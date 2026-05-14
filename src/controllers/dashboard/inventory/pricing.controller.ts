@@ -136,7 +136,24 @@ export async function getPricingAnalysis(req: Request, res: Response, next: Next
 export async function getMarketBenchmarkForProduct(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId, productId } = req.params
-    const data = await marketBenchmarkService.getMarketBenchmark(venueId, productId)
+    const userId = (req as any).authContext?.userId
+    const data = await marketBenchmarkService.getMarketBenchmark(venueId, productId, { userId })
+    res.json({ success: true, data })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Bulk benchmark — analyze up to 50 products in one call. Consumes from the
+ * venue's chatbot token budget (same pool as text-to-sql / assistant).
+ */
+export async function getBulkMarketBenchmark(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId } = req.params
+    const userId = (req as any).authContext?.userId
+    const productIds = Array.isArray(req.body?.productIds) ? (req.body.productIds as string[]) : []
+    const data = await marketBenchmarkService.getBulkMarketBenchmark(venueId, productIds, { userId })
     res.json({ success: true, data })
   } catch (error) {
     next(error)

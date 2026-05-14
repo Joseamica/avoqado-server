@@ -14,7 +14,7 @@
 
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
-import { TokenQueryType, TokenPurchaseType, TokenPurchaseStatus } from '@prisma/client'
+import { Prisma, TokenQueryType, TokenPurchaseType, TokenPurchaseStatus } from '@prisma/client'
 import Stripe from 'stripe'
 import { logAction } from './activity-log.service'
 
@@ -706,6 +706,106 @@ class TokenBudgetService {
   /**
    * Reset monthly budget (called automatically or via cron)
    */
+  /**
+   * Charge a venue's accumulated overage via Stripe.
+   *
+   * Idempotency: callers are expected to filter on `overageTokensUsed > 0`
+   * before invoking. If overage drops to 0 between query and call (race),
+   * this returns `{ skipped: 'no_overage' }` without billing.
+   *
+   * Behavior on missing Stripe setup: returns `{ skipped: 'no_payment_method' }`
+   * WITHOUT zeroing the overage — we keep tracking so the next attempt (or
+   * manual purchase) can settle the bill.
+   */
+  async chargeOverage(venueId: string): Promise<
+    | { skipped: 'no_overage' | 'no_payment_method' | 'no_stripe'; venueId: string }
+    | { charged: true; venueId: string; tokenAmount: number; amountUSD: number; paymentIntentId: string }
+    | { charged: false; venueId: string; error: string }
+  > {
+    const budget = await prisma.chatbotTokenBudget.findUnique({
+      where: { venueId },
+    })
+    if (!budget) return { skipped: 'no_overage', venueId }
+
+    const overage = budget.overageTokensUsed
+    if (overage <= 0) return { skipped: 'no_overage', venueId }
+
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { stripeCustomerId: true, stripePaymentMethodId: true },
+    })
+    if (!venue?.stripeCustomerId || !venue?.stripePaymentMethodId) {
+      logger.warn('[OVERAGE_CHARGE] venue missing Stripe setup', { venueId, overage })
+      return { skipped: 'no_payment_method', venueId }
+    }
+
+    if (!this.stripe) {
+      logger.error('[OVERAGE_CHARGE] Stripe client not configured')
+      return { skipped: 'no_stripe', venueId }
+    }
+
+    const amountUSD = (overage / 1000) * CONFIG.PRICE_PER_1K_TOKENS_USD
+    const amountCents = Math.round(amountUSD * 100)
+
+    // Stripe minimum charge is $0.50 USD. Below that, skip and roll over.
+    if (amountCents < 50) {
+      logger.info('[OVERAGE_CHARGE] amount below Stripe minimum, rolling over', { venueId, overage, amountUSD })
+      return { skipped: 'no_overage', venueId } // semantically: not billed this period
+    }
+
+    try {
+      const paymentIntent = await this.stripe.paymentIntents.create({
+        amount: amountCents,
+        currency: 'usd',
+        customer: venue.stripeCustomerId,
+        payment_method: venue.stripePaymentMethodId,
+        off_session: true,
+        confirm: true,
+        metadata: {
+          type: 'chatbot_tokens_overage_charge',
+          venueId,
+          overageTokens: String(overage),
+        },
+      })
+
+      // Record in TokenPurchase + reset overage atomically
+      await prisma.$transaction([
+        prisma.tokenPurchase.create({
+          data: {
+            budgetId: budget.id,
+            tokenAmount: overage,
+            amountPaid: new Prisma.Decimal(amountUSD.toFixed(2)),
+            stripePaymentIntentId: paymentIntent.id,
+            status: TokenPurchaseStatus.COMPLETED,
+            purchaseType: TokenPurchaseType.OVERAGE_CHARGE,
+            triggeredBy: 'system-overage-billing',
+            completedAt: new Date(),
+          },
+        }),
+        prisma.chatbotTokenBudget.update({
+          where: { id: budget.id },
+          data: { overageTokensUsed: 0 },
+        }),
+      ])
+
+      logger.info('[OVERAGE_CHARGE] charged successfully', {
+        venueId,
+        tokenAmount: overage,
+        amountUSD,
+        paymentIntentId: paymentIntent.id,
+      })
+
+      return { charged: true, venueId, tokenAmount: overage, amountUSD, paymentIntentId: paymentIntent.id }
+    } catch (err: any) {
+      logger.error('[OVERAGE_CHARGE] Stripe charge failed — overage preserved for retry', {
+        venueId,
+        overage,
+        error: err?.message,
+      })
+      return { charged: false, venueId, error: err?.message ?? 'unknown_stripe_error' }
+    }
+  }
+
   async resetMonthlyBudget(venueId: string) {
     const budget = await prisma.chatbotTokenBudget.findUnique({
       where: { venueId },
@@ -719,14 +819,38 @@ class TokenBudgetService {
     const now = new Date()
     const newPeriodEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1)
 
-    // If there's overage, it should be billed before reset
+    // If there's overage, bill it before reset. Failures preserve the
+    // overage so the monthly-overage-billing cron can retry the next day.
     if (budget.overageTokensUsed > 0) {
-      logger.info('Overage detected at period reset', {
+      logger.info('Overage detected at period reset — attempting Stripe charge', {
         venueId,
         overageTokens: budget.overageTokensUsed,
         overageCost: (budget.overageTokensUsed / 1000) * CONFIG.PRICE_PER_1K_TOKENS_USD,
       })
-      // TODO: Create overage invoice via Stripe
+      const chargeResult = await this.chargeOverage(venueId)
+      if ('charged' in chargeResult && chargeResult.charged) {
+        // Re-fetch budget — overageTokensUsed is now 0
+        const refreshed = await prisma.chatbotTokenBudget.findUnique({ where: { id: budget.id } })
+        if (refreshed) Object.assign(budget, refreshed)
+      } else if ('skipped' in chargeResult) {
+        logger.warn('[OVERAGE_CHARGE] skipped at period reset, overage will roll over', {
+          venueId,
+          reason: chargeResult.skipped,
+        })
+        // Don't reset overage if we couldn't charge — roll it into next period
+        const newPeriodEndKeep = new Date(now.getFullYear(), now.getMonth() + 1, 1)
+        const rolledBudget = await prisma.chatbotTokenBudget.update({
+          where: { id: budget.id },
+          data: {
+            currentMonthUsed: 0,
+            // overageTokensUsed: KEEP (not reset)
+            overageWarningShown: false,
+            currentPeriodStart: now,
+            currentPeriodEnd: newPeriodEndKeep,
+          },
+        })
+        return rolledBudget
+      }
     }
 
     const updatedBudget = await prisma.chatbotTokenBudget.update({

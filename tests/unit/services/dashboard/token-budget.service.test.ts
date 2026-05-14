@@ -343,10 +343,10 @@ describe('TokenBudgetService', () => {
   })
 
   describe('resetMonthlyBudget', () => {
-    it('should reset monthly counters and keep extra balance', async () => {
+    it('should reset monthly counters when there is no overage', async () => {
       const mockBudget = createMockBudget({
         currentMonthUsed: 8500,
-        overageTokensUsed: 1500,
+        overageTokensUsed: 0,
         extraTokensBalance: 3000,
         overageWarningShown: true,
       })
@@ -366,6 +366,144 @@ describe('TokenBudgetService', () => {
           currentPeriodEnd: expect.any(Date),
         },
       })
+    })
+
+    it('rolls over overage to next period when venue has no payment method', async () => {
+      const mockBudget = createMockBudget({
+        currentMonthUsed: 8500,
+        overageTokensUsed: 1500,
+        overageWarningShown: true,
+      })
+      prismaMock.chatbotTokenBudget.findUnique.mockResolvedValue(mockBudget as any)
+      // No Stripe customer → chargeOverage skips → overage rolls over
+      prismaMock.venue.findUnique.mockResolvedValue({
+        stripeCustomerId: null,
+        stripePaymentMethodId: null,
+      } as any)
+      prismaMock.chatbotTokenBudget.update.mockResolvedValue({} as any)
+
+      await tokenBudgetService.resetMonthlyBudget('venue-123')
+
+      // Should NOT zero the overage (rolls over for retry)
+      expect(prismaMock.chatbotTokenBudget.update).toHaveBeenCalledWith({
+        where: { id: 'budget-123' },
+        data: {
+          currentMonthUsed: 0,
+          overageWarningShown: false,
+          currentPeriodStart: expect.any(Date),
+          currentPeriodEnd: expect.any(Date),
+        },
+      })
+    })
+  })
+
+  describe('chargeOverage', () => {
+    beforeEach(() => {
+      // Mock $transaction to behave like Promise.all on the array
+      ;(prismaMock as any).$transaction = jest.fn(async (ops: any[]) => Promise.all(ops))
+    })
+
+    it('skips when budget has no overage', async () => {
+      prismaMock.chatbotTokenBudget.findUnique.mockResolvedValue(
+        createMockBudget({ overageTokensUsed: 0 }) as any,
+      )
+      const result = await tokenBudgetService.chargeOverage('venue-123')
+      expect(result).toMatchObject({ skipped: 'no_overage' })
+    })
+
+    it('skips when venue has no Stripe payment method', async () => {
+      prismaMock.chatbotTokenBudget.findUnique.mockResolvedValue(
+        createMockBudget({ overageTokensUsed: 50000 }) as any,
+      )
+      prismaMock.venue.findUnique.mockResolvedValue({
+        stripeCustomerId: null,
+        stripePaymentMethodId: null,
+      } as any)
+
+      const result = await tokenBudgetService.chargeOverage('venue-123')
+      expect(result).toMatchObject({ skipped: 'no_payment_method' })
+    })
+
+    it('skips when overage amount is below Stripe minimum ($0.50)', async () => {
+      // 1000 tokens × $0.03/1k = $0.03 → below the $0.50 floor
+      prismaMock.chatbotTokenBudget.findUnique.mockResolvedValue(
+        createMockBudget({ overageTokensUsed: 1000 }) as any,
+      )
+      prismaMock.venue.findUnique.mockResolvedValue({
+        stripeCustomerId: 'cus_x',
+        stripePaymentMethodId: 'pm_x',
+      } as any)
+
+      const result = await tokenBudgetService.chargeOverage('venue-123')
+      // Below-minimum: treated as no_overage (rolled over silently)
+      expect(result).toMatchObject({ skipped: 'no_overage' })
+    })
+
+    it('charges overage via Stripe and records purchase + zeroes overage', async () => {
+      prismaMock.chatbotTokenBudget.findUnique.mockResolvedValue(
+        createMockBudget({ overageTokensUsed: 50000 }) as any,
+      )
+      prismaMock.venue.findUnique.mockResolvedValue({
+        stripeCustomerId: 'cus_abc',
+        stripePaymentMethodId: 'pm_abc',
+      } as any)
+      prismaMock.tokenPurchase.create.mockResolvedValue({} as any)
+      prismaMock.chatbotTokenBudget.update.mockResolvedValue({} as any)
+
+      const result = await tokenBudgetService.chargeOverage('venue-123')
+
+      expect(result).toMatchObject({
+        charged: true,
+        tokenAmount: 50000,
+        // 50000 × $0.03/1k = $1.50
+        amountUSD: 1.5,
+        paymentIntentId: 'pi_test_123',
+      })
+
+      // TokenPurchase record created with OVERAGE_CHARGE type
+      expect(prismaMock.tokenPurchase.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            tokenAmount: 50000,
+            purchaseType: 'OVERAGE_CHARGE',
+            status: TokenPurchaseStatus.COMPLETED,
+            stripePaymentIntentId: 'pi_test_123',
+          }),
+        }),
+      )
+
+      // Overage zeroed
+      expect(prismaMock.chatbotTokenBudget.update).toHaveBeenCalledWith({
+        where: { id: 'budget-123' },
+        data: { overageTokensUsed: 0 },
+      })
+    })
+
+    // Regression: ensure we don't reset overage when Stripe throws
+    it('regression: keeps overage intact when Stripe charge fails', async () => {
+      prismaMock.chatbotTokenBudget.findUnique.mockResolvedValue(
+        createMockBudget({ overageTokensUsed: 50000 }) as any,
+      )
+      prismaMock.venue.findUnique.mockResolvedValue({
+        stripeCustomerId: 'cus_abc',
+        stripePaymentMethodId: 'pm_abc',
+      } as any)
+
+      // Reach into the singleton's stripe client and force the next call to fail.
+      const stripe = (tokenBudgetService as any).stripe as { paymentIntents: { create: jest.Mock } }
+      const original = stripe.paymentIntents.create
+      stripe.paymentIntents.create = jest.fn().mockRejectedValueOnce(new Error('card_declined'))
+
+      try {
+        const result = await tokenBudgetService.chargeOverage('venue-123')
+        expect(result).toMatchObject({ charged: false, error: expect.stringContaining('card_declined') })
+
+        // Overage NOT zeroed
+        expect(prismaMock.chatbotTokenBudget.update).not.toHaveBeenCalled()
+        expect(prismaMock.tokenPurchase.create).not.toHaveBeenCalled()
+      } finally {
+        stripe.paymentIntents.create = original
+      }
     })
   })
 

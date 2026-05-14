@@ -13,9 +13,15 @@
  */
 
 import OpenAI from 'openai'
+import { TokenQueryType } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
 import AppError, { NotFoundError } from '../../../errors/AppError'
 import logger from '../../../config/logger'
+import tokenBudgetService from '../token-budget.service'
+
+/** Conservative pre-flight estimate so we don't run the API when the budget
+ * can't cover it. Actual usage is reported back via `recordTokenUsage`. */
+const ESTIMATED_TOKENS_PER_BENCHMARK = 1500
 
 // ---- Types ---------------------------------------------------------------
 
@@ -188,7 +194,11 @@ Responde SOLO con JSON válido en este formato exacto:
 }`
 }
 
-async function askOpenAI(prompt: string): Promise<OpenAIEstimate> {
+async function askOpenAI(prompt: string): Promise<{
+  estimate: OpenAIEstimate
+  promptTokens: number
+  completionTokens: number
+}> {
   const apiKey = process.env.OPENAI_API_KEY
   if (!apiKey) throw new AppError('OPENAI_API_KEY is not configured', 500)
 
@@ -213,22 +223,37 @@ async function askOpenAI(prompt: string): Promise<OpenAIEstimate> {
   }
 
   return {
-    medianEstimate: typeof parsed.medianEstimate === 'number' ? parsed.medianEstimate : null,
-    rangeLow: typeof parsed.rangeLow === 'number' ? parsed.rangeLow : null,
-    rangeHigh: typeof parsed.rangeHigh === 'number' ? parsed.rangeHigh : null,
-    confidence: ['low', 'medium', 'high'].includes(parsed.confidence) ? parsed.confidence : 'low',
-    reasoning: typeof parsed.reasoning === 'string' ? parsed.reasoning : 'Sin contexto disponible.',
+    estimate: {
+      medianEstimate: typeof parsed.medianEstimate === 'number' ? parsed.medianEstimate : null,
+      rangeLow: typeof parsed.rangeLow === 'number' ? parsed.rangeLow : null,
+      rangeHigh: typeof parsed.rangeHigh === 'number' ? parsed.rangeHigh : null,
+      confidence: ['low', 'medium', 'high'].includes(parsed.confidence) ? parsed.confidence : 'low',
+      reasoning: typeof parsed.reasoning === 'string' ? parsed.reasoning : 'Sin contexto disponible.',
+    },
+    promptTokens: completion.usage?.prompt_tokens ?? 0,
+    completionTokens: completion.usage?.completion_tokens ?? 0,
   }
 }
 
 // ---- Public entry point --------------------------------------------------
 
-export async function getMarketBenchmark(venueId: string, productId: string): Promise<MarketBenchmarkResult> {
-  // 1. Cache check
+export async function getMarketBenchmark(
+  venueId: string,
+  productId: string,
+  options: { userId?: string; skipBudget?: boolean } = {},
+): Promise<MarketBenchmarkResult> {
+  // 1. Cache check — cached results don't consume tokens (already paid for)
   const cached = readCache(venueId, productId)
   if (cached) return cached
 
-  // 2. Load product + venue context
+  // 2. Token budget pre-flight: soft-limit (matches chatbot behavior).
+  // We don't block but we do surface the overage warning back to the caller
+  // through the recorded usage so the UI can warn the user.
+  if (!options.skipBudget) {
+    await tokenBudgetService.checkTokensAvailable(venueId, ESTIMATED_TOKENS_PER_BENCHMARK)
+  }
+
+  // 3. Load product + venue context
   const product = await prisma.product.findFirst({
     where: { id: productId, venueId },
     select: {
@@ -281,7 +306,7 @@ export async function getMarketBenchmark(venueId: string, productId: string): Pr
 
   // 5. Ask OpenAI
   const cost = product.recipe?.totalCost?.toNumber() ?? product.cost?.toNumber() ?? null
-  const estimate = await askOpenAI(
+  const { estimate, promptTokens, completionTokens } = await askOpenAI(
     buildPrompt({
       productName: product.name,
       category: product.category?.name ?? null,
@@ -293,7 +318,22 @@ export async function getMarketBenchmark(venueId: string, productId: string): Pr
     }),
   )
 
-  // 6. Build result + cache
+  // 6. Record actual token usage (best-effort — failure here doesn't block result)
+  if (!options.skipBudget && (promptTokens > 0 || completionTokens > 0)) {
+    try {
+      await tokenBudgetService.recordTokenUsage({
+        venueId,
+        userId: options.userId ?? 'system',
+        promptTokens,
+        completionTokens,
+        queryType: TokenQueryType.COMPLEX_SINGLE,
+      })
+    } catch (err) {
+      logger.warn('[MARKET_BENCHMARK] failed to record token usage', { venueId, productId, error: err })
+    }
+  }
+
+  // 7. Build result + cache
   const result: MarketBenchmarkResult = {
     productId: product.id,
     productName: product.name,
@@ -310,6 +350,64 @@ export async function getMarketBenchmark(venueId: string, productId: string): Pr
   }
   writeCache(venueId, productId, result)
   return result
+}
+
+// ---- Bulk benchmark ------------------------------------------------------
+
+export interface BulkBenchmarkResult {
+  results: Array<MarketBenchmarkResult | { productId: string; error: string }>
+  tokensAvailableBefore: number
+  tokensAvailableAfter: number
+  productsProcessed: number
+  productsFailed: number
+  warning?: string
+}
+
+const BULK_MAX_PRODUCTS = 50
+
+/**
+ * Run benchmarks for multiple products serially. Soft-limit token usage —
+ * matches the chatbot pattern: continues even when in overage, but reports
+ * remaining tokens so the UI can warn the user.
+ */
+export async function getBulkMarketBenchmark(
+  venueId: string,
+  productIds: string[],
+  options: { userId?: string } = {},
+): Promise<BulkBenchmarkResult> {
+  if (productIds.length === 0) {
+    throw new AppError('Lista de productos vacía', 400)
+  }
+  if (productIds.length > BULK_MAX_PRODUCTS) {
+    throw new AppError(`Máximo ${BULK_MAX_PRODUCTS} productos por análisis bulk`, 400)
+  }
+
+  const budgetBefore = await tokenBudgetService.getBudgetStatus(venueId)
+  const results: BulkBenchmarkResult['results'] = []
+  let processed = 0
+  let failed = 0
+
+  for (const productId of productIds) {
+    try {
+      const result = await getMarketBenchmark(venueId, productId, options)
+      results.push(result)
+      processed += 1
+    } catch (err: any) {
+      logger.warn('[BULK_MARKET_BENCHMARK] product failed', { productId, error: err?.message })
+      results.push({ productId, error: err?.message ?? 'Error desconocido' })
+      failed += 1
+    }
+  }
+
+  const budgetAfter = await tokenBudgetService.getBudgetStatus(venueId)
+  return {
+    results,
+    tokensAvailableBefore: budgetBefore.totalAvailable,
+    tokensAvailableAfter: budgetAfter.totalAvailable,
+    productsProcessed: processed,
+    productsFailed: failed,
+    warning: budgetAfter.warning,
+  }
 }
 
 // ---- Test helpers --------------------------------------------------------

@@ -25,6 +25,7 @@ import { reservationReminderJob } from './jobs/reservation-reminder.job'
 import { reservationAutoNoShowJob } from './jobs/reservation-auto-no-show.job'
 import { commissionAggregationJob } from './jobs/commission-aggregation.job'
 import { autoClockOutJob } from './jobs/auto-clockout.job'
+import { monthlyOverageBillingJob } from './jobs/monthly-overage-billing.job'
 import { nightlySalesSummaryJob } from './jobs/nightly-sales-summary.job'
 import { nightlyLowStockJob } from './jobs/nightly-low-stock.job'
 import { marketingCampaignJob } from './jobs/marketing-campaign.job'
@@ -312,6 +313,9 @@ const startApplication = async (retries = 3) => {
 
       // Start auto clock-out job (every 15 minutes for HR automation)
       autoClockOutJob.start()
+
+      // Bill chatbot token overage at period rollover (daily at 3:17 AM Mexico City)
+      monthlyOverageBillingJob.start()
 
       // Start Blumon webhook reconciliation job (every 30s — picks up PENDING
       // ProviderEventLog rows when TPV records the Payment after the webhook arrived)

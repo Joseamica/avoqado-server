@@ -5799,6 +5799,7 @@ enum TokenPurchaseType {
   MANUAL // User-initiated purchase from dashboard
   AUTO_RECHARGE // Automatic recharge when threshold reached
   PROMOTIONAL // Free promotional tokens (marketing, support, etc.)
+  OVERAGE_CHARGE // Monthly bill for tokens used beyond the budget
 }
 
 enum TokenPurchaseStatus {

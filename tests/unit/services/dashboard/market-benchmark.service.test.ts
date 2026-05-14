@@ -9,6 +9,19 @@ jest.mock('openai', () =>
   })),
 )
 
+// Mock token budget service — soft limit, just records usage
+const mockCheckTokensAvailable = jest.fn().mockResolvedValue({ allowed: true })
+const mockRecordTokenUsage = jest.fn().mockResolvedValue({})
+const mockGetBudgetStatus = jest.fn().mockResolvedValue({ totalAvailable: 100000, warning: undefined })
+jest.mock('../../../../src/services/dashboard/token-budget.service', () => ({
+  __esModule: true,
+  default: {
+    checkTokensAvailable: (...args: any[]) => mockCheckTokensAvailable(...args),
+    recordTokenUsage: (...args: any[]) => mockRecordTokenUsage(...args),
+    getBudgetStatus: (...args: any[]) => mockGetBudgetStatus(...args),
+  },
+}))
+
 // Mock global fetch (used for Google Places)
 const fetchMock = jest.fn()
 ;(global as any).fetch = fetchMock
@@ -59,6 +72,7 @@ const openAiOk = (overrides: Partial<{ medianEstimate: number; rangeLow: number;
       },
     },
   ],
+  usage: { prompt_tokens: 1200, completion_tokens: 200 },
 })
 
 describe('getMarketBenchmark', () => {
@@ -178,5 +192,54 @@ describe('getMarketBenchmark', () => {
         where: expect.objectContaining({ id: 'prod-001', venueId: 'venue-1' }),
       }),
     )
+  })
+
+  it('checks token budget before calling OpenAI and records actual usage after', async () => {
+    prismaMock.product.findFirst.mockResolvedValue(baseProduct() as any)
+    fetchMock.mockResolvedValueOnce(placesOk)
+    mockChatCompletionsCreate.mockResolvedValueOnce(openAiOk())
+
+    await getMarketBenchmark('venue-1', 'prod-001', { userId: 'staff-99' })
+
+    expect(mockCheckTokensAvailable).toHaveBeenCalledWith('venue-1', expect.any(Number))
+    expect(mockRecordTokenUsage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        venueId: 'venue-1',
+        userId: 'staff-99',
+        promptTokens: 1200,
+        completionTokens: 200,
+      }),
+    )
+  })
+
+  it('does NOT consume tokens on cached hits', async () => {
+    prismaMock.product.findFirst.mockResolvedValue(baseProduct() as any)
+    fetchMock.mockResolvedValueOnce(placesOk)
+    mockChatCompletionsCreate.mockResolvedValueOnce(openAiOk())
+
+    // First call: consumes tokens
+    await getMarketBenchmark('venue-1', 'prod-001')
+    expect(mockRecordTokenUsage).toHaveBeenCalledTimes(1)
+
+    // Second call: served from cache, no token usage
+    mockRecordTokenUsage.mockClear()
+    mockCheckTokensAvailable.mockClear()
+    const cached = await getMarketBenchmark('venue-1', 'prod-001')
+    expect(cached.cached).toBe(true)
+    expect(mockCheckTokensAvailable).not.toHaveBeenCalled()
+    expect(mockRecordTokenUsage).not.toHaveBeenCalled()
+  })
+
+  it('skipBudget option bypasses both check and record (system / cron use)', async () => {
+    prismaMock.product.findFirst.mockResolvedValue(baseProduct() as any)
+    fetchMock.mockResolvedValueOnce(placesOk)
+    mockChatCompletionsCreate.mockResolvedValueOnce(openAiOk())
+
+    mockCheckTokensAvailable.mockClear()
+    mockRecordTokenUsage.mockClear()
+    await getMarketBenchmark('venue-1', 'prod-001', { skipBudget: true })
+
+    expect(mockCheckTokensAvailable).not.toHaveBeenCalled()
+    expect(mockRecordTokenUsage).not.toHaveBeenCalled()
   })
 })

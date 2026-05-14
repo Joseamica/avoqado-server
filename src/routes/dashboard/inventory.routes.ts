@@ -457,6 +457,19 @@ router.get(
   pricingController.getMarketBenchmarkForProduct,
 )
 
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/market-benchmark/bulk:
+ *   post:
+ *     tags: [Inventory - Pricing]
+ *     summary: Bulk AI price benchmark — consumes from the venue's chatbot token budget
+ */
+router.post(
+  '/market-benchmark/bulk',
+  checkPermission('inventory:read'),
+  pricingController.getBulkMarketBenchmark,
+)
+
 // ===========================================
 // SUPPLIERS ROUTES
 // ===========================================
