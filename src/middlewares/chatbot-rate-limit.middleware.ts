@@ -4,9 +4,9 @@
  * Prevents abuse and resource exhaustion by limiting chatbot query frequency.
  *
  * RATE LIMITS:
- * - Per User: 10 queries per minute
- * - Per Venue: 100 queries per hour
- * - Per IP: 20 queries per minute (fallback if no auth)
+ * - Per User: configurable, defaults to 10/min in production and 120/min outside production
+ * - Per Venue: configurable, defaults to 100/hour in production and 1000/hour outside production
+ * - Per IP: configurable, defaults to 20/min in production and 120/min outside production
  *
  * Uses in-memory store (can be upgraded to Redis for production scale)
  *
@@ -23,18 +23,25 @@ import logger from '@/config/logger'
 /**
  * Rate limit configuration
  */
+const parsePositiveInt = (value: string | undefined, fallback: number): number => {
+  const parsed = Number.parseInt(value || '', 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
+
+const isProduction = process.env.NODE_ENV === 'production'
+
 const RATE_LIMIT_CONFIG = {
   USER: {
     windowMs: 60 * 1000, // 1 minute
-    max: 10, // 10 requests per minute
+    max: parsePositiveInt(process.env.CHATBOT_USER_RATE_LIMIT_MAX, isProduction ? 10 : 120),
   },
   VENUE: {
     windowMs: 60 * 60 * 1000, // 1 hour
-    max: 100, // 100 requests per hour
+    max: parsePositiveInt(process.env.CHATBOT_VENUE_RATE_LIMIT_MAX, isProduction ? 100 : 1000),
   },
   IP: {
     windowMs: 60 * 1000, // 1 minute
-    max: 20, // 20 requests per minute (fallback)
+    max: parsePositiveInt(process.env.CHATBOT_IP_RATE_LIMIT_MAX, isProduction ? 20 : 120),
   },
 }
 

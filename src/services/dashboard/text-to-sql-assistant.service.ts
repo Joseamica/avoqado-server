@@ -2751,7 +2751,16 @@ Ejemplos de respuestas CORRECTAS:
                 if (pendingStats.byStatus.preparing > 0) statusBreakdown.push(`👨‍🍳 ${pendingStats.byStatus.preparing} preparándose`)
                 if (pendingStats.byStatus.ready > 0) statusBreakdown.push(`🔔 ${pendingStats.byStatus.ready} listas`)
 
-                naturalResponse = `📊 **${pendingStats.total} órdenes activas:**\n${statusBreakdown.join(' | ')}\n\n⏱️ Tiempo promedio de espera: ${pendingStats.averageWaitMinutes.toFixed(0)} minutos${pendingStats.oldestOrderMinutes ? `\n⚠️ Orden más antigua: ${pendingStats.oldestOrderMinutes.toFixed(0)} minutos` : ''}`
+                const recentWaitText =
+                  pendingStats.recentOpenTotal > 0
+                    ? `\n\n⏱️ Tiempo promedio de espera reciente: ${pendingStats.averageWaitMinutes.toFixed(0)} minutos${pendingStats.oldestOrderMinutes ? `\n⚠️ Orden reciente más antigua: ${pendingStats.oldestOrderMinutes.toFixed(0)} minutos` : ''}`
+                    : '\n\nNo hay órdenes abiertas creadas en las últimas 24 horas.'
+                const staleText =
+                  pendingStats.staleOpenTotal > 0
+                    ? `\n\n⚠️ ${pendingStats.staleOpenTotal} órdenes abiertas son antiguas (>24h); revisa si deben cerrarse o limpiarse.`
+                    : ''
+
+                naturalResponse = `📊 **${pendingStats.total} órdenes abiertas:**\n${statusBreakdown.join(' | ')}${recentWaitText}${staleText}`
               }
               serviceResult = pendingStats
               break
@@ -7680,14 +7689,14 @@ Responde SOLO JSON (sin markdown):
         }
       }
 
-      if (intent === 'productSales' && this.isTopProductRevenueQuestion(normalizedMessage) && !this.extractProductSalesTerm(message)) {
+      if (intent === 'productSales' && this.isTopProductRevenueQuestion(normalizedMessage)) {
         return {
           classification: {
             isSimpleQuery: true,
             intent: 'topProducts',
             dateRange: finalDateRange || 'thisMonth',
             confidence: Math.max(confidence, 0.9),
-            reason: 'Corrected productSales without product entity to topProducts revenue ranking',
+            reason: 'Corrected productSales without product entity or with ranking phrase to topProducts revenue ranking',
             requiresDateRange: true,
             wasDateExplicit,
           },
@@ -8758,6 +8767,9 @@ ${JSON.stringify(input, null, 2)}
   private extractProductSalesTerm(message: string): string | null {
     const normalizedMessage = this.normalizeTextForMatch(message).replace(/\s+/g, ' ').trim()
     if (!normalizedMessage) {
+      return null
+    }
+    if (this.isTopProductRevenueQuestion(normalizedMessage)) {
       return null
     }
 

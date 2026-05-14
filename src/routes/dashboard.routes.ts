@@ -7463,7 +7463,7 @@ router.post(
   '/assistant/text-to-sql',
   authenticateTokenMiddleware,
   checkFeatureAccess('CHATBOT'),
-  chatbotRateLimitMiddleware, // Rate limit: 10 queries/min per user, 100/hour per venue
+  chatbotRateLimitMiddleware, // Configurable per-user/per-venue chatbot rate limit
   tokenBudgetMiddleware, // Track token budget and add headers
   requireJsonBodyMiddleware,
   validateRequest(assistantQuerySchema),

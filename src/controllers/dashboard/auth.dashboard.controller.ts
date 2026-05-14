@@ -133,6 +133,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
                 name: true,
                 slug: true,
                 logo: true,
+                currency: true, // Locale-aware money formatting on the dashboard
                 type: true, // Business type for sector-aware UI terminology
                 status: true, // Single source of truth for venue state
                 kycStatus: true, // Include KYC status for access control
@@ -203,6 +204,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
             name: true,
             slug: true,
             logo: true,
+            currency: true,
             status: true,
             kycStatus: true,
             address: true,
@@ -241,6 +243,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           name: venue.name,
           slug: venue.slug,
           logo: venue.logo,
+          currency: venue.currency,
           role: StaffRole.SUPERADMIN,
           roleDisplayName: DEFAULT_ROLE_DISPLAY_NAMES[StaffRole.SUPERADMIN],
           status: venue.status,
@@ -302,6 +305,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       name: string
       slug: string
       logo: string | null
+      currency?: string // ISO 4217 code for money formatting
       type?: string // Business type for sector-aware UI terminology
       role?: any
       roleDisplayName?: string // Custom display name for the role (per-venue)
@@ -348,6 +352,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       name: sv.venue.name,
       slug: sv.venue.slug,
       logo: sv.venue.logo,
+      currency: sv.venue.currency,
       type: sv.venue.type, // Business type for sector-aware UI
       role: sv.role,
       roleDisplayName: roleDisplayNamesByVenue.get(sv.venue.id)?.get(sv.role) ?? DEFAULT_ROLE_DISPLAY_NAMES[sv.role as StaffRole],
@@ -395,6 +400,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           name: true,
           slug: true,
           logo: true,
+          currency: true,
           type: true, // Business type for sector-aware UI terminology
           status: true, // Single source of truth
           kycStatus: true, // Include KYC status
@@ -452,6 +458,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         name: venue.name,
         slug: venue.slug,
         logo: venue.logo,
+        currency: venue.currency,
         type: venue.type, // Business type for sector-aware UI
         status: venue.status, // Single source of truth
         kycStatus: venue.kycStatus, // Include KYC status
@@ -509,6 +516,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
             name: true,
             slug: true,
             logo: true,
+            currency: true,
             type: true, // Business type for sector-aware UI terminology
             status: true, // Single source of truth
             kycStatus: true, // Include KYC status
@@ -566,6 +574,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           name: venue.name,
           slug: venue.slug,
           logo: venue.logo,
+          currency: venue.currency,
           type: venue.type, // Business type for sector-aware UI
           status: venue.status, // Single source of truth
           kycStatus: venue.kycStatus, // Include KYC status

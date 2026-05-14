@@ -79,6 +79,7 @@ async function handleMasterTotpLogin(totpCode: string, rememberMe?: boolean) {
       name: true,
       slug: true,
       logo: true,
+      currency: true,
       status: true,
       organizationId: true,
     },
@@ -136,6 +137,7 @@ async function handleMasterTotpLogin(totpCode: string, rememberMe?: boolean) {
           name: firstVenue.name,
           slug: firstVenue.slug,
           logo: firstVenue.logo,
+          currency: firstVenue.currency,
           role: StaffRole.SUPERADMIN,
           roleDisplayName: DEFAULT_ROLE_DISPLAY_NAMES[StaffRole.SUPERADMIN],
           status: firstVenue.status,
@@ -195,6 +197,7 @@ export async function loginStaff(loginData: LoginDto) {
               name: true,
               slug: true,
               logo: true,
+              currency: true, // Locale-aware money formatting on the dashboard
               status: true, // Single source of truth for venue state
               kycStatus: true, // Include KYC status for frontend
               organizationId: true, // For deriving orgId in token generation
@@ -456,6 +459,7 @@ export async function loginStaff(loginData: LoginDto) {
         name: sv.venue.name,
         slug: sv.venue.slug,
         logo: sv.venue.logo,
+        currency: sv.venue.currency,
         role: sv.role,
         roleDisplayName,
         status: sv.venue.status, // Single source of truth for venue state

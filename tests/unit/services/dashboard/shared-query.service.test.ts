@@ -80,12 +80,17 @@ describe('SharedQueryService', () => {
   })
 
   describe('getPendingOrders', () => {
-    it('only counts recently-created open orders as active', async () => {
+    it('counts every open order and separates stale orders from recent wait-time metrics', async () => {
       ;(prisma.order.findMany as jest.Mock).mockResolvedValue([
         {
           id: 'order-recent',
           status: 'PENDING',
           createdAt: new Date('2026-05-11T23:30:00.000Z'),
+        },
+        {
+          id: 'order-stale',
+          status: 'CONFIRMED',
+          createdAt: new Date('2026-05-10T23:30:00.000Z'),
         },
       ])
 
@@ -96,12 +101,15 @@ describe('SharedQueryService', () => {
           where: expect.objectContaining({
             venueId: 'venue-test',
             status: { in: ['PENDING', 'CONFIRMED', 'PREPARING', 'READY'] },
-            createdAt: { gte: new Date('2026-05-11T00:00:00.000Z') },
           }),
         }),
       )
-      expect(result.total).toBe(1)
+      expect((prisma.order.findMany as jest.Mock).mock.calls[0][0].where.createdAt).toBeUndefined()
+      expect(result.total).toBe(2)
+      expect(result.recentOpenTotal).toBe(1)
+      expect(result.staleOpenTotal).toBe(1)
       expect(result.byStatus.pending).toBe(1)
+      expect(result.byStatus.confirmed).toBe(1)
       expect(result.averageWaitMinutes).toBe(30)
       expect(result.oldestOrderMinutes).toBe(30)
     })

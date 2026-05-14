@@ -45,6 +45,8 @@ interface ConversationOrchestratorOptions {
   plannerModelFallbackEnabled?: boolean
 }
 
+type ResponseLanguage = 'es' | 'en'
+
 export class ConversationOrchestratorService {
   private readonly planner: ConversationPlannerService
   private readonly toolCatalog: ToolCatalogService
@@ -76,6 +78,7 @@ export class ConversationOrchestratorService {
     const queryResults: unknown[] = []
     const dataSources = new Set<string>()
     const executedStepIds = new Set<string>()
+    const responseLanguage = this.detectResponseLanguage(request.message)
     let actionMetadata: Record<string, unknown> | undefined
     let queryExecuted = false
     let blocked = false
@@ -92,7 +95,7 @@ export class ConversationOrchestratorService {
         if (plan.riskLevel === 'high') {
           violationType = SecurityViolationType.PROMPT_INJECTION
         }
-        responseBlocks.push(this.formatUnsupported(step.topic, step.reason))
+        responseBlocks.push(this.formatUnsupported(step.topic, step.reason, responseLanguage))
         metadataSteps.push(this.stepMetadata(step, plan.riskLevel === 'high' ? 'blocked' : 'skipped'))
         continue
       }
@@ -181,7 +184,7 @@ export class ConversationOrchestratorService {
           continue
         }
 
-        const queryResult = await this.executeQueryStep(step, request.venueId)
+        const queryResult = await this.executeQueryStep(step, request.venueId, responseLanguage)
         responseBlocks.push(queryResult.response)
         queryResults.push(queryResult.result)
         dataSources.add(queryResult.dataSource)
@@ -308,7 +311,7 @@ export class ConversationOrchestratorService {
     }
   }
 
-  private async executeQueryStep(step: PlannerQueryStep, venueId: string): Promise<QueryExecutionResult> {
+  private async executeQueryStep(step: PlannerQueryStep, venueId: string, language: ResponseLanguage): Promise<QueryExecutionResult> {
     const dateRange = this.getDateRange(step)
     if (!venueId) {
       throw new Error('ConversationOrchestrator requires venueId')
@@ -317,29 +320,38 @@ export class ConversationOrchestratorService {
     switch (step.tool) {
       case 'sales': {
         const sales = await SharedQueryService.getSalesForPeriod(venueId, dateRange)
-        return this.queryResult(step.tool, sales, this.formatSales(sales, dateRange))
+        return this.queryResult(step.tool, sales, this.formatSales(sales, dateRange, language))
       }
       case 'averageTicket': {
         const sales = await SharedQueryService.getSalesForPeriod(venueId, dateRange)
         return this.queryResult(
           step.tool,
           { averageTicket: sales.averageTicket, orderCount: sales.orderCount, currency: sales.currency },
-          `El ticket promedio en ${this.formatDateRangeName(dateRange)} es de ${this.money(sales.averageTicket, sales.currency)}, basado en ${sales.orderCount} órdenes.`,
+          language === 'en'
+            ? `The average ticket in ${this.formatDateRangeName(dateRange, language)} is ${this.money(sales.averageTicket, sales.currency, language)}, based on ${sales.orderCount} orders.`
+            : `El ticket promedio en ${this.formatDateRangeName(dateRange)} es de ${this.money(sales.averageTicket, sales.currency)}, basado en ${sales.orderCount} órdenes.`,
         )
       }
       case 'topProducts': {
         const products = await SharedQueryService.getTopProducts(venueId, dateRange, this.limit(step, 5))
         const list = products
           .map(
-            (product, index) => `${index + 1}. ${product.productName} (${product.quantitySold} vendidos, ${this.money(product.revenue)})`,
+            (product, index) =>
+              language === 'en'
+                ? `${index + 1}. ${product.productName} (${product.quantitySold} sold, ${this.money(product.revenue, 'MXN', language)})`
+                : `${index + 1}. ${product.productName} (${product.quantitySold} vendidos, ${this.money(product.revenue)})`,
           )
           .join('\n')
         return this.queryResult(
           step.tool,
           products,
           products.length > 0
-            ? `Los productos más vendidos en ${this.formatDateRangeName(dateRange)} son:\n${list}`
-            : `No encontré productos vendidos en ${this.formatDateRangeName(dateRange)}.`,
+            ? language === 'en'
+              ? `The top-selling products in ${this.formatDateRangeName(dateRange, language)} are:\n${list}`
+              : `Los productos más vendidos en ${this.formatDateRangeName(dateRange)} son:\n${list}`
+            : language === 'en'
+              ? `I did not find product sales in ${this.formatDateRangeName(dateRange, language)}.`
+              : `No encontré productos vendidos en ${this.formatDateRangeName(dateRange)}.`,
           products.length,
         )
       }
@@ -351,8 +363,12 @@ export class ConversationOrchestratorService {
           step.tool,
           productSales,
           productSales.quantitySold > 0
-            ? `En ${this.formatDateRangeName(dateRange)}, ${matchedName} vendió ${productSales.quantitySold} unidades por ${this.money(productSales.revenue, productSales.currency)} en ${productSales.orderCount} órdenes.`
-            : `No encontré ventas de "${matchedName}" en ${this.formatDateRangeName(dateRange)}.`,
+            ? language === 'en'
+              ? `In ${this.formatDateRangeName(dateRange, language)}, ${matchedName} sold ${productSales.quantitySold} units for ${this.money(productSales.revenue, productSales.currency, language)} across ${productSales.orderCount} orders.`
+              : `En ${this.formatDateRangeName(dateRange)}, ${matchedName} vendió ${productSales.quantitySold} unidades por ${this.money(productSales.revenue, productSales.currency)} en ${productSales.orderCount} órdenes.`
+            : language === 'en'
+              ? `I did not find sales for "${matchedName}" in ${this.formatDateRangeName(dateRange, language)}.`
+              : `No encontré ventas de "${matchedName}" en ${this.formatDateRangeName(dateRange)}.`,
           productSales.matchedProducts.length,
         )
       }
@@ -369,7 +385,7 @@ export class ConversationOrchestratorService {
         return this.queryResult(
           step.tool,
           comparison,
-          this.formatProductSalesComparison(comparison, dateRange),
+          this.formatProductSalesComparison(comparison, dateRange, language),
           comparison.left.products.length + comparison.right.products.length,
         )
       }
@@ -395,7 +411,9 @@ export class ConversationOrchestratorService {
         return this.queryResult(
           step.tool,
           reviews,
-          `En ${this.formatDateRangeName(dateRange)} tienes ${reviews.totalReviews} reseñas con promedio de ${reviews.averageRating.toFixed(1)} estrellas.`,
+          language === 'en'
+            ? `In ${this.formatDateRangeName(dateRange, language)}, you have ${reviews.totalReviews} reviews with an average rating of ${reviews.averageRating.toFixed(1)} stars.`
+            : `En ${this.formatDateRangeName(dateRange)} tienes ${reviews.totalReviews} reseñas con promedio de ${reviews.averageRating.toFixed(1)} estrellas.`,
         )
       }
       case 'businessOverview': {
@@ -408,7 +426,9 @@ export class ConversationOrchestratorService {
         return this.queryResult(
           step.tool,
           { sales, reviews, topProducts: products },
-          `Resumen de ${this.formatDateRangeName(dateRange)}: ${this.money(sales.totalRevenue, sales.currency)} en ventas, ${sales.orderCount} órdenes, ticket promedio de ${this.money(sales.averageTicket, sales.currency)}, ${reviews.totalReviews} reseñas y producto líder: ${topProduct}.`,
+          language === 'en'
+            ? `Summary for ${this.formatDateRangeName(dateRange, language)}: ${this.money(sales.totalRevenue, sales.currency, language)} in sales, ${sales.orderCount} orders, average ticket ${this.money(sales.averageTicket, sales.currency, language)}, ${reviews.totalReviews} reviews, and top product: ${topProduct}.`
+            : `Resumen de ${this.formatDateRangeName(dateRange)}: ${this.money(sales.totalRevenue, sales.currency)} en ventas, ${sales.orderCount} órdenes, ticket promedio de ${this.money(sales.averageTicket, sales.currency)}, ${reviews.totalReviews} reseñas y producto líder: ${topProduct}.`,
         )
       }
       case 'inventoryAlerts': {
@@ -460,10 +480,26 @@ export class ConversationOrchestratorService {
       }
       case 'pendingOrders': {
         const pending = await SharedQueryService.getPendingOrders(venueId)
+        const staleText =
+          pending.staleOpenTotal > 0
+            ? language === 'en'
+              ? ` ${pending.staleOpenTotal} are older than 24h; review whether they should be closed or cleaned up.`
+              : ` ${pending.staleOpenTotal} son antiguas (>24h); conviene revisar si deben cerrarse o limpiarse.`
+            : ''
+        const recentText =
+          pending.recentOpenTotal > 0
+            ? language === 'en'
+              ? ` Recent average wait: ${pending.averageWaitMinutes} min.`
+              : ` Tiempo promedio reciente: ${pending.averageWaitMinutes} min.`
+            : language === 'en'
+              ? ' There are no open orders created in the last 24 hours.'
+              : ' No hay órdenes abiertas creadas en las últimas 24 horas.'
         return this.queryResult(
           step.tool,
           pending,
-          `Tienes ${pending.total} órdenes pendientes o abiertas: ${pending.byStatus.pending} pendientes, ${pending.byStatus.confirmed} confirmadas, ${pending.byStatus.preparing} en preparación y ${pending.byStatus.ready} listas.`,
+          language === 'en'
+            ? `You have ${pending.total} open orders: ${pending.byStatus.pending} pending, ${pending.byStatus.confirmed} confirmed, ${pending.byStatus.preparing} preparing, and ${pending.byStatus.ready} ready.${recentText}${staleText}`
+            : `Tienes ${pending.total} órdenes abiertas: ${pending.byStatus.pending} pendientes, ${pending.byStatus.confirmed} confirmadas, ${pending.byStatus.preparing} en preparación y ${pending.byStatus.ready} listas.${recentText}${staleText}`,
         )
       }
       case 'activeShifts': {
@@ -566,8 +602,12 @@ export class ConversationOrchestratorService {
           step.tool,
           settlement,
           settlement.transactionCount > 0
-            ? `Para ${this.formatDateRangeName(dateRange)}, te liquidan ${this.money(settlement.totalNetAmount, settlement.currency)} netos en ${settlement.transactionCount} transacciones.${list ? `\n${list}` : ''}`
-            : `No hay liquidaciones programadas para ${this.formatDateRangeName(dateRange)}.`,
+            ? language === 'en'
+              ? `For ${this.formatDateRangeName(dateRange, language)}, your scheduled settlement is ${this.money(settlement.totalNetAmount, settlement.currency, language)} net across ${settlement.transactionCount} transactions.${list ? `\n${list}` : ''}`
+              : `Para ${this.formatDateRangeName(dateRange)}, te liquidan ${this.money(settlement.totalNetAmount, settlement.currency)} netos en ${settlement.transactionCount} transacciones.${list ? `\n${list}` : ''}`
+            : language === 'en'
+              ? `There are no settlements scheduled for ${this.formatDateRangeName(dateRange, language)}.`
+              : `No hay liquidaciones programadas para ${this.formatDateRangeName(dateRange)}.`,
           settlement.entries.length,
         )
       }
@@ -645,8 +685,12 @@ export class ConversationOrchestratorService {
           step.tool,
           reservations,
           reservations.total > 0
-            ? `En ${this.formatDateRangeName(dateRange)} tienes ${reservations.total} reservaciones. ${byStatus || 'Sin desglose por estado'}. No-show: ${reservations.noShowRate.toFixed(1)}%.`
-            : `No encontré reservaciones para ${this.formatDateRangeName(dateRange)}.`,
+            ? language === 'en'
+              ? `In ${this.formatDateRangeName(dateRange, language)}, you have ${reservations.total} reservations. ${byStatus || 'No status breakdown'}. No-show: ${reservations.noShowRate.toFixed(1)}%.`
+              : `En ${this.formatDateRangeName(dateRange)} tienes ${reservations.total} reservaciones. ${byStatus || 'Sin desglose por estado'}. No-show: ${reservations.noShowRate.toFixed(1)}%.`
+            : language === 'en'
+              ? `I did not find reservations for ${this.formatDateRangeName(dateRange, language)}.`
+              : `No encontré reservaciones para ${this.formatDateRangeName(dateRange)}.`,
         )
       }
       case 'reservations.list': {
@@ -836,6 +880,24 @@ export class ConversationOrchestratorService {
     }
   }
 
+  private detectResponseLanguage(message: string): ResponseLanguage {
+    const normalized = message
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+
+    const englishSignals =
+      /\b(how|what|which|when|where|show|list|give|tell|sales|revenue|orders?|payments?|settlements?|reservations?|customers?|team|links?|today|yesterday|month|week|money|contact|sold|average|ticket)\b/.test(
+        normalized,
+      )
+    const spanishSignals =
+      /\b(cuanto|cuanta|cuantos|cuantas|como|donde|ventas?|vendi|ordenes?|pedidos?|pagos?|liquid|dispers|reservaciones?|reservas?|clientes?|equipo|hoy|ayer|mes|semana|dinero|contacto)\b/.test(
+        normalized,
+      )
+
+    return englishSignals && !spanishSignals ? 'en' : 'es'
+  }
+
   private getDateRange(step: PlannerQueryStep): RelativeDateRange {
     const raw = typeof step.args.dateRange === 'string' ? step.args.dateRange : undefined
     const allowed: RelativeDateRange[] = [
@@ -872,7 +934,12 @@ export class ConversationOrchestratorService {
   private formatSales(
     sales: { totalRevenue: number; orderCount: number; averageTicket: number; currency: string },
     dateRange: RelativeDateRange,
+    language: ResponseLanguage = 'es',
   ): string {
+    if (language === 'en') {
+      return `In ${this.formatDateRangeName(dateRange, language)}, you sold ${this.money(sales.totalRevenue, sales.currency, language)} total, with ${sales.orderCount} orders and an average ticket of ${this.money(sales.averageTicket, sales.currency, language)}.`
+    }
+
     return `En ${this.formatDateRangeName(dateRange)} vendiste ${this.money(sales.totalRevenue, sales.currency)} en total, con ${sales.orderCount} órdenes y ticket promedio de ${this.money(sales.averageTicket, sales.currency)}.`
   }
 
@@ -887,11 +954,12 @@ export class ConversationOrchestratorService {
       filters: { weekendOnly: boolean; nightOnly: boolean }
     },
     dateRange: RelativeDateRange,
+    language: ResponseLanguage = 'es',
   ): string {
     const filtersUsed = [
-      this.formatDateRangeName(dateRange),
-      comparison.filters.weekendOnly ? 'fines de semana' : null,
-      comparison.filters.nightOnly ? 'horario nocturno (18:00-23:59)' : null,
+      this.formatDateRangeName(dateRange, language),
+      comparison.filters.weekendOnly ? (language === 'en' ? 'weekends' : 'fines de semana') : null,
+      comparison.filters.nightOnly ? (language === 'en' ? 'night hours (18:00-23:59)' : 'horario nocturno (18:00-23:59)') : null,
     ]
       .filter(Boolean)
       .join(', ')
@@ -899,12 +967,23 @@ export class ConversationOrchestratorService {
     const rightShare = comparison.totalRevenue > 0 ? (comparison.right.revenue / comparison.totalRevenue) * 100 : 0
 
     if (comparison.totalRevenue === 0) {
-      return `No encontré ventas para comparar "${comparison.leftTerm}" vs "${comparison.rightTerm}" en ${filtersUsed}.`
+      return language === 'en'
+        ? `I did not find sales to compare "${comparison.leftTerm}" vs "${comparison.rightTerm}" in ${filtersUsed}.`
+        : `No encontré ventas para comparar "${comparison.leftTerm}" vs "${comparison.rightTerm}" en ${filtersUsed}.`
     }
 
     const leftWins = comparison.left.revenue >= comparison.right.revenue
     const winner = leftWins ? comparison.leftTerm : comparison.rightTerm
     const delta = Math.abs(comparison.left.revenue - comparison.right.revenue)
+
+    if (language === 'en') {
+      return [
+        `Comparison ${comparison.leftTerm} vs ${comparison.rightTerm} in ${filtersUsed}:`,
+        `• ${comparison.leftTerm}: ${this.money(comparison.left.revenue, comparison.currency, language)} (${comparison.left.quantitySold} units, ${leftShare.toFixed(1)}%)`,
+        `• ${comparison.rightTerm}: ${this.money(comparison.right.revenue, comparison.currency, language)} (${comparison.right.quantitySold} units, ${rightShare.toFixed(1)}%)`,
+        `• Winner: ${winner} by ${this.money(delta, comparison.currency, language)}.`,
+      ].join('\n')
+    }
 
     return [
       `Comparativo ${comparison.leftTerm} vs ${comparison.rightTerm} en ${filtersUsed}:`,
@@ -914,12 +993,16 @@ export class ConversationOrchestratorService {
     ].join('\n')
   }
 
-  private formatUnsupported(topic: string, reason: string): string {
+  private formatUnsupported(topic: string, reason: string, language: ResponseLanguage = 'es'): string {
+    if (language === 'en') {
+      return `About ${topic}: ${reason} I can help with data and operations for the current venue.`
+    }
+
     return `Sobre ${topic}: ${reason} Puedo ayudarte con datos y operaciones del venue actual.`
   }
 
-  private formatDateRangeName(dateRange: RelativeDateRange): string {
-    const names: Record<RelativeDateRange, string> = {
+  private formatDateRangeName(dateRange: RelativeDateRange, language: ResponseLanguage = 'es'): string {
+    const namesEs: Record<RelativeDateRange, string> = {
       today: 'hoy',
       yesterday: 'ayer',
       last7days: 'los últimos 7 días',
@@ -930,6 +1013,18 @@ export class ConversationOrchestratorService {
       lastMonth: 'el mes pasado',
       allTime: 'todo el historial',
     }
+    const namesEn: Record<RelativeDateRange, string> = {
+      today: 'today',
+      yesterday: 'yesterday',
+      last7days: 'the last 7 days',
+      last30days: 'the last 30 days',
+      thisWeek: 'this week',
+      thisMonth: 'this month',
+      lastWeek: 'last week',
+      lastMonth: 'last month',
+      allTime: 'all time',
+    }
+    const names = language === 'en' ? namesEn : namesEs
     return names[dateRange] || dateRange
   }
 
@@ -942,8 +1037,8 @@ export class ConversationOrchestratorService {
     }).format(date)
   }
 
-  private money(value: number, currency = 'MXN'): string {
-    return new Intl.NumberFormat('es-MX', { style: 'currency', currency }).format(value)
+  private money(value: number, currency = 'MXN', language: ResponseLanguage = 'es'): string {
+    return new Intl.NumberFormat(language === 'en' ? 'en-US' : 'es-MX', { style: 'currency', currency }).format(value)
   }
 
   private formatDate(value: Date): string {

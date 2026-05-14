@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express'
 import * as pricingService from '../../../services/dashboard/pricing.service'
+import * as marketBenchmarkService from '../../../services/dashboard/inventory/market-benchmark.service'
 
 /**
  * Get pricing policy for a product
@@ -120,6 +121,45 @@ export async function getPricingAnalysis(req: Request, res: Response, next: Next
     res.json({
       success: true,
       data: analysis,
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Market benchmark — AI-assisted price exploration powered by Google Places
+ * + OpenAI. Returns an advisory median estimate for a single product based on
+ * comparable restaurants/cafés near the venue. Always advisory; the dashboard
+ * shows a "verify before applying" disclaimer.
+ */
+export async function getMarketBenchmarkForProduct(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId, productId } = req.params
+    const data = await marketBenchmarkService.getMarketBenchmark(venueId, productId)
+    res.json({ success: true, data })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Unified profitability view: recipes + quantity-tracked products in one
+ * response. Powers the Inventario → Rentabilidad page.
+ */
+export async function getProfitability(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId } = req.params
+    const { categoryId, includeInactive } = req.query
+
+    const data = await pricingService.getProfitability(venueId, {
+      categoryId: categoryId as string | undefined,
+      includeInactive: includeInactive === 'true',
+    })
+
+    res.json({
+      success: true,
+      data,
     })
   } catch (error) {
     next(error)

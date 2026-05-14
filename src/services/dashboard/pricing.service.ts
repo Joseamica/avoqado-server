@@ -407,3 +407,110 @@ export async function getPricingAnalysis(venueId: string, options?: { categoryId
     }
   })
 }
+
+// ─── Unified Profitability (Recetas + Inventario unitario) ────────────────
+
+export type ProfitabilityType = 'RECIPE' | 'QUANTITY'
+export type ProfitabilityStatus = 'EXCELLENT' | 'HEALTHY' | 'ACCEPTABLE' | 'POOR' | 'UNDEFINED'
+
+export interface ProfitabilityRow {
+  productId: string
+  name: string
+  category: string | null
+  categoryId: string | null
+  type: ProfitabilityType
+  price: number
+  cost: number | null
+  costPct: number | null
+  marginAmount: number | null
+  marginPct: number | null
+  status: ProfitabilityStatus
+  strategy: PricingStrategy | 'NONE'
+  hasPolicy: boolean
+  // v2: cost drift detection requires audit of cost vs price update timestamps
+  costDrift: boolean
+  costLastUpdatedAt: string | null
+  priceLastUpdatedAt: string | null
+}
+
+function classify(marginPct: number | null): ProfitabilityStatus {
+  if (marginPct === null) return 'UNDEFINED'
+  if (marginPct >= 0.65) return 'EXCELLENT'
+  if (marginPct >= 0.5) return 'HEALTHY'
+  if (marginPct >= 0.35) return 'ACCEPTABLE'
+  return 'POOR'
+}
+
+/**
+ * Unified profitability view across BOTH recipe-costed products and
+ * quantity-tracked products that have a wholesale `cost` set.
+ *
+ * Returns one row per product. Cost is recipe.totalCost when a recipe exists,
+ * otherwise Product.cost. Margin/status null when no cost is available.
+ */
+export async function getProfitability(
+  venueId: string,
+  options?: { categoryId?: string; includeInactive?: boolean },
+): Promise<ProfitabilityRow[]> {
+  const products = await prisma.product.findMany({
+    where: {
+      venueId,
+      deletedAt: null,
+      ...(options?.categoryId && { categoryId: options.categoryId }),
+      ...(!options?.includeInactive && { active: true }),
+      OR: [
+        { recipe: { isNot: null } },
+        { inventoryMethod: 'QUANTITY' },
+      ],
+    },
+    select: {
+      id: true,
+      name: true,
+      price: true,
+      cost: true,
+      categoryId: true,
+      updatedAt: true,
+      recipe: { select: { totalCost: true, updatedAt: true } },
+      pricingPolicy: { select: { pricingStrategy: true } },
+      category: { select: { name: true } },
+    },
+  })
+
+  return products.map(p => {
+    const isRecipe = !!p.recipe
+    const type: ProfitabilityType = isRecipe ? 'RECIPE' : 'QUANTITY'
+
+    let costDecimal: Decimal | null = null
+    if (isRecipe && p.recipe) {
+      costDecimal = p.recipe.totalCost
+    } else if (p.cost) {
+      costDecimal = p.cost
+    }
+
+    const price = p.price.toNumber()
+    const cost = costDecimal?.toNumber() ?? null
+    const hasUsableCost = cost !== null && cost > 0 && price > 0
+    const marginAmount = hasUsableCost ? price - cost! : null
+    const marginPct = hasUsableCost ? (price - cost!) / price : null
+    const costPct = hasUsableCost ? cost! / price : null
+
+    return {
+      productId: p.id,
+      name: p.name,
+      category: p.category?.name ?? null,
+      categoryId: p.categoryId,
+      type,
+      price,
+      cost,
+      costPct,
+      marginAmount,
+      marginPct,
+      status: classify(marginPct),
+      strategy: p.pricingPolicy?.pricingStrategy ?? 'NONE',
+      hasPolicy: !!p.pricingPolicy,
+      costDrift: false,
+      costLastUpdatedAt: null,
+      priceLastUpdatedAt: null,
+    }
+  })
+}

@@ -269,6 +269,8 @@ export interface NewCustomerTimingPattern {
  */
 export interface PendingOrdersStats {
   total: number
+  recentOpenTotal: number
+  staleOpenTotal: number
   byStatus: {
     pending: number
     confirmed: number
@@ -1667,15 +1669,14 @@ export class SharedQueryService {
     // Use typed enum values for Prisma query
     const openStatuses: Prisma.Enumerable<'PENDING' | 'CONFIRMED' | 'PREPARING' | 'READY'> = ['PENDING', 'CONFIRMED', 'PREPARING', 'READY']
     const now = new Date()
-    const activeOrderCutoff = new Date(now.getTime() - 24 * 60 * 60 * 1000)
+    const recentOrderCutoff = new Date(now.getTime() - 24 * 60 * 60 * 1000)
 
-    // Get recently-created orders with open status. Historical seed/demo orders
-    // can remain open forever, but they should not appear as "active right now".
+    // Count every open order. If seed/demo orders remain open for days, the
+    // response should surface that data quality issue instead of saying "none".
     const orders = await prisma.order.findMany({
       where: {
         venueId,
         status: { in: openStatuses },
-        createdAt: { gte: activeOrderCutoff },
       },
       select: {
         id: true,
@@ -1684,13 +1685,19 @@ export class SharedQueryService {
       },
     })
 
-    // Calculate wait times
-    const waitTimes = orders.map(o => Math.floor((now.getTime() - o.createdAt.getTime()) / (1000 * 60)))
+    const recentOrders = orders.filter(o => o.createdAt >= recentOrderCutoff)
+    const staleOpenTotal = orders.length - recentOrders.length
+
+    // Calculate wait times only for recent operational orders. Stale open
+    // orders are still counted above, but they should not distort live wait time.
+    const waitTimes = recentOrders.map(o => Math.floor((now.getTime() - o.createdAt.getTime()) / (1000 * 60)))
     const oldestOrderMinutes = waitTimes.length > 0 ? Math.max(...waitTimes) : null
     const averageWaitMinutes = waitTimes.length > 0 ? waitTimes.reduce((a, b) => a + b, 0) / waitTimes.length : 0
 
     return {
       total: orders.length,
+      recentOpenTotal: recentOrders.length,
+      staleOpenTotal,
       byStatus: {
         pending: orders.filter(o => o.status === 'PENDING').length,
         confirmed: orders.filter(o => o.status === 'CONFIRMED').length,

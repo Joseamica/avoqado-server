@@ -57,6 +57,10 @@ describe('ConversationPlannerService', () => {
         expectedSteps: [{ kind: 'query', tool: 'productSales', args: { productName: 'jicamas', dateRange: 'thisMonth' } }],
       },
       {
+        message: 'Which product made the most money this month?',
+        expectedSteps: [{ kind: 'query', tool: 'topProducts', args: { dateRange: 'thisMonth', limit: 5 } }],
+      },
+      {
         message: 'que links de pago tengo activos',
         expectedSteps: [{ kind: 'query', tool: 'paymentLinks.list', args: { limit: 10, status: 'ACTIVE' } }],
       },
@@ -206,6 +210,25 @@ describe('ConversationPlannerService', () => {
       }),
     ])
     expect(plan.steps).not.toEqual([expect.objectContaining({ kind: 'query', tool: 'sales' })])
+    expect(openai.chat.completions.create).not.toHaveBeenCalled()
+  })
+
+  it('does not treat English revenue-ranking words as a product name', async () => {
+    const plan = await planner.plan({
+      message: 'Which product made the most money this month?',
+      venueId: 'venue-1',
+      userId: 'user-1',
+    })
+
+    expect(plan.mode).toBe('single')
+    expect(plan.steps).toEqual([
+      expect.objectContaining({
+        kind: 'query',
+        tool: 'topProducts',
+        args: { dateRange: 'thisMonth', limit: 5 },
+      }),
+    ])
+    expect(plan.steps).not.toEqual([expect.objectContaining({ kind: 'query', tool: 'productSales' })])
     expect(openai.chat.completions.create).not.toHaveBeenCalled()
   })
 

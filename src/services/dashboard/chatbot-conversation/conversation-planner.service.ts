@@ -172,6 +172,7 @@ export class ConversationPlannerService {
     const containsCrud = this.hasCrudIntent(normalized)
     const containsWeather = this.hasUnsupportedTopic(normalized)
     const productComparison = this.extractProductComparisonTerms(normalized)
+    const topProductsIntent = productComparison ? false : this.hasTopProductsIntent(normalized)
 
     if (productComparison) {
       steps.push({
@@ -188,7 +189,19 @@ export class ConversationPlannerService {
       })
     }
 
-    const productSalesTerm = productComparison ? null : this.extractProductSalesTerm(normalized)
+    if (topProductsIntent) {
+      steps.push({
+        id: this.nextStepId('query', steps),
+        kind: 'query',
+        tool: 'topProducts',
+        args: {
+          dateRange: this.extractDateRange(normalized) || 'thisMonth',
+          limit: 5,
+        },
+      })
+    }
+
+    const productSalesTerm = productComparison || topProductsIntent ? null : this.extractProductSalesTerm(normalized)
     if (productSalesTerm) {
       steps.push({
         id: this.nextStepId('query', steps),
@@ -799,7 +812,21 @@ export class ConversationPlannerService {
     return asksAmount && salesTerm && !excludedDetail
   }
 
+  private hasTopProductsIntent(normalized: string): boolean {
+    const mentionsProduct = /\b(producto|productos|product|products|platillos?|items?)\b/.test(normalized)
+    const asksRevenueOrRanking =
+      /\b(top\s+(productos?|products?)|best-selling|top-selling|mas\s+(vendid[oa]s?|ventas?|dinero|ingresos?|revenue|money)|mayor(?:es)?\s+(ingresos?|revenue|venta)|made\s+the\s+most\s+money|generated\s+the\s+most\s+revenue|highest\s+revenue|most\s+sold)\b/.test(
+        normalized,
+      )
+
+    return mentionsProduct && asksRevenueOrRanking
+  }
+
   private extractProductSalesTerm(normalized: string): string | null {
+    if (this.hasTopProductsIntent(normalized)) {
+      return null
+    }
+
     const patterns = [
       /\bcu[aá]nt[oa]s?\s+(.+?)\s+(?:(?:he|has|ha|hemos|han)\s+)?(?:vend[ií]do|vendido|vend[ií]|vendi|vendimos|vendieron|salieron|se\s+vendieron)\b/,
       /\b(?:cu[aá]nt[oa]s?\s+)?(?:vend[ií]|vendi|vendimos|vendieron|vendido|ventas?|ingresos?|facturad[oa]|sales|revenue)(?:\s+[a-z0-9ñ]+){0,5}?\s+(?:de|del|from|for)\s+(.+?)(?=(?:\s+(?:hoy|ayer|esta|este|estos|estas|los|las|en|durante|last|this|today|yesterday|week|month|days?)\b|[?.,!]|$))/,

@@ -435,6 +435,28 @@ router.post('/products/:productId/apply-suggested-price', checkPermission('inven
  */
 router.get('/pricing-analysis', checkPermission('inventory:read'), pricingController.getPricingAnalysis)
 
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/profitability:
+ *   get:
+ *     tags: [Inventory - Pricing]
+ *     summary: Unified profitability — recipes + quantity-tracked products in one view
+ */
+router.get('/profitability', checkPermission('inventory:read'), pricingController.getProfitability)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/products/{productId}/market-benchmark:
+ *   get:
+ *     tags: [Inventory - Pricing]
+ *     summary: AI-assisted price benchmark vs. competitors near the venue (advisory only)
+ */
+router.get(
+  '/products/:productId/market-benchmark',
+  checkPermission('inventory:read'),
+  pricingController.getMarketBenchmarkForProduct,
+)
+
 // ===========================================
 // SUPPLIERS ROUTES
 // ===========================================

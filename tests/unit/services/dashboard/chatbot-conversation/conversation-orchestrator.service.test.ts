@@ -246,6 +246,33 @@ describe('ConversationOrchestratorService', () => {
     expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'productSales', status: 'executed' })])
   })
 
+  it('answers English top-product revenue questions in English', async () => {
+    jest.spyOn(SharedQueryService, 'getTopProducts').mockResolvedValue([
+      {
+        productId: 'product-1',
+        productName: 'Hamburguesa BBQ',
+        categoryName: 'Comida',
+        quantitySold: 27,
+        revenue: 4023,
+        orderCount: 20,
+      },
+    ])
+
+    const response = await orchestrator.process({
+      message: 'Which product made the most money this month?',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(SharedQueryService.getTopProducts).toHaveBeenCalledWith('venue-1', 'thisMonth', 5)
+    expect(response?.response).toContain('The top-selling products in this month are')
+    expect(response?.response).toContain('Hamburguesa BBQ')
+    expect(response?.response).toContain('sold')
+    expect(response?.response).not.toContain('Los productos')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'topProducts', status: 'executed' })])
+  })
+
   it('answers payment link list questions with the registered shared query tool', async () => {
     jest.spyOn(SharedQueryService, 'getPaymentLinks').mockResolvedValue({
       total: 1,
