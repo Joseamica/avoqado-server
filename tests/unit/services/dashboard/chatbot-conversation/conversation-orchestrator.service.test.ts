@@ -200,6 +200,52 @@ describe('ConversationOrchestratorService', () => {
     expect(openai.chat.completions.create).not.toHaveBeenCalled()
   })
 
+  it('answers product-specific sales questions with the productSales tool, not aggregate sales', async () => {
+    const productSalesSpy = jest.spyOn(SharedQueryService, 'getProductSalesByName').mockResolvedValue({
+      searchTerm: 'jicamas',
+      productName: 'Jícama con chile',
+      quantitySold: 7,
+      revenue: 525,
+      orderCount: 5,
+      matchedProducts: [
+        {
+          productName: 'Jícama con chile',
+          quantitySold: 7,
+          revenue: 525,
+          orderCount: 5,
+        },
+      ],
+      currency: 'MXN',
+    })
+    const salesSpy = jest.spyOn(SharedQueryService, 'getSalesForPeriod').mockResolvedValue({
+      totalRevenue: 9999,
+      averageTicket: 100,
+      orderCount: 99,
+      paymentCount: 99,
+      currency: 'MXN',
+      period: 'thisMonth',
+      dateRange: {
+        from: new Date('2026-05-01T00:00:00.000Z'),
+        to: new Date('2026-05-31T23:59:59.999Z'),
+      },
+    })
+
+    const response = await orchestrator.process({
+      message: 'cuantas jicamas he vendido este mes',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(productSalesSpy).toHaveBeenCalledWith('venue-1', 'jicamas', 'thisMonth')
+    expect(salesSpy).not.toHaveBeenCalled()
+    expect(response?.response).toContain('Jícama con chile')
+    expect(response?.response).toContain('7 unidades')
+    expect(response?.response).toContain('$525.00')
+    expect(response?.response).not.toContain('$9,999.00')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'productSales', status: 'executed' })])
+  })
+
   it('answers payment link list questions with the registered shared query tool', async () => {
     jest.spyOn(SharedQueryService, 'getPaymentLinks').mockResolvedValue({
       total: 1,
@@ -244,6 +290,50 @@ describe('ConversationOrchestratorService', () => {
     expect(response?.response).toContain('https://pay.avoqado.io/abc12345')
     expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'paymentLinks.list', status: 'executed' })])
     expect(openai.chat.completions.create).not.toHaveBeenCalled()
+  })
+
+  it('passes payment-link title searches and status filters to the shared query service', async () => {
+    jest.spyOn(SharedQueryService, 'getPaymentLinks').mockResolvedValue({
+      total: 1,
+      limit: 5,
+      offset: 0,
+      hasMore: false,
+      links: [
+        {
+          id: 'pl-1',
+          title: 'Cena privada',
+          shortCode: 'abc12345',
+          status: 'ACTIVE',
+          purpose: 'PAYMENT',
+          amountType: 'FIXED',
+          amount: 500,
+          currency: 'MXN',
+          isReusable: true,
+          totalCollected: 1000,
+          paymentCount: 2,
+          checkoutSessionCount: 2,
+          createdAt: new Date('2026-05-12T12:00:00.000Z'),
+          expiresAt: null,
+          createdByName: 'Ana Admin',
+        },
+      ],
+    })
+
+    const response = await orchestrator.process({
+      message: 'dame el link de pago activo de cena privada',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(SharedQueryService.getPaymentLinks).toHaveBeenCalledWith('venue-1', {
+      limit: 5,
+      status: 'ACTIVE',
+      search: 'cena privada',
+    })
+    expect(response?.response).toContain('Cena privada')
+    expect(response?.response).toContain('https://pay.avoqado.io/abc12345')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'paymentLinks.list', status: 'executed' })])
   })
 
   it('answers payment link summary questions with the registered shared query tool', async () => {
@@ -474,6 +564,38 @@ describe('ConversationOrchestratorService', () => {
 
     expect(SharedQueryService.getTeamMembers).toHaveBeenCalledWith('venue-1', { limit: 10, search: undefined })
     expect(response?.response).toContain('Tienes 1 miembros en tu equipo')
+    expect(response?.response).toContain('Ana Admin')
+    expect(response?.response).not.toContain('@')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'team.members', status: 'executed' })])
+  })
+
+  it('passes team member name searches to the shared query service', async () => {
+    jest.spyOn(SharedQueryService, 'getTeamMembers').mockResolvedValue({
+      total: 1,
+      limit: 10,
+      members: [
+        {
+          staffVenueId: 'sv-1',
+          staffId: 'staff-1',
+          name: 'Ana Admin',
+          role: 'ADMIN',
+          active: true,
+          totalSales: 5000,
+          totalTips: 500,
+          totalOrders: 25,
+          permissionSetName: 'Admin',
+        },
+      ],
+    })
+
+    const response = await orchestrator.process({
+      message: 'busca a ana en mi equipo',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(SharedQueryService.getTeamMembers).toHaveBeenCalledWith('venue-1', { limit: 10, search: 'ana' })
     expect(response?.response).toContain('Ana Admin')
     expect(response?.response).not.toContain('@')
     expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'team.members', status: 'executed' })])
@@ -735,6 +857,51 @@ describe('ConversationOrchestratorService', () => {
     expect(response?.response).toContain('Reservaciones de hoy')
     expect(response?.response).toContain('Mesa Perez')
     expect(response?.response).toContain('RES-ABC123')
+    expect(response?.response).not.toContain('@')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'reservations.list', status: 'executed' })])
+  })
+
+  it('passes reservation guest searches to the shared query service', async () => {
+    jest.spyOn(SharedQueryService, 'getReservations').mockResolvedValue({
+      total: 1,
+      page: 1,
+      pageSize: 10,
+      totalPages: 1,
+      period: 'today',
+      dateRange: {
+        from: new Date('2026-05-12T06:00:00.000Z'),
+        to: new Date('2026-05-13T05:59:59.999Z'),
+      },
+      reservations: [
+        {
+          confirmationCode: 'RES-ABC123',
+          status: 'CONFIRMED',
+          channel: 'WEB',
+          startsAt: new Date('2026-05-12T20:00:00.000Z'),
+          endsAt: new Date('2026-05-12T21:00:00.000Z'),
+          partySize: 4,
+          guestName: 'Ana Perez',
+          customerName: 'Ana Perez',
+          tableNumber: '12',
+          productName: 'Cena',
+          assignedStaffName: 'Luis Host',
+        },
+      ],
+    })
+
+    const response = await orchestrator.process({
+      message: 'muestrame reservas de ana hoy',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(SharedQueryService.getReservations).toHaveBeenCalledWith('venue-1', 'today', {
+      limit: 10,
+      status: undefined,
+      search: 'ana',
+    })
+    expect(response?.response).toContain('Ana Perez')
     expect(response?.response).not.toContain('@')
     expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'reservations.list', status: 'executed' })])
   })

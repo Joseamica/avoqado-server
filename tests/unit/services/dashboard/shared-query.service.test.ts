@@ -16,6 +16,9 @@ jest.mock('@/utils/prismaClient', () => ({
     order: {
       findMany: jest.fn(),
     },
+    product: {
+      findMany: jest.fn(),
+    },
     venue: {
       findUnique: jest.fn(),
     },
@@ -160,6 +163,46 @@ describe('SharedQueryService', () => {
         { cardType: 'CREDIT', netAmount: 300, transactionCount: 1 },
       ])
       expect(result.totalNetAmount).toBe(1000)
+    })
+  })
+
+  describe('getProductSalesByName', () => {
+    it('resolves plural and accent-insensitive product names before querying sales', async () => {
+      ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ timezone: 'UTC', currency: 'MXN' })
+      ;(prisma.product.findMany as jest.Mock).mockResolvedValue([
+        {
+          id: 'product-jicama',
+          name: 'Jícama con chile',
+        },
+      ])
+      ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([
+        {
+          productName: 'Jícama con chile',
+          quantitySold: BigInt(4),
+          revenue: { toNumber: () => 200 },
+          orderCount: BigInt(3),
+        },
+      ])
+
+      const result = await SharedQueryService.getProductSalesByName('venue-test', 'jicamas', 'thisMonth')
+
+      expect(prisma.product.findMany).toHaveBeenCalledWith({
+        where: {
+          venueId: 'venue-test',
+          active: true,
+          deletedAt: null,
+        },
+        select: {
+          id: true,
+          name: true,
+        },
+        take: 500,
+      })
+      expect(prisma.$queryRaw).toHaveBeenCalledTimes(1)
+      expect(result.searchTerm).toBe('jicamas')
+      expect(result.productName).toBe('Jícama con chile')
+      expect(result.quantitySold).toBe(4)
+      expect(result.revenue).toBe(200)
     })
   })
 

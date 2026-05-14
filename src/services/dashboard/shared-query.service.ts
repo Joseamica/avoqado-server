@@ -701,6 +701,96 @@ export class SharedQueryService {
     return variants.some(variant => normalizedProductName.includes(variant))
   }
 
+  private static editDistance(left: string, right: string): number {
+    const previous = Array.from({ length: right.length + 1 }, (_, index) => index)
+
+    for (let i = 1; i <= left.length; i += 1) {
+      let diagonal = previous[0]
+      previous[0] = i
+
+      for (let j = 1; j <= right.length; j += 1) {
+        const temp = previous[j]
+        previous[j] = Math.min(previous[j] + 1, previous[j - 1] + 1, diagonal + (left[i - 1] === right[j - 1] ? 0 : 1))
+        diagonal = temp
+      }
+    }
+
+    return previous[right.length]
+  }
+
+  private static productNameMatchScore(productName: string, variants: string[]): number {
+    const normalizedProductName = this.normalizeProductSearchTerm(productName)
+    if (!normalizedProductName || variants.length === 0) {
+      return 0
+    }
+
+    if (variants.some(variant => normalizedProductName === variant)) {
+      return 1
+    }
+
+    if (variants.some(variant => normalizedProductName.includes(variant))) {
+      return 0.92
+    }
+
+    const productWords = normalizedProductName.split(' ').filter(Boolean)
+    const searchWords = variants[0]?.split(' ').filter(Boolean) || []
+    if (searchWords.length === 0) {
+      return 0
+    }
+
+    const matchedWords = searchWords.filter(searchWord =>
+      productWords.some(productWord => {
+        if (productWord === searchWord || productWord.startsWith(searchWord) || searchWord.startsWith(productWord)) {
+          return true
+        }
+
+        return searchWord.length >= 4 && productWord.length >= 4 && this.editDistance(productWord, searchWord) <= 1
+      }),
+    )
+
+    return (matchedWords.length / searchWords.length) * 0.75
+  }
+
+  private static async resolveVenueProductSearch(
+    venueId: string,
+    searchTerm: string,
+  ): Promise<{ variants: string[]; productIds: string[]; productNames: string[] }> {
+    const variants = this.productSearchVariants(searchTerm)
+    if (variants.length === 0) {
+      return { variants: [], productIds: [], productNames: [] }
+    }
+
+    const products = await prisma.product.findMany({
+      where: {
+        venueId,
+        active: true,
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        name: true,
+      },
+      take: 500,
+    })
+
+    const scoredProducts = products
+      .map(product => ({
+        ...product,
+        score: this.productNameMatchScore(product.name, variants),
+      }))
+      .filter(product => product.score >= 0.7)
+      .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
+
+    const bestScore = scoredProducts[0]?.score || 0
+    const matches = scoredProducts.filter(product => product.score >= Math.max(0.7, bestScore - 0.15)).slice(0, 10)
+
+    return {
+      variants,
+      productIds: matches.map(product => product.id),
+      productNames: matches.map(product => product.name),
+    }
+  }
+
   /**
    * Helper: Normalize date range specification to actual dates
    */
@@ -982,7 +1072,28 @@ export class SharedQueryService {
 
     const venueTimezone = timezone || venue.timezone
     const { from, to } = this.getDateRange(period, venueTimezone)
-    const searchPattern = `%${searchTerm}%`
+    const resolvedProducts = await this.resolveVenueProductSearch(venueId, searchTerm)
+    const textSearchFilters = resolvedProducts.variants.map(variant => {
+      const pattern = `%${variant}%`
+      return Prisma.sql`COALESCE(oi."productName", p."name", '') ILIKE ${pattern}`
+    })
+    const productIdFilter =
+      resolvedProducts.productIds.length > 0
+        ? Prisma.sql`oi."productId"::text IN (${Prisma.join(resolvedProducts.productIds)})`
+        : Prisma.empty
+    const productFilters = resolvedProducts.productIds.length > 0 ? [productIdFilter, ...textSearchFilters] : textSearchFilters
+
+    if (productFilters.length === 0) {
+      return {
+        searchTerm,
+        productName: null,
+        quantitySold: 0,
+        revenue: 0,
+        orderCount: 0,
+        matchedProducts: [],
+        currency: venue.currency || 'MXN',
+      }
+    }
 
     const rows = await prisma.$queryRaw<
       Array<{
@@ -1003,7 +1114,7 @@ export class SharedQueryService {
       WHERE o."venueId"::text = ${venueId}
         AND o."createdAt" >= ${from}::timestamp
         AND o."createdAt" <= ${to}::timestamp
-        AND COALESCE(oi."productName", p."name", '') ILIKE ${searchPattern}
+        AND (${Prisma.join(productFilters, ' OR ')})
       GROUP BY COALESCE(oi."productName", p."name", 'Producto sin nombre')
       ORDER BY "revenue" DESC
       LIMIT 5
@@ -1018,12 +1129,12 @@ export class SharedQueryService {
 
     return {
       searchTerm,
-      productName: matchedProducts[0]?.productName || null,
+      productName: matchedProducts[0]?.productName || resolvedProducts.productNames[0] || null,
       quantitySold: matchedProducts.reduce((sum, row) => sum + row.quantitySold, 0),
       revenue: matchedProducts.reduce((sum, row) => sum + row.revenue, 0),
       orderCount: matchedProducts.reduce((sum, row) => sum + row.orderCount, 0),
       matchedProducts,
-      currency: 'MXN',
+      currency: venue.currency || 'MXN',
     }
   }
 

@@ -56,10 +56,15 @@ type RawPlannerStep = {
   reason?: string | null
 }
 
+interface ConversationPlannerOptions {
+  enableModelFallback?: boolean
+}
+
 export class ConversationPlannerService {
   constructor(
     private readonly openai: OpenAI,
     private readonly toolCatalog: ToolCatalogService = new ToolCatalogService(),
+    private readonly options: ConversationPlannerOptions = {},
   ) {}
 
   async plan(request: PlannerRequest): Promise<ConversationPlan> {
@@ -67,6 +72,10 @@ export class ConversationPlannerService {
     const deterministicPlan = this.buildDeterministicPlan(request.message, state)
     if (deterministicPlan) {
       return this.normalizePlan(deterministicPlan)
+    }
+
+    if (this.options.enableModelFallback === false) {
+      return this.buildLegacyFallbackPlan(request.message, 'Planner model fallback disabled.')
     }
 
     try {
@@ -79,19 +88,7 @@ export class ConversationPlannerService {
         userId: request.userId,
       })
 
-      return {
-        mode: 'single',
-        steps: [
-          {
-            id: 'query_1',
-            kind: 'query',
-            tool: 'adHocAnalytics',
-            args: { originalMessage: request.message },
-          },
-        ],
-        userFacingSummary: 'Planner no disponible; usar pipeline legacy.',
-        riskLevel: 'medium',
-      }
+      return this.buildLegacyFallbackPlan(request.message, 'Planner no disponible; usar pipeline legacy.')
     }
   }
 
@@ -187,6 +184,19 @@ export class ConversationPlannerService {
           dateRange: this.extractDateRange(normalized) || 'thisMonth',
           weekendOnly: this.hasWeekendConstraint(normalized),
           nightOnly: this.hasNightConstraint(normalized),
+        },
+      })
+    }
+
+    const productSalesTerm = productComparison ? null : this.extractProductSalesTerm(normalized)
+    if (productSalesTerm) {
+      steps.push({
+        id: this.nextStepId('query', steps),
+        kind: 'query',
+        tool: 'productSales',
+        args: {
+          productName: productSalesTerm,
+          dateRange: this.extractDateRange(normalized) || 'thisMonth',
         },
       })
     }
@@ -294,12 +304,23 @@ export class ConversationPlannerService {
           args: { linkId },
         })
       } else {
-        steps.push({
-          id: this.nextStepId('clarify', steps),
-          kind: 'clarify',
-          question: '¿Cuál link de pago quieres revisar? Puedes compartir el identificador o pedirme primero la lista de links.',
-          missing: ['linkId'],
-        })
+        const search = this.extractPaymentLinkSearchTerm(normalized)
+        const status = this.extractPaymentLinkStatus(normalized)
+        if (search) {
+          steps.push({
+            id: this.nextStepId('query', steps),
+            kind: 'query',
+            tool: 'paymentLinks.list',
+            args: { limit: 5, search, ...(status ? { status } : {}) },
+          })
+        } else {
+          steps.push({
+            id: this.nextStepId('clarify', steps),
+            kind: 'clarify',
+            question: '¿Cuál link de pago quieres revisar? Puedes compartir el identificador o pedirme primero la lista de links.',
+            missing: ['linkId'],
+          })
+        }
       }
     }
 
@@ -313,11 +334,13 @@ export class ConversationPlannerService {
     }
 
     if (this.hasPaymentLinksListIntent(normalized)) {
+      const search = this.extractPaymentLinkSearchTerm(normalized)
+      const status = this.extractPaymentLinkStatus(normalized)
       steps.push({
         id: this.nextStepId('query', steps),
         kind: 'query',
         tool: 'paymentLinks.list',
-        args: { limit: 10 },
+        args: { limit: search ? 5 : 10, ...(status ? { status } : {}), ...(search ? { search } : {}) },
       })
     }
 
@@ -331,11 +354,18 @@ export class ConversationPlannerService {
     }
 
     if (this.hasReservationListIntent(normalized)) {
+      const search = this.extractReservationSearchTerm(normalized)
+      const status = this.extractReservationStatus(normalized)
       steps.push({
         id: this.nextStepId('query', steps),
         kind: 'query',
         tool: 'reservations.list',
-        args: { dateRange: this.extractDateRange(normalized) || 'today', limit: 10 },
+        args: {
+          dateRange: this.extractDateRange(normalized) || 'today',
+          limit: 10,
+          ...(status ? { status } : {}),
+          ...(search ? { search } : {}),
+        },
       })
     }
 
@@ -426,11 +456,12 @@ export class ConversationPlannerService {
     }
 
     if (this.hasTeamMembersIntent(normalized)) {
+      const search = this.extractTeamSearchTerm(normalized)
       steps.push({
         id: this.nextStepId('query', steps),
         kind: 'query',
         tool: 'team.members',
-        args: { limit: 10 },
+        args: { limit: 10, ...(search ? { search } : {}) },
       })
     }
 
@@ -768,6 +799,43 @@ export class ConversationPlannerService {
     return asksAmount && salesTerm && !excludedDetail
   }
 
+  private extractProductSalesTerm(normalized: string): string | null {
+    const patterns = [
+      /\bcu[aá]nt[oa]s?\s+(.+?)\s+(?:(?:he|has|ha|hemos|han)\s+)?(?:vend[ií]do|vendido|vend[ií]|vendi|vendimos|vendieron|salieron|se\s+vendieron)\b/,
+      /\b(?:cu[aá]nt[oa]s?\s+)?(?:vend[ií]|vendi|vendimos|vendieron|vendido|ventas?|ingresos?|facturad[oa]|sales|revenue)(?:\s+[a-z0-9ñ]+){0,5}?\s+(?:de|del|from|for)\s+(.+?)(?=(?:\s+(?:hoy|ayer|esta|este|estos|estas|los|las|en|durante|last|this|today|yesterday|week|month|days?)\b|[?.,!]|$))/,
+      /\b(?:sales|revenue)\s+(?:for|from)\s+(.+?)(?=(?:\s+(?:today|yesterday|last|this|week|month|days?)\b|[?.,!]|$))/,
+    ]
+
+    for (const pattern of patterns) {
+      const match = normalized.match(pattern)
+      const rawTerm = match?.[1]?.trim()
+      if (!rawTerm) continue
+
+      const cleaned = rawTerm
+        .replace(/\b(producto|productos|product|products|item|items|platillo|platillos|articulo|articulos|artículo|artículos)\b/g, ' ')
+        .replace(/[^a-z0-9ñ\s-]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+
+      if (!cleaned || cleaned.length < 2) continue
+
+      const isDateOnly = /\b(hoy|ayer|semana|mes|ano|dia|dias|ultimos|pasad[oa]s?|today|yesterday|week|month|year|days?|last|this)\b/.test(
+        cleaned,
+      )
+      const isGenericDimension =
+        /\b(categoria|categorias|category|categories|mesero|staff|cliente|clientes|customer|customers|ordenes?|pedidos?|pagos?)\b/.test(
+          cleaned,
+        )
+      const isComparison = /\b(vs|versus|contra)\b/.test(cleaned)
+
+      if (!isDateOnly && !isGenericDimension && !isComparison) {
+        return cleaned
+      }
+    }
+
+    return null
+  }
+
   private hasPendingOrdersIntent(normalized: string): boolean {
     return /\b(ordenes pendientes|pedidos pendientes|comandas pendientes|ordenes abiertas|pedidos abiertos)\b/.test(normalized)
   }
@@ -829,6 +897,41 @@ export class ConversationPlannerService {
     const summaryIntent = /\b(resumen|summary|total|cuantos|cuantas|metricas|estadisticas)\b/.test(normalized)
     const mutationIntent = /\b(crea|crear|agrega|agregar|actualiza|editar|edita|borra|borrar|archiva|pausa|pausar)\b/.test(normalized)
     return paymentLinkTerm && readIntent && !summaryIntent && !mutationIntent
+  }
+
+  private extractPaymentLinkStatus(normalized: string): string | null {
+    if (/\b(activo|activos|active|habilitado|habilitados)\b/.test(normalized)) return 'ACTIVE'
+    if (/\b(pausado|pausados|paused)\b/.test(normalized)) return 'PAUSED'
+    if (/\b(expirado|expirados|expired|vencido|vencidos)\b/.test(normalized)) return 'EXPIRED'
+    if (/\b(archivado|archivados|archived)\b/.test(normalized)) return 'ARCHIVED'
+    return null
+  }
+
+  private extractPaymentLinkSearchTerm(normalized: string): string | null {
+    const patterns = [
+      /\b(?:link|links|liga|ligas|enlace|enlaces)\s+(?:de\s+)?pago(?:\s+(?:activo|activos|active|pausado|pausados|paused|expirado|expirados|expired))?\s+(?:de|del|para|llamado|llamada|titulado|titulada)\s+(.+)$/,
+      /\bpayment\s+links?\s+(?:for|called|named)\s+(.+)$/,
+    ]
+
+    for (const pattern of patterns) {
+      const match = normalized.match(pattern)
+      const cleaned = this.cleanEntitySearchTerm(match?.[1] || '', [
+        'activo',
+        'activos',
+        'active',
+        'pausado',
+        'pausados',
+        'paused',
+        'expirado',
+        'expirados',
+        'expired',
+        'hoy',
+        'ayer',
+      ])
+      if (cleaned) return cleaned
+    }
+
+    return null
   }
 
   private hasPaymentLinksDetailIntent(normalized: string): boolean {
@@ -894,6 +997,45 @@ export class ConversationPlannerService {
     return this.hasReservationTerms(normalized) && readIntent && !countIntent && !this.hasReservationMutationIntent(normalized)
   }
 
+  private extractReservationStatus(normalized: string): string | null {
+    if (/\b(confirmada|confirmadas|confirmado|confirmados|confirmed)\b/.test(normalized)) return 'CONFIRMED'
+    if (/\b(pendiente|pendientes|pending)\b/.test(normalized)) return 'PENDING'
+    if (/\b(cancelada|canceladas|cancelado|cancelados|cancelled|canceled)\b/.test(normalized)) return 'CANCELLED'
+    if (/\b(no show|no-show)\b/.test(normalized)) return 'NO_SHOW'
+    if (/\b(completada|completadas|completado|completados|completed)\b/.test(normalized)) return 'COMPLETED'
+    return null
+  }
+
+  private extractReservationSearchTerm(normalized: string): string | null {
+    const patterns = [
+      /\b(?:reserva|reservas|reservacion|reservaciones|booking|bookings|reservation|reservations)\s+(?:de|del|para|por|a nombre de)\s+(.+)$/,
+      /\b(?:codigo|confirmacion|confirmation)\s+([a-z0-9_-]{3,})\b/,
+    ]
+
+    for (const pattern of patterns) {
+      const match = normalized.match(pattern)
+      const cleaned = this.cleanEntitySearchTerm(match?.[1] || '', [
+        'hoy',
+        'today',
+        'ayer',
+        'yesterday',
+        'esta semana',
+        'semana',
+        'este mes',
+        'mes',
+        'confirmada',
+        'confirmadas',
+        'pendiente',
+        'pendientes',
+        'cancelada',
+        'canceladas',
+      ])
+      if (cleaned) return cleaned
+    }
+
+    return null
+  }
+
   private hasCustomersSummaryIntent(normalized: string): boolean {
     const customerTerm = /\b(cliente|clientes|customers?)\b/.test(normalized)
     const summaryIntent =
@@ -953,11 +1095,30 @@ export class ConversationPlannerService {
 
   private hasTeamMembersIntent(normalized: string): boolean {
     const teamTerm = /\b(equipo|team|miembros|staff|empleados|colaboradores)\b/.test(normalized)
-    const readIntent = /\b(quien|quienes|que|cuales|lista|listar|muestra|muestrame|dame|ver|veo|tengo|show|list|see)\b/.test(normalized)
+    const readIntent =
+      /\b(quien|quienes|que|cuales|lista|listar|muestra|muestrame|dame|ver|veo|tengo|busca|buscar|encuentra|encontrar|show|list|see|search|find)\b/.test(
+        normalized,
+      )
     const mutationIntent = /\b(crea|crear|agrega|agregar|invita|invitar|actualiza|editar|edita|borra|borrar|elimina|desactiva)\b/.test(
       normalized,
     )
     return teamTerm && readIntent && !mutationIntent
+  }
+
+  private extractTeamSearchTerm(normalized: string): string | null {
+    const patterns = [
+      /\b(?:busca|buscar|encuentra|encontrar|search|find)\s+(?:a\s+)?(.+?)\s+(?:en\s+mi\s+)?(?:equipo|team|staff|empleados|colaboradores)\b/,
+      /\b(?:quien|quienes)\s+(?:es|son)\s+(.+?)\s+(?:en\s+mi\s+)?(?:equipo|team|staff)\b/,
+      /\b(?:equipo|team|staff|empleado|empleada|miembro)\s+(?:de|llamado|llamada|nombre)\s+(.+)$/,
+    ]
+
+    for (const pattern of patterns) {
+      const match = normalized.match(pattern)
+      const cleaned = this.cleanEntitySearchTerm(match?.[1] || '', ['mi', 'mis', 'del', 'de'])
+      if (cleaned) return cleaned
+    }
+
+    return null
   }
 
   private hasCommissionsSummaryIntent(normalized: string): boolean {
@@ -1012,6 +1173,39 @@ export class ConversationPlannerService {
     }
 
     return null
+  }
+
+  private cleanEntitySearchTerm(raw: string, extraStopWords: string[] = []): string | null {
+    if (!raw.trim()) return null
+    let cleaned = raw
+      .replace(/[?!.,;:]+$/g, '')
+      .replace(/\b(por favor|please|me|el|la|los|las|un|una|unos|unas)\b/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+
+    for (const stopWord of extraStopWords) {
+      const escaped = stopWord.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      cleaned = cleaned.replace(new RegExp(`\\b${escaped}\\b`, 'g'), ' ')
+    }
+
+    cleaned = cleaned.replace(/\s+/g, ' ').trim().slice(0, 80)
+    return cleaned.length >= 2 && !this.isLikelyBusinessIdentifier(cleaned) ? cleaned : null
+  }
+
+  private buildLegacyFallbackPlan(message: string, summary: string): ConversationPlan {
+    return {
+      mode: 'single',
+      steps: [
+        {
+          id: 'query_1',
+          kind: 'query',
+          tool: 'adHocAnalytics',
+          args: { originalMessage: message },
+        },
+      ],
+      userFacingSummary: summary,
+      riskLevel: 'medium',
+    }
   }
 
   private extractDateRange(normalized: string): RelativeDateRange | undefined {

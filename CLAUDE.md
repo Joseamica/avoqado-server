@@ -84,6 +84,13 @@ validates configs at runtime against this schema. If you add/rename fields in th
 reject the update with cryptic "should have required property" errors. Schema is defined in `scripts/setup-modules.ts` — after editing,
 re-run the script to update the DB.
 
+## Production Data Inserts: IDs MUST be cuid format
+
+When the user asks you to insert/create records directly in production (psql, scripts, etc.), **always generate IDs as cuid v1** (25 chars,
+prefix `c`) to match Prisma's `@default(cuid())` convention. Never use custom prefixes like `mindf_hh_001` or UUIDs — they break consistency
+with the rest of the catalog. Use the `cuid` package: `npm install --no-save cuid && node -e "console.log(require('cuid')())"`. FKs with
+`ON UPDATE CASCADE` (Product→MenuCategory, Inventory→Product) allow safe id rewrites in a transaction if you forget upfront.
+
 ## Cross-Repo (TPV Android)
 
 Backend ALWAYS supports old TPV versions. NEVER remove API response fields. New fields must be optional with defaults. Deploy backend first,

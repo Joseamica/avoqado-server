@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-05-13T23:54:19.044Z",
+  "generatedAt": "2026-05-14T06:41:39.684Z",
   "assistantTools": [
     "activeShifts",
     "adHocAnalytics",
@@ -59,6 +59,7 @@
     "payments.summary",
     "pendingOrders",
     "pricing.applySuggestedPrice",
+    "productSales",
     "productSales.compare",
     "profitAnalysis",
     "recipeCount",

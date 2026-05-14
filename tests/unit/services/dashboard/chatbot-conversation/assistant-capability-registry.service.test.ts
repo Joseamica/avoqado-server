@@ -39,6 +39,24 @@ describe('AssistantCapabilityRegistryService', () => {
     expect(capability?.examples).toContain('hamburguesas vs pizzas en horario nocturno los fines de semana')
   })
 
+  it('registers productSales as an executable venue-scoped query capability', () => {
+    const capability = registry.getCapability('productSales')
+
+    expect(capability).toEqual(
+      expect.objectContaining({
+        id: 'productSales',
+        kind: 'query',
+        status: 'registered',
+        scope: 'venue',
+        requiresVenueScope: true,
+        permissions: ['orders:read', 'menu:read'],
+        riskLevel: 'low',
+        dataSource: 'shared_query.productSales',
+      }),
+    )
+    expect(capability?.examples).toContain('cuantas jicamas vendi este mes')
+  })
+
   it('marks legacy adHocAnalytics as blocked so coverage grows through explicit tools', () => {
     const capability = registry.getCapability('adHocAnalytics')
 

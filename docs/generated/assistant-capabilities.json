@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-05-13T23:54:19.044Z",
+  "generatedAt": "2026-05-14T06:41:39.684Z",
   "capabilities": [
     {
       "id": "activeShifts",
@@ -1767,6 +1767,36 @@
       ],
       "notes": [
         "Entity: Product. Operation: custom."
+      ]
+    },
+    {
+      "id": "productSales",
+      "kind": "query",
+      "status": "registered",
+      "description": "Sales quantity, revenue, and order count for one product search term in the current venue.",
+      "scope": "venue",
+      "requiresVenueScope": true,
+      "permissions": [
+        "orders:read",
+        "menu:read"
+      ],
+      "riskLevel": "low",
+      "requiresConfirmation": false,
+      "requiresDoubleConfirmation": false,
+      "dataSource": "shared_query.productSales",
+      "schema": {
+        "type": "queryTool",
+        "fields": [
+          "dateRange",
+          "limit?"
+        ]
+      },
+      "examples": [
+        "cuantas jicamas vendi este mes",
+        "sales for Hamburguesa BBQ this month"
+      ],
+      "notes": [
+        "Resolves one product search term through SharedQueryService.getProductSalesByName scoped to the active venue."
       ]
     },
     {

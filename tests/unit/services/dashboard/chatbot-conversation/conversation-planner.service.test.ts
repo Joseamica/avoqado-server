@@ -53,8 +53,12 @@ describe('ConversationPlannerService', () => {
         ],
       },
       {
+        message: 'cuantas jicamas he vendido este mes',
+        expectedSteps: [{ kind: 'query', tool: 'productSales', args: { productName: 'jicamas', dateRange: 'thisMonth' } }],
+      },
+      {
         message: 'que links de pago tengo activos',
-        expectedSteps: [{ kind: 'query', tool: 'paymentLinks.list', args: { limit: 10 } }],
+        expectedSteps: [{ kind: 'query', tool: 'paymentLinks.list', args: { limit: 10, status: 'ACTIVE' } }],
       },
       {
         message: 'cuantas reservaciones tengo hoy',
@@ -186,6 +190,25 @@ describe('ConversationPlannerService', () => {
     expect(openai.chat.completions.create).not.toHaveBeenCalled()
   })
 
+  it('plans product-specific sales deterministically before the model can choose aggregate sales', async () => {
+    const plan = await planner.plan({
+      message: 'cuantas jicamas he vendido este mes',
+      venueId: 'venue-1',
+      userId: 'user-1',
+    })
+
+    expect(plan.mode).toBe('single')
+    expect(plan.steps).toEqual([
+      expect.objectContaining({
+        kind: 'query',
+        tool: 'productSales',
+        args: { productName: 'jicamas', dateRange: 'thisMonth' },
+      }),
+    ])
+    expect(plan.steps).not.toEqual([expect.objectContaining({ kind: 'query', tool: 'sales' })])
+    expect(openai.chat.completions.create).not.toHaveBeenCalled()
+  })
+
   it('plans payment link list questions deterministically', async () => {
     const plan = await planner.plan({
       message: 'que links de pago tengo activos',
@@ -194,7 +217,23 @@ describe('ConversationPlannerService', () => {
     })
 
     expect(plan.mode).toBe('single')
-    expect(plan.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'paymentLinks.list', args: { limit: 10 } })])
+    expect(plan.steps).toEqual([
+      expect.objectContaining({ kind: 'query', tool: 'paymentLinks.list', args: { limit: 10, status: 'ACTIVE' } }),
+    ])
+    expect(openai.chat.completions.create).not.toHaveBeenCalled()
+  })
+
+  it('plans payment link searches by title without asking for raw IDs', async () => {
+    const plan = await planner.plan({
+      message: 'dame el link de pago de cena privada',
+      venueId: 'venue-1',
+      userId: 'user-1',
+    })
+
+    expect(plan.mode).toBe('single')
+    expect(plan.steps).toEqual([
+      expect.objectContaining({ kind: 'query', tool: 'paymentLinks.list', args: { limit: 5, search: 'cena privada' } }),
+    ])
     expect(openai.chat.completions.create).not.toHaveBeenCalled()
   })
 
@@ -230,6 +269,17 @@ describe('ConversationPlannerService', () => {
     expect(customers.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'customers.summary', args: {} })])
     expect(team.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'team.members', args: { limit: 10 } })])
     expect(commissions.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'commissions.summary', args: {} })])
+    expect(openai.chat.completions.create).not.toHaveBeenCalled()
+  })
+
+  it('plans team member searches by staff name within the current venue', async () => {
+    const plan = await planner.plan({
+      message: 'busca a ana en mi equipo',
+      venueId: 'venue-1',
+      userId: 'user-1',
+    })
+
+    expect(plan.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'team.members', args: { limit: 10, search: 'ana' } })])
     expect(openai.chat.completions.create).not.toHaveBeenCalled()
   })
 
@@ -314,6 +364,19 @@ describe('ConversationPlannerService', () => {
     expect(summary.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'reservations.summary', args: { dateRange: 'today' } })])
     expect(list.steps).toEqual([
       expect.objectContaining({ kind: 'query', tool: 'reservations.list', args: { dateRange: 'today', limit: 10 } }),
+    ])
+    expect(openai.chat.completions.create).not.toHaveBeenCalled()
+  })
+
+  it('plans reservation searches by guest or confirmation text', async () => {
+    const plan = await planner.plan({
+      message: 'muestrame reservas de ana hoy',
+      venueId: 'venue-1',
+      userId: 'user-1',
+    })
+
+    expect(plan.steps).toEqual([
+      expect.objectContaining({ kind: 'query', tool: 'reservations.list', args: { dateRange: 'today', limit: 10, search: 'ana' } }),
     ])
     expect(openai.chat.completions.create).not.toHaveBeenCalled()
   })

@@ -277,7 +277,12 @@ interface ParsedCreateProductActionCommand {
 
 const CREATE_PRODUCT_ACTION_COMMAND_PREFIX = '__AIOPS_CREATE_PRODUCT__:'
 const CHATBOT_MUTATIONS_ENABLED = process.env.CHATBOT_ENABLE_MUTATIONS === 'true'
-const CHATBOT_CONVERSATION_PLANNER_ENABLED = process.env.CHATBOT_ENABLE_CONVERSATION_PLANNER === 'true'
+const CHATBOT_CONVERSATION_PLANNER_ENABLED =
+  process.env.CHATBOT_ENABLE_CONVERSATION_PLANNER === 'true' ||
+  (process.env.NODE_ENV !== 'test' && process.env.CHATBOT_ENABLE_CONVERSATION_PLANNER !== 'false')
+const CHATBOT_CONVERSATION_PLANNER_MODEL_ENABLED =
+  process.env.CHATBOT_ENABLE_CONVERSATION_PLANNER_MODEL === 'true' ||
+  (process.env.NODE_ENV !== 'test' && process.env.CHATBOT_ENABLE_CONVERSATION_PLANNER_MODEL !== 'false')
 const MAX_PROMPT_CONTEXT_CHARS = 600
 const MAX_REFERENCES_CONTEXT_CHARS = 3000
 const ACTION_SESSION_TTL_MS = 15 * 60 * 1000
@@ -334,6 +339,7 @@ interface IntentClassificationResult {
     | 'profitAnalysis'
     | 'paymentMethodBreakdown'
     | 'settlementCalendar'
+    | 'reservationSummary'
   dateRange?: RelativeDateRange
   confidence: number
   reason: string
@@ -436,6 +442,7 @@ class TextToSqlAssistantService {
     profitAnalysis: ['Payment', 'OrderItem', 'Order', 'Product', 'Recipe'],
     paymentMethodBreakdown: ['Payment'],
     settlementCalendar: ['Payment'],
+    reservationSummary: ['Reservation'],
   }
 
   constructor() {
@@ -449,7 +456,9 @@ class TextToSqlAssistantService {
     this.learningService = new AILearningService()
     this.actionEngine = new ActionEngine()
     registerAllActions()
-    this.conversationOrchestrator = new ConversationOrchestratorService(this.openai, this.actionEngine)
+    this.conversationOrchestrator = new ConversationOrchestratorService(this.openai, this.actionEngine, undefined, {
+      plannerModelFallbackEnabled: CHATBOT_CONVERSATION_PLANNER_MODEL_ENABLED,
+    })
     this.initializeActionSessionCleanup()
   }
 
@@ -2832,6 +2841,23 @@ Ejemplos de respuestas CORRECTAS:
               }
 
               serviceResult = settlementData
+              break
+            }
+
+            case 'reservationSummary': {
+              const reservations = await SharedQueryService.getReservationSummary(query.venueId, dateRange)
+              const periodLabel = dateName(dateRange)
+              const byStatus = Object.entries(reservations.byStatus)
+                .filter(([, count]) => count > 0)
+                .map(([status, count]) => `${status}: ${count}`)
+                .join(', ')
+
+              naturalResponse =
+                reservations.total > 0
+                  ? `En ${periodLabel} tienes ${reservations.total} reservaciones.${byStatus ? ` ${byStatus}.` : ''} No-show: ${reservations.noShowRate.toFixed(1)}%.`
+                  : `No encontré reservaciones para ${periodLabel}.`
+
+              serviceResult = reservations
               break
             }
 
@@ -6883,6 +6909,19 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
       }
     }
 
+    if (this.isReservationSummaryQuestion(normalizedMessage)) {
+      const effectiveDateRange = dateRange || 'today'
+      return {
+        isSimpleQuery: true,
+        intent: 'reservationSummary',
+        dateRange: effectiveDateRange,
+        confidence: 0.95,
+        reason: `Detected reservation summary query with date range: ${effectiveDateRange}${!wasExplicit ? ' (default)' : ''}`,
+        requiresDateRange: true,
+        wasDateExplicit: wasExplicit,
+      }
+    }
+
     const productSalesTerm = this.extractProductSalesTerm(message)
     if (productSalesTerm) {
       const effectiveDateRange = dateRange || 'thisMonth'
@@ -7297,7 +7336,10 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
     if (
       deterministicClassification.isSimpleQuery &&
       deterministicClassification.intent &&
-      (this.isRealTimeSharedIntent(deterministicClassification.intent) || deterministicClassification.intent === 'settlementCalendar')
+      (this.isRealTimeSharedIntent(deterministicClassification.intent) ||
+        deterministicClassification.intent === 'settlementCalendar' ||
+        deterministicClassification.intent === 'reservationSummary' ||
+        deterministicClassification.intent === 'productSales')
     ) {
       return {
         classification: {
@@ -7324,6 +7366,33 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
           confidence: 0.9,
           reason: 'Detected recipe usage follow-up from recent recipe context',
           requiresDateRange: false,
+        },
+        tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      }
+    }
+
+    const productSalesFollowUpTerm = this.extractProductSalesFollowUpTerm(message)
+    const recentHistoryMentionsSalesOrProducts =
+      conversationHistory?.slice(-4).some(turn => {
+        const normalizedContent = this.normalizeTextForMatch(turn.content)
+        return /\b(vend[ií]|vendi|vendido|vendieron|ventas?|sales|revenue|ingresos?|facturad[oa]|productos?|products?)\b/.test(
+          normalizedContent,
+        )
+      }) ?? false
+
+    if (productSalesFollowUpTerm && recentHistoryMentionsSalesOrProducts) {
+      const recentDateRange = this.extractRecentDateRangeFromHistory(conversationHistory)
+      return {
+        classification: {
+          isSimpleQuery: true,
+          intent: 'productSales',
+          dateRange: recentDateRange || 'thisMonth',
+          confidence: 0.9,
+          reason: 'Detected product-sales follow-up from recent sales/product context',
+          requiresDateRange: true,
+          wasDateExplicit: recentDateRange !== undefined,
+          hasEntityFilter: true,
+          entityName: productSalesFollowUpTerm,
         },
         tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
       }
@@ -7390,6 +7459,7 @@ INTENTS SIMPLES (isSimple=true) — tenemos queries pre-construidas para estos:
 - profitAnalysis: utilidad, márgenes, ganancias, costos
 - paymentMethodBreakdown: métodos de pago, efectivo vs tarjeta, desglose pagos
 - settlementCalendar: cuánto me liquidan/dispersan/depositan, liquidación de hoy, payout/settlement amount. Por defecto dateRange="today" si no hay fecha
+- reservationSummary: cuántas reservaciones/reservas tengo, how many reservations. Por defecto dateRange="today" si no hay fecha
 - businessOverview: resumen general, cómo va el negocio, qué hacer para incrementar/aumentar/mejorar ventas, recomendaciones, estrategia, plan de acción
 
 NO SOPORTADO (isSimple=false, intent="unsupported") — no hay herramienta registrada:
@@ -7424,6 +7494,7 @@ REGLAS CRÍTICAS:
 12. EXCEPCIONES: "cuántas recetas tengo" / "total de recetas" → recipeCount. "cuáles/qué recetas tengo" / "lista de recetas" → recipeList. "qué receta se usa más" / "cuál es la que más se usa" con contexto de recetas → recipeUsage
 13. "cuántos clientes nuevos" → newCustomers. "cuándo recibo más clientes nuevos" / "qué día llegan más clientes nuevos" → newCustomerTiming
 14. "cuánto me liquidan hoy" / "cuánto me dispersan hoy" / "cuánto me depositan hoy" → settlementCalendar. NO lo clasifiques como conversational ni paymentMethodBreakdown
+15. "cuántas reservaciones tengo" / "cuántas reservas hay" → reservationSummary. Si no hay fecha, usa dateRange="today"
 
 dateRanges válidos: today, yesterday, thisWeek, lastWeek, thisMonth, lastMonth, last7days, last30days, allTime, null
 
@@ -7536,6 +7607,7 @@ Responde SOLO JSON (sin markdown):
         'profitAnalysis',
         'paymentMethodBreakdown',
         'settlementCalendar',
+        'reservationSummary',
       ])
 
       const validDateRanges = new Set<RelativeDateRange | null>([
@@ -7588,7 +7660,8 @@ Responde SOLO JSON (sin markdown):
         ? (parsedDateRangeRaw as RelativeDateRange | null)
         : null
 
-      const finalDateRange = requiresDateRange ? (parsedDateRange as RelativeDateRange) || 'thisMonth' : undefined
+      const defaultDateRange = intent === 'settlementCalendar' || intent === 'reservationSummary' ? 'today' : 'thisMonth'
+      const finalDateRange = requiresDateRange ? (parsedDateRange as RelativeDateRange) || defaultDateRange : undefined
       const wasDateExplicit = Boolean(parsed.wasDateExplicit && parsedDateRange)
       const confidence = Math.max(0, Math.min(1, Number(parsed.confidence || 0.8)))
 
@@ -7693,6 +7766,19 @@ Responde SOLO JSON (sin markdown):
       /\b(como|how|donde|where|reviso|revisar|ver|veo|encuentro|configuro|configurar|pasos|guia|ayuda)\b/.test(normalizedMessage)
 
     return asksData && !asksHowTo
+  }
+
+  private isReservationSummaryQuestion(normalizedMessage: string): boolean {
+    const hasReservationTerm = /\b(reservas?|reservaciones?|reservacion|booking|bookings|reservation|reservations)\b/.test(
+      normalizedMessage,
+    )
+    if (!hasReservationTerm) return false
+
+    const asksCount = /\b(cuant[ao]s?|cantidad|total|numero|número|hay|tengo|how\s+many)\b/.test(normalizedMessage)
+    const asksMutation = /\b(crea|crear|agenda|agendar|cancela|cancelar|modifica|modificar|actualiza|actualizar)\b/.test(normalizedMessage)
+    const asksHowTo = /\b(como|how|donde|where|configuro|configurar|pasos|guia|ayuda)\b/.test(normalizedMessage)
+
+    return asksCount && !asksMutation && !asksHowTo
   }
 
   private isRealTimeSharedIntent(intent: string): boolean {
@@ -8676,6 +8762,7 @@ ${JSON.stringify(input, null, 2)}
     }
 
     const patterns = [
+      /\bcu[aá]nt[oa]s?\s+(.+?)\s+(?:(?:he|has|ha|hemos|han)\s+)?(?:vend[ií]do|vendido|vend[ií]|vendi|vendimos|vendieron|salieron|se\s+vendieron)\b/,
       /\b(?:cu[aá]nt[oa]s?\s+)?(?:vend[ií]|vendi|vendimos|vendieron|vendido|ventas?|ingresos?|facturad[oa]|sales|revenue)(?:\s+[a-z0-9ñ]+){0,5}?\s+(?:de|del|from|for)\s+(.+?)(?=(?:\s+(?:hoy|ayer|esta|este|estos|estas|los|las|en|durante|last|this|today|yesterday|week|month|days?)\b|[?.,!]|$))/,
       /\b(?:sales|revenue)\s+(?:for|from)\s+(.+?)(?=(?:\s+(?:today|yesterday|last|this|week|month|days?)\b|[?.,!]|$))/,
     ]
@@ -8712,6 +8799,27 @@ ${JSON.stringify(input, null, 2)}
     }
 
     return null
+  }
+
+  private extractProductSalesFollowUpTerm(message: string): string | null {
+    const normalizedMessage = this.normalizeTextForMatch(message).replace(/\s+/g, ' ').trim()
+    const match = normalizedMessage.match(/\b(?:y\s+)?(?:los?|las?)?\s*(?:productos?|products?|platillos?|items?)\s+(.+?)(?:[?.,!]|$)/)
+    const rawTerm = match?.[1]?.trim()
+    if (!rawTerm) {
+      return null
+    }
+
+    const cleaned = rawTerm
+      .replace(/[^a-z0-9ñ\s-]/g, ' ')
+      .replace(/\b(hoy|ayer|esta|este|mes|semana|week|month|today|yesterday)\b/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+
+    if (!cleaned || cleaned.length < 2 || /\b(productos?|products?|algo|cosa|cosas)\b/.test(cleaned)) {
+      return null
+    }
+
+    return cleaned
   }
 
   private detectComplexity(message: string): boolean {

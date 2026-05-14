@@ -41,6 +41,10 @@ interface QueryExecutionResult {
   rowsReturned?: number
 }
 
+interface ConversationOrchestratorOptions {
+  plannerModelFallbackEnabled?: boolean
+}
+
 export class ConversationOrchestratorService {
   private readonly planner: ConversationPlannerService
   private readonly toolCatalog: ToolCatalogService
@@ -50,10 +54,13 @@ export class ConversationOrchestratorService {
     openai: OpenAI,
     private readonly actionEngine: ActionEngine,
     toolCatalog = new ToolCatalogService(),
+    options: ConversationOrchestratorOptions = {},
   ) {
     this.toolCatalog = toolCatalog
     this.capabilityRegistry = new AssistantCapabilityRegistryService(toolCatalog)
-    this.planner = new ConversationPlannerService(openai, toolCatalog)
+    this.planner = new ConversationPlannerService(openai, toolCatalog, {
+      enableModelFallback: options.plannerModelFallbackEnabled,
+    })
   }
 
   async process(request: OrchestratorRequest): Promise<OrchestratorResponse | null> {
@@ -334,6 +341,19 @@ export class ConversationOrchestratorService {
             ? `Los productos más vendidos en ${this.formatDateRangeName(dateRange)} son:\n${list}`
             : `No encontré productos vendidos en ${this.formatDateRangeName(dateRange)}.`,
           products.length,
+        )
+      }
+      case 'productSales': {
+        const productName = this.requiredStringArg(step, 'productName')
+        const productSales = await SharedQueryService.getProductSalesByName(venueId, productName, dateRange)
+        const matchedName = productSales.productName || productSales.searchTerm || productName
+        return this.queryResult(
+          step.tool,
+          productSales,
+          productSales.quantitySold > 0
+            ? `En ${this.formatDateRangeName(dateRange)}, ${matchedName} vendió ${productSales.quantitySold} unidades por ${this.money(productSales.revenue, productSales.currency)} en ${productSales.orderCount} órdenes.`
+            : `No encontré ventas de "${matchedName}" en ${this.formatDateRangeName(dateRange)}.`,
+          productSales.matchedProducts.length,
         )
       }
       case 'productSales.compare': {

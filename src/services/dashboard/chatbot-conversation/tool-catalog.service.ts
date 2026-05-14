@@ -30,6 +30,13 @@ export class ToolCatalogService {
         defaultDateRange: 'thisMonth',
       },
       {
+        name: 'productSales',
+        description: 'Sales quantity, revenue, and order count for one product search term in the current venue.',
+        tables: ['OrderItem', 'Order', 'Product'],
+        requiresDateRange: true,
+        defaultDateRange: 'thisMonth',
+      },
+      {
         name: 'productSales.compare',
         description: 'Compare sales for two product search terms with optional weekend/night filters.',
         tables: ['OrderItem', 'Order', 'Product'],

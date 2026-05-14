@@ -502,6 +502,17 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(classification.requiresDateRange).toBe(false)
     })
 
+    it('should classify reservation count questions as a registered reservation summary tool', () => {
+      const query = 'cuantas reservaciones tengo'
+      // @ts-expect-error - accessing private method for testing
+      const classification = service.classifyIntent(query)
+
+      expect(classification.isSimpleQuery).toBe(true)
+      expect(classification.intent).toBe('reservationSummary')
+      expect(classification.dateRange).toBe('today')
+      expect(classification.wasDateExplicit).toBe(false)
+    })
+
     it('should classify product-specific sales through the registered productSales tool', () => {
       const query = '¿Cuánto vendí de Hamburguesa BBQ?'
       // @ts-expect-error - accessing private method for testing
@@ -522,6 +533,18 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(classification.isSimpleQuery).toBe(true)
       expect(classification.intent).toBe('productSales')
       expect(classification.entityName).toBe('hamburguesa bbq')
+      expect(classification.wasDateExplicit).toBe(true)
+    })
+
+    it('should classify quantity-first product sales questions as productSales', () => {
+      const query = 'cuantas jicamas he vendido este mes'
+      // @ts-expect-error - accessing private method for testing
+      const classification = service.classifyIntent(query)
+
+      expect(classification.isSimpleQuery).toBe(true)
+      expect(classification.intent).toBe('productSales')
+      expect(classification.entityName).toBe('jicamas')
+      expect(classification.dateRange).toBe('thisMonth')
       expect(classification.wasDateExplicit).toBe(true)
     })
 
@@ -750,6 +773,87 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(routed.classification.reason).toContain('deterministic registered intent pre-route')
       expect(routed.tokenUsage.totalTokens).toBe(0)
       expect(serviceWithInternals.openai.chat.completions.create).not.toHaveBeenCalled()
+    })
+
+    it('should pre-route reservation count questions before unsupported LLM routing', async () => {
+      serviceWithInternals.openai.chat.completions.create = jest.fn(async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                isSimple: false,
+                intent: 'unsupported',
+                dateRange: null,
+                wasDateExplicit: false,
+                confidence: 0.6,
+                reason: 'no registered tool',
+              }),
+            },
+          },
+        ],
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 20,
+          total_tokens: 120,
+        },
+      }))
+
+      const routed = await serviceWithInternals.routeWithLLM('cuantas reservaciones tengo')
+
+      expect(routed.classification.isSimpleQuery).toBe(true)
+      expect(routed.classification.intent).toBe('reservationSummary')
+      expect(routed.classification.dateRange).toBe('today')
+      expect(routed.classification.reason).toContain('deterministic registered intent pre-route')
+      expect(routed.tokenUsage.totalTokens).toBe(0)
+      expect(serviceWithInternals.openai.chat.completions.create).not.toHaveBeenCalled()
+    })
+
+    it('should prefer deterministic productSales over generic LLM sales routing', async () => {
+      serviceWithInternals.openai.chat.completions.create = jest.fn(async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                isSimple: true,
+                intent: 'sales',
+                dateRange: 'thisMonth',
+                wasDateExplicit: true,
+                confidence: 0.92,
+                reason: 'mentions vendido este mes',
+              }),
+            },
+          },
+        ],
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 20,
+          total_tokens: 120,
+        },
+      }))
+
+      const routed = await serviceWithInternals.routeWithLLM('cuantas jicamas he vendido este mes')
+
+      expect(routed.classification.isSimpleQuery).toBe(true)
+      expect(routed.classification.intent).toBe('productSales')
+      expect(routed.classification.entityName).toBe('jicamas')
+      expect(routed.classification.dateRange).toBe('thisMonth')
+      expect(routed.classification.reason).toContain('deterministic')
+    })
+
+    it('should route product-name follow-ups from recent sales context to productSales', async () => {
+      const routed = await serviceWithInternals.routeWithLLM('y los productos jicamas?', [
+        { role: 'user', content: 'cuantas jicamas he vendido este mes' },
+        {
+          role: 'assistant',
+          content: 'En los últimos 30 días vendiste $143,222.50 en total.',
+        },
+      ])
+
+      expect(routed.classification.isSimpleQuery).toBe(true)
+      expect(routed.classification.intent).toBe('productSales')
+      expect(routed.classification.entityName).toBe('jicamas')
+      expect(routed.classification.dateRange).toBe('thisMonth')
+      expect(routed.tokenUsage.totalTokens).toBe(0)
     })
 
     it('should recover English review requests when LLM returns unsupported', async () => {
@@ -1049,6 +1153,65 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
         serviceWithInternals.executeSafeQuery = originalExecuteSafeQuery
         serviceWithInternals.learningService.recordChatInteraction = originalRecordChatInteraction
         compareProductSalesSpy.mockRestore()
+        semanticDetectSpy.mockRestore()
+      }
+    })
+
+    it('should answer reservation count questions with the registered reservation summary tool', async () => {
+      const serviceWithInternals = service as any
+      const originalRouteWithLLM = serviceWithInternals.routeWithLLM
+      const originalRecordChatInteraction = serviceWithInternals.learningService.recordChatInteraction
+      const semanticDetectSpy = jest.spyOn(SemanticInjectionDetectorService, 'detect').mockResolvedValue({
+        isInjection: false,
+        confidence: 0,
+        reason: 'safe reservation question',
+        category: 'SAFE',
+        detectedLanguage: 'es',
+        latencyMs: 0,
+        fromCache: false,
+      })
+      const reservationSummarySpy = jest.spyOn(SharedQueryService, 'getReservationSummary').mockResolvedValue({
+        total: 3,
+        byStatus: { CONFIRMED: 2, PENDING: 1 },
+        byChannel: { WEB: 3 },
+        noShowRate: 0,
+        period: 'today',
+        dateRange: {
+          from: new Date('2026-05-13T00:00:00.000Z'),
+          to: new Date('2026-05-14T00:00:00.000Z'),
+        },
+      })
+
+      serviceWithInternals.routeWithLLM = jest.fn(async () => ({
+        classification: {
+          isSimpleQuery: true,
+          intent: 'reservationSummary',
+          dateRange: 'today',
+          confidence: 0.95,
+          reason: 'registered reservation summary test route',
+          requiresDateRange: true,
+          wasDateExplicit: false,
+        },
+        tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      }))
+      serviceWithInternals.learningService.recordChatInteraction = jest.fn(async () => 'training-id')
+
+      try {
+        const response = await service.processQuery({
+          message: 'cuantas reservaciones tengo',
+          venueId: 'venue-test',
+          userId: 'user-test',
+          userRole: 'ADMIN' as any,
+        })
+
+        expect(reservationSummarySpy).toHaveBeenCalledWith('venue-test', 'today')
+        expect(response.metadata?.intent).toBe('reservationSummary')
+        expect(response.response).toContain('tienes 3 reservaciones')
+        expect(response.response).not.toContain('Todavía no tengo una herramienta registrada')
+      } finally {
+        serviceWithInternals.routeWithLLM = originalRouteWithLLM
+        serviceWithInternals.learningService.recordChatInteraction = originalRecordChatInteraction
+        reservationSummarySpy.mockRestore()
         semanticDetectSpy.mockRestore()
       }
     })
