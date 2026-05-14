@@ -92,7 +92,7 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
 // ------------------------------------------------------------
 interface LabsContact {
   name: string
-  email: string
+  email?: string
   whatsapp?: string
 }
 
@@ -127,7 +127,13 @@ function validateLabsPayload(p: any): p is LabsSubmitPayload {
   if (typeof f.urgency !== 'string') return false
   const c = f.contact
   if (!c || typeof c.name !== 'string' || !c.name.trim()) return false
-  if (typeof c.email !== 'string' || !EMAIL_RE.test(c.email)) return false
+  // Need at least one reachable channel: a valid email OR a non-empty whatsapp.
+  const hasEmail = typeof c.email === 'string' && EMAIL_RE.test(c.email)
+  const hasWhatsapp = typeof c.whatsapp === 'string' && c.whatsapp.trim().length > 0
+  if (!hasEmail && !hasWhatsapp) return false
+  // If email is present but invalid (truthy non-empty string that doesn't match), reject.
+  // Empty / undefined email is fine as long as whatsapp is present.
+  if (typeof c.email === 'string' && c.email.trim().length > 0 && !EMAIL_RE.test(c.email)) return false
   if (!Array.isArray(p.transcript)) return false
   return true
 }
@@ -167,7 +173,7 @@ function renderLabsBriefHtml(payload: LabsSubmitPayload): string {
   </p>
   <h2>Contacto</h2>
   <div class="field"><div class="label">Nombre</div><div class="value">${escapeHtml(f.contact.name)}</div></div>
-  <div class="field"><div class="label">Email</div><div class="value"><a href="mailto:${escapeHtml(f.contact.email)}">${escapeHtml(f.contact.email)}</a></div></div>
+  ${f.contact.email ? `<div class="field"><div class="label">Email</div><div class="value"><a href="mailto:${escapeHtml(f.contact.email)}">${escapeHtml(f.contact.email)}</a></div></div>` : ''}
   ${f.contact.whatsapp ? `<div class="field"><div class="label">WhatsApp</div><div class="value">${escapeHtml(f.contact.whatsapp)}</div></div>` : ''}
   <h2>Proyecto</h2>
   <div class="field"><div class="label">Tipo</div><div class="value">${projectTypeLabel}</div></div>
@@ -223,23 +229,27 @@ export async function submitLabsBrief(req: Request, res: Response, next: NextFun
       })
     }
 
-    // Confirmation to the lead — non-blocking quality
-    const confirmSent = await emailService.sendEmail({
-      to: payload.fields.contact.email,
-      subject: 'Recibimos tu brief — Avoqado Labs',
-      html: `
-        <h2>Hola ${escapeHtml(payload.fields.contact.name)},</h2>
-        <p>Recibimos tu brief para Avoqado Labs. Jose lo revisa personalmente y te confirma timeline y costo en menos de 24 horas.</p>
-        <p>Mientras tanto, si quieres agregar algo, responde a este correo.</p>
-        <p style="color:#888;font-size:13px;">— El equipo de Avoqado Labs</p>
-      `,
-    })
-
-    if (!confirmSent) {
-      logger.warn('[LABS_SUBMIT] Confirmation email failed (brief delivered)', {
-        sessionId: payload.sessionId,
-        email: payload.fields.contact.email,
+    // Confirmation to the lead — non-blocking quality.
+    // Only sent if the lead provided an email. Whatsapp-only leads will be
+    // contacted by Jose directly (no automated outbound on WA from this flow).
+    if (payload.fields.contact.email) {
+      const confirmSent = await emailService.sendEmail({
+        to: payload.fields.contact.email,
+        subject: 'Recibimos tu brief — Avoqado Labs',
+        html: `
+          <h2>Hola ${escapeHtml(payload.fields.contact.name)},</h2>
+          <p>Recibimos tu brief para Avoqado Labs. Jose lo revisa personalmente y te confirma timeline y costo en menos de 24 horas.</p>
+          <p>Mientras tanto, si quieres agregar algo, responde a este correo.</p>
+          <p style="color:#888;font-size:13px;">— El equipo de Avoqado Labs</p>
+        `,
       })
+
+      if (!confirmSent) {
+        logger.warn('[LABS_SUBMIT] Confirmation email failed (brief delivered)', {
+          sessionId: payload.sessionId,
+          email: payload.fields.contact.email,
+        })
+      }
     }
 
     return res.status(200).json({ success: true, message: 'Brief enviado' })
