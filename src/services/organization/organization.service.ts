@@ -73,6 +73,9 @@ export interface OrganizationTeamMember {
   lastName: string
   email: string
   phone: string | null
+  // Free-text identifier the org sets per staff (used by white-label orgs like
+  // PlayTelecom that assign internal employee numbers). Null when unset.
+  employeeCode: string | null
   venues: Array<{
     venueId: string
     venueName: string
@@ -1082,6 +1085,7 @@ export async function getOrganizationTeam(orgId: string): Promise<OrganizationTe
       lastName: true,
       email: true,
       phone: true,
+      employeeCode: true,
       createdAt: true,
       venues: {
         select: {
@@ -1105,6 +1109,7 @@ export async function getOrganizationTeam(orgId: string): Promise<OrganizationTe
     lastName: member.lastName,
     email: member.email,
     phone: member.phone,
+    employeeCode: member.employeeCode,
     createdAt: member.createdAt,
     venues: member.venues.map(v => ({
       venueId: v.venueId,

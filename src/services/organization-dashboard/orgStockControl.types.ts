@@ -16,13 +16,20 @@ export interface OrgStockOverviewItem {
   currentVenueName: string | null
   createdById: string | null
   createdByName: string | null
+  createdByEmployeeCode: string | null
   // Chain-of-custody (plan §2.2). Populated by the custody service + shown as
   // new columns in the Detalle SIMs table.
   custodyState: SerializedItemCustodyState
   assignedSupervisorId: string | null
   assignedSupervisorName: string | null
+  // Free-text org-internal identifier (used by white-label orgs like
+  // PlayTelecom that assign employee numbers to supervisors/promoters).
+  // Always populated when the staff member has it set, regardless of org
+  // type — the dashboard decides whether to surface the column.
+  assignedSupervisorEmployeeCode: string | null
   assignedPromoterId: string | null
   assignedPromoterName: string | null
+  assignedPromoterEmployeeCode: string | null
   promoterAcceptedAt: string | null
   promoterRejectedAt: string | null
 }
@@ -37,6 +44,7 @@ export interface OrgStockBulkGroup {
   registeredFromVenueName: string | null
   createdById: string | null
   createdByName: string | null
+  createdByEmployeeCode: string | null
   itemCount: number
   serialNumberFirst: string
   serialNumberLast: string

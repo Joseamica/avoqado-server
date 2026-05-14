@@ -42,8 +42,10 @@ export class OrgStockControlService {
         registeredFromVenue: { select: { id: true, name: true } },
         // Chain-of-custody relations (plan §2.2) — powers the Supervisor /
         // Promoter columns in the Detalle SIMs table without extra queries.
-        assignedSupervisor: { select: { id: true, firstName: true, lastName: true } },
-        assignedPromoter: { select: { id: true, firstName: true, lastName: true } },
+        // `employeeCode` surfaces org-internal IDs (white-label orgs like
+        // PlayTelecom assign these to their supervisors and promoters).
+        assignedSupervisor: { select: { id: true, firstName: true, lastName: true, employeeCode: true } },
+        assignedPromoter: { select: { id: true, firstName: true, lastName: true, employeeCode: true } },
       },
       orderBy: { createdAt: 'desc' },
     })
@@ -53,7 +55,7 @@ export class OrgStockControlService {
    * Groups items into bulk upload events using a 2-minute window + same creator + category + origin venue.
    * Mirrors the logic in stockDashboard.service.getRecentMovements but adapted for org-level items.
    */
-  groupByBulkUpload(items: any[], staffMap?: Map<string, string>): OrgStockBulkGroup[] {
+  groupByBulkUpload(items: any[], staffMap?: Map<string, string>, employeeCodeMap?: Map<string, string | null>): OrgStockBulkGroup[] {
     const groups = new Map<string, any[]>()
 
     for (const item of items) {
@@ -80,6 +82,7 @@ export class OrgStockControlService {
         registeredFromVenueName: first.registeredFromVenue?.name ?? null,
         createdById: first.createdBy ?? null,
         createdByName: first.createdBy && staffMap ? (staffMap.get(first.createdBy) ?? null) : null,
+        createdByEmployeeCode: first.createdBy && employeeCodeMap ? (employeeCodeMap.get(first.createdBy) ?? null) : null,
         itemCount: group.length,
         serialNumberFirst: sortedSerials[0] ?? '',
         serialNumberLast: sortedSerials[sortedSerials.length - 1] ?? '',
@@ -248,22 +251,31 @@ export class OrgStockControlService {
   async getOrgOverview(orgId: string, options: OrgStockOverviewOptions): Promise<OrgStockOverview> {
     const items = await this.fetchSerializedItems(orgId, options)
 
-    // Resolve staff names in a batch
+    // Resolve staff names + employeeCodes in a batch (just for createdBy —
+    // supervisor/promoter come back via Prisma `include`).
     const staffIds = Array.from(new Set(items.map(i => i.createdBy).filter(Boolean))) as string[]
     const staffMap = new Map<string, string>()
+    const employeeCodeMap = new Map<string, string | null>()
     if (staffIds.length > 0) {
       const staff = await prisma.staff.findMany({
         where: { id: { in: staffIds } },
-        select: { id: true, firstName: true, lastName: true },
+        select: { id: true, firstName: true, lastName: true, employeeCode: true },
       })
       for (const s of staff) {
         staffMap.set(s.id, `${s.firstName ?? ''} ${s.lastName ?? ''}`.trim())
+        employeeCodeMap.set(s.id, s.employeeCode ?? null)
       }
     }
 
     const serializedItems: OrgStockOverviewItem[] = items.map(item => {
-      const supervisor = (item as any).assignedSupervisor as { id: string; firstName: string; lastName: string } | null | undefined
-      const promoter = (item as any).assignedPromoter as { id: string; firstName: string; lastName: string } | null | undefined
+      const supervisor = (item as any).assignedSupervisor as
+        | { id: string; firstName: string; lastName: string; employeeCode: string | null }
+        | null
+        | undefined
+      const promoter = (item as any).assignedPromoter as
+        | { id: string; firstName: string; lastName: string; employeeCode: string | null }
+        | null
+        | undefined
       return {
         id: item.id,
         serialNumber: item.serialNumber,
@@ -280,18 +292,21 @@ export class OrgStockControlService {
         currentVenueName: item.venue?.name ?? null,
         createdById: item.createdBy ?? null,
         createdByName: item.createdBy ? (staffMap.get(item.createdBy) ?? null) : null,
+        createdByEmployeeCode: item.createdBy ? (employeeCodeMap.get(item.createdBy) ?? null) : null,
         // Chain-of-custody fields (new)
         custodyState: item.custodyState,
         assignedSupervisorId: item.assignedSupervisorId ?? null,
         assignedSupervisorName: supervisor ? `${supervisor.firstName} ${supervisor.lastName}`.trim() : null,
+        assignedSupervisorEmployeeCode: supervisor?.employeeCode ?? null,
         assignedPromoterId: item.assignedPromoterId ?? null,
         assignedPromoterName: promoter ? `${promoter.firstName} ${promoter.lastName}`.trim() : null,
+        assignedPromoterEmployeeCode: promoter?.employeeCode ?? null,
         promoterAcceptedAt: item.promoterAcceptedAt?.toISOString() ?? null,
         promoterRejectedAt: item.promoterRejectedAt?.toISOString() ?? null,
       }
     })
 
-    const bulkGroups = this.groupByBulkUpload(items, staffMap)
+    const bulkGroups = this.groupByBulkUpload(items, staffMap, employeeCodeMap)
     const aggregatesBySucursal = this.aggregateBySucursal(items)
     const aggregatesByCategoria = this.aggregateByCategoria(items)
     const summary = this.computeSummary(items, bulkGroups, options)

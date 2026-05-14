@@ -42,6 +42,7 @@ export class OrgStockControlExportService {
       { wch: 24 },
       { wch: 24 },
       { wch: 22 },
+      { wch: 14 }, // ID Registrante
       { wch: 12 },
       { wch: 10 },
       { wch: 22 },
@@ -50,16 +51,22 @@ export class OrgStockControlExportService {
 
     const wsDetalle = this.buildDetalleSheet(data)
     wsDetalle['!cols'] = [
-      { wch: 5 },
-      { wch: 24 },
-      { wch: 22 },
-      { wch: 12 },
-      { wch: 12 },
-      { wch: 38 },
-      { wch: 22 },
-      { wch: 22 },
-      { wch: 12 },
-      { wch: 25 },
+      { wch: 5 }, // #
+      { wch: 24 }, // ICCID
+      { wch: 22 }, // Categoría
+      { wch: 12 }, // Estado
+      { wch: 18 }, // Custodia
+      { wch: 12 }, // Fecha Carga
+      { wch: 38 }, // Sucursal Receptora
+      { wch: 22 }, // Sucursal Actual
+      { wch: 22 }, // Sucursal Venta
+      { wch: 12 }, // Fecha Venta
+      { wch: 25 }, // Registrado Por
+      { wch: 14 }, // ID Registrante
+      { wch: 22 }, // Supervisor
+      { wch: 14 }, // ID Supervisor
+      { wch: 22 }, // Promotor
+      { wch: 14 }, // ID Promotor
     ]
     XLSX.utils.book_append_sheet(wb, wsDetalle, 'Detalle SIMs')
 
@@ -113,6 +120,8 @@ export class OrgStockControlExportService {
       'ICCID Primero': g.serialNumberFirst,
       'ICCID Último': g.serialNumberLast,
       'Registrado Por': g.createdByName ?? '—',
+      // White-label orgs use this; blank for everyone else.
+      'ID Registrante': g.createdByEmployeeCode ?? '',
       Disponibles: g.availableCount,
       Vendidos: g.soldCount,
       Estado: g.soldCount > 0 ? 'Parcialmente vendido' : 'Todo disponible',
@@ -126,12 +135,18 @@ export class OrgStockControlExportService {
       ICCID: item.serialNumber,
       Categoría: item.categoryName,
       Estado: item.status,
+      Custodia: item.custodyState,
       'Fecha Carga': fmtDate(item.createdAt),
       'Sucursal Receptora': item.registeredFromVenueName ?? '—',
       'Sucursal Actual': item.currentVenueName ?? 'Stock Org',
       'Sucursal Venta': item.sellingVenueName ?? '',
       'Fecha Venta': fmtDate(item.soldAt),
       'Registrado Por': item.createdByName ?? '—',
+      'ID Registrante': item.createdByEmployeeCode ?? '',
+      Supervisor: item.assignedSupervisorName ?? '',
+      'ID Supervisor': item.assignedSupervisorEmployeeCode ?? '',
+      Promotor: item.assignedPromoterName ?? '',
+      'ID Promotor': item.assignedPromoterEmployeeCode ?? '',
     }))
     return XLSX.utils.json_to_sheet(rows)
   }

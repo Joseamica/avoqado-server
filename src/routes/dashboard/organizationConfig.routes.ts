@@ -373,6 +373,7 @@ router.get('/promoters', orgStaffAccess, async (req: Request, res: Response, nex
         lastName: true,
         email: true,
         phone: true,
+        employeeCode: true,
         venues: {
           where: {
             venue: { organizationId: orgId },
@@ -395,6 +396,7 @@ router.get('/promoters', orgStaffAccess, async (req: Request, res: Response, nex
       lastName: s.lastName,
       email: s.email,
       phone: s.phone,
+      employeeCode: s.employeeCode,
       venues: s.venues.map(v => ({
         venueId: v.venueId,
         venueName: v.venue.name,
@@ -445,6 +447,9 @@ router.get('/team', orgOwnerAccess, async (req: Request, res: Response, next: Ne
       email: so.staff.email,
       phone: so.staff.phone,
       photoUrl: so.staff.photoUrl,
+      // Free-text identifier the org sets per staff (used by white-label orgs
+      // like PlayTelecom that assign internal employee numbers). Null when unset.
+      employeeCode: so.staff.employeeCode,
       status: 'ACTIVE',
       orgRole: so.role,
       venues: so.staff.venues.map((v: any) => ({
@@ -775,6 +780,57 @@ router.patch('/team/:staffId/pin', orgOwnerAccess, async (req: Request, res: Res
     })
 
     res.json({ success: true, data: { message: 'PIN updated across all venues' } })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * PATCH /dashboard/organizations/:orgId/team/:staffId/employee-code
+ * Set/clear the free-text employee code for a staff member.
+ *
+ * Used by white-label orgs (e.g. PlayTelecom) that assign internal IDs to
+ * promoters and supervisors. The field is org-agnostic on the Staff model
+ * (single column), so a staff member who belongs to multiple orgs would
+ * share one code — fine for current usage where these staff are exclusive
+ * to one org.
+ *
+ * Body: { employeeCode: string | null } — null/empty clears the code.
+ */
+router.patch('/team/:staffId/employee-code', orgOwnerAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { orgId, staffId } = req.params
+    const { employeeCode } = req.body as { employeeCode: string | null | undefined }
+    const authContext = (req as any).authContext
+
+    // Verify staff belongs to org (tenant isolation)
+    const staffOrg = await prisma.staffOrganization.findFirst({
+      where: { staffId, organizationId: orgId },
+    })
+    if (!staffOrg) {
+      return res.status(404).json({ success: false, error: 'not_found', message: 'Staff not found in this organization' })
+    }
+
+    // Normalize: trim and treat empty string as null. No format/length
+    // enforcement at the API layer — the schema column is freeform String?.
+    const normalized = typeof employeeCode === 'string' ? employeeCode.trim() : null
+    const value = normalized && normalized.length > 0 ? normalized : null
+
+    await prisma.staff.update({
+      where: { id: staffId },
+      data: { employeeCode: value },
+    })
+
+    logAction({
+      staffId: authContext?.userId || null,
+      venueId: null,
+      action: 'EMPLOYEE_CODE_UPDATED',
+      entity: 'Staff',
+      entityId: staffId,
+      data: { orgId, employeeCode: value },
+    })
+
+    res.json({ success: true, data: { employeeCode: value } })
   } catch (error) {
     next(error)
   }

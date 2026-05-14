@@ -152,6 +152,11 @@ export interface ActivityEvent {
   venueName: string
   staffId?: string
   staffName?: string
+  // Org-internal identifier (white-label orgs). Populated when the staff
+  // member has a code set; left blank otherwise. Surfaced beside the name in
+  // the dashboard and in CSV/Excel exports so Walmart-style audits can map
+  // sales/check-ins to the org's own ID system.
+  staffEmployeeCode?: string | null
   metadata?: Record<string, any>
 }
 
@@ -1284,7 +1289,7 @@ class OrganizationDashboardService {
       },
       include: {
         venue: { select: { id: true, name: true } },
-        servedBy: { select: { id: true, firstName: true, lastName: true } },
+        servedBy: { select: { id: true, firstName: true, lastName: true, employeeCode: true } },
         items: {
           take: 1,
           include: {
@@ -1327,6 +1332,7 @@ class OrganizationDashboardService {
         venueName: order.venue.name,
         staffId: order.servedById || undefined,
         staffName: order.servedBy ? `${order.servedBy.firstName} ${order.servedBy.lastName}` : undefined,
+        staffEmployeeCode: order.servedBy?.employeeCode ?? null,
         metadata: {
           orderId: order.id,
           total: order.total ? Number(order.total) : 0,
@@ -1349,7 +1355,7 @@ class OrganizationDashboardService {
       },
       include: {
         venue: { select: { id: true, name: true } },
-        staff: { select: { id: true, firstName: true, lastName: true } },
+        staff: { select: { id: true, firstName: true, lastName: true, employeeCode: true } },
       },
       orderBy: { clockInTime: 'desc' },
       take: limit, // Fetch up to full limit for time entries
@@ -1368,6 +1374,7 @@ class OrganizationDashboardService {
         venueName: entry.venue.name,
         staffId: entry.staffId,
         staffName: `${entry.staff.firstName} ${entry.staff.lastName}`,
+        staffEmployeeCode: entry.staff.employeeCode ?? null,
         metadata: {
           timeEntryId: entry.id,
           role: entry.jobRole,
@@ -1387,6 +1394,7 @@ class OrganizationDashboardService {
           venueName: entry.venue.name,
           staffId: entry.staffId,
           staffName: `${entry.staff.firstName} ${entry.staff.lastName}`,
+          staffEmployeeCode: entry.staff.employeeCode ?? null,
           metadata: {
             timeEntryId: entry.id,
             role: entry.jobRole,
@@ -2032,6 +2040,8 @@ class OrganizationDashboardService {
       id: string
       name: string
       email: string
+      // White-label org internal ID (e.g. PlayTelecom employee number).
+      employeeCode: string | null
       avatar?: string | null
       venueId: string
       venueName: string
@@ -2089,6 +2099,7 @@ class OrganizationDashboardService {
             lastName: true,
             email: true,
             photoUrl: true,
+            employeeCode: true,
           },
         },
         venue: { select: { name: true, timezone: true } },
@@ -2298,6 +2309,7 @@ class OrganizationDashboardService {
         validationStatus: mostRecentEntry?.validationStatus || 'PENDING',
         name: fullName,
         email: sv.staff.email,
+        employeeCode: sv.staff.employeeCode ?? null,
         avatar: sv.staff.photoUrl,
         venueId: sv.venueId,
         venueName: sv.venue.name,
@@ -2918,7 +2930,7 @@ class OrganizationDashboardService {
         staffId: true,
         venueId: true,
         role: true,
-        staff: { select: { firstName: true, lastName: true } },
+        staff: { select: { firstName: true, lastName: true, employeeCode: true } },
         venue: { select: { name: true, state: true, timezone: true } },
       },
     })
@@ -2947,6 +2959,7 @@ class OrganizationDashboardService {
     const mapped = staffVenues.map(sv => ({
       staffId: sv.staffId,
       staffName: `${sv.staff.firstName} ${sv.staff.lastName}`,
+      staffEmployeeCode: sv.staff.employeeCode ?? null,
       venueId: sv.venueId,
       venueName: sv.venue.name,
       venueState: sv.venue.state || '',
@@ -3069,6 +3082,7 @@ class OrganizationDashboardService {
       return {
         staffId: sv.staffId,
         staffName: sv.staffName,
+        staffEmployeeCode: sv.staffEmployeeCode,
         venueId: sv.venueId,
         venueName: sv.venueName,
         venueState: sv.venueState,
@@ -3176,6 +3190,7 @@ class OrganizationDashboardService {
       return {
         staffId: sv.staffId,
         staffName: sv.staffName,
+        staffEmployeeCode: sv.staffEmployeeCode,
         venueId: sv.venueId,
         venueName: sv.venueName,
         venueState: sv.venueState,
