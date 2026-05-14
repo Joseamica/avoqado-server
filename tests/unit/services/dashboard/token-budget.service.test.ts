@@ -404,17 +404,13 @@ describe('TokenBudgetService', () => {
     })
 
     it('skips when budget has no overage', async () => {
-      prismaMock.chatbotTokenBudget.findUnique.mockResolvedValue(
-        createMockBudget({ overageTokensUsed: 0 }) as any,
-      )
+      prismaMock.chatbotTokenBudget.findUnique.mockResolvedValue(createMockBudget({ overageTokensUsed: 0 }) as any)
       const result = await tokenBudgetService.chargeOverage('venue-123')
       expect(result).toMatchObject({ skipped: 'no_overage' })
     })
 
     it('skips when venue has no Stripe payment method', async () => {
-      prismaMock.chatbotTokenBudget.findUnique.mockResolvedValue(
-        createMockBudget({ overageTokensUsed: 50000 }) as any,
-      )
+      prismaMock.chatbotTokenBudget.findUnique.mockResolvedValue(createMockBudget({ overageTokensUsed: 50000 }) as any)
       prismaMock.venue.findUnique.mockResolvedValue({
         stripeCustomerId: null,
         stripePaymentMethodId: null,
@@ -426,9 +422,7 @@ describe('TokenBudgetService', () => {
 
     it('skips when overage amount is below Stripe minimum ($0.50)', async () => {
       // 1000 tokens × $0.03/1k = $0.03 → below the $0.50 floor
-      prismaMock.chatbotTokenBudget.findUnique.mockResolvedValue(
-        createMockBudget({ overageTokensUsed: 1000 }) as any,
-      )
+      prismaMock.chatbotTokenBudget.findUnique.mockResolvedValue(createMockBudget({ overageTokensUsed: 1000 }) as any)
       prismaMock.venue.findUnique.mockResolvedValue({
         stripeCustomerId: 'cus_x',
         stripePaymentMethodId: 'pm_x',
@@ -440,9 +434,7 @@ describe('TokenBudgetService', () => {
     })
 
     it('charges overage via Stripe and records purchase + zeroes overage', async () => {
-      prismaMock.chatbotTokenBudget.findUnique.mockResolvedValue(
-        createMockBudget({ overageTokensUsed: 50000 }) as any,
-      )
+      prismaMock.chatbotTokenBudget.findUnique.mockResolvedValue(createMockBudget({ overageTokensUsed: 50000 }) as any)
       prismaMock.venue.findUnique.mockResolvedValue({
         stripeCustomerId: 'cus_abc',
         stripePaymentMethodId: 'pm_abc',
@@ -481,9 +473,7 @@ describe('TokenBudgetService', () => {
 
     // Regression: ensure we don't reset overage when Stripe throws
     it('regression: keeps overage intact when Stripe charge fails', async () => {
-      prismaMock.chatbotTokenBudget.findUnique.mockResolvedValue(
-        createMockBudget({ overageTokensUsed: 50000 }) as any,
-      )
+      prismaMock.chatbotTokenBudget.findUnique.mockResolvedValue(createMockBudget({ overageTokensUsed: 50000 }) as any)
       prismaMock.venue.findUnique.mockResolvedValue({
         stripeCustomerId: 'cus_abc',
         stripePaymentMethodId: 'pm_abc',

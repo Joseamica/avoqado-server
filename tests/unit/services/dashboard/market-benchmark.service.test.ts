@@ -57,7 +57,9 @@ const placesOk = {
   }),
 }
 
-const openAiOk = (overrides: Partial<{ medianEstimate: number; rangeLow: number; rangeHigh: number; confidence: string; reasoning: string }> = {}) => ({
+const openAiOk = (
+  overrides: Partial<{ medianEstimate: number; rangeLow: number; rangeHigh: number; confidence: string; reasoning: string }> = {},
+) => ({
   choices: [
     {
       message: {
@@ -100,9 +102,7 @@ describe('getMarketBenchmark', () => {
   })
 
   it('uses Product.cost for quantity products (no recipe)', async () => {
-    prismaMock.product.findFirst.mockResolvedValue(
-      baseProduct({ recipe: null, cost: new Decimal(68) }) as any,
-    )
+    prismaMock.product.findFirst.mockResolvedValue(baseProduct({ recipe: null, cost: new Decimal(68) }) as any)
     fetchMock.mockResolvedValueOnce(placesOk)
     mockChatCompletionsCreate.mockResolvedValueOnce(openAiOk({ medianEstimate: 90 }))
 
@@ -161,9 +161,7 @@ describe('getMarketBenchmark', () => {
   })
 
   it('handles OpenAI returning low confidence + null median for unique products', async () => {
-    prismaMock.product.findFirst.mockResolvedValue(
-      baseProduct({ name: 'Doradita Keto Cacao' }) as any,
-    )
+    prismaMock.product.findFirst.mockResolvedValue(baseProduct({ name: 'Doradita Keto Cacao' }) as any)
     fetchMock.mockResolvedValueOnce(placesOk)
     mockChatCompletionsCreate.mockResolvedValueOnce(
       openAiOk({ medianEstimate: null as any, confidence: 'low', reasoning: 'Producto único, sin comparables' }),

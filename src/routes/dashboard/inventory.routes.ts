@@ -451,11 +451,7 @@ router.get('/profitability', checkPermission('inventory:read'), pricingControlle
  *     tags: [Inventory - Pricing]
  *     summary: AI-assisted price benchmark vs. competitors near the venue (advisory only)
  */
-router.get(
-  '/products/:productId/market-benchmark',
-  checkPermission('inventory:read'),
-  pricingController.getMarketBenchmarkForProduct,
-)
+router.get('/products/:productId/market-benchmark', checkPermission('inventory:read'), pricingController.getMarketBenchmarkForProduct)
 
 /**
  * @openapi
@@ -464,11 +460,7 @@ router.get(
  *     tags: [Inventory - Pricing]
  *     summary: Bulk AI price benchmark — consumes from the venue's chatbot token budget
  */
-router.post(
-  '/market-benchmark/bulk',
-  checkPermission('inventory:read'),
-  pricingController.getBulkMarketBenchmark,
-)
+router.post('/market-benchmark/bulk', checkPermission('inventory:read'), pricingController.getBulkMarketBenchmark)
 
 // ===========================================
 // SUPPLIERS ROUTES

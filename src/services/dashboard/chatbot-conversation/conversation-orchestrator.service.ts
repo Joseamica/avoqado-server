@@ -335,11 +335,10 @@ export class ConversationOrchestratorService {
       case 'topProducts': {
         const products = await SharedQueryService.getTopProducts(venueId, dateRange, this.limit(step, 5))
         const list = products
-          .map(
-            (product, index) =>
-              language === 'en'
-                ? `${index + 1}. ${product.productName} (${product.quantitySold} sold, ${this.money(product.revenue, 'MXN', language)})`
-                : `${index + 1}. ${product.productName} (${product.quantitySold} vendidos, ${this.money(product.revenue)})`,
+          .map((product, index) =>
+            language === 'en'
+              ? `${index + 1}. ${product.productName} (${product.quantitySold} sold, ${this.money(product.revenue, 'MXN', language)})`
+              : `${index + 1}. ${product.productName} (${product.quantitySold} vendidos, ${this.money(product.revenue)})`,
           )
           .join('\n')
         return this.queryResult(

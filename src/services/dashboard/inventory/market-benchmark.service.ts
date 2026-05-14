@@ -155,9 +155,7 @@ function buildPrompt(opts: {
   currentCost: number | null
 }): string {
   const compList = opts.nearby.length
-    ? opts.nearby
-        .map((v, i) => `${i + 1}. ${v.name}${v.rating ? ` (${v.rating}★ · ${v.userRatingsTotal ?? 0} reseñas)` : ''}`)
-        .join('\n')
+    ? opts.nearby.map((v, i) => `${i + 1}. ${v.name}${v.rating ? ` (${v.rating}★ · ${v.userRatingsTotal ?? 0} reseñas)` : ''}`).join('\n')
     : '(no se encontraron lugares cercanos)'
 
   return `Eres un analista de precios para restaurantes en ${opts.city ?? 'México'}.
@@ -283,10 +281,7 @@ export async function getMarketBenchmark(
 
   if (lat === null || lng === null) {
     if (!product.venue.address) {
-      throw new AppError(
-        'No se puede analizar el mercado: el venue no tiene coordenadas ni dirección configurada.',
-        422,
-      )
+      throw new AppError('No se puede analizar el mercado: el venue no tiene coordenadas ni dirección configurada.', 422)
     }
     const geocoded = await geocode(product.venue.address)
     if (!geocoded) {

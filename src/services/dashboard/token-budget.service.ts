@@ -717,7 +717,9 @@ class TokenBudgetService {
    * WITHOUT zeroing the overage — we keep tracking so the next attempt (or
    * manual purchase) can settle the bill.
    */
-  async chargeOverage(venueId: string): Promise<
+  async chargeOverage(
+    venueId: string,
+  ): Promise<
     | { skipped: 'no_overage' | 'no_payment_method' | 'no_stripe'; venueId: string }
     | { charged: true; venueId: string; tokenAmount: number; amountUSD: number; paymentIntentId: string }
     | { charged: false; venueId: string; error: string }

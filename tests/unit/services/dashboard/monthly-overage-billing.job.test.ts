@@ -80,9 +80,7 @@ describe('MonthlyOverageBillingJob', () => {
   })
 
   it('counts failed venues separately (Stripe declined, etc.)', async () => {
-    prismaMock.chatbotTokenBudget.findMany.mockResolvedValue([
-      { venueId: 'v1', overageTokensUsed: 50000 },
-    ] as any)
+    prismaMock.chatbotTokenBudget.findMany.mockResolvedValue([{ venueId: 'v1', overageTokensUsed: 50000 }] as any)
     mockChargeOverage.mockResolvedValueOnce({
       charged: false,
       venueId: 'v1',

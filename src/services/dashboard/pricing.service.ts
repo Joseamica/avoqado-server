@@ -458,10 +458,7 @@ export async function getProfitability(
       deletedAt: null,
       ...(options?.categoryId && { categoryId: options.categoryId }),
       ...(!options?.includeInactive && { active: true }),
-      OR: [
-        { recipe: { isNot: null } },
-        { inventoryMethod: 'QUANTITY' },
-      ],
+      OR: [{ recipe: { isNot: null } }, { inventoryMethod: 'QUANTITY' }],
     },
     select: {
       id: true,
