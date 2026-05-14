@@ -14,6 +14,11 @@ process.env.SESSION_SECRET = 'test-session-secret'
 process.env.COOKIE_SECRET = 'test-cookie-secret'
 process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test'
 process.env.RABBITMQ_URL = 'amqp://test:test@localhost:5672'
+// Stripe key must be set before any service module imports — TokenBudgetService
+// instantiates its Stripe client in the constructor (singleton), and tests rely
+// on jest.mock('stripe') hooking that constructor. Without this, CI (which has
+// no STRIPE_SECRET_KEY) skips Stripe init and chargeOverage returns 'no_stripe'.
+process.env.STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || 'sk_test_dummy_for_jest'
 
 // Comprehensive Prisma Mock Setup
 const createMockModel = () => ({
