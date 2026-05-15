@@ -69,6 +69,10 @@ describe('ConversationPlannerService', () => {
         expectedSteps: [{ kind: 'query', tool: 'reservations.summary', args: { dateRange: 'today' } }],
       },
       {
+        message: 'cuantas reservaciones tengo',
+        expectedSteps: [{ kind: 'query', tool: 'reservations.summary', args: { dateRange: 'today', includeAllTimeFallback: true } }],
+      },
+      {
         message: 'resumen de clientes',
         expectedSteps: [{ kind: 'query', tool: 'customers.summary', args: {} }],
       },
@@ -210,6 +214,28 @@ describe('ConversationPlannerService', () => {
       }),
     ])
     expect(plan.steps).not.toEqual([expect.objectContaining({ kind: 'query', tool: 'sales' })])
+    expect(openai.chat.completions.create).not.toHaveBeenCalled()
+  })
+
+  it('routes bare product-name replies after product clarification to productSales', async () => {
+    const plan = await planner.plan({
+      message: 'jicamas',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      conversationHistory: [
+        { role: 'user', content: 'productos' },
+        { role: 'assistant', content: 'Claro. ¿Qué quieres revisar de productos?' },
+      ],
+    })
+
+    expect(plan.mode).toBe('single')
+    expect(plan.steps).toEqual([
+      expect.objectContaining({
+        kind: 'query',
+        tool: 'productSales',
+        args: { productName: 'jicamas', dateRange: 'thisMonth' },
+      }),
+    ])
     expect(openai.chat.completions.create).not.toHaveBeenCalled()
   })
 
@@ -387,6 +413,23 @@ describe('ConversationPlannerService', () => {
     expect(summary.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'reservations.summary', args: { dateRange: 'today' } })])
     expect(list.steps).toEqual([
       expect.objectContaining({ kind: 'query', tool: 'reservations.list', args: { dateRange: 'today', limit: 10 } }),
+    ])
+    expect(openai.chat.completions.create).not.toHaveBeenCalled()
+  })
+
+  it('adds an all-time fallback for ambiguous reservation counts without a period', async () => {
+    const plan = await planner.plan({
+      message: 'cuantas reservaciones tengo',
+      venueId: 'venue-1',
+      userId: 'user-1',
+    })
+
+    expect(plan.steps).toEqual([
+      expect.objectContaining({
+        kind: 'query',
+        tool: 'reservations.summary',
+        args: { dateRange: 'today', includeAllTimeFallback: true },
+      }),
     ])
     expect(openai.chat.completions.create).not.toHaveBeenCalled()
   })

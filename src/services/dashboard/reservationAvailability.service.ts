@@ -200,6 +200,20 @@ export async function getAvailableSlots(
       })
     : []
 
+  // External calendar busy blocks (Google Calendar et al.) — merged into the
+  // same busy-intervals data structure the per-slot logic uses below.
+  // Venue-master blocks always apply; staff-personal blocks only apply when
+  // the caller asked for availability scoped to a specific staff member.
+  const externalBlocks = await prisma.externalBusyBlock.findMany({
+    where: {
+      OR: [
+        { venueId, startsAt: { lt: dayEnd }, endsAt: { gt: dayStart } },
+        ...(options.staffId ? [{ staffId: options.staffId, startsAt: { lt: dayEnd }, endsAt: { gt: dayStart } }] : []),
+      ],
+    },
+    select: { startsAt: true, endsAt: true, staffId: true, venueId: true },
+  })
+
   // Tableless studios (Mindform pattern) have NO resource model gating
   // concurrent appointments — the table-collision logic below is a no-op
   // when tables.length === 0, and pacingMax defaults to null. Without this
@@ -219,6 +233,16 @@ export async function getAvailableSlots(
     // Find reservations overlapping this slot
     const overlapping = existingReservations.filter(r => r.startsAt < slotEnd && r.endsAt > slotStart)
     const overlappingHolds = activeHolds.filter(h => h.startsAt < slotEnd && h.endsAt > slotStart)
+
+    // External calendar busy-block check — a single overlap fully blocks the
+    // slot regardless of pacing/capacity (the venue or the requested staff
+    // member is unavailable for the entire window). Staff-personal blocks are
+    // only considered when the caller asked for a specific staff member;
+    // venue-master blocks always apply.
+    const overlappingExternal = externalBlocks.some(b => b.startsAt < slotEnd && b.endsAt > slotStart)
+    if (overlappingExternal) {
+      continue
+    }
 
     // Pacing check: total bookings + active holds in this slot
     if (effectivePacing !== null && overlapping.length + overlappingHolds.length >= effectivePacing) {

@@ -56,6 +56,8 @@ const getSlots = (options: any = {}, config: any = defaultModuleConfig) => getAv
 describe('Reservation Availability Service', () => {
   beforeEach(() => {
     jest.resetAllMocks()
+    // Default: no external busy blocks. Tests opt in by overriding.
+    prismaMock.externalBusyBlock.findMany.mockResolvedValue([])
   })
 
   // ==========================================
@@ -338,6 +340,96 @@ describe('Reservation Availability Service', () => {
       // With 30min interval + 60min duration: 8:00 to 21:30 = 28 slots
       // (Last possible start: 21:00 because 21:30 + 60min = 22:30 > 22:00)
       expect(result.length).toBe(27)
+    })
+
+    // ============================================================
+    // ExternalBusyBlock integration (Phase 1 — Task 27)
+    // ============================================================
+
+    describe('external busy blocks (Google Calendar)', () => {
+      it('excludes slots covered by a venue-master ExternalBusyBlock', async () => {
+        prismaMock.reservation.findMany.mockResolvedValue([])
+        prismaMock.table.findMany.mockResolvedValue([createMockTable()])
+        prismaMock.staff.findMany.mockResolvedValue([createMockStaff()])
+        prismaMock.externalBusyBlock.findMany.mockResolvedValue([
+          {
+            startsAt: new Date('2026-03-03T12:00:00Z'),
+            endsAt: new Date('2026-03-03T13:00:00Z'),
+            staffId: null,
+            venueId: VENUE_ID,
+          },
+        ])
+
+        const result = await getSlots()
+
+        // The 12:00 slot should be excluded — venue-master block is in force
+        const noon = result.find(s => s.startsAt.getUTCHours() === 12)
+        expect(noon).toBeUndefined()
+        // Adjacent and non-overlapping slots are still available
+        const eleven = result.find(s => s.startsAt.getUTCHours() === 11)
+        expect(eleven).toBeDefined()
+        const onePm = result.find(s => s.startsAt.getUTCHours() === 13)
+        expect(onePm).toBeDefined()
+      })
+
+      it('excludes slots when a staff-personal block applies and staffId is requested', async () => {
+        prismaMock.reservation.findMany.mockResolvedValue([])
+        prismaMock.table.findMany.mockResolvedValue([createMockTable()])
+        prismaMock.staff.findMany.mockResolvedValue([createMockStaff({ id: 'staff-1' })])
+        prismaMock.externalBusyBlock.findMany.mockResolvedValue([
+          {
+            startsAt: new Date('2026-03-03T14:00:00Z'),
+            endsAt: new Date('2026-03-03T15:00:00Z'),
+            staffId: 'staff-1',
+            venueId: null,
+          },
+        ])
+
+        const result = await getSlots({ staffId: 'staff-1' })
+
+        // 14:00 slot blocked by the staff-personal external event
+        const twoPm = result.find(s => s.startsAt.getUTCHours() === 14)
+        expect(twoPm).toBeUndefined()
+      })
+
+      it('does not query staff-personal blocks when no staffId is requested', async () => {
+        prismaMock.reservation.findMany.mockResolvedValue([])
+        prismaMock.table.findMany.mockResolvedValue([createMockTable()])
+        prismaMock.staff.findMany.mockResolvedValue([createMockStaff()])
+        prismaMock.externalBusyBlock.findMany.mockResolvedValue([])
+
+        await getSlots()
+
+        const findArg = prismaMock.externalBusyBlock.findMany.mock.calls[0][0]
+        // OR should only contain the venue clause when staffId is not provided
+        expect(findArg.where.OR).toHaveLength(1)
+        expect(findArg.where.OR[0].venueId).toBe(VENUE_ID)
+      })
+
+      it('queries staff-personal blocks when staffId is requested', async () => {
+        prismaMock.reservation.findMany.mockResolvedValue([])
+        prismaMock.table.findMany.mockResolvedValue([createMockTable()])
+        prismaMock.staff.findMany.mockResolvedValue([createMockStaff({ id: 'staff-1' })])
+        prismaMock.externalBusyBlock.findMany.mockResolvedValue([])
+
+        await getSlots({ staffId: 'staff-1' })
+
+        const findArg = prismaMock.externalBusyBlock.findMany.mock.calls[0][0]
+        expect(findArg.where.OR).toHaveLength(2)
+        expect(findArg.where.OR[0].venueId).toBe(VENUE_ID)
+        expect(findArg.where.OR[1].staffId).toBe('staff-1')
+      })
+
+      it('REGRESSION: empty externalBusyBlock list does not affect normal availability', async () => {
+        prismaMock.reservation.findMany.mockResolvedValue([])
+        prismaMock.table.findMany.mockResolvedValue([createMockTable()])
+        prismaMock.staff.findMany.mockResolvedValue([createMockStaff()])
+        prismaMock.externalBusyBlock.findMany.mockResolvedValue([])
+
+        const result = await getSlots()
+
+        expect(result.length).toBe(14) // unchanged from the baseline
+      })
     })
   })
 

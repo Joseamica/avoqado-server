@@ -1889,6 +1889,25 @@ Ejemplos de respuestas CORRECTAS:
         return await this.buildOperationalHelpResponse(query, earlyOperationalHelp, startTime, sessionId)
       }
 
+      if (this.isSensitiveTeamCredentialRequest(query.message)) {
+        return {
+          response:
+            'No puedo mostrar emails, PINs, contraseñas ni credenciales del equipo por el chat. Puedo ayudarte con una lista segura del equipo que incluya nombres, roles y estado de acceso.',
+          confidence: 1,
+          suggestions: ['¿Quién está en mi equipo?', 'Busca a Ana en mi equipo', '¿Cómo agrego a alguien a mi equipo?'],
+          metadata: {
+            queryGenerated: false,
+            queryExecuted: false,
+            dataSourcesUsed: [],
+            routedTo: 'Blocked',
+            riskLevel: 'high',
+            reasonCode: 'sensitive_team_credentials_blocked',
+            blocked: true,
+            violationType: SecurityViolationType.PII_ACCESS_ATTEMPT,
+          },
+        }
+      }
+
       // Step 0.1b: Semantic Injection Detection (language-agnostic, runs only when regex didn't block)
       // Uses gpt-4o-mini to classify intent in ANY language. ~$0.0001/call, 3s timeout, fails open.
       // Checks BOTH the message AND conversation history entries for injection attempts.
@@ -1912,8 +1931,9 @@ Ejemplos de respuestas CORRECTAS:
         const isCrudMessage = this.isCrudMutationMessage(query.message)
         const crudMessageHasInjectionSignals = isCrudMessage && this.hasExplicitPromptInjectionSignals(query.message)
         const isActionFieldReply = this.isLikelyActionFieldReply(query.message, query.conversationHistory)
+        const isBusinessFollowUpReply = this.isLikelyBusinessFollowUpReply(query.message, query.conversationHistory)
 
-        const shouldBypassSemanticBlock = this.shouldBypassSemanticInjectionBlock(query.message)
+        const shouldBypassSemanticBlock = this.shouldBypassSemanticInjectionBlock(query.message) || isBusinessFollowUpReply
 
         if (
           semanticCheck.isInjection &&
@@ -1976,7 +1996,7 @@ Ejemplos de respuestas CORRECTAS:
         // An attacker could embed injection in prior conversation entries that go directly to LLM.
         // Only scan the last 5 entries to keep cost bounded.
         const currentMessageIsSafeCrud = (isCrudMessage || isActionFieldReply) && !crudMessageHasInjectionSignals
-        if (!currentMessageIsSafeCrud && query.conversationHistory && query.conversationHistory.length > 0) {
+        if (!currentMessageIsSafeCrud && !isBusinessFollowUpReply && query.conversationHistory && query.conversationHistory.length > 0) {
           const historyToScan = query.conversationHistory.slice(-5)
           const sanitizedHistory = [...query.conversationHistory]
           for (const entry of historyToScan) {
@@ -2362,6 +2382,8 @@ Ejemplos de respuestas CORRECTAS:
           const dateRange = intentClassification.dateRange!
           const responseLanguage = this.detectUserLanguage(query.message)
           const dateName = (range: RelativeDateRange) => this.formatDateRangeName(range, responseLanguage)
+          const datePrefix = (range: RelativeDateRange) => this.formatDateRangeSentencePrefix(range, responseLanguage)
+          const dateAdverbial = (range: RelativeDateRange) => this.formatDateRangeAdverbial(range, responseLanguage)
           const formatMoney = (amount: number, currency: string = 'MXN') =>
             new Intl.NumberFormat(responseLanguage === 'en' ? 'en-US' : 'es-MX', {
               style: 'currency',
@@ -2387,8 +2409,8 @@ Ejemplos de respuestas CORRECTAS:
 
                 naturalResponse =
                   responseLanguage === 'en'
-                    ? `In ${dateName(dateRange)}, you sold ${formattedRevenue}${trend} in total across ${timeSeries.totalOrders} orders. Here is the sales chart ${granularityText}.`
-                    : `En ${dateName(dateRange)} vendiste ${formattedRevenue}${trend} en total, con ${timeSeries.totalOrders} órdenes. Aquí tienes la gráfica de ventas ${granularityText}.`
+                    ? `${datePrefix(dateRange)}, you sold ${formattedRevenue}${trend} in total across ${timeSeries.totalOrders} orders. Here is the sales chart ${granularityText}.`
+                    : `${datePrefix(dateRange)} vendiste ${formattedRevenue}${trend} en total, con ${timeSeries.totalOrders} órdenes. Aquí tienes la gráfica de ventas ${granularityText}.`
                 serviceResult = timeSeries
               } else {
                 // Standard summary without visualization
@@ -2399,8 +2421,8 @@ Ejemplos de respuestas CORRECTAS:
 
                 naturalResponse =
                   responseLanguage === 'en'
-                    ? `In ${dateName(dateRange)}, you sold ${formattedRevenue}${trend} in total across ${salesData.orderCount} orders, with an average ticket of ${formatMoney(salesData.averageTicket, salesData.currency)}.`
-                    : `En ${dateName(dateRange)} vendiste ${formattedRevenue}${trend} en total, con ${salesData.orderCount} órdenes y un ticket promedio de ${formatMoney(salesData.averageTicket, salesData.currency)}.`
+                    ? `${datePrefix(dateRange)}, you sold ${formattedRevenue}${trend} in total across ${salesData.orderCount} orders, with an average ticket of ${formatMoney(salesData.averageTicket, salesData.currency)}.`
+                    : `${datePrefix(dateRange)} vendiste ${formattedRevenue}${trend} en total, con ${salesData.orderCount} órdenes y un ticket promedio de ${formatMoney(salesData.averageTicket, salesData.currency)}.`
                 serviceResult = salesData
               }
               break
@@ -2415,8 +2437,8 @@ Ejemplos de respuestas CORRECTAS:
 
               naturalResponse =
                 responseLanguage === 'en'
-                  ? `The average ticket in ${dateName(dateRange)} is ${formattedAvg}${trend}, based on ${salesData.orderCount} orders.`
-                  : `El ticket promedio en ${dateName(dateRange)} es de ${formattedAvg}${trend}, basado en ${salesData.orderCount} órdenes.`
+                  ? `The average ticket ${dateAdverbial(dateRange)} is ${formattedAvg}${trend}, based on ${salesData.orderCount} orders.`
+                  : `El ticket promedio ${dateAdverbial(dateRange)} es de ${formattedAvg}${trend}, basado en ${salesData.orderCount} órdenes.`
               serviceResult = { averageTicket: salesData.averageTicket, orderCount: salesData.orderCount, currency: salesData.currency }
               break
             }
@@ -2432,8 +2454,8 @@ Ejemplos de respuestas CORRECTAS:
                 .join('\n')
               naturalResponse =
                 responseLanguage === 'en'
-                  ? `The top-selling products in ${dateName(dateRange)} are:\n\n${productList}`
-                  : `Los productos más vendidos en ${dateName(dateRange)} son:\n\n${productList}`
+                  ? `The top-selling products ${dateAdverbial(dateRange)} are:\n\n${productList}`
+                  : `Los productos más vendidos ${dateAdverbial(dateRange)} son:\n\n${productList}`
               serviceResult = topProducts
               break
             }
@@ -2444,14 +2466,14 @@ Ejemplos de respuestas CORRECTAS:
               if (productSales.revenue === 0 || productSales.quantitySold === 0) {
                 naturalResponse =
                   responseLanguage === 'en'
-                    ? `I did not find sales for "${productSales.searchTerm || productName}" in ${dateName(dateRange)}.`
-                    : `No encontré ventas de "${productSales.searchTerm || productName}" en ${dateName(dateRange)}.`
+                    ? `I did not find sales for "${productSales.searchTerm || productName}" ${dateAdverbial(dateRange)}.`
+                    : `No encontré ventas de "${productSales.searchTerm || productName}" ${dateAdverbial(dateRange)}.`
               } else {
                 const matchedName = productSales.productName || productSales.searchTerm
                 naturalResponse =
                   responseLanguage === 'en'
-                    ? `In ${dateName(dateRange)}, ${matchedName} sold ${productSales.quantitySold} units for ${formatMoney(productSales.revenue, productSales.currency)} across ${productSales.orderCount} orders.`
-                    : `En ${dateName(dateRange)}, ${matchedName} vendió ${productSales.quantitySold} unidades por ${formatMoney(productSales.revenue, productSales.currency)} en ${productSales.orderCount} órdenes.`
+                    ? `${datePrefix(dateRange)}, ${matchedName} sold ${productSales.quantitySold} units for ${formatMoney(productSales.revenue, productSales.currency)} across ${productSales.orderCount} orders.`
+                    : `${datePrefix(dateRange)}, ${matchedName} vendió ${productSales.quantitySold} unidades por ${formatMoney(productSales.revenue, productSales.currency)} en ${productSales.orderCount} órdenes.`
               }
               serviceResult = productSales
               break
@@ -2855,6 +2877,36 @@ Ejemplos de respuestas CORRECTAS:
 
             case 'reservationSummary': {
               const reservations = await SharedQueryService.getReservationSummary(query.venueId, dateRange)
+              const shouldIncludeAllTimeFallback = !intentClassification.wasDateExplicit && dateRange === 'today'
+              if (shouldIncludeAllTimeFallback) {
+                const allTimeReservations = await SharedQueryService.getReservationSummary(query.venueId, 'allTime')
+                const todayStatus = this.formatStatusBreakdown(reservations.byStatus)
+                const allTimeStatus = this.formatStatusBreakdown(allTimeReservations.byStatus)
+                if (responseLanguage === 'en') {
+                  const todayText =
+                    reservations.total > 0
+                      ? `Today, you have ${reservations.total} reservations${todayStatus ? ` (${todayStatus})` : ''}.`
+                      : 'I did not find reservations for today.'
+                  const allTimeText =
+                    allTimeReservations.total > 0
+                      ? `Across all time, you have ${allTimeReservations.total} reservations${allTimeStatus ? ` (${allTimeStatus})` : ''}. No-show: ${allTimeReservations.noShowRate.toFixed(1)}%.`
+                      : 'I did not find historical reservations either.'
+                  naturalResponse = `${todayText} ${allTimeText}`
+                } else {
+                  const todayText =
+                    reservations.total > 0
+                      ? `Hoy tienes ${reservations.total} reservaciones${todayStatus ? ` (${todayStatus})` : ''}.`
+                      : 'No encontré reservaciones para hoy.'
+                  const allTimeText =
+                    allTimeReservations.total > 0
+                      ? `En todo el historial tienes ${allTimeReservations.total} reservaciones${allTimeStatus ? ` (${allTimeStatus})` : ''}. No-show: ${allTimeReservations.noShowRate.toFixed(1)}%.`
+                      : 'Tampoco encontré reservaciones históricas.'
+                  naturalResponse = `${todayText} ${allTimeText}`
+                }
+                serviceResult = { today: reservations, allTime: allTimeReservations }
+                break
+              }
+
               const periodLabel = dateName(dateRange)
               const byStatus = Object.entries(reservations.byStatus)
                 .filter(([, count]) => count > 0)
@@ -6656,6 +6708,67 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
     return normalizedMessage.length <= 180
   }
 
+  private isLikelyBusinessFollowUpReply(message: string, conversationHistory?: ConversationEntry[]): boolean {
+    if (this.hasExplicitPromptInjectionSignals(message)) {
+      return false
+    }
+
+    const normalizedMessage = this.normalizeTextForMatch(message)
+    if (!normalizedMessage || normalizedMessage.length > 120) {
+      return false
+    }
+
+    if (this.looksLikeStandaloneAssistantRequest(normalizedMessage)) {
+      return false
+    }
+
+    const wordCount = normalizedMessage.split(/\s+/).filter(Boolean).length
+    if (wordCount > 6) {
+      return false
+    }
+
+    if (
+      /\b(passwords?|contrasenas?|contraseñas?|secrets?|secretos?|tokens?|api\s*keys?|credenciales?|credentials?|pins?|pin|emails?|correos?)\b/.test(
+        normalizedMessage,
+      )
+    ) {
+      return false
+    }
+
+    const recentContext = (conversationHistory || [])
+      .slice(-6)
+      .map(entry => this.normalizeTextForMatch(entry.content))
+      .join(' ')
+
+    if (!recentContext) {
+      return false
+    }
+
+    const hasBusinessContext =
+      /\b(productos?|products?|platillos?|items?|ventas?|vendid[oa]s?|top-selling|recetas?|inventario|stock|reservas?|reservaciones?|clientes?|pagos?|liquidaciones?)\b/.test(
+        recentContext,
+      )
+
+    const assistantAskedForBusinessClarification =
+      /\b(que quieres revisar|que necesitas saber|cual quieres usar|responde con el nombre exacto|puedes especificar)\b/.test(recentContext)
+
+    return hasBusinessContext || assistantAskedForBusinessClarification
+  }
+
+  private isSensitiveTeamCredentialRequest(message: string): boolean {
+    const normalizedMessage = this.normalizeTextForMatch(message)
+    const hasTeamTerm = /\b(equipo|team|staff|empleados?|colaboradores?|usuarios?)\b/.test(normalizedMessage)
+    const hasSensitiveField =
+      /\b(pins?|pin|emails?|correos?|contrasenas?|contraseñas?|passwords?|credenciales?|credentials?|tokens?|secrets?|secretos?)\b/.test(
+        normalizedMessage,
+      )
+    const asksToExtract = /\b(dame|muestrame|mostrar|lista|listar|ver|exporta|exportar|saca|sacar|get|give|show|list|export)\b/.test(
+      normalizedMessage,
+    )
+
+    return hasTeamTerm && hasSensitiveField && asksToExtract
+  }
+
   private shouldAttemptPendingActionContinuation(message: string, conversationHistory?: ConversationEntry[]): boolean {
     if (!CHATBOT_MUTATIONS_ENABLED || this.hasExplicitPromptInjectionSignals(message)) {
       return false
@@ -7380,7 +7493,6 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
       }
     }
 
-    const productSalesFollowUpTerm = this.extractProductSalesFollowUpTerm(message)
     const recentHistoryMentionsSalesOrProducts =
       conversationHistory?.slice(-4).some(turn => {
         const normalizedContent = this.normalizeTextForMatch(turn.content)
@@ -7388,6 +7500,9 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
           normalizedContent,
         )
       }) ?? false
+    const productSalesFollowUpTerm =
+      this.extractProductSalesFollowUpTerm(message) ||
+      (recentHistoryMentionsSalesOrProducts ? this.extractBareProductSalesFollowUpTerm(message) : null)
 
     if (productSalesFollowUpTerm && recentHistoryMentionsSalesOrProducts) {
       const recentDateRange = this.extractRecentDateRangeFromHistory(conversationHistory)
@@ -7966,6 +8081,37 @@ Responde SOLO JSON (sin markdown):
     }
     const names = language === 'en' ? namesEn : namesEs
     return names[dateRange] || dateRange
+  }
+
+  private formatDateRangeSentencePrefix(dateRange: RelativeDateRange, language: 'es' | 'en' = 'es'): string {
+    if (language === 'en') {
+      if (dateRange === 'today') return 'Today'
+      if (dateRange === 'yesterday') return 'Yesterday'
+      return `In ${this.formatDateRangeName(dateRange, language)}`
+    }
+
+    if (dateRange === 'today') return 'Hoy'
+    if (dateRange === 'yesterday') return 'Ayer'
+    return `En ${this.formatDateRangeName(dateRange)}`
+  }
+
+  private formatDateRangeAdverbial(dateRange: RelativeDateRange, language: 'es' | 'en' = 'es'): string {
+    if (language === 'en') {
+      if (dateRange === 'today') return 'today'
+      if (dateRange === 'yesterday') return 'yesterday'
+      return `in ${this.formatDateRangeName(dateRange, language)}`
+    }
+
+    if (dateRange === 'today') return 'hoy'
+    if (dateRange === 'yesterday') return 'ayer'
+    return `en ${this.formatDateRangeName(dateRange)}`
+  }
+
+  private formatStatusBreakdown(byStatus: Record<string, number>): string {
+    return Object.entries(byStatus)
+      .filter(([, count]) => Number(count) > 0)
+      .map(([status, count]) => `${status}: ${count}`)
+      .join(', ')
   }
 
   /**
@@ -8828,6 +8974,31 @@ ${JSON.stringify(input, null, 2)}
       .trim()
 
     if (!cleaned || cleaned.length < 2 || /\b(productos?|products?|algo|cosa|cosas)\b/.test(cleaned)) {
+      return null
+    }
+
+    return cleaned
+  }
+
+  private extractBareProductSalesFollowUpTerm(message: string): string | null {
+    const normalizedMessage = this.normalizeTextForMatch(message).replace(/\s+/g, ' ').trim()
+    const cleaned = normalizedMessage
+      .replace(/^(?:y\s+)?(?:los?|las?|el|la)?\s*(?:productos?|products?|platillos?|items?)?\s*/i, '')
+      .replace(/[^a-z0-9ñ\s-]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+
+    if (!cleaned || cleaned.length < 2) {
+      return null
+    }
+    if (cleaned.split(/\s+/).length > 5) {
+      return null
+    }
+    if (
+      /\b(cuanto|cuanta|cuantos|cuantas|como|donde|que|cual|ventas?|vendi|vendido|top|mas|menos|mejor|peor|reservas?|reservaciones?|clientes?|equipo|pagos?|liquid|ordenes?|pedidos?|recetas?|inventario|links?|algo|cosas?)\b/.test(
+        cleaned,
+      )
+    ) {
       return null
     }
 

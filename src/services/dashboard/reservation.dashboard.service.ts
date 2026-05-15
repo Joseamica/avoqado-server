@@ -8,6 +8,7 @@ import { getReservationSettings } from './reservationSettings.service'
 import { sendReservationRescheduleWhatsApp } from '../whatsapp.service'
 import emailService from '../email.service'
 import { getProvider } from '../payments/provider-registry'
+import { checkExternalBusyBlock } from '../reservation/external-busy-block.service'
 // creditPack.public.service is imported lazily inside cancelReservation/markNoShow to avoid
 // the circular import — creditPack imports `withSerializableRetry` from this module.
 
@@ -271,6 +272,20 @@ export async function createReservation(venueId: string, data: CreateReservation
       }
     }
     const initialStatus: ReservationStatus = depositAmount ? 'PENDING' : autoConfirm ? 'CONFIRMED' : 'PENDING'
+
+    // Layer 0: External calendar busy-block check (Google Calendar et al.).
+    // Runs BEFORE table/staff overlap checks so a Google event blocking the
+    // venue or staff member rejects the request with a clear domain-specific
+    // error instead of the generic "horario ya reservado" message.
+    const externalBlock = await checkExternalBusyBlock(tx, {
+      venueId,
+      staffId: data.assignedStaffId ?? null,
+      startsAt: data.startsAt,
+      endsAt: data.endsAt,
+    })
+    if (externalBlock) {
+      throw new ConflictError('Este horario fue bloqueado por un evento de calendario externo')
+    }
 
     // Layer 1: Check table overlap (FOR UPDATE NOWAIT)
     if (data.tableId) {
@@ -863,6 +878,20 @@ export async function updateReservation(
       productId: newProductId,
       assignedStaffId: newStaffId,
     })
+
+    // Layer 0: External calendar busy-block check against the NEW (target)
+    // values. We always check, even when time/staff are unchanged — an
+    // `ExternalBusyBlock` may have been inserted AFTER this reservation was
+    // originally created, and the update is still a chance to surface it.
+    const externalBlock = await checkExternalBusyBlock(tx, {
+      venueId,
+      staffId: newStaffId,
+      startsAt: newStartsAt,
+      endsAt: newEndsAt,
+    })
+    if (externalBlock) {
+      throw new ConflictError('Este horario fue bloqueado por un evento de calendario externo')
+    }
 
     if (newTableId) {
       const tableConflicts = await tx.$queryRaw<{ id: string; confirmationCode: string }[]>`

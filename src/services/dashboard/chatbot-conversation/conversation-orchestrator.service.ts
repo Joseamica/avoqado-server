@@ -25,6 +25,7 @@ interface OrchestratorResponse {
     routedTo: 'ConversationOrchestrator'
     planId: string
     planMode: ConversationPlan['mode']
+    intent?: string
     steps: PlanStepMetadata[]
     riskLevel?: 'low' | 'medium' | 'high' | 'critical'
     reasonCode?: string
@@ -346,11 +347,11 @@ export class ConversationOrchestratorService {
           products,
           products.length > 0
             ? language === 'en'
-              ? `The top-selling products in ${this.formatDateRangeName(dateRange, language)} are:\n${list}`
-              : `Los productos más vendidos en ${this.formatDateRangeName(dateRange)} son:\n${list}`
+              ? `The top-selling products ${this.formatDateRangeAdverbial(dateRange, language)} are:\n${list}`
+              : `Los productos más vendidos ${this.formatDateRangeAdverbial(dateRange)} son:\n${list}`
             : language === 'en'
-              ? `I did not find product sales in ${this.formatDateRangeName(dateRange, language)}.`
-              : `No encontré productos vendidos en ${this.formatDateRangeName(dateRange)}.`,
+              ? `I did not find product sales ${this.formatDateRangeAdverbial(dateRange, language)}.`
+              : `No encontré productos vendidos ${this.formatDateRangeAdverbial(dateRange)}.`,
           products.length,
         )
       }
@@ -363,11 +364,11 @@ export class ConversationOrchestratorService {
           productSales,
           productSales.quantitySold > 0
             ? language === 'en'
-              ? `In ${this.formatDateRangeName(dateRange, language)}, ${matchedName} sold ${productSales.quantitySold} units for ${this.money(productSales.revenue, productSales.currency, language)} across ${productSales.orderCount} orders.`
-              : `En ${this.formatDateRangeName(dateRange)}, ${matchedName} vendió ${productSales.quantitySold} unidades por ${this.money(productSales.revenue, productSales.currency)} en ${productSales.orderCount} órdenes.`
+              ? `${this.formatDateRangeSentencePrefix(dateRange, language)}, ${matchedName} sold ${productSales.quantitySold} units for ${this.money(productSales.revenue, productSales.currency, language)} across ${productSales.orderCount} orders.`
+              : `${this.formatDateRangeSentencePrefix(dateRange)}, ${matchedName} vendió ${productSales.quantitySold} unidades por ${this.money(productSales.revenue, productSales.currency)} en ${productSales.orderCount} órdenes.`
             : language === 'en'
-              ? `I did not find sales for "${matchedName}" in ${this.formatDateRangeName(dateRange, language)}.`
-              : `No encontré ventas de "${matchedName}" en ${this.formatDateRangeName(dateRange)}.`,
+              ? `I did not find sales for "${matchedName}" ${this.formatDateRangeAdverbial(dateRange, language)}.`
+              : `No encontré ventas de "${matchedName}" ${this.formatDateRangeAdverbial(dateRange)}.`,
           productSales.matchedProducts.length,
         )
       }
@@ -677,6 +678,16 @@ export class ConversationOrchestratorService {
       }
       case 'reservations.summary': {
         const reservations = await SharedQueryService.getReservationSummary(venueId, dateRange)
+        const includeAllTimeFallback = step.args.includeAllTimeFallback === true && dateRange === 'today'
+        if (includeAllTimeFallback) {
+          const allTimeReservations = await SharedQueryService.getReservationSummary(venueId, 'allTime')
+          return this.queryResult(
+            step.tool,
+            { today: reservations, allTime: allTimeReservations },
+            this.formatReservationSummaryWithFallback(reservations, allTimeReservations, language),
+          )
+        }
+
         const byStatus = Object.entries(reservations.byStatus)
           .map(([status, count]) => `${status}: ${count}`)
           .join(', ')
@@ -936,10 +947,10 @@ export class ConversationOrchestratorService {
     language: ResponseLanguage = 'es',
   ): string {
     if (language === 'en') {
-      return `In ${this.formatDateRangeName(dateRange, language)}, you sold ${this.money(sales.totalRevenue, sales.currency, language)} total, with ${sales.orderCount} orders and an average ticket of ${this.money(sales.averageTicket, sales.currency, language)}.`
+      return `${this.formatDateRangeSentencePrefix(dateRange, language)}, you sold ${this.money(sales.totalRevenue, sales.currency, language)} total, with ${sales.orderCount} orders and an average ticket of ${this.money(sales.averageTicket, sales.currency, language)}.`
     }
 
-    return `En ${this.formatDateRangeName(dateRange)} vendiste ${this.money(sales.totalRevenue, sales.currency)} en total, con ${sales.orderCount} órdenes y ticket promedio de ${this.money(sales.averageTicket, sales.currency)}.`
+    return `${this.formatDateRangeSentencePrefix(dateRange)} vendiste ${this.money(sales.totalRevenue, sales.currency)} en total, con ${sales.orderCount} órdenes y ticket promedio de ${this.money(sales.averageTicket, sales.currency)}.`
   }
 
   private formatProductSalesComparison(
@@ -992,6 +1003,44 @@ export class ConversationOrchestratorService {
     ].join('\n')
   }
 
+  private formatReservationSummaryWithFallback(
+    today: { total: number; byStatus: Record<string, number>; noShowRate: number },
+    allTime: { total: number; byStatus: Record<string, number>; noShowRate: number },
+    language: ResponseLanguage = 'es',
+  ): string {
+    const todayStatus = this.formatStatusBreakdown(today.byStatus)
+    const allTimeStatus = this.formatStatusBreakdown(allTime.byStatus)
+
+    if (language === 'en') {
+      const todayText =
+        today.total > 0
+          ? `Today, you have ${today.total} reservations${todayStatus ? ` (${todayStatus})` : ''}.`
+          : 'I did not find reservations for today.'
+      const allTimeText =
+        allTime.total > 0
+          ? `Across all time, you have ${allTime.total} reservations${allTimeStatus ? ` (${allTimeStatus})` : ''}. No-show: ${allTime.noShowRate.toFixed(1)}%.`
+          : 'I did not find historical reservations either.'
+      return `${todayText} ${allTimeText}`
+    }
+
+    const todayText =
+      today.total > 0
+        ? `Hoy tienes ${today.total} reservaciones${todayStatus ? ` (${todayStatus})` : ''}.`
+        : 'No encontré reservaciones para hoy.'
+    const allTimeText =
+      allTime.total > 0
+        ? `En todo el historial tienes ${allTime.total} reservaciones${allTimeStatus ? ` (${allTimeStatus})` : ''}. No-show: ${allTime.noShowRate.toFixed(1)}%.`
+        : 'Tampoco encontré reservaciones históricas.'
+    return `${todayText} ${allTimeText}`
+  }
+
+  private formatStatusBreakdown(byStatus: Record<string, number>): string {
+    return Object.entries(byStatus)
+      .filter(([, count]) => Number(count) > 0)
+      .map(([status, count]) => `${status}: ${count}`)
+      .join(', ')
+  }
+
   private formatUnsupported(topic: string, reason: string, language: ResponseLanguage = 'es'): string {
     if (language === 'en') {
       return `About ${topic}: ${reason} I can help with data and operations for the current venue.`
@@ -1006,10 +1055,10 @@ export class ConversationOrchestratorService {
       yesterday: 'ayer',
       last7days: 'los últimos 7 días',
       last30days: 'los últimos 30 días',
-      thisWeek: 'esta semana',
-      thisMonth: 'este mes',
-      lastWeek: 'la semana pasada',
-      lastMonth: 'el mes pasado',
+      thisWeek: 'los últimos 7 días',
+      thisMonth: 'los últimos 30 días',
+      lastWeek: 'los 7 días anteriores',
+      lastMonth: 'los 30 días anteriores',
       allTime: 'todo el historial',
     }
     const namesEn: Record<RelativeDateRange, string> = {
@@ -1017,14 +1066,38 @@ export class ConversationOrchestratorService {
       yesterday: 'yesterday',
       last7days: 'the last 7 days',
       last30days: 'the last 30 days',
-      thisWeek: 'this week',
-      thisMonth: 'this month',
-      lastWeek: 'last week',
-      lastMonth: 'last month',
+      thisWeek: 'the last 7 days',
+      thisMonth: 'the last 30 days',
+      lastWeek: 'the previous 7 days',
+      lastMonth: 'the previous 30 days',
       allTime: 'all time',
     }
     const names = language === 'en' ? namesEn : namesEs
     return names[dateRange] || dateRange
+  }
+
+  private formatDateRangeSentencePrefix(dateRange: RelativeDateRange, language: ResponseLanguage = 'es'): string {
+    if (language === 'en') {
+      if (dateRange === 'today') return 'Today'
+      if (dateRange === 'yesterday') return 'Yesterday'
+      return `In ${this.formatDateRangeName(dateRange, language)}`
+    }
+
+    if (dateRange === 'today') return 'Hoy'
+    if (dateRange === 'yesterday') return 'Ayer'
+    return `En ${this.formatDateRangeName(dateRange)}`
+  }
+
+  private formatDateRangeAdverbial(dateRange: RelativeDateRange, language: ResponseLanguage = 'es'): string {
+    if (language === 'en') {
+      if (dateRange === 'today') return 'today'
+      if (dateRange === 'yesterday') return 'yesterday'
+      return `in ${this.formatDateRangeName(dateRange, language)}`
+    }
+
+    if (dateRange === 'today') return 'hoy'
+    if (dateRange === 'yesterday') return 'ayer'
+    return `en ${this.formatDateRangeName(dateRange)}`
   }
 
   private formatDateTime(date: Date): string {
@@ -1096,6 +1169,8 @@ export class ConversationOrchestratorService {
     violationType?: SecurityViolationType
     reasonCode: string
   }): OrchestratorResponse {
+    const primaryIntent = params.metadataSteps.find(step => step.kind === 'query' && step.status === 'executed')?.tool
+
     return {
       response: params.responseBlocks.join('\n\n'),
       queryResult: params.queryResults.length === 1 ? params.queryResults[0] : params.queryResults,
@@ -1107,6 +1182,7 @@ export class ConversationOrchestratorService {
         routedTo: 'ConversationOrchestrator',
         planId: params.planId,
         planMode: params.plan.mode,
+        intent: primaryIntent,
         steps: params.metadataSteps,
         riskLevel: params.plan.riskLevel === 'high' ? 'critical' : params.plan.riskLevel,
         reasonCode: params.reasonCode,

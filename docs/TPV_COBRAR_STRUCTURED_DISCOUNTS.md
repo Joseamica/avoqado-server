@@ -9,18 +9,14 @@ These schema fields were added for the new standalone TPV **Cobrar** flow:
 - `OrderItem.appliedDiscountId`
 - `OrderDiscount.appliedToItemIds`
 
-They exist so a single TPV cart can persist catalog products, custom line
-items, cortesía items, per-item discounts, and order-level discounts in one
-transaction while keeping receipts, dashboard details, reports, and audit
-trails explainable.
+They exist so a single TPV cart can persist catalog products, custom line items, cortesía items, per-item discounts, and order-level
+discounts in one transaction while keeping receipts, dashboard details, reports, and audit trails explainable.
 
 ## Scope Rule
 
-These fields are **additive metadata**, not a required replacement for the
-legacy discount model.
+These fields are **additive metadata**, not a required replacement for the legacy discount model.
 
-Do not migrate existing endpoints or clients to these fields unless the
-product owner explicitly asks for that migration.
+Do not migrate existing endpoints or clients to these fields unless the product owner explicitly asks for that migration.
 
 This includes:
 
@@ -38,8 +34,7 @@ Existing flows can keep using:
 - `OrderDiscount`
 - `OrderAction`
 
-New Cobrar should write the new structured fields **in addition to** the
-legacy money fields, so old reports continue to work.
+New Cobrar should write the new structured fields **in addition to** the legacy money fields, so old reports continue to work.
 
 ## Money Invariants
 
@@ -50,11 +45,11 @@ For new TPV Cobrar V1:
 - `OrderItem.discountAmount` stores item-level reductions.
 - `Order.discountAmount` stores total reductions: cortesía + per-item discounts + order-level discount.
 - `Order.total = Order.subtotal - Order.discountAmount`.
-- `Order.taxAmount = 0` in V1. The new Cobrar flow must not enable order tax until payment math, receipts, and dashboard totals are updated together.
+- `Order.taxAmount = 0` in V1. The new Cobrar flow must not enable order tax until payment math, receipts, and dashboard totals are updated
+  together.
 
-Do not set `OrderItem.total = 0` for cortesía. That breaks gross sales
-reporting. A cortesía item keeps its gross total and stores the reduction in
-`discountAmount`, with `isCortesia=true`.
+Do not set `OrderItem.total = 0` for cortesía. That breaks gross sales reporting. A cortesía item keeps its gross total and stores the
+reduction in `discountAmount`, with `isCortesia=true`.
 
 ## How To Adopt In Another Endpoint Later
 
@@ -88,7 +83,5 @@ Only do this after explicit product approval.
 
 These fields do not require a global frontend migration.
 
-They do not change how payment capture, tips, transaction costs,
-commissions, or inventory deduction work by themselves. Those systems still
-depend on the existing payment/order completion flows unless a separate plan
-changes them explicitly.
+They do not change how payment capture, tips, transaction costs, commissions, or inventory deduction work by themselves. Those systems still
+depend on the existing payment/order completion flows unless a separate plan changes them explicitly.

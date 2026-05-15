@@ -20,6 +20,17 @@ process.env.RABBITMQ_URL = 'amqp://test:test@localhost:5672'
 // no STRIPE_SECRET_KEY) skips Stripe init and chargeOverage returns 'no_stripe'.
 process.env.STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || 'sk_test_dummy_for_jest'
 
+// Google Calendar Sync (Phase 1) — services that read these at module-load time
+// need deterministic test values BEFORE any import. The token key must be 32-byte
+// hex (64 chars) to satisfy GoogleCalendarTokenEncryption's getKey() validator.
+process.env.GOOGLE_CALENDAR_TOKEN_KEY = process.env.GOOGLE_CALENDAR_TOKEN_KEY || 'a'.repeat(64)
+process.env.OAUTH_STATE_SECRET = process.env.OAUTH_STATE_SECRET || 'test-oauth-state-secret'
+process.env.GOOGLE_OAUTH_CLIENT_ID = process.env.GOOGLE_OAUTH_CLIENT_ID || 'test-google-oauth-client-id'
+process.env.GOOGLE_OAUTH_CLIENT_SECRET = process.env.GOOGLE_OAUTH_CLIENT_SECRET || 'test-google-oauth-client-secret'
+process.env.GOOGLE_OAUTH_REDIRECT_URI =
+  process.env.GOOGLE_OAUTH_REDIRECT_URI || 'http://localhost:4000/api/v1/google-calendar/oauth/callback'
+process.env.GOOGLE_CALENDAR_WEBHOOK_BASE = process.env.GOOGLE_CALENDAR_WEBHOOK_BASE || 'http://localhost:4000'
+
 // Comprehensive Prisma Mock Setup
 const createMockModel = () => ({
   findUnique: jest.fn(),
@@ -150,6 +161,12 @@ const prismaMock: any = {
   paymentLink: createMockModel(),
   checkoutSession: createMockModel(),
   ecommerceMerchant: createMockModel(),
+  // Google Calendar Sync (Phase 1)
+  googleCalendarConnection: createMockModel(),
+  googleCalendarChannel: createMockModel(),
+  externalBusyBlock: createMockModel(),
+  googleCalendarWebhookInbox: createMockModel(),
+  googleOAuthSession: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),

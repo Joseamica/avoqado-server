@@ -3,6 +3,7 @@ import * as reservationService from '../../services/dashboard/reservation.dashbo
 import * as availabilityService from '../../services/dashboard/reservationAvailability.service'
 import { countAppointmentOccupancy, effectiveAppointmentPacing } from '../../services/dashboard/reservationAvailability.service'
 import { getReservationSettings } from '../../services/dashboard/reservationSettings.service'
+import { checkExternalBusyBlock } from '../../services/reservation/external-busy-block.service'
 import { BadRequestError, ConflictError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
 import { verifyCustomerToken } from '../../jwt.service'
 import prisma from '../../utils/prismaClient'
@@ -1219,6 +1220,20 @@ async function createClassReservation(
       throw new BadRequestError('Esta sesion de clase ya no acepta reservaciones')
     }
 
+    // External calendar busy-block check (Google Calendar et al.).
+    // Class reservations bypass `reservationService.createReservation`, so the
+    // check has to be re-applied here. Class sessions are venue-master only
+    // (no per-instructor staff field on the booking), so staffId stays null.
+    const externalBlock = await checkExternalBusyBlock(tx, {
+      venueId,
+      staffId: null,
+      startsAt: session.startsAt,
+      endsAt: session.endsAt,
+    })
+    if (externalBlock) {
+      throw new ConflictError('Este horario fue bloqueado por un evento de calendario externo')
+    }
+
     // Enforce admin booking-window policy (maxAdvanceDays / minNoticeMin).
     // ValidationError -> 422.
     reservationService.enforceBookingWindow(session.startsAt, moduleConfig?.scheduling)
@@ -1616,6 +1631,20 @@ export async function createHold(req: Request, res: Response, next: NextFunction
       hold = await prisma.$transaction(async tx => {
         const lockKey = `apt-hold:${venue.id}`
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey})::bigint)`
+
+        // External calendar busy-block check — reject the hold so the customer
+        // never sees a "your slot is reserved" countdown for a slot the venue
+        // already blocked via Google Calendar.
+        const externalBlock = await checkExternalBusyBlock(tx, {
+          venueId: venue.id,
+          staffId: null,
+          startsAt,
+          endsAt,
+        })
+        if (externalBlock) {
+          throw new ConflictError('Este horario fue bloqueado por un evento de calendario externo')
+        }
+
         const { reservations, holds } = await countAppointmentOccupancy(tx, {
           venueId: venue.id,
           startsAt,
@@ -1639,18 +1668,32 @@ export async function createHold(req: Request, res: Response, next: NextFunction
         })
       })
     } else {
-      hold = await prisma.slotHold.create({
-        data: {
+      // Non-appointment holds (classes, generic) — wrap in a transaction so the
+      // external busy-block check runs against the same snapshot the create
+      // commits with.
+      hold = await prisma.$transaction(async tx => {
+        const externalBlock = await checkExternalBusyBlock(tx, {
           venueId: venue.id,
+          staffId: null,
           startsAt,
           endsAt,
-          productIds,
-          classSessionId: body.classSessionId ?? null,
-          partySize: Math.max(1, body.partySize ?? 1),
-          expiresAt,
-          fingerprint: body.fingerprint ?? null,
-        },
-        select: { id: true, expiresAt: true },
+        })
+        if (externalBlock) {
+          throw new ConflictError('Este horario fue bloqueado por un evento de calendario externo')
+        }
+        return tx.slotHold.create({
+          data: {
+            venueId: venue.id,
+            startsAt,
+            endsAt,
+            productIds,
+            classSessionId: body.classSessionId ?? null,
+            partySize: Math.max(1, body.partySize ?? 1),
+            expiresAt,
+            fingerprint: body.fingerprint ?? null,
+          },
+          select: { id: true, expiresAt: true },
+        })
       })
     }
 

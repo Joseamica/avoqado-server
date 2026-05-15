@@ -17,6 +17,7 @@ import { getCorsConfig, Environment } from './config/corsOptions'
 // Import routes
 import publicMenuRoutes from './routes/publicMenu.routes'
 import webhookRoutes from './routes/webhook.routes'
+import { handleGoogleCalendarWebhook } from './controllers/webhook/google-calendar.webhook.controller'
 import publicRoutes from './routes/public.routes'
 import appUpdateRoutes from './routes/superadmin/appUpdate.routes'
 import settlementReportRoutes from './routes/settlement-report.routes'
@@ -75,7 +76,14 @@ export function getAppEventLoopHistogram() {
 }
 
 // ⚠️ IMPORTANT: Webhook routes MUST be mounted BEFORE configureCoreMiddlewares
-// Stripe webhooks require raw body (not JSON parsed) for signature verification
+// Stripe webhooks require raw body (not JSON parsed) for signature verification.
+//
+// ⚠️ Google Calendar webhook MUST mount BEFORE the existing /api/v1/webhooks
+// router so Google notifications hit a `*/*` raw parser, not Stripe's strict
+// `application/json` parser (which silently drops Google's non-JSON pings).
+// Express matches routes in mount order — most-specific path first.
+app.post('/api/v1/webhooks/google-calendar', express.raw({ type: '*/*', limit: '64kb' }), handleGoogleCalendarWebhook)
+
 app.use(
   '/api/v1/webhooks',
   express.raw({ type: 'application/json' }), // Raw body parser for Stripe signature verification

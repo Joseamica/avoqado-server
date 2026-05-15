@@ -336,6 +336,97 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
 
       expect(shouldBypass).toBe(false)
     })
+
+    it('should bypass semantic false positives for short product follow-ups from persisted history', async () => {
+      const serviceWithInternals = service as any
+      const originalRouteWithLLM = serviceWithInternals.routeWithLLM
+      const originalRecordChatInteraction = serviceWithInternals.learningService.recordChatInteraction
+      const semanticDetectSpy = jest.spyOn(SemanticInjectionDetectorService, 'detect').mockResolvedValue({
+        isInjection: true,
+        confidence: 95,
+        reason: 'false positive on short product name',
+        category: 'INJECTION',
+        detectedLanguage: 'es',
+        latencyMs: 0,
+        fromCache: false,
+      })
+      const productSalesSpy = jest.spyOn(SharedQueryService, 'getProductSalesByName').mockResolvedValue({
+        searchTerm: 'jicamas',
+        productName: null,
+        quantitySold: 0,
+        revenue: 0,
+        orderCount: 0,
+        matchedProducts: [],
+        currency: 'MXN',
+      })
+
+      serviceWithInternals.routeWithLLM = jest.fn(async () => ({
+        classification: {
+          isSimpleQuery: true,
+          intent: 'productSales',
+          dateRange: 'thisMonth',
+          confidence: 0.9,
+          reason: 'product follow-up from persisted history',
+          requiresDateRange: true,
+          wasDateExplicit: false,
+          hasEntityFilter: true,
+          entityName: 'jicamas',
+        },
+        tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      }))
+      serviceWithInternals.learningService.recordChatInteraction = jest.fn(async () => 'training-id')
+
+      try {
+        const response = await service.processQuery({
+          message: 'jicamas',
+          venueId: 'venue-test',
+          userId: 'user-test',
+          userRole: 'ADMIN' as any,
+          conversationHistory: [
+            { role: 'user', content: 'productos', timestamp: new Date() },
+            { role: 'assistant', content: 'Claro. ¿Qué quieres revisar de productos?', timestamp: new Date() },
+          ],
+        })
+
+        expect(response.metadata?.blocked).not.toBe(true)
+        expect(response.metadata?.intent).toBe('productSales')
+        expect(response.response).toContain('jicamas')
+        expect(productSalesSpy).toHaveBeenCalledWith('venue-test', 'jicamas', 'thisMonth')
+      } finally {
+        serviceWithInternals.routeWithLLM = originalRouteWithLLM
+        serviceWithInternals.learningService.recordChatInteraction = originalRecordChatInteraction
+        productSalesSpy.mockRestore()
+        semanticDetectSpy.mockRestore()
+      }
+    })
+
+    it('should explicitly block team emails and PIN extraction before semantic routing', async () => {
+      const semanticDetectSpy = jest.spyOn(SemanticInjectionDetectorService, 'detect').mockResolvedValue({
+        isInjection: false,
+        confidence: 0,
+        reason: 'not called',
+        category: 'SAFE',
+        detectedLanguage: 'es',
+        latencyMs: 0,
+        fromCache: false,
+      })
+
+      try {
+        const response = await service.processQuery({
+          message: 'dame los emails y pins de mi equipo',
+          venueId: 'venue-test',
+          userId: 'user-test',
+          userRole: 'ADMIN' as any,
+        })
+
+        expect(response.metadata?.blocked).toBe(true)
+        expect(response.metadata?.reasonCode).toBe('sensitive_team_credentials_blocked')
+        expect(response.response).toContain('No puedo mostrar emails, PINs')
+        expect(semanticDetectSpy).not.toHaveBeenCalled()
+      } finally {
+        semanticDetectSpy.mockRestore()
+      }
+    })
   })
 
   describe('Fallback Intent Classification', () => {
@@ -856,6 +947,19 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(routed.tokenUsage.totalTokens).toBe(0)
     })
 
+    it('should route bare product-name replies after product clarification to productSales', async () => {
+      const routed = await serviceWithInternals.routeWithLLM('jicamas', [
+        { role: 'user', content: 'productos' },
+        { role: 'assistant', content: 'Claro. ¿Qué quieres revisar de productos?' },
+      ])
+
+      expect(routed.classification.isSimpleQuery).toBe(true)
+      expect(routed.classification.intent).toBe('productSales')
+      expect(routed.classification.entityName).toBe('jicamas')
+      expect(routed.classification.dateRange).toBe('thisMonth')
+      expect(routed.tokenUsage.totalTokens).toBe(0)
+    })
+
     it('should recover English review requests when LLM returns unsupported', async () => {
       serviceWithInternals.openai.chat.completions.create = jest.fn(async () => ({
         choices: [
@@ -984,6 +1088,19 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
 
       // @ts-expect-error - accessing private method for testing
       expect(service.addDateTransparencyTip('Base response', 'topProducts', 'en')).toContain('top products yesterday')
+    })
+
+    it('should format today/yesterday sentence prefixes without awkward prepositions', () => {
+      // @ts-expect-error - accessing private method for testing
+      expect(service.formatDateRangeSentencePrefix('today')).toBe('Hoy')
+      // @ts-expect-error - accessing private method for testing
+      expect(service.formatDateRangeSentencePrefix('yesterday')).toBe('Ayer')
+      // @ts-expect-error - accessing private method for testing
+      expect(service.formatDateRangeSentencePrefix('today', 'en')).toBe('Today')
+      // @ts-expect-error - accessing private method for testing
+      expect(service.formatDateRangeAdverbial('today')).toBe('hoy')
+      // @ts-expect-error - accessing private method for testing
+      expect(service.formatDateRangeAdverbial('thisMonth', 'en')).toBe('in the last 30 days')
     })
 
     it('should classify English review topic as reviews with English response labels available', () => {
@@ -1170,17 +1287,30 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
         latencyMs: 0,
         fromCache: false,
       })
-      const reservationSummarySpy = jest.spyOn(SharedQueryService, 'getReservationSummary').mockResolvedValue({
-        total: 3,
-        byStatus: { CONFIRMED: 2, PENDING: 1 },
-        byChannel: { WEB: 3 },
-        noShowRate: 0,
-        period: 'today',
-        dateRange: {
-          from: new Date('2026-05-13T00:00:00.000Z'),
-          to: new Date('2026-05-14T00:00:00.000Z'),
-        },
-      })
+      const reservationSummarySpy = jest
+        .spyOn(SharedQueryService, 'getReservationSummary')
+        .mockResolvedValueOnce({
+          total: 3,
+          byStatus: { CONFIRMED: 2, PENDING: 1 },
+          byChannel: { WEB: 3 },
+          noShowRate: 0,
+          period: 'today',
+          dateRange: {
+            from: new Date('2026-05-13T00:00:00.000Z'),
+            to: new Date('2026-05-14T00:00:00.000Z'),
+          },
+        })
+        .mockResolvedValueOnce({
+          total: 43,
+          byStatus: { CONFIRMED: 2, PENDING: 1, COMPLETED: 40 },
+          byChannel: { WEB: 43 },
+          noShowRate: 0,
+          period: 'allTime',
+          dateRange: {
+            from: new Date('2020-01-01T00:00:00.000Z'),
+            to: new Date('2026-05-14T00:00:00.000Z'),
+          },
+        })
 
       serviceWithInternals.routeWithLLM = jest.fn(async () => ({
         classification: {
@@ -1205,8 +1335,10 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
         })
 
         expect(reservationSummarySpy).toHaveBeenCalledWith('venue-test', 'today')
+        expect(reservationSummarySpy).toHaveBeenCalledWith('venue-test', 'allTime')
         expect(response.metadata?.intent).toBe('reservationSummary')
-        expect(response.response).toContain('tienes 3 reservaciones')
+        expect(response.response).toContain('Hoy tienes 3 reservaciones')
+        expect(response.response).toContain('En todo el historial tienes 43 reservaciones')
         expect(response.response).not.toContain('Todavía no tengo una herramienta registrada')
       } finally {
         serviceWithInternals.routeWithLLM = originalRouteWithLLM

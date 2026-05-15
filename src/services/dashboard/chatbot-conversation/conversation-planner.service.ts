@@ -103,6 +103,7 @@ export class ConversationPlannerService {
       if (!state.lastTool) {
         if (this.hasRecipeTerms(normalized)) state.lastTool = 'recipeList'
         if (/\binventario|stock|insumo|materia prima\b/.test(normalized)) state.lastTool = 'inventory'
+        if (/\b(productos?|products?|platillos?|items?)\b/.test(normalized)) state.lastTool = 'productSales'
       }
 
       if (!state.pendingDisambiguation && /cual de estas|cual quieres usar|responde con el nombre exacto/.test(normalized)) {
@@ -173,6 +174,7 @@ export class ConversationPlannerService {
     const containsWeather = this.hasUnsupportedTopic(normalized)
     const productComparison = this.extractProductComparisonTerms(normalized)
     const topProductsIntent = productComparison ? false : this.hasTopProductsIntent(normalized)
+    const bareProductFollowUpTerm = state.lastTool === 'productSales' ? this.extractBareProductFollowUpTerm(normalized) : null
 
     if (productComparison) {
       steps.push({
@@ -189,6 +191,18 @@ export class ConversationPlannerService {
       })
     }
 
+    if (bareProductFollowUpTerm) {
+      steps.push({
+        id: this.nextStepId('query', steps),
+        kind: 'query',
+        tool: 'productSales',
+        args: {
+          productName: bareProductFollowUpTerm,
+          dateRange: this.extractDateRange(normalized) || 'thisMonth',
+        },
+      })
+    }
+
     if (topProductsIntent) {
       steps.push({
         id: this.nextStepId('query', steps),
@@ -201,7 +215,8 @@ export class ConversationPlannerService {
       })
     }
 
-    const productSalesTerm = productComparison || topProductsIntent ? null : this.extractProductSalesTerm(normalized)
+    const productSalesTerm =
+      productComparison || topProductsIntent || bareProductFollowUpTerm ? null : this.extractProductSalesTerm(normalized)
     if (productSalesTerm) {
       steps.push({
         id: this.nextStepId('query', steps),
@@ -358,11 +373,15 @@ export class ConversationPlannerService {
     }
 
     if (this.hasReservationSummaryIntent(normalized)) {
+      const reservationDateRange = this.extractDateRange(normalized)
       steps.push({
         id: this.nextStepId('query', steps),
         kind: 'query',
         tool: 'reservations.summary',
-        args: { dateRange: this.extractDateRange(normalized) || 'today' },
+        args: {
+          dateRange: reservationDateRange || 'today',
+          ...(!reservationDateRange ? { includeAllTimeFallback: true } : {}),
+        },
       })
     }
 
@@ -861,6 +880,26 @@ export class ConversationPlannerService {
     }
 
     return null
+  }
+
+  private extractBareProductFollowUpTerm(normalized: string): string | null {
+    const cleaned = normalized
+      .replace(/^(?:y\s+)?(?:los?|las?|el|la)?\s*(?:productos?|products?|platillos?|items?)?\s*/i, '')
+      .replace(/[^a-z0-9ñ\s-]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+
+    if (!cleaned || cleaned.length < 2) return null
+    if (cleaned.split(/\s+/).length > 5) return null
+    if (
+      /\b(cuanto|cuanta|cuantos|cuantas|como|donde|que|cual|ventas?|vendi|vendido|top|mas|menos|mejor|peor|reservas?|reservaciones?|clientes?|equipo|pagos?|liquid|ordenes?|pedidos?|recetas?|inventario|links?|algo|cosas?)\b/.test(
+        cleaned,
+      )
+    ) {
+      return null
+    }
+
+    return cleaned
   }
 
   private hasPendingOrdersIntent(normalized: string): boolean {

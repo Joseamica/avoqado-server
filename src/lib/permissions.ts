@@ -459,12 +459,19 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'customers:read', // Phase 1: Customer System
     'loyalty:read', // Phase 1b: Loyalty System
     'teams:read',
+    'calendar:connect_self', // Google Calendar Sync — connect own personal calendar
   ],
 
   /**
    * KITCHEN: Kitchen operations only
    */
-  [StaffRole.KITCHEN]: ['home:read', 'orders:read', 'orders:update', 'menu:read'],
+  [StaffRole.KITCHEN]: [
+    'home:read',
+    'orders:read',
+    'orders:update',
+    'menu:read',
+    'calendar:connect_self', // Google Calendar Sync — connect own personal calendar
+  ],
 
   /**
    * WAITER: Order and table management
@@ -502,6 +509,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // SIM custody (PlayTelecom chain-of-custody) — TPV-only actions for Promoter
     'tpv-sim-custody:accept', // Accept SIM reception on TPV
     'tpv-sim-custody:reject', // Reject a pending SIM on TPV
+    // Google Calendar Sync — staff can connect their own personal calendar
+    'calendar:connect_self',
   ],
 
   /**
@@ -538,6 +547,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // service layer (`assignedPromoterId === currentStaffId`).
     'tpv-sim-custody:accept',
     'tpv-sim-custody:reject',
+    // Google Calendar Sync — staff can connect their own personal calendar
+    'calendar:connect_self',
   ],
 
   /**
@@ -632,6 +643,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // Ownership is enforced at the service layer so adding these is safe.
     'tpv-sim-custody:accept',
     'tpv-sim-custody:reject',
+    // Google Calendar Sync — connect own calendar + view venue connection status
+    'calendar:connect_self',
+    'calendar:view_status',
     // NO: tpv-messages:send (ADMIN+ only)
     // NO: tpv-terminal:settings (ADMIN+ only)
     // NO: tpv-reports (ADMIN+ only - except pay-later-aging)
@@ -707,6 +721,11 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // SIM custody inbox (ADMIN operates TPV in some venues too).
     'tpv-sim-custody:accept',
     'tpv-sim-custody:reject',
+    // Google Calendar Sync — full venue control
+    'calendar:manage_venue',
+    'calendar:connect_self',
+    'calendar:disconnect_staff',
+    'calendar:view_status',
     // NO: tpv-settings:* (OWNER only - org-level TPV config)
     // NO: venue-crypto:manage (SUPERADMIN only)
     // NO: tpv-factory-reset:execute (OWNER only - destructive)
@@ -788,6 +807,11 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // Allow OWNER to use TPV inbox too (edge case: venue owner also operates as promoter).
     'tpv-sim-custody:accept',
     'tpv-sim-custody:reject',
+    // Google Calendar Sync — full venue control
+    'calendar:manage_venue',
+    'calendar:connect_self',
+    'calendar:disconnect_staff',
+    'calendar:view_status',
     // NO: venue-crypto:manage (SUPERADMIN only - via *:*)
   ],
 
@@ -1198,6 +1222,12 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   ],
   // Org-level goals management
   goals: ['goals:org-manage'],
+  // Google Calendar Sync (Phase 1)
+  // - manage_venue: connect/disconnect the venue master calendar (OWNER/ADMIN)
+  // - connect_self: connect/disconnect your own personal calendar (any operational role)
+  // - disconnect_staff: force-disconnect another staff member's personal calendar (audit, OWNER/ADMIN)
+  // - view_status: view calendar connection status for the venue (OWNER/ADMIN/MANAGER)
+  calendar: ['calendar:manage_venue', 'calendar:connect_self', 'calendar:disconnect_staff', 'calendar:view_status'],
 }
 
 /**

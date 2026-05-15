@@ -14,6 +14,7 @@ import { connectToRabbitMQ, closeRabbitMQConnection } from './communication/rabb
 import { CommandListener } from './communication/rabbitmq/commandListener'
 import { CommandRetryService } from './communication/rabbitmq/commandRetryService'
 import { startEventConsumer } from './communication/rabbitmq/consumer'
+import { startGcalPullConsumer } from './communication/rabbitmq/gcal-pull-consumer'
 import { startPosConnectionMonitor } from './jobs/monitorPosConnections'
 import { tpvHealthMonitorJob } from './jobs/tpv-health-monitor.job'
 import { subscriptionCancellationJob } from './jobs/subscription-cancellation.job'
@@ -31,6 +32,11 @@ import { nightlyLowStockJob } from './jobs/nightly-low-stock.job'
 import { marketingCampaignJob } from './jobs/marketing-campaign.job'
 import { moneygiverSettlementJob } from './jobs/moneygiver-settlement.job'
 import { venueCommissionSettlementJob } from './jobs/venue-commission-settlement.job'
+import { gcalInboxSweeperJob } from './jobs/gcal-inbox-sweeper.job'
+import { gcalChannelRenewalJob } from './jobs/gcal-channel-renewal.job'
+import { gcalHorizonRefreshJob } from './jobs/gcal-horizon-refresh.job'
+import { gcalPruningJob } from './jobs/gcal-pruning.job'
+import { gcalHealthCheckJob } from './jobs/gcal-health-check.job'
 // Import the new Socket.io system
 import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
 // Import Firebase Admin initialization
@@ -144,6 +150,13 @@ const gracefulShutdown = async (signal: string) => {
       moneygiverSettlementJob.stop()
       venueCommissionSettlementJob.stop()
 
+      // Stop Google Calendar sync jobs (Phase 1)
+      gcalInboxSweeperJob.stop()
+      gcalChannelRenewalJob.stop()
+      gcalHorizonRefreshJob.stop()
+      gcalPruningJob.stop()
+      gcalHealthCheckJob.stop()
+
       // Stop live demo cleanup job
       if (liveDemoCleanupJob) {
         logger.info('Stopping live demo cleanup job...')
@@ -242,6 +255,13 @@ const startApplication = async (retries = 3) => {
             logger.warn('⚠️  Event consumer could not start:', err)
           }
 
+          // Start Google Calendar pull consumer (Phase 1) — drains gcal.pull
+          // messages produced by the webhook handler. Best-effort; the inbox
+          // sweeper drives pulls if this fails to start.
+          startGcalPullConsumer().catch(err => {
+            logger.warn('⚠️  gcal pull consumer could not start:', err)
+          })
+
           // Start command listener
           commandListener.start().catch(err => {
             logger.warn('⚠️  Command listener could not start:', err)
@@ -318,6 +338,18 @@ const startApplication = async (retries = 3) => {
       // Start Blumon webhook reconciliation job (every 30s — picks up PENDING
       // ProviderEventLog rows when TPV records the Payment after the webhook arrived)
       blumonWebhookReconciliationJob.start()
+
+      // Start Google Calendar sync jobs (Phase 1)
+      // Inbox sweeper: drives pulls for inbox rows the RMQ consumer missed (every 30s)
+      gcalInboxSweeperJob.start()
+      // Channel renewal: refresh events.watch before 7-day expiry (every 12h)
+      gcalChannelRenewalJob.start()
+      // Horizon refresh: re-sync events newly inside the booking window (daily 04:00)
+      gcalHorizonRefreshJob.start()
+      // Pruning: drop ExternalBusyBlock past 7 days (daily 04:30)
+      gcalPruningJob.start()
+      // Health check: detect quiet revocations (daily 05:00)
+      gcalHealthCheckJob.start()
 
       // Start nightly email jobs only in production (avoid sending emails from dev/staging)
       if (NODE_ENV === 'production') {

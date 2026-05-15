@@ -90,10 +90,6 @@ router.delete('/:linkId', validateRequest(getPaymentLinkSchema), paymentLinkCont
  * `payment-link:read` check — sharing an existing link is a read-level
  * action (no mutation to the link itself).
  */
-router.post(
-  '/:linkId/share-whatsapp',
-  validateRequest(sharePaymentLinkWhatsappSchema),
-  paymentLinkController.shareViaWhatsapp,
-)
+router.post('/:linkId/share-whatsapp', validateRequest(sharePaymentLinkWhatsappSchema), paymentLinkController.shareViaWhatsapp)
 
 export default router

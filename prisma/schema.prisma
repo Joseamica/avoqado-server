@@ -399,6 +399,9 @@ model Venue {
   // Per-staff onboarding/tour state records scoped to this venue
   staffOnboardingStates StaffOnboardingState[]
 
+  // Google Calendar Sync (Phase 1)
+  googleCalendarConnections GoogleCalendarConnection[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -646,13 +649,20 @@ model Staff {
   marketingCampaignsCreated MarketingCampaign[] @relation("MarketingCampaignCreator")
 
   // Payment Links
-  paymentLinksCreated PaymentLink[] @relation("PaymentLinkCreatedBy")
+  paymentLinksCreated     PaymentLink[]            @relation("PaymentLinkCreatedBy")
   /// Payment links where THIS staff is one of the commission recipients
   /// (via PaymentLinkAttribution join). Distinct from createdById.
   paymentLinkAttributions PaymentLinkAttribution[]
 
   // Per-venue onboarding/tour progress (checklists, banner dismissals, auto-launch flags)
   onboardingStates StaffOnboardingState[]
+
+  // Google Calendar Sync (Phase 1)
+  // Logically 0-or-1 per staff for STAFF_PERSONAL scope (enforced by partial
+  // unique index in migration); modelled as a list so Prisma can express the
+  // FK without forcing @unique on the nullable staffId column.
+  googleCalendarConnections GoogleCalendarConnection[] @relation("StaffGoogleCalendarConnection")
+  createdGoogleConnections  GoogleCalendarConnection[] @relation("StaffCreatedGoogleConnection")
 
   // Email is now @unique on the field itself (globally unique)
   @@index([email])
@@ -1198,12 +1208,12 @@ model Product {
   lastSyncAt   DateTime?
 
   // Relations
-  inventory         Inventory?
-  orderItems        OrderItem[]
-  paymentLinkItems  PaymentLinkItem[]
-  modifierGroups    ProductModifierGroup[]
-  recipe         Recipe? // ✅ NEW: Recipe composition
-  pricingPolicy  PricingPolicy? // ✅ NEW: Pricing strategy
+  inventory        Inventory?
+  orderItems       OrderItem[]
+  paymentLinkItems PaymentLinkItem[]
+  modifierGroups   ProductModifierGroup[]
+  recipe           Recipe? // ✅ NEW: Recipe composition
+  pricingPolicy    PricingPolicy? // ✅ NEW: Pricing strategy
 
   // Commission System
   commissionMilestones CommissionMilestone[]
@@ -3284,7 +3294,7 @@ model EcommerceMerchant {
   checkoutSessions CheckoutSession[]
   paymentLinks     PaymentLink[]
   payments         Payment[]
-  reservations     Reservation[]      @relation("ReservationEcommerceMerchant")
+  reservations     Reservation[]     @relation("ReservationEcommerceMerchant")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -4468,7 +4478,7 @@ model Discount {
   orderDiscounts    OrderDiscount[]
   // Back-reference for the optional item-level discount link used by the
   // new TPV Cobrar flow. Not a requirement for legacy endpoints.
-  orderItems        OrderItem[] @relation("OrderItemAppliedDiscount")
+  orderItems        OrderItem[]        @relation("OrderItemAppliedDiscount")
 
   @@index([venueId])
   @@index([isAutomatic])
@@ -4577,8 +4587,8 @@ model OrderDiscount {
   value Decimal      @db.Decimal(10, 4) // Original value (% or fixed)
 
   // Calculated amounts
-  amount       Decimal @db.Decimal(10, 2) // Actual discount amount applied
-  taxReduction Decimal @default(0) @db.Decimal(10, 2) // Tax saved due to discount
+  amount           Decimal  @db.Decimal(10, 2) // Actual discount amount applied
+  taxReduction     Decimal  @default(0) @db.Decimal(10, 2) // Tax saved due to discount
   // New TPV Cobrar uses this to preserve which OrderItem ids an order-level
   // discount/cortesía affected. Existing endpoints may leave it empty.
   // See docs/TPV_COBRAR_STRUCTURED_DISCOUNTS.md before adopting elsewhere.
@@ -8426,6 +8436,179 @@ model ReservationSettings {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+// ==========================================
+// GOOGLE CALENDAR SYNC (Phase 1)
+// Two-scope model: VENUE (one master per venue) and STAFF_PERSONAL (one per staff).
+// Read-only sync in Phase 1: Google events become ExternalBusyBlock rows that block
+// availability in `book.avoqado.io` and the dashboard reservation calendar.
+// ==========================================
+
+enum GoogleCalendarConnectionScope {
+  VENUE
+  STAFF_PERSONAL
+}
+
+enum GoogleCalendarConnectionStatus {
+  CONNECTED
+  TOKEN_REVOKED
+  CALENDAR_LOST
+  WATCH_FAILED
+  DISCONNECTED
+}
+
+enum GoogleCalendarChannelStatus {
+  ACTIVE
+  RENEWING
+  EXPIRED
+  STOPPED
+}
+
+/// One Google Calendar connection for a venue or a staff member.
+/// Backed at the DB level by a CHECK constraint that enforces exactly one of
+/// (venueId, staffId) is set, matching the `scope` discriminator.
+/// Refresh / access tokens are AES-256-GCM encrypted with GOOGLE_CALENDAR_TOKEN_KEY.
+model GoogleCalendarConnection {
+  id      String                        @id @default(cuid())
+  scope   GoogleCalendarConnectionScope
+  venueId String?
+  venue   Venue?                        @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  staffId String?
+  staff   Staff?                        @relation("StaffGoogleCalendarConnection", fields: [staffId], references: [id], onDelete: Cascade)
+
+  googleAccountEmail       String
+  googleAccountSub         String
+  selectedCalendarId       String
+  selectedCalendarSummary  String
+  selectedCalendarTimeZone String
+
+  refreshTokenCiphertext Bytes
+  accessTokenCiphertext  Bytes?
+  accessTokenExpiresAt   DateTime?
+
+  // Incremental sync state (set after Phase A backfill completes)
+  syncToken      String?
+  lastSyncedAt   DateTime?
+  lastHorizonEnd DateTime? // Furthest future timestamp covered by backfill
+
+  status         GoogleCalendarConnectionStatus @default(CONNECTED)
+  statusReason   String?                        @db.Text
+  connectedAt    DateTime                       @default(now())
+  disconnectedAt DateTime?
+
+  createdByStaffId String?
+  createdByStaff   Staff?  @relation("StaffCreatedGoogleConnection", fields: [createdByStaffId], references: [id], onDelete: SetNull)
+
+  channels   GoogleCalendarChannel[]
+  busyBlocks ExternalBusyBlock[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId])
+  @@index([staffId])
+  @@index([status])
+}
+
+/// A Google Calendar push-notification channel ("events.watch" subscription).
+/// Channels expire after ~7 days and are renewed via the gcal-channel-renewal cron.
+model GoogleCalendarChannel {
+  id           String                   @id @default(cuid())
+  connectionId String
+  connection   GoogleCalendarConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  channelId  String                      @unique // Google channel id (UUID we generate)
+  resourceId String // Google calendar resource id
+  token      String // Random secret echoed in webhook headers for verification
+  expiresAt  DateTime
+  status     GoogleCalendarChannelStatus @default(ACTIVE)
+
+  createdAt DateTime  @default(now())
+  stoppedAt DateTime?
+
+  @@index([connectionId, status])
+  @@index([expiresAt, status])
+  @@index([resourceId])
+}
+
+/// External-source busy-time block. Phase 1 covers Google Calendar events as
+/// opaque blocks (we never reveal event titles to public-facing surfaces).
+/// `venueId` is denormalized for fast availability queries; `staffId` is set
+/// when the connection is STAFF_PERSONAL.
+model ExternalBusyBlock {
+  id                 String                   @id @default(cuid())
+  googleConnectionId String
+  connection         GoogleCalendarConnection @relation(fields: [googleConnectionId], references: [id], onDelete: Cascade)
+  venueId            String?
+  staffId            String?
+
+  externalSource     String @default("GOOGLE")
+  externalCalendarId String
+  externalEventId    String
+
+  startsAt DateTime
+  endsAt   DateTime
+  allDay   Boolean  @default(false)
+
+  title     String? @db.Text
+  isPrivate Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([googleConnectionId, externalEventId])
+  @@index([venueId, startsAt, endsAt])
+  @@index([staffId, startsAt, endsAt])
+}
+
+/// Durable inbox for Google Calendar webhook notifications. We write a row here
+/// BEFORE acking the webhook so a downstream worker can deliver-at-least-once
+/// even if RabbitMQ is momentarily unavailable. The inbox sweeper cron picks
+/// orphan rows (`processedAt IS NULL` AND old `receivedAt`).
+model GoogleCalendarWebhookInbox {
+  id            String @id @default(cuid())
+  connectionId  String
+  channelId     String
+  resourceId    String
+  resourceState String
+  messageNumber String
+
+  receivedAt  DateTime  @default(now())
+  processedAt DateTime?
+  attempts    Int       @default(0)
+  lastError   String?   @db.Text
+
+  @@index([processedAt, receivedAt])
+  @@index([connectionId, processedAt])
+}
+
+/// Short-lived (10 minute) one-shot bridge row used to hand the OAuth tokens
+/// produced by the redirect callback to the authenticated dashboard session that
+/// completes the calendar-selection step. The session token is delivered to the
+/// dashboard via a signed cookie; only the SHA-256 hash is stored here.
+/// `consumedAt` is set atomically on use to prevent replay.
+model GoogleOAuthSession {
+  id        String @id @default(cuid())
+  tokenHash String @unique
+
+  authUserId String
+  intent     String // 'staff_personal' | 'venue_master'
+  venueId    String?
+  staffId    String?
+
+  encryptedRefreshToken Bytes
+  encryptedAccessToken  Bytes
+  accessTokenExpiresAt  DateTime
+
+  googleAccountEmail String
+  googleAccountSub   String
+
+  createdAt  DateTime  @default(now())
+  expiresAt  DateTime
+  consumedAt DateTime?
+
+  @@index([expiresAt])
 }
 
 // ==========================================

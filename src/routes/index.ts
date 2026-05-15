@@ -15,6 +15,7 @@ import partnerRoutes from './partner.routes'
 import mobileRoutes from './mobile.routes'
 import meRoutes from './me.routes'
 import consumerRoutes from './consumer.routes'
+import googleCalendarRoutes from './google-calendar.routes'
 import { tpvVersionGate } from '../middlewares/tpv-version-gate.middleware'
 
 const router = express.Router({ mergeParams: true })
@@ -34,5 +35,6 @@ router.use('/partner', partnerRoutes) // Partner API (PlayTelecom, etc.) under /
 router.use('/mobile', mobileRoutes) // Mobile app routes (iOS, Android) under /api/v1/mobile
 router.use('/consumer', consumerRoutes) // Public consumer app routes under /api/v1/consumer
 router.use('/me', meRoutes) // Current user routes under /api/v1/me
+router.use('/google-calendar', googleCalendarRoutes) // Google Calendar Sync (Phase 1)
 
 export default router

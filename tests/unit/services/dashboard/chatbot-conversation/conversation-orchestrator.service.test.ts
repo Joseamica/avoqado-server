@@ -51,6 +51,31 @@ describe('ConversationOrchestratorService', () => {
     })
   })
 
+  it('formats today sales without awkward prepositions', async () => {
+    jest.spyOn(SharedQueryService, 'getSalesForPeriod').mockResolvedValue({
+      totalRevenue: 0,
+      averageTicket: 0,
+      orderCount: 0,
+      paymentCount: 0,
+      currency: 'MXN',
+      period: 'today',
+      dateRange: {
+        from: new Date('2026-05-15T06:00:00.000Z'),
+        to: new Date('2026-05-16T05:59:59.999Z'),
+      },
+    })
+
+    const response = await orchestrator.process({
+      message: 'cuanto vendi hoy',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(response?.response).toContain('Hoy vendiste $0.00')
+    expect(response?.response).not.toContain('En hoy')
+  })
+
   it('executes compound recipe count and usage with known tools', async () => {
     jest.spyOn(SharedQueryService, 'getRecipeCount').mockResolvedValue({ totalRecipes: 24 })
     jest.spyOn(SharedQueryService, 'getRecipeUsage').mockResolvedValue({
@@ -266,7 +291,7 @@ describe('ConversationOrchestratorService', () => {
     })
 
     expect(SharedQueryService.getTopProducts).toHaveBeenCalledWith('venue-1', 'thisMonth', 5)
-    expect(response?.response).toContain('The top-selling products in this month are')
+    expect(response?.response).toContain('The top-selling products in the last 30 days are')
     expect(response?.response).toContain('Hamburguesa BBQ')
     expect(response?.response).toContain('sold')
     expect(response?.response).not.toContain('Los productos')
@@ -838,6 +863,46 @@ describe('ConversationOrchestratorService', () => {
     expect(SharedQueryService.getReservationSummary).toHaveBeenCalledWith('venue-1', 'today')
     expect(response?.response).toContain('tienes 3 reservaciones')
     expect(response?.response).toContain('CONFIRMED: 2')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'reservations.summary', status: 'executed' })])
+  })
+
+  it('answers ambiguous reservation count questions with today and all-time context', async () => {
+    jest
+      .spyOn(SharedQueryService, 'getReservationSummary')
+      .mockResolvedValueOnce({
+        total: 0,
+        byStatus: {},
+        byChannel: {},
+        noShowRate: 0,
+        period: 'today',
+        dateRange: {
+          from: new Date('2026-05-12T06:00:00.000Z'),
+          to: new Date('2026-05-13T05:59:59.999Z'),
+        },
+      })
+      .mockResolvedValueOnce({
+        total: 43,
+        byStatus: { COMPLETED: 1, CANCELLED: 15, NO_SHOW: 27 },
+        byChannel: { WEB: 43 },
+        noShowRate: 62.8,
+        period: 'allTime',
+        dateRange: {
+          from: new Date('2020-01-01T00:00:00.000Z'),
+          to: new Date('2026-05-13T05:59:59.999Z'),
+        },
+      })
+
+    const response = await orchestrator.process({
+      message: 'cuantas reservaciones tengo',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(SharedQueryService.getReservationSummary).toHaveBeenCalledWith('venue-1', 'today')
+    expect(SharedQueryService.getReservationSummary).toHaveBeenCalledWith('venue-1', 'allTime')
+    expect(response?.response).toContain('No encontré reservaciones para hoy')
+    expect(response?.response).toContain('En todo el historial tienes 43 reservaciones')
     expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'reservations.summary', status: 'executed' })])
   })
 

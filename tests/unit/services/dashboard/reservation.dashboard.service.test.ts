@@ -236,6 +236,89 @@ describe('Reservation Dashboard Service', () => {
       ).rejects.toThrow(ConflictError)
     })
 
+    // ============================================================
+    // ExternalBusyBlock integration (Phase 1 — Task 24)
+    // ============================================================
+
+    it('should throw ConflictError when ExternalBusyBlock overlaps (venue-master)', async () => {
+      prismaMock.externalBusyBlock.findFirst.mockResolvedValue({
+        id: 'block-1',
+        venueId: VENUE_ID,
+        staffId: null,
+        startsAt: new Date('2026-03-01T14:00:00Z'),
+        endsAt: new Date('2026-03-01T15:00:00Z'),
+      })
+
+      await expect(
+        createReservation(
+          VENUE_ID,
+          {
+            startsAt: new Date('2026-03-01T14:00:00Z'),
+            endsAt: new Date('2026-03-01T15:00:00Z'),
+            duration: 60,
+            tableId: 'table-1',
+          },
+          STAFF_ID,
+        ),
+      ).rejects.toThrow(ConflictError)
+      await expect(
+        createReservation(
+          VENUE_ID,
+          {
+            startsAt: new Date('2026-03-01T14:00:00Z'),
+            endsAt: new Date('2026-03-01T15:00:00Z'),
+            duration: 60,
+            tableId: 'table-1',
+          },
+          STAFF_ID,
+        ),
+      ).rejects.toThrow(/calendario externo/)
+    })
+
+    it('should throw ConflictError when ExternalBusyBlock overlaps (staff-personal)', async () => {
+      prismaMock.externalBusyBlock.findFirst.mockResolvedValueOnce({
+        id: 'block-2',
+        venueId: null,
+        staffId: 'staff-1',
+        startsAt: new Date('2026-03-01T14:00:00Z'),
+        endsAt: new Date('2026-03-01T15:00:00Z'),
+      })
+
+      await expect(
+        createReservation(
+          VENUE_ID,
+          {
+            startsAt: new Date('2026-03-01T14:00:00Z'),
+            endsAt: new Date('2026-03-01T15:00:00Z'),
+            duration: 60,
+            assignedStaffId: 'staff-1',
+          },
+          STAFF_ID,
+        ),
+      ).rejects.toThrow(ConflictError)
+    })
+
+    it('REGRESSION: succeeds when no ExternalBusyBlock matches', async () => {
+      prismaMock.externalBusyBlock.findFirst.mockResolvedValueOnce(null)
+      const mockCreated = createMockReservation()
+      prismaMock.reservation.create.mockResolvedValue(mockCreated)
+      prismaMock.reservation.findUnique.mockResolvedValue(null) // unique code
+
+      const result = await createReservation(
+        VENUE_ID,
+        {
+          startsAt: new Date('2026-03-01T14:00:00Z'),
+          endsAt: new Date('2026-03-01T15:00:00Z'),
+          duration: 60,
+          tableId: 'table-1',
+        },
+        STAFF_ID,
+      )
+
+      expect(result).toBeDefined()
+      expect(prismaMock.reservation.create).toHaveBeenCalled()
+    })
+
     it('should calculate deposit when config requires it', async () => {
       const mockCreated = createMockReservation({
         depositAmount: new Prisma.Decimal(200),
@@ -688,6 +771,62 @@ describe('Reservation Dashboard Service', () => {
       prismaMock.reservation.findFirst.mockResolvedValue(null)
 
       await expect(updateReservation(VENUE_ID, 'nonexistent', { guestName: 'New' }, STAFF_ID)).rejects.toThrow(NotFoundError)
+    })
+
+    // ============================================================
+    // ExternalBusyBlock integration (Phase 1 — Task 25)
+    // ============================================================
+
+    it('should throw ConflictError when reschedule lands on an ExternalBusyBlock', async () => {
+      const existing = createMockReservation({ status: 'CONFIRMED' })
+      prismaMock.reservation.findFirst.mockResolvedValueOnce(existing)
+      prismaMock.externalBusyBlock.findFirst.mockResolvedValueOnce({
+        id: 'block-3',
+        venueId: VENUE_ID,
+        staffId: null,
+        startsAt: new Date('2026-03-01T16:00:00Z'),
+        endsAt: new Date('2026-03-01T17:00:00Z'),
+      })
+
+      await expect(
+        updateReservation(
+          VENUE_ID,
+          'res-1',
+          {
+            startsAt: new Date('2026-03-01T16:00:00Z'),
+            endsAt: new Date('2026-03-01T17:00:00Z'),
+            duration: 60,
+          },
+          STAFF_ID,
+        ),
+      ).rejects.toThrow(ConflictError)
+    })
+
+    it('REGRESSION: succeeds when no ExternalBusyBlock matches the new time', async () => {
+      const existing = createMockReservation({ status: 'CONFIRMED' })
+      const updated = createMockReservation({
+        status: 'CONFIRMED',
+        startsAt: new Date('2026-03-01T16:00:00Z'),
+        endsAt: new Date('2026-03-01T17:00:00Z'),
+      })
+
+      prismaMock.reservation.findFirst.mockResolvedValueOnce(existing)
+      prismaMock.externalBusyBlock.findFirst.mockResolvedValueOnce(null)
+      prismaMock.reservation.update.mockResolvedValue(updated)
+      prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(updated)
+
+      const result = await updateReservation(
+        VENUE_ID,
+        'res-1',
+        {
+          startsAt: new Date('2026-03-01T16:00:00Z'),
+          endsAt: new Date('2026-03-01T17:00:00Z'),
+          duration: 60,
+        },
+        STAFF_ID,
+      )
+
+      expect(result).toBeDefined()
     })
   })
 

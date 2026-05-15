@@ -40,8 +40,10 @@ Generated: 2026-05-14T06:41:39.739Z
 - `inventory.purchaseOrder.receive` (action, medium) — permissions: inventory:update; source: purchaseOrderService.receivePurchaseOrder
 - `inventory.purchaseOrder.receiveAll` (action, medium) — permissions: inventory:update; source: purchaseOrderService.receiveAllItems
 - `inventory.purchaseOrder.receiveNone` (action, high) — permissions: inventory:delete; source: purchaseOrderService.receiveNoItems
-- `inventory.purchaseOrder.reject` (action, medium) — permissions: inventory:update; source: purchaseOrderWorkflowService.rejectPurchaseOrder
-- `inventory.purchaseOrder.submitForApproval` (action, low) — permissions: inventory:update; source: purchaseOrderWorkflowService.submitForApproval
+- `inventory.purchaseOrder.reject` (action, medium) — permissions: inventory:update; source:
+  purchaseOrderWorkflowService.rejectPurchaseOrder
+- `inventory.purchaseOrder.submitForApproval` (action, low) — permissions: inventory:update; source:
+  purchaseOrderWorkflowService.submitForApproval
 - `inventory.rawMaterial.adjustStock` (action, medium) — permissions: inventory:update; source: rawMaterialService.adjustStock
 - `inventory.rawMaterial.create` (action, low) — permissions: inventory:create; source: rawMaterialService.createRawMaterial
 - `inventory.rawMaterial.delete` (action, high) — permissions: inventory:delete; source: rawMaterialService.deactivateRawMaterial
@@ -101,85 +103,85 @@ Generated: 2026-05-14T06:41:39.739Z
 
 ## Full Registry
 
-| ID | Kind | Status | Scope | Risk | Permission | Confirmation | Data Source |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `activeShifts` | query | registered | venue | medium | staff:read | - | shared_query.activeShifts |
-| `adHocAnalytics` | query | blocked | venue | critical | - | - | legacy.text_to_sql |
-| `alert.acknowledge` | action | registered | venue | low | inventory:update | single | alertService.acknowledgeAlert |
-| `alert.dismiss` | action | registered | venue | low | inventory:update | single | alertService.dismissAlert |
-| `alert.resolve` | action | registered | venue | low | inventory:update | single | alertService.resolveAlert |
-| `averageTicket` | query | registered | venue | low | payments:read, orders:read | - | shared_query.averageTicket |
-| `blocked.crossVenueData` | blocked | blocked | venue | critical | - | - | security.blocklist |
-| `blocked.superadminSecrets` | blocked | blocked | superadmin | critical | - | - | security.blocklist |
-| `businessOverview` | query | registered | venue | low | payments:read, orders:read, reviews:read | - | shared_query.businessOverview |
-| `commissions.payouts` | query | registered | venue | medium | commissions:payout | - | shared_query.commissions.payouts |
-| `commissions.summary` | query | registered | venue | medium | commissions:read | - | shared_query.commissions.summary |
-| `creditPacks.balance` | query | registered | venue | medium | credit-packs:read | - | shared_query.creditPacks.balance |
-| `creditPacks.list` | query | registered | venue | medium | credit-packs:read | - | shared_query.creditPacks.list |
-| `creditPacks.summary` | query | registered | venue | low | credit-packs:read | - | shared_query.creditPacks.summary |
-| `customers.detail` | query | registered | venue | medium | customers:read | - | shared_query.customers.detail |
-| `customers.search` | query | registered | venue | medium | customers:read | - | shared_query.customers.search |
-| `customers.summary` | query | registered | venue | medium | customers:read | - | shared_query.customers.summary |
-| `howTo.contactSupport` | howTo | registered | venue | low | - | - | dashboard_knowledge_base |
-| `howTo.paymentLinks` | howTo | registered | venue | low | - | - | dashboard_knowledge_base |
-| `howTo.permissions` | howTo | registered | venue | low | - | - | dashboard_knowledge_base |
-| `howTo.settlements` | howTo | registered | venue | low | - | - | dashboard_knowledge_base |
-| `howTo.teamInvite` | howTo | registered | venue | low | - | - | dashboard_knowledge_base |
-| `inventory.product.adjustStock` | action | registered | venue | medium | inventory:update | single | productInventoryService.adjustInventoryStock |
-| `inventory.product.setMinimum` | action | registered | venue | low | inventory:update | single | productInventoryService.setMinimumStock |
-| `inventory.purchaseOrder.approve` | action | registered | venue | medium | inventory:update | single | purchaseOrderService.approvePurchaseOrder |
-| `inventory.purchaseOrder.cancel` | action | registered | venue | high | inventory:delete | double | purchaseOrderService.cancelPurchaseOrder |
-| `inventory.purchaseOrder.create` | action | registered | venue | low | inventory:create | single | purchaseOrderService.createPurchaseOrder |
-| `inventory.purchaseOrder.delete` | action | registered | venue | high | inventory:delete | double | purchaseOrderService.deletePurchaseOrder |
-| `inventory.purchaseOrder.receive` | action | registered | venue | medium | inventory:update | single | purchaseOrderService.receivePurchaseOrder |
-| `inventory.purchaseOrder.receiveAll` | action | registered | venue | medium | inventory:update | single | purchaseOrderService.receiveAllItems |
-| `inventory.purchaseOrder.receiveNone` | action | registered | venue | high | inventory:delete | double | purchaseOrderService.receiveNoItems |
-| `inventory.purchaseOrder.reject` | action | registered | venue | medium | inventory:update | single | purchaseOrderWorkflowService.rejectPurchaseOrder |
-| `inventory.purchaseOrder.submitForApproval` | action | registered | venue | low | inventory:update | single | purchaseOrderWorkflowService.submitForApproval |
-| `inventory.rawMaterial.adjustStock` | action | registered | venue | medium | inventory:update | single | rawMaterialService.adjustStock |
-| `inventory.rawMaterial.create` | action | registered | venue | low | inventory:create | single | rawMaterialService.createRawMaterial |
-| `inventory.rawMaterial.delete` | action | registered | venue | high | inventory:delete | double | rawMaterialService.deactivateRawMaterial |
-| `inventory.rawMaterial.reactivate` | action | registered | venue | low | inventory:update | single | rawMaterialService.reactivateRawMaterial |
-| `inventory.rawMaterial.update` | action | registered | venue | medium | inventory:update | single | rawMaterialService.updateRawMaterial |
-| `inventory.recipe.addLine` | action | registered | venue | low | menu:update | single | recipeService.addRecipeLine |
-| `inventory.recipe.create` | action | registered | venue | low | menu:create | single | recipeService.createRecipe |
-| `inventory.recipe.delete` | action | registered | venue | high | menu:delete | double | recipeService.deleteRecipe |
-| `inventory.recipe.recalculateCost` | action | registered | venue | low | menu:update | single | recipeService.recalculateRecipeCost |
-| `inventory.recipe.removeLine` | action | registered | venue | medium | menu:update | single | recipeService.removeRecipeLine |
-| `inventory.recipe.update` | action | registered | venue | medium | menu:update | single | recipeService.updateRecipe |
-| `inventoryAlerts` | query | registered | venue | low | inventory:read | - | shared_query.inventoryAlerts |
-| `menu.product.create` | action | registered | venue | low | menu:create | single | productService.createProduct |
-| `menu.product.delete` | action | registered | venue | high | menu:delete | double | productService.deleteProduct |
-| `menu.product.update` | action | registered | venue | medium | menu:update | single | productService.updateProduct |
-| `paymentLinks.create` | action | backlog | venue | medium | payment-link:create | single | backlog |
-| `paymentLinks.detail` | query | registered | venue | medium | payment-link:read | - | shared_query.paymentLinks.detail |
-| `paymentLinks.list` | query | registered | venue | low | payment-link:read | - | shared_query.paymentLinks.list |
-| `paymentLinks.summary` | query | registered | venue | low | payment-link:read | - | shared_query.paymentLinks.summary |
-| `paymentMethodBreakdown` | query | registered | venue | low | payments:read | - | shared_query.paymentMethodBreakdown |
-| `payments.detail` | query | registered | venue | medium | payments:read | - | shared_query.payments.detail |
-| `payments.list` | query | registered | venue | medium | payments:read | - | shared_query.payments.list |
-| `payments.summary` | query | registered | venue | low | payments:read | - | shared_query.payments.summary |
-| `pendingOrders` | query | registered | venue | low | orders:read | - | shared_query.pendingOrders |
-| `pricing.applySuggestedPrice` | action | registered | venue | medium | menu:update | single | pricingService.applySuggestedPrice |
-| `productSales` | query | registered | venue | low | orders:read, menu:read | - | shared_query.productSales |
-| `productSales.compare` | query | registered | venue | low | orders:read, menu:read | - | shared_query.productSales.compare |
-| `profitAnalysis` | query | registered | venue | medium | payments:read, orders:read, inventory:read | - | shared_query.profitAnalysis |
-| `recipeCount` | query | registered | venue | low | inventory:read | - | shared_query.recipeCount |
-| `recipeList` | query | registered | venue | low | inventory:read | - | shared_query.recipeList |
-| `recipeUsage` | query | registered | venue | low | inventory:read, orders:read | - | shared_query.recipeUsage |
-| `reservations.cancel` | action | backlog | venue | high | reservations:update | double | backlog |
-| `reservations.create` | action | backlog | venue | medium | reservations:create | single | backlog |
-| `reservations.list` | query | registered | venue | medium | reservations:read | - | shared_query.reservations.list |
-| `reservations.summary` | query | registered | venue | low | reservations:read | - | shared_query.reservations.summary |
-| `reviews` | query | registered | venue | low | reviews:read | - | shared_query.reviews |
-| `sales` | query | registered | venue | low | payments:read, orders:read | - | shared_query.sales |
-| `settlementCalendar` | query | registered | venue | low | settlements:read | - | shared_query.settlementCalendar |
-| `settlements.detail` | query | registered | venue | low | settlements:read | - | shared_query.settlements.detail |
-| `staffPerformance` | query | registered | venue | medium | orders:read, staff:read | - | shared_query.staffPerformance |
-| `supplier.create` | action | registered | venue | low | inventory:create | single | supplierService.createSupplier |
-| `supplier.createPricing` | action | registered | venue | low | inventory:create | single | supplierService.createSupplierPricing |
-| `supplier.delete` | action | registered | venue | high | inventory:delete | double | supplierService.deleteSupplier |
-| `supplier.update` | action | registered | venue | medium | inventory:update | single | supplierService.updateSupplier |
-| `team.invite` | action | backlog | venue | high | team:invite | double | backlog |
-| `team.members` | query | registered | venue | medium | teams:read | - | shared_query.team.members |
-| `topProducts` | query | registered | venue | low | orders:read, menu:read | - | shared_query.topProducts |
+| ID                                          | Kind    | Status     | Scope      | Risk     | Permission                                 | Confirmation | Data Source                                      |
+| ------------------------------------------- | ------- | ---------- | ---------- | -------- | ------------------------------------------ | ------------ | ------------------------------------------------ |
+| `activeShifts`                              | query   | registered | venue      | medium   | staff:read                                 | -            | shared_query.activeShifts                        |
+| `adHocAnalytics`                            | query   | blocked    | venue      | critical | -                                          | -            | legacy.text_to_sql                               |
+| `alert.acknowledge`                         | action  | registered | venue      | low      | inventory:update                           | single       | alertService.acknowledgeAlert                    |
+| `alert.dismiss`                             | action  | registered | venue      | low      | inventory:update                           | single       | alertService.dismissAlert                        |
+| `alert.resolve`                             | action  | registered | venue      | low      | inventory:update                           | single       | alertService.resolveAlert                        |
+| `averageTicket`                             | query   | registered | venue      | low      | payments:read, orders:read                 | -            | shared_query.averageTicket                       |
+| `blocked.crossVenueData`                    | blocked | blocked    | venue      | critical | -                                          | -            | security.blocklist                               |
+| `blocked.superadminSecrets`                 | blocked | blocked    | superadmin | critical | -                                          | -            | security.blocklist                               |
+| `businessOverview`                          | query   | registered | venue      | low      | payments:read, orders:read, reviews:read   | -            | shared_query.businessOverview                    |
+| `commissions.payouts`                       | query   | registered | venue      | medium   | commissions:payout                         | -            | shared_query.commissions.payouts                 |
+| `commissions.summary`                       | query   | registered | venue      | medium   | commissions:read                           | -            | shared_query.commissions.summary                 |
+| `creditPacks.balance`                       | query   | registered | venue      | medium   | credit-packs:read                          | -            | shared_query.creditPacks.balance                 |
+| `creditPacks.list`                          | query   | registered | venue      | medium   | credit-packs:read                          | -            | shared_query.creditPacks.list                    |
+| `creditPacks.summary`                       | query   | registered | venue      | low      | credit-packs:read                          | -            | shared_query.creditPacks.summary                 |
+| `customers.detail`                          | query   | registered | venue      | medium   | customers:read                             | -            | shared_query.customers.detail                    |
+| `customers.search`                          | query   | registered | venue      | medium   | customers:read                             | -            | shared_query.customers.search                    |
+| `customers.summary`                         | query   | registered | venue      | medium   | customers:read                             | -            | shared_query.customers.summary                   |
+| `howTo.contactSupport`                      | howTo   | registered | venue      | low      | -                                          | -            | dashboard_knowledge_base                         |
+| `howTo.paymentLinks`                        | howTo   | registered | venue      | low      | -                                          | -            | dashboard_knowledge_base                         |
+| `howTo.permissions`                         | howTo   | registered | venue      | low      | -                                          | -            | dashboard_knowledge_base                         |
+| `howTo.settlements`                         | howTo   | registered | venue      | low      | -                                          | -            | dashboard_knowledge_base                         |
+| `howTo.teamInvite`                          | howTo   | registered | venue      | low      | -                                          | -            | dashboard_knowledge_base                         |
+| `inventory.product.adjustStock`             | action  | registered | venue      | medium   | inventory:update                           | single       | productInventoryService.adjustInventoryStock     |
+| `inventory.product.setMinimum`              | action  | registered | venue      | low      | inventory:update                           | single       | productInventoryService.setMinimumStock          |
+| `inventory.purchaseOrder.approve`           | action  | registered | venue      | medium   | inventory:update                           | single       | purchaseOrderService.approvePurchaseOrder        |
+| `inventory.purchaseOrder.cancel`            | action  | registered | venue      | high     | inventory:delete                           | double       | purchaseOrderService.cancelPurchaseOrder         |
+| `inventory.purchaseOrder.create`            | action  | registered | venue      | low      | inventory:create                           | single       | purchaseOrderService.createPurchaseOrder         |
+| `inventory.purchaseOrder.delete`            | action  | registered | venue      | high     | inventory:delete                           | double       | purchaseOrderService.deletePurchaseOrder         |
+| `inventory.purchaseOrder.receive`           | action  | registered | venue      | medium   | inventory:update                           | single       | purchaseOrderService.receivePurchaseOrder        |
+| `inventory.purchaseOrder.receiveAll`        | action  | registered | venue      | medium   | inventory:update                           | single       | purchaseOrderService.receiveAllItems             |
+| `inventory.purchaseOrder.receiveNone`       | action  | registered | venue      | high     | inventory:delete                           | double       | purchaseOrderService.receiveNoItems              |
+| `inventory.purchaseOrder.reject`            | action  | registered | venue      | medium   | inventory:update                           | single       | purchaseOrderWorkflowService.rejectPurchaseOrder |
+| `inventory.purchaseOrder.submitForApproval` | action  | registered | venue      | low      | inventory:update                           | single       | purchaseOrderWorkflowService.submitForApproval   |
+| `inventory.rawMaterial.adjustStock`         | action  | registered | venue      | medium   | inventory:update                           | single       | rawMaterialService.adjustStock                   |
+| `inventory.rawMaterial.create`              | action  | registered | venue      | low      | inventory:create                           | single       | rawMaterialService.createRawMaterial             |
+| `inventory.rawMaterial.delete`              | action  | registered | venue      | high     | inventory:delete                           | double       | rawMaterialService.deactivateRawMaterial         |
+| `inventory.rawMaterial.reactivate`          | action  | registered | venue      | low      | inventory:update                           | single       | rawMaterialService.reactivateRawMaterial         |
+| `inventory.rawMaterial.update`              | action  | registered | venue      | medium   | inventory:update                           | single       | rawMaterialService.updateRawMaterial             |
+| `inventory.recipe.addLine`                  | action  | registered | venue      | low      | menu:update                                | single       | recipeService.addRecipeLine                      |
+| `inventory.recipe.create`                   | action  | registered | venue      | low      | menu:create                                | single       | recipeService.createRecipe                       |
+| `inventory.recipe.delete`                   | action  | registered | venue      | high     | menu:delete                                | double       | recipeService.deleteRecipe                       |
+| `inventory.recipe.recalculateCost`          | action  | registered | venue      | low      | menu:update                                | single       | recipeService.recalculateRecipeCost              |
+| `inventory.recipe.removeLine`               | action  | registered | venue      | medium   | menu:update                                | single       | recipeService.removeRecipeLine                   |
+| `inventory.recipe.update`                   | action  | registered | venue      | medium   | menu:update                                | single       | recipeService.updateRecipe                       |
+| `inventoryAlerts`                           | query   | registered | venue      | low      | inventory:read                             | -            | shared_query.inventoryAlerts                     |
+| `menu.product.create`                       | action  | registered | venue      | low      | menu:create                                | single       | productService.createProduct                     |
+| `menu.product.delete`                       | action  | registered | venue      | high     | menu:delete                                | double       | productService.deleteProduct                     |
+| `menu.product.update`                       | action  | registered | venue      | medium   | menu:update                                | single       | productService.updateProduct                     |
+| `paymentLinks.create`                       | action  | backlog    | venue      | medium   | payment-link:create                        | single       | backlog                                          |
+| `paymentLinks.detail`                       | query   | registered | venue      | medium   | payment-link:read                          | -            | shared_query.paymentLinks.detail                 |
+| `paymentLinks.list`                         | query   | registered | venue      | low      | payment-link:read                          | -            | shared_query.paymentLinks.list                   |
+| `paymentLinks.summary`                      | query   | registered | venue      | low      | payment-link:read                          | -            | shared_query.paymentLinks.summary                |
+| `paymentMethodBreakdown`                    | query   | registered | venue      | low      | payments:read                              | -            | shared_query.paymentMethodBreakdown              |
+| `payments.detail`                           | query   | registered | venue      | medium   | payments:read                              | -            | shared_query.payments.detail                     |
+| `payments.list`                             | query   | registered | venue      | medium   | payments:read                              | -            | shared_query.payments.list                       |
+| `payments.summary`                          | query   | registered | venue      | low      | payments:read                              | -            | shared_query.payments.summary                    |
+| `pendingOrders`                             | query   | registered | venue      | low      | orders:read                                | -            | shared_query.pendingOrders                       |
+| `pricing.applySuggestedPrice`               | action  | registered | venue      | medium   | menu:update                                | single       | pricingService.applySuggestedPrice               |
+| `productSales`                              | query   | registered | venue      | low      | orders:read, menu:read                     | -            | shared_query.productSales                        |
+| `productSales.compare`                      | query   | registered | venue      | low      | orders:read, menu:read                     | -            | shared_query.productSales.compare                |
+| `profitAnalysis`                            | query   | registered | venue      | medium   | payments:read, orders:read, inventory:read | -            | shared_query.profitAnalysis                      |
+| `recipeCount`                               | query   | registered | venue      | low      | inventory:read                             | -            | shared_query.recipeCount                         |
+| `recipeList`                                | query   | registered | venue      | low      | inventory:read                             | -            | shared_query.recipeList                          |
+| `recipeUsage`                               | query   | registered | venue      | low      | inventory:read, orders:read                | -            | shared_query.recipeUsage                         |
+| `reservations.cancel`                       | action  | backlog    | venue      | high     | reservations:update                        | double       | backlog                                          |
+| `reservations.create`                       | action  | backlog    | venue      | medium   | reservations:create                        | single       | backlog                                          |
+| `reservations.list`                         | query   | registered | venue      | medium   | reservations:read                          | -            | shared_query.reservations.list                   |
+| `reservations.summary`                      | query   | registered | venue      | low      | reservations:read                          | -            | shared_query.reservations.summary                |
+| `reviews`                                   | query   | registered | venue      | low      | reviews:read                               | -            | shared_query.reviews                             |
+| `sales`                                     | query   | registered | venue      | low      | payments:read, orders:read                 | -            | shared_query.sales                               |
+| `settlementCalendar`                        | query   | registered | venue      | low      | settlements:read                           | -            | shared_query.settlementCalendar                  |
+| `settlements.detail`                        | query   | registered | venue      | low      | settlements:read                           | -            | shared_query.settlements.detail                  |
+| `staffPerformance`                          | query   | registered | venue      | medium   | orders:read, staff:read                    | -            | shared_query.staffPerformance                    |
+| `supplier.create`                           | action  | registered | venue      | low      | inventory:create                           | single       | supplierService.createSupplier                   |
+| `supplier.createPricing`                    | action  | registered | venue      | low      | inventory:create                           | single       | supplierService.createSupplierPricing            |
+| `supplier.delete`                           | action  | registered | venue      | high     | inventory:delete                           | double       | supplierService.deleteSupplier                   |
+| `supplier.update`                           | action  | registered | venue      | medium   | inventory:update                           | single       | supplierService.updateSupplier                   |
+| `team.invite`                               | action  | backlog    | venue      | high     | team:invite                                | double       | backlog                                          |
+| `team.members`                              | query   | registered | venue      | medium   | teams:read                                 | -            | shared_query.team.members                        |
+| `topProducts`                               | query   | registered | venue      | low      | orders:read, menu:read                     | -            | shared_query.topProducts                         |

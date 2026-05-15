@@ -723,6 +723,31 @@ async function main() {
   console.log(`   ID: ${paymentLinksModule.id}`)
   console.log(`   Name: ${paymentLinksModule.name}\n`)
 
+  // Create GOOGLE_CALENDAR_SYNC module
+  // Bidirectional Google Calendar sync for reservations. Per-venue toggle; staff
+  // members can additionally connect their personal calendar from the dashboard.
+  // Config schema is intentionally empty in Phase 1 — push/privacy settings land
+  // with Phase 2 when CalendarSyncOutbox + push hooks are wired in.
+  const googleCalendarSyncModule = await prisma.module.upsert({
+    where: { code: 'GOOGLE_CALENDAR_SYNC' },
+    create: {
+      code: 'GOOGLE_CALENDAR_SYNC',
+      name: 'Google Calendar Sync',
+      description: 'Sincronización bidireccional con Google Calendar para reservaciones (lectura en Fase 1, escritura en Fase 2).',
+      defaultConfig: {},
+      presets: {},
+      configSchema: { type: 'object', properties: {} },
+    },
+    update: {
+      name: 'Google Calendar Sync',
+      description: 'Sincronización bidireccional con Google Calendar para reservaciones (lectura en Fase 1, escritura en Fase 2).',
+    },
+  })
+
+  console.log(`✅ Module: ${googleCalendarSyncModule.code}`)
+  console.log(`   ID: ${googleCalendarSyncModule.id}`)
+  console.log(`   Name: ${googleCalendarSyncModule.name}\n`)
+
   // Summary
   const moduleCount = await prisma.module.count({ where: { active: true } })
   console.log(`\n📊 Summary: ${moduleCount} active modules in system`)
