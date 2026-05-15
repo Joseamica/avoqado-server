@@ -547,7 +547,7 @@ export class VenueCommissionSettlementJob {
     </table>
 
     <p style="margin:24px 0 0;font-size:11px;color:#a0aec0;text-align:center">
-      Generado automaticamente por Avoqado | Split: AVO = Avoqado | MG = Moneygiver | Comision MG no incluye IVA
+      Generado automaticamente por Avoqado | Split: AVO = Avoqado | EXT = Externo | Comision EXT no incluye IVA
     </p>
   </div>
 </div>

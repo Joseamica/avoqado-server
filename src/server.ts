@@ -305,11 +305,9 @@ const startApplication = async (retries = 3) => {
       // Start commission aggregation job (daily at 3:00 AM Mexico City)
       commissionAggregationJob.start()
 
-      // Start Moneygiver daily settlement report (daily at 7:00 AM Mexico City)
-      moneygiverSettlementJob.start()
-
-      // Start Venue Commission settlement report (daily at 7:00 AM Mexico City)
-      venueCommissionSettlementJob.start()
+      // Disabled:  / Externo settlement jobs
+      // .start()
+      // venueCommissionSettlementJob.start()
 
       // Start auto clock-out job (every 15 minutes for HR automation)
       autoClockOutJob.start()
