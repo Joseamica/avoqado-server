@@ -304,6 +304,26 @@ export const getPaymentLinkSchema = z.object({
   }),
 })
 
+/**
+ * Body schema for sharing a payment link with a customer via WhatsApp using
+ * the approved `payment_link_share` template. Phone arrives as E.164 with
+ * the leading `+` from the dashboard's CountryCodePicker; the WhatsApp
+ * service normalizes it further before hitting the Meta Cloud API.
+ */
+export const sharePaymentLinkWhatsappSchema = z.object({
+  params: z.object({
+    venueId: z.string().min(1),
+    linkId: z.string().min(1),
+  }),
+  body: z.object({
+    phone: z
+      .string()
+      .min(10, 'Teléfono inválido')
+      .max(20, 'Teléfono inválido')
+      .regex(/^[+\d\s\-()]+$/, 'Teléfono inválido'),
+  }),
+})
+
 export const listPaymentLinksSchema = z.object({
   params: z.object({
     venueId: z.string().min(1),

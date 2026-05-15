@@ -21,7 +21,7 @@ import emailService from '@/services/email.service'
 import { formatInTimeZone } from 'date-fns-tz'
 import { es as esLocale } from 'date-fns/locale'
 import { createCommissionForPayment, createSplitCommissionForPayment } from '@/services/dashboard/commission/commission-calculation.service'
-import { sendReceiptWhatsApp } from '@/services/whatsapp.service'
+import { sendReceiptWhatsApp, sendPaymentLinkShareWhatsApp } from '@/services/whatsapp.service'
 
 // Stripe charge bounds (MXN cents). Kept inline to avoid yet-another shared
 // module for what is functionally a pair of env-tunable constants. Defaults
@@ -2595,4 +2595,73 @@ function formatPaymentMethodLabel(cardBrand: string | null, last4: string | null
     SPEI: 'SPEI',
   }
   return methodLabels[method] ?? 'Tarjeta'
+}
+
+/**
+ * Dashboard action — share a payment link with a customer via WhatsApp using
+ * the approved `payment_link_share` template. Validates that the link belongs
+ * to the venue, isn't expired/paused/archived, and (for single-use links)
+ * hasn't already been paid — so an operator can't send a link the public
+ * checkout will reject.
+ *
+ * The "concepto" sent to the customer is built here so we control formatting:
+ *   - FIXED amount  → "<title> — $<amount> <currency>"
+ *   - OPEN amount   → "<title>" (customer picks the amount on checkout)
+ */
+export async function sharePaymentLinkViaWhatsapp(venueId: string, linkId: string, phone: string) {
+  const link = await prisma.paymentLink.findFirst({
+    where: { id: linkId, venueId },
+    select: {
+      id: true,
+      shortCode: true,
+      title: true,
+      amount: true,
+      amountType: true,
+      currency: true,
+      status: true,
+      isReusable: true,
+      paymentCount: true,
+      expiresAt: true,
+      venue: { select: { name: true } },
+    },
+  })
+
+  if (!link) throw new NotFoundError('Liga de pago no encontrada')
+
+  if (link.status === 'PAUSED') throw new BadRequestError('Esta liga está pausada — actívala antes de compartirla')
+  if (link.status === 'EXPIRED') throw new BadRequestError('Esta liga ya expiró')
+  if (link.status === 'ARCHIVED') throw new BadRequestError('Esta liga está archivada')
+  if (link.expiresAt && link.expiresAt < new Date()) {
+    throw new BadRequestError('Esta liga ya expiró')
+  }
+  if (!link.isReusable && link.paymentCount > 0) {
+    throw new BadRequestError('Esta liga de un solo uso ya fue pagada — crea una nueva')
+  }
+
+  // Resolve customer-facing URL. CHECKOUT_BASE_URL is set per environment
+  // (pay.avoqado.io / staging / demo). Fall back to production so a missing
+  // var in dev doesn't ship an internal localhost URL to a real customer.
+  const checkoutBase = process.env.CHECKOUT_BASE_URL || 'https://pay.avoqado.io'
+  const paymentLinkUrl = `${checkoutBase.replace(/\/$/, '')}/${link.shortCode}`
+
+  // Build the "concepto" — what the customer sees in {{2}} of the template.
+  // Currency formatting mirrors the customer checkout (Intl.NumberFormat
+  // with the link's currency); keeping it server-side prevents the operator
+  // dashboard's locale from affecting what the customer reads.
+  let concepto = link.title
+  if (link.amountType === 'FIXED' && link.amount != null) {
+    const formatted = new Intl.NumberFormat('es-MX', {
+      style: 'currency',
+      currency: link.currency || 'MXN',
+    }).format(Number(link.amount))
+    concepto = `${link.title} — ${formatted} ${link.currency || 'MXN'}`
+  }
+
+  await sendPaymentLinkShareWhatsApp(phone, {
+    venueName: link.venue.name,
+    concepto,
+    paymentLinkUrl,
+  })
+
+  return { sent: true }
 }

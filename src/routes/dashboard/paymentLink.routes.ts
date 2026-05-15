@@ -18,6 +18,7 @@ import {
   updatePaymentLinkSchema,
   updatePaymentLinkBrandingSchema,
   updatePaymentLinkSettingsSchema,
+  sharePaymentLinkWhatsappSchema,
 } from '@/schemas/dashboard/paymentLink.schema'
 
 const router = Router({ mergeParams: true })
@@ -81,5 +82,18 @@ router.put('/:linkId', validateRequest(updatePaymentLinkSchema), paymentLinkCont
  * Archives a payment link (soft delete)
  */
 router.delete('/:linkId', validateRequest(getPaymentLinkSchema), paymentLinkController.archivePaymentLink)
+
+/**
+ * POST /api/v1/dashboard/venues/:venueId/payment-links/:linkId/share-whatsapp
+ * Sends a payment link to a customer via WhatsApp Business (Meta template
+ * `payment_link_share`). Permission is enforced by the parent router's
+ * `payment-link:read` check — sharing an existing link is a read-level
+ * action (no mutation to the link itself).
+ */
+router.post(
+  '/:linkId/share-whatsapp',
+  validateRequest(sharePaymentLinkWhatsappSchema),
+  paymentLinkController.shareViaWhatsapp,
+)
 
 export default router

@@ -210,3 +210,22 @@ export async function updatePaymentLinkSettingsHandler(req: Request, res: Respon
     res.status(error.statusCode || 500).json({ success: false, error: error.message || 'Error al actualizar ajustes' })
   }
 }
+
+/**
+ * POST /api/v1/dashboard/venues/:venueId/payment-links/:linkId/share-whatsapp
+ * Sends a payment link to a customer via WhatsApp Business template.
+ */
+export async function shareViaWhatsapp(req: Request, res: Response) {
+  try {
+    const { venueId, linkId } = req.params
+    const { phone } = req.body as { phone: string }
+    const result = await paymentLinkService.sharePaymentLinkViaWhatsapp(venueId, linkId, phone)
+    res.json({ success: true, data: result })
+  } catch (error: any) {
+    logger.error('Error sharing payment link via WhatsApp:', error)
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || 'No se pudo enviar la liga por WhatsApp',
+    })
+  }
+}

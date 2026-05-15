@@ -31,6 +31,16 @@ interface WhatsAppReceiptData {
   receiptUrl: string
 }
 
+interface WhatsAppPaymentLinkShareData {
+  /** Restaurant/venue name — fills {{1}} in the approved template. */
+  venueName: string
+  /** Free-form description of what's being charged — fills {{2}}. Typical
+   *  format: "Hamburguesa BBQ — $164.50 MXN". Caller formats. */
+  concepto: string
+  /** Full payment-link URL the customer taps to pay — fills {{3}}. */
+  paymentLinkUrl: string
+}
+
 interface WhatsAppPurchaseConfirmationData {
   customerName: string
   venueName: string
@@ -139,6 +149,29 @@ export async function sendReceiptWhatsApp(phone: string, data: WhatsAppReceiptDa
     { type: 'text', text: data.venueName },
     { type: 'text', text: data.totalAmount },
     { type: 'text', text: data.receiptUrl },
+  ])
+}
+
+/**
+ * Share a payment link with a customer via WhatsApp.
+ *
+ * Uses the approved Utility template `payment_link_share` — body copy:
+ *
+ *   Hola, {{1}} te envió una liga de pago.
+ *   Concepto: {{2}}
+ *   Paga de forma segura aquí: {{3}}
+ *   ¡Gracias por tu preferencia!
+ *
+ * Template name is configurable via WHATSAPP_TEMPLATE_PAYMENT_LINK_SHARE so
+ * we can swap to a renamed/v2 template without a code change if Meta ever
+ * asks us to.
+ */
+export async function sendPaymentLinkShareWhatsApp(phone: string, data: WhatsAppPaymentLinkShareData): Promise<boolean> {
+  const template = process.env.WHATSAPP_TEMPLATE_PAYMENT_LINK_SHARE || 'payment_link_share'
+  return sendTemplateMessage(phone, template, [
+    { type: 'text', text: data.venueName },
+    { type: 'text', text: data.concepto },
+    { type: 'text', text: data.paymentLinkUrl },
   ])
 }
 
