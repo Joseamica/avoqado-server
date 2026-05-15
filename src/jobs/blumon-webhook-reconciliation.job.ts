@@ -103,7 +103,7 @@ export class BlumonWebhookReconciliationJob {
       },
       take: this.BATCH_SIZE,
       orderBy: { createdAt: 'asc' },
-      select: { id: true, payload: true, venueId: true },
+      select: { id: true, payload: true },
     })
 
     if (pending.length === 0) return 0
@@ -112,9 +112,11 @@ export class BlumonWebhookReconciliationJob {
     for (const row of pending) {
       try {
         const payload = row.payload as unknown as BlumonWebhookPayload
-        const result = await reconcileBlumonEvent(row.id, payload, {
-          scopeVenueId: row.venueId,
-        })
+        // No explicit scope — `reconcileBlumonEvent` re-resolves the venue
+        // scope from `payload.serialNumber` on every pass so a shared Blumon
+        // MerchantAccount (one merchant → N venues) doesn't get pinned to the
+        // single terminal's venue that was cached at insert time.
+        const result = await reconcileBlumonEvent(row.id, payload)
         if (result.action !== 'NOT_FOUND') resolved++
       } catch (err) {
         logger.error('❌ [Blumon recon] Failed to retry event', {

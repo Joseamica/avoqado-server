@@ -89,6 +89,62 @@ export async function resolveTerminalFromBlumonSerial(
 }
 
 /**
+ * Resolve the **scope of venues** a Blumon webhook can legitimately match against.
+ *
+ * Blumon sends a single `serialNumber` per webhook, but in our data model that
+ * serial can map to two distinct things at the same time:
+ *   1. A physical PAX `Terminal` (one venue — where the device lives).
+ *   2. A `MerchantAccount.blumonSerialNumber` (N venues — every venue whose
+ *      `VenuePaymentConfig` points at that merchant account as
+ *      primary/secondary/tertiary).
+ *
+ * When a single MerchantAccount is shared across many venues (e.g. a chain
+ * using one Blumon merchant for 35 stores), scoping the matcher to just the
+ * terminal's venue creates false negatives — the webhook arrives for a
+ * Payment recorded in *another* venue of the same merchant, and the cron job
+ * keeps retrying forever. See: 2026-05-14 reconciliation incident.
+ *
+ * @returns deduped list of venueIds the webhook may match against. Empty list
+ *          means "no scope, match globally" (intentional — caller decides what
+ *          to do with that).
+ */
+export async function resolveScopeVenueIdsFromBlumonSerial(rawSerial: string | undefined | null): Promise<string[]> {
+  if (!rawSerial) return []
+  const canonical = canonicalizeBlumonSerial(rawSerial)
+  const rawTrimmed = rawSerial.trim().replace(/^AVQD-/, '')
+
+  const [terminal, merchantAccount] = await Promise.all([
+    prisma.terminal.findUnique({
+      where: { serialNumber: canonical },
+      select: { venueId: true },
+    }),
+    prisma.merchantAccount.findFirst({
+      where: { blumonSerialNumber: rawTrimmed },
+      select: { id: true },
+    }),
+  ])
+
+  const venueIds = new Set<string>()
+  if (terminal?.venueId) venueIds.add(terminal.venueId)
+
+  if (merchantAccount?.id) {
+    const configs = await prisma.venuePaymentConfig.findMany({
+      where: {
+        OR: [
+          { primaryAccountId: merchantAccount.id },
+          { secondaryAccountId: merchantAccount.id },
+          { tertiaryAccountId: merchantAccount.id },
+        ],
+      },
+      select: { venueId: true },
+    })
+    for (const cfg of configs) venueIds.add(cfg.venueId)
+  }
+
+  return Array.from(venueIds)
+}
+
+/**
  * Build a canonical, idempotent event id from a Blumon webhook payload.
  *
  * The pair `(operationNumber, reference)` is unique-per-transaction inside
@@ -279,7 +335,15 @@ export async function processBlumonPaymentWebhook(payload: BlumonWebhookPayload)
     }
 
     // ───────────── 2. Resolve serialNumber → Terminal → Venue ─────────────
-    const terminal = await resolveTerminalFromBlumonSerial(payload.serialNumber)
+    // `terminal` is used for the physical-location stamp on the event row.
+    // `scopeVenueIds` widens that to every venue sharing the same Blumon
+    // MerchantAccount — necessary when a single merchant fans out to N venues
+    // (one webhook → one of N possible Payments). See
+    // `resolveScopeVenueIdsFromBlumonSerial` for the why.
+    const [terminal, scopeVenueIds] = await Promise.all([
+      resolveTerminalFromBlumonSerial(payload.serialNumber),
+      resolveScopeVenueIdsFromBlumonSerial(payload.serialNumber),
+    ])
     const scopeVenueId = terminal?.venueId ?? null
 
     if (payload.serialNumber && !terminal) {
@@ -385,8 +449,8 @@ export async function processBlumonPaymentWebhook(payload: BlumonWebhookPayload)
       throw err
     }
 
-    // ───────────── 5. Inline reconciliation (5s retry, scoped to venueId) ─────────────
-    const matchResult = await attemptPaymentMatch(payload, { scopeVenueId, correlationId })
+    // ───────────── 5. Inline reconciliation (5s retry, scoped to merchant's venues) ─────────────
+    const matchResult = await attemptPaymentMatch(payload, { scopeVenueIds, correlationId })
 
     // ───────────── 6. Persist final state into the event row ─────────────
     await updateEventLogFromMatchResult(event.id, matchResult)
@@ -415,18 +479,22 @@ export async function processBlumonPaymentWebhook(payload: BlumonWebhookPayload)
  *
  * @param eventLogId The ProviderEventLog row to update.
  * @param payload The original webhook payload (taken from `event.payload` JSONB).
- * @param ctx Optional context — `scopeVenueId` should be the venueId the row
- *            was originally tagged with (we cache it on the row so we don't
- *            re-resolve from `serialNumber` every pass).
+ * @param ctx Optional context — when `scopeVenueIds` is omitted we re-resolve
+ *            from `payload.serialNumber` on every pass. That avoids caching a
+ *            too-narrow scope on the row (a single terminal's venue, when the
+ *            same Blumon merchant fans out to N venues). Callers that already
+ *            know the correct narrow scope (e.g. the per-Payment backfill in
+ *            `reconcileWebhooksForPayment`) can pass it explicitly.
  */
 export async function reconcileBlumonEvent(
   eventLogId: string,
   payload: BlumonWebhookPayload,
-  ctx: { scopeVenueId?: string | null } = {},
+  ctx: { scopeVenueIds?: string[] } = {},
 ): Promise<WebhookProcessingResult> {
   const correlationId = `blumon-recon-${eventLogId.slice(-8)}`
+  const scopeVenueIds = ctx.scopeVenueIds ?? (await resolveScopeVenueIdsFromBlumonSerial(payload.serialNumber))
   const result = await attemptPaymentMatch(payload, {
-    scopeVenueId: ctx.scopeVenueId ?? null,
+    scopeVenueIds,
     correlationId,
     skipRetries: true, // Cron is already on a 30s cadence, no need for inline retry
   })
@@ -477,9 +545,11 @@ export async function reconcileWebhooksForPayment(payment: {
     try {
       const payload = row.payload as unknown as BlumonWebhookPayload
       const result = await reconcileBlumonEvent(row.id, payload, {
-        // Trust the Payment's venueId over the row's cached venueId — Payments
-        // are the source of truth and may correct an earlier UNKNOWN_TERMINAL.
-        scopeVenueId: payment.venueId,
+        // Backfill is triggered by a specific Payment creation — restrict the
+        // match to that Payment's venue. Payments are the source of truth and
+        // this prevents accidentally matching against another orphan payment
+        // in a sibling venue of the same merchant.
+        scopeVenueIds: [payment.venueId],
       })
       if (result.action === 'MATCHED' || result.action === 'RECONCILED') reconciled++
     } catch (err) {
@@ -551,19 +621,22 @@ async function updateEventLogFromMatchResult(eventLogId: string, result: Webhook
  * be re-used by the cron worker. NEVER inserts into ProviderEventLog (the
  * caller owns the row); only reads + updates Payment.processorData.
  *
- * @param scopeVenueId If provided, matches are restricted to Payments in this
- *                     venue. Reduces false-positives when references collide
- *                     across venues. Resolved from the webhook's serialNumber
- *                     in the orchestrator above.
+ * @param scopeVenueIds If non-empty, matches are restricted to Payments whose
+ *                      order is in one of these venues (Prisma `IN` clause).
+ *                      Empty list means "no scope, match globally" — reserved
+ *                      for cases where serialNumber is missing. Reduces
+ *                      false-positives when references collide across
+ *                      merchants. Resolved from the webhook's serialNumber in
+ *                      the orchestrator/cron entry points.
  */
 async function attemptPaymentMatch(
   payload: BlumonWebhookPayload,
-  ctx: { scopeVenueId: string | null; correlationId: string; skipRetries?: boolean } = {
-    scopeVenueId: null,
+  ctx: { scopeVenueIds: string[]; correlationId: string; skipRetries?: boolean } = {
+    scopeVenueIds: [],
     correlationId: `blumon-wh-${Date.now()}`,
   },
 ): Promise<WebhookProcessingResult> {
-  const { scopeVenueId, correlationId, skipRetries } = ctx
+  const { scopeVenueIds, correlationId, skipRetries } = ctx
   try {
     const blumonAmount = parseFloat(payload.amount)
 
@@ -617,14 +690,16 @@ async function attemptPaymentMatch(
       }
     }
 
-    // Build the where clause once. When `scopeVenueId` is provided we restrict
-    // the search to Payments inside that venue — eliminates false positives
-    // from references that collide across venues. We resolve the venue from
-    // the webhook's `serialNumber`, so it's the strongest scope we have.
+    // Build the where clause once. When `scopeVenueIds` is non-empty we
+    // restrict the search to Payments inside those venues — eliminates false
+    // positives from references that collide across merchants. The list is
+    // resolved from the webhook's `serialNumber` and covers (a) the physical
+    // terminal's venue + (b) every venue using the same Blumon MerchantAccount
+    // (a single merchant can fan out to N venues).
     const baseWhere: Prisma.PaymentWhereInput = {
       OR: matchConditions,
       status: { in: ['COMPLETED', 'PENDING'] },
-      ...(scopeVenueId ? { order: { venueId: scopeVenueId } } : {}),
+      ...(scopeVenueIds.length > 0 ? { order: { venueId: { in: scopeVenueIds } } } : {}),
     }
 
     // Retry loop only when called inline from the webhook controller. The cron
@@ -788,7 +863,8 @@ async function attemptPaymentMatch(
         amount: blumonAmount,
         retryAttempts: skipRetries ? 0 : RETRY_CONFIG.maxAttempts,
         totalWaitMs: totalWaitTime,
-        scopeVenueId,
+        scopeVenueIds,
+        scopeVenueCount: scopeVenueIds.length,
         skipRetries,
       })
 
