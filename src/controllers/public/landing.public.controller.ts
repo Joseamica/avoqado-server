@@ -225,20 +225,20 @@ export async function submitLabsBrief(req: Request, res: Response, next: NextFun
       })
       return res.status(502).json({
         success: false,
-        message: 'El correo no se pudo enviar. Tu brief quedó registrado; Jose lo recupera manualmente.',
+        message: 'El correo no se pudo enviar. Tu brief quedó registrado; Avoqado lo recupera manualmente.',
       })
     }
 
     // Confirmation to the lead — non-blocking quality.
     // Only sent if the lead provided an email. Whatsapp-only leads will be
-    // contacted by Jose directly (no automated outbound on WA from this flow).
+    // contacted by Avoqado directly (no automated outbound on WA from this flow).
     if (payload.fields.contact.email) {
       const confirmSent = await emailService.sendEmail({
         to: payload.fields.contact.email,
         subject: 'Recibimos tu brief — Avoqado Labs',
         html: `
           <h2>Hola ${escapeHtml(payload.fields.contact.name)},</h2>
-          <p>Recibimos tu brief para Avoqado Labs. Jose lo revisa personalmente y te confirma timeline y costo en menos de 24 horas.</p>
+          <p>Recibimos tu brief para Avoqado Labs. Lo revisamos personalmente y te confirmamos timeline y costo en menos de 24 horas.</p>
           <p>Mientras tanto, si quieres agregar algo, responde a este correo.</p>
           <p style="color:#888;font-size:13px;">— El equipo de Avoqado Labs</p>
         `,
