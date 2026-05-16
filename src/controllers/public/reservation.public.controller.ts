@@ -978,6 +978,13 @@ export async function getReservation(req: Request, res: Response, next: NextFunc
     const creditsUsed = redeems.reduce((sum, t) => sum + Math.abs(t.quantity), 0)
     const creditsRefundable = Math.floor((creditsUsed * cancellationPreview.refundPercent) / 100)
 
+    // Fetch modifiers if any were selected on the reservation
+    const modifierRows = await prisma.reservationModifier.findMany({
+      where: { reservationId: reservation.id },
+      select: { id: true, productId: true, name: true, quantity: true, price: true },
+      orderBy: { createdAt: 'asc' },
+    })
+
     res.json({
       confirmationCode: reservation.confirmationCode,
       status: reservation.status,
@@ -1023,6 +1030,13 @@ export async function getReservation(req: Request, res: Response, next: NextFunc
         minHoursBeforeStart: settings.cancellation.minHoursBeforeStart,
         productId: (reservation as any).productId ?? null,
       },
+      modifiers: modifierRows.map(m => ({
+        id: m.id,
+        productId: m.productId,
+        name: m.name,
+        quantity: m.quantity,
+        price: Number(m.price),
+      })),
     })
   } catch (error) {
     next(error)
