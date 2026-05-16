@@ -9,6 +9,7 @@ import { sendReservationRescheduleWhatsApp } from '../whatsapp.service'
 import emailService from '../email.service'
 import { getProvider } from '../payments/provider-registry'
 import { checkExternalBusyBlock } from '../reservation/external-busy-block.service'
+import { resolveModifierSelections } from '@/services/reservation/resolveModifierSelections'
 // creditPack.public.service is imported lazily inside cancelReservation/markNoShow to avoid
 // the circular import — creditPack imports `withSerializableRetry` from this module.
 
@@ -197,10 +198,12 @@ export interface CreateReservationInput {
   partySize?: number
   tableId?: string
   productId?: string
+  productIds?: string[]
   assignedStaffId?: string
   specialRequests?: string
   internalNotes?: string
   tags?: string[]
+  modifierSelections?: { productId: string; modifierId: string; quantity?: number }[]
 }
 
 /**
@@ -257,12 +260,23 @@ export async function createReservation(venueId: string, data: CreateReservation
       assignedStaffId: data.assignedStaffId,
     })
 
+    const bookedProductIds = data.productIds && data.productIds.length > 0 ? data.productIds : data.productId ? [data.productId] : []
+    const { persistRows: modifierRows, totalDelta: modifierDelta } = await resolveModifierSelections(
+      tx,
+      bookedProductIds,
+      data.modifierSelections ?? [],
+    )
+
     // Calculate deposit with validated product price (if configured as percentage)
     let depositAmount: Prisma.Decimal | null = null
     let depositStatus: string | null = null
     let depositExpiresAt: Date | null = null
     if (moduleConfig?.deposits) {
-      const deposit = calculateDepositAmount(moduleConfig.deposits, requestedPartySize, product?.price ? Number(product.price) : null)
+      const deposit = calculateDepositAmount(
+        moduleConfig.deposits,
+        requestedPartySize,
+        product?.price ? Number(new Prisma.Decimal(product.price).add(modifierDelta)) : null,
+      )
       if (deposit.required && deposit.amount) {
         depositAmount = deposit.amount
         depositStatus = 'PENDING'
@@ -388,6 +402,19 @@ export async function createReservation(venueId: string, data: CreateReservation
         assignedStaff: { select: { id: true, firstName: true, lastName: true } },
       },
     })
+
+    if (modifierRows.length > 0) {
+      await tx.reservationModifier.createMany({
+        data: modifierRows.map(r => ({
+          reservationId: reservation.id,
+          productId: r.productId,
+          modifierId: r.modifierId,
+          name: r.name,
+          quantity: r.quantity,
+          price: r.price,
+        })),
+      })
+    }
 
     logger.info(
       `✅ [RESERVATION] Created ${finalCode} | venue=${venueId} status=${initialStatus} table=${data.tableId ?? 'none'} staff=${data.assignedStaffId ?? 'none'}`,
