@@ -554,7 +554,6 @@ describe('WORKFLOW [Task 29]: webhook → durable inbox → pullConnection → b
         nextSyncToken: 'sync-token-after-incremental',
       },
     })
-
     ;(prismaMock.externalBusyBlock.deleteMany as jest.Mock).mockResolvedValue({ count: 1 })
     ;(prismaMock.externalBusyBlock.upsert as jest.Mock).mockResolvedValue({})
     ;(prismaMock.googleCalendarConnection.update as jest.Mock).mockResolvedValue({})
