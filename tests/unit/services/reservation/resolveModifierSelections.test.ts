@@ -26,8 +26,8 @@ const productGroupsFixture = [
       maxSelections: null,
       active: true,
       modifiers: [
-        { id: M1A, name: 'Vitral', price: '10.00', active: true },
-        { id: M1B, name: 'Aurora', price: '10.00', active: true },
+        { id: M1A, name: 'Vitral', price: '10.00', durationMin: null, active: true },
+        { id: M1B, name: 'Aurora', price: '10.00', durationMin: null, active: true },
       ],
     },
   },
@@ -38,6 +38,7 @@ describe('resolveModifierSelections', () => {
     const prisma = makePrisma([{ ...productGroupsFixture[0], group: { ...productGroupsFixture[0].group, required: false } }])
     const result = await resolveModifierSelections(prisma, [PROD], [])
     expect(result.totalDelta.toString()).toBe('0')
+    expect(result.totalDurationDelta).toBe(0)
     expect(result.persistRows).toEqual([])
   })
 
@@ -81,7 +82,7 @@ describe('resolveModifierSelections', () => {
           minSelections: 0,
           maxSelections: 5,
           active: true,
-          modifiers: [{ id: M1A, name: 'Por uña', price: '10.00', active: true }],
+          modifiers: [{ id: M1A, name: 'Por uña', price: '10.00', durationMin: null, active: true }],
         },
       },
     ])
@@ -89,6 +90,55 @@ describe('resolveModifierSelections', () => {
     const result = await resolveModifierSelections(prisma, [PROD], selections)
     expect(result.totalDelta.toString()).toBe('30')
     expect(result.persistRows[0].quantity).toBe(3)
+  })
+
+  it('accumulates duration delta from modifier.durationMin × qty', async () => {
+    const prisma = makePrisma([
+      {
+        productId: PROD,
+        group: {
+          id: G1,
+          required: false,
+          allowMultiple: true,
+          minSelections: 0,
+          maxSelections: 5,
+          active: true,
+          modifiers: [
+            { id: M1A, name: 'Esmalte', price: '150', durationMin: 35, active: true },
+            { id: M1B, name: 'Por uña (10 min)', price: '10', durationMin: 10, active: true },
+          ],
+        },
+      },
+    ])
+    const selections: ModifierSelectionInput[] = [
+      { productId: PROD, modifierId: M1A, quantity: 1 },
+      { productId: PROD, modifierId: M1B, quantity: 3 },
+    ]
+    const result = await resolveModifierSelections(prisma, [PROD], selections)
+    // 35 × 1 + 10 × 3 = 65 min
+    expect(result.totalDurationDelta).toBe(65)
+    expect(result.totalDelta.toString()).toBe('180') // 150 + 30
+  })
+
+  it('ignores null durationMin (treated as 0)', async () => {
+    const prisma = makePrisma([
+      {
+        productId: PROD,
+        group: {
+          id: G1,
+          required: false,
+          allowMultiple: true,
+          minSelections: 0,
+          maxSelections: 5,
+          active: true,
+          modifiers: [{ id: M1A, name: 'Gratis sin duración', price: '0', durationMin: null, active: true }],
+        },
+      },
+    ])
+    const result = await resolveModifierSelections(prisma, [PROD], [
+      { productId: PROD, modifierId: M1A, quantity: 2 },
+    ])
+    expect(result.totalDurationDelta).toBe(0)
   })
 
   it('rejects quantity > maxSelections on multi-select group', async () => {
@@ -102,7 +152,7 @@ describe('resolveModifierSelections', () => {
           minSelections: 0,
           maxSelections: 5,
           active: true,
-          modifiers: [{ id: M1A, name: 'Por uña', price: '10.00', active: true }],
+          modifiers: [{ id: M1A, name: 'Por uña', price: '10.00', durationMin: null, active: true }],
         },
       },
     ])

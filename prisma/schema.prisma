@@ -2329,6 +2329,11 @@ model Modifier {
   name  String
   price Decimal @default(0) @db.Decimal(10, 2)
 
+  // Additional minutes this modifier adds to the booked service when selected.
+  // Multiplied by the picked quantity in resolveModifierSelections. Null = no
+  // duration impact (price-only modifier — the original behavior).
+  durationMin Int?
+
   // ✅ INVENTORY TRACKING (Toast/Square pattern)
   // Link modifier to a raw material for inventory deduction
   rawMaterialId   String? // Optional: only if this modifier affects inventory
