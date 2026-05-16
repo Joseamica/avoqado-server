@@ -2346,8 +2346,9 @@ model Modifier {
   // Demo data flag (for cleanup on conversion)
   isDemo Boolean @default(false)
 
-  orderItems       OrderItemModifier[]
-  paymentLinkItems PaymentLinkItemModifier[]
+  orderItems         OrderItemModifier[]
+  paymentLinkItems   PaymentLinkItemModifier[]
+  reservationItems   ReservationModifier[]
 
   @@index([rawMaterialId])
 }
@@ -8188,6 +8189,9 @@ model Reservation {
   // Idempotent log of reminder sends — one row per (reservation, offset, channel).
   reminderRecords ReservationReminderSent[]
 
+  // Modifiers selected during booking for multi-service appointments
+  modifiers ReservationModifier[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -8225,6 +8229,29 @@ model ReservationReminderSent {
   @@unique([reservationId, offsetMinutes, channel])
   @@index([reservationId])
   @@index([sentAt])
+}
+
+model ReservationModifier {
+  id            String      @id @default(cuid())
+  reservationId String
+  reservation   Reservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+
+  // Which service in a multi-service appointment this modifier belongs to.
+  // We don't FK to Product because Reservation.productIds is a text[] (Square pattern),
+  // not a join table — keeping productId here as a tag matches that pattern.
+  productId String
+  modifierId String?
+  modifier   Modifier? @relation(fields: [modifierId], references: [id], onDelete: SetNull)
+
+  // Denormalized — preserved if Modifier is deleted (parity with OrderItemModifier)
+  name     String?
+  quantity Int     @default(1)
+  price    Decimal @db.Decimal(10, 2)
+
+  createdAt DateTime @default(now())
+
+  @@index([reservationId])
+  @@index([modifierId])
 }
 
 // Slot hold: temporarily reserves a time window while the customer fills out
