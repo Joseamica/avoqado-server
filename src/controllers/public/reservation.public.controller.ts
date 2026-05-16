@@ -177,6 +177,32 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
             // New Phase 3 fields — null/inherit by default for existing products.
             creditCost: true,
             upfrontPolicy: true,
+            // Modifier groups assigned to this product (booking widget surface).
+            // Mirrors Vagaro's add-on model — see venue.consumer.service.ts for the
+            // sibling shape used by the dashboard consumer namespace.
+            modifierGroups: {
+              select: {
+                displayOrder: true,
+                group: {
+                  select: {
+                    id: true,
+                    name: true,
+                    description: true,
+                    required: true,
+                    allowMultiple: true,
+                    minSelections: true,
+                    maxSelections: true,
+                    active: true,
+                    modifiers: {
+                      where: { active: true },
+                      select: { id: true, name: true, price: true, active: true },
+                      orderBy: { name: 'asc' },
+                    },
+                  },
+                },
+              },
+              orderBy: { displayOrder: 'asc' },
+            },
           },
           orderBy: { name: 'asc' },
         },
@@ -196,6 +222,24 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
           classUpfrontDefault: settings.payments.classUpfrontDefault,
         },
       ),
+      modifierGroups: p.modifierGroups
+        .filter(pg => pg.group.active)
+        .map(pg => ({
+          id: pg.group.id,
+          name: pg.group.name,
+          description: pg.group.description,
+          required: pg.group.required,
+          allowMultiple: pg.group.allowMultiple,
+          minSelections: pg.group.minSelections,
+          maxSelections: pg.group.maxSelections,
+          displayOrder: pg.displayOrder,
+          modifiers: pg.group.modifiers.map(m => ({
+            id: m.id,
+            name: m.name,
+            price: Number(m.price),
+            active: m.active,
+          })),
+        })),
     }))
 
     res.json({
