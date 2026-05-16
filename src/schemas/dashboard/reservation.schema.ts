@@ -355,6 +355,16 @@ export const publicCreateReservationBodySchema = z
     // transactionally on success. Missing/expired holds throw 409 so the
     // widget falls back to the time-slot picker.
     holdId: z.string().optional(),
+    modifierSelections: z
+      .array(
+        z.object({
+          productId: z.string().min(1, 'productId del modificador es requerido'),
+          modifierId: z.string().min(1, 'modifierId es requerido'),
+          quantity: z.number().int().min(1).max(99).optional(),
+        }),
+      )
+      .max(100)
+      .optional(),
   })
   .refine(
     data => {
