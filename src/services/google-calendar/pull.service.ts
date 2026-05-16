@@ -173,34 +173,43 @@ export async function runBackfill(connectionId: string): Promise<void> {
 
   // The transaction is the atomic boundary: wipe-and-replace blocks for this
   // connection AND advance the sync state cursor in one shot.
-  await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-    await tx.externalBusyBlock.deleteMany({ where: { googleConnectionId: conn.id } })
+  //
+  // Timeout raised to 60s (default 5s) because each `upsertBlock` is a
+  // separate round-trip to Postgres and a fresh connection with several
+  // hundred future events can easily exceed 5s — observed in prod rescue
+  // 2026-05-16. 60s is a safe ceiling: even a 1000-event calendar over a
+  // 100ms-latency link stays inside the window.
+  await prisma.$transaction(
+    async (tx: Prisma.TransactionClient) => {
+      await tx.externalBusyBlock.deleteMany({ where: { googleConnectionId: conn.id } })
 
-    for (const ev of events) {
-      if (!ev.id) continue
-      if (isAvoqadoOrigin(ev)) continue
-      if (ev.transparency === 'transparent') continue
-      if (isSelfDeclined(ev)) continue
+      for (const ev of events) {
+        if (!ev.id) continue
+        if (isAvoqadoOrigin(ev)) continue
+        if (ev.transparency === 'transparent') continue
+        if (isSelfDeclined(ev)) continue
 
-      await upsertBlock(tx, {
-        connectionId: conn.id,
-        venueId: conn.venueId,
-        staffId: conn.staffId,
-        externalCalendarId: conn.selectedCalendarId,
-        event: ev,
-        calendarTimeZone: conn.selectedCalendarTimeZone,
+        await upsertBlock(tx, {
+          connectionId: conn.id,
+          venueId: conn.venueId,
+          staffId: conn.staffId,
+          externalCalendarId: conn.selectedCalendarId,
+          event: ev,
+          calendarTimeZone: conn.selectedCalendarTimeZone,
+        })
+      }
+
+      await tx.googleCalendarConnection.update({
+        where: { id: conn.id },
+        data: {
+          syncToken: nextSyncToken ?? null,
+          lastSyncedAt: new Date(),
+          lastHorizonEnd: horizonEnd,
+        },
       })
-    }
-
-    await tx.googleCalendarConnection.update({
-      where: { id: conn.id },
-      data: {
-        syncToken: nextSyncToken ?? null,
-        lastSyncedAt: new Date(),
-        lastHorizonEnd: horizonEnd,
-      },
-    })
-  })
+    },
+    { timeout: 60_000, maxWait: 5_000 },
+  )
 
   logger.info('gcal backfill complete', {
     connectionId: conn.id,
@@ -279,51 +288,56 @@ export async function runIncrementalPull(connectionId: string): Promise<void> {
   }
 
   // Atomic commit: per-event handling + advance sync cursor.
-  await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-    for (const ev of collected) {
-      if (!ev.id) continue
+  // Timeout 60s mirrors `runBackfill` — incremental can also batch many events
+  // (e.g., user added 50 events in one go, all delivered in one webhook).
+  await prisma.$transaction(
+    async (tx: Prisma.TransactionClient) => {
+      for (const ev of collected) {
+        if (!ev.id) continue
 
-      // Order matters — see spec §8.1, first match wins.
-      if (ev.status === 'cancelled') {
-        await tx.externalBusyBlock.deleteMany({
-          where: { googleConnectionId: conn.id, externalEventId: ev.id },
+        // Order matters — see spec §8.1, first match wins.
+        if (ev.status === 'cancelled') {
+          await tx.externalBusyBlock.deleteMany({
+            where: { googleConnectionId: conn.id, externalEventId: ev.id },
+          })
+          continue
+        }
+        if (isAvoqadoOrigin(ev)) continue
+        if (ev.transparency === 'transparent' || isSelfDeclined(ev)) {
+          await tx.externalBusyBlock.deleteMany({
+            where: { googleConnectionId: conn.id, externalEventId: ev.id },
+          })
+          continue
+        }
+
+        // Horizon filter — drops events that moved out of our booking window.
+        const start = eventStartUtc(ev)
+        const end = eventEndUtc(ev)
+        const inHorizon = end > horizonStart && start < horizonEnd
+        if (!inHorizon) {
+          await tx.externalBusyBlock.deleteMany({
+            where: { googleConnectionId: conn.id, externalEventId: ev.id },
+          })
+          continue
+        }
+
+        await upsertBlock(tx, {
+          connectionId: conn.id,
+          venueId: conn.venueId,
+          staffId: conn.staffId,
+          externalCalendarId: conn.selectedCalendarId,
+          event: ev,
+          calendarTimeZone: conn.selectedCalendarTimeZone,
         })
-        continue
-      }
-      if (isAvoqadoOrigin(ev)) continue
-      if (ev.transparency === 'transparent' || isSelfDeclined(ev)) {
-        await tx.externalBusyBlock.deleteMany({
-          where: { googleConnectionId: conn.id, externalEventId: ev.id },
-        })
-        continue
       }
 
-      // Horizon filter — drops events that moved out of our booking window.
-      const start = eventStartUtc(ev)
-      const end = eventEndUtc(ev)
-      const inHorizon = end > horizonStart && start < horizonEnd
-      if (!inHorizon) {
-        await tx.externalBusyBlock.deleteMany({
-          where: { googleConnectionId: conn.id, externalEventId: ev.id },
-        })
-        continue
-      }
-
-      await upsertBlock(tx, {
-        connectionId: conn.id,
-        venueId: conn.venueId,
-        staffId: conn.staffId,
-        externalCalendarId: conn.selectedCalendarId,
-        event: ev,
-        calendarTimeZone: conn.selectedCalendarTimeZone,
+      await tx.googleCalendarConnection.update({
+        where: { id: conn.id },
+        data: { syncToken: nextSyncToken, lastSyncedAt: new Date() },
       })
-    }
-
-    await tx.googleCalendarConnection.update({
-      where: { id: conn.id },
-      data: { syncToken: nextSyncToken, lastSyncedAt: new Date() },
-    })
-  })
+    },
+    { timeout: 60_000, maxWait: 5_000 },
+  )
 
   logger.info('gcal incremental pull complete', {
     connectionId: conn.id,

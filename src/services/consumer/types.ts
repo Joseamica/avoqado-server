@@ -2,6 +2,9 @@ export interface PublicModifier {
   id: string
   name: string
   price: number
+  /** Minutes this modifier extends the booked service when picked. Null = no
+   *  duration impact. Server multiplies by selected quantity. */
+  durationMin: number | null
   active: boolean
 }
 

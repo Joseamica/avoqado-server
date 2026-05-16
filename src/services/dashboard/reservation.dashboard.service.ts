@@ -261,11 +261,17 @@ export async function createReservation(venueId: string, data: CreateReservation
     })
 
     const bookedProductIds = data.productIds && data.productIds.length > 0 ? data.productIds : data.productId ? [data.productId] : []
-    const { persistRows: modifierRows, totalDelta: modifierDelta } = await resolveModifierSelections(
-      tx,
-      bookedProductIds,
-      data.modifierSelections ?? [],
-    )
+    const {
+      persistRows: modifierRows,
+      totalDelta: modifierDelta,
+      totalDurationDelta: modifierDurationDelta,
+    } = await resolveModifierSelections(tx, bookedProductIds, data.modifierSelections ?? [])
+
+    // Modifier duration extends the booking. Recompute endsAt + duration so
+    // overlap checks, capacity gates and the persisted record all reflect the
+    // real time the customer will occupy the table/staff. Zero delta = identity.
+    const finalEndsAt = modifierDurationDelta > 0 ? new Date(data.endsAt.getTime() + modifierDurationDelta * 60_000) : data.endsAt
+    const finalDuration = data.duration + modifierDurationDelta
 
     // Calculate deposit with validated product price (if configured as percentage)
     let depositAmount: Prisma.Decimal | null = null
@@ -295,7 +301,7 @@ export async function createReservation(venueId: string, data: CreateReservation
       venueId,
       staffId: data.assignedStaffId ?? null,
       startsAt: data.startsAt,
-      endsAt: data.endsAt,
+      endsAt: finalEndsAt,
     })
     if (externalBlock) {
       throw new ConflictError('Este horario fue bloqueado por un evento de calendario externo')
@@ -307,7 +313,7 @@ export async function createReservation(venueId: string, data: CreateReservation
         SELECT id FROM "Reservation"
         WHERE "venueId" = ${venueId}
         AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
-        AND "startsAt" < ${data.endsAt}
+        AND "startsAt" < ${finalEndsAt}
         AND "endsAt" > ${data.startsAt}
         AND "tableId" = ${data.tableId}
         FOR UPDATE NOWAIT
@@ -323,7 +329,7 @@ export async function createReservation(venueId: string, data: CreateReservation
         SELECT id FROM "Reservation"
         WHERE "venueId" = ${venueId}
         AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
-        AND "startsAt" < ${data.endsAt}
+        AND "startsAt" < ${finalEndsAt}
         AND "endsAt" > ${data.startsAt}
         AND "assignedStaffId" = ${data.assignedStaffId}
         FOR UPDATE NOWAIT
@@ -343,7 +349,7 @@ export async function createReservation(venueId: string, data: CreateReservation
           FROM "Reservation"
           WHERE "venueId" = ${venueId}
             AND "productId" = ${data.productId}
-            AND "startsAt" < ${data.endsAt}
+            AND "startsAt" < ${finalEndsAt}
             AND "endsAt" > ${data.startsAt}
             AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
           FOR UPDATE
@@ -374,8 +380,8 @@ export async function createReservation(venueId: string, data: CreateReservation
         status: initialStatus,
         channel: data.channel ?? 'DASHBOARD',
         startsAt: data.startsAt,
-        endsAt: data.endsAt,
-        duration: data.duration,
+        endsAt: finalEndsAt,
+        duration: finalDuration,
         customerId: data.customerId,
         guestName: data.guestName,
         guestPhone: data.guestPhone,

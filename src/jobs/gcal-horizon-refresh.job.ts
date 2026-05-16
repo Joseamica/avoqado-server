@@ -6,9 +6,19 @@
  * driven incremental sync does NOT notify on "this previously-existing event
  * just fell inside the booking window" — Google only fires on changes.
  *
- * This job runs daily, looks at each CONNECTED connection, and does a bounded
- * re-sync of the newly-uncovered window [lastHorizonEnd, NOW + maxAdvanceDays].
- * It does NOT touch the incremental `syncToken` — that's a separate channel.
+ * This job runs daily and serves TWO purposes:
+ *
+ *   1. **Normal path** — for connections that have completed their initial
+ *      backfill (`syncToken` and `lastHorizonEnd` both set), do a bounded
+ *      windowed re-sync of [lastHorizonEnd, NOW + maxAdvanceDays] to catch
+ *      events newly entering the booking horizon. Does NOT touch `syncToken`.
+ *
+ *   2. **Rescue path** — for connections where `syncToken IS NULL` OR
+ *      `lastHorizonEnd IS NULL`, the initial inline backfill in
+ *      `connection.service.ts` failed (e.g., transient Google API error at
+ *      connect time, or process crashed mid-sync). Run a full `runBackfill()`
+ *      here instead of the windowed re-sync. This is the long-tail safety net
+ *      that guarantees every CONNECTED row eventually completes its backfill.
  *
  * Cron: daily at 04:00 Mexico City.
  */
@@ -19,6 +29,7 @@ import prisma from '../utils/prismaClient'
 import { buildOAuthClient } from '../services/google-calendar/oauth.service'
 import { decryptToken } from '../services/google-calendar/encryption.service'
 import { upsertBlock } from '../services/google-calendar/external-busy-block.service'
+import { runBackfill } from '../services/google-calendar/pull.service'
 
 const TIMEZONE = 'America/Mexico_City'
 const DEFAULT_MAX_ADVANCE_DAYS = 60
@@ -71,10 +82,26 @@ export class GcalHorizonRefreshJob {
       for (const conn of connections) {
         try {
           if (!conn.accessTokenCiphertext) continue
+
+          // RESCUE PATH: initial backfill never completed. Run a full backfill
+          // instead of the windowed re-sync — `runBackfill` queries from NOW
+          // to NOW+maxAdvanceDays and stamps `syncToken + lastSyncedAt +
+          // lastHorizonEnd` in a single transaction.
+          if (!conn.syncToken || !conn.lastHorizonEnd) {
+            logger.info('gcal horizon refresh: rescuing connection with incomplete backfill', {
+              connectionId: conn.id,
+              hadSyncToken: !!conn.syncToken,
+              hadLastHorizonEnd: !!conn.lastHorizonEnd,
+            })
+            await runBackfill(conn.id)
+            continue
+          }
+
+          // NORMAL PATH: windowed re-sync of [lastHorizonEnd, NOW + maxAdvanceDays].
           const maxAdvanceDays = conn.venue?.reservationSettings?.maxAdvanceDays ?? DEFAULT_MAX_ADVANCE_DAYS
           const now = new Date()
           const newHorizonEnd = new Date(now.getTime() + maxAdvanceDays * 86400_000)
-          const windowStart = conn.lastHorizonEnd ?? new Date(conn.connectedAt.getTime() + maxAdvanceDays * 86400_000)
+          const windowStart = conn.lastHorizonEnd
 
           // Skip if no new uncovered window
           if (windowStart >= newHorizonEnd) continue

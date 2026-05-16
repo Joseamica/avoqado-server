@@ -12,10 +12,16 @@
  *   3. ONE transaction that consumes the session, inserts the connection,
  *      and inserts the channel — all-or-nothing.
  *
- * Post-commit work (Phase A backfill) is intentionally NOT in this service.
- * The pull worker (Subagent 3) picks up connections with `syncToken=null`
- * via its standard "needs full sync" predicate, so a missed enqueue here
- * cannot leave a connection without backfill.
+ * Post-commit, we trigger the initial Phase A backfill in-process via
+ * `pullConnection` (fire-and-forget). This bypasses RabbitMQ entirely for the
+ * one-time initial sync: a fresh `Connection` has no `GoogleCalendarWebhookInbox`
+ * rows, so the inbox sweeper would never see it, and a silently-failed RMQ
+ * enqueue would leave the connection stuck with `syncToken=null` forever
+ * (until the daily horizon-refresh rescue path runs).
+ *
+ * RabbitMQ is still used in steady-state (Google webhook → inbox → enqueue →
+ * worker). Bypassing it ONLY for the initial backfill keeps the connection
+ * commit path resilient when CloudAMQP is briefly unavailable.
  */
 import { google } from 'googleapis'
 
@@ -24,7 +30,7 @@ import { InternalServerError, ValidationError } from '@/errors/AppError'
 import { decryptToken } from '@/services/google-calendar/encryption.service'
 import { consumeSession } from '@/services/google-calendar/oauth-session.service'
 import { buildOAuthClient } from '@/services/google-calendar/oauth.service'
-import { enqueuePullForConnection } from '@/services/google-calendar/pull.service'
+import { pullConnection } from '@/services/google-calendar/pull.service'
 import { subscribeToCalendar } from '@/services/google-calendar/watch-channel.service'
 import prisma from '@/utils/prismaClient'
 
@@ -116,13 +122,16 @@ export async function commitConnection(args: CommitConnectionArgs) {
     calendarId: args.selectedCalendarId,
   })
 
-  // Best-effort enqueue of Phase A backfill on the pull queue. If RabbitMQ is
-  // down (server.ts:229 boots without it) or the publish fails, the worker's
-  // "needs full sync" predicate (syncToken=null) still picks this connection
-  // up on the next inbox-sweeper tick. The request path never fails because
-  // of an enqueue hiccup.
-  void enqueuePullForConnection(connection.id).catch(err => {
-    logger.warn('gcal connection commit: failed to enqueue initial pull (sweeper will retry)', {
+  // Fire-and-forget initial backfill IN-PROCESS. `pullConnection` runs the
+  // single-flight pg_try_advisory_xact_lock + Phase A backfill (because the
+  // fresh connection has `syncToken=null`). Doing this inline instead of via
+  // RabbitMQ means a brief CloudAMQP outage cannot leave the connection
+  // permanently stuck — the inbox sweeper iterates webhook rows, not
+  // connections, so a connection without prior webhook activity would never
+  // be rescued by it. The daily horizon-refresh job is the long-tail rescue
+  // path (see gcal-horizon-refresh.job.ts).
+  void pullConnection(connection.id).catch(err => {
+    logger.warn('gcal connection commit: initial backfill failed (horizon-refresh will retry)', {
       err: err?.message,
       connectionId: connection.id,
     })

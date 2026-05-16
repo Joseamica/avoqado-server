@@ -18,6 +18,10 @@ export interface ResolvedModifierRow {
 export interface ResolveResult {
   persistRows: ResolvedModifierRow[]
   totalDelta: Prisma.Decimal
+  /** Sum of (modifier.durationMin × qty) across all picked modifiers, in
+   *  minutes. Zero when no modifier carries a duration. createReservation
+   *  adds this to the reservation duration + extends endsAt. */
+  totalDurationDelta: number
 }
 
 export async function resolveModifierSelections(
@@ -29,7 +33,7 @@ export async function resolveModifierSelections(
     if (selections.length > 0) {
       throw new BadRequestError('No se pueden enviar modificadores sin un servicio')
     }
-    return { persistRows: [], totalDelta: new Prisma.Decimal(0) }
+    return { persistRows: [], totalDelta: new Prisma.Decimal(0), totalDurationDelta: 0 }
   }
 
   const assignments = await tx.productModifierGroup.findMany({
@@ -46,7 +50,7 @@ export async function resolveModifierSelections(
           active: true,
           modifiers: {
             where: { active: true },
-            select: { id: true, name: true, price: true, active: true },
+            select: { id: true, name: true, price: true, durationMin: true, active: true },
           },
         },
       },
@@ -59,7 +63,7 @@ export async function resolveModifierSelections(
     {
       productId: string
       group: (typeof assignments)[number]['group']
-      modifier: { id: string; name: string; price: Prisma.Decimal | string }
+      modifier: { id: string; name: string; price: Prisma.Decimal | string; durationMin: number | null }
     }
   >()
 
@@ -119,6 +123,7 @@ export async function resolveModifierSelections(
   }
 
   let totalDelta = new Prisma.Decimal(0)
+  let totalDurationDelta = 0
   const persistRows: ResolvedModifierRow[] = []
   for (const sel of selections) {
     const entry = modifierIndex.get(`${sel.productId}:${sel.modifierId}`)!
@@ -126,6 +131,9 @@ export async function resolveModifierSelections(
     const unitPrice = new Prisma.Decimal(entry.modifier.price as any)
     const lineTotal = unitPrice.mul(qty)
     totalDelta = totalDelta.add(lineTotal)
+    if (entry.modifier.durationMin != null) {
+      totalDurationDelta += entry.modifier.durationMin * qty
+    }
     persistRows.push({
       productId: sel.productId,
       modifierId: sel.modifierId,
@@ -135,5 +143,5 @@ export async function resolveModifierSelections(
     })
   }
 
-  return { persistRows, totalDelta }
+  return { persistRows, totalDelta, totalDurationDelta }
 }
