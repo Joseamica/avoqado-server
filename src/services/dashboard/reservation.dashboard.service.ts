@@ -261,14 +261,16 @@ export async function createReservation(venueId: string, data: CreateReservation
     })
 
     const bookedProductIds = data.productIds && data.productIds.length > 0 ? data.productIds : data.productId ? [data.productId] : []
-    const { persistRows: modifierRows, totalDelta: modifierDelta, totalDurationDelta: modifierDurationDelta } =
-      await resolveModifierSelections(tx, bookedProductIds, data.modifierSelections ?? [])
+    const {
+      persistRows: modifierRows,
+      totalDelta: modifierDelta,
+      totalDurationDelta: modifierDurationDelta,
+    } = await resolveModifierSelections(tx, bookedProductIds, data.modifierSelections ?? [])
 
     // Modifier duration extends the booking. Recompute endsAt + duration so
     // overlap checks, capacity gates and the persisted record all reflect the
     // real time the customer will occupy the table/staff. Zero delta = identity.
-    const finalEndsAt =
-      modifierDurationDelta > 0 ? new Date(data.endsAt.getTime() + modifierDurationDelta * 60_000) : data.endsAt
+    const finalEndsAt = modifierDurationDelta > 0 ? new Date(data.endsAt.getTime() + modifierDurationDelta * 60_000) : data.endsAt
     const finalDuration = data.duration + modifierDurationDelta
 
     // Calculate deposit with validated product price (if configured as percentage)

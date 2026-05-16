@@ -126,7 +126,7 @@ export async function getVenueDetail(venueSlug: string) {
                   active: true,
                   modifiers: {
                     where: { active: true },
-                    select: { id: true, name: true, price: true, active: true },
+                    select: { id: true, name: true, price: true, durationMin: true, active: true },
                     orderBy: { name: 'asc' },
                   },
                 },
@@ -173,6 +173,7 @@ export async function getVenueDetail(venueSlug: string) {
             id: m.id,
             name: m.name,
             price: Number(m.price),
+            durationMin: m.durationMin,
             active: m.active,
           })),
         })),

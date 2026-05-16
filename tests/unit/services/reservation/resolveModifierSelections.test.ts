@@ -135,9 +135,7 @@ describe('resolveModifierSelections', () => {
         },
       },
     ])
-    const result = await resolveModifierSelections(prisma, [PROD], [
-      { productId: PROD, modifierId: M1A, quantity: 2 },
-    ])
+    const result = await resolveModifierSelections(prisma, [PROD], [{ productId: PROD, modifierId: M1A, quantity: 2 }])
     expect(result.totalDurationDelta).toBe(0)
   })
 
