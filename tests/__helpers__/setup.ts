@@ -103,8 +103,10 @@ const prismaMock: any = {
   // Modifier Inventory Analytics models
   modifier: createMockModel(),
   modifierGroup: createMockModel(),
+  productModifierGroup: createMockModel(),
   orderItemModifier: createMockModel(),
   rawMaterial: createMockModel(),
+  reservationModifier: createMockModel(),
   // Inventory models (QUANTITY method)
   inventory: createMockModel(),
   inventoryMovement: createMockModel(),
@@ -177,6 +179,10 @@ prismaMock.$transaction = jest.fn((callback: any) => callback(prismaMock))
 
 // Add $queryRaw for raw SQL queries
 prismaMock.$queryRaw = jest.fn()
+
+// Set safe default return values for mocks that are frequently queried
+prismaMock.productModifierGroup.findMany.mockResolvedValue([])
+prismaMock.externalBusyBlock.findFirst.mockResolvedValue(null)
 
 // Mock Prisma Client globally
 jest.mock('@/utils/prismaClient', () => ({

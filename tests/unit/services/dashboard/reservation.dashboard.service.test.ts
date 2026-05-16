@@ -86,6 +86,9 @@ describe('Reservation Dashboard Service', () => {
     // only mocked .update keep working — individual tests can override findUniqueOrThrow
     // when they want a specific shape returned to the caller.
     prismaMock.reservation.updateMany.mockResolvedValue({ count: 1 } as any)
+    // Task 4: resolveModifierSelections calls productModifierGroup.findMany in all reservation creations.
+    // Default to empty array to maintain backward compatibility with existing tests that don't mock this.
+    prismaMock.productModifierGroup.findMany.mockResolvedValue([])
   })
 
   // ==========================================
