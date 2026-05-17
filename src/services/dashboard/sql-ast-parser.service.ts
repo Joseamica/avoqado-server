@@ -74,6 +74,13 @@ export class SqlAstParserService {
     let violationType: SecurityViolationType | undefined
 
     try {
+      const rawAnalysis = this.detectRawSqlSecurityIssues(sql)
+      warnings.push(...rawAnalysis.warnings)
+      errors.push(...rawAnalysis.errors)
+      if (rawAnalysis.violationType) {
+        violationType = rawAnalysis.violationType
+      }
+
       // Step 1: Parse SQL into AST
       const ast = this.parseSQL(sql)
       if (!ast) {
@@ -144,6 +151,7 @@ export class SqlAstParserService {
       // Example: WHERE venueId='correct' OR 1=1 would pass but is malicious
       if (whereAnalysis.hasSuspiciousPatterns) {
         whereAnalysis.suspiciousReasons.forEach(reason => {
+          warnings.push(reason)
           // OR conditions are CRITICAL security violations - always block
           if (reason.includes('OR conditions') || reason.includes('Always-true condition')) {
             errors.push(reason)
@@ -233,6 +241,59 @@ export class SqlAstParserService {
       logger.error('Failed to parse SQL', { error, sql: sql.substring(0, 100) })
       return null
     }
+  }
+
+  /**
+   * Raw SQL checks that should run before AST normalization.
+   *
+   * The parser can discard comments or normalize attack syntax in ways that make
+   * security reporting weaker. These checks do not authorize a query; they only
+   * add explicit warnings/errors for high-risk patterns seen in the original SQL.
+   */
+  private detectRawSqlSecurityIssues(sql: string): {
+    errors: string[]
+    warnings: string[]
+    violationType?: SecurityViolationType
+  } {
+    const errors: string[] = []
+    const warnings: string[] = []
+    let violationType: SecurityViolationType | undefined
+    const trimmed = sql.trim()
+    const normalized = trimmed.toLowerCase()
+
+    if (/--|\/\*/.test(trimmed)) {
+      warnings.push('SQL comments detected - comments are not allowed in generated queries')
+      errors.push('SQL comments are not allowed in generated queries')
+      violationType = SecurityViolationType.SQL_INJECTION_ATTEMPT
+    }
+
+    const semicolonMatches = trimmed.match(/;/g) || []
+    const hasStackedStatements = semicolonMatches.length > 1 || (semicolonMatches.length === 1 && !trimmed.endsWith(';'))
+    if (hasStackedStatements) {
+      errors.push('Multiple SQL statements are not allowed')
+      violationType = SecurityViolationType.SQL_INJECTION_ATTEMPT
+    }
+
+    if (/\b(information_schema|pg_catalog|sys\.)\b/i.test(trimmed)) {
+      errors.push('System catalog access is not allowed (information_schema, pg_catalog, sys)')
+      violationType = SecurityViolationType.SCHEMA_DISCOVERY
+    }
+
+    if (/\bunion(?:\s+all)?\s+select\b/i.test(trimmed)) {
+      warnings.push('UNION detected - every SELECT branch must preserve tenant isolation')
+    }
+
+    if (/\b(?:1\s*=\s*1|true\s*=\s*true)\b/i.test(normalized)) {
+      warnings.push('Always-true condition detected in SQL text')
+      errors.push('Always-true condition detected in SQL text')
+      violationType = SecurityViolationType.SQL_INJECTION_ATTEMPT
+    }
+
+    if (/\(\s*select\b/i.test(normalized)) {
+      warnings.push('Subquery detected in SQL text - nested queries require independent tenant isolation')
+    }
+
+    return { errors, warnings, violationType }
   }
 
   /**
@@ -504,7 +565,9 @@ export class SqlAstParserService {
     }
 
     // Check if this is a venueId = 'xxx' expression
-    if (whereExpr.type === 'binary_expr' && whereExpr.operator === '=' && whereExpr.left && whereExpr.left.type === 'column_ref') {
+    const operator = typeof whereExpr.operator === 'string' ? whereExpr.operator.toUpperCase() : whereExpr.operator
+
+    if (whereExpr.type === 'binary_expr' && operator === '=' && whereExpr.left && whereExpr.left.type === 'column_ref') {
       const columnName = this.extractColumnName(whereExpr.left.column)
 
       if (columnName === 'venueid') {
@@ -518,7 +581,7 @@ export class SqlAstParserService {
     }
 
     // Check AND conditions (venueId must be in one of them)
-    if (whereExpr.type === 'binary_expr' && whereExpr.operator === 'AND') {
+    if (whereExpr.type === 'binary_expr' && operator === 'AND') {
       const leftCheck = this.findVenueFilter(whereExpr.left, requiredVenueId)
       if (leftCheck.found) return leftCheck
 
@@ -538,7 +601,9 @@ export class SqlAstParserService {
   private hasOrConditions(whereExpr: any): boolean {
     if (!whereExpr) return false
 
-    if (whereExpr.type === 'binary_expr' && whereExpr.operator === 'OR') {
+    const operator = typeof whereExpr.operator === 'string' ? whereExpr.operator.toUpperCase() : whereExpr.operator
+
+    if (whereExpr.type === 'binary_expr' && operator === 'OR') {
       return true
     }
 
@@ -559,9 +624,17 @@ export class SqlAstParserService {
       if (!expr) return
 
       // Pattern 1: Always-true conditions (1=1, true, etc.)
-      if (expr.type === 'binary_expr' && expr.operator === '=') {
-        if (expr.left?.value === expr.right?.value && typeof expr.left?.value === 'number') {
-          suspicious.push(`Always-true condition detected: ${expr.left.value}=${expr.right.value}`)
+      const operator = typeof expr.operator === 'string' ? expr.operator.toUpperCase() : expr.operator
+
+      if (expr.type === 'select') {
+        suspicious.push('Subquery detected in WHERE clause - may bypass venueId filter')
+      }
+
+      if (expr.type === 'binary_expr' && operator === '=') {
+        const leftValue = expr.left?.value
+        const rightValue = expr.right?.value
+        if (leftValue !== undefined && rightValue !== undefined && String(leftValue) === String(rightValue)) {
+          suspicious.push(`Always-true condition detected: ${leftValue}=${rightValue}`)
         }
       }
 
@@ -578,12 +651,12 @@ export class SqlAstParserService {
       }
 
       // Pattern 3: IN with subquery that might return multiple venues
-      if (expr.type === 'binary_expr' && expr.operator === 'IN' && expr.right?.type === 'select') {
+      if (expr.type === 'binary_expr' && operator === 'IN' && expr.right?.type === 'select') {
         suspicious.push('IN clause with subquery detected - may bypass venueId filter')
       }
 
       // Pattern 4: NOT operator (potential bypass)
-      if (expr.type === 'unary_expr' && expr.operator === 'NOT') {
+      if (expr.type === 'unary_expr' && operator === 'NOT') {
         suspicious.push('NOT operator detected - may negate venueId filter')
       }
 

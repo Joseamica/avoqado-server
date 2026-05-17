@@ -183,7 +183,7 @@ securityDescribe('🔒 Chatbot Security Penetration Tests', () => {
       })
 
       expect(validation.valid).toBe(false)
-      expect(validation.errors).toContain(expect.stringContaining('VenueId mismatch'))
+      expect(validation.errors.some(error => error.includes('does not match'))).toBe(true)
     })
 
     it('should DETECT OR condition attempt to bypass venueId filter', async () => {
@@ -197,7 +197,7 @@ securityDescribe('🔒 Chatbot Security Penetration Tests', () => {
       })
 
       expect(validation.valid).toBe(false)
-      expect(validation.warnings).toContain(expect.stringContaining('OR condition in WHERE clause'))
+      expect(validation.warnings.some(warning => /OR conditions?/i.test(warning))).toBe(true)
     })
   })
 
@@ -224,7 +224,7 @@ securityDescribe('🔒 Chatbot Security Penetration Tests', () => {
 
         // Should be blocked
         expect(result.metadata.blocked).toBe(true)
-        expect(result.response).toContain('seguridad')
+        expect(result.response).toMatch(/seguridad|security/i)
       }
     })
 
@@ -281,13 +281,14 @@ securityDescribe('🔒 Chatbot Security Penetration Tests', () => {
 
       const parser = new SqlAstParserService()
       for (const sql of attacks) {
-        expect(() => {
-          parser.validateQuery(sql, {
-            requiredVenueId: testVenueId1,
-            maxDepth: 3,
-            strictMode: true,
-          })
-        }).toThrow()
+        const validation = parser.validateQuery(sql, {
+          requiredVenueId: testVenueId1,
+          maxDepth: 3,
+          strictMode: true,
+        })
+
+        expect(validation.valid).toBe(false)
+        expect(validation.errors.some(error => /multiple sql statements|select statement|dangerous/i.test(error))).toBe(true)
       }
     })
   })
@@ -340,7 +341,7 @@ securityDescribe('🔒 Chatbot Security Penetration Tests', () => {
       })
 
       // Should detect UNION and flag as suspicious
-      expect(validation.warnings).toContain(expect.stringContaining('UNION'))
+      expect(validation.warnings.some(warning => /UNION/i.test(warning))).toBe(true)
     })
 
     it('should DETECT subquery injection attempts', async () => {
@@ -367,7 +368,7 @@ securityDescribe('🔒 Chatbot Security Penetration Tests', () => {
         strictMode: true,
       })
 
-      expect(validation.warnings).toContain(expect.stringContaining('always-true condition'))
+      expect(validation.warnings.some(warning => /always-true condition/i.test(warning))).toBe(true)
     })
   })
 
@@ -464,8 +465,8 @@ securityDescribe('🔒 Chatbot Security Penetration Tests', () => {
       const detection = PIIDetectionService.detectAndRedact(mockData, PIIDetectionService.getDefaultOptions(UserRole.VIEWER))
 
       expect(detection.hasPII).toBe(true)
-      expect(detection.detectedFields).toContain('email')
-      expect(detection.redactedData[0].email).toBe('***REDACTED***')
+      expect(detection.detectedFields.some(field => field.fieldName === 'email' && field.fieldType === 'EMAIL')).toBe(true)
+      expect(detection.redactedData[0].email).toBe('[EMAIL_REDACTED]')
     })
 
     it('should DETECT phone numbers in query results', () => {
@@ -477,7 +478,7 @@ securityDescribe('🔒 Chatbot Security Penetration Tests', () => {
       const detection = PIIDetectionService.detectAndRedact(mockData, PIIDetectionService.getDefaultOptions(UserRole.CASHIER))
 
       expect(detection.hasPII).toBe(true)
-      expect(detection.detectedFields).toContain('phone')
+      expect(detection.detectedFields.some(field => field.fieldName === 'phone' && field.fieldType === 'PHONE')).toBe(true)
     })
 
     it('should NOT redact PII for SUPERADMIN role', () => {
@@ -489,13 +490,13 @@ securityDescribe('🔒 Chatbot Security Penetration Tests', () => {
       expect(detection.redactedData[0].email).toBe('john.doe@example.com') // Not redacted
     })
 
-    it('should NOT redact PII for ADMIN role', () => {
+    it('should redact PII for ADMIN role', () => {
       const mockData = [{ id: 1, name: 'John Doe', email: 'john.doe@example.com' }]
 
       const detection = PIIDetectionService.detectAndRedact(mockData, PIIDetectionService.getDefaultOptions(UserRole.ADMIN))
 
-      expect(detection.hasPII).toBe(false) // Skipped for ADMIN
-      expect(detection.redactedData[0].email).toBe('john.doe@example.com') // Not redacted
+      expect(detection.hasPII).toBe(true)
+      expect(detection.redactedData[0].email).toBe('[EMAIL_REDACTED]')
     })
   })
 

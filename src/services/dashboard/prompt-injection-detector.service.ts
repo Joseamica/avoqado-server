@@ -58,6 +58,13 @@ export class PromptInjectionDetectorService {
       description: 'Attempt to ignore previous instructions',
     },
     {
+      pattern: /ignore\s+all\s+previous\s+(instructions?|rules?|directives?|prompts?)/i,
+      type: 'INSTRUCTION_OVERRIDE',
+      severity: 'CRITICAL',
+      riskScore: 95,
+      description: 'Attempt to ignore all previous instructions',
+    },
+    {
       pattern: /forget\s+(everything|all|what|your)\s+(you\s+)?(know|learned|were\s+told|instructions?)/i,
       type: 'INSTRUCTION_OVERRIDE',
       severity: 'CRITICAL',
@@ -166,6 +173,20 @@ export class PromptInjectionDetectorService {
     // ========================================
     {
       pattern: /show\s+(me\s+)?(all\s+)?(tables?|columns?|database\s+schema)/i,
+      type: 'SCHEMA_DISCOVERY',
+      severity: 'HIGH',
+      riskScore: 75,
+      description: 'Attempt to discover database schema',
+    },
+    {
+      pattern: /what\s+(tables?|columns?|database\s+objects?)\s+(exist|are\s+available|do\s+you\s+have)/i,
+      type: 'SCHEMA_DISCOVERY',
+      severity: 'HIGH',
+      riskScore: 75,
+      description: 'Attempt to discover database objects',
+    },
+    {
+      pattern: /(database|db)\s+schema/i,
       type: 'SCHEMA_DISCOVERY',
       severity: 'HIGH',
       riskScore: 75,

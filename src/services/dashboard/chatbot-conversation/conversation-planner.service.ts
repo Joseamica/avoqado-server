@@ -765,14 +765,24 @@ export class ConversationPlannerService {
   }
 
   private hasCriticalInjection(normalized: string): boolean {
-    return /\b(ignore|ignora|olvida|forget|disregard|override|sobrescribe|system prompt|prompt del sistema|developer message|revela|muestra instrucciones|ejecuta codigo|execute code|sql schema|tablas internas|bypass|saltate|sin permisos|contrasenas?|contraseñas?|passwords?|secrets?|secretos?|api keys?|superadmin)\b/.test(
-      normalized,
+    return (
+      /\b(ignore|ignora|olvida|forget|disregard|override|sobrescribe|system prompt|prompt del sistema|developer message|revela|muestra instrucciones|ejecuta codigo|execute code|sql schema|database schema|db schema|tablas internas|bypass|saltate|sin permisos|contrasenas?|contraseñas?|passwords?|secrets?|secretos?|api keys?|superadmin)\b/.test(
+        normalized,
+      ) ||
+      /\b(information_schema|pg_catalog|sys\.|list all tables|show me all tables|what tables exist|database columns?)\b/.test(
+        normalized,
+      )
     )
   }
 
   private hasCrossVenueRequest(normalized: string): boolean {
-    return /\b(otro venue|otra sucursal|todos los venues|todas las sucursales|otra cuenta|otro restaurante|cross[- ]?venue)\b/.test(
-      normalized,
+    return (
+      /\b(otro venue|otra sucursal|todos los venues|todas las sucursales|otra cuenta|otro restaurante|cross[- ]?venue)\b/.test(
+        normalized,
+      ) ||
+      /\b(another|other)\s+(venue|branch|location|restaurant|store|account)\b/.test(normalized) ||
+      /\bfrom\s+venue\s+[a-z0-9_-]+\b/.test(normalized) ||
+      /\bvenue\s+(id\s+)?[a-z0-9_-]{8,}\b/.test(normalized)
     )
   }
 

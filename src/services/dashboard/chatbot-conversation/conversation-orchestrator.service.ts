@@ -4,7 +4,7 @@ import { getUserAccess } from '@/services/access/access.service'
 import { evaluatePermissionList } from '@/lib/permissions'
 import { RelativeDateRange } from '@/utils/datetime'
 import { SharedQueryService } from '../shared-query.service'
-import { SecurityViolationType } from '../security-response.service'
+import { SecurityResponseService, SecurityViolationType } from '../security-response.service'
 import { TableAccessControlService, UserRole } from '../table-access-control.service'
 import { ActionEngine } from '../chatbot-actions/action-engine.service'
 import { ActionClassification, ActionContext, ActionResponse } from '../chatbot-actions/types'
@@ -94,9 +94,11 @@ export class ConversationOrchestratorService {
       if (step.kind === 'unsupported') {
         blocked = blocked || plan.riskLevel === 'high'
         if (plan.riskLevel === 'high') {
-          violationType = SecurityViolationType.PROMPT_INJECTION
+          violationType = this.violationTypeForUnsupported(step.topic, step.reason)
+          responseBlocks.push(SecurityResponseService.generateSecurityResponse(violationType, responseLanguage).message)
+        } else {
+          responseBlocks.push(this.formatUnsupported(step.topic, step.reason, responseLanguage))
         }
-        responseBlocks.push(this.formatUnsupported(step.topic, step.reason, responseLanguage))
         metadataSteps.push(this.stepMetadata(step, plan.riskLevel === 'high' ? 'blocked' : 'skipped'))
         continue
       }
@@ -1047,6 +1049,23 @@ export class ConversationOrchestratorService {
     }
 
     return `Sobre ${topic}: ${reason} Puedo ayudarte con datos y operaciones del venue actual.`
+  }
+
+  private violationTypeForUnsupported(topic: string, reason: string): SecurityViolationType {
+    const normalized = `${topic} ${reason}`
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+
+    if (/\b(otro venue|otra sucursal|another venue|other venue|venue actual|cross[- ]?venue)\b/.test(normalized)) {
+      return SecurityViolationType.CROSS_VENUE_ACCESS
+    }
+
+    if (/\b(schema|esquema|tablas?|columns?|information_schema|pg_catalog|base de datos|database)\b/.test(normalized)) {
+      return SecurityViolationType.SCHEMA_DISCOVERY
+    }
+
+    return SecurityViolationType.PROMPT_INJECTION
   }
 
   private formatDateRangeName(dateRange: RelativeDateRange, language: ResponseLanguage = 'es'): string {
