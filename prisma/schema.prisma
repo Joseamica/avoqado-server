@@ -2174,6 +2174,12 @@ model Order {
   // Credit Packs (for future TPV integration)
   creditTransactions CreditTransaction[]
 
+  // Originating reservation — set by check-in auto-conversion so the cashier
+  // sees the booked services + picked modifiers pre-populated. Idempotency
+  // anchor: createOrderFromReservation skips when this order already exists.
+  reservationId String?
+  reservation   Reservation? @relation("OrderFromReservation", fields: [reservationId], references: [id], onDelete: SetNull)
+
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   completedAt DateTime?
@@ -2185,6 +2191,7 @@ model Order {
   @@index([createdAt])
   @@index([customerId])
   @@index([terminalId])
+  @@index([reservationId])
   @@index([venueId, tableId, paymentStatus])
   @@index([venueId, customerIdentifier, paymentStatus])
   @@index([venueId, createdAt])
@@ -8199,6 +8206,8 @@ model Reservation {
 
   // Modifiers selected during booking for multi-service appointments
   modifiers ReservationModifier[]
+  // Orders auto-created from this reservation on check-in.
+  orders    Order[]              @relation("OrderFromReservation")
 
   // Google Calendar Sync (Phase 2 — push)
   calendarSyncOutbox  CalendarSyncOutbox[]

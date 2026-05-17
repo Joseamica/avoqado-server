@@ -10,6 +10,7 @@ import emailService from '../email.service'
 import { getProvider } from '../payments/provider-registry'
 import { checkExternalBusyBlock } from '../reservation/external-busy-block.service'
 import { resolveModifierSelections } from '@/services/reservation/resolveModifierSelections'
+import { createOrderFromReservation } from '@/services/reservation/createOrderFromReservation'
 import {
   buildSyncKey,
   collapseSupersededOps,
@@ -500,6 +501,12 @@ const RESERVATION_INCLUDE = {
   product: { select: { id: true, name: true, price: true } },
   assignedStaff: { select: { id: true, firstName: true, lastName: true } },
   createdBy: { select: { id: true, firstName: true, lastName: true } },
+  // Picked modifiers — surfaced so the dashboard reservation detail / TPV
+  // shows the full breakdown and the cashier charges the correct total.
+  modifiers: {
+    select: { id: true, productId: true, name: true, quantity: true, price: true, createdAt: true },
+    orderBy: { createdAt: 'asc' },
+  },
 } as const
 
 export async function getReservations(venueId: string, filters: ReservationFilters, page = 1, pageSize = 50) {
@@ -566,6 +573,10 @@ export async function getReservationByCancelSecret(venueId: string, cancelSecret
       product: { select: { id: true, name: true, price: true } },
       assignedStaff: { select: { id: true, firstName: true, lastName: true } },
       venue: { select: { name: true, slug: true, timezone: true } },
+      modifiers: {
+        select: { id: true, productId: true, name: true, quantity: true, price: true, createdAt: true },
+        orderBy: { createdAt: 'asc' },
+      },
     },
   })
   if (!reservation) throw new NotFoundError('Reservacion no encontrada')
@@ -756,7 +767,29 @@ export async function confirmReservation(venueId: string, reservationId: string,
 }
 
 export async function checkInReservation(venueId: string, reservationId: string, checkedInBy: string) {
-  return transitionReservation(venueId, reservationId, 'CHECKED_IN', checkedInBy)
+  const transitioned = await transitionReservation(venueId, reservationId, 'CHECKED_IN', checkedInBy)
+  // Auto-create the TPV order so the cashier sees the booked services +
+  // picked modifiers pre-populated. Idempotent — re-check-in of an already
+  // converted reservation returns the existing order. Wrapped in a single
+  // SERIALIZABLE tx so the check-in + conversion either both happen or
+  // neither does.
+  let orderId: string | null = null
+  try {
+    const result = await withSerializableRetry(async tx =>
+      createOrderFromReservation(tx, {
+        reservationId,
+        venueId,
+        createdByStaffId: checkedInBy === 'CUSTOMER' || checkedInBy === 'SYSTEM' ? null : checkedInBy,
+      }),
+    )
+    orderId = result?.orderId ?? null
+  } catch (err) {
+    // Order auto-creation must NEVER block check-in. The reservation IS
+    // checked in; if conversion fails, the cashier creates the order
+    // manually like before.
+    logger.error(`[CHECK_IN] Order auto-create failed for reservation ${reservationId}: ${(err as Error).message}`)
+  }
+  return Object.assign(transitioned, { orderId })
 }
 
 export async function completeReservation(venueId: string, reservationId: string) {
