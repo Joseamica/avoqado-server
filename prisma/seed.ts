@@ -57,6 +57,7 @@ import bcrypt from 'bcryptjs'
 import crypto from 'crypto'
 import { getUnitType } from '../src/services/dashboard/rawMaterial.service'
 import { calculatePaymentSettlement } from '../src/services/payments/settlementCalculation.service'
+import { setupModules } from '../scripts/setup-modules'
 
 const prisma = new PrismaClient()
 
@@ -851,6 +852,12 @@ async function main() {
 
   console.log(`  Created ${blumonSettlementTypes.length} settlement configurations (Blumon A).`)
 
+  // --- Modules (Module table) ---
+  // Populate the Module catalog (WHITE_LABEL_DASHBOARD, SERIALIZED_INVENTORY, etc.)
+  // so OrganizationModule/VenueModule rows below can reference them.
+  console.log('Seeding modules catalog...')
+  await setupModules()
+
   // --- 1. Organizaciones ---
   // Mirror real production structure: Grupo Avoqado + PlayTelecom.
   // Upsert by slug → idempotent across runs.
@@ -949,6 +956,71 @@ async function main() {
     }
     console.log(`  Created ${createdStaffList.length} global staff members (SUPERADMIN, OWNER).`)
 
+    // --- Org-level modules (replicates prod) ---
+    // PlayTelecom gets WHITE_LABEL_DASHBOARD (telecom preset) + SERIALIZED_INVENTORY (org-wide).
+    // Per-venue overrides (e.g. SIM labels on BAE) are applied below in the venue loop.
+    if (org.slug === 'playtelecom' && createdStaffList.length > 0) {
+      const enabledBy = createdStaffList[0].id
+      const [wlModule, siModule] = await Promise.all([
+        prisma.module.findUnique({ where: { code: 'WHITE_LABEL_DASHBOARD' } }),
+        prisma.module.findUnique({ where: { code: 'SERIALIZED_INVENTORY' } }),
+      ])
+      const orgModules: Array<{ moduleId: string; config: any; code: string }> = []
+      if (wlModule) {
+        orgModules.push({
+          moduleId: wlModule.id,
+          code: 'WHITE_LABEL_DASHBOARD',
+          config: {
+            preset: 'telecom',
+            version: '1.0',
+            theme: { brandName: 'Telecom Dashboard', primaryColor: '#FF6B00' },
+            navigation: {
+              layout: 'sidebar',
+              items: [
+                { id: 'nav-MANAGERS_DASHBOARD', icon: 'UserCog', type: 'feature', label: 'Gerentes', order: 0, featureCode: 'MANAGERS_DASHBOARD' },
+                { id: 'nav-TPV_CONFIGURATION', icon: 'Settings', type: 'feature', label: 'Configuración White Label', order: 1, featureCode: 'TPV_CONFIGURATION' },
+                { id: 'nav-SUPERVISOR_DASHBOARD', icon: 'Eye', type: 'feature', label: 'Supervisor', order: 2, featureCode: 'SUPERVISOR_DASHBOARD' },
+                { id: 'nav-USERS_MANAGEMENT', icon: 'Users', type: 'feature', label: 'Usuarios', order: 3, featureCode: 'USERS_MANAGEMENT' },
+                { id: 'nav-SERIALIZED_STOCK', icon: 'Package', type: 'feature', label: 'Inventario', order: 4, featureCode: 'SERIALIZED_STOCK' },
+                { id: 'nav-SALES_REPORT', icon: 'Receipt', type: 'feature', label: 'Reporte de Ventas', order: 5, featureCode: 'SALES_REPORT' },
+              ],
+            },
+            featureConfigs: {
+              SALES_REPORT: { enabled: true, config: { autoReconcile: false, exportFormats: ['csv', 'xlsx'], showRevenueCharts: true, requireProofOfSale: true } },
+              SERIALIZED_STOCK: { enabled: true, config: { showIMEI: true, trackWarranty: true, lowStockThreshold: 10, requireSerialOnSale: true } },
+              USERS_MANAGEMENT: { enabled: true, config: { allowPasswordReset: true, showZoneManagement: true } },
+              TPV_CONFIGURATION: { enabled: true, config: { showPhonePreview: true, allowCatalogReorder: true } },
+              MANAGERS_DASHBOARD: { enabled: true, config: { showTeamHealth: true, showGoalProgress: true, enableGoalSetting: true } },
+              SUPERVISOR_DASHBOARD: { enabled: true, config: { showGaugeChart: true, refreshInterval: 30 } },
+            },
+            enabledFeatures: [
+              { code: 'MANAGERS_DASHBOARD', source: 'module_specific' },
+              { code: 'TPV_CONFIGURATION', source: 'module_specific' },
+              { code: 'SUPERVISOR_DASHBOARD', source: 'module_specific' },
+              { code: 'USERS_MANAGEMENT', source: 'module_specific' },
+              { code: 'SERIALIZED_STOCK', source: 'module_specific' },
+              { code: 'SALES_REPORT', source: 'module_specific' },
+            ],
+          },
+        })
+      }
+      if (siModule) {
+        orgModules.push({
+          moduleId: siModule.id,
+          code: 'SERIALIZED_INVENTORY',
+          config: { features: { enablePortabilidad: true } },
+        })
+      }
+      for (const { moduleId, code, config } of orgModules) {
+        await prisma.organizationModule.upsert({
+          where: { organizationId_moduleId: { organizationId: org.id, moduleId } },
+          update: {},
+          create: { organizationId: org.id, moduleId, enabled: true, enabledBy, config },
+        })
+        console.log(`  Enabled org-level module: ${code}`)
+      }
+    }
+
     // Para invitaciones usamos OWNER como invitador
     const mainInviter = createdStaffList.find(s => s.assignedRole === StaffRole.OWNER)
 
@@ -1009,34 +1081,77 @@ async function main() {
       const venueName = venueConfig.name
       const venueSlug = venueConfig.slug || generateSlug(venueName)
       const isFullVenue = venueConfig.seedFullData
-      const venueCreateData = {
-        organizationId: org.id,
-        name: venueName,
-        slug: venueSlug,
-        type: 'venueType' in venueConfig ? (venueConfig.venueType as VenueType) : VenueType.RESTAURANT,
-        entityType: index === 0 ? EntityType.PERSONA_MORAL : EntityType.PERSONA_FISICA,
-        address: faker.location.streetAddress(),
-        city: faker.location.city(),
-        state: faker.location.state(),
-        zipCode: faker.location.zipCode(),
-        country: 'MX',
-        phone: faker.phone.number(),
-        email: `contact@${venueSlug}.com`,
-        logo: faker.image.urlLoremFlickr({ category: 'restaurant,logo' }),
-        feeValue: 0.025,
-        feeScheduleId: feeSchedule.id,
-        status: venueConfig.status,
-        kycStatus: venueConfig.kycStatus,
-        statusChangedAt: new Date(),
-        ...('demoExpiresAt' in venueConfig && { demoExpiresAt: venueConfig.demoExpiresAt }),
-        ...('suspensionReason' in venueConfig && { suspensionReason: venueConfig.suspensionReason }),
-      }
       const venue = await prisma.venue.upsert({
         where: { slug: venueSlug },
         update: {}, // Keep existing data on re-runs; only fill if missing
-        create: venueCreateData,
+        create: {
+          organizationId: org.id,
+          name: venueName,
+          slug: venueSlug,
+          type: 'venueType' in venueConfig ? (venueConfig.venueType as VenueType) : VenueType.RESTAURANT,
+          entityType: index === 0 ? EntityType.PERSONA_MORAL : EntityType.PERSONA_FISICA,
+          address: faker.location.streetAddress(),
+          city: faker.location.city(),
+          state: faker.location.state(),
+          zipCode: faker.location.zipCode(),
+          country: 'MX',
+          phone: faker.phone.number(),
+          email: `contact@${venueSlug}.com`,
+          logo: faker.image.urlLoremFlickr({ category: 'restaurant,logo' }),
+          feeValue: 0.025,
+          feeScheduleId: feeSchedule.id,
+          status: venueConfig.status,
+          kycStatus: venueConfig.kycStatus,
+          statusChangedAt: new Date(),
+        },
       })
       console.log(`    -> Created Venue: ${venue.name} (status: ${venueConfig.status}, kyc: ${venueConfig.kycStatus})`)
+
+      // --- Venue-level modules for BAE PlayTelecom (mirror prod config) ---
+      if (venue.slug === 'play-telecom' && createdStaffList.length > 0) {
+        const enabledBy = createdStaffList[0].id
+        // Ensure COMMISSIONS module exists (setup-modules.ts doesn't create it yet)
+        const commissionsModule = await prisma.module.upsert({
+          where: { code: 'COMMISSIONS' },
+          update: { name: 'Comisiones y Metas de Venta' },
+          create: {
+            code: 'COMMISSIONS',
+            name: 'Comisiones y Metas de Venta',
+            description: 'Gestión de comisiones por ventas y metas de equipo. Permite configurar tiers, overrides y trackear cumplimiento por staff/venue.',
+            defaultConfig: { salesGoals: [] },
+            presets: {},
+            configSchema: { type: 'object', properties: { salesGoals: { type: 'array' } } },
+          },
+        })
+        const siModuleForVenue = await prisma.module.findUnique({ where: { code: 'SERIALIZED_INVENTORY' } })
+
+        const venueModuleSpecs: Array<{ moduleId: string; code: string; config: any }> = []
+        if (siModuleForVenue) {
+          venueModuleSpecs.push({
+            moduleId: siModuleForVenue.id,
+            code: 'SERIALIZED_INVENTORY',
+            config: {
+              ui: { enableShifts: false, skipTipScreen: true, skipReviewScreen: true, simplifiedOrderFlow: true },
+              labels: { item: 'SIM', scan: 'Escanear SIM', barcode: 'ICCID', category: 'Tipo de SIM', register: 'Alta de SIM' },
+              features: { enablePortabilidad: true },
+              attendance: { requireClockInGps: true, requireClockOutGps: false, requireClockInPhoto: true, requireClockOutPhoto: true },
+            },
+          })
+        }
+        venueModuleSpecs.push({
+          moduleId: commissionsModule.id,
+          code: 'COMMISSIONS',
+          config: {},
+        })
+        for (const { moduleId, code, config } of venueModuleSpecs) {
+          await prisma.venueModule.upsert({
+            where: { venueId_moduleId: { venueId: venue.id, moduleId } },
+            update: {},
+            create: { venueId: venue.id, moduleId, enabled: true, enabledBy, config },
+          })
+          console.log(`      - Enabled venue-level module: ${code}`)
+        }
+      }
 
       // Crear staff específico para este venue (solo para org 0)
       const venueSpecificStaff: (any & { assignedRole: StaffRole })[] = []
@@ -3603,18 +3718,80 @@ async function main() {
       const sellableProductTypes: ProductType[] = [ProductType.FOOD, ProductType.BEVERAGE, ProductType.ALCOHOL, ProductType.RETAIL]
       const sellableProducts = products.filter(p => sellableProductTypes.includes(p.type))
 
-      const modifierGroup = await prisma.modifierGroup.create({ data: { venueId: venue.id, name: 'Aderezos', allowMultiple: true } })
-      const modifiers = await Promise.all([
-        prisma.modifier.create({ data: { groupId: modifierGroup.id, name: 'Ranch', price: 10 } }),
-        prisma.modifier.create({ data: { groupId: modifierGroup.id, name: 'BBQ', price: 12.5 } }),
-        prisma.modifier.create({ data: { groupId: modifierGroup.id, name: 'Chipotle Mayo', price: 15 } }),
-      ])
+      // 3 modifier groups exercising different schema features:
+      //   - Tamaño: required + single-choice, mix of free + paid
+      //   - Aderezos: optional + multi-choice, all paid
+      //   - Extras (servicio): optional + multi-choice, with durationMin (booking add-ons)
+      const modifierGroupSpecs = [
+        {
+          group: {
+            name: 'Tamaño',
+            description: 'Selecciona el tamaño',
+            required: true,
+            allowMultiple: false,
+            minSelections: 1,
+            maxSelections: 1,
+            displayOrder: 1,
+          },
+          modifiers: [
+            { name: 'Chico', price: 0 },
+            { name: 'Mediano', price: 15 },
+            { name: 'Grande', price: 30 },
+          ],
+        },
+        {
+          group: {
+            name: 'Aderezos',
+            description: 'Agrega aderezos a tu orden',
+            allowMultiple: true,
+            displayOrder: 2,
+          },
+          modifiers: [
+            { name: 'Ranch', price: 10 },
+            { name: 'BBQ', price: 12.5 },
+            { name: 'Chipotle Mayo', price: 15 },
+          ],
+        },
+        {
+          group: {
+            name: 'Extras (servicio)',
+            description: 'Servicios adicionales que extienden la duración de la cita',
+            allowMultiple: true,
+            minSelections: 0,
+            maxSelections: 3,
+            displayOrder: 3,
+          },
+          modifiers: [
+            { name: 'Tratamiento capilar', price: 250, durationMin: 30 },
+            { name: 'Mascarilla facial', price: 180, durationMin: 20 },
+            { name: 'Diseño de cejas', price: 60, durationMin: 5 },
+          ],
+        },
+      ]
+      const modifiers: any[] = [] // Flat list of all created modifiers (used later by orders loop)
+      const createdGroups: { id: string }[] = []
+      for (const { group, modifiers: modSpecs } of modifierGroupSpecs) {
+        const modifierGroup = await prisma.modifierGroup.create({ data: { venueId: venue.id, ...group } })
+        const created = await Promise.all(
+          modSpecs.map(m =>
+            prisma.modifier.create({ data: { groupId: modifierGroup.id, ...m } }),
+          ),
+        )
+        modifiers.push(...created)
+        createdGroups.push({ id: modifierGroup.id })
+      }
+      // Assign all groups to a sample of products (cross-join: each product gets all groups)
+      const productsForModifiers = getRandomSample(sellableProducts, Math.min(8, sellableProducts.length))
       await Promise.all(
-        getRandomSample(sellableProducts, 5).map(product =>
-          prisma.productModifierGroup.create({ data: { productId: product.id, groupId: modifierGroup.id } }),
+        productsForModifiers.flatMap(product =>
+          createdGroups.map(g =>
+            prisma.productModifierGroup.create({ data: { productId: product.id, groupId: g.id } }),
+          ),
         ),
       )
-      console.log(`      - Created modifiers and assigned to products.`)
+      console.log(
+        `      - Created ${createdGroups.length} modifier groups (${modifiers.length} modifiers, includes durationMin add-ons) and assigned to ${productsForModifiers.length} products.`,
+      )
 
       const venueWaiters = await prisma.staffVenue.findMany({
         where: { venueId: venue.id, role: { in: [StaffRole.WAITER] } },

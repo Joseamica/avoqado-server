@@ -7,7 +7,7 @@
 
 import prisma from '../src/utils/prismaClient'
 
-async function main() {
+export async function setupModules() {
   console.log('🚀 Setting up modules...\n')
 
   // Create SERIALIZED_INVENTORY module
@@ -754,11 +754,14 @@ async function main() {
   console.log('✅ Setup complete!\n')
 }
 
-main()
-  .catch(e => {
-    console.error('❌ Error:', e)
-    process.exit(1)
-  })
-  .finally(async () => {
-    await prisma.$disconnect()
-  })
+// CLI entry point: only run when invoked directly (not when imported)
+if (require.main === module) {
+  setupModules()
+    .catch(e => {
+      console.error('❌ Error:', e)
+      process.exit(1)
+    })
+    .finally(async () => {
+      await prisma.$disconnect()
+    })
+}
