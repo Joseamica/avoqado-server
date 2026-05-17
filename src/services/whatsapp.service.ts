@@ -188,10 +188,48 @@ export async function sendPurchaseConfirmationWhatsApp(phone: string, data: What
 }
 
 /**
+ * Format picked modifiers as a single line for the WhatsApp template.
+ * Example: "Esmalte de color +$150, Por uña × 3 +$30"
+ * Returns empty string when no modifiers — caller decides which template to use.
+ */
+export function formatModifiersForWhatsApp(modifiers: Array<{ name: string | null; quantity: number; price: number }>): string {
+  return modifiers
+    .filter(m => m.name)
+    .map(m => {
+      const qtyLabel = m.quantity > 1 ? ` × ${m.quantity}` : ''
+      const total = m.price * m.quantity
+      const priceLabel = total > 0 ? ` +$${total.toLocaleString('es-MX', { maximumFractionDigits: 0 })}` : ''
+      return `${m.name}${qtyLabel}${priceLabel}`
+    })
+    .join(', ')
+}
+
+/**
  * Send reservation confirmation via WhatsApp
  * Template: reservation_confirmation — params: {{1}}=name, {{2}}=venue, {{3}}=date, {{4}}=time
+ *
+ * When `data.extras` is set (modifier breakdown), routes to the extended template
+ * `reservation_confirmation_with_extras` which adds {{5}}=extras line.
+ *
+ * AWAITING META TEMPLATE APPROVAL — register a new template named
+ * `reservation_confirmation_with_extras` (es_MX) with 5 body params:
+ *   "Hola {{1}}, confirmamos tu cita en {{2}} el {{3}} a las {{4}}. Extras: {{5}}"
+ * Until approved, callers should leave `extras` undefined so the legacy 4-param
+ * template fires — modifier info will still reach the customer via the email.
  */
-export async function sendReservationConfirmationWhatsApp(phone: string, data: WhatsAppReservationData): Promise<boolean> {
+export async function sendReservationConfirmationWhatsApp(
+  phone: string,
+  data: WhatsAppReservationData & { extras?: string },
+): Promise<boolean> {
+  if (data.extras && data.extras.trim().length > 0) {
+    return sendTemplateMessage(phone, 'reservation_confirmation_with_extras', [
+      { type: 'text', text: data.customerName },
+      { type: 'text', text: data.venueName },
+      { type: 'text', text: data.date },
+      { type: 'text', text: data.time },
+      { type: 'text', text: data.extras },
+    ])
+  }
   return sendTemplateMessage(phone, 'reservation_confirmation', [
     { type: 'text', text: data.customerName },
     { type: 'text', text: data.venueName },

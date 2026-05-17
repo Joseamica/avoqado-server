@@ -2453,8 +2453,16 @@ Equipo de Avoqado
       dateLong: string
       /** "12:45" */
       time: string
-      /** Service names to show in the summary card (max 5). */
+      /** Service names to show in the summary card (max 5).
+       *  DEPRECATED for new callers — prefer `services` (richer, includes modifiers). */
       serviceNames?: string[]
+      /** Services with optional picked modifiers. When provided, replaces
+       *  serviceNames-only rendering and shows "Extras" sub-rows under each
+       *  service (e.g. "Esmalte de color +$150"). */
+      services?: Array<{
+        name: string
+        modifiers?: Array<{ name: string; quantity: number; price: number }>
+      }>
       /** Charged via Stripe at booking time. */
       depositPaidMxn?: number | null
       /** Owed by the customer when they arrive (pay-at-venue policy). */
@@ -2472,14 +2480,31 @@ Equipo de Avoqado
     const fmt = (n: number) => new Intl.NumberFormat('es-MX', { style: 'currency', currency }).format(n)
     const subject = `Reservación confirmada: ${data.venueName} – ${data.dateLong} ${data.time}`
 
+    // Prefer the rich `services` shape (with modifiers); fall back to flat
+    // serviceNames for legacy callers.
+    const richServices =
+      data.services && data.services.length > 0
+        ? data.services.slice(0, 5)
+        : data.serviceNames && data.serviceNames.length > 0
+          ? data.serviceNames.slice(0, 5).map(name => ({ name, modifiers: [] as { name: string; quantity: number; price: number }[] }))
+          : []
     const servicesBlock =
-      data.serviceNames && data.serviceNames.length > 0
+      richServices.length > 0
         ? `
     <div style="padding: 16px 20px; background-color: #f5f5f5; border-radius: 8px; margin-bottom: 24px;">
-      <p style="font-size: 13px; font-weight: 600; color: #666; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.5px;">${data.serviceNames.length === 1 ? 'Servicio' : 'Servicios'}</p>
-      ${data.serviceNames
-        .slice(0, 5)
-        .map(s => `<p style="font-size: 15px; color: #000; margin: 0 0 4px 0;">${s}</p>`)
+      <p style="font-size: 13px; font-weight: 600; color: #666; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.5px;">${richServices.length === 1 ? 'Servicio' : 'Servicios'}</p>
+      ${richServices
+        .map(svc => {
+          const mods = (svc.modifiers ?? [])
+            .map(m => {
+              const qtyLabel = m.quantity > 1 ? ` × ${m.quantity}` : ''
+              const lineTotal = m.price * m.quantity
+              const priceLabel = lineTotal > 0 ? ` (${fmt(lineTotal)})` : ''
+              return `<p style="font-size: 13px; color: #666; margin: 2px 0 0 12px;">• ${m.name}${qtyLabel}${priceLabel}</p>`
+            })
+            .join('')
+          return `<div style="margin: 0 0 6px 0;"><p style="font-size: 15px; color: #000; margin: 0;">${svc.name}</p>${mods}</div>`
+        })
         .join('')}
     </div>`
         : ''
