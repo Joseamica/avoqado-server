@@ -4,6 +4,7 @@ import logger from '@/config/logger'
 import { VerifiedWebhookEvent } from './providers/provider.interface'
 import { finalizePaymentLinkCheckout } from '@/services/dashboard/paymentLink.service'
 import emailService from '@/services/email.service'
+import { sendReservationConfirmationWhatsApp, formatModifiersForWhatsApp } from '@/services/whatsapp.service'
 import { formatInTimeZone } from 'date-fns-tz'
 import { es as esLocale } from 'date-fns/locale'
 
@@ -177,10 +178,12 @@ async function processCheckoutCompleted(event: VerifiedWebhookEvent) {
       const reservation = await prisma.reservation.findUnique({
         where: { id: justConfirmedReservationId },
         select: {
+          id: true,
           confirmationCode: true,
           cancelSecret: true,
           guestName: true,
           guestEmail: true,
+          guestPhone: true,
           startsAt: true,
           productId: true,
           productIds: true,
@@ -203,7 +206,25 @@ async function processCheckoutCompleted(event: VerifiedWebhookEvent) {
               })
             : []
         const nameById = new Map(products.map(p => [p.id, p.name]))
-        const serviceNames = productIds.map(id => nameById.get(id)).filter((n): n is string => !!n)
+        // Fetch picked modifiers so the email shows the full breakdown.
+        const modifierRows = await prisma.reservationModifier.findMany({
+          where: { reservationId: reservation.id },
+          select: { productId: true, name: true, quantity: true, price: true },
+          orderBy: { createdAt: 'asc' },
+        })
+        const modifiersByProduct = new Map<string, Array<{ name: string; quantity: number; price: number }>>()
+        for (const m of modifierRows) {
+          if (!m.name) continue
+          if (!modifiersByProduct.has(m.productId)) modifiersByProduct.set(m.productId, [])
+          modifiersByProduct.get(m.productId)!.push({ name: m.name, quantity: m.quantity, price: Number(m.price) })
+        }
+        const services = productIds
+          .map(id => {
+            const name = nameById.get(id)
+            if (!name) return null
+            return { name, modifiers: modifiersByProduct.get(id) ?? [] }
+          })
+          .filter((s): s is { name: string; modifiers: Array<{ name: string; quantity: number; price: number }> } => !!s)
         const tz = reservation.venue.timezone || 'America/Mexico_City'
         const dateLongRaw = formatInTimeZone(reservation.startsAt, tz, "EEEE d 'de' MMMM 'de' yyyy", { locale: esLocale })
         await emailService.sendReservationConfirmedEmail(reservation.guestEmail, {
@@ -214,11 +235,44 @@ async function processCheckoutCompleted(event: VerifiedWebhookEvent) {
           cancelSecret: reservation.cancelSecret,
           dateLong: dateLongRaw.charAt(0).toUpperCase() + dateLongRaw.slice(1),
           time: formatInTimeZone(reservation.startsAt, tz, 'HH:mm'),
-          serviceNames,
+          services,
           // Deposit path: payment cleared this very webhook tick.
           depositPaidMxn: reservation.depositAmount ? Number(reservation.depositAmount) : null,
           owedAtVenueMxn: null,
         })
+      }
+      // WhatsApp confirmation (parallel to email, fire-and-forget). Routes to
+      // `reservation_confirmation_with_extras` when modifiers are present.
+      if (reservation?.guestPhone) {
+        try {
+          const productIdsForWa =
+            reservation.productIds && reservation.productIds.length > 0
+              ? reservation.productIds
+              : reservation.productId
+                ? [reservation.productId]
+                : []
+          const waModifierRows = await prisma.reservationModifier.findMany({
+            where: { reservationId: reservation.id },
+            select: { name: true, quantity: true, price: true },
+            orderBy: { createdAt: 'asc' },
+          })
+          const tz = reservation.venue.timezone || 'America/Mexico_City'
+          const waDateRaw = formatInTimeZone(reservation.startsAt, tz, "EEEE d 'de' MMMM 'de' yyyy", { locale: esLocale })
+          await sendReservationConfirmationWhatsApp(reservation.guestPhone, {
+            customerName: reservation.guestName ?? 'Cliente',
+            venueName: reservation.venue.name,
+            date: waDateRaw.charAt(0).toUpperCase() + waDateRaw.slice(1),
+            time: formatInTimeZone(reservation.startsAt, tz, 'HH:mm'),
+            extras:
+              productIdsForWa.length > 0
+                ? formatModifiersForWhatsApp(waModifierRows.map(m => ({ name: m.name, quantity: m.quantity, price: Number(m.price) })))
+                : '',
+          })
+        } catch (waError) {
+          logger.warn(
+            `[STRIPE CONNECT] confirmation whatsapp failed for reservation ${justConfirmedReservationId}: ${(waError as Error).message}`,
+          )
+        }
       }
     } catch (mailError) {
       logger.warn(

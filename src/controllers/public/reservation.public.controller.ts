@@ -16,6 +16,7 @@ import { getProvider } from '../../services/payments/provider-registry'
 import { formatInTimeZone } from 'date-fns-tz'
 import { es as esLocale } from 'date-fns/locale'
 import emailService from '../../services/email.service'
+import { sendReservationConfirmationWhatsApp, formatModifiersForWhatsApp } from '../../services/whatsapp.service'
 import { enqueuePush, resolveClassSessionPushTargets } from '../../services/google-calendar/outbox.service'
 
 // ==========================================
@@ -958,7 +959,26 @@ export async function createReservation(req: Request, res: Response, next: NextF
             : []
         // Preserve customer's pick order: products[] comes back unordered.
         const nameById = new Map(products.map(p => [p.id, p.name]))
-        const serviceNames = allProductIds.map(id => nameById.get(id)).filter((n): n is string => !!n)
+        // Fetch picked modifiers for this reservation so the email shows the
+        // full breakdown (e.g. "Manicura tradicional + Esmalte de color +$150").
+        const modifierRows = await prisma.reservationModifier.findMany({
+          where: { reservationId: reservation.id },
+          select: { productId: true, name: true, quantity: true, price: true },
+          orderBy: { createdAt: 'asc' },
+        })
+        const modifiersByProduct = new Map<string, Array<{ name: string; quantity: number; price: number }>>()
+        for (const m of modifierRows) {
+          if (!m.name) continue
+          if (!modifiersByProduct.has(m.productId)) modifiersByProduct.set(m.productId, [])
+          modifiersByProduct.get(m.productId)!.push({ name: m.name, quantity: m.quantity, price: Number(m.price) })
+        }
+        const services = allProductIds
+          .map(id => {
+            const name = nameById.get(id)
+            if (!name) return null
+            return { name, modifiers: modifiersByProduct.get(id) ?? [] }
+          })
+          .filter((s): s is { name: string; modifiers: Array<{ name: string; quantity: number; price: number }> } => !!s)
         const tz = venue.timezone || 'America/Mexico_City'
         const dateLongRaw = formatInTimeZone(reservation.startsAt, tz, "EEEE d 'de' MMMM 'de' yyyy", { locale: esLocale })
         const owedAtVenueMxn = reservation.depositAmount ? Number(reservation.depositAmount) : null
@@ -970,7 +990,7 @@ export async function createReservation(req: Request, res: Response, next: NextF
           cancelSecret: reservation.cancelSecret,
           dateLong: dateLongRaw.charAt(0).toUpperCase() + dateLongRaw.slice(1),
           time: formatInTimeZone(reservation.startsAt, tz, 'HH:mm'),
-          serviceNames,
+          services,
           // Pay-at-venue case stamps depositAmount + leaves status=CONFIRMED;
           // no charge has cleared today, so it shows as "owed at venue".
           owedAtVenueMxn,
@@ -979,6 +999,36 @@ export async function createReservation(req: Request, res: Response, next: NextF
         // Email failures must NEVER fail a successful booking. The customer
         // already has cancelSecret on screen — we log and move on.
         logger.warn(`[BOOKING CONFIRM EMAIL] failed for ${reservation.confirmationCode}: ${(error as Error).message}`)
+      }
+    }
+
+    // WhatsApp confirmation (parallel to email). Same best-effort posture —
+    // a Meta API failure must never fail a successful booking. Routes to
+    // `reservation_confirmation_with_extras` template (5 params incl. picked
+    // modifiers) when there are modifiers; falls back to legacy 4-param
+    // template when there aren't.
+    if (reservation.status === 'CONFIRMED' && reservation.guestPhone) {
+      try {
+        const allProductIds = incomingProductIds.length > 0 ? incomingProductIds : reservation.productId ? [reservation.productId] : []
+        const modifierRows = await prisma.reservationModifier.findMany({
+          where: { reservationId: reservation.id },
+          select: { name: true, quantity: true, price: true, productId: true },
+          orderBy: { createdAt: 'asc' },
+        })
+        const tz = venue.timezone || 'America/Mexico_City'
+        const dateLongRaw = formatInTimeZone(reservation.startsAt, tz, "EEEE d 'de' MMMM 'de' yyyy", { locale: esLocale })
+        await sendReservationConfirmationWhatsApp(reservation.guestPhone, {
+          customerName: reservation.guestName ?? 'Cliente',
+          venueName: venue.name,
+          date: dateLongRaw.charAt(0).toUpperCase() + dateLongRaw.slice(1),
+          time: formatInTimeZone(reservation.startsAt, tz, 'HH:mm'),
+          extras:
+            allProductIds.length > 0
+              ? formatModifiersForWhatsApp(modifierRows.map(m => ({ name: m.name, quantity: m.quantity, price: Number(m.price) })))
+              : '',
+        })
+      } catch (error) {
+        logger.warn(`[BOOKING CONFIRM WHATSAPP] failed for ${reservation.confirmationCode}: ${(error as Error).message}`)
       }
     }
 
