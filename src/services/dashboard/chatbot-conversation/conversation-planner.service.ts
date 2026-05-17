@@ -769,9 +769,7 @@ export class ConversationPlannerService {
       /\b(ignore|ignora|olvida|forget|disregard|override|sobrescribe|system prompt|prompt del sistema|developer message|revela|muestra instrucciones|ejecuta codigo|execute code|sql schema|database schema|db schema|tablas internas|bypass|saltate|sin permisos|contrasenas?|contraseñas?|passwords?|secrets?|secretos?|api keys?|superadmin)\b/.test(
         normalized,
       ) ||
-      /\b(information_schema|pg_catalog|sys\.|list all tables|show me all tables|what tables exist|database columns?)\b/.test(
-        normalized,
-      )
+      /\b(information_schema|pg_catalog|sys\.|list all tables|show me all tables|what tables exist|database columns?)\b/.test(normalized)
     )
   }
 

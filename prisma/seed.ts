@@ -385,35 +385,31 @@ async function resetDatabase() {
     ['VenuePricingStructures', () => prisma.venuePricingStructure.deleteMany()],
     ['ProviderCostStructures', () => prisma.providerCostStructure.deleteMany()],
     ['VenuePaymentConfigs', () => prisma.venuePaymentConfig.deleteMany()],
-    // ⚠️ DON'T delete EcommerceMerchants with Blumon OAuth credentials
-    // Delete only Menta merchants (no OAuth), preserve Blumon merchants with OAuth tokens
+    // ⚠️ DON'T delete EcommerceMerchants with Blumon OAuth credentials.
+    // Strategy: delete EVERYTHING except Blumon merchants WITH OAuth tokens.
+    // Wipes legacy merchants from removed providers (BANORTE, BANORTE_DIRECT, CLIP).
     [
       'EcommerceMerchants',
       async () => {
-        // Delete Menta merchants (demo credentials, safe to recreate)
-        const mentaProvider = await prisma.paymentProvider.findFirst({ where: { code: 'MENTA' } })
-        if (mentaProvider) {
-          await prisma.ecommerceMerchant.deleteMany({ where: { providerId: mentaProvider.id } })
-        }
-
-        // Delete Blumon merchants WITHOUT OAuth credentials (incomplete setup)
         const blumonProvider = await prisma.paymentProvider.findFirst({ where: { code: 'BLUMON' } })
+        const preservedIds: string[] = []
         if (blumonProvider) {
           const blumonMerchants = await prisma.ecommerceMerchant.findMany({
             where: { providerId: blumonProvider.id },
           })
-
           for (const merchant of blumonMerchants) {
             const credentials = merchant.providerCredentials as any
-            // Delete if no OAuth tokens (incomplete setup)
-            if (!credentials?.accessToken || !credentials?.refreshToken) {
-              await prisma.ecommerceMerchant.delete({ where: { id: merchant.id } })
-              console.log(`      🗑️ Deleted Blumon merchant "${merchant.channelName}" (no OAuth credentials)`)
-            } else {
+            if (credentials?.accessToken && credentials?.refreshToken) {
+              preservedIds.push(merchant.id)
               console.log(`      ✅ Preserved Blumon merchant "${merchant.channelName}" (has OAuth credentials)`)
             }
           }
         }
+        const { count } =
+          preservedIds.length > 0
+            ? await prisma.ecommerceMerchant.deleteMany({ where: { id: { notIn: preservedIds } } })
+            : await prisma.ecommerceMerchant.deleteMany()
+        if (count > 0) console.log(`      🗑️ Deleted ${count} ecommerce merchants (kept ${preservedIds.length} Blumon w/ OAuth)`)
       },
     ],
     ['MerchantAccounts', () => prisma.merchantAccount.deleteMany()],
@@ -958,17 +954,65 @@ async function main() {
             navigation: {
               layout: 'sidebar',
               items: [
-                { id: 'nav-MANAGERS_DASHBOARD', icon: 'UserCog', type: 'feature', label: 'Gerentes', order: 0, featureCode: 'MANAGERS_DASHBOARD' },
-                { id: 'nav-TPV_CONFIGURATION', icon: 'Settings', type: 'feature', label: 'Configuración White Label', order: 1, featureCode: 'TPV_CONFIGURATION' },
-                { id: 'nav-SUPERVISOR_DASHBOARD', icon: 'Eye', type: 'feature', label: 'Supervisor', order: 2, featureCode: 'SUPERVISOR_DASHBOARD' },
-                { id: 'nav-USERS_MANAGEMENT', icon: 'Users', type: 'feature', label: 'Usuarios', order: 3, featureCode: 'USERS_MANAGEMENT' },
-                { id: 'nav-SERIALIZED_STOCK', icon: 'Package', type: 'feature', label: 'Inventario', order: 4, featureCode: 'SERIALIZED_STOCK' },
-                { id: 'nav-SALES_REPORT', icon: 'Receipt', type: 'feature', label: 'Reporte de Ventas', order: 5, featureCode: 'SALES_REPORT' },
+                {
+                  id: 'nav-MANAGERS_DASHBOARD',
+                  icon: 'UserCog',
+                  type: 'feature',
+                  label: 'Gerentes',
+                  order: 0,
+                  featureCode: 'MANAGERS_DASHBOARD',
+                },
+                {
+                  id: 'nav-TPV_CONFIGURATION',
+                  icon: 'Settings',
+                  type: 'feature',
+                  label: 'Configuración White Label',
+                  order: 1,
+                  featureCode: 'TPV_CONFIGURATION',
+                },
+                {
+                  id: 'nav-SUPERVISOR_DASHBOARD',
+                  icon: 'Eye',
+                  type: 'feature',
+                  label: 'Supervisor',
+                  order: 2,
+                  featureCode: 'SUPERVISOR_DASHBOARD',
+                },
+                {
+                  id: 'nav-USERS_MANAGEMENT',
+                  icon: 'Users',
+                  type: 'feature',
+                  label: 'Usuarios',
+                  order: 3,
+                  featureCode: 'USERS_MANAGEMENT',
+                },
+                {
+                  id: 'nav-SERIALIZED_STOCK',
+                  icon: 'Package',
+                  type: 'feature',
+                  label: 'Inventario',
+                  order: 4,
+                  featureCode: 'SERIALIZED_STOCK',
+                },
+                {
+                  id: 'nav-SALES_REPORT',
+                  icon: 'Receipt',
+                  type: 'feature',
+                  label: 'Reporte de Ventas',
+                  order: 5,
+                  featureCode: 'SALES_REPORT',
+                },
               ],
             },
             featureConfigs: {
-              SALES_REPORT: { enabled: true, config: { autoReconcile: false, exportFormats: ['csv', 'xlsx'], showRevenueCharts: true, requireProofOfSale: true } },
-              SERIALIZED_STOCK: { enabled: true, config: { showIMEI: true, trackWarranty: true, lowStockThreshold: 10, requireSerialOnSale: true } },
+              SALES_REPORT: {
+                enabled: true,
+                config: { autoReconcile: false, exportFormats: ['csv', 'xlsx'], showRevenueCharts: true, requireProofOfSale: true },
+              },
+              SERIALIZED_STOCK: {
+                enabled: true,
+                config: { showIMEI: true, trackWarranty: true, lowStockThreshold: 10, requireSerialOnSale: true },
+              },
               USERS_MANAGEMENT: { enabled: true, config: { allowPasswordReset: true, showZoneManagement: true } },
               TPV_CONFIGURATION: { enabled: true, config: { showPhonePreview: true, allowCatalogReorder: true } },
               MANAGERS_DASHBOARD: { enabled: true, config: { showTeamHealth: true, showGoalProgress: true, enableGoalSetting: true } },
@@ -1109,7 +1153,8 @@ async function main() {
           create: {
             code: 'COMMISSIONS',
             name: 'Comisiones y Metas de Venta',
-            description: 'Gestión de comisiones por ventas y metas de equipo. Permite configurar tiers, overrides y trackear cumplimiento por staff/venue.',
+            description:
+              'Gestión de comisiones por ventas y metas de equipo. Permite configurar tiers, overrides y trackear cumplimiento por staff/venue.',
             defaultConfig: { salesGoals: [] },
             presets: {},
             configSchema: { type: 'object', properties: { salesGoals: { type: 'array' } } },
@@ -3764,11 +3809,7 @@ async function main() {
       const createdGroups: { id: string }[] = []
       for (const { group, modifiers: modSpecs } of modifierGroupSpecs) {
         const modifierGroup = await prisma.modifierGroup.create({ data: { venueId: venue.id, ...group } })
-        const created = await Promise.all(
-          modSpecs.map(m =>
-            prisma.modifier.create({ data: { groupId: modifierGroup.id, ...m } }),
-          ),
-        )
+        const created = await Promise.all(modSpecs.map(m => prisma.modifier.create({ data: { groupId: modifierGroup.id, ...m } })))
         modifiers.push(...created)
         createdGroups.push({ id: modifierGroup.id })
       }
@@ -3776,9 +3817,7 @@ async function main() {
       const productsForModifiers = getRandomSample(sellableProducts, Math.min(8, sellableProducts.length))
       await Promise.all(
         productsForModifiers.flatMap(product =>
-          createdGroups.map(g =>
-            prisma.productModifierGroup.create({ data: { productId: product.id, groupId: g.id } }),
-          ),
+          createdGroups.map(g => prisma.productModifierGroup.create({ data: { productId: product.id, groupId: g.id } })),
         ),
       )
       console.log(
@@ -5376,19 +5415,71 @@ async function main() {
       // Products
       const productSpecs = [
         // Services (APPOINTMENTS_SERVICE)
-        { sku: 'wel-srv-masaje-60', name: 'Masaje relajante 60min', categoryId: catServicios.id, type: ProductType.APPOINTMENTS_SERVICE, price: 800, duration: 60 },
-        { sku: 'wel-srv-facial-45', name: 'Facial limpieza profunda 45min', categoryId: catServicios.id, type: ProductType.APPOINTMENTS_SERVICE, price: 600, duration: 45 },
-        { sku: 'wel-srv-nutri-30', name: 'Consulta nutrición 30min', categoryId: catServicios.id, type: ProductType.APPOINTMENTS_SERVICE, price: 500, duration: 30 },
+        {
+          sku: 'wel-srv-masaje-60',
+          name: 'Masaje relajante 60min',
+          categoryId: catServicios.id,
+          type: ProductType.APPOINTMENTS_SERVICE,
+          price: 800,
+          duration: 60,
+        },
+        {
+          sku: 'wel-srv-facial-45',
+          name: 'Facial limpieza profunda 45min',
+          categoryId: catServicios.id,
+          type: ProductType.APPOINTMENTS_SERVICE,
+          price: 600,
+          duration: 45,
+        },
+        {
+          sku: 'wel-srv-nutri-30',
+          name: 'Consulta nutrición 30min',
+          categoryId: catServicios.id,
+          type: ProductType.APPOINTMENTS_SERVICE,
+          price: 500,
+          duration: 30,
+        },
         // Classes (CLASS)
-        { sku: 'wel-cls-yoga-60', name: 'Yoga (clase grupal)', categoryId: catClases.id, type: ProductType.CLASS, price: 300, duration: 60, maxParticipants: 12 },
-        { sku: 'wel-cls-pilates-60', name: 'Pilates (clase grupal)', categoryId: catClases.id, type: ProductType.CLASS, price: 350, duration: 60, maxParticipants: 10 },
-        { sku: 'wel-cls-medit-45', name: 'Meditación guiada', categoryId: catClases.id, type: ProductType.CLASS, price: 200, duration: 45, maxParticipants: 15 },
+        {
+          sku: 'wel-cls-yoga-60',
+          name: 'Yoga (clase grupal)',
+          categoryId: catClases.id,
+          type: ProductType.CLASS,
+          price: 300,
+          duration: 60,
+          maxParticipants: 12,
+        },
+        {
+          sku: 'wel-cls-pilates-60',
+          name: 'Pilates (clase grupal)',
+          categoryId: catClases.id,
+          type: ProductType.CLASS,
+          price: 350,
+          duration: 60,
+          maxParticipants: 10,
+        },
+        {
+          sku: 'wel-cls-medit-45',
+          name: 'Meditación guiada',
+          categoryId: catClases.id,
+          type: ProductType.CLASS,
+          price: 200,
+          duration: 45,
+          maxParticipants: 15,
+        },
         // Retail (REGULAR)
         { sku: 'wel-ret-crema', name: 'Crema corporal hidratante', categoryId: catRetail.id, type: ProductType.REGULAR, price: 350 },
         { sku: 'wel-ret-aceite', name: 'Aceite esencial lavanda', categoryId: catRetail.id, type: ProductType.REGULAR, price: 280 },
         { sku: 'wel-ret-mat', name: 'Mat de yoga premium', categoryId: catRetail.id, type: ProductType.REGULAR, price: 550 },
       ]
-      const products: Array<{ id: string; name: string; type: ProductType; price: any; duration: number | null; maxParticipants: number | null }> = []
+      const products: Array<{
+        id: string
+        name: string
+        type: ProductType
+        price: any
+        duration: number | null
+        maxParticipants: number | null
+      }> = []
       for (const spec of productSpecs) {
         const p = await prisma.product.upsert({
           where: { venueId_sku: { venueId: venue.id, sku: spec.sku } },
@@ -5428,19 +5519,19 @@ async function main() {
         prisma.modifier.create({ data: { groupId: addonGroup.id, name: 'Aromaterapia', price: 80, durationMin: 5 } }),
       ])
       // Attach add-ons to services
-      await Promise.all(
-        services.map(s => prisma.productModifierGroup.create({ data: { productId: s.id, groupId: addonGroup.id } })),
-      )
+      await Promise.all(services.map(s => prisma.productModifierGroup.create({ data: { productId: s.id, groupId: addonGroup.id } })))
 
       // ClassSessions: 4 weeks recurring schedule (Yoga Mon/Wed/Fri, Pilates Tue/Thu, Meditación Sat)
       const sessionPlan: Array<{ productId: string; dayOfWeek: number; hour: number; capacity: number }> = []
       const [yoga, pilates, meditacion] = classes
       for (let week = 0; week < 4; week++) {
         if (yoga) {
-          for (const day of [1, 3, 5]) sessionPlan.push({ productId: yoga.id, dayOfWeek: week * 7 + day, hour: 8, capacity: yoga.maxParticipants ?? 12 })
+          for (const day of [1, 3, 5])
+            sessionPlan.push({ productId: yoga.id, dayOfWeek: week * 7 + day, hour: 8, capacity: yoga.maxParticipants ?? 12 })
         }
         if (pilates) {
-          for (const day of [2, 4]) sessionPlan.push({ productId: pilates.id, dayOfWeek: week * 7 + day, hour: 18, capacity: pilates.maxParticipants ?? 10 })
+          for (const day of [2, 4])
+            sessionPlan.push({ productId: pilates.id, dayOfWeek: week * 7 + day, hour: 18, capacity: pilates.maxParticipants ?? 10 })
         }
         if (meditacion) {
           sessionPlan.push({ productId: meditacion.id, dayOfWeek: week * 7 + 6, hour: 9, capacity: meditacion.maxParticipants ?? 15 })
@@ -5474,7 +5565,14 @@ async function main() {
       }
 
       // Reservations: 15 mixed (services + class signups), realistic statuses
-      const wellnessCustomers = await prisma.customer.findMany({ where: { venueId: { in: (await prisma.venue.findMany({ where: { organizationId: venue.organizationId }, select: { id: true } })).map(v => v.id) } }, take: 30 })
+      const wellnessCustomers = await prisma.customer.findMany({
+        where: {
+          venueId: {
+            in: (await prisma.venue.findMany({ where: { organizationId: venue.organizationId }, select: { id: true } })).map(v => v.id),
+          },
+        },
+        take: 30,
+      })
       let createdWellnessRes = 0
 
       // 8 service reservations
@@ -5499,7 +5597,7 @@ async function main() {
             endsAt,
             duration,
             productId: product.id,
-            assignedStaffId: orgStaff[(i % orgStaff.length)]?.staffId ?? null,
+            assignedStaffId: orgStaff[i % orgStaff.length]?.staffId ?? null,
             customerId: customer?.id ?? null,
             guestName: customer ? `${customer.firstName} ${customer.lastName ?? ''}`.trim() : faker.person.fullName(),
             guestPhone: customer?.phone ?? `+52555${faker.string.numeric(7)}`,
@@ -5562,8 +5660,8 @@ async function main() {
 
       console.log(
         `  - Avoqado Wellness: ${products.length} products (services/classes/retail), ` +
-        `${createdSessions.length} class sessions, ${createdWellnessRes} reservations, ` +
-        `${addonModifiers.length} duration-add-on modifiers.`,
+          `${createdSessions.length} class sessions, ${createdWellnessRes} reservations, ` +
+          `${addonModifiers.length} duration-add-on modifiers.`,
       )
     }
   }
