@@ -658,55 +658,26 @@ async function main() {
   // developers (and any validation layer you wire up later).
   // Secrets (API keys, tokens, etc.) are *not* described here—they live in
   // `credentialsEncrypted` in the accounts seeded below.
-  // Create or update payment providers (upsert to handle preserved providers)
+  // Create or update payment providers (upsert to handle preserved providers).
+  // Mirror prod: BLUMON + ANGELPAY + STRIPE_CONNECT + MENTA.
+  // Removed from seed (no longer used in any product flow): BANORTE, BANORTE_DIRECT, CLIP, Mercado Pago.
   const mentaProvider = await prisma.paymentProvider.upsert({
-    where: { code: 'BANORTE' },
+    where: { code: 'MENTA' },
     update: {},
     create: {
-      code: 'BANORTE',
-      name: 'Menta Payment Solutions - Banorte',
+      code: 'MENTA',
+      name: 'Menta Payment Solutions',
       type: ProviderType.PAYMENT_PROCESSOR,
-      countryCode: ['MX', 'AR'],
+      countryCode: ['MX'],
       active: true,
       configSchema: {
         required: ['acquirerId', 'countryCode', 'currencyCode'],
         properties: {
           acquirerId: { type: 'string', description: 'Acquirer identifier (BANORTE, GPS, etc.)' },
-          countryCode: {
-            type: 'string',
-            enum: ['484', '032'],
-            description: 'ISO numeric country code as string (484 = MX, 032 = AR)',
-          },
-          currencyCode: {
-            type: 'string',
-            enum: ['MX'],
-            description: 'Processor-specific currency code (Menta expects MX)',
-          },
-          terminalId: {
-            type: 'string',
-            description: 'Preferred terminal UUID used for this account (non-sensitive)',
-          },
-          invoiceCapable: { type: 'boolean', description: 'Marks accounts that support electronic invoicing flows' },
-        },
-      },
-    },
-  })
-
-  const clipProvider = await prisma.paymentProvider.upsert({
-    where: { code: 'CLIP' },
-    update: {},
-    create: {
-      code: 'CLIP',
-      name: 'Clip Digital Wallet',
-      type: ProviderType.WALLET,
-      countryCode: ['MX'],
-      active: true,
-      configSchema: {
-        required: ['countryCode', 'currencyCode'],
-        properties: {
           countryCode: { type: 'string', enum: ['484'], description: 'ISO numeric country code (484 = MX)' },
-          currencyCode: { type: 'string', enum: ['MX'], description: 'Settlement currency code used by Clip' },
-          webhookUrl: { type: 'string', description: 'URL where Clip will send webhook events' },
+          currencyCode: { type: 'string', enum: ['MX'], description: 'Processor-specific currency code' },
+          terminalId: { type: 'string', description: 'Preferred terminal UUID used for this account (non-sensitive)' },
+          invoiceCapable: { type: 'boolean', description: 'Marks accounts that support electronic invoicing flows' },
         },
       },
     },
@@ -724,49 +695,59 @@ async function main() {
       configSchema: {
         required: ['serialNumber', 'posId', 'environment'],
         properties: {
-          serialNumber: {
-            type: 'string',
-            description: 'Blumon device serial number (e.g., 2841548417)',
-          },
-          posId: {
-            type: 'string',
-            description: 'Momentum API position ID (CRITICAL for payment routing)',
-          },
-          environment: {
-            type: 'string',
-            enum: ['SANDBOX', 'PRODUCTION'],
-            description: 'Blumon environment',
-          },
-          merchantId: {
-            type: 'string',
-            description: 'Blumon merchant identifier',
-          },
+          serialNumber: { type: 'string', description: 'Blumon device serial number (e.g., 2841548417)' },
+          posId: { type: 'string', description: 'Momentum API position ID (CRITICAL for payment routing)' },
+          environment: { type: 'string', enum: ['SANDBOX', 'PRODUCTION'], description: 'Blumon environment' },
+          merchantId: { type: 'string', description: 'Blumon merchant identifier' },
         },
       },
     },
   })
 
-  await prisma.paymentProvider.upsert({
-    where: { code: 'BANORTE_DIRECT' },
+  const angelpayProvider = await prisma.paymentProvider.upsert({
+    where: { code: 'ANGELPAY' },
     update: {},
     create: {
-      code: 'BANORTE_DIRECT',
-      name: 'Banorte Direct Integration',
-      type: ProviderType.BANK_DIRECT,
+      code: 'ANGELPAY',
+      name: 'AngelPay (Nexgo)',
+      type: ProviderType.PAYMENT_PROCESSOR,
       countryCode: ['MX'],
       active: true,
       configSchema: {
-        required: ['clientId', 'clientSecret'],
+        required: ['merchantId', 'environment'],
         properties: {
-          clientId: { type: 'string', description: 'Bank client ID' },
-          clientSecret: { type: 'string', description: 'Bank client secret' },
-          environment: { type: 'string', enum: ['sandbox', 'production'] },
+          merchantId: { type: 'string', description: 'AngelPay merchant identifier' },
+          environment: { type: 'string', enum: ['SANDBOX', 'PRODUCTION'], description: 'AngelPay environment' },
+          terminalId: { type: 'string', description: 'Nexgo terminal identifier' },
         },
       },
     },
   })
 
-  console.log(`  Created 4 payment providers (Menta, Clip, Blumon, Banorte).`)
+  const stripeProvider = await prisma.paymentProvider.upsert({
+    where: { code: 'STRIPE_CONNECT' },
+    update: {},
+    create: {
+      code: 'STRIPE_CONNECT',
+      name: 'Stripe Connect',
+      type: ProviderType.PAYMENT_PROCESSOR,
+      countryCode: ['MX', 'US'],
+      active: true,
+      configSchema: {
+        required: ['stripeAccountId'],
+        properties: {
+          stripeAccountId: { type: 'string', description: 'Stripe Connect account ID (acct_...)' },
+          chargesEnabled: { type: 'boolean', description: 'Whether the account can accept charges' },
+          payoutsEnabled: { type: 'boolean', description: 'Whether the account can receive payouts' },
+        },
+      },
+    },
+  })
+  // Silence unused-var lint for future merchant wiring against these providers
+  void angelpayProvider
+  void stripeProvider
+
+  console.log(`  Created 4 payment providers (Menta, Blumon, AngelPay, Stripe Connect).`)
 
   // 🆕 Blumon Merchant Accounts (Multi-Merchant Support - 2025-11-06)
   // These match the actual Blumon sandbox devices registered with Edgardo

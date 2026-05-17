@@ -102,11 +102,21 @@ describe('SqlAstParserService - Column Type Handling', () => {
         requiredVenueId: testVenueId,
       })
 
-      // SECURITY: System intentionally doesn't recognize venueId inside OR conditions
-      // This prevents bypass attacks like: WHERE venueId='correct' OR 1=1
+      // SECURITY: System intentionally doesn't recognize venueId inside OR conditions.
+      // The validator now catches the bypass at two complementary layers:
+      //   1. A textual pre-check flags the `1=1` tautology directly
+      //      (`Always-true condition detected in SQL text`).
+      //   2. AST tenant analysis still records `hasVenueFilter === false`.
+      // Both paths reject the query — the test asserts the rejection plus
+      // either error message so future re-orderings of the validator don't
+      // turn this into a brittle string match.
       expect(result.valid).toBe(false)
-      expect(result.details?.hasVenueFilter).toBe(false) // Correctly rejects OR conditions
-      expect(result.errors[0]).toContain('Query MUST include a WHERE filter with venueId')
+      expect(result.details?.hasVenueFilter).toBe(false)
+      expect(
+        result.errors.some(
+          e => e.includes('Always-true condition detected') || e.includes('Query MUST include a WHERE filter with venueId'),
+        ),
+      ).toBe(true)
     })
   })
 
