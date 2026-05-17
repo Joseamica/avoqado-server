@@ -1,13 +1,13 @@
 # Google Calendar Bidirectional Sync — Design Spec
 
-**Status:** APPROVED v1.6 — backend Phase 1 implemented and tested (210 tests pass, 46 Stripe regression intact, uncommitted in working tree). Dashboard UI pending its own plan.
-**Author:** Jose Antonio Amieva (with Claude Code)
-**Date:** 2026-05-15
-**Repos affected (verified by post-implementation cross-repo audit):**
+**Status:** APPROVED v1.6 — backend Phase 1 implemented and tested (210 tests pass, 46 Stripe regression intact, uncommitted in working
+tree). Dashboard UI pending its own plan. **Author:** Jose Antonio Amieva (with Claude Code) **Date:** 2026-05-15 **Repos affected (verified
+by post-implementation cross-repo audit):**
+
 - `avoqado-server` — full backend (this spec)
 - `avoqado-web-dashboard` — UI for the 6 new endpoints (REQUIRED for Phase 1 to be user-visible — separate plan)
-- `avoqado-android` — cosmetic 409 error mapping (OPTIONAL polish, see §20)
-**Out of scope (confirmed by audit):** `avoqado-tpv`, `avoqado-checkout`, `avoqado-booking-widget`
+- `avoqado-android` — cosmetic 409 error mapping (OPTIONAL polish, see §20) **Out of scope (confirmed by audit):** `avoqado-tpv`,
+  `avoqado-checkout`, `avoqado-booking-widget`
 
 ---
 
@@ -15,9 +15,14 @@
 
 **v1.6 (2026-05-15) — post-implementation cross-repo audit:**
 
-- ✅ **`avoqado-android` flagged for cosmetic-only polish:** post-implementation audit revealed `avoqado-android` (separate repo from `avoqado-tpv`) has a full reservations module that calls `POST /dashboard/venues/{v}/reservations`. When backend rejects with 409 `external_calendar_busy`, the Android app currently shows raw JSON. Fix is ~5 lines in `ReservationApi.kt:110-113`. NOT blocking Phase 1. (§20)
-- ✅ **`avoqado-web-dashboard` UI marked as REQUIRED for Phase 1 user-visibility:** without dashboard UI the 6 endpoints can only be called via Postman/curl. Backend ships first, soaks, then dashboard merges. (§20)
-- ✅ **`avoqado-tpv` confirmed zero-touch:** audit verified TPV has 48 endpoints, none for reservations/availability. Spec was correct. (§20)
+- ✅ **`avoqado-android` flagged for cosmetic-only polish:** post-implementation audit revealed `avoqado-android` (separate repo from
+  `avoqado-tpv`) has a full reservations module that calls `POST /dashboard/venues/{v}/reservations`. When backend rejects with 409
+  `external_calendar_busy`, the Android app currently shows raw JSON. Fix is ~5 lines in `ReservationApi.kt:110-113`. NOT blocking Phase 1.
+  (§20)
+- ✅ **`avoqado-web-dashboard` UI marked as REQUIRED for Phase 1 user-visibility:** without dashboard UI the 6 endpoints can only be called
+  via Postman/curl. Backend ships first, soaks, then dashboard merges. (§20)
+- ✅ **`avoqado-tpv` confirmed zero-touch:** audit verified TPV has 48 endpoints, none for reservations/availability. Spec was correct.
+  (§20)
 
 **v1.5 (2026-05-15) — final approval notes:**
 
@@ -1568,14 +1573,14 @@ Each phase is independently shippable.
 
 ## 20. Cross-repo impact
 
-| Repo | Phase 1 impact | Required for Phase 1 ship? |
-|---|---|---|
-| `avoqado-server` | All implementation lives here | ✅ — entire feature |
-| `avoqado-web-dashboard` | UI to drive the 6 new endpoints (connect button, OAuth picker page, connections list with disconnect, calendar status badge) | ✅ — without it users have no way to connect a calendar |
-| `avoqado-android` | Cosmetic only: Spanish error string for `external_calendar_busy` 409 in `ReservationApi.kt` | ❌ optional — without it staff using the Android app see raw JSON when they try to create a reservation over a synced Google event |
-| `avoqado-tpv` (Android POS) | None — no reservation surface in TPV | ❌ — verified by audit |
-| `avoqado-checkout` | None — e-commerce checkout, unrelated | ❌ |
-| `avoqado-booking-widget` | None — consumes server `/availability`; server-side change is transparent | ❌ |
+| Repo                        | Phase 1 impact                                                                                                               | Required for Phase 1 ship?                                                                                                         |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `avoqado-server`            | All implementation lives here                                                                                                | ✅ — entire feature                                                                                                                |
+| `avoqado-web-dashboard`     | UI to drive the 6 new endpoints (connect button, OAuth picker page, connections list with disconnect, calendar status badge) | ✅ — without it users have no way to connect a calendar                                                                            |
+| `avoqado-android`           | Cosmetic only: Spanish error string for `external_calendar_busy` 409 in `ReservationApi.kt`                                  | ❌ optional — without it staff using the Android app see raw JSON when they try to create a reservation over a synced Google event |
+| `avoqado-tpv` (Android POS) | None — no reservation surface in TPV                                                                                         | ❌ — verified by audit                                                                                                             |
+| `avoqado-checkout`          | None — e-commerce checkout, unrelated                                                                                        | ❌                                                                                                                                 |
+| `avoqado-booking-widget`    | None — consumes server `/availability`; server-side change is transparent                                                    | ❌                                                                                                                                 |
 
 ### `avoqado-web-dashboard` (REQUIRED — separate plan)
 
@@ -1583,34 +1588,50 @@ The 6 backend endpoints are useless without a UI to invoke them. The dashboard n
 
 1. **OAuth init trigger** — a "Conectar Google Calendar" button in:
    - Venue Settings → Integraciones (gated by `calendar:manage_venue`).
-   - "Mi perfil" → Calendarios (gated by `calendar:connect_self`).
-   The button calls `GET /api/v1/google-calendar/oauth/init?intent={staff_personal|venue_master}`, receives a `{ url }` payload, and redirects the browser to Google.
-2. **Picker page** at `/google-calendar/picker?session=<token>` — receives the redirect from `/oauth/callback`, calls `GET /api/v1/google-calendar/oauth/calendars?session=<token>`, renders the picker, and POSTs `{ session, selectedCalendarId }` to `/api/v1/google-calendar/connections`. Shows accessRole warning for read-only calendars on staff_personal intent.
-3. **Connections list** — for each venue + the current staff: `GET /api/v1/google-calendar/connections` (renders email, calendar name, status, lastSyncedAt) with a "Disconnect" button calling `DELETE /api/v1/google-calendar/connections/:id`.
+   - "Mi perfil" → Calendarios (gated by `calendar:connect_self`). The button calls
+     `GET /api/v1/google-calendar/oauth/init?intent={staff_personal|venue_master}`, receives a `{ url }` payload, and redirects the browser
+     to Google.
+2. **Picker page** at `/google-calendar/picker?session=<token>` — receives the redirect from `/oauth/callback`, calls
+   `GET /api/v1/google-calendar/oauth/calendars?session=<token>`, renders the picker, and POSTs `{ session, selectedCalendarId }` to
+   `/api/v1/google-calendar/connections`. Shows accessRole warning for read-only calendars on staff_personal intent.
+3. **Connections list** — for each venue + the current staff: `GET /api/v1/google-calendar/connections` (renders email, calendar name,
+   status, lastSyncedAt) with a "Disconnect" button calling `DELETE /api/v1/google-calendar/connections/:id`.
 4. **Status badges** — show `TOKEN_REVOKED` / `CALENDAR_LOST` / `WATCH_FAILED` connections with a "Reconnect" CTA in venue/profile settings.
-5. **Conflict-error UX** — when create/update reservation returns 409 with `errorCode: 'external_calendar_busy'`, show a friendly Spanish toast: "Este horario está bloqueado por un evento del calendario conectado."
+5. **Conflict-error UX** — when create/update reservation returns 409 with `errorCode: 'external_calendar_busy'`, show a friendly Spanish
+   toast: "Este horario está bloqueado por un evento del calendario conectado."
 
-Backend MUST ship first and soak before dashboard merges UI. While backend is live with no UI, only direct API consumers (e.g., Postman / curl) can connect calendars — which is fine for staged rollout.
+Backend MUST ship first and soak before dashboard merges UI. While backend is live with no UI, only direct API consumers (e.g., Postman /
+curl) can connect calendars — which is fine for staged rollout.
 
 ### `avoqado-android` (OPTIONAL polish — separate ticket)
 
-Per audit by Subagent 7, the Android staff app at `/Users/amieva/Documents/Programming/Avoqado/avoqado-android` has a full reservations module: calendar view (`presentation/calendar/`), create wizard (`CreateReservationViewModel.kt:226-244`), and the reservation list/detail/reschedule flows. It calls `GET /dashboard/venues/{v}/reservations/calendar` and `POST /dashboard/venues/{v}/reservations`.
+Per audit by Subagent 7, the Android staff app at `/Users/amieva/Documents/Programming/Avoqado/avoqado-android` has a full reservations
+module: calendar view (`presentation/calendar/`), create wizard (`CreateReservationViewModel.kt:226-244`), and the reservation
+list/detail/reschedule flows. It calls `GET /dashboard/venues/{v}/reservations/calendar` and `POST /dashboard/venues/{v}/reservations`.
 
-**Risk:** when staff creates/updates a reservation via the Android wizard and the backend rejects with 409 `external_calendar_busy`, the app today shows raw JSON: `HTTP 409: {"errorCode":"external_calendar_busy",...}`. This is because `ReservationApi.kt:110-113` only special-cases 404; everything else falls to the generic `"HTTP $code: ${body.take(200)}"` branch.
+**Risk:** when staff creates/updates a reservation via the Android wizard and the backend rejects with 409 `external_calendar_busy`, the app
+today shows raw JSON: `HTTP 409: {"errorCode":"external_calendar_busy",...}`. This is because `ReservationApi.kt:110-113` only special-cases
+404; everything else falls to the generic `"HTTP $code: ${body.take(200)}"` branch.
 
 **Fix (cosmetic):**
 
-- Edit `app/src/main/java/com/avoqado/pos/reservations/data/ReservationApi.kt:110-113` to add a `409 ->` branch with a Spanish message (e.g., *"El horario está bloqueado por un evento del calendario"*).
+- Edit `app/src/main/java/com/avoqado/pos/reservations/data/ReservationApi.kt:110-113` to add a `409 ->` branch with a Spanish message
+  (e.g., _"El horario está bloqueado por un evento del calendario"_).
 - For better UX, parse the JSON body's `errorCode` field so other 409 reasons (e.g., regular double-booking) get distinct copy.
 - Mirror the pattern in `ClassSessionApi.kt:98-104` which already does this for class endpoints.
 
-**Phase 2 watch-out:** the app's JSON parser uses `ignoreUnknownKeys = true` (`ReservationApi.kt:33`) so new optional response fields are safe — BUT it does NOT use `coerceInputValues = true`. Any new enum value (e.g., a hypothetical `GOOGLE_CALENDAR` `ReservationChannel`) would crash deserialization. Phase 2 must avoid adding enum values to existing Reservation responses, OR the Android app must add coercion first.
+**Phase 2 watch-out:** the app's JSON parser uses `ignoreUnknownKeys = true` (`ReservationApi.kt:33`) so new optional response fields are
+safe — BUT it does NOT use `coerceInputValues = true`. Any new enum value (e.g., a hypothetical `GOOGLE_CALENDAR` `ReservationChannel`)
+would crash deserialization. Phase 2 must avoid adding enum values to existing Reservation responses, OR the Android app must add coercion
+first.
 
-**Phase 3 watch-out:** if you decide staff should be able to connect their personal Google Calendar from the Android app (not just the web dashboard), this is greenfield — the app has no OAuth/Google sign-in scaffolding today. Recommended: keep Google Calendar connect web-only.
+**Phase 3 watch-out:** if you decide staff should be able to connect their personal Google Calendar from the Android app (not just the web
+dashboard), this is greenfield — the app has no OAuth/Google sign-in scaffolding today. Recommended: keep Google Calendar connect web-only.
 
 ### Compatibility rule (per `.claude/rules/critical-warnings.md`, Cross-Repo TPV)
 
-No API response fields removed; all new fields optional with defaults. Backend ships first, soaks, then dashboard. The `avoqado-android` polish is independent and can land in any order after backend.
+No API response fields removed; all new fields optional with defaults. Backend ships first, soaks, then dashboard. The `avoqado-android`
+polish is independent and can land in any order after backend.
 
 ---
 

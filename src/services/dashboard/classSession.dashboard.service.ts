@@ -13,6 +13,9 @@ import type {
 import { ReservationStatus } from '@prisma/client'
 import { withSerializableRetry } from './reservation.dashboard.service'
 import { logAction } from './activity-log.service'
+import { buildSyncKey, collapseSupersededOps, enqueuePush, resolveClassSessionPushTargets } from '@/services/google-calendar/outbox.service'
+import { publishPushNotification } from '@/communication/rabbitmq/gcal-push-consumer'
+import logger from '../../config/logger'
 
 // ==========================================
 // CLASS SESSION SERVICE
@@ -116,20 +119,50 @@ export async function createClassSession(venueId: string, data: CreateClassSessi
     throw new BadRequestError('No se puede agendar una clase en el pasado')
   }
 
-  const session = await prisma.classSession.create({
-    data: {
+  // Wrap insert + outbox enqueue in a single transaction so the gcal push row
+  // commits atomically with the ClassSession row (spec §14.1).
+  const { session, pushRowIds } = await prisma.$transaction(async tx => {
+    const session = await tx.classSession.create({
+      data: {
+        venueId,
+        productId: data.productId,
+        startsAt,
+        endsAt,
+        duration,
+        capacity: data.capacity,
+        assignedStaffId: data.assignedStaffId ?? null,
+        internalNotes: data.internalNotes ?? null,
+        createdById,
+      },
+      include: SESSION_INCLUDE,
+    })
+
+    const targets = await resolveClassSessionPushTargets(tx, {
       venueId,
-      productId: data.productId,
-      startsAt,
-      endsAt,
-      duration,
-      capacity: data.capacity,
-      assignedStaffId: data.assignedStaffId ?? null,
-      internalNotes: data.internalNotes ?? null,
-      createdById,
-    },
-    include: SESSION_INCLUDE,
+      assignedStaffId: session.assignedStaffId ?? null,
+    })
+    const pushRowIds =
+      targets.length > 0
+        ? await enqueuePush(tx, {
+            source: { kind: 'class', classSessionId: session.id },
+            venueId,
+            operation: 'CREATE',
+            targetConnectionIds: targets.map(t => t.id),
+          })
+        : []
+
+    return { session, pushRowIds }
   })
+
+  if (pushRowIds.length > 0) {
+    publishPushNotification(pushRowIds).catch(err =>
+      logger.warn('gcal push publish failed after createClassSession (sweeper will retry)', {
+        err,
+        rowIds: pushRowIds,
+        classSessionId: session.id,
+      }),
+    )
+  }
 
   logAction({
     staffId: createdById,
@@ -225,11 +258,12 @@ export async function createClassSessionsBulk(
   const toCreate = instances.filter(i => !existingTimestamps.has(i.startsAt.getTime()))
   const skipped = instances.length - toCreate.length
 
-  // Single transaction so partial failures roll back. Each row is independent so we
-  // don't need SERIALIZABLE — REPEATABLE READ is enough; rely on default.
-  const created = await prisma.$transaction(
-    toCreate.map(i =>
-      prisma.classSession.create({
+  // Single transaction so partial failures roll back. Convert to a callback
+  // form so we can co-commit gcal push outbox rows for each new session.
+  const { created, pushRowIds } = await prisma.$transaction(async tx => {
+    const created: { id: string; startsAt: Date; endsAt: Date }[] = []
+    for (const i of toCreate) {
+      const row = await tx.classSession.create({
         data: {
           venueId,
           productId: data.productId,
@@ -242,9 +276,40 @@ export async function createClassSessionsBulk(
           createdById,
         },
         select: { id: true, startsAt: true, endsAt: true },
+      })
+      created.push(row)
+    }
+
+    // Resolve targets ONCE — same venue + same instructor for the whole batch.
+    const targets = await resolveClassSessionPushTargets(tx, {
+      venueId,
+      assignedStaffId: data.assignedStaffId ?? null,
+    })
+    const pushRowIds: string[] = []
+    if (targets.length > 0) {
+      for (const row of created) {
+        const ids = await enqueuePush(tx, {
+          source: { kind: 'class', classSessionId: row.id },
+          venueId,
+          operation: 'CREATE',
+          targetConnectionIds: targets.map(t => t.id),
+        })
+        pushRowIds.push(...ids)
+      }
+    }
+
+    return { created, pushRowIds }
+  })
+
+  if (pushRowIds.length > 0) {
+    publishPushNotification(pushRowIds).catch(err =>
+      logger.warn('gcal push publish failed after createClassSessionsBulk (sweeper will retry)', {
+        err,
+        rowIds: pushRowIds,
+        productId: data.productId,
       }),
-    ),
-  )
+    )
+  }
 
   logAction({
     staffId: createdById,
@@ -304,11 +369,41 @@ export async function updateClassSession(venueId: string, sessionId: string, dat
   if ('assignedStaffId' in data) updateData.assignedStaffId = data.assignedStaffId ?? null
   if ('internalNotes' in data) updateData.internalNotes = data.internalNotes ?? null
 
-  const updated = await prisma.classSession.update({
-    where: { id: sessionId },
-    data: updateData,
-    include: SESSION_INCLUDE,
+  // Wrap update + outbox enqueue in a single transaction so the gcal push row
+  // commits atomically with the ClassSession mutation.
+  const { updated, pushRowIds } = await prisma.$transaction(async tx => {
+    const updated = await tx.classSession.update({
+      where: { id: sessionId },
+      data: updateData,
+      include: SESSION_INCLUDE,
+    })
+
+    const targets = await resolveClassSessionPushTargets(tx, {
+      venueId,
+      assignedStaffId: updated.assignedStaffId ?? null,
+    })
+    const pushRowIds =
+      targets.length > 0
+        ? await enqueuePush(tx, {
+            source: { kind: 'class', classSessionId: updated.id },
+            venueId,
+            operation: 'UPDATE',
+            targetConnectionIds: targets.map(t => t.id),
+          })
+        : []
+
+    return { updated, pushRowIds }
   })
+
+  if (pushRowIds.length > 0) {
+    publishPushNotification(pushRowIds).catch(err =>
+      logger.warn('gcal push publish failed after updateClassSession (sweeper will retry)', {
+        err,
+        rowIds: pushRowIds,
+        classSessionId: updated.id,
+      }),
+    )
+  }
 
   logAction({
     venueId,
@@ -327,7 +422,7 @@ export async function cancelClassSession(venueId: string, sessionId: string) {
   if (!session) throw new NotFoundError('Sesión no encontrada')
   if (session.status === 'CANCELLED') throw new ConflictError('La sesión ya está cancelada')
 
-  const cancelled = await prisma.$transaction(async tx => {
+  const { cancelled, pushRowIds } = await prisma.$transaction(async tx => {
     // Cancel all active reservations for this session
     await tx.reservation.updateMany({
       where: {
@@ -342,12 +437,51 @@ export async function cancelClassSession(venueId: string, sessionId: string) {
       },
     })
 
-    return tx.classSession.update({
+    const cancelled = await tx.classSession.update({
       where: { id: sessionId },
       data: { status: 'CANCELLED' },
       include: SESSION_INCLUDE,
     })
+
+    // ---- Google Calendar push outbox (Phase 2 — spec §14.3) ----
+    // ONE CANCEL row per target connection — NOT one per attendee reservation.
+    // Per-attendee reservations were bulk-cancelled above; they never had
+    // their own pushed events (the class is the calendar entity).
+    const targets = await resolveClassSessionPushTargets(tx, {
+      venueId,
+      assignedStaffId: cancelled.assignedStaffId ?? null,
+    })
+    let pushRowIds: string[] = []
+    if (targets.length > 0) {
+      const now = new Date()
+      for (const target of targets) {
+        const syncKey = buildSyncKey({
+          kind: 'class',
+          classSessionId: cancelled.id,
+          connectionId: target.id,
+        })
+        await collapseSupersededOps(tx, syncKey, now)
+      }
+      pushRowIds = await enqueuePush(tx, {
+        source: { kind: 'class', classSessionId: cancelled.id },
+        venueId,
+        operation: 'CANCEL',
+        targetConnectionIds: targets.map(t => t.id),
+      })
+    }
+
+    return { cancelled, pushRowIds }
   })
+
+  if (pushRowIds.length > 0) {
+    publishPushNotification(pushRowIds).catch(err =>
+      logger.warn('gcal push publish failed after cancelClassSession (sweeper will retry)', {
+        err,
+        rowIds: pushRowIds,
+        classSessionId: cancelled.id,
+      }),
+    )
+  }
 
   logAction({
     venueId,
@@ -409,7 +543,7 @@ export async function addAttendee(venueId: string, sessionId: string, data: AddA
 
     const confirmationCode = generateConfirmationCode()
 
-    return tx.reservation.create({
+    const reservation = await tx.reservation.create({
       data: {
         venueId,
         confirmationCode,
@@ -433,6 +567,31 @@ export async function addAttendee(venueId: string, sessionId: string, data: AddA
         customer: { select: { id: true, firstName: true, lastName: true } },
       },
     })
+
+    // ---- Google Calendar push outbox (Phase 2 — spec §14.2) ----
+    // Roster changed → bump the class's event description. Debounced 30s so
+    // the worker coalesces back-to-back attendee additions.
+    const classMeta = await tx.classSession.findUnique({
+      where: { id: sessionId },
+      select: { assignedStaffId: true },
+    })
+    if (classMeta) {
+      const classTargets = await resolveClassSessionPushTargets(tx, {
+        venueId,
+        assignedStaffId: classMeta.assignedStaffId ?? null,
+      })
+      if (classTargets.length > 0) {
+        await enqueuePush(tx, {
+          source: { kind: 'class', classSessionId: sessionId },
+          venueId,
+          operation: 'UPDATE_ROSTER',
+          targetConnectionIds: classTargets.map(t => t.id),
+          debounceUntil: new Date(Date.now() + 30_000),
+        })
+      }
+    }
+
+    return reservation
   })
 }
 
@@ -447,12 +606,41 @@ export async function removeAttendee(venueId: string, sessionId: string, reserva
     throw new BadRequestError('Esta reservación ya no puede ser cancelada')
   }
 
-  return prisma.reservation.update({
-    where: { id: reservationId },
-    data: {
-      status: 'CANCELLED',
-      cancelledAt: new Date(),
-      cancelledBy: 'STAFF',
-    },
+  // Wrap cancel + outbox enqueue in a single transaction so the roster bump
+  // commits atomically with the attendee CANCELLED state.
+  return prisma.$transaction(async tx => {
+    const updated = await tx.reservation.update({
+      where: { id: reservationId },
+      data: {
+        status: 'CANCELLED',
+        cancelledAt: new Date(),
+        cancelledBy: 'STAFF',
+      },
+    })
+
+    // ---- Google Calendar push outbox (Phase 2 — spec §14.2) ----
+    // Don't emit per-attendee CANCEL — the class is the calendar event.
+    // UPDATE_ROSTER (debounced 30s) keeps the description list current.
+    const classMeta = await tx.classSession.findUnique({
+      where: { id: sessionId },
+      select: { assignedStaffId: true },
+    })
+    if (classMeta) {
+      const classTargets = await resolveClassSessionPushTargets(tx, {
+        venueId,
+        assignedStaffId: classMeta.assignedStaffId ?? null,
+      })
+      if (classTargets.length > 0) {
+        await enqueuePush(tx, {
+          source: { kind: 'class', classSessionId: sessionId },
+          venueId,
+          operation: 'UPDATE_ROSTER',
+          targetConnectionIds: classTargets.map(t => t.id),
+          debounceUntil: new Date(Date.now() + 30_000),
+        })
+      }
+    }
+
+    return updated
   })
 }

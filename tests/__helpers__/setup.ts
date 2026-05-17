@@ -169,6 +169,10 @@ const prismaMock: any = {
   externalBusyBlock: createMockModel(),
   googleCalendarWebhookInbox: createMockModel(),
   googleOAuthSession: createMockModel(),
+  // Google Calendar Sync (Phase 2 — push)
+  calendarSyncOutbox: createMockModel(),
+  reservationGoogleEventMapping: createMockModel(),
+  reservationSettings: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),

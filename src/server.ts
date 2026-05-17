@@ -15,6 +15,7 @@ import { CommandListener } from './communication/rabbitmq/commandListener'
 import { CommandRetryService } from './communication/rabbitmq/commandRetryService'
 import { startEventConsumer } from './communication/rabbitmq/consumer'
 import { startGcalPullConsumer } from './communication/rabbitmq/gcal-pull-consumer'
+import { startGcalPushConsumer } from './communication/rabbitmq/gcal-push-consumer'
 import { startPosConnectionMonitor } from './jobs/monitorPosConnections'
 import { tpvHealthMonitorJob } from './jobs/tpv-health-monitor.job'
 import { subscriptionCancellationJob } from './jobs/subscription-cancellation.job'
@@ -33,6 +34,7 @@ import { marketingCampaignJob } from './jobs/marketing-campaign.job'
 import { moneygiverSettlementJob } from './jobs/moneygiver-settlement.job'
 import { venueCommissionSettlementJob } from './jobs/venue-commission-settlement.job'
 import { gcalInboxSweeperJob } from './jobs/gcal-inbox-sweeper.job'
+import { gcalOutboxSweeperJob } from './jobs/gcal-outbox-sweeper.job'
 import { gcalChannelRenewalJob } from './jobs/gcal-channel-renewal.job'
 import { gcalHorizonRefreshJob } from './jobs/gcal-horizon-refresh.job'
 import { gcalPruningJob } from './jobs/gcal-pruning.job'
@@ -150,8 +152,9 @@ const gracefulShutdown = async (signal: string) => {
       moneygiverSettlementJob.stop()
       venueCommissionSettlementJob.stop()
 
-      // Stop Google Calendar sync jobs (Phase 1)
+      // Stop Google Calendar sync jobs (Phase 1 + Phase 2)
       gcalInboxSweeperJob.stop()
+      gcalOutboxSweeperJob.stop()
       gcalChannelRenewalJob.stop()
       gcalHorizonRefreshJob.stop()
       gcalPruningJob.stop()
@@ -262,6 +265,13 @@ const startApplication = async (retries = 3) => {
             logger.warn('⚠️  gcal pull consumer could not start:', err)
           })
 
+          // Start Google Calendar push consumer (Phase 2) — drains gcal.push
+          // messages produced by the outbox enqueue hooks. Best-effort; the
+          // outbox sweeper drives pushes if this fails to start.
+          startGcalPushConsumer().catch(err => {
+            logger.warn('⚠️  gcal push consumer could not start:', err)
+          })
+
           // Start command listener
           commandListener.start().catch(err => {
             logger.warn('⚠️  Command listener could not start:', err)
@@ -339,9 +349,11 @@ const startApplication = async (retries = 3) => {
       // ProviderEventLog rows when TPV records the Payment after the webhook arrived)
       blumonWebhookReconciliationJob.start()
 
-      // Start Google Calendar sync jobs (Phase 1)
+      // Start Google Calendar sync jobs (Phase 1 + Phase 2)
       // Inbox sweeper: drives pulls for inbox rows the RMQ consumer missed (every 30s)
       gcalInboxSweeperJob.start()
+      // Outbox sweeper: drives pushes for outbox rows the RMQ consumer missed (every 30s)
+      gcalOutboxSweeperJob.start()
       // Channel renewal: refresh events.watch before 7-day expiry (every 12h)
       gcalChannelRenewalJob.start()
       // Horizon refresh: re-sync events newly inside the booking window (daily 04:00)

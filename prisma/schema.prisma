@@ -402,6 +402,9 @@ model Venue {
   // Google Calendar Sync (Phase 1)
   googleCalendarConnections GoogleCalendarConnection[]
 
+  // Google Calendar Sync (Phase 2 — push)
+  calendarSyncOutbox CalendarSyncOutbox[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -2351,9 +2354,9 @@ model Modifier {
   // Demo data flag (for cleanup on conversion)
   isDemo Boolean @default(false)
 
-  orderItems         OrderItemModifier[]
-  paymentLinkItems   PaymentLinkItemModifier[]
-  reservationItems   ReservationModifier[]
+  orderItems       OrderItemModifier[]
+  paymentLinkItems PaymentLinkItemModifier[]
+  reservationItems ReservationModifier[]
 
   @@index([rawMaterialId])
 }
@@ -8197,6 +8200,10 @@ model Reservation {
   // Modifiers selected during booking for multi-service appointments
   modifiers ReservationModifier[]
 
+  // Google Calendar Sync (Phase 2 — push)
+  calendarSyncOutbox  CalendarSyncOutbox[]
+  googleEventMappings ReservationGoogleEventMapping[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -8244,7 +8251,7 @@ model ReservationModifier {
   // Which service in a multi-service appointment this modifier belongs to.
   // We don't FK to Product because Reservation.productIds is a text[] (Square pattern),
   // not a join table — keeping productId here as a tag matches that pattern.
-  productId String
+  productId  String
   modifierId String?
   modifier   Modifier? @relation(fields: [modifierId], references: [id], onDelete: SetNull)
 
@@ -8349,6 +8356,10 @@ model ClassSession {
   // Relations
   reservations Reservation[]
   slotHolds    SlotHold[]
+
+  // Google Calendar Sync (Phase 2 — push)
+  calendarSyncOutbox  CalendarSyncOutbox[]
+  googleEventMappings ReservationGoogleEventMapping[]
 
   createdById String?
   createdBy   Staff?  @relation("ClassSessionCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
@@ -8466,6 +8477,23 @@ model ReservationSettings {
   // Operating hours (per-day weekly schedule, venue local time)
   operatingHours Json? // null = use defaults (Mon-Sat 09:00-22:00, Sunday closed)
 
+  // Google Calendar Sync (Phase 2 — push direction).
+  // Push toggle is independent of module enablement so a venue can pause push
+  // without disconnecting the calendar (read-side / pull stays active).
+  googleCalendarPushEnabled              Boolean @default(true)
+  // Dual-write fans the push out to BOTH the staff personal calendar AND the
+  // venue master. Default is single-target (staff if assigned, else venue).
+  googleCalendarDualWrite                Boolean @default(false)
+  // Detail level controls what fields appear in the Google event body.
+  // FULL = customer name, service, party size visible (locked-in default per
+  // user decision 2026-05-16). Other values: 'SERVICE' | 'MINIMAL'.
+  googleCalendarEventDetailLevel         String  @default("FULL")
+  // When true, cancellations hard-delete the Google event; when false (default)
+  // we patch the event to status='cancelled' for an audit trail.
+  googleCalendarRemoveCancelled          Boolean @default(false)
+  // For ClassSession push: include the attendee roster in the event description.
+  googleCalendarClassRosterInDescription Boolean @default(true)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -8534,6 +8562,10 @@ model GoogleCalendarConnection {
 
   channels   GoogleCalendarChannel[]
   busyBlocks ExternalBusyBlock[]
+
+  // Google Calendar Sync (Phase 2 — push)
+  outboxRows    CalendarSyncOutbox[]
+  eventMappings ReservationGoogleEventMapping[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -8641,6 +8673,119 @@ model GoogleOAuthSession {
   consumedAt DateTime?
 
   @@index([expiresAt])
+}
+
+// ==========================================
+// GOOGLE CALENDAR SYNC (Phase 2 — push direction)
+// Avoqado reservations / class sessions → Google Calendar events.
+// Outbox-pattern guarantees: writes happen inside the same SERIALIZABLE
+// transaction as the source row, so we never push without a committed
+// reservation and never lose a push if RabbitMQ blips.
+// ==========================================
+
+/// Operation enqueued for push. UPDATE_ROSTER is ClassSession-only — a
+/// debounced description-only patch that re-renders the attendee list.
+enum CalendarSyncOperation {
+  CREATE
+  UPDATE
+  CANCEL
+  UPDATE_ROSTER
+}
+
+/// Outbox lifecycle. SKIPPED is set by the CANCEL pre-flight collapse logic
+/// (an earlier CREATE/UPDATE for the same syncKey was superseded). DEAD_LETTER
+/// is terminal after `attempts` exhausts the retry budget.
+enum CalendarSyncStatus {
+  PENDING
+  IN_PROGRESS
+  SUCCESS
+  FAILED
+  DEAD_LETTER
+  SKIPPED
+}
+
+/// Durable push-intent rows. We insert one row PER (source-row × target-connection)
+/// inside the same DB transaction as the source mutation. A consumer + sweeper
+/// drain rows with single-flight semantics keyed on `syncKey` (pg advisory lock).
+model CalendarSyncOutbox {
+  id String @id @default(cuid())
+
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  reservationId String?
+  reservation   Reservation? @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+
+  classSessionId String?
+  classSession   ClassSession? @relation(fields: [classSessionId], references: [id], onDelete: Cascade)
+
+  operation CalendarSyncOperation
+
+  targetConnectionId String
+  targetConnection   GoogleCalendarConnection @relation(fields: [targetConnectionId], references: [id], onDelete: Cascade)
+
+  // Logical ordering key — "reservation:<id>:<connId>" or "class:<id>:<connId>".
+  // The push worker takes a pg_try_advisory_xact_lock on hashtext(syncKey)
+  // to serialize operations against the same target.
+  syncKey String
+
+  // De-dupes "exact same intent re-enqueued" at the DB layer. Caller derives
+  // this from (syncKey, operation, sourceUpdatedAt) so a retry of the SAME
+  // mutation collapses to one row.
+  idempotencyKey String @unique
+
+  status   CalendarSyncStatus @default(PENDING)
+  attempts Int                @default(0)
+
+  scheduledAt DateTime  @default(now())
+  processedAt DateTime?
+  lastError   String?   @db.Text
+
+  // ClassSession UPDATE_ROSTER debounce window — sweeper / worker skips rows
+  // until NOW() >= debounceUntil, then collapses pending UPDATE_ROSTER rows
+  // for the same syncKey into one.
+  debounceUntil DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([status, scheduledAt])
+  @@index([venueId, status])
+  @@index([syncKey, status, createdAt]) // collapse query
+  @@index([reservationId])
+  @@index([classSessionId])
+  @@index([targetConnectionId])
+}
+
+/// Mapping between an Avoqado source row (reservation OR class session) and the
+/// Google Calendar event id created for it on a specific connection. PK is
+/// (connectionId, googleEventId) because googleEventId is only unique within a
+/// single calendar. Partial unique indexes on (reservationId, connectionId) and
+/// (classSessionId, connectionId) enforce "one event per source per target"
+/// while allowing the column to be NULL when the other side is set.
+/// Exactly-one-of (reservationId, classSessionId) MUST be set — enforced at the
+/// DB layer by a CHECK constraint added in the migration SQL.
+model ReservationGoogleEventMapping {
+  reservationId String?
+  reservation   Reservation? @relation(fields: [reservationId], references: [id], onDelete: SetNull)
+
+  classSessionId String?
+  classSession   ClassSession? @relation(fields: [classSessionId], references: [id], onDelete: SetNull)
+
+  connectionId String
+  connection   GoogleCalendarConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  googleEventId String
+
+  lastPushedAt DateTime
+  // "PUSHED" | "PATCHED" | "TOMBSTONED" | "FAILED"
+  lastStatus   String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@id([connectionId, googleEventId])
+  @@index([reservationId])
+  @@index([classSessionId])
 }
 
 // ==========================================

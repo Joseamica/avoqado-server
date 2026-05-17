@@ -483,7 +483,12 @@ async function main() {
   }
   console.log('')
 
-  await resetDatabase()
+  if (process.env.SEED_RESET === 'true') {
+    await resetDatabase()
+  } else {
+    console.log('⏭️  Skipping resetDatabase() — set SEED_RESET=true to wipe the DB before seeding.')
+    console.log('   Default mode: idempotent upsert (safe to re-run).')
+  }
 
   // --- Seed de Datos Globales/Independientes ---
   console.log('Seeding global data...')
@@ -847,13 +852,34 @@ async function main() {
   console.log(`  Created ${blumonSettlementTypes.length} settlement configurations (Blumon A).`)
 
   // --- 1. Organizaciones ---
+  // Mirror real production structure: Grupo Avoqado + PlayTelecom.
+  // Upsert by slug → idempotent across runs.
   console.log('Seeding organizations...')
   const organizations = await Promise.all([
-    prisma.organization.create({
-      data: { name: 'Grupo Avoqado Prime', email: 'hola@avoqado.com', phone: faker.phone.number(), taxId: 'AVP123456XYZ' },
+    prisma.organization.upsert({
+      where: { slug: 'grupo-avoqado' },
+      update: {},
+      create: {
+        name: 'Grupo Avoqado',
+        slug: 'grupo-avoqado',
+        email: 'hola@avoqado.com',
+        phone: '+525555000000',
+        taxId: 'AVP123456XYZ',
+      },
+    }),
+    prisma.organization.upsert({
+      where: { slug: 'playtelecom' },
+      update: {},
+      create: {
+        name: 'PlayTelecom',
+        slug: 'playtelecom',
+        email: 'admin@playtelecom.mx',
+        phone: '+524441000000',
+        taxId: 'PLT987654ABC',
+      },
     }),
   ])
-  console.log(`  Created ${organizations.length} organizations.`)
+  console.log(`  Upserted ${organizations.length} organizations: ${organizations.map(o => o.name).join(', ')}.`)
 
   // --- Bucle principal para poblar cada organización ---
   for (const [orgIndex, org] of organizations.entries()) {
@@ -946,10 +972,11 @@ async function main() {
 
     // --- Bucle de Venues: diferentes venues con distintos estados para testing ---
     // Cada venue tiene un status y kycStatus diferente para probar todos los flujos
+    // Mirror real prod: Grupo Avoqado has {avoqado-full, avoqado-empty}.
+    // PlayTelecom has 39 BAE venues in prod; seed a single representative one.
     const venuesConfig =
       orgIndex === 0
         ? [
-            // 1. Venue principal: ACTIVE con KYC VERIFIED (full data)
             {
               name: 'Avoqado Full',
               slug: 'avoqado-full',
@@ -957,80 +984,57 @@ async function main() {
               status: VenueStatus.ACTIVE,
               kycStatus: VerificationStatus.VERIFIED,
             },
-            // 2. Venue en TRIAL (demo de onboarding, 30 días)
             {
-              name: 'Avoqado Trial',
-              slug: 'avoqado-trial',
+              name: 'Avoqado Empty',
+              slug: 'avoqado-empty',
               seedFullData: false,
-              status: VenueStatus.TRIAL,
-              kycStatus: VerificationStatus.NOT_SUBMITTED,
-              demoExpiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days from now
-            },
-            // 3. Venue en ONBOARDING con KYC PENDING_REVIEW (esperando revisión)
-            {
-              name: 'Avoqado Onboarding',
-              slug: 'avoqado-onboarding',
-              seedFullData: false,
-              status: VenueStatus.ONBOARDING,
-              kycStatus: VerificationStatus.PENDING_REVIEW,
-            },
-            // 4. Venue PENDING_ACTIVATION (KYC en revisión por Avoqado)
-            {
-              name: 'Avoqado Pending',
-              slug: 'avoqado-pending',
-              seedFullData: false,
-              status: VenueStatus.PENDING_ACTIVATION,
-              kycStatus: VerificationStatus.IN_REVIEW,
-            },
-            // 5. Venue SUSPENDED (suspendido por owner)
-            {
-              name: 'Avoqado Suspended',
-              slug: 'avoqado-suspended',
-              seedFullData: false,
-              status: VenueStatus.SUSPENDED,
+              status: VenueStatus.ACTIVE,
               kycStatus: VerificationStatus.VERIFIED,
-              suspensionReason: 'Vacaciones de temporada - reabrimos en enero',
-            },
-            // 6. Venue con KYC REJECTED (necesita reenviar)
-            {
-              name: 'Avoqado Rejected',
-              slug: 'avoqado-rejected',
-              seedFullData: false,
-              status: VenueStatus.ONBOARDING,
-              kycStatus: VerificationStatus.REJECTED,
             },
           ]
-        : []
+        : orgIndex === 1
+          ? [
+              {
+                name: 'BAE EL PORTAL (2838)',
+                slug: 'play-telecom',
+                seedFullData: false,
+                status: VenueStatus.ACTIVE,
+                kycStatus: VerificationStatus.VERIFIED,
+                venueType: VenueType.OTHER,
+              },
+            ]
+          : []
 
     for (const [index, venueConfig] of venuesConfig.entries()) {
       const venueName = venueConfig.name
       const venueSlug = venueConfig.slug || generateSlug(venueName)
       const isFullVenue = venueConfig.seedFullData
-      const venue = await prisma.venue.create({
-        data: {
-          organizationId: org.id,
-          name: venueName,
-          slug: venueSlug,
-          type: VenueType.RESTAURANT,
-          entityType: index === 0 ? EntityType.PERSONA_MORAL : EntityType.PERSONA_FISICA,
-          address: faker.location.streetAddress(),
-          city: faker.location.city(),
-          state: faker.location.state(),
-          zipCode: faker.location.zipCode(),
-          country: 'MX',
-          phone: faker.phone.number(),
-          email: `contact@${venueSlug}.com`,
-          logo: faker.image.urlLoremFlickr({ category: 'restaurant,logo' }),
-          feeValue: 0.025,
-          feeScheduleId: feeSchedule.id,
-          // Use status and kycStatus from venueConfig
-          status: venueConfig.status,
-          kycStatus: venueConfig.kycStatus,
-          statusChangedAt: new Date(),
-          // Optional fields from config
-          ...('demoExpiresAt' in venueConfig && { demoExpiresAt: venueConfig.demoExpiresAt }),
-          ...('suspensionReason' in venueConfig && { suspensionReason: venueConfig.suspensionReason }),
-        },
+      const venueCreateData = {
+        organizationId: org.id,
+        name: venueName,
+        slug: venueSlug,
+        type: 'venueType' in venueConfig ? (venueConfig.venueType as VenueType) : VenueType.RESTAURANT,
+        entityType: index === 0 ? EntityType.PERSONA_MORAL : EntityType.PERSONA_FISICA,
+        address: faker.location.streetAddress(),
+        city: faker.location.city(),
+        state: faker.location.state(),
+        zipCode: faker.location.zipCode(),
+        country: 'MX',
+        phone: faker.phone.number(),
+        email: `contact@${venueSlug}.com`,
+        logo: faker.image.urlLoremFlickr({ category: 'restaurant,logo' }),
+        feeValue: 0.025,
+        feeScheduleId: feeSchedule.id,
+        status: venueConfig.status,
+        kycStatus: venueConfig.kycStatus,
+        statusChangedAt: new Date(),
+        ...('demoExpiresAt' in venueConfig && { demoExpiresAt: venueConfig.demoExpiresAt }),
+        ...('suspensionReason' in venueConfig && { suspensionReason: venueConfig.suspensionReason }),
+      }
+      const venue = await prisma.venue.upsert({
+        where: { slug: venueSlug },
+        update: {}, // Keep existing data on re-runs; only fill if missing
+        create: venueCreateData,
       })
       console.log(`    -> Created Venue: ${venue.name} (status: ${venueConfig.status}, kyc: ${venueConfig.kycStatus})`)
 

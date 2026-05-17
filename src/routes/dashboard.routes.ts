@@ -224,6 +224,7 @@ import reportsRoutes from './dashboard/reports.routes'
 import commissionRoutes from './dashboard/commission.routes'
 import reservationRoutes from './dashboard/reservation.routes'
 import classSessionRoutes from './dashboard/classSession.routes'
+import googleCalendarStatusRoutes from './dashboard/googleCalendarStatus.routes'
 // @temporary - Serialized inventory demo routes (delete after final implementation)
 import serializedInventoryRoutes from './dashboard/serializedInventory.routes'
 // Command Center routes for PlayTelecom/White-Label dashboard
@@ -3514,6 +3515,9 @@ router.use('/venues/:venueId/reservations', authenticateTokenMiddleware, reserva
 
 // Class Sessions (group classes / workshops)
 router.use('/venues/:venueId/class-sessions', authenticateTokenMiddleware, classSessionRoutes)
+
+// Google Calendar Sync — venue-scoped status / ops endpoints (Phase 3)
+router.use('/venues/:venueId/google-calendar', authenticateTokenMiddleware, googleCalendarStatusRoutes)
 
 // Credit Packs / Bundles (multi-product packages with credits)
 router.use('/venues/:venueId/credit-packs', authenticateTokenMiddleware, creditPackRoutes)

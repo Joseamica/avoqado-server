@@ -298,6 +298,92 @@ export async function listConnections(req: Request, res: Response, next: NextFun
 }
 
 /**
+ * GET /api/v1/google-calendar/connections/:id
+ *
+ * Detailed status of a single connection — used by the dashboard's per-connection
+ * settings/diagnostics view. Returns:
+ *   - The display-safe connection columns.
+ *   - The latest ACTIVE watch channel (if any).
+ *   - Aggregate counts of pending/failed and dead-letter outbox rows.
+ *
+ * Authorization (spec §12):
+ *   - Own personal: scope=STAFF_PERSONAL && staffId === caller.userId (always allowed).
+ *   - Otherwise: require `calendar:view_status` for the caller's current venue.
+ */
+export async function getConnectionDetail(req: Request, res: Response, next: NextFunction) {
+  try {
+    const ctx = getAuthContext(req)
+    const id = String(req.params.id ?? '')
+    if (!id) throw new BadRequestError('Falta el id de conexión')
+
+    const conn = await prisma.googleCalendarConnection.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        scope: true,
+        venueId: true,
+        staffId: true,
+        googleAccountEmail: true,
+        selectedCalendarId: true,
+        selectedCalendarSummary: true,
+        selectedCalendarTimeZone: true,
+        status: true,
+        statusReason: true,
+        lastSyncedAt: true,
+        lastHorizonEnd: true,
+        connectedAt: true,
+        disconnectedAt: true,
+      },
+    })
+    if (!conn) throw new NotFoundError('Conexión no encontrada')
+
+    const isOwnPersonal = conn.scope === 'STAFF_PERSONAL' && conn.staffId === ctx.userId
+    if (!isOwnPersonal) {
+      const access = await getUserAccess(ctx.userId, ctx.venueId)
+      if (!hasPermission(access, 'calendar:view_status')) {
+        throw new ForbiddenError('No tienes permiso para ver el estado de esta conexión')
+      }
+    }
+
+    const [pendingCount, deadLetterCount, latestChannel] = await Promise.all([
+      prisma.calendarSyncOutbox.count({
+        where: { targetConnectionId: id, status: { in: ['PENDING', 'FAILED'] } },
+      }),
+      prisma.calendarSyncOutbox.count({
+        where: { targetConnectionId: id, status: 'DEAD_LETTER' },
+      }),
+      prisma.googleCalendarChannel.findFirst({
+        where: { connectionId: id, status: 'ACTIVE' },
+        orderBy: { expiresAt: 'desc' },
+        select: { expiresAt: true, status: true },
+      }),
+    ])
+
+    res.status(200).json({
+      connection: {
+        id: conn.id,
+        scope: conn.scope,
+        status: conn.status,
+        statusReason: conn.statusReason,
+        googleAccountEmail: conn.googleAccountEmail,
+        selectedCalendarId: conn.selectedCalendarId,
+        selectedCalendarSummary: conn.selectedCalendarSummary,
+        selectedCalendarTimeZone: conn.selectedCalendarTimeZone,
+        lastSyncedAt: conn.lastSyncedAt,
+        lastHorizonEnd: conn.lastHorizonEnd,
+        connectedAt: conn.connectedAt,
+        disconnectedAt: conn.disconnectedAt,
+        channel: latestChannel ? { expiresAt: latestChannel.expiresAt, status: latestChannel.status } : null,
+        pendingCount,
+        deadLetterCount,
+      },
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
  * DELETE /api/v1/google-calendar/connections/:id
  *
  * Disconnect a Google Calendar integration:

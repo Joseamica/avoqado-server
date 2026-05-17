@@ -18,6 +18,7 @@ import { Router } from 'express'
 
 import {
   disconnectConnection,
+  getConnectionDetail,
   listCalendars,
   listConnections,
   oauthCallback,
@@ -36,6 +37,7 @@ router.get('/oauth/calendars', authenticateTokenMiddleware, listCalendars)
 
 router.post('/connections', authenticateTokenMiddleware, postConnection)
 router.get('/connections', authenticateTokenMiddleware, listConnections)
+router.get('/connections/:id', authenticateTokenMiddleware, getConnectionDetail)
 router.delete('/connections/:id', authenticateTokenMiddleware, disconnectConnection)
 
 export default router

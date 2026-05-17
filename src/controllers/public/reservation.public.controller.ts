@@ -16,6 +16,7 @@ import { getProvider } from '../../services/payments/provider-registry'
 import { formatInTimeZone } from 'date-fns-tz'
 import { es as esLocale } from 'date-fns/locale'
 import emailService from '../../services/email.service'
+import { enqueuePush, resolveClassSessionPushTargets } from '../../services/google-calendar/outbox.service'
 
 // ==========================================
 // PUBLIC RESERVATION CONTROLLER (Unauthenticated)
@@ -177,6 +178,12 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
             // New Phase 3 fields — null/inherit by default for existing products.
             creditCost: true,
             upfrontPolicy: true,
+            // Category — surfaced so the booking widget can group services + render
+            // category chips/headers (Booksy/Vagaro/Fresha pattern). Inactive
+            // categories are filtered server-side via the where below.
+            category: {
+              select: { id: true, name: true, slug: true, displayOrder: true },
+            },
             // Modifier groups assigned to this product (booking widget surface).
             // Mirrors Vagaro's add-on model — see venue.consumer.service.ts for the
             // sibling shape used by the dashboard consumer namespace.
@@ -1562,6 +1569,31 @@ async function createClassReservation(
     logger.info(
       `✅ [CLASS BOOKING] Created ${reservation.confirmationCode} | venue=${venueId} session=${body.classSessionId} party=${requestedPartySize} enrolled=${enrolled}→${enrolled + requestedPartySize}/${effectiveCapacity}${creditRedeemed ? ` (${creditsUsed} credit${creditsUsed > 1 ? 's' : ''})` : ''}`,
     )
+
+    // ---- Google Calendar push outbox (Phase 2 — spec §14.2) ----
+    // One event per class, not per attendee. Enqueue UPDATE_ROSTER (debounced
+    // 30s) so the worker coalesces multiple attendee mutations into a single
+    // events.patch on the class's pushed event. No per-reservation CREATE.
+    const classSession = await tx.classSession.findUnique({
+      where: { id: body.classSessionId },
+      select: { assignedStaffId: true },
+    })
+    if (classSession) {
+      const classTargets = await resolveClassSessionPushTargets(tx, {
+        venueId,
+        assignedStaffId: classSession.assignedStaffId ?? null,
+      })
+      if (classTargets.length > 0) {
+        await enqueuePush(tx, {
+          source: { kind: 'class', classSessionId: body.classSessionId },
+          venueId,
+          operation: 'UPDATE_ROSTER',
+          targetConnectionIds: classTargets.map(t => t.id),
+          debounceUntil: new Date(Date.now() + 30_000),
+        })
+        // Debounced — sweeper publishes after window. No immediate RMQ push.
+      }
+    }
 
     return { ...reservation, creditRedeemed, creditsUsed, requiresUpfrontCash, owesAtVenue, upfrontAmount }
   })

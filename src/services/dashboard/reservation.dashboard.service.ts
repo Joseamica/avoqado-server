@@ -10,6 +10,14 @@ import emailService from '../email.service'
 import { getProvider } from '../payments/provider-registry'
 import { checkExternalBusyBlock } from '../reservation/external-busy-block.service'
 import { resolveModifierSelections } from '@/services/reservation/resolveModifierSelections'
+import {
+  buildSyncKey,
+  collapseSupersededOps,
+  enqueuePush,
+  resolveClassSessionPushTargets,
+  resolveReservationPushTargets,
+} from '@/services/google-calendar/outbox.service'
+import { publishPushNotification } from '@/communication/rabbitmq/gcal-push-consumer'
 // creditPack.public.service is imported lazily inside cancelReservation/markNoShow to avoid
 // the circular import — creditPack imports `withSerializableRetry` from this module.
 
@@ -426,19 +434,50 @@ export async function createReservation(venueId: string, data: CreateReservation
       `✅ [RESERVATION] Created ${finalCode} | venue=${venueId} status=${initialStatus} table=${data.tableId ?? 'none'} staff=${data.assignedStaffId ?? 'none'}`,
     )
 
-    return reservation
+    // ---- Google Calendar push outbox (Phase 2) ----
+    // Co-commit one outbox row per target connection so the push is atomic
+    // with the reservation INSERT. Class reservations don't flow through this
+    // path — they're created in `createClassReservation` (public controller)
+    // which handles roster-update push semantics (spec §14.2).
+    const targets = await resolveReservationPushTargets(tx, {
+      venueId,
+      assignedStaffId: reservation.assignedStaffId ?? null,
+    })
+    const pushRowIds =
+      targets.length > 0
+        ? await enqueuePush(tx, {
+            source: { kind: 'reservation', reservationId: reservation.id },
+            venueId,
+            operation: 'CREATE',
+            targetConnectionIds: targets.map(t => t.id),
+          })
+        : []
+
+    return { reservation, pushRowIds }
   })
+
+  // Fire-and-forget RMQ publish AFTER the transaction commits. Sweeper is the
+  // retry path if RMQ is down; we never block the request on this.
+  if (reservation.pushRowIds.length > 0) {
+    publishPushNotification(reservation.pushRowIds).catch(err =>
+      logger.warn('gcal push publish failed after createReservation (sweeper will retry)', {
+        err,
+        rowIds: reservation.pushRowIds,
+        reservationId: reservation.reservation.id,
+      }),
+    )
+  }
 
   logAction({
     staffId: createdById,
     venueId,
     action: 'RESERVATION_CREATED',
     entity: 'Reservation',
-    entityId: reservation.id,
-    data: { status: reservation.status, confirmationCode: reservation.confirmationCode },
+    entityId: reservation.reservation.id,
+    data: { status: reservation.reservation.status, confirmationCode: reservation.reservation.confirmationCode },
   })
 
-  return reservation
+  return reservation.reservation
 }
 
 // ---- List / Get ----
@@ -595,24 +634,98 @@ async function transitionReservation(
     ...extraData,
   }
 
-  // RACE GUARD: only update if the row is still in the source status we just read.
-  // Two concurrent cancel requests would both pass validateTransition above (since
-  // they both saw `CONFIRMED`), then both run the unguarded `update`, both succeed,
-  // both fire downstream side-effects (refund, notifications). The conditional
-  // updateMany makes exactly one of them succeed (rowsAffected=1) and the rest get
-  // rowsAffected=0 → we throw the same error the validator would.
-  const guarded = await prisma.reservation.updateMany({
-    where: { id: reservationId, status: reservation.status },
-    data: updateData as any, // updateMany accepts the same scalar fields as update
-  })
-  if (guarded.count === 0) {
-    throw new BadRequestError('La reservacion ya fue modificada por otro proceso. Recarga e intenta de nuevo.')
-  }
+  // Wrap update + outbox enqueue in a single transaction so the gcal push row
+  // commits atomically with the status change. Without this, a crash between
+  // updateMany and enqueuePush would leave the reservation cancelled but
+  // Google still showing the event.
+  const { updated, pushRowIds } = await prisma.$transaction(async tx => {
+    // RACE GUARD: only update if the row is still in the source status we just read.
+    // Two concurrent cancel requests would both pass validateTransition above (since
+    // they both saw `CONFIRMED`), then both run the unguarded `update`, both succeed,
+    // both fire downstream side-effects (refund, notifications). The conditional
+    // updateMany makes exactly one of them succeed (rowsAffected=1) and the rest get
+    // rowsAffected=0 → we throw the same error the validator would.
+    const guarded = await tx.reservation.updateMany({
+      where: { id: reservationId, status: reservation.status },
+      data: updateData as any, // updateMany accepts the same scalar fields as update
+    })
+    if (guarded.count === 0) {
+      throw new BadRequestError('La reservacion ya fue modificada por otro proceso. Recarga e intenta de nuevo.')
+    }
 
-  const updated = await prisma.reservation.findUniqueOrThrow({
-    where: { id: reservationId },
-    include: RESERVATION_INCLUDE,
+    const updated = await tx.reservation.findUniqueOrThrow({
+      where: { id: reservationId },
+      include: RESERVATION_INCLUDE,
+    })
+
+    // ---- Google Calendar push outbox (Phase 2) ----
+    // Only CANCELLED transitions need a gcal push from this code path. Other
+    // state changes (CONFIRMED, CHECKED_IN, COMPLETED, NO_SHOW) don't mutate
+    // the calendar event — the event was created at CREATE time and is
+    // updated via `updateReservation` when time/staff change.
+    let pushRowIds: string[] = []
+    if (targetStatus === 'CANCELLED') {
+      if (updated.classSessionId) {
+        // Attendee cancel: bump the class's roster event, don't emit per-attendee CANCEL.
+        const classSession = await tx.classSession.findUnique({
+          where: { id: updated.classSessionId },
+          select: { assignedStaffId: true },
+        })
+        if (classSession) {
+          const classTargets = await resolveClassSessionPushTargets(tx, {
+            venueId,
+            assignedStaffId: classSession.assignedStaffId ?? null,
+          })
+          if (classTargets.length > 0) {
+            await enqueuePush(tx, {
+              source: { kind: 'class', classSessionId: updated.classSessionId },
+              venueId,
+              operation: 'UPDATE_ROSTER',
+              targetConnectionIds: classTargets.map(t => t.id),
+              debounceUntil: new Date(Date.now() + 30_000),
+            })
+            // Roster rows are intentionally debounced — sweeper picks them up.
+          }
+        }
+      } else {
+        const targets = await resolveReservationPushTargets(tx, {
+          venueId,
+          assignedStaffId: updated.assignedStaffId ?? null,
+        })
+        if (targets.length > 0) {
+          // Collapse any earlier PENDING CREATE/UPDATE rows for this syncKey
+          // BEFORE enqueuing the CANCEL so the worker sees a clean state.
+          const now = new Date()
+          for (const target of targets) {
+            const syncKey = buildSyncKey({
+              kind: 'reservation',
+              reservationId: updated.id,
+              connectionId: target.id,
+            })
+            await collapseSupersededOps(tx, syncKey, now)
+          }
+          pushRowIds = await enqueuePush(tx, {
+            source: { kind: 'reservation', reservationId: updated.id },
+            venueId,
+            operation: 'CANCEL',
+            targetConnectionIds: targets.map(t => t.id),
+          })
+        }
+      }
+    }
+
+    return { updated, pushRowIds }
   })
+
+  if (pushRowIds.length > 0) {
+    publishPushNotification(pushRowIds).catch(err =>
+      logger.warn('gcal push publish failed after transitionReservation (sweeper will retry)', {
+        err,
+        rowIds: pushRowIds,
+        reservationId,
+      }),
+    )
+  }
 
   logger.info(`✅ [RESERVATION] ${reservation.confirmationCode} transitioned ${reservation.status} → ${targetStatus} by=${by ?? 'system'}`)
 
@@ -1004,19 +1117,54 @@ export async function updateReservation(
 
     logger.info(`✅ [RESERVATION] Updated ${reservation.confirmationCode} by=${updatedById}`)
 
-    return updated
+    // ---- Google Calendar push outbox (Phase 2) ----
+    // Re-resolve targets against the NEW state. If `assignedStaffId` changed,
+    // the new staff's calendar receives the UPDATE (which the worker promotes
+    // to CREATE if no mapping exists for that connection). Skip pushing for
+    // reservations attached to a ClassSession — the class itself is the
+    // pushed event; per-attendee row edits don't change the class event.
+    // TODO Phase 3: when assignedStaffId moves A → B, the event remains in
+    // staff A's calendar (stale mapping). Add a cleanup-orphan-mapping
+    // pass that emits CANCEL against the previous target.
+    let pushRowIds: string[] = []
+    if (!updated.classSessionId) {
+      const targets = await resolveReservationPushTargets(tx, {
+        venueId,
+        assignedStaffId: updated.assignedStaffId ?? null,
+      })
+      if (targets.length > 0) {
+        pushRowIds = await enqueuePush(tx, {
+          source: { kind: 'reservation', reservationId: updated.id },
+          venueId,
+          operation: 'UPDATE',
+          targetConnectionIds: targets.map(t => t.id),
+        })
+      }
+    }
+
+    return { updated, pushRowIds }
   })
+
+  if (updated.pushRowIds.length > 0) {
+    publishPushNotification(updated.pushRowIds).catch(err =>
+      logger.warn('gcal push publish failed after updateReservation (sweeper will retry)', {
+        err,
+        rowIds: updated.pushRowIds,
+        reservationId: updated.updated.id,
+      }),
+    )
+  }
 
   logAction({
     staffId: updatedById,
     venueId,
     action: 'RESERVATION_UPDATED',
     entity: 'Reservation',
-    entityId: updated.id,
-    data: { confirmationCode: updated.confirmationCode },
+    entityId: updated.updated.id,
+    data: { confirmationCode: updated.updated.confirmationCode },
   })
 
-  return updated
+  return updated.updated
 }
 
 // ---- Reschedule ----
@@ -1271,6 +1419,31 @@ export async function rescheduleClassReservation(args: {
     })
 
     logger.info(`🔄 [RESCHEDULE] ${updated.confirmationCode} ${reservation.classSessionId} → ${newClassSessionId} by=${rescheduledBy}`)
+
+    // ---- Google Calendar push outbox (Phase 2) ----
+    // Both the OLD class (attendee removed) and the NEW class (attendee added)
+    // need their roster events bumped. Debounce 30s so the worker coalesces.
+    for (const classSessionId of [reservation.classSessionId, newClassSessionId]) {
+      if (!classSessionId) continue
+      const cs = await tx.classSession.findUnique({
+        where: { id: classSessionId },
+        select: { assignedStaffId: true },
+      })
+      if (!cs) continue
+      const classTargets = await resolveClassSessionPushTargets(tx, {
+        venueId,
+        assignedStaffId: cs.assignedStaffId ?? null,
+      })
+      if (classTargets.length === 0) continue
+      await enqueuePush(tx, {
+        source: { kind: 'class', classSessionId },
+        venueId,
+        operation: 'UPDATE_ROSTER',
+        targetConnectionIds: classTargets.map(t => t.id),
+        debounceUntil: new Date(Date.now() + 30_000),
+      })
+    }
+
     logAction({
       staffId: rescheduledBy === 'CUSTOMER' ? undefined : rescheduledBy,
       venueId,
