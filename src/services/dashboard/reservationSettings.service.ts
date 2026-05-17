@@ -93,6 +93,19 @@ export interface ReservationConfig {
     requireEmail: boolean
     requireAccount: boolean
   }
+  /**
+   * Google Calendar Sync (Phase 2) — controls per-venue behavior when staff or
+   * the venue admin has connected a Google Calendar via /api/v1/google-calendar.
+   * These fields gate the push direction; pull-direction blocking is always on
+   * when a connection exists.
+   */
+  googleCalendar: {
+    pushEnabled: boolean
+    dualWrite: boolean
+    eventDetailLevel: 'MINIMAL' | 'SERVICE' | 'FULL'
+    removeCancelled: boolean
+    classRosterInDescription: boolean
+  }
   operatingHours: OperatingHours
 }
 
@@ -134,6 +147,12 @@ type ReservationSettingsUpdateInput = Partial<{
   appointmentUpfrontDefault: 'required' | 'at_venue' | 'optional'
   classUpfrontDefault: 'required' | 'at_venue' | 'optional'
   operatingHours: Prisma.InputJsonValue | typeof Prisma.DbNull
+  // Google Calendar (Phase 2) — flat legacy form
+  googleCalendarPushEnabled: boolean
+  googleCalendarDualWrite: boolean
+  googleCalendarEventDetailLevel: 'MINIMAL' | 'SERVICE' | 'FULL'
+  googleCalendarRemoveCancelled: boolean
+  googleCalendarClassRosterInDescription: boolean
   scheduling: Partial<ReservationConfig['scheduling']>
   deposits: Partial<ReservationConfig['deposits']>
   cancellation: Partial<ReservationConfig['cancellation']>
@@ -141,6 +160,7 @@ type ReservationSettingsUpdateInput = Partial<{
   reminders: Partial<ReservationConfig['reminders']>
   publicBooking: Partial<ReservationConfig['publicBooking']>
   payments: Partial<ReservationConfig['payments']>
+  googleCalendar: Partial<ReservationConfig['googleCalendar']>
 }>
 
 /**
@@ -208,6 +228,17 @@ export async function getReservationSettings(venueId: string): Promise<Reservati
       requirePhone: settings.requirePhone,
       requireEmail: settings.requireEmail,
       requireAccount: settings.requireAccount ?? false,
+    },
+    googleCalendar: {
+      pushEnabled: settings.googleCalendarPushEnabled,
+      dualWrite: settings.googleCalendarDualWrite,
+      eventDetailLevel: ((['MINIMAL', 'SERVICE', 'FULL'] as const).includes(
+        settings.googleCalendarEventDetailLevel as 'MINIMAL' | 'SERVICE' | 'FULL',
+      )
+        ? settings.googleCalendarEventDetailLevel
+        : 'FULL') as 'MINIMAL' | 'SERVICE' | 'FULL',
+      removeCancelled: settings.googleCalendarRemoveCancelled,
+      classRosterInDescription: settings.googleCalendarClassRosterInDescription,
     },
     operatingHours: settings.operatingHours ? (settings.operatingHours as unknown as OperatingHours) : getDefaultOperatingHours(),
   }
@@ -350,6 +381,24 @@ function normalizeReservationSettingsUpdate(data: ReservationSettingsUpdateInput
     if (data.payments.classUpfrontDefault !== undefined) normalized.classUpfrontDefault = data.payments.classUpfrontDefault
   }
 
+  // Google Calendar (Phase 2) — flat legacy keys
+  if (data.googleCalendarPushEnabled !== undefined) normalized.googleCalendarPushEnabled = data.googleCalendarPushEnabled
+  if (data.googleCalendarDualWrite !== undefined) normalized.googleCalendarDualWrite = data.googleCalendarDualWrite
+  if (data.googleCalendarEventDetailLevel !== undefined) normalized.googleCalendarEventDetailLevel = data.googleCalendarEventDetailLevel
+  if (data.googleCalendarRemoveCancelled !== undefined) normalized.googleCalendarRemoveCancelled = data.googleCalendarRemoveCancelled
+  if (data.googleCalendarClassRosterInDescription !== undefined)
+    normalized.googleCalendarClassRosterInDescription = data.googleCalendarClassRosterInDescription
+
+  // Nested form `googleCalendar: { ... }` — dashboard UI shape
+  if (data.googleCalendar) {
+    if (data.googleCalendar.pushEnabled !== undefined) normalized.googleCalendarPushEnabled = data.googleCalendar.pushEnabled
+    if (data.googleCalendar.dualWrite !== undefined) normalized.googleCalendarDualWrite = data.googleCalendar.dualWrite
+    if (data.googleCalendar.eventDetailLevel !== undefined) normalized.googleCalendarEventDetailLevel = data.googleCalendar.eventDetailLevel
+    if (data.googleCalendar.removeCancelled !== undefined) normalized.googleCalendarRemoveCancelled = data.googleCalendar.removeCancelled
+    if (data.googleCalendar.classRosterInDescription !== undefined)
+      normalized.googleCalendarClassRosterInDescription = data.googleCalendar.classRosterInDescription
+  }
+
   return normalized
 }
 
@@ -404,6 +453,13 @@ function getDefaultConfig(): ReservationConfig {
       requirePhone: true,
       requireEmail: false,
       requireAccount: false,
+    },
+    googleCalendar: {
+      pushEnabled: true,
+      dualWrite: false,
+      eventDetailLevel: 'FULL',
+      removeCancelled: false,
+      classRosterInDescription: true,
     },
     operatingHours: getDefaultOperatingHours(),
   }

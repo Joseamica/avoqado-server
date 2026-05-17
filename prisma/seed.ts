@@ -1046,6 +1046,9 @@ async function main() {
     // Cada venue tiene un status y kycStatus diferente para probar todos los flujos
     // Mirror real prod: Grupo Avoqado has {avoqado-full, avoqado-empty}.
     // PlayTelecom has 39 BAE venues in prod; seed a single representative one.
+    // Avoqado Wellness is a synthetic seed-only venue to exercise SERVICE/CLASS
+    // booking flows end-to-end (reservations, ClassSession, deposits, modifiers
+    // with durationMin). Detailed wellness setup happens AFTER the venue loop.
     const venuesConfig =
       orgIndex === 0
         ? [
@@ -1062,6 +1065,14 @@ async function main() {
               seedFullData: false,
               status: VenueStatus.ACTIVE,
               kycStatus: VerificationStatus.VERIFIED,
+            },
+            {
+              name: 'Avoqado Wellness',
+              slug: 'avoqado-wellness',
+              seedFullData: false, // restaurant-themed generator skipped; bespoke setup below
+              status: VenueStatus.ACTIVE,
+              kycStatus: VerificationStatus.VERIFIED,
+              venueType: VenueType.SPA,
             },
           ]
         : orgIndex === 1
@@ -5221,6 +5232,362 @@ async function main() {
   } else {
     console.log(`  ⚠️ avoqado-full venue not found, skipping commission seed`)
   }
+
+  // ==========================================
+  // PHASE 3: RESERVATIONS + AVOQADO WELLNESS VENUE
+  // - Avoqado Full: ReservationSettings + 15 mixed-status reservations
+  // - Avoqado Wellness: full bespoke setup (services + classes + retail + bookings)
+  // ==========================================
+  console.log(`\n📅 Phase 3: reservations + wellness venue...`)
+
+  const phase3MakeCode = () => `RES-${crypto.randomBytes(3).toString('hex').toUpperCase()}`
+
+  // ----- A. Avoqado Full: restaurant reservations -----
+  {
+    const venue = await prisma.venue.findUnique({ where: { slug: 'avoqado-full' } })
+    if (!venue) {
+      console.log('  ⚠️ avoqado-full venue not found, skipping its reservations.')
+    } else {
+      await prisma.reservationSettings.upsert({
+        where: { venueId: venue.id },
+        update: {},
+        create: {
+          venueId: venue.id,
+          slotIntervalMin: 30,
+          defaultDurationMin: 90,
+          autoConfirm: true,
+          maxAdvanceDays: 60,
+          appointmentUpfrontDefault: 'at_venue', // restaurant: walk-in pays at end
+          classUpfrontDefault: 'required',
+          publicBookingEnabled: true,
+          requirePhone: true,
+          waitlistEnabled: true,
+        },
+      })
+      const tables = await prisma.table.findMany({ where: { venueId: venue.id } })
+      const customers = await prisma.customer.findMany({ where: { venueId: venue.id }, take: 20 })
+      const reservationStatusPlan: Array<{ daysOffset: number; hour: number; status: any; channel: any }> = [
+        { daysOffset: -7, hour: 14, status: 'COMPLETED', channel: 'WEB' },
+        { daysOffset: -5, hour: 20, status: 'NO_SHOW', channel: 'PHONE' },
+        { daysOffset: -3, hour: 13, status: 'COMPLETED', channel: 'WEB' },
+        { daysOffset: -2, hour: 21, status: 'CANCELLED', channel: 'DASHBOARD' },
+        { daysOffset: -1, hour: 19, status: 'COMPLETED', channel: 'WHATSAPP' },
+        { daysOffset: 0, hour: 14, status: 'CHECKED_IN', channel: 'WALK_IN' },
+        { daysOffset: 1, hour: 13, status: 'CONFIRMED', channel: 'WEB' },
+        { daysOffset: 1, hour: 20, status: 'CONFIRMED', channel: 'PHONE' },
+        { daysOffset: 2, hour: 14, status: 'CONFIRMED', channel: 'WEB' },
+        { daysOffset: 3, hour: 21, status: 'PENDING', channel: 'WEB' },
+        { daysOffset: 5, hour: 19, status: 'CONFIRMED', channel: 'WHATSAPP' },
+        { daysOffset: 7, hour: 13, status: 'PENDING', channel: 'WEB' },
+        { daysOffset: 10, hour: 20, status: 'CONFIRMED', channel: 'DASHBOARD' },
+        { daysOffset: 14, hour: 14, status: 'PENDING', channel: 'WEB' },
+        { daysOffset: 21, hour: 21, status: 'CONFIRMED', channel: 'PHONE' },
+      ]
+      let createdRestaurantRes = 0
+      for (const [i, plan] of reservationStatusPlan.entries()) {
+        const startsAt = new Date()
+        startsAt.setDate(startsAt.getDate() + plan.daysOffset)
+        startsAt.setHours(plan.hour, 0, 0, 0)
+        const endsAt = new Date(startsAt.getTime() + 90 * 60 * 1000)
+        const customer = customers[i % Math.max(customers.length, 1)]
+        const table = tables[i % Math.max(tables.length, 1)]
+        await prisma.reservation.create({
+          data: {
+            venueId: venue.id,
+            confirmationCode: phase3MakeCode(),
+            status: plan.status,
+            channel: plan.channel,
+            startsAt,
+            endsAt,
+            duration: 90,
+            tableId: table?.id ?? null,
+            customerId: customer?.id ?? null,
+            guestName: customer ? `${customer.firstName} ${customer.lastName ?? ''}`.trim() : faker.person.fullName(),
+            guestPhone: customer?.phone ?? `+52555${faker.string.numeric(7)}`,
+            partySize: 2 + (i % 5),
+            confirmedAt: plan.status !== 'PENDING' ? new Date() : null,
+            checkedInAt: ['CHECKED_IN', 'COMPLETED'].includes(plan.status) ? startsAt : null,
+            completedAt: plan.status === 'COMPLETED' ? endsAt : null,
+            cancelledAt: plan.status === 'CANCELLED' ? new Date() : null,
+            noShowAt: plan.status === 'NO_SHOW' ? endsAt : null,
+          },
+        })
+        createdRestaurantRes++
+      }
+      console.log(`  - Avoqado Full: ReservationSettings + ${createdRestaurantRes} reservations.`)
+    }
+  }
+
+  // ----- B. Avoqado Wellness: full bespoke setup -----
+  {
+    const venue = await prisma.venue.findUnique({ where: { slug: 'avoqado-wellness' } })
+    if (!venue) {
+      console.log('  ⚠️ avoqado-wellness venue not found, skipping wellness setup.')
+    } else {
+      // Assigned staff: pick from Grupo Avoqado org staff
+      const orgStaff = await prisma.staffOrganization.findMany({
+        where: { organizationId: venue.organizationId, isActive: true },
+        include: { staff: true },
+        take: 3,
+      })
+      const enabledBy = orgStaff[0]?.staffId
+
+      // VenueSettings (minimal — only required fields use defaults)
+      await prisma.venueSettings.upsert({
+        where: { venueId: venue.id },
+        update: {},
+        create: { venueId: venue.id },
+      })
+
+      // ReservationSettings: appointments optional upfront, classes require prepay + deposit fixed
+      await prisma.reservationSettings.upsert({
+        where: { venueId: venue.id },
+        update: {},
+        create: {
+          venueId: venue.id,
+          slotIntervalMin: 30,
+          defaultDurationMin: 60,
+          autoConfirm: true,
+          maxAdvanceDays: 30,
+          depositMode: 'deposit',
+          depositFixedAmount: 200,
+          depositPaymentWindow: 30,
+          appointmentUpfrontDefault: 'optional',
+          classUpfrontDefault: 'required',
+          publicBookingEnabled: true,
+          requirePhone: true,
+          requireEmail: true,
+          waitlistEnabled: true,
+          allowCustomerCancel: true,
+          minHoursBeforeCancel: 12,
+        },
+      })
+
+      // Areas (cabinas para servicios + studio para clases)
+      const cabinas = await prisma.area.upsert({
+        where: { venueId_name: { venueId: venue.id, name: 'Cabinas' } },
+        update: {},
+        create: { venueId: venue.id, name: 'Cabinas', description: 'Cabinas de tratamientos individuales' },
+      })
+      const studio = await prisma.area.upsert({
+        where: { venueId_name: { venueId: venue.id, name: 'Studio' } },
+        update: {},
+        create: { venueId: venue.id, name: 'Studio', description: 'Sala para clases grupales' },
+      })
+
+      // Menu Categories
+      const catServicios = await prisma.menuCategory.upsert({
+        where: { venueId_slug: { venueId: venue.id, slug: 'servicios' } },
+        update: {},
+        create: { venueId: venue.id, name: 'Servicios', slug: 'servicios', displayOrder: 1, color: '#10b981' },
+      })
+      const catClases = await prisma.menuCategory.upsert({
+        where: { venueId_slug: { venueId: venue.id, slug: 'clases' } },
+        update: {},
+        create: { venueId: venue.id, name: 'Clases', slug: 'clases', displayOrder: 2, color: '#3b82f6' },
+      })
+      const catRetail = await prisma.menuCategory.upsert({
+        where: { venueId_slug: { venueId: venue.id, slug: 'retail' } },
+        update: {},
+        create: { venueId: venue.id, name: 'Retail', slug: 'retail', displayOrder: 3, color: '#f97316' },
+      })
+
+      // Products
+      const productSpecs = [
+        // Services (APPOINTMENTS_SERVICE)
+        { sku: 'wel-srv-masaje-60', name: 'Masaje relajante 60min', categoryId: catServicios.id, type: ProductType.APPOINTMENTS_SERVICE, price: 800, duration: 60 },
+        { sku: 'wel-srv-facial-45', name: 'Facial limpieza profunda 45min', categoryId: catServicios.id, type: ProductType.APPOINTMENTS_SERVICE, price: 600, duration: 45 },
+        { sku: 'wel-srv-nutri-30', name: 'Consulta nutrición 30min', categoryId: catServicios.id, type: ProductType.APPOINTMENTS_SERVICE, price: 500, duration: 30 },
+        // Classes (CLASS)
+        { sku: 'wel-cls-yoga-60', name: 'Yoga (clase grupal)', categoryId: catClases.id, type: ProductType.CLASS, price: 300, duration: 60, maxParticipants: 12 },
+        { sku: 'wel-cls-pilates-60', name: 'Pilates (clase grupal)', categoryId: catClases.id, type: ProductType.CLASS, price: 350, duration: 60, maxParticipants: 10 },
+        { sku: 'wel-cls-medit-45', name: 'Meditación guiada', categoryId: catClases.id, type: ProductType.CLASS, price: 200, duration: 45, maxParticipants: 15 },
+        // Retail (REGULAR)
+        { sku: 'wel-ret-crema', name: 'Crema corporal hidratante', categoryId: catRetail.id, type: ProductType.REGULAR, price: 350 },
+        { sku: 'wel-ret-aceite', name: 'Aceite esencial lavanda', categoryId: catRetail.id, type: ProductType.REGULAR, price: 280 },
+        { sku: 'wel-ret-mat', name: 'Mat de yoga premium', categoryId: catRetail.id, type: ProductType.REGULAR, price: 550 },
+      ]
+      const products: Array<{ id: string; name: string; type: ProductType; price: any; duration: number | null; maxParticipants: number | null }> = []
+      for (const spec of productSpecs) {
+        const p = await prisma.product.upsert({
+          where: { venueId_sku: { venueId: venue.id, sku: spec.sku } },
+          update: {},
+          create: {
+            venueId: venue.id,
+            sku: spec.sku,
+            name: spec.name,
+            categoryId: spec.categoryId,
+            type: spec.type,
+            price: spec.price,
+            duration: 'duration' in spec ? spec.duration : null,
+            maxParticipants: 'maxParticipants' in spec ? spec.maxParticipants : null,
+          },
+        })
+        products.push({ id: p.id, name: p.name, type: p.type, price: p.price, duration: p.duration, maxParticipants: p.maxParticipants })
+      }
+
+      const services = products.filter(p => p.type === ProductType.APPOINTMENTS_SERVICE)
+      const classes = products.filter(p => p.type === ProductType.CLASS)
+
+      // Modifier group "Add-ons (extiende duración)" for services
+      const addonGroup = await prisma.modifierGroup.create({
+        data: {
+          venueId: venue.id,
+          name: 'Add-ons (extiende duración)',
+          description: 'Tratamientos adicionales que extienden la duración del servicio',
+          allowMultiple: true,
+          minSelections: 0,
+          maxSelections: 3,
+          displayOrder: 1,
+        },
+      })
+      const addonModifiers = await Promise.all([
+        prisma.modifier.create({ data: { groupId: addonGroup.id, name: 'Exfoliación corporal', price: 200, durationMin: 20 } }),
+        prisma.modifier.create({ data: { groupId: addonGroup.id, name: 'Masaje en pies', price: 150, durationMin: 15 } }),
+        prisma.modifier.create({ data: { groupId: addonGroup.id, name: 'Aromaterapia', price: 80, durationMin: 5 } }),
+      ])
+      // Attach add-ons to services
+      await Promise.all(
+        services.map(s => prisma.productModifierGroup.create({ data: { productId: s.id, groupId: addonGroup.id } })),
+      )
+
+      // ClassSessions: 4 weeks recurring schedule (Yoga Mon/Wed/Fri, Pilates Tue/Thu, Meditación Sat)
+      const sessionPlan: Array<{ productId: string; dayOfWeek: number; hour: number; capacity: number }> = []
+      const [yoga, pilates, meditacion] = classes
+      for (let week = 0; week < 4; week++) {
+        if (yoga) {
+          for (const day of [1, 3, 5]) sessionPlan.push({ productId: yoga.id, dayOfWeek: week * 7 + day, hour: 8, capacity: yoga.maxParticipants ?? 12 })
+        }
+        if (pilates) {
+          for (const day of [2, 4]) sessionPlan.push({ productId: pilates.id, dayOfWeek: week * 7 + day, hour: 18, capacity: pilates.maxParticipants ?? 10 })
+        }
+        if (meditacion) {
+          sessionPlan.push({ productId: meditacion.id, dayOfWeek: week * 7 + 6, hour: 9, capacity: meditacion.maxParticipants ?? 15 })
+        }
+      }
+      const today = new Date()
+      today.setHours(0, 0, 0, 0)
+      const startOfWeek = new Date(today)
+      startOfWeek.setDate(today.getDate() - today.getDay() + 1) // Monday this week
+      const createdSessions: Array<{ id: string; productId: string; startsAt: Date; capacity: number }> = []
+      for (const plan of sessionPlan) {
+        const product = products.find(p => p.id === plan.productId)!
+        const startsAt = new Date(startOfWeek)
+        startsAt.setDate(startOfWeek.getDate() + plan.dayOfWeek - 1)
+        startsAt.setHours(plan.hour, 0, 0, 0)
+        const endsAt = new Date(startsAt.getTime() + (product.duration ?? 60) * 60 * 1000)
+        const session = await prisma.classSession.create({
+          data: {
+            venueId: venue.id,
+            productId: product.id,
+            startsAt,
+            endsAt,
+            duration: product.duration ?? 60,
+            capacity: plan.capacity,
+            assignedStaffId: orgStaff[1]?.staffId ?? null,
+            status: startsAt < new Date() ? 'COMPLETED' : 'SCHEDULED',
+            createdById: enabledBy ?? null,
+          },
+        })
+        createdSessions.push({ id: session.id, productId: product.id, startsAt, capacity: plan.capacity })
+      }
+
+      // Reservations: 15 mixed (services + class signups), realistic statuses
+      const wellnessCustomers = await prisma.customer.findMany({ where: { venueId: { in: (await prisma.venue.findMany({ where: { organizationId: venue.organizationId }, select: { id: true } })).map(v => v.id) } }, take: 30 })
+      let createdWellnessRes = 0
+
+      // 8 service reservations
+      for (let i = 0; i < 8; i++) {
+        const product = services[i % services.length]
+        if (!product) break
+        const daysOffset = [-5, -2, 0, 1, 2, 3, 7, 14][i]
+        const startsAt = new Date()
+        startsAt.setDate(startsAt.getDate() + daysOffset)
+        startsAt.setHours(10 + (i % 6), 0, 0, 0)
+        const duration = product.duration ?? 60
+        const endsAt = new Date(startsAt.getTime() + duration * 60 * 1000)
+        const status = (['COMPLETED', 'COMPLETED', 'CHECKED_IN', 'CONFIRMED', 'CONFIRMED', 'PENDING', 'CONFIRMED', 'CONFIRMED'] as const)[i]
+        const customer = wellnessCustomers[i % Math.max(wellnessCustomers.length, 1)]
+        const reservation = await prisma.reservation.create({
+          data: {
+            venueId: venue.id,
+            confirmationCode: phase3MakeCode(),
+            status,
+            channel: (['WEB', 'PHONE', 'WALK_IN', 'WEB', 'WHATSAPP', 'WEB', 'DASHBOARD', 'WEB'] as const)[i],
+            startsAt,
+            endsAt,
+            duration,
+            productId: product.id,
+            assignedStaffId: orgStaff[(i % orgStaff.length)]?.staffId ?? null,
+            customerId: customer?.id ?? null,
+            guestName: customer ? `${customer.firstName} ${customer.lastName ?? ''}`.trim() : faker.person.fullName(),
+            guestPhone: customer?.phone ?? `+52555${faker.string.numeric(7)}`,
+            guestEmail: customer?.email ?? faker.internet.email(),
+            partySize: 1,
+            depositAmount: i % 2 === 0 ? 200 : null,
+            depositStatus: i % 2 === 0 ? 'PAID' : null,
+            depositPaidAt: i % 2 === 0 ? new Date() : null,
+            confirmedAt: status !== 'PENDING' ? new Date() : null,
+            checkedInAt: ['CHECKED_IN', 'COMPLETED'].includes(status) ? startsAt : null,
+            completedAt: status === 'COMPLETED' ? endsAt : null,
+          },
+        })
+        // Attach a modifier to half of the service reservations (exercise ReservationModifier + durationMin)
+        if (i % 2 === 0 && addonModifiers[0]) {
+          const addon = addonModifiers[i % addonModifiers.length]
+          await prisma.reservationModifier.create({
+            data: {
+              reservationId: reservation.id,
+              productId: product.id,
+              modifierId: addon.id,
+              name: addon.name,
+              quantity: 1,
+              price: addon.price,
+            },
+          })
+        }
+        createdWellnessRes++
+      }
+
+      // 7 class reservations (sign-ups for upcoming sessions)
+      const upcomingSessions = createdSessions.filter(s => s.startsAt > new Date()).slice(0, 7)
+      for (const [i, session] of upcomingSessions.entries()) {
+        const product = products.find(p => p.id === session.productId)!
+        const customer = wellnessCustomers[(i + 10) % Math.max(wellnessCustomers.length, 1)]
+        await prisma.reservation.create({
+          data: {
+            venueId: venue.id,
+            confirmationCode: phase3MakeCode(),
+            status: 'CONFIRMED',
+            channel: (['WEB', 'WEB', 'APP', 'WEB', 'PHONE', 'WEB', 'WEB'] as const)[i] ?? 'WEB',
+            startsAt: session.startsAt,
+            endsAt: new Date(session.startsAt.getTime() + (product.duration ?? 60) * 60 * 1000),
+            duration: product.duration ?? 60,
+            productId: product.id,
+            classSessionId: session.id,
+            customerId: customer?.id ?? null,
+            guestName: customer ? `${customer.firstName} ${customer.lastName ?? ''}`.trim() : faker.person.fullName(),
+            guestPhone: customer?.phone ?? `+52555${faker.string.numeric(7)}`,
+            guestEmail: customer?.email ?? faker.internet.email(),
+            partySize: 1,
+            depositAmount: product.price,
+            depositStatus: 'PAID',
+            depositPaidAt: new Date(),
+            confirmedAt: new Date(),
+          },
+        })
+        createdWellnessRes++
+      }
+
+      console.log(
+        `  - Avoqado Wellness: ${products.length} products (services/classes/retail), ` +
+        `${createdSessions.length} class sessions, ${createdWellnessRes} reservations, ` +
+        `${addonModifiers.length} duration-add-on modifiers.`,
+      )
+    }
+  }
+
+  console.log(`📅 Phase 3 complete.\n`)
 
   // ==========================================
   // SEED SUMMARY REPORT
