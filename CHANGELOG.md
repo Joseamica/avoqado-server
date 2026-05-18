@@ -22,6 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **Backend schema**: `AngelPayUserAccount` model + `AngelPayAccountStatus` enum (`PENDING_PIN | ACTIVE | PIN_ROTATION_REQUIRED | SUSPENDED | DELETED`) for per-venue AngelPay credential storage. Design choices: `pinEncrypted` is nullable (null = no PIN provisioned yet, matches `PENDING_PIN` status); FK to `Venue` uses `onDelete: Restrict` (cascade would silently drop the AngelPay credential trail; operator must explicitly transition status to `DELETED` first); no `@@index([venueId])` (redundant with `@unique` constraint). First schema change for the AngelPay SDK 1.0.5 multi-merchant migration (D3 lifecycle). Migration: `20260518010202_add_angelpay_user_account`.
 - **B4Bit minimum amount validation**: `initiateCryptoPayment` now rejects orders below $20 MXN (2000 centavos) with a clear error `El monto mínimo para pagar con cripto es $20 MXN`. Prevents confusing validation errors from B4Bit's API when merchants try to charge small amounts
 
 ### Fixed
