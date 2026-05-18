@@ -25,6 +25,7 @@ import * as timeEntryController from '../controllers/tpv/time-entry.tpv.controll
 import * as tpvMessageController from '../controllers/tpv/tpv-message.tpv.controller'
 import * as trainingController from '../controllers/tpv/training.tpv.controller'
 import * as venueController from '../controllers/tpv/venue.tpv.controller'
+import * as angelpayValidationController from '../controllers/tpv/angelpayValidation.tpv.controller'
 import AppError from '../errors/AppError'
 import { DEFAULT_PERMISSIONS, expandWildcards, resolvePermissions } from '../lib/permissions'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
@@ -6771,6 +6772,36 @@ router.post(
   simCustodyIdempotency({ required: false }),
   checkPermission('tpv-sim-custody:reject'),
   rejectSim,
+)
+
+// ==========================================
+// ANGELPAY VALIDATION REPORTS (Task 14, spec §4.6 / §8.2)
+// Closes backend Phase 1 of the AngelPay multi-merchant migration.
+// Both endpoints are terminal-authenticated via the standard JWT middleware
+// (req.authContext.terminalSerialNumber). The report-validation endpoint
+// mutates AngelPayUserAccount.lastValidatedAt / lastValidationErr /
+// externalUserId; report-merchant-switch is audit-only (structured logs).
+// ==========================================
+router.post(
+  '/angelpay/report-validation',
+  authenticateTokenMiddleware,
+  angelpayValidationController.reportAngelPayValidation,
+)
+
+router.post(
+  '/angelpay/report-merchant-switch',
+  authenticateTokenMiddleware,
+  angelpayValidationController.reportAngelPayMerchantSwitch,
+)
+
+// Option B workaround: TPV reports merchants from AngelPaySDK.getUserMerchants()
+// after successful auth. Backend upserts MerchantAccount rows with active=false
+// (PENDING_REVIEW) for admin approval in the dashboard. See controller for full
+// design notes and `upsertDiscoveredAngelPayMerchants` for upsert semantics.
+router.post(
+  '/angelpay/report-discovered-merchants',
+  authenticateTokenMiddleware,
+  angelpayValidationController.reportDiscoveredMerchants,
 )
 
 export default router

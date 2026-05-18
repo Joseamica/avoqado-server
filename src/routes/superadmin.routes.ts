@@ -22,6 +22,7 @@ import partnerKeyRoutes from './superadmin/partnerKey.routes'
 import aggregatorRoutes from './superadmin/aggregator.routes'
 import venueCommissionRoutes from './superadmin/venueCommission.routes'
 import stripeConnectOffboardingRoutes from './superadmin/stripeConnectOffboarding.routes'
+import angelpayUserAccountRoutes from './superadmin/angelpayUserAccount.routes'
 // NOTE: appUpdateRoutes are mounted EARLY in app.ts with 100MB body limit for APK uploads
 // Do NOT mount here to avoid duplicate route registration
 
@@ -49,6 +50,9 @@ router.use('/partner-keys', partnerKeyRoutes)
 router.use('/aggregators', aggregatorRoutes)
 router.use('/venue-commissions', venueCommissionRoutes)
 router.use('/stripe-connect', stripeConnectOffboardingRoutes)
+// AngelPay user accounts — mounted at root because endpoints span
+// /venues/:venueId/angelpay-account AND /angelpay-accounts/:id/...
+router.use('/', angelpayUserAccountRoutes)
 // app-updates route is mounted in app.ts with 100MB body limit (not here)
 
 export default router

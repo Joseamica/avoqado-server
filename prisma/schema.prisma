@@ -3202,6 +3202,13 @@ model MerchantAccount {
   settlementConfigs     SettlementConfiguration[]
   payments              Payment[] // ⭐ Track all payments processed by this merchant account
 
+  // 🆕 AngelPay display fields (2026-05-17)
+  // Optional caches for AngelPay MerchantOption display data. Source of truth
+  // remains AngelPay's backend (SDK.getUserMerchants()). The actual AngelPay
+  // merchant ID is stored in the existing `externalMerchantId` column.
+  angelpayAffiliation  String?
+  angelpayMerchantName String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

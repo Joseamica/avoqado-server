@@ -7,6 +7,8 @@ import { blumonApiService } from '../../services/blumon/blumonApi.service'
 import type { BlumonEnvironment } from '../../services/blumon/types'
 import { createBlumonTpvService } from '../../services/tpv/blumon-tpv.service'
 import prisma from '@/utils/prismaClient'
+import { assertMerchantTerminalCompatible } from '@/lib/providerDeviceCompatibility'
+import { IncompatibleDeviceError } from '@/errors/AppError'
 
 /**
  * MerchantAccount Controller
@@ -111,6 +113,12 @@ export async function createMerchantAccount(req: Request, res: Response, next: N
       displayOrder,
       credentials,
       providerConfig,
+      // 🆕 Task 17: optional venue scope. When supplied, unlocks the Task 10
+      // device-compatibility guard (`assertVenueHasCompatibleTerminal`) and
+      // the AngelPay-specific branch in the service (requires an ACTIVE
+      // `AngelPayUserAccount`). Blumon callers that omit this keep legacy
+      // behavior — the service treats `venueId` as optional throughout.
+      venueId,
       // Blumon-specific fields for manual account creation
       blumonSerialNumber,
       blumonEnvironment,
@@ -150,6 +158,11 @@ export async function createMerchantAccount(req: Request, res: Response, next: N
       displayOrder,
       credentials: isBlumonPendingAccount ? undefined : credentials,
       providerConfig,
+      // 🆕 Task 17: forward venueId so the service-level guard added in
+      // Task 10 (device compatibility + ANGELPAY ACTIVE-account check) can
+      // actually fire. `undefined` for callers that don't pass it keeps the
+      // pre-Task-17 path byte-for-byte identical.
+      venueId,
       // Include Blumon fields if provided
       blumonSerialNumber,
       blumonEnvironment,
@@ -739,6 +752,24 @@ export async function autoFetchBlumonCredentials(req: Request, res: Response, ne
       for (const terminal of terminalsWithSerial) {
         // Check if merchant is not already attached
         if (!terminal.assignedMerchantIds.includes(merchantAccount.id)) {
+          // Provider ↔ device-brand compatibility guard (Task 11 / validation
+          // point #2). Auto-attach paths SKIP incompatible terminals instead of
+          // failing the whole flow — a stale PAX terminal with a matching serial
+          // shouldn't block creating an ANGELPAY merchant account.
+          try {
+            await assertMerchantTerminalCompatible(terminal.id, merchantAccount.id)
+          } catch (err) {
+            if (err instanceof IncompatibleDeviceError) {
+              logger.warn('[Blumon Auto-Fetch] Skipping incompatible terminal', {
+                terminalId: terminal.id,
+                merchantAccountId: merchantAccount.id,
+                reason: err.message,
+              })
+              continue
+            }
+            throw err
+          }
+
           await prisma.terminal.update({
             where: { id: terminal.id },
             data: {
@@ -1240,6 +1271,22 @@ export async function batchAutoFetchBlumonCredentials(req: Request, res: Respons
             let attachedCount = 0
             for (const term of terminalsWithSerial) {
               if (!term.assignedMerchantIds.includes(merchantAccount.id)) {
+                // Provider ↔ device-brand compatibility guard (Task 11 / validation
+                // point #2). Skip incompatible terminals in this batch auto-attach.
+                try {
+                  await assertMerchantTerminalCompatible(term.id, merchantAccount.id)
+                } catch (err) {
+                  if (err instanceof IncompatibleDeviceError) {
+                    logger.warn('[Blumon Batch Auto-Fetch] Skipping incompatible terminal', {
+                      terminalId: term.id,
+                      merchantAccountId: merchantAccount.id,
+                      reason: err.message,
+                    })
+                    continue
+                  }
+                  throw err
+                }
+
                 await prisma.terminal.update({
                   where: { id: term.id },
                   data: {
@@ -1407,6 +1454,11 @@ export async function batchAssignTerminals(req: Request, res: Response, next: Ne
           alreadyAttached++
           continue
         }
+
+        // Provider ↔ device-brand compatibility guard (Task 11 / validation
+        // point #2). Explicit operator-initiated batch assign — surface the
+        // incompatibility as a per-terminal error so the UI can show it.
+        await assertMerchantTerminalCompatible(terminalId, merchantAccountId)
 
         await prisma.terminal.update({
           where: { id: terminalId },
@@ -1759,6 +1811,22 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
 
     for (const terminal of terminalsWithSerial) {
       if (!terminal.assignedMerchantIds.includes(merchantAccountId)) {
+        // Provider ↔ device-brand compatibility guard (Task 11 / validation
+        // point #2). Auto-attach: skip incompatible terminals silently.
+        try {
+          await assertMerchantTerminalCompatible(terminal.id, merchantAccountId)
+        } catch (err) {
+          if (err instanceof IncompatibleDeviceError) {
+            logger.warn('[Full Setup] Skipping incompatible auto-attach terminal', {
+              terminalId: terminal.id,
+              merchantAccountId,
+              reason: err.message,
+            })
+            continue
+          }
+          throw err
+        }
+
         await prisma.terminal.update({
           where: { id: terminal.id },
           data: { assignedMerchantIds: { push: merchantAccountId } },
@@ -1776,6 +1844,10 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
           select: { id: true, assignedMerchantIds: true },
         })
         if (terminal && !terminal.assignedMerchantIds.includes(merchantAccountId)) {
+          // Provider ↔ device-brand compatibility guard (Task 11 / validation
+          // point #2). Explicit operator-selected terminal — fail hard.
+          await assertMerchantTerminalCompatible(terminalId, merchantAccountId)
+
           await prisma.terminal.update({
             where: { id: terminalId },
             data: { assignedMerchantIds: { push: merchantAccountId } },

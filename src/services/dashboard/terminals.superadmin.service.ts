@@ -1,10 +1,11 @@
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, IncompatibleDeviceError, NotFoundError, TerminalBrandChangeBlocked } from '../../errors/AppError'
 import { generateActivationCode as generateActivationCodeUtil } from './terminal-activation.service'
 import { notifyAffectedTerminals } from '../superadmin/merchantAccount.service'
 import { tpvCommandQueueService } from '../tpv/command-queue.service'
 import { updateTpvSettings, type TpvSettings } from './tpv.dashboard.service'
+import { assertMerchantsTerminalCompatible, isProviderCompatibleWithBrand } from '../../lib/providerDeviceCompatibility'
 
 /**
  * Get All Terminals (Cross-Venue)
@@ -142,6 +143,24 @@ export async function createTerminal(data: {
 
     if (merchantCount !== data.assignedMerchantIds.length) {
       throw new BadRequestError('One or more merchant accounts not found')
+    }
+
+    // Provider ↔ device-brand compatibility guard (Task 11 / validation point #2).
+    // For a fresh terminal we don't have an id yet, so we inline the check
+    // against the prospective `data.brand` (may be undefined → permissive,
+    // re-enforced on activation per the spec).
+    if (data.brand) {
+      const merchants = await prisma.merchantAccount.findMany({
+        where: { id: { in: data.assignedMerchantIds } },
+        select: { id: true, provider: { select: { code: true } } },
+      })
+      const incompatible = merchants.filter(m => !isProviderCompatibleWithBrand(m.provider.code, data.brand!))
+      if (incompatible.length > 0) {
+        const summary = incompatible.map(m => `${m.id} (${m.provider.code})`).join(', ')
+        throw new IncompatibleDeviceError(
+          `Cannot assign incompatible merchants to ${data.brand} terminal: ${summary}`,
+        )
+      }
     }
   }
 
@@ -282,6 +301,22 @@ export async function updateTerminal(
     assignedMerchantIds?: string[]
     brand?: string
     model?: string
+    /**
+     * Task 12 / validation point #3: when changing `brand`, if any currently
+     * assigned merchant becomes incompatible, the service returns a warning
+     * payload (no mutation) by default. Pass `forceUnassign: true` after
+     * operator confirmation to atomically (a) change the brand and (b)
+     * remove the incompatible merchants from `assignedMerchantIds`.
+     */
+    forceUnassign?: boolean
+    /**
+     * Task 54: move terminal to a different venue. When set and differs from
+     * the current venueId, the service (a) verifies the target venue exists,
+     * (b) clears `assignedMerchantIds` (cross-tenant assignments are invalid),
+     * and (c) writes the new venueId. The TPV picks up the new venue context
+     * on its next `/tpv/terminals/:serial/config` poll (~30s).
+     */
+    venueId?: string
   },
 ) {
   logger.info(`Updating terminal ${terminalId}:`, data)
@@ -293,6 +328,93 @@ export async function updateTerminal(
 
   if (!terminal) {
     throw new NotFoundError('Terminal not found')
+  }
+
+  // ---------------------------------------------------------------------------
+  // Task 54: venue-move guard.
+  // ---------------------------------------------------------------------------
+  // If the caller wants to move the terminal to a different venue, validate
+  // the target venue and clear merchant assignments (a MerchantAccount lives
+  // in the global pool but is wired to a venue via VenuePaymentConfig — keeping
+  // assignedMerchantIds across a venue move would leak cross-tenant routing).
+  let venueChanged = false
+  if (data.venueId && data.venueId !== terminal.venueId) {
+    const targetVenue = await prisma.venue.findUnique({ where: { id: data.venueId } })
+    if (!targetVenue) {
+      throw new NotFoundError(`Target venue ${data.venueId} not found`)
+    }
+    venueChanged = true
+    logger.info(
+      `Moving terminal ${terminalId} from venue ${terminal.venueId} → ${data.venueId} (clearing assignedMerchantIds)`,
+    )
+  }
+
+  // ---------------------------------------------------------------------------
+  // Validation point #3 (Task 12 / spec §3.1 point 2c, §4.4): brand-change guard
+  // ---------------------------------------------------------------------------
+  // When `brand` changes, scan currently-assigned merchants. If any become
+  // incompatible with the NEW brand, return a warning payload (no mutation)
+  // unless `forceUnassign: true` — in which case prune them atomically.
+  let prunedAssignedMerchantIds: string[] | undefined
+  if (data.brand && data.brand !== terminal.brand) {
+    const assignedIds = terminal.assignedMerchantIds ?? []
+    if (assignedIds.length > 0) {
+      const assignedMerchants = await prisma.merchantAccount.findMany({
+        where: { id: { in: assignedIds } },
+        select: {
+          id: true,
+          displayName: true,
+          externalMerchantId: true,
+          provider: { select: { code: true } },
+        },
+      })
+
+      const incompatible = assignedMerchants.filter(
+        m => !isProviderCompatibleWithBrand(m.provider.code, data.brand!),
+      )
+
+      if (incompatible.length > 0) {
+        if (!data.forceUnassign) {
+          logger.warn(
+            `Brand change for terminal ${terminalId} (${terminal.brand} → ${data.brand}) blocked: ${incompatible.length} incompatible merchant(s). Throwing TerminalBrandChangeBlocked.`,
+          )
+          throw new TerminalBrandChangeBlocked(
+            incompatible.map(m => ({
+              id: m.id,
+              name: m.displayName ?? m.externalMerchantId,
+              code: m.provider.code,
+            })),
+          )
+        }
+
+        // forceUnassign:true — atomic brand change + assigned list pruning
+        const incompatibleIds = new Set(incompatible.map(m => m.id))
+        prunedAssignedMerchantIds = assignedIds.filter(id => !incompatibleIds.has(id))
+        logger.info(
+          `Brand change for terminal ${terminalId} confirmed with forceUnassign — pruning ${incompatible.length} incompatible merchant(s): ${[...incompatibleIds].join(', ')}`,
+        )
+
+        return await prisma.$transaction(async tx => {
+          const updated = await tx.terminal.update({
+            where: { id: terminalId },
+            data: {
+              ...(data.name && { name: data.name }),
+              ...(data.status && { status: data.status as any }),
+              brand: data.brand,
+              assignedMerchantIds: prunedAssignedMerchantIds!,
+              ...(data.model && { model: data.model }),
+            },
+            include: {
+              venue: { select: { id: true, name: true, slug: true } },
+            },
+          })
+          logger.info(
+            `Terminal ${terminalId} brand changed atomically with merchant pruning`,
+          )
+          return updated
+        })
+      }
+    }
   }
 
   // Validate merchant accounts if being updated
@@ -317,6 +439,12 @@ export async function updateTerminal(
       logger.error('Missing merchant IDs:', missingIds)
       throw new BadRequestError(`Merchant accounts not found: ${missingIds.join(', ')}`)
     }
+
+    // Provider ↔ device-brand compatibility guard (Task 11 / validation point #2).
+    // Rejects e.g. ANGELPAY merchants → PAX terminals, BLUMON merchants → NEXGO.
+    // Permissive on unconstrained providers (STRIPE/MENTA) and null brand
+    // (PENDING_ACTIVATION terminals).
+    await assertMerchantsTerminalCompatible(terminalId, data.assignedMerchantIds)
   }
 
   // Update terminal
@@ -325,7 +453,14 @@ export async function updateTerminal(
     data: {
       ...(data.name && { name: data.name }),
       ...(data.status && { status: data.status as any }),
-      ...(data.assignedMerchantIds !== undefined && { assignedMerchantIds: data.assignedMerchantIds }),
+      // Task 54: clear assignedMerchantIds on venue change (cross-tenant
+      // assignments are never valid). When venue isn't changing, defer to
+      // explicit `assignedMerchantIds` from the caller.
+      ...(venueChanged
+        ? { venueId: data.venueId!, assignedMerchantIds: [] }
+        : data.assignedMerchantIds !== undefined
+          ? { assignedMerchantIds: data.assignedMerchantIds }
+          : {}),
       ...(data.brand && { brand: data.brand }),
       ...(data.model && { model: data.model }),
     },

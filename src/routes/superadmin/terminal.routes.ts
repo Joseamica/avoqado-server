@@ -48,6 +48,17 @@ const updateTerminalSchema = z.object({
     assignedMerchantIds: z.array(z.string()).optional(),
     brand: z.string().optional(),
     model: z.string().optional(),
+    // Task 12 / validation point #3: operator confirmation flag for brand-change
+    // pruning of incompatible merchants. Default false → service returns a
+    // warning envelope listing the incompatible merchants instead of mutating.
+    forceUnassign: z.boolean().optional(),
+    // Task 54: move a terminal to a different venue. Used by the "Anexar
+    // terminal existente" flow in the AngelPay wizard (a NEXGO terminal
+    // physically present at venue X has to be re-registered to venue Y so it
+    // pulls Y's `/tpv/terminals/:serial/config` payload on next heartbeat).
+    // Service-level guard: assigned merchants are cleared on venue move
+    // (cross-tenant assignments are never valid).
+    venueId: z.string().cuid('Invalid venue ID').optional(),
   }),
 })
 

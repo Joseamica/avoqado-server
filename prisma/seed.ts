@@ -702,19 +702,24 @@ async function main() {
 
   const angelpayProvider = await prisma.paymentProvider.upsert({
     where: { code: 'ANGELPAY' },
-    update: {},
+    update: {
+      name: 'Angel Pay',
+      countryCode: ['MX'],
+    },
     create: {
       code: 'ANGELPAY',
-      name: 'AngelPay (Nexgo)',
+      name: 'Angel Pay',
       type: ProviderType.PAYMENT_PROCESSOR,
       countryCode: ['MX'],
       active: true,
       configSchema: {
-        required: ['merchantId', 'environment'],
+        type: 'object',
+        // externalMerchantId carries the AngelPay merchant ID (numeric string from MerchantOption.id).
+        // It's already required + unique-per-provider on MerchantAccount — no need to require it here again.
+        required: [],
         properties: {
-          merchantId: { type: 'string', description: 'AngelPay merchant identifier' },
-          environment: { type: 'string', enum: ['SANDBOX', 'PRODUCTION'], description: 'AngelPay environment' },
-          terminalId: { type: 'string', description: 'Nexgo terminal identifier' },
+          angelpayAffiliation: { type: 'string', description: 'Display affiliation number (from MerchantOption.afiliationNumber)' },
+          angelpayMerchantName: { type: 'string', description: 'Display merchant name (from MerchantOption.name)' },
         },
       },
     },
