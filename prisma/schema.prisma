@@ -405,6 +405,9 @@ model Venue {
   // Google Calendar Sync (Phase 2 — push)
   calendarSyncOutbox CalendarSyncOutbox[]
 
+  // AngelPay multi-merchant: per-venue user account credentials (D3)
+  angelpayUserAccount AngelPayUserAccount?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -3199,6 +3202,13 @@ model MerchantAccount {
   settlementConfigs     SettlementConfiguration[]
   payments              Payment[] // ⭐ Track all payments processed by this merchant account
 
+  // 🆕 AngelPay display fields (2026-05-17)
+  // Optional caches for AngelPay MerchantOption display data. Source of truth
+  // remains AngelPay's backend (SDK.getUserMerchants()). The actual AngelPay
+  // merchant ID is stored in the existing `externalMerchantId` column.
+  angelpayAffiliation  String?
+  angelpayMerchantName String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -3206,6 +3216,47 @@ model MerchantAccount {
   @@index([providerId])
   @@index([active])
   @@index([displayOrder])
+}
+
+// ==========================================
+// NOTE: ANGELPAY USER ACCOUNTS (D3 — per-venue lifecycle)
+// ==========================================
+
+/// Per-venue AngelPay user credentials (email + encrypted PIN) for SDK 1.0.5+.
+/// Separate from MerchantAccount: AngelPay binds a single user to a venue,
+/// while MerchantAccount represents per-tender provider routing.
+/// See specs/2026-05-14-angelpay-sdk-1.0.5-migration-design.md §3.2, §4.1, §18.2.
+enum AngelPayAccountStatus {
+  PENDING_PIN
+  ACTIVE
+  PIN_ROTATION_REQUIRED
+  SUSPENDED
+  DELETED
+}
+
+model AngelPayUserAccount {
+  id      String @id @default(cuid())
+  venueId String @unique
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Restrict)
+
+  email        String
+  pinEncrypted Json? // nullable. null = no PIN provisioned yet (status=PENDING_PIN). When present, shape: { encrypted: hex, iv: hex } produced by encryptCredentials() in src/services/superadmin/merchantAccount.service.ts
+  environment  String @default("QA")
+
+  status          AngelPayAccountStatus @default(PENDING_PIN)
+  statusChangedAt DateTime?
+  statusChangedBy String?
+  statusReason    String?
+
+  externalUserId    Int?
+  lastValidatedAt   DateTime?
+  lastValidationErr String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  createdBy String?
+
+  @@index([status])
 }
 
 // ==========================================

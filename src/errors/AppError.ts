@@ -72,4 +72,34 @@ export class ValidationError extends AppError {
   }
 }
 
+export class IncompatibleDeviceError extends AppError {
+  constructor(message: string = 'Dispositivo incompatible con el procesador de pagos') {
+    super(message, 409, true, 'INCOMPATIBLE_DEVICE')
+  }
+}
+
+/**
+ * Task 12 / validation point #3: thrown when `Terminal.brand` is mutated to a
+ * value that would orphan currently-assigned merchants. The dashboard catches
+ * this (HTTP 409, code `TERMINAL_BRAND_CHANGE_BLOCKED`), reads
+ * `incompatibleMerchants` from the response payload, and prompts the operator
+ * to confirm. On confirm, it re-issues the PATCH with `forceUnassign: true`,
+ * which prunes the incompatible merchants atomically with the brand change.
+ *
+ * Carrying structured detail on an AppError is intentional — the global error
+ * handler serializes `details` into the JSON response.
+ */
+export class TerminalBrandChangeBlocked extends AppError {
+  public details: { incompatibleMerchants: Array<{ id: string; name: string; code: string }> }
+  constructor(incompatibleMerchants: Array<{ id: string; name: string; code: string }>) {
+    super(
+      'Cambiar la marca del terminal dejaría huérfanos a uno o más comercios asignados. Confirma para continuar.',
+      409,
+      true,
+      'TERMINAL_BRAND_CHANGE_BLOCKED',
+    )
+    this.details = { incompatibleMerchants }
+  }
+}
+
 export default AppError // Keep default export for the base class if used elsewhere

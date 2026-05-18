@@ -1,9 +1,10 @@
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError, ValidationError } from '../../errors/AppError'
 import crypto from 'crypto'
 import socketManager from '../../communication/sockets'
 import { lookupRatesByBusinessName, lookupRatesByVenueType, type MCCLookupResult } from '../pricing/blumon-mcc-lookup.service'
+import { assertMerchantTerminalCompatible, assertVenueHasCompatibleTerminal } from '../../lib/providerDeviceCompatibility'
 
 /**
  * MerchantAccount Service
@@ -28,7 +29,7 @@ const ALGORITHM = 'aes-256-cbc'
  * @param credentials Plain credentials object
  * @returns Encrypted credentials object with iv
  */
-function encryptCredentials(credentials: any): any {
+export function encryptCredentials(credentials: any): any {
   try {
     const iv = crypto.randomBytes(16)
     const cipher = crypto.createCipheriv(ALGORITHM, ENCRYPTION_KEY, iv)
@@ -51,7 +52,7 @@ function encryptCredentials(credentials: any): any {
  * @param encryptedData Encrypted credentials with iv
  * @returns Plain credentials object
  */
-function decryptCredentials(encryptedData: any): any {
+export function decryptCredentials(encryptedData: any): any {
   try {
     if (!encryptedData || !encryptedData.encrypted || !encryptedData.iv) {
       throw new Error('Invalid encrypted data format')
@@ -178,6 +179,12 @@ interface CreateMerchantAccountData {
   displayName?: string
   active?: boolean
   displayOrder?: number
+  // 🆕 Optional venue scope (Task 10) — when supplied, gates creation on
+  // provider↔device compatibility (`assertVenueHasCompatibleTerminal`) and
+  // unlocks the AngelPay-specific branch which requires an ACTIVE
+  // `AngelPayUserAccount` for that venue. Existing callers (Blumon flows)
+  // that omit this field keep the legacy behavior.
+  venueId?: string
   // Credentials are optional for Blumon pending accounts (will be fetched via OAuth later)
   credentials?: {
     merchantId?: string // Optional - not all providers use this
@@ -397,6 +404,38 @@ export async function createMerchantAccount(data: CreateMerchantAccountData) {
 
   if (!provider) {
     throw new NotFoundError(`Payment provider ${data.providerId} not found`)
+  }
+
+  // 🆕 Task 10: device-compatibility gate (covers ANGELPAY + BLUMON).
+  // Only runs when a venue is in scope. Unconstrained providers (STRIPE, etc.)
+  // are a no-op inside the helper. Throws IncompatibleDeviceError (HTTP 409).
+  if (data.venueId) {
+    await assertVenueHasCompatibleTerminal(data.venueId, provider.code)
+  }
+
+  // 🆕 Task 10: AngelPay-specific branch.
+  // AngelPay credentials live on AngelPayUserAccount (per-venue email+PIN), so
+  // the MerchantAccount row stores only a placeholder. We additionally require:
+  //   1. externalMerchantId is a numeric string (AngelPay MerchantOption.id is Int)
+  //   2. An ACTIVE AngelPayUserAccount on the venue
+  if (provider.code === 'ANGELPAY') {
+    if (!data.venueId) {
+      throw new ValidationError('AngelPay merchant accounts require a venueId')
+    }
+    if (!/^\d+$/.test(data.externalMerchantId)) {
+      throw new ValidationError('AngelPay externalMerchantId must be a numeric string')
+    }
+    const angelpayAccount = await prisma.angelPayUserAccount.findUnique({
+      where: { venueId: data.venueId },
+    })
+    if (!angelpayAccount || angelpayAccount.status !== 'ACTIVE') {
+      throw new ValidationError(
+        `AngelPay account is in state ${angelpayAccount?.status ?? 'NONE'}; cannot create merchant accounts until ACTIVE`,
+      )
+    }
+    // Auth lives on AngelPayUserAccount; force placeholder credentials so the
+    // downstream encryption step writes the standard { encrypted, iv } blob.
+    data.credentials = {}
   }
 
   // Determine if this is a Blumon "pending" account (no credentials but has serial number)
@@ -1013,4 +1052,309 @@ export async function createMerchantAccountWithCostStructure(
   }
 
   return { merchantAccount }
+}
+
+// ============================================================
+// Option B workaround: AngelPay auto-discovery upsert
+// ============================================================
+
+/**
+ * Single AngelPay merchant entry reported by TPV (mirrors SDK
+ * MerchantOption / MerchantSummary shape).
+ */
+export interface DiscoveredAngelPayMerchant {
+  angelpayId: number // SDK MerchantOption.id (Int)
+  name: string
+  affiliationNumber: string
+  isActive: boolean // SDK's "currently selected" — informational only, NOT our `active`
+}
+
+/**
+ * Idempotent upsert of merchants auto-discovered by TPV via
+ * AngelPaySDK.getUserMerchants() after a successful auth.
+ *
+ * Key design notes:
+ * - Upsert key: (providerId=ANGELPAY, externalMerchantId=String(angelpayId)),
+ *   enforced by `@@unique([providerId, externalMerchantId])` on MerchantAccount.
+ * - Existing rows: only refresh display fields (`angelpayAffiliation`,
+ *   `angelpayMerchantName`). NEVER flip `active` — that respects admin
+ *   approval decisions in the dashboard.
+ * - New rows: created with `active: false` (PENDING_REVIEW). Admin must
+ *   approve via dashboard to surface the merchant in the TPV.
+ * - Bypasses the AngelPayUserAccount.status==ACTIVE gate from Task 10
+ *   (manual createMerchantAccount): by the time TPV reaches this endpoint
+ *   the SDK has already authenticated against AngelPay, so the user IS
+ *   active by definition. Re-asserting here would just create a circular
+ *   chicken-and-egg failure on first onboarding.
+ * - NOTE: MerchantAccount has no direct `venueId` column — the
+ *   Venue ↔ MerchantAccount link lives in VenuePaymentConfig (primary /
+ *   secondary / tertiary slots). Auto-discovered rows are added to the
+ *   global merchant pool with `active=false` and become routable only
+ *   after an admin both approves them (sets `active=true`) and wires them
+ *   into a VenuePaymentConfig slot. `input.venueId` is accepted purely
+ *   for audit/logging.
+ */
+export async function upsertDiscoveredAngelPayMerchants(input: {
+  venueId: string
+  merchants: DiscoveredAngelPayMerchant[]
+}): Promise<{ created: number; updated: number; skipped: number }> {
+  const angelpayProvider = await prisma.paymentProvider.findUnique({ where: { code: 'ANGELPAY' } })
+  if (!angelpayProvider) {
+    throw new NotFoundError('PaymentProvider ANGELPAY not found — was seed.ts run?')
+  }
+
+  let created = 0
+  let updated = 0
+  let skipped = 0
+
+  for (const m of input.merchants) {
+    if (!Number.isInteger(m.angelpayId) || m.angelpayId <= 0) {
+      logger.warn('Skipping invalid AngelPay merchant ID in auto-discovery', {
+        angelpayId: m.angelpayId,
+        venueId: input.venueId,
+      })
+      skipped++
+      continue
+    }
+
+    const externalMerchantId = String(m.angelpayId)
+    const existing = await prisma.merchantAccount.findUnique({
+      where: {
+        providerId_externalMerchantId: {
+          providerId: angelpayProvider.id,
+          externalMerchantId,
+        },
+      },
+    })
+
+    if (existing) {
+      await prisma.merchantAccount.update({
+        where: { id: existing.id },
+        data: {
+          angelpayAffiliation: m.affiliationNumber,
+          angelpayMerchantName: m.name,
+          // Intentionally NOT touching `active` — respects admin approval.
+        },
+      })
+      updated++
+    } else {
+      await prisma.merchantAccount.create({
+        data: {
+          providerId: angelpayProvider.id,
+          externalMerchantId,
+          displayName: m.name,
+          active: false, // PENDING_REVIEW — admin approves in dashboard
+          credentialsEncrypted: encryptCredentials({}), // placeholder (auth lives on AngelPayUserAccount)
+          angelpayAffiliation: m.affiliationNumber,
+          angelpayMerchantName: m.name,
+        },
+      })
+      created++
+    }
+  }
+
+  logger.info('AngelPay auto-discovered merchants upserted', {
+    venueId: input.venueId,
+    created,
+    updated,
+    skipped,
+    total: input.merchants.length,
+  })
+
+  return { created, updated, skipped }
+}
+
+// ============================================================================
+// Option B closure: approve auto-discovered AngelPay merchant + auto-attach
+// to a VenuePaymentConfig slot in one atomic operation (mirrors Blumon's
+// auto-attach pattern, but targets VenuePaymentConfig slots instead of the
+// Terminal.assignedMerchantIds bag because AngelPay is intent-routed and
+// terminal-agnostic).
+// ============================================================================
+
+export type VenuePaymentSlot = 'PRIMARY' | 'SECONDARY' | 'TERTIARY'
+
+const SLOT_TO_COLUMN: Record<VenuePaymentSlot, 'primaryAccountId' | 'secondaryAccountId' | 'tertiaryAccountId'> = {
+  PRIMARY: 'primaryAccountId',
+  SECONDARY: 'secondaryAccountId',
+  TERTIARY: 'tertiaryAccountId',
+}
+
+/**
+ * Approve an auto-discovered AngelPay MerchantAccount AND wire it into a
+ * VenuePaymentConfig slot in a single transaction.
+ *
+ * Mirrors the spirit of Blumon's auto-attach (Blumon attaches a freshly
+ * fetched MerchantAccount to Terminals with matching serials in the same
+ * controller flow). For AngelPay, the equivalent "where does this routable
+ * thing live" is the VenuePaymentConfig (PRIMARY/SECONDARY/TERTIARY), so
+ * approval = flip `active=true` + write the chosen slot in one shot.
+ *
+ * Semantics:
+ *  - Validates the MerchantAccount is providerCode=ANGELPAY and currently
+ *    inactive (PENDING_REVIEW). Refuses to "re-approve" an active one (no-op).
+ *  - Validates the venue exists.
+ *  - Inside a single `prisma.$transaction`:
+ *      1. Update MerchantAccount.active = true
+ *      2. Upsert VenuePaymentConfig for the venue, writing only the chosen
+ *         slot. If no config exists, create one with this merchant in the
+ *         chosen slot (when slot=SECONDARY or TERTIARY, that is impossible
+ *         because primaryAccountId is non-null in the schema — we surface a
+ *         clear 400 error in that edge case instead of silently demoting to
+ *         primary).
+ *      3. If the chosen slot is already occupied by a *different* merchant,
+ *         throw ConflictError (409) — operator must choose another slot or
+ *         unassign the incumbent first.
+ *
+ * Returns the updated MerchantAccount + the resulting VenuePaymentConfig.
+ */
+export async function approveDiscoveredAngelPayMerchant(input: {
+  venueId: string
+  merchantAccountId: string
+  slot: VenuePaymentSlot
+  /**
+   * Optional per-terminal scoping. When non-empty, the merchant is pushed onto
+   * each `Terminal.assignedMerchantIds` (idempotent) so the TPV config endpoint
+   * only surfaces this merchant on the listed terminals. When omitted or empty,
+   * the merchant is available on every venue terminal via VenuePaymentConfig
+   * inheritance (Terminal.assignedMerchantIds=[] → fallback path).
+   */
+  terminalIds?: string[]
+}): Promise<{
+  merchantAccount: Awaited<ReturnType<typeof prisma.merchantAccount.findUnique>>
+  venuePaymentConfig: Awaited<ReturnType<typeof prisma.venuePaymentConfig.findUnique>>
+}> {
+  const { venueId, merchantAccountId, slot, terminalIds } = input
+
+  // ---- Pre-flight validation (outside transaction so errors don't roll back nothing) ----
+  const venue = await prisma.venue.findUnique({ where: { id: venueId } })
+  if (!venue) {
+    throw new NotFoundError(`Venue ${venueId} not found`)
+  }
+
+  const merchantAccount = await prisma.merchantAccount.findUnique({
+    where: { id: merchantAccountId },
+    include: { provider: true },
+  })
+  if (!merchantAccount) {
+    throw new NotFoundError(`MerchantAccount ${merchantAccountId} not found`)
+  }
+  if (merchantAccount.provider.code !== 'ANGELPAY') {
+    throw new BadRequestError(
+      `MerchantAccount ${merchantAccountId} is not an AngelPay merchant (provider=${merchantAccount.provider.code})`,
+    )
+  }
+  if (merchantAccount.active) {
+    throw new BadRequestError(
+      `MerchantAccount ${merchantAccountId} is already active — nothing to approve`,
+    )
+  }
+
+  const slotColumn = SLOT_TO_COLUMN[slot]
+  if (!slotColumn) {
+    throw new BadRequestError(`Invalid slot "${slot}" — must be PRIMARY, SECONDARY, or TERTIARY`)
+  }
+
+  // ---- Transaction: flip active + assign slot ----
+  const result = await prisma.$transaction(async (tx) => {
+    const updatedMerchant = await tx.merchantAccount.update({
+      where: { id: merchantAccountId },
+      data: { active: true },
+      include: { provider: true },
+    })
+
+    const existingConfig = await tx.venuePaymentConfig.findUnique({
+      where: { venueId },
+    })
+
+    let updatedConfig
+
+    if (!existingConfig) {
+      // No config exists — must create one. Schema requires primaryAccountId,
+      // so we can only create from scratch when slot=PRIMARY. Otherwise refuse
+      // with a clear message instead of silently demoting.
+      if (slot !== 'PRIMARY') {
+        throw new BadRequestError(
+          `Venue ${venueId} has no payment config yet — first approval must target the PRIMARY slot to seed it.`,
+        )
+      }
+      updatedConfig = await tx.venuePaymentConfig.create({
+        data: {
+          venueId,
+          primaryAccountId: merchantAccountId,
+          routingRules: {},
+          preferredProcessor: 'AUTO',
+        },
+        include: {
+          primaryAccount: { include: { provider: true } },
+          secondaryAccount: { include: { provider: true } },
+          tertiaryAccount: { include: { provider: true } },
+        },
+      })
+    } else {
+      // Conflict check: slot occupied by a *different* merchant?
+      const occupantId = (existingConfig as any)[slotColumn] as string | null | undefined
+      if (occupantId && occupantId !== merchantAccountId) {
+        throw new ConflictError(
+          `Slot ${slot} is already occupied by another merchant (${occupantId}). ` +
+            `Choose another slot or unassign the current merchant first.`,
+        )
+      }
+      updatedConfig = await tx.venuePaymentConfig.update({
+        where: { venueId },
+        data: { [slotColumn]: merchantAccountId },
+        include: {
+          primaryAccount: { include: { provider: true } },
+          secondaryAccount: { include: { provider: true } },
+          tertiaryAccount: { include: { provider: true } },
+        },
+      })
+    }
+
+    // ---- Optional per-terminal scoping ----
+    // Empty/undefined `terminalIds` means "no per-terminal restriction" — the
+    // terminal config endpoint falls back to VenuePaymentConfig inheritance
+    // when `Terminal.assignedMerchantIds` is empty. Non-empty means "restrict
+    // to these terminals only" — we push the merchant id to each terminal's
+    // assignedMerchantIds (idempotent: skip if already present).
+    if (terminalIds && terminalIds.length > 0) {
+      for (const terminalId of terminalIds) {
+        const terminal = await tx.terminal.findUnique({
+          where: { id: terminalId },
+          select: { id: true, venueId: true, assignedMerchantIds: true },
+        })
+        if (!terminal) {
+          throw new BadRequestError(`Terminal ${terminalId} not found`)
+        }
+        if (terminal.venueId !== venueId) {
+          throw new BadRequestError(
+            `Terminal ${terminalId} does not belong to venue ${venueId}`,
+          )
+        }
+        // Task 11 — brand-compat guard. Rejects e.g. PAX terminal + ANGELPAY merchant.
+        await assertMerchantTerminalCompatible(terminalId, merchantAccountId, tx)
+
+        const current = terminal.assignedMerchantIds ?? []
+        if (!current.includes(merchantAccountId)) {
+          await tx.terminal.update({
+            where: { id: terminalId },
+            data: { assignedMerchantIds: { set: [...current, merchantAccountId] } },
+          })
+        }
+      }
+    }
+
+    return { merchantAccount: updatedMerchant, venuePaymentConfig: updatedConfig }
+  })
+
+  logger.info('AngelPay discovered merchant approved + assigned to venue slot', {
+    event: 'angelpay.discovered_merchant_approved',
+    venueId,
+    merchantAccountId,
+    slot,
+    externalMerchantId: merchantAccount.externalMerchantId,
+    terminalIds: terminalIds && terminalIds.length > 0 ? terminalIds : undefined,
+  })
+
+  return result
 }

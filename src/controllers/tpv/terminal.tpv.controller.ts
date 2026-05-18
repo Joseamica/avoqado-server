@@ -3,6 +3,9 @@ import { NextFunction, Request, Response } from 'express'
 import { Prisma } from '@prisma/client'
 import { getEffectivePaymentConfig } from '@/services/organization-payment-config.service'
 import { computeOverrides, getOrgDefaultsForTerminal } from '@/services/dashboard/tpv.dashboard.service'
+import { isProviderCompatibleWithBrand } from '@/lib/providerDeviceCompatibility'
+import { decryptCredentials } from '@/services/superadmin/merchantAccount.service'
+import { getAngelPayUserAccountForTerminal } from '@/services/superadmin/angelpayUserAccount.service'
 import prisma from '@/utils/prismaClient'
 import logger from '../../config/logger'
 import { NotFoundError } from '../../errors/AppError'
@@ -223,6 +226,10 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
       blumonMerchantId: true,
       credentialsEncrypted: true,
       providerConfig: true,
+      // Task 13 / spec §6.4 — DTO extension (additive)
+      externalMerchantId: true,
+      angelpayAffiliation: true,
+      angelpayMerchantName: true,
       provider: { select: { code: true } }, // Include provider code for multi-processor routing
     }
 
@@ -276,8 +283,28 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
       })),
     })
 
-    // Step 3: Transform merchant accounts for Android response
-    const transformedMerchants = merchantAccounts.map((ma: any) => ({
+    // Task 13 / spec §4.4 — validation point #4 (runtime gate / defense in depth).
+    // Filter merchants[] to only providers compatible with terminal.brand. Even if
+    // validation points #1–#3 were bypassed by legacy/imported data, the TPV must
+    // never receive a merchant assignment its hardware cannot route.
+    const compatibleMerchants = merchantAccounts.filter((ma: any) =>
+      isProviderCompatibleWithBrand(ma.provider?.code || 'BLUMON', terminal.brand),
+    )
+
+    if (compatibleMerchants.length !== merchantAccounts.length) {
+      logger.warn('[Terminal Config] Filtered incompatible merchants for terminal brand', {
+        terminalId: terminal.id,
+        brand: terminal.brand,
+        beforeCount: merchantAccounts.length,
+        afterCount: compatibleMerchants.length,
+        droppedIds: merchantAccounts
+          .filter((ma: any) => !compatibleMerchants.find((c: any) => c.id === ma.id))
+          .map((ma: any) => ({ id: ma.id, provider: ma.provider?.code })),
+      })
+    }
+
+    // Step 3: Transform merchant accounts for Android response (spec §6.4 — additive DTO)
+    const transformedMerchants = compatibleMerchants.map((ma: any) => ({
       id: ma.id,
       displayName: ma.displayName,
       providerCode: ma.provider?.code || 'BLUMON', // BLUMON, ANGELPAY, MENTA, etc.
@@ -287,6 +314,11 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
       merchantId: ma.blumonMerchantId,
       credentials: ma.credentialsEncrypted, // Encrypted - Android will decrypt
       providerConfig: ma.providerConfig,
+      // Task 13 / spec §6.4 — additive fields for AngelPay + provider-agnostic UI
+      externalMerchantId: ma.externalMerchantId,
+      isActive: ma.active,
+      angelpayAffiliation: ma.angelpayAffiliation,
+      angelpayMerchantName: ma.angelpayMerchantName,
     }))
 
     // Step 4: Extract TPV settings from terminal config
@@ -308,10 +340,57 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
       // requireClockInPhoto and requireClockOutPhoto come from terminalTpvSettings (Terminal.config)
     }
 
+    // Task 13 / spec §4.5 + §4.5b — angelpayAuth payload.
+    // ONLY emitted when terminal.brand === 'NEXGO' AND the venue has an ACTIVE
+    // AngelPayUserAccount. PIN is decrypted server-side and travels over TLS
+    // only to a terminal-token-authenticated endpoint. The TPV must never
+    // persist or log the plaintext PIN (see spec §4.5b PIN handling rules).
+    let angelpayAuth: {
+      accountId: string
+      email: string
+      pin: string
+      environment: string
+    } | null = null
+
+    if (terminal.brand === 'NEXGO') {
+      try {
+        const account = await getAngelPayUserAccountForTerminal(serialNumber)
+        if (account && account.status === 'ACTIVE' && account.pinEncrypted) {
+          angelpayAuth = {
+            accountId: account.id,
+            email: account.email,
+            pin: decryptCredentials(account.pinEncrypted) as string,
+            environment: account.environment,
+          }
+          logger.info('[Terminal Config] Attached angelpayAuth payload', {
+            terminalId: terminal.id,
+            accountId: account.id,
+            environment: account.environment,
+          })
+        } else if (account) {
+          logger.info('[Terminal Config] AngelPayUserAccount present but not ACTIVE — omitting angelpayAuth', {
+            terminalId: terminal.id,
+            accountId: account.id,
+            status: account.status,
+          })
+        }
+      } catch (err) {
+        // Never break terminal config fetch on AngelPay payload failure — the
+        // TPV will simply lack credentials and fall back to its existing error
+        // surface. Logged for ops investigation.
+        logger.error('[Terminal Config] Failed to build angelpayAuth payload', {
+          terminalId: terminal.id,
+          serialNumber: terminal.serialNumber,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
+
     logger.info('[Terminal Config] Successfully fetched config', {
       terminalId: terminal.id,
       serialNumber: terminal.serialNumber,
       merchantCount: transformedMerchants.length,
+      angelpayAuthAttached: angelpayAuth !== null,
       tpvSettings,
     })
 
@@ -329,6 +408,7 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
         },
         merchantAccounts: transformedMerchants,
         tpvSettings, // Per-terminal payment flow configuration
+        angelpayAuth, // Task 13 / spec §4.5 — optional; null unless terminal is NEXGO with ACTIVE account
       },
     })
   } catch (error) {

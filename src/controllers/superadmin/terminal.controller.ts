@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { assertMerchantsTerminalCompatible } from '../../lib/providerDeviceCompatibility'
 
 /**
  * Terminal Controller
@@ -134,6 +135,10 @@ export async function assignMerchantsToTerminal(req: Request, res: Response, nex
         blumonSerialNumber: ma.blumonSerialNumber,
       })),
     })
+
+    // Provider ↔ device-brand compatibility guard (Task 11 / validation point #2).
+    // Rejects ANGELPAY merchants on PAX, BLUMON merchants on NEXGO, etc.
+    await assertMerchantsTerminalCompatible(terminalId, merchantAccountIds)
 
     // Step 3: Update terminal with assigned merchant IDs
     const updatedTerminal = await prisma.terminal.update({

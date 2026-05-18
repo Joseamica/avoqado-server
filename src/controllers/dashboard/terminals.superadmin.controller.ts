@@ -109,14 +109,23 @@ export const createTerminal = async (req: Request, res: Response, next: NextFunc
 export const updateTerminal = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { terminalId } = req.params
-    const { name, status, assignedMerchantIds, brand, model } = req.body
+    const { name, status, assignedMerchantIds, brand, model, forceUnassign, venueId } = req.body
 
+    // Task 12: when `brand` is changed and currently-assigned merchants would
+    // become incompatible, the service throws `TerminalBrandChangeBlocked`
+    // (HTTP 409, code `TERMINAL_BRAND_CHANGE_BLOCKED`) with the offending
+    // merchants in `details.incompatibleMerchants`. The dashboard catches that
+    // and prompts the operator, then re-issues with `forceUnassign: true`.
+    // Task 54: `venueId` (optional) moves the terminal to another venue and
+    // clears `assignedMerchantIds` atomically (cross-tenant safety).
     const terminal = await updateTerminalService(terminalId, {
       name,
       status,
       assignedMerchantIds,
       brand,
       model,
+      forceUnassign,
+      venueId,
     })
 
     return res.status(200).json({

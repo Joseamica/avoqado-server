@@ -18,7 +18,8 @@ import { getEffectivePaymentConfig } from '@/services/organization-payment-confi
 import { moduleService } from '@/services/modules/module.service'
 import emailService from '@/services/email.service'
 import logger from '@/config/logger'
-import { BadRequestError } from '@/errors/AppError'
+import { BadRequestError, IncompatibleDeviceError } from '@/errors/AppError'
+import { isProviderCompatibleWithBrand } from '@/lib/providerDeviceCompatibility'
 import { addDays } from 'date-fns'
 import crypto from 'crypto'
 
@@ -344,11 +345,28 @@ export async function createVenueWizard(req: Request, res: Response, next: NextF
     // merchantAccountId is passed in pricing.merchantAccountId and linked above.
     if (payload.terminal?.serialNumber) {
       try {
+        // Provider ↔ device-brand compatibility guard (Task 11 / validation
+        // point #2). If a merchant account is being linked to a brand-known
+        // terminal, verify compatibility before create (no terminal id yet, so
+        // we use the synchronous predicate against the prospective brand).
+        const prospectiveBrand = payload.terminal.brand || 'PAX'
+        if (payload.pricing?.merchantAccountId) {
+          const merchant = await prisma.merchantAccount.findUnique({
+            where: { id: payload.pricing.merchantAccountId },
+            select: { id: true, provider: { select: { code: true } } },
+          })
+          if (merchant && !isProviderCompatibleWithBrand(merchant.provider.code, prospectiveBrand)) {
+            throw new IncompatibleDeviceError(
+              `Cannot assign ${merchant.provider.code} merchant ${merchant.id} to ${prospectiveBrand} terminal`,
+            )
+          }
+        }
+
         const terminal = await prisma.terminal.create({
           data: {
             venueId,
             serialNumber: payload.terminal.serialNumber,
-            brand: payload.terminal.brand || 'PAX',
+            brand: prospectiveBrand,
             model: payload.terminal.model || '',
             name: payload.terminal.name || `Terminal ${payload.terminal.serialNumber}`,
             type: 'TPV_ANDROID',
