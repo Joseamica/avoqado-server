@@ -43,7 +43,7 @@ import {
 const router = Router()
 
 // Wildcard CORS for public endpoints — no credentials needed, safe for embedding
-router.use(cors({ origin: '*', credentials: false, methods: ['GET', 'POST', 'PATCH', 'OPTIONS'] }))
+router.use(cors({ origin: '*', credentials: false, methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] }))
 
 // Rate limiting: read endpoints (60 req/min), write (5 req/min), cancel (10 req/min)
 const readLimit = rateLimit({ windowMs: 60_000, max: 60, standardHeaders: true, legacyHeaders: false })
