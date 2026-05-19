@@ -453,6 +453,36 @@ model WhatsappContactWindow {
   updatedAt     DateTime  @updatedAt
 }
 
+enum WhatsappInboundRouting {
+  ACTIVATION_CONSUMED
+  ACTIVATION_FAILED
+  DEACTIVATION_REDIRECT
+  VENUE_REPLY_ROUTED
+  VENUE_REPLY_ORPHAN
+  VENUE_REPLY_NO_CONTEXT
+  NON_TEXT_REJECTED
+  IGNORED
+}
+
+// Per-wamid log of inbound WhatsApp messages — primary idempotency key for the
+// webhook handler. Meta may redeliver the same wamid on retries; we de-dupe on
+// the unique constraint and route only once.
+model WhatsappInboundEvent {
+  id              String                  @id @default(cuid())
+  wamid           String                  @unique
+  fromPhone       String
+  messageType     String
+  rawBody         Json
+  receivedAt      DateTime                @default(now())
+  routedAs        WhatsappInboundRouting?
+  routedSessionId String?
+  processedAt     DateTime?
+  replyWamid      String?
+  replySentAt     DateTime?
+
+  @@index([fromPhone, receivedAt])
+}
+
 // ✅ Live Demo Session Tracking
 // Tracks temporary demo sessions for public demo (demo.dashboard.avoqado.io)
 model LiveDemoSession {
