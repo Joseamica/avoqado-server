@@ -413,6 +413,7 @@ model Venue {
   whatsappOptInPhone  String?
   whatsappOptInAt     DateTime?
   whatsappActivations VenueWhatsappActivation[]
+  chatSessions        VenueChatSession[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -481,6 +482,39 @@ model WhatsappInboundEvent {
   replySentAt     DateTime?
 
   @@index([fromPhone, receivedAt])
+}
+
+enum VenueChatSessionStatus {
+  OPEN
+  CLOSED_BY_INACTIVITY
+  CLOSED_BY_VENUE_DEACTIVATION
+  CLOSED_BY_CUSTOMER
+}
+
+// One conversation between a customer (web modal) and a venue (via WABA relay).
+// shortCode is human-readable (e.g. "A3F2"), uniqueness enforced only while
+// status=OPEN via a partial index (see add_venue_chat_session_shortcode_index).
+model VenueChatSession {
+  id                     String                 @id @default(cuid())
+  shortCode              String
+  venueId                String
+  venue                  Venue                  @relation(fields: [venueId], references: [id])
+  customerName           String
+  customerEmail          String?
+  flowOrigin             String                 @default("appointments")
+  clientSessionNonce     String?                @unique
+  requestFingerprintHash String
+  status                 VenueChatSessionStatus @default(OPEN)
+  accessTokenHash        String
+  createdAt              DateTime               @default(now())
+  closedAt               DateTime?
+  lastActivityAt         DateTime               @default(now())
+  lastCustomerSeenAt     DateTime?
+  lastEmailNotifiedAt    DateTime?
+  // messages VenueChatMessage[]  // re-enabled in next migration
+
+  @@index([venueId, lastActivityAt])
+  @@index([status, lastActivityAt])
 }
 
 // ✅ Live Demo Session Tracking
