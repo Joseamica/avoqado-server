@@ -71,7 +71,7 @@ describe('getVenueChatStatus', () => {
   it('returns the full status snapshot including pending activation', async () => {
     prismaMock.venue.findUnique.mockResolvedValue({
       whatsappContactMode: 'RELAY',
-      whatsappOptInPhone: '+525567976805',
+      whatsappOptInPhone: '+525667976805',
       whatsappOptInAt: new Date('2026-05-19T10:00:00Z'),
       phone: '+525500001234',
     })
@@ -84,7 +84,7 @@ describe('getVenueChatStatus', () => {
 
     expect(status).toEqual({
       mode: 'RELAY',
-      optInPhone: '+525567976805',
+      optInPhone: '+525667976805',
       optInAt: new Date('2026-05-19T10:00:00Z'),
       fallbackPhone: '+525500001234',
       pendingActivation: { tokenLast4: 'JKMN', expiresAt: new Date('2026-05-19T11:00:00Z') },

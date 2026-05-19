@@ -15,10 +15,7 @@ import prisma from '@/utils/prismaClient'
 import { getTerminalConfig } from '@/controllers/tpv/terminal.tpv.controller'
 import { isProviderCompatibleWithBrand } from '@/lib/providerDeviceCompatibility'
 import { decryptCredentials } from '@/services/superadmin/merchantAccount.service'
-import {
-  getAngelPayUserAccountForTerminal,
-  getAngelPayUserAccountsForTerminal,
-} from '@/services/superadmin/angelpayUserAccount.service'
+import { getAngelPayUserAccountForTerminal, getAngelPayUserAccountsForTerminal } from '@/services/superadmin/angelpayUserAccount.service'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,

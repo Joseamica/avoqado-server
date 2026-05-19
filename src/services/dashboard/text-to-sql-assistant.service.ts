@@ -7977,10 +7977,7 @@ Responde SOLO JSON (sin markdown):
       return null
     }
 
-    const unsupportedInheritedIntents = new Set<IntentClassificationResult['intent']>([
-      'productSales',
-      'productSales.compare',
-    ])
+    const unsupportedInheritedIntents = new Set<IntentClassificationResult['intent']>(['productSales', 'productSales.compare'])
     if (unsupportedInheritedIntents.has(context.previousIntent)) {
       return null
     }

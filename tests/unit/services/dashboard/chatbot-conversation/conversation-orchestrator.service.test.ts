@@ -297,7 +297,9 @@ describe('ConversationOrchestratorService', () => {
     expect(SharedQueryService.getPaymentMethodBreakdown).toHaveBeenCalledWith('venue-1', 'thisMonth')
     expect(response?.response).toContain('Métodos de pago')
     expect(response?.response).toContain('CARD')
-    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'paymentMethodBreakdown', status: 'executed' })])
+    expect(response?.metadata.steps).toEqual([
+      expect.objectContaining({ kind: 'query', tool: 'paymentMethodBreakdown', status: 'executed' }),
+    ])
   })
 
   it('answers growth strategy questions with business context and action hints', async () => {
