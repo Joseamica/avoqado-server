@@ -8,6 +8,7 @@
 
 import { Router } from 'express'
 import { handleStripeConnectWebhook, handleStripeWebhook } from '../controllers/webhook.controller'
+import { handleWhatsappInbound, handleWhatsappVerify } from '../controllers/webhook/whatsapp.webhook.controller'
 import { handleBlumonTPVWebhook, blumonWebhookHealthCheck } from '../controllers/tpv/blumon-webhook.tpv.controller'
 import { handleB4BitWebhook, b4bitWebhookHealthCheck } from '../controllers/tpv/b4bit-webhook.tpv.controller'
 import { handleResendWebhook, resendWebhookHealthCheck } from '../controllers/webhooks/resend.webhook.controller'
@@ -345,5 +346,10 @@ router.post('/resend', handleResendWebhook)
  *         description: Webhook endpoint is healthy
  */
 router.get('/resend/health', resendWebhookHealthCheck)
+
+// WhatsApp Cloud API webhook (venue chat v1 — see docs/superpowers/specs/2026-05-17-venue-chat-design.md)
+// GET = Meta verification handshake; POST = inbound dispatcher (HMAC middleware + dispatcher wired in later tasks).
+router.get('/whatsapp', handleWhatsappVerify)
+router.post('/whatsapp', handleWhatsappInbound)
 
 export default router
