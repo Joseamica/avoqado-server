@@ -204,7 +204,7 @@ export async function listCalendars(req: Request, res: Response, next: NextFunct
         primary: c.primary ?? false,
       }))
 
-    res.status(200).json({ calendars })
+    res.status(200).json({ calendars, intent: session.intent })
   } catch (error) {
     next(error)
   }

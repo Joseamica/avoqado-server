@@ -366,6 +366,9 @@ describe('GET /api/v1/google-calendar/oauth/calendars', () => {
     expect(res.status).toBe(200)
     const ids = (res.body.calendars as Array<{ id: string }>).map(c => c.id).sort()
     expect(ids).toEqual(['primary', 'team@group'])
+    // Picker uses intent to decide where to redirect after commit
+    // (settings vs Mi Cuenta) — assert it's surfaced on the response.
+    expect(res.body.intent).toBe('staff_personal')
   })
 
   it('returns owner|writer|reader calendars for venue_master intent', async () => {
@@ -380,6 +383,7 @@ describe('GET /api/v1/google-calendar/oauth/calendars', () => {
       .set('Cookie', [`accessToken=${makeToken()}`])
     expect(res.status).toBe(200)
     expect((res.body.calendars as Array<{ id: string }>).length).toBe(3)
+    expect(res.body.intent).toBe('venue_master')
   })
 })
 
