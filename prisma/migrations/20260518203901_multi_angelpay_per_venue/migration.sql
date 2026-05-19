@@ -64,11 +64,14 @@ slot_assignments AS (
   UNION
   SELECT vpc."venueId", vpc."tertiaryAccountId"  AS "merchantId" FROM "public"."VenuePaymentConfig" vpc WHERE vpc."tertiaryAccountId"  IS NOT NULL
 )
+-- NOTE: Postgres forbids referencing the UPDATE target (`ma`) in a JOIN of the
+-- FROM clause, so we bring `angelpay_provider` in via CROSS JOIN (the CTE
+-- returns at most one row) and match `ma."providerId" = ap."id"` in WHERE.
 UPDATE "public"."MerchantAccount" ma
 SET "angelpayUserAccountId" = sav."accountId"
 FROM slot_assignments sa
 JOIN single_account_venues sav ON sav."venueId" = sa."venueId"
-JOIN angelpay_provider ap ON ap."id" = ma."providerId"
+CROSS JOIN angelpay_provider ap
 WHERE ma."id" = sa."merchantId"
   AND ma."providerId" = ap."id"
   AND ma."angelpayUserAccountId" IS NULL;
