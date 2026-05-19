@@ -173,6 +173,12 @@ const prismaMock: any = {
   calendarSyncOutbox: createMockModel(),
   reservationGoogleEventMapping: createMockModel(),
   reservationSettings: createMockModel(),
+  // Venue chat (WhatsApp relay) — venue-chat v1
+  venueWhatsappActivation: createMockModel(),
+  whatsappContactWindow: createMockModel(),
+  whatsappInboundEvent: createMockModel(),
+  venueChatSession: createMockModel(),
+  venueChatMessage: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),
