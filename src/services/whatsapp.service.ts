@@ -20,6 +20,7 @@
  */
 
 import logger from '@/config/logger'
+import { sanitizeServiceMessage, sanitizeTemplateVar } from '@/utils/whatsappSanitize'
 
 const WHATSAPP_API_URL = 'https://graph.facebook.com/v21.0'
 
@@ -300,4 +301,84 @@ export async function sendOrderStatusUpdateWhatsApp(phone: string, data: WhatsAp
     { type: 'text', text: data.status },
   ])
   return true
+}
+
+// ===== VENUE CHAT (relay) =====
+
+export interface VenueChatTemplateParams {
+  venueName: string // {{1}}
+  customerName: string // {{2}}
+  shortCode: string // {{3}}
+  flowLabel: string // {{4}}
+  messageBody: string // {{5}}
+}
+
+// Send the venue_new_customer_message_v2 utility template. Used by the relay
+// to notify the venue (on WhatsApp) of a new customer message when the 24h
+// service window is closed. Returns wamid so the relay can correlate the
+// venue's WhatsApp reply back to the originating chat session.
+export async function sendVenueChatTemplate(phone: string, params: VenueChatTemplateParams): Promise<{ messageId: string }> {
+  const sanitized: WhatsAppTemplateParam[] = [
+    { type: 'text', text: sanitizeTemplateVar(params.venueName, 60) },
+    { type: 'text', text: sanitizeTemplateVar(params.customerName, 40) },
+    { type: 'text', text: sanitizeTemplateVar(params.shortCode, 8) },
+    { type: 'text', text: sanitizeTemplateVar(params.flowLabel, 30) },
+    { type: 'text', text: sanitizeTemplateVar(params.messageBody, 250) },
+  ]
+  return sendTemplateMessage(phone, 'venue_new_customer_message_v2', sanitized)
+}
+
+// Error subclass that carries the Cloud API numeric error code so callers can
+// branch on specific failures — e.g. 131047 ("Re-engagement message") means
+// the 24h window closed and the relay must retry as a template.
+export class WhatsappCloudApiError extends Error {
+  cloudApiErrorCode?: number
+  constructor(message: string, code?: number) {
+    super(message)
+    this.name = 'WhatsappCloudApiError'
+    this.cloudApiErrorCode = code
+  }
+}
+
+// Send a free-form service (non-template) text message. Valid only inside an
+// open 24h customer-service window. Caller must check WhatsappContactWindow
+// before invoking. On Cloud API failure, throws WhatsappCloudApiError so the
+// caller can branch on cloudApiErrorCode (e.g. 131047 → fall back to template).
+export async function sendServiceMessage(phone: string, body: string): Promise<{ messageId: string }> {
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID
+  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN
+  if (!phoneNumberId || !accessToken) {
+    throw new Error('WhatsApp Business API no esta configurado')
+  }
+
+  const fullPhone = normalizePhone(phone)
+  const sanitized = sanitizeServiceMessage(body)
+
+  const response = await fetch(`${WHATSAPP_API_URL}/${phoneNumberId}/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+    body: JSON.stringify({
+      messaging_product: 'whatsapp',
+      to: fullPhone,
+      type: 'text',
+      text: { body: sanitized },
+    }),
+  })
+
+  const result = (await response.json()) as Record<string, any>
+  if (!response.ok) {
+    const code = result?.error?.code
+    const msg = result?.error?.message || `HTTP ${response.status}`
+    logger.error(`WhatsApp service msg error: ${msg}`, { phone: fullPhone, status: response.status, code })
+    throw new WhatsappCloudApiError(`Error al enviar WhatsApp: ${msg}`, typeof code === 'number' ? code : undefined)
+  }
+
+  const messageId = result?.messages?.[0]?.id
+  if (!messageId) {
+    logger.error('WhatsApp service msg 200 but no messages[0].id', { phone: fullPhone, result })
+    throw new Error('Error al enviar WhatsApp: no message id in response')
+  }
+
+  logger.info(`WhatsApp service message sent to ${fullPhone}`, { messageId })
+  return { messageId }
 }
