@@ -408,6 +408,11 @@ model Venue {
   // AngelPay multi-merchant: per-venue user account credentials (D3)
   angelpayUserAccount AngelPayUserAccount?
 
+  // WhatsApp venue chat (v1: customer ↔ venue messaging via WABA relay)
+  whatsappContactMode VenueChatMode @default(WA_ME_FALLBACK)
+  whatsappOptInPhone  String?
+  whatsappOptInAt     DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -415,6 +420,12 @@ model Venue {
   @@index([slug])
   @@index([active])
   @@index([status]) // For filtering by operational status
+}
+
+enum VenueChatMode {
+  RELAY
+  WA_ME_FALLBACK
+  DISABLED
 }
 
 // ✅ Live Demo Session Tracking
@@ -8258,7 +8269,7 @@ model Reservation {
   // Modifiers selected during booking for multi-service appointments
   modifiers ReservationModifier[]
   // Orders auto-created from this reservation on check-in.
-  orders    Order[]              @relation("OrderFromReservation")
+  orders    Order[]               @relation("OrderFromReservation")
 
   // Google Calendar Sync (Phase 2 — push)
   calendarSyncOutbox  CalendarSyncOutbox[]
