@@ -1,5 +1,8 @@
 const URL_REGEX = /https?:\/\/\S+/g
 // Strip ASCII control chars except whitespace we explicitly handle elsewhere.
+// The control characters in this class are exactly what we're sanitizing OUT
+// of WhatsApp payloads — flagging them as "unexpected" defeats the purpose.
+// eslint-disable-next-line no-control-regex
 const CONTROL_CHARS_REGEX = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g
 
 // Sanitize a string for use as a WhatsApp utility template variable.

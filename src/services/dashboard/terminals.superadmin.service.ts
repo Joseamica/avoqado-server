@@ -157,9 +157,7 @@ export async function createTerminal(data: {
       const incompatible = merchants.filter(m => !isProviderCompatibleWithBrand(m.provider.code, data.brand!))
       if (incompatible.length > 0) {
         const summary = incompatible.map(m => `${m.id} (${m.provider.code})`).join(', ')
-        throw new IncompatibleDeviceError(
-          `Cannot assign incompatible merchants to ${data.brand} terminal: ${summary}`,
-        )
+        throw new IncompatibleDeviceError(`Cannot assign incompatible merchants to ${data.brand} terminal: ${summary}`)
       }
     }
   }
@@ -344,9 +342,7 @@ export async function updateTerminal(
       throw new NotFoundError(`Target venue ${data.venueId} not found`)
     }
     venueChanged = true
-    logger.info(
-      `Moving terminal ${terminalId} from venue ${terminal.venueId} → ${data.venueId} (clearing assignedMerchantIds)`,
-    )
+    logger.info(`Moving terminal ${terminalId} from venue ${terminal.venueId} → ${data.venueId} (clearing assignedMerchantIds)`)
   }
 
   // ---------------------------------------------------------------------------
@@ -369,9 +365,7 @@ export async function updateTerminal(
         },
       })
 
-      const incompatible = assignedMerchants.filter(
-        m => !isProviderCompatibleWithBrand(m.provider.code, data.brand!),
-      )
+      const incompatible = assignedMerchants.filter(m => !isProviderCompatibleWithBrand(m.provider.code, data.brand!))
 
       if (incompatible.length > 0) {
         if (!data.forceUnassign) {
@@ -408,9 +402,7 @@ export async function updateTerminal(
               venue: { select: { id: true, name: true, slug: true } },
             },
           })
-          logger.info(
-            `Terminal ${terminalId} brand changed atomically with merchant pruning`,
-          )
+          logger.info(`Terminal ${terminalId} brand changed atomically with merchant pruning`)
           return updated
         })
       }

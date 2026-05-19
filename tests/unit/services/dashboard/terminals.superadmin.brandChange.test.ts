@@ -98,9 +98,7 @@ describe('updateTerminal — brand-change warning guard (Task 12)', () => {
     const err = caught as TerminalBrandChangeBlocked
     expect(err.statusCode).toBe(409)
     expect(err.code).toBe('TERMINAL_BRAND_CHANGE_BLOCKED')
-    expect(err.details.incompatibleMerchants).toEqual([
-      { id: 'ma-angelpay-1', name: 'AngelPay Merchant 1', code: 'ANGELPAY' },
-    ])
+    expect(err.details.incompatibleMerchants).toEqual([{ id: 'ma-angelpay-1', name: 'AngelPay Merchant 1', code: 'ANGELPAY' }])
     expect(mockedPrisma.terminal.update).not.toHaveBeenCalled()
     expect(mockedPrisma.__tx.terminal.update).not.toHaveBeenCalled()
     expect(mockedPrisma.$transaction).not.toHaveBeenCalled()

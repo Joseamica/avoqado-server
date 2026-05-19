@@ -52,6 +52,7 @@ import * as tokenBudgetController from '../controllers/dashboard/token-budget.da
 import * as tpvController from '../controllers/dashboard/tpv.dashboard.controller'
 import * as tpvCommandController from '../controllers/dashboard/tpv-command.dashboard.controller'
 import * as venueController from '../controllers/dashboard/venue.dashboard.controller'
+import * as venueChatDashController from '../controllers/dashboard/venueChat.dashboard.controller'
 import * as venueKycController from '../controllers/dashboard/venueKyc.controller'
 import * as venueFeatureController from '../controllers/dashboard/venueFeature.dashboard.controller'
 import * as saleVerificationController from '../controllers/dashboard/sale-verification.dashboard.controller'
@@ -10630,6 +10631,28 @@ router.delete(
   authenticateTokenMiddleware,
   checkPermission('tpv-messages:send'),
   tpvMessageController.cancelMessage,
+)
+
+// ---- Venue Chat (WhatsApp relay) admin endpoints ----
+// venues:manage gates the same admin actions as suspend/close/update — these
+// are venue-config mutations, not casual reads. Status read uses venues:read.
+router.post(
+  '/venues/:venueId/chat/activation',
+  authenticateTokenMiddleware,
+  checkPermission('venues:manage'),
+  venueChatDashController.postActivation,
+)
+router.get(
+  '/venues/:venueId/chat/status',
+  authenticateTokenMiddleware,
+  checkPermission('venues:read'),
+  venueChatDashController.getChatStatus,
+)
+router.post(
+  '/venues/:venueId/chat/deactivate',
+  authenticateTokenMiddleware,
+  checkPermission('venues:manage'),
+  venueChatDashController.deactivate,
 )
 
 export default router

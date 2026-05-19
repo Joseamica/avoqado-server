@@ -5,9 +5,9 @@ import prisma from '@/utils/prismaClient'
 import { Prisma, ProductType, StaffRole } from '@prisma/client'
 import { AILearningService } from './ai-learning.service'
 import { SqlValidationService } from './sql-validation.service'
-import { SharedQueryService } from './shared-query.service'
+import { SharedQueryService, type DateRangeSpec } from './shared-query.service'
 import { randomUUID } from 'crypto'
-import { type RelativeDateRange } from '@/utils/datetime'
+import { DEFAULT_TIMEZONE, type RelativeDateRange } from '@/utils/datetime'
 // Note: Date filter examples are defined in buildSchemaContext() below.
 // The getSqlDateFilter utility from @/utils/datetime can be used for manual SQL generation if needed.
 
@@ -30,6 +30,7 @@ import { ActionEngine } from './chatbot-actions/action-engine.service'
 import { ActionContext } from './chatbot-actions/types'
 import { registerAllActions } from './chatbot-actions/definitions'
 import { ConversationOrchestratorService } from './chatbot-conversation/conversation-orchestrator.service'
+import { isCustomDateRangeSpec, parseCustomDateRange } from './chatbot-conversation/date-range-parser'
 
 interface TextToSqlQuery {
   message: string
@@ -124,7 +125,7 @@ const DATE_RANGE_EXAMPLES_EN: Record<string, string> = {
 
 // Result type for extractDateRangeWithExplicit()
 interface DateRangeExtractionResult {
-  dateRange: RelativeDateRange | undefined
+  dateRange: DateRangeSpec | undefined
   wasExplicit: boolean
 }
 
@@ -340,7 +341,7 @@ interface IntentClassificationResult {
     | 'paymentMethodBreakdown'
     | 'settlementCalendar'
     | 'reservationSummary'
-  dateRange?: RelativeDateRange
+  dateRange?: DateRangeSpec
   confidence: number
   reason: string
   // NEW: Some intents don't require date range (inventory, pending orders, active shifts)
@@ -370,7 +371,7 @@ type SharedIntent = NonNullable<IntentClassificationResult['intent']>
  */
 interface ConversationContext {
   previousIntent?: IntentClassificationResult['intent']
-  previousDateRange?: RelativeDateRange
+  previousDateRange?: DateRangeSpec
   previousQuery?: string
   turnCount: number
 }
@@ -2414,9 +2415,9 @@ Ejemplos de respuestas CORRECTAS:
           // (intentClassification.dateRange || intentClassification.requiresDateRange === false)
           const dateRange = intentClassification.dateRange!
           const responseLanguage = this.detectUserLanguage(query.message)
-          const dateName = (range: RelativeDateRange) => this.formatDateRangeName(range, responseLanguage)
-          const datePrefix = (range: RelativeDateRange) => this.formatDateRangeSentencePrefix(range, responseLanguage)
-          const dateAdverbial = (range: RelativeDateRange) => this.formatDateRangeAdverbial(range, responseLanguage)
+          const dateName = (range: DateRangeSpec) => this.formatDateRangeName(range, responseLanguage)
+          const datePrefix = (range: DateRangeSpec) => this.formatDateRangeSentencePrefix(range, responseLanguage)
+          const dateAdverbial = (range: DateRangeSpec) => this.formatDateRangeAdverbial(range, responseLanguage)
           const formatMoney = (amount: number, currency: string = 'MXN') =>
             new Intl.NumberFormat(responseLanguage === 'en' ? 'en-US' : 'es-MX', {
               style: 'currency',
@@ -3995,7 +3996,7 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
   private generateVisualization(
     intent: IntentClassificationResult['intent'],
     data: any,
-    dateRange?: RelativeDateRange,
+    dateRange?: DateRangeSpec,
     includeVisualization?: boolean,
   ): VisualizationResult | undefined {
     // If visualization not requested, return undefined (skip silently)
@@ -4423,7 +4424,7 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
   private generateFallbackVisualization(
     intent: IntentClassificationResult['intent'],
     data: any,
-    dateRange?: RelativeDateRange,
+    dateRange?: DateRangeSpec,
   ): VisualizationResult {
     try {
       const periodLabel = dateRange ? this.formatDateRangeName(dateRange) : 'Resultado'
@@ -7533,6 +7534,7 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
       deterministicClassification.isSimpleQuery &&
       deterministicClassification.intent &&
       (this.isRealTimeSharedIntent(deterministicClassification.intent) ||
+        this.isCustomDateRange(deterministicClassification.dateRange) ||
         deterministicClassification.intent === 'settlementCalendar' ||
         deterministicClassification.intent === 'reservationSummary' ||
         deterministicClassification.intent === 'productSales')
@@ -8007,8 +8009,21 @@ Responde SOLO JSON (sin markdown):
    * - "último mes" → lastMonth
    * - etc.
    */
-  private extractDateRange(message: string): RelativeDateRange | undefined {
+  private extractCustomDateRange(message: string): DateRangeSpec | undefined {
+    return parseCustomDateRange(message)
+  }
+
+  private isCustomDateRange(dateRange?: DateRangeSpec): dateRange is { from: Date; to: Date } {
+    return isCustomDateRangeSpec(dateRange)
+  }
+
+  private extractDateRange(message: string): DateRangeSpec | undefined {
     const lowerMessage = message.toLowerCase()
+
+    const customRange = this.extractCustomDateRange(message)
+    if (customRange) {
+      return customRange
+    }
 
     // Today
     if (lowerMessage.includes('hoy') || lowerMessage.includes('today')) {
@@ -8107,7 +8122,7 @@ Responde SOLO JSON (sin markdown):
     }
   }
 
-  private extractRecentDateRangeFromHistory(conversationHistory?: Array<{ role: string; content: string }>): RelativeDateRange | undefined {
+  private extractRecentDateRangeFromHistory(conversationHistory?: Array<{ role: string; content: string }>): DateRangeSpec | undefined {
     if (!conversationHistory || conversationHistory.length === 0) return undefined
 
     const recentTurns = [...conversationHistory].reverse().slice(0, 4)
@@ -8130,7 +8145,11 @@ Responde SOLO JSON (sin markdown):
   /**
    * Format date range name for natural language responses
    */
-  private formatDateRangeName(dateRange: RelativeDateRange, language: 'es' | 'en' = 'es'): string {
+  private formatDateRangeName(dateRange: DateRangeSpec, language: 'es' | 'en' = 'es'): string {
+    if (this.isCustomDateRange(dateRange)) {
+      return this.formatCustomDateRangeName(dateRange, language)
+    }
+
     const namesEs: Record<RelativeDateRange, string> = {
       today: 'hoy',
       yesterday: 'ayer',
@@ -8157,7 +8176,30 @@ Responde SOLO JSON (sin markdown):
     return names[dateRange] || dateRange
   }
 
-  private formatDateRangeSentencePrefix(dateRange: RelativeDateRange, language: 'es' | 'en' = 'es'): string {
+  private formatCustomDateRangeName(dateRange: { from: Date; to: Date }, language: 'es' | 'en' = 'es'): string {
+    const locale = language === 'en' ? 'en-US' : 'es-MX'
+    const from = new Intl.DateTimeFormat(locale, {
+      day: 'numeric',
+      month: 'long',
+      year: dateRange.from.getFullYear() === dateRange.to.getFullYear() ? undefined : 'numeric',
+      timeZone: DEFAULT_TIMEZONE,
+    }).format(dateRange.from)
+    const to = new Intl.DateTimeFormat(locale, {
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+      timeZone: DEFAULT_TIMEZONE,
+    }).format(dateRange.to)
+
+    return language === 'en' ? `from ${from} to ${to}` : `del ${from} al ${to}`
+  }
+
+  private formatDateRangeSentencePrefix(dateRange: DateRangeSpec, language: 'es' | 'en' = 'es'): string {
+    if (this.isCustomDateRange(dateRange)) {
+      const formattedRange = this.formatCustomDateRangeName(dateRange, language)
+      return language === 'en' ? `In the period ${formattedRange}` : `En el período ${formattedRange}`
+    }
+
     if (language === 'en') {
       if (dateRange === 'today') return 'Today'
       if (dateRange === 'yesterday') return 'Yesterday'
@@ -8169,7 +8211,11 @@ Responde SOLO JSON (sin markdown):
     return `En ${this.formatDateRangeName(dateRange)}`
   }
 
-  private formatDateRangeAdverbial(dateRange: RelativeDateRange, language: 'es' | 'en' = 'es'): string {
+  private formatDateRangeAdverbial(dateRange: DateRangeSpec, language: 'es' | 'en' = 'es'): string {
+    if (this.isCustomDateRange(dateRange)) {
+      return this.formatCustomDateRangeName(dateRange, language)
+    }
+
     if (language === 'en') {
       if (dateRange === 'today') return 'today'
       if (dateRange === 'yesterday') return 'yesterday'
@@ -8193,7 +8239,11 @@ Responde SOLO JSON (sin markdown):
    *
    * Example: "En este mes (nov 1 - nov 25)"
    */
-  private formatDateRangeForResponse(dateRange: RelativeDateRange, language: 'es' | 'en' = 'es'): string {
+  private formatDateRangeForResponse(dateRange: DateRangeSpec, language: 'es' | 'en' = 'es'): string {
+    if (this.isCustomDateRange(dateRange)) {
+      return this.formatCustomDateRangeName(dateRange, language)
+    }
+
     const periodName = this.formatDateRangeName(dateRange, language)
 
     // Calculate actual dates for the period
@@ -8485,7 +8535,11 @@ Responde SOLO JSON (sin markdown):
    * @param currentPeriod - The current date range
    * @returns The previous period for comparison, or undefined if no comparison makes sense
    */
-  private getComparisonPeriod(currentPeriod: RelativeDateRange): RelativeDateRange | undefined {
+  private getComparisonPeriod(currentPeriod: DateRangeSpec): RelativeDateRange | undefined {
+    if (this.isCustomDateRange(currentPeriod)) {
+      return undefined
+    }
+
     const comparisonMap: Partial<Record<RelativeDateRange, RelativeDateRange>> = {
       today: 'yesterday',
       thisWeek: 'lastWeek',
@@ -8543,7 +8597,7 @@ Responde SOLO JSON (sin markdown):
    */
   private async getSalesComparison(
     venueId: string,
-    currentPeriod: RelativeDateRange,
+    currentPeriod: DateRangeSpec,
     currentValue: number,
     language: 'es' | 'en' = 'es',
   ): Promise<string> {
@@ -8565,7 +8619,7 @@ Responde SOLO JSON (sin markdown):
    */
   private async getAverageTicketComparison(
     venueId: string,
-    currentPeriod: RelativeDateRange,
+    currentPeriod: DateRangeSpec,
     currentValue: number,
     language: 'es' | 'en' = 'es',
   ): Promise<string> {
@@ -8992,6 +9046,9 @@ ${JSON.stringify(input, null, 2)}
     if (this.isTopProductRevenueQuestion(normalizedMessage)) {
       return null
     }
+    if (this.extractCustomDateRange(message)) {
+      return null
+    }
 
     const patterns = [
       /\bcu[aá]nt[oa]s?\s+(.+?)\s+(?:(?:he|has|ha|hemos|han)\s+)?(?:vend[ií]do|vendido|vend[ií]|vendi|vendimos|vendieron|salieron|se\s+vendieron)\b/,
@@ -9017,9 +9074,9 @@ ${JSON.stringify(input, null, 2)}
       }
 
       const isDateOnly =
-        /\b(hoy|ayer|semana|mes|año|ano|dia|dias|ultimos|últimos|pasad[oa]s?|today|yesterday|week|month|year|days?|last|this)\b/.test(
+        /\b(hoy|ayer|semana|mes|año|ano|dia|dias|ultimos|últimos|pasad[oa]s?|today|yesterday|week|month|year|days?|last|this|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)\b/.test(
           cleaned,
-        )
+        ) || /\b\d{1,2}\b/.test(cleaned)
       const isGenericDimension = /\b(categoria|categorias|category|categories|mesero|staff|cliente|clientes|customer|customers)\b/.test(
         cleaned,
       )

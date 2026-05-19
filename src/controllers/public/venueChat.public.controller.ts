@@ -1,6 +1,12 @@
 import { Request, Response } from 'express'
 
-import { appendCustomerMessage, createSessionWithIdempotency, listMessages, maybeUpdateCustomerSeen } from '@/services/venueChat.service'
+import {
+  appendCustomerMessage,
+  createSessionWithIdempotency,
+  listMessages,
+  maybeUpdateCustomerSeen,
+  resumeSessionWithEmail,
+} from '@/services/venueChat.service'
 
 // POST /api/v1/public/venue-chat/sessions
 // Creates a brand-new chat session OR returns 409 on nonce reuse / venue not
@@ -69,4 +75,17 @@ export async function getSession(req: Request, res: Response) {
     sessionStatus: session.status,
     createdAt: session.createdAt,
   })
+}
+
+// POST /api/v1/public/venue-chat/sessions/:id/resume
+// Used by the email "you have a reply" link: widget reads sessionId from the
+// URL fragment, prompts the customer for their email, and exchanges that for
+// a fresh accessToken. Generic 404 on any failure — never reveals whether
+// the session exists, was already closed, or the email mismatched.
+export async function postResume(req: Request, res: Response) {
+  const sessionId = req.params.id
+  const { email } = req.body
+  const result = await resumeSessionWithEmail({ sessionId, email })
+  if (result.kind === 'NOT_FOUND') return res.status(404).json({ error: 'not_found' })
+  return res.status(200).json({ accessToken: result.accessToken })
 }

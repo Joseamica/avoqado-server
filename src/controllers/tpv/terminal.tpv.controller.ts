@@ -5,7 +5,7 @@ import { getEffectivePaymentConfig } from '@/services/organization-payment-confi
 import { computeOverrides, getOrgDefaultsForTerminal } from '@/services/dashboard/tpv.dashboard.service'
 import { isProviderCompatibleWithBrand } from '@/lib/providerDeviceCompatibility'
 import { decryptCredentials } from '@/services/superadmin/merchantAccount.service'
-import { getAngelPayUserAccountForTerminal } from '@/services/superadmin/angelpayUserAccount.service'
+import { getAngelPayUserAccountForTerminal, getAngelPayUserAccountsForTerminal } from '@/services/superadmin/angelpayUserAccount.service'
 import prisma from '@/utils/prismaClient'
 import logger from '../../config/logger'
 import { NotFoundError } from '../../errors/AppError'
@@ -230,6 +230,12 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
       externalMerchantId: true,
       angelpayAffiliation: true,
       angelpayMerchantName: true,
+      // Multi-AngelPay per venue (2026-05-18) — links merchant to the
+      // AngelPay user account it was discovered under. TPV uses this to
+      // call `switchAccount(accountId)` when the cashier picks a merchant
+      // owned by a different AngelPay login than the SDK currently has
+      // authenticated. Null for legacy/un-backfilled rows.
+      angelpayUserAccountId: true,
       provider: { select: { code: true } }, // Include provider code for multi-processor routing
     }
 
@@ -319,6 +325,9 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
       isActive: ma.active,
       angelpayAffiliation: ma.angelpayAffiliation,
       angelpayMerchantName: ma.angelpayMerchantName,
+      // Multi-AngelPay per venue (2026-05-18). Lets the TPV switch to the
+      // correct AngelPay user account when this merchant is selected.
+      angelpayUserAccountId: ma.angelpayUserAccountId ?? null,
     }))
 
     // Step 4: Extract TPV settings from terminal config
@@ -345,34 +354,66 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
     // AngelPayUserAccount. PIN is decrypted server-side and travels over TLS
     // only to a terminal-token-authenticated endpoint. The TPV must never
     // persist or log the plaintext PIN (see spec §4.5b PIN handling rules).
-    let angelpayAuth: {
+    //
+    // Multi-account (2026-05-18): we now ALSO emit `angelpayAccounts` (list)
+    // with EVERY ACTIVE account so the TPV can `switchAccount(accountId)` when
+    // the cashier picks a merchant owned by a different login than the SDK
+    // currently has authenticated. The single `angelpayAuth` field is preserved
+    // for backward compat — populated with the FIRST account.
+    type AngelPayAuthPayload = {
       accountId: string
       email: string
       pin: string
       environment: string
-    } | null = null
+    }
+    let angelpayAuth: AngelPayAuthPayload | null = null
+    let angelpayAccounts: AngelPayAuthPayload[] = []
 
     if (terminal.brand === 'NEXGO') {
       try {
-        const account = await getAngelPayUserAccountForTerminal(serialNumber)
-        if (account && account.status === 'ACTIVE' && account.pinEncrypted) {
-          angelpayAuth = {
-            accountId: account.id,
-            email: account.email,
-            pin: decryptCredentials(account.pinEncrypted) as string,
-            environment: account.environment,
+        const accounts = await getAngelPayUserAccountsForTerminal(serialNumber)
+        for (const account of accounts) {
+          if (account.status === 'ACTIVE' && account.pinEncrypted) {
+            const payload: AngelPayAuthPayload = {
+              accountId: account.id,
+              email: account.email,
+              pin: decryptCredentials(account.pinEncrypted) as string,
+              environment: account.environment,
+            }
+            angelpayAccounts.push(payload)
+          } else {
+            logger.info('[Terminal Config] Skipping non-ACTIVE AngelPay account in payload', {
+              terminalId: terminal.id,
+              accountId: account.id,
+              status: account.status,
+            })
           }
-          logger.info('[Terminal Config] Attached angelpayAuth payload', {
+        }
+        // Single-account backward-compat field: first ACTIVE wins. Falls back to
+        // the legacy single-account helper only if the multi-account list is
+        // empty AND the legacy helper finds a row (shouldn't happen — the
+        // multi-account helper supersedes — but keeps the contract stable).
+        if (angelpayAccounts.length > 0) {
+          angelpayAuth = angelpayAccounts[0]
+          logger.info('[Terminal Config] Attached angelpayAuth payload(s)', {
             terminalId: terminal.id,
-            accountId: account.id,
-            environment: account.environment,
+            accountCount: angelpayAccounts.length,
+            primaryAccountId: angelpayAuth.accountId,
+            environment: angelpayAuth.environment,
           })
-        } else if (account) {
-          logger.info('[Terminal Config] AngelPayUserAccount present but not ACTIVE — omitting angelpayAuth', {
-            terminalId: terminal.id,
-            accountId: account.id,
-            status: account.status,
-          })
+        } else {
+          // Fallback to legacy single-fetch path in case multi-fetch returns
+          // nothing but the legacy fetch still finds something (defensive).
+          const legacyAccount = await getAngelPayUserAccountForTerminal(serialNumber)
+          if (legacyAccount && legacyAccount.status === 'ACTIVE' && legacyAccount.pinEncrypted) {
+            angelpayAuth = {
+              accountId: legacyAccount.id,
+              email: legacyAccount.email,
+              pin: decryptCredentials(legacyAccount.pinEncrypted) as string,
+              environment: legacyAccount.environment,
+            }
+            angelpayAccounts = [angelpayAuth]
+          }
         }
       } catch (err) {
         // Never break terminal config fetch on AngelPay payload failure — the
@@ -391,6 +432,7 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
       serialNumber: terminal.serialNumber,
       merchantCount: transformedMerchants.length,
       angelpayAuthAttached: angelpayAuth !== null,
+      angelpayAccountsCount: angelpayAccounts.length,
       tpvSettings,
     })
 
@@ -408,7 +450,11 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
         },
         merchantAccounts: transformedMerchants,
         tpvSettings, // Per-terminal payment flow configuration
-        angelpayAuth, // Task 13 / spec §4.5 — optional; null unless terminal is NEXGO with ACTIVE account
+        angelpayAuth, // Task 13 / spec §4.5 — optional single-account back-compat; null unless terminal is NEXGO with ACTIVE account
+        // Multi-account (2026-05-18) — full list of ACTIVE AngelPay user accounts
+        // for the venue. Always present (possibly empty []) when the terminal
+        // is NEXGO; omitted entirely on non-NEXGO terminals.
+        angelpayAccounts: terminal.brand === 'NEXGO' ? angelpayAccounts : undefined,
       },
     })
   } catch (error) {

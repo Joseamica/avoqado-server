@@ -39,6 +39,7 @@ export const TpvCommandTypeSchema = z.enum([
   'UPDATE_CONFIG',
   'REFRESH_MENU',
   'UPDATE_MERCHANT',
+  'FETCH_ANGELPAY_MERCHANTS', // Ask TPV to re-auth AngelPay SDK + report discovered merchants
   // Automation Commands
   'SCHEDULE',
   'GEOFENCE_TRIGGER',

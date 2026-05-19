@@ -246,6 +246,13 @@ export async function getMerchantAccounts(filters?: { providerId?: string; activ
           type: true,
         },
       },
+      // Multi-account AngelPay: expose the linked AngelPayUserAccount email
+      // so the dashboard's edit-merchant dialog can show "Cuenta vinculada:
+      // contacto@avoqado.io" instead of the raw FK id. Only AngelPay
+      // merchants have this populated; other providers ignore it.
+      angelpayUserAccount: {
+        select: { id: true, email: true, status: true, environment: true, venueId: true },
+      },
       venueConfigsPrimary: {
         select: { venue: { select: { id: true, name: true, slug: true } } },
       },
@@ -425,12 +432,17 @@ export async function createMerchantAccount(data: CreateMerchantAccountData) {
     if (!/^\d+$/.test(data.externalMerchantId)) {
       throw new ValidationError('AngelPay externalMerchantId must be a numeric string')
     }
-    const angelpayAccount = await prisma.angelPayUserAccount.findUnique({
-      where: { venueId: data.venueId },
+    // Multi-account per venue (2026-05-18): venueId alone is no longer unique.
+    // Require at least ONE active account on the venue; the dashboard form has
+    // a per-account "Reservar slot"/discovery UX that links the eventual
+    // MerchantAccount to the right AngelPay login via `angelpayUserAccountId`.
+    const angelpayAccount = await prisma.angelPayUserAccount.findFirst({
+      where: { venueId: data.venueId, status: 'ACTIVE' },
+      orderBy: { createdAt: 'asc' },
     })
-    if (!angelpayAccount || angelpayAccount.status !== 'ACTIVE') {
+    if (!angelpayAccount) {
       throw new ValidationError(
-        `AngelPay account is in state ${angelpayAccount?.status ?? 'NONE'}; cannot create merchant accounts until ACTIVE`,
+        `Venue has no ACTIVE AngelPay user account; cannot create merchant accounts until at least one account is ACTIVE`,
       )
     }
     // Auth lives on AngelPayUserAccount; force placeholder credentials so the
@@ -1097,6 +1109,18 @@ export interface DiscoveredAngelPayMerchant {
 export async function upsertDiscoveredAngelPayMerchants(input: {
   venueId: string
   merchants: DiscoveredAngelPayMerchant[]
+  /**
+   * Optional — when provided, the upsert links new MerchantAccount rows (and
+   * upgraded placeholders) to this AngelPayUserAccount via the
+   * `angelpayUserAccountId` FK. Required for the TPV's `switchAccount(accountId)`
+   * flow when a venue has more than one AngelPay login: without the link, the
+   * cashier-side merchant picker can't route back to "which AngelPay account
+   * owns this merchant?".
+   *
+   * Existing rows are NOT re-linked — operators can manually re-attribute
+   * via the dashboard if discovery first happened under a different account.
+   */
+  angelpayUserAccountId?: string
 }): Promise<{ created: number; updated: number; skipped: number }> {
   const angelpayProvider = await prisma.paymentProvider.findUnique({ where: { code: 'ANGELPAY' } })
   if (!angelpayProvider) {
@@ -1128,26 +1152,203 @@ export async function upsertDiscoveredAngelPayMerchants(input: {
     })
 
     if (existing) {
+      // Backfill the FK lazily: if the existing row has no AngelPay user
+      // account link yet AND this discovery run carries one, fill it in.
+      // Don't OVERRIDE an existing link — operators may have intentionally
+      // re-attributed via the dashboard.
+      const shouldLinkAccount = input.angelpayUserAccountId && !existing.angelpayUserAccountId
       await prisma.merchantAccount.update({
         where: { id: existing.id },
         data: {
           angelpayAffiliation: m.affiliationNumber,
           angelpayMerchantName: m.name,
           // Intentionally NOT touching `active` — respects admin approval.
+          ...(shouldLinkAccount && { angelpayUserAccountId: input.angelpayUserAccountId }),
         },
       })
       updated++
+
+      // Multi-account shared-merchant case (2026-05-19): when account B (e.g.
+      // contacto@) reports a merchant that account A (e.g. ventas@) already
+      // brought into the DB, the unique `(providerId, externalMerchantId)`
+      // constraint blocks creating a separate row. The placeholder reserved
+      // for account B would then sit AWAITING_ forever. Resolve by repointing
+      // B's reserved slot to the existing merchant + deleting the orphan
+      // placeholder. Routing still works because TPV's `switchAccount(B)`
+      // flips the SDK session at payment time, regardless of which account
+      // the MerchantAccount row's `angelpayUserAccountId` FK points to.
+      if (input.angelpayUserAccountId) {
+        const orphanPlaceholder = await prisma.merchantAccount.findFirst({
+          where: {
+            providerId: angelpayProvider.id,
+            externalMerchantId: { startsWith: `AWAITING_${input.venueId}_` },
+            angelpayUserAccountId: input.angelpayUserAccountId,
+          },
+          orderBy: { createdAt: 'asc' },
+        })
+        if (orphanPlaceholder && orphanPlaceholder.id !== existing.id) {
+          await prisma.$transaction(async tx => {
+            const cfg = await tx.venuePaymentConfig.findUnique({
+              where: { venueId: input.venueId },
+            })
+            if (cfg) {
+              const updates: Record<string, string> = {}
+              if (cfg.primaryAccountId === orphanPlaceholder.id) updates.primaryAccountId = existing.id
+              if (cfg.secondaryAccountId === orphanPlaceholder.id) updates.secondaryAccountId = existing.id
+              if (cfg.tertiaryAccountId === orphanPlaceholder.id) updates.tertiaryAccountId = existing.id
+              if (Object.keys(updates).length > 0) {
+                await tx.venuePaymentConfig.update({
+                  where: { venueId: input.venueId },
+                  data: updates,
+                })
+              }
+            }
+            // Clean FK dependents before deleting the placeholder.
+            // `ProviderCostStructure.merchantAccountId` has no CASCADE so an
+            // unguarded delete throws P2003 (seen 2026-05-19 on contacto@ in
+            // venue cmpaiwleb001f9kh88csbymkm — placeholder had "1 costo"
+            // from reserveSlot's default cost structure seeding). Delete cost
+            // rows first; intentionally no equivalent loop for terminals or
+            // venuePaymentConfig because both were either repointed above
+            // (config) or never assigned (placeholder was inactive).
+            await tx.providerCostStructure.deleteMany({
+              where: { merchantAccountId: orphanPlaceholder.id },
+            })
+            await tx.merchantAccount.delete({ where: { id: orphanPlaceholder.id } })
+          })
+          logger.info('Repointed reserved slot to existing shared merchant + deleted orphan placeholder', {
+            venueId: input.venueId,
+            angelpayUserAccountId: input.angelpayUserAccountId,
+            angelpayId: m.angelpayId,
+            existingMerchantAccountId: existing.id,
+            deletedPlaceholderId: orphanPlaceholder.id,
+            oldExternalId: orphanPlaceholder.externalMerchantId,
+          })
+        }
+      }
     } else {
-      await prisma.merchantAccount.create({
-        data: {
-          providerId: angelpayProvider.id,
-          externalMerchantId,
-          displayName: m.name,
-          active: false, // PENDING_REVIEW — admin approves in dashboard
-          credentialsEncrypted: encryptCredentials({}), // placeholder (auth lives on AngelPayUserAccount)
-          angelpayAffiliation: m.affiliationNumber,
-          angelpayMerchantName: m.name,
-        },
+      // Placeholder upgrade path: if admin reserved a slot from the dashboard,
+      // there's a MerchantAccount in this venue with externalMerchantId like
+      // `AWAITING_<venueId>_*`. Upgrade THIS account's placeholder first if
+      // one exists (multi-account safety — without the `angelpayUserAccountId`
+      // filter the query would grab ANY placeholder in the venue and upgrade
+      // the wrong account's reserved slot). Fall back to "any placeholder in
+      // venue" only when no account-scoped match exists, preserving the
+      // single-account legacy behavior.
+      const placeholderQuery = {
+        providerId: angelpayProvider.id,
+        externalMerchantId: { startsWith: `AWAITING_${input.venueId}_` },
+      }
+      const placeholderInVenue = input.angelpayUserAccountId
+        ? ((await prisma.merchantAccount.findFirst({
+            where: { ...placeholderQuery, angelpayUserAccountId: input.angelpayUserAccountId },
+            orderBy: { createdAt: 'asc' },
+          })) ??
+          (await prisma.merchantAccount.findFirst({
+            where: { ...placeholderQuery, angelpayUserAccountId: null },
+            orderBy: { createdAt: 'asc' },
+          })))
+        : await prisma.merchantAccount.findFirst({
+            where: placeholderQuery,
+            orderBy: { createdAt: 'asc' },
+          })
+
+      if (placeholderInVenue) {
+        await prisma.merchantAccount.update({
+          where: { id: placeholderInVenue.id },
+          data: {
+            externalMerchantId, // Replace AWAITING_xxx with the real numeric ID
+            displayName: m.name,
+            active: true,
+            angelpayAffiliation: m.affiliationNumber,
+            angelpayMerchantName: m.name,
+            ...(input.angelpayUserAccountId && { angelpayUserAccountId: input.angelpayUserAccountId }),
+          },
+        })
+        logger.info('Placeholder upgraded with discovered merchant data', {
+          venueId: input.venueId,
+          placeholderId: placeholderInVenue.id,
+          oldExternalId: placeholderInVenue.externalMerchantId,
+          newExternalId: externalMerchantId,
+          angelpayId: m.angelpayId,
+        })
+        created++
+        continue
+      }
+
+      // No placeholder available — zero-touch auto-onboarding: create the
+      // merchant as active + atomically attach to the venue's first empty
+      // VenuePaymentConfig slot. Without the slot attachment, the new merchant
+      // exists in DB but isn't routable from the TPV (the
+      // /tpv/terminals/:serial/config endpoint only returns merchants assigned
+      // to a slot). Without active=true, the dashboard MerchantAccounts page
+      // hides them by default and admins can't tell anything happened.
+      await prisma.$transaction(async tx => {
+        const newAccount = await tx.merchantAccount.create({
+          data: {
+            providerId: angelpayProvider.id,
+            externalMerchantId,
+            displayName: m.name,
+            active: true, // Auto-approved — TPV already authenticated successfully
+            credentialsEncrypted: encryptCredentials({}), // placeholder (auth lives on AngelPayUserAccount)
+            angelpayAffiliation: m.affiliationNumber,
+            angelpayMerchantName: m.name,
+            ...(input.angelpayUserAccountId && { angelpayUserAccountId: input.angelpayUserAccountId }),
+          },
+        })
+
+        // Pick the first empty VenuePaymentConfig slot for this venue.
+        // PRIMARY slot in the schema is non-null, so if no config row exists we
+        // must create it with the new merchant in primary. Otherwise we update
+        // the first empty slot (secondary → tertiary).
+        const existingConfig = await tx.venuePaymentConfig.findUnique({
+          where: { venueId: input.venueId },
+        })
+        if (!existingConfig) {
+          await tx.venuePaymentConfig.create({
+            data: {
+              venueId: input.venueId,
+              primaryAccountId: newAccount.id,
+            },
+          })
+          logger.info('Auto-assigned to PRIMARY (new VenuePaymentConfig)', {
+            venueId: input.venueId,
+            merchantAccountId: newAccount.id,
+            angelpayId: m.angelpayId,
+          })
+        } else if (!existingConfig.secondaryAccountId) {
+          await tx.venuePaymentConfig.update({
+            where: { venueId: input.venueId },
+            data: { secondaryAccountId: newAccount.id },
+          })
+          logger.info('Auto-assigned to SECONDARY', {
+            venueId: input.venueId,
+            merchantAccountId: newAccount.id,
+            angelpayId: m.angelpayId,
+          })
+        } else if (!existingConfig.tertiaryAccountId) {
+          await tx.venuePaymentConfig.update({
+            where: { venueId: input.venueId },
+            data: { tertiaryAccountId: newAccount.id },
+          })
+          logger.info('Auto-assigned to TERTIARY', {
+            venueId: input.venueId,
+            merchantAccountId: newAccount.id,
+            angelpayId: m.angelpayId,
+          })
+        } else {
+          // All 3 slots full — leave the merchant active but unassigned.
+          // Admin must manually reassign via the approve endpoint to make it
+          // routable. Log a clear warning so this scenario is observable.
+          logger.warn('All VenuePaymentConfig slots full — merchant created but NOT assigned', {
+            venueId: input.venueId,
+            merchantAccountId: newAccount.id,
+            angelpayId: m.angelpayId,
+            primaryAccountId: existingConfig.primaryAccountId,
+            secondaryAccountId: existingConfig.secondaryAccountId,
+            tertiaryAccountId: existingConfig.tertiaryAccountId,
+          })
+        }
       })
       created++
     }
@@ -1245,9 +1446,7 @@ export async function approveDiscoveredAngelPayMerchant(input: {
     )
   }
   if (merchantAccount.active) {
-    throw new BadRequestError(
-      `MerchantAccount ${merchantAccountId} is already active — nothing to approve`,
-    )
+    throw new BadRequestError(`MerchantAccount ${merchantAccountId} is already active — nothing to approve`)
   }
 
   const slotColumn = SLOT_TO_COLUMN[slot]
@@ -1256,7 +1455,7 @@ export async function approveDiscoveredAngelPayMerchant(input: {
   }
 
   // ---- Transaction: flip active + assign slot ----
-  const result = await prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async tx => {
     const updatedMerchant = await tx.merchantAccount.update({
       where: { id: merchantAccountId },
       data: { active: true },
@@ -1274,9 +1473,7 @@ export async function approveDiscoveredAngelPayMerchant(input: {
       // so we can only create from scratch when slot=PRIMARY. Otherwise refuse
       // with a clear message instead of silently demoting.
       if (slot !== 'PRIMARY') {
-        throw new BadRequestError(
-          `Venue ${venueId} has no payment config yet — first approval must target the PRIMARY slot to seed it.`,
-        )
+        throw new BadRequestError(`Venue ${venueId} has no payment config yet — first approval must target the PRIMARY slot to seed it.`)
       }
       updatedConfig = await tx.venuePaymentConfig.create({
         data: {
@@ -1327,9 +1524,7 @@ export async function approveDiscoveredAngelPayMerchant(input: {
           throw new BadRequestError(`Terminal ${terminalId} not found`)
         }
         if (terminal.venueId !== venueId) {
-          throw new BadRequestError(
-            `Terminal ${terminalId} does not belong to venue ${venueId}`,
-          )
+          throw new BadRequestError(`Terminal ${terminalId} does not belong to venue ${venueId}`)
         }
         // Task 11 — brand-compat guard. Rejects e.g. PAX terminal + ANGELPAY merchant.
         await assertMerchantTerminalCompatible(terminalId, merchantAccountId, tx)
@@ -1357,4 +1552,110 @@ export async function approveDiscoveredAngelPayMerchant(input: {
   })
 
   return result
+}
+
+// ============================================================================
+// Placeholder reservation flow: admin reserves a VenuePaymentConfig slot for
+// an AngelPay merchant WITHOUT having the real Merchant ID / Affiliation
+// numbers (those come from AngelPay/TPV). When the TPV authenticates and
+// reports the discovered merchants, `upsertDiscoveredAngelPayMerchants`
+// detects the AWAITING placeholder and UPDATES it with the real IDs instead
+// of creating a duplicate row.
+// ============================================================================
+
+export async function reserveAngelPaySlot(input: {
+  venueId: string
+  slot?: VenuePaymentSlot
+  displayName?: string
+  /**
+   * Optional — when the admin knows up-front which AngelPay login should own
+   * the merchant (multi-account venue: dashboard offers a per-account
+   * "reservar slot" button), link the placeholder to that account so the
+   * subsequent discovery upgrade lands on the correct AngelPay user. When
+   * omitted, the placeholder is unlinked and the next discovery run that
+   * matches it lazily back-fills the FK.
+   */
+  angelpayUserAccountId?: string
+}): Promise<{ merchantAccountId: string; slot: VenuePaymentSlot; externalMerchantId: string }> {
+  const angelpayProvider = await prisma.paymentProvider.findUnique({ where: { code: 'ANGELPAY' } })
+  if (!angelpayProvider) {
+    throw new NotFoundError('PaymentProvider ANGELPAY not found — was seed.ts run?')
+  }
+
+  // Synthetic externalMerchantId that includes venueId for fast lookup later
+  // (see upsertDiscoveredAngelPayMerchants placeholder match).
+  const placeholderExternalId = `AWAITING_${input.venueId}_${Date.now()}`
+
+  return prisma.$transaction(async tx => {
+    const placeholder = await tx.merchantAccount.create({
+      data: {
+        providerId: angelpayProvider.id,
+        externalMerchantId: placeholderExternalId,
+        displayName: input.displayName || 'AngelPay (esperando TPV)',
+        active: false, // Becomes true when TPV discovery upgrades the placeholder
+        credentialsEncrypted: encryptCredentials({}),
+        angelpayAffiliation: 'PENDING',
+        angelpayMerchantName: input.displayName || 'Pendiente',
+        ...(input.angelpayUserAccountId && { angelpayUserAccountId: input.angelpayUserAccountId }),
+      },
+    })
+
+    // Pick the slot: admin-specified, or first empty if not specified.
+    const existingConfig = await tx.venuePaymentConfig.findUnique({
+      where: { venueId: input.venueId },
+    })
+
+    let assignedSlot: VenuePaymentSlot
+    if (!existingConfig) {
+      // No config exists — create with the placeholder in primary (only slot
+      // legal at creation since primaryAccountId is non-null).
+      await tx.venuePaymentConfig.create({
+        data: { venueId: input.venueId, primaryAccountId: placeholder.id },
+      })
+      assignedSlot = 'PRIMARY'
+    } else if (input.slot) {
+      // Admin specified a slot — honor it if empty, throw otherwise.
+      const slotColumn = SLOT_TO_COLUMN[input.slot]
+      const currentOccupant = (existingConfig as any)[slotColumn]
+      if (currentOccupant) {
+        throw new ConflictError(`El slot ${input.slot} ya está ocupado. Escoge otro slot o libéralo primero.`)
+      }
+      await tx.venuePaymentConfig.update({
+        where: { venueId: input.venueId },
+        data: { [slotColumn]: placeholder.id },
+      })
+      assignedSlot = input.slot
+    } else {
+      // Auto-pick first empty slot (skipping PRIMARY since it's non-null,
+      // it's already taken by something).
+      if (!existingConfig.secondaryAccountId) {
+        await tx.venuePaymentConfig.update({
+          where: { venueId: input.venueId },
+          data: { secondaryAccountId: placeholder.id },
+        })
+        assignedSlot = 'SECONDARY'
+      } else if (!existingConfig.tertiaryAccountId) {
+        await tx.venuePaymentConfig.update({
+          where: { venueId: input.venueId },
+          data: { tertiaryAccountId: placeholder.id },
+        })
+        assignedSlot = 'TERTIARY'
+      } else {
+        throw new ConflictError('Los 3 slots del venue están ocupados. Libera uno antes de reservar.')
+      }
+    }
+
+    logger.info('AngelPay slot reserved (placeholder created)', {
+      venueId: input.venueId,
+      merchantAccountId: placeholder.id,
+      slot: assignedSlot,
+      externalMerchantId: placeholderExternalId,
+    })
+
+    return {
+      merchantAccountId: placeholder.id,
+      slot: assignedSlot,
+      externalMerchantId: placeholderExternalId,
+    }
+  })
 }

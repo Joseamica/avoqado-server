@@ -405,8 +405,11 @@ model Venue {
   // Google Calendar Sync (Phase 2 — push)
   calendarSyncOutbox CalendarSyncOutbox[]
 
-  // AngelPay multi-merchant: per-venue user account credentials (D3)
-  angelpayUserAccount AngelPayUserAccount?
+  // AngelPay multi-merchant: per-venue user account credentials (D3).
+  // Multi-account (2026-05-18): a venue can register multiple AngelPay logins
+  // (one per AngelPay merchant when the venue operates several merchants
+  // under different emails). Uniqueness is enforced on (venueId, email).
+  angelpayUserAccounts AngelPayUserAccount[]
 
   // WhatsApp venue chat (v1: customer ↔ venue messaging via WABA relay)
   whatsappContactMode VenueChatMode             @default(WA_ME_FALLBACK)
@@ -3353,6 +3356,16 @@ model MerchantAccount {
   angelpayAffiliation  String?
   angelpayMerchantName String?
 
+  // 🆕 Multi-AngelPay accounts per venue (2026-05-18)
+  // Links a discovered AngelPay MerchantAccount back to the AngelPayUserAccount
+  // (email + PIN) it was discovered under. Required for the TPV to call
+  // `switchAccount(accountId)` when the cashier picks a merchant attached to a
+  // *different* AngelPay login than the SDK currently has authenticated. Null
+  // for legacy rows (backfilled by migration when venue has exactly 1 account)
+  // and for non-AngelPay providers.
+  angelpayUserAccountId String?
+  angelpayUserAccount   AngelPayUserAccount? @relation(fields: [angelpayUserAccountId], references: [id], onDelete: SetNull)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -3360,6 +3373,7 @@ model MerchantAccount {
   @@index([providerId])
   @@index([active])
   @@index([displayOrder])
+  @@index([angelpayUserAccountId])
 }
 
 // ==========================================
@@ -3380,7 +3394,12 @@ enum AngelPayAccountStatus {
 
 model AngelPayUserAccount {
   id      String @id @default(cuid())
-  venueId String @unique
+  // Multi-account per venue (2026-05-18): venueId is no longer unique on its
+  // own. Uniqueness now lives on the (venueId, email) compound — same venue
+  // cannot register the same AngelPay login twice, but it CAN register
+  // multiple distinct logins (e.g. one per AngelPay merchant when the venue
+  // operates several merchants under different emails).
+  venueId String
   venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Restrict)
 
   email        String
@@ -3396,10 +3415,19 @@ model AngelPayUserAccount {
   lastValidatedAt   DateTime?
   lastValidationErr String?
 
+  // Back-reference to MerchantAccount rows discovered/created under this
+  // AngelPay login. Required so the dashboard can show "this account has
+  // discovered N merchants" and so the TPV can attribute discovery reports
+  // to the correct account when an operator runs the FETCH_ANGELPAY_MERCHANTS
+  // socket command.
+  merchantAccounts MerchantAccount[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   createdBy String?
 
+  @@unique([venueId, email])
+  @@index([venueId])
   @@index([status])
 }
 
@@ -6062,6 +6090,7 @@ enum TpvCommandType {
   UPDATE_CONFIG // Push new configuration
   REFRESH_MENU // Force menu refresh
   UPDATE_MERCHANT // Change active merchant
+  FETCH_ANGELPAY_MERCHANTS // Ask the TPV to re-authenticate the AngelPay SDK and report discovered merchants
 
   // Automation Commands
   SCHEDULE // Schedule future command
@@ -7022,6 +7051,7 @@ enum SerializedItemCustodyState {
 enum SerializedItemCollectionReason {
   STAFF_TERMINATED // Baja de empleado
   DAMAGED_SIM // SIM defectuoso
+  SUPERVISOR_COLLECTION // Recolección de Supervisor
 }
 
 // Rollout flag controlling whether markAsSold enforces SIM custody acceptance.

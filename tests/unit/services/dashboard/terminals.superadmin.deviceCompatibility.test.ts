@@ -65,9 +65,7 @@ describe('updateTerminal — device compatibility guard (Task 11)', () => {
       new IncompatibleDeviceError('Cannot assign incompatible merchants to PAX terminal term-pax: ma-angelpay (ANGELPAY)'),
     )
 
-    await expect(
-      updateTerminal('term-pax', { assignedMerchantIds: ['ma-angelpay'] }),
-    ).rejects.toThrow(IncompatibleDeviceError)
+    await expect(updateTerminal('term-pax', { assignedMerchantIds: ['ma-angelpay'] })).rejects.toThrow(IncompatibleDeviceError)
 
     expect(mockedAssert).toHaveBeenCalledWith('term-pax', ['ma-angelpay'])
     expect(mockedPrisma.terminal.update).not.toHaveBeenCalled()

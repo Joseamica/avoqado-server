@@ -23,3 +23,10 @@ export const pollMessagesQuerySchema = z.object({
 export const sessionParamsSchema = z.object({
   id: z.string().min(1, 'sessionId requerido'),
 })
+
+// POST /venue-chat/sessions/:id/resume — proves possession of the on-file
+// email and gets a fresh accessToken. Used by the email "you have a reply"
+// link (which contains only the sessionId in the URL fragment).
+export const resumeSessionBodySchema = z.object({
+  email: z.string().email('Email inválido').max(120),
+})

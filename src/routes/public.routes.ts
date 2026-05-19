@@ -17,6 +17,7 @@ import {
   createSessionBodySchema,
   pollMessagesQuerySchema,
   postMessageBodySchema,
+  resumeSessionBodySchema,
   sessionParamsSchema,
 } from '../schemas/public/venueChat.schema'
 import {
@@ -264,6 +265,15 @@ router.post(
   validateRequest(z.object({ params: sessionParamsSchema, body: postMessageBodySchema })),
   venueChatAuth,
   venueChatController.postMessage,
+)
+
+// Email-link resume: no Bearer auth (whole point is to mint one). writeLimit
+// caps brute-force on email-vs-sessionId combinations to 5/min/IP.
+router.post(
+  '/venue-chat/sessions/:id/resume',
+  writeLimit,
+  validateRequest(z.object({ params: sessionParamsSchema, body: resumeSessionBodySchema })),
+  venueChatController.postResume,
 )
 
 export default router

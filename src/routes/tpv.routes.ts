@@ -6782,26 +6782,14 @@ router.post(
 // mutates AngelPayUserAccount.lastValidatedAt / lastValidationErr /
 // externalUserId; report-merchant-switch is audit-only (structured logs).
 // ==========================================
-router.post(
-  '/angelpay/report-validation',
-  authenticateTokenMiddleware,
-  angelpayValidationController.reportAngelPayValidation,
-)
+router.post('/angelpay/report-validation', authenticateTokenMiddleware, angelpayValidationController.reportAngelPayValidation)
 
-router.post(
-  '/angelpay/report-merchant-switch',
-  authenticateTokenMiddleware,
-  angelpayValidationController.reportAngelPayMerchantSwitch,
-)
+router.post('/angelpay/report-merchant-switch', authenticateTokenMiddleware, angelpayValidationController.reportAngelPayMerchantSwitch)
 
 // Option B workaround: TPV reports merchants from AngelPaySDK.getUserMerchants()
 // after successful auth. Backend upserts MerchantAccount rows with active=false
 // (PENDING_REVIEW) for admin approval in the dashboard. See controller for full
 // design notes and `upsertDiscoveredAngelPayMerchants` for upsert semantics.
-router.post(
-  '/angelpay/report-discovered-merchants',
-  authenticateTokenMiddleware,
-  angelpayValidationController.reportDiscoveredMerchants,
-)
+router.post('/angelpay/report-discovered-merchants', authenticateTokenMiddleware, angelpayValidationController.reportDiscoveredMerchants)
 
 export default router

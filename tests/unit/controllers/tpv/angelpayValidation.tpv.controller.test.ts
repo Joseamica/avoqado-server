@@ -11,14 +11,8 @@
 
 import type { NextFunction, Request, Response } from 'express'
 
-import {
-  reportAngelPayMerchantSwitch,
-  reportAngelPayValidation,
-} from '@/controllers/tpv/angelpayValidation.tpv.controller'
-import {
-  markAngelPayUserAccountValidated,
-  recordAngelPayUserAccountError,
-} from '@/services/superadmin/angelpayUserAccount.service'
+import { reportAngelPayMerchantSwitch, reportAngelPayValidation } from '@/controllers/tpv/angelpayValidation.tpv.controller'
+import { markAngelPayUserAccountValidated, recordAngelPayUserAccountError } from '@/services/superadmin/angelpayUserAccount.service'
 
 jest.mock('@/services/superadmin/angelpayUserAccount.service', () => ({
   markAngelPayUserAccountValidated: jest.fn(),

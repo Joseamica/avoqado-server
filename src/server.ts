@@ -17,6 +17,8 @@ import { startEventConsumer } from './communication/rabbitmq/consumer'
 import { startGcalPullConsumer } from './communication/rabbitmq/gcal-pull-consumer'
 import { startGcalPushConsumer } from './communication/rabbitmq/gcal-push-consumer'
 import { startPosConnectionMonitor } from './jobs/monitorPosConnections'
+import { startStalePendingAlertJob } from './jobs/stalePendingAlert.job'
+import { startVenueChatInactivityCleanupJob } from './jobs/venueChatInactivityCleanup.job'
 import { tpvHealthMonitorJob } from './jobs/tpv-health-monitor.job'
 import { subscriptionCancellationJob } from './jobs/subscription-cancellation.job'
 import { settlementDetectionJob } from './jobs/settlement-detection.job'
@@ -312,6 +314,10 @@ const startApplication = async (retries = 3) => {
 
       // Start POS connection monitor
       startPosConnectionMonitor()
+
+      // Start venue-chat relay supervisors (stale-PENDING alert + inactivity cleanup)
+      startStalePendingAlertJob()
+      startVenueChatInactivityCleanupJob()
 
       // Start TPV health monitor
       tpvHealthMonitorJob.start()

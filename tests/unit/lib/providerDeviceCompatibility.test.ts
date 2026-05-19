@@ -73,9 +73,7 @@ describe('providerDeviceCompatibility', () => {
     it('throws IncompatibleDeviceError when venue has zero NEXGO terminals (provider=ANGELPAY)', async () => {
       mockedPrisma.terminal.count.mockResolvedValue(0)
 
-      await expect(assertVenueHasCompatibleTerminal('venue-1', 'ANGELPAY')).rejects.toBeInstanceOf(
-        IncompatibleDeviceError,
-      )
+      await expect(assertVenueHasCompatibleTerminal('venue-1', 'ANGELPAY')).rejects.toBeInstanceOf(IncompatibleDeviceError)
 
       expect(mockedPrisma.terminal.count).toHaveBeenCalledWith({
         where: { venueId: 'venue-1', brand: { in: ['NEXGO'] }, status: 'ACTIVE' },
@@ -91,9 +89,7 @@ describe('providerDeviceCompatibility', () => {
     it('throws IncompatibleDeviceError when venue has zero PAX terminals (provider=BLUMON)', async () => {
       mockedPrisma.terminal.count.mockResolvedValue(0)
 
-      await expect(assertVenueHasCompatibleTerminal('venue-1', 'BLUMON')).rejects.toBeInstanceOf(
-        IncompatibleDeviceError,
-      )
+      await expect(assertVenueHasCompatibleTerminal('venue-1', 'BLUMON')).rejects.toBeInstanceOf(IncompatibleDeviceError)
 
       expect(mockedPrisma.terminal.count).toHaveBeenCalledWith({
         where: { venueId: 'venue-1', brand: { in: ['PAX'] }, status: 'ACTIVE' },
@@ -109,9 +105,7 @@ describe('providerDeviceCompatibility', () => {
     it('only counts ACTIVE terminals — INACTIVE/MAINTENANCE/RETIRED are ignored by the where clause', async () => {
       mockedPrisma.terminal.count.mockResolvedValue(0)
 
-      await expect(assertVenueHasCompatibleTerminal('venue-1', 'ANGELPAY')).rejects.toBeInstanceOf(
-        IncompatibleDeviceError,
-      )
+      await expect(assertVenueHasCompatibleTerminal('venue-1', 'ANGELPAY')).rejects.toBeInstanceOf(IncompatibleDeviceError)
 
       // The query must filter status: 'ACTIVE' — anything else is excluded server-side
       const call = mockedPrisma.terminal.count.mock.calls[0][0]
@@ -136,9 +130,7 @@ describe('providerDeviceCompatibility', () => {
         terminal: { count: jest.fn().mockResolvedValue(1) },
       } as unknown as Parameters<typeof assertVenueHasCompatibleTerminal>[2]
 
-      await expect(
-        assertVenueHasCompatibleTerminal('venue-1', 'ANGELPAY', txMock),
-      ).resolves.toBeUndefined()
+      await expect(assertVenueHasCompatibleTerminal('venue-1', 'ANGELPAY', txMock)).resolves.toBeUndefined()
 
       // Tx mock was used, default prisma client was NOT
       expect((txMock as any).terminal.count).toHaveBeenCalledTimes(1)

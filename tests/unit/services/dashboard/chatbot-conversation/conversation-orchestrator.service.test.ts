@@ -28,6 +28,11 @@ describe('ConversationOrchestratorService', () => {
   } as unknown as jest.Mocked<ActionEngine>
 
   const orchestrator = new ConversationOrchestratorService(openai, actionEngine)
+  const currentYear = new Date().getFullYear()
+  const aprilMayRange = {
+    from: new Date(`${currentYear}-04-01T06:00:00.000Z`),
+    to: new Date(`${currentYear}-05-19T05:59:59.999Z`),
+  }
 
   beforeEach(() => {
     jest.clearAllMocks()
@@ -269,6 +274,32 @@ describe('ConversationOrchestratorService', () => {
     expect(response?.response).toContain('$525.00')
     expect(response?.response).not.toContain('$9,999.00')
     expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'productSales', status: 'executed' })])
+  })
+
+  it('answers absolute date range sales with aggregate sales, not product sales', async () => {
+    const salesSpy = jest.spyOn(SharedQueryService, 'getSalesForPeriod').mockResolvedValue({
+      totalRevenue: 12345.5,
+      averageTicket: 617.275,
+      orderCount: 20,
+      paymentCount: 20,
+      currency: 'MXN',
+      period: 'custom',
+      dateRange: aprilMayRange,
+    })
+    const productSalesSpy = jest.spyOn(SharedQueryService, 'getProductSalesByName')
+
+    const response = await orchestrator.process({
+      message: 'cuanto vendi del 1 de abril al 18 de mayo hoy',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(salesSpy).toHaveBeenCalledWith('venue-1', aprilMayRange)
+    expect(productSalesSpy).not.toHaveBeenCalled()
+    expect(response?.response).toContain(`En el período del 1 de abril al 18 de mayo de ${currentYear} vendiste $12,345.50`)
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'sales', status: 'executed' })])
+    expect(openai.chat.completions.create).not.toHaveBeenCalled()
   })
 
   it('answers English top-product revenue questions in English', async () => {

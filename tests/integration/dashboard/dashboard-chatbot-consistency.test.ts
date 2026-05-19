@@ -22,6 +22,9 @@ import { SharedQueryService } from '@/services/dashboard/shared-query.service'
 import { SqlValidationService } from '@/services/dashboard/sql-validation.service'
 import { Prisma } from '@prisma/client'
 import { UserRole } from '@/services/dashboard/table-access-control.service'
+import OpenAI from 'openai'
+import { ConversationOrchestratorService } from '@/services/dashboard/chatbot-conversation/conversation-orchestrator.service'
+import { ActionEngine } from '@/services/dashboard/chatbot-actions/action-engine.service'
 
 // Increase timeout for integration tests (Neon cold start and full pre-deploy load can be slow)
 const ASSISTANT_CONSISTENCY_TIMEOUT_MS = 90000
@@ -68,6 +71,50 @@ describe('Dashboard-Chatbot Consistency Tests (Layer 4)', () => {
           expect(chatbotResponse.queryResult.orderCount).toBe(dashboardValue.orderCount)
           expect(chatbotResponse.queryResult.averageTicket).toBe(dashboardValue.averageTicket)
         }
+      },
+      ASSISTANT_CONSISTENCY_TIMEOUT_MS,
+    )
+
+    it(
+      'should keep planner-routed absolute date range sales consistent with SharedQueryService',
+      async () => {
+        const currentYear = new Date().getFullYear()
+        const dateRange = {
+          from: new Date(`${currentYear}-04-01T06:00:00.000Z`),
+          to: new Date(`${currentYear}-05-19T05:59:59.999Z`),
+        }
+        const dashboardValue = await SharedQueryService.getSalesForPeriod(testData.venue.id, dateRange)
+        const openai = {
+          chat: {
+            completions: {
+              create: jest.fn(),
+            },
+          },
+        } as unknown as OpenAI
+        const actionEngine = {
+          continueDisambiguation: jest.fn(),
+          detectAction: jest.fn(),
+          processAction: jest.fn(),
+        } as unknown as ActionEngine
+        const orchestrator = new ConversationOrchestratorService(openai, actionEngine, undefined, {
+          plannerModelFallbackEnabled: false,
+        })
+
+        const chatbotResponse = await orchestrator.process({
+          message: 'cuanto vendi del 1 de abril al 18 de mayo hoy',
+          venueId: testData.venue.id,
+          userId: testData.staff[0].id,
+          userRole: UserRole.SUPERADMIN,
+        })
+
+        expect(chatbotResponse?.metadata.routedTo).toBe('ConversationOrchestrator')
+        expect(chatbotResponse?.metadata.intent).toBe('sales')
+        expect(chatbotResponse?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'sales', status: 'executed' })])
+        expect(openai.chat.completions.create).not.toHaveBeenCalled()
+
+        expect((chatbotResponse?.queryResult as any)?.totalRevenue).toBe(dashboardValue.totalRevenue)
+        expect((chatbotResponse?.queryResult as any)?.orderCount).toBe(dashboardValue.orderCount)
+        expect((chatbotResponse?.queryResult as any)?.averageTicket).toBe(dashboardValue.averageTicket)
       },
       ASSISTANT_CONSISTENCY_TIMEOUT_MS,
     )

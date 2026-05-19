@@ -4,6 +4,7 @@ import { normalizePhoneE164 } from '@/utils/phone'
 import prisma from '@/utils/prismaClient'
 
 import { handleActivationCommand } from './venueChatActivation.service'
+import { maybeSendVenueReplyEmail } from './venueChatEmail.service'
 import { sendServiceMessage, WhatsappCloudApiError } from './whatsapp.service'
 
 // Meta Cloud API inbound message shape (only fields we read; rest preserved as rawBody).
@@ -210,6 +211,7 @@ async function routeQuoteReply(msg: CloudApiInboundMessage, fromPhone: string, e
 
   // Persist the venue reply. @unique on whatsappMessageId makes the insert
   // idempotent — Meta retries land on P2002 and we swallow it.
+  let persisted = true
   try {
     await prisma.venueChatMessage.create({
       data: {
@@ -226,12 +228,22 @@ async function routeQuoteReply(msg: CloudApiInboundMessage, fromPhone: string, e
     })
   } catch (err: unknown) {
     if ((err as { code?: string }).code !== 'P2002') throw err
+    persisted = false
   }
 
   await prisma.whatsappInboundEvent.update({
     where: { id: eventId },
     data: { routedAs: 'VENUE_REPLY_ROUTED', routedSessionId: original.sessionId },
   })
+
+  // Fire-and-forget email notification to the customer. Idempotent on
+  // Meta-retry: P2002 path above sets persisted=false so we don't re-notify
+  // when the venue reply was already stored on an earlier delivery.
+  if (persisted) {
+    maybeSendVenueReplyEmail(original.sessionId).catch(err => {
+      logger.error('[Webhook] maybeSendVenueReplyEmail failed', { sessionId: original.sessionId, err })
+    })
+  }
 }
 
 // Idempotent reply: skip the Cloud API call if a reply was already sent for

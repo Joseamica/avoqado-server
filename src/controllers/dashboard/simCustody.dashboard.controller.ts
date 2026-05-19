@@ -44,7 +44,7 @@ const AssignToPromoterBody = z.object({
 
 const CollectBody = z.object({
   serialNumber: z.string().min(1, 'El ICCID es requerido'),
-  reason: z.enum(['STAFF_TERMINATED', 'DAMAGED_SIM'], {
+  reason: z.enum(['STAFF_TERMINATED', 'DAMAGED_SIM', 'SUPERVISOR_COLLECTION'], {
     errorMap: () => ({ message: 'Motivo inválido' }),
   }),
 })

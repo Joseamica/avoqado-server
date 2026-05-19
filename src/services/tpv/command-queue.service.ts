@@ -188,6 +188,20 @@ const COMMAND_CONFIG: Record<
     expirationMinutes: 60,
     doubleConfirm: false,
   },
+  FETCH_ANGELPAY_MERCHANTS: {
+    // Operator-triggered "re-auth + report" command. Safe: idempotent inside
+    // AngelPayAuthRepository.ensureAuthenticated() (cached session is a no-op).
+    // No PIN required — the dashboard caller is SUPERADMIN-only anyway.
+    requiresPin: false,
+    riskLevel: 'LOW',
+    defaultPriority: 'NORMAL',
+    maxRetries: 2,
+    // Short validity: operator is actively staring at the dialog waiting for
+    // a refresh — if the TPV is offline >5 min there's no point still firing
+    // a stale refresh later.
+    expirationMinutes: 5,
+    doubleConfirm: false,
+  },
   SCHEDULE: {
     requiresPin: false,
     riskLevel: 'MEDIUM',

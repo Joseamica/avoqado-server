@@ -170,8 +170,6 @@ export async function assertMerchantsTerminalCompatible(
   const incompatible = merchants.filter(m => !isProviderCompatibleWithBrand(m.provider.code, terminal.brand))
   if (incompatible.length > 0) {
     const summary = incompatible.map(m => `${m.id} (${m.provider.code})`).join(', ')
-    throw new IncompatibleDeviceError(
-      `Cannot assign incompatible merchants to ${terminal.brand} terminal ${terminalId}: ${summary}`,
-    )
+    throw new IncompatibleDeviceError(`Cannot assign incompatible merchants to ${terminal.brand} terminal ${terminalId}: ${summary}`)
   }
 }

@@ -14,6 +14,11 @@ describe('ConversationPlannerService', () => {
   } as unknown as OpenAI
 
   const planner = new ConversationPlannerService(openai, new ToolCatalogService())
+  const currentYear = new Date().getFullYear()
+  const aprilMayRange = {
+    from: new Date(`${currentYear}-04-01T06:00:00.000Z`),
+    to: new Date(`${currentYear}-05-19T05:59:59.999Z`),
+  }
 
   beforeEach(() => {
     jest.clearAllMocks()
@@ -27,6 +32,14 @@ describe('ConversationPlannerService', () => {
       {
         message: 'cuanto vendi hoy',
         expectedSteps: [{ kind: 'query', tool: 'sales', args: { dateRange: 'today' } }],
+      },
+      {
+        message: 'cuanto vendi del 1 de abril al 18 de mayo hoy',
+        expectedSteps: [{ kind: 'query', tool: 'sales', args: { dateRange: aprilMayRange } }],
+      },
+      {
+        message: 'cuando vendi desde la fecha del 1 de abril al 18 de mayo',
+        expectedSteps: [{ kind: 'query', tool: 'sales', args: { dateRange: aprilMayRange } }],
       },
       {
         message: 'cuanto me dispersaran hoy',

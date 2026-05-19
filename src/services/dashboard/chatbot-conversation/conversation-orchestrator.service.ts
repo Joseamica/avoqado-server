@@ -2,8 +2,8 @@ import OpenAI from 'openai'
 import { StaffRole } from '@prisma/client'
 import { getUserAccess } from '@/services/access/access.service'
 import { evaluatePermissionList } from '@/lib/permissions'
-import { RelativeDateRange } from '@/utils/datetime'
-import { SharedQueryService } from '../shared-query.service'
+import { DEFAULT_TIMEZONE, type RelativeDateRange } from '@/utils/datetime'
+import { SharedQueryService, type DateRangeSpec } from '../shared-query.service'
 import { SecurityResponseService, SecurityViolationType } from '../security-response.service'
 import { TableAccessControlService, UserRole } from '../table-access-control.service'
 import { ActionEngine } from '../chatbot-actions/action-engine.service'
@@ -12,6 +12,7 @@ import { ConversationPlannerService } from './conversation-planner.service'
 import { ToolCatalogService } from './tool-catalog.service'
 import { AssistantCapabilityRegistryService } from './assistant-capability-registry.service'
 import { ConversationPlan, OrchestratorRequest, PlanStepMetadata, PlannerQueryStep, PlannerStep } from './types'
+import { isCustomDateRangeSpec } from './date-range-parser'
 
 interface OrchestratorResponse {
   response: string
@@ -910,7 +911,12 @@ export class ConversationOrchestratorService {
     return englishSignals && !spanishSignals ? 'en' : 'es'
   }
 
-  private getDateRange(step: PlannerQueryStep): RelativeDateRange {
+  private getDateRange(step: PlannerQueryStep): DateRangeSpec {
+    const customRange = this.getCustomDateRangeArg(step.args.dateRange)
+    if (customRange) {
+      return customRange
+    }
+
     const raw = typeof step.args.dateRange === 'string' ? step.args.dateRange : undefined
     const allowed: RelativeDateRange[] = [
       'today',
@@ -929,6 +935,26 @@ export class ConversationOrchestratorService {
     return this.toolCatalog.getQueryTool(step.tool)?.defaultDateRange || 'thisMonth'
   }
 
+  private getCustomDateRangeArg(value: unknown): DateRangeSpec | undefined {
+    if (isCustomDateRangeSpec(value as DateRangeSpec)) {
+      return value as DateRangeSpec
+    }
+
+    if (!value || typeof value !== 'object') {
+      return undefined
+    }
+
+    const maybeRange = value as { from?: unknown; to?: unknown }
+    const from = maybeRange.from instanceof Date ? maybeRange.from : typeof maybeRange.from === 'string' ? new Date(maybeRange.from) : null
+    const to = maybeRange.to instanceof Date ? maybeRange.to : typeof maybeRange.to === 'string' ? new Date(maybeRange.to) : null
+
+    if (!from || !to || Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from.getTime() > to.getTime()) {
+      return undefined
+    }
+
+    return { from, to }
+  }
+
   private limit(step: PlannerQueryStep, fallback: number): number {
     const raw = Number(step.args.limit)
     if (!Number.isFinite(raw)) return fallback
@@ -945,7 +971,7 @@ export class ConversationOrchestratorService {
 
   private formatSales(
     sales: { totalRevenue: number; orderCount: number; averageTicket: number; currency: string },
-    dateRange: RelativeDateRange,
+    dateRange: DateRangeSpec,
     language: ResponseLanguage = 'es',
   ): string {
     if (language === 'en') {
@@ -965,7 +991,7 @@ export class ConversationOrchestratorService {
       currency: string
       filters: { weekendOnly: boolean; nightOnly: boolean }
     },
-    dateRange: RelativeDateRange,
+    dateRange: DateRangeSpec,
     language: ResponseLanguage = 'es',
   ): string {
     const filtersUsed = [
@@ -1068,7 +1094,11 @@ export class ConversationOrchestratorService {
     return SecurityViolationType.PROMPT_INJECTION
   }
 
-  private formatDateRangeName(dateRange: RelativeDateRange, language: ResponseLanguage = 'es'): string {
+  private formatDateRangeName(dateRange: DateRangeSpec, language: ResponseLanguage = 'es'): string {
+    if (isCustomDateRangeSpec(dateRange)) {
+      return this.formatCustomDateRangeName(dateRange, language)
+    }
+
     const namesEs: Record<RelativeDateRange, string> = {
       today: 'hoy',
       yesterday: 'ayer',
@@ -1095,7 +1125,30 @@ export class ConversationOrchestratorService {
     return names[dateRange] || dateRange
   }
 
-  private formatDateRangeSentencePrefix(dateRange: RelativeDateRange, language: ResponseLanguage = 'es'): string {
+  private formatCustomDateRangeName(dateRange: { from: Date; to: Date }, language: ResponseLanguage = 'es'): string {
+    const locale = language === 'en' ? 'en-US' : 'es-MX'
+    const from = new Intl.DateTimeFormat(locale, {
+      day: 'numeric',
+      month: 'long',
+      year: dateRange.from.getFullYear() === dateRange.to.getFullYear() ? undefined : 'numeric',
+      timeZone: DEFAULT_TIMEZONE,
+    }).format(dateRange.from)
+    const to = new Intl.DateTimeFormat(locale, {
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+      timeZone: DEFAULT_TIMEZONE,
+    }).format(dateRange.to)
+
+    return language === 'en' ? `from ${from} to ${to}` : `del ${from} al ${to}`
+  }
+
+  private formatDateRangeSentencePrefix(dateRange: DateRangeSpec, language: ResponseLanguage = 'es'): string {
+    if (isCustomDateRangeSpec(dateRange)) {
+      const formattedRange = this.formatCustomDateRangeName(dateRange, language)
+      return language === 'en' ? `In the period ${formattedRange}` : `En el período ${formattedRange}`
+    }
+
     if (language === 'en') {
       if (dateRange === 'today') return 'Today'
       if (dateRange === 'yesterday') return 'Yesterday'
@@ -1107,7 +1160,11 @@ export class ConversationOrchestratorService {
     return `En ${this.formatDateRangeName(dateRange)}`
   }
 
-  private formatDateRangeAdverbial(dateRange: RelativeDateRange, language: ResponseLanguage = 'es'): string {
+  private formatDateRangeAdverbial(dateRange: DateRangeSpec, language: ResponseLanguage = 'es'): string {
+    if (isCustomDateRangeSpec(dateRange)) {
+      return this.formatCustomDateRangeName(dateRange, language)
+    }
+
     if (language === 'en') {
       if (dateRange === 'today') return 'today'
       if (dateRange === 'yesterday') return 'yesterday'

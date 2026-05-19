@@ -1,9 +1,10 @@
 import OpenAI from 'openai'
 import { z } from 'zod'
 import logger from '@/config/logger'
-import { RelativeDateRange } from '@/utils/datetime'
+import type { DateRangeSpec } from '../shared-query.service'
 import { ToolCatalogService } from './tool-catalog.service'
 import { AssistantConversationState, ConversationPlan, PlannerRequest, PlannerStep } from './types'
+import { parseCustomDateRange } from './date-range-parser'
 
 const MAX_PLANNER_STEPS = 4
 
@@ -833,10 +834,11 @@ export class ConversationPlannerService {
 
   private hasSalesSummaryIntent(normalized: string): boolean {
     const asksAmount = /\b(cuanto|cuanta|cuantos|cuantas|total|monto|how much)\b/.test(normalized)
+    const asksAmountWithTypo = /\bcuando\b/.test(normalized) && Boolean(parseCustomDateRange(normalized))
     const salesTerm = /\b(vendi|vendimos|ventas?|ingresos?|facturacion|revenue|sales)\b/.test(normalized)
     const excludedDetail =
       /\b(vs|versus|contra|producto|productos|categoria|categorias|mesero|staff|empleado|empleados|metodo|pago|pagos)\b/.test(normalized)
-    return asksAmount && salesTerm && !excludedDetail
+    return (asksAmount || asksAmountWithTypo) && salesTerm && !excludedDetail
   }
 
   private hasTopProductsIntent(normalized: string): boolean {
@@ -851,6 +853,9 @@ export class ConversationPlannerService {
 
   private extractProductSalesTerm(normalized: string): string | null {
     if (this.hasTopProductsIntent(normalized)) {
+      return null
+    }
+    if (parseCustomDateRange(normalized)) {
       return null
     }
 
@@ -873,9 +878,10 @@ export class ConversationPlannerService {
 
       if (!cleaned || cleaned.length < 2) continue
 
-      const isDateOnly = /\b(hoy|ayer|semana|mes|ano|dia|dias|ultimos|pasad[oa]s?|today|yesterday|week|month|year|days?|last|this)\b/.test(
-        cleaned,
-      )
+      const isDateOnly =
+        /\b(hoy|ayer|semana|mes|ano|dia|dias|ultimos|pasad[oa]s?|today|yesterday|week|month|year|days?|last|this)\b/.test(cleaned) ||
+        /\b(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)\b/.test(cleaned) ||
+        /\b\d{1,2}\b/.test(cleaned)
       const isGenericDimension =
         /\b(categoria|categorias|category|categories|mesero|staff|cliente|clientes|customer|customers|ordenes?|pedidos?|pagos?)\b/.test(
           cleaned,
@@ -1282,7 +1288,10 @@ export class ConversationPlannerService {
     }
   }
 
-  private extractDateRange(normalized: string): RelativeDateRange | undefined {
+  private extractDateRange(normalized: string): DateRangeSpec | undefined {
+    const customRange = parseCustomDateRange(normalized)
+    if (customRange) return customRange
+
     if (
       /\bfines? de semana\b/.test(normalized) &&
       !/\b(esta semana|semana pasada|ultima semana|ultimos|ultimas|this week|last week)\b/.test(normalized)

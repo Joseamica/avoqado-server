@@ -22,8 +22,10 @@
 
 import prisma from '../../utils/prismaClient'
 import { AngelPayAccountStatus, type AngelPayUserAccount } from '@prisma/client'
-import { ValidationError, ConflictError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError, ValidationError } from '../../errors/AppError'
 import { encryptCredentials } from './merchantAccount.service'
+import { tpvCommandQueueService } from '../tpv/command-queue.service'
+import logger from '../../config/logger'
 
 const PIN_REGEX = /^\d{6}$/
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
@@ -43,18 +45,22 @@ export interface CreateAngelPayUserAccountInput {
  * - If pin provided: status=ACTIVE, pinEncrypted={ encrypted, iv }.
  * - If pin omitted: status=PENDING_PIN, pinEncrypted=null.
  *
- * Special case — reactivation of DELETED row:
- * - If the existing row has status=DELETED, this call UPDATES it in place
- *   (new email, new pin if provided, new env, status flipped back to ACTIVE
- *   or PENDING_PIN based on whether pin was provided). This matches the
- *   dashboard UX which warns "Cuenta existente en estado DELETED. Conectar
- *   reemplazará el PIN actual." — the row is reused (preserves audit trail
- *   on `createdAt`, `externalUserId` if previously discovered) instead of
- *   a hard delete + insert cycle that would orphan downstream references.
+ * Multi-account per venue (2026-05-18): a venue can register multiple AngelPay
+ * logins (one per AngelPay merchant when the venue runs several merchants
+ * under different emails). Uniqueness is enforced on `(venueId, email)` —
+ * Prisma surfaces dup-on-create as P2002, which we translate to ConflictError.
  *
- * - If the existing row has any other non-DELETED status, throws
- *   ConflictError — admin must explicitly soft-delete first via the
- *   delete flow before reconnecting.
+ * Special case — reactivation of DELETED row:
+ * - If a row exists for `(venueId, email)` with status=DELETED, this call
+ *   UPDATES it in place (new pin if provided, new env, status flipped back to
+ *   ACTIVE or PENDING_PIN). The row is reused (preserves audit trail on
+ *   `createdAt`, `externalUserId` if previously discovered) instead of a hard
+ *   delete + insert cycle that would orphan downstream references.
+ *
+ * - If a row exists for `(venueId, email)` with any other non-DELETED status,
+ *   throws ConflictError — admin must explicitly soft-delete first via the
+ *   delete flow before reconnecting (matches pre-multi-account semantics for
+ *   this email).
  */
 export async function createAngelPayUserAccount(input: CreateAngelPayUserAccountInput): Promise<AngelPayUserAccount> {
   if (!EMAIL_REGEX.test(input.email)) {
@@ -64,8 +70,10 @@ export async function createAngelPayUserAccount(input: CreateAngelPayUserAccount
     throw new ValidationError('PIN must be 6 numeric digits')
   }
 
+  // Match on (venueId, email) instead of venueId alone. Multi-account venues
+  // can have several rows; we only want to reactivate the SAME email's row.
   const existing = await prisma.angelPayUserAccount.findUnique({
-    where: { venueId: input.venueId },
+    where: { venueId_email: { venueId: input.venueId, email: input.email } },
   })
 
   const pinEncrypted = input.pin ? encryptCredentials(input.pin) : null
@@ -78,7 +86,6 @@ export async function createAngelPayUserAccount(input: CreateAngelPayUserAccount
       return prisma.angelPayUserAccount.update({
         where: { id: existing.id },
         data: {
-          email: input.email,
           environment: input.environment,
           pinEncrypted: pinEncrypted as any,
           status,
@@ -89,21 +96,31 @@ export async function createAngelPayUserAccount(input: CreateAngelPayUserAccount
         },
       })
     }
-    throw new ConflictError('Venue already has an AngelPay user account')
+    throw new ConflictError('Ya existe una cuenta AngelPay con ese correo en este venue')
   }
 
-  return prisma.angelPayUserAccount.create({
-    data: {
-      venueId: input.venueId,
-      email: input.email,
-      environment: input.environment,
-      pinEncrypted: pinEncrypted as any,
-      status,
-      statusChangedAt: new Date(),
-      statusChangedBy: input.createdBy ?? null,
-      createdBy: input.createdBy ?? null,
-    },
-  })
+  try {
+    return await prisma.angelPayUserAccount.create({
+      data: {
+        venueId: input.venueId,
+        email: input.email,
+        environment: input.environment,
+        pinEncrypted: pinEncrypted as any,
+        status,
+        statusChangedAt: new Date(),
+        statusChangedBy: input.createdBy ?? null,
+        createdBy: input.createdBy ?? null,
+      },
+    })
+  } catch (err: any) {
+    // Race-condition safety net: if another transaction inserted the same
+    // (venueId, email) pair between our findUnique and create, Prisma P2002
+    // fires. Translate to ConflictError so the controller maps to HTTP 409.
+    if (err?.code === 'P2002') {
+      throw new ConflictError('Ya existe una cuenta AngelPay con ese correo en este venue')
+    }
+    throw err
+  }
 }
 
 /**
@@ -127,11 +144,57 @@ export async function setAngelPayUserAccountPin(id: string, newPin: string): Pro
   })
 }
 
-export async function markAngelPayUserAccountRotationRequired(
+/**
+ * Update credentials (email + environment) of an UNCONFIRMED account.
+ *
+ * Only allowed while the account is still in `PENDING_PIN` — meaning ops
+ * created it (typically with the wrong email or env) but no one has yet
+ * set a PIN. After ACTIVE/PIN_ROTATION_REQUIRED/SUSPENDED, the email is
+ * locked because (a) the SDK has likely validated against it (externalUserId
+ * populated) and (b) the TPV may have cached creds against that login.
+ *
+ * Same uniqueness constraint as create — `(venueId, email)` must stay unique
+ * for the venue. Prisma's P2002 surfaces as ConflictError.
+ */
+export async function updateAngelPayUserAccountCredentials(
   id: string,
-  reason: string,
-  changedBy: string,
+  updates: { email?: string; environment?: 'QA' | 'PROD' },
 ): Promise<AngelPayUserAccount> {
+  const existing = await prisma.angelPayUserAccount.findUnique({ where: { id } })
+  if (!existing) {
+    throw new NotFoundError('AngelPay account not found')
+  }
+  if (existing.status !== AngelPayAccountStatus.PENDING_PIN) {
+    throw new ValidationError(`Solo se pueden editar credenciales en cuentas PENDING_PIN. Estado actual: ${existing.status}.`)
+  }
+  const data: Record<string, unknown> = {}
+  if (updates.email !== undefined) {
+    const trimmed = updates.email.trim()
+    if (!trimmed) throw new ValidationError('email no puede estar vacío')
+    data.email = trimmed
+  }
+  if (updates.environment !== undefined) {
+    if (updates.environment !== 'QA' && updates.environment !== 'PROD') {
+      throw new ValidationError('environment debe ser QA o PROD')
+    }
+    data.environment = updates.environment
+  }
+  if (Object.keys(data).length === 0) {
+    return existing // nothing to update — return current row
+  }
+
+  try {
+    return await prisma.angelPayUserAccount.update({ where: { id }, data })
+  } catch (err: any) {
+    // Prisma P2002 = compound unique violation on (venueId, email)
+    if (err?.code === 'P2002') {
+      throw new ConflictError('Ya existe una cuenta AngelPay con ese correo en este venue')
+    }
+    throw err
+  }
+}
+
+export async function markAngelPayUserAccountRotationRequired(id: string, reason: string, changedBy: string): Promise<AngelPayUserAccount> {
   return prisma.angelPayUserAccount.update({
     where: { id },
     data: {
@@ -143,11 +206,7 @@ export async function markAngelPayUserAccountRotationRequired(
   })
 }
 
-export async function suspendAngelPayUserAccount(
-  id: string,
-  reason: string,
-  changedBy: string,
-): Promise<AngelPayUserAccount> {
+export async function suspendAngelPayUserAccount(id: string, reason: string, changedBy: string): Promise<AngelPayUserAccount> {
   return prisma.angelPayUserAccount.update({
     where: { id },
     data: {
@@ -199,13 +258,54 @@ export async function recordAngelPayUserAccountError(id: string, message: string
 }
 
 /**
- * Lookup by venueId — used by the superadmin dashboard GET endpoint.
+ * @deprecated Multi-account per venue (2026-05-18): use
+ * {@link getAngelPayUserAccountsByVenueId} (plural) which returns the full
+ * list. This singular variant is preserved for backward compatibility with
+ * pre-multi-account callers — it returns the OLDEST active row (or any row
+ * if none are active) so legacy code that assumed "one account per venue"
+ * continues to find *something*. New code should switch to the plural form.
+ *
  * Returns null if the venue has no AngelPay account (e.g., never configured).
  */
 export async function getAngelPayUserAccountByVenueId(venueId: string): Promise<AngelPayUserAccount | null> {
-  return prisma.angelPayUserAccount.findUnique({
-    where: { venueId },
+  // Pick a stable, predictable row: oldest first so re-runs return the same
+  // account. Filter out DELETED so legacy callers don't get a soft-deleted
+  // row back (they would have failed before anyway because the unique row
+  // was DELETED).
+  return prisma.angelPayUserAccount.findFirst({
+    where: { venueId, status: { not: AngelPayAccountStatus.DELETED } },
+    orderBy: { createdAt: 'asc' },
   })
+}
+
+/**
+ * Multi-account-aware lookup. Returns every AngelPay account registered for
+ * the venue (excluding soft-deleted rows), oldest-first so the dashboard
+ * lists them in a stable order. Always returns an array — empty when the
+ * venue has not been provisioned yet.
+ */
+export async function getAngelPayUserAccountsByVenueId(venueId: string): Promise<AngelPayUserAccount[]> {
+  return prisma.angelPayUserAccount.findMany({
+    where: { venueId, status: { not: AngelPayAccountStatus.DELETED } },
+    orderBy: { createdAt: 'asc' },
+  })
+}
+
+/**
+ * Lookup the AngelPay account linked to a specific MerchantAccount via the
+ * `angelpayUserAccountId` FK. Returns null when the merchant is not linked
+ * (legacy/un-backfilled row, or a non-AngelPay provider).
+ *
+ * Used by the TPV switch flow so the cashier-side merchant picker can route
+ * back to "which AngelPay login owns this merchant?" without re-querying
+ * AngelPay's SDK.
+ */
+export async function getAngelPayUserAccountForMerchantAccount(merchantAccountId: string): Promise<AngelPayUserAccount | null> {
+  const ma = await prisma.merchantAccount.findUnique({
+    where: { id: merchantAccountId },
+    include: { angelpayUserAccount: true },
+  })
+  return ma?.angelpayUserAccount ?? null
 }
 
 /**
@@ -220,13 +320,55 @@ export async function getAngelPayUserAccountById(id: string): Promise<AngelPayUs
 }
 
 /**
- * Lookup helper: TPV → terminal → venue → angelpayUserAccount.
+ * Lookup helper: TPV → terminal → venue → angelpayUserAccount (first non-DELETED).
+ *
+ * Multi-account note (2026-05-18): venues can now have multiple AngelPay
+ * accounts. This helper preserves the legacy "pick one" behaviour by returning
+ * the oldest non-DELETED row so the terminal config payload's `angelpayAuth`
+ * field (single-account contract) stays populated. The new `angelpayAccounts`
+ * list field in the terminal config response surfaces ALL accounts for callers
+ * that need the full list.
+ *
  * Returns null if terminal missing or venue has no AngelPay account.
  */
 export async function getAngelPayUserAccountForTerminal(serialNumber: string): Promise<AngelPayUserAccount | null> {
   const terminal = await prisma.terminal.findUnique({
     where: { serialNumber },
-    include: { venue: { include: { angelpayUserAccount: true } } },
+    include: {
+      venue: {
+        include: {
+          angelpayUserAccounts: {
+            where: { status: { not: AngelPayAccountStatus.DELETED } },
+            orderBy: { createdAt: 'asc' },
+            take: 1,
+          },
+        },
+      },
+    },
   })
-  return terminal?.venue?.angelpayUserAccount ?? null
+  return terminal?.venue?.angelpayUserAccounts?.[0] ?? null
+}
+
+/**
+ * Multi-account-aware variant of {@link getAngelPayUserAccountForTerminal}.
+ * Returns every non-DELETED AngelPay account registered for the terminal's
+ * venue. Used by the terminal config endpoint to populate the new
+ * `angelpayAccounts` list field on the response so the TPV can switch
+ * between accounts at runtime.
+ */
+export async function getAngelPayUserAccountsForTerminal(serialNumber: string): Promise<AngelPayUserAccount[]> {
+  const terminal = await prisma.terminal.findUnique({
+    where: { serialNumber },
+    include: {
+      venue: {
+        include: {
+          angelpayUserAccounts: {
+            where: { status: { not: AngelPayAccountStatus.DELETED } },
+            orderBy: { createdAt: 'asc' },
+          },
+        },
+      },
+    },
+  })
+  return terminal?.venue?.angelpayUserAccounts ?? []
 }

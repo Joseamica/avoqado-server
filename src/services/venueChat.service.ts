@@ -1,9 +1,12 @@
-import { createHash } from 'crypto'
+import { createHash, timingSafeEqual } from 'crypto'
 
+import logger from '@/config/logger'
 import { encodeCursor, decodeCursor } from '@/utils/chatCursor'
 import { generateAccessToken, hashAccessToken } from '@/utils/sessionToken'
 import { generateShortCode } from '@/utils/shortCode'
 import prisma from '@/utils/prismaClient'
+
+import { relayCustomerMessageToVenue } from './whatsappRelay.service'
 
 // Stable per-request fingerprint so the same nonce replayed with the same
 // content is recognized as a true retry (replay) vs a different request that
@@ -75,6 +78,13 @@ export async function createSessionWithIdempotency(args: {
       },
     },
     include: { messages: true },
+  })
+
+  // Fire-and-forget relay of the first message — same contract as
+  // appendCustomerMessage: row is persisted as PENDING and relay marks it
+  // SENT/FAILED out-of-band. Stale-PENDING cron picks up anything stuck.
+  relayCustomerMessageToVenue(session.messages[0].id).catch(err => {
+    logger.error('[VenueChat] Relay failed for initial customer message', { messageId: session.messages[0].id, err })
   })
 
   return {
@@ -207,8 +217,13 @@ export async function appendCustomerMessage(args: {
     data: { lastActivityAt: new Date() },
   })
 
-  // Phase 6: relayCustomerMessageToVenue(row.id) goes here. Stubbed for now
-  // (row stays PENDING; the relay service will pick it up once wired in).
+  // Fire-and-forget: relay never blocks the customer-facing response. The
+  // service marks the row FAILED on Cloud API errors and the stale-PENDING
+  // cron alerts on anything that stays stuck. Errors thrown here would be
+  // unhandled rejections, so we swallow them and log.
+  relayCustomerMessageToVenue(row.id).catch(err => {
+    logger.error('[VenueChat] Relay failed for inbound customer message', { messageId: row.id, err })
+  })
 
   return {
     id: row.id,
@@ -217,4 +232,52 @@ export async function appendCustomerMessage(args: {
     body: row.body,
     relayStatus: row.relayStatus,
   }
+}
+
+export type ResumeSessionResult = { kind: 'OK'; accessToken: string } | { kind: 'NOT_FOUND' }
+
+// Customer proves possession of the on-file email and gets a fresh
+// accessToken. Used by the email "you have a reply" link, which contains
+// only the sessionId in its URL fragment. Returns a generic NOT_FOUND on any
+// failure (missing session, email mismatch, closed session) — never leak
+// which precondition failed.
+export async function resumeSessionWithEmail(args: { sessionId: string; email: string }): Promise<ResumeSessionResult> {
+  const session = await prisma.venueChatSession.findUnique({
+    where: { id: args.sessionId },
+    select: { id: true, customerEmail: true, status: true },
+  })
+
+  if (!session || !session.customerEmail || session.status !== 'OPEN') {
+    return { kind: 'NOT_FOUND' }
+  }
+  if (!emailEquals(session.customerEmail, args.email)) {
+    return { kind: 'NOT_FOUND' }
+  }
+
+  const newToken = generateAccessToken()
+  await prisma.venueChatSession.update({
+    where: { id: session.id },
+    data: { accessTokenHash: hashAccessToken(newToken) },
+  })
+  return { kind: 'OK', accessToken: newToken }
+}
+
+// Constant-time, case-insensitive email comparison. Both sides are
+// normalized to lowercase before comparison; lengths are zero-padded to the
+// max of the two so timingSafeEqual never throws on differing lengths.
+function emailEquals(a: string, b: string): boolean {
+  const x = Buffer.from(a.trim().toLowerCase())
+  const y = Buffer.from(b.trim().toLowerCase())
+  if (x.length !== y.length) {
+    // Compare both against the longer length so timing is independent of
+    // input-length difference within a small bound.
+    const max = Math.max(x.length, y.length)
+    const xPadded = Buffer.alloc(max, 0)
+    const yPadded = Buffer.alloc(max, 0)
+    x.copy(xPadded)
+    y.copy(yPadded)
+    timingSafeEqual(xPadded, yPadded)
+    return false
+  }
+  return timingSafeEqual(x, y)
 }

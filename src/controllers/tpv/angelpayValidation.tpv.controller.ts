@@ -22,10 +22,7 @@ import { NextFunction, Request, Response } from 'express'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
-import {
-  markAngelPayUserAccountValidated,
-  recordAngelPayUserAccountError,
-} from '../../services/superadmin/angelpayUserAccount.service'
+import { markAngelPayUserAccountValidated, recordAngelPayUserAccountError } from '../../services/superadmin/angelpayUserAccount.service'
 import { upsertDiscoveredAngelPayMerchants } from '../../services/superadmin/merchantAccount.service'
 
 export type AngelPayValidationState = 'AUTHENTICATED' | 'AUTH_ERROR' | 'CONFIG_MISMATCH'
@@ -169,6 +166,14 @@ export async function reportDiscoveredMerchants(req: Request, res: Response, nex
     const result = await upsertDiscoveredAngelPayMerchants({
       venueId: account.venueId,
       merchants,
+      // Multi-account routing (2026-05-19): pass the reporting account's ID so
+      // the upsert can (a) link newly-discovered merchants to the correct
+      // AngelPay login, (b) prefer THIS account's reserved placeholder over
+      // another account's when upgrading, and (c) detect the shared-merchant
+      // case (account B reports merchant X already created by account A) and
+      // repoint B's reserved slot to the existing row instead of leaving B's
+      // placeholder AWAITING_ forever.
+      angelpayUserAccountId: accountId,
     })
 
     logger.info('AngelPay auto-discovered merchants reported by TPV', {

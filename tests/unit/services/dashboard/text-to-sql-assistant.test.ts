@@ -616,6 +616,28 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(classification.hasEntityFilter).toBe(true)
     })
 
+    it('should classify absolute date range sales as sales, not productSales', () => {
+      const query = 'cuanto vendi del 1 de abril al 18 de mayo hoy'
+      // @ts-expect-error - accessing private method for testing
+      const classification = service.classifyIntent(query)
+
+      expect(classification.isSimpleQuery).toBe(true)
+      expect(classification.intent).toBe('sales')
+      expect(classification.dateRange).toEqual({
+        from: expect.any(Date),
+        to: expect.any(Date),
+      })
+      const customRange = classification.dateRange
+      if (!customRange || typeof customRange === 'string') {
+        throw new Error('Expected a custom date range')
+      }
+      const currentYear = new Date().getFullYear()
+      expect(customRange.from.toISOString()).toBe(`${currentYear}-04-01T06:00:00.000Z`)
+      expect(customRange.to.toISOString()).toBe(`${currentYear}-05-19T05:59:59.999Z`)
+      expect(classification.wasDateExplicit).toBe(true)
+      expect(classification.entityName).toBeUndefined()
+    })
+
     it('should classify product-specific sales with filler words and explicit date', () => {
       const query = '¿Cuánto vendí exactamente de Hamburguesa BBQ este mes?'
       // @ts-expect-error - accessing private method for testing
@@ -1120,6 +1142,16 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       // @ts-expect-error - accessing private method for testing
       expect(service.calculateTopProductsConcentration(3000, 2924.23)).toBe(100)
     })
+
+    it('should format custom date ranges in responses', () => {
+      const customRange = {
+        from: new Date('2026-04-01T06:00:00.000Z'),
+        to: new Date('2026-05-19T05:59:59.999Z'),
+      }
+
+      // @ts-expect-error - accessing private method for testing
+      expect(service.formatDateRangeSentencePrefix(customRange)).toBe('En el período del 1 de abril al 18 de mayo de 2026')
+    })
   })
 
   describe('Unsupported Query Guard', () => {
@@ -1185,6 +1217,57 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       } finally {
         serviceWithInternals.routeWithLLM = originalRouteWithLLM
         serviceWithInternals.learningService.recordChatInteraction = originalRecordChatInteraction
+        productSalesSpy.mockRestore()
+        semanticDetectSpy.mockRestore()
+      }
+    })
+
+    it('should answer sales for an absolute date range instead of treating the range as a product', async () => {
+      const serviceWithInternals = service as any
+      const originalRecordChatInteraction = serviceWithInternals.learningService.recordChatInteraction
+      const semanticDetectSpy = jest.spyOn(SemanticInjectionDetectorService, 'detect').mockResolvedValue({
+        isInjection: false,
+        confidence: 0,
+        reason: 'safe sales date range question',
+        category: 'SAFE',
+        detectedLanguage: 'es',
+        latencyMs: 0,
+        fromCache: false,
+      })
+      const salesSpy = jest.spyOn(SharedQueryService, 'getSalesForPeriod').mockResolvedValue({
+        totalRevenue: 12345.5,
+        averageTicket: 617.275,
+        orderCount: 20,
+        paymentCount: 20,
+        currency: 'MXN',
+        period: 'custom',
+        dateRange: {
+          from: new Date('2026-04-01T06:00:00.000Z'),
+          to: new Date('2026-05-19T05:59:59.999Z'),
+        },
+      })
+      const productSalesSpy = jest.spyOn(SharedQueryService, 'getProductSalesByName')
+      serviceWithInternals.learningService.recordChatInteraction = jest.fn(async () => 'training-id')
+      const currentYear = new Date().getFullYear()
+
+      try {
+        const response = await service.processQuery({
+          message: 'cuanto vendi del 1 de abril al 18 de mayo hoy',
+          venueId: 'venue-test',
+          userId: 'user-test',
+          userRole: 'ADMIN' as any,
+        })
+
+        expect(response.metadata?.intent).toBe('sales')
+        expect(response.response).toContain(`En el período del 1 de abril al 18 de mayo de ${currentYear} vendiste $12,345.50`)
+        expect(productSalesSpy).not.toHaveBeenCalled()
+        expect(salesSpy).toHaveBeenCalledWith('venue-test', {
+          from: new Date(`${currentYear}-04-01T06:00:00.000Z`),
+          to: new Date(`${currentYear}-05-19T05:59:59.999Z`),
+        })
+      } finally {
+        serviceWithInternals.learningService.recordChatInteraction = originalRecordChatInteraction
+        salesSpy.mockRestore()
         productSalesSpy.mockRestore()
         semanticDetectSpy.mockRestore()
       }
