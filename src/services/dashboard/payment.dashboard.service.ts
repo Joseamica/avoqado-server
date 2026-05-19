@@ -240,6 +240,90 @@ export async function getPaymentsData(
 }
 
 /**
+ * Build the same `where` clause used by `getPaymentsData` — extracted so the export endpoint
+ * can apply the same filters without duplicating logic.
+ */
+function buildPaymentsWhereClause(venueId: string, filters?: PaymentFilters): any {
+  const whereClause: any = {
+    venueId,
+    status: {
+      not: 'PENDING' as TransactionStatus,
+    },
+  }
+  if (!filters) return whereClause
+
+  if (filters.merchantAccountIds && filters.merchantAccountIds.length > 0) {
+    whereClause.merchantAccountId = { in: filters.merchantAccountIds }
+  } else if (filters.merchantAccountId) {
+    whereClause.merchantAccountId = filters.merchantAccountId
+  }
+  if (filters.methods && filters.methods.length > 0) {
+    whereClause.method = { in: filters.methods }
+  } else if (filters.method) {
+    whereClause.method = filters.method
+  }
+  if (filters.sources && filters.sources.length > 0) {
+    whereClause.source = { in: filters.sources }
+  } else if (filters.source) {
+    whereClause.source = filters.source
+  }
+  if (filters.staffIds && filters.staffIds.length > 0) {
+    whereClause.processedById = { in: filters.staffIds }
+  } else if (filters.staffId) {
+    whereClause.processedById = filters.staffId
+  }
+  if (filters.startDate || filters.endDate) {
+    whereClause.createdAt = {}
+    if (filters.startDate) whereClause.createdAt.gte = new Date(filters.startDate)
+    if (filters.endDate) whereClause.createdAt.lte = new Date(filters.endDate)
+  }
+  if (filters.search) {
+    const searchTerm = filters.search.trim()
+    const searchNumber = parseFloat(searchTerm)
+    whereClause.OR = [
+      ...(isNaN(searchNumber)
+        ? []
+        : [{ amount: { gte: searchNumber, lt: searchNumber + 1 } }, { tipAmount: { gte: searchNumber, lt: searchNumber + 1 } }]),
+      { maskedPan: { contains: searchTerm, mode: 'insensitive' } },
+      { referenceNumber: { contains: searchTerm, mode: 'insensitive' } },
+      { authorizationNumber: { contains: searchTerm, mode: 'insensitive' } },
+      {
+        processedBy: {
+          OR: [{ firstName: { contains: searchTerm, mode: 'insensitive' } }, { lastName: { contains: searchTerm, mode: 'insensitive' } }],
+        },
+      },
+    ]
+  }
+  return whereClause
+}
+
+/**
+ * Count rows that match the export filters — used as a pre-flight check before
+ * pulling everything into memory.
+ */
+export async function countPaymentsForExport(venueId: string, filters?: PaymentFilters): Promise<number> {
+  return prisma.payment.count({ where: buildPaymentsWhereClause(venueId, filters) })
+}
+
+/**
+ * Fetch all matching payment rows for export (caller is responsible for caps).
+ * Returns a flat shape with everything the export columns need.
+ */
+export async function fetchPaymentsForExport(venueId: string, filters: PaymentFilters | undefined, limit: number) {
+  return prisma.payment.findMany({
+    where: buildPaymentsWhereClause(venueId, filters),
+    include: {
+      processedBy: { select: { firstName: true, lastName: true } },
+      order: { include: { table: { select: { number: true } } } },
+      merchantAccount: { select: { displayName: true, externalMerchantId: true } },
+      ecommerceMerchant: { select: { channelName: true } },
+    },
+    orderBy: { createdAt: 'desc' },
+    take: limit,
+  })
+}
+
+/**
  * Función para obtener un solo pago, adaptada al nuevo schema.
  */
 export async function getPaymentById(venueId: string, paymentId: string) {

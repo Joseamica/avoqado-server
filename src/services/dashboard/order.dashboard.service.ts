@@ -151,6 +151,74 @@ export async function getOrders(venueId: string, page: number, pageSize: number,
   }
 }
 /**
+ * Build the same `where` clause used by `getOrders` — extracted so the export endpoint
+ * can apply the same filters without duplicating logic.
+ */
+function buildOrdersWhereClause(venueId: string, filters?: OrderFilters): any {
+  const whereClause: any = {
+    venueId,
+    status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
+  }
+  if (!filters) return whereClause
+
+  if (filters.statuses && filters.statuses.length > 0) whereClause.status = { in: filters.statuses }
+  if (filters.types && filters.types.length > 0) whereClause.type = { in: filters.types }
+  if (filters.tableIds && filters.tableIds.length > 0) whereClause.tableId = { in: filters.tableIds }
+  if (filters.staffIds && filters.staffIds.length > 0) whereClause.servedById = { in: filters.staffIds }
+  if (filters.startDate || filters.endDate) {
+    whereClause.createdAt = {}
+    if (filters.startDate) whereClause.createdAt.gte = new Date(filters.startDate)
+    if (filters.endDate) whereClause.createdAt.lte = new Date(filters.endDate)
+  }
+  if (filters.search) {
+    const searchTerm = filters.search.trim()
+    const searchNumber = parseFloat(searchTerm)
+    whereClause.OR = [
+      { orderNumber: { contains: searchTerm, mode: 'insensitive' } },
+      ...(isNaN(searchNumber) ? [] : [{ total: { gte: searchNumber, lt: searchNumber + 1 } }]),
+      {
+        orderCustomers: {
+          some: {
+            customer: {
+              OR: [
+                { firstName: { contains: searchTerm, mode: 'insensitive' } },
+                { lastName: { contains: searchTerm, mode: 'insensitive' } },
+                { phone: { contains: searchTerm, mode: 'insensitive' } },
+              ],
+            },
+          },
+        },
+      },
+    ]
+  }
+  return whereClause
+}
+
+/**
+ * Count rows matching the export filters — pre-flight before pulling into memory.
+ */
+export async function countOrdersForExport(venueId: string, filters?: OrderFilters): Promise<number> {
+  return prisma.order.count({ where: buildOrdersWhereClause(venueId, filters) })
+}
+
+/**
+ * Fetch all matching orders for export (caller caps the result with `limit`).
+ */
+export async function fetchOrdersForExport(venueId: string, filters: OrderFilters | undefined, limit: number) {
+  return prisma.order.findMany({
+    where: buildOrdersWhereClause(venueId, filters),
+    include: {
+      createdBy: { select: { firstName: true, lastName: true } },
+      servedBy: { select: { firstName: true, lastName: true } },
+      table: { select: { number: true } },
+      _count: { select: { items: true } },
+    },
+    orderBy: { createdAt: 'desc' },
+    take: limit,
+  })
+}
+
+/**
  * Hoists refund metadata from `processorData` to top-level fields and attaches
  * a `refunds[]` array to each original payment that has been (partially or fully)
  * refunded. Pure read-side transform — no DB side effects.

@@ -2794,6 +2794,14 @@ router.post(
  */
 router.get('/venues/:venueId/payments', authenticateTokenMiddleware, checkPermission('payments:read'), paymentController.getPaymentsData)
 
+// Export route — must be declared BEFORE the `:paymentId` routes so Express matches it first.
+router.get(
+  '/venues/:venueId/payments/export',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  paymentController.exportPaymentsData,
+)
+
 /**
  * @openapi
  * /api/v1/dashboard/venues/{venueId}/orders:
@@ -2823,6 +2831,9 @@ router.get(
   checkPermission('orders:read'),
   orderController.getOrdersData, // Apunta al nuevo controlador
 )
+
+// Export route — must be declared BEFORE the `:orderId` routes so Express matches it first.
+router.get('/venues/:venueId/orders/export', authenticateTokenMiddleware, checkPermission('orders:read'), orderController.exportOrdersData)
 
 router.get(
   '/venues/:venueId/orders/:orderId', // Nueva ruta semántica
