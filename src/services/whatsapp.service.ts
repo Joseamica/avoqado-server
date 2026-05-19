@@ -75,10 +75,16 @@ function normalizePhone(phone: string): string {
   return clean
 }
 
-/**
- * Send a WhatsApp template message via Meta Cloud API
- */
-async function sendTemplateMessage(phone: string, templateName: string, parameters: WhatsAppTemplateParam[]): Promise<boolean> {
+// Send a WhatsApp template message via Meta Cloud API. Throws on failure.
+// Returns the Cloud API messageId (wamid) so callers that need to track the
+// outbound message in their own state machine (e.g. the venue-chat relay) can
+// store it. Exported wrappers below translate this back to Promise<boolean> for
+// backward compatibility.
+async function sendTemplateMessage(
+  phone: string,
+  templateName: string,
+  parameters: WhatsAppTemplateParam[],
+): Promise<{ messageId: string }> {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN
 
@@ -124,11 +130,14 @@ async function sendTemplateMessage(phone: string, templateName: string, paramete
       throw new Error(`Error al enviar WhatsApp: ${errorMsg}`)
     }
 
-    logger.info(`WhatsApp template "${templateName}" sent to ${fullPhone}`, {
-      messageId: result?.messages?.[0]?.id,
-    })
+    const messageId = result?.messages?.[0]?.id
+    if (!messageId) {
+      logger.error('WhatsApp API returned 200 but no messages[0].id', { phone: fullPhone, template: templateName, result })
+      throw new Error('Error al enviar WhatsApp: no message id in response')
+    }
 
-    return true
+    logger.info(`WhatsApp template "${templateName}" sent to ${fullPhone}`, { messageId })
+    return { messageId }
   } catch (error) {
     if ((error as Error).message.startsWith('Error al enviar') || (error as Error).message.startsWith('WhatsApp Business API')) {
       throw error
@@ -145,11 +154,12 @@ async function sendTemplateMessage(phone: string, templateName: string, paramete
  * Template: receipt_link — params: {{1}}=venueName, {{2}}=totalAmount, {{3}}=receiptUrl
  */
 export async function sendReceiptWhatsApp(phone: string, data: WhatsAppReceiptData): Promise<boolean> {
-  return sendTemplateMessage(phone, 'receipt_link', [
+  await sendTemplateMessage(phone, 'receipt_link', [
     { type: 'text', text: data.venueName },
     { type: 'text', text: data.totalAmount },
     { type: 'text', text: data.receiptUrl },
   ])
+  return true
 }
 
 /**
@@ -168,11 +178,12 @@ export async function sendReceiptWhatsApp(phone: string, data: WhatsAppReceiptDa
  */
 export async function sendPaymentLinkShareWhatsApp(phone: string, data: WhatsAppPaymentLinkShareData): Promise<boolean> {
   const template = process.env.WHATSAPP_TEMPLATE_PAYMENT_LINK_SHARE || 'payment_link_share'
-  return sendTemplateMessage(phone, template, [
+  await sendTemplateMessage(phone, template, [
     { type: 'text', text: data.venueName },
     { type: 'text', text: data.concepto },
     { type: 'text', text: data.paymentLinkUrl },
   ])
+  return true
 }
 
 /**
@@ -180,11 +191,12 @@ export async function sendPaymentLinkShareWhatsApp(phone: string, data: WhatsApp
  * Template: purchase_confirmation — params: {{1}}=name, {{2}}=venue, {{3}}=amount
  */
 export async function sendPurchaseConfirmationWhatsApp(phone: string, data: WhatsAppPurchaseConfirmationData): Promise<boolean> {
-  return sendTemplateMessage(phone, 'purchase_confirmation', [
+  await sendTemplateMessage(phone, 'purchase_confirmation', [
     { type: 'text', text: data.customerName },
     { type: 'text', text: data.venueName },
     { type: 'text', text: data.amount },
   ])
+  return true
 }
 
 /**
@@ -222,20 +234,22 @@ export async function sendReservationConfirmationWhatsApp(
   data: WhatsAppReservationData & { extras?: string },
 ): Promise<boolean> {
   if (data.extras && data.extras.trim().length > 0) {
-    return sendTemplateMessage(phone, 'reservation_confirmation_with_extras', [
+    await sendTemplateMessage(phone, 'reservation_confirmation_with_extras', [
       { type: 'text', text: data.customerName },
       { type: 'text', text: data.venueName },
       { type: 'text', text: data.date },
       { type: 'text', text: data.time },
       { type: 'text', text: data.extras },
     ])
+    return true
   }
-  return sendTemplateMessage(phone, 'reservation_confirmation', [
+  await sendTemplateMessage(phone, 'reservation_confirmation', [
     { type: 'text', text: data.customerName },
     { type: 'text', text: data.venueName },
     { type: 'text', text: data.date },
     { type: 'text', text: data.time },
   ])
+  return true
 }
 
 /**
@@ -243,12 +257,13 @@ export async function sendReservationConfirmationWhatsApp(
  * Template: reservation_reminder — params: {{1}}=name, {{2}}=venue, {{3}}=date, {{4}}=time
  */
 export async function sendReservationReminderWhatsApp(phone: string, data: WhatsAppReservationData): Promise<boolean> {
-  return sendTemplateMessage(phone, 'reservation_reminder', [
+  await sendTemplateMessage(phone, 'reservation_reminder', [
     { type: 'text', text: data.customerName },
     { type: 'text', text: data.venueName },
     { type: 'text', text: data.date },
     { type: 'text', text: data.time },
   ])
+  return true
 }
 
 /**
@@ -264,13 +279,14 @@ export async function sendReservationRescheduleWhatsApp(
   data: WhatsAppReservationData & { message?: string },
 ): Promise<boolean> {
   const fifth = data.message?.trim() || 'Te esperamos.'
-  return sendTemplateMessage(phone, 'reservation_reschedule', [
+  await sendTemplateMessage(phone, 'reservation_reschedule', [
     { type: 'text', text: data.customerName },
     { type: 'text', text: data.venueName },
     { type: 'text', text: data.date },
     { type: 'text', text: data.time },
     { type: 'text', text: fifth },
   ])
+  return true
 }
 
 /**
@@ -278,9 +294,10 @@ export async function sendReservationRescheduleWhatsApp(
  * Template: order_status_update — params: {{1}}=name, {{2}}=venue, {{3}}=status
  */
 export async function sendOrderStatusUpdateWhatsApp(phone: string, data: WhatsAppOrderStatusData): Promise<boolean> {
-  return sendTemplateMessage(phone, 'order_status_update', [
+  await sendTemplateMessage(phone, 'order_status_update', [
     { type: 'text', text: data.customerName },
     { type: 'text', text: data.venueName },
     { type: 'text', text: data.status },
   ])
+  return true
 }
