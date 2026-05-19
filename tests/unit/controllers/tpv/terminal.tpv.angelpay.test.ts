@@ -15,7 +15,10 @@ import prisma from '@/utils/prismaClient'
 import { getTerminalConfig } from '@/controllers/tpv/terminal.tpv.controller'
 import { isProviderCompatibleWithBrand } from '@/lib/providerDeviceCompatibility'
 import { decryptCredentials } from '@/services/superadmin/merchantAccount.service'
-import { getAngelPayUserAccountForTerminal } from '@/services/superadmin/angelpayUserAccount.service'
+import {
+  getAngelPayUserAccountForTerminal,
+  getAngelPayUserAccountsForTerminal,
+} from '@/services/superadmin/angelpayUserAccount.service'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -35,7 +38,12 @@ jest.mock('@/services/superadmin/merchantAccount.service', () => ({
 }))
 
 jest.mock('@/services/superadmin/angelpayUserAccount.service', () => ({
+  // Multi-account per venue (2026-05-18): controller now prefers the
+  // plural variant and only falls back to the singular when the venue
+  // has no accounts at all. Mock both so the controller can take either
+  // branch deterministically.
   getAngelPayUserAccountForTerminal: jest.fn(),
+  getAngelPayUserAccountsForTerminal: jest.fn(),
 }))
 
 // Fallback path (org→venue inheritance) is not exercised in these tests
@@ -53,6 +61,7 @@ const mockedPrisma = prisma as unknown as {
 const mockedIsCompat = isProviderCompatibleWithBrand as jest.Mock
 const mockedDecrypt = decryptCredentials as jest.Mock
 const mockedGetAngelPayAccount = getAngelPayUserAccountForTerminal as jest.Mock
+const mockedGetAngelPayAccounts = getAngelPayUserAccountsForTerminal as jest.Mock
 
 function makeRes(): Response & { __status: number; __body: any } {
   const res: any = {}
@@ -73,6 +82,11 @@ describe('GET /tpv/terminals/:serialNumber/config — Task 13 (AngelPay)', () =>
   beforeEach(() => {
     jest.clearAllMocks()
     mockedPrisma.venueSettings.findUnique.mockResolvedValue({ enableShifts: false })
+    // Multi-account per venue (2026-05-18): default the plural variant to []
+    // so each existing test continues to exercise the legacy single-account
+    // code path (which uses `getAngelPayUserAccountForTerminal`). Tests that
+    // want the multi-account branch override this to return a non-empty array.
+    mockedGetAngelPayAccounts.mockResolvedValue([])
   })
 
   // ----------------------------------------------------------------

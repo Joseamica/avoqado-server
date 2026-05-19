@@ -236,6 +236,14 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
       // owned by a different AngelPay login than the SDK currently has
       // authenticated. Null for legacy/un-backfilled rows.
       angelpayUserAccountId: true,
+      // Eager-load the email so the TPV picker can disambiguate when two
+      // MerchantAccount rows share the same `externalMerchantId` because two
+      // AngelPayUserAccounts can both route to the same physical merchant
+      // (e.g. ventas@avoqado.io + contacto@avoqado.io both have merchant 61
+      // — without the email suffix the picker would show "Avoqado" twice
+      // identically and the cashier couldn't tell which account they're
+      // routing through). Multi-AngelPay accounts per venue (2026-05-19).
+      angelpayUserAccount: { select: { email: true } },
       provider: { select: { code: true } }, // Include provider code for multi-processor routing
     }
 
@@ -309,26 +317,48 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
       })
     }
 
+    // Multi-AngelPay accounts per venue (2026-05-19): when two MerchantAccount
+    // rows share the same `externalMerchantId` (because the same AngelPay
+    // merchant is exposed under multiple AngelPay logins), the TPV picker
+    // would render identical "Avoqado" buttons and the cashier couldn't tell
+    // them apart. Detect dupes here and append the AngelPay account email to
+    // the `displayName` ONLY for the dupes — single-account rows keep their
+    // clean label. Counts based on `externalMerchantId` so Blumon rows
+    // (which have unique externalMerchantIds per affiliation) are never
+    // suffixed.
+    const externalIdCounts = compatibleMerchants.reduce((acc: Record<string, number>, ma: any) => {
+      const key = ma.externalMerchantId ?? ''
+      acc[key] = (acc[key] || 0) + 1
+      return acc
+    }, {})
+
     // Step 3: Transform merchant accounts for Android response (spec §6.4 — additive DTO)
-    const transformedMerchants = compatibleMerchants.map((ma: any) => ({
-      id: ma.id,
-      displayName: ma.displayName,
-      providerCode: ma.provider?.code || 'BLUMON', // BLUMON, ANGELPAY, MENTA, etc.
-      serialNumber: ma.blumonSerialNumber,
-      posId: ma.blumonPosId,
-      environment: ma.blumonEnvironment,
-      merchantId: ma.blumonMerchantId,
-      credentials: ma.credentialsEncrypted, // Encrypted - Android will decrypt
-      providerConfig: ma.providerConfig,
-      // Task 13 / spec §6.4 — additive fields for AngelPay + provider-agnostic UI
-      externalMerchantId: ma.externalMerchantId,
-      isActive: ma.active,
-      angelpayAffiliation: ma.angelpayAffiliation,
-      angelpayMerchantName: ma.angelpayMerchantName,
-      // Multi-AngelPay per venue (2026-05-18). Lets the TPV switch to the
-      // correct AngelPay user account when this merchant is selected.
-      angelpayUserAccountId: ma.angelpayUserAccountId ?? null,
-    }))
+    const transformedMerchants = compatibleMerchants.map((ma: any) => {
+      const accountEmail = ma.angelpayUserAccount?.email as string | undefined
+      const needsDisambiguation =
+        ma.provider?.code === 'ANGELPAY' && accountEmail && (externalIdCounts[ma.externalMerchantId ?? ''] || 0) > 1
+      const displayName = needsDisambiguation ? `${ma.displayName} (${accountEmail})` : ma.displayName
+
+      return {
+        id: ma.id,
+        displayName,
+        providerCode: ma.provider?.code || 'BLUMON', // BLUMON, ANGELPAY, MENTA, etc.
+        serialNumber: ma.blumonSerialNumber,
+        posId: ma.blumonPosId,
+        environment: ma.blumonEnvironment,
+        merchantId: ma.blumonMerchantId,
+        credentials: ma.credentialsEncrypted, // Encrypted - Android will decrypt
+        providerConfig: ma.providerConfig,
+        // Task 13 / spec §6.4 — additive fields for AngelPay + provider-agnostic UI
+        externalMerchantId: ma.externalMerchantId,
+        isActive: ma.active,
+        angelpayAffiliation: ma.angelpayAffiliation,
+        angelpayMerchantName: ma.angelpayMerchantName,
+        // Multi-AngelPay per venue (2026-05-18). Lets the TPV switch to the
+        // correct AngelPay user account when this merchant is selected.
+        angelpayUserAccountId: ma.angelpayUserAccountId ?? null,
+      }
+    })
 
     // Step 4: Extract TPV settings from terminal config
     const terminalTpvSettings = getTpvSettingsFromConfig(terminal.config)

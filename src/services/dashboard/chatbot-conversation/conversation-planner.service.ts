@@ -177,6 +177,15 @@ export class ConversationPlannerService {
     const topProductsIntent = productComparison ? false : this.hasTopProductsIntent(normalized)
     const bareProductFollowUpTerm = state.lastTool === 'productSales' ? this.extractBareProductFollowUpTerm(normalized) : null
 
+    if (this.hasStrategicGrowthIntent(normalized)) {
+      steps.push({
+        id: this.nextStepId('query', steps),
+        kind: 'query',
+        tool: 'businessOverview',
+        args: { dateRange: this.extractDateRange(normalized) || 'thisMonth' },
+      })
+    }
+
     if (productComparison) {
       steps.push({
         id: this.nextStepId('query', steps),
@@ -253,6 +262,15 @@ export class ConversationPlannerService {
 
     if (this.hasInventoryAlertsIntent(normalized)) {
       steps.push({ id: this.nextStepId('query', steps), kind: 'query', tool: 'inventoryAlerts', args: {} })
+    }
+
+    if (this.hasPaymentMethodBreakdownIntent(normalized)) {
+      steps.push({
+        id: this.nextStepId('query', steps),
+        kind: 'query',
+        tool: 'paymentMethodBreakdown',
+        args: { dateRange: this.extractDateRange(normalized) || 'thisMonth' },
+      })
     }
 
     if (this.hasSalesSummaryIntent(normalized)) {
@@ -571,14 +589,7 @@ export class ConversationPlannerService {
           }),
         },
       ],
-      response_format: {
-        type: 'json_schema',
-        json_schema: {
-          name: 'conversation_plan',
-          strict: true,
-          schema: this.jsonSchema(),
-        },
-      },
+      response_format: { type: 'json_object' },
     } as any)
 
     const content = response.choices[0]?.message?.content
@@ -763,6 +774,8 @@ export class ConversationPlannerService {
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
       .toLowerCase()
+      .replace(/\bcaunto\b/g, 'cuanto')
+      .replace(/\boy\b/g, 'hoy')
   }
 
   private hasCriticalInjection(normalized: string): boolean {
@@ -829,7 +842,40 @@ export class ConversationPlannerService {
   }
 
   private hasInventoryAlertsIntent(normalized: string): boolean {
-    return /\b(alertas|bajo inventario|stock bajo|minimo|reorden)\b/.test(normalized)
+    return (
+      /\b(alertas|bajo inventario|stock bajo|bajo stock|poco stock|stock de algo|minimo|reorden|agotad[oa]s?|faltantes?)\b/.test(
+        normalized,
+      ) ||
+      (/\b(inventario|stock|insumos?|ingredientes?|materiales?)\b/.test(normalized) &&
+        /\b(bajo|baja|bajos|bajas|poco|poca|faltan|falta|minimo|agotad[oa])\b/.test(normalized))
+    )
+  }
+
+  private hasStrategicGrowthIntent(normalized: string): boolean {
+    const hasBusinessMetric = /\b(ventas?|ingresos?|revenue|sales|ticket|ordenes?|pedidos?|clientes?|negocio|business)\b/.test(normalized)
+    const hasGrowthGoal =
+      /\b(incrementar|aumentar|subir|mejorar|crecer|levantar|impulsar|optimizar|maximizar|vender mas|mas ventas|increase|grow|boost|improve|more sales)\b/.test(
+        normalized,
+      )
+    const asksForAction =
+      /\b(que tengo que hacer|que debo hacer|que hago|como puedo|recomiend|recomendacion|estrategia|plan|acciones?|oportunidades?|calculo dificil|analisis|ayudame|what should|how can|recommend|strategy|action plan)\b/.test(
+        normalized,
+      )
+
+    return hasBusinessMetric && hasGrowthGoal && asksForAction
+  }
+
+  private hasPaymentMethodBreakdownIntent(normalized: string): boolean {
+    const paymentMethodTerm =
+      /\b(metodos? de pago|formas? de pago|payment methods?|como pagaron|como pagan|tarjeta o efectivo|efectivo o tarjeta|desglose de pagos|distribucion de pagos)\b/.test(
+        normalized,
+      )
+    const usageIntent =
+      /\b(usa mas|uso mas|mas usado|mas usada|se usa mas|principal|top|ranking|desglose|distribucion|cuanto|cuantos|total|breakdown|most used)\b/.test(
+        normalized,
+      )
+
+    return paymentMethodTerm && usageIntent
   }
 
   private hasSalesSummaryIntent(normalized: string): boolean {
@@ -844,7 +890,7 @@ export class ConversationPlannerService {
   private hasTopProductsIntent(normalized: string): boolean {
     const mentionsProduct = /\b(producto|productos|product|products|platillos?|items?)\b/.test(normalized)
     const asksRevenueOrRanking =
-      /\b(top\s+(productos?|products?)|best-selling|top-selling|mas\s+(vendid[oa]s?|ventas?|dinero|ingresos?|revenue|money)|mayor(?:es)?\s+(ingresos?|revenue|venta)|made\s+the\s+most\s+money|generated\s+the\s+most\s+revenue|highest\s+revenue|most\s+sold)\b/.test(
+      /\b(top\s+(productos?|products?)|best-selling|top-selling|mas\s+(vendid[oa]s?|ventas?|dinero|ingresos?|revenue|money)|vend[ií]\s+mas|vendimos\s+mas|vendieron\s+mas|sold\s+the\s+most|mayor(?:es)?\s+(ingresos?|revenue|venta)|made\s+the\s+most\s+money|generated\s+the\s+most\s+revenue|highest\s+revenue|most\s+sold)\b/.test(
         normalized,
       )
 
@@ -943,7 +989,8 @@ export class ConversationPlannerService {
 
   private cleanProductComparisonTerm(rawTerm: string): string {
     return rawTerm
-      .replace(/\b(cuanto|cuanta|cuantos|cuantas|how much|how many|vendi|vendimos|ventas?|ingresos?)\b/g, ' ')
+      .replace(/\b(cuanto|cuanta|cuantos|cuantas|how much|how many|vendi|vendimos|ventas?|ingresos?|compara(?:lo)?|comparar)\b/g, ' ')
+      .replace(/\b(hoy|ayer|manana|semana|pasada|pasado|mes|ultimos?|last|week|month|today|yesterday|tomorrow)\b/g, ' ')
       .replace(/\b(de|la|el|los|las|del|al|en|por|para|con|y)\b/g, ' ')
       .replace(/[^a-z0-9ñ\s]/g, ' ')
       .replace(/\s+/g, ' ')
@@ -1299,6 +1346,7 @@ export class ConversationPlannerService {
       return undefined
     }
 
+    if (/\b(manana|tomorrow)\b/.test(normalized)) return this.dayOffsetRange(1)
     if (/\b(hoy|today)\b/.test(normalized)) return 'today'
     if (/\b(ayer|yesterday)\b/.test(normalized)) return 'yesterday'
     if (/\b(ultimos 7 dias|ultimos siete dias|last 7 days)\b/.test(normalized)) return 'last7days'
@@ -1308,6 +1356,19 @@ export class ConversationPlannerService {
     if (/\b(esta semana|this week|semana)\b/.test(normalized)) return 'thisWeek'
     if (/\b(este mes|this month|mes)\b/.test(normalized)) return 'thisMonth'
     return undefined
+  }
+
+  private dayOffsetRange(offsetDays: number): DateRangeSpec {
+    const target = new Date()
+    target.setDate(target.getDate() + offsetDays)
+
+    const from = new Date(target)
+    from.setHours(0, 0, 0, 0)
+
+    const to = new Date(target)
+    to.setHours(23, 59, 59, 999)
+
+    return { from, to }
   }
 
   private isAmbiguousDestructiveFollowUp(normalized: string, state: AssistantConversationState): boolean {

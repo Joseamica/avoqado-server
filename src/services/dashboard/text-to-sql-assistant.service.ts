@@ -3839,7 +3839,8 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
 
     const cleanupTerm = (rawTerm: string): string => {
       return rawTerm
-        .replace(/\b(cuanto|cuanta|cuantos|cuantas|how much|how many|vendi|vendimos|ventas?|ingresos?)\b/g, ' ')
+        .replace(/\b(cuanto|cuanta|cuantos|cuantas|how much|how many|vendi|vendimos|ventas?|ingresos?|compara(?:lo)?|comparar)\b/g, ' ')
+        .replace(/\b(hoy|ayer|manana|mañana|semana|pasada|pasado|mes|ultimos?|last|week|month|today|yesterday|tomorrow)\b/g, ' ')
         .replace(/\b(de|la|el|los|las|del|al|en|por|para|con|y)\b/g, ' ')
         .replace(/[^a-z0-9ñ\s]/g, ' ')
         .replace(/\s+/g, ' ')
@@ -5559,6 +5560,8 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
       .toLowerCase()
+      .replace(/\bcaunto\b/g, 'cuanto')
+      .replace(/\boy\b/g, 'hoy')
       .trim()
   }
 
@@ -6547,6 +6550,37 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
       return null
     }
 
+    const paymentLinksHelpSignal =
+      /\b(link|links|liga|ligas|enlace|enlaces)\s+(de\s+)?pago|payment\s+links?\b/.test(normalizedMessage) &&
+      /\b(configur(?:o|ar)|crear|creo|alta|editar|edita|personalizar|branding|como|how|pasos|guia|ayuda)\b/.test(normalizedMessage)
+    if (paymentLinksHelpSignal) {
+      return {
+        topic: 'payments',
+        response:
+          language === 'en'
+            ? [
+                'To configure payment links, open `Links de pago` in the dashboard.',
+                '1. Click `Crear link`.',
+                '2. Choose whether the amount is fixed or open.',
+                '3. Add title, description, expiration and allowed payment settings.',
+                '4. Save it and share the generated link with your customer.',
+                'For branding, use the branding/settings section inside `Links de pago` before sharing links publicly.',
+              ].join('\n')
+            : [
+                'Para configurar links de pago, entra a `Links de pago` en el dashboard.',
+                '1. Haz clic en `Crear link`.',
+                '2. Elige si el monto será fijo o abierto.',
+                '3. Agrega título, descripción, expiración y configuración de cobro.',
+                '4. Guarda y comparte el link generado con tu cliente.',
+                'Para branding, revisa la sección de marca/configuración dentro de `Links de pago` antes de compartir links públicos.',
+              ].join('\n'),
+        suggestions:
+          language === 'en'
+            ? ['What payment links do I have?', 'Payment link summary', 'How do I review payments?']
+            : ['¿Qué links de pago tengo?', 'Resumen de links de pago', '¿Cómo reviso mis pagos?'],
+      }
+    }
+
     const paymentsHelpSignal =
       /\b(pagos?|payments?|cobros?|transacciones?|liquidaciones?|settlements?)\b/.test(normalizedMessage) &&
       /\b(donde|ver|veo|revis(?:a|ar|o)|consult(?:a|ar|o)|encuentro|mostrar|muestrame|how|where|review|see|find)\b/.test(normalizedMessage)
@@ -7529,6 +7563,14 @@ Los datos que encontré muestran: ${JSON.stringify(finalExecution.result)}
     classification: IntentClassificationResult
     tokenUsage: { promptTokens: number; completionTokens: number; totalTokens: number }
   }> {
+    const contextualFollowUp = this.classifyContextualFollowUp(message, conversationHistory)
+    if (contextualFollowUp) {
+      return {
+        classification: contextualFollowUp,
+        tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      }
+    }
+
     const deterministicClassification = this.classifyIntent(message)
     if (
       deterministicClassification.isSimpleQuery &&
@@ -7922,6 +7964,46 @@ Responde SOLO JSON (sin markdown):
     }
   }
 
+  private classifyContextualFollowUp(
+    message: string,
+    conversationHistory?: Array<{ role: string; content: string }>,
+  ): IntentClassificationResult | null {
+    if (!conversationHistory || conversationHistory.length === 0 || !this.detectFollowUpQuery(message)) {
+      return null
+    }
+
+    const context = this.extractConversationContext(conversationHistory as ConversationEntry[])
+    if (!context.previousIntent) {
+      return null
+    }
+
+    const unsupportedInheritedIntents = new Set<IntentClassificationResult['intent']>([
+      'productSales',
+      'productSales.compare',
+    ])
+    if (unsupportedInheritedIntents.has(context.previousIntent)) {
+      return null
+    }
+
+    const newDateRange = this.extractDateRange(message)
+    const realTimeIntents = ['inventoryAlerts', 'recipeCount', 'recipeList', 'recipeUsage', 'pendingOrders', 'activeShifts']
+    const isPreviousRealTime = realTimeIntents.includes(context.previousIntent)
+
+    if (!newDateRange && !isPreviousRealTime) {
+      return null
+    }
+
+    return {
+      isSimpleQuery: true,
+      intent: context.previousIntent,
+      dateRange: newDateRange || context.previousDateRange,
+      confidence: 0.88,
+      reason: `Contextual follow-up inherited intent '${context.previousIntent}' from previous turn.`,
+      requiresDateRange: !isPreviousRealTime,
+      wasDateExplicit: Boolean(newDateRange),
+    }
+  }
+
   /** Fallback classification when LLM router can't parse response. */
   private fallbackClassification(reason: string): IntentClassificationResult {
     return {
@@ -7942,7 +8024,7 @@ Responde SOLO JSON (sin markdown):
   private isTopProductRevenueQuestion(normalizedMessage: string): boolean {
     const mentionsProduct = /\b(producto|productos|product|products)\b/.test(normalizedMessage)
     const asksRevenueRanking =
-      /\b(mas\s+(dinero|ingresos?|revenue|money)|mayor(?:es)?\s+(ingresos?|revenue|venta)|top\s+revenue|made\s+the\s+most\s+money|generated\s+the\s+most\s+revenue|highest\s+revenue)\b/.test(
+      /\b(mas\s+(vendid[oa]s?|ventas?|dinero|ingresos?|revenue|money)|vend[ií]\s+mas|vendimos\s+mas|vendieron\s+mas|sold\s+the\s+most|best-selling|top-selling|most\s+sold|mayor(?:es)?\s+(ingresos?|revenue|venta)|top\s+revenue|made\s+the\s+most\s+money|generated\s+the\s+most\s+revenue|highest\s+revenue)\b/.test(
         normalizedMessage,
       )
 
@@ -8018,7 +8100,7 @@ Responde SOLO JSON (sin markdown):
   }
 
   private extractDateRange(message: string): DateRangeSpec | undefined {
-    const lowerMessage = message.toLowerCase()
+    const lowerMessage = this.normalizeTextForMatch(message)
 
     const customRange = this.extractCustomDateRange(message)
     if (customRange) {
@@ -8028,6 +8110,11 @@ Responde SOLO JSON (sin markdown):
     // Today
     if (lowerMessage.includes('hoy') || lowerMessage.includes('today')) {
       return 'today'
+    }
+
+    // Tomorrow
+    if (lowerMessage.includes('mañana') || lowerMessage.includes('manana') || lowerMessage.includes('tomorrow')) {
+      return this.dayOffsetRange(1)
     }
 
     // Yesterday
@@ -8107,6 +8194,19 @@ Responde SOLO JSON (sin markdown):
     return undefined
   }
 
+  private dayOffsetRange(offsetDays: number): DateRangeSpec {
+    const target = new Date()
+    target.setDate(target.getDate() + offsetDays)
+
+    const from = new Date(target)
+    from.setHours(0, 0, 0, 0)
+
+    const to = new Date(target)
+    to.setHours(23, 59, 59, 999)
+
+    return { from, to }
+  }
+
   /**
    * Extract date range WITH explicit flag
    *
@@ -8178,10 +8278,14 @@ Responde SOLO JSON (sin markdown):
 
   private formatCustomDateRangeName(dateRange: { from: Date; to: Date }, language: 'es' | 'en' = 'es'): string {
     const locale = language === 'en' ? 'en-US' : 'es-MX'
+    const sameDay =
+      dateRange.from.getFullYear() === dateRange.to.getFullYear() &&
+      dateRange.from.getMonth() === dateRange.to.getMonth() &&
+      dateRange.from.getDate() === dateRange.to.getDate()
     const from = new Intl.DateTimeFormat(locale, {
       day: 'numeric',
       month: 'long',
-      year: dateRange.from.getFullYear() === dateRange.to.getFullYear() ? undefined : 'numeric',
+      year: sameDay || dateRange.from.getFullYear() === dateRange.to.getFullYear() ? undefined : 'numeric',
       timeZone: DEFAULT_TIMEZONE,
     }).format(dateRange.from)
     const to = new Intl.DateTimeFormat(locale, {
@@ -8190,6 +8294,10 @@ Responde SOLO JSON (sin markdown):
       year: 'numeric',
       timeZone: DEFAULT_TIMEZONE,
     }).format(dateRange.to)
+
+    if (sameDay) {
+      return language === 'en' ? `on ${to}` : `el ${to}`
+    }
 
     return language === 'en' ? `from ${from} to ${to}` : `del ${from} al ${to}`
   }
@@ -8327,23 +8435,27 @@ Responde SOLO JSON (sin markdown):
       return { turnCount: 0 }
     }
 
-    // Get the last user message (the one before the current)
     const userMessages = history.filter(h => h.role === 'user')
-    const lastUserMessage = userMessages[userMessages.length - 1]
-
-    if (!lastUserMessage) {
+    if (userMessages.length === 0) {
       return { turnCount: history.length }
     }
 
-    // Classify the previous query to extract its intent
-    const previousClassification = this.classifyIntentWithoutContext(lastUserMessage.content)
+    for (let index = userMessages.length - 1; index >= 0; index -= 1) {
+      const previousMessage = userMessages[index]
+      const previousClassification = this.classifyIntentWithoutContext(previousMessage.content)
+      if (!previousClassification.intent) {
+        continue
+      }
 
-    return {
-      previousIntent: previousClassification.intent,
-      previousDateRange: previousClassification.dateRange,
-      previousQuery: lastUserMessage.content,
-      turnCount: history.length,
+      return {
+        previousIntent: previousClassification.intent,
+        previousDateRange: previousClassification.dateRange,
+        previousQuery: previousMessage.content,
+        turnCount: history.length,
+      }
     }
+
+    return { turnCount: history.length }
   }
 
   /**
@@ -8390,7 +8502,7 @@ Responde SOLO JSON (sin markdown):
    * @returns true if this is likely a follow-up query
    */
   private detectFollowUpQuery(message: string): boolean {
-    const lowerMessage = message.toLowerCase().trim()
+    const lowerMessage = this.normalizeTextForMatch(message)
 
     // Follow-up indicators - short phrases that reference previous context
     const followUpIndicators = [
@@ -8416,6 +8528,10 @@ Responde SOLO JSON (sin markdown):
       'y el mes pasado',
       // Comparative follow-ups
       'comparado con',
+      'comparalo contra',
+      'compáralo contra',
+      'comparalo con',
+      'compáralo con',
       'versus ayer',
       'vs ayer',
     ]
@@ -9126,7 +9242,7 @@ ${JSON.stringify(input, null, 2)}
       return null
     }
     if (
-      /\b(cuanto|cuanta|cuantos|cuantas|como|donde|que|cual|ventas?|vendi|vendido|top|mas|menos|mejor|peor|reservas?|reservaciones?|clientes?|equipo|pagos?|liquid|ordenes?|pedidos?|recetas?|inventario|links?|algo|cosas?)\b/.test(
+      /\b(cuanto|cuanta|cuantos|cuantas|como|donde|que|cual|ventas?|vendi|vendido|top|mas|menos|mejor|peor|reservas?|reservaciones?|clientes?|equipo|pagos?|liquid|ordenes?|pedidos?|recetas?|inventario|links?|algo|cosas?|hoy|ayer|manana|semana|mes|pasad[oa]|ultimos?|today|yesterday|tomorrow|week|month|last|this)\b/.test(
         cleaned,
       )
     ) {

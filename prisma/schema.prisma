@@ -3369,7 +3369,16 @@ model MerchantAccount {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([providerId, externalMerchantId])
+  // Multi-AngelPay accounts per venue (2026-05-19): widened from
+  // (providerId, externalMerchantId) to include angelpayUserAccountId so the
+  // same AngelPay merchant (e.g. afiliación 9814275) can route through
+  // MULTIPLE AngelPayUserAccount sessions independently — each
+  // (merchant × account) gets its own MerchantAccount row, its own slot
+  // assignment, its own cost structure, and its own dashboard card.
+  // Postgres unique constraints treat NULL as distinct, so Blumon rows
+  // (angelpayUserAccountId = NULL) keep their effective de-facto uniqueness
+  // because Blumon code never tries to insert duplicate externalMerchantIds.
+  @@unique([providerId, externalMerchantId, angelpayUserAccountId])
   @@index([providerId])
   @@index([active])
   @@index([displayOrder])

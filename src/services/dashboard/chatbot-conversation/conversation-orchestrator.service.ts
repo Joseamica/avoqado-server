@@ -218,7 +218,7 @@ export class ConversationOrchestratorService {
   }
 
   private shouldFallbackToLegacy(plan: ConversationPlan): boolean {
-    if (plan.mode === 'unsupported') return false
+    if (plan.mode === 'unsupported') return plan.riskLevel !== 'high'
     const executable = plan.steps.filter(step => step.kind !== 'unsupported')
     return executable.length === 1 && executable[0]?.kind === 'query' && executable[0].tool === 'adHocAnalytics'
   }
@@ -426,12 +426,20 @@ export class ConversationOrchestratorService {
           SharedQueryService.getTopProducts(venueId, dateRange, 3),
         ])
         const topProduct = products[0]?.productName || 'sin producto líder'
+        const actionHints =
+          language === 'en'
+            ? products.length > 0
+              ? ` Suggested actions: promote ${topProduct} in bundles, review low-traffic hours with staff, and test an average-ticket offer around your top products.`
+              : ' Suggested actions: start by identifying top products, traffic peaks, and average-ticket opportunities once sales data is available.'
+            : products.length > 0
+              ? ` Acciones sugeridas: impulsa ${topProduct} en combos, revisa horarios flojos con tu equipo y prueba una oferta para subir ticket promedio alrededor de tus productos top.`
+              : ' Acciones sugeridas: primero identifica productos top, horarios fuertes y oportunidades de ticket promedio cuando haya datos de ventas.'
         return this.queryResult(
           step.tool,
           { sales, reviews, topProducts: products },
           language === 'en'
-            ? `Summary for ${this.formatDateRangeName(dateRange, language)}: ${this.money(sales.totalRevenue, sales.currency, language)} in sales, ${sales.orderCount} orders, average ticket ${this.money(sales.averageTicket, sales.currency, language)}, ${reviews.totalReviews} reviews, and top product: ${topProduct}.`
-            : `Resumen de ${this.formatDateRangeName(dateRange)}: ${this.money(sales.totalRevenue, sales.currency)} en ventas, ${sales.orderCount} órdenes, ticket promedio de ${this.money(sales.averageTicket, sales.currency)}, ${reviews.totalReviews} reseñas y producto líder: ${topProduct}.`,
+            ? `Summary for ${this.formatDateRangeName(dateRange, language)}: ${this.money(sales.totalRevenue, sales.currency, language)} in sales, ${sales.orderCount} orders, average ticket ${this.money(sales.averageTicket, sales.currency, language)}, ${reviews.totalReviews} reviews, and top product: ${topProduct}.${actionHints}`
+            : `Resumen de ${this.formatDateRangeName(dateRange)}: ${this.money(sales.totalRevenue, sales.currency)} en ventas, ${sales.orderCount} órdenes, ticket promedio de ${this.money(sales.averageTicket, sales.currency)}, ${reviews.totalReviews} reseñas y producto líder: ${topProduct}.${actionHints}`,
         )
       }
       case 'inventoryAlerts': {
@@ -1127,10 +1135,14 @@ export class ConversationOrchestratorService {
 
   private formatCustomDateRangeName(dateRange: { from: Date; to: Date }, language: ResponseLanguage = 'es'): string {
     const locale = language === 'en' ? 'en-US' : 'es-MX'
+    const sameDay =
+      dateRange.from.getFullYear() === dateRange.to.getFullYear() &&
+      dateRange.from.getMonth() === dateRange.to.getMonth() &&
+      dateRange.from.getDate() === dateRange.to.getDate()
     const from = new Intl.DateTimeFormat(locale, {
       day: 'numeric',
       month: 'long',
-      year: dateRange.from.getFullYear() === dateRange.to.getFullYear() ? undefined : 'numeric',
+      year: sameDay || dateRange.from.getFullYear() === dateRange.to.getFullYear() ? undefined : 'numeric',
       timeZone: DEFAULT_TIMEZONE,
     }).format(dateRange.from)
     const to = new Intl.DateTimeFormat(locale, {
@@ -1139,6 +1151,10 @@ export class ConversationOrchestratorService {
       year: 'numeric',
       timeZone: DEFAULT_TIMEZONE,
     }).format(dateRange.to)
+
+    if (sameDay) {
+      return language === 'en' ? `on ${to}` : `el ${to}`
+    }
 
     return language === 'en' ? `from ${from} to ${to}` : `del ${from} al ${to}`
   }

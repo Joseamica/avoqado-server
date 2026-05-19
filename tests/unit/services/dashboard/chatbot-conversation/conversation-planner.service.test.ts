@@ -34,6 +34,10 @@ describe('ConversationPlannerService', () => {
         expectedSteps: [{ kind: 'query', tool: 'sales', args: { dateRange: 'today' } }],
       },
       {
+        message: 'caunto vendi oy',
+        expectedSteps: [{ kind: 'query', tool: 'sales', args: { dateRange: 'today' } }],
+      },
+      {
         message: 'cuanto vendi del 1 de abril al 18 de mayo hoy',
         expectedSteps: [{ kind: 'query', tool: 'sales', args: { dateRange: aprilMayRange } }],
       },
@@ -70,7 +74,27 @@ describe('ConversationPlannerService', () => {
         expectedSteps: [{ kind: 'query', tool: 'productSales', args: { productName: 'jicamas', dateRange: 'thisMonth' } }],
       },
       {
+        message: 'hazme un calculo dificil de que tengo que hacer para incrementar mis ventas',
+        expectedSteps: [{ kind: 'query', tool: 'businessOverview', args: { dateRange: 'thisMonth' } }],
+      },
+      {
+        message: 'tengo poco stock de algo?',
+        expectedSteps: [{ kind: 'query', tool: 'inventoryAlerts', args: {} }],
+      },
+      {
+        message: 'que metodo de pago se usa mas este mes?',
+        expectedSteps: [{ kind: 'query', tool: 'paymentMethodBreakdown', args: { dateRange: 'thisMonth' } }],
+      },
+      {
         message: 'Which product made the most money this month?',
+        expectedSteps: [{ kind: 'query', tool: 'topProducts', args: { dateRange: 'thisMonth', limit: 5 } }],
+      },
+      {
+        message: 'que productos vendi mas este mes',
+        expectedSteps: [{ kind: 'query', tool: 'topProducts', args: { dateRange: 'thisMonth', limit: 5 } }],
+      },
+      {
+        message: 'what products sold the most this month?',
         expectedSteps: [{ kind: 'query', tool: 'topProducts', args: { dateRange: 'thisMonth', limit: 5 } }],
       },
       {
@@ -187,6 +211,27 @@ describe('ConversationPlannerService', () => {
     expect(openai.chat.completions.create).not.toHaveBeenCalled()
   })
 
+  it('plans tomorrow settlement amount questions with tomorrow instead of today', async () => {
+    const plan = await planner.plan({
+      message: 'cuanto me dispersaran mañana?',
+      venueId: 'venue-1',
+      userId: 'user-1',
+    })
+
+    expect(plan.mode).toBe('single')
+    expect(plan.steps).toEqual([
+      expect.objectContaining({
+        kind: 'query',
+        tool: 'settlementCalendar',
+        args: { dateRange: { from: expect.any(Date), to: expect.any(Date) } },
+      }),
+    ])
+    const dateRange = (plan.steps[0] as any).args.dateRange
+    expect(dateRange.from.getTime()).toBeLessThan(dateRange.to.getTime())
+    expect(dateRange.from.getDate()).not.toBe(new Date().getDate())
+    expect(openai.chat.completions.create).not.toHaveBeenCalled()
+  })
+
   it('plans product sales comparisons with weekend and night filters deterministically', async () => {
     const plan = await planner.plan({
       message: '¿Cuánto vendí de hamburguesas vs pizzas en horario nocturno los fines de semana?',
@@ -269,6 +314,67 @@ describe('ConversationPlannerService', () => {
     ])
     expect(plan.steps).not.toEqual([expect.objectContaining({ kind: 'query', tool: 'productSales' })])
     expect(openai.chat.completions.create).not.toHaveBeenCalled()
+  })
+
+  it('does not treat Spanish top-selling ranking words as a product name', async () => {
+    const plan = await planner.plan({
+      message: 'que productos vendi mas este mes',
+      venueId: 'venue-1',
+      userId: 'user-1',
+    })
+
+    expect(plan.mode).toBe('single')
+    expect(plan.steps).toEqual([
+      expect.objectContaining({
+        kind: 'query',
+        tool: 'topProducts',
+        args: { dateRange: 'thisMonth', limit: 5 },
+      }),
+    ])
+    expect(plan.steps).not.toEqual([expect.objectContaining({ kind: 'query', tool: 'productSales' })])
+    expect(openai.chat.completions.create).not.toHaveBeenCalled()
+  })
+
+  it('requests planner model JSON without an invalid strict arbitrary args schema', async () => {
+    ;(openai.chat.completions.create as jest.Mock).mockResolvedValueOnce({
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({
+              mode: 'single',
+              userFacingSummary: 'Plan generated.',
+              riskLevel: 'low',
+              steps: [
+                {
+                  id: 'query_1',
+                  kind: 'query',
+                  tool: 'topProducts',
+                  args: { dateRange: 'thisMonth', limit: 5 },
+                  dependsOn: null,
+                  actionType: null,
+                  question: null,
+                  missing: null,
+                  topic: null,
+                  reason: null,
+                },
+              ],
+            }),
+          },
+        },
+      ],
+    })
+
+    await planner.plan({
+      message: 'dame insights accionables del negocio',
+      venueId: 'venue-1',
+      userId: 'user-1',
+    })
+
+    expect(openai.chat.completions.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        response_format: { type: 'json_object' },
+      }),
+    )
   })
 
   it('plans payment link list questions deterministically', async () => {

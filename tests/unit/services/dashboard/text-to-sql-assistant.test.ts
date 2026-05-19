@@ -172,6 +172,17 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(help?.response.toLowerCase()).toContain('pagos')
     })
 
+    it('should route payment-link configuration questions to concrete operational help', () => {
+      const query = 'como configuro links de pago?'
+      // @ts-expect-error - accessing private method for testing
+      const help = service.getOperationalHelpResponse(query)
+
+      expect(help).not.toBeNull()
+      expect(help?.topic).toBe('payments')
+      expect(help?.response).toContain('Links de pago')
+      expect(help?.response).toContain('Crear link')
+    })
+
     it('should answer operational help even when the semantic classifier falsely flags it', async () => {
       const serviceWithInternals = service as any
       const originalRecordChatInteraction = serviceWithInternals.learningService.recordChatInteraction
@@ -544,6 +555,26 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
 
     it('should classify top-product revenue questions as topProducts, not productSales', () => {
       const query = 'Which product made the most money this month?'
+      // @ts-expect-error - accessing private method for testing
+      const classification = service.classifyIntent(query)
+
+      expect(classification.isSimpleQuery).toBe(true)
+      expect(classification.intent).toBe('topProducts')
+      expect(classification.dateRange).toBe('thisMonth')
+    })
+
+    it('should classify Spanish top-selling product questions as topProducts, not productSales', () => {
+      const query = 'que productos vendi mas este mes'
+      // @ts-expect-error - accessing private method for testing
+      const classification = service.classifyIntent(query)
+
+      expect(classification.isSimpleQuery).toBe(true)
+      expect(classification.intent).toBe('topProducts')
+      expect(classification.dateRange).toBe('thisMonth')
+    })
+
+    it('should classify English sold-the-most product questions as topProducts, not productSales', () => {
+      const query = 'what products sold the most this month?'
       // @ts-expect-error - accessing private method for testing
       const classification = service.classifyIntent(query)
 
@@ -966,6 +997,58 @@ describe('TextToSqlAssistantService - Unit Tests', () => {
       expect(routed.classification.intent).toBe('productSales')
       expect(routed.classification.entityName).toBe('jicamas')
       expect(routed.classification.dateRange).toBe('thisMonth')
+      expect(routed.tokenUsage.totalTokens).toBe(0)
+    })
+
+    it('should route date-only sales follow-ups as the previous sales intent, not as a product name', async () => {
+      const routed = await serviceWithInternals.routeWithLLM('y ayer?', [
+        { role: 'user', content: 'caunto vendi oy' },
+        { role: 'assistant', content: 'Hoy vendiste $0.00 en total, con 0 órdenes.' },
+      ])
+
+      expect(routed.classification.isSimpleQuery).toBe(true)
+      expect(routed.classification.intent).toBe('sales')
+      expect(routed.classification.dateRange).toBe('yesterday')
+      expect(routed.classification.entityName).toBeUndefined()
+      expect(routed.tokenUsage.totalTokens).toBe(0)
+    })
+
+    it('should route sales comparison follow-ups to the requested comparison period instead of productSales', async () => {
+      const routed = await serviceWithInternals.routeWithLLM('comparalo contra la semana pasada', [
+        { role: 'user', content: 'cuanto vendi hoy' },
+        { role: 'assistant', content: 'Hoy vendiste $1,000.00 en total, con 4 órdenes.' },
+      ])
+
+      expect(routed.classification.isSimpleQuery).toBe(true)
+      expect(routed.classification.intent).toBe('sales')
+      expect(routed.classification.dateRange).toBe('lastWeek')
+      expect(routed.classification.entityName).toBeUndefined()
+      expect(routed.tokenUsage.totalTokens).toBe(0)
+    })
+
+    it('should look past prior date-only follow-ups to recover the last concrete sales intent', async () => {
+      const routed = await serviceWithInternals.routeWithLLM('comparalo contra la semana pasada', [
+        { role: 'user', content: 'caunto vendi oy' },
+        { role: 'assistant', content: 'Hoy vendiste $0.00 en total, con 0 órdenes.' },
+        { role: 'user', content: 'y ayer?' },
+        { role: 'assistant', content: 'Ayer vendiste $0.00 en total, con 1 órdenes.' },
+      ])
+
+      expect(routed.classification.isSimpleQuery).toBe(true)
+      expect(routed.classification.intent).toBe('sales')
+      expect(routed.classification.dateRange).toBe('lastWeek')
+      expect(routed.tokenUsage.totalTokens).toBe(0)
+    })
+
+    it('should route reservation date follow-ups as reservation summaries', async () => {
+      const routed = await serviceWithInternals.routeWithLLM('y de esta semana?', [
+        { role: 'user', content: 'cuantas reservaciones tengo' },
+        { role: 'assistant', content: 'Hoy tienes 1 reservaciones. En todo el historial tienes 9 reservaciones.' },
+      ])
+
+      expect(routed.classification.isSimpleQuery).toBe(true)
+      expect(routed.classification.intent).toBe('reservationSummary')
+      expect(routed.classification.dateRange).toBe('thisWeek')
       expect(routed.tokenUsage.totalTokens).toBe(0)
     })
 

@@ -43,6 +43,7 @@ describe('ConversationOrchestratorService', () => {
         'inventory:read',
         'orders:read',
         'menu:read',
+        'reviews:read',
         'payment-link:read',
         'settlements:read',
         'reservations:read',
@@ -180,6 +181,167 @@ describe('ConversationOrchestratorService', () => {
     expect(response?.metadata.dataSourcesUsed).toContain('shared_query.settlementCalendar')
     expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'settlementCalendar', status: 'executed' })])
     expect(openai.chat.completions.create).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the legacy pipeline when the planner model marks a low-risk business question unsupported', async () => {
+    ;(openai.chat.completions.create as jest.Mock).mockResolvedValueOnce({
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({
+              mode: 'unsupported',
+              userFacingSummary: 'No registered tool.',
+              riskLevel: 'low',
+              steps: [
+                {
+                  id: 'unsupported_1',
+                  kind: 'unsupported',
+                  topic: 'business analytics',
+                  reason: 'No registered tool.',
+                },
+              ],
+            }),
+          },
+        },
+      ],
+    })
+
+    const response = await orchestrator.process({
+      message: 'dame recomendaciones accionables del negocio',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(response).toBeNull()
+  })
+
+  it('answers tomorrow settlement questions using a tomorrow date range', async () => {
+    jest.spyOn(SharedQueryService, 'getSettlementCalendarForPeriod').mockResolvedValue({
+      totalNetAmount: 500,
+      transactionCount: 1,
+      currency: 'MXN',
+      period: 'custom',
+      dateRange: {
+        from: new Date('2026-05-20T06:00:00.000Z'),
+        to: new Date('2026-05-21T05:59:59.999Z'),
+      },
+      entries: [
+        {
+          settlementDate: new Date('2026-05-20T12:00:00.000Z'),
+          totalNetAmount: 500,
+          transactionCount: 1,
+          status: 'pending',
+          byCardType: [],
+        },
+      ],
+    })
+
+    const response = await orchestrator.process({
+      message: 'cuanto me dispersaran mañana?',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.SUPERADMIN,
+    })
+
+    const [, dateRange] = (SharedQueryService.getSettlementCalendarForPeriod as jest.Mock).mock.calls[0]
+    expect(dateRange).toEqual({ from: expect.any(Date), to: expect.any(Date) })
+    expect(dateRange.from.getDate()).not.toBe(new Date().getDate())
+    expect(response?.response).toContain('te liquidan $500.00')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'settlementCalendar', status: 'executed' })])
+  })
+
+  it('answers natural low-stock questions with inventory alerts', async () => {
+    jest.spyOn(SharedQueryService, 'getInventoryAlerts').mockResolvedValue([
+      {
+        rawMaterialId: 'raw-1',
+        rawMaterialName: 'Jitomate',
+        currentStock: 2,
+        minimumStock: 5,
+        unit: 'kg',
+        stockPercentage: 40,
+        estimatedDaysRemaining: null,
+        lastPurchaseDate: null,
+      },
+    ])
+
+    const response = await orchestrator.process({
+      message: 'tengo poco stock de algo?',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(SharedQueryService.getInventoryAlerts).toHaveBeenCalledWith('venue-1')
+    expect(response?.response).toContain('Jitomate')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'inventoryAlerts', status: 'executed' })])
+  })
+
+  it('answers most-used payment method questions with the payment method breakdown tool', async () => {
+    jest.spyOn(SharedQueryService, 'getPaymentMethodBreakdown').mockResolvedValue({
+      total: 1600,
+      methods: [
+        { method: 'CARD', amount: 1200, tipAmount: 0, count: 6, percentage: 75 },
+        { method: 'CASH', amount: 400, tipAmount: 0, count: 2, percentage: 25 },
+      ],
+      currency: 'MXN',
+    })
+
+    const response = await orchestrator.process({
+      message: 'que metodo de pago se usa mas este mes?',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(SharedQueryService.getPaymentMethodBreakdown).toHaveBeenCalledWith('venue-1', 'thisMonth')
+    expect(response?.response).toContain('Métodos de pago')
+    expect(response?.response).toContain('CARD')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'paymentMethodBreakdown', status: 'executed' })])
+  })
+
+  it('answers growth strategy questions with business context and action hints', async () => {
+    jest.spyOn(SharedQueryService, 'getSalesForPeriod').mockResolvedValue({
+      totalRevenue: 2500,
+      averageTicket: 250,
+      orderCount: 10,
+      paymentCount: 10,
+      currency: 'MXN',
+      period: 'thisMonth',
+      dateRange: {
+        from: new Date('2026-05-01T00:00:00.000Z'),
+        to: new Date('2026-05-31T23:59:59.999Z'),
+      },
+    })
+    jest.spyOn(SharedQueryService, 'getReviewStats').mockResolvedValue({
+      totalReviews: 5,
+      averageRating: 4.6,
+      distribution: { oneStar: 0, twoStar: 0, threeStar: 0, fourStar: 2, fiveStar: 3 },
+      recentReviews: [],
+      unansweredNegative: 0,
+    })
+    jest.spyOn(SharedQueryService, 'getTopProducts').mockResolvedValue([
+      {
+        productId: 'product-1',
+        productName: 'Alitas Buffalo',
+        categoryName: 'Comida',
+        quantitySold: 12,
+        revenue: 1800,
+        orderCount: 10,
+      },
+    ])
+
+    const response = await orchestrator.process({
+      message: 'hazme un calculo dificil de que tengo que hacer para incrementar mis ventas',
+      venueId: 'venue-1',
+      userId: 'user-1',
+      userRole: UserRole.ADMIN,
+    })
+
+    expect(response?.response).toContain('Resumen')
+    expect(response?.response).toContain('Acciones sugeridas')
+    expect(response?.response).toContain('Alitas Buffalo')
+    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'businessOverview', status: 'executed' })])
   })
 
   it('answers product comparison questions with the registered shared query tool', async () => {

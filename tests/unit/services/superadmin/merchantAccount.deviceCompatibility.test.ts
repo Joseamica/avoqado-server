@@ -29,6 +29,12 @@ jest.mock('@/utils/prismaClient', () => ({
     },
     angelPayUserAccount: {
       findUnique: jest.fn(),
+      // Multi-account per venue (2026-05-18) — service migrated to `findFirst`
+      // because venueId is no longer unique on its own (the unique key is
+      // (venueId, email) compound). The findUnique mock is kept to preserve
+      // the BLUMON regression test (`expect(...findUnique).not.toHaveBeenCalled()`)
+      // — neither call should fire on Blumon-only paths.
+      findFirst: jest.fn(),
     },
   },
 }))
@@ -40,7 +46,7 @@ jest.mock('@/lib/providerDeviceCompatibility', () => ({
 const mockedPrisma = prisma as unknown as {
   paymentProvider: { findUnique: jest.Mock }
   merchantAccount: { findFirst: jest.Mock; create: jest.Mock }
-  angelPayUserAccount: { findUnique: jest.Mock }
+  angelPayUserAccount: { findUnique: jest.Mock; findFirst: jest.Mock }
 }
 
 const mockedAssert = assertVenueHasCompatibleTerminal as jest.Mock
@@ -89,7 +95,7 @@ describe('createMerchantAccount — device compatibility + AngelPay branch', () 
       configSchema: null,
     })
     mockedAssert.mockResolvedValue(undefined)
-    mockedPrisma.angelPayUserAccount.findUnique.mockResolvedValue({ status: 'ACTIVE' })
+    mockedPrisma.angelPayUserAccount.findFirst.mockResolvedValue({ status: 'ACTIVE' })
 
     await expect(
       createMerchantAccount({
@@ -102,7 +108,7 @@ describe('createMerchantAccount — device compatibility + AngelPay branch', () 
     expect(mockedPrisma.merchantAccount.create).not.toHaveBeenCalled()
   })
 
-  it('with provider=ANGELPAY requires AngelPayUserAccount status=ACTIVE (rejects PENDING_PIN)', async () => {
+  it('with provider=ANGELPAY requires AngelPayUserAccount status=ACTIVE (rejects when only non-ACTIVE accounts exist)', async () => {
     mockedPrisma.paymentProvider.findUnique.mockResolvedValue({
       id: 'prov-angelpay',
       code: 'ANGELPAY',
@@ -110,7 +116,13 @@ describe('createMerchantAccount — device compatibility + AngelPay branch', () 
       configSchema: null,
     })
     mockedAssert.mockResolvedValue(undefined)
-    mockedPrisma.angelPayUserAccount.findUnique.mockResolvedValue({ status: 'PENDING_PIN' })
+    // Multi-account per venue (2026-05-18): the service now `findFirst`s
+    // pre-filtered by `status: 'ACTIVE'`, so the "no usable account" case
+    // surfaces as a null result (not as a row with status=PENDING_PIN).
+    // The error message changed to "Venue has no ACTIVE AngelPay user
+    // account" — `/ACTIVE/` matches it; the old `/PENDING_PIN/` pattern
+    // no longer reflects the wording or the call shape.
+    mockedPrisma.angelPayUserAccount.findFirst.mockResolvedValue(null)
 
     await expect(
       createMerchantAccount({
@@ -118,7 +130,7 @@ describe('createMerchantAccount — device compatibility + AngelPay branch', () 
         externalMerchantId: '12345',
         venueId: 'venue-1',
       } as any),
-    ).rejects.toThrow(/PENDING_PIN/)
+    ).rejects.toThrow(/ACTIVE AngelPay/)
 
     expect(mockedPrisma.merchantAccount.create).not.toHaveBeenCalled()
   })
@@ -131,7 +143,7 @@ describe('createMerchantAccount — device compatibility + AngelPay branch', () 
       configSchema: null,
     })
     mockedAssert.mockResolvedValue(undefined)
-    mockedPrisma.angelPayUserAccount.findUnique.mockResolvedValue({ status: 'ACTIVE' })
+    mockedPrisma.angelPayUserAccount.findFirst.mockResolvedValue({ status: 'ACTIVE' })
 
     const result = await createMerchantAccount({
       providerId: 'prov-angelpay',
@@ -175,6 +187,7 @@ describe('createMerchantAccount — device compatibility + AngelPay branch', () 
     expect(mockedAssert).toHaveBeenCalledWith('venue-1', 'BLUMON')
     // AngelPay-only lookup must not run for BLUMON
     expect(mockedPrisma.angelPayUserAccount.findUnique).not.toHaveBeenCalled()
+    expect(mockedPrisma.angelPayUserAccount.findFirst).not.toHaveBeenCalled()
     expect(mockedPrisma.merchantAccount.create).toHaveBeenCalledTimes(1)
   })
 })

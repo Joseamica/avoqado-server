@@ -284,10 +284,14 @@ describe('AngelPayUserAccountService', () => {
   describe('getForTerminal()', () => {
     it('returns account via terminal→venue join', async () => {
       const account = { id: 'a1', venueId: 'venue-1', email: 'ops@avoqado.io', status: 'ACTIVE' }
+      // Multi-account per venue (2026-05-18): the relation changed from
+      // `venue.angelpayUserAccount` (singular) to `venue.angelpayUserAccounts`
+      // (plural array). The service preserves single-account contract by
+      // selecting the oldest non-DELETED row (take: 1, order createdAt asc).
       mockedPrisma.terminal.findUnique.mockResolvedValue({
         id: 'term-1',
         serialNumber: 'NEXGO-001',
-        venue: { id: 'venue-1', angelpayUserAccount: account },
+        venue: { id: 'venue-1', angelpayUserAccounts: [account] },
       })
 
       const result = await getAngelPayUserAccountForTerminal('NEXGO-001')
@@ -295,7 +299,17 @@ describe('AngelPayUserAccountService', () => {
       expect(result).toEqual(account)
       expect(mockedPrisma.terminal.findUnique).toHaveBeenCalledWith({
         where: { serialNumber: 'NEXGO-001' },
-        include: { venue: { include: { angelpayUserAccount: true } } },
+        include: {
+          venue: {
+            include: {
+              angelpayUserAccounts: {
+                where: { status: { not: 'DELETED' } },
+                orderBy: { createdAt: 'asc' },
+                take: 1,
+              },
+            },
+          },
+        },
       })
     })
 

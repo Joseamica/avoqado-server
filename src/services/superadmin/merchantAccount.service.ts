@@ -1142,90 +1142,32 @@ export async function upsertDiscoveredAngelPayMerchants(input: {
     }
 
     const externalMerchantId = String(m.angelpayId)
-    const existing = await prisma.merchantAccount.findUnique({
+    // Multi-account uniqueness (2026-05-19): the row is keyed by
+    // (providerId, externalMerchantId, angelpayUserAccountId), so the same
+    // AngelPay merchant CAN exist multiple times in the DB — once per
+    // AngelPay user account that has access to it. Each row gets its own
+    // VenuePaymentConfig slot, its own ProviderCostStructure, and its own
+    // dashboard card. This replaces the prior orphan-placeholder-cleanup
+    // hack (2026-05-19, removed) which merged shared merchants into a
+    // single row and made the second account inert for that merchant.
+    const existing = await prisma.merchantAccount.findFirst({
       where: {
-        providerId_externalMerchantId: {
-          providerId: angelpayProvider.id,
-          externalMerchantId,
-        },
+        providerId: angelpayProvider.id,
+        externalMerchantId,
+        angelpayUserAccountId: input.angelpayUserAccountId ?? null,
       },
     })
 
     if (existing) {
-      // Backfill the FK lazily: if the existing row has no AngelPay user
-      // account link yet AND this discovery run carries one, fill it in.
-      // Don't OVERRIDE an existing link — operators may have intentionally
-      // re-attributed via the dashboard.
-      const shouldLinkAccount = input.angelpayUserAccountId && !existing.angelpayUserAccountId
       await prisma.merchantAccount.update({
         where: { id: existing.id },
         data: {
           angelpayAffiliation: m.affiliationNumber,
           angelpayMerchantName: m.name,
           // Intentionally NOT touching `active` — respects admin approval.
-          ...(shouldLinkAccount && { angelpayUserAccountId: input.angelpayUserAccountId }),
         },
       })
       updated++
-
-      // Multi-account shared-merchant case (2026-05-19): when account B (e.g.
-      // contacto@) reports a merchant that account A (e.g. ventas@) already
-      // brought into the DB, the unique `(providerId, externalMerchantId)`
-      // constraint blocks creating a separate row. The placeholder reserved
-      // for account B would then sit AWAITING_ forever. Resolve by repointing
-      // B's reserved slot to the existing merchant + deleting the orphan
-      // placeholder. Routing still works because TPV's `switchAccount(B)`
-      // flips the SDK session at payment time, regardless of which account
-      // the MerchantAccount row's `angelpayUserAccountId` FK points to.
-      if (input.angelpayUserAccountId) {
-        const orphanPlaceholder = await prisma.merchantAccount.findFirst({
-          where: {
-            providerId: angelpayProvider.id,
-            externalMerchantId: { startsWith: `AWAITING_${input.venueId}_` },
-            angelpayUserAccountId: input.angelpayUserAccountId,
-          },
-          orderBy: { createdAt: 'asc' },
-        })
-        if (orphanPlaceholder && orphanPlaceholder.id !== existing.id) {
-          await prisma.$transaction(async tx => {
-            const cfg = await tx.venuePaymentConfig.findUnique({
-              where: { venueId: input.venueId },
-            })
-            if (cfg) {
-              const updates: Record<string, string> = {}
-              if (cfg.primaryAccountId === orphanPlaceholder.id) updates.primaryAccountId = existing.id
-              if (cfg.secondaryAccountId === orphanPlaceholder.id) updates.secondaryAccountId = existing.id
-              if (cfg.tertiaryAccountId === orphanPlaceholder.id) updates.tertiaryAccountId = existing.id
-              if (Object.keys(updates).length > 0) {
-                await tx.venuePaymentConfig.update({
-                  where: { venueId: input.venueId },
-                  data: updates,
-                })
-              }
-            }
-            // Clean FK dependents before deleting the placeholder.
-            // `ProviderCostStructure.merchantAccountId` has no CASCADE so an
-            // unguarded delete throws P2003 (seen 2026-05-19 on contacto@ in
-            // venue cmpaiwleb001f9kh88csbymkm — placeholder had "1 costo"
-            // from reserveSlot's default cost structure seeding). Delete cost
-            // rows first; intentionally no equivalent loop for terminals or
-            // venuePaymentConfig because both were either repointed above
-            // (config) or never assigned (placeholder was inactive).
-            await tx.providerCostStructure.deleteMany({
-              where: { merchantAccountId: orphanPlaceholder.id },
-            })
-            await tx.merchantAccount.delete({ where: { id: orphanPlaceholder.id } })
-          })
-          logger.info('Repointed reserved slot to existing shared merchant + deleted orphan placeholder', {
-            venueId: input.venueId,
-            angelpayUserAccountId: input.angelpayUserAccountId,
-            angelpayId: m.angelpayId,
-            existingMerchantAccountId: existing.id,
-            deletedPlaceholderId: orphanPlaceholder.id,
-            oldExternalId: orphanPlaceholder.externalMerchantId,
-          })
-        }
-      }
     } else {
       // Placeholder upgrade path: if admin reserved a slot from the dashboard,
       // there's a MerchantAccount in this venue with externalMerchantId like
