@@ -444,6 +444,15 @@ model VenueWhatsappActivation {
   @@index([venueId, expiresAt])
 }
 
+// Per-phone WhatsApp 24h customer-service window state. The relay can only
+// send free-form (SERVICE) messages within 24h of the last inbound. When
+// closed (lastInboundAt = null or >24h ago), the relay falls back to TEMPLATE.
+model WhatsappContactWindow {
+  phone         String    @id
+  lastInboundAt DateTime?
+  updatedAt     DateTime  @updatedAt
+}
+
 // ✅ Live Demo Session Tracking
 // Tracks temporary demo sessions for public demo (demo.dashboard.avoqado.io)
 model LiveDemoSession {
