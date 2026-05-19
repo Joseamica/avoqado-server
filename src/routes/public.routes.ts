@@ -9,8 +9,16 @@ import * as creditPackPublicController from '../controllers/public/creditPack.pu
 import * as customerPortalController from '../controllers/public/customerPortal.public.controller'
 import * as paymentLinkPublicController from '../controllers/public/paymentLink.public.controller'
 import { submitContact, submitLabsBrief } from '../controllers/public/landing.public.controller'
+import * as venueChatController from '../controllers/public/venueChat.public.controller'
 import { validateRequest } from '../middlewares/validation'
 import { authenticateCustomer } from '../middlewares/customerAuth.middleware'
+import { venueChatAuth } from '../middlewares/venueChatAuth.middleware'
+import {
+  createSessionBodySchema,
+  pollMessagesQuerySchema,
+  postMessageBodySchema,
+  sessionParamsSchema,
+} from '../schemas/public/venueChat.schema'
 import {
   publicVenueParamsSchema,
   publicReservationParamsSchema,
@@ -212,5 +220,50 @@ router.post(
 // email submissions to this server which uses Resend (HTTP).
 router.post('/contact', writeLimit, submitContact)
 router.post('/labs/submit', writeLimit, submitLabsBrief)
+
+// ---- Venue Chat (customer ↔ venue messaging via WABA relay) ----
+//
+// Customer-facing endpoints. POST /sessions is the only one without
+// venueChatAuth — it mints the accessToken returned to the widget. All
+// others require Bearer <accessToken>.
+//
+// Rate limits: writeLimit (5/min IP) for session creation is intentional —
+// real customers create at most one session per visit. Per-session limits
+// for poll (60/min) and post (30/min) are tighter than venueChatPollLimit
+// below so a single abusive session can't DoS the dispatcher.
+
+const venueChatPollLimit = rateLimit({ windowMs: 60_000, max: 60, standardHeaders: true, legacyHeaders: false })
+const venueChatPostLimit = rateLimit({ windowMs: 60_000, max: 30, standardHeaders: true, legacyHeaders: false })
+
+router.post(
+  '/venue-chat/sessions',
+  writeLimit,
+  validateRequest(z.object({ body: createSessionBodySchema })),
+  venueChatController.postSession,
+)
+
+router.get(
+  '/venue-chat/sessions/:id',
+  readLimit,
+  validateRequest(z.object({ params: sessionParamsSchema })),
+  venueChatAuth,
+  venueChatController.getSession,
+)
+
+router.get(
+  '/venue-chat/sessions/:id/messages',
+  venueChatPollLimit,
+  validateRequest(z.object({ params: sessionParamsSchema, query: pollMessagesQuerySchema })),
+  venueChatAuth,
+  venueChatController.getMessages,
+)
+
+router.post(
+  '/venue-chat/sessions/:id/messages',
+  venueChatPostLimit,
+  validateRequest(z.object({ params: sessionParamsSchema, body: postMessageBodySchema })),
+  venueChatAuth,
+  venueChatController.postMessage,
+)
 
 export default router
