@@ -511,10 +511,54 @@ model VenueChatSession {
   lastActivityAt         DateTime               @default(now())
   lastCustomerSeenAt     DateTime?
   lastEmailNotifiedAt    DateTime?
-  // messages VenueChatMessage[]  // re-enabled in next migration
+  messages               VenueChatMessage[]
 
   @@index([venueId, lastActivityAt])
   @@index([status, lastActivityAt])
+}
+
+enum VenueChatDirection {
+  INBOUND_FROM_CUSTOMER
+  INBOUND_FROM_VENUE
+  OUTBOUND_TO_CUSTOMER_EMAIL
+}
+
+enum WhatsappTransport {
+  TEMPLATE
+  SERVICE
+}
+
+enum RelayStatus {
+  NOT_APPLICABLE
+  PENDING
+  SENT
+  SENT_NO_WAMID
+  FAILED
+}
+
+// One message inside a VenueChatSession. Records both directions and (for
+// venue replies routed via WhatsApp) the relay lifecycle in relayStatus.
+// clientMessageId enables customer-side optimistic-send idempotency.
+model VenueChatMessage {
+  id                String             @id @default(cuid())
+  sessionId         String
+  session           VenueChatSession   @relation(fields: [sessionId], references: [id])
+  direction         VenueChatDirection
+  body              String
+  whatsappMessageId String?            @unique
+  whatsappContextId String?
+  emailMessageId    String?
+  whatsappTransport WhatsappTransport?
+  relayStatus       RelayStatus        @default(NOT_APPLICABLE)
+  sendAttemptedAt   DateTime?
+  sendErrorCode     String?
+  sendErrorMessage  String?
+  clientMessageId   String?
+  createdAt         DateTime           @default(now())
+
+  @@unique([sessionId, clientMessageId])
+  @@index([sessionId, createdAt, id])
+  @@index([whatsappContextId])
 }
 
 // ✅ Live Demo Session Tracking
