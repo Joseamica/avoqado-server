@@ -2,6 +2,9 @@ import request from 'supertest'
 
 import app from '@/app'
 
+// Only the GET verification handshake lives here — it's mock-safe (no DB).
+// POST inbound dispatch tests need real DB and live in
+// tests/integration/webhook/whatsapp.webhook.test.ts.
 describe('GET /api/v1/webhooks/whatsapp', () => {
   beforeAll(() => {
     process.env.WHATSAPP_VERIFY_TOKEN = 'test-verify-token'

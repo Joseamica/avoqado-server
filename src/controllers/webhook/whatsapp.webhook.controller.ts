@@ -1,6 +1,8 @@
 import { Request, Response } from 'express'
 
+import logger from '@/config/logger'
 import { getWhatsappVerifyToken } from '@/config/whatsappCloud'
+import { processWhatsappWebhook } from '@/services/whatsappWebhook.service'
 
 // GET /api/v1/webhooks/whatsapp — Meta verification handshake.
 // Meta sends this once when you configure the webhook URL to confirm you
@@ -14,9 +16,16 @@ export function handleWhatsappVerify(req: Request, res: Response) {
 }
 
 // POST /api/v1/webhooks/whatsapp — inbound message dispatcher.
-// Implemented in subsequent tasks (4.3 HMAC middleware, 4.4 dedup + dispatch).
-// For now: always 200 so Meta's "Test" button in the Configuración panel
-// doesn't show errors before the full handler exists.
-export async function handleWhatsappInbound(_req: Request, res: Response) {
-  return res.sendStatus(200)
+// Body was preserved as Buffer by express.raw() so HMAC could verify against
+// the exact bytes Meta sent. Parse to JSON now (after middleware) and hand
+// off to the service. On any throw we return 500 so Meta retries.
+export async function handleWhatsappInbound(req: Request, res: Response) {
+  try {
+    const payload = JSON.parse(Buffer.isBuffer(req.body) ? req.body.toString('utf-8') : '{}')
+    await processWhatsappWebhook(payload)
+    return res.sendStatus(200)
+  } catch (err) {
+    logger.error('WhatsApp webhook processing failed', { err: (err as Error).message })
+    return res.sendStatus(500)
+  }
 }
