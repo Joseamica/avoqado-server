@@ -802,6 +802,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'sim-custody:assign-to-supervisor', // Admin bulk-assigns SIMs to a Supervisor
     'sim-custody:assign-to-promoter', // Admin can also assign down the chain if needed
     'sim-custody:assign-to-promoter-direct', // Admin bypass — skip Supervisor and assign directly to Promoter (emergencias / excepciones)
+    'sim-custody:collect-from-promoter', // Admin can reclaim directly from Promoter (Baja de promotor, SIM defectuoso, recolección por Supervisor)
     'sim-custody:collect-from-supervisor', // Admin reclaims from Supervisor
     'sim-custody:view-all-supervisors', // Full cross-supervisor visibility
     // Allow OWNER to use TPV inbox too (edge case: venue owner also operates as promoter).
