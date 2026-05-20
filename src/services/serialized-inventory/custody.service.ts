@@ -436,14 +436,19 @@ export class SimCustodyService {
 
   /**
    * Supervisor reclaims a SIM from the Promoter. Only the owning supervisor
-   * may collect (plan §1.7 — visibility ≠ authority).
+   * may collect by default (plan §1.7 — visibility ≠ authority), EXCEPT for
+   * elevated roles (OWNER / SUPERADMIN) which can recolect across supervisors
+   * for org-level recovery scenarios (Baja de promotor, SIM defectuoso,
+   * supervisor unavailable). The audit log records the actual actor so the
+   * bypass is traceable.
    */
   async collectFromPromoter(input: CollectInput): Promise<{ custodyState: SerializedItemCustodyState }> {
     const { actor, serialNumber, reason } = input
+    const elevated = actor.role === 'OWNER' || actor.role === 'SUPERADMIN'
     const result = await this.db.$transaction(async tx => {
       const item = await this.findOrgItem(tx, actor.organizationId, serialNumber)
       if (!item) throw new SimCustodyError('NOT_FOUND')
-      if (item.assignedSupervisorId !== actor.staffId) {
+      if (!elevated && item.assignedSupervisorId !== actor.staffId) {
         throw new SimCustodyError('NOT_IN_YOUR_CUSTODY')
       }
       if (item.status === 'SOLD') throw new SimCustodyError('SIM_SOLD')
