@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express'
 import * as reservationService from '../../services/dashboard/reservation.dashboard.service'
 import * as availabilityService from '../../services/dashboard/reservationAvailability.service'
 import { countAppointmentOccupancy, effectiveAppointmentPacing } from '../../services/dashboard/reservationAvailability.service'
-import { getReservationSettings } from '../../services/dashboard/reservationSettings.service'
+import { getReservationSettings, type OperatingHours } from '../../services/dashboard/reservationSettings.service'
 import { checkExternalBusyBlock } from '../../services/reservation/external-busy-block.service'
 import { BadRequestError, ConflictError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
 import { verifyCustomerToken } from '../../jwt.service'
@@ -13,7 +13,7 @@ import { Prisma } from '@prisma/client'
 import { calculateApplicationFeeWithVAT, toStripeAmount } from '../../services/payments/providers/money'
 import { getVatRateBps } from '../../services/superadmin/platformSettings.service'
 import { getProvider } from '../../services/payments/provider-registry'
-import { formatInTimeZone } from 'date-fns-tz'
+import { formatInTimeZone, toZonedTime } from 'date-fns-tz'
 import { es as esLocale } from 'date-fns/locale'
 import emailService from '../../services/email.service'
 import { sendReservationConfirmationWhatsApp, formatModifiersForWhatsApp } from '../../services/whatsapp.service'
@@ -31,6 +31,50 @@ import { enqueuePush, resolveClassSessionPushTargets } from '../../services/goog
  */
 const UPFRONT_POLICY_VALUES = ['inherit', 'required', 'at_venue', 'optional'] as const
 type UpfrontPolicy = Exclude<(typeof UPFRONT_POLICY_VALUES)[number], 'inherit'>
+
+/**
+ * Whether a class session's [startsAt, endsAt) interval lies entirely within
+ * one of the operating-hours ranges for that day of week. Used by the public
+ * class listing to hide sessions an admin created outside of the venue's
+ * operating hours (e.g. a 6am Pilates when operatingHours starts at 9am).
+ *
+ * If the venue's operating hours are mis-configured we err on the side of
+ * showing the session — better to expose it than silently hide.
+ */
+function classSessionFitsOperatingHours(
+  startsAt: Date,
+  endsAt: Date,
+  operatingHours: OperatingHours,
+  timezone: string,
+): boolean {
+  const DAY_KEYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'] as const
+  // Convert both endpoints to venue-local wall-clock to compare against the
+  // operatingHours config (which is stored as HH:MM strings in venue tz).
+  const startLocal = toZonedTime(startsAt, timezone)
+  const endLocal = toZonedTime(endsAt, timezone)
+  const dayKey = DAY_KEYS[startLocal.getDay()]
+  const day = operatingHours[dayKey]
+  if (!day || !day.enabled || day.ranges.length === 0) return false
+  // HH:MM helpers
+  const toMinutes = (d: Date) => d.getHours() * 60 + d.getMinutes()
+  const parseHHMM = (s: string) => {
+    const [h, m] = s.split(':').map(Number)
+    return (Number.isFinite(h) ? h : 0) * 60 + (Number.isFinite(m) ? m : 0)
+  }
+  const startMin = toMinutes(startLocal)
+  // Session that crosses midnight: pin endMin to 24h so we only match against
+  // ranges that span past midnight — there are none in the current schema,
+  // so a midnight-crossing session is implicitly hidden.
+  const endMin = startLocal.toDateString() === endLocal.toDateString()
+    ? toMinutes(endLocal)
+    : 24 * 60
+  for (const r of day.ranges) {
+    const open = parseHHMM(r.open)
+    const close = parseHHMM(r.close)
+    if (startMin >= open && endMin <= close) return true
+  }
+  return false
+}
 
 /**
  * Resolve the effective upfront-payment policy for a product.
@@ -149,6 +193,18 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
     const { venueSlug } = req.params
     const venue = await resolveVenueBySlug(venueSlug)
 
+    // Hoist settings up so we can both (a) gate public access and (b) feed
+    // them into the response below — avoids a second query.
+    const settings = await getReservationSettings(venue.id)
+
+    // Hard gate — when the venue admin disabled public booking, refuse to
+    // expose the catalog so the host page doesn't render a working storefront
+    // that would just bounce the customer at checkout. Mirrors the gates in
+    // getAvailability/createReservation/createHold.
+    if (settings.publicBooking?.enabled === false) {
+      throw new BadRequestError('Las reservaciones en línea están deshabilitadas para este establecimiento.')
+    }
+
     // Get public-safe venue info
     const venueInfo = await prisma.venue.findUnique({
       where: { id: venue.id },
@@ -216,8 +272,6 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
         },
       },
     })
-
-    const settings = await getReservationSettings(venue.id)
 
     // Resolve upfrontPolicy per product server-side so the widget gets a
     // ready-to-use string and doesn't reimplement the precedence rules.
@@ -289,6 +343,13 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
     const { date, dateFrom, dateTo, duration, partySize, productId, type } = req.query as Record<string, string | undefined>
 
     const settings = await getReservationSettings(venue.id)
+    // Hard gate: when the venue admin has flipped public booking off in
+    // settings, the availability endpoint returns nothing. We don't want to
+    // leak the schedule (or worse, allow holds/reservations) when the venue
+    // intentionally went private. This mirrors createReservation below.
+    if (settings.publicBooking?.enabled === false) {
+      throw new BadRequestError('Las reservaciones en línea están deshabilitadas para este establecimiento.')
+    }
     const tz = venue.timezone || 'America/Mexico_City'
 
     // Whitelist the type filter so junk values don't trigger arbitrary code paths.
@@ -334,6 +395,25 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
       }
 
       const onlinePercent = settings.scheduling?.onlineCapacityPercent ?? 100
+      // Skip sessions that are too close to start to satisfy the venue's
+      // minimum-notice policy. The customer can't book them anyway —
+      // createReservation throws ValidationError once they try — so hiding
+      // them here avoids a confusing "requiere X minutos de anticipacion"
+      // toast after they've already picked a class.
+      const minNoticeMin = settings.scheduling?.minNoticeMin ?? 0
+      const earliestStart = minNoticeMin > 0
+        ? new Date(Date.now() + minNoticeMin * 60 * 1000)
+        : null
+
+      // Mirror the booking-window's other half: cap the window at
+      // now + maxAdvanceDays so we don't surface classes the venue would
+      // refuse to book "con tanta anticipacion".
+      const maxAdvanceDays = settings.scheduling?.maxAdvanceDays ?? 0
+      const latestStart = maxAdvanceDays > 0
+        ? new Date(Date.now() + maxAdvanceDays * 24 * 60 * 60 * 1000)
+        : null
+      const requestedEnd = new Date(`${toDate.toISOString().slice(0, 10)}T23:59:59.999`)
+      const effectiveEnd = latestStart && latestStart < requestedEnd ? latestStart : requestedEnd
 
       // Single Prisma query across the whole window — no per-product fan-out.
       // We then enrich with the same enrolled/capacity computation used by
@@ -344,8 +424,10 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
           status: 'SCHEDULED',
           ...(productId ? { productId } : { product: { type: 'CLASS', active: true } }),
           startsAt: {
-            gte: new Date(`${dateFrom}T00:00:00`),
-            lte: new Date(`${toDate.toISOString().slice(0, 10)}T23:59:59.999`),
+            gte: earliestStart && earliestStart > new Date(`${dateFrom}T00:00:00`)
+              ? earliestStart
+              : new Date(`${dateFrom}T00:00:00`),
+            lte: effectiveEnd,
           },
         },
         include: {
@@ -359,7 +441,24 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
         orderBy: { startsAt: 'asc' },
       })
 
-      const slots = sessionsRaw.map(session => {
+      // Hide sessions that fall outside the venue's CONFIGURED operating
+      // hours. The normalizer falls back to a default schedule (09-22 Mon-Sat,
+      // Sun closed) when the venue admin never touched operatingHours — we
+      // don't want to apply that default silently here, because then a venue
+      // that scheduled 6am Yoga without restricting hours would see those
+      // sessions vanish from the public listing for no obvious reason.
+      // Query the raw column to detect "user opted in to hours" vs "default".
+      const rawSettings = await prisma.reservationSettings.findUnique({
+        where: { venueId: venue.id },
+        select: { operatingHours: true },
+      })
+      const operatingHoursConfigured = rawSettings?.operatingHours != null
+      const operatingHours = settings.operatingHours ?? null
+      const sessionsInHours = operatingHoursConfigured && operatingHours
+        ? sessionsRaw.filter(s => classSessionFitsOperatingHours(s.startsAt, s.endsAt, operatingHours, tz))
+        : sessionsRaw
+
+      const slots = sessionsInHours.map(session => {
         const enrolled = session.reservations.reduce((sum, r) => sum + r.partySize, 0)
         const effectiveCapacity = Math.floor((session.capacity * onlinePercent) / 100)
         const remaining = Math.max(0, effectiveCapacity - enrolled)
