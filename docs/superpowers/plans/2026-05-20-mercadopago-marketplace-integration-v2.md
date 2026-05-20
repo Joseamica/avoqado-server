@@ -1,14 +1,23 @@
 # Mercado Pago Marketplace (Split Payments) Integration Plan — v2
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Supersedes:** `docs/superpowers/plans/2026-05-19-mercadopago-marketplace-integration.md` (v1)
 
-**Goal:** Add Mercado Pago as a third e-commerce payment provider alongside Stripe Connect and Blumon, using MP marketplace OAuth so payments settle directly in the merchant's MP account (preserving their negotiated rates) while Avoqado collects a configurable `marketplace_fee`. Dashboard exposes Mercado Pago as a new option alongside the existing providers.
+**Goal:** Add Mercado Pago as a third e-commerce payment provider alongside Stripe Connect and Blumon, using MP marketplace OAuth so
+payments settle directly in the merchant's MP account (preserving their negotiated rates) while Avoqado collects a configurable
+`marketplace_fee`. Dashboard exposes Mercado Pago as a new option alongside the existing providers.
 
-**Architecture:** Mirror the existing `IEcommerceProvider` abstraction (`src/services/payments/providers/`). Each connected merchant is an `EcommerceMerchant` row with `providerId → PaymentProvider(code='MERCADO_PAGO')`. Seller OAuth `access_token`/`refresh_token` are AES-256-GCM encrypted (using a generalized `src/lib/token-encryption.ts` helper) and stored as base64 inside `EcommerceMerchant.providerCredentials` JSON. OAuth state is a JWT-signed envelope (reuse `OAUTH_STATE_SECRET`). Checkout Pro is the primary flow (MP-hosted page). Platform fee is set via `marketplace_fee` on `/checkout/preferences`. `paymentLink.service.ts` is generalized to support both `STRIPE_CONNECT` and `MERCADO_PAGO` so the existing public checkout flow handles MP.
+**Architecture:** Mirror the existing `IEcommerceProvider` abstraction (`src/services/payments/providers/`). Each connected merchant is an
+`EcommerceMerchant` row with `providerId → PaymentProvider(code='MERCADO_PAGO')`. Seller OAuth `access_token`/`refresh_token` are
+AES-256-GCM encrypted (using a generalized `src/lib/token-encryption.ts` helper) and stored as base64 inside
+`EcommerceMerchant.providerCredentials` JSON. OAuth state is a JWT-signed envelope (reuse `OAUTH_STATE_SECRET`). Checkout Pro is the primary
+flow (MP-hosted page). Platform fee is set via `marketplace_fee` on `/checkout/preferences`. `paymentLink.service.ts` is generalized to
+support both `STRIPE_CONNECT` and `MERCADO_PAGO` so the existing public checkout flow handles MP.
 
 **Tech Stack:**
+
 - Backend: Node.js 20+, Express 4.x, TypeScript, Prisma 5.x, PostgreSQL
 - New dep: `mercadopago@^2.x` (official SDK) for preferences/payments/refunds. Raw axios for OAuth.
 - Crypto: `node:crypto` (AES-256-GCM), `jsonwebtoken` (HS256 state)
@@ -19,25 +28,26 @@
 
 ## Changelog vs v1
 
-These fixes came from `/codex` review of v1 + manual verification of every claim against the actual code. Each fix is annotated with the file/line evidence.
+These fixes came from `/codex` review of v1 + manual verification of every claim against the actual code. Each fix is annotated with the
+file/line evidence.
 
-| # | v1 Bug | v2 Fix |
-|---|---|---|
-| 1 | **Money units bug** — v1 passed `params.amount` directly to MP API; callers pass Stripe centavos via `toStripeAmount` (`reservation.consumer.service.ts:113`, `paymentLink.service.ts:1766`), so MP would have been charged 100x. | Provider interface keeps centavos convention. MP provider divides `amount/100` and `marketplaceFee/100` at the MP API boundary (see Task 15). JSDoc on `CreateCheckoutParams.amount` explicitly documents "minor units". |
-| 2 | **`getPaymentStatus` used preference ID where MP API wants payment ID** — v1 returned `preference.id` as the session ID and passed it to `GET /v1/payments/:id`. MP payment IDs only arrive via IPN. | `CheckoutSession` schema gains `mpPreferenceId`, `mpPaymentId`, `mpMerchantOrderId` columns. `getPaymentStatus` reads from DB; only hits MP API when `mpPaymentId` is set (Task 13, Task 20). |
-| 3 | **Webhook handler was a stub** — v1 Task 19 left a `TODO Task-20: persist + dispatch` comment; Task 20 only mounted the route. | New `payment-flow.service.ts` (Task 17) fully implements the IPN handler: verify → dedupe → fetch payment → find session by `external_reference` → update DB. Webhook controller (Task 27) calls into it. |
-| 4 | **Tenant isolation gap** — v1 `initiate`/`callback`/`disconnect` did not verify that `ecommerceMerchantId` belongs to the authenticated venue. Stripe DOES check (`stripeConnect.service.ts:16-37`). | New `merchant-guard.service.ts` (Task 9) provides `getMercadoPagoMerchant(venueId, merchantId)` mirror of Stripe's helper. All MP HTTP entry points use it. |
-| 5 | **Token refresh race** — v1 `refreshIfExpiring` had no concurrency control. MP rotates refresh tokens; two concurrent refreshes can persist a stale token. | Per-venue PostgreSQL advisory lock (`pg_advisory_xact_lock`) around refresh (Task 12). |
-| 6 | **Webhook signature on `body.data.id`** — MP signs against the `data.id` from the query param (lowercased if alphanumeric), not the JSON body. | Webhook controller (Task 19) reads `data.id` from query param first, falls back to body if absent. Lowercases alphanumeric IDs before HMAC. |
-| 7 | **paymentLink.service.ts hardcoded `STRIPE_CONNECT`** — v1 added MP to the provider registry but lines 967, 1717 in `paymentLink.service.ts` throw `'Esta liga de pago no está configurada para Stripe Connect'` when provider is anything else. v1 never noticed. | Task 26 generalizes the provider check to accept `STRIPE_CONNECT` OR `MERCADO_PAGO`. Adds a `kind` switch in the hosted-vs-inline decision (line 874) to recognize `MERCADO_PAGO` as `STRIPE_HOSTED`-family (redirect-based). |
-| 8 | **csrfNonce dead code** — v1 generated `csrfNonce` but never stored or verified it. | Removed. JWT signing of OAuth state already provides CSRF protection because `OAUTH_STATE_SECRET` is server-only. |
-| 9 | **`providerCredentials` overwrite** — v1 `persistTokens` replaced the entire JSON, dropping any existing fields. Stripe merges (`stripe-connect.provider.ts:481`). | `persistTokens` merges (Task 10). |
-| 10 | **Encryption helper duplicated** — v1 duplicated Google Calendar's `encryption.service.ts` with a new key env var. DRY violation. | Generalize into `src/lib/token-encryption.ts` parametrized by env var name (Task 2). Google Calendar refactored to use it (Task 3). Adds `keyVersion` field in credentials envelope for future rotation. |
-| 11 | **No webhook deduplication** — v1 had no replay protection or duplicate-delivery handling. | New `MercadoPagoWebhookEvent` table with unique `(applicationId, dataId, requestId)` constraint (Task 14). Payment flow service checks dedupe before processing (Task 17). |
-| 12 | **Routes under `/dashboard/integrations/mercadopago/oauth`** (global) — inconsistent with existing `/api/v1/dashboard/venues/:venueId/ecommerce-merchants` pattern. | Routes mounted under `/dashboard/venues/:venueId/ecommerce-merchants/:merchantId/mercadopago/oauth/...` (Task 29). |
-| 13 | **`mercadopago` SDK never installed** — v1 used raw axios for everything despite stating the SDK was the standard approach. | Task 4 installs `mercadopago@^2.x`. Checkout, payment lookup, refund all use the SDK. OAuth still uses axios (SDK has no OAuth helpers). |
-| 14 | **No `keyVersion` for encryption rotation** | Credentials envelope gains `keyVersion: 1`. Rotation runbook documented (out of v1 scope; documented decision deferred to follow-up). |
-| 15 | **Reservation deposits ambiguous** — v1 didn't address whether MP supports `reservation.consumer.service.ts` deposits, which hardcode `STRIPE_CONNECT` (lines 44, 50, 108, 291, 457, 460). | Explicitly OUT OF SCOPE in v2. Reservation deposits stay Stripe-only. Generalizing reservations is a separate plan. |
+| #   | v1 Bug                                                                                                                                                                                                                                                             | v2 Fix                                                                                                                                                                                                                        |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | **Money units bug** — v1 passed `params.amount` directly to MP API; callers pass Stripe centavos via `toStripeAmount` (`reservation.consumer.service.ts:113`, `paymentLink.service.ts:1766`), so MP would have been charged 100x.                                  | Provider interface keeps centavos convention. MP provider divides `amount/100` and `marketplaceFee/100` at the MP API boundary (see Task 15). JSDoc on `CreateCheckoutParams.amount` explicitly documents "minor units".      |
+| 2   | **`getPaymentStatus` used preference ID where MP API wants payment ID** — v1 returned `preference.id` as the session ID and passed it to `GET /v1/payments/:id`. MP payment IDs only arrive via IPN.                                                               | `CheckoutSession` schema gains `mpPreferenceId`, `mpPaymentId`, `mpMerchantOrderId` columns. `getPaymentStatus` reads from DB; only hits MP API when `mpPaymentId` is set (Task 13, Task 20).                                 |
+| 3   | **Webhook handler was a stub** — v1 Task 19 left a `TODO Task-20: persist + dispatch` comment; Task 20 only mounted the route.                                                                                                                                     | New `payment-flow.service.ts` (Task 17) fully implements the IPN handler: verify → dedupe → fetch payment → find session by `external_reference` → update DB. Webhook controller (Task 27) calls into it.                     |
+| 4   | **Tenant isolation gap** — v1 `initiate`/`callback`/`disconnect` did not verify that `ecommerceMerchantId` belongs to the authenticated venue. Stripe DOES check (`stripeConnect.service.ts:16-37`).                                                               | New `merchant-guard.service.ts` (Task 9) provides `getMercadoPagoMerchant(venueId, merchantId)` mirror of Stripe's helper. All MP HTTP entry points use it.                                                                   |
+| 5   | **Token refresh race** — v1 `refreshIfExpiring` had no concurrency control. MP rotates refresh tokens; two concurrent refreshes can persist a stale token.                                                                                                         | Per-venue PostgreSQL advisory lock (`pg_advisory_xact_lock`) around refresh (Task 12).                                                                                                                                        |
+| 6   | **Webhook signature on `body.data.id`** — MP signs against the `data.id` from the query param (lowercased if alphanumeric), not the JSON body.                                                                                                                     | Webhook controller (Task 19) reads `data.id` from query param first, falls back to body if absent. Lowercases alphanumeric IDs before HMAC.                                                                                   |
+| 7   | **paymentLink.service.ts hardcoded `STRIPE_CONNECT`** — v1 added MP to the provider registry but lines 967, 1717 in `paymentLink.service.ts` throw `'Esta liga de pago no está configurada para Stripe Connect'` when provider is anything else. v1 never noticed. | Task 26 generalizes the provider check to accept `STRIPE_CONNECT` OR `MERCADO_PAGO`. Adds a `kind` switch in the hosted-vs-inline decision (line 874) to recognize `MERCADO_PAGO` as `STRIPE_HOSTED`-family (redirect-based). |
+| 8   | **csrfNonce dead code** — v1 generated `csrfNonce` but never stored or verified it.                                                                                                                                                                                | Removed. JWT signing of OAuth state already provides CSRF protection because `OAUTH_STATE_SECRET` is server-only.                                                                                                             |
+| 9   | **`providerCredentials` overwrite** — v1 `persistTokens` replaced the entire JSON, dropping any existing fields. Stripe merges (`stripe-connect.provider.ts:481`).                                                                                                 | `persistTokens` merges (Task 10).                                                                                                                                                                                             |
+| 10  | **Encryption helper duplicated** — v1 duplicated Google Calendar's `encryption.service.ts` with a new key env var. DRY violation.                                                                                                                                  | Generalize into `src/lib/token-encryption.ts` parametrized by env var name (Task 2). Google Calendar refactored to use it (Task 3). Adds `keyVersion` field in credentials envelope for future rotation.                      |
+| 11  | **No webhook deduplication** — v1 had no replay protection or duplicate-delivery handling.                                                                                                                                                                         | New `MercadoPagoWebhookEvent` table with unique `(applicationId, dataId, requestId)` constraint (Task 14). Payment flow service checks dedupe before processing (Task 17).                                                    |
+| 12  | **Routes under `/dashboard/integrations/mercadopago/oauth`** (global) — inconsistent with existing `/api/v1/dashboard/venues/:venueId/ecommerce-merchants` pattern.                                                                                                | Routes mounted under `/dashboard/venues/:venueId/ecommerce-merchants/:merchantId/mercadopago/oauth/...` (Task 29).                                                                                                            |
+| 13  | **`mercadopago` SDK never installed** — v1 used raw axios for everything despite stating the SDK was the standard approach.                                                                                                                                        | Task 4 installs `mercadopago@^2.x`. Checkout, payment lookup, refund all use the SDK. OAuth still uses axios (SDK has no OAuth helpers).                                                                                      |
+| 14  | **No `keyVersion` for encryption rotation**                                                                                                                                                                                                                        | Credentials envelope gains `keyVersion: 1`. Rotation runbook documented (out of v1 scope; documented decision deferred to follow-up).                                                                                         |
+| 15  | **Reservation deposits ambiguous** — v1 didn't address whether MP supports `reservation.consumer.service.ts` deposits, which hardcode `STRIPE_CONNECT` (lines 44, 50, 108, 291, 457, 460).                                                                         | Explicitly OUT OF SCOPE in v2. Reservation deposits stay Stripe-only. Generalizing reservations is a separate plan.                                                                                                           |
 
 ---
 
@@ -45,26 +55,26 @@ These fixes came from `/codex` review of v1 + manual verification of every claim
 
 These were settled during planning + codex review. The implementing agent must NOT re-litigate:
 
-| Decision | Choice | Rationale |
-|---|---|---|
-| Provider interface money unit | **Centavos** (existing convention, unchanged) | All current callers (`paymentLink.service.ts:1766`, `reservation.consumer.service.ts:113`) convert via `toStripeAmount` BEFORE invoking the provider. Changing the interface = touching 4+ callers + StripeConnectProvider. MP provider divides by 100 at its API boundary instead. |
-| Token storage shape | `EcommerceMerchant.providerCredentials` JSON with base64-encoded encrypted bytes | Matches Blumon + Stripe Connect pattern. Zero new tables for the credential itself. |
-| New columns on `CheckoutSession` | `mpPreferenceId`, `mpPaymentId`, `mpMerchantOrderId` (all nullable) | Needed because MP preference ID ≠ payment ID. v1 conflated them. |
-| Dedupe table | New `MercadoPagoWebhookEvent` with unique `(applicationId, dataId, requestId)` | MP sends duplicate IPNs by design. Without dedupe we double-process payments. |
-| Encryption | Generalized `src/lib/token-encryption.ts(envKeyName)` with `keyVersion: 1` in payload | DRY with Google Calendar. Future rotation path. |
-| OAuth state | JWT (HS256) using `OAUTH_STATE_SECRET`. No separate csrfNonce. | Reuses existing pattern (Google Calendar). Stateless, 10-min TTL, CSRF baked in via server-only secret. |
-| Webhook signature manifest | `id:<lowercased data.id>;request-id:<requestId>;ts:<ts>;`, HMAC SHA-256 with `MP_WEBHOOK_SECRET` | Per MP docs. `data.id` read from query param first, body fallback. Lowercased if alphanumeric. |
-| Webhook replay window | Reject if `now - ts` > 5 minutes (300s) | MP docs recommend timestamp tolerance. Wide enough for clock skew, narrow enough to block replay. |
-| Token refresh concurrency | PostgreSQL advisory lock keyed by `hashtextextended(venueId)` | Cron + on-demand can run concurrently; lock prevents stale refresh persistence. |
-| Tenant guard | `getMercadoPagoMerchant(venueId, merchantId)` mirror of `getStripeConnectMerchant` | Same pattern, copy/paste with the code constant changed. |
-| `paymentLink.service.ts` generalization | Add `MERCADO_PAGO` to the allowed provider list in lines 967, 1717. Add MP branch in the `STRIPE_HOSTED` vs `INLINE_CARD` decision (line 874). | MP is hosted-redirect (same family as Stripe Checkout). The "kind" enum doesn't need a new value, just MP added to the redirect family. |
-| Route shape | `/api/v1/dashboard/venues/:venueId/ecommerce-merchants/:merchantId/mercadopago/oauth/{connect,callback,disconnect}` | Matches existing venue-scoped pattern (`ecommerceMerchant.routes.ts`). |
-| MP SDK | `mercadopago@^2.x` for `/checkout/preferences`, `/v1/payments/:id`, `/v1/payments/:id/refunds`. Raw axios for `/oauth/token`. | SDK handles MP-specific quirks (idempotency, error shapes, money types). OAuth not covered by SDK. |
-| Sandbox vs prod | `EcommerceMerchant.sandboxMode` boolean (existing) | Mirrors Blumon. |
-| Frontend dashboard UI | OUT OF SCOPE for this plan | Separate frontend plan. Backend ships first, dashboard wires up after smoke test passes. |
-| Reservation deposits via MP | OUT OF SCOPE for v2 | `reservation.consumer.service.ts` stays `STRIPE_CONNECT`-only. Generalizing reservations is a follow-up plan. |
-| 1:N split (multi-payee) | OUT OF SCOPE for v2 | Requires MP commercial team approval. v2 implements 1:1 (one seller, one marketplace fee). |
-| KYC nivel 6 enforcement | Documented gate in smoke test + onboarding-status string `KYC_INSUFFICIENT` | Backend doesn't gate automatically (MP returns API errors); UX surfaces it via `onboardingStatus`. |
+| Decision                                | Choice                                                                                                                                         | Rationale                                                                                                                                                                                                                                                                           |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Provider interface money unit           | **Centavos** (existing convention, unchanged)                                                                                                  | All current callers (`paymentLink.service.ts:1766`, `reservation.consumer.service.ts:113`) convert via `toStripeAmount` BEFORE invoking the provider. Changing the interface = touching 4+ callers + StripeConnectProvider. MP provider divides by 100 at its API boundary instead. |
+| Token storage shape                     | `EcommerceMerchant.providerCredentials` JSON with base64-encoded encrypted bytes                                                               | Matches Blumon + Stripe Connect pattern. Zero new tables for the credential itself.                                                                                                                                                                                                 |
+| New columns on `CheckoutSession`        | `mpPreferenceId`, `mpPaymentId`, `mpMerchantOrderId` (all nullable)                                                                            | Needed because MP preference ID ≠ payment ID. v1 conflated them.                                                                                                                                                                                                                    |
+| Dedupe table                            | New `MercadoPagoWebhookEvent` with unique `(applicationId, dataId, requestId)`                                                                 | MP sends duplicate IPNs by design. Without dedupe we double-process payments.                                                                                                                                                                                                       |
+| Encryption                              | Generalized `src/lib/token-encryption.ts(envKeyName)` with `keyVersion: 1` in payload                                                          | DRY with Google Calendar. Future rotation path.                                                                                                                                                                                                                                     |
+| OAuth state                             | JWT (HS256) using `OAUTH_STATE_SECRET`. No separate csrfNonce.                                                                                 | Reuses existing pattern (Google Calendar). Stateless, 10-min TTL, CSRF baked in via server-only secret.                                                                                                                                                                             |
+| Webhook signature manifest              | `id:<lowercased data.id>;request-id:<requestId>;ts:<ts>;`, HMAC SHA-256 with `MP_WEBHOOK_SECRET`                                               | Per MP docs. `data.id` read from query param first, body fallback. Lowercased if alphanumeric.                                                                                                                                                                                      |
+| Webhook replay window                   | Reject if `now - ts` > 5 minutes (300s)                                                                                                        | MP docs recommend timestamp tolerance. Wide enough for clock skew, narrow enough to block replay.                                                                                                                                                                                   |
+| Token refresh concurrency               | PostgreSQL advisory lock keyed by `hashtextextended(venueId)`                                                                                  | Cron + on-demand can run concurrently; lock prevents stale refresh persistence.                                                                                                                                                                                                     |
+| Tenant guard                            | `getMercadoPagoMerchant(venueId, merchantId)` mirror of `getStripeConnectMerchant`                                                             | Same pattern, copy/paste with the code constant changed.                                                                                                                                                                                                                            |
+| `paymentLink.service.ts` generalization | Add `MERCADO_PAGO` to the allowed provider list in lines 967, 1717. Add MP branch in the `STRIPE_HOSTED` vs `INLINE_CARD` decision (line 874). | MP is hosted-redirect (same family as Stripe Checkout). The "kind" enum doesn't need a new value, just MP added to the redirect family.                                                                                                                                             |
+| Route shape                             | `/api/v1/dashboard/venues/:venueId/ecommerce-merchants/:merchantId/mercadopago/oauth/{connect,callback,disconnect}`                            | Matches existing venue-scoped pattern (`ecommerceMerchant.routes.ts`).                                                                                                                                                                                                              |
+| MP SDK                                  | `mercadopago@^2.x` for `/checkout/preferences`, `/v1/payments/:id`, `/v1/payments/:id/refunds`. Raw axios for `/oauth/token`.                  | SDK handles MP-specific quirks (idempotency, error shapes, money types). OAuth not covered by SDK.                                                                                                                                                                                  |
+| Sandbox vs prod                         | `EcommerceMerchant.sandboxMode` boolean (existing)                                                                                             | Mirrors Blumon.                                                                                                                                                                                                                                                                     |
+| Frontend dashboard UI                   | OUT OF SCOPE for this plan                                                                                                                     | Separate frontend plan. Backend ships first, dashboard wires up after smoke test passes.                                                                                                                                                                                            |
+| Reservation deposits via MP             | OUT OF SCOPE for v2                                                                                                                            | `reservation.consumer.service.ts` stays `STRIPE_CONNECT`-only. Generalizing reservations is a follow-up plan.                                                                                                                                                                       |
+| 1:N split (multi-payee)                 | OUT OF SCOPE for v2                                                                                                                            | Requires MP commercial team approval. v2 implements 1:1 (one seller, one marketplace fee).                                                                                                                                                                                          |
+| KYC nivel 6 enforcement                 | Documented gate in smoke test + onboarding-status string `KYC_INSUFFICIENT`                                                                    | Backend doesn't gate automatically (MP returns API errors); UX surfaces it via `onboardingStatus`.                                                                                                                                                                                  |
 
 ---
 
@@ -72,42 +82,42 @@ These were settled during planning + codex review. The implementing agent must N
 
 ### Files to create
 
-| Path | Responsibility |
-|---|---|
-| `src/lib/token-encryption.ts` | Generalized AES-256-GCM helper, parameterized by env var name. Returns `{ encrypt, decrypt, encryptToBase64, decryptFromBase64 }`. |
-| `src/services/mercado-pago/oauth.service.ts` | Pure helpers: `signState`, `verifyState`, `buildAuthUrl`, `exchangeCodeForTokens`, `refreshAccessToken` (raw axios). |
-| `src/services/mercado-pago/connection.service.ts` | `persistTokens` (MERGE), `loadCredentials`, `clearCredentials`, `refreshIfExpiring` (with advisory lock). |
-| `src/services/mercado-pago/checkout.service.ts` | Wraps MP SDK's `createPreference` (with `marketplace_fee`), `getPayment`, `refundPayment`. Money adapter (centavos→MXN) at this boundary. |
-| `src/services/mercado-pago/webhook.service.ts` | HMAC signature verification (query-param `data.id`, lowercased, timestamp tolerance). |
-| `src/services/mercado-pago/payment-flow.service.ts` | IPN handler: dedupe via `MercadoPagoWebhookEvent` → fetch payment from MP → find `CheckoutSession` by `external_reference` → update `mpPaymentId`, `status`, link to `Payment`. |
-| `src/services/mercado-pago/merchant-guard.service.ts` | `getMercadoPagoMerchant(venueId, merchantId)` — tenant + provider-code guard. |
-| `src/services/mercado-pago/types.ts` | `MercadoPagoCredentials` envelope (with `keyVersion`), `MercadoPagoOAuthState`, `MercadoPagoTokenResponse`, `MercadoPagoWebhookPayload`. |
-| `src/services/payments/providers/mercado-pago.provider.ts` | Implements `IEcommerceProvider`. Uses `merchant-guard` (via service callers), `connection.service`, `checkout.service`, `payment-flow.service`. |
-| `src/controllers/dashboard/mercadoPagoOAuth.controller.ts` | `initiate`, `callback`, `disconnect` — each goes through tenant guard. |
-| `src/controllers/webhook/mercadoPago.webhook.controller.ts` | Verify signature → call `payment-flow.service.handleIpn`. |
-| `src/routes/dashboard/mercadoPagoOAuth.routes.ts` | Express router. Mounted under `/dashboard/venues/:venueId/ecommerce-merchants/:merchantId/mercadopago/oauth/...`. |
-| `src/schemas/dashboard/mercadoPagoOAuth.schema.ts` | Zod schemas (Spanish messages). |
-| `src/jobs/mercadopago-token-refresh.job.ts` | Daily cron (3 AM Mexico City). Iterates MP merchants, calls `refreshIfExpiring` (which acquires advisory lock). |
-| `prisma/migrations/<ts>_seed_mercado_pago_provider/migration.sql` | INSERT `PaymentProvider(code='MERCADO_PAGO')` for MX. |
-| `prisma/migrations/<ts>_add_mp_fields_to_checkout_session/migration.sql` | ALTER `CheckoutSession` ADD `mpPreferenceId`, `mpPaymentId`, `mpMerchantOrderId`. Indexes on `mpPaymentId` (unique) and `mpPreferenceId`. |
-| `prisma/migrations/<ts>_add_mercadopago_webhook_event/migration.sql` | CREATE `MercadoPagoWebhookEvent` with unique `(applicationId, dataId, requestId)`. |
-| All test files mirror the above (16 test files total). | |
+| Path                                                                     | Responsibility                                                                                                                                                                  |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/lib/token-encryption.ts`                                            | Generalized AES-256-GCM helper, parameterized by env var name. Returns `{ encrypt, decrypt, encryptToBase64, decryptFromBase64 }`.                                              |
+| `src/services/mercado-pago/oauth.service.ts`                             | Pure helpers: `signState`, `verifyState`, `buildAuthUrl`, `exchangeCodeForTokens`, `refreshAccessToken` (raw axios).                                                            |
+| `src/services/mercado-pago/connection.service.ts`                        | `persistTokens` (MERGE), `loadCredentials`, `clearCredentials`, `refreshIfExpiring` (with advisory lock).                                                                       |
+| `src/services/mercado-pago/checkout.service.ts`                          | Wraps MP SDK's `createPreference` (with `marketplace_fee`), `getPayment`, `refundPayment`. Money adapter (centavos→MXN) at this boundary.                                       |
+| `src/services/mercado-pago/webhook.service.ts`                           | HMAC signature verification (query-param `data.id`, lowercased, timestamp tolerance).                                                                                           |
+| `src/services/mercado-pago/payment-flow.service.ts`                      | IPN handler: dedupe via `MercadoPagoWebhookEvent` → fetch payment from MP → find `CheckoutSession` by `external_reference` → update `mpPaymentId`, `status`, link to `Payment`. |
+| `src/services/mercado-pago/merchant-guard.service.ts`                    | `getMercadoPagoMerchant(venueId, merchantId)` — tenant + provider-code guard.                                                                                                   |
+| `src/services/mercado-pago/types.ts`                                     | `MercadoPagoCredentials` envelope (with `keyVersion`), `MercadoPagoOAuthState`, `MercadoPagoTokenResponse`, `MercadoPagoWebhookPayload`.                                        |
+| `src/services/payments/providers/mercado-pago.provider.ts`               | Implements `IEcommerceProvider`. Uses `merchant-guard` (via service callers), `connection.service`, `checkout.service`, `payment-flow.service`.                                 |
+| `src/controllers/dashboard/mercadoPagoOAuth.controller.ts`               | `initiate`, `callback`, `disconnect` — each goes through tenant guard.                                                                                                          |
+| `src/controllers/webhook/mercadoPago.webhook.controller.ts`              | Verify signature → call `payment-flow.service.handleIpn`.                                                                                                                       |
+| `src/routes/dashboard/mercadoPagoOAuth.routes.ts`                        | Express router. Mounted under `/dashboard/venues/:venueId/ecommerce-merchants/:merchantId/mercadopago/oauth/...`.                                                               |
+| `src/schemas/dashboard/mercadoPagoOAuth.schema.ts`                       | Zod schemas (Spanish messages).                                                                                                                                                 |
+| `src/jobs/mercadopago-token-refresh.job.ts`                              | Daily cron (3 AM Mexico City). Iterates MP merchants, calls `refreshIfExpiring` (which acquires advisory lock).                                                                 |
+| `prisma/migrations/<ts>_seed_mercado_pago_provider/migration.sql`        | INSERT `PaymentProvider(code='MERCADO_PAGO')` for MX.                                                                                                                           |
+| `prisma/migrations/<ts>_add_mp_fields_to_checkout_session/migration.sql` | ALTER `CheckoutSession` ADD `mpPreferenceId`, `mpPaymentId`, `mpMerchantOrderId`. Indexes on `mpPaymentId` (unique) and `mpPreferenceId`.                                       |
+| `prisma/migrations/<ts>_add_mercadopago_webhook_event/migration.sql`     | CREATE `MercadoPagoWebhookEvent` with unique `(applicationId, dataId, requestId)`.                                                                                              |
+| All test files mirror the above (16 test files total).                   |                                                                                                                                                                                 |
 
 ### Files to modify
 
-| Path | Change |
-|---|---|
-| `prisma/schema.prisma` | Add `mpPreferenceId`, `mpPaymentId`, `mpMerchantOrderId` fields to `CheckoutSession`. Add `MercadoPagoWebhookEvent` model. |
-| `src/services/google-calendar/encryption.service.ts` | Re-export `createTokenCipher('GOOGLE_CALENDAR_TOKEN_KEY')` from the new generalized helper. Existing tests continue to pass. |
-| `src/services/payments/provider-registry.ts` | Add `case 'MERCADO_PAGO': return new MercadoPagoProvider()`. |
-| `src/services/payments/providers/provider.interface.ts` | Add JSDoc to `CreateCheckoutParams.amount` and `applicationFeeAmount`: "amount in minor units (centavos for MXN). Provider converts at API boundary if needed." |
-| `src/services/dashboard/paymentLink.service.ts` | Lines 874, 967, 1717: change `=== 'STRIPE_CONNECT'` to `in ['STRIPE_CONNECT', 'MERCADO_PAGO']`. Update `payment.provider` literal at lines 1102, 1839 to use merchant.provider.code. |
-| `src/routes/webhook.routes.ts` OR new mount in `src/app.ts` | Mount `/api/v1/webhooks/mercadopago` with `express.raw()` BEFORE `express.json()`. |
-| Central dashboard router (search for `ecommerceMerchant.routes`) | Mount `mercadoPagoOAuth.routes` under venue-scoped path. |
-| `src/config/env.ts` (or wherever Zod env validation lives) | Add `MP_CLIENT_ID`, `MP_CLIENT_SECRET`, `MP_REDIRECT_URI`, `MP_WEBHOOK_SECRET`, `MERCADO_PAGO_TOKEN_KEY`, `MP_API_BASE_URL`, `MP_AUTH_BASE_URL`. |
-| `tests/__helpers__/setup.ts` | Set the MP env vars + token key for tests. |
-| `.env.example` | Document new MP variables. |
-| `package.json` | Add `mercadopago@^2.x`. |
+| Path                                                             | Change                                                                                                                                                                               |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `prisma/schema.prisma`                                           | Add `mpPreferenceId`, `mpPaymentId`, `mpMerchantOrderId` fields to `CheckoutSession`. Add `MercadoPagoWebhookEvent` model.                                                           |
+| `src/services/google-calendar/encryption.service.ts`             | Re-export `createTokenCipher('GOOGLE_CALENDAR_TOKEN_KEY')` from the new generalized helper. Existing tests continue to pass.                                                         |
+| `src/services/payments/provider-registry.ts`                     | Add `case 'MERCADO_PAGO': return new MercadoPagoProvider()`.                                                                                                                         |
+| `src/services/payments/providers/provider.interface.ts`          | Add JSDoc to `CreateCheckoutParams.amount` and `applicationFeeAmount`: "amount in minor units (centavos for MXN). Provider converts at API boundary if needed."                      |
+| `src/services/dashboard/paymentLink.service.ts`                  | Lines 874, 967, 1717: change `=== 'STRIPE_CONNECT'` to `in ['STRIPE_CONNECT', 'MERCADO_PAGO']`. Update `payment.provider` literal at lines 1102, 1839 to use merchant.provider.code. |
+| `src/routes/webhook.routes.ts` OR new mount in `src/app.ts`      | Mount `/api/v1/webhooks/mercadopago` with `express.raw()` BEFORE `express.json()`.                                                                                                   |
+| Central dashboard router (search for `ecommerceMerchant.routes`) | Mount `mercadoPagoOAuth.routes` under venue-scoped path.                                                                                                                             |
+| `src/config/env.ts` (or wherever Zod env validation lives)       | Add `MP_CLIENT_ID`, `MP_CLIENT_SECRET`, `MP_REDIRECT_URI`, `MP_WEBHOOK_SECRET`, `MERCADO_PAGO_TOKEN_KEY`, `MP_API_BASE_URL`, `MP_AUTH_BASE_URL`.                                     |
+| `tests/__helpers__/setup.ts`                                     | Set the MP env vars + token key for tests.                                                                                                                                           |
+| `.env.example`                                                   | Document new MP variables.                                                                                                                                                           |
+| `package.json`                                                   | Add `mercadopago@^2.x`.                                                                                                                                                              |
 
 ### Files explicitly NOT modified (out of scope for v2)
 
@@ -125,14 +135,14 @@ These were settled during planning + codex review. The implementing agent must N
 ### Task 1: Add env vars and validation
 
 **Files:**
+
 - Modify: `src/config/env.ts` (locate via `grep -rln "STRIPE_SECRET_KEY" src/config/`)
 - Modify: `.env.example`
 - Modify: `tests/__helpers__/setup.ts`
 
 - [ ] **Step 1: Locate env validation file**
 
-Run: `grep -rln "STRIPE_SECRET_KEY" src/config/ src/ | head -3`
-Use whichever single file emerges. Call it `<env-file>`.
+Run: `grep -rln "STRIPE_SECRET_KEY" src/config/ src/ | head -3` Use whichever single file emerges. Call it `<env-file>`.
 
 - [ ] **Step 2: Add MP env var schema**
 
@@ -196,6 +206,7 @@ git commit -m "feat(mercado-pago): add env vars for MP marketplace integration"
 ### Task 2: Generalized token encryption helper
 
 **Files:**
+
 - Create: `src/lib/token-encryption.ts`
 - Create: `tests/unit/lib/token-encryption.test.ts`
 
@@ -255,8 +266,7 @@ describe('createTokenCipher', () => {
 
 - [ ] **Step 2: Run, expect fail**
 
-Run: `npm test -- tests/unit/lib/token-encryption.test.ts`
-Expected: module not found.
+Run: `npm test -- tests/unit/lib/token-encryption.test.ts` Expected: module not found.
 
 - [ ] **Step 3: Implement**
 
@@ -323,8 +333,7 @@ export function createTokenCipher(envKeyName: string): TokenCipher {
 
 - [ ] **Step 4: Run, expect pass**
 
-Run: `npm test -- tests/unit/lib/token-encryption.test.ts`
-Expected: PASS (6/6).
+Run: `npm test -- tests/unit/lib/token-encryption.test.ts` Expected: PASS (6/6).
 
 - [ ] **Step 5: Commit**
 
@@ -338,6 +347,7 @@ git commit -m "feat(lib): generalized AES-256-GCM token encryption helper"
 ### Task 3: Refactor Google Calendar to use generalized helper
 
 **Files:**
+
 - Modify: `src/services/google-calendar/encryption.service.ts`
 - Run: existing Google Calendar tests
 
@@ -365,13 +375,11 @@ export const decryptToken = cipher.decrypt
 
 - [ ] **Step 2: Run Google Calendar tests to confirm no regression**
 
-Run: `npm test -- tests/unit/services/google-calendar/`
-Expected: all PASS (same suite that already exists).
+Run: `npm test -- tests/unit/services/google-calendar/` Expected: all PASS (same suite that already exists).
 
 - [ ] **Step 3: Run full test suite (defense in depth)**
 
-Run: `npm test`
-Expected: pass.
+Run: `npm test` Expected: pass.
 
 - [ ] **Step 4: Commit**
 
@@ -385,6 +393,7 @@ git commit -m "refactor(google-calendar): use generalized token encryption helpe
 ### Task 4: Install Mercado Pago SDK
 
 **Files:**
+
 - Modify: `package.json`
 - Modify: `package-lock.json`
 
@@ -409,6 +418,7 @@ git commit -m "feat(mercado-pago): install mercadopago SDK v2"
 ### Task 5: Type definitions
 
 **Files:**
+
 - Create: `src/services/mercado-pago/types.ts`
 
 - [ ] **Step 1: Create types**
@@ -490,6 +500,7 @@ git commit -m "feat(mercado-pago): credentials envelope and API types"
 ### Task 6: OAuth state helpers (JWT signed)
 
 **Files:**
+
 - Create: `src/services/mercado-pago/oauth.service.ts` (state helpers only in this task)
 - Create: `tests/unit/services/mercado-pago/oauth.service.test.ts`
 
@@ -580,6 +591,7 @@ git commit -m "feat(mercado-pago): JWT-signed OAuth state helpers"
 ### Task 7: OAuth URL builder + code exchange + refresh
 
 **Files:**
+
 - Modify: `src/services/mercado-pago/oauth.service.ts`
 - Modify: `tests/unit/services/mercado-pago/oauth.service.test.ts`
 
@@ -610,17 +622,24 @@ describe('MP OAuth - exchangeCodeForTokens', () => {
 
   it('exchanges code via /oauth/token', async () => {
     nock('https://api.mercadopago.com')
-      .post('/oauth/token', body =>
-        body.client_id === 'test-mp-client-id' &&
-        body.client_secret === 'test-mp-client-secret' &&
-        body.grant_type === 'authorization_code' &&
-        body.code === 'auth-code-123' &&
-        body.redirect_uri === process.env.MP_REDIRECT_URI,
+      .post(
+        '/oauth/token',
+        body =>
+          body.client_id === 'test-mp-client-id' &&
+          body.client_secret === 'test-mp-client-secret' &&
+          body.grant_type === 'authorization_code' &&
+          body.code === 'auth-code-123' &&
+          body.redirect_uri === process.env.MP_REDIRECT_URI,
       )
       .reply(200, {
-        access_token: 'APP_USR-access', token_type: 'bearer', expires_in: 15552000,
-        scope: 'offline_access read write', user_id: 12345678, refresh_token: 'TG-refresh',
-        public_key: 'pk', live_mode: false,
+        access_token: 'APP_USR-access',
+        token_type: 'bearer',
+        expires_in: 15552000,
+        scope: 'offline_access read write',
+        user_id: 12345678,
+        refresh_token: 'TG-refresh',
+        public_key: 'pk',
+        live_mode: false,
       })
 
     const t = await exchangeCodeForTokens('auth-code-123')
@@ -641,8 +660,14 @@ describe('MP OAuth - refreshAccessToken', () => {
     nock('https://api.mercadopago.com')
       .post('/oauth/token', body => body.grant_type === 'refresh_token' && body.refresh_token === 'old')
       .reply(200, {
-        access_token: 'NEW-access', token_type: 'bearer', expires_in: 15552000,
-        scope: 's', user_id: 1, refresh_token: 'NEW-refresh', public_key: 'pk', live_mode: false,
+        access_token: 'NEW-access',
+        token_type: 'bearer',
+        expires_in: 15552000,
+        scope: 's',
+        user_id: 1,
+        refresh_token: 'NEW-refresh',
+        public_key: 'pk',
+        live_mode: false,
       })
     const t = await refreshAccessToken('old')
     expect(t.access_token).toBe('NEW-access')
@@ -724,6 +749,7 @@ git commit -m "feat(mercado-pago): OAuth authorize URL + code exchange + token r
 ### Task 8: Seed MERCADO_PAGO PaymentProvider row
 
 **Files:**
+
 - Create: `prisma/migrations/<ts>_seed_mercado_pago_provider/migration.sql`
 
 - [ ] **Step 1: Create the migration**
@@ -773,6 +799,7 @@ Run: `npx prisma migrate dev`
 ```bash
 psql $DATABASE_URL -c "SELECT id, code, name, active FROM \"PaymentProvider\" WHERE code = 'MERCADO_PAGO';"
 ```
+
 Expected: 1 row.
 
 - [ ] **Step 5: Commit**
@@ -791,6 +818,7 @@ git commit -m "feat(mercado-pago): seed MERCADO_PAGO PaymentProvider for MX"
 ### Task 9: Tenant guard helper
 
 **Files:**
+
 - Create: `src/services/mercado-pago/merchant-guard.service.ts`
 - Create: `tests/unit/services/mercado-pago/merchant-guard.service.test.ts`
 
@@ -814,7 +842,9 @@ describe('getMercadoPagoMerchant', () => {
 
   it('returns merchant when venue + provider match', async () => {
     mockPrisma.ecommerceMerchant.findUnique.mockResolvedValue({
-      id: 'em_1', venueId: 'v_1', provider: { code: 'MERCADO_PAGO' },
+      id: 'em_1',
+      venueId: 'v_1',
+      provider: { code: 'MERCADO_PAGO' },
     })
     const m = await getMercadoPagoMerchant('v_1', 'em_1')
     expect(m.id).toBe('em_1')
@@ -827,14 +857,18 @@ describe('getMercadoPagoMerchant', () => {
 
   it('throws UnauthorizedError when venue mismatches', async () => {
     mockPrisma.ecommerceMerchant.findUnique.mockResolvedValue({
-      id: 'em_1', venueId: 'OTHER_VENUE', provider: { code: 'MERCADO_PAGO' },
+      id: 'em_1',
+      venueId: 'OTHER_VENUE',
+      provider: { code: 'MERCADO_PAGO' },
     })
     await expect(getMercadoPagoMerchant('v_1', 'em_1')).rejects.toThrow(UnauthorizedError)
   })
 
   it('throws BadRequestError when provider is not MERCADO_PAGO', async () => {
     mockPrisma.ecommerceMerchant.findUnique.mockResolvedValue({
-      id: 'em_1', venueId: 'v_1', provider: { code: 'STRIPE_CONNECT' },
+      id: 'em_1',
+      venueId: 'v_1',
+      provider: { code: 'STRIPE_CONNECT' },
     })
     await expect(getMercadoPagoMerchant('v_1', 'em_1')).rejects.toThrow(BadRequestError)
   })
@@ -876,6 +910,7 @@ git commit -m "feat(mercado-pago): tenant guard helper mirrors Stripe Connect pa
 ### Task 10: Connection service — persistTokens (MERGE) + loadCredentials
 
 **Files:**
+
 - Create: `src/services/mercado-pago/connection.service.ts`
 - Create: `tests/unit/services/mercado-pago/connection.service.test.ts`
 
@@ -898,9 +933,14 @@ const mockPrisma = prisma as unknown as { ecommerceMerchant: { findUnique: jest.
 const cipher = createTokenCipher('MERCADO_PAGO_TOKEN_KEY')
 
 const tokens = {
-  access_token: 'APP_USR-access', refresh_token: 'TG-refresh',
-  expires_in: 15552000, scope: 'offline_access read write',
-  user_id: 12345678, token_type: 'bearer' as const, public_key: 'pk', live_mode: false,
+  access_token: 'APP_USR-access',
+  refresh_token: 'TG-refresh',
+  expires_in: 15552000,
+  scope: 'offline_access read write',
+  user_id: 12345678,
+  token_type: 'bearer' as const,
+  public_key: 'pk',
+  live_mode: false,
 }
 
 describe('persistTokens', () => {
@@ -917,8 +957,8 @@ describe('persistTokens', () => {
 
     const updateArgs = mockPrisma.ecommerceMerchant.update.mock.calls[0][0]
     const creds = updateArgs.data.providerCredentials
-    expect(creds.unrelatedField).toBe('keep-me')        // preserved
-    expect(creds.mpUserId).toBe('12345678')             // updated
+    expect(creds.unrelatedField).toBe('keep-me') // preserved
+    expect(creds.mpUserId).toBe('12345678') // updated
     expect(creds.schemaVersion).toBe(1)
     expect(creds.keyVersion).toBe(1)
     expect(updateArgs.data.providerMerchantId).toBe('12345678')
@@ -937,7 +977,8 @@ describe('loadCredentials', () => {
     mockPrisma.ecommerceMerchant.findUnique.mockResolvedValue({
       id: 'em_1',
       providerCredentials: {
-        schemaVersion: 1, keyVersion: 1,
+        schemaVersion: 1,
+        keyVersion: 1,
         mpUserId: '12345678',
         accessTokenCiphertext: cipher.encryptToBase64('APP_USR-access'),
         refreshTokenCiphertext: cipher.encryptToBase64('TG-refresh'),
@@ -996,9 +1037,15 @@ export interface DecryptedCredentials {
 }
 
 const MP_KEYS = [
-  'schemaVersion', 'keyVersion', 'mpUserId',
-  'accessTokenCiphertext', 'refreshTokenCiphertext',
-  'expiresAt', 'scope', 'liveMode', 'lastRefreshedAt',
+  'schemaVersion',
+  'keyVersion',
+  'mpUserId',
+  'accessTokenCiphertext',
+  'refreshTokenCiphertext',
+  'expiresAt',
+  'scope',
+  'liveMode',
+  'lastRefreshedAt',
 ]
 
 function readJsonObject(value: Prisma.JsonValue | null | undefined): Record<string, unknown> {
@@ -1082,6 +1129,7 @@ git commit -m "feat(mercado-pago): connection service with MERGE persistence + c
 ### Task 11: Connection service — refreshIfExpiring with advisory lock
 
 **Files:**
+
 - Modify: `src/services/mercado-pago/connection.service.ts`
 - Modify: `tests/unit/services/mercado-pago/connection.service.test.ts`
 
@@ -1105,18 +1153,28 @@ describe('refreshIfExpiring', () => {
 
   it('refreshes when expiry is within threshold', async () => {
     mockPrisma.ecommerceMerchant.findUnique.mockResolvedValue({
-      id: 'em_1', venueId: 'v_1',
+      id: 'em_1',
+      venueId: 'v_1',
       providerCredentials: {
-        schemaVersion: 1, keyVersion: 1, mpUserId: '1',
+        schemaVersion: 1,
+        keyVersion: 1,
+        mpUserId: '1',
         accessTokenCiphertext: cipher.encryptToBase64('OLD'),
         refreshTokenCiphertext: cipher.encryptToBase64('OLD-r'),
         expiresAt: new Date(Date.now() + 10 * 86400_000).toISOString(),
-        scope: 's', liveMode: false,
+        scope: 's',
+        liveMode: false,
       },
     })
     ;(oauthService.refreshAccessToken as jest.Mock).mockResolvedValue({
-      access_token: 'NEW', refresh_token: 'NEW-r', user_id: 1,
-      expires_in: 15552000, scope: 's', token_type: 'bearer', public_key: 'pk', live_mode: false,
+      access_token: 'NEW',
+      refresh_token: 'NEW-r',
+      user_id: 1,
+      expires_in: 15552000,
+      scope: 's',
+      token_type: 'bearer',
+      public_key: 'pk',
+      live_mode: false,
     })
     mockPrisma.ecommerceMerchant.update.mockResolvedValue({})
 
@@ -1127,13 +1185,17 @@ describe('refreshIfExpiring', () => {
 
   it('skips when token has plenty of life', async () => {
     mockPrisma.ecommerceMerchant.findUnique.mockResolvedValue({
-      id: 'em_1', venueId: 'v_1',
+      id: 'em_1',
+      venueId: 'v_1',
       providerCredentials: {
-        schemaVersion: 1, keyVersion: 1, mpUserId: '1',
+        schemaVersion: 1,
+        keyVersion: 1,
+        mpUserId: '1',
         accessTokenCiphertext: cipher.encryptToBase64('a'),
         refreshTokenCiphertext: cipher.encryptToBase64('r'),
         expiresAt: new Date(Date.now() + 100 * 86400_000).toISOString(),
-        scope: 's', liveMode: false,
+        scope: 's',
+        liveMode: false,
       },
     })
     expect(await refreshIfExpiring('em_1', 30)).toBe('not_needed')
@@ -1147,18 +1209,28 @@ describe('refreshIfExpiring', () => {
 
   it('acquires per-venue advisory lock during refresh', async () => {
     mockPrisma.ecommerceMerchant.findUnique.mockResolvedValue({
-      id: 'em_1', venueId: 'v_1',
+      id: 'em_1',
+      venueId: 'v_1',
       providerCredentials: {
-        schemaVersion: 1, keyVersion: 1, mpUserId: '1',
+        schemaVersion: 1,
+        keyVersion: 1,
+        mpUserId: '1',
         accessTokenCiphertext: cipher.encryptToBase64('a'),
         refreshTokenCiphertext: cipher.encryptToBase64('r'),
         expiresAt: new Date(Date.now() + 86400_000).toISOString(),
-        scope: 's', liveMode: false,
+        scope: 's',
+        liveMode: false,
       },
     })
     ;(oauthService.refreshAccessToken as jest.Mock).mockResolvedValue({
-      access_token: 'N', refresh_token: 'NR', user_id: 1,
-      expires_in: 15552000, scope: 's', token_type: 'bearer', public_key: 'pk', live_mode: false,
+      access_token: 'N',
+      refresh_token: 'NR',
+      user_id: 1,
+      expires_in: 15552000,
+      scope: 's',
+      token_type: 'bearer',
+      public_key: 'pk',
+      live_mode: false,
     })
     mockPrisma.ecommerceMerchant.update.mockResolvedValue({})
 
@@ -1243,6 +1315,7 @@ git commit -m "feat(mercado-pago): refresh with per-venue advisory lock"
 ### Task 12: Add MP fields to CheckoutSession
 
 **Files:**
+
 - Modify: `prisma/schema.prisma`
 - Create: `prisma/migrations/<ts>_add_mp_fields_to_checkout_session/migration.sql`
 
@@ -1289,6 +1362,7 @@ git commit -m "feat(mercado-pago): add MP fields to CheckoutSession"
 ### Task 13: Add MercadoPagoWebhookEvent dedupe table
 
 **Files:**
+
 - Modify: `prisma/schema.prisma`
 - Create: `prisma/migrations/<ts>_add_mercadopago_webhook_event/migration.sql`
 
@@ -1352,6 +1426,7 @@ git commit -m "feat(mercado-pago): webhook event dedupe table"
 ### Task 14: Checkout service — createPreference with money adapter
 
 **Files:**
+
 - Create: `src/services/mercado-pago/checkout.service.ts`
 - Create: `tests/unit/services/mercado-pago/checkout.service.test.ts`
 
@@ -1385,10 +1460,17 @@ describe('createPreference — money adapter (centavos→MXN)', () => {
       })
 
     const out = await createPreference({
-      accessToken: 'SELLER', sandboxMode: false,
-      orderId: 'order_123', amountCents: 100000, marketplaceFeeCents: 5000,
-      currency: 'MXN', description: 'Sesión yoga', payerEmail: 'b@x.com',
-      successUrl: 'https://a/s', failureUrl: 'https://a/f', pendingUrl: 'https://a/p',
+      accessToken: 'SELLER',
+      sandboxMode: false,
+      orderId: 'order_123',
+      amountCents: 100000,
+      marketplaceFeeCents: 5000,
+      currency: 'MXN',
+      description: 'Sesión yoga',
+      payerEmail: 'b@x.com',
+      successUrl: 'https://a/s',
+      failureUrl: 'https://a/f',
+      pendingUrl: 'https://a/p',
       notificationUrl: 'https://api.example.com/api/v1/webhooks/mercadopago',
     })
     expect(out.id).toBe('pref_abc')
@@ -1397,11 +1479,22 @@ describe('createPreference — money adapter (centavos→MXN)', () => {
 
   it('uses sandbox_init_point when sandboxMode=true', async () => {
     nock('https://api.mercadopago.com').post('/checkout/preferences').reply(200, {
-      id: 'p', init_point: 'https://prod/p', sandbox_init_point: 'https://sand/p',
+      id: 'p',
+      init_point: 'https://prod/p',
+      sandbox_init_point: 'https://sand/p',
     })
     const out = await createPreference({
-      accessToken: 'S', sandboxMode: true, orderId: 'o', amountCents: 1000, marketplaceFeeCents: 0,
-      currency: 'MXN', description: 'd', successUrl: 'a', failureUrl: 'b', pendingUrl: 'c', notificationUrl: 'd',
+      accessToken: 'S',
+      sandboxMode: true,
+      orderId: 'o',
+      amountCents: 1000,
+      marketplaceFeeCents: 0,
+      currency: 'MXN',
+      description: 'd',
+      successUrl: 'a',
+      failureUrl: 'b',
+      pendingUrl: 'c',
+      notificationUrl: 'd',
     })
     expect(out.url).toBe('https://sand/p')
   })
@@ -1453,13 +1546,15 @@ export async function createPreference(p: CreatePreferenceParams): Promise<Prefe
 
   const result = await pref.create({
     body: {
-      items: [{
-        id: p.orderId,
-        title: p.description,
-        quantity: 1,
-        unit_price: amountMxn,
-        currency_id: p.currency,
-      }],
+      items: [
+        {
+          id: p.orderId,
+          title: p.description,
+          quantity: 1,
+          unit_price: amountMxn,
+          currency_id: p.currency,
+        },
+      ],
       external_reference: p.orderId,
       marketplace_fee: feeMxn,
       payer: p.payerEmail ? { email: p.payerEmail } : undefined,
@@ -1491,6 +1586,7 @@ git commit -m "feat(mercado-pago): createPreference using SDK with money adapter
 ### Task 15: Checkout service — getPayment + refundPayment
 
 **Files:**
+
 - Modify: `src/services/mercado-pago/checkout.service.ts`
 - Modify: `tests/unit/services/mercado-pago/checkout.service.test.ts`
 
@@ -1507,11 +1603,16 @@ describe('getPayment', () => {
     nock('https://api.mercadopago.com', { reqheaders: { authorization: 'Bearer SELLER' } })
       .get('/v1/payments/9999')
       .reply(200, {
-        id: 9999, status: 'approved', status_detail: 'accredited',
-        external_reference: 'order_123', transaction_amount: 1000,
-        currency_id: 'MXN', date_approved: '2026-05-20T10:00:00Z',
+        id: 9999,
+        status: 'approved',
+        status_detail: 'accredited',
+        external_reference: 'order_123',
+        transaction_amount: 1000,
+        currency_id: 'MXN',
+        date_approved: '2026-05-20T10:00:00Z',
         date_created: '2026-05-20T09:55:00Z',
-        fee_details: [], marketplace_fee: 50,
+        fee_details: [],
+        marketplace_fee: 50,
         order: { id: 7777 },
       })
     const p = await getPayment('SELLER', '9999')
@@ -1634,6 +1735,7 @@ git commit -m "feat(mercado-pago): getPayment + refundPayment (idempotent, beare
 ### Task 16: Webhook signature verification (query data.id, lowercased, timestamp tolerance)
 
 **Files:**
+
 - Create: `src/services/mercado-pago/webhook.service.ts`
 - Create: `tests/unit/services/mercado-pago/webhook.service.test.ts`
 
@@ -1657,34 +1759,28 @@ describe('verifyWebhookSignature', () => {
   it('accepts a valid signature using query data.id', () => {
     const ts = String(Math.floor(Date.now() / 1000))
     const sig = buildSig(ts, 'req-1', 'pay_abc')
-    expect(() =>
-      verifyWebhookSignature({ signature: sig, requestId: 'req-1', queryDataId: 'pay_abc', bodyDataId: null }),
-    ).not.toThrow()
+    expect(() => verifyWebhookSignature({ signature: sig, requestId: 'req-1', queryDataId: 'pay_abc', bodyDataId: null })).not.toThrow()
   })
 
   it('lowercases alphanumeric data.id before HMAC', () => {
     const ts = String(Math.floor(Date.now() / 1000))
-    const sig = buildSig(ts, 'req-1', 'PAY_ABC')   // upper in MP query? still lowercased here
+    const sig = buildSig(ts, 'req-1', 'PAY_ABC') // upper in MP query? still lowercased here
     // Note buildSig already lowercases; pass uppercase as queryDataId
-    expect(() =>
-      verifyWebhookSignature({ signature: sig, requestId: 'req-1', queryDataId: 'PAY_ABC', bodyDataId: null }),
-    ).not.toThrow()
+    expect(() => verifyWebhookSignature({ signature: sig, requestId: 'req-1', queryDataId: 'PAY_ABC', bodyDataId: null })).not.toThrow()
   })
 
   it('falls back to body data.id when query absent', () => {
     const ts = String(Math.floor(Date.now() / 1000))
     const sig = buildSig(ts, 'req-1', 'pay_xyz')
-    expect(() =>
-      verifyWebhookSignature({ signature: sig, requestId: 'req-1', queryDataId: null, bodyDataId: 'pay_xyz' }),
-    ).not.toThrow()
+    expect(() => verifyWebhookSignature({ signature: sig, requestId: 'req-1', queryDataId: null, bodyDataId: 'pay_xyz' })).not.toThrow()
   })
 
   it('rejects when timestamp is stale beyond tolerance (>300s)', () => {
     const stale = String(Math.floor(Date.now() / 1000) - 400)
     const sig = buildSig(stale, 'req-1', 'pay_x')
-    expect(() =>
-      verifyWebhookSignature({ signature: sig, requestId: 'req-1', queryDataId: 'pay_x', bodyDataId: null }),
-    ).toThrow(/stale|tolerance|replay/i)
+    expect(() => verifyWebhookSignature({ signature: sig, requestId: 'req-1', queryDataId: 'pay_x', bodyDataId: null })).toThrow(
+      /stale|tolerance|replay/i,
+    )
   })
 
   it('rejects invalid signature', () => {
@@ -1694,9 +1790,7 @@ describe('verifyWebhookSignature', () => {
   })
 
   it('rejects malformed header', () => {
-    expect(() =>
-      verifyWebhookSignature({ signature: 'garbage', requestId: 'r', queryDataId: 'x', bodyDataId: null }),
-    ).toThrow(/malformed/i)
+    expect(() => verifyWebhookSignature({ signature: 'garbage', requestId: 'r', queryDataId: 'x', bodyDataId: null })).toThrow(/malformed/i)
   })
 })
 ```
@@ -1774,6 +1868,7 @@ git commit -m "feat(mercado-pago): webhook signature verification (query data.id
 ### Task 17: Payment-flow service (dedupe → fetch → update DB)
 
 **Files:**
+
 - Create: `src/services/mercado-pago/payment-flow.service.ts`
 - Create: `tests/unit/services/mercado-pago/payment-flow.service.test.ts`
 
@@ -1810,34 +1905,62 @@ describe('handleIpn — happy path payment.updated', () => {
     m.ecommerceMerchant.findFirst.mockResolvedValue({ id: 'em_1', sandboxMode: false })
     ;(connectionService.loadCredentials as jest.Mock).mockResolvedValue({ accessToken: 'SELLER' })
     ;(checkoutService.getPayment as jest.Mock).mockResolvedValue({
-      id: 9999, status: 'approved', external_reference: 'order_123',
-      transaction_amount: 1000, currency_id: 'MXN', date_approved: new Date().toISOString(),
-      order: { id: 7777 }, marketplace_fee: 50, fee_details: [],
+      id: 9999,
+      status: 'approved',
+      external_reference: 'order_123',
+      transaction_amount: 1000,
+      currency_id: 'MXN',
+      date_approved: new Date().toISOString(),
+      order: { id: 7777 },
+      marketplace_fee: 50,
+      fee_details: [],
     })
     m.checkoutSession.findFirst.mockResolvedValue({ id: 'cs_1', mpPaymentId: null, status: 'PENDING' })
     m.checkoutSession.update.mockResolvedValue({ id: 'cs_1' })
 
     await handleIpn({
-      payload: { type: 'payment', action: 'payment.updated', data: { id: '9999' }, user_id: 12345678, id: 1, live_mode: false, date_created: 't', api_version: 'v1' },
+      payload: {
+        type: 'payment',
+        action: 'payment.updated',
+        data: { id: '9999' },
+        user_id: 12345678,
+        id: 1,
+        live_mode: false,
+        date_created: 't',
+        api_version: 'v1',
+      },
       requestId: 'req-1',
     })
 
     expect(m.mercadoPagoWebhookEvent.create).toHaveBeenCalled()
     expect(checkoutService.getPayment).toHaveBeenCalledWith('SELLER', '9999')
-    expect(m.checkoutSession.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: 'cs_1' },
-      data: expect.objectContaining({ mpPaymentId: '9999', mpMerchantOrderId: '7777', status: 'COMPLETED' }),
-    }))
+    expect(m.checkoutSession.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'cs_1' },
+        data: expect.objectContaining({ mpPaymentId: '9999', mpMerchantOrderId: '7777', status: 'COMPLETED' }),
+      }),
+    )
   })
 
   it('returns ignored on duplicate (P key violation handled)', async () => {
     const dupErr: any = new Error('Unique constraint failed')
     dupErr.code = 'P2002'
     m.mercadoPagoWebhookEvent.create.mockRejectedValue(dupErr)
-    await expect(handleIpn({
-      payload: { type: 'payment', action: 'payment.updated', data: { id: '9999' }, user_id: 1, id: 1, live_mode: false, date_created: 't', api_version: 'v1' },
-      requestId: 'req-1',
-    })).resolves.toEqual({ status: 'duplicate' })
+    await expect(
+      handleIpn({
+        payload: {
+          type: 'payment',
+          action: 'payment.updated',
+          data: { id: '9999' },
+          user_id: 1,
+          id: 1,
+          live_mode: false,
+          date_created: 't',
+          api_version: 'v1',
+        },
+        requestId: 'req-1',
+      }),
+    ).resolves.toEqual({ status: 'duplicate' })
   })
 })
 ```
@@ -1894,8 +2017,12 @@ export async function handleIpn(p: HandleIpnParams): Promise<HandleIpnResult> {
   try {
     await prisma.mercadoPagoWebhookEvent.create({
       data: {
-        mpUserId, dataId, requestId: p.requestId,
-        eventType, action, payload: p.payload as unknown as any,
+        mpUserId,
+        dataId,
+        requestId: p.requestId,
+        eventType,
+        action,
+        payload: p.payload as unknown as any,
         processingStatus: 'pending',
       },
     })
@@ -1997,6 +2124,7 @@ git commit -m "feat(mercado-pago): IPN payment-flow service (dedupe → fetch �
 ### Task 18: MercadoPagoProvider class + registry wiring
 
 **Files:**
+
 - Create: `src/services/payments/providers/mercado-pago.provider.ts`
 - Modify: `src/services/payments/provider-registry.ts`
 - Create: `tests/unit/services/payments/providers/mercado-pago.provider.test.ts`
@@ -2010,7 +2138,9 @@ import { MercadoPagoProvider } from '@/services/payments/providers/mercado-pago.
 describe('provider registry', () => {
   it('returns MercadoPagoProvider for MERCADO_PAGO', () => {
     const merchant = {
-      id: 'em_1', providerCredentials: {}, sandboxMode: true,
+      id: 'em_1',
+      providerCredentials: {},
+      sandboxMode: true,
       provider: { code: 'MERCADO_PAGO' },
     } as any
     expect(getProvider(merchant)).toBeInstanceOf(MercadoPagoProvider)
@@ -2030,10 +2160,19 @@ import * as oauthService from '@/services/mercado-pago/oauth.service'
 import * as checkoutService from '@/services/mercado-pago/checkout.service'
 import prisma from '@/utils/prismaClient'
 import type {
-  AuthorizeCardPaymentParams, AuthorizeCardPaymentResult,
-  CheckoutSession, CreateCheckoutParams, EcommerceMerchantWithProvider,
-  IEcommerceProvider, OnboardingLink, OnboardingStatus, PaymentStatus,
-  RefundParams, RefundResult, TokenizeCardParams, TokenizeCardResult,
+  AuthorizeCardPaymentParams,
+  AuthorizeCardPaymentResult,
+  CheckoutSession,
+  CreateCheckoutParams,
+  EcommerceMerchantWithProvider,
+  IEcommerceProvider,
+  OnboardingLink,
+  OnboardingStatus,
+  PaymentStatus,
+  RefundParams,
+  RefundResult,
+  TokenizeCardParams,
+  TokenizeCardResult,
   VerifiedWebhookEvent,
 } from './provider.interface'
 import type { MercadoPagoOAuthState } from '@/services/mercado-pago/types'
@@ -2061,7 +2200,8 @@ export class MercadoPagoProvider implements IEcommerceProvider {
     const expired = creds.expiresAt.getTime() <= Date.now()
     return {
       status: expired ? 'RESTRICTED' : 'COMPLETED',
-      chargesEnabled: !expired, payoutsEnabled: !expired,
+      chargesEnabled: !expired,
+      payoutsEnabled: !expired,
       requirementsDue: expired ? ['token_expired'] : [],
       disabledReason: expired ? 'token_expired' : null,
     }
@@ -2162,11 +2302,19 @@ export class MercadoPagoProvider implements IEcommerceProvider {
 
 function mapMpStatus(s: string): PaymentStatus['status'] {
   switch (s) {
-    case 'approved': case 'authorized': return 'PAID'
-    case 'pending': case 'in_process': case 'in_mediation': return 'PENDING'
-    case 'refunded': return 'REFUNDED'
-    case 'charged_back': return 'DISPUTED'
-    default: return 'FAILED'
+    case 'approved':
+    case 'authorized':
+      return 'PAID'
+    case 'pending':
+    case 'in_process':
+    case 'in_mediation':
+      return 'PENDING'
+    case 'refunded':
+      return 'REFUNDED'
+    case 'charged_back':
+      return 'DISPUTED'
+    default:
+      return 'FAILED'
   }
 }
 ```
@@ -2184,10 +2332,14 @@ import { EcommerceMerchantWithProvider, IEcommerceProvider } from './providers/p
 
 export function getProvider(merchant: EcommerceMerchantWithProvider): IEcommerceProvider {
   switch (merchant.provider?.code) {
-    case 'BLUMON': return new BlumonProvider()
-    case 'STRIPE_CONNECT': return new StripeConnectProvider()
-    case 'MERCADO_PAGO': return new MercadoPagoProvider()
-    default: throw new BadRequestError(`Proveedor de pagos no soportado: ${merchant.provider?.code || 'desconocido'}`)
+    case 'BLUMON':
+      return new BlumonProvider()
+    case 'STRIPE_CONNECT':
+      return new StripeConnectProvider()
+    case 'MERCADO_PAGO':
+      return new MercadoPagoProvider()
+    default:
+      throw new BadRequestError(`Proveedor de pagos no soportado: ${merchant.provider?.code || 'desconocido'}`)
   }
 }
 ```
@@ -2209,6 +2361,7 @@ git commit -m "feat(mercado-pago): IEcommerceProvider implementation + registry"
 ### Task 19: Zod schemas
 
 **Files:**
+
 - Create: `src/schemas/dashboard/mercadoPagoOAuth.schema.ts`
 
 ```typescript
@@ -2234,6 +2387,7 @@ Commit and move on.
 ### Task 20: OAuth controller (initiate / callback / disconnect) WITH TENANT GUARD
 
 **Files:**
+
 - Create: `src/controllers/dashboard/mercadoPagoOAuth.controller.ts`
 - Create: `tests/unit/controllers/dashboard/mercadoPagoOAuth.controller.test.ts`
 
@@ -2274,10 +2428,14 @@ describe('initiate', () => {
     await initiate(req, res)
 
     expect(guardService.getMercadoPagoMerchant).toHaveBeenCalledWith('v_1', 'em_1')
-    expect(oauthService.signState).toHaveBeenCalledWith(expect.objectContaining({
-      intent: 'connect_merchant',
-      ecommerceMerchantId: 'em_1', venueId: 'v_1', staffId: 's_1',
-    }))
+    expect(oauthService.signState).toHaveBeenCalledWith(
+      expect.objectContaining({
+        intent: 'connect_merchant',
+        ecommerceMerchantId: 'em_1',
+        venueId: 'v_1',
+        staffId: 's_1',
+      }),
+    )
     expect(res.redirect).toHaveBeenCalled()
   })
 
@@ -2300,10 +2458,22 @@ describe('callback', () => {
 
   it('verifies state, guards venue, exchanges code, persists, redirects success', async () => {
     ;(oauthService.verifyState as jest.Mock).mockReturnValue({
-      intent: 'connect_merchant', ecommerceMerchantId: 'em_1', venueId: 'v_1', staffId: 's_1',
+      intent: 'connect_merchant',
+      ecommerceMerchantId: 'em_1',
+      venueId: 'v_1',
+      staffId: 's_1',
     })
     ;(guardService.getMercadoPagoMerchant as jest.Mock).mockResolvedValue({ id: 'em_1', venueId: 'v_1' })
-    ;(oauthService.exchangeCodeForTokens as jest.Mock).mockResolvedValue({ access_token: 'a', refresh_token: 'r', user_id: 1, expires_in: 1, scope: 's', token_type: 'bearer', public_key: 'pk', live_mode: false })
+    ;(oauthService.exchangeCodeForTokens as jest.Mock).mockResolvedValue({
+      access_token: 'a',
+      refresh_token: 'r',
+      user_id: 1,
+      expires_in: 1,
+      scope: 's',
+      token_type: 'bearer',
+      public_key: 'pk',
+      live_mode: false,
+    })
     ;(connectionService.persistTokens as jest.Mock).mockResolvedValue(undefined)
     process.env.PUBLIC_DASHBOARD_URL = 'https://dashboard.avoqado.io'
 
@@ -2318,7 +2488,10 @@ describe('callback', () => {
 
   it('rejects when state venue mismatches URL venue', async () => {
     ;(oauthService.verifyState as jest.Mock).mockReturnValue({
-      intent: 'connect_merchant', ecommerceMerchantId: 'em_1', venueId: 'v_DIFFERENT', staffId: 's_1',
+      intent: 'connect_merchant',
+      ecommerceMerchantId: 'em_1',
+      venueId: 'v_DIFFERENT',
+      staffId: 's_1',
     })
     process.env.PUBLIC_DASHBOARD_URL = 'https://dashboard.avoqado.io'
 
@@ -2458,6 +2631,7 @@ git commit -m "feat(mercado-pago): OAuth controller with venue-scoped tenant gua
 ### Task 21: Mount OAuth routes under venue-scoped path
 
 **Files:**
+
 - Create: `src/routes/dashboard/mercadoPagoOAuth.routes.ts`
 - Modify: central dashboard router
 
@@ -2490,11 +2664,13 @@ router.use('/venues/:venueId/ecommerce-merchants/:merchantId/mercadopago/oauth',
 ```
 
 Final endpoints:
+
 - `GET    /api/v1/dashboard/venues/:venueId/ecommerce-merchants/:merchantId/mercadopago/oauth/connect`
 - `GET    /api/v1/dashboard/venues/:venueId/ecommerce-merchants/:merchantId/mercadopago/oauth/callback`
 - `DELETE /api/v1/dashboard/venues/:venueId/ecommerce-merchants/:merchantId/mercadopago/oauth`
 
-Set `MP_REDIRECT_URI` to match the callback path with concrete IDs replaced at OAuth time. Tip for sandbox: use ngrok to expose localhost; place a single fixed `MP_REDIRECT_URI` per environment.
+Set `MP_REDIRECT_URI` to match the callback path with concrete IDs replaced at OAuth time. Tip for sandbox: use ngrok to expose localhost;
+place a single fixed `MP_REDIRECT_URI` per environment.
 
 - [ ] **Step 3: Build + commit**
 
@@ -2509,6 +2685,7 @@ git commit -m "feat(mercado-pago): mount OAuth routes under venue-scoped path"
 ### Task 22: Webhook controller — verify + dispatch
 
 **Files:**
+
 - Create: `src/controllers/webhook/mercadoPago.webhook.controller.ts`
 - Create: `tests/unit/controllers/webhook/mercadoPago.webhook.controller.test.ts`
 
@@ -2527,7 +2704,18 @@ function buildReq({ overrides = {} }: { overrides?: any } = {}) {
   const ts = String(Math.floor(Date.now() / 1000))
   const requestId = 'req-1'
   const dataId = '9999'
-  const body = Buffer.from(JSON.stringify({ id: 1, live_mode: false, type: 'payment', action: 'payment.updated', data: { id: dataId }, user_id: 12345678, date_created: 't', api_version: 'v1' }))
+  const body = Buffer.from(
+    JSON.stringify({
+      id: 1,
+      live_mode: false,
+      type: 'payment',
+      action: 'payment.updated',
+      data: { id: dataId },
+      user_id: 12345678,
+      date_created: 't',
+      api_version: 'v1',
+    }),
+  )
   const manifest = `id:${dataId};request-id:${requestId};ts:${ts};`
   const v1 = crypto.createHmac('sha256', SECRET).update(manifest).digest('hex')
   const headers: Record<string, string> = {
@@ -2535,7 +2723,9 @@ function buildReq({ overrides = {} }: { overrides?: any } = {}) {
     'x-request-id': requestId,
   }
   return {
-    body, headers, query: { 'data.id': dataId },
+    body,
+    headers,
+    query: { 'data.id': dataId },
     get: (k: string) => headers[k.toLowerCase()],
     ...overrides,
   } as any
@@ -2562,7 +2752,12 @@ describe('handleMercadoPagoWebhook', () => {
   })
 
   it('401 on invalid signature', async () => {
-    const req = buildReq({ overrides: { headers: { 'x-signature': 'ts=1,v1=deadbeef', 'x-request-id': 'r' }, get: (k: string) => ({ 'x-signature': 'ts=1,v1=deadbeef', 'x-request-id': 'r' }[k.toLowerCase()]) } })
+    const req = buildReq({
+      overrides: {
+        headers: { 'x-signature': 'ts=1,v1=deadbeef', 'x-request-id': 'r' },
+        get: (k: string) => ({ 'x-signature': 'ts=1,v1=deadbeef', 'x-request-id': 'r' })[k.toLowerCase()],
+      },
+    })
     const res = buildRes()
     await handleMercadoPagoWebhook(req, res)
     expect(res.status).toHaveBeenCalledWith(401)
@@ -2635,6 +2830,7 @@ git commit -m "feat(mercado-pago): webhook controller (verify + dispatch + idemp
 ### Task 23: Mount webhook route BEFORE express.json()
 
 **Files:**
+
 - Modify: `src/app.ts`
 
 Locate the Google Calendar webhook mount (around line 85). Add MP webhook mount immediately after:
@@ -2646,8 +2842,7 @@ import { handleMercadoPagoWebhook } from './controllers/webhook/mercadoPago.webh
 app.post('/api/v1/webhooks/mercadopago', express.raw({ type: '*/*', limit: '64kb' }), handleMercadoPagoWebhook)
 ```
 
-Run: `npm run build`
-Commit:
+Run: `npm run build` Commit:
 
 ```bash
 git add src/app.ts
@@ -2663,6 +2858,7 @@ git commit -m "feat(mercado-pago): mount /api/v1/webhooks/mercadopago with expre
 ### Task 24: Generalize paymentLink.service.ts to support MERCADO_PAGO
 
 **Files:**
+
 - Modify: `src/services/dashboard/paymentLink.service.ts`
 - Modify: existing payment-link tests (or add new)
 
@@ -2676,8 +2872,7 @@ Note the exact lines: 874, 967, 1102, 1717, 1839.
 
 In `paymentLink.service.ts`:
 
-- Line 874 (current):
-  `paymentLink.ecommerceMerchant.provider?.code === 'STRIPE_CONNECT' ? 'STRIPE_HOSTED' : 'INLINE_CARD'`
+- Line 874 (current): `paymentLink.ecommerceMerchant.provider?.code === 'STRIPE_CONNECT' ? 'STRIPE_HOSTED' : 'INLINE_CARD'`
 
   Replace with helper at top of file:
 
@@ -2724,7 +2919,8 @@ git add src/services/dashboard/paymentLink.service.ts tests/unit/services/dashbo
 git commit -m "feat(mercado-pago): generalize paymentLink hosted checkout to accept MP"
 ```
 
-> Note: function names like `createStripeCheckoutForPaymentLink` (line 1680) can stay as-is to minimize blast radius. Rename in a follow-up if desired.
+> Note: function names like `createStripeCheckoutForPaymentLink` (line 1680) can stay as-is to minimize blast radius. Rename in a follow-up
+> if desired.
 
 ---
 
@@ -2735,6 +2931,7 @@ git commit -m "feat(mercado-pago): generalize paymentLink hosted checkout to acc
 ### Task 25: Token refresh job
 
 **Files:**
+
 - Create: `src/jobs/mercadopago-token-refresh.job.ts`
 - Create: `tests/unit/jobs/mercadopago-token-refresh.job.test.ts`
 - Modify: cron scheduler bootstrap
@@ -2777,9 +2974,7 @@ describe('refreshMercadoPagoTokens', () => {
   it('catches errors per merchant', async () => {
     m.paymentProvider.findUnique.mockResolvedValue({ id: 'pp_1' })
     m.ecommerceMerchant.findMany.mockResolvedValue([{ id: 'a' }, { id: 'b' }])
-    ;(connectionService.refreshIfExpiring as jest.Mock)
-      .mockRejectedValueOnce(new Error('MP API down'))
-      .mockResolvedValueOnce('refreshed')
+    ;(connectionService.refreshIfExpiring as jest.Mock).mockRejectedValueOnce(new Error('MP API down')).mockResolvedValueOnce('refreshed')
 
     const r = await refreshMercadoPagoTokens()
     expect(r.errors).toBe(1)
@@ -2841,10 +3036,17 @@ Add in that scheduler file:
 ```typescript
 import { refreshMercadoPagoTokens } from '@/jobs/mercadopago-token-refresh.job'
 
-cron.schedule('0 3 * * *', async () => {
-  try { await refreshMercadoPagoTokens() }
-  catch (err) { logger.error({ err }, '[MP refresh] uncaught') }
-}, { timezone: 'America/Mexico_City' })
+cron.schedule(
+  '0 3 * * *',
+  async () => {
+    try {
+      await refreshMercadoPagoTokens()
+    } catch (err) {
+      logger.error({ err }, '[MP refresh] uncaught')
+    }
+  },
+  { timezone: 'America/Mexico_City' },
+)
 ```
 
 - [ ] **Step 4: Commit**
@@ -2879,9 +3081,11 @@ This task can only run after the user's MP business account is verified AND a sa
 ```bash
 ngrok http 3000 &
 ```
+
 Copy the HTTPS URL. Update `MP_REDIRECT_URI` and `MP_WEBHOOK_NOTIFICATION_URL` to use that domain. Restart dev server.
 
 Then via MP MCP:
+
 ```
 mcp__mercadopago__save_webhook
   application_id: <sandbox app id>
@@ -2892,6 +3096,7 @@ mcp__mercadopago__save_webhook
 - [ ] **Step 3: Trigger OAuth from API client (logged in as a venue owner)**
 
 Open in browser (preserves cookie):
+
 ```
 http://localhost:3000/api/v1/dashboard/venues/<venueId>/ecommerce-merchants/<merchantId>/mercadopago/oauth/connect
 ```
@@ -2903,35 +3108,42 @@ Login at MP as the **seller** test account. Authorize. Should land on dashboard 
 ```bash
 psql $DATABASE_URL -c "SELECT id, \"providerMerchantId\", \"providerCredentials\"->>'mpUserId' AS mp_user, \"providerCredentials\"->>'expiresAt' AS expires FROM \"EcommerceMerchant\" WHERE id = '<merchantId>';"
 ```
+
 Expected: `providerMerchantId` = seller's MP user_id, `expires` ≈ 180 days out.
 
 - [ ] **Step 5: Generate a PaymentLink for the MP-connected venue and pay it**
 
-Use existing dashboard flow to create a PaymentLink against this venue. Open the shortCode in incognito. Should redirect to MP Checkout Pro (sandbox).
+Use existing dashboard flow to create a PaymentLink against this venue. Open the shortCode in incognito. Should redirect to MP Checkout Pro
+(sandbox).
 
 Login as **buyer** test user. Pay with card `APRO` (Visa 4509 9535 6623 3704, any CVV, future expiry).
 
 - [ ] **Step 6: Verify webhook + DB**
 
 Tail server logs:
+
 ```
 [MP webhook] dispatched { result: { status: 'processed', checkoutSessionId: 'cs_xxx', paymentId: 'xxx' } }
 ```
 
 Check DB:
+
 ```bash
 psql $DATABASE_URL -c "SELECT id, status, \"mpPreferenceId\", \"mpPaymentId\", \"mpMerchantOrderId\" FROM \"CheckoutSession\" WHERE id = 'cs_xxx';"
 ```
+
 Expected: status `COMPLETED`, mpPaymentId set.
 
 ```bash
 psql $DATABASE_URL -c "SELECT \"mpUserId\", \"dataId\", action, \"processingStatus\" FROM \"MercadoPagoWebhookEvent\" ORDER BY \"createdAt\" DESC LIMIT 5;"
 ```
+
 Expected: rows with `processed`.
 
 - [ ] **Step 7: Verify seller balance reflects amount minus marketplace_fee**
 
-Login as **seller** test user on `mercadopago.com.mx`. Open balance. Verify the deposited amount = transaction amount − MP commission − marketplaceFee.
+Login as **seller** test user on `mercadopago.com.mx`. Open balance. Verify the deposited amount = transaction amount − MP commission −
+marketplaceFee.
 
 - [ ] **Step 8: Verify MP MCP quality checklist**
 
@@ -2939,19 +3151,23 @@ Login as **seller** test user on `mercadopago.com.mx`. Open balance. Verify the 
 mcp__mercadopago__quality_checklist
   application_id: <sandbox app id>
 ```
+
 Address any items it flags as missing.
 
 - [ ] **Step 9: Verify dedupe protects against replay**
 
 Resend the same IPN with the same x-request-id (use the MP DevPanel "test notification" feature, or replay from server logs). Expect:
+
 ```
 [MP webhook] dispatched { result: { status: 'duplicate' } }
 ```
+
 DB should NOT have a second row in MercadoPagoWebhookEvent.
 
 - [ ] **Step 10: Document numbers**
 
 Append to this plan a `Smoke test results — 2026-05-XX` subsection with:
+
 - amount paid (MXN)
 - marketplace_fee charged (MXN)
 - MP commission deducted (verify via seller dashboard)
@@ -2991,12 +3207,15 @@ These numbers are what you'll send to the MP commercial executive to prove rates
 
 ## Out of Scope (v2 explicitly defers these)
 
-1. **Frontend dashboard UI** — Connect button, status badge, disconnect flow. Lives in `/Users/amieva/Documents/Programming/Avoqado/avoqado-web-dashboard`. Separate plan.
-2. **Reservation deposits via MP** — `reservation.consumer.service.ts:44,50,108,291,457,460` stay `STRIPE_CONNECT`-only. Generalizing reservations is a follow-up plan.
+1. **Frontend dashboard UI** — Connect button, status badge, disconnect flow. Lives in
+   `/Users/amieva/Documents/Programming/Avoqado/avoqado-web-dashboard`. Separate plan.
+2. **Reservation deposits via MP** — `reservation.consumer.service.ts:44,50,108,291,457,460` stay `STRIPE_CONNECT`-only. Generalizing
+   reservations is a follow-up plan.
 3. **Checkout API (in-house card collection)** — v2 uses Checkout Pro (MP-hosted). Checkout API requires PCI scope.
 4. **Split Payments 1:N** — multi-payee per transaction. Requires MP commercial team approval.
 5. **Encryption key rotation runbook** — `keyVersion: 1` field is reserved; rotation is a follow-up.
-6. **Production cutover** — requires MP commercial OK on rate preservation + production app credentials + KYC nivel 6 on all merchants. Separate runbook.
+6. **Production cutover** — requires MP commercial OK on rate preservation + production app credentials + KYC nivel 6 on all merchants.
+   Separate runbook.
 7. **MP card subscriptions / `/preapproval`** — out of marketplace flow.
 8. **Per-product fee schedule** — v2 uses a single `marketplace_fee` per checkout.
 9. **Refactoring `provider.interface.ts` to canonical Decimal** — decision deferred. Centavos convention preserved for v2.
@@ -3005,17 +3224,17 @@ These numbers are what you'll send to the MP commercial executive to prove rates
 
 ## Risks tracked
 
-| Risk | Mitigation |
-|---|---|
-| MP commercial team blocks Split Payments approval | Plan ships sandbox-only until OK; production env vars stay empty in prod until cleared |
-| MP webhook signature format differs from our implementation | Smoke test step 9 (replay) verifies. If smoke fails, isolate `webhook.service.ts` and adjust manifest. |
-| MP changes manifest format | All signature logic in one service; one place to update |
-| Token refresh fails silently | Job logs `errors` count; add BetterStack alerting on `summary.errors > 0` |
-| Multi-tab race during OAuth | State JWT TTL = 10 min. Last-write-wins on `providerCredentials` (mitigated by tenant guard preventing cross-venue overwrite) |
-| Sandbox MP user lacks KYC nivel 6 | Smoke test should use the seller's MP DevPanel sandbox seller (auto KYC 6); document for prod gate |
-| `paymentLink.service.ts` rename creates merge conflicts | Function names preserved as-is in Task 24; rename in follow-up |
-| Encryption key compromise | `keyVersion: 1` field reserved; rotation runbook documented as follow-up |
-| `mercadopago` SDK version mismatch with docs | Pin to `^2.x` (current major). Verify in smoke test. |
+| Risk                                                        | Mitigation                                                                                                                    |
+| ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| MP commercial team blocks Split Payments approval           | Plan ships sandbox-only until OK; production env vars stay empty in prod until cleared                                        |
+| MP webhook signature format differs from our implementation | Smoke test step 9 (replay) verifies. If smoke fails, isolate `webhook.service.ts` and adjust manifest.                        |
+| MP changes manifest format                                  | All signature logic in one service; one place to update                                                                       |
+| Token refresh fails silently                                | Job logs `errors` count; add BetterStack alerting on `summary.errors > 0`                                                     |
+| Multi-tab race during OAuth                                 | State JWT TTL = 10 min. Last-write-wins on `providerCredentials` (mitigated by tenant guard preventing cross-venue overwrite) |
+| Sandbox MP user lacks KYC nivel 6                           | Smoke test should use the seller's MP DevPanel sandbox seller (auto KYC 6); document for prod gate                            |
+| `paymentLink.service.ts` rename creates merge conflicts     | Function names preserved as-is in Task 24; rename in follow-up                                                                |
+| Encryption key compromise                                   | `keyVersion: 1` field reserved; rotation runbook documented as follow-up                                                      |
+| `mercadopago` SDK version mismatch with docs                | Pin to `^2.x` (current major). Verify in smoke test.                                                                          |
 
 ---
 
@@ -3026,4 +3245,5 @@ Two options after this plan is approved:
 1. **Subagent-Driven (recommended)** — dispatch a fresh subagent per task, review between, fast iteration.
 2. **Inline Execution** — execute tasks in this session using `superpowers:executing-plans`, batch with checkpoints.
 
-The first tasks (Phase 0: env + encryption + types) have no MP dependency and can run today regardless of MP account status. Phases 5+ (smoke test) gate on MP account verification.
+The first tasks (Phase 0: env + encryption + types) have no MP dependency and can run today regardless of MP account status. Phases 5+
+(smoke test) gate on MP account verification.

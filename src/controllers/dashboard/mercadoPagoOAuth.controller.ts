@@ -108,12 +108,14 @@ export async function callback(req: Request, res: Response) {
   }
 
   // Once we have a venueId from state, every subsequent redirect should land
-  // on the merchant page so the user sees the banner. Look up the slug once.
+  // on the venue's integrations page (the OWNER/ADMIN-accessible page that
+  // hosts EcommercePaymentsSection). `/venues/:slug/ecommerce-merchants` is
+  // SUPERADMIN-only, so redirecting there bounces non-superadmins to home.
   const venue = await prisma.venue.findUnique({
     where: { id: statePayload.venueId },
     select: { slug: true },
   })
-  const merchantPath = venue?.slug ? `/venues/${venue.slug}/ecommerce-merchants` : '/integrations/mercadopago'
+  const merchantPath = venue?.slug ? `/venues/${venue.slug}/edit/integrations` : '/integrations/mercadopago'
 
   // 3. Tenant re-check: the venue + merchant in the state must still be a
   //    valid MERCADO_PAGO merchant (defense-in-depth — someone could have

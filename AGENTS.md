@@ -6,7 +6,8 @@ Agent configurations for Claude Code subagents working on this codebase. This fi
 
 ## Operational Notes
 
-- Backend runtime logs live in `logs/` at the repo root. Check `logs/development.log` first when debugging local backend behavior; when the log rotates it may continue as `development1.log`, `development2.log`, etc.
+- Backend runtime logs live in `logs/` at the repo root. Check `logs/development.log` first when debugging local backend behavior; when the
+  log rotates it may continue as `development1.log`, `development2.log`, etc.
 
 ---
 

@@ -4,6 +4,7 @@ import * as oauthService from '@/services/mercado-pago/oauth.service'
 import * as connectionService from '@/services/mercado-pago/connection.service'
 import { UnauthorizedError, NotFoundError } from '@/errors/AppError'
 import type { Response } from 'express'
+import { prismaMock } from '../../../__helpers__/setup'
 
 jest.mock('@/services/mercado-pago/merchant-guard.service')
 jest.mock('@/services/mercado-pago/oauth.service')
@@ -124,14 +125,16 @@ describe('callback', () => {
       live_mode: false,
     })
     ;(connectionService.persistTokens as jest.Mock).mockResolvedValue(undefined)
+    prismaMock.venue.findUnique.mockResolvedValue({ slug: 'venue-one' })
 
     const req: any = { query: { code: 'auth-code-123', state: 'state-jwt' } }
     const res = buildRes()
     await callback(req, res)
 
     expect(connectionService.persistTokens).toHaveBeenCalledWith('em_1', expect.objectContaining({ access_token: 'TEST-access' }))
-    expect(res.redirect).toHaveBeenCalledWith(expect.stringContaining('/venues/v_1/ecommerce-merchants/em_1/integrations/mercadopago'))
+    expect(res.redirect).toHaveBeenCalledWith(expect.stringContaining('/venues/venue-one/edit/integrations'))
     expect(res.redirect).toHaveBeenCalledWith(expect.stringContaining('mp_status=connected'))
+    expect(res.redirect).toHaveBeenCalledWith(expect.stringContaining('ecommerceMerchantId=em_1'))
   })
 
   it('redirects with error when MP returns error param (e.g. user cancelled)', async () => {
