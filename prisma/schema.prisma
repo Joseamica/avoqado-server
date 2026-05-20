@@ -3734,10 +3734,9 @@ model CheckoutSession {
   @@index([expiresAt]) // For cleanup of expired sessions
   @@index([paymentId])
   @@index([paymentLinkId])
-  // Mercado Pago lookups (webhook IPN finds the session via mpPaymentId or
-  // mpMerchantOrderId; mpPreferenceId is queried during status polling)
-  @@index([mpPreferenceId])
-  @@index([mpPaymentId])
+  // Mercado Pago lookups: mpPreferenceId and mpPaymentId already have unique
+  // indexes from `@unique` above; only mpMerchantOrderId needs its own (the
+  // webhook IPN looks sessions up by merchant_order during status polling).
   @@index([mpMerchantOrderId])
 }
 

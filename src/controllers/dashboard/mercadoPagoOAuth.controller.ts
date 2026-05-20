@@ -17,6 +17,7 @@
  */
 import { Request, Response } from 'express'
 import logger from '@/config/logger'
+import prisma from '@/utils/prismaClient'
 import * as guardService from '@/services/mercado-pago/merchant-guard.service'
 import * as oauthService from '@/services/mercado-pago/oauth.service'
 import * as connectionService from '@/services/mercado-pago/connection.service'
@@ -111,6 +112,16 @@ export async function callback(req: Request, res: Response) {
     return res.redirect(`${dashboardUrl}/integrations/mercadopago?mp_status=error&reason=invalid_state`)
   }
 
+  // Once we have a venueId from state, every subsequent redirect should land
+  // on the merchant page so the user sees the banner. Look up the slug once.
+  const venue = await prisma.venue.findUnique({
+    where: { id: statePayload.venueId },
+    select: { slug: true },
+  })
+  const merchantPath = venue?.slug
+    ? `/venues/${venue.slug}/ecommerce-merchants`
+    : '/integrations/mercadopago'
+
   // 3. Tenant re-check: the venue + merchant in the state must still be a
   //    valid MERCADO_PAGO merchant (defense-in-depth — someone could have
   //    tampered with their dashboard session in between).
@@ -122,7 +133,7 @@ export async function callback(req: Request, res: Response) {
       venueId: statePayload.venueId,
       merchantId: statePayload.ecommerceMerchantId,
     })
-    return res.redirect(`${dashboardUrl}/integrations/mercadopago?mp_status=error&reason=tenant_check_failed`)
+    return res.redirect(`${dashboardUrl}${merchantPath}?mp_status=error&reason=tenant_check_failed`)
   }
 
   // 4. Exchange code → tokens, persist (encrypted).
@@ -140,15 +151,20 @@ export async function callback(req: Request, res: Response) {
       mp_status: 'connected',
       ecommerceMerchantId: statePayload.ecommerceMerchantId,
     })
-    const path = `/venues/${statePayload.venueId}/ecommerce-merchants/${statePayload.ecommerceMerchantId}/integrations/mercadopago`
-    return res.redirect(`${dashboardUrl}${path}?${params.toString()}`)
+    return res.redirect(`${dashboardUrl}${merchantPath}?${params.toString()}`)
   } catch (err: any) {
     logger.error('[MP OAuth] token exchange failed', {
       err: err.message,
       venueId: statePayload.venueId,
       ecommerceMerchantId: statePayload.ecommerceMerchantId,
     })
-    return res.redirect(`${dashboardUrl}/integrations/mercadopago?mp_status=error&reason=token_exchange_failed`)
+    const params = new URLSearchParams({
+      mp_status: 'error',
+      reason: 'token_exchange_failed',
+      ecommerceMerchantId: statePayload.ecommerceMerchantId,
+      ...(err.message ? { description: err.message } : {}),
+    })
+    return res.redirect(`${dashboardUrl}${merchantPath}?${params.toString()}`)
   }
 }
 
