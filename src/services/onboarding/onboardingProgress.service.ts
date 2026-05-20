@@ -402,10 +402,10 @@ export async function acceptV2Terms(organizationId: string, termsVersion: string
 
   const progress = await getOrCreateOnboardingProgress(organizationId)
 
-  // Mark step 5 as completed
+  // Mark terms (step 6) as completed and advance pointer to bank account (step 7).
   const completedSteps = Array.isArray(progress.completedSteps) ? (progress.completedSteps as number[]) : []
-  if (!completedSteps.includes(5)) {
-    completedSteps.push(5)
+  if (!completedSteps.includes(6)) {
+    completedSteps.push(6)
   }
 
   const updated = await prisma.onboardingProgress.update({
@@ -416,7 +416,7 @@ export async function acceptV2Terms(organizationId: string, termsVersion: string
       privacyAcceptedAt: now,
       termsVersion,
       termsIpAddress: ipAddress,
-      currentStep: 6,
+      currentStep: 7,
       completedSteps: completedSteps as any,
       updatedAt: new Date(),
     },

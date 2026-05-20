@@ -41,6 +41,7 @@ import { gcalChannelRenewalJob } from './jobs/gcal-channel-renewal.job'
 import { gcalHorizonRefreshJob } from './jobs/gcal-horizon-refresh.job'
 import { gcalPruningJob } from './jobs/gcal-pruning.job'
 import { gcalHealthCheckJob } from './jobs/gcal-health-check.job'
+import { mercadoPagoTokenRefreshJob } from './jobs/mercadopago-token-refresh.job'
 // Import the new Socket.io system
 import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
 // Import Firebase Admin initialization
@@ -161,6 +162,9 @@ const gracefulShutdown = async (signal: string) => {
       gcalHorizonRefreshJob.stop()
       gcalPruningJob.stop()
       gcalHealthCheckJob.stop()
+
+      // Stop Mercado Pago marketplace jobs
+      mercadoPagoTokenRefreshJob.stop()
 
       // Stop live demo cleanup job
       if (liveDemoCleanupJob) {
@@ -368,6 +372,9 @@ const startApplication = async (retries = 3) => {
       gcalPruningJob.start()
       // Health check: detect quiet revocations (daily 05:00)
       gcalHealthCheckJob.start()
+
+      // Mercado Pago — refresh access_tokens expiring within 30 days (daily 03:00)
+      mercadoPagoTokenRefreshJob.start()
 
       // Start nightly email jobs only in production (avoid sending emails from dev/staging)
       if (NODE_ENV === 'production') {

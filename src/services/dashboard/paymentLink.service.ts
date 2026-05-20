@@ -865,13 +865,19 @@ export async function getPaymentLinkByShortCode(shortCode: string) {
   }
 
   // `paymentMethod` tells the public checkout which UX to render:
-  //  - 'STRIPE_HOSTED': customer is redirected to Stripe's hosted checkout; no
-  //    card form on Avoqado's side. Avoqado collects an application_fee on
-  //    every charge (set by `platformFeeBps` on the merchant).
+  //  - 'STRIPE_HOSTED': Stripe Elements inline (option name kept for backward
+  //    compat — historically meant "hosted by Stripe", now means "iframe-tokenized
+  //    inline by Stripe"). Application fee handled by Stripe at settlement.
+  //  - 'MERCADO_PAGO_BRICKS': MP Bricks inline (analog of Stripe Elements but
+  //    via @mercadopago/sdk-react). Application_fee passed at /v1/payments.
   //  - 'INLINE_CARD': legacy Blumon flow — Avoqado tokenizes the card inline
   //    and authorizes the charge directly.
-  const paymentMethod: 'STRIPE_HOSTED' | 'INLINE_CARD' =
-    paymentLink.ecommerceMerchant.provider?.code === 'STRIPE_CONNECT' ? 'STRIPE_HOSTED' : 'INLINE_CARD'
+  let paymentMethod: 'STRIPE_HOSTED' | 'MERCADO_PAGO_BRICKS' | 'INLINE_CARD' = 'INLINE_CARD'
+  if (paymentLink.ecommerceMerchant.provider?.code === 'STRIPE_CONNECT') {
+    paymentMethod = 'STRIPE_HOSTED'
+  } else if (paymentLink.ecommerceMerchant.provider?.code === 'MERCADO_PAGO') {
+    paymentMethod = 'MERCADO_PAGO_BRICKS'
+  }
 
   return {
     id: paymentLink.id,
@@ -2664,4 +2670,271 @@ export async function sharePaymentLinkViaWhatsapp(venueId: string, linkId: strin
   })
 
   return { sent: true }
+}
+
+// ============================================================================
+// Mercado Pago — public Brick (inline) checkout flow
+// ============================================================================
+
+/**
+ * Initializes the MP Bricks payment flow for a public payment link.
+ *
+ * Equivalent of `createStripePaymentIntentForPaymentLink` but for MP:
+ *   - Validates the link + provider + seller credentials
+ *   - Computes charge amount + Avoqado's application_fee (centavos)
+ *   - Creates a CheckoutSession row (status=PENDING)
+ *   - Returns the seller's publicKey + sessionId so the frontend Brick can
+ *     initialize and bootstrap tokenization
+ *
+ * The actual MP /v1/payments call happens later in
+ * `executeMercadoPagoPaymentForPaymentLink` once the Brick submits the token.
+ */
+export async function createMercadoPagoPaymentIntentForPaymentLink(
+  shortCode: string,
+  input: {
+    amount?: number
+    tipAmount?: number
+    customerEmail?: string
+    customFieldResponses?: Record<string, string>
+  },
+) {
+  const { loadCredentials } = await import('@/services/mercado-pago/connection.service')
+
+  const paymentLink = await prisma.paymentLink.findUnique({
+    where: { shortCode },
+    include: {
+      ecommerceMerchant: {
+        include: { provider: { select: { code: true } } },
+      },
+      ...BUNDLE_ITEMS_INCLUDE,
+    },
+  })
+
+  if (!paymentLink) throw new NotFoundError('Liga de pago no encontrada')
+  if (paymentLink.status !== 'ACTIVE') throw new BadRequestError('Esta liga de pago no está disponible')
+  if (paymentLink.expiresAt && new Date() > paymentLink.expiresAt) {
+    await prisma.paymentLink.update({ where: { id: paymentLink.id }, data: { status: 'EXPIRED' } })
+    throw new BadRequestError('Esta liga de pago ha expirado')
+  }
+  if (!paymentLink.isReusable && paymentLink.paymentCount > 0) {
+    throw new BadRequestError('Esta liga de pago ya fue utilizada')
+  }
+  if (paymentLink.ecommerceMerchant.provider?.code !== 'MERCADO_PAGO') {
+    throw new BadRequestError('Esta liga de pago no usa Mercado Pago')
+  }
+
+  const creds = await loadCredentials(paymentLink.ecommerceMerchant.id)
+  if (!creds) {
+    throw new BadRequestError('La cuenta de Mercado Pago del comercio no está conectada')
+  }
+  if (creds.expiresAt.getTime() <= Date.now()) {
+    throw new BadRequestError('El token de Mercado Pago expiró. El comercio debe reconectar.')
+  }
+
+  // 1. Resolve charge amount (same logic as Stripe Elements flow)
+  let chargeAmount: number
+  if (paymentLink.purpose === 'ITEM' && paymentLink.items.length > 0) {
+    chargeAmount = computeBundleTotal(paymentLink.items)
+  } else if (paymentLink.amountType === 'FIXED') {
+    chargeAmount = Number(paymentLink.amount)
+  } else {
+    if (!input.amount || input.amount <= 0) {
+      throw new BadRequestError('El monto es requerido para esta liga de pago')
+    }
+    chargeAmount = input.amount
+  }
+
+  // 2. Validate custom fields (same as Stripe)
+  const customFields = paymentLink.customFields as CustomFieldDefinition[] | null
+  if (customFields && customFields.length > 0) {
+    for (const field of customFields) {
+      if (field.required) {
+        const response = input.customFieldResponses?.[field.id]
+        if (!response || response.trim() === '') {
+          throw new BadRequestError(`El campo "${field.label}" es requerido`)
+        }
+      }
+      if (field.type === 'SELECT' && field.options && input.customFieldResponses?.[field.id]) {
+        if (!field.options.includes(input.customFieldResponses[field.id])) {
+          throw new BadRequestError(`Opción inválida para el campo "${field.label}"`)
+        }
+      }
+    }
+  }
+
+  // 3. Tip
+  const tipAmount = input.tipAmount && input.tipAmount > 0 ? input.tipAmount : 0
+  const tippingConfig = paymentLink.tippingConfig as TippingConfig | null
+  if (tipAmount > 0 && !tippingConfig) {
+    throw new BadRequestError('Esta liga de pago no acepta propinas')
+  }
+  chargeAmount = chargeAmount + tipAmount
+
+  // 4. Compute application_fee (same VAT logic as Stripe). Returns centavos.
+  const stripeAmount = toStripeAmount(new Prisma.Decimal(chargeAmount))
+  const vatRateBps = await getVatRateBps()
+  const applicationFeeCents = calculateApplicationFeeWithVAT(
+    stripeAmount,
+    paymentLink.ecommerceMerchant.platformFeeBps,
+    vatRateBps,
+  )
+
+  // 5. Generate a stable sessionId that will become MP's external_reference
+  //    when the Brick submits the payment. The webhook handler looks up the
+  //    session by this id.
+  const sessionId = `cs_mp_${nanoid(16)}`
+
+  await prisma.checkoutSession.create({
+    data: {
+      sessionId,
+      ecommerceMerchantId: paymentLink.ecommerceMerchant.id,
+      paymentLinkId: paymentLink.id,
+      amount: new Prisma.Decimal(chargeAmount),
+      currency: 'MXN',
+      description: paymentLink.title,
+      customerEmail: input.customerEmail,
+      applicationFeeCents,
+      metadata: {
+        applicationFeeCents,
+        platformFeeBps: paymentLink.ecommerceMerchant.platformFeeBps,
+        vatRateBps,
+        provider: 'MERCADO_PAGO',
+        flow: 'mp_bricks',
+        ...(tipAmount > 0 && { tipAmount }),
+        ...(input.customFieldResponses && { customFieldResponses: input.customFieldResponses }),
+        ...(paymentLink.purpose === 'ITEM' &&
+          paymentLink.items.length > 0 && {
+            purpose: 'ITEM',
+            items: buildBundleSnapshot(paymentLink.items),
+          }),
+      } as unknown as Prisma.InputJsonValue,
+      status: 'PENDING',
+      expiresAt: new Date(Date.now() + 24 * 60 * 60_000),
+    },
+  })
+
+  logger.info('MP Bricks payment intent created for payment link', {
+    sessionId,
+    paymentLinkId: paymentLink.id,
+    shortCode,
+    amountMxn: chargeAmount,
+    applicationFeeCents,
+  })
+
+  return {
+    sessionId,
+    publicKey: creds.publicKey,
+    mpUserId: creds.mpUserId,
+    amountMxn: chargeAmount,
+    applicationFeeMxn: applicationFeeCents / 100,
+    currency: 'MXN',
+    description: paymentLink.title,
+  }
+}
+
+/**
+ * Completes the MP Bricks payment flow.
+ *
+ * The frontend Brick tokenized the card and submitted {token, paymentMethodId,
+ * installments, payer} to our backend. We call MP /v1/payments with the
+ * seller's access_token + application_fee, then update CheckoutSession with
+ * mpPaymentId and the resulting status.
+ *
+ * Note: this returns immediately with the MP API result. Final status comes
+ * via webhook (handleIpn) once MP confirms async approval (3DS, etc.).
+ */
+export async function executeMercadoPagoPaymentForPaymentLink(
+  shortCode: string,
+  sessionId: string,
+  input: {
+    token: string
+    paymentMethodId: string
+    installments: number
+    issuerId?: string
+    payer: {
+      email: string
+      firstName?: string
+      lastName?: string
+      identification?: { type: string; number: string }
+    }
+  },
+) {
+  const { loadCredentials } = await import('@/services/mercado-pago/connection.service')
+  const { createPayment } = await import('@/services/mercado-pago/payment.service')
+
+  const session = await prisma.checkoutSession.findUnique({
+    where: { sessionId },
+    include: {
+      ecommerceMerchant: { include: { provider: { select: { code: true } } } },
+      paymentLink: true,
+    },
+  })
+  if (!session) throw new NotFoundError('Sesión de pago no encontrada')
+  if (session.status !== 'PENDING') {
+    throw new BadRequestError(`Esta sesión ya fue procesada (status=${session.status})`)
+  }
+  if (session.paymentLink?.shortCode !== shortCode) {
+    throw new BadRequestError('La sesión no pertenece a esta liga de pago')
+  }
+  if (session.ecommerceMerchant.provider?.code !== 'MERCADO_PAGO') {
+    throw new BadRequestError('Esta sesión no usa Mercado Pago')
+  }
+
+  const creds = await loadCredentials(session.ecommerceMerchantId)
+  if (!creds) {
+    throw new BadRequestError('Credenciales de Mercado Pago no disponibles')
+  }
+
+  const amountMxn = Number(session.amount)
+  const applicationFeeMxn = (session.applicationFeeCents ?? 0) / 100
+
+  const payment = await createPayment({
+    accessToken: creds.accessToken,
+    token: input.token,
+    paymentMethodId: input.paymentMethodId,
+    installments: input.installments,
+    issuerId: input.issuerId,
+    orderId: session.sessionId, // becomes MP's external_reference
+    amountMxn,
+    applicationFeeMxn,
+    description: session.description ?? 'Pago',
+    payerEmail: input.payer.email,
+    payerFirstName: input.payer.firstName,
+    payerLastName: input.payer.lastName,
+    payerIdentificationType: input.payer.identification?.type,
+    payerIdentificationNumber: input.payer.identification?.number,
+    idempotencyKey: session.sessionId,
+  })
+
+  // Map MP status → our CheckoutStatus for the optimistic update. The
+  // webhook will confirm the authoritative state later.
+  const optimisticStatus =
+    payment.status === 'approved' || payment.status === 'authorized'
+      ? 'COMPLETED'
+      : payment.status === 'rejected' || payment.status === 'cancelled'
+        ? 'CANCELLED'
+        : 'PENDING'
+
+  await prisma.checkoutSession.update({
+    where: { id: session.id },
+    data: {
+      mpPaymentId: String(payment.id),
+      status: optimisticStatus,
+      completedAt: optimisticStatus === 'COMPLETED' ? new Date() : null,
+    },
+  })
+
+  logger.info('MP Bricks payment created', {
+    sessionId,
+    paymentId: payment.id,
+    status: payment.status,
+    statusDetail: payment.status_detail,
+  })
+
+  return {
+    paymentId: payment.id,
+    status: payment.status,
+    statusDetail: payment.status_detail,
+    threeDsRedirectUrl: payment.three_ds_redirect_url,
+  }
 }

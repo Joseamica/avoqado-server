@@ -106,6 +106,58 @@ export async function createStripePaymentIntent(req: Request, res: Response) {
 }
 
 /**
+ * POST /api/v1/public/payment-links/:shortCode/mp-payment-intent
+ *
+ * Mercado Pago Bricks (inline) entry point. Returns the seller's publicKey
+ * + sessionId so the frontend Brick can initialize and tokenize the card
+ * in-iframe. Customer stays on `pay.avoqado.io`.
+ *
+ * Body: { amount?, tipAmount?, customerEmail?, customFieldResponses? }
+ */
+export async function createMercadoPagoPaymentIntent(req: Request, res: Response) {
+  try {
+    const { shortCode } = req.params
+    const result = await paymentLinkService.createMercadoPagoPaymentIntentForPaymentLink(shortCode, req.body)
+    res.status(201).json({ success: true, data: result })
+  } catch (error: any) {
+    logger.error('Error creating MP payment intent for payment link:', error)
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || 'Error al iniciar pago con Mercado Pago',
+    })
+  }
+}
+
+/**
+ * POST /api/v1/public/payment-links/:shortCode/mp-pay
+ *
+ * Called by the frontend Brick's onSubmit. Receives the card token + payer
+ * info, creates the MP payment on the connected seller's account with
+ * `application_fee`, and returns the immediate result (approved/pending/3DS).
+ *
+ * Final status arrives later via webhook (handleIpn).
+ *
+ * Body: { sessionId, token, paymentMethodId, installments, issuerId?, payer: {...} }
+ */
+export async function executeMercadoPagoPayment(req: Request, res: Response) {
+  try {
+    const { shortCode } = req.params
+    const { sessionId, ...payInput } = req.body
+    if (!sessionId) {
+      return res.status(400).json({ success: false, error: 'sessionId es requerido' })
+    }
+    const result = await paymentLinkService.executeMercadoPagoPaymentForPaymentLink(shortCode, sessionId, payInput)
+    res.status(201).json({ success: true, data: result })
+  } catch (error: any) {
+    logger.error('Error executing MP payment for payment link:', error)
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || 'Error al procesar pago con Mercado Pago',
+    })
+  }
+}
+
+/**
  * POST /api/v1/public/payment-links/:shortCode/charge
  * Completes the charge after 3DS (if applicable)
  */

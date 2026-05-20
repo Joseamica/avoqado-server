@@ -193,6 +193,23 @@ router.post(
   paymentLinkPublicController.createStripePaymentIntent,
 )
 
+// Mercado Pago Bricks (inline) flow — customer stays on pay.avoqado.io and pays
+// via embedded MP Brick (analog of Stripe Elements). Returns publicKey +
+// sessionId so the frontend SDK can initialize and tokenize the card in-iframe.
+router.post(
+  '/payment-links/:shortCode/mp-payment-intent',
+  writeLimit,
+  paymentLinkPublicController.createMercadoPagoPaymentIntent,
+)
+
+// Brick onSubmit callback — receives the tokenized card from the Brick frontend
+// and creates the MP payment with application_fee on the seller's account.
+router.post(
+  '/payment-links/:shortCode/mp-pay',
+  writeLimit,
+  paymentLinkPublicController.executeMercadoPagoPayment,
+)
+
 router.post('/payment-links/:shortCode/charge', writeLimit, validateRequest(publicChargeSchema), paymentLinkPublicController.completeCharge)
 
 router.get(

@@ -3394,12 +3394,20 @@ router.post('/time-entries/:timeEntryId/break/start', authenticateTokenMiddlewar
 router.post('/time-entries/:timeEntryId/break/end', authenticateTokenMiddleware, timeEntryController.endBreak)
 
 /**
- * Get time entries for a venue (requires shifts:manage permission)
+ * Get time entries for a venue (manager view — all staff).
+ *
+ * Permission: tpv-time-entries:read (was 'shifts:manage' which is a phantom
+ * string not present in the permission catalog — default-role users passed via
+ * 'shifts:*' wildcard match, but venues with custom VenueRolePermission
+ * overrides that explode wildcards to individual perms had no way to satisfy
+ * the gate and got 403. The TPV self-service endpoint below is unaffected;
+ * managers/admins use tpv-time-entries:read which already exists in
+ * DEFAULT_PERMISSIONS for MANAGER/ADMIN/OWNER.)
  */
 router.get(
   '/venues/:venueId/time-entries',
   authenticateTokenMiddleware,
-  checkPermission('shifts:manage'),
+  checkPermission('tpv-time-entries:read'),
   timeEntryController.getTimeEntries,
 )
 
@@ -3421,12 +3429,16 @@ router.get(
 router.get('/staff/:staffId/time-summary', authenticateTokenMiddleware, timeEntryController.getStaffTimeSummary)
 
 /**
- * Get currently clocked in staff
+ * Get currently clocked in staff.
+ *
+ * Permission: tpv-time-entries:read (see note on /time-entries above —
+ * 'shifts:manage' was a phantom string; tpv-time-entries:read is the canonical
+ * manager-view perm and is held by MANAGER/ADMIN/OWNER by default).
  */
 router.get(
   '/venues/:venueId/time-entries/active',
   authenticateTokenMiddleware,
-  checkPermission('shifts:manage'),
+  checkPermission('tpv-time-entries:read'),
   timeEntryController.getCurrentlyClockedInStaff,
 )
 

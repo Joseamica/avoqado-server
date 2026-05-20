@@ -3679,11 +3679,27 @@ model CheckoutSession {
   blumonCheckoutId  String? // ID returned by Blumon
   blumonCheckoutUrl String? // URL where we redirect the customer
 
+  /// Mercado Pago — only set when ecommerceMerchant.provider.code = MERCADO_PAGO.
+  /// preferenceId is the result of POST /checkout/preferences (used in some
+  /// Bricks flows). Optional in v1 — many flows skip preferences and create
+  /// payments directly with the Brick token; reserved for future flexibility.
+  mpPreferenceId String? @unique
+  /// mpPaymentId is the MP payment.id, received via IPN once the buyer completes
+  /// the payment. This — not the preferenceId — is what gets passed to
+  /// GET /v1/payments/:id and POST /v1/payments/:id/refunds.
+  mpPaymentId String? @unique
+  /// mpMerchantOrderId reconciles the preference ↔ payments relationship in MP.
+  /// One preference can map to multiple payment attempts; merchant_order groups
+  /// them. Populated via IPN.
+  mpMerchantOrderId String?
+
   /// Avoqado's platform fee taken on this checkout, in centavos. For Stripe
   /// Connect sessions this is the `application_fee_amount` passed at session
-  /// creation. Promoted from `metadata.applicationFeeCents` to a real column
-  /// so `SUM(applicationFeeCents)` runs as a fast indexed aggregate instead
-  /// of a JSON parse over every row.
+  /// creation. For Mercado Pago this is the `application_fee` (in centavos at
+  /// the interface boundary; converted to MXN by mercado-pago.provider before
+  /// the MP API call). Promoted from `metadata.applicationFeeCents` to a real
+  /// column so `SUM(applicationFeeCents)` runs as a fast indexed aggregate
+  /// instead of a JSON parse over every row.
   applicationFeeCents Int?
 
   // Payment result
@@ -3718,6 +3734,11 @@ model CheckoutSession {
   @@index([expiresAt]) // For cleanup of expired sessions
   @@index([paymentId])
   @@index([paymentLinkId])
+  // Mercado Pago lookups (webhook IPN finds the session via mpPaymentId or
+  // mpMerchantOrderId; mpPreferenceId is queried during status polling)
+  @@index([mpPreferenceId])
+  @@index([mpPaymentId])
+  @@index([mpMerchantOrderId])
 }
 
 /// Mapping between a venue and the merchant accounts it should use.
@@ -5490,8 +5511,10 @@ enum SaleVerificationStatus {
 // Back-office rejection reasons for sale verification documentation
 // Used by PlayTelecom (Walmart) to flag missing/incorrect documentation
 enum SaleVerificationRejectionReason {
-  REVIEW_PORTABILIDAD
-  REVIEW_DUPLICATE_VINCULACION
+  REVIEW_PORTABILIDAD // "Falta imagen de portabilidad"
+  REVIEW_DUPLICATE_VINCULACION // "# de vinculación duplicada"
+  REVIEW_ILLEGIBLE_IMAGES // "Imágenes ilegibles"
+  REVIEW_MISSING_LINKING_IMAGE // "Falta imagen de vinculación"
   OTHER
 }
 
@@ -9648,4 +9671,55 @@ model StaffOnboardingState {
 
   @@unique([staffId, venueId, key])
   @@index([staffId, venueId])
+}
+
+// ============================================================================
+// MERCADO PAGO — Webhook event dedupe
+// ============================================================================
+
+/// Dedupe table for Mercado Pago IPN webhooks.
+///
+/// MP sends duplicate deliveries for the same event (retry storms, multiple
+/// notification triggers). The unique constraint on (mpUserId, dataId, requestId)
+/// guarantees we only process each event once — the insert is the atomic
+/// check (P2002 unique violation = duplicate, skip).
+///
+/// Also serves as an audit log: full raw payload kept for forensics,
+/// processingStatus shows what we did with each event.
+model MercadoPagoWebhookEvent {
+  id String @id @default(cuid())
+
+  /// MP seller user_id who owns the resource that triggered the event.
+  /// Used to lookup the EcommerceMerchant via providerMerchantId.
+  mpUserId String
+
+  /// data.id from the IPN payload (payment id, merchant_order id, etc.).
+  /// Lowercased to match the canonical form MP uses in the signature manifest.
+  dataId String
+
+  /// x-request-id header from MP. Together with mpUserId + dataId guarantees
+  /// uniqueness; MP guarantees a fresh request-id per delivery attempt.
+  requestId String
+
+  /// IPN payload `type` (typically "payment", "merchant_order", "claim").
+  eventType String
+
+  /// IPN `action` (e.g. "payment.created", "payment.updated").
+  action String
+
+  /// Full raw payload, kept for forensics + replay testing.
+  payload Json
+
+  /// Outcome of our processing: "pending" (mid-flight), "processed",
+  /// "ignored" (e.g. unsupported event type), "error".
+  processingStatus String
+
+  /// Optional error message if processing failed.
+  errorMessage String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([mpUserId, dataId, requestId])
+  @@index([dataId])
+  @@index([createdAt])
 }

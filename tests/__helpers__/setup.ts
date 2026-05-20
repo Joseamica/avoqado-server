@@ -31,6 +31,21 @@ process.env.GOOGLE_OAUTH_REDIRECT_URI =
   process.env.GOOGLE_OAUTH_REDIRECT_URI || 'http://localhost:4000/api/v1/google-calendar/oauth/callback'
 process.env.GOOGLE_CALENDAR_WEBHOOK_BASE = process.env.GOOGLE_CALENDAR_WEBHOOK_BASE || 'http://localhost:4000'
 
+// Mercado Pago — services that read these at module-load time (Brick OAuth,
+// token encryption, webhook signing) need deterministic test values BEFORE any
+// import. Token key must be 32-byte hex (64 chars) to satisfy createTokenCipher.
+process.env.MP_CLIENT_ID = process.env.MP_CLIENT_ID || 'test-mp-client-id'
+process.env.MP_CLIENT_SECRET = process.env.MP_CLIENT_SECRET || 'test-mp-client-secret'
+process.env.MP_REDIRECT_URI =
+  process.env.MP_REDIRECT_URI || 'http://localhost:3000/api/v1/integrations/mercadopago/oauth/callback'
+process.env.MP_WEBHOOK_SECRET = process.env.MP_WEBHOOK_SECRET || 'test-mp-webhook-secret'
+process.env.MP_PUBLIC_KEY_TEST = process.env.MP_PUBLIC_KEY_TEST || 'TEST-pk-test'
+process.env.MP_ACCESS_TOKEN_TEST = process.env.MP_ACCESS_TOKEN_TEST || 'TEST-at-test'
+process.env.MERCADO_PAGO_TOKEN_KEY =
+  process.env.MERCADO_PAGO_TOKEN_KEY || '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+process.env.MP_API_BASE_URL = process.env.MP_API_BASE_URL || 'https://api.mercadopago.com'
+process.env.MP_AUTH_BASE_URL = process.env.MP_AUTH_BASE_URL || 'https://auth.mercadopago.com.mx'
+
 // Comprehensive Prisma Mock Setup
 const createMockModel = () => ({
   findUnique: jest.fn(),
@@ -163,6 +178,9 @@ const prismaMock: any = {
   paymentLink: createMockModel(),
   checkoutSession: createMockModel(),
   ecommerceMerchant: createMockModel(),
+  paymentProvider: createMockModel(),
+  // Mercado Pago (Phase 0 of MP marketplace integration)
+  mercadoPagoWebhookEvent: createMockModel(),
   // Google Calendar Sync (Phase 1)
   googleCalendarConnection: createMockModel(),
   googleCalendarChannel: createMockModel(),

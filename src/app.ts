@@ -18,6 +18,7 @@ import { getCorsConfig, Environment } from './config/corsOptions'
 import publicMenuRoutes from './routes/publicMenu.routes'
 import webhookRoutes from './routes/webhook.routes'
 import { handleGoogleCalendarWebhook } from './controllers/webhook/google-calendar.webhook.controller'
+import { handleMercadoPagoWebhook } from './controllers/webhook/mercadoPago.webhook.controller'
 import publicRoutes from './routes/public.routes'
 import appUpdateRoutes from './routes/superadmin/appUpdate.routes'
 import settlementReportRoutes from './routes/settlement-report.routes'
@@ -83,6 +84,12 @@ export function getAppEventLoopHistogram() {
 // `application/json` parser (which silently drops Google's non-JSON pings).
 // Express matches routes in mount order — most-specific path first.
 app.post('/api/v1/webhooks/google-calendar', express.raw({ type: '*/*', limit: '64kb' }), handleGoogleCalendarWebhook)
+
+// ⚠️ Mercado Pago webhook also needs raw body for HMAC signature verification.
+// Mount BEFORE the generic /api/v1/webhooks router (which uses strict
+// application/json parsing) so MP's potentially mixed content types still hit
+// our raw parser. Express matches routes in mount order.
+app.post('/api/v1/webhooks/mercadopago', express.raw({ type: '*/*', limit: '64kb' }), handleMercadoPagoWebhook)
 
 app.use(
   '/api/v1/webhooks',

@@ -344,8 +344,13 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'tpv-kiosk:enable': ['tpv-kiosk:enable', 'tpv:read', 'tpv-terminal:settings'],
 
   // Orders - TPV-specific actions
-  'tpv-orders:comp': ['tpv-orders:comp', 'orders:read', 'orders:update'],
-  'tpv-orders:void': ['tpv-orders:void', 'orders:read', 'orders:update'],
+  // 'tpv-orders:comp' implies 'orders:comp' so users granted the TPV-level
+  // permission (via dashboard role editor) automatically pass route gates that
+  // still check the data-level 'orders:comp' (e.g. POST /orders/:id/comp).
+  // Without this, venues whose ADMIN custom perms list individual orders perms
+  // instead of the 'orders:*' wildcard get 403 on cortesía/anulación. Same for void.
+  'tpv-orders:comp': ['tpv-orders:comp', 'orders:comp', 'orders:read', 'orders:update'],
+  'tpv-orders:void': ['tpv-orders:void', 'orders:void', 'orders:read', 'orders:update'],
   'tpv-orders:discount': ['tpv-orders:discount', 'orders:read', 'orders:update', 'discounts:read', 'discounts:apply'],
 
   // Time Entries
@@ -1131,7 +1136,7 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   settlements: ['settlements:read', 'settlements:simulate'],
   reports: ['reports:read', 'reports:export'],
   menu: ['menu:read', 'menu:create', 'menu:update', 'menu:delete', 'menu:import'],
-  orders: ['orders:read', 'orders:create', 'orders:update', 'orders:cancel'],
+  orders: ['orders:read', 'orders:create', 'orders:update', 'orders:cancel', 'orders:comp', 'orders:void'],
   payments: ['payments:read', 'payments:create', 'payments:refund'],
   // Singular `payment` namespace for admin-only, one-off payment actions.
   payment: ['payment:create-manual'],

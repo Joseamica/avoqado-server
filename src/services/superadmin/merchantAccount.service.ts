@@ -1291,9 +1291,90 @@ export async function upsertDiscoveredAngelPayMerchants(input: {
             tertiaryAccountId: existingConfig.tertiaryAccountId,
           })
         }
+
       })
       created++
     }
+  }
+
+  // Auto-bind every active AngelPay MerchantAccount linked to this venue
+  // (via VenuePaymentConfig slots or angelpayUserAccountId scoped to this
+  // venue) into every NEXGO terminal's `assignedMerchantIds`. Idempotent —
+  // skips merchants already attached. Mirrors Blumon's serial-based terminal
+  // attachment (Terminal.assignedMerchantIds is the routing signal the
+  // dashboard reads to show the "X terminales" badge, and the TPV config
+  // endpoint uses to filter merchants per terminal). Without this, AngelPay
+  // merchants only flow through the venue-level VenuePaymentConfig slot →
+  // dashboard shows "no terminal count" → operator thinks "not connected"
+  // and cashier can't tell which merchants the current terminal can charge.
+  // Runs after the main upsert loop so it covers all 3 paths (existing
+  // update / placeholder upgrade / new create) uniformly.
+  try {
+    const nexgoTerminals = await prisma.terminal.findMany({
+      where: { venueId: input.venueId, brand: 'NEXGO' },
+      select: { id: true, serialNumber: true, assignedMerchantIds: true },
+    })
+    if (nexgoTerminals.length > 0) {
+      // Find every active ANGELPAY MerchantAccount routable in this venue.
+      // Scoped to (a) merchants linked to one of this venue's AngelPay accounts
+      // OR (b) merchants attached to this venue's VenuePaymentConfig slots —
+      // covers both multi-account (FK link) and legacy single-account (slot)
+      // wiring without leaking other venues' AngelPay merchants in.
+      const venueConfig = await prisma.venuePaymentConfig.findUnique({
+        where: { venueId: input.venueId },
+        select: { primaryAccountId: true, secondaryAccountId: true, tertiaryAccountId: true },
+      })
+      const slotIds = [
+        venueConfig?.primaryAccountId,
+        venueConfig?.secondaryAccountId,
+        venueConfig?.tertiaryAccountId,
+      ].filter((x): x is string => !!x)
+
+      const venueAccountIds = await prisma.angelPayUserAccount.findMany({
+        where: { venueId: input.venueId },
+        select: { id: true },
+      })
+
+      const venueAngelpayMerchants = await prisma.merchantAccount.findMany({
+        where: {
+          providerId: angelpayProvider.id,
+          active: true,
+          OR: [
+            { id: { in: slotIds } },
+            { angelpayUserAccountId: { in: venueAccountIds.map(a => a.id) } },
+          ],
+        },
+        select: { id: true, externalMerchantId: true },
+      })
+
+      let boundCount = 0
+      for (const term of nexgoTerminals) {
+        const missing = venueAngelpayMerchants
+          .filter(ma => !term.assignedMerchantIds.includes(ma.id))
+          .map(ma => ma.id)
+        if (missing.length === 0) continue
+        await prisma.terminal.update({
+          where: { id: term.id },
+          data: { assignedMerchantIds: { push: missing } },
+        })
+        boundCount += missing.length
+      }
+      if (boundCount > 0) {
+        logger.info('Auto-bound AngelPay merchants to NEXGO terminals', {
+          venueId: input.venueId,
+          terminalsTouched: nexgoTerminals.length,
+          merchantAttachments: boundCount,
+        })
+      }
+    }
+  } catch (err) {
+    // Non-fatal — discovery still counts as successful even if attachment
+    // hiccups (operator can manually attach via dashboard). Logs the error
+    // so we can monitor for systemic failures.
+    logger.warn('Auto-bind AngelPay merchants to NEXGO terminals failed', {
+      venueId: input.venueId,
+      error: err instanceof Error ? err.message : String(err),
+    })
   }
 
   logger.info('AngelPay auto-discovered merchants upserted', {

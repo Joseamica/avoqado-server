@@ -83,6 +83,22 @@ const envSchema = z.object({
   BLUMON_MASTER_PASSWORD: z.string().optional(),
   BLUMON_KYC_EMAILS: z.string().optional(), // Comma-separated emails for KYC document delivery
 
+  // Mercado Pago — Marketplace (Split Payments via Checkout Bricks)
+  // CLIENT_ID = "Número de aplicación" from MP DevPanel; CLIENT_SECRET lives in
+  // Credenciales de producción (applies to both test and prod — same value).
+  MP_CLIENT_ID: z.string().min(1, 'MP_CLIENT_ID es requerido').optional(),
+  MP_CLIENT_SECRET: z.string().min(1, 'MP_CLIENT_SECRET es requerido').optional(),
+  MP_REDIRECT_URI: z.string().url('MP_REDIRECT_URI debe ser una URL válida').optional(),
+  MP_WEBHOOK_SECRET: z.string().min(1, 'MP_WEBHOOK_SECRET es requerido').optional(),
+  MP_PUBLIC_KEY_TEST: z.string().min(1).optional(),
+  MP_PUBLIC_KEY_PROD: z.string().min(1).optional(),
+  MP_ACCESS_TOKEN_TEST: z.string().min(1).optional(),
+  // 32-byte hex (64 chars) AES-256-GCM key encrypting MP seller refresh+access
+  // tokens at rest. ROTATE-SEPARATELY from JWT_SECRET and GOOGLE_CALENDAR_TOKEN_KEY.
+  MERCADO_PAGO_TOKEN_KEY: z.string().length(64, 'MERCADO_PAGO_TOKEN_KEY debe ser hex de 32 bytes (64 chars)').optional(),
+  MP_API_BASE_URL: z.string().url().default('https://api.mercadopago.com'),
+  MP_AUTH_BASE_URL: z.string().url().default('https://auth.mercadopago.com.mx'),
+
   // Google OAuth
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),

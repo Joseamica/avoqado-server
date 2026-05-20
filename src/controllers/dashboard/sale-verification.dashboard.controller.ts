@@ -160,7 +160,13 @@ export async function reviewSaleVerification(req: Request, res: Response): Promi
     }
 
     // Validate rejection reasons enum values (defensive — Prisma will also throw on bad enum)
-    const validReasons: SaleVerificationRejectionReason[] = ['REVIEW_PORTABILIDAD', 'REVIEW_DUPLICATE_VINCULACION', 'OTHER']
+    const validReasons: SaleVerificationRejectionReason[] = [
+      'REVIEW_PORTABILIDAD',
+      'REVIEW_DUPLICATE_VINCULACION',
+      'REVIEW_ILLEGIBLE_IMAGES',
+      'REVIEW_MISSING_LINKING_IMAGE',
+      'OTHER',
+    ]
     if (Array.isArray(rejectionReasons)) {
       const invalid = rejectionReasons.filter(r => !validReasons.includes(r))
       if (invalid.length > 0) {

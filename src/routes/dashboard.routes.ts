@@ -243,6 +243,8 @@ import organizationDashboardRoutes from './dashboard/organizationDashboard.route
 import organizationConfigRoutes from './dashboard/organizationConfig.routes'
 import organizationStockControlRoutes from './dashboard/organizationStockControl.routes'
 import simCustodyDashboardRoutes from './dashboard/simCustody.dashboard.routes'
+// Org-scoped sale verification routes (PlayTelecom back-office Walmart documentation approval)
+import saleVerificationOrgDashboardRoutes from './dashboard/saleVerification.org.dashboard.routes'
 // Stores Analysis routes for PlayTelecom/White-Label dashboard (venue-level org data)
 import storesAnalysisRoutes from './dashboard/storesAnalysis.routes'
 import creditPackRoutes from './dashboard/creditPack.routes'
@@ -3571,6 +3573,9 @@ router.use('/organizations/:orgId', organizationStockControlRoutes)
 
 // SIM custody chain-of-custody endpoints (plan §1.4)
 router.use('/organizations/:orgId', simCustodyDashboardRoutes)
+
+// Org-scoped sale verification (back-office Walmart documentation approval flow)
+router.use('/organizations/:orgId/sale-verifications', saleVerificationOrgDashboardRoutes)
 
 // Stores Analysis routes for PlayTelecom/White-Label dashboard
 // Venue-level routes that fetch organization data with white-label access control
