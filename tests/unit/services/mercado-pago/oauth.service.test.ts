@@ -1,12 +1,6 @@
 import jwt from 'jsonwebtoken'
 import nock from 'nock'
-import {
-  signState,
-  verifyState,
-  buildAuthUrl,
-  exchangeCodeForTokens,
-  refreshAccessToken,
-} from '@/services/mercado-pago/oauth.service'
+import { signState, verifyState, buildAuthUrl, exchangeCodeForTokens, refreshAccessToken } from '@/services/mercado-pago/oauth.service'
 import type { MercadoPagoOAuthState } from '@/services/mercado-pago/types'
 
 // Guarantee NO real HTTP calls leak from these tests (would hit MP for real)
@@ -44,10 +38,7 @@ describe('MP OAuth state helpers', () => {
 
   it('rejects an expired token', () => {
     // Sign a token whose exp is already in the past
-    const expired = jwt.sign(
-      { ...payload, exp: Math.floor(Date.now() / 1000) - 60 },
-      process.env.OAUTH_STATE_SECRET!,
-    )
+    const expired = jwt.sign({ ...payload, exp: Math.floor(Date.now() / 1000) - 60 }, process.env.OAUTH_STATE_SECRET!)
     expect(() => verifyState(expired)).toThrow(/expired/i)
   })
 
@@ -105,9 +96,7 @@ describe('MP OAuth - exchangeCodeForTokens', () => {
   })
 
   it('surfaces MP error_description when MP rejects the exchange', async () => {
-    nock('https://api.mercadopago.com')
-      .post('/oauth/token')
-      .reply(400, { error: 'invalid_grant', error_description: 'code has expired' })
+    nock('https://api.mercadopago.com').post('/oauth/token').reply(400, { error: 'invalid_grant', error_description: 'code has expired' })
 
     await expect(exchangeCodeForTokens('expired-code')).rejects.toThrow(/invalid_grant|code has expired/i)
   })
@@ -119,11 +108,7 @@ describe('MP OAuth - refreshAccessToken', () => {
   it('POSTs to /oauth/token with grant_type=refresh_token', async () => {
     nock('https://api.mercadopago.com')
       .post('/oauth/token', body => {
-        return (
-          body.grant_type === 'refresh_token' &&
-          body.refresh_token === 'old-refresh-token' &&
-          body.client_id === 'test-mp-client-id'
-        )
+        return body.grant_type === 'refresh_token' && body.refresh_token === 'old-refresh-token' && body.client_id === 'test-mp-client-id'
       })
       .reply(200, {
         access_token: 'NEW-access',

@@ -138,9 +138,7 @@ describe('handleIpn — dedupe', () => {
     dbError.code = 'P1001'
     mockPrisma.mercadoPagoWebhookEvent.create.mockRejectedValue(dbError)
 
-    await expect(
-      handleIpn({ payload: buildPaymentPayload(), requestId: 'req-1' }),
-    ).rejects.toThrow(/Connection lost/)
+    await expect(handleIpn({ payload: buildPaymentPayload(), requestId: 'req-1' })).rejects.toThrow(/Connection lost/)
   })
 })
 

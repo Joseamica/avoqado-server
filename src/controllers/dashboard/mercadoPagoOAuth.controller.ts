@@ -21,11 +21,7 @@ import prisma from '@/utils/prismaClient'
 import * as guardService from '@/services/mercado-pago/merchant-guard.service'
 import * as oauthService from '@/services/mercado-pago/oauth.service'
 import * as connectionService from '@/services/mercado-pago/connection.service'
-import {
-  initiateQuerySchema,
-  callbackQuerySchema,
-  disconnectParamsSchema,
-} from '@/schemas/dashboard/mercadoPagoOAuth.schema'
+import { initiateQuerySchema, callbackQuerySchema, disconnectParamsSchema } from '@/schemas/dashboard/mercadoPagoOAuth.schema'
 import type { MercadoPagoOAuthState } from '@/services/mercado-pago/types'
 
 /**
@@ -83,8 +79,7 @@ export async function callback(req: Request, res: Response) {
     return res.status(400).send('Parámetros OAuth inválidos')
   }
 
-  const dashboardUrl =
-    process.env.PUBLIC_DASHBOARD_URL || process.env.DASHBOARD_URL || process.env.FRONTEND_URL || 'http://localhost:5173'
+  const dashboardUrl = process.env.PUBLIC_DASHBOARD_URL || process.env.DASHBOARD_URL || process.env.FRONTEND_URL || 'http://localhost:5173'
 
   // 1. Did MP itself return an error? (User clicked "Cancelar", or scope rejected, etc.)
   if (parsed.data.error) {
@@ -118,9 +113,7 @@ export async function callback(req: Request, res: Response) {
     where: { id: statePayload.venueId },
     select: { slug: true },
   })
-  const merchantPath = venue?.slug
-    ? `/venues/${venue.slug}/ecommerce-merchants`
-    : '/integrations/mercadopago'
+  const merchantPath = venue?.slug ? `/venues/${venue.slug}/ecommerce-merchants` : '/integrations/mercadopago'
 
   // 3. Tenant re-check: the venue + merchant in the state must still be a
   //    valid MERCADO_PAGO merchant (defense-in-depth — someone could have

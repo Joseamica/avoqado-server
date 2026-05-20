@@ -71,16 +71,7 @@ export interface MercadoPagoWebhookPayload {
 /** Subset of MP payment object returned by GET /v1/payments/:id */
 export interface MercadoPagoPayment {
   id: number
-  status:
-    | 'pending'
-    | 'approved'
-    | 'authorized'
-    | 'in_process'
-    | 'in_mediation'
-    | 'rejected'
-    | 'cancelled'
-    | 'refunded'
-    | 'charged_back'
+  status: 'pending' | 'approved' | 'authorized' | 'in_process' | 'in_mediation' | 'rejected' | 'cancelled' | 'refunded' | 'charged_back'
   status_detail: string
   external_reference: string | null
   transaction_amount: number

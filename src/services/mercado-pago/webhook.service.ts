@@ -68,9 +68,7 @@ export function verifyWebhookSignature(p: VerifyWebhookSignatureParams): void {
   }
   const now = Math.floor(Date.now() / 1000)
   if (Math.abs(now - tsNum) > TOLERANCE_SECONDS) {
-    throw new Error(
-      `MP webhook timestamp out of tolerance (replay protection): now=${now}, ts=${tsNum}, max delta=${TOLERANCE_SECONDS}s`,
-    )
+    throw new Error(`MP webhook timestamp out of tolerance (replay protection): now=${now}, ts=${tsNum}, max delta=${TOLERANCE_SECONDS}s`)
   }
 
   // Prefer query data.id; body is fallback for deliveries that lack query params

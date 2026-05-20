@@ -1291,7 +1291,6 @@ export async function upsertDiscoveredAngelPayMerchants(input: {
             tertiaryAccountId: existingConfig.tertiaryAccountId,
           })
         }
-
       })
       created++
     }
@@ -1324,11 +1323,9 @@ export async function upsertDiscoveredAngelPayMerchants(input: {
         where: { venueId: input.venueId },
         select: { primaryAccountId: true, secondaryAccountId: true, tertiaryAccountId: true },
       })
-      const slotIds = [
-        venueConfig?.primaryAccountId,
-        venueConfig?.secondaryAccountId,
-        venueConfig?.tertiaryAccountId,
-      ].filter((x): x is string => !!x)
+      const slotIds = [venueConfig?.primaryAccountId, venueConfig?.secondaryAccountId, venueConfig?.tertiaryAccountId].filter(
+        (x): x is string => !!x,
+      )
 
       const venueAccountIds = await prisma.angelPayUserAccount.findMany({
         where: { venueId: input.venueId },
@@ -1339,19 +1336,14 @@ export async function upsertDiscoveredAngelPayMerchants(input: {
         where: {
           providerId: angelpayProvider.id,
           active: true,
-          OR: [
-            { id: { in: slotIds } },
-            { angelpayUserAccountId: { in: venueAccountIds.map(a => a.id) } },
-          ],
+          OR: [{ id: { in: slotIds } }, { angelpayUserAccountId: { in: venueAccountIds.map(a => a.id) } }],
         },
         select: { id: true, externalMerchantId: true },
       })
 
       let boundCount = 0
       for (const term of nexgoTerminals) {
-        const missing = venueAngelpayMerchants
-          .filter(ma => !term.assignedMerchantIds.includes(ma.id))
-          .map(ma => ma.id)
+        const missing = venueAngelpayMerchants.filter(ma => !term.assignedMerchantIds.includes(ma.id)).map(ma => ma.id)
         if (missing.length === 0) continue
         await prisma.terminal.update({
           where: { id: term.id },

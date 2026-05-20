@@ -27,9 +27,7 @@ describe('initiate', () => {
   it('redirects to MP authorize URL when guard + auth pass', async () => {
     ;(guardService.getMercadoPagoMerchant as jest.Mock).mockResolvedValue({ id: 'em_1' })
     ;(oauthService.signState as jest.Mock).mockReturnValue('state-jwt')
-    ;(oauthService.buildAuthUrl as jest.Mock).mockReturnValue(
-      'https://auth.mercadopago.com.mx/authorization?...',
-    )
+    ;(oauthService.buildAuthUrl as jest.Mock).mockReturnValue('https://auth.mercadopago.com.mx/authorization?...')
 
     const req: any = {
       query: { venueId: 'v_1', ecommerceMerchantId: 'em_1' },
@@ -82,9 +80,7 @@ describe('initiate', () => {
   })
 
   it('propagates tenant guard rejection (NotFoundError → 404)', async () => {
-    ;(guardService.getMercadoPagoMerchant as jest.Mock).mockRejectedValue(
-      new NotFoundError('Afiliación no encontrada'),
-    )
+    ;(guardService.getMercadoPagoMerchant as jest.Mock).mockRejectedValue(new NotFoundError('Afiliación no encontrada'))
 
     const req: any = {
       query: { venueId: 'v_1', ecommerceMerchantId: 'em_x' },
@@ -96,9 +92,7 @@ describe('initiate', () => {
   })
 
   it('propagates UnauthorizedError → 401', async () => {
-    ;(guardService.getMercadoPagoMerchant as jest.Mock).mockRejectedValue(
-      new UnauthorizedError('No tienes acceso'),
-    )
+    ;(guardService.getMercadoPagoMerchant as jest.Mock).mockRejectedValue(new UnauthorizedError('No tienes acceso'))
 
     const req: any = {
       query: { venueId: 'v_1', ecommerceMerchantId: 'em_1' },
@@ -135,13 +129,8 @@ describe('callback', () => {
     const res = buildRes()
     await callback(req, res)
 
-    expect(connectionService.persistTokens).toHaveBeenCalledWith(
-      'em_1',
-      expect.objectContaining({ access_token: 'TEST-access' }),
-    )
-    expect(res.redirect).toHaveBeenCalledWith(
-      expect.stringContaining('/venues/v_1/ecommerce-merchants/em_1/integrations/mercadopago'),
-    )
+    expect(connectionService.persistTokens).toHaveBeenCalledWith('em_1', expect.objectContaining({ access_token: 'TEST-access' }))
+    expect(res.redirect).toHaveBeenCalledWith(expect.stringContaining('/venues/v_1/ecommerce-merchants/em_1/integrations/mercadopago'))
     expect(res.redirect).toHaveBeenCalledWith(expect.stringContaining('mp_status=connected'))
   })
 
@@ -177,9 +166,7 @@ describe('callback', () => {
       venueId: 'v_TAMPERED',
       staffId: 's_1',
     })
-    ;(guardService.getMercadoPagoMerchant as jest.Mock).mockRejectedValue(
-      new UnauthorizedError('No tienes acceso'),
-    )
+    ;(guardService.getMercadoPagoMerchant as jest.Mock).mockRejectedValue(new UnauthorizedError('No tienes acceso'))
 
     const req: any = { query: { code: 'c', state: 'state-jwt' } }
     const res = buildRes()
@@ -195,9 +182,7 @@ describe('callback', () => {
       staffId: 's_1',
     })
     ;(guardService.getMercadoPagoMerchant as jest.Mock).mockResolvedValue({ id: 'em_1' })
-    ;(oauthService.exchangeCodeForTokens as jest.Mock).mockRejectedValue(
-      new Error('MP OAuth authorization_code failed: invalid_grant'),
-    )
+    ;(oauthService.exchangeCodeForTokens as jest.Mock).mockRejectedValue(new Error('MP OAuth authorization_code failed: invalid_grant'))
 
     const req: any = { query: { code: 'expired-code', state: 'state-jwt' } }
     const res = buildRes()
@@ -235,9 +220,7 @@ describe('disconnect', () => {
   })
 
   it('propagates tenant guard rejection', async () => {
-    ;(guardService.getMercadoPagoMerchant as jest.Mock).mockRejectedValue(
-      new UnauthorizedError('No tienes acceso'),
-    )
+    ;(guardService.getMercadoPagoMerchant as jest.Mock).mockRejectedValue(new UnauthorizedError('No tienes acceso'))
 
     const req: any = { params: { venueId: 'v_1', merchantId: 'em_OTHER' } }
     const res = buildRes()

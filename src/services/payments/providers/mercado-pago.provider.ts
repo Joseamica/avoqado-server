@@ -130,10 +130,7 @@ export class MercadoPagoProvider implements IEcommerceProvider {
    * The actual MP /v1/payments call happens elsewhere (the public
    * mp-pay endpoint — Phase 7 Task 22) when the Brick submits the token.
    */
-  async createCheckoutSession(
-    merchant: EcommerceMerchantWithProvider,
-    params: CreateCheckoutParams,
-  ): Promise<CheckoutSession> {
+  async createCheckoutSession(merchant: EcommerceMerchantWithProvider, params: CreateCheckoutParams): Promise<CheckoutSession> {
     const creds = await connectionService.loadCredentials(merchant.id)
     if (!creds) {
       throw new BadRequestError('Este negocio aún no ha conectado Mercado Pago')
@@ -166,10 +163,7 @@ export class MercadoPagoProvider implements IEcommerceProvider {
    *   - If mpPaymentId not yet set (Brick hasn't submitted) → return from DB cache
    *   - If mpPaymentId set → hit MP API for authoritative status
    */
-  async getPaymentStatus(
-    merchant: EcommerceMerchantWithProvider,
-    sessionId: string,
-  ): Promise<PaymentStatus> {
+  async getPaymentStatus(merchant: EcommerceMerchantWithProvider, sessionId: string): Promise<PaymentStatus> {
     const session = await prisma.checkoutSession.findUnique({
       where: { id: sessionId },
       select: { mpPaymentId: true, status: true, completedAt: true },
@@ -230,12 +224,7 @@ export class MercadoPagoProvider implements IEcommerceProvider {
       refundId: String(refund.id),
       // Convert MP response back to centavos to honor the interface contract.
       amount: refund.amount * 100,
-      status:
-        refund.status === 'approved'
-          ? 'SUCCEEDED'
-          : refund.status === 'in_process'
-            ? 'PENDING'
-            : 'FAILED',
+      status: refund.status === 'approved' ? 'SUCCEEDED' : refund.status === 'in_process' ? 'PENDING' : 'FAILED',
     }
   }
 
@@ -254,10 +243,7 @@ export class MercadoPagoProvider implements IEcommerceProvider {
     )
   }
 
-  async tokenizeCard(
-    _merchant: EcommerceMerchantWithProvider,
-    _params: TokenizeCardParams,
-  ): Promise<TokenizeCardResult> {
+  async tokenizeCard(_merchant: EcommerceMerchantWithProvider, _params: TokenizeCardParams): Promise<TokenizeCardResult> {
     throw new ProviderCapabilityError(
       PROVIDER_CODE,
       'tokenizeCard: MP Bricks tokenizes the card in-iframe on the frontend, never via backend',

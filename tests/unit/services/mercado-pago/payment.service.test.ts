@@ -1,9 +1,5 @@
 import nock from 'nock'
-import {
-  createPayment,
-  getPayment,
-  refundPayment,
-} from '@/services/mercado-pago/payment.service'
+import { createPayment, getPayment, refundPayment } from '@/services/mercado-pago/payment.service'
 
 // Prevent real network calls leaking from these tests
 beforeAll(() => nock.disableNetConnect())
@@ -157,9 +153,7 @@ describe('createPayment', () => {
   })
 
   it('surfaces MP error response with status code and body', async () => {
-    nock('https://api.mercadopago.com')
-      .post('/v1/payments')
-      .reply(400, { error: 'invalid_card_token', message: 'token expired' })
+    nock('https://api.mercadopago.com').post('/v1/payments').reply(400, { error: 'invalid_card_token', message: 'token expired' })
 
     await expect(
       createPayment({
@@ -178,14 +172,12 @@ describe('createPayment', () => {
   })
 
   it('returns three_ds_redirect_url when 3DS challenge is required', async () => {
-    nock('https://api.mercadopago.com')
-      .post('/v1/payments')
-      .reply(201, {
-        id: 7,
-        status: 'pending',
-        status_detail: 'pending_challenge',
-        three_ds_redirect_url: 'https://acs.bank.com/3ds-challenge?txn=abc',
-      })
+    nock('https://api.mercadopago.com').post('/v1/payments').reply(201, {
+      id: 7,
+      status: 'pending',
+      status_detail: 'pending_challenge',
+      three_ds_redirect_url: 'https://acs.bank.com/3ds-challenge?txn=abc',
+    })
 
     const result = await createPayment({
       accessToken: SELLER_TOKEN,
@@ -237,9 +229,7 @@ describe('getPayment', () => {
   })
 
   it('surfaces 404 when payment does not exist', async () => {
-    nock('https://api.mercadopago.com')
-      .get('/v1/payments/nope')
-      .reply(404, { error: 'not_found', message: 'Payment not found' })
+    nock('https://api.mercadopago.com').get('/v1/payments/nope').reply(404, { error: 'not_found', message: 'Payment not found' })
 
     await expect(getPayment(SELLER_TOKEN, 'nope')).rejects.toThrow(/getPayment failed: 404/i)
   })

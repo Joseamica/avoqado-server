@@ -41,12 +41,7 @@ type UpfrontPolicy = Exclude<(typeof UPFRONT_POLICY_VALUES)[number], 'inherit'>
  * If the venue's operating hours are mis-configured we err on the side of
  * showing the session — better to expose it than silently hide.
  */
-function classSessionFitsOperatingHours(
-  startsAt: Date,
-  endsAt: Date,
-  operatingHours: OperatingHours,
-  timezone: string,
-): boolean {
+function classSessionFitsOperatingHours(startsAt: Date, endsAt: Date, operatingHours: OperatingHours, timezone: string): boolean {
   const DAY_KEYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'] as const
   // Convert both endpoints to venue-local wall-clock to compare against the
   // operatingHours config (which is stored as HH:MM strings in venue tz).
@@ -65,9 +60,7 @@ function classSessionFitsOperatingHours(
   // Session that crosses midnight: pin endMin to 24h so we only match against
   // ranges that span past midnight — there are none in the current schema,
   // so a midnight-crossing session is implicitly hidden.
-  const endMin = startLocal.toDateString() === endLocal.toDateString()
-    ? toMinutes(endLocal)
-    : 24 * 60
+  const endMin = startLocal.toDateString() === endLocal.toDateString() ? toMinutes(endLocal) : 24 * 60
   for (const r of day.ranges) {
     const open = parseHHMM(r.open)
     const close = parseHHMM(r.close)
@@ -401,17 +394,13 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
       // them here avoids a confusing "requiere X minutos de anticipacion"
       // toast after they've already picked a class.
       const minNoticeMin = settings.scheduling?.minNoticeMin ?? 0
-      const earliestStart = minNoticeMin > 0
-        ? new Date(Date.now() + minNoticeMin * 60 * 1000)
-        : null
+      const earliestStart = minNoticeMin > 0 ? new Date(Date.now() + minNoticeMin * 60 * 1000) : null
 
       // Mirror the booking-window's other half: cap the window at
       // now + maxAdvanceDays so we don't surface classes the venue would
       // refuse to book "con tanta anticipacion".
       const maxAdvanceDays = settings.scheduling?.maxAdvanceDays ?? 0
-      const latestStart = maxAdvanceDays > 0
-        ? new Date(Date.now() + maxAdvanceDays * 24 * 60 * 60 * 1000)
-        : null
+      const latestStart = maxAdvanceDays > 0 ? new Date(Date.now() + maxAdvanceDays * 24 * 60 * 60 * 1000) : null
       const requestedEnd = new Date(`${toDate.toISOString().slice(0, 10)}T23:59:59.999`)
       const effectiveEnd = latestStart && latestStart < requestedEnd ? latestStart : requestedEnd
 
@@ -424,9 +413,7 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
           status: 'SCHEDULED',
           ...(productId ? { productId } : { product: { type: 'CLASS', active: true } }),
           startsAt: {
-            gte: earliestStart && earliestStart > new Date(`${dateFrom}T00:00:00`)
-              ? earliestStart
-              : new Date(`${dateFrom}T00:00:00`),
+            gte: earliestStart && earliestStart > new Date(`${dateFrom}T00:00:00`) ? earliestStart : new Date(`${dateFrom}T00:00:00`),
             lte: effectiveEnd,
           },
         },
@@ -454,9 +441,10 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
       })
       const operatingHoursConfigured = rawSettings?.operatingHours != null
       const operatingHours = settings.operatingHours ?? null
-      const sessionsInHours = operatingHoursConfigured && operatingHours
-        ? sessionsRaw.filter(s => classSessionFitsOperatingHours(s.startsAt, s.endsAt, operatingHours, tz))
-        : sessionsRaw
+      const sessionsInHours =
+        operatingHoursConfigured && operatingHours
+          ? sessionsRaw.filter(s => classSessionFitsOperatingHours(s.startsAt, s.endsAt, operatingHours, tz))
+          : sessionsRaw
 
       const slots = sessionsInHours.map(session => {
         const enrolled = session.reservations.reduce((sum, r) => sum + r.partySize, 0)

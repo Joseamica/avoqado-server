@@ -102,9 +102,7 @@ async function postOAuthToken(body: Record<string, string>): Promise<MercadoPago
   } catch (err) {
     if (err instanceof AxiosError && err.response?.data) {
       const { error, error_description } = err.response.data as { error?: string; error_description?: string }
-      throw new Error(
-        `MP OAuth ${body.grant_type} failed: ${error || err.message} — ${error_description || ''}`.trim(),
-      )
+      throw new Error(`MP OAuth ${body.grant_type} failed: ${error || err.message} — ${error_description || ''}`.trim())
     }
     throw err
   }

@@ -72,16 +72,7 @@ export interface CreatePaymentParams {
 
 export interface PaymentResult {
   id: number
-  status:
-    | 'pending'
-    | 'approved'
-    | 'authorized'
-    | 'in_process'
-    | 'in_mediation'
-    | 'rejected'
-    | 'cancelled'
-    | 'refunded'
-    | 'charged_back'
+  status: 'pending' | 'approved' | 'authorized' | 'in_process' | 'in_mediation' | 'rejected' | 'cancelled' | 'refunded' | 'charged_back'
   status_detail: string
   /** Present when 3DS challenge is required. */
   three_ds_redirect_url?: string
@@ -171,9 +162,7 @@ export async function createPayment(p: CreatePaymentParams): Promise<PaymentResu
     return data
   } catch (err) {
     if (err instanceof AxiosError && err.response) {
-      throw new Error(
-        `MP createPayment failed: ${err.response.status} ${JSON.stringify(err.response.data)}`,
-      )
+      throw new Error(`MP createPayment failed: ${err.response.status} ${JSON.stringify(err.response.data)}`)
     }
     throw err
   }
@@ -199,9 +188,7 @@ export async function getPayment(accessToken: string, paymentId: string): Promis
     return data
   } catch (err) {
     if (err instanceof AxiosError && err.response) {
-      throw new Error(
-        `MP getPayment failed: ${err.response.status} ${JSON.stringify(err.response.data)}`,
-      )
+      throw new Error(`MP getPayment failed: ${err.response.status} ${JSON.stringify(err.response.data)}`)
     }
     throw err
   }
@@ -223,24 +210,18 @@ export async function getPayment(accessToken: string, paymentId: string): Promis
 export async function refundPayment(p: RefundParams): Promise<RefundResult> {
   try {
     const body = p.amount !== undefined ? { amount: p.amount } : {}
-    const { data } = await axios.post<RefundResult>(
-      `${API_BASE}/v1/payments/${p.paymentId}/refunds`,
-      body,
-      {
-        headers: {
-          Authorization: `Bearer ${p.accessToken}`,
-          'Content-Type': 'application/json',
-          'X-Idempotency-Key': p.idempotencyKey,
-        },
-        timeout: 15000,
+    const { data } = await axios.post<RefundResult>(`${API_BASE}/v1/payments/${p.paymentId}/refunds`, body, {
+      headers: {
+        Authorization: `Bearer ${p.accessToken}`,
+        'Content-Type': 'application/json',
+        'X-Idempotency-Key': p.idempotencyKey,
       },
-    )
+      timeout: 15000,
+    })
     return data
   } catch (err) {
     if (err instanceof AxiosError && err.response) {
-      throw new Error(
-        `MP refundPayment failed: ${err.response.status} ${JSON.stringify(err.response.data)}`,
-      )
+      throw new Error(`MP refundPayment failed: ${err.response.status} ${JSON.stringify(err.response.data)}`)
     }
     throw err
   }

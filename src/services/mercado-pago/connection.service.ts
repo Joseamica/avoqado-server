@@ -55,10 +55,7 @@ function readJsonObject(value: Prisma.JsonValue | null | undefined): Record<stri
  * Persist a fresh OAuth token response into `EcommerceMerchant.providerCredentials`.
  * Merges with existing keys (does NOT overwrite the whole JSON).
  */
-export async function persistTokens(
-  ecommerceMerchantId: string,
-  tokens: MercadoPagoTokenResponse,
-): Promise<void> {
+export async function persistTokens(ecommerceMerchantId: string, tokens: MercadoPagoTokenResponse): Promise<void> {
   const existing = await prisma.ecommerceMerchant.findUnique({
     where: { id: ecommerceMerchantId },
     select: { providerCredentials: true },
@@ -94,9 +91,7 @@ export async function persistTokens(
 /**
  * Load and decrypt credentials. Returns null if the merchant has no MP connection.
  */
-export async function loadCredentials(
-  ecommerceMerchantId: string,
-): Promise<DecryptedCredentials | null> {
+export async function loadCredentials(ecommerceMerchantId: string): Promise<DecryptedCredentials | null> {
   const merchant = await prisma.ecommerceMerchant.findUnique({
     where: { id: ecommerceMerchantId },
     select: { providerCredentials: true },
@@ -139,10 +134,7 @@ export type RefreshResult = 'refreshed' | 'not_needed' | 'no_credentials' | 'mer
  *   - "no_credentials":    merchant has not connected MP yet
  *   - "merchant_not_found": no row with that ecommerceMerchantId exists
  */
-export async function refreshIfExpiring(
-  ecommerceMerchantId: string,
-  thresholdDays = 30,
-): Promise<RefreshResult> {
+export async function refreshIfExpiring(ecommerceMerchantId: string, thresholdDays = 30): Promise<RefreshResult> {
   return prisma.$transaction(async tx => {
     const merchant = await tx.ecommerceMerchant.findUnique({
       where: { id: ecommerceMerchantId },

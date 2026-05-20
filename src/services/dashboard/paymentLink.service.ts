@@ -2773,11 +2773,7 @@ export async function createMercadoPagoPaymentIntentForPaymentLink(
   // 4. Compute application_fee (same VAT logic as Stripe). Returns centavos.
   const stripeAmount = toStripeAmount(new Prisma.Decimal(chargeAmount))
   const vatRateBps = await getVatRateBps()
-  const applicationFeeCents = calculateApplicationFeeWithVAT(
-    stripeAmount,
-    paymentLink.ecommerceMerchant.platformFeeBps,
-    vatRateBps,
-  )
+  const applicationFeeCents = calculateApplicationFeeWithVAT(stripeAmount, paymentLink.ecommerceMerchant.platformFeeBps, vatRateBps)
 
   // 5. Generate a stable sessionId that will become MP's external_reference
   //    when the Brick submits the payment. The webhook handler looks up the

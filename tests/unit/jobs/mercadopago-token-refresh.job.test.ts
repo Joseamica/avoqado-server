@@ -24,11 +24,7 @@ describe('MercadoPagoTokenRefreshJob.runNow', () => {
 
   it('iterates only MP merchants with providerMerchantId set', async () => {
     mockPrisma.paymentProvider.findUnique.mockResolvedValue({ id: 'pp_1' })
-    mockPrisma.ecommerceMerchant.findMany.mockResolvedValue([
-      { id: 'em_1' },
-      { id: 'em_2' },
-      { id: 'em_3' },
-    ])
+    mockPrisma.ecommerceMerchant.findMany.mockResolvedValue([{ id: 'em_1' }, { id: 'em_2' }, { id: 'em_3' }])
     ;(connectionService.refreshIfExpiring as jest.Mock)
       .mockResolvedValueOnce('refreshed')
       .mockResolvedValueOnce('not_needed')
@@ -51,9 +47,7 @@ describe('MercadoPagoTokenRefreshJob.runNow', () => {
   it('counts no_credentials outcomes separately', async () => {
     mockPrisma.paymentProvider.findUnique.mockResolvedValue({ id: 'pp_1' })
     mockPrisma.ecommerceMerchant.findMany.mockResolvedValue([{ id: 'em_1' }, { id: 'em_2' }])
-    ;(connectionService.refreshIfExpiring as jest.Mock)
-      .mockResolvedValueOnce('no_credentials')
-      .mockResolvedValueOnce('merchant_not_found')
+    ;(connectionService.refreshIfExpiring as jest.Mock).mockResolvedValueOnce('no_credentials').mockResolvedValueOnce('merchant_not_found')
 
     const result = await new MercadoPagoTokenRefreshJob().runNow()
     expect(result.noCredentials).toBe(2) // both bucket into "noCredentials"
@@ -62,11 +56,7 @@ describe('MercadoPagoTokenRefreshJob.runNow', () => {
 
   it('isolates per-merchant errors so one failure does not block the batch', async () => {
     mockPrisma.paymentProvider.findUnique.mockResolvedValue({ id: 'pp_1' })
-    mockPrisma.ecommerceMerchant.findMany.mockResolvedValue([
-      { id: 'em_1' },
-      { id: 'em_2' },
-      { id: 'em_3' },
-    ])
+    mockPrisma.ecommerceMerchant.findMany.mockResolvedValue([{ id: 'em_1' }, { id: 'em_2' }, { id: 'em_3' }])
     ;(connectionService.refreshIfExpiring as jest.Mock)
       .mockRejectedValueOnce(new Error('MP API 503'))
       .mockResolvedValueOnce('refreshed')

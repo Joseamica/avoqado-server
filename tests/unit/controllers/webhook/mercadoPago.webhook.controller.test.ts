@@ -17,7 +17,16 @@ function buildRes() {
 function buildSignedRequest({
   dataId = '9999',
   requestId = 'req-1',
-  payload = { id: 1, live_mode: false, type: 'payment', action: 'payment.updated', data: { id: dataId }, user_id: 12345678, api_version: 'v1', date_created: '2026-05-20T19:00:00Z' },
+  payload = {
+    id: 1,
+    live_mode: false,
+    type: 'payment',
+    action: 'payment.updated',
+    data: { id: dataId },
+    user_id: 12345678,
+    api_version: 'v1',
+    date_created: '2026-05-20T19:00:00Z',
+  },
   passDataIdInQuery = true,
   ts = String(Math.floor(Date.now() / 1000)),
 }: {
@@ -81,8 +90,7 @@ describe('handleMercadoPagoWebhook', () => {
         'x-request-id': 'r',
       },
       query: { 'data.id': '9999' },
-      get: (h: string) =>
-        ({ 'x-signature': 'ts=1700000000,v1=deadbeef00000000', 'x-request-id': 'r' }[h.toLowerCase()]),
+      get: (h: string) => ({ 'x-signature': 'ts=1700000000,v1=deadbeef00000000', 'x-request-id': 'r' })[h.toLowerCase()],
     }
     const res = buildRes()
     await handleMercadoPagoWebhook(req, res)

@@ -25,10 +25,6 @@ router.get('/oauth/connect', authenticateTokenMiddleware, initiate)
 // Defense-in-depth: the controller re-runs the tenant guard.
 router.get('/oauth/callback', callback)
 
-router.delete(
-  '/venues/:venueId/ecommerce-merchants/:merchantId/oauth',
-  authenticateTokenMiddleware,
-  disconnect,
-)
+router.delete('/venues/:venueId/ecommerce-merchants/:merchantId/oauth', authenticateTokenMiddleware, disconnect)
 
 export default router

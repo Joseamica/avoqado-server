@@ -36,8 +36,7 @@ process.env.GOOGLE_CALENDAR_WEBHOOK_BASE = process.env.GOOGLE_CALENDAR_WEBHOOK_B
 // import. Token key must be 32-byte hex (64 chars) to satisfy createTokenCipher.
 process.env.MP_CLIENT_ID = process.env.MP_CLIENT_ID || 'test-mp-client-id'
 process.env.MP_CLIENT_SECRET = process.env.MP_CLIENT_SECRET || 'test-mp-client-secret'
-process.env.MP_REDIRECT_URI =
-  process.env.MP_REDIRECT_URI || 'http://localhost:3000/api/v1/integrations/mercadopago/oauth/callback'
+process.env.MP_REDIRECT_URI = process.env.MP_REDIRECT_URI || 'http://localhost:3000/api/v1/integrations/mercadopago/oauth/callback'
 process.env.MP_WEBHOOK_SECRET = process.env.MP_WEBHOOK_SECRET || 'test-mp-webhook-secret'
 process.env.MP_PUBLIC_KEY_TEST = process.env.MP_PUBLIC_KEY_TEST || 'TEST-pk-test'
 process.env.MP_ACCESS_TOKEN_TEST = process.env.MP_ACCESS_TOKEN_TEST || 'TEST-at-test'

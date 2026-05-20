@@ -49,17 +49,13 @@ describe('MercadoPagoProvider.createOnboardingLink', () => {
         // with the actual authContext.userId before calling buildAuthUrl directly.
       }),
     )
-    expect(result.url).toBe(
-      'https://auth.mercadopago.com.mx/authorization?client_id=x&state=signed-state-jwt',
-    )
+    expect(result.url).toBe('https://auth.mercadopago.com.mx/authorization?client_id=x&state=signed-state-jwt')
     expect(result.expiresAt).toBeInstanceOf(Date)
   })
 
   it('throws when merchant.venueId is missing', async () => {
     const provider = new MercadoPagoProvider()
-    await expect(
-      provider.createOnboardingLink({ ...baseMerchant, venueId: undefined } as any),
-    ).rejects.toThrow(/venueId/i)
+    await expect(provider.createOnboardingLink({ ...baseMerchant, venueId: undefined } as any)).rejects.toThrow(/venueId/i)
   })
 })
 
@@ -211,9 +207,7 @@ describe('MercadoPagoProvider.getPaymentStatus', () => {
 
   it('throws when CheckoutSession is not found', async () => {
     mockPrisma.checkoutSession.findUnique.mockResolvedValue(null)
-    await expect(
-      new MercadoPagoProvider().getPaymentStatus(baseMerchant as any, 'cs_missing'),
-    ).rejects.toThrow(/no encontrada/i)
+    await expect(new MercadoPagoProvider().getPaymentStatus(baseMerchant as any, 'cs_missing')).rejects.toThrow(/no encontrada/i)
   })
 
   it('returns PENDING from DB when mpPaymentId is null (payment not initiated yet)', async () => {
@@ -387,20 +381,14 @@ describe('MercadoPagoProvider.refund', () => {
 
 describe('MercadoPagoProvider capability errors', () => {
   it('throws ProviderCapabilityError on tokenizeCard (MP Bricks tokenizes in iframe)', async () => {
-    await expect(
-      new MercadoPagoProvider().tokenizeCard(baseMerchant as any, {} as any),
-    ).rejects.toThrow(ProviderCapabilityError)
+    await expect(new MercadoPagoProvider().tokenizeCard(baseMerchant as any, {} as any)).rejects.toThrow(ProviderCapabilityError)
   })
 
   it('throws ProviderCapabilityError on authorizeCardPayment', async () => {
-    await expect(
-      new MercadoPagoProvider().authorizeCardPayment(baseMerchant as any, {} as any),
-    ).rejects.toThrow(ProviderCapabilityError)
+    await expect(new MercadoPagoProvider().authorizeCardPayment(baseMerchant as any, {} as any)).rejects.toThrow(ProviderCapabilityError)
   })
 
   it('throws ProviderCapabilityError on verifyWebhookSignature (use webhook controller directly)', async () => {
-    await expect(
-      new MercadoPagoProvider().verifyWebhookSignature('', '', 'platform'),
-    ).rejects.toThrow(ProviderCapabilityError)
+    await expect(new MercadoPagoProvider().verifyWebhookSignature('', '', 'platform')).rejects.toThrow(ProviderCapabilityError)
   })
 })
