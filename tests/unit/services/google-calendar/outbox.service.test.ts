@@ -25,16 +25,22 @@ describe('outbox.service', () => {
   // resolveReservationPushTargets
   // ============================================================
   describe('resolveReservationPushTargets', () => {
-    it('returns [] when ReservationSettings row is missing', async () => {
+    it('treats missing ReservationSettings row as schema defaults (pushEnabled=true)', async () => {
+      // GET /reservation-settings returns defaults without persisting them, so
+      // a venue can connect a calendar without ever materializing the settings
+      // row. Push must still work in that case — fall back to the schema
+      // default (pushEnabled=true, dualWrite=false) instead of silently no-op.
       ;(prismaMock.reservationSettings.findUnique as jest.Mock).mockResolvedValue(null)
+      ;(prismaMock.googleCalendarConnection.findFirst as jest.Mock)
+        .mockResolvedValueOnce(null) // staff lookup → none
+        .mockResolvedValueOnce({ id: 'conn-venue' }) // venue lookup
 
       const targets = await resolveReservationPushTargets(prismaMock, {
         venueId: 'venue-1',
         assignedStaffId: 'staff-1',
       })
 
-      expect(targets).toEqual([])
-      expect(prismaMock.googleCalendarConnection.findFirst).not.toHaveBeenCalled()
+      expect(targets).toEqual([{ id: 'conn-venue', scope: 'VENUE' }])
     })
 
     it('returns [] when googleCalendarPushEnabled=false', async () => {
