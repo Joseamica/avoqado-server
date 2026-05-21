@@ -149,9 +149,25 @@ export function buildEventBodyForReservation(args: EventBodyForReservationArgs):
   return {
     summary,
     description,
+    location: buildVenueLocation(reservation.venue),
     start: { dateTime: reservation.startsAt.toISOString() },
     end: { dateTime: reservation.endsAt.toISOString() },
     transparency: 'opaque',
+    // colorId '10' = Basil (green) in Google's palette. Matches Avoqado brand
+    // and visually separates Avoqado-pushed events from unrelated calendar
+    // entries when the owner glances at their week view.
+    colorId: '10',
+    // Override the calendar's default reminders so the venue owner gets a
+    // reliable heads-up regardless of personal Google Calendar settings.
+    // Two layers: a day-before email so they can plan the day, and a 30-min
+    // popup so they're not caught off guard right before the reservation.
+    reminders: {
+      useDefault: false,
+      overrides: [
+        { method: 'email', minutes: 1440 },
+        { method: 'popup', minutes: 30 },
+      ],
+    },
     extendedProperties: {
       private: {
         avoqadoOrigin: 'avoqado',
@@ -160,6 +176,27 @@ export function buildEventBodyForReservation(args: EventBodyForReservationArgs):
       },
     },
   }
+}
+
+/**
+ * Build a human-readable location string from venue address fields. Returns
+ * `undefined` when the venue has no usable address — Google Calendar's
+ * `location` field is optional and we'd rather omit it than emit something
+ * useless like "undefined, undefined, MX".
+ *
+ * Output format: "{name} — {address}, {city}, {state}, {country}"
+ * Falls back gracefully when intermediate fields are missing.
+ */
+function buildVenueLocation(venue: {
+  name: string
+  address: string | null
+  city: string | null
+  state: string | null
+  country: string | null
+}): string | undefined {
+  const parts = [venue.address, venue.city, venue.state, venue.country].filter((p): p is string => !!p && p.trim().length > 0)
+  if (parts.length === 0) return undefined
+  return `${venue.name} — ${parts.join(', ')}`
 }
 
 interface ReservationDescriptionArgs {
@@ -176,7 +213,12 @@ function buildReservationDescription(args: ReservationDescriptionArgs): string {
   // MINIMAL contract: zero PII. Only the dashboard URL — staff with dashboard
   // access can click through; anyone else seeing the calendar sees nothing.
   if (detailLevel === 'MINIMAL') {
-    return reservationUrl
+    const lines: string[] = []
+    lines.push('Para gestionar esta reservación, abre Avoqado:')
+    lines.push(reservationUrl)
+    lines.push('')
+    lines.push('— Powered by Avoqado')
+    return lines.join('\n')
   }
 
   const lines: string[] = []
@@ -201,7 +243,11 @@ function buildReservationDescription(args: ReservationDescriptionArgs): string {
   }
 
   lines.push('')
+  lines.push('¿Necesitas gestionar esta reservación?')
+  lines.push('Ver detalles, editar o cancelar en Avoqado:')
   lines.push(reservationUrl)
+  lines.push('')
+  lines.push('— Powered by Avoqado')
 
   return lines.join('\n')
 }
@@ -240,9 +286,18 @@ export function buildEventBodyForClassSession(args: EventBodyForClassSessionArgs
   return {
     summary,
     description,
+    location: buildVenueLocation(classSession.venue),
     start: { dateTime: classSession.startsAt.toISOString() },
     end: { dateTime: classSession.endsAt.toISOString() },
     transparency: 'opaque',
+    colorId: '10',
+    reminders: {
+      useDefault: false,
+      overrides: [
+        { method: 'email', minutes: 1440 },
+        { method: 'popup', minutes: 30 },
+      ],
+    },
     extendedProperties: {
       private: {
         avoqadoOrigin: 'avoqado',
