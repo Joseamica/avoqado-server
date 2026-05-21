@@ -3496,29 +3496,29 @@ router.use('/venues/:venueId/ecommerce-merchants', authenticateTokenMiddleware, 
 // Payment Link Management routes (ADMIN+)
 router.use('/venues/:venueId/payment-links', authenticateTokenMiddleware, checkPermission('payment-link:read'), paymentLinkRoutes)
 
-// Venue Crypto Config routes (ADMIN+) - Per-venue B4Bit device management
+// Venue Crypto Config routes (OWNER+) - Per-venue B4Bit device management
 router.post(
   '/venues/:venueId/crypto/enable',
   authenticateTokenMiddleware,
-  checkPermission('system:manage'),
+  checkPermission('venue-crypto:manage'),
   cryptoConfigController.enableCrypto as any,
 )
 router.put(
   '/venues/:venueId/crypto/setup',
   authenticateTokenMiddleware,
-  checkPermission('system:manage'),
+  checkPermission('venue-crypto:manage'),
   cryptoConfigController.setupCrypto as any,
 )
 router.get(
   '/venues/:venueId/crypto/config',
   authenticateTokenMiddleware,
-  checkPermission('system:manage'),
+  checkPermission('venue-crypto:manage'),
   cryptoConfigController.getConfig as any,
 )
 router.put(
   '/venues/:venueId/crypto/disable',
   authenticateTokenMiddleware,
-  checkPermission('system:manage'),
+  checkPermission('venue-crypto:manage'),
   cryptoConfigController.disableCryptoHandler as any,
 )
 // Inventory Management routes (ADMIN and MANAGER)

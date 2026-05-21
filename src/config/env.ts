@@ -98,6 +98,11 @@ const envSchema = z.object({
   MERCADO_PAGO_TOKEN_KEY: z.string().length(64, 'MERCADO_PAGO_TOKEN_KEY debe ser hex de 32 bytes (64 chars)').optional(),
   MP_API_BASE_URL: z.string().url().default('https://api.mercadopago.com'),
   MP_AUTH_BASE_URL: z.string().url().default('https://auth.mercadopago.com.mx'),
+  // When 'true', append ?test_token=true to /oauth/token so MP emits sandbox
+  // tokens (TEST-prefix). Required for any e2e validation with MP test_users
+  // in MLM; otherwise marketplace OAuth silently emits APP_USR- tokens and
+  // payments fail with code 2034. Default unset / false in prod.
+  MP_SANDBOX_MODE: z.enum(['true', 'false']).optional(),
 
   // Google OAuth
   GOOGLE_CLIENT_ID: z.string().optional(),

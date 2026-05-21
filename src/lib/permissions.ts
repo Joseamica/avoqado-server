@@ -818,7 +818,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'calendar:connect_self',
     'calendar:disconnect_staff',
     'calendar:view_status',
-    // NO: venue-crypto:manage (SUPERADMIN only - via *:*)
+    // B4Bit Crypto Payments — venue owners need to configure crypto
+    // settings for their own venues. SUPERADMIN still has full access via *:*.
+    'venue-crypto:manage',
   ],
 
   /**

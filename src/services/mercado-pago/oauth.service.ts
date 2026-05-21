@@ -90,11 +90,19 @@ export async function refreshAccessToken(refreshToken: string): Promise<MercadoP
 /**
  * Internal: POST to /oauth/token with the given body. Surfaces MP's
  * `error_description` in the thrown Error message so callers can log it.
+ *
+ * `MP_SANDBOX_MODE=true` appends `?test_token=true`, which forces MP to mint
+ * sandbox-flavored tokens (prefix `TEST-`, accompanied by a sandbox public_key)
+ * even when a test_user authorizes a production-grade app. Without this flag
+ * MP MLM emits `APP_USR-` tokens to test_users, which then collide with test
+ * payers/cards and surface as error 2034 "Invalid users involved".
  */
 async function postOAuthToken(body: Record<string, string>): Promise<MercadoPagoTokenResponse> {
   const apiBase = process.env.MP_API_BASE_URL || 'https://api.mercadopago.com'
+  const sandboxMode = process.env.MP_SANDBOX_MODE === 'true'
+  const url = sandboxMode ? `${apiBase}/oauth/token?test_token=true` : `${apiBase}/oauth/token`
   try {
-    const { data } = await axios.post<MercadoPagoTokenResponse>(`${apiBase}/oauth/token`, body, {
+    const { data } = await axios.post<MercadoPagoTokenResponse>(url, body, {
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       timeout: 15000,
     })
