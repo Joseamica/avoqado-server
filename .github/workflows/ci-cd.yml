@@ -37,6 +37,10 @@ on:
         options:
           - production
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 permissions:
   contents: write
   actions: read
@@ -78,9 +82,6 @@ jobs:
       - name: 🏗️ Build application
         run: npm run build
 
-      - name: 🧪 Run unit tests
-        run: npm run test:unit
-
       - name: 🏪 Run integration tests
         continue-on-error: true
         run: |
@@ -118,6 +119,46 @@ jobs:
           name: prisma-schema-${{ github.sha }}
           path: prisma/
           retention-days: 7
+
+  # 🧪 Unit tests are sharded so every test still runs, but wall-clock time drops.
+  unit-tests:
+    name: 🧪 Unit Tests (${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 🗄️ Generate Prisma Client
+        run: npx prisma generate
+
+      - name: 💾 Restore Jest cache
+        uses: actions/cache@v4
+        with:
+          path: node_modules/.cache/jest
+          key: jest-${{ runner.os }}-node20-${{ hashFiles('package-lock.json', 'jest.config.js', 'tsconfig.json', 'tsconfig.build.json') }}
+          restore-keys: |
+            jest-${{ runner.os }}-node20-
+
+      - name: 🧪 Run unit tests shard ${{ matrix.shard }}/4
+        run: |
+          START=$(date +%s)
+          npm run test:unit:ci -- --shard=${{ matrix.shard }}/4
+          END=$(date +%s)
+          echo "Unit test shard ${{ matrix.shard }}/4 duration: $((END - START)) seconds" >> "$GITHUB_STEP_SUMMARY"
 
   # NOTE: Staging deploy disabled — Render staging service is suspended.
   # Demo environment (Fly.io) is still active via fly-deploy.yml.
@@ -183,7 +224,7 @@ jobs:
   # 🏭 Deploy to Production Environment
   deploy-production:
     name: 🏭 Deploy to Production
-    needs: test-and-build
+    needs: [test-and-build, unit-tests]
     runs-on: ubuntu-latest
     if: |
       (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
@@ -250,7 +291,7 @@ jobs:
     name: 👀 PR Preview & Quality Report
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
-    needs: test-and-build
+    needs: [test-and-build, unit-tests]
 
     steps:
       - name: 💬 Enhanced PR Comment
