@@ -84,8 +84,14 @@ async function resolvePushTargets(
     },
   })
 
-  // No settings row OR push disabled → nothing to push.
-  if (!settings || settings.googleCalendarPushEnabled === false) {
+  // Schema-default behavior when the row doesn't exist: push enabled, no
+  // dual-write. Previously a missing row silently disabled push, which broke
+  // venues that connected a calendar without ever editing reservation settings
+  // (the settings page returns defaults without persisting them).
+  const pushEnabled = settings?.googleCalendarPushEnabled ?? true
+  const dualWrite = settings?.googleCalendarDualWrite ?? false
+
+  if (!pushEnabled) {
     return []
   }
 
@@ -113,7 +119,7 @@ async function resolvePushTargets(
 
   const targets: PushTarget[] = []
 
-  if (settings.googleCalendarDualWrite === true) {
+  if (dualWrite === true) {
     // Dual-write: emit to both when both exist. Order is deterministic
     // (staff first, venue second) so callers can assert on it in tests.
     if (staffConn) targets.push({ id: staffConn.id, scope: 'STAFF_PERSONAL' })

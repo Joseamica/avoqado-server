@@ -83,6 +83,19 @@ export async function commitConnection(args: CommitConnectionArgs) {
   const connection = await prisma.$transaction(async tx => {
     await consumeSession(tx, session.id)
 
+    // Ensure ReservationSettings exists for venue-scoped connections so the
+    // push gate (resolvePushTargets) finds a row with the schema defaults
+    // (pushEnabled=true). Without this, GET /reservation-settings returns
+    // defaults without persisting them, and push silently no-ops because the
+    // gate treats a missing row as "disabled".
+    if (session.intent === 'venue_master' && session.venueId) {
+      await tx.reservationSettings.upsert({
+        where: { venueId: session.venueId },
+        create: { venueId: session.venueId },
+        update: {},
+      })
+    }
+
     const conn = await tx.googleCalendarConnection.create({
       data: {
         scope: session.intent === 'venue_master' ? 'VENUE' : 'STAFF_PERSONAL',
