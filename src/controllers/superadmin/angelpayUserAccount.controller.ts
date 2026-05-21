@@ -21,6 +21,7 @@
  */
 
 import { NextFunction, Request, Response } from 'express'
+import { TerminalStatus } from '@prisma/client'
 
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
@@ -478,7 +479,14 @@ export async function dispatchFetchAngelPayMerchantsForVenue(req: Request, res: 
       // right merchant slot — observed 2026-05-21 on venue Amaena where the
       // dispatcher kept sending to the productive terminal even though the
       // debug SPRD was online + had the AngelPay placeholder assigned.
-      let preferredTerminal: { id: string; serialNumber: string | null; venueId: string; brand: string; status: string } | null = null
+      type PickedTerminal = {
+        id: string
+        serialNumber: string | null
+        venueId: string
+        brand: string | null
+        status: TerminalStatus
+      }
+      let preferredTerminal: PickedTerminal | null = null
       if (angelpayUserAccountId) {
         const accountMerchants = await prisma.merchantAccount.findMany({
           where: { angelpayUserAccountId, active: true },

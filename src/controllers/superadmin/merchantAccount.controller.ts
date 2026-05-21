@@ -2086,3 +2086,51 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
     next(error)
   }
 }
+
+/**
+ * POST /api/v1/superadmin/merchant-accounts/:id/blumon/refetch
+ *
+ * Re-fetch OAuth/RSA/DUKPT credentials from Blumon for an existing MerchantAccount.
+ * Preserves the same MerchantAccount.id (and all linked Payments, SettlementConfigs,
+ * VenuePaymentConfig slots). Only rotates credentials + Blumon-internal fields.
+ *
+ * Body (all optional — if omitted, uses values from the existing account/providerConfig):
+ *   - serialNumber?: string
+ *   - brand?: string  (default from providerConfig.brand, e.g. "PAX")
+ *   - model?: string  (default from providerConfig.model, e.g. "A910S")
+ *   - environment?: "SANDBOX" | "PRODUCTION"
+ *
+ * Failure behavior: if Blumon API call fails, NO DB write happens — the TPV
+ * keeps cobrando with the existing credentials. Zero-downtime by construction.
+ */
+export async function refetchBlumonMerchantCredentials(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { id } = req.params
+    const { serialNumber, brand, model, environment } = req.body || {}
+    const operatorUserId = (req as any).authContext?.userId || (req as any).user?.uid
+
+    const result = await merchantAccountService.refetchBlumonCredentials(id, {
+      operatorUserId,
+      serialNumber,
+      brand,
+      model,
+      environment,
+    })
+
+    logger.info('[Blumon Refetch] API success', {
+      merchantAccountId: id,
+      migrated: result.migrated,
+      operatorUserId,
+    })
+
+    res.json({
+      success: true,
+      data: result,
+      message: result.migrated
+        ? `Credenciales rotadas. ⚠️ Migración detectada: posId cambió de ${result.previousPosId ?? 'N/A'} → ${result.newPosId}. ${result.affectedTerminalsNotified} terminal(es) notificada(s).`
+        : `Credenciales rotadas exitosamente. ${result.affectedTerminalsNotified} terminal(es) notificada(s).`,
+    })
+  } catch (error) {
+    next(error)
+  }
+}

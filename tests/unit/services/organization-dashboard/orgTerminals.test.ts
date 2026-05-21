@@ -63,6 +63,12 @@ describe('OrganizationDashboardService - getOrgTerminals', () => {
     },
   ]
 
+  // versionRows query (distinct non-null versions across the fleet) — used to
+  // compute summary.latestVersion. Mocked by default; overridden per test.
+  beforeEach(() => {
+    prismaMock.terminal.findMany.mockResolvedValue([{ version: '2.1.0' }, { version: '2.0.0' }])
+  })
+
   it('should return terminals with pagination and summary', async () => {
     prismaMock.venue.findMany.mockResolvedValue(venues)
 
@@ -176,5 +182,44 @@ describe('OrganizationDashboardService - getOrgTerminals', () => {
     await organizationDashboardService.getOrgTerminals(orgId, { search: 'SN-001' })
 
     expect(prismaMock.$transaction).toHaveBeenCalled()
+  })
+
+  it('should compute summary.latestVersion as the highest version in the fleet', async () => {
+    prismaMock.venue.findMany.mockResolvedValue(venues)
+    // Out of order + mixed segment widths to exercise numeric comparison.
+    prismaMock.terminal.findMany.mockResolvedValue([{ version: '1.14.0' }, { version: '2.0.0' }, { version: '1.9.0' }])
+    prismaMock.$transaction
+      .mockResolvedValueOnce([terminals, 3])
+      .mockResolvedValueOnce([[{ status: 'ACTIVE', type: 'TPV_ANDROID', _count: 3 }], 1])
+
+    const result = await organizationDashboardService.getOrgTerminals(orgId)
+
+    expect(result.summary.latestVersion).toBe('2.0.0')
+  })
+
+  it('should return null latestVersion when no terminal reports a version', async () => {
+    prismaMock.venue.findMany.mockResolvedValue(venues)
+    prismaMock.terminal.findMany.mockResolvedValue([])
+    prismaMock.$transaction
+      .mockResolvedValueOnce([[terminals[2]], 1])
+      .mockResolvedValueOnce([[{ status: 'INACTIVE', type: 'PRINTER_RECEIPT', _count: 1 }], 0])
+
+    const result = await organizationDashboardService.getOrgTerminals(orgId)
+
+    expect(result.summary.latestVersion).toBeNull()
+  })
+
+  it('should accept versionStatus filter without error', async () => {
+    prismaMock.venue.findMany.mockResolvedValue(venues)
+    prismaMock.$transaction
+      .mockResolvedValueOnce([[terminals[1]], 1])
+      .mockResolvedValueOnce([[{ status: 'ACTIVE', type: 'TPV_ANDROID', _count: 2 }], 1])
+
+    const result = await organizationDashboardService.getOrgTerminals(orgId, {
+      versionStatuses: ['outdated'],
+    })
+
+    expect(prismaMock.$transaction).toHaveBeenCalled()
+    expect(result.summary.latestVersion).toBe('2.1.0')
   })
 })

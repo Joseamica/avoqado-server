@@ -5,6 +5,7 @@ import crypto from 'crypto'
 import socketManager from '../../communication/sockets'
 import { lookupRatesByBusinessName, lookupRatesByVenueType, type MCCLookupResult } from '../pricing/blumon-mcc-lookup.service'
 import { assertMerchantTerminalCompatible, assertVenueHasCompatibleTerminal } from '../../lib/providerDeviceCompatibility'
+import { createBlumonTpvService } from '../tpv/blumon-tpv.service'
 
 /**
  * MerchantAccount Service
@@ -1673,4 +1674,209 @@ export async function reserveAngelPaySlot(input: {
       externalMerchantId: placeholderExternalId,
     }
   })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BLUMON REFETCH (rotate credentials without losing history)
+// ═══════════════════════════════════════════════════════════════════════════
+
+interface RefetchBlumonResult {
+  id: string
+  migrated: boolean
+  previousPosId: string | null
+  newPosId: string
+  previousSerial: string | null
+  newSerial: string
+  blumonEnvironment: string | null
+  dukptKeysAvailable: boolean
+  affectedTerminalsNotified: number
+  refetchedAt: string
+}
+
+/**
+ * Refetch OAuth/RSA/DUKPT credentials from Blumon for an EXISTING MerchantAccount.
+ *
+ * Use case: a serial was reassigned in Blumon's portal (e.g., Kepler → Moneygiver),
+ * or the local credentials are stale/PENDING_AFFILIATION. Reaching out to Blumon
+ * pulls fresh credentials issued for whichever merchant currently owns the serial.
+ *
+ * Safety guarantees:
+ *  - Same MerchantAccount.id is preserved → no FK breaks → Payment/Settlement
+ *    history stays attached.
+ *  - Blumon API call happens BEFORE any DB write. If Blumon fails, nothing is
+ *    persisted and the TPV keeps cobrando with the existing credentials.
+ *  - DB write is atomic (single update); credentialsEncrypted is replaced
+ *    wholesale (no partial state).
+ *  - Layer 1 push (notifyAffectedTerminals urgent=true) tells online terminals
+ *    to refresh immediately. If offline, Layer 2 (heartbeat configVersion) and
+ *    Layer 3 (backend re-validation on payment) cover the recovery.
+ *
+ * NOT touched: externalMerchantId, displayName, blumonSerialNumber,
+ * blumonEnvironment, aggregatorId, active, displayOrder, provider links.
+ * Operators can edit those via the normal update endpoint if a true migration
+ * across commercial entities also warrants relabeling.
+ */
+export async function refetchBlumonCredentials(
+  id: string,
+  options: { operatorUserId?: string; serialNumber?: string; brand?: string; model?: string; environment?: 'SANDBOX' | 'PRODUCTION' } = {},
+): Promise<RefetchBlumonResult> {
+  const existing = await prisma.merchantAccount.findUnique({
+    where: { id },
+    include: { provider: { select: { code: true } } },
+  })
+
+  if (!existing) {
+    throw new NotFoundError(`Merchant account ${id} not found`)
+  }
+
+  if (existing.provider.code !== 'BLUMON') {
+    throw new BadRequestError(`Re-fetch is only available for Blumon merchants (this is ${existing.provider.code})`)
+  }
+
+  const providerConfig: any = existing.providerConfig ?? {}
+
+  // Resolve fetch inputs from caller, providerConfig snapshot, or DB columns.
+  const serialNumber = options.serialNumber || existing.blumonSerialNumber || providerConfig.serialNumber
+  const brand = options.brand || providerConfig.brand
+  const model = options.model || providerConfig.model
+  const environment = (options.environment || existing.blumonEnvironment || providerConfig.environment || 'PRODUCTION') as
+    | 'SANDBOX'
+    | 'PRODUCTION'
+
+  if (!serialNumber) {
+    throw new BadRequestError('Cannot refetch: blumonSerialNumber is missing on the merchant account and was not supplied')
+  }
+  if (!brand) {
+    throw new BadRequestError('Cannot refetch: providerConfig.brand is missing (e.g. "PAX") and was not supplied')
+  }
+  if (!model) {
+    throw new BadRequestError('Cannot refetch: providerConfig.model is missing (e.g. "A910S") and was not supplied')
+  }
+  if (environment !== 'SANDBOX' && environment !== 'PRODUCTION') {
+    throw new BadRequestError(`Invalid environment "${environment}" — expected SANDBOX or PRODUCTION`)
+  }
+
+  logger.info('[Blumon Refetch] Starting credential refetch', {
+    merchantAccountId: id,
+    serialNumber,
+    brand,
+    model,
+    environment,
+    operatorUserId: options.operatorUserId,
+  })
+
+  // STEP 1: Pull fresh credentials from Blumon. If this throws (network,
+  // serial-not-affiliated, auth error), we exit BEFORE any DB write — TPV keeps
+  // cobrando with the existing credentials, zero impact.
+  const blumonTpvService = createBlumonTpvService(environment)
+  const fresh = await blumonTpvService.fetchMerchantCredentials(serialNumber, brand, model)
+
+  const previousPosId = existing.blumonPosId
+  const previousSerial = existing.blumonSerialNumber
+  const migrated = previousPosId !== fresh.posId
+
+  // STEP 2: Append audit entry to providerConfig.refetchHistory (additive — keeps any
+  // prior history intact for forensics).
+  const refetchedAt = new Date().toISOString()
+  const refetchHistory = Array.isArray(providerConfig.refetchHistory) ? providerConfig.refetchHistory : []
+  const newRefetchHistory = [
+    ...refetchHistory,
+    {
+      at: refetchedAt,
+      operatorUserId: options.operatorUserId ?? null,
+      previousPosId,
+      newPosId: fresh.posId,
+      previousSerial,
+      newSerial: fresh.serialNumber,
+      migrated,
+      dukptKeysAvailable: fresh.dukptKeysAvailable,
+    },
+  ]
+
+  // STEP 3: Atomic write. We rewrite only credentials + Blumon-internal fields.
+  // Identity fields (externalMerchantId, displayName, active, aggregatorId) are
+  // deliberately untouched — those remain operator-controlled.
+  const newCredentials = {
+    oauthAccessToken: fresh.credentials.oauthAccessToken,
+    oauthRefreshToken: fresh.credentials.oauthRefreshToken,
+    oauthExpiresAt: fresh.credentials.oauthExpiresAt,
+    rsaId: fresh.credentials.rsaId,
+    rsaKey: fresh.credentials.rsaKey,
+    ...(fresh.dukptKeysAvailable && {
+      dukptKsn: fresh.credentials.dukptKsn,
+      dukptKey: fresh.credentials.dukptKey,
+      dukptKeyCrc32: fresh.credentials.dukptKeyCrc32,
+      dukptKeyCheckValue: fresh.credentials.dukptKeyCheckValue,
+    }),
+  }
+
+  const updated = await prisma.merchantAccount.update({
+    where: { id },
+    data: {
+      credentialsEncrypted: encryptCredentials(newCredentials),
+      blumonPosId: fresh.posId,
+      // blumonSerialNumber sólo cambia si Blumon devolvió otro (raro pero posible).
+      blumonSerialNumber: fresh.serialNumber,
+      blumonMerchantId: `blumon_${fresh.serialNumber}`,
+      providerConfig: {
+        ...providerConfig,
+        brand,
+        model,
+        environment,
+        serialNumber: fresh.serialNumber,
+        status: 'ACTIVE',
+        autoFetched: true,
+        autoFetchedAt: refetchedAt,
+        dukptKeysAvailable: fresh.dukptKeysAvailable,
+        refetchHistory: newRefetchHistory,
+      },
+    },
+    select: {
+      id: true,
+      displayName: true,
+      alias: true,
+      externalMerchantId: true,
+      blumonEnvironment: true,
+    },
+  })
+
+  logger.info('[Blumon Refetch] Credentials rotated successfully', {
+    merchantAccountId: id,
+    previousPosId,
+    newPosId: fresh.posId,
+    migrated,
+    dukptKeysAvailable: fresh.dukptKeysAvailable,
+    operatorUserId: options.operatorUserId,
+  })
+
+  // STEP 4: Find affected terminals so we can both notify them AND return a count
+  // to the operator (useful for the confirmation UI).
+  const affectedTerminals = await prisma.terminal.findMany({
+    where: { assignedMerchantIds: { has: id } },
+    select: { id: true },
+  })
+
+  // Layer 1 PUSH — urgent=true because old credentials are now invalid and the
+  // TPV must refresh before its next cobro. If the terminal is offline the
+  // event is lost but Layer 2 (heartbeat configVersion) + Layer 3 (backend
+  // validation on payment) recover it transparently.
+  notifyAffectedTerminals(id, updated.displayName || updated.alias || updated.externalMerchantId, 'MERCHANT_UPDATED', true).catch(err => {
+    logger.error('[Blumon Refetch] Failed to notify terminals (non-blocking)', {
+      merchantAccountId: id,
+      error: err instanceof Error ? err.message : 'Unknown error',
+    })
+  })
+
+  return {
+    id,
+    migrated,
+    previousPosId,
+    newPosId: fresh.posId,
+    previousSerial,
+    newSerial: fresh.serialNumber,
+    blumonEnvironment: updated.blumonEnvironment,
+    dukptKeysAvailable: fresh.dukptKeysAvailable,
+    affectedTerminalsNotified: affectedTerminals.length,
+    refetchedAt,
+  }
 }

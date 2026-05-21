@@ -59,6 +59,12 @@ router.post('/blumon/batch-auto-fetch', merchantAccountController.batchAutoFetch
 // Complete wizard setup: auto-fetch → assign terminals → cost structure → payment config → pricing → settlement
 router.post('/blumon/full-setup', merchantAccountController.fullSetupBlumonMerchant)
 
+// POST /api/v1/superadmin/merchant-accounts/:id/blumon/refetch
+// Rotate OAuth/RSA/DUKPT credentials from Blumon for an EXISTING MerchantAccount.
+// Preserves account id + all linked Payment/Settlement history. If Blumon API
+// fails, no DB write happens — TPV keeps cobrando with existing credentials.
+router.post('/:id/blumon/refetch', merchantAccountController.refetchBlumonMerchantCredentials)
+
 // GET /api/v1/superadmin/merchant-accounts/payment-setup/summary
 // Get full payment setup summary for a venue or organization
 // Query: ?targetType=venue&targetId=xxx OR ?targetType=organization&targetId=xxx
