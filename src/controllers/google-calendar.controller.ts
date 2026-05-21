@@ -204,7 +204,19 @@ export async function listCalendars(req: Request, res: Response, next: NextFunct
         primary: c.primary ?? false,
       }))
 
-    res.status(200).json({ calendars, intent: session.intent })
+    // Resolve venue slug so the picker can build a slug-scoped return path.
+    // Without this the dashboard falls back to activeVenue which may not be
+    // hydrated yet after the OAuth redirect, producing /venues/... (no slug).
+    let venueSlug: string | null = null
+    if (session.venueId) {
+      const venue = await prisma.venue.findUnique({
+        where: { id: session.venueId },
+        select: { slug: true },
+      })
+      venueSlug = venue?.slug ?? null
+    }
+
+    res.status(200).json({ calendars, intent: session.intent, venueSlug })
   } catch (error) {
     next(error)
   }
