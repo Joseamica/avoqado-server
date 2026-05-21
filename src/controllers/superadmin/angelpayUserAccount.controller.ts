@@ -465,11 +465,53 @@ export async function dispatchFetchAngelPayMerchantsForVenue(req: Request, res: 
         throw new BadRequestError(`Terminal ${terminalId} is not a NEXGO terminal (brand=${terminal.brand})`)
       }
     } else {
-      terminal = await prisma.terminal.findFirst({
-        where: { venueId, brand: 'NEXGO', status: 'ACTIVE' },
-        orderBy: { createdAt: 'asc' },
-        select: { id: true, serialNumber: true, venueId: true, brand: true, status: true },
-      })
+      // Smart terminal picker (2026-05-21): pick the NEXGO terminal MOST
+      // LIKELY to succeed at AngelPay auth, in this order of preference:
+      //   1. Terminal whose `assignedMerchantIds` contains a MerchantAccount
+      //      linked to the requested `angelpayUserAccountId` — that's the
+      //      explicit wiring intent set by the operator from dashboard.
+      //   2. Otherwise: most recently heartbeating terminal (`lastSeen` desc).
+      //   3. Tie-breaker: oldest `createdAt` (preserves legacy behavior when
+      //      no heartbeats are available).
+      // Without this, the previous `orderBy createdAt asc` always picked the
+      // first-registered NEXGO regardless of whether it was online or had the
+      // right merchant slot — observed 2026-05-21 on venue Amaena where the
+      // dispatcher kept sending to the productive terminal even though the
+      // debug SPRD was online + had the AngelPay placeholder assigned.
+      let preferredTerminal: { id: string; serialNumber: string | null; venueId: string; brand: string; status: string } | null = null
+      if (angelpayUserAccountId) {
+        const accountMerchants = await prisma.merchantAccount.findMany({
+          where: { angelpayUserAccountId, active: true },
+          select: { id: true },
+        })
+        if (accountMerchants.length > 0) {
+          const accountMerchantIds = accountMerchants.map(m => m.id)
+          // Postgres array overlap operator: find terminals whose
+          // assignedMerchantIds contains ANY of the account's merchants.
+          const candidates = await prisma.terminal.findMany({
+            where: {
+              venueId,
+              brand: 'NEXGO',
+              status: 'ACTIVE',
+              assignedMerchantIds: { hasSome: accountMerchantIds },
+            },
+            orderBy: [{ lastHeartbeat: 'desc' }, { createdAt: 'asc' }],
+            select: { id: true, serialNumber: true, venueId: true, brand: true, status: true },
+          })
+          if (candidates.length > 0) {
+            preferredTerminal = candidates[0]
+          }
+        }
+      }
+      if (!preferredTerminal) {
+        // Fallback: any ACTIVE NEXGO, prefer most recent heartbeat.
+        preferredTerminal = await prisma.terminal.findFirst({
+          where: { venueId, brand: 'NEXGO', status: 'ACTIVE' },
+          orderBy: [{ lastHeartbeat: 'desc' }, { createdAt: 'asc' }],
+          select: { id: true, serialNumber: true, venueId: true, brand: true, status: true },
+        })
+      }
+      terminal = preferredTerminal
       if (!terminal) {
         throw new NotFoundError(
           `No ACTIVE NEXGO terminal found in venue ${venueId}. ` +
