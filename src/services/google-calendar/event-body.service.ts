@@ -210,15 +210,13 @@ interface ReservationDescriptionArgs {
 function buildReservationDescription(args: ReservationDescriptionArgs): string {
   const { reservation, detailLevel, reservationUrl, guestName, serviceName } = args
 
-  // MINIMAL contract: zero PII. Only the dashboard URL — staff with dashboard
-  // access can click through; anyone else seeing the calendar sees nothing.
+  // MINIMAL contract: zero PII, zero branding. Only the dashboard URL — staff
+  // with dashboard access can click through; anyone else seeing the calendar
+  // (e.g., on a shared-with-public calendar) sees nothing identifiable.
+  // The Calendly-style "manage in Avoqado" prompt belongs to SERVICE/FULL,
+  // where some surface text is already present.
   if (detailLevel === 'MINIMAL') {
-    const lines: string[] = []
-    lines.push('Para gestionar esta reservación, abre Avoqado:')
-    lines.push(reservationUrl)
-    lines.push('')
-    lines.push('— Powered by Avoqado')
-    return lines.join('\n')
+    return reservationUrl
   }
 
   const lines: string[] = []
