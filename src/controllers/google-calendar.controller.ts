@@ -112,8 +112,19 @@ export async function oauthInit(req: Request, res: Response, next: NextFunction)
  */
 export async function oauthCallback(req: Request, res: Response, next: NextFunction) {
   try {
+    const errorParam = String(req.query.error ?? '')
     const code = String(req.query.code ?? '')
     const state = String(req.query.state ?? '')
+
+    // User clicked Cancel on Google's consent screen (or some other OAuth
+    // rejection). Google sends `?error=access_denied&state=...` with no `code`.
+    // Redirect back to the dashboard with a friendly error param instead of
+    // surfacing raw JSON; the picker page renders a cancellation message.
+    if (errorParam) {
+      logger.info('gcal oauth callback: user denied consent', { error: errorParam })
+      return res.redirect(303, `${DASHBOARD_BASE}/google-calendar/picker?error=${encodeURIComponent(errorParam)}`)
+    }
+
     if (!code || !state) {
       throw new BadRequestError('Faltan los parámetros code o state')
     }
