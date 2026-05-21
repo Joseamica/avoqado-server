@@ -188,6 +188,23 @@ export interface VolumeVsTargetData {
   date: string // ISO date string
 }
 
+/**
+ * Compare two version strings numerically (e.g. "1.14.0" > "1.9.0").
+ * Returns >0 if a is newer, <0 if older, 0 if equal. Tolerant of non-semver
+ * formats — splits on . - + and treats missing/NaN segments as 0.
+ */
+function compareVersions(a: string, b: string): number {
+  const pa = a.split(/[.\-+]/)
+  const pb = b.split(/[.\-+]/)
+  const len = Math.max(pa.length, pb.length)
+  for (let i = 0; i < len; i++) {
+    const x = parseInt(pa[i] ?? '0', 10) || 0
+    const y = parseInt(pb[i] ?? '0', 10) || 0
+    if (x !== y) return x - y
+  }
+  return 0
+}
+
 class OrganizationDashboardService {
   /**
    * Get vision global summary for an organization (aggregate KPIs)
@@ -3452,6 +3469,7 @@ class OrganizationDashboardService {
       venueIds?: string[]
       statuses?: string[]
       types?: string[]
+      versionStatuses?: string[]
       search?: string
       sortBy?: string
       sortOrder?: 'asc' | 'desc'
@@ -3472,9 +3490,21 @@ class OrganizationDashboardService {
       return {
         terminals: [],
         pagination: { page, pageSize, total: 0, totalPages: 0 },
-        summary: { total: 0, online: 0, offline: 0, byStatus: {}, byType: {} },
+        summary: { total: 0, online: 0, offline: 0, byStatus: {}, byType: {}, latestVersion: null as string | null },
       }
     }
+
+    // Latest version = highest version string present across the org's terminal
+    // fleet. Self-contained reference (no config): a terminal is "outdated" once
+    // any sibling reports a newer version.
+    const versionRows = await prisma.terminal.findMany({
+      where: { venueId: { in: venueIds }, version: { not: null } },
+      select: { version: true },
+      distinct: ['version'],
+    })
+    const latestVersion = versionRows
+      .map(r => r.version as string)
+      .reduce<string | null>((max, v) => (max == null || compareVersions(v, max) > 0 ? v : max), null)
 
     // Build where clause. Venue filter is intersected with org venue scope.
     const requestedVenueIds = (filters?.venueIds ?? []).filter(id => venueIds.includes(id))
@@ -3488,6 +3518,25 @@ class OrganizationDashboardService {
 
     if (filters?.types && filters.types.length > 0) {
       where.type = { in: filters.types as any }
+    }
+
+    // Version status filter: upToDate | outdated | unknown. Combined via AND so
+    // it composes with the search OR group without colliding.
+    const versionStatuses = (filters?.versionStatuses ?? []).filter(s => ['upToDate', 'outdated', 'unknown'].includes(s))
+    if (versionStatuses.length > 0 && versionStatuses.length < 3) {
+      const versionOr: Prisma.TerminalWhereInput[] = []
+      for (const status of versionStatuses) {
+        if (status === 'unknown') {
+          versionOr.push({ version: null })
+        } else if (status === 'upToDate' && latestVersion) {
+          versionOr.push({ version: latestVersion })
+        } else if (status === 'outdated' && latestVersion) {
+          versionOr.push({ AND: [{ version: { not: null } }, { version: { not: latestVersion } }] })
+        }
+      }
+      // If only upToDate/outdated were requested but no fleet version exists,
+      // versionOr is empty → return nothing (matches "no terminal qualifies").
+      where.AND = [{ OR: versionOr.length > 0 ? versionOr : [{ id: '__none__' }] }]
     }
 
     if (filters?.search) {
@@ -3593,6 +3642,7 @@ class OrganizationDashboardService {
         offline: totalAll - onlineCount,
         byStatus,
         byType,
+        latestVersion,
       },
     }
   }

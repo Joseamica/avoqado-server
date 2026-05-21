@@ -605,6 +605,7 @@ router.delete(
  *   venueId    comma-separated list of venue ids
  *   status     comma-separated list of TerminalStatus values
  *   type       comma-separated list of TerminalType values
+ *   versionStatus  comma-separated list of: upToDate | outdated | unknown
  *   search     case-insensitive contains on name, serial, brand, model, venue.name
  *   sortBy     one of: name | lastHeartbeat | status | type | brand | createdAt | latestHealthScore | venue.name
  *   sortOrder  asc | desc
@@ -623,7 +624,7 @@ function parseListParam(value: unknown): string[] | undefined {
 router.get('/:orgId/terminals', authenticateTokenMiddleware, checkOrgAccess, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { orgId } = req.params
-    const { page, pageSize, venueId, status, type, search, sortBy, sortOrder } = req.query
+    const { page, pageSize, venueId, status, type, versionStatus, search, sortBy, sortOrder } = req.query
 
     const sortByValue = typeof sortBy === 'string' && SORT_BY_WHITELIST.has(sortBy) ? sortBy : undefined
     const sortOrderValue = sortOrder === 'asc' || sortOrder === 'desc' ? sortOrder : undefined
@@ -634,6 +635,7 @@ router.get('/:orgId/terminals', authenticateTokenMiddleware, checkOrgAccess, asy
       venueIds: parseListParam(venueId),
       statuses: parseListParam(status),
       types: parseListParam(type),
+      versionStatuses: parseListParam(versionStatus),
       search: typeof search === 'string' ? search : undefined,
       sortBy: sortByValue,
       sortOrder: sortOrderValue,
