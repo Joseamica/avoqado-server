@@ -3,6 +3,7 @@ import { OrgRole, StaffRole, PermissionSet } from '@prisma/client'
 import { evaluatePermissionList, hasPermission } from '@/lib/permissions'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
+import { logAction } from '@/services/dashboard/activity-log.service'
 
 type RoleResolutionSource = 'token' | 'staffVenue' | 'orgOwner' | 'none'
 
@@ -208,6 +209,24 @@ export const checkPermission = (requiredPermission: string) => {
 
       if (!userRole) {
         logger.warn(`checkPermission: User ${authContext.userId} has no access to venue ${venueId}`)
+
+        // Audit: cross-venue access attempt.
+        void logAction({
+          staffId: authContext.userId,
+          venueId,
+          action: 'PERMISSION_DENIED',
+          entity: 'venue-access',
+          entityId: requiredPermission,
+          data: {
+            permission: requiredPermission,
+            reason: 'no_venue_access',
+            method: req.method,
+            path: req.originalUrl,
+          },
+          ipAddress: req.ip,
+          userAgent: req.get('user-agent'),
+        })
+
         return res.status(403).json({
           error: 'Forbidden',
           message: 'No access to this venue',
@@ -246,6 +265,27 @@ export const checkPermission = (requiredPermission: string) => {
         logger.warn(
           `checkPermission: User ${authContext.userId} (${userRole}) denied access to '${requiredPermission}' in venue ${venueId}`,
         )
+
+        // Persist the denial to ActivityLog for post-deploy monitoring + audit.
+        // Fire-and-forget via logAction() which is wrapped in try/catch — the
+        // helper never throws, so an audit-write failure can't leak as a 500.
+        void logAction({
+          staffId: authContext.userId,
+          venueId,
+          action: 'PERMISSION_DENIED',
+          entity: 'permission',
+          entityId: requiredPermission,
+          data: {
+            permission: requiredPermission,
+            userRole,
+            roleSource,
+            method: req.method,
+            path: req.originalUrl,
+            hasPermissionSet: !!permissionSet,
+          },
+          ipAddress: req.ip,
+          userAgent: req.get('user-agent'),
+        })
 
         return res.status(403).json({
           error: 'Forbidden',

@@ -3,6 +3,7 @@ import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { validatePermissionFormat } from '../../lib/permissions'
 import logger from '@/config/logger'
 import type { CreatePermissionSetInput, UpdatePermissionSetInput } from '../../schemas/dashboard/permissionSet.schema'
+import { logAction } from './activity-log.service'
 
 const MAX_PERMISSION_SETS_PER_VENUE = 20
 
@@ -63,6 +64,21 @@ export async function create(venueId: string, data: CreatePermissionSetInput, cr
     createdBy,
   })
 
+  void logAction({
+    staffId: createdBy,
+    venueId,
+    action: 'PERMISSION_SET_CREATED',
+    entity: 'permission-set',
+    entityId: permissionSet.id,
+    data: {
+      name: data.name,
+      description: data.description,
+      permissionsCount: data.permissions.length,
+      permissions: data.permissions,
+      color: data.color,
+    },
+  })
+
   return permissionSet
 }
 
@@ -100,6 +116,20 @@ export async function update(venueId: string, id: string, data: UpdatePermission
     name: permissionSet.name,
   })
 
+  void logAction({
+    venueId,
+    action: 'PERMISSION_SET_UPDATED',
+    entity: 'permission-set',
+    entityId: id,
+    data: {
+      name: permissionSet.name,
+      previousName: existing.name,
+      permissionsCount: permissionSet.permissions.length,
+      changedFields: Object.keys(data),
+      previousPermissionsCount: existing.permissions.length,
+    },
+  })
+
   return permissionSet
 }
 
@@ -120,6 +150,18 @@ export async function remove(venueId: string, id: string) {
     permissionSetId: id,
     name: existing.name,
     affectedStaff: existing._count.staffVenues,
+  })
+
+  void logAction({
+    venueId,
+    action: 'PERMISSION_SET_DELETED',
+    entity: 'permission-set',
+    entityId: id,
+    data: {
+      name: existing.name,
+      affectedStaff: existing._count.staffVenues,
+      permissionsCount: existing.permissions.length,
+    },
   })
 
   return { deleted: true, affectedStaff: existing._count.staffVenues }
@@ -160,6 +202,20 @@ export async function duplicate(venueId: string, id: string, newName: string, cr
     newId: permissionSet.id,
     newName,
     createdBy,
+  })
+
+  void logAction({
+    staffId: createdBy,
+    venueId,
+    action: 'PERMISSION_SET_DUPLICATED',
+    entity: 'permission-set',
+    entityId: permissionSet.id,
+    data: {
+      sourceId: id,
+      sourceName: existing.name,
+      newName,
+      permissionsCount: permissionSet.permissions.length,
+    },
   })
 
   return permissionSet
