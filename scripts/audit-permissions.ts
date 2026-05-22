@@ -171,6 +171,7 @@ function extractCatalog(): {
   individual: Set<string>
   defaults: Map<StaffRole, string[]>
   dependencyKeys: Set<string>
+  dependencies: Map<string, string[]>
 } {
   const permissionsSrc = fs.readFileSync(path.join(ROOT, 'src/lib/permissions.ts'), 'utf8')
 
@@ -183,15 +184,24 @@ function extractCatalog(): {
     Array.from(catalogMatch[1].matchAll(/'([a-z][a-zA-Z0-9_:.-]+:[a-z][a-zA-Z0-9_-]+)'/g)).map(m => m[1]),
   )
 
-  // PERMISSION_DEPENDENCIES — keys are permissions that have explicit bridges/aliases.
-  // Used to silence false-positive TPV_CLIENT_ONLY warnings: if `tpv-orders:comp` is a
-  // key in this map, the developer wired up the bridge to `orders:comp` on purpose.
+  // PERMISSION_DEPENDENCIES — full map of `'X': ['Y', 'Z']` entries. Two uses:
+  //  1. `dependencyKeys` set silences TPV_CLIENT_ONLY when a bridge exists.
+  //  2. `dependencies` map enables reachability check: a perm P missing from the
+  //     catalog is still grantable via the editor if some catalog perm K has P
+  //     in K's dependency expansion (e.g. assigning `features:update` from the
+  //     catalog gives the user `features:write` too via the bidirectional alias).
   const depsMatch = permissionsSrc.match(/PERMISSION_DEPENDENCIES[^=]*=\s*\{([\s\S]+?)\n\}/)
   const dependencyKeys = new Set<string>()
+  const dependencies = new Map<string, string[]>()
   if (depsMatch) {
-    // Match top-level keys only: 2-space indent + 'perm:name' followed by colon and array.
-    for (const m of depsMatch[1].matchAll(/^[ \t]*'([a-z][a-zA-Z0-9_:.-]+:[a-z][a-zA-Z0-9_-]+)'\s*:/gm)) {
-      dependencyKeys.add(m[1])
+    // Parse line-by-line: `  'key:name': ['val1', 'val2', ...],` (single-line entries).
+    for (const line of depsMatch[1].split('\n')) {
+      const m = line.match(/^\s*'([a-z][a-zA-Z0-9_:.-]+:[a-z][a-zA-Z0-9_-]+)'\s*:\s*\[(.*?)\]/)
+      if (!m) continue
+      const key = m[1]
+      const values = Array.from(m[2].matchAll(/'([a-z][a-zA-Z0-9_:.-]+:[a-z][a-zA-Z0-9_-]+)'/g)).map(v => v[1])
+      dependencyKeys.add(key)
+      dependencies.set(key, values)
     }
   }
 
@@ -199,7 +209,26 @@ function extractCatalog(): {
   for (const role of Object.keys(DEFAULT_PERMISSIONS) as StaffRole[]) {
     defaultsMap.set(role, DEFAULT_PERMISSIONS[role])
   }
-  return { individual, defaults: defaultsMap, dependencyKeys }
+  return { individual, defaults: defaultsMap, dependencyKeys, dependencies }
+}
+
+/**
+ * Returns true if `perm` is assignable from the dashboard role editor either
+ * directly (it's listed in INDIVIDUAL_PERMISSIONS_BY_RESOURCE) or indirectly
+ * via a PERMISSION_DEPENDENCIES alias from some catalog entry that expands to
+ * include it (e.g. `features:update` in catalog has alias deps to
+ * `features:write`, so assigning `features:update` grants both).
+ */
+function isAssignableFromCatalog(
+  perm: string,
+  catalog: Set<string>,
+  dependencies: Map<string, string[]>,
+): boolean {
+  if (catalog.has(perm)) return true
+  for (const [key, values] of dependencies) {
+    if (catalog.has(key) && values.includes(perm)) return true
+  }
+  return false
 }
 
 /**
@@ -299,7 +328,7 @@ function reportJson(issues: Issue[], stats: Record<string, number>): void {
 
 function main(): void {
   const backendUsages = extractBackendGates()
-  const { individual: catalogIndividual, dependencyKeys } = extractCatalog()
+  const { individual: catalogIndividual, dependencyKeys, dependencies } = extractCatalog()
 
   const dashboardUsages = extractClientGates(AUDITED_CLIENTS[0])
   const tpvUsages = extractClientGates(AUDITED_CLIENTS[1])
@@ -340,12 +369,12 @@ function main(): void {
     }
   }
 
-  // ── Check 2: every backend perm in INDIVIDUAL_PERMISSIONS_BY_RESOURCE
-  // SUPERADMIN-only permissions are intentionally absent from the catalog (no
-  // role editor toggle for them), so silence CATALOG_GAP when the perm is
-  // already documented as SUPERADMIN-only.
+  // ── Check 2: every backend perm assignable from the role editor
+  // A perm is "assignable" if it's literally in the catalog OR a catalog entry
+  // has it in its PERMISSION_DEPENDENCIES expansion (alias path). Silenced
+  // categories: SUPERADMIN-only (intentionally no toggle) and explicit allowlist.
   for (const perm of backendPermsSet) {
-    if (catalogIndividual.has(perm)) continue
+    if (isAssignableFromCatalog(perm, catalogIndividual, dependencies)) continue
     if (CATALOG_GAP_ALLOWLIST.has(perm)) continue
     if (SUPERADMIN_ONLY_ALLOWLIST.has(perm)) continue
 
@@ -353,7 +382,7 @@ function main(): void {
       severity: 'WARN',
       code: 'CATALOG_GAP',
       perm,
-      message: `Backend checks this but it's missing from INDIVIDUAL_PERMISSIONS_BY_RESOURCE — admins cannot assign it individually from the role editor. Add it to the catalog or to CATALOG_GAP_ALLOWLIST.`,
+      message: `Backend checks this but it cannot be assigned from the role editor — neither in INDIVIDUAL_PERMISSIONS_BY_RESOURCE directly nor reachable via PERMISSION_DEPENDENCIES alias from a catalog entry. Add it to the catalog, add an alias to an existing catalog entry, or add to CATALOG_GAP_ALLOWLIST.`,
     })
   }
 
