@@ -13,8 +13,8 @@ interface VenuePaymentConfigCreateInput {
 
 interface VenuePaymentConfigUpdateInput {
   primaryAccountId?: string
-  secondaryAccountId?: string
-  tertiaryAccountId?: string
+  secondaryAccountId?: string | null
+  tertiaryAccountId?: string | null
   routingRules?: any
   preferredProcessor?: 'LEGACY' | 'MENTA' | 'CLIP' | 'BANK_DIRECT' | 'AUTO'
 }
