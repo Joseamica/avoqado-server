@@ -167,8 +167,13 @@ function extractBackendGates(): PermUsage[] {
   return usages
 }
 
-function extractCatalog(): { individual: Set<string>; defaults: Map<StaffRole, string[]> } {
+function extractCatalog(): {
+  individual: Set<string>
+  defaults: Map<StaffRole, string[]>
+  dependencyKeys: Set<string>
+} {
   const permissionsSrc = fs.readFileSync(path.join(ROOT, 'src/lib/permissions.ts'), 'utf8')
+
   const catalogMatch = permissionsSrc.match(/INDIVIDUAL_PERMISSIONS_BY_RESOURCE[^=]*=\s*\{([\s\S]+?)\n\}/)
   if (!catalogMatch) {
     console.error('FATAL: Could not parse INDIVIDUAL_PERMISSIONS_BY_RESOURCE from permissions.ts')
@@ -178,11 +183,36 @@ function extractCatalog(): { individual: Set<string>; defaults: Map<StaffRole, s
     Array.from(catalogMatch[1].matchAll(/'([a-z][a-zA-Z0-9_:.-]+:[a-z][a-zA-Z0-9_-]+)'/g)).map(m => m[1]),
   )
 
+  // PERMISSION_DEPENDENCIES — keys are permissions that have explicit bridges/aliases.
+  // Used to silence false-positive TPV_CLIENT_ONLY warnings: if `tpv-orders:comp` is a
+  // key in this map, the developer wired up the bridge to `orders:comp` on purpose.
+  const depsMatch = permissionsSrc.match(/PERMISSION_DEPENDENCIES[^=]*=\s*\{([\s\S]+?)\n\}/)
+  const dependencyKeys = new Set<string>()
+  if (depsMatch) {
+    // Match top-level keys only: 2-space indent + 'perm:name' followed by colon and array.
+    for (const m of depsMatch[1].matchAll(/^[ \t]*'([a-z][a-zA-Z0-9_:.-]+:[a-z][a-zA-Z0-9_-]+)'\s*:/gm)) {
+      dependencyKeys.add(m[1])
+    }
+  }
+
   const defaultsMap = new Map<StaffRole, string[]>()
   for (const role of Object.keys(DEFAULT_PERMISSIONS) as StaffRole[]) {
     defaultsMap.set(role, DEFAULT_PERMISSIONS[role])
   }
-  return { individual, defaults: defaultsMap }
+  return { individual, defaults: defaultsMap, dependencyKeys }
+}
+
+/**
+ * Strip JSDoc / block comments + line comments from a source file before scanning.
+ * Without this, `<PermissionGate permission="analytics:export">` inside a `/** ... *​/`
+ * example block gets scraped as a real gate → false-positive DASHBOARD_DEAD_GATE.
+ */
+function stripComments(src: string): string {
+  // Remove /* ... */ blocks (including JSDoc /** ... */)
+  let out = src.replace(/\/\*[\s\S]*?\*\//g, '')
+  // Remove // line comments
+  out = out.replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+  return out
 }
 
 function extractClientGates(client: ClientRepo): PermUsage[] {
@@ -190,7 +220,11 @@ function extractClientGates(client: ClientRepo): PermUsage[] {
   const root = path.join(WORKSPACE_ROOT, client.relativeDir, client.scanDir)
   if (!fs.existsSync(root)) return usages
   walkDir(root, client.fileExt, file => {
-    const content = fs.readFileSync(file, 'utf8')
+    const raw = fs.readFileSync(file, 'utf8')
+    // Strip comments before scanning so JSDoc examples like
+    //   /** Usage: <PermissionGate permission="analytics:export">...*​/
+    // don't get reported as a real gate.
+    const content = stripComments(raw)
     for (const { kind, regex } of client.patterns) {
       for (const m of content.matchAll(regex)) {
         usages.push({
@@ -265,7 +299,7 @@ function reportJson(issues: Issue[], stats: Record<string, number>): void {
 
 function main(): void {
   const backendUsages = extractBackendGates()
-  const { individual: catalogIndividual } = extractCatalog()
+  const { individual: catalogIndividual, dependencyKeys } = extractCatalog()
 
   const dashboardUsages = extractClientGates(AUDITED_CLIENTS[0])
   const tpvUsages = extractClientGates(AUDITED_CLIENTS[1])
@@ -307,15 +341,20 @@ function main(): void {
   }
 
   // ── Check 2: every backend perm in INDIVIDUAL_PERMISSIONS_BY_RESOURCE
+  // SUPERADMIN-only permissions are intentionally absent from the catalog (no
+  // role editor toggle for them), so silence CATALOG_GAP when the perm is
+  // already documented as SUPERADMIN-only.
   for (const perm of backendPermsSet) {
-    if (!catalogIndividual.has(perm) && !CATALOG_GAP_ALLOWLIST.has(perm)) {
-      issues.push({
-        severity: 'WARN',
-        code: 'CATALOG_GAP',
-        perm,
-        message: `Backend checks this but it's missing from INDIVIDUAL_PERMISSIONS_BY_RESOURCE — admins cannot assign it individually from the role editor. Add it to the catalog or to CATALOG_GAP_ALLOWLIST.`,
-      })
-    }
+    if (catalogIndividual.has(perm)) continue
+    if (CATALOG_GAP_ALLOWLIST.has(perm)) continue
+    if (SUPERADMIN_ONLY_ALLOWLIST.has(perm)) continue
+
+    issues.push({
+      severity: 'WARN',
+      code: 'CATALOG_GAP',
+      perm,
+      message: `Backend checks this but it's missing from INDIVIDUAL_PERMISSIONS_BY_RESOURCE — admins cannot assign it individually from the role editor. Add it to the catalog or to CATALOG_GAP_ALLOWLIST.`,
+    })
   }
 
   // ── Check 3: dashboard PermissionGate strings backed by backend
@@ -355,14 +394,19 @@ function main(): void {
         occurrences: tpvUsages.filter(u => u.perm === perm).map(u => u.location).slice(0, 3),
       })
     } else if (!backendPermsSet.has(perm)) {
-      // Many TPV-side perms are intentionally client-only (e.g. tpv-orders:comp gates UI;
-      // backend uses the data-level orders:comp via PERMISSION_DEPENDENCIES bridge).
-      // We just log informationally — not a hard fail.
+      // If perm is a key in PERMISSION_DEPENDENCIES, the developer wired up an
+      // intentional bridge (e.g. `tpv-orders:comp` → `orders:comp`). Don't warn —
+      // the bridge IS the contract.
+      if (dependencyKeys.has(perm)) continue
+
+      // No bridge: TPV gates client-side but nothing on the backend honors the
+      // same name and nothing in deps expands to it. Either add a bridge or
+      // tighten the backend gate to match the client's expectation.
       issues.push({
         severity: 'WARN',
         code: 'TPV_CLIENT_ONLY',
         perm,
-        message: `TPV gates this client-side but no backend endpoint checks the same name. Verify there's a PERMISSION_DEPENDENCIES bridge (e.g. tpv-orders:comp → orders:comp).`,
+        message: `TPV gates this client-side but no backend endpoint checks the same name and no PERMISSION_DEPENDENCIES bridge exists. Add a bridge (e.g. tpv-orders:comp → orders:comp) or wire the backend gate to the same string.`,
         occurrences: tpvUsages.filter(u => u.perm === perm).map(u => u.location).slice(0, 3),
       })
     }
