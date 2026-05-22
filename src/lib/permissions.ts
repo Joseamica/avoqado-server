@@ -1172,9 +1172,15 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   venues: ['venues:read', 'venues:update'],
   customers: ['customers:read', 'customers:create', 'customers:update', 'customers:delete', 'customers:settle-balance'],
   'customer-groups': ['customer-groups:read', 'customer-groups:create', 'customer-groups:update', 'customer-groups:delete'],
-  loyalty: ['loyalty:read', 'loyalty:create', 'loyalty:update', 'loyalty:delete', 'loyalty:redeem', 'loyalty:adjust'],
+  loyalty: ['loyalty:read', 'loyalty:create', 'loyalty:update', 'loyalty:delete', 'loyalty:redeem', 'loyalty:adjust', 'loyalty:expire'],
   discounts: ['discounts:read', 'discounts:create', 'discounts:update', 'discounts:delete', 'discounts:apply'],
-  coupons: ['coupons:read', 'coupons:create', 'coupons:update', 'coupons:delete'],
+  coupons: ['coupons:read', 'coupons:create', 'coupons:update', 'coupons:delete', 'coupons:redeem'],
+  // Credit packs / bundles — venue-level credit packages (e.g. class packs, prepaid plans).
+  // Routes live in dashboard/creditPack.routes.ts.
+  creditPacks: ['creditPacks:read', 'creditPacks:create', 'creditPacks:update', 'creditPacks:delete'],
+  // Shareable payment links (Stripe Connect + Blumon E-commerce).
+  // Routes live in dashboard/paymentLink.routes.ts under the parent `payment-link:read` gate.
+  'payment-link': ['payment-link:read', 'payment-link:create', 'payment-link:update'],
   features: ['features:read', 'features:update'],
   notifications: ['notifications:send'],
   products: ['products:read', 'products:create', 'products:update', 'products:delete'],

@@ -10,6 +10,7 @@
 
 import { Router } from 'express'
 import { validateRequest } from '@/middlewares/validation'
+import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import * as paymentLinkController from '@/controllers/dashboard/paymentLink.dashboard.controller'
 import {
   listPaymentLinksSchema,
@@ -33,7 +34,7 @@ router.get('/', validateRequest(listPaymentLinksSchema), paymentLinkController.l
  * POST /api/v1/dashboard/venues/:venueId/payment-links
  * Creates a new payment link
  */
-router.post('/', validateRequest(createPaymentLinkSchema), paymentLinkController.createPaymentLink)
+router.post('/', checkPermission('payment-link:create'), validateRequest(createPaymentLinkSchema), paymentLinkController.createPaymentLink)
 
 // ───────────────────────────────────────────────────────────────────────────
 // Static-prefix routes — MUST be declared BEFORE `/:linkId` because Express
@@ -47,7 +48,7 @@ router.post('/', validateRequest(createPaymentLinkSchema), paymentLinkController
  * PUT  /api/v1/dashboard/venues/:venueId/payment-links/branding/config
  */
 router.get('/branding/config', paymentLinkController.getPaymentLinkBranding)
-router.put('/branding/config', validateRequest(updatePaymentLinkBrandingSchema), paymentLinkController.updatePaymentLinkBranding)
+router.put('/branding/config', checkPermission('payment-link:update'), validateRequest(updatePaymentLinkBrandingSchema), paymentLinkController.updatePaymentLinkBranding)
 
 /**
  * GET   /api/v1/dashboard/venues/:venueId/payment-links/settings
@@ -59,7 +60,7 @@ router.put('/branding/config', validateRequest(updatePaymentLinkBrandingSchema),
  * the on-paid notification email.
  */
 router.get('/settings', paymentLinkController.getPaymentLinkSettingsHandler)
-router.patch('/settings', validateRequest(updatePaymentLinkSettingsSchema), paymentLinkController.updatePaymentLinkSettingsHandler)
+router.patch('/settings', checkPermission('payment-link:update'), validateRequest(updatePaymentLinkSettingsSchema), paymentLinkController.updatePaymentLinkSettingsHandler)
 
 // ───────────────────────────────────────────────────────────────────────────
 // Dynamic-id routes
@@ -75,13 +76,15 @@ router.get('/:linkId', validateRequest(getPaymentLinkSchema), paymentLinkControl
  * PUT /api/v1/dashboard/venues/:venueId/payment-links/:linkId
  * Updates a payment link
  */
-router.put('/:linkId', validateRequest(updatePaymentLinkSchema), paymentLinkController.updatePaymentLink)
+router.put('/:linkId', checkPermission('payment-link:update'), validateRequest(updatePaymentLinkSchema), paymentLinkController.updatePaymentLink)
 
 /**
  * DELETE /api/v1/dashboard/venues/:venueId/payment-links/:linkId
- * Archives a payment link (soft delete)
+ * Archives a payment link (soft delete). Uses the `:update` permission since
+ * the dashboard surfaces archive as part of the edit-link UI; if we ever add
+ * a distinct `payment-link:delete` permission, change this gate.
  */
-router.delete('/:linkId', validateRequest(getPaymentLinkSchema), paymentLinkController.archivePaymentLink)
+router.delete('/:linkId', checkPermission('payment-link:update'), validateRequest(getPaymentLinkSchema), paymentLinkController.archivePaymentLink)
 
 /**
  * POST /api/v1/dashboard/venues/:venueId/payment-links/:linkId/share-whatsapp

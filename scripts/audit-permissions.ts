@@ -31,7 +31,8 @@
 
 import * as fs from 'fs'
 import * as path from 'path'
-import { DEFAULT_PERMISSIONS, hasPermission, type StaffRole } from '../src/lib/permissions'
+import { StaffRole } from '@prisma/client'
+import { DEFAULT_PERMISSIONS, hasPermission } from '../src/lib/permissions'
 
 // ────────────────────────────────────────────────────────────────────────────
 // Config
@@ -97,17 +98,28 @@ const SUPERADMIN_ONLY_ALLOWLIST = new Set<string>([
   'tpv-commands:geofence',
 ])
 
-// Permissions intentionally absent from INDIVIDUAL_PERMISSIONS_BY_RESOURCE (can't be assigned
-// individually because they're either SUPERADMIN-only or destructive).
+// Permissions intentionally absent from INDIVIDUAL_PERMISSIONS_BY_RESOURCE.
+// Reasons fall into two buckets: (1) SUPERADMIN-only system internals, and
+// (2) destructive/financial operations where a default wildcard (`payments:*`,
+// `orders:*`, etc.) is the only way to grant access — splitting them off into
+// individual toggles would let an admin accidentally assign delete/destroy
+// rights to a custom role without realizing what they're doing.
 const CATALOG_GAP_ALLOWLIST = new Set<string>([
-  'system:config',
-  'system:manage',
-  'system:test',
-  'venue-crypto:manage',
-  'payments:delete', // ADMIN+ via wildcard, intentionally not granular
-  'payments:update', // ADMIN+ via wildcard, intentionally not granular
+  // Destructive/financial — intentionally only via wildcard in DEFAULT_PERMISSIONS:
+  'payments:delete', // ADMIN+ via `payments:*`. Splitting off would let a custom role
+                     // delete payments without owning the rest of payments management.
+  'payments:update', // Same reasoning.
   'orders:delete',
   'reviews:delete',
+  'settlements:write', // Confirms settlement incidents (financial reconciliation).
+                       // ADMIN+ via `settlements:*` is the deliberate floor. If a
+                       // venue needs more granular control later, split into
+                       // `settlements:confirm-incident`, `settlements:create-payout`, etc.
+  'venues:manage', // Toggles Google OAuth integrations, venue-level config (1280, 1352,
+                   // 1377, 1510, 1582 in dashboard.routes.ts). ADMIN+ via `venues:*` is
+                   // the floor — if a client needs IT staff who can configure
+                   // integrations without full venue management, decompose into
+                   // `venues:integrations` etc. and add those to the catalog.
 ])
 
 const ARG_STRICT = process.argv.includes('--strict')
