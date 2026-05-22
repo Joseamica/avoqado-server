@@ -185,6 +185,10 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'tpv:command:schedule': ['tpv:read', 'tpv:command', 'tpv:command:schedule'], // Scheduled commands (ADMIN+)
   'tpv:command:geofence': ['tpv:read', 'tpv:command', 'tpv:command:geofence'], // Geofencing (ADMIN+)
 
+  // FEATURES — alias bidirectional (catalog uses `features:update`, routes check `features:write`)
+  'features:write': ['features:write', 'features:update', 'features:read'],
+  'features:update': ['features:update', 'features:write', 'features:read'],
+
   // ===========================
   // REVIEWS
   // ===========================
@@ -223,9 +227,9 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
 
   // ===========================
   // FEATURES - Venue Features
+  // (features:write ↔ features:update aliases defined earlier in this map; see comment above)
   // ===========================
   'features:read': ['features:read'],
-  'features:write': ['features:read', 'features:write'],
 
   // ===========================
   // HOME - Dashboard

@@ -7967,7 +7967,7 @@ router.get(
 router.post(
   '/venues/:venueId/permission-sets',
   authenticateTokenMiddleware,
-  checkPermission('role-permissions:update'),
+  checkPermission('settings:manage'),
   validateRequest(CreatePermissionSetSchema),
   permissionSetController.create,
 )
@@ -7975,7 +7975,7 @@ router.post(
 router.put(
   '/venues/:venueId/permission-sets/:id',
   authenticateTokenMiddleware,
-  checkPermission('role-permissions:update'),
+  checkPermission('settings:manage'),
   validateRequest(UpdatePermissionSetSchema),
   permissionSetController.update,
 )
@@ -7990,7 +7990,7 @@ router.delete(
 router.post(
   '/venues/:venueId/permission-sets/:id/duplicate',
   authenticateTokenMiddleware,
-  checkPermission('role-permissions:update'),
+  checkPermission('settings:manage'),
   validateRequest(DuplicatePermissionSetSchema),
   permissionSetController.duplicate,
 )
