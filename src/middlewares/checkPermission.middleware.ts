@@ -210,22 +210,27 @@ export const checkPermission = (requiredPermission: string) => {
       if (!userRole) {
         logger.warn(`checkPermission: User ${authContext.userId} has no access to venue ${venueId}`)
 
-        // Audit: cross-venue access attempt.
-        void logAction({
-          staffId: authContext.userId,
-          venueId,
-          action: 'PERMISSION_DENIED',
-          entity: 'venue-access',
-          entityId: requiredPermission,
-          data: {
-            permission: requiredPermission,
-            reason: 'no_venue_access',
-            method: req.method,
-            path: req.originalUrl,
-          },
-          ipAddress: req.ip,
-          userAgent: req.get('user-agent'),
-        })
+        // Audit: cross-venue access attempt. Wrapped in try/catch so a mocked
+        // req without .get() (in unit tests) can't break the response path.
+        try {
+          void logAction({
+            staffId: authContext.userId,
+            venueId,
+            action: 'PERMISSION_DENIED',
+            entity: 'venue-access',
+            entityId: requiredPermission,
+            data: {
+              permission: requiredPermission,
+              reason: 'no_venue_access',
+              method: req.method,
+              path: req.originalUrl,
+            },
+            ipAddress: req.ip,
+            userAgent: typeof req.get === 'function' ? req.get('user-agent') : undefined,
+          })
+        } catch (auditErr) {
+          logger.error('checkPermission: audit log construction failed (non-fatal)', auditErr)
+        }
 
         return res.status(403).json({
           error: 'Forbidden',
@@ -267,25 +272,30 @@ export const checkPermission = (requiredPermission: string) => {
         )
 
         // Persist the denial to ActivityLog for post-deploy monitoring + audit.
-        // Fire-and-forget via logAction() which is wrapped in try/catch — the
-        // helper never throws, so an audit-write failure can't leak as a 500.
-        void logAction({
-          staffId: authContext.userId,
-          venueId,
-          action: 'PERMISSION_DENIED',
-          entity: 'permission',
-          entityId: requiredPermission,
-          data: {
-            permission: requiredPermission,
-            userRole,
-            roleSource,
-            method: req.method,
-            path: req.originalUrl,
-            hasPermissionSet: !!permissionSet,
-          },
-          ipAddress: req.ip,
-          userAgent: req.get('user-agent'),
-        })
+        // Wrapped in try/catch so a mocked req without .get() (in unit tests)
+        // or any unexpected synchronous failure can't leak as a 500 response.
+        // logAction() itself is also fire-and-forget + try/catch internally.
+        try {
+          void logAction({
+            staffId: authContext.userId,
+            venueId,
+            action: 'PERMISSION_DENIED',
+            entity: 'permission',
+            entityId: requiredPermission,
+            data: {
+              permission: requiredPermission,
+              userRole,
+              roleSource,
+              method: req.method,
+              path: req.originalUrl,
+              hasPermissionSet: !!permissionSet,
+            },
+            ipAddress: req.ip,
+            userAgent: typeof req.get === 'function' ? req.get('user-agent') : undefined,
+          })
+        } catch (auditErr) {
+          logger.error('checkPermission: audit log construction failed (non-fatal)', auditErr)
+        }
 
         return res.status(403).json({
           error: 'Forbidden',
