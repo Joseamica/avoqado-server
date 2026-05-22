@@ -6,6 +6,18 @@ import { notifyAffectedTerminals } from '../superadmin/merchantAccount.service'
 import { tpvCommandQueueService } from '../tpv/command-queue.service'
 import { updateTpvSettings, type TpvSettings } from './tpv.dashboard.service'
 import { assertMerchantsTerminalCompatible, isProviderCompatibleWithBrand } from '../../lib/providerDeviceCompatibility'
+import { logAction } from './activity-log.service'
+
+/**
+ * Audit actor — who triggered a terminal mutation. Threaded from the controller
+ * so every Terminal change lands in `ActivityLog` (the May 2026 incident had
+ * zero audit trail because these services never logged).
+ */
+export interface TerminalActor {
+  staffId?: string | null
+  ipAddress?: string
+  userAgent?: string
+}
 
 /**
  * Get All Terminals (Cross-Venue)
@@ -275,6 +287,21 @@ export async function createTerminal(data: {
     logger.info(`Activation code generated for terminal ${terminal.id}: ${activationCodeData.activationCode}`)
   }
 
+  await logAction({
+    staffId: data.staffId ?? null,
+    venueId: terminal.venueId,
+    action: 'TERMINAL_CREATED',
+    entity: 'Terminal',
+    entityId: terminal.id,
+    data: {
+      serialNumber: terminal.serialNumber,
+      name: terminal.name,
+      type: terminal.type,
+      assignedMerchantIds: terminal.assignedMerchantIds,
+      autoAttachedMerchantIds: autoAttachedMerchants.map(m => m.id),
+    },
+  })
+
   return {
     terminal,
     activationCode: activationCodeData,
@@ -316,6 +343,7 @@ export async function updateTerminal(
      */
     venueId?: string
   },
+  actor?: TerminalActor,
 ) {
   logger.info(`Updating terminal ${terminalId}:`, data)
 
@@ -388,8 +416,8 @@ export async function updateTerminal(
           `Brand change for terminal ${terminalId} confirmed with forceUnassign — pruning ${incompatible.length} incompatible merchant(s): ${[...incompatibleIds].join(', ')}`,
         )
 
-        return await prisma.$transaction(async tx => {
-          const updated = await tx.terminal.update({
+        const updated = await prisma.$transaction(async tx => {
+          return tx.terminal.update({
             where: { id: terminalId },
             data: {
               ...(data.name && { name: data.name }),
@@ -402,9 +430,24 @@ export async function updateTerminal(
               venue: { select: { id: true, name: true, slug: true } },
             },
           })
-          logger.info(`Terminal ${terminalId} brand changed atomically with merchant pruning`)
-          return updated
         })
+        logger.info(`Terminal ${terminalId} brand changed atomically with merchant pruning`)
+        await logAction({
+          staffId: actor?.staffId ?? null,
+          venueId: updated.venueId,
+          action: 'TERMINAL_UPDATED',
+          entity: 'Terminal',
+          entityId: terminalId,
+          data: {
+            updatedFields: ['brand', 'assignedMerchantIds'],
+            brand: { before: terminal.brand, after: updated.brand },
+            assignedMerchantIds: { before: terminal.assignedMerchantIds, after: updated.assignedMerchantIds },
+            reason: 'brand-change forceUnassign pruning',
+          },
+          ipAddress: actor?.ipAddress,
+          userAgent: actor?.userAgent,
+        })
+        return updated
       }
     }
   }
@@ -467,6 +510,31 @@ export async function updateTerminal(
     },
   })
 
+  const updatedFields: string[] = []
+  for (const f of ['name', 'status', 'brand', 'model'] as const) {
+    if (data[f] !== undefined) updatedFields.push(f)
+  }
+  const merchantsChanged = venueChanged || data.assignedMerchantIds !== undefined
+  if (merchantsChanged) updatedFields.push('assignedMerchantIds')
+  if (venueChanged) updatedFields.push('venueId')
+
+  await logAction({
+    staffId: actor?.staffId ?? null,
+    venueId: updatedTerminal.venueId,
+    action: 'TERMINAL_UPDATED',
+    entity: 'Terminal',
+    entityId: terminalId,
+    data: {
+      updatedFields,
+      ...(merchantsChanged && {
+        assignedMerchantIds: { before: terminal.assignedMerchantIds, after: updatedTerminal.assignedMerchantIds },
+      }),
+      ...(venueChanged && { venue: { before: terminal.venueId, after: updatedTerminal.venueId } }),
+    },
+    ipAddress: actor?.ipAddress,
+    userAgent: actor?.userAgent,
+  })
+
   logger.info(`Terminal ${terminalId} updated successfully`)
 
   return updatedTerminal
@@ -494,7 +562,7 @@ export async function generateActivationCodeForTerminal(terminalId: string, staf
  *
  * @param terminalId Terminal ID (CUID)
  */
-export async function deleteTerminal(terminalId: string) {
+export async function deleteTerminal(terminalId: string, actor?: TerminalActor) {
   logger.info(`Deleting terminal: ${terminalId}`)
 
   const terminal = await prisma.terminal.findUnique({
@@ -515,6 +583,21 @@ export async function deleteTerminal(terminalId: string) {
   })
 
   logger.info(`Terminal ${terminalId} deleted successfully`)
+
+  await logAction({
+    staffId: actor?.staffId ?? null,
+    venueId: terminal.venueId,
+    action: 'TERMINAL_DELETED',
+    entity: 'Terminal',
+    entityId: terminalId,
+    data: {
+      serialNumber: terminal.serialNumber,
+      name: terminal.name,
+      assignedMerchantIds: terminal.assignedMerchantIds,
+    },
+    ipAddress: actor?.ipAddress,
+    userAgent: actor?.userAgent,
+  })
 
   return { success: true }
 }

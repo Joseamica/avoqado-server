@@ -67,8 +67,8 @@ export const createTerminal = async (req: Request, res: Response, next: NextFunc
   try {
     const { venueId, serialNumber, name, type, brand, model, assignedMerchantIds, generateActivationCode, configOverrides } = req.body
 
-    // Get staffId from authenticated user (assuming req.user exists)
-    const staffId = (req as any).user?.userId || 'superadmin'
+    // Audit actor — `authContext` is set by authenticateToken middleware.
+    const staffId = (req as any).authContext?.userId || (req as any).user?.userId || 'superadmin'
 
     const result = await createTerminalService({
       venueId,
@@ -110,6 +110,7 @@ export const updateTerminal = async (req: Request, res: Response, next: NextFunc
   try {
     const { terminalId } = req.params
     const { name, status, assignedMerchantIds, brand, model, forceUnassign, venueId } = req.body
+    const authContext = (req as any).authContext
 
     // Task 12: when `brand` is changed and currently-assigned merchants would
     // become incompatible, the service throws `TerminalBrandChangeBlocked`
@@ -118,15 +119,23 @@ export const updateTerminal = async (req: Request, res: Response, next: NextFunc
     // and prompts the operator, then re-issues with `forceUnassign: true`.
     // Task 54: `venueId` (optional) moves the terminal to another venue and
     // clears `assignedMerchantIds` atomically (cross-tenant safety).
-    const terminal = await updateTerminalService(terminalId, {
-      name,
-      status,
-      assignedMerchantIds,
-      brand,
-      model,
-      forceUnassign,
-      venueId,
-    })
+    const terminal = await updateTerminalService(
+      terminalId,
+      {
+        name,
+        status,
+        assignedMerchantIds,
+        brand,
+        model,
+        forceUnassign,
+        venueId,
+      },
+      {
+        staffId: authContext?.userId,
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent'),
+      },
+    )
 
     return res.status(200).json({
       data: terminal,
@@ -173,7 +182,12 @@ export const deleteTerminal = async (req: Request, res: Response, next: NextFunc
   try {
     const { terminalId } = req.params
 
-    await deleteTerminalService(terminalId)
+    const authContext = (req as any).authContext
+    await deleteTerminalService(terminalId, {
+      staffId: authContext?.userId,
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+    })
 
     return res.status(200).json({
       message: 'Terminal deleted successfully',
