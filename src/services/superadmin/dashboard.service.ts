@@ -6,7 +6,7 @@
  */
 
 import prisma from '../../utils/prismaClient'
-import { VerificationStatus, TerminalStatus, PaymentStatus, VenueStatus } from '@prisma/client'
+import { VerificationStatus, TerminalStatus, TransactionStatus, VenueStatus } from '@prisma/client'
 
 export interface SuperadminDashboardSummary {
   venues: {
@@ -81,12 +81,13 @@ export async function getSuperadminDashboardSummary(): Promise<SuperadminDashboa
   const kycCount = (status: VerificationStatus): number =>
     venueByKyc.find((row) => row.kycStatus === status)?._count._all ?? 0
 
-  // Failed payments in last 24h: filter the raw rows because groupBy by `status`
-  // would double-fire DB calls; cheaper to query once.
+  // Payment.status uses the `TransactionStatus` enum (COMPLETED, FAILED,
+  // PENDING, PROCESSING, REFUNDED) — not PaymentStatus. We only count FAILED
+  // here; PENDING/PROCESSING are in-flight, not failures.
   const paymentsFailed = await prisma.payment.count({
     where: {
       createdAt: { gte: since24h },
-      status: { in: [PaymentStatus.PENDING, PaymentStatus.PARTIAL] },
+      status: TransactionStatus.FAILED,
     },
   })
 
