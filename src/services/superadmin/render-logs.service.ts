@@ -74,6 +74,30 @@ function isConfigured(): { ok: true; apiKey: string; serviceId: string } | { ok:
   return { ok: true, apiKey, serviceId }
 }
 
+/**
+ * Cache the ownerId in memory after the first lookup. Owner ID is a stable
+ * property of the service — it doesn't change unless the service is moved
+ * across accounts (rare). One extra HTTP roundtrip on cold start, zero on
+ * subsequent requests.
+ */
+let cachedOwnerId: string | null = null
+
+async function getOwnerId(apiKey: string, serviceId: string): Promise<string> {
+  if (cachedOwnerId) return cachedOwnerId
+  const { data } = await axios.get<{ ownerId: string }>(
+    `${RENDER_API_BASE}/services/${serviceId}`,
+    {
+      headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
+      timeout: 10_000,
+    },
+  )
+  if (!data.ownerId) {
+    throw new Error('Render API returned a service without an ownerId — verify RENDER_SERVICE_ID.')
+  }
+  cachedOwnerId = data.ownerId
+  return cachedOwnerId
+}
+
 function findLabel(labels: Array<{ name: string; value: string }>, name: string): string | null {
   return labels.find((l) => l.name === name)?.value ?? null
 }
@@ -102,19 +126,24 @@ export async function fetchRenderLogs(
     return { enabled: false, disabledReason: config.reason, logs: [], hasMore: false }
   }
 
-  // Render API espera params repetidos (`?resource=srv-x&resource=srv-y`),
-  // NO el `resource[]=...` que axios serializa por default. Construimos la
-  // URL con URLSearchParams para tener control fino y no depender de `qs`.
-  const search = new URLSearchParams()
-  search.append('resource', config.serviceId)
-  search.append('direction', 'backward')
-  search.append('limit', String(Math.min(params.limit ?? 100, 100)))
-  if (params.level) search.append('level', params.level)
-  if (params.type) search.append('type', params.type)
-  if (params.startTime) search.append('startTime', params.startTime)
-  if (params.endTime) search.append('endTime', params.endTime)
-
   try {
+    // Render requires an `ownerId` query param on /v1/logs. We resolve it
+    // dynamically from the service itself (one-time, cached) so the operator
+    // only has to set RENDER_API_KEY + RENDER_SERVICE_ID, not three vars.
+    const ownerId = await getOwnerId(config.apiKey, config.serviceId)
+
+    // Render API espera params repetidos (`?resource=srv-x&resource=srv-y`),
+    // NO el `resource[]=...` que axios serializa por default. Construimos la
+    // URL con URLSearchParams para tener control fino y no depender de `qs`.
+    const search = new URLSearchParams()
+    search.append('ownerId', ownerId)
+    search.append('resource', config.serviceId)
+    search.append('direction', 'backward')
+    search.append('limit', String(Math.min(params.limit ?? 100, 100)))
+    if (params.level) search.append('level', params.level)
+    if (params.type) search.append('type', params.type)
+    if (params.startTime) search.append('startTime', params.startTime)
+    if (params.endTime) search.append('endTime', params.endTime)
     const { data } = await axios.get<{
       hasMore: boolean
       nextEndTime?: string
