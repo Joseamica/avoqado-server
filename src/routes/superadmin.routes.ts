@@ -18,6 +18,7 @@ import moduleRoutes from './superadmin/module.routes'
 import onboardingRoutes from './superadmin/onboarding.routes'
 import trainingRoutes from './superadmin/training.routes'
 import activityLogRoutes from './superadmin/activityLog.routes'
+import dashboardRoutes from './superadmin/dashboard.routes'
 import partnerKeyRoutes from './superadmin/partnerKey.routes'
 import aggregatorRoutes from './superadmin/aggregator.routes'
 import venueCommissionRoutes from './superadmin/venueCommission.routes'
@@ -46,6 +47,7 @@ router.use('/modules', moduleRoutes)
 router.use('/onboarding', onboardingRoutes)
 router.use('/trainings', trainingRoutes)
 router.use('/activity-log', activityLogRoutes)
+router.use('/dashboard', dashboardRoutes)
 router.use('/partner-keys', partnerKeyRoutes)
 router.use('/aggregators', aggregatorRoutes)
 router.use('/venue-commissions', venueCommissionRoutes)
