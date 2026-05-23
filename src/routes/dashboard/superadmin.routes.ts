@@ -31,6 +31,7 @@ import marketingRoutes from '../superadmin/marketing.routes'
 import staffRoutes from '../superadmin/staff.routes'
 import trainingRoutes from '../superadmin/training.routes'
 import aggregatorRoutes from '../superadmin/aggregator.routes'
+import merchantRevenueShareRoutes from '../superadmin/merchantRevenueShare.routes'
 import venueCommissionRoutes from '../superadmin/venueCommission.routes'
 
 // Import cost management validation schemas
@@ -386,6 +387,9 @@ router.use('/trainings', trainingRoutes)
 
 // Aggregator Management (Moneygiver, etc.)
 router.use('/aggregators', aggregatorRoutes)
+
+// Revenue-share configurable por merchant (Plan 2026-05-22)
+router.use('/merchant-revenue-shares', merchantRevenueShareRoutes)
 
 // Venue Commission Management (per-venue rates + splits)
 router.use('/venue-commissions', venueCommissionRoutes)

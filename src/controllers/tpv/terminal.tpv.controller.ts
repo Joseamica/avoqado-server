@@ -48,6 +48,7 @@ interface TpvSettings {
   showOrderManagement: boolean // Show "Órdenes" button on home screen
   showMessages: boolean // Show "Mensajes" button on home screen
   showTrainings: boolean // Show "Entrenamientos" button on home screen
+  showCheckout: boolean // Show "Cobro" button on home screen
   // Crypto payment option (B4Bit integration)
   showCryptoOption: boolean
   // Cellular Failover (experimental — ConnectionViewModel reads these exact names)
@@ -88,6 +89,7 @@ const DEFAULT_TPV_SETTINGS: TpvSettings = {
   showOrderManagement: true,
   showMessages: true,
   showTrainings: true,
+  showCheckout: true,
   // Crypto payment disabled by default
   showCryptoOption: false,
   // Cellular Failover — safe defaults: OFF, threshold 3, cooldown 60s, hold 120s
@@ -403,11 +405,13 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
       try {
         const accounts = await getAngelPayUserAccountsForTerminal(serialNumber)
         for (const account of accounts) {
-          if (account.status === 'ACTIVE' && account.pinEncrypted) {
+          // Plaintext `pin` is the source of truth; fall back to decrypting the
+          // legacy `pinEncrypted` for rows created before the plaintext switch.
+          if (account.status === 'ACTIVE' && (account.pin || account.pinEncrypted)) {
             const payload: AngelPayAuthPayload = {
               accountId: account.id,
               email: account.email,
-              pin: decryptCredentials(account.pinEncrypted) as string,
+              pin: account.pin ?? (decryptCredentials(account.pinEncrypted) as string),
               environment: account.environment,
             }
             angelpayAccounts.push(payload)
@@ -435,11 +439,11 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
           // Fallback to legacy single-fetch path in case multi-fetch returns
           // nothing but the legacy fetch still finds something (defensive).
           const legacyAccount = await getAngelPayUserAccountForTerminal(serialNumber)
-          if (legacyAccount && legacyAccount.status === 'ACTIVE' && legacyAccount.pinEncrypted) {
+          if (legacyAccount && legacyAccount.status === 'ACTIVE' && (legacyAccount.pin || legacyAccount.pinEncrypted)) {
             angelpayAuth = {
               accountId: legacyAccount.id,
               email: legacyAccount.email,
-              pin: decryptCredentials(legacyAccount.pinEncrypted) as string,
+              pin: legacyAccount.pin ?? (decryptCredentials(legacyAccount.pinEncrypted) as string),
               environment: legacyAccount.environment,
             }
             angelpayAccounts = [angelpayAuth]

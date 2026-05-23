@@ -1,0 +1,49 @@
+# Schema Map Auto-Regeneration
+# =============================
+# Keeps docs/SCHEMA_MAP.md in sync with prisma/schema.prisma.
+# Triggers only when the schema changes; regenerates the map and, if it
+# differs, commits the updated docs/SCHEMA_MAP.md back to the branch.
+#
+# If a new model is missing from MODEL_TO_DOMAIN in
+# scripts/generate-schema-map.ts, the generator exits non-zero and this
+# workflow fails — add the model to the script.
+
+name: 🗺️ Schema Map
+
+on:
+  push:
+    paths:
+      - 'prisma/schema.prisma'
+  pull_request:
+    paths:
+      - 'prisma/schema.prisma'
+
+permissions:
+  contents: write
+
+jobs:
+  regenerate-schema-map:
+    name: 🗺️ Regenerate Schema Map
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 🗺️ Regenerate schema map
+        run: npm run schema:map
+
+      - name: 💾 Commit updated schema map
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: 'chore: regenerate schema map'
+          file_pattern: 'docs/SCHEMA_MAP.md'

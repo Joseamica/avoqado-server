@@ -108,7 +108,7 @@ describe('AngelPayUserAccountService', () => {
       expect(mockedPrisma.angelPayUserAccount.create).not.toHaveBeenCalled()
     })
 
-    it('with no PIN → status PENDING_PIN, pinEncrypted=null', async () => {
+    it('with no PIN → status PENDING_PIN, pin=null', async () => {
       mockedPrisma.angelPayUserAccount.findUnique.mockResolvedValue(null)
       mockedPrisma.angelPayUserAccount.create.mockImplementation(({ data }: any) => ({ id: 'a1', ...data }))
 
@@ -121,14 +121,16 @@ describe('AngelPayUserAccountService', () => {
       expect(mockedPrisma.angelPayUserAccount.create).toHaveBeenCalledTimes(1)
       const createArg = mockedPrisma.angelPayUserAccount.create.mock.calls[0][0]
       expect(createArg.data.status).toBe('PENDING_PIN')
-      expect(createArg.data.pinEncrypted).toBeNull()
+      // Plaintext PIN: null when no PIN provisioned yet (status=PENDING_PIN).
+      // See spec 2026-05-21-angelpay-merchant-wizard §6.1.
+      expect(createArg.data.pin).toBeNull()
       expect(createArg.data.venueId).toBe('venue-1')
       expect(createArg.data.email).toBe('ops@avoqado.io')
       expect(createArg.data.environment).toBe('QA')
       expect(result.status).toBe('PENDING_PIN')
     })
 
-    it('with valid PIN → status ACTIVE, pinEncrypted has { encrypted, iv } shape', async () => {
+    it('with valid PIN → status ACTIVE, pin stored plaintext', async () => {
       mockedPrisma.angelPayUserAccount.findUnique.mockResolvedValue(null)
       mockedPrisma.angelPayUserAccount.create.mockImplementation(({ data }: any) => ({ id: 'a1', ...data }))
 
@@ -142,7 +144,10 @@ describe('AngelPayUserAccountService', () => {
 
       const createArg = mockedPrisma.angelPayUserAccount.create.mock.calls[0][0]
       expect(createArg.data.status).toBe('ACTIVE')
-      expect(createArg.data.pinEncrypted).toEqual({ encrypted: 'enc(123456)', iv: 'iv-hex' })
+      // Plaintext PIN by decision (spec 2026-05-21-angelpay-merchant-wizard §6.1).
+      // The legacy encrypted `pinEncrypted` column is preserved for backwards
+      // compat (read fallback in terminal.tpv.controller), but new writes go to `pin`.
+      expect(createArg.data.pin).toBe('123456')
       expect(createArg.data.createdBy).toBe('staff-1')
       expect(createArg.data.statusChangedBy).toBe('staff-1')
       expect(result.status).toBe('ACTIVE')
@@ -182,7 +187,8 @@ describe('AngelPayUserAccountService', () => {
       const updateArg = mockedPrisma.angelPayUserAccount.update.mock.calls[0][0]
       expect(updateArg.where).toEqual({ id: 'a1' })
       expect(updateArg.data.status).toBe('ACTIVE')
-      expect(updateArg.data.pinEncrypted).toEqual({ encrypted: 'enc(654321)', iv: 'iv-hex' })
+      // Plaintext PIN by decision (spec 2026-05-21-angelpay-merchant-wizard §6.1).
+      expect(updateArg.data.pin).toBe('654321')
       expect(updateArg.data.lastValidationErr).toBeNull()
       expect(updateArg.data.statusReason).toBeNull()
       expect(updateArg.data.statusChangedAt).toBeInstanceOf(Date)

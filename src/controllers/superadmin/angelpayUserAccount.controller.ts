@@ -45,14 +45,14 @@ import prisma from '../../utils/prismaClient'
 import { tpvCommandQueueService } from '../../services/tpv/command-queue.service'
 
 /**
- * Strip `pinEncrypted` from the response shape — the dashboard never needs
- * the ciphertext, and surfacing it widens the blast radius if an XSS bug
- * ever lands client-side. The PIN is set/rotated via dedicated endpoints,
- * never read back.
+ * Strip PIN material (`pin` plaintext + legacy `pinEncrypted`) from the
+ * response shape — the dashboard never needs the PIN, and surfacing it widens
+ * the blast radius if an XSS bug ever lands client-side. The PIN is set/rotated
+ * via dedicated endpoints, never read back.
  */
 function sanitize(account: any) {
   if (!account) return account
-  const { pinEncrypted: _pinEncrypted, ...rest } = account
+  const { pin: _pin, pinEncrypted: _pinEncrypted, ...rest } = account
   return rest
 }
 

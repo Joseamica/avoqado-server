@@ -8,10 +8,10 @@
  * Status lifecycle:
  *   PENDING_PIN → ACTIVE ↔ PIN_ROTATION_REQUIRED → SUSPENDED → DELETED
  *
- * pinEncrypted is nullable: null when status=PENDING_PIN (no PIN yet);
- *   { encrypted, iv } shape (AES-256-CBC) once setPin() lands. Encryption
- *   reuses the merchantAccount.service.ts helper for a single canonical
- *   credentials-at-rest format across all provider account types.
+ * pin is nullable plaintext: null when status=PENDING_PIN (no PIN yet);
+ *   the 6-digit PIN once setPin() lands. Stored plaintext by decision
+ *   (spec 2026-05-21-angelpay-merchant-wizard §6.1) — unrelated to
+ *   StaffVenue.pin.
  *
  * Convention note: this file follows the standalone-exported-function
  * pattern used by every other service in src/services/superadmin/
@@ -23,7 +23,6 @@
 import prisma from '../../utils/prismaClient'
 import { AngelPayAccountStatus, type AngelPayUserAccount } from '@prisma/client'
 import { BadRequestError, ConflictError, NotFoundError, ValidationError } from '../../errors/AppError'
-import { encryptCredentials } from './merchantAccount.service'
 import { tpvCommandQueueService } from '../tpv/command-queue.service'
 import logger from '../../config/logger'
 
@@ -42,8 +41,8 @@ export interface CreateAngelPayUserAccountInput {
  * Create a per-venue AngelPay user account.
  * - email validated against RFC-ish regex.
  * - pin (optional) must be 6 numeric digits.
- * - If pin provided: status=ACTIVE, pinEncrypted={ encrypted, iv }.
- * - If pin omitted: status=PENDING_PIN, pinEncrypted=null.
+ * - If pin provided: status=ACTIVE, pin stored plaintext.
+ * - If pin omitted: status=PENDING_PIN, pin=null.
  *
  * Multi-account per venue (2026-05-18): a venue can register multiple AngelPay
  * logins (one per AngelPay merchant when the venue runs several merchants
@@ -76,7 +75,7 @@ export async function createAngelPayUserAccount(input: CreateAngelPayUserAccount
     where: { venueId_email: { venueId: input.venueId, email: input.email } },
   })
 
-  const pinEncrypted = input.pin ? encryptCredentials(input.pin) : null
+  const pin = input.pin ?? null
   const status: AngelPayAccountStatus = input.pin ? AngelPayAccountStatus.ACTIVE : AngelPayAccountStatus.PENDING_PIN
 
   if (existing) {
@@ -87,7 +86,7 @@ export async function createAngelPayUserAccount(input: CreateAngelPayUserAccount
         where: { id: existing.id },
         data: {
           environment: input.environment,
-          pinEncrypted: pinEncrypted as any,
+          pin,
           status,
           statusChangedAt: new Date(),
           statusChangedBy: input.createdBy ?? null,
@@ -105,7 +104,7 @@ export async function createAngelPayUserAccount(input: CreateAngelPayUserAccount
         venueId: input.venueId,
         email: input.email,
         environment: input.environment,
-        pinEncrypted: pinEncrypted as any,
+        pin,
         status,
         statusChangedAt: new Date(),
         statusChangedBy: input.createdBy ?? null,
@@ -135,7 +134,7 @@ export async function setAngelPayUserAccountPin(id: string, newPin: string): Pro
   return prisma.angelPayUserAccount.update({
     where: { id },
     data: {
-      pinEncrypted: encryptCredentials(newPin) as any,
+      pin: newPin,
       status: AngelPayAccountStatus.ACTIVE,
       statusChangedAt: new Date(),
       statusReason: null,

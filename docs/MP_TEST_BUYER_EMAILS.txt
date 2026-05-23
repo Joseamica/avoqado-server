@@ -1,0 +1,57 @@
+==============================================================
+MERCADO PAGO — Test Credentials (sandbox post-verification)
+==============================================================
+App: Avoqado Marketplace MX (id 2551292920123796)
+Updated: 2026-05-21 (post account verification)
+
+==============================================================
+NUEVO SELLER FRESH (creado post-verificación 2026-05-21)
+==============================================================
+User ID:   3415452354
+Username:  TESTUSER7606027659655848214
+Password:  486bMC8V7U
+Email:     test_user_7606027659655848214@testuser.com
+
+USA ESTAS CREDENCIALES PARA LOGIN EN MP CUANDO HAGAS OAUTH
+(desconecta el seller anterior 3414699907 primero)
+
+==============================================================
+BUYER EMAIL PARA EL BRICK (del panel - mismo app que seller)
+==============================================================
+Buyer del panel (QA Buyer - MP Testing, id 3414699903):
+
+test_user_6115718530863174786@testuser.com
+
+(Confirmado por el usuario al loguear el buyer en mercadopago.com.mx)
+
+==============================================================
+BUYERS API (creados via POST /users/test_user — pueden estar en otra app)
+==============================================================
+test_user_5519805657547440830@testuser.com   (id 3404634748)
+test_user_2712977502740995172@testuser.com   (id 3415452264)
+test_user_6139726114107435377@testuser.com   (id 3415452258)
+
+==============================================================
+TARJETAS DE PRUEBA MX (MLM)
+==============================================================
+Mastercard crédito:  5474 9254 3267 0366  CVV 123  11/30
+Visa crédito:        4075 5957 1648 3764  CVV 123  11/30
+Amex crédito:        3711 803032 57522    CVV 1234 11/30
+Mastercard débito:   5579 0534 6148 2647  CVV 123  11/30
+Visa débito:         4189 1412 2126 7633  CVV 123  11/30
+
+NOMBRE TITULAR (controla el resultado):
+  APRO  = aprobado
+  OTHE  = rechazado fondos
+  CONT  = rechazado inválida
+  CALL  = pendiente
+
+==============================================================
+SELLER ANTERIOR (pre-verificación — puede estar en estado raro)
+==============================================================
+User ID:   3414699907
+Username:  TESTUSER6558699960249257250
+Password:  0IqXBxjWgM
+
+Si el nuevo seller (3415452354) funciona y el anterior no, sabremos
+que la verificación de la cuenta dev resolvió el bug 2034.

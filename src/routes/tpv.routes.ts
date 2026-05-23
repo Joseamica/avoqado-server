@@ -5031,6 +5031,34 @@ router.get(
   saleVerificationController.getPendingVerifications,
 )
 
+/**
+ * @openapi
+ * /tpv/verification/{verificationId}:
+ *   get:
+ *     summary: Get a single verification owned by the authenticated staff
+ *     description: Used by the TPV sale-correction flow to re-upload rejected documentation.
+ *     tags: [TPV - Sale Verification]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: verificationId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Verification detail
+ *       404:
+ *         description: Verification not found for this staff member
+ */
+router.get(
+  '/verification/:verificationId',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  saleVerificationController.getVerificationDetail,
+)
+
 // ══════════════════════════════════════════════════════════════════════════════
 // BARCODE QUICK ADD (Square POS "Scan & Go" Pattern)
 // ══════════════════════════════════════════════════════════════════════════════
@@ -5969,9 +5997,10 @@ router.get(
         const firstItem = order.items[0]
         const price = parseFloat(order.total.toString())
 
-        // Pick the verification from the most recent payment that has one.
+        // Pick the payment (and its verification) from the most recent payment that has one.
         // payments is already ordered by createdAt desc.
-        const verification = order.payments.find(p => p.saleVerification != null)?.saleVerification ?? null
+        const paymentWithVerification = order.payments.find(p => p.saleVerification != null) ?? null
+        const verification = paymentWithVerification?.saleVerification ?? null
 
         return {
           id: order.id,
@@ -5983,6 +6012,8 @@ router.get(
           paymentStatus: order.paymentStatus === PaymentStatus.PAID ? 'COMPLETED' : order.paymentStatus,
           isGift: price === 0,
           // Back-office review status (nullable for backwards compat with old TPV clients)
+          // paymentId is required by the TPV correction flow to re-upload proof-of-sale photos.
+          paymentId: paymentWithVerification?.id ?? null,
           verificationId: verification?.id ?? null,
           verificationStatus: verification?.status ?? null,
           reviewedAt: verification?.reviewedAt ? verification.reviewedAt.toISOString() : null,

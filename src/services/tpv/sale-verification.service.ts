@@ -327,6 +327,59 @@ export async function getPendingVerifications(venueId: string, staffId: string):
   }))
 }
 
+interface VerificationDetailResponse extends PendingVerificationResponse {
+  status: SaleVerificationStatus
+  rejectionReasons: string[]
+  reviewNotes: string | null
+}
+
+/**
+ * Get a single verification owned by a staff member, in the same shape the
+ * "Pendientes" screen consumes, plus the back-office review verdict.
+ * Used by the TPV sale-correction flow (Mis Ventas → "Revisar documentación"):
+ * the promoter taps a rejected sale and re-uploads the documentation photos.
+ */
+export async function getVerificationForCorrection(
+  venueId: string,
+  staffId: string,
+  verificationId: string,
+): Promise<VerificationDetailResponse> {
+  logger.info(`📸 [SALE VERIFICATION SERVICE] Getting verification ${verificationId} for correction (staff ${staffId})`)
+
+  const v = await prisma.saleVerification.findFirst({
+    where: { id: verificationId, venueId, staffId },
+    include: {
+      payment: {
+        select: {
+          id: true,
+          amount: true,
+          createdAt: true,
+          order: { select: { orderNumber: true } },
+        },
+      },
+    },
+  })
+
+  if (!v) {
+    throw new NotFoundError(`Verification ${verificationId} not found for staff ${staffId} in venue ${venueId}`)
+  }
+
+  return {
+    id: v.id,
+    paymentId: v.paymentId,
+    amount: v.payment.amount.toNumber(),
+    orderNumber: v.payment.order?.orderNumber ?? null,
+    date: v.createdAt.toISOString(),
+    serialNumbers: v.serialNumbers,
+    isPortabilidad: v.isPortabilidad,
+    photos: v.photos, // Preserves index positions (may contain empty strings for unfilled slots)
+    requiredPhotos: v.isPortabilidad ? 2 : 1,
+    status: v.status,
+    rejectionReasons: v.rejectionReasons,
+    reviewNotes: v.reviewNotes,
+  }
+}
+
 /**
  * Create or update proof-of-sale photo for a payment
  * Supports both:
@@ -408,17 +461,35 @@ export async function createOrUpdateProofOfSale(
     const requiredPhotos = existing.isPortabilidad ? 2 : 1
     const isComplete = nonEmptyPhotos.length >= requiredPhotos
 
+    // Correction flow (Asana: Administración de Ventas):
+    // Once the back-office has reviewed this verification at least once
+    // (reviewedAt set), ANY re-upload must return it to the review queue
+    // (PENDING) — never auto-complete — so the back-office re-checks the
+    // corrected docs. `reviewedAt` is kept as the "has been reviewed" marker
+    // so a multi-photo correction (portabilidad) doesn't auto-complete on the
+    // second upload after the first one flipped FAILED → PENDING.
+    const wasReviewed = existing.reviewedAt !== null
+    const isCorrectingRejection = existing.status === 'FAILED'
+
     logger.info(`📸 [SALE VERIFICATION SERVICE] Updated photos for verification ${existing.id}`, {
       totalPhotos: nonEmptyPhotos.length,
       requiredPhotos,
-      willComplete: isComplete,
+      willComplete: isComplete && !wasReviewed,
+      wasReviewed,
+      isCorrectingRejection,
     })
 
     verification = await prisma.saleVerification.update({
       where: { id: existing.id },
       data: {
         photos: updatedPhotos,
-        status: isComplete ? 'COMPLETED' : 'PENDING',
+        status: !wasReviewed && isComplete ? 'COMPLETED' : 'PENDING',
+        // Clear the stale rejection verdict so the back-office sees a fresh
+        // submission. Keep reviewedAt/reviewedById as the "reviewed" marker.
+        ...(isCorrectingRejection && {
+          rejectionReasons: [],
+          reviewNotes: null,
+        }),
       },
     })
   } else {

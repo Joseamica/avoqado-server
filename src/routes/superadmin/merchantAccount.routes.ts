@@ -59,6 +59,11 @@ router.post('/blumon/batch-auto-fetch', merchantAccountController.batchAutoFetch
 // Complete wizard setup: auto-fetch → assign terminals → cost structure → payment config → pricing → settlement
 router.post('/blumon/full-setup', merchantAccountController.fullSetupBlumonMerchant)
 
+// POST /api/v1/superadmin/merchant-accounts/full-setup-angelpay
+// One-shot AngelPay wizard: login + merchant + slot + terminals + cost + pricing
+// + settlement, all in one DB transaction (all-or-nothing).
+router.post('/full-setup-angelpay', merchantAccountController.fullSetupAngelPayMerchant)
+
 // POST /api/v1/superadmin/merchant-accounts/:id/blumon/refetch
 // Rotate OAuth/RSA/DUKPT credentials from Blumon for an EXISTING MerchantAccount.
 // Preserves account id + all linked Payment/Settlement history. If Blumon API

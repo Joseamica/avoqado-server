@@ -3,6 +3,19 @@
 Multi-tenant B2B SaaS for restaurant/venue management (POS, payments, inventory, staff). Express.js + TypeScript, PostgreSQL/Prisma,
 Socket.IO, Redis, RabbitMQ. Payments via Blumon (TPV + E-commerce) and Stripe (subscriptions).
 
+## Sister Repos (this repo is the hub of 10)
+
+`avoqado-server` is the backend hub; 9 client repos talk to it over `/api/v1/`. Full ecosystem map: workspace-root `../CLAUDE.md`.
+
+- **avoqado-web-dashboard** — React admin dashboard (venue owners/staff)
+- **avoqado-tpv** — Kotlin app, card payment processing on PAX terminals
+- **avoqado-android** / **avoqado-ios** — POS apps (menu/orders/tables) on tablets & phones
+- **avoqado-consumer-app** — React Native app, customers book appointments
+- **avoqado-booking-widget** — embeddable `<avoqado-booking>` web component
+- **avoqado-checkout** — hosted online payment page (Stripe + MercadoPago)
+- **avoqado-landing** — Astro marketing site
+- **avoqado-windows-service** — bridges an external SoftRestaurant POS in via RabbitMQ
+
 ## How This Configuration Works
 
 | Layer         | Location         | Loaded                  | Purpose                        |
@@ -116,7 +129,8 @@ wait stable, then APK. TPV sends `X-App-Version-Code` for conditional behavior.
 | -------------------- | ------------------------------------------------- |
 | All docs index       | `docs/README.md`                                  |
 | Architecture         | `docs/ARCHITECTURE_OVERVIEW.md`                   |
-| Database schema      | `docs/DATABASE_SCHEMA.md`                         |
+| Schema map (START HERE) | `docs/SCHEMA_MAP.md` — 206 models in 20 domains |
+| Database schema (full)  | `docs/DATABASE_SCHEMA.md`                       |
 | Permissions system   | `docs/PERMISSIONS_SYSTEM.md`                      |
 | Blumon TPV           | `docs/blumon-tpv/BLUMON_QUICK_REFERENCE.md`       |
 | Blumon E-commerce    | `docs/blumon-ecommerce/REFACTORING_COMPLETE.md`   |

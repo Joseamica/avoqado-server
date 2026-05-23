@@ -83,6 +83,20 @@ export async function toggleAggregator(req: Request, res: Response, next: NextFu
 }
 
 /**
+ * DELETE /api/v1/dashboard/superadmin/aggregators/:id
+ * Hard-delete; falla si el agregador tiene merchants/comisiones/tarifas ligadas.
+ */
+export async function deleteAggregator(req: Request, res: Response, next: NextFunction) {
+  try {
+    await aggregatorService.deleteAggregator(req.params.id)
+    logger.info('Aggregator deleted', { aggregatorId: req.params.id })
+    res.json({ success: true })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
  * POST /api/v1/superadmin/aggregators/:id/generate-token
  */
 export async function generateReportToken(req: Request, res: Response, next: NextFunction) {

@@ -488,6 +488,14 @@ export async function updateTerminal(
     data: {
       ...(data.name && { name: data.name }),
       ...(data.status && { status: data.status as any }),
+      // A superadmin setting a terminal to ACTIVE that was never activated
+      // counts as activation — stamp activatedAt (and activatedBy) so the
+      // heartbeat/login/payment layers treat it as a real activated terminal.
+      // Without this the terminal logs "Heartbeat from unactivated terminal"
+      // and login/payment endpoints stay blocked even though status=ACTIVE.
+      ...(data.status === 'ACTIVE' && !terminal.activatedAt
+        ? { activatedAt: new Date(), activatedBy: actor?.staffId ?? null }
+        : {}),
       // Task 54: clear assignedMerchantIds on venue change (cross-tenant
       // assignments are never valid). When venue isn't changing, defer to
       // explicit `assignedMerchantIds` from the caller.
@@ -514,6 +522,7 @@ export async function updateTerminal(
   for (const f of ['name', 'status', 'brand', 'model'] as const) {
     if (data[f] !== undefined) updatedFields.push(f)
   }
+  if (data.status === 'ACTIVE' && !terminal.activatedAt) updatedFields.push('activatedAt')
   const merchantsChanged = venueChanged || data.assignedMerchantIds !== undefined
   if (merchantsChanged) updatedFields.push('assignedMerchantIds')
   if (venueChanged) updatedFields.push('venueId')

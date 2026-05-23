@@ -1376,8 +1376,18 @@ async function main() {
       }
 
       // Asignar staff específico del venue
+      // PINs únicos por venue: recolectar los ya usados (incl. staff global) y evitar colisiones
+      const usedVenuePins = new Set(
+        (await prisma.staffVenue.findMany({ where: { venueId: venue.id }, select: { pin: true } }))
+          .map(sv => sv.pin)
+          .filter((p): p is string => p != null),
+      )
       for (const staffWithRole of venueSpecificStaff) {
-        const pin = faker.string.numeric(4)
+        let pin = faker.string.numeric(4)
+        while (usedVenuePins.has(pin)) {
+          pin = faker.string.numeric(4)
+        }
+        usedVenuePins.add(pin)
 
         await prisma.staffVenue.create({
           data: {

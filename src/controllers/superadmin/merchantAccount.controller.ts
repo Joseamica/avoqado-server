@@ -9,6 +9,8 @@ import { createBlumonTpvService } from '../../services/tpv/blumon-tpv.service'
 import prisma from '@/utils/prismaClient'
 import { assertMerchantTerminalCompatible } from '@/lib/providerDeviceCompatibility'
 import { IncompatibleDeviceError } from '@/errors/AppError'
+import { fullSetupAngelPaySchema } from '../../schemas/dashboard/angelpay-full-setup.schema'
+import { fullSetupAngelPayMerchant as fullSetupAngelPayMerchantService } from '../../services/superadmin/angelpayFullSetup.service'
 
 /**
  * MerchantAccount Controller
@@ -2129,6 +2131,32 @@ export async function refetchBlumonMerchantCredentials(req: Request, res: Respon
       message: result.migrated
         ? `Credenciales rotadas. ⚠️ Migración detectada: posId cambió de ${result.previousPosId ?? 'N/A'} → ${result.newPosId}. ${result.affectedTerminalsNotified} terminal(es) notificada(s).`
         : `Credenciales rotadas exitosamente. ${result.affectedTerminalsNotified} terminal(es) notificada(s).`,
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * POST /api/v1/dashboard/superadmin/merchant-accounts/full-setup-angelpay
+ * One-shot AngelPay account setup: login + merchant + slot + terminals + cost +
+ * pricing + settlement, all in one DB transaction (all-or-nothing).
+ */
+export async function fullSetupAngelPayMerchant(req: Request, res: Response, next: NextFunction) {
+  try {
+    const parsed = fullSetupAngelPaySchema.safeParse(req.body)
+    if (!parsed.success) {
+      const first = parsed.error.issues[0]
+      throw new BadRequestError(first?.message || 'Datos inválidos')
+    }
+
+    const createdBy = (req as Request & { user?: { id?: string } }).user?.id
+    const result = await fullSetupAngelPayMerchantService(parsed.data, createdBy)
+
+    res.status(201).json({
+      success: true,
+      data: result,
+      message: 'Cuenta AngelPay configurada exitosamente',
     })
   } catch (error) {
     next(error)

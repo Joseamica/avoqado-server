@@ -3270,11 +3270,11 @@ model PaymentProvider {
   configSchema Json? // JSON schema for validation
 
   // Relations
-  merchants          MerchantAccount[]
-  webhooks           WebhookSubscription[]
-  eventLogs          ProviderEventLog[]
-  costStructures     ProviderCostStructure[]
-  ecommerceMerchants EcommerceMerchant[] // ⭐ E-commerce channels using this provider
+  merchants              MerchantAccount[]
+  webhooks               WebhookSubscription[]
+  eventLogs              ProviderEventLog[]
+  costStructures         ProviderCostStructure[]
+  ecommerceMerchants     EcommerceMerchant[] // ⭐ E-commerce channels using this provider
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -3348,6 +3348,10 @@ model MerchantAccount {
   transactionCosts      TransactionCost[]
   settlementConfigs     SettlementConfiguration[]
   payments              Payment[] // ⭐ Track all payments processed by this merchant account
+  // Revenue-share configurable (cadena provider/agregador/Avoqado). Opcional:
+  // un merchant sin fila aquí mantiene el comportamiento histórico (toda la
+  // ganancia atribuida a Avoqado en reportes).
+  merchantRevenueShare  MerchantRevenueShare?
 
   // 🆕 AngelPay display fields (2026-05-17)
   // Optional caches for AngelPay MerchantOption display data. Source of truth
@@ -3412,7 +3416,12 @@ model AngelPayUserAccount {
   venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Restrict)
 
   email        String
-  pinEncrypted Json? // nullable. null = no PIN provisioned yet (status=PENDING_PIN). When present, shape: { encrypted: hex, iv: hex } produced by encryptCredentials() in src/services/superadmin/merchantAccount.service.ts
+  pin          String? // 6-digit AngelPay account PIN, plaintext. null = not provisioned yet (status=PENDING_PIN). Plaintext by decision (spec 2026-05-21-angelpay-merchant-wizard §6.1) — unrelated to StaffVenue.pin.
+  // LEGACY — pre-plaintext encrypted PIN { encrypted, iv }. New writes use `pin`.
+  // Kept for lazy migration: readers fall back to decrypting this when `pin` is
+  // null (rows created before the plaintext switch). Droppable once every row
+  // has `pin` populated. See spec §6.1.
+  pinEncrypted Json?
   environment  String @default("QA")
 
   status          AngelPayAccountStatus @default(PENDING_PIN)
@@ -4055,6 +4064,43 @@ model ProviderCostStructure {
   @@index([providerId])
   @@index([merchantAccountId])
   @@index([effectiveFrom])
+}
+
+/// Revenue-share configurable de una transacción entre el procesador (AngelPay/
+/// Blumon), el agregador (cuando hay) y Avoqado. Una fila por `MerchantAccount`.
+///
+/// Aditivo: un merchant SIN fila aquí mantiene el comportamiento histórico —
+/// todo el `grossProfit` se atribuye a Avoqado en reportes. La presencia/ausencia
+/// de `aggregatorPrice` distingue los 2 casos:
+///   - `aggregatorPrice = null`  → venta DIRECTA: 1 margen, split provider↔Avoqado.
+///   - `aggregatorPrice` poblado → vía AGREGADOR: 2 márgenes, 2 splits.
+///
+/// El proceso de pago NO usa este modelo; el cálculo es report-time
+/// (settlement, analytics). Spec: docs/superpowers/specs/2026-05-22-revenue-share-fee-model-design.md
+model MerchantRevenueShare {
+  id                String          @id @default(cuid())
+  merchantAccountId String          @unique
+  merchantAccount   MerchantAccount @relation(fields: [merchantAccountId], references: [id], onDelete: Cascade)
+
+  /// Precio que Avoqado le cobra al agregador, por tarjeta
+  /// `{DEBIT,CREDIT,AMEX,INTERNATIONAL}` (decimales 0..1). `null` = venta directa.
+  aggregatorPrice            Json?
+  aggregatorPriceIncludesTax Boolean  @default(false)
+
+  /// Fracción 0..1 del margen procesador→Avoqado que se queda Avoqado.
+  /// El resto va al provider. Default 0.50 (50/50, caso casi universal).
+  avoqadoShareOfProviderMargin   Decimal  @default(0.50) @db.Decimal(5, 4)
+  /// Fracción 0..1 del margen agregador→venue que se queda Avoqado.
+  /// El resto va al agregador. `null` cuando es venta directa.
+  avoqadoShareOfAggregatorMargin Decimal? @db.Decimal(5, 4)
+
+  taxRate   Decimal  @default(0.16) @db.Decimal(5, 4)
+  active    Boolean  @default(true)
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([active])
 }
 
 /// Pricing agreement we offer to a venue for processing via a particular

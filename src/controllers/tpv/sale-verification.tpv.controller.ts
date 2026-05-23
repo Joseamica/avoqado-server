@@ -203,6 +203,42 @@ export async function getPendingVerifications(req: Request, res: Response): Prom
 }
 
 /**
+ * GET /tpv/verification/:verificationId
+ * Get a single verification owned by the authenticated staff member.
+ * Used by the TPV sale-correction flow to re-upload rejected documentation.
+ */
+export async function getVerificationDetail(req: Request, res: Response): Promise<void> {
+  try {
+    const venueId = req.authContext?.venueId
+    const staffId = req.authContext?.userId
+    const { verificationId } = req.params
+
+    if (!venueId || !staffId) {
+      res.status(401).json({
+        success: false,
+        message: 'Unauthorized - Missing authentication context',
+      })
+      return
+    }
+
+    logger.info(`[SALE VERIFICATION CONTROLLER] GET /tpv/verification/${verificationId} - Staff: ${staffId}`)
+
+    const verification = await saleVerificationService.getVerificationForCorrection(venueId, staffId, verificationId)
+
+    res.status(200).json({
+      success: true,
+      data: verification,
+    })
+  } catch (error: any) {
+    logger.error(`[SALE VERIFICATION CONTROLLER] Error getting verification detail: ${error.message}`)
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || 'Internal server error',
+    })
+  }
+}
+
+/**
  * POST /tpv/verification/proof-of-sale
  * Create or update proof-of-sale photo for a payment
  * Supports:

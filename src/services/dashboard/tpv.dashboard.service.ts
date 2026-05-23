@@ -497,6 +497,7 @@ export interface TpvSettings {
   showGoals: boolean
   showMessages: boolean
   showTrainings: boolean
+  showCheckout: boolean
   // Evidence rules (PlayTelecom — boolean toggles)
   requireDepositPhoto?: boolean
   requireFacadePhoto?: boolean
@@ -546,6 +547,7 @@ const DEFAULT_TPV_SETTINGS: TpvSettings = {
   showGoals: true,
   showMessages: true,
   showTrainings: true,
+  showCheckout: true,
   // Cellular Failover — OFF by default for canary-style rollout
   cellularFailoverMode: 'OFF',
   cellularFailoverBadReadingsThreshold: 3,
