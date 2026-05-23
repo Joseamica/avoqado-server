@@ -278,14 +278,21 @@ export async function fullSetupAngelPayMerchant(input: FullSetupAngelPayInput, c
         }
 
         // ---- 7. Settlement (one config per main card type) ----
+        //
+        // El cliente PUEDE pasar `settlementDaysByCard` con un valor por tipo de
+        // tarjeta — caso típico: débito/crédito T+1, AMEX/Internacional T+3.
+        // Para cada cardType, primero busca el override en `settlementDaysByCard`;
+        // si no hay, cae al scalar `settlementDays` (compat hacia atrás).
         const settlementIds: string[] = []
         if (input.settlement) {
+          const byCard = input.settlement.settlementDaysByCard ?? {}
           for (const cardType of SETTLEMENT_CARD_TYPES) {
+            const daysForThisCard = byCard[cardType] ?? input.settlement.settlementDays
             const s = await tx.settlementConfiguration.create({
               data: {
                 merchantAccountId: merchantAccount.id,
                 cardType,
-                settlementDays: input.settlement.settlementDays,
+                settlementDays: daysForThisCard,
                 settlementDayType: input.settlement.settlementDayType,
                 cutoffTime: input.settlement.cutoffTime,
                 cutoffTimezone: input.settlement.cutoffTimezone,

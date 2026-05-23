@@ -81,7 +81,24 @@ export const fullSetupAngelPaySchema = z
       .optional(),
     settlement: z
       .object({
+        // Scalar legacy: aplica como default cuando un tipo de tarjeta NO tiene
+        // override en `settlementDaysByCard`. Sigue obligatorio para no romper
+        // clientes que solo manden este campo.
         settlementDays: z.number().int().min(0, 'Los días de liquidación no pueden ser negativos'),
+        /**
+         * Override per-card. Cada campo opcional; el backend hace
+         * `byCard[type] ?? scalar` al crear cada SettlementConfiguration row.
+         * Permite casos típicos como débito/crédito T+1 + AMEX/Internacional T+3
+         * sin tener que llamar 4 endpoints separados.
+         */
+        settlementDaysByCard: z
+          .object({
+            DEBIT: z.number().int().min(0).optional(),
+            CREDIT: z.number().int().min(0).optional(),
+            AMEX: z.number().int().min(0).optional(),
+            INTERNATIONAL: z.number().int().min(0).optional(),
+          })
+          .optional(),
         settlementDayType: z.enum(['BUSINESS_DAYS', 'CALENDAR_DAYS']),
         cutoffTime: z.string().min(1, 'Hora de corte requerida'),
         cutoffTimezone: z.string().min(1, 'Zona horaria de corte requerida'),
