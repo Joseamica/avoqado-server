@@ -1122,6 +1122,21 @@ export async function upsertDiscoveredAngelPayMerchants(input: {
    * via the dashboard if discovery first happened under a different account.
    */
   angelpayUserAccountId?: string
+  /**
+   * When true, the "zero-touch auto-onboarding" branch is SKIPPED — discovered
+   * merchants that aren't placeholders and don't have an existing row are
+   * returned in `skipped` instead of being silently created + auto-assigned
+   * to a VenuePaymentConfig slot.
+   *
+   * Set by `POST /tpv/angelpay/report-discovered-merchants` when the original
+   * dispatch came from the AngelPay wizard (which carries its own create+slot
+   * assignment step `fullSetupAngelPayMerchant`). Without this, the wizard
+   * conflicts: the TPV would auto-create the merchant + take PRIMARY,
+   * then step 9 of the wizard would try to create another and fail with
+   * "El slot PRIMARY ya está ocupado". Default false preserves the legacy
+   * zero-touch flow for non-wizard callers.
+   */
+  skipAutoOnboarding?: boolean
 }): Promise<{ created: number; updated: number; skipped: number }> {
   const angelpayProvider = await prisma.paymentProvider.findUnique({ where: { code: 'ANGELPAY' } })
   if (!angelpayProvider) {
@@ -1226,6 +1241,37 @@ export async function upsertDiscoveredAngelPayMerchants(input: {
       // /tpv/terminals/:serial/config endpoint only returns merchants assigned
       // to a slot). Without active=true, the dashboard MerchantAccounts page
       // hides them by default and admins can't tell anything happened.
+      //
+      // PREVIEW_ONLY (wizard) variant — create the row but inactive + slotless.
+      // The wizard reads from the same MerchantAccount table to populate its
+      // "merchants descubiertos" picker. If the operator picks one in step 3,
+      // step 9's `fullSetupAngelPayMerchant` runs with mode='existing' and
+      // reuses the row (activating it + assigning the slot the operator
+      // explicitly chose). If the operator abandons the wizard, the preview
+      // row stays around inactive and slotless — visible only as "Inactivo"
+      // in the MerchantAccounts dashboard, easy to clean up.
+      if (input.skipAutoOnboarding) {
+        const previewMerchant = await prisma.merchantAccount.create({
+          data: {
+            providerId: angelpayProvider.id,
+            externalMerchantId,
+            displayName: m.name,
+            active: false,
+            credentialsEncrypted: encryptCredentials({}),
+            angelpayAffiliation: m.affiliationNumber,
+            angelpayMerchantName: m.name,
+            ...(input.angelpayUserAccountId && { angelpayUserAccountId: input.angelpayUserAccountId }),
+          },
+        })
+        logger.info('Created preview-only merchant (wizard discovery, no slot)', {
+          venueId: input.venueId,
+          merchantAccountId: previewMerchant.id,
+          angelpayId: m.angelpayId,
+          externalMerchantId,
+        })
+        created++
+        continue
+      }
       await prisma.$transaction(async tx => {
         const newAccount = await tx.merchantAccount.create({
           data: {

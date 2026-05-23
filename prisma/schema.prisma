@@ -3433,6 +3433,27 @@ model AngelPayUserAccount {
   lastValidatedAt   DateTime?
   lastValidationErr String?
 
+  /**
+   * Ephemeral flag set by the dashboard's dispatch endpoint right before it
+   * triggers a TPV discovery command. The TPV reports back asynchronously to
+   * `POST /tpv/angelpay/report-discovered-merchants`, which reads + clears
+   * this flag and routes the upsert accordingly:
+   *   - null / 'AUTO_ONBOARD' (default, legacy): zero-touch — creates new
+   *     `MerchantAccount` rows and assigns them to the first free
+   *     `VenuePaymentConfig` slot. Used by older flows where there is no
+   *     wizard owning the merchant creation.
+   *   - 'PREVIEW_ONLY': skip auto-create + slot assignment. The wizard owns
+   *     the merchant creation (paso 9 = `fullSetupAngelPayMerchant`), so the
+   *     TPV report is only used to populate the wizard's "merchants
+   *     descubiertos" picker, never to silently persist.
+   *
+   * The column is cleared on consume so each dispatch only affects one report
+   * cycle. If multiple dispatches happen with different modes within the
+   * report window, last-write-wins (acceptable — the operator only runs one
+   * wizard at a time per venue).
+   */
+  pendingDiscoveryMode String?
+
   // Back-reference to MerchantAccount rows discovered/created under this
   // AngelPay login. Required so the dashboard can show "this account has
   // discovered N merchants" and so the TPV can attribute discovery reports

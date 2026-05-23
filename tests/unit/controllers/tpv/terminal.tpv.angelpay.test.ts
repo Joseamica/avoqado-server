@@ -195,7 +195,7 @@ describe('GET /tpv/terminals/:serialNumber/config — Task 13 (AngelPay)', () =>
     mockedGetAngelPayAccount.mockResolvedValue({
       id: 'apa-1',
       venueId: 'venue-1',
-      email: 'ops@avoqado.io',
+      email: 'hola@avoqado.io',
       pinEncrypted: { encrypted: 'enc(123456)', iv: 'iv-hex' },
       environment: 'QA',
       status: 'ACTIVE',
@@ -211,7 +211,7 @@ describe('GET /tpv/terminals/:serialNumber/config — Task 13 (AngelPay)', () =>
     expect(angelpayAuth).not.toBeNull()
     expect(angelpayAuth).toEqual({
       accountId: 'apa-1',
-      email: 'ops@avoqado.io',
+      email: 'hola@avoqado.io',
       pin: '123456',
       environment: 'QA',
     })
@@ -258,7 +258,7 @@ describe('GET /tpv/terminals/:serialNumber/config — Task 13 (AngelPay)', () =>
     mockedGetAngelPayAccount.mockResolvedValue({
       id: 'apa-1',
       venueId: 'venue-1',
-      email: 'ops@avoqado.io',
+      email: 'hola@avoqado.io',
       pinEncrypted: { encrypted: 'enc(123456)', iv: 'iv-hex' },
       environment: 'QA',
       status: 'PIN_ROTATION_REQUIRED',
@@ -316,7 +316,7 @@ describe('GET /tpv/terminals/:serialNumber/config — Task 13 (AngelPay)', () =>
     mockedGetAngelPayAccount.mockResolvedValue({
       id: 'apa-1',
       venueId: 'venue-1',
-      email: 'ops@avoqado.io',
+      email: 'hola@avoqado.io',
       pinEncrypted: { encrypted: 'enc(123456)', iv: 'iv-hex' },
       environment: 'QA',
       status: 'ACTIVE',

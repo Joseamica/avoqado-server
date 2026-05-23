@@ -440,9 +440,24 @@ export async function listAngelPayUserAccountsForVenue(req: Request, res: Respon
 export async function dispatchFetchAngelPayMerchantsForVenue(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId } = req.params
-    const { terminalId, angelpayUserAccountId } = (req.body ?? {}) as {
+    const { terminalId, angelpayUserAccountId, mode } = (req.body ?? {}) as {
       terminalId?: string
       angelpayUserAccountId?: string
+      /**
+       * Discovery mode for the report endpoint that fires asynchronously when
+       * the TPV reports back:
+       *   - 'AUTO_ONBOARD' (default, legacy): zero-touch — TPV report creates
+       *     MerchantAccount rows and assigns them to free VenuePaymentConfig
+       *     slots. Used by older flows where no wizard owns the merchant.
+       *   - 'PREVIEW_ONLY': the AngelPay wizard owns merchant creation in
+       *     step 9. The report only populates the wizard's "merchants
+       *     descubiertos" picker — no silent creation.
+       *
+       * Persisted via `AngelPayUserAccount.pendingDiscoveryMode` so the
+       * report endpoint (which has no way to look back at this dispatch
+       * directly) can route correctly when the TPV replies.
+       */
+      mode?: 'AUTO_ONBOARD' | 'PREVIEW_ONLY'
     }
 
     if (!venueId) {
@@ -531,6 +546,21 @@ export async function dispatchFetchAngelPayMerchantsForVenue(req: Request, res: 
     const payload: Record<string, any> = {}
     if (angelpayUserAccountId) {
       payload.angelpayUserAccountId = angelpayUserAccountId
+    }
+
+    // Persist the discovery mode flag on the AngelPayUserAccount BEFORE
+    // dispatching the TPV command. The TPV's report endpoint reads + clears
+    // this flag and routes the upsert accordingly:
+    //   - PREVIEW_ONLY (wizard flow) → skip zero-touch auto-create.
+    //   - null / AUTO_ONBOARD (legacy) → keep historical behavior.
+    // Stored per AngelPay account so multi-account venues don't cross-pollute.
+    // Only flips when an explicit account is targeted — otherwise the legacy
+    // unbound discovery (smart picker) keeps its auto-onboard semantics.
+    if (angelpayUserAccountId && mode) {
+      await prisma.angelPayUserAccount.update({
+        where: { id: angelpayUserAccountId },
+        data: { pendingDiscoveryMode: mode },
+      })
     }
 
     const result = await tpvCommandQueueService.queueCommand({

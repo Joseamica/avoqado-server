@@ -67,7 +67,7 @@ describe('AngelPayUserAccountService', () => {
       await expect(
         createAngelPayUserAccount({
           venueId: 'venue-1',
-          email: 'ops@avoqado.io',
+          email: 'hola@avoqado.io',
           pin: 'abc123',
           environment: 'QA',
         }),
@@ -76,7 +76,7 @@ describe('AngelPayUserAccountService', () => {
       await expect(
         createAngelPayUserAccount({
           venueId: 'venue-1',
-          email: 'ops@avoqado.io',
+          email: 'hola@avoqado.io',
           pin: '12345',
           environment: 'QA',
         }),
@@ -85,7 +85,7 @@ describe('AngelPayUserAccountService', () => {
       await expect(
         createAngelPayUserAccount({
           venueId: 'venue-1',
-          email: 'ops@avoqado.io',
+          email: 'hola@avoqado.io',
           pin: '1234567',
           environment: 'QA',
         }),
@@ -114,7 +114,7 @@ describe('AngelPayUserAccountService', () => {
 
       const result = await createAngelPayUserAccount({
         venueId: 'venue-1',
-        email: 'ops@avoqado.io',
+        email: 'hola@avoqado.io',
         environment: 'QA',
       })
 
@@ -125,7 +125,7 @@ describe('AngelPayUserAccountService', () => {
       // See spec 2026-05-21-angelpay-merchant-wizard §6.1.
       expect(createArg.data.pin).toBeNull()
       expect(createArg.data.venueId).toBe('venue-1')
-      expect(createArg.data.email).toBe('ops@avoqado.io')
+      expect(createArg.data.email).toBe('hola@avoqado.io')
       expect(createArg.data.environment).toBe('QA')
       expect(result.status).toBe('PENDING_PIN')
     })
@@ -136,7 +136,7 @@ describe('AngelPayUserAccountService', () => {
 
       const result = await createAngelPayUserAccount({
         venueId: 'venue-1',
-        email: 'ops@avoqado.io',
+        email: 'hola@avoqado.io',
         pin: '123456',
         environment: 'QA',
         createdBy: 'staff-1',
@@ -159,7 +159,7 @@ describe('AngelPayUserAccountService', () => {
       await expect(
         createAngelPayUserAccount({
           venueId: 'venue-1',
-          email: 'ops@avoqado.io',
+          email: 'hola@avoqado.io',
           environment: 'QA',
         }),
       ).rejects.toThrow(ConflictError)
@@ -289,7 +289,7 @@ describe('AngelPayUserAccountService', () => {
 
   describe('getForTerminal()', () => {
     it('returns account via terminal→venue join', async () => {
-      const account = { id: 'a1', venueId: 'venue-1', email: 'ops@avoqado.io', status: 'ACTIVE' }
+      const account = { id: 'a1', venueId: 'venue-1', email: 'hola@avoqado.io', status: 'ACTIVE' }
       // Multi-account per venue (2026-05-18): the relation changed from
       // `venue.angelpayUserAccount` (singular) to `venue.angelpayUserAccounts`
       // (plural array). The service preserves single-account contract by

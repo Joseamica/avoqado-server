@@ -163,6 +163,21 @@ export async function reportDiscoveredMerchants(req: Request, res: Response, nex
       throw new NotFoundError(`AngelPayUserAccount ${accountId} not found`)
     }
 
+    // Consume the discovery mode flag set by the dispatch endpoint right before
+    // it queued the TPV command. PREVIEW_ONLY means the wizard owns merchant
+    // creation in its step 9; if we let the legacy auto-onboard run here it
+    // races the wizard and steals the PRIMARY slot, surfacing as a 409 nine
+    // steps later. We clear the flag immediately so any subsequent fire-and-
+    // forget TPV report (e.g., terminal reboot triggering ensureAuthenticated)
+    // falls back to the historical auto-onboard behavior.
+    const skipAutoOnboarding = account.pendingDiscoveryMode === 'PREVIEW_ONLY'
+    if (account.pendingDiscoveryMode != null) {
+      await prisma.angelPayUserAccount.update({
+        where: { id: accountId },
+        data: { pendingDiscoveryMode: null },
+      })
+    }
+
     const result = await upsertDiscoveredAngelPayMerchants({
       venueId: account.venueId,
       merchants,
@@ -174,6 +189,7 @@ export async function reportDiscoveredMerchants(req: Request, res: Response, nex
       // repoint B's reserved slot to the existing row instead of leaving B's
       // placeholder AWAITING_ forever.
       angelpayUserAccountId: accountId,
+      skipAutoOnboarding,
     })
 
     logger.info('AngelPay auto-discovered merchants reported by TPV', {
@@ -181,6 +197,7 @@ export async function reportDiscoveredMerchants(req: Request, res: Response, nex
       accountId,
       venueId: account.venueId,
       terminalSerial: req.authContext?.terminalSerialNumber,
+      mode: skipAutoOnboarding ? 'PREVIEW_ONLY' : 'AUTO_ONBOARD',
       ...result,
     })
 
