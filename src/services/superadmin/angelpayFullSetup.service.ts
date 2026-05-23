@@ -42,10 +42,7 @@ export interface FullSetupAngelPayResult {
   settlementIds: string[]
 }
 
-export async function fullSetupAngelPayMerchant(
-  input: FullSetupAngelPayInput,
-  createdBy?: string,
-): Promise<FullSetupAngelPayResult> {
+export async function fullSetupAngelPayMerchant(input: FullSetupAngelPayInput, createdBy?: string): Promise<FullSetupAngelPayResult> {
   // Fast-fail validation before opening the transaction.
   if (input.merchant.mode === 'create' && !isNumericMerchantId(input.merchant.externalMerchantId)) {
     throw new ValidationError('El ID del merchant debe ser numérico')
@@ -175,9 +172,7 @@ export async function fullSetupAngelPayMerchant(
         })
         if (!existingConfig) {
           if (input.slot.accountType !== 'PRIMARY') {
-            throw new BadRequestError(
-              'El venue no tiene configuración de pagos — el primer slot debe ser PRIMARY',
-            )
+            throw new BadRequestError('El venue no tiene configuración de pagos — el primer slot debe ser PRIMARY')
           }
           await tx.venuePaymentConfig.create({
             data: {
@@ -204,8 +199,7 @@ export async function fullSetupAngelPayMerchant(
           const data: Record<string, string | null> = { [slotColumn]: merchantAccount.id }
           if (input.slot.fromSlot && input.slot.fromSlot !== input.slot.accountType) {
             const fromColumn = SLOT_COLUMN[input.slot.fromSlot]
-            data[fromColumn] =
-              input.slot.moveStrategy === 'swap' ? (input.slot.replacedAccountId ?? null) : null
+            data[fromColumn] = input.slot.moveStrategy === 'swap' ? (input.slot.replacedAccountId ?? null) : null
           }
           await tx.venuePaymentConfig.update({ where: { venueId: input.venueId }, data })
         }

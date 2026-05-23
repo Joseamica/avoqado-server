@@ -49,19 +49,14 @@ const round2 = (n: number) => Math.round(n * 100) / 100
 /** Si un fee "incluye IVA", lo devolvemos pre-IVA dividiendo por `(1 + taxRate)`.
  *  Si no, ya es pre-IVA y pasa tal cual. El revenue-share se reparte SIEMPRE
  *  sobre montos pre-IVA. */
-const preIva = (fee: number, includesTax: boolean, taxRate: number) =>
-  includesTax ? fee / (1 + taxRate) : fee
+const preIva = (fee: number, includesTax: boolean, taxRate: number) => (includesTax ? fee / (1 + taxRate) : fee)
 
 export function computeRevenueSplit(input: RevenueSplitInput): RevenueSplit {
   const { amount, cardType, providerCostRate, venueChargeRate, share } = input
   const taxRate = share?.taxRate ?? 0.16
 
-  const providerCost = round2(
-    preIva(amount * providerCostRate, input.providerCostIncludesTax, taxRate),
-  )
-  const venueCharge = round2(
-    preIva(amount * venueChargeRate, input.venueChargeIncludesTax, taxRate),
-  )
+  const providerCost = round2(preIva(amount * providerCostRate, input.providerCostIncludesTax, taxRate))
+  const venueCharge = round2(preIva(amount * venueChargeRate, input.venueChargeIncludesTax, taxRate))
 
   let providerNet: number
   let avoqadoNet: number
@@ -79,13 +74,7 @@ export function computeRevenueSplit(input: RevenueSplitInput): RevenueSplit {
     providerNet = round2(venueCharge - avoqadoNet)
   } else {
     // Con agregador: 2 márgenes, 2 splits.
-    aggregatorPrice = round2(
-      preIva(
-        amount * share.aggregatorPrice[cardType],
-        share.aggregatorPriceIncludesTax,
-        taxRate,
-      ),
-    )
+    aggregatorPrice = round2(preIva(amount * share.aggregatorPrice[cardType], share.aggregatorPriceIncludesTax, taxRate))
     const m1 = aggregatorPrice - providerCost
     const m2 = venueCharge - aggregatorPrice
     const aggShare = share.avoqadoShareOfAggregatorMargin ?? 0
@@ -96,8 +85,7 @@ export function computeRevenueSplit(input: RevenueSplitInput): RevenueSplit {
     aggregatorNet = round2(m2 - avoFromM2)
   }
 
-  const iva = (fee: number, includesTax: boolean) =>
-    includesTax ? 0 : round2(fee * taxRate)
+  const iva = (fee: number, includesTax: boolean) => (includesTax ? 0 : round2(fee * taxRate))
 
   return {
     providerNet,
@@ -105,9 +93,7 @@ export function computeRevenueSplit(input: RevenueSplitInput): RevenueSplit {
     aggregatorNet,
     ivaByLayer: {
       provider: iva(providerCost, input.providerCostIncludesTax),
-      aggregator: share?.aggregatorPrice
-        ? iva(aggregatorPrice, share.aggregatorPriceIncludesTax)
-        : 0,
+      aggregator: share?.aggregatorPrice ? iva(aggregatorPrice, share.aggregatorPriceIncludesTax) : 0,
       venue: iva(venueCharge, input.venueChargeIncludesTax),
     },
   }

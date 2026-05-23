@@ -81,8 +81,7 @@ export async function computeRevenueReport(filters: ReportFilters): Promise<Merc
               : null,
           aggregatorPriceIncludesTax: ms.aggregatorPriceIncludesTax,
           avoqadoShareOfProviderMargin: Number(ms.avoqadoShareOfProviderMargin),
-          avoqadoShareOfAggregatorMargin:
-            ms.avoqadoShareOfAggregatorMargin == null ? null : Number(ms.avoqadoShareOfAggregatorMargin),
+          avoqadoShareOfAggregatorMargin: ms.avoqadoShareOfAggregatorMargin == null ? null : Number(ms.avoqadoShareOfAggregatorMargin),
           taxRate: Number(ms.taxRate),
         }
       : null

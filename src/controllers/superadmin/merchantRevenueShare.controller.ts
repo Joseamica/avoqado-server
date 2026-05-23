@@ -1,10 +1,7 @@
 import { Request, Response, NextFunction } from 'express'
 import * as service from '../../services/superadmin/merchantRevenueShare.service'
 import { computeRevenueReport } from '../../services/payments/revenueShareReport.service'
-import {
-  createMerchantRevenueShareSchema,
-  updateMerchantRevenueShareSchema,
-} from '../../schemas/dashboard/merchant-revenue-share.schema'
+import { createMerchantRevenueShareSchema, updateMerchantRevenueShareSchema } from '../../schemas/dashboard/merchant-revenue-share.schema'
 import { BadRequestError } from '../../errors/AppError'
 
 /** GET /merchant-revenue-shares?active= */

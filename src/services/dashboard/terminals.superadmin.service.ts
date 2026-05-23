@@ -493,9 +493,7 @@ export async function updateTerminal(
       // heartbeat/login/payment layers treat it as a real activated terminal.
       // Without this the terminal logs "Heartbeat from unactivated terminal"
       // and login/payment endpoints stay blocked even though status=ACTIVE.
-      ...(data.status === 'ACTIVE' && !terminal.activatedAt
-        ? { activatedAt: new Date(), activatedBy: actor?.staffId ?? null }
-        : {}),
+      ...(data.status === 'ACTIVE' && !terminal.activatedAt ? { activatedAt: new Date(), activatedBy: actor?.staffId ?? null } : {}),
       // Task 54: clear assignedMerchantIds on venue change (cross-tenant
       // assignments are never valid). When venue isn't changing, defer to
       // explicit `assignedMerchantIds` from the caller.

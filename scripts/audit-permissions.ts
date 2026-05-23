@@ -107,19 +107,19 @@ const SUPERADMIN_ONLY_ALLOWLIST = new Set<string>([
 const CATALOG_GAP_ALLOWLIST = new Set<string>([
   // Destructive/financial — intentionally only via wildcard in DEFAULT_PERMISSIONS:
   'payments:delete', // ADMIN+ via `payments:*`. Splitting off would let a custom role
-                     // delete payments without owning the rest of payments management.
+  // delete payments without owning the rest of payments management.
   'payments:update', // Same reasoning.
   'orders:delete',
   'reviews:delete',
   'settlements:write', // Confirms settlement incidents (financial reconciliation).
-                       // ADMIN+ via `settlements:*` is the deliberate floor. If a
-                       // venue needs more granular control later, split into
-                       // `settlements:confirm-incident`, `settlements:create-payout`, etc.
+  // ADMIN+ via `settlements:*` is the deliberate floor. If a
+  // venue needs more granular control later, split into
+  // `settlements:confirm-incident`, `settlements:create-payout`, etc.
   'venues:manage', // Toggles Google OAuth integrations, venue-level config (1280, 1352,
-                   // 1377, 1510, 1582 in dashboard.routes.ts). ADMIN+ via `venues:*` is
-                   // the floor — if a client needs IT staff who can configure
-                   // integrations without full venue management, decompose into
-                   // `venues:integrations` etc. and add those to the catalog.
+  // 1377, 1510, 1582 in dashboard.routes.ts). ADMIN+ via `venues:*` is
+  // the floor — if a client needs IT staff who can configure
+  // integrations without full venue management, decompose into
+  // `venues:integrations` etc. and add those to the catalog.
 ])
 
 const ARG_STRICT = process.argv.includes('--strict')
@@ -192,9 +192,7 @@ function extractCatalog(): {
     console.error('FATAL: Could not parse INDIVIDUAL_PERMISSIONS_BY_RESOURCE from permissions.ts')
     process.exit(2)
   }
-  const individual = new Set<string>(
-    Array.from(catalogMatch[1].matchAll(/'([a-z][a-zA-Z0-9_:.-]+:[a-z][a-zA-Z0-9_-]+)'/g)).map(m => m[1]),
-  )
+  const individual = new Set<string>(Array.from(catalogMatch[1].matchAll(/'([a-z][a-zA-Z0-9_:.-]+:[a-z][a-zA-Z0-9_-]+)'/g)).map(m => m[1]))
 
   // PERMISSION_DEPENDENCIES — full map of `'X': ['Y', 'Z']` entries. Two uses:
   //  1. `dependencyKeys` set silences TPV_CLIENT_ONLY when a bridge exists.
@@ -231,11 +229,7 @@ function extractCatalog(): {
  * include it (e.g. `features:update` in catalog has alias deps to
  * `features:write`, so assigning `features:update` grants both).
  */
-function isAssignableFromCatalog(
-  perm: string,
-  catalog: Set<string>,
-  dependencies: Map<string, string[]>,
-): boolean {
+function isAssignableFromCatalog(perm: string, catalog: Set<string>, dependencies: Map<string, string[]>): boolean {
   if (catalog.has(perm)) return true
   for (const [key, values] of dependencies) {
     if (catalog.has(key) && values.includes(perm)) return true
@@ -245,7 +239,7 @@ function isAssignableFromCatalog(
 
 /**
  * Strip JSDoc / block comments + line comments from a source file before scanning.
- * Without this, `<PermissionGate permission="analytics:export">` inside a `/** ... *​/`
+ * Without this, `<PermissionGate permission="analytics:export">` inside a JSDoc-style
  * example block gets scraped as a real gate → false-positive DASHBOARD_DEAD_GATE.
  */
 function stripComments(src: string): string {
@@ -263,7 +257,7 @@ function extractClientGates(client: ClientRepo): PermUsage[] {
   walkDir(root, client.fileExt, file => {
     const raw = fs.readFileSync(file, 'utf8')
     // Strip comments before scanning so JSDoc examples like
-    //   /** Usage: <PermissionGate permission="analytics:export">...*​/
+    //   /** Usage: <PermissionGate permission="analytics:export">...*\/
     // don't get reported as a real gate.
     const content = stripComments(raw)
     for (const { kind, regex } of client.patterns) {
@@ -409,7 +403,10 @@ function main(): void {
           code: 'DASHBOARD_PHANTOM',
           perm,
           message: `Dashboard gate references a permission no role can satisfy. Likely a typo or stale string.`,
-          occurrences: dashboardUsages.filter(u => u.perm === perm).map(u => u.location).slice(0, 3),
+          occurrences: dashboardUsages
+            .filter(u => u.perm === perm)
+            .map(u => u.location)
+            .slice(0, 3),
         })
       } else {
         issues.push({
@@ -417,7 +414,10 @@ function main(): void {
           code: 'DASHBOARD_DEAD_GATE',
           perm,
           message: `Dashboard gates this but no backend endpoint checks it. Either gate-only UI by design, or backend gate missing.`,
-          occurrences: dashboardUsages.filter(u => u.perm === perm).map(u => u.location).slice(0, 3),
+          occurrences: dashboardUsages
+            .filter(u => u.perm === perm)
+            .map(u => u.location)
+            .slice(0, 3),
         })
       }
     }
@@ -432,7 +432,10 @@ function main(): void {
         code: 'TPV_PHANTOM',
         perm,
         message: `TPV client checks this permission but no role can satisfy it.`,
-        occurrences: tpvUsages.filter(u => u.perm === perm).map(u => u.location).slice(0, 3),
+        occurrences: tpvUsages
+          .filter(u => u.perm === perm)
+          .map(u => u.location)
+          .slice(0, 3),
       })
     } else if (!backendPermsSet.has(perm)) {
       // If perm is a key in PERMISSION_DEPENDENCIES, the developer wired up an
@@ -448,7 +451,10 @@ function main(): void {
         code: 'TPV_CLIENT_ONLY',
         perm,
         message: `TPV gates this client-side but no backend endpoint checks the same name and no PERMISSION_DEPENDENCIES bridge exists. Add a bridge (e.g. tpv-orders:comp → orders:comp) or wire the backend gate to the same string.`,
-        occurrences: tpvUsages.filter(u => u.perm === perm).map(u => u.location).slice(0, 3),
+        occurrences: tpvUsages
+          .filter(u => u.perm === perm)
+          .map(u => u.location)
+          .slice(0, 3),
       })
     }
   }
