@@ -102,15 +102,17 @@ export async function fetchRenderLogs(
     return { enabled: false, disabledReason: config.reason, logs: [], hasMore: false }
   }
 
-  const query: Record<string, string | string[]> = {
-    'resource[]': [config.serviceId],
-    direction: 'backward',
-    limit: String(Math.min(params.limit ?? 100, 100)),
-  }
-  if (params.level) query['level[]'] = [params.level]
-  if (params.type) query['type[]'] = [params.type]
-  if (params.startTime) query.startTime = params.startTime
-  if (params.endTime) query.endTime = params.endTime
+  // Render API espera params repetidos (`?resource=srv-x&resource=srv-y`),
+  // NO el `resource[]=...` que axios serializa por default. Construimos la
+  // URL con URLSearchParams para tener control fino y no depender de `qs`.
+  const search = new URLSearchParams()
+  search.append('resource', config.serviceId)
+  search.append('direction', 'backward')
+  search.append('limit', String(Math.min(params.limit ?? 100, 100)))
+  if (params.level) search.append('level', params.level)
+  if (params.type) search.append('type', params.type)
+  if (params.startTime) search.append('startTime', params.startTime)
+  if (params.endTime) search.append('endTime', params.endTime)
 
   try {
     const { data } = await axios.get<{
@@ -122,8 +124,7 @@ export async function fetchRenderLogs(
         message: string
         labels: Array<{ name: string; value: string }>
       }>
-    }>(`${RENDER_API_BASE}/logs`, {
-      params: query,
+    }>(`${RENDER_API_BASE}/logs?${search.toString()}`, {
       headers: {
         Authorization: `Bearer ${config.apiKey}`,
         Accept: 'application/json',
