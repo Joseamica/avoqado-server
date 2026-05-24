@@ -632,10 +632,25 @@ describe('Reservation Dashboard Service', () => {
         )
       })
 
-      it('should reject PENDING -> NO_SHOW (must be confirmed first)', async () => {
+      // PENDING -> NO_SHOW is intentionally allowed so the auto-no-show worker
+      // can mark unconfirmed reservations whose customer never arrived (e.g.
+      // autoConfirm=false venues, or unpaid-deposit reservations past startsAt).
+      it('should transition PENDING -> NO_SHOW (unconfirmed customer never arrived)', async () => {
         prismaMock.reservation.findFirst.mockResolvedValue(createMockReservation({ status: 'PENDING' }))
+        prismaMock.reservation.update.mockResolvedValue(createMockReservation({ status: 'NO_SHOW' }))
+        prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(createMockReservation({ status: 'NO_SHOW' }))
 
-        await expect(markNoShow(VENUE_ID, 'res-1', STAFF_ID)).rejects.toThrow(BadRequestError)
+        const result = await markNoShow(VENUE_ID, 'res-1', STAFF_ID)
+
+        expect(result.status).toBe('NO_SHOW')
+        expect(prismaMock.reservation.updateMany).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({
+              status: 'NO_SHOW',
+              noShowAt: expect.any(Date),
+            }),
+          }),
+        )
       })
     })
 

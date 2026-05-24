@@ -411,17 +411,12 @@ export async function getMerchantAccount(id: string, includeCredentials: boolean
   // may occupy the same venue in multiple slots (rare but possible). Same
   // logic as the list endpoint.
   const venueMap = new Map<string, { id: string; name: string; slug: string }>()
-  for (const vc of [
-    ...account.venueConfigsPrimary,
-    ...account.venueConfigsSecondary,
-    ...account.venueConfigsTertiary,
-  ]) {
+  for (const vc of [...account.venueConfigsPrimary, ...account.venueConfigsSecondary, ...account.venueConfigsTertiary]) {
     venueMap.set(vc.venue.id, vc.venue)
   }
 
   // Compute total venue configs count
-  const venueConfigsCount =
-    account._count.venueConfigsPrimary + account._count.venueConfigsSecondary + account._count.venueConfigsTertiary
+  const venueConfigsCount = account._count.venueConfigsPrimary + account._count.venueConfigsSecondary + account._count.venueConfigsTertiary
 
   return {
     ...account,

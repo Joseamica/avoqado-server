@@ -28,8 +28,15 @@ import { publishPushNotification } from '@/communication/rabbitmq/gcal-push-cons
 
 // ---- State Machine ----
 
+// PENDING → NO_SHOW is allowed: the auto-no-show worker (and dashboard staff) need
+// to be able to mark a reservation as no-show even when it never advanced past
+// PENDING — e.g. autoConfirm=false venues where staff never confirmed, or deposit-
+// required reservations where the customer never paid. In both cases the customer
+// didn't arrive, which is the business definition of "no-show". The no-show fee
+// path in the job (depositStatus='PAID'-gated) prevents accidental fee capture
+// on unpaid PENDING reservations.
 const VALID_TRANSITIONS: Record<ReservationStatus, ReservationStatus[]> = {
-  PENDING: ['CONFIRMED', 'CANCELLED'],
+  PENDING: ['CONFIRMED', 'CANCELLED', 'NO_SHOW'],
   CONFIRMED: ['CHECKED_IN', 'CANCELLED', 'NO_SHOW'],
   CHECKED_IN: ['COMPLETED'],
   COMPLETED: [],

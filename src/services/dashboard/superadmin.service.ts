@@ -123,6 +123,19 @@ export interface SuperadminVenue {
   approvedBy?: string
   createdAt: string
   updatedAt: string
+  /**
+   * Flags de completitud del setup del venue. Permiten al UI mostrar de un
+   * vistazo qué tiene configurado y qué falta. **Aditivo** — campo opcional;
+   * los consumidores legacy lo ignoran sin romperse.
+   */
+  completeness?: {
+    hasOwner: boolean
+    hasTerminal: boolean
+    hasMerchantAccount: boolean
+    hasKycDocs: boolean
+    hasPricing: boolean
+    kycVerified: boolean
+  }
 }
 
 /**
@@ -247,34 +260,24 @@ export async function getAllVenuesForSuperadmin(includeDemos = false): Promise<S
   try {
     const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1)
 
-    // Fetch venues without loading all orders+payments into memory
+    // Fetch venues sin cargar todas las órdenes/pagos en memoria.
+    // El staff include trae OWNER + ADMIN (un staff con OWNER es el dueño
+    // legal del venue; legacy data tiene el dueño como ADMIN, así que
+    // mantenemos ambos en la query y priorizamos OWNER al elegir).
     const venues = await prisma.venue.findMany({
       where: includeDemos ? undefined : PRODUCTION_VENUE_FILTER,
       include: {
         organization: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-            phone: true,
-          },
+          select: { id: true, name: true, email: true, phone: true },
         },
         staff: {
-          where: {
-            role: 'ADMIN',
-          },
+          where: { role: { in: ['OWNER', 'ADMIN'] } },
           include: {
             staff: {
-              select: {
-                id: true,
-                firstName: true,
-                lastName: true,
-                email: true,
-                phone: true,
-              },
+              select: { id: true, firstName: true, lastName: true, email: true, phone: true },
             },
           },
-          take: 1,
+          take: 5,
         },
       },
     })
@@ -282,7 +285,6 @@ export async function getAllVenuesForSuperadmin(includeDemos = false): Promise<S
     const venueIds = venues.map(v => v.id)
 
     // Aggregate revenue and transaction counts at the database level (avoids loading 100K+ rows)
-    // Both use payment.createdAt as the temporal base to ensure consistent AOV calculation
     const revenueByVenue = await prisma.payment.groupBy({
       by: ['venueId'],
       where: {
@@ -294,23 +296,54 @@ export async function getAllVenuesForSuperadmin(includeDemos = false): Promise<S
       _count: true,
     })
 
+    // Setup-completeness queries — paralelas, una sola request al motor por flag.
+    const [terminalCounts, paymentConfigs, pricingStructures] = await Promise.all([
+      prisma.terminal.groupBy({
+        by: ['venueId'],
+        where: { venueId: { in: venueIds } },
+        _count: { _all: true },
+      }),
+      prisma.venuePaymentConfig.findMany({
+        where: { venueId: { in: venueIds } },
+        select: { venueId: true, primaryAccountId: true },
+      }),
+      prisma.venuePricingStructure.groupBy({
+        by: ['venueId'],
+        where: { venueId: { in: venueIds } },
+        _count: { _all: true },
+      }),
+    ])
+
     const revenueMap = new Map(revenueByVenue.map(r => [r.venueId, r._sum.amount?.toNumber() || 0]))
     const ordersMap = new Map(revenueByVenue.map(r => [r.venueId, r._count]))
+    const terminalCountMap = new Map(terminalCounts.map(t => [t.venueId, t._count._all]))
+    const paymentConfigMap = new Map(
+      paymentConfigs.map(p => [p.venueId, !!p.primaryAccountId]),
+    )
+    const pricingCountMap = new Map(pricingStructures.map(p => [p.venueId, p._count._all]))
 
     return venues.map(venue => {
       const monthlyRevenue = revenueMap.get(venue.id) || 0
       const totalTransactions = ordersMap.get(venue.id) || 0
       const averageOrderValue = totalTransactions > 0 ? monthlyRevenue / totalTransactions : 0
-      const ownerRel = venue.staff[0]
-      const owner = ownerRel?.staff
+
+      // Owner = primer staff con rol OWNER. Si no hay, primer ADMIN (legacy data).
+      const ownerStaff = venue.staff.find(s => s.role === 'OWNER') ?? venue.staff.find(s => s.role === 'ADMIN')
+      const owner = ownerStaff?.staff
         ? {
-            id: ownerRel.staff.id,
-            firstName: ownerRel.staff.firstName,
-            lastName: ownerRel.staff.lastName,
-            email: ownerRel.staff.email,
-            phone: ownerRel.staff.phone,
+            id: ownerStaff.staff.id,
+            firstName: ownerStaff.staff.firstName,
+            lastName: ownerStaff.staff.lastName,
+            email: ownerStaff.staff.email,
+            phone: ownerStaff.staff.phone,
           }
         : { id: '', firstName: 'Unknown', lastName: 'Owner', email: 'unknown@email.com' }
+
+      // KYC docs: el venue tiene al menos UN documento subido — chequeamos el INE
+      // como proxy (es el primer doc del flujo Blumon). No requiere los 4-6
+      // todos completos para que el flag sea true; es indicador de "está en
+      // proceso", no de "está terminado". `kycVerified` separa eso último.
+      const hasKycDocs = !!venue.idDocumentUrl || !!venue.taxDocumentUrl
 
       return {
         id: venue.id,
@@ -350,6 +383,14 @@ export async function getAllVenuesForSuperadmin(includeDemos = false): Promise<S
         suspensionReason: venue.suspensionReason || null,
         createdAt: venue.createdAt.toISOString(),
         updatedAt: venue.updatedAt.toISOString(),
+        completeness: {
+          hasOwner: !!ownerStaff,
+          hasTerminal: (terminalCountMap.get(venue.id) ?? 0) > 0,
+          hasMerchantAccount: paymentConfigMap.get(venue.id) === true,
+          hasKycDocs,
+          hasPricing: (pricingCountMap.get(venue.id) ?? 0) > 0,
+          kycVerified: venue.kycStatus === 'VERIFIED',
+        },
       }
     })
   } catch (error) {
