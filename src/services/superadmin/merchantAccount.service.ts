@@ -363,6 +363,20 @@ export async function getMerchantAccount(id: string, includeCredentials: boolean
         orderBy: { effectiveFrom: 'desc' },
         take: 5,
       },
+      // Venue relations — the dashboard's edit panel (MerchantSetupPanel)
+      // needs venues[0].id to hydrate Venue/Slot/Pricing cards. Without
+      // these joins the singular endpoint silently omits the venues array,
+      // forcing the client to fall back to the list endpoint (which IS
+      // expensive on large datasets). Mirror the list endpoint's pattern.
+      venueConfigsPrimary: {
+        select: { venue: { select: { id: true, name: true, slug: true } } },
+      },
+      venueConfigsSecondary: {
+        select: { venue: { select: { id: true, name: true, slug: true } } },
+      },
+      venueConfigsTertiary: {
+        select: { venue: { select: { id: true, name: true, slug: true } } },
+      },
       _count: {
         select: {
           costStructures: true,
@@ -393,11 +407,28 @@ export async function getMerchantAccount(id: string, includeCredentials: boolean
     includeCredentials,
   })
 
+  // Deduplicate venues across primary/secondary/tertiary configs — a merchant
+  // may occupy the same venue in multiple slots (rare but possible). Same
+  // logic as the list endpoint.
+  const venueMap = new Map<string, { id: string; name: string; slug: string }>()
+  for (const vc of [
+    ...account.venueConfigsPrimary,
+    ...account.venueConfigsSecondary,
+    ...account.venueConfigsTertiary,
+  ]) {
+    venueMap.set(vc.venue.id, vc.venue)
+  }
+
   // Compute total venue configs count
-  const venueConfigsCount = account._count.venueConfigsPrimary + account._count.venueConfigsSecondary + account._count.venueConfigsTertiary
+  const venueConfigsCount =
+    account._count.venueConfigsPrimary + account._count.venueConfigsSecondary + account._count.venueConfigsTertiary
 
   return {
     ...account,
+    venueConfigsPrimary: undefined,
+    venueConfigsSecondary: undefined,
+    venueConfigsTertiary: undefined,
+    venues: Array.from(venueMap.values()),
     _count: {
       costStructures: account._count.costStructures,
       venueConfigs: venueConfigsCount,
