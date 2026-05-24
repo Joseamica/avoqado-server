@@ -289,9 +289,7 @@ export async function hardDeleteAngelPayUserAccount(
   const merchantIds = existing.merchantAccounts.map(m => m.id)
 
   if (merchantIds.length > 0 && !opts.cascadeMerchants) {
-    throw new ConflictError(
-      `Account has ${merchantIds.length} merchant(s) still bound. Detach them first or pass cascadeMerchants=true.`,
-    )
+    throw new ConflictError(`Account has ${merchantIds.length} merchant(s) still bound. Detach them first or pass cascadeMerchants=true.`)
   }
 
   const result = await prisma.$transaction(async tx => {

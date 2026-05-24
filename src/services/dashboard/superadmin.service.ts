@@ -317,9 +317,7 @@ export async function getAllVenuesForSuperadmin(includeDemos = false): Promise<S
     const revenueMap = new Map(revenueByVenue.map(r => [r.venueId, r._sum.amount?.toNumber() || 0]))
     const ordersMap = new Map(revenueByVenue.map(r => [r.venueId, r._count]))
     const terminalCountMap = new Map(terminalCounts.map(t => [t.venueId, t._count._all]))
-    const paymentConfigMap = new Map(
-      paymentConfigs.map(p => [p.venueId, !!p.primaryAccountId]),
-    )
+    const paymentConfigMap = new Map(paymentConfigs.map(p => [p.venueId, !!p.primaryAccountId]))
     const pricingCountMap = new Map(pricingStructures.map(p => [p.venueId, p._count._all]))
 
     return venues.map(venue => {
