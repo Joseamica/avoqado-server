@@ -194,7 +194,18 @@ export async function createMerchantAccount(req: Request, res: Response, next: N
 export async function updateMerchantAccount(req: Request, res: Response, next: NextFunction) {
   try {
     const { id } = req.params
-    const { externalMerchantId, alias, displayName, active, displayOrder, credentials, providerConfig } = req.body
+    const {
+      externalMerchantId,
+      alias,
+      displayName,
+      active,
+      displayOrder,
+      credentials,
+      providerConfig,
+      // string | null → re-bind or detach the merchant's AngelPay account.
+      // undefined leaves the field unchanged.
+      angelpayUserAccountId,
+    } = req.body
 
     const account = await merchantAccountService.updateMerchantAccount(id, {
       externalMerchantId,
@@ -204,6 +215,7 @@ export async function updateMerchantAccount(req: Request, res: Response, next: N
       displayOrder,
       credentials,
       providerConfig,
+      angelpayUserAccountId,
     })
 
     logger.info('Merchant account updated via API', {

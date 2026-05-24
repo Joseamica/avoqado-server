@@ -218,6 +218,15 @@ interface UpdateMerchantAccountData {
     [key: string]: any
   }
   providerConfig?: any
+  /**
+   * Re-bind (or unbind) this merchant from an AngelPayUserAccount.
+   * - string    → attach to that login
+   * - null      → detach (merchant becomes orphan w.r.t. AngelPay credentials).
+   *               Useful when consolidating logins or before re-attaching to
+   *               another account. Schema is `String?` so null is permitted.
+   * - undefined → leave unchanged (default behavior).
+   */
+  angelpayUserAccountId?: string | null
 }
 
 /**
@@ -632,6 +641,12 @@ export async function updateMerchantAccount(id: string, data: UpdateMerchantAcco
   if (data.displayOrder !== undefined) updateData.displayOrder = data.displayOrder
   if (data.credentials) updateData.credentialsEncrypted = updatedCredentials
   if (data.providerConfig !== undefined) updateData.providerConfig = data.providerConfig
+  // `angelpayUserAccountId` accepts null (detach) — discriminate explicitly
+  // so an absent key doesn't accidentally clear the relation. The column has
+  // `onDelete: SetNull` in Prisma so null is a valid assignment.
+  if (data.angelpayUserAccountId !== undefined) {
+    updateData.angelpayUserAccountId = data.angelpayUserAccountId
+  }
 
   const account = await prisma.merchantAccount.update({
     where: { id },
