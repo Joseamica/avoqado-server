@@ -30,7 +30,9 @@ import {
   getAngelPayUserAccountById,
   getAngelPayUserAccountByVenueId,
   getAngelPayUserAccountsByVenueId,
+  hardDeleteAngelPayUserAccount,
   markAngelPayUserAccountRotationRequired,
+  reactivateAngelPayUserAccount,
   setAngelPayUserAccountPin,
   softDeleteAngelPayUserAccount,
   suspendAngelPayUserAccount,
@@ -247,7 +249,9 @@ export async function updateAngelPayUserAccountStatusController(req: Request, re
     if (!id) {
       throw new BadRequestError('id is required')
     }
-    if (!reason || typeof reason !== 'string') {
+    // Reactivation does not require a reason (it's a recovery operation,
+    // not a punitive state change). Other transitions still do.
+    if (status !== 'ACTIVE' && (!reason || typeof reason !== 'string')) {
       throw new BadRequestError('reason is required')
     }
 
@@ -265,6 +269,10 @@ export async function updateAngelPayUserAccountStatusController(req: Request, re
         break
       case 'SUSPENDED':
         account = await suspendAngelPayUserAccount(id, reason, changedBy)
+        break
+      case 'ACTIVE':
+        // Reactivation: only valid from DELETED (service enforces this).
+        account = await reactivateAngelPayUserAccount(id, changedBy)
         break
       default:
         throw new BadRequestError(`Unsupported status transition: ${String(status)}`)
@@ -358,8 +366,19 @@ export async function approveAngelPayDiscoveredMerchantController(req: Request, 
 /**
  * DELETE /api/v1/superadmin/angelpay-accounts/:id
  *
- * Soft delete — sets status=DELETED. The row is preserved for audit /
- * report-error backfill purposes (FK from validation logs etc.).
+ * Default (no query params) — soft delete. Sets status=DELETED, preserves
+ * the row for audit / FK references / backfill.
+ *
+ * Query params (opt-in):
+ *   - `?hard=true`           → physically remove the row from the DB.
+ *                              409 Conflict if any merchant is still bound
+ *                              (operator must detach first OR pass cascade).
+ *   - `?hard=true&cascade=true` → detach every bound merchant
+ *                              (angelpayUserAccountId=null) inside the same
+ *                              transaction, then delete the row.
+ *
+ * Soft delete is the safe default. Hard delete is reserved for cleanup
+ * (test data, GDPR, decommission).
  */
 export async function deleteAngelPayUserAccountController(req: Request, res: Response, next: NextFunction) {
   try {
@@ -374,6 +393,24 @@ export async function deleteAngelPayUserAccountController(req: Request, res: Res
     }
 
     const changedBy = (req as any).user?.uid ?? 'unknown'
+    const hard = req.query.hard === 'true' || req.query.hard === '1'
+    const cascade = req.query.cascade === 'true' || req.query.cascade === '1'
+
+    if (hard) {
+      const result = await hardDeleteAngelPayUserAccount(id, changedBy, { cascadeMerchants: cascade })
+      // No `account` to return — the row is gone. Surface the cleanup result.
+      res.json({
+        success: true,
+        data: {
+          deleted: true,
+          mode: 'hard',
+          accountId: result.deletedAccountId,
+          detachedMerchantIds: result.detachedMerchantIds,
+        },
+      })
+      return
+    }
+
     const account = await softDeleteAngelPayUserAccount(id, changedBy)
 
     logger.info('AngelPay user account soft-deleted', {

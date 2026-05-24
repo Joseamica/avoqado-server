@@ -229,6 +229,94 @@ export async function softDeleteAngelPayUserAccount(id: string, changedBy: strin
 }
 
 /**
+ * Reactivate a DELETED AngelPay account → ACTIVE (or PENDING_PIN if it has no
+ * PIN yet). Useful when an operator soft-deleted a row by mistake or wants to
+ * un-archive a previously decommissioned login without going through the
+ * create flow.
+ *
+ * - Throws ConflictError if the account isn't in DELETED state.
+ * - Does NOT touch credentials — PIN, email, environment stay as they were.
+ * - statusChangedAt + statusChangedBy reflect this reactivation event.
+ */
+export async function reactivateAngelPayUserAccount(id: string, changedBy: string): Promise<AngelPayUserAccount> {
+  const existing = await prisma.angelPayUserAccount.findUnique({ where: { id } })
+  if (!existing) throw new NotFoundError(`AngelPay account ${id} not found`)
+  if (existing.status !== AngelPayAccountStatus.DELETED) {
+    throw new ConflictError(`Only DELETED accounts can be reactivated. Current status: ${existing.status}`)
+  }
+  const nextStatus = existing.pin ? AngelPayAccountStatus.ACTIVE : AngelPayAccountStatus.PENDING_PIN
+  return prisma.angelPayUserAccount.update({
+    where: { id },
+    data: {
+      status: nextStatus,
+      statusChangedAt: new Date(),
+      statusChangedBy: changedBy,
+      statusReason: null,
+      lastValidationErr: null,
+    },
+  })
+}
+
+/**
+ * Hard-delete an AngelPay account — physically remove the row from the DB.
+ *
+ * Unlike `softDeleteAngelPayUserAccount`, this does NOT preserve the audit
+ * trail. Use only for cleanup (test data, GDPR, decommission). Operators
+ * normally want soft delete.
+ *
+ * Behavior re: merchant relations:
+ *  - The `MerchantAccount.angelpayUserAccountId` FK has `onDelete: SetNull`
+ *    in Prisma, so any merchants still bound to this account become orphan
+ *    (`angelpayUserAccountId = null`).
+ *  - To prevent silent orphaning, this function checks the count first:
+ *    - if `cascadeMerchants=false` (default) and there are bound merchants,
+ *      throws ConflictError with the count → caller must detach first OR
+ *      retry with `cascadeMerchants=true`.
+ *    - if `cascadeMerchants=true`, the explicit SetNull is applied in the
+ *      same transaction (defensive against FK behavior changes) and then
+ *      the row is deleted.
+ */
+export async function hardDeleteAngelPayUserAccount(
+  id: string,
+  changedBy: string,
+  opts: { cascadeMerchants: boolean } = { cascadeMerchants: false },
+): Promise<{ deletedAccountId: string; detachedMerchantIds: string[] }> {
+  const existing = await prisma.angelPayUserAccount.findUnique({
+    where: { id },
+    include: { merchantAccounts: { select: { id: true } } },
+  })
+  if (!existing) throw new NotFoundError(`AngelPay account ${id} not found`)
+  const merchantIds = existing.merchantAccounts.map(m => m.id)
+
+  if (merchantIds.length > 0 && !opts.cascadeMerchants) {
+    throw new ConflictError(
+      `Account has ${merchantIds.length} merchant(s) still bound. Detach them first or pass cascadeMerchants=true.`,
+    )
+  }
+
+  const result = await prisma.$transaction(async tx => {
+    if (merchantIds.length > 0) {
+      await tx.merchantAccount.updateMany({
+        where: { angelpayUserAccountId: id },
+        data: { angelpayUserAccountId: null },
+      })
+    }
+    await tx.angelPayUserAccount.delete({ where: { id } })
+    return { deletedAccountId: id, detachedMerchantIds: merchantIds }
+  })
+
+  logger.info('AngelPay user account hard-deleted', {
+    event: 'angelpay.account.hard_deleted',
+    accountId: id,
+    changedBy,
+    detachedMerchants: merchantIds.length,
+    cascadeMerchants: opts.cascadeMerchants,
+  })
+
+  return result
+}
+
+/**
  * Called by TPV after a successful AngelPay SDK validation handshake.
  * Records the SDK-returned externalUserId for future lookups and clears
  * any prior validation error. Does NOT change status.

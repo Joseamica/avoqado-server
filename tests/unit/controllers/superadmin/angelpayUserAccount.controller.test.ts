@@ -22,7 +22,9 @@ import {
   createAngelPayUserAccount,
   getAngelPayUserAccountById,
   getAngelPayUserAccountByVenueId,
+  hardDeleteAngelPayUserAccount,
   markAngelPayUserAccountRotationRequired,
+  reactivateAngelPayUserAccount,
   setAngelPayUserAccountPin,
   softDeleteAngelPayUserAccount,
   suspendAngelPayUserAccount,
@@ -32,7 +34,9 @@ jest.mock('@/services/superadmin/angelpayUserAccount.service', () => ({
   createAngelPayUserAccount: jest.fn(),
   getAngelPayUserAccountById: jest.fn(),
   getAngelPayUserAccountByVenueId: jest.fn(),
+  hardDeleteAngelPayUserAccount: jest.fn(),
   markAngelPayUserAccountRotationRequired: jest.fn(),
+  reactivateAngelPayUserAccount: jest.fn(),
   setAngelPayUserAccountPin: jest.fn(),
   softDeleteAngelPayUserAccount: jest.fn(),
   suspendAngelPayUserAccount: jest.fn(),
@@ -41,7 +45,9 @@ jest.mock('@/services/superadmin/angelpayUserAccount.service', () => ({
 const mockedCreate = createAngelPayUserAccount as jest.Mock
 const mockedGetById = getAngelPayUserAccountById as jest.Mock
 const mockedGetByVenue = getAngelPayUserAccountByVenueId as jest.Mock
+const mockedHardDelete = hardDeleteAngelPayUserAccount as jest.Mock
 const mockedMarkRotation = markAngelPayUserAccountRotationRequired as jest.Mock
+const mockedReactivate = reactivateAngelPayUserAccount as jest.Mock
 const mockedSetPin = setAngelPayUserAccountPin as jest.Mock
 const mockedSoftDelete = softDeleteAngelPayUserAccount as jest.Mock
 const mockedSuspend = suspendAngelPayUserAccount as jest.Mock
@@ -243,7 +249,9 @@ describe('PATCH /superadmin/angelpay-accounts/:id/status', () => {
   it('rejects unsupported status transitions via next(BadRequestError)', async () => {
     const req = makeReq({
       params: { id: 'acct-1' } as any,
-      body: { status: 'ACTIVE', reason: 'restore please' },
+      // Use a value that is genuinely unsupported. ACTIVE is now valid
+      // (reactivation path) so a different sentinel is needed.
+      body: { status: 'PENDING_PIN', reason: 'random' },
     })
     const res = makeRes()
     const next = jest.fn() as unknown as NextFunction
@@ -252,12 +260,32 @@ describe('PATCH /superadmin/angelpay-accounts/:id/status', () => {
 
     expect(mockedMarkRotation).not.toHaveBeenCalled()
     expect(mockedSuspend).not.toHaveBeenCalled()
+    expect(mockedReactivate).not.toHaveBeenCalled()
     expect((next as jest.Mock).mock.calls[0][0]).toMatchObject({ statusCode: 400 })
+  })
+
+  it('dispatches to reactivateAngelPayUserAccount for ACTIVE (DELETED → ACTIVE)', async () => {
+    mockedGetById.mockResolvedValue({ id: 'acct-1', status: 'DELETED' })
+    mockedReactivate.mockResolvedValue({ id: 'acct-1', status: 'ACTIVE' })
+
+    const req = makeReq({
+      params: { id: 'acct-1' } as any,
+      // ACTIVE intentionally omits `reason` to assert the new "reason is
+      // optional for reactivation" branch.
+      body: { status: 'ACTIVE' },
+    })
+    const res = makeRes()
+    const next = jest.fn() as unknown as NextFunction
+
+    await updateAngelPayUserAccountStatusController(req, res, next)
+
+    expect(mockedReactivate).toHaveBeenCalledWith('acct-1', 'admin-staff-1')
+    expect(res.__json.data.status).toBe('ACTIVE')
   })
 })
 
 describe('DELETE /superadmin/angelpay-accounts/:id', () => {
-  it('soft-deletes when the account exists', async () => {
+  it('soft-deletes when the account exists (default — no query params)', async () => {
     mockedGetById.mockResolvedValue({ id: 'acct-1' })
     mockedSoftDelete.mockResolvedValue({ id: 'acct-1', status: 'DELETED' })
 
@@ -268,6 +296,45 @@ describe('DELETE /superadmin/angelpay-accounts/:id', () => {
     await deleteAngelPayUserAccountController(req, res, next)
 
     expect(mockedSoftDelete).toHaveBeenCalledWith('acct-1', 'admin-staff-1')
+    expect(mockedHardDelete).not.toHaveBeenCalled()
     expect(res.__json.data.status).toBe('DELETED')
+  })
+
+  it('hard-deletes when ?hard=true', async () => {
+    mockedGetById.mockResolvedValue({ id: 'acct-1' })
+    mockedHardDelete.mockResolvedValue({ deletedAccountId: 'acct-1', detachedMerchantIds: [] })
+
+    const req = makeReq({
+      params: { id: 'acct-1' } as any,
+      query: { hard: 'true' } as any,
+    })
+    const res = makeRes()
+    const next = jest.fn() as unknown as NextFunction
+
+    await deleteAngelPayUserAccountController(req, res, next)
+
+    expect(mockedHardDelete).toHaveBeenCalledWith('acct-1', 'admin-staff-1', { cascadeMerchants: false })
+    expect(mockedSoftDelete).not.toHaveBeenCalled()
+    expect(res.__json.data).toMatchObject({ deleted: true, mode: 'hard', accountId: 'acct-1' })
+  })
+
+  it('hard-deletes with cascade when ?hard=true&cascade=true', async () => {
+    mockedGetById.mockResolvedValue({ id: 'acct-1' })
+    mockedHardDelete.mockResolvedValue({
+      deletedAccountId: 'acct-1',
+      detachedMerchantIds: ['m1', 'm2'],
+    })
+
+    const req = makeReq({
+      params: { id: 'acct-1' } as any,
+      query: { hard: 'true', cascade: 'true' } as any,
+    })
+    const res = makeRes()
+    const next = jest.fn() as unknown as NextFunction
+
+    await deleteAngelPayUserAccountController(req, res, next)
+
+    expect(mockedHardDelete).toHaveBeenCalledWith('acct-1', 'admin-staff-1', { cascadeMerchants: true })
+    expect(res.__json.data.detachedMerchantIds).toEqual(['m1', 'm2'])
   })
 })
