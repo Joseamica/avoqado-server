@@ -84,13 +84,10 @@ let cachedOwnerId: string | null = null
 
 async function getOwnerId(apiKey: string, serviceId: string): Promise<string> {
   if (cachedOwnerId) return cachedOwnerId
-  const { data } = await axios.get<{ ownerId: string }>(
-    `${RENDER_API_BASE}/services/${serviceId}`,
-    {
-      headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
-      timeout: 10_000,
-    },
-  )
+  const { data } = await axios.get<{ ownerId: string }>(`${RENDER_API_BASE}/services/${serviceId}`, {
+    headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
+    timeout: 20_000,
+  })
   if (!data.ownerId) {
     throw new Error('Render API returned a service without an ownerId — verify RENDER_SERVICE_ID.')
   }
@@ -99,7 +96,7 @@ async function getOwnerId(apiKey: string, serviceId: string): Promise<string> {
 }
 
 function findLabel(labels: Array<{ name: string; value: string }>, name: string): string | null {
-  return labels.find((l) => l.name === name)?.value ?? null
+  return labels.find(l => l.name === name)?.value ?? null
 }
 
 function normalizeLevel(value: string | null): RenderLogLevel | null {
@@ -118,9 +115,7 @@ function normalizeType(value: string | null): RenderLogType | null {
   return null
 }
 
-export async function fetchRenderLogs(
-  params: FetchRenderLogsParams = {},
-): Promise<RenderLogsResponse> {
+export async function fetchRenderLogs(params: FetchRenderLogsParams = {}): Promise<RenderLogsResponse> {
   const config = isConfigured()
   if (!config.ok) {
     return { enabled: false, disabledReason: config.reason, logs: [], hasMore: false }
@@ -158,10 +153,10 @@ export async function fetchRenderLogs(
         Authorization: `Bearer ${config.apiKey}`,
         Accept: 'application/json',
       },
-      timeout: 10_000,
+      timeout: 20_000,
     })
 
-    let logs: RenderLogEntry[] = data.logs.map((entry) => ({
+    let logs: RenderLogEntry[] = data.logs.map(entry => ({
       id: entry.id,
       timestamp: entry.timestamp,
       message: entry.message,
@@ -173,7 +168,7 @@ export async function fetchRenderLogs(
     // Server-side filtro de búsqueda (Render no la expone como query).
     if (params.search) {
       const needle = params.search.toLowerCase()
-      logs = logs.filter((l) => l.message.toLowerCase().includes(needle))
+      logs = logs.filter(l => l.message.toLowerCase().includes(needle))
     }
 
     return {
@@ -185,8 +180,7 @@ export async function fetchRenderLogs(
   } catch (error) {
     if (isAxiosError(error)) {
       const status = error.response?.status
-      const renderMessage =
-        (error.response?.data as { message?: string } | undefined)?.message ?? error.message
+      const renderMessage = (error.response?.data as { message?: string } | undefined)?.message ?? error.message
 
       if (status === 401 || status === 403) {
         return {

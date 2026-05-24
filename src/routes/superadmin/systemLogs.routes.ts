@@ -7,11 +7,7 @@
  */
 
 import { Router, type Request, type Response, type NextFunction } from 'express'
-import {
-  fetchRenderLogs,
-  type RenderLogLevel,
-  type RenderLogType,
-} from '@/services/superadmin/render-logs.service'
+import { fetchRenderLogs, type RenderLogLevel, type RenderLogType } from '@/services/superadmin/render-logs.service'
 
 const router = Router()
 
@@ -19,15 +15,11 @@ const VALID_LEVELS: RenderLogLevel[] = ['info', 'warning', 'error']
 const VALID_TYPES: RenderLogType[] = ['app', 'request', 'build', 'deploy']
 
 function asLevel(value: unknown): RenderLogLevel | undefined {
-  return typeof value === 'string' && (VALID_LEVELS as string[]).includes(value)
-    ? (value as RenderLogLevel)
-    : undefined
+  return typeof value === 'string' && (VALID_LEVELS as string[]).includes(value) ? (value as RenderLogLevel) : undefined
 }
 
 function asType(value: unknown): RenderLogType | undefined {
-  return typeof value === 'string' && (VALID_TYPES as string[]).includes(value)
-    ? (value as RenderLogType)
-    : undefined
+  return typeof value === 'string' && (VALID_TYPES as string[]).includes(value) ? (value as RenderLogType) : undefined
 }
 
 /**

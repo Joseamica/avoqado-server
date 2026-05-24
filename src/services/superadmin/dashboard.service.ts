@@ -43,14 +43,7 @@ export interface SuperadminDashboardSummary {
 export async function getSuperadminDashboardSummary(): Promise<SuperadminDashboardSummary> {
   const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000)
 
-  const [
-    venueByStatus,
-    terminalByStatus,
-    venueByKyc,
-    staffTotal,
-    paymentStats,
-    activityLast24h,
-  ] = await Promise.all([
+  const [venueByStatus, terminalByStatus, venueByKyc, staffTotal, paymentStats, activityLast24h] = await Promise.all([
     prisma.venue.groupBy({
       by: ['status'],
       _count: { _all: true },
@@ -74,12 +67,9 @@ export async function getSuperadminDashboardSummary(): Promise<SuperadminDashboa
     }),
   ])
 
-  const venueCount = (status: VenueStatus): number =>
-    venueByStatus.find((row) => row.status === status)?._count._all ?? 0
-  const terminalCount = (status: TerminalStatus): number =>
-    terminalByStatus.find((row) => row.status === status)?._count._all ?? 0
-  const kycCount = (status: VerificationStatus): number =>
-    venueByKyc.find((row) => row.kycStatus === status)?._count._all ?? 0
+  const venueCount = (status: VenueStatus): number => venueByStatus.find(row => row.status === status)?._count._all ?? 0
+  const terminalCount = (status: TerminalStatus): number => terminalByStatus.find(row => row.status === status)?._count._all ?? 0
+  const kycCount = (status: VerificationStatus): number => venueByKyc.find(row => row.kycStatus === status)?._count._all ?? 0
 
   // Payment.status uses the `TransactionStatus` enum (COMPLETED, FAILED,
   // PENDING, PROCESSING, REFUNDED) — not PaymentStatus. We only count FAILED
