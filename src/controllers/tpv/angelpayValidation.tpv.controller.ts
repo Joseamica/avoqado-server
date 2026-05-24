@@ -163,14 +163,24 @@ export async function reportDiscoveredMerchants(req: Request, res: Response, nex
       throw new NotFoundError(`AngelPayUserAccount ${accountId} not found`)
     }
 
-    // Consume the discovery mode flag set by the dispatch endpoint right before
-    // it queued the TPV command. PREVIEW_ONLY means the wizard owns merchant
-    // creation in its step 9; if we let the legacy auto-onboard run here it
-    // races the wizard and steals the PRIMARY slot, surfacing as a 409 nine
-    // steps later. We clear the flag immediately so any subsequent fire-and-
-    // forget TPV report (e.g., terminal reboot triggering ensureAuthenticated)
-    // falls back to the historical auto-onboard behavior.
-    const skipAutoOnboarding = account.pendingDiscoveryMode === 'PREVIEW_ONLY'
+    // Discovery mode (2026-05-24 update — invert default to PREVIEW_ONLY):
+    //
+    //   - PREVIEW_ONLY (default — was: null/AUTO_ONBOARD): create the discovered
+    //     rows INACTIVE + slotless. The dashboard's setup panel owns activation
+    //     (Activar merchant in MerchantSetupPanel calls fullSetupAngelPayMerchant).
+    //   - AUTO_ONBOARD: legacy zero-touch — auto-create active + take a slot.
+    //     Only honored when the dispatch endpoint set the flag EXPLICITLY.
+    //
+    // Why the flip: the TPV reports merchants on every reboot / SDK
+    // re-authentication, not just after a dashboard-triggered fetch. Under
+    // the previous default, that meant every terminal reboot recreated the
+    // merchants we just cleaned up — an infinite loop. PREVIEW_ONLY-by-default
+    // makes the report idempotent: rebooting the TPV no longer mutates state.
+    //
+    // We still consume the flag (clear it after read) so an explicit
+    // AUTO_ONBOARD request from the dashboard only runs once. After the
+    // single use, subsequent fire-and-forget reports go back to PREVIEW_ONLY.
+    const skipAutoOnboarding = account.pendingDiscoveryMode !== 'AUTO_ONBOARD'
     if (account.pendingDiscoveryMode != null) {
       await prisma.angelPayUserAccount.update({
         where: { id: accountId },
