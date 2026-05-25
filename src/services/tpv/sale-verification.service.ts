@@ -2,6 +2,7 @@ import { SaleVerificationStatus, Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
+import { moduleService, MODULE_CODES } from '../modules/module.service'
 
 // ============================================================
 // Sale Verification Service
@@ -105,6 +106,13 @@ export async function createSaleVerification(venueId: string, data: CreateSaleVe
     throw new NotFoundError(`Staff ${data.staffId} not found in venue ${venueId}`)
   }
 
+  // Backend is source of truth: venues with a back-office review step
+  // (serialized inventory) can NEVER be auto-completed by the client. If the
+  // TPV sends COMPLETED, downgrade to PENDING so the sale enters the queue.
+  const requiresBackOfficeReview = await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY)
+  const requestedStatus = data.status ?? 'PENDING'
+  const effectiveStatus: SaleVerificationStatus = requiresBackOfficeReview && requestedStatus === 'COMPLETED' ? 'PENDING' : requestedStatus
+
   // Create the verification record
   const verification = await prisma.saleVerification.create({
     data: {
@@ -113,7 +121,7 @@ export async function createSaleVerification(venueId: string, data: CreateSaleVe
       staffId: data.staffId,
       photos: data.photos,
       scannedProducts: data.scannedProducts as unknown as Prisma.InputJsonValue,
-      status: data.status ?? 'PENDING',
+      status: effectiveStatus,
       deviceId: data.deviceId ?? null,
       notes: data.notes ?? null,
     },
@@ -425,6 +433,13 @@ export async function createOrUpdateProofOfSale(
 
   let verification
 
+  // Venues running serialized inventory (e.g. SIM promoters) require the
+  // back-office to review EVERY sale — uploading the proof photos must NOT
+  // auto-complete the verification. Restaurants without the module keep the
+  // legacy auto-complete behavior (no back-office review step exists for them).
+  // Config-driven per .claude/rules: never hardcode client slugs.
+  const requiresBackOfficeReview = await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY)
+
   // Try to find existing verification (by verificationId or paymentId)
   const existing = verificationId
     ? await prisma.saleVerification.findFirst({ where: { id: verificationId, venueId } })
@@ -471,10 +486,16 @@ export async function createOrUpdateProofOfSale(
     const wasReviewed = existing.reviewedAt !== null
     const isCorrectingRejection = existing.status === 'FAILED'
 
+    // Auto-complete only when the venue has NO back-office review step.
+    // With review required (serialized inventory), a completed photo set keeps
+    // the verification PENDING so the back-office accepts or sends it back.
+    const willAutoComplete = !requiresBackOfficeReview && !wasReviewed && isComplete
+
     logger.info(`📸 [SALE VERIFICATION SERVICE] Updated photos for verification ${existing.id}`, {
       totalPhotos: nonEmptyPhotos.length,
       requiredPhotos,
-      willComplete: isComplete && !wasReviewed,
+      willComplete: willAutoComplete,
+      requiresBackOfficeReview,
       wasReviewed,
       isCorrectingRejection,
     })
@@ -483,7 +504,7 @@ export async function createOrUpdateProofOfSale(
       where: { id: existing.id },
       data: {
         photos: updatedPhotos,
-        status: !wasReviewed && isComplete ? 'COMPLETED' : 'PENDING',
+        status: willAutoComplete ? 'COMPLETED' : 'PENDING',
         // Clear the stale rejection verdict so the back-office sees a fresh
         // submission. Keep reviewedAt/reviewedById as the "reviewed" marker.
         ...(isCorrectingRejection && {
@@ -493,8 +514,11 @@ export async function createOrUpdateProofOfSale(
       },
     })
   } else {
-    // No existing verification → Create new with COMPLETED status (legacy flow)
-    logger.info(`📸 [SALE VERIFICATION SERVICE] Creating new proof-of-sale verification (legacy flow)`)
+    // No existing verification → legacy flow.
+    // Restaurants (no review step) auto-complete; venues requiring back-office
+    // review stay PENDING until someone accepts or sends the sale back.
+    const legacyStatus: SaleVerificationStatus = requiresBackOfficeReview ? 'PENDING' : 'COMPLETED'
+    logger.info(`📸 [SALE VERIFICATION SERVICE] Creating new proof-of-sale verification (legacy flow), status=${legacyStatus}`)
 
     verification = await prisma.saleVerification.create({
       data: {
@@ -503,7 +527,7 @@ export async function createOrUpdateProofOfSale(
         staffId,
         photos: photoUrls,
         scannedProducts: [],
-        status: 'COMPLETED',
+        status: legacyStatus,
         inventoryDeducted: false,
       },
     })
