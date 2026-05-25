@@ -77,6 +77,16 @@ export async function createVenuePaymentConfig(req: Request, res: Response, next
       createdBy: (req as any).user?.uid,
     })
 
+    await logAction({
+      staffId: (req as any).user?.uid ?? null,
+      action: 'VENUE_PAYMENT_CONFIG_CREATED',
+      entity: 'VenuePaymentConfig',
+      entityId: venueId,
+      data: { venueId, primaryAccountId, secondaryAccountId, tertiaryAccountId, preferredProcessor },
+      ipAddress: req.ip,
+      userAgent: req.headers?.['user-agent'],
+    })
+
     res.status(201).json({
       success: true,
       data: config,
@@ -151,6 +161,16 @@ export async function updateVenuePaymentConfig(req: Request, res: Response, next
     logger.info('Venue payment config updated via API', {
       venueId,
       updatedBy: (req as any).user?.uid,
+    })
+
+    await logAction({
+      staffId: (req as any).user?.uid ?? null,
+      action: 'VENUE_PAYMENT_CONFIG_UPDATED',
+      entity: 'VenuePaymentConfig',
+      entityId: venueId,
+      data: { venueId, primaryAccountId, secondaryAccountId, tertiaryAccountId, preferredProcessor },
+      ipAddress: req.ip,
+      userAgent: req.headers?.['user-agent'],
     })
 
     res.json({
