@@ -3,6 +3,7 @@ import * as venuePricingService from '../../services/superadmin/venuePricing.ser
 import logger from '../../config/logger'
 import { BadRequestError } from '../../errors/AppError'
 import { AccountType } from '@prisma/client'
+import { logAction } from '../../services/dashboard/activity-log.service'
 
 /**
  * VenuePricing Controller
@@ -305,6 +306,23 @@ export async function createVenuePricingStructure(req: Request, res: Response, n
       createdBy: (req as any).user?.uid,
     })
 
+    await logAction({
+      staffId: (req as any).user?.uid ?? null,
+      action: 'VENUE_PRICING_CREATED',
+      entity: 'VenuePricingStructure',
+      entityId: pricingStructure.id,
+      data: {
+        venueId: pricingStructure.venueId,
+        accountType: pricingStructure.accountType,
+        debitRate: pricingStructure.debitRate,
+        creditRate: pricingStructure.creditRate,
+        amexRate: pricingStructure.amexRate,
+        internationalRate: pricingStructure.internationalRate,
+      },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    })
+
     res.status(201).json({
       success: true,
       data: pricingStructure,
@@ -409,6 +427,23 @@ export async function updateVenuePricingStructure(req: Request, res: Response, n
     logger.info('Venue pricing structure updated via API', {
       pricingStructureId: id,
       updatedBy: (req as any).user?.uid,
+    })
+
+    await logAction({
+      staffId: (req as any).user?.uid ?? null,
+      action: 'VENUE_PRICING_UPDATED',
+      entity: 'VenuePricingStructure',
+      entityId: id,
+      data: {
+        venueId: pricingStructure.venueId,
+        accountType: pricingStructure.accountType,
+        debitRate: pricingStructure.debitRate,
+        creditRate: pricingStructure.creditRate,
+        amexRate: pricingStructure.amexRate,
+        internationalRate: pricingStructure.internationalRate,
+      },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
     })
 
     res.json({

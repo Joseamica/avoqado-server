@@ -3,6 +3,7 @@ import * as service from '../../services/superadmin/merchantRevenueShare.service
 import { computeRevenueReport } from '../../services/payments/revenueShareReport.service'
 import { createMerchantRevenueShareSchema, updateMerchantRevenueShareSchema } from '../../schemas/dashboard/merchant-revenue-share.schema'
 import { BadRequestError } from '../../errors/AppError'
+import { logAction } from '../../services/dashboard/activity-log.service'
 
 /** GET /merchant-revenue-shares?active= */
 export async function getMerchantRevenueShares(req: Request, res: Response, next: NextFunction) {
@@ -47,6 +48,20 @@ export async function createMerchantRevenueShare(req: Request, res: Response, ne
     const parsed = createMerchantRevenueShareSchema.safeParse(req.body)
     if (!parsed.success) throw new BadRequestError(parsed.error.issues[0]?.message || 'Datos inválidos')
     const row = await service.createMerchantRevenueShare(parsed.data)
+
+    await logAction({
+      staffId: (req as any).user?.uid ?? null,
+      action: 'REVENUE_SHARE_CREATED',
+      entity: 'MerchantRevenueShare',
+      entityId: row.id,
+      data: {
+        merchantAccountId: row.merchantAccountId,
+        mode: (parsed.data as any).aggregatorPrice !== undefined ? 'aggregator' : 'direct',
+      },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    })
+
     res.status(201).json({ success: true, data: row })
   } catch (error) {
     next(error)
@@ -59,6 +74,20 @@ export async function updateMerchantRevenueShare(req: Request, res: Response, ne
     const parsed = updateMerchantRevenueShareSchema.safeParse(req.body)
     if (!parsed.success) throw new BadRequestError(parsed.error.issues[0]?.message || 'Datos inválidos')
     const row = await service.updateMerchantRevenueShare(req.params.id, parsed.data)
+
+    await logAction({
+      staffId: (req as any).user?.uid ?? null,
+      action: 'REVENUE_SHARE_UPDATED',
+      entity: 'MerchantRevenueShare',
+      entityId: req.params.id,
+      data: {
+        merchantAccountId: row.merchantAccountId,
+        mode: (parsed.data as any).aggregatorPrice !== undefined ? 'aggregator' : 'direct',
+      },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    })
+
     res.json({ success: true, data: row })
   } catch (error) {
     next(error)

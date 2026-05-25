@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express'
 import * as providerCostStructureService from '../../services/superadmin/providerCostStructure.service'
 import logger from '../../config/logger'
 import { BadRequestError } from '../../errors/AppError'
+import { logAction } from '../../services/dashboard/activity-log.service'
 
 /**
  * ProviderCostStructure Controller
@@ -132,6 +133,22 @@ export async function createProviderCostStructure(req: Request, res: Response, n
       createdBy: (req as any).user?.uid,
     })
 
+    await logAction({
+      staffId: (req as any).user?.uid ?? null,
+      action: 'COST_STRUCTURE_CREATED',
+      entity: 'ProviderCostStructure',
+      entityId: costStructure.id,
+      data: {
+        merchantAccountId: costStructure.merchantAccountId,
+        debitRate: costStructure.debitRate,
+        creditRate: costStructure.creditRate,
+        amexRate: costStructure.amexRate,
+        internationalRate: costStructure.internationalRate,
+      },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    })
+
     res.status(201).json({
       success: true,
       data: costStructure,
@@ -225,6 +242,22 @@ export async function updateProviderCostStructure(req: Request, res: Response, n
     logger.info('Provider cost structure updated via API', {
       costStructureId: id,
       updatedBy: (req as any).user?.uid,
+    })
+
+    await logAction({
+      staffId: (req as any).user?.uid ?? null,
+      action: 'COST_STRUCTURE_UPDATED',
+      entity: 'ProviderCostStructure',
+      entityId: id,
+      data: {
+        merchantAccountId: costStructure.merchantAccountId,
+        debitRate: costStructure.debitRate,
+        creditRate: costStructure.creditRate,
+        amexRate: costStructure.amexRate,
+        internationalRate: costStructure.internationalRate,
+      },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
     })
 
     res.json({

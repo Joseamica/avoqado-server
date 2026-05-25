@@ -23,6 +23,8 @@ import systemLogsRoutes from './superadmin/systemLogs.routes'
 import partnerKeyRoutes from './superadmin/partnerKey.routes'
 import aggregatorRoutes from './superadmin/aggregator.routes'
 import venueCommissionRoutes from './superadmin/venueCommission.routes'
+import settlementConfigRoutes from './superadmin/settlementConfiguration.routes'
+import merchantRevenueShareRoutes from './superadmin/merchantRevenueShare.routes'
 import stripeConnectOffboardingRoutes from './superadmin/stripeConnectOffboarding.routes'
 import angelpayUserAccountRoutes from './superadmin/angelpayUserAccount.routes'
 // NOTE: appUpdateRoutes are mounted EARLY in app.ts with 100MB body limit for APK uploads
@@ -53,6 +55,10 @@ router.use('/system-logs', systemLogsRoutes)
 router.use('/partner-keys', partnerKeyRoutes)
 router.use('/aggregators', aggregatorRoutes)
 router.use('/venue-commissions', venueCommissionRoutes)
+// Aditivo (2026-05): mismos controllers que ya viven en /api/v1/dashboard/superadmin/*,
+// expuestos también aquí para que el frontend superadmin use un solo namespace.
+router.use('/settlement-configurations', settlementConfigRoutes)
+router.use('/merchant-revenue-shares', merchantRevenueShareRoutes)
 router.use('/stripe-connect', stripeConnectOffboardingRoutes)
 // AngelPay user accounts — mounted at root because endpoints span
 // /venues/:venueId/angelpay-account AND /angelpay-accounts/:id/...

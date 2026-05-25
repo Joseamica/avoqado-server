@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express'
 import * as merchantAccountService from '../../services/superadmin/merchantAccount.service'
 import * as settlementConfigService from '../../services/superadmin/settlementConfiguration.service'
 import logger from '../../config/logger'
+import { logAction } from '../../services/dashboard/activity-log.service'
 import { BadRequestError } from '../../errors/AppError'
 import { blumonApiService } from '../../services/blumon/blumonApi.service'
 import type { BlumonEnvironment } from '../../services/blumon/types'
@@ -178,6 +179,16 @@ export async function createMerchantAccount(req: Request, res: Response, next: N
       blumonSerialNumber,
     })
 
+    await logAction({
+      staffId: (req as any).user?.uid,
+      action: 'MERCHANT_ACCOUNT_CREATED',
+      entity: 'MerchantAccount',
+      entityId: account.id,
+      data: { externalMerchantId: account.externalMerchantId, providerId: account.providerId, active: account.active },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    })
+
     res.status(201).json({
       success: true,
       data: account,
@@ -223,6 +234,16 @@ export async function updateMerchantAccount(req: Request, res: Response, next: N
       updatedBy: (req as any).user?.uid,
     })
 
+    await logAction({
+      staffId: (req as any).user?.uid,
+      action: 'MERCHANT_ACCOUNT_UPDATED',
+      entity: 'MerchantAccount',
+      entityId: id,
+      data: { externalMerchantId: account.externalMerchantId, active: account.active },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    })
+
     res.json({
       success: true,
       data: account,
@@ -248,6 +269,16 @@ export async function toggleMerchantAccountStatus(req: Request, res: Response, n
       toggledBy: (req as any).user?.uid,
     })
 
+    await logAction({
+      staffId: (req as any).user?.uid,
+      action: 'MERCHANT_ACCOUNT_STATUS_TOGGLED',
+      entity: 'MerchantAccount',
+      entityId: id,
+      data: { active: account.active },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    })
+
     res.json({
       success: true,
       data: account,
@@ -271,6 +302,16 @@ export async function deleteMerchantAccount(req: Request, res: Response, next: N
     logger.warn('Merchant account deleted via API', {
       accountId: id,
       deletedBy: (req as any).user?.uid,
+    })
+
+    await logAction({
+      staffId: (req as any).user?.uid,
+      action: 'MERCHANT_ACCOUNT_DELETED',
+      entity: 'MerchantAccount',
+      entityId: id,
+      data: {},
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
     })
 
     res.json({
