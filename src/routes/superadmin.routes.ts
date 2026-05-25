@@ -22,6 +22,7 @@ import dashboardRoutes from './superadmin/dashboard.routes'
 import systemLogsRoutes from './superadmin/systemLogs.routes'
 import partnerKeyRoutes from './superadmin/partnerKey.routes'
 import aggregatorRoutes from './superadmin/aggregator.routes'
+import holidaysRoutes from './superadmin/holidays.routes'
 import venueCommissionRoutes from './superadmin/venueCommission.routes'
 import settlementConfigRoutes from './superadmin/settlementConfiguration.routes'
 import merchantRevenueShareRoutes from './superadmin/merchantRevenueShare.routes'
@@ -54,6 +55,7 @@ router.use('/dashboard', dashboardRoutes)
 router.use('/system-logs', systemLogsRoutes)
 router.use('/partner-keys', partnerKeyRoutes)
 router.use('/aggregators', aggregatorRoutes)
+router.use('/holidays', holidaysRoutes)
 router.use('/venue-commissions', venueCommissionRoutes)
 // Aditivo (2026-05): mismos controllers que ya viven en /api/v1/dashboard/superadmin/*,
 // expuestos también aquí para que el frontend superadmin use un solo namespace.

@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express'
 import * as settlementConfigService from '../../services/superadmin/settlementConfiguration.service'
 import { BadRequestError } from '../../errors/AppError'
+import { logAction } from '../../services/dashboard/activity-log.service'
 
 /**
  * SettlementConfiguration Controller (Superadmin)
@@ -134,6 +135,16 @@ export async function createSettlementConfiguration(req: Request, res: Response,
       createdBy,
     })
 
+    await logAction({
+      staffId: (req as any).user?.uid ?? null,
+      action: 'SETTLEMENT_CONFIG_CREATED',
+      entity: 'SettlementConfiguration',
+      entityId: configuration.id,
+      data: { merchantAccountId: configuration.merchantAccountId, cardType: configuration.cardType, settlementDays: configuration.settlementDays, settlementDayType: configuration.settlementDayType },
+      ipAddress: req.ip,
+      userAgent: req.headers?.['user-agent'],
+    })
+
     res.status(201).json({
       success: true,
       data: configuration,
@@ -166,6 +177,16 @@ export async function updateSettlementConfiguration(req: Request, res: Response,
     if (effectiveTo !== undefined) updateData.effectiveTo = effectiveTo ? new Date(effectiveTo) : null
 
     const configuration = await settlementConfigService.updateSettlementConfiguration(id, updateData)
+
+    await logAction({
+      staffId: (req as any).user?.uid ?? null,
+      action: 'SETTLEMENT_CONFIG_UPDATED',
+      entity: 'SettlementConfiguration',
+      entityId: id,
+      data: { merchantAccountId: configuration.merchantAccountId, cardType: configuration.cardType, settlementDays: configuration.settlementDays, settlementDayType: configuration.settlementDayType },
+      ipAddress: req.ip,
+      userAgent: req.headers?.['user-agent'],
+    })
 
     res.json({
       success: true,
@@ -226,6 +247,16 @@ export async function bulkCreateSettlementConfigurations(req: Request, res: Resp
       new Date(effectiveFrom),
       createdBy,
     )
+
+    await logAction({
+      staffId: (req as any).user?.uid ?? null,
+      action: 'SETTLEMENT_CONFIG_BULK_CREATED',
+      entity: 'SettlementConfiguration',
+      entityId: merchantAccountId,
+      data: { merchantAccountId, count: configurations.length },
+      ipAddress: req.ip,
+      userAgent: req.headers?.['user-agent'],
+    })
 
     res.status(201).json({
       success: true,

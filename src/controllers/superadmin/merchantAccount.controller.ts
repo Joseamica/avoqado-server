@@ -186,7 +186,7 @@ export async function createMerchantAccount(req: Request, res: Response, next: N
       entityId: account.id,
       data: { externalMerchantId: account.externalMerchantId, providerId: account.providerId, active: account.active },
       ipAddress: req.ip,
-      userAgent: req.headers['user-agent'],
+      userAgent: req.headers?.['user-agent'],
     })
 
     res.status(201).json({
@@ -241,7 +241,7 @@ export async function updateMerchantAccount(req: Request, res: Response, next: N
       entityId: id,
       data: { externalMerchantId: account.externalMerchantId, active: account.active },
       ipAddress: req.ip,
-      userAgent: req.headers['user-agent'],
+      userAgent: req.headers?.['user-agent'],
     })
 
     res.json({
@@ -276,7 +276,7 @@ export async function toggleMerchantAccountStatus(req: Request, res: Response, n
       entityId: id,
       data: { active: account.active },
       ipAddress: req.ip,
-      userAgent: req.headers['user-agent'],
+      userAgent: req.headers?.['user-agent'],
     })
 
     res.json({
@@ -311,7 +311,7 @@ export async function deleteMerchantAccount(req: Request, res: Response, next: N
       entityId: id,
       data: {},
       ipAddress: req.ip,
-      userAgent: req.headers['user-agent'],
+      userAgent: req.headers?.['user-agent'],
     })
 
     res.json({

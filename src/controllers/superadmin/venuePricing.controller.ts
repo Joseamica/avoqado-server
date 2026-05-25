@@ -320,7 +320,7 @@ export async function createVenuePricingStructure(req: Request, res: Response, n
         internationalRate: pricingStructure.internationalRate,
       },
       ipAddress: req.ip,
-      userAgent: req.headers['user-agent'],
+      userAgent: req.headers?.['user-agent'],
     })
 
     res.status(201).json({
@@ -443,7 +443,7 @@ export async function updateVenuePricingStructure(req: Request, res: Response, n
         internationalRate: pricingStructure.internationalRate,
       },
       ipAddress: req.ip,
-      userAgent: req.headers['user-agent'],
+      userAgent: req.headers?.['user-agent'],
     })
 
     res.json({

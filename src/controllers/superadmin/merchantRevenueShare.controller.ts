@@ -59,7 +59,7 @@ export async function createMerchantRevenueShare(req: Request, res: Response, ne
         mode: (parsed.data as any).aggregatorPrice !== undefined ? 'aggregator' : 'direct',
       },
       ipAddress: req.ip,
-      userAgent: req.headers['user-agent'],
+      userAgent: req.headers?.['user-agent'],
     })
 
     res.status(201).json({ success: true, data: row })
@@ -85,7 +85,7 @@ export async function updateMerchantRevenueShare(req: Request, res: Response, ne
         mode: (parsed.data as any).aggregatorPrice !== undefined ? 'aggregator' : 'direct',
       },
       ipAddress: req.ip,
-      userAgent: req.headers['user-agent'],
+      userAgent: req.headers?.['user-agent'],
     })
 
     res.json({ success: true, data: row })

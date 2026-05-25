@@ -146,7 +146,7 @@ export async function createProviderCostStructure(req: Request, res: Response, n
         internationalRate: costStructure.internationalRate,
       },
       ipAddress: req.ip,
-      userAgent: req.headers['user-agent'],
+      userAgent: req.headers?.['user-agent'],
     })
 
     res.status(201).json({
@@ -257,7 +257,7 @@ export async function updateProviderCostStructure(req: Request, res: Response, n
         internationalRate: costStructure.internationalRate,
       },
       ipAddress: req.ip,
-      userAgent: req.headers['user-agent'],
+      userAgent: req.headers?.['user-agent'],
     })
 
     res.json({
