@@ -49,6 +49,15 @@ jest.mock('@/services/organization-payment-config.service', () => ({
   getEffectivePaymentConfig: jest.fn().mockResolvedValue(null),
 }))
 
+// getTerminalConfig now checks the SERIALIZED_INVENTORY module flag. Mock the
+// module service so its real impl (which queries unmocked prisma models) doesn't
+// throw — these tests don't exercise the serialized-inventory branch.
+jest.mock('@/services/modules/module.service', () => ({
+  __esModule: true,
+  moduleService: { isModuleEnabled: jest.fn().mockResolvedValue(false) },
+  MODULE_CODES: { SERIALIZED_INVENTORY: 'SERIALIZED_INVENTORY' },
+}))
+
 const mockedPrisma = prisma as unknown as {
   terminal: { findFirst: jest.Mock }
   merchantAccount: { findMany: jest.Mock }
