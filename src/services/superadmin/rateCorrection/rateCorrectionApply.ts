@@ -165,8 +165,7 @@ export async function applyRateCorrection(args: ApplyArgs, ctx: ApplyContext) {
         beforeFeePercentage: parseFloat(p.feePercentage.toString()),
         beforeVenueTxnFee: existingVt ? parseFloat(existingVt.feeAmount.toString()) : null,
         beforeVenueTxnNet: existingVt ? parseFloat(existingVt.netAmount.toString()) : null,
-        beforeVenueTxnNetSettlement:
-          existingVt?.netSettlementAmount != null ? parseFloat(existingVt.netSettlementAmount.toString()) : null,
+        beforeVenueTxnNetSettlement: existingVt?.netSettlementAmount != null ? parseFloat(existingVt.netSettlementAmount.toString()) : null,
         costCreated: willCreateCost,
         // Json input: a TransactionCost row carries Decimals; store as-is for the audit trail.
         beforeCostJson: (existingCost ?? null) as unknown,
