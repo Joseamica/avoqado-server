@@ -1,15 +1,15 @@
 # AngelPay Webhook Receiver — Spec
 
-**Status:** draft
-**Date:** 2026-05-25
-**Owner:** Avoqado backend
-**Scope:** ONLY the receiver endpoint that accepts AngelPay webhook callbacks. Out of scope (later docs): registering/fetching webhook endpoints via AngelPay's `/api/v1/webhooks/endpoints`, surfacing merchant id, dashboard UI.
+**Status:** draft **Date:** 2026-05-25 **Owner:** Avoqado backend **Scope:** ONLY the receiver endpoint that accepts AngelPay webhook
+callbacks. Out of scope (later docs): registering/fetching webhook endpoints via AngelPay's `/api/v1/webhooks/endpoints`, surfacing merchant
+id, dashboard UI.
 
 ---
 
 ## 1. Goal
 
-Receive AngelPay payment-confirmation callbacks, verify they're authentic, store every event immutably, and reconcile against the `Payment` table — mirroring the proven Blumon TPV pattern (4-layer reconciliation, layer 4).
+Receive AngelPay payment-confirmation callbacks, verify they're authentic, store every event immutably, and reconcile against the `Payment`
+table — mirroring the proven Blumon TPV pattern (4-layer reconciliation, layer 4).
 
 This is **layer 4 of 4** for AngelPay payments:
 
@@ -22,16 +22,16 @@ This is **layer 4 of 4** for AngelPay payments:
 
 ## 2. Differences vs. Blumon (the reason this spec exists)
 
-| Concern | Blumon TPV | AngelPay |
-|---|---|---|
-| Auth | IP whitelist (no signature) | **HMAC-SHA256 Svix headers** (`svix-id`, `svix-timestamp`, `svix-signature: v1,<base64>`) |
-| Endpoint | 1 fixed URL | **1 URL per merchant account** (`/webhooks/angelpay/:merchantAccountId`) — each has its own Svix secret |
-| Event types | 1 (`payment`) | 3 (`send_transaction`, `offline_event`, `canceled_transaction`) |
-| Tenant identification | `serialNumber` → Terminal → Venue | `:merchantAccountId` from URL (cross-checked against payload `merchant_id`) |
-| Idempotency key | `(operationNumber, reference)` | **`svix-id` header** (Svix guarantees per-event uniqueness) |
-| Persistence model | `ProviderEventLog` | **Same `ProviderEventLog`** (`provider: PAYMENT_PROCESSOR`, distinguish by `payload.source` or `eventId` prefix) |
-| Match retries | 3 attempts (0/2/3 s) | Same — keep Blumon's `RETRY_CONFIG` |
-| PENDING cron | 30 s cadence, 24 h TTL → ORPHANED | Same — clone the cron, scope by event prefix |
+| Concern               | Blumon TPV                        | AngelPay                                                                                                         |
+| --------------------- | --------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Auth                  | IP whitelist (no signature)       | **HMAC-SHA256 Svix headers** (`svix-id`, `svix-timestamp`, `svix-signature: v1,<base64>`)                        |
+| Endpoint              | 1 fixed URL                       | **1 URL per merchant account** (`/webhooks/angelpay/:merchantAccountId`) — each has its own Svix secret          |
+| Event types           | 1 (`payment`)                     | 3 (`send_transaction`, `offline_event`, `canceled_transaction`)                                                  |
+| Tenant identification | `serialNumber` → Terminal → Venue | `:merchantAccountId` from URL (cross-checked against payload `merchant_id`)                                      |
+| Idempotency key       | `(operationNumber, reference)`    | **`svix-id` header** (Svix guarantees per-event uniqueness)                                                      |
+| Persistence model     | `ProviderEventLog`                | **Same `ProviderEventLog`** (`provider: PAYMENT_PROCESSOR`, distinguish by `payload.source` or `eventId` prefix) |
+| Match retries         | 3 attempts (0/2/3 s)              | Same — keep Blumon's `RETRY_CONFIG`                                                                              |
+| PENDING cron          | 30 s cadence, 24 h TTL → ORPHANED | Same — clone the cron, scope by event prefix                                                                     |
 
 ---
 
@@ -42,7 +42,8 @@ POST  /api/v1/webhooks/angelpay/:merchantAccountId
 GET   /api/v1/webhooks/angelpay/health
 ```
 
-Registered in `src/routes/webhook.routes.ts` next to the Blumon route. Uses the same `express.raw({ type: 'application/json' })` body parser the file already imposes — Svix signature verification REQUIRES the raw bytes; do **not** mount `express.json()` upstream of this route.
+Registered in `src/routes/webhook.routes.ts` next to the Blumon route. Uses the same `express.raw({ type: 'application/json' })` body parser
+the file already imposes — Svix signature verification REQUIRES the raw bytes; do **not** mount `express.json()` upstream of this route.
 
 ---
 
@@ -69,7 +70,8 @@ model MerchantAccount {
 
 Migration name: `add_angelpay_webhook_fields_to_merchant_account`. **No DB constraint changes — backfill = NULL.**
 
-`ProviderEventLog` already has the columns we need (`provider`, `eventId`, `type`, `payload`, `status`, `errorReason`, `venueId`, `terminalId`, `paymentId`, `processedAt`). No new model.
+`ProviderEventLog` already has the columns we need (`provider`, `eventId`, `type`, `payload`, `status`, `errorReason`, `venueId`,
+`terminalId`, `paymentId`, `processedAt`). No new model.
 
 ---
 
@@ -112,7 +114,8 @@ All three events share an outer envelope:
 }
 ```
 
-**Defensive:** treat every field except `event_type` and `merchant_id` as potentially missing. Same posture as `BlumonWebhookPayload` (lenient validation, log full payload on first surprise shape).
+**Defensive:** treat every field except `event_type` and `merchant_id` as potentially missing. Same posture as `BlumonWebhookPayload`
+(lenient validation, log full payload on first surprise shape).
 
 ---
 
@@ -122,9 +125,11 @@ All three events share an outer envelope:
 
 ### Step 0 — Always-respond contract
 
-Like Blumon: **always reply 200** unless the signature itself is invalid (then 401). AngelPay's Svix infrastructure retries on 5xx; we own retry semantics now, so we acknowledge and queue internally.
+Like Blumon: **always reply 200** unless the signature itself is invalid (then 401). AngelPay's Svix infrastructure retries on 5xx; we own
+retry semantics now, so we acknowledge and queue internally.
 
 The only non-200 responses:
+
 - **`401 Unauthorized`** — signature verification failed (this MUST 4xx so AngelPay flags the misconfig).
 - **`404 Not Found`** — `:merchantAccountId` doesn't exist in our DB.
 - **`410 Gone`** — merchant account exists but `angelpayWebhookSecret = NULL` (we haven't provisioned).
@@ -157,7 +162,7 @@ const wh = new Webhook(decrypt(merchantAccount.angelpayWebhookSecret))
 let payload: AngelPayWebhookPayload
 try {
   payload = wh.verify(req.body /* raw Buffer */, {
-    'svix-id':        req.header('svix-id')!,
+    'svix-id': req.header('svix-id')!,
     'svix-timestamp': req.header('svix-timestamp')!,
     'svix-signature': req.header('svix-signature')!,
   }) as AngelPayWebhookPayload
@@ -167,7 +172,8 @@ try {
 }
 ```
 
-The `svix` library handles: HMAC-SHA256 over `${svix-id}.${svix-timestamp}.${body}`, base64 decode, constant-time compare, multi-key rotation, and **timestamp tolerance ±5 min** (replay protection — Svix bakes this in).
+The `svix` library handles: HMAC-SHA256 over `${svix-id}.${svix-timestamp}.${body}`, base64 decode, constant-time compare, multi-key
+rotation, and **timestamp tolerance ±5 min** (replay protection — Svix bakes this in).
 
 ### Step 3 — Cross-check tenant
 
@@ -212,9 +218,12 @@ const event = await prisma.providerEventLog.create({
 
 ```ts
 switch (payload.event_type) {
-  case 'send_transaction':       return await handleSendTransaction(event.id, payload, merchantAccount)
-  case 'canceled_transaction':   return await handleCanceledTransaction(event.id, payload, merchantAccount)
-  case 'offline_event':          return await handleOfflineEvent(event.id, payload, merchantAccount)
+  case 'send_transaction':
+    return await handleSendTransaction(event.id, payload, merchantAccount)
+  case 'canceled_transaction':
+    return await handleCanceledTransaction(event.id, payload, merchantAccount)
+  case 'offline_event':
+    return await handleOfflineEvent(event.id, payload, merchantAccount)
 }
 ```
 
@@ -222,7 +231,8 @@ switch (payload.event_type) {
 
 Inline match with retry (clone Blumon's `attemptPaymentMatch`):
 
-- Match conditions: `referenceNumber = data.external_reference` OR `authorizationNumber = data.auth_code` OR `processorId = data.transaction_id`
+- Match conditions: `referenceNumber = data.external_reference` OR `authorizationNumber = data.auth_code` OR
+  `processorId = data.transaction_id`
 - Scope: `order.venueId = merchantAccount.venueId` (single-venue scope — AngelPay merchants are 1:1 with venue today; no fan-out yet)
 - Retry: 3 attempts at 0/2/3 s (same `RETRY_CONFIG`)
 - On match: compare `data.amount` ↔ `payment.amount` with `<0.01` tolerance
@@ -235,7 +245,8 @@ If `data.status !== 'APPROVED'`: persist `ERROR/NOT_APPROVED`, return 200.
 #### 6b. `canceled_transaction` (refund / void confirmation)
 
 - Match by `data.transaction_id` against `Payment.processorData.angelpayTransactionId` OR by `external_reference`
-- On match: stamp `payment.processorData.angelpayCanceledAt + canceledReason`. Do NOT mutate `payment.status` from webhook — backend already has its own cancel flow. Use this only for reconciliation + audit.
+- On match: stamp `payment.processorData.angelpayCanceledAt + canceledReason`. Do NOT mutate `payment.status` from webhook — backend already
+  has its own cancel flow. Use this only for reconciliation + audit.
 - On miss: `PENDING` → cron.
 
 #### 6c. `offline_event` (terminal accumulated offline txs and batched them)
@@ -247,7 +258,8 @@ If `data.status !== 'APPROVED'`: persist `ERROR/NOT_APPROVED`, return 200.
 
 ### Step 7 — Finalize event row
 
-Identical to Blumon's `updateEventLogFromMatchResult`. Touch `merchantAccount.angelpayWebhookLastReceivedAt = NOW()` on every successful processing (any non-PENDING terminal state).
+Identical to Blumon's `updateEventLogFromMatchResult`. Touch `merchantAccount.angelpayWebhookLastReceivedAt = NOW()` on every successful
+processing (any non-PENDING terminal state).
 
 ---
 
@@ -282,7 +294,8 @@ where: {
 }
 ```
 
-Reconcile immediately. Same pattern, just a different JSONB path. Acceptable to call this on every `Payment.create` — it's already one indexed query for Blumon; adding AngelPay = same query shape with OR'd prefix.
+Reconcile immediately. Same pattern, just a different JSONB path. Acceptable to call this on every `Payment.create` — it's already one
+indexed query for Blumon; adding AngelPay = same query shape with OR'd prefix.
 
 ---
 
@@ -309,15 +322,15 @@ Add a sibling to `BLUMON_WEBHOOK_ERROR_REASONS`:
 
 ```ts
 export const ANGELPAY_WEBHOOK_ERROR_REASONS = {
-  INVALID_SIGNATURE:   'INVALID_SIGNATURE',    // (rarely persisted — we 401 instead)
-  UNKNOWN_MERCHANT:    'UNKNOWN_MERCHANT',
-  NOT_PROVISIONED:     'NOT_PROVISIONED',
-  MERCHANT_MISMATCH:   'MERCHANT_MISMATCH',
-  NO_MATCH_FIELDS:     'NO_MATCH_FIELDS',
-  AMOUNT_MISMATCH:     'AMOUNT_MISMATCH',
-  NOT_APPROVED:        'NOT_APPROVED',
-  ORPHANED:            'ORPHANED',
-  PROCESSING_ERROR:    'PROCESSING_ERROR',
+  INVALID_SIGNATURE: 'INVALID_SIGNATURE', // (rarely persisted — we 401 instead)
+  UNKNOWN_MERCHANT: 'UNKNOWN_MERCHANT',
+  NOT_PROVISIONED: 'NOT_PROVISIONED',
+  MERCHANT_MISMATCH: 'MERCHANT_MISMATCH',
+  NO_MATCH_FIELDS: 'NO_MATCH_FIELDS',
+  AMOUNT_MISMATCH: 'AMOUNT_MISMATCH',
+  NOT_APPROVED: 'NOT_APPROVED',
+  ORPHANED: 'ORPHANED',
+  PROCESSING_ERROR: 'PROCESSING_ERROR',
 } as const
 ```
 
@@ -325,16 +338,16 @@ export const ANGELPAY_WEBHOOK_ERROR_REASONS = {
 
 ## 11. Security rules
 
-| # | Rule | Why |
-|---|---|---|
-| 1 | Always read body as raw `Buffer` (`express.raw`). Never let `express.json` touch this route. | HMAC is over exact bytes; pretty-printed JSON breaks it. |
-| 2 | `angelpayWebhookSecret` stored encrypted (KMS) — same envelope as `providerCredentials`. | Secrets at rest. |
-| 3 | Constant-time compare via `svix` lib only. Never roll our own HMAC compare. | Timing attacks. |
-| 4 | Reject `svix-timestamp` outside ±5 min (handled by `svix` lib). | Replay protection. |
-| 5 | Log `svix-id`, never log raw signature header. | Signature is a credential proxy. |
-| 6 | Log full payload on first-of-kind unknown `event_type`, redact `card.last_four` to `****` and never log full PAN (AngelPay should never send PAN anyway). | PCI. |
-| 7 | 404 on unknown `:merchantAccountId` — don't leak existence by behaving differently. | Enumeration. |
-| 8 | All processing happens server-side; webhook never triggers a payment, only records observations. | Defense in depth — webhook is observability, not a command channel. |
+| #   | Rule                                                                                                                                                      | Why                                                                 |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| 1   | Always read body as raw `Buffer` (`express.raw`). Never let `express.json` touch this route.                                                              | HMAC is over exact bytes; pretty-printed JSON breaks it.            |
+| 2   | `angelpayWebhookSecret` stored encrypted (KMS) — same envelope as `providerCredentials`.                                                                  | Secrets at rest.                                                    |
+| 3   | Constant-time compare via `svix` lib only. Never roll our own HMAC compare.                                                                               | Timing attacks.                                                     |
+| 4   | Reject `svix-timestamp` outside ±5 min (handled by `svix` lib).                                                                                           | Replay protection.                                                  |
+| 5   | Log `svix-id`, never log raw signature header.                                                                                                            | Signature is a credential proxy.                                    |
+| 6   | Log full payload on first-of-kind unknown `event_type`, redact `card.last_four` to `****` and never log full PAN (AngelPay should never send PAN anyway). | PCI.                                                                |
+| 7   | 404 on unknown `:merchantAccountId` — don't leak existence by behaving differently.                                                                       | Enumeration.                                                        |
+| 8   | All processing happens server-side; webhook never triggers a payment, only records observations.                                                          | Defense in depth — webhook is observability, not a command channel. |
 
 ---
 
@@ -345,7 +358,8 @@ export const ANGELPAY_WEBHOOK_ERROR_REASONS = {
 - [ ] Wrong signature → returns 401, no `ProviderEventLog` row written
 - [ ] Unknown `:merchantAccountId` → returns 404
 - [ ] Provisioned but `data.merchant_id` ≠ `externalMerchantId` → returns 401
-- [ ] Valid event for a Payment that hasn't been recorded yet → row stays PENDING, cron reconciles within 30 s of `POST /tpv/fast` completing
+- [ ] Valid event for a Payment that hasn't been recorded yet → row stays PENDING, cron reconciles within 30 s of `POST /tpv/fast`
+      completing
 - [ ] Amount mismatch → row → `ERROR/AMOUNT_MISMATCH`, Payment `processorData.angelpayDiscrepancy` populated
 - [ ] `canceled_transaction` for a real Payment → stamps `processorData.angelpayCanceledAt`, does NOT change `payment.status`
 - [ ] Cron promotes a 24 h-old PENDING row to `ERROR/ORPHANED`
@@ -375,4 +389,5 @@ export const ANGELPAY_WEBHOOK_ERROR_REASONS = {
 8. Unit tests: signature verify (happy/wrong/expired/replayed), each event_type handler, cron promotion to ORPHANED
 9. Manual smoke: provision a sandbox `angelpayWebhookSecret`, trigger a Nexgo payment, verify the row lands as `PROCESSED`
 
-End-to-end acceptance unlocks the moment we have one merchant's secret in `MerchantAccount.angelpayWebhookSecret` and AngelPay pointing their delivery URL at us — even before the `/webhooks/endpoints` automation lands.
+End-to-end acceptance unlocks the moment we have one merchant's secret in `MerchantAccount.angelpayWebhookSecret` and AngelPay pointing
+their delivery URL at us — even before the `/webhooks/endpoints` automation lands.
