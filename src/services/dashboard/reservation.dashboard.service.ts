@@ -756,13 +756,23 @@ async function transitionReservation(
   }
   const logActionName = STATUS_TO_ACTION[targetStatus]
   if (logActionName) {
+    // `by` can be a real Staff ID OR a sentinel string ('SYSTEM' for the
+    // auto-no-show job, 'CUSTOMER' for self-service cancel). Only pass it
+    // through as staffId when it looks like an actual ID — otherwise the
+    // ActivityLog_staffId_fkey would fail. logAction normalizes these too,
+    // but keeping the intent explicit here makes the audit trail readable.
+    const isRealStaff = !!by && by !== 'SYSTEM' && by !== 'CUSTOMER' && by !== 'PUBLIC' && by !== 'WEBHOOK'
     logAction({
-      staffId: by ?? undefined,
+      staffId: isRealStaff ? by : undefined,
       venueId,
       action: logActionName,
       entity: 'Reservation',
       entityId: updated.id,
-      data: { status: updated.status, confirmationCode: updated.confirmationCode },
+      data: {
+        status: updated.status,
+        confirmationCode: updated.confirmationCode,
+        ...(!isRealStaff && by ? { actor: by } : {}),
+      },
     })
   }
 

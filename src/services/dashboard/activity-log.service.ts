@@ -25,6 +25,13 @@ export interface LogActionParams {
 }
 
 /**
+ * Sentinel strings callers pass as the actor of an action when the trigger
+ * is not a real staff user. Persisting these would violate the staffId FK,
+ * so we normalize them to null here.
+ */
+const ACTOR_SENTINELS = new Set(['SYSTEM', 'CUSTOMER', 'PUBLIC', 'WEBHOOK'])
+
+/**
  * Best-effort audit log writer.
  * Wraps prisma.activityLog.create() in try/catch — NEVER throws.
  * Callers may await it when they need audit persistence attempted before
@@ -32,9 +39,15 @@ export interface LogActionParams {
  */
 export async function logAction(params: LogActionParams): Promise<void> {
   try {
+    // Normalize sentinel actor strings (SYSTEM, CUSTOMER, etc.) to null so we
+    // don't trip the ActivityLog_staffId_fkey constraint. The action itself
+    // (e.g. RESERVATION_NO_SHOW) records what happened; the absence of staffId
+    // already signals "no human did this".
+    const staffId = params.staffId && !ACTOR_SENTINELS.has(params.staffId) ? params.staffId : null
+
     await prisma.activityLog.create({
       data: {
-        staffId: params.staffId ?? null,
+        staffId,
         venueId: params.venueId ?? null,
         action: params.action,
         entity: params.entity ?? null,

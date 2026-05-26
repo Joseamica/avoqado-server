@@ -736,12 +736,29 @@ export type PaymentLinkBranding = typeof DEFAULT_PAYMENT_LINK_BRANDING
  * (preview) and the public checkout reader so missing keys never leak
  * through as `undefined` to the UI.
  */
-function mergeBranding(raw: unknown): PaymentLinkBranding {
-  if (!raw || typeof raw !== 'object') return DEFAULT_PAYMENT_LINK_BRANDING
+/**
+ * Brand-accent fallback for the checkout button. When a venue never set an
+ * explicit `buttonColor`, the public checkout inherits the venue's brand
+ * accent (`Venue.primaryColor` — the same field the booking widget consumes
+ * as `--avq-accent`) so payment links and appointments/classes share one
+ * color. Only honored when it looks like a CSS color; otherwise the legacy
+ * blue default. Resolved at READ time and NEVER persisted, so changing the
+ * venue's primaryColor keeps propagating (live inheritance).
+ */
+function resolveBrandFallbackColor(primaryColor?: string | null): string {
+  const trimmed = typeof primaryColor === 'string' ? primaryColor.trim() : ''
+  return /^(#[0-9a-fA-F]{3,8}|rgb|hsl|oklch|color\()/.test(trimmed) ? trimmed : DEFAULT_PAYMENT_LINK_BRANDING.buttonColor
+}
+
+function mergeBranding(raw: unknown, primaryColor?: string | null): PaymentLinkBranding {
+  const buttonFallback = resolveBrandFallbackColor(primaryColor)
+  if (!raw || typeof raw !== 'object') {
+    return { ...DEFAULT_PAYMENT_LINK_BRANDING, buttonColor: buttonFallback }
+  }
   const stored = raw as Partial<PaymentLinkBranding>
   return {
     showLogo: stored.showLogo ?? DEFAULT_PAYMENT_LINK_BRANDING.showLogo,
-    buttonColor: stored.buttonColor ?? DEFAULT_PAYMENT_LINK_BRANDING.buttonColor,
+    buttonColor: stored.buttonColor ?? buttonFallback,
     buttonShape: stored.buttonShape ?? DEFAULT_PAYMENT_LINK_BRANDING.buttonShape,
     fontFamily: stored.fontFamily ?? DEFAULT_PAYMENT_LINK_BRANDING.fontFamily,
     showImage: stored.showImage ?? DEFAULT_PAYMENT_LINK_BRANDING.showImage,
@@ -753,10 +770,10 @@ function mergeBranding(raw: unknown): PaymentLinkBranding {
 export async function getPaymentLinkBranding(venueId: string): Promise<PaymentLinkBranding> {
   const venue = await prisma.venue.findUnique({
     where: { id: venueId },
-    select: { paymentLinkBranding: true },
+    select: { paymentLinkBranding: true, primaryColor: true },
   })
   if (!venue) throw new NotFoundError('Venue no encontrado')
-  return mergeBranding(venue.paymentLinkBranding)
+  return mergeBranding(venue.paymentLinkBranding, venue.primaryColor)
 }
 
 export async function updatePaymentLinkBranding(
@@ -899,7 +916,7 @@ export async function getPaymentLinkByShortCode(shortCode: string) {
     },
     // Branding overrides for this checkout. Always merged with defaults so
     // the customer-facing page never has to handle null/undefined fields.
-    branding: mergeBranding(paymentLink.venue.paymentLinkBranding),
+    branding: mergeBranding(paymentLink.venue.paymentLinkBranding, paymentLink.venue.primaryColor),
     // Line items for ITEM-purpose links. Empty array for PAYMENT/DONATION.
     // Each line includes its pre-selected modifiers so the customer-facing
     // checkout page can render the full configuration. Total =
