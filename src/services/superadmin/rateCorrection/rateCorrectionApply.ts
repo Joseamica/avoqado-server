@@ -131,90 +131,91 @@ export async function applyRateCorrection(args: ApplyArgs, ctx: ApplyContext) {
     let costCreatedCount = 0
     let estimatedImpact = 0
 
-    await prisma.$transaction(async tx => {
-      for (const p of payments) {
-        const { transactionType, after } = recomputePaymentEconomics(p, effVenue!, effProvider)
+    await prisma.$transaction(
+      async tx => {
+        for (const p of payments) {
+          const { transactionType, after } = recomputePaymentEconomics(p, effVenue!, effProvider)
 
-        const beforeFee = parseFloat(p.feeAmount.toString())
-        estimatedImpact += after.feeAmount - beforeFee
+          const beforeFee = parseFloat(p.feeAmount.toString())
+          estimatedImpact += after.feeAmount - beforeFee
 
-        const existingCost = await tx.transactionCost.findUnique({ where: { paymentId: p.id } })
-        const existingVt = await tx.venueTransaction.findUnique({ where: { paymentId: p.id } })
+          const existingCost = await tx.transactionCost.findUnique({ where: { paymentId: p.id } })
+          const existingVt = await tx.venueTransaction.findUnique({ where: { paymentId: p.id } })
 
-        await tx.rateCorrectionEntry.create({
-          data: {
-            batchId: batch.id,
-            paymentId: p.id,
-            beforeFeeAmount: beforeFee,
-            beforeNetAmount: parseFloat(p.netAmount.toString()),
-            beforeFeePercentage: parseFloat(p.feePercentage.toString()),
-            beforeVenueTxnFee: existingVt ? parseFloat(existingVt.feeAmount.toString()) : null,
-            beforeVenueTxnNet: existingVt ? parseFloat(existingVt.netAmount.toString()) : null,
-            beforeVenueTxnNetSettlement:
-              existingVt?.netSettlementAmount != null ? parseFloat(existingVt.netSettlementAmount.toString()) : null,
-            costCreated: !existingCost && args.missingCostMode === 'CREATE_COST',
-            // Json input types: a TransactionCost row carries Decimals; store as-is for the audit trail.
-            beforeCostJson: (existingCost ?? undefined) as any,
-            afterFeeAmount: after.feeAmount,
-            afterNetAmount: after.netAmount,
-            afterFeePercentage: after.venueRate,
-          },
-        })
-
-        await tx.payment.update({
-          where: { id: p.id },
-          data: { feeAmount: after.feeAmount, netAmount: after.netAmount, feePercentage: after.venueRate },
-        })
-
-        if (existingVt) {
-          await tx.venueTransaction.update({
-            where: { paymentId: p.id },
-            data: { feeAmount: after.feeAmount, netAmount: after.netAmount, netSettlementAmount: after.netAmount },
-          })
-        }
-
-        if (existingCost) {
-          await tx.transactionCost.update({
-            where: { paymentId: p.id },
+          await tx.rateCorrectionEntry.create({
             data: {
-              venueRate: after.venueRate,
-              venueChargeAmount: after.venueChargeAmount,
-              venueFixedFee: after.venueFixedFee,
-              providerRate: after.providerRate,
-              providerCostAmount: after.providerCostAmount,
-              providerFixedFee: after.providerFixedFee,
-              grossProfit: after.grossProfit,
-              profitMargin: after.profitMargin,
-            },
-          })
-        } else if (args.missingCostMode === 'CREATE_COST') {
-          await tx.transactionCost.create({
-            data: {
+              batchId: batch.id,
               paymentId: p.id,
-              merchantAccountId,
-              transactionType,
-              amount: parseFloat(p.amount.toString()) + parseFloat(p.tipAmount?.toString() || '0'),
-              venueRate: after.venueRate,
-              venueChargeAmount: after.venueChargeAmount,
-              venueFixedFee: after.venueFixedFee,
-              providerRate: after.providerRate,
-              providerCostAmount: after.providerCostAmount,
-              providerFixedFee: after.providerFixedFee,
-              grossProfit: after.grossProfit,
-              profitMargin: after.profitMargin,
-              providerCostStructureId: activeProvider?.id,
-              venuePricingStructureId: activeVenue?.id,
+              beforeFeeAmount: beforeFee,
+              beforeNetAmount: parseFloat(p.netAmount.toString()),
+              beforeFeePercentage: parseFloat(p.feePercentage.toString()),
+              beforeVenueTxnFee: existingVt ? parseFloat(existingVt.feeAmount.toString()) : null,
+              beforeVenueTxnNet: existingVt ? parseFloat(existingVt.netAmount.toString()) : null,
+              beforeVenueTxnNetSettlement:
+                existingVt?.netSettlementAmount != null ? parseFloat(existingVt.netSettlementAmount.toString()) : null,
+              costCreated: !existingCost && args.missingCostMode === 'CREATE_COST',
+              // Json input types: a TransactionCost row carries Decimals; store as-is for the audit trail.
+              beforeCostJson: (existingCost ?? undefined) as any,
+              afterFeeAmount: after.feeAmount,
+              afterNetAmount: after.netAmount,
+              afterFeePercentage: after.venueRate,
             },
           })
-          costCreatedCount++
+
+          await tx.payment.update({
+            where: { id: p.id },
+            data: { feeAmount: after.feeAmount, netAmount: after.netAmount, feePercentage: after.venueRate },
+          })
+
+          if (existingVt) {
+            await tx.venueTransaction.update({
+              where: { paymentId: p.id },
+              data: { feeAmount: after.feeAmount, netAmount: after.netAmount, netSettlementAmount: after.netAmount },
+            })
+          }
+
+          if (existingCost) {
+            await tx.transactionCost.update({
+              where: { paymentId: p.id },
+              data: {
+                venueRate: after.venueRate,
+                venueChargeAmount: after.venueChargeAmount,
+                venueFixedFee: after.venueFixedFee,
+                providerRate: after.providerRate,
+                providerCostAmount: after.providerCostAmount,
+                providerFixedFee: after.providerFixedFee,
+                grossProfit: after.grossProfit,
+                profitMargin: after.profitMargin,
+              },
+            })
+          } else if (args.missingCostMode === 'CREATE_COST') {
+            await tx.transactionCost.create({
+              data: {
+                paymentId: p.id,
+                merchantAccountId,
+                transactionType,
+                amount: parseFloat(p.amount.toString()) + parseFloat(p.tipAmount?.toString() || '0'),
+                venueRate: after.venueRate,
+                venueChargeAmount: after.venueChargeAmount,
+                venueFixedFee: after.venueFixedFee,
+                providerRate: after.providerRate,
+                providerCostAmount: after.providerCostAmount,
+                providerFixedFee: after.providerFixedFee,
+                grossProfit: after.grossProfit,
+                profitMargin: after.profitMargin,
+                providerCostStructureId: activeProvider?.id,
+                venuePricingStructureId: activeVenue?.id,
+              },
+            })
+            costCreatedCount++
+          }
         }
-      }
-    },
-    // La transacción interactiva de Prisma aborta a los 5s por default. Contra una
-    // DB remota, cientos de writes secuenciales (≤200 pagos × varias queries c/u)
-    // superan ese límite y se hace rollback ("Transaction not found"). Subimos el
-    // presupuesto a 2 min (maxWait 10s para adquirir conexión del pool).
-    { timeout: 120_000, maxWait: 10_000 },
+      },
+      // La transacción interactiva de Prisma aborta a los 5s por default. Contra una
+      // DB remota, cientos de writes secuenciales (≤200 pagos × varias queries c/u)
+      // superan ese límite y se hace rollback ("Transaction not found"). Subimos el
+      // presupuesto a 2 min (maxWait 10s para adquirir conexión del pool).
+      { timeout: 120_000, maxWait: 10_000 },
     )
 
     // 10. Finalize the batch.
