@@ -16,6 +16,7 @@ import { Prisma } from '@prisma/client'
 import AppError from '@/errors/AppError'
 import { getMergedCategories, type CategorySource } from './category-resolution.service'
 import { logAction } from './activity-log.service'
+import { normalizeSerial } from '../serialized-inventory/serializedInventory.service'
 
 // ===========================================
 // TYPES
@@ -356,10 +357,10 @@ export async function bulkUploadItems(venueId: string, categoryId: string, data:
     // Parse CSV - expect one serial number per line or comma-separated
     serialNumbers = data.csvContent
       .split(/[\n,]/)
-      .map(s => s.trim())
+      .map(s => normalizeSerial(s))
       .filter(s => s.length > 0)
   } else if (data.serialNumbers) {
-    serialNumbers = data.serialNumbers.map(s => s.trim()).filter(s => s.length > 0)
+    serialNumbers = data.serialNumbers.map(s => normalizeSerial(s)).filter(s => s.length > 0)
   }
 
   if (serialNumbers.length === 0) {

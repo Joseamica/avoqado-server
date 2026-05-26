@@ -15,6 +15,27 @@ import { SimCustodyError } from '../../lib/sim-custody-error-codes'
 import { buildCustodyDataForScanner } from './custodyAssignment.helper'
 
 // ==========================================
+// SERIAL NORMALIZATION
+// Barcodes for the same physical item can arrive with different casing or
+// surrounding whitespace depending on the capture path (bulk file import vs
+// live barcode scanner). ICCIDs in particular carry a trailing hex check
+// nibble that scanners may emit as 'f' while a bulk upload stored 'F'. Without
+// normalization the case-sensitive unique lookup misses the existing item and
+// the sale flow registers a DUPLICATE marked SOLD, leaving the real inventory
+// item AVAILABLE forever (inventory inflation + phantom sales).
+//
+// Canonical form = trimmed + UPPERCASE (matches the dominant stored form).
+// Apply at every public entry point that accepts a serial.
+// ==========================================
+export function normalizeSerial(serial: string): string {
+  return serial.trim().toUpperCase()
+}
+
+function normalizeSerials(serials: string[]): string[] {
+  return serials.map(normalizeSerial)
+}
+
+// ==========================================
 // SCAN RESULT TYPES
 // ==========================================
 export type ScanStatus = 'available' | 'already_sold' | 'not_registered' | 'module_disabled'
@@ -66,6 +87,7 @@ export class SerializedInventoryService {
    * - 'module_disabled': Module is not enabled for this venue
    */
   async scan(venueId: string, serialNumber: string): Promise<ScanResult> {
+    serialNumber = normalizeSerial(serialNumber)
     // Verify module is enabled
     const isEnabled = await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY)
 
@@ -153,7 +175,7 @@ export class SerializedInventoryService {
       data: {
         venueId: data.venueId,
         categoryId: data.categoryId,
-        serialNumber: data.serialNumber,
+        serialNumber: normalizeSerial(data.serialNumber),
         createdBy: data.createdBy,
         status: 'AVAILABLE',
       },
@@ -173,6 +195,7 @@ export class SerializedInventoryService {
     createdBy: string
     scannerRole?: StaffRole
   }): Promise<RegisterBatchResult> {
+    data = { ...data, serialNumbers: normalizeSerials(data.serialNumbers) }
     const custodyData = buildCustodyDataForScanner(data.scannerRole, data.createdBy)
     const eventType =
       custodyData.custodyState === 'PROMOTER_HELD'
@@ -268,6 +291,7 @@ export class SerializedInventoryService {
     tx?: Prisma.TransactionClient,
     opts?: { staffId?: string; appVersionCode?: number; minimumVersionWithMisSims?: number },
   ): Promise<{ item: SerializedItem; deprecationWarning: string | null }> {
+    serialNumber = normalizeSerial(serialNumber)
     const client = tx || this.db
 
     // 1. Locate item (venue-level first, org-level fallback)
@@ -316,6 +340,7 @@ export class SerializedInventoryService {
     serialNumber: string,
     opts: { staffId: string; appVersionCode?: number; minimumVersionWithMisSims?: number },
   ): Promise<{ deprecationWarning: string | null }> {
+    serialNumber = normalizeSerial(serialNumber)
     const item =
       (await this.db.serializedItem.findUnique({
         where: { venueId_serialNumber: { venueId, serialNumber } },
@@ -384,7 +409,7 @@ export class SerializedInventoryService {
       data: {
         venueId: data.venueId,
         categoryId: data.categoryId,
-        serialNumber: data.serialNumber,
+        serialNumber: normalizeSerial(data.serialNumber),
         createdBy: data.createdBy,
         status: 'SOLD',
         soldAt: new Date(),
@@ -561,6 +586,7 @@ export class SerializedInventoryService {
    * remain findable. Mirrors the venue→org pattern in scan()/markAsSold().
    */
   async getItemBySerialNumber(venueId: string, serialNumber: string): Promise<(SerializedItem & { category: ItemCategory }) | null> {
+    serialNumber = normalizeSerial(serialNumber)
     return (
       (await this.db.serializedItem.findUnique({
         where: { venueId_serialNumber: { venueId, serialNumber } },
@@ -608,6 +634,7 @@ export class SerializedInventoryService {
    * (business assumption — refund triage happens at the org level).
    */
   async markAsReturned(venueId: string, serialNumber: string): Promise<SerializedItem> {
+    serialNumber = normalizeSerial(serialNumber)
     return this.db.serializedItem.update({
       where: { venueId_serialNumber: { venueId, serialNumber } },
       data: {
@@ -632,6 +659,7 @@ export class SerializedInventoryService {
    * mirroring a `STAFF_TERMINATED`/`DAMAGED_SIM` collect-to-admin path.
    */
   async markAsDamaged(venueId: string, serialNumber: string): Promise<SerializedItem> {
+    serialNumber = normalizeSerial(serialNumber)
     return this.db.serializedItem.update({
       where: { venueId_serialNumber: { venueId, serialNumber } },
       data: {
@@ -658,6 +686,7 @@ export class SerializedInventoryService {
     registeredFromVenueId?: string
     scannerRole?: StaffRole
   }): Promise<RegisterBatchResult> {
+    data = { ...data, serialNumbers: normalizeSerials(data.serialNumbers) }
     const custodyData = buildCustodyDataForScanner(data.scannerRole, data.createdBy)
     const eventType =
       custodyData.custodyState === 'PROMOTER_HELD'
@@ -746,6 +775,7 @@ export class SerializedInventoryService {
     serialNumber: string,
     client?: Prisma.TransactionClient,
   ): Promise<(SerializedItem & { category: ItemCategory }) | null> {
+    serialNumber = normalizeSerial(serialNumber)
     const db = client || this.db
     const venue = await db.venue.findUnique({
       where: { id: venueId },
