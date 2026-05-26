@@ -59,6 +59,8 @@ export interface OrgSaleListRow {
   } | null
   category: { id: string; name: string } | null
   saleType: 'LINEA_NUEVA' | 'PORTABILIDAD' | 'NO_APLICA'
+  /** Venue that originally registered/received the SIM into inventory (e.g. "Virtual"). Null for legacy items. */
+  registeredFromVenue: { id: string; name: string; slug: string } | null
 }
 
 export interface OrgSaleListResponse {
@@ -179,6 +181,7 @@ export async function listOrgSaleVerifications(orgId: string, filters: OrgSaleLi
                     id: true,
                     serialNumber: true,
                     category: { select: { id: true, name: true } },
+                    registeredFromVenue: { select: { id: true, name: true, slug: true } },
                   },
                 },
               },
@@ -236,6 +239,7 @@ export async function listOrgSaleVerifications(orgId: string, filters: OrgSaleLi
       },
       category,
       saleType: deriveSaleType(isPort, category?.name ?? null),
+      registeredFromVenue: firstSerialized?.registeredFromVenue ?? null,
     }
   })
 
