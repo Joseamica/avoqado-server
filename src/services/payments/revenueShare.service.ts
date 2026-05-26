@@ -42,6 +42,10 @@ export interface RevenueSplit {
   aggregatorNet: number
   /** IVA por capa, pass-through (no se reparte — cada parte lo entera a SAT). */
   ivaByLayer: { provider: number; aggregator: number; venue: number }
+  /** Avoqado's share of the provider→aggregator margin (tramo 1). */
+  avoqadoFromProviderMargin: number
+  /** Avoqado's share of the aggregator→venue margin (tramo 2). 0 when direct/no-config. */
+  avoqadoFromAggregatorMargin: number
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100
@@ -62,16 +66,22 @@ export function computeRevenueSplit(input: RevenueSplitInput): RevenueSplit {
   let avoqadoNet: number
   let aggregatorNet = 0
   let aggregatorPrice = 0
+  let avoqadoFromProviderMargin: number
+  let avoqadoFromAggregatorMargin: number
 
   if (!share) {
     // Sin config — comportamiento histórico: todo el margen a Avoqado.
     providerNet = providerCost
     avoqadoNet = round2(venueCharge - providerCost)
+    avoqadoFromProviderMargin = avoqadoNet
+    avoqadoFromAggregatorMargin = 0
   } else if (!share.aggregatorPrice) {
     // Directo: 1 margen, split provider↔Avoqado.
     const margin = venueCharge - providerCost
     avoqadoNet = round2(margin * share.avoqadoShareOfProviderMargin)
     providerNet = round2(venueCharge - avoqadoNet)
+    avoqadoFromProviderMargin = avoqadoNet
+    avoqadoFromAggregatorMargin = 0
   } else {
     // Con agregador: 2 márgenes, 2 splits.
     aggregatorPrice = round2(preIva(amount * share.aggregatorPrice[cardType], share.aggregatorPriceIncludesTax, taxRate))
@@ -83,6 +93,8 @@ export function computeRevenueSplit(input: RevenueSplitInput): RevenueSplit {
     avoqadoNet = round2(avoFromM1 + avoFromM2)
     providerNet = round2(providerCost + (m1 - avoFromM1))
     aggregatorNet = round2(m2 - avoFromM2)
+    avoqadoFromProviderMargin = avoFromM1
+    avoqadoFromAggregatorMargin = avoFromM2
   }
 
   const iva = (fee: number, includesTax: boolean) => (includesTax ? 0 : round2(fee * taxRate))
@@ -96,5 +108,7 @@ export function computeRevenueSplit(input: RevenueSplitInput): RevenueSplit {
       aggregator: share?.aggregatorPrice ? iva(aggregatorPrice, share.aggregatorPriceIncludesTax) : 0,
       venue: iva(venueCharge, input.venueChargeIncludesTax),
     },
+    avoqadoFromProviderMargin,
+    avoqadoFromAggregatorMargin,
   }
 }

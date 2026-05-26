@@ -20,6 +20,9 @@ describe('computeRevenueSplit', () => {
     expect(r.providerNet).toBeCloseTo(2)
     expect(r.avoqadoNet).toBeCloseTo(3)
     expect(r.aggregatorNet).toBe(0)
+    // tramo fields: no-config → all from provider margin, none from aggregator
+    expect(r.avoqadoFromAggregatorMargin).toBe(0)
+    expect(r.avoqadoFromProviderMargin).toBeCloseTo(r.avoqadoNet)
   })
 
   it('directo: margen partido por avoqadoShareOfProviderMargin', () => {
@@ -38,6 +41,9 @@ describe('computeRevenueSplit', () => {
     expect(r.avoqadoNet).toBeCloseTo(1.5)
     expect(r.aggregatorNet).toBe(0)
     expect(r.providerNet + r.avoqadoNet + r.aggregatorNet).toBeCloseTo(5)
+    // tramo fields: direct → all from provider margin, none from aggregator
+    expect(r.avoqadoFromAggregatorMargin).toBe(0)
+    expect(r.avoqadoFromProviderMargin).toBeCloseTo(r.avoqadoNet)
   })
 
   it('con agregador: 2 márgenes, 2 splits, suma = fee al venue', () => {
@@ -57,6 +63,10 @@ describe('computeRevenueSplit', () => {
     expect(r.avoqadoNet).toBeCloseTo(2.5)
     expect(r.aggregatorNet).toBeCloseTo(1.5)
     expect(r.providerNet + r.avoqadoNet + r.aggregatorNet).toBeCloseTo(7)
+    // tramo fields: aggregator case — tramos sum to avoqadoNet
+    expect(r.avoqadoFromProviderMargin).toBeCloseTo(1) // Avoqado's cut of M1
+    expect(r.avoqadoFromAggregatorMargin).toBeCloseTo(1.5) // Avoqado's cut of M2
+    expect(r.avoqadoFromProviderMargin + r.avoqadoFromAggregatorMargin).toBeCloseTo(r.avoqadoNet)
   })
 
   it('share 0-100 (Avoqado se queda 0 del margen agregador → todo al agregador)', () => {

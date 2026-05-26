@@ -1,120 +1,96 @@
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { Prisma } from '@prisma/client'
-import * as paymentAnalyticsService from './paymentAnalytics.service'
+import { computeRevenueSplit, type CardType, type MerchantRevenueShareConfig } from '../payments/revenueShare.service'
 
 export interface DateRange {
   startDate?: Date
   endDate?: Date
 }
+export type Granularity = 'daily' | 'weekly' | 'monthly'
+
+const round2 = (n: number) => Math.round(n * 100) / 100
 
 /** EcommerceMerchant stores Avoqado's fee in integer centavos; UI works in MXN. */
 export function centsToMxn(cents: number | bigint | null | undefined): number {
   return Number(cents ?? 0) / 100
 }
 
-interface TerminalVenueAgg {
-  venueId: string
-  venueName: string
-  profit: number
-  volume: number
-  transactions: number
-}
-interface OnlineVenueAgg {
-  venueId: string
-  venueName: string
-  fees: number
-  volume: number
-  transactions: number
+/** UTC time-bucket key for the trend. Weekly keys to the Monday of the week. */
+export function bucketKey(date: Date, granularity: Granularity): string {
+  const iso = date.toISOString()
+  if (granularity === 'monthly') return iso.slice(0, 7) // YYYY-MM
+  if (granularity === 'weekly') {
+    const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()))
+    const dow = (d.getUTCDay() + 6) % 7 // Monday = 0
+    d.setUTCDate(d.getUTCDate() - dow)
+    return d.toISOString().slice(0, 10)
+  }
+  return iso.slice(0, 10) // YYYY-MM-DD
 }
 
-export interface VenueEarnings {
-  venueId: string
-  venueName: string
-  profit: number
-  terminalProfit: number
-  onlineFees: number
-  volume: number
-  transactions: number
+function resolveRange(range?: DateRange): { startDate: Date; endDate: Date } {
+  const endDate = range?.endDate ?? new Date()
+  const startDate = range?.startDate ?? new Date(endDate.getFullYear(), endDate.getMonth(), 1)
+  return { startDate, endDate }
 }
 
-/** Combine per-venue terminal profit and online fees into one list, sorted by total profit. */
-export function mergeByVenue(terminal: TerminalVenueAgg[], online: OnlineVenueAgg[]): VenueEarnings[] {
-  const map = new Map<string, VenueEarnings>()
-  for (const t of terminal) {
-    map.set(t.venueId, {
-      venueId: t.venueId,
-      venueName: t.venueName,
-      terminalProfit: t.profit,
-      onlineFees: 0,
-      profit: t.profit,
-      volume: t.volume,
-      transactions: t.transactions,
-    })
-  }
-  for (const o of online) {
-    const existing = map.get(o.venueId)
-    if (existing) {
-      existing.onlineFees += o.fees
-      existing.profit += o.fees
-      existing.volume += o.volume
-      existing.transactions += o.transactions
-    } else {
-      map.set(o.venueId, {
-        venueId: o.venueId,
-        venueName: o.venueName,
-        terminalProfit: 0,
-        onlineFees: o.fees,
-        profit: o.fees,
-        volume: o.volume,
-        transactions: o.transactions,
-      })
-    }
-  }
-  return Array.from(map.values()).sort((a, b) => b.profit - a.profit)
+/** TransactionCost.transactionType may be OTHER; treat as CREDIT (rate already
+ *  snapshotted; type only matters to resolve aggregatorPrice[cardType]). */
+function toCardType(t: string): CardType {
+  if (t === 'DEBIT' || t === 'CREDIT' || t === 'AMEX' || t === 'INTERNATIONAL') return t
+  return 'CREDIT'
 }
 
-export interface EarningsTimePoint {
-  date: string
-  terminalProfit: number
-  onlineFees: number
-  profit: number
-}
-
-/** Merge terminal-profit and online-fee time series by date bucket, filling gaps with 0. */
-export function mergeTimeSeries(
-  terminal: { date: string; profit: number }[],
-  online: { date: string; fees: number }[],
-): EarningsTimePoint[] {
-  const map = new Map<string, EarningsTimePoint>()
-  for (const t of terminal) {
-    map.set(t.date, { date: t.date, terminalProfit: t.profit, onlineFees: 0, profit: t.profit })
+function mapShare(
+  ms: {
+    aggregatorPrice: unknown
+    aggregatorPriceIncludesTax: boolean
+    avoqadoShareOfProviderMargin: unknown
+    avoqadoShareOfAggregatorMargin: unknown
+    taxRate: unknown
+  } | null,
+): MerchantRevenueShareConfig | null {
+  if (!ms) return null
+  return {
+    aggregatorPrice:
+      ms.aggregatorPrice && typeof ms.aggregatorPrice === 'object' && !Array.isArray(ms.aggregatorPrice)
+        ? (ms.aggregatorPrice as Record<CardType, number>)
+        : null,
+    aggregatorPriceIncludesTax: ms.aggregatorPriceIncludesTax,
+    avoqadoShareOfProviderMargin: Number(ms.avoqadoShareOfProviderMargin),
+    avoqadoShareOfAggregatorMargin: ms.avoqadoShareOfAggregatorMargin == null ? null : Number(ms.avoqadoShareOfAggregatorMargin),
+    taxRate: Number(ms.taxRate),
   }
-  for (const o of online) {
-    const existing = map.get(o.date)
-    if (existing) {
-      existing.onlineFees += o.fees
-      existing.profit += o.fees
-    } else {
-      map.set(o.date, { date: o.date, terminalProfit: 0, onlineFees: o.fees, profit: o.fees })
-    }
-  }
-  return Array.from(map.values()).sort((a, b) => (a.date < b.date ? -1 : 1))
 }
 
 export interface EarningsTotals {
-  grossProfit: number
-  terminalProfit: number
+  netProfit: number // terminalNet + onlineFees — the headline (Avoqado's real take)
+  terminalNet: number // Σ avoqadoNet across terminal transactions (both tramos)
+  onlineFees: number // Σ applicationFeeCents / 100 (already Avoqado's net)
+  tramoProvider: number // Σ Avoqado's cut of the provider→aggregator margin
+  tramoAggregator: number // Σ Avoqado's cut of the aggregator→venue margin
+  aggregatorKept: number // Σ what the aggregator kept (context)
+  volume: number
+  transactions: number
+  averageMargin: number // terminalNet / terminalVolume (Avoqado's effective take rate)
+}
+export interface VenueEarnings {
+  venueId: string
+  venueName: string
+  netProfit: number
+  terminalNet: number
   onlineFees: number
   volume: number
   transactions: number
-  averageMargin: number
 }
 export interface MerchantEarnings {
   merchantAccountId: string
   label: string
   providerCode: string
-  profit: number
+  hasAggregator: boolean
+  netProfit: number
+  tramoProvider: number
+  tramoAggregator: number
   volume: number
   transactions: number
 }
@@ -123,15 +99,14 @@ export interface ProviderEarnings {
   providerCode: string
   providerName: string
   volume: number
-  cost: number
+  netProfit: number
   transactions: number
 }
 export interface CardTypeEarnings {
   type: string
   transactions: number
   volume: number
-  profit: number
-  margin: number
+  netProfit: number
 }
 export interface ChannelEarnings {
   ecommerceMerchantId: string
@@ -150,58 +125,34 @@ export interface EarningsSummary {
   byCardType: CardTypeEarnings[]
   byChannel: ChannelEarnings[]
 }
-
-function resolveRange(range?: DateRange): { startDate: Date; endDate: Date } {
-  const endDate = range?.endDate ?? new Date()
-  const startDate = range?.startDate ?? new Date(endDate.getFullYear(), endDate.getMonth(), 1)
-  return { startDate, endDate }
+export interface EarningsTimePoint {
+  date: string
+  terminalNet: number
+  onlineFees: number
+  net: number
 }
+
+const TX_INCLUDE = {
+  payment: { select: { venue: { select: { id: true, name: true } } } },
+  merchantAccount: {
+    select: {
+      id: true,
+      alias: true,
+      displayName: true,
+      externalMerchantId: true,
+      provider: { select: { id: true, code: true, name: true } },
+      merchantRevenueShare: true,
+    },
+  },
+} as const
 
 export async function getEarningsSummary(range?: DateRange): Promise<EarningsSummary> {
   const { startDate, endDate } = resolveRange(range)
-  logger.info('Calculating earnings summary', { startDate, endDate })
+  logger.info('Calculating earnings summary (revenue-share net)', { startDate, endDate })
 
-  // REUSE (unchanged shared service): terminal totals, card-type + provider breakdowns.
-  const terminal = await paymentAnalyticsService.getProfitMetrics({ startDate, endDate })
-
-  // CREATE: full per-venue terminal, per-merchant terminal, and the online (e-commerce) aggregates.
-  const [terminalByVenue, merchantRows, onlineByVenue, onlineTotals, channelRows] = await Promise.all([
-    prisma.$queryRaw<Array<{ venueId: string; venueName: string; profit: Prisma.Decimal; volume: Prisma.Decimal; transactions: bigint }>>`
-      SELECT v.id as "venueId", v.name as "venueName",
-             COALESCE(SUM(tc."grossProfit"), 0) as profit,
-             COALESCE(SUM(tc.amount), 0) as volume,
-             COUNT(*) as transactions
-      FROM "TransactionCost" tc
-      JOIN "Payment" p ON tc."paymentId" = p.id
-      JOIN "Venue" v ON p."venueId" = v.id
-      WHERE tc."createdAt" >= ${startDate} AND tc."createdAt" <= ${endDate}
-      GROUP BY v.id, v.name
-    `,
-    prisma.$queryRaw<
-      Array<{
-        merchantAccountId: string
-        displayName: string | null
-        alias: string | null
-        externalMerchantId: string
-        providerCode: string
-        profit: Prisma.Decimal
-        volume: Prisma.Decimal
-        transactions: bigint
-      }>
-    >`
-      SELECT ma.id as "merchantAccountId", ma."displayName", ma.alias, ma."externalMerchantId",
-             pp.code as "providerCode",
-             COALESCE(SUM(tc."grossProfit"), 0) as profit,
-             COALESCE(SUM(tc.amount), 0) as volume,
-             COUNT(*) as transactions
-      FROM "TransactionCost" tc
-      JOIN "MerchantAccount" ma ON tc."merchantAccountId" = ma.id
-      JOIN "PaymentProvider" pp ON ma."providerId" = pp.id
-      WHERE tc."createdAt" >= ${startDate} AND tc."createdAt" <= ${endDate}
-      GROUP BY ma.id, ma."displayName", ma.alias, ma."externalMerchantId", pp.code
-      ORDER BY profit DESC
-    `,
-    prisma.$queryRaw<Array<{ venueId: string; venueName: string; fees: bigint; volume: Prisma.Decimal; transactions: bigint }>>`
+  const [txs, onlineByVenue, onlineTotals, channelRows] = await Promise.all([
+    prisma.transactionCost.findMany({ where: { createdAt: { gte: startDate, lte: endDate } }, include: TX_INCLUDE }),
+    prisma.$queryRaw<Array<{ venueId: string; venueName: string; fees: bigint; volume: unknown; transactions: bigint }>>`
       SELECT v.id as "venueId", v.name as "venueName",
              COALESCE(SUM(cs."applicationFeeCents"), 0) as fees,
              COALESCE(SUM(cs.amount), 0) as volume,
@@ -224,12 +175,11 @@ export async function getEarningsSummary(range?: DateRange): Promise<EarningsSum
         businessName: string | null
         providerCode: string
         fees: bigint
-        volume: Prisma.Decimal
+        volume: unknown
         transactions: bigint
       }>
     >`
-      SELECT em.id as "ecommerceMerchantId", em."channelName", em."businessName",
-             pp.code as "providerCode",
+      SELECT em.id as "ecommerceMerchantId", em."channelName", em."businessName", pp.code as "providerCode",
              COALESCE(SUM(cs."applicationFeeCents"), 0) as fees,
              COALESCE(SUM(cs.amount), 0) as volume,
              COUNT(*) as transactions
@@ -242,61 +192,156 @@ export async function getEarningsSummary(range?: DateRange): Promise<EarningsSum
     `,
   ])
 
-  const byVenue = mergeByVenue(
-    terminalByVenue.map(r => ({
-      venueId: r.venueId,
-      venueName: r.venueName,
-      profit: Number(r.profit),
-      volume: Number(r.volume),
-      transactions: Number(r.transactions),
-    })),
-    onlineByVenue.map(r => ({
-      venueId: r.venueId,
-      venueName: r.venueName,
-      fees: centsToMxn(r.fees),
-      volume: Number(r.volume),
-      transactions: Number(r.transactions),
-    })),
-  )
+  const venueMap = new Map<string, VenueEarnings>()
+  const merchantMap = new Map<string, MerchantEarnings>()
+  const providerMap = new Map<string, ProviderEarnings>()
+  const cardMap = new Map<string, CardTypeEarnings>()
+
+  let terminalNet = 0
+  let tramoProvider = 0
+  let tramoAggregator = 0
+  let aggregatorKept = 0
+  let terminalVolume = 0
+  let terminalTxns = 0
+
+  for (const tc of txs) {
+    const m = tc.merchantAccount
+    const cardType = toCardType(tc.transactionType)
+    const share = mapShare(m.merchantRevenueShare)
+    const split = computeRevenueSplit({
+      amount: Number(tc.amount),
+      cardType,
+      providerCostRate: Number(tc.providerRate),
+      providerCostIncludesTax: true,
+      venueChargeRate: Number(tc.venueRate),
+      venueChargeIncludesTax: true,
+      share,
+    })
+    const amount = Number(tc.amount)
+    const net = split.avoqadoNet
+
+    terminalNet += net
+    tramoProvider += split.avoqadoFromProviderMargin
+    tramoAggregator += split.avoqadoFromAggregatorMargin
+    aggregatorKept += split.aggregatorNet
+    terminalVolume += amount
+    terminalTxns += 1
+
+    const v = tc.payment.venue
+    const ve = venueMap.get(v.id) ?? {
+      venueId: v.id,
+      venueName: v.name,
+      netProfit: 0,
+      terminalNet: 0,
+      onlineFees: 0,
+      volume: 0,
+      transactions: 0,
+    }
+    ve.terminalNet += net
+    ve.netProfit += net
+    ve.volume += amount
+    ve.transactions += 1
+    venueMap.set(v.id, ve)
+
+    const me = merchantMap.get(m.id) ?? {
+      merchantAccountId: m.id,
+      label: m.displayName || m.alias || m.externalMerchantId,
+      providerCode: m.provider.code,
+      hasAggregator: !!share?.aggregatorPrice,
+      netProfit: 0,
+      tramoProvider: 0,
+      tramoAggregator: 0,
+      volume: 0,
+      transactions: 0,
+    }
+    me.netProfit += net
+    me.tramoProvider += split.avoqadoFromProviderMargin
+    me.tramoAggregator += split.avoqadoFromAggregatorMargin
+    me.volume += amount
+    me.transactions += 1
+    merchantMap.set(m.id, me)
+
+    const pe = providerMap.get(m.provider.id) ?? {
+      providerId: m.provider.id,
+      providerCode: m.provider.code,
+      providerName: m.provider.name,
+      volume: 0,
+      netProfit: 0,
+      transactions: 0,
+    }
+    pe.netProfit += net
+    pe.volume += amount
+    pe.transactions += 1
+    providerMap.set(m.provider.id, pe)
+
+    const ce = cardMap.get(cardType) ?? { type: cardType, transactions: 0, volume: 0, netProfit: 0 }
+    ce.netProfit += net
+    ce.volume += amount
+    ce.transactions += 1
+    cardMap.set(cardType, ce)
+  }
+
+  for (const o of onlineByVenue) {
+    const fees = centsToMxn(o.fees)
+    const vol = Number(o.volume)
+    const txns = Number(o.transactions)
+    const ve = venueMap.get(o.venueId) ?? {
+      venueId: o.venueId,
+      venueName: o.venueName,
+      netProfit: 0,
+      terminalNet: 0,
+      onlineFees: 0,
+      volume: 0,
+      transactions: 0,
+    }
+    ve.onlineFees += fees
+    ve.netProfit += fees
+    ve.volume += vol
+    ve.transactions += txns
+    venueMap.set(o.venueId, ve)
+  }
 
   const onlineFees = centsToMxn(onlineTotals._sum.applicationFeeCents)
   const onlineVolume = Number(onlineTotals._sum.amount) || 0
-  const onlineTransactions = onlineTotals._count
+  const onlineTxns = onlineTotals._count
+
+  const totals: EarningsTotals = {
+    netProfit: round2(terminalNet + onlineFees),
+    terminalNet: round2(terminalNet),
+    onlineFees: round2(onlineFees),
+    tramoProvider: round2(tramoProvider),
+    tramoAggregator: round2(tramoAggregator),
+    aggregatorKept: round2(aggregatorKept),
+    volume: round2(terminalVolume + onlineVolume),
+    transactions: terminalTxns + onlineTxns,
+    averageMargin: terminalVolume > 0 ? terminalNet / terminalVolume : 0,
+  }
 
   return {
     range: { startDate: startDate.toISOString(), endDate: endDate.toISOString() },
-    totals: {
-      grossProfit: terminal.totalProfit + onlineFees,
-      terminalProfit: terminal.totalProfit,
-      onlineFees,
-      volume: terminal.totalVolume + onlineVolume,
-      transactions: terminal.totalTransactions + onlineTransactions,
-      averageMargin: terminal.averageMargin,
-    },
-    byVenue,
-    byMerchant: merchantRows.map(r => ({
-      merchantAccountId: r.merchantAccountId,
-      label: r.displayName || r.alias || r.externalMerchantId,
-      providerCode: r.providerCode,
-      profit: Number(r.profit),
-      volume: Number(r.volume),
-      transactions: Number(r.transactions),
-    })),
-    byProvider: terminal.topProviders.map(p => ({
-      providerId: p.providerId,
-      providerCode: p.providerCode,
-      providerName: p.providerName,
-      volume: p.volume,
-      cost: p.cost,
-      transactions: p.transactions,
-    })),
-    byCardType: terminal.byCardType.map(c => ({
-      type: c.type,
-      transactions: c.transactions,
-      volume: c.volume,
-      profit: c.profit,
-      margin: c.margin,
-    })),
+    totals,
+    byVenue: Array.from(venueMap.values())
+      .map(r => ({
+        ...r,
+        netProfit: round2(r.netProfit),
+        terminalNet: round2(r.terminalNet),
+        onlineFees: round2(r.onlineFees),
+        volume: round2(r.volume),
+      }))
+      .sort((a, b) => b.netProfit - a.netProfit),
+    byMerchant: Array.from(merchantMap.values())
+      .map(r => ({
+        ...r,
+        netProfit: round2(r.netProfit),
+        tramoProvider: round2(r.tramoProvider),
+        tramoAggregator: round2(r.tramoAggregator),
+        volume: round2(r.volume),
+      }))
+      .sort((a, b) => b.netProfit - a.netProfit),
+    byProvider: Array.from(providerMap.values())
+      .map(r => ({ ...r, netProfit: round2(r.netProfit), volume: round2(r.volume) }))
+      .sort((a, b) => b.volume - a.volume),
+    byCardType: Array.from(cardMap.values()).map(r => ({ ...r, netProfit: round2(r.netProfit), volume: round2(r.volume) })),
     byChannel: channelRows.map(r => ({
       ecommerceMerchantId: r.ecommerceMerchantId,
       label: r.channelName || r.businessName || r.ecommerceMerchantId,
@@ -308,31 +353,50 @@ export async function getEarningsSummary(range?: DateRange): Promise<EarningsSum
   }
 }
 
-export async function getEarningsTimeSeries(
-  range?: DateRange,
-  granularity: 'daily' | 'weekly' | 'monthly' = 'daily',
-): Promise<EarningsTimePoint[]> {
+export async function getEarningsTimeSeries(range?: DateRange, granularity: Granularity = 'daily'): Promise<EarningsTimePoint[]> {
   const { startDate, endDate } = resolveRange(range)
 
-  // REUSE: terminal profit series (unchanged shared service).
-  const terminalSeries = await paymentAnalyticsService.getProfitTimeSeries({ startDate, endDate }, granularity)
+  const [txs, onlineSessions] = await Promise.all([
+    prisma.transactionCost.findMany({ where: { createdAt: { gte: startDate, lte: endDate } }, include: TX_INCLUDE }),
+    prisma.checkoutSession.findMany({
+      where: { status: 'COMPLETED', createdAt: { gte: startDate, lte: endDate } },
+      select: { createdAt: true, applicationFeeCents: true },
+    }),
+  ])
 
-  // CREATE: online fee series (same DATE_TRUNC buckets).
-  const truncInterval = granularity === 'weekly' ? 'week' : granularity === 'monthly' ? 'month' : 'day'
-  const dateFormat = granularity === 'monthly' ? 'YYYY-MM' : 'YYYY-MM-DD'
-  const onlineRows = await prisma.$queryRaw<Array<{ date: string; fees: bigint }>>(
-    Prisma.sql`
-      SELECT TO_CHAR(DATE_TRUNC(${Prisma.raw(`'${truncInterval}'`)}, "createdAt"), ${Prisma.raw(`'${dateFormat}'`)}) as date,
-             COALESCE(SUM("applicationFeeCents"), 0) as fees
-      FROM "CheckoutSession"
-      WHERE status = 'COMPLETED' AND "createdAt" >= ${startDate} AND "createdAt" <= ${endDate}
-      GROUP BY date
-      ORDER BY date
-    `,
-  )
+  const map = new Map<string, EarningsTimePoint>()
+  const at = (k: string): EarningsTimePoint => {
+    let p = map.get(k)
+    if (!p) {
+      p = { date: k, terminalNet: 0, onlineFees: 0, net: 0 }
+      map.set(k, p)
+    }
+    return p
+  }
 
-  return mergeTimeSeries(
-    terminalSeries.map(t => ({ date: t.date, profit: t.profit })),
-    onlineRows.map(o => ({ date: o.date, fees: centsToMxn(o.fees) })),
-  )
+  for (const tc of txs) {
+    const m = tc.merchantAccount
+    const split = computeRevenueSplit({
+      amount: Number(tc.amount),
+      cardType: toCardType(tc.transactionType),
+      providerCostRate: Number(tc.providerRate),
+      providerCostIncludesTax: true,
+      venueChargeRate: Number(tc.venueRate),
+      venueChargeIncludesTax: true,
+      share: mapShare(m.merchantRevenueShare),
+    })
+    const p = at(bucketKey(tc.createdAt, granularity))
+    p.terminalNet += split.avoqadoNet
+    p.net += split.avoqadoNet
+  }
+  for (const cs of onlineSessions) {
+    const fees = centsToMxn(cs.applicationFeeCents)
+    const p = at(bucketKey(cs.createdAt, granularity))
+    p.onlineFees += fees
+    p.net += fees
+  }
+
+  return Array.from(map.values())
+    .map(p => ({ date: p.date, terminalNet: round2(p.terminalNet), onlineFees: round2(p.onlineFees), net: round2(p.net) }))
+    .sort((a, b) => (a.date < b.date ? -1 : 1))
 }
