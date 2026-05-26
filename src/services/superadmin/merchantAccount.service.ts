@@ -418,15 +418,28 @@ export async function getMerchantAccount(id: string, includeCredentials: boolean
   // Compute total venue configs count
   const venueConfigsCount = account._count.venueConfigsPrimary + account._count.venueConfigsSecondary + account._count.venueConfigsTertiary
 
+  // Terminals link via Terminal.assignedMerchantIds (a String[] array), NOT a
+  // Prisma relation, so `_count` can't cover them — query explicitly, mirroring
+  // the list endpoint (getMerchantAccounts). Without this the singular endpoint
+  // always reported 0 terminals even when assigned, so the superadmin detail
+  // page showed "Terminales (0)" + a red readiness chip on merchants that DO
+  // have terminals.
+  const assignedTerminals = await prisma.terminal.findMany({
+    where: { assignedMerchantIds: { has: id } },
+    select: { id: true, serialNumber: true },
+  })
+
   return {
     ...account,
     venueConfigsPrimary: undefined,
     venueConfigsSecondary: undefined,
     venueConfigsTertiary: undefined,
     venues: Array.from(venueMap.values()),
+    terminals: assignedTerminals.map(t => ({ id: t.id, serialNumber: t.serialNumber || '' })),
     _count: {
       costStructures: account._count.costStructures,
       venueConfigs: venueConfigsCount,
+      terminals: assignedTerminals.length,
     },
     credentialsEncrypted: undefined, // Don't expose encrypted data
     credentials: decryptedCredentials, // Only if requested

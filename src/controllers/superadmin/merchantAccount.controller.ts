@@ -2128,6 +2128,16 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
       settlements: { created: settlementsCreated },
     }
 
+    await logAction({
+      staffId: (req as any).user?.uid ?? null,
+      action: 'MERCHANT_ACCOUNT_PROVISIONED_BLUMON',
+      entity: 'MerchantAccount',
+      entityId: merchantAccountId,
+      data: { venueId: target?.id, serialNumber, accountSlot, environment, merchantCreated },
+      ipAddress: req.ip,
+      userAgent: req.headers?.['user-agent'],
+    })
+
     res.status(201).json({
       success: true,
       data: summary,
@@ -2205,6 +2215,21 @@ export async function fullSetupAngelPayMerchant(req: Request, res: Response, nex
 
     const createdBy = (req as Request & { user?: { id?: string } }).user?.id
     const result = await fullSetupAngelPayMerchantService(parsed.data, createdBy)
+
+    await logAction({
+      staffId: (req as any).user?.uid ?? null,
+      action: 'MERCHANT_ACCOUNT_PROVISIONED_ANGELPAY',
+      entity: 'MerchantAccount',
+      entityId: result.merchantAccountId,
+      data: {
+        venueId: parsed.data.venueId,
+        accountType: parsed.data.slot.accountType,
+        loginMode: parsed.data.login.mode,
+        merchantMode: parsed.data.merchant.mode,
+      },
+      ipAddress: req.ip,
+      userAgent: req.headers?.['user-agent'],
+    })
 
     res.status(201).json({
       success: true,
