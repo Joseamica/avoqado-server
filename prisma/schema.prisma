@@ -429,6 +429,9 @@ model Venue {
   whatsappActivations VenueWhatsappActivation[]
   chatSessions        VenueChatSession[]
 
+  // Rate correction batches applied to this venue's historical payments
+  rateCorrectionBatches RateCorrectionBatch[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -827,6 +830,10 @@ model Staff {
   // FK without forcing @unique on the nullable staffId column.
   googleCalendarConnections GoogleCalendarConnection[] @relation("StaffGoogleCalendarConnection")
   createdGoogleConnections  GoogleCalendarConnection[] @relation("StaffCreatedGoogleConnection")
+
+  // Rate correction batches applied/reversed by this staff member
+  rateCorrectionsApplied  RateCorrectionBatch[] @relation("RateCorrectionAppliedBy")
+  rateCorrectionsReversed RateCorrectionBatch[] @relation("RateCorrectionReversedBy")
 
   // Email is now @unique on the field itself (globally unique)
   @@index([email])
@@ -2693,6 +2700,9 @@ model Payment {
   // VENTA + DEVOLUCION later, etc.).
   providerEventLogs ProviderEventLog[]
 
+  // Rate correction entries for retroactive economics recomputation
+  rateCorrectionEntries RateCorrectionEntry[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -3380,6 +3390,9 @@ model MerchantAccount {
   // and for non-AngelPay providers.
   angelpayUserAccountId String?
   angelpayUserAccount   AngelPayUserAccount? @relation(fields: [angelpayUserAccountId], references: [id], onDelete: SetNull)
+
+  // Rate correction batches targeting this merchant account
+  rateCorrectionBatches RateCorrectionBatch[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -4239,6 +4252,93 @@ model TransactionCost {
   @@index([merchantAccountId])
   @@index([transactionType])
   @@index([createdAt])
+}
+
+// ==========================================
+// RATE CORRECTION SYSTEM
+// ==========================================
+
+enum RateCorrectionStatus {
+  PENDING
+  APPLIED
+  FAILED
+  REVERSED
+}
+
+enum RateCorrectionMissingCostMode {
+  FIX_PAYMENT_ONLY
+  CREATE_COST
+}
+
+/// Audit + reversal record for a retroactive rate correction applied to the
+/// historical payments of ONE venue + merchant account.
+model RateCorrectionBatch {
+  id                String          @id @default(cuid())
+  venueId           String
+  venue             Venue           @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  merchantAccountId String
+  merchantAccount   MerchantAccount @relation(fields: [merchantAccountId], references: [id])
+  accountType       AccountType
+
+  // Full pricing snapshot before/after. Stores BOTH sides: { venue: {...}, provider: {...} }
+  oldRates Json
+  newRates Json
+
+  dateFrom        DateTime?
+  dateTo          DateTime?
+  missingCostMode RateCorrectionMissingCostMode
+
+  status           RateCorrectionStatus @default(PENDING)
+  paymentCount     Int                  @default(0)
+  costCreatedCount Int                  @default(0)
+  estimatedImpact  Decimal              @default(0) @db.Decimal(14, 4)
+
+  appliedById  String?
+  appliedBy    Staff?    @relation("RateCorrectionAppliedBy", fields: [appliedById], references: [id], onDelete: SetNull)
+  appliedAt    DateTime?
+  reversedById String?
+  reversedBy   Staff?    @relation("RateCorrectionReversedBy", fields: [reversedById], references: [id], onDelete: SetNull)
+  reversedAt   DateTime?
+
+  failureReason String?
+
+  entries RateCorrectionEntry[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId])
+  @@index([merchantAccountId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+/// Per-payment before/after snapshot — the source of truth for reversal.
+model RateCorrectionEntry {
+  id        String              @id @default(cuid())
+  batchId   String
+  batch     RateCorrectionBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  paymentId String
+  payment   Payment             @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  beforeFeeAmount             Decimal  @db.Decimal(12, 4)
+  beforeNetAmount             Decimal  @db.Decimal(12, 4)
+  beforeFeePercentage         Decimal  @db.Decimal(5, 4)
+  beforeVenueTxnFee           Decimal? @db.Decimal(12, 4)
+  beforeVenueTxnNet           Decimal? @db.Decimal(12, 4)
+  beforeVenueTxnNetSettlement Decimal? @db.Decimal(12, 4)
+  costCreated                 Boolean  @default(false)
+  beforeCostJson              Json?
+
+  afterFeeAmount     Decimal @db.Decimal(12, 4)
+  afterNetAmount     Decimal @db.Decimal(12, 4)
+  afterFeePercentage Decimal @db.Decimal(5, 4)
+
+  createdAt DateTime @default(now())
+
+  @@unique([batchId, paymentId])
+  @@index([batchId])
+  @@index([paymentId])
 }
 
 // ==========================================

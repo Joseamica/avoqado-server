@@ -70,6 +70,9 @@ npx prisma db push
 npx prisma migrate dev --name {description}
 ```
 
+When adding **new models**, also add them to `MODEL_TO_DOMAIN` in `scripts/generate-schema-map.ts` (pick one of the 20 domains), then run
+`npm run schema:map`. The script fails on unclassified models to prevent gaps in `docs/SCHEMA_MAP.md`.
+
 ## Industry Config: Never Hardcode Client Names
 
 ```typescript

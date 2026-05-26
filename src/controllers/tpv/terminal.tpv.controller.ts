@@ -6,6 +6,7 @@ import { computeOverrides, getOrgDefaultsForTerminal } from '@/services/dashboar
 import { isProviderCompatibleWithBrand } from '@/lib/providerDeviceCompatibility'
 import { decryptCredentials } from '@/services/superadmin/merchantAccount.service'
 import { getAngelPayUserAccountForTerminal, getAngelPayUserAccountsForTerminal } from '@/services/superadmin/angelpayUserAccount.service'
+import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 import prisma from '@/utils/prismaClient'
 import logger from '../../config/logger'
 import { NotFoundError } from '../../errors/AppError'
@@ -379,6 +380,13 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
       ...terminalTpvSettings,
       enableShifts: venueSettings?.enableShifts ?? DEFAULT_TPV_SETTINGS.enableShifts,
       // requireClockInPhoto and requireClockOutPhoto come from terminalTpvSettings (Terminal.config)
+    }
+
+    // Serialized-inventory venues operate without shifts (SIM kiosks have no cash-drawer
+    // reconciliation). Force shifts OFF when the module is active, regardless of VenueSettings.
+    const serializedInventoryActive = await moduleService.isModuleEnabled(terminal.venueId, MODULE_CODES.SERIALIZED_INVENTORY)
+    if (serializedInventoryActive) {
+      tpvSettings.enableShifts = false
     }
 
     // Task 13 / spec §4.5 + §4.5b — angelpayAuth payload.

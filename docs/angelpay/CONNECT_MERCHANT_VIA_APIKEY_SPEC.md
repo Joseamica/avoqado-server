@@ -2,14 +2,17 @@
 
 > Handoff document for another agent/dev. Self-contained: no prior context needed.
 
-**Repo:** `avoqado-server` (Node.js + Express + TypeScript + Prisma + PostgreSQL)
-**Feature:** Add new endpoint that lets a superadmin "connect" an AngelPay merchant to a venue by pasting an apiKey. The endpoint validates the apiKey against AngelPay's integrations-api, captures the merchant_id, persists the credentials encrypted, and registers a webhook so AngelPay can push transaction events back to us.
+**Repo:** `avoqado-server` (Node.js + Express + TypeScript + Prisma + PostgreSQL) **Feature:** Add new endpoint that lets a superadmin
+"connect" an AngelPay merchant to a venue by pasting an apiKey. The endpoint validates the apiKey against AngelPay's integrations-api,
+captures the merchant_id, persists the credentials encrypted, and registers a webhook so AngelPay can push transaction events back to us.
 
 ---
 
 ## 1. Why this exists (context)
 
-Avoqado is a multi-tenant POS/payments platform. Today AngelPay merchants are discovered **TPV-side** (`FETCH_ANGELPAY_MERCHANTS` command → TPV runs AngelPay SDK → reports back). That flow has 5+ failure modes (heartbeat lag, SDK auth timeouts, R8 stripping, etc.) and a 90s spinner.
+Avoqado is a multi-tenant POS/payments platform. Today AngelPay merchants are discovered **TPV-side** (`FETCH_ANGELPAY_MERCHANTS` command →
+TPV runs AngelPay SDK → reports back). That flow has 5+ failure modes (heartbeat lag, SDK auth timeouts, R8 stripping, etc.) and a 90s
+spinner.
 
 AngelPay finally released their **integrations-api** (Q2 2026) which allows backend-to-backend onboarding:
 
@@ -23,17 +26,17 @@ This spec covers ONLY the onboarding endpoint. Webhook receiver (`POST /api/v1/w
 
 ## 2. AngelPay integrations-api facts (already explored)
 
-| Item | Value |
-|---|---|
-| Base URL (QA) | `https://integrations-api.angelpay-qa.com.mx` |
-| Base URL (PROD) | `https://integrations-api.angelpay.com.mx` *(probable — confirm with AngelPay)* |
-| Auth | `POST /auth/token` with `{apiKey}` → returns `{access_token, token_type:"bearer", expires_in:3600}` |
-| Decode JWT to get merchant_id | `JWT.sub` (string, numeric like "61", "63", "106", "107") |
-| Register webhook | `POST /api/v1/webhooks/endpoints` with `{url, description?, events:[]}` — response includes `id` (uuid), `id_merchant`, `secret` (`whsec_*`) |
-| 🚨 Secret returned ONLY on CREATE | `GET /webhooks/endpoints` does NOT expose secret. Persist immediately or you lose it forever (no regenerate endpoint exists). |
-| Event types available | `send_transaction`, `offline_event`, `canceled_transaction` (from `GET /api/v1/webhooks/events/catalog`) |
+| Item                                  | Value                                                                                                                                                                                                                          |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Base URL (QA)                         | `https://integrations-api.angelpay-qa.com.mx`                                                                                                                                                                                  |
+| Base URL (PROD)                       | `https://integrations-api.angelpay.com.mx` _(probable — confirm with AngelPay)_                                                                                                                                                |
+| Auth                                  | `POST /auth/token` with `{apiKey}` → returns `{access_token, token_type:"bearer", expires_in:3600}`                                                                                                                            |
+| Decode JWT to get merchant_id         | `JWT.sub` (string, numeric like "61", "63", "106", "107")                                                                                                                                                                      |
+| Register webhook                      | `POST /api/v1/webhooks/endpoints` with `{url, description?, events:[]}` — response includes `id` (uuid), `id_merchant`, `secret` (`whsec_*`)                                                                                   |
+| 🚨 Secret returned ONLY on CREATE     | `GET /webhooks/endpoints` does NOT expose secret. Persist immediately or you lose it forever (no regenerate endpoint exists).                                                                                                  |
+| Event types available                 | `send_transaction`, `offline_event`, `canceled_transaction` (from `GET /api/v1/webhooks/events/catalog`)                                                                                                                       |
 | Signature scheme on incoming webhooks | Svix-style HMAC-SHA256: headers `svix-id`, `svix-timestamp`, `svix-signature` (format `v1,<base64>`). Verify: `expected = base64(HMAC_SHA256(base64decode(secret[6:]), f"{svix-id}.{svix-timestamp}.".encode() + body_bytes))` |
-| NO endpoint returns | Merchant name, affiliation number, MSI plans — those still come only from SDK on-device |
+| NO endpoint returns                   | Merchant name, affiliation number, MSI plans — those still come only from SDK on-device                                                                                                                                        |
 
 ### Verified curl outputs (don't re-test, just trust)
 
@@ -105,13 +108,13 @@ Content-Type: application/json
 
 ### Error responses
 
-| HTTP | When |
-|---|---|
-| 400 | Missing fields, invalid environment |
-| 401 | AngelPay rejected apiKey (relay their error) |
-| 409 | A `MerchantAccount` with `(providerId, externalMerchantId, venueId-via-VenuePaymentConfig)` already exists for this venue + merchant_id |
-| 502 | AngelPay integrations-api unreachable / timed out |
-| 500 | Unexpected backend error (do not leak internals) |
+| HTTP | When                                                                                                                                    |
+| ---- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| 400  | Missing fields, invalid environment                                                                                                     |
+| 401  | AngelPay rejected apiKey (relay their error)                                                                                            |
+| 409  | A `MerchantAccount` with `(providerId, externalMerchantId, venueId-via-VenuePaymentConfig)` already exists for this venue + merchant_id |
+| 502  | AngelPay integrations-api unreachable / timed out                                                                                       |
+| 500  | Unexpected backend error (do not leak internals)                                                                                        |
 
 ---
 
@@ -138,7 +141,8 @@ Content-Type: application/json
 8. Return 201 with the created row + webhook info
 ```
 
-**Critical:** the webhook secret must be persisted in the SAME transaction as the MerchantAccount row. If we crash between create-merchant and persist-secret, we'll never recover the secret (AngelPay doesn't expose it post-create).
+**Critical:** the webhook secret must be persisted in the SAME transaction as the MerchantAccount row. If we crash between create-merchant
+and persist-secret, we'll never recover the secret (AngelPay doesn't expose it post-create).
 
 ---
 
@@ -162,6 +166,7 @@ model MerchantAccount {
 ```
 
 Migration:
+
 ```bash
 npx prisma migrate dev --name add_angelpay_integrations_api_fields
 ```
@@ -170,32 +175,37 @@ npx prisma migrate dev --name add_angelpay_integrations_api_fields
 
 ## 6. Code reuse — don't reinvent
 
-| Need | Existing helper |
-|---|---|
-| Encrypt sensitive blob | `encryptCredentials()` in `src/services/superadmin/merchantAccount.service.ts` (line ~32) |
+| Need                                                                | Existing helper                                                                                                                                                                                                                 |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Encrypt sensitive blob                                              | `encryptCredentials()` in `src/services/superadmin/merchantAccount.service.ts` (line ~32)                                                                                                                                       |
 | Auto-bind a new MerchantAccount to all NEXGO terminals in the venue | Pattern already in `upsertDiscoveredAngelPayMerchants()` post-loop in same file (line ~1310). Extract into a reusable `attachAngelPayMerchantToNexgoTerminals(merchantAccountId, venueId)` helper if it'd be the 3rd call site. |
-| HTTP client (with timeout, retries) | Use `axios` (already a dep). Wrap in a tiny `AngelPayIntegrationsApiClient` class with `auth()` + `registerWebhook()` methods. Place at `src/services/integrations/angelpay-integrations-api.client.ts`. |
+| HTTP client (with timeout, retries)                                 | Use `axios` (already a dep). Wrap in a tiny `AngelPayIntegrationsApiClient` class with `auth()` + `registerWebhook()` methods. Place at `src/services/integrations/angelpay-integrations-api.client.ts`.                        |
 
 ---
 
 ## 7. Files to touch (estimate)
 
 1. **Service** — new file `src/services/superadmin/angelpayConnectMerchant.service.ts`
+
    - Exports `connectAngelPayMerchant(input: {venueId, apiKey, environment, displayName, affiliation, alias?})`
 
 2. **HTTP client** — new file `src/services/integrations/angelpay-integrations-api.client.ts`
+
    - Exports class with `auth(apiKey)` → `{accessToken, merchantId}` and `registerWebhook(token, body)` → `{id, secret}`
 
 3. **Controller** — new file `src/controllers/superadmin/angelpayConnectMerchant.controller.ts`
+
    - Zod schema validation
    - Calls service, maps service errors → HTTP
 
 4. **Routes** — `src/routes/superadmin/index.ts` (or wherever existing AngelPay routes live)
+
    - Mount `POST /venues/:venueId/angelpay-connect-merchant`
 
 5. **Prisma schema** — add 4 fields (see §5) + migration
 
 6. **Env vars** — add to `.env.example`:
+
    ```
    ANGELPAY_INTEGRATIONS_API_BASE_URL_QA=https://integrations-api.angelpay-qa.com.mx
    ANGELPAY_INTEGRATIONS_API_BASE_URL_PROD=https://integrations-api.angelpay.com.mx
@@ -210,17 +220,24 @@ npx prisma migrate dev --name add_angelpay_integrations_api_fields
 
 ## 8. Security / non-negotiables
 
-- **Encrypt apiKey + webhook secret BEFORE any DB write.** Use the existing `encryptCredentials()` helper — it's already tested and proven on other credentials.
-- **Never log the apiKey or secret.** Add a `RedactingLoggingInterceptor` pattern if axios logs request bodies (the AngelPay SDK has a similar interceptor in TPV at `core/data/network/RedactingLoggingInterceptor.kt` — same idea).
-- **Validate the URL we send to AngelPay.** It MUST be HTTPS and on our domain (allow-list check). Otherwise a malicious request could trick the system into pointing webhooks elsewhere.
-- **No external callbacks before persistence.** If we register the webhook BEFORE persisting the MerchantAccount and our DB write fails, AngelPay holds an orphan webhook pointing to us. Order is: insert MerchantAccount → register webhook → update MerchantAccount with secret. If webhook registration fails, rollback the insert.
+- **Encrypt apiKey + webhook secret BEFORE any DB write.** Use the existing `encryptCredentials()` helper — it's already tested and proven
+  on other credentials.
+- **Never log the apiKey or secret.** Add a `RedactingLoggingInterceptor` pattern if axios logs request bodies (the AngelPay SDK has a
+  similar interceptor in TPV at `core/data/network/RedactingLoggingInterceptor.kt` — same idea).
+- **Validate the URL we send to AngelPay.** It MUST be HTTPS and on our domain (allow-list check). Otherwise a malicious request could trick
+  the system into pointing webhooks elsewhere.
+- **No external callbacks before persistence.** If we register the webhook BEFORE persisting the MerchantAccount and our DB write fails,
+  AngelPay holds an orphan webhook pointing to us. Order is: insert MerchantAccount → register webhook → update MerchantAccount with secret.
+  If webhook registration fails, rollback the insert.
 
 ---
 
 ## 9. Acceptance criteria
 
-- [ ] `POST /api/v1/superadmin/venues/:venueId/angelpay-connect-merchant` exists and is mounted under the superadmin router (auth + SUPERADMIN role enforced)
-- [ ] Happy path: with a valid apiKey returns 201 + the persisted MerchantAccount. Webhook IS visible in `GET /api/v1/webhooks/endpoints` (verify with curl).
+- [ ] `POST /api/v1/superadmin/venues/:venueId/angelpay-connect-merchant` exists and is mounted under the superadmin router (auth +
+      SUPERADMIN role enforced)
+- [ ] Happy path: with a valid apiKey returns 201 + the persisted MerchantAccount. Webhook IS visible in `GET /api/v1/webhooks/endpoints`
+      (verify with curl).
 - [ ] Bad apiKey → 401 with helpful message, no DB writes
 - [ ] AngelPay unreachable (simulate via env override) → 502, no orphan rows
 - [ ] Duplicate (`same venueId + same externalMerchantId from JWT.sub`) → 409
@@ -237,7 +254,8 @@ npx prisma migrate dev --name add_angelpay_integrations_api_fields
 - Dashboard UI for the form — separate ticket (only the backend endpoint here)
 - Disconnect/rotate flow (`DELETE`) — follow-up
 - Backfilling existing AngelPay merchants with apiKey/webhook — separate migration script
-- TPV-side changes — none required. The TPV continues using the SDK on-device and reading `angelpayAccounts` from `/tpv/terminals/:serial/config` exactly as today.
+- TPV-side changes — none required. The TPV continues using the SDK on-device and reading `angelpayAccounts` from
+  `/tpv/terminals/:serial/config` exactly as today.
 
 ---
 
@@ -286,9 +304,12 @@ npm test -- tests/unit/services/superadmin/angelpayConnectMerchant.service.test.
 ## 12. References
 
 - AngelPay integrations-api Swagger: https://integrations-api.angelpay-qa.com.mx/docs#
-- Webhook integration example app: `/Users/amieva/Library/Mobile Documents/com~apple~CloudDocs/Avoqado/Socios/AngelPay/dev/sdk_propio/1.0.7/webhook-integration-example/` (Python Flask reference impl; `app.py` has Svix signature verification we can port to TS)
+- Webhook integration example app:
+  `/Users/amieva/Library/Mobile Documents/com~apple~CloudDocs/Avoqado/Socios/AngelPay/dev/sdk_propio/1.0.7/webhook-integration-example/`
+  (Python Flask reference impl; `app.py` has Svix signature verification we can port to TS)
 - Existing AngelPay-related code in this repo:
-  - `src/services/superadmin/angelpayUserAccount.service.ts` (existing service for SDK-based AngelPay user accounts — coexists with new flow)
+  - `src/services/superadmin/angelpayUserAccount.service.ts` (existing service for SDK-based AngelPay user accounts — coexists with new
+    flow)
   - `src/services/superadmin/merchantAccount.service.ts` (encryption helpers + auto-bind pattern)
   - `src/controllers/superadmin/angelpayUserAccount.controller.ts` (existing controllers — follow same patterns)
   - `prisma/schema.prisma` — `MerchantAccount`, `AngelPayUserAccount`, `Terminal` models
