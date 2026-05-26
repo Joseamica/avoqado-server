@@ -2,9 +2,9 @@ import { PaymentMethod, CardBrand } from '@prisma/client'
 
 const tx = {
   payment: { update: jest.fn() },
-  venueTransaction: { update: jest.fn(), findUnique: jest.fn() },
-  transactionCost: { update: jest.fn(), create: jest.fn(), findUnique: jest.fn() },
-  rateCorrectionEntry: { create: jest.fn() },
+  venueTransaction: { update: jest.fn() },
+  transactionCost: { update: jest.fn(), createMany: jest.fn() },
+  rateCorrectionEntry: { createMany: jest.fn() },
 }
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -12,6 +12,7 @@ jest.mock('@/utils/prismaClient', () => ({
     venuePaymentConfig: { findUnique: jest.fn() },
     payment: { findMany: jest.fn() },
     transactionCost: { findMany: jest.fn() },
+    venueTransaction: { findMany: jest.fn() },
     providerCostStructure: { findFirst: jest.fn(), updateMany: jest.fn(), create: jest.fn() },
     venuePricingStructure: { findFirst: jest.fn() },
     merchantAccount: { findUniqueOrThrow: jest.fn() },
@@ -79,9 +80,10 @@ describe('applyRateCorrection', () => {
         feePercentage: '0.01',
       },
     ])
-    ;(prisma.transactionCost.findMany as jest.Mock).mockResolvedValue([{ paymentId: 'p1' }])
-    tx.venueTransaction.findUnique.mockResolvedValue({ id: 'vt1', feeAmount: '10', netAmount: '990', netSettlementAmount: '990' })
-    tx.transactionCost.findUnique.mockResolvedValue({ id: 'tc1', paymentId: 'p1', venueRate: '0.01' })
+    ;(prisma.transactionCost.findMany as jest.Mock).mockResolvedValue([{ paymentId: 'p1', venueRate: '0.01' }])
+    ;(prisma.venueTransaction.findMany as jest.Mock).mockResolvedValue([
+      { paymentId: 'p1', feeAmount: '10', netAmount: '990', netSettlementAmount: '990' },
+    ])
   })
 
   it('applies, writes 3 tables, records entry, logs, marks APPLIED', async () => {
@@ -98,8 +100,10 @@ describe('applyRateCorrection', () => {
     )
     expect(tx.venueTransaction.update).toHaveBeenCalled()
     expect(tx.transactionCost.update).toHaveBeenCalled()
-    expect(tx.rateCorrectionEntry.create).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ beforeFeeAmount: 10, afterFeeAmount: 55 }) }),
+    expect(tx.rateCorrectionEntry.createMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.arrayContaining([expect.objectContaining({ beforeFeeAmount: 10, afterFeeAmount: 55 })]),
+      }),
     )
     expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'RATE_CORRECTION_APPLIED', entityId: 'b1' }))
     expect(prisma.rateCorrectionBatch.update).toHaveBeenCalledWith(

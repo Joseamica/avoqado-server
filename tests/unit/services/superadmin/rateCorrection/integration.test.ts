@@ -2,9 +2,9 @@ import { PaymentMethod, CardBrand } from '@prisma/client'
 
 const tx = {
   payment: { update: jest.fn() },
-  venueTransaction: { update: jest.fn(), findUnique: jest.fn() },
-  transactionCost: { update: jest.fn(), create: jest.fn(), findUnique: jest.fn(), delete: jest.fn() },
-  rateCorrectionEntry: { create: jest.fn() },
+  venueTransaction: { update: jest.fn() },
+  transactionCost: { update: jest.fn(), createMany: jest.fn(), delete: jest.fn() },
+  rateCorrectionEntry: { createMany: jest.fn() },
 }
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -12,6 +12,7 @@ jest.mock('@/utils/prismaClient', () => ({
     venuePaymentConfig: { findUnique: jest.fn() },
     payment: { findMany: jest.fn() },
     transactionCost: { findMany: jest.fn() },
+    venueTransaction: { findMany: jest.fn() },
     providerCostStructure: { findFirst: jest.fn() },
     venuePricingStructure: { findFirst: jest.fn() },
     merchantAccount: { findUniqueOrThrow: jest.fn() },
@@ -78,20 +79,23 @@ describe('apply → reverse round trip', () => {
         feePercentage: '0.01',
       },
     ])
-    ;(prisma.transactionCost.findMany as jest.Mock).mockResolvedValue([{ paymentId: 'p1' }])
-    tx.venueTransaction.findUnique.mockResolvedValue({ id: 'vt1', feeAmount: '10', netAmount: '990', netSettlementAmount: '990' })
-    tx.transactionCost.findUnique.mockResolvedValue({
-      id: 'tc1',
-      paymentId: 'p1',
-      venueRate: '0.01',
-      venueChargeAmount: '10',
-      venueFixedFee: '0',
-      providerRate: '0.005',
-      providerCostAmount: '5',
-      providerFixedFee: '0',
-      grossProfit: '5',
-      profitMargin: '0.5',
-    })
+    ;(prisma.transactionCost.findMany as jest.Mock).mockResolvedValue([
+      {
+        id: 'tc1',
+        paymentId: 'p1',
+        venueRate: '0.01',
+        venueChargeAmount: '10',
+        venueFixedFee: '0',
+        providerRate: '0.005',
+        providerCostAmount: '5',
+        providerFixedFee: '0',
+        grossProfit: '5',
+        profitMargin: '0.5',
+      },
+    ])
+    ;(prisma.venueTransaction.findMany as jest.Mock).mockResolvedValue([
+      { paymentId: 'p1', feeAmount: '10', netAmount: '990', netSettlementAmount: '990' },
+    ])
 
     await applyRateCorrection(
       { venueId: 'v1', accountType: 'PRIMARY', newVenueRates, missingCostMode: 'FIX_PAYMENT_ONLY' },
@@ -101,7 +105,8 @@ describe('apply → reverse round trip', () => {
     // apply wrote the recomputed fee (55) and recorded before (10)
     const applyWrite = (tx.payment.update as jest.Mock).mock.calls[0][0].data
     expect(applyWrite.feeAmount).toBeCloseTo(55, 6)
-    const recordedEntry = (tx.rateCorrectionEntry.create as jest.Mock).mock.calls[0][0].data
+    // entries are batched via createMany → data is an array
+    const recordedEntry = (tx.rateCorrectionEntry.createMany as jest.Mock).mock.calls[0][0].data[0]
     expect(recordedEntry.beforeFeeAmount).toBe(10)
     expect(recordedEntry.beforeNetAmount).toBe(990)
 

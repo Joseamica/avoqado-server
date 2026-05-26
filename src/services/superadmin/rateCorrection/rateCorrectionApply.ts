@@ -112,7 +112,10 @@ export async function applyRateCorrection(args: ApplyArgs, ctx: ApplyContext) {
   })
 
   try {
-    // 8. Load the in-scope payments.
+    // 8. Load the in-scope payments + BULK-prefetch their existing TransactionCost
+    //    and VenueTransaction rows. Reading in 2 findMany (instead of 2 findUnique
+    //    PER payment inside the transaction) keeps the interactive transaction short:
+    //    long transactions time out against a remote DB. Same data, fewer round-trips.
     const payments = await prisma.payment.findMany({
       where: buildScopeWhere({ venueId: args.venueId, merchantAccountId, dateFrom: args.dateFrom, dateTo: args.dateTo }),
       select: {
@@ -128,93 +131,121 @@ export async function applyRateCorrection(args: ApplyArgs, ctx: ApplyContext) {
       },
     })
 
+    const paymentIds = payments.map(p => p.id)
+    const [existingCosts, existingVts] = await Promise.all([
+      prisma.transactionCost.findMany({ where: { paymentId: { in: paymentIds } } }),
+      prisma.venueTransaction.findMany({ where: { paymentId: { in: paymentIds } } }),
+    ])
+    const costByPayment = new Map(existingCosts.map(c => [c.paymentId, c]))
+    const vtByPayment = new Map(existingVts.map(v => [v.paymentId, v]))
+
+    // Pre-compute everything (pure, no DB) so the transaction only does writes.
     let costCreatedCount = 0
     let estimatedImpact = 0
+    const entryRows: Array<Record<string, unknown>> = []
+    const paymentUpdates: Array<{ id: string; feeAmount: number; netAmount: number; feePercentage: number }> = []
+    const vtUpdates: Array<{ paymentId: string; feeAmount: number; netAmount: number; netSettlementAmount: number }> = []
+    const costUpdates: Array<{ paymentId: string; data: Record<string, number> }> = []
+    const costCreates: Array<Record<string, unknown>> = []
 
+    for (const p of payments) {
+      const { transactionType, after } = recomputePaymentEconomics(p, effVenue!, effProvider)
+      const beforeFee = parseFloat(p.feeAmount.toString())
+      estimatedImpact += after.feeAmount - beforeFee
+
+      const existingCost = costByPayment.get(p.id)
+      const existingVt = vtByPayment.get(p.id)
+      const willCreateCost = !existingCost && args.missingCostMode === 'CREATE_COST'
+
+      entryRows.push({
+        batchId: batch.id,
+        paymentId: p.id,
+        beforeFeeAmount: beforeFee,
+        beforeNetAmount: parseFloat(p.netAmount.toString()),
+        beforeFeePercentage: parseFloat(p.feePercentage.toString()),
+        beforeVenueTxnFee: existingVt ? parseFloat(existingVt.feeAmount.toString()) : null,
+        beforeVenueTxnNet: existingVt ? parseFloat(existingVt.netAmount.toString()) : null,
+        beforeVenueTxnNetSettlement:
+          existingVt?.netSettlementAmount != null ? parseFloat(existingVt.netSettlementAmount.toString()) : null,
+        costCreated: willCreateCost,
+        // Json input: a TransactionCost row carries Decimals; store as-is for the audit trail.
+        beforeCostJson: (existingCost ?? null) as unknown,
+        afterFeeAmount: after.feeAmount,
+        afterNetAmount: after.netAmount,
+        afterFeePercentage: after.venueRate,
+      })
+
+      paymentUpdates.push({ id: p.id, feeAmount: after.feeAmount, netAmount: after.netAmount, feePercentage: after.venueRate })
+
+      if (existingVt) {
+        vtUpdates.push({
+          paymentId: p.id,
+          feeAmount: after.feeAmount,
+          netAmount: after.netAmount,
+          netSettlementAmount: after.netAmount,
+        })
+      }
+
+      if (existingCost) {
+        costUpdates.push({
+          paymentId: p.id,
+          data: {
+            venueRate: after.venueRate,
+            venueChargeAmount: after.venueChargeAmount,
+            venueFixedFee: after.venueFixedFee,
+            providerRate: after.providerRate,
+            providerCostAmount: after.providerCostAmount,
+            providerFixedFee: after.providerFixedFee,
+            grossProfit: after.grossProfit,
+            profitMargin: after.profitMargin,
+          },
+        })
+      } else if (args.missingCostMode === 'CREATE_COST') {
+        costCreates.push({
+          paymentId: p.id,
+          merchantAccountId,
+          transactionType,
+          amount: parseFloat(p.amount.toString()) + parseFloat(p.tipAmount?.toString() || '0'),
+          venueRate: after.venueRate,
+          venueChargeAmount: after.venueChargeAmount,
+          venueFixedFee: after.venueFixedFee,
+          providerRate: after.providerRate,
+          providerCostAmount: after.providerCostAmount,
+          providerFixedFee: after.providerFixedFee,
+          grossProfit: after.grossProfit,
+          profitMargin: after.profitMargin,
+          providerCostStructureId: activeProvider?.id,
+          venuePricingStructureId: activeVenue?.id,
+        })
+        costCreatedCount++
+      }
+    }
+
+    // 9. Write everything in one transaction. Audit entries and any new cost rows
+    //    batch into a single createMany each; the 3 snapshot tables need per-row
+    //    values so they stay per-row updates — but with reads pre-fetched and entries
+    //    batched, the transaction is far shorter. Timeout raised for safety.
     await prisma.$transaction(
       async tx => {
-        for (const p of payments) {
-          const { transactionType, after } = recomputePaymentEconomics(p, effVenue!, effProvider)
-
-          const beforeFee = parseFloat(p.feeAmount.toString())
-          estimatedImpact += after.feeAmount - beforeFee
-
-          const existingCost = await tx.transactionCost.findUnique({ where: { paymentId: p.id } })
-          const existingVt = await tx.venueTransaction.findUnique({ where: { paymentId: p.id } })
-
-          await tx.rateCorrectionEntry.create({
-            data: {
-              batchId: batch.id,
-              paymentId: p.id,
-              beforeFeeAmount: beforeFee,
-              beforeNetAmount: parseFloat(p.netAmount.toString()),
-              beforeFeePercentage: parseFloat(p.feePercentage.toString()),
-              beforeVenueTxnFee: existingVt ? parseFloat(existingVt.feeAmount.toString()) : null,
-              beforeVenueTxnNet: existingVt ? parseFloat(existingVt.netAmount.toString()) : null,
-              beforeVenueTxnNetSettlement:
-                existingVt?.netSettlementAmount != null ? parseFloat(existingVt.netSettlementAmount.toString()) : null,
-              costCreated: !existingCost && args.missingCostMode === 'CREATE_COST',
-              // Json input types: a TransactionCost row carries Decimals; store as-is for the audit trail.
-              beforeCostJson: (existingCost ?? undefined) as any,
-              afterFeeAmount: after.feeAmount,
-              afterNetAmount: after.netAmount,
-              afterFeePercentage: after.venueRate,
-            },
-          })
-
+        if (entryRows.length) await tx.rateCorrectionEntry.createMany({ data: entryRows as never })
+        if (costCreates.length) await tx.transactionCost.createMany({ data: costCreates as never })
+        for (const u of paymentUpdates) {
           await tx.payment.update({
-            where: { id: p.id },
-            data: { feeAmount: after.feeAmount, netAmount: after.netAmount, feePercentage: after.venueRate },
+            where: { id: u.id },
+            data: { feeAmount: u.feeAmount, netAmount: u.netAmount, feePercentage: u.feePercentage },
           })
-
-          if (existingVt) {
-            await tx.venueTransaction.update({
-              where: { paymentId: p.id },
-              data: { feeAmount: after.feeAmount, netAmount: after.netAmount, netSettlementAmount: after.netAmount },
-            })
-          }
-
-          if (existingCost) {
-            await tx.transactionCost.update({
-              where: { paymentId: p.id },
-              data: {
-                venueRate: after.venueRate,
-                venueChargeAmount: after.venueChargeAmount,
-                venueFixedFee: after.venueFixedFee,
-                providerRate: after.providerRate,
-                providerCostAmount: after.providerCostAmount,
-                providerFixedFee: after.providerFixedFee,
-                grossProfit: after.grossProfit,
-                profitMargin: after.profitMargin,
-              },
-            })
-          } else if (args.missingCostMode === 'CREATE_COST') {
-            await tx.transactionCost.create({
-              data: {
-                paymentId: p.id,
-                merchantAccountId,
-                transactionType,
-                amount: parseFloat(p.amount.toString()) + parseFloat(p.tipAmount?.toString() || '0'),
-                venueRate: after.venueRate,
-                venueChargeAmount: after.venueChargeAmount,
-                venueFixedFee: after.venueFixedFee,
-                providerRate: after.providerRate,
-                providerCostAmount: after.providerCostAmount,
-                providerFixedFee: after.providerFixedFee,
-                grossProfit: after.grossProfit,
-                profitMargin: after.profitMargin,
-                providerCostStructureId: activeProvider?.id,
-                venuePricingStructureId: activeVenue?.id,
-              },
-            })
-            costCreatedCount++
-          }
+        }
+        for (const u of vtUpdates) {
+          await tx.venueTransaction.update({
+            where: { paymentId: u.paymentId },
+            data: { feeAmount: u.feeAmount, netAmount: u.netAmount, netSettlementAmount: u.netSettlementAmount },
+          })
+        }
+        for (const u of costUpdates) {
+          await tx.transactionCost.update({ where: { paymentId: u.paymentId }, data: u.data })
         }
       },
-      // La transacción interactiva de Prisma aborta a los 5s por default. Contra una
-      // DB remota, cientos de writes secuenciales (≤200 pagos × varias queries c/u)
-      // superan ese límite y se hace rollback ("Transaction not found"). Subimos el
-      // presupuesto a 2 min (maxWait 10s para adquirir conexión del pool).
+      // Even shorter now, but keep a generous budget: remote DB × per-row updates.
       { timeout: 120_000, maxWait: 10_000 },
     )
 
