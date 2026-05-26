@@ -175,19 +175,30 @@ export async function createRawMaterial(venueId: string, data: CreateRawMaterial
     },
   })
 
-  // Create initial movement record
-  await prisma.rawMaterialMovement.create({
-    data: {
-      rawMaterialId: rawMaterial.id,
-      venueId,
-      type: RawMaterialMovementType.ADJUSTMENT,
+  // Create initial StockBatch + movement when there is initial stock
+  if (data.currentStock > 0) {
+    const batch = await createStockBatch(venueId, rawMaterial.id, {
       quantity: data.currentStock,
       unit,
-      previousStock: 0,
-      newStock: data.currentStock,
-      reason: 'Initial stock',
-    },
-  })
+      costPerUnit: data.costPerUnit || 0,
+      receivedDate: new Date(),
+      expirationDate: data.perishable && data.shelfLifeDays ? new Date(Date.now() + data.shelfLifeDays * 24 * 60 * 60 * 1000) : undefined,
+    })
+
+    await prisma.rawMaterialMovement.create({
+      data: {
+        rawMaterialId: rawMaterial.id,
+        venueId,
+        batchId: batch.id,
+        type: RawMaterialMovementType.ADJUSTMENT,
+        quantity: data.currentStock,
+        unit,
+        previousStock: 0,
+        newStock: data.currentStock,
+        reason: 'Initial stock',
+      },
+    })
+  }
 
   logAction({
     venueId,
@@ -217,9 +228,12 @@ export async function updateRawMaterial(
     throw new AppError(`Raw material with ID ${rawMaterialId} not found`, 404)
   }
 
-  // Handle unit update with unitType
+  // Strip currentStock from update — stock changes must go through adjustStock()
+  // to maintain StockBatch consistency
+  const { currentStock: _stripStock, ...safeData } = data as any
+
   const updateData: any = {
-    ...data,
+    ...safeData,
   }
 
   if (data.unit) {
