@@ -58,7 +58,7 @@ export interface OrgSaleListRow {
     createdAt: Date
   } | null
   category: { id: string; name: string } | null
-  saleType: 'LINEA_NUEVA' | 'PORTABILIDAD' | 'NO_APLICA'
+  saleType: 'LINEA_NUEVA' | 'PORTABILIDAD'
   /** Venue that originally registered/received the SIM into inventory (e.g. "Virtual"). Null for legacy items. */
   registeredFromVenue: { id: string; name: string; slug: string } | null
 }
@@ -83,15 +83,14 @@ function derivePaymentForm(method: PaymentMethod | null | undefined): 'CASH' | '
 }
 
 /**
- * Map isPortabilidad → 3-state "Tipo de venta".
- * Category-based fallback: SIM exchange categories surface as NO_APLICA when
- * the boolean is false AND the category name contains "intercambio" (case
- * insensitive). The boolean stays the source of truth for true portabilidad.
+ * Map isPortabilidad → "Tipo de venta". Only two values exist: a sale is
+ * either a portability (customer brings their number) or a new line.
+ * Per Isaac (PlayTelecom, 2026-05-26): eSIM and "SIM de intercambio" are SIM
+ * TYPES (categories), not sale types — each can itself be a new line or a
+ * portability. The boolean toggle is the single source of truth.
  */
-function deriveSaleType(isPortabilidad: boolean, categoryName: string | null | undefined): 'LINEA_NUEVA' | 'PORTABILIDAD' | 'NO_APLICA' {
-  if (isPortabilidad) return 'PORTABILIDAD'
-  if (categoryName && /intercambio/i.test(categoryName)) return 'NO_APLICA'
-  return 'LINEA_NUEVA'
+function deriveSaleType(isPortabilidad: boolean): 'LINEA_NUEVA' | 'PORTABILIDAD' {
+  return isPortabilidad ? 'PORTABILIDAD' : 'LINEA_NUEVA'
 }
 
 function buildPaymentWhere(orgId: string, filters: OrgSaleListFilters): Prisma.PaymentWhereInput {
@@ -238,7 +237,7 @@ export async function listOrgSaleVerifications(orgId: string, filters: OrgSaleLi
         createdAt: p.createdAt,
       },
       category,
-      saleType: deriveSaleType(isPort, category?.name ?? null),
+      saleType: deriveSaleType(isPort),
       registeredFromVenue: firstSerialized?.registeredFromVenue ?? null,
     }
   })
