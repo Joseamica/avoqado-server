@@ -328,12 +328,7 @@ export async function getPaymentProviderBlockers(id: string): Promise<ProviderBl
     }),
   ])
   const c = provider._count
-  const canDelete =
-    c.merchants === 0 &&
-    c.ecommerceMerchants === 0 &&
-    c.webhooks === 0 &&
-    c.eventLogs === 0 &&
-    c.costStructures === 0
+  const canDelete = c.merchants === 0 && c.ecommerceMerchants === 0 && c.webhooks === 0 && c.eventLogs === 0 && c.costStructures === 0
   return {
     code: provider.code,
     name: provider.name,
@@ -351,9 +346,7 @@ export async function getPaymentProviderBlockers(id: string): Promise<ProviderBl
       const removable = parts.length === 0
       return {
         id: e.id,
-        label: e.venue?.name
-          ? `${e.venue.name}${e.providerMerchantId ? ` · ${e.providerMerchantId}` : ''}`
-          : e.providerMerchantId || e.id,
+        label: e.venue?.name ? `${e.venue.name}${e.providerMerchantId ? ` · ${e.providerMerchantId}` : ''}` : e.providerMerchantId || e.id,
         removable,
         reason: removable ? undefined : parts.join(' · '),
       }
@@ -374,10 +367,7 @@ export async function getPaymentProviderBlockers(id: string): Promise<ProviderBl
  * - `force = true` (nuevo — flujo de borrado guiado): HARD delete real, pero
  *   SÓLO si el provider está 100% limpio. Si no, lanza error con el detalle.
  */
-export async function deletePaymentProvider(
-  id: string,
-  opts: { force?: boolean } = {},
-): Promise<{ hardDeleted: boolean; code: string }> {
+export async function deletePaymentProvider(id: string, opts: { force?: boolean } = {}): Promise<{ hardDeleted: boolean; code: string }> {
   const provider = await prisma.paymentProvider.findUnique({
     where: { id },
     include: { _count: { select: PROVIDER_BLOCKER_COUNT } },

@@ -207,16 +207,14 @@ export async function deletePaymentProvider(req: Request, res: Response, next: N
       })
     }
 
-    logger.info(
-      result.hardDeleted ? 'Payment provider hard-deleted via API' : 'Payment provider deactivated via API',
-      { providerId: id, code: result.code },
-    )
+    logger.info(result.hardDeleted ? 'Payment provider hard-deleted via API' : 'Payment provider deactivated via API', {
+      providerId: id,
+      code: result.code,
+    })
 
     res.json({
       success: true,
-      message: result.hardDeleted
-        ? 'Payment provider deleted successfully'
-        : 'Payment provider deactivated successfully',
+      message: result.hardDeleted ? 'Payment provider deleted successfully' : 'Payment provider deactivated successfully',
     })
   } catch (error) {
     next(error)

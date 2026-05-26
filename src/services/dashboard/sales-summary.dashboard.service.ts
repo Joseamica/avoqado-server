@@ -123,14 +123,10 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
 
   // When filtering by merchant, we scope orders to only those that have at
   // least one Payment linked to the target merchantAccountId.
-  const merchantOrderFilter = merchantAccountId
-    ? { payments: { some: { merchantAccountId } } }
-    : {}
+  const merchantOrderFilter = merchantAccountId ? { payments: { some: { merchantAccountId } } } : {}
 
   // Payment-level merchant filter
-  const merchantPaymentFilter = merchantAccountId
-    ? { merchantAccountId }
-    : {}
+  const merchantPaymentFilter = merchantAccountId ? { merchantAccountId } : {}
 
   // ============================================================
   // Calculate Core Metrics
@@ -429,13 +425,9 @@ async function calculateTimePeriodMetrics(
 
   // Optional merchant filter clause for raw SQL queries
   const merchantPaymentClause = merchantAccountId ? `AND "merchantAccountId" = $4` : ''
-  const merchantOrderClause = merchantAccountId
-    ? `AND id IN (SELECT "orderId" FROM "Payment" WHERE "merchantAccountId" = $4)`
-    : ''
+  const merchantOrderClause = merchantAccountId ? `AND id IN (SELECT "orderId" FROM "Payment" WHERE "merchantAccountId" = $4)` : ''
   const merchantPlatformClause = merchantAccountId ? `AND p."merchantAccountId" = $4` : ''
-  const merchantCommissionClause = merchantAccountId
-    ? `AND "paymentId" IN (SELECT id FROM "Payment" WHERE "merchantAccountId" = $4)`
-    : ''
+  const merchantCommissionClause = merchantAccountId ? `AND "paymentId" IN (SELECT id FROM "Payment" WHERE "merchantAccountId" = $4)` : ''
 
   // Query order metrics grouped by period
   // Using subtotal for gross_sales (not total) to match accounting standards

@@ -868,11 +868,10 @@ export async function getMerchantAccountBlockers(id: string): Promise<MerchantBl
   const vc = venueConfigs.map(c => ({
     venueId: c.venueId,
     venueName: c.venue?.name ?? '—',
-    slot: (c.primaryAccountId === id
-      ? 'PRIMARY'
-      : c.secondaryAccountId === id
-        ? 'SECONDARY'
-        : 'TERTIARY') as 'PRIMARY' | 'SECONDARY' | 'TERTIARY',
+    slot: (c.primaryAccountId === id ? 'PRIMARY' : c.secondaryAccountId === id ? 'SECONDARY' : 'TERTIARY') as
+      | 'PRIMARY'
+      | 'SECONDARY'
+      | 'TERTIARY',
   }))
 
   const canDelete =
