@@ -45,13 +45,11 @@ describe('resolveEffectiveTerminals — explicit ∪ venue-slot inheritance', ()
 
     const result = await resolveEffectiveTerminals(new Map([['M', ['V1']]]))
 
-    expect((result['M'] ?? []).map((t) => t.id).sort()).toEqual(['t-explicit', 't-inherit'])
+    expect((result['M'] ?? []).map(t => t.id).sort()).toEqual(['t-explicit', 't-inherit'])
   })
 
   it('attributes an inherited (empty) terminal to every merchant slotted in its venue', async () => {
-    mockedPrisma.terminal.findMany.mockResolvedValue([
-      { id: 't-inh', serialNumber: 'S', venueId: 'V1', assignedMerchantIds: [] },
-    ])
+    mockedPrisma.terminal.findMany.mockResolvedValue([{ id: 't-inh', serialNumber: 'S', venueId: 'V1', assignedMerchantIds: [] }])
 
     const result = await resolveEffectiveTerminals(
       new Map([
@@ -60,14 +58,12 @@ describe('resolveEffectiveTerminals — explicit ∪ venue-slot inheritance', ()
       ]),
     )
 
-    expect(result['M1']?.map((t) => t.id)).toEqual(['t-inh'])
-    expect(result['M2']?.map((t) => t.id)).toEqual(['t-inh'])
+    expect(result['M1']?.map(t => t.id)).toEqual(['t-inh'])
+    expect(result['M2']?.map(t => t.id)).toEqual(['t-inh'])
   })
 
   it('normalizes a null serialNumber to an empty string', async () => {
-    mockedPrisma.terminal.findMany.mockResolvedValue([
-      { id: 't1', serialNumber: null, venueId: 'V1', assignedMerchantIds: ['M'] },
-    ])
+    mockedPrisma.terminal.findMany.mockResolvedValue([{ id: 't1', serialNumber: null, venueId: 'V1', assignedMerchantIds: ['M'] }])
 
     const result = await resolveEffectiveTerminals(new Map([['M', ['V1']]]))
 
@@ -75,9 +71,7 @@ describe('resolveEffectiveTerminals — explicit ∪ venue-slot inheritance', ()
   })
 
   it('dedupes a merchant id that appears twice in a terminal assignment', async () => {
-    mockedPrisma.terminal.findMany.mockResolvedValue([
-      { id: 't1', serialNumber: 'S1', venueId: 'V1', assignedMerchantIds: ['M', 'M'] },
-    ])
+    mockedPrisma.terminal.findMany.mockResolvedValue([{ id: 't1', serialNumber: 'S1', venueId: 'V1', assignedMerchantIds: ['M', 'M'] }])
 
     const result = await resolveEffectiveTerminals(new Map([['M', ['V1']]]))
 
