@@ -9,10 +9,18 @@ function parseRange(req: Request) {
   }
 }
 
+function parseFilter(req: Request) {
+  const { venueId, merchantAccountId } = req.query
+  return {
+    venueId: typeof venueId === 'string' ? venueId : undefined,
+    merchantAccountId: typeof merchantAccountId === 'string' ? merchantAccountId : undefined,
+  }
+}
+
 /** GET /api/v1/superadmin/earnings/summary */
 export async function getEarningsSummary(req: Request, res: Response, next: NextFunction) {
   try {
-    const data = await earningsService.getEarningsSummary(parseRange(req))
+    const data = await earningsService.getEarningsSummary(parseRange(req), parseFilter(req))
     res.json({ success: true, data })
   } catch (error) {
     next(error)
@@ -23,7 +31,7 @@ export async function getEarningsSummary(req: Request, res: Response, next: Next
 export async function getEarningsTimeSeries(req: Request, res: Response, next: NextFunction) {
   try {
     const granularity = (req.query.granularity as 'daily' | 'weekly' | 'monthly') || 'daily'
-    const data = await earningsService.getEarningsTimeSeries(parseRange(req), granularity)
+    const data = await earningsService.getEarningsTimeSeries(parseRange(req), granularity, parseFilter(req))
     res.json({ success: true, data, meta: { granularity } })
   } catch (error) {
     next(error)
