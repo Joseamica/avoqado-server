@@ -209,7 +209,13 @@ export async function applyRateCorrection(args: ApplyArgs, ctx: ApplyContext) {
           costCreatedCount++
         }
       }
-    })
+    },
+    // La transacción interactiva de Prisma aborta a los 5s por default. Contra una
+    // DB remota, cientos de writes secuenciales (≤200 pagos × varias queries c/u)
+    // superan ese límite y se hace rollback ("Transaction not found"). Subimos el
+    // presupuesto a 2 min (maxWait 10s para adquirir conexión del pool).
+    { timeout: 120_000, maxWait: 10_000 },
+    )
 
     // 10. Finalize the batch.
     const applied = await prisma.rateCorrectionBatch.update({
