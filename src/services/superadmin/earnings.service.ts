@@ -1,4 +1,5 @@
 import prisma from '../../utils/prismaClient'
+import { Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import { computeRevenueSplit, type CardType, type MerchantRevenueShareConfig } from '../payments/revenueShare.service'
 
@@ -6,6 +7,13 @@ export interface DateRange {
   startDate?: Date
   endDate?: Date
 }
+
+/** Optional scope for the earnings detail pages. Mutually exclusive in practice. */
+export interface EarningsFilter {
+  venueId?: string
+  merchantAccountId?: string
+}
+
 export type Granularity = 'daily' | 'weekly' | 'monthly'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
@@ -146,51 +154,86 @@ const TX_INCLUDE = {
   },
 } as const
 
-export async function getEarningsSummary(range?: DateRange): Promise<EarningsSummary> {
+export async function getEarningsSummary(range?: DateRange, filter?: EarningsFilter): Promise<EarningsSummary> {
   const { startDate, endDate } = resolveRange(range)
-  logger.info('Calculating earnings summary (revenue-share net)', { startDate, endDate })
+  logger.info('Calculating earnings summary (revenue-share net)', { startDate, endDate, filter })
 
-  const [txs, onlineByVenue, onlineTotals, channelRows] = await Promise.all([
-    prisma.transactionCost.findMany({ where: { createdAt: { gte: startDate, lte: endDate } }, include: TX_INCLUDE }),
-    prisma.$queryRaw<Array<{ venueId: string; venueName: string; fees: bigint; volume: unknown; transactions: bigint }>>`
-      SELECT v.id as "venueId", v.name as "venueName",
-             COALESCE(SUM(cs."applicationFeeCents"), 0) as fees,
-             COALESCE(SUM(cs.amount), 0) as volume,
-             COUNT(*) as transactions
-      FROM "CheckoutSession" cs
-      JOIN "EcommerceMerchant" em ON cs."ecommerceMerchantId" = em.id
-      JOIN "Venue" v ON em."venueId" = v.id
-      WHERE cs.status = 'COMPLETED' AND cs."createdAt" >= ${startDate} AND cs."createdAt" <= ${endDate}
-      GROUP BY v.id, v.name
-    `,
-    prisma.checkoutSession.aggregate({
-      where: { status: 'COMPLETED', createdAt: { gte: startDate, lte: endDate } },
-      _count: true,
-      _sum: { amount: true, applicationFeeCents: true },
-    }),
-    prisma.$queryRaw<
-      Array<{
-        ecommerceMerchantId: string
-        channelName: string | null
-        businessName: string | null
-        providerCode: string
-        fees: bigint
-        volume: unknown
-        transactions: bigint
-      }>
-    >`
-      SELECT em.id as "ecommerceMerchantId", em."channelName", em."businessName", pp.code as "providerCode",
-             COALESCE(SUM(cs."applicationFeeCents"), 0) as fees,
-             COALESCE(SUM(cs.amount), 0) as volume,
-             COUNT(*) as transactions
-      FROM "CheckoutSession" cs
-      JOIN "EcommerceMerchant" em ON cs."ecommerceMerchantId" = em.id
-      JOIN "PaymentProvider" pp ON em."providerId" = pp.id
-      WHERE cs.status = 'COMPLETED' AND cs."createdAt" >= ${startDate} AND cs."createdAt" <= ${endDate}
-      GROUP BY em.id, em."channelName", em."businessName", pp.code
-      ORDER BY fees DESC
-    `,
-  ])
+  const terminalWhere: Prisma.TransactionCostWhereInput = {
+    createdAt: { gte: startDate, lte: endDate },
+    ...(filter?.venueId ? { payment: { venueId: filter.venueId } } : {}),
+    ...(filter?.merchantAccountId ? { merchantAccountId: filter.merchantAccountId } : {}),
+  }
+  // E-commerce is never tied to a POS merchant account → skip online when merchant-scoped.
+  const includeOnline = !filter?.merchantAccountId
+  const onlineVenueClause = filter?.venueId ? Prisma.sql`AND em."venueId" = ${filter.venueId}` : Prisma.empty
+
+  const txs = await prisma.transactionCost.findMany({ where: terminalWhere, include: TX_INCLUDE })
+
+  let onlineByVenue: Array<{ venueId: string; venueName: string; fees: bigint; volume: unknown; transactions: bigint }> = []
+  let onlineFees = 0
+  let onlineVolume = 0
+  let onlineTxns = 0
+  let channelRows: Array<{
+    ecommerceMerchantId: string
+    channelName: string | null
+    businessName: string | null
+    providerCode: string
+    fees: bigint
+    volume: unknown
+    transactions: bigint
+  }> = []
+
+  if (includeOnline) {
+    const [obv, oTotals, cr] = await Promise.all([
+      prisma.$queryRaw<Array<{ venueId: string; venueName: string; fees: bigint; volume: unknown; transactions: bigint }>>(Prisma.sql`
+        SELECT v.id as "venueId", v.name as "venueName",
+               COALESCE(SUM(cs."applicationFeeCents"), 0) as fees,
+               COALESCE(SUM(cs.amount), 0) as volume,
+               COUNT(*) as transactions
+        FROM "CheckoutSession" cs
+        JOIN "EcommerceMerchant" em ON cs."ecommerceMerchantId" = em.id
+        JOIN "Venue" v ON em."venueId" = v.id
+        WHERE cs.status = 'COMPLETED' AND cs."createdAt" >= ${startDate} AND cs."createdAt" <= ${endDate} ${onlineVenueClause}
+        GROUP BY v.id, v.name
+      `),
+      prisma.checkoutSession.aggregate({
+        where: {
+          status: 'COMPLETED',
+          createdAt: { gte: startDate, lte: endDate },
+          ...(filter?.venueId ? { ecommerceMerchant: { venueId: filter.venueId } } : {}),
+        },
+        _count: true,
+        _sum: { amount: true, applicationFeeCents: true },
+      }),
+      prisma.$queryRaw<
+        Array<{
+          ecommerceMerchantId: string
+          channelName: string | null
+          businessName: string | null
+          providerCode: string
+          fees: bigint
+          volume: unknown
+          transactions: bigint
+        }>
+      >(Prisma.sql`
+        SELECT em.id as "ecommerceMerchantId", em."channelName", em."businessName", pp.code as "providerCode",
+               COALESCE(SUM(cs."applicationFeeCents"), 0) as fees,
+               COALESCE(SUM(cs.amount), 0) as volume,
+               COUNT(*) as transactions
+        FROM "CheckoutSession" cs
+        JOIN "EcommerceMerchant" em ON cs."ecommerceMerchantId" = em.id
+        JOIN "PaymentProvider" pp ON em."providerId" = pp.id
+        WHERE cs.status = 'COMPLETED' AND cs."createdAt" >= ${startDate} AND cs."createdAt" <= ${endDate} ${onlineVenueClause}
+        GROUP BY em.id, em."channelName", em."businessName", pp.code
+        ORDER BY fees DESC
+      `),
+    ])
+    onlineByVenue = obv
+    onlineFees = centsToMxn(oTotals._sum.applicationFeeCents)
+    onlineVolume = Number(oTotals._sum.amount) || 0
+    onlineTxns = oTotals._count
+    channelRows = cr
+  }
 
   const venueMap = new Map<string, VenueEarnings>()
   const merchantMap = new Map<string, MerchantEarnings>()
@@ -301,10 +344,6 @@ export async function getEarningsSummary(range?: DateRange): Promise<EarningsSum
     venueMap.set(o.venueId, ve)
   }
 
-  const onlineFees = centsToMxn(onlineTotals._sum.applicationFeeCents)
-  const onlineVolume = Number(onlineTotals._sum.amount) || 0
-  const onlineTxns = onlineTotals._count
-
   const totals: EarningsTotals = {
     netProfit: round2(terminalNet + onlineFees),
     terminalNet: round2(terminalNet),
@@ -353,16 +392,31 @@ export async function getEarningsSummary(range?: DateRange): Promise<EarningsSum
   }
 }
 
-export async function getEarningsTimeSeries(range?: DateRange, granularity: Granularity = 'daily'): Promise<EarningsTimePoint[]> {
+export async function getEarningsTimeSeries(
+  range?: DateRange,
+  granularity: Granularity = 'daily',
+  filter?: EarningsFilter,
+): Promise<EarningsTimePoint[]> {
   const { startDate, endDate } = resolveRange(range)
 
-  const [txs, onlineSessions] = await Promise.all([
-    prisma.transactionCost.findMany({ where: { createdAt: { gte: startDate, lte: endDate } }, include: TX_INCLUDE }),
-    prisma.checkoutSession.findMany({
-      where: { status: 'COMPLETED', createdAt: { gte: startDate, lte: endDate } },
-      select: { createdAt: true, applicationFeeCents: true },
-    }),
-  ])
+  const txs = await prisma.transactionCost.findMany({
+    where: {
+      createdAt: { gte: startDate, lte: endDate },
+      ...(filter?.venueId ? { payment: { venueId: filter.venueId } } : {}),
+      ...(filter?.merchantAccountId ? { merchantAccountId: filter.merchantAccountId } : {}),
+    },
+    include: TX_INCLUDE,
+  })
+  const onlineSessions = filter?.merchantAccountId
+    ? []
+    : await prisma.checkoutSession.findMany({
+        where: {
+          status: 'COMPLETED',
+          createdAt: { gte: startDate, lte: endDate },
+          ...(filter?.venueId ? { ecommerceMerchant: { venueId: filter.venueId } } : {}),
+        },
+        select: { createdAt: true, applicationFeeCents: true },
+      })
 
   const map = new Map<string, EarningsTimePoint>()
   const at = (k: string): EarningsTimePoint => {
