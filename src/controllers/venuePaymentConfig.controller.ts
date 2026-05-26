@@ -183,11 +183,7 @@ export async function getVenueSettlementInfo(req: Request, res: Response) {
       return res.json({ success: true, data: [] })
     }
 
-    const merchantAccountIds = [
-      config.primaryAccountId,
-      config.secondaryAccountId,
-      config.tertiaryAccountId,
-    ].filter(Boolean) as string[]
+    const merchantAccountIds = [config.primaryAccountId, config.secondaryAccountId, config.tertiaryAccountId].filter(Boolean) as string[]
 
     if (merchantAccountIds.length === 0) {
       return res.json({ success: true, data: [] })

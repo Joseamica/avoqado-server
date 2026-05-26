@@ -34,8 +34,14 @@ describe('earnings pure helpers', () => {
 
   describe('mergeTimeSeries', () => {
     it('merges terminal + online points by date and fills gaps with 0', () => {
-      const terminal = [{ date: '2026-05-01', profit: 100 }, { date: '2026-05-02', profit: 200 }]
-      const online = [{ date: '2026-05-02', fees: 30 }, { date: '2026-05-03', fees: 5 }]
+      const terminal = [
+        { date: '2026-05-01', profit: 100 },
+        { date: '2026-05-02', profit: 200 },
+      ]
+      const online = [
+        { date: '2026-05-02', fees: 30 },
+        { date: '2026-05-03', fees: 5 },
+      ]
       expect(mergeTimeSeries(terminal, online)).toEqual([
         { date: '2026-05-01', terminalProfit: 100, onlineFees: 0, profit: 100 },
         { date: '2026-05-02', terminalProfit: 200, onlineFees: 30, profit: 230 },

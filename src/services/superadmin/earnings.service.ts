@@ -13,8 +13,20 @@ export function centsToMxn(cents: number | bigint | null | undefined): number {
   return Number(cents ?? 0) / 100
 }
 
-interface TerminalVenueAgg { venueId: string; venueName: string; profit: number; volume: number; transactions: number }
-interface OnlineVenueAgg { venueId: string; venueName: string; fees: number; volume: number; transactions: number }
+interface TerminalVenueAgg {
+  venueId: string
+  venueName: string
+  profit: number
+  volume: number
+  transactions: number
+}
+interface OnlineVenueAgg {
+  venueId: string
+  venueName: string
+  fees: number
+  volume: number
+  transactions: number
+}
 
 export interface VenueEarnings {
   venueId: string
@@ -62,7 +74,12 @@ export function mergeByVenue(terminal: TerminalVenueAgg[], online: OnlineVenueAg
   return Array.from(map.values()).sort((a, b) => b.profit - a.profit)
 }
 
-export interface EarningsTimePoint { date: string; terminalProfit: number; onlineFees: number; profit: number }
+export interface EarningsTimePoint {
+  date: string
+  terminalProfit: number
+  onlineFees: number
+  profit: number
+}
 
 /** Merge terminal-profit and online-fee time series by date bucket, filling gaps with 0. */
 export function mergeTimeSeries(
@@ -93,10 +110,37 @@ export interface EarningsTotals {
   transactions: number
   averageMargin: number
 }
-export interface MerchantEarnings { merchantAccountId: string; label: string; providerCode: string; profit: number; volume: number; transactions: number }
-export interface ProviderEarnings { providerId: string; providerCode: string; providerName: string; volume: number; cost: number; transactions: number }
-export interface CardTypeEarnings { type: string; transactions: number; volume: number; profit: number; margin: number }
-export interface ChannelEarnings { ecommerceMerchantId: string; label: string; providerCode: string; fees: number; volume: number; transactions: number }
+export interface MerchantEarnings {
+  merchantAccountId: string
+  label: string
+  providerCode: string
+  profit: number
+  volume: number
+  transactions: number
+}
+export interface ProviderEarnings {
+  providerId: string
+  providerCode: string
+  providerName: string
+  volume: number
+  cost: number
+  transactions: number
+}
+export interface CardTypeEarnings {
+  type: string
+  transactions: number
+  volume: number
+  profit: number
+  margin: number
+}
+export interface ChannelEarnings {
+  ecommerceMerchantId: string
+  label: string
+  providerCode: string
+  fees: number
+  volume: number
+  transactions: number
+}
 export interface EarningsSummary {
   range: { startDate: string; endDate: string }
   totals: EarningsTotals
@@ -133,7 +177,18 @@ export async function getEarningsSummary(range?: DateRange): Promise<EarningsSum
       WHERE tc."createdAt" >= ${startDate} AND tc."createdAt" <= ${endDate}
       GROUP BY v.id, v.name
     `,
-    prisma.$queryRaw<Array<{ merchantAccountId: string; displayName: string | null; alias: string | null; externalMerchantId: string; providerCode: string; profit: Prisma.Decimal; volume: Prisma.Decimal; transactions: bigint }>>`
+    prisma.$queryRaw<
+      Array<{
+        merchantAccountId: string
+        displayName: string | null
+        alias: string | null
+        externalMerchantId: string
+        providerCode: string
+        profit: Prisma.Decimal
+        volume: Prisma.Decimal
+        transactions: bigint
+      }>
+    >`
       SELECT ma.id as "merchantAccountId", ma."displayName", ma.alias, ma."externalMerchantId",
              pp.code as "providerCode",
              COALESCE(SUM(tc."grossProfit"), 0) as profit,
@@ -162,7 +217,17 @@ export async function getEarningsSummary(range?: DateRange): Promise<EarningsSum
       _count: true,
       _sum: { amount: true, applicationFeeCents: true },
     }),
-    prisma.$queryRaw<Array<{ ecommerceMerchantId: string; channelName: string | null; businessName: string | null; providerCode: string; fees: bigint; volume: Prisma.Decimal; transactions: bigint }>>`
+    prisma.$queryRaw<
+      Array<{
+        ecommerceMerchantId: string
+        channelName: string | null
+        businessName: string | null
+        providerCode: string
+        fees: bigint
+        volume: Prisma.Decimal
+        transactions: bigint
+      }>
+    >`
       SELECT em.id as "ecommerceMerchantId", em."channelName", em."businessName",
              pp.code as "providerCode",
              COALESCE(SUM(cs."applicationFeeCents"), 0) as fees,
@@ -178,8 +243,20 @@ export async function getEarningsSummary(range?: DateRange): Promise<EarningsSum
   ])
 
   const byVenue = mergeByVenue(
-    terminalByVenue.map(r => ({ venueId: r.venueId, venueName: r.venueName, profit: Number(r.profit), volume: Number(r.volume), transactions: Number(r.transactions) })),
-    onlineByVenue.map(r => ({ venueId: r.venueId, venueName: r.venueName, fees: centsToMxn(r.fees), volume: Number(r.volume), transactions: Number(r.transactions) })),
+    terminalByVenue.map(r => ({
+      venueId: r.venueId,
+      venueName: r.venueName,
+      profit: Number(r.profit),
+      volume: Number(r.volume),
+      transactions: Number(r.transactions),
+    })),
+    onlineByVenue.map(r => ({
+      venueId: r.venueId,
+      venueName: r.venueName,
+      fees: centsToMxn(r.fees),
+      volume: Number(r.volume),
+      transactions: Number(r.transactions),
+    })),
   )
 
   const onlineFees = centsToMxn(onlineTotals._sum.applicationFeeCents)
