@@ -1,6 +1,7 @@
 import cron from 'node-cron'
 import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
+import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
 const HEARTBEAT_TIMEOUT_MINUTES = 3 // Si no recibimos heartbeat en 3 mins, se considera OFFLINE
 
@@ -11,14 +12,19 @@ async function checkPosConnections() {
     const timeoutThreshold = new Date(Date.now() - HEARTBEAT_TIMEOUT_MINUTES * 60 * 1000)
 
     // Busca todas las conexiones que están ONLINE pero cuyo último latido es más antiguo que nuestro umbral de tiempo.
-    const offlineVenues = await prisma.posConnectionStatus.findMany({
-      where: {
-        status: 'ONLINE',
-        lastHeartbeatAt: {
-          lt: timeoutThreshold,
-        },
-      },
-    })
+    // Retry only on transient DB connection blips (P1001 during the top-of-hour cron stampede). See .claude/rules/cron-jobs.md
+    const offlineVenues = await retry(
+      () =>
+        prisma.posConnectionStatus.findMany({
+          where: {
+            status: 'ONLINE',
+            lastHeartbeatAt: {
+              lt: timeoutThreshold,
+            },
+          },
+        }),
+      { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'monitorPosConnections.findOnline' },
+    )
 
     if (offlineVenues.length > 0) {
       const offlineVenueIds = offlineVenues.map(v => v.venueId)

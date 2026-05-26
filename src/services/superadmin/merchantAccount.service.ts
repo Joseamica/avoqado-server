@@ -824,6 +824,75 @@ export async function toggleMerchantAccountStatus(id: string) {
  * Only allowed if no cost structures or venue configs reference it
  * @param id Merchant account ID
  */
+export interface MerchantBlockers {
+  displayName: string
+  /** Historial — NO removible (sólo se puede desactivar la cuenta). */
+  payments: number
+  transactionCosts: number
+  /** Removibles. */
+  costStructures: { id: string }[]
+  venueConfigs: { venueId: string; venueName: string; slot: 'PRIMARY' | 'SECONDARY' | 'TERTIARY' }[]
+  terminals: { id: string; name: string; serialNumber: string | null }[]
+  canDelete: boolean
+}
+
+/**
+ * Lista qué impide BORRAR un merchant account. Mismo criterio que
+ * `deleteMerchantAccount`. Read-only, aditivo — para el flujo de borrado guiado.
+ */
+export async function getMerchantAccountBlockers(id: string): Promise<MerchantBlockers> {
+  const account = await prisma.merchantAccount.findUnique({
+    where: { id },
+    include: {
+      _count: { select: { payments: true, transactionCosts: true } },
+      costStructures: { select: { id: true } },
+    },
+  })
+  if (!account) {
+    throw new NotFoundError(`Merchant account ${id} not found`)
+  }
+
+  const [venueConfigs, terminals] = await Promise.all([
+    prisma.venuePaymentConfig.findMany({
+      where: {
+        OR: [{ primaryAccountId: id }, { secondaryAccountId: id }, { tertiaryAccountId: id }],
+      },
+      include: { venue: { select: { name: true } } },
+    }),
+    prisma.terminal.findMany({
+      where: { assignedMerchantIds: { has: id } },
+      select: { id: true, name: true, serialNumber: true },
+    }),
+  ])
+
+  const vc = venueConfigs.map(c => ({
+    venueId: c.venueId,
+    venueName: c.venue?.name ?? '—',
+    slot: (c.primaryAccountId === id
+      ? 'PRIMARY'
+      : c.secondaryAccountId === id
+        ? 'SECONDARY'
+        : 'TERTIARY') as 'PRIMARY' | 'SECONDARY' | 'TERTIARY',
+  }))
+
+  const canDelete =
+    account._count.payments === 0 &&
+    account._count.transactionCosts === 0 &&
+    account.costStructures.length === 0 &&
+    vc.length === 0 &&
+    terminals.length === 0
+
+  return {
+    displayName: account.displayName || account.alias || account.externalMerchantId,
+    payments: account._count.payments,
+    transactionCosts: account._count.transactionCosts,
+    costStructures: account.costStructures.map(c => ({ id: c.id })),
+    venueConfigs: vc,
+    terminals,
+    canDelete,
+  }
+}
+
 export async function deleteMerchantAccount(id: string) {
   const account = await prisma.merchantAccount.findUnique({
     where: { id },

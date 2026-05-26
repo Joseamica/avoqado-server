@@ -12,6 +12,7 @@ import { CronJob } from 'cron'
 import logger from '../config/logger'
 import prisma from '../utils/prismaClient'
 import { pullConnection } from '../services/google-calendar/pull.service'
+import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
 const TIMEZONE = 'America/Mexico_City'
 const STALE_AFTER_MS = 60_000
@@ -57,11 +58,16 @@ export class GcalInboxSweeperJob {
 
     try {
       const cutoff = new Date(Date.now() - STALE_AFTER_MS)
-      const rows = await prisma.googleCalendarWebhookInbox.findMany({
-        where: { processedAt: null, receivedAt: { lt: cutoff } },
-        distinct: ['connectionId'],
-        take: BATCH_SIZE,
-      })
+      // Retry only on transient DB connection blips (P1001 during the cron stampede). See .claude/rules/cron-jobs.md
+      const rows = await retry(
+        () =>
+          prisma.googleCalendarWebhookInbox.findMany({
+            where: { processedAt: null, receivedAt: { lt: cutoff } },
+            distinct: ['connectionId'],
+            take: BATCH_SIZE,
+          }),
+        { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'gcal-inbox-sweeper.findStale' },
+      )
       if (rows.length === 0) return
 
       for (const row of rows) {

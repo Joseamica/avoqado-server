@@ -3,6 +3,7 @@
 import { CronJob } from 'cron'
 import { tpvHealthService } from '../services/tpv/tpv-health.service'
 import logger from '../config/logger'
+import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
 /**
  * Job que monitorea la salud de las terminales TPV
@@ -56,8 +57,16 @@ export class TpvHealthMonitorJob {
     try {
       logger.debug('Running TPV health check...')
 
-      // Ejecutar verificación de terminales offline
-      await tpvHealthService.checkOfflineTerminals()
+      // checkOfflineTerminals() is a single idempotent updateMany, so it is safe to
+      // retry on a transient DB connection blip — e.g. the top-of-hour cron stampede
+      // that briefly exhausts Prisma's connect_timeout and surfaces as P1001.
+      // Only connection errors are retried; any other error fails through to the catch.
+      await retry(() => tpvHealthService.checkOfflineTerminals(), {
+        retries: 2,
+        initialDelay: 1500,
+        shouldRetry: shouldRetryDbConnectionError,
+        context: 'tpv-health.checkOfflineTerminals',
+      })
 
       logger.debug('TPV health check completed successfully')
     } catch (error) {

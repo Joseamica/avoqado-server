@@ -87,6 +87,7 @@ export interface SalesSummaryFilters {
   groupBy?: 'none' | 'paymentMethod'
   reportType?: ReportType
   timezone?: string
+  merchantAccountId?: string
 }
 
 // ============================================================
@@ -97,7 +98,7 @@ export interface SalesSummaryFilters {
  * Get sales summary for a venue within a date range
  */
 export async function getSalesSummary(venueId: string, filters: SalesSummaryFilters): Promise<SalesSummaryResponse> {
-  const { startDate, endDate, groupBy = 'none', reportType = 'summary', timezone = 'America/Mexico_City' } = filters
+  const { startDate, endDate, groupBy = 'none', reportType = 'summary', timezone = 'America/Mexico_City', merchantAccountId } = filters
 
   // Validate dates
   const parsedStartDate = new Date(startDate)
@@ -110,7 +111,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     throw new BadRequestError(`Invalid endDate: ${endDate}`)
   }
 
-  logger.info('Calculating sales summary', { venueId, startDate, endDate, groupBy })
+  logger.info('Calculating sales summary', { venueId, startDate, endDate, groupBy, merchantAccountId })
 
   // Base date filter for orders
   const dateFilter = {
@@ -119,6 +120,17 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       lte: parsedEndDate,
     },
   }
+
+  // When filtering by merchant, we scope orders to only those that have at
+  // least one Payment linked to the target merchantAccountId.
+  const merchantOrderFilter = merchantAccountId
+    ? { payments: { some: { merchantAccountId } } }
+    : {}
+
+  // Payment-level merchant filter
+  const merchantPaymentFilter = merchantAccountId
+    ? { merchantAccountId }
+    : {}
 
   // ============================================================
   // Calculate Core Metrics
@@ -131,6 +143,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       ...dateFilter,
       status: { notIn: ['PENDING', 'CANCELLED', 'DELETED'] },
       paymentStatus: { notIn: ['REFUNDED'] },
+      ...merchantOrderFilter,
     },
     _sum: {
       total: true,
@@ -157,6 +170,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       venueId,
       ...dateFilter,
       type: 'REFUND',
+      ...merchantPaymentFilter,
     },
     _sum: {
       amount: true,
@@ -172,6 +186,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       ...dateFilter,
       status: { notIn: ['PENDING', 'CANCELLED', 'DELETED'] },
       paymentStatus: { in: ['PENDING', 'PARTIAL'] },
+      ...merchantOrderFilter,
     },
     _sum: {
       remainingBalance: true,
@@ -185,6 +200,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       venueId,
       ...dateFilter,
       status: 'COMPLETED',
+      ...merchantPaymentFilter,
     },
     _sum: {
       tipAmount: true,
@@ -195,21 +211,33 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // (joined via Payment because TransactionCost has no venueId column).
   // VenueTransaction.feeAmount is currently not synced from TransactionCost,
   // so reading the canonical value from TransactionCost avoids reporting $0.
-  const platformFeesRows = await prisma.$queryRaw<Array<{ sum_fee: number }>>`
-    SELECT COALESCE(SUM(tc."venueChargeAmount"), 0)::float AS sum_fee
-    FROM "TransactionCost" tc
-    JOIN "Payment" p ON p.id = tc."paymentId"
-    WHERE p."venueId" = ${venueId}
-      AND p."createdAt" >= ${parsedStartDate}
-      AND p."createdAt" <= ${parsedEndDate}
-  `
+  const platformFeesRows = merchantAccountId
+    ? await prisma.$queryRaw<Array<{ sum_fee: number }>>`
+        SELECT COALESCE(SUM(tc."venueChargeAmount"), 0)::float AS sum_fee
+        FROM "TransactionCost" tc
+        JOIN "Payment" p ON p.id = tc."paymentId"
+        WHERE p."venueId" = ${venueId}
+          AND p."createdAt" >= ${parsedStartDate}
+          AND p."createdAt" <= ${parsedEndDate}
+          AND p."merchantAccountId" = ${merchantAccountId}
+      `
+    : await prisma.$queryRaw<Array<{ sum_fee: number }>>`
+        SELECT COALESCE(SUM(tc."venueChargeAmount"), 0)::float AS sum_fee
+        FROM "TransactionCost" tc
+        JOIN "Payment" p ON p.id = tc."paymentId"
+        WHERE p."venueId" = ${venueId}
+          AND p."createdAt" >= ${parsedStartDate}
+          AND p."createdAt" <= ${parsedEndDate}
+      `
 
   // 7. Staff Commissions (paid to employees) - From CommissionCalculation
+  // CommissionCalculation has paymentId → Payment.merchantAccountId for filtering
   const staffCommissionsResult = await prisma.commissionCalculation.aggregate({
     where: {
       venueId,
       createdAt: dateFilter.createdAt,
-      status: { not: 'VOIDED' }, // Exclude voided commissions
+      status: { not: 'VOIDED' },
+      ...(merchantAccountId ? { payment: { merchantAccountId } } : {}),
     },
     _sum: {
       netCommission: true,
@@ -222,6 +250,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       venueId,
       ...dateFilter,
       status: 'COMPLETED',
+      ...merchantPaymentFilter,
     },
   })
 
@@ -292,6 +321,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
         venueId,
         ...dateFilter,
         status: 'COMPLETED',
+        ...merchantPaymentFilter,
       },
       _sum: {
         amount: true,
@@ -320,7 +350,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   let byPeriod: TimePeriodMetrics[] | undefined
 
   if (reportType !== 'summary') {
-    byPeriod = await calculateTimePeriodMetrics(venueId, parsedStartDate, parsedEndDate, reportType, timezone)
+    byPeriod = await calculateTimePeriodMetrics(venueId, parsedStartDate, parsedEndDate, reportType, timezone, merchantAccountId)
   }
 
   logger.info('Sales summary calculated', {
@@ -357,6 +387,7 @@ async function calculateTimePeriodMetrics(
   endDate: Date,
   reportType: ReportType,
   timezone: string,
+  merchantAccountId?: string,
 ): Promise<TimePeriodMetrics[]> {
   // SECURITY: Sanitize timezone to prevent SQL injection
   const safeTz = sanitizeTimezone(timezone)
@@ -396,6 +427,16 @@ async function calculateTimePeriodMetrics(
       return []
   }
 
+  // Optional merchant filter clause for raw SQL queries
+  const merchantPaymentClause = merchantAccountId ? `AND "merchantAccountId" = $4` : ''
+  const merchantOrderClause = merchantAccountId
+    ? `AND id IN (SELECT "orderId" FROM "Payment" WHERE "merchantAccountId" = $4)`
+    : ''
+  const merchantPlatformClause = merchantAccountId ? `AND p."merchantAccountId" = $4` : ''
+  const merchantCommissionClause = merchantAccountId
+    ? `AND "paymentId" IN (SELECT id FROM "Payment" WHERE "merchantAccountId" = $4)`
+    : ''
+
   // Query order metrics grouped by period
   // Using subtotal for gross_sales (not total) to match accounting standards
   const orderMetricsQuery = `
@@ -411,6 +452,7 @@ async function calculateTimePeriodMetrics(
       AND "createdAt" <= $3
       AND status NOT IN ('CANCELLED')
       AND "paymentStatus" NOT IN ('REFUNDED')
+      ${merchantOrderClause}
     GROUP BY ${groupByExpression}
     ORDER BY ${orderByExpression}
   `
@@ -427,6 +469,7 @@ async function calculateTimePeriodMetrics(
       AND "createdAt" >= $2
       AND "createdAt" <= $3
       AND status = 'COMPLETED'
+      ${merchantPaymentClause}
     GROUP BY ${groupByExpression}
     ORDER BY ${orderByExpression}
   `
@@ -443,6 +486,7 @@ async function calculateTimePeriodMetrics(
       AND "createdAt" >= $2
       AND "createdAt" <= $3
       AND type = 'REFUND'
+      ${merchantPaymentClause}
     GROUP BY ${groupByExpression}
     ORDER BY ${orderByExpression}
   `
@@ -458,6 +502,7 @@ async function calculateTimePeriodMetrics(
       AND "createdAt" <= $3
       AND status NOT IN ('CANCELLED')
       AND "paymentStatus" IN ('PENDING', 'PARTIAL')
+      ${merchantOrderClause}
     GROUP BY ${groupByExpression}
     ORDER BY ${orderByExpression}
   `
@@ -476,6 +521,7 @@ async function calculateTimePeriodMetrics(
     WHERE p."venueId" = $1
       AND p."createdAt" >= $2
       AND p."createdAt" <= $3
+      ${merchantPlatformClause}
     GROUP BY ${platformFeesGroupBy}
     ORDER BY ${platformFeesOrderBy}
   `
@@ -490,28 +536,30 @@ async function calculateTimePeriodMetrics(
       AND "createdAt" >= $2
       AND "createdAt" <= $3
       AND status != 'VOIDED'
+      ${merchantCommissionClause}
     GROUP BY ${groupByExpression}
     ORDER BY ${orderByExpression}
   `
 
   // Execute all queries in parallel
+  // When merchantAccountId is provided, it becomes the 4th parameter ($4) for all queries
+  const queryParams: [string, Date, Date, ...string[]] = merchantAccountId
+    ? [venueId, startDate, endDate, merchantAccountId]
+    : [venueId, startDate, endDate]
+
   const [orderMetrics, paymentMetrics, refundsMetrics, deferredMetrics, platformFeesMetrics, staffCommissionsMetrics] = await Promise.all([
     prisma.$queryRawUnsafe<Array<{ period: Date | number; gross_sales: number; taxes: number; discounts: number; order_count: bigint }>>(
       orderMetricsQuery,
-      venueId,
-      startDate,
-      endDate,
+      ...queryParams,
     ),
     prisma.$queryRawUnsafe<Array<{ period: Date | number; payment_amount: number; tips: number; transaction_count: bigint }>>(
       paymentMetricsQuery,
-      venueId,
-      startDate,
-      endDate,
+      ...queryParams,
     ),
-    prisma.$queryRawUnsafe<Array<{ period: Date | number; refunds: number }>>(refundsQuery, venueId, startDate, endDate),
-    prisma.$queryRawUnsafe<Array<{ period: Date | number; deferred_sales: number }>>(deferredQuery, venueId, startDate, endDate),
-    prisma.$queryRawUnsafe<Array<{ period: Date | number; platform_fees: number }>>(platformFeesQuery, venueId, startDate, endDate),
-    prisma.$queryRawUnsafe<Array<{ period: Date | number; staff_commissions: number }>>(staffCommissionsQuery, venueId, startDate, endDate),
+    prisma.$queryRawUnsafe<Array<{ period: Date | number; refunds: number }>>(refundsQuery, ...queryParams),
+    prisma.$queryRawUnsafe<Array<{ period: Date | number; deferred_sales: number }>>(deferredQuery, ...queryParams),
+    prisma.$queryRawUnsafe<Array<{ period: Date | number; platform_fees: number }>>(platformFeesQuery, ...queryParams),
+    prisma.$queryRawUnsafe<Array<{ period: Date | number; staff_commissions: number }>>(staffCommissionsQuery, ...queryParams),
   ])
 
   // Create maps for quick lookup

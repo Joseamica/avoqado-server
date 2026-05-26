@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express'
 import * as paymentProviderService from '../../services/superadmin/paymentProvider.service'
 import logger from '../../config/logger'
+import { logAction } from '../../services/dashboard/activity-log.service'
 
 /**
  * GET /api/v1/superadmin/payment-providers
@@ -169,19 +170,53 @@ export async function togglePaymentProviderStatus(req: Request, res: Response, n
  * DELETE /api/v1/superadmin/payment-providers/:id
  * Delete (soft delete) a payment provider
  */
+/**
+ * GET /api/v1/superadmin/payment-providers/:id/blockers
+ * Lista lo que impide borrar (hard) un provider. Aditivo — el legacy no lo usa.
+ */
+export async function getPaymentProviderBlockers(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { id } = req.params
+    const data = await paymentProviderService.getPaymentProviderBlockers(id)
+    res.json({ success: true, data })
+  } catch (error) {
+    next(error)
+  }
+}
+
 export async function deletePaymentProvider(req: Request, res: Response, next: NextFunction) {
   try {
     const { id } = req.params
+    // `?force=true` → borrado REAL (sólo si está limpio). Sin el flag, el
+    // comportamiento es el de siempre (soft-delete), intacto para el legacy.
+    const force = req.query.force === 'true'
 
-    await paymentProviderService.deletePaymentProvider(id)
+    const result = await paymentProviderService.deletePaymentProvider(id, { force })
 
-    logger.info('Payment provider deleted via API', {
-      providerId: id,
-    })
+    if (result.hardDeleted) {
+      await logAction({
+        // El staff id vive en req.authContext.userId (NO req.user.uid — ese
+        // patrón legacy es undefined y dejaba el "quién" vacío en el audit log).
+        staffId: req.authContext?.userId ?? null,
+        action: 'PAYMENT_PROVIDER_DELETED',
+        entity: 'PaymentProvider',
+        entityId: id,
+        data: { code: result.code },
+        ipAddress: req.ip,
+        userAgent: req.headers?.['user-agent'],
+      })
+    }
+
+    logger.info(
+      result.hardDeleted ? 'Payment provider hard-deleted via API' : 'Payment provider deactivated via API',
+      { providerId: id, code: result.code },
+    )
 
     res.json({
       success: true,
-      message: 'Payment provider deactivated successfully',
+      message: result.hardDeleted
+        ? 'Payment provider deleted successfully'
+        : 'Payment provider deactivated successfully',
     })
   } catch (error) {
     next(error)

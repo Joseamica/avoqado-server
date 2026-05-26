@@ -156,7 +156,7 @@ export async function fetchRenderLogs(params: FetchRenderLogsParams = {}): Promi
       timeout: 20_000,
     })
 
-    let logs: RenderLogEntry[] = data.logs.map(entry => ({
+    let logs: RenderLogEntry[] = (data.logs ?? []).map(entry => ({
       id: entry.id,
       timestamp: entry.timestamp,
       message: entry.message,

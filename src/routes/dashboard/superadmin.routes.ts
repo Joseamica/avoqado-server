@@ -339,6 +339,7 @@ router.patch('/platform-settings', platformSettingsController.updatePlatformSett
 // ───── E-commerce Merchants (cross-venue view, fee management)
 router.get('/ecommerce-merchants', ecommerceMerchantsSuperadminController.listAllEcommerceMerchants)
 router.get('/ecommerce-merchants/:id/fee-history', ecommerceMerchantsSuperadminController.getMerchantFeeHistory)
+router.delete('/ecommerce-merchants/:id', ecommerceMerchantsSuperadminController.deleteEcommerceMerchant)
 
 // Payment Provider Management
 router.use('/payment-providers', paymentProviderRoutes)

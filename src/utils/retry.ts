@@ -85,6 +85,34 @@ export function shouldRetryStripeError(error: any): boolean {
 }
 
 /**
+ * shouldRetry predicate for transient DATABASE CONNECTION errors.
+ *
+ * Use this for idempotent DB operations (reads, idempotent updateMany) that can
+ * fail during a transient connection blip — e.g. the top-of-hour cron stampede
+ * that briefly exhausts Prisma's `connect_timeout` and surfaces as P1001.
+ *
+ * IMPORTANT: This ONLY retries connection-level failures. It deliberately does
+ * NOT retry data/constraint errors (P2002 unique, P2025 not found, etc.) so
+ * genuine business errors still fail fast.
+ *
+ * - Prisma connection errors: P1001 (can't reach server), P1002 (reached but
+ *   timed out), P1008 (operation timed out), P1017 (server closed connection)
+ * - Node/pg socket errors: ECONNREFUSED, ETIMEDOUT, ENOTFOUND, ECONNRESET, EPIPE
+ */
+export function shouldRetryDbConnectionError(error: any): boolean {
+  const code = error?.code
+  if (!code) return false
+
+  // Prisma connection-level error codes (NOT P2xxx data/constraint errors)
+  if (['P1001', 'P1002', 'P1008', 'P1017'].includes(code)) return true
+
+  // Underlying socket/network errors (pg client)
+  if (['ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'ECONNRESET', 'EPIPE'].includes(code)) return true
+
+  return false
+}
+
+/**
  * Calculate delay for next retry attempt
  *
  * @param attempt - Current attempt number (0-indexed)

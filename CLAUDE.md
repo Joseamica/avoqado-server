@@ -116,6 +116,7 @@ wait stable, then APK. TPV sends `X-App-Version-Code` for conditional behavior.
 - `critical-warnings.md` - authContext, tenant isolation, money, webhooks, storage, migrations, Zod Spanish messages
 - `testing-and-git.md` - Regression prevention, git policy, test workflow
 - `payments.md` - Payment/inventory rules (path-conditional: `src/services/tpv/**`, `src/services/dashboard/rawMaterial*`)
+- `cron-jobs.md` - Cron jobs MUST wrap entry DB read with `retry(..., shouldRetryDbConnectionError)` (path-conditional: `src/jobs/**`). Prevents top-of-hour P1001 stampede deaths. NO global Prisma retry.
 
 ### On-demand guides (`docs/guides/`)
 

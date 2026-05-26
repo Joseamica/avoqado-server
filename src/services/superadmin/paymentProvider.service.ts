@@ -276,39 +276,141 @@ export async function togglePaymentProviderStatus(id: string) {
  * Only allowed if no merchant accounts exist
  * @param id Provider ID
  */
-export async function deletePaymentProvider(id: string) {
+// Todas las relaciones que impiden un borrado REAL de un provider.
+const PROVIDER_BLOCKER_COUNT = {
+  merchants: true,
+  ecommerceMerchants: true,
+  webhooks: true,
+  eventLogs: true,
+  costStructures: true,
+} as const
+
+export interface ProviderBlockers {
+  code: string
+  name: string
+  merchants: { id: string; label: string }[]
+  /** `removable=false` cuando el canal tiene historial (pagos/sesiones/links) → no se puede borrar, sólo desactivar el provider. */
+  ecommerceMerchants: { id: string; label: string; removable: boolean; reason?: string }[]
+  webhooks: number
+  eventLogs: number
+  costStructures: number
+  canDelete: boolean
+}
+
+/**
+ * Lista qué impide BORRAR (hard) un payment provider. Read-only y aditivo: el
+ * dashboard legacy no lo usa. Un provider sólo se puede borrar de verdad cuando
+ * todas estas dependencias están en cero.
+ */
+export async function getPaymentProviderBlockers(id: string): Promise<ProviderBlockers> {
   const provider = await prisma.paymentProvider.findUnique({
     where: { id },
-    include: {
-      _count: {
-        select: {
-          merchants: true,
-        },
-      },
-    },
+    include: { _count: { select: PROVIDER_BLOCKER_COUNT } },
   })
-
   if (!provider) {
     throw new NotFoundError(`Payment provider ${id} not found`)
   }
+  const [merchants, ecommerce] = await Promise.all([
+    prisma.merchantAccount.findMany({
+      where: { providerId: id },
+      select: { id: true, displayName: true, alias: true, externalMerchantId: true },
+    }),
+    prisma.ecommerceMerchant.findMany({
+      where: { providerId: id },
+      select: {
+        id: true,
+        providerMerchantId: true,
+        venue: { select: { name: true } },
+        _count: {
+          select: { checkoutSessions: true, paymentLinks: true, payments: true, reservations: true },
+        },
+      },
+    }),
+  ])
+  const c = provider._count
+  const canDelete =
+    c.merchants === 0 &&
+    c.ecommerceMerchants === 0 &&
+    c.webhooks === 0 &&
+    c.eventLogs === 0 &&
+    c.costStructures === 0
+  return {
+    code: provider.code,
+    name: provider.name,
+    merchants: merchants.map(m => ({
+      id: m.id,
+      label: m.displayName || m.alias || m.externalMerchantId,
+    })),
+    ecommerceMerchants: ecommerce.map(e => {
+      const h = e._count
+      const parts: string[] = []
+      if (h.payments > 0) parts.push(`${h.payments} pago(s)`)
+      if (h.checkoutSessions > 0) parts.push(`${h.checkoutSessions} sesión(es)`)
+      if (h.paymentLinks > 0) parts.push(`${h.paymentLinks} link(s)`)
+      if (h.reservations > 0) parts.push(`${h.reservations} reservación(es)`)
+      const removable = parts.length === 0
+      return {
+        id: e.id,
+        label: e.venue?.name
+          ? `${e.venue.name}${e.providerMerchantId ? ` · ${e.providerMerchantId}` : ''}`
+          : e.providerMerchantId || e.id,
+        removable,
+        reason: removable ? undefined : parts.join(' · '),
+      }
+    }),
+    webhooks: c.webhooks,
+    eventLogs: c.eventLogs,
+    costStructures: c.costStructures,
+    canDelete,
+  }
+}
 
-  // Prevent deletion if merchant accounts exist
-  if (provider._count.merchants > 0) {
-    throw new BadRequestError(
-      `Cannot delete payment provider ${provider.code} because it has ${provider._count.merchants} merchant account(s). Deactivate instead.`,
-    )
+/**
+ * Borra un payment provider.
+ *
+ * - `force = false` (default — comportamiento histórico que usa el dashboard
+ *   legacy): bloquea si hay merchants; si no, SOFT delete (`active = false`).
+ *   NO cambia, para no romper al legacy.
+ * - `force = true` (nuevo — flujo de borrado guiado): HARD delete real, pero
+ *   SÓLO si el provider está 100% limpio. Si no, lanza error con el detalle.
+ */
+export async function deletePaymentProvider(
+  id: string,
+  opts: { force?: boolean } = {},
+): Promise<{ hardDeleted: boolean; code: string }> {
+  const provider = await prisma.paymentProvider.findUnique({
+    where: { id },
+    include: { _count: { select: PROVIDER_BLOCKER_COUNT } },
+  })
+  if (!provider) {
+    throw new NotFoundError(`Payment provider ${id} not found`)
+  }
+  const c = provider._count
+
+  if (opts.force) {
+    const blockers: string[] = []
+    if (c.merchants > 0) blockers.push(`${c.merchants} merchant account(s)`)
+    if (c.ecommerceMerchants > 0) blockers.push(`${c.ecommerceMerchants} canal(es) e-commerce`)
+    if (c.webhooks > 0) blockers.push(`${c.webhooks} webhook(s)`)
+    if (c.eventLogs > 0) blockers.push(`${c.eventLogs} log(s) de eventos`)
+    if (c.costStructures > 0) blockers.push(`${c.costStructures} estructura(s) de costo`)
+    if (blockers.length > 0) {
+      throw new BadRequestError(
+        `No se puede borrar el provider ${provider.code}: todavía tiene ${blockers.join(', ')}. Quita esas dependencias primero.`,
+      )
+    }
+    await prisma.paymentProvider.delete({ where: { id } })
+    logger.warn('Payment provider HARD deleted', { providerId: id, code: provider.code })
+    return { hardDeleted: true, code: provider.code }
   }
 
-  // Soft delete by setting active=false
-  await prisma.paymentProvider.update({
-    where: { id },
-    data: {
-      active: false,
-    },
-  })
-
-  logger.warn('Payment provider soft deleted', {
-    providerId: id,
-    code: provider.code,
-  })
+  // Comportamiento histórico (legacy): bloquea con merchants; si no, soft-delete.
+  if (c.merchants > 0) {
+    throw new BadRequestError(
+      `Cannot delete payment provider ${provider.code} because it has ${c.merchants} merchant account(s). Deactivate instead.`,
+    )
+  }
+  await prisma.paymentProvider.update({ where: { id }, data: { active: false } })
+  logger.warn('Payment provider soft deleted', { providerId: id, code: provider.code })
+  return { hardDeleted: false, code: provider.code }
 }

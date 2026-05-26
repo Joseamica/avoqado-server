@@ -22,13 +22,14 @@ import prisma from '@/utils/prismaClient'
  * - endDate: ISO date string (required)
  * - groupBy: 'none' | 'paymentMethod' (optional, default: 'none')
  * - reportType: 'summary' | 'hours' | 'days' | 'weeks' | 'months' | 'hourlySum' | 'dailySum' (optional, default: 'summary')
+ * - merchantAccountId: CUID string (optional) - filter by specific merchant account
  *
  * @permission reports:read
  */
 export async function salesSummaryReport(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId } = req.authContext!
-    const { startDate, endDate, groupBy, reportType } = req.query
+    const { startDate, endDate, groupBy, reportType, merchantAccountId } = req.query
 
     // Validate required params
     if (!startDate || typeof startDate !== 'string') {
@@ -62,6 +63,7 @@ export async function salesSummaryReport(req: Request, res: Response, next: Next
       groupBy: (groupBy as 'none' | 'paymentMethod') || 'none',
       reportType: (reportType as ReportType) || 'summary',
       timezone: venue?.timezone || 'America/Mexico_City',
+      merchantAccountId: typeof merchantAccountId === 'string' ? merchantAccountId : undefined,
     }
 
     const report = await getSalesSummary(venueId, filters)

@@ -2,6 +2,7 @@ import { CronJob } from 'cron'
 import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
 import { markNoShow } from '../services/dashboard/reservation.dashboard.service'
+import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
 /**
  * Auto no-show worker.
@@ -47,29 +48,35 @@ export class ReservationAutoNoShowJob {
       // express `startsAt + noShowGraceMin < now` directly in Prisma's predicate
       // language without raw SQL — but the candidate set is bounded (past start,
       // not checked-in, not terminal) so this is cheap.
-      const candidates = await prisma.reservation.findMany({
-        where: {
-          status: { in: ['PENDING', 'CONFIRMED'] },
-          checkedInAt: null,
-          startsAt: { lt: now },
-          venue: {
-            reservationSettings: {
-              noShowGraceMin: { gt: 0 },
-            },
-          },
-        },
-        include: {
-          venue: {
-            select: {
-              id: true,
-              reservationSettings: {
-                select: { noShowGraceMin: true, noShowFeePercent: true },
+      // Entry read only. Retry on transient DB connection blips (P1001 during the cron
+      // stampede); the markNoShow/fee writes below are NOT retried. See .claude/rules/cron-jobs.md
+      const candidates = await retry(
+        () =>
+          prisma.reservation.findMany({
+            where: {
+              status: { in: ['PENDING', 'CONFIRMED'] },
+              checkedInAt: null,
+              startsAt: { lt: now },
+              venue: {
+                reservationSettings: {
+                  noShowGraceMin: { gt: 0 },
+                },
               },
             },
-          },
-        },
-        take: 500,
-      })
+            include: {
+              venue: {
+                select: {
+                  id: true,
+                  reservationSettings: {
+                    select: { noShowGraceMin: true, noShowFeePercent: true },
+                  },
+                },
+              },
+            },
+            take: 500,
+          }),
+        { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'reservation-auto-no-show.findCandidates' },
+      )
 
       let marked = 0
 

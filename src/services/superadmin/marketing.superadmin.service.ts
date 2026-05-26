@@ -12,6 +12,7 @@
 import { Resend } from 'resend'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
+import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 import { CampaignStatus, DeliveryStatus, StaffRole } from '@prisma/client'
 
 // Initialize Resend
@@ -579,16 +580,29 @@ export async function processPendingDeliveries() {
     return { processed: 0, success: 0, failed: 0 }
   }
 
-  // Find campaigns that are currently sending
-  const sendingCampaigns = await prisma.marketingCampaign.findMany({
-    where: { status: 'SENDING' },
-    select: {
-      id: true,
-      subject: true,
-      bodyHtml: true,
-      bodyText: true,
+  // Find campaigns that are currently sending.
+  // This is a pure read and the FIRST DB op of the job (no emails sent yet), so it
+  // is safe to retry on a transient connection blip (P1001 during the :00 cron
+  // stampede). The email-sending loop below is deliberately NOT wrapped — retrying
+  // it could double-send / double-increment counters.
+  const sendingCampaigns = await retry(
+    () =>
+      prisma.marketingCampaign.findMany({
+        where: { status: 'SENDING' },
+        select: {
+          id: true,
+          subject: true,
+          bodyHtml: true,
+          bodyText: true,
+        },
+      }),
+    {
+      retries: 2,
+      initialDelay: 1500,
+      shouldRetry: shouldRetryDbConnectionError,
+      context: 'marketing.processPendingDeliveries.findSendingCampaigns',
     },
-  })
+  )
 
   if (sendingCampaigns.length === 0) {
     return { processed: 0, success: 0, failed: 0 }
@@ -599,11 +613,22 @@ export async function processPendingDeliveries() {
   let totalFailed = 0
 
   for (const campaign of sendingCampaigns) {
-    // Get pending deliveries for this campaign (batch size)
-    const pendingDeliveries = await prisma.campaignDelivery.findMany({
-      where: { campaignId: campaign.id, status: 'PENDING' },
-      take: BATCH_SIZE,
-    })
+    // Get pending deliveries for this campaign (batch size).
+    // Pure read executed BEFORE any email is sent for this batch, so retrying a
+    // transient connection blip here is safe (no double-send risk).
+    const pendingDeliveries = await retry(
+      () =>
+        prisma.campaignDelivery.findMany({
+          where: { campaignId: campaign.id, status: 'PENDING' },
+          take: BATCH_SIZE,
+        }),
+      {
+        retries: 2,
+        initialDelay: 1500,
+        shouldRetry: shouldRetryDbConnectionError,
+        context: 'marketing.processPendingDeliveries.findPendingDeliveries',
+      },
+    )
 
     if (pendingDeliveries.length === 0) {
       // No more pending deliveries - mark campaign as completed

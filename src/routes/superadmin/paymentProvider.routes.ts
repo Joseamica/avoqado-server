@@ -16,6 +16,9 @@ router.get('/', paymentProviderController.getPaymentProviders)
 // GET /api/v1/superadmin/payment-providers/code/:code
 router.get('/code/:code', paymentProviderController.getPaymentProviderByCode)
 
+// GET /api/v1/superadmin/payment-providers/:id/blockers (qué impide borrarlo)
+router.get('/:id/blockers', paymentProviderController.getPaymentProviderBlockers)
+
 // GET /api/v1/superadmin/payment-providers/:id
 router.get('/:id', paymentProviderController.getPaymentProvider)
 

@@ -30,6 +30,7 @@ import { CronJob } from 'cron'
 import logger from '../config/logger'
 import { processOutboxRow } from '../services/google-calendar/push.service'
 import prisma from '../utils/prismaClient'
+import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
 const TIMEZONE = 'America/Mexico_City'
 const BATCH_SIZE = 100
@@ -78,16 +79,21 @@ export class GcalOutboxSweeperJob {
 
     try {
       const now = new Date()
-      const rows = await prisma.calendarSyncOutbox.findMany({
-        where: {
-          status: { in: ['PENDING', 'FAILED'] },
-          scheduledAt: { lte: now },
-          OR: [{ debounceUntil: null }, { debounceUntil: { lte: now } }],
-        },
-        orderBy: { scheduledAt: 'asc' },
-        take: BATCH_SIZE,
-        select: { id: true, syncKey: true },
-      })
+      // Retry only on transient DB connection blips (P1001 during the cron stampede). See .claude/rules/cron-jobs.md
+      const rows = await retry(
+        () =>
+          prisma.calendarSyncOutbox.findMany({
+            where: {
+              status: { in: ['PENDING', 'FAILED'] },
+              scheduledAt: { lte: now },
+              OR: [{ debounceUntil: null }, { debounceUntil: { lte: now } }],
+            },
+            orderBy: { scheduledAt: 'asc' },
+            take: BATCH_SIZE,
+            select: { id: true, syncKey: true },
+          }),
+        { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'gcal-outbox-sweeper.findReady' },
+      )
       if (rows.length === 0) return
 
       // Process sequentially — processOutboxRow takes its own advisory lock

@@ -18,6 +18,7 @@
 import { Request, Response } from 'express'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
+import { logAction } from '@/services/dashboard/activity-log.service'
 
 /**
  * GET /api/v1/dashboard/superadmin/ecommerce-merchants/:id/fee-history
@@ -66,6 +67,63 @@ export async function getMerchantFeeHistory(req: Request, res: Response) {
     res.status(error.statusCode || 500).json({
       success: false,
       error: error.message || 'Failed to fetch fee history',
+    })
+  }
+}
+
+/**
+ * DELETE /api/v1/dashboard/superadmin/ecommerce-merchants/:id
+ *
+ * Borra un canal e-commerce SÓLO si no tiene historial (pagos, sesiones de
+ * checkout, links de pago ni reservaciones). Si lo tiene, devuelve 400 con el
+ * detalle. Pensado para el flujo de borrado guiado de un payment provider.
+ */
+export async function deleteEcommerceMerchant(req: Request, res: Response) {
+  try {
+    const { id } = req.params
+    const merchant = await prisma.ecommerceMerchant.findUnique({
+      where: { id },
+      include: {
+        _count: {
+          select: { checkoutSessions: true, paymentLinks: true, payments: true, reservations: true },
+        },
+      },
+    })
+    if (!merchant) {
+      res.status(404).json({ success: false, error: 'Ecommerce merchant not found' })
+      return
+    }
+    const c = merchant._count
+    const blockers: string[] = []
+    if (c.payments > 0) blockers.push(`${c.payments} pago(s)`)
+    if (c.checkoutSessions > 0) blockers.push(`${c.checkoutSessions} sesión(es) de checkout`)
+    if (c.paymentLinks > 0) blockers.push(`${c.paymentLinks} link(s) de pago`)
+    if (c.reservations > 0) blockers.push(`${c.reservations} reservación(es)`)
+    if (blockers.length > 0) {
+      res.status(400).json({
+        success: false,
+        error: `No se puede borrar el canal e-commerce: tiene ${blockers.join(', ')}. Sólo se puede borrar uno sin historial.`,
+      })
+      return
+    }
+    await prisma.ecommerceMerchant.delete({ where: { id } })
+    await logAction({
+      // El staff id vive en req.authContext.userId (req.user.uid es undefined).
+      staffId: req.authContext?.userId ?? null,
+      action: 'ECOMMERCE_MERCHANT_DELETED',
+      entity: 'EcommerceMerchant',
+      entityId: id,
+      data: { venueId: merchant.venueId, providerId: merchant.providerId },
+      ipAddress: req.ip,
+      userAgent: req.headers?.['user-agent'],
+    })
+    logger.warn('Ecommerce merchant deleted via superadmin', { id })
+    res.json({ success: true, message: 'Canal e-commerce borrado' })
+  } catch (error: any) {
+    logger.error('Error deleting ecommerce merchant:', error)
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || 'Failed to delete ecommerce merchant',
     })
   }
 }

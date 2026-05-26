@@ -293,6 +293,20 @@ export async function toggleMerchantAccountStatus(req: Request, res: Response, n
  * Delete a merchant account
  * Only allowed if no cost structures or venue configs reference it
  */
+/**
+ * GET /api/v1/superadmin/merchant-accounts/:id/blockers
+ * Lista lo que impide borrar el merchant. Aditivo — para el borrado guiado.
+ */
+export async function getMerchantAccountBlockers(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { id } = req.params
+    const data = await merchantAccountService.getMerchantAccountBlockers(id)
+    res.json({ success: true, data })
+  } catch (error) {
+    next(error)
+  }
+}
+
 export async function deleteMerchantAccount(req: Request, res: Response, next: NextFunction) {
   try {
     const { id } = req.params

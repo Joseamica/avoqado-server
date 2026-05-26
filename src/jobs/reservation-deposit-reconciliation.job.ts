@@ -5,6 +5,7 @@ import { getProvider } from '../services/payments/provider-registry'
 import { calculateApplicationFeeWithVAT, toStripeAmount } from '../services/payments/providers/money'
 import { getVatRateBps } from '../services/superadmin/platformSettings.service'
 import { processStripeConnectWebhookEvent } from '../services/payments/reservation-deposit-webhook.service'
+import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
 export class ReservationDepositReconciliationJob {
   private job: CronJob | null = null
@@ -40,19 +41,25 @@ export class ReservationDepositReconciliationJob {
   }
 
   private async expirePastDueReservations(): Promise<void> {
-    const expired = await prisma.reservation.updateMany({
-      where: {
-        depositStatus: 'PENDING',
-        depositExpiresAt: { lt: new Date() },
-      },
-      data: {
-        status: 'CANCELLED',
-        cancelledAt: new Date(),
-        cancelledBy: 'SYSTEM',
-        cancellationReason: 'Reservation deposit payment window expired',
-        depositStatus: 'EXPIRED',
-      },
-    })
+    // Idempotent updateMany (the WHERE excludes already-EXPIRED rows), so retrying a
+    // transient DB connection blip (P1001 during the cron stampede) is safe. See .claude/rules/cron-jobs.md
+    const expired = await retry(
+      () =>
+        prisma.reservation.updateMany({
+          where: {
+            depositStatus: 'PENDING',
+            depositExpiresAt: { lt: new Date() },
+          },
+          data: {
+            status: 'CANCELLED',
+            cancelledAt: new Date(),
+            cancelledBy: 'SYSTEM',
+            cancellationReason: 'Reservation deposit payment window expired',
+            depositStatus: 'EXPIRED',
+          },
+        }),
+      { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'deposit-reconciliation.expirePastDue' },
+    )
 
     if (expired.count > 0) {
       logger.warn(`⏱️ [RESERVATION DEPOSIT RECONCILIATION] Expired ${expired.count} unpaid deposit reservation(s)`)
@@ -60,16 +67,21 @@ export class ReservationDepositReconciliationJob {
   }
 
   private async reconcileCheckoutSessions(): Promise<void> {
-    const pending = await prisma.reservation.findMany({
-      where: {
-        depositStatus: 'PENDING',
-        checkoutSessionId: { not: null },
-      },
-      include: {
-        venue: { select: { id: true, slug: true } },
-      },
-      take: 100,
-    })
+    // Entry read only — the Stripe polling loop below is NOT retried. See .claude/rules/cron-jobs.md
+    const pending = await retry(
+      () =>
+        prisma.reservation.findMany({
+          where: {
+            depositStatus: 'PENDING',
+            checkoutSessionId: { not: null },
+          },
+          include: {
+            venue: { select: { id: true, slug: true } },
+          },
+          take: 100,
+        }),
+      { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'deposit-reconciliation.findPending' },
+    )
 
     for (const reservation of pending) {
       // Poll Stripe through the SAME connected account that minted the
@@ -116,20 +128,25 @@ export class ReservationDepositReconciliationJob {
 
   private async recoverOrphanCheckoutSessions(): Promise<void> {
     const threshold = new Date(Date.now() - this.ORPHAN_THRESHOLD_MINUTES * 60_000)
-    const orphans = await prisma.reservation.findMany({
-      where: {
-        depositStatus: 'PENDING',
-        checkoutSessionId: null,
-        idempotencyKey: { not: null },
-        createdAt: { lt: threshold },
-        depositExpiresAt: { gt: new Date() },
-        depositAmount: { not: null },
-      },
-      include: {
-        venue: { select: { id: true, name: true, slug: true } },
-      },
-      take: 50,
-    })
+    // Entry read only — the Stripe createCheckoutSession recovery loop below is NOT retried. See .claude/rules/cron-jobs.md
+    const orphans = await retry(
+      () =>
+        prisma.reservation.findMany({
+          where: {
+            depositStatus: 'PENDING',
+            checkoutSessionId: null,
+            idempotencyKey: { not: null },
+            createdAt: { lt: threshold },
+            depositExpiresAt: { gt: new Date() },
+            depositAmount: { not: null },
+          },
+          include: {
+            venue: { select: { id: true, name: true, slug: true } },
+          },
+          take: 50,
+        }),
+      { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'deposit-reconciliation.findOrphans' },
+    )
 
     for (const reservation of orphans) {
       // Orphan recovery may not have a pinned merchant yet (the original

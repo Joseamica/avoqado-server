@@ -5,6 +5,7 @@ import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
 import emailService from '../services/email.service'
 import { sendReservationReminderWhatsApp } from '../services/whatsapp.service'
+import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
 type ReminderChannel = 'EMAIL' | 'SMS' | 'WHATSAPP'
 
@@ -52,31 +53,37 @@ export class ReservationReminderJob {
       const now = new Date()
       const horizon = new Date(now.getTime() + this.SCAN_HORIZON_MS)
 
-      const reservations = await prisma.reservation.findMany({
-        where: {
-          status: { in: ['CONFIRMED', 'PENDING'] },
-          startsAt: { gt: now, lt: horizon },
-          venue: {
-            reservationSettings: {
-              remindersEnabled: true,
-            },
-          },
-        },
-        include: {
-          venue: {
-            select: {
-              id: true,
-              name: true,
-              slug: true,
-              timezone: true,
-              reservationSettings: {
-                select: { reminderChannels: true, reminderMinBefore: true },
+      // Entry read only. Retry on transient DB connection blips (P1001 during the cron
+      // stampede); the email/WhatsApp dispatch below is NOT retried. See .claude/rules/cron-jobs.md
+      const reservations = await retry(
+        () =>
+          prisma.reservation.findMany({
+            where: {
+              status: { in: ['CONFIRMED', 'PENDING'] },
+              startsAt: { gt: now, lt: horizon },
+              venue: {
+                reservationSettings: {
+                  remindersEnabled: true,
+                },
               },
             },
-          },
-        },
-        take: 500,
-      })
+            include: {
+              venue: {
+                select: {
+                  id: true,
+                  name: true,
+                  slug: true,
+                  timezone: true,
+                  reservationSettings: {
+                    select: { reminderChannels: true, reminderMinBefore: true },
+                  },
+                },
+              },
+            },
+            take: 500,
+          }),
+        { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'reservation-reminder.findDue' },
+      )
 
       let scanned = 0
       let sent = 0

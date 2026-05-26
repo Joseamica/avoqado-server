@@ -24,6 +24,9 @@ router.get('/mcc-lookup', merchantAccountController.getMccRateSuggestion)
 // Query params: ?includeCredentials=true (optional, defaults to false)
 router.get('/:id', merchantAccountController.getMerchantAccount)
 
+// GET /api/v1/superadmin/merchant-accounts/:id/blockers (qué impide borrarlo)
+router.get('/:id/blockers', merchantAccountController.getMerchantAccountBlockers)
+
 // GET /api/v1/superadmin/merchant-accounts/:id/credentials
 // SECURITY: Only use when needed for payment processing setup
 router.get('/:id/credentials', merchantAccountController.getMerchantAccountCredentials)

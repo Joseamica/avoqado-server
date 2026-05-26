@@ -5,6 +5,7 @@ import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
 import { TimeEntryStatus } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
+import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
 /**
  * Auto Clock-Out Job
@@ -107,21 +108,26 @@ export class AutoClockOutJob {
 
     try {
       // Get all venues with fixed-time auto clock-out enabled
-      const venuesWithFixedTime = await prisma.venueSettings.findMany({
-        where: {
-          autoClockOutEnabled: true,
-          autoClockOutTime: { not: null },
-        },
-        include: {
-          venue: {
-            select: {
-              id: true,
-              name: true,
-              timezone: true,
+      // Entry read only — retry on transient DB connection blips (P1001 during the cron stampede). See .claude/rules/cron-jobs.md
+      const venuesWithFixedTime = await retry(
+        () =>
+          prisma.venueSettings.findMany({
+            where: {
+              autoClockOutEnabled: true,
+              autoClockOutTime: { not: null },
             },
-          },
-        },
-      })
+            include: {
+              venue: {
+                select: {
+                  id: true,
+                  name: true,
+                  timezone: true,
+                },
+              },
+            },
+          }),
+        { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'auto-clockout.findFixedTime' },
+      )
 
       for (const settings of venuesWithFixedTime) {
         try {
@@ -188,21 +194,26 @@ export class AutoClockOutJob {
 
     try {
       // Get all venues with max-duration auto clock-out enabled
-      const venuesWithMaxDuration = await prisma.venueSettings.findMany({
-        where: {
-          maxShiftDurationEnabled: true,
-          maxShiftDurationHours: { gt: 0 },
-        },
-        include: {
-          venue: {
-            select: {
-              id: true,
-              name: true,
-              timezone: true,
+      // Entry read only — retry on transient DB connection blips (P1001 during the cron stampede). See .claude/rules/cron-jobs.md
+      const venuesWithMaxDuration = await retry(
+        () =>
+          prisma.venueSettings.findMany({
+            where: {
+              maxShiftDurationEnabled: true,
+              maxShiftDurationHours: { gt: 0 },
             },
-          },
-        },
-      })
+            include: {
+              venue: {
+                select: {
+                  id: true,
+                  name: true,
+                  timezone: true,
+                },
+              },
+            },
+          }),
+        { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'auto-clockout.findMaxDuration' },
+      )
 
       for (const settings of venuesWithMaxDuration) {
         try {
