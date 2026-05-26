@@ -260,6 +260,8 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   StripeWebhookEvent: 'Payment Providers & Settlement',
   ProcessedStripeEvent: 'Payment Providers & Settlement',
   MercadoPagoWebhookEvent: 'Payment Providers & Settlement',
+  RateCorrectionBatch: 'Payment Providers & Settlement',
+  RateCorrectionEntry: 'Payment Providers & Settlement',
 
   // 11. Payment Links
   PaymentLink: 'Payment Links',
