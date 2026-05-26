@@ -230,6 +230,72 @@ interface UpdateMerchantAccountData {
 }
 
 /**
+ * Resolve the terminals that EFFECTIVELY serve each merchant account, mirroring
+ * the TPV routing model in `terminal.tpv.controller.ts`: a terminal serves a
+ * merchant when it either
+ *   (a) lists the merchant explicitly in `assignedMerchantIds`, OR
+ *   (b) has an EMPTY `assignedMerchantIds` AND the merchant occupies one of that
+ *       terminal's venue's VenuePaymentConfig slots (inheritance fallback).
+ *
+ * Counting only (a) — the old behavior — reported "0 terminals" for merchants
+ * routed the normal way (slotted into a venue whose terminals are unrestricted),
+ * even though those terminals DO process the merchant. The superadmin detail
+ * page + readiness chip read this, so they showed a false "0 / red".
+ *
+ * @param merchantVenueIds map of merchantAccountId → venueIds where it is slotted
+ * @returns map of merchantAccountId → [{ id, serialNumber }] (deduped per merchant)
+ */
+async function resolveEffectiveTerminals(
+  merchantVenueIds: Map<string, string[]>,
+): Promise<Record<string, Array<{ id: string; serialNumber: string }>>> {
+  const merchantIds = [...merchantVenueIds.keys()]
+  if (merchantIds.length === 0) return {}
+
+  const allVenueIds = [...new Set([...merchantVenueIds.values()].flat())]
+
+  // Inverse index: venueId → merchants slotted there (for the inheritance branch).
+  const merchantsByVenue: Record<string, string[]> = {}
+  for (const [mid, venueIds] of merchantVenueIds) {
+    for (const vid of venueIds) {
+      ;(merchantsByVenue[vid] ??= []).push(mid)
+    }
+  }
+
+  const terminals = await prisma.terminal.findMany({
+    where: {
+      OR: [
+        // (a) explicit — any terminal that lists one of these merchants
+        { assignedMerchantIds: { hasSome: merchantIds } },
+        // (b) inherited — unrestricted terminals in a venue where a merchant is slotted
+        ...(allVenueIds.length > 0 ? [{ venueId: { in: allVenueIds }, assignedMerchantIds: { isEmpty: true } }] : []),
+      ],
+    },
+    select: { id: true, serialNumber: true, venueId: true, assignedMerchantIds: true },
+  })
+
+  const result: Record<string, Array<{ id: string; serialNumber: string }>> = {}
+  const seen: Record<string, Set<string>> = {} // merchantId → terminalId (dedup)
+  const attribute = (mid: string, t: { id: string; serialNumber: string | null }) => {
+    if (!merchantVenueIds.has(mid)) return
+    if (!seen[mid]) seen[mid] = new Set()
+    if (seen[mid].has(t.id)) return
+    seen[mid].add(t.id)
+    ;(result[mid] ??= []).push({ id: t.id, serialNumber: t.serialNumber || '' })
+  }
+
+  for (const t of terminals) {
+    if (t.assignedMerchantIds.length > 0) {
+      // explicit: attribute to each listed merchant we were asked about
+      for (const mid of t.assignedMerchantIds) attribute(mid, t)
+    } else {
+      // inherited: attribute to every merchant slotted in this terminal's venue
+      for (const mid of merchantsByVenue[t.venueId] ?? []) attribute(mid, t)
+    }
+  }
+  return result
+}
+
+/**
  * Get all merchant accounts with optional filters
  * @param filters Optional filters for provider, active status
  * @returns List of merchant accounts (credentials NOT decrypted)
@@ -284,32 +350,19 @@ export async function getMerchantAccounts(filters?: { providerId?: string; activ
     orderBy: [{ displayOrder: 'asc' }, { createdAt: 'desc' }],
   })
 
-  // Get terminals for each merchant account (with serial numbers)
-  // Since assignedMerchantIds is a String[] array, we can't use Prisma _count
-  const accountIds = accounts.map(a => a.id)
-  const terminalsWithMerchants = await prisma.terminal.findMany({
-    where: {
-      assignedMerchantIds: {
-        hasSome: accountIds,
-      },
-    },
-    select: {
-      id: true,
-      serialNumber: true,
-      assignedMerchantIds: true,
-    },
-  })
-
-  // Build a map of merchantAccountId -> terminal details
-  const terminalsByMerchant: Record<string, Array<{ id: string; serialNumber: string }>> = {}
-  for (const terminal of terminalsWithMerchants) {
-    for (const merchantId of terminal.assignedMerchantIds) {
-      if (accountIds.includes(merchantId)) {
-        if (!terminalsByMerchant[merchantId]) terminalsByMerchant[merchantId] = []
-        terminalsByMerchant[merchantId].push({ id: terminal.id, serialNumber: terminal.serialNumber || '' })
-      }
+  // Resolve terminals that EFFECTIVELY serve each merchant (explicit assignment
+  // ∪ venue-slot inheritance) — see resolveEffectiveTerminals. assignedMerchantIds
+  // is a String[] (not a relation), and counting only explicit assignments
+  // reported "0 terminals" for normally-routed merchants.
+  const merchantVenueIds = new Map<string, string[]>()
+  for (const account of accounts) {
+    const vids = new Set<string>()
+    for (const vc of [...account.venueConfigsPrimary, ...account.venueConfigsSecondary, ...account.venueConfigsTertiary]) {
+      vids.add(vc.venue.id)
     }
+    merchantVenueIds.set(account.id, [...vids])
   }
+  const terminalsByMerchant = await resolveEffectiveTerminals(merchantVenueIds)
 
   // Remove encrypted credentials from response for security
   // Include venue names and terminal serials for the table UI
@@ -418,16 +471,12 @@ export async function getMerchantAccount(id: string, includeCredentials: boolean
   // Compute total venue configs count
   const venueConfigsCount = account._count.venueConfigsPrimary + account._count.venueConfigsSecondary + account._count.venueConfigsTertiary
 
-  // Terminals link via Terminal.assignedMerchantIds (a String[] array), NOT a
-  // Prisma relation, so `_count` can't cover them — query explicitly, mirroring
-  // the list endpoint (getMerchantAccounts). Without this the singular endpoint
-  // always reported 0 terminals even when assigned, so the superadmin detail
-  // page showed "Terminales (0)" + a red readiness chip on merchants that DO
-  // have terminals.
-  const assignedTerminals = await prisma.terminal.findMany({
-    where: { assignedMerchantIds: { has: id } },
-    select: { id: true, serialNumber: true },
-  })
+  // Terminals that EFFECTIVELY serve this merchant — explicit assignment ∪
+  // venue-slot inheritance (see resolveEffectiveTerminals). Mirrors the TPV
+  // routing model; counting only explicit assignments reported "0 terminals"
+  // for merchants routed the normal way (venue slot + unrestricted terminals).
+  const effectiveTerminals = await resolveEffectiveTerminals(new Map([[id, [...venueMap.keys()]]]))
+  const assignedTerminals = effectiveTerminals[id] ?? []
 
   return {
     ...account,
