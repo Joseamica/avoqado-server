@@ -3,6 +3,7 @@ import * as reservationService from '../../services/dashboard/reservation.dashbo
 import * as availabilityService from '../../services/dashboard/reservationAvailability.service'
 import { countAppointmentOccupancy, effectiveAppointmentPacing } from '../../services/dashboard/reservationAvailability.service'
 import { getReservationSettings, type OperatingHours } from '../../services/dashboard/reservationSettings.service'
+import { mergeReservationBranding } from '../../services/dashboard/reservationBranding.service'
 import { checkExternalBusyBlock } from '../../services/reservation/external-busy-block.service'
 import { BadRequestError, ConflictError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
 import { verifyCustomerToken } from '../../jwt.service'
@@ -208,6 +209,7 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
         logoFull: true, // Wide / horizontal full logo for marketing surfaces (booking page header)
         heroImageUrl: true, // Phase 7: hero photo for the public booking page
         primaryColor: true, // Phase 7: brand accent the widget consumes as --avq-accent
+        reservationBranding: true, // Reservation branding overrides (merged + resolved below)
         type: true,
         address: true,
         phone: true,
@@ -298,8 +300,14 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
         })),
     }))
 
+    // Strip the raw reservationBranding out of the spread and expose the merged
+    // `branding` (accentColor resolved from primaryColor) the widget consumes.
+    const { reservationBranding, ...venueInfoRest } = (venueInfo ?? {}) as NonNullable<typeof venueInfo> & {
+      reservationBranding?: unknown
+    }
     res.json({
-      ...venueInfo,
+      ...venueInfoRest,
+      branding: mergeReservationBranding(reservationBranding, venueInfoRest.primaryColor),
       products,
       timezone: venue.timezone || 'America/Mexico_City',
       publicBooking: settings.publicBooking,

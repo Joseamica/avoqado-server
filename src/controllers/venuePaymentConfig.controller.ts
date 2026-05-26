@@ -1,5 +1,6 @@
 import { Request, Response } from 'express'
 import * as venuePaymentConfigService from '../services/venuePaymentConfig.service'
+import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 
 /**
@@ -165,6 +166,53 @@ export async function getVenuePricingStructures(req: Request, res: Response) {
     res.status(500).json({
       success: false,
       error: error.message || 'Failed to get pricing structures',
+    })
+  }
+}
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/payment-config/settlement-info
+ * Get settlement days per card type for the venue's merchant accounts
+ */
+export async function getVenueSettlementInfo(req: Request, res: Response) {
+  try {
+    const { venueId } = req.params
+
+    const config = await venuePaymentConfigService.getVenuePaymentConfig(venueId)
+    if (!config) {
+      return res.json({ success: true, data: [] })
+    }
+
+    const merchantAccountIds = [
+      config.primaryAccountId,
+      config.secondaryAccountId,
+      config.tertiaryAccountId,
+    ].filter(Boolean) as string[]
+
+    if (merchantAccountIds.length === 0) {
+      return res.json({ success: true, data: [] })
+    }
+
+    const settlements = await prisma.settlementConfiguration.findMany({
+      where: {
+        merchantAccountId: { in: merchantAccountIds },
+        effectiveTo: null,
+      },
+      select: {
+        merchantAccountId: true,
+        cardType: true,
+        settlementDays: true,
+        settlementDayType: true,
+      },
+      orderBy: { cardType: 'asc' },
+    })
+
+    res.json({ success: true, data: settlements })
+  } catch (error: any) {
+    logger.error('Error getting venue settlement info:', error)
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to get settlement info',
     })
   }
 }

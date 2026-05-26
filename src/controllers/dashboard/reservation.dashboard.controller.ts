@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express'
 import * as reservationService from '../../services/dashboard/reservation.dashboard.service'
 import * as availabilityService from '../../services/dashboard/reservationAvailability.service'
 import { getReservationSettings, updateReservationSettings } from '../../services/dashboard/reservationSettings.service'
+import * as reservationBrandingService from '../../services/dashboard/reservationBranding.service'
 import prisma from '../../utils/prismaClient'
 import { BadRequestError } from '../../errors/AppError'
 import { fromZonedTime } from 'date-fns-tz'
@@ -285,6 +286,34 @@ export async function updateSettings(req: Request, res: Response, next: NextFunc
     const venueId = resolveVenueId(req)
     const updated = await updateReservationSettings(venueId, req.body)
     res.json(updated)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * GET /venues/:venueId/reservations/branding/config
+ * Returns the merged reservation branding (accentColor resolved from primaryColor).
+ */
+export async function getReservationBranding(req: Request, res: Response, next: NextFunction) {
+  try {
+    const venueId = resolveVenueId(req)
+    const branding = await reservationBrandingService.getReservationBranding(venueId)
+    res.json(branding)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * PUT /venues/:venueId/reservations/branding/config
+ */
+export async function updateReservationBranding(req: Request, res: Response, next: NextFunction) {
+  try {
+    const venueId = resolveVenueId(req)
+    const { userId } = (req as any).authContext
+    const branding = await reservationBrandingService.updateReservationBranding(venueId, req.body, userId)
+    res.json(branding)
   } catch (error) {
     next(error)
   }

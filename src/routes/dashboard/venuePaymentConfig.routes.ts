@@ -19,6 +19,9 @@ router.get('/merchant-accounts', venuePaymentConfigController.getVenueMerchantAc
 // Pricing structures for this venue
 router.get('/pricing-structures', venuePaymentConfigController.getVenuePricingStructures)
 
+// Settlement configuration for this venue's merchant accounts
+router.get('/settlement-info', venuePaymentConfigController.getVenueSettlementInfo)
+
 // Cost structures for this venue's merchant accounts
 router.get('/cost-structures', venuePaymentConfigController.getVenueCostStructures)
 

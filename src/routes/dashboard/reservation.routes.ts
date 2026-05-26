@@ -20,6 +20,7 @@ import {
   venueParamsSchema,
   waitlistEntryParamsSchema,
 } from '../../schemas/dashboard/reservation.schema'
+import { updateReservationBrandingSchema } from '../../schemas/dashboard/reservationBranding.schema'
 
 // ==========================================
 // RESERVATION ROUTES (Permission-gated — core Avoqado feature)
@@ -60,6 +61,16 @@ router.put(
   checkPermission('reservations:update'),
   validateRequest(z.object({ body: updateReservationSettingsBodySchema })),
   controller.updateSettings,
+)
+
+// ---- Branding (MUST be before /:id to avoid shadowing) ----
+// GET/PUT /venues/:venueId/reservations/branding/config
+router.get('/branding/config', checkPermission('reservations:read'), controller.getReservationBranding)
+router.put(
+  '/branding/config',
+  checkPermission('reservations:update'),
+  validateRequest(updateReservationBrandingSchema),
+  controller.updateReservationBranding,
 )
 
 // ---- Waitlist (MUST be before /:id to avoid shadowing) ----

@@ -9,6 +9,7 @@ import kycReviewRoutes from './superadmin/kycReview.routes'
 import paymentProviderRoutes from './superadmin/paymentProvider.routes'
 import merchantAccountRoutes from './superadmin/merchantAccount.routes'
 import paymentAnalyticsRoutes from './superadmin/paymentAnalytics.routes'
+import earningsRoutes from './superadmin/earnings.routes'
 import providerCostStructureRoutes from './superadmin/providerCostStructure.routes'
 import venuePricingRoutes from './superadmin/venuePricing.routes'
 import webhookRoutes from './superadmin/webhook.routes'
@@ -43,6 +44,7 @@ router.use('/payment-providers', paymentProviderRoutes)
 router.use('/merchant-accounts', merchantAccountRoutes)
 router.use('/terminals', terminalRoutes)
 router.use('/payment-analytics', paymentAnalyticsRoutes)
+router.use('/earnings', earningsRoutes)
 router.use('/cost-structures', providerCostStructureRoutes)
 router.use('/venue-pricing', venuePricingRoutes)
 router.use('/webhooks', webhookRoutes)

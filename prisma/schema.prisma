@@ -150,6 +150,17 @@ model Venue {
   /// is sufficient.
   paymentLinkBranding Json?
 
+  /// Per-venue branding overrides for the public reservation pages
+  /// (book.avoqado.io citas/clases). JSON shape mirrors
+  /// DEFAULT_RESERVATION_BRANDING in reservationBranding.service.ts:
+  ///   { showLogo: bool, accentColor: '#hex'|null,
+  ///     buttonShape: 'rounded'|'square'|'pill', fontFamily: string,
+  ///     showHeroImage: bool, showDescriptions: bool,
+  ///     showDuration: bool, showPrices: bool }
+  /// `accentColor` null = inherit Venue.primaryColor (resolved at read).
+  /// NULL = sane defaults. Sibling of paymentLinkBranding.
+  reservationBranding Json?
+
   // Status
   active           Boolean   @default(true)
   operationalSince DateTime?
