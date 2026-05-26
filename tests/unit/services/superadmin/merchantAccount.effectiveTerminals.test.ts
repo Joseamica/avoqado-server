@@ -46,6 +46,9 @@ describe('resolveEffectiveTerminals — explicit ∪ venue-slot inheritance', ()
     const result = await resolveEffectiveTerminals(new Map([['M', ['V1']]]))
 
     expect((result['M'] ?? []).map(t => t.id).sort()).toEqual(['t-explicit', 't-inherit'])
+    // flag: explicit → inherited:false, inherited → inherited:true
+    expect(result['M']?.find(t => t.id === 't-explicit')?.inherited).toBe(false)
+    expect(result['M']?.find(t => t.id === 't-inherit')?.inherited).toBe(true)
   })
 
   it('attributes an inherited (empty) terminal to every merchant slotted in its venue', async () => {
@@ -67,7 +70,7 @@ describe('resolveEffectiveTerminals — explicit ∪ venue-slot inheritance', ()
 
     const result = await resolveEffectiveTerminals(new Map([['M', ['V1']]]))
 
-    expect(result['M']).toEqual([{ id: 't1', serialNumber: '' }])
+    expect(result['M']).toEqual([{ id: 't1', serialNumber: '', inherited: false }])
   })
 
   it('dedupes a merchant id that appears twice in a terminal assignment', async () => {

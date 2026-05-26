@@ -36,6 +36,14 @@ router.get('/:id/terminals', merchantAccountController.getTerminalsByMerchantAcc
 // Remove merchant account from a terminal
 router.delete('/:id/terminals/:terminalId', merchantAccountController.removeMerchantFromTerminal)
 
+// GET /api/v1/superadmin/merchant-accounts/:id/assignable-terminals
+// Brand-compatible terminals in the merchant's venues that don't already serve it
+router.get('/:id/assignable-terminals', merchantAccountController.getAssignableTerminals)
+
+// PUT /api/v1/superadmin/merchant-accounts/:id/terminals/:terminalId
+// Toggle whether a terminal serves this merchant (preserves venue-slot inheritance)
+router.put('/:id/terminals/:terminalId', merchantAccountController.setTerminalServesMerchant)
+
 // POST /api/v1/superadmin/merchant-accounts
 router.post('/', merchantAccountController.createMerchantAccount)
 

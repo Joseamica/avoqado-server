@@ -369,6 +369,47 @@ export async function removeMerchantFromTerminal(req: Request, res: Response, ne
 }
 
 /**
+ * PUT /api/v1/superadmin/merchant-accounts/:id/terminals/:terminalId
+ * Toggle whether a single terminal serves this merchant, preserving venue-slot
+ * inheritance (logic in the service). Body: { serves: boolean }.
+ */
+export async function setTerminalServesMerchant(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { id, terminalId } = req.params
+    const serves = req.body?.serves === true
+
+    const data = await merchantAccountService.setTerminalServesMerchant({ merchantAccountId: id, terminalId, serves })
+
+    await logAction({
+      staffId: (req as any).user?.uid,
+      action: serves ? 'MERCHANT_TERMINAL_ASSIGNED' : 'MERCHANT_TERMINAL_UNASSIGNED',
+      entity: 'Terminal',
+      entityId: terminalId,
+      data: { merchantAccountId: id, serves, assignedMerchantIds: data.assignedMerchantIds },
+      ipAddress: req.ip,
+      userAgent: req.headers?.['user-agent'],
+    })
+
+    res.json({ success: true, data })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * GET /api/v1/superadmin/merchant-accounts/:id/assignable-terminals
+ * Brand-compatible terminals in the merchant's venues that don't already serve it.
+ */
+export async function getAssignableTerminals(req: Request, res: Response, next: NextFunction) {
+  try {
+    const data = await merchantAccountService.getAssignableTerminals(req.params.id)
+    res.json({ success: true, data })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
  * POST /api/v1/superadmin/merchant-accounts/blumon/register
  * Register a new Blumon merchant account with auto-config from Blumon API
  *

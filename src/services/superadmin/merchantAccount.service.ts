@@ -4,7 +4,11 @@ import { BadRequestError, ConflictError, NotFoundError, ValidationError } from '
 import crypto from 'crypto'
 import socketManager from '../../communication/sockets'
 import { lookupRatesByBusinessName, lookupRatesByVenueType, type MCCLookupResult } from '../pricing/blumon-mcc-lookup.service'
-import { assertMerchantTerminalCompatible, assertVenueHasCompatibleTerminal } from '../../lib/providerDeviceCompatibility'
+import {
+  assertMerchantTerminalCompatible,
+  assertVenueHasCompatibleTerminal,
+  PROVIDER_DEVICE_COMPATIBILITY,
+} from '../../lib/providerDeviceCompatibility'
 import { createBlumonTpvService } from '../tpv/blumon-tpv.service'
 
 /**
@@ -247,7 +251,7 @@ interface UpdateMerchantAccountData {
  */
 export async function resolveEffectiveTerminals(
   merchantVenueIds: Map<string, string[]>,
-): Promise<Record<string, Array<{ id: string; serialNumber: string }>>> {
+): Promise<Record<string, Array<{ id: string; serialNumber: string; inherited: boolean }>>> {
   const merchantIds = [...merchantVenueIds.keys()]
   if (merchantIds.length === 0) return {}
 
@@ -273,23 +277,23 @@ export async function resolveEffectiveTerminals(
     select: { id: true, serialNumber: true, venueId: true, assignedMerchantIds: true },
   })
 
-  const result: Record<string, Array<{ id: string; serialNumber: string }>> = {}
+  const result: Record<string, Array<{ id: string; serialNumber: string; inherited: boolean }>> = {}
   const seen: Record<string, Set<string>> = {} // merchantId → terminalId (dedup)
-  const attribute = (mid: string, t: { id: string; serialNumber: string | null }) => {
+  const attribute = (mid: string, t: { id: string; serialNumber: string | null }, inherited: boolean) => {
     if (!merchantVenueIds.has(mid)) return
     if (!seen[mid]) seen[mid] = new Set()
     if (seen[mid].has(t.id)) return
     seen[mid].add(t.id)
-    ;(result[mid] ??= []).push({ id: t.id, serialNumber: t.serialNumber || '' })
+    ;(result[mid] ??= []).push({ id: t.id, serialNumber: t.serialNumber || '', inherited })
   }
 
   for (const t of terminals) {
     if (t.assignedMerchantIds.length > 0) {
       // explicit: attribute to each listed merchant we were asked about
-      for (const mid of t.assignedMerchantIds) attribute(mid, t)
+      for (const mid of t.assignedMerchantIds) attribute(mid, t, false)
     } else {
       // inherited: attribute to every merchant slotted in this terminal's venue
-      for (const mid of merchantsByVenue[t.venueId] ?? []) attribute(mid, t)
+      for (const mid of merchantsByVenue[t.venueId] ?? []) attribute(mid, t, true)
     }
   }
   return result
@@ -484,7 +488,7 @@ export async function getMerchantAccount(id: string, includeCredentials: boolean
     venueConfigsSecondary: undefined,
     venueConfigsTertiary: undefined,
     venues: Array.from(venueMap.values()),
-    terminals: assignedTerminals.map(t => ({ id: t.id, serialNumber: t.serialNumber || '' })),
+    terminals: assignedTerminals.map(t => ({ id: t.id, serialNumber: t.serialNumber, inherited: t.inherited })),
     _count: {
       costStructures: account._count.costStructures,
       venueConfigs: venueConfigsCount,
@@ -956,6 +960,105 @@ export async function removeMerchantFromTerminal(terminalId: string, merchantAcc
   })
 
   return { success: true }
+}
+
+/**
+ * Toggle whether a single terminal serves a merchant, preserving venue-slot
+ * inheritance (mirrors resolveEffectiveTerminals + terminal.tpv.controller.ts).
+ *
+ * `effective(T)` = T.assignedMerchantIds if non-empty, else the venue's slotted
+ * merchants (what an unrestricted terminal inherits).
+ *  - serves=true  → assignedMerchantIds := unique(effective ∪ {M}) — pre-seeds an
+ *    inherited terminal with what it already served, so nothing is dropped.
+ *  - serves=false → assignedMerchantIds := effective \ {M}.
+ *
+ * Guard: never leave the array empty when that would re-inherit M (M still in the
+ * venue slots) — the "only account on the venue" edge case → reject with an
+ * actionable message instead of silently re-serving.
+ */
+export async function setTerminalServesMerchant(input: {
+  merchantAccountId: string
+  terminalId: string
+  serves: boolean
+}): Promise<{ terminalId: string; assignedMerchantIds: string[]; inherited: boolean }> {
+  const { merchantAccountId, terminalId, serves } = input
+  return prisma.$transaction(async tx => {
+    const merchant = await tx.merchantAccount.findUnique({ where: { id: merchantAccountId }, select: { id: true } })
+    if (!merchant) throw new NotFoundError(`Merchant account ${merchantAccountId} not found`)
+
+    const terminal = await tx.terminal.findUnique({
+      where: { id: terminalId },
+      select: { id: true, venueId: true, assignedMerchantIds: true },
+    })
+    if (!terminal) throw new NotFoundError(`Terminal ${terminalId} not found`)
+
+    const cfg = await tx.venuePaymentConfig.findUnique({
+      where: { venueId: terminal.venueId },
+      select: { primaryAccountId: true, secondaryAccountId: true, tertiaryAccountId: true },
+    })
+    const slots = cfg ? ([cfg.primaryAccountId, cfg.secondaryAccountId, cfg.tertiaryAccountId].filter(Boolean) as string[]) : []
+    const effective = terminal.assignedMerchantIds.length > 0 ? terminal.assignedMerchantIds : slots
+
+    let next: string[]
+    if (serves) {
+      await assertMerchantTerminalCompatible(terminalId, merchantAccountId, tx) // throws IncompatibleDeviceError on brand mismatch
+      next = [...new Set([...effective, merchantAccountId])]
+    } else {
+      next = effective.filter(id => id !== merchantAccountId)
+      if (next.length === 0 && slots.includes(merchantAccountId)) {
+        throw new BadRequestError(
+          'Esta es la única cuenta del venue; para que la terminal deje de procesarla, asigna otra cuenta al slot del venue o cambia el slot.',
+        )
+      }
+    }
+
+    await tx.terminal.update({ where: { id: terminalId }, data: { assignedMerchantIds: { set: next } } })
+    logger.info('Terminal merchant assignment updated', { terminalId, merchantAccountId, serves, assignedMerchantIds: next })
+    return { terminalId, assignedMerchantIds: next, inherited: next.length === 0 }
+  })
+}
+
+/**
+ * Terminals that can be NEWLY assigned to serve this merchant from the merchant
+ * detail page: brand-compatible terminals in the venues where the merchant is
+ * slotted that don't already serve it. Inherited (empty assignedMerchantIds)
+ * terminals already serve it via the slot, so candidates are restricted
+ * terminals that currently exclude this merchant.
+ */
+export async function getAssignableTerminals(merchantAccountId: string) {
+  const cfgs = await prisma.venuePaymentConfig.findMany({
+    where: {
+      OR: [{ primaryAccountId: merchantAccountId }, { secondaryAccountId: merchantAccountId }, { tertiaryAccountId: merchantAccountId }],
+    },
+    select: { venueId: true },
+  })
+  const venueIds = cfgs.map(c => c.venueId)
+  if (venueIds.length === 0) return []
+
+  const merchant = await prisma.merchantAccount.findUnique({
+    where: { id: merchantAccountId },
+    select: { provider: { select: { code: true } } },
+  })
+  const compatibleBrands = merchant ? PROVIDER_DEVICE_COMPATIBILITY[merchant.provider.code] : undefined
+
+  const terminals = await prisma.terminal.findMany({
+    where: {
+      venueId: { in: venueIds },
+      assignedMerchantIds: { isEmpty: false }, // empty = inherits the slot = already serves M
+      NOT: { assignedMerchantIds: { has: merchantAccountId } },
+      ...(compatibleBrands?.length ? { brand: { in: compatibleBrands } } : {}),
+    },
+    select: { id: true, serialNumber: true, name: true, venueId: true, brand: true, venue: { select: { name: true } } },
+  })
+
+  return terminals.map(t => ({
+    id: t.id,
+    serialNumber: t.serialNumber || '',
+    name: t.name,
+    venueId: t.venueId,
+    venueName: t.venue?.name ?? '',
+    brand: t.brand,
+  }))
 }
 
 /**
