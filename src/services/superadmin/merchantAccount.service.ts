@@ -245,7 +245,7 @@ interface UpdateMerchantAccountData {
  * @param merchantVenueIds map of merchantAccountId → venueIds where it is slotted
  * @returns map of merchantAccountId → [{ id, serialNumber }] (deduped per merchant)
  */
-async function resolveEffectiveTerminals(
+export async function resolveEffectiveTerminals(
   merchantVenueIds: Map<string, string[]>,
 ): Promise<Record<string, Array<{ id: string; serialNumber: string }>>> {
   const merchantIds = [...merchantVenueIds.keys()]
