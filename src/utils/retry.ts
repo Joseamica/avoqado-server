@@ -132,7 +132,12 @@ function calculateDelay(attempt: number, options: Required<RetryOptions>): numbe
     delay = initialDelay * (attempt + 1)
   }
 
-  // Cap at maxDelay
+  // Jitter: ±25% randomness so many callers that fail at the same instant don't
+  // retry in lockstep and recreate a thundering herd (e.g. the top-of-hour cron
+  // stampede that causes P1001). Standard exponential-backoff-with-jitter pattern.
+  delay = delay * (0.75 + Math.random() * 0.5)
+
+  // Cap at maxDelay (applied after jitter so we never exceed it)
   return Math.min(delay, maxDelay)
 }
 

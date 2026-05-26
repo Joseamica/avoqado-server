@@ -66,6 +66,41 @@ describe('retry utility', () => {
   })
 
   // ──────────────────────────────────────────────────────────────────
+  // NEW FEATURE: jitter on retry delay (anti thundering-herd)
+  // ──────────────────────────────────────────────────────────────────
+  describe('retry delay jitter', () => {
+    afterEach(() => jest.restoreAllMocks())
+
+    it('applies ±25% jitter to the delay (lower bound when random=0)', async () => {
+      const setTimeoutSpy = jest.spyOn(global, 'setTimeout')
+      jest.spyOn(Math, 'random').mockReturnValue(0) // multiplier = 0.75
+      const fn = jest
+        .fn()
+        .mockRejectedValueOnce(Object.assign(new Error('x'), { code: 'P1001' }))
+        .mockResolvedValueOnce('ok')
+
+      await retry(fn, { retries: 2, initialDelay: 100, shouldRetry: shouldRetryDbConnectionError })
+
+      // attempt 0: base = 100 * 2^0 = 100; jittered = 100 * 0.75 = 75ms
+      expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 75)
+    })
+
+    it('jittered delay never exceeds maxDelay (upper bound when random≈1)', async () => {
+      const setTimeoutSpy = jest.spyOn(global, 'setTimeout')
+      jest.spyOn(Math, 'random').mockReturnValue(1) // multiplier = 1.25
+      const fn = jest
+        .fn()
+        .mockRejectedValueOnce(Object.assign(new Error('x'), { code: 'P1001' }))
+        .mockResolvedValueOnce('ok')
+
+      await retry(fn, { retries: 2, initialDelay: 100, maxDelay: 110, shouldRetry: shouldRetryDbConnectionError })
+
+      // base 100 * 1.25 = 125, capped at maxDelay 110
+      expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 110)
+    })
+  })
+
+  // ──────────────────────────────────────────────────────────────────
   // REGRESSION: existing Stripe predicate behavior unchanged
   // ──────────────────────────────────────────────────────────────────
   describe('shouldRetryStripeError (regression)', () => {
