@@ -23,7 +23,10 @@ interface RefundRequestData {
   shiftId?: string | null
   merchantAccountId?: string | null
   tpvId?: string | null // Terminal that processed this refund (for sales attribution)
-  blumonSerialNumber: string
+  // Blumon serial: REQUIRED for Blumon/PAX refunds (used for SDK merchant switch
+  // tracking), OPTIONAL/empty for AngelPay/Nexgo refunds (the AngelPay SDK
+  // resolves the merchant via its own auth context, no serial needed).
+  blumonSerialNumber?: string | null
   authorizationNumber: string
   referenceNumber: string
   maskedPan?: string | null
@@ -31,6 +34,16 @@ interface RefundRequestData {
   entryMode?: string | null
   isPartialRefund: boolean
   currency: string
+  /**
+   * Payment processor that handled the original transaction. Persisted into
+   * `Payment.processor` for the refund row so reports/reconciliation can
+   * separate Blumon vs AngelPay refunds.
+   *
+   * Backwards compatible: omitting it defaults to `'blumon'`, matching the
+   * legacy behavior used by all TPV builds before this field existed.
+   * Accepted values: `'blumon'` (PAX) | `'angelpay'` (Nexgo).
+   */
+  processor?: string
   /**
    * Optional explicit tip portion of the refund, in cents. When omitted, TPV
    * splits proportional to the original sale/tip ratio. When set, the caller
@@ -259,8 +272,10 @@ export async function recordRefund(
         status: TransactionStatus.COMPLETED,
         type: PaymentType.REFUND,
 
-        // Processor info
-        processor: 'blumon',
+        // Processor info — defaults to 'blumon' for backwards compat with
+        // pre-2.31 TPVs that don't send the field. Newer TPVs send 'angelpay'
+        // for Nexgo refunds so downstream reports can separate them.
+        processor: refundData.processor ?? 'blumon',
         processorData: {
           originalPaymentId: refundData.originalPaymentId,
           refundReason: refundData.reason,

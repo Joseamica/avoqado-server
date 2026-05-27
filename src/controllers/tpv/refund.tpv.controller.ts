@@ -67,6 +67,10 @@ export async function recordRefund(req: Request, res: Response, next: NextFuncti
       entryMode: req.body.entryMode,
       isPartialRefund: req.body.isPartialRefund || false,
       currency: req.body.currency || 'MXN',
+      // Optional processor tag — 'blumon' (default for legacy TPVs) or
+      // 'angelpay' (sent by TPV v2.31+ when refunding Nexgo payments).
+      // Persisted into Payment.processor for downstream reconciliation.
+      processor: req.body.processor,
     }
 
     // Call service to record the refund
