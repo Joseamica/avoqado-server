@@ -387,6 +387,16 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
     const serializedInventoryActive = await moduleService.isModuleEnabled(terminal.venueId, MODULE_CODES.SERIALIZED_INVENTORY)
     if (serializedInventoryActive) {
       tpvSettings.enableShifts = false
+      // SIM kiosks sell exclusively through the "Vender" (serialized sale) flow.
+      // The generic restaurant/retail entry points (Pago rápido, Cobrar, Órdenes)
+      // must NEVER appear here — they let an operator create empty $0 orders with
+      // no SIM, polluting the org "Ventas" list. Defense-in-depth: even if the
+      // TPV's simplified-mode gating doesn't kick in (e.g. module config not yet
+      // loaded at home-screen render), forcing these OFF server-side guarantees
+      // the buttons never show on a serialized-inventory venue.
+      tpvSettings.showCheckout = false
+      tpvSettings.showQuickPayment = false
+      tpvSettings.showOrderManagement = false
     }
 
     // Task 13 / spec §4.5 + §4.5b — angelpayAuth payload.
