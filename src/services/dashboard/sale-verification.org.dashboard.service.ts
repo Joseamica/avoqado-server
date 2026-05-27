@@ -58,7 +58,7 @@ export interface OrgSaleListRow {
     createdAt: Date
   } | null
   category: { id: string; name: string } | null
-  saleType: 'LINEA_NUEVA' | 'PORTABILIDAD'
+  saleType: 'LINEA_NUEVA' | 'PORTABILIDAD' | 'ESIM'
   /** Venue that originally registered/received the SIM into inventory (e.g. "Virtual"). Null for legacy items. */
   registeredFromVenue: { id: string; name: string; slug: string } | null
 }
@@ -83,13 +83,16 @@ function derivePaymentForm(method: PaymentMethod | null | undefined): 'CASH' | '
 }
 
 /**
- * Map isPortabilidad → "Tipo de venta". Only two values exist: a sale is
- * either a portability (customer brings their number) or a new line.
- * Per Isaac (PlayTelecom, 2026-05-26): eSIM and "SIM de intercambio" are SIM
- * TYPES (categories), not sale types — each can itself be a new line or a
- * portability. The boolean toggle is the single source of truth.
+ * "Tipo de venta" → one of three values (per Isaac/PlayTelecom Asana spec
+ * 2026-05-27): ESIM, PORTABILIDAD, or LINEA_NUEVA.
+ *
+ * eSIM is detected from the SIM category name ("E-SIM de promotor") and takes
+ * precedence — an eSIM sale surfaces as "eSIM". Otherwise the isPortabilidad
+ * toggle decides portability vs new line. "SIM de intercambio" is NOT a sale
+ * type; it falls through to línea nueva / portabilidad like any other SIM.
  */
-function deriveSaleType(isPortabilidad: boolean): 'LINEA_NUEVA' | 'PORTABILIDAD' {
+function deriveSaleType(isPortabilidad: boolean, categoryName: string | null | undefined): 'LINEA_NUEVA' | 'PORTABILIDAD' | 'ESIM' {
+  if (categoryName && /e-?sim/i.test(categoryName)) return 'ESIM'
   return isPortabilidad ? 'PORTABILIDAD' : 'LINEA_NUEVA'
 }
 
@@ -237,7 +240,7 @@ export async function listOrgSaleVerifications(orgId: string, filters: OrgSaleLi
         createdAt: p.createdAt,
       },
       category,
-      saleType: deriveSaleType(isPort),
+      saleType: deriveSaleType(isPort, category?.name ?? null),
       registeredFromVenue: firstSerialized?.registeredFromVenue ?? null,
     }
   })
