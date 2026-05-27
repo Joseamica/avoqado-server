@@ -90,12 +90,15 @@ export interface VenueEarnings {
   onlineFees: number
   volume: number
   transactions: number
+  /** True if any of this venue's transactions ran through a merchant with a revenue-share config. */
+  hasRevenueShare: boolean
 }
 export interface MerchantEarnings {
   merchantAccountId: string
   label: string
   providerCode: string
   hasAggregator: boolean
+  hasRevenueShare: boolean
   netProfit: number
   tramoProvider: number
   tramoAggregator: number
@@ -279,11 +282,13 @@ export async function getEarningsSummary(range?: DateRange, filter?: EarningsFil
       onlineFees: 0,
       volume: 0,
       transactions: 0,
+      hasRevenueShare: false,
     }
     ve.terminalNet += net
     ve.netProfit += net
     ve.volume += amount
     ve.transactions += 1
+    if (share) ve.hasRevenueShare = true
     venueMap.set(v.id, ve)
 
     const me = merchantMap.get(m.id) ?? {
@@ -291,6 +296,7 @@ export async function getEarningsSummary(range?: DateRange, filter?: EarningsFil
       label: m.displayName || m.alias || m.externalMerchantId,
       providerCode: m.provider.code,
       hasAggregator: !!share?.aggregatorPrice,
+      hasRevenueShare: !!share,
       netProfit: 0,
       tramoProvider: 0,
       tramoAggregator: 0,
@@ -336,6 +342,7 @@ export async function getEarningsSummary(range?: DateRange, filter?: EarningsFil
       onlineFees: 0,
       volume: 0,
       transactions: 0,
+      hasRevenueShare: false,
     }
     ve.onlineFees += fees
     ve.netProfit += fees
