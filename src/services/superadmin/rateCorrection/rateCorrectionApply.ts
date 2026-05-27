@@ -24,8 +24,8 @@ export async function applyRateCorrection(args: ApplyArgs, ctx: ApplyContext) {
   const preview = await previewRateCorrection(args)
 
   // 2. Guards.
-  if (preview.inScopeCount > 200) {
-    throw new BadRequestError(`Rate correction scope has ${preview.inScopeCount} payments (limit is 200). Please narrow the date range.`)
+  if (preview.inScopeCount > 500) {
+    throw new BadRequestError(`Rate correction scope has ${preview.inScopeCount} payments (limit is 500). Please narrow the date range.`)
   }
   if (args.missingCostMode === 'CREATE_COST' && !preview.costStructureAvailable) {
     throw new BadRequestError('Cannot CREATE_COST: no provider cost structure available for this merchant account.')

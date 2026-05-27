@@ -112,9 +112,9 @@ describe('applyRateCorrection', () => {
     expect(batch).toBeDefined()
   })
 
-  it('rejects scopes over 200 payments', async () => {
+  it('rejects scopes over 500 payments', async () => {
     ;(prisma.payment.findMany as jest.Mock).mockResolvedValue(
-      Array.from({ length: 201 }, (_, i) => ({
+      Array.from({ length: 501 }, (_, i) => ({
         id: `p${i}`,
         amount: '1',
         tipAmount: '0',
@@ -129,7 +129,7 @@ describe('applyRateCorrection', () => {
     ;(prisma.transactionCost.findMany as jest.Mock).mockResolvedValue([])
     await expect(
       applyRateCorrection({ venueId: 'v1', accountType: 'PRIMARY', newVenueRates, missingCostMode: 'FIX_PAYMENT_ONLY' }, { staffId: 's1' }),
-    ).rejects.toThrow(/200/)
+    ).rejects.toThrow(/500/)
   })
 
   it('rejects CREATE_COST when no provider cost structure', async () => {
