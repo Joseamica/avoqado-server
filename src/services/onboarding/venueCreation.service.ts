@@ -23,6 +23,7 @@ import { seedDemoVenue } from './demoSeed.service'
 import * as stripeService from '@/services/stripe.service'
 import * as kycReviewService from '@/services/superadmin/kycReview.service'
 import emailService from '@/services/email.service'
+import * as resendService from '@/services/resend.service'
 import logger from '@/config/logger'
 import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import { logAction } from '../dashboard/activity-log.service'
@@ -155,6 +156,18 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
       ? VenueStatus.PENDING_ACTIVATION
       : VenueStatus.ONBOARDING
 
+  // Lookup the signup Staff so we can:
+  //   1. Fall back to their email if the wizard did not collect a business email
+  //      (V2 wizard does not currently expose this field).
+  //   2. Include their contact in the admin digest email below.
+  const ownerStaff = await prisma.staff.findUnique({
+    where: { id: userId },
+    select: { id: true, firstName: true, lastName: true, email: true, phone: true },
+  })
+
+  // Final venue email: explicit business email > owner signup email > null
+  const resolvedVenueEmail = businessInfo.email?.trim() || ownerStaff?.email || null
+
   // Create venue
   const venue = await prisma.venue.create({
     data: {
@@ -175,7 +188,7 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
 
       // Contact
       phone: businessInfo.phone,
-      email: businessInfo.email,
+      email: resolvedVenueEmail,
 
       // Legal Entity Type (from KYC documents step or business info)
       // Validate against Prisma EntityType enum to prevent PrismaClientValidationError
@@ -266,10 +279,73 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
     // For now, just store it as venue metadata
   }
 
-  // Notify superadmins if KYC documents were submitted (real venue, not onboarding demo)
-  if (!isOnboardingDemo && hasKycDocuments) {
-    logger.info(`📤 Notifying superadmins about new KYC submission from ${venue.name}`)
-    await kycReviewService.notifySuperadminsNewKycSubmission(venue.id, venue.name)
+  // Admin notifications for REAL onboarding (demos generate noise — skip).
+  if (!isOnboardingDemo) {
+    // 1) Always send a full-context digest to onboarding@avoqado.io so the team can
+    //    follow up even when the wizard skipped KYC docs. Fire-and-forget;
+    //    failure here must NOT block onboarding completion.
+    void resendService
+      .sendNewVenueOnboardingDigest({
+        venueId: venue.id,
+        venueName: venue.name,
+        venueSlug: venue.slug,
+        venueStatus,
+        kycStatus,
+        hasKycDocuments: Boolean(hasKycDocuments),
+        businessInfo: {
+          phone: businessInfo.phone || null,
+          email: resolvedVenueEmail,
+          address: businessInfo.address || null,
+          city: businessInfo.city || null,
+          state: businessInfo.state || null,
+          country: businessInfo.country || null,
+          zipCode: businessInfo.zipCode || null,
+          entityType: kycDocuments?.entityType || businessInfo.entityType || null,
+        },
+        owner: ownerStaff
+          ? {
+              firstName: ownerStaff.firstName || '',
+              lastName: ownerStaff.lastName || '',
+              email: ownerStaff.email,
+              phone: ownerStaff.phone || null,
+            }
+          : null,
+        paymentInfo: paymentInfo
+          ? {
+              clabe: paymentInfo.clabe,
+              bankName: paymentInfo.bankName || null,
+              accountHolder: paymentInfo.accountHolder,
+            }
+          : null,
+      })
+      .catch(err => {
+        logger.error(`Failed to send new-venue digest for ${venue.id}:`, err)
+      })
+
+    // 2) Welcome the owner so they know we received their data and what's
+    //    next. Without this, completing onboarding lands them on a dashboard
+    //    with no confirmation that anything happened on our side.
+    //    Fire-and-forget; failure must NOT block onboarding.
+    if (ownerStaff?.email) {
+      void resendService
+        .sendOnboardingWelcomeEmail({
+          ownerEmail: ownerStaff.email,
+          ownerFirstName: ownerStaff.firstName || '',
+          venueName: venue.name,
+          venueSlug: venue.slug,
+          hasKycDocuments: Boolean(hasKycDocuments),
+        })
+        .catch(err => {
+          logger.error(`Failed to send onboarding welcome for ${venue.id}:`, err)
+        })
+    }
+
+    // 3) If KYC docs were uploaded, also fire the existing in-app + email
+    //    superadmin notification so the review queue picks it up.
+    if (hasKycDocuments) {
+      logger.info(`📤 Notifying superadmins about new KYC submission from ${venue.name}`)
+      await kycReviewService.notifySuperadminsNewKycSubmission(venue.id, venue.name)
+    }
   }
 
   // Enable selected premium features with Stripe trial

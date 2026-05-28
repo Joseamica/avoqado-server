@@ -34,7 +34,14 @@ interface NotificationPayload {
 }
 
 /**
- * Get notification preferences for a staff member
+ * Get notification preferences for a staff member.
+ *
+ * When no explicit `NotificationPreference` row exists, we return `null`
+ * channels — the caller (`sendNotification`) treats that as "no override"
+ * and falls back to the channels requested in the payload. Returning
+ * a hard-coded `[IN_APP]` array here silently suppressed every EMAIL
+ * notification (KYC_APPROVED, KYC_REJECTED, low-stock, etc.) because no
+ * default preference row exists for these system notifications.
  */
 export async function getNotificationPreferences(staffId: string, venueId: string, type: NotificationType) {
   const preference = await prisma.notificationPreference.findUnique({
@@ -47,11 +54,12 @@ export async function getNotificationPreferences(staffId: string, venueId: strin
     },
   })
 
-  // Default preferences if none exist
+  // No explicit preference: enabled with no channel override → caller's
+  // requested channels apply unchanged.
   if (!preference) {
     return {
       enabled: true,
-      channels: [NotificationChannel.IN_APP],
+      channels: null as NotificationChannel[] | null,
       priority: NotificationPriority.NORMAL,
       quietStart: null,
       quietEnd: null,
@@ -133,8 +141,16 @@ export async function sendNotification(payload: NotificationPayload): Promise<an
       return null
     }
 
-    // Determine channels to use (user preferences override payload)
-    const channels = preferences.channels.length > 0 ? preferences.channels : payload.channels || [NotificationChannel.IN_APP]
+    // Determine channels to use:
+    //   - Explicit user preference (non-null channels) overrides payload.
+    //   - No explicit preference → respect the caller's requested channels.
+    //   - Neither → fall back to IN_APP only.
+    const channels: NotificationChannel[] =
+      preferences.channels && preferences.channels.length > 0
+        ? preferences.channels
+        : payload.channels && payload.channels.length > 0
+          ? payload.channels
+          : [NotificationChannel.IN_APP]
 
     // Create notification record
     const notification = await prisma.notification.create({
@@ -286,6 +302,11 @@ async function sendEmailNotification(notification: any): Promise<boolean> {
       // Collect all recipient emails
       const recipients: string[] = []
 
+      // Always CC the onboarding alias so the team has a permanent record
+      // even if the SUPERADMIN role assignments change.
+      const onboardingAlias = process.env.ONBOARDING_NOTIFICATIONS_EMAIL || 'onboarding@avoqado.io'
+      recipients.push(onboardingAlias)
+
       // Add all superadmin emails (extract unique emails from assignments)
       const superadminEmails = [...new Set(superadminAssignments.map(sv => sv.staff.email))]
       recipients.push(...superadminEmails)
@@ -299,6 +320,7 @@ async function sendEmailNotification(notification: any): Promise<boolean> {
       const uniqueRecipients = [...new Set(recipients)]
 
       logger.info(`📧 Found ${uniqueRecipients.length} recipients for KYC notification:`)
+      logger.info(`   - ${onboardingAlias} (onboarding alias)`)
       logger.info(`   - ${superadminEmails.length} SUPERADMIN(s)`)
       logger.info(`   - ${venueOwner ? '1 OWNER' : '0 OWNER'}`)
 

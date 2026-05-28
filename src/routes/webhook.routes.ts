@@ -11,6 +11,7 @@ import { handleStripeConnectWebhook, handleStripeWebhook } from '../controllers/
 import { handleWhatsappInbound, handleWhatsappVerify } from '../controllers/webhook/whatsapp.webhook.controller'
 import { verifyWhatsappSignature } from '../middlewares/whatsappSignature.middleware'
 import { handleBlumonTPVWebhook, blumonWebhookHealthCheck } from '../controllers/tpv/blumon-webhook.tpv.controller'
+import { handleAngelPayWebhook, angelpayWebhookHealthCheck } from '../controllers/tpv/angelpay-webhook.tpv.controller'
 import { handleB4BitWebhook, b4bitWebhookHealthCheck } from '../controllers/tpv/b4bit-webhook.tpv.controller'
 import { handleResendWebhook, resendWebhookHealthCheck } from '../controllers/webhooks/resend.webhook.controller'
 import { blumonIPWhitelist } from '../middlewares/blumon-ip-whitelist.middleware'
@@ -166,6 +167,51 @@ router.post('/blumon/tpv', blumonIPWhitelist, handleBlumonTPVWebhook)
  *                 version: { type: string }
  */
 router.get('/blumon/tpv/health', blumonWebhookHealthCheck)
+
+/**
+ * @openapi
+ * /api/v1/webhooks/angelpay/health:
+ *   get:
+ *     tags: [Webhooks]
+ *     summary: AngelPay webhook health check
+ *     responses:
+ *       200:
+ *         description: OK
+ */
+router.get('/angelpay/health', angelpayWebhookHealthCheck)
+
+/**
+ * @openapi
+ * /api/v1/webhooks/angelpay/{merchantAccountId}:
+ *   post:
+ *     tags: [Webhooks]
+ *     summary: AngelPay TPV payment-confirmation webhook (per-merchant)
+ *     description: |
+ *       Receives Svix-signed payment confirmations from AngelPay cloud.
+ *       The :merchantAccountId path param identifies the MerchantAccount row
+ *       from which the per-merchant webhook secret (angelpayWebhookSecret) is
+ *       retrieved. After Svix verification succeeds, the body's id_merchant
+ *       is cross-checked against MerchantAccount.externalMerchantId as a
+ *       defence against URL/secret mix-ups. Reconciles against the Payment
+ *       table and persists every event to ProviderEventLog for audit.
+ *     parameters:
+ *       - in: path
+ *         name: merchantAccountId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Internal MerchantAccount ID (CUID)
+ *     responses:
+ *       200:
+ *         description: Webhook processed (signature valid; any reconciliation outcome)
+ *       401:
+ *         description: Missing or invalid signature, or id_merchant mismatch
+ *       404:
+ *         description: merchantAccountId not found or not an ANGELPAY merchant
+ *       503:
+ *         description: Webhook secret not provisioned for this merchant, or no venue assigned
+ */
+router.post('/angelpay/:merchantAccountId', handleAngelPayWebhook)
 
 /**
  * @openapi

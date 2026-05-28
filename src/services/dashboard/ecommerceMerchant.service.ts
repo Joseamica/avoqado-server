@@ -136,12 +136,29 @@ export async function createEcommerceMerchant(data: CreateEcommerceMerchantData)
       })
       return existingStripe
     }
+
+    // Aun sin merchant de Stripe, el channelName puede chocar con otro
+    // provider del mismo venue (Mercado Pago, Blumon, etc.) — el unique index
+    // @@unique([venueId, channelName]) aplica cross-provider. Sin este check,
+    // el create() de abajo truena con P2002 y el cliente recibe un 500 con
+    // "Unique constraint failed" sin contexto útil.
+    const channelCollision = await prisma.ecommerceMerchant.findFirst({
+      where: { venueId: data.venueId, channelName: data.channelName },
+      include: { provider: { select: { name: true } } },
+    })
+    if (channelCollision) {
+      throw new BadRequestError(
+        `Ya existe un canal con el nombre "${data.channelName}" en este venue (proveedor actual: ${
+          channelCollision.provider?.name ?? '—'
+        }). Elige otro nombre para tu canal de Stripe.`,
+      )
+    }
   } else {
     const existingChannel = await prisma.ecommerceMerchant.findFirst({
       where: { venueId: data.venueId, channelName: data.channelName },
     })
     if (existingChannel) {
-      throw new BadRequestError(`Channel "${data.channelName}" already exists for this venue. Use a different channel name.`)
+      throw new BadRequestError(`Ya existe un canal con el nombre "${data.channelName}" en este venue. Usa un nombre diferente.`)
     }
   }
 

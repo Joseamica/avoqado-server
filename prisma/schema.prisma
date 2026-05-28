@@ -3391,6 +3391,18 @@ model MerchantAccount {
   angelpayUserAccountId String?
   angelpayUserAccount   AngelPayUserAccount? @relation(fields: [angelpayUserAccountId], references: [id], onDelete: SetNull)
 
+  /// Last time we successfully processed an AngelPay webhook for this merchant.
+  /// NULL = never. Useful for ops dashboard ("¿está vivo el endpoint?").
+  angelpayWebhookLastReceivedAt DateTime?
+  /// Svix HMAC secret returned by AngelPay's POST /api/v1/webhooks/endpoints
+  /// when we register a webhook for this merchant. Format: "whsec_<base64>".
+  /// Stored plaintext — it's not a customer credential, it's a per-tenant
+  /// signing key (same risk class as a JWT signing key).
+  angelpayWebhookSecret      String?
+  /// AngelPay's endpoint id (e.g. "ep_abc123") from the registration response.
+  /// Kept for traceability + future automation of de-registration / re-rotation.
+  angelpayWebhookEndpointId  String?
+
   // Rate correction batches targeting this merchant account
   rateCorrectionBatches RateCorrectionBatch[]
 

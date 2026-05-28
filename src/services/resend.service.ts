@@ -29,12 +29,13 @@
  * 5. Test email sending:
  *    - Restart the server
  *    - Complete onboarding with KYC documents
- *    - Check hola@avoqado.io for notification email
+ *    - Check onboarding@avoqado.io for notification email
  *
  * NOTES:
  * - After domain verification, you can send FROM any email @avoqado.io
  * - noreply@avoqado.io doesn't need to be a real mailbox (send-only)
- * - hola@avoqado.io MUST be a real mailbox to receive notifications
+ * - onboarding@avoqado.io MUST be a real mailbox (alias) to receive
+ *   onboarding + KYC notifications
  * - Free tier: 3,000 emails/month, then $20/month for 50k emails
  */
 
@@ -46,7 +47,9 @@ const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KE
 
 // Email configuration
 const FROM_EMAIL = process.env.EMAIL_FROM || 'Avoqado <noreply@avoqado.io>'
-const ADMIN_EMAIL = 'hola@avoqado.io' // Central admin email for KYC notifications
+// Dedicated alias for onboarding + KYC notifications so the inbox does not
+// drown in operational noise. Override via env if the alias moves.
+const ONBOARDING_EMAIL = process.env.ONBOARDING_NOTIFICATIONS_EMAIL || 'onboarding@avoqado.io'
 
 interface KycNotificationData {
   venueName: string
@@ -107,8 +110,8 @@ export async function sendKycSubmissionNotification(data: KycNotificationData): 
 
     // Validate recipients
     if (!data.recipients || data.recipients.length === 0) {
-      logger.warn('No recipients provided for KYC notification. Falling back to admin email.')
-      data.recipients = [ADMIN_EMAIL]
+      logger.warn('No recipients provided for KYC notification. Falling back to onboarding alias.')
+      data.recipients = [ONBOARDING_EMAIL]
     }
 
     const html = `
@@ -258,6 +261,473 @@ Venue ID: ${data.venueId}
     return successCount > 0 // Return true if at least one email was sent successfully
   } catch (error) {
     logger.error('Error sending KYC notification email:', error)
+    return false
+  }
+}
+
+// ---------------------------------------------------------------------------
+// New-venue onboarding digest (REAL onboarding only)
+// ---------------------------------------------------------------------------
+// Goal: every time a new business finishes onboarding, the Avoqado team
+// receives a single email at onboarding@avoqado.io (dedicated alias) with
+// everything we need to follow up — owner contact, business info, bank info,
+// KYC status. This fires regardless of whether the user uploaded KYC
+// documents, so we catch leads even when the wizard was abandoned at the
+// docs step.
+// ---------------------------------------------------------------------------
+
+interface NewVenueOnboardingDigestData {
+  venueId: string
+  venueName: string
+  venueSlug: string
+  venueStatus: string
+  kycStatus: string
+  hasKycDocuments: boolean
+  businessInfo: {
+    phone: string | null
+    email: string | null
+    address: string | null
+    city: string | null
+    state: string | null
+    country: string | null
+    zipCode: string | null
+    entityType: string | null
+  }
+  owner: {
+    firstName: string
+    lastName: string
+    email: string
+    phone: string | null
+  } | null
+  paymentInfo: {
+    clabe: string
+    bankName: string | null
+    accountHolder: string
+  } | null
+}
+
+function escapeHtml(value: string | null | undefined): string {
+  if (!value) return '—'
+  return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+}
+
+/**
+ * Sends the new-venue digest email to the onboarding alias (onboarding@avoqado.io).
+ *
+ * Fired by venueCreation.service after a REAL venue is created — even when
+ * the user did not upload KYC documents. Failure does not block onboarding;
+ * the caller is expected to catch and log.
+ *
+ * @returns true if Resend accepted the email
+ */
+export async function sendNewVenueOnboardingDigest(data: NewVenueOnboardingDigestData): Promise<boolean> {
+  if (!resend) {
+    logger.warn('📧 Resend not configured - skipping new-venue digest email')
+    return false
+  }
+
+  const dashboardUrl = process.env.FRONTEND_URL || 'https://dashboardv2.avoqado.io'
+  const reviewUrl = `${dashboardUrl}/superadmin/kyc/${data.venueId}`
+  const ownerName = data.owner ? `${data.owner.firstName} ${data.owner.lastName}`.trim() : ''
+  const kycLabel = data.hasKycDocuments ? `${data.kycStatus} (docs subidos)` : `${data.kycStatus} (sin docs aún)`
+  const addressLine = [
+    data.businessInfo.address,
+    data.businessInfo.city,
+    data.businessInfo.state,
+    data.businessInfo.zipCode,
+    data.businessInfo.country,
+  ]
+    .filter(Boolean)
+    .join(', ')
+
+  const dateFormatted = new Date().toLocaleDateString('es-MX', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+    timeZone: 'America/Mexico_City',
+  })
+  const dateCapitalized = dateFormatted.charAt(0).toUpperCase() + dateFormatted.slice(1)
+
+  // Plain-text helper for WhatsApp link in text body (same logic as `waLink`
+  // but returns a "phone (wa.me/...)" string instead of HTML).
+  const waPlain = (value: string | null | undefined) => {
+    if (!value) return '—'
+    const digits = value.replace(/\D/g, '')
+    if (!digits) return value
+    const intlDigits = digits.length === 10 ? `52${digits}` : digits
+    return `${value} (https://wa.me/${intlDigits})`
+  }
+
+  // Plain-text body — readable inline preview in clients that hide HTML.
+  const textLines: string[] = [
+    `Nuevo venue en onboarding: ${data.venueName}`,
+    dateCapitalized,
+    '',
+    `Un nuevo negocio completó el wizard de onboarding. KYC: ${kycLabel}.`,
+    '',
+    'NEGOCIO',
+    `  Nombre:        ${data.venueName}`,
+    `  Slug:          ${data.venueSlug}`,
+    `  Venue ID:      ${data.venueId}`,
+    `  Status:        ${data.venueStatus}`,
+    `  Tipo entidad:  ${data.businessInfo.entityType || '—'}`,
+    `  Tel negocio:   ${waPlain(data.businessInfo.phone)}`,
+    `  Email negocio: ${data.businessInfo.email || '—'}`,
+    `  Dirección:     ${addressLine || '—'}`,
+    '',
+    'DUEÑO (signup)',
+    `  Nombre: ${ownerName || '—'}`,
+    `  Email:  ${data.owner?.email || '—'}`,
+    `  Tel:    ${waPlain(data.owner?.phone)}`,
+    '',
+  ]
+
+  if (data.paymentInfo) {
+    textLines.push(
+      'BANCO',
+      `  CLABE:   ${data.paymentInfo.clabe}`,
+      `  Banco:   ${data.paymentInfo.bankName || '—'}`,
+      `  Titular: ${data.paymentInfo.accountHolder}`,
+      '',
+    )
+  }
+
+  textLines.push(`Abrir en superadmin: ${reviewUrl}`)
+  textLines.push('', '---', 'Servicios Tecnologicos Avo S.A. de C.V.')
+  const text = textLines.join('\n')
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // HTML — Avoqado standard template (matches sendLowStockDigestEmail).
+  // See `docs/guides/EMAIL_STANDARDS.md` for the rules. White bg, black text,
+  // black CTAs, Avoqado isotipo header + footer. No gradients, no emoji-only
+  // headers, no card-on-card shadows.
+  // ─────────────────────────────────────────────────────────────────────────
+  const logoUrl = 'https://avoqado.io/isotipo.svg'
+
+  // Build a key/value table row used across all three sections.
+  const row = (label: string, value: string) => `
+    <tr>
+      <td style="padding:12px 16px;border-bottom:1px solid #e5e7eb;width:160px;font-size:13px;color:#666;vertical-align:top;">${escapeHtml(label)}</td>
+      <td style="padding:12px 16px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#000;">${value}</td>
+    </tr>`
+
+  // The value cells need different formatting (links, code, plain text). Helper
+  // returns the inner HTML so `row` stays generic.
+  const code = (value: string | null | undefined) =>
+    value
+      ? `<code style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:#f3f4f6;padding:2px 6px;border-radius:4px;color:#000;">${escapeHtml(value)}</code>`
+      : '—'
+  const mailto = (value: string | null | undefined) =>
+    value ? `<a href="mailto:${escapeHtml(value)}" style="color:#1a73e8;text-decoration:none;">${escapeHtml(value)}</a>` : '—'
+  const plain = (value: string | null | undefined) => (value ? escapeHtml(value) : '—')
+
+  // WhatsApp deep link. wa.me wants international digits without `+`. New
+  // onboardings already arrive as E.164 (`+526648442154`); legacy 10-digit
+  // values are treated as Mexican (MX +52) since that's our primary market.
+  const waLink = (value: string | null | undefined) => {
+    if (!value) return '—'
+    const digits = value.replace(/\D/g, '')
+    if (!digits) return escapeHtml(value)
+    const intlDigits = digits.length === 10 ? `52${digits}` : digits
+    return `<a href="https://wa.me/${intlDigits}" style="color:#1a73e8;text-decoration:none;">${escapeHtml(value)}</a> <span style="color:#999;">·</span> <a href="https://wa.me/${intlDigits}" style="color:#1a73e8;text-decoration:none;font-size:12px;">WhatsApp</a>`
+  }
+
+  const businessSection = `
+    <h2 style="margin:32px 0 12px;font-size:13px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.5px;">Negocio</h2>
+    <table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">
+      ${row('Nombre', plain(data.venueName))}
+      ${row('Slug', code(data.venueSlug))}
+      ${row('Venue ID', code(data.venueId))}
+      ${row('Status', plain(data.venueStatus))}
+      ${row('KYC', plain(kycLabel))}
+      ${row('Tipo entidad', plain(data.businessInfo.entityType))}
+      ${row('Tel negocio', waLink(data.businessInfo.phone))}
+      ${row('Email negocio', mailto(data.businessInfo.email))}
+      ${row('Dirección', plain(addressLine))}
+    </table>`
+
+  const ownerSection = data.owner
+    ? `
+    <h2 style="margin:32px 0 12px;font-size:13px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.5px;">Dueño (signup)</h2>
+    <table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">
+      ${row('Nombre', plain(ownerName))}
+      ${row('Email', mailto(data.owner.email))}
+      ${row('Teléfono', waLink(data.owner.phone))}
+    </table>`
+    : ''
+
+  const paymentSection = data.paymentInfo
+    ? `
+    <h2 style="margin:32px 0 12px;font-size:13px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.5px;">Banco</h2>
+    <table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">
+      ${row('CLABE', code(data.paymentInfo.clabe))}
+      ${row('Banco', plain(data.paymentInfo.bankName))}
+      ${row('Titular', plain(data.paymentInfo.accountHolder))}
+    </table>`
+    : ''
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nuevo venue en onboarding: ${escapeHtml(data.venueName)}</title>
+</head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;line-height:1.6;margin:0;padding:0;background-color:#ffffff;color:#000000;">
+  <div style="max-width:600px;margin:0 auto;padding:32px 24px;">
+
+    <!-- Header with Logo -->
+    <div style="padding-bottom:32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display:inline-block;vertical-align:middle;">
+      <span style="font-size:18px;font-weight:700;color:#000;vertical-align:middle;margin-left:8px;">Avoqado</span>
+    </div>
+
+    <!-- Title Section -->
+    <h1 style="margin:0 0 8px 0;font-size:28px;font-weight:400;color:#000;line-height:1.2;">
+      Nuevo venue en onboarding
+    </h1>
+    <p style="margin:0 0 24px 0;font-size:14px;color:#666;">
+      ${dateCapitalized}
+    </p>
+
+    <!-- Summary -->
+    <p style="margin:0 0 8px 0;font-size:14px;color:#000;">
+      <strong>${escapeHtml(data.venueName)}</strong> completó el wizard de onboarding.
+    </p>
+    <p style="margin:0 0 24px 0;font-size:14px;color:#666;">
+      KYC: <strong style="color:#000;">${escapeHtml(kycLabel)}</strong>
+    </p>
+
+    ${businessSection}
+    ${ownerSection}
+    ${paymentSection}
+
+    <!-- CTA Button (black, per EMAIL_STANDARDS) -->
+    <div style="margin:32px 0;text-align:left;">
+      <a href="${reviewUrl}" style="display:inline-block;background-color:#000000;color:#ffffff;padding:12px 24px;border-radius:6px;text-decoration:none;font-size:14px;font-weight:600;">
+        Abrir en superadmin
+      </a>
+    </div>
+
+    <!-- Divider -->
+    <hr style="border:none;border-top:1px solid #e5e7eb;margin:32px 0;" />
+
+    <!-- Footer -->
+    <div style="padding-top:8px;">
+      <div style="margin-bottom:16px;">
+        <img src="${logoUrl}" alt="Avoqado" width="24" height="24" style="display:inline-block;vertical-align:middle;">
+        <span style="font-size:14px;font-weight:700;color:#000;vertical-align:middle;margin-left:6px;">Avoqado</span>
+      </div>
+      <p style="margin:0 0 8px 0;font-size:12px;color:#999;">
+        Servicios Tecnologicos Avo S.A. de C.V.
+      </p>
+      <p style="margin:0;font-size:12px;color:#999;">
+        Notificación automática · ${escapeHtml(data.venueId)}
+      </p>
+    </div>
+
+  </div>
+</body>
+</html>`
+
+  try {
+    logger.info(`📧 Sending new-venue digest to ${ONBOARDING_EMAIL} for ${data.venueName} (${data.venueId})`)
+    const result = await resend.emails.send({
+      from: FROM_EMAIL,
+      to: ONBOARDING_EMAIL,
+      // No emoji in subject — per EMAIL_STANDARDS rules + better deliverability.
+      subject: `Nuevo venue: ${data.venueName}${data.businessInfo.city ? ` (${data.businessInfo.city})` : ''}`,
+      html,
+      text,
+    })
+
+    if (result.error) {
+      logger.error(`Failed to send new-venue digest for ${data.venueId}:`, result.error)
+      return false
+    }
+
+    logger.info(`✅ New-venue digest sent (Resend ID: ${result.data?.id}) for ${data.venueId}`)
+    return true
+  } catch (error) {
+    logger.error(`Error sending new-venue digest for ${data.venueId}:`, error)
+    return false
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Onboarding welcome email (sent to the venue owner)
+// ---------------------------------------------------------------------------
+// Goal: every REAL onboarding completion triggers a warm welcome to the
+// signup email so the customer knows we received their data and what to
+// expect next. Today we don't send anything to the owner — they finish
+// the wizard, land on a near-empty dashboard, and silence. This bridges
+// the gap until the team contacts them manually.
+// ---------------------------------------------------------------------------
+
+interface OnboardingWelcomeData {
+  ownerEmail: string
+  ownerFirstName: string
+  venueName: string
+  venueSlug: string
+  /** Whether the wizard included KYC docs. If false, we surface the
+   *  "upload docs to speed things up" CTA. */
+  hasKycDocuments: boolean
+}
+
+/**
+ * Send the welcome email to a new venue owner right after they complete
+ * onboarding. Plain Avoqado template (white bg, black CTA, logo header
+ * + footer) per `docs/guides/EMAIL_STANDARDS.md`.
+ *
+ * Fire-and-forget — failure here must NOT block onboarding completion.
+ */
+export async function sendOnboardingWelcomeEmail(data: OnboardingWelcomeData): Promise<boolean> {
+  if (!resend) {
+    logger.warn('📧 Resend not configured - skipping onboarding welcome email')
+    return false
+  }
+
+  const dashboardUrl = process.env.FRONTEND_URL || 'https://dashboardv2.avoqado.io'
+  const homeUrl = `${dashboardUrl}/venues/${data.venueSlug}/home`
+  const docsUrl = `${dashboardUrl}/venues/${data.venueSlug}/edit/documents`
+  const supportEmail = process.env.ONBOARDING_NOTIFICATIONS_EMAIL || 'onboarding@avoqado.io'
+  const logoUrl = 'https://avoqado.io/isotipo.svg'
+
+  // Owner first-name might come as "Gibran bernardo" — take only the first
+  // token so the greeting reads natural.
+  const firstName = (data.ownerFirstName || '').trim().split(/\s+/)[0] || ''
+  const greeting = firstName ? `¡Hola, ${firstName}!` : '¡Hola!'
+
+  // Plain-text body — readable inline preview in clients that hide HTML.
+  const textLines: string[] = [
+    `${greeting}`,
+    '',
+    `Recibimos los datos de ${data.venueName} y los estamos revisando.`,
+    'Nuestro equipo de onboarding te contacta en menos de 24 horas hábiles.',
+    '',
+    'Mientras tanto puedes:',
+    `  - Explorar tu dashboard:  ${homeUrl}`,
+  ]
+  if (!data.hasKycDocuments) {
+    textLines.push(`  - Subir documentos para acelerar la activación: ${docsUrl}`)
+  }
+  textLines.push(
+    `  - Escribirnos:            ${supportEmail}`,
+    '',
+    '¿Tienes preguntas? Solo responde a este correo y te contestamos.',
+    '',
+    '— Equipo Avoqado',
+    '',
+    '---',
+    'Servicios Tecnologicos Avo S.A. de C.V.',
+  )
+  const text = textLines.join('\n')
+
+  // Optional secondary CTA for KYC docs when they didn't upload during signup.
+  const docsCta = !data.hasKycDocuments
+    ? `
+    <p style="margin:24px 0 8px 0;font-size:14px;color:#000;">
+      ¿Quieres acelerar tu activación?
+    </p>
+    <p style="margin:0 0 16px 0;font-size:14px;color:#666;">
+      Sube tus documentos (INE, RFC, comprobante de domicilio) cuando estés listo. No es obligatorio para empezar a explorar el dashboard.
+    </p>
+    <div style="margin:0 0 32px 0;">
+      <a href="${docsUrl}" style="font-size:14px;color:#1a73e8;text-decoration:none;font-weight:600;">
+        Subir documentos →
+      </a>
+    </div>`
+    : ''
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bienvenido a Avoqado</title>
+</head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;line-height:1.6;margin:0;padding:0;background-color:#ffffff;color:#000000;">
+  <div style="max-width:600px;margin:0 auto;padding:32px 24px;">
+
+    <!-- Header with Logo -->
+    <div style="padding-bottom:32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display:inline-block;vertical-align:middle;">
+      <span style="font-size:18px;font-weight:700;color:#000;vertical-align:middle;margin-left:8px;">Avoqado</span>
+    </div>
+
+    <!-- Title Section -->
+    <h1 style="margin:0 0 8px 0;font-size:28px;font-weight:400;color:#000;line-height:1.2;">
+      ${escapeHtml(greeting)}
+    </h1>
+    <p style="margin:0 0 24px 0;font-size:14px;color:#666;">
+      Bienvenido a Avoqado
+    </p>
+
+    <!-- Body -->
+    <p style="margin:0 0 16px 0;font-size:15px;color:#000;">
+      Recibimos los datos de <strong>${escapeHtml(data.venueName)}</strong> y los estamos revisando.
+    </p>
+    <p style="margin:0 0 24px 0;font-size:15px;color:#000;">
+      Nuestro equipo de onboarding te contacta en menos de <strong>24 horas hábiles</strong> para terminar de activar tu cuenta y resolver cualquier duda.
+    </p>
+
+    <!-- Primary CTA (black) -->
+    <div style="margin:0 0 32px 0;">
+      <a href="${homeUrl}" style="display:inline-block;background-color:#000000;color:#ffffff;padding:12px 24px;border-radius:6px;text-decoration:none;font-size:14px;font-weight:600;">
+        Explorar mi dashboard
+      </a>
+    </div>
+
+    ${docsCta}
+
+    <!-- Help section -->
+    <hr style="border:none;border-top:1px solid #e5e7eb;margin:32px 0;" />
+    <p style="margin:0 0 8px 0;font-size:13px;color:#666;">
+      ¿Tienes preguntas? Solo responde a este correo y te contestamos, o escríbenos a
+      <a href="mailto:${escapeHtml(supportEmail)}" style="color:#1a73e8;text-decoration:none;">${escapeHtml(supportEmail)}</a>.
+    </p>
+
+    <!-- Footer -->
+    <div style="padding-top:24px;">
+      <div style="margin-bottom:16px;">
+        <img src="${logoUrl}" alt="Avoqado" width="24" height="24" style="display:inline-block;vertical-align:middle;">
+        <span style="font-size:14px;font-weight:700;color:#000;vertical-align:middle;margin-left:6px;">Avoqado</span>
+      </div>
+      <p style="margin:0 0 8px 0;font-size:12px;color:#999;">
+        Servicios Tecnologicos Avo S.A. de C.V.
+      </p>
+      <p style="margin:0;font-size:12px;color:#999;">
+        Recibiste este correo porque completaste el registro de un negocio en Avoqado.
+      </p>
+    </div>
+
+  </div>
+</body>
+</html>`
+
+  try {
+    logger.info(`📧 Sending onboarding welcome to ${data.ownerEmail} for ${data.venueName}`)
+    const result = await resend.emails.send({
+      from: FROM_EMAIL,
+      to: data.ownerEmail,
+      // Reply-to so when the owner hits "Reply" it lands in the team inbox
+      // instead of the noreply mailbox.
+      replyTo: supportEmail,
+      subject: `Bienvenido a Avoqado, ${firstName || 'equipo'}`,
+      html,
+      text,
+    })
+
+    if (result.error) {
+      logger.error(`Failed to send onboarding welcome to ${data.ownerEmail}:`, result.error)
+      return false
+    }
+
+    logger.info(`✅ Onboarding welcome sent (Resend ID: ${result.data?.id}) to ${data.ownerEmail}`)
+    return true
+  } catch (error) {
+    logger.error(`Error sending onboarding welcome to ${data.ownerEmail}:`, error)
     return false
   }
 }

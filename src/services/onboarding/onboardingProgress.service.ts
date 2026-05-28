@@ -428,6 +428,10 @@ export async function acceptV2Terms(organizationId: string, termsVersion: string
 /**
  * Extracts V2 setup data and builds venue creation input.
  * Does NOT create the venue — the controller handles that with optimistic locking.
+ *
+ * Note: businessInfo.email is left empty here on purpose — the V2 wizard does
+ * not collect a business contact email. venueCreation.service falls back to
+ * the signup Staff.email so the venue is never persisted with `email: NULL`.
  */
 export async function getV2SetupDataForCompletion(organizationId: string) {
   const progress = await getOnboardingProgress(organizationId)
@@ -470,7 +474,7 @@ export async function getV2SetupDataForCompletion(organizationId: string) {
     country: businessInfo.country || 'MX',
     zipCode: businessInfo.zipCode || '',
     phone: entityInfo.phone || '',
-    email: '', // Will be filled from org
+    email: businessInfo.email || '', // Fallback to Staff.email is applied in venueCreation.service
   }
 
   return {

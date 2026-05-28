@@ -21,6 +21,7 @@ import prisma from '@/utils/prismaClient'
 import * as guardService from '@/services/mercado-pago/merchant-guard.service'
 import * as oauthService from '@/services/mercado-pago/oauth.service'
 import * as connectionService from '@/services/mercado-pago/connection.service'
+import { userHasVenueAccess } from '@/services/staffOrganization.service'
 import { initiateQuerySchema, callbackQuerySchema, disconnectParamsSchema } from '@/schemas/dashboard/mercadoPagoOAuth.schema'
 import type { MercadoPagoOAuthState } from '@/services/mercado-pago/types'
 
@@ -36,14 +37,15 @@ export async function initiate(req: Request, res: Response) {
   }
 
   const { venueId, ecommerceMerchantId } = parsed.data
-  const { userId: staffId, venueId: authVenueId } = (req as any).authContext ?? {}
+  const { userId: staffId } = (req as any).authContext ?? {}
   if (!staffId) {
     return res.status(401).json({ success: false, error: 'No autenticado' })
   }
-  // Defense-in-depth: the authenticated user's venue (if scoped) must match
-  // the venueId in the query.
-  if (authVenueId && authVenueId !== venueId) {
-    return res.status(401).json({ success: false, error: 'No tienes acceso a este venue' })
+  // Authorize against REAL venue access, not a fragile token comparison.
+  // Handles multi-venue OWNER, multi-org and SUPERADMIN correctly, and blocks
+  // users who genuinely lack access to this venue.
+  if (!(await userHasVenueAccess(staffId, venueId))) {
+    return res.status(403).json({ success: false, error: 'No tienes acceso a este venue' })
   }
 
   try {
@@ -178,6 +180,15 @@ export async function disconnect(req: Request, res: Response) {
   }
 
   const { venueId, merchantId } = parsed.data
+  const { userId: staffId } = (req as any).authContext ?? {}
+  if (!staffId) {
+    return res.status(401).json({ success: false, error: 'No autenticado' })
+  }
+  // Authorize against real venue access before mutating credentials.
+  if (!(await userHasVenueAccess(staffId, venueId))) {
+    return res.status(403).json({ success: false, error: 'No tienes acceso a este venue' })
+  }
+
   try {
     await guardService.getMercadoPagoMerchant(venueId, merchantId)
   } catch (err: any) {

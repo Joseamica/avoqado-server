@@ -10,6 +10,10 @@ jest.mock('../../../src/utils/prismaClient', () => ({
       findUnique: jest.fn(),
       upsert: jest.fn(),
     },
+    staffVenue: {
+      findFirst: jest.fn(),
+      findMany: jest.fn(),
+    },
     venue: {
       findUnique: jest.fn(),
     },
@@ -21,6 +25,7 @@ import {
   getPrimaryOrganizationId,
   getOrganizationIdFromVenue,
   hasOrganizationAccess,
+  userHasVenueAccess,
   createStaffOrganizationMembership,
 } from '../../../src/services/staffOrganization.service'
 
@@ -165,6 +170,70 @@ describe('StaffOrganization Service', () => {
           }),
         }),
       )
+    })
+  })
+
+  describe('userHasVenueAccess', () => {
+    it('grants access on a direct active StaffVenue membership', async () => {
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValueOnce({ id: 'sv-1' })
+
+      const result = await userHasVenueAccess('staff-1', 'venue-1')
+
+      expect(result).toBe(true)
+      expect(prisma.staffVenue.findFirst).toHaveBeenCalledWith({
+        where: { staffId: 'staff-1', venueId: 'venue-1', active: true },
+        select: { id: true },
+      })
+      // Short-circuits — no need to look at roles/org.
+      expect(prisma.staffVenue.findMany).not.toHaveBeenCalled()
+    })
+
+    it('grants SUPERADMIN access to any venue (no direct membership)', async () => {
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValueOnce(null)
+      ;(prisma.staffVenue.findMany as jest.Mock).mockResolvedValueOnce([{ role: 'SUPERADMIN' }])
+
+      const result = await userHasVenueAccess('staff-1', 'venue-other')
+
+      expect(result).toBe(true)
+      // SUPERADMIN short-circuits before the org lookup.
+      expect(prisma.venue.findUnique).not.toHaveBeenCalled()
+    })
+
+    it('grants OWNER access to a venue of an org they belong to', async () => {
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValueOnce(null)
+      ;(prisma.staffVenue.findMany as jest.Mock).mockResolvedValueOnce([{ role: 'OWNER' }])
+      ;(prisma.venue.findUnique as jest.Mock).mockResolvedValueOnce({ organizationId: 'org-1' })
+      ;(prisma.staffOrganization.findUnique as jest.Mock).mockResolvedValueOnce({ isActive: true })
+
+      const result = await userHasVenueAccess('staff-1', 'venue-other')
+
+      expect(result).toBe(true)
+      expect(prisma.venue.findUnique).toHaveBeenCalledWith({
+        where: { id: 'venue-other' },
+        select: { organizationId: true },
+      })
+    })
+
+    it('denies OWNER access to a venue of an org they do NOT belong to', async () => {
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValueOnce(null)
+      ;(prisma.staffVenue.findMany as jest.Mock).mockResolvedValueOnce([{ role: 'OWNER' }])
+      ;(prisma.venue.findUnique as jest.Mock).mockResolvedValueOnce({ organizationId: 'org-foreign' })
+      ;(prisma.staffOrganization.findUnique as jest.Mock).mockResolvedValueOnce(null)
+
+      const result = await userHasVenueAccess('staff-1', 'venue-foreign')
+
+      expect(result).toBe(false)
+    })
+
+    it('denies a non-owner, non-superadmin staff without direct membership', async () => {
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValueOnce(null)
+      ;(prisma.staffVenue.findMany as jest.Mock).mockResolvedValueOnce([{ role: 'ADMIN' }, { role: 'MANAGER' }])
+
+      const result = await userHasVenueAccess('staff-1', 'venue-foreign')
+
+      expect(result).toBe(false)
+      // ADMIN/MANAGER are not OWNER/SUPERADMIN → no org-level fallback.
+      expect(prisma.venue.findUnique).not.toHaveBeenCalled()
     })
   })
 })

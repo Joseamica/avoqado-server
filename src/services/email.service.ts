@@ -2280,9 +2280,9 @@ Servicios Tecnologicos Avo S.A. de C.V.
       </tbody>
     </table>
 
-    <!-- CTA Button -->
+    <!-- CTA Button (black, per EMAIL_STANDARDS) -->
     <div style="margin: 32px 0; text-align: left;">
-      <a href="${data.dashboardUrl}" style="display: inline-block; background-color: #2563eb; color: #fff; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-size: 14px; font-weight: 600;">
+      <a href="${data.dashboardUrl}" style="display: inline-block; background-color: #000000; color: #ffffff; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-size: 14px; font-weight: 600;">
         Administrar inventario
       </a>
     </div>

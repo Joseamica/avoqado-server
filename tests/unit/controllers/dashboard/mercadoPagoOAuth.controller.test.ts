@@ -2,6 +2,7 @@ import { initiate, callback, disconnect } from '@/controllers/dashboard/mercadoP
 import * as guardService from '@/services/mercado-pago/merchant-guard.service'
 import * as oauthService from '@/services/mercado-pago/oauth.service'
 import * as connectionService from '@/services/mercado-pago/connection.service'
+import { userHasVenueAccess } from '@/services/staffOrganization.service'
 import { UnauthorizedError, NotFoundError } from '@/errors/AppError'
 import type { Response } from 'express'
 import { prismaMock } from '../../../__helpers__/setup'
@@ -9,6 +10,7 @@ import { prismaMock } from '../../../__helpers__/setup'
 jest.mock('@/services/mercado-pago/merchant-guard.service')
 jest.mock('@/services/mercado-pago/oauth.service')
 jest.mock('@/services/mercado-pago/connection.service')
+jest.mock('@/services/staffOrganization.service')
 
 function buildRes(): Response {
   const res: any = {}
@@ -22,6 +24,9 @@ function buildRes(): Response {
 beforeEach(() => {
   jest.clearAllMocks()
   process.env.PUBLIC_DASHBOARD_URL = 'https://dashboard.avoqado.io'
+  // Default: the authenticated staff HAS access to the venue. Individual
+  // tests override this to false to exercise the access-denied path.
+  ;(userHasVenueAccess as jest.Mock).mockResolvedValue(true)
 })
 
 describe('initiate', () => {
@@ -70,14 +75,35 @@ describe('initiate', () => {
     expect(res.status).toHaveBeenCalledWith(401)
   })
 
-  it('rejects 401 when authVenueId mismatches query venueId', async () => {
+  it('rejects 403 when staff lacks real access to the venue', async () => {
+    ;(userHasVenueAccess as jest.Mock).mockResolvedValue(false)
     const req: any = {
       query: { venueId: 'v_1', ecommerceMerchantId: 'em_1' },
+      // Token may even carry a different active venue — what matters is the
+      // real access check, not a token comparison.
       authContext: { userId: 's_1', venueId: 'v_OTHER' },
     }
     const res = buildRes()
     await initiate(req, res)
-    expect(res.status).toHaveBeenCalledWith(401)
+    expect(userHasVenueAccess).toHaveBeenCalledWith('s_1', 'v_1')
+    expect(res.status).toHaveBeenCalledWith(403)
+    expect(guardService.getMercadoPagoMerchant).not.toHaveBeenCalled()
+  })
+
+  it('allows a multi-venue OWNER whose token venue differs from the query venue', async () => {
+    ;(userHasVenueAccess as jest.Mock).mockResolvedValue(true)
+    ;(guardService.getMercadoPagoMerchant as jest.Mock).mockResolvedValue({ id: 'em_1' })
+    ;(oauthService.signState as jest.Mock).mockReturnValue('state-jwt')
+    ;(oauthService.buildAuthUrl as jest.Mock).mockReturnValue('https://auth.mercadopago.com.mx/authorization?...')
+
+    const req: any = {
+      query: { venueId: 'v_1', ecommerceMerchantId: 'em_1' },
+      authContext: { userId: 's_1', venueId: 'v_OTHER', role: 'OWNER' },
+    }
+    const res = buildRes()
+    await initiate(req, res)
+    expect(userHasVenueAccess).toHaveBeenCalledWith('s_1', 'v_1')
+    expect(res.redirect).toHaveBeenCalled()
   })
 
   it('propagates tenant guard rejection (NotFoundError → 404)', async () => {
@@ -206,26 +232,36 @@ describe('disconnect', () => {
     ;(guardService.getMercadoPagoMerchant as jest.Mock).mockResolvedValue({ id: 'em_1' })
     ;(connectionService.clearCredentials as jest.Mock).mockResolvedValue(undefined)
 
-    const req: any = { params: { venueId: 'v_1', merchantId: 'em_1' } }
+    const req: any = { params: { venueId: 'v_1', merchantId: 'em_1' }, authContext: { userId: 's_1' } }
     const res = buildRes()
     await disconnect(req, res)
 
+    expect(userHasVenueAccess).toHaveBeenCalledWith('s_1', 'v_1')
     expect(guardService.getMercadoPagoMerchant).toHaveBeenCalledWith('v_1', 'em_1')
     expect(connectionService.clearCredentials).toHaveBeenCalledWith('em_1')
     expect(res.json).toHaveBeenCalledWith({ success: true })
   })
 
   it('rejects 400 when params are missing', async () => {
-    const req: any = { params: {} }
+    const req: any = { params: {}, authContext: { userId: 's_1' } }
     const res = buildRes()
     await disconnect(req, res)
     expect(res.status).toHaveBeenCalledWith(400)
   })
 
+  it('rejects 403 when staff lacks real access to the venue', async () => {
+    ;(userHasVenueAccess as jest.Mock).mockResolvedValue(false)
+    const req: any = { params: { venueId: 'v_1', merchantId: 'em_1' }, authContext: { userId: 's_1' } }
+    const res = buildRes()
+    await disconnect(req, res)
+    expect(res.status).toHaveBeenCalledWith(403)
+    expect(connectionService.clearCredentials).not.toHaveBeenCalled()
+  })
+
   it('propagates tenant guard rejection', async () => {
     ;(guardService.getMercadoPagoMerchant as jest.Mock).mockRejectedValue(new UnauthorizedError('No tienes acceso'))
 
-    const req: any = { params: { venueId: 'v_1', merchantId: 'em_OTHER' } }
+    const req: any = { params: { venueId: 'v_1', merchantId: 'em_OTHER' }, authContext: { userId: 's_1' } }
     const res = buildRes()
     await disconnect(req, res)
     expect(res.status).toHaveBeenCalledWith(401)
