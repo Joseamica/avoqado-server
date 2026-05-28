@@ -18,6 +18,14 @@ on:
     paths:
       - 'prisma/schema.prisma'
 
+# Prevent parallel runs on the same ref. If a regen workflow is already running
+# and a new push arrives, cancel the old one — the new regen is what matters.
+# This eliminates the race where two runs both push "chore: regenerate schema
+# map" and the loser gets a non-fast-forward rejection.
+concurrency:
+  group: schema-map-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
