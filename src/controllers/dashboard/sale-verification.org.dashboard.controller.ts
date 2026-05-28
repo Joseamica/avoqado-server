@@ -210,3 +210,44 @@ export async function reviewOrgSaleVerification(req: Request, res: Response): Pr
     res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Internal server error' })
   }
 }
+
+/**
+ * POST /dashboard/organizations/:orgId/sale-verifications/:id/reopen
+ *
+ * Revert an approved (COMPLETED) verification back to PENDING for re-review.
+ * Gated upstream by `sale-verifications:reopen` (OWNER-only by default).
+ * The service layer additionally enforces SERIALIZED_INVENTORY scope and the
+ * COMPLETED status guard — see service for the full safety contract.
+ *
+ * Body: { reason: string } — required, min 5 chars (trimmed).
+ */
+export async function reopenOrgSaleVerification(req: Request, res: Response): Promise<void> {
+  try {
+    const { orgId, id } = req.params
+    const { reason } = req.body as { reason?: string }
+
+    const reopenedById = (req as any).authContext?.userId
+    if (!reopenedById) {
+      res.status(401).json({ success: false, message: 'No reviewer staff context' })
+      return
+    }
+
+    if (typeof reason !== 'string' || reason.trim().length < 5) {
+      res.status(400).json({ success: false, message: 'reason (min 5 chars) is required' })
+      return
+    }
+
+    logger.info(`[ORG SALE VERIFICATION] POST ${id}/reopen org=${orgId} by=${reopenedById}`)
+
+    const updated = await svc.reopenOrgSaleVerification(orgId, {
+      saleVerificationId: id,
+      reopenedById,
+      reason,
+    })
+
+    res.status(200).json({ success: true, data: updated })
+  } catch (error: any) {
+    logger.error(`[ORG SALE VERIFICATION] reopen error: ${error.message}`)
+    res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Internal server error' })
+  }
+}

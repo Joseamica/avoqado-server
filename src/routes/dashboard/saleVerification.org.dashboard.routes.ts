@@ -53,5 +53,6 @@ router.get('/by-supervisor', checkPermission('sale-verifications:review'), ctrl.
 router.get('/by-store', checkPermission('sale-verifications:review'), ctrl.getSalesByStore)
 
 router.patch('/:id/review', checkPermission('sale-verifications:review'), ctrl.reviewOrgSaleVerification)
+router.post('/:id/reopen', checkPermission('sale-verifications:reopen'), ctrl.reopenOrgSaleVerification)
 
 export default router

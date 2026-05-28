@@ -3,6 +3,9 @@ import { fromZonedTime } from 'date-fns-tz'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { reviewSaleVerification as reviewSaleVerificationVenue, type ReviewDecision } from './sale-verification.dashboard.service'
+import { moduleService, MODULE_CODES } from '../modules/module.service'
+import socketManager from '../../communication/sockets'
+import { SocketEventType } from '../../communication/sockets/types'
 
 // ============================================================
 // Org-Scoped Sale Verification Dashboard Service
@@ -602,6 +605,115 @@ export async function reviewOrgSaleVerification(
   }
 
   return reviewSaleVerificationVenue(existing.venueId, params)
+}
+
+/**
+ * Reopen an APPROVED (COMPLETED) sale verification — reverts it to PENDING so
+ * the back-office can re-evaluate it. OWNER-only operation (gated upstream by
+ * `sale-verifications:reopen` permission, OWNER-default per `permissions.ts`).
+ *
+ * Safety contract (verified cross-repo before shipping):
+ *   - The SerializedItem (SIM) status stays SOLD — sale of physical inventory
+ *     is unaffected. Approval/rejection is purely a documentation review state.
+ *   - Payment / Order / CommissionCalculation / DigitalReceipt are untouched.
+ *     No money moves, no inventory unwinds.
+ *   - The TPV ("Mis Ventas") just re-renders the badge as Pendiente via the
+ *     `sale-verification.reviewed` socket. The correction screen does NOT open
+ *     on PENDING (only on FAILED), so the promoter sees no false prompt.
+ *   - A future photo re-upload on the reopened sale stays PENDING (does NOT
+ *     auto-complete) because serialized-inventory venues are gated by
+ *     `requiresBackOfficeReview` in `createOrUpdateProofOfSale`.
+ *
+ * Scoping:
+ *   - Verification must belong to a venue inside `orgId`.
+ *   - The venue's org must have SERIALIZED_INVENTORY active (extra defense:
+ *     reopen is meaningless for a restaurant that has no review step).
+ *
+ * Idempotency: the status guard `existing.status === 'COMPLETED'` makes double
+ * calls / races into a 409 instead of a silent no-op or drift.
+ */
+export async function reopenOrgSaleVerification(
+  orgId: string,
+  params: {
+    saleVerificationId: string
+    reopenedById: string
+    reason: string
+  },
+) {
+  const trimmedReason = params.reason?.trim() ?? ''
+  if (trimmedReason.length < 5) {
+    throw createServiceError('Un motivo de al menos 5 caracteres es obligatorio para reabrir la revisión', 400)
+  }
+
+  const existing = await prisma.saleVerification.findUnique({
+    where: { id: params.saleVerificationId },
+    select: {
+      id: true,
+      venueId: true,
+      staffId: true,
+      paymentId: true,
+      status: true,
+      venue: { select: { organizationId: true } },
+    },
+  })
+
+  if (!existing) throw createServiceError('Sale verification not found', 404)
+  if (existing.venue?.organizationId !== orgId) {
+    throw createServiceError('Sale verification does not belong to this organization', 403)
+  }
+  if (existing.status !== 'COMPLETED') {
+    throw createServiceError(`Only COMPLETED verifications can be reopened (current status=${existing.status})`, 409)
+  }
+
+  // Defense-in-depth: reopen is a white-label / serialized-inventory feature.
+  // Block it for any venue that somehow lacks the module (shouldn't happen via
+  // normal UI, but a stray API call should not bypass the scope).
+  const serializedActive = await moduleService.isModuleEnabled(existing.venueId, MODULE_CODES.SERIALIZED_INVENTORY)
+  if (!serializedActive) {
+    throw createServiceError('Reopen is only available on serialized-inventory venues', 403)
+  }
+
+  const updated = await prisma.saleVerification.update({
+    where: { id: existing.id },
+    data: {
+      status: 'PENDING',
+      reviewedById: null,
+      reviewedAt: null,
+      reviewNotes: null,
+      rejectionReasons: [],
+    },
+    include: {
+      staff: { select: { id: true, firstName: true, lastName: true, email: true, photoUrl: true } },
+      reviewedBy: { select: { id: true, firstName: true, lastName: true } },
+      payment: { select: { id: true, amount: true, status: true, createdAt: true } },
+    },
+  })
+
+  // Audit trail — Render logs / BetterStack are the system of record.
+  // Structured so a future query can filter by event name.
+  logger.info(
+    `[SALE_VERIFICATION_REOPEN] verification=${updated.id} org=${orgId} by=${params.reopenedById} ` +
+      `previousStatus=COMPLETED reason="${trimmedReason.replace(/"/g, '\\"')}"`,
+  )
+
+  // Notify the promoter — TPV's "Mis Ventas" refreshes the badge via the same
+  // socket event used for normal approve/reject. PENDING is already a handled
+  // state on the TPV (no correction screen pops on PENDING).
+  try {
+    socketManager.broadcastToUser(existing.staffId, SocketEventType.SALE_VERIFICATION_REVIEWED, {
+      saleVerificationId: updated.id,
+      paymentId: updated.paymentId,
+      status: updated.status,
+      reviewedAt: null,
+      reviewNotes: null,
+      rejectionReasons: [],
+      reviewedBy: null,
+    })
+  } catch (err: any) {
+    logger.warn(`[SALE_VERIFICATION_REOPEN] socket emit failed for staff ${existing.staffId}: ${err?.message ?? err}`)
+  }
+
+  return updated
 }
 
 // Utility — parse query dates with venue-timezone-aware day boundaries
