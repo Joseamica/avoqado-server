@@ -3,6 +3,7 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { VerifiedWebhookEvent } from './providers/provider.interface'
 import { finalizePaymentLinkCheckout } from '@/services/dashboard/paymentLink.service'
+import { finalizeVenueCheckout } from '@/services/dashboard/venueCheckout.service'
 import emailService from '@/services/email.service'
 import { sendReservationConfirmationWhatsApp, formatModifiersForWhatsApp } from '@/services/whatsapp.service'
 import { formatInTimeZone } from 'date-fns-tz'
@@ -392,11 +393,15 @@ async function processPaymentIntentSucceeded(event: VerifiedWebhookEvent) {
     return
   }
 
-  if (pi.metadata?.type !== 'payment_link') {
-    logger.info('ℹ️ [STRIPE CONNECT] payment_intent.succeeded for non-payment-link source — ignored', {
+  // Both the payment-link Elements flow and the venue-checkout widget store
+  // the PaymentIntent id in CheckoutSession.sessionId and tag the intent with
+  // metadata.type. Route to the matching finalizer; anything else is ignored.
+  const piType = pi.metadata?.type
+  if (piType !== 'payment_link' && piType !== 'venue_checkout') {
+    logger.info('ℹ️ [STRIPE CONNECT] payment_intent.succeeded for unrecognized source — ignored', {
       eventId: event.id,
       paymentIntentId: pi.id,
-      type: pi.metadata?.type ?? 'unknown',
+      type: piType ?? 'unknown',
     })
     return
   }
@@ -422,12 +427,21 @@ async function processPaymentIntentSucceeded(event: VerifiedWebhookEvent) {
         payload: event.data as Prisma.InputJsonValue,
       },
     })
-    await finalizePaymentLinkCheckout({
-      stripeSessionId: pi.id, // sessionId column stores the pi_XXX for Elements flow
-      paymentIntentId: pi.id,
-      amountPaidCents: pi.amount_received ?? null,
-      stripePaymentMethodType,
-    })
+    if (piType === 'venue_checkout') {
+      await finalizeVenueCheckout({
+        stripeSessionId: pi.id,
+        paymentIntentId: pi.id,
+        amountPaidCents: pi.amount_received ?? null,
+        stripePaymentMethodType,
+      })
+    } else {
+      await finalizePaymentLinkCheckout({
+        stripeSessionId: pi.id, // sessionId column stores the pi_XXX for Elements flow
+        paymentIntentId: pi.id,
+        amountPaidCents: pi.amount_received ?? null,
+        stripePaymentMethodType,
+      })
+    }
   } catch (error: any) {
     if (error?.code === 'P2002') {
       logger.info('ℹ️ [STRIPE CONNECT] Duplicate payment_intent.succeeded ignored', { eventId: event.id })
@@ -449,7 +463,7 @@ async function processPaymentIntentFailed(event: VerifiedWebhookEvent) {
     metadata?: Record<string, string> | null
     last_payment_error?: { message?: string; code?: string; type?: string } | null
   }
-  if (!pi.id || pi.metadata?.type !== 'payment_link') return
+  if (!pi.id || (pi.metadata?.type !== 'payment_link' && pi.metadata?.type !== 'venue_checkout')) return
 
   try {
     await prisma.processedStripeEvent.create({

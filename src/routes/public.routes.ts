@@ -8,6 +8,7 @@ import * as reservationPublicController from '../controllers/public/reservation.
 import * as creditPackPublicController from '../controllers/public/creditPack.public.controller'
 import * as customerPortalController from '../controllers/public/customerPortal.public.controller'
 import * as paymentLinkPublicController from '../controllers/public/paymentLink.public.controller'
+import * as venueCheckoutController from '../controllers/public/venueCheckout.public.controller'
 import { submitContact, submitLabsBrief } from '../controllers/public/landing.public.controller'
 import * as venueChatController from '../controllers/public/venueChat.public.controller'
 import { validateRequest } from '../middlewares/validation'
@@ -48,6 +49,13 @@ import {
   publicSendReceiptWhatsappSchema,
   publicSendReceiptEmailSchema,
 } from '../schemas/dashboard/paymentLink.schema'
+import {
+  venueCheckoutInfoSchema,
+  venueStripeIntentSchema,
+  venueMpIntentSchema,
+  venueMpPaySchema,
+  venueCheckoutSessionSchema,
+} from '../schemas/public/venueCheckout.schema'
 
 const router = Router()
 
@@ -223,6 +231,40 @@ router.post(
   writeLimit,
   validateRequest(publicSendReceiptEmailSchema),
   paymentLinkPublicController.sendReceiptEmail,
+)
+
+// ---- Public Venue Checkout Routes (unauthenticated) ----
+// Powers the embeddable checkout widget. Charges go directly to a venue's
+// connected processor with a host/customer-provided amount — no payment link.
+
+router.get('/venues/:venueSlug/checkout-info', readLimit, validateRequest(venueCheckoutInfoSchema), venueCheckoutController.getCheckoutInfo)
+
+router.post(
+  '/venues/:venueSlug/checkout/payment-intent',
+  writeLimit,
+  validateRequest(venueStripeIntentSchema),
+  venueCheckoutController.createStripePaymentIntent,
+)
+
+router.post(
+  '/venues/:venueSlug/checkout/mp-payment-intent',
+  writeLimit,
+  validateRequest(venueMpIntentSchema),
+  venueCheckoutController.createMercadoPagoPaymentIntent,
+)
+
+router.post(
+  '/venues/:venueSlug/checkout/mp-pay',
+  writeLimit,
+  validateRequest(venueMpPaySchema),
+  venueCheckoutController.executeMercadoPagoPayment,
+)
+
+router.get(
+  '/venues/:venueSlug/checkout/session/:sessionId',
+  readLimit,
+  validateRequest(venueCheckoutSessionSchema),
+  venueCheckoutController.getSessionStatus,
 )
 
 // ---- Landing Page Routes (unauthenticated) — called from avoqado.io frontend ----

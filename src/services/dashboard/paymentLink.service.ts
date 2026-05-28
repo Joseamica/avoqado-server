@@ -1199,7 +1199,7 @@ export async function createStripePaymentIntentForPaymentLink(
  * reports if something exotic comes through. Add new mappings as we enable
  * more Stripe payment methods.
  */
-function mapStripeMethodToPaymentMethod(
+export function mapStripeMethodToPaymentMethod(
   stripeType: string | null | undefined,
 ): 'CASH' | 'CREDIT_CARD' | 'DEBIT_CARD' | 'DIGITAL_WALLET' | 'BANK_TRANSFER' | 'CRYPTOCURRENCY' | 'OTHER' {
   if (!stripeType) return 'CREDIT_CARD'
@@ -1223,7 +1223,7 @@ function mapStripeMethodToPaymentMethod(
  *  Stripe values: 'visa' | 'mastercard' | 'amex' | 'discover' | 'diners' |
  *  'jcb' | 'unionpay' | 'unknown'. Anything we can't map → OTHER so reports
  *  stay grouped instead of falling to NULL. */
-function mapStripeCardBrandToEnum(
+export function mapStripeCardBrandToEnum(
   brand: string | null | undefined,
 ):
   | 'VISA'
@@ -2787,6 +2787,15 @@ export async function createMercadoPagoPaymentIntentForPaymentLink(
   }
   chargeAmount = chargeAmount + tipAmount
 
+  // MercadoPago Mexico rejects amounts below its platform minimum (~$10 MXN)
+  // with a generic 2072 "Invalid value for transaction_amount" — and that only
+  // surfaces at payment time (mp-pay), after the customer entered their card.
+  // Fail fast here, at intent creation, with a clear message.
+  const mpMinMxn = Number(process.env.MP_MIN_CHARGE_MXN ?? 5)
+  if (chargeAmount < mpMinMxn) {
+    throw new BadRequestError(`El monto mínimo para pagar con Mercado Pago es $${mpMinMxn} MXN`)
+  }
+
   // 4. Compute application_fee (same VAT logic as Stripe). Returns centavos.
   const stripeAmount = toStripeAmount(new Prisma.Decimal(chargeAmount))
   const vatRateBps = await getVatRateBps()
@@ -2937,6 +2946,20 @@ export async function executeMercadoPagoPaymentForPaymentLink(
     },
   })
 
+  // Record the Payment + Order now if the charge is already approved. The MP
+  // IPN webhook does the same on its authoritative callback — both are
+  // idempotent (unique Payment.idempotencyKey = mpPaymentId), so whichever
+  // lands first wins. Non-fatal: the payment already succeeded on MP, so a
+  // finalize hiccup must not fail the response — the IPN will reconcile.
+  if (optimisticStatus === 'COMPLETED') {
+    await finalizeMercadoPagoCheckout({ sessionId, mpPaymentId: payment.id }).catch(err =>
+      logger.error('finalizeMercadoPagoCheckout failed (optimistic path)', {
+        sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    )
+  }
+
   logger.info('MP Bricks payment created', {
     sessionId,
     paymentId: payment.id,
@@ -2949,5 +2972,127 @@ export async function executeMercadoPagoPaymentForPaymentLink(
     status: payment.status,
     statusDetail: payment.status_detail,
     threeDsRedirectUrl: payment.three_ds_redirect_url,
+  }
+}
+
+/**
+ * Record the Order + Payment for a COMPLETED MercadoPago checkout — the MP
+ * analogue of what `finalizePaymentLinkCheckout` does for Stripe. Without this,
+ * MP payments charge the seller but never show up in the venue's /payments or
+ * /orders (the bug seen in production: a $5 MP payment to a venue left no record).
+ *
+ * Works for BOTH payment-link and venue (data-venue widget) checkout sessions —
+ * it branches on `session.paymentLink`. Called from two places, both idempotent:
+ *  - `executeMercadoPagoPaymentForPaymentLink/ForVenue` (optimistic, on approval)
+ *  - the MP IPN handler (authoritative, on webhook)
+ *
+ * Idempotency: guarded by `session.paymentId` (set once finalized) AND the
+ * unique `Payment(venueId, idempotencyKey=mpPaymentId)` index — a duplicate
+ * call throws P2002 and no-ops. Safe to call twice concurrently.
+ */
+export async function finalizeMercadoPagoCheckout(args: { sessionId: string; mpPaymentId: string | number }): Promise<void> {
+  const session = await prisma.checkoutSession.findUnique({
+    where: { sessionId: args.sessionId },
+    include: {
+      ecommerceMerchant: { select: { id: true, venueId: true } },
+      paymentLink: { select: { id: true, venueId: true, createdById: true } },
+    },
+  })
+  if (!session) {
+    logger.warn('⚠️ [MP FINALIZE] No checkout session found', { sessionId: args.sessionId })
+    return
+  }
+  if (session.paymentId) return // already finalized — idempotent no-op
+
+  const isLink = !!session.paymentLink
+  const venueId = session.paymentLink?.venueId ?? session.ecommerceMerchant.venueId
+  // session.amount already includes the tip; split it out so the Order/Payment
+  // report the tip separately, mirroring finalizePaymentLinkCheckout (Stripe).
+  const metadata = (session.metadata ?? {}) as Record<string, any>
+  const gross = session.amount
+  const tipAmount = new Prisma.Decimal(metadata.tipAmount || 0)
+  const subtotal = gross.sub(tipAmount).gte(0) ? gross.sub(tipAmount) : new Prisma.Decimal(0)
+  const feeAmount = session.applicationFeeCents ? new Prisma.Decimal(session.applicationFeeCents).div(100) : new Prisma.Decimal(0)
+  const netAmount = subtotal.sub(feeAmount).gte(0) ? subtotal.sub(feeAmount) : new Prisma.Decimal(0)
+  const feePercentage = subtotal.gt(0) ? feeAmount.div(subtotal).toDecimalPlaces(4) : new Prisma.Decimal(0)
+  const processorId = String(args.mpPaymentId)
+
+  try {
+    await prisma.$transaction(async tx => {
+      // Re-check inside the tx so two concurrent finalizers (optimistic + IPN)
+      // can't both create an Order.
+      const fresh = await tx.checkoutSession.findUnique({ where: { id: session.id }, select: { paymentId: true } })
+      if (fresh?.paymentId) return
+
+      const order = await tx.order.create({
+        data: {
+          venueId,
+          orderNumber: `${isLink ? 'PL' : 'VC'}-${Date.now()}`,
+          type: 'MANUAL_ENTRY',
+          source: isLink ? 'PAYMENT_LINK' : 'WEB',
+          createdById: session.paymentLink?.createdById ?? undefined,
+          customerEmail: session.customerEmail,
+          subtotal,
+          discountAmount: 0,
+          taxAmount: 0,
+          tipAmount,
+          total: gross,
+          paidAmount: gross,
+          remainingBalance: 0,
+          status: 'COMPLETED',
+          paymentStatus: 'PAID',
+          completedAt: new Date(),
+        },
+      })
+
+      const createdPayment = await tx.payment.create({
+        data: {
+          venueId,
+          orderId: order.id,
+          ecommerceMerchantId: session.ecommerceMerchant.id,
+          amount: subtotal,
+          tipAmount,
+          method: 'CREDIT_CARD',
+          source: 'WEB',
+          status: 'COMPLETED',
+          type: 'FAST',
+          processor: 'mercadopago',
+          processorId,
+          feePercentage,
+          feeAmount,
+          netAmount,
+          idempotencyKey: processorId,
+        },
+        select: { id: true },
+      })
+
+      await tx.checkoutSession.update({ where: { id: session.id }, data: { paymentId: createdPayment.id } })
+
+      if (isLink) {
+        await tx.paymentLink.update({
+          where: { id: session.paymentLink!.id },
+          data: { totalCollected: { increment: gross }, paymentCount: { increment: 1 } },
+        })
+      }
+    })
+
+    logger.info('MercadoPago checkout finalized (Order + Payment recorded)', {
+      sessionId: args.sessionId,
+      mpPaymentId: processorId,
+      venueId,
+      isLink,
+    })
+  } catch (err: any) {
+    // Only the Payment idempotencyKey collision means "already finalized".
+    // Any OTHER unique violation is a real bug — surface it, don't mask it as
+    // a successful no-op.
+    const target = err?.meta?.target
+    const isIdempotencyCollision =
+      err?.code === 'P2002' && (Array.isArray(target) ? target.includes('idempotencyKey') : String(target ?? '').includes('idempotencyKey'))
+    if (isIdempotencyCollision) {
+      logger.info('ℹ️ [MP FINALIZE] Duplicate finalize ignored (idempotent)', { sessionId: args.sessionId, mpPaymentId: processorId })
+      return
+    }
+    throw err
   }
 }

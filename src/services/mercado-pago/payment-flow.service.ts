@@ -154,7 +154,30 @@ export async function handleIpn(p: HandleIpnParams): Promise<HandleIpnResult> {
     },
   })
 
-  await markStatus(mpUserId, dataId, p.requestId, 'processed', null)
+  // Record the Order + Payment once MP confirms approval. This is the
+  // authoritative path; the optimistic mp-pay endpoint also calls this, both
+  // idempotent (unique Payment.idempotencyKey = mpPaymentId). Dynamic import
+  // avoids a static cycle between the MP module and paymentLink.service.
+  let finalizeError: string | null = null
+  if (checkoutStatus === 'COMPLETED') {
+    const { finalizeMercadoPagoCheckout } = await import('@/services/dashboard/paymentLink.service')
+    try {
+      await finalizeMercadoPagoCheckout({ sessionId: session.sessionId, mpPaymentId: payment.id })
+    } catch (err) {
+      // The charge succeeded on MP but we failed to record the local
+      // Order/Payment. Mark the webhook event 'error' (not 'processed') so it's
+      // queryable for reconciliation instead of silently lost. A sweep of
+      // COMPLETED sessions with paymentId=null is the recommended follow-up.
+      finalizeError = err instanceof Error ? err.message : String(err)
+      logger.error('[MP IPN] finalizeMercadoPagoCheckout failed — charged on MP but no local Order/Payment', {
+        sessionId: session.sessionId,
+        mpPaymentId: String(payment.id),
+        error: finalizeError,
+      })
+    }
+  }
+
+  await markStatus(mpUserId, dataId, p.requestId, finalizeError ? 'error' : 'processed', finalizeError)
   logger.info('[MP] IPN processed', {
     checkoutSessionId: session.id,
     paymentId: payment.id,
