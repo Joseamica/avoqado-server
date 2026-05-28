@@ -392,8 +392,12 @@ describe('ClassSession Dashboard Service', () => {
           }),
         }),
       )
-      expect(result.status).toBe('CONFIRMED')
-      expect(result.classSessionId).toBe(SESSION_ID)
+      // addAttendee now returns { reservation, orderId } so the controller can
+      // surface a TPV deep-link on walk-in flows. orderId stays null here
+      // because checkInImmediately defaults to false in this test path.
+      expect(result.orderId).toBeNull()
+      expect(result.reservation.status).toBe('CONFIRMED')
+      expect(result.reservation.classSessionId).toBe(SESSION_ID)
     })
 
     it('should default partySize to 1 when not specified', async () => {
@@ -464,6 +468,151 @@ describe('ClassSession Dashboard Service', () => {
       mockSessionAndEnrolled(sessionRow, 10)
 
       await expect(addAttendee(VENUE_ID, SESSION_ID, { ...addAttendeeDto, partySize: 1 } as any, STAFF_ID)).rejects.toThrow(ConflictError)
+    })
+
+    // ====================================================
+    // checkInImmediately (walk-in flow): reservation enters
+    // CHECKED_IN and an Order is auto-built in the same TX
+    // ====================================================
+
+    // Mocks the second leg of the same TX: createOrderFromReservation()
+    // querying its own data. The helper does:
+    //   1. tx.order.findFirst (idempotency check)
+    //   2. tx.reservation.findFirst (load reservation+modifiers)
+    //   3. tx.product.findMany (load product catalog)
+    //   4. tx.order.create (build the Order)
+    //   5. tx.orderItem.create (one per product)
+    function mockHelperHappyPath(opts: { partySize: number; price: number; orderId?: string } = { partySize: 1, price: 200 }) {
+      const orderId = opts.orderId ?? 'order-walkin-001'
+      prismaMock.order.findFirst.mockResolvedValueOnce(null) // no prior order — idempotent allow
+      prismaMock.reservation.findFirst.mockResolvedValueOnce({
+        id: RESERVATION_ID,
+        productId: PRODUCT_ID,
+        productIds: [],
+        partySize: opts.partySize,
+        tableId: null,
+        customerId: null,
+        guestName: 'Ana Lopez',
+        guestPhone: '+525551234567',
+        guestEmail: null,
+        specialRequests: null,
+        modifiers: [],
+      } as any)
+      prismaMock.product.findMany.mockResolvedValueOnce([
+        {
+          id: PRODUCT_ID,
+          name: 'Yoga Class',
+          sku: 'YOGA-001',
+          price: opts.price,
+          taxRate: 0,
+          category: { name: 'Wellness' },
+        } as any,
+      ])
+      prismaMock.order.create.mockResolvedValueOnce({ id: orderId } as any)
+      prismaMock.orderItem.create.mockResolvedValue({ id: 'orderitem-001' } as any)
+    }
+
+    it('should create CHECKED_IN reservation + build Order when checkInImmediately=true', async () => {
+      mockSessionAndEnrolled(sessionRow, 3)
+      const checkedInReservation = makeReservation({
+        status: 'CHECKED_IN',
+        classSessionId: SESSION_ID,
+        partySize: 1,
+        checkedInAt: new Date(),
+      })
+      prismaMock.reservation.create.mockResolvedValue(checkedInReservation)
+      mockHelperHappyPath({ partySize: 1, price: 200, orderId: 'order-abc-123' })
+
+      const result = await addAttendee(VENUE_ID, SESSION_ID, { ...addAttendeeDto, partySize: 1, checkInImmediately: true } as any, STAFF_ID)
+
+      // 1) Reservation persisted as CHECKED_IN with checkedInAt set
+      expect(prismaMock.reservation.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            status: 'CHECKED_IN',
+            checkedInAt: expect.any(Date),
+          }),
+        }),
+      )
+      // 2) Helper built an Order — verified by the orderItem mock being touched
+      expect(prismaMock.order.create).toHaveBeenCalledTimes(1)
+      expect(prismaMock.orderItem.create).toHaveBeenCalledTimes(1)
+      // 3) Result shape carries the orderId so the controller can deep-link
+      expect(result.orderId).toBe('order-abc-123')
+      expect(result.reservation.status).toBe('CHECKED_IN')
+    })
+
+    it('should pass quantity=partySize to OrderItem when checkInImmediately=true and partySize>1', async () => {
+      // Capacity 10, 0 enrolled, partySize=3 — full family bought in one charge.
+      mockSessionAndEnrolled(sessionRow, 0)
+      const familyReservation = makeReservation({
+        status: 'CHECKED_IN',
+        classSessionId: SESSION_ID,
+        partySize: 3,
+        checkedInAt: new Date(),
+      })
+      prismaMock.reservation.create.mockResolvedValue(familyReservation)
+      mockHelperHappyPath({ partySize: 3, price: 200 })
+
+      await addAttendee(VENUE_ID, SESSION_ID, { ...addAttendeeDto, partySize: 3, checkInImmediately: true } as any, STAFF_ID)
+
+      // OrderItem.quantity reflects seatCount so the cashier charges 3× the class price
+      expect(prismaMock.orderItem.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            productId: PRODUCT_ID,
+            quantity: 3,
+          }),
+        }),
+      )
+      // And the Order subtotal should be 3 × 200 = 600 (no modifiers, taxRate=0)
+      const orderCreateCall = prismaMock.order.create.mock.calls[0][0] as any
+      expect(orderCreateCall.data.subtotal.toString()).toBe('600')
+      expect(orderCreateCall.data.total.toString()).toBe('600')
+    })
+
+    it('should not call the Order helper when checkInImmediately is absent (regression guard)', async () => {
+      mockSessionAndEnrolled(sessionRow, 3)
+      prismaMock.reservation.create.mockResolvedValue(makeReservation({ status: 'CONFIRMED' }))
+
+      const result = await addAttendee(VENUE_ID, SESSION_ID, addAttendeeDto as any, STAFF_ID)
+
+      // The helper's first query (order.findFirst) must NOT have fired,
+      // proving the default path is unchanged for legacy callers.
+      expect(prismaMock.order.findFirst).not.toHaveBeenCalled()
+      expect(prismaMock.order.create).not.toHaveBeenCalled()
+      expect(prismaMock.orderItem.create).not.toHaveBeenCalled()
+      expect(result.orderId).toBeNull()
+    })
+
+    it('should return orderId=null when helper cannot build the Order (productId soft-deleted)', async () => {
+      mockSessionAndEnrolled(sessionRow, 3)
+      prismaMock.reservation.create.mockResolvedValue(makeReservation({ status: 'CHECKED_IN', classSessionId: SESSION_ID, partySize: 1 }))
+      // Helper happy path UNTIL product.findMany — return empty so the
+      // helper bails out at "no products resolved" and returns null.
+      prismaMock.order.findFirst.mockResolvedValueOnce(null)
+      prismaMock.reservation.findFirst.mockResolvedValueOnce({
+        id: RESERVATION_ID,
+        productId: PRODUCT_ID,
+        productIds: [],
+        partySize: 1,
+        tableId: null,
+        customerId: null,
+        guestName: 'Test',
+        guestPhone: null,
+        guestEmail: null,
+        specialRequests: null,
+        modifiers: [],
+      } as any)
+      prismaMock.product.findMany.mockResolvedValueOnce([]) // ← key: no product visible
+
+      const result = await addAttendee(VENUE_ID, SESSION_ID, { ...addAttendeeDto, partySize: 1, checkInImmediately: true } as any, STAFF_ID)
+
+      // Reservation IS still CHECKED_IN (capacity already consumed),
+      // but no Order was created.
+      expect(result.reservation.status).toBe('CHECKED_IN')
+      expect(result.orderId).toBeNull()
+      expect(prismaMock.order.create).not.toHaveBeenCalled()
     })
   })
 

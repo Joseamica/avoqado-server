@@ -12,6 +12,7 @@ import type {
 } from '../../schemas/dashboard/classSession.schema'
 import { ReservationStatus } from '@prisma/client'
 import { withSerializableRetry } from './reservation.dashboard.service'
+import { createOrderFromReservation } from '../reservation/createOrderFromReservation'
 import { logAction } from './activity-log.service'
 import { buildSyncKey, collapseSupersededOps, enqueuePush, resolveClassSessionPushTargets } from '@/services/google-calendar/outbox.service'
 import { publishPushNotification } from '@/communication/rabbitmq/gcal-push-consumer'
@@ -543,6 +544,13 @@ export async function addAttendee(venueId: string, sessionId: string, data: AddA
 
     const confirmationCode = generateConfirmationCode()
 
+    // Walk-in flow short-circuits: when `checkInImmediately` is true the
+    // reservation arrives already-checked-in and we build the cashier Order
+    // in the same TX (idempotent helper — see createOrderFromReservation).
+    // Default behavior (flag absent) keeps the historical CONFIRMED-only
+    // semantics so existing dashboards and online bookings are untouched.
+    const targetStatus: ReservationStatus = data.checkInImmediately ? 'CHECKED_IN' : 'CONFIRMED'
+
     const reservation = await tx.reservation.create({
       data: {
         venueId,
@@ -552,7 +560,7 @@ export async function addAttendee(venueId: string, sessionId: string, data: AddA
         startsAt: session.startsAt,
         endsAt: session.endsAt,
         duration: session.duration,
-        status: 'CONFIRMED',
+        status: targetStatus,
         channel: 'DASHBOARD',
         guestName: data.guestName,
         guestPhone: data.guestPhone ?? null,
@@ -562,6 +570,7 @@ export async function addAttendee(venueId: string, sessionId: string, data: AddA
         customerId: data.customerId ?? null,
         createdById: staffId,
         confirmedAt: new Date(),
+        checkedInAt: data.checkInImmediately ? new Date() : null,
       },
       include: {
         customer: { select: { id: true, firstName: true, lastName: true } },
@@ -591,7 +600,28 @@ export async function addAttendee(venueId: string, sessionId: string, data: AddA
       }
     }
 
-    return reservation
+    // Walk-in flow: build the cashier Order inline so the caller can deep-link
+    // to PaymentFlowScreen with no extra navigation. Helper is idempotent and
+    // gracefully returns null when the reservation has no productId — that
+    // path only triggers if the ClassSession.productId points to a
+    // soft-deleted product; we surface the warning rather than fail the TX.
+    let orderId: string | null = null
+    if (data.checkInImmediately) {
+      const orderResult = await createOrderFromReservation(tx, {
+        reservationId: reservation.id,
+        venueId,
+        createdByStaffId: staffId,
+      })
+      if (!orderResult) {
+        logger.warn(
+          `[addAttendee] Could not build Order from reservation ${reservation.id} ` +
+            `(productId=${session.productId} may be soft-deleted). Reservation is CHECKED_IN but uncharged.`,
+        )
+      }
+      orderId = orderResult?.orderId ?? null
+    }
+
+    return { reservation, orderId }
   })
 }
 

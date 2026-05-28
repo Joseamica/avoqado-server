@@ -59,6 +59,11 @@ export const addAttendeeSchema = z.object({
   partySize: z.number().int().min(1).default(1),
   specialRequests: z.string().max(2000).optional().nullable(),
   customerId: z.string().cuid().optional().nullable(),
+  // When true, the attendee is created in CHECKED_IN state and an Order is
+  // auto-built in the same TX so the cashier can charge immediately (walk-in
+  // flow). Default false keeps existing callers on the old CONFIRMED-only
+  // behavior — no Android client change is required to keep working.
+  checkInImmediately: z.boolean().default(false),
 })
 
 // ---- Bulk (recurring) creation ----

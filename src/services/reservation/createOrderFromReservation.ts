@@ -46,6 +46,7 @@ export async function createOrderFromReservation(
       id: true,
       productId: true,
       productIds: true,
+      partySize: true,
       tableId: true,
       customerId: true,
       guestName: true,
@@ -59,6 +60,11 @@ export async function createOrderFromReservation(
     },
   })
   if (!reservation) return null
+
+  // partySize drives line quantity so a family of 3 paying 1 charge sees the
+  // correct total automatically. Defaults to 1 for legacy bookings — math is
+  // unchanged for any reservation that didn't opt into multi-seat pricing.
+  const seatCount = reservation.partySize ?? 1
 
   // Resolve productId list: multi-service array if present, else single id.
   const productIds =
@@ -110,7 +116,10 @@ export async function createOrderFromReservation(
     if (!product) continue
     const unitPrice = new Prisma.Decimal(product.price)
     const taxRate = new Prisma.Decimal(product.taxRate)
-    const lineSubtotal = unitPrice // quantity = 1 per reservation product
+    // Line subtotal scales with seatCount so a partySize=3 walk-in charges
+    // 3× the class price in one transaction. seatCount=1 (the historical
+    // default) leaves the math identical to the previous behavior.
+    const lineSubtotal = unitPrice.mul(seatCount)
     const lineTax = lineSubtotal.mul(taxRate)
     const lineTotal = lineSubtotal.add(lineTax)
     subtotal = subtotal.add(lineSubtotal)
@@ -119,15 +128,16 @@ export async function createOrderFromReservation(
     const modRows = modifiersByProduct.get(pid) ?? []
     const modLines: LineDraft['modifiers'] = []
     for (const m of modRows) {
-      const lineTotalMod = new Prisma.Decimal(m.price).mul(m.quantity)
-      // Modifier price is added to the order subtotal so the cashier sees the
-      // final total reflecting the customer's picks.
+      // Modifiers are per-seat add-ons: 1 "Esmalte de color" picked at
+      // booking time times a family of 3 means 3 esmaltes on the bill.
+      const lineTotalMod = new Prisma.Decimal(m.price).mul(m.quantity).mul(seatCount)
       subtotal = subtotal.add(lineTotalMod)
-      // Apply product tax rate to modifier add-on (TPV convention).
       const modTax = lineTotalMod.mul(taxRate)
       totalTax = totalTax.add(modTax)
       modLines.push({
         name: m.name ?? '',
+        // OrderItemModifier.quantity stays per-unit; the OrderItem.quantity
+        // below (= seatCount) is what multiplies it across the bill.
         quantity: m.quantity,
         price: new Prisma.Decimal(m.price),
         modifierId: m.modifierId,
@@ -185,7 +195,9 @@ export async function createOrderFromReservation(
         productName: line.productName,
         productSku: line.productSku,
         categoryName: line.categoryName,
-        quantity: 1,
+        // OrderItem.quantity = number of seats sold for this product.
+        // Subtotal/tax above already include the seat multiplier.
+        quantity: seatCount,
         unitPrice: line.unitPrice,
         taxAmount: line.taxAmount,
         total: line.total,

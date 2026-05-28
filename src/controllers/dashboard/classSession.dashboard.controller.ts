@@ -105,14 +105,24 @@ export async function cancelClassSession(req: Request, res: Response, next: Next
 
 /**
  * POST /venues/:venueId/class-sessions/:sessionId/attendees
+ *
+ * Response shape is intentionally polymorphic to preserve backward
+ * compatibility with existing dashboard clients:
+ * - Default (no `checkInImmediately`) → flat Reservation object as before.
+ * - With `checkInImmediately: true` → `{ reservation, orderId }` so the
+ *   walk-in caller (Android POS) can deep-link to PaymentFlowScreen.
  */
 export async function addAttendee(req: Request, res: Response, next: NextFunction) {
   try {
     const venueId = resolveVenueId(req)
     const { sessionId } = req.params
     const { userId } = (req as any).authContext
-    const reservation = await classSessionService.addAttendee(venueId, sessionId, req.body, userId)
-    res.status(201).json(reservation)
+    const result = await classSessionService.addAttendee(venueId, sessionId, req.body, userId)
+    if (req.body?.checkInImmediately) {
+      res.status(201).json({ reservation: result.reservation, orderId: result.orderId })
+    } else {
+      res.status(201).json(result.reservation)
+    }
   } catch (error) {
     next(error)
   }
