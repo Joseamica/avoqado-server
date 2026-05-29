@@ -40,7 +40,7 @@ export interface EnsureVenueResult {
  *     Step 2 businessInfo yet) — callers handle this by omitting `venueId`
  *     from the response so the frontend doesn't try to invoke later steps.
  */
-export async function ensureVenueForOnboarding(organizationId: string, userId: string): Promise<EnsureVenueResult | null> {
+export async function ensureVenueForOnboarding(organizationId: string, userId?: string): Promise<EnsureVenueResult | null> {
   // 1. Reuse existing venue if any. We pick the FIRST one created so a
   //    multi-venue org gets a stable answer instead of last-write-wins.
   //    Any status is OK — ACTIVE / ONBOARDING / PENDING_ACTIVATION all
@@ -51,6 +51,24 @@ export async function ensureVenueForOnboarding(organizationId: string, userId: s
     orderBy: { createdAt: 'asc' },
   })
   if (existing) return existing
+
+  // Resolve the OWNER staff for the StaffVenue link. The GET progress route
+  // that calls us is NOT token-authenticated (no req.authContext), so callers
+  // can't always supply a userId. Fall back to the org's primary OWNER.
+  let ownerStaffId = userId
+  if (!ownerStaffId) {
+    const ownerLink = await prisma.staffOrganization.findFirst({
+      where: { organizationId, role: 'OWNER' },
+      select: { staffId: true },
+      orderBy: { isPrimary: 'desc' },
+    })
+    ownerStaffId = ownerLink?.staffId
+  }
+  if (!ownerStaffId) {
+    // No owner to attribute the venue to — can't safely create one.
+    logger.info('ensureVenueForOnboarding: no OWNER staff for org, skipping creation', { organizationId })
+    return null
+  }
 
   // 2. No venue yet — assemble the minimum CreateVenueInput from wizard data.
   //    getV2SetupDataForCompletion already does the heavy lifting (parses
@@ -81,7 +99,7 @@ export async function ensureVenueForOnboarding(organizationId: string, userId: s
   //    V2 is always REAL.
   const result = await createVenueFromOnboarding({
     organizationId,
-    userId,
+    userId: ownerStaffId,
     onboardingType: 'REAL',
     businessInfo: setupData.businessInfo,
     // Optional inputs not yet collected at this point — venueCreation handles

@@ -204,19 +204,20 @@ export async function getOnboardingProgress(req: Request, res: Response, next: N
     // status=ONBOARDING using the wizard data captured so far. Returns null
     // when the user hasn't filled enough data yet (e.g. pre-businessName).
     // Spec: docs/superpowers/specs/2026-05-29-onboarding-tpv-purchase-design.md
+    // This route is NOT token-authenticated, so req.authContext may be absent.
+    // Pass staffId when available; otherwise ensureVenueForOnboarding resolves
+    // the org's primary OWNER itself for the StaffVenue link.
     const authContext = (req as any).authContext
     const staffId = authContext?.userId
-    const venue = staffId
-      ? await ensureVenueForOnboarding(organizationId, staffId).catch(err => {
-          // Never let venue-ensure break the progress endpoint — if we can't
-          // create one, the wizard just won't show Steps 8/9. Log and continue.
-          logger.warn('ensureVenueForOnboarding failed; omitting venueId', {
-            organizationId,
-            error: err instanceof Error ? err.message : String(err),
-          })
-          return null
-        })
-      : null
+    const venue = await ensureVenueForOnboarding(organizationId, staffId).catch(err => {
+      // Never let venue-ensure break the progress endpoint — if we can't
+      // create one, the wizard just won't show Steps 8/9. Log and continue.
+      logger.warn('ensureVenueForOnboarding failed; omitting venueId', {
+        organizationId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+      return null
+    })
 
     // Optional Step 9 (TPV purchase) — gated by env flag. When the flag is
     // off the field is omitted entirely so the frontend behaves as if the step
