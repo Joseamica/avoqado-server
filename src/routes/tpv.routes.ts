@@ -89,6 +89,7 @@ import * as rolePermissionService from '../services/dashboard/rolePermission.ser
 import emailService from '../services/email.service'
 import { moduleService } from '../services/modules/module.service'
 import { serializedInventoryService } from '../services/serialized-inventory/serializedInventory.service'
+import { simRegistrationService } from '../services/serialized-inventory/simRegistration.service'
 import * as orderTpvService from '../services/tpv/order.tpv.service'
 import prisma from '../utils/prismaClient'
 
@@ -5860,6 +5861,36 @@ router.post(
       })
 
       const isOrgLevel = !!venue?.organizationId
+
+      // Approval mode (org en ENFORCE): el alta NO crea inventario vendible; crea
+      // una solicitud que el OWNER aprueba. Respuesta retrocompatible: las TPVs
+      // viejas leen { created: 0, duplicates, assignedToYou: 0 } y NO añaden stock.
+      if (isOrgLevel && (await simRegistrationService.isApprovalModeEnabled(venue!.organizationId!))) {
+        const reqResult = await simRegistrationService.createRequest({
+          organizationId: venue!.organizationId!,
+          requestedByStaffId: staffId,
+          registeredFromVenueId: venueId,
+          proposedCategoryId: categoryId,
+          serialNumbers,
+        })
+        logger.info(`📦 [SERIALIZED INV] Approval request created`, {
+          venueId, organizationId: venue!.organizationId, requestId: reqResult.requestId,
+          submitted: reqResult.submitted, duplicates: reqResult.duplicates.length,
+          invalid: reqResult.invalid.length, correlationId: req.correlationId,
+        })
+        return res.status(200).json({
+          success: true,
+          data: {
+            created: 0,
+            duplicates: reqResult.duplicates,
+            assignedToYou: 0,
+            mode: 'approval',
+            requestId: reqResult.requestId,
+            submitted: reqResult.submitted,
+            invalid: reqResult.invalid,
+          },
+        })
+      }
 
       logger.info(`📦 [SERIALIZED INV] Batch registration (${isOrgLevel ? 'org-level' : 'venue-level'})`, {
         venueId,
