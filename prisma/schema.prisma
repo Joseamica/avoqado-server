@@ -80,6 +80,9 @@ model Organization {
   // Partner API keys for external system access (e.g., PlayTelecom)
   partnerAPIKeys PartnerAPIKey[]
 
+  // SIM registration approval layer (additive, sits on top of SerializedItem custody)
+  simRegistrationRequests SimRegistrationRequest[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -436,6 +439,9 @@ model Venue {
 
   // Rate correction batches applied to this venue's historical payments
   rateCorrectionBatches RateCorrectionBatch[]
+
+  // SIM registration approval layer (additive, sits on top of SerializedItem custody)
+  simRegRequestsFromHere SimRegistrationRequest[] @relation("SimRegRequestVenue")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -818,6 +824,10 @@ model Staff {
   // ✅ Serialized-inventory chain-of-custody (SIM flow)
   serializedItemsAsSupervisor SerializedItem[] @relation("SerializedItemSupervisor")
   serializedItemsAsPromoter   SerializedItem[] @relation("SerializedItemPromoter")
+
+  // SIM registration approval layer (additive, sits on top of SerializedItem custody)
+  simRegRequestsMade     SimRegistrationRequest[] @relation("SimRegRequestRequester")
+  simRegRequestsReviewed SimRegistrationRequest[] @relation("SimRegRequestReviewer")
 
   // Marketing Campaigns (superadmin)
   emailTemplatesCreated     EmailTemplate[]     @relation("EmailTemplateCreator")
@@ -7368,6 +7378,7 @@ model ItemCategory {
   // Relations
   serializedItems   SerializedItem[]
   stockAlertConfigs StockAlertConfig[]
+  simRegRequests    SimRegistrationRequest[] @relation("SimRegRequestCategory")
 
   @@unique([venueId, name]) // Venue-level uniqueness (NULL venueId won't conflict)
   @@unique([organizationId, name]) // Org-level uniqueness
@@ -7552,6 +7563,59 @@ model SerializedItemCustodyEvent {
   @@index([serializedItemId, createdAt])
   @@index([serialNumber, createdAt])
   @@index([idempotencyRequestId])
+}
+
+enum SimRegistrationRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  PARTIAL
+}
+
+enum SimRegistrationItemStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  DUPLICATE
+}
+
+/// Solicitud de alta de SIMs creada por un promotor desde la TPV cuando la org
+/// está en modo ENFORCE. Al aprobar, se crean SerializedItem en ADMIN_HELD.
+/// Capa aditiva: NO reemplaza ni modifica SerializedItem.
+model SimRegistrationRequest {
+  id                    String   @id @default(cuid())
+  organizationId        String
+  organization          Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  registeredFromVenueId String?
+  registeredFromVenue   Venue?   @relation("SimRegRequestVenue", fields: [registeredFromVenueId], references: [id])
+  requestedByStaffId    String
+  requestedBy           Staff    @relation("SimRegRequestRequester", fields: [requestedByStaffId], references: [id])
+  proposedCategoryId    String?
+  proposedCategory      ItemCategory? @relation("SimRegRequestCategory", fields: [proposedCategoryId], references: [id])
+  status                SimRegistrationRequestStatus @default(PENDING)
+  reviewedByStaffId     String?
+  reviewedBy            Staff?   @relation("SimRegRequestReviewer", fields: [reviewedByStaffId], references: [id])
+  reviewedAt            DateTime?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  items                 SimRegistrationRequestItem[]
+
+  @@index([organizationId, status])
+  @@index([requestedByStaffId])
+}
+
+model SimRegistrationRequestItem {
+  id                      String  @id @default(cuid())
+  requestId               String
+  request                 SimRegistrationRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  serialNumber            String
+  status                  SimRegistrationItemStatus @default(PENDING)
+  rejectionReason         String?
+  createdSerializedItemId String?
+  createdAt               DateTime @default(now())
+
+  @@unique([requestId, serialNumber])
+  @@index([serialNumber])
 }
 
 // Per-request idempotency cache. Scope: (org, actor, endpoint, key). A bulk
