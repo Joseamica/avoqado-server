@@ -80,6 +80,9 @@ export const UpdateVenueSettingsSchema = z.object({
     paymentTiming: z.enum(['PAY_BEFORE', 'PAY_AFTER', 'PAY_AT_TABLE']).optional(),
     inventoryDeduction: z.enum(['ON_ORDER_CREATE', 'ON_PAYMENT_COMPLETE']).optional(),
 
+    // TPV kill-switches
+    requireAvoqadoServerForCardPayment: z.boolean().optional(),
+
     // TPV Screen Configuration
     tpvShowReviewScreen: z.boolean().optional(),
     tpvShowTipScreen: z.boolean().optional(),

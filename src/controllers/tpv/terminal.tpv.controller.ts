@@ -57,6 +57,11 @@ interface TpvSettings {
   cellularFailoverBadReadingsThreshold: number
   cellularFailoverCooldownSeconds: number
   cellularFailoverMinCellHoldSeconds: number
+  // Card payment server-decoupling kill-switch.
+  // true (default) = require api.avoqado.io reachable before allowing a card charge (legacy behavior).
+  // false = allow the (always-online-to-Momentum) charge even when our backend heartbeat is down;
+  //         recording falls to the TPV offline queue. Scoped on-device to orderId == null.
+  requireAvoqadoServerForCardPayment: boolean
 }
 
 /**
@@ -98,6 +103,8 @@ const DEFAULT_TPV_SETTINGS: TpvSettings = {
   cellularFailoverBadReadingsThreshold: 3,
   cellularFailoverCooldownSeconds: 60,
   cellularFailoverMinCellHoldSeconds: 120,
+  // Card auth requires our backend by default (legacy behavior — no change until flipped per-venue).
+  requireAvoqadoServerForCardPayment: true,
 }
 
 /**
@@ -379,6 +386,11 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
     const tpvSettings: TpvSettings = {
       ...terminalTpvSettings,
       enableShifts: venueSettings?.enableShifts ?? DEFAULT_TPV_SETTINGS.enableShifts,
+      // requireAvoqadoServerForCardPayment: no VenueSettings column yet — always resolves to the
+      // safe default (true = legacy behavior). A future DB migration + venueSettings select update
+      // will enable per-venue control. Until then, the TPV behaves exactly as before.
+      requireAvoqadoServerForCardPayment:
+        DEFAULT_TPV_SETTINGS.requireAvoqadoServerForCardPayment,
       // requireClockInPhoto and requireClockOutPhoto come from terminalTpvSettings (Terminal.config)
     }
 
