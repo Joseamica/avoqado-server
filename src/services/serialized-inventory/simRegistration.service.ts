@@ -1,4 +1,4 @@
-import { PrismaClient, SimRegistrationItemStatus } from '@prisma/client'
+import { Prisma, PrismaClient, SimRegistrationItemStatus } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { isValidMxIccid, normalizeSerial } from './serializedInventory.service'
 
@@ -48,7 +48,8 @@ export class SimRegistrationService {
       where: { organizationId: input.organizationId, serialNumber: { in: wellFormed } },
       select: { serialNumber: true },
     })
-    const existingSet = new Set(existing.map(e => e.serialNumber))
+    // Legacy items may be stored with inconsistent case; mirrors custody.service.ts findOrgItem insensitive match.
+    const existingSet = new Set(existing.map(e => e.serialNumber.toUpperCase()))
 
     const pendingItems = await this.db.simRegistrationRequestItem.findMany({
       where: {
@@ -58,7 +59,7 @@ export class SimRegistrationService {
       },
       select: { serialNumber: true },
     })
-    const pendingSet = new Set(pendingItems.map(p => p.serialNumber))
+    const pendingSet = new Set(pendingItems.map(p => p.serialNumber.toUpperCase()))
 
     const duplicates = wellFormed.filter(sn => existingSet.has(sn) || pendingSet.has(sn))
     const toSubmit = wellFormed.filter(sn => !existingSet.has(sn) && !pendingSet.has(sn))
@@ -113,18 +114,33 @@ export class SimRegistrationService {
           await tx.simRegistrationRequestItem.update({ where: { id: it.id }, data: { status: 'DUPLICATE' } })
           duplicates++; continue
         }
-        const created = await tx.serializedItem.create({
-          data: {
-            organizationId: input.organizationId,
-            categoryId: input.categoryId,
-            serialNumber: it.serialNumber,
-            createdBy: request.requestedByStaffId,
-            registeredFromVenueId: request.registeredFromVenueId,
-            status: 'AVAILABLE',
-            custodyState: 'ADMIN_HELD',
-          },
-          select: { id: true },
-        })
+        let created: { id: string }
+        try {
+          created = await tx.serializedItem.create({
+            data: {
+              organizationId: input.organizationId,
+              categoryId: input.categoryId,
+              serialNumber: it.serialNumber,
+              createdBy: request.requestedByStaffId,
+              registeredFromVenueId: request.registeredFromVenueId,
+              status: 'AVAILABLE',
+              custodyState: 'ADMIN_HELD',
+            },
+            select: { id: true },
+          })
+        } catch (err) {
+          // P2002 = concurrent insert created this SIM between our re-dedup findMany and this create.
+          // A P2002 inside a Postgres interactive transaction aborts the tx; any further write in the
+          // same tx would fail. We count it as a duplicate and skip the item status update entirely —
+          // the item stays PENDING and will resolve correctly on the next approve call.
+          if (
+            err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002'
+          ) {
+            duplicates++
+            continue
+          }
+          throw err
+        }
         await tx.simRegistrationRequestItem.update({
           where: { id: it.id }, data: { status: 'APPROVED', createdSerializedItemId: created.id },
         })
