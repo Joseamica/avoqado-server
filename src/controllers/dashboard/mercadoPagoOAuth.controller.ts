@@ -26,6 +26,25 @@ import { initiateQuerySchema, callbackQuerySchema, disconnectParamsSchema } from
 import type { MercadoPagoOAuthState } from '@/services/mercado-pago/types'
 
 /**
+ * Build the post-callback redirect URL. If the OAuth initiation was triggered
+ * from the V2 setup wizard, return to the wizard at step 8 (hash #step-7,
+ * since the hash is 0-indexed). Otherwise use the legacy integrations page
+ * (venue-scoped if we know the slug, else the global integrations page).
+ */
+function buildCallbackRedirect(
+  dashboardUrl: string,
+  state: Pick<MercadoPagoOAuthState, 'returnTo'>,
+  legacyPath: string,
+  params: Record<string, string>,
+): string {
+  const search = new URLSearchParams(params).toString()
+  if (state.returnTo === 'wizard') {
+    return `${dashboardUrl}/setup?${search}#step-7`
+  }
+  return `${dashboardUrl}${legacyPath}?${search}`
+}
+
+/**
  * GET /api/v1/dashboard/integrations/mercadopago/oauth/connect?venueId=...&ecommerceMerchantId=...
  *
  * Authenticated. Redirects the browser to MP's authorization page.
@@ -135,7 +154,12 @@ export async function callback(req: Request, res: Response) {
       venueId: statePayload.venueId,
       merchantId: statePayload.ecommerceMerchantId,
     })
-    return res.redirect(`${dashboardUrl}${merchantPath}?mp_status=error&reason=tenant_check_failed`)
+    return res.redirect(
+      buildCallbackRedirect(dashboardUrl, statePayload, merchantPath, {
+        mp_status: 'error',
+        reason: 'tenant_check_failed',
+      }),
+    )
   }
 
   // 4. Exchange code → tokens, persist (encrypted).
@@ -149,24 +173,26 @@ export async function callback(req: Request, res: Response) {
       mpUserId: tokens.user_id,
     })
 
-    const params = new URLSearchParams({
-      mp_status: 'connected',
-      ecommerceMerchantId: statePayload.ecommerceMerchantId,
-    })
-    return res.redirect(`${dashboardUrl}${merchantPath}?${params.toString()}`)
+    return res.redirect(
+      buildCallbackRedirect(dashboardUrl, statePayload, merchantPath, {
+        mp_status: 'connected',
+        ecommerceMerchantId: statePayload.ecommerceMerchantId,
+      }),
+    )
   } catch (err: any) {
     logger.error('[MP OAuth] token exchange failed', {
       err: err.message,
       venueId: statePayload.venueId,
       ecommerceMerchantId: statePayload.ecommerceMerchantId,
     })
-    const params = new URLSearchParams({
-      mp_status: 'error',
-      reason: 'token_exchange_failed',
-      ecommerceMerchantId: statePayload.ecommerceMerchantId,
-      ...(err.message ? { description: err.message } : {}),
-    })
-    return res.redirect(`${dashboardUrl}${merchantPath}?${params.toString()}`)
+    return res.redirect(
+      buildCallbackRedirect(dashboardUrl, statePayload, merchantPath, {
+        mp_status: 'error',
+        reason: 'token_exchange_failed',
+        ecommerceMerchantId: statePayload.ecommerceMerchantId,
+        ...(err.message ? { description: err.message } : {}),
+      }),
+    )
   }
 }
 
