@@ -77,7 +77,7 @@ export async function confirmIncident(
   try {
     const { incidentId } = req.params
     const { settlementArrived, actualDate, notes } = req.body
-    const userId = (req as any).user?.id || 'unknown'
+    const { userId } = (req as any).authContext
 
     const result = await settlementIncidentService.confirmSettlementIncident(
       incidentId,
@@ -119,7 +119,7 @@ export async function bulkConfirmIncidents(
   try {
     const { venueId } = req.params
     const { incidentIds, settlementArrived, actualDate, notes } = req.body
-    const userId = (req as any).user?.id || 'unknown'
+    const { userId } = (req as any).authContext
 
     const result = await settlementIncidentService.bulkConfirmSettlementIncidents(
       venueId,
