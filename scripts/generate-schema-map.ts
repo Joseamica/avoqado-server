@@ -211,6 +211,8 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   // 7. Serialized Inventory
   SerializedItem: 'Serialized Inventory',
   SerializedItemCustodyEvent: 'Serialized Inventory',
+  SimRegistrationRequest: 'Serialized Inventory',
+  SimRegistrationRequestItem: 'Serialized Inventory',
   SaleVerification: 'Serialized Inventory',
 
   // 8. Orders, KDS & Cash
