@@ -1,0 +1,199 @@
+import { PrismaClient, SimRegistrationItemStatus } from '@prisma/client'
+import prisma from '../../utils/prismaClient'
+import { isValidMxIccid, normalizeSerial } from './serializedInventory.service'
+
+export interface CreateRequestInput {
+  organizationId: string
+  requestedByStaffId: string
+  registeredFromVenueId?: string | null
+  proposedCategoryId?: string | null
+  serialNumbers: string[]
+}
+export interface CreateRequestResult {
+  requestId: string | null
+  submitted: number
+  duplicates: string[]
+  invalid: string[]
+}
+
+export interface ApproveInput {
+  organizationId: string; requestId: string; reviewedByStaffId: string
+  serialNumbers?: string[]; categoryId: string
+}
+export interface ApproveResult { approved: number; duplicates: number; requestStatus: string }
+export interface RejectInput {
+  organizationId: string; requestId: string; reviewedByStaffId: string
+  serialNumbers?: string[]; reason: string
+}
+export interface RejectResult { rejected: number; requestStatus: string }
+
+export class SimRegistrationService {
+  constructor(private db: PrismaClient = prisma) {}
+
+  /** Approval feature + sale gate share one switch: org.simCustodyEnforcementMode === 'ENFORCE'. */
+  async isApprovalModeEnabled(organizationId: string): Promise<boolean> {
+    const org = await this.db.organization.findUnique({
+      where: { id: organizationId },
+      select: { simCustodyEnforcementMode: true },
+    })
+    return org?.simCustodyEnforcementMode === 'ENFORCE'
+  }
+
+  async createRequest(input: CreateRequestInput): Promise<CreateRequestResult> {
+    const normalized = input.serialNumbers.map(normalizeSerial)
+    const invalid = normalized.filter(sn => !isValidMxIccid(sn))
+    const wellFormed = normalized.filter(sn => isValidMxIccid(sn))
+
+    const existing = await this.db.serializedItem.findMany({
+      where: { organizationId: input.organizationId, serialNumber: { in: wellFormed } },
+      select: { serialNumber: true },
+    })
+    const existingSet = new Set(existing.map(e => e.serialNumber))
+
+    const pendingItems = await this.db.simRegistrationRequestItem.findMany({
+      where: {
+        serialNumber: { in: wellFormed },
+        status: 'PENDING' as SimRegistrationItemStatus,
+        request: { organizationId: input.organizationId, status: 'PENDING' },
+      },
+      select: { serialNumber: true },
+    })
+    const pendingSet = new Set(pendingItems.map(p => p.serialNumber))
+
+    const duplicates = wellFormed.filter(sn => existingSet.has(sn) || pendingSet.has(sn))
+    const toSubmit = wellFormed.filter(sn => !existingSet.has(sn) && !pendingSet.has(sn))
+
+    if (toSubmit.length === 0) {
+      return { requestId: null, submitted: 0, duplicates, invalid }
+    }
+
+    const request = await this.db.simRegistrationRequest.create({
+      data: {
+        organizationId: input.organizationId,
+        requestedByStaffId: input.requestedByStaffId,
+        registeredFromVenueId: input.registeredFromVenueId ?? null,
+        proposedCategoryId: input.proposedCategoryId ?? null,
+        status: 'PENDING',
+        items: {
+          create: toSubmit.map(serialNumber => ({
+            serialNumber,
+            status: 'PENDING' as SimRegistrationItemStatus,
+          })),
+        },
+      },
+      select: { id: true },
+    })
+
+    return { requestId: request.id, submitted: toSubmit.length, duplicates, invalid }
+  }
+
+  async approve(input: ApproveInput): Promise<ApproveResult> {
+    return this.db.$transaction(async (tx: any) => {
+      const request = await tx.simRegistrationRequest.findUnique({
+        where: { id: input.requestId }, include: { items: true },
+      })
+      if (!request || request.organizationId !== input.organizationId) throw new Error('REQUEST_NOT_FOUND')
+
+      const targetSet = input.serialNumbers ? new Set(input.serialNumbers.map(normalizeSerial)) : null
+      const pending = request.items.filter(
+        (it: any) => it.status === 'PENDING' && (!targetSet || targetSet.has(it.serialNumber)),
+      )
+      const serials = pending.map((it: any) => it.serialNumber)
+      const existing = serials.length
+        ? await tx.serializedItem.findMany({
+            where: { organizationId: input.organizationId, serialNumber: { in: serials } },
+            select: { serialNumber: true },
+          })
+        : []
+      const existingSet = new Set(existing.map((e: any) => e.serialNumber))
+
+      let approved = 0, duplicates = 0
+      for (const it of pending) {
+        if (existingSet.has(it.serialNumber)) {
+          await tx.simRegistrationRequestItem.update({ where: { id: it.id }, data: { status: 'DUPLICATE' } })
+          duplicates++; continue
+        }
+        const created = await tx.serializedItem.create({
+          data: {
+            organizationId: input.organizationId,
+            categoryId: input.categoryId,
+            serialNumber: it.serialNumber,
+            createdBy: request.requestedByStaffId,
+            registeredFromVenueId: request.registeredFromVenueId,
+            status: 'AVAILABLE',
+            custodyState: 'ADMIN_HELD',
+          },
+          select: { id: true },
+        })
+        await tx.simRegistrationRequestItem.update({
+          where: { id: it.id }, data: { status: 'APPROVED', createdSerializedItemId: created.id },
+        })
+        approved++
+      }
+      const requestStatus = await this.recalcStatus(tx, input.requestId)
+      await tx.simRegistrationRequest.update({
+        where: { id: input.requestId },
+        data: { status: requestStatus as any, reviewedByStaffId: input.reviewedByStaffId, reviewedAt: new Date() },
+      })
+      return { approved, duplicates, requestStatus }
+    })
+  }
+
+  async reject(input: RejectInput): Promise<RejectResult> {
+    return this.db.$transaction(async (tx: any) => {
+      const request = await tx.simRegistrationRequest.findUnique({
+        where: { id: input.requestId }, include: { items: true },
+      })
+      if (!request || request.organizationId !== input.organizationId) throw new Error('REQUEST_NOT_FOUND')
+      const targetSet = input.serialNumbers ? new Set(input.serialNumbers.map(normalizeSerial)) : null
+      const pending = request.items.filter(
+        (it: any) => it.status === 'PENDING' && (!targetSet || targetSet.has(it.serialNumber)),
+      )
+      let rejected = 0
+      for (const it of pending) {
+        await tx.simRegistrationRequestItem.update({
+          where: { id: it.id }, data: { status: 'REJECTED', rejectionReason: input.reason },
+        })
+        rejected++
+      }
+      const requestStatus = await this.recalcStatus(tx, input.requestId)
+      await tx.simRegistrationRequest.update({
+        where: { id: input.requestId },
+        data: { status: requestStatus as any, reviewedByStaffId: input.reviewedByStaffId, reviewedAt: new Date() },
+      })
+      return { rejected, requestStatus }
+    })
+  }
+
+  private async recalcStatus(tx: any, requestId: string): Promise<string> {
+    const items = await tx.simRegistrationRequestItem.findMany({
+      where: { requestId }, select: { status: true },
+    })
+    const hasPending = items.some((i: any) => i.status === 'PENDING')
+    if (hasPending) return 'PENDING'
+    const approvedCount = items.filter((i: any) => i.status === 'APPROVED').length
+    const rejectedish = items.filter((i: any) => i.status === 'REJECTED' || i.status === 'DUPLICATE').length
+    if (approvedCount > 0 && rejectedish > 0) return 'PARTIAL'
+    if (approvedCount > 0) return 'APPROVED'
+    return 'REJECTED'
+  }
+
+  async listPending(organizationId: string) {
+    return this.db.simRegistrationRequest.findMany({
+      where: { organizationId, status: 'PENDING' },
+      include: {
+        items: true,
+        requestedBy: { select: { id: true, firstName: true, lastName: true } },
+        registeredFromVenue: { select: { id: true, name: true } },
+        proposedCategory: { select: { id: true, name: true } },
+      },
+      orderBy: { createdAt: 'asc' },
+    })
+  }
+
+  async countPending(organizationId: string): Promise<number> {
+    return this.db.simRegistrationRequest.count({ where: { organizationId, status: 'PENDING' } })
+  }
+}
+
+export const simRegistrationService = new SimRegistrationService()
