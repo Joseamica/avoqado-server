@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
 import { describeDbTarget, text } from './context'
+import { registerVenueTools } from './tools/venues'
 
 async function main() {
   const server = new McpServer({ name: 'avoqado-admin', version: '0.1.0' })
@@ -13,6 +14,8 @@ async function main() {
     {},
     async () => text({ ok: true, dbTarget: describeDbTarget() }),
   )
+
+  registerVenueTools(server)
 
   const transport = new StdioServerTransport()
   await server.connect(transport)
