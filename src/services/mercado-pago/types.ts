@@ -42,6 +42,12 @@ export interface MercadoPagoOAuthState {
   ecommerceMerchantId: string
   venueId: string
   staffId: string
+  /**
+   * When set to 'wizard', the OAuth callback redirects back to the V2 setup
+   * wizard (#step-7) instead of the legacy /integrations/mercadopago page.
+   * Optional — absence means legacy redirect behavior.
+   */
+  returnTo?: 'wizard'
 }
 
 /** Response from POST https://api.mercadopago.com/oauth/token */
