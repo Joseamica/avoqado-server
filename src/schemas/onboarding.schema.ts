@@ -237,7 +237,10 @@ export const GetMenuTemplateSchema = z.object({
 export const V2StepParamsSchema = z.object({
   params: z.object({
     organizationId: z.string().cuid('ID de organizacion invalido'),
-    stepNumber: z.string().regex(/^[1-7]$/, 'Numero de paso invalido (1-7)'),
+    // Step 8 (payment providers) is optional and gated by the
+    // ENABLE_ONBOARDING_PAYMENT_PROVIDERS env flag — included in the regex
+    // so the wizard can save its skip / connected state.
+    stepNumber: z.string().regex(/^[1-8]$/, 'Numero de paso invalido (1-8)'),
   }),
 })
 

@@ -2,8 +2,23 @@
  * Referral Program — end-to-end integration tests.
  *
  * Codifies the Phase B Part 3 smoke flow as a Jest integration suite.
- * Runs against the LIVE local DB `av-db-25` (DATABASE_URL in .env) and
- * cleans up after itself so it is safe to re-run.
+ * Runs against the LIVE local DB `av-db-25` (which carries the latest
+ * Prisma schema including `Discount.source` and `Venue.reservationBranding`).
+ *
+ * The shared `tests/__helpers__/integration-setup.ts` prefers
+ * `TEST_DATABASE_URL` over `DATABASE_URL`, so to run THIS suite against
+ * `av-db-25` you must either:
+ *
+ *   1. Override at the CLI:
+ *        TEST_DATABASE_URL="postgresql://postgres:exitosoy777@localhost:5432/av-db-25" \
+ *        npx jest tests/integration/referrals/ --testTimeout=30000
+ *
+ *   2. Or temporarily point `TEST_DATABASE_URL` in your local `.env`
+ *      at `av-db-25` (do not commit).
+ *
+ * The test asserts schema presence in `beforeAll` so an out-of-date
+ * `av-db-25-test` DB fails fast with a clear message instead of confusing
+ * column-missing errors deep in `cleanup`.
  *
  * Uses the seeded `avoqado-wellness` venue + its existing StaffVenues.
  *
@@ -61,6 +76,17 @@ describe('Referral Program — end-to-end integration', () => {
   }
 
   beforeAll(async () => {
+    // Fail fast if the DB is missing fields added by the referral migration.
+    const cols = await prisma.$queryRaw<{ column_name: string }[]>`
+      SELECT column_name FROM information_schema.columns
+       WHERE table_name = 'Discount' AND column_name = 'source'
+    `
+    if (cols.length === 0) {
+      throw new Error(
+        'Connected DB is missing Discount.source. Override TEST_DATABASE_URL to point at av-db-25 (see file header).',
+      )
+    }
+
     const venue = await prisma.venue.findFirst({ where: { slug: 'avoqado-wellness' } })
     if (!venue) {
       throw new Error('Test venue avoqado-wellness not found in av-db-25')
