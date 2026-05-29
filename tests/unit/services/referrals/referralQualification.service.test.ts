@@ -15,11 +15,7 @@
  *     Prisma's `data:` create argument (outer).
  */
 
-import {
-  computeTier,
-  emitTierReward,
-  onOrderPaid,
-} from '@/services/referrals/referralQualification.service'
+import { computeTier, emitTierReward, onOrderPaid } from '@/services/referrals/referralQualification.service'
 import prisma from '@/utils/prismaClient'
 
 jest.mock('@/utils/prismaClient', () => ({

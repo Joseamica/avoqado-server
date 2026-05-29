@@ -40,10 +40,7 @@ export interface EnsureVenueResult {
  *     Step 2 businessInfo yet) — callers handle this by omitting `venueId`
  *     from the response so the frontend doesn't try to invoke later steps.
  */
-export async function ensureVenueForOnboarding(
-  organizationId: string,
-  userId: string,
-): Promise<EnsureVenueResult | null> {
+export async function ensureVenueForOnboarding(organizationId: string, userId: string): Promise<EnsureVenueResult | null> {
   // 1. Reuse existing venue if any. We pick the FIRST one created so a
   //    multi-venue org gets a stable answer instead of last-write-wins.
   //    Any status is OK — ACTIVE / ONBOARDING / PENDING_ACTIVATION all

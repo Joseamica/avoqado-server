@@ -87,9 +87,7 @@ function loadFontByCandidates(filenames: string[]): Buffer {
     if (fs.existsSync(f)) return fs.readFileSync(f)
   }
 
-  throw new Error(
-    `[referralCard] No system font available for card generation. Bundle Inter-Regular.ttf at src/assets/fonts/.`,
-  )
+  throw new Error(`[referralCard] No system font available for card generation. Bundle Inter-Regular.ttf at src/assets/fonts/.`)
 }
 
 function getRegularFont(): Buffer {
@@ -139,12 +137,7 @@ const CARD_BG = '#10b981'
 function escapeForJsx(s: string): string {
   // satori-html parses HTML strings, so we must escape `<`, `>`, `&`
   // and the JSX-significant `{`, `}` to keep user-supplied content safe.
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/{/g, '&#123;')
-    .replace(/}/g, '&#125;')
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/{/g, '&#123;').replace(/}/g, '&#125;')
 }
 
 function buildWelcomeMarkup(input: WelcomeCardInput): string {

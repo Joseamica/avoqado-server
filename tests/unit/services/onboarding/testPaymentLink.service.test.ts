@@ -92,7 +92,10 @@ describe('testPaymentLink.service — WhatsApp delivery', () => {
       staffId: 'staff-1',
     })
     expect(result.whatsappSent).toBe(true)
-    expect(whatsappService.sendServiceMessage).toHaveBeenCalledWith('+526648442154', expect.stringContaining('https://book.example.com/pay/abc'))
+    expect(whatsappService.sendServiceMessage).toHaveBeenCalledWith(
+      '+526648442154',
+      expect.stringContaining('https://book.example.com/pay/abc'),
+    )
   })
 
   it('returns whatsappSent=false when the service rejects, without throwing', async () => {

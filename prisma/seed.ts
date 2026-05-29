@@ -520,6 +520,13 @@ async function main() {
       monthlyPrice: 599.0, // MXN
     },
     {
+      code: 'REFERRAL_PROGRAM',
+      name: 'Programa de Referidos',
+      description: 'Programa de referidos por niveles: los clientes recomiendan a otros, acumulan referidos calificados y desbloquean descuentos por tier.',
+      category: FeatureCategory.MARKETING,
+      monthlyPrice: 299.0, // MXN
+    },
+    {
       code: 'ONLINE_ORDERING',
       name: 'Pedidos en Línea',
       description: 'Permite a los clientes ordenar desde la web o app con QR.',

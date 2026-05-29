@@ -1,16 +1,7 @@
 import prisma from '@/utils/prismaClient'
-import {
-  ReferralTier,
-  ReferralProgramConfig,
-  Discount,
-  CustomerDiscount,
-  CouponCode,
-} from '@prisma/client'
+import { ReferralTier, ReferralProgramConfig, Discount, CustomerDiscount, CouponCode } from '@prisma/client'
 
-type TierConfig = Pick<
-  ReferralProgramConfig,
-  'tier1ReferralsRequired' | 'tier2ReferralsRequired' | 'tier3ReferralsRequired'
->
+type TierConfig = Pick<ReferralProgramConfig, 'tier1ReferralsRequired' | 'tier2ReferralsRequired' | 'tier3ReferralsRequired'>
 
 /**
  * Pure-function tier resolver. Compares a referral count against the
@@ -64,13 +55,32 @@ export async function emitTierReward(input: EmitTierRewardInput): Promise<TierRe
     TIER_2: input.config.tier2RewardPercent,
     TIER_3: input.config.tier3RewardPercent,
   }[input.tier]
-  const prefix = input.config.codePrefix ?? 'VENUE'
+  // Prefix consistency: tier-coupon codes must share the same prefix the
+  // customer's own referralCode uses. referralCode.service falls back to
+  // venue.slug when config.codePrefix is null — mirror that here instead of
+  // the old hardcoded 'VENUE', so a Mindform customer's MINDFORM-... code and
+  // their MINDFORM-TIER1-... reward coupon stay visually consistent.
+  let prefix = input.config.codePrefix
+  if (!prefix) {
+    const venue = await prisma.venue.findUnique({
+      where: { id: input.venueId },
+      select: { slug: true },
+    })
+    prefix = venue?.slug ?? input.venueId.slice(-8)
+  }
+  // Normalize exactly like referralCode.service.normalizeVenuePrefix:
+  // strip accents/non-alphanumerics, uppercase, cap at 8 chars.
+  prefix = prefix
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/[^A-Za-z0-9]/g, '')
+    .toUpperCase()
+    .slice(0, 8)
   const tierNum = input.tier.split('_')[1]
   const customerShort = input.referrer.id.slice(-6).toUpperCase()
   const validUntil = new Date()
   validUntil.setDate(validUntil.getDate() + input.config.rewardCouponExpiryDays)
-  const referrerName =
-    [input.referrer.firstName, input.referrer.lastName].filter(Boolean).join(' ') || 'customer'
+  const referrerName = [input.referrer.firstName, input.referrer.lastName].filter(Boolean).join(' ') || 'customer'
 
   return prisma.$transaction(async tx => {
     const discount = await tx.discount.create({
@@ -213,8 +223,7 @@ export async function onOrderPaid(input: OnOrderPaidInput): Promise<void> {
         const { generateTierUpCard } = await import('@/services/referrals/referralCard.service')
         const { sendReferralTierUpEmail } = await import('@/services/email.service')
         const cardPng = await generateTierUpCard({
-          customerName:
-            [fullReferrer.firstName, fullReferrer.lastName].filter(Boolean).join(' ') || 'Cliente',
+          customerName: [fullReferrer.firstName, fullReferrer.lastName].filter(Boolean).join(' ') || 'Cliente',
           venueName: venue.name,
           tier: newTier,
           tierLabel,

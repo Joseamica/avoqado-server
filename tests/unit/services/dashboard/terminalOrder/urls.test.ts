@@ -20,9 +20,7 @@ describe('buildStripeCheckoutUrls', () => {
         venueSlug: 'pelusis',
       })
 
-      expect(successUrl).toBe(
-        'https://dashboard.test/venues/pelusis/tpv/orders/order-1?session_id={CHECKOUT_SESSION_ID}',
-      )
+      expect(successUrl).toBe('https://dashboard.test/venues/pelusis/tpv/orders/order-1?session_id={CHECKOUT_SESSION_ID}')
       expect(cancelUrl).toBe('https://dashboard.test/venues/pelusis/tpv?cancelled=true')
     })
 

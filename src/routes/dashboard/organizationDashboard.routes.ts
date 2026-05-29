@@ -662,16 +662,21 @@ router.get('/:orgId/terminals', authenticateTokenMiddleware, checkOrgAccess, asy
  * MUST be declared before the '/:terminalId' route below, otherwise Express
  * matches "app-versions" as a terminalId.
  */
-router.get('/:orgId/terminals/app-versions', authenticateTokenMiddleware, checkOrgAccess, async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const raw = typeof req.query.environment === 'string' ? req.query.environment.toUpperCase() : 'PRODUCTION'
-    const environment: orgTerminalsService.AppEnvironmentParam = raw === 'SANDBOX' ? 'SANDBOX' : 'PRODUCTION'
-    const versions = await orgTerminalsService.listAppVersionsForOrg(environment)
-    res.json({ success: true, data: versions })
-  } catch (error) {
-    next(error)
-  }
-})
+router.get(
+  '/:orgId/terminals/app-versions',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const raw = typeof req.query.environment === 'string' ? req.query.environment.toUpperCase() : 'PRODUCTION'
+      const environment: orgTerminalsService.AppEnvironmentParam = raw === 'SANDBOX' ? 'SANDBOX' : 'PRODUCTION'
+      const versions = await orgTerminalsService.listAppVersionsForOrg(environment)
+      res.json({ success: true, data: versions })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
 
 /**
  * GET /dashboard/organizations/:orgId/terminals/:terminalId

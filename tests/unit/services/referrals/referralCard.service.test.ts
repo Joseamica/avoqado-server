@@ -1,8 +1,4 @@
-import {
-  generateWelcomeCard,
-  generateTierUpCard,
-  pngBufferToBase64DataUri,
-} from '@/services/referrals/referralCard.service'
+import { generateWelcomeCard, generateTierUpCard, pngBufferToBase64DataUri } from '@/services/referrals/referralCard.service'
 
 /**
  * Unit tests for the referral card PNG service.

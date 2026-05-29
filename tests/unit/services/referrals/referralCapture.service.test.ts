@@ -263,16 +263,12 @@ describe('referralCapture.service', () => {
 
     it('rejects when Referral is already QUALIFIED (must use refund flow)', async () => {
       mockedPrisma.referral.findUnique.mockResolvedValue({ id: 'ref_1', status: 'QUALIFIED', venueId: 'venue_1' })
-      await expect(
-        manualVoidReferral({ referralId: 'ref_1', reason: 'X', staffVenueId: 'sv_1' }),
-      ).rejects.toThrow(/already qualified/i)
+      await expect(manualVoidReferral({ referralId: 'ref_1', reason: 'X', staffVenueId: 'sv_1' })).rejects.toThrow(/already qualified/i)
     })
 
     it('rejects when Referral does not exist', async () => {
       mockedPrisma.referral.findUnique.mockResolvedValue(null)
-      await expect(
-        manualVoidReferral({ referralId: 'ghost', reason: 'X', staffVenueId: 'sv_1' }),
-      ).rejects.toThrow(/not found/i)
+      await expect(manualVoidReferral({ referralId: 'ghost', reason: 'X', staffVenueId: 'sv_1' })).rejects.toThrow(/not found/i)
     })
   })
 })

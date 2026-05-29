@@ -70,11 +70,17 @@ describe('referralReads.service', () => {
       // call order in service: thisMonth, prevMonth, qualifiedThisMonth, pendingThisMonth, couponsEmittedThisMonth
       mockedPrisma.referral.count
         .mockResolvedValueOnce(10) // thisMonth
-        .mockResolvedValueOnce(5)  // prevMonth
-        .mockResolvedValueOnce(8)  // qualifiedThisMonth
-        .mockResolvedValueOnce(2)  // pendingThisMonth
+        .mockResolvedValueOnce(5) // prevMonth
+        .mockResolvedValueOnce(8) // qualifiedThisMonth
+        .mockResolvedValueOnce(2) // pendingThisMonth
       mockedPrisma.discount.count.mockResolvedValue(3)
-      mockedPrisma.customer.findFirst.mockResolvedValue({ id: 'c1', firstName: 'Jose', lastName: 'P', referralCount: 7, referralTier: 'TIER_1' })
+      mockedPrisma.customer.findFirst.mockResolvedValue({
+        id: 'c1',
+        firstName: 'Jose',
+        lastName: 'P',
+        referralCount: 7,
+        referralTier: 'TIER_1',
+      })
       const result = await getReferralSummary('v1')
       expect(result.conversionRate).toBe(0.8)
       expect(result.couponsEmittedThisMonth).toBe(3)

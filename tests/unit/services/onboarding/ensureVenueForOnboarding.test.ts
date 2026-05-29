@@ -30,11 +30,10 @@ jest.mock('../../../../src/services/onboarding/onboardingProgress.service', () =
 
 import { ensureVenueForOnboarding } from '../../../../src/services/onboarding/ensureVenue.service'
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const prisma = require('../../../../src/utils/prismaClient').default
-// eslint-disable-next-line @typescript-eslint/no-var-requires
+
 const venueCreation = require('../../../../src/services/onboarding/venueCreation.service')
-// eslint-disable-next-line @typescript-eslint/no-var-requires
+
 const onboardingProgress = require('../../../../src/services/onboarding/onboardingProgress.service')
 
 describe('ensureVenueForOnboarding', () => {
@@ -129,9 +128,7 @@ describe('ensureVenueForOnboarding', () => {
 
   it('also returns null when getV2SetupDataForCompletion throws (no progress)', async () => {
     prisma.venue.findFirst.mockResolvedValue(null)
-    onboardingProgress.getV2SetupDataForCompletion.mockRejectedValue(
-      new Error('No se encontro el progreso de onboarding'),
-    )
+    onboardingProgress.getV2SetupDataForCompletion.mockRejectedValue(new Error('No se encontro el progreso de onboarding'))
 
     const result = await ensureVenueForOnboarding('org-1', 'staff-1')
     expect(result).toBeNull()
