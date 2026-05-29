@@ -1,18 +1,22 @@
+import crypto from 'crypto'
+
 import type { Request, Response } from 'express'
 
 import { handleAngelPayWebhook, angelpayWebhookHealthCheck } from '@/controllers/tpv/angelpay-webhook.tpv.controller'
 import * as service from '@/services/tpv/angelpay-webhook.service'
 
-jest.mock('svix', () => {
-  class Webhook {
-    constructor(public secret: string) {}
-    verify(body: Buffer, headers: Record<string, string>) {
-      if (headers['svix-signature'] === 'bad') throw new Error('invalid signature')
-      return JSON.parse(body.toString('utf8'))
-    }
-  }
-  return { Webhook }
-})
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/**
+ * Compute the real AngelPay HMAC-SHA256 hex signature.
+ * key = full secret string with "whsec_" prefix as raw UTF-8
+ * body = raw JSON string bytes
+ */
+function sign(secret: string, body: string): string {
+  return crypto.createHmac('sha256', secret).update(body).digest('hex')
+}
+
+// ── Mocks ────────────────────────────────────────────────────────────────────
 
 jest.mock('@/services/tpv/angelpay-webhook.service', () => ({
   ...jest.requireActual('@/services/tpv/angelpay-webhook.service'),
@@ -33,10 +37,19 @@ const mockedMerchantAccountFindFirst = prisma.merchantAccount.findFirst as jest.
 
 const mockedProcess = service.processAngelPayWebhook as jest.Mock
 
-function mkReq(opts: { body?: object; headers?: Record<string, string>; params?: Record<string, string> }): Request {
-  const raw = Buffer.from(JSON.stringify(opts.body ?? {}))
+// ── Request / Response builders ───────────────────────────────────────────────
+
+/**
+ * Build a minimal Express-like Request.
+ * body should be a Buffer (the raw bytes that were signed).
+ */
+function mkReq(opts: {
+  bodyBuf?: Buffer
+  headers?: Record<string, string>
+  params?: Record<string, string>
+}): Request {
   return {
-    body: raw,
+    body: opts.bodyBuf ?? Buffer.from('{}'),
     params: opts.params ?? {},
     header(name: string) {
       return opts.headers?.[name.toLowerCase()]
@@ -57,11 +70,17 @@ function mkRes(): Response & { __status?: number; __body?: unknown } {
   return res
 }
 
+// ── Fixtures ──────────────────────────────────────────────────────────────────
+
+const TEST_SECRET = 'whsec_x'
+
 const merchantRow = {
   id: 'ma_1',
   externalMerchantId: '351',
-  angelpayWebhookSecret: 'whsec_x',
+  angelpayWebhookSecret: TEST_SECRET,
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe('handleAngelPayWebhook', () => {
   beforeEach(() => {
@@ -84,66 +103,71 @@ describe('handleAngelPayWebhook', () => {
     expect(res.__status).toBe(503)
   })
 
-  it('returns 401 when svix headers are missing', async () => {
+  it('returns 401 when x-webhook-signature header is missing', async () => {
     mockedMerchantAccountFindFirst.mockResolvedValue(merchantRow)
     const res = mkRes()
-    await handleAngelPayWebhook(mkReq({ params: { merchantAccountId: 'ma_1' } }), res, jest.fn())
-    expect(res.__status).toBe(401)
-  })
-
-  it('accepts webhook-* alias headers when svix-* are absent', async () => {
-    mockedMerchantAccountFindFirst.mockResolvedValue(merchantRow)
-    mockedProcess.mockResolvedValue({ action: 'MATCHED', eventLogId: 'evt_1', paymentId: 'pay_1' })
-    const res = mkRes()
+    // No x-webhook-signature or x-webhook-event-id
     await handleAngelPayWebhook(
-      mkReq({
-        params: { merchantAccountId: 'ma_1' },
-        body: { event_type: 'send_transaction', id_merchant: 351, payload: { amount: 10 } },
-        headers: { 'webhook-id': 'msg_a', 'webhook-timestamp': '1', 'webhook-signature': 'good' },
-      }),
-      res,
-      jest.fn(),
-    )
-    expect(res.__status).toBe(200)
-    expect(mockedProcess).toHaveBeenCalledWith(
-      expect.objectContaining({
-        svixId: 'msg_a',
-        merchantAccount: expect.objectContaining({ id: 'ma_1', externalMerchantId: '351' }),
-      }),
-    )
-  })
-
-  it('returns 401 when signature verification throws', async () => {
-    mockedMerchantAccountFindFirst.mockResolvedValue(merchantRow)
-    const res = mkRes()
-    await handleAngelPayWebhook(
-      mkReq({
-        params: { merchantAccountId: 'ma_1' },
-        body: { event_type: 'send_transaction', id_merchant: 351, payload: { amount: 10 } },
-        headers: { 'svix-id': 'msg_b', 'svix-timestamp': '1', 'svix-signature': 'bad' },
-      }),
+      mkReq({ params: { merchantAccountId: 'ma_1' }, headers: {} }),
       res,
       jest.fn(),
     )
     expect(res.__status).toBe(401)
+    expect((res.__body as any).error).toBe('missing signature headers')
     expect(mockedProcess).not.toHaveBeenCalled()
   })
 
-  it('returns 200 + action body on success', async () => {
+  it('returns 401 when signature is invalid (wrong HMAC)', async () => {
     mockedMerchantAccountFindFirst.mockResolvedValue(merchantRow)
-    mockedProcess.mockResolvedValue({ action: 'MATCHED', eventLogId: 'evt_9', paymentId: 'pay_9' })
     const res = mkRes()
+    const bodyStr = JSON.stringify({ event_type: 'send_transaction', payload: { amount: '100' } })
     await handleAngelPayWebhook(
       mkReq({
         params: { merchantAccountId: 'ma_1' },
-        body: { event_type: 'send_transaction', id_merchant: 351, payload: { amount: 10 } },
-        headers: { 'svix-id': 'msg_c', 'svix-timestamp': '1', 'svix-signature': 'good' },
+        bodyBuf: Buffer.from(bodyStr),
+        headers: {
+          'x-webhook-event-id': 'evt_bad',
+          'x-webhook-signature': 'deadbeef00000000000000000000000000000000000000000000000000000000',
+        },
       }),
       res,
       jest.fn(),
     )
+    expect(res.__status).toBe(401)
+    expect((res.__body as any).error).toBe('invalid signature')
+    expect(mockedProcess).not.toHaveBeenCalled()
+  })
+
+  it('returns 200 + action body on valid signature and successful processing', async () => {
+    mockedMerchantAccountFindFirst.mockResolvedValue(merchantRow)
+    mockedProcess.mockResolvedValue({ action: 'MATCHED', eventLogId: 'evt_9', paymentId: 'pay_9' })
+
+    const bodyStr = JSON.stringify({ event_type: 'send_transaction', payload: { amount: '10000', integratorReference: 'ref-x', status: 'approved' } })
+    const sig = sign(TEST_SECRET, bodyStr)
+
+    const res = mkRes()
+    await handleAngelPayWebhook(
+      mkReq({
+        params: { merchantAccountId: 'ma_1' },
+        bodyBuf: Buffer.from(bodyStr),
+        headers: {
+          'x-webhook-event-id': 'evt_1',
+          'x-webhook-timestamp': '2026-05-29T00:53:14.104341+00:00',
+          'x-webhook-signature': sig,
+        },
+      }),
+      res,
+      jest.fn(),
+    )
+
     expect(res.__status).toBe(200)
     expect(res.__body).toMatchObject({ action: 'MATCHED', eventLogId: 'evt_9', paymentId: 'pay_9' })
+    expect(mockedProcess).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventId: 'evt_1',
+        merchantAccount: expect.objectContaining({ id: 'ma_1', externalMerchantId: '351' }),
+      }),
+    )
   })
 })
 

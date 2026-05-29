@@ -2,23 +2,21 @@
  * Integration test — POST /api/v1/webhooks/angelpay/:merchantAccountId
  *
  * Exercises the full Express stack (controller → service) with a REAL
- * Svix-signed payload. The service layer is mocked so no Prisma/DB
- * connection is required, but signature verification runs against
- * the real svix library (Webhook.verify).
+ * HMAC-SHA256 signed payload matching the actual AngelPay production scheme.
+ * The service layer is mocked so no Prisma/DB connection is required,
+ * but signature verification runs against the real crypto implementation.
  *
- * Signing approach: svix's own `Webhook.sign()` (confirmed public method
- * in svix ^1.84.1). Returns the `v1,<hmac-sha256-base64>` string that
- * svix's verifier expects. No manual HMAC needed.
+ * Real AngelPay signature scheme (reverse-engineered from live capture, 2026-05-29):
+ *   HMAC_SHA256(key=fullSecretWithWhsecPrefix, body=rawBytes).hexdigest()
+ *   key is NOT base64-decoded — the full "whsec_..." string is used as raw UTF-8
  */
 
 import crypto from 'crypto'
 
 import express from 'express'
 import request from 'supertest'
-import { Webhook } from 'svix'
 
 // ── Mock service + Prisma ─────────────────────────────────────────────────────
-// Must be hoisted above imports that consume the module.
 jest.mock('@/services/tpv/angelpay-webhook.service', () => ({
   ...jest.requireActual('@/services/tpv/angelpay-webhook.service'),
   processAngelPayWebhook: jest.fn().mockResolvedValue({ action: 'MATCHED', eventLogId: 'evt_int', paymentId: 'pay_int' }),
@@ -39,9 +37,8 @@ import { handleAngelPayWebhook } from '@/controllers/tpv/angelpay-webhook.tpv.co
 
 // ── Test fixtures ─────────────────────────────────────────────────────────────
 
-// Generate a fresh Svix-format secret for this test run
-const RAW_KEY = crypto.randomBytes(32)
-const TEST_SECRET = 'whsec_' + RAW_KEY.toString('base64')
+// Use a fixed whsec_-prefixed secret (same format as production)
+const TEST_SECRET = 'whsec_' + crypto.randomBytes(32).toString('hex')
 
 const merchantRow = {
   id: 'ma_1',
@@ -51,38 +48,42 @@ const merchantRow = {
 
 const mockedMerchantAccountFindFirst = prisma.merchantAccount.findFirst as jest.Mock
 
-/** Build a correctly Svix-signed request helper */
-function makeSvixHeaders(body: string, msgId: string, ts: Date): { 'svix-id': string; 'svix-timestamp': string; 'svix-signature': string } {
-  const wh = new Webhook(TEST_SECRET)
-  const signature = wh.sign(msgId, ts, body)
-  return {
-    'svix-id': msgId,
-    'svix-timestamp': String(Math.floor(ts.getTime() / 1000)),
-    'svix-signature': signature,
-  }
+/**
+ * Sign a body string with the real AngelPay HMAC scheme.
+ * Returns the lowercase hex digest to send as X-Webhook-Signature.
+ */
+function signBody(secret: string, body: string): string {
+  return crypto.createHmac('sha256', secret).update(body).digest('hex')
 }
 
+// Real-shape production body (no id_merchant, amount in centavos)
 const VALID_BODY = JSON.stringify({
   event_type: 'send_transaction',
-  id_merchant: 351,
-  payload: { amount: 10, integratorReference: 'ref-int-1', terminalSerial: '12345678', status: 'approved' },
+  payload: {
+    amount: '000000001000', // 1000 cents = $10.00 MXN
+    integratorReference: 'ref-int-1',
+    terminalSerial: 'N860W175781',
+    status: 'approved',
+    transactionId: '260528195230',
+    timestamp: '2026-05-29T00:52:32.000Z',
+    description: 'APROBADA',
+  },
 })
 
-// ── Minimal Express app (mirrors webhook.routes.ts setup) ─────────────────────
+// ── Minimal Express app ───────────────────────────────────────────────────────
 
 const app = express()
-// express.raw() ensures req.body is a Buffer — required for svix verify
+// express.raw() ensures req.body is a Buffer — required for HMAC verification
 app.post('/webhooks/angelpay/:merchantAccountId', express.raw({ type: 'application/json' }), handleAngelPayWebhook)
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-describe('POST /webhooks/angelpay/:merchantAccountId (integration — real Svix sign+verify)', () => {
+describe('POST /webhooks/angelpay/:merchantAccountId (integration — real HMAC sign+verify)', () => {
   beforeAll(() => {
     mockedMerchantAccountFindFirst.mockResolvedValue(merchantRow)
   })
 
   beforeEach(() => {
-    // Clear call history between tests to avoid state leaking across assertions
     ;(service.processAngelPayWebhook as jest.Mock).mockClear()
     mockedMerchantAccountFindFirst.mockClear()
     mockedMerchantAccountFindFirst.mockResolvedValue(merchantRow)
@@ -92,49 +93,65 @@ describe('POST /webhooks/angelpay/:merchantAccountId (integration — real Svix 
     jest.restoreAllMocks()
   })
 
-  it('accepts a properly Svix-signed payload and returns 200 with MATCHED action', async () => {
-    const msgId = 'msg_int_1'
-    const ts = new Date(Math.floor(Date.now() / 1000) * 1000) // truncate to seconds
-    const svixHeaders = makeSvixHeaders(VALID_BODY, msgId, ts)
+  it('accepts a properly HMAC-signed payload and returns 200 with MATCHED action', async () => {
+    const sig = signBody(TEST_SECRET, VALID_BODY)
 
     const res = await request(app)
       .post('/webhooks/angelpay/ma_1')
       .set('Content-Type', 'application/json')
-      .set('svix-id', svixHeaders['svix-id'])
-      .set('svix-timestamp', svixHeaders['svix-timestamp'])
-      .set('svix-signature', svixHeaders['svix-signature'])
+      .set('x-webhook-event-id', 'evt_int_1')
+      .set('x-webhook-timestamp', '2026-05-29T00:53:14.104341+00:00')
+      .set('x-webhook-event', 'send_transaction')
+      .set('x-webhook-signature', sig)
       .send(VALID_BODY)
 
     expect(res.status).toBe(200)
     expect(res.body).toMatchObject({ action: 'MATCHED' })
     expect(service.processAngelPayWebhook).toHaveBeenCalledTimes(1)
+    // Confirm eventId is passed through correctly
+    expect(service.processAngelPayWebhook).toHaveBeenCalledWith(
+      expect.objectContaining({ eventId: 'evt_int_1' }),
+    )
   })
 
-  it('rejects a request with no Svix headers with 401', async () => {
-    const res = await request(app).post('/webhooks/angelpay/ma_1').set('Content-Type', 'application/json').send(VALID_BODY)
+  it('rejects a request with no X-Webhook-Signature header with 401', async () => {
+    const res = await request(app)
+      .post('/webhooks/angelpay/ma_1')
+      .set('Content-Type', 'application/json')
+      .send(VALID_BODY)
 
     expect(res.status).toBe(401)
+    expect(res.body).toMatchObject({ error: 'missing signature headers' })
     expect(service.processAngelPayWebhook).not.toHaveBeenCalled()
   })
 
   it('rejects a request with a tampered body (signature mismatch) with 401', async () => {
-    const msgId = 'msg_int_tampered'
-    const ts = new Date(Math.floor(Date.now() / 1000) * 1000)
     // Sign the original body, then send a different body
-    const svixHeaders = makeSvixHeaders(VALID_BODY, msgId, ts)
+    const sig = signBody(TEST_SECRET, VALID_BODY)
     const tamperedBody = JSON.stringify({
       event_type: 'send_transaction',
-      id_merchant: 999,
-      payload: { amount: 999 },
+      payload: { amount: '000000099900', integratorReference: 'evil' },
     })
 
     const res = await request(app)
       .post('/webhooks/angelpay/ma_1')
       .set('Content-Type', 'application/json')
-      .set('svix-id', svixHeaders['svix-id'])
-      .set('svix-timestamp', svixHeaders['svix-timestamp'])
-      .set('svix-signature', svixHeaders['svix-signature'])
+      .set('x-webhook-event-id', 'evt_tampered')
+      .set('x-webhook-signature', sig) // signature is for original body, not tampered
       .send(tamperedBody)
+
+    expect(res.status).toBe(401)
+    expect(res.body).toMatchObject({ error: 'invalid signature' })
+    expect(service.processAngelPayWebhook).not.toHaveBeenCalled()
+  })
+
+  it('rejects a request with a wrong/garbage signature with 401', async () => {
+    const res = await request(app)
+      .post('/webhooks/angelpay/ma_1')
+      .set('Content-Type', 'application/json')
+      .set('x-webhook-event-id', 'evt_garbage')
+      .set('x-webhook-signature', 'deadbeef00000000000000000000000000000000000000000000000000000000')
+      .send(VALID_BODY)
 
     expect(res.status).toBe(401)
     expect(service.processAngelPayWebhook).not.toHaveBeenCalled()
@@ -143,7 +160,10 @@ describe('POST /webhooks/angelpay/:merchantAccountId (integration — real Svix 
   it('returns 404 when merchantAccountId is unknown', async () => {
     mockedMerchantAccountFindFirst.mockResolvedValueOnce(null)
 
-    const res = await request(app).post('/webhooks/angelpay/unknown_id').set('Content-Type', 'application/json').send(VALID_BODY)
+    const res = await request(app)
+      .post('/webhooks/angelpay/unknown_id')
+      .set('Content-Type', 'application/json')
+      .send(VALID_BODY)
 
     expect(res.status).toBe(404)
     expect(res.body).toMatchObject({ error: 'unknown merchant' })
@@ -153,27 +173,12 @@ describe('POST /webhooks/angelpay/:merchantAccountId (integration — real Svix 
   it('returns 503 when merchant has no angelpayWebhookSecret', async () => {
     mockedMerchantAccountFindFirst.mockResolvedValueOnce({ ...merchantRow, angelpayWebhookSecret: null })
 
-    const res = await request(app).post('/webhooks/angelpay/ma_1').set('Content-Type', 'application/json').send(VALID_BODY)
-
-    expect(res.status).toBe(503)
-    expect(res.body).toMatchObject({ error: 'webhook not provisioned for this merchant' })
-  })
-
-  it('accepts webhook-* alias headers (AngelPay reference impl emits both)', async () => {
-    const msgId = 'msg_int_alias'
-    const ts = new Date(Math.floor(Date.now() / 1000) * 1000)
-    const svixHeaders = makeSvixHeaders(VALID_BODY, msgId, ts)
-
     const res = await request(app)
       .post('/webhooks/angelpay/ma_1')
       .set('Content-Type', 'application/json')
-      // Use webhook-* aliases instead of svix-*
-      .set('webhook-id', svixHeaders['svix-id'])
-      .set('webhook-timestamp', svixHeaders['svix-timestamp'])
-      .set('webhook-signature', svixHeaders['svix-signature'])
       .send(VALID_BODY)
 
-    expect(res.status).toBe(200)
-    expect(service.processAngelPayWebhook).toHaveBeenCalledTimes(1)
+    expect(res.status).toBe(503)
+    expect(res.body).toMatchObject({ error: 'webhook not provisioned for this merchant' })
   })
 })

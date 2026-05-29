@@ -1,9 +1,12 @@
 /**
  * AngelPay TPV Webhook Service
  *
- * Layer 4 of 4 in the payment reconciliation strategy. Receives Svix-signed
+ * Layer 4 of 4 in the payment reconciliation strategy. Receives HMAC-signed
  * payment confirmations from AngelPay cloud, verifies them, and reconciles
  * against the `Payment` table.
+ *
+ * Signature scheme (real production, reverse-engineered from live capture):
+ *   HMAC_SHA256(key=fullSecretWithPrefix, body=rawBytes).hexdigest()
  *
  * See: docs/angelpay/WEBHOOK_RECEIVER_SPEC.md
  */
@@ -17,23 +20,22 @@ import logger from '@/config/logger'
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 /**
- * Real AngelPay webhook delivery body (verified against their OpenAPI spec
- * `InternalEventCreate` schema and event catalog at
- * https://integrations-api.angelpay-qa.com.mx/api/v1/webhooks/events/catalog).
+ * Real AngelPay webhook delivery body (captured from live production webhook,
+ * 2026-05-29). The top-level `id_merchant` field is NOT present in the actual
+ * delivery — merchant identity is established by URL param + valid HMAC signature.
  *
- * Lenient on every field except `event_type`, `id_merchant`, `payload.amount`.
+ * Lenient on every field except `event_type` and `payload.amount`.
  */
 export interface AngelPayWebhookPayload {
   event_type: string // "send_transaction" | "offline_event" | "canceled_transaction"
-  id_merchant: number // AngelPay's merchant id (numeric in their system)
   payload: {
-    amount: number | string // decimal MXN
-    description?: string // present on declines (decline reason)
-    integratorReference?: string // OUR referenceNumber that TPV passed in startPayment
+    amount: number | string // zero-padded string in CENTAVOS (e.g. "000000000100" = $1.00 MXN)
+    description?: string // human-readable status (e.g. "APROBADA")
+    integratorReference?: string // OUR paymentAttemptId / Payment.idempotencyKey
     status?: string // lowercase: "approved" | "declined" | ...
-    terminalSerial?: string // Nexgo serial number
+    terminalSerial?: string // Nexgo serial number (e.g. "N860W175781")
     timestamp?: string // ISO 8601
-    transactionId?: string // AngelPay's transaction PK
+    transactionId?: string // AngelPay's transaction PK (numeric string)
     [key: string]: unknown // forward-compat
   }
   [key: string]: unknown
@@ -67,7 +69,6 @@ export const ANGELPAY_WEBHOOK_ERROR_REASONS = {
   INVALID_PAYLOAD: 'INVALID_PAYLOAD',
   UNSUPPORTED_EVENT_TYPE: 'UNSUPPORTED_EVENT_TYPE',
   UNKNOWN_MERCHANT: 'UNKNOWN_MERCHANT',
-  MERCHANT_MISMATCH: 'MERCHANT_MISMATCH',
   NO_MATCH_FIELDS: 'NO_MATCH_FIELDS',
   AMOUNT_MISMATCH: 'AMOUNT_MISMATCH',
   NOT_APPROVED: 'NOT_APPROVED',
@@ -83,7 +84,6 @@ export function validateAngelPayWebhookPayload(payload: unknown): payload is Ang
   if (!payload || typeof payload !== 'object') return false
   const p = payload as Record<string, unknown>
   if (typeof p.event_type !== 'string' || !p.event_type) return false
-  if (typeof p.id_merchant !== 'number') return false
   const inner = p.payload as Record<string, unknown> | undefined
   if (!inner || inner.amount == null) return false
   return true
@@ -139,6 +139,11 @@ export async function attemptPaymentMatch(args: {
 
   const conditions: Prisma.PaymentWhereInput[] = []
   if (payload.payload.integratorReference) {
+    // The TPV sets the SDK's `integratorReference` to its paymentAttemptId, which
+    // it ALSO sends to /tpv/fast as the Payment's `idempotencyKey` (NOT as
+    // referenceNumber — that holds AngelPay's own generated ref). Match both so we
+    // reconcile regardless of which column the value landed in.
+    conditions.push({ idempotencyKey: payload.payload.integratorReference })
     conditions.push({ referenceNumber: payload.payload.integratorReference })
   }
   if (payload.payload.transactionId) {
@@ -170,7 +175,7 @@ export async function attemptPaymentMatch(args: {
 
 export interface ProcessArgs {
   payload: unknown
-  svixId: string
+  eventId: string
   merchantAccount: {
     id: string
     externalMerchantId: string
@@ -179,15 +184,15 @@ export interface ProcessArgs {
 }
 
 export async function processAngelPayWebhook(args: ProcessArgs): Promise<AngelPayWebhookResult> {
-  const { payload, svixId, merchantAccount } = args
-  const eventId = `angelpay-${svixId}`
-  const correlationId = `angelpay-wh-${svixId}`
+  const { payload, eventId: rawEventId, merchantAccount } = args
+  const eventLogId_key = `angelpay-${rawEventId}`
+  const correlationId = `angelpay-wh-${rawEventId}`
 
   // 1. Lenient validation
   if (!validateAngelPayWebhookPayload(payload)) {
     const raw = payload as Record<string, unknown>
     const errored = await persistErrorEvent({
-      eventId,
+      eventId: eventLogId_key,
       type: (typeof raw?.event_type === 'string' ? raw.event_type : null) ?? 'unknown',
       payload: payload as AngelPayWebhookPayload,
       venueId: null,
@@ -196,23 +201,16 @@ export async function processAngelPayWebhook(args: ProcessArgs): Promise<AngelPa
     return { action: 'ERROR', errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.INVALID_PAYLOAD, eventLogId: errored.id }
   }
 
-  // 2. Cross-check: payload's id_merchant must match the merchant resolved from the URL.
-  // If they differ, someone wired up the wrong webhook URL (or worse).
-  if (String(payload.id_merchant) !== merchantAccount.externalMerchantId) {
-    const errored = await persistErrorEvent({
-      eventId,
-      type: payload.event_type,
-      payload,
-      venueId: null,
-      errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.MERCHANT_MISMATCH,
-    })
-    return { action: 'UNKNOWN_MERCHANT', errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.MERCHANT_MISMATCH, eventLogId: errored.id }
-  }
+  // NOTE: No id_merchant cross-check. The real AngelPay webhook does not include
+  // id_merchant in the body. Merchant identity is established solely by the URL
+  // param (merchantAccountId) + valid HMAC signature (which proves AngelPay
+  // signed for this merchant's secret). Removing the check prevents always-failing
+  // MERCHANT_MISMATCH errors on legitimate webhooks.
 
   // Bail early: only act on send_transaction in v1
   if (payload.event_type !== 'send_transaction') {
     const errored = await persistErrorEvent({
-      eventId,
+      eventId: eventLogId_key,
       type: payload.event_type,
       payload,
       venueId: null,
@@ -221,13 +219,13 @@ export async function processAngelPayWebhook(args: ProcessArgs): Promise<AngelPa
     return { action: 'UNSUPPORTED_EVENT_TYPE', errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.UNSUPPORTED_EVENT_TYPE, eventLogId: errored?.id }
   }
 
-  // 3. Insert PENDING row (race-safe)
+  // 2. Insert PENDING row (race-safe idempotency via unique eventId)
   let eventLogId: string
   try {
     const created = await prisma.providerEventLog.create({
       data: {
         provider: ProviderType.PAYMENT_PROCESSOR,
-        eventId,
+        eventId: eventLogId_key,
         type: payload.event_type,
         payload: payload as unknown as Prisma.InputJsonValue,
         venueId: null,
@@ -239,7 +237,7 @@ export async function processAngelPayWebhook(args: ProcessArgs): Promise<AngelPa
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
       const existing = await prisma.providerEventLog.findFirst({
-        where: { provider: ProviderType.PAYMENT_PROCESSOR, eventId },
+        where: { provider: ProviderType.PAYMENT_PROCESSOR, eventId: eventLogId_key },
         select: { id: true, paymentId: true },
       })
       return { action: 'DUPLICATE', eventLogId: existing?.id, paymentId: existing?.paymentId ?? undefined }
@@ -256,7 +254,7 @@ export async function processAngelPayWebhook(args: ProcessArgs): Promise<AngelPa
     return { action: 'NOT_APPROVED', errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.NOT_APPROVED, eventLogId }
   }
 
-  // 4. Bail: no usable matching field
+  // 3. Bail: no usable matching field
   const hasMatchableField = !!(payload.payload.integratorReference || payload.payload.transactionId)
   if (!hasMatchableField) {
     await prisma.providerEventLog.update({
@@ -266,7 +264,7 @@ export async function processAngelPayWebhook(args: ProcessArgs): Promise<AngelPa
     return { action: 'ORPHANED', errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.NO_MATCH_FIELDS, eventLogId }
   }
 
-  // 5. Match
+  // 4. Match
   const payment = await attemptPaymentMatch({ payload, merchantAccountId: merchantAccount.id, retryDelaysMs: args.retryDelaysMs })
 
   if (!payment) {
@@ -277,8 +275,11 @@ export async function processAngelPayWebhook(args: ProcessArgs): Promise<AngelPa
     return { action: 'ORPHANED', errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.ORPHANED, eventLogId }
   }
 
-  // 6. Reconcile amount
-  const webhookAmount = Number(payload.payload.amount)
+  // 5. Reconcile amount
+  // Webhook amount is in CENTAVOS (zero-padded string, e.g. "000000000100" = 100 cents = $1.00 MXN).
+  // Payment.amount is stored in PESOS (e.g. Decimal("1.00")).
+  // Divide by 100 to convert centavos → pesos before comparing.
+  const webhookAmount = Number(payload.payload.amount) / 100
   const recordedAmount = Number(payment.amount)
   const diff = Math.abs(webhookAmount - recordedAmount)
 
@@ -290,7 +291,7 @@ export async function processAngelPayWebhook(args: ProcessArgs): Promise<AngelPa
           ...((payment.processorData as Record<string, unknown>) ?? {}),
           angelpayWebhook: {
             receivedAt: new Date().toISOString(),
-            svixId,
+            eventId: rawEventId,
             transactionId: payload.payload.transactionId ?? null,
             integratorReference: payload.payload.integratorReference ?? null,
             terminalSerial: payload.payload.terminalSerial ?? null,

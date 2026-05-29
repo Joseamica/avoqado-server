@@ -39,6 +39,16 @@ const baseOrder = {
 }
 
 describe('handleTerminalOrderCheckoutCompleted', () => {
+  // Plan 3 wired in signSerialAssignmentToken() inside the handler — it needs a
+  // valid (>=16 chars) secret to sign the JWT that goes into the order row.
+  const ORIG_SECRET = process.env.TERMINAL_ORDER_TOKEN_SECRET
+  beforeAll(() => {
+    process.env.TERMINAL_ORDER_TOKEN_SECRET = 'test-secret-32chars-min-required-x'
+  })
+  afterAll(() => {
+    process.env.TERMINAL_ORDER_TOKEN_SECRET = ORIG_SECRET
+  })
+
   beforeEach(() => {
     jest.clearAllMocks()
     ;(prisma.terminalOrder.findUnique as jest.Mock).mockResolvedValue(baseOrder)
@@ -77,6 +87,10 @@ describe('handleTerminalOrderCheckoutCompleted', () => {
         paymentStatus: 'PAID',
         stripePaymentIntentId: 'pi_test_1',
         fulfillmentStatus: 'AWAITING_SERIALS',
+        // Plan 3 — signed JWT + 30-day expiry persisted on the order so the
+        // email's "Asignar serials" magic link works without login.
+        serialAssignmentToken: expect.any(String),
+        serialAssignmentTokenExpiresAt: expect.any(Date),
       },
     })
     expect(sendPaymentConfirmedMock).toHaveBeenCalledTimes(1)

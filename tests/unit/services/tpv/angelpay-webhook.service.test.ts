@@ -37,10 +37,10 @@ const mockedMerchantAccountUpdate = prisma.merchantAccount.update as jest.Mock
 const TEST_MERCHANT = { id: 'ma_1', externalMerchantId: '351' }
 
 describe('validateAngelPayWebhookPayload', () => {
+  // Real production body shape — no id_merchant at top level
   const valid = {
     event_type: 'send_transaction',
-    id_merchant: 351,
-    payload: { amount: 100 },
+    payload: { amount: '000000000100' },
   }
 
   it('accepts a minimal valid payload', () => {
@@ -49,10 +49,6 @@ describe('validateAngelPayWebhookPayload', () => {
 
   it('rejects when event_type is missing', () => {
     expect(validateAngelPayWebhookPayload({ ...valid, event_type: undefined })).toBe(false)
-  })
-
-  it('rejects when id_merchant is missing (not a number)', () => {
-    expect(validateAngelPayWebhookPayload({ ...valid, id_merchant: undefined })).toBe(false)
   })
 
   it('rejects when payload.amount is missing', () => {
@@ -76,7 +72,7 @@ describe('persistErrorEvent', () => {
     const result = await persistErrorEvent({
       eventId: 'angelpay-msg_1',
       type: 'send_transaction',
-      payload: { id_merchant: 351, event_type: 'send_transaction', payload: { amount: 10 } } as any,
+      payload: { event_type: 'send_transaction', payload: { amount: '100' } } as any,
       venueId: null,
       errorReason: 'UNKNOWN_MERCHANT',
     })
@@ -103,11 +99,10 @@ describe('attemptPaymentMatch', () => {
   const baseArgs = {
     payload: {
       event_type: 'send_transaction',
-      id_merchant: 351,
       payload: {
         integratorReference: 'ref-123',
         transactionId: 'tx_abc',
-        amount: 100,
+        amount: '000000010000', // 10000 cents = $100.00
       },
     } as any,
     merchantAccountId: 'ma_xyz',
@@ -145,7 +140,7 @@ describe('attemptPaymentMatch', () => {
     expect(mockedPaymentFindFirst).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          OR: [{ referenceNumber: 'ref-123' }, { processorId: 'tx_abc' }],
+          OR: [{ idempotencyKey: 'ref-123' }, { referenceNumber: 'ref-123' }, { processorId: 'tx_abc' }],
           status: { in: ['COMPLETED', 'PENDING'] },
           merchantAccountId: 'ma_xyz',
         }),
@@ -160,7 +155,7 @@ describe('attemptPaymentMatch', () => {
       payload: { ...baseArgs.payload, payload: { ...baseArgs.payload.payload, transactionId: undefined } } as any,
     })
     const callArgs = mockedPaymentFindFirst.mock.calls[0][0]
-    expect(callArgs.where.OR).toEqual([{ referenceNumber: 'ref-123' }])
+    expect(callArgs.where.OR).toEqual([{ idempotencyKey: 'ref-123' }, { referenceNumber: 'ref-123' }])
   })
 })
 
@@ -179,22 +174,22 @@ describe('processAngelPayWebhook — MATCHED happy path', () => {
   it('stamps processorData.angelpayWebhook, marks event PROCESSED, touches lastReceivedAt', async () => {
     mockedProviderEventLogFindFirst.mockResolvedValue(null)
     mockedProviderEventLogCreate.mockResolvedValue({ id: 'evt_1' })
+    // Payment amount: $100.00 pesos. Webhook amount: 10000 cents = $100.00 pesos → diff < 0.01 → MATCHED
     mockedPaymentFindFirst.mockResolvedValueOnce({ id: 'pay_1', amount: 100, processorData: null, venueId: 'venue_1' })
 
     const result = await processAngelPayWebhook({
       payload: {
         event_type: 'send_transaction',
-        id_merchant: 351,
         payload: {
           integratorReference: 'ref-1',
-          amount: 100,
+          amount: '000000010000', // 10000 cents = $100.00 MXN
           status: 'approved',
           transactionId: 'tx_1',
           terminalSerial: '12345678',
           timestamp: '2026-03-20T12:34:56Z',
         },
       } as any,
-      svixId: 'msg_a',
+      eventId: 'msg_a',
       merchantAccount: TEST_MERCHANT,
       retryDelaysMs: [0, 0, 0],
     })
@@ -209,7 +204,7 @@ describe('processAngelPayWebhook — MATCHED happy path', () => {
         data: expect.objectContaining({
           processorData: expect.objectContaining({
             angelpayWebhook: expect.objectContaining({
-              svixId: 'msg_a',
+              eventId: 'msg_a',
               transactionId: 'tx_1',
               integratorReference: 'ref-1',
               terminalSerial: '12345678',
@@ -248,15 +243,20 @@ describe('processAngelPayWebhook — DISCREPANCY', () => {
   it('stamps angelpayDiscrepancy, marks event ERROR/AMOUNT_MISMATCH, does NOT mutate payment.status', async () => {
     mockedProviderEventLogFindFirst.mockResolvedValue(null)
     mockedProviderEventLogCreate.mockResolvedValue({ id: 'evt_2' })
+    // Payment amount: $100.00. Webhook: "000001055000" = 1055000 cents? No — use "000000010550" = 10550 cents = $105.50 → diff = 5.50 → DISCREPANCY
     mockedPaymentFindFirst.mockResolvedValueOnce({ id: 'pay_2', amount: 100, processorData: { existing: true }, venueId: 'venue_1' })
 
     const result = await processAngelPayWebhook({
       payload: {
         event_type: 'send_transaction',
-        id_merchant: 351,
-        payload: { integratorReference: 'ref-2', amount: 105.5, status: 'approved', transactionId: 'tx_2' },
+        payload: {
+          integratorReference: 'ref-2',
+          amount: '000000010550', // 10550 cents = $105.50 MXN → diff vs $100.00 = 5.50
+          status: 'approved',
+          transactionId: 'tx_2',
+        },
       } as any,
-      svixId: 'msg_b',
+      eventId: 'msg_b',
       merchantAccount: TEST_MERCHANT,
       retryDelaysMs: [0, 0, 0],
     })
@@ -304,10 +304,9 @@ describe('processAngelPayWebhook — early-return paths', () => {
     const result = await processAngelPayWebhook({
       payload: {
         event_type: 'send_transaction',
-        id_merchant: 351,
-        payload: { integratorReference: 'ref-3', amount: 50, status: 'declined' },
+        payload: { integratorReference: 'ref-3', amount: '000000005000', status: 'declined' },
       } as any,
-      svixId: 'msg_c',
+      eventId: 'msg_c',
       merchantAccount: TEST_MERCHANT,
       retryDelaysMs: [0, 0, 0],
     })
@@ -324,10 +323,9 @@ describe('processAngelPayWebhook — early-return paths', () => {
     const result = await processAngelPayWebhook({
       payload: {
         event_type: 'canceled_transaction',
-        id_merchant: 351,
-        payload: { amount: 10 },
+        payload: { amount: '000000001000' },
       } as any,
-      svixId: 'msg_d',
+      eventId: 'msg_d',
       merchantAccount: TEST_MERCHANT,
       retryDelaysMs: [0, 0, 0],
     })
@@ -349,22 +347,7 @@ describe('processAngelPayWebhook — error paths', () => {
     ].forEach(m => m.mockReset())
   })
 
-  it("returns UNKNOWN_MERCHANT with MERCHANT_MISMATCH when body id_merchant doesn't match URL merchantAccount", async () => {
-    mockedProviderEventLogCreate.mockResolvedValue({ id: 'evt_mismatch' })
-
-    const result = await processAngelPayWebhook({
-      payload: { event_type: 'send_transaction', id_merchant: 999, payload: { amount: 10 } } as any,
-      svixId: 'msg_mismatch',
-      merchantAccount: TEST_MERCHANT,
-      retryDelaysMs: [0, 0, 0],
-    })
-
-    expect(result.action).toBe('UNKNOWN_MERCHANT')
-    expect(result.errorReason).toBe('MERCHANT_MISMATCH')
-    expect(mockedPaymentFindFirst).not.toHaveBeenCalled()
-  })
-
-  it('returns DUPLICATE when ProviderEventLog already has this svix-id (P2002 race)', async () => {
+  it('returns DUPLICATE when ProviderEventLog already has this event-id (P2002 race)', async () => {
     const p2002 = new Prisma.PrismaClientKnownRequestError('unique violation', { code: 'P2002', clientVersion: 'x' })
     mockedProviderEventLogCreate.mockRejectedValueOnce(p2002)
     mockedProviderEventLogFindFirst.mockResolvedValue({ id: 'evt_existing', paymentId: 'pay_existing' })
@@ -372,10 +355,9 @@ describe('processAngelPayWebhook — error paths', () => {
     const result = await processAngelPayWebhook({
       payload: {
         event_type: 'send_transaction',
-        id_merchant: 351,
-        payload: { integratorReference: 'ref-dup', amount: 10, status: 'approved' },
+        payload: { integratorReference: 'ref-dup', amount: '000000001000', status: 'approved' },
       } as any,
-      svixId: 'msg_f',
+      eventId: 'msg_f',
       merchantAccount: TEST_MERCHANT,
       retryDelaysMs: [0, 0, 0],
     })
@@ -392,10 +374,9 @@ describe('processAngelPayWebhook — error paths', () => {
     const result = await processAngelPayWebhook({
       payload: {
         event_type: 'send_transaction',
-        id_merchant: 351,
-        payload: { integratorReference: 'ref-miss', amount: 10, status: 'approved' },
+        payload: { integratorReference: 'ref-miss', amount: '000000001000', status: 'approved' },
       } as any,
-      svixId: 'msg_g',
+      eventId: 'msg_g',
       merchantAccount: TEST_MERCHANT,
       retryDelaysMs: [0, 0, 0],
     })
@@ -412,8 +393,8 @@ describe('processAngelPayWebhook — error paths', () => {
     mockedPaymentFindFirst.mockResolvedValue(null)
 
     const result = await processAngelPayWebhook({
-      payload: { event_type: 'send_transaction', id_merchant: 351, payload: { amount: 10, status: 'approved' } } as any,
-      svixId: 'msg_h',
+      payload: { event_type: 'send_transaction', payload: { amount: '000000001000', status: 'approved' } } as any,
+      eventId: 'msg_h',
       merchantAccount: TEST_MERCHANT,
       retryDelaysMs: [0, 0, 0],
     })

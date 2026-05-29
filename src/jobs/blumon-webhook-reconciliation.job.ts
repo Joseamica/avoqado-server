@@ -135,13 +135,43 @@ export class BlumonWebhookReconciliationJob {
    */
   private async markOrphaned(): Promise<number> {
     const cutoff = new Date(Date.now() - BLUMON_WEBHOOK_PENDING_TTL_MS)
+    const orphanWhere = {
+      provider: ProviderType.PAYMENT_PROCESSOR,
+      status: EventStatus.PENDING,
+      createdAt: { lt: cutoff },
+      eventId: { startsWith: 'blumon-tpv-' },
+    } as const
+
+    // Fetch the rows BEFORE flipping them so we can emit a per-event alert with
+    // enough detail for manual reconciliation. An ORPHANED event means Blumon
+    // confirmed a charge but no Avoqado Payment ever recorded it (e.g. the TPV
+    // never synced its offline queue). Ops must reconcile these by hand.
+    // BetterStack alerts on the '🚨 [Blumon recon] ORPHANED' message.
+    const toOrphan = await prisma.providerEventLog.findMany({
+      where: orphanWhere,
+      select: { id: true, venueId: true, terminalId: true, payload: true, createdAt: true },
+    })
+
+    if (toOrphan.length === 0) return 0
+
+    for (const row of toOrphan) {
+      const p = row.payload as unknown as BlumonWebhookPayload
+      logger.error('🚨 [Blumon recon] ORPHANED webhook — Blumon charge with NO Avoqado payment', {
+        eventLogId: row.id,
+        venueId: row.venueId,
+        terminalId: row.terminalId,
+        amount: p?.amount,
+        authorizationCode: p?.authorizationCode,
+        lastFour: p?.lastFour,
+        reference: p?.reference,
+        operationNumber: p?.operationNumber,
+        serialNumber: p?.serialNumber,
+        ageHours: Math.round((Date.now() - new Date(row.createdAt).getTime()) / 3_600_000),
+      })
+    }
+
     const result = await prisma.providerEventLog.updateMany({
-      where: {
-        provider: ProviderType.PAYMENT_PROCESSOR,
-        status: EventStatus.PENDING,
-        createdAt: { lt: cutoff },
-        eventId: { startsWith: 'blumon-tpv-' },
-      },
+      where: orphanWhere,
       data: {
         status: EventStatus.ERROR,
         errorReason: BLUMON_WEBHOOK_ERROR_REASONS.ORPHANED,
@@ -149,11 +179,9 @@ export class BlumonWebhookReconciliationJob {
       },
     })
 
-    if (result.count > 0) {
-      logger.warn('🚨 [Blumon recon] Marked orphaned events (no Payment match within 24h)', {
-        count: result.count,
-      })
-    }
+    logger.warn('🚨 [Blumon recon] Marked orphaned events (no Payment match within 24h)', {
+      count: result.count,
+    })
 
     return result.count
   }
