@@ -2266,7 +2266,9 @@ Avoqado Dashboard
 </body></html>`
 
     const text =
-      `Necesitamos verificar tu pago ${order.orderNumber}\n\n` + `Motivo: ${reason}\n\n` + `Vuelve a subir el comprobante: ${orderDetailUrl}\n\nAvoqado`
+      `Necesitamos verificar tu pago ${order.orderNumber}\n\n` +
+      `Motivo: ${reason}\n\n` +
+      `Vuelve a subir el comprobante: ${orderDetailUrl}\n\nAvoqado`
 
     return this.sendEmail({ to: order.contactEmail, subject, html, text })
   }

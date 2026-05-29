@@ -7,10 +7,7 @@ import { z } from 'zod'
  */
 export const rejectSpeiSchema = z.object({
   body: z.object({
-    reason: z
-      .string()
-      .min(5, 'El motivo debe tener al menos 5 caracteres')
-      .max(500, 'El motivo no puede exceder 500 caracteres'),
+    reason: z.string().min(5, 'El motivo debe tener al menos 5 caracteres').max(500, 'El motivo no puede exceder 500 caracteres'),
   }),
 })
 

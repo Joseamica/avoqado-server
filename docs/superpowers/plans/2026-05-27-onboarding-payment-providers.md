@@ -1,12 +1,18 @@
 # Onboarding Payment Providers Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add an optional Step 8 to the V2 setup wizard that lets a new merchant connect Mercado Pago and/or Stripe Connect, with state preserved across OAuth round-trips and an optional test payment link delivered via WhatsApp.
+**Goal:** Add an optional Step 8 to the V2 setup wizard that lets a new merchant connect Mercado Pago and/or Stripe Connect, with state
+preserved across OAuth round-trips and an optional test payment link delivered via WhatsApp.
 
-**Architecture:** Extends the existing MP OAuth state JWT with a `returnTo` field so the callback can route back to the wizard instead of the legacy integrations page. Stripe Connect already accepts a dynamic `returnPath` — we wire it through from the wizard. V2 wizard state survives because `OnboardingProgress.v2SetupData.step8` is persisted before redirect. All new behavior gated on `ENABLE_ONBOARDING_PAYMENT_PROVIDERS` env flag.
+**Architecture:** Extends the existing MP OAuth state JWT with a `returnTo` field so the callback can route back to the wizard instead of
+the legacy integrations page. Stripe Connect already accepts a dynamic `returnPath` — we wire it through from the wizard. V2 wizard state
+survives because `OnboardingProgress.v2SetupData.step8` is persisted before redirect. All new behavior gated on
+`ENABLE_ONBOARDING_PAYMENT_PROVIDERS` env flag.
 
 **Tech Stack:**
+
 - Backend: Express + TypeScript, Prisma, existing MP/Stripe providers, `whatsapp.service.ts`, `qrcode` (already installed)
 - Frontend: React 18 + Vite, react-i18next, existing `setup.service.ts` API client
 - Tests: Jest (`runInBand` to avoid OOM in this repo)
@@ -18,29 +24,29 @@
 
 **Backend (`avoqado-server`)**
 
-| File | Action | Responsibility |
-|---|---|---|
-| `src/services/mercado-pago/oauth.service.ts` | Modify | Add optional `returnTo` field to state schema |
-| `src/controllers/dashboard/mercadoPagoOAuth.controller.ts` | Modify | Accept `?from=wizard`, branch redirect on `state.returnTo` |
-| `src/services/dashboard/stripeConnect.service.ts` | Modify (small) | Expose `returnPath` to callers (already accepts internally) |
-| `src/services/onboarding/onboardingProgress.service.ts` | Modify | Add `V2Step8Data` typing + read helper for step8 |
-| `src/controllers/onboarding.controller.ts` | Modify | Surface `paymentProviders` in `getV2SetupDataForCompletion` response |
-| `src/services/onboarding/testPaymentLink.service.ts` | Create | Provider-agnostic facade: amount → checkout URL + QR + WhatsApp |
-| `src/routes/onboarding.routes.ts` | Modify | `POST /onboarding/venues/:venueId/test-payment-link` |
-| `src/config/featureFlags.ts` (or inline) | Modify | Expose `ENABLE_ONBOARDING_PAYMENT_PROVIDERS` |
-| `tests/unit/services/mercado-pago/oauth.returnTo.test.ts` | Create | OAuth state round-trip with returnTo |
-| `tests/unit/controllers/mercadoPagoOAuth.callback.returnTo.test.ts` | Create | Callback branches on returnTo |
-| `tests/unit/services/onboarding/testPaymentLink.service.test.ts` | Create | Service unit tests |
+| File                                                                | Action         | Responsibility                                                       |
+| ------------------------------------------------------------------- | -------------- | -------------------------------------------------------------------- |
+| `src/services/mercado-pago/oauth.service.ts`                        | Modify         | Add optional `returnTo` field to state schema                        |
+| `src/controllers/dashboard/mercadoPagoOAuth.controller.ts`          | Modify         | Accept `?from=wizard`, branch redirect on `state.returnTo`           |
+| `src/services/dashboard/stripeConnect.service.ts`                   | Modify (small) | Expose `returnPath` to callers (already accepts internally)          |
+| `src/services/onboarding/onboardingProgress.service.ts`             | Modify         | Add `V2Step8Data` typing + read helper for step8                     |
+| `src/controllers/onboarding.controller.ts`                          | Modify         | Surface `paymentProviders` in `getV2SetupDataForCompletion` response |
+| `src/services/onboarding/testPaymentLink.service.ts`                | Create         | Provider-agnostic facade: amount → checkout URL + QR + WhatsApp      |
+| `src/routes/onboarding.routes.ts`                                   | Modify         | `POST /onboarding/venues/:venueId/test-payment-link`                 |
+| `src/config/featureFlags.ts` (or inline)                            | Modify         | Expose `ENABLE_ONBOARDING_PAYMENT_PROVIDERS`                         |
+| `tests/unit/services/mercado-pago/oauth.returnTo.test.ts`           | Create         | OAuth state round-trip with returnTo                                 |
+| `tests/unit/controllers/mercadoPagoOAuth.callback.returnTo.test.ts` | Create         | Callback branches on returnTo                                        |
+| `tests/unit/services/onboarding/testPaymentLink.service.test.ts`    | Create         | Service unit tests                                                   |
 
 **Frontend (`avoqado-web-dashboard`)**
 
-| File | Action | Responsibility |
-|---|---|---|
-| `src/pages/Setup/types.ts` | Modify | Add `paymentProviders` field to `SetupData` |
-| `src/pages/Setup/SetupWizard.tsx` | Modify | Conditionally add PaymentProvidersStep, URL-param hydration |
-| `src/pages/Setup/steps/PaymentProvidersStep.tsx` | Create | Views A / C / D + skip + OAuth initiation |
-| `src/services/setup.service.ts` | Modify | Add `testPaymentLink` method |
-| `src/locales/es/setup.json`, `src/locales/en/setup.json` | Modify | New i18n keys for step 8 |
+| File                                                     | Action | Responsibility                                              |
+| -------------------------------------------------------- | ------ | ----------------------------------------------------------- |
+| `src/pages/Setup/types.ts`                               | Modify | Add `paymentProviders` field to `SetupData`                 |
+| `src/pages/Setup/SetupWizard.tsx`                        | Modify | Conditionally add PaymentProvidersStep, URL-param hydration |
+| `src/pages/Setup/steps/PaymentProvidersStep.tsx`         | Create | Views A / C / D + skip + OAuth initiation                   |
+| `src/services/setup.service.ts`                          | Modify | Add `testPaymentLink` method                                |
+| `src/locales/es/setup.json`, `src/locales/en/setup.json` | Modify | New i18n keys for step 8                                    |
 
 ---
 
@@ -50,7 +56,8 @@
 
 Path: `docs/superpowers/specs/2026-05-27-onboarding-payment-providers-design.md`
 
-This plan assumes you've internalized the failure matrix, the OAuth state JWT mechanism, and the four-view state machine. If any of those are unclear, re-read the spec before starting Task 1.
+This plan assumes you've internalized the failure matrix, the OAuth state JWT mechanism, and the four-view state machine. If any of those
+are unclear, re-read the spec before starting Task 1.
 
 - [ ] **Step 0.2: Create a feature branch**
 
@@ -76,6 +83,7 @@ Expected: `(unset — good)`. We want all changes invisible until we explicitly 
 ### Task 1: Add `returnTo` field to MP OAuth state schema
 
 **Files:**
+
 - Modify: `src/services/mercado-pago/oauth.service.ts`
 - Modify: `src/services/mercado-pago/types.ts`
 - Create: `tests/unit/services/mercado-pago/oauth.returnTo.test.ts`
@@ -144,7 +152,8 @@ export interface MercadoPagoOAuthState {
 }
 ```
 
-(If the interface lives elsewhere — search via `grep -rn "MercadoPagoOAuthState" src/` — apply the same edit there. `signState` and `verifyState` should pick up the new field automatically since they cast to/from the same interface.)
+(If the interface lives elsewhere — search via `grep -rn "MercadoPagoOAuthState" src/` — apply the same edit there. `signState` and
+`verifyState` should pick up the new field automatically since they cast to/from the same interface.)
 
 - [ ] **Step 1.4: Run test to verify it passes**
 
@@ -167,6 +176,7 @@ git commit -m "feat(mp-oauth): add optional returnTo field to state JWT"
 ### Task 2: Accept `?from=wizard` on `/oauth/connect` and propagate to state
 
 **Files:**
+
 - Modify: `src/controllers/dashboard/mercadoPagoOAuth.controller.ts` (the `initiate` function around line 30-60)
 - Create: `tests/unit/controllers/mercadoPagoOAuth.initiate.fromWizard.test.ts`
 
@@ -207,9 +217,7 @@ describe('MP OAuth initiate — from=wizard', () => {
 
   it('passes returnTo:"wizard" to signState when ?from=wizard is present', async () => {
     await initiate(mockReq({ query: { from: 'wizard' } }), mockRes())
-    expect(oauthService.signState).toHaveBeenCalledWith(
-      expect.objectContaining({ returnTo: 'wizard' })
-    )
+    expect(oauthService.signState).toHaveBeenCalledWith(expect.objectContaining({ returnTo: 'wizard' }))
   })
 
   it('omits returnTo when from query param is absent', async () => {
@@ -277,6 +285,7 @@ git commit -m "feat(mp-oauth): accept ?from=wizard on /connect and propagate to 
 ### Task 3: Branch MP callback redirect on `state.returnTo === 'wizard'`
 
 **Files:**
+
 - Modify: `src/controllers/dashboard/mercadoPagoOAuth.controller.ts` (the `callback` function)
 - Create: `tests/unit/controllers/mercadoPagoOAuth.callback.returnTo.test.ts`
 
@@ -357,7 +366,9 @@ Expected: FAIL — both cases redirect to `/integrations/mercadopago`.
 
 - [ ] **Step 3.3: Implement the branch**
 
-In `src/controllers/dashboard/mercadoPagoOAuth.controller.ts:callback`, locate **every** `res.redirect(`${dashboardUrl}/integrations/mercadopago?...`)` call after `verifyState` succeeds (success path AND error paths that occur AFTER state was successfully verified). Replace them with a helper:
+In `src/controllers/dashboard/mercadoPagoOAuth.controller.ts:callback`, locate **every**
+`res.redirect(`${dashboardUrl}/integrations/mercadopago?...`)` call after `verifyState` succeeds (success path AND error paths that occur
+AFTER state was successfully verified). Replace them with a helper:
 
 Add this helper near the top of the file (after imports):
 
@@ -380,7 +391,8 @@ function buildCallbackRedirect(
 }
 ```
 
-Then replace the success redirect (find the line that does `res.redirect(`${dashboardUrl}/integrations/mercadopago?...`)` AFTER tokens are persisted):
+Then replace the success redirect (find the line that does `res.redirect(`${dashboardUrl}/integrations/mercadopago?...`)` AFTER tokens are
+persisted):
 
 ```typescript
 // BEFORE (success path, after persistTokens)
@@ -395,7 +407,8 @@ return res.redirect(
 )
 ```
 
-And the error-after-state-verified paths similarly — pass `statePayload` and use the helper. For error paths BEFORE state verification (e.g. invalid state JWT itself), leave the legacy redirect — there's no `state.returnTo` to read.
+And the error-after-state-verified paths similarly — pass `statePayload` and use the helper. For error paths BEFORE state verification (e.g.
+invalid state JWT itself), leave the legacy redirect — there's no `state.returnTo` to read.
 
 - [ ] **Step 3.4: Run test, verify pass**
 
@@ -418,6 +431,7 @@ git commit -m "feat(mp-oauth): route callback back to wizard when returnTo=wizar
 ### Task 4: Expose `returnPath` flow-through for Stripe Connect
 
 **Files:**
+
 - Modify: `src/services/dashboard/stripeConnect.service.ts` (no real changes — already accepts `returnPath`)
 - Verify only
 
@@ -448,7 +462,8 @@ return_url: returnPath ? `${baseUrl}${returnPath}` : `${baseUrl}/ecommerce-merch
 refresh_url: returnPath ? `${baseUrl}${returnPath}` : `${baseUrl}/ecommerce-merchants?status=refresh&merchantId=${merchant.id}`,
 ```
 
-(If the file's structure differs, follow the existing pattern. The point is: the caller MUST be able to pass `/setup?stripe_status=success&merchantId=X#step-7` as a returnPath.)
+(If the file's structure differs, follow the existing pattern. The point is: the caller MUST be able to pass
+`/setup?stripe_status=success&merchantId=X#step-7` as a returnPath.)
 
 - [ ] **Step 4.3: No commit needed if nothing changed; otherwise commit**
 
@@ -464,6 +479,7 @@ git status
 ### Task 5: Add `V2Step8Data` typing helper
 
 **Files:**
+
 - Modify: `src/services/onboarding/onboardingProgress.service.ts`
 - Create: `tests/unit/services/onboarding/v2Step8.test.ts`
 
@@ -567,6 +583,7 @@ git commit -m "feat(onboarding): add V2Step8Data type and parseV2Step8 helper"
 ### Task 6: Surface `paymentProviders` in `/onboarding/status` response
 
 **Files:**
+
 - Modify: `src/controllers/onboarding.controller.ts` (the route that returns onboarding status)
 
 - [ ] **Step 6.1: Find the status endpoint**
@@ -575,7 +592,8 @@ git commit -m "feat(onboarding): add V2Step8Data type and parseV2Step8 helper"
 grep -n "v2SetupData\|onboarding/status\|getOnboardingStatus" src/controllers/onboarding.controller.ts | head -10
 ```
 
-Identify the controller method that returns the wizard's progress. It already returns `v2SetupData` per Task 0 (line 215 surfaced this earlier).
+Identify the controller method that returns the wizard's progress. It already returns `v2SetupData` per Task 0 (line 215 surfaced this
+earlier).
 
 - [ ] **Step 6.2: Add `paymentProviders` to the response**
 
@@ -624,6 +642,7 @@ git commit -m "feat(onboarding): expose paymentProviders in /onboarding/status"
 ### Task 7: Create `testPaymentLink.service.ts` (happy path, no WhatsApp yet)
 
 **Files:**
+
 - Create: `src/services/onboarding/testPaymentLink.service.ts`
 - Create: `tests/unit/services/onboarding/testPaymentLink.service.test.ts`
 
@@ -792,6 +811,7 @@ git commit -m "feat(onboarding): add testPaymentLink service (happy path + valid
 ### Task 8: Add WhatsApp delivery to the service
 
 **Files:**
+
 - Modify: `src/services/onboarding/testPaymentLink.service.ts`
 - Modify: `tests/unit/services/onboarding/testPaymentLink.service.test.ts`
 
@@ -801,7 +821,8 @@ git commit -m "feat(onboarding): add testPaymentLink service (happy path + valid
 grep -n "export" src/services/whatsapp.service.ts | head -10
 ```
 
-Note the exact function name (e.g. `sendWhatsAppMessage`, `sendMessage`, etc.). The test below uses `sendWhatsAppMessage` — adjust both implementation and test to match the actual name.
+Note the exact function name (e.g. `sendWhatsAppMessage`, `sendMessage`, etc.). The test below uses `sendWhatsAppMessage` — adjust both
+implementation and test to match the actual name.
 
 - [ ] **Step 8.2: Append new tests**
 
@@ -825,9 +846,7 @@ describe('testPaymentLink.service — WhatsApp delivery', () => {
       staffId: 'staff-1',
     })
     expect(result.whatsappSent).toBe(true)
-    expect(whatsappService.sendWhatsAppMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ to: '+526648442154' }),
-    )
+    expect(whatsappService.sendWhatsAppMessage).toHaveBeenCalledWith(expect.objectContaining({ to: '+526648442154' }))
   })
 
   it('returns whatsappSent=false when the service rejects, without throwing', async () => {
@@ -920,6 +939,7 @@ git commit -m "feat(onboarding): deliver test payment link via WhatsApp (non-blo
 ### Task 9: Expose the route
 
 **Files:**
+
 - Modify: `src/routes/onboarding.routes.ts`
 - Modify: `src/controllers/onboarding.controller.ts` (add the handler)
 
@@ -971,11 +991,7 @@ import { testPaymentLink as testPaymentLinkController } from '@/controllers/onbo
 // Gate the route on the env flag at registration time. If the flag is off,
 // the endpoint simply doesn't exist (404).
 if (process.env.ENABLE_ONBOARDING_PAYMENT_PROVIDERS === 'true') {
-  router.post(
-    '/venues/:venueId/test-payment-link',
-    authenticateTokenMiddleware,
-    testPaymentLinkController,
-  )
+  router.post('/venues/:venueId/test-payment-link', authenticateTokenMiddleware, testPaymentLinkController)
 }
 ```
 
@@ -991,7 +1007,8 @@ curl -X POST http://localhost:3000/api/v1/onboarding/venues/foo/test-payment-lin
      -d '{"amount": 50, "providerCode": "MERCADO_PAGO"}' | jq .
 ```
 
-Expected (if no MP merchant connected): `{ "success": false, "error": "No hay un canal MERCADO_PAGO conectado..." }`. If the flag is off, expect `404`.
+Expected (if no MP merchant connected): `{ "success": false, "error": "No hay un canal MERCADO_PAGO conectado..." }`. If the flag is off,
+expect `404`.
 
 - [ ] **Step 9.4: Commit**
 
@@ -1007,6 +1024,7 @@ git commit -m "feat(onboarding): expose POST /test-payment-link (env-gated)"
 ### Task 10: Document the env flag
 
 **Files:**
+
 - Modify: `.env.example` (or equivalent)
 - Modify: `docs/guides/PRODUCTION_READINESS_CHECKLIST.md` (optional, find the env section)
 
@@ -1033,6 +1051,7 @@ git commit -m "chore: document ENABLE_ONBOARDING_PAYMENT_PROVIDERS flag"
 ### Task 11: Extend `SetupData` type
 
 **Files:**
+
 - Modify: `/Users/amieva/Documents/Programming/Avoqado/avoqado-web-dashboard/src/pages/Setup/types.ts`
 
 - [ ] **Step 11.1: Add the field**
@@ -1069,6 +1088,7 @@ git commit -m "feat(wizard): add paymentProviders field to SetupData"
 ### Task 12: Add `testPaymentLink` to the API client
 
 **Files:**
+
 - Modify: `src/services/setup.service.ts`
 
 - [ ] **Step 12.1: Add the method**
@@ -1098,6 +1118,7 @@ npx tsc --noEmit && git add src/services/setup.service.ts && \
 ### Task 13: Scaffold the step component with View A
 
 **Files:**
+
 - Create: `src/pages/Setup/steps/PaymentProvidersStep.tsx`
 
 - [ ] **Step 13.1: Create the component**
@@ -1307,6 +1328,7 @@ git commit -m "feat(wizard): scaffold PaymentProvidersStep with Views A and C"
 ### Task 14: Hook PaymentProvidersStep into `SETUP_STEPS` (env-gated)
 
 **Files:**
+
 - Modify: `src/pages/Setup/SetupWizard.tsx`
 
 - [ ] **Step 14.1: Add the import and env flag check**
@@ -1334,7 +1356,8 @@ const SETUP_STEPS = PAYMENT_PROVIDERS_ENABLED
 
 - [ ] **Step 14.2: Pass venue + merchant props to the step**
 
-Find where `SETUP_STEPS[currentStep].component` is rendered. It's a generic component render — we need to special-case `paymentProviders` to pass extra props. Around the JSX where the step component is mounted:
+Find where `SETUP_STEPS[currentStep].component` is rendered. It's a generic component render — we need to special-case `paymentProviders` to
+pass extra props. Around the JSX where the step component is mounted:
 
 ```typescript
 const StepComponent = SETUP_STEPS[currentStep].component as any
@@ -1354,7 +1377,8 @@ const stepId = SETUP_STEPS[currentStep].id
 />
 ```
 
-(If there's no `venueId` in `data` yet because the wizard hasn't completed venue creation, the `paymentProviders` step is unreachable — it only renders post-bank-step, by which point the venue exists. Verify in Task 16 with manual QA.)
+(If there's no `venueId` in `data` yet because the wizard hasn't completed venue creation, the `paymentProviders` step is unreachable — it
+only renders post-bank-step, by which point the venue exists. Verify in Task 16 with manual QA.)
 
 - [ ] **Step 14.3: TS check + commit**
 
@@ -1369,6 +1393,7 @@ git commit -m "feat(wizard): conditionally mount PaymentProvidersStep behind env
 ### Task 15: Build the test payment link sub-flow (View D)
 
 **Files:**
+
 - Modify: `src/pages/Setup/steps/PaymentProvidersStep.tsx`
 
 - [ ] **Step 15.1: Replace the `TestLinkLauncher` stub**
@@ -1465,6 +1490,7 @@ git commit -m "feat(wizard): implement test payment link sub-flow (View D)"
 ### Task 16: Hydrate Step 8 from URL params + DB on wizard return
 
 **Files:**
+
 - Modify: `src/pages/Setup/SetupWizard.tsx`
 
 - [ ] **Step 16.1: Add URL param parsing on mount**
@@ -1485,7 +1511,7 @@ if (PAYMENT_PROVIDERS_ENABLED && (mpStatus === 'success' || stripeStatus === 'su
   // Force step 8 (last visible step).
   const step8Index = SETUP_STEPS.length - 1
   setCurrentStep(step8Index)
-  setData((prev) => ({
+  setData(prev => ({
     ...prev,
     paymentProviders: {
       ...(prev.paymentProviders ?? {}),
@@ -1506,7 +1532,7 @@ In the same `useEffect`, right after `setData((prev) => ({ ...prev, ...restored 
 ```typescript
 const persistedProviders = progressData?.paymentProviders ?? null
 if (persistedProviders) {
-  setData((prev) => ({ ...prev, paymentProviders: persistedProviders }))
+  setData(prev => ({ ...prev, paymentProviders: persistedProviders }))
 }
 ```
 
@@ -1525,6 +1551,7 @@ git commit -m "feat(wizard): hydrate Step 8 from URL params and persisted state"
 ### Task 17: Add i18n keys (es + en)
 
 **Files:**
+
 - Modify: `src/locales/es/setup.json`
 - Modify: `src/locales/en/setup.json`
 
@@ -1666,7 +1693,8 @@ Restart both dev servers (tsx watch + vite pick up env on restart).
 1. New email + password at `/signup`.
 2. Complete steps 2–7 of the wizard (use placeholder data, no-physical-address checkbox at step 2).
 3. At Step 7 → "Complete setup" → wizard now shows Step 8 of 8 instead of redirecting to /home.
-4. Click "Conectar" on the Mercado Pago tile. Verify the browser navigates to `/api/v1/integrations/mercadopago/oauth/connect?...&from=wizard`.
+4. Click "Conectar" on the Mercado Pago tile. Verify the browser navigates to
+   `/api/v1/integrations/mercadopago/oauth/connect?...&from=wizard`.
 5. Approve at MP (or use a sandbox account). Verify the redirect lands on `/setup?mp_status=success&merchantId=...#step-7`.
 6. Confirm the MP tile is green and View C is shown.
 7. Click "Generar liga de prueba", enter 50 MXN, click Enviar. Confirm a payment link + QR appear and WhatsApp arrives on the venue phone.
@@ -1686,7 +1714,8 @@ Restart both dev servers (tsx watch + vite pick up env on restart).
 
 - [ ] **Step 19.5: Document any deviations**
 
-If anything didn't behave as the spec describes, write the deviation as a follow-up issue (don't fix inline — that's another PR). Otherwise: ✅ ready to enable in production.
+If anything didn't behave as the spec describes, write the deviation as a follow-up issue (don't fix inline — that's another PR). Otherwise:
+✅ ready to enable in production.
 
 ---
 
@@ -1728,7 +1757,10 @@ These are tracked in the spec but explicitly deferred:
 
 ## Implementation tips
 
-- **Run jest with `--runInBand`** in this repo — the full suite OOMs otherwise (documented in project memory `p1001-cron-stampede.md` and elsewhere).
-- **Don't commit the env flag flipped to `true`** until manual QA passes in Task 19. The plan's intermediate commits should leave the flag `false`.
+- **Run jest with `--runInBand`** in this repo — the full suite OOMs otherwise (documented in project memory `p1001-cron-stampede.md` and
+  elsewhere).
+- **Don't commit the env flag flipped to `true`** until manual QA passes in Task 19. The plan's intermediate commits should leave the flag
+  `false`.
 - **OAuth state JWT TTL is 10 minutes.** If you spend longer than that testing manually, expect `reason=expired` and re-initiate.
-- The MP marketplace **sandbox is known broken** (project memory `mercadopago-marketplace-status.md`). Manual QA uses a real or pre-approved test seller account.
+- The MP marketplace **sandbox is known broken** (project memory `mercadopago-marketplace-status.md`). Manual QA uses a real or pre-approved
+  test seller account.

@@ -391,6 +391,15 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // ===========================
   'tpv-messages:read': ['tpv-messages:read', 'tpv:read'],
   'tpv-messages:send': ['tpv-messages:send', 'tpv-messages:read', 'tpv:read'],
+
+  // ===========================
+  // REFERRAL PROGRAM
+  // ===========================
+  'referral:read': ['referral:read', 'customers:read'], // Need customer data to display referrer/referred names
+  'referral:configure': ['referral:read', 'referral:configure'],
+  'referral:override-existing-customer': ['referral:read', 'referral:override-existing-customer'],
+  'referral:void-manual': ['referral:read', 'referral:void-manual'],
+  'referral:export-csv': ['referral:read', 'referral:export-csv', 'customers:read'],
 }
 
 /**
@@ -449,6 +458,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'loyalty:read', // Phase 1b: Loyalty System
     'discounts:read', // Phase 2: Discount System
     'coupons:read', // Phase 2: Coupon System
+    'referral:read', // Referral Program: read-only access
     'features:read',
   ],
 
@@ -467,6 +477,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'reservations:cancel',
     'customers:read', // Phase 1: Customer System
     'loyalty:read', // Phase 1b: Loyalty System
+    'referral:read', // Referral Program: read-only access
     'teams:read',
     'calendar:connect_self', // Google Calendar Sync — connect own personal calendar
   ],
@@ -505,6 +516,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'discounts:apply', // Phase 2: Can apply discounts to orders
     'coupons:read', // Phase 2: Can view coupons
     'coupons:redeem', // Phase 2: Can redeem coupons at checkout
+    'referral:read', // Referral Program: read-only access
     'commissions:view_own', // Can view own commission earnings
     'teams:read',
     'tpv:read', // Can view TPV terminals (but not create/edit/command)
@@ -541,6 +553,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'discounts:apply', // Phase 2: Can apply discounts to orders
     'coupons:read', // Phase 2: Can view coupons
     'coupons:redeem', // Phase 2: Can redeem coupons at checkout
+    'referral:read', // Referral Program: read-only access
     'commissions:view_own', // Can view own commission earnings
     'teams:read',
     // TPV-specific permissions
@@ -578,6 +591,12 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'orders:create',
     'orders:update',
     'orders:cancel',
+    // Reservations & class sessions — managers operate the calendar (Square-style:
+    // staff running the front desk see and book classes/appointments).
+    'reservations:read',
+    'reservations:create',
+    'reservations:update',
+    'reservations:cancel',
     'payments:read',
     'payments:create',
     'payments:refund',
@@ -616,6 +635,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'discounts:*', // Phase 2: Full discount management
     'coupons:*', // Phase 2: Full coupon management
     'creditPacks:*', // Credit pack/bundle management
+    'referral:read', // Referral Program: read-only access
+    'referral:override-existing-customer', // Referral Program: can override existing-customer guard
     'commissions:read', // Can view commission configs and staff earnings
     'commissions:view_own', // Can view own commission earnings
     'features:read',
@@ -684,6 +705,12 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'discounts:*', // Phase 2: Full discount management
     'coupons:*', // Phase 2: Full coupon management
     'creditPacks:*', // Credit pack/bundle management
+    // Referral Program (full management except no SUPERADMIN-only powers)
+    'referral:read',
+    'referral:configure',
+    'referral:override-existing-customer',
+    'referral:void-manual',
+    'referral:export-csv',
     'serialized-inventory:*', // Serialized Inventory (SIMs, jewelry, etc.)
     'sale-verifications:review', // Can approve/reject SIM-sale documentation from dashboard
     'inventory:org-manage', // Manage org-level item categories & serialized items
@@ -764,6 +791,12 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'discounts:*', // Phase 2: Full discount management
     'coupons:*', // Phase 2: Full coupon management
     'creditPacks:*', // Credit pack/bundle management
+    // Referral Program (full management)
+    'referral:read',
+    'referral:configure',
+    'referral:override-existing-customer',
+    'referral:void-manual',
+    'referral:export-csv',
     'features:*',
     'notifications:*', // Can send push notifications
     'venues:*', // Can manage venue settings, billing, payment methods

@@ -65,8 +65,7 @@ export async function handleAngelPayWebhook(req: Request, res: Response, _next: 
   // This is NOT Svix: the key is NOT base64-decoded, NOT stripped. Pass the full string.
   const expected = crypto.createHmac('sha256', merchantAccount.angelpayWebhookSecret).update(rawBody).digest('hex')
 
-  const valid =
-    expected.length === signature.length && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature))
+  const valid = expected.length === signature.length && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature))
 
   if (!valid) {
     logger.warn('🚫 [AngelPay webhook] invalid signature', { merchantAccountId, eventId })

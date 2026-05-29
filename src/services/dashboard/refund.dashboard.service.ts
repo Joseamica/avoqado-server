@@ -426,11 +426,23 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
     return {
       refundPaymentId: refundPayment.id,
       originalPaymentId: original.id,
+      originalOrderId: original.orderId,
       refundedItems,
       remainingAfterCents: Math.max(0, remainingBeforeCents - refundCents),
       refundAmountCents: refundCents,
     }
   })
+
+  // REFERRAL HOOK: trigger referral void if the original order had a QUALIFIED referral
+  // (idempotent: no-ops if no QUALIFIED Referral matches this orderId)
+  if (result.originalOrderId) {
+    try {
+      const { onOrderRefunded } = await import('@/services/referrals/referralRefund.service')
+      await onOrderRefunded({ orderId: result.originalOrderId, venueId: input.venueId })
+    } catch (err) {
+      console.error('[referral hook] onOrderRefunded failed for order', result.originalOrderId, err)
+    }
+  }
 
   // Restock inventory for selected items (best-effort, outside the payment tx
   // because it touches multiple Inventory rows and a partial failure shouldn't

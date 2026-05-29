@@ -523,6 +523,16 @@ export async function createManualPayment(venueId: string, staffId: string, inpu
     }
   }
 
+  // REFERRAL HOOK: trigger referral qualification if this manual payment closed an order with a pending referral
+  if (loyaltyOrderId) {
+    try {
+      const { onOrderPaid } = await import('@/services/referrals/referralQualification.service')
+      await onOrderPaid({ orderId: loyaltyOrderId, venueId })
+    } catch (err) {
+      console.error('[referral hook] onOrderPaid failed for order', loyaltyOrderId, err)
+    }
+  }
+
   return result
 }
 

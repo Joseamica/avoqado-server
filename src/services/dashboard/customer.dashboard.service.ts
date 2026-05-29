@@ -380,6 +380,30 @@ export async function createCustomer(venueId: string, data: CreateCustomerReques
     data: { email: customer.email, phone: customer.phone },
   })
 
+  // REFERRAL HOOK: auto-generate referralCode if program is active for this venue
+  try {
+    const cfg = await prisma.referralProgramConfig.findUnique({
+      where: { venueId: customer.venueId },
+      select: { active: true, codePrefix: true },
+    })
+    if (cfg?.active && !customer.referralCode) {
+      const venue = await prisma.venue.findUnique({
+        where: { id: customer.venueId },
+        select: { slug: true },
+      })
+      const { generateReferralCode } = await import('@/services/referrals/referralCode.service')
+      const code = await generateReferralCode({
+        venueId: customer.venueId,
+        venuePrefix: cfg.codePrefix ?? venue?.slug ?? customer.venueId.slice(-8),
+        customerName: [customer.firstName, customer.lastName].filter(Boolean).join(' '),
+      })
+      await prisma.customer.update({ where: { id: customer.id }, data: { referralCode: code } })
+    }
+  } catch (err) {
+    // Don't fail customer creation if referral hook fails — just log
+    console.error('[referral hook] Failed to auto-generate referralCode for customer', customer.id, err)
+  }
+
   return customer
 }
 
@@ -693,6 +717,21 @@ export async function settleCustomerBalance(
       })
     }
   })
+
+  // REFERRAL HOOK: each settled order may have had a pending referral — trigger qualification
+  // (idempotent: no-ops if no PENDING Referral matches each orderId)
+  try {
+    const { onOrderPaid } = await import('@/services/referrals/referralQualification.service')
+    for (const oc of pendingOrders) {
+      try {
+        await onOrderPaid({ orderId: oc.order.id, venueId })
+      } catch (err) {
+        console.error('[referral hook] onOrderPaid failed for order', oc.order.id, err)
+      }
+    }
+  } catch (err) {
+    console.error('[referral hook] Failed to import referralQualification.service', err)
+  }
 
   logger.info(`Customer balance settled: ${customerId}`, {
     venueId,

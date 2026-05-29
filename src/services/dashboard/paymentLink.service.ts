@@ -1392,6 +1392,7 @@ export async function finalizePaymentLinkCheckout(args: {
   const attributedStaffIds = session.paymentLink.attributions.map(a => a.staffId)
   const primaryStaffId = attributedStaffIds[0] ?? null // for Payment.processedById
   let paymentIdForCommission: string | null = null
+  let orderIdForReferral: string | null = null
 
   await prisma.$transaction(async tx => {
     // 1. Mark session COMPLETED + record Stripe paymentIntent for reconciliation
@@ -1537,7 +1538,18 @@ export async function finalizePaymentLinkCheckout(args: {
       select: { id: true },
     })
     paymentIdForCommission = createdPayment.id
+    orderIdForReferral = order.id
   })
+
+  // REFERRAL HOOK: trigger referral qualification if this paid order has a pending referral
+  if (orderIdForReferral) {
+    try {
+      const { onOrderPaid } = await import('@/services/referrals/referralQualification.service')
+      await onOrderPaid({ orderId: orderIdForReferral, venueId })
+    } catch (err) {
+      console.error('[referral hook] onOrderPaid failed for order', orderIdForReferral, err)
+    }
+  }
 
   // Fire-and-forget commission calculation. Mirrors how the TPV flow does it
   // (payment.tpv.service.ts:1813) — async so the webhook ack isn't blocked
@@ -2143,6 +2155,7 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
   const attributedStaffIds = session.paymentLink!.attributions.map(a => a.staffId)
   const primaryStaffId = attributedStaffIds[0] ?? null
   let paymentIdForCommission: string | null = null
+  let orderIdForReferral: string | null = null
 
   await prisma.$transaction(async tx => {
     // Update checkout session
@@ -2284,8 +2297,19 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
         select: { id: true },
       })
       paymentIdForCommission = createdPayment.id
+      orderIdForReferral = order.id
     }
   })
+
+  // REFERRAL HOOK: trigger referral qualification if this paid order has a pending referral
+  if (orderIdForReferral) {
+    try {
+      const { onOrderPaid } = await import('@/services/referrals/referralQualification.service')
+      await onOrderPaid({ orderId: orderIdForReferral, venueId })
+    } catch (err) {
+      console.error('[referral hook] onOrderPaid failed for order', orderIdForReferral, err)
+    }
+  }
 
   // Fire-and-forget commission calculation (matches the Stripe webhook flow).
   // 0 attributions → skip · 1 → regular createCommissionForPayment · 2+ →
@@ -3017,6 +3041,7 @@ export async function finalizeMercadoPagoCheckout(args: { sessionId: string; mpP
   const feePercentage = subtotal.gt(0) ? feeAmount.div(subtotal).toDecimalPlaces(4) : new Prisma.Decimal(0)
   const processorId = String(args.mpPaymentId)
 
+  let orderIdForReferral: string | null = null
   try {
     await prisma.$transaction(async tx => {
       // Re-check inside the tx so two concurrent finalizers (optimistic + IPN)
@@ -3074,7 +3099,19 @@ export async function finalizeMercadoPagoCheckout(args: { sessionId: string; mpP
           data: { totalCollected: { increment: gross }, paymentCount: { increment: 1 } },
         })
       }
+
+      orderIdForReferral = order.id
     })
+
+    // REFERRAL HOOK: trigger referral qualification if this paid order has a pending referral
+    if (orderIdForReferral) {
+      try {
+        const { onOrderPaid } = await import('@/services/referrals/referralQualification.service')
+        await onOrderPaid({ orderId: orderIdForReferral, venueId })
+      } catch (err) {
+        console.error('[referral hook] onOrderPaid failed for order', orderIdForReferral, err)
+      }
+    }
 
     logger.info('MercadoPago checkout finalized (Order + Payment recorded)', {
       sessionId: args.sessionId,

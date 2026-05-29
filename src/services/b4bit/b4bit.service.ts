@@ -705,6 +705,14 @@ async function handlePaymentConfirmed(
       },
     })
     logger.info('📦 Order marked as PAID', { orderId: payment.orderId })
+
+    // REFERRAL HOOK: trigger referral qualification if this crypto-paid order has a pending referral
+    try {
+      const { onOrderPaid } = await import('@/services/referrals/referralQualification.service')
+      await onOrderPaid({ orderId: payment.orderId, venueId })
+    } catch (err) {
+      console.error('[referral hook] onOrderPaid failed for order', payment.orderId, err)
+    }
   }
 
   // Emit CRYPTO_PAYMENT_CONFIRMED event

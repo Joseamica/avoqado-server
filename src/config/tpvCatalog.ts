@@ -39,12 +39,7 @@ export const TPV_CATALOG: Record<string, TpvCatalogEntry> = {
     description: 'Potente TPV de bolsillo con pagos integrados',
     unitPriceCents: 400_000, // $4,000 MXN
     image: '/images/tpv/pax-a910s.png',
-    features: [
-      'Pantalla táctil 5"',
-      'Escáner integrado',
-      'Cámara para QR',
-      'SIM con internet 4G incluida — sin costo adicional',
-    ],
+    features: ['Pantalla táctil 5"', 'Escáner integrado', 'Cámara para QR', 'SIM con internet 4G incluida — sin costo adicional'],
     specs: {
       dimensions: 'TBD por sales',
       weight: 'TBD',
@@ -64,12 +59,7 @@ export const TPV_CATALOG: Record<string, TpvCatalogEntry> = {
     description: 'TPV compacto, ideal para movilidad',
     unitPriceCents: 180_000, // $1,800 MXN
     image: '/images/tpv/nexgo-n62.png',
-    features: [
-      'Pantalla compacta',
-      'Escáner por cámara',
-      'Batería extendida',
-      'SIM con internet 4G incluida — sin costo adicional',
-    ],
+    features: ['Pantalla compacta', 'Escáner por cámara', 'Batería extendida', 'SIM con internet 4G incluida — sin costo adicional'],
     specs: {
       dimensions: 'TBD por sales',
       weight: 'TBD',
@@ -88,12 +78,7 @@ export const TPV_CATALOG: Record<string, TpvCatalogEntry> = {
     description: 'TPV premium con pantalla grande y escáner físico',
     unitPriceCents: 300_000, // $3,000 MXN
     image: '/images/tpv/nexgo-n86.png',
-    features: [
-      'Pantalla 6"',
-      'Escáner físico 1D/2D',
-      'Cámara para QR',
-      'SIM con internet 4G incluida — sin costo adicional',
-    ],
+    features: ['Pantalla 6"', 'Escáner físico 1D/2D', 'Cámara para QR', 'SIM con internet 4G incluida — sin costo adicional'],
     specs: {
       dimensions: 'TBD por sales',
       weight: 'TBD',

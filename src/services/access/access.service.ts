@@ -149,6 +149,13 @@ const PERMISSION_TO_FEATURE_MAP: Record<string, string> = {
   // Reservations
   'reservations:read': 'AVOQADO_RESERVATIONS',
   'reservations:write': 'AVOQADO_RESERVATIONS',
+
+  // Referral Program
+  'referral:read': 'REFERRAL_PROGRAM',
+  'referral:configure': 'REFERRAL_PROGRAM',
+  'referral:override-existing-customer': 'REFERRAL_PROGRAM',
+  'referral:void-manual': 'REFERRAL_PROGRAM',
+  'referral:export-csv': 'REFERRAL_PROGRAM',
 }
 
 /**

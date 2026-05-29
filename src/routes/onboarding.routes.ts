@@ -803,4 +803,15 @@ router.post(
   onboardingController.completeV2Onboarding,
 )
 
+/**
+ * POST /api/v1/onboarding/venues/:venueId/test-payment-link
+ *
+ * Wizard-only test charge: generates a real payment link via the venue's
+ * connected Mercado Pago or Stripe Connect merchant. Gated by env flag at
+ * registration time — if the flag is off, the endpoint simply doesn't exist (404).
+ */
+if (process.env.ENABLE_ONBOARDING_PAYMENT_PROVIDERS === 'true') {
+  router.post('/venues/:venueId/test-payment-link', authenticateTokenMiddleware, onboardingController.testPaymentLink)
+}
+
 export default router

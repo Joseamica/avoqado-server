@@ -74,13 +74,16 @@ npx prisma migrate dev --name {description}
 
 **Whenever you add a new `model Foo {}` to `prisma/schema.prisma`, you MUST also:**
 
-1. Open `scripts/generate-schema-map.ts` and add the new model name to the `MODEL_TO_DOMAIN` map (pick one of the 20 domains — group it with siblings).
+1. Open `scripts/generate-schema-map.ts` and add the new model name to the `MODEL_TO_DOMAIN` map (pick one of the 20 domains — group it with
+   siblings).
 2. Run `npm run schema:map` to regenerate `docs/SCHEMA_MAP.md`.
 3. Stage BOTH `scripts/generate-schema-map.ts` AND `docs/SCHEMA_MAP.md` along with the schema change in the SAME commit.
 
 The script fails fast on unclassified models — leaving a new model unmapped breaks `npm run schema:map` for the next person.
 
-**Heuristic for picking the domain**: look at where the model's `@relation` fields point. If it's tightly coupled to `Terminal` / `TpvCommand` / `AppUpdate` → `Terminals / TPV Fleet`. If it's about `Order` / `Payment` / `MerchantAccount` → `Orders, KDS & Cash` or `Payments & Fees`. When in doubt, `grep` an existing sibling in `MODEL_TO_DOMAIN` and copy its placement.
+**Heuristic for picking the domain**: look at where the model's `@relation` fields point. If it's tightly coupled to `Terminal` /
+`TpvCommand` / `AppUpdate` → `Terminals / TPV Fleet`. If it's about `Order` / `Payment` / `MerchantAccount` → `Orders, KDS & Cash` or
+`Payments & Fees`. When in doubt, `grep` an existing sibling in `MODEL_TO_DOMAIN` and copy its placement.
 
 This rule applies to **renames** too — if you rename `Foo` → `Bar` in the schema, update the same key in `MODEL_TO_DOMAIN`.
 

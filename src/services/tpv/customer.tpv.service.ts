@@ -357,6 +357,7 @@ export async function quickCreateCustomer(venueId: string, data: QuickCreateCust
       loyaltyPoints: true,
       totalVisits: true,
       totalSpent: true,
+      referralCode: true,
       customerGroup: {
         select: {
           id: true,
@@ -372,8 +373,35 @@ export async function quickCreateCustomer(venueId: string, data: QuickCreateCust
     customerId: customer.id,
   })
 
+  // REFERRAL HOOK: auto-generate referralCode if program is active for this venue
+  try {
+    const cfg = await prisma.referralProgramConfig.findUnique({
+      where: { venueId },
+      select: { active: true, codePrefix: true },
+    })
+    if (cfg?.active && !customer.referralCode) {
+      const venue = await prisma.venue.findUnique({
+        where: { id: venueId },
+        select: { slug: true },
+      })
+      const { generateReferralCode } = await import('@/services/referrals/referralCode.service')
+      const code = await generateReferralCode({
+        venueId,
+        venuePrefix: cfg.codePrefix ?? venue?.slug ?? venueId.slice(-8),
+        customerName: [customer.firstName, customer.lastName].filter(Boolean).join(' '),
+      })
+      await prisma.customer.update({ where: { id: customer.id }, data: { referralCode: code } })
+    }
+  } catch (err) {
+    // Don't fail customer creation if referral hook fails — just log
+    console.error('[referral hook] Failed to auto-generate referralCode for customer', customer.id, err)
+  }
+
+  // Strip referralCode from response (kept above only for the hook check)
+  const { referralCode: _referralCode, ...customerResponse } = customer
+
   return {
-    ...customer,
+    ...customerResponse,
     totalSpent: customer.totalSpent.toNumber(),
   }
 }

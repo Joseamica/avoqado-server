@@ -817,6 +817,15 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     })
   })
 
+  // REFERRAL HOOK: trigger referral qualification if this order has a pending referral
+  // (idempotent: no-ops if no PENDING Referral matches this orderId)
+  try {
+    const { onOrderPaid } = await import('@/services/referrals/referralQualification.service')
+    await onOrderPaid({ orderId, venueId })
+  } catch (err) {
+    console.error('[referral hook] onOrderPaid failed for order', orderId, err)
+  }
+
   // Emit Socket.IO events for real-time updates
   const broadcastingService = socketManager.getBroadcastingService()
   if (broadcastingService) {

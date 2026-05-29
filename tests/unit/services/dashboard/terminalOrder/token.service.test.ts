@@ -1,8 +1,4 @@
-import {
-  signApprovalToken,
-  verifyApprovalToken,
-  TerminalOrderTokenAction,
-} from '@/services/dashboard/terminalOrder/token.service'
+import { signApprovalToken, verifyApprovalToken, TerminalOrderTokenAction } from '@/services/dashboard/terminalOrder/token.service'
 
 describe('terminalOrder token.service', () => {
   const ORIG_SECRET = process.env.TERMINAL_ORDER_TOKEN_SECRET
@@ -31,9 +27,7 @@ describe('terminalOrder token.service', () => {
 
   it('rejects a token whose action does not match the expected', () => {
     const token = signApprovalToken({ orderId: 'ord_1', action: 'approve' })
-    expect(() =>
-      verifyApprovalToken(token, { expectedAction: 'reject' as TerminalOrderTokenAction }),
-    ).toThrow(/action mismatch/i)
+    expect(() => verifyApprovalToken(token, { expectedAction: 'reject' as TerminalOrderTokenAction })).toThrow(/action mismatch/i)
   })
 
   it('rejects an expired token', () => {
@@ -44,9 +38,7 @@ describe('terminalOrder token.service', () => {
   it('throws if TERMINAL_ORDER_TOKEN_SECRET is unset at sign time', () => {
     const prev = process.env.TERMINAL_ORDER_TOKEN_SECRET
     delete process.env.TERMINAL_ORDER_TOKEN_SECRET
-    expect(() => signApprovalToken({ orderId: 'x', action: 'approve' })).toThrow(
-      /TERMINAL_ORDER_TOKEN_SECRET/,
-    )
+    expect(() => signApprovalToken({ orderId: 'x', action: 'approve' })).toThrow(/TERMINAL_ORDER_TOKEN_SECRET/)
     process.env.TERMINAL_ORDER_TOKEN_SECRET = prev
   })
 })

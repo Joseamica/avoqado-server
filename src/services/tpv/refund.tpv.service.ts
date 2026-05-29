@@ -392,6 +392,17 @@ export async function recordRefund(
     amount: refundAmountInPesos,
   })
 
+  // REFERRAL HOOK: trigger referral void if the original order had a QUALIFIED referral
+  // (idempotent: no-ops if no QUALIFIED Referral matches this orderId)
+  if (originalPayment.orderId) {
+    try {
+      const { onOrderRefunded } = await import('@/services/referrals/referralRefund.service')
+      await onOrderRefunded({ orderId: originalPayment.orderId, venueId })
+    } catch (err) {
+      console.error('[referral hook] onOrderRefunded failed for order', originalPayment.orderId, err)
+    }
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════
   // STEP 5: Create negative TransactionCost for refund (for accurate profit reporting)
   // ═══════════════════════════════════════════════════════════════════════════

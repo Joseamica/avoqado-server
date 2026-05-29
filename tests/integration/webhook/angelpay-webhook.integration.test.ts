@@ -109,16 +109,11 @@ describe('POST /webhooks/angelpay/:merchantAccountId (integration — real HMAC 
     expect(res.body).toMatchObject({ action: 'MATCHED' })
     expect(service.processAngelPayWebhook).toHaveBeenCalledTimes(1)
     // Confirm eventId is passed through correctly
-    expect(service.processAngelPayWebhook).toHaveBeenCalledWith(
-      expect.objectContaining({ eventId: 'evt_int_1' }),
-    )
+    expect(service.processAngelPayWebhook).toHaveBeenCalledWith(expect.objectContaining({ eventId: 'evt_int_1' }))
   })
 
   it('rejects a request with no X-Webhook-Signature header with 401', async () => {
-    const res = await request(app)
-      .post('/webhooks/angelpay/ma_1')
-      .set('Content-Type', 'application/json')
-      .send(VALID_BODY)
+    const res = await request(app).post('/webhooks/angelpay/ma_1').set('Content-Type', 'application/json').send(VALID_BODY)
 
     expect(res.status).toBe(401)
     expect(res.body).toMatchObject({ error: 'missing signature headers' })
@@ -160,10 +155,7 @@ describe('POST /webhooks/angelpay/:merchantAccountId (integration — real HMAC 
   it('returns 404 when merchantAccountId is unknown', async () => {
     mockedMerchantAccountFindFirst.mockResolvedValueOnce(null)
 
-    const res = await request(app)
-      .post('/webhooks/angelpay/unknown_id')
-      .set('Content-Type', 'application/json')
-      .send(VALID_BODY)
+    const res = await request(app).post('/webhooks/angelpay/unknown_id').set('Content-Type', 'application/json').send(VALID_BODY)
 
     expect(res.status).toBe(404)
     expect(res.body).toMatchObject({ error: 'unknown merchant' })
@@ -173,10 +165,7 @@ describe('POST /webhooks/angelpay/:merchantAccountId (integration — real HMAC 
   it('returns 503 when merchant has no angelpayWebhookSecret', async () => {
     mockedMerchantAccountFindFirst.mockResolvedValueOnce({ ...merchantRow, angelpayWebhookSecret: null })
 
-    const res = await request(app)
-      .post('/webhooks/angelpay/ma_1')
-      .set('Content-Type', 'application/json')
-      .send(VALID_BODY)
+    const res = await request(app).post('/webhooks/angelpay/ma_1').set('Content-Type', 'application/json').send(VALID_BODY)
 
     expect(res.status).toBe(503)
     expect(res.body).toMatchObject({ error: 'webhook not provisioned for this merchant' })

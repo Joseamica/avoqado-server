@@ -448,12 +448,9 @@ describe('reconcileAngelPayWebhookForPayment', () => {
   }
 
   beforeEach(() => {
-    ;[
-      mockedProviderEventLogFindMany,
-      mockedProviderEventLogUpdate,
-      mockedPaymentFindUnique,
-      mockedPaymentUpdate,
-    ].forEach(m => m.mockReset())
+    ;[mockedProviderEventLogFindMany, mockedProviderEventLogUpdate, mockedPaymentFindUnique, mockedPaymentUpdate].forEach(m =>
+      m.mockReset(),
+    )
     // Default: payment has no existing processorData
     mockedPaymentFindUnique.mockResolvedValue({ processorData: null })
     mockedProviderEventLogUpdate.mockResolvedValue({})

@@ -335,12 +335,7 @@ router.post(
 // other mutating public endpoints.
 router.get('/tpv-orders/:id/approve', cancelLimit, tpvOrderPublicController.approveOrderHandler)
 router.get('/tpv-orders/:id/approve/check', readLimit, tpvOrderPublicController.approveCheckHandler)
-router.post(
-  '/tpv-orders/:id/reject',
-  cancelLimit,
-  validateRequest(rejectSpeiSchema),
-  tpvOrderPublicController.rejectOrderHandler,
-)
+router.post('/tpv-orders/:id/reject', cancelLimit, validateRequest(rejectSpeiSchema), tpvOrderPublicController.rejectOrderHandler)
 
 // ---- Public TerminalOrder Serial-Assignment Magic-Link Routes (Plan 3 · Task 4) ----
 // Same token-based pattern as approve/reject: the signed JWT in `?token=...`

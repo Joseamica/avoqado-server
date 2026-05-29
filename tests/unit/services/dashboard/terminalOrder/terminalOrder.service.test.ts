@@ -449,9 +449,7 @@ describe('approveSpei', () => {
       paymentStatus: 'AWAITING_PROOF',
       items: [],
     })
-    await expect(approveSpei({ orderId: 'ord_1', approvedBy: 'sales@avoqado.io' })).rejects.toThrow(
-      /not in PROOF_UPLOADED/i,
-    )
+    await expect(approveSpei({ orderId: 'ord_1', approvedBy: 'sales@avoqado.io' })).rejects.toThrow(/not in PROOF_UPLOADED/i)
   })
 
   it('marks PAID + AWAITING_SERIALS and clears approval token (single-use)', async () => {
@@ -486,9 +484,9 @@ describe('rejectSpei', () => {
 
   it('rejects if order is not PROOF_UPLOADED', async () => {
     ;(prisma.terminalOrder.findUnique as jest.Mock).mockResolvedValue({ id: 'ord_1', paymentStatus: 'PAID' })
-    await expect(
-      rejectSpei({ orderId: 'ord_1', reason: 'falso', rejectedBy: 'sales@avoqado.io' }),
-    ).rejects.toThrow(/not in PROOF_UPLOADED/i)
+    await expect(rejectSpei({ orderId: 'ord_1', reason: 'falso', rejectedBy: 'sales@avoqado.io' })).rejects.toThrow(
+      /not in PROOF_UPLOADED/i,
+    )
   })
 
   it('marks REJECTED + persists reason + clears approval token', async () => {

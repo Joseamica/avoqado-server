@@ -734,6 +734,14 @@ async function updateOrderTotalsForStandalonePayment(
       // Continue execution - payment is still successful
     }
 
+    // REFERRAL HOOK: trigger referral qualification if this order has a pending referral
+    try {
+      const { onOrderPaid } = await import('@/services/referrals/referralQualification.service')
+      await onOrderPaid({ orderId: updatedOrder.id, venueId: updatedOrder.venueId })
+    } catch (err) {
+      console.error('[referral hook] onOrderPaid failed for order', updatedOrder.id, err)
+    }
+
     // 🎁 CUSTOMER METRICS & LOYALTY POINTS: Update for ALL customers, points for PRIMARY only
     // ✅ WORLD-CLASS PATTERN: Multiple customers per order (visit tracking + loyalty)
     const orderTotal = parseFloat(updatedOrder.total.toString())
@@ -2480,6 +2488,14 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   } catch (error) {
     logger.error('Failed to generate digital receipt for fast payment', { paymentId: payment.id, error })
     // Don't fail the payment if receipt generation fails
+  }
+
+  // REFERRAL HOOK: trigger referral qualification if this fast order has a pending referral
+  try {
+    const { onOrderPaid } = await import('@/services/referrals/referralQualification.service')
+    await onOrderPaid({ orderId: fastOrder.id, venueId: fastOrder.venueId })
+  } catch (err) {
+    console.error('[referral hook] onOrderPaid failed for order', fastOrder.id, err)
   }
 
   // 🔌 REAL-TIME: Emit socket events based on payment status (fast payment)

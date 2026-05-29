@@ -43,11 +43,7 @@ const mockedProcess = service.processAngelPayWebhook as jest.Mock
  * Build a minimal Express-like Request.
  * body should be a Buffer (the raw bytes that were signed).
  */
-function mkReq(opts: {
-  bodyBuf?: Buffer
-  headers?: Record<string, string>
-  params?: Record<string, string>
-}): Request {
+function mkReq(opts: { bodyBuf?: Buffer; headers?: Record<string, string>; params?: Record<string, string> }): Request {
   return {
     body: opts.bodyBuf ?? Buffer.from('{}'),
     params: opts.params ?? {},
@@ -107,11 +103,7 @@ describe('handleAngelPayWebhook', () => {
     mockedMerchantAccountFindFirst.mockResolvedValue(merchantRow)
     const res = mkRes()
     // No x-webhook-signature or x-webhook-event-id
-    await handleAngelPayWebhook(
-      mkReq({ params: { merchantAccountId: 'ma_1' }, headers: {} }),
-      res,
-      jest.fn(),
-    )
+    await handleAngelPayWebhook(mkReq({ params: { merchantAccountId: 'ma_1' }, headers: {} }), res, jest.fn())
     expect(res.__status).toBe(401)
     expect((res.__body as any).error).toBe('missing signature headers')
     expect(mockedProcess).not.toHaveBeenCalled()
@@ -142,7 +134,10 @@ describe('handleAngelPayWebhook', () => {
     mockedMerchantAccountFindFirst.mockResolvedValue(merchantRow)
     mockedProcess.mockResolvedValue({ action: 'MATCHED', eventLogId: 'evt_9', paymentId: 'pay_9' })
 
-    const bodyStr = JSON.stringify({ event_type: 'send_transaction', payload: { amount: '10000', integratorReference: 'ref-x', status: 'approved' } })
+    const bodyStr = JSON.stringify({
+      event_type: 'send_transaction',
+      payload: { amount: '10000', integratorReference: 'ref-x', status: 'approved' },
+    })
     const sig = sign(TEST_SECRET, bodyStr)
 
     const res = mkRes()

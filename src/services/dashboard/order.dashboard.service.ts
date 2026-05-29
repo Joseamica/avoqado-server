@@ -697,6 +697,14 @@ export async function settleOrder(
     })
   })
 
+  // REFERRAL HOOK: trigger referral qualification if this order had a pending referral
+  try {
+    const { onOrderPaid } = await import('@/services/referrals/referralQualification.service')
+    await onOrderPaid({ orderId, venueId })
+  } catch (err) {
+    console.error('[referral hook] onOrderPaid failed for order', orderId, err)
+  }
+
   logger.info(`Order settled: ${orderId}`, {
     venueId,
     orderId,

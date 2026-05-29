@@ -10,6 +10,7 @@ import { EntityType, VenueType } from '@prisma/client'
 import * as onboardingProgressService from '../services/onboarding/onboardingProgress.service'
 import * as venueCreationService from '../services/onboarding/venueCreation.service'
 import * as signupService from '../services/onboarding/signup.service'
+import * as testPaymentLinkService from '../services/onboarding/testPaymentLink.service'
 import { createOnboardingSetupIntent } from '../services/stripe.service'
 import { generateMenuCSVTemplate, parseMenuCSV } from '../utils/menuCsvParser'
 import { validateCLABE } from '../utils/clabeValidator'
@@ -194,6 +195,7 @@ export async function getOnboardingProgress(req: Request, res: Response, next: N
     }
 
     const completionPercentage = await onboardingProgressService.getOnboardingCompletionPercentage(organizationId)
+    const paymentProviders = onboardingProgressService.parseV2Step8(progress.v2SetupData)
 
     res.status(200).json({
       progress: {
@@ -213,6 +215,7 @@ export async function getOnboardingProgress(req: Request, res: Response, next: N
         step7_kycDocuments: progress.step7_kycDocuments,
         wizardVersion: progress.wizardVersion,
         v2SetupData: progress.v2SetupData,
+        paymentProviders,
         // Don't expose step8_paymentInfo for security (contains CLABE)
       },
     })
@@ -754,9 +757,12 @@ export async function getOnboardingStatus(req: Request, res: Response, next: Nex
       where: { organizationId: org.id },
     })
 
+    const paymentProviders = progress ? onboardingProgressService.parseV2Step8(progress.v2SetupData) : null
+
     res.status(200).json({
       organization: org,
       onboardingProgress: progress,
+      paymentProviders,
     })
   } catch (error) {
     next(error)
@@ -989,6 +995,36 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
     })
   } catch (error) {
     logger.error('Error completing V2 onboarding:', error)
+    next(error)
+  }
+}
+
+/**
+ * POST /api/v1/onboarding/venues/:venueId/test-payment-link
+ *
+ * Generates a real payment link via the venue's connected MP or Stripe Connect
+ * merchant so the owner can immediately try a charge from their phone.
+ * Wizard-only — gated by `ENABLE_ONBOARDING_PAYMENT_PROVIDERS` at the route layer.
+ */
+export async function testPaymentLink(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const authContext = (req as any).authContext
+    if (!authContext?.userId) throw new BadRequestError('No autenticado')
+
+    const { amount, providerCode } = req.body
+    if (!['MERCADO_PAGO', 'STRIPE'].includes(providerCode)) {
+      throw new BadRequestError('providerCode debe ser MERCADO_PAGO o STRIPE')
+    }
+
+    const result = await testPaymentLinkService.createTestPaymentLink({
+      venueId,
+      staffId: authContext.userId,
+      amount: Number(amount),
+      providerCode,
+    })
+    res.status(200).json({ success: true, ...result })
+  } catch (error) {
     next(error)
   }
 }

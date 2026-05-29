@@ -20,9 +20,7 @@ const DEFAULT_EXPIRY_SECONDS = 7 * 24 * 60 * 60 // 7 days
 function getSecret(): string {
   const secret = process.env.TERMINAL_ORDER_TOKEN_SECRET
   if (!secret || secret.length < 16) {
-    throw new Error(
-      'TERMINAL_ORDER_TOKEN_SECRET is not configured (must be at least 16 chars).',
-    )
+    throw new Error('TERMINAL_ORDER_TOKEN_SECRET is not configured (must be at least 16 chars).')
   }
   return secret
 }
@@ -38,10 +36,7 @@ export function signApprovalToken(input: SignTokenInput): string {
   return jwt.sign(payload, getSecret(), options)
 }
 
-export function verifyApprovalToken(
-  token: string,
-  opts: { expectedAction?: TerminalOrderTokenAction } = {},
-): TerminalOrderTokenPayload {
+export function verifyApprovalToken(token: string, opts: { expectedAction?: TerminalOrderTokenAction } = {}): TerminalOrderTokenPayload {
   let decoded: TerminalOrderTokenPayload
   try {
     decoded = jwt.verify(token, getSecret()) as TerminalOrderTokenPayload

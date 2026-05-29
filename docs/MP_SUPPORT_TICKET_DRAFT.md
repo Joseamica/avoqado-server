@@ -1,6 +1,7 @@
 # Draft — Ticket MP Support (actualizado 2026-05-21)
 
-**Asunto sugerido**: `Marketplace MLM Checkout API — error 2034/2198 persistente con cuenta dev verificada + test users del panel + emails confirmados`
+**Asunto sugerido**:
+`Marketplace MLM Checkout API — error 2034/2198 persistente con cuenta dev verificada + test users del panel + emails confirmados`
 
 ---
 
@@ -8,15 +9,14 @@
 
 Hola equipo Mercado Pago,
 
-Marketplace MLM integration con OAuth + `application_fee` (Split Payments
-1:1). Cuenta developer **ya verificada** (2026-05-21). Test users del panel
-**ya con `confirmed_email: true`**. Aún así, **todos los pagos sandbox
-devuelven error**:
+Marketplace MLM integration con OAuth + `application_fee` (Split Payments 1:1). Cuenta developer **ya verificada** (2026-05-21). Test users
+del panel **ya con `confirmed_email: true`**. Aún así, **todos los pagos sandbox devuelven error**:
 
 - `payer.email = test_user_<X>@testuser.com` → **2034 "Invalid users involved"**
 - `payer.email = email_real_del_buyer_perfil` (cambiado) → **2198 "Invalid test user email"**
 
 Estamos atascados en un círculo:
+
 - El email `@testuser.com` original NO se puede validar (no recibe correos)
 - El email nuevo (ej. `avoqado@test.com`) sí se puede validar pero MP lo rechaza con 2198
 
@@ -40,17 +40,15 @@ Estamos atascados en un círculo:
 
 ### ⭐ EVIDENCIA DEFINITIVA (2026-05-21 20:45 UTC)
 
-Creé un test buyer 100% nuevo y fresco directamente desde el panel MP
-(no via API, mismo dev account, app correcta). El buyer NO se ha tocado:
-no se cambió el email, no se validó, está exactamente como MP lo entregó.
+Creé un test buyer 100% nuevo y fresco directamente desde el panel MP (no via API, mismo dev account, app correcta). El buyer NO se ha
+tocado: no se cambió el email, no se validó, está exactamente como MP lo entregó.
 
 - **Buyer fresh**: `3417475741` / `TESTUSER6448646864699319800`
 - **Email entregado por MP**: `test_user_6448646864699319800@testuser.com`
 - **Resultado con `application_fee: 5`**: 2034
 - **Resultado SIN `application_fee` (pago directo, no marketplace)**: 2034
 
-⚠️ **Esto confirma que el problema NO es del flow marketplace** — es
-algo más fundamental. MP rechaza la combinación de:
+⚠️ **Esto confirma que el problema NO es del flow marketplace** — es algo más fundamental. MP rechaza la combinación de:
 
 - Seller test (`3414699907`, panel, `confirmed_email: true`)
 - Buyer test FRESH (`3417475741`, panel, sin tocar)
@@ -59,6 +57,7 @@ algo más fundamental. MP rechaza la combinación de:
 - `payer.email = test_user_6448646864699319800@testuser.com`
 
 Ambos test users:
+
 - Mismo dev account (`3415086004`)
 - Misma app (`2551292920123796`)
 - Mismo país (MLM)
@@ -68,6 +67,7 @@ Ambos test users:
 ### Setup técnico (todo verificado consistent)
 
 **Test seller (panel, app 2551292920123796):**
+
 - user_id: `3414699907`
 - nickname: `TESTUSER6558699960249257250`
 - tags: `["test_user", "normal"]`
@@ -77,12 +77,14 @@ Ambos test users:
 - `status.billing.allow: true`
 
 **Test buyer (panel, app 2551292920123796, mismo dev):**
+
 - user_id: `3414699903`
 - nickname: `TESTUSER6115718530863174786`
 - email original: `test_user_6115718530863174786@testuser.com`
 - email cambiado (para validar): `avoqado@test.com` ahora confirmado ✓
 
 **OAuth tokens consistentes (vía `/users/me`):**
+
 - access_token ID suffix: `3414699907` ✓
 - public_key: `APP_USR-70e1a05c-60b9-4204-82ab-aff3c4d4ab38`
 - card_token live_mode: `true` (consistent con APP_USR-)
@@ -107,10 +109,9 @@ Ambos test users:
 ¿Cómo se procesa un pago Checkout API marketplace MLM sandbox?
 
 Específicamente:
-1. ¿Qué `payer.email` espera MP cuando el buyer test cambió su email del
-   `@testuser.com` automático a uno ficticio para validación?
-2. ¿Existe algún flag adicional para sandbox marketplace MLM que no esté
-   documentado?
+
+1. ¿Qué `payer.email` espera MP cuando el buyer test cambió su email del `@testuser.com` automático a uno ficticio para validación?
+2. ¿Existe algún flag adicional para sandbox marketplace MLM que no esté documentado?
 3. ¿Es bug conocido de MLM marketplace sandbox + Checkout API?
 
 Adjunto los trace IDs — pueden ver el request exacto en sus logs.
@@ -121,11 +122,9 @@ Gracias.
 
 ## Resumen ejecutivo (para Avoqado interno)
 
-**Bloqueo confirmado**: Sandbox MP MLM marketplace + Checkout API no procesa
-pagos en ninguna combinación probada (10+ scenarios). Todas las hipótesis
-del otro LLM/docs/foros probadas y descartadas.
+**Bloqueo confirmado**: Sandbox MP MLM marketplace + Checkout API no procesa pagos en ninguna combinación probada (10+ scenarios). Todas las
+hipótesis del otro LLM/docs/foros probadas y descartadas.
 
 **El código backend está correcto** según docs oficiales MP 2026.
 
-**Camino real para validar e2e**: Producción real con cuenta MP de Cristina
-(Red Bloom). Monto $1 MXN para mitigar riesgo.
+**Camino real para validar e2e**: Producción real con cuenta MP de Cristina (Red Bloom). Monto $1 MXN para mitigar riesgo.

@@ -254,6 +254,8 @@ import creditPackRoutes from './dashboard/creditPack.routes'
 import staffOnboardingRoutes from './dashboard/staffOnboarding.routes'
 // SUPERADMIN impersonation — view the dashboard as another user/role (read-only)
 import impersonationRoutes from './dashboard/impersonation.routes'
+// Referral Program routes (Phase C)
+import referralsRoutes from './dashboard/referrals.routes'
 
 const router = express.Router({ mergeParams: true })
 
@@ -3525,6 +3527,9 @@ router.put(
 )
 // Inventory Management routes (ADMIN and MANAGER)
 router.use('/venues/:venueId/inventory', authenticateTokenMiddleware, inventoryRoutes)
+
+// Referral Program routes (program config + capture + reads)
+router.use('/venues/:venueId/referrals', authenticateTokenMiddleware, referralsRoutes)
 
 // Reservation / Booking System (core feature, permission-gated)
 router.use('/venues/:venueId/reservations', authenticateTokenMiddleware, reservationRoutes)

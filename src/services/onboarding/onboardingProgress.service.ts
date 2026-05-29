@@ -67,6 +67,37 @@ export interface OnboardingStepData {
   }
 }
 
+export interface V2Step8Data {
+  mpMerchantId: string | null
+  stripeMerchantId: string | null
+  skipped: boolean
+  lastUpdatedAt: string | null
+}
+
+/**
+ * Read the V2 wizard's step 8 (payment providers) sub-tree. Returns null
+ * when step 8 has never been saved, so callers can short-circuit.
+ *
+ * The wizard saves `onNext({ paymentProviders: { ... } })`, which means the
+ * payload is stored nested as `step8.paymentProviders`. We accept both shapes
+ * for forward-compat: the nested form (current frontend) and a flat form
+ * (in case a future code path writes the fields directly under `step8`).
+ */
+export function parseV2Step8(v2SetupData: unknown): V2Step8Data | null {
+  if (!v2SetupData || typeof v2SetupData !== 'object') return null
+  const step8 = (v2SetupData as Record<string, any>).step8
+  if (!step8 || typeof step8 !== 'object') return null
+  // Prefer the nested `paymentProviders` shape (matches `SetupData` on the
+  // frontend); fall back to the flat shape if older data exists.
+  const node = step8.paymentProviders && typeof step8.paymentProviders === 'object' ? step8.paymentProviders : step8
+  return {
+    mpMerchantId: typeof node.mpMerchantId === 'string' ? node.mpMerchantId : null,
+    stripeMerchantId: typeof node.stripeMerchantId === 'string' ? node.stripeMerchantId : null,
+    skipped: node.skipped === true,
+    lastUpdatedAt: typeof node.lastUpdatedAt === 'string' ? node.lastUpdatedAt : null,
+  }
+}
+
 /**
  * Creates or retrieves onboarding progress for an organization
  *
