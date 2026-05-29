@@ -1,7 +1,12 @@
 # Avoqado Admin MCP (internal)
 
 Local, single-user MCP server exposing read-only operational tools over stdio.
-Run with `npm run mcp`. See `docs/plans/2026-05-29-admin-mcp-design.md` for the full design.
+
+Smoke-test locally with `npm run mcp` (output goes to stderr). For **MCP registration,
+launch `tsx` directly** (see below) — `npm run` prints its preamble (`> avoqado-server@…`)
+to **stdout**, which is the MCP protocol channel, and would corrupt the handshake.
+
+Full design: `docs/plans/2026-05-29-admin-mcp-design.md`.
 
 ## Tools (Phase 1a — read only)
 
@@ -13,17 +18,17 @@ Run with `npm run mcp`. See `docs/plans/2026-05-29-admin-mcp-design.md` for the 
 
 ## Register in Claude
 
-Add to your MCP config (project `.mcp.json` or global), pointing `DOTENV_CONFIG_PATH`
-at the environment you want (⚠️ this server reads whatever `DATABASE_URL` is set):
+Add to your MCP config (project `.mcp.json` or global). Use the local `tsx` binary (not
+bare `tsx`, which assumes a global install). Prisma auto-loads `.env` from `cwd`, so the
+DB target is whatever that `.env`'s `DATABASE_URL` points to — ⚠️ check it before running.
 
 ```json
 {
   "mcpServers": {
     "avoqado-admin": {
-      "command": "tsx",
+      "command": "node_modules/.bin/tsx",
       "args": ["scripts/mcp/server.ts"],
-      "cwd": "/Users/amieva/Documents/Programming/Avoqado/avoqado-server",
-      "env": { "DOTENV_CONFIG_PATH": ".env" }
+      "cwd": "/Users/amieva/Documents/Programming/Avoqado/avoqado-server"
     }
   }
 }
