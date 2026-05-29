@@ -105,7 +105,7 @@ export async function sendKycSubmissionNotification(data: KycNotificationData): 
   }
 
   try {
-    const dashboardUrl = data.dashboardBaseUrl || process.env.FRONTEND_URL || 'https://dashboardv2.avoqado.io'
+    const dashboardUrl = data.dashboardBaseUrl || process.env.FRONTEND_URL || 'https://dashboard.avoqado.io'
     const fullActionUrl = `${dashboardUrl}${data.actionUrl}`
 
     // Validate recipients
@@ -326,7 +326,7 @@ export async function sendNewVenueOnboardingDigest(data: NewVenueOnboardingDiges
     return false
   }
 
-  const dashboardUrl = process.env.FRONTEND_URL || 'https://dashboardv2.avoqado.io'
+  const dashboardUrl = process.env.FRONTEND_URL || 'https://dashboard.avoqado.io'
   const reviewUrl = `${dashboardUrl}/superadmin/kyc/${data.venueId}`
   const ownerName = data.owner ? `${data.owner.firstName} ${data.owner.lastName}`.trim() : ''
   const kycLabel = data.hasKycDocuments ? `${data.kycStatus} (docs subidos)` : `${data.kycStatus} (sin docs aún)`
@@ -588,7 +588,7 @@ export async function sendOnboardingWelcomeEmail(data: OnboardingWelcomeData): P
     return false
   }
 
-  const dashboardUrl = process.env.FRONTEND_URL || 'https://dashboardv2.avoqado.io'
+  const dashboardUrl = process.env.FRONTEND_URL || 'https://dashboard.avoqado.io'
   const homeUrl = `${dashboardUrl}/venues/${data.venueSlug}/home`
   const docsUrl = `${dashboardUrl}/venues/${data.venueSlug}/edit/documents`
   const supportEmail = process.env.ONBOARDING_NOTIFICATIONS_EMAIL || 'onboarding@avoqado.io'

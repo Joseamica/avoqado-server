@@ -51,6 +51,7 @@ import * as textToSqlAssistantController from '../controllers/dashboard/text-to-
 import * as tokenBudgetController from '../controllers/dashboard/token-budget.dashboard.controller'
 import * as tpvController from '../controllers/dashboard/tpv.dashboard.controller'
 import * as tpvCommandController from '../controllers/dashboard/tpv-command.dashboard.controller'
+import * as terminalOrderController from '../controllers/dashboard/terminalOrder.controller'
 import * as venueController from '../controllers/dashboard/venue.dashboard.controller'
 import * as venueChatDashController from '../controllers/dashboard/venueChat.dashboard.controller'
 import * as venueKycController from '../controllers/dashboard/venueKyc.controller'
@@ -215,6 +216,7 @@ import {
   terminalAckSchema,
   terminalResultSchema,
 } from '../schemas/dashboard/tpv-command.schema'
+import { createTerminalOrderSchema } from '../schemas/dashboard/terminalOrder.schema'
 import inventoryRoutes from './dashboard/inventory.routes'
 import superadminRoutes from './dashboard/superadmin.routes'
 import venuePaymentConfigRoutes from './dashboard/venuePaymentConfig.routes'
@@ -4132,6 +4134,28 @@ router.get('/tpv/:tpvId/settings', authenticateTokenMiddleware, checkPermission(
  *         description: Terminal not found
  */
 router.put('/tpv/:tpvId/settings', authenticateTokenMiddleware, checkPermission('tpv-settings:update'), tpvController.updateTpvSettings)
+
+// ---------------------------------------------------------------------------
+// TPV Shop — TerminalOrder endpoints (Plan 1 · Tasks 9 + 10)
+// ---------------------------------------------------------------------------
+router.post(
+  '/venues/:venueId/tpv-orders',
+  authenticateTokenMiddleware,
+  validateRequest(createTerminalOrderSchema),
+  terminalOrderController.createOrderHandler,
+)
+router.get('/venues/:venueId/tpv-orders', authenticateTokenMiddleware, terminalOrderController.listOrdersHandler)
+router.get('/venues/:venueId/tpv-orders/:id', authenticateTokenMiddleware, terminalOrderController.getOrderHandler)
+
+// SPEI proof upload (Plan 2 · Task 8) — multipart, field name `proof`.
+// Reuses the existing `documentUpload` multer instance (memoryStorage, 10MB,
+// PDF/JPG/PNG) defined above.
+router.post(
+  '/venues/:venueId/tpv-orders/:id/upload-proof',
+  authenticateTokenMiddleware,
+  documentUpload.single('proof'),
+  terminalOrderController.uploadProofHandler,
+)
 
 /**
  * @openapi

@@ -126,14 +126,15 @@ export interface MatchedPayment {
   id: string
   amount: Prisma.Decimal | number | string
   processorData: Prisma.JsonValue | null
+  venueId: string
 }
 
 export async function attemptPaymentMatch(args: {
   payload: AngelPayWebhookPayload
-  venueId: string
+  merchantAccountId: string
   retryDelaysMs?: number[]
 }): Promise<MatchedPayment | null> {
-  const { payload, venueId } = args
+  const { payload, merchantAccountId } = args
   const delays = args.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS
 
   const conditions: Prisma.PaymentWhereInput[] = []
@@ -149,14 +150,14 @@ export async function attemptPaymentMatch(args: {
   const where: Prisma.PaymentWhereInput = {
     OR: conditions,
     status: { in: ['COMPLETED', 'PENDING'] },
-    order: { venueId },
+    merchantAccountId,
   }
 
   for (let i = 0; i < delays.length; i++) {
     if (delays[i] > 0) await delay(delays[i])
     const payment = await prisma.payment.findFirst({
       where,
-      select: { id: true, amount: true, processorData: true },
+      select: { id: true, amount: true, processorData: true, venueId: true },
     })
     if (payment) return payment as MatchedPayment
   }
@@ -172,7 +173,6 @@ export interface ProcessArgs {
   svixId: string
   merchantAccount: {
     id: string
-    venueId: string
     externalMerchantId: string
   }
   retryDelaysMs?: number[]
@@ -190,7 +190,7 @@ export async function processAngelPayWebhook(args: ProcessArgs): Promise<AngelPa
       eventId,
       type: (typeof raw?.event_type === 'string' ? raw.event_type : null) ?? 'unknown',
       payload: payload as AngelPayWebhookPayload,
-      venueId: merchantAccount.venueId,
+      venueId: null,
       errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.INVALID_PAYLOAD,
     })
     return { action: 'ERROR', errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.INVALID_PAYLOAD, eventLogId: errored.id }
@@ -203,7 +203,7 @@ export async function processAngelPayWebhook(args: ProcessArgs): Promise<AngelPa
       eventId,
       type: payload.event_type,
       payload,
-      venueId: merchantAccount.venueId,
+      venueId: null,
       errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.MERCHANT_MISMATCH,
     })
     return { action: 'UNKNOWN_MERCHANT', errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.MERCHANT_MISMATCH, eventLogId: errored.id }
@@ -215,7 +215,7 @@ export async function processAngelPayWebhook(args: ProcessArgs): Promise<AngelPa
       eventId,
       type: payload.event_type,
       payload,
-      venueId: merchantAccount.venueId,
+      venueId: null,
       errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.UNSUPPORTED_EVENT_TYPE,
     })
     return { action: 'UNSUPPORTED_EVENT_TYPE', errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.UNSUPPORTED_EVENT_TYPE, eventLogId: errored?.id }
@@ -230,7 +230,7 @@ export async function processAngelPayWebhook(args: ProcessArgs): Promise<AngelPa
         eventId,
         type: payload.event_type,
         payload: payload as unknown as Prisma.InputJsonValue,
-        venueId: merchantAccount.venueId,
+        venueId: null,
         status: EventStatus.PENDING,
       },
       select: { id: true },
@@ -267,7 +267,7 @@ export async function processAngelPayWebhook(args: ProcessArgs): Promise<AngelPa
   }
 
   // 5. Match
-  const payment = await attemptPaymentMatch({ payload, venueId: merchantAccount.venueId, retryDelaysMs: args.retryDelaysMs })
+  const payment = await attemptPaymentMatch({ payload, merchantAccountId: merchantAccount.id, retryDelaysMs: args.retryDelaysMs })
 
   if (!payment) {
     await prisma.providerEventLog.update({
@@ -303,7 +303,7 @@ export async function processAngelPayWebhook(args: ProcessArgs): Promise<AngelPa
     })
     await prisma.providerEventLog.update({
       where: { id: eventLogId },
-      data: { status: EventStatus.PROCESSED, paymentId: payment.id, errorReason: null, processedAt: new Date() },
+      data: { status: EventStatus.PROCESSED, paymentId: payment.id, venueId: payment.venueId, errorReason: null, processedAt: new Date() },
     })
     await prisma.merchantAccount.update({
       where: { id: merchantAccount.id },
@@ -335,6 +335,7 @@ export async function processAngelPayWebhook(args: ProcessArgs): Promise<AngelPa
       status: EventStatus.ERROR,
       errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.AMOUNT_MISMATCH,
       paymentId: payment.id,
+      venueId: payment.venueId,
       processedAt: new Date(),
     },
   })

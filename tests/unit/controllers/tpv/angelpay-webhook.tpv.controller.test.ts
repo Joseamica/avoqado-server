@@ -61,9 +61,6 @@ const merchantRow = {
   id: 'ma_1',
   externalMerchantId: '351',
   angelpayWebhookSecret: 'whsec_x',
-  venueConfigsPrimary: [{ venueId: 'venue_1' }],
-  venueConfigsSecondary: [],
-  venueConfigsTertiary: [],
 }
 
 describe('handleAngelPayWebhook', () => {
@@ -111,7 +108,7 @@ describe('handleAngelPayWebhook', () => {
     expect(mockedProcess).toHaveBeenCalledWith(
       expect.objectContaining({
         svixId: 'msg_a',
-        merchantAccount: expect.objectContaining({ id: 'ma_1', externalMerchantId: '351', venueId: 'venue_1' }),
+        merchantAccount: expect.objectContaining({ id: 'ma_1', externalMerchantId: '351' }),
       }),
     )
   })

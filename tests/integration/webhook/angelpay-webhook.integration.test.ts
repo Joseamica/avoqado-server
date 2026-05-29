@@ -47,9 +47,6 @@ const merchantRow = {
   id: 'ma_1',
   externalMerchantId: '351',
   angelpayWebhookSecret: TEST_SECRET,
-  venueConfigsPrimary: [{ venueId: 'venue_1' }],
-  venueConfigsSecondary: [],
-  venueConfigsTertiary: [],
 }
 
 const mockedMerchantAccountFindFirst = prisma.merchantAccount.findFirst as jest.Mock

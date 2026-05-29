@@ -1137,6 +1137,11 @@ export async function handleStripeWebhookEvent(event: Stripe.Event) {
           })
           await fulfillCreditPackPurchase(session.id)
         }
+        // Only our TPV-Shop terminal orders carry this metadata flag
+        if (session.metadata?.terminalOrderId) {
+          const { handleTerminalOrderCheckoutCompleted } = await import('./stripe-webhooks/terminalOrderCheckoutCompleted.handler')
+          await handleTerminalOrderCheckoutCompleted(session)
+        }
         break
       }
 

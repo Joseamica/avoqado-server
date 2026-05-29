@@ -11,6 +11,8 @@ import * as paymentLinkPublicController from '../controllers/public/paymentLink.
 import * as venueCheckoutController from '../controllers/public/venueCheckout.public.controller'
 import { submitContact, submitLabsBrief } from '../controllers/public/landing.public.controller'
 import * as venueChatController from '../controllers/public/venueChat.public.controller'
+import * as tpvOrderPublicController from '../controllers/public/tpvOrder.public.controller'
+import { assignSerialsPublicSchema, rejectSpeiSchema } from '../schemas/public/tpvOrder.public.schema'
 import { validateRequest } from '../middlewares/validation'
 import { authenticateCustomer } from '../middlewares/customerAuth.middleware'
 import { venueChatAuth } from '../middlewares/venueChatAuth.middleware'
@@ -325,6 +327,31 @@ router.post(
   writeLimit,
   validateRequest(z.object({ params: sessionParamsSchema, body: resumeSessionBodySchema })),
   venueChatController.postResume,
+)
+
+// ---- Public TerminalOrder SPEI Magic-Link Routes (Plan 2 · Task 9) ----
+// Token-based, no session/Bearer auth. The signed JWT in `?token=...` proves
+// authorization and is verified inside each controller. Rate-limited like the
+// other mutating public endpoints.
+router.get('/tpv-orders/:id/approve', cancelLimit, tpvOrderPublicController.approveOrderHandler)
+router.get('/tpv-orders/:id/approve/check', readLimit, tpvOrderPublicController.approveCheckHandler)
+router.post(
+  '/tpv-orders/:id/reject',
+  cancelLimit,
+  validateRequest(rejectSpeiSchema),
+  tpvOrderPublicController.rejectOrderHandler,
+)
+
+// ---- Public TerminalOrder Serial-Assignment Magic-Link Routes (Plan 3 · Task 4) ----
+// Same token-based pattern as approve/reject: the signed JWT in `?token=...`
+// (action: 'assign-serials') proves authorization. POST clears the token on
+// success so the magic link is single-use.
+router.get('/tpv-orders/:id/assign-serials/check', readLimit, tpvOrderPublicController.assignSerialsCheckHandler)
+router.post(
+  '/tpv-orders/:id/assign-serials',
+  cancelLimit,
+  validateRequest(assignSerialsPublicSchema),
+  tpvOrderPublicController.assignSerialsPublicHandler,
 )
 
 export default router

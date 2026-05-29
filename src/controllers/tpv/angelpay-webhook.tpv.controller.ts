@@ -33,9 +33,6 @@ export async function handleAngelPayWebhook(req: Request, res: Response, _next: 
       id: true,
       externalMerchantId: true,
       angelpayWebhookSecret: true,
-      venueConfigsPrimary: { select: { venueId: true }, take: 1 },
-      venueConfigsSecondary: { select: { venueId: true }, take: 1 },
-      venueConfigsTertiary: { select: { venueId: true }, take: 1 },
     },
   })
 
@@ -45,17 +42,6 @@ export async function handleAngelPayWebhook(req: Request, res: Response, _next: 
   }
   if (!merchantAccount.angelpayWebhookSecret) {
     res.status(503).json({ error: 'webhook not provisioned for this merchant' })
-    return
-  }
-
-  // Resolve venueId via VenuePaymentConfig join chain (MerchantAccount has no direct venueId)
-  const venueId =
-    merchantAccount.venueConfigsPrimary[0]?.venueId ??
-    merchantAccount.venueConfigsSecondary[0]?.venueId ??
-    merchantAccount.venueConfigsTertiary[0]?.venueId ??
-    null
-  if (!venueId) {
-    res.status(503).json({ error: 'merchant has no venue assigned' })
     return
   }
 
@@ -90,7 +76,6 @@ export async function handleAngelPayWebhook(req: Request, res: Response, _next: 
       svixId: headers['svix-id']!,
       merchantAccount: {
         id: merchantAccount.id,
-        venueId,
         externalMerchantId: merchantAccount.externalMerchantId,
       },
     })

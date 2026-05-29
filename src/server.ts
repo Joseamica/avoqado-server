@@ -23,6 +23,7 @@ import { tpvHealthMonitorJob } from './jobs/tpv-health-monitor.job'
 import { subscriptionCancellationJob } from './jobs/subscription-cancellation.job'
 import { settlementDetectionJob } from './jobs/settlement-detection.job'
 import { abandonedOrdersCleanupJob } from './jobs/abandoned-orders-cleanup.job'
+import { tpvOrderExpiryJob } from './jobs/tpv-order-expiry.job'
 import { blumonWebhookReconciliationJob } from './jobs/blumon-webhook-reconciliation.job'
 import { reservationDepositReconciliationJob } from './jobs/reservation-deposit-reconciliation.job'
 import { reservationReminderJob } from './jobs/reservation-reminder.job'
@@ -121,6 +122,10 @@ const gracefulShutdown = async (signal: string) => {
       // Stop abandoned orders cleanup job
       logger.info('Stopping abandoned orders cleanup job...')
       abandonedOrdersCleanupJob.stop()
+
+      // Stop TPV order expiry/reminder job
+      logger.info('Stopping TPV order expiry job...')
+      tpvOrderExpiryJob.stop()
 
       // Stop Blumon webhook reconciliation job
       logger.info('Stopping Blumon webhook reconciliation job...')
@@ -334,6 +339,10 @@ const startApplication = async (retries = 3) => {
 
       // Start abandoned orders cleanup job
       abandonedOrdersCleanupJob.start()
+
+      // Start TPV order expiry/reminder job (every 6h — expires Stripe AWAITING_PAYMENT > 7d,
+      // SPEI AWAITING_PROOF > 14d, and sends SPEI reminders on day 3 + day 7)
+      tpvOrderExpiryJob.start()
 
       // Start Stripe reservation deposit reconciliation job
       reservationDepositReconciliationJob.start()

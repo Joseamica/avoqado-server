@@ -328,6 +328,8 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   Terminal: 'Terminals / TPV Fleet',
   TerminalHealth: 'Terminals / TPV Fleet',
   TerminalLog: 'Terminals / TPV Fleet',
+  TerminalOrder: 'Terminals / TPV Fleet',
+  TerminalOrderItem: 'Terminals / TPV Fleet',
   AppUpdate: 'Terminals / TPV Fleet',
   TpvCommandHistory: 'Terminals / TPV Fleet',
   TpvCommandQueue: 'Terminals / TPV Fleet',

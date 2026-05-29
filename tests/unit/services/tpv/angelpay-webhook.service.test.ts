@@ -34,7 +34,7 @@ const mockedPaymentUpdate = prisma.payment.update as jest.Mock
 const mockedMerchantAccountUpdate = prisma.merchantAccount.update as jest.Mock
 
 // Shared test merchantAccount arg
-const TEST_MERCHANT = { id: 'ma_1', venueId: 'venue_1', externalMerchantId: '351' }
+const TEST_MERCHANT = { id: 'ma_1', externalMerchantId: '351' }
 
 describe('validateAngelPayWebhookPayload', () => {
   const valid = {
@@ -110,12 +110,12 @@ describe('attemptPaymentMatch', () => {
         amount: 100,
       },
     } as any,
-    venueId: 'venue_xyz',
+    merchantAccountId: 'ma_xyz',
     retryDelaysMs: [0, 0, 0],
   }
 
   it('returns the payment on first attempt when found', async () => {
-    const payment = { id: 'pay_1', amount: 100 }
+    const payment = { id: 'pay_1', amount: 100, venueId: 'venue_1' }
     mockedPaymentFindFirst.mockResolvedValueOnce(payment)
     const result = await attemptPaymentMatch(baseArgs)
     expect(result).toBe(payment)
@@ -123,9 +123,12 @@ describe('attemptPaymentMatch', () => {
   })
 
   it('retries up to 3 times and returns the payment when later attempts succeed', async () => {
-    mockedPaymentFindFirst.mockResolvedValueOnce(null).mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 'pay_2', amount: 100 })
+    mockedPaymentFindFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: 'pay_2', amount: 100, venueId: 'venue_1' })
     const result = await attemptPaymentMatch(baseArgs)
-    expect(result).toEqual({ id: 'pay_2', amount: 100 })
+    expect(result).toEqual({ id: 'pay_2', amount: 100, venueId: 'venue_1' })
     expect(mockedPaymentFindFirst).toHaveBeenCalledTimes(3)
   })
 
@@ -136,15 +139,15 @@ describe('attemptPaymentMatch', () => {
     expect(mockedPaymentFindFirst).toHaveBeenCalledTimes(3)
   })
 
-  it('builds OR conditions from integratorReference, transactionId and scopes by venueId', async () => {
-    mockedPaymentFindFirst.mockResolvedValueOnce({ id: 'pay_3' })
+  it('builds OR conditions from integratorReference, transactionId and scopes by merchantAccountId', async () => {
+    mockedPaymentFindFirst.mockResolvedValueOnce({ id: 'pay_3', venueId: 'venue_1' })
     await attemptPaymentMatch(baseArgs)
     expect(mockedPaymentFindFirst).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
           OR: [{ referenceNumber: 'ref-123' }, { processorId: 'tx_abc' }],
           status: { in: ['COMPLETED', 'PENDING'] },
-          order: { venueId: 'venue_xyz' },
+          merchantAccountId: 'ma_xyz',
         }),
       }),
     )
@@ -176,7 +179,7 @@ describe('processAngelPayWebhook — MATCHED happy path', () => {
   it('stamps processorData.angelpayWebhook, marks event PROCESSED, touches lastReceivedAt', async () => {
     mockedProviderEventLogFindFirst.mockResolvedValue(null)
     mockedProviderEventLogCreate.mockResolvedValue({ id: 'evt_1' })
-    mockedPaymentFindFirst.mockResolvedValueOnce({ id: 'pay_1', amount: 100, processorData: null })
+    mockedPaymentFindFirst.mockResolvedValueOnce({ id: 'pay_1', amount: 100, processorData: null, venueId: 'venue_1' })
 
     const result = await processAngelPayWebhook({
       payload: {
@@ -220,7 +223,7 @@ describe('processAngelPayWebhook — MATCHED happy path', () => {
 
     expect(mockedProviderEventLogUpdate).toHaveBeenCalledWith({
       where: { id: 'evt_1' },
-      data: expect.objectContaining({ status: 'PROCESSED', paymentId: 'pay_1' }),
+      data: expect.objectContaining({ status: 'PROCESSED', paymentId: 'pay_1', venueId: 'venue_1' }),
     })
 
     expect(mockedMerchantAccountUpdate).toHaveBeenCalledWith({
@@ -245,7 +248,7 @@ describe('processAngelPayWebhook — DISCREPANCY', () => {
   it('stamps angelpayDiscrepancy, marks event ERROR/AMOUNT_MISMATCH, does NOT mutate payment.status', async () => {
     mockedProviderEventLogFindFirst.mockResolvedValue(null)
     mockedProviderEventLogCreate.mockResolvedValue({ id: 'evt_2' })
-    mockedPaymentFindFirst.mockResolvedValueOnce({ id: 'pay_2', amount: 100, processorData: { existing: true } })
+    mockedPaymentFindFirst.mockResolvedValueOnce({ id: 'pay_2', amount: 100, processorData: { existing: true }, venueId: 'venue_1' })
 
     const result = await processAngelPayWebhook({
       payload: {

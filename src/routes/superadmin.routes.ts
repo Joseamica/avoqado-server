@@ -30,6 +30,7 @@ import merchantRevenueShareRoutes from './superadmin/merchantRevenueShare.routes
 import stripeConnectOffboardingRoutes from './superadmin/stripeConnectOffboarding.routes'
 import angelpayUserAccountRoutes from './superadmin/angelpayUserAccount.routes'
 import rateCorrectionRoutes from './superadmin/rateCorrection.routes'
+import terminalOrderSuperadminRoutes from './superadmin/terminalOrder.routes'
 // NOTE: appUpdateRoutes are mounted EARLY in app.ts with 100MB body limit for APK uploads
 // Do NOT mount here to avoid duplicate route registration
 
@@ -44,6 +45,7 @@ router.use('/kyc', kycReviewRoutes)
 router.use('/payment-providers', paymentProviderRoutes)
 router.use('/merchant-accounts', merchantAccountRoutes)
 router.use('/terminals', terminalRoutes)
+router.use('/tpv-orders', terminalOrderSuperadminRoutes)
 router.use('/payment-analytics', paymentAnalyticsRoutes)
 router.use('/earnings', earningsRoutes)
 router.use('/cost-structures', providerCostStructureRoutes)

@@ -260,6 +260,7 @@ model Venue {
   terminals             Terminal[]
   terminalLogs          TerminalLog[]
   terminalHealthMetrics TerminalHealth[]
+  terminalOrders        TerminalOrder[]
 
   // Customer Management (Phase 1)
   customers      Customer[]
@@ -800,6 +801,9 @@ model Staff {
 
   // ✅ TPV App Update System (superadmin uploads)
   appUpdatesUploaded AppUpdate[] @relation("AppUpdateUploadedBy")
+
+  // ✅ TPV Shop — orders created by this staff member
+  terminalOrdersCreated TerminalOrder[] @relation("TerminalOrderCreatedBy")
 
   // ✅ Passkeys (WebAuthn) for passwordless authentication
   passkeys StaffPasskey[]
@@ -3165,6 +3169,11 @@ model Terminal {
   // tagged with this terminal's serial number)
   providerEventLogs ProviderEventLog[]
 
+  // 🆕 TPV Shop — order this terminal was provisioned from (nullable: not all terminals
+  // come from the shop; some are imported manually or pre-existed before the shop launched)
+  terminalOrderId String?
+  terminalOrder   TerminalOrder? @relation("TerminalToTerminalOrder", fields: [terminalOrderId], references: [id], onDelete: SetNull)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -3173,6 +3182,7 @@ model Terminal {
   @@index([activationCode]) // Fast lookup for activation code validation
   @@index([isLocked]) // Fast lookup for locked terminals
   @@index([latestHealthScore]) // Sort by latestHealthScore (NULLS LAST handled in query)
+  @@index([terminalOrderId])
 }
 
 // ==========================================
@@ -3267,6 +3277,119 @@ enum LogLevel {
   INFO
   WARN
   ERROR
+}
+
+enum TerminalOrderPaymentMethod {
+  CARD_STRIPE
+  SPEI
+}
+
+enum TerminalOrderPaymentStatus {
+  AWAITING_PAYMENT
+  AWAITING_PROOF
+  PROOF_UPLOADED
+  PAID
+  REJECTED
+  EXPIRED
+  REFUNDED
+}
+
+enum TerminalOrderFulfillmentStatus {
+  NEW
+  AWAITING_SERIALS
+  SERIALS_ASSIGNED
+  SHIPPED
+  DELIVERED
+  CANCELLED
+}
+
+model TerminalOrder {
+  id          String @id @default(cuid())
+  orderNumber String @unique
+  venueId     String
+  venue       Venue  @relation(fields: [venueId], references: [id])
+  createdById String
+  createdBy   Staff  @relation("TerminalOrderCreatedBy", fields: [createdById], references: [id])
+
+  items TerminalOrderItem[]
+
+  // Snapshot de contacto / envío (puede divergir del venue después)
+  contactName      String
+  contactEmail     String
+  contactPhone     String
+  shippingAddress  String
+  shippingAddress2 String?
+  shippingCity     String
+  shippingState    String
+  shippingZip      String
+  shippingCountry  String @default("México")
+
+  // Pago
+  paymentMethod TerminalOrderPaymentMethod
+  paymentStatus TerminalOrderPaymentStatus
+  // Money — Stored as Int centavos to mirror Stripe's amount representation
+  // (Stripe Checkout uses unit_amount in the smallest currency unit). The
+  // project default for money is Decimal — this is an intentional Stripe-
+  // native exception. IVA (16%) is computed at order creation; unitPriceCents
+  // on items is NET (without IVA). Do NOT change these to Decimal without
+  // also reworking the Stripe Checkout integration in tpv-shop services.
+  subtotalCents Int
+  taxCents      Int
+  totalCents    Int
+  currency      String @default("MXN")
+
+  // Stripe (solo CARD_STRIPE)
+  stripeCheckoutSessionId String?
+  stripePaymentIntentId   String?
+  stripeReceiptUrl        String?
+
+  // SPEI (Plan 2 — campos opcionales en Plan 1)
+  speiProofUrl        String?
+  speiProofMimeType   String?
+  speiProofUploadedAt DateTime?
+  speiApprovalToken   String?   @unique
+  speiTokenExpiresAt  DateTime?
+  speiApprovedAt      DateTime?
+  speiApprovedBy      String?   // Email of staff who approved (or "system" for automated)
+  speiRejectionReason String?
+
+  // Fulfillment (separado de pago)
+  fulfillmentStatus              TerminalOrderFulfillmentStatus @default(NEW)
+  serialAssignmentToken          String?                        @unique
+  serialAssignmentTokenExpiresAt DateTime?
+  serialsAssignedAt              DateTime?
+  serialsAssignedBy              String?                        // Email of staff who assigned
+  trackingNumber                 String?
+  carrier                        String?
+  shippedAt                      DateTime?
+  deliveredAt                    DateTime?
+
+  // Relaciones
+  terminals Terminal[] @relation("TerminalToTerminalOrder")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId])
+  @@index([venueId, createdAt])
+  @@index([paymentStatus])
+  @@index([fulfillmentStatus])
+  @@index([speiApprovalToken])
+  @@index([serialAssignmentToken])
+}
+
+model TerminalOrderItem {
+  id             String        @id @default(cuid())
+  orderId        String
+  order          TerminalOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  brand          String
+  model          String
+  productName    String
+  quantity       Int
+  unitPriceCents Int    // NET price, sin IVA. See TerminalOrder money comment.
+  namePrefix     String // "Terminal" → terminales se generan como "Terminal 1, Terminal 2…"
+
+  @@index([orderId])
 }
 
 // ==========================================

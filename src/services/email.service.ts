@@ -131,6 +131,92 @@ interface TerminalPurchaseEmailData {
   orderDate: string
 }
 
+export interface TerminalOrderEmailItem {
+  productName: string
+  brand: string
+  model: string
+  quantity: number
+  unitPriceCents: number
+  namePrefix: string
+}
+
+export interface TerminalOrderEmailData {
+  order: {
+    id: string
+    orderNumber: string
+    venueId: string
+    contactName: string
+    contactEmail: string
+    contactPhone: string
+    shippingAddress: string
+    shippingAddress2: string | null
+    shippingCity: string
+    shippingState: string
+    shippingZip: string
+    shippingCountry: string
+    paymentMethod: 'CARD_STRIPE' | 'SPEI'
+    subtotalCents: number
+    taxCents: number
+    totalCents: number
+    currency: string
+    stripeReceiptUrl?: string | null
+    createdAt: Date | string
+  }
+  items: TerminalOrderEmailItem[]
+}
+
+export interface TerminalOrderShippedEmailData extends TerminalOrderEmailData {
+  terminals: Array<{
+    id: string
+    name: string
+    serialNumber: string | null
+    activationCode: string | null
+    brand: string
+    model: string
+  }>
+}
+
+export interface SpeiInstructionsEmailData extends TerminalOrderEmailData {
+  speiRecipient: {
+    beneficiary: string
+    clabe: string
+    rfc: string
+    bank: string
+  }
+  orderDetailUrl: string
+}
+
+export interface SpeiProofForSalesEmailData extends TerminalOrderEmailData {
+  proofUrl: string
+  proofMimeType: string
+  approveUrl: string
+  rejectUrl: string
+  adminUiUrl: string
+  isResubmit?: boolean
+}
+
+export interface SpeiRejectedEmailData extends TerminalOrderEmailData {
+  reason: string
+  orderDetailUrl: string
+}
+
+export interface SpeiReminderEmailData extends TerminalOrderEmailData {
+  daysSinceCreation: number // 3 or 7
+  daysRemaining: number // 11 or 7 (14-day SPEI expiry minus daysSinceCreation)
+  orderDetailUrl: string
+  speiRecipient: {
+    beneficiary: string
+    clabe: string
+    rfc: string
+    bank: string
+  }
+}
+
+export interface SerialAssignmentRequestEmailData extends TerminalOrderEmailData {
+  serialAssignmentUrl: string
+  adminUiUrl: string
+}
+
 interface TpvFeedbackEmailData {
   feedbackType: 'bug' | 'feature'
   message: string
@@ -1711,6 +1797,535 @@ Avoqado Dashboard
       html,
       text,
     })
+  }
+
+  /**
+   * Send payment confirmation email to customer after a TPV Shop order is paid.
+   * Sent to order.contactEmail after the Stripe checkout.session.completed webhook (or SPEI confirmation) flips the order to PAID.
+   */
+  async sendTerminalOrderPaymentConfirmed(data: TerminalOrderEmailData): Promise<boolean> {
+    const { order, items } = data
+    const subject = `✅ Pago confirmado ${order.orderNumber}`
+    const logoUrl = 'https://avoqado.io/isotipo.svg'
+    const fmtMx = (cents: number) =>
+      `$${(cents / 100).toLocaleString('es-MX', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })} ${order.currency}`
+
+    const itemsRows = items
+      .map(
+        i => `
+        <tr>
+          <td style="padding: 8px 0; font-size: 14px; color: #000;">${i.productName} × ${i.quantity}</td>
+          <td style="padding: 8px 0; font-size: 14px; color: #000; text-align: right;">${fmtMx(i.unitPriceCents * i.quantity)}</td>
+        </tr>`,
+      )
+      .join('')
+
+    const receiptLink = order.stripeReceiptUrl
+      ? `<p style="margin: 16px 0 0 0; font-size: 14px;"><a href="${order.stripeReceiptUrl}" style="color: #1a73e8; text-decoration: none;">Ver recibo de Stripe →</a></p>`
+      : ''
+
+    const html = `
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Pago confirmado ${order.orderNumber}</title></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+  <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
+    <div style="padding-bottom: 32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display: inline-block; vertical-align: middle;">
+      <span style="font-size: 18px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
+    </div>
+    <div style="padding-bottom: 24px;">
+      <h1 style="margin: 0 0 8px 0; font-size: 32px; font-weight: 400; color: #000;">Pago confirmado</h1>
+      <p style="margin: 0; font-size: 16px; color: #666;">Pedido ${order.orderNumber}</p>
+    </div>
+    <div style="background: #ecfdf5; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
+      <p style="font-size: 14px; color: #065f46; margin: 0;">
+        Recibimos tu pago. Te avisamos cuando enviemos los terminales con sus números de serie.
+      </p>
+    </div>
+    <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 24px;">
+      <h3 style="margin: 0 0 16px 0; font-size: 16px; font-weight: 600; color: #000;">Resumen</h3>
+      <table cellpadding="0" cellspacing="0" style="width: 100%;">
+        ${itemsRows}
+        <tr><td style="padding: 8px 0; font-size: 14px; color: #666;">Subtotal</td><td style="padding: 8px 0; font-size: 14px; color: #000; text-align: right;">${fmtMx(order.subtotalCents)}</td></tr>
+        <tr><td style="padding: 8px 0; font-size: 14px; color: #666;">IVA (16%)</td><td style="padding: 8px 0; font-size: 14px; color: #000; text-align: right;">${fmtMx(order.taxCents)}</td></tr>
+        <tr style="border-top: 1px solid #e0e0e0;"><td style="padding: 16px 0 0 0; font-size: 16px; font-weight: 600;">Total</td><td style="padding: 16px 0 0 0; font-size: 16px; font-weight: 600; text-align: right;">${fmtMx(order.totalCents)}</td></tr>
+      </table>
+      ${receiptLink}
+    </div>
+    <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 0;">
+    <div style="padding-top: 24px;">
+      <div style="margin-bottom: 16px;">
+        <img src="${logoUrl}" alt="Avoqado" width="24" height="24" style="display: inline-block; vertical-align: middle;">
+        <span style="font-size: 16px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
+      </div>
+      <p style="margin: 0; font-size: 14px; color: #666;">Correo automático enviado por Avoqado Dashboard</p>
+    </div>
+  </div>
+</body></html>`
+
+    const text =
+      `Pago confirmado — ${order.orderNumber}\n\n` +
+      items.map(i => `${i.productName} × ${i.quantity}: ${fmtMx(i.unitPriceCents * i.quantity)}`).join('\n') +
+      `\n\nSubtotal: ${fmtMx(order.subtotalCents)}\nIVA (16%): ${fmtMx(order.taxCents)}\nTotal: ${fmtMx(order.totalCents)}\n` +
+      (order.stripeReceiptUrl ? `\nRecibo: ${order.stripeReceiptUrl}\n` : '') +
+      `\nTe avisamos cuando enviemos los terminales.\n\nAvoqado`
+
+    return this.sendEmail({ to: order.contactEmail, subject, html, text })
+  }
+
+  /**
+   * Send serial-assignment request to the sales team after a TPV Shop order is paid.
+   * Sent to ORDER_NOTIFICATIONS_EMAIL — sales clicks the link, signs in to /superadmin, and assigns serials.
+   */
+  async sendTerminalOrderSerialAssignmentRequest(data: SerialAssignmentRequestEmailData): Promise<boolean> {
+    const adminEmail = process.env.ORDER_NOTIFICATIONS_EMAIL
+    if (!adminEmail) {
+      logger.warn('ORDER_NOTIFICATIONS_EMAIL not configured — skipping serial-assignment notification')
+      return false
+    }
+
+    const { order, items, serialAssignmentUrl, adminUiUrl } = data
+    const subject = `💰 Asigna números de serie — ${order.orderNumber}`
+    const logoUrl = 'https://avoqado.io/isotipo.svg'
+    const fmtMx = (cents: number) =>
+      `$${(cents / 100).toLocaleString('es-MX', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })} ${order.currency}`
+
+    const itemsRows = items
+      .map(
+        i => `
+      <tr>
+        <td style="padding: 8px 0; font-size: 14px; color: #000;">${i.productName}</td>
+        <td style="padding: 8px 0; font-size: 14px; color: #000; text-align: right;">${i.quantity} unidad${i.quantity === 1 ? '' : 'es'}</td>
+      </tr>`,
+      )
+      .join('')
+
+    const html = `
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Asigna serials ${order.orderNumber}</title></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+  <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
+    <div style="padding-bottom: 32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display: inline-block; vertical-align: middle;">
+      <span style="font-size: 18px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
+    </div>
+    <div style="padding-bottom: 24px;">
+      <h1 style="margin: 0 0 8px 0; font-size: 28px; font-weight: 400;">Pedido pagado — Asigna serials</h1>
+      <p style="margin: 0; font-size: 16px; color: #666;">${order.orderNumber} · ${order.contactName}</p>
+    </div>
+    <div style="background: #fef3c7; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
+      <p style="font-size: 14px; color: #92400e; margin: 0;"><strong>Acción requerida:</strong> Asigna los números de serie de los dispositivos a enviar y se notifica automáticamente al cliente.</p>
+    </div>
+    <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 24px;">
+      <h3 style="margin: 0 0 16px 0; font-size: 16px; font-weight: 600;">Items a asignar</h3>
+      <table cellpadding="0" cellspacing="0" style="width: 100%;">${itemsRows}</table>
+      <p style="margin: 16px 0 0 0; font-size: 14px; color: #666;">Total cobrado: <strong style="color: #000;">${fmtMx(order.totalCents)}</strong></p>
+    </div>
+    <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 24px;">
+      <h3 style="margin: 0 0 16px 0; font-size: 16px; font-weight: 600;">Envío a</h3>
+      <p style="font-size: 14px; margin: 0;"><strong>${order.contactName}</strong><br>${order.shippingAddress}${order.shippingAddress2 ? `, ${order.shippingAddress2}` : ''}<br>${order.shippingCity}, ${order.shippingState} ${order.shippingZip}<br>${order.shippingCountry}<br><br>Teléfono: ${order.contactPhone}<br>Email: ${order.contactEmail}</p>
+    </div>
+    <div style="text-align: center; margin-bottom: 24px;">
+      <a href="${serialAssignmentUrl}" style="display: inline-block; background: #000; color: #fff; padding: 14px 28px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 16px;">Asignar números de serie</a>
+    </div>
+    <div style="text-align: center; margin-bottom: 32px;">
+      <a href="${adminUiUrl}" style="font-size: 13px; color: #666; text-decoration: none;">Ver en admin UI (login requerido) →</a>
+    </div>
+    <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 0;">
+    <div style="padding-top: 24px;">
+      <p style="margin: 0; font-size: 14px; color: #666;">Avoqado · Notificación de pedido pagado</p>
+    </div>
+  </div>
+</body></html>`
+
+    const text =
+      `Pedido pagado — ${order.orderNumber}\n\n` +
+      items.map(i => `${i.productName} × ${i.quantity}`).join('\n') +
+      `\n\nTotal: ${fmtMx(order.totalCents)}\nCliente: ${order.contactName} <${order.contactEmail}>\nTeléfono: ${order.contactPhone}\n\nEnvío: ${order.shippingAddress}, ${order.shippingCity}, ${order.shippingState}, ${order.shippingZip}\n\nAsignar serials: ${serialAssignmentUrl}\nAdmin UI:        ${adminUiUrl}\n`
+
+    return this.sendEmail({ to: adminEmail, subject, html, text })
+  }
+
+  /**
+   * Notify the customer that their terminals have been assigned and are shipping.
+   * Sent to order.contactEmail after sales assigns serial numbers + activation codes.
+   */
+  async sendTerminalOrderTerminalsShipped(data: TerminalOrderShippedEmailData): Promise<boolean> {
+    const { order, terminals } = data
+    const subject = `📦 Tu pedido ${order.orderNumber} está en camino`
+    const logoUrl = 'https://avoqado.io/isotipo.svg'
+
+    const termRows = terminals
+      .map(
+        t => `
+      <tr style="background: #f5f5f5;">
+        <td style="padding: 12px 8px; font-size: 14px; color: #000;"><strong>${t.name}</strong><br><span style="font-size: 12px; color: #666;">${t.brand} ${t.model}</span></td>
+        <td style="padding: 12px 8px; font-size: 13px; color: #000; font-family: monospace;">${t.serialNumber ?? '—'}</td>
+        <td style="padding: 12px 8px; font-size: 16px; color: #000; font-family: monospace; font-weight: 600; text-align: center;">${t.activationCode ?? '—'}</td>
+      </tr>`,
+      )
+      .join('')
+
+    const html = `
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Tu pedido está en camino</title></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+  <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
+    <div style="padding-bottom: 32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display: inline-block; vertical-align: middle;">
+      <span style="font-size: 18px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
+    </div>
+    <div style="padding-bottom: 24px;">
+      <h1 style="margin: 0 0 8px 0; font-size: 32px; font-weight: 400;">📦 Tu pedido está en camino</h1>
+      <p style="margin: 0; font-size: 16px; color: #666;">Pedido ${order.orderNumber}</p>
+    </div>
+    <div style="background: #ecfdf5; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
+      <p style="font-size: 14px; color: #065f46; margin: 0;">Tus terminales fueron asignados y se enviarán pronto. Cuando los recibas, usa los códigos de activación para encenderlos.</p>
+    </div>
+    <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 24px;">
+      <h3 style="margin: 0 0 16px 0; font-size: 16px; font-weight: 600;">Terminales asignados</h3>
+      <table cellpadding="0" cellspacing="0" style="width: 100%; border-collapse: collapse;">
+        <thead><tr><th style="padding: 8px; text-align: left; font-size: 12px; color: #666; text-transform: uppercase;">Nombre / Modelo</th><th style="padding: 8px; text-align: left; font-size: 12px; color: #666; text-transform: uppercase;">Serial</th><th style="padding: 8px; text-align: center; font-size: 12px; color: #666; text-transform: uppercase;">Código activación</th></tr></thead>
+        <tbody>${termRows}</tbody>
+      </table>
+    </div>
+    <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 24px;">
+      <h3 style="margin: 0 0 16px 0; font-size: 16px; font-weight: 600;">Cómo activarlos</h3>
+      <ol style="font-size: 14px; margin: 0; padding-left: 20px; color: #000;">
+        <li style="margin-bottom: 8px;">Enciende el dispositivo físico (PAX A910S, NexGo N62 o N86).</li>
+        <li style="margin-bottom: 8px;">Abre la app Avoqado TPV.</li>
+        <li style="margin-bottom: 8px;">Ingresa el código de activación de 6 caracteres correspondiente.</li>
+        <li>El terminal queda listo para procesar pagos.</li>
+      </ol>
+      <p style="font-size: 13px; color: #92400e; background: #fef3c7; padding: 12px; border-radius: 6px; margin: 16px 0 0 0;">⚠️ Los códigos de activación expiran a los 30 días. Activa cuanto antes.</p>
+    </div>
+    <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 0;">
+    <div style="padding-top: 24px;">
+      <p style="margin: 0; font-size: 14px; color: #666;">Avoqado · Pedido enviado</p>
+    </div>
+  </div>
+</body></html>`
+
+    const text =
+      `Tu pedido ${order.orderNumber} está en camino\n\n` +
+      terminals
+        .map(t => `${t.name} (${t.brand} ${t.model}) — Serial: ${t.serialNumber ?? '—'} — Código activación: ${t.activationCode ?? '—'}`)
+        .join('\n') +
+      `\n\nLos códigos expiran a los 30 días.\n\nAvoqado`
+
+    return this.sendEmail({ to: order.contactEmail, subject, html, text })
+  }
+
+  /**
+   * SPEI Email #1: SPEI payment instructions sent to the customer
+   * Sent right after createOrder when paymentMethod = SPEI
+   */
+  async sendTerminalOrderSpeiInstructions(data: SpeiInstructionsEmailData): Promise<boolean> {
+    const { order, items, speiRecipient, orderDetailUrl } = data
+    const subject = `Datos para completar tu pedido ${order.orderNumber}`
+    const logoUrl = 'https://avoqado.io/isotipo.svg'
+    const fmtMx = (cents: number) =>
+      `$${(cents / 100).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${order.currency}`
+
+    const itemsRows = items
+      .map(
+        i => `
+      <tr>
+        <td style="padding: 8px 0; font-size: 14px; color: #000;">${i.productName} × ${i.quantity}</td>
+        <td style="padding: 8px 0; font-size: 14px; color: #000; text-align: right;">${fmtMx(i.unitPriceCents * i.quantity)}</td>
+      </tr>`,
+      )
+      .join('')
+
+    const html = `
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>SPEI ${order.orderNumber}</title></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+  <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
+    <div style="padding-bottom: 32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display: inline-block; vertical-align: middle;">
+      <span style="font-size: 18px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
+    </div>
+    <div style="padding-bottom: 24px;">
+      <h1 style="margin: 0 0 8px 0; font-size: 28px; font-weight: 400; color: #000;">Completa tu pago por SPEI</h1>
+      <p style="margin: 0; font-size: 16px; color: #666;">Pedido ${order.orderNumber}</p>
+    </div>
+    <div style="background: #eff6ff; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
+      <p style="font-size: 14px; color: #1e3a8a; margin: 0;">
+        Haz la transferencia SPEI con estos datos y sube el comprobante en tu dashboard.
+        Verificamos el depósito en 1-2 días hábiles.
+      </p>
+    </div>
+    <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 24px;">
+      <h3 style="margin: 0 0 16px 0; font-size: 16px; font-weight: 600; color: #000;">Datos para la transferencia</h3>
+      <table cellpadding="0" cellspacing="0" style="width: 100%;">
+        <tr><td style="padding: 8px 0; font-size: 14px; color: #666;">Beneficiario</td><td style="padding: 8px 0; font-size: 14px; color: #000; text-align: right;">${speiRecipient.beneficiary}</td></tr>
+        <tr style="background: #f5f5f5;"><td style="padding: 12px 8px; font-size: 14px; color: #666;">CLABE</td><td style="padding: 12px 8px; font-size: 16px; color: #000; text-align: right; font-family: monospace; font-weight: 600;">${speiRecipient.clabe}</td></tr>
+        <tr><td style="padding: 8px 0; font-size: 14px; color: #666;">Banco</td><td style="padding: 8px 0; font-size: 14px; color: #000; text-align: right;">${speiRecipient.bank}</td></tr>
+        <tr><td style="padding: 8px 0; font-size: 14px; color: #666;">RFC</td><td style="padding: 8px 0; font-size: 14px; color: #000; text-align: right; font-family: monospace;">${speiRecipient.rfc}</td></tr>
+        <tr style="background: #fef3c7;"><td style="padding: 12px 8px; font-size: 14px; color: #666;">Monto exacto</td><td style="padding: 12px 8px; font-size: 18px; font-weight: 700; color: #000; text-align: right;">${fmtMx(order.totalCents)}</td></tr>
+        <tr style="background: #fef3c7;"><td style="padding: 12px 8px; font-size: 14px; color: #666;">Concepto</td><td style="padding: 12px 8px; font-size: 16px; color: #000; text-align: right; font-family: monospace; font-weight: 600;">${order.orderNumber}</td></tr>
+      </table>
+    </div>
+    <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 24px;">
+      <h3 style="margin: 0 0 16px 0; font-size: 16px; font-weight: 600;">Resumen de tu pedido</h3>
+      <table cellpadding="0" cellspacing="0" style="width: 100%;">
+        ${itemsRows}
+        <tr><td style="padding: 8px 0; font-size: 14px; color: #666;">Subtotal</td><td style="padding: 8px 0; font-size: 14px; color: #000; text-align: right;">${fmtMx(order.subtotalCents)}</td></tr>
+        <tr><td style="padding: 8px 0; font-size: 14px; color: #666;">IVA (16%)</td><td style="padding: 8px 0; font-size: 14px; color: #000; text-align: right;">${fmtMx(order.taxCents)}</td></tr>
+        <tr style="border-top: 1px solid #e0e0e0;"><td style="padding: 16px 0 0 0; font-size: 16px; font-weight: 600;">Total</td><td style="padding: 16px 0 0 0; font-size: 16px; font-weight: 600; text-align: right;">${fmtMx(order.totalCents)}</td></tr>
+      </table>
+    </div>
+    <div style="text-align: center; margin-bottom: 32px;">
+      <a href="${orderDetailUrl}" style="display: inline-block; background: #000; color: #fff; padding: 14px 28px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 16px;">Subir comprobante</a>
+      <p style="margin: 12px 0 0 0; font-size: 12px; color: #666;">Una vez que hagas la transferencia, sube el comprobante (PDF o imagen) en tu dashboard.</p>
+    </div>
+    <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 0;">
+    <div style="padding-top: 24px;">
+      <p style="margin: 0; font-size: 14px; color: #666;">Avoqado · Notificación de pedido</p>
+    </div>
+  </div>
+</body></html>`
+
+    const text =
+      `Datos SPEI — ${order.orderNumber}\n\n` +
+      `Beneficiario: ${speiRecipient.beneficiary}\n` +
+      `CLABE: ${speiRecipient.clabe}\n` +
+      `Banco: ${speiRecipient.bank}\n` +
+      `RFC: ${speiRecipient.rfc}\n` +
+      `Monto exacto: ${fmtMx(order.totalCents)}\n` +
+      `Concepto: ${order.orderNumber}\n\n` +
+      `Sube tu comprobante en: ${orderDetailUrl}\n\nAvoqado`
+
+    return this.sendEmail({ to: order.contactEmail, subject, html, text })
+  }
+
+  /**
+   * SPEI Email #2: SPEI proof notification to sales with attachment + magic links
+   * Sent when the customer uploads a payment proof. Includes approve/reject token URLs.
+   */
+  async sendTerminalOrderSpeiProofForSales(data: SpeiProofForSalesEmailData): Promise<boolean> {
+    const adminEmail = process.env.ORDER_NOTIFICATIONS_EMAIL
+    if (!adminEmail) {
+      logger.warn('ORDER_NOTIFICATIONS_EMAIL not configured — skipping SPEI-proof notification')
+      return false
+    }
+
+    const { order, items, proofUrl, proofMimeType, approveUrl, rejectUrl, adminUiUrl, isResubmit } = data
+    const subject = isResubmit ? `🔁 Re-aprobar SPEI — ${order.orderNumber}` : `⏳ Aprobar SPEI — ${order.orderNumber}`
+    const logoUrl = 'https://avoqado.io/isotipo.svg'
+    const fmtMx = (cents: number) =>
+      `$${(cents / 100).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${order.currency}`
+
+    const itemsRows = items
+      .map(
+        i => `
+      <tr>
+        <td style="padding: 8px 0; font-size: 14px;">${i.productName}</td>
+        <td style="padding: 8px 0; font-size: 14px; text-align: right;">${i.quantity} u.</td>
+      </tr>`,
+      )
+      .join('')
+
+    // Try to fetch the proof file and attach. If too large (>5MB), fall back to URL only.
+    let attachments: EmailAttachment[] | undefined
+    try {
+      const res = await fetch(proofUrl)
+      if (res.ok) {
+        const buf = Buffer.from(await res.arrayBuffer())
+        const MAX_ATTACH = 5 * 1024 * 1024
+        if (buf.byteLength <= MAX_ATTACH) {
+          const ext =
+            proofMimeType === 'application/pdf'
+              ? 'pdf'
+              : proofMimeType === 'image/png'
+                ? 'png'
+                : proofMimeType === 'image/webp'
+                  ? 'webp'
+                  : 'jpg'
+          attachments = [{ filename: `comprobante-${order.orderNumber}.${ext}`, content: buf, contentType: proofMimeType }]
+        } else {
+          logger.warn('SPEI proof too large for attachment, falling back to link only', {
+            orderId: order.id,
+            size: buf.byteLength,
+          })
+        }
+      }
+    } catch (err) {
+      logger.warn('Could not fetch SPEI proof for attachment', {
+        orderId: order.id,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+
+    const html = `
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>${subject}</title></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+  <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
+    <div style="padding-bottom: 32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display: inline-block; vertical-align: middle;">
+      <span style="font-size: 18px; font-weight: 700; vertical-align: middle; margin-left: 8px;">Avoqado</span>
+    </div>
+    <div style="padding-bottom: 24px;">
+      <h1 style="margin: 0 0 8px 0; font-size: 26px; font-weight: 400;">${isResubmit ? 'Comprobante re-subido' : 'Comprobante SPEI recibido'}</h1>
+      <p style="margin: 0; font-size: 16px; color: #666;">${order.orderNumber} · ${order.contactName} · ${fmtMx(order.totalCents)}</p>
+    </div>
+    <div style="background: #fef3c7; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
+      <p style="font-size: 14px; color: #92400e; margin: 0;"><strong>Acción requerida:</strong> Verifica en el banco que llegó el SPEI por ${fmtMx(order.totalCents)} con concepto <strong>${order.orderNumber}</strong>, después aprueba o rechaza.</p>
+    </div>
+    <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 24px;">
+      <h3 style="margin: 0 0 16px 0; font-size: 16px; font-weight: 600;">Items</h3>
+      <table cellpadding="0" cellspacing="0" style="width: 100%;">${itemsRows}</table>
+    </div>
+    <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 24px;">
+      <h3 style="margin: 0 0 16px 0; font-size: 16px; font-weight: 600;">Comprobante</h3>
+      <p style="font-size: 14px; margin: 0;">
+        ${attachments ? 'Adjunto en este correo' : 'No se pudo adjuntar (demasiado grande o no disponible)'}.
+      </p>
+      <p style="font-size: 13px; margin: 8px 0 0 0;">
+        <a href="${proofUrl}" style="color: #1a73e8; text-decoration: none;">Ver comprobante online →</a>
+      </p>
+    </div>
+    <div style="text-align: center; margin-bottom: 24px;">
+      <a href="${approveUrl}" style="display: inline-block; background: #059669; color: #fff; padding: 14px 24px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 15px; margin-right: 12px;">✅ Aprobar pedido</a>
+      <a href="${rejectUrl}" style="display: inline-block; background: #dc2626; color: #fff; padding: 14px 24px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 15px;">❌ Rechazar pago</a>
+    </div>
+    <div style="text-align: center; margin-bottom: 32px;">
+      <a href="${adminUiUrl}" style="font-size: 13px; color: #666; text-decoration: none;">Ver en admin UI (login requerido) →</a>
+    </div>
+    <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 0;">
+    <div style="padding-top: 24px;">
+      <p style="margin: 0; font-size: 14px; color: #666;">Los botones expiran a los 7 días. Token único, single-use.</p>
+    </div>
+  </div>
+</body></html>`
+
+    const text =
+      `${subject}\n\n` +
+      `Cliente: ${order.contactName} <${order.contactEmail}>\n` +
+      `Monto: ${fmtMx(order.totalCents)}\n` +
+      `Concepto SPEI: ${order.orderNumber}\n\n` +
+      `Comprobante: ${proofUrl}\n\n` +
+      `Aprobar: ${approveUrl}\n` +
+      `Rechazar: ${rejectUrl}\n` +
+      `Admin UI: ${adminUiUrl}\n`
+
+    return this.sendEmail({
+      to: adminEmail,
+      subject,
+      html,
+      text,
+      attachments,
+    })
+  }
+
+  /**
+   * SPEI Email #3: SPEI proof rejected — sent to the customer with a reason and a link
+   * back to the order detail page so they can re-upload.
+   */
+  async sendTerminalOrderSpeiRejected(data: SpeiRejectedEmailData): Promise<boolean> {
+    const { order, reason, orderDetailUrl } = data
+    const subject = `Necesitamos verificar tu pago ${order.orderNumber}`
+    const logoUrl = 'https://avoqado.io/isotipo.svg'
+
+    const html = `
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>${subject}</title></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+  <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
+    <div style="padding-bottom: 32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display: inline-block; vertical-align: middle;">
+      <span style="font-size: 18px; font-weight: 700; vertical-align: middle; margin-left: 8px;">Avoqado</span>
+    </div>
+    <div style="padding-bottom: 24px;">
+      <h1 style="margin: 0 0 8px 0; font-size: 26px; font-weight: 400;">Necesitamos verificar tu pago</h1>
+      <p style="margin: 0; font-size: 16px; color: #666;">Pedido ${order.orderNumber}</p>
+    </div>
+    <div style="background: #fef3c7; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
+      <p style="font-size: 14px; color: #92400e; margin: 0 0 8px 0;"><strong>No pudimos confirmar tu pago.</strong></p>
+      <p style="font-size: 14px; color: #92400e; margin: 0;">Motivo: ${reason}</p>
+    </div>
+    <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 24px;">
+      <p style="margin: 0 0 12px 0; font-size: 14px;">Por favor verifica los datos del comprobante (monto exacto, concepto = <strong>${order.orderNumber}</strong>) y vuelve a subirlo desde tu dashboard.</p>
+    </div>
+    <div style="text-align: center; margin-bottom: 32px;">
+      <a href="${orderDetailUrl}" style="display: inline-block; background: #000; color: #fff; padding: 14px 28px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 16px;">Volver a subir comprobante</a>
+    </div>
+    <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 0;">
+    <div style="padding-top: 24px;">
+      <p style="margin: 0; font-size: 14px; color: #666;">Si tienes dudas, escríbenos a sales@avoqado.io.</p>
+    </div>
+  </div>
+</body></html>`
+
+    const text =
+      `Necesitamos verificar tu pago ${order.orderNumber}\n\n` + `Motivo: ${reason}\n\n` + `Vuelve a subir el comprobante: ${orderDetailUrl}\n\nAvoqado`
+
+    return this.sendEmail({ to: order.contactEmail, subject, html, text })
+  }
+
+  async sendTerminalOrderSpeiReminder(data: SpeiReminderEmailData): Promise<boolean> {
+    const { order, daysSinceCreation, daysRemaining, orderDetailUrl, speiRecipient } = data
+    const subject = `Recordatorio: pago pendiente ${order.orderNumber}`
+    const logoUrl = 'https://avoqado.io/isotipo.svg'
+    const fmtMx = (cents: number) =>
+      `$${(cents / 100).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${order.currency}`
+
+    const html = `
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>${subject}</title></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+  <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
+    <div style="padding-bottom: 32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display: inline-block; vertical-align: middle;">
+      <span style="font-size: 18px; font-weight: 700; vertical-align: middle; margin-left: 8px;">Avoqado</span>
+    </div>
+    <div style="padding-bottom: 24px;">
+      <h1 style="margin: 0 0 8px 0; font-size: 26px; font-weight: 400;">Recordatorio de pago</h1>
+      <p style="margin: 0; font-size: 16px; color: #666;">Pedido ${order.orderNumber} · creado hace ${daysSinceCreation} día${daysSinceCreation === 1 ? '' : 's'}</p>
+    </div>
+    <div style="background: #fef3c7; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
+      <p style="font-size: 14px; color: #92400e; margin: 0;">
+        Aún no recibimos tu comprobante SPEI. Tu pedido expira en <strong>${daysRemaining} día${daysRemaining === 1 ? '' : 's'}</strong>.
+      </p>
+    </div>
+    <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 24px;">
+      <h3 style="margin: 0 0 16px 0; font-size: 16px; font-weight: 600;">Datos para tu transferencia</h3>
+      <p style="font-size: 14px; margin: 0;">
+        Beneficiario: <strong>${speiRecipient.beneficiary}</strong><br>
+        CLABE: <strong style="font-family: monospace;">${speiRecipient.clabe}</strong><br>
+        Banco: ${speiRecipient.bank}<br>
+        Monto: <strong>${fmtMx(order.totalCents)}</strong><br>
+        Concepto: <strong style="font-family: monospace;">${order.orderNumber}</strong>
+      </p>
+    </div>
+    <div style="text-align: center; margin-bottom: 32px;">
+      <a href="${orderDetailUrl}" style="display: inline-block; background: #000; color: #fff; padding: 14px 28px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 16px;">Subir comprobante</a>
+    </div>
+    <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 0;">
+    <div style="padding-top: 24px;">
+      <p style="margin: 0; font-size: 14px; color: #666;">Avoqado</p>
+    </div>
+  </div>
+</body></html>`
+
+    const text =
+      `Recordatorio — ${order.orderNumber}\n\n` +
+      `Aún no recibimos tu comprobante SPEI. Tu pedido expira en ${daysRemaining} días.\n\n` +
+      `Beneficiario: ${speiRecipient.beneficiary}\n` +
+      `CLABE: ${speiRecipient.clabe}\n` +
+      `Monto: ${fmtMx(order.totalCents)}\n` +
+      `Concepto: ${order.orderNumber}\n\n` +
+      `Sube tu comprobante en: ${orderDetailUrl}\n\nAvoqado`
+
+    return this.sendEmail({ to: order.contactEmail, subject, html, text })
   }
 
   /**
