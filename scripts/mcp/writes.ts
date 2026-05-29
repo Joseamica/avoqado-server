@@ -39,6 +39,8 @@ export async function confirmGuard(opts: {
   confirm: boolean
   preview: Record<string, unknown>
   args: unknown
+  /** Optional: transform the result before it is written to the audit log (e.g. mask secrets). The caller still receives the full result. */
+  redact?: (result: unknown) => unknown
   execute: () => Promise<unknown>
 }) {
   if (!opts.confirm) {
@@ -50,6 +52,6 @@ export async function confirmGuard(opts: {
     })
   }
   const result = await opts.execute()
-  auditWrite({ tool: opts.tool, actor: opts.actor, args: opts.args, result })
+  auditWrite({ tool: opts.tool, actor: opts.actor, args: opts.args, result: opts.redact ? opts.redact(result) : result })
   return text({ status: 'DONE', dbTarget: describeDbTarget(), result })
 }

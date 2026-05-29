@@ -23,6 +23,12 @@ Full design: `docs/plans/2026-05-29-admin-mcp-design.md`.
 - `move_terminal` — reassign a terminal to another venue (clears assigned merchants for cross-tenant safety)
 - `update_user` — change a team member's role / active flag / PIN
 
+**Phase 2 — heavy creates (return a PREVIEW unless `confirm:true`)**
+- `list_payment_providers` — resolve a providerId (read)
+- `create_venue` — create a venue, KYC pre-approved by default (VERIFIED + ACTIVE in one step; wraps bulkCreateVenues)
+- `create_merchant_account` — payment-routing merchant terminals use (Blumon/Stripe/MercadoPago/AngelPay)
+- `create_ecommerce_merchant` — SDK / online-checkout client; generates pk_/sk_ API keys (secret shown ONCE, never retrievable)
+
 Write tools need an actor staff id: set `MCP_ADMIN_STAFF_ID` in the `.env` that matches your
 `DATABASE_URL` (per-DB), or pass `performedBy` per call. Every executed write is appended to
 `logs/mcp-admin-audit.log`.
@@ -45,5 +51,5 @@ DB target is whatever that `.env`'s `DATABASE_URL` points to — ⚠️ check it
 }
 ```
 
-The server logs its DB target to stderr on startup. Write tools return a PREVIEW unless
-called with `confirm:true`. Phase 2 (create_venue+KYC, create_merchant) is pending.
+The server logs its DB target to stderr on startup. All write tools return a PREVIEW unless
+called with `confirm:true`, and every executed write is appended to `logs/mcp-admin-audit.log`.

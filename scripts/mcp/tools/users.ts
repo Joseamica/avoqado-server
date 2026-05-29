@@ -9,7 +9,7 @@ const ROLES = ['SUPERADMIN', 'OWNER', 'ADMIN', 'MANAGER', 'CASHIER', 'WAITER', '
 export function registerUserTools(server: McpServer) {
   server.tool(
     'update_user',
-    "Update a team member (staff) at a venue: their venue role, active flag, and/or PIN. Venue-scoped. Wraps the team service. PREVIEW unless confirm:true.",
+    'Update a team member (staff) at a venue: their venue role, active flag, and/or PIN. Venue-scoped. Wraps the team service. PREVIEW unless confirm:true.',
     {
       venueId: z.string().describe('Venue the staff belongs to (use list_venues)'),
       teamMemberId: z.string().describe('The staff member id'),

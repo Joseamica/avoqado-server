@@ -7,6 +7,7 @@ import { registerTerminalTools } from './tools/terminals'
 import { registerOrderTools } from './tools/orders'
 import { registerVerificationTools } from './tools/verifications'
 import { registerUserTools } from './tools/users'
+import { registerCreateTools } from './tools/create'
 
 async function main() {
   const server = new McpServer({ name: 'avoqado-admin', version: '0.1.0' })
@@ -22,6 +23,7 @@ async function main() {
   registerOrderTools(server)
   registerVerificationTools(server)
   registerUserTools(server)
+  registerCreateTools(server)
 
   const transport = new StdioServerTransport()
   await server.connect(transport)
