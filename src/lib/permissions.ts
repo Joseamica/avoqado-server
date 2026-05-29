@@ -320,6 +320,7 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'sim-custody:collect-from-promoter': ['sim-custody:collect-from-promoter', 'inventory:read'], // Supervisor reclaims from Promoter (owning-supervisor only)
   'sim-custody:collect-from-supervisor': ['sim-custody:collect-from-supervisor', 'inventory:read'], // Admin reclaims from Supervisor
   'sim-custody:view-all-supervisors': ['sim-custody:view-all-supervisors', 'inventory:read'], // Read-only cross-supervisor visibility (no mutation authority)
+  'sim-custody:approve-registration': ['sim-custody:approve-registration', 'sim-custody:assign-to-supervisor', 'inventory:read'], // OWNER aprueba/rechaza solicitudes de alta de SIMs creadas por promotores en la TPV
   'tpv-sim-custody:accept': ['tpv-sim-custody:accept'], // Promoter accepts SIM reception on TPV
   'tpv-sim-custody:reject': ['tpv-sim-custody:reject'], // Promoter rejects a pending SIM on TPV
 
@@ -848,6 +849,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'sim-custody:collect-from-promoter', // Admin can reclaim directly from Promoter (Baja de promotor, SIM defectuoso, recolección por Supervisor)
     'sim-custody:collect-from-supervisor', // Admin reclaims from Supervisor
     'sim-custody:view-all-supervisors', // Full cross-supervisor visibility
+    'sim-custody:approve-registration', // Aprobar/rechazar solicitudes de alta de SIMs
     // Allow OWNER to use TPV inbox too (edge case: venue owner also operates as promoter).
     'tpv-sim-custody:accept',
     'tpv-sim-custody:reject',
@@ -1258,6 +1260,7 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
     'sim-custody:collect-from-promoter',
     'sim-custody:collect-from-supervisor',
     'sim-custody:view-all-supervisors',
+    'sim-custody:approve-registration',
   ],
   'tpv-sim-custody': ['tpv-sim-custody:accept', 'tpv-sim-custody:reject'],
   // Venue Crypto Config (per-venue B4Bit device management)
