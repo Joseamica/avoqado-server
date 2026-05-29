@@ -35,6 +35,17 @@ function normalizeSerials(serials: string[]): string[] {
   return serials.map(normalizeSerial)
 }
 
+/**
+ * Mexican ICCID format guard per ITU-T E.118: `8952` (MII 89 + country MX 52) +
+ * 15-16 digits + optional trailing `F` (BCD padding). Verified against 1,021 real
+ * ALTAN SIMs. Mirrors the TPV regex (SerializedInventoryViewModel.kt MX_ICCID_REGEX).
+ * Defense-in-depth: the TPV validates first, this re-validates server-side.
+ */
+const MX_ICCID_REGEX = /^8952\d{15,16}F?$/
+export function isValidMxIccid(raw: string): boolean {
+  return MX_ICCID_REGEX.test(normalizeSerial(raw))
+}
+
 // ==========================================
 // SCAN RESULT TYPES
 // ==========================================
