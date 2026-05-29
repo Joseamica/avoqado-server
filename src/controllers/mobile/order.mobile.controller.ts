@@ -66,6 +66,7 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       tip,
       note,
       splitType,
+      reservationId,
     } = req.body
 
     // Validate required fields
@@ -120,6 +121,7 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       tip: typeof tip === 'number' ? tip : 0,
       note,
       splitType,
+      reservationId: typeof reservationId === 'string' ? reservationId : null,
     })
 
     res.status(201).json({

@@ -101,6 +101,77 @@ describe('order.mobile.service', () => {
     expect(result.total).toBe(120)
   })
 
+  // ── Walk-in class flow: link the sale to its reservation ──
+
+  function mockBaseOrderCreate() {
+    prismaMock.staff.findUnique.mockResolvedValue({ id: 'staff-1', venueId: 'venue-1' })
+    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: 'venue-1', active: true })
+    prismaMock.product.findMany.mockResolvedValue([
+      { id: 'prod-class', name: 'Yoga', price: new Decimal(300), sku: 'YOGA-1', category: { name: 'Clases' } },
+    ])
+    prismaMock.modifier.findMany.mockResolvedValue([])
+    prismaMock.order.create.mockResolvedValue({
+      id: 'order-1',
+      orderNumber: 'ORD-1',
+      status: 'CONFIRMED',
+      paymentStatus: 'PENDING',
+      subtotal: new Decimal(300),
+      discountAmount: new Decimal(0),
+      taxAmount: new Decimal(0),
+      total: new Decimal(300),
+      createdAt: new Date('2026-05-28T10:00:00.000Z'),
+      items: [],
+    })
+  }
+
+  it('links the order to the reservation when reservationId belongs to the venue', async () => {
+    mockBaseOrderCreate()
+    prismaMock.reservation.findFirst.mockResolvedValue({ id: 'res-1' })
+
+    await createOrderWithItems('venue-1', {
+      staffId: 'staff-1',
+      items: [{ productId: 'prod-class', quantity: 1 }],
+      source: 'AVOQADO_ANDROID',
+      reservationId: 'res-1',
+    })
+
+    expect(prismaMock.reservation.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'res-1', venueId: 'venue-1' } }))
+    expect(prismaMock.order.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ reservationId: 'res-1' }) }),
+    )
+  })
+
+  it('drops a reservationId that does not belong to the venue (no FK break, sale still created)', async () => {
+    mockBaseOrderCreate()
+    prismaMock.reservation.findFirst.mockResolvedValue(null) // foreign / unknown
+
+    await createOrderWithItems('venue-1', {
+      staffId: 'staff-1',
+      items: [{ productId: 'prod-class', quantity: 1 }],
+      source: 'AVOQADO_ANDROID',
+      reservationId: 'res-from-other-venue',
+    })
+
+    expect(prismaMock.order.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ reservationId: null }) }),
+    )
+  })
+
+  it('does not query reservations when no reservationId is provided (regression)', async () => {
+    mockBaseOrderCreate()
+
+    await createOrderWithItems('venue-1', {
+      staffId: 'staff-1',
+      items: [{ productId: 'prod-class', quantity: 1 }],
+      source: 'AVOQADO_ANDROID',
+    })
+
+    expect(prismaMock.reservation.findFirst).not.toHaveBeenCalled()
+    expect(prismaMock.order.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ reservationId: null }) }),
+    )
+  })
+
   it('marks discounted cash order as paid when customer pays the discounted total', async () => {
     prismaMock.order.findUnique.mockResolvedValue({
       id: 'order-1',

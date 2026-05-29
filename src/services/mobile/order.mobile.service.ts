@@ -42,6 +42,9 @@ export interface CreateOrderInput {
   tip?: number // cents
   note?: string | null
   splitType?: string | null
+  /** Links the sale to a class/appointment reservation (walk-in flow).
+   *  Validated against the venue before use; ignored if it doesn't belong. */
+  reservationId?: string | null
 }
 
 export interface CreatedOrderResponse {
@@ -424,11 +427,30 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
     }
   }
 
+  // Validate the optional reservation link belongs to this venue. We never
+  // fail the sale over a bad link (a bogus id would also break the FK insert),
+  // so an unknown/foreign reservationId is simply dropped with a warning.
+  let linkedReservationId: string | null = null
+  if (input.reservationId) {
+    const reservation = await prisma.reservation.findFirst({
+      where: { id: input.reservationId, venueId },
+      select: { id: true },
+    })
+    if (reservation) {
+      linkedReservationId = reservation.id
+    } else {
+      logger.warn(
+        `[createOrderWithItems] reservationId ${input.reservationId} not found in venue ${venueId}; order created without reservation link`,
+      )
+    }
+  }
+
   // Create order with items in a transaction
   const order = await prisma.order.create({
     data: {
       venueId,
       orderNumber,
+      reservationId: linkedReservationId,
       tableId: input.tableId || null,
       servedById: validatedStaffId || null,
       createdById: validatedStaffId || null,
