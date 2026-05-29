@@ -291,6 +291,8 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   CreditPackPurchase: 'Discounts, Loyalty & Credit Packs',
   CreditItemBalance: 'Discounts, Loyalty & Credit Packs',
   CreditTransaction: 'Discounts, Loyalty & Credit Packs',
+  ReferralProgramConfig: 'Discounts, Loyalty & Credit Packs',
+  Referral: 'Discounts, Loyalty & Credit Packs',
 
   // 14. Commissions & Sales Goals
   CommissionCalculation: 'Commissions & Sales Goals',
