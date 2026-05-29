@@ -9,11 +9,11 @@
  * and "manual" refunds entered by staff from the web dashboard.
  */
 
-import { MovementType, PaymentMethod, PaymentSource, PaymentType, Prisma, RawMaterialMovementType, TransactionStatus } from '@prisma/client'
+import { PaymentMethod, PaymentSource, PaymentType, Prisma, TransactionStatus } from '@prisma/client'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
-import { adjustStock } from './rawMaterial.service'
+import { restockItem } from './inventoryRestock.service'
 import { generateAndStoreReceipt } from './receipt.dashboard.service'
 import { createRefundCommission } from './commission/commission-calculation.service'
 import { createRefundTransactionCost } from '../payments/transactionCost.service'
@@ -517,109 +517,6 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
     remainingRefundable: centsToNumber(result.remainingAfterCents),
     status: 'COMPLETED',
   }
-}
-
-/**
- * Add stock back for a refunded item.
- *
- * Routes by inventoryMethod:
- *   - QUANTITY: atomic increment on the product's `Inventory` row + ADJUSTMENT
- *     movement.
- *   - RECIPE:   for each recipe line (skipping optional/variable lines), call
- *     `adjustStock` on the raw material with `quantity * portions`. This
- *     creates a new batch at current cost and an ADJUSTMENT movement. Note
- *     this is an approximation — FIFO batches consumed during the original
- *     sale aren't tracked back to their exact origin.
- *
- *     Modifier substitutions (SUBSTITUTION mode) are *not* reversed here —
- *     the default recipe ingredients are the ones restocked.
- */
-async function restockItem(args: { venueId: string; productId: string; quantity: number; refundPaymentId: string; staffId?: string }) {
-  const { venueId, productId, quantity, refundPaymentId, staffId } = args
-
-  const product = await prisma.product.findUnique({
-    where: { id: productId },
-    select: { id: true, name: true, inventoryMethod: true, trackInventory: true },
-  })
-  if (!product || !product.trackInventory) return
-
-  // Explicit QUANTITY, or fall back: if an Inventory row exists, treat as QUANTITY.
-  const method = product.inventoryMethod
-  if (method === 'QUANTITY') {
-    const inventory = await prisma.inventory.findUnique({ where: { productId } })
-    if (!inventory) return
-    await prisma.$transaction(async tx => {
-      const updated = await tx.inventory.update({
-        where: { productId },
-        data: { currentStock: { increment: quantity } },
-      })
-      const newStock = updated.currentStock
-      const previousStock = newStock.sub(quantity)
-      await tx.inventoryMovement.create({
-        data: {
-          inventoryId: inventory.id,
-          type: MovementType.ADJUSTMENT,
-          quantity: new Prisma.Decimal(quantity),
-          previousStock,
-          newStock,
-          reason: `Refund restock (paymentId=${refundPaymentId})`,
-          reference: refundPaymentId,
-          createdBy: staffId,
-        },
-      })
-    })
-    logger.info('[REFUND.DASHBOARD] Restocked (QUANTITY)', { venueId, productId, quantity, refundPaymentId })
-    return
-  }
-
-  if (method === 'RECIPE') {
-    const recipe = await prisma.recipe.findUnique({
-      where: { productId },
-      include: { lines: { include: { rawMaterial: { select: { id: true, name: true, unit: true } } } } },
-    })
-    if (!recipe) return
-
-    for (const line of recipe.lines) {
-      if (line.isOptional) continue
-      // Skip variable (substitution-capable) lines — we can't know without the
-      // original OrderItemModifier set whether the default or substitute was used.
-      if (line.isVariable) continue
-
-      const addQty = Number(line.quantity) * quantity
-      if (addQty <= 0) continue
-
-      try {
-        await adjustStock(
-          venueId,
-          line.rawMaterialId,
-          {
-            quantity: addQty,
-            type: RawMaterialMovementType.ADJUSTMENT,
-            reason: `Refund restock for ${product.name} (paymentId=${refundPaymentId})`,
-            reference: refundPaymentId,
-          },
-          staffId,
-        )
-      } catch (err: any) {
-        logger.warn('[REFUND.DASHBOARD] Failed to restock raw material', {
-          rawMaterialId: line.rawMaterialId,
-          productId,
-          addQty,
-          error: err?.message ?? err,
-        })
-      }
-    }
-    logger.info('[REFUND.DASHBOARD] Restocked (RECIPE)', {
-      venueId,
-      productId,
-      portions: quantity,
-      lines: recipe.lines.length,
-      refundPaymentId,
-    })
-    return
-  }
-
-  logger.info('[REFUND.DASHBOARD] Skipped restock (no inventoryMethod)', { productId })
 }
 
 /**

@@ -6,6 +6,7 @@ import { generateDigitalReceipt } from './digitalReceipt.tpv.service'
 import { Decimal } from '@prisma/client/runtime/library'
 import { createRefundTransactionCost } from '../payments/transactionCost.service'
 import { createRefundCommission } from '../dashboard/commission/commission-calculation.service'
+import { restockOrderItems } from '../dashboard/inventoryRestock.service'
 
 /**
  * Refund request data from TPV Android app
@@ -400,6 +401,53 @@ export async function recordRefund(
       await onOrderRefunded({ orderId: originalPayment.orderId, venueId })
     } catch (err) {
       console.error('[referral hook] onOrderRefunded failed for order', originalPayment.orderId, err)
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // STEP 4.5: Restock inventory when this refund fully reverses the order (Bug B)
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Historically the TPV refund path never returned inventory, so every refund
+  // of an inventory-tracked product silently under-counted stock. TPV refunds
+  // are amount-based (no per-item breakdown), so we restock the order's items
+  // only once the cumulative refunds reach the order total — i.e. the whole
+  // order is reversed. Non-blocking (a restock failure must not fail the refund)
+  // and processor-agnostic, so it covers both AngelPay and Blumon refunds.
+  if (originalPayment.orderId && originalPayment.order) {
+    try {
+      const orderTotal = Number(originalPayment.order.total)
+      if (orderTotal > 0) {
+        // This refund row is already committed, so it's included in the sum.
+        const orderRefunds = await prisma.payment.findMany({
+          where: { orderId: originalPayment.orderId, type: PaymentType.REFUND, status: TransactionStatus.COMPLETED },
+          select: { amount: true },
+        })
+        const totalRefundedSale = orderRefunds.reduce((sum, p) => sum + Math.abs(Number(p.amount)), 0)
+        const beforeThisRefund = totalRefundedSale - salesRefund
+        // Only the refund that crosses the threshold restocks → idempotent across
+        // multiple partial refunds that cumulatively reach the order total.
+        const crossedToFullyRefunded = beforeThisRefund < orderTotal - 0.01 && totalRefundedSale >= orderTotal - 0.01
+        if (crossedToFullyRefunded) {
+          const summary = await restockOrderItems({
+            venueId,
+            orderId: originalPayment.orderId,
+            refundPaymentId: result.id,
+            staffId: refundData.staffId,
+          })
+          logger.info('Order fully refunded — inventory restocked', {
+            orderId: originalPayment.orderId,
+            refundPaymentId: result.id,
+            ...summary,
+          })
+        }
+      }
+    } catch (error) {
+      // Never fail the refund because restock failed — the money movement already succeeded.
+      logger.error('Failed to restock inventory on full refund', {
+        refundPaymentId: result.id,
+        orderId: originalPayment.orderId,
+        error: error instanceof Error ? error.message : String(error),
+      })
     }
   }
 

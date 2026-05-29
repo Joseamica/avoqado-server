@@ -3492,8 +3492,13 @@ router.post(
   settlementIncidentController.escalateIncident,
 )
 
-// Venue Payment Configuration routes (SUPERADMIN only)
-router.use('/venues/:venueId/payment-config', authenticateTokenMiddleware, checkPermission('system:config'), venuePaymentConfigRoutes)
+// Venue Payment Configuration routes.
+// Permissions are enforced PER-ROUTE inside venuePaymentConfigRoutes: config
+// mutations + sensitive views stay `system:config` (SUPERADMIN), while the
+// read-only settlement views consumed by the Sales Summary report
+// (settlement-info, merchant-accounts) are gated `settlements:read` so venue
+// ADMIN/OWNER/MANAGER can read them. Do NOT add a blanket checkPermission here.
+router.use('/venues/:venueId/payment-config', authenticateTokenMiddleware, venuePaymentConfigRoutes)
 
 // E-commerce Merchant Management routes (OWNER, ADMIN)
 router.use('/venues/:venueId/ecommerce-merchants', authenticateTokenMiddleware, ecommerceMerchantRoutes)

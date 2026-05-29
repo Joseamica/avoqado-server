@@ -134,9 +134,16 @@ export async function getVenueMerchantAccounts(req: Request, res: Response) {
 
     const accounts = await venuePaymentConfigService.getVenueMerchantAccounts(venueId)
 
+    // This endpoint is readable by ADMIN/OWNER/MANAGER (settlements:read) for the
+    // Sales Summary report, so strip secret fields before responding: provider
+    // credentials and the AngelPay webhook signing secret must never go over the
+    // wire to the dashboard. The internal callers (e.g. getVenueCostStructures)
+    // keep using the unredacted service result.
+    const sanitized = accounts.map(({ credentialsEncrypted, angelpayWebhookSecret, angelpayWebhookEndpointId, ...safe }: any) => safe)
+
     res.json({
       success: true,
-      data: accounts,
+      data: sanitized,
     })
   } catch (error: any) {
     logger.error('Error getting venue merchant accounts:', error)
