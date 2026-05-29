@@ -40,6 +40,9 @@ import {
 } from '@/services/referrals/referralCapture.service'
 import { onOrderPaid } from '@/services/referrals/referralQualification.service'
 import { onOrderRefunded } from '@/services/referrals/referralRefund.service'
+// The referrer's tier reward is a plain CouponCode, so it must redeem through
+// Avoqado's EXISTING coupon engine — no referral-specific redemption code.
+import { validateCouponCode, recordCouponRedemption } from '@/services/dashboard/coupon.dashboard.service'
 
 jest.setTimeout(60000)
 
@@ -189,7 +192,10 @@ describe('Referral Program — end-to-end integration', () => {
     const couponCode = await prisma.couponCode.findFirst({
       where: { discountId: qualified!.rewardDiscountId! },
     })
-    expect(couponCode?.code).toMatch(/^TESTSMOKE-TIER1-/)
+    // Prefix is normalized + capped at 8 chars to stay consistent with the
+    // customer-code generator (normalizeVenuePrefix). 'TESTSMOKE' (9) → 'TESTSMOK'.
+    // Real venue prefixes are ≤8 ('MINDFORM', 'AVOQADOW') so they pass through whole.
+    expect(couponCode?.code).toMatch(/^TESTSMOK-TIER1-/)
     expect(couponCode?.active).toBe(true)
 
     const customerDiscount = await prisma.customerDiscount.findFirst({
@@ -200,6 +206,114 @@ describe('Referral Program — end-to-end integration', () => {
 
     // Per-test order cleanup — avoid leaving Order rows around.
     await prisma.order.delete({ where: { id: order.id } })
+  })
+
+  it('redeem cycle: referrer USES the earned tier coupon → 15% applies, redemption recorded, double-use blocked', async () => {
+    // ── Earn the reward (capture → pay → tier-up) ─────────────────────────
+    await activateReferralProgram({
+      venueId,
+      newCustomerDiscountPercent: 10,
+      tier1ReferralsRequired: 1,
+      tier1RewardPercent: 15,
+      tier2ReferralsRequired: 2,
+      tier2RewardPercent: 20,
+      tier3ReferralsRequired: 3,
+      tier3RewardPercent: 25,
+      rewardCouponExpiryDays: 90,
+      codePrefix: 'TESTSMOKE',
+    })
+
+    const referrer = await prisma.customer.create({
+      data: { venueId, firstName: 'Jose', lastName: 'Test', phone: '5599999011', referralCode: 'TESTSMOKE-JOSE011' },
+    })
+    const newCustomer = await prisma.customer.create({
+      data: { venueId, firstName: 'María', lastName: 'Test', phone: '5599999012' },
+    })
+
+    const referral = await captureReferral({
+      venueId,
+      referralCode: 'TESTSMOKE-JOSE011',
+      newCustomerId: newCustomer.id,
+      capturedByStaffVenueId: waiterStaffVenueId,
+    })
+    const referredOrder = await prisma.order.create({
+      data: {
+        venueId,
+        customerId: newCustomer.id,
+        orderNumber: `TEST-REF-EARN-${Date.now()}`,
+        status: 'PENDING',
+        subtotal: 500,
+        taxAmount: 0,
+        total: 500,
+        paidAmount: 0,
+        remainingBalance: 500,
+        discountAmount: 0,
+        tipAmount: 0,
+      },
+    })
+    await prisma.referral.update({ where: { id: referral.id }, data: { qualifyingOrderId: referredOrder.id } })
+    await prisma.order.update({ where: { id: referredOrder.id }, data: { status: 'COMPLETED' } })
+    await onOrderPaid({ orderId: referredOrder.id, venueId })
+
+    const qualified = await prisma.referral.findUnique({ where: { id: referral.id } })
+    const tierCoupon = await prisma.couponCode.findFirst({
+      where: { discountId: qualified!.rewardDiscountId! },
+    })
+    expect(tierCoupon).toBeTruthy()
+    expect(tierCoupon!.currentUses).toBe(0)
+
+    // ── Redeem the reward (referrer makes a NEW purchase) ─────────────────
+    const redeemOrder = await prisma.order.create({
+      data: {
+        venueId,
+        customerId: referrer.id,
+        orderNumber: `TEST-REF-REDEEM-${Date.now()}`,
+        status: 'PENDING',
+        subtotal: 500,
+        taxAmount: 0,
+        total: 500,
+        paidAmount: 0,
+        remainingBalance: 500,
+        discountAmount: 0,
+        tipAmount: 0,
+      },
+    })
+
+    // 1. Validate through Avoqado's REAL coupon engine — must accept our coupon.
+    const validation = await validateCouponCode(venueId, tierCoupon!.code, 500, referrer.id)
+    expect(validation.valid).toBe(true)
+    expect(validation.coupon?.discount.type).toBe('PERCENTAGE')
+    expect(Number(validation.coupon?.discount.value)).toBe(15)
+
+    // 2. Apply the 15% + record the redemption (what checkout/payment does).
+    const amountSaved = 500 * 0.15 // 75
+    await prisma.order.update({
+      where: { id: redeemOrder.id },
+      data: { discountAmount: amountSaved, total: 500 - amountSaved, remainingBalance: 500 - amountSaved },
+    })
+    await recordCouponRedemption(venueId, tierCoupon!.id, redeemOrder.id, amountSaved, referrer.id)
+
+    const settled = await prisma.order.findUnique({ where: { id: redeemOrder.id } })
+    expect(Number(settled?.discountAmount)).toBe(75)
+    expect(Number(settled?.total)).toBe(425)
+
+    const afterUse = await prisma.couponCode.findUnique({ where: { id: tierCoupon!.id } })
+    expect(afterUse?.currentUses).toBe(1)
+
+    const redemption = await prisma.couponRedemption.findUnique({ where: { orderId: redeemOrder.id } })
+    expect(redemption).toBeTruthy()
+    expect(Number(redemption?.amountSaved)).toBe(75)
+    expect(redemption?.customerId).toBe(referrer.id)
+
+    // 3. Single-use enforcement — a second redeem attempt must be rejected.
+    const secondAttempt = await validateCouponCode(venueId, tierCoupon!.code, 500, referrer.id)
+    expect(secondAttempt.valid).toBe(false)
+    expect(secondAttempt.errorCode).toBe('USAGE_LIMIT')
+
+    // Cleanup the two orders (redemption row cascades via cleanup()).
+    await prisma.couponRedemption.deleteMany({ where: { orderId: redeemOrder.id } })
+    await prisma.order.delete({ where: { id: redeemOrder.id } })
+    await prisma.order.delete({ where: { id: referredOrder.id } })
   })
 
   it('refund flow: tier drops, reward revoked when unredeemed', async () => {

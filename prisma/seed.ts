@@ -522,7 +522,8 @@ async function main() {
     {
       code: 'REFERRAL_PROGRAM',
       name: 'Programa de Referidos',
-      description: 'Programa de referidos por niveles: los clientes recomiendan a otros, acumulan referidos calificados y desbloquean descuentos por tier.',
+      description:
+        'Programa de referidos por niveles: los clientes recomiendan a otros, acumulan referidos calificados y desbloquean descuentos por tier.',
       category: FeatureCategory.MARKETING,
       monthlyPrice: 299.0, // MXN
     },
