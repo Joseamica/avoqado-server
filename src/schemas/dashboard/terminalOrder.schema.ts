@@ -27,6 +27,10 @@ export const createTerminalOrderSchema = z.object({
     shippingZip: z.string().min(1, 'El código postal es obligatorio'),
     shippingCountry: z.string().optional(),
     paymentMethod: z.enum(['CARD_STRIPE', 'SPEI']),
+    // Where the purchase wizard was opened from. Affects Stripe success/cancel
+    // URLs (lands at /setup#step-8 when 'setup'). Optional, defaults to 'tpv'
+    // in the controller. Spec: 2026-05-29-onboarding-tpv-purchase-design.md.
+    from: z.enum(['tpv', 'setup']).optional(),
   }),
 })
 

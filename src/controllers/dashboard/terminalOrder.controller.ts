@@ -3,6 +3,7 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { createOrder, uploadSpeiProof } from '@/services/dashboard/terminalOrder/terminalOrder.service'
 import { createCheckoutSessionForOrder } from '@/services/dashboard/terminalOrder/stripeCheckout.service'
+import { buildStripeCheckoutUrls } from '@/services/dashboard/terminalOrder/urls'
 
 /**
  * POST /api/v1/dashboard/venues/:venueId/tpv-orders
@@ -27,15 +28,20 @@ export async function createOrderHandler(req: Request, res: Response, next: Next
     })
 
     if (order.paymentMethod === 'CARD_STRIPE') {
-      // Pick the right dashboard URL — handle multiple env var names defensively.
-      const baseUrl = process.env.DASHBOARD_URL ?? process.env.FRONTEND_URL ?? process.env.APP_URL ?? 'https://dashboard.avoqado.io'
-
       const venue = await prisma.venue.findUniqueOrThrow({
         where: { id: venueId },
         select: { slug: true },
       })
-      const successUrl = `${baseUrl}/venues/${venue.slug}/tpv/orders/${order.id}?session_id={CHECKOUT_SESSION_ID}`
-      const cancelUrl = `${baseUrl}/venues/${venue.slug}/tpv?cancelled=true`
+
+      // `from` controls Stripe's success/cancel URL targets. When 'setup',
+      // we route back to the V2 onboarding wizard so a card purchase started
+      // inside the wizard doesn't dump the user at /venues/.../tpv/orders/...
+      // (which makes them feel they left onboarding). Defaults to 'tpv'.
+      const { successUrl, cancelUrl } = buildStripeCheckoutUrls({
+        orderId: order.id,
+        venueSlug: venue.slug,
+        from: req.body.from,
+      })
 
       const { redirectUrl } = await createCheckoutSessionForOrder({
         order: order as any,

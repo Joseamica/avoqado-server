@@ -151,3 +151,54 @@ export async function getHallOfFameHandler(req: Request, res: Response, next: Ne
     next(e)
   }
 }
+
+// ==========================================
+// WHATSAPP SHARE LINK (Phase 4 / Path B)
+// ==========================================
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/referrals/customers/:customerId/share-link
+ *
+ * Returns a wa.me deep link the customer (or a staff member sharing on
+ * their behalf) can tap to open WhatsApp with the referral share message
+ * pre-filled. Dynamic import keeps the WhatsApp helper out of the cold
+ * path for read-heavy endpoints that don't need it.
+ */
+export async function getShareLink(req: Request, res: Response, next: NextFunction) {
+  try {
+    const customer = await prisma.customer.findUnique({
+      where: { id: req.params.customerId },
+      select: {
+        referralCode: true,
+        venueId: true,
+        venue: { select: { name: true } },
+      },
+    })
+    if (!customer || customer.venueId !== req.params.venueId || !customer.referralCode) {
+      return res.status(404).json({ error: 'No code or program' })
+    }
+    const cfg = await prisma.referralProgramConfig.findUnique({
+      where: { venueId: customer.venueId },
+      select: { newCustomerDiscountPercent: true },
+    })
+    if (!cfg) {
+      return res.status(404).json({ error: 'No code or program' })
+    }
+    const { buildWelcomeShareDeepLink, buildWelcomeShareMessage } = await import(
+      '../../../services/referrals/referralWhatsApp.service'
+    )
+    const linkInput = {
+      venueName: customer.venue.name,
+      referralCode: customer.referralCode,
+      newCustomerDiscountPercent: Number(cfg.newCustomerDiscountPercent),
+    }
+    res.json({
+      whatsappShareUrl: buildWelcomeShareDeepLink(linkInput),
+      message: buildWelcomeShareMessage(linkInput),
+      code: customer.referralCode,
+      venueName: customer.venue.name,
+    })
+  } catch (e) {
+    next(e)
+  }
+}

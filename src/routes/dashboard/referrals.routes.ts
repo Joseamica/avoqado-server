@@ -181,4 +181,22 @@ router.get('/summary', checkPermission('referral:read'), referralsController.get
  */
 router.get('/hall-of-fame', checkPermission('referral:read'), referralsController.getHallOfFameHandler)
 
+// ===========================================
+// WHATSAPP SHARE LINK (Phase 4)
+// ===========================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/referrals/customers/{customerId}/share-link:
+ *   get:
+ *     tags: [Referrals]
+ *     summary: Get a wa.me deep link a customer can tap to share their referral code via WhatsApp
+ *     security: [{ bearerAuth: [] }]
+ */
+router.get(
+  '/customers/:customerId/share-link',
+  checkPermission('referral:read'),
+  referralsController.getShareLink,
+)
+
 export default router

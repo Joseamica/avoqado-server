@@ -26,6 +26,7 @@ jest.mock('@/utils/prismaClient', () => ({
     referralProgramConfig: { findUnique: jest.fn() },
     customer: { findFirst: jest.fn(), findUnique: jest.fn() },
     referral: { create: jest.fn(), update: jest.fn(), findUnique: jest.fn() },
+    staffVenue: { findFirst: jest.fn() },
     order: { count: jest.fn() },
     activityLog: { create: jest.fn() },
   },
@@ -34,7 +35,11 @@ jest.mock('@/utils/prismaClient', () => ({
 const mockedPrisma = prisma as any
 
 describe('referralCapture.service', () => {
-  beforeEach(() => jest.clearAllMocks())
+  beforeEach(() => {
+    jest.clearAllMocks()
+    // Default: the supplied staff id resolves directly as a StaffVenue id.
+    mockedPrisma.staffVenue.findFirst.mockResolvedValue({ id: 'sv_1' })
+  })
 
   describe('validateReferralCode', () => {
     const ctx = { venueId: 'venue_1', referralCode: 'TESTMF-JOSE2K7', newCustomerId: 'cust_new' }
@@ -109,6 +114,46 @@ describe('referralCapture.service', () => {
           capturedByStaffVenueId: 'sv_1',
           qualifyingOrderId: 'order_pending',
         }),
+      })
+    })
+
+    it('resolves a raw Staff.id into the StaffVenue.id (mobile clients send Staff.id) — regression for FK violation', async () => {
+      // Live-discovered bug: mobile apps persist Staff.id (userId), not the
+      // StaffVenue join-row id the FK requires. Passing Staff.id straight to
+      // the insert crashed capture with a 500 FK violation. The service now
+      // resolves it: first findFirst({id}) misses, then findFirst({staffId}) hits.
+      mockedPrisma.referralProgramConfig.findUnique.mockResolvedValue({ active: true, newCustomerDiscountPercent: 10 })
+      mockedPrisma.customer.findFirst.mockResolvedValue({ id: 'cust_ref', firstName: 'Jose', lastName: 'P' })
+      mockedPrisma.order.count.mockResolvedValue(0)
+      mockedPrisma.referral.create.mockResolvedValue({ id: 'ref_1', status: 'PENDING' })
+      mockedPrisma.staffVenue.findFirst
+        .mockResolvedValueOnce(null) // not a StaffVenue.id
+        .mockResolvedValueOnce({ id: 'sv_resolved' }) // but matches a Staff.id at this venue
+      await captureReferral({
+        venueId: 'venue_1',
+        referralCode: 'TESTMF-JOSE2K7',
+        newCustomerId: 'cust_new',
+        capturedByStaffVenueId: 'staff_raw_id',
+      })
+      expect(mockedPrisma.referral.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ capturedByStaffVenueId: 'sv_resolved' }),
+      })
+    })
+
+    it('falls back to null capturedByStaffVenueId when the staff id cannot be resolved (no FK crash)', async () => {
+      mockedPrisma.referralProgramConfig.findUnique.mockResolvedValue({ active: true, newCustomerDiscountPercent: 10 })
+      mockedPrisma.customer.findFirst.mockResolvedValue({ id: 'cust_ref', firstName: 'Jose', lastName: 'P' })
+      mockedPrisma.order.count.mockResolvedValue(0)
+      mockedPrisma.referral.create.mockResolvedValue({ id: 'ref_1', status: 'PENDING' })
+      mockedPrisma.staffVenue.findFirst.mockResolvedValue(null) // neither StaffVenue.id nor Staff.id
+      await captureReferral({
+        venueId: 'venue_1',
+        referralCode: 'TESTMF-JOSE2K7',
+        newCustomerId: 'cust_new',
+        capturedByStaffVenueId: 'totally_unknown_id',
+      })
+      expect(mockedPrisma.referral.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ capturedByStaffVenueId: null }),
       })
     })
 

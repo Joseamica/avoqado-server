@@ -192,4 +192,56 @@ export async function onOrderPaid(input: OnOrderPaidInput): Promise<void> {
       },
     },
   })
+
+  // Tier-up email — fire-and-forget. Wrapped in try/catch so a
+  // Resend / satori / resvg failure can never break the payment-paid
+  // event handler (we'd rather lose the email than lose the
+  // qualification + reward bundle that already landed in the DB).
+  try {
+    const fullReferrer = await prisma.customer.findUnique({
+      where: { id: referrer.id },
+      select: { email: true, firstName: true, lastName: true, marketingConsent: true },
+    })
+    if (fullReferrer?.email && fullReferrer.marketingConsent) {
+      const venue = await prisma.venue.findUnique({
+        where: { id: input.venueId },
+        select: { name: true },
+      })
+      if (venue) {
+        const tierLabel = { TIER_1: 'Nivel 1', TIER_2: 'Nivel 2', TIER_3: 'Nivel 3' }[newTier]
+        const rewardPercent = Number(bundle.discount.value)
+        const { generateTierUpCard } = await import('@/services/referrals/referralCard.service')
+        const { sendReferralTierUpEmail } = await import('@/services/email.service')
+        const cardPng = await generateTierUpCard({
+          customerName:
+            [fullReferrer.firstName, fullReferrer.lastName].filter(Boolean).join(' ') || 'Cliente',
+          venueName: venue.name,
+          tier: newTier,
+          tierLabel,
+          referralCount: referrer.referralCount,
+          rewardPercent,
+          couponCode: bundle.couponCode.code,
+          validDays: config.rewardCouponExpiryDays,
+        })
+        await sendReferralTierUpEmail({
+          to: fullReferrer.email,
+          customerName: fullReferrer.firstName ?? 'Cliente',
+          venueName: venue.name,
+          tier: newTier,
+          tierLabel,
+          referralCount: referrer.referralCount,
+          rewardPercent,
+          couponCode: bundle.couponCode.code,
+          validDays: config.rewardCouponExpiryDays,
+          cardPng,
+        })
+      }
+    }
+  } catch (err) {
+    console.error('[referral-tier-up-email] failed', {
+      customerId: referrer.id,
+      tier: newTier,
+      err,
+    })
+  }
 }

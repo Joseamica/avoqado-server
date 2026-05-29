@@ -643,9 +643,20 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       }
     })
 
-    // V2 wizard detection: if OWNER with no venues, check OnboardingProgress for wizardVersion
+    // Onboarding completion signal — authoritative and INDEPENDENT of venue count.
+    // The V2 wizard can now create a PROVISIONAL venue mid-onboarding (so Steps 8/9
+    // — payment providers + buy TPV — have a real venueId). That means "has venues"
+    // is no longer a reliable "onboarding done" proxy. The frontend routing must
+    // gate on this flag instead, otherwise a mid-onboarding OWNER with a provisional
+    // venue would be bounced into a half-built dashboard.
+    const primaryStaffOrgForOnboarding = staff.organizations.find(so => so.isPrimary) ?? staff.organizations[0]
+    const onboardingCompleted = primaryStaffOrgForOnboarding?.organization?.onboardingCompletedAt != null
+
+    // V2 wizard detection: resolve wizardVersion whenever onboarding is incomplete
+    // (not only when there are zero venues — a provisional venue would otherwise
+    // leave this null and the frontend would fall back to the deprecated /onboarding).
     let wizardVersion: number | null = null
-    if (highestRole === StaffRole.OWNER && enrichedVenues.length === 0) {
+    if (highestRole === StaffRole.OWNER && (enrichedVenues.length === 0 || !onboardingCompleted)) {
       const primaryOrgId = staff.organizations[0]?.organizationId
       if (primaryOrgId) {
         const progress = await prisma.onboardingProgress.findUnique({
@@ -668,6 +679,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       organizationId: staff.organizations[0]?.organizationId ?? null,
       role: highestRole, // Add explicit role field
       wizardVersion, // V2 onboarding wizard version (null = legacy/v1, 2 = new setup wizard)
+      onboardingCompleted, // Authoritative onboarding-done flag (independent of venue count)
       createdAt: staff.createdAt,
       lastLogin: staff.lastLoginAt,
       venues: enrichedVenues, // Use enriched venues with permissions

@@ -98,6 +98,99 @@ export function parseV2Step8(v2SetupData: unknown): V2Step8Data | null {
   }
 }
 
+export interface V2Step9Data {
+  tpvOrderId: string | null
+  skipped: boolean
+  lastUpdatedAt: string | null
+}
+
+/**
+ * Read the V2 wizard's step 9 (optional TPV purchase) sub-tree. Returns null
+ * when step 9 has never been saved, so callers can short-circuit.
+ *
+ * The wizard saves `onNext({ tpvPurchase: { ... } })`, which means the payload
+ * is stored nested as `step9.tpvPurchase`. We accept both shapes for the same
+ * forward-compat reason as step8: the nested form (current frontend) and a
+ * flat form (in case a future code path writes the fields directly under
+ * `step9`).
+ *
+ * Spec: docs/superpowers/specs/2026-05-29-onboarding-tpv-purchase-design.md
+ */
+export function parseV2Step9(v2SetupData: unknown): V2Step9Data | null {
+  if (!v2SetupData || typeof v2SetupData !== 'object') return null
+  const step9 = (v2SetupData as Record<string, any>).step9
+  if (!step9 || typeof step9 !== 'object') return null
+  const node = step9.tpvPurchase && typeof step9.tpvPurchase === 'object' ? step9.tpvPurchase : step9
+  return {
+    tpvOrderId: typeof node.tpvOrderId === 'string' ? node.tpvOrderId : null,
+    skipped: node.skipped === true,
+    lastUpdatedAt: typeof node.lastUpdatedAt === 'string' ? node.lastUpdatedAt : null,
+  }
+}
+
+export interface ResolvedTpvPurchase {
+  tpvOrderId: string | null
+  skipped: boolean
+}
+
+/**
+ * DB-backed hydration of step9 (TPV purchase) for the onboarding progress
+ * endpoint. Resolution order:
+ *
+ *   1. If onboarding progress doesn't exist → return nulls.
+ *   2. If step9 has a `tpvOrderId` → return it. The frontend fetches the
+ *      full order (with paymentStatus + fulfillmentStatus) via the existing
+ *      tpvOrderService.getOrder endpoint. Keeps this payload light and avoids
+ *      state denormalization that could drift while the user is in the wizard.
+ *   3. If step9.skipped === true → return nulls + skipped. Honor the user's
+ *      choice and DO NOT fall back to recent orders (they'd see View B for a
+ *      purchase they explicitly skipped, which is confusing).
+ *   4. Otherwise → fallback to the most-recent TerminalOrder for any venue in
+ *      this organization. Covers the "tab closed mid-Stripe, returned days
+ *      later" case where step9 was never saved but an order exists.
+ *
+ * Spec: docs/superpowers/specs/2026-05-29-onboarding-tpv-purchase-design.md
+ */
+export async function resolveTpvPurchaseForOnboarding(
+  organizationId: string,
+): Promise<ResolvedTpvPurchase> {
+  const progress = await prisma.onboardingProgress.findUnique({
+    where: { organizationId },
+  })
+  if (!progress) return { tpvOrderId: null, skipped: false }
+
+  const step9 = parseV2Step9(progress.v2SetupData)
+
+  if (step9?.tpvOrderId) {
+    return { tpvOrderId: step9.tpvOrderId, skipped: step9.skipped }
+  }
+
+  if (step9?.skipped) {
+    return { tpvOrderId: null, skipped: true }
+  }
+
+  // Fallback: most-recent order for the org's first venue. We pick the first
+  // venue by creation order so a multi-venue org doesn't surface an order
+  // from a branch the merchant didn't expect.
+  const venue = await prisma.venue.findFirst({
+    where: { organizationId },
+    select: { id: true },
+    orderBy: { createdAt: 'asc' },
+  })
+  if (!venue) return { tpvOrderId: null, skipped: false }
+
+  const recent = await prisma.terminalOrder.findFirst({
+    where: { venueId: venue.id },
+    select: { id: true },
+    orderBy: { createdAt: 'desc' },
+  })
+
+  return {
+    tpvOrderId: recent?.id ?? null,
+    skipped: false,
+  }
+}
+
 /**
  * Creates or retrieves onboarding progress for an organization
  *

@@ -85,6 +85,41 @@ export interface CaptureInput {
 }
 
 /**
+ * Resolve a client-supplied staff identifier into a valid `StaffVenue.id`
+ * for this venue, returning `null` when no match exists.
+ *
+ * WHY: the mobile clients (TPV, Android POS, iOS POS) persist a `Staff.id`
+ * (a.k.a. userId) in their secure storage, NOT the `StaffVenue` join-row id
+ * that the `Referral.capturedByStaffVenueId` FK requires. Passing a raw
+ * Staff.id (or anything else) straight to the insert violates the FK and
+ * crashes the capture with a 500. This helper makes capture tolerant of
+ * either id:
+ *   1. If the value already IS a StaffVenue.id for this venue → use it.
+ *   2. Else if it matches a Staff.id with a StaffVenue at this venue → map it.
+ *   3. Else → null (capture still succeeds; the audit link is simply absent).
+ */
+async function resolveStaffVenueId(venueId: string, candidate: string | null | undefined): Promise<string | null> {
+  if (!candidate) return null
+
+  // 1. Already a valid StaffVenue id at this venue?
+  const direct = await prisma.staffVenue.findFirst({
+    where: { id: candidate, venueId },
+    select: { id: true },
+  })
+  if (direct) return direct.id
+
+  // 2. A Staff id that has a StaffVenue at this venue?
+  const byStaff = await prisma.staffVenue.findFirst({
+    where: { staffId: candidate, venueId },
+    select: { id: true },
+  })
+  if (byStaff) return byStaff.id
+
+  // 3. Unknown identifier — don't crash the capture; just drop the link.
+  return null
+}
+
+/**
  * Create a PENDING Referral row after re-running validation. We don't
  * trust the caller to have called `validateReferralCode` first — this
  * function is the only consumer-safe entrypoint that persists state.
@@ -101,13 +136,14 @@ export async function captureReferral(input: CaptureInput): Promise<Referral> {
   if (!validation.valid) {
     throw new Error(validation.reason)
   }
+  const capturedByStaffVenueId = await resolveStaffVenueId(input.venueId, input.capturedByStaffVenueId)
   return prisma.referral.create({
     data: {
       venueId: input.venueId,
       referrerCustomerId: validation.referrer!.id,
       referredCustomerId: input.newCustomerId,
       status: 'PENDING',
-      capturedByStaffVenueId: input.capturedByStaffVenueId,
+      capturedByStaffVenueId,
       qualifyingOrderId: input.intendedOrderId,
     },
   })
@@ -141,13 +177,14 @@ export async function forceOverrideReferral(input: ForceOverrideInput): Promise<
   if (!referrer) throw new Error('CODE_NOT_FOUND')
   if (referrer.id === input.existingCustomerId) throw new Error('SELF_REFERRAL')
 
+  const capturedByStaffVenueId = await resolveStaffVenueId(input.venueId, input.capturedByStaffVenueId)
   const referral = await prisma.referral.create({
     data: {
       venueId: input.venueId,
       referrerCustomerId: referrer.id,
       referredCustomerId: input.existingCustomerId,
       status: 'PENDING',
-      capturedByStaffVenueId: input.capturedByStaffVenueId,
+      capturedByStaffVenueId,
       forcedOverride: true,
       overrideReason: input.reason,
     },

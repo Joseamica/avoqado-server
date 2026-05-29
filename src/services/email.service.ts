@@ -3726,3 +3726,199 @@ Servicios Tecnologicos Avo S.A. de C.V.`
 }
 
 export default new EmailService()
+
+// ===========================
+// Referral Program Emails
+// ===========================
+//
+// Two transactional emails for the customer referral program:
+//
+//   1. sendReferralWelcomeEmail — fires once when a Customer gets a
+//      referralCode for the first time. Includes a generated PNG card
+//      so the customer can save+share by screenshot, plus a WhatsApp
+//      deep link as the primary CTA.
+//   2. sendReferralTierUpEmail — fires when a Customer crosses a tier
+//      threshold (TIER_1/2/3). Surfaces the coupon code they just
+//      unlocked + a tier-up celebration card.
+//
+// Both functions follow the same fire-and-forget contract as the rest
+// of this file: they return `false` on any error so the caller can
+// keep moving without losing the parent operation (customer creation,
+// order qualification). Callers MUST wrap the call in try/catch as
+// well — defense in depth, since a thrown error from satori/resvg
+// upstream of `await resend.emails.send(...)` would still propagate.
+//
+// PNG cards are attached as binary attachments referenced via CID
+// (`<img src="cid:tu-codigo-referido.png">`). Most modern clients
+// (Gmail web/app, Apple Mail, Outlook 365, Resend's preview) render
+// these correctly. Older Outlook desktops fall back to showing the
+// attachment as a download — the textual code + WhatsApp CTA still
+// work.
+
+/**
+ * Locally-scoped HTML escape so we don't depend on the inner
+ * `escapeHtml` declared inside `sendNewVenueOnboardingDigest`.
+ */
+function escapeHtmlForReferralEmail(value: string | null | undefined): string {
+  if (!value) return ''
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+export interface SendReferralWelcomeEmailInput {
+  to: string
+  customerName: string
+  venueName: string
+  referralCode: string
+  newCustomerDiscountPercent: number
+  /** Pre-generated welcome PNG (1080x1080). */
+  cardPng: Buffer
+}
+
+export async function sendReferralWelcomeEmail(input: SendReferralWelcomeEmailInput): Promise<boolean> {
+  if (!resend) {
+    logger.warn('[referral-email] Resend not configured — skipping welcome email')
+    return false
+  }
+  try {
+    const result = await resend.emails.send({
+      from: FROM_EMAIL,
+      to: input.to,
+      subject: `¡Bienvenida a ${input.venueName}! Tu código de referido está listo`,
+      html: buildWelcomeReferralHtml(input),
+      attachments: [
+        {
+          filename: 'tu-codigo-referido.png',
+          content: input.cardPng,
+        },
+      ],
+    })
+
+    if (result.error) {
+      logger.error('[referral-email] Failed to send welcome email', { to: input.to, err: result.error })
+      return false
+    }
+
+    logger.info('[referral-email] Welcome email sent', { to: input.to, resendId: result?.data?.id })
+    return true
+  } catch (err) {
+    logger.error('[referral-email] Failed to send welcome email', { to: input.to, err })
+    return false
+  }
+}
+
+function buildWelcomeReferralHtml(input: SendReferralWelcomeEmailInput): string {
+  // Pre-compose the WhatsApp share message so the CTA can pre-fill it.
+  // wa.me reads the `text` query param; URL-encoded UTF-8 ensures
+  // accents survive across clients.
+  const waMessage = encodeURIComponent(
+    `¡Te recomiendo ${input.venueName}! Usa mi código *${input.referralCode}* y te dan ${input.newCustomerDiscountPercent}% en tu primera compra.`,
+  )
+  return `<!doctype html>
+<html>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:40px 20px;">
+    <tr><td align="center">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:12px;overflow:hidden;max-width:600px;">
+        <tr><td style="padding:40px 40px 0 40px;text-align:center;">
+          <h1 style="margin:0 0 10px 0;font-size:28px;color:#10b981;">¡Bienvenida, ${escapeHtmlForReferralEmail(input.customerName)}!</h1>
+          <p style="margin:0 0 30px 0;font-size:16px;line-height:1.5;color:#555;">Ya eres parte de ${escapeHtmlForReferralEmail(input.venueName)}. Aquí tienes tu código de referido para compartir con amigas y familia.</p>
+        </td></tr>
+        <tr><td align="center" style="padding:0 40px;">
+          <img src="cid:tu-codigo-referido.png" alt="Tu código de referido" width="320" style="display:block;width:320px;max-width:320px;height:auto;border-radius:12px;" />
+        </td></tr>
+        <tr><td style="padding:30px 40px 0 40px;text-align:center;">
+          <div style="font-size:14px;color:#888;margin-bottom:8px;">Tu código</div>
+          <div style="font-family:monospace;font-size:24px;font-weight:bold;letter-spacing:2px;background:#f0fdf4;padding:16px;border-radius:8px;color:#10b981;">${escapeHtmlForReferralEmail(input.referralCode)}</div>
+        </td></tr>
+        <tr><td style="padding:30px 40px 40px 40px;text-align:center;">
+          <a href="https://wa.me/?text=${waMessage}" style="display:inline-block;background:#25d366;color:#fff;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:16px;">Compartir por WhatsApp</a>
+        </td></tr>
+        <tr><td style="padding:0 40px 40px 40px;">
+          <p style="margin:0;font-size:14px;line-height:1.5;color:#888;text-align:center;">Cuando una persona use tu código en su primera compra, recibirá ${input.newCustomerDiscountPercent}% de descuento y tú acumulas un referido hacia tus premios.</p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`
+}
+
+export interface SendReferralTierUpEmailInput {
+  to: string
+  customerName: string
+  venueName: string
+  tier: 'TIER_1' | 'TIER_2' | 'TIER_3'
+  tierLabel: string
+  referralCount: number
+  rewardPercent: number
+  couponCode: string
+  validDays: number
+  /** Pre-generated tier-up PNG (1080x1080). */
+  cardPng: Buffer
+}
+
+export async function sendReferralTierUpEmail(input: SendReferralTierUpEmailInput): Promise<boolean> {
+  if (!resend) {
+    logger.warn('[referral-email] Resend not configured — skipping tier-up email')
+    return false
+  }
+  try {
+    const result = await resend.emails.send({
+      from: FROM_EMAIL,
+      to: input.to,
+      subject: `¡Lograste ${input.tierLabel} en ${input.venueName}! Aquí está tu premio`,
+      html: buildTierUpReferralHtml(input),
+      attachments: [
+        {
+          filename: 'premio-referido.png',
+          content: input.cardPng,
+        },
+      ],
+    })
+
+    if (result.error) {
+      logger.error('[referral-email] Failed to send tier-up email', { to: input.to, err: result.error })
+      return false
+    }
+
+    logger.info('[referral-email] Tier-up email sent', { to: input.to, tier: input.tier, resendId: result?.data?.id })
+    return true
+  } catch (err) {
+    logger.error('[referral-email] Failed to send tier-up email', { to: input.to, err })
+    return false
+  }
+}
+
+function buildTierUpReferralHtml(input: SendReferralTierUpEmailInput): string {
+  return `<!doctype html>
+<html>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:40px 20px;">
+    <tr><td align="center">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:12px;overflow:hidden;max-width:600px;">
+        <tr><td style="padding:40px 40px 0 40px;text-align:center;">
+          <h1 style="margin:0 0 10px 0;font-size:28px;color:#10b981;">¡Lograste ${escapeHtmlForReferralEmail(input.tierLabel)}!</h1>
+          <p style="margin:0 0 30px 0;font-size:16px;line-height:1.5;color:#555;">${escapeHtmlForReferralEmail(input.customerName)}, refiriste a ${input.referralCount} personas a ${escapeHtmlForReferralEmail(input.venueName)}. Aquí tu premio.</p>
+        </td></tr>
+        <tr><td align="center" style="padding:0 40px;">
+          <img src="cid:premio-referido.png" alt="Tu premio de tier" width="320" style="display:block;width:320px;max-width:320px;height:auto;border-radius:12px;" />
+        </td></tr>
+        <tr><td style="padding:30px 40px 0 40px;text-align:center;">
+          <div style="font-size:14px;color:#888;margin-bottom:8px;">Tu cupón</div>
+          <div style="font-family:monospace;font-size:22px;font-weight:bold;letter-spacing:2px;background:#f0fdf4;padding:16px;border-radius:8px;color:#10b981;">${escapeHtmlForReferralEmail(input.couponCode)}</div>
+          <p style="margin:16px 0 0 0;font-size:14px;color:#888;">${input.rewardPercent}% de descuento · válido ${input.validDays} días</p>
+        </td></tr>
+        <tr><td style="padding:30px 40px 40px 40px;">
+          <p style="margin:0;font-size:14px;line-height:1.5;color:#888;text-align:center;">Menciónalo en tu próxima visita o úsalo en tu próxima reserva. ¡Gracias por confiar en nosotros y por traer a tus amigas!</p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`
+}

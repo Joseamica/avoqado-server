@@ -9,6 +9,7 @@ import { Request, Response, NextFunction } from 'express'
 import { EntityType, VenueType } from '@prisma/client'
 import * as onboardingProgressService from '../services/onboarding/onboardingProgress.service'
 import * as venueCreationService from '../services/onboarding/venueCreation.service'
+import { ensureVenueForOnboarding } from '../services/onboarding/ensureVenue.service'
 import * as signupService from '../services/onboarding/signup.service'
 import * as testPaymentLinkService from '../services/onboarding/testPaymentLink.service'
 import { createOnboardingSetupIntent } from '../services/stripe.service'
@@ -197,6 +198,34 @@ export async function getOnboardingProgress(req: Request, res: Response, next: N
     const completionPercentage = await onboardingProgressService.getOnboardingCompletionPercentage(organizationId)
     const paymentProviders = onboardingProgressService.parseV2Step8(progress.v2SetupData)
 
+    // Ensure a "provisional" venue exists so Steps 8 (payment providers) and
+    // 9 (TPV purchase) have a real venueId to call APIs against. Idempotent:
+    // returns the existing venue if any, otherwise creates one with
+    // status=ONBOARDING using the wizard data captured so far. Returns null
+    // when the user hasn't filled enough data yet (e.g. pre-businessName).
+    // Spec: docs/superpowers/specs/2026-05-29-onboarding-tpv-purchase-design.md
+    const authContext = (req as any).authContext
+    const staffId = authContext?.userId
+    const venue = staffId
+      ? await ensureVenueForOnboarding(organizationId, staffId).catch(err => {
+          // Never let venue-ensure break the progress endpoint — if we can't
+          // create one, the wizard just won't show Steps 8/9. Log and continue.
+          logger.warn('ensureVenueForOnboarding failed; omitting venueId', {
+            organizationId,
+            error: err instanceof Error ? err.message : String(err),
+          })
+          return null
+        })
+      : null
+
+    // Optional Step 9 (TPV purchase) — gated by env flag. When the flag is
+    // off the field is omitted entirely so the frontend behaves as if the step
+    // doesn't exist. Spec: 2026-05-29-onboarding-tpv-purchase-design.md.
+    const tpvPurchase =
+      process.env.ENABLE_ONBOARDING_TPV_PURCHASE === 'true'
+        ? await onboardingProgressService.resolveTpvPurchaseForOnboarding(organizationId)
+        : undefined
+
     res.status(200).json({
       progress: {
         id: progress.id,
@@ -216,6 +245,11 @@ export async function getOnboardingProgress(req: Request, res: Response, next: N
         wizardVersion: progress.wizardVersion,
         v2SetupData: progress.v2SetupData,
         paymentProviders,
+        ...(tpvPurchase ? { tpvPurchase } : {}),
+        // Provisional venue ID/slug — set when ensureVenueForOnboarding
+        // succeeded. PaymentProvidersStep + BuyTpvStep need this to invoke
+        // venue-scoped backend APIs before the wizard finishes.
+        ...(venue ? { venueId: venue.id, venueSlug: venue.slug } : {}),
         // Don't expose step8_paymentInfo for security (contains CLABE)
       },
     })
@@ -952,17 +986,40 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
       selectedFeatures: [],
     }
 
-    // Create venue — if this fails, release the lock
+    // Idempotency: a "provisional" venue may already exist if the user
+    // reached Steps 8 or 9 (ensureVenueForOnboarding created one). In that
+    // case skip the create call entirely and just transition status —
+    // creating a SECOND venue here would surface as a duplicate to the user.
     let result: Awaited<ReturnType<typeof venueCreationService.createVenueFromOnboarding>>
-    try {
-      result = await venueCreationService.createVenueFromOnboarding(venueInput)
-    } catch (venueError) {
-      logger.error(`❌ V2 Venue creation failed for organization ${organizationId} - rolling back lock`, venueError)
-      await prisma.onboardingProgress.update({
-        where: { organizationId },
-        data: { completedAt: null },
+    const existingVenue = await prisma.venue.findFirst({
+      where: { organizationId },
+      select: { id: true, slug: true, status: true },
+      orderBy: { createdAt: 'asc' },
+    })
+
+    if (existingVenue) {
+      logger.info(`V2 completion: reusing provisional venue ${existingVenue.id} (was ${existingVenue.status})`)
+      // Transition out of ONBOARDING. ACTIVE if no KYC requirement was uploaded
+      // mid-flow; otherwise PENDING_ACTIVATION (matches createVenueFromOnboarding
+      // logic). For V2 today we leave it ONBOARDING-ish via ACTIVE since KYC is
+      // an out-of-band upload.
+      const nextStatus = existingVenue.status === 'ONBOARDING' ? 'ACTIVE' : existingVenue.status
+      const updated = await prisma.venue.update({
+        where: { id: existingVenue.id },
+        data: { status: nextStatus },
       })
-      throw venueError
+      result = { venue: updated, kycStatus: 'NOT_SUBMITTED', emailSent: false } as any
+    } else {
+      try {
+        result = await venueCreationService.createVenueFromOnboarding(venueInput)
+      } catch (venueError) {
+        logger.error(`❌ V2 Venue creation failed for organization ${organizationId} - rolling back lock`, venueError)
+        await prisma.onboardingProgress.update({
+          where: { organizationId },
+          data: { completedAt: null },
+        })
+        throw venueError
+      }
     }
 
     // Persist identity info (RFC, legalName, commercialName) from onboarding steps

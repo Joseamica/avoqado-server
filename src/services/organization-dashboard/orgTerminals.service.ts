@@ -246,6 +246,13 @@ export async function sendCommandForOrg(
   command: OrgAllowedCommand,
   staffId: string,
   staffName?: string,
+  /**
+   * Optional target app version (AppUpdate.versionCode) for REQUEST_UPDATE.
+   * When set, the TPV is asked to update to this specific version and shows
+   * the operator a confirmation dialog. Omitted → "latest" (current TPV
+   * behavior). Ignored by the executor for any other command type.
+   */
+  versionCode?: number,
 ) {
   const terminal = await validateTerminalInOrg(terminalId, orgId)
 
@@ -253,7 +260,7 @@ export async function sendCommandForOrg(
     throw new BadRequestError(`Comando no permitido a nivel organización: ${command}`)
   }
 
-  logger.info('[OrgTerminals] Sending command', { orgId, terminalId, command, staffId })
+  logger.info('[OrgTerminals] Sending command', { orgId, terminalId, command, staffId, versionCode })
 
   const result = await tpvCommandQueueService.queueCommand({
     terminalId,
@@ -262,6 +269,9 @@ export async function sendCommandForOrg(
     payload: {
       source: 'ORG_DASHBOARD',
       orgId,
+      // Carried only for REQUEST_UPDATE; the TPV reads payload.versionCode to
+      // target a specific version (older TPV builds ignore it → install latest).
+      ...(typeof versionCode === 'number' ? { versionCode } : {}),
     },
     priority: 'NORMAL',
     requestedBy: staffId,
@@ -390,6 +400,49 @@ export async function bulkCommandForOrg(
     failed: results.length - succeeded,
     results,
   }
+}
+
+// ---------------------------------------------------------------------------
+// App versions (for the "Actualizar TPV" dropdown in the org terminals drawer)
+// ---------------------------------------------------------------------------
+
+export type AppEnvironmentParam = 'SANDBOX' | 'PRODUCTION'
+
+export interface OrgAppVersion {
+  versionName: string
+  versionCode: number
+  environment: AppEnvironmentParam
+  releaseNotes: string | null
+  /** Highest versionCode for the environment — the natural default to push. */
+  isLatest: boolean
+  createdAt: Date
+}
+
+/**
+ * List active TPV app versions for a given environment, newest first, so an
+ * OWNER can pick which version to push from the org terminals drawer.
+ *
+ * Reads the self-managed `AppUpdate` catalog (versions uploaded by SUPERADMIN
+ * via /superadmin/app-updates). Not org-scoped data — versions are global —
+ * but the route gates access via checkOrgAccess like the other org terminal
+ * endpoints, so only org members reach it. Empty array if no versions exist
+ * for the environment (e.g. the org runs Blumon-signed builds, not self-managed).
+ */
+export async function listAppVersionsForOrg(environment: AppEnvironmentParam): Promise<OrgAppVersion[]> {
+  const versions = await prisma.appUpdate.findMany({
+    where: { environment, isActive: true },
+    orderBy: { versionCode: 'desc' },
+    select: { versionName: true, versionCode: true, environment: true, releaseNotes: true, createdAt: true },
+  })
+
+  return versions.map((v, idx) => ({
+    versionName: v.versionName,
+    versionCode: v.versionCode,
+    environment: v.environment as AppEnvironmentParam,
+    releaseNotes: v.releaseNotes,
+    isLatest: idx === 0, // list is desc by versionCode, so first row is newest
+    createdAt: v.createdAt,
+  }))
 }
 
 /**

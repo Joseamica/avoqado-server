@@ -64,6 +64,13 @@ export interface OrgSaleListRow {
   saleType: 'LINEA_NUEVA' | 'PORTABILIDAD' | 'ESIM'
   /** Venue that originally registered/received the SIM into inventory (e.g. "Virtual"). Null for legacy items. */
   registeredFromVenue: { id: string; name: string; slug: string } | null
+  /**
+   * TPV terminal that captured the verification, resolved from
+   * `SaleVerification.deviceId` (which equals `Terminal.serialNumber`, e.g.
+   * "AVQD-2841548417"). Lets the dashboard link a sale to its terminal.
+   * Null when the device serial doesn't match a Terminal in the org.
+   */
+  terminal: { id: string; name: string; serialNumber: string } | null
 }
 
 export interface OrgSaleListResponse {
@@ -204,6 +211,24 @@ export async function listOrgSaleVerifications(orgId: string, filters: OrgSaleLi
     prisma.payment.count({ where: paymentWhere }),
   ])
 
+  // Resolve TPV terminals for this page in ONE query.
+  // SaleVerification.deviceId stores the Terminal.serialNumber (e.g.
+  // "AVQD-2841548417"), so we batch-match the page's device serials against
+  // terminals in this org. Map keyed by serialNumber for O(1) lookup per row.
+  const deviceSerials = Array.from(
+    new Set(payments.map(p => p.saleVerification?.deviceId).filter((s): s is string => typeof s === 'string' && s.length > 0)),
+  )
+  const terminalBySerial = new Map<string, { id: string; name: string; serialNumber: string }>()
+  if (deviceSerials.length > 0) {
+    const terminals = await prisma.terminal.findMany({
+      where: { serialNumber: { in: deviceSerials }, venue: { organizationId: orgId } },
+      select: { id: true, name: true, serialNumber: true },
+    })
+    for (const t of terminals) {
+      if (t.serialNumber) terminalBySerial.set(t.serialNumber, { id: t.id, name: t.name, serialNumber: t.serialNumber })
+    }
+  }
+
   const rows: OrgSaleListRow[] = payments.map(p => {
     const v = p.saleVerification
     const firstSerialized = p.order?.items?.find(oi => oi.serializedItem)?.serializedItem ?? null
@@ -245,6 +270,7 @@ export async function listOrgSaleVerifications(orgId: string, filters: OrgSaleLi
       category,
       saleType: deriveSaleType(isPort, category?.name ?? null),
       registeredFromVenue: firstSerialized?.registeredFromVenue ?? null,
+      terminal: v?.deviceId ? (terminalBySerial.get(v.deviceId) ?? null) : null,
     }
   })
 

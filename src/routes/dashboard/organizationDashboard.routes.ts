@@ -655,6 +655,25 @@ router.get('/:orgId/terminals', authenticateTokenMiddleware, checkOrgAccess, asy
 // ==========================================
 
 /**
+ * GET /dashboard/organizations/:orgId/terminals/app-versions?environment=PRODUCTION
+ * Lists active TPV app versions for the given environment (newest first) so an
+ * OWNER can pick a version to push via the "Actualizar" action in the drawer.
+ *
+ * MUST be declared before the '/:terminalId' route below, otherwise Express
+ * matches "app-versions" as a terminalId.
+ */
+router.get('/:orgId/terminals/app-versions', authenticateTokenMiddleware, checkOrgAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const raw = typeof req.query.environment === 'string' ? req.query.environment.toUpperCase() : 'PRODUCTION'
+    const environment: orgTerminalsService.AppEnvironmentParam = raw === 'SANDBOX' ? 'SANDBOX' : 'PRODUCTION'
+    const versions = await orgTerminalsService.listAppVersionsForOrg(environment)
+    res.json({ success: true, data: versions })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
  * GET /dashboard/organizations/:orgId/terminals/:terminalId
  * Returns: Single terminal detail
  */
@@ -822,7 +841,7 @@ router.post(
     try {
       const { orgId, terminalId } = req.params
       const { userId } = (req as any).authContext
-      const { command } = req.body
+      const { command, versionCode } = req.body
 
       // Get staff name for audit trail
       const staff = await (
@@ -833,7 +852,7 @@ router.post(
       })
       const staffName = staff ? `${staff.firstName} ${staff.lastName}`.trim() : undefined
 
-      const result = await orgTerminalsService.sendCommandForOrg(orgId, terminalId, command, userId, staffName)
+      const result = await orgTerminalsService.sendCommandForOrg(orgId, terminalId, command, userId, staffName, versionCode)
 
       res.json({
         success: true,

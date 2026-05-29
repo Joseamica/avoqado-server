@@ -113,6 +113,11 @@ export const SendOrgCommandSchema = z.object({
         message: `Comando no permitido. Comandos válidos: ${OrgAllowedCommands.join(', ')}`,
       }),
     }),
+    // Target app version for REQUEST_UPDATE. When provided, the TPV is asked to
+    // update to this specific AppUpdate.versionCode (it shows the operator a
+    // confirmation dialog). Optional — omitted means "latest" (current TPV
+    // behavior). Ignored for non-update commands.
+    versionCode: z.number({ invalid_type_error: 'versionCode debe ser numérico' }).int().positive().optional(),
   }),
   params: OrgTerminalParams,
 })

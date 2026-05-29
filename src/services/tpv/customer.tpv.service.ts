@@ -373,16 +373,19 @@ export async function quickCreateCustomer(venueId: string, data: QuickCreateCust
     customerId: customer.id,
   })
 
-  // REFERRAL HOOK: auto-generate referralCode if program is active for this venue
+  // REFERRAL HOOK: auto-generate referralCode if program is active
+  // for this venue, then fire the welcome email when the customer is
+  // both contactable (email present) and opted in. Wrapped in
+  // try/catch to keep referral failures from breaking TPV flows.
   try {
     const cfg = await prisma.referralProgramConfig.findUnique({
       where: { venueId },
-      select: { active: true, codePrefix: true },
+      select: { active: true, codePrefix: true, newCustomerDiscountPercent: true },
     })
     if (cfg?.active && !customer.referralCode) {
       const venue = await prisma.venue.findUnique({
         where: { id: venueId },
-        select: { slug: true },
+        select: { slug: true, name: true },
       })
       const { generateReferralCode } = await import('@/services/referrals/referralCode.service')
       const code = await generateReferralCode({
@@ -391,6 +394,38 @@ export async function quickCreateCustomer(venueId: string, data: QuickCreateCust
         customerName: [customer.firstName, customer.lastName].filter(Boolean).join(' '),
       })
       await prisma.customer.update({ where: { id: customer.id }, data: { referralCode: code } })
+
+      // TPV quick-add does not capture marketingConsent, so we fetch
+      // it explicitly. Default to false — if a customer hasn't opted
+      // in via dashboard, no email goes out.
+      if (customer.email && venue) {
+        try {
+          const flags = await prisma.customer.findUnique({
+            where: { id: customer.id },
+            select: { marketingConsent: true },
+          })
+          if (flags?.marketingConsent) {
+            const { generateWelcomeCard } = await import('@/services/referrals/referralCard.service')
+            const { sendReferralWelcomeEmail } = await import('@/services/email.service')
+            const cardPng = await generateWelcomeCard({
+              customerName: [customer.firstName, customer.lastName].filter(Boolean).join(' ') || 'Cliente',
+              venueName: venue.name,
+              referralCode: code,
+              newCustomerDiscountPercent: Number(cfg.newCustomerDiscountPercent),
+            })
+            await sendReferralWelcomeEmail({
+              to: customer.email,
+              customerName: customer.firstName ?? 'Cliente',
+              venueName: venue.name,
+              referralCode: code,
+              newCustomerDiscountPercent: Number(cfg.newCustomerDiscountPercent),
+              cardPng,
+            })
+          }
+        } catch (emailErr) {
+          console.error('[referral-welcome-email] failed', { customerId: customer.id, err: emailErr })
+        }
+      }
     }
   } catch (err) {
     // Don't fail customer creation if referral hook fails — just log

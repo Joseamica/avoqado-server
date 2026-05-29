@@ -50,12 +50,22 @@ module.exports = {
       transform: {
         '^.+\\.(ts|tsx|js|jsx|mjs)$': 'ts-jest',
       },
-      transformIgnorePatterns: ['node_modules/(?!(@scure|@noble|otplib|@otplib))'],
+      // satori|satori-html|ultrahtml are pure ESM and ship `import`
+      // syntax in their dist. Without transforming them, ts-jest
+      // chokes on the import statement at runtime.
+      transformIgnorePatterns: ['node_modules/(?!(@scure|@noble|otplib|@otplib|satori|satori-html|ultrahtml))'],
       setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/setup.ts'],
       moduleNameMapper: {
         '^@/(.*)$': '<rootDir>/src/$1',
         '^@tests/(.*)$': '<rootDir>/tests/$1',
         '^pdf-to-img$': '<rootDir>/tests/__mocks__/pdf-to-img.ts',
+        // ultrahtml uses an `exports` map with only the `import`
+        // condition, which the default jest resolver can't satisfy.
+        // Point both the root and the subpath exports directly at
+        // their bundled ESM files (then transformed by ts-jest via
+        // the allowlist above).
+        '^ultrahtml$': '<rootDir>/node_modules/ultrahtml/dist/index.js',
+        '^ultrahtml/transformers/(.*)$': '<rootDir>/node_modules/ultrahtml/dist/transformers/$1.js',
       },
     },
     {
@@ -64,12 +74,19 @@ module.exports = {
       transform: {
         '^.+\\.(ts|tsx|js|jsx|mjs)$': 'ts-jest',
       },
-      transformIgnorePatterns: ['node_modules/(?!(@scure|@noble|otplib|@otplib))'],
+      transformIgnorePatterns: ['node_modules/(?!(@scure|@noble|otplib|@otplib|satori|satori-html|ultrahtml))'],
       setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/setup.ts'],
       moduleNameMapper: {
         '^@/(.*)$': '<rootDir>/src/$1',
         '^@tests/(.*)$': '<rootDir>/tests/$1',
         '^pdf-to-img$': '<rootDir>/tests/__mocks__/pdf-to-img.ts',
+        // ultrahtml uses an `exports` map with only the `import`
+        // condition, which the default jest resolver can't satisfy.
+        // Point both the root and the subpath exports directly at
+        // their bundled ESM files (then transformed by ts-jest via
+        // the allowlist above).
+        '^ultrahtml$': '<rootDir>/node_modules/ultrahtml/dist/index.js',
+        '^ultrahtml/transformers/(.*)$': '<rootDir>/node_modules/ultrahtml/dist/transformers/$1.js',
       },
     },
     {
@@ -78,12 +95,19 @@ module.exports = {
       transform: {
         '^.+\\.(ts|tsx|js|jsx|mjs)$': 'ts-jest',
       },
-      transformIgnorePatterns: ['node_modules/(?!(@scure|@noble|otplib|@otplib))'],
+      transformIgnorePatterns: ['node_modules/(?!(@scure|@noble|otplib|@otplib|satori|satori-html|ultrahtml))'],
       setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/setup.ts'],
       moduleNameMapper: {
         '^@/(.*)$': '<rootDir>/src/$1',
         '^@tests/(.*)$': '<rootDir>/tests/$1',
         '^pdf-to-img$': '<rootDir>/tests/__mocks__/pdf-to-img.ts',
+        // ultrahtml uses an `exports` map with only the `import`
+        // condition, which the default jest resolver can't satisfy.
+        // Point both the root and the subpath exports directly at
+        // their bundled ESM files (then transformed by ts-jest via
+        // the allowlist above).
+        '^ultrahtml$': '<rootDir>/node_modules/ultrahtml/dist/index.js',
+        '^ultrahtml/transformers/(.*)$': '<rootDir>/node_modules/ultrahtml/dist/transformers/$1.js',
       },
     },
     {
@@ -92,12 +116,19 @@ module.exports = {
       transform: {
         '^.+\\.(ts|tsx|js|jsx|mjs)$': 'ts-jest',
       },
-      transformIgnorePatterns: ['node_modules/(?!(@scure|@noble|otplib|@otplib))'],
+      transformIgnorePatterns: ['node_modules/(?!(@scure|@noble|otplib|@otplib|satori|satori-html|ultrahtml))'],
       setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/integration-setup.ts'],
       moduleNameMapper: {
         '^@/(.*)$': '<rootDir>/src/$1',
         '^@tests/(.*)$': '<rootDir>/tests/$1',
         '^pdf-to-img$': '<rootDir>/tests/__mocks__/pdf-to-img.ts',
+        // ultrahtml uses an `exports` map with only the `import`
+        // condition, which the default jest resolver can't satisfy.
+        // Point both the root and the subpath exports directly at
+        // their bundled ESM files (then transformed by ts-jest via
+        // the allowlist above).
+        '^ultrahtml$': '<rootDir>/node_modules/ultrahtml/dist/index.js',
+        '^ultrahtml/transformers/(.*)$': '<rootDir>/node_modules/ultrahtml/dist/transformers/$1.js',
       },
     },
   ],
