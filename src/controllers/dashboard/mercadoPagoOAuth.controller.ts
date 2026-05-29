@@ -54,13 +54,18 @@ export async function initiate(req: Request, res: Response) {
     return res.status(err.statusCode || 401).json({ success: false, error: err.message })
   }
 
+  // When the dashboard's V2 setup wizard kicks off this flow, it appends
+  // `?from=wizard` so the callback can redirect back to #step-7 instead of
+  // the legacy `/integrations/mercadopago` page. Absence = legacy behavior.
+  const fromWizard = (req.query.from as string | undefined) === 'wizard'
   const state = oauthService.signState({
     intent: 'connect_merchant',
     ecommerceMerchantId,
     venueId,
     staffId,
+    ...(fromWizard ? { returnTo: 'wizard' as const } : {}),
   })
-  logger.info('[MP OAuth] initiate', { venueId, ecommerceMerchantId, staffId })
+  logger.info('[MP OAuth] initiate', { venueId, ecommerceMerchantId, staffId, fromWizard })
   return res.redirect(oauthService.buildAuthUrl(state))
 }
 
