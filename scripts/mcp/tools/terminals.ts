@@ -1,6 +1,8 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { prisma, text } from '../context'
+import { resolveActor, confirmGuard } from '../writes'
+import { updateTerminal } from '@/services/dashboard/terminals.superadmin.service'
 
 export interface TerminalInput {
   name: string
@@ -66,6 +68,48 @@ export function registerTerminalTools(server: McpServer) {
       }))
       const flagged = reports.filter(r => r.flags.length > 0)
       return text({ count: reports.length, flaggedCount: flagged.length, terminals: reports })
+    },
+  )
+
+  server.tool(
+    'move_terminal',
+    "Move a terminal to a different venue. Wraps the safe service: it validates the target venue and CLEARS the terminal's assigned merchants (cross-tenant routing safety). The TPV picks up the new venue on its next config poll (~30s). PREVIEW unless confirm:true.",
+    {
+      terminalId: z.string().describe('Terminal id'),
+      targetVenueId: z.string().describe('Destination venue id (use list_venues)'),
+      performedBy: z.string().optional().describe('Acting staff id; defaults to MCP_ADMIN_STAFF_ID'),
+      confirm: z.boolean().default(false).describe('false = preview only; true = execute'),
+    },
+    async ({ terminalId, targetVenueId, performedBy, confirm }) => {
+      const actor = resolveActor(performedBy)
+      const terminal = await prisma.terminal.findUnique({
+        where: { id: terminalId },
+        select: {
+          id: true,
+          name: true,
+          serialNumber: true,
+          venueId: true,
+          assignedMerchantIds: true,
+          venue: { select: { name: true } },
+        },
+      })
+      if (!terminal) return text({ error: `Terminal ${terminalId} not found` })
+      if (terminal.venueId === targetVenueId) return text({ error: 'Terminal is already in that venue' })
+      const target = await prisma.venue.findUnique({ where: { id: targetVenueId }, select: { name: true } })
+      if (!target) return text({ error: `Target venue ${targetVenueId} not found` })
+
+      return confirmGuard({
+        tool: 'move_terminal',
+        actor,
+        confirm,
+        args: { terminalId, targetVenueId },
+        preview: {
+          terminal: `${terminal.name} (${terminal.serialNumber ?? 'no serial'})`,
+          venueChange: `${terminal.venue?.name} → ${target.name}`,
+          willClearAssignedMerchants: terminal.assignedMerchantIds?.length ? terminal.assignedMerchantIds : 'none',
+        },
+        execute: () => updateTerminal(terminalId, { venueId: targetVenueId }, { staffId: actor }),
+      })
     },
   )
 }
