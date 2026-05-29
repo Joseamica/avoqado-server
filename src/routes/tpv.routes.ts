@@ -5874,9 +5874,13 @@ router.post(
           serialNumbers,
         })
         logger.info(`📦 [SERIALIZED INV] Approval request created`, {
-          venueId, organizationId: venue!.organizationId, requestId: reqResult.requestId,
-          submitted: reqResult.submitted, duplicates: reqResult.duplicates.length,
-          invalid: reqResult.invalid.length, correlationId: req.correlationId,
+          venueId,
+          organizationId: venue!.organizationId,
+          requestId: reqResult.requestId,
+          submitted: reqResult.submitted,
+          duplicates: reqResult.duplicates.length,
+          invalid: reqResult.invalid.length,
+          correlationId: req.correlationId,
         })
         return res.status(200).json({
           success: true,

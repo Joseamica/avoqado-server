@@ -3193,10 +3193,10 @@ export async function sellSerializedItem(
       // alta → aprobación → custodia (spec §3.3). Solo aplica a la rama de venta
       // de items NO registrados; los items ya registrados siguen vendiéndose normal.
       const sellVenue = await prisma.venue.findUnique({
-        where: { id: venueId }, select: { organizationId: true },
+        where: { id: venueId },
+        select: { organizationId: true },
       })
-      if (sellVenue?.organizationId &&
-          (await simRegistrationService.isApprovalModeEnabled(sellVenue.organizationId))) {
+      if (sellVenue?.organizationId && (await simRegistrationService.isApprovalModeEnabled(sellVenue.organizationId))) {
         throw new ValidationError('Esta SIM no está dada de alta. Debe aprobarse antes de venderse.')
       }
 

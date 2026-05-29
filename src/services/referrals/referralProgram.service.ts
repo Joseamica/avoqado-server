@@ -180,7 +180,7 @@ export async function backfillLegacyReferralCodes(venueId: string, venuePrefix: 
 
   // Loop draining null-code customers. Each update flips a row from null →
   // a code, so it leaves the `referralCode: null` working set on the next find.
-  // eslint-disable-next-line no-constant-condition
+
   while (true) {
     const batch = await prisma.customer.findMany({
       where: { venueId, referralCode: null },

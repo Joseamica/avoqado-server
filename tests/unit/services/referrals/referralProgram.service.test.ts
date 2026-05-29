@@ -154,9 +154,7 @@ describe('referralProgram.service', () => {
       mockedPrisma.venue.findUnique.mockResolvedValue({ slug: 'avoqado-wellness' })
       await activateReferralProgram({ ...input, codePrefix: undefined })
       await flush()
-      expect(mockedPrisma.venue.findUnique).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { id: 'venue_1' } }),
-      )
+      expect(mockedPrisma.venue.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'venue_1' } }))
     })
 
     it('does NOT look up venue when codePrefix is present', async () => {

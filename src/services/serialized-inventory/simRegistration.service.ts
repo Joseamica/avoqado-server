@@ -17,15 +17,28 @@ export interface CreateRequestResult {
 }
 
 export interface ApproveInput {
-  organizationId: string; requestId: string; reviewedByStaffId: string
-  serialNumbers?: string[]; categoryId: string
+  organizationId: string
+  requestId: string
+  reviewedByStaffId: string
+  serialNumbers?: string[]
+  categoryId: string
 }
-export interface ApproveResult { approved: number; duplicates: number; requestStatus: string }
+export interface ApproveResult {
+  approved: number
+  duplicates: number
+  requestStatus: string
+}
 export interface RejectInput {
-  organizationId: string; requestId: string; reviewedByStaffId: string
-  serialNumbers?: string[]; reason: string
+  organizationId: string
+  requestId: string
+  reviewedByStaffId: string
+  serialNumbers?: string[]
+  reason: string
 }
-export interface RejectResult { rejected: number; requestStatus: string }
+export interface RejectResult {
+  rejected: number
+  requestStatus: string
+}
 
 export class SimRegistrationService {
   constructor(private db: PrismaClient = prisma) {}
@@ -91,14 +104,13 @@ export class SimRegistrationService {
   async approve(input: ApproveInput): Promise<ApproveResult> {
     return this.db.$transaction(async (tx: any) => {
       const request = await tx.simRegistrationRequest.findUnique({
-        where: { id: input.requestId }, include: { items: true },
+        where: { id: input.requestId },
+        include: { items: true },
       })
       if (!request || request.organizationId !== input.organizationId) throw new Error('REQUEST_NOT_FOUND')
 
       const targetSet = input.serialNumbers ? new Set(input.serialNumbers.map(normalizeSerial)) : null
-      const pending = request.items.filter(
-        (it: any) => it.status === 'PENDING' && (!targetSet || targetSet.has(it.serialNumber)),
-      )
+      const pending = request.items.filter((it: any) => it.status === 'PENDING' && (!targetSet || targetSet.has(it.serialNumber)))
       const serials = pending.map((it: any) => it.serialNumber)
       const existing = serials.length
         ? await tx.serializedItem.findMany({
@@ -108,11 +120,13 @@ export class SimRegistrationService {
         : []
       const existingSet = new Set(existing.map((e: any) => e.serialNumber))
 
-      let approved = 0, duplicates = 0
+      let approved = 0,
+        duplicates = 0
       for (const it of pending) {
         if (existingSet.has(it.serialNumber)) {
           await tx.simRegistrationRequestItem.update({ where: { id: it.id }, data: { status: 'DUPLICATE' } })
-          duplicates++; continue
+          duplicates++
+          continue
         }
         let created: { id: string }
         try {
@@ -133,16 +147,15 @@ export class SimRegistrationService {
           // A P2002 inside a Postgres interactive transaction aborts the tx; any further write in the
           // same tx would fail. We count it as a duplicate and skip the item status update entirely —
           // the item stays PENDING and will resolve correctly on the next approve call.
-          if (
-            err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002'
-          ) {
+          if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
             duplicates++
             continue
           }
           throw err
         }
         await tx.simRegistrationRequestItem.update({
-          where: { id: it.id }, data: { status: 'APPROVED', createdSerializedItemId: created.id },
+          where: { id: it.id },
+          data: { status: 'APPROVED', createdSerializedItemId: created.id },
         })
         approved++
       }
@@ -158,17 +171,17 @@ export class SimRegistrationService {
   async reject(input: RejectInput): Promise<RejectResult> {
     return this.db.$transaction(async (tx: any) => {
       const request = await tx.simRegistrationRequest.findUnique({
-        where: { id: input.requestId }, include: { items: true },
+        where: { id: input.requestId },
+        include: { items: true },
       })
       if (!request || request.organizationId !== input.organizationId) throw new Error('REQUEST_NOT_FOUND')
       const targetSet = input.serialNumbers ? new Set(input.serialNumbers.map(normalizeSerial)) : null
-      const pending = request.items.filter(
-        (it: any) => it.status === 'PENDING' && (!targetSet || targetSet.has(it.serialNumber)),
-      )
+      const pending = request.items.filter((it: any) => it.status === 'PENDING' && (!targetSet || targetSet.has(it.serialNumber)))
       let rejected = 0
       for (const it of pending) {
         await tx.simRegistrationRequestItem.update({
-          where: { id: it.id }, data: { status: 'REJECTED', rejectionReason: input.reason },
+          where: { id: it.id },
+          data: { status: 'REJECTED', rejectionReason: input.reason },
         })
         rejected++
       }
@@ -183,7 +196,8 @@ export class SimRegistrationService {
 
   private async recalcStatus(tx: any, requestId: string): Promise<string> {
     const items = await tx.simRegistrationRequestItem.findMany({
-      where: { requestId }, select: { status: true },
+      where: { requestId },
+      select: { status: true },
     })
     const hasPending = items.some((i: any) => i.status === 'PENDING')
     if (hasPending) return 'PENDING'

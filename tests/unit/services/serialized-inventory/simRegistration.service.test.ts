@@ -30,8 +30,11 @@ describe('SimRegistrationService.isApprovalModeEnabled', () => {
 describe('SimRegistrationService.createRequest', () => {
   it('returns bad-format ICCIDs in `invalid` and does not submit them', async () => {
     const res = await new SimRegistrationService(makeDb()).createRequest({
-      organizationId: 'org_1', requestedByStaffId: 'staff_1', registeredFromVenueId: 'venue_1',
-      proposedCategoryId: 'cat_1', serialNumbers: ['BADFORMAT123'],
+      organizationId: 'org_1',
+      requestedByStaffId: 'staff_1',
+      registeredFromVenueId: 'venue_1',
+      proposedCategoryId: 'cat_1',
+      serialNumbers: ['BADFORMAT123'],
     })
     expect(res.invalid).toContain('BADFORMAT123')
     expect(res.submitted).toBe(0)
@@ -39,16 +42,22 @@ describe('SimRegistrationService.createRequest', () => {
   it('marks already-existing SerializedItems as duplicates', async () => {
     const db = makeDb({ serializedItem: { findMany: jest.fn().mockResolvedValue([{ serialNumber: '8952140000001234567' }]) } })
     const res = await new SimRegistrationService(db).createRequest({
-      organizationId: 'org_1', requestedByStaffId: 'staff_1', registeredFromVenueId: 'venue_1',
-      proposedCategoryId: 'cat_1', serialNumbers: ['8952140000001234567'],
+      organizationId: 'org_1',
+      requestedByStaffId: 'staff_1',
+      registeredFromVenueId: 'venue_1',
+      proposedCategoryId: 'cat_1',
+      serialNumbers: ['8952140000001234567'],
     })
     expect(res.duplicates).toContain('8952140000001234567')
     expect(res.submitted).toBe(0)
   })
   it('creates a request for valid new ICCIDs', async () => {
     const res = await new SimRegistrationService(makeDb()).createRequest({
-      organizationId: 'org_1', requestedByStaffId: 'staff_1', registeredFromVenueId: 'venue_1',
-      proposedCategoryId: 'cat_1', serialNumbers: ['8952140000001234567', '89521400000012345678'],
+      organizationId: 'org_1',
+      requestedByStaffId: 'staff_1',
+      registeredFromVenueId: 'venue_1',
+      proposedCategoryId: 'cat_1',
+      serialNumbers: ['8952140000001234567', '89521400000012345678'],
     })
     expect(res.submitted).toBe(2)
     expect(res.requestId).toBeTruthy()
@@ -59,8 +68,13 @@ function makeApproveDb(items: any[], orgItems: any[] = []) {
   const txStub = {
     simRegistrationRequest: {
       findUnique: jest.fn().mockResolvedValue({
-        id: 'req_1', organizationId: 'org_1', requestedByStaffId: 'staff_1',
-        registeredFromVenueId: 'venue_1', proposedCategoryId: 'cat_1', status: 'PENDING', items,
+        id: 'req_1',
+        organizationId: 'org_1',
+        requestedByStaffId: 'staff_1',
+        registeredFromVenueId: 'venue_1',
+        proposedCategoryId: 'cat_1',
+        status: 'PENDING',
+        items,
       }),
       update: jest.fn().mockResolvedValue({}),
     },
@@ -79,11 +93,12 @@ function makeApproveDb(items: any[], orgItems: any[] = []) {
 
 describe('SimRegistrationService.approve', () => {
   it('creates a SerializedItem in ADMIN_HELD per approved item and marks item APPROVED', async () => {
-    const { db, txStub } = makeApproveDb([
-      { id: 'it_1', serialNumber: '8952140000001234567', status: 'PENDING', _finalStatus: 'APPROVED' },
-    ])
+    const { db, txStub } = makeApproveDb([{ id: 'it_1', serialNumber: '8952140000001234567', status: 'PENDING', _finalStatus: 'APPROVED' }])
     const res = await new (require('@/services/serialized-inventory/simRegistration.service').SimRegistrationService)(db).approve({
-      organizationId: 'org_1', requestId: 'req_1', reviewedByStaffId: 'owner_1', categoryId: 'cat_1',
+      organizationId: 'org_1',
+      requestId: 'req_1',
+      reviewedByStaffId: 'owner_1',
+      categoryId: 'cat_1',
     })
     expect(txStub.serializedItem.create).toHaveBeenCalledTimes(1)
     const createArg = txStub.serializedItem.create.mock.calls[0][0].data
@@ -99,7 +114,10 @@ describe('SimRegistrationService.approve', () => {
       [{ serialNumber: '8952140000001234567' }],
     )
     const res = await new (require('@/services/serialized-inventory/simRegistration.service').SimRegistrationService)(db).approve({
-      organizationId: 'org_1', requestId: 'req_1', reviewedByStaffId: 'owner_1', categoryId: 'cat_1',
+      organizationId: 'org_1',
+      requestId: 'req_1',
+      reviewedByStaffId: 'owner_1',
+      categoryId: 'cat_1',
     })
     expect(txStub.serializedItem.create).not.toHaveBeenCalled()
     expect(res.approved).toBe(0)
@@ -108,22 +126,30 @@ describe('SimRegistrationService.approve', () => {
 
   it('throws REQUEST_NOT_FOUND when request belongs to another org', async () => {
     const { db } = makeApproveDb([{ id: 'it_1', serialNumber: '8952140000001234567', status: 'PENDING' }])
-    db.$transaction = jest.fn().mockImplementation(async (fn: any) => fn({
-      simRegistrationRequest: { findUnique: jest.fn().mockResolvedValue({ id: 'req_1', organizationId: 'OTHER', items: [] }) },
-    }))
-    await expect(new (require('@/services/serialized-inventory/simRegistration.service').SimRegistrationService)(db).approve({
-      organizationId: 'org_1', requestId: 'req_1', reviewedByStaffId: 'owner_1', categoryId: 'cat_1',
-    })).rejects.toThrow('REQUEST_NOT_FOUND')
+    db.$transaction = jest.fn().mockImplementation(async (fn: any) =>
+      fn({
+        simRegistrationRequest: { findUnique: jest.fn().mockResolvedValue({ id: 'req_1', organizationId: 'OTHER', items: [] }) },
+      }),
+    )
+    await expect(
+      new (require('@/services/serialized-inventory/simRegistration.service').SimRegistrationService)(db).approve({
+        organizationId: 'org_1',
+        requestId: 'req_1',
+        reviewedByStaffId: 'owner_1',
+        categoryId: 'cat_1',
+      }),
+    ).rejects.toThrow('REQUEST_NOT_FOUND')
   })
 })
 
 describe('SimRegistrationService.reject', () => {
   it('marks items REJECTED with reason and creates no SerializedItem', async () => {
-    const { db, txStub } = makeApproveDb([
-      { id: 'it_1', serialNumber: '8952140000001234567', status: 'PENDING', _finalStatus: 'REJECTED' },
-    ])
+    const { db, txStub } = makeApproveDb([{ id: 'it_1', serialNumber: '8952140000001234567', status: 'PENDING', _finalStatus: 'REJECTED' }])
     const res = await new (require('@/services/serialized-inventory/simRegistration.service').SimRegistrationService)(db).reject({
-      organizationId: 'org_1', requestId: 'req_1', reviewedByStaffId: 'owner_1', reason: 'ICCID ilegible',
+      organizationId: 'org_1',
+      requestId: 'req_1',
+      reviewedByStaffId: 'owner_1',
+      reason: 'ICCID ilegible',
     })
     expect(txStub.serializedItem.create).not.toHaveBeenCalled()
     expect(txStub.simRegistrationRequestItem.update).toHaveBeenCalled()
@@ -152,17 +178,18 @@ describe('SimRegistrationService.createRequest — case-insensitive dedup (Fix 1
 
 describe('SimRegistrationService.approve — P2002 race (Fix 2)', () => {
   it('counts concurrent-created item as duplicate, does not reject, does not write item status', async () => {
-    const p2002 = new Prisma.PrismaClientKnownRequestError(
-      'Unique constraint failed on (organizationId, serialNumber)',
-      { code: 'P2002', clientVersion: 'test' },
-    )
-    const { db, txStub } = makeApproveDb([
-      { id: 'it_1', serialNumber: '8952140000001234567', status: 'PENDING', _finalStatus: 'APPROVED' },
-    ])
+    const p2002 = new Prisma.PrismaClientKnownRequestError('Unique constraint failed on (organizationId, serialNumber)', {
+      code: 'P2002',
+      clientVersion: 'test',
+    })
+    const { db, txStub } = makeApproveDb([{ id: 'it_1', serialNumber: '8952140000001234567', status: 'PENDING', _finalStatus: 'APPROVED' }])
     // Override create to throw P2002, simulating a concurrent insert race.
     txStub.serializedItem.create = jest.fn().mockRejectedValue(p2002)
     const res = await new SimRegistrationService(db).approve({
-      organizationId: 'org_1', requestId: 'req_1', reviewedByStaffId: 'owner_1', categoryId: 'cat_1',
+      organizationId: 'org_1',
+      requestId: 'req_1',
+      reviewedByStaffId: 'owner_1',
+      categoryId: 'cat_1',
     })
     expect(res.approved).toBe(0)
     expect(res.duplicates).toBe(1)
