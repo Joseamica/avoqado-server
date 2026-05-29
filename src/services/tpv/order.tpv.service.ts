@@ -1,10 +1,11 @@
 import prisma from '../../utils/prismaClient'
 import { Order, Prisma } from '@prisma/client'
-import { NotFoundError, BadRequestError, ConflictError } from '../../errors/AppError'
+import { NotFoundError, BadRequestError, ConflictError, ValidationError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
 import { SocketEventType } from '../../communication/sockets/types'
 import { serializedInventoryService } from '../serialized-inventory/serializedInventory.service'
+import { simRegistrationService } from '../serialized-inventory/simRegistration.service'
 import { moduleService, MODULE_CODES } from '../modules/module.service'
 import { deductInventoryForProduct, getProductInventoryMethod } from '../dashboard/productInventoryIntegration.service'
 import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service'
@@ -3186,6 +3187,17 @@ export async function sellSerializedItem(
     } else {
       if (!input.categoryId) {
         throw new BadRequestError('categoryId is required for unregistered items')
+      }
+
+      // ENFORCE: prohibido vender SIMs no registradas on-the-fly. Deben pasar por
+      // alta → aprobación → custodia (spec §3.3). Solo aplica a la rama de venta
+      // de items NO registrados; los items ya registrados siguen vendiéndose normal.
+      const sellVenue = await prisma.venue.findUnique({
+        where: { id: venueId }, select: { organizationId: true },
+      })
+      if (sellVenue?.organizationId &&
+          (await simRegistrationService.isApprovalModeEnabled(sellVenue.organizationId))) {
+        throw new ValidationError('Esta SIM no está dada de alta. Debe aprobarse antes de venderse.')
       }
 
       serializedItemWithCategory = await serializedInventoryService.register({
