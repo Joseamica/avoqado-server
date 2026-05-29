@@ -1,4 +1,5 @@
 import prisma from '@/utils/prismaClient'
+import logger from '@/config/logger'
 import { generateReferralCode } from './referralCode.service'
 
 /**
@@ -73,20 +74,32 @@ function composeName(firstName: string | null | undefined, lastName: string | nu
  * Activate (or re-activate) the referral program for a venue.
  *
  * Side effects, in order:
- *   1. Upsert the `ReferralProgramConfig` row, setting `active=true`
- *      and `activatedAt=now`.
- *   2. Backfill `referralCode` for every existing customer in that
- *      venue who doesn't have one yet (idempotent on re-runs).
- *   3. Write an `ActivityLog` entry tagged `REFERRAL_PROGRAM_ACTIVATED`
- *      with the count of legacy customers migrated.
+ *   1. In a FAST transaction: upsert the `ReferralProgramConfig` row
+ *      (`active=true`, `activatedAt=now`) + write the `REFERRAL_PROGRAM_ACTIVATED`
+ *      audit log. This is sub-second regardless of venue size.
+ *   2. AFTER the transaction commits: kick off `backfillLegacyReferralCodes`
+ *      as a background task (fire-and-forget). It assigns a `referralCode` to
+ *      every existing customer who lacks one.
  *
- * Everything runs in a single `$transaction` — if the audit log write
- * fails, the config and code backfills are rolled back as well.
+ * ⚠️ WHY THE BACKFILL IS NOT IN THE TRANSACTION (production incident 2026-05-29):
+ * The original version looped over every legacy customer (one collision-checked
+ * code generation + one update each) INSIDE a single interactive `$transaction`.
+ * Prisma interactive transactions have a 5s default timeout. A production venue
+ * with enough customers blew past 5000ms → "Transaction already closed" → 500,
+ * and the whole activation rolled back (config never saved). Moving the backfill
+ * out of the transaction makes activation O(1) and unbreakable at any venue size.
+ *
+ * The backfill is idempotent (only touches `referralCode: null` rows) and
+ * non-critical: new customers get codes via the creation hook, and any customer
+ * still lacking a code shows the "Activar código" affordance in CustomerDetail.
+ * So losing the backfill to a process restart is recoverable, never corrupting.
  */
 export async function activateReferralProgram(input: ActivateInput): Promise<void> {
   validateConfig(input)
-  await prisma.$transaction(async (tx: any) => {
-    const config = await tx.referralProgramConfig.upsert({
+
+  // Step 1 — atomic, fast: config + audit log only. No per-customer work here.
+  const config = await prisma.$transaction(async (tx: any) => {
+    const cfg = await tx.referralProgramConfig.upsert({
       where: { venueId: input.venueId },
       create: {
         venueId: input.venueId,
@@ -119,49 +132,78 @@ export async function activateReferralProgram(input: ActivateInput): Promise<voi
       },
     })
 
-    let venuePrefix: string | null | undefined = config.codePrefix
-    if (!venuePrefix) {
-      const venue = await tx.venue.findUnique({
-        where: { id: input.venueId },
-        select: { slug: true },
-      })
-      venuePrefix = venue?.slug ?? input.venueId.slice(-8)
-    }
-
-    const legacyCustomers = await tx.customer.findMany({
-      where: { venueId: input.venueId, referralCode: null },
-      select: { id: true, firstName: true, lastName: true },
-    })
-    for (const c of legacyCustomers) {
-      const code = await generateReferralCode({
-        venueId: input.venueId,
-        venuePrefix: venuePrefix as string,
-        customerName: composeName(c.firstName, c.lastName),
-      })
-      await tx.customer.update({
-        where: { id: c.id },
-        data: { referralCode: code },
-      })
-    }
-
     await tx.activityLog.create({
       data: {
-        // `staffId` is intentionally null — activation is a venue-level
-        // event, not tied to a specific staff member at the moment of
-        // calling. Callers that want attribution can pass it through a
-        // future enhancement.
+        // `staffId` is intentionally null — activation is a venue-level event.
         staffId: null,
         venueId: input.venueId,
         action: 'REFERRAL_PROGRAM_ACTIVATED',
         entity: 'ReferralProgramConfig',
-        entityId: config.id,
-        data: {
-          legacyCustomersMigrated: legacyCustomers.length,
-          codePrefixUsed: venuePrefix,
-        },
+        entityId: cfg.id,
+        data: { codePrefixUsed: cfg.codePrefix ?? null, backfillScheduled: true },
       },
     })
+
+    return cfg
   })
+
+  // Step 2 — resolve the prefix (cheap) and fire the backfill in the background.
+  let venuePrefix: string | null | undefined = config.codePrefix
+  if (!venuePrefix) {
+    const venue = await prisma.venue.findUnique({
+      where: { id: input.venueId },
+      select: { slug: true },
+    })
+    venuePrefix = venue?.slug ?? input.venueId.slice(-8)
+  }
+
+  // Fire-and-forget: activation returns immediately; codes populate in the
+  // background. NOT awaited so a large venue can never time out the request.
+  void backfillLegacyReferralCodes(input.venueId, venuePrefix as string).catch(err => {
+    logger.error('[referral] legacy code backfill failed', { venueId: input.venueId, err })
+  })
+}
+
+/**
+ * Assign a `referralCode` to every customer of a venue that lacks one.
+ *
+ * Runs OUTSIDE any wrapping transaction, in bounded batches, so it scales to
+ * venues of any size without hitting the interactive-transaction timeout.
+ * Idempotent: each pass only selects `referralCode: null` rows, and rows it
+ * updates drop out of the next batch automatically. Safe to call repeatedly.
+ *
+ * Exported so it can be tested in isolation and re-run as a recovery step.
+ */
+export async function backfillLegacyReferralCodes(venueId: string, venuePrefix: string): Promise<number> {
+  const BATCH_SIZE = 200
+  let processed = 0
+
+  // Loop draining null-code customers. Each update flips a row from null →
+  // a code, so it leaves the `referralCode: null` working set on the next find.
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const batch = await prisma.customer.findMany({
+      where: { venueId, referralCode: null },
+      select: { id: true, firstName: true, lastName: true },
+      take: BATCH_SIZE,
+    })
+    if (batch.length === 0) break
+
+    for (const c of batch) {
+      const code = await generateReferralCode({
+        venueId,
+        venuePrefix,
+        customerName: composeName(c.firstName, c.lastName),
+      })
+      await prisma.customer.update({ where: { id: c.id }, data: { referralCode: code } })
+      processed++
+    }
+  }
+
+  if (processed > 0) {
+    logger.info('[referral] legacy code backfill complete', { venueId, processed })
+  }
+  return processed
 }
 
 export interface DeactivateInput {

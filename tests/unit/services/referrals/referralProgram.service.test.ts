@@ -14,10 +14,15 @@
 import prisma from '@/utils/prismaClient'
 import {
   activateReferralProgram,
+  backfillLegacyReferralCodes,
   deactivateReferralProgram,
   updateReferralConfig,
   ActivateInput,
 } from '@/services/referrals/referralProgram.service'
+
+// Flush pending microtasks so the fire-and-forget backfill kicked off by
+// activateReferralProgram settles before a test ends (prevents cross-test bleed).
+const flush = () => new Promise(resolve => setImmediate(resolve))
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -55,8 +60,19 @@ const { generateReferralCode } = require('@/services/referrals/referralCode.serv
 describe('referralProgram.service', () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    // By default $transaction passes the same prisma proxy as the tx client.
-    mockedPrisma.$transaction.mockImplementation(async (fn: any) => fn(mockedPrisma))
+    // The interactive transaction must ONLY touch config + activityLog. The tx
+    // client we hand the callback deliberately omits `customer` and `venue`, so
+    // if activation ever moves per-customer work back INTO the transaction, the
+    // callback throws (tx.customer is undefined) and the test fails. This is the
+    // structural guard for the 2026-05-29 production incident (txn 5s timeout).
+    mockedPrisma.$transaction.mockImplementation(async (fn: any) =>
+      fn({
+        referralProgramConfig: mockedPrisma.referralProgramConfig,
+        activityLog: mockedPrisma.activityLog,
+      }),
+    )
+    // Default: backfill (fire-and-forget) finds nothing → clean no-op.
+    mockedPrisma.customer.findMany.mockResolvedValue([])
   })
 
   describe('activateReferralProgram', () => {
@@ -79,8 +95,8 @@ describe('referralProgram.service', () => {
         active: true,
         codePrefix: 'TESTMF',
       })
-      mockedPrisma.customer.findMany.mockResolvedValue([])
       await activateReferralProgram(input)
+      await flush()
       expect(mockedPrisma.referralProgramConfig.upsert).toHaveBeenCalledWith(
         expect.objectContaining({
           where: { venueId: 'venue_1' },
@@ -96,29 +112,13 @@ describe('referralProgram.service', () => {
       )
     })
 
-    it('generates codes for legacy customers without referralCode', async () => {
-      mockedPrisma.referralProgramConfig.upsert.mockResolvedValue({
-        id: 'cfg_1',
-        codePrefix: 'TESTMF',
-      })
-      mockedPrisma.customer.findMany.mockResolvedValue([
-        { id: 'cust_1', firstName: 'María', lastName: 'López' },
-        { id: 'cust_2', firstName: 'Jose', lastName: 'Pérez' },
-      ])
-      mockedPrisma.customer.update.mockResolvedValue({})
-      await activateReferralProgram(input)
-      expect(mockedPrisma.customer.update).toHaveBeenCalledTimes(2)
-      expect(generateReferralCode).toHaveBeenCalledTimes(2)
-    })
-
-    it('is idempotent — no updates when customers already have codes', async () => {
-      mockedPrisma.referralProgramConfig.upsert.mockResolvedValue({
-        id: 'cfg_1',
-        codePrefix: 'TESTMF',
-      })
-      mockedPrisma.customer.findMany.mockResolvedValue([])
-      await activateReferralProgram(input)
-      expect(mockedPrisma.customer.update).not.toHaveBeenCalled()
+    it('REGRESSION: does NOT do per-customer work inside the transaction (prod 5s timeout)', async () => {
+      // The tx client (see beforeEach) has no `customer`. If the activation
+      // transaction tried any customer op, it would throw here. A clean return
+      // proves the config txn is O(1) and the backfill runs outside it.
+      mockedPrisma.referralProgramConfig.upsert.mockResolvedValue({ id: 'cfg_1', codePrefix: 'TESTMF' })
+      await expect(activateReferralProgram(input)).resolves.toBeUndefined()
+      await flush()
     })
 
     it('validates tier requirements are strictly ascending', async () => {
@@ -129,13 +129,13 @@ describe('referralProgram.service', () => {
       await expect(activateReferralProgram({ ...input, tier1RewardPercent: -5 })).rejects.toThrow(/non-negative/i)
     })
 
-    it('writes activity log entry on activation', async () => {
+    it('writes activity log entry tagged backfillScheduled', async () => {
       mockedPrisma.referralProgramConfig.upsert.mockResolvedValue({
         id: 'cfg_1',
         codePrefix: 'TESTMF',
       })
-      mockedPrisma.customer.findMany.mockResolvedValue([{ id: 'c1', firstName: 'X', lastName: null }])
       await activateReferralProgram(input)
+      await flush()
       expect(mockedPrisma.activityLog.create).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
@@ -143,21 +143,51 @@ describe('referralProgram.service', () => {
             venueId: 'venue_1',
             entity: 'ReferralProgramConfig',
             entityId: 'cfg_1',
-            data: expect.objectContaining({ legacyCustomersMigrated: 1 }),
+            data: expect.objectContaining({ backfillScheduled: true }),
           }),
         }),
       )
     })
 
-    it('derives codePrefix from venue.slug when codePrefix is undefined', async () => {
-      mockedPrisma.referralProgramConfig.upsert.mockResolvedValue({
-        id: 'cfg_1',
-        codePrefix: null,
-      })
+    it('looks up venue.slug for the prefix only when codePrefix is null', async () => {
+      mockedPrisma.referralProgramConfig.upsert.mockResolvedValue({ id: 'cfg_1', codePrefix: null })
       mockedPrisma.venue.findUnique.mockResolvedValue({ slug: 'avoqado-wellness' })
-      mockedPrisma.customer.findMany.mockResolvedValue([{ id: 'c1', firstName: 'María', lastName: null }])
       await activateReferralProgram({ ...input, codePrefix: undefined })
-      expect(generateReferralCode).toHaveBeenCalledWith(expect.objectContaining({ venuePrefix: 'avoqado-wellness' }))
+      await flush()
+      expect(mockedPrisma.venue.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'venue_1' } }),
+      )
+    })
+
+    it('does NOT look up venue when codePrefix is present', async () => {
+      mockedPrisma.referralProgramConfig.upsert.mockResolvedValue({ id: 'cfg_1', codePrefix: 'TESTMF' })
+      await activateReferralProgram(input)
+      await flush()
+      expect(mockedPrisma.venue.findUnique).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('backfillLegacyReferralCodes', () => {
+    it('assigns codes to all null-code customers, draining in batches', async () => {
+      mockedPrisma.customer.findMany
+        .mockResolvedValueOnce([
+          { id: 'cust_1', firstName: 'María', lastName: 'López' },
+          { id: 'cust_2', firstName: 'Jose', lastName: 'Pérez' },
+        ])
+        .mockResolvedValueOnce([]) // second pass: drained
+      mockedPrisma.customer.update.mockResolvedValue({})
+      const n = await backfillLegacyReferralCodes('venue_1', 'TESTMF')
+      expect(n).toBe(2)
+      expect(generateReferralCode).toHaveBeenCalledTimes(2)
+      expect(generateReferralCode).toHaveBeenCalledWith(expect.objectContaining({ venuePrefix: 'TESTMF' }))
+      expect(mockedPrisma.customer.update).toHaveBeenCalledTimes(2)
+    })
+
+    it('no-ops (returns 0) when every customer already has a code', async () => {
+      mockedPrisma.customer.findMany.mockResolvedValueOnce([])
+      const n = await backfillLegacyReferralCodes('venue_1', 'TESTMF')
+      expect(n).toBe(0)
+      expect(mockedPrisma.customer.update).not.toHaveBeenCalled()
     })
   })
 
