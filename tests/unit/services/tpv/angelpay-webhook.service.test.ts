@@ -3,6 +3,7 @@ import {
   persistErrorEvent,
   attemptPaymentMatch,
   processAngelPayWebhook,
+  reconcileAngelPayWebhookForPayment,
 } from '@/services/tpv/angelpay-webhook.service'
 import prisma from '@/utils/prismaClient'
 import { Prisma } from '@prisma/client'
@@ -13,10 +14,12 @@ jest.mock('@/utils/prismaClient', () => ({
     providerEventLog: {
       create: jest.fn(),
       findFirst: jest.fn(),
+      findMany: jest.fn(),
       update: jest.fn(),
     },
     payment: {
       findFirst: jest.fn(),
+      findUnique: jest.fn(),
       update: jest.fn(),
     },
     merchantAccount: {
@@ -28,8 +31,10 @@ jest.mock('@/utils/prismaClient', () => ({
 
 const mockedProviderEventLogCreate = prisma.providerEventLog.create as jest.Mock
 const mockedProviderEventLogFindFirst = prisma.providerEventLog.findFirst as jest.Mock
+const mockedProviderEventLogFindMany = prisma.providerEventLog.findMany as jest.Mock
 const mockedProviderEventLogUpdate = prisma.providerEventLog.update as jest.Mock
 const mockedPaymentFindFirst = prisma.payment.findFirst as jest.Mock
+const mockedPaymentFindUnique = prisma.payment.findUnique as jest.Mock
 const mockedPaymentUpdate = prisma.payment.update as jest.Mock
 const mockedMerchantAccountUpdate = prisma.merchantAccount.update as jest.Mock
 
@@ -367,7 +372,7 @@ describe('processAngelPayWebhook — error paths', () => {
     expect(result.paymentId).toBe('pay_existing')
   })
 
-  it('returns ORPHANED when no Payment matches after retries', async () => {
+  it('returns ORPHANED/AWAITING_PAYMENT and leaves event PENDING when no Payment matches after retries', async () => {
     mockedProviderEventLogCreate.mockResolvedValue({ id: 'evt_5' })
     mockedPaymentFindFirst.mockResolvedValue(null)
 
@@ -381,11 +386,16 @@ describe('processAngelPayWebhook — error paths', () => {
       retryDelaysMs: [0, 0, 0],
     })
 
+    // action stays ORPHANED (HTTP cosmetic); status row is PENDING so backfill can reconcile
     expect(result.action).toBe('ORPHANED')
+    expect(result.errorReason).toBe('AWAITING_PAYMENT')
     expect(mockedProviderEventLogUpdate).toHaveBeenCalledWith({
       where: { id: 'evt_5' },
-      data: expect.objectContaining({ status: 'ERROR', errorReason: 'ORPHANED' }),
+      data: expect.objectContaining({ status: 'PENDING', errorReason: 'AWAITING_PAYMENT' }),
     })
+    // Must NOT set processedAt (event is not yet terminal)
+    const updateArgs = mockedProviderEventLogUpdate.mock.calls[0][0]
+    expect(updateArgs.data).not.toHaveProperty('processedAt')
   })
 
   it('returns ORPHANED/NO_MATCH_FIELDS when payload has none of integratorReference/transactionId', async () => {
@@ -401,5 +411,170 @@ describe('processAngelPayWebhook — error paths', () => {
 
     expect(result.action).toBe('ORPHANED')
     expect(result.errorReason).toBe('NO_MATCH_FIELDS')
+    // NO_MATCH_FIELDS is genuinely unprocessable — must stay terminal ERROR (not PENDING)
+    expect(mockedProviderEventLogUpdate).toHaveBeenCalledWith({
+      where: { id: 'evt_6' },
+      data: expect.objectContaining({ status: 'ERROR', errorReason: 'NO_MATCH_FIELDS' }),
+    })
+  })
+})
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// reconcileAngelPayWebhookForPayment — backfill tests
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+describe('reconcileAngelPayWebhookForPayment', () => {
+  const basePayment = {
+    id: 'pay_backfill_1',
+    idempotencyKey: 'idem-abc',
+    referenceNumber: null,
+    venueId: 'venue_x',
+    amount: 100,
+  }
+
+  const pendingEvent = {
+    id: 'evt_pending_1',
+    payload: {
+      event_type: 'send_transaction',
+      payload: {
+        amount: '000000010000', // 10000 cents = $100.00 MXN — exact match
+        integratorReference: 'idem-abc',
+        transactionId: 'tx_ap_1',
+        terminalSerial: 'N860W175781',
+        timestamp: '2026-05-28T01:00:00Z',
+        status: 'approved',
+      },
+    },
+  }
+
+  beforeEach(() => {
+    ;[
+      mockedProviderEventLogFindMany,
+      mockedProviderEventLogUpdate,
+      mockedPaymentFindUnique,
+      mockedPaymentUpdate,
+    ].forEach(m => m.mockReset())
+    // Default: payment has no existing processorData
+    mockedPaymentFindUnique.mockResolvedValue({ processorData: null })
+    mockedProviderEventLogUpdate.mockResolvedValue({})
+    mockedPaymentUpdate.mockResolvedValue({})
+  })
+
+  it('stamps processorData.angelpayWebhook and marks event PROCESSED on amount match', async () => {
+    mockedProviderEventLogFindMany.mockResolvedValue([pendingEvent])
+
+    await reconcileAngelPayWebhookForPayment(basePayment)
+
+    expect(mockedPaymentUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'pay_backfill_1' },
+        data: expect.objectContaining({
+          processorData: expect.objectContaining({
+            angelpayWebhook: expect.objectContaining({
+              reconciledVia: 'payment-create-backfill',
+              transactionId: 'tx_ap_1',
+              integratorReference: 'idem-abc',
+              terminalSerial: 'N860W175781',
+              status: 'approved',
+            }),
+          }),
+        }),
+      }),
+    )
+
+    expect(mockedProviderEventLogUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'evt_pending_1' },
+        data: expect.objectContaining({
+          status: 'PROCESSED',
+          paymentId: 'pay_backfill_1',
+          venueId: 'venue_x',
+          errorReason: null,
+        }),
+      }),
+    )
+  })
+
+  it('preserves existing processorData keys when stamping angelpayWebhook', async () => {
+    mockedProviderEventLogFindMany.mockResolvedValue([pendingEvent])
+    mockedPaymentFindUnique.mockResolvedValue({ processorData: { existingKey: 'keepMe' } })
+
+    await reconcileAngelPayWebhookForPayment(basePayment)
+
+    const updateCall = mockedPaymentUpdate.mock.calls[0][0]
+    expect(updateCall.data.processorData).toMatchObject({
+      existingKey: 'keepMe',
+      angelpayWebhook: expect.objectContaining({ reconciledVia: 'payment-create-backfill' }),
+    })
+  })
+
+  it('stamps angelpayDiscrepancy and marks ERROR/AMOUNT_MISMATCH on amount mismatch', async () => {
+    const mismatchEvent = {
+      id: 'evt_pending_mismatch',
+      payload: {
+        event_type: 'send_transaction',
+        payload: {
+          amount: '000000010550', // 10550 cents = $105.50 — diff $5.50 vs $100.00
+          integratorReference: 'idem-abc',
+          transactionId: 'tx_ap_mismatch',
+          status: 'approved',
+        },
+      },
+    }
+    mockedProviderEventLogFindMany.mockResolvedValue([mismatchEvent])
+
+    await reconcileAngelPayWebhookForPayment(basePayment)
+
+    expect(mockedPaymentUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          processorData: expect.objectContaining({
+            angelpayDiscrepancy: expect.objectContaining({
+              webhookAmount: 105.5,
+              recordedAmount: 100,
+              transactionId: 'tx_ap_mismatch',
+            }),
+          }),
+        }),
+      }),
+    )
+
+    expect(mockedProviderEventLogUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'ERROR',
+          errorReason: 'AMOUNT_MISMATCH',
+          paymentId: 'pay_backfill_1',
+        }),
+      }),
+    )
+  })
+
+  it('is a no-op when no pending event is found', async () => {
+    mockedProviderEventLogFindMany.mockResolvedValue([])
+
+    await reconcileAngelPayWebhookForPayment(basePayment)
+
+    expect(mockedPaymentUpdate).not.toHaveBeenCalled()
+    expect(mockedProviderEventLogUpdate).not.toHaveBeenCalled()
+  })
+
+  it('is a no-op and returns without querying when both idempotencyKey and referenceNumber are null', async () => {
+    await reconcileAngelPayWebhookForPayment({
+      ...basePayment,
+      idempotencyKey: null,
+      referenceNumber: null,
+    })
+
+    expect(mockedProviderEventLogFindMany).not.toHaveBeenCalled()
+    expect(mockedPaymentUpdate).not.toHaveBeenCalled()
+  })
+
+  it('never throws when findMany rejects — swallows error gracefully', async () => {
+    mockedProviderEventLogFindMany.mockRejectedValue(new Error('DB connection lost'))
+
+    // Must resolve without throwing
+    await expect(reconcileAngelPayWebhookForPayment(basePayment)).resolves.toBeUndefined()
+    expect(mockedPaymentUpdate).not.toHaveBeenCalled()
   })
 })

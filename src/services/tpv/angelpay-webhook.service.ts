@@ -73,6 +73,10 @@ export const ANGELPAY_WEBHOOK_ERROR_REASONS = {
   AMOUNT_MISMATCH: 'AMOUNT_MISMATCH',
   NOT_APPROVED: 'NOT_APPROVED',
   ORPHANED: 'ORPHANED',
+  // AngelPay fires the webhook on charge-approval; the TPV records the Payment only
+  // after the cashier dismisses the success screen (often minutes later). The event
+  // is left PENDING with this reason so reconcile-on-Payment-create can pick it up.
+  AWAITING_PAYMENT: 'AWAITING_PAYMENT',
   PROCESSING_ERROR: 'PROCESSING_ERROR',
 } as const
 
@@ -268,11 +272,14 @@ export async function processAngelPayWebhook(args: ProcessArgs): Promise<AngelPa
   const payment = await attemptPaymentMatch({ payload, merchantAccountId: merchantAccount.id, retryDelaysMs: args.retryDelaysMs })
 
   if (!payment) {
+    // Leave the event PENDING (not terminal ERROR) so reconcile-on-Payment-create
+    // can find and reconcile it when the TPV finally records the Payment.
+    // AngelPay almost always fires before the cashier dismisses the success screen.
     await prisma.providerEventLog.update({
       where: { id: eventLogId },
-      data: { status: EventStatus.ERROR, errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.ORPHANED, processedAt: new Date() },
+      data: { status: EventStatus.PENDING, errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.AWAITING_PAYMENT },
     })
-    return { action: 'ORPHANED', errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.ORPHANED, eventLogId }
+    return { action: 'ORPHANED', errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.AWAITING_PAYMENT, eventLogId }
   }
 
   // 5. Reconcile amount
@@ -346,4 +353,133 @@ export async function processAngelPayWebhook(args: ProcessArgs): Promise<AngelPa
   })
   logger.error('❌ [AngelPay webhook] amount discrepancy', { correlationId, paymentId: payment.id, webhookAmount, recordedAmount, diff })
   return { action: 'DISCREPANCY', errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.AMOUNT_MISMATCH, eventLogId, paymentId: payment.id }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Reconcile-on-Payment-create (backfill path)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/**
+ * Reconcile-on-Payment-create: AngelPay fires the webhook BEFORE the TPV records
+ * the Payment (the cashier may linger on AngelPay's success screen for minutes).
+ * So the webhook lands as PENDING/AWAITING_PAYMENT with no Payment to match yet.
+ * When the Payment is finally recorded, the /tpv/fast path calls this to find that
+ * PENDING webhook and reconcile it — stamping processorData + marking PROCESSED.
+ *
+ * Fire-and-forget from the caller; never throws (logs + swallows all errors).
+ */
+export async function reconcileAngelPayWebhookForPayment(payment: {
+  id: string
+  idempotencyKey: string | null
+  referenceNumber: string | null
+  venueId: string
+  amount: Prisma.Decimal | number | string
+}): Promise<void> {
+  try {
+    const orFilters: Prisma.ProviderEventLogWhereInput[] = []
+    if (payment.idempotencyKey) {
+      orFilters.push({ payload: { path: ['payload', 'integratorReference'], equals: payment.idempotencyKey } })
+    }
+    if (payment.referenceNumber) {
+      orFilters.push({ payload: { path: ['payload', 'transactionId'], equals: payment.referenceNumber } })
+    }
+    if (orFilters.length === 0) return
+
+    const pendingEvents = await prisma.providerEventLog.findMany({
+      where: {
+        provider: ProviderType.PAYMENT_PROCESSOR,
+        status: EventStatus.PENDING,
+        eventId: { startsWith: 'angelpay-' },
+        OR: orFilters,
+      },
+      select: { id: true, payload: true },
+    })
+
+    for (const event of pendingEvents) {
+      const webhookPayload = event.payload as unknown as AngelPayWebhookPayload
+      const webhookAmount = Number(webhookPayload?.payload?.amount) / 100 // centavos → pesos
+      const recordedAmount = Number(payment.amount)
+      const diff = Math.abs(webhookAmount - recordedAmount)
+
+      // Fetch the current payment's processorData to spread (preserve existing keys)
+      const existingPayment = await prisma.payment.findUnique({
+        where: { id: payment.id },
+        select: { processorData: true },
+      })
+      const existingProcessorData = (existingPayment?.processorData as Record<string, unknown>) ?? {}
+
+      if (Number.isFinite(webhookAmount) && diff >= 0.01) {
+        // Amount discrepancy — stamp angelpayDiscrepancy, mark ERROR/AMOUNT_MISMATCH
+        await prisma.payment.update({
+          where: { id: payment.id },
+          data: {
+            processorData: {
+              ...existingProcessorData,
+              angelpayDiscrepancy: {
+                detectedAt: new Date().toISOString(),
+                webhookAmount,
+                recordedAmount,
+                difference: diff,
+                transactionId: webhookPayload?.payload?.transactionId ?? null,
+              },
+            } as Prisma.InputJsonValue,
+          },
+        })
+        await prisma.providerEventLog.update({
+          where: { id: event.id },
+          data: {
+            status: EventStatus.ERROR,
+            errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.AMOUNT_MISMATCH,
+            paymentId: payment.id,
+            venueId: payment.venueId,
+            processedAt: new Date(),
+          },
+        })
+        logger.warn('🪝 [AngelPay backfill] amount discrepancy on reconcile-on-create', {
+          paymentId: payment.id,
+          webhookAmount,
+          recordedAmount,
+          diff,
+        })
+      } else {
+        // MATCHED — stamp processorData.angelpayWebhook, mark PROCESSED
+        await prisma.payment.update({
+          where: { id: payment.id },
+          data: {
+            processorData: {
+              ...existingProcessorData,
+              angelpayWebhook: {
+                receivedAt: new Date().toISOString(),
+                reconciledVia: 'payment-create-backfill',
+                transactionId: webhookPayload?.payload?.transactionId ?? null,
+                integratorReference: webhookPayload?.payload?.integratorReference ?? null,
+                terminalSerial: webhookPayload?.payload?.terminalSerial ?? null,
+                timestamp: webhookPayload?.payload?.timestamp ?? null,
+                status: webhookPayload?.payload?.status ?? null,
+              },
+            } as Prisma.InputJsonValue,
+          },
+        })
+        await prisma.providerEventLog.update({
+          where: { id: event.id },
+          data: {
+            status: EventStatus.PROCESSED,
+            paymentId: payment.id,
+            venueId: payment.venueId,
+            errorReason: null,
+            processedAt: new Date(),
+          },
+        })
+        logger.info('🪝 [AngelPay backfill] reconciled pending webhook on payment-create', {
+          paymentId: payment.id,
+          eventLogId: event.id,
+        })
+      }
+    }
+  } catch (err) {
+    logger.error('🪝 [AngelPay backfill] reconcileAngelPayWebhookForPayment failed', {
+      paymentId: payment.id,
+      error: err instanceof Error ? err.message : err,
+    })
+  }
 }

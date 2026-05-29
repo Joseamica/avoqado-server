@@ -1966,6 +1966,25 @@ export async function recordOrderPayment(
     }),
   )
 
+  // 🪝 Backfill any AngelPay webhook that arrived BEFORE this Payment was recorded.
+  // AngelPay fires on charge-approval; the TPV records only after the cashier
+  // dismisses AngelPay's success screen — often minutes later. No-op for non-AngelPay
+  // payments (no matching pending webhook will exist).
+  void import('./angelpay-webhook.service').then(({ reconcileAngelPayWebhookForPayment }) =>
+    reconcileAngelPayWebhookForPayment({
+      id: payment.id,
+      idempotencyKey: payment.idempotencyKey,
+      referenceNumber: payment.referenceNumber,
+      venueId,
+      amount: payment.amount,
+    }).catch(err => {
+      logger.error('🪝 [AngelPay backfill] Failed to reconcile pending webhooks for order payment', {
+        paymentId: payment.id,
+        error: err instanceof Error ? err.message : err,
+      })
+    }),
+  )
+
   // Add digital receipt info to payment response
   return {
     ...payment,
@@ -2560,6 +2579,25 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       venueId,
     }).catch(err => {
       logger.error('🪝 [Blumon backfill] Failed to reconcile pending webhooks for fast payment', {
+        paymentId: payment.id,
+        error: err instanceof Error ? err.message : err,
+      })
+    }),
+  )
+
+  // 🪝 Backfill any AngelPay webhook that arrived BEFORE this Payment was recorded.
+  // AngelPay fires on charge-approval; the TPV records only after the cashier
+  // dismisses AngelPay's success screen — often minutes later. No-op for non-AngelPay
+  // payments (no matching pending webhook will exist).
+  void import('./angelpay-webhook.service').then(({ reconcileAngelPayWebhookForPayment }) =>
+    reconcileAngelPayWebhookForPayment({
+      id: payment.id,
+      idempotencyKey: payment.idempotencyKey,
+      referenceNumber: payment.referenceNumber,
+      venueId,
+      amount: payment.amount,
+    }).catch(err => {
+      logger.error('🪝 [AngelPay backfill] Failed to reconcile pending webhooks for fast payment', {
         paymentId: payment.id,
         error: err instanceof Error ? err.message : err,
       })

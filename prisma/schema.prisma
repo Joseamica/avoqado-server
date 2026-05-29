@@ -267,6 +267,10 @@ model Venue {
   customerGroups CustomerGroup[]
   loyaltyConfig  LoyaltyConfig?
 
+  // Referral Program
+  referralProgramConfig ReferralProgramConfig?
+  referrals             Referral[]
+
   // Discount System (Phase 2)
   discounts Discount[]
 
@@ -882,6 +886,9 @@ model StaffVenue {
 
   // Credit Packs
   creditTransactionsCreated CreditTransaction[] @relation("CreditTransactionCreatedBy")
+
+  // Referral Program
+  referralsCaptured Referral[] @relation("ReferralsCaptured")
 
   @@unique([venueId, posStaffId]) // Asegura que no se duplique posStaffId por venue
   @@unique([staffId, venueId]) // Un staff solo puede tener una relación por venue
@@ -2352,6 +2359,9 @@ model Order {
   reservationId String?
   reservation   Reservation? @relation("OrderFromReservation", fields: [reservationId], references: [id], onDelete: SetNull)
 
+  // Referral Program — Referrals que califican cuando este Order se marca PAID.
+  referralsTriggered Referral[]
+
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   completedAt DateTime?
@@ -3322,7 +3332,7 @@ model TerminalOrder {
   shippingCity     String
   shippingState    String
   shippingZip      String
-  shippingCountry  String @default("México")
+  shippingCountry  String  @default("México")
 
   // Pago
   paymentMethod TerminalOrderPaymentMethod
@@ -3336,7 +3346,7 @@ model TerminalOrder {
   subtotalCents Int
   taxCents      Int
   totalCents    Int
-  currency      String @default("MXN")
+  currency      String                     @default("MXN")
 
   // Stripe (solo CARD_STRIPE)
   stripeCheckoutSessionId String?
@@ -3350,7 +3360,7 @@ model TerminalOrder {
   speiApprovalToken   String?   @unique
   speiTokenExpiresAt  DateTime?
   speiApprovedAt      DateTime?
-  speiApprovedBy      String?   // Email of staff who approved (or "system" for automated)
+  speiApprovedBy      String? // Email of staff who approved (or "system" for automated)
   speiRejectionReason String?
 
   // Fulfillment (separado de pago)
@@ -3358,7 +3368,7 @@ model TerminalOrder {
   serialAssignmentToken          String?                        @unique
   serialAssignmentTokenExpiresAt DateTime?
   serialsAssignedAt              DateTime?
-  serialsAssignedBy              String?                        // Email of staff who assigned
+  serialsAssignedBy              String? // Email of staff who assigned
   trackingNumber                 String?
   carrier                        String?
   shippedAt                      DateTime?
@@ -3386,7 +3396,7 @@ model TerminalOrderItem {
   model          String
   productName    String
   quantity       Int
-  unitPriceCents Int    // NET price, sin IVA. See TerminalOrder money comment.
+  unitPriceCents Int // NET price, sin IVA. See TerminalOrder money comment.
   namePrefix     String // "Terminal" → terminales se generan como "Terminal 1, Terminal 2…"
 
   @@index([orderId])
@@ -3414,11 +3424,11 @@ model PaymentProvider {
   configSchema Json? // JSON schema for validation
 
   // Relations
-  merchants              MerchantAccount[]
-  webhooks               WebhookSubscription[]
-  eventLogs              ProviderEventLog[]
-  costStructures         ProviderCostStructure[]
-  ecommerceMerchants     EcommerceMerchant[] // ⭐ E-commerce channels using this provider
+  merchants          MerchantAccount[]
+  webhooks           WebhookSubscription[]
+  eventLogs          ProviderEventLog[]
+  costStructures     ProviderCostStructure[]
+  ecommerceMerchants EcommerceMerchant[] // ⭐ E-commerce channels using this provider
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -3521,10 +3531,10 @@ model MerchantAccount {
   /// when we register a webhook for this merchant. Format: "whsec_<base64>".
   /// Stored plaintext — it's not a customer credential, it's a per-tenant
   /// signing key (same risk class as a JWT signing key).
-  angelpayWebhookSecret      String?
+  angelpayWebhookSecret         String?
   /// AngelPay's endpoint id (e.g. "ep_abc123") from the registration response.
   /// Kept for traceability + future automation of de-registration / re-rotation.
-  angelpayWebhookEndpointId  String?
+  angelpayWebhookEndpointId     String?
 
   // Rate correction batches targeting this merchant account
   rateCorrectionBatches RateCorrectionBatch[]
@@ -3581,7 +3591,7 @@ model AngelPayUserAccount {
   // null (rows created before the plaintext switch). Droppable once every row
   // has `pin` populated. See spec §6.1.
   pinEncrypted Json?
-  environment  String @default("QA")
+  environment  String  @default("QA")
 
   status          AngelPayAccountStatus @default(PENDING_PIN)
   statusChangedAt DateTime?
@@ -3597,15 +3607,14 @@ model AngelPayUserAccount {
    * triggers a TPV discovery command. The TPV reports back asynchronously to
    * `POST /tpv/angelpay/report-discovered-merchants`, which reads + clears
    * this flag and routes the upsert accordingly:
-   *   - null / 'AUTO_ONBOARD' (default, legacy): zero-touch — creates new
-   *     `MerchantAccount` rows and assigns them to the first free
-   *     `VenuePaymentConfig` slot. Used by older flows where there is no
-   *     wizard owning the merchant creation.
-   *   - 'PREVIEW_ONLY': skip auto-create + slot assignment. The wizard owns
-   *     the merchant creation (paso 9 = `fullSetupAngelPayMerchant`), so the
-   *     TPV report is only used to populate the wizard's "merchants
-   *     descubiertos" picker, never to silently persist.
-   *
+   * - null / 'AUTO_ONBOARD' (default, legacy): zero-touch — creates new
+   * `MerchantAccount` rows and assigns them to the first free
+   * `VenuePaymentConfig` slot. Used by older flows where there is no
+   * wizard owning the merchant creation.
+   * - 'PREVIEW_ONLY': skip auto-create + slot assignment. The wizard owns
+   * the merchant creation (paso 9 = `fullSetupAngelPayMerchant`), so the
+   * TPV report is only used to populate the wizard's "merchants
+   * descubiertos" picker, never to silently persist.
    * The column is cleared on consume so each dispatch only affects one report
    * cycle. If multiple dispatches happen with different modes within the
    * report window, last-write-wins (acceptable — the operator only runs one
@@ -3872,11 +3881,11 @@ model CheckoutSession {
   /// preferenceId is the result of POST /checkout/preferences (used in some
   /// Bricks flows). Optional in v1 — many flows skip preferences and create
   /// payments directly with the Brick token; reserved for future flexibility.
-  mpPreferenceId String? @unique
+  mpPreferenceId    String? @unique
   /// mpPaymentId is the MP payment.id, received via IPN once the buyer completes
   /// the payment. This — not the preferenceId — is what gets passed to
   /// GET /v1/payments/:id and POST /v1/payments/:id/refunds.
-  mpPaymentId String? @unique
+  mpPaymentId       String? @unique
   /// mpMerchantOrderId reconciles the preference ↔ payments relationship in MP.
   /// One preference can map to multiple payment attempts; merchant_order groups
   /// them. Populated via IPN.
@@ -4265,7 +4274,7 @@ model MerchantRevenueShare {
   /// Precio que Avoqado le cobra al agregador, por tarjeta
   /// `{DEBIT,CREDIT,AMEX,INTERNATIONAL}` (decimales 0..1). `null` = venta directa.
   aggregatorPrice            Json?
-  aggregatorPriceIncludesTax Boolean  @default(false)
+  aggregatorPriceIncludesTax Boolean @default(false)
 
   /// Fracción 0..1 del margen procesador→Avoqado que se queda Avoqado.
   /// El resto va al provider. Default 0.50 (50/50, caso casi universal).
@@ -4814,6 +4823,19 @@ model Customer {
   totalSpent        Decimal   @default(0) @db.Decimal(12, 2)
   averageOrderValue Decimal   @default(0) @db.Decimal(10, 2)
 
+  // Referral program — 6 campos
+  referralCode         String?
+  referralCount        Int           @default(0)
+  referralTier         ReferralTier?
+  tierUnlockedAt       DateTime?
+  tierUpModalSeenAt    DateTime?
+  referredByCustomerId String?
+  referredByCustomer   Customer?     @relation("CustomerReferredBy", fields: [referredByCustomerId], references: [id], onDelete: SetNull)
+  referredCustomers    Customer[]    @relation("CustomerReferredBy")
+
+  referralsAsReferrer Referral[] @relation("ReferralsAsReferrer")
+  referralsAsReferred Referral[] @relation("ReferralsAsReferred")
+
   // Additional info
   notes String?  @db.Text
   tags  String[] // ["VIP", "Allergic-Nuts", "Birthday-Dec"]
@@ -4848,9 +4870,11 @@ model Customer {
 
   @@unique([venueId, email]) // Unique email per venue (not globally)
   @@unique([venueId, phone]) // Unique phone per venue (not globally)
+  @@unique([venueId, referralCode])
   @@index([venueId])
   @@index([consumerId])
   @@index([customerGroupId])
+  @@index([referredByCustomerId])
 }
 
 model Consumer {
@@ -4976,6 +5000,85 @@ model LoyaltyTransaction {
 }
 
 // ==========================================
+// NOTE: REFERRAL PROGRAM
+// ==========================================
+
+model ReferralProgramConfig {
+  id      String @id @default(cuid())
+  venueId String @unique
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  active      Boolean   @default(false)
+  activatedAt DateTime?
+
+  // Premio al referido en su primera compra
+  newCustomerDiscountPercent Decimal @default(10) @db.Decimal(5, 2)
+
+  // 3 tiers — defaults del PDF de Mindform
+  tier1ReferralsRequired Int     @default(7)
+  tier1RewardPercent     Decimal @default(15) @db.Decimal(5, 2)
+  tier2ReferralsRequired Int     @default(12)
+  tier2RewardPercent     Decimal @default(20) @db.Decimal(5, 2)
+  tier3ReferralsRequired Int     @default(20)
+  tier3RewardPercent     Decimal @default(25) @db.Decimal(5, 2)
+
+  // Vigencia del cupón emitido al desbloquear tier
+  rewardCouponExpiryDays Int @default(90)
+
+  // Templates editables (es-MX). Nullable = usa defaults del código.
+  welcomeMessageTemplate String? @db.Text
+  tierUpMessageTemplate  String? @db.Text
+
+  // Prefijo del código de referido. Nullable = uppercase del venue slug
+  codePrefix String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Referral {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  referrerCustomerId String
+  referrerCustomer   Customer @relation("ReferralsAsReferrer", fields: [referrerCustomerId], references: [id], onDelete: Cascade)
+
+  referredCustomerId String
+  referredCustomer   Customer @relation("ReferralsAsReferred", fields: [referredCustomerId], references: [id], onDelete: Cascade)
+
+  status ReferralStatus @default(PENDING)
+
+  // Auditoría: quién capturó (staff en TPV / manager en dashboard)
+  capturedByStaffVenueId String?
+  capturedByStaffVenue   StaffVenue? @relation("ReferralsCaptured", fields: [capturedByStaffVenueId], references: [id], onDelete: SetNull)
+
+  // Override de manager sobre regla EXISTING_CUSTOMER
+  forcedOverride Boolean @default(false)
+  overrideReason String? @db.Text
+
+  // Order cuyo PAID gatilla la calificación
+  qualifyingOrderId String?
+  qualifyingOrder   Order?    @relation(fields: [qualifyingOrderId], references: [id], onDelete: SetNull)
+  qualifiedAt       DateTime?
+
+  // Void
+  voidedAt   DateTime?
+  voidReason String?   @db.Text
+
+  // Premio emitido al desbloquear tier (FK al Discount padre, que tiene CouponCode + CustomerDiscount)
+  rewardDiscountId String?
+  rewardDiscount   Discount? @relation("ReferralReward", fields: [rewardDiscountId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  @@index([venueId])
+  @@index([referrerCustomerId])
+  @@index([referredCustomerId])
+  @@index([status])
+}
+
+// ==========================================
 // NOTE: DISCOUNT SYSTEM
 // ==========================================
 
@@ -5046,6 +5149,13 @@ model Discount {
   // Status
   active Boolean @default(true)
 
+  // Source tracking (analytics)
+  source String? // e.g., "REFERRAL_TIER", "MANUAL", "CAMPAIGN", "PROMO". Null = legacy/unspecified.
+
+  // Deactivation audit
+  deactivatedReason String?   @db.Text // Por qué se marcó active=false (e.g., "TIER_REVERSED_BY_REFUND", "MANUAL_REVOCATION")
+  deactivatedAt     DateTime?
+
   // Audit
   createdById String?
   createdBy   StaffVenue? @relation("DiscountCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
@@ -5060,6 +5170,9 @@ model Discount {
   // Back-reference for the optional item-level discount link used by the
   // new TPV Cobrar flow. Not a requirement for legacy endpoints.
   orderItems        OrderItem[]        @relation("OrderItemAppliedDiscount")
+
+  // Referral Program — Referrals para las que este Discount es el premio emitido.
+  referralRewards Referral[] @relation("ReferralReward")
 
   @@index([venueId])
   @@index([isAutomatic])
@@ -10034,4 +10147,16 @@ model MercadoPagoWebhookEvent {
   @@unique([mpUserId, dataId, requestId])
   @@index([dataId])
   @@index([createdAt])
+}
+
+enum ReferralStatus {
+  PENDING // Capturado en TPV/dashboard, Order aún no se cobra
+  QUALIFIED // Order PAID, referidor recibió crédito
+  VOID // Refund, fraude o anulado manualmente
+}
+
+enum ReferralTier {
+  TIER_1
+  TIER_2
+  TIER_3
 }
