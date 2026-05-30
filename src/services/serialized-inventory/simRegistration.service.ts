@@ -224,6 +224,107 @@ export class SimRegistrationService {
   async countPending(organizationId: string): Promise<number> {
     return this.db.simRegistrationRequest.count({ where: { organizationId, status: 'PENDING' } })
   }
+
+  // ==========================================
+  // OWNER STOCK-APPROVAL QUEUE
+  // ==========================================
+
+  /** Count SIMs flagged for owner approval (the queue badge). */
+  async countPendingStockApprovals(organizationId: string): Promise<number> {
+    return this.db.serializedItem.count({
+      where: { organizationId, requiresOwnerApproval: true, status: 'AVAILABLE' },
+    })
+  }
+
+  /** Paginated list of flagged SIMs for the OWNER approval queue. */
+  async listPendingStockApprovals(
+    organizationId: string,
+    opts: { cursor?: string; limit?: number; search?: string } = {},
+  ) {
+    const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200)
+    const where: any = { organizationId, requiresOwnerApproval: true, status: 'AVAILABLE' }
+    if (opts.search) where.serialNumber = { contains: opts.search.trim().toUpperCase() }
+    const rows = await this.db.serializedItem.findMany({
+      where,
+      take: limit + 1,
+      ...(opts.cursor ? { cursor: { id: opts.cursor }, skip: 1 } : {}),
+      orderBy: { id: 'asc' },
+      include: {
+        category: { select: { id: true, name: true } },
+        registeredFromVenue: { select: { id: true, name: true } },
+      },
+    })
+    const hasMore = rows.length > limit
+    const items = hasMore ? rows.slice(0, limit) : rows
+    return {
+      items: items.map(it => ({
+        id: it.id,
+        serialNumber: it.serialNumber,
+        custodyState: it.custodyState,
+        category: it.category,
+        registeredFromVenue: it.registeredFromVenue,
+      })),
+      nextCursor: hasMore ? items[items.length - 1].id : null,
+    }
+  }
+
+  /**
+   * OWNER approves flagged SIMs → they go to the warehouse (ADMIN_HELD), the
+   * flag is cleared, and assignments are wiped (per Isaac: "al aprobar van al
+   * almacén y de ahí se asignan a supervisor → promotor"). Bulk-capable.
+   * Writes a custody event per item for the timeline.
+   *
+   * Event type: COLLECTED_FROM_SUPERVISOR — the closest existing enum value for
+   * "item returned to warehouse / ADMIN_HELD state". The timeline is readable
+   * by context: fromState tells the full story; actorStaffId identifies the
+   * owner who approved. No new enum value is added (would require a migration).
+   */
+  async approveStockItems(input: {
+    organizationId: string
+    reviewedByStaffId: string
+    serializedItemIds: string[]
+  }): Promise<{ approved: number }> {
+    let approved = 0
+    for (const id of input.serializedItemIds) {
+      await this.db.$transaction(async (tx: any) => {
+        const item = await tx.serializedItem.findUnique({ where: { id } })
+        if (!item || item.organizationId !== input.organizationId || !item.requiresOwnerApproval) return
+        const fromState = item.custodyState
+        await tx.serializedItem.update({
+          where: { id },
+          data: {
+            requiresOwnerApproval: false,
+            ownerApprovedAt: new Date(),
+            ownerApprovedById: input.reviewedByStaffId,
+            custodyState: 'ADMIN_HELD',
+            assignedSupervisorId: null,
+            assignedSupervisorAt: null,
+            assignedPromoterId: null,
+            assignedPromoterAt: null,
+            promoterAcceptedAt: null,
+            promoterRejectedAt: null,
+          },
+        })
+        // COLLECTED_FROM_SUPERVISOR: closest existing enum value for
+        // "returned to warehouse / ADMIN_HELD". fromState carries the prior
+        // custody state; actorStaffId is the owner who approved.
+        await tx.serializedItemCustodyEvent.create({
+          data: {
+            serializedItemId: item.id,
+            serialNumber: item.serialNumber,
+            eventType: 'COLLECTED_FROM_SUPERVISOR',
+            fromState,
+            toState: 'ADMIN_HELD',
+            fromStaffId: item.assignedPromoterId ?? item.assignedSupervisorId ?? null,
+            toStaffId: null,
+            actorStaffId: input.reviewedByStaffId,
+          },
+        })
+        approved++
+      })
+    }
+    return { approved }
+  }
 }
 
 export const simRegistrationService = new SimRegistrationService()

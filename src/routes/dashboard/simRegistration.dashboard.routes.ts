@@ -16,6 +16,9 @@ import {
   countRequests,
   listRequests,
   rejectRequest,
+  approveStockItems,
+  countStockApprovals,
+  listStockApprovals,
 } from '../../controllers/dashboard/simRegistration.dashboard.controller'
 
 const router = Router({ mergeParams: true })
@@ -61,6 +64,30 @@ router.post(
   limiter,
   checkPermission('sim-custody:approve-registration'),
   rejectRequest,
+)
+
+router.get(
+  '/pending-stock-approvals',
+  authenticateTokenMiddleware,
+  limiter,
+  checkPermission('sim-custody:approve-registration'),
+  listStockApprovals,
+)
+
+router.get(
+  '/pending-stock-approvals/count',
+  authenticateTokenMiddleware,
+  limiter,
+  checkPermission('sim-custody:approve-registration'),
+  countStockApprovals,
+)
+
+router.post(
+  '/pending-stock-approvals/approve',
+  authenticateTokenMiddleware,
+  limiter,
+  checkPermission('sim-custody:approve-registration'),
+  approveStockItems,
 )
 
 export default router

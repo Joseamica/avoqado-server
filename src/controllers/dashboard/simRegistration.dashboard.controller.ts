@@ -16,6 +16,13 @@ const ApproveBody = z.object({
   serialNumbers: z.array(z.string().min(1)).optional(),
 })
 
+const ApproveStockBody = z.object({
+  serializedItemIds: z
+    .array(z.string().min(1))
+    .min(1, 'Se requiere al menos un artículo')
+    .max(500, 'Máximo 500 artículos por solicitud'),
+})
+
 const RejectBody = z.object({
   reason: z.string().min(1, 'El motivo es requerido'),
   serialNumbers: z.array(z.string().min(1)).optional(),
@@ -110,6 +117,58 @@ export async function rejectRequest(req: Request, res: Response, next: NextFunct
     if (err instanceof Error && err.message === 'REQUEST_NOT_FOUND') {
       return res.status(404).json({ error: 'REQUEST_NOT_FOUND', message: 'Solicitud no encontrada' })
     }
+    next(err)
+  }
+}
+
+// ==========================================
+// STOCK-APPROVAL QUEUE (OWNER)
+// ==========================================
+
+export async function listStockApprovals(req: Request, res: Response, next: NextFunction) {
+  try {
+    if (!tenantOk(req)) {
+      return res.status(403).json({ error: 'TENANT_MISMATCH', message: 'Organización no coincide' })
+    }
+    const { cursor, limit, search } = req.query as { cursor?: string; limit?: string; search?: string }
+    const data = await simRegistrationService.listPendingStockApprovals(req.params.orgId, {
+      cursor,
+      limit: limit ? parseInt(limit, 10) : undefined,
+      search,
+    })
+    res.status(200).json({ success: true, data })
+  } catch (err) {
+    next(err)
+  }
+}
+
+export async function countStockApprovals(req: Request, res: Response, next: NextFunction) {
+  try {
+    if (!tenantOk(req)) {
+      return res.status(403).json({ error: 'TENANT_MISMATCH', message: 'Organización no coincide' })
+    }
+    const count = await simRegistrationService.countPendingStockApprovals(req.params.orgId)
+    res.status(200).json({ success: true, data: { count } })
+  } catch (err) {
+    next(err)
+  }
+}
+
+export async function approveStockItems(req: Request, res: Response, next: NextFunction) {
+  try {
+    if (!tenantOk(req)) {
+      return res.status(403).json({ error: 'TENANT_MISMATCH', message: 'Organización no coincide' })
+    }
+    const parse = ApproveStockBody.safeParse(req.body)
+    if (!parse.success) return mapZodError(res, parse.error)
+    const { userId } = (req as any).authContext ?? {}
+    const result = await simRegistrationService.approveStockItems({
+      organizationId: req.params.orgId,
+      reviewedByStaffId: userId,
+      serializedItemIds: parse.data.serializedItemIds,
+    })
+    res.status(200).json({ success: true, data: result })
+  } catch (err) {
     next(err)
   }
 }
