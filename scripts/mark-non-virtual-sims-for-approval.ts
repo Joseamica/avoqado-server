@@ -22,7 +22,7 @@
  *   ORG_ID=... VIRTUAL_VENUE_ID=... npx ts-node ... --apply              # overrides
  */
 import prisma from '../src/utils/prismaClient'
-import { logger } from '../src/config/logger'
+import logger from '../src/config/logger'
 
 const ORG_ID = process.env.ORG_ID || 'cmietitbn000zpr2d8213qkzq' // PlayTelecom
 const VIRTUAL_VENUE_ID = process.env.VIRTUAL_VENUE_ID || 'cmnv_virtual_playtelecom'
