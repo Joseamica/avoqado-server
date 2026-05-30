@@ -385,6 +385,21 @@ export class SerializedInventoryService {
     const mode: SimCustodyEnforcementMode = org?.simCustodyEnforcementMode ?? 'OFF'
     if (mode === 'OFF') return null
 
+    // Owner-approval gate: a flagged SIM is NOT sellable regardless of custody
+    // until the OWNER approves it (origin-based rule — non-Virtual stock needs
+    // manual approval). Reuses SIM_NOT_ACCEPTED so the TPV handles it identically.
+    if (item.requiresOwnerApproval) {
+      if (mode === 'WARN') {
+        logger.warn('sim requires owner approval (WARN mode)', {
+          serialNumber: item.serialNumber,
+          custodyState: item.custodyState,
+          actorStaffId: opts.staffId,
+        })
+        return 'sim-requires-owner-approval'
+      }
+      throw new SimCustodyError('SIM_NOT_ACCEPTED')
+    }
+
     const custodyOk = item.custodyState === 'PROMOTER_HELD' && item.assignedPromoterId === opts.staffId
     if (custodyOk) return null
 
