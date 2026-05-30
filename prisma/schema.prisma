@@ -7443,6 +7443,13 @@ model SerializedItem {
   promoterRejectedAt   DateTime?
   custodyVersion       Int                        @default(0)
 
+  // Owner-approval gate (PlayTelecom: only "Virtual"-origin SIMs are trusted;
+  // everything else needs OWNER approval before it can be sold). Additive,
+  // default false = no behavior change for any existing item or other org.
+  requiresOwnerApproval Boolean   @default(false)
+  ownerApprovedAt       DateTime?
+  ownerApprovedById     String?
+
   custodyEvents SerializedItemCustodyEvent[] @relation("CustodyEventItem")
 
   // Audit
@@ -7458,6 +7465,7 @@ model SerializedItem {
   @@index([serialNumber])
   @@index([assignedSupervisorId, custodyState])
   @@index([assignedPromoterId, custodyState])
+  @@index([organizationId, requiresOwnerApproval])
 }
 
 // ===== CREDIT ASSESSMENT ENUMS =====
