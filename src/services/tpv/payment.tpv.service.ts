@@ -20,6 +20,28 @@ import { logAction } from '../dashboard/activity-log.service'
 import { validateStaffVenue as validateStaffVenueShared } from '../../utils/staff-venue.util'
 
 /**
+ * Build the slim digitalReceipt response shape with a constructed `receiptUrl`.
+ *
+ * The TPV client (`FastPaymentRecorder`) requires `digitalReceipt.receiptUrl` (non-null). The
+ * fresh-record path constructs it inline, but the idempotent / existing-payment branches used to
+ * return the raw Prisma receipt (which has NO `receiptUrl` field) → the TPV crashed parsing the
+ * response and the offline queue never cleared (stuck "pago pendiente" + blank QR). Use this
+ * everywhere a digitalReceipt is returned so every response shape is consistent.
+ */
+function mapDigitalReceiptResponse<T extends { accessKey: string }>(
+  receipt: T | null | undefined,
+): (T & { receiptUrl: string }) | null {
+  if (!receipt) return null
+  // Purely ADDITIVE: keep every field the idempotent branches already returned (id, accessKey,
+  // dataSnapshot, status, …) and just ADD the constructed `receiptUrl` the TPV client needs.
+  // Removes nothing → cannot break any consumer that relied on the previous shape.
+  return {
+    ...receipt,
+    receiptUrl: `${process.env.FRONTEND_URL || 'https://dashboardv2.avoqado.io'}/receipts/public/${receipt.accessKey}`,
+  }
+}
+
+/**
  * Convert TPV rating strings to numeric values for database storage
  *
  * **Supports:**
@@ -1298,7 +1320,7 @@ export async function recordOrderPayment(
         idempotencyKey: paymentData.idempotencyKey,
         existingPaymentId: existingByKey.id,
       })
-      return { ...existingByKey, digitalReceipt: existingByKey.receipts[0] || null }
+      return { ...existingByKey, digitalReceipt: mapDigitalReceiptResponse(existingByKey.receipts[0]) }
     }
   }
 
@@ -1329,7 +1351,7 @@ export async function recordOrderPayment(
       // Return existing payment with receipt (safe retry - client gets same response)
       return {
         ...existingPayment,
-        digitalReceipt: existingPayment.receipts[0] || null,
+        digitalReceipt: mapDigitalReceiptResponse(existingPayment.receipts[0]),
       }
     }
   }
@@ -1693,7 +1715,7 @@ export async function recordOrderPayment(
         })
 
         if (winner) {
-          return { ...winner, digitalReceipt: winner.receipts[0] || null }
+          return { ...winner, digitalReceipt: mapDigitalReceiptResponse(winner.receipts[0]) }
         }
 
         logger.error('🚨 [recordOrderPayment] P2002 on idempotencyKey but winner not found — should be impossible', {
@@ -2050,7 +2072,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         idempotencyKey: paymentData.idempotencyKey,
         existingPaymentId: existingByKey.id,
       })
-      return { ...existingByKey, digitalReceipt: existingByKey.receipts[0] || null }
+      return { ...existingByKey, digitalReceipt: mapDigitalReceiptResponse(existingByKey.receipts[0]) }
     }
   }
 
@@ -2083,7 +2105,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       // Return existing payment with receipt (safe retry - client gets same response)
       return {
         ...existingPayment,
-        digitalReceipt: existingPayment.receipts[0] || null,
+        digitalReceipt: mapDigitalReceiptResponse(existingPayment.receipts[0]),
       }
     }
   }
@@ -2418,7 +2440,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         })
 
         if (winner) {
-          return { ...winner, digitalReceipt: winner.receipts[0] || null }
+          return { ...winner, digitalReceipt: mapDigitalReceiptResponse(winner.receipts[0]) }
         }
 
         logger.error('🚨 [recordFastPayment] P2002 on idempotencyKey but winner not found — should be impossible', {
