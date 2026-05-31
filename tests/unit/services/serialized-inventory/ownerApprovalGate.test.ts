@@ -41,11 +41,7 @@ function makeItem(overrides: Partial<SerializedItem> = {}): SerializedItem {
 
 // Minimal PrismaClient mock: only the delegates touched by ensureSellable /
 // applyCustodyPrecheck.
-function makeMockDb(
-  item: SerializedItem | null,
-  enforcementMode: SimCustodyEnforcementMode,
-  categoryName: string | null = null,
-) {
+function makeMockDb(item: SerializedItem | null, enforcementMode: SimCustodyEnforcementMode, categoryName: string | null = null) {
   return {
     serializedItem: {
       findUnique: jest.fn().mockResolvedValue(item),

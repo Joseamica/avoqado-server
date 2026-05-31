@@ -35,17 +35,12 @@ async function main() {
   // Business rule: eSIMs are always sellable and must never be flagged.
   const esimCategories = await prisma.itemCategory.findMany({
     where: {
-      OR: [
-        { name: { contains: 'e-sim', mode: 'insensitive' } },
-        { name: { contains: 'esim', mode: 'insensitive' } },
-      ],
+      OR: [{ name: { contains: 'e-sim', mode: 'insensitive' } }, { name: { contains: 'esim', mode: 'insensitive' } }],
     },
     select: { id: true, name: true },
   })
   const esimCategoryIds = esimCategories.map(c => c.id)
-  logger.info(
-    `[mark-non-virtual] eSIM categories excluded: ${esimCategories.map(c => c.name).join(', ') || '(none)'}`,
-  )
+  logger.info(`[mark-non-virtual] eSIM categories excluded: ${esimCategories.map(c => c.name).join(', ') || '(none)'}`)
 
   // Items in scope: this org, AVAILABLE, NOT from the Virtual venue (incl. NULL origin),
   // and NOT in an eSIM category.
