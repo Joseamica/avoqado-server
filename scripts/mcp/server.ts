@@ -1,3 +1,5 @@
+// MUST be first: reroute app logging off stdout before chatty services load.
+import { mcpStdout } from './stdout-guard'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { describeDbTarget, text } from './context'
@@ -25,7 +27,7 @@ async function main() {
   registerUserTools(server)
   registerCreateTools(server)
 
-  const transport = new StdioServerTransport()
+  const transport = new StdioServerTransport(process.stdin, mcpStdout)
   await server.connect(transport)
   // Logs MUST go to stderr — stdout is the MCP protocol channel.
   console.error(`[avoqado-admin MCP] connected · DB target: ${describeDbTarget()}`)

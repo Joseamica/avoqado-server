@@ -87,12 +87,36 @@ export function registerCreateTools(server: McpServer) {
       performedBy: z.string().optional().describe('Acting staff id; defaults to MCP_ADMIN_STAFF_ID'),
       confirm: z.boolean().default(false).describe('false = preview only; true = execute'),
     },
-    async ({ providerId, externalMerchantId, alias, displayName, venueId, blumonSerialNumber, blumonEnvironment, clabeNumber, bankName, accountHolder, performedBy, confirm }) => {
+    async ({
+      providerId,
+      externalMerchantId,
+      alias,
+      displayName,
+      venueId,
+      blumonSerialNumber,
+      blumonEnvironment,
+      clabeNumber,
+      bankName,
+      accountHolder,
+      performedBy,
+      confirm,
+    }) => {
       const actor = resolveActor(performedBy)
       const provider = await prisma.paymentProvider.findUnique({ where: { id: providerId }, select: { code: true, name: true } })
       if (!provider) return text({ error: `Provider ${providerId} not found (use list_payment_providers)` })
 
-      const data = { providerId, externalMerchantId, alias, displayName, venueId, blumonSerialNumber, blumonEnvironment, clabeNumber, bankName, accountHolder }
+      const data = {
+        providerId,
+        externalMerchantId,
+        alias,
+        displayName,
+        venueId,
+        blumonSerialNumber,
+        blumonEnvironment,
+        clabeNumber,
+        bankName,
+        accountHolder,
+      }
 
       return confirmGuard({
         tool: 'create_merchant_account',
@@ -127,7 +151,19 @@ export function registerCreateTools(server: McpServer) {
       performedBy: z.string().optional().describe('Acting staff id; defaults to MCP_ADMIN_STAFF_ID'),
       confirm: z.boolean().default(false).describe('false = preview only; true = execute'),
     },
-    async ({ venueId, businessName, contactEmail, providerId, channelName, rfc, contactPhone, website, sandboxMode, performedBy, confirm }) => {
+    async ({
+      venueId,
+      businessName,
+      contactEmail,
+      providerId,
+      channelName,
+      rfc,
+      contactPhone,
+      website,
+      sandboxMode,
+      performedBy,
+      confirm,
+    }) => {
       const actor = resolveActor(performedBy)
       const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { name: true } })
       if (!venue) return text({ error: `Venue ${venueId} not found (use list_venues)` })
