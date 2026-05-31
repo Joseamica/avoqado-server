@@ -385,6 +385,18 @@ export class SerializedInventoryService {
     const mode: SimCustodyEnforcementMode = org?.simCustodyEnforcementMode ?? 'OFF'
     if (mode === 'OFF') return null
 
+    // eSIMs are always sellable — exempt from ALL custody/approval gates
+    // (business rule: "los eSIM sí se venden, no se deben restringir").
+    // Detect by category name (e-sim / esim, case-insensitive) so it's robust
+    // across orgs, not tied to a hardcoded category id.
+    const category = await this.db.itemCategory.findUnique({
+      where: { id: item.categoryId },
+      select: { name: true },
+    })
+    if (category && /e-?sim/i.test(category.name)) {
+      return null
+    }
+
     // Owner-approval gate: a flagged SIM is NOT sellable regardless of custody
     // until the OWNER approves it (origin-based rule — non-Virtual stock needs
     // manual approval). Reuses SIM_NOT_ACCEPTED so the TPV handles it identically.

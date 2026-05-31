@@ -31,11 +31,29 @@ const APPLY = process.argv.includes('--apply')
 async function main() {
   logger.info(`[mark-non-virtual] org=${ORG_ID} virtualVenue=${VIRTUAL_VENUE_ID} apply=${APPLY}`)
 
-  // Items in scope: this org, AVAILABLE, NOT from the Virtual venue (incl. NULL origin).
+  // Resolve eSIM category ids so we can exclude them from the scope.
+  // Business rule: eSIMs are always sellable and must never be flagged.
+  const esimCategories = await prisma.itemCategory.findMany({
+    where: {
+      OR: [
+        { name: { contains: 'e-sim', mode: 'insensitive' } },
+        { name: { contains: 'esim', mode: 'insensitive' } },
+      ],
+    },
+    select: { id: true, name: true },
+  })
+  const esimCategoryIds = esimCategories.map(c => c.id)
+  logger.info(
+    `[mark-non-virtual] eSIM categories excluded: ${esimCategories.map(c => c.name).join(', ') || '(none)'}`,
+  )
+
+  // Items in scope: this org, AVAILABLE, NOT from the Virtual venue (incl. NULL origin),
+  // and NOT in an eSIM category.
   const scopeWhere = {
     organizationId: ORG_ID,
     status: 'AVAILABLE' as const,
     NOT: { registeredFromVenueId: VIRTUAL_VENUE_ID },
+    categoryId: { notIn: esimCategoryIds },
   }
 
   const total = await prisma.serializedItem.count({ where: scopeWhere })

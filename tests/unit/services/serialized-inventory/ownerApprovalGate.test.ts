@@ -41,7 +41,11 @@ function makeItem(overrides: Partial<SerializedItem> = {}): SerializedItem {
 
 // Minimal PrismaClient mock: only the delegates touched by ensureSellable /
 // applyCustodyPrecheck.
-function makeMockDb(item: SerializedItem | null, enforcementMode: SimCustodyEnforcementMode) {
+function makeMockDb(
+  item: SerializedItem | null,
+  enforcementMode: SimCustodyEnforcementMode,
+  categoryName: string | null = null,
+) {
   return {
     serializedItem: {
       findUnique: jest.fn().mockResolvedValue(item),
@@ -52,6 +56,9 @@ function makeMockDb(item: SerializedItem | null, enforcementMode: SimCustodyEnfo
     },
     venue: {
       findUnique: jest.fn().mockResolvedValue(null), // resolveOrgIdFromVenue — not used (organizationId is set)
+    },
+    itemCategory: {
+      findUnique: jest.fn().mockResolvedValue(categoryName !== null ? { name: categoryName } : null),
     },
   }
 }
@@ -143,6 +150,59 @@ describe('owner-approval gate (applyCustodyPrecheck via ensureSellable)', () => 
 
       const result = await service2.ensureSellable(VENUE_ID, SERIAL, { staffId: STAFF_ID })
       expect(result.deprecationWarning).toBeNull()
+    })
+  })
+
+  describe('eSIM exemption', () => {
+    // Business rule: eSIMs are always sellable — they must NOT be restricted by
+    // ANY custody gate (requiresOwnerApproval OR custody mismatch).
+    // Detection: category name matches /e-?sim/i.
+
+    it('does NOT throw for eSIM item with requiresOwnerApproval=true in ENFORCE mode', async () => {
+      // Item flagged as requiresOwnerApproval — would normally throw — but it's an eSIM.
+      const item = makeItem({ requiresOwnerApproval: true, categoryId: 'cat-esim' })
+      const db = makeMockDb(item, 'ENFORCE', 'E-SIM de promotor')
+
+      const service = new SerializedInventoryService(db as any)
+
+      const result = await service.ensureSellable(VENUE_ID, SERIAL, { staffId: STAFF_ID })
+      expect(result.deprecationWarning).toBeNull()
+    })
+
+    it('does NOT throw for eSIM item with wrong custody (not PROMOTER_HELD) in ENFORCE mode', async () => {
+      // Custody mismatch — would normally throw — but it's an eSIM.
+      const item = makeItem({
+        requiresOwnerApproval: false,
+        custodyState: 'SUPERVISOR_HELD' as SerializedItemCustodyState,
+        assignedPromoterId: null,
+        categoryId: 'cat-esim',
+      })
+      const db = makeMockDb(item, 'ENFORCE', 'E-SIM de promotor')
+
+      const service = new SerializedInventoryService(db as any)
+
+      const result = await service.ensureSellable(VENUE_ID, SERIAL, { staffId: STAFF_ID })
+      expect(result.deprecationWarning).toBeNull()
+    })
+
+    it('detects eSIM with lowercase "esim" in category name', async () => {
+      const item = makeItem({ requiresOwnerApproval: true, categoryId: 'cat-esim2' })
+      const db = makeMockDb(item, 'ENFORCE', 'esim prepago')
+
+      const service = new SerializedInventoryService(db as any)
+
+      const result = await service.ensureSellable(VENUE_ID, SERIAL, { staffId: STAFF_ID })
+      expect(result.deprecationWarning).toBeNull()
+    })
+
+    it('still throws for a NON-eSIM item with requiresOwnerApproval=true in ENFORCE mode', async () => {
+      // A regular SIM (not eSIM) flagged for approval — must still throw.
+      const item = makeItem({ requiresOwnerApproval: true, categoryId: 'cat-sim' })
+      const db = makeMockDb(item, 'ENFORCE', 'SIM Física')
+
+      const service = new SerializedInventoryService(db as any)
+
+      await expect(service.ensureSellable(VENUE_ID, SERIAL, { staffId: STAFF_ID })).rejects.toThrow(SimCustodyError)
     })
   })
 })
