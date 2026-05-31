@@ -17,10 +17,7 @@ const ApproveBody = z.object({
 })
 
 const ApproveStockBody = z.object({
-  serializedItemIds: z
-    .array(z.string().min(1))
-    .min(1, 'Se requiere al menos un artículo')
-    .max(500, 'Máximo 500 artículos por solicitud'),
+  serializedItemIds: z.array(z.string().min(1)).min(1, 'Se requiere al menos un artículo').max(500, 'Máximo 500 artículos por solicitud'),
 })
 
 const RejectBody = z.object({

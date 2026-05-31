@@ -28,9 +28,7 @@ import { validateStaffVenue as validateStaffVenueShared } from '../../utils/staf
  * response and the offline queue never cleared (stuck "pago pendiente" + blank QR). Use this
  * everywhere a digitalReceipt is returned so every response shape is consistent.
  */
-function mapDigitalReceiptResponse<T extends { accessKey: string }>(
-  receipt: T | null | undefined,
-): (T & { receiptUrl: string }) | null {
+function mapDigitalReceiptResponse<T extends { accessKey: string }>(receipt: T | null | undefined): (T & { receiptUrl: string }) | null {
   if (!receipt) return null
   // Purely ADDITIVE: keep every field the idempotent branches already returned (id, accessKey,
   // dataSnapshot, status, …) and just ADD the constructed `receiptUrl` the TPV client needs.

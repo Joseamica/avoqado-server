@@ -237,10 +237,7 @@ export class SimRegistrationService {
   }
 
   /** Paginated list of flagged SIMs for the OWNER approval queue. */
-  async listPendingStockApprovals(
-    organizationId: string,
-    opts: { cursor?: string; limit?: number; search?: string } = {},
-  ) {
+  async listPendingStockApprovals(organizationId: string, opts: { cursor?: string; limit?: number; search?: string } = {}) {
     const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200)
     const where: any = { organizationId, requiresOwnerApproval: true, status: 'AVAILABLE' }
     if (opts.search) where.serialNumber = { contains: opts.search.trim().toUpperCase() }

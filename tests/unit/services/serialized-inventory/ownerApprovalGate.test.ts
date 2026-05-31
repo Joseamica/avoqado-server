@@ -7,12 +7,7 @@
 
 import { SerializedInventoryService } from '@/services/serialized-inventory/serializedInventory.service'
 import { SimCustodyError } from '@/lib/sim-custody-error-codes'
-import {
-  SerializedItem,
-  SerializedItemCustodyState,
-  SerializedItemStatus,
-  SimCustodyEnforcementMode,
-} from '@prisma/client'
+import { SerializedItem, SerializedItemCustodyState, SerializedItemStatus, SimCustodyEnforcementMode } from '@prisma/client'
 
 // Minimal SerializedItem factory — only fields the gate code reads.
 function makeItem(overrides: Partial<SerializedItem> = {}): SerializedItem {
@@ -70,7 +65,7 @@ describe('owner-approval gate (applyCustodyPrecheck via ensureSellable)', () => 
     it('throws SimCustodyError(SIM_NOT_ACCEPTED) when requiresOwnerApproval=true', async () => {
       const item = makeItem({ requiresOwnerApproval: true })
       const db = makeMockDb(item, 'ENFORCE')
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
       const service = new SerializedInventoryService(db as any)
 
       await expect(service.ensureSellable(VENUE_ID, SERIAL, { staffId: STAFF_ID })).rejects.toThrow(SimCustodyError)
@@ -90,7 +85,7 @@ describe('owner-approval gate (applyCustodyPrecheck via ensureSellable)', () => 
         assignedPromoterId: STAFF_ID,
       })
       const db = makeMockDb(item, 'ENFORCE')
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
       const service = new SerializedInventoryService(db as any)
 
       const result = await service.ensureSellable(VENUE_ID, SERIAL, { staffId: STAFF_ID })
@@ -102,7 +97,7 @@ describe('owner-approval gate (applyCustodyPrecheck via ensureSellable)', () => 
     it('returns the deprecation warning key (not throw) when requiresOwnerApproval=true', async () => {
       const item = makeItem({ requiresOwnerApproval: true })
       const db = makeMockDb(item, 'WARN')
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
       const service = new SerializedInventoryService(db as any)
 
       const result = await service.ensureSellable(VENUE_ID, SERIAL, { staffId: STAFF_ID })
@@ -114,7 +109,7 @@ describe('owner-approval gate (applyCustodyPrecheck via ensureSellable)', () => 
     it('skips the gate entirely (returns null warning) regardless of requiresOwnerApproval', async () => {
       const item = makeItem({ requiresOwnerApproval: true })
       const db = makeMockDb(item, 'OFF')
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
       const service = new SerializedInventoryService(db as any)
 
       const result = await service.ensureSellable(VENUE_ID, SERIAL, { staffId: STAFF_ID })
@@ -125,7 +120,7 @@ describe('owner-approval gate (applyCustodyPrecheck via ensureSellable)', () => 
   describe('edge cases', () => {
     it('returns null warning when item is not found (no item in db)', async () => {
       const db = makeMockDb(null, 'ENFORCE')
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
       const service = new SerializedInventoryService(db as any)
 
       const result = await service.ensureSellable(VENUE_ID, SERIAL, { staffId: STAFF_ID })
@@ -135,7 +130,7 @@ describe('owner-approval gate (applyCustodyPrecheck via ensureSellable)', () => 
     it('skips gate (legacy path) when no staffId is provided', async () => {
       const item = makeItem({ requiresOwnerApproval: true })
       const db = makeMockDb(item, 'ENFORCE')
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
       const service = new SerializedInventoryService(db as any)
 
       // ensureSellable requires staffId — call applyCustodyPrecheck path
@@ -143,7 +138,7 @@ describe('owner-approval gate (applyCustodyPrecheck via ensureSellable)', () => 
       // never reached when organizationId is null and venueId resolves to null.
       const itemNoOrg = makeItem({ requiresOwnerApproval: true, organizationId: null, venueId: null })
       const db2 = makeMockDb(itemNoOrg, 'ENFORCE')
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
       const service2 = new SerializedInventoryService(db2 as any)
 
       const result = await service2.ensureSellable(VENUE_ID, SERIAL, { staffId: STAFF_ID })
