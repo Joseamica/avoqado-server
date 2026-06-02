@@ -27,6 +27,8 @@
  * the bottom for why it can't run under the mocked-Prisma unit harness).
  */
 
+import { Prisma } from '@prisma/client'
+
 import {
   buildPaymentWhereFilter,
   buildPaymentSqlClause,
@@ -36,6 +38,24 @@ import {
   type PaymentMethodFilter,
   type CardTypeFilter,
 } from '@/services/dashboard/sales-summary.dashboard.service'
+
+// NULL-safe "not international" OR-form shared by CREDIT / DEBIT / AMEX.
+// Mirrors buildPaymentWhereFilter so the expected shapes stay in one place.
+// REGRESSION GUARD: a naive `NOT: { processorData: { path, equals: true } }`
+// (the original bug) drops rows with NULL / absent processorData. Real payments
+// frequently lack the flag, so the report under-counted CREDIT/DEBIT badly
+// (incident 2026-06-02). These three OR branches restore those rows.
+const NOT_INTERNATIONAL = {
+  OR: [
+    { processorData: { equals: Prisma.DbNull } },
+    { processorData: { path: ['isInternational'], equals: Prisma.AnyNull } },
+    { NOT: { processorData: { path: ['isInternational'], equals: true } } },
+  ],
+}
+// NULL-safe "not AMEX brand": includes rows with no captured cardBrand.
+const NOT_AMEX_BRAND = {
+  OR: [{ cardBrand: null }, { cardBrand: { not: 'AMERICAN_EXPRESS' } }],
+}
 
 // ============================================================
 // buildPaymentWhereFilter — Prisma where fragment
@@ -74,27 +94,25 @@ describe('buildPaymentWhereFilter', () => {
     })
   })
 
-  it('maps CARD + AMEX to AMEX brand, card methods, and NOT-international', () => {
+  it('maps CARD + AMEX to AMEX brand, card methods, and NULL-safe NOT-international', () => {
     expect(buildPaymentWhereFilter('CARD', 'AMEX')).toEqual({
       method: { in: ['CREDIT_CARD', 'DEBIT_CARD'] },
       cardBrand: 'AMERICAN_EXPRESS',
-      NOT: { processorData: { path: ['isInternational'], equals: true } },
+      AND: [NOT_INTERNATIONAL],
     })
   })
 
-  it('maps CARD + CREDIT to CREDIT_CARD, excluding AMEX brand and international', () => {
+  it('maps CARD + CREDIT to CREDIT_CARD with NULL-safe AMEX + international exclusions', () => {
     expect(buildPaymentWhereFilter('CARD', 'CREDIT')).toEqual({
       method: 'CREDIT_CARD',
-      cardBrand: { not: 'AMERICAN_EXPRESS' },
-      NOT: { processorData: { path: ['isInternational'], equals: true } },
+      AND: [NOT_AMEX_BRAND, NOT_INTERNATIONAL],
     })
   })
 
-  it('maps CARD + DEBIT to DEBIT_CARD, excluding AMEX brand and international', () => {
+  it('maps CARD + DEBIT to DEBIT_CARD with NULL-safe AMEX + international exclusions', () => {
     expect(buildPaymentWhereFilter('CARD', 'DEBIT')).toEqual({
       method: 'DEBIT_CARD',
-      cardBrand: { not: 'AMERICAN_EXPRESS' },
-      NOT: { processorData: { path: ['isInternational'], equals: true } },
+      AND: [NOT_AMEX_BRAND, NOT_INTERNATIONAL],
     })
   })
 })
@@ -201,22 +219,63 @@ describe('buildPaymentWhereFilter <-> buildPaymentSqlClause parity', () => {
     expect(whereIsEmpty).toBe(clauseIsEmpty)
   })
 
+  // The Prisma fragment nests its exclusions inside AND/OR/NOT arrays (the
+  // NULL-safe forms), so a shallow `key in where` check misses them. Walk the
+  // whole tree and report which column keys appear anywhere.
+  const keyAppears = (node: unknown, key: string): boolean => {
+    if (Array.isArray(node)) return node.some(n => keyAppears(n, key))
+    if (node && typeof node === 'object') {
+      return Object.entries(node as Record<string, unknown>).some(([k, v]) => k === key || keyAppears(v, key))
+    }
+    return false
+  }
+
   it.each(combos)('agree on constraining the AMEX brand for (%s, %s)', (pm, ct) => {
-    const where = buildPaymentWhereFilter(pm, ct) as Record<string, unknown>
+    const where = buildPaymentWhereFilter(pm, ct)
     const clause = buildPaymentSqlClause(pm, ct)
-    const whereTouchesBrand = 'cardBrand' in where
-    const clauseTouchesBrand = clause.includes('"cardBrand"')
-    expect(whereTouchesBrand).toBe(clauseTouchesBrand)
+    expect(keyAppears(where, 'cardBrand')).toBe(clause.includes('"cardBrand"'))
   })
 
   it.each(combos)('agree on constraining the international flag for (%s, %s)', (pm, ct) => {
-    const where = buildPaymentWhereFilter(pm, ct) as Record<string, unknown>
+    const where = buildPaymentWhereFilter(pm, ct)
     const clause = buildPaymentSqlClause(pm, ct)
-    // Prisma encodes international either as a positive `processorData` match
-    // (INTERNATIONAL) or a `NOT` exclusion (AMEX / CREDIT / DEBIT).
-    const whereTouchesIntl = 'processorData' in where || 'NOT' in where
-    const clauseTouchesIntl = clause.includes('isInternational')
-    expect(whereTouchesIntl).toBe(clauseTouchesIntl)
+    expect(keyAppears(where, 'processorData')).toBe(clause.includes('isInternational'))
+  })
+})
+
+// ============================================================
+// Regression guard — NULL / absent fields must NOT be dropped
+// (incident 2026-06-02: CREDIT 157→20, DEBIT 117→0, negative totals)
+// ============================================================
+
+describe('buildPaymentWhereFilter NULL-safety (regression)', () => {
+  // A deep walk that asserts the buggy naive shapes are NOT used, and the
+  // NULL-inclusive OR branches ARE present, for CREDIT / DEBIT / AMEX.
+  const json = (v: unknown) => JSON.stringify(v, (_k, val) => (typeof val === 'bigint' ? String(val) : val))
+
+  it('CREDIT includes a NULL cardBrand branch (not a bare `not` that drops NULLs)', () => {
+    const where = buildPaymentWhereFilter('CARD', 'CREDIT')
+    // The fix lives in an OR with an explicit { cardBrand: null } branch.
+    expect(json(where)).toContain('"cardBrand":null')
+    // The naive top-level form { cardBrand: { not: 'AMERICAN_EXPRESS' } } (which
+    // silently excludes NULL brands in Postgres) must NOT be the whole story.
+    expect((where as Record<string, unknown>).cardBrand).toBeUndefined()
+  })
+
+  it('CREDIT/DEBIT/AMEX all carry the NULL-safe NOT_INTERNATIONAL OR (DbNull + AnyNull + NOT)', () => {
+    for (const ct of ['CREDIT', 'DEBIT', 'AMEX'] as const) {
+      const where = buildPaymentWhereFilter('CARD', ct)
+      // Must reach the int'l flag via the 3-branch OR, never a bare top-level NOT.
+      expect((where as Record<string, unknown>).NOT).toBeUndefined()
+      expect(json(where)).toContain('isInternational')
+    }
+  })
+
+  it('INTERNATIONAL stays a positive match (no NULL hazard)', () => {
+    expect(buildPaymentWhereFilter('CARD', 'INTERNATIONAL')).toEqual({
+      method: { in: ['CREDIT_CARD', 'DEBIT_CARD'] },
+      processorData: { path: ['isInternational'], equals: true },
+    })
   })
 })
 

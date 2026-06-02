@@ -216,7 +216,28 @@ export function buildPaymentWhereFilter(
     return { method: { in: ['CREDIT_CARD', 'DEBIT_CARD'] } }
   }
 
+  // ── NULL-safe exclusions (must mirror buildPaymentSqlClause exactly) ──
+  // Prisma's scalar `not` and JSON-path `NOT { equals }` BOTH drop rows where
+  // the column / JSON key is NULL or absent (SQL `x <> v` and `NOT (NULL = v)`
+  // are NULL → excluded). Real payments very often have a NULL cardBrand and a
+  // NULL/absent processorData.isInternational, so the naive negation silently
+  // dropped the vast majority of CREDIT/DEBIT rows (incident found via
+  // /full-testing 2026-06-02: CREDIT 157→20, DEBIT 117→0, negative totals when
+  // the Prisma count disagreed with the SQL fee sum). These OR-forms restore
+  // the NULL/absent rows so Prisma matches the SQL clause 1:1.
+  const notAmexBrand: Prisma.PaymentWhereInput = {
+    OR: [{ cardBrand: null }, { cardBrand: { not: 'AMERICAN_EXPRESS' } }],
+  }
+  const notInternational: Prisma.PaymentWhereInput = {
+    OR: [
+      { processorData: { equals: Prisma.DbNull } }, // column is SQL NULL
+      { processorData: { path: ['isInternational'], equals: Prisma.AnyNull } }, // key absent / JSON null
+      { NOT: { processorData: { path: ['isInternational'], equals: true } } }, // present & not true
+    ],
+  }
+
   if (cardType === 'INTERNATIONAL') {
+    // Positive match — no NULL hazard (only rows explicitly flagged true).
     return {
       method: { in: ['CREDIT_CARD', 'DEBIT_CARD'] },
       processorData: { path: ['isInternational'], equals: true },
@@ -227,15 +248,15 @@ export function buildPaymentWhereFilter(
     return {
       method: { in: ['CREDIT_CARD', 'DEBIT_CARD'] },
       cardBrand: 'AMERICAN_EXPRESS',
-      NOT: { processorData: { path: ['isInternational'], equals: true } },
+      AND: [notInternational],
     }
   }
 
-  // CREDIT or DEBIT — exclude AMEX brand and exclude international flag
+  // CREDIT or DEBIT — exclude AMEX brand and exclude international flag,
+  // both NULL-safe so cards with no captured brand / processorData still count.
   return {
     method: cardType === 'CREDIT' ? 'CREDIT_CARD' : 'DEBIT_CARD',
-    cardBrand: { not: 'AMERICAN_EXPRESS' },
-    NOT: { processorData: { path: ['isInternational'], equals: true } },
+    AND: [notAmexBrand, notInternational],
   }
 }
 
