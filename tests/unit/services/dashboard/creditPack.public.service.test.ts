@@ -50,6 +50,10 @@ const CUSTOMER_ID = 'cust-456'
 const PACK_ID = 'pack-123'
 const BALANCE_ID = 'balance-789'
 
+// Future expiration date for ACTIVE purchase mocks. Computed relative to "now" so it
+// never goes stale — a hardcoded absolute date becomes a time-bomb the moment it passes.
+const FUTURE_EXPIRES_AT = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000)
+
 const createMockPack = (overrides: Record<string, any> = {}) => ({
   id: PACK_ID,
   venueId: VENUE_ID,
@@ -120,7 +124,7 @@ const createMockPurchase = (overrides: Record<string, any> = {}) => ({
   stripePaymentIntentId: 'pi_test_abc123',
   amountPaid: new Decimal(600),
   status: CreditPurchaseStatus.ACTIVE,
-  expiresAt: new Date('2026-06-01'),
+  expiresAt: FUTURE_EXPIRES_AT,
   createdAt: new Date('2026-03-01'),
   updatedAt: new Date('2026-03-01'),
   ...overrides,
@@ -939,7 +943,7 @@ describe('CreditPack Public Service', () => {
         remainingQuantity: 5,
         creditPackPurchase: {
           id: 'purchase-001',
-          expiresAt: new Date('2026-06-01'),
+          expiresAt: FUTURE_EXPIRES_AT,
           creditPack: { name: 'Pack Fitness' },
         },
       })
@@ -1033,7 +1037,7 @@ describe('CreditPack Public Service', () => {
       }
       const purchase = {
         status: CreditPurchaseStatus.ACTIVE,
-        expiresAt: new Date('2026-06-01'),
+        expiresAt: FUTURE_EXPIRES_AT,
         venueId: VENUE_ID,
         customerId: CUSTOMER_ID,
       }
@@ -1109,7 +1113,7 @@ describe('CreditPack Public Service', () => {
       }
       const purchase = {
         status: CreditPurchaseStatus.EXHAUSTED,
-        expiresAt: new Date('2026-06-01'),
+        expiresAt: FUTURE_EXPIRES_AT,
         venueId: VENUE_ID,
         customerId: CUSTOMER_ID,
       }
@@ -1155,7 +1159,7 @@ describe('CreditPack Public Service', () => {
       }
       const purchase = {
         status: CreditPurchaseStatus.ACTIVE,
-        expiresAt: new Date('2026-06-01'),
+        expiresAt: FUTURE_EXPIRES_AT,
         venueId: VENUE_ID,
         customerId: 'different-customer-id', // Mismatch
       }
@@ -1179,7 +1183,7 @@ describe('CreditPack Public Service', () => {
       }
       const purchase = {
         status: CreditPurchaseStatus.ACTIVE,
-        expiresAt: new Date('2026-06-01'),
+        expiresAt: FUTURE_EXPIRES_AT,
         venueId: 'different-venue-id', // Mismatch
         customerId: CUSTOMER_ID,
       }
@@ -1203,7 +1207,7 @@ describe('CreditPack Public Service', () => {
       }
       const purchase = {
         status: CreditPurchaseStatus.ACTIVE,
-        expiresAt: new Date('2026-06-01'),
+        expiresAt: FUTURE_EXPIRES_AT,
         venueId: VENUE_ID,
         customerId: CUSTOMER_ID,
       }
@@ -1234,7 +1238,7 @@ describe('CreditPack Public Service', () => {
       }
       const purchase = {
         status: CreditPurchaseStatus.ACTIVE,
-        expiresAt: new Date('2026-06-01'),
+        expiresAt: FUTURE_EXPIRES_AT,
         venueId: VENUE_ID,
         customerId: CUSTOMER_ID,
       }
@@ -1371,7 +1375,7 @@ describe('CreditPack Public Service', () => {
       }
       const purchase = {
         status: CreditPurchaseStatus.ACTIVE,
-        expiresAt: new Date('2026-06-01'),
+        expiresAt: FUTURE_EXPIRES_AT,
         venueId: VENUE_ID,
         customerId: CUSTOMER_ID,
       }

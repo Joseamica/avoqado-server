@@ -449,12 +449,17 @@ describe('Phase 2 push hooks integration', () => {
       }
       prismaMock.classSession.create.mockResolvedValue(newSession)
 
+      // createClassSession rejects past scheduling (startsAt < Date.now() - 60s),
+      // so the input dates must be relative to now — a hardcoded absolute date is a time-bomb.
+      const startsAt = new Date(Date.now() + 24 * 60 * 60 * 1000)
+      const endsAt = new Date(startsAt.getTime() + 60 * 60 * 1000)
+
       await classSessionService.createClassSession(
         VENUE_ID,
         {
           productId: 'prod-class-1',
-          startsAt: '2026-06-01T18:00:00Z' as any,
-          endsAt: '2026-06-01T19:00:00Z' as any,
+          startsAt: startsAt.toISOString() as any,
+          endsAt: endsAt.toISOString() as any,
           capacity: 10,
           assignedStaffId: STAFF_ID,
         } as any,
