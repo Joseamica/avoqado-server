@@ -8,8 +8,15 @@
 import type { Request, Response, NextFunction } from 'express'
 
 import logger from '@/config/logger'
-import { getSalesSummary, SalesSummaryFilters, ReportType } from '@/services/dashboard/sales-summary.dashboard.service'
+import {
+  getSalesSummary,
+  SalesSummaryFilters,
+  ReportType,
+  PaymentMethodFilter,
+  CardTypeFilter,
+} from '@/services/dashboard/sales-summary.dashboard.service'
 import { BadRequestError } from '@/errors/AppError'
+import { MINDFORM_NEW_VENUE_ID } from '@/services/legacy/qrPayments.legacy.service'
 import prisma from '@/utils/prismaClient'
 
 /**
@@ -23,13 +30,19 @@ import prisma from '@/utils/prismaClient'
  * - groupBy: 'none' | 'paymentMethod' (optional, default: 'none')
  * - reportType: 'summary' | 'hours' | 'days' | 'weeks' | 'months' | 'hourlySum' | 'dailySum' (optional, default: 'summary')
  * - merchantAccountId: CUID string (optional) - filter by specific merchant account
+ * - paymentMethod: 'CASH' | 'CARD' | 'QR_LEGACY' | 'OTHER' (optional) - narrow to a single payment bucket.
+ *   When set, order-derived metrics (grossSales/items/discounts/taxes/deferredSales) return null
+ *   and only payment-derived metrics (tips/refunds/txCount/platformFees/totalCollected/netProfit)
+ *   are computed. QR_LEGACY is only valid for the MindForm venue.
+ * - cardType: 'CREDIT' | 'DEBIT' | 'AMEX' | 'INTERNATIONAL' (optional) - sub-filter when paymentMethod=CARD.
+ *   Ignored (with a warning) for any other paymentMethod.
  *
  * @permission reports:read
  */
 export async function salesSummaryReport(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId } = req.authContext!
-    const { startDate, endDate, groupBy, reportType, merchantAccountId } = req.query
+    const { startDate, endDate, groupBy, reportType, merchantAccountId, paymentMethod, cardType } = req.query
 
     // Validate required params
     if (!startDate || typeof startDate !== 'string') {
@@ -51,6 +64,25 @@ export async function salesSummaryReport(req: Request, res: Response, next: Next
       throw new BadRequestError(`Invalid reportType value. Must be one of: ${validReportTypes.join(', ')}`)
     }
 
+    // Validate paymentMethod / cardType filter combination
+    const validPaymentMethods: PaymentMethodFilter[] = ['CASH', 'CARD', 'QR_LEGACY', 'OTHER']
+    if (paymentMethod && !validPaymentMethods.includes(paymentMethod as PaymentMethodFilter)) {
+      throw new BadRequestError(`Invalid paymentMethod. Must be one of: ${validPaymentMethods.join(', ')}`)
+    }
+
+    const validCardTypes: CardTypeFilter[] = ['CREDIT', 'DEBIT', 'AMEX', 'INTERNATIONAL']
+    if (cardType && !validCardTypes.includes(cardType as CardTypeFilter)) {
+      throw new BadRequestError(`Invalid cardType. Must be one of: ${validCardTypes.join(', ')}`)
+    }
+
+    if (cardType && paymentMethod !== 'CARD') {
+      logger.warn('cardType ignored because paymentMethod is not CARD', { paymentMethod, cardType })
+    }
+
+    if (paymentMethod === 'QR_LEGACY' && venueId !== MINDFORM_NEW_VENUE_ID) {
+      throw new BadRequestError('QR_LEGACY filter is only available for the MindForm venue')
+    }
+
     // Fetch venue timezone
     const venue = await prisma.venue.findUnique({
       where: { id: venueId },
@@ -64,6 +96,8 @@ export async function salesSummaryReport(req: Request, res: Response, next: Next
       reportType: (reportType as ReportType) || 'summary',
       timezone: venue?.timezone || 'America/Mexico_City',
       merchantAccountId: typeof merchantAccountId === 'string' ? merchantAccountId : undefined,
+      paymentMethod: typeof paymentMethod === 'string' ? (paymentMethod as PaymentMethodFilter) : undefined,
+      cardType: typeof cardType === 'string' ? (cardType as CardTypeFilter) : undefined,
     }
 
     const report = await getSalesSummary(venueId, filters)

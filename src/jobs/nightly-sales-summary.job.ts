@@ -25,6 +25,13 @@ import { FRONTEND_URL } from '../config/env'
 // Types
 // ============================================================
 
+// Email-shaped metrics: the nightly job never passes a paymentMethod filter, so
+// order-derived fields are always present at runtime. We coerce nulls to 0 at
+// the boundary and type the email payload with a non-nullable variant.
+type SalesSummaryMetricsForEmail = {
+  [K in keyof SalesSummaryMetrics]: NonNullable<SalesSummaryMetrics[K]>
+}
+
 interface VenueSalesSummaryData {
   venueId: string
   venueName: string
@@ -34,7 +41,7 @@ interface VenueSalesSummaryData {
   businessHoursStart: string
   businessHoursEnd: string
   dashboardUrl: string
-  metrics: SalesSummaryMetrics
+  metrics: SalesSummaryMetricsForEmail
   // Comparison with previous period
   previousPeriod?: {
     netSales: number
@@ -281,23 +288,35 @@ export class NightlySalesSummaryJob {
             businessHoursStart: '', // Not tracked per venue yet
             businessHoursEnd: '',
             dashboardUrl: `${FRONTEND_URL}/venues/${venue.slug}`,
-            metrics: todaySummary.summary,
+            // Nightly job never passes paymentMethod, so order-derived metrics
+            // (grossSales/items/etc.) are guaranteed non-null at runtime —
+            // coerce with `?? 0` to satisfy the email service's strict `number` shape.
+            metrics: {
+              ...todaySummary.summary,
+              grossSales: todaySummary.summary.grossSales ?? 0,
+              items: todaySummary.summary.items ?? 0,
+              serviceCosts: todaySummary.summary.serviceCosts ?? 0,
+              discounts: todaySummary.summary.discounts ?? 0,
+              netSales: todaySummary.summary.netSales ?? 0,
+              deferredSales: todaySummary.summary.deferredSales ?? 0,
+              taxes: todaySummary.summary.taxes ?? 0,
+            },
             previousPeriod: {
-              netSales: yesterdaySummary.summary.netSales,
+              netSales: yesterdaySummary.summary.netSales ?? 0,
               avgOrder:
                 yesterdaySummary.summary.transactionCount > 0
-                  ? yesterdaySummary.summary.netSales / yesterdaySummary.summary.transactionCount
+                  ? (yesterdaySummary.summary.netSales ?? 0) / yesterdaySummary.summary.transactionCount
                   : 0,
               transactionCount: yesterdaySummary.summary.transactionCount,
             },
             lastWeekMetrics: {
-              grossSales: lwSummary.grossSales,
-              items: lwSummary.items,
-              serviceCosts: lwSummary.serviceCosts,
-              discounts: lwSummary.discounts,
+              grossSales: lwSummary.grossSales ?? 0,
+              items: lwSummary.items ?? 0,
+              serviceCosts: lwSummary.serviceCosts ?? 0,
+              discounts: lwSummary.discounts ?? 0,
               refunds: lwSummary.refunds,
-              netSales: lwSummary.netSales,
-              taxes: lwSummary.taxes,
+              netSales: lwSummary.netSales ?? 0,
+              taxes: lwSummary.taxes ?? 0,
               tips: lwSummary.tips,
               totalCollected: lwSummary.totalCollected,
               platformFees: lwSummary.platformFees,
@@ -307,11 +326,11 @@ export class NightlySalesSummaryJob {
             orderSources,
           }
 
-          // Calculate weekly comparison
-          const weeklyNetSalesChange =
-            lastWeekSummary.summary.netSales > 0
-              ? ((todaySummary.summary.netSales - lastWeekSummary.summary.netSales) / lastWeekSummary.summary.netSales) * 100
-              : 0
+          // Calculate weekly comparison — coerce nullable netSales to 0 because
+          // the nightly job never filters (so these are always present at runtime).
+          const todayNetSales = todaySummary.summary.netSales ?? 0
+          const lastWeekNetSales = lastWeekSummary.summary.netSales ?? 0
+          const weeklyNetSalesChange = lastWeekNetSales > 0 ? ((todayNetSales - lastWeekNetSales) / lastWeekNetSales) * 100 : 0
 
           // Send email to each recipient (with 500ms delay to respect Resend's 2/sec rate limit)
           for (const recipient of recipients) {
