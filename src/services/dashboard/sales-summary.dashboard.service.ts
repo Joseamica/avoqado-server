@@ -285,7 +285,7 @@ export function buildPaymentSqlClause(
  * `method` is the legacy method bucket to keep ('CARD' | 'CASH'); when
  * undefined, all eligible legacy rows are kept.
  */
-function legacyAdmission(
+export function legacyAdmission(
   paymentMethod: PaymentMethodFilter | undefined,
   cardType: CardTypeFilter | undefined,
 ): { include: boolean; method?: 'CARD' | 'CASH' } {
@@ -302,7 +302,7 @@ function legacyAdmission(
  * Row-level twin of legacyAdmission: does THIS legacy payment (already mapped to
  * 'CARD' | 'CASH') match the active filter?
  */
-function legacyMatchesFilter(
+export function legacyMatchesFilter(
   legacyMethod: string,
   paymentMethod: PaymentMethodFilter | undefined,
   cardType: CardTypeFilter | undefined,
@@ -313,8 +313,8 @@ function legacyMatchesFilter(
   return legacyMethod === admission.method
 }
 
-type BreakdownBucket = 'CARD' | 'CASH' | 'OTHER' | 'QR_LEGACY'
-type CardSubBucket = 'CREDIT' | 'DEBIT' | 'AMEX' | 'INTERNATIONAL'
+export type BreakdownBucket = 'CARD' | 'CASH' | 'OTHER' | 'QR_LEGACY'
+export type CardSubBucket = 'CREDIT' | 'DEBIT' | 'AMEX' | 'INTERNATIONAL'
 
 /**
  * Classify a payment into a breakdown bucket + optional card sub-bucket.
@@ -322,7 +322,7 @@ type CardSubBucket = 'CREDIT' | 'DEBIT' | 'AMEX' | 'INTERNATIONAL'
  * payment that counts as AMEX here counts as AMEX everywhere else: international
  * wins first, then AMEX brand, then the card method (credit/debit).
  */
-function bucketOf(
+export function bucketOf(
   method: string,
   cardBrand: string | null,
   isInternational: boolean,
