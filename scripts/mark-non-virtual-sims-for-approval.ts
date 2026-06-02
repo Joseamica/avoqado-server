@@ -39,10 +39,7 @@ async function main() {
   // the eSIM category ids so we can exclude them from the flagging scope.
   const esimCategories = await prisma.itemCategory.findMany({
     where: {
-      OR: [
-        { name: { contains: 'e-sim', mode: 'insensitive' } },
-        { name: { contains: 'esim', mode: 'insensitive' } },
-      ],
+      OR: [{ name: { contains: 'e-sim', mode: 'insensitive' } }, { name: { contains: 'esim', mode: 'insensitive' } }],
     },
     select: { id: true, name: true },
   })

@@ -121,6 +121,65 @@ export interface LegacyPaymentFilters {
 }
 
 /**
+ * The full set of `method` values the legacy mapper can emit (see `mapMethod`).
+ * Used by `shouldIncludeLegacyPayments` and `filterLegacyRowsByMethodSource` to
+ * decide whether a user's method filter could possibly include a legacy row.
+ */
+export const LEGACY_METHOD_VALUES = ['CASH', 'CARD'] as const
+
+/**
+ * The single `source` value the legacy mapper always emits (see `mapToPaymentShape`).
+ */
+export const LEGACY_SOURCE_VALUE = 'QR_LEGACY' as const
+
+/**
+ * Pre-flight check: decide whether the user's method/source filter could match
+ * any legacy QR payment. When this returns `false`, the caller should skip the
+ * legacy DB round-trip entirely — there is nothing the legacy bridge could
+ * contribute to the filtered result.
+ *
+ * Rules:
+ *   - An empty/undefined filter means "no constraint" → include legacy.
+ *   - `methods` is satisfied if it intersects `LEGACY_METHOD_VALUES`.
+ *   - `sources` is satisfied if it includes `LEGACY_SOURCE_VALUE`.
+ *   - Both constraints must pass (logical AND).
+ */
+export function shouldIncludeLegacyPayments(filter?: { methods?: readonly string[]; sources?: readonly string[] }): boolean {
+  if (filter?.methods && filter.methods.length > 0) {
+    const intersects = filter.methods.some(m => (LEGACY_METHOD_VALUES as readonly string[]).includes(m))
+    if (!intersects) return false
+  }
+  if (filter?.sources && filter.sources.length > 0) {
+    if (!filter.sources.includes(LEGACY_SOURCE_VALUE)) return false
+  }
+  return true
+}
+
+/**
+ * Drop legacy rows whose `method` or `source` doesn't match the user's filter.
+ * Mirrors what Prisma's `where: { method: { in } }` does for the new-system
+ * branch, but applied in JS because legacy values live in a separate DB and the
+ * mapping shape is computed in `mapToPaymentShape` (not directly queryable).
+ *
+ * Returns the input untouched when no method/source filter is active.
+ */
+export function filterLegacyRowsByMethodSource<T extends { method: string; source: string }>(
+  rows: T[],
+  filter?: { methods?: readonly string[]; sources?: readonly string[] },
+): T[] {
+  if (!filter) return rows
+  const { methods, sources } = filter
+  const hasMethodFilter = methods && methods.length > 0
+  const hasSourceFilter = sources && sources.length > 0
+  if (!hasMethodFilter && !hasSourceFilter) return rows
+  return rows.filter(row => {
+    if (hasMethodFilter && !methods!.includes(row.method)) return false
+    if (hasSourceFilter && !sources!.includes(row.source)) return false
+    return true
+  })
+}
+
+/**
  * Fetch legacy QR payments for MindForm.
  * Returns { rows, total } to support pagination merge.
  */

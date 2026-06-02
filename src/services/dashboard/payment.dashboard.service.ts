@@ -5,7 +5,12 @@ import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { PaginatedPaymentsResponse } from '../../schemas/dashboard/payment.schema'
 import { logAction } from './activity-log.service'
-import { MINDFORM_NEW_VENUE_ID, getLegacyPayments } from '../legacy/qrPayments.legacy.service'
+import {
+  MINDFORM_NEW_VENUE_ID,
+  getLegacyPayments,
+  shouldIncludeLegacyPayments,
+  filterLegacyRowsByMethodSource,
+} from '../legacy/qrPayments.legacy.service'
 import logger from '../../config/logger'
 
 export interface PaymentFilters {
@@ -150,26 +155,47 @@ export async function getPaymentsData(
       transactionCost: true,
     }
 
+    // Pre-flight: if the user's method/source filter cannot possibly match any
+    // legacy row (e.g. methods=['CREDIT_CARD'] or sources=['TPV']), skip the
+    // legacy DB round-trip entirely. Without this guard the legacy QR rows leak
+    // into every filtered view because they ignore the filter — see Bug:
+    // "filtrar Efectivo y aparecen los pagos QR".
+    const methodFilterValues = (filters?.methods as readonly string[] | undefined) ?? undefined
+    const sourceFilterValues = filters?.sources
+    const legacyFilter = { methods: methodFilterValues, sources: sourceFilterValues }
+
     const [allNewPayments, legacy] = await Promise.all([
       prisma.payment.findMany({
         where: whereClause,
         include: sharedInclude,
         orderBy: { createdAt: 'desc' },
       }),
-      getLegacyPayments({
-        startDate: filters?.startDate,
-        endDate: filters?.endDate,
-        search: filters?.search,
-      }),
+      shouldIncludeLegacyPayments(legacyFilter)
+        ? getLegacyPayments({
+            startDate: filters?.startDate,
+            endDate: filters?.endDate,
+            search: filters?.search,
+          })
+        : Promise.resolve({ rows: [] as Awaited<ReturnType<typeof getLegacyPayments>>['rows'], total: 0 }),
     ])
+
+    // Post-fetch: drop any legacy row that doesn't match method/source. The
+    // pre-flight guard skips the query when no legacy row could match at all,
+    // but when the filter is partially-matching (e.g. methods=['CASH'] still
+    // matches legacy CASH rows but not legacy CARD rows) we still need to
+    // narrow the merged result here.
+    const filteredLegacyRows = filterLegacyRowsByMethodSource(legacy.rows, legacyFilter)
 
     logger.info('[Payments] Legacy merge result', {
       legacyRows: legacy.rows.length,
+      legacyKept: filteredLegacyRows.length,
       legacyTotal: legacy.total,
       newRows: allNewPayments.length,
     })
 
-    const merged = [...allNewPayments, ...legacy.rows].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    const merged = [...allNewPayments, ...filteredLegacyRows].sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+    )
     const combinedTotal = merged.length
     const paginated = merged.slice(skip, skip + take)
 
