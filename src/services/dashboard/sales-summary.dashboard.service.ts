@@ -313,6 +313,29 @@ function legacyMatchesFilter(
   return legacyMethod === admission.method
 }
 
+type BreakdownBucket = 'CARD' | 'CASH' | 'OTHER' | 'QR_LEGACY'
+type CardSubBucket = 'CREDIT' | 'DEBIT' | 'AMEX' | 'INTERNATIONAL'
+
+/**
+ * Classify a payment into a breakdown bucket + optional card sub-bucket.
+ * Mirrors determineTransactionCardType in transactionCost.service.ts so a
+ * payment that counts as AMEX here counts as AMEX everywhere else: international
+ * wins first, then AMEX brand, then the card method (credit/debit).
+ */
+function bucketOf(
+  method: string,
+  cardBrand: string | null,
+  isInternational: boolean,
+): { bucket: BreakdownBucket; sub?: CardSubBucket } {
+  if (method === 'CASH') return { bucket: 'CASH' }
+  if (method === 'CREDIT_CARD' || method === 'DEBIT_CARD') {
+    if (isInternational) return { bucket: 'CARD', sub: 'INTERNATIONAL' }
+    if (cardBrand === 'AMERICAN_EXPRESS') return { bucket: 'CARD', sub: 'AMEX' }
+    return { bucket: 'CARD', sub: method === 'CREDIT_CARD' ? 'CREDIT' : 'DEBIT' }
+  }
+  return { bucket: 'OTHER' }
+}
+
 // ============================================================
 // Main Service Function
 // ============================================================
@@ -748,6 +771,147 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   }
 
   // ============================================================
+  // Enriched Payment Method Breakdown (Card → Credit/Debit/AMEX/International)
+  // ============================================================
+  // Surfaces the per-bucket platform commission so a venue owner can SEE that
+  // e.g. AMEX really costs ~4.5%. Same gate as byPaymentMethod (only on the
+  // unfiltered grouped view — under a filter the user already drilled into one
+  // bucket, so a single-bucket breakdown adds nothing).
+
+  let byPaymentMethodDetailed: PaymentMethodDetailedBreakdown[] | undefined
+
+  if (groupBy === 'paymentMethod' && !isFiltered) {
+    // Per-bucket and per-sub-bucket accumulator. `amount` INCLUDES tips for
+    // consistency with byPaymentMethod (its `amount` is amount+tipAmount).
+    type Acc = { amount: number; count: number; tips: number; refunds: number; platformFees: number }
+    const newAcc = (): Acc => ({ amount: 0, count: 0, tips: 0, refunds: 0, platformFees: 0 })
+    const buckets = new Map<BreakdownBucket, Acc>()
+    const subBuckets = new Map<CardSubBucket, Acc>()
+    const ensure = <K>(map: Map<K, Acc>, key: K): Acc => {
+      let acc = map.get(key)
+      if (!acc) {
+        acc = newAcc()
+        map.set(key, acc)
+      }
+      return acc
+    }
+
+    // (1) Completed payments — one row per payment so we can classify each into
+    // its card sub-bucket. (2) Platform fee per payment via TransactionCost
+    // joined by paymentId. (3) Refund payments (negative amounts) per bucket.
+    const [detailRows, feeRows, refundDetailRows] = await Promise.all([
+      prisma.payment.findMany({
+        where: { venueId, ...dateFilter, status: 'COMPLETED', ...merchantPaymentFilter },
+        select: { id: true, method: true, cardBrand: true, processorData: true, amount: true, tipAmount: true },
+      }),
+      prisma.$queryRaw<Array<{ payment_id: string; fee: number }>>`
+        SELECT tc."paymentId" AS payment_id, tc."venueChargeAmount"::float AS fee
+        FROM "TransactionCost" tc
+        JOIN "Payment" p ON p.id = tc."paymentId"
+        WHERE p."venueId" = ${venueId}
+          AND p."createdAt" >= ${parsedStartDate}
+          AND p."createdAt" <= ${parsedEndDate}
+          AND p."status" = 'COMPLETED'
+          ${merchantAccountId ? Prisma.sql`AND p."merchantAccountId" = ${merchantAccountId}` : Prisma.empty}
+      `,
+      prisma.payment.findMany({
+        where: { venueId, ...dateFilter, type: 'REFUND', ...merchantPaymentFilter },
+        select: { method: true, cardBrand: true, processorData: true, amount: true, tipAmount: true },
+      }),
+    ])
+
+    const feeMap = new Map(feeRows.map(f => [f.payment_id, Number(f.fee)]))
+
+    // Completed payments → bucket (+ sub-bucket) accumulators.
+    for (const row of detailRows) {
+      const isIntl = !!(row.processorData as { isInternational?: boolean } | null)?.isInternational
+      const { bucket, sub } = bucketOf(row.method, row.cardBrand, isIntl)
+      const amt = Number(row.amount)
+      const tip = Number(row.tipAmount)
+      const fee = feeMap.get(row.id) ?? 0
+
+      const b = ensure(buckets, bucket)
+      b.amount += amt + tip // tips-inclusive, matching byPaymentMethod
+      b.tips += tip
+      b.count += 1
+      b.platformFees += fee
+
+      if (sub) {
+        const s = ensure(subBuckets, sub)
+        s.amount += amt + tip
+        s.tips += tip
+        s.count += 1
+        s.platformFees += fee
+      }
+    }
+
+    // Refund payments → bucket refunds (positive magnitude). Refunds aren't
+    // attributed down to sub-buckets (the dashboard surfaces refunds at the
+    // bucket level only).
+    for (const row of refundDetailRows) {
+      const isIntl = !!(row.processorData as { isInternational?: boolean } | null)?.isInternational
+      const { bucket } = bucketOf(row.method, row.cardBrand, isIntl)
+      const b = ensure(buckets, bucket)
+      b.refunds += Math.abs(Number(row.amount) + Number(row.tipAmount))
+    }
+
+    // MindForm legacy QR → its own QR_LEGACY bucket (no recorded platform fees).
+    // legacyAggregate was populated by the Part D block above (declared with let
+    // before this block, so it's in scope here). The MINDFORM_NEW_VENUE_ID guard
+    // is redundant (legacyAggregate is null otherwise) but kept so the
+    // "delete when native QR ships" repo-grep on MINDFORM_NEW_VENUE_ID finds it.
+    if (venueId === MINDFORM_NEW_VENUE_ID && legacyAggregate && legacyAggregate.count > 0) {
+      const acc = ensure(buckets, 'QR_LEGACY')
+      acc.amount += legacyAggregate.amount + legacyAggregate.tips
+      acc.tips += legacyAggregate.tips
+      acc.count += legacyAggregate.count
+    }
+
+    // Grand total = sum of bucket amounts (already tips-inclusive), the same
+    // denominator basis byPaymentMethod uses, so percentages are trustworthy.
+    const grandTotal = Array.from(buckets.values()).reduce((s, b) => s + b.amount, 0)
+    const pct = (part: number, whole: number): number => (whole > 0 ? Number(((part / whole) * 100).toFixed(1)) : 0)
+
+    const bucketOrder: BreakdownBucket[] = ['CARD', 'CASH', 'OTHER', 'QR_LEGACY']
+    const subOrder: CardSubBucket[] = ['CREDIT', 'DEBIT', 'AMEX', 'INTERNATIONAL']
+
+    byPaymentMethodDetailed = bucketOrder
+      .filter(key => buckets.has(key))
+      .map(key => {
+        const b = buckets.get(key)!
+        const entry: PaymentMethodDetailedBreakdown = {
+          bucket: key,
+          amount: b.amount,
+          count: b.count,
+          percentage: pct(b.amount, grandTotal),
+          tips: b.tips,
+          refunds: b.refunds,
+          platformFees: b.platformFees,
+        }
+
+        // Attach card sub-buckets (only present types), percentages relative to
+        // the CARD bucket total so they sum to ~100 within the card breakdown.
+        if (key === 'CARD') {
+          const subs = subOrder
+            .filter(sk => subBuckets.has(sk))
+            .map(sk => {
+              const s = subBuckets.get(sk)!
+              return {
+                type: sk,
+                amount: s.amount,
+                count: s.count,
+                percentage: pct(s.amount, b.amount),
+                platformFees: s.platformFees,
+              }
+            })
+          if (subs.length > 0) entry.subBuckets = subs
+        }
+
+        return entry
+      })
+  }
+
+  // ============================================================
   // Time-Period Breakdown (if reportType is not 'summary')
   // ============================================================
 
@@ -784,6 +948,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     reportType,
     summary,
     byPaymentMethod,
+    byPaymentMethodDetailed,
     byPeriod,
     filtered: isFiltered,
   }
