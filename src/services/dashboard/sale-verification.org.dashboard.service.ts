@@ -146,6 +146,14 @@ function buildPaymentWhere(orgId: string, filters: OrgSaleListFilters): Prisma.P
   }
 
   if (filters.search) {
+    // `serialNumbers` is a scalar string[] — Prisma's `has` is an EXACT,
+    // case-SENSITIVE match and (unlike `contains`) does NOT support
+    // `mode: 'insensitive'`. ICCIDs are normally stored upper-cased
+    // (normalizeSerial = trim().toUpperCase()), but a handful of legacy items
+    // are stored lower-cased. So we match against several case variants of the
+    // search term via `hasSome` to make the ICCID lookup case-insensitive.
+    const term = filters.search.trim()
+    const serialVariants = Array.from(new Set([term, term.toUpperCase(), term.toLowerCase()]))
     where.OR = [
       { id: { contains: filters.search, mode: 'insensitive' } },
       {
@@ -158,7 +166,7 @@ function buildPaymentWhere(orgId: string, filters: OrgSaleListFilters): Prisma.P
           },
         },
       },
-      { saleVerification: { serialNumbers: { has: filters.search } } },
+      { saleVerification: { serialNumbers: { hasSome: serialVariants } } },
     ]
   }
 
