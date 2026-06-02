@@ -195,10 +195,7 @@ function withPercentages(buckets: PaymentMethodBreakdown[]): PaymentMethodBreakd
  * getSalesSummary. We throw here as defense-in-depth so any direct caller
  * (e.g. a test) gets a clear failure instead of silent zero rows.
  */
-export function buildPaymentWhereFilter(
-  paymentMethod?: PaymentMethodFilter,
-  cardType?: CardTypeFilter,
-): Prisma.PaymentWhereInput {
+export function buildPaymentWhereFilter(paymentMethod?: PaymentMethodFilter, cardType?: CardTypeFilter): Prisma.PaymentWhereInput {
   if (!paymentMethod) return {}
 
   if (paymentMethod === 'CASH') return { method: 'CASH' }
@@ -285,7 +282,8 @@ export function buildPaymentSqlClause(
   // CARD
   if (!cardType) return ` AND ${c}method IN ('CREDIT_CARD','DEBIT_CARD')`
   if (cardType === 'INTERNATIONAL') return ` AND ${c}method IN ('CREDIT_CARD','DEBIT_CARD') AND ${pdIsIntl}`
-  if (cardType === 'AMEX') return ` AND ${c}method IN ('CREDIT_CARD','DEBIT_CARD') AND ${c}"cardBrand" = 'AMERICAN_EXPRESS' AND ${pdNotIntl}`
+  if (cardType === 'AMEX')
+    return ` AND ${c}method IN ('CREDIT_CARD','DEBIT_CARD') AND ${c}"cardBrand" = 'AMERICAN_EXPRESS' AND ${pdNotIntl}`
 
   const method = cardType === 'CREDIT' ? 'CREDIT_CARD' : 'DEBIT_CARD'
   return ` AND ${c}method = '${method}' AND (${c}"cardBrand" IS NULL OR ${c}"cardBrand" <> 'AMERICAN_EXPRESS') AND ${pdNotIntl}`
@@ -1172,9 +1170,7 @@ async function calculateTimePeriodMetrics(
   // results would be misleading because a single order can't be split per method.
   const [orderMetrics, paymentMetrics, refundsMetrics, deferredMetrics, platformFeesMetrics, staffCommissionsMetrics] = await Promise.all([
     isFiltered
-      ? Promise.resolve(
-          [] as Array<{ period: Date | number; gross_sales: number; taxes: number; discounts: number; order_count: bigint }>,
-        )
+      ? Promise.resolve([] as Array<{ period: Date | number; gross_sales: number; taxes: number; discounts: number; order_count: bigint }>)
       : prisma.$queryRawUnsafe<
           Array<{ period: Date | number; gross_sales: number; taxes: number; discounts: number; order_count: bigint }>
         >(orderMetricsQuery, ...queryParams),
