@@ -10,6 +10,7 @@
 import { Decimal } from '@prisma/client/runtime/library'
 import { legacyPool } from './legacyPool'
 import logger from '../../config/logger'
+import { sanitizeTimezone } from '../../utils/sanitizeTimezone'
 
 // Legacy venue ID in the old DB (hardcoded — single venue)
 const LEGACY_MINDFORM_VENUE_ID = 'mindform_prado'
@@ -227,12 +228,20 @@ export async function getLegacyPayments(
 
     const [dataResult, countResult] = await Promise.all([
       legacyPool.query(
+        // Tip is pre-aggregated by paymentId in a subquery so a payment with
+        // multiple Tip rows yields exactly ONE row here (not N duplicates).
+        // A bare `LEFT JOIN "Tip"` would emit one row per tip, double-counting
+        // amount/tip and inflating rows.length past the COUNT(*) total — and,
+        // critically, over-counting the legacy totals merged into the
+        // sales-summary report. Keep this in sync with getLegacyPeriodMetrics,
+        // which uses the same pre-aggregation.
         `SELECT p.id, p.amount, p.status, p.method, p."cardBrand", p.last4,
                 p."createdAt", p."updatedAt", p.source, p."splitType",
                 p."tableNumber", p."waiterName", p.currency, p.bank,
                 COALESCE(t.amount, 0) AS "tipAmount"
          FROM "Payment" p
-         LEFT JOIN "Tip" t ON t."paymentId" = p.id
+         LEFT JOIN (SELECT "paymentId", SUM(amount) AS amount FROM "Tip" GROUP BY "paymentId") t
+           ON t."paymentId" = p.id
          WHERE ${where}
          ORDER BY p."createdAt" DESC`,
         params,
@@ -257,5 +266,96 @@ export async function getLegacyPayments(
       filters,
     })
     return { rows: [], total: 0 }
+  }
+}
+
+export type LegacyPeriodReportType = 'hours' | 'days' | 'weeks' | 'months' | 'hourlySum' | 'dailySum'
+
+export interface LegacyPeriodMetric {
+  periodKey: string // String(Number(period)) — matches the native period map key
+  amount: number // pesos (legacy centavos / 100)
+  tips: number // pesos
+  count: number
+}
+
+/**
+ * Aggregate MindForm legacy QR payments grouped by the SAME time-period
+ * expression the native sales-summary uses, so the buckets align 1:1 with the
+ * native byPeriod map keys. Uses EXTRACT(EPOCH …)*1000 for date types to match
+ * Prisma's UTC interpretation of `timestamp without time zone` across drivers.
+ *
+ * methodFilter: undefined → all eligible legacy rows; 'CARD' → only card rows;
+ * 'CASH' → only cash rows. (Legacy rows are only ever CARD or CASH.)
+ *
+ * Part of the temporary MindForm QR bridge — delete with the rest when the
+ * native QR module ships.
+ */
+export async function getLegacyPeriodMetrics(
+  startDate: string,
+  endDate: string,
+  reportType: LegacyPeriodReportType,
+  timezone: string,
+  methodFilter?: 'CARD' | 'CASH',
+): Promise<LegacyPeriodMetric[]> {
+  if (!legacyPool) {
+    logger.warn('[LegacyQRPayments] getLegacyPeriodMetrics skipped — legacyPool is null')
+    return []
+  }
+  const tz = sanitizeTimezone(timezone)
+
+  let periodExpr: string
+  switch (reportType) {
+    case 'hours':
+      periodExpr = `(EXTRACT(EPOCH FROM DATE_TRUNC('hour',  p."createdAt" AT TIME ZONE '${tz}')) * 1000)::bigint`
+      break
+    case 'days':
+      periodExpr = `(EXTRACT(EPOCH FROM DATE_TRUNC('day',   p."createdAt" AT TIME ZONE '${tz}')) * 1000)::bigint`
+      break
+    case 'weeks':
+      periodExpr = `(EXTRACT(EPOCH FROM DATE_TRUNC('week',  p."createdAt" AT TIME ZONE '${tz}')) * 1000)::bigint`
+      break
+    case 'months':
+      periodExpr = `(EXTRACT(EPOCH FROM DATE_TRUNC('month', p."createdAt" AT TIME ZONE '${tz}')) * 1000)::bigint`
+      break
+    case 'hourlySum':
+      periodExpr = `EXTRACT(HOUR FROM p."createdAt" AT TIME ZONE '${tz}')::int`
+      break
+    case 'dailySum':
+      periodExpr = `EXTRACT(DOW FROM p."createdAt" AT TIME ZONE '${tz}')::int`
+      break
+    default:
+      return []
+  }
+
+  // Legacy method values: 'STRIPE'/null → CARD, 'CASH' → CASH (see mapMethod).
+  const conditions = [`p."venueId" = $1`, `p.status = 'ACCEPTED'`, `p."createdAt" >= $2`, `p."createdAt" <= $3`]
+  if (methodFilter === 'CASH') conditions.push(`UPPER(COALESCE(p.method, '')) = 'CASH'`)
+  if (methodFilter === 'CARD') conditions.push(`UPPER(COALESCE(p.method, '')) <> 'CASH'`)
+  const where = conditions.join(' AND ')
+
+  // Tips are aggregated in a subquery (≤1 row per payment) so that SUM(p.amount)
+  // can never be inflated by a payment that happens to carry multiple Tip rows.
+  const sql = `
+    SELECT ${periodExpr} AS period,
+           COALESCE(SUM(p.amount), 0) AS amount_centavos,
+           COALESCE(SUM(COALESCE(t.amt, 0)), 0) AS tip_centavos,
+           COUNT(*)::int AS count
+    FROM "Payment" p
+    LEFT JOIN (SELECT "paymentId", SUM(amount) AS amt FROM "Tip" GROUP BY "paymentId") t
+      ON t."paymentId" = p.id
+    WHERE ${where}
+    GROUP BY ${periodExpr}
+  `
+  try {
+    const res = await legacyPool.query(sql, [LEGACY_MINDFORM_VENUE_ID, new Date(startDate), new Date(endDate)])
+    return res.rows.map((r: any) => ({
+      periodKey: String(Number(r.period)),
+      amount: Number(r.amount_centavos) / 100,
+      tips: Number(r.tip_centavos) / 100,
+      count: Number(r.count),
+    }))
+  } catch (err) {
+    logger.error('[LegacyQRPayments] getLegacyPeriodMetrics failed', { error: err instanceof Error ? err.message : String(err) })
+    return []
   }
 }

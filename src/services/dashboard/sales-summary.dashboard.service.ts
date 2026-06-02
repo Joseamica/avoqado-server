@@ -29,6 +29,13 @@ import { Prisma } from '@prisma/client'
 
 import logger from '@/config/logger'
 import { BadRequestError } from '@/errors/AppError'
+import {
+  MINDFORM_NEW_VENUE_ID,
+  getLegacyPayments,
+  getLegacyPeriodMetrics,
+  type LegacyPeriodMetric,
+  type LegacyPeriodReportType,
+} from '@/services/legacy/qrPayments.legacy.service'
 import prisma from '@/utils/prismaClient'
 import { sanitizeTimezone } from '@/utils/sanitizeTimezone'
 
@@ -124,6 +131,61 @@ export interface SalesSummaryFilters {
 // ============================================================
 
 /**
+ * Zeroed summary shell. Used by the QR_LEGACY short-circuit when there is
+ * nothing to compute (non-MindForm venue reaching the legacy branch defensively).
+ * Order-derived metrics are null to mirror the filtered-view contract.
+ */
+function emptySummary(): SalesSummaryMetrics {
+  return {
+    grossSales: null,
+    items: null,
+    serviceCosts: null,
+    discounts: null,
+    refunds: 0,
+    netSales: null,
+    deferredSales: null,
+    taxes: null,
+    tips: 0,
+    platformFees: 0,
+    staffCommissions: 0,
+    commissions: 0,
+    totalCollected: 0,
+    netProfit: 0,
+    transactionCount: 0,
+  }
+}
+
+/**
+ * Build a legacy-only period metric (order-derived fields null, payment-derived
+ * fields filled from the legacy aggregate). Used by the QR_LEGACY short-circuit
+ * to populate byPeriod without the native queries. Part of the MindForm QR
+ * bridge — delete when native QR ships.
+ */
+function legacyOnlyMetrics(amount: number, tips: number, count: number): SalesSummaryMetrics {
+  return {
+    ...emptySummary(),
+    tips,
+    totalCollected: amount + tips,
+    netProfit: amount,
+    transactionCount: count,
+  }
+}
+
+/**
+ * Assign each bucket's `percentage` against a tips-INCLUSIVE grand total (the
+ * sum of the `amount` fields, which already include tips) and sort by amount
+ * descending. Using the same basis as the `amount` field keeps the percentage
+ * trustworthy for any consumer and makes the native + legacy-append paths use an
+ * identical denominator.
+ */
+function withPercentages(buckets: PaymentMethodBreakdown[]): PaymentMethodBreakdown[] {
+  const grandTotal = buckets.reduce((s, p) => s + p.amount, 0)
+  return buckets
+    .map(p => ({ ...p, percentage: grandTotal > 0 ? Number(((p.amount / grandTotal) * 100).toFixed(1)) : 0 }))
+    .sort((a, b) => b.amount - a.amount)
+}
+
+/**
  * Build a Prisma where fragment narrowing payments to a single method/card-type
  * bucket. Mirrors the canonical mapping in `transactionCost.service.ts`
  * (`determineTransactionCardType`) so a payment that counts as AMEX here
@@ -208,6 +270,49 @@ export function buildPaymentSqlClause(
   return ` AND ${c}method = '${method}' AND (${c}"cardBrand" IS NULL OR ${c}"cardBrand" <> 'AMERICAN_EXPRESS') AND ${pdNotIntl}`
 }
 
+/**
+ * SINGLE SOURCE OF TRUTH for how the active (paymentMethod, cardType) filter
+ * admits MindForm legacy QR rows. Both the row-level summary merge
+ * (legacyMatchesFilter) and the SQL period query (calculateTimePeriodMetrics)
+ * derive from this so they can never drift apart.
+ *
+ * Legacy rows lack processorData.isInternational and a reliable cardBrand, so:
+ *   - INTERNATIONAL / AMEX / DEBIT → excluded (legacy can't satisfy them)
+ *   - CREDIT or CARD-without-cardType → include card-method legacy rows
+ *   - CASH → include cash-method legacy rows
+ *   - OTHER → excluded; no filter / QR_LEGACY → include all
+ *
+ * `method` is the legacy method bucket to keep ('CARD' | 'CASH'); when
+ * undefined, all eligible legacy rows are kept.
+ */
+function legacyAdmission(
+  paymentMethod: PaymentMethodFilter | undefined,
+  cardType: CardTypeFilter | undefined,
+): { include: boolean; method?: 'CARD' | 'CASH' } {
+  if (!paymentMethod) return { include: true }
+  if (paymentMethod === 'QR_LEGACY') return { include: true }
+  if (paymentMethod === 'CASH') return { include: true, method: 'CASH' }
+  if (paymentMethod === 'OTHER') return { include: false }
+  // CARD
+  if (!cardType || cardType === 'CREDIT') return { include: true, method: 'CARD' }
+  return { include: false } // DEBIT / AMEX / INTERNATIONAL
+}
+
+/**
+ * Row-level twin of legacyAdmission: does THIS legacy payment (already mapped to
+ * 'CARD' | 'CASH') match the active filter?
+ */
+function legacyMatchesFilter(
+  legacyMethod: string,
+  paymentMethod: PaymentMethodFilter | undefined,
+  cardType: CardTypeFilter | undefined,
+): boolean {
+  const admission = legacyAdmission(paymentMethod, cardType)
+  if (!admission.include) return false
+  if (!admission.method) return true
+  return legacyMethod === admission.method
+}
+
 // ============================================================
 // Main Service Function
 // ============================================================
@@ -244,32 +349,79 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // taxes/deferred — frontend hides those rows.
   const isFiltered = !!paymentMethod
 
-  // QR_LEGACY short-circuit. Phase 3 will replace this with the actual
-  // legacy QR merge for MindForm; until then, return a zeroed shell so we
-  // don't issue 8 native queries that the buildPaymentWhereFilter sentinel
-  // would force to return zero rows.
+  // QR_LEGACY short-circuit. This filter only makes sense for MindForm (the one
+  // venue with legacy avo-pwa QR payments). We compute the summary directly from
+  // the legacy DB and skip the 8 native queries entirely — the native Payment
+  // table has no QR_LEGACY rows, and buildPaymentWhereFilter throws on QR_LEGACY.
   if (paymentMethod === 'QR_LEGACY') {
-    const zeroSummary: SalesSummaryMetrics = {
-      grossSales: null,
-      items: null,
-      serviceCosts: null,
-      discounts: null,
-      refunds: 0,
-      netSales: null,
-      deferredSales: null,
-      taxes: null,
-      tips: 0,
-      platformFees: 0,
-      staffCommissions: 0,
-      commissions: 0,
-      totalCollected: 0,
-      netProfit: 0,
-      transactionCount: 0,
+    // Only MindForm has legacy QR data. Controller already rejects QR_LEGACY
+    // for other venues; this is defense-in-depth.
+    if (venueId !== MINDFORM_NEW_VENUE_ID) {
+      return {
+        dateRange: { startDate: parsedStartDate, endDate: parsedEndDate },
+        reportType,
+        summary: emptySummary(),
+        filtered: true,
+      }
     }
+
+    const { rows: legacyRows } = await getLegacyPayments({
+      startDate: parsedStartDate.toISOString(),
+      endDate: parsedEndDate.toISOString(),
+    })
+    const eligible = legacyRows.filter(p => p.status === 'COMPLETED' && p.type !== 'REFUND')
+    const amount = eligible.reduce((s, p) => s + Number(p.amount), 0)
+    const tips = eligible.reduce((s, p) => s + Number(p.tipAmount), 0)
+    const summary: SalesSummaryMetrics = {
+      ...emptySummary(),
+      tips,
+      totalCollected: amount + tips,
+      netProfit: amount,
+      transactionCount: eligible.length,
+    }
+
+    // For a non-summary reportType, build the time-series from legacy alone so
+    // the period bars match this legacy-only headline total. Order-derived
+    // metrics are null; payment-derived metrics come from the legacy aggregate.
+    let byPeriod: TimePeriodMetrics[] | undefined
+    if ((reportType as string) !== 'summary') {
+      const legacyRowsByPeriod = await getLegacyPeriodMetrics(
+        parsedStartDate.toISOString(),
+        parsedEndDate.toISOString(),
+        reportType as LegacyPeriodReportType,
+        timezone, // no methodFilter — all legacy
+      )
+      const legacyMap = new Map(legacyRowsByPeriod.map(r => [r.periodKey, r]))
+      const allPeriods = generateAllPeriods(reportType)
+      if (allPeriods.length > 0) {
+        // Sum types (hourlySum/dailySum): iterate the fixed 0-23 / 0-6 buckets,
+        // filling zeros for periods with no legacy rows.
+        byPeriod = allPeriods.map(periodValue => {
+          const legacy = legacyMap.get(String(Number(periodValue)))
+          return {
+            period: formatPeriod(periodValue, reportType, timezone),
+            periodLabel: formatPeriodLabel(periodValue, reportType, timezone),
+            metrics: legacyOnlyMetrics(legacy?.amount ?? 0, legacy?.tips ?? 0, legacy?.count ?? 0),
+          }
+        })
+      } else {
+        // Date types: iterate the legacy period keys (epoch-ms → Date).
+        byPeriod = legacyRowsByPeriod.map(r => {
+          const periodValue = new Date(Number(r.periodKey))
+          return {
+            period: formatPeriod(periodValue, reportType, timezone),
+            periodLabel: formatPeriodLabel(periodValue, reportType, timezone),
+            metrics: legacyOnlyMetrics(r.amount, r.tips, r.count),
+          }
+        })
+      }
+    }
+
     return {
       dateRange: { startDate: parsedStartDate, endDate: parsedEndDate },
       reportType,
-      summary: zeroSummary,
+      summary,
+      byPeriod,
       filtered: true,
     }
   }
@@ -509,6 +661,41 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     transactionCount: transactionCountResult,
   }
 
+  // ⚠️ MindForm legacy QR bridge. Mirrors the gate in
+  // payment.dashboard.service.ts and mergedPayments.service.ts.
+  // DELETE this block when the native QR module ships — search the repo for
+  // MINDFORM_NEW_VENUE_ID to find every gate.
+  let legacyAggregate: { amount: number; tips: number; count: number } | null = null
+  if (venueId === MINDFORM_NEW_VENUE_ID) {
+    const { rows: legacyRows } = await getLegacyPayments({
+      startDate: parsedStartDate.toISOString(),
+      endDate: parsedEndDate.toISOString(),
+    })
+    const eligible = legacyRows.filter(p => p.status === 'COMPLETED' && p.type !== 'REFUND')
+    const matching = eligible.filter(p => legacyMatchesFilter(p.method, paymentMethod, cardType))
+    legacyAggregate = {
+      amount: matching.reduce((s, p) => s + Number(p.amount), 0),
+      tips: matching.reduce((s, p) => s + Number(p.tipAmount), 0),
+      count: matching.length,
+    }
+
+    if (legacyAggregate.count > 0) {
+      // Payment-derived totals always include matching legacy volume.
+      summary.tips += legacyAggregate.tips
+      summary.transactionCount += legacyAggregate.count
+      summary.totalCollected += legacyAggregate.amount + legacyAggregate.tips
+      summary.netProfit += legacyAggregate.amount
+
+      // Order-derived totals only when NOT filtered (legacy sold real food,
+      // so grossSales/netSales should include it on the unfiltered view).
+      if (!isFiltered) {
+        summary.grossSales = (summary.grossSales ?? 0) + legacyAggregate.amount
+        summary.items = (summary.items ?? 0) + legacyAggregate.amount
+        summary.netSales = (summary.netSales ?? 0) + legacyAggregate.amount
+      }
+    }
+  }
+
   // ============================================================
   // Payment Method Breakdown (if requested)
   // ============================================================
@@ -533,17 +720,31 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       _count: true,
     })
 
-    const totalPaymentAmount = paymentsByMethod.reduce((sum, p) => sum + Number(p._sum.amount || 0), 0)
-
     byPaymentMethod = paymentsByMethod.map(p => ({
       method: p.method,
       amount: Number(p._sum.amount || 0) + Number(p._sum.tipAmount || 0),
       count: p._count,
-      percentage: totalPaymentAmount > 0 ? Number(((Number(p._sum.amount || 0) / totalPaymentAmount) * 100).toFixed(1)) : 0,
+      percentage: 0, // assigned by withPercentages below
     }))
 
-    // Sort by amount descending
-    byPaymentMethod.sort((a, b) => b.amount - a.amount)
+    // Percentages are computed against a tips-INCLUSIVE grand total (the sum of
+    // the `amount` fields, which already include tips) so the field is trustworthy
+    // for any consumer (e.g. the mobile controller) — `amount` and its percentage
+    // share the same basis. Same helper is reused after the legacy bucket is
+    // appended so both paths use an identical denominator.
+    byPaymentMethod = withPercentages(byPaymentMethod)
+
+    // Append MindForm's legacy QR volume as its own bucket, then recompute every
+    // percentage against the new (larger) grand total so the slices still sum to
+    // 100%. Depends on the Part D legacyAggregate block above having populated
+    // `legacyAggregate` first.
+    if (venueId === MINDFORM_NEW_VENUE_ID && legacyAggregate && legacyAggregate.count > 0) {
+      const legacyTotal = legacyAggregate.amount + legacyAggregate.tips
+      byPaymentMethod = withPercentages([
+        ...(byPaymentMethod ?? []),
+        { method: 'QR_LEGACY', amount: legacyTotal, count: legacyAggregate.count, percentage: 0 },
+      ])
+    }
   }
 
   // ============================================================
@@ -669,7 +870,10 @@ async function calculateTimePeriodMetrics(
     WHERE "venueId" = $1
       AND "createdAt" >= $2
       AND "createdAt" <= $3
-      AND status NOT IN ('CANCELLED')
+      -- Must mirror the summary grossSales filter (status notIn PENDING/CANCELLED/DELETED)
+      -- so the period bars sum to the headline total. Previously this only excluded
+      -- CANCELLED, double-counting PENDING/DELETED orders vs the summary card.
+      AND status NOT IN ('PENDING', 'CANCELLED', 'DELETED')
       AND "paymentStatus" NOT IN ('REFUNDED')
       ${merchantOrderClause}
     GROUP BY ${groupByExpression}
@@ -722,7 +926,8 @@ async function calculateTimePeriodMetrics(
     WHERE "venueId" = $1
       AND "createdAt" >= $2
       AND "createdAt" <= $3
-      AND status NOT IN ('CANCELLED')
+      -- Mirror the summary deferred filter (status notIn PENDING/CANCELLED/DELETED).
+      AND status NOT IN ('PENDING', 'CANCELLED', 'DELETED')
       AND "paymentStatus" IN ('PENDING', 'PARTIAL')
       ${merchantOrderClause}
     GROUP BY ${groupByExpression}
@@ -817,14 +1022,45 @@ async function calculateTimePeriodMetrics(
     )
   }
 
+  // ⚠️ MindForm legacy QR bridge — merge legacy QR into the time-series so the
+  // period bars sum to the legacy-inclusive headline total. Delete with the
+  // rest of the MindForm QR bridge when native QR ships.
+  let legacyPeriodMap = new Map<string, LegacyPeriodMetric>()
+  if (venueId === MINDFORM_NEW_VENUE_ID && (reportType as string) !== 'summary') {
+    // Single source of truth for which legacy rows the active filter admits.
+    // QR_LEGACY never reaches here (getSalesSummary short-circuits it).
+    const admission = legacyAdmission(paymentMethod, cardType)
+    if (admission.include) {
+      const legacyRows = await getLegacyPeriodMetrics(
+        startDate.toISOString(),
+        endDate.toISOString(),
+        reportType as LegacyPeriodReportType,
+        timezone,
+        admission.method,
+      )
+      legacyPeriodMap = new Map(legacyRows.map(r => [r.periodKey, r]))
+    }
+  }
+
   // Generate all periods for summary report types (fill zeros for missing periods)
   const allPeriods = generateAllPeriods(reportType)
 
-  // Combine metrics by period — use allPeriods for summary types, otherwise
-  // drive from whichever metric source has rows (payment under filter; order
-  // metrics in the default path).
-  const periodsToProcess =
-    allPeriods.length > 0 ? allPeriods : isFiltered ? paymentMetrics.map(p => p.period) : orderMetrics.map(o => o.period)
+  // Combine metrics by period — use allPeriods for summary types (0-23 / 0-6
+  // already cover any legacy buckets); otherwise drive from whichever native
+  // metric source has rows (payment under filter; order metrics in the default
+  // path), then union in any legacy-only periods so they still render.
+  let periodsToProcess: Array<Date | number>
+  if (allPeriods.length > 0) {
+    periodsToProcess = allPeriods
+  } else {
+    const nativePeriods = isFiltered ? paymentMetrics.map(p => p.period) : orderMetrics.map(o => o.period)
+    const seen = new Set(nativePeriods.map(p => String(Number(p))))
+    const legacyOnly: Array<Date | number> = []
+    for (const key of legacyPeriodMap.keys()) {
+      if (!seen.has(key)) legacyOnly.push(new Date(Number(key))) // epoch-ms key → Date for formatPeriod
+    }
+    periodsToProcess = [...nativePeriods, ...legacyOnly]
+  }
 
   const result: TimePeriodMetrics[] = periodsToProcess.map(periodValue => {
     const periodKey = String(Number(periodValue))
@@ -835,33 +1071,45 @@ async function calculateTimePeriodMetrics(
     const platformFee = platformFeesMap.get(periodKey)
     const staffCommission = staffCommissionsMap.get(periodKey)
 
+    // MindForm legacy QR contribution for this period (0 if none). Folded into
+    // the formulas below so each period rolls up to the Part D summary total.
+    const legacy = legacyPeriodMap.get(periodKey)
+    const legacyAmount = legacy ? legacy.amount : 0
+    const legacyTips = legacy ? legacy.tips : 0
+    const legacyCount = legacy ? legacy.count : 0
+
     // Order-derived metrics are null when filtered (order rows can't be honestly
-    // split per payment bucket).
-    const grossSales = isFiltered ? null : Number(order?.gross_sales || 0)
+    // split per payment bucket). When NOT filtered, legacy sold real food so its
+    // amount folds into grossSales (and therefore items/netSales).
+    const grossSales = isFiltered ? null : Number(order?.gross_sales || 0) + legacyAmount
     const discounts = isFiltered ? null : Number(order?.discounts || 0)
     const taxes = isFiltered ? null : Number(order?.taxes || 0)
     const deferredSales = isFiltered ? null : Number(deferred?.deferred_sales || 0)
 
-    // Payment-derived metrics are always present.
+    // Payment-derived metrics are always present; legacy tips/count always count.
     const refunds = Number(refund?.refunds || 0)
-    const tips = Number(payment?.tips || 0)
+    const tips = Number(payment?.tips || 0) + legacyTips
     const platformFees = Number(platformFee?.platform_fees || 0)
     const staffCommissions = Number(staffCommission?.staff_commissions || 0)
     const paymentAmount = Number(payment?.payment_amount || 0)
 
+    // grossSales already includes legacyAmount (unfiltered), so netSales does too.
     const netSales = grossSales !== null && discounts !== null ? grossSales - discounts - refunds : null
 
-    // Mexico model: taxes are already included in prices, NOT added on top
-    // Total Collected = Net Sales + Tips - Platform Fees (actual cash flow)
-    // Under filter, derive from filtered payment volume directly.
+    // Mexico model: taxes are already included in prices, NOT added on top.
+    // Total Collected = Net Sales + Tips - Platform Fees (actual cash flow).
+    // Under filter, derive from filtered payment volume directly; legacy volume
+    // (amount + tips) is added on top in both branches. Note `tips` already
+    // includes legacyTips, so only legacyAmount is added explicitly here.
     const totalCollected = isFiltered
-      ? paymentAmount + tips - platformFees
+      ? paymentAmount + tips - platformFees + legacyAmount
       : netSales !== null
         ? netSales + tips - platformFees
         : 0
-    // Net Profit = Net Sales - Platform Fees - Staff Commissions (true profit)
+    // Net Profit = Net Sales - Platform Fees - Staff Commissions (true profit).
+    // netSales already includes legacyAmount when unfiltered; under filter add it.
     const netProfit = isFiltered
-      ? paymentAmount - platformFees - staffCommissions
+      ? paymentAmount - platformFees - staffCommissions + legacyAmount
       : netSales !== null
         ? netSales - platformFees - staffCommissions
         : 0
@@ -886,7 +1134,7 @@ async function calculateTimePeriodMetrics(
         commissions: platformFees, // Legacy field for backwards compatibility
         totalCollected,
         netProfit,
-        transactionCount: Number(payment?.transaction_count || 0),
+        transactionCount: Number(payment?.transaction_count || 0) + legacyCount,
       },
     }
   })
