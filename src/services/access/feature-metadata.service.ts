@@ -1,5 +1,15 @@
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
+import { venueHasActiveBasePlan, PAID_PLAN_TIER_CODES } from '@/services/access/basePlan.service'
+
+/**
+ * Gate states that already grant the venue access to a feature. When the base
+ * plan blanket grant applies we only "upgrade" features whose individual state
+ * is NOT one of these — preserving the more informative à-la-carte state
+ * (own trial / grace period / paid) when the venue happens to have its own
+ * subscription too. This keeps the grant a pure UNION (never removes access).
+ */
+const ACCESS_GRANTING_STATES: ReadonlySet<FeatureGateState> = new Set<FeatureGateState>(['ACTIVE', 'TRIALING', 'GRACE_PERIOD'])
 
 export type FeatureGateState = 'ACTIVE' | 'TRIALING' | 'LOCKED' | 'TRIAL_EXPIRED' | 'SUSPENDED' | 'GRACE_PERIOD'
 
@@ -59,7 +69,7 @@ function buildFeatureCheckoutUrl(venueId: string): string {
 }
 
 export async function getFeatureMetadataForVenue(venueId: string): Promise<Record<string, FeatureMetadata>> {
-  const [features, venueFeatures] = await Promise.all([
+  const [features, venueFeatures, hasBasePlan] = await Promise.all([
     prisma.feature.findMany({
       where: { active: true },
       select: {
@@ -84,6 +94,10 @@ export async function getFeatureMetadataForVenue(venueId: string): Promise<Recor
         },
       },
     }),
+    // Blanket grant mirror: an active base plan (PLAN_PRO active or trialing)
+    // unlocks ALL premium features in the payload too, so the dashboard UI
+    // matches what checkFeatureAccess/hasFeatureAccess allow at the API layer.
+    venueHasActiveBasePlan(venueId),
   ])
 
   const now = new Date()
@@ -99,9 +113,18 @@ export async function getFeatureMetadataForVenue(venueId: string): Promise<Recor
     ]),
   )
 
+  const isPlanTierCode = (code: string): boolean => (PAID_PLAN_TIER_CODES as readonly string[]).includes(code)
+
   const featureMetadata = features.reduce<Record<string, FeatureMetadata>>((acc, feature) => {
     const venueFeature = venueFeatureByCode.get(feature.code)
-    const state = resolveFeatureGateState(venueFeature, now)
+    const individualState = resolveFeatureGateState(venueFeature, now)
+
+    // UNION the base-plan grant: when the venue has an active base plan, every
+    // premium feature (all codes except the plan tiers themselves) is unlocked.
+    // Preserve the richer à-la-carte state when it already grants access; only
+    // upgrade non-access states (LOCKED / TRIAL_EXPIRED / SUSPENDED) to ACTIVE.
+    const grantedByBasePlan = hasBasePlan && !isPlanTierCode(feature.code) && !ACCESS_GRANTING_STATES.has(individualState)
+    const state: FeatureGateState = grantedByBasePlan ? 'ACTIVE' : individualState
 
     acc[feature.code] = {
       code: feature.code,

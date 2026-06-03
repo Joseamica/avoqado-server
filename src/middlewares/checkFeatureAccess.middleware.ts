@@ -17,6 +17,7 @@
 import { Request, Response, NextFunction } from 'express'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
+import { venueHasActiveBasePlan, PAID_PLAN_TIER_CODES } from '@/services/access/basePlan.service'
 
 /**
  * Middleware factory to check if venue has access to a specific feature
@@ -55,6 +56,13 @@ export function checkFeatureAccess(featureCode: string) {
 
       // Feature not found or not active
       if (!venueFeature || !venueFeature.active) {
+        // Blanket grant: an active base plan (or trial) unlocks all premium features,
+        // except the plan tiers themselves. Phase 1 has no ALWAYS_ADDON features.
+        if (!PAID_PLAN_TIER_CODES.includes(featureCode as any) && (await venueHasActiveBasePlan(venueId))) {
+          ;(req as any).venueFeature = { featureCode, grantedBy: 'BASE_PLAN' }
+          return next()
+        }
+
         logger.warn('⚠️ Feature access denied: Feature not active', {
           venueId,
           userId,
@@ -311,6 +319,11 @@ export async function hasFeatureAccess(
     })
 
     if (!venueFeature || !venueFeature.active) {
+      // Blanket grant: an active base plan (or trial) unlocks all premium features,
+      // except the plan tiers themselves. Phase 1 has no ALWAYS_ADDON features.
+      if (!PAID_PLAN_TIER_CODES.includes(featureCode as any) && (await venueHasActiveBasePlan(venueId))) {
+        return { hasAccess: true, isTrialing: false, trialEndsAt: null }
+      }
       return {
         hasAccess: false,
         isTrialing: false,

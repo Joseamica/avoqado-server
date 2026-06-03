@@ -8,6 +8,7 @@ import Stripe from 'stripe'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
+import { venueHasActiveBasePlan, PAID_PLAN_TIER_CODES } from '@/services/access/basePlan.service'
 import { cancelSubscription, createTrialSubscriptions } from '../stripe.service'
 import { logAction } from './activity-log.service'
 
@@ -287,6 +288,20 @@ export async function getVenueFeatureStatus(venueId: string) {
   const activeFeatureIds = venue.features.map(vf => vf.featureId)
   const availableFeatures = allFeatures.filter(f => !activeFeatureIds.includes(f.id))
 
+  // Base-plan blanket grant (mirror of checkFeatureAccess + getFeatureMetadataForVenue):
+  // when the venue has an active base plan (PLAN_PRO active or trialing) every PREMIUM
+  // feature it doesn't already own à-la-carte must surface as UNLOCKED in this paywall
+  // payload too — otherwise a paying venue still sees premium features as locked upsell
+  // cards. This is a pure UNION: features the venue already owns (real VenueFeature rows
+  // in `venue.features`) keep their richer state untouched; we only promote the ones that
+  // would otherwise be in `availableFeatures`. The plan-tier codes themselves are excluded.
+  const hasBasePlan = await venueHasActiveBasePlan(venueId)
+  const isPlanTierCode = (code: string): boolean => (PAID_PLAN_TIER_CODES as readonly string[]).includes(code)
+  const basePlanGrantedFeatures = hasBasePlan ? availableFeatures.filter(f => !isPlanTierCode(f.code)) : []
+  const basePlanGrantedIds = new Set(basePlanGrantedFeatures.map(f => f.id))
+  // Features that remain genuinely locked (no base plan, or the plan-tier feature itself).
+  const lockedAvailableFeatures = availableFeatures.filter(f => !basePlanGrantedIds.has(f.id))
+
   // Get historical feature usage (including canceled) to determine if features were previously used
   const previousFeatures = await prisma.venueFeature.findMany({
     where: {
@@ -336,24 +351,50 @@ export async function getVenueFeatureStatus(venueId: string) {
     hasStripeCustomer: !!venue.stripeCustomerId,
     hasPaymentMethod: !!venue.stripePaymentMethodId,
     paymentMethod,
-    activeFeatures: venue.features.map(vf => ({
-      id: vf.id,
-      venueId: vf.venueId,
-      featureId: vf.feature.id,
-      feature: {
-        id: vf.feature.id,
-        code: vf.feature.code,
-        name: vf.feature.name,
-        description: vf.feature.description,
-      },
-      active: vf.active,
-      monthlyPrice: vf.monthlyPrice,
-      startDate: vf.startDate,
-      endDate: vf.endDate,
-      stripeSubscriptionId: vf.stripeSubscriptionId,
-      stripePriceId: vf.stripePriceId,
-    })),
-    availableFeatures: availableFeatures.map(f => ({
+    activeFeatures: [
+      ...venue.features.map(vf => ({
+        id: vf.id,
+        venueId: vf.venueId,
+        featureId: vf.feature.id,
+        feature: {
+          id: vf.feature.id,
+          code: vf.feature.code,
+          name: vf.feature.name,
+          description: vf.feature.description,
+        },
+        active: vf.active,
+        monthlyPrice: vf.monthlyPrice,
+        startDate: vf.startDate,
+        endDate: vf.endDate,
+        stripeSubscriptionId: vf.stripeSubscriptionId,
+        stripePriceId: vf.stripePriceId,
+      })),
+      // Premium features unlocked solely by the active base plan (no à-la-carte
+      // VenueFeature row exists). Synthesized to the active-feature shape so the
+      // paywall renders them as owned/unlocked. They carry no Stripe subscription
+      // and a synthetic, non-DB id; `grantedByBasePlan` is an additive optional
+      // marker the dashboard can use to suppress the per-feature cancel control
+      // (you can't cancel a base-plan grant individually).
+      ...basePlanGrantedFeatures.map(f => ({
+        id: `baseplan:${f.code}`,
+        venueId: venue.id,
+        featureId: f.id,
+        feature: {
+          id: f.id,
+          code: f.code,
+          name: f.name,
+          description: f.description,
+        },
+        active: true,
+        monthlyPrice: f.monthlyPrice,
+        startDate: null,
+        endDate: null,
+        stripeSubscriptionId: null,
+        stripePriceId: f.stripePriceId,
+        grantedByBasePlan: true,
+      })),
+    ],
+    availableFeatures: lockedAvailableFeatures.map(f => ({
       id: f.id,
       code: f.code,
       name: f.name,
