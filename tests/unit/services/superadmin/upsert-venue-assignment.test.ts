@@ -53,9 +53,7 @@ describe('upsertVenueAssignment', () => {
   it('rejects when the PIN is already used by someone else in the venue', async () => {
     healthy()
     m.staffVenue.findFirst.mockResolvedValue({ id: 'other' })
-    await expect(upsertVenueAssignment(prisma as any, 'staff-1', 'venue-1', 'WAITER' as any, '3987')).rejects.toThrow(
-      'PIN ya está en uso',
-    )
+    await expect(upsertVenueAssignment(prisma as any, 'staff-1', 'venue-1', 'WAITER' as any, '3987')).rejects.toThrow('PIN ya está en uso')
     expect(m.staffVenue.upsert).not.toHaveBeenCalled()
   })
 })

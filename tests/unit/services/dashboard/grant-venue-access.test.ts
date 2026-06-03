@@ -75,9 +75,9 @@ describe('grantVenueAccessBatch', () => {
 
   it('does NOT write any audit log when a grant fails inside the transaction (atomic)', async () => {
     upsert.mockRejectedValueOnce(new Error('boom'))
-    await expect(
-      grantVenueAccessBatch('venue-1', [{ staffId: 's1', role: 'MANAGER' as any, pin: '1111' }], actor as any),
-    ).rejects.toThrow('boom')
+    await expect(grantVenueAccessBatch('venue-1', [{ staffId: 's1', role: 'MANAGER' as any, pin: '1111' }], actor as any)).rejects.toThrow(
+      'boom',
+    )
     expect(logAction).not.toHaveBeenCalled()
   })
 })

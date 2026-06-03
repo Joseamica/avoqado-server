@@ -28,11 +28,7 @@ export interface GrantResult {
  * the standalone "Dar acceso a una persona" action. Each upsert independently
  * re-checks staff ∈ org + PIN uniqueness (see upsertVenueAssignment).
  */
-export async function grantVenueAccessBatch(
-  venueId: string,
-  grants: VenueAccessGrant[],
-  actor: TerminalActor,
-): Promise<GrantResult[]> {
+export async function grantVenueAccessBatch(venueId: string, grants: VenueAccessGrant[], actor: TerminalActor): Promise<GrantResult[]> {
   if (grants.length === 0) {
     const error: any = new Error('Selecciona al menos una persona')
     error.statusCode = 400

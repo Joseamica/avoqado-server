@@ -22,7 +22,10 @@ export const grantVenueAccessSchema = z.object({
         z.object({
           staffId: id('ID de usuario inválido'),
           role: z.nativeEnum(StaffRole, { errorMap: () => ({ message: 'Rol inválido' }) }),
-          pin: z.string().regex(/^\d{4,6}$/, 'El PIN debe ser de 4 a 6 dígitos').optional(),
+          pin: z
+            .string()
+            .regex(/^\d{4,6}$/, 'El PIN debe ser de 4 a 6 dígitos')
+            .optional(),
         }),
       )
       .min(1, 'Selecciona al menos una persona'),
