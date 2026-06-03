@@ -237,10 +237,11 @@ export const GetMenuTemplateSchema = z.object({
 export const V2StepParamsSchema = z.object({
   params: z.object({
     organizationId: z.string().cuid('ID de organizacion invalido'),
-    // Step 8 (payment providers) is optional and gated by the
-    // ENABLE_ONBOARDING_PAYMENT_PROVIDERS env flag — included in the regex
-    // so the wizard can save its skip / connected state.
-    stepNumber: z.string().regex(/^[1-8]$/, 'Numero de paso invalido (1-8)'),
+    // Steps 8 (payment providers), 9 (buy TPV) and 10 (plan) are optional/env-gated
+    // wizard steps. They must be inside the regex so the wizard can save their
+    // skip / connected / plan-selected state. Bumping this cap is required whenever
+    // a new trailing wizard step is added (see ENABLE_ONBOARDING_* / ENABLE_VENUE_BASE_SUBSCRIPTION flags).
+    stepNumber: z.string().regex(/^([1-9]|10)$/, 'Numero de paso invalido (1-10)'),
   }),
 })
 

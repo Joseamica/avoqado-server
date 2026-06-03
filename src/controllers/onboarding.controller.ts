@@ -12,7 +12,12 @@ import * as venueCreationService from '../services/onboarding/venueCreation.serv
 import { ensureVenueForOnboarding } from '../services/onboarding/ensureVenue.service'
 import * as signupService from '../services/onboarding/signup.service'
 import * as testPaymentLinkService from '../services/onboarding/testPaymentLink.service'
-import { createOnboardingSetupIntent } from '../services/stripe.service'
+import {
+  createOnboardingSetupIntent,
+  createPlanSetupIntent,
+  createPlanSubscription,
+  getOrCreateStripeCustomer,
+} from '../services/stripe.service'
 import { generateMenuCSVTemplate, parseMenuCSV } from '../utils/menuCsvParser'
 import { validateCLABE } from '../utils/clabeValidator'
 import logger from '../config/logger'
@@ -926,7 +931,16 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
     }
 
     // Extract and validate v2 setup data
-    const { businessInfo, bankInfo, identityInfo, entityInfo } = await onboardingProgressService.getV2SetupDataForCompletion(organizationId)
+    const { progress, businessInfo, bankInfo, identityInfo, entityInfo } =
+      await onboardingProgressService.getV2SetupDataForCompletion(organizationId)
+
+    // HARD GATE: when the venue base subscription feature is on, the plan step's
+    // payment method is mandatory — onboarding cannot complete without it.
+    const planEnabled = process.env.ENABLE_VENUE_BASE_SUBSCRIPTION === 'true'
+    const planData = onboardingProgressService.parseV2Plan(progress.v2SetupData)
+    if (planEnabled && !planData?.paymentMethodId) {
+      throw new BadRequestError('Falta el método de pago del plan. Completa el paso de plan para terminar.')
+    }
 
     // OPTIMISTIC LOCKING: Atomically mark as completing BEFORE creating venue
     // This prevents race condition where double-click creates 2 venues
@@ -1038,6 +1052,40 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
       })
     }
 
+    // Create the PLAN_PRO base subscription in Stripe. The hard gate above
+    // already guaranteed a paymentMethodId when the feature is enabled. This is
+    // wrapped in try/catch so a Stripe hiccup never blocks onboarding completion
+    // (the venue already exists at this point).
+    if (planEnabled && planData?.paymentMethodId) {
+      try {
+        const venueRecord = await prisma.venue.findUnique({
+          where: { id: result.venue.id },
+          select: { id: true, name: true, slug: true, email: true },
+        })
+        const customerId = await getOrCreateStripeCustomer(
+          result.venue.id,
+          venueRecord?.email || `venue-${result.venue.slug}@avoqado.io`,
+          venueRecord?.name || result.venue.name,
+          venueRecord?.name || result.venue.name,
+          result.venue.slug,
+        )
+        await createPlanSubscription({
+          venueId: result.venue.id,
+          customerId,
+          paymentMethodId: planData.paymentMethodId,
+          tierCode: 'PLAN_PRO',
+          interval: planData.interval,
+          trialPeriodDays: planData.payNow ? 0 : 30,
+          coupon: planData.payNow && planData.interval === 'monthly' ? 'INTRO_PRO_3M' : undefined,
+          venueName: result.venue.name,
+          venueSlug: result.venue.slug,
+        })
+        await prisma.venue.update({ where: { id: result.venue.id }, data: { planTier: 'PRO' } })
+      } catch (planErr) {
+        logger.error(`⚠️ PLAN_PRO subscription creation failed for venue ${result.venue.id}`, planErr)
+      }
+    }
+
     // Mark organization as onboarding completed
     await prisma.organization.update({
       where: { id: organizationId },
@@ -1082,6 +1130,26 @@ export async function testPaymentLink(req: Request, res: Response, next: NextFun
       providerCode,
     })
     res.status(200).json({ success: true, ...result })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * POST /api/v1/onboarding/venues/:venueId/plan-setup-intent
+ * Returns a customer-scoped Stripe SetupIntent client_secret so the wizard's
+ * plan step can collect the card via Stripe Elements. Env-gated at the route.
+ */
+export async function planSetupIntent(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const authContext = (req as any).authContext
+    if (!authContext?.userId) throw new BadRequestError('No autenticado')
+    const clientSecret = await createPlanSetupIntent(venueId)
+    // Nested `data` envelope to match the existing setup-intent endpoints
+    // (the frontend reads `response.data.data.clientSecret`, like
+    // StripePaymentMethod.tsx does for /venues/:id/setup-intent).
+    res.status(200).json({ success: true, data: { clientSecret } })
   } catch (error) {
     next(error)
   }

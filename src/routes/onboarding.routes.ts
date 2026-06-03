@@ -814,4 +814,15 @@ if (process.env.ENABLE_ONBOARDING_PAYMENT_PROVIDERS === 'true') {
   router.post('/venues/:venueId/test-payment-link', authenticateTokenMiddleware, onboardingController.testPaymentLink)
 }
 
+/**
+ * POST /api/v1/onboarding/venues/:venueId/plan-setup-intent
+ *
+ * Returns a customer-scoped Stripe SetupIntent client_secret so the wizard's
+ * plan step can collect the card via Stripe Elements. Gated by env flag at
+ * registration time — if the flag is off, the endpoint simply doesn't exist (404).
+ */
+if (process.env.ENABLE_VENUE_BASE_SUBSCRIPTION === 'true') {
+  router.post('/venues/:venueId/plan-setup-intent', authenticateTokenMiddleware, onboardingController.planSetupIntent)
+}
+
 export default router

@@ -128,6 +128,41 @@ export function parseV2Step9(v2SetupData: unknown): V2Step9Data | null {
   }
 }
 
+export interface V2PlanData {
+  paymentMethodId: string | null
+  interval: 'monthly' | 'annual'
+  payNow: boolean
+  acceptedAt: string | null
+}
+
+/**
+ * Resolves the plan step's saved data from v2SetupData. The wizard persists it via the
+ * generic per-step endpoint, which nests the payload under the (flag-dependent) positional
+ * key, e.g. `step10.plan`. Because the plan step's number shifts with which optional steps
+ * (paymentProviders, buyTpv) are enabled, resolve `plan` by checking a top-level `plan`
+ * first, then any `stepN.plan`. Returns null when the plan step hasn't been saved.
+ */
+export function parseV2Plan(v2SetupData: unknown): V2PlanData | null {
+  if (!v2SetupData || typeof v2SetupData !== 'object') return null
+  const root = v2SetupData as Record<string, any>
+  let plan: Record<string, any> | null = root.plan && typeof root.plan === 'object' ? root.plan : null
+  if (!plan) {
+    for (const value of Object.values(root)) {
+      if (value && typeof value === 'object' && typeof (value as Record<string, any>).plan === 'object') {
+        plan = (value as Record<string, any>).plan
+        break
+      }
+    }
+  }
+  if (!plan || typeof plan !== 'object') return null
+  return {
+    paymentMethodId: typeof plan.paymentMethodId === 'string' ? plan.paymentMethodId : null,
+    interval: plan.interval === 'annual' ? 'annual' : 'monthly',
+    payNow: plan.payNow === true,
+    acceptedAt: typeof plan.acceptedAt === 'string' ? plan.acceptedAt : null,
+  }
+}
+
 export interface ResolvedTpvPurchase {
   tpvOrderId: string | null
   skipped: boolean
