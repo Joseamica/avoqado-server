@@ -152,6 +152,7 @@ const prismaMock: any = {
   organizationSalesGoalConfig: createMockModel(),
   organizationAttendanceConfig: createMockModel(),
   terminal: createMockModel(),
+  tpvCommandQueue: createMockModel(),
   // Reservation / Booking models
   reservation: createMockModel(),
   classSession: createMockModel(),
@@ -210,6 +211,11 @@ prismaMock.$queryRaw = jest.fn()
 // Set safe default return values for mocks that are frequently queried
 prismaMock.productModifierGroup.findMany.mockResolvedValue([])
 prismaMock.externalBusyBlock.findFirst.mockResolvedValue(null)
+// Terminal list endpoints (getOrgTerminals / getAllTerminals) run an incidental
+// migration-badge query (prisma.tpvCommandQueue.findMany) for the page's terminals.
+// Tests that don't exercise migration badges shouldn't have to mock it — default to
+// no in-flight migrations so the result is iterable and the "Migrando…" badge is off.
+prismaMock.tpvCommandQueue.findMany.mockResolvedValue([])
 
 // Mock Prisma Client globally
 jest.mock('@/utils/prismaClient', () => ({
