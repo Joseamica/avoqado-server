@@ -36,13 +36,84 @@ export interface TerminalActor {
 export const MIGRATION_WIPE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
 /**
+ * Per-terminal migration badge shape attached to each terminal in the SUPERADMIN
+ * list response. `null` when the terminal has no in-flight migration FACTORY_RESET.
+ *
+ * `inProgress` is true while a migration wipe is "live" AND the device has NOT yet
+ * rebound after it. A FACTORY_RESET never ACKs (it lingers in a non-terminal status
+ * until it EXPIRES), so completion is detected via the device's post-wipe rebound
+ * (`Terminal.lastActivationStatusCheckAt` stamped strictly AFTER the command was
+ * created), not via the command reaching a terminal status.
+ */
+export interface TerminalMigrationInfo {
+  inProgress: boolean
+  commandId: string
+  fromVenueId: string
+  toVenueId: string
+}
+
+/**
+ * In-flight (non-terminal) command statuses for a migration FACTORY_RESET. These
+ * mean the wipe has NOT completed/failed/expired/been cancelled yet.
+ */
+const MIGRATION_IN_FLIGHT_STATUSES = ['PENDING', 'QUEUED', 'SENT', 'RECEIVED', 'EXECUTING'] as const
+
+/**
+ * Minimal shape of a migration FACTORY_RESET command needed to compute the badge.
+ * Decoupled from Prisma's generated type so this stays unit-testable in isolation.
+ */
+export interface MigrationCommandLike {
+  id: string
+  createdAt: Date | null
+  payload: unknown
+}
+
+/**
+ * Pure helper — compute the `migration` badge for a single terminal.
+ *
+ * @param command The terminal's latest in-flight migration FACTORY_RESET (or null/undefined).
+ * @param lastActivationStatusCheckAt When the device last (re-)bound via activation-status.
+ * @returns The `TerminalMigrationInfo` badge, or `null` when there's no migration command
+ *          (or the command's payload lacks a `migration` object — i.e. a manual reset).
+ *
+ * A migration is in progress UNLESS the device already rebound after the wipe, i.e.
+ * `lastActivationStatusCheckAt` is strictly after the command's `createdAt`. An offline
+ * device (no rebound) stays `inProgress: true`.
+ */
+export function computeTerminalMigration(
+  command: MigrationCommandLike | null | undefined,
+  lastActivationStatusCheckAt: Date | null | undefined,
+): TerminalMigrationInfo | null {
+  if (!command) return null
+
+  const migration = (command.payload as any)?.migration
+  if (!migration || typeof migration.fromVenueId !== 'string' || typeof migration.toVenueId !== 'string') {
+    // Not a migration wipe (manual FACTORY_RESET, or legacy command without payload).
+    return null
+  }
+
+  const rebound = Boolean(lastActivationStatusCheckAt && command.createdAt && lastActivationStatusCheckAt > command.createdAt)
+
+  return {
+    inProgress: !rebound,
+    commandId: command.id,
+    fromVenueId: migration.fromVenueId,
+    toVenueId: migration.toVenueId,
+  }
+}
+
+/**
  * Get All Terminals (Cross-Venue)
  *
  * Returns all terminals across all venues with optional filters.
  * Used by superadmin dashboard.
  *
+ * Each returned terminal additionally carries a `migration` field
+ * (`TerminalMigrationInfo | null`) so the dashboard can show a "Migrando…" badge
+ * and offer resume/cancel for terminals with an in-flight migration FACTORY_RESET.
+ *
  * @param filters Optional filters: venueId, status, type
- * @returns List of terminals with venue info
+ * @returns List of terminals with venue info + migration badge
  */
 export async function getAllTerminals(filters?: { venueId?: string; status?: string; type?: string }) {
   logger.info('Fetching all terminals with filters:', filters)
@@ -77,9 +148,48 @@ export async function getAllTerminals(filters?: { venueId?: string; status?: str
     },
   })
 
+  // ---------------------------------------------------------------------------
+  // Migration badge ("Migrando…").
+  // ---------------------------------------------------------------------------
+  // One batched query (no N+1) for the in-flight migration FACTORY_RESET commands
+  // of the terminals on this page. We filter in-flight statuses + not-expired here
+  // (a migration wipe never ACKs; it lingers until it EXPIRES), then keep only the
+  // latest such command per terminal and compute `inProgress` from the device's
+  // post-wipe rebound timestamp. Adds the `migration` field WITHOUT changing the
+  // existing list shape.
+  const terminalIds = terminals.map(t => t.id)
+  const latestMigrationByTerminal = new Map<string, MigrationCommandLike>()
+
+  if (terminalIds.length > 0) {
+    const migrationCommands = await prisma.tpvCommandQueue.findMany({
+      where: {
+        terminalId: { in: terminalIds },
+        commandType: 'FACTORY_RESET',
+        status: { in: [...MIGRATION_IN_FLIGHT_STATUSES] },
+        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+      },
+      select: { id: true, terminalId: true, createdAt: true, payload: true },
+      orderBy: { createdAt: 'desc' },
+    })
+
+    // Keep the latest migration command per terminal. Because rows are ordered by
+    // createdAt desc, the first one we see for a terminal is its latest — and we
+    // only keep commands whose payload actually carries a `migration` object.
+    for (const cmd of migrationCommands) {
+      if (latestMigrationByTerminal.has(cmd.terminalId)) continue
+      if (!(cmd.payload as any)?.migration) continue
+      latestMigrationByTerminal.set(cmd.terminalId, cmd)
+    }
+  }
+
+  const terminalsWithMigration = terminals.map(terminal => ({
+    ...terminal,
+    migration: computeTerminalMigration(latestMigrationByTerminal.get(terminal.id), terminal.lastActivationStatusCheckAt),
+  }))
+
   logger.info(`Fetched ${terminals.length} terminals`)
 
-  return terminals
+  return terminalsWithMigration
 }
 
 /**
