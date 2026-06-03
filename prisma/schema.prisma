@@ -120,6 +120,7 @@ model Venue {
   type     VenueType @default(RESTAURANT)
   timezone String    @default("America/Mexico_City")
   currency String    @default("MXN")
+  language String    @default("es") // locale for transactional emails (es|en), set from onboarding wizard
 
   // Location
   address   String?
@@ -2952,6 +2953,9 @@ model VenueFeature {
   gracePeriodEndsAt   DateTime? // When the grace period ends (7 days after first failure)
   lastPaymentAttempt  DateTime? // Last time payment was attempted
   paymentFailureCount Int       @default(0) // Number of consecutive payment failures
+
+  renewalReminderSentAt DateTime? // last renewal-reminder email sent (cron dedup, per billing period)
+  winbackSentAt         DateTime? // win-back email sent once after suspension (cron dedup)
 
   @@unique([venueId, featureId])
   @@index([venueId])

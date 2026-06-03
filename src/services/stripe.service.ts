@@ -15,6 +15,7 @@ import { Feature } from '@prisma/client'
 import { retry, shouldRetryStripeError } from '@/utils/retry'
 import { addDays } from 'date-fns'
 import emailService from './email.service'
+import { resolvePlanNotificationTarget } from './access/planNotification.service'
 
 // Initialize Stripe
 // Using default API version from SDK (automatically uses the latest compatible version)
@@ -1256,7 +1257,16 @@ export async function handlePaymentFailure(
           break
         }
 
-        const emailSent = await emailService.sendPaymentFailedEmail(venueFeature.venue.organization.email, {
+        // Resolve recipient (venue.email → owner → org), keeping org email as last-resort fallback.
+        const target = await resolvePlanNotificationTarget(venueFeature.venueId)
+        const recipient = target.email ?? venueFeature.venue.organization.email
+
+        if (!recipient) {
+          logger.warn(`⚠️ No notification recipient for venue ${venueFeature.venueId}; skipping payment failed email`)
+          break
+        }
+
+        const emailSent = await emailService.sendPaymentFailedEmail(recipient, {
           venueName: venueFeature.venue.name,
           featureName: venueFeature.feature.name,
           attemptCount,
@@ -1264,17 +1274,18 @@ export async function handlePaymentFailure(
           currency: invoiceData.currency,
           billingPortalUrl,
           last4: invoiceData.last4,
+          locale: target.locale,
         })
 
         if (emailSent) {
           logger.info(`✅ Payment failed email sent (attempt ${attemptCount})`, {
-            email: venueFeature.venue.organization.email,
+            email: recipient,
             venueId: venueFeature.venueId,
             featureName: venueFeature.feature.name,
           })
         } else {
           logger.warn(`⚠️ Payment failed email failed to send (attempt ${attemptCount})`, {
-            email: venueFeature.venue.organization.email,
+            email: recipient,
             venueId: venueFeature.venueId,
           })
         }
@@ -1301,23 +1312,33 @@ export async function handlePaymentFailure(
       logger.warn(`⛔ SUSPENDED: Feature ${venueFeature.feature.name} for venue ${venueFeature.venue.name}`)
 
       try {
-        const emailSent = await emailService.sendSubscriptionSuspendedEmail(venueFeature.venue.organization.email, {
+        // Resolve recipient (venue.email → owner → org), keeping org email as last-resort fallback.
+        const target = await resolvePlanNotificationTarget(venueFeature.venueId)
+        const recipient = target.email ?? venueFeature.venue.organization.email
+
+        if (!recipient) {
+          logger.warn(`⚠️ No notification recipient for venue ${venueFeature.venueId}; skipping subscription suspended email`)
+          break
+        }
+
+        const emailSent = await emailService.sendSubscriptionSuspendedEmail(recipient, {
           venueName: venueFeature.venue.name,
           featureName: venueFeature.feature.name,
           suspendedAt: now,
           gracePeriodEndsAt: updateData.gracePeriodEndsAt || addDays(now, 7),
           billingPortalUrl,
+          locale: target.locale,
         })
 
         if (emailSent) {
           logger.info('✅ Subscription suspended email sent', {
-            email: venueFeature.venue.organization.email,
+            email: recipient,
             venueId: venueFeature.venueId,
             featureName: venueFeature.feature.name,
           })
         } else {
           logger.warn('⚠️ Subscription suspended email failed to send', {
-            email: venueFeature.venue.organization.email,
+            email: recipient,
             venueId: venueFeature.venueId,
           })
         }

@@ -18,6 +18,8 @@ import {
   createPlanSubscription,
   getOrCreateStripeCustomer,
 } from '../services/stripe.service'
+import { resolvePlanNotificationTarget } from '../services/access/planNotification.service'
+import emailService from '../services/email.service'
 import { generateMenuCSVTemplate, parseMenuCSV } from '../utils/menuCsvParser'
 import { validateCLABE } from '../utils/clabeValidator'
 import logger from '../config/logger'
@@ -930,6 +932,11 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
       throw new BadRequestError('User authentication required')
     }
 
+    // Locale for transactional emails, captured from the wizard's active i18n
+    // language. Defaults to 'es'. Persisted onto the venue below so the plan
+    // confirmation email (and later lifecycle crons) pick up the right locale.
+    const language = req.body?.language === 'en' ? 'en' : 'es'
+
     // Extract and validate v2 setup data
     const { progress, businessInfo, bankInfo, identityInfo, entityInfo } =
       await onboardingProgressService.getV2SetupDataForCompletion(organizationId)
@@ -1037,8 +1044,10 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
       }
     }
 
-    // Persist identity info (RFC, legalName, commercialName) from onboarding steps
-    const venueUpdateData: Record<string, any> = {}
+    // Persist identity info (RFC, legalName, commercialName) from onboarding steps,
+    // plus the email locale captured from the wizard. `language` is always set so
+    // the plan confirmation email below resolves the correct locale.
+    const venueUpdateData: Record<string, any> = { language }
     if (identityInfo?.rfc) venueUpdateData.rfc = identityInfo.rfc
     if (entityInfo?.commercialName) venueUpdateData.legalName = entityInfo.commercialName
     else if (identityInfo?.legalFirstName && identityInfo?.legalLastName) {
@@ -1081,6 +1090,35 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
           venueSlug: result.venue.slug,
         })
         await prisma.venue.update({ where: { id: result.venue.id }, data: { planTier: 'PRO' } })
+
+        // Send the plan confirmation email (non-blocking). The venue's `language`
+        // was persisted above, so the resolver returns the right locale. A null
+        // recipient or any email/Stripe hiccup must never break onboarding.
+        try {
+          const target = await resolvePlanNotificationTarget(result.venue.id)
+          if (target.email) {
+            const grossCents = planData.interval === 'annual' ? 1158840 : 115884 // IVA-inclusive
+            const now = new Date()
+            const firstChargeDate = planData.payNow
+              ? new Date(now.getTime() + (planData.interval === 'annual' ? 365 : 30) * 86400000)
+              : new Date(now.getTime() + 30 * 86400000) // trial end
+            const FRONTEND_URL = process.env.FRONTEND_URL || 'https://dashboard.avoqado.io'
+            await emailService.sendPlanConfirmationEmail(target.email, {
+              locale: target.locale,
+              venueName: target.venueName,
+              payNow: planData.payNow,
+              interval: planData.interval,
+              firstChargeDate,
+              firstChargeAmountCents: grossCents,
+              introAmountCents: planData.payNow && planData.interval === 'monthly' ? 69484 : undefined,
+              billingPortalUrl: `${FRONTEND_URL}/dashboard/venues/${result.venue.slug}/billing`,
+            })
+          } else {
+            logger.warn(`No notification recipient for venue ${result.venue.id}; skipping plan confirmation email`)
+          }
+        } catch (mailErr) {
+          logger.error(`⚠️ Plan confirmation email failed for venue ${result.venue.id}`, mailErr)
+        }
       } catch (planErr) {
         logger.error(`⚠️ PLAN_PRO subscription creation failed for venue ${result.venue.id}`, planErr)
       }
