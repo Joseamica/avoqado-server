@@ -1,9 +1,5 @@
 import prisma from '@/utils/prismaClient'
-import {
-  grantVenueAccessBatch,
-  listVenueAccessCandidates,
-  type VenueAccessGrant,
-} from '@/services/dashboard/venue-access.service'
+import { grantVenueAccessBatch, listVenueAccessCandidates, type VenueAccessGrant } from '@/services/dashboard/venue-access.service'
 import type { TerminalActor } from '@/services/dashboard/terminals.superadmin.service'
 
 /**

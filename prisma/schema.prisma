@@ -7709,6 +7709,9 @@ enum TierPeriod {
 /// Whether a tier boundary is a fixed amount or resolves to the staff member's active sales goal
 enum ThresholdType {
   FIXED
+  // Resolved at calculation time to the staff member's active SalesGoal
+  // (getStaffSalesGoal in services/dashboard/commission/sales-goal.service.ts),
+  // NOT the PerformanceGoal model. "staff" distinguishes it from venue-wide goals.
   STAFF_GOAL
 }
 
