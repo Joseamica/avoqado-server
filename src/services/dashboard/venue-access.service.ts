@@ -74,3 +74,66 @@ export async function grantVenueAccessBatch(
 
   return grants.map(g => ({ staffId: g.staffId, role: g.role, pin: g.pin ?? null }))
 }
+
+export interface AccessCandidate {
+  staffId: string
+  name: string
+  email: string
+  inSourceVenue: boolean
+  currentRoleAtSource: StaffRole | null
+  alreadyAtDestination: boolean
+  currentRoleAtDestination: StaffRole | null
+  suggestedPin: string | null
+  rolesHeld: StaffRole[]
+}
+
+function mostCommon(arr: string[]): string | null {
+  if (arr.length === 0) return null
+  const counts = new Map<string, number>()
+  for (const x of arr) counts.set(x, (counts.get(x) ?? 0) + 1)
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0]
+}
+
+/**
+ * List the candidate staff for granting access to a destination venue: everyone
+ * in that venue's organization, annotated for the picker so the UI can pre-select
+ * the role the person had at the source venue and pre-fill their existing PIN.
+ */
+export async function listVenueAccessCandidates(destVenueId: string, sourceVenueId?: string): Promise<AccessCandidate[]> {
+  const venue = await prisma.venue.findUnique({ where: { id: destVenueId }, select: { id: true, organizationId: true } })
+  if (!venue) {
+    const error: any = new Error('Sucursal no encontrada')
+    error.statusCode = 404
+    throw error
+  }
+
+  const staff = await prisma.staff.findMany({
+    where: { active: true, organizations: { some: { organizationId: venue.organizationId, isActive: true } } },
+    select: {
+      id: true,
+      firstName: true,
+      lastName: true,
+      email: true,
+      venues: { select: { venueId: true, role: true, pin: true, active: true } },
+    },
+    orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
+  })
+
+  return staff.map(s => {
+    const activeVenues = s.venues.filter(v => v.active)
+    const sourceRow = sourceVenueId ? activeVenues.find(v => v.venueId === sourceVenueId) : undefined
+    const destRow = activeVenues.find(v => v.venueId === destVenueId)
+    const pins = activeVenues.map(v => v.pin).filter((p): p is string => !!p)
+    return {
+      staffId: s.id,
+      name: `${s.firstName} ${s.lastName}`.trim() || s.email,
+      email: s.email,
+      inSourceVenue: !!sourceRow,
+      currentRoleAtSource: sourceRow?.role ?? null,
+      alreadyAtDestination: !!destRow,
+      currentRoleAtDestination: destRow?.role ?? null,
+      suggestedPin: sourceRow?.pin ?? mostCommon(pins),
+      rolesHeld: [...new Set(activeVenues.map(v => v.role))],
+    }
+  })
+}
