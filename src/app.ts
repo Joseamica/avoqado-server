@@ -13,6 +13,7 @@ import { setupSwaggerUI } from './config/swagger'
 import AppError from './errors/AppError'
 import mainApiRouter from './routes' // Esto importa el 'router' exportado por defecto de 'src/routes/index.ts'
 import { getCorsConfig, Environment } from './config/corsOptions'
+import { handleMcpRequest } from './mcp/server'
 
 // Import routes
 import publicMenuRoutes from './routes/publicMenu.routes'
@@ -113,6 +114,9 @@ app.use(
 // ⚠️ Public booking/receipt routes — mounted BEFORE global CORS so wildcard origin works for widget embedding
 // These are unauthenticated endpoints (no credentials needed), safe to allow any origin
 app.use('/api/v1/public', express.json(), cookieParser(), publicRoutes)
+
+// Customer-facing MCP (Phase 0): scoped read tools over Streamable HTTP, gated by an MCP-audience bearer token.
+app.post('/mcp', express.json(), handleMcpRequest)
 
 // ⚠️ Public settlement report route — token-validated, no auth middleware
 // Mounted before configureCoreMiddlewares to avoid auth checks
