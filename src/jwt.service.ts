@@ -167,6 +167,10 @@ export function verifyAccessToken(token: string): AccessTokenPayload {
   const decoded = jwt.verify(token, ACCESS_TOKEN_SECRET!, {
     algorithms: ['HS256'],
   }) as AccessTokenPayload
+  // An MCP-audience token must never authenticate against the dashboard / /api/v1.
+  if ((decoded as jwt.JwtPayload).aud === 'avoqado-mcp') {
+    throw new jwt.JsonWebTokenError('MCP token not valid for the dashboard API')
+  }
   // Validaciones adicionales del payload si es necesario
   if (!decoded.sub || !decoded.orgId || !decoded.venueId || !decoded.role) {
     throw new jwt.JsonWebTokenError('Payload del token de acceso incompleto.')
