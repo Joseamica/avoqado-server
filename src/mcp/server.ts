@@ -4,6 +4,9 @@ import type { Request, Response } from 'express'
 import { verifyMcpToken } from './mcpToken'
 import { resolveScope } from './scope'
 import { registerVenueTools } from './tools/venues'
+import { registerSalesTools } from './tools/sales'
+import { registerOrderTools } from './tools/orders'
+import { registerTerminalTools } from './tools/terminals'
 
 /** Build a per-request MCP server bound to the caller's resolved scope. */
 async function buildServerForRequest(authHeader: string | undefined): Promise<McpServer> {
@@ -13,6 +16,9 @@ async function buildServerForRequest(authHeader: string | undefined): Promise<Mc
 
   const server = new McpServer({ name: 'avoqado-customer-mcp', version: '0.1.0' })
   registerVenueTools(server, scope)
+  registerSalesTools(server, scope)
+  registerOrderTools(server, scope)
+  registerTerminalTools(server, scope)
   return server
 }
 
