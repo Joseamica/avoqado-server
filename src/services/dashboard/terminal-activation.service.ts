@@ -244,6 +244,12 @@ export async function checkTerminalActivationStatus(serialNumber: string) {
     throw new NotFoundError('Terminal no registrado. Contacta a tu administrador.')
   }
 
+  // Proof-of-wipe signal for venue migration: a (possibly just-wiped) device
+  // polls this endpoint on boot. Record the timestamp; never block the response on it.
+  void prisma.terminal
+    .update({ where: { id: terminal.id }, data: { lastActivationStatusCheckAt: new Date() } })
+    .catch(err => logger.warn(`Failed to stamp lastActivationStatusCheckAt for ${terminal.id}: ${err}`))
+
   // Check if activated
   const isActivated = terminal.activatedAt !== null
 

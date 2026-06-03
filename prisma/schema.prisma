@@ -3152,6 +3152,8 @@ model Terminal {
   activationAttempts    Int       @default(0) // Counter for failed attempts (max 5)
   lastActivationAttempt DateTime? // Last activation attempt timestamp (anti-brute force)
 
+  lastActivationStatusCheckAt DateTime? // stamped when a (possibly just-wiped) device polls activation-status; proof-of-wipe signal for venue migration
+
   reviews Review[] // ✅ LÍNEA AGREGADA
 
   // 🆕 Sales Attribution Relations (2026-01-08)

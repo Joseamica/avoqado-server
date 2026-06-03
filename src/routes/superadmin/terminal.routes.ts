@@ -1,5 +1,7 @@
 import { Router } from 'express'
 import * as terminalController from '../../controllers/dashboard/terminals.superadmin.controller'
+import * as migrationController from '../../controllers/dashboard/terminal-migration.controller'
+import { migratePreflightSchema, migrateExecuteSchema, migrateStatusSchema } from './terminal-migration.schemas'
 import { validateRequest } from '../../middlewares/validation'
 import { z } from 'zod'
 
@@ -68,6 +70,9 @@ const terminalIdSchema = z.object({
   }),
 })
 
+// Terminal venue migration schemas live in ./terminal-migration.schemas (imported above)
+// so the validation contract can be unit-tested in isolation.
+
 // Routes
 
 /**
@@ -111,6 +116,27 @@ router.post('/:terminalId/generate-activation-code', validateRequest(terminalIdS
  * @access  Superadmin only
  */
 router.post('/:terminalId/remote-activate', validateRequest(terminalIdSchema), terminalController.sendRemoteActivation)
+
+/**
+ * @route   POST /api/v1/dashboard/superadmin/terminals/:terminalId/migrate-preflight
+ * @desc    Run read-only safety checks before migrating a terminal to another venue
+ * @access  Superadmin only
+ */
+router.post('/:terminalId/migrate-preflight', validateRequest(migratePreflightSchema), migrationController.preflight)
+
+/**
+ * @route   POST /api/v1/dashboard/superadmin/terminals/:terminalId/migrate-execute
+ * @desc    Re-parent the terminal to the destination venue and queue the factory reset
+ * @access  Superadmin only
+ */
+router.post('/:terminalId/migrate-execute', validateRequest(migrateExecuteSchema), migrationController.execute)
+
+/**
+ * @route   GET /api/v1/dashboard/superadmin/terminals/:terminalId/migrate-status
+ * @desc    Poll the status of an in-flight terminal migration
+ * @access  Superadmin only
+ */
+router.get('/:terminalId/migrate-status', validateRequest(migrateStatusSchema), migrationController.status)
 
 /**
  * @route   DELETE /api/v1/dashboard/superadmin/terminals/:terminalId
