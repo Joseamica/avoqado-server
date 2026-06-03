@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import * as terminalController from '../../controllers/dashboard/terminals.superadmin.controller'
 import * as migrationController from '../../controllers/dashboard/terminal-migration.controller'
-import { migratePreflightSchema, migrateExecuteSchema, migrateStatusSchema } from './terminal-migration.schemas'
+import { migratePreflightSchema, migrateExecuteSchema, migrateStatusSchema, migrateCancelSchema } from './terminal-migration.schemas'
 import { validateRequest } from '../../middlewares/validation'
 import { z } from 'zod'
 
@@ -137,6 +137,13 @@ router.post('/:terminalId/migrate-execute', validateRequest(migrateExecuteSchema
  * @access  Superadmin only
  */
 router.get('/:terminalId/migrate-status', validateRequest(migrateStatusSchema), migrationController.status)
+
+/**
+ * @route   POST /api/v1/dashboard/superadmin/terminals/:terminalId/migrate-cancel
+ * @desc    Cancel an in-flight migration (revert venue) while the device hasn't wiped yet
+ * @access  Superadmin only
+ */
+router.post('/:terminalId/migrate-cancel', validateRequest(migrateCancelSchema), migrationController.cancel)
 
 /**
  * @route   DELETE /api/v1/dashboard/superadmin/terminals/:terminalId

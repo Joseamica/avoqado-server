@@ -1,7 +1,9 @@
 import prisma from '@/utils/prismaClient'
+import logger from '@/config/logger'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import { updateTerminal, type TerminalActor } from '@/services/dashboard/terminals.superadmin.service'
 import { tpvCommandQueueService } from '@/services/tpv/command-queue.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
 
 export interface MigrationBlocker {
   code: 'TERMINAL_RETIRED' | 'SAME_VENUE' | 'NO_PAYMENT_CONFIG' | 'NO_STAFF_PIN' | 'MIGRATION_IN_PROGRESS'
@@ -110,22 +112,22 @@ export interface MigrateExecuteResult {
 
 /**
  * Execute a terminal venue migration. The order here is the whole safety story:
- * re-parent the terminal to the destination venue FIRST, then queue the
- * FACTORY_RESET against that NEW venue. A factory reset auto-restores the
- * device's venue from the server on reboot, so if we wiped before re-parenting
- * the device would simply return to the OLD venue. Re-parent → wipe is forced.
+ * re-parent the terminal to the destination venue FIRST, then the FACTORY_RESET
+ * is queued against that NEW venue. A factory reset auto-restores the device's
+ * venue from the server on reboot, so if we wiped before re-parenting the device
+ * would simply return to the OLD venue. Re-parent → wipe is forced.
+ *
+ * The wipe-queueing now lives INSIDE `updateTerminal` ("blindar") so EVERY
+ * venue-change path wipes — not just this wizard. This function therefore
+ * delegates the re-parent + wipe to `updateTerminal` and must NOT queue the
+ * wipe again (that would double-wipe). It recovers the queued command id by
+ * re-querying the latest FACTORY_RESET for the terminal.
  */
-// 7 days — the migration wipe must wait for an offline device (e.g. a venue closed for a few days)
-// instead of expiring in the default 30 min. The device's Blumon merchant creds are re-synced ONLY
-// by the wipe-and-restart (verified in avoqado-tpv: heartbeat/config-poll does NOT re-sync them), so
-// if the wipe expired before the device returned, the terminal would come back charging through the
-// OLD venue's merchant. A long TTL lets the wipe complete whenever the device reconnects.
-const MIGRATION_WIPE_TTL_MS = 7 * 24 * 60 * 60 * 1000
-
 export async function migrateExecute(
   terminalId: string,
   toVenueId: string,
   actor: TerminalActor & { staffName?: string },
+  assignedMerchantIds?: string[],
 ): Promise<MigrateExecuteResult> {
   // Re-validate at execute time — state may have changed since preflight.
   const pre = await migratePreflight(terminalId, toVenueId)
@@ -133,47 +135,121 @@ export async function migrateExecute(
     throw new BadRequestError(`Migration blocked: ${pre.blockers.map(b => b.code).join(', ')}`)
   }
 
-  // 1) Re-parent FIRST. updateTerminal validates the target venue exists and
-  //    clears assignedMerchantIds (cross-tenant safety) on venue change.
+  // 1) Re-parent + auto-queue the wipe in ONE call. updateTerminal validates the
+  //    target venue exists, clears assignedMerchantIds (cross-tenant safety),
+  //    and — because the venue changed — queues the 7-day-TTL FACTORY_RESET with
+  //    the migration payload ({ fromVenueId, previousMerchantIds, toVenueId }).
+  //    We do NOT queue the wipe here ourselves: that would double-wipe.
   await updateTerminal(terminalId, { venueId: toVenueId }, actor)
 
-  // 2) Queue the wipe AGAINST THE NEW VENUE. queueCommand asserts
-  //    terminal.venueId === venueId, which now holds after the re-parent.
-  //    Delivery is via the device's next heartbeat (post-reparent the socket
-  //    room no longer matches), which is exactly our model.
-  //
-  //    PARTIAL-FAILURE WINDOW: the re-parent above already committed. queueCommand
-  //    is NOT transaction-aware, so we cannot atomically roll it back. If queueing
-  //    fails here (e.g. the terminal got locked between preflight and queue), the
-  //    terminal is left re-parented to the destination venue with NO wipe queued.
-  //    Surface that recoverable state to the operator instead of a bare error so
-  //    they know to re-send the factory reset from the TPV command panel.
-  let queued
-  try {
-    queued = await tpvCommandQueueService.queueCommand({
-      terminalId,
-      venueId: toVenueId,
-      commandType: 'FACTORY_RESET',
-      priority: 'CRITICAL',
-      requestedBy: actor.staffId ?? 'system',
-      requestedByName: actor.staffName,
-      source: 'DASHBOARD',
-    })
+  // 2) Optional: set the destination merchant(s) AFTER the re-parent. This is a
+  //    SECOND updateTerminal call with the venue unchanged, so it does NOT
+  //    re-queue a wipe — it only validates brand/merchant compatibility via the
+  //    existing logic and writes assignedMerchantIds. Setting them before the
+  //    device's post-wipe config fetch means the freshly-wiped TPV pulls the
+  //    correct merchant on first reconnect.
+  if (assignedMerchantIds && assignedMerchantIds.length > 0) {
+    await updateTerminal(terminalId, { assignedMerchantIds }, actor)
+  }
 
-    // Override the default 30-min FACTORY_RESET TTL with a long one so the wipe survives a
-    // multi-day offline device and completes the migration whenever it reconnects (see constant above).
-    await prisma.tpvCommandQueue.update({
-      where: { id: queued.commandId },
-      data: { expiresAt: new Date(Date.now() + MIGRATION_WIPE_TTL_MS) },
-    })
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
+  // 3) Recover the queued wipe's commandId. updateTerminal does not return it
+  //    (its return shape is the terminal, which callers depend on), so we
+  //    re-query the latest FACTORY_RESET for this terminal.
+  //
+  //    PARTIAL-FAILURE WINDOW: the re-parent already committed. If the wipe
+  //    failed to queue inside updateTerminal (it logs a warning instead of
+  //    throwing, since the re-parent stands), there is no command to recover.
+  //    Surface that recoverable state to the operator so they re-send the
+  //    factory reset from the TPV command panel — preserving the prior
+  //    recoverable-state semantics.
+  const cmd = await prisma.tpvCommandQueue.findFirst({
+    where: { terminalId, commandType: 'FACTORY_RESET' },
+    orderBy: { createdAt: 'desc' },
+  })
+  if (!cmd) {
     throw new ConflictError(
-      `La terminal se reasignó correctamente al venue destino, pero no se pudo encolar el borrado (factory reset): ${msg}. La terminal NO se ha borrado todavía — reenvía el factory reset desde el panel de comandos de la TPV.`,
+      'La terminal se reasignó correctamente al venue destino, pero no se pudo encolar el borrado (factory reset). La terminal NO se ha borrado todavía — reenvía el factory reset desde el panel de comandos de la TPV.',
     )
   }
 
-  return { commandId: queued.commandId, fromVenueId: pre.fromVenueId, toVenueId, startedAt: new Date() }
+  return { commandId: cmd.id, fromVenueId: pre.fromVenueId, toVenueId, startedAt: new Date() }
+}
+
+/**
+ * Cancel an in-flight terminal migration — undo the move while the device has
+ * NOT wiped yet.
+ *
+ * Safety hinge: only a FACTORY_RESET still in PENDING/QUEUED (and not expired)
+ * is cancellable. Those statuses mean the device has not received the wipe
+ * (offline / hasn't polled). Once the command reaches SENT/RECEIVED/EXECUTING/
+ * COMPLETED the device may already have wiped, so the migration is no longer
+ * reversible from here.
+ *
+ * Reverts the terminal directly via Prisma (NOT updateTerminal) so the "blindar"
+ * auto-wipe does NOT re-queue a FACTORY_RESET on the revert.
+ */
+export interface MigrateCancelResult {
+  cancelled: boolean
+  restoredVenueId: string
+}
+
+export async function migrateCancel(terminalId: string, actor: TerminalActor): Promise<MigrateCancelResult> {
+  // 1) Find the cancellable in-flight wipe. PENDING/QUEUED + not-expired only —
+  //    SENT and beyond means the device may already have wiped.
+  const command = await prisma.tpvCommandQueue.findFirst({
+    where: {
+      terminalId,
+      commandType: 'FACTORY_RESET',
+      status: { in: ['PENDING', 'QUEUED'] },
+      OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+    },
+    orderBy: { createdAt: 'desc' },
+  })
+
+  if (!command) {
+    throw new BadRequestError(
+      'No hay una migración cancelable para esta terminal (la TPV ya recibió el borrado o no hay migración en curso).',
+    )
+  }
+
+  // 2) Read the revert target from the command payload. Older commands queued
+  //    before the blindar payload existed can't be auto-reverted.
+  const migration = (command.payload as { migration?: { fromVenueId?: string; previousMerchantIds?: string[] } } | null)?.migration
+  if (!migration || !migration.fromVenueId) {
+    throw new BadRequestError(
+      'Esta migración no se puede revertir automáticamente: el comando de borrado no tiene la información del venue de origen.',
+    )
+  }
+  const { fromVenueId, previousMerchantIds } = migration
+
+  // 3) Cancel the queued wipe so it never reaches the device.
+  await tpvCommandQueueService.cancelCommand(command.id, actor.staffId ?? 'system', 'Migración cancelada por el operador')
+
+  // 4) Revert the terminal directly (BYPASS updateTerminal so blindar does NOT
+  //    re-queue a wipe on the revert). Restore both the origin venue and the
+  //    merchant assignments captured at migration time.
+  await prisma.terminal.update({
+    where: { id: terminalId },
+    data: { venueId: fromVenueId, assignedMerchantIds: previousMerchantIds ?? [] },
+  })
+
+  // 5) Best-effort audit trail (never throws).
+  await logAction({
+    staffId: actor.staffId ?? null,
+    venueId: fromVenueId,
+    action: 'TERMINAL_MIGRATION_CANCELLED',
+    entity: 'Terminal',
+    entityId: terminalId,
+    data: { commandId: command.id, restoredVenueId: fromVenueId, restoredMerchantIds: previousMerchantIds ?? [] },
+    ipAddress: actor.ipAddress,
+    userAgent: actor.userAgent,
+  })
+
+  logger.info(`Migration cancelled for terminal ${terminalId} — reverted to venue ${fromVenueId}`, {
+    commandId: command.id,
+  })
+
+  return { cancelled: true, restoredVenueId: fromVenueId }
 }
 
 const ONLINE_THRESHOLD_MS = 2 * 60 * 1000 // mirror tpv-health/command-execution online cutoff

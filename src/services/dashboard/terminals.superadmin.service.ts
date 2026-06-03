@@ -15,9 +15,25 @@ import { logAction } from './activity-log.service'
  */
 export interface TerminalActor {
   staffId?: string | null
+  staffName?: string
   ipAddress?: string
   userAgent?: string
 }
+
+/**
+ * Migration wipe TTL — 7 days.
+ *
+ * Any venue change on a terminal auto-queues a FACTORY_RESET ("blindar"): the
+ * device's Blumon merchant creds are re-synced ONLY by the wipe-and-restart
+ * (heartbeat/config-poll does NOT re-sync them), so a re-parented-but-not-wiped
+ * terminal would keep charging through the OLD venue's merchant → split-brain
+ * money routing. The default FACTORY_RESET TTL is 30 min, which would expire
+ * before a multi-day-offline device returns. This long TTL lets the wipe
+ * complete whenever the device reconnects.
+ *
+ * Kept in sync with the same constant in terminal-migration.service.ts.
+ */
+export const MIGRATION_WIPE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
 /**
  * Get All Terminals (Cross-Venue)
@@ -541,6 +557,61 @@ export async function updateTerminal(
     ipAddress: actor?.ipAddress,
     userAgent: actor?.userAgent,
   })
+
+  // ---------------------------------------------------------------------------
+  // "Blindar": auto-queue the migration wipe on EVERY venue change.
+  // ---------------------------------------------------------------------------
+  // A re-parented-but-not-wiped terminal keeps the OLD venue's Blumon merchant
+  // creds (only the wipe-and-restart re-syncs them) → split-brain money routing.
+  // So ANY path that changes the venue (edit dialog, AttachTerminalDialog,
+  // admin-MCP move_terminal, migration wizard) must queue the FACTORY_RESET —
+  // not just the wizard. This runs AFTER the venue is persisted because
+  // queueCommand asserts terminal.venueId === the new venueId.
+  //
+  // Cancel state (fromVenueId, previousMerchantIds) is captured from the
+  // pre-update `terminal` row BEFORE merchants were cleared, so migrateCancel
+  // can revert the move while the device hasn't wiped yet.
+  //
+  // Resilient by design: the re-parent already committed, so a queue failure
+  // must NOT fail the whole update (the operator can re-send the factory reset
+  // from the command panel). We log a warning instead of throwing.
+  if (venueChanged) {
+    const fromVenueId = terminal.venueId
+    const previousMerchantIds = terminal.assignedMerchantIds ?? []
+    const toVenueId = updatedTerminal.venueId
+    try {
+      const queued = await tpvCommandQueueService.queueCommand({
+        terminalId,
+        venueId: toVenueId,
+        commandType: 'FACTORY_RESET',
+        priority: 'CRITICAL',
+        requestedBy: actor?.staffId ?? 'system',
+        ...(actor?.staffName ? { requestedByName: actor.staffName } : {}),
+        source: 'DASHBOARD',
+        payload: { migration: { fromVenueId, previousMerchantIds, toVenueId } },
+      })
+
+      // Override the default 30-min FACTORY_RESET TTL with a long one so the wipe
+      // survives a multi-day-offline device and completes whenever it reconnects.
+      await prisma.tpvCommandQueue.update({
+        where: { id: queued.commandId },
+        data: { expiresAt: new Date(Date.now() + MIGRATION_WIPE_TTL_MS) },
+      })
+
+      logger.info(`Migration wipe queued for terminal ${terminalId} (blindar)`, {
+        commandId: queued.commandId,
+        fromVenueId,
+        toVenueId,
+      })
+    } catch (err) {
+      logger.warn(`Failed to queue migration wipe for terminal ${terminalId} (blindar) — re-parent stands, operator can re-send`, {
+        terminalId,
+        fromVenueId,
+        toVenueId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
 
   logger.info(`Terminal ${terminalId} updated successfully`)
 

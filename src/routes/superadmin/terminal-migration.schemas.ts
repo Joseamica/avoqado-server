@@ -21,9 +21,22 @@ export const migratePreflightSchema = z.object({
   body: z.object({ toVenueId: z.string().min(1, 'Debes seleccionar un venue destino válido') }),
 })
 
-export const migrateExecuteSchema = migratePreflightSchema
+export const migrateExecuteSchema = z.object({
+  params: z.object({ terminalId: z.string().min(1, 'ID de terminal inválido') }),
+  body: z.object({
+    toVenueId: z.string().min(1, 'Debes seleccionar un venue destino válido'),
+    // Optional: assign a specific destination merchant during the migration (set
+    // after the re-parent, before the device's post-wipe config fetch). If omitted,
+    // the terminal falls back to the destination venue's default VenuePaymentConfig.
+    assignedMerchantIds: z.array(z.string()).optional(),
+  }),
+})
 
 export const migrateStatusSchema = z.object({
   params: z.object({ terminalId: z.string().min(1, 'ID de terminal inválido') }),
   query: z.object({ commandId: z.string().min(1, 'ID de comando inválido') }),
+})
+
+export const migrateCancelSchema = z.object({
+  params: z.object({ terminalId: z.string().min(1, 'ID de terminal inválido') }),
 })
