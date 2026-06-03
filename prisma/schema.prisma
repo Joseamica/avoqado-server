@@ -10246,3 +10246,53 @@ enum ReferralTier {
   TIER_2
   TIER_3
 }
+
+/// Dynamically-registered OAuth client (RFC 7591 DCR) for the customer-facing MCP.
+model McpOAuthClient {
+  clientId                String   @id
+  clientSecretHash        String? // sha256 of the issued secret; null for public (PKCE) clients
+  clientName              String?
+  redirectUris            String[]
+  grantTypes              String[] @default([])
+  scope                   String?
+  tokenEndpointAuthMethod String?  @default("none")
+  clientIdIssuedAt        Int? // epoch seconds
+  clientSecretExpiresAt   Int? // epoch seconds; 0 = never
+  createdAt               DateTime @default(now())
+
+  @@map("mcp_oauth_clients")
+}
+
+/// Single-use, short-lived authorization code (PKCE) for the customer MCP. Stored hashed.
+model McpAuthCode {
+  codeHash      String    @id // sha256(code)
+  clientId      String
+  staffId       String
+  activeOrg     String
+  codeChallenge String
+  redirectUri   String
+  scopes        String[]  @default([])
+  resource      String?
+  expiresAt     DateTime
+  consumedAt    DateTime?
+  createdAt     DateTime  @default(now())
+
+  @@index([expiresAt])
+  @@map("mcp_auth_codes")
+}
+
+/// Refresh token (hashed at rest) for the customer MCP. Access tokens are stateless JWTs, not stored.
+model McpRefreshToken {
+  tokenHash String    @id // sha256(token)
+  clientId  String
+  staffId   String
+  activeOrg String
+  scopes    String[]  @default([])
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([staffId])
+  @@index([expiresAt])
+  @@map("mcp_refresh_tokens")
+}
