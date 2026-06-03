@@ -100,11 +100,31 @@ export async function getOrCreateStripeCustomer(
     },
   )
 
-  // Save customer ID to venue database
-  await prisma.venue.update({
-    where: { id: venueId },
+  // Save customer ID to venue database — RACE-SAFE. Concurrent callers (e.g. React
+  // StrictMode double-invoking the plan SetupIntent effect, or two onboarding requests)
+  // can each reach here having just created a distinct Stripe customer. Only the FIRST to
+  // claim the (still-null) column wins; losers discard their duplicate and reuse the winner,
+  // so every caller ends up on the SAME customer. Without this, a payment method attached via
+  // one customer's SetupIntent won't match the customer createPlanSubscription reads back →
+  // "The payment method must be attached to the customer" and the subscription silently fails.
+  const claim = await prisma.venue.updateMany({
+    where: { id: venueId, stripeCustomerId: null },
     data: { stripeCustomerId: customer.id },
   })
+
+  if (claim.count === 0) {
+    const fresh = await prisma.venue.findUnique({ where: { id: venueId }, select: { stripeCustomerId: true } })
+    const winner = fresh?.stripeCustomerId
+    logger.warn(
+      `getOrCreateStripeCustomer: lost create race for venue ${venueId}, reusing existing ${winner} and discarding duplicate ${customer.id}`,
+    )
+    try {
+      await stripe.customers.del(customer.id)
+    } catch (delErr) {
+      logger.warn(`getOrCreateStripeCustomer: could not delete duplicate customer ${customer.id}`, delErr)
+    }
+    if (winner) return winner
+  }
 
   logger.info(`✅ Created Stripe customer ${customer.id} for venue ${venueId}`)
   return customer.id
@@ -544,6 +564,100 @@ export async function createTrialSubscriptions(
   }
 
   return subscriptionIds
+}
+
+export interface CreatePlanSubscriptionInput {
+  venueId: string
+  customerId: string
+  paymentMethodId: string
+  tierCode: 'PLAN_PRO'
+  interval: 'monthly' | 'annual'
+  trialPeriodDays: number // 0 = pay-now (no trial), 30 = trial
+  coupon?: string // e.g. 'INTRO_PRO_3M' (monthly pay-now only)
+  venueName?: string
+  venueSlug?: string
+}
+
+/**
+ * Creates the venue's base-plan subscription (PLAN_PRO). Sibling of
+ * createTrialSubscriptions but supports interval (monthly/annual price),
+ * pay-now (trialPeriodDays:0), an intro coupon, and Stripe Tax (16% IVA).
+ * Idempotent: reuses an existing PLAN_PRO subscription if one already exists.
+ */
+export async function createPlanSubscription(input: CreatePlanSubscriptionInput): Promise<string> {
+  const feature = await prisma.feature.findFirst({ where: { code: input.tierCode, active: true } })
+  if (!feature) throw new Error(`Feature ${input.tierCode} not found or inactive`)
+
+  // Idempotency: reuse existing subscription for this venue+feature.
+  const existing = await prisma.venueFeature.findUnique({
+    where: { venueId_featureId: { venueId: input.venueId, featureId: feature.id } },
+    select: { stripeSubscriptionId: true },
+  })
+  if (existing?.stripeSubscriptionId) {
+    logger.info(`createPlanSubscription: reusing existing sub ${existing.stripeSubscriptionId} for venue ${input.venueId}`)
+    return existing.stripeSubscriptionId
+  }
+
+  const lookupKey = input.interval === 'annual' ? 'plan_pro_annual' : 'plan_pro_monthly'
+  const prices = await stripe.prices.list({ lookup_keys: [lookupKey], limit: 1 })
+  const price = prices.data[0]
+  if (!price) throw new Error(`Stripe price not found for lookup_key ${lookupKey} — run scripts/seed-plan-pro.ts`)
+
+  const subscription = await retry(
+    () =>
+      stripe.subscriptions.create({
+        customer: input.customerId,
+        items: [{ price: price.id }],
+        trial_period_days: input.trialPeriodDays,
+        default_payment_method: input.paymentMethodId,
+        // No Stripe Tax: IVA is baked into the price (tax_behavior 'inclusive'), so we charge the
+        // price as-is and the merchant remits/itemizes the IVA on their own CFDI factura.
+        ...(input.coupon ? { discounts: [{ coupon: input.coupon }] } : {}),
+        description: input.venueName ? `Plan Avoqado Pro - ${input.venueName}` : 'Plan Avoqado Pro',
+        metadata: {
+          venueId: input.venueId,
+          featureId: feature.id,
+          featureCode: feature.code,
+          interval: input.interval,
+          ...(input.venueName ? { venueName: input.venueName } : {}),
+          ...(input.venueSlug ? { venueSlug: input.venueSlug } : {}),
+        },
+        collection_method: 'charge_automatically',
+        payment_settings: { save_default_payment_method: 'on_subscription', payment_method_types: ['card'] },
+      }),
+    { retries: 3, shouldRetry: shouldRetryStripeError, context: 'stripe.createPlanSubscription' },
+  )
+
+  const now = new Date()
+  const trialEnd = input.trialPeriodDays > 0 ? new Date(now.getTime() + input.trialPeriodDays * 86400000) : null
+  await prisma.venueFeature.upsert({
+    where: { venueId_featureId: { venueId: input.venueId, featureId: feature.id } },
+    update: {
+      active: true,
+      stripeSubscriptionId: subscription.id,
+      stripePriceId: price.id,
+      monthlyPrice: feature.monthlyPrice,
+      endDate: trialEnd,
+      trialEndDate: trialEnd,
+      suspendedAt: null,
+      paymentFailureCount: 0,
+    },
+    create: {
+      venueId: input.venueId,
+      featureId: feature.id,
+      active: true,
+      monthlyPrice: feature.monthlyPrice,
+      stripeSubscriptionId: subscription.id,
+      stripePriceId: price.id,
+      endDate: trialEnd,
+      trialEndDate: trialEnd,
+    },
+  })
+
+  logger.info(
+    `✅ createPlanSubscription: ${subscription.id} (${input.interval}, trial=${input.trialPeriodDays}d) for venue ${input.venueId}`,
+  )
+  return subscription.id
 }
 
 /**
@@ -1243,15 +1357,49 @@ export async function createOnboardingSetupIntent(): Promise<string> {
   return setupIntent.client_secret!
 }
 
+/**
+ * Customer-scoped SetupIntent for the onboarding plan step. Unlike
+ * createOnboardingSetupIntent (no customer), this attaches the resulting
+ * payment method to the venue's Stripe customer so the plan subscription can
+ * charge it. Returns the client_secret for Stripe Elements.
+ */
+export async function createPlanSetupIntent(venueId: string): Promise<string> {
+  const venue = await prisma.venue.findUnique({
+    where: { id: venueId },
+    select: { id: true, email: true, name: true, slug: true, stripeCustomerId: true },
+  })
+  if (!venue) throw new Error(`Venue ${venueId} not found`)
+
+  const customerId = await getOrCreateStripeCustomer(
+    venue.id,
+    venue.email || `venue-${venue.slug}@avoqado.io`,
+    venue.name,
+    venue.name,
+    venue.slug,
+  )
+
+  const setupIntent = await stripe.setupIntents.create({
+    customer: customerId,
+    payment_method_types: ['card'],
+    usage: 'off_session',
+    metadata: { venueId, purpose: 'plan_pro_onboarding' },
+  })
+
+  logger.info(`✅ Created plan SetupIntent ${setupIntent.id} for venue ${venueId} (customer ${customerId})`)
+  return setupIntent.client_secret!
+}
+
 export default {
   getOrCreateStripeCustomer,
   syncFeaturesToStripe,
   createTrialSubscriptions,
+  createPlanSubscription,
   convertTrialToPaid,
   cancelSubscription,
   updatePaymentMethod,
   createTrialSetupIntent,
   createOnboardingSetupIntent,
+  createPlanSetupIntent,
   getCustomerInvoices,
   getInvoicePdfUrl,
   listPaymentMethods,

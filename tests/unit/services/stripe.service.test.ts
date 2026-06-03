@@ -22,6 +22,7 @@ jest.mock('@/utils/prismaClient', () => ({
     venue: {
       findUnique: jest.fn(),
       update: jest.fn(),
+      updateMany: jest.fn(),
     },
     feature: {
       findMany: jest.fn(),
@@ -53,6 +54,7 @@ jest.mock('stripe', () => {
     customers: {
       create: jest.fn(),
       update: jest.fn(),
+      del: jest.fn(),
     },
     products: {
       create: jest.fn(),
@@ -124,11 +126,8 @@ describe('Stripe Service - Comprehensive Tests', () => {
           name: mockName,
         })
 
-        // Mock: Update venue with new customer ID
-        ;(prisma.venue.update as jest.Mock).mockResolvedValueOnce({
-          id: mockVenueId,
-          stripeCustomerId: 'cus_new_123',
-        })
+        // Mock: race-safe claim of the customer id succeeds (this caller wins)
+        ;(prisma.venue.updateMany as jest.Mock).mockResolvedValueOnce({ count: 1 })
 
         const result = await stripeService.getOrCreateStripeCustomer(mockVenueId, mockEmail, mockName)
 
@@ -141,10 +140,30 @@ describe('Stripe Service - Comprehensive Tests', () => {
             venueId: mockVenueId,
           },
         })
-        expect(prisma.venue.update).toHaveBeenCalledWith({
-          where: { id: mockVenueId },
+        expect(prisma.venue.updateMany).toHaveBeenCalledWith({
+          where: { id: mockVenueId, stripeCustomerId: null },
           data: { stripeCustomerId: 'cus_new_123' },
         })
+      })
+
+      it('should reuse the winning customer when it loses the create race (concurrent calls)', async () => {
+        const mockVenueId = 'venue_race'
+        // Venue starts without a customer
+        ;(prisma.venue.findUnique as jest.Mock).mockResolvedValueOnce({ id: mockVenueId, stripeCustomerId: null })
+        // This call creates a (soon-to-be-discarded) duplicate
+        mockStripeInstance.customers.create.mockResolvedValueOnce({ id: 'cus_duplicate' })
+        // Atomic claim loses — another concurrent call already set the column
+        ;(prisma.venue.updateMany as jest.Mock).mockResolvedValueOnce({ count: 0 })
+        // Re-read returns the winner
+        ;(prisma.venue.findUnique as jest.Mock).mockResolvedValueOnce({ stripeCustomerId: 'cus_winner' })
+        mockStripeInstance.customers.del.mockResolvedValueOnce({ id: 'cus_duplicate', deleted: true })
+
+        const result = await stripeService.getOrCreateStripeCustomer(mockVenueId, 'test@example.com', 'Test User')
+
+        // Must return the WINNER, not our duplicate — otherwise a payment method attached to
+        // the winner's SetupIntent won't match and the subscription silently fails.
+        expect(result).toBe('cus_winner')
+        expect(mockStripeInstance.customers.del).toHaveBeenCalledWith('cus_duplicate')
       })
 
       it('should return existing customer ID without creating new one', async () => {
@@ -897,7 +916,7 @@ describe('Stripe Service - Comprehensive Tests', () => {
         .mockRejectedValueOnce({ type: 'api_error', message: 'Transient error' })
         .mockRejectedValueOnce({ type: 'api_error', message: 'Transient error' })
         .mockResolvedValueOnce({ id: 'cus_success_after_retry' })
-      ;(prisma.venue.update as jest.Mock).mockResolvedValue({})
+      ;(prisma.venue.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
 
       const result = await stripeService.getOrCreateStripeCustomer('venue_retry', 'test@example.com', 'Test User')
 
