@@ -7,6 +7,8 @@ import { registerVenueTools } from './tools/venues'
 import { registerSalesTools } from './tools/sales'
 import { registerOrderTools } from './tools/orders'
 import { registerTerminalTools } from './tools/terminals'
+import { registerReservationTools } from './tools/reservations'
+import { registerInventoryTools } from './tools/inventory'
 
 /** Build a per-request MCP server bound to the caller's resolved scope. */
 async function buildServerForRequest(authHeader: string | undefined): Promise<McpServer> {
@@ -19,6 +21,8 @@ async function buildServerForRequest(authHeader: string | undefined): Promise<Mc
   registerSalesTools(server, scope)
   registerOrderTools(server, scope)
   registerTerminalTools(server, scope)
+  registerReservationTools(server, scope)
+  registerInventoryTools(server, scope)
   return server
 }
 

@@ -33,4 +33,43 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
       return text({ count: orders.length, orders })
     },
   )
+
+  server.tool(
+    'find_order',
+    'Find one order by its id, or by a serial number (SIM/ICCID/barcode) of an item sold on it. Returns the order header, line items, and payments — but only if the order belongs to one of your venues. Pass exactly one of orderId or serialNumber.',
+    {
+      orderId: z.string().optional().describe('The order id (cuid)'),
+      serialNumber: z.string().optional().describe('A serial number / barcode / ICCID of an item sold on the order'),
+    },
+    async ({ orderId, serialNumber }) => {
+      const where = guard.venueFilter() // {venueId:{in:[...]}} — enforces scope
+      let id = orderId
+      if (!id && serialNumber) {
+        const item = await prisma.serializedItem.findFirst({
+          where: { serialNumber },
+          select: { orderItem: { select: { orderId: true } } },
+        })
+        id = item?.orderItem?.orderId ?? undefined
+        if (!id) return text({ found: false, reason: `No order found for serial "${serialNumber}"` })
+      }
+      if (!id) return text({ found: false, reason: 'Pass orderId or serialNumber' })
+      const order = await prisma.order.findFirst({
+        where: { id, ...where }, // scope: null if the order is not one of your venues'
+        select: {
+          id: true,
+          orderNumber: true,
+          type: true,
+          status: true,
+          paymentStatus: true,
+          total: true,
+          createdAt: true,
+          venue: { select: { name: true } },
+          items: { select: { productName: true, quantity: true, unitPrice: true, total: true } },
+          payments: { select: { amount: true, method: true, status: true, createdAt: true } },
+        },
+      })
+      if (!order) return text({ found: false, reason: 'Order not found, or it is outside your venues' })
+      return text({ found: true, order })
+    },
+  )
 }
