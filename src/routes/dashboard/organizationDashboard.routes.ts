@@ -21,7 +21,12 @@ import {
   BulkCommandSchema,
   AssignMerchantsSchema,
   GetOrgMerchantAccountsSchema,
+  orgMigratePreflightSchema,
+  orgMigrateExecuteSchema,
+  orgMigrateStatusSchema,
+  orgMigrateCancelSchema,
 } from '../../schemas/dashboard/orgTerminals.schema'
+import prisma from '../../utils/prismaClient'
 
 const router = Router()
 
@@ -44,6 +49,52 @@ async function checkOrgAccess(req: Request, res: Response, next: NextFunction) {
         success: false,
         error: 'access_denied',
         message: 'You do not have access to this organization',
+      })
+    }
+
+    next()
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Middleware to verify the requester is an OWNER of the organization.
+ *
+ * MUST be placed AFTER `checkOrgAccess` — that middleware proves org membership,
+ * this one tightens it to OWNER for money-critical / destructive operations
+ * (e.g. terminal migration, which factory-resets a payment terminal).
+ *
+ * SUPERADMIN bypasses (same as `checkOrgAccess`). For everyone else we require
+ * an explicit, active OWNER row in `StaffOrganization` for this exact org — the
+ * org-level `OrgRole`, not a venue role. This is the authoritative OWNER check;
+ * the service-layer venue-in-org validators are the defense-in-depth behind it.
+ */
+export async function requireOrgOwner(req: Request, res: Response, next: NextFunction) {
+  try {
+    const authContext = (req as any).authContext
+    const orgId = req.params.orgId
+
+    // SUPERADMIN has full access to all organizations.
+    if (authContext?.role === 'SUPERADMIN') {
+      return next()
+    }
+
+    const ownership = await prisma.staffOrganization.findFirst({
+      where: {
+        staffId: authContext?.userId,
+        organizationId: orgId,
+        isActive: true,
+        role: 'OWNER',
+      },
+      select: { id: true },
+    })
+
+    if (!ownership) {
+      return res.status(403).json({
+        success: false,
+        error: 'owner_required',
+        message: 'Solo el propietario de la organización puede migrar terminales.',
       })
     }
 
@@ -927,6 +978,148 @@ router.put(
       res.json({
         success: true,
         data: terminal,
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+// ==========================================
+// TERMINAL MIGRATION (Org OWNER-only)
+// ==========================================
+//
+// An org OWNER can migrate a terminal ONLY from a venue they own TO another
+// venue within the SAME org they own. Every route is gated:
+//   checkOrgAccess   → requester belongs to (or is SUPERADMIN of) the org
+//   requireOrgOwner  → requester is an active OWNER of THIS org
+//   *ForOrg service  → source terminal ∈ org, dest venue ∈ org, merchants ∈ org
+// The two DB-backed venue-in-org checks inside the service are the real
+// security guarantee (defense in depth behind requireOrgOwner). We intentionally
+// do NOT add a per-route checkPermission here — requireOrgOwner is the explicit,
+// unambiguous gate and avoids the evaluation-venue fragility of permission
+// checks on org-scoped routes.
+
+/**
+ * POST /dashboard/organizations/:orgId/terminals/:terminalId/migrate-preflight
+ * Body: { toVenueId }
+ * Returns: PreflightResult (blockers/warnings, canProceed)
+ */
+router.post(
+  '/:orgId/terminals/:terminalId/migrate-preflight',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  requireOrgOwner,
+  validateRequest(orgMigratePreflightSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId, terminalId } = req.params
+      const { toVenueId } = req.body
+
+      const data = await orgTerminalsService.migratePreflightForOrg(orgId, terminalId, toVenueId)
+
+      res.json({
+        success: true,
+        data,
+        message: 'Verificación de migración completada',
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * POST /dashboard/organizations/:orgId/terminals/:terminalId/migrate-execute
+ * Body: { toVenueId, assignedMerchantIds? }
+ * Re-parents the terminal to the destination venue and queues the factory reset.
+ */
+router.post(
+  '/:orgId/terminals/:terminalId/migrate-execute',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  requireOrgOwner,
+  validateRequest(orgMigrateExecuteSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId, terminalId } = req.params
+      const { toVenueId, assignedMerchantIds } = req.body
+      const authContext = (req as any).authContext
+
+      const actor = {
+        staffId: authContext.userId,
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent') ?? undefined,
+      }
+
+      const data = await orgTerminalsService.migrateExecuteForOrg(orgId, terminalId, toVenueId, actor, assignedMerchantIds)
+
+      res.json({
+        success: true,
+        data,
+        message: 'Migración iniciada',
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * GET /dashboard/organizations/:orgId/terminals/:terminalId/migrate-status?commandId=...
+ * Returns: migration progress (delivered, rebound after wipe, confirmed).
+ */
+router.get(
+  '/:orgId/terminals/:terminalId/migrate-status',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  requireOrgOwner,
+  validateRequest(orgMigrateStatusSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId, terminalId } = req.params
+      const commandId = req.query.commandId as string
+
+      const data = await orgTerminalsService.migrateStatusForOrg(orgId, terminalId, commandId)
+
+      res.json({
+        success: true,
+        data,
+        message: 'Estado de migración',
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * POST /dashboard/organizations/:orgId/terminals/:terminalId/migrate-cancel
+ * Cancels an in-flight migration (only while the factory reset is still PENDING/QUEUED).
+ */
+router.post(
+  '/:orgId/terminals/:terminalId/migrate-cancel',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  requireOrgOwner,
+  validateRequest(orgMigrateCancelSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId, terminalId } = req.params
+      const authContext = (req as any).authContext
+
+      const actor = {
+        staffId: authContext.userId,
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent') ?? undefined,
+      }
+
+      const data = await orgTerminalsService.migrateCancelForOrg(orgId, terminalId, actor)
+
+      res.json({
+        success: true,
+        data,
+        message: 'Migración cancelada',
       })
     } catch (error) {
       next(error)

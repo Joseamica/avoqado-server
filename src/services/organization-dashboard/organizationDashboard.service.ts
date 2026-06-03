@@ -20,6 +20,7 @@ import {
 } from '../../utils/datetime'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
+import { computeTerminalMigration, type MigrationCommandLike } from '../dashboard/terminals.superadmin.service'
 
 // Types for organization dashboard
 export interface OrgCategoryBreakdown {
@@ -3584,6 +3585,37 @@ class OrganizationDashboardService {
       prisma.terminal.count({ where }),
     ])
 
+    // ---------------------------------------------------------------------------
+    // Migration badge ("Migrando…") — mirrors getAllTerminals (superadmin list).
+    // ---------------------------------------------------------------------------
+    // One batched query (no N+1) for the in-flight migration FACTORY_RESET commands
+    // of the terminals on this page. A migration wipe never ACKs (it lingers until
+    // it EXPIRES), so we filter in-flight statuses + not-expired, keep only the
+    // latest such command per terminal whose payload carries a `migration` object,
+    // and compute `inProgress` from the device's post-wipe rebound timestamp via
+    // the shared computeTerminalMigration helper.
+    const pageTerminalIds = terminals.map(t => t.id)
+    const latestMigrationByTerminal = new Map<string, MigrationCommandLike>()
+
+    if (pageTerminalIds.length > 0) {
+      const migrationCommands = await prisma.tpvCommandQueue.findMany({
+        where: {
+          terminalId: { in: pageTerminalIds },
+          commandType: 'FACTORY_RESET',
+          status: { in: ['PENDING', 'QUEUED', 'SENT', 'RECEIVED', 'EXECUTING'] },
+          OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+        },
+        select: { id: true, terminalId: true, createdAt: true, payload: true },
+        orderBy: { createdAt: 'desc' },
+      })
+
+      for (const cmd of migrationCommands) {
+        if (latestMigrationByTerminal.has(cmd.terminalId)) continue
+        if (!(cmd.payload as any)?.migration) continue
+        latestMigrationByTerminal.set(cmd.terminalId, cmd)
+      }
+    }
+
     // Summary stats (all terminals in org, unfiltered by search/pagination)
     const allWhere: Prisma.TerminalWhereInput = { venueId: { in: venueIds } }
     const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000)
@@ -3629,6 +3661,7 @@ class OrganizationDashboardService {
         activationCode: (t as any).activationCode ?? null,
         activationCodeExpiry: (t as any).activationCodeExpiry ?? null,
         venue: t.venue,
+        migration: computeTerminalMigration(latestMigrationByTerminal.get(t.id), (t as any).lastActivationStatusCheckAt ?? null),
       })),
       pagination: {
         page,

@@ -164,3 +164,56 @@ export type AssignMerchantsDto = z.infer<typeof AssignMerchantsSchema>['body']
 export const GetOrgMerchantAccountsSchema = z.object({
   params: OrgIdParams,
 })
+
+// ==========================================
+// ORG TERMINAL MIGRATION SCHEMAS
+// ==========================================
+//
+// IDs (orgId, terminalId, toVenueId, merchantIds) are NOT regex/cuid validated —
+// they may be cuid OR uuid depending on the generator that created them. The
+// service layer + ownership validators resolve them against the DB and return a
+// proper 404/403 if they don't belong to the org. Shape-only checks here.
+
+/**
+ * POST /:orgId/terminals/:terminalId/migrate-preflight
+ * Body: { toVenueId }
+ */
+export const orgMigratePreflightSchema = z.object({
+  body: z.object({
+    toVenueId: z.string().min(1, 'ID de sucursal destino requerido'),
+  }),
+  params: OrgTerminalParams,
+})
+export type OrgMigratePreflightDto = z.infer<typeof orgMigratePreflightSchema>['body']
+
+/**
+ * POST /:orgId/terminals/:terminalId/migrate-execute
+ * Body: { toVenueId, assignedMerchantIds? }
+ */
+export const orgMigrateExecuteSchema = z.object({
+  body: z.object({
+    toVenueId: z.string().min(1, 'ID de sucursal destino requerido'),
+    assignedMerchantIds: z.array(z.string().min(1, 'ID de comercio vacío')).optional(),
+  }),
+  params: OrgTerminalParams,
+})
+export type OrgMigrateExecuteDto = z.infer<typeof orgMigrateExecuteSchema>['body']
+
+/**
+ * GET /:orgId/terminals/:terminalId/migrate-status
+ * Query: { commandId }
+ */
+export const orgMigrateStatusSchema = z.object({
+  query: z.object({
+    commandId: z.string().min(1, 'ID de comando requerido'),
+  }),
+  params: OrgTerminalParams,
+})
+
+/**
+ * POST /:orgId/terminals/:terminalId/migrate-cancel
+ * Params only.
+ */
+export const orgMigrateCancelSchema = z.object({
+  params: OrgTerminalParams,
+})

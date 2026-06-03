@@ -10,6 +10,8 @@ import {
 } from '../dashboard/terminals.superadmin.service'
 import { tpvCommandQueueService } from '../tpv/command-queue.service'
 import { logAction } from '../dashboard/activity-log.service'
+import type { TerminalActor } from '../dashboard/terminals.superadmin.service'
+import { migratePreflight, migrateExecute, migrateStatus, migrateCancel } from '../dashboard/terminal-migration.service'
 
 // Allowed commands at org level
 const ORG_ALLOWED_COMMANDS = [
@@ -533,4 +535,67 @@ export async function getOrgMerchantAccounts(orgId: string) {
   })
 
   return merchants
+}
+
+// ---------------------------------------------------------------------------
+// Terminal migration (org OWNER-scoped)
+// ---------------------------------------------------------------------------
+//
+// These wrappers add airtight, DB-backed ownership guards on top of the shared,
+// org-agnostic terminal-migration service. They are the defense-in-depth layer
+// BEHIND the `requireOrgOwner` route middleware: every operation re-validates,
+// against the database, that the source terminal AND the destination venue (and
+// any assigned merchants) belong to `orgId` BEFORE the migration runs. A
+// terminal or venue outside the org throws ForbiddenError and the underlying
+// migration call is never reached — never cross-org, never a foreign venue.
+//
+// Order matters: the source-terminal-in-org check runs FIRST, the destination-
+// venue-in-org check SECOND, the merchants-in-org check LAST, and only then do
+// we delegate to the migration service.
+
+/**
+ * Preflight a terminal migration scoped to an org.
+ * Guards: source terminal ∈ org, destination venue ∈ org.
+ */
+export async function migratePreflightForOrg(orgId: string, terminalId: string, toVenueId: string) {
+  await validateTerminalInOrg(terminalId, orgId)
+  await validateVenueInOrg(toVenueId, orgId)
+  return migratePreflight(terminalId, toVenueId)
+}
+
+/**
+ * Execute a terminal migration scoped to an org.
+ * Guards: source terminal ∈ org, destination venue ∈ org, merchants ∈ org (if any).
+ */
+export async function migrateExecuteForOrg(
+  orgId: string,
+  terminalId: string,
+  toVenueId: string,
+  actor: TerminalActor & { staffName?: string },
+  assignedMerchantIds?: string[],
+) {
+  await validateTerminalInOrg(terminalId, orgId)
+  await validateVenueInOrg(toVenueId, orgId)
+  if (assignedMerchantIds && assignedMerchantIds.length > 0) {
+    await validateMerchantsInOrg(orgId, assignedMerchantIds)
+  }
+  return migrateExecute(terminalId, toVenueId, actor, assignedMerchantIds)
+}
+
+/**
+ * Read migration status scoped to an org.
+ * Guards: terminal ∈ org.
+ */
+export async function migrateStatusForOrg(orgId: string, terminalId: string, commandId: string) {
+  await validateTerminalInOrg(terminalId, orgId)
+  return migrateStatus(terminalId, commandId)
+}
+
+/**
+ * Cancel an in-flight migration scoped to an org.
+ * Guards: terminal ∈ org.
+ */
+export async function migrateCancelForOrg(orgId: string, terminalId: string, actor: TerminalActor) {
+  await validateTerminalInOrg(terminalId, orgId)
+  return migrateCancel(terminalId, actor)
 }
