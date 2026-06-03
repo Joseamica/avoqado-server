@@ -1,10 +1,16 @@
 # SIM Registration Approval — Backend Implementation Plan (avoqado-server)
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** En avoqado-server, hacer que el alta de SIMs desde la TPV genere una *solicitud de aprobación* (en vez de inventario vendible) cuando la org está en modo `ENFORCE`, dar al OWNER endpoints para aprobar/rechazar, y bloquear la venta de SIMs no aprobadas.
+**Goal:** En avoqado-server, hacer que el alta de SIMs desde la TPV genere una _solicitud de aprobación_ (en vez de inventario vendible)
+cuando la org está en modo `ENFORCE`, dar al OWNER endpoints para aprobar/rechazar, y bloquear la venta de SIMs no aprobadas.
 
-**Architecture:** Capa aditiva sobre el sistema de custodia existente. Dos modelos Prisma nuevos (`SimRegistrationRequest`, `SimRegistrationRequestItem`) + un servicio nuevo (`simRegistration.service.ts`). El endpoint TPV `register-batch` se bifurca según `Organization.simCustodyEnforcementMode`. Al aprobar, se crean `SerializedItem` en `ADMIN_HELD` reutilizando la cadena de custodia ya existente (Owner→Supervisor→Promotor→acepta). El gate de venta `applyCustodyPrecheck` (ya implementado) se activa poniendo la org en `ENFORCE`. **No se modifica `SerializedItem` ni la state machine de custodia.**
+**Architecture:** Capa aditiva sobre el sistema de custodia existente. Dos modelos Prisma nuevos (`SimRegistrationRequest`,
+`SimRegistrationRequestItem`) + un servicio nuevo (`simRegistration.service.ts`). El endpoint TPV `register-batch` se bifurca según
+`Organization.simCustodyEnforcementMode`. Al aprobar, se crean `SerializedItem` en `ADMIN_HELD` reutilizando la cadena de custodia ya
+existente (Owner→Supervisor→Promotor→acepta). El gate de venta `applyCustodyPrecheck` (ya implementado) se activa poniendo la org en
+`ENFORCE`. **No se modifica `SerializedItem` ni la state machine de custodia.**
 
 **Tech Stack:** Express + TypeScript, PostgreSQL/Prisma, Zod (validación, mensajes ES), Jest (`npm run test:unit`).
 
@@ -15,17 +21,22 @@
 ## File Structure
 
 **Crear:**
+
 - `prisma/migrations/<timestamp>_sim_registration_requests/migration.sql` — migración aditiva (generada por Prisma).
-- `src/services/serialized-inventory/simRegistration.service.ts` — lógica de solicitudes (crear, listar, aprobar, rechazar, contar) + helper `isApprovalModeEnabled`.
+- `src/services/serialized-inventory/simRegistration.service.ts` — lógica de solicitudes (crear, listar, aprobar, rechazar, contar) + helper
+  `isApprovalModeEnabled`.
 - `src/controllers/dashboard/simRegistration.dashboard.controller.ts` — controladores thin (Zod ES + tenant check + delega al servicio).
 - `src/routes/dashboard/simRegistration.dashboard.routes.ts` — rutas dashboard (auth + rate-limit + permiso).
 - `tests/unit/services/serialized-inventory/simRegistration.service.test.ts` — tests del servicio (puros + con mock de Prisma).
 - `tests/unit/services/serialized-inventory/iccidFormat.test.ts` — test del validador de formato ICCID.
 
 **Modificar:**
+
 - `prisma/schema.prisma` — 2 modelos + 2 enums + relaciones inversas opcionales.
-- `src/services/serialized-inventory/serializedInventory.service.ts` — extraer/usar `isValidMxIccid`, bloquear `registerAndSell` en modo ENFORCE.
-- `src/routes/tpv.routes.ts:5838` — bifurcar `register-batch` a `createRequest` cuando la org está en ENFORCE; mantener respuesta retrocompatible.
+- `src/services/serialized-inventory/serializedInventory.service.ts` — extraer/usar `isValidMxIccid`, bloquear `registerAndSell` en modo
+  ENFORCE.
+- `src/routes/tpv.routes.ts:5838` — bifurcar `register-batch` a `createRequest` cuando la org está en ENFORCE; mantener respuesta
+  retrocompatible.
 - `src/routes/tpv.routes.ts` (sell endpoint ~6060) — devolver `SIM_NOT_REGISTERED` claro cuando se intente vender no-registrada en ENFORCE.
 - `src/lib/permissions.ts` — permiso `sim-custody:approve-registration` (OWNER + SUPERADMIN).
 - `src/routes/dashboard.routes.ts:3582` — montar el router nuevo bajo `/organizations/:orgId`.
@@ -34,11 +45,13 @@
 
 ## Task 1: Validador de formato ICCID (compartido, DB-free)
 
-Extrae el guard de formato mexicano a una función reutilizable en el servicio. Hoy el regex
-vive solo en la TPV; el backend necesita su propia copia como defensa en profundidad.
+Extrae el guard de formato mexicano a una función reutilizable en el servicio. Hoy el regex vive solo en la TPV; el backend necesita su
+propia copia como defensa en profundidad.
 
 **Files:**
-- Modify: `src/services/serialized-inventory/serializedInventory.service.ts` (agregar export `isValidMxIccid` cerca de `normalizeSerial`, ~línea 30)
+
+- Modify: `src/services/serialized-inventory/serializedInventory.service.ts` (agregar export `isValidMxIccid` cerca de `normalizeSerial`,
+  ~línea 30)
 - Test: `tests/unit/services/serialized-inventory/iccidFormat.test.ts`
 
 - [ ] **Step 1: Write the failing test**
@@ -78,8 +91,8 @@ describe('isValidMxIccid', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx jest tests/unit/services/serialized-inventory/iccidFormat.test.ts`
-Expected: FAIL — `isValidMxIccid is not a function` / not exported.
+Run: `npx jest tests/unit/services/serialized-inventory/iccidFormat.test.ts` Expected: FAIL — `isValidMxIccid is not a function` / not
+exported.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -98,13 +111,11 @@ export function isValidMxIccid(raw: string): boolean {
 }
 ```
 
-> Verifica que `normalizeSerial` haga trim + uppercase. Si solo hace uppercase sin trim,
-> usar `normalizeSerial(raw.trim())` aquí.
+> Verifica que `normalizeSerial` haga trim + uppercase. Si solo hace uppercase sin trim, usar `normalizeSerial(raw.trim())` aquí.
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx jest tests/unit/services/serialized-inventory/iccidFormat.test.ts`
-Expected: PASS (7 tests).
+Run: `npx jest tests/unit/services/serialized-inventory/iccidFormat.test.ts` Expected: PASS (7 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -118,6 +129,7 @@ git commit -m "feat(sim-registration): add isValidMxIccid server-side format gua
 ## Task 2: Modelos Prisma + migración (aditivo)
 
 **Files:**
+
 - Modify: `prisma/schema.prisma`
 - Create: `prisma/migrations/<timestamp>_sim_registration_requests/migration.sql` (generada)
 
@@ -185,42 +197,48 @@ model SimRegistrationRequestItem {
 - [ ] **Step 3: Agregar relaciones inversas opcionales** (arrays) en los modelos existentes:
 
 En `model Organization` (~línea 60-80), agregar:
+
 ```prisma
   simRegistrationRequests SimRegistrationRequest[]
 ```
+
 En `model Venue`, agregar:
+
 ```prisma
   simRegRequestsFromHere SimRegistrationRequest[] @relation("SimRegRequestVenue")
 ```
+
 En `model Staff`, agregar:
+
 ```prisma
   simRegRequestsMade     SimRegistrationRequest[] @relation("SimRegRequestRequester")
   simRegRequestsReviewed SimRegistrationRequest[] @relation("SimRegRequestReviewer")
 ```
+
 En `model ItemCategory` (~línea 7369), agregar:
+
 ```prisma
   simRegRequests SimRegistrationRequest[] @relation("SimRegRequestCategory")
 ```
 
 - [ ] **Step 4: Validar el schema**
 
-Run: `npx prisma validate`
-Expected: `The schema at prisma/schema.prisma is valid 🚀`
+Run: `npx prisma validate` Expected: `The schema at prisma/schema.prisma is valid 🚀`
 
 - [ ] **Step 5: Generar la migración**
 
-Run: `npx prisma migrate dev --name sim_registration_requests`
-Expected: migración creada; `prisma generate` corre automáticamente.
+Run: `npx prisma migrate dev --name sim_registration_requests` Expected: migración creada; `prisma generate` corre automáticamente.
 
 - [ ] **Step 6: Verificar que la migración es aditiva**
 
-Run: `grep -iE "DROP|ALTER TABLE \"SerializedItem\"|ALTER TABLE \"ItemCategory\"" prisma/migrations/*sim_registration_requests*/migration.sql`
-Expected: SIN salida (solo `CREATE TABLE`/`CREATE TYPE` + `ALTER TABLE ... ADD CONSTRAINT` para FKs nuevas). Cero DROP/cambio destructivo en tablas existentes.
+Run:
+`grep -iE "DROP|ALTER TABLE \"SerializedItem\"|ALTER TABLE \"ItemCategory\"" prisma/migrations/*sim_registration_requests*/migration.sql`
+Expected: SIN salida (solo `CREATE TABLE`/`CREATE TYPE` + `ALTER TABLE ... ADD CONSTRAINT` para FKs nuevas). Cero DROP/cambio destructivo en
+tablas existentes.
 
 - [ ] **Step 7: Typecheck**
 
-Run: `npm run build`
-Expected: compila sin errores (los nuevos tipos Prisma existen).
+Run: `npm run build` Expected: compila sin errores (los nuevos tipos Prisma existen).
 
 - [ ] **Step 8: Commit**
 
@@ -234,6 +252,7 @@ git commit -m "feat(sim-registration): add SimRegistrationRequest models (additi
 ## Task 3: Servicio — `isApprovalModeEnabled` + `createRequest`
 
 **Files:**
+
 - Create: `src/services/serialized-inventory/simRegistration.service.ts`
 - Test: `tests/unit/services/serialized-inventory/simRegistration.service.test.ts`
 
@@ -331,8 +350,7 @@ describe('SimRegistrationService.createRequest', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx jest tests/unit/services/serialized-inventory/simRegistration.service.test.ts`
-Expected: FAIL — module/class not found.
+Run: `npx jest tests/unit/services/serialized-inventory/simRegistration.service.test.ts` Expected: FAIL — module/class not found.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -423,14 +441,13 @@ export class SimRegistrationService {
 export const simRegistrationService = new SimRegistrationService()
 ```
 
-> Nota: el test mockea `simRegistrationRequest.create` (no usa `$transaction` para createRequest).
-> Si prefieres transacción, ajusta el test. La versión simple de arriba usa create anidado
-> (atómico por sí mismo) — suficiente porque crea una sola fila + sus items.
+> Nota: el test mockea `simRegistrationRequest.create` (no usa `$transaction` para createRequest). Si prefieres transacción, ajusta el test.
+> La versión simple de arriba usa create anidado (atómico por sí mismo) — suficiente porque crea una sola fila + sus items.
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx jest tests/unit/services/serialized-inventory/simRegistration.service.test.ts`
-Expected: PASS (isApprovalModeEnabled ×3 + createRequest ×3).
+Run: `npx jest tests/unit/services/serialized-inventory/simRegistration.service.test.ts` Expected: PASS (isApprovalModeEnabled ×3 +
+createRequest ×3).
 
 - [ ] **Step 5: Commit**
 
@@ -444,6 +461,7 @@ git commit -m "feat(sim-registration): service createRequest + isApprovalModeEna
 ## Task 4: Servicio — `approve`, `reject`, `listPending`, `countPending`
 
 **Files:**
+
 - Modify: `src/services/serialized-inventory/simRegistration.service.ts`
 - Test: `tests/unit/services/serialized-inventory/simRegistration.service.test.ts` (añadir describes)
 
@@ -454,8 +472,12 @@ function makeApproveDb(items: any[], orgItems: any[] = []) {
   const txStub = {
     simRegistrationRequest: {
       findUnique: jest.fn().mockResolvedValue({
-        id: 'req_1', organizationId: 'org_1', requestedByStaffId: 'staff_1',
-        registeredFromVenueId: 'venue_1', proposedCategoryId: 'cat_1', status: 'PENDING',
+        id: 'req_1',
+        organizationId: 'org_1',
+        requestedByStaffId: 'staff_1',
+        registeredFromVenueId: 'venue_1',
+        proposedCategoryId: 'cat_1',
+        status: 'PENDING',
         items,
       }),
       update: jest.fn().mockResolvedValue({}),
@@ -474,12 +496,13 @@ function makeApproveDb(items: any[], orgItems: any[] = []) {
 
 describe('SimRegistrationService.approve', () => {
   it('creates a SerializedItem in ADMIN_HELD per approved item and marks item APPROVED', async () => {
-    const { db, txStub } = makeApproveDb([
-      { id: 'it_1', serialNumber: '8952140000001234567', status: 'PENDING' },
-    ])
+    const { db, txStub } = makeApproveDb([{ id: 'it_1', serialNumber: '8952140000001234567', status: 'PENDING' }])
     const svc = new SimRegistrationService(db)
     const res = await svc.approve({
-      organizationId: 'org_1', requestId: 'req_1', reviewedByStaffId: 'owner_1', categoryId: 'cat_1',
+      organizationId: 'org_1',
+      requestId: 'req_1',
+      reviewedByStaffId: 'owner_1',
+      categoryId: 'cat_1',
     })
     expect(txStub.serializedItem.create).toHaveBeenCalledTimes(1)
     const createArg = txStub.serializedItem.create.mock.calls[0][0].data
@@ -496,7 +519,10 @@ describe('SimRegistrationService.approve', () => {
     )
     const svc = new SimRegistrationService(db)
     const res = await svc.approve({
-      organizationId: 'org_1', requestId: 'req_1', reviewedByStaffId: 'owner_1', categoryId: 'cat_1',
+      organizationId: 'org_1',
+      requestId: 'req_1',
+      reviewedByStaffId: 'owner_1',
+      categoryId: 'cat_1',
     })
     expect(txStub.serializedItem.create).not.toHaveBeenCalled()
     expect(res.approved).toBe(0)
@@ -506,12 +532,13 @@ describe('SimRegistrationService.approve', () => {
 
 describe('SimRegistrationService.reject', () => {
   it('marks items REJECTED with reason and creates no SerializedItem', async () => {
-    const { db, txStub } = makeApproveDb([
-      { id: 'it_1', serialNumber: '8952140000001234567', status: 'PENDING' },
-    ])
+    const { db, txStub } = makeApproveDb([{ id: 'it_1', serialNumber: '8952140000001234567', status: 'PENDING' }])
     const svc = new SimRegistrationService(db)
     const res = await svc.reject({
-      organizationId: 'org_1', requestId: 'req_1', reviewedByStaffId: 'owner_1', reason: 'ICCID ilegible',
+      organizationId: 'org_1',
+      requestId: 'req_1',
+      reviewedByStaffId: 'owner_1',
+      reason: 'ICCID ilegible',
     })
     expect(txStub.serializedItem.create).not.toHaveBeenCalled()
     expect(txStub.simRegistrationRequestItem.update).toHaveBeenCalled()
@@ -522,8 +549,7 @@ describe('SimRegistrationService.reject', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx jest tests/unit/services/serialized-inventory/simRegistration.service.test.ts`
-Expected: FAIL — `approve`/`reject` not defined.
+Run: `npx jest tests/unit/services/serialized-inventory/simRegistration.service.test.ts` Expected: FAIL — `approve`/`reject` not defined.
 
 - [ ] **Step 3: Write minimal implementation** (añadir métodos a la clase)
 
@@ -535,7 +561,11 @@ export interface ApproveInput {
   serialNumbers?: string[] // subset; omit = all PENDING items
   categoryId: string
 }
-export interface ApproveResult { approved: number; duplicates: number; requestStatus: string }
+export interface ApproveResult {
+  approved: number
+  duplicates: number
+  requestStatus: string
+}
 
 export interface RejectInput {
   organizationId: string
@@ -544,7 +574,10 @@ export interface RejectInput {
   serialNumbers?: string[]
   reason: string
 }
-export interface RejectResult { rejected: number; requestStatus: string }
+export interface RejectResult {
+  rejected: number
+  requestStatus: string
+}
 ```
 
 ```typescript
@@ -674,8 +707,8 @@ export interface RejectResult { rejected: number; requestStatus: string }
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx jest tests/unit/services/serialized-inventory/simRegistration.service.test.ts`
-Expected: PASS (approve ×2, reject ×1 + Task 3 tests).
+Run: `npx jest tests/unit/services/serialized-inventory/simRegistration.service.test.ts` Expected: PASS (approve ×2, reject ×1 + Task 3
+tests).
 
 - [ ] **Step 5: Commit**
 
@@ -689,6 +722,7 @@ git commit -m "feat(sim-registration): service approve/reject/listPending/countP
 ## Task 5: Permiso `sim-custody:approve-registration`
 
 **Files:**
+
 - Modify: `src/lib/permissions.ts`
 
 - [ ] **Step 1: Agregar a PERMISSION_DEPENDENCIES** (junto a las otras `sim-custody:*`, ~línea 322):
@@ -703,15 +737,14 @@ git commit -m "feat(sim-registration): service approve/reject/listPending/countP
     'sim-custody:approve-registration', // Aprobar/rechazar solicitudes de alta de SIMs
 ```
 
-- [ ] **Step 3: Verificar que SUPERADMIN lo hereda** (wildcard `*:*` o lista explícita). Si SUPERADMIN usa lista explícita, agregarlo también.
+- [ ] **Step 3: Verificar que SUPERADMIN lo hereda** (wildcard `*:*` o lista explícita). Si SUPERADMIN usa lista explícita, agregarlo
+      también.
 
-Run: `grep -n "approve-registration" src/lib/permissions.ts`
-Expected: aparece en dependencias + OWNER (+ SUPERADMIN si es lista explícita).
+Run: `grep -n "approve-registration" src/lib/permissions.ts` Expected: aparece en dependencias + OWNER (+ SUPERADMIN si es lista explícita).
 
 - [ ] **Step 4: Typecheck**
 
-Run: `npm run build`
-Expected: compila.
+Run: `npm run build` Expected: compila.
 
 - [ ] **Step 5: Commit**
 
@@ -725,6 +758,7 @@ git commit -m "feat(sim-registration): add sim-custody:approve-registration perm
 ## Task 6: Controlador + rutas dashboard (aprobar/rechazar/listar)
 
 **Files:**
+
 - Create: `src/controllers/dashboard/simRegistration.dashboard.controller.ts`
 - Create: `src/routes/dashboard/simRegistration.dashboard.routes.ts`
 - Modify: `src/routes/dashboard.routes.ts` (import + mount)
@@ -764,7 +798,9 @@ export async function listRequests(req: Request, res: Response, next: NextFuncti
     if (!tenantOk(req)) return res.status(403).json({ error: 'TENANT_MISMATCH', message: 'Organización no coincide' })
     const data = await simRegistrationService.listPending(req.params.orgId)
     res.status(200).json({ success: true, data })
-  } catch (err) { next(err) }
+  } catch (err) {
+    next(err)
+  }
 }
 
 export async function countRequests(req: Request, res: Response, next: NextFunction) {
@@ -772,7 +808,9 @@ export async function countRequests(req: Request, res: Response, next: NextFunct
     if (!tenantOk(req)) return res.status(403).json({ error: 'TENANT_MISMATCH', message: 'Organización no coincide' })
     const count = await simRegistrationService.countPending(req.params.orgId)
     res.status(200).json({ success: true, data: { count } })
-  } catch (err) { next(err) }
+  } catch (err) {
+    next(err)
+  }
 }
 
 export async function approveRequest(req: Request, res: Response, next: NextFunction) {
@@ -829,24 +867,51 @@ import rateLimit from 'express-rate-limit'
 import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken.middleware'
 import { checkPermission } from '../../middlewares/checkPermission.middleware'
 import {
-  approveRequest, countRequests, listRequests, rejectRequest,
+  approveRequest,
+  countRequests,
+  listRequests,
+  rejectRequest,
 } from '../../controllers/dashboard/simRegistration.dashboard.controller'
 
 const router = Router({ mergeParams: true })
 const actorKey = (req: any) => req.authContext?.userId ?? req.ip
 const limiter = rateLimit({
-  windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false, keyGenerator: actorKey,
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: actorKey,
   message: { error: 'RATE_LIMIT', message: 'Demasiadas solicitudes. Intenta de nuevo en un minuto.' },
 })
 
-router.get('/sim-registration-requests', authenticateTokenMiddleware, limiter,
-  checkPermission('sim-custody:approve-registration'), listRequests)
-router.get('/sim-registration-requests/count', authenticateTokenMiddleware, limiter,
-  checkPermission('sim-custody:approve-registration'), countRequests)
-router.post('/sim-registration-requests/:id/approve', authenticateTokenMiddleware, limiter,
-  checkPermission('sim-custody:approve-registration'), approveRequest)
-router.post('/sim-registration-requests/:id/reject', authenticateTokenMiddleware, limiter,
-  checkPermission('sim-custody:approve-registration'), rejectRequest)
+router.get(
+  '/sim-registration-requests',
+  authenticateTokenMiddleware,
+  limiter,
+  checkPermission('sim-custody:approve-registration'),
+  listRequests,
+)
+router.get(
+  '/sim-registration-requests/count',
+  authenticateTokenMiddleware,
+  limiter,
+  checkPermission('sim-custody:approve-registration'),
+  countRequests,
+)
+router.post(
+  '/sim-registration-requests/:id/approve',
+  authenticateTokenMiddleware,
+  limiter,
+  checkPermission('sim-custody:approve-registration'),
+  approveRequest,
+)
+router.post(
+  '/sim-registration-requests/:id/reject',
+  authenticateTokenMiddleware,
+  limiter,
+  checkPermission('sim-custody:approve-registration'),
+  rejectRequest,
+)
 
 export default router
 ```
@@ -854,18 +919,20 @@ export default router
 - [ ] **Step 3: Montar el router** en `src/routes/dashboard.routes.ts`:
 
 Junto al import de `simCustodyDashboardRoutes` (~línea 247):
+
 ```typescript
 import simRegistrationDashboardRoutes from './dashboard/simRegistration.dashboard.routes'
 ```
+
 Junto al `router.use('/organizations/:orgId', simCustodyDashboardRoutes)` (~línea 3582):
+
 ```typescript
 router.use('/organizations/:orgId', simRegistrationDashboardRoutes)
 ```
 
 - [ ] **Step 4: Typecheck**
 
-Run: `npm run build`
-Expected: compila.
+Run: `npm run build` Expected: compila.
 
 - [ ] **Step 5: Commit**
 
@@ -879,56 +946,62 @@ git commit -m "feat(sim-registration): dashboard endpoints approve/reject/list/c
 ## Task 7: Bifurcar `register-batch` (TPV) — modo solicitud + respuesta retrocompatible
 
 **Files:**
+
 - Modify: `src/routes/tpv.routes.ts:5838-5906`
 - Test: `tests/unit/services/serialized-inventory/simRegistration.service.test.ts` (ya cubre createRequest; aquí es wiring de ruta)
 
-- [ ] **Step 1: Modificar el handler** `register-batch`. Tras resolver `venue.organizationId`, insertar el branch ANTES de llamar a `registerBatchOrg`/`registerBatch`:
+- [ ] **Step 1: Modificar el handler** `register-batch`. Tras resolver `venue.organizationId`, insertar el branch ANTES de llamar a
+      `registerBatchOrg`/`registerBatch`:
 
 ```typescript
-      const isOrgLevel = !!venue?.organizationId
+const isOrgLevel = !!venue?.organizationId
 
-      // Approval mode (org en ENFORCE): el alta NO crea inventario vendible; crea
-      // una solicitud que el OWNER aprueba. Respuesta retrocompatible: las TPVs
-      // viejas leen { created: 0, duplicates, assignedToYou: 0 } y NO añaden stock.
-      if (isOrgLevel && (await simRegistrationService.isApprovalModeEnabled(venue!.organizationId!))) {
-        const reqResult = await simRegistrationService.createRequest({
-          organizationId: venue!.organizationId!,
-          requestedByStaffId: staffId,
-          registeredFromVenueId: venueId,
-          proposedCategoryId: categoryId,
-          serialNumbers,
-        })
-        return res.status(200).json({
-          success: true,
-          data: {
-            created: 0,
-            duplicates: reqResult.duplicates,
-            assignedToYou: 0,
-            // Campos nuevos opcionales (TPV nueva los usa; vieja los ignora):
-            mode: 'approval',
-            requestId: reqResult.requestId,
-            submitted: reqResult.submitted,
-            invalid: reqResult.invalid,
-          },
-        })
-      }
+// Approval mode (org en ENFORCE): el alta NO crea inventario vendible; crea
+// una solicitud que el OWNER aprueba. Respuesta retrocompatible: las TPVs
+// viejas leen { created: 0, duplicates, assignedToYou: 0 } y NO añaden stock.
+if (isOrgLevel && (await simRegistrationService.isApprovalModeEnabled(venue!.organizationId!))) {
+  const reqResult = await simRegistrationService.createRequest({
+    organizationId: venue!.organizationId!,
+    requestedByStaffId: staffId,
+    registeredFromVenueId: venueId,
+    proposedCategoryId: categoryId,
+    serialNumbers,
+  })
+  return res.status(200).json({
+    success: true,
+    data: {
+      created: 0,
+      duplicates: reqResult.duplicates,
+      assignedToYou: 0,
+      // Campos nuevos opcionales (TPV nueva los usa; vieja los ignora):
+      mode: 'approval',
+      requestId: reqResult.requestId,
+      submitted: reqResult.submitted,
+      invalid: reqResult.invalid,
+    },
+  })
+}
 
-      const result = isOrgLevel
-        ? await serializedInventoryService.registerBatchOrg({ /* ...existing... */ })
-        : await serializedInventoryService.registerBatch({ /* ...existing... */ })
+const result = isOrgLevel
+  ? await serializedInventoryService.registerBatchOrg({
+      /* ...existing... */
+    })
+  : await serializedInventoryService.registerBatch({
+      /* ...existing... */
+    })
 ```
 
 > Agregar el import al inicio de `tpv.routes.ts`:
 > `import { simRegistrationService } from '../services/serialized-inventory/simRegistration.service'`
 
 - [ ] **Step 2: Verificar retrocompatibilidad manualmente** (revisión de código):
+
   - Con org en OFF → no entra al branch, comportamiento idéntico al actual.
   - Con org en ENFORCE → `data.created === 0`, `requestId` presente.
 
 - [ ] **Step 3: Typecheck**
 
-Run: `npm run build`
-Expected: compila.
+Run: `npm run build` Expected: compila.
 
 - [ ] **Step 4: Commit**
 
@@ -942,35 +1015,35 @@ git commit -m "feat(sim-registration): register-batch creates approval request i
 ## Task 8: Bloquear venta on-the-fly de no-registradas en ENFORCE
 
 **Files:**
-- Modify: `src/services/serialized-inventory/serializedInventory.service.ts` (método `registerAndSell`, ~línea 401) o el handler del endpoint `/serialized-inventory/sell` (`tpv.routes.ts` ~6060)
+
+- Modify: `src/services/serialized-inventory/serializedInventory.service.ts` (método `registerAndSell`, ~línea 401) o el handler del
+  endpoint `/serialized-inventory/sell` (`tpv.routes.ts` ~6060)
 - Test: `tests/unit/services/serialized-inventory/simRegistration.service.test.ts` (añadir guard test si la lógica vive en servicio)
 
 - [ ] **Step 1: Localizar dónde se llama `registerAndSell`** (venta de items `not_registered`):
 
-Run: `grep -n "registerAndSell" src/routes/tpv.routes.ts src/services/**/*.ts`
-Expected: identifica el handler de `/serialized-inventory/sell`.
+Run: `grep -n "registerAndSell" src/routes/tpv.routes.ts src/services/**/*.ts` Expected: identifica el handler de
+`/serialized-inventory/sell`.
 
 - [ ] **Step 2: En ese handler**, antes de llamar a `registerAndSell`, agregar guard:
 
 ```typescript
-      // ENFORCE: prohibido vender SIMs no registradas on-the-fly. Deben pasar por
-      // alta → aprobación → custodia. Ver spec §3.3.
-      const sellVenue = await prisma.venue.findUnique({
-        where: { id: venueId }, select: { organizationId: true },
-      })
-      if (sellVenue?.organizationId &&
-          (await simRegistrationService.isApprovalModeEnabled(sellVenue.organizationId))) {
-        throw new AppError('Esta SIM no está dada de alta. Debe aprobarse antes de venderse.', 422, 'SIM_NOT_REGISTERED')
-      }
+// ENFORCE: prohibido vender SIMs no registradas on-the-fly. Deben pasar por
+// alta → aprobación → custodia. Ver spec §3.3.
+const sellVenue = await prisma.venue.findUnique({
+  where: { id: venueId },
+  select: { organizationId: true },
+})
+if (sellVenue?.organizationId && (await simRegistrationService.isApprovalModeEnabled(sellVenue.organizationId))) {
+  throw new AppError('Esta SIM no está dada de alta. Debe aprobarse antes de venderse.', 422, 'SIM_NOT_REGISTERED')
+}
 ```
 
-> Ajustar la firma de `AppError` a la del proyecto (revisar otros usos: `new AppError(msg, status)`
-> o `new AppError(msg, status, code)`).
+> Ajustar la firma de `AppError` a la del proyecto (revisar otros usos: `new AppError(msg, status)` o `new AppError(msg, status, code)`).
 
 - [ ] **Step 3: Typecheck**
 
-Run: `npm run build`
-Expected: compila.
+Run: `npm run build` Expected: compila.
 
 - [ ] **Step 4: Commit**
 
@@ -987,13 +1060,12 @@ git commit -m "feat(sim-registration): block on-the-fly sale of unregistered SIM
 
 - [ ] **Step 1: Correr toda la suite de serialized-inventory**
 
-Run: `npx jest tests/unit/services/serialized-inventory`
-Expected: PASS — incluye custody.state-machine, serial-normalization, iccidFormat, simRegistration.
+Run: `npx jest tests/unit/services/serialized-inventory` Expected: PASS — incluye custody.state-machine, serial-normalization, iccidFormat,
+simRegistration.
 
 - [ ] **Step 2: Correr build + lint**
 
-Run: `npm run build`
-Expected: compila sin errores.
+Run: `npm run build` Expected: compila sin errores.
 
 - [ ] **Step 3: Audit Fase 0** (ANTES de activar). Query de seguridad:
 
@@ -1002,6 +1074,7 @@ SELECT "organizationId", COUNT(*) FROM "SerializedItem"
 WHERE status = 'AVAILABLE' AND "custodyState" <> 'PROMOTER_HELD'
 GROUP BY "organizationId";
 ```
+
 Revisar resultados. Si hay orgs no-PlayTelecom con inventario en riesgo → activar ENFORCE solo en `cmietitbn000zpr2d8213qkzq`.
 
 - [ ] **Step 4: Activar ENFORCE** en la(s) org(s) objetivo:
@@ -1012,6 +1085,7 @@ WHERE id = 'cmietitbn000zpr2d8213qkzq';
 ```
 
 - [ ] **Step 5: Deploy backend** y smoke test:
+
   - TPV vieja: `register-batch` sigue respondiendo (floor-version safeguard mantiene OFF para clientes < `minimumVersionWithMisSims`).
   - Endpoints de aprobación responden 200 con OWNER, 403 sin permiso.
 
@@ -1029,9 +1103,8 @@ WHERE id = 'cmietitbn000zpr2d8213qkzq';
 - **§5 pruebas backend** → Tasks 1, 3, 4 (+ Task 9 suite) ✅
 - **Validación formato 8952** (defensa en profundidad backend) → Task 1 ✅
 
-Pendiente fuera de este plan (otros repos): guard de venta en TPV (8952 en SerializedSaleViewModel),
-tab "Solicitudes" en dashboard. Ver plan cross-repo índice en avoqado-tpv.
+Pendiente fuera de este plan (otros repos): guard de venta en TPV (8952 en SerializedSaleViewModel), tab "Solicitudes" en dashboard. Ver
+plan cross-repo índice en avoqado-tpv.
 
-**Nota de tipo:** el servicio usa `requestStatus: string` y castea a enum Prisma con `as any` al
-persistir — aceptable porque `recalcStatus` solo devuelve valores válidos del enum
-`SimRegistrationRequestStatus`. Si prefieres tipado estricto, importar el enum y tipar el retorno.
+**Nota de tipo:** el servicio usa `requestStatus: string` y castea a enum Prisma con `as any` al persistir — aceptable porque `recalcStatus`
+solo devuelve valores válidos del enum `SimRegistrationRequestStatus`. Si prefieres tipado estricto, importar el enum y tipar el retorno.

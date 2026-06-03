@@ -1,12 +1,17 @@
 # Avoqado Admin MCP — Phase 1a (Read Tools) Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Stand up a local, stdio MCP server inside `avoqado-server` exposing 5 read-only operational tools (`list_venues`/`list_orgs`, `daily_sales`, `audit_terminals`, `find_order`/`find_payment`) that the founder drives from Claude.
+**Goal:** Stand up a local, stdio MCP server inside `avoqado-server` exposing 5 read-only operational tools (`list_venues`/`list_orgs`,
+`daily_sales`, `audit_terminals`, `find_order`/`find_payment`) that the founder drives from Claude.
 
-**Architecture:** A small MCP server at `scripts/mcp/` that imports the repo's Prisma singleton (`@/utils/prismaClient`) and queries the DB directly — same pattern as the ~40 existing `scripts/*.ts`. Read-only this phase: zero mutation risk. Pure logic (sales aggregation, terminal-config auditing) is split into testable functions; the Prisma queries + MCP wiring are verified by a manual smoke test.
+**Architecture:** A small MCP server at `scripts/mcp/` that imports the repo's Prisma singleton (`@/utils/prismaClient`) and queries the DB
+directly — same pattern as the ~40 existing `scripts/*.ts`. Read-only this phase: zero mutation risk. Pure logic (sales aggregation,
+terminal-config auditing) is split into testable functions; the Prisma queries + MCP wiring are verified by a manual smoke test.
 
-**Tech Stack:** `@modelcontextprotocol/sdk` (new dep), `zod` (present), `@prisma/client` (present), run with `tsx` (present), tests with Jest/ts-jest (present, `tests/unit/**`).
+**Tech Stack:** `@modelcontextprotocol/sdk` (new dep), `zod` (present), `@prisma/client` (present), run with `tsx` (present), tests with
+Jest/ts-jest (present, `tests/unit/**`).
 
 **Source spec:** `docs/plans/2026-05-29-admin-mcp-design.md`
 
@@ -30,9 +35,11 @@ tests/unit/mcp/
   auditTerminalConfig.test.ts
 ```
 
-Each tool file exports one `registerXxxTools(server)` function and keeps any branching logic in a separately-exported pure function. `server.ts` imports and calls each register function.
+Each tool file exports one `registerXxxTools(server)` function and keeps any branching logic in a separately-exported pure function.
+`server.ts` imports and calls each register function.
 
 **Type contracts used across tasks (defined in the tasks that own them):**
+
 - `text(data: unknown): { content: { type: 'text'; text: string }[] }` — `context.ts` (Task 1)
 - `summarizeSales(payments: SalesInput[]): SalesSummary` — `tools/sales.ts` (Task 3)
 - `auditTerminalConfig(t: TerminalInput): TerminalConfigReport` — `tools/terminals.ts` (Task 4)
@@ -42,6 +49,7 @@ Each tool file exports one `registerXxxTools(server)` function and keeps any bra
 ## Task 1: Scaffolding + smoke test
 
 **Files:**
+
 - Modify: `package.json` (add dep + `mcp` script)
 - Create: `scripts/mcp/context.ts`
 - Create: `scripts/mcp/server.ts`
@@ -49,9 +57,11 @@ Each tool file exports one `registerXxxTools(server)` function and keeps any bra
 - [ ] **Step 1: Install the MCP SDK**
 
 Run:
+
 ```bash
 npm install @modelcontextprotocol/sdk
 ```
+
 Expected: adds `@modelcontextprotocol/sdk` to `dependencies`, no peer-dep errors.
 
 - [ ] **Step 2: Create `scripts/mcp/context.ts`**
@@ -95,11 +105,8 @@ async function main() {
   const server = new McpServer({ name: 'avoqado-admin', version: '0.1.0' })
 
   // Smoke tool — confirms the server is wired before real tools are added.
-  server.tool(
-    'ping',
-    'Health check. Returns the DB target this MCP is pointed at.',
-    {},
-    async () => text({ ok: true, dbTarget: describeDbTarget() }),
+  server.tool('ping', 'Health check. Returns the DB target this MCP is pointed at.', {}, async () =>
+    text({ ok: true, dbTarget: describeDbTarget() }),
   )
 
   const transport = new StdioServerTransport()
@@ -108,7 +115,7 @@ async function main() {
   console.error(`[avoqado-admin MCP] connected · DB target: ${describeDbTarget()}`)
 }
 
-main().catch((err) => {
+main().catch(err => {
   console.error('[avoqado-admin MCP] fatal:', err)
   process.exit(1)
 })
@@ -117,6 +124,7 @@ main().catch((err) => {
 - [ ] **Step 4: Add the `mcp` npm script**
 
 In `package.json` `"scripts"`, add:
+
 ```json
 "mcp": "tsx scripts/mcp/server.ts"
 ```
@@ -124,10 +132,15 @@ In `package.json` `"scripts"`, add:
 - [ ] **Step 5: Smoke test the server starts and the import chain resolves**
 
 Run (the server reads from stdin; we send nothing and just confirm it boots without crashing, then Ctrl-C):
+
 ```bash
 timeout 5 npm run mcp; echo "exit: $?"
 ```
-Expected: stderr prints `[avoqado-admin MCP] connected · DB target: ...` and the process stays alive until the 5s timeout (exit 124). **If it crashes with an ESM/`ERR_REQUIRE_ESM` or `Cannot find module '.../server/mcp.js'` error**, the SDK's ESM subpath imports aren't resolving under tsx — fix by ensuring `scripts/mcp/*` is run through `tsx` (not `ts-node` CJS) and that imports use the exact `/server/mcp.js` and `/server/stdio.js` subpaths shown. Do not proceed until this boots cleanly.
+
+Expected: stderr prints `[avoqado-admin MCP] connected · DB target: ...` and the process stays alive until the 5s timeout (exit 124). **If
+it crashes with an ESM/`ERR_REQUIRE_ESM` or `Cannot find module '.../server/mcp.js'` error**, the SDK's ESM subpath imports aren't resolving
+under tsx — fix by ensuring `scripts/mcp/*` is run through `tsx` (not `ts-node` CJS) and that imports use the exact `/server/mcp.js` and
+`/server/stdio.js` subpaths shown. Do not proceed until this boots cleanly.
 
 - [ ] **Step 6: Commit**
 
@@ -141,10 +154,12 @@ git commit -m "feat(mcp): scaffold avoqado-admin MCP server with ping smoke tool
 ## Task 2: `list_venues` / `list_orgs` (base read tools)
 
 **Files:**
+
 - Create: `scripts/mcp/tools/venues.ts`
 - Modify: `scripts/mcp/server.ts` (register the tools)
 
-These are thin pass-through reads (resolve a venue/org by name → id). They have no branching logic, so they are verified by the manual smoke test in Step 4 rather than a unit test.
+These are thin pass-through reads (resolve a venue/org by name → id). They have no branching logic, so they are verified by the manual smoke
+test in Step 4 rather than a unit test.
 
 - [ ] **Step 1: Create `scripts/mcp/tools/venues.ts`**
 
@@ -213,25 +228,31 @@ export function registerVenueTools(server: McpServer) {
 - [ ] **Step 2: Register in `scripts/mcp/server.ts`**
 
 Add the import at the top:
+
 ```typescript
 import { registerVenueTools } from './tools/venues'
 ```
+
 And inside `main()`, after the `ping` tool registration, add:
+
 ```typescript
-  registerVenueTools(server)
+registerVenueTools(server)
 ```
 
 - [ ] **Step 3: Verify it compiles / boots**
 
 Run:
+
 ```bash
 timeout 5 npm run mcp; echo "exit: $?"
 ```
+
 Expected: boots cleanly (stderr connected line, exit 124). No TS compile errors from `tsx`.
 
 - [ ] **Step 4: Manual smoke (optional but recommended)**
 
-Register the server in Claude (see Task 6) pointed at a non-prod DB, then ask Claude: "list venues matching 'pozos'". Expected: a JSON list with matching venues and their ids.
+Register the server in Claude (see Task 6) pointed at a non-prod DB, then ask Claude: "list venues matching 'pozos'". Expected: a JSON list
+with matching venues and their ids.
 
 - [ ] **Step 5: Commit**
 
@@ -245,6 +266,7 @@ git commit -m "feat(mcp): add list_venues and list_orgs read tools"
 ## Task 3: `daily_sales` (with TDD on the aggregation)
 
 **Files:**
+
 - Create: `scripts/mcp/tools/sales.ts`
 - Test: `tests/unit/mcp/summarizeSales.test.ts`
 - Modify: `scripts/mcp/server.ts`
@@ -252,6 +274,7 @@ git commit -m "feat(mcp): add list_venues and list_orgs read tools"
 - [ ] **Step 1: Write the failing test**
 
 Create `tests/unit/mcp/summarizeSales.test.ts`:
+
 ```typescript
 import { summarizeSales } from '../../../scripts/mcp/tools/sales'
 
@@ -293,9 +316,11 @@ describe('summarizeSales', () => {
 - [ ] **Step 2: Run the test to verify it fails**
 
 Run:
+
 ```bash
 npx jest --selectProjects unit tests/unit/mcp/summarizeSales.test.ts
 ```
+
 Expected: FAIL — `Cannot find module '.../scripts/mcp/tools/sales'` (file not created yet).
 
 - [ ] **Step 3: Implement `scripts/mcp/tools/sales.ts`**
@@ -371,28 +396,35 @@ export function registerSalesTools(server: McpServer) {
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run:
+
 ```bash
 npx jest --selectProjects unit tests/unit/mcp/summarizeSales.test.ts
 ```
+
 Expected: PASS (4 tests).
 
 - [ ] **Step 5: Register in `scripts/mcp/server.ts`**
 
 Add import:
+
 ```typescript
 import { registerSalesTools } from './tools/sales'
 ```
+
 Inside `main()`:
+
 ```typescript
-  registerSalesTools(server)
+registerSalesTools(server)
 ```
 
 - [ ] **Step 6: Verify it boots**
 
 Run:
+
 ```bash
 timeout 5 npm run mcp; echo "exit: $?"
 ```
+
 Expected: boots cleanly (exit 124).
 
 - [ ] **Step 7: Commit**
@@ -407,15 +439,19 @@ git commit -m "feat(mcp): add daily_sales tool with tested aggregation"
 ## Task 4: `audit_terminals` (with TDD on the config audit)
 
 **Files:**
+
 - Create: `scripts/mcp/tools/terminals.ts`
 - Test: `tests/unit/mcp/auditTerminalConfig.test.ts`
 - Modify: `scripts/mcp/server.ts`
 
-Background: a Terminal's effective TPV settings live in the `config` JSON (`config.settings`), with optional per-terminal `configOverrides`. Known keys: `showCheckout` (the "Cobrar" button), `showQuickPayment` ("Pago rápido"), `enableShifts`. The PlayTelecom gap was `showCheckout=true` while `showQuickPayment=false` across many terminals — this tool flags that.
+Background: a Terminal's effective TPV settings live in the `config` JSON (`config.settings`), with optional per-terminal `configOverrides`.
+Known keys: `showCheckout` (the "Cobrar" button), `showQuickPayment` ("Pago rápido"), `enableShifts`. The PlayTelecom gap was
+`showCheckout=true` while `showQuickPayment=false` across many terminals — this tool flags that.
 
 - [ ] **Step 1: Write the failing test**
 
 Create `tests/unit/mcp/auditTerminalConfig.test.ts`:
+
 ```typescript
 import { auditTerminalConfig } from '../../../scripts/mcp/tools/terminals'
 
@@ -435,7 +471,9 @@ describe('auditTerminalConfig', () => {
 
   it('flags checkout-on / quickpay-off (the PlayTelecom gap)', () => {
     const r = auditTerminalConfig({
-      name: 'T2', serialNumber: null, status: 'ACTIVE',
+      name: 'T2',
+      serialNumber: null,
+      status: 'ACTIVE',
       config: { settings: { showCheckout: true, showQuickPayment: false } },
       configOverrides: null,
     })
@@ -444,7 +482,9 @@ describe('auditTerminalConfig', () => {
 
   it('produces no flags for a balanced config', () => {
     const r = auditTerminalConfig({
-      name: 'T3', serialNumber: 'AVQD-3', status: 'ACTIVE',
+      name: 'T3',
+      serialNumber: 'AVQD-3',
+      status: 'ACTIVE',
       config: { settings: { showCheckout: true, showQuickPayment: true } },
       configOverrides: null,
     })
@@ -462,9 +502,11 @@ describe('auditTerminalConfig', () => {
 - [ ] **Step 2: Run the test to verify it fails**
 
 Run:
+
 ```bash
 npx jest --selectProjects unit tests/unit/mcp/auditTerminalConfig.test.ts
 ```
+
 Expected: FAIL — `Cannot find module '.../scripts/mcp/tools/terminals'`.
 
 - [ ] **Step 3: Implement `scripts/mcp/tools/terminals.ts`**
@@ -513,7 +555,7 @@ export function auditTerminalConfig(t: TerminalInput): TerminalConfigReport {
 export function registerTerminalTools(server: McpServer) {
   server.tool(
     'audit_terminals',
-    'Audit the TPV config of a venue\'s (or org\'s) terminals. Returns each terminal\'s effective showCheckout/showQuickPayment/enableShifts settings and flags known config gaps (e.g. checkout enabled while quick-pay disabled).',
+    "Audit the TPV config of a venue's (or org's) terminals. Returns each terminal's effective showCheckout/showQuickPayment/enableShifts settings and flags known config gaps (e.g. checkout enabled while quick-pay disabled).",
     {
       venueId: z.string().optional().describe('Audit terminals of one venue'),
       organizationId: z.string().optional().describe('Audit terminals across an org (all its venues)'),
@@ -523,16 +565,20 @@ export function registerTerminalTools(server: McpServer) {
       const terminals = await prisma.terminal.findMany({
         where: venueId ? { venueId } : { venue: { organizationId } },
         select: {
-          name: true, serialNumber: true, status: true, config: true, configOverrides: true,
+          name: true,
+          serialNumber: true,
+          status: true,
+          config: true,
+          configOverrides: true,
           venue: { select: { id: true, name: true } },
         },
         orderBy: { name: 'asc' },
       })
-      const reports = terminals.map((t) => ({
+      const reports = terminals.map(t => ({
         venue: t.venue?.name,
         ...auditTerminalConfig(t as unknown as TerminalInput),
       }))
-      const flagged = reports.filter((r) => r.flags.length > 0)
+      const flagged = reports.filter(r => r.flags.length > 0)
       return text({ count: reports.length, flaggedCount: flagged.length, terminals: reports })
     },
   )
@@ -542,28 +588,35 @@ export function registerTerminalTools(server: McpServer) {
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run:
+
 ```bash
 npx jest --selectProjects unit tests/unit/mcp/auditTerminalConfig.test.ts
 ```
+
 Expected: PASS (4 tests).
 
 - [ ] **Step 5: Register in `scripts/mcp/server.ts`**
 
 Add import:
+
 ```typescript
 import { registerTerminalTools } from './tools/terminals'
 ```
+
 Inside `main()`:
+
 ```typescript
-  registerTerminalTools(server)
+registerTerminalTools(server)
 ```
 
 - [ ] **Step 6: Verify it boots**
 
 Run:
+
 ```bash
 timeout 5 npm run mcp; echo "exit: $?"
 ```
+
 Expected: boots cleanly (exit 124).
 
 - [ ] **Step 7: Commit**
@@ -578,10 +631,12 @@ git commit -m "feat(mcp): add audit_terminals tool with tested config audit"
 ## Task 5: `find_order` / `find_payment` (support lookup)
 
 **Files:**
+
 - Create: `scripts/mcp/tools/orders.ts`
 - Modify: `scripts/mcp/server.ts`
 
-Thin lookups (by id or by serial number → SerializedItem → OrderItem → Order). Verified by the manual smoke test; no branching logic worth a unit test beyond what Prisma enforces.
+Thin lookups (by id or by serial number → SerializedItem → OrderItem → Order). Verified by the manual smoke test; no branching logic worth a
+unit test beyond what Prisma enforces.
 
 - [ ] **Step 1: Create `scripts/mcp/tools/orders.ts`**
 
@@ -614,8 +669,13 @@ export function registerOrderTools(server: McpServer) {
       const order = await prisma.order.findUnique({
         where: { id: resolvedOrderId },
         select: {
-          id: true, orderNumber: true, type: true, status: true, total: true,
-          createdAt: true, completedAt: true,
+          id: true,
+          orderNumber: true,
+          type: true,
+          status: true,
+          total: true,
+          createdAt: true,
+          completedAt: true,
           venue: { select: { id: true, name: true } },
           terminal: { select: { id: true, name: true, serialNumber: true } },
           payments: { select: { id: true, amount: true, method: true, status: true, type: true } },
@@ -636,7 +696,12 @@ export function registerOrderTools(server: McpServer) {
       const payment = await prisma.payment.findUnique({
         where: { id: paymentId },
         select: {
-          id: true, amount: true, method: true, status: true, type: true, createdAt: true,
+          id: true,
+          amount: true,
+          method: true,
+          status: true,
+          type: true,
+          createdAt: true,
           venue: { select: { id: true, name: true } },
           terminal: { select: { id: true, name: true, serialNumber: true } },
           order: { select: { id: true, orderNumber: true, status: true } },
@@ -652,20 +717,25 @@ export function registerOrderTools(server: McpServer) {
 - [ ] **Step 2: Register in `scripts/mcp/server.ts`**
 
 Add import:
+
 ```typescript
 import { registerOrderTools } from './tools/orders'
 ```
+
 Inside `main()`:
+
 ```typescript
-  registerOrderTools(server)
+registerOrderTools(server)
 ```
 
 - [ ] **Step 3: Verify it boots**
 
 Run:
+
 ```bash
 timeout 5 npm run mcp; echo "exit: $?"
 ```
+
 Expected: boots cleanly (exit 124).
 
 - [ ] **Step 4: Commit**
@@ -680,14 +750,17 @@ git commit -m "feat(mcp): add find_order and find_payment lookup tools"
 ## Task 6: README, register in Claude, and full manual verification
 
 **Files:**
+
 - Create: `scripts/mcp/README.md`
 
 - [ ] **Step 1: Run the full unit suite to confirm nothing regressed**
 
 Run:
+
 ```bash
 npx jest --selectProjects unit tests/unit/mcp
 ```
+
 Expected: PASS (summarizeSales 4 + auditTerminalConfig 4 = 8 tests).
 
 - [ ] **Step 2: Create `scripts/mcp/README.md`**
@@ -695,46 +768,40 @@ Expected: PASS (summarizeSales 4 + auditTerminalConfig 4 = 8 tests).
 ```markdown
 # Avoqado Admin MCP (internal)
 
-Local, single-user MCP server exposing read-only operational tools over stdio.
-Run with `npm run mcp`. See `docs/plans/2026-05-29-admin-mcp-design.md` for the full design.
+Local, single-user MCP server exposing read-only operational tools over stdio. Run with `npm run mcp`. See
+`docs/plans/2026-05-29-admin-mcp-design.md` for the full design.
 
 ## Tools (Phase 1a — read only)
+
 - `list_venues` / `list_orgs` — resolve venue/org ids
 - `daily_sales` — sales summary for a venue/day (timezone-correct)
 - `audit_terminals` — terminal TPV config audit + gap flags
 - `find_order` / `find_payment` — support lookup by id or serial
 
 ## Register in Claude
-Add to your MCP config (project `.mcp.json` or global), pointing `DOTENV_CONFIG_PATH`
-at the environment you want (⚠️ this server reads whatever DATABASE_URL is set):
 
-\`\`\`json
-{
-  "mcpServers": {
-    "avoqado-admin": {
-      "command": "tsx",
-      "args": ["scripts/mcp/server.ts"],
-      "cwd": "/Users/amieva/Documents/Programming/Avoqado/avoqado-server",
-      "env": { "DOTENV_CONFIG_PATH": ".env" }
-    }
-  }
-}
-\`\`\`
+Add to your MCP config (project `.mcp.json` or global), pointing `DOTENV_CONFIG_PATH` at the environment you want (⚠️ this server reads
+whatever DATABASE_URL is set):
 
-The server logs its DB target to stderr on startup. Phase 1a is read-only; write tools
-(Phase 1b+) will add preview+confirm guards.
+\`\`\`json { "mcpServers": { "avoqado-admin": { "command": "tsx", "args": ["scripts/mcp/server.ts"], "cwd":
+"/Users/amieva/Documents/Programming/Avoqado/avoqado-server", "env": { "DOTENV_CONFIG_PATH": ".env" } } } } \`\`\`
+
+The server logs its DB target to stderr on startup. Phase 1a is read-only; write tools (Phase 1b+) will add preview+confirm guards.
 ```
 
 - [ ] **Step 3: Manual agent-loop verification**
 
-Register the server in Claude pointed at a **non-prod** DB. In a Claude session, run each tool and confirm the agent selects the right one and gets usable output:
+Register the server in Claude pointed at a **non-prod** DB. In a Claude session, run each tool and confirm the agent selects the right one
+and gets usable output:
+
 1. "list venues matching 'pozos'" → `list_venues` returns matches + ids
 2. "today's sales for venue <id>" → `daily_sales` returns a summary
 3. "audit terminals for org <id>" → `audit_terminals` returns reports, flags any checkout/quickpay gaps
 4. "find payment <id>" → `find_payment` returns the payment
 5. "find the order for serial <iccid>" → `find_order` resolves via the serial
 
-Note any tool the agent picks wrong or any confusing output; refine the tool `description` strings if needed (descriptions are how the agent chooses).
+Note any tool the agent picks wrong or any confusing output; refine the tool `description` strings if needed (descriptions are how the agent
+chooses).
 
 - [ ] **Step 4: Commit**
 
@@ -748,8 +815,10 @@ git commit -m "docs(mcp): add Phase 1a README and registration guide"
 ## Self-Review
 
 **Spec coverage (against `2026-05-29-admin-mcp-design.md`):**
+
 - §2 architecture (scripts/mcp, stdio, Prisma direct, @modelcontextprotocol/sdk only new dep) → Task 1 ✓
-- §3 safety: read/write separation → this plan is read-only ✓; env target surfaced on startup → `describeDbTarget()` Task 1 ✓ (preview+confirm/audit-log apply to write tools, deferred to Phase 1b — out of scope here, intentionally)
+- §3 safety: read/write separation → this plan is read-only ✓; env target surfaced on startup → `describeDbTarget()` Task 1 ✓
+  (preview+confirm/audit-log apply to write tools, deferred to Phase 1b — out of scope here, intentionally)
 - §4 Phase 1 read tools 1–4 (list_venues/orgs, daily_sales, audit_terminals, find_order/find_payment) → Tasks 2–5 ✓
 - §4 light writes (sale_verifications reopen, move_terminal, update_user) → **deferred to Phase 1b plan** (separate doc) — noted, not a gap
 - §5 registration → Task 6 README ✓
@@ -757,6 +826,10 @@ git commit -m "docs(mcp): add Phase 1a README and registration guide"
 
 **Placeholder scan:** No TBD/TODO; every code step shows complete code; every command shows expected output. ✓
 
-**Type consistency:** `text()` (context.ts) used by all tools with the same shape; `summarizeSales`/`SalesInput`/`SalesSummary` consistent between Task 3 test and impl; `auditTerminalConfig`/`TerminalInput`/`TerminalConfigReport` consistent between Task 4 test and impl; `registerVenueTools`/`registerSalesTools`/`registerTerminalTools`/`registerOrderTools` names match between tool files and `server.ts` imports. ✓
+**Type consistency:** `text()` (context.ts) used by all tools with the same shape; `summarizeSales`/`SalesInput`/`SalesSummary` consistent
+between Task 3 test and impl; `auditTerminalConfig`/`TerminalInput`/`TerminalConfigReport` consistent between Task 4 test and impl;
+`registerVenueTools`/`registerSalesTools`/`registerTerminalTools`/`registerOrderTools` names match between tool files and `server.ts`
+imports. ✓
 
-**Known risk carried from spec:** MCP SDK is ESM-only; Task 1 Step 5 smoke test exists specifically to catch ESM/tsx interop before building further.
+**Known risk carried from spec:** MCP SDK is ESM-only; Task 1 Step 5 smoke test exists specifically to catch ESM/tsx interop before building
+further.

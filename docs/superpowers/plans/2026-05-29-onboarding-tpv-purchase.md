@@ -1,12 +1,19 @@
 # Onboarding TPV Purchase Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add an optional Step 9 to the V2 setup wizard that lets a new merchant buy a TPV terminal, reusing the existing `TerminalPurchaseWizard` modal verbatim. State survives Stripe Checkout round-trip and tab close. The step never blocks onboarding completion regardless of order state.
+**Goal:** Add an optional Step 9 to the V2 setup wizard that lets a new merchant buy a TPV terminal, reusing the existing
+`TerminalPurchaseWizard` modal verbatim. State survives Stripe Checkout round-trip and tab close. The step never blocks onboarding
+completion regardless of order state.
 
-**Architecture:** Extend `createCheckoutSession` to accept `from: 'tpv' | 'setup'` so Stripe's `success_url` can route back to `/setup#step-8` instead of `/tpv/orders/:id`. The setup step (`BuyTpvStep.tsx`) hydrates from URL params → step9 data → most-recent-order fallback → empty. The existing `TerminalPurchaseWizard` gains two new props (`from`, `onComplete`) — no internal changes. All new behavior gated on `ENABLE_ONBOARDING_TPV_PURCHASE` env flag.
+**Architecture:** Extend `createCheckoutSession` to accept `from: 'tpv' | 'setup'` so Stripe's `success_url` can route back to
+`/setup#step-8` instead of `/tpv/orders/:id`. The setup step (`BuyTpvStep.tsx`) hydrates from URL params → step9 data → most-recent-order
+fallback → empty. The existing `TerminalPurchaseWizard` gains two new props (`from`, `onComplete`) — no internal changes. All new behavior
+gated on `ENABLE_ONBOARDING_TPV_PURCHASE` env flag.
 
 **Tech Stack:**
+
 - Backend: Express + TypeScript, Prisma, existing Stripe Checkout service, existing TPV order pipeline
 - Frontend: React 18 + Vite, react-i18next, existing `tpvOrderService`, existing `TerminalPurchaseWizard`
 - Tests: Jest (`runInBand` to avoid OOM in this repo) for backend, Playwright for E2E
@@ -18,31 +25,31 @@
 
 **Backend (`avoqado-server`)**
 
-| File | Action | Responsibility |
-|---|---|---|
-| `src/services/dashboard/terminalOrder/createCheckoutSession.ts` | Modify | Accept optional `from: 'tpv' \| 'setup'`. Branch `success_url` / `cancel_url`. |
-| `src/services/dashboard/terminalOrder/createOrder.service.ts` | Modify | Forward `from` to `createCheckoutSession`. |
-| `src/controllers/dashboard/terminalOrder.dashboard.controller.ts` | Modify | Accept `from` in `POST /tpv-orders` request body. |
-| `src/schemas/dashboard/terminalOrder.schema.ts` | Modify | Add `from: z.enum(['tpv', 'setup']).optional()` to create-order Zod schema. |
-| `src/services/onboarding/onboardingProgress.service.ts` | Modify | Add `V2Step9Data` typing + reading helper. |
-| `src/controllers/onboarding.controller.ts` | Modify | Extend `getV2SetupDataForCompletion` to surface `tpvOrderId` + order state. |
-| `src/config/featureFlags.ts` (or inline) | Modify | Expose `ENABLE_ONBOARDING_TPV_PURCHASE`. |
-| `tests/unit/services/dashboard/terminalOrder/createCheckoutSession.from.test.ts` | Create | `from` branches `success_url`. |
-| `tests/unit/services/onboarding/v2Step9.test.ts` | Create | `step9_tpvPurchase` round-trips through progress service. |
-| `tests/unit/controllers/onboarding.tpvOrderId.test.ts` | Create | `getV2SetupDataForCompletion` returns latest TPV order ID. |
+| File                                                                             | Action | Responsibility                                                                 |
+| -------------------------------------------------------------------------------- | ------ | ------------------------------------------------------------------------------ |
+| `src/services/dashboard/terminalOrder/createCheckoutSession.ts`                  | Modify | Accept optional `from: 'tpv' \| 'setup'`. Branch `success_url` / `cancel_url`. |
+| `src/services/dashboard/terminalOrder/createOrder.service.ts`                    | Modify | Forward `from` to `createCheckoutSession`.                                     |
+| `src/controllers/dashboard/terminalOrder.dashboard.controller.ts`                | Modify | Accept `from` in `POST /tpv-orders` request body.                              |
+| `src/schemas/dashboard/terminalOrder.schema.ts`                                  | Modify | Add `from: z.enum(['tpv', 'setup']).optional()` to create-order Zod schema.    |
+| `src/services/onboarding/onboardingProgress.service.ts`                          | Modify | Add `V2Step9Data` typing + reading helper.                                     |
+| `src/controllers/onboarding.controller.ts`                                       | Modify | Extend `getV2SetupDataForCompletion` to surface `tpvOrderId` + order state.    |
+| `src/config/featureFlags.ts` (or inline)                                         | Modify | Expose `ENABLE_ONBOARDING_TPV_PURCHASE`.                                       |
+| `tests/unit/services/dashboard/terminalOrder/createCheckoutSession.from.test.ts` | Create | `from` branches `success_url`.                                                 |
+| `tests/unit/services/onboarding/v2Step9.test.ts`                                 | Create | `step9_tpvPurchase` round-trips through progress service.                      |
+| `tests/unit/controllers/onboarding.tpvOrderId.test.ts`                           | Create | `getV2SetupDataForCompletion` returns latest TPV order ID.                     |
 
 **Frontend (`avoqado-web-dashboard`)**
 
-| File | Action | Responsibility |
-|---|---|---|
-| `src/pages/Setup/types.ts` | Modify | Add `tpvPurchase: { tpvOrderId, skipped, lastUpdatedAt }` to `SetupData`. |
-| `src/pages/Setup/SetupWizard.tsx` | Modify | Conditionally add `BuyTpvStep` to `SETUP_STEPS`. URL-param hydration for `tpv_status`. Pass `venueId` to BuyTpvStep like PaymentProvidersStep. |
-| `src/pages/Setup/steps/BuyTpvStep.tsx` | Create | Views A + B. Embeds `TerminalPurchaseWizard` modal. Hydrates from most-recent-order query. |
-| `src/pages/Tpv/components/purchase-wizard/TerminalPurchaseWizard.tsx` | Modify (small) | Accept `from?: 'tpv' \| 'setup'` and `onComplete?: (result) => void` props. Forward `from` to `createOrder`. Fire `onComplete` from Step4 on SPEI success. |
-| `src/pages/Tpv/components/purchase-wizard/wizard-steps/Step4Confirmation.tsx` | Modify | Receive `onComplete` callback, fire it on SPEI flow completion. |
-| `src/services/tpvOrder.service.ts` | Modify | `createOrder` payload accepts `from`. |
-| `src/locales/es/setup.json`, `src/locales/en/setup.json` | Modify | New `step9.*` i18n keys. |
-| `e2e/tests/onboarding/buy-tpv-step.spec.ts` | Create | Playwright E2E: skip, SPEI happy path, "Terminar onboarding →" works in every order state. |
+| File                                                                          | Action         | Responsibility                                                                                                                                             |
+| ----------------------------------------------------------------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/pages/Setup/types.ts`                                                    | Modify         | Add `tpvPurchase: { tpvOrderId, skipped, lastUpdatedAt }` to `SetupData`.                                                                                  |
+| `src/pages/Setup/SetupWizard.tsx`                                             | Modify         | Conditionally add `BuyTpvStep` to `SETUP_STEPS`. URL-param hydration for `tpv_status`. Pass `venueId` to BuyTpvStep like PaymentProvidersStep.             |
+| `src/pages/Setup/steps/BuyTpvStep.tsx`                                        | Create         | Views A + B. Embeds `TerminalPurchaseWizard` modal. Hydrates from most-recent-order query.                                                                 |
+| `src/pages/Tpv/components/purchase-wizard/TerminalPurchaseWizard.tsx`         | Modify (small) | Accept `from?: 'tpv' \| 'setup'` and `onComplete?: (result) => void` props. Forward `from` to `createOrder`. Fire `onComplete` from Step4 on SPEI success. |
+| `src/pages/Tpv/components/purchase-wizard/wizard-steps/Step4Confirmation.tsx` | Modify         | Receive `onComplete` callback, fire it on SPEI flow completion.                                                                                            |
+| `src/services/tpvOrder.service.ts`                                            | Modify         | `createOrder` payload accepts `from`.                                                                                                                      |
+| `src/locales/es/setup.json`, `src/locales/en/setup.json`                      | Modify         | New `step9.*` i18n keys.                                                                                                                                   |
+| `e2e/tests/onboarding/buy-tpv-step.spec.ts`                                   | Create         | Playwright E2E: skip, SPEI happy path, "Terminar onboarding →" works in every order state.                                                                 |
 
 ---
 
@@ -52,19 +59,15 @@
 
 Path: `docs/superpowers/specs/2026-05-29-onboarding-tpv-purchase-design.md`
 
-This plan assumes you've internalized the three views (A/B/C), the failure
-matrix (11 scenarios), the hydration rules table, and especially the
-**central invariant**: Step 9 NEVER blocks completion. Re-read the spec
-before starting Task 1 if any of these are unclear.
+This plan assumes you've internalized the three views (A/B/C), the failure matrix (11 scenarios), the hydration rules table, and especially
+the **central invariant**: Step 9 NEVER blocks completion. Re-read the spec before starting Task 1 if any of these are unclear.
 
 - [ ] **Step 0.2: Read the payment-providers spec for the round-trip pattern**
 
 Path: `docs/superpowers/specs/2026-05-27-onboarding-payment-providers-design.md`
 
-We reuse the URL-param hydration mechanism from Step 8 (`?mp_status=success`)
-for Step 9 (`?tpv_status=success`). The implementation pattern in
-`SetupWizard.tsx` (the `if (mpStatus === 'success')` branch) is the template
-for our `tpv_status` branch.
+We reuse the URL-param hydration mechanism from Step 8 (`?mp_status=success`) for Step 9 (`?tpv_status=success`). The implementation pattern
+in `SetupWizard.tsx` (the `if (mpStatus === 'success')` branch) is the template for our `tpv_status` branch.
 
 - [ ] **Step 0.3: Create a feature branch**
 
@@ -74,8 +77,7 @@ git checkout -b feature/onboarding-tpv-purchase
 git status
 ```
 
-Expected: clean working tree, on the new branch. The frontend repo also gets
-the same branch name when you switch over.
+Expected: clean working tree, on the new branch. The frontend repo also gets the same branch name when you switch over.
 
 - [ ] **Step 0.4: Verify the env flag is unset locally**
 
@@ -83,8 +85,7 @@ the same branch name when you switch over.
 grep -i ENABLE_ONBOARDING_TPV_PURCHASE .env || echo "(unset — good)"
 ```
 
-Expected: `(unset — good)`. All new behavior stays invisible until the flag
-is flipped at the end of the plan.
+Expected: `(unset — good)`. All new behavior stays invisible until the flag is flipped at the end of the plan.
 
 ---
 
@@ -93,6 +94,7 @@ is flipped at the end of the plan.
 ### Task 1: Extend `createCheckoutSession` with `from` parameter
 
 **Files:**
+
 - Modify: `src/services/dashboard/terminalOrder/createCheckoutSession.ts`
 - Create: `tests/unit/services/dashboard/terminalOrder/createCheckoutSession.from.test.ts`
 
@@ -129,10 +131,12 @@ describe('createCheckoutSession — `from` parameter', () => {
       orderItems: [{ name: 'PAX A910S', quantity: 1, unitPrice: 4000 }],
     })
 
-    expect(mockStripeCreate).toHaveBeenCalledWith(expect.objectContaining({
-      success_url: 'https://dashboard.test/tpv/orders/order-1?status=success',
-      cancel_url: 'https://dashboard.test/tpv/orders/order-1?status=canceled',
-    }))
+    expect(mockStripeCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success_url: 'https://dashboard.test/tpv/orders/order-1?status=success',
+        cancel_url: 'https://dashboard.test/tpv/orders/order-1?status=canceled',
+      }),
+    )
   })
 
   it('routes success_url to /setup#step-8 when `from === setup`', async () => {
@@ -148,10 +152,12 @@ describe('createCheckoutSession — `from` parameter', () => {
       from: 'setup',
     })
 
-    expect(mockStripeCreate).toHaveBeenCalledWith(expect.objectContaining({
-      success_url: 'https://dashboard.test/setup?tpv_status=success&orderId=order-1#step-8',
-      cancel_url: 'https://dashboard.test/setup?tpv_status=cancel&orderId=order-1#step-8',
-    }))
+    expect(mockStripeCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success_url: 'https://dashboard.test/setup?tpv_status=success&orderId=order-1#step-8',
+        cancel_url: 'https://dashboard.test/setup?tpv_status=cancel&orderId=order-1#step-8',
+      }),
+    )
   })
 })
 ```
@@ -167,15 +173,16 @@ In `src/services/dashboard/terminalOrder/createCheckoutSession.ts`:
 
 ```typescript
 const frontend = process.env.FRONTEND_URL || 'https://dashboard.avoqado.io'
-const baseUrls = from === 'setup'
-  ? {
-      success_url: `${frontend}/setup?tpv_status=success&orderId=${orderId}#step-8`,
-      cancel_url: `${frontend}/setup?tpv_status=cancel&orderId=${orderId}#step-8`,
-    }
-  : {
-      success_url: `${frontend}/tpv/orders/${orderId}?status=success`,
-      cancel_url: `${frontend}/tpv/orders/${orderId}?status=canceled`,
-    }
+const baseUrls =
+  from === 'setup'
+    ? {
+        success_url: `${frontend}/setup?tpv_status=success&orderId=${orderId}#step-8`,
+        cancel_url: `${frontend}/setup?tpv_status=cancel&orderId=${orderId}#step-8`,
+      }
+    : {
+        success_url: `${frontend}/tpv/orders/${orderId}?status=success`,
+        cancel_url: `${frontend}/tpv/orders/${orderId}?status=canceled`,
+      }
 ```
 
 Run: `npm test -- createCheckoutSession.from.test.ts --runInBand`. Expected: green.
@@ -191,6 +198,7 @@ Expected: all `createCheckoutSession.*` tests pass (the default-behavior test gu
 ### Task 2: Forward `from` from `createOrder.service`
 
 **Files:**
+
 - Modify: `src/services/dashboard/terminalOrder/createOrder.service.ts`
 - Modify: existing `createOrder.service.test.ts` (add 1 case)
 
@@ -221,6 +229,7 @@ Run: fails — `from` not in params yet.
 - [ ] **Step 2.2: Add `from` to params + forward**
 
 In `createOrder.service.ts`:
+
 - Add `from?: 'tpv' | 'setup'` to `CreateOrderParams`.
 - When calling `createCheckoutSession`, pass `from`.
 
@@ -229,6 +238,7 @@ Run: green.
 ### Task 3: Accept `from` in the controller + Zod schema
 
 **Files:**
+
 - Modify: `src/schemas/dashboard/terminalOrder.schema.ts`
 - Modify: `src/controllers/dashboard/terminalOrder.dashboard.controller.ts`
 - Modify: existing `terminalOrder.dashboard.controller.test.ts` (add 1 case)
@@ -241,7 +251,8 @@ In `terminalOrder.schema.ts`, find the `createTerminalOrderSchema` body and add:
 from: z.enum(['tpv', 'setup']).optional(),
 ```
 
-⚠️ **Remember**: Zod error messages reach the user. Keep the field optional — no custom message needed since invalid values produce a generic 400.
+⚠️ **Remember**: Zod error messages reach the user. Keep the field optional — no custom message needed since invalid values produce a
+generic 400.
 
 - [ ] **Step 3.2: Add a controller test**
 
@@ -268,7 +279,8 @@ Run: fails (controller doesn't forward it yet).
 
 - [ ] **Step 3.3: Forward `from` in the controller**
 
-In `terminalOrder.dashboard.controller.ts`, find the `createTerminalOrder` handler and add `from: req.body.from` to the `createOrder()` call.
+In `terminalOrder.dashboard.controller.ts`, find the `createTerminalOrder` handler and add `from: req.body.from` to the `createOrder()`
+call.
 
 Run: green. Run the full controller test file too — no regressions.
 
@@ -279,6 +291,7 @@ Run: green. Run the full controller test file too — no regressions.
 ### Task 4: Add `V2Step9Data` typing + reader
 
 **Files:**
+
 - Modify: `src/services/onboarding/onboardingProgress.service.ts`
 - Create: `tests/unit/services/onboarding/v2Step9.test.ts`
 
@@ -290,17 +303,23 @@ import { prisma } from '../../../helpers/prisma'
 
 describe('V2Step9 data — round-trip', () => {
   let orgId: string
-  beforeEach(async () => { orgId = (await prisma.organization.create({ data: { name: 't', slug: 'tst-' + Date.now() } })).id })
-  afterEach(async () => { await prisma.organization.delete({ where: { id: orgId } }) })
+  beforeEach(async () => {
+    orgId = (await prisma.organization.create({ data: { name: 't', slug: 'tst-' + Date.now() } })).id
+  })
+  afterEach(async () => {
+    await prisma.organization.delete({ where: { id: orgId } })
+  })
 
   it('persists step9_tpvPurchase fields and reads them back', async () => {
     await saveV2StepData(orgId, 9, { tpvOrderId: 'order-abc', skipped: false })
     const data = await getV2SetupData(orgId)
-    expect(data?.step9_tpvPurchase).toEqual(expect.objectContaining({
-      tpvOrderId: 'order-abc',
-      skipped: false,
-      lastUpdatedAt: expect.any(String),
-    }))
+    expect(data?.step9_tpvPurchase).toEqual(
+      expect.objectContaining({
+        tpvOrderId: 'order-abc',
+        skipped: false,
+        lastUpdatedAt: expect.any(String),
+      }),
+    )
   })
 })
 ```
@@ -310,15 +329,19 @@ Run: fails — `step9_tpvPurchase` isn't typed/keyed yet.
 - [ ] **Step 4.2: Add typing + step-9 key handling**
 
 In `onboardingProgress.service.ts`:
-1. Add to `V2StepData` union: `step9_tpvPurchase?: V2Step9Data` (or whatever the existing typing pattern is — match `step8_paymentProviders`).
+
+1. Add to `V2StepData` union: `step9_tpvPurchase?: V2Step9Data` (or whatever the existing typing pattern is — match
+   `step8_paymentProviders`).
 2. Add `V2Step9Data` interface: `{ tpvOrderId: string | null; skipped: boolean; lastUpdatedAt: string }`.
-3. Verify `saveV2StepData(orgId, 9, ...)` writes under `step9_tpvPurchase` (the existing code probably maps step number → JSON key; mirror the step-8 pattern).
+3. Verify `saveV2StepData(orgId, 9, ...)` writes under `step9_tpvPurchase` (the existing code probably maps step number → JSON key; mirror
+   the step-8 pattern).
 
 Run: green.
 
 ### Task 5: Surface `tpvOrderId` from `getV2SetupDataForCompletion`
 
 **Files:**
+
 - Modify: `src/controllers/onboarding.controller.ts`
 - Create: `tests/unit/controllers/onboarding.tpvOrderId.test.ts`
 
@@ -328,9 +351,15 @@ Three scenarios in one describe block:
 
 ```typescript
 describe('getV2SetupDataForCompletion — tpvOrderId hydration', () => {
-  it('returns null when no order exists', async () => { /* assert response.body.tpvOrderId === null */ })
-  it('returns the order id from step9_tpvPurchase when set', async () => { /* assert it matches */ })
-  it('falls back to the most recent TerminalOrder when step9 is empty', async () => { /* assert it matches the latest */ })
+  it('returns null when no order exists', async () => {
+    /* assert response.body.tpvOrderId === null */
+  })
+  it('returns the order id from step9_tpvPurchase when set', async () => {
+    /* assert it matches */
+  })
+  it('falls back to the most recent TerminalOrder when step9 is empty', async () => {
+    /* assert it matches the latest */
+  })
 })
 ```
 
@@ -371,6 +400,7 @@ Run: green.
 ### Task 6: Wire `ENABLE_ONBOARDING_TPV_PURCHASE` env flag
 
 **Files:**
+
 - Modify: `src/controllers/onboarding.controller.ts` (or `featureFlags.ts` if it exists)
 - Modify: `.env.example`
 
@@ -382,11 +412,13 @@ Mirror the existing `ENABLE_ONBOARDING_PAYMENT_PROVIDERS` pattern exactly.
 const TPV_PURCHASE_ENABLED = process.env.ENABLE_ONBOARDING_TPV_PURCHASE === 'true'
 ```
 
-When `false`, `getV2SetupDataForCompletion` does **not** include `tpvOrderId` / `tpvOrderState` in the response (return as if Step 9 doesn't exist).
+When `false`, `getV2SetupDataForCompletion` does **not** include `tpvOrderId` / `tpvOrderState` in the response (return as if Step 9 doesn't
+exist).
 
 - [ ] **Step 6.2: Document in `.env.example`**
 
 Add:
+
 ```
 # Enable optional TPV purchase step in V2 onboarding wizard (Step 9).
 # When false, backend behaves as if the step doesn't exist.
@@ -408,6 +440,7 @@ Expected: all green.
 ### Task 7: Extend `SetupData` typing
 
 **Files:**
+
 - Modify: `src/pages/Setup/types.ts`
 
 - [ ] **Step 7.1: Add the field**
@@ -429,6 +462,7 @@ No test for typing alone; the next tasks exercise it.
 ### Task 8: Add `BuyTpvStep` to `SETUP_STEPS` array (flag-gated)
 
 **Files:**
+
 - Modify: `src/pages/Setup/SetupWizard.tsx`
 
 - [ ] **Step 8.1: Import + conditional step**
@@ -438,7 +472,7 @@ Mirror the `PAYMENT_PROVIDERS_ENABLED` pattern:
 ```typescript
 import { BuyTpvStep } from './steps/BuyTpvStep'
 
-const TPV_PURCHASE_ENABLED = true  // controlled by backend flag; UI always opts in
+const TPV_PURCHASE_ENABLED = true // controlled by backend flag; UI always opts in
 
 const SETUP_STEPS = (() => {
   let steps = [...BASE_SETUP_STEPS]
@@ -477,6 +511,7 @@ Expected: green build. The placeholder renders but isn't tested yet.
 ### Task 9: URL-param hydration for `?tpv_status=...`
 
 **Files:**
+
 - Modify: `src/pages/Setup/SetupWizard.tsx`
 
 - [ ] **Step 9.1: Mirror the MP/Stripe hydration block**
@@ -492,7 +527,7 @@ if (TPV_PURCHASE_ENABLED && (tpvStatus === 'success' || tpvStatus === 'cancel'))
   if (buyTpvIndex >= 0) {
     maxAllowedStepRef.current = Math.max(maxAllowedStepRef.current, buyTpvIndex)
     setCurrentStep(buyTpvIndex)
-    setData((prev) => {
+    setData(prev => {
       const next = {
         ...prev,
         tpvPurchase: {
@@ -520,7 +555,7 @@ Below the existing `persistedProviders` block, add:
 ```typescript
 const persistedTpvOrderId = (progressData as any)?.tpvOrderId ?? null
 if (persistedTpvOrderId) {
-  setData((prev) => ({ ...prev, tpvPurchase: { tpvOrderId: persistedTpvOrderId, skipped: false } }))
+  setData(prev => ({ ...prev, tpvPurchase: { tpvOrderId: persistedTpvOrderId, skipped: false } }))
   dataRef.current = { ...dataRef.current, tpvPurchase: { tpvOrderId: persistedTpvOrderId, skipped: false } }
 }
 ```
@@ -548,6 +583,7 @@ Run `npm run build`. Expected: green.
 ### Task 10: Add `from` + `onComplete` props to `TerminalPurchaseWizard`
 
 **Files:**
+
 - Modify: `src/pages/Tpv/components/purchase-wizard/TerminalPurchaseWizard.tsx`
 - Modify: `src/pages/Tpv/components/purchase-wizard/wizard-steps/Step4Confirmation.tsx`
 - Modify: `src/services/tpvOrder.service.ts`
@@ -566,12 +602,14 @@ async createOrder(venueId: string, body: {
 - [ ] **Step 10.2: Wizard accepts + forwards props**
 
 In `TerminalPurchaseWizard.tsx`:
+
 - Add `from?: 'tpv' | 'setup'` and `onComplete?: (result: { orderId: string; paymentMethod: 'CARD' | 'SPEI' }) => void` to props.
 - Default `from` to `'tpv'`.
 - Pass `from` into the `createOrder` mutation payload.
 - Forward `onComplete` to `Step4Confirmation`.
 
 In `Step4Confirmation.tsx`:
+
 - Accept `onComplete`.
 - After the SPEI order is successfully created (locally — no Stripe redirect), fire `onComplete({ orderId, paymentMethod: 'SPEI' })`.
 - For Card flow, do NOT fire `onComplete` here — Stripe redirect takes over.
@@ -588,6 +626,7 @@ Expected: no regressions. The new props are additive and optional.
 ### Task 11: Build the real `BuyTpvStep`
 
 **Files:**
+
 - Modify: `src/pages/Setup/steps/BuyTpvStep.tsx` (replace placeholder)
 
 This is the largest single task. Build it incrementally inside one file, then add a snapshot test.
@@ -633,8 +672,7 @@ export function BuyTpvStep({ data, onNext, venueId, tpvOrderId }: BuyTpvStepProp
     enabled: Boolean(venueId),
   })
 
-  const handleSkip = () =>
-    onNext({ tpvPurchase: { tpvOrderId: null, skipped: true, lastUpdatedAt: new Date().toISOString() } })
+  const handleSkip = () => onNext({ tpvPurchase: { tpvOrderId: null, skipped: true, lastUpdatedAt: new Date().toISOString() } })
 
   const handleFinish = () =>
     onNext({
@@ -670,9 +708,7 @@ Inside the component return, when `!order`:
 return (
   <div className="flex flex-col gap-8 max-w-2xl mx-auto">
     <header>
-      <h1 className="text-2xl font-semibold sm:text-3xl">
-        {t('step9.title', { defaultValue: 'Compra tu terminal de pago (opcional)' })}
-      </h1>
+      <h1 className="text-2xl font-semibold sm:text-3xl">{t('step9.title', { defaultValue: 'Compra tu terminal de pago (opcional)' })}</h1>
       <p className="text-sm text-muted-foreground mt-2">
         {t('step9.subtitle', { defaultValue: 'Cobra presencial con una terminal física. SIM con internet 4G incluida.' })}
       </p>
@@ -681,7 +717,9 @@ return (
       <p className="font-medium text-sm">{t('step9.catalogHeading', { defaultValue: 'Modelos disponibles' })}</p>
       <ul className="text-sm space-y-1">
         {CATALOG.map(m => (
-          <li key={m.code}>• {m.name} — ${m.price.toLocaleString('es-MX')} + IVA</li>
+          <li key={m.code}>
+            • {m.name} — ${m.price.toLocaleString('es-MX')} + IVA
+          </li>
         ))}
       </ul>
       <Button onClick={() => setWizardOpen(true)} className="rounded-full">
@@ -710,16 +748,46 @@ Inside the same return, when `order`:
 
 ```tsx
 const STATE_MESSAGES: Record<string, { label: string; help: string }> = {
-  AWAITING_SPEI: { label: t('step9.state.awaitingSpei', { defaultValue: 'Esperando comprobante SPEI' }), help: t('step9.help.awaitingSpei', { defaultValue: 'Sube tu comprobante en TPV → Pedidos cuando estés listo.' }) },
-  SPEI_RECEIVED: { label: t('step9.state.speiReceived', { defaultValue: 'Comprobante recibido — revisando' }), help: t('step9.help.speiReceived', { defaultValue: 'Te notificaremos por correo cuando lo aprobemos.' }) },
-  PAID: { label: t('step9.state.paid', { defaultValue: 'Pago confirmado' }), help: t('step9.help.paid', { defaultValue: 'Asignaremos tu terminal en las próximas horas.' }) },
-  AWAITING_SERIALS: { label: t('step9.state.paid', { defaultValue: 'Pago confirmado' }), help: t('step9.help.paid', { defaultValue: 'Asignaremos tu terminal en las próximas horas.' }) },
-  SERIALS_ASSIGNED: { label: t('step9.state.shipped', { defaultValue: 'Tu terminal está en camino' }), help: t('step9.help.shipped', { defaultValue: 'Te enviamos los detalles de envío al correo.' }) },
-  SHIPPED: { label: t('step9.state.shipped', { defaultValue: 'Tu terminal está en camino' }), help: t('step9.help.shipped', { defaultValue: 'Te enviamos los detalles de envío al correo.' }) },
-  DELIVERED: { label: t('step9.state.delivered', { defaultValue: 'Entregada' }), help: t('step9.help.delivered', { defaultValue: 'Empieza a cobrar desde TPV → Equipos.' }) },
-  REJECTED: { label: t('step9.state.rejected', { defaultValue: 'Pedido cancelado' }), help: t('step9.help.rejected', { defaultValue: 'Puedes intentar de nuevo o saltar este paso.' }) },
-  EXPIRED: { label: t('step9.state.rejected', { defaultValue: 'Pedido cancelado' }), help: t('step9.help.rejected', { defaultValue: 'Puedes intentar de nuevo o saltar este paso.' }) },
-  CANCELED: { label: t('step9.state.rejected', { defaultValue: 'Pedido cancelado' }), help: t('step9.help.rejected', { defaultValue: 'Puedes intentar de nuevo o saltar este paso.' }) },
+  AWAITING_SPEI: {
+    label: t('step9.state.awaitingSpei', { defaultValue: 'Esperando comprobante SPEI' }),
+    help: t('step9.help.awaitingSpei', { defaultValue: 'Sube tu comprobante en TPV → Pedidos cuando estés listo.' }),
+  },
+  SPEI_RECEIVED: {
+    label: t('step9.state.speiReceived', { defaultValue: 'Comprobante recibido — revisando' }),
+    help: t('step9.help.speiReceived', { defaultValue: 'Te notificaremos por correo cuando lo aprobemos.' }),
+  },
+  PAID: {
+    label: t('step9.state.paid', { defaultValue: 'Pago confirmado' }),
+    help: t('step9.help.paid', { defaultValue: 'Asignaremos tu terminal en las próximas horas.' }),
+  },
+  AWAITING_SERIALS: {
+    label: t('step9.state.paid', { defaultValue: 'Pago confirmado' }),
+    help: t('step9.help.paid', { defaultValue: 'Asignaremos tu terminal en las próximas horas.' }),
+  },
+  SERIALS_ASSIGNED: {
+    label: t('step9.state.shipped', { defaultValue: 'Tu terminal está en camino' }),
+    help: t('step9.help.shipped', { defaultValue: 'Te enviamos los detalles de envío al correo.' }),
+  },
+  SHIPPED: {
+    label: t('step9.state.shipped', { defaultValue: 'Tu terminal está en camino' }),
+    help: t('step9.help.shipped', { defaultValue: 'Te enviamos los detalles de envío al correo.' }),
+  },
+  DELIVERED: {
+    label: t('step9.state.delivered', { defaultValue: 'Entregada' }),
+    help: t('step9.help.delivered', { defaultValue: 'Empieza a cobrar desde TPV → Equipos.' }),
+  },
+  REJECTED: {
+    label: t('step9.state.rejected', { defaultValue: 'Pedido cancelado' }),
+    help: t('step9.help.rejected', { defaultValue: 'Puedes intentar de nuevo o saltar este paso.' }),
+  },
+  EXPIRED: {
+    label: t('step9.state.rejected', { defaultValue: 'Pedido cancelado' }),
+    help: t('step9.help.rejected', { defaultValue: 'Puedes intentar de nuevo o saltar este paso.' }),
+  },
+  CANCELED: {
+    label: t('step9.state.rejected', { defaultValue: 'Pedido cancelado' }),
+    help: t('step9.help.rejected', { defaultValue: 'Puedes intentar de nuevo o saltar este paso.' }),
+  },
 }
 const stateMsg = STATE_MESSAGES[order.state] ?? STATE_MESSAGES.AWAITING_SPEI
 const isTerminal = ['REJECTED', 'EXPIRED', 'CANCELED'].includes(order.state)
@@ -787,6 +855,7 @@ Run via the existing component test runner. Three assertions, three states.
 ### Task 12: Add `step9.*` keys
 
 **Files:**
+
 - Modify: `src/locales/es/setup.json`
 - Modify: `src/locales/en/setup.json`
 
@@ -909,8 +978,7 @@ Restart backend. Then:
 sed -i '' 's/ENABLE_ONBOARDING_TPV_PURCHASE=true/ENABLE_ONBOARDING_TPV_PURCHASE=false/' /Users/amieva/Documents/Programming/Avoqado/avoqado-server/.env
 ```
 
-Restart. Sign up a new merchant. Verify the wizard ends at Step 8
-(payment providers) as before — no Step 9 visible.
+Restart. Sign up a new merchant. Verify the wizard ends at Step 8 (payment providers) as before — no Step 9 visible.
 
 ---
 
