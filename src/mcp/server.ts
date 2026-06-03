@@ -11,10 +11,8 @@ import { registerReservationTools } from './tools/reservations'
 import { registerInventoryTools } from './tools/inventory'
 
 /** Build a per-request MCP server bound to the caller's resolved scope. */
-async function buildServerForRequest(authHeader: string | undefined): Promise<McpServer> {
-  const token = (authHeader ?? '').replace(/^Bearer\s+/i, '')
-  const { sub, org } = verifyMcpToken(token) // throws on bad / expired / wrong-audience token → 401 below
-  const scope = await resolveScope(sub, org)
+async function buildServerForIdentity(staffId: string, activeOrg: string): Promise<McpServer> {
+  const scope = await resolveScope(staffId, activeOrg)
 
   const server = new McpServer({ name: 'avoqado-customer-mcp', version: '0.1.0' })
   registerVenueTools(server, scope)
@@ -28,11 +26,24 @@ async function buildServerForRequest(authHeader: string | undefined): Promise<Mc
 
 /**
  * Express handler for POST /mcp (stateless per request).
- * Auth: a bearer MCP-audience token (see mcpToken.ts). Scope: per-request via resolveScope.
+ * Phase 1: requireBearerAuth populated req.auth.extra ({ staffId, activeOrg }) via
+ * provider.verifyAccessToken. Phase-0 dev server passes a raw bearer header instead.
  */
 export async function handleMcpRequest(req: Request, res: Response): Promise<void> {
   try {
-    const server = await buildServerForRequest(req.headers.authorization)
+    let staffId: string
+    let activeOrg: string
+    const extra = (req as { auth?: { extra?: Record<string, unknown> } }).auth?.extra
+    if (extra && typeof extra.staffId === 'string' && typeof extra.activeOrg === 'string') {
+      staffId = extra.staffId
+      activeOrg = extra.activeOrg
+    } else {
+      const token = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')
+      const payload = verifyMcpToken(token) // throws on bad / expired / wrong-audience → 401 below
+      staffId = payload.sub
+      activeOrg = payload.org
+    }
+    const server = await buildServerForIdentity(staffId, activeOrg)
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
     res.on('close', () => {
       void transport.close()

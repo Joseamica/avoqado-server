@@ -14,6 +14,11 @@ import AppError from './errors/AppError'
 import mainApiRouter from './routes' // Esto importa el 'router' exportado por defecto de 'src/routes/index.ts'
 import { getCorsConfig, Environment } from './config/corsOptions'
 import { handleMcpRequest } from './mcp/server'
+import { mountCustomerMcpAuth } from './mcp/oauth/router'
+import { provider as mcpOAuthProvider } from './mcp/oauth/provider'
+import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js'
+import { getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js'
+import { MCP_RESOURCE_URL } from './mcp/oauth/config'
 
 // Import routes
 import publicMenuRoutes from './routes/publicMenu.routes'
@@ -115,8 +120,21 @@ app.use(
 // These are unauthenticated endpoints (no credentials needed), safe to allow any origin
 app.use('/api/v1/public', express.json(), cookieParser(), publicRoutes)
 
-// Customer-facing MCP (Phase 0): scoped read tools over Streamable HTTP, gated by an MCP-audience bearer token.
-app.post('/mcp', express.json(), handleMcpRequest)
+// Customer-facing MCP OAuth 2.1 Authorization Server: DCR, /authorize (bcrypt consent), /token,
+// /revoke, and discovery metadata — all at the app root (required by the SDK).
+mountCustomerMcpAuth(app)
+
+// Customer-facing MCP endpoint (Streamable HTTP). Guarded by the SDK bearer middleware, which
+// validates the access token via provider.verifyAccessToken and sets req.auth.extra {staffId, activeOrg}.
+app.post(
+  '/mcp',
+  requireBearerAuth({
+    verifier: mcpOAuthProvider,
+    resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(MCP_RESOURCE_URL),
+  }),
+  express.json(),
+  handleMcpRequest,
+)
 
 // ⚠️ Public settlement report route — token-validated, no auth middleware
 // Mounted before configureCoreMiddlewares to avoid auth checks

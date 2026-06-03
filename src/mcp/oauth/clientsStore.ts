@@ -26,6 +26,8 @@ function toClientInfo(row: {
     token_endpoint_auth_method: row.tokenEndpointAuthMethod ?? undefined,
     client_id_issued_at: row.clientIdIssuedAt ?? undefined,
     client_secret_expires_at: row.clientSecretExpiresAt ?? undefined,
+    logo_uri: undefined,
+    tos_uri: undefined,
   }
 }
 
