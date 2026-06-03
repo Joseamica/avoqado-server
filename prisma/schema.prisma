@@ -213,6 +213,11 @@ model Venue {
   stripeCustomerId      String? @unique
   stripePaymentMethodId String?
 
+  // Subscription plan tier. Null = legacy/untiered (existing venues, behaves as
+  // today). New venues completing onboarding get PRO. See
+  // docs/superpowers/specs/2026-06-02-venue-base-subscription-design.md
+  planTier PlanTier?
+
   // POS Integration
   posType   PosType?
   posConfig Json? // Encrypted POS credentials
@@ -5588,6 +5593,13 @@ enum VenueStatus {
   SUSPENDED // Suspended by venue owner (voluntary, can reactivate)
   ADMIN_SUSPENDED // Suspended by Avoqado (non-payment, policy violation)
   CLOSED // Permanently closed (data retained for audit, immutable)
+}
+
+enum PlanTier {
+  GRATIS
+  PRO
+  PREMIUM
+  ENTERPRISE
 }
 
 /// Venue type enum - mirrors BusinessType for backwards compatibility
