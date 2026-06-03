@@ -7706,6 +7706,12 @@ enum TierPeriod {
   YEARLY
 }
 
+/// Whether a tier boundary is a fixed amount or resolves to the staff member's active sales goal
+enum ThresholdType {
+  FIXED
+  STAFF_GOAL
+}
+
 /// What metric is used for milestone targets
 enum MilestoneTargetType {
   ORDER_QUANTITY // Number of orders
@@ -7884,6 +7890,11 @@ model CommissionTier {
   // Thresholds
   minThreshold Decimal  @db.Decimal(12, 2) // Min orders/amount to reach this tier
   maxThreshold Decimal? @db.Decimal(12, 2) // Max before next tier (null = unlimited)
+
+  // A tier boundary can be a fixed amount (default) or resolve to the staff
+  // member's active sales goal at calculation time (STAFF_GOAL).
+  minThresholdType ThresholdType @default(FIXED)
+  maxThresholdType ThresholdType @default(FIXED)
 
   // Rate at this tier
   rate Decimal @db.Decimal(5, 4) // Commission rate for this tier
