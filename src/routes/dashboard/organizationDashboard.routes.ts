@@ -8,6 +8,8 @@ import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken
 import { validateRequest } from '../../middlewares/validation'
 import { organizationDashboardService } from '../../services/organization-dashboard/organizationDashboard.service'
 import * as orgTerminalsService from '../../services/organization-dashboard/orgTerminals.service'
+import * as orgVenueAccessService from '../../services/organization-dashboard/orgVenueAccess.service'
+import { grantVenueAccessSchema, listCandidatesSchema } from '../superadmin/venue-access.schemas'
 import * as orgMessagesService from '../../services/organization-dashboard/orgMessages.service'
 import * as activityLogService from '../../services/dashboard/activity-log.service'
 import {
@@ -1121,6 +1123,61 @@ router.post(
         data,
         message: 'Migración cancelada',
       })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * GET /dashboard/organizations/:orgId/venues/:venueId/staff-access/candidates?sourceVenueId=
+ * Owner-only. Lists org staff with their current role at the source venue (for
+ * pre-select) + existing PIN (for auto-fill), so the owner can carry people over.
+ */
+router.get(
+  '/:orgId/venues/:venueId/staff-access/candidates',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  requireOrgOwner,
+  validateRequest(listCandidatesSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId, venueId } = req.params
+      const { sourceVenueId } = req.query as { sourceVenueId?: string }
+      const data = await orgVenueAccessService.listVenueAccessCandidatesForOrg(orgId, venueId, sourceVenueId)
+      res.json({ success: true, data, message: 'Candidates listed' })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * POST /dashboard/organizations/:orgId/venues/:venueId/staff-access
+ * Owner-only. Body: { grants: [{ staffId, role, pin? }] }. Atomic batch grant —
+ * gives the selected people access at the venue (role + PIN) BEFORE a terminal moves.
+ */
+router.post(
+  '/:orgId/venues/:venueId/staff-access',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  requireOrgOwner,
+  validateRequest(grantVenueAccessSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId, venueId } = req.params
+      const { grants } = req.body
+      const authContext = (req as any).authContext
+
+      const actor = {
+        staffId: authContext.userId,
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent') ?? undefined,
+      }
+
+      const data = await orgVenueAccessService.grantVenueAccessForOrg(orgId, venueId, grants, actor)
+
+      res.json({ success: true, data, message: 'Acceso otorgado' })
     } catch (error) {
       next(error)
     }
