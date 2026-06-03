@@ -1,4 +1,4 @@
-import { OrgRole, StaffRole } from '@prisma/client'
+import { OrgRole, Prisma, StaffRole } from '@prisma/client'
 import bcrypt from 'bcryptjs'
 
 import logger from '../../config/logger'
@@ -416,9 +416,20 @@ export async function removeFromOrganization(staffId: string, organizationId: st
 // ASSIGN TO VENUE (upsert)
 // ===========================================
 
-export async function assignToVenue(staffId: string, venueId: string, role: StaffRole, pin?: string) {
+/**
+ * Core venue-assignment upsert — tx-aware so a batch can run it inside one transaction.
+ * Validates: staff exists, venue exists, staff ∈ venue's org, PIN unique within venue.
+ * Does NOT hydrate/return the staff (callers decide whether they need it).
+ */
+export async function upsertVenueAssignment(
+  client: Prisma.TransactionClient,
+  staffId: string,
+  venueId: string,
+  role: StaffRole,
+  pin?: string,
+): Promise<void> {
   // Validate staff exists
-  const staff = await prisma.staff.findUnique({ where: { id: staffId } })
+  const staff = await client.staff.findUnique({ where: { id: staffId }, select: { id: true } })
   if (!staff) {
     const error: any = new Error('Usuario no encontrado')
     error.statusCode = 404
@@ -426,7 +437,7 @@ export async function assignToVenue(staffId: string, venueId: string, role: Staf
   }
 
   // Validate venue exists and get its org
-  const venue = await prisma.venue.findUnique({
+  const venue = await client.venue.findUnique({
     where: { id: venueId },
     select: { id: true, organizationId: true, name: true },
   })
@@ -437,7 +448,7 @@ export async function assignToVenue(staffId: string, venueId: string, role: Staf
   }
 
   // Validate staff belongs to the venue's org
-  const orgMembership = await prisma.staffOrganization.findUnique({
+  const orgMembership = await client.staffOrganization.findUnique({
     where: { staffId_organizationId: { staffId, organizationId: venue.organizationId } },
   })
   if (!orgMembership || !orgMembership.isActive) {
@@ -448,7 +459,7 @@ export async function assignToVenue(staffId: string, venueId: string, role: Staf
 
   // Check PIN uniqueness if provided
   if (pin) {
-    const existingPin = await prisma.staffVenue.findFirst({
+    const existingPin = await client.staffVenue.findFirst({
       where: {
         venueId,
         pin,
@@ -463,7 +474,7 @@ export async function assignToVenue(staffId: string, venueId: string, role: Staf
     }
   }
 
-  await prisma.staffVenue.upsert({
+  await client.staffVenue.upsert({
     where: {
       staffId_venueId: { staffId, venueId },
     },
@@ -481,6 +492,13 @@ export async function assignToVenue(staffId: string, venueId: string, role: Staf
       active: true,
     },
   })
+}
+
+export async function assignToVenue(staffId: string, venueId: string, role: StaffRole, pin?: string) {
+  // Delegates the validation + upsert to the tx-aware helper (passing the global
+  // prisma client; PrismaClient is assignable to Prisma.TransactionClient), then
+  // returns the hydrated staff for the existing superadmin assign route.
+  await upsertVenueAssignment(prisma, staffId, venueId, role, pin)
 
   logger.info(`[STAFF-SUPERADMIN] Assigned staff to venue`, { staffId, venueId, role })
   return getStaffById(staffId)
