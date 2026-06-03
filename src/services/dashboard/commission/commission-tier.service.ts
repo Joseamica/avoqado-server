@@ -13,7 +13,7 @@
 
 import prisma from '../../../utils/prismaClient'
 import logger from '../../../config/logger'
-import { Prisma, TierType, TierPeriod, CommissionCalcType } from '@prisma/client'
+import { Prisma, TierType, TierPeriod, CommissionCalcType, ThresholdType } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
 import { validateRate, getPeriodDateRange, decimalToNumber, getVenueTimezone, CommissionConfigWithRelations } from './commission-utils'
 import { logAction } from '../activity-log.service'
@@ -30,6 +30,10 @@ export interface CreateCommissionTierInput {
   tierType?: TierType
   minThreshold: number
   maxThreshold?: number | null
+  // FIXED (default) = use the numeric threshold. STAFF_GOAL = resolve the
+  // boundary to the staff member's active sales goal at calculation time.
+  minThresholdType?: ThresholdType
+  maxThresholdType?: ThresholdType
   rate: number // As decimal, e.g., 0.05 for 5%
   period?: TierPeriod
 }
@@ -39,6 +43,8 @@ export interface UpdateCommissionTierInput {
   tierType?: TierType
   minThreshold?: number
   maxThreshold?: number | null
+  minThresholdType?: ThresholdType
+  maxThresholdType?: ThresholdType
   rate?: number
   period?: TierPeriod
   active?: boolean
@@ -177,6 +183,8 @@ export async function createCommissionTier(configId: string, venueId: string, da
       tierType: data.tierType ?? TierType.BY_AMOUNT,
       minThreshold: data.minThreshold,
       maxThreshold: data.maxThreshold,
+      minThresholdType: data.minThresholdType ?? ThresholdType.FIXED,
+      maxThresholdType: data.maxThresholdType ?? ThresholdType.FIXED,
       rate: data.rate,
       tierPeriod: data.period ?? TierPeriod.MONTHLY,
     },
@@ -255,6 +263,8 @@ export async function createTiersBatch(configId: string, venueId: string, tiers:
           tierType: tier.tierType ?? TierType.BY_AMOUNT,
           minThreshold: tier.minThreshold,
           maxThreshold: tier.maxThreshold,
+          minThresholdType: tier.minThresholdType ?? ThresholdType.FIXED,
+          maxThresholdType: tier.maxThresholdType ?? ThresholdType.FIXED,
           rate: tier.rate,
           tierPeriod: tier.period ?? TierPeriod.MONTHLY,
         },
@@ -330,6 +340,8 @@ export async function updateCommissionTier(tierId: string, venueId: string, data
   if (data.tierType !== undefined) updateData.tierType = data.tierType
   if (data.minThreshold !== undefined) updateData.minThreshold = data.minThreshold
   if (data.maxThreshold !== undefined) updateData.maxThreshold = data.maxThreshold
+  if (data.minThresholdType !== undefined) updateData.minThresholdType = data.minThresholdType
+  if (data.maxThresholdType !== undefined) updateData.maxThresholdType = data.maxThresholdType
   if (data.rate !== undefined) updateData.rate = data.rate
   if (data.period !== undefined) updateData.tierPeriod = data.period
   if (data.active !== undefined) updateData.active = data.active
@@ -483,13 +495,22 @@ export async function getStaffTierProgress(configId: string, staffId: string, ve
     currentValue = decimalToNumber(sum._sum.baseAmount)
   }
 
+  // Resolve STAFF_GOAL boundaries to the staff member's active goal (matching period).
+  const staffGoal = await getStaffSalesGoal(venueId, staffId)
+  const goalValue = staffGoal?.goal ?? null
+
+  const resolveBoundary = (threshold: Prisma.Decimal | null, type: ThresholdType, nullFallback: number): number => {
+    if (type === ThresholdType.STAFF_GOAL) return goalValue ?? Infinity // no goal → boundary at infinity
+    return threshold === null ? nullFallback : decimalToNumber(threshold)
+  }
+
   // Determine current and next tier
   let currentTier: number | null = null
   let nextTier: number | null = null
 
   for (const tier of config.tiers) {
-    const min = decimalToNumber(tier.minThreshold)
-    const max = tier.maxThreshold ? decimalToNumber(tier.maxThreshold) : Infinity
+    const min = resolveBoundary(tier.minThreshold, tier.minThresholdType as ThresholdType, 0)
+    const max = resolveBoundary(tier.maxThreshold, tier.maxThresholdType as ThresholdType, Infinity)
 
     if (currentValue >= min && currentValue < max) {
       currentTier = tier.tierLevel
@@ -505,9 +526,11 @@ export async function getStaffTierProgress(configId: string, staffId: string, ve
   if (nextTier !== null) {
     const nextTierData = config.tiers.find(t => t.tierLevel === nextTier)
     if (nextTierData) {
-      const nextMin = decimalToNumber(nextTierData.minThreshold)
+      const nextMin = resolveBoundary(nextTierData.minThreshold, nextTierData.minThresholdType as ThresholdType, 0)
       const currentTierData = config.tiers.find(t => t.tierLevel === currentTier)
-      const currentMin = currentTierData ? decimalToNumber(currentTierData.minThreshold) : 0
+      const currentMin = currentTierData
+        ? resolveBoundary(currentTierData.minThreshold, currentTierData.minThresholdType as ThresholdType, 0)
+        : 0
       const range = nextMin - currentMin
       progressToNext = range > 0 ? (currentValue - currentMin) / range : 0
     }
@@ -519,13 +542,16 @@ export async function getStaffTierProgress(configId: string, staffId: string, ve
     currentTier,
     nextTier,
     progressToNext: Math.min(1, Math.max(0, progressToNext)),
-    tiers: config.tiers.map(tier => ({
-      level: tier.tierLevel,
-      name: tier.tierName,
-      minThreshold: decimalToNumber(tier.minThreshold),
-      rate: decimalToNumber(tier.rate),
-      achieved: currentValue >= decimalToNumber(tier.minThreshold),
-    })),
+    tiers: config.tiers.map(tier => {
+      const min = resolveBoundary(tier.minThreshold, tier.minThresholdType as ThresholdType, 0)
+      return {
+        level: tier.tierLevel,
+        name: tier.tierName,
+        minThreshold: min === Infinity ? decimalToNumber(tier.minThreshold) : min,
+        rate: decimalToNumber(tier.rate),
+        achieved: currentValue >= min,
+      }
+    }),
   }
 }
 
