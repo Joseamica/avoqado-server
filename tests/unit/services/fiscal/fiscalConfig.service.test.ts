@@ -113,9 +113,9 @@ describe('upsertMerchantFiscalConfig', () => {
     const r = await upsertMerchantFiscalConfig({ ...base, ecommerceMerchantId: 'em1' }, d)
     expect(r.id).toBe('mc1')
     // New signature: (venueId, merchantAccountId?, ecommerceMerchantId?)
-    expect((d.findMerchantVenue as jest.Mock).mock.calls[0][0]).toBe('v1')   // venueId
+    expect((d.findMerchantVenue as jest.Mock).mock.calls[0][0]).toBe('v1') // venueId
     expect((d.findMerchantVenue as jest.Mock).mock.calls[0][1]).toBeUndefined() // merchantAccountId
-    expect((d.findMerchantVenue as jest.Mock).mock.calls[0][2]).toBe('em1')   // ecommerceMerchantId
+    expect((d.findMerchantVenue as jest.Mock).mock.calls[0][2]).toBe('em1') // ecommerceMerchantId
   })
 
   it('rejects when neither merchant FK is set (XOR — neither)', async () => {

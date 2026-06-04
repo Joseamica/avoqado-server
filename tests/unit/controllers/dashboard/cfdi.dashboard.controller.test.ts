@@ -102,9 +102,7 @@ describe('issueCfdiForOrderController', () => {
       }),
     )
     // ActivityLog: CFDI_ISSUED must fire on STAMPED
-    expect(mockLogAction).toHaveBeenCalledWith(
-      expect.objectContaining({ action: 'CFDI_ISSUED', entity: 'Cfdi', entityId: 'c1' }),
-    )
+    expect(mockLogAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'CFDI_ISSUED', entity: 'Cfdi', entityId: 'c1' }))
   })
 
   it('does NOT call logAction on VALIDATION_FAILED', async () => {
@@ -246,9 +244,7 @@ describe('cancelCfdiController', () => {
       }),
     )
     // ActivityLog: CFDI_CANCELLED must fire on success
-    expect(mockLogAction).toHaveBeenCalledWith(
-      expect.objectContaining({ action: 'CFDI_CANCELLED', entity: 'Cfdi', entityId: 'c1' }),
-    )
+    expect(mockLogAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'CFDI_CANCELLED', entity: 'Cfdi', entityId: 'c1' }))
   })
 
   it('returns 409 when the cfdi is not STAMPED', async () => {
