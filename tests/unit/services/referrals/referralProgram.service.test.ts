@@ -50,7 +50,6 @@ const mockedPrisma = prisma as unknown as {
   activityLog: { create: jest.Mock }
 }
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const { generateReferralCode } = require('@/services/referrals/referralCode.service')
 
 describe('referralProgram.service', () => {

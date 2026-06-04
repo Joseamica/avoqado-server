@@ -17,7 +17,6 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
 
 import { resolveTpvPurchaseForOnboarding } from '../../../../src/services/onboarding/onboardingProgress.service'
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const prisma = require('../../../../src/utils/prismaClient').default
 
 describe('resolveTpvPurchaseForOnboarding', () => {

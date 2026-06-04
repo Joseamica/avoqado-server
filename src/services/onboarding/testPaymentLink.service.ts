@@ -65,10 +65,7 @@ export async function createTestPaymentLink(input: CreateTestPaymentLinkInput): 
   const venue = await prisma.venue.findUnique({ where: { id: input.venueId }, select: { phone: true } })
   if (venue?.phone) {
     try {
-      await sendServiceMessage(
-        venue.phone,
-        `Probando tu nueva cuenta de cobros en Avoqado. Liga de prueba: ${link.url}`,
-      )
+      await sendServiceMessage(venue.phone, `Probando tu nueva cuenta de cobros en Avoqado. Liga de prueba: ${link.url}`)
       whatsappSent = true
     } catch (err) {
       logger.warn(`[onboarding-test-link] WhatsApp delivery failed for venue ${input.venueId}: ${(err as Error).message}`)

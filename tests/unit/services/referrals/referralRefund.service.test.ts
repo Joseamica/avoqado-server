@@ -17,11 +17,7 @@
  *     `couponCode` relation on CouponRedemption.
  */
 
-import {
-  onOrderRefunded,
-  isRewardRedeemed,
-  revokeTierReward,
-} from '@/services/referrals/referralRefund.service'
+import { onOrderRefunded, isRewardRedeemed, revokeTierReward } from '@/services/referrals/referralRefund.service'
 import prisma from '@/utils/prismaClient'
 
 jest.mock('@/utils/prismaClient', () => ({

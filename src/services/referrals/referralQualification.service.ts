@@ -1,16 +1,7 @@
 import prisma from '@/utils/prismaClient'
-import {
-  ReferralTier,
-  ReferralProgramConfig,
-  Discount,
-  CustomerDiscount,
-  CouponCode,
-} from '@prisma/client'
+import { ReferralTier, ReferralProgramConfig, Discount, CustomerDiscount, CouponCode } from '@prisma/client'
 
-type TierConfig = Pick<
-  ReferralProgramConfig,
-  'tier1ReferralsRequired' | 'tier2ReferralsRequired' | 'tier3ReferralsRequired'
->
+type TierConfig = Pick<ReferralProgramConfig, 'tier1ReferralsRequired' | 'tier2ReferralsRequired' | 'tier3ReferralsRequired'>
 
 /**
  * Pure-function tier resolver. Compares a referral count against the
@@ -69,8 +60,7 @@ export async function emitTierReward(input: EmitTierRewardInput): Promise<TierRe
   const customerShort = input.referrer.id.slice(-6).toUpperCase()
   const validUntil = new Date()
   validUntil.setDate(validUntil.getDate() + input.config.rewardCouponExpiryDays)
-  const referrerName =
-    [input.referrer.firstName, input.referrer.lastName].filter(Boolean).join(' ') || 'customer'
+  const referrerName = [input.referrer.firstName, input.referrer.lastName].filter(Boolean).join(' ') || 'customer'
 
   return prisma.$transaction(async tx => {
     const discount = await tx.discount.create({
@@ -213,8 +203,7 @@ export async function onOrderPaid(input: OnOrderPaidInput): Promise<void> {
         const { generateTierUpCard } = await import('@/services/referrals/referralCard.service')
         const { sendReferralTierUpEmail } = await import('@/services/email.service')
         const cardPng = await generateTierUpCard({
-          customerName:
-            [fullReferrer.firstName, fullReferrer.lastName].filter(Boolean).join(' ') || 'Cliente',
+          customerName: [fullReferrer.firstName, fullReferrer.lastName].filter(Boolean).join(' ') || 'Cliente',
           venueName: venue.name,
           tier: newTier,
           tierLabel,

@@ -151,9 +151,7 @@ export interface ResolvedTpvPurchase {
  *
  * Spec: docs/superpowers/specs/2026-05-29-onboarding-tpv-purchase-design.md
  */
-export async function resolveTpvPurchaseForOnboarding(
-  organizationId: string,
-): Promise<ResolvedTpvPurchase> {
+export async function resolveTpvPurchaseForOnboarding(organizationId: string): Promise<ResolvedTpvPurchase> {
   const progress = await prisma.onboardingProgress.findUnique({
     where: { organizationId },
   })

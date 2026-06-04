@@ -90,12 +90,7 @@ router.post(
  *     summary: Validate a referral code (no side effects)
  *     security: [{ bearerAuth: [] }]
  */
-router.post(
-  '/validate',
-  checkPermission('referral:read'),
-  validateRequest(ValidateReferralCodeSchema),
-  referralsController.validate,
-)
+router.post('/validate', checkPermission('referral:read'), validateRequest(ValidateReferralCodeSchema), referralsController.validate)
 
 /**
  * @openapi
@@ -105,12 +100,7 @@ router.post(
  *     summary: Capture a referral (create PENDING Referral)
  *     security: [{ bearerAuth: [] }]
  */
-router.post(
-  '/capture',
-  checkPermission('referral:read'),
-  validateRequest(CaptureReferralSchema),
-  referralsController.captureCode,
-)
+router.post('/capture', checkPermission('referral:read'), validateRequest(CaptureReferralSchema), referralsController.captureCode)
 
 /**
  * @openapi
@@ -154,12 +144,7 @@ router.post(
  *     summary: List referrals (paginated, filterable)
  *     security: [{ bearerAuth: [] }]
  */
-router.get(
-  '/',
-  checkPermission('referral:read'),
-  validateRequest(ListReferralsQuerySchema),
-  referralsController.listReferralsHandler,
-)
+router.get('/', checkPermission('referral:read'), validateRequest(ListReferralsQuerySchema), referralsController.listReferralsHandler)
 
 /**
  * @openapi
@@ -193,10 +178,6 @@ router.get('/hall-of-fame', checkPermission('referral:read'), referralsControlle
  *     summary: Get a wa.me deep link a customer can tap to share their referral code via WhatsApp
  *     security: [{ bearerAuth: [] }]
  */
-router.get(
-  '/customers/:customerId/share-link',
-  checkPermission('referral:read'),
-  referralsController.getShareLink,
-)
+router.get('/customers/:customerId/share-link', checkPermission('referral:read'), referralsController.getShareLink)
 
 export default router

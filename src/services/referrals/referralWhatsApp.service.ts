@@ -38,7 +38,9 @@ export interface ReferralWhatsAppDeepLinkInput {
  * controller can also surface the raw text (e.g. for a "copy text" button in
  * the dashboard) without re-deriving the wording.
  */
-export function buildWelcomeShareMessage(input: Pick<ReferralWhatsAppDeepLinkInput, 'venueName' | 'referralCode' | 'newCustomerDiscountPercent'>): string {
+export function buildWelcomeShareMessage(
+  input: Pick<ReferralWhatsAppDeepLinkInput, 'venueName' | 'referralCode' | 'newCustomerDiscountPercent'>,
+): string {
   return `¡Te recomiendo ${input.venueName}! Usa mi código *${input.referralCode}* y te dan ${input.newCustomerDiscountPercent}% en tu primera compra.`
 }
 
@@ -75,7 +77,9 @@ export interface ReferralTierUpWhatsAppInput {
   validDays: number
 }
 
-export function buildTierUpAdminShareMessage(input: Pick<ReferralTierUpWhatsAppInput, 'customerName' | 'venueName' | 'tierLabel' | 'rewardPercent' | 'couponCode' | 'validDays'>): string {
+export function buildTierUpAdminShareMessage(
+  input: Pick<ReferralTierUpWhatsAppInput, 'customerName' | 'venueName' | 'tierLabel' | 'rewardPercent' | 'couponCode' | 'validDays'>,
+): string {
   return `¡${input.customerName}, lograste el ${input.tierLabel} en ${input.venueName}! 🎉\nTu premio: ${input.rewardPercent}% de descuento. Código: ${input.couponCode}. Válido ${input.validDays} días.`
 }
 

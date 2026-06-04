@@ -65,7 +65,11 @@ export async function captureCode(req: Request, res: Response, next: NextFunctio
     const referral = await capture.captureReferral({ venueId: req.params.venueId, ...req.body })
     res.status(201).json(referral)
   } catch (e: any) {
-    if (e && typeof e.message === 'string' && ['PROGRAM_INACTIVE', 'CODE_NOT_FOUND', 'SELF_REFERRAL', 'EXISTING_CUSTOMER'].includes(e.message)) {
+    if (
+      e &&
+      typeof e.message === 'string' &&
+      ['PROGRAM_INACTIVE', 'CODE_NOT_FOUND', 'SELF_REFERRAL', 'EXISTING_CUSTOMER'].includes(e.message)
+    ) {
       return res.status(400).json({ valid: false, reason: e.message })
     }
     next(e)
@@ -184,9 +188,7 @@ export async function getShareLink(req: Request, res: Response, next: NextFuncti
     if (!cfg) {
       return res.status(404).json({ error: 'No code or program' })
     }
-    const { buildWelcomeShareDeepLink, buildWelcomeShareMessage } = await import(
-      '../../../services/referrals/referralWhatsApp.service'
-    )
+    const { buildWelcomeShareDeepLink, buildWelcomeShareMessage } = await import('../../../services/referrals/referralWhatsApp.service')
     const linkInput = {
       venueName: customer.venue.name,
       referralCode: customer.referralCode,

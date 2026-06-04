@@ -82,9 +82,7 @@ describe('Referral Program — end-to-end integration', () => {
        WHERE table_name = 'Discount' AND column_name = 'source'
     `
     if (cols.length === 0) {
-      throw new Error(
-        'Connected DB is missing Discount.source. Override TEST_DATABASE_URL to point at av-db-25 (see file header).',
-      )
+      throw new Error('Connected DB is missing Discount.source. Override TEST_DATABASE_URL to point at av-db-25 (see file header).')
     }
 
     const venue = await prisma.venue.findFirst({ where: { slug: 'avoqado-wellness' } })
