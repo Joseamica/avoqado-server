@@ -74,6 +74,13 @@ describe('issueCfdiForOrder', () => {
     expect(deps.resolveProvider).not.toHaveBeenCalled()
   })
 
+  it('tenant isolation: rejects an order whose venue ≠ expectedVenueId, never calls the PAC', async () => {
+    const deps = makeDeps() // loadOrderForCfdi returns venueId 'v1'
+    await expect(issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true, expectedVenueId: 'OTHER' }, deps)).rejects.toThrow(/not found/)
+    expect(deps.resolveProvider).not.toHaveBeenCalled()
+    expect(deps.persistCfdi).not.toHaveBeenCalled()
+  })
+
   it('validation failure: never calls the PAC, persists VALIDATION_FAILED with reasons', async () => {
     const deps = makeDeps()
     const res = await issueCfdiForOrder({ orderId: 'o1', receptor: { ...receptor, rfc: 'BAD' }, sandbox: true }, deps)
