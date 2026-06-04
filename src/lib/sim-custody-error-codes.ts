@@ -21,6 +21,7 @@ export type SimCustodyErrorCode =
   | 'ALREADY_REJECTED'
   | 'SIM_SOLD'
   | 'SIM_NOT_ACCEPTED'
+  | 'REQUIRES_OWNER_APPROVAL'
   | 'CATEGORY_NOT_FOUND'
   | 'CATEGORY_MISMATCH'
   | 'INVALID_STATE'
@@ -111,6 +112,14 @@ export const SIM_CUSTODY_ERROR_CODES: Record<SimCustodyErrorCode, SimCustodyErro
     messages: {
       es: 'Debes aceptar la recepción del SIM en "Mis SIMs" antes de venderlo.',
       en: 'You must accept reception of this SIM in "My SIMs" before selling it.',
+    },
+  },
+  REQUIRES_OWNER_APPROVAL: {
+    code: 'REQUIRES_OWNER_APPROVAL',
+    httpStatus: 409,
+    messages: {
+      es: 'Este SIM requiere aprobación del dueño antes de distribuirse. Apruébalo en la cola de aprobación de stock.',
+      en: 'This SIM requires owner approval before it can be distributed. Approve it in the stock-approval queue.',
     },
   },
   CATEGORY_NOT_FOUND: {

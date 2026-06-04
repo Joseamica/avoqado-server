@@ -13,7 +13,7 @@
 import { Request, Response } from 'express'
 import { env } from '@/config/env'
 import logger from '@/config/logger'
-import { issueCfdiForOrder } from '@/services/fiscal/cfdi.service'
+import { issueCfdiForOrder, cancelCfdi, getCfdiStatus } from '@/services/fiscal/cfdi.service'
 
 /**
  * POST /api/v1/dashboard/venues/:venueId/orders/:orderId/cfdi
@@ -80,5 +80,80 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
     }
 
     res.status(500).json({ error: 'Error interno al facturar' })
+  }
+}
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/cfdi/:cfdiId
+ *
+ * Returns the current CFDI record (including cancel status) for the given venue.
+ * Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:view').
+ */
+export async function getCfdiStatusController(req: Request, res: Response): Promise<void> {
+  const { cfdiId } = req.params
+  const { venueId } = (req as any).authContext ?? {}
+
+  try {
+    const cfdi = await getCfdiStatus({ cfdiId, expectedVenueId: venueId })
+
+    res.status(200).json({ cfdi })
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    logger.error(`[cfdi.controller] getCfdiStatus failed for cfdi ${cfdiId}: ${message}`)
+
+    if (/not found/i.test(message)) {
+      res.status(404).json({ error: 'CFDI no encontrado' })
+      return
+    }
+
+    res.status(500).json({ error: 'Error interno al consultar el CFDI' })
+  }
+}
+
+/**
+ * POST /api/v1/dashboard/venues/:venueId/cfdi/:cfdiId/cancel
+ *
+ * Cancels an issued CFDI (destructive — voids a fiscal document).
+ * Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:configure') (OWNER/ADMIN).
+ * Body is validated by validateRequest(cancelCfdiSchema) before this handler runs.
+ */
+export async function cancelCfdiController(req: Request, res: Response): Promise<void> {
+  const { cfdiId } = req.params
+  const { motivo, substituteUuid } = req.body
+  const { venueId } = (req as any).authContext ?? {}
+
+  // Sandbox stamps in dev/staging; live key in production.
+  const sandbox = env.NODE_ENV !== 'production'
+
+  try {
+    const result = await cancelCfdi({
+      cfdiId,
+      motivo,
+      substituteUuid,
+      sandbox,
+      expectedVenueId: venueId,
+    })
+
+    res.status(200).json({
+      cancelStatus: result.cancelStatus,
+      cancelledAt: result.cancelledAt,
+      cfdiId: result.cfdi?.id,
+    })
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    logger.error(`[cfdi.controller] cancelCfdi failed for cfdi ${cfdiId}: ${message}`)
+
+    if (/not found/i.test(message)) {
+      res.status(404).json({ error: 'CFDI no encontrado' })
+      return
+    }
+
+    // Business-rule violations (not STAMPED, motivo 01 without substitute) → 409 Conflict
+    if (/timbrad|stamped|motivo|sustituci|substitut/i.test(message)) {
+      res.status(409).json({ error: message })
+      return
+    }
+
+    res.status(500).json({ error: 'Error interno al cancelar el CFDI' })
   }
 }

@@ -197,6 +197,8 @@ const prismaMock: any = {
   whatsappInboundEvent: createMockModel(),
   venueChatSession: createMockModel(),
   venueChatMessage: createMockModel(),
+  // Audit trail
+  activityLog: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),

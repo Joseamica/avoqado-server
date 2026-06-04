@@ -1,6 +1,9 @@
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import Stripe from 'stripe'
+import { Prisma } from '@prisma/client'
+import { addDays } from 'date-fns'
+import { BadRequestError } from '@/errors/AppError'
 import { PAID_PLAN_TIER_CODES, derivePlanState } from '@/services/access/basePlan.service'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
@@ -122,37 +125,50 @@ async function mapVenueSubscription(v: VenueSubscriptionRow): Promise<Superadmin
   }
 }
 
+/** The `select` shape every loader shares so {@link mapVenueSubscription} can map any row identically. */
+const VENUE_SUBSCRIPTION_SELECT = {
+  id: true,
+  name: true,
+  slug: true,
+  planTier: true,
+  features: {
+    where: { feature: { code: { in: [...PAID_PLAN_TIER_CODES] } } },
+    select: {
+      active: true,
+      endDate: true,
+      suspendedAt: true,
+      gracePeriodEndsAt: true,
+      stripeSubscriptionId: true,
+      stripePriceId: true,
+      monthlyPrice: true,
+    },
+    take: 1,
+  },
+  staff: {
+    where: { role: { in: ['OWNER', 'ADMIN'] } },
+    select: { role: true, staff: { select: { firstName: true, lastName: true, email: true } } },
+    take: 5,
+  },
+} satisfies Prisma.VenueSelect
+
 /** Shared loader: every venue + its single PLAN_PRO VenueFeature (if any) + owner staff. Tenant scope = superadmin (all venues). */
 async function loadVenueSubscriptions(q?: string): Promise<SuperadminVenueSubscription[]> {
   const venues = (await prisma.venue.findMany({
     where: q ? { OR: [{ name: { contains: q, mode: 'insensitive' } }, { slug: { contains: q, mode: 'insensitive' } }] } : undefined,
-    select: {
-      id: true,
-      name: true,
-      slug: true,
-      planTier: true,
-      features: {
-        where: { feature: { code: { in: [...PAID_PLAN_TIER_CODES] } } },
-        select: {
-          active: true,
-          endDate: true,
-          suspendedAt: true,
-          gracePeriodEndsAt: true,
-          stripeSubscriptionId: true,
-          stripePriceId: true,
-          monthlyPrice: true,
-        },
-        take: 1,
-      },
-      staff: {
-        where: { role: { in: ['OWNER', 'ADMIN'] } },
-        select: { role: true, staff: { select: { firstName: true, lastName: true, email: true } } },
-        take: 5,
-      },
-    },
+    select: VENUE_SUBSCRIPTION_SELECT,
     orderBy: { name: 'asc' },
   })) as unknown as VenueSubscriptionRow[]
   return Promise.all(venues.map(mapVenueSubscription))
+}
+
+/** Single-venue subscription row, mapped with the SAME logic as the list. `null` if the venue doesn't exist. */
+export async function getVenueSubscription(venueId: string): Promise<SuperadminVenueSubscription | null> {
+  const venue = (await prisma.venue.findFirst({
+    where: { id: venueId },
+    select: VENUE_SUBSCRIPTION_SELECT,
+  })) as unknown as VenueSubscriptionRow | null
+  if (!venue) return null
+  return mapVenueSubscription(venue)
 }
 
 /** Paginated, state-filterable per-venue subscription list. */
@@ -179,4 +195,23 @@ export async function getSubscriptionOverview(): Promise<SubscriptionOverview> {
     )
     .map(r => ({ venueId: r.venueId, name: r.name, trialEndsAt: r.trialEndsAt as string }))
   return { counts, mrr: { total, currency: 'MXN' }, trialsEndingSoon }
+}
+
+/**
+ * Superadmin management action: shift a venue's PLAN_PRO end date by `deltaDays`
+ * (negative shortens it). Base is the existing endDate, or now() if it's null.
+ * Returns the freshly-mapped single-venue row. Throws BadRequestError if the
+ * venue has no PLAN_PRO VenueFeature.
+ */
+export async function adjustVenuePlanEndDate(venueId: string, deltaDays: number): Promise<SuperadminVenueSubscription | null> {
+  const vf = await prisma.venueFeature.findFirst({
+    where: { venueId, feature: { code: 'PLAN_PRO' } },
+    select: { id: true, endDate: true },
+  })
+  if (!vf) throw new BadRequestError('El venue no tiene un plan PLAN_PRO')
+
+  const newEnd = addDays(vf.endDate ?? new Date(), deltaDays)
+  await prisma.venueFeature.update({ where: { id: vf.id }, data: { endDate: newEnd } })
+
+  return getVenueSubscription(venueId)
 }

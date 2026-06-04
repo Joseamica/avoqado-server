@@ -37,7 +37,24 @@ export const issueCfdiSchema = z.object({
 })
 
 // ==========================================
+// CANCEL CFDI SCHEMA
+// ==========================================
+
+/** Schema passed to validateRequest() for POST /venues/:venueId/cfdi/:cfdiId/cancel */
+export const cancelCfdiSchema = z.object({
+  body: z.object({
+    motivo: z.enum(['01', '02', '03', '04'], {
+      required_error: 'El motivo de cancelación es requerido',
+      invalid_type_error: 'El motivo de cancelación no es válido',
+    }),
+    // Optional — the "motivo 01 requires substituteUuid" cross-field rule lives in the SERVICE (shape-only in Zod per rules)
+    substituteUuid: z.string().uuid('El UUID de sustitución no es válido').optional(),
+  }),
+})
+
+// ==========================================
 // TYPE EXPORTS
 // ==========================================
 
 export type IssueCfdiBody = z.infer<typeof issueCfdiSchema.shape.body>
+export type CancelCfdiBody = z.infer<typeof cancelCfdiSchema.shape.body>

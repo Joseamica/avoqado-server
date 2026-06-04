@@ -152,11 +152,28 @@ wait stable, then APK. TPV sends `X-App-Version-Code` for conditional behavior.
 | Datetime/timezone       | `docs/DATETIME_SYNC.md`                           |
 | Production checklist    | `docs/PRODUCTION_READINESS_CHECKLIST.md`          |
 
-## 🔴 CRITICAL — Keep the Avoqado MCP in sync
+## 🔴 CRITICAL — Two MCPs: keep the CUSTOMER MCP in sync (do NOT confuse them)
 
-The Avoqado MCP (`avoqado-server/scripts/mcp/`) is a **first-class interface**: it exposes the platform's data and actions to AI agents
-(internal ops today, customer-facing tomorrow). It must never fall behind the platform.
+Avoqado has **two separate MCP servers**. Confusing them causes branch chaos — be exact:
 
-**Whenever you add or change a feature, Prisma model, service, endpoint, permission, or any capability the MCP should expose, you MUST add
-or update the matching MCP tool in `avoqado-server/scripts/mcp/` as part of the SAME change — never "later".** A capability that exists but
-isn't reachable through the MCP is unfinished. Treat the MCP like permissions: kept in lockstep, never an afterthought.
+| MCP                          | Path           | What it is                                                                                                    | Where it lives                   |
+| ---------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------- | -------------------------------- |
+| **Customer MCP** ← this rule | `src/mcp/`     | Customer-facing **product**: Streamable HTTP + OAuth, scoped by `getUserAccess()`. New feature tools go HERE. | `develop` (deployed)             |
+| **Admin MCP**                | `scripts/mcp/` | **Internal** founder-ops tool (stdio, Prisma-direct). Separate lifecycle.                                     | only `feat/admin-mcp` (unmerged) |
+
+**This rule targets the CUSTOMER MCP (`src/mcp/`).** Whenever you add or change a feature, Prisma model, service, endpoint, permission, or
+any capability an operator should be able to read (later: act on), add or update the matching tool in **`src/mcp/tools/`** (on `develop`),
+registered in `src/mcp/server.ts`, as part of the SAME change — never "later". A capability not reachable through the customer MCP is
+unfinished. Treat it like permissions: kept in lockstep.
+
+**Do NOT** add product feature tools to the admin MCP (`scripts/mcp/`), and **do NOT** merge `feat/admin-mcp` into develop just to add a
+tool — it is a separate internal tool, not driven by this rule.
+
+## 🔴 CRITICAL — Audit mutations with ActivityLog
+
+Every **audit-worthy mutation** — create/update/delete of domain entities, money ops, access/permission changes, **superadmin overrides**
+(plan activate/deactivate, grant-trial, adjust-end-date), and status changes — MUST write an `ActivityLog` row (`action`, `entity`,
+`entityId`, `staffId` from authContext, `venueId`, `data`) in the SAME change, never "later". A mutating endpoint without `ActivityLog` is
+unfinished (treat it like permissions/MCP: kept in lockstep). Do NOT log reads or high-frequency events (heartbeats, scans, request logging)
+— that just bloats the audit trail. Full rule + example: `.claude/rules/critical-warnings.md`. (Backend-only — clients call the API;
+`avoqado-server` audits.)

@@ -374,27 +374,36 @@
           </tr>
           <tr>
             <td>URL del sitio web</td>
-            <td><code>https://book.avoqado.io/{{1}}</code></td>
+            <td>
+              <code>https://book.avoqado.io/</code>
+              <div class="hint" style="color: var(--warn)">
+                ⚠️ TERMINA en <code>/</code> y NADA más. <strong>NO escribas <code>{{1}}</code></strong> — Meta lo agrega solo (lo ves como
+                un badge a la derecha). Si escribes <code>{{1}}</code> en el campo, queda literal y el link se rompe (<code
+                  >book.avoqado.io/{{1}}amaena</code
+                >
+                → "Establecimiento no encontrado").
+              </div>
+            </td>
           </tr>
           <tr>
             <td>Ejemplo / URL de muestra de {{1}}</td>
             <td>
-              <code>amaena?manage=a8a9aa9c-1234</code>
+              <code>https://book.avoqado.io/amaena?manage=a8a9aa9c-1234</code>
               <div class="hint" style="color: var(--warn)">
-                ⚠️ SOLO esto. SIN <code>https://</code> y SIN <code>/</code> al inicio. Es la parte que va después de la URL base. Meta arma
-                la final: <code>https://book.avoqado.io/amaena?manage=a8a9aa9c-1234</code>
+                ⚠️ Aquí va la URL <strong>COMPLETA</strong> de ejemplo, NO solo el valor de la variable. Meta exige que
+                <strong>empiece EXACTO igual que la URL base de arriba</strong> (<code>https://book.avoqado.io/</code>). Si pones solo
+                <code>amaena?manage=...</code>, Meta lo convierte en <code>https://amaena/?manage=...</code> y lo rechaza ("Ingresa una URL
+                del sitio web válida") porque <code>amaena</code> no es el dominio.
               </div>
             </td>
           </tr>
         </table>
-        <div class="field-label"><span>URL de muestra de {{1}} (para copiar)</span></div>
-        <div class="copy short" data-copy="amaena?manage=a8a9aa9c-1234">
-          amaena?manage=a8a9aa9c-1234<button class="copy-btn">Copiar</button>
+        <div class="field-label"><span>URL de muestra de {{1}} (para copiar — URL COMPLETA, mismo dominio que la base)</span></div>
+        <div class="copy short" data-copy="https://book.avoqado.io/amaena?manage=a8a9aa9c-1234">
+          https://book.avoqado.io/amaena?manage=a8a9aa9c-1234<button class="copy-btn">Copiar</button>
         </div>
-        <div class="field-label"><span>URL del botón (para copiar)</span></div>
-        <div class="copy short" data-copy="https://book.avoqado.io/{{1}}">
-          https://book.avoqado.io/<span class="var">{{1}}</span><button class="copy-btn">Copiar</button>
-        </div>
+        <div class="field-label"><span>URL del botón / base (para copiar — termina en / SIN {{1}})</span></div>
+        <div class="copy short" data-copy="https://book.avoqado.io/">https://book.avoqado.io/<button class="copy-btn">Copiar</button></div>
         <div class="field-label"><span>Texto del botón (para copiar)</span></div>
         <div class="copy short" data-copy="Gestionar mi cita">Gestionar mi cita<button class="copy-btn">Copiar</button></div>
 
@@ -435,15 +444,28 @@
           </tr>
         </table>
 
-        <p class="sub" style="margin-top: 14px">
-          El botón de la Plantilla 2 es <strong>idéntico</strong> al de la Plantilla 1 (misma URL
-          <code>https://book.avoqado.io/{{1}}</code> y mismo texto "Gestionar mi cita").
-        </p>
+        <p class="sub" style="margin-top: 14px">El botón de la Plantilla 2 es <strong>idéntico</strong> al de la Plantilla 1:</p>
+        <ul class="sub" style="margin: 6px 0 0 18px; line-height: 1.7">
+          <li>Tipo de acción: <strong>Visitar sitio web</strong> · Tipo de URL: <strong>Dinámica</strong></li>
+          <li>Texto del botón: <code>Gestionar mi cita</code></li>
+          <li>
+            URL del sitio web: <code>https://book.avoqado.io/</code> (termina en <code>/</code>, SIN <code>{{1}}</code> — Meta agrega el
+            badge)
+          </li>
+          <li>
+            URL de muestra de {{1}}: <code>https://book.avoqado.io/amaena?manage=a8a9aa9c-1234</code> (URL COMPLETA, mismo dominio que la
+            base)
+          </li>
+        </ul>
 
         <div class="note warn" style="margin-top: 18px">
-          <strong>El botón pega UNA variable al final de la URL base.</strong> Por eso la base termina en <code>/{{1}}</code> y Avoqado le
-          manda <code>amaena?manage=&lt;token&gt;</code>. El cliente termina abriendo
-          <code>https://book.avoqado.io/amaena?manage=&lt;token&gt;</code> → su reserva, lista para cancelar/reagendar.
+          <strong>El botón pega UNA variable al final de la URL base.</strong> Tú escribes solo la base
+          <code>https://book.avoqado.io/</code> y Meta agrega la variable <code>{{1}}</code> (el badge). En producción Avoqado le manda
+          <code>amaena?manage=&lt;token&gt;</code> como valor de <code>{{1}}</code>. El cliente termina abriendo
+          <code>https://book.avoqado.io/amaena?manage=&lt;token&gt;</code> → su reserva, lista para cancelar/reagendar. <br /><br />
+          <strong>Ojo con el campo "URL de muestra":</strong> pide la URL <strong>completa</strong> (con
+          <code>https://book.avoqado.io/</code> al inicio), NO solo el valor de la variable. Es únicamente para que Meta revise; no afecta
+          lo que reciben tus clientes.
         </div>
 
         <div class="note ok">

@@ -165,6 +165,7 @@ export class SimCustodyService {
     // in future consumer payloads doesn't surface as a TS error.
     const { actor, supervisorStaffId, rows, idempotencyRequestId } = input
     await this.assertStaffBelongsToOrg(supervisorStaffId, actor.organizationId)
+    const approvalEnforced = await this.isApprovalEnforced(actor.organizationId)
 
     const results: BulkResultRow[] = []
     for (const row of rows) {
@@ -189,6 +190,13 @@ export class SimCustodyService {
             // can't be resolved (cleared assignment race, deleted Staff, etc.).
             const detail = await this.formatCurrentHolderDetail(tx, item)
             throw new SimCustodyError('ALREADY_ASSIGNED', detail)
+          }
+          // Owner-approval distribution gate (root-cause fix 2026-06-04): un-approved
+          // stock must NOT flow down the chain, or it dead-ends at the sale gate.
+          // eSIMs are never flagged (the backfill excludes them), so no eSIM exemption
+          // is needed here. ENFORCE-only, mirroring applyCustodyPrecheck.
+          if (approvalEnforced && item.requiresOwnerApproval) {
+            throw new SimCustodyError('REQUIRES_OWNER_APPROVAL')
           }
 
           const newState = applyTransition(item.custodyState, 'ASSIGN_TO_SUPERVISOR')
@@ -225,6 +233,7 @@ export class SimCustodyService {
   async assignToPromoter(input: AssignToPromoterInput): Promise<BulkResult> {
     const { actor, promoterStaffId, serialNumbers, idempotencyRequestId } = input
     await this.assertStaffBelongsToOrg(promoterStaffId, actor.organizationId)
+    const approvalEnforced = await this.isApprovalEnforced(actor.organizationId)
 
     const results: BulkResultRow[] = []
     for (const sn of serialNumbers) {
@@ -235,6 +244,10 @@ export class SimCustodyService {
           if (item.status === 'SOLD') throw new SimCustodyError('SIM_SOLD')
           if (item.assignedSupervisorId !== actor.staffId) {
             throw new SimCustodyError('NOT_IN_YOUR_CUSTODY')
+          }
+          // Owner-approval distribution gate — see assignToSupervisor.
+          if (approvalEnforced && item.requiresOwnerApproval) {
+            throw new SimCustodyError('REQUIRES_OWNER_APPROVAL')
           }
           const newState = applyTransition(item.custodyState, 'ASSIGN_TO_PROMOTER')
           const updated = await this.updateWithVersion(tx, item, {
@@ -293,6 +306,7 @@ export class SimCustodyService {
   async assignToPromoterDirect(input: AssignToPromoterInput): Promise<BulkResult> {
     const { actor, promoterStaffId, serialNumbers, idempotencyRequestId } = input
     await this.assertStaffBelongsToOrg(promoterStaffId, actor.organizationId)
+    const approvalEnforced = await this.isApprovalEnforced(actor.organizationId)
 
     const results: BulkResultRow[] = []
     for (const sn of serialNumbers) {
@@ -312,6 +326,10 @@ export class SimCustodyService {
           if (item.custodyState !== 'ADMIN_HELD') {
             const detail = await this.formatCurrentHolderDetail(tx, item)
             throw new SimCustodyError('ALREADY_ASSIGNED', detail)
+          }
+          // Owner-approval distribution gate — see assignToSupervisor.
+          if (approvalEnforced && item.requiresOwnerApproval) {
+            throw new SimCustodyError('REQUIRES_OWNER_APPROVAL')
           }
 
           const newState = applyTransition(item.custodyState, 'ASSIGN_TO_PROMOTER_DIRECT')
@@ -658,6 +676,20 @@ export class SimCustodyService {
       },
     })
     return venueItem
+  }
+
+  /**
+   * Whether the owner-approval gate is active for this org. Mirrors
+   * SimRegistrationService.isApprovalModeEnabled and the sale-time hard block in
+   * applyCustodyPrecheck: the approval feature + the distribution gate share one
+   * switch — `simCustodyEnforcementMode === 'ENFORCE'`.
+   */
+  private async isApprovalEnforced(organizationId: string): Promise<boolean> {
+    const org = await this.db.organization.findUnique({
+      where: { id: organizationId },
+      select: { simCustodyEnforcementMode: true },
+    })
+    return org?.simCustodyEnforcementMode === 'ENFORCE'
   }
 
   private async assertStaffBelongsToOrg(staffId: string, organizationId: string): Promise<void> {

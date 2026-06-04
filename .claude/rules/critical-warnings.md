@@ -115,11 +115,43 @@ password: z.string().min(1, 'La contraseña es requerida').optional()
 // Validate strength in service layer only for new accounts
 ```
 
-## 🔴 CRITICAL — Keep the Avoqado MCP in sync
+## 🔴 CRITICAL — Two MCPs: keep the CUSTOMER MCP in sync (do NOT confuse them)
 
-The Avoqado MCP (`avoqado-server/scripts/mcp/`) is a **first-class interface**: it exposes the platform's data and actions to AI agents
-(internal ops today, customer-facing tomorrow). It must never fall behind the platform.
+Avoqado has **two separate MCP servers**. Confusing them causes branch chaos:
 
-**Whenever you add or change a feature, Prisma model, service, endpoint, permission, or any capability the MCP should expose, you MUST add
-or update the matching MCP tool in `avoqado-server/scripts/mcp/` as part of the SAME change — never "later".** A capability that exists but
-isn't reachable through the MCP is unfinished. Treat the MCP like permissions: kept in lockstep, never an afterthought.
+- **Customer MCP** = `src/mcp/` — the customer-facing **product** (Streamable HTTP + OAuth, scoped by `getUserAccess()`), on **`develop`**.
+  **New feature tools go HERE**, in `src/mcp/tools/`, registered in `src/mcp/server.ts`.
+- **Admin MCP** = `scripts/mcp/` — an **internal** founder-ops tool (stdio), separate, only on `feat/admin-mcp` (unmerged).
+
+**This rule targets the CUSTOMER MCP (`src/mcp/`).** Whenever you add or change a feature, model, service, endpoint, permission, or any
+capability an operator should be able to read (later: act on), add/update the matching tool in `src/mcp/tools/` as part of the SAME change.
+A capability not reachable through the customer MCP is unfinished. **Do NOT** add product tools to the admin MCP, and **do NOT** merge
+`feat/admin-mcp` into develop just to add a tool.
+
+## 🔴 CRITICAL — Audit every meaningful mutation with ActivityLog
+
+Every **audit-worthy state change MUST write an `ActivityLog` row in the SAME change** — never "later". `ActivityLog` is the platform's
+audit trail (who did what, when) and the `/full-testing` flow verifies backend actions against it.
+
+**MUST log (mutations that matter):** create / update / delete of domain entities (Venue, Order, Payment, Staff, VenueFeature, Terminal,
+MerchantAccount…), money ops (payments, refunds, settlements, payouts), access / permission changes, **superadmin overrides** (plan
+activate/deactivate, grant-trial, adjust-end-date, feature enable/disable), and status changes (KYC, subscription, suspension).
+
+**Do NOT log:** reads / list queries, internal computations, no-ops, or high-frequency events (TPV heartbeats, barcode scans, webhook
+retries, request logging) — that bloats the table and adds noise. Audit-worthy mutations only.
+
+```typescript
+await prisma.activityLog.create({
+  data: {
+    action: 'SUPERADMIN_PLAN_DEACTIVATED', // SCREAMING_SNAKE verb describing the action
+    entity: 'VenueFeature', // the model touched
+    entityId: venueFeature.id,
+    staffId: (req as any).authContext.userId, // WHO did it (authContext, NOT req.user)
+    venueId, // tenant scope
+    data: { featureCode, reason }, // jsonb: relevant context/params
+  },
+})
+```
+
+A mutating endpoint without an `ActivityLog` write is **unfinished** — treat it like permissions and the MCP: kept in lockstep, never an
+afterthought. (Backend-only: client repos call the API; `avoqado-server` is what audits.)
