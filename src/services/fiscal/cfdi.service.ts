@@ -45,7 +45,7 @@ export interface IssueCfdiResult {
 }
 
 export async function issueCfdiForOrder(
-  params: { orderId: string; receptor: IssueReceptor; sandbox: boolean; flow?: 'STAFF_B' | 'AUTOFACTURA_A' },
+  params: { orderId: string; receptor: IssueReceptor; sandbox: boolean; flow?: 'STAFF_B' | 'AUTOFACTURA_A'; expectedVenueId?: string },
   deps: IssueCfdiDeps = defaultDeps,
 ): Promise<IssueCfdiResult> {
   const idempotencyKey = `cfdi-order-${params.orderId}`
@@ -57,6 +57,10 @@ export async function issueCfdiForOrder(
   // 2. Load
   const bundle = await deps.loadOrderForCfdi(params.orderId)
   if (!bundle) throw new Error(`Order ${params.orderId} not found or has no fiscal emisor configured`)
+  // Tenant isolation (critical-warnings rule): the order MUST belong to the caller's venue.
+  if (params.expectedVenueId && bundle.venueId !== params.expectedVenueId) {
+    throw new Error(`Order ${params.orderId} not found`) // → 404, no cross-venue leak
+  }
 
   // 3. Assemble + build
   const saleInput = assembleSaleInput(bundle.order, {

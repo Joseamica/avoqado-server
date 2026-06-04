@@ -59,6 +59,7 @@ import * as venueFeatureController from '../controllers/dashboard/venueFeature.d
 import * as saleVerificationController from '../controllers/dashboard/sale-verification.dashboard.controller'
 import * as cryptoConfigController from '../controllers/dashboard/cryptoConfig.dashboard.controller'
 import * as tpvMessageController from '../controllers/dashboard/tpv-message.dashboard.controller'
+import { issueCfdiForOrderController } from '../controllers/dashboard/cfdi.dashboard.controller'
 import {
   assistantActionConfirmSchema,
   assistantActionPreviewSchema,
@@ -218,6 +219,7 @@ import {
   terminalResultSchema,
 } from '../schemas/dashboard/tpv-command.schema'
 import { createTerminalOrderSchema } from '../schemas/dashboard/terminalOrder.schema'
+import { issueCfdiSchema } from '../schemas/dashboard/cfdi.schema'
 import inventoryRoutes from './dashboard/inventory.routes'
 import superadminRoutes from './dashboard/superadmin.routes'
 import venuePaymentConfigRoutes from './dashboard/venuePaymentConfig.routes'
@@ -2985,6 +2987,17 @@ router.post(
   checkPermission('orders:update'), // Same permission as updating orders
   validateRequest(SettleOrderSchema),
   orderController.settleOrder,
+)
+
+// ---- Facturación CFDI 4.0 — Flow B: staff issues a CFDI for a closed bill ----
+// Middleware order per permissions-policy: validate body BEFORE feature/perm checks.
+router.post(
+  '/venues/:venueId/orders/:orderId/cfdi',
+  authenticateTokenMiddleware,
+  validateRequest(issueCfdiSchema),
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:issue'),
+  issueCfdiForOrderController,
 )
 
 // Manual Payment routes (ADMIN+) — MUST be registered BEFORE /venues/:venueId/payments/:paymentId
