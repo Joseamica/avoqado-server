@@ -138,7 +138,7 @@
     "satori": "^0.26.0",
     "satori-html": "^0.3.2",
     "socket.io": "^4.8.1",
-    "stripe": "^19.1.0",
+    "stripe": "^22.2.0",
     "svix": "^1.84.1",
     "swagger-jsdoc": "^6.2.8",
     "swagger-ui-express": "^5.0.1",
