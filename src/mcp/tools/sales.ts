@@ -39,7 +39,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
   server.tool(
     'daily_sales',
-    "Sales for a day across your venues (or one venue). Returns completed-payment count, gross total, and a breakdown by payment method and type (REGULAR/FAST). Defaults to today; pass venueId to focus one venue (must be in your scope).",
+    'Sales for a day across your venues (or one venue). Returns completed-payment count, gross total, and a breakdown by payment method and type (REGULAR/FAST). Defaults to today; pass venueId to focus one venue (must be in your scope).',
     {
       venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues'),
       date: z.string().optional().describe('ISO date YYYY-MM-DD; defaults to today (Mexico City)'),

@@ -428,6 +428,13 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'referral:override-existing-customer': ['referral:read', 'referral:override-existing-customer'],
   'referral:void-manual': ['referral:read', 'referral:void-manual'],
   'referral:export-csv': ['referral:read', 'referral:export-csv', 'customers:read'],
+
+  // ===========================
+  // FACTURACIÓN CFDI 4.0 (Pro-tier paid feature — §15/§18)
+  // configure and issue both imply view so the holder can read what they manage
+  // ===========================
+  'cfdi:configure': ['cfdi:configure', 'cfdi:view'],
+  'cfdi:issue': ['cfdi:issue', 'cfdi:view'],
 }
 
 /**
@@ -709,6 +716,10 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // NO: tpv-reports (ADMIN+ only - except pay-later-aging)
     // NO: tpv-factory-reset (OWNER only)
     // NO: commissions:create/update/delete/approve/payout (ADMIN+ only)
+    // NO: cfdi:configure (OWNER/ADMIN only)
+    // Facturación CFDI 4.0 (Pro-tier) — MANAGER can issue and view invoices
+    'cfdi:issue',
+    'cfdi:view',
   ],
 
   /**
@@ -800,6 +811,10 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // NO: venue-crypto:manage (SUPERADMIN only)
     // NO: tpv-factory-reset:execute (OWNER only - destructive)
     // NO: commissions:payout (OWNER only - financial)
+    // Facturación CFDI 4.0 (Pro-tier) — ADMIN has full CFDI access
+    'cfdi:configure',
+    'cfdi:issue',
+    'cfdi:view',
   ],
 
   /**
@@ -900,6 +915,10 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // B4Bit Crypto Payments — venue owners need to configure crypto
     // settings for their own venues. SUPERADMIN still has full access via *:*.
     'venue-crypto:manage',
+    // Facturación CFDI 4.0 (Pro-tier) — OWNER has full CFDI access
+    'cfdi:configure',
+    'cfdi:issue',
+    'cfdi:view',
   ],
 
   /**
@@ -1323,6 +1342,11 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   // - disconnect_staff: force-disconnect another staff member's personal calendar (audit, OWNER/ADMIN)
   // - view_status: view calendar connection status for the venue (OWNER/ADMIN/MANAGER)
   calendar: ['calendar:manage_venue', 'calendar:connect_self', 'calendar:disconnect_staff', 'calendar:view_status'],
+  // Facturación CFDI 4.0 (Pro-tier paid feature — §15/§18 of the facturación spec)
+  // - configure: set up SAT credentials, RFC, CFDI series, PAC settings (OWNER/ADMIN only)
+  // - issue:     stamp & send a CFDI to the SAT (OWNER/ADMIN/MANAGER)
+  // - view:      read-only access to issued invoices and fiscal config (OWNER/ADMIN/MANAGER)
+  cfdi: ['cfdi:configure', 'cfdi:issue', 'cfdi:view'],
 }
 
 /**

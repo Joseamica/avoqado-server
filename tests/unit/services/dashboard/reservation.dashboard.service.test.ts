@@ -12,6 +12,7 @@ import {
   updateReservation,
   rescheduleReservation,
   getReservationsCalendar,
+  handleNoShowDepositForfeit,
 } from '@/services/dashboard/reservation.dashboard.service'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
@@ -1162,5 +1163,44 @@ describe('Reservation Dashboard Service', () => {
         await expect(cancelReservation(VENUE_ID, 'res-1', STAFF_ID)).rejects.toThrow(BadRequestError)
       })
     }
+  })
+})
+
+describe('handleNoShowDepositForfeit (Escenario A — no-show keeps the deposit)', () => {
+  beforeEach(() => {
+    jest.resetAllMocks()
+  })
+
+  it('forfeits a PAID deposit when the venue has forfeitDeposit enabled', async () => {
+    prismaMock.reservation.findFirst.mockResolvedValue({ id: 'res-1', confirmationCode: 'RES-ABC', depositStatus: 'PAID' })
+    // getReservationSettings reads reservationSettings.findUnique; a row with
+    // forfeitDeposit:true maps to cancellation.forfeitDeposit = true.
+    prismaMock.reservationSettings.findUnique.mockResolvedValue({ venueId: VENUE_ID, forfeitDeposit: true } as any)
+
+    await handleNoShowDepositForfeit('res-1', VENUE_ID)
+
+    expect(prismaMock.reservation.update).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'res-1' }, data: { depositStatus: 'FORFEITED' } }),
+    )
+  })
+
+  it('does NOT touch the deposit when forfeitDeposit is off (no auto-refund on no-show)', async () => {
+    prismaMock.reservation.findFirst.mockResolvedValue({ id: 'res-1', confirmationCode: 'RES-ABC', depositStatus: 'PAID' })
+    // null settings → getReservationSettings returns defaults (forfeitDeposit:false).
+    prismaMock.reservationSettings.findUnique.mockResolvedValue(null as any)
+
+    await handleNoShowDepositForfeit('res-1', VENUE_ID)
+
+    expect(prismaMock.reservation.update).not.toHaveBeenCalled()
+  })
+
+  it('does nothing when there is no PAID deposit', async () => {
+    prismaMock.reservation.findFirst.mockResolvedValue({ id: 'res-1', confirmationCode: 'RES-ABC', depositStatus: null })
+
+    await handleNoShowDepositForfeit('res-1', VENUE_ID)
+
+    expect(prismaMock.reservation.update).not.toHaveBeenCalled()
+    // Should not even need to load settings when there's no paid deposit.
+    expect(prismaMock.reservationSettings.findUnique).not.toHaveBeenCalled()
   })
 })

@@ -816,6 +816,11 @@ export async function completeReservation(venueId: string, reservationId: string
 export async function markNoShow(venueId: string, reservationId: string, markedBy: string) {
   const updated = await transitionReservation(venueId, reservationId, 'NO_SHOW', markedBy)
 
+  // Deposit forfeit (Escenario A) — when the venue keeps deposits on no-show
+  // (`forfeitDeposit`), keep the already-captured deposit instead of leaving it
+  // in limbo. Best-effort; never blocks the NO_SHOW transition.
+  await handleNoShowDepositForfeit(updated.id, venueId)
+
   // Optional: refund credits on no-show if the venue policy says so.
   try {
     const settings = await getReservationSettings(venueId)
@@ -1008,6 +1013,50 @@ async function handleReservationDepositCancellation(reservationId: string, venue
       },
     })
     logger.error(`❌ [RESERVATION DEPOSIT] Refund failed for ${reservation.confirmationCode}`, error)
+  }
+}
+
+/**
+ * No-show deposit handling (Escenario A — "no-show keeps the deposit").
+ *
+ * When a reservation is marked NO_SHOW and the venue opted into keeping the
+ * deposit (`forfeitDeposit`), the already-captured deposit is forfeited: we
+ * mark it FORFEITED and do NOT refund. No Stripe call is needed because the
+ * funds were captured at booking time (Checkout `mode: 'payment'`) — forfeit
+ * is simply "don't return the money".
+ *
+ * Gated strictly on `forfeitDeposit`. When the venue did NOT opt in, we leave
+ * the deposit untouched (today's behavior) — we never auto-refund on no-show,
+ * since a no-show is the customer's fault, not a cancellation.
+ *
+ * Note: partial no-show fees (`noShowFeePercent` < 100) would require a partial
+ * Stripe refund of the remainder, which the current refund path doesn't support
+ * (it refunds in full). That stays a separate, deliberate payments feature; this
+ * handles the binary "keep the whole deposit" case only.
+ *
+ * Best-effort: never throws — a forfeit-bookkeeping failure must not block the
+ * NO_SHOW transition itself.
+ */
+export async function handleNoShowDepositForfeit(reservationId: string, venueId: string): Promise<void> {
+  try {
+    const reservation = await prisma.reservation.findFirst({
+      where: { id: reservationId, venueId },
+      select: { id: true, confirmationCode: true, depositStatus: true },
+    })
+    // Only a paid deposit can be forfeited. Anything else (no deposit, pending,
+    // already refunded/forfeited) → nothing to do.
+    if (!reservation || reservation.depositStatus !== 'PAID') return
+
+    const settings = await getReservationSettings(venueId)
+    if (!settings.cancellation.forfeitDeposit) return
+
+    await prisma.reservation.update({
+      where: { id: reservation.id },
+      data: { depositStatus: 'FORFEITED' },
+    })
+    logger.info(`💰 [RESERVATION NO-SHOW] Forfeited deposit for ${reservation.confirmationCode}`)
+  } catch (error) {
+    logger.error(`❌ [RESERVATION NO-SHOW] Deposit forfeit failed for reservation ${reservationId}`, error)
   }
 }
 
