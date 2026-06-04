@@ -11,9 +11,11 @@ import {
   cancelReservation,
   updateReservation,
   rescheduleReservation,
+  rescheduleAppointmentReservation,
   getReservationsCalendar,
   handleNoShowDepositForfeit,
 } from '@/services/dashboard/reservation.dashboard.service'
+import { countAppointmentOccupancy } from '@/services/dashboard/reservationAvailability.service'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import { Prisma } from '@prisma/client'
@@ -1202,5 +1204,183 @@ describe('handleNoShowDepositForfeit (Escenario A — no-show keeps the deposit)
     expect(prismaMock.reservation.update).not.toHaveBeenCalled()
     // Should not even need to load settings when there's no paid deposit.
     expect(prismaMock.reservationSettings.findUnique).not.toHaveBeenCalled()
+  })
+})
+
+// ==========================================
+// RESCHEDULE APPOINTMENT RESERVATION (public-facing + ops/MCP)
+// ==========================================
+
+describe('rescheduleAppointmentReservation', () => {
+  const VENUE = 'venue-123'
+  const future = Date.now() + 24 * 3_600_000 // tomorrow — outside any cancel window
+  const oldStart = new Date(future)
+  const oldEnd = new Date(future + 60 * 60_000)
+  const newStart = new Date(future + 3 * 3_600_000)
+  const newEnd = new Date(newStart.getTime() + 60 * 60_000) // duration stays 60
+
+  function makeAppt(overrides: Record<string, any> = {}) {
+    return {
+      id: 'res-appt-1',
+      venueId: VENUE,
+      confirmationCode: 'RES-APPT1',
+      status: 'CONFIRMED',
+      classSessionId: null,
+      productId: null,
+      tableId: null,
+      assignedStaffId: null,
+      duration: 60,
+      partySize: 1,
+      startsAt: oldStart,
+      endsAt: oldEnd,
+      guestName: 'Ana',
+      guestPhone: null, // null phone + email → notifications skipped (keeps the test pure)
+      guestEmail: null,
+      customer: null,
+      product: null,
+      venue: { name: 'Amaena', timezone: 'America/Mexico_City' },
+      ...overrides,
+    }
+  }
+
+  beforeEach(() => {
+    jest.resetAllMocks()
+    // Mirror the working updateReservation env from the main suite's beforeEach.
+    prismaMock.$transaction.mockImplementation(async (arg: any) => (typeof arg === 'function' ? arg(prismaMock) : arg))
+    prismaMock.$queryRaw.mockResolvedValue([])
+    prismaMock.table.findFirst.mockResolvedValue({ id: 'table-1' })
+    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1' })
+    prismaMock.product.findFirst.mockResolvedValue({ id: 'prod-1', price: new Prisma.Decimal(100), eventCapacity: 20 })
+    prismaMock.reservation.updateMany.mockResolvedValue({ count: 1 } as any)
+    prismaMock.productModifierGroup.findMany.mockResolvedValue([])
+    prismaMock.externalBusyBlock.findMany.mockResolvedValue([])
+  })
+
+  it('rejects a class reservation (must use the class flow)', async () => {
+    prismaMock.reservation.findFirst.mockResolvedValue(makeAppt({ classSessionId: 'sess-1' }))
+    await expect(
+      rescheduleAppointmentReservation({
+        venueId: VENUE,
+        reservationId: 'res-appt-1',
+        newStartsAt: newStart,
+        holdId: 'h1',
+        rescheduledBy: 'CUSTOMER',
+      }),
+    ).rejects.toThrow(/solo para citas/i)
+  })
+
+  it('rejects a non-reschedulable status', async () => {
+    prismaMock.reservation.findFirst.mockResolvedValue(makeAppt({ status: 'COMPLETED' }))
+    await expect(
+      rescheduleAppointmentReservation({
+        venueId: VENUE,
+        reservationId: 'res-appt-1',
+        newStartsAt: newStart,
+        holdId: 'h1',
+        rescheduledBy: 'CUSTOMER',
+      }),
+    ).rejects.toThrow(/COMPLETED/)
+  })
+
+  it('409s when the hold is expired', async () => {
+    prismaMock.reservation.findFirst.mockResolvedValue(makeAppt())
+    prismaMock.slotHold.findFirst.mockResolvedValue({
+      id: 'h1',
+      venueId: VENUE,
+      startsAt: newStart,
+      endsAt: newEnd,
+      expiresAt: new Date(Date.now() - 1000),
+    })
+    await expect(
+      rescheduleAppointmentReservation({
+        venueId: VENUE,
+        reservationId: 'res-appt-1',
+        newStartsAt: newStart,
+        holdId: 'h1',
+        rescheduledBy: 'CUSTOMER',
+      }),
+    ).rejects.toThrow(/ya no está disponible/i)
+  })
+
+  it('400s when the hold window does not match the requested move', async () => {
+    prismaMock.reservation.findFirst.mockResolvedValue(makeAppt())
+    prismaMock.slotHold.findFirst.mockResolvedValue({
+      id: 'h1',
+      venueId: VENUE,
+      startsAt: newStart,
+      endsAt: new Date(newEnd.getTime() + 30 * 60_000), // wrong end
+      expiresAt: new Date(Date.now() + 60_000),
+    })
+    await expect(
+      rescheduleAppointmentReservation({
+        venueId: VENUE,
+        reservationId: 'res-appt-1',
+        newStartsAt: newStart,
+        holdId: 'h1',
+        rescheduledBy: 'CUSTOMER',
+      }),
+    ).rejects.toThrow(/no coincide/i)
+  })
+
+  it('moves the appointment, keeps duration, and consumes the hold (customer path)', async () => {
+    const existing = makeAppt()
+    const updated = makeAppt({ startsAt: newStart, endsAt: newEnd })
+    prismaMock.reservation.findFirst.mockResolvedValue(existing) // load + updateReservation internal load
+    prismaMock.slotHold.findFirst.mockResolvedValue({
+      id: 'h1',
+      venueId: VENUE,
+      startsAt: newStart,
+      endsAt: newEnd,
+      expiresAt: new Date(Date.now() + 60_000),
+    })
+    prismaMock.reservation.update.mockResolvedValue(updated)
+    prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(updated)
+    prismaMock.slotHold.deleteMany.mockResolvedValue({ count: 1 } as any)
+
+    const result = await rescheduleAppointmentReservation({
+      venueId: VENUE,
+      reservationId: 'res-appt-1',
+      newStartsAt: newStart,
+      holdId: 'h1',
+      rescheduledBy: 'CUSTOMER',
+    })
+
+    expect(prismaMock.reservation.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ startsAt: newStart, endsAt: newEnd, duration: 60 }) }),
+    )
+    expect(prismaMock.slotHold.deleteMany).toHaveBeenCalledWith({ where: { id: 'h1', venueId: VENUE } })
+    expect(result.confirmationCode).toBe('RES-APPT1')
+  })
+})
+
+describe('countAppointmentOccupancy — reschedule self-exclusion', () => {
+  beforeEach(() => {
+    jest.resetAllMocks()
+  })
+
+  it('excludes the moving reservation from the active-reservation count', async () => {
+    prismaMock.reservation.count.mockResolvedValue(0)
+    prismaMock.slotHold.count.mockResolvedValue(0)
+    await countAppointmentOccupancy(prismaMock, {
+      venueId: 'v1',
+      startsAt: new Date(),
+      endsAt: new Date(Date.now() + 60_000),
+      excludeReservationId: 'res-self',
+    })
+    expect(prismaMock.reservation.count).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ id: { not: 'res-self' } }) }),
+    )
+  })
+
+  it('adds no id filter when no exclusion is passed (booking path unchanged)', async () => {
+    prismaMock.reservation.count.mockResolvedValue(0)
+    prismaMock.slotHold.count.mockResolvedValue(0)
+    await countAppointmentOccupancy(prismaMock, {
+      venueId: 'v1',
+      startsAt: new Date(),
+      endsAt: new Date(Date.now() + 60_000),
+    })
+    const where = prismaMock.reservation.count.mock.calls[0][0].where
+    expect(where.id).toBeUndefined()
   })
 })

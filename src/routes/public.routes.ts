@@ -32,6 +32,8 @@ import {
   getAvailabilityQuerySchema,
   cancelBodySchema,
   publicRescheduleBodySchema,
+  rescheduleAvailabilityQuerySchema,
+  rescheduleHoldBodySchema,
 } from '../schemas/dashboard/reservation.schema'
 import {
   publicPacksParamsSchema,
@@ -132,6 +134,21 @@ router.post(
   reservationPublicController.cancelReservation,
 )
 
+// Appointment reschedule sub-flow (scoped by cancelSecret; self-exclusion server-side).
+// Registered before the bare /reschedule POST is irrelevant (distinct path segments),
+// but kept together for readability.
+router.get(
+  '/venues/:venueSlug/reservations/:cancelSecret/reschedule/availability',
+  readLimit,
+  validateRequest(z.object({ params: publicReservationParamsSchema, query: rescheduleAvailabilityQuerySchema })),
+  reservationPublicController.getRescheduleAvailability,
+)
+router.post(
+  '/venues/:venueSlug/reservations/:cancelSecret/reschedule/hold',
+  writeLimit,
+  validateRequest(z.object({ params: publicReservationParamsSchema, body: rescheduleHoldBodySchema })),
+  reservationPublicController.createRescheduleHold,
+)
 router.post(
   '/venues/:venueSlug/reservations/:cancelSecret/reschedule',
   cancelLimit, // same rate envelope — destructive-ish public mutation

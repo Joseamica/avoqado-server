@@ -1300,13 +1300,14 @@ export async function getReservation(req: Request, res: Response, next: NextFunc
         }
       })(),
       // Reschedule eligibility — same window as cancel, plus the venue toggle.
-      // Only meaningful for class reservations (`classSessionId` present).
+      // Works for BOTH classes (swap session) and appointments (pick new slot).
+      // `kind` tells the widget which mini-flow to run.
       reschedule: {
         allowed:
           settings.cancellation.allowCustomerReschedule &&
-          !!(reservation as any).classSessionId &&
           (reservation.status === 'CONFIRMED' || reservation.status === 'PENDING') &&
           isWithinWindow(reservation.startsAt, settings.cancellation.minHoursBeforeStart),
+        kind: (reservation as any).classSessionId ? 'class' : 'appointment',
         minHoursBeforeStart: settings.cancellation.minHoursBeforeStart,
         productId: (reservation as any).productId ?? null,
       },
@@ -1366,56 +1367,226 @@ export function computeCancelDecision(args: {
 }
 
 /**
+ * Shared reschedule guard for the 3 cancelSecret-scoped reschedule handlers.
+ * Mirrors the cancellation window + venue toggle + status gate. Throws on any
+ * failure so callers stay flat.
+ */
+function assertCanReschedule(
+  reservation: { status: string; startsAt: Date },
+  settings: Awaited<ReturnType<typeof getReservationSettings>>,
+) {
+  if (!settings.cancellation.allowCustomerReschedule) {
+    throw new BadRequestError('Este negocio no permite cambiar horarios en línea. Contacta al negocio directamente.')
+  }
+  if (reservation.status !== 'CONFIRMED' && reservation.status !== 'PENDING') {
+    throw new BadRequestError('Esta reservación ya no se puede cambiar.')
+  }
+  if (settings.cancellation.minHoursBeforeStart != null) {
+    const hoursUntilStart = (reservation.startsAt.getTime() - Date.now()) / 3_600_000
+    if (hoursUntilStart < settings.cancellation.minHoursBeforeStart) {
+      throw new BadRequestError(
+        `No puedes cambiar el horario con menos de ${settings.cancellation.minHoursBeforeStart} horas de anticipación.`,
+      )
+    }
+  }
+}
+
+/**
+ * Assert the requested appointment slot is genuinely offerable (not just "not in
+ * the past"). Single source of truth = the booking availability engine, plus
+ * explicit window checks `getAvailableSlots` does NOT do (minNotice / maxAdvance /
+ * past). `excludeReservationId` keeps the moving reservation from blocking its
+ * own target slot. Throws 409/400 on any failure.
+ */
+async function assertSlotOfferable(args: {
+  venueId: string
+  productId: string | null
+  startsAt: Date
+  endsAt: Date
+  settings: Awaited<ReturnType<typeof getReservationSettings>>
+  timezone: string
+  excludeReservationId: string
+}): Promise<void> {
+  const now = Date.now()
+  if (args.startsAt.getTime() < now) {
+    throw new ConflictError('Ese horario ya pasó, elige otro.')
+  }
+  const minNoticeMin = args.settings.scheduling?.minNoticeMin ?? 0
+  if (minNoticeMin > 0 && args.startsAt.getTime() < now + minNoticeMin * 60_000) {
+    throw new BadRequestError(`Debes reservar con al menos ${minNoticeMin} minutos de anticipación.`)
+  }
+  const maxAdvanceDays = args.settings.scheduling?.maxAdvanceDays ?? 0
+  if (maxAdvanceDays > 0 && args.startsAt.getTime() > now + maxAdvanceDays * 24 * 60 * 60_000) {
+    throw new BadRequestError(`No puedes reservar con más de ${maxAdvanceDays} días de anticipación.`)
+  }
+  // Operating hours + grid alignment + pacing + capacity + staff/table + external
+  // blocks — all enforced by membership in the offered set (excluding self).
+  const durationMin = Math.round((args.endsAt.getTime() - args.startsAt.getTime()) / 60_000)
+  const slots = await availabilityService.getAvailableSlots(
+    args.venueId,
+    args.startsAt,
+    { duration: durationMin, productId: args.productId ?? undefined, excludeReservationId: args.excludeReservationId },
+    args.settings,
+    args.timezone,
+  )
+  const offered = slots.some(s => new Date(s.startsAt).getTime() === args.startsAt.getTime())
+  if (!offered) {
+    throw new ConflictError('Ese horario ya no está disponible, elige otro.')
+  }
+}
+
+/**
+ * GET /public/venues/:venueSlug/reservations/:cancelSecret/reschedule/availability?date=YYYY-MM-DD
+ *
+ * Appointment reschedule: offered slots of the SAME service for the given date,
+ * excluding the reservation being moved (so adjacent/overlapping slots show).
+ */
+export async function getRescheduleAvailability(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueSlug, cancelSecret } = req.params
+    const { date } = req.query as { date?: string }
+    if (!date) throw new BadRequestError('date es requerido (YYYY-MM-DD)')
+
+    const reservation = await reservationService.getReservationByCancelSecret(venueSlug, cancelSecret)
+    const settings = await getReservationSettings(reservation.venueId)
+    assertCanReschedule(reservation, settings)
+    if ((reservation as any).classSessionId) {
+      throw new BadRequestError('Para clases, usa la disponibilidad de sesiones.')
+    }
+
+    const tz = reservation.venue?.timezone || 'America/Mexico_City'
+    const slots = await availabilityService.getAvailableSlots(
+      reservation.venueId,
+      date,
+      { duration: reservation.duration, productId: reservation.productId ?? undefined, excludeReservationId: reservation.id },
+      settings,
+      tz,
+    )
+    res.json({ date, slots: slots.map(s => ({ startsAt: s.startsAt, endsAt: s.endsAt, available: true })) })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * POST /public/venues/:venueSlug/reservations/:cancelSecret/reschedule/hold
+ *
+ * Body: { startsAt, endsAt } — reserve the target slot for ~10 min before the
+ * customer confirms. Re-validates the slot (§5.8) excluding self, then holds it.
+ */
+export async function createRescheduleHold(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueSlug, cancelSecret } = req.params
+    const reservation = await reservationService.getReservationByCancelSecret(venueSlug, cancelSecret)
+    const settings = await getReservationSettings(reservation.venueId)
+    assertCanReschedule(reservation, settings)
+    if ((reservation as any).classSessionId) {
+      throw new BadRequestError('Las clases se reagendan eligiendo otra sesión; no requieren reservar el horario.')
+    }
+
+    const body = req.body as { startsAt: string; endsAt: string }
+    const startsAt = new Date(body.startsAt)
+    const endsAt = new Date(body.endsAt)
+    if (Number.isNaN(startsAt.getTime()) || Number.isNaN(endsAt.getTime())) {
+      throw new BadRequestError('Fechas inválidas')
+    }
+    if (endsAt <= startsAt) {
+      throw new BadRequestError('endsAt debe ser posterior a startsAt')
+    }
+    // Duration is fixed (same service + same extras) — reject a tampered window.
+    const reqDuration = Math.round((endsAt.getTime() - startsAt.getTime()) / 60_000)
+    if (Math.abs(reqDuration - reservation.duration) > 1) {
+      throw new BadRequestError('La duración del horario no coincide con el servicio.')
+    }
+
+    const tz = reservation.venue?.timezone || 'America/Mexico_City'
+    await assertSlotOfferable({
+      venueId: reservation.venueId,
+      productId: reservation.productId,
+      startsAt,
+      endsAt,
+      settings,
+      timezone: tz,
+      excludeReservationId: reservation.id,
+    })
+
+    void pruneExpiredHolds()
+    const pacingMax = effectiveAppointmentPacing(settings.scheduling?.pacingMaxPerSlot)
+    const hold = await holdAppointmentSlot({
+      venueId: reservation.venueId,
+      startsAt,
+      endsAt,
+      productIds: reservation.productId ? [reservation.productId] : [],
+      partySize: reservation.partySize,
+      fingerprint: null,
+      pacingMax,
+      excludeReservationId: reservation.id,
+    })
+
+    res.status(201).json({ holdId: hold.id, expiresAt: hold.expiresAt, ttlSeconds: Math.floor(SLOT_HOLD_TTL_MS / 1000) })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
  * POST /public/venues/:venueSlug/reservations/:cancelSecret/reschedule
  *
- * Body: { classSessionId: string, spotIds?: string[] }
+ * Branches on reservation kind:
+ *   - class (`classSessionId` present): same-product session swap (existing).
+ *   - appointment: move to `{ startsAt, holdId }` of the same service (new).
  *
- * Same-product swap of a class reservation. Mirrors the venue's cancellation window
- * for the time check. Credit transactions are NOT touched (same product = same N
- * credits stay attached). For class swap to a different product, the customer must
- * cancel and re-book.
+ * The cancellation window + venue toggle + status gate apply to both via
+ * `assertCanReschedule`. Credit transactions / deposits are untouched.
  */
 export async function rescheduleReservation(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueSlug, cancelSecret } = req.params
-    const { classSessionId, spotIds } = req.body as { classSessionId: string; spotIds?: string[] }
-
-    if (!classSessionId) {
-      throw new BadRequestError('classSessionId es requerido')
-    }
-
     const reservation = await reservationService.getReservationByCancelSecret(venueSlug, cancelSecret)
     const settings = await getReservationSettings(reservation.venueId)
+    assertCanReschedule(reservation, settings)
 
-    if (!settings.cancellation.allowCustomerReschedule) {
-      throw new BadRequestError('Este negocio no permite cambiar horarios en línea. Contacta al negocio directamente.')
-    }
-    if (settings.cancellation.minHoursBeforeStart != null) {
-      const hoursUntilStart = (reservation.startsAt.getTime() - Date.now()) / 3_600_000
-      if (hoursUntilStart < settings.cancellation.minHoursBeforeStart) {
-        throw new BadRequestError(
-          `No puedes cambiar el horario con menos de ${settings.cancellation.minHoursBeforeStart} horas de anticipacion.`,
-        )
+    // ── Class reschedule (existing behavior) ──────────────────────────────
+    if ((reservation as any).classSessionId) {
+      const { classSessionId, spotIds } = req.body as { classSessionId?: string; spotIds?: string[] }
+      if (!classSessionId) {
+        throw new BadRequestError('classSessionId es requerido')
       }
+      const updated = await reservationService.rescheduleClassReservation({
+        venueId: reservation.venueId,
+        reservationId: reservation.id,
+        newClassSessionId: classSessionId,
+        newSpotIds: Array.isArray(spotIds) ? spotIds : undefined,
+        rescheduledBy: 'CUSTOMER',
+        reason: req.body?.reason,
+      })
+      return res.json({
+        confirmationCode: updated.confirmationCode,
+        status: updated.status,
+        startsAt: updated.startsAt,
+        endsAt: updated.endsAt,
+        partySize: updated.partySize,
+        spotIds: updated.spotIds,
+      })
     }
 
-    const updated = await reservationService.rescheduleClassReservation({
+    // ── Appointment reschedule (new) ──────────────────────────────────────
+    const { startsAt: startsAtRaw, holdId } = req.body as { startsAt?: string; holdId?: string }
+    if (!startsAtRaw) {
+      throw new BadRequestError('startsAt es requerido')
+    }
+    const newStartsAt = new Date(startsAtRaw)
+    if (Number.isNaN(newStartsAt.getTime())) {
+      throw new BadRequestError('startsAt inválido')
+    }
+    const updated = await reservationService.rescheduleAppointmentReservation({
       venueId: reservation.venueId,
       reservationId: reservation.id,
-      newClassSessionId: classSessionId,
-      newSpotIds: Array.isArray(spotIds) ? spotIds : undefined,
+      newStartsAt,
+      holdId,
       rescheduledBy: 'CUSTOMER',
-      reason: req.body?.reason,
     })
-
-    res.json({
-      confirmationCode: updated.confirmationCode,
-      status: updated.status,
-      startsAt: updated.startsAt,
-      endsAt: updated.endsAt,
-      partySize: updated.partySize,
-      spotIds: updated.spotIds,
-    })
+    return res.json(updated)
   } catch (error) {
     next(error)
   }
@@ -1898,6 +2069,64 @@ async function pruneExpiredHolds(): Promise<void> {
 }
 
 /**
+ * Create an APPOINTMENTS_SERVICE SlotHold under the per-venue advisory lock with
+ * a pacing + external-calendar guard. Shared by createHold (booking) and
+ * createRescheduleHold (reschedule). `excludeReservationId` lets reschedule skip
+ * counting the reservation being moved against its own target slot.
+ */
+async function holdAppointmentSlot(args: {
+  venueId: string
+  startsAt: Date
+  endsAt: Date
+  productIds: string[]
+  partySize: number
+  fingerprint: string | null
+  pacingMax: number
+  excludeReservationId?: string
+}): Promise<{ id: string; expiresAt: Date }> {
+  const expiresAt = new Date(Date.now() + SLOT_HOLD_TTL_MS)
+  return prisma.$transaction(async tx => {
+    const lockKey = `apt-hold:${args.venueId}`
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey})::bigint)`
+
+    // External calendar busy-block check — reject so the customer never sees a
+    // countdown for a slot the venue already blocked via Google Calendar.
+    const externalBlock = await checkExternalBusyBlock(tx, {
+      venueId: args.venueId,
+      staffId: null,
+      startsAt: args.startsAt,
+      endsAt: args.endsAt,
+    })
+    if (externalBlock) {
+      throw new ConflictError('Este horario fue bloqueado por un evento de calendario externo')
+    }
+
+    const { reservations, holds } = await countAppointmentOccupancy(tx, {
+      venueId: args.venueId,
+      startsAt: args.startsAt,
+      endsAt: args.endsAt,
+      excludeReservationId: args.excludeReservationId,
+    })
+    if (reservations + holds >= args.pacingMax) {
+      throw new ConflictError('Este horario ya no está disponible. Por favor elige otro horario.')
+    }
+    return tx.slotHold.create({
+      data: {
+        venueId: args.venueId,
+        startsAt: args.startsAt,
+        endsAt: args.endsAt,
+        productIds: args.productIds,
+        classSessionId: null,
+        partySize: Math.max(1, args.partySize),
+        expiresAt,
+        fingerprint: args.fingerprint,
+      },
+      select: { id: true, expiresAt: true },
+    })
+  })
+}
+
+/**
  * POST /public/venues/:venueSlug/reservations/hold
  *
  * Body: { startsAt, endsAt, productIds?, classSessionId?, partySize? }
@@ -1988,44 +2217,14 @@ export async function createHold(req: Request, res: Response, next: NextFunction
     let hold: { id: string; expiresAt: Date }
     if (isAppointmentHold) {
       const pacingMax = effectiveAppointmentPacing(settings.scheduling?.pacingMaxPerSlot)
-      hold = await prisma.$transaction(async tx => {
-        const lockKey = `apt-hold:${venue.id}`
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey})::bigint)`
-
-        // External calendar busy-block check — reject the hold so the customer
-        // never sees a "your slot is reserved" countdown for a slot the venue
-        // already blocked via Google Calendar.
-        const externalBlock = await checkExternalBusyBlock(tx, {
-          venueId: venue.id,
-          staffId: null,
-          startsAt,
-          endsAt,
-        })
-        if (externalBlock) {
-          throw new ConflictError('Este horario fue bloqueado por un evento de calendario externo')
-        }
-
-        const { reservations, holds } = await countAppointmentOccupancy(tx, {
-          venueId: venue.id,
-          startsAt,
-          endsAt,
-        })
-        if (reservations + holds >= pacingMax) {
-          throw new ConflictError('Este horario ya no está disponible. Por favor elige otro horario.')
-        }
-        return tx.slotHold.create({
-          data: {
-            venueId: venue.id,
-            startsAt,
-            endsAt,
-            productIds,
-            classSessionId: null,
-            partySize: Math.max(1, body.partySize ?? 1),
-            expiresAt,
-            fingerprint: body.fingerprint ?? null,
-          },
-          select: { id: true, expiresAt: true },
-        })
+      hold = await holdAppointmentSlot({
+        venueId: venue.id,
+        startsAt,
+        endsAt,
+        productIds,
+        partySize: body.partySize ?? 1,
+        fingerprint: body.fingerprint ?? null,
+        pacingMax,
       })
     } else {
       // Non-appointment holds (classes, generic) — wrap in a transaction so the

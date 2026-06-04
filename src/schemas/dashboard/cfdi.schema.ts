@@ -109,6 +109,23 @@ export const upsertMerchantConfigSchema = z.object({
   body: upsertMerchantConfigBodyShape,
 })
 
+// ── Emisor onboarding: CSD upload ─────────────────────────────────────────────
+
+/**
+ * Schema passed to validateRequest() for:
+ *   POST /venues/:venueId/fiscal/emisores/:emisorId/csd
+ *
+ * cer/key are base64-encoded files; password is the CSD private-key passphrase.
+ * Shape-only — the files are forwarded to facturapi and never persisted by us.
+ */
+export const uploadCsdSchema = z.object({
+  body: z.object({
+    cerBase64: z.string({ required_error: 'El archivo .cer en base64 es requerido' }).min(1, 'El archivo .cer no puede estar vacío'),
+    keyBase64: z.string({ required_error: 'El archivo .key en base64 es requerido' }).min(1, 'El archivo .key no puede estar vacío'),
+    password: z.string({ required_error: 'La contraseña del CSD es requerida' }).min(1, 'La contraseña del CSD no puede estar vacía'),
+  }),
+})
+
 // ==========================================
 // TYPE EXPORTS
 // ==========================================
@@ -117,3 +134,4 @@ export type IssueCfdiBody = z.infer<typeof issueCfdiSchema.shape.body>
 export type CancelCfdiBody = z.infer<typeof cancelCfdiSchema.shape.body>
 export type UpsertEmisorBody = z.infer<typeof upsertEmisorSchema.shape.body>
 export type UpsertMerchantConfigBody = z.infer<typeof upsertMerchantConfigSchema.shape.body>
+export type UploadCsdBody = z.infer<typeof uploadCsdSchema.shape.body>

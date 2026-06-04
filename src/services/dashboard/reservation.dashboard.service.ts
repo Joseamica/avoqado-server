@@ -5,6 +5,7 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { logAction } from './activity-log.service'
 import { getReservationSettings } from './reservationSettings.service'
+import { countAppointmentOccupancy, effectiveAppointmentPacing } from './reservationAvailability.service'
 import { sendReservationRescheduleWhatsApp } from '../whatsapp.service'
 import emailService from '../email.service'
 import { getProvider } from '../payments/provider-registry'
@@ -1376,6 +1377,148 @@ export async function rescheduleReservation(
   })
 
   return rescheduled
+}
+
+/**
+ * Move an APPOINTMENT reservation to a new date/time of the SAME service.
+ *
+ * Customer-facing self-service (magic link, no login) + ops/MCP. Mirrors
+ * `rescheduleClassReservation` but for appointment products (productId, no
+ * classSessionId). Duration is fixed (same service + same modifiers) so the new
+ * endsAt is derived from the existing `duration` — the caller never sets it.
+ *
+ * Pacing protection (two paths):
+ *   - Customer path (`holdId`): a SlotHold already reserved the target slot
+ *     (created via createRescheduleHold, pacing-checked excluding self). Validated here.
+ *   - Ops/MCP path (no `holdId`): re-check pacing inline, excluding self.
+ *
+ *        old slot                         new slot
+ *   ┌──────────────┐                 ┌──────────────┐
+ *   │ reservation  │   move (same    │ reservation  │   updateReservation does the
+ *   │ (productId)  │ ─ duration) ──▶ │ (productId)  │   serializable overlap check
+ *   └──────────────┘                 └──────────────┘   (excludes self) + GCal outbox
+ */
+export async function rescheduleAppointmentReservation(args: {
+  venueId: string
+  reservationId: string
+  newStartsAt: Date
+  holdId?: string
+  rescheduledBy: string // 'CUSTOMER' or actor id — normalized by logAction sentinels
+}) {
+  const { venueId, reservationId, newStartsAt, holdId, rescheduledBy } = args
+
+  const reservation = await prisma.reservation.findFirst({
+    where: { id: reservationId, venueId },
+    include: {
+      customer: { select: { firstName: true, lastName: true, phone: true, email: true } },
+      product: { select: { name: true } },
+      venue: { select: { name: true, timezone: true } },
+    },
+  })
+  if (!reservation) throw new NotFoundError('Reservacion no encontrada')
+  if (reservation.classSessionId) {
+    throw new BadRequestError('Esta función es solo para citas. Las clases se reagendan por sesión.')
+  }
+  if (reservation.status !== 'CONFIRMED' && reservation.status !== 'PENDING') {
+    throw new BadRequestError(`No puedes cambiar el horario de una reserva ${reservation.status}`)
+  }
+
+  // Same service + same extras → duration is fixed. Derive the new end.
+  const newEndsAt = new Date(newStartsAt.getTime() + reservation.duration * 60_000)
+
+  if (holdId) {
+    // Customer path: the hold reserved the slot. Validate it matches the move.
+    const hold = await prisma.slotHold.findFirst({ where: { id: holdId, venueId } })
+    if (!hold || hold.expiresAt.getTime() <= Date.now()) {
+      throw new ConflictError('Ese horario ya no está disponible, elige otro.')
+    }
+    if (hold.startsAt.getTime() !== newStartsAt.getTime() || hold.endsAt.getTime() !== newEndsAt.getTime()) {
+      throw new BadRequestError('El horario reservado no coincide con la solicitud.')
+    }
+  } else {
+    // Ops/MCP path: no hold reserved the slot, so re-check pacing (excl. self).
+    const settings = await getReservationSettings(venueId)
+    const pacingMax = effectiveAppointmentPacing(settings.scheduling?.pacingMaxPerSlot)
+    const { reservations, holds } = await countAppointmentOccupancy(prisma, {
+      venueId,
+      startsAt: newStartsAt,
+      endsAt: newEndsAt,
+      excludeReservationId: reservationId,
+    })
+    if (reservations + holds >= pacingMax) {
+      throw new ConflictError('Ese horario ya no está disponible, elige otro.')
+    }
+  }
+
+  const originalStartsAt = reservation.startsAt
+
+  // The actual move: serializable table/staff/capacity overlap check that
+  // excludes self (id <> reservationId) + Google Calendar UPDATE outbox op.
+  const updated = await updateReservation(
+    venueId,
+    reservationId,
+    { startsAt: newStartsAt, endsAt: newEndsAt, duration: reservation.duration },
+    rescheduledBy,
+  )
+
+  // Consume the hold now that the move committed (best-effort).
+  if (holdId) {
+    prisma.slotHold.deleteMany({ where: { id: holdId, venueId } }).catch(() => {})
+  }
+
+  // Notify the customer of the new time — WhatsApp + email, both best-effort.
+  const customerName =
+    [reservation.customer?.firstName, reservation.customer?.lastName].filter(Boolean).join(' ').trim() || updated.guestName || 'cliente'
+  const phone = reservation.customer?.phone || updated.guestPhone
+  const email = reservation.customer?.email || updated.guestEmail
+  const venueName = reservation.venue?.name || 'Avoqado'
+  const tz = reservation.venue?.timezone || 'America/Mexico_City'
+  const fmtDate = (d: Date) => new Intl.DateTimeFormat('es-MX', { day: 'numeric', month: 'long', year: 'numeric', timeZone: tz }).format(d)
+  const fmtTime = (d: Date) =>
+    new Intl.DateTimeFormat('es-MX', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: tz }).format(d)
+
+  if (phone) {
+    try {
+      await sendReservationRescheduleWhatsApp(phone, {
+        customerName,
+        venueName,
+        date: fmtDate(newStartsAt),
+        time: fmtTime(newStartsAt),
+      })
+    } catch (err) {
+      logger.warn(`[RESERVATION] WhatsApp reschedule failed for ${updated.confirmationCode}: ${(err as Error).message}`)
+    }
+  }
+  if (email) {
+    try {
+      await emailService.sendReservationRescheduledEmail(email, {
+        customerName,
+        venueName,
+        serviceName: reservation.product?.name,
+        oldDateTime: `${fmtDate(originalStartsAt)}, ${fmtTime(originalStartsAt)}`,
+        newDateTime: `${fmtDate(newStartsAt)}, ${fmtTime(newStartsAt)}`,
+        confirmationCode: updated.confirmationCode,
+      })
+    } catch (err) {
+      logger.warn(`[RESERVATION] Email reschedule failed for ${updated.confirmationCode}: ${(err as Error).message}`)
+    }
+  }
+
+  logAction({
+    staffId: rescheduledBy,
+    venueId,
+    action: 'RESERVATION_RESCHEDULED',
+    entity: 'Reservation',
+    entityId: updated.id,
+    data: { startsAt: newStartsAt, endsAt: newEndsAt, confirmationCode: updated.confirmationCode, by: rescheduledBy },
+  })
+
+  return {
+    confirmationCode: updated.confirmationCode,
+    status: updated.status,
+    startsAt: updated.startsAt,
+    endsAt: updated.endsAt,
+  }
 }
 
 // ---- Class Reservation Reschedule (public-facing) ----

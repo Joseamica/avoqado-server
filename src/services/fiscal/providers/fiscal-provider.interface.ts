@@ -12,6 +12,13 @@ export interface CreateOrgResult {
   testKey: string // per-org sk_test_
 }
 
+export interface UpdateOrgLegalParams {
+  providerOrgId: string
+  legalName: string
+  taxSystem: string // c_RegimenFiscal
+  zip: string // lugar de expedición
+}
+
 export interface UploadCsdParams {
   providerOrgId: string
   cerBase64: string
@@ -91,6 +98,7 @@ export interface CancelInvoiceResult {
 export interface FiscalProvider {
   readonly name: string
   createOrganization(params: CreateOrgParams): Promise<CreateOrgResult>
+  updateOrgLegal(params: UpdateOrgLegalParams): Promise<void>
   uploadCsd(params: UploadCsdParams): Promise<UploadCsdResult>
   validateReceptor(params: ReceptorInput): Promise<ReceptorValidationResult>
   createInvoice(params: CreateInvoiceParams): Promise<StampedInvoice>

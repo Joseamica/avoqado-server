@@ -5,6 +5,7 @@ const mockOrgCreate = jest.fn()
 const mockOrgRenewLiveApiKey = jest.fn()
 const mockOrgGetTestApiKey = jest.fn()
 const mockOrgUploadCertificate = jest.fn()
+const mockOrgUpdateLegal = jest.fn()
 const mockInvoicesDownloadXml = jest.fn()
 const mockInvoicesDownloadPdf = jest.fn()
 
@@ -22,6 +23,7 @@ jest.mock('facturapi', () => {
       renewLiveApiKey: mockOrgRenewLiveApiKey,
       getTestApiKey: mockOrgGetTestApiKey,
       uploadCertificate: mockOrgUploadCertificate,
+      updateLegal: mockOrgUpdateLegal,
     },
   }))
 })
@@ -96,6 +98,17 @@ describe('FacturapiProvider', () => {
   })
 
   // REGRESSION / edge
+  it('updateOrgLegal calls organizations.updateLegal with the mapped body', async () => {
+    mockOrgUpdateLegal.mockResolvedValue({ id: 'org1' })
+    const provider = new FacturapiProvider('sk_test_x')
+    await provider.updateOrgLegal({ providerOrgId: 'org1', legalName: 'Empresa SA', taxSystem: '601', zip: '64000' })
+    expect(mockOrgUpdateLegal).toHaveBeenCalledWith('org1', {
+      legal_name: 'Empresa SA',
+      tax_system: '601',
+      address: { zip: '64000' },
+    })
+  })
+
   it('throws a clear error when the SDK rejects (PAC/SAT error)', async () => {
     mockCreate.mockRejectedValue(new Error('TaxObjectError: 02 required'))
     const provider = new FacturapiProvider('sk_test_x')

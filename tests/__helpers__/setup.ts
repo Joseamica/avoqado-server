@@ -191,6 +191,8 @@ const prismaMock: any = {
   calendarSyncOutbox: createMockModel(),
   reservationGoogleEventMapping: createMockModel(),
   reservationSettings: createMockModel(),
+  // Slot holds (booking + reschedule countdown)
+  slotHold: createMockModel(),
   // Venue chat (WhatsApp relay) — venue-chat v1
   venueWhatsappActivation: createMockModel(),
   whatsappContactWindow: createMockModel(),

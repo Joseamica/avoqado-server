@@ -15,6 +15,7 @@ import { env } from '@/config/env'
 import logger from '@/config/logger'
 import { issueCfdiForOrder, cancelCfdi, getCfdiStatus } from '@/services/fiscal/cfdi.service'
 import { upsertEmisor, upsertMerchantFiscalConfig, getFiscalConfig } from '@/services/fiscal/fiscalConfig.service'
+import { provisionEmisor, uploadEmisorCsd } from '@/services/fiscal/fiscalOnboarding.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 
 /**
@@ -305,5 +306,102 @@ export async function upsertMerchantFiscalConfigController(req: Request, res: Re
     }
 
     res.status(500).json({ error: 'Error interno al guardar la configuración de facturación' })
+  }
+}
+
+// ─── Emisor Onboarding controllers ────────────────────────────────────────────
+
+/**
+ * POST /api/v1/dashboard/venues/:venueId/fiscal/emisores/:emisorId/provision
+ *
+ * Provisions the FiscalEmisor in facturapi: createOrganization → updateOrgLegal
+ * → stores providerOrgId + encrypted live key in our DB.
+ * Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:configure').
+ * No body required.
+ */
+export async function provisionEmisorController(req: Request, res: Response): Promise<void> {
+  const { emisorId } = req.params
+  // Tenant isolation: always use authContext.venueId — never trust the path :venueId.
+  const { venueId, userId } = (req as any).authContext ?? {}
+
+  try {
+    const emisor = await provisionEmisor({ emisorId, expectedVenueId: venueId })
+
+    // ActivityLog: FISCAL_EMISOR_PROVISIONED — do NOT include any key material.
+    logAction({
+      staffId: userId,
+      venueId,
+      action: 'FISCAL_EMISOR_PROVISIONED',
+      entity: 'FiscalEmisor',
+      entityId: emisor.id,
+      data: { providerOrgId: emisor.providerOrgId },
+    })
+
+    res.status(200).json({ emisor })
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    logger.error(`[cfdi.controller] provisionEmisor failed for emisor ${emisorId}: ${message}`)
+
+    if (/not found/i.test(message)) {
+      res.status(404).json({ error: 'Emisor no encontrado' })
+      return
+    }
+
+    res.status(500).json({ error: 'Error interno al provisionar el emisor fiscal' })
+  }
+}
+
+/**
+ * POST /api/v1/dashboard/venues/:venueId/fiscal/emisores/:emisorId/csd
+ *
+ * Uploads the CSD (.cer/.key/password) to facturapi and marks the emisor ACTIVE.
+ * The CSD material is forwarded to facturapi and NEVER persisted or logged by us.
+ * Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:configure').
+ * Body validated by validateRequest(uploadCsdSchema) before this handler runs.
+ */
+export async function uploadEmisorCsdController(req: Request, res: Response): Promise<void> {
+  const { emisorId } = req.params
+  const { cerBase64, keyBase64, password } = req.body
+  // Tenant isolation: always use authContext.venueId — never trust the path :venueId.
+  const { venueId, userId } = (req as any).authContext ?? {}
+
+  try {
+    // NOTE: cerBase64, keyBase64, password flow straight to facturapi and are NEVER
+    // logged or persisted by us (security requirement from spec §7.2).
+    const emisor = await uploadEmisorCsd({
+      emisorId,
+      cerBase64,
+      keyBase64,
+      csdPassword: password,
+      expectedVenueId: venueId,
+    })
+
+    // ActivityLog: FISCAL_CSD_UPLOADED — only non-sensitive fields.
+    logAction({
+      staffId: userId,
+      venueId,
+      action: 'FISCAL_CSD_UPLOADED',
+      entity: 'FiscalEmisor',
+      entityId: emisor.id,
+      data: { csdStatus: emisor.csdStatus, csdExpiresAt: emisor.csdExpiresAt ?? null },
+    })
+
+    res.status(200).json({ emisor })
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    logger.error(`[cfdi.controller] uploadEmisorCsd failed for emisor ${emisorId}: ${message}`)
+
+    if (/not found/i.test(message)) {
+      res.status(404).json({ error: 'Emisor no encontrado' })
+      return
+    }
+
+    // provisión required before CSD upload
+    if (/provision/i.test(message)) {
+      res.status(409).json({ error: message })
+      return
+    }
+
+    res.status(500).json({ error: 'Error interno al subir el CSD del emisor fiscal' })
   }
 }

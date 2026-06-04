@@ -66,6 +66,8 @@ import {
   getFiscalConfigController,
   upsertEmisorController,
   upsertMerchantFiscalConfigController,
+  provisionEmisorController,
+  uploadEmisorCsdController,
 } from '../controllers/dashboard/cfdi.dashboard.controller'
 import {
   assistantActionConfirmSchema,
@@ -226,7 +228,13 @@ import {
   terminalResultSchema,
 } from '../schemas/dashboard/tpv-command.schema'
 import { createTerminalOrderSchema } from '../schemas/dashboard/terminalOrder.schema'
-import { issueCfdiSchema, cancelCfdiSchema, upsertEmisorSchema, upsertMerchantConfigSchema } from '../schemas/dashboard/cfdi.schema'
+import {
+  issueCfdiSchema,
+  cancelCfdiSchema,
+  upsertEmisorSchema,
+  upsertMerchantConfigSchema,
+  uploadCsdSchema,
+} from '../schemas/dashboard/cfdi.schema'
 import inventoryRoutes from './dashboard/inventory.routes'
 import superadminRoutes from './dashboard/superadmin.routes'
 import venuePaymentConfigRoutes from './dashboard/venuePaymentConfig.routes'
@@ -3055,6 +3063,23 @@ router.put(
   checkFeatureAccess('CFDI'),
   checkPermission('cfdi:configure'),
   upsertMerchantFiscalConfigController,
+)
+
+// ---- Facturación CFDI 4.0 — Emisor onboarding: provision + CSD upload ----
+router.post(
+  '/venues/:venueId/fiscal/emisores/:emisorId/provision',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:configure'),
+  provisionEmisorController,
+)
+router.post(
+  '/venues/:venueId/fiscal/emisores/:emisorId/csd',
+  authenticateTokenMiddleware,
+  validateRequest(uploadCsdSchema), // validate body BEFORE feature/perm checks (permissions-policy rule)
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:configure'),
+  uploadEmisorCsdController,
 )
 
 // Manual Payment routes (ADMIN+) — MUST be registered BEFORE /venues/:venueId/payments/:paymentId

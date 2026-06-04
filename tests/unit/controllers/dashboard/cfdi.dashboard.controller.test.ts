@@ -18,6 +18,13 @@ jest.mock('../../../../src/services/fiscal/fiscalConfig.service', () => ({
   upsertMerchantFiscalConfig: (...a: any[]) => mockUpsertMerchantFiscalConfig(...a),
 }))
 
+const mockProvisionEmisor = jest.fn()
+const mockUploadEmisorCsd = jest.fn()
+jest.mock('../../../../src/services/fiscal/fiscalOnboarding.service', () => ({
+  provisionEmisor: (...a: any[]) => mockProvisionEmisor(...a),
+  uploadEmisorCsd: (...a: any[]) => mockUploadEmisorCsd(...a),
+}))
+
 const mockLogAction = jest.fn()
 jest.mock('../../../../src/services/dashboard/activity-log.service', () => ({
   logAction: (...a: any[]) => mockLogAction(...a),
@@ -41,6 +48,8 @@ import {
   getFiscalConfigController,
   upsertEmisorController,
   upsertMerchantFiscalConfigController,
+  provisionEmisorController,
+  uploadEmisorCsdController,
 } from '../../../../src/controllers/dashboard/cfdi.dashboard.controller'
 
 // ==========================================
@@ -581,5 +590,173 @@ describe('upsertMerchantFiscalConfigController', () => {
 
     expect(res.status).toHaveBeenCalledWith(500)
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Error interno al guardar la configuración de facturación' }))
+  })
+})
+
+// ──────────────────────────────────────────────────────────────────────────────
+// provisionEmisorController
+// ──────────────────────────────────────────────────────────────────────────────
+
+function provisionReq(overrides: Partial<any> = {}): any {
+  return {
+    params: { venueId: 'v1', emisorId: 'e1' },
+    body: {},
+    authContext: { venueId: 'v1', userId: 'u1' },
+    ...overrides,
+  }
+}
+
+describe('provisionEmisorController', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockLogAction.mockResolvedValue(undefined)
+  })
+
+  it('returns 200 with the emisor on success', async () => {
+    mockProvisionEmisor.mockResolvedValue({ id: 'e1', providerOrgId: 'org1', csdStatus: 'NONE' })
+
+    const res = mockRes()
+    await provisionEmisorController(provisionReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ emisor: expect.objectContaining({ id: 'e1', providerOrgId: 'org1' }) }))
+  })
+
+  it('writes ActivityLog with FISCAL_EMISOR_PROVISIONED on success', async () => {
+    mockProvisionEmisor.mockResolvedValue({ id: 'e1', providerOrgId: 'org1', csdStatus: 'NONE' })
+
+    const res = mockRes()
+    await provisionEmisorController(provisionReq(), res)
+
+    expect(mockLogAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'FISCAL_EMISOR_PROVISIONED', entity: 'FiscalEmisor', entityId: 'e1' }),
+    )
+    // Security: CSD material must NOT appear in the log data
+    const logCall = (mockLogAction as jest.Mock).mock.calls[0][0]
+    expect(JSON.stringify(logCall.data)).not.toMatch(/password|cer|key|sk_live|sk_test/i)
+  })
+
+  it('uses authContext.venueId for the service call (tenant isolation)', async () => {
+    mockProvisionEmisor.mockResolvedValue({ id: 'e1', providerOrgId: 'org1' })
+
+    const res = mockRes()
+    await provisionEmisorController(
+      provisionReq({ params: { venueId: 'path-v1', emisorId: 'e1' }, authContext: { venueId: 'auth-v1', userId: 'u1' } }),
+      res,
+    )
+
+    expect(mockProvisionEmisor).toHaveBeenCalledWith(expect.objectContaining({ expectedVenueId: 'auth-v1' }))
+  })
+
+  it('returns 404 when service throws not found (tenant mismatch)', async () => {
+    mockProvisionEmisor.mockRejectedValue(new Error('Emisor e1 not found'))
+
+    const res = mockRes()
+    await provisionEmisorController(provisionReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(404)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Emisor no encontrado' }))
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+
+  it('returns 500 on unexpected errors', async () => {
+    mockProvisionEmisor.mockRejectedValue(new Error('facturapi network error'))
+
+    const res = mockRes()
+    await provisionEmisorController(provisionReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(500)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Error interno al provisionar el emisor fiscal' }))
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+})
+
+// ──────────────────────────────────────────────────────────────────────────────
+// uploadEmisorCsdController
+// ──────────────────────────────────────────────────────────────────────────────
+
+function csdReq(overrides: Partial<any> = {}): any {
+  return {
+    params: { venueId: 'v1', emisorId: 'e1' },
+    body: { cerBase64: 'AA==', keyBase64: 'BB==', password: 'secretpw' },
+    authContext: { venueId: 'v1', userId: 'u1' },
+    ...overrides,
+  }
+}
+
+describe('uploadEmisorCsdController', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockLogAction.mockResolvedValue(undefined)
+  })
+
+  it('returns 200 with the emisor on success', async () => {
+    mockUploadEmisorCsd.mockResolvedValue({ id: 'e1', csdStatus: 'ACTIVE', csdExpiresAt: new Date('2030-01-01') })
+
+    const res = mockRes()
+    await uploadEmisorCsdController(csdReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ emisor: expect.objectContaining({ id: 'e1', csdStatus: 'ACTIVE' }) }))
+  })
+
+  it('writes ActivityLog with FISCAL_CSD_UPLOADED on success — no CSD secrets in data', async () => {
+    const expiresAt = new Date('2030-01-01')
+    mockUploadEmisorCsd.mockResolvedValue({ id: 'e1', csdStatus: 'ACTIVE', csdExpiresAt: expiresAt })
+
+    const res = mockRes()
+    await uploadEmisorCsdController(csdReq(), res)
+
+    expect(mockLogAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'FISCAL_CSD_UPLOADED', entity: 'FiscalEmisor', entityId: 'e1' }),
+    )
+    // Security: CSD password/key must NEVER appear in the log
+    const logCall = (mockLogAction as jest.Mock).mock.calls[0][0]
+    expect(JSON.stringify(logCall.data)).not.toMatch(/password|cerBase64|keyBase64/i)
+  })
+
+  it('uses authContext.venueId for the service call (tenant isolation)', async () => {
+    mockUploadEmisorCsd.mockResolvedValue({ id: 'e1', csdStatus: 'ACTIVE', csdExpiresAt: null })
+
+    const res = mockRes()
+    await uploadEmisorCsdController(
+      csdReq({ params: { venueId: 'path-v1', emisorId: 'e1' }, authContext: { venueId: 'auth-v1', userId: 'u1' } }),
+      res,
+    )
+
+    expect(mockUploadEmisorCsd).toHaveBeenCalledWith(expect.objectContaining({ expectedVenueId: 'auth-v1' }))
+  })
+
+  it('returns 404 on not found (tenant mismatch)', async () => {
+    mockUploadEmisorCsd.mockRejectedValue(new Error('Emisor e1 not found'))
+
+    const res = mockRes()
+    await uploadEmisorCsdController(csdReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(404)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Emisor no encontrado' }))
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+
+  it('returns 409 when emisor not yet provisioned', async () => {
+    mockUploadEmisorCsd.mockRejectedValue(new Error('El emisor debe provisionarse antes de subir el CSD'))
+
+    const res = mockRes()
+    await uploadEmisorCsdController(csdReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(409)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: expect.stringMatching(/provision/i) }))
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+
+  it('returns 500 on unexpected errors', async () => {
+    mockUploadEmisorCsd.mockRejectedValue(new Error('facturapi upload failed'))
+
+    const res = mockRes()
+    await uploadEmisorCsdController(csdReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(500)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Error interno al subir el CSD del emisor fiscal' }))
+    expect(mockLogAction).not.toHaveBeenCalled()
   })
 })

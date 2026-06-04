@@ -10,6 +10,7 @@ import {
   ReceptorInput,
   ReceptorValidationResult,
   StampedInvoice,
+  UpdateOrgLegalParams,
   UploadCsdParams,
   UploadCsdResult,
 } from './fiscal-provider.interface'
@@ -36,6 +37,18 @@ export class FacturapiProvider implements FiscalProvider {
       this.client.organizations.getTestApiKey(org.id),
     ])
     return { providerOrgId: org.id, liveKey, testKey }
+  }
+
+  /**
+   * Updates the org's legal information in facturapi.
+   * SDK method confirmed: organizations.updateLegal(id, data) — see node_modules/facturapi/dist/resources/organizations.d.ts
+   */
+  async updateOrgLegal(params: UpdateOrgLegalParams): Promise<void> {
+    await this.client.organizations.updateLegal(params.providerOrgId, {
+      legal_name: params.legalName,
+      tax_system: params.taxSystem,
+      address: { zip: params.zip },
+    })
   }
 
   async uploadCsd(params: UploadCsdParams): Promise<UploadCsdResult> {

@@ -198,10 +198,31 @@ export const cancelBodySchema = z.object({
   reason: z.string().max(1000).optional(),
 })
 
-export const publicRescheduleBodySchema = z.object({
-  classSessionId: z.string().min(1, 'classSessionId es requerido'),
-  spotIds: z.array(z.string().min(1)).max(100).optional(),
-  reason: z.string().max(1000).optional(),
+export const publicRescheduleBodySchema = z
+  .object({
+    // Class reschedule (swap to another session of the same class).
+    classSessionId: z.string().min(1).optional(),
+    spotIds: z.array(z.string().min(1)).max(100).optional(),
+    reason: z.string().max(1000).optional(),
+    // Appointment reschedule (move to a new slot of the same service).
+    startsAt: z.string().min(1).optional(),
+    holdId: z.string().min(1).optional(),
+  })
+  .refine(d => Boolean(d.classSessionId) || Boolean(d.startsAt), {
+    message: 'Debes proporcionar classSessionId (clase) o startsAt (cita)',
+    path: ['startsAt'],
+  })
+
+// Reschedule availability (appointments): same shape as a single-date slot query,
+// but scoped by cancelSecret server-side so it can exclude the moving reservation.
+export const rescheduleAvailabilityQuerySchema = z.object({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date debe ser YYYY-MM-DD'),
+})
+
+// Reschedule hold (appointments): reserve the target slot for ~10 min before confirm.
+export const rescheduleHoldBodySchema = z.object({
+  startsAt: z.string().min(1, 'startsAt es requerido'),
+  endsAt: z.string().min(1, 'endsAt es requerido'),
 })
 
 export const addToWaitlistBodySchema = z

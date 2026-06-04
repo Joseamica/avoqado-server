@@ -38,7 +38,7 @@ export function effectiveAppointmentPacing(pacingMaxFromSettings: number | null 
  */
 export async function countAppointmentOccupancy(
   client: Prisma.TransactionClient | typeof prisma,
-  args: { venueId: string; startsAt: Date; endsAt: Date; excludeHoldId?: string },
+  args: { venueId: string; startsAt: Date; endsAt: Date; excludeHoldId?: string; excludeReservationId?: string },
 ): Promise<{ reservations: number; holds: number }> {
   const now = new Date()
   const [reservations, holds] = await Promise.all([
@@ -49,6 +49,9 @@ export async function countAppointmentOccupancy(
         classSessionId: null,
         startsAt: { lt: args.endsAt },
         endsAt: { gt: args.startsAt },
+        // Reschedule: don't count the reservation being moved against its own
+        // target slot (otherwise a pacing=1 venue blocks itself on an adjacent move).
+        ...(args.excludeReservationId ? { id: { not: args.excludeReservationId } } : {}),
       },
     }),
     client.slotHold.count({
@@ -71,6 +74,12 @@ export interface SlotOptions {
   tableId?: string
   staffId?: string
   productId?: string
+  /**
+   * Reschedule: exclude this reservation from per-slot occupancy so the customer
+   * can move to an adjacent/overlapping slot without colliding with their own
+   * current booking. Resolved server-side from the cancelSecret.
+   */
+  excludeReservationId?: string
 }
 
 export interface AvailableSlot {
@@ -138,6 +147,9 @@ export async function getAvailableSlots(
       status: { in: ACTIVE_STATUSES },
       startsAt: { lt: dayEnd },
       endsAt: { gt: dayStart },
+      // Reschedule self-exclusion: the reservation being moved must not occupy
+      // its own target slots (see SlotOptions.excludeReservationId).
+      ...(options.excludeReservationId ? { id: { not: options.excludeReservationId } } : {}),
     },
     select: {
       id: true,
