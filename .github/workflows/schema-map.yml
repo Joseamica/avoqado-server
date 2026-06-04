@@ -37,6 +37,12 @@ jobs:
     steps:
       - name: 📥 Checkout code
         uses: actions/checkout@v4
+        with:
+          # On pull_request events, check out the PR's HEAD branch (not the
+          # detached merge ref) so the auto-commit step can push the regenerated
+          # map back to the PR branch. On push events github.head_ref is empty,
+          # which makes checkout fall back to the ref that triggered the run.
+          ref: ${{ github.head_ref }}
 
       - name: 🟢 Setup Node.js
         uses: actions/setup-node@v4
@@ -50,7 +56,27 @@ jobs:
       - name: 🗺️ Regenerate schema map
         run: npm run schema:map
 
+      # `main` is a protected branch (changes must go through a PR), so the bot
+      # cannot push to it — a direct push fails with GH006. The map is already
+      # correct on main because the PR that changed the schema regenerated it on
+      # the PR branch (step below). Here we only VERIFY and fail loudly if it
+      # ever drifts, instead of attempting an impossible push.
+      - name: 🔍 Verify schema map is in sync (protected main)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          if ! git diff --quiet -- docs/SCHEMA_MAP.md; then
+            echo "::error::docs/SCHEMA_MAP.md is out of sync with prisma/schema.prisma on main."
+            echo "The PR that changed the schema should have regenerated it. Run 'npm run schema:map' and merge the result."
+            git --no-pager diff -- docs/SCHEMA_MAP.md
+            exit 1
+          fi
+          echo "✅ Schema map is in sync."
+
+      # On PR branches and other non-protected branches (develop, feature/*),
+      # auto-commit the regenerated map. Only changes docs/SCHEMA_MAP.md, so it
+      # never re-triggers this workflow (which is gated on prisma/schema.prisma).
       - name: 💾 Commit updated schema map
+        if: github.ref != 'refs/heads/main'
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: 'chore: regenerate schema map'

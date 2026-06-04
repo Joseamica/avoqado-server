@@ -24,6 +24,7 @@
 
 import * as fs from 'fs'
 import * as path from 'path'
+import * as prettier from 'prettier'
 
 const REPO_ROOT = path.resolve(__dirname, '..')
 const SCHEMA_PATH = path.join(REPO_ROOT, 'prisma', 'schema.prisma')
@@ -510,7 +511,7 @@ function buildDocument(parsed: ParsedSchema): string {
 // Main
 // ---------------------------------------------------------------------------
 
-function main() {
+async function main() {
   const checkMode = process.argv.includes('--check')
 
   if (!fs.existsSync(SCHEMA_PATH)) {
@@ -543,7 +544,17 @@ function main() {
     for (const name of stale.sort()) console.warn(`   - ${name}`)
   }
 
-  const generated = buildDocument(parsed)
+  const rawDocument = buildDocument(parsed)
+
+  // Format the generated Markdown through the project's Prettier config so the
+  // output is byte-identical to what `npm run format` (`prettier --write .`)
+  // produces. Without this, `npm run format` reflows docs/SCHEMA_MAP.md (it is
+  // NOT in .prettierignore) and the next `npm run schema:map` re-emits the raw
+  // form, so the file is perpetually "out of date" even when no model changed.
+  // That false drift is what made the Schema Map workflow auto-commit on every
+  // run and fail with GH006 when it tried to push to protected `main`.
+  const prettierConfig = await prettier.resolveConfig(MAP_PATH)
+  const generated = await prettier.format(rawDocument, { ...prettierConfig, parser: 'markdown' })
 
   if (checkMode) {
     const current = fs.existsSync(MAP_PATH) ? fs.readFileSync(MAP_PATH, 'utf8') : ''
@@ -560,4 +571,7 @@ function main() {
   console.log(`✅ Regenerated docs/SCHEMA_MAP.md — ${modelNames.length} models, ` + `${parsed.enumCount} enums, ${parsed.lineCount} lines.`)
 }
 
-main()
+main().catch(err => {
+  console.error(err)
+  process.exit(1)
+})
