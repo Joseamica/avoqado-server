@@ -84,14 +84,12 @@ describe('issueCfdiForOrder', () => {
 
   it('PAC error: persists STAMP_FAILED with the error', async () => {
     const deps = makeDeps({
-      resolveProvider: jest
-        .fn()
-        .mockReturnValue({
-          name: 'facturapi',
-          createInvoice: jest.fn().mockRejectedValue(new Error('SAT down')),
-          downloadXml: jest.fn(),
-          downloadPdf: jest.fn(),
-        } as any),
+      resolveProvider: jest.fn().mockReturnValue({
+        name: 'facturapi',
+        createInvoice: jest.fn().mockRejectedValue(new Error('SAT down')),
+        downloadXml: jest.fn(),
+        downloadPdf: jest.fn(),
+      } as any),
     })
     const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
     expect(res.status).toBe('STAMP_FAILED')

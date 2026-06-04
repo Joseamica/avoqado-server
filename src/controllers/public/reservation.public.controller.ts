@@ -313,6 +313,15 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
       publicBooking: settings.publicBooking,
       operatingHours: settings.operatingHours,
       payments: settings.payments,
+      // Scheduling window — exposed so the date picker caps exactly at the
+      // venue's booking horizon instead of a hardcoded default. The server
+      // already enforces these (enforceBookingWindow); exposing them keeps the
+      // UI from offering dates the server rejects (or hiding valid ones).
+      scheduling: {
+        maxAdvanceDays: settings.scheduling.maxAdvanceDays,
+        minNoticeMin: settings.scheduling.minNoticeMin,
+        autoConfirm: settings.scheduling.autoConfirm,
+      },
     })
   } catch (error) {
     next(error)

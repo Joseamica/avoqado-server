@@ -209,6 +209,13 @@ export async function removeFeatureFromVenue(venueId: string, featureId: string)
     throw new NotFoundError(`Active feature ${featureId} not found for venue ${venueId}`)
   }
 
+  // Guard: the PLAN_PRO base plan must NEVER be canceled via this à-la-carte delete
+  // (cancelSubscription cancels Stripe immediately). The base plan can only be canceled
+  // through POST /plan/cancel, which schedules cancel_at_period_end. See planState.service.
+  if ((PAID_PLAN_TIER_CODES as readonly string[]).includes(venueFeature.feature.code)) {
+    throw new BadRequestError('Usa el flujo de plan (cancelar suscripción) para el plan base. Endpoint: /plan/cancel')
+  }
+
   // Cancel Stripe subscription if exists
   if (venueFeature.stripeSubscriptionId) {
     try {
