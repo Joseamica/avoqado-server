@@ -29,7 +29,15 @@ describe('summarizeSales', () => {
     expect(s.byType.FAST).toBe(50)
   })
   it('handles empty', () => {
-    expect(summarizeSales([])).toEqual({ completedCount: 0, gross: 0, byMethod: {}, byType: {} })
+    expect(summarizeSales([])).toEqual({ completedCount: 0, gross: 0, byMethod: {}, byType: {}, byMerchantAccount: {} })
+  })
+  it('breaks down card payments by merchant account (skips cash/null)', () => {
+    const s = summarizeSales([
+      { amount: 200, method: 'CREDIT_CARD', type: 'REGULAR', status: 'COMPLETED', merchantAccountId: 'ma-A' },
+      { amount: 300, method: 'DEBIT_CARD', type: 'REGULAR', status: 'COMPLETED', merchantAccountId: 'ma-A' },
+      { amount: 100, method: 'CASH', type: 'REGULAR', status: 'COMPLETED', merchantAccountId: null },
+    ])
+    expect(s.byMerchantAccount).toEqual({ 'ma-A': 500 })
   })
 })
 
