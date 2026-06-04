@@ -4,6 +4,7 @@ import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
+import { serializedInventoryService } from '@/services/serialized-inventory/serializedInventory.service'
 
 export function registerInventoryTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
@@ -30,6 +31,29 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
         total,
         byStatus,
       })
+    },
+  )
+
+  server.tool(
+    'mark_serialized_item',
+    "Mark a serialized item (SIM / ICCID / barcode) as RETURNED (reverses a sale and frees it back up the custody chain) or DAMAGED (removes it from the sellable chain). Identify it by serial number within a venue you can access. This WRITES — it changes inventory state; requires inventory:adjust.",
+    {
+      venueId: z.string().describe('Venue that owns the item (must be in your scope)'),
+      serialNumber: z.string().min(1).describe('Serial number / ICCID / barcode of the item'),
+      action: z.enum(['returned', 'damaged']).describe("'returned' reverses a sale; 'damaged' marks it unsellable"),
+    },
+    async ({ venueId, serialNumber, action }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('inventory:adjust', venueId) // write gate (per-venue role)
+      try {
+        const item =
+          action === 'returned'
+            ? await serializedInventoryService.markAsReturned(venueId, serialNumber)
+            : await serializedInventoryService.markAsDamaged(venueId, serialNumber)
+        return text({ ok: true, item: { serialNumber: item.serialNumber, status: item.status, custodyState: item.custodyState } })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
     },
   )
 }
