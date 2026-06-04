@@ -1,12 +1,23 @@
 # Customer MCP — Phase 1 (OAuth 2.1) Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Let a venue operator connect their own Claude/ChatGPT/Gemini to Avoqado over a standards-compliant OAuth 2.1 flow (DCR → authorize → bcrypt login → PKCE code → token → `/mcp`), so the pasted-token step from Phase 0 disappears and the existing scoped read tools work behind a real login.
+**Goal:** Let a venue operator connect their own Claude/ChatGPT/Gemini to Avoqado over a standards-compliant OAuth 2.1 flow (DCR → authorize
+→ bcrypt login → PKCE code → token → `/mcp`), so the pasted-token step from Phase 0 disappears and the existing scoped read tools work
+behind a real login.
 
-**Architecture:** Avoqado IS the OAuth 2.1 Authorization Server (decision D5, design §8). We mount the MCP SDK's `mcpAuthRouter` at the Express app root — it provides Dynamic Client Registration, discovery metadata, `/authorize`, `/token`, and `/revoke`. We supply an `OAuthServerProvider` whose **access token is the Phase-0 audience-bound JWT** (`issueMcpToken`/`verifyMcpToken`), so token verification stays stateless. Only three things need persistence (Prisma): DCR clients, single-use authorization codes, and refresh tokens (hashed at rest). The `/authorize` step renders a self-contained bcrypt login page in `avoqado-server` (decision D3) that mirrors `loginStaff`'s security checks. After login the token is bound to one active org (`getPrimaryOrganizationId`), and `/mcp` is guarded by the SDK's `requireBearerAuth`, which puts `{ staffId, activeOrg }` on `req.auth.extra` for `resolveScope`.
+**Architecture:** Avoqado IS the OAuth 2.1 Authorization Server (decision D5, design §8). We mount the MCP SDK's `mcpAuthRouter` at the
+Express app root — it provides Dynamic Client Registration, discovery metadata, `/authorize`, `/token`, and `/revoke`. We supply an
+`OAuthServerProvider` whose **access token is the Phase-0 audience-bound JWT** (`issueMcpToken`/`verifyMcpToken`), so token verification
+stays stateless. Only three things need persistence (Prisma): DCR clients, single-use authorization codes, and refresh tokens (hashed at
+rest). The `/authorize` step renders a self-contained bcrypt login page in `avoqado-server` (decision D3) that mirrors `loginStaff`'s
+security checks. After login the token is bound to one active org (`getPrimaryOrganizationId`), and `/mcp` is guarded by the SDK's
+`requireBearerAuth`, which puts `{ staffId, activeOrg }` on `req.auth.extra` for `resolveScope`.
 
-**Tech Stack:** `@modelcontextprotocol/sdk@1.29.x` (already installed, Phase 0 `fa7a23b`), Express + TypeScript, Prisma/PostgreSQL, `jsonwebtoken`, `bcrypt`, Node `crypto`. Branch `feat/customer-mcp-phase0` (worktree `avoqado-server/.worktrees/customer-mcp`), off `develop`, **not merged**.
+**Tech Stack:** `@modelcontextprotocol/sdk@1.29.x` (already installed, Phase 0 `fa7a23b`), Express + TypeScript, Prisma/PostgreSQL,
+`jsonwebtoken`, `bcrypt`, Node `crypto`. Branch `feat/customer-mcp-phase0` (worktree `avoqado-server/.worktrees/customer-mcp`), off
+`develop`, **not merged**.
 
 ---
 
@@ -14,23 +25,24 @@
 
 Verified, committed, on this branch:
 
-| Piece | File | Signature |
-|---|---|---|
-| Audience-bound token | `src/mcp/mcpToken.ts` | `issueMcpToken(staffId, activeOrg, ttl=3600)`, `verifyMcpToken(token) → {sub, org}`, `MCP_AUDIENCE='avoqado-mcp'` |
-| Dashboard-token guard | `src/jwt.service.ts:167` | rejects any token whose `aud === 'avoqado-mcp'` from `/api/v1` |
-| Scope resolver | `src/mcp/scope.ts` | `resolveScope(staffId, activeOrg) → McpScope` (org OWNER → all venues; else `StaffVenue`) |
-| Central guard | `src/mcp/guard.ts` | `createGuard(scope)` → `venueFilter`, `requirePermission`, `redact` |
-| 7 read tools | `src/mcp/tools/*` | venues, sales, orders (recent + find), terminals, reservations, inventory |
-| Transport | `src/mcp/server.ts` | `handleMcpRequest(req,res)` — currently parses the bearer header **manually** in `buildServerForRequest(authHeader)` |
+| Piece                 | File                     | Signature                                                                                                            |
+| --------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------- |
+| Audience-bound token  | `src/mcp/mcpToken.ts`    | `issueMcpToken(staffId, activeOrg, ttl=3600)`, `verifyMcpToken(token) → {sub, org}`, `MCP_AUDIENCE='avoqado-mcp'`    |
+| Dashboard-token guard | `src/jwt.service.ts:167` | rejects any token whose `aud === 'avoqado-mcp'` from `/api/v1`                                                       |
+| Scope resolver        | `src/mcp/scope.ts`       | `resolveScope(staffId, activeOrg) → McpScope` (org OWNER → all venues; else `StaffVenue`)                            |
+| Central guard         | `src/mcp/guard.ts`       | `createGuard(scope)` → `venueFilter`, `requirePermission`, `redact`                                                  |
+| 7 read tools          | `src/mcp/tools/*`        | venues, sales, orders (recent + find), terminals, reservations, inventory                                            |
+| Transport             | `src/mcp/server.ts`      | `handleMcpRequest(req,res)` — currently parses the bearer header **manually** in `buildServerForRequest(authHeader)` |
 
-Phase 1 changes exactly one thing about the existing code path: **the token's _source_ at `/mcp`** moves from "manually parse `Authorization` header" to "read `req.auth.extra` populated by `requireBearerAuth`". Everything downstream of `resolveScope` is untouched.
+Phase 1 changes exactly one thing about the existing code path: **the token's _source_ at `/mcp`** moves from "manually parse
+`Authorization` header" to "read `req.auth.extra` populated by `requireBearerAuth`". Everything downstream of `resolveScope` is untouched.
 
 Reusable platform code (already exists, do not modify behavior):
 
-| Need | Source |
-|---|---|
-| bcrypt login pattern (lockout, emailVerified, active checks) | `src/services/dashboard/auth.service.ts:151` `loginStaff` (bcrypt at `:229`) |
-| Pick active org | `src/services/staffOrganization.service.ts:17` `getPrimaryOrganizationId(staffId): Promise<string>` (isPrimary + isActive) |
+| Need                                                         | Source                                                                                                                     |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| bcrypt login pattern (lockout, emailVerified, active checks) | `src/services/dashboard/auth.service.ts:151` `loginStaff` (bcrypt at `:229`)                                               |
+| Pick active org                                              | `src/services/staffOrganization.service.ts:17` `getPrimaryOrganizationId(staffId): Promise<string>` (isPrimary + isActive) |
 
 ## The OAuth flow we are building
 
@@ -62,6 +74,7 @@ Claude (MCP client)                     Avoqado (AS + RS, avoqado-server)
 ## File structure
 
 **Create (`src/mcp/oauth/`):**
+
 - `config.ts` — issuer/resource URLs + TTL constants (env-driven).
 - `tokenStore.ts` — auth-code + refresh-token persistence (create/consume/revoke), sha256 hashing.
 - `clientsStore.ts` — `PrismaClientsStore` implementing `OAuthRegisteredClientsStore` (DCR).
@@ -71,6 +84,7 @@ Claude (MCP client)                     Avoqado (AS + RS, avoqado-server)
 - `router.ts` — `mcpOAuthApproveRouter()` (the `POST /mcp-oauth/approve` route) + `mountCustomerMcpAuth(app)`.
 
 **Modify:**
+
 - `prisma/schema.prisma` — 3 models (`McpOAuthClient`, `McpAuthCode`, `McpRefreshToken`).
 - `scripts/generate-schema-map.ts` — add the 3 models to `MODEL_TO_DOMAIN`.
 - `src/mcp/mcpToken.ts` — carry `clientId` in the token (AuthInfo needs it) + add `verifyMcpTokenFull`.
@@ -78,15 +92,19 @@ Claude (MCP client)                     Avoqado (AS + RS, avoqado-server)
 - `src/app.ts` — mount `mcpAuthRouter` at root, the approve route, and guard `/mcp` with `requireBearerAuth`.
 
 **Tests (`tests/unit/mcp-customer/`):**
+
 - `oauth-tokenStore.test.ts`, `oauth-credentials.test.ts`, `oauth-loginPage.test.ts`, `oauth-provider.test.ts`.
 
-> **Machine-load discipline (this worktree):** never run `npm run format` (whole-repo prettier pollution) or the full `jest`/`tsc` suite (V8 OOM). Run only the scoped test file for each task: `npx jest tests/unit/mcp-customer/<file> --runInBand`. Reap orphan MCP servers with `pkill -f "mcp-dev-server.ts"` / `pkill -f "scripts/mcp/server.ts"`.
+> **Machine-load discipline (this worktree):** never run `npm run format` (whole-repo prettier pollution) or the full `jest`/`tsc` suite (V8
+> OOM). Run only the scoped test file for each task: `npx jest tests/unit/mcp-customer/<file> --runInBand`. Reap orphan MCP servers with
+> `pkill -f "mcp-dev-server.ts"` / `pkill -f "scripts/mcp/server.ts"`.
 
 ---
 
 ### Task 1: Prisma models + migration + schema-map
 
 **Files:**
+
 - Modify: `prisma/schema.prisma` (append near other auth/identity models)
 - Modify: `scripts/generate-schema-map.ts`
 - Migration: `prisma/migrations/<ts>_customer_mcp_oauth/migration.sql` (generated)
@@ -149,8 +167,8 @@ model McpRefreshToken {
 
 Find the domain used for identity models and reuse it (or add a dedicated one):
 
-Run: `grep -nE "StaffOrganization|'Staff'" scripts/generate-schema-map.ts`
-Then in `MODEL_TO_DOMAIN`, add the three keys with that same domain string (or a new `'Customer MCP / OAuth'` domain grouped beside it):
+Run: `grep -nE "StaffOrganization|'Staff'" scripts/generate-schema-map.ts` Then in `MODEL_TO_DOMAIN`, add the three keys with that same
+domain string (or a new `'Customer MCP / OAuth'` domain grouped beside it):
 
 ```typescript
   McpOAuthClient: 'Customer MCP / OAuth',
@@ -158,17 +176,17 @@ Then in `MODEL_TO_DOMAIN`, add the three keys with that same domain string (or a
   McpRefreshToken: 'Customer MCP / OAuth',
 ```
 
-(If you introduce a new domain string, confirm the generator accepts free-form domains — it groups by the string value. If it enforces a fixed domain list, reuse the identity domain instead.)
+(If you introduce a new domain string, confirm the generator accepts free-form domains — it groups by the string value. If it enforces a
+fixed domain list, reuse the identity domain instead.)
 
 - [ ] **Step 3: Create the migration (dev DB only — NEVER `db push`)**
 
-Run: `npx prisma migrate dev --name customer_mcp_oauth`
-Expected: a new folder under `prisma/migrations/` and `prisma generate` runs. **Do not hand-edit the generated SQL.**
+Run: `npx prisma migrate dev --name customer_mcp_oauth` Expected: a new folder under `prisma/migrations/` and `prisma generate` runs. **Do
+not hand-edit the generated SQL.**
 
 - [ ] **Step 4: Regenerate the schema map**
 
-Run: `npm run schema:map`
-Expected: `docs/SCHEMA_MAP.md` updates with the 3 models; script exits 0 (fails fast if a model is unmapped).
+Run: `npm run schema:map` Expected: `docs/SCHEMA_MAP.md` updates with the 3 models; script exits 0 (fails fast if a model is unmapped).
 
 - [ ] **Step 5: Commit**
 
@@ -182,6 +200,7 @@ git commit -m "feat(customer-mcp): Prisma models for OAuth (clients, auth codes,
 ### Task 2: Token store (auth codes + refresh tokens)
 
 **Files:**
+
 - Create: `src/mcp/oauth/config.ts`
 - Create: `src/mcp/oauth/tokenStore.ts`
 - Test: `tests/unit/mcp-customer/oauth-tokenStore.test.ts`
@@ -212,7 +231,13 @@ const db = {
 }
 jest.mock('@/utils/prismaClient', () => ({ __esModule: true, default: db }))
 
-import { createAuthCode, consumeAuthCode, createRefreshToken, consumeRefreshToken, revokeRefreshToken } from '../../../src/mcp/oauth/tokenStore'
+import {
+  createAuthCode,
+  consumeAuthCode,
+  createRefreshToken,
+  consumeRefreshToken,
+  revokeRefreshToken,
+} from '../../../src/mcp/oauth/tokenStore'
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex')
 
@@ -222,7 +247,13 @@ describe('auth codes', () => {
   it('stores the HASH of the code, never the plaintext', async () => {
     db.mcpAuthCode.create.mockResolvedValue({})
     const { code } = await createAuthCode({
-      clientId: 'c1', staffId: 's1', activeOrg: 'o1', codeChallenge: 'cc', redirectUri: 'http://x', scopes: [], resource: undefined,
+      clientId: 'c1',
+      staffId: 's1',
+      activeOrg: 'o1',
+      codeChallenge: 'cc',
+      redirectUri: 'http://x',
+      scopes: [],
+      resource: undefined,
     })
     const arg = db.mcpAuthCode.create.mock.calls[0][0].data
     expect(arg.codeHash).toBe(sha(code))
@@ -230,7 +261,18 @@ describe('auth codes', () => {
   })
 
   it('consumes a valid, unexpired, unused code exactly once', async () => {
-    const row = { codeHash: sha('abc'), clientId: 'c1', staffId: 's1', activeOrg: 'o1', codeChallenge: 'cc', redirectUri: 'http://x', scopes: [], resource: null, expiresAt: new Date(Date.now() + 10000), consumedAt: null }
+    const row = {
+      codeHash: sha('abc'),
+      clientId: 'c1',
+      staffId: 's1',
+      activeOrg: 'o1',
+      codeChallenge: 'cc',
+      redirectUri: 'http://x',
+      scopes: [],
+      resource: null,
+      expiresAt: new Date(Date.now() + 10000),
+      consumedAt: null,
+    }
     db.mcpAuthCode.findUnique.mockResolvedValue(row)
     db.mcpAuthCode.update.mockResolvedValue({})
     const res = await consumeAuthCode('abc')
@@ -255,7 +297,15 @@ describe('refresh tokens', () => {
     const { token } = await createRefreshToken({ clientId: 'c1', staffId: 's1', activeOrg: 'o1', scopes: [] })
     expect(db.mcpRefreshToken.create.mock.calls[0][0].data.tokenHash).toBe(sha(token))
 
-    db.mcpRefreshToken.findUnique.mockResolvedValue({ tokenHash: sha(token), clientId: 'c1', staffId: 's1', activeOrg: 'o1', scopes: [], expiresAt: new Date(Date.now() + 10000), revokedAt: null })
+    db.mcpRefreshToken.findUnique.mockResolvedValue({
+      tokenHash: sha(token),
+      clientId: 'c1',
+      staffId: 's1',
+      activeOrg: 'o1',
+      scopes: [],
+      expiresAt: new Date(Date.now() + 10000),
+      revokedAt: null,
+    })
     const res = await consumeRefreshToken(token)
     expect(res?.staffId).toBe('s1')
   })
@@ -267,8 +317,7 @@ describe('refresh tokens', () => {
 })
 ```
 
-Run: `npx jest tests/unit/mcp-customer/oauth-tokenStore.test.ts --runInBand`
-Expected: FAIL — module `tokenStore` not found.
+Run: `npx jest tests/unit/mcp-customer/oauth-tokenStore.test.ts --runInBand` Expected: FAIL — module `tokenStore` not found.
 
 - [ ] **Step 3: Implement `tokenStore.ts`**
 
@@ -314,14 +363,22 @@ export async function consumeAuthCode(code: string): Promise<AuthCodeData | null
   if (!row || row.consumedAt || row.expiresAt.getTime() < Date.now()) return null
   await prisma.mcpAuthCode.update({ where: { codeHash: row.codeHash }, data: { consumedAt: new Date() } })
   return {
-    clientId: row.clientId, staffId: row.staffId, activeOrg: row.activeOrg,
-    codeChallenge: row.codeChallenge, redirectUri: row.redirectUri, scopes: row.scopes, resource: row.resource ?? undefined,
+    clientId: row.clientId,
+    staffId: row.staffId,
+    activeOrg: row.activeOrg,
+    codeChallenge: row.codeChallenge,
+    redirectUri: row.redirectUri,
+    scopes: row.scopes,
+    resource: row.resource ?? undefined,
   }
 }
 
 /** Returns the bound challenge for a code WITHOUT consuming it (SDK calls this before exchange). */
 export async function peekAuthCodeChallenge(code: string): Promise<string | null> {
-  const row = await prisma.mcpAuthCode.findUnique({ where: { codeHash: sha256(code) }, select: { codeChallenge: true, consumedAt: true, expiresAt: true } })
+  const row = await prisma.mcpAuthCode.findUnique({
+    where: { codeHash: sha256(code) },
+    select: { codeChallenge: true, consumedAt: true, expiresAt: true },
+  })
   if (!row || row.consumedAt || row.expiresAt.getTime() < Date.now()) return null
   return row.codeChallenge
 }
@@ -336,7 +393,14 @@ export interface RefreshData {
 export async function createRefreshToken(d: RefreshData): Promise<{ token: string }> {
   const token = randomToken()
   await prisma.mcpRefreshToken.create({
-    data: { tokenHash: sha256(token), clientId: d.clientId, staffId: d.staffId, activeOrg: d.activeOrg, scopes: d.scopes, expiresAt: new Date(Date.now() + REFRESH_TTL_SECONDS * 1000) },
+    data: {
+      tokenHash: sha256(token),
+      clientId: d.clientId,
+      staffId: d.staffId,
+      activeOrg: d.activeOrg,
+      scopes: d.scopes,
+      expiresAt: new Date(Date.now() + REFRESH_TTL_SECONDS * 1000),
+    },
   })
   return { token }
 }
@@ -352,12 +416,13 @@ export async function revokeRefreshToken(token: string): Promise<void> {
 }
 ```
 
-> Note: `peekAuthCodeChallenge` exists because the SDK calls `challengeForAuthorizationCode()` (read) and then `exchangeAuthorizationCode()` (consume) as two steps. Do not consume in the peek.
+> Note: `peekAuthCodeChallenge` exists because the SDK calls `challengeForAuthorizationCode()` (read) and then `exchangeAuthorizationCode()`
+> (consume) as two steps. Do not consume in the peek.
 
 - [ ] **Step 4: Run the test**
 
-Run: `npx jest tests/unit/mcp-customer/oauth-tokenStore.test.ts --runInBand`
-Expected: PASS (6 tests). The `revokeRefreshToken` test uses `updateMany` — if you kept `update` in the test, align to `updateMany`.
+Run: `npx jest tests/unit/mcp-customer/oauth-tokenStore.test.ts --runInBand` Expected: PASS (6 tests). The `revokeRefreshToken` test uses
+`updateMany` — if you kept `update` in the test, align to `updateMany`.
 
 - [ ] **Step 5: Commit**
 
@@ -371,6 +436,7 @@ git commit -m "feat(customer-mcp): OAuth token store (hashed auth codes + refres
 ### Task 3: Clients store (Dynamic Client Registration)
 
 **Files:**
+
 - Create: `src/mcp/oauth/clientsStore.ts`
 
 - [ ] **Step 1: Implement `clientsStore.ts`** (thin Prisma adapter — covered by the provider/E2E test, no dedicated unit test)
@@ -384,9 +450,15 @@ import type { OAuthClientInformationFull } from '@modelcontextprotocol/sdk/share
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex')
 
 function toClientInfo(row: {
-  clientId: string; clientSecretHash: string | null; clientName: string | null
-  redirectUris: string[]; grantTypes: string[]; scope: string | null
-  tokenEndpointAuthMethod: string | null; clientIdIssuedAt: number | null; clientSecretExpiresAt: number | null
+  clientId: string
+  clientSecretHash: string | null
+  clientName: string | null
+  redirectUris: string[]
+  grantTypes: string[]
+  scope: string | null
+  tokenEndpointAuthMethod: string | null
+  clientIdIssuedAt: number | null
+  clientSecretExpiresAt: number | null
 }): OAuthClientInformationFull {
   return {
     client_id: row.clientId,
@@ -449,6 +521,7 @@ git commit -m "feat(customer-mcp): Prisma-backed OAuth clients store (DCR)"
 ### Task 4: Credentials (bcrypt login for the consent page)
 
 **Files:**
+
 - Create: `src/mcp/oauth/credentials.ts`
 - Test: `tests/unit/mcp-customer/oauth-credentials.test.ts`
 
@@ -496,8 +569,7 @@ it('rejects an unverified or inactive account', async () => {
 })
 ```
 
-Run: `npx jest tests/unit/mcp-customer/oauth-credentials.test.ts --runInBand`
-Expected: FAIL — module not found.
+Run: `npx jest tests/unit/mcp-customer/oauth-credentials.test.ts --runInBand` Expected: FAIL — module not found.
 
 - [ ] **Step 2: Implement `credentials.ts`** (mirrors `loginStaff` security checks; returns only the staffId)
 
@@ -549,8 +621,7 @@ export async function authenticateForMcp(emailRaw: string, password: string): Pr
 
 - [ ] **Step 3: Run the test**
 
-Run: `npx jest tests/unit/mcp-customer/oauth-credentials.test.ts --runInBand`
-Expected: PASS (5 tests).
+Run: `npx jest tests/unit/mcp-customer/oauth-credentials.test.ts --runInBand` Expected: PASS (5 tests).
 
 - [ ] **Step 4: Commit**
 
@@ -564,6 +635,7 @@ git commit -m "feat(customer-mcp): bcrypt credential check for the MCP consent p
 ### Task 5: Login / consent page (HTML)
 
 **Files:**
+
 - Create: `src/mcp/oauth/loginPage.ts`
 - Test: `tests/unit/mcp-customer/oauth-loginPage.test.ts`
 
@@ -578,8 +650,13 @@ it('escapes every interpolated value to prevent XSS via oauth params', () => {
 
 it('embeds the oauth params as hidden fields and posts to the approve route', () => {
   const html = renderLoginPage({
-    clientId: 'c1', redirectUri: 'https://claude.ai/cb', codeChallenge: 'cc',
-    state: 's"x', scope: 'mcp:read', resource: 'https://api.avoqado.io/mcp', clientName: 'Claude',
+    clientId: 'c1',
+    redirectUri: 'https://claude.ai/cb',
+    codeChallenge: 'cc',
+    state: 's"x',
+    scope: 'mcp:read',
+    resource: 'https://api.avoqado.io/mcp',
+    clientName: 'Claude',
   })
   expect(html).toContain('action="/mcp-oauth/approve"')
   expect(html).toContain('name="client_id" value="c1"')
@@ -593,8 +670,7 @@ it('shows an error banner when provided', () => {
 })
 ```
 
-Run: `npx jest tests/unit/mcp-customer/oauth-loginPage.test.ts --runInBand`
-Expected: FAIL — module not found.
+Run: `npx jest tests/unit/mcp-customer/oauth-loginPage.test.ts --runInBand` Expected: FAIL — module not found.
 
 - [ ] **Step 2: Implement `loginPage.ts`**
 
@@ -610,12 +686,7 @@ export interface LoginPageParams {
 }
 
 export function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
 }
 
 const hidden = (name: string, value?: string) =>
@@ -658,8 +729,7 @@ export function renderLoginPage(p: LoginPageParams, opts: { error?: string } = {
 
 - [ ] **Step 3: Run the test**
 
-Run: `npx jest tests/unit/mcp-customer/oauth-loginPage.test.ts --runInBand`
-Expected: PASS (3 tests).
+Run: `npx jest tests/unit/mcp-customer/oauth-loginPage.test.ts --runInBand` Expected: PASS (3 tests).
 
 - [ ] **Step 4: Commit**
 
@@ -673,9 +743,11 @@ git commit -m "feat(customer-mcp): self-contained OAuth consent page (XSS-escape
 ### Task 6: Extend the MCP token to carry clientId
 
 **Files:**
+
 - Modify: `src/mcp/mcpToken.ts`
 
-`AuthInfo.clientId` is required by the SDK; the access token must carry it. Add it without breaking the Phase-0 callers (the dev server calls `issueMcpToken(staffId, org)` 2-arg).
+`AuthInfo.clientId` is required by the SDK; the access token must carry it. Add it without breaking the Phase-0 callers (the dev server
+calls `issueMcpToken(staffId, org)` 2-arg).
 
 - [ ] **Step 1: Edit `mcpToken.ts`**
 
@@ -715,8 +787,7 @@ export function verifyMcpToken(token: string): McpTokenPayload {
 
 - [ ] **Step 2: Run the existing token test** (must still pass)
 
-Run: `npx jest tests/unit/mcp-customer/mcpToken.test.ts --runInBand`
-Expected: PASS — the 2-arg call still works; `cid` is additive.
+Run: `npx jest tests/unit/mcp-customer/mcpToken.test.ts --runInBand` Expected: PASS — the 2-arg call still works; `cid` is additive.
 
 - [ ] **Step 3: Commit**
 
@@ -730,6 +801,7 @@ git commit -m "feat(customer-mcp): carry OAuth client id in the MCP access token
 ### Task 7: The OAuth provider
 
 **Files:**
+
 - Create: `src/mcp/oauth/provider.ts`
 - Test: `tests/unit/mcp-customer/oauth-provider.test.ts`
 
@@ -737,8 +809,11 @@ git commit -m "feat(customer-mcp): carry OAuth client id in the MCP access token
 
 ```typescript
 jest.mock('../../../src/mcp/oauth/tokenStore', () => ({
-  consumeAuthCode: jest.fn(), peekAuthCodeChallenge: jest.fn(),
-  createRefreshToken: jest.fn(), consumeRefreshToken: jest.fn(), revokeRefreshToken: jest.fn(),
+  consumeAuthCode: jest.fn(),
+  peekAuthCodeChallenge: jest.fn(),
+  createRefreshToken: jest.fn(),
+  consumeRefreshToken: jest.fn(),
+  revokeRefreshToken: jest.fn(),
 }))
 jest.mock('../../../src/mcp/oauth/clientsStore', () => ({ prismaClientsStore: {} }))
 
@@ -746,7 +821,9 @@ import { provider } from '../../../src/mcp/oauth/provider'
 import { issueMcpToken } from '../../../src/mcp/mcpToken'
 import * as store from '../../../src/mcp/oauth/tokenStore'
 
-beforeAll(() => { process.env.ACCESS_TOKEN_SECRET = 'test-secret' })
+beforeAll(() => {
+  process.env.ACCESS_TOKEN_SECRET = 'test-secret'
+})
 beforeEach(() => jest.clearAllMocks())
 
 it('verifyAccessToken returns AuthInfo with staffId/activeOrg in extra', async () => {
@@ -762,7 +839,14 @@ it('verifyAccessToken throws on a non-MCP token', async () => {
 })
 
 it('exchangeAuthorizationCode consumes the code and returns access+refresh', async () => {
-  ;(store.consumeAuthCode as jest.Mock).mockResolvedValue({ clientId: 'c1', staffId: 's1', activeOrg: 'o1', codeChallenge: 'cc', redirectUri: 'http://cb', scopes: ['mcp:read'] })
+  ;(store.consumeAuthCode as jest.Mock).mockResolvedValue({
+    clientId: 'c1',
+    staffId: 's1',
+    activeOrg: 'o1',
+    codeChallenge: 'cc',
+    redirectUri: 'http://cb',
+    scopes: ['mcp:read'],
+  })
   ;(store.createRefreshToken as jest.Mock).mockResolvedValue({ token: 'refresh123' })
   const tokens = await provider.exchangeAuthorizationCode({ client_id: 'c1', redirect_uris: ['http://cb'] } as any, 'thecode')
   expect(tokens.access_token).toBeTruthy()
@@ -773,13 +857,19 @@ it('exchangeAuthorizationCode consumes the code and returns access+refresh', asy
 })
 
 it('exchangeAuthorizationCode rejects a code bound to a different client', async () => {
-  ;(store.consumeAuthCode as jest.Mock).mockResolvedValue({ clientId: 'OTHER', staffId: 's1', activeOrg: 'o1', codeChallenge: 'cc', redirectUri: 'http://cb', scopes: [] })
+  ;(store.consumeAuthCode as jest.Mock).mockResolvedValue({
+    clientId: 'OTHER',
+    staffId: 's1',
+    activeOrg: 'o1',
+    codeChallenge: 'cc',
+    redirectUri: 'http://cb',
+    scopes: [],
+  })
   await expect(provider.exchangeAuthorizationCode({ client_id: 'c1', redirect_uris: ['http://cb'] } as any, 'thecode')).rejects.toBeTruthy()
 })
 ```
 
-Run: `npx jest tests/unit/mcp-customer/oauth-provider.test.ts --runInBand`
-Expected: FAIL — module not found.
+Run: `npx jest tests/unit/mcp-customer/oauth-provider.test.ts --runInBand` Expected: FAIL — module not found.
 
 - [ ] **Step 2: Implement `provider.ts`**
 
@@ -836,7 +926,12 @@ export const provider: OAuthServerProvider = {
     if (redirectUri !== undefined && redirectUri !== data.redirectUri) throw new InvalidGrant('redirect_uri mismatch')
 
     const access_token = issueMcpToken(data.staffId, data.activeOrg, ACCESS_TTL_SECONDS, client.client_id)
-    const { token: refresh_token } = await createRefreshToken({ clientId: client.client_id, staffId: data.staffId, activeOrg: data.activeOrg, scopes: data.scopes })
+    const { token: refresh_token } = await createRefreshToken({
+      clientId: client.client_id,
+      staffId: data.staffId,
+      activeOrg: data.activeOrg,
+      scopes: data.scopes,
+    })
     return { access_token, token_type: 'Bearer', expires_in: ACCESS_TTL_SECONDS, scope: data.scopes.join(' ') || undefined, refresh_token }
   },
 
@@ -849,8 +944,19 @@ export const provider: OAuthServerProvider = {
     const access_token = issueMcpToken(data.staffId, data.activeOrg, ACCESS_TTL_SECONDS, client.client_id)
     // Rotate the refresh token (revoke old, issue new) — refresh-token rotation best practice.
     await revokeRefreshToken(refreshToken)
-    const { token: refresh_token } = await createRefreshToken({ clientId: client.client_id, staffId: data.staffId, activeOrg: data.activeOrg, scopes: grantedScopes })
-    return { access_token, token_type: 'Bearer', expires_in: ACCESS_TTL_SECONDS, scope: grantedScopes.join(' ') || undefined, refresh_token }
+    const { token: refresh_token } = await createRefreshToken({
+      clientId: client.client_id,
+      staffId: data.staffId,
+      activeOrg: data.activeOrg,
+      scopes: grantedScopes,
+    })
+    return {
+      access_token,
+      token_type: 'Bearer',
+      expires_in: ACCESS_TTL_SECONDS,
+      scope: grantedScopes.join(' ') || undefined,
+      refresh_token,
+    }
   },
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
@@ -873,8 +979,7 @@ export const provider: OAuthServerProvider = {
 
 - [ ] **Step 3: Run the test**
 
-Run: `npx jest tests/unit/mcp-customer/oauth-provider.test.ts --runInBand`
-Expected: PASS (4 tests).
+Run: `npx jest tests/unit/mcp-customer/oauth-provider.test.ts --runInBand` Expected: PASS (4 tests).
 
 - [ ] **Step 4: Commit**
 
@@ -888,9 +993,11 @@ git commit -m "feat(customer-mcp): OAuthServerProvider (Phase-0 JWT as access to
 ### Task 8: The approve route (login POST → authorization code)
 
 **Files:**
+
 - Create: `src/mcp/oauth/router.ts`
 
-This route is **not** part of the SDK router. It receives the consent-form POST, authenticates, mints a code, and redirects back to the client.
+This route is **not** part of the SDK router. It receives the consent-form POST, authenticates, mints a code, and redirects back to the
+client.
 
 - [ ] **Step 1: Implement `router.ts`**
 
@@ -911,7 +1018,14 @@ function approveHandler() {
   router.post('/mcp-oauth/approve', async (req: Request, res: Response) => {
     const { email, password, client_id, redirect_uri, code_challenge, state, scope, resource } = req.body ?? {}
     const reRender = (error: string) =>
-      res.status(401).send(renderLoginPage({ clientId: client_id, redirectUri: redirect_uri, codeChallenge: code_challenge, state, scope, resource }, { error }))
+      res
+        .status(401)
+        .send(
+          renderLoginPage(
+            { clientId: client_id, redirectUri: redirect_uri, codeChallenge: code_challenge, state, scope, resource },
+            { error },
+          ),
+        )
 
     if (!client_id || !redirect_uri || !code_challenge) return res.status(400).send('Missing OAuth parameters')
 
@@ -930,7 +1044,15 @@ function approveHandler() {
     }
 
     const scopes = scope ? String(scope).split(' ').filter(Boolean) : []
-    const { code } = await createAuthCode({ clientId: client_id, staffId, activeOrg, codeChallenge: code_challenge, redirectUri: redirect_uri, scopes, resource: resource || undefined })
+    const { code } = await createAuthCode({
+      clientId: client_id,
+      staffId,
+      activeOrg,
+      codeChallenge: code_challenge,
+      redirectUri: redirect_uri,
+      scopes,
+      resource: resource || undefined,
+    })
 
     const target = new URL(redirect_uri)
     target.searchParams.set('code', code)
@@ -969,10 +1091,12 @@ git commit -m "feat(customer-mcp): /authorize consent approve route + auth route
 ### Task 9: Wire it into the app + switch /mcp to req.auth
 
 **Files:**
+
 - Modify: `src/mcp/server.ts`
 - Modify: `src/app.ts`
 
-- [ ] **Step 1: Switch `handleMcpRequest` to read `req.auth`** (populated by `requireBearerAuth`), keeping the header path as a fallback for the dev server.
+- [ ] **Step 1: Switch `handleMcpRequest` to read `req.auth`** (populated by `requireBearerAuth`), keeping the header path as a fallback for
+      the dev server.
 
 In `src/mcp/server.ts`, change `buildServerForRequest` to accept a resolved `{ staffId, activeOrg }` and update `handleMcpRequest`:
 
@@ -1057,11 +1181,15 @@ app.post(
 )
 ```
 
-> Mounting notes: `mcpAuthRouter` registers `.well-known/oauth-authorization-server`, `.well-known/oauth-protected-resource`, `/authorize`, `/token`, `/register`, `/revoke` — all at root, so it must NOT sit under `/api/v1`. It is unrelated to the Stripe-webhook-before-`express.json()` rule (that's a different route). The approve route uses its own `urlencoded` parser, so global `express.json()` order doesn't matter for it.
+> Mounting notes: `mcpAuthRouter` registers `.well-known/oauth-authorization-server`, `.well-known/oauth-protected-resource`, `/authorize`,
+> `/token`, `/register`, `/revoke` — all at root, so it must NOT sit under `/api/v1`. It is unrelated to the
+> Stripe-webhook-before-`express.json()` rule (that's a different route). The approve route uses its own `urlencoded` parser, so global
+> `express.json()` order doesn't matter for it.
 
 - [ ] **Step 3: Boot-check (light — no full tsc/jest)**
 
-Run: `npx tsc --noEmit -p tsconfig.json 2>&1 | grep -E "src/mcp/" | head` — expect no errors in `src/mcp/`. (Scope the grep; do not eyeball the whole repo output.)
+Run: `npx tsc --noEmit -p tsconfig.json 2>&1 | grep -E "src/mcp/" | head` — expect no errors in `src/mcp/`. (Scope the grep; do not eyeball
+the whole repo output.)
 
 - [ ] **Step 4: Commit**
 
@@ -1075,9 +1203,11 @@ git commit -m "feat(customer-mcp): mount OAuth AS + guard /mcp with requireBeare
 ### Task 10: End-to-end verification (full OAuth dance)
 
 **Files:**
+
 - Create (temp, DELETE after): `scripts/temp-oauth-e2e.ts`
 
-Prove a real MCP client completes DCR → authorize → login → code → token → `/mcp`. The SDK client can drive the whole flow with an `OAuthClientProvider`, but the login page is interactive. So verify in two halves:
+Prove a real MCP client completes DCR → authorize → login → code → token → `/mcp`. The SDK client can drive the whole flow with an
+`OAuthClientProvider`, but the login page is interactive. So verify in two halves:
 
 - [ ] **Step 1: Metadata + DCR + protected-resource discovery**
 
@@ -1090,13 +1220,15 @@ curl -s localhost:12344/.well-known/oauth-protected-resource/mcp | jq '{resource
 curl -s -X POST localhost:12344/register -H 'content-type: application/json' \
   -d '{"client_name":"e2e","redirect_uris":["http://localhost:9999/cb"],"token_endpoint_auth_method":"none","grant_types":["authorization_code","refresh_token"]}' | jq '{client_id, redirect_uris}'
 ```
+
 Expected: metadata lists the endpoints; `/register` returns a `mcp_…` client_id persisted in `mcp_oauth_clients`.
 
 - [ ] **Step 2: Authorize page renders + approve issues a code**
 
 Open in a browser (real PKCE pair; generate a verifier/challenge with the snippet, paste the challenge):
 `http://localhost:12344/authorize?response_type=code&client_id=<id>&redirect_uri=http://localhost:9999/cb&code_challenge=<challenge>&code_challenge_method=S256&scope=mcp:read&state=xyz`
-Expected: the dark consent card renders. Submit a real OWNER's email/password → 302 to `http://localhost:9999/cb?code=…&state=xyz`. Copy the `code`.
+Expected: the dark consent card renders. Submit a real OWNER's email/password → 302 to `http://localhost:9999/cb?code=…&state=xyz`. Copy the
+`code`.
 
 - [ ] **Step 3: Exchange code → token, then call /mcp**
 
@@ -1110,7 +1242,9 @@ curl -s -X POST localhost:12344/mcp -H "authorization: Bearer <access_token>" -H
 # negative: no token → 401 with WWW-Authenticate
 curl -s -i -X POST localhost:12344/mcp -H 'content-type: application/json' -d '{}' | head -3
 ```
-Expected: token exchange returns a Bearer access token + refresh token; `/mcp` `tools/list` returns the 7 tool names; no-token → `401` with a `WWW-Authenticate` header pointing at the protected-resource metadata.
+
+Expected: token exchange returns a Bearer access token + refresh token; `/mcp` `tools/list` returns the 7 tool names; no-token → `401` with
+a `WWW-Authenticate` header pointing at the protected-resource metadata.
 
 - [ ] **Step 4: Clean up + commit nothing**
 
@@ -1124,16 +1258,20 @@ git status -s   # expect clean (no temp files staged)
 
 ### Task 11 (OPTIONAL — defer unless perf bites): Redis access cache
 
-Review §7 flagged `getUserAccess` as ~7 queries/venue, request-level cache only. If `/mcp` latency is poor with large orgs, wrap `resolveScope`'s per-venue calls in a short Redis TTL cache keyed `mcp:access:{staffId}:{venueId}` (TTL 60s) using the existing Redis client. This is a pure optimization — do NOT block Phase 1 on it. Add only with a measured reason, and log cache hit/miss.
+Review §7 flagged `getUserAccess` as ~7 queries/venue, request-level cache only. If `/mcp` latency is poor with large orgs, wrap
+`resolveScope`'s per-venue calls in a short Redis TTL cache keyed `mcp:access:{staffId}:{venueId}` (TTL 60s) using the existing Redis
+client. This is a pure optimization — do NOT block Phase 1 on it. Add only with a measured reason, and log cache hit/miss.
 
 ---
 
 ## Self-Review (run before handoff)
 
 **Spec coverage** (design §8 + memory must-fix list):
+
 - ✅ Avoqado as AS via `mcpAuthRouter` — Task 8/9.
 - ✅ bcrypt login (NOT Firebase) — Task 4, mirrors `loginStaff`.
-- ✅ P0 `aud` binding — inherited from Phase 0 (`MCP_AUDIENCE`); access token stays audience-bound; dashboard rejection already at `jwt.service.ts:167`.
+- ✅ P0 `aud` binding — inherited from Phase 0 (`MCP_AUDIENCE`); access token stays audience-bound; dashboard rejection already at
+  `jwt.service.ts:167`.
 - ✅ Stateful AS (persist codes/tokens/DCR clients) — Task 1/2/3, **hashed at rest**.
 - ✅ Short token lifetimes — `ACCESS_TTL_SECONDS=3600`, refresh 30d with rotation (Task 2/7).
 - ✅ Payment field redaction — already in Phase-0 `guard.redact`; unchanged.
@@ -1143,15 +1281,21 @@ Review §7 flagged `getUserAccess` as ~7 queries/venue, request-level cache only
 
 **Placeholder scan:** none — every step has full code or a concrete command.
 
-**Type consistency:** `McpTokenPayload.cid` (Task 6) ↔ `provider.verifyAccessToken` reads `cid` (Task 7). `AuthCodeData`/`RefreshData` (Task 2) ↔ consumed identically in `provider` (Task 7). `extra:{staffId,activeOrg}` set in Task 7 ↔ read in Task 9. `prismaClientsStore` (Task 3) ↔ `provider.clientsStore` (Task 7). Consistent.
+**Type consistency:** `McpTokenPayload.cid` (Task 6) ↔ `provider.verifyAccessToken` reads `cid` (Task 7). `AuthCodeData`/`RefreshData`
+(Task 2) ↔ consumed identically in `provider` (Task 7). `extra:{staffId,activeOrg}` set in Task 7 ↔ read in Task 9. `prismaClientsStore`
+(Task 3) ↔ `provider.clientsStore` (Task 7). Consistent.
 
-**Open decision to confirm with the founder before Task 1:** the schema-map domain name for the 3 models (`'Customer MCP / OAuth'` new domain vs. reuse the identity domain). Non-blocking — pick reuse if the generator enforces a fixed domain set.
+**Open decision to confirm with the founder before Task 1:** the schema-map domain name for the 3 models (`'Customer MCP / OAuth'` new
+domain vs. reuse the identity domain). Non-blocking — pick reuse if the generator enforces a fixed domain set.
 
 ## Execution Handoff
 
 Plan complete and saved to `docs/plans/2026-06-03-customer-mcp-phase1-oauth-plan.md`. Two execution options:
 
-1. **Subagent-Driven (recommended)** — dispatch a fresh subagent per task, review between tasks. Given this worktree's machine-load history, hard-constrain each subagent: edit only the task's listed files, run only the one scoped `jest` file, NEVER `npm run format` or the full suite, and `git add` exactly the listed paths.
+1. **Subagent-Driven (recommended)** — dispatch a fresh subagent per task, review between tasks. Given this worktree's machine-load history,
+   hard-constrain each subagent: edit only the task's listed files, run only the one scoped `jest` file, NEVER `npm run format` or the full
+   suite, and `git add` exactly the listed paths.
 2. **Inline Execution** — execute tasks in this session with checkpoints.
 
-Recommended order is exactly Task 1 → 11. Tasks 1–7 are independent of `app.ts` and safe to land incrementally; Task 9 is the only one that changes request behaviour; Task 10 is the proof. **Do not merge `feat/customer-mcp-phase0` until the founder asks.**
+Recommended order is exactly Task 1 → 11. Tasks 1–7 are independent of `app.ts` and safe to land incrementally; Task 9 is the only one that
+changes request behaviour; Task 10 is the proof. **Do not merge `feat/customer-mcp-phase0` until the founder asks.**

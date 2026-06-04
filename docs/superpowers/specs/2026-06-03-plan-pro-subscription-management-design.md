@@ -1,7 +1,7 @@
 # PLAN_PRO Subscription Management & Visibility — Design
 
 > **Status:** Approved design (2026-06-03), pending implementation plans. **Builds on:** `2026-06-02-venue-base-subscription-design.md`
-> (PLAN_PRO base subscription, live in prod) and `2026-06-03-subscription-lifecycle-emails-design.md` (Phase 1.5 emails). **Repos:**
+> (PLAN_PRO base subscription, live in prod) and `2026-06-03-subscription-lifecycle-emails-design.md` (Phase 1.5 emails). **Repos:** >
 > `avoqado-server` (backend hub), `avoqado-web-dashboard` (client), `avoqado-superadmin` (superadmin).
 
 ## Goal

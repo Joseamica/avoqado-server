@@ -387,13 +387,19 @@ We never store the raw CSD — facturapi holds it. We store only the org id + st
 
 ### 7.3 Issuance — plain `invoices.create` for ALL flows (COST DECISION 2026-06-03)
 
-> **Why NOT facturapi "Receipts":** facturapi's e-receipts + hosted autofactura portal + "facturas globales con e-receipts" are a SEPARATE paid product — **"E-Receipts y autofactura" = $599 MXN / organización / mes** (i.e. PER VENUE). The core **"API de facturación" ($299/mes FLAT, RFC emisores ILIMITADOS, $0.60/timbre)** already emits **all CFDI types incl. the global** via plain `invoices.create`. So we **do NOT use facturapi Receipts** — we track un-invoiced sales in OUR OWN DB (the `Cfdi` model + existing Order/Payment tables) and emit plain invoices. This keeps the whole platform on the single $299/mes plan (see §7.6) instead of $599 × every venue.
+> **Why NOT facturapi "Receipts":** facturapi's e-receipts + hosted autofactura portal + "facturas globales con e-receipts" are a SEPARATE
+> paid product — **"E-Receipts y autofactura" = $599 MXN / organización / mes** (i.e. PER VENUE). The core **"API de facturación" ($299/mes
+> FLAT, RFC emisores ILIMITADOS, $0.60/timbre)** already emits **all CFDI types incl. the global** via plain `invoices.create`. So we **do
+> NOT use facturapi Receipts** — we track un-invoiced sales in OUR OWN DB (the `Cfdi` model + existing Order/Payment tables) and emit plain
+> invoices. This keeps the whole platform on the single $299/mes plan (see §7.6) instead of $599 × every venue.
 
 All three flows use the same primitive — `invoices.create` (our `FiscalProvider.createInvoice`):
 
 - **Flow B (Phase 1):** staff picks a closed bill → build CFDI payload → `createInvoice`.
-- **Flow A (Phase 2):** OUR OWN hosted autofactura portal (QR/folio on the ticket → our page) collects receptor data → `createInvoice`. We do NOT buy facturapi's hosted portal.
-- **Flow C (Phase 3):** a job aggregates OUR un-invoiced sales for the period → ONE `createInvoice` to `XAXX010101000` with the `InformacionGlobal` node. No e-receipts needed.
+- **Flow A (Phase 2):** OUR OWN hosted autofactura portal (QR/folio on the ticket → our page) collects receptor data → `createInvoice`. We
+  do NOT buy facturapi's hosted portal.
+- **Flow C (Phase 3):** a job aggregates OUR un-invoiced sales for the period → ONE `createInvoice` to `XAXX010101000` with the
+  `InformacionGlobal` node. No e-receipts needed.
 
 Core endpoints used (the venue's org key):
 
@@ -404,7 +410,8 @@ GET    /v2/invoices/{id}/xml | /pdf      artifacts
 DELETE /v2/invoices/{id} { motive, substitution }  cancel 4.0 (§12)
 ```
 
-> ✅ The Phase 0b connector already matches this: `FiscalProvider` has `createInvoice`/`cancel`/`getInvoice`/`downloadXml|Pdf` and intentionally NO receipt methods — no rework. The global is a `createInvoice` variant (add the `InformacionGlobal` mapping in Phase 3).
+> ✅ The Phase 0b connector already matches this: `FiscalProvider` has `createInvoice`/`cancel`/`getInvoice`/`downloadXml|Pdf` and
+> intentionally NO receipt methods — no rework. The global is a `createInvoice` variant (add the `InformacionGlobal` mapping in Phase 3).
 
 ### 7.4 Connector service shape (DDD, mirrors existing provider pattern)
 
@@ -438,14 +445,23 @@ portability, not Alegra.
 
 ### 7.6 Cost model — which facturapi product we contract (RESOLVED 2026-06-03)
 
-We contract **ONE product: "API de facturación" — $299 MXN/mes FLAT for the whole Avoqado account + $0.60 MXN/timbre.** Its included scope (per facturapi's own list) covers everything this module needs:
-- Emisión de **todo tipo de CFDI y complementos** vía API (Flow B/A/C) · **RFC emisores ILIMITADOS** (every venue = one emisor, **no per-org fee**) · **Sin tope de timbrado** · **Cancelaciones ilimitadas** (§12) · Webhooks · **PDF personalizado + envío por correo** (§14 artifacts/delivery) · **Búsqueda en catálogos Producto/Unidad SAT** (D3 — catalogs are facturapi's burden) · soporte e-mail/chat.
+We contract **ONE product: "API de facturación" — $299 MXN/mes FLAT for the whole Avoqado account + $0.60 MXN/timbre.** Its included scope
+(per facturapi's own list) covers everything this module needs:
 
-**We do NOT contract** the per-organización add-ons: ~~Facturación web $199~~ (we have our own dashboard), ~~E-Receipts y autofactura $599~~ (we build our own portal + global, §7.3), ~~Descarga masiva $999~~, ~~Facturapi para Stripe $299~~.
+- Emisión de **todo tipo de CFDI y complementos** vía API (Flow B/A/C) · **RFC emisores ILIMITADOS** (every venue = one emisor, **no per-org
+  fee**) · **Sin tope de timbrado** · **Cancelaciones ilimitadas** (§12) · Webhooks · **PDF personalizado + envío por correo** (§14
+  artifacts/delivery) · **Búsqueda en catálogos Producto/Unidad SAT** (D3 — catalogs are facturapi's burden) · soporte e-mail/chat.
 
-**Economics:** the ENTIRE platform (all venues) = **$299/mes + $0.60 per stamped CFDI.** Not per venue. Since facturación is a **Pro-tier ($999/mes) feature** (§15), a single Pro venue more than covers the $299; most diners don't ask for factura so timbre volume is low. Comfortably profitable; the $0.60/timbre can even be passed through.
+**We do NOT contract** the per-organización add-ons: ~~Facturación web $199~~ (we have our own dashboard), ~~E-Receipts y autofactura $599~~
+(we build our own portal + global, §7.3), ~~Descarga masiva $999~~, ~~Facturapi para Stripe $299~~.
 
-**Building + testing now = $0:** facturapi test mode is FREE — *"Los CFDI emitidos con tu test secret key o mediante playground no generan costo."* The $299 plan is only needed to issue LIVE CFDIs. So get a free account + `sk_test_` key to run the smoke test; subscribe only when going to production.
+**Economics:** the ENTIRE platform (all venues) = **$299/mes + $0.60 per stamped CFDI.** Not per venue. Since facturación is a **Pro-tier
+($999/mes) feature** (§15), a single Pro venue more than covers the $299; most diners don't ask for factura so timbre volume is low.
+Comfortably profitable; the $0.60/timbre can even be passed through.
+
+**Building + testing now = $0:** facturapi test mode is FREE — _"Los CFDI emitidos con tu test secret key o mediante playground no generan
+costo."_ The $299 plan is only needed to issue LIVE CFDIs. So get a free account + `sk_test_` key to run the smoke test; subscribe only when
+going to production.
 
 ---
 
@@ -502,9 +518,10 @@ Runs **locally before** any call to the PAC. Rejects with a human-readable reaso
 ## 11. Factura global (Flow C — Phase 3)
 
 - Job `factura-global.job.ts` runs per `FiscalEmisor.globalPeriodicity` (default mensual), grouped per emisor.
-- Gathers OUR un-invoiced sales (tracked in our DB) in the period whose merchant has `includeInGlobal=true` and that were NOT individually invoiced (A or B). NOT facturapi receipts (§7.3 cost decision).
-- Issues one CFDI via `createInvoice` (the global variant): Receptor `XAXX010101000` "PÚBLICO EN GENERAL", `RegimenFiscalReceptor=616`, `UsoCFDI=S01`, with
-  `InformacionGlobal { Periodicidad, Meses, Año }`.
+- Gathers OUR un-invoiced sales (tracked in our DB) in the period whose merchant has `includeInGlobal=true` and that were NOT individually
+  invoiced (A or B). NOT facturapi receipts (§7.3 cost decision).
+- Issues one CFDI via `createInvoice` (the global variant): Receptor `XAXX010101000` "PÚBLICO EN GENERAL", `RegimenFiscalReceptor=616`,
+  `UsoCFDI=S01`, with `InformacionGlobal { Periodicidad, Meses, Año }`.
 - Idempotent per (venue, period) — never double-issue a period.
 - Surfaces result + any excluded sales in the dashboard (no silent truncation).
 
