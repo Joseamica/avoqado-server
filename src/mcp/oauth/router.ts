@@ -16,7 +16,12 @@ function approveHandler() {
     const reRender = (error: string) =>
       res
         .status(401)
-        .send(renderLoginPage({ clientId: client_id, redirectUri: redirect_uri, codeChallenge: code_challenge, state, scope, resource }, { error }))
+        .send(
+          renderLoginPage(
+            { clientId: client_id, redirectUri: redirect_uri, codeChallenge: code_challenge, state, scope, resource },
+            { error },
+          ),
+        )
 
     if (!client_id || !redirect_uri || !code_challenge) return res.status(400).send('Missing OAuth parameters')
 

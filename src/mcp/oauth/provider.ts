@@ -74,7 +74,13 @@ export const provider: OAuthServerProvider = {
       activeOrg: data.activeOrg,
       scopes: grantedScopes,
     })
-    return { access_token, token_type: 'Bearer', expires_in: ACCESS_TTL_SECONDS, scope: grantedScopes.join(' ') || undefined, refresh_token }
+    return {
+      access_token,
+      token_type: 'Bearer',
+      expires_in: ACCESS_TTL_SECONDS,
+      scope: grantedScopes.join(' ') || undefined,
+      refresh_token,
+    }
   },
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {

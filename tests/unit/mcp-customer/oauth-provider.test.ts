@@ -55,5 +55,7 @@ it('exchangeAuthorizationCode rejects a code bound to a different client', async
     redirectUri: 'http://cb',
     scopes: [],
   })
-  await expect(provider.exchangeAuthorizationCode({ client_id: 'c1', redirect_uris: ['http://cb'] } as never, 'thecode')).rejects.toBeTruthy()
+  await expect(
+    provider.exchangeAuthorizationCode({ client_id: 'c1', redirect_uris: ['http://cb'] } as never, 'thecode'),
+  ).rejects.toBeTruthy()
 })
