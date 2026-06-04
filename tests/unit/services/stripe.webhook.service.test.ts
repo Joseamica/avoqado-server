@@ -730,4 +730,85 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       expect(prisma.venueFeature.findFirst).toHaveBeenCalled()
     })
   })
+
+  // Regression: prod incident 2026-06-04 — payment_intent.succeeded crashed the whole
+  // webhook with `Foreign key constraint violated: WebhookEvent_venueId_fkey` because the
+  // venueId enrichment wrote an untrusted metadata.venueId (pointing to a non-existent
+  // venue) BEFORE the event switch, and the controller returns 200 to Stripe (no retry).
+  describe('🛡️ TEST 7: venueId enrichment must never block event processing (FK guard)', () => {
+    const buildPaymentIntentEvent = (venueId: string): Stripe.Event =>
+      ({
+        id: 'evt_pi_fkguard',
+        object: 'event',
+        type: 'payment_intent.succeeded',
+        created: Date.now() / 1000,
+        livemode: false,
+        pending_webhooks: 0,
+        request: null,
+        api_version: '2023-10-16',
+        data: {
+          object: {
+            id: 'pi_fkguard_123',
+            object: 'payment_intent',
+            // type !== 'chatbot_tokens' → handlePaymentIntentSucceeded is a no-op
+            metadata: { venueId, type: 'reservation_deposit' },
+          } as any,
+        },
+      }) as Stripe.Event
+
+    it('should NOT crash and should skip enrichment when metadata.venueId does not exist', async () => {
+      ;(prisma.webhookEvent.create as jest.Mock).mockResolvedValueOnce({ id: 'webhook_pi_1' })
+      // Venue does not exist (deleted / foreign-environment id)
+      ;(prisma.venue.findUnique as jest.Mock).mockResolvedValueOnce(null)
+      ;(prisma.webhookEvent.update as jest.Mock).mockResolvedValue({})
+
+      // Must NOT throw (previously threw the FK violation and lost the event)
+      await expect(handleStripeWebhookEvent(buildPaymentIntentEvent('venue_deleted_999'))).resolves.not.toThrow()
+
+      // Validated the venue before touching the FK column
+      expect(prisma.venue.findUnique).toHaveBeenCalledWith({
+        where: { id: 'venue_deleted_999' },
+        select: { id: true },
+      })
+
+      // Enrichment update with the bad venueId must NOT happen
+      expect(prisma.webhookEvent.update).not.toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ venueId: 'venue_deleted_999' }) }),
+      )
+
+      // Event still reaches the SUCCESS update (processing was not blocked)
+      expect(prisma.webhookEvent.update).toHaveBeenCalledWith({
+        where: { id: 'webhook_pi_1' },
+        data: expect.objectContaining({ status: 'SUCCESS' }),
+      })
+    })
+
+    it('should still enrich the webhook event when metadata.venueId exists (regression)', async () => {
+      ;(prisma.webhookEvent.create as jest.Mock).mockResolvedValueOnce({ id: 'webhook_pi_2' })
+      ;(prisma.venue.findUnique as jest.Mock).mockResolvedValueOnce({ id: 'venue_real_1' })
+      ;(prisma.webhookEvent.update as jest.Mock).mockResolvedValue({})
+
+      await expect(handleStripeWebhookEvent(buildPaymentIntentEvent('venue_real_1'))).resolves.not.toThrow()
+
+      expect(prisma.webhookEvent.update).toHaveBeenCalledWith({
+        where: { id: 'webhook_pi_2' },
+        data: { venueId: 'venue_real_1' },
+      })
+    })
+
+    it('should keep enrichment non-fatal if the existence check throws', async () => {
+      ;(prisma.webhookEvent.create as jest.Mock).mockResolvedValueOnce({ id: 'webhook_pi_3' })
+      // A transient DB error during the venue lookup must not bring down the webhook
+      ;(prisma.venue.findUnique as jest.Mock).mockRejectedValueOnce(new Error('connection reset'))
+      ;(prisma.webhookEvent.update as jest.Mock).mockResolvedValue({})
+
+      await expect(handleStripeWebhookEvent(buildPaymentIntentEvent('venue_real_1'))).resolves.not.toThrow()
+
+      // Event still processed to SUCCESS despite the enrichment failure
+      expect(prisma.webhookEvent.update).toHaveBeenCalledWith({
+        where: { id: 'webhook_pi_3' },
+        data: expect.objectContaining({ status: 'SUCCESS' }),
+      })
+    })
+  })
 })

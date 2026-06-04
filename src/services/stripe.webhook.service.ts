@@ -1083,12 +1083,41 @@ export async function handleStripeWebhookEvent(event: Stripe.Event) {
       venueId = venueFeature?.venueId || null
     }
 
-    // Update the webhook event with venueId if found
+    // Update the webhook event with venueId if found.
+    // ⚠️ metadata.venueId is UNTRUSTED input from Stripe — a venue that was deleted (or an
+    // id from another environment) violates WebhookEvent_venueId_fkey. Because this runs
+    // BEFORE the switch below, an unvalidated id would crash the whole webhook before the
+    // event is ever processed, and the controller returns 200 to Stripe (no retry) → the
+    // event would be silently lost. This enrichment is monitoring-only, so it must NEVER be
+    // able to block event processing: validate the venue exists, and keep it non-fatal.
     if (venueId && webhookEventId) {
-      await prisma.webhookEvent.update({
-        where: { id: webhookEventId },
-        data: { venueId },
-      })
+      try {
+        const venueExists = await prisma.venue.findUnique({
+          where: { id: venueId },
+          select: { id: true },
+        })
+
+        if (venueExists) {
+          await prisma.webhookEvent.update({
+            where: { id: webhookEventId },
+            data: { venueId },
+          })
+        } else {
+          logger.warn('⚠️ Webhook: venueId from event metadata does not exist, skipping enrichment', {
+            eventId: event.id,
+            type: event.type,
+            venueId,
+          })
+        }
+      } catch (enrichError) {
+        // Monitoring metadata must never block event processing
+        logger.warn('⚠️ Webhook: failed to enrich event with venueId (non-fatal)', {
+          eventId: event.id,
+          type: event.type,
+          venueId,
+          error: enrichError instanceof Error ? enrichError.message : 'Unknown error',
+        })
+      }
     }
 
     logger.info('🎯 Processing webhook event', { type: event.type, id: event.id, webhookEventId })
