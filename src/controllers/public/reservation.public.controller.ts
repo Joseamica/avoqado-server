@@ -807,6 +807,60 @@ export async function createReservation(req: Request, res: Response, next: NextF
       // reservation exists. Best-effort (see helper).
       await finalizeReservationSideEffects(reservation.id)
 
+      // Confirmation (email + WhatsApp) for non-paid classes — free / credit /
+      // pay-at-venue, which land CONFIRMED here. Paid classes are PENDING with a
+      // Stripe checkout pending, so their confirmation fires from the deposit
+      // webhook after payment clears (same as appointments). Without this block,
+      // non-paid class reservations never got a confirmation carrying the manage
+      // link: this branch returns before the appointment confirmation code below.
+      // Best-effort — a mail/Meta failure must never fail a committed booking.
+      if (reservation.status === 'CONFIRMED') {
+        const classProduct = await prisma.product
+          .findFirst({ where: { id: reservation.productId ?? undefined, venueId: venue.id }, select: { name: true } })
+          .catch(() => null)
+        const className = classProduct?.name ?? 'Clase'
+        const tz = venue.timezone || 'America/Mexico_City'
+        const dateLongRaw = formatInTimeZone(reservation.startsAt, tz, "EEEE d 'de' MMMM 'de' yyyy", { locale: esLocale })
+        const dateLong = dateLongRaw.charAt(0).toUpperCase() + dateLongRaw.slice(1)
+        const time = formatInTimeZone(reservation.startsAt, tz, 'HH:mm')
+
+        if (reservation.guestEmail) {
+          try {
+            await emailService.sendReservationConfirmedEmail(reservation.guestEmail, {
+              customerName: reservation.guestName ?? 'Cliente',
+              venueName: venue.name,
+              venueSlug: venue.slug,
+              confirmationCode: reservation.confirmationCode,
+              cancelSecret: reservation.cancelSecret,
+              dateLong,
+              time,
+              services: [{ name: className, modifiers: [] }],
+              owedAtVenueMxn: reservation.owesAtVenue && reservation.upfrontAmount ? Number(reservation.upfrontAmount) : null,
+            })
+          } catch (error) {
+            logger.warn(`[CLASS CONFIRM EMAIL] failed for ${reservation.confirmationCode}: ${(error as Error).message}`)
+          }
+        }
+        if (reservation.guestPhone) {
+          try {
+            await sendReservationConfirmationWhatsApp(reservation.guestPhone, {
+              customerName: reservation.guestName ?? 'Cliente',
+              venueName: venue.name,
+              date: dateLong,
+              time,
+              // Classes don't carry add-on modifiers; keep the clean 4-param
+              // template. The class name lives in the email body.
+              extras: '',
+              // Feeds the optional "Gestionar mi cita" WhatsApp button.
+              venueSlug: venue.slug,
+              cancelSecret: reservation.cancelSecret,
+            })
+          } catch (error) {
+            logger.warn(`[CLASS CONFIRM WHATSAPP] failed for ${reservation.confirmationCode}: ${(error as Error).message}`)
+          }
+        }
+      }
+
       return res.status(201).json({
         confirmationCode: reservation.confirmationCode,
         cancelSecret: reservation.cancelSecret,
