@@ -59,7 +59,11 @@ import * as venueFeatureController from '../controllers/dashboard/venueFeature.d
 import * as saleVerificationController from '../controllers/dashboard/sale-verification.dashboard.controller'
 import * as cryptoConfigController from '../controllers/dashboard/cryptoConfig.dashboard.controller'
 import * as tpvMessageController from '../controllers/dashboard/tpv-message.dashboard.controller'
-import { issueCfdiForOrderController } from '../controllers/dashboard/cfdi.dashboard.controller'
+import {
+  issueCfdiForOrderController,
+  getCfdiStatusController,
+  cancelCfdiController,
+} from '../controllers/dashboard/cfdi.dashboard.controller'
 import {
   assistantActionConfirmSchema,
   assistantActionPreviewSchema,
@@ -219,7 +223,7 @@ import {
   terminalResultSchema,
 } from '../schemas/dashboard/tpv-command.schema'
 import { createTerminalOrderSchema } from '../schemas/dashboard/terminalOrder.schema'
-import { issueCfdiSchema } from '../schemas/dashboard/cfdi.schema'
+import { issueCfdiSchema, cancelCfdiSchema } from '../schemas/dashboard/cfdi.schema'
 import inventoryRoutes from './dashboard/inventory.routes'
 import superadminRoutes from './dashboard/superadmin.routes'
 import venuePaymentConfigRoutes from './dashboard/venuePaymentConfig.routes'
@@ -2998,6 +3002,23 @@ router.post(
   checkFeatureAccess('CFDI'),
   checkPermission('cfdi:issue'),
   issueCfdiForOrderController,
+)
+
+// ---- CFDI lifecycle: status read + cancel ----
+router.get(
+  '/venues/:venueId/cfdi/:cfdiId',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:view'),
+  getCfdiStatusController,
+)
+router.post(
+  '/venues/:venueId/cfdi/:cfdiId/cancel',
+  authenticateTokenMiddleware,
+  validateRequest(cancelCfdiSchema), // validate body BEFORE feature/perm checks (permissions-policy rule)
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:configure'), // destructive → OWNER/ADMIN only
+  cancelCfdiController,
 )
 
 // Manual Payment routes (ADMIN+) — MUST be registered BEFORE /venues/:venueId/payments/:paymentId

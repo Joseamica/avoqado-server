@@ -242,3 +242,111 @@ function stampedFields(data: Record<string, any>) {
   for (const k of keys) if (data[k] !== undefined) out[k] = data[k]
   return out
 }
+
+// ─── Cancel ───────────────────────────────────────────────────────────────────
+
+export interface CancelCfdiDeps {
+  loadCfdi: (cfdiId: string) => Promise<any | null>
+  resolveProvider: typeof resolveFiscalProvider
+  updateCfdi: (cfdiId: string, data: Record<string, any>) => Promise<any>
+}
+
+export interface CancelCfdiResult {
+  cancelStatus: 'REQUESTED' | 'ACCEPTED' | 'REJECTED' | 'CANCELLED'
+  cancelledAt: Date | null
+  cfdi: any
+}
+
+export async function cancelCfdi(
+  params: {
+    cfdiId: string
+    motivo: '01' | '02' | '03' | '04'
+    substituteUuid?: string
+    sandbox: boolean
+    expectedVenueId?: string
+  },
+  deps: CancelCfdiDeps = defaultCancelDeps,
+): Promise<CancelCfdiResult> {
+  // 1. Load + tenant isolation
+  const cfdi = await deps.loadCfdi(params.cfdiId)
+  if (!cfdi) throw new Error(`CFDI ${params.cfdiId} not found`)
+  if (params.expectedVenueId && cfdi.venueId !== params.expectedVenueId) {
+    throw new Error(`CFDI ${params.cfdiId} not found`) // tenant isolation → 404
+  }
+
+  // 2. Business-rule guards (spec §12: shape-only in Zod; rules stay in service)
+  if (cfdi.status !== 'STAMPED') {
+    throw new Error('Solo se puede cancelar un CFDI timbrado (STAMPED)')
+  }
+  if (params.motivo === '01' && !params.substituteUuid) {
+    throw new Error('El motivo 01 requiere el UUID de sustitución')
+  }
+
+  // 3. Call the PAC via the provider interface
+  const provider = deps.resolveProvider(cfdi.fiscalEmisor, { sandbox: params.sandbox })
+  const result = await provider.cancelInvoice({
+    providerInvoiceId: cfdi.facturapiId,
+    motivo: params.motivo,
+    substituteUuid: params.substituteUuid,
+  })
+
+  // 4. Map provider status → CfdiCancelStatus enum
+  const cancelStatus = mapProviderCancelStatus(result.status)
+
+  // 5. Persist — update cancel fields + flip cfdi.status when definitively resolved
+  const updated = await deps.updateCfdi(cfdi.id, {
+    cancelMotivo: params.motivo,
+    cancelSubstituteUuid: params.substituteUuid ?? null,
+    cancelStatus,
+    cancelRequestedAt: new Date(),
+    cancelledAt: result.cancelledAt,
+    // Only flip the CFDI status to CANCELLED when the PAC confirms it is done
+    status: cancelStatus === 'CANCELLED' || cancelStatus === 'ACCEPTED' ? 'CANCELLED' : cfdi.status,
+  })
+
+  return { cancelStatus, cancelledAt: result.cancelledAt, cfdi: updated }
+}
+
+function mapProviderCancelStatus(s: string): 'REQUESTED' | 'ACCEPTED' | 'REJECTED' | 'CANCELLED' {
+  switch (s) {
+    case 'canceled':
+      return 'CANCELLED'
+    case 'accepted':
+      return 'ACCEPTED'
+    case 'rejected':
+      return 'REJECTED'
+    default:
+      // 'pending' / 'verifying' / unknown → still awaiting SAT resolution
+      return 'REQUESTED'
+  }
+}
+
+// Real defaults — mirror defaultDeps pattern
+const defaultCancelDeps: CancelCfdiDeps = {
+  loadCfdi: id => prisma.cfdi.findUnique({ where: { id }, include: { fiscalEmisor: true } }),
+  resolveProvider: resolveFiscalProvider,
+  updateCfdi: (id, data) => prisma.cfdi.update({ where: { id }, data }),
+}
+
+// ─── Status ───────────────────────────────────────────────────────────────────
+
+export interface GetCfdiStatusDeps {
+  loadCfdi: (cfdiId: string) => Promise<any | null>
+}
+
+export async function getCfdiStatus(
+  params: { cfdiId: string; expectedVenueId?: string },
+  deps: GetCfdiStatusDeps = defaultStatusDeps,
+): Promise<any> {
+  const cfdi = await deps.loadCfdi(params.cfdiId)
+  if (!cfdi) throw new Error(`CFDI ${params.cfdiId} not found`)
+  if (params.expectedVenueId && cfdi.venueId !== params.expectedVenueId) {
+    throw new Error(`CFDI ${params.cfdiId} not found`) // tenant isolation → 404
+  }
+  return cfdi
+}
+
+// Real defaults
+const defaultStatusDeps: GetCfdiStatusDeps = {
+  loadCfdi: id => prisma.cfdi.findUnique({ where: { id } }),
+}

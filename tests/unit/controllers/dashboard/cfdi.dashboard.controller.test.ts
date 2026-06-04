@@ -1,8 +1,12 @@
 // tests/unit/controllers/dashboard/cfdi.dashboard.controller.test.ts
 
 const mockIssue = jest.fn()
+const mockCancel = jest.fn()
+const mockGetStatus = jest.fn()
 jest.mock('../../../../src/services/fiscal/cfdi.service', () => ({
   issueCfdiForOrder: (...a: any[]) => mockIssue(...a),
+  cancelCfdi: (...a: any[]) => mockCancel(...a),
+  getCfdiStatus: (...a: any[]) => mockGetStatus(...a),
 }))
 
 jest.mock('../../../../src/config/logger', () => ({
@@ -16,7 +20,11 @@ jest.mock('../../../../src/config/env', () => ({
   env: { NODE_ENV: 'test' },
 }))
 
-import { issueCfdiForOrderController } from '../../../../src/controllers/dashboard/cfdi.dashboard.controller'
+import {
+  issueCfdiForOrderController,
+  cancelCfdiController,
+  getCfdiStatusController,
+} from '../../../../src/controllers/dashboard/cfdi.dashboard.controller'
 
 // ==========================================
 // HELPERS
@@ -147,5 +155,146 @@ describe('issueCfdiForOrderController', () => {
         flow: 'STAFF_B',
       }),
     )
+  })
+})
+
+// ──────────────────────────────────────────────────────────────────────────────
+// cancelCfdiController
+// ──────────────────────────────────────────────────────────────────────────────
+
+function cancelReq(overrides: Partial<any> = {}): any {
+  return {
+    params: { cfdiId: 'c1', venueId: 'v1' },
+    body: { motivo: '02' },
+    authContext: { venueId: 'v1' },
+    ...overrides,
+  }
+}
+
+describe('cancelCfdiController', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  it('returns 200 with cancelStatus on successful cancel', async () => {
+    mockCancel.mockResolvedValue({
+      cancelStatus: 'ACCEPTED',
+      cancelledAt: new Date('2026-01-01'),
+      cfdi: { id: 'c1' },
+    })
+
+    const res = mockRes()
+    await cancelCfdiController(cancelReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cancelStatus: 'ACCEPTED',
+        cfdiId: 'c1',
+      }),
+    )
+  })
+
+  it('returns 409 when the cfdi is not STAMPED', async () => {
+    mockCancel.mockRejectedValue(new Error('Solo se puede cancelar un CFDI timbrado (STAMPED)'))
+
+    const res = mockRes()
+    await cancelCfdiController(cancelReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(409)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: expect.stringMatching(/timbrad/i) }))
+  })
+
+  it('returns 409 when motivo 01 is sent without a substituteUuid', async () => {
+    mockCancel.mockRejectedValue(new Error('El motivo 01 requiere el UUID de sustitución'))
+
+    const res = mockRes()
+    await cancelCfdiController(cancelReq({ body: { motivo: '01' } }), res)
+
+    expect(res.status).toHaveBeenCalledWith(409)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: expect.stringMatching(/motivo|sustituci/i) }))
+  })
+
+  it('returns 404 when the cfdi is not found (tenant isolation)', async () => {
+    mockCancel.mockRejectedValue(new Error('CFDI c1 not found'))
+
+    const res = mockRes()
+    await cancelCfdiController(cancelReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(404)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'CFDI no encontrado' }))
+  })
+
+  it('returns 500 on unexpected errors', async () => {
+    mockCancel.mockRejectedValue(new Error('Connection refused'))
+
+    const res = mockRes()
+    await cancelCfdiController(cancelReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(500)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Error interno al cancelar el CFDI' }))
+  })
+
+  it('passes expectedVenueId from authContext to the service', async () => {
+    mockCancel.mockResolvedValue({ cancelStatus: 'REQUESTED', cancelledAt: null, cfdi: { id: 'c1' } })
+
+    const res = mockRes()
+    await cancelCfdiController(cancelReq({ authContext: { venueId: 'myVenue' } }), res)
+
+    expect(mockCancel).toHaveBeenCalledWith(expect.objectContaining({ expectedVenueId: 'myVenue', cfdiId: 'c1', motivo: '02' }))
+  })
+})
+
+// ──────────────────────────────────────────────────────────────────────────────
+// getCfdiStatusController
+// ──────────────────────────────────────────────────────────────────────────────
+
+function statusReq(overrides: Partial<any> = {}): any {
+  return {
+    params: { cfdiId: 'c1', venueId: 'v1' },
+    authContext: { venueId: 'v1' },
+    ...overrides,
+  }
+}
+
+describe('getCfdiStatusController', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  it('returns 200 with the cfdi on success', async () => {
+    const cfdi = { id: 'c1', uuid: 'U1', status: 'STAMPED', cancelStatus: null }
+    mockGetStatus.mockResolvedValue(cfdi)
+
+    const res = mockRes()
+    await getCfdiStatusController(statusReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith({ cfdi })
+  })
+
+  it('returns 404 when the cfdi is not found (tenant isolation)', async () => {
+    mockGetStatus.mockRejectedValue(new Error('CFDI c1 not found'))
+
+    const res = mockRes()
+    await getCfdiStatusController(statusReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(404)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'CFDI no encontrado' }))
+  })
+
+  it('returns 500 on unexpected errors', async () => {
+    mockGetStatus.mockRejectedValue(new Error('DB connection failed'))
+
+    const res = mockRes()
+    await getCfdiStatusController(statusReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(500)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Error interno al consultar el CFDI' }))
+  })
+
+  it('passes expectedVenueId from authContext to the service', async () => {
+    mockGetStatus.mockResolvedValue({ id: 'c1' })
+
+    const res = mockRes()
+    await getCfdiStatusController(statusReq({ authContext: { venueId: 'tenantVenue' } }), res)
+
+    expect(mockGetStatus).toHaveBeenCalledWith(expect.objectContaining({ cfdiId: 'c1', expectedVenueId: 'tenantVenue' }))
   })
 })
