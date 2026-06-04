@@ -940,4 +940,121 @@ describe('Stripe Service - Comprehensive Tests', () => {
       )
     })
   })
+
+  describe('🗓️ TEST 8: PLAN_PRO subscription helpers', () => {
+    describe('setSubscriptionCancelAtPeriodEnd()', () => {
+      it('should schedule cancellation at period end (cancel=true) WITHOUT touching the VenueFeature row', async () => {
+        const mockSubId = 'sub_plan_pro'
+
+        mockStripeInstance.subscriptions.update.mockResolvedValueOnce({
+          id: mockSubId,
+          cancel_at_period_end: true,
+        })
+
+        const result = await stripeService.setSubscriptionCancelAtPeriodEnd(mockSubId, true)
+
+        // Uses subscriptions.update (NOT subscriptions.cancel — never immediate)
+        expect(mockStripeInstance.subscriptions.update).toHaveBeenCalledWith(mockSubId, { cancel_at_period_end: true })
+        expect(mockStripeInstance.subscriptions.cancel).not.toHaveBeenCalled()
+        // Must NOT deactivate the VenueFeature (venue stays entitled until period end)
+        expect(prisma.venueFeature.updateMany).not.toHaveBeenCalled()
+        expect(prisma.venueFeature.update).not.toHaveBeenCalled()
+        // Returns the updated Stripe subscription
+        expect((result as any).cancel_at_period_end).toBe(true)
+      })
+
+      it('should reactivate a scheduled cancellation (cancel=false)', async () => {
+        const mockSubId = 'sub_plan_pro'
+
+        mockStripeInstance.subscriptions.update.mockResolvedValueOnce({
+          id: mockSubId,
+          cancel_at_period_end: false,
+        })
+
+        const result = await stripeService.setSubscriptionCancelAtPeriodEnd(mockSubId, false)
+
+        expect(mockStripeInstance.subscriptions.update).toHaveBeenCalledWith(mockSubId, { cancel_at_period_end: false })
+        expect((result as any).cancel_at_period_end).toBe(false)
+      })
+
+      it('should propagate Stripe errors', async () => {
+        const stripeError = new Error('No such subscription')
+        ;(stripeError as any).type = 'invalid_request_error'
+        mockStripeInstance.subscriptions.update.mockRejectedValueOnce(stripeError)
+
+        await expect(stripeService.setSubscriptionCancelAtPeriodEnd('sub_missing', true)).rejects.toThrow('No such subscription')
+      })
+    })
+
+    describe('retrievePlanSubscription()', () => {
+      it('should return the typed summary the plan endpoint needs', async () => {
+        const mockSubId = 'sub_plan_pro'
+        const periodEndSec = 1893456000 // 2030-01-01T00:00:00Z
+
+        mockStripeInstance.subscriptions.retrieve.mockResolvedValueOnce({
+          id: mockSubId,
+          status: 'active',
+          cancel_at_period_end: true,
+          current_period_end: periodEndSec,
+          items: {
+            data: [{ price: { recurring: { interval: 'month' }, unit_amount: 115884 } }],
+          },
+        })
+
+        const result = await stripeService.retrievePlanSubscription(mockSubId)
+
+        expect(mockStripeInstance.subscriptions.retrieve).toHaveBeenCalledWith(mockSubId)
+        expect(result).toEqual({
+          status: 'active',
+          cancelAtPeriodEnd: true,
+          currentPeriodEnd: new Date(periodEndSec * 1000),
+          interval: 'month',
+          grossAmountCents: 115884,
+        })
+      })
+
+      it('should normalize a yearly interval', async () => {
+        mockStripeInstance.subscriptions.retrieve.mockResolvedValueOnce({
+          id: 'sub_yearly',
+          status: 'active',
+          cancel_at_period_end: false,
+          current_period_end: 1893456000,
+          items: { data: [{ price: { recurring: { interval: 'year' }, unit_amount: 1390608 } }] },
+        })
+
+        const result = await stripeService.retrievePlanSubscription('sub_yearly')
+
+        expect(result.interval).toBe('year')
+        expect(result.cancelAtPeriodEnd).toBe(false)
+      })
+
+      it('should null out missing/unknown fields (no period end, weekly interval, no unit_amount)', async () => {
+        mockStripeInstance.subscriptions.retrieve.mockResolvedValueOnce({
+          id: 'sub_sparse',
+          status: 'incomplete',
+          // cancel_at_period_end absent → false
+          // current_period_end absent → currentPeriodEnd null
+          items: { data: [{ price: { recurring: { interval: 'week' } } }] },
+        })
+
+        const result = await stripeService.retrievePlanSubscription('sub_sparse')
+
+        expect(result).toEqual({
+          status: 'incomplete',
+          cancelAtPeriodEnd: false,
+          currentPeriodEnd: null,
+          interval: null, // 'week' is neither month nor year
+          grossAmountCents: null,
+        })
+      })
+
+      it('should propagate Stripe errors', async () => {
+        const stripeError = new Error('No such subscription')
+        ;(stripeError as any).type = 'invalid_request_error'
+        mockStripeInstance.subscriptions.retrieve.mockRejectedValueOnce(stripeError)
+
+        await expect(stripeService.retrievePlanSubscription('sub_missing')).rejects.toThrow('No such subscription')
+      })
+    })
+  })
 })

@@ -264,4 +264,9 @@ export const V2CompleteSchema = z.object({
   params: z.object({
     organizationId: z.string().cuid('ID de organizacion invalido'),
   }),
+  body: z.object({
+    // Locale captured from the wizard's active i18n language, used for the plan
+    // confirmation email. Optional — defaults to 'es' in the controller.
+    language: z.enum(['es', 'en']).optional(),
+  }),
 })

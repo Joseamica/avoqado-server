@@ -1,4 +1,11 @@
-import { sendReceiptWhatsApp, sendServiceMessage, sendVenueChatTemplate, WhatsappCloudApiError } from '@/services/whatsapp.service'
+import {
+  sendReceiptWhatsApp,
+  sendReservationConfirmationWhatsApp,
+  sendReservationReminderWhatsApp,
+  sendServiceMessage,
+  sendVenueChatTemplate,
+  WhatsappCloudApiError,
+} from '@/services/whatsapp.service'
 
 describe('sendReceiptWhatsApp (backward-compat after refactor)', () => {
   beforeEach(() => {
@@ -83,6 +90,111 @@ describe('sendVenueChatTemplate', () => {
     const params = capturedBody.template.components[0].parameters
     expect(params[1].text).toBe('Juan Malicioso')
     expect(params[4].text).toBe('visita [enlace] hoy')
+  })
+})
+
+describe('reservation manage-button (gated on env + cancelSecret)', () => {
+  beforeEach(() => {
+    process.env.WHATSAPP_PHONE_NUMBER_ID = 'test-phone-id'
+    process.env.WHATSAPP_ACCESS_TOKEN = 'test-token'
+    delete process.env.WHATSAPP_TEMPLATE_RESERVATION_CONFIRMATION_MANAGE
+    delete process.env.WHATSAPP_TEMPLATE_RESERVATION_REMINDER_MANAGE
+  })
+
+  const baseData = {
+    customerName: 'Catalina',
+    venueName: 'Amaena',
+    date: '03/06/2026',
+    time: '11:30',
+    venueSlug: 'amaena',
+    cancelSecret: 'a8a9aa9c-9912-4382-840c-c02f642543a7',
+  }
+
+  it('CONFIRMATION: uses manage template + URL button when env set and cancelSecret present', async () => {
+    process.env.WHATSAPP_TEMPLATE_RESERVATION_CONFIRMATION_MANAGE = 'reservation_confirmation_manage'
+    let capturedBody: any
+    global.fetch = jest.fn().mockImplementation(async (_url, opts: any) => {
+      capturedBody = JSON.parse(opts.body)
+      return { ok: true, json: async () => ({ messages: [{ id: 'wamid.CONF_MANAGE' }] }) }
+    }) as unknown as typeof global.fetch
+
+    const ok = await sendReservationConfirmationWhatsApp('+525591986192', { ...baseData, extras: 'Gel semipermanente' })
+    expect(ok).toBe(true)
+    expect(capturedBody.template.name).toBe('reservation_confirmation_manage')
+    // Body: 5 params, extras carried through
+    const body = capturedBody.template.components.find((c: any) => c.type === 'body')
+    expect(body.parameters).toHaveLength(5)
+    expect(body.parameters[4].text).toBe('Gel semipermanente')
+    // Button: dynamic URL suffix is "<slug>?manage=<encoded secret>"
+    const button = capturedBody.template.components.find((c: any) => c.type === 'button')
+    expect(button.sub_type).toBe('url')
+    expect(button.index).toBe('0')
+    expect(button.parameters[0].text).toBe('amaena?manage=a8a9aa9c-9912-4382-840c-c02f642543a7')
+  })
+
+  it('CONFIRMATION: fills extras with "—" when none so a single manage template covers both cases', async () => {
+    process.env.WHATSAPP_TEMPLATE_RESERVATION_CONFIRMATION_MANAGE = 'reservation_confirmation_manage'
+    let capturedBody: any
+    global.fetch = jest.fn().mockImplementation(async (_url, opts: any) => {
+      capturedBody = JSON.parse(opts.body)
+      return { ok: true, json: async () => ({ messages: [{ id: 'wamid.X' }] }) }
+    }) as unknown as typeof global.fetch
+
+    await sendReservationConfirmationWhatsApp('+525591986192', { ...baseData, extras: '' })
+    const body = capturedBody.template.components.find((c: any) => c.type === 'body')
+    expect(body.parameters[4].text).toBe('—')
+  })
+
+  it('CONFIRMATION: falls back to legacy template (no button) when env var is NOT set', async () => {
+    let capturedBody: any
+    global.fetch = jest.fn().mockImplementation(async (_url, opts: any) => {
+      capturedBody = JSON.parse(opts.body)
+      return { ok: true, json: async () => ({ messages: [{ id: 'wamid.X' }] }) }
+    }) as unknown as typeof global.fetch
+
+    await sendReservationConfirmationWhatsApp('+525591986192', { ...baseData, extras: 'Gel' })
+    expect(capturedBody.template.name).toBe('reservation_confirmation_with_extras')
+    expect(capturedBody.template.components.some((c: any) => c.type === 'button')).toBe(false)
+  })
+
+  it('CONFIRMATION: falls back (no button) when env set but cancelSecret missing', async () => {
+    process.env.WHATSAPP_TEMPLATE_RESERVATION_CONFIRMATION_MANAGE = 'reservation_confirmation_manage'
+    let capturedBody: any
+    global.fetch = jest.fn().mockImplementation(async (_url, opts: any) => {
+      capturedBody = JSON.parse(opts.body)
+      return { ok: true, json: async () => ({ messages: [{ id: 'wamid.X' }] }) }
+    }) as unknown as typeof global.fetch
+
+    await sendReservationConfirmationWhatsApp('+525591986192', { ...baseData, cancelSecret: null, extras: '' })
+    expect(capturedBody.template.name).toBe('reservation_confirmation')
+    expect(capturedBody.template.components.some((c: any) => c.type === 'button')).toBe(false)
+  })
+
+  it('REMINDER: uses manage template + URL button when env set and cancelSecret present', async () => {
+    process.env.WHATSAPP_TEMPLATE_RESERVATION_REMINDER_MANAGE = 'reservation_reminder_manage'
+    let capturedBody: any
+    global.fetch = jest.fn().mockImplementation(async (_url, opts: any) => {
+      capturedBody = JSON.parse(opts.body)
+      return { ok: true, json: async () => ({ messages: [{ id: 'wamid.REM_MANAGE' }] }) }
+    }) as unknown as typeof global.fetch
+
+    const ok = await sendReservationReminderWhatsApp('+525591986192', baseData)
+    expect(ok).toBe(true)
+    expect(capturedBody.template.name).toBe('reservation_reminder_manage')
+    const button = capturedBody.template.components.find((c: any) => c.type === 'button')
+    expect(button.parameters[0].text).toBe('amaena?manage=a8a9aa9c-9912-4382-840c-c02f642543a7')
+  })
+
+  it('REMINDER: falls back to plain reminder (no button) when env var is NOT set', async () => {
+    let capturedBody: any
+    global.fetch = jest.fn().mockImplementation(async (_url, opts: any) => {
+      capturedBody = JSON.parse(opts.body)
+      return { ok: true, json: async () => ({ messages: [{ id: 'wamid.X' }] }) }
+    }) as unknown as typeof global.fetch
+
+    await sendReservationReminderWhatsApp('+525591986192', baseData)
+    expect(capturedBody.template.name).toBe('reservation_reminder')
+    expect(capturedBody.template.components.some((c: any) => c.type === 'button')).toBe(false)
   })
 })
 

@@ -22,6 +22,7 @@ import logger from '@/config/logger'
 import Stripe from 'stripe'
 import { subDays } from 'date-fns'
 import emailService from '@/services/email.service'
+import { resolvePlanNotificationTarget } from '@/services/access/planNotification.service'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
 
@@ -142,23 +143,32 @@ export class SubscriptionCancellationJob {
 
           // Send trial expired email
           try {
-            const emailSent = await emailService.sendTrialExpiredEmail(venueFeature.venue.organization.email, {
-              venueName: venueFeature.venue.name,
-              featureName: venueFeature.feature.name,
-              expiredAt: venueFeature.endDate || now,
-            })
+            // Resolve recipient (venue.email → owner → org), keeping org email as last-resort fallback.
+            const target = await resolvePlanNotificationTarget(venueFeature.venueId)
+            const recipient = target.email ?? venueFeature.venue.organization.email
 
-            if (emailSent) {
-              logger.info('✅ Trial expired email sent', {
-                email: venueFeature.venue.organization.email,
-                venueId: venueFeature.venueId,
+            if (recipient) {
+              const emailSent = await emailService.sendTrialExpiredEmail(recipient, {
+                venueName: venueFeature.venue.name,
                 featureName: venueFeature.feature.name,
+                expiredAt: venueFeature.endDate || now,
+                locale: target.locale,
               })
+
+              if (emailSent) {
+                logger.info('✅ Trial expired email sent', {
+                  email: recipient,
+                  venueId: venueFeature.venueId,
+                  featureName: venueFeature.feature.name,
+                })
+              } else {
+                logger.warn('⚠️ Trial expired email failed to send', {
+                  email: recipient,
+                  venueId: venueFeature.venueId,
+                })
+              }
             } else {
-              logger.warn('⚠️ Trial expired email failed to send', {
-                email: venueFeature.venue.organization.email,
-                venueId: venueFeature.venueId,
-              })
+              logger.warn(`⚠️ No notification recipient for venue ${venueFeature.venueId}; skipping trial expired email`)
             }
           } catch (emailError) {
             // Non-blocking: Log error but continue
@@ -270,24 +280,33 @@ export class SubscriptionCancellationJob {
 
           // Send cancellation email
           try {
-            const emailSent = await emailService.sendSubscriptionCanceledEmail(venueFeature.venue.organization.email, {
-              venueName: venueFeature.venue.name,
-              featureName: venueFeature.feature.name,
-              canceledAt: now,
-              suspendedAt: venueFeature.suspendedAt || now,
-            })
+            // Resolve recipient (venue.email → owner → org), keeping org email as last-resort fallback.
+            const target = await resolvePlanNotificationTarget(venueFeature.venueId)
+            const recipient = target.email ?? venueFeature.venue.organization.email
 
-            if (emailSent) {
-              logger.info('✅ Subscription canceled email sent', {
-                email: venueFeature.venue.organization.email,
-                venueId: venueFeature.venueId,
+            if (recipient) {
+              const emailSent = await emailService.sendSubscriptionCanceledEmail(recipient, {
+                venueName: venueFeature.venue.name,
                 featureName: venueFeature.feature.name,
+                canceledAt: now,
+                suspendedAt: venueFeature.suspendedAt || now,
+                locale: target.locale,
               })
+
+              if (emailSent) {
+                logger.info('✅ Subscription canceled email sent', {
+                  email: recipient,
+                  venueId: venueFeature.venueId,
+                  featureName: venueFeature.feature.name,
+                })
+              } else {
+                logger.warn('⚠️ Subscription canceled email failed to send', {
+                  email: recipient,
+                  venueId: venueFeature.venueId,
+                })
+              }
             } else {
-              logger.warn('⚠️ Subscription canceled email failed to send', {
-                email: venueFeature.venue.organization.email,
-                venueId: venueFeature.venueId,
-              })
+              logger.warn(`⚠️ No notification recipient for venue ${venueFeature.venueId}; skipping subscription canceled email`)
             }
           } catch (emailError) {
             // Non-blocking: Log error but continue cancellation process

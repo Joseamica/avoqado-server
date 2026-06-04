@@ -313,6 +313,15 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
       publicBooking: settings.publicBooking,
       operatingHours: settings.operatingHours,
       payments: settings.payments,
+      // Scheduling window — exposed so the date picker caps exactly at the
+      // venue's booking horizon instead of a hardcoded default. The server
+      // already enforces these (enforceBookingWindow); exposing them keeps the
+      // UI from offering dates the server rejects (or hiding valid ones).
+      scheduling: {
+        maxAdvanceDays: settings.scheduling.maxAdvanceDays,
+        minNoticeMin: settings.scheduling.minNoticeMin,
+        autoConfirm: settings.scheduling.autoConfirm,
+      },
     })
   } catch (error) {
     next(error)
@@ -807,6 +816,60 @@ export async function createReservation(req: Request, res: Response, next: NextF
       // reservation exists. Best-effort (see helper).
       await finalizeReservationSideEffects(reservation.id)
 
+      // Confirmation (email + WhatsApp) for non-paid classes — free / credit /
+      // pay-at-venue, which land CONFIRMED here. Paid classes are PENDING with a
+      // Stripe checkout pending, so their confirmation fires from the deposit
+      // webhook after payment clears (same as appointments). Without this block,
+      // non-paid class reservations never got a confirmation carrying the manage
+      // link: this branch returns before the appointment confirmation code below.
+      // Best-effort — a mail/Meta failure must never fail a committed booking.
+      if (reservation.status === 'CONFIRMED') {
+        const classProduct = await prisma.product
+          .findFirst({ where: { id: reservation.productId ?? undefined, venueId: venue.id }, select: { name: true } })
+          .catch(() => null)
+        const className = classProduct?.name ?? 'Clase'
+        const tz = venue.timezone || 'America/Mexico_City'
+        const dateLongRaw = formatInTimeZone(reservation.startsAt, tz, "EEEE d 'de' MMMM 'de' yyyy", { locale: esLocale })
+        const dateLong = dateLongRaw.charAt(0).toUpperCase() + dateLongRaw.slice(1)
+        const time = formatInTimeZone(reservation.startsAt, tz, 'HH:mm')
+
+        if (reservation.guestEmail) {
+          try {
+            await emailService.sendReservationConfirmedEmail(reservation.guestEmail, {
+              customerName: reservation.guestName ?? 'Cliente',
+              venueName: venue.name,
+              venueSlug: venue.slug,
+              confirmationCode: reservation.confirmationCode,
+              cancelSecret: reservation.cancelSecret,
+              dateLong,
+              time,
+              services: [{ name: className, modifiers: [] }],
+              owedAtVenueMxn: reservation.owesAtVenue && reservation.upfrontAmount ? Number(reservation.upfrontAmount) : null,
+            })
+          } catch (error) {
+            logger.warn(`[CLASS CONFIRM EMAIL] failed for ${reservation.confirmationCode}: ${(error as Error).message}`)
+          }
+        }
+        if (reservation.guestPhone) {
+          try {
+            await sendReservationConfirmationWhatsApp(reservation.guestPhone, {
+              customerName: reservation.guestName ?? 'Cliente',
+              venueName: venue.name,
+              date: dateLong,
+              time,
+              // Classes don't carry add-on modifiers; keep the clean 4-param
+              // template. The class name lives in the email body.
+              extras: '',
+              // Feeds the optional "Gestionar mi cita" WhatsApp button.
+              venueSlug: venue.slug,
+              cancelSecret: reservation.cancelSecret,
+            })
+          } catch (error) {
+            logger.warn(`[CLASS CONFIRM WHATSAPP] failed for ${reservation.confirmationCode}: ${(error as Error).message}`)
+          }
+        }
+      }
+
       return res.status(201).json({
         confirmationCode: reservation.confirmationCode,
         cancelSecret: reservation.cancelSecret,
@@ -1121,6 +1184,10 @@ export async function createReservation(req: Request, res: Response, next: NextF
             allProductIds.length > 0
               ? formatModifiersForWhatsApp(modifierRows.map(m => ({ name: m.name, quantity: m.quantity, price: Number(m.price) })))
               : '',
+          // Feeds the optional "Gestionar mi cita" WhatsApp button (same
+          // self-service manage link as the confirmation email).
+          venueSlug: venue.slug,
+          cancelSecret: reservation.cancelSecret,
         })
       } catch (error) {
         logger.warn(`[BOOKING CONFIRM WHATSAPP] failed for ${reservation.confirmationCode}: ${(error as Error).message}`)
@@ -1208,14 +1275,30 @@ export async function getReservation(req: Request, res: Response, next: NextFunc
       specialRequests: reservation.specialRequests,
       depositAmount: reservation.depositAmount,
       depositStatus: reservation.depositStatus,
-      cancellation: {
-        allowed: settings.cancellation.allowCustomerCancel,
-        minHoursBeforeStart: settings.cancellation.minHoursBeforeStart,
-        creditsUsed,
-        creditsRefundable,
-        refundPercent: cancellationPreview.refundPercent,
-        policyLabel: cancellationPreview.label,
-      },
+      cancellation: (() => {
+        // `allowed` is the FULL decision (toggle + status + time window), not just
+        // the venue toggle — so every frontend that reads it (widget, consumer app)
+        // disables the cancel control exactly when the server would reject. Same
+        // helper backs the POST guard below.
+        const decision = computeCancelDecision({
+          status: reservation.status,
+          startsAt: reservation.startsAt,
+          allowCustomerCancel: settings.cancellation.allowCustomerCancel,
+          minHoursBeforeStart: settings.cancellation.minHoursBeforeStart,
+        })
+        return {
+          allowed: decision.allowed,
+          reason: decision.reason,
+          // Raw venue toggle kept separate so the UI can distinguish "venue never
+          // allows online cancel" from "too late this time" → show contact info.
+          allowCustomerCancel: settings.cancellation.allowCustomerCancel,
+          minHoursBeforeStart: settings.cancellation.minHoursBeforeStart,
+          creditsUsed,
+          creditsRefundable,
+          refundPercent: cancellationPreview.refundPercent,
+          policyLabel: cancellationPreview.label,
+        }
+      })(),
       // Reschedule eligibility — same window as cancel, plus the venue toggle.
       // Only meaningful for class reservations (`classSessionId` present).
       reschedule: {
@@ -1244,6 +1327,42 @@ function isWithinWindow(startsAt: Date, minHoursBefore: number | null): boolean 
   if (minHoursBefore == null) return true
   const hoursUntilStart = (startsAt.getTime() - Date.now()) / 3_600_000
   return hoursUntilStart >= minHoursBefore
+}
+
+/**
+ * Reason a self-service cancellation is blocked. `null` means cancellation IS
+ * allowed. Frontends switch on this to show the right message (and the venue
+ * contact when they must call instead).
+ */
+export type CancelBlockedReason = 'NOT_ALLOWED' | 'TOO_LATE' | 'NOT_CANCELLABLE_STATUS' | null
+
+/**
+ * SINGLE SOURCE OF TRUTH for "can the customer cancel this reservation right now?".
+ *
+ * Used by BOTH the GET reservation endpoint (to set `cancellation.allowed`, which
+ * every frontend — booking widget, consumer app — reads to enable/disable the
+ * cancel control) AND the POST cancel endpoint (the enforcement boundary). Routing
+ * both through this helper guarantees the UI never offers a cancel the server will
+ * reject, and the rule lives in exactly one place.
+ *
+ * Three gates, in order: the venue toggle, the reservation status, and the
+ * time window. Returns the first failing reason so callers can message precisely.
+ */
+export function computeCancelDecision(args: {
+  status: string
+  startsAt: Date
+  allowCustomerCancel: boolean
+  minHoursBeforeStart: number | null
+}): { allowed: boolean; reason: CancelBlockedReason } {
+  if (!args.allowCustomerCancel) return { allowed: false, reason: 'NOT_ALLOWED' }
+  // Only future, still-active reservations can be cancelled by the customer.
+  if (args.status !== 'CONFIRMED' && args.status !== 'PENDING') {
+    return { allowed: false, reason: 'NOT_CANCELLABLE_STATUS' }
+  }
+  if (!isWithinWindow(args.startsAt, args.minHoursBeforeStart)) {
+    return { allowed: false, reason: 'TOO_LATE' }
+  }
+  return { allowed: true, reason: null }
 }
 
 /**
@@ -1333,19 +1452,24 @@ export async function cancelReservation(req: Request, res: Response, next: NextF
     const { venueSlug, cancelSecret } = req.params
     const reservation = await reservationService.getReservationByCancelSecret(venueSlug, cancelSecret)
 
-    // Check if venue allows customer cancellation
+    // Enforcement boundary — SAME helper that powers `cancellation.allowed` in the
+    // GET response, so the UI never offers a cancel we reject here (and vice versa).
     const settings = await getReservationSettings(reservation.venueId)
-    if (!settings.cancellation.allowCustomerCancel) {
-      throw new BadRequestError('La cancelacion en linea no esta permitida. Contacta al negocio directamente.')
-    }
-
-    // Check cancellation time window
-    if (settings.cancellation.minHoursBeforeStart) {
+    const decision = computeCancelDecision({
+      status: reservation.status,
+      startsAt: reservation.startsAt,
+      allowCustomerCancel: settings.cancellation.allowCustomerCancel,
+      minHoursBeforeStart: settings.cancellation.minHoursBeforeStart,
+    })
+    if (!decision.allowed) {
       const minHours = settings.cancellation.minHoursBeforeStart
-      const hoursUntilStart = (reservation.startsAt.getTime() - Date.now()) / (1000 * 60 * 60)
-      if (hoursUntilStart < minHours) {
-        throw new BadRequestError(`No se puede cancelar con menos de ${minHours} horas de anticipacion. Contacta al negocio directamente.`)
-      }
+      const message =
+        decision.reason === 'TOO_LATE' && minHours != null
+          ? `No se puede cancelar con menos de ${minHours} horas de anticipacion. Contacta al negocio directamente.`
+          : decision.reason === 'NOT_CANCELLABLE_STATUS'
+            ? 'Esta reservacion ya no se puede cancelar en linea. Contacta al negocio directamente.'
+            : 'La cancelacion en linea no esta permitida. Contacta al negocio directamente.'
+      throw new BadRequestError(message)
     }
 
     const cancelled = await reservationService.cancelReservation(reservation.venueId, reservation.id, 'CUSTOMER', req.body?.reason)

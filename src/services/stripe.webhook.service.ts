@@ -9,6 +9,7 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { FRONTEND_URL } from '@/config/env'
 import emailService from './email.service'
+import { resolvePlanNotificationTarget } from './access/planNotification.service'
 import { createNotification } from './dashboard/notification.dashboard.service'
 import { NotificationType, NotificationChannel, NotificationPriority, StaffRole } from '@prisma/client'
 import { handlePaymentFailure, generateBillingPortalUrl } from './stripe.service'
@@ -613,6 +614,11 @@ async function sendTrialEndingNotifications(venueId: string, venueName: string, 
 
     const billingPortalUrl = venue?.stripeCustomerId ? await generateBillingPortalUrl(venue.stripeCustomerId, returnUrl) : returnUrl
 
+    // Resolve the preferred email recipient + locale once for this venue.
+    // In-app notifications still go to each OWNER/ADMIN; the email itself prefers the
+    // resolved recipient (venue.email → owner → org), falling back to the staff email.
+    const target = await resolvePlanNotificationTarget(venueId)
+
     // 4. Send notifications to each staff member
     for (const staffVenue of staffMembers) {
       const { staff } = staffVenue
@@ -636,12 +642,15 @@ async function sendTrialEndingNotifications(venueId: string, venueName: string, 
 
         logger.info('✅ In-app notification created', { userId: staff.id, venueId })
 
-        // 4b. Send email notification with Stripe billing portal URL
-        const emailSent = await emailService.sendTrialEndingEmail(staff.email, {
+        // 4b. Send email notification with Stripe billing portal URL.
+        // Prefer the resolved recipient; fall back to this staff member's email.
+        const recipient = target.email ?? staff.email
+        const emailSent = await emailService.sendTrialEndingEmail(recipient, {
           venueName,
           featureName,
           trialEndDate,
           billingPortalUrl,
+          locale: target.locale,
         })
 
         if (emailSent) {

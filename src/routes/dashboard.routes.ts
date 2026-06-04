@@ -199,6 +199,7 @@ import {
   addVenueFeaturesSchema,
   updatePaymentMethodSchema,
   createBillingPortalSessionSchema,
+  planParamsSchema,
 } from '../schemas/dashboard/venue.schema'
 import {
   // Wrapped schemas for route validation (use these with validateRequest)
@@ -1985,9 +1986,74 @@ router.put(
 router.post(
   '/venues/:venueId/billing-portal',
   authenticateTokenMiddleware,
-  checkPermission('venues:manage'),
+  checkPermission('billing:subscriptions:manage'),
   validateRequest(createBillingPortalSessionSchema) as RequestHandler,
   venueController.createBillingPortalSession,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/plan:
+ *   get:
+ *     tags: [Venues]
+ *     summary: Get the venue's base-plan (PLAN_PRO) subscription state
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: PlanState }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.get(
+  '/venues/:venueId/plan',
+  authenticateTokenMiddleware,
+  checkPermission('billing:subscriptions:read'),
+  validateRequest(planParamsSchema) as RequestHandler,
+  venueController.getVenuePlan,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/plan/cancel:
+ *   post:
+ *     tags: [Venues]
+ *     summary: Schedule cancellation of the base plan at period end
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: Updated PlanState }
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ */
+router.post(
+  '/venues/:venueId/plan/cancel',
+  authenticateTokenMiddleware,
+  checkPermission('billing:subscriptions:manage'),
+  validateRequest(planParamsSchema) as RequestHandler,
+  venueController.cancelVenuePlan,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/plan/reactivate:
+ *   post:
+ *     tags: [Venues]
+ *     summary: Undo a scheduled base-plan cancellation
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: Updated PlanState }
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ */
+router.post(
+  '/venues/:venueId/plan/reactivate',
+  authenticateTokenMiddleware,
+  checkPermission('billing:subscriptions:manage'),
+  validateRequest(planParamsSchema) as RequestHandler,
+  venueController.reactivateVenuePlan,
 )
 
 /**
@@ -2029,7 +2095,7 @@ router.post(
 router.get(
   '/venues/:venueId/payment-methods',
   authenticateTokenMiddleware,
-  checkPermission('venues:manage'),
+  checkPermission('billing:payment-methods:read'),
   venueController.listVenuePaymentMethods,
 )
 
@@ -2061,7 +2127,7 @@ router.get(
 router.delete(
   '/venues/:venueId/payment-methods/:paymentMethodId',
   authenticateTokenMiddleware,
-  checkPermission('venues:manage'),
+  checkPermission('billing:payment-methods:manage'),
   venueController.detachVenuePaymentMethod,
 )
 
@@ -2103,7 +2169,7 @@ router.delete(
 router.put(
   '/venues/:venueId/payment-methods/set-default',
   authenticateTokenMiddleware,
-  checkPermission('venues:manage'),
+  checkPermission('billing:payment-methods:manage'),
   venueController.setVenueDefaultPaymentMethod,
 )
 
@@ -2234,7 +2300,7 @@ router.post(
 router.get(
   '/venues/:venueId/features',
   authenticateTokenMiddleware,
-  checkPermission('venues:read'),
+  checkPermission('billing:subscriptions:read'),
   venueFeatureController.getVenueFeatures,
 )
 
@@ -2274,7 +2340,7 @@ router.get(
 router.post(
   '/venues/:venueId/features',
   authenticateTokenMiddleware,
-  checkPermission('venues:manage'),
+  checkPermission('billing:subscriptions:manage'),
   validateRequest(addVenueFeaturesSchema) as RequestHandler,
   venueFeatureController.addVenueFeatures,
 )
@@ -2299,7 +2365,7 @@ router.post(
 router.delete(
   '/venues/:venueId/features/:featureId',
   authenticateTokenMiddleware,
-  checkPermission('venues:manage'),
+  checkPermission('billing:subscriptions:manage'),
   venueFeatureController.removeVenueFeature,
 )
 
@@ -2707,7 +2773,7 @@ router.put(
 router.get(
   '/venues/:venueId/invoices',
   authenticateTokenMiddleware,
-  checkPermission('features:read'),
+  checkPermission('billing:history:read'),
   venueFeatureController.getVenueInvoices,
 )
 
@@ -2735,7 +2801,7 @@ router.get(
 router.get(
   '/venues/:venueId/invoices/:invoiceId/download',
   authenticateTokenMiddleware,
-  checkPermission('features:read'),
+  checkPermission('billing:history:read'),
   venueFeatureController.downloadInvoice,
 )
 
@@ -2772,7 +2838,7 @@ router.get(
 router.post(
   '/venues/:venueId/invoices/:invoiceId/retry',
   authenticateTokenMiddleware,
-  checkPermission('payments:create'),
+  checkPermission('billing:history:read'),
   venueFeatureController.retryInvoicePayment,
 )
 

@@ -3,13 +3,14 @@
  *
  * Tests for resolveGoalBasedTier in commission-tier.service.ts
  * Verifies that staff's monthly sales goal is correctly used as a tier threshold.
+ * Also tests STAFF_GOAL boundary resolution in getStaffTierProgress.
  */
 
 import { Decimal } from '@prisma/client/runtime/library'
 import { CommissionRecipient, CommissionCalcType } from '@prisma/client'
-import { resolveGoalBasedTier } from '../../../../src/services/dashboard/commission/commission-tier.service'
+import { resolveGoalBasedTier, getStaffTierProgress } from '../../../../src/services/dashboard/commission/commission-tier.service'
 import { CommissionConfigWithRelations } from '../../../../src/services/dashboard/commission/commission-utils'
-import '../../../__helpers__/setup'
+import { prismaMock } from '../../../__helpers__/setup'
 
 // Mock sales-goal.service
 jest.mock('../../../../src/services/dashboard/commission/sales-goal.service', () => ({
@@ -198,5 +199,73 @@ describe('resolveGoalBasedTier', () => {
     const result = await resolveGoalBasedTier('staff-1', 'venue-1', config, 60000)
 
     expect(result).toBeNull() // Not a venue-wide goal
+  })
+})
+
+// ============================================
+// getStaffTierProgress — STAFF_GOAL boundaries
+// ============================================
+
+describe('getStaffTierProgress — STAFF_GOAL boundaries', () => {
+  const tiers = [
+    {
+      tierLevel: 1,
+      tierName: 'Base',
+      tierType: 'BY_AMOUNT',
+      tierPeriod: 'MONTHLY',
+      minThreshold: new Decimal(0),
+      maxThreshold: new Decimal(30000),
+      minThresholdType: 'FIXED',
+      maxThresholdType: 'FIXED',
+      rate: new Decimal(0.04),
+    },
+    {
+      tierLevel: 2,
+      tierName: 'Meta',
+      tierType: 'BY_AMOUNT',
+      tierPeriod: 'MONTHLY',
+      minThreshold: new Decimal(30000),
+      maxThreshold: new Decimal(0),
+      minThresholdType: 'FIXED',
+      maxThresholdType: 'STAFF_GOAL',
+      rate: new Decimal(0.06),
+    },
+    {
+      tierLevel: 3,
+      tierName: 'Super',
+      tierType: 'BY_AMOUNT',
+      tierPeriod: 'MONTHLY',
+      minThreshold: new Decimal(0),
+      maxThreshold: null,
+      minThresholdType: 'STAFF_GOAL',
+      maxThresholdType: 'FIXED',
+      rate: new Decimal(0.08),
+    },
+  ]
+
+  beforeEach(() => {
+    prismaMock.commissionConfig.findFirst.mockResolvedValue({ id: 'cfg', venueId: 'v', deletedAt: null, tiers })
+    prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' })
+  })
+
+  it('puts a staff at 8% when current sales exceed their goal (40k goal, 45k sales)', async () => {
+    ;(getStaffSalesGoal as jest.MockedFunction<typeof getStaffSalesGoal>).mockResolvedValue({ goal: 40000 } as any)
+    prismaMock.commissionCalculation.aggregate.mockResolvedValue({ _sum: { baseAmount: new Decimal(45000) } })
+    const progress = await getStaffTierProgress('cfg', 'staff-1', 'v')
+    expect(progress?.currentTier).toBe(3)
+  })
+
+  it('puts a staff at 6% when between 30k and their goal (40k goal, 35k sales)', async () => {
+    ;(getStaffSalesGoal as jest.MockedFunction<typeof getStaffSalesGoal>).mockResolvedValue({ goal: 40000 } as any)
+    prismaMock.commissionCalculation.aggregate.mockResolvedValue({ _sum: { baseAmount: new Decimal(35000) } })
+    const progress = await getStaffTierProgress('cfg', 'staff-1', 'v')
+    expect(progress?.currentTier).toBe(2)
+  })
+
+  it('no goal → stays in 6% band, 8% unreachable (45k sales, no goal)', async () => {
+    ;(getStaffSalesGoal as jest.MockedFunction<typeof getStaffSalesGoal>).mockResolvedValue(null)
+    prismaMock.commissionCalculation.aggregate.mockResolvedValue({ _sum: { baseAmount: new Decimal(45000) } })
+    const progress = await getStaffTierProgress('cfg', 'staff-1', 'v')
+    expect(progress?.currentTier).toBe(2)
   })
 })

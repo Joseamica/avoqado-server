@@ -23,6 +23,7 @@
  */
 import { NextFunction, Request, Response } from 'express'
 import * as venueDashboardService from '../../services/dashboard/venue.dashboard.service'
+import * as planStateService from '../../services/dashboard/planState.service'
 
 import { CreateVenueDto, ListVenuesQueryDto, ConvertDemoVenueDto } from '../../schemas/dashboard/venue.schema'
 import { EnhancedCreateVenueBody } from '../../schemas/dashboard/cost-management.schema'
@@ -490,6 +491,60 @@ export async function detachVenuePaymentMethod(
       orgId: req.authContext?.orgId,
       venueId: req.params?.venueId,
       paymentMethodId: req.params?.paymentMethodId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Get the venue's base-plan (PLAN_PRO) lifecycle state.
+ * GET /api/v1/dashboard/venues/:venueId/plan
+ */
+export async function getVenuePlan(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const planState = await planStateService.getPlanState(venueId)
+    res.status(200).json({ success: true, data: planState })
+  } catch (error) {
+    logger.error('Error getting venue plan state', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      venueId: req.params?.venueId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Schedule cancellation of the base plan at period end (cancel_at_period_end=true).
+ * POST /api/v1/dashboard/venues/:venueId/plan/cancel
+ */
+export async function cancelVenuePlan(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const planState = await planStateService.cancelPlan(venueId)
+    res.status(200).json({ success: true, data: planState })
+  } catch (error) {
+    logger.error('Error canceling venue plan', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      venueId: req.params?.venueId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Undo a scheduled base-plan cancellation (cancel_at_period_end=false).
+ * POST /api/v1/dashboard/venues/:venueId/plan/reactivate
+ */
+export async function reactivateVenuePlan(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const planState = await planStateService.reactivatePlan(venueId)
+    res.status(200).json({ success: true, data: planState })
+  } catch (error) {
+    logger.error('Error reactivating venue plan', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      venueId: req.params?.venueId,
     })
     next(error)
   }

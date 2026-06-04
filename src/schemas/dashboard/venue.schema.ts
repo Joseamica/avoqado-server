@@ -196,3 +196,12 @@ export const createBillingPortalSessionSchema = z.object({
 })
 
 export type CreateBillingPortalSessionDto = z.infer<typeof createBillingPortalSessionSchema.shape.body>
+
+// Schema for base-plan endpoints (GET/POST /venues/:venueId/plan*). Path-param only.
+export const planParamsSchema = z.object({
+  params: z.object({
+    venueId: z.string({ required_error: 'El ID del venue es requerido' }).min(1, { message: 'El ID del venue es requerido' }),
+  }),
+})
+
+export type PlanParamsDto = z.infer<typeof planParamsSchema.shape.params>

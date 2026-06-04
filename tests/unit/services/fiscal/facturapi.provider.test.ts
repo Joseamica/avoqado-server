@@ -1,0 +1,118 @@
+const mockCreate = jest.fn()
+const mockRetrieve = jest.fn()
+const mockCancel = jest.fn()
+const mockOrgCreate = jest.fn()
+const mockOrgRenewLiveApiKey = jest.fn()
+const mockOrgGetTestApiKey = jest.fn()
+const mockOrgUploadCertificate = jest.fn()
+const mockInvoicesDownloadXml = jest.fn()
+const mockInvoicesDownloadPdf = jest.fn()
+
+jest.mock('facturapi', () => {
+  return jest.fn().mockImplementation(() => ({
+    invoices: {
+      create: mockCreate,
+      retrieve: mockRetrieve,
+      cancel: mockCancel,
+      downloadXml: mockInvoicesDownloadXml,
+      downloadPdf: mockInvoicesDownloadPdf,
+    },
+    organizations: {
+      create: mockOrgCreate,
+      renewLiveApiKey: mockOrgRenewLiveApiKey,
+      getTestApiKey: mockOrgGetTestApiKey,
+      uploadCertificate: mockOrgUploadCertificate,
+    },
+  }))
+})
+
+import { FacturapiProvider } from '../../../../src/services/fiscal/providers/facturapi.provider'
+
+describe('FacturapiProvider', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  // NEW FEATURE
+  it('createInvoice maps our cents-based params to the SDK and returns a StampedInvoice', async () => {
+    mockCreate.mockResolvedValue({
+      id: 'fa_inv_1',
+      uuid: 'UUID-123',
+      series: 'A',
+      folio_number: 42,
+      total: 116.0,
+      stamp: { date: '2026-06-03T10:00:00Z' },
+      status: 'valid',
+      cancellation_status: 'none',
+    })
+    const provider = new FacturapiProvider('sk_test_x')
+    const result = await provider.createInvoice({
+      receptor: {
+        rfc: 'EKU9003173C9',
+        razonSocial: 'ESCUELA KEMPER URGATE SA DE CV',
+        regimenFiscal: '601',
+        codigoPostal: '64000',
+        usoCfdi: 'G03',
+      },
+      items: [
+        {
+          satProductKey: '90101500',
+          satUnitKey: 'E48',
+          description: 'Servicio',
+          quantity: 1,
+          unitPriceCents: 10000,
+          discountCents: 0,
+          objetoImp: '02',
+          taxes: [{ type: 'IVA', factor: 'Tasa', rate: 0.16, withholding: false }],
+        },
+      ],
+      formaPago: '01',
+      metodoPago: 'PUE',
+      idempotencyKey: 'idem-1',
+    })
+    expect(result.uuid).toBe('UUID-123')
+    expect(result.totalCents).toBe(11600)
+    expect(mockCreate).toHaveBeenCalledTimes(1)
+    // facturapi rejects idempotency on create (query OR body, verified live) → adapter must NOT forward
+    // it; idempotency is enforced at our service layer via the unique Cfdi.idempotencyKey.
+    const body = mockCreate.mock.calls[0][0]
+    expect(body.i_key).toBeUndefined()
+    expect(body.idempotency_key).toBeUndefined()
+    expect(mockCreate.mock.calls[0][1]).toBeUndefined() // no second-arg query param
+    // unit price sent to SDK is pesos (net), not cents
+    const sentItems = body.items
+    expect(sentItems[0].product.price).toBe(100)
+  })
+
+  it('cancelInvoice passes motive + substitution', async () => {
+    mockCancel.mockResolvedValue({
+      id: 'fa_inv_1',
+      uuid: 'UUID-123',
+      status: 'canceled',
+      cancellation_status: 'accepted',
+    })
+    const provider = new FacturapiProvider('sk_test_x')
+    const r = await provider.cancelInvoice({ providerInvoiceId: 'fa_inv_1', motivo: '02' })
+    expect(mockCancel).toHaveBeenCalledWith('fa_inv_1', expect.objectContaining({ motive: '02' }))
+    expect(['accepted', 'canceled']).toContain(r.status)
+  })
+
+  // REGRESSION / edge
+  it('throws a clear error when the SDK rejects (PAC/SAT error)', async () => {
+    mockCreate.mockRejectedValue(new Error('TaxObjectError: 02 required'))
+    const provider = new FacturapiProvider('sk_test_x')
+    await expect(
+      provider.createInvoice({
+        receptor: {
+          rfc: 'X',
+          razonSocial: 'Y',
+          regimenFiscal: '601',
+          codigoPostal: '64000',
+          usoCfdi: 'G03',
+        },
+        items: [],
+        formaPago: '01',
+        metodoPago: 'PUE',
+        idempotencyKey: 'i',
+      }),
+    ).rejects.toThrow(/TaxObjectError/)
+  })
+})

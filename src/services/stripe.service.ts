@@ -15,6 +15,7 @@ import { Feature } from '@prisma/client'
 import { retry, shouldRetryStripeError } from '@/utils/retry'
 import { addDays } from 'date-fns'
 import emailService from './email.service'
+import { resolvePlanNotificationTarget } from './access/planNotification.service'
 
 // Initialize Stripe
 // Using default API version from SDK (automatically uses the latest compatible version)
@@ -710,6 +711,58 @@ export async function cancelSubscription(subscriptionId: string): Promise<void> 
 }
 
 /**
+ * Flip cancel_at_period_end on a subscription WITHOUT canceling immediately.
+ * This is the ONLY supported way to cancel/reactivate the PLAN_PRO base plan:
+ * `cancel=true` schedules cancellation at period end (venue stays entitled until
+ * current_period_end); `cancel=false` undoes a scheduled cancellation.
+ * Unlike cancelSubscription(), this does NOT touch the VenueFeature row.
+ *
+ * @param subscriptionId - Stripe subscription ID
+ * @param cancel - true to schedule cancel at period end, false to reactivate
+ * @returns the updated Stripe subscription
+ */
+export async function setSubscriptionCancelAtPeriodEnd(subscriptionId: string, cancel: boolean): Promise<Stripe.Subscription> {
+  const updated = await retry(() => stripe.subscriptions.update(subscriptionId, { cancel_at_period_end: cancel }), {
+    retries: 3,
+    shouldRetry: shouldRetryStripeError,
+    context: 'stripe.setSubscriptionCancelAtPeriodEnd',
+  })
+  logger.info(`✅ Set cancel_at_period_end=${cancel} on subscription ${subscriptionId}`)
+  return updated
+}
+
+/**
+ * Retrieve a subscription and return the typed summary the plan endpoint needs.
+ * Stripe SDK v19 omits current_period_end / cancel_at_period_end on the Subscription
+ * type even though the API returns them — cast like the rest of the codebase
+ * (see stripe.webhook.service.ts:32, plan-renewal-reminder.job.ts:102).
+ *
+ * @param subscriptionId - Stripe subscription ID
+ */
+export async function retrievePlanSubscription(subscriptionId: string): Promise<{
+  status: string
+  cancelAtPeriodEnd: boolean
+  currentPeriodEnd: Date | null
+  interval: 'month' | 'year' | null
+  grossAmountCents: number | null
+}> {
+  const sub = await retry(() => stripe.subscriptions.retrieve(subscriptionId), {
+    retries: 3,
+    shouldRetry: shouldRetryStripeError,
+    context: 'stripe.retrievePlanSubscription',
+  })
+  const periodEndRaw = (sub as any).current_period_end as number | undefined
+  const rawInterval = sub.items.data[0]?.price.recurring?.interval
+  return {
+    status: sub.status,
+    cancelAtPeriodEnd: Boolean((sub as any).cancel_at_period_end),
+    currentPeriodEnd: periodEndRaw ? new Date(periodEndRaw * 1000) : null,
+    interval: rawInterval === 'year' ? 'year' : rawInterval === 'month' ? 'month' : null,
+    grossAmountCents: sub.items.data[0]?.price.unit_amount ?? null,
+  }
+}
+
+/**
  * Update payment method for customer (with retry)
  *
  * @param customerId - Stripe customer ID
@@ -1256,7 +1309,16 @@ export async function handlePaymentFailure(
           break
         }
 
-        const emailSent = await emailService.sendPaymentFailedEmail(venueFeature.venue.organization.email, {
+        // Resolve recipient (venue.email → owner → org), keeping org email as last-resort fallback.
+        const target = await resolvePlanNotificationTarget(venueFeature.venueId)
+        const recipient = target.email ?? venueFeature.venue.organization.email
+
+        if (!recipient) {
+          logger.warn(`⚠️ No notification recipient for venue ${venueFeature.venueId}; skipping payment failed email`)
+          break
+        }
+
+        const emailSent = await emailService.sendPaymentFailedEmail(recipient, {
           venueName: venueFeature.venue.name,
           featureName: venueFeature.feature.name,
           attemptCount,
@@ -1264,17 +1326,18 @@ export async function handlePaymentFailure(
           currency: invoiceData.currency,
           billingPortalUrl,
           last4: invoiceData.last4,
+          locale: target.locale,
         })
 
         if (emailSent) {
           logger.info(`✅ Payment failed email sent (attempt ${attemptCount})`, {
-            email: venueFeature.venue.organization.email,
+            email: recipient,
             venueId: venueFeature.venueId,
             featureName: venueFeature.feature.name,
           })
         } else {
           logger.warn(`⚠️ Payment failed email failed to send (attempt ${attemptCount})`, {
-            email: venueFeature.venue.organization.email,
+            email: recipient,
             venueId: venueFeature.venueId,
           })
         }
@@ -1301,23 +1364,33 @@ export async function handlePaymentFailure(
       logger.warn(`⛔ SUSPENDED: Feature ${venueFeature.feature.name} for venue ${venueFeature.venue.name}`)
 
       try {
-        const emailSent = await emailService.sendSubscriptionSuspendedEmail(venueFeature.venue.organization.email, {
+        // Resolve recipient (venue.email → owner → org), keeping org email as last-resort fallback.
+        const target = await resolvePlanNotificationTarget(venueFeature.venueId)
+        const recipient = target.email ?? venueFeature.venue.organization.email
+
+        if (!recipient) {
+          logger.warn(`⚠️ No notification recipient for venue ${venueFeature.venueId}; skipping subscription suspended email`)
+          break
+        }
+
+        const emailSent = await emailService.sendSubscriptionSuspendedEmail(recipient, {
           venueName: venueFeature.venue.name,
           featureName: venueFeature.feature.name,
           suspendedAt: now,
           gracePeriodEndsAt: updateData.gracePeriodEndsAt || addDays(now, 7),
           billingPortalUrl,
+          locale: target.locale,
         })
 
         if (emailSent) {
           logger.info('✅ Subscription suspended email sent', {
-            email: venueFeature.venue.organization.email,
+            email: recipient,
             venueId: venueFeature.venueId,
             featureName: venueFeature.feature.name,
           })
         } else {
           logger.warn('⚠️ Subscription suspended email failed to send', {
-            email: venueFeature.venue.organization.email,
+            email: recipient,
             venueId: venueFeature.venueId,
           })
         }

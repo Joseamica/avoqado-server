@@ -66,6 +66,7 @@ interface TrialEndingEmailData {
   featureName: string
   trialEndDate: Date
   billingPortalUrl: string
+  locale?: 'es' | 'en' // optional; defaults to 'es' so legacy à-la-carte Feature callers keep working
 }
 
 interface PaymentFailedEmailData {
@@ -76,6 +77,7 @@ interface PaymentFailedEmailData {
   currency: string
   billingPortalUrl: string
   last4?: string // Last 4 digits of card
+  locale?: 'es' | 'en' // optional; defaults to 'es'
 }
 
 interface SubscriptionSuspendedEmailData {
@@ -84,6 +86,7 @@ interface SubscriptionSuspendedEmailData {
   suspendedAt: Date
   gracePeriodEndsAt: Date
   billingPortalUrl: string
+  locale?: 'es' | 'en' // optional; defaults to 'es'
 }
 
 interface SubscriptionCanceledEmailData {
@@ -91,12 +94,40 @@ interface SubscriptionCanceledEmailData {
   featureName: string
   canceledAt: Date
   suspendedAt: Date
+  locale?: 'es' | 'en' // optional; defaults to 'es'
 }
 
 interface TrialExpiredEmailData {
   venueName: string
   featureName: string
   expiredAt: Date
+  locale?: 'es' | 'en' // optional; defaults to 'es'
+}
+
+export interface PlanConfirmationEmailData {
+  locale: 'es' | 'en'
+  venueName: string
+  payNow: boolean // true = paid today, false = trial
+  interval: 'monthly' | 'annual'
+  firstChargeDate: Date // trial end (trial) OR next renewal (pay-now)
+  firstChargeAmountCents: number // gross IVA-inclusive (115884 monthly / 1158840 annual)
+  introAmountCents?: number // pay-now first charge (69484 = $694.84) when applicable
+  billingPortalUrl: string
+}
+
+export interface PlanRenewalReminderEmailData {
+  locale: 'es' | 'en'
+  venueName: string
+  interval: 'monthly' | 'annual'
+  renewalDate: Date
+  amountCents: number
+  billingPortalUrl: string
+}
+
+export interface PlanWinbackEmailData {
+  locale: 'es' | 'en'
+  venueName: string
+  reactivateUrl: string
 }
 
 interface EmailVerificationData {
@@ -578,14 +609,57 @@ Equipo de Avoqado
   }
 
   async sendTrialEndingEmail(email: string, data: TrialEndingEmailData): Promise<boolean> {
-    const subject = `Tu prueba gratuita de ${data.featureName} esta por terminar - ${data.venueName}`
+    const locale = data.locale ?? 'es'
     const logoUrl = 'https://avoqado.io/isotipo.svg'
-    const trialEndDateFormatted = data.trialEndDate.toLocaleDateString('es-MX', {
+    const trialEndDateFormatted = data.trialEndDate.toLocaleDateString(locale === 'en' ? 'en-US' : 'es-MX', {
       weekday: 'long',
       year: 'numeric',
       month: 'long',
       day: 'numeric',
     })
+
+    const t =
+      locale === 'en'
+        ? {
+            subject: `Your free trial of ${data.featureName} is ending soon - ${data.venueName}`,
+            htmlTitle: 'Your free trial is ending soon',
+            title: 'Your free trial is ending soon',
+            greeting: 'Hi,',
+            intro: `We're writing to remind you that your <strong>free trial of ${data.featureName}</strong> is ending on <strong>${trialEndDateFormatted}</strong>.`,
+            importantLabel: 'Important',
+            importantBody: `After this date, the feature will be deactivated automatically if you don't update your payment method. To keep using ${data.featureName} without interruptions, update your payment method now.`,
+            cta: 'Go to Billing',
+            footerCompanyLine: 'Servicios Tecnologicos Avo S.A. de C.V.<br>Mexico City, Mexico',
+            footerHelp: 'Need help? Contact us anytime.',
+            privacy: 'Privacy Policy',
+            textIntro: `Your free trial of ${data.featureName} is ending on ${trialEndDateFormatted}.`,
+            textImportant:
+              "IMPORTANT: After this date, the feature will be deactivated automatically if you don't update your payment method.",
+            textCallToAction: `To keep using ${data.featureName} without interruptions, update your payment method now:`,
+            textHelp: 'Need help? Contact us anytime.',
+            textSignoff: 'The Avoqado Team',
+          }
+        : {
+            subject: `Tu prueba gratuita de ${data.featureName} esta por terminar - ${data.venueName}`,
+            htmlTitle: 'Tu prueba gratuita esta por terminar',
+            title: 'Tu prueba gratuita esta por terminar',
+            greeting: 'Hola,',
+            intro: `Te escribimos para recordarte que tu <strong>prueba gratuita de ${data.featureName}</strong> esta por terminar el <strong>${trialEndDateFormatted}</strong>.`,
+            importantLabel: 'Importante',
+            importantBody: `Despues de esta fecha, la funcion sera desactivada automaticamente si no actualizas tu metodo de pago. Para continuar usando ${data.featureName} sin interrupciones, actualiza tu metodo de pago ahora.`,
+            cta: 'Ir a Facturacion',
+            footerCompanyLine: 'Servicios Tecnologicos Avo S.A. de C.V.<br>Ciudad de Mexico, Mexico',
+            footerHelp: 'Necesitas ayuda? Contactanos en cualquier momento.',
+            privacy: 'Politica de Privacidad',
+            textIntro: `Tu prueba gratuita de ${data.featureName} esta por terminar el ${trialEndDateFormatted}.`,
+            textImportant:
+              'IMPORTANTE: Despues de esta fecha, la funcion sera desactivada automaticamente si no actualizas tu metodo de pago.',
+            textCallToAction: `Para continuar usando ${data.featureName} sin interrupciones, actualiza tu metodo de pago ahora:`,
+            textHelp: 'Necesitas ayuda? Contactanos en cualquier momento.',
+            textSignoff: 'Equipo de Avoqado',
+          }
+
+    const subject = t.subject
 
     const html = `
 <!DOCTYPE html>
@@ -593,7 +667,7 @@ Equipo de Avoqado
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Tu prueba gratuita esta por terminar</title>
+  <title>${t.htmlTitle}</title>
 </head>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
   <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
@@ -606,23 +680,23 @@ Equipo de Avoqado
 
     <!-- Title -->
     <div style="padding-bottom: 24px;">
-      <h1 style="margin: 0 0 8px 0; font-size: 32px; font-weight: 400; color: #000;">Tu prueba gratuita esta por terminar</h1>
+      <h1 style="margin: 0 0 8px 0; font-size: 32px; font-weight: 400; color: #000;">${t.title}</h1>
       <p style="margin: 0; font-size: 14px; color: #666;">${data.venueName}</p>
     </div>
 
     <!-- Content -->
     <div style="padding-bottom: 24px;">
-      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Hola,</p>
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${t.greeting}</p>
 
       <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
-        Te escribimos para recordarte que tu <strong>prueba gratuita de ${data.featureName}</strong> esta por terminar el <strong>${trialEndDateFormatted}</strong>.
+        ${t.intro}
       </p>
 
       <!-- Warning Box -->
       <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin: 24px 0;">
-        <p style="font-size: 15px; margin: 0 0 8px 0; color: #000; font-weight: 600;">Importante</p>
+        <p style="font-size: 15px; margin: 0 0 8px 0; color: #000; font-weight: 600;">${t.importantLabel}</p>
         <p style="font-size: 14px; margin: 0; color: #666;">
-          Despues de esta fecha, la funcion sera desactivada automaticamente si no actualizas tu metodo de pago. Para continuar usando ${data.featureName} sin interrupciones, actualiza tu metodo de pago ahora.
+          ${t.importantBody}
         </p>
       </div>
     </div>
@@ -630,7 +704,7 @@ Equipo de Avoqado
     <!-- CTA Button -->
     <div style="padding: 32px 0; text-align: center;">
       <a href="${data.billingPortalUrl}" style="background: #000; color: #fff; padding: 14px 32px; text-decoration: none; border-radius: 4px; font-weight: 600; font-size: 14px; display: inline-block;">
-        Ir a Facturacion
+        ${t.cta}
       </a>
     </div>
 
@@ -642,14 +716,13 @@ Equipo de Avoqado
         <span style="font-size: 16px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
       </div>
       <p style="margin: 0 0 16px 0; font-size: 14px; color: #000;">
-        Servicios Tecnologicos Avo S.A. de C.V.<br>
-        Ciudad de Mexico, Mexico
+        ${t.footerCompanyLine}
       </p>
       <p style="margin: 0; font-size: 12px; color: #666;">
-        Necesitas ayuda? Contactanos en cualquier momento.
+        ${t.footerHelp}
       </p>
       <p style="margin: 16px 0 0 0; font-size: 14px;">
-        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Politica de Privacidad</a>
+        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">${t.privacy}</a>
       </p>
     </div>
 
@@ -659,19 +732,19 @@ Equipo de Avoqado
     `
 
     const text = `
-Hola,
+${t.greeting}
 
-Tu prueba gratuita de ${data.featureName} esta por terminar el ${trialEndDateFormatted}.
+${t.textIntro}
 
-IMPORTANTE: Despues de esta fecha, la funcion sera desactivada automaticamente si no actualizas tu metodo de pago.
+${t.textImportant}
 
-Para continuar usando ${data.featureName} sin interrupciones, actualiza tu metodo de pago ahora:
+${t.textCallToAction}
 
 ${data.billingPortalUrl}
 
-Necesitas ayuda? Contactanos en cualquier momento.
+${t.textHelp}
 
-Equipo de Avoqado
+${t.textSignoff}
     `
 
     return this.sendEmail({
@@ -683,25 +756,100 @@ Equipo de Avoqado
   }
 
   async sendPaymentFailedEmail(email: string, data: PaymentFailedEmailData): Promise<boolean> {
-    const subject = `Problema con el pago de ${data.featureName} - ${data.venueName}`
+    const locale = data.locale ?? 'es'
     const logoUrl = 'https://avoqado.io/isotipo.svg'
-    const amountFormatted = new Intl.NumberFormat('es-MX', {
+    const amountFormatted = new Intl.NumberFormat(locale === 'en' ? 'en-US' : 'es-MX', {
       style: 'currency',
       currency: data.currency.toUpperCase(),
     }).format(data.amountDue / 100)
+
+    const t =
+      locale === 'en'
+        ? {
+            subject: `Payment problem with ${data.featureName} - ${data.venueName}`,
+            htmlTitle: 'Payment problem',
+            title: 'Payment problem',
+            greeting: 'Hi,',
+            intro: `We couldn't process the payment of <strong>${amountFormatted}</strong> for your <strong>${data.featureName}</strong> subscription.`,
+            cardEndingIn: (last4: string) => `Card ending in <strong>${last4}</strong>`,
+            reasonsLabel: 'Common reasons for decline',
+            reasons: ['Insufficient funds on the card', 'Card expired or about to expire', 'Credit limit reached', 'Temporary bank block'],
+            cta: 'Update Payment Method',
+            footerCompanyLine: 'Servicios Tecnologicos Avo S.A. de C.V.<br>Mexico City, Mexico',
+            footerHelp: 'Need help? Contact us anytime or check with your bank.',
+            privacy: 'Privacy Policy',
+            attempt1: {
+              level: 'Attempt 1 of 3',
+              steps: "We'll try to charge again over the next few days. Please update your payment method as soon as possible.",
+            },
+            attempt2: {
+              level: 'Attempt 2 of 3 - Action Required',
+              steps: 'This is the second failed attempt. If the next attempt also fails, your subscription will be canceled automatically.',
+            },
+            attempt3: {
+              level: 'LAST ATTEMPT - Urgent Action',
+              steps: "This is the last attempt. If you don't update your payment method immediately, your subscription will be canceled.",
+            },
+            textIntro: `We couldn't process the payment of ${amountFormatted} for your ${data.featureName} subscription.`,
+            textCardEndingIn: (last4: string) => `Card ending in ${last4}`,
+            textCallToAction: 'Update your payment method now:',
+            textReasonsLabel: 'Common reasons for decline:',
+            textHelp: 'Need help? Contact us anytime or check with your bank.',
+            textSignoff: 'The Avoqado Team',
+          }
+        : {
+            subject: `Problema con el pago de ${data.featureName} - ${data.venueName}`,
+            htmlTitle: 'Problema con el pago',
+            title: 'Problema con el pago',
+            greeting: 'Hola,',
+            intro: `No pudimos procesar el pago de <strong>${amountFormatted}</strong> para tu suscripcion de <strong>${data.featureName}</strong>.`,
+            cardEndingIn: (last4: string) => `Tarjeta terminada en <strong>${last4}</strong>`,
+            reasonsLabel: 'Razones comunes de rechazo',
+            reasons: [
+              'Fondos insuficientes en la tarjeta',
+              'Tarjeta vencida o cerca de vencer',
+              'Limite de credito alcanzado',
+              'Bloqueo temporal del banco',
+            ],
+            cta: 'Actualizar Metodo de Pago',
+            footerCompanyLine: 'Servicios Tecnologicos Avo S.A. de C.V.<br>Ciudad de Mexico, Mexico',
+            footerHelp: 'Necesitas ayuda? Contactanos en cualquier momento o verifica con tu banco.',
+            privacy: 'Politica de Privacidad',
+            attempt1: {
+              level: 'Intento 1 de 3',
+              steps: 'Intentaremos cobrar nuevamente en los proximos dias. Por favor, actualiza tu metodo de pago lo antes posible.',
+            },
+            attempt2: {
+              level: 'Intento 2 de 3 - Accion Requerida',
+              steps:
+                'Este es el segundo intento fallido. Si el proximo intento tambien falla, tu suscripcion sera cancelada automaticamente.',
+            },
+            attempt3: {
+              level: 'ULTIMO INTENTO - Accion Urgente',
+              steps: 'Este es el ultimo intento. Si no actualizas tu metodo de pago inmediatamente, tu suscripcion sera cancelada.',
+            },
+            textIntro: `No pudimos procesar el pago de ${amountFormatted} para tu suscripcion de ${data.featureName}.`,
+            textCardEndingIn: (last4: string) => `Tarjeta terminada en ${last4}`,
+            textCallToAction: 'Actualiza tu metodo de pago ahora:',
+            textReasonsLabel: 'Razones comunes de rechazo:',
+            textHelp: 'Necesitas ayuda? Contactanos en cualquier momento o verifica con tu banco.',
+            textSignoff: 'Equipo de Avoqado',
+          }
+
+    const subject = t.subject
 
     let urgencyLevel = ''
     let nextSteps = ''
 
     if (data.attemptCount === 1) {
-      urgencyLevel = 'Intento 1 de 3'
-      nextSteps = 'Intentaremos cobrar nuevamente en los proximos dias. Por favor, actualiza tu metodo de pago lo antes posible.'
+      urgencyLevel = t.attempt1.level
+      nextSteps = t.attempt1.steps
     } else if (data.attemptCount === 2) {
-      urgencyLevel = 'Intento 2 de 3 - Accion Requerida'
-      nextSteps = 'Este es el segundo intento fallido. Si el proximo intento tambien falla, tu suscripcion sera cancelada automaticamente.'
+      urgencyLevel = t.attempt2.level
+      nextSteps = t.attempt2.steps
     } else {
-      urgencyLevel = 'ULTIMO INTENTO - Accion Urgente'
-      nextSteps = 'Este es el ultimo intento. Si no actualizas tu metodo de pago inmediatamente, tu suscripcion sera cancelada.'
+      urgencyLevel = t.attempt3.level
+      nextSteps = t.attempt3.steps
     }
 
     const html = `
@@ -710,7 +858,7 @@ Equipo de Avoqado
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Problema con el pago</title>
+  <title>${t.htmlTitle}</title>
 </head>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
   <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
@@ -723,33 +871,30 @@ Equipo de Avoqado
 
     <!-- Title -->
     <div style="padding-bottom: 24px;">
-      <h1 style="margin: 0 0 8px 0; font-size: 32px; font-weight: 400; color: #000;">Problema con el pago</h1>
+      <h1 style="margin: 0 0 8px 0; font-size: 32px; font-weight: 400; color: #000;">${t.title}</h1>
       <p style="margin: 0; font-size: 14px; color: #666;">${data.venueName}</p>
     </div>
 
     <!-- Content -->
     <div style="padding-bottom: 24px;">
-      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Hola,</p>
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${t.greeting}</p>
 
       <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
-        No pudimos procesar el pago de <strong>${amountFormatted}</strong> para tu suscripcion de <strong>${data.featureName}</strong>.
+        ${t.intro}
       </p>
 
       <!-- Alert Box -->
       <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin: 24px 0;">
         <p style="font-size: 15px; margin: 0 0 8px 0; color: #000; font-weight: 600;">${urgencyLevel}</p>
-        ${data.last4 ? `<p style="font-size: 14px; margin: 0 0 8px 0; color: #666;">Tarjeta terminada en <strong>${data.last4}</strong></p>` : ''}
+        ${data.last4 ? `<p style="font-size: 14px; margin: 0 0 8px 0; color: #666;">${t.cardEndingIn(data.last4)}</p>` : ''}
         <p style="font-size: 14px; margin: 0; color: #666;">${nextSteps}</p>
       </div>
 
       <!-- Info Box -->
       <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin: 24px 0;">
-        <p style="font-size: 15px; margin: 0 0 12px 0; color: #000; font-weight: 600;">Razones comunes de rechazo</p>
+        <p style="font-size: 15px; margin: 0 0 12px 0; color: #000; font-weight: 600;">${t.reasonsLabel}</p>
         <ul style="font-size: 14px; margin: 0; padding-left: 20px; color: #666;">
-          <li style="margin-bottom: 4px;">Fondos insuficientes en la tarjeta</li>
-          <li style="margin-bottom: 4px;">Tarjeta vencida o cerca de vencer</li>
-          <li style="margin-bottom: 4px;">Limite de credito alcanzado</li>
-          <li>Bloqueo temporal del banco</li>
+          ${t.reasons.map(r => `<li style="margin-bottom: 4px;">${r}</li>`).join('\n          ')}
         </ul>
       </div>
     </div>
@@ -757,7 +902,7 @@ Equipo de Avoqado
     <!-- CTA Button -->
     <div style="padding: 32px 0; text-align: center;">
       <a href="${data.billingPortalUrl}" style="background: #000; color: #fff; padding: 14px 32px; text-decoration: none; border-radius: 4px; font-weight: 600; font-size: 14px; display: inline-block;">
-        Actualizar Metodo de Pago
+        ${t.cta}
       </a>
     </div>
 
@@ -769,14 +914,13 @@ Equipo de Avoqado
         <span style="font-size: 16px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
       </div>
       <p style="margin: 0 0 16px 0; font-size: 14px; color: #000;">
-        Servicios Tecnologicos Avo S.A. de C.V.<br>
-        Ciudad de Mexico, Mexico
+        ${t.footerCompanyLine}
       </p>
       <p style="margin: 0; font-size: 12px; color: #666;">
-        Necesitas ayuda? Contactanos en cualquier momento o verifica con tu banco.
+        ${t.footerHelp}
       </p>
       <p style="margin: 16px 0 0 0; font-size: 14px;">
-        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Politica de Privacidad</a>
+        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">${t.privacy}</a>
       </p>
     </div>
 
@@ -786,27 +930,24 @@ Equipo de Avoqado
     `
 
     const text = `
-Hola,
+${t.greeting}
 
-No pudimos procesar el pago de ${amountFormatted} para tu suscripcion de ${data.featureName}.
+${t.textIntro}
 
 ${urgencyLevel}
-${data.last4 ? `Tarjeta terminada en ${data.last4}` : ''}
+${data.last4 ? t.textCardEndingIn(data.last4) : ''}
 
 ${nextSteps}
 
-Actualiza tu metodo de pago ahora:
+${t.textCallToAction}
 ${data.billingPortalUrl}
 
-Razones comunes de rechazo:
-- Fondos insuficientes en la tarjeta
-- Tarjeta vencida o cerca de vencer
-- Limite de credito alcanzado
-- Bloqueo temporal del banco
+${t.textReasonsLabel}
+${t.reasons.map(r => `- ${r}`).join('\n')}
 
-Necesitas ayuda? Contactanos en cualquier momento o verifica con tu banco.
+${t.textHelp}
 
-Equipo de Avoqado
+${t.textSignoff}
     `
 
     return this.sendEmail({
@@ -818,20 +959,82 @@ Equipo de Avoqado
   }
 
   async sendSubscriptionSuspendedEmail(email: string, data: SubscriptionSuspendedEmailData): Promise<boolean> {
-    const subject = `Tu suscripcion de ${data.featureName} ha sido suspendida - ${data.venueName}`
+    const locale = data.locale ?? 'es'
     const logoUrl = 'https://avoqado.io/isotipo.svg'
-    const suspendedDateFormatted = data.suspendedAt.toLocaleDateString('es-MX', {
+    const dateLocale = locale === 'en' ? 'en-US' : 'es-MX'
+    const suspendedDateFormatted = data.suspendedAt.toLocaleDateString(dateLocale, {
       weekday: 'long',
       year: 'numeric',
       month: 'long',
       day: 'numeric',
     })
-    const cancellationDateFormatted = data.gracePeriodEndsAt.toLocaleDateString('es-MX', {
+    const cancellationDateFormatted = data.gracePeriodEndsAt.toLocaleDateString(dateLocale, {
       weekday: 'long',
       year: 'numeric',
       month: 'long',
       day: 'numeric',
     })
+
+    const t =
+      locale === 'en'
+        ? {
+            subject: `Your ${data.featureName} subscription has been suspended - ${data.venueName}`,
+            htmlTitle: 'Subscription suspended',
+            title: 'Subscription Suspended',
+            greeting: 'Hi,',
+            intro: `Your <strong>${data.featureName}</strong> subscription has been suspended due to multiple failed payment attempts.`,
+            currentStatusLabel: 'Current status',
+            currentStatusValue: `Access blocked since ${suspendedDateFormatted}`,
+            cancellationLabel: 'Final cancellation date',
+            warning: `If you don't update your payment method before ${cancellationDateFormatted}, your subscription will be canceled permanently.`,
+            meaningLabel: 'What this means:',
+            meaning: [
+              `Your access to ${data.featureName} is currently blocked`,
+              'Your data remains safe and saved',
+              'You can reactivate your subscription by updating your payment method',
+              `After ${cancellationDateFormatted}, the subscription will be canceled`,
+            ],
+            cta: 'Update Payment Method',
+            footerHelp: 'Need help? Contact us anytime.',
+            privacy: 'Privacy Policy',
+            textSuspendedHeadline: `Your ${data.featureName} subscription has been SUSPENDED due to multiple failed payment attempts.`,
+            textCurrentStatus: `Current status: Access blocked since ${suspendedDateFormatted}`,
+            textCancellation: `Final cancellation date: ${cancellationDateFormatted}`,
+            textMeaningLabel: 'What this means:',
+            textCallToAction: 'Reactivate your subscription now:',
+            textHelp: 'Need help? Contact us anytime.',
+            textSignoff: 'The Avoqado Team',
+          }
+        : {
+            subject: `Tu suscripcion de ${data.featureName} ha sido suspendida - ${data.venueName}`,
+            htmlTitle: 'Suscripcion suspendida',
+            title: 'Suscripcion Suspendida',
+            greeting: 'Hola,',
+            intro: `Tu suscripcion de <strong>${data.featureName}</strong> ha sido suspendida debido a multiples intentos de pago fallidos.`,
+            currentStatusLabel: 'Estado actual',
+            currentStatusValue: `Acceso bloqueado desde ${suspendedDateFormatted}`,
+            cancellationLabel: 'Fecha de cancelacion definitiva',
+            warning: `Si no actualizas tu metodo de pago antes del ${cancellationDateFormatted}, tu suscripcion sera cancelada permanentemente.`,
+            meaningLabel: 'Que significa esto:',
+            meaning: [
+              `Tu acceso a ${data.featureName} esta actualmente bloqueado`,
+              'Tus datos permanecen seguros y guardados',
+              'Puedes reactivar tu suscripcion actualizando tu metodo de pago',
+              `Despues del ${cancellationDateFormatted}, la suscripcion sera cancelada`,
+            ],
+            cta: 'Actualizar Metodo de Pago',
+            footerHelp: 'Necesitas ayuda? Contactanos en cualquier momento.',
+            privacy: 'Politica de Privacidad',
+            textSuspendedHeadline: `Tu suscripcion de ${data.featureName} ha sido SUSPENDIDA debido a multiples intentos de pago fallidos.`,
+            textCurrentStatus: `Estado actual: Acceso bloqueado desde ${suspendedDateFormatted}`,
+            textCancellation: `Fecha de cancelacion definitiva: ${cancellationDateFormatted}`,
+            textMeaningLabel: 'Que significa esto:',
+            textCallToAction: 'Reactiva tu suscripcion ahora:',
+            textHelp: 'Necesitas ayuda? Contactanos en cualquier momento.',
+            textSignoff: 'Equipo de Avoqado',
+          }
+
+    const subject = t.subject
 
     const html = `
 <!DOCTYPE html>
@@ -839,7 +1042,7 @@ Equipo de Avoqado
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Suscripcion suspendida</title>
+  <title>${t.htmlTitle}</title>
 </head>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
   <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
@@ -852,15 +1055,15 @@ Equipo de Avoqado
 
     <!-- Title -->
     <div style="padding-bottom: 24px;">
-      <h1 style="margin: 0 0 8px 0; font-size: 32px; font-weight: 400; color: #000;">Suscripcion Suspendida</h1>
+      <h1 style="margin: 0 0 8px 0; font-size: 32px; font-weight: 400; color: #000;">${t.title}</h1>
       <p style="margin: 0; font-size: 16px; color: #666;">${data.venueName}</p>
     </div>
 
     <!-- Content -->
     <div style="padding-bottom: 24px;">
-      <p style="font-size: 16px; color: #000; margin: 0 0 16px 0;">Hola,</p>
+      <p style="font-size: 16px; color: #000; margin: 0 0 16px 0;">${t.greeting}</p>
       <p style="font-size: 15px; color: #000; margin: 0 0 24px 0;">
-        Tu suscripcion de <strong>${data.featureName}</strong> ha sido suspendida debido a multiples intentos de pago fallidos.
+        ${t.intro}
       </p>
     </div>
 
@@ -868,11 +1071,11 @@ Equipo de Avoqado
     <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 24px;">
       <table cellpadding="0" cellspacing="0" style="width: 100%;">
         <tr>
-          <td style="padding: 8px 0; font-size: 14px; color: #666;">Estado actual</td>
-          <td style="padding: 8px 0; font-size: 14px; color: #000; text-align: right;">Acceso bloqueado desde ${suspendedDateFormatted}</td>
+          <td style="padding: 8px 0; font-size: 14px; color: #666;">${t.currentStatusLabel}</td>
+          <td style="padding: 8px 0; font-size: 14px; color: #000; text-align: right;">${t.currentStatusValue}</td>
         </tr>
         <tr>
-          <td style="padding: 8px 0; font-size: 14px; color: #666;">Fecha de cancelacion definitiva</td>
+          <td style="padding: 8px 0; font-size: 14px; color: #666;">${t.cancellationLabel}</td>
           <td style="padding: 8px 0; font-size: 14px; color: #000; text-align: right;">${cancellationDateFormatted}</td>
         </tr>
       </table>
@@ -881,25 +1084,22 @@ Equipo de Avoqado
     <!-- Warning -->
     <div style="background: #fef3c7; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
       <p style="font-size: 14px; color: #92400e; margin: 0;">
-        Si no actualizas tu metodo de pago antes del ${cancellationDateFormatted}, tu suscripcion sera cancelada permanentemente.
+        ${t.warning}
       </p>
     </div>
 
     <!-- Info Box -->
     <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 24px;">
-      <p style="font-size: 14px; font-weight: 600; color: #000; margin: 0 0 12px 0;">Que significa esto:</p>
+      <p style="font-size: 14px; font-weight: 600; color: #000; margin: 0 0 12px 0;">${t.meaningLabel}</p>
       <ul style="font-size: 14px; margin: 0; padding-left: 20px; color: #000;">
-        <li style="margin-bottom: 8px;">Tu acceso a ${data.featureName} esta actualmente bloqueado</li>
-        <li style="margin-bottom: 8px;">Tus datos permanecen seguros y guardados</li>
-        <li style="margin-bottom: 8px;">Puedes reactivar tu suscripcion actualizando tu metodo de pago</li>
-        <li>Despues del ${cancellationDateFormatted}, la suscripcion sera cancelada</li>
+        ${t.meaning.map(m => `<li style="margin-bottom: 8px;">${m}</li>`).join('\n        ')}
       </ul>
     </div>
 
     <!-- CTA Button -->
     <div style="padding: 24px 0; text-align: center;">
       <a href="${data.billingPortalUrl}" style="background: #000; color: #fff; padding: 14px 32px; text-decoration: none; border-radius: 4px; font-weight: 600; font-size: 14px; display: inline-block;">
-        Actualizar Metodo de Pago
+        ${t.cta}
       </a>
     </div>
 
@@ -911,10 +1111,10 @@ Equipo de Avoqado
         <span style="font-size: 16px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
       </div>
       <p style="margin: 0; font-size: 14px; color: #666;">
-        Necesitas ayuda? Contactanos en cualquier momento.
+        ${t.footerHelp}
       </p>
       <p style="margin: 16px 0 0 0; font-size: 14px;">
-        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Politica de Privacidad</a>
+        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">${t.privacy}</a>
       </p>
     </div>
 
@@ -924,25 +1124,22 @@ Equipo de Avoqado
     `
 
     const text = `
-Hola,
+${t.greeting}
 
-Tu suscripcion de ${data.featureName} ha sido SUSPENDIDA debido a multiples intentos de pago fallidos.
+${t.textSuspendedHeadline}
 
-Estado actual: Acceso bloqueado desde ${suspendedDateFormatted}
-Fecha de cancelacion definitiva: ${cancellationDateFormatted}
+${t.textCurrentStatus}
+${t.textCancellation}
 
-Que significa esto:
-- Tu acceso a ${data.featureName} esta actualmente bloqueado
-- Tus datos permanecen seguros y guardados
-- Puedes reactivar tu suscripcion actualizando tu metodo de pago
-- Despues del ${cancellationDateFormatted}, la suscripcion sera cancelada
+${t.textMeaningLabel}
+${t.meaning.map(m => `- ${m}`).join('\n')}
 
-Reactiva tu suscripcion ahora:
+${t.textCallToAction}
 ${data.billingPortalUrl}
 
-Necesitas ayuda? Contactanos en cualquier momento.
+${t.textHelp}
 
-Equipo de Avoqado
+${t.textSignoff}
     `
 
     return this.sendEmail({
@@ -954,20 +1151,80 @@ Equipo de Avoqado
   }
 
   async sendSubscriptionCanceledEmail(email: string, data: SubscriptionCanceledEmailData): Promise<boolean> {
-    const subject = `Tu suscripcion de ${data.featureName} ha sido cancelada - ${data.venueName}`
+    const locale = data.locale ?? 'es'
     const logoUrl = 'https://avoqado.io/isotipo.svg'
-    const canceledDateFormatted = data.canceledAt.toLocaleDateString('es-MX', {
+    const dateLocale = locale === 'en' ? 'en-US' : 'es-MX'
+    const canceledDateFormatted = data.canceledAt.toLocaleDateString(dateLocale, {
       weekday: 'long',
       year: 'numeric',
       month: 'long',
       day: 'numeric',
     })
-    const suspendedDateFormatted = data.suspendedAt.toLocaleDateString('es-MX', {
+    const suspendedDateFormatted = data.suspendedAt.toLocaleDateString(dateLocale, {
       weekday: 'long',
       year: 'numeric',
       month: 'long',
       day: 'numeric',
     })
+
+    const t =
+      locale === 'en'
+        ? {
+            subject: `Your ${data.featureName} subscription has been canceled - ${data.venueName}`,
+            htmlTitle: 'Subscription canceled',
+            title: 'Subscription Canceled',
+            greeting: 'Hi,',
+            intro: `Your <strong>${data.featureName}</strong> subscription has been permanently canceled on ${canceledDateFormatted} due to unresolved payment issues.`,
+            suspensionLabel: 'Suspension date',
+            cancellationLabel: 'Cancellation date',
+            accessDeactivated: `Your access to ${data.featureName} has been completely deactivated.`,
+            reactivateLabel: `Want to reactivate ${data.featureName}?`,
+            reactivateBody:
+              'You can reactivate your subscription at any time. Your previous data remains safe and you can regain access immediately after setting up your payment method.',
+            ctaPrompt: 'Ready to come back?',
+            ctaLink: 'Contact us to reactivate your subscription',
+            footerNote: "We're sorry to see you go. If you need help or have questions, we're here for you.",
+            privacy: 'Privacy Policy',
+            textCanceledHeadline: `Your ${data.featureName} subscription has been PERMANENTLY CANCELED on ${canceledDateFormatted} due to unresolved payment issues.`,
+            textSuspension: `Suspension date: ${suspendedDateFormatted}`,
+            textCancellation: `Cancellation date: ${canceledDateFormatted}`,
+            textAccessDeactivated: `Your access to ${data.featureName} has been completely deactivated.`,
+            textReactivateLabel: `Want to reactivate ${data.featureName}?`,
+            textReactivateBody:
+              'You can reactivate your subscription at any time. Your previous data remains safe and you can regain access immediately after setting up your payment method.',
+            textContact: 'Contact us if you need help: hola@avoqado.io',
+            textFooterNote: "We're sorry to see you go. If you need help or have questions, we're here for you.",
+            textSignoff: 'The Avoqado Team',
+          }
+        : {
+            subject: `Tu suscripcion de ${data.featureName} ha sido cancelada - ${data.venueName}`,
+            htmlTitle: 'Suscripcion cancelada',
+            title: 'Suscripcion Cancelada',
+            greeting: 'Hola,',
+            intro: `Tu suscripcion de <strong>${data.featureName}</strong> ha sido cancelada permanentemente el ${canceledDateFormatted} debido a problemas de pago no resueltos.`,
+            suspensionLabel: 'Fecha de suspension',
+            cancellationLabel: 'Fecha de cancelacion',
+            accessDeactivated: `Tu acceso a ${data.featureName} ha sido completamente desactivado.`,
+            reactivateLabel: `Quieres volver a activar ${data.featureName}?`,
+            reactivateBody:
+              'Puedes reactivar tu suscripcion en cualquier momento. Tus datos previos permanecen seguros y podras recuperar el acceso inmediatamente despues de configurar tu metodo de pago.',
+            ctaPrompt: 'Listo para volver?',
+            ctaLink: 'Contactanos para reactivar tu suscripcion',
+            footerNote: 'Lamentamos verte partir. Si necesitas ayuda o tienes preguntas, estamos aqui para ti.',
+            privacy: 'Politica de Privacidad',
+            textCanceledHeadline: `Tu suscripcion de ${data.featureName} ha sido CANCELADA PERMANENTEMENTE el ${canceledDateFormatted} debido a problemas de pago no resueltos.`,
+            textSuspension: `Fecha de suspension: ${suspendedDateFormatted}`,
+            textCancellation: `Fecha de cancelacion: ${canceledDateFormatted}`,
+            textAccessDeactivated: `Tu acceso a ${data.featureName} ha sido completamente desactivado.`,
+            textReactivateLabel: `Quieres volver a activar ${data.featureName}?`,
+            textReactivateBody:
+              'Puedes reactivar tu suscripcion en cualquier momento. Tus datos previos permanecen seguros y podras recuperar el acceso inmediatamente despues de configurar tu metodo de pago.',
+            textContact: 'Contactanos si necesitas ayuda: hola@avoqado.io',
+            textFooterNote: 'Lamentamos verte partir. Si necesitas ayuda o tienes preguntas, estamos aqui para ti.',
+            textSignoff: 'Equipo de Avoqado',
+          }
+
+    const subject = t.subject
 
     const html = `
 <!DOCTYPE html>
@@ -975,7 +1232,7 @@ Equipo de Avoqado
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Suscripcion cancelada</title>
+  <title>${t.htmlTitle}</title>
 </head>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
   <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
@@ -988,15 +1245,15 @@ Equipo de Avoqado
 
     <!-- Title -->
     <div style="padding-bottom: 24px;">
-      <h1 style="margin: 0 0 8px 0; font-size: 32px; font-weight: 400; color: #000;">Suscripcion Cancelada</h1>
+      <h1 style="margin: 0 0 8px 0; font-size: 32px; font-weight: 400; color: #000;">${t.title}</h1>
       <p style="margin: 0; font-size: 16px; color: #666;">${data.venueName}</p>
     </div>
 
     <!-- Content -->
     <div style="padding-bottom: 24px;">
-      <p style="font-size: 16px; color: #000; margin: 0 0 16px 0;">Hola,</p>
+      <p style="font-size: 16px; color: #000; margin: 0 0 16px 0;">${t.greeting}</p>
       <p style="font-size: 15px; color: #000; margin: 0 0 24px 0;">
-        Tu suscripcion de <strong>${data.featureName}</strong> ha sido cancelada permanentemente el ${canceledDateFormatted} debido a problemas de pago no resueltos.
+        ${t.intro}
       </p>
     </div>
 
@@ -1004,32 +1261,32 @@ Equipo de Avoqado
     <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 24px;">
       <table cellpadding="0" cellspacing="0" style="width: 100%;">
         <tr>
-          <td style="padding: 8px 0; font-size: 14px; color: #666;">Fecha de suspension</td>
+          <td style="padding: 8px 0; font-size: 14px; color: #666;">${t.suspensionLabel}</td>
           <td style="padding: 8px 0; font-size: 14px; color: #000; text-align: right;">${suspendedDateFormatted}</td>
         </tr>
         <tr>
-          <td style="padding: 8px 0; font-size: 14px; color: #666;">Fecha de cancelacion</td>
+          <td style="padding: 8px 0; font-size: 14px; color: #666;">${t.cancellationLabel}</td>
           <td style="padding: 8px 0; font-size: 14px; color: #000; text-align: right;">${canceledDateFormatted}</td>
         </tr>
       </table>
       <p style="font-size: 14px; color: #666; margin: 16px 0 0 0;">
-        Tu acceso a ${data.featureName} ha sido completamente desactivado.
+        ${t.accessDeactivated}
       </p>
     </div>
 
     <!-- Info Box -->
     <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 24px;">
-      <p style="font-size: 14px; font-weight: 600; color: #000; margin: 0 0 12px 0;">Quieres volver a activar ${data.featureName}?</p>
+      <p style="font-size: 14px; font-weight: 600; color: #000; margin: 0 0 12px 0;">${t.reactivateLabel}</p>
       <p style="font-size: 14px; color: #000; margin: 0;">
-        Puedes reactivar tu suscripcion en cualquier momento. Tus datos previos permanecen seguros y podras recuperar el acceso inmediatamente despues de configurar tu metodo de pago.
+        ${t.reactivateBody}
       </p>
     </div>
 
     <!-- CTA -->
     <div style="padding: 16px 0 24px 0; text-align: center;">
-      <p style="font-size: 15px; color: #000; margin: 0 0 16px 0;">Listo para volver?</p>
+      <p style="font-size: 15px; color: #000; margin: 0 0 16px 0;">${t.ctaPrompt}</p>
       <a href="mailto:hola@avoqado.io" style="color: #1a73e8; text-decoration: none; font-weight: 600; font-size: 14px;">
-        Contactanos para reactivar tu suscripcion
+        ${t.ctaLink}
       </a>
     </div>
 
@@ -1041,10 +1298,10 @@ Equipo de Avoqado
         <span style="font-size: 16px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
       </div>
       <p style="margin: 0; font-size: 14px; color: #666;">
-        Lamentamos verte partir. Si necesitas ayuda o tienes preguntas, estamos aqui para ti.
+        ${t.footerNote}
       </p>
       <p style="margin: 16px 0 0 0; font-size: 14px;">
-        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Politica de Privacidad</a>
+        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">${t.privacy}</a>
       </p>
     </div>
 
@@ -1054,23 +1311,23 @@ Equipo de Avoqado
     `
 
     const text = `
-Hola,
+${t.greeting}
 
-Tu suscripcion de ${data.featureName} ha sido CANCELADA PERMANENTEMENTE el ${canceledDateFormatted} debido a problemas de pago no resueltos.
+${t.textCanceledHeadline}
 
-Fecha de suspension: ${suspendedDateFormatted}
-Fecha de cancelacion: ${canceledDateFormatted}
+${t.textSuspension}
+${t.textCancellation}
 
-Tu acceso a ${data.featureName} ha sido completamente desactivado.
+${t.textAccessDeactivated}
 
-Quieres volver a activar ${data.featureName}?
-Puedes reactivar tu suscripcion en cualquier momento. Tus datos previos permanecen seguros y podras recuperar el acceso inmediatamente despues de configurar tu metodo de pago.
+${t.textReactivateLabel}
+${t.textReactivateBody}
 
-Contactanos si necesitas ayuda: hola@avoqado.io
+${t.textContact}
 
-Lamentamos verte partir. Si necesitas ayuda o tienes preguntas, estamos aqui para ti.
+${t.textFooterNote}
 
-Equipo de Avoqado
+${t.textSignoff}
     `
 
     return this.sendEmail({
@@ -1082,14 +1339,71 @@ Equipo de Avoqado
   }
 
   async sendTrialExpiredEmail(email: string, data: TrialExpiredEmailData): Promise<boolean> {
-    const subject = `Tu periodo de prueba de ${data.featureName} ha terminado - ${data.venueName}`
+    const locale = data.locale ?? 'es'
     const logoUrl = 'https://avoqado.io/isotipo.svg'
-    const expiredDateFormatted = data.expiredAt.toLocaleDateString('es-MX', {
+    const expiredDateFormatted = data.expiredAt.toLocaleDateString(locale === 'en' ? 'en-US' : 'es-MX', {
       weekday: 'long',
       year: 'numeric',
       month: 'long',
       day: 'numeric',
     })
+
+    const t =
+      locale === 'en'
+        ? {
+            subject: `Your ${data.featureName} trial has ended - ${data.venueName}`,
+            htmlTitle: 'Trial period ended',
+            title: 'Trial Period Ended',
+            greeting: 'Hi,',
+            intro: `Your <strong>${data.featureName}</strong> trial period ended on ${expiredDateFormatted}.`,
+            expirationLabel: 'Expiration date',
+            statusLabel: 'Status',
+            statusValue: 'Access temporarily deactivated',
+            likedLabel: `Did you like ${data.featureName}?`,
+            likedBody:
+              'You can subscribe at any time to keep enjoying all the features. Your data is safe and access will be restored immediately.',
+            ctaPrompt: 'Ready to subscribe?',
+            ctaBody: 'Visit the billing section in your dashboard to activate your subscription.',
+            footerNote: `Thanks for trying ${data.featureName}. If you have questions, we're here to help.`,
+            privacy: 'Privacy Policy',
+            textExpiredHeadline: `Your ${data.featureName} trial period has ENDED on ${expiredDateFormatted}.`,
+            textExpiration: `Expiration date: ${expiredDateFormatted}`,
+            textAccess: `Your access to ${data.featureName} has been temporarily deactivated.`,
+            textLikedLabel: `Did you like ${data.featureName}?`,
+            textLikedBody:
+              'You can subscribe at any time to keep enjoying all the features. Your data is safe and access will be restored immediately.',
+            textCallToAction: 'Visit the billing section in your dashboard to activate your subscription.',
+            textFooterNote: `Thanks for trying ${data.featureName}. If you have questions, we're here to help.`,
+            textSignoff: 'The Avoqado Team',
+          }
+        : {
+            subject: `Tu periodo de prueba de ${data.featureName} ha terminado - ${data.venueName}`,
+            htmlTitle: 'Periodo de prueba terminado',
+            title: 'Periodo de Prueba Terminado',
+            greeting: 'Hola,',
+            intro: `Tu periodo de prueba de <strong>${data.featureName}</strong> ha terminado el ${expiredDateFormatted}.`,
+            expirationLabel: 'Fecha de expiracion',
+            statusLabel: 'Estado',
+            statusValue: 'Acceso desactivado temporalmente',
+            likedLabel: `Te gusto ${data.featureName}?`,
+            likedBody:
+              'Puedes suscribirte en cualquier momento para continuar disfrutando de todas las funcionalidades. Tus datos estan seguros y el acceso se reactivara inmediatamente.',
+            ctaPrompt: 'Listo para suscribirte?',
+            ctaBody: 'Visita la seccion de facturacion en tu dashboard para activar tu suscripcion.',
+            footerNote: `Gracias por probar ${data.featureName}. Si tienes preguntas, estamos aqui para ayudarte.`,
+            privacy: 'Politica de Privacidad',
+            textExpiredHeadline: `Tu periodo de prueba de ${data.featureName} ha TERMINADO el ${expiredDateFormatted}.`,
+            textExpiration: `Fecha de expiracion: ${expiredDateFormatted}`,
+            textAccess: `Tu acceso a ${data.featureName} ha sido desactivado temporalmente.`,
+            textLikedLabel: `Te gusto ${data.featureName}?`,
+            textLikedBody:
+              'Puedes suscribirte en cualquier momento para continuar disfrutando de todas las funcionalidades. Tus datos estan seguros y el acceso se reactivara inmediatamente.',
+            textCallToAction: 'Visita la seccion de facturacion en tu dashboard para activar tu suscripcion.',
+            textFooterNote: `Gracias por probar ${data.featureName}. Si tienes preguntas, estamos aqui para ayudarte.`,
+            textSignoff: 'Equipo de Avoqado',
+          }
+
+    const subject = t.subject
 
     const html = `
 <!DOCTYPE html>
@@ -1097,7 +1411,7 @@ Equipo de Avoqado
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Periodo de prueba terminado</title>
+  <title>${t.htmlTitle}</title>
 </head>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
   <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
@@ -1110,15 +1424,15 @@ Equipo de Avoqado
 
     <!-- Title -->
     <div style="padding-bottom: 24px;">
-      <h1 style="margin: 0 0 8px 0; font-size: 32px; font-weight: 400; color: #000;">Periodo de Prueba Terminado</h1>
+      <h1 style="margin: 0 0 8px 0; font-size: 32px; font-weight: 400; color: #000;">${t.title}</h1>
       <p style="margin: 0; font-size: 16px; color: #666;">${data.venueName}</p>
     </div>
 
     <!-- Content -->
     <div style="padding-bottom: 24px;">
-      <p style="font-size: 16px; color: #000; margin: 0 0 16px 0;">Hola,</p>
+      <p style="font-size: 16px; color: #000; margin: 0 0 16px 0;">${t.greeting}</p>
       <p style="font-size: 15px; color: #000; margin: 0 0 24px 0;">
-        Tu periodo de prueba de <strong>${data.featureName}</strong> ha terminado el ${expiredDateFormatted}.
+        ${t.intro}
       </p>
     </div>
 
@@ -1126,29 +1440,29 @@ Equipo de Avoqado
     <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 24px;">
       <table cellpadding="0" cellspacing="0" style="width: 100%;">
         <tr>
-          <td style="padding: 8px 0; font-size: 14px; color: #666;">Fecha de expiracion</td>
+          <td style="padding: 8px 0; font-size: 14px; color: #666;">${t.expirationLabel}</td>
           <td style="padding: 8px 0; font-size: 14px; color: #000; text-align: right;">${expiredDateFormatted}</td>
         </tr>
         <tr>
-          <td style="padding: 8px 0; font-size: 14px; color: #666;">Estado</td>
-          <td style="padding: 8px 0; font-size: 14px; color: #000; text-align: right;">Acceso desactivado temporalmente</td>
+          <td style="padding: 8px 0; font-size: 14px; color: #666;">${t.statusLabel}</td>
+          <td style="padding: 8px 0; font-size: 14px; color: #000; text-align: right;">${t.statusValue}</td>
         </tr>
       </table>
     </div>
 
     <!-- Info Box -->
     <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 24px;">
-      <p style="font-size: 14px; font-weight: 600; color: #000; margin: 0 0 12px 0;">Te gusto ${data.featureName}?</p>
+      <p style="font-size: 14px; font-weight: 600; color: #000; margin: 0 0 12px 0;">${t.likedLabel}</p>
       <p style="font-size: 14px; color: #000; margin: 0;">
-        Puedes suscribirte en cualquier momento para continuar disfrutando de todas las funcionalidades. Tus datos estan seguros y el acceso se reactivara inmediatamente.
+        ${t.likedBody}
       </p>
     </div>
 
     <!-- CTA -->
     <div style="padding: 16px 0 24px 0; text-align: center;">
-      <p style="font-size: 15px; color: #000; margin: 0 0 16px 0;">Listo para suscribirte?</p>
+      <p style="font-size: 15px; color: #000; margin: 0 0 16px 0;">${t.ctaPrompt}</p>
       <p style="font-size: 14px; color: #666; margin: 0;">
-        Visita la seccion de facturacion en tu dashboard para activar tu suscripcion.
+        ${t.ctaBody}
       </p>
     </div>
 
@@ -1160,10 +1474,10 @@ Equipo de Avoqado
         <span style="font-size: 16px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
       </div>
       <p style="margin: 0; font-size: 14px; color: #666;">
-        Gracias por probar ${data.featureName}. Si tienes preguntas, estamos aqui para ayudarte.
+        ${t.footerNote}
       </p>
       <p style="margin: 16px 0 0 0; font-size: 14px;">
-        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Politica de Privacidad</a>
+        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">${t.privacy}</a>
       </p>
     </div>
 
@@ -1173,22 +1487,22 @@ Equipo de Avoqado
     `
 
     const text = `
-Hola,
+${t.greeting}
 
-Tu periodo de prueba de ${data.featureName} ha TERMINADO el ${expiredDateFormatted}.
+${t.textExpiredHeadline}
 
-Fecha de expiracion: ${expiredDateFormatted}
+${t.textExpiration}
 
-Tu acceso a ${data.featureName} ha sido desactivado temporalmente.
+${t.textAccess}
 
-Te gusto ${data.featureName}?
-Puedes suscribirte en cualquier momento para continuar disfrutando de todas las funcionalidades. Tus datos estan seguros y el acceso se reactivara inmediatamente.
+${t.textLikedLabel}
+${t.textLikedBody}
 
-Visita la seccion de facturacion en tu dashboard para activar tu suscripcion.
+${t.textCallToAction}
 
-Gracias por probar ${data.featureName}. Si tienes preguntas, estamos aqui para ayudarte.
+${t.textFooterNote}
 
-Equipo de Avoqado
+${t.textSignoff}
     `
 
     return this.sendEmail({
@@ -3712,6 +4026,334 @@ Servicios Tecnologicos Avo S.A. de C.V.`
       html,
       text,
     })
+  }
+
+  /**
+   * Shared HTML shell for the subscription-lifecycle plan emails (confirmation, renewal reminder,
+   * win-back). Mirrors the `sendPaymentFailedEmail` structure: white bg, isotipo in header + footer,
+   * black CTA button. Keeps the 3 plan-email methods DRY. Locale only varies the footer chrome;
+   * the title/body/CTA strings are passed pre-localized by each method.
+   */
+  private buildPlanEmailHtml(opts: {
+    locale: 'es' | 'en'
+    title: string
+    venueName: string
+    bodyHtml: string // inner content blocks (already localized + escaped where needed)
+    ctaLabel: string
+    ctaUrl: string
+  }): string {
+    const logoUrl = 'https://avoqado.io/isotipo.svg'
+    const footer =
+      opts.locale === 'en'
+        ? {
+            help: 'Need help? Contact us anytime.',
+            privacy: 'Privacy Policy',
+          }
+        : {
+            help: 'Necesitas ayuda? Contactanos en cualquier momento.',
+            privacy: 'Politica de Privacidad',
+          }
+
+    return `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${opts.title}</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+  <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
+
+    <!-- Header with Logo -->
+    <div style="padding-bottom: 32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display: inline-block; vertical-align: middle;">
+      <span style="font-size: 18px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
+    </div>
+
+    <!-- Title -->
+    <div style="padding-bottom: 24px;">
+      <h1 style="margin: 0 0 8px 0; font-size: 32px; font-weight: 400; color: #000;">${opts.title}</h1>
+      <p style="margin: 0; font-size: 14px; color: #666;">${opts.venueName}</p>
+    </div>
+
+    <!-- Content -->
+    <div style="padding-bottom: 24px;">
+      ${opts.bodyHtml}
+    </div>
+
+    <!-- CTA Button -->
+    <div style="padding: 32px 0; text-align: center;">
+      <a href="${opts.ctaUrl}" style="background-color: #000000; color: #fff; padding: 14px 32px; text-decoration: none; border-radius: 6px; font-weight: 600; font-size: 14px; display: inline-block;">
+        ${opts.ctaLabel}
+      </a>
+    </div>
+
+    <!-- Footer -->
+    <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 40px 0 24px 0;">
+    <div>
+      <div style="margin-bottom: 16px;">
+        <img src="${logoUrl}" alt="Avoqado" width="24" height="24" style="display: inline-block; vertical-align: middle;">
+        <span style="font-size: 16px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
+      </div>
+      <p style="margin: 0 0 16px 0; font-size: 14px; color: #000;">
+        Servicios Tecnologicos Avo S.A. de C.V.<br>
+        Ciudad de Mexico, Mexico
+      </p>
+      <p style="margin: 0; font-size: 12px; color: #666;">
+        ${footer.help}
+      </p>
+      <p style="margin: 16px 0 0 0; font-size: 14px;">
+        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">${footer.privacy}</a>
+      </p>
+    </div>
+
+  </div>
+</body>
+</html>
+    `
+  }
+
+  /**
+   * Plan confirmation email (Phase 1.5). Sent right after PLAN_PRO is enabled in onboarding.
+   * Two variants: trial (payNow=false) and pay-now (payNow=true, with intro price for the first
+   * 3 months on monthly). Money formatted via Intl.NumberFormat (es-MX/en-US, currency MXN).
+   */
+  async sendPlanConfirmationEmail(email: string, data: PlanConfirmationEmailData): Promise<boolean> {
+    const fmt = (cents: number) =>
+      new Intl.NumberFormat(data.locale === 'en' ? 'en-US' : 'es-MX', {
+        style: 'currency',
+        currency: 'MXN',
+      }).format(cents / 100)
+    const dateFormatted = data.firstChargeDate.toLocaleDateString(data.locale === 'en' ? 'en-US' : 'es-MX', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    })
+    const intervalLabel =
+      data.locale === 'en' ? (data.interval === 'annual' ? 'year' : 'month') : data.interval === 'annual' ? 'año' : 'mes'
+
+    const firstAmount = fmt(data.firstChargeAmountCents)
+    const introAmount = data.introAmountCents != null ? fmt(data.introAmountCents) : null
+
+    let subject: string
+    let greeting: string
+    let bodyHtml: string
+    let ctaLabel: string
+    let text: string
+
+    if (data.payNow) {
+      // Pay-now variant
+      subject = data.locale === 'en' ? 'Welcome to Avoqado Pro!' : '¡Bienvenido a Avoqado Pro!'
+      ctaLabel = data.locale === 'en' ? 'View billing' : 'Ver facturación'
+      if (data.locale === 'en') {
+        greeting = 'Hi,'
+        const introClause = introAmount
+          ? `We received your payment of <strong>${introAmount}</strong>. You'll keep paying ${introAmount} for the first 3 months, then ${firstAmount}/${intervalLabel}.`
+          : `We received your payment of <strong>${firstAmount}</strong>. Your plan renews at ${firstAmount}/${intervalLabel}.`
+        bodyHtml = `
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${greeting}</p>
+      <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
+        Your <strong>Avoqado Pro</strong> plan for ${data.venueName} is active. ${introClause}
+      </p>
+      <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin: 24px 0;">
+        <p style="font-size: 14px; margin: 0; color: #666;">Next renewal: <strong>${dateFormatted}</strong> · <strong>${firstAmount}</strong>/${intervalLabel}.</p>
+      </div>`
+        text = `Hi,
+
+Your Avoqado Pro plan for ${data.venueName} is active. ${
+          introAmount
+            ? `We received your payment of ${introAmount}. You'll keep paying ${introAmount} for the first 3 months, then ${firstAmount}/${intervalLabel}.`
+            : `We received your payment of ${firstAmount}. Your plan renews at ${firstAmount}/${intervalLabel}.`
+        }
+
+Next renewal: ${dateFormatted} · ${firstAmount}/${intervalLabel}.
+
+View billing: ${data.billingPortalUrl}
+
+Avoqado Team`
+      } else {
+        greeting = 'Hola,'
+        const introClause = introAmount
+          ? `Recibimos tu pago de <strong>${introAmount}</strong>. Seguirás con ${introAmount} los primeros 3 meses, luego ${firstAmount}/${intervalLabel}.`
+          : `Recibimos tu pago de <strong>${firstAmount}</strong>. Tu plan se renueva en ${firstAmount}/${intervalLabel}.`
+        bodyHtml = `
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${greeting}</p>
+      <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
+        Tu plan <strong>Avoqado Pro</strong> para ${data.venueName} está activo. ${introClause}
+      </p>
+      <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin: 24px 0;">
+        <p style="font-size: 14px; margin: 0; color: #666;">Próxima renovación: <strong>${dateFormatted}</strong> · <strong>${firstAmount}</strong>/${intervalLabel}.</p>
+      </div>`
+        text = `Hola,
+
+Tu plan Avoqado Pro para ${data.venueName} está activo. ${
+          introAmount
+            ? `Recibimos tu pago de ${introAmount}. Seguirás con ${introAmount} los primeros 3 meses, luego ${firstAmount}/${intervalLabel}.`
+            : `Recibimos tu pago de ${firstAmount}. Tu plan se renueva en ${firstAmount}/${intervalLabel}.`
+        }
+
+Próxima renovación: ${dateFormatted} · ${firstAmount}/${intervalLabel}.
+
+Ver facturación: ${data.billingPortalUrl}
+
+Equipo de Avoqado`
+      }
+    } else {
+      // Trial variant
+      subject = data.locale === 'en' ? 'Your Avoqado Pro trial has started' : 'Tu prueba de Avoqado Pro empezó'
+      ctaLabel = data.locale === 'en' ? 'View billing' : 'Ver facturación'
+      if (data.locale === 'en') {
+        greeting = 'Hi,'
+        bodyHtml = `
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${greeting}</p>
+      <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
+        Your 30-day trial is active. Your first charge of <strong>${firstAmount}</strong> is on <strong>${dateFormatted}</strong>.
+      </p>`
+        text = `Hi,
+
+Your 30-day trial is active. Your first charge of ${firstAmount} is on ${dateFormatted}.
+
+View billing: ${data.billingPortalUrl}
+
+Avoqado Team`
+      } else {
+        greeting = 'Hola,'
+        bodyHtml = `
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${greeting}</p>
+      <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
+        Tu prueba de 30 días está activa. Tu primer cobro será de <strong>${firstAmount}</strong> el <strong>${dateFormatted}</strong>.
+      </p>`
+        text = `Hola,
+
+Tu prueba de 30 días está activa. Tu primer cobro será de ${firstAmount} el ${dateFormatted}.
+
+Ver facturación: ${data.billingPortalUrl}
+
+Equipo de Avoqado`
+      }
+    }
+
+    const html = this.buildPlanEmailHtml({
+      locale: data.locale,
+      title: subject,
+      venueName: data.venueName,
+      bodyHtml,
+      ctaLabel,
+      ctaUrl: data.billingPortalUrl,
+    })
+
+    return this.sendEmail({ to: email, subject, html, text })
+  }
+
+  /**
+   * Plan renewal reminder (Phase 1.5). Sent ~3 days before the next billing period by a daily cron.
+   */
+  async sendPlanRenewalReminderEmail(email: string, data: PlanRenewalReminderEmailData): Promise<boolean> {
+    const amount = new Intl.NumberFormat(data.locale === 'en' ? 'en-US' : 'es-MX', {
+      style: 'currency',
+      currency: 'MXN',
+    }).format(data.amountCents / 100)
+    const dateFormatted = data.renewalDate.toLocaleDateString(data.locale === 'en' ? 'en-US' : 'es-MX', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    })
+
+    const subject = data.locale === 'en' ? 'Your plan renews soon' : 'Tu plan se renueva pronto'
+    const ctaLabel = data.locale === 'en' ? 'Manage plan' : 'Administrar plan'
+
+    let bodyHtml: string
+    let text: string
+    if (data.locale === 'en') {
+      bodyHtml = `
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Hi,</p>
+      <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
+        Your Avoqado Pro plan will renew on <strong>${dateFormatted}</strong> for <strong>${amount}</strong>. You don't need to do anything; it charges your card automatically.
+      </p>`
+      text = `Hi,
+
+Your Avoqado Pro plan will renew on ${dateFormatted} for ${amount}. You don't need to do anything; it charges your card automatically.
+
+Manage plan: ${data.billingPortalUrl}
+
+Avoqado Team`
+    } else {
+      bodyHtml = `
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Hola,</p>
+      <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
+        Tu plan Avoqado Pro se renovará el <strong>${dateFormatted}</strong> por <strong>${amount}</strong>. No necesitas hacer nada; se cobra automáticamente a tu tarjeta.
+      </p>`
+      text = `Hola,
+
+Tu plan Avoqado Pro se renovará el ${dateFormatted} por ${amount}. No necesitas hacer nada; se cobra automáticamente a tu tarjeta.
+
+Administrar plan: ${data.billingPortalUrl}
+
+Equipo de Avoqado`
+    }
+
+    const html = this.buildPlanEmailHtml({
+      locale: data.locale,
+      title: subject,
+      venueName: data.venueName,
+      bodyHtml,
+      ctaLabel,
+      ctaUrl: data.billingPortalUrl,
+    })
+
+    return this.sendEmail({ to: email, subject, html, text })
+  }
+
+  /**
+   * Win-back email (Phase 1.5). Sent once ~3 days after a PLAN_PRO subscription is suspended,
+   * offering the first month free (WINBACK_FIRST_MONTH_FREE coupon).
+   */
+  async sendPlanWinbackEmail(email: string, data: PlanWinbackEmailData): Promise<boolean> {
+    const subject =
+      data.locale === 'en' ? 'Come back to Avoqado Pro — your first month is free' : 'Vuelve a Avoqado Pro — tu primer mes es gratis'
+    const ctaLabel = data.locale === 'en' ? 'Reactivate — 1 month free' : 'Reactivar con 1 mes gratis'
+
+    let bodyHtml: string
+    let text: string
+    if (data.locale === 'en') {
+      bodyHtml = `
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Hi,</p>
+      <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
+        We miss you. Reactivate Avoqado Pro and your first month is free. Your data is intact and access turns back on instantly.
+      </p>`
+      text = `Hi,
+
+We miss you. Reactivate Avoqado Pro and your first month is free. Your data is intact and access turns back on instantly.
+
+Reactivate — 1 month free: ${data.reactivateUrl}
+
+Avoqado Team`
+    } else {
+      bodyHtml = `
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Hola,</p>
+      <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
+        Te extrañamos. Reactiva Avoqado Pro y tu primer mes es gratis. Tus datos siguen intactos y el acceso se reactiva al instante.
+      </p>`
+      text = `Hola,
+
+Te extrañamos. Reactiva Avoqado Pro y tu primer mes es gratis. Tus datos siguen intactos y el acceso se reactiva al instante.
+
+Reactivar con 1 mes gratis: ${data.reactivateUrl}
+
+Equipo de Avoqado`
+    }
+
+    const html = this.buildPlanEmailHtml({
+      locale: data.locale,
+      title: subject,
+      venueName: data.venueName,
+      bodyHtml,
+      ctaLabel,
+      ctaUrl: data.reactivateUrl,
+    })
+
+    return this.sendEmail({ to: email, subject, html, text })
   }
 
   async verifyConnection(): Promise<boolean> {

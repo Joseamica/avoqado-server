@@ -145,6 +145,18 @@ const envSchema = z.object({
   API_PREFIX: z.string().default('/api/v1'),
 
   // ─────────────────────────────────────────────────────────────────────────
+  // FACTURACIÓN CFDI (facturapi)
+  // ─────────────────────────────────────────────────────────────────────────
+  /** facturapi account-level User Key (sk_user_…) — provisions organizations (emisores). Prod only. */
+  FACTURAPI_USER_KEY: z.string().optional(),
+  /** facturapi sandbox/test key (sk_test_…) — used in dev/staging to issue NON-billed test CFDIs. */
+  FACTURAPI_TEST_KEY: z.string().optional(),
+  /** Override base URL (defaults to facturapi prod in the SDK). Rarely needed. */
+  FACTURAPI_BASE_URL: z.string().url().optional(),
+  /** 32-byte hex key used to encrypt per-emisor facturapi live keys at rest (FiscalEmisor.providerKeyEnc). */
+  FISCAL_PROVIDER_KEY: z.string().length(64, 'FISCAL_PROVIDER_KEY must be a 32-byte hex string (64 chars)').optional(),
+
+  // ─────────────────────────────────────────────────────────────────────────
   // DEPLOYMENT (Auto-set by hosting providers)
   // ─────────────────────────────────────────────────────────────────────────
   FLY_APP_NAME: z.string().optional(),

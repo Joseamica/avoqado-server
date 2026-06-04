@@ -120,6 +120,7 @@ model Venue {
   type     VenueType @default(RESTAURANT)
   timezone String    @default("America/Mexico_City")
   currency String    @default("MXN")
+  language String    @default("es") // locale for transactional emails (es|en), set from onboarding wizard
 
   // Location
   address   String?
@@ -447,6 +448,12 @@ model Venue {
 
   // SIM registration approval layer (additive, sits on top of SerializedItem custody)
   simRegRequestsFromHere SimRegistrationRequest[] @relation("SimRegRequestVenue")
+
+  // ==========================================
+  // FACTURACIÓN CFDI 4.0
+  // ==========================================
+  fiscalEmisors FiscalEmisor[]
+  cfdis         Cfdi[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1222,6 +1229,10 @@ model MenuCategory {
   // Demo data flag (for cleanup on conversion)
   isDemo Boolean @default(false)
 
+  // SAT keys for CFDI 4.0 (per-sector defaults; product override ?? category default ?? sector default)
+  defaultSatProductKey String? // e.g. 90101500 "Servicio de restaurante"
+  defaultSatUnitKey    String? // e.g. E48 "Unidad de servicio"
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -1307,6 +1318,11 @@ model Product {
   price   Decimal  @db.Decimal(10, 2)
   cost    Decimal? @db.Decimal(10, 2)
   taxRate Decimal  @default(0.16) @db.Decimal(5, 4)
+
+  // SAT keys for CFDI 4.0 (override category defaults when set)
+  satProductKey String? // ClaveProdServ (8 digits)
+  satUnitKey    String? // ClaveUnidad (e.g. E48, H87)
+  objetoImp     String  @default("02") // 02 = sí objeto de impuesto
 
   // Display
   imageUrl     String?
@@ -2377,6 +2393,9 @@ model Order {
   // Referral Program — Referrals que califican cuando este Order se marca PAID.
   referralsTriggered Referral[]
 
+  // Facturación CFDI 4.0
+  cfdis Cfdi[]
+
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   completedAt DateTime?
@@ -2952,6 +2971,9 @@ model VenueFeature {
   gracePeriodEndsAt   DateTime? // When the grace period ends (7 days after first failure)
   lastPaymentAttempt  DateTime? // Last time payment was attempted
   paymentFailureCount Int       @default(0) // Number of consecutive payment failures
+
+  renewalReminderSentAt DateTime? // last renewal-reminder email sent (cron dedup, per billing period)
+  winbackSentAt         DateTime? // win-back email sent once after suspension (cron dedup)
 
   @@unique([venueId, featureId])
   @@index([venueId])
@@ -3556,6 +3578,9 @@ model MerchantAccount {
   // Rate correction batches targeting this merchant account
   rateCorrectionBatches RateCorrectionBatch[]
 
+  // Facturación CFDI 4.0
+  fiscalConfig MerchantFiscalConfig?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -3758,6 +3783,9 @@ model EcommerceMerchant {
   paymentLinks     PaymentLink[]
   payments         Payment[]
   reservations     Reservation[]     @relation("ReservationEcommerceMerchant")
+
+  // Facturación CFDI 4.0
+  fiscalConfig MerchantFiscalConfig?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -4884,6 +4912,9 @@ model Customer {
   // Credit Packs
   creditPackPurchases CreditPackPurchase[]
   creditTransactions  CreditTransaction[]
+
+  // Facturación CFDI 4.0
+  taxProfiles CustomerTaxProfile[]
 
   @@unique([venueId, email]) // Unique email per venue (not globally)
   @@unique([venueId, phone]) // Unique phone per venue (not globally)
@@ -7702,6 +7733,15 @@ enum TierPeriod {
   YEARLY
 }
 
+/// Whether a tier boundary is a fixed amount or resolves to the staff member's active sales goal
+enum ThresholdType {
+  FIXED
+  // Resolved at calculation time to the staff member's active SalesGoal
+  // (getStaffSalesGoal in services/dashboard/commission/sales-goal.service.ts),
+  // NOT the PerformanceGoal model. "staff" distinguishes it from venue-wide goals.
+  STAFF_GOAL
+}
+
 /// What metric is used for milestone targets
 enum MilestoneTargetType {
   ORDER_QUANTITY // Number of orders
@@ -7880,6 +7920,11 @@ model CommissionTier {
   // Thresholds
   minThreshold Decimal  @db.Decimal(12, 2) // Min orders/amount to reach this tier
   maxThreshold Decimal? @db.Decimal(12, 2) // Max before next tier (null = unlimited)
+
+  // A tier boundary can be a fixed amount (default) or resolve to the staff
+  // member's active sales goal at calculation time (STAFF_GOAL).
+  minThresholdType ThresholdType @default(FIXED)
+  maxThresholdType ThresholdType @default(FIXED)
 
   // Rate at this tier
   rate Decimal @db.Decimal(5, 4) // Commission rate for this tier
@@ -10295,4 +10340,213 @@ model McpRefreshToken {
   @@index([staffId])
   @@index([expiresAt])
   @@map("mcp_refresh_tokens")
+}
+
+// ─── Facturación CFDI 4.0 ───────────────────────────────────────────────
+enum CsdStatus {
+  NONE
+  UPLOADED
+  ACTIVE
+  EXPIRED
+  RESTRICTED
+}
+
+enum GlobalPeriodicity {
+  DIARIO
+  SEMANAL
+  QUINCENAL
+  MENSUAL
+  BIMESTRAL
+}
+
+enum FiscalProviderType {
+  FACTURAPI
+  FACTURAMA
+  ALEGRA
+}
+
+enum CfdiType {
+  INGRESO
+  EGRESO
+  PAGO
+}
+
+enum CfdiStatus {
+  DRAFT
+  VALIDATING
+  VALIDATION_FAILED
+  STAMPING
+  STAMPED
+  STAMP_FAILED
+  CANCEL_REQUESTED
+  CANCELLED
+}
+
+enum CfdiFlow {
+  STAFF_B
+  AUTOFACTURA_A
+  GLOBAL_C
+}
+
+enum CfdiCancelStatus {
+  REQUESTED
+  ACCEPTED
+  REJECTED
+  CANCELLED
+}
+
+enum FiscalValidationStatus {
+  UNVALIDATED
+  VALID
+  INVALID
+}
+
+/// The fiscal issuer (emisor) = one RFC + its CSD + provider binding. 1+ per venue.
+model FiscalEmisor {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Legal identity (must match SAT)
+  rfc             String
+  legalName       String
+  regimenFiscal   String // c_RegimenFiscal
+  lugarExpedicion String // fiscal CP
+
+  // Provider binding (provider-agnostic; facturapi = first adapter)
+  provider         FiscalProviderType @default(FACTURAPI)
+  providerOrgId    String? // facturapi org id / Alegra empresa id
+  providerKeyEnc   String? // encrypted per-emisor key
+  csdStatus        CsdStatus          @default(NONE)
+  csdExpiresAt     DateTime?
+  csdLastCheckedAt DateTime?
+
+  // Comprobante defaults
+  serie             String?
+  defaultUsoCfdi    String            @default("G03")
+  globalPeriodicity GlobalPeriodicity @default(MENSUAL)
+
+  merchantConfigs MerchantFiscalConfig[]
+  cfdis           Cfdi[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([venueId, rfc])
+  @@index([venueId])
+}
+
+/// Per-merchant facturación enablement. Exactly ONE of the two merchant FKs is set.
+/// Drives BOTH "which merchants invoice" (venue choice) and the customer-facing "facturar" gate.
+model MerchantFiscalConfig {
+  id String @id @default(cuid())
+
+  merchantAccountId   String?          @unique // in-person POS merchant
+  merchantAccount     MerchantAccount? @relation(fields: [merchantAccountId], references: [id], onDelete: Cascade)
+  ecommerceMerchantId String?            @unique // online channel merchant
+  ecommerceMerchant   EcommerceMerchant? @relation(fields: [ecommerceMerchantId], references: [id], onDelete: Cascade)
+
+  fiscalEmisorId String
+  fiscalEmisor   FiscalEmisor @relation(fields: [fiscalEmisorId], references: [id], onDelete: Restrict)
+
+  facturacionEnabled Boolean @default(false) // master switch for this merchant
+  autofacturaEnabled Boolean @default(false) // customer self-invoice (Flow A) allowed
+  includeInGlobal    Boolean @default(true)  // included in month-end global sweep (Flow C)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([fiscalEmisorId])
+}
+
+/// An issued (or in-flight) CFDI 4.0 fiscal document. NOTE: distinct from `Invoice` (internal SaaS billing).
+model Cfdi {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Restrict)
+
+  fiscalEmisorId String
+  fiscalEmisor   FiscalEmisor @relation(fields: [fiscalEmisorId], references: [id], onDelete: Restrict)
+
+  type   CfdiType   @default(INGRESO)
+  status CfdiStatus @default(DRAFT)
+  flow   CfdiFlow
+
+  // Source (individual) OR global period
+  orderId      String?
+  order        Order?  @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  isGlobal     Boolean @default(false)
+  globalPeriod Json? // { periodicidad, meses, anio }
+
+  // Receptor snapshot (denormalized at issuance)
+  receptorRfc     String
+  receptorNombre  String
+  receptorRegimen String
+  receptorCp      String
+  usoCfdi         String
+
+  // SAT payment classification
+  formaPago  String // c_FormaPago code
+  metodoPago String // PUE / PPD
+
+  // Money — integer cents (cuadra al centavo)
+  subtotalCents Int
+  discountCents Int  @default(0)
+  taxCents      Int
+  totalCents    Int
+  taxBreakdown  Json? // [{ impuesto:002, tipo:Traslado, base, tasa, importe }, ...]
+
+  // Provider + fiscal identifiers
+  facturapiId String?
+  uuid        String?   @unique // folio fiscal (timbre)
+  serie       String?
+  folio       String?
+  stampedAt   DateTime?
+
+  // Artifacts (blob storage URLs)
+  xmlUrl   String?
+  pdfUrl   String?
+  acuseUrl String?
+
+  // Errors / retries
+  lastError      String? @db.Text
+  attempts       Int     @default(0)
+  idempotencyKey String? @unique
+
+  // Cancellation (4.0)
+  cancelMotivo         String? // 01/02/03/04
+  cancelSubstituteUuid String? // required for motivo 01
+  cancelStatus         CfdiCancelStatus?
+  cancelRequestedAt    DateTime?
+  cancelledAt          DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId, status])
+  @@index([fiscalEmisorId, isGlobal, createdAt])
+}
+
+/// Receptor fiscal data. A Customer may have several; guests/autofactura create a one-off.
+/// The receptor data is ALSO snapshotted onto the Cfdi at issuance.
+model CustomerTaxProfile {
+  id         String    @id @default(cuid())
+  venueId    String
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
+  rfc            String
+  razonSocial    String
+  regimenFiscal  String
+  codigoPostal   String
+  defaultUsoCfdi String  @default("G03")
+  email          String?
+
+  validationStatus FiscalValidationStatus @default(UNVALIDATED)
+  validatedAt      DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId, rfc])
 }

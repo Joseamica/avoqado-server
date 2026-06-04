@@ -21,6 +21,8 @@ import { startStalePendingAlertJob } from './jobs/stalePendingAlert.job'
 import { startVenueChatInactivityCleanupJob } from './jobs/venueChatInactivityCleanup.job'
 import { tpvHealthMonitorJob } from './jobs/tpv-health-monitor.job'
 import { subscriptionCancellationJob } from './jobs/subscription-cancellation.job'
+import { planRenewalReminderJob } from './jobs/plan-renewal-reminder.job'
+import { planWinbackJob } from './jobs/plan-winback.job'
 import { settlementDetectionJob } from './jobs/settlement-detection.job'
 import { abandonedOrdersCleanupJob } from './jobs/abandoned-orders-cleanup.job'
 import { tpvOrderExpiryJob } from './jobs/tpv-order-expiry.job'
@@ -114,6 +116,12 @@ const gracefulShutdown = async (signal: string) => {
       // Stop subscription cancellation job
       logger.info('Stopping subscription cancellation job...')
       subscriptionCancellationJob.stop()
+
+      // Stop plan renewal reminder + win-back jobs
+      logger.info('Stopping plan renewal reminder job...')
+      planRenewalReminderJob.stop()
+      logger.info('Stopping plan win-back job...')
+      planWinbackJob.stop()
 
       // Stop settlement detection job
       logger.info('Stopping settlement detection job...')
@@ -333,6 +341,12 @@ const startApplication = async (retries = 3) => {
 
       // Start subscription cancellation job
       subscriptionCancellationJob.start()
+
+      // Start plan renewal reminder job (daily 09:00)
+      planRenewalReminderJob.start()
+
+      // Start plan win-back job (daily 10:00)
+      planWinbackJob.start()
 
       // Start settlement detection job
       settlementDetectionJob.start()

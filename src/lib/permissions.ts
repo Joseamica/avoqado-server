@@ -190,6 +190,33 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'features:update': ['features:update', 'features:write', 'features:read'],
 
   // ===========================
+  // BILLING — base-plan + à-la-carte client billing surface.
+  // Bidirectional aliases preserve any stored VenueRolePermission overrides that
+  // used the legacy venues:* / features:* names before this surface moved to billing:*.
+  // ===========================
+  'billing:read': ['billing:read'],
+  'billing:subscriptions:read': ['billing:subscriptions:read', 'billing:read', 'venues:read', 'features:read'],
+  'billing:subscriptions:manage': [
+    'billing:subscriptions:manage',
+    'billing:subscriptions:read',
+    'billing:read',
+    'venues:manage',
+    'venues:read',
+    'features:update',
+  ],
+  'billing:history:read': ['billing:history:read', 'billing:read'],
+  'billing:payment-methods:read': ['billing:payment-methods:read', 'billing:read', 'venues:read'],
+  'billing:payment-methods:manage': [
+    'billing:payment-methods:manage',
+    'billing:payment-methods:read',
+    'billing:read',
+    'venues:manage',
+    'venues:read',
+  ],
+  // Reverse direction: a stored override granting the legacy name still implies the new billing name.
+  'venues:manage': ['venues:manage', 'venues:read', 'billing:subscriptions:manage', 'billing:payment-methods:manage'],
+
+  // ===========================
   // REVIEWS
   // ===========================
   'reviews:read': [
@@ -725,6 +752,12 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'features:*',
     'notifications:*', // Can send push notifications
     'venues:*', // Can manage venue settings, billing, payment methods
+    'billing:read', // Client billing surface (subscriptions / history / payment methods)
+    'billing:subscriptions:read',
+    'billing:subscriptions:manage', // Cancel/reactivate base plan, add/remove features, open portal
+    'billing:history:read',
+    'billing:payment-methods:read',
+    'billing:payment-methods:manage',
     'tpv:*',
     'tables:*',
     'reservations:*',
@@ -801,6 +834,12 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'features:*',
     'notifications:*', // Can send push notifications
     'venues:*', // Can manage venue settings, billing, payment methods
+    'billing:read',
+    'billing:subscriptions:read',
+    'billing:subscriptions:manage',
+    'billing:history:read',
+    'billing:payment-methods:read',
+    'billing:payment-methods:manage',
     'tpv:*',
     'tables:*',
     'reservations:*',
