@@ -168,22 +168,24 @@ const defaultDeps: FiscalConfigDeps = {
     }),
 
   /**
-   * Resolve venueId for a merchant.
+   * Confirm a merchant belongs to the caller's venue (existence check, scoped).
    *
    * MerchantAccount path:
    *   MerchantAccount has NO direct venueId. It links to a venue via VenuePaymentConfig
    *   in one of three slots (primaryAccountId / secondaryAccountId / tertiaryAccountId).
-   *   We query VenuePaymentConfig with an OR across those three FK columns. The first
-   *   matching row's venueId is the owner. If no VenuePaymentConfig references this
-   *   MerchantAccount, the merchant is unattached → return null.
+   *   Query scopes to BOTH the caller's venueId AND the OR across those three FK columns —
+   *   so a merchant shared across venues never returns a foreign venue's id.
+   *   Returns the caller's venueId when confirmed, null otherwise.
    *
    * EcommerceMerchant path:
-   *   Has a direct venueId column — simple findUnique select.
+   *   Has a direct venueId column. We scope the findUnique by (id, venueId) and confirm
+   *   the record's venueId matches the caller's before returning.
    */
-  findMerchantVenue: async (merchantAccountId?: string, ecommerceMerchantId?: string) => {
+  findMerchantVenue: async (venueId: string, merchantAccountId?: string, ecommerceMerchantId?: string) => {
     if (merchantAccountId) {
       const config = await prisma.venuePaymentConfig.findFirst({
         where: {
+          venueId,
           OR: [
             { primaryAccountId: merchantAccountId },
             { secondaryAccountId: merchantAccountId },
@@ -192,14 +194,15 @@ const defaultDeps: FiscalConfigDeps = {
         },
         select: { venueId: true },
       })
-      return config?.venueId ?? null
+      return config ? venueId : null
     }
     if (ecommerceMerchantId) {
       const merchant = await prisma.ecommerceMerchant.findUnique({
         where: { id: ecommerceMerchantId },
         select: { venueId: true },
       })
-      return merchant?.venueId ?? null
+      // Confirm the merchant's own venueId matches the caller's
+      return merchant?.venueId === venueId ? venueId : null
     }
     return null
   },
