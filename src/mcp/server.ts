@@ -10,7 +10,6 @@ import { registerTerminalTools } from './tools/terminals'
 import { registerReservationTools } from './tools/reservations'
 import { registerInventoryTools } from './tools/inventory'
 import { registerCfdiTools } from './tools/cfdi'
-import { registerBillingTools } from './tools/billing'
 import { registerCommissionTools } from './tools/commissions'
 import { registerSubscriptionTools } from './tools/subscriptions'
 
@@ -26,7 +25,6 @@ async function buildServerForIdentity(staffId: string, activeOrg: string): Promi
   registerReservationTools(server, scope)
   registerInventoryTools(server, scope)
   registerCfdiTools(server, scope)
-  registerBillingTools(server, scope)
   registerCommissionTools(server, scope)
   registerSubscriptionTools(server, scope)
   return server
