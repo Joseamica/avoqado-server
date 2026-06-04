@@ -1,22 +1,31 @@
 # Facturación CFDI — Phase 0a: Fiscal Data Model — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add the Prisma data foundation for the CFDI 4.0 facturación module — the emisor/merchant/CFDI/receptor models and product SAT keys — so later phases (facturapi connector, validation engine, issuance flows) have schema to build on.
+**Goal:** Add the Prisma data foundation for the CFDI 4.0 facturación module — the emisor/merchant/CFDI/receptor models and product SAT keys
+— so later phases (facturapi connector, validation engine, issuance flows) have schema to build on.
 
-**Architecture:** Five new models + product/category SAT-key fields, all additive (no changes to existing columns). `FiscalEmisor` (RFC+CSD+provider, 1+ per venue) and `MerchantFiscalConfig` (per-merchant enablement → which emisor, autofactura, global) implement the founder's "config per-merchant" requirement. `Cfdi` stores issued documents; `CustomerTaxProfile` stores receptor fiscal data. One migration, schema-map updated, validated with a throwaway script.
+**Architecture:** Five new models + product/category SAT-key fields, all additive (no changes to existing columns). `FiscalEmisor`
+(RFC+CSD+provider, 1+ per venue) and `MerchantFiscalConfig` (per-merchant enablement → which emisor, autofactura, global) implement the
+founder's "config per-merchant" requirement. `Cfdi` stores issued documents; `CustomerTaxProfile` stores receptor fiscal data. One
+migration, schema-map updated, validated with a throwaway script.
 
 **Tech Stack:** PostgreSQL + Prisma, TypeScript. Migrations via `prisma migrate dev`. Schema map via `npm run schema:map`.
 
-**Scope:** Phase 0a is ONLY the data model. NOT in this plan (separate plans): facturapi connector (0b), pre-timbrado validation engine (0c), gating — `CFDI` Feature + `cfdi:*` permissions + MCP tools (0d), and the issuance flows B/A/C (Phases 1–3). Design source: `docs/superpowers/specs/2026-06-03-facturacion-cfdi-module-design.md` §6.
+**Scope:** Phase 0a is ONLY the data model. NOT in this plan (separate plans): facturapi connector (0b), pre-timbrado validation engine
+(0c), gating — `CFDI` Feature + `cfdi:*` permissions + MCP tools (0d), and the issuance flows B/A/C (Phases 1–3). Design source:
+`docs/superpowers/specs/2026-06-03-facturacion-cfdi-module-design.md` §6.
 
-**Reference rules:** `.claude/rules/critical-warnings.md` (migrations: NEVER `db push`; Schema Map mandatory for new models; money = Decimal/cents), `.claude/rules/testing-and-git.md` (temp-script→permanent-test; NEVER commit without asking).
+**Reference rules:** `.claude/rules/critical-warnings.md` (migrations: NEVER `db push`; Schema Map mandatory for new models; money =
+Decimal/cents), `.claude/rules/testing-and-git.md` (temp-script→permanent-test; NEVER commit without asking).
 
 ---
 
 ### Task 1: Add fiscal enums
 
 **Files:**
+
 - Modify: `prisma/schema.prisma` (append enums near the other enums, e.g. after `enum PaymentMethod {...}` ~line 5846)
 
 - [ ] **Step 1: Add the enums**
@@ -86,14 +95,15 @@ enum FiscalValidationStatus {
 
 - [ ] **Step 2: Verify it parses**
 
-Run: `npx prisma validate`
-Expected: `The schema at prisma/schema.prisma is valid 🚀` (models from later tasks not added yet — enums alone are valid).
+Run: `npx prisma validate` Expected: `The schema at prisma/schema.prisma is valid 🚀` (models from later tasks not added yet — enums alone
+are valid).
 
 ---
 
 ### Task 2: Add `FiscalEmisor` model + Venue back-relation
 
 **Files:**
+
 - Modify: `prisma/schema.prisma` (new model + one line on `model Venue`)
 
 - [ ] **Step 1: Add the model**
@@ -147,14 +157,15 @@ In `model Venue { ... }` (starts ~line 108), add this line alongside the other r
 
 - [ ] **Step 3: Verify**
 
-Run: `npx prisma validate`
-Expected: error about `MerchantFiscalConfig` / `Cfdi` not yet defined is OK at this point — they are added in Tasks 3–4. If you prefer a clean validate, do Tasks 2–5 then validate once at Task 6. (Relations resolve once all five models exist.)
+Run: `npx prisma validate` Expected: error about `MerchantFiscalConfig` / `Cfdi` not yet defined is OK at this point — they are added in
+Tasks 3–4. If you prefer a clean validate, do Tasks 2–5 then validate once at Task 6. (Relations resolve once all five models exist.)
 
 ---
 
 ### Task 3: Add `MerchantFiscalConfig` + merchant back-relations
 
 **Files:**
+
 - Modify: `prisma/schema.prisma` (new model + one line each on `MerchantAccount` ~line 3475 and `EcommerceMerchant` ~line 3690)
 
 - [ ] **Step 1: Add the model**
@@ -201,6 +212,7 @@ model MerchantFiscalConfig {
 ### Task 4: Add `Cfdi` model + Venue/Order back-relations
 
 **Files:**
+
 - Modify: `prisma/schema.prisma` (new model + one line on `model Venue` and one on `model Order` ~line 2277)
 
 - [ ] **Step 1: Add the model**
@@ -292,6 +304,7 @@ model Cfdi {
 ### Task 5: Add `CustomerTaxProfile` + Customer back-relation
 
 **Files:**
+
 - Modify: `prisma/schema.prisma` (new model + one line on `model Customer` ~line 4812)
 
 - [ ] **Step 1: Add the model**
@@ -333,6 +346,7 @@ model CustomerTaxProfile {
 ### Task 6: Add SAT keys to `Product` + `MenuCategory`
 
 **Files:**
+
 - Modify: `prisma/schema.prisma` (`model Product` ~line 1289, `model MenuCategory`)
 
 - [ ] **Step 1: Add to `model Product`** (near `taxRate`, ~line 1311)
@@ -353,31 +367,33 @@ model CustomerTaxProfile {
 
 - [ ] **Step 3: Validate the full schema**
 
-Run: `npx prisma validate`
-Expected: `The schema at prisma/schema.prisma is valid 🚀` (all five models + relations now resolve).
+Run: `npx prisma validate` Expected: `The schema at prisma/schema.prisma is valid 🚀` (all five models + relations now resolve).
 
 ---
 
 ### Task 7: Create the migration
 
 **Files:**
+
 - Create: `prisma/migrations/<timestamp>_add_cfdi_facturacion_models/migration.sql` (generated)
 
 - [ ] **Step 1: Generate + apply the migration (dev DB)**
 
-Run: `npx prisma migrate dev --name add_cfdi_facturacion_models`
-Expected: new migration folder created, applied to the dev DB, `✔ Generated Prisma Client`. NEVER use `prisma db push` (`.claude/rules/critical-warnings.md`).
+Run: `npx prisma migrate dev --name add_cfdi_facturacion_models` Expected: new migration folder created, applied to the dev DB,
+`✔ Generated Prisma Client`. NEVER use `prisma db push` (`.claude/rules/critical-warnings.md`).
 
 - [ ] **Step 2: Sanity-check the generated SQL**
 
-Run: `ls prisma/migrations | tail -1` then open the new `migration.sql`.
-Expected: `CREATE TABLE "FiscalEmisor"`, `"MerchantFiscalConfig"`, `"Cfdi"`, `"CustomerTaxProfile"`, the 8 new enum types, `ALTER TABLE "Product" ADD COLUMN "satProductKey"...`, `ALTER TABLE "MenuCategory" ADD COLUMN "defaultSatProductKey"...`. No `DROP`/`ALTER ... DROP COLUMN` (this migration is purely additive).
+Run: `ls prisma/migrations | tail -1` then open the new `migration.sql`. Expected: `CREATE TABLE "FiscalEmisor"`, `"MerchantFiscalConfig"`,
+`"Cfdi"`, `"CustomerTaxProfile"`, the 8 new enum types, `ALTER TABLE "Product" ADD COLUMN "satProductKey"...`,
+`ALTER TABLE "MenuCategory" ADD COLUMN "defaultSatProductKey"...`. No `DROP`/`ALTER ... DROP COLUMN` (this migration is purely additive).
 
 ---
 
 ### Task 8: Register new models in the schema map
 
 **Files:**
+
 - Modify: `scripts/generate-schema-map.ts` (DOMAINS array ~line 42; MODEL_TO_DOMAIN ~line 130)
 - Regenerate: `docs/SCHEMA_MAP.md`
 
@@ -404,20 +420,24 @@ Insert after the `Payment Links` block in `MODEL_TO_DOMAIN`:
   CustomerTaxProfile: 'Facturación (CFDI)',
 ```
 
-> Note: `CustomerTaxProfile` is placed in the Facturación domain (not Customers) because it only exists for CFDI issuance and relates to `FiscalEmisor`/`Cfdi`.
+> Note: `CustomerTaxProfile` is placed in the Facturación domain (not Customers) because it only exists for CFDI issuance and relates to
+> `FiscalEmisor`/`Cfdi`.
 
 - [ ] **Step 3: Regenerate the schema map**
 
-Run: `npm run schema:map`
-Expected: exits 0, `docs/SCHEMA_MAP.md` regenerated with a new "Facturación (CFDI)" section listing the 4 models. If it fails with "unclassified model", a model name in Step 2 doesn't match the schema — fix the spelling.
+Run: `npm run schema:map` Expected: exits 0, `docs/SCHEMA_MAP.md` regenerated with a new "Facturación (CFDI)" section listing the 4 models.
+If it fails with "unclassified model", a model name in Step 2 doesn't match the schema — fix the spelling.
 
 ---
 
 ### Task 9: Validate the data model end-to-end (throwaway script)
 
-Per `.claude/rules/testing-and-git.md` (temp-script → permanent-test): Phase 0a has no service behavior yet, so validate the schema + the per-merchant resolution linkage with a throwaway script. The **permanent Jest test** lands in Phase 0d with the eligibility-resolution service (where there is real behavior to assert).
+Per `.claude/rules/testing-and-git.md` (temp-script → permanent-test): Phase 0a has no service behavior yet, so validate the schema + the
+per-merchant resolution linkage with a throwaway script. The **permanent Jest test** lands in Phase 0d with the eligibility-resolution
+service (where there is real behavior to assert).
 
 **Files:**
+
 - Create (temporary, deleted before commit): `scripts/temp-verify-fiscal-models.ts`
 
 - [ ] **Step 1: Write the verification script**
@@ -494,7 +514,7 @@ async function main() {
 }
 
 main()
-  .catch((e) => {
+  .catch(e => {
     console.error('❌', e)
     process.exit(1)
   })
@@ -503,8 +523,8 @@ main()
 
 - [ ] **Step 2: Run it**
 
-Run: `npx ts-node -r tsconfig-paths/register scripts/temp-verify-fiscal-models.ts`
-Expected: prints `✅ Phase 0a data model verified + cleaned up`, exit 0.
+Run: `npx ts-node -r tsconfig-paths/register scripts/temp-verify-fiscal-models.ts` Expected: prints
+`✅ Phase 0a data model verified + cleaned up`, exit 0.
 
 - [ ] **Step 3: Delete the temp script**
 
@@ -516,17 +536,16 @@ Run: `rm scripts/temp-verify-fiscal-models.ts`
 
 - [ ] **Step 1: Format + lint**
 
-Run: `npm run format && npm run lint:fix`
-Expected: no errors (schema.prisma + generate-schema-map.ts formatted).
+Run: `npm run format && npm run lint:fix` Expected: no errors (schema.prisma + generate-schema-map.ts formatted).
 
 - [ ] **Step 2: Build + existing tests (no regressions)**
 
-Run: `npm run build && npm run test:unit`
-Expected: build succeeds; unit tests still pass (this change is additive — nothing should break).
+Run: `npm run build && npm run test:unit` Expected: build succeeds; unit tests still pass (this change is additive — nothing should break).
 
 - [ ] **Step 3: Commit (ASK THE USER FIRST — git policy)**
 
-Per `.claude/rules/testing-and-git.md`, NEVER commit without explicit permission. Ask: "¿Hago commit de la migración + modelos fiscales?" Only on yes:
+Per `.claude/rules/testing-and-git.md`, NEVER commit without explicit permission. Ask: "¿Hago commit de la migración + modelos fiscales?"
+Only on yes:
 
 ```bash
 git add prisma/schema.prisma \
@@ -548,10 +567,18 @@ Do NOT touch unrelated WIP in the working tree (stage only the files listed abov
 
 ## Self-review
 
-**Spec coverage (§6 of the design):** §6.1 FiscalEmisor ✓ (T2), §6.1b MerchantFiscalConfig ✓ (T3), §6.1c resolution linkage ✓ (verified T9), §6.2 CustomerTaxProfile ✓ (T5), §6.3 Product/MenuCategory SAT keys ✓ (T6), §6.4 Cfdi ✓ (T4). Enums ✓ (T1). Migration + schema-map governance (§18) ✓ (T7–T8). **Out of scope by design:** connector (§7→0b), validation engine (§8→0c), Feature gate + `cfdi:*` permissions + MCP tools (§15,§18→0d), issuance flows (Phases 1–3).
+**Spec coverage (§6 of the design):** §6.1 FiscalEmisor ✓ (T2), §6.1b MerchantFiscalConfig ✓ (T3), §6.1c resolution linkage ✓ (verified T9),
+§6.2 CustomerTaxProfile ✓ (T5), §6.3 Product/MenuCategory SAT keys ✓ (T6), §6.4 Cfdi ✓ (T4). Enums ✓ (T1). Migration + schema-map governance
+(§18) ✓ (T7–T8). **Out of scope by design:** connector (§7→0b), validation engine (§8→0c), Feature gate + `cfdi:*` permissions + MCP tools
+(§15,§18→0d), issuance flows (Phases 1–3).
 
 **Placeholder scan:** none — every step has exact code/commands/expected output.
 
-**Type consistency:** enum names used in models match Task 1 exactly (`CsdStatus`, `GlobalPeriodicity`, `FiscalProviderType`, `CfdiType`, `CfdiStatus`, `CfdiFlow`, `CfdiCancelStatus`, `FiscalValidationStatus`). Relation field names consistent: `FiscalEmisor.merchantConfigs`↔`MerchantFiscalConfig.fiscalEmisor`, `FiscalEmisor.cfdis`↔`Cfdi.fiscalEmisor`, `MerchantAccount.fiscalConfig`/`EcommerceMerchant.fiscalConfig`↔the two `@unique` FKs, `Venue.fiscalEmisors`/`Venue.cfdis`, `Order.cfdis`, `Customer.taxProfiles`.
+**Type consistency:** enum names used in models match Task 1 exactly (`CsdStatus`, `GlobalPeriodicity`, `FiscalProviderType`, `CfdiType`,
+`CfdiStatus`, `CfdiFlow`, `CfdiCancelStatus`, `FiscalValidationStatus`). Relation field names consistent:
+`FiscalEmisor.merchantConfigs`↔`MerchantFiscalConfig.fiscalEmisor`, `FiscalEmisor.cfdis`↔`Cfdi.fiscalEmisor`,
+`MerchantAccount.fiscalConfig`/`EcommerceMerchant.fiscalConfig`↔the two `@unique` FKs, `Venue.fiscalEmisors`/`Venue.cfdis`, `Order.cfdis`,
+`Customer.taxProfiles`.
 
-**Note for 0d:** the `CFDI` Feature row + `cfdi:configure`(OWNER/ADMIN)/`cfdi:issue`/`cfdi:view` permissions + matching MCP tools are intentionally deferred — they gate behavior that doesn't exist until the connector/issuance lands.
+**Note for 0d:** the `CFDI` Feature row + `cfdi:configure`(OWNER/ADMIN)/`cfdi:issue`/`cfdi:view` permissions + matching MCP tools are
+intentionally deferred — they gate behavior that doesn't exist until the connector/issuance lands.

@@ -13,7 +13,7 @@
 import prisma from '../../../utils/prismaClient'
 import logger from '../../../config/logger'
 import { Decimal } from '@prisma/client/runtime/library'
-import { CommissionRecipient, StaffRole, CommissionCalcType, TierType, TierPeriod } from '@prisma/client'
+import { CommissionRecipient, StaffRole, CommissionCalcType, TierType, TierPeriod, ThresholdType } from '@prisma/client'
 import { startOfDay, endOfDay, startOfWeek, endOfWeek, startOfMonth, endOfMonth } from 'date-fns'
 import { toZonedTime, fromZonedTime } from 'date-fns-tz'
 import { DEFAULT_TIMEZONE } from '../../../utils/datetime'
@@ -58,6 +58,8 @@ export interface CommissionTierData {
   maxThreshold: Decimal | null
   rate: Decimal
   tierPeriod: TierPeriod
+  minThresholdType: ThresholdType
+  maxThresholdType: ThresholdType
 }
 
 export interface CommissionOverrideData {
@@ -587,6 +589,44 @@ export async function commissionExistsForOrder(orderId: string): Promise<boolean
 // ============================================
 
 /**
+ * Find ALL active commission configs for a venue at a given date.
+ * Venue-level configs take precedence: if any exist, org-level configs are
+ * ignored (mirrors findActiveCommissionConfig's venue-over-org fallback).
+ * Returned highest-priority first.
+ */
+export async function findActiveCommissionConfigs(
+  venueId: string,
+  effectiveDate: Date = new Date(),
+): Promise<CommissionConfigWithRelations[]> {
+  const includeTiers = { tiers: { where: { active: true }, orderBy: { tierLevel: 'asc' as const } } }
+  const dateFilter = {
+    active: true,
+    deletedAt: null,
+    effectiveFrom: { lte: effectiveDate },
+    OR: [{ effectiveTo: null }, { effectiveTo: { gte: effectiveDate } }],
+  }
+
+  const venueConfigs = await prisma.commissionConfig.findMany({
+    where: { venueId, ...dateFilter },
+    include: includeTiers,
+    orderBy: { priority: 'desc' },
+  })
+  if (venueConfigs.length > 0) {
+    return venueConfigs.map(c => ({ ...c, roleRates: c.roleRates as RoleRates | null, tiers: c.tiers as CommissionTierData[] }))
+  }
+
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { organizationId: true } })
+  if (!venue?.organizationId) return []
+
+  const orgConfigs = await prisma.commissionConfig.findMany({
+    where: { orgId: venue.organizationId, venueId: null, ...dateFilter },
+    include: includeTiers,
+    orderBy: { priority: 'desc' },
+  })
+  return orgConfigs.map(c => ({ ...c, roleRates: c.roleRates as RoleRates | null, tiers: c.tiers as CommissionTierData[] }))
+}
+
+/**
  * Calculate the commission base amount filtering only order items in allowed categories.
  *
  * When a config has filterByCategories=true, only items whose menuItem.categoryId
@@ -635,5 +675,35 @@ export async function calculateCategoryFilteredAmount(
     total += itemAmount
   }
 
+  return total
+}
+
+/**
+ * Sum order items whose product category is NOT in `claimedCategoryIds`
+ * (plus uncategorized items). Used by a catch-all commission config so it
+ * only bills the part of the order no category-scoped config already claims.
+ */
+export async function calculateLeftoverAmount(
+  orderId: string,
+  claimedCategoryIds: string[],
+  config: { includeTax: boolean; includeDiscount: boolean },
+): Promise<number> {
+  const orderItems = await prisma.orderItem.findMany({
+    where: {
+      orderId,
+      product: { categoryId: { notIn: claimedCategoryIds } },
+    },
+    select: { quantity: true, unitPrice: true, taxAmount: true, discountAmount: true },
+  })
+
+  if (orderItems.length === 0) return 0
+
+  let total = 0
+  for (const item of orderItems) {
+    let itemAmount = decimalToNumber(item.unitPrice) * item.quantity
+    if (config.includeTax) itemAmount += decimalToNumber(item.taxAmount)
+    if (config.includeDiscount) itemAmount += decimalToNumber(item.discountAmount)
+    total += itemAmount
+  }
   return total
 }

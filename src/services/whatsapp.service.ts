@@ -85,6 +85,15 @@ async function sendTemplateMessage(
   phone: string,
   templateName: string,
   parameters: WhatsAppTemplateParam[],
+  /**
+   * Optional dynamic-URL button parameter. When set, appends a `button`
+   * component (sub_type `url`, index `0`) so the template's URL button gets its
+   * variable filled. Meta dynamic URL buttons append exactly ONE variable to a
+   * static prefix baked into the template (e.g. base `https://book.avoqado.io/`
+   * + this suffix). Only pass this for templates that actually declare a URL
+   * button — sending it to a button-less template makes Meta reject the call.
+   */
+  buttonUrlParam?: string,
 ): Promise<{ messageId: string }> {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN
@@ -97,6 +106,21 @@ async function sendTemplateMessage(
   const fullPhone = normalizePhone(phone)
   const url = `${WHATSAPP_API_URL}/${phoneNumberId}/messages`
 
+  const components: Array<Record<string, unknown>> = [
+    {
+      type: 'body',
+      parameters,
+    },
+  ]
+  if (buttonUrlParam) {
+    components.push({
+      type: 'button',
+      sub_type: 'url',
+      index: '0',
+      parameters: [{ type: 'text', text: buttonUrlParam }],
+    })
+  }
+
   const body = {
     messaging_product: 'whatsapp',
     to: fullPhone,
@@ -104,12 +128,7 @@ async function sendTemplateMessage(
     template: {
       name: templateName,
       language: { code: 'es_MX' },
-      components: [
-        {
-          type: 'body',
-          parameters,
-        },
-      ],
+      components,
     },
   }
 
@@ -201,6 +220,22 @@ export async function sendPurchaseConfirmationWhatsApp(phone: string, data: What
 }
 
 /**
+ * Build the dynamic suffix for the WhatsApp "Gestionar mi cita" URL button.
+ *
+ * Meta dynamic URL buttons append exactly ONE variable to a static prefix that
+ * lives in the approved template (base `https://book.avoqado.io/`). We fill that
+ * variable with `<venueSlug>?manage=<cancelSecret>` so the customer lands on the
+ * same self-service manage page the confirmation email links to.
+ *
+ * Returns `null` when we don't have enough to build a working link (missing slug
+ * or cancelSecret) — callers fall back to the plain, button-less templates.
+ */
+function buildManageUrlSuffix(venueSlug?: string | null, cancelSecret?: string | null): string | null {
+  if (!venueSlug || !cancelSecret) return null
+  return `${venueSlug}?manage=${encodeURIComponent(cancelSecret)}`
+}
+
+/**
  * Format picked modifiers as a single line for the WhatsApp template.
  * Example: "Esmalte de color +$150, Por uña × 3 +$30"
  * Returns empty string when no modifiers — caller decides which template to use.
@@ -232,8 +267,33 @@ export function formatModifiersForWhatsApp(modifiers: Array<{ name: string | nul
  */
 export async function sendReservationConfirmationWhatsApp(
   phone: string,
-  data: WhatsAppReservationData & { extras?: string },
+  data: WhatsAppReservationData & { extras?: string; venueSlug?: string | null; cancelSecret?: string | null },
 ): Promise<boolean> {
+  // Preferred path: manage-enabled template with a "Gestionar mi cita" URL
+  // button so the customer can self-cancel/reschedule straight from WhatsApp
+  // (the #1 channel in MX). Gated on BOTH the env var (set only once ops has
+  // registered + Meta-approved the template) AND a buildable manage link, so
+  // until those exist we fall through to today's exact behavior — zero risk of
+  // breaking live confirmations. Always sends 5 body params (extras → "—" when
+  // none) so a single template covers the with/without-extras cases.
+  const manageTemplate = process.env.WHATSAPP_TEMPLATE_RESERVATION_CONFIRMATION_MANAGE
+  const manageSuffix = buildManageUrlSuffix(data.venueSlug, data.cancelSecret)
+  if (manageTemplate && manageSuffix) {
+    await sendTemplateMessage(
+      phone,
+      manageTemplate,
+      [
+        { type: 'text', text: data.customerName },
+        { type: 'text', text: data.venueName },
+        { type: 'text', text: data.date },
+        { type: 'text', text: data.time },
+        { type: 'text', text: data.extras && data.extras.trim().length > 0 ? data.extras : '—' },
+      ],
+      manageSuffix,
+    )
+    return true
+  }
+
   if (data.extras && data.extras.trim().length > 0) {
     await sendTemplateMessage(phone, 'reservation_confirmation_with_extras', [
       { type: 'text', text: data.customerName },
@@ -257,7 +317,31 @@ export async function sendReservationConfirmationWhatsApp(
  * Send reservation reminder via WhatsApp
  * Template: reservation_reminder — params: {{1}}=name, {{2}}=venue, {{3}}=date, {{4}}=time
  */
-export async function sendReservationReminderWhatsApp(phone: string, data: WhatsAppReservationData): Promise<boolean> {
+export async function sendReservationReminderWhatsApp(
+  phone: string,
+  data: WhatsAppReservationData & { venueSlug?: string | null; cancelSecret?: string | null },
+): Promise<boolean> {
+  // Same gated manage-button strategy as the confirmation: when ops has
+  // registered the manage-enabled reminder template (env set) and we can build
+  // a manage link, send the variant with a "Gestionar mi cita" button.
+  // Otherwise fall back to today's plain reminder template.
+  const manageTemplate = process.env.WHATSAPP_TEMPLATE_RESERVATION_REMINDER_MANAGE
+  const manageSuffix = buildManageUrlSuffix(data.venueSlug, data.cancelSecret)
+  if (manageTemplate && manageSuffix) {
+    await sendTemplateMessage(
+      phone,
+      manageTemplate,
+      [
+        { type: 'text', text: data.customerName },
+        { type: 'text', text: data.venueName },
+        { type: 'text', text: data.date },
+        { type: 'text', text: data.time },
+      ],
+      manageSuffix,
+    )
+    return true
+  }
+
   await sendTemplateMessage(phone, 'reservation_reminder', [
     { type: 'text', text: data.customerName },
     { type: 'text', text: data.venueName },

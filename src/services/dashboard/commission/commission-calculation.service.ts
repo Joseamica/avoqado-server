@@ -27,16 +27,19 @@ import { NotFoundError, BadRequestError } from '../../../errors/AppError'
 import { logAction } from '../activity-log.service'
 import {
   findActiveCommissionConfig,
+  findActiveCommissionConfigs,
   findActiveOverride,
   getRecipientStaffId,
   calculateFinalRate,
   applyCommissionBounds,
   calculateBaseAmount,
   calculateCategoryFilteredAmount,
+  calculateLeftoverAmount,
   validateStaffForCommission,
   commissionExistsForPayment,
   decimalToNumber,
   getVenueTimezone,
+  CommissionConfigWithRelations,
 } from './commission-utils'
 import { subMonths, startOfMonth, endOfMonth } from 'date-fns'
 import { toZonedTime, fromZonedTime } from 'date-fns-tz'
@@ -59,226 +62,75 @@ export interface CommissionCalculationResult {
 }
 
 // ============================================
-// Main Entry Points
+// Internal helpers
 // ============================================
 
-/**
- * Create commission calculation for a payment
- *
- * This is the main entry point, called after payment COMPLETED.
- * Follows TransactionCost pattern: create immutable financial record.
- *
- * @param paymentId - Payment ID that triggered this calculation
- * @returns Commission calculation result or null if skipped
- */
-export async function createCommissionForPayment(paymentId: string): Promise<CommissionCalculationResult | null> {
-  logger.info('Creating commission for payment', { paymentId })
+type LoadedPayment = {
+  id: string
+  venueId: string
+  orderId: string | null
+  processedById: string | null
+  tipAmount: Prisma.Decimal
+  createdAt: Date
+  order: { createdById: string | null; servedById: string | null } | null
+  shift: { id: string } | null
+}
 
-  // ========================================
-  // Step 1: Load Payment with Relations
-  // ========================================
-
-  const payment = await prisma.payment.findUnique({
-    where: { id: paymentId },
-    include: {
-      order: {
-        select: {
-          id: true,
-          createdById: true,
-          servedById: true,
-          subtotal: true,
-          discountAmount: true,
-          taxAmount: true,
-        },
-      },
-      shift: {
-        select: {
-          id: true,
-        },
-      },
-      venue: {
-        select: {
-          id: true,
-          timezone: true,
-        },
-      },
-    },
-  })
-
-  if (!payment) {
-    throw new NotFoundError(`Payment ${paymentId} not found`)
-  }
-
-  // ========================================
-  // Step 2: Eligibility Validation
-  // ========================================
-
-  // Skip TEST payments (no real money)
-  if (payment.type === PaymentType.TEST) {
-    logger.info('Skipping commission: TEST payment', { paymentId })
-    return null
-  }
-
-  // Skip non-COMPLETED payments
-  if (payment.status !== 'COMPLETED') {
-    logger.info('Skipping commission: Payment not COMPLETED', {
-      paymentId,
-      status: payment.status,
-    })
-    return null
-  }
-
-  // Idempotency: Check if commission already exists
-  if (await commissionExistsForPayment(paymentId)) {
-    logger.info('Commission already exists for payment', { paymentId })
-    return null
-  }
-
-  // ========================================
-  // Step 3: Find Active Commission Config
-  // ========================================
-
-  const config = await findActiveCommissionConfig(payment.venueId, payment.createdAt)
-
-  if (!config) {
-    logger.info('No active commission config for venue', {
-      paymentId,
-      venueId: payment.venueId,
-    })
-    return null
-  }
-
-  // ========================================
-  // Step 4: Determine Recipient Staff
-  // ========================================
-
+async function createCalcForConfig(
+  payment: LoadedPayment,
+  config: CommissionConfigWithRelations,
+  amounts: { baseAmount: number; tipAmount: number; discountAmount: number; taxAmount: number },
+): Promise<CommissionCalculationResult | null> {
   const recipientStaffId = getRecipientStaffId({ processedById: payment.processedById }, payment.order, config.recipient)
-
   if (!recipientStaffId) {
-    logger.warn('Could not determine commission recipient', {
-      paymentId,
-      recipientType: config.recipient,
-      orderId: payment.orderId,
-    })
+    logger.warn('Could not determine commission recipient', { paymentId: payment.id, configId: config.id })
     return null
   }
 
-  // Validate staff is active and can receive commissions
   const staffInfo = await validateStaffForCommission(recipientStaffId, payment.venueId)
-  if (!staffInfo) {
-    logger.info('Staff not eligible for commission', {
-      paymentId,
+  if (!staffInfo) return null
+
+  // Idempotency: one calc per (payment, config, staff). Lets webhook retries
+  // run safely and lets multiple configs coexist on the same payment.
+  const existing = await prisma.commissionCalculation.findFirst({
+    where: { paymentId: payment.id, configId: config.id, staffId: recipientStaffId, status: { not: CommissionCalcStatus.VOIDED } },
+    select: { id: true },
+  })
+  if (existing) {
+    logger.info('Commission already exists for (payment, config, staff)', {
+      paymentId: payment.id,
+      configId: config.id,
       staffId: recipientStaffId,
     })
     return null
   }
-
-  // ========================================
-  // Step 5: Check for Override
-  // ========================================
 
   const override = await findActiveOverride(config.id, recipientStaffId, payment.createdAt)
-
-  // If staff is excluded from commissions
-  if (override?.excludeFromCommissions) {
-    logger.info('Staff excluded from commissions via override', {
-      paymentId,
-      staffId: recipientStaffId,
-      overrideId: override.id,
-    })
-    return null
-  }
-
-  // ========================================
-  // Step 6: Calculate Base Amount
-  // ========================================
-
-  let baseAmount: number
-  let tipAmount: number
-  let discountAmount: number
-  let taxAmount: number
-
-  // If category filtering is enabled, calculate amount from matching order items only
-  if (config.filterByCategories && config.categoryIds.length > 0 && payment.orderId) {
-    baseAmount = await calculateCategoryFilteredAmount(payment.orderId, config.categoryIds, {
-      includeTax: config.includeTax,
-      includeDiscount: config.includeDiscount,
-    })
-    tipAmount = config.includeTips ? decimalToNumber(payment.tipAmount) : 0
-    discountAmount = 0 // Already handled in category filter
-    taxAmount = 0 // Already handled in category filter
-
-    // Add tips to base if configured
-    if (config.includeTips) {
-      baseAmount += tipAmount
-    }
-
-    if (baseAmount <= 0) {
-      logger.info('Skipping commission: No matching category items in order', {
-        paymentId,
-        categoryIds: config.categoryIds,
-      })
-      return null
-    }
-  } else {
-    const result = calculateBaseAmount(
-      {
-        amount: payment.amount,
-        tipAmount: payment.tipAmount,
-        taxAmount: payment.order?.taxAmount,
-        discountAmount: payment.order?.discountAmount,
-      },
-      config,
-    )
-    baseAmount = result.baseAmount
-    tipAmount = result.tipAmount
-    discountAmount = result.discountAmount
-    taxAmount = result.taxAmount
-  }
-
-  if (baseAmount <= 0) {
-    logger.info('Skipping commission: Base amount is zero or negative', {
-      paymentId,
-      baseAmount,
-    })
-    return null
-  }
-
-  // ========================================
-  // Step 7: Determine Rate
-  // ========================================
+  if (override?.excludeFromCommissions) return null
 
   let tierLevel: number | undefined
   let tierName: string | undefined
   let tierRate: number | null = null
 
-  // Check for goal-based tier first (takes priority over manual tiers)
   if (config.useGoalAsTier && config.goalBonusRate) {
-    // Get current month's sales for this staff
     const timezone = await getVenueTimezone(payment.venueId)
-    const now = new Date()
-    const venueNow = toZonedTime(now, timezone)
-    const monthStart = fromZonedTime(startOfMonth(venueNow), timezone)
-
+    const monthStart = fromZonedTime(startOfMonth(toZonedTime(new Date(), timezone)), timezone)
     const monthlyStats = await prisma.commissionCalculation.aggregate({
-      where: {
-        staffId: recipientStaffId,
-        venueId: payment.venueId,
-        status: { not: 'VOIDED' },
-        calculatedAt: { gte: monthStart },
-      },
+      where: { staffId: recipientStaffId, venueId: payment.venueId, status: { not: 'VOIDED' }, calculatedAt: { gte: monthStart } },
       _sum: { baseAmount: true },
     })
-    const currentPeriodSales = decimalToNumber(monthlyStats._sum.baseAmount)
-
-    const goalTierInfo = await resolveGoalBasedTier(recipientStaffId, payment.venueId, config, currentPeriodSales)
+    const goalTierInfo = await resolveGoalBasedTier(
+      recipientStaffId,
+      payment.venueId,
+      config,
+      decimalToNumber(monthlyStats._sum.baseAmount),
+    )
     if (goalTierInfo) {
       tierLevel = goalTierInfo.tierLevel
       tierName = goalTierInfo.tierName
       tierRate = goalTierInfo.rate
     }
   } else if (config.calcType === CommissionCalcType.TIERED) {
-    // Standard tier-based rate
     const tierInfo = await getApplicableTierRate(config.id, recipientStaffId, payment.venueId)
     if (tierInfo) {
       tierLevel = tierInfo.tierLevel
@@ -287,50 +139,14 @@ export async function createCommissionForPayment(paymentId: string): Promise<Com
     }
   }
 
-  // Calculate final rate with cascade
   const effectiveRate = calculateFinalRate(config, override, staffInfo.role, tierRate)
 
-  // ========================================
-  // Step 8: Calculate Commission
-  // ========================================
+  let grossCommission =
+    config.calcType === CommissionCalcType.FIXED ? decimalToNumber(config.defaultRate) : amounts.baseAmount * effectiveRate
 
-  let grossCommission: number
-  let netCommission: number
-
-  switch (config.calcType) {
-    case CommissionCalcType.FIXED:
-      // Fixed amount per transaction
-      grossCommission = decimalToNumber(config.defaultRate) // For FIXED, defaultRate is the fixed amount
-      break
-
-    case CommissionCalcType.PERCENTAGE:
-    case CommissionCalcType.TIERED:
-    default:
-      // Percentage of base amount
-      grossCommission = baseAmount * effectiveRate
-      break
-  }
-
-  // Apply min/max bounds
-  netCommission = applyCommissionBounds(grossCommission, config)
-
-  // Round to 2 decimal places
+  let netCommission = applyCommissionBounds(grossCommission, config)
   grossCommission = Math.round(grossCommission * 100) / 100
   netCommission = Math.round(netCommission * 100) / 100
-
-  logger.info('Commission calculated', {
-    paymentId,
-    staffId: recipientStaffId,
-    baseAmount,
-    effectiveRate,
-    grossCommission,
-    netCommission,
-    tierLevel,
-  })
-
-  // ========================================
-  // Step 9: Create Immutable Record
-  // ========================================
 
   const calculation = await prisma.commissionCalculation.create({
     data: {
@@ -340,40 +156,26 @@ export async function createCommissionForPayment(paymentId: string): Promise<Com
       orderId: payment.orderId,
       shiftId: payment.shift?.id,
       configId: config.id,
-
-      // Snapshot of amounts at calculation time
-      baseAmount,
-      tipAmount,
-      discountAmount,
-      taxAmount,
-
-      // Commission calculation
+      baseAmount: amounts.baseAmount,
+      tipAmount: amounts.tipAmount,
+      discountAmount: amounts.discountAmount,
+      taxAmount: amounts.taxAmount,
       effectiveRate,
       grossCommission,
       netCommission,
-
-      // Metadata
       calcType: config.calcType,
       tier: tierLevel,
       tierName,
-
       status: CommissionCalcStatus.CALCULATED,
       calculatedAt: new Date(),
     },
   })
 
-  logger.info('Commission calculation created', {
-    calculationId: calculation.id,
-    paymentId,
-    staffId: recipientStaffId,
-    netCommission,
-  })
-
   return {
     calculationId: calculation.id,
-    paymentId,
+    paymentId: payment.id,
     staffId: recipientStaffId,
-    baseAmount,
+    baseAmount: amounts.baseAmount,
     effectiveRate,
     grossCommission,
     netCommission,
@@ -382,108 +184,178 @@ export async function createCommissionForPayment(paymentId: string): Promise<Com
   }
 }
 
+// ============================================
+// Main Entry Points
+// ============================================
+
 /**
- * Create negative commission record for a refund
+ * Create commission calculation for a payment
  *
- * Mirrors the original payment's commission proportionally.
+ * This is the main entry point, called after payment COMPLETED.
+ * Follows TransactionCost pattern: create immutable financial record.
+ * Evaluates ALL active configs — category-scoped configs each bill their
+ * own categories; a catch-all config bills the leftover.
+ *
+ * @param paymentId - Payment ID that triggered this calculation
+ * @returns Array of commission calculation results (one per config that fired)
+ */
+export async function createCommissionForPayment(paymentId: string): Promise<CommissionCalculationResult[]> {
+  logger.info('Creating commission for payment', { paymentId })
+
+  const payment = await prisma.payment.findUnique({
+    where: { id: paymentId },
+    include: {
+      order: { select: { id: true, createdById: true, servedById: true, subtotal: true, discountAmount: true, taxAmount: true } },
+      shift: { select: { id: true } },
+      venue: { select: { id: true, timezone: true } },
+    },
+  })
+  if (!payment) throw new NotFoundError(`Payment ${paymentId} not found`)
+  if (payment.type === PaymentType.TEST) {
+    logger.info('Skipping commission: TEST payment', { paymentId })
+    return []
+  }
+  if (payment.status !== 'COMPLETED') {
+    logger.info('Skipping commission: not COMPLETED', { paymentId, status: payment.status })
+    return []
+  }
+
+  const configs = await findActiveCommissionConfigs(payment.venueId, payment.createdAt)
+  if (configs.length === 0) {
+    logger.info('No active commission config', { paymentId, venueId: payment.venueId })
+    return []
+  }
+
+  const categoryScoped = configs.filter(c => c.filterByCategories && c.categoryIds.length > 0)
+  const catchAll = configs.filter(c => !(c.filterByCategories && c.categoryIds.length > 0))
+  const claimed = [...new Set(categoryScoped.flatMap(c => c.categoryIds))]
+
+  const results: CommissionCalculationResult[] = []
+
+  // 1) Category-scoped configs — each bills its own categories.
+  for (const config of categoryScoped) {
+    if (!payment.orderId) continue
+    let base = await calculateCategoryFilteredAmount(payment.orderId, config.categoryIds, {
+      includeTax: config.includeTax,
+      includeDiscount: config.includeDiscount,
+    })
+    const tip = config.includeTips ? decimalToNumber(payment.tipAmount) : 0
+    if (config.includeTips) base += tip
+    if (base <= 0) continue
+    const r = await createCalcForConfig(payment, config, { baseAmount: base, tipAmount: tip, discountAmount: 0, taxAmount: 0 })
+    if (r) results.push(r)
+  }
+
+  // 2) Catch-all config (highest priority) — bills the leftover. If there are
+  //    no category-scoped configs, claimed is empty → whole payment (today's behavior).
+  const generalConfig = catchAll[0]
+  if (generalConfig) {
+    let amounts: { baseAmount: number; tipAmount: number; discountAmount: number; taxAmount: number } | null = null
+    if (claimed.length === 0) {
+      const r = calculateBaseAmount(
+        {
+          amount: payment.amount,
+          tipAmount: payment.tipAmount,
+          taxAmount: payment.order?.taxAmount,
+          discountAmount: payment.order?.discountAmount,
+        },
+        generalConfig,
+      )
+      amounts = r
+    } else if (payment.orderId) {
+      let base = await calculateLeftoverAmount(payment.orderId, claimed, {
+        includeTax: generalConfig.includeTax,
+        includeDiscount: generalConfig.includeDiscount,
+      })
+      const tip = generalConfig.includeTips ? decimalToNumber(payment.tipAmount) : 0
+      if (generalConfig.includeTips) base += tip
+      amounts = { baseAmount: base, tipAmount: tip, discountAmount: 0, taxAmount: 0 }
+    }
+    if (amounts && amounts.baseAmount > 0) {
+      const r = await createCalcForConfig(payment, generalConfig, amounts)
+      if (r) results.push(r)
+    }
+  }
+
+  logger.info('Commission(s) created for payment', { paymentId, count: results.length })
+  return results
+}
+
+/**
+ * Create negative commission records for a refund.
+ *
+ * Mirrors ALL original payment's commissions proportionally (one per config).
  * This ensures SUM(netCommission) reflects actual earnings after refunds.
  *
  * @param refundPaymentId - The refund Payment ID
  * @param originalPaymentId - The original Payment that was refunded
- * @returns Commission calculation result or null if skipped
+ * @returns Array of commission calculation results (one per original calc)
  */
-export async function createRefundCommission(
-  refundPaymentId: string,
-  originalPaymentId: string,
-): Promise<CommissionCalculationResult | null> {
+export async function createRefundCommission(refundPaymentId: string, originalPaymentId: string): Promise<CommissionCalculationResult[]> {
   logger.info('Creating refund commission', { refundPaymentId, originalPaymentId })
 
-  // Find original commission calculation
-  const originalCalc = await prisma.commissionCalculation.findFirst({
-    where: {
-      paymentId: originalPaymentId,
-      status: { not: CommissionCalcStatus.VOIDED },
-    },
+  const originalCalcs = await prisma.commissionCalculation.findMany({
+    where: { paymentId: originalPaymentId, status: { not: CommissionCalcStatus.VOIDED } },
   })
-
-  if (!originalCalc) {
-    logger.info('No commission found for original payment, skipping refund commission', {
-      refundPaymentId,
-      originalPaymentId,
-    })
-    return null
+  if (originalCalcs.length === 0) {
+    logger.info('No commission for original payment, skipping refund commission', { refundPaymentId, originalPaymentId })
+    return []
   }
 
-  // Fetch refund payment
-  const refundPayment = await prisma.payment.findUnique({
-    where: { id: refundPaymentId },
-  })
+  const refundPayment = await prisma.payment.findUnique({ where: { id: refundPaymentId } })
+  if (!refundPayment) throw new NotFoundError(`Refund payment ${refundPaymentId} not found`)
 
-  if (!refundPayment) {
-    throw new NotFoundError(`Refund payment ${refundPaymentId} not found`)
-  }
-
-  // Calculate refund ratio (for partial refunds)
-  const originalBaseAmount = decimalToNumber(originalCalc.baseAmount)
-  // Refund total = absolute(amount) + absolute(tipAmount) because since 2026-04-19
-  // refund Payments split the refund across both fields (sale vs tip) — before that
-  // they stored everything in `amount` with tipAmount=0. Sum both so the ratio is
-  // consistent regardless of which side of the fix produced the refund row.
   const refundAmount = Math.abs(decimalToNumber(refundPayment.amount)) + Math.abs(decimalToNumber(refundPayment.tipAmount ?? 0))
-  const refundRatio = originalBaseAmount > 0 ? refundAmount / originalBaseAmount : 1
+  const results: CommissionCalculationResult[] = []
 
-  // Calculate negative commission proportionally
-  const negativeGrossCommission = -decimalToNumber(originalCalc.grossCommission) * refundRatio
-  const negativeNetCommission = -decimalToNumber(originalCalc.netCommission) * refundRatio
+  for (const originalCalc of originalCalcs) {
+    const existing = await prisma.commissionCalculation.findFirst({
+      where: {
+        paymentId: refundPaymentId,
+        configId: originalCalc.configId,
+        staffId: originalCalc.staffId,
+        status: { not: CommissionCalcStatus.VOIDED },
+      },
+      select: { id: true },
+    })
+    if (existing) continue
 
-  // Create negative commission record
-  const calculation = await prisma.commissionCalculation.create({
-    data: {
-      venueId: originalCalc.venueId,
-      staffId: originalCalc.staffId,
+    const originalBaseAmount = decimalToNumber(originalCalc.baseAmount)
+    const refundRatio = originalBaseAmount > 0 ? refundAmount / originalBaseAmount : 1
+
+    const calculation = await prisma.commissionCalculation.create({
+      data: {
+        venueId: originalCalc.venueId,
+        staffId: originalCalc.staffId,
+        paymentId: refundPaymentId,
+        orderId: originalCalc.orderId,
+        shiftId: originalCalc.shiftId,
+        configId: originalCalc.configId,
+        baseAmount: -refundAmount,
+        tipAmount: -decimalToNumber(originalCalc.tipAmount) * refundRatio,
+        discountAmount: -decimalToNumber(originalCalc.discountAmount) * refundRatio,
+        taxAmount: -decimalToNumber(originalCalc.taxAmount) * refundRatio,
+        effectiveRate: originalCalc.effectiveRate,
+        grossCommission: -decimalToNumber(originalCalc.grossCommission) * refundRatio,
+        netCommission: -decimalToNumber(originalCalc.netCommission) * refundRatio,
+        calcType: originalCalc.calcType,
+        tier: originalCalc.tier,
+        tierName: originalCalc.tierName,
+        status: CommissionCalcStatus.CALCULATED,
+        calculatedAt: new Date(),
+      },
+    })
+    results.push({
+      calculationId: calculation.id,
       paymentId: refundPaymentId,
-      orderId: originalCalc.orderId,
-      shiftId: originalCalc.shiftId,
-      configId: originalCalc.configId,
-
-      // Negative amounts
+      staffId: originalCalc.staffId,
       baseAmount: -refundAmount,
-      tipAmount: -decimalToNumber(originalCalc.tipAmount) * refundRatio,
-      discountAmount: -decimalToNumber(originalCalc.discountAmount) * refundRatio,
-      taxAmount: -decimalToNumber(originalCalc.taxAmount) * refundRatio,
-
-      // Negative commission (same rate as original)
-      effectiveRate: originalCalc.effectiveRate,
-      grossCommission: negativeGrossCommission,
-      netCommission: negativeNetCommission,
-
-      // Metadata
-      calcType: originalCalc.calcType,
-      tier: originalCalc.tier,
-      tierName: originalCalc.tierName,
-
-      status: CommissionCalcStatus.CALCULATED,
-      calculatedAt: new Date(),
-    },
-  })
-
-  logger.info('Refund commission created', {
-    calculationId: calculation.id,
-    refundPaymentId,
-    originalPaymentId,
-    refundRatio,
-    negativeNetCommission,
-  })
-
-  return {
-    calculationId: calculation.id,
-    paymentId: refundPaymentId,
-    staffId: originalCalc.staffId,
-    baseAmount: -refundAmount,
-    effectiveRate: decimalToNumber(originalCalc.effectiveRate),
-    grossCommission: negativeGrossCommission,
-    netCommission: negativeNetCommission,
+      effectiveRate: decimalToNumber(originalCalc.effectiveRate),
+      grossCommission: decimalToNumber(calculation.grossCommission),
+      netCommission: decimalToNumber(calculation.netCommission),
+    })
   }
+  return results
 }
 
 // ============================================
@@ -1163,8 +1035,7 @@ export async function createSplitCommissionForPayment(paymentId: string, staffId
   if (staffIds.length === 1) {
     // Caller should have routed through createCommissionForPayment; guard
     // anyway so this function is safe to call with any list length.
-    const single = await createCommissionForPayment(paymentId)
-    return single ? [single] : []
+    return createCommissionForPayment(paymentId)
   }
 
   const payment = await prisma.payment.findUnique({

@@ -187,7 +187,16 @@ export class ReservationReminderJob {
           if (!reservation.guestPhone) {
             return { success: false, errorMessage: 'No guest phone on reservation' }
           }
-          const ok = await sendReservationReminderWhatsApp(reservation.guestPhone, { customerName, venueName, date, time })
+          const ok = await sendReservationReminderWhatsApp(reservation.guestPhone, {
+            customerName,
+            venueName,
+            date,
+            time,
+            // Feeds the optional "Gestionar mi cita" WhatsApp button so the
+            // customer can self-cancel from the reminder, not just the email.
+            venueSlug: reservation.venue.slug,
+            cancelSecret: reservation.cancelSecret,
+          })
           return ok ? { success: true } : { success: false, errorMessage: 'WhatsApp send returned false' }
         }
         case 'EMAIL': {

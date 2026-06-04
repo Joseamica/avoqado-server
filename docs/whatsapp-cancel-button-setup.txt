@@ -1,0 +1,148 @@
+==============================================================================
+  AVOQADO · Activar el botón "Gestionar mi cita" en WhatsApp
+  (cancelar / reagendar desde la confirmación y el recordatorio)
+==============================================================================
+
+QUÉ ES ESTO
+-----------
+Hoy la confirmación por WhatsApp NO trae link para cancelar/reagendar (solo el
+email lo trae). Esto agrega un botón "Gestionar mi cita" al mensaje de WhatsApp
+que lleva al cliente a su reserva para cancelar o reagendar.
+
+El código del backend YA está listo. Está "dormido": no hace nada hasta que
+completes los 2 pasos de abajo (registrar plantillas en Meta + prender env vars).
+Mientras no lo hagas, todo sigue igual que hoy (sin riesgo).
+
+IMPORTANTE: no es obligatorio. La regla de "no se puede cancelar con menos de X
+horas" ya se respeta en todos lados aunque NO actives esto. Esto solo agrega la
+comodidad del botón en WhatsApp.
+
+
+==============================================================================
+  PASO 1 — Registrar 2 plantillas en Meta Business Manager
+==============================================================================
+
+Dónde: https://business.facebook.com  →  WhatsApp Manager  →  Plantillas de
+mensajes  →  "Crear plantilla".
+
+Necesitas crear DOS plantillas. Para cada una:
+  - Categoría: UTILITY (Utilidad)
+  - Idioma: Spanish (MEX)  /  es_MX
+  - Sin encabezado (Header: None)
+
+------------------------------------------------------------------------------
+PLANTILLA 1
+------------------------------------------------------------------------------
+  Nombre (exacto, sin mayúsculas, con guiones bajos):
+      reservation_confirmation_manage
+
+  Cuerpo (Body) — copia/pega tal cual (tiene 5 variables):
+      Hola {{1}}, confirmamos tu cita en {{2}} el {{3}} a las {{4}}. Extras: {{5}}
+
+  Ejemplos para las variables (Meta los pide para aprobar):
+      {{1}} = Catalina
+      {{2}} = Amaena
+      {{3}} = 3 de junio
+      {{4}} = 11:30
+      {{5}} = Gel semipermanente
+
+  Botón (Buttons):
+      Tipo:            "Visitar sitio web" (URL)
+      Tipo de URL:     Dinámica (Dynamic)
+      Texto del botón: Gestionar mi cita
+      URL base:        https://book.avoqado.io/{{1}}
+      Ejemplo {{1}}:   amaena?manage=a8a9aa9c-9912-4382-840c-c02f642543a7
+
+------------------------------------------------------------------------------
+PLANTILLA 2
+------------------------------------------------------------------------------
+  Nombre (exacto):
+      reservation_reminder_manage
+
+  Cuerpo (Body) — copia/pega tal cual (tiene 4 variables):
+      Hola {{1}}, te recordamos tu cita en {{2}} el {{3}} a las {{4}}.
+
+  Ejemplos para las variables:
+      {{1}} = Catalina
+      {{2}} = Amaena
+      {{3}} = 3 de junio
+      {{4}} = 11:30
+
+  Botón (Buttons):
+      Tipo:            "Visitar sitio web" (URL)
+      Tipo de URL:     Dinámica (Dynamic)
+      Texto del botón: Gestionar mi cita
+      URL base:        https://book.avoqado.io/{{1}}
+      Ejemplo {{1}}:   amaena?manage=a8a9aa9c-9912-4382-840c-c02f642543a7
+
+NOTA SOBRE EL BOTÓN URL DINÁMICO:
+  Meta pega UNA sola variable al final de la URL base. Por eso la base termina
+  en "/{{1}}" y nosotros mandamos "amaena?manage=<token>". El resultado final que
+  abre el cliente es:
+      https://book.avoqado.io/amaena?manage=a8a9aa9c-9912-4382-840c-c02f642543a7
+
+ESPERA LA APROBACIÓN:
+  Meta tarda normalmente entre 1 y 48 horas. Las dos plantillas deben quedar en
+  estado "Aprobada" (Approved) antes de hacer el Paso 2.
+
+
+==============================================================================
+  PASO 2 — Prender las variables de entorno en Render
+==============================================================================
+
+Dónde: https://dashboard.render.com  →  servicio del backend de PRODUCCIÓN
+(avoqado-server)  →  pestaña "Environment".
+
+Agrega estas variables (Add Environment Variable). El VALOR debe ser EXACTAMENTE
+el mismo nombre que registraste en Meta:
+
+  WHATSAPP_TEMPLATE_RESERVATION_CONFIRMATION_MANAGE = reservation_confirmation_manage
+  WHATSAPP_TEMPLATE_RESERVATION_REMINDER_MANAGE     = reservation_reminder_manage
+
+Verifica que estas ya existan (deberían). Si no, agrégalas también:
+
+  BOOKING_PUBLIC_URL = https://book.avoqado.io
+      (debe coincidir EXACTO con la URL base del botón en Meta. Si no coincide,
+       el link del botón abre en el lado equivocado.)
+
+  WHATSAPP_PHONE_NUMBER_ID = <tu phone number id de WhatsApp Cloud>
+  WHATSAPP_ACCESS_TOKEN    = <tu access token de WhatsApp Cloud>
+      (estas ya deben estar puestas porque WhatsApp ya manda confirmaciones hoy)
+
+Guarda (Save Changes). Render hace redeploy automático (~3-5 min).
+
+
+==============================================================================
+  PASO 3 — Verificar que quedó bien
+==============================================================================
+
+1. Haz una reserva de prueba (con un teléfono real de WhatsApp).
+2. Te debe llegar la confirmación por WhatsApp con un botón azul abajo:
+   "Gestionar mi cita".
+3. Toca el botón. Debe abrir tu reserva (no el catálogo de servicios) con la
+   opción de cancelar / reagendar.
+4. Si la reserva está dentro de la ventana de no-cancelación (ej. faltan menos
+   de 2 horas), el botón de cancelar debe aparecer DESHABILITADO con el mensaje
+   de "solo puedes cancelar hasta X horas antes". Eso es correcto.
+
+
+==============================================================================
+  CÓMO APAGARLO (si algo sale mal)
+==============================================================================
+
+Borra (o deja vacías) las 2 variables del Paso 2 en Render y guarda. El backend
+vuelve automáticamente a las plantillas de WhatsApp de hoy (sin botón). Cero
+riesgo, no hay que tocar código.
+
+
+==============================================================================
+  RESUMEN RÁPIDO
+==============================================================================
+  [ ] Meta: crear plantilla  reservation_confirmation_manage  (5 vars + botón URL)
+  [ ] Meta: crear plantilla  reservation_reminder_manage      (4 vars + botón URL)
+  [ ] Esperar a que Meta las apruebe (Approved)
+  [ ] Render: WHATSAPP_TEMPLATE_RESERVATION_CONFIRMATION_MANAGE = reservation_confirmation_manage
+  [ ] Render: WHATSAPP_TEMPLATE_RESERVATION_REMINDER_MANAGE     = reservation_reminder_manage
+  [ ] Render: verificar BOOKING_PUBLIC_URL = https://book.avoqado.io
+  [ ] Probar con una reserva real
+==============================================================================

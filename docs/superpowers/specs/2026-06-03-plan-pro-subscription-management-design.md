@@ -1,46 +1,44 @@
 # PLAN_PRO Subscription Management & Visibility — Design
 
-> **Status:** Approved design (2026-06-03), pending implementation plans.
-> **Builds on:** `2026-06-02-venue-base-subscription-design.md` (PLAN_PRO base subscription, live in prod) and
-> `2026-06-03-subscription-lifecycle-emails-design.md` (Phase 1.5 emails).
-> **Repos:** `avoqado-server` (backend hub), `avoqado-web-dashboard` (client), `avoqado-superadmin` (superadmin).
+> **Status:** Approved design (2026-06-03), pending implementation plans. **Builds on:** `2026-06-02-venue-base-subscription-design.md`
+> (PLAN_PRO base subscription, live in prod) and `2026-06-03-subscription-lifecycle-emails-design.md` (Phase 1.5 emails). **Repos:**
+> `avoqado-server` (backend hub), `avoqado-web-dashboard` (client), `avoqado-superadmin` (superadmin).
 
 ## Goal
 
-Make the **PLAN_PRO base subscription** (a) **manageable by the venue** in `avoqado-web-dashboard` (see current plan, cancel /
-reactivate, manage payment, view invoices) and (b) **visible to superadmin** in `avoqado-superadmin` (who is subscribed / trialing /
-suspended / none, with MRR) — replacing today's mock data, and **without rebuilding the billing UI that already exists** for à-la-carte
-features.
+Make the **PLAN_PRO base subscription** (a) **manageable by the venue** in `avoqado-web-dashboard` (see current plan, cancel / reactivate,
+manage payment, view invoices) and (b) **visible to superadmin** in `avoqado-superadmin` (who is subscribed / trialing / suspended / none,
+with MRR) — replacing today's mock data, and **without rebuilding the billing UI that already exists** for à-la-carte features.
 
 ## Current state (audited 2026-06-03 against prod)
 
-Prod: 60 venues, **all legacy** (0 PLAN_PRO, 0 trials). The client billing section already exists; the gaps below are about the **new
-base plan** specifically.
+Prod: 60 venues, **all legacy** (0 PLAN_PRO, 0 trials). The client billing section already exists; the gaps below are about the **new base
+plan** specifically.
 
 **What already works (do NOT rebuild):**
 
-- Client billing UI exists: `avoqado-web-dashboard/src/pages/Settings/Billing/` — `Subscriptions.tsx`, `History.tsx`,
-  `PaymentMethods.tsx`, `Tokens.tsx`, `BillingLayout.tsx`. Route `settings/billing` (ADMIN + `billing:read`).
-- Invoices/history (`GET /dashboard/venues/:venueId/invoices`), invoice retry, and payment methods (list/add/remove/set-default)
-  **already work for PLAN_PRO automatically** (Stripe customer-level). No gap.
+- Client billing UI exists: `avoqado-web-dashboard/src/pages/Settings/Billing/` — `Subscriptions.tsx`, `History.tsx`, `PaymentMethods.tsx`,
+  `Tokens.tsx`, `BillingLayout.tsx`. Route `settings/billing` (ADMIN + `billing:read`).
+- Invoices/history (`GET /dashboard/venues/:venueId/invoices`), invoice retry, and payment methods (list/add/remove/set-default) **already
+  work for PLAN_PRO automatically** (Stripe customer-level). No gap.
 - PLAN_PRO appears in `getVenueFeatureStatus` because it is a real active `VenueFeature` — but as a **generic à-la-carte row**.
 
 **Gaps (client):**
 
-1. 🔴 **Dangerous unguarded cancel.** The à-la-carte "Cancelar" button is live for the real PLAN_PRO `VenueFeature`; `DELETE
-   /features/:featureId` → `removeFeatureFromVenue` → `cancelSubscription()` cancels the Stripe sub **immediately**
-   (`stripe.service.ts:697`). The existing guard (`Subscriptions.tsx:587`) only protects synthesized `grantedByBasePlan` rows, NOT
-   PLAN_PRO. The cancel dialog copy says "until {endDate}" but the cancel is immediate → copy/behaviour mismatch.
+1. 🔴 **Dangerous unguarded cancel.** The à-la-carte "Cancelar" button is live for the real PLAN_PRO `VenueFeature`;
+   `DELETE /features/:featureId` → `removeFeatureFromVenue` → `cancelSubscription()` cancels the Stripe sub **immediately**
+   (`stripe.service.ts:697`). The existing guard (`Subscriptions.tsx:587`) only protects synthesized `grantedByBasePlan` rows, NOT PLAN_PRO.
+   The cancel dialog copy says "until {endDate}" but the cancel is immediate → copy/behaviour mismatch.
 2. No distinct **"current plan"** card — PLAN_PRO renders like CHATBOT etc. (`Subscriptions.tsx:568-610`).
 3. **Renewal date is fabricated** client-side (`now()+1 month`, `Subscriptions.tsx:388-396`); never reads Stripe `current_period_end`.
-4. **No `past_due` / `suspended` / grace status** — only trial/active/canceled (`Subscriptions.tsx:364-375`); the features API does not
-   even return `suspendedAt` / `gracePeriodEndsAt` (`venueFeature.dashboard.service.ts:354-371`).
+4. **No `past_due` / `suspended` / grace status** — only trial/active/canceled (`Subscriptions.tsx:364-375`); the features API does not even
+   return `suspendedAt` / `gracePeriodEndsAt` (`venueFeature.dashboard.service.ts:354-371`).
 5. No **interval** (monthly vs annual) and no **IVA** shown (price is base ex-IVA only).
 6. No **Stripe billing-portal** entry point in the Billing pages (endpoint exists, wired only in `TrialStatusBanner.tsx:114`).
 
 **Gaps (superadmin):** `getAllVenuesForSuperadmin` (`dashboard/superadmin.service.ts`) never queries `VenueFeature` or `Venue.planTier`;
-`subscriptionPlan: 'PROFESSIONAL'` and the whole `billing` block (`$299`, `paymentStatus:'PAID'`, fake `nextBillingDate`) are hardcoded
-mock (`:351,:372-378`).
+`subscriptionPlan: 'PROFESSIONAL'` and the whole `billing` block (`$299`, `paymentStatus:'PAID'`, fake `nextBillingDate`) are hardcoded mock
+(`:351,:372-378`).
 
 **Gap (MCP):** no MCP tool exposes PLAN_PRO subscription state.
 
@@ -50,34 +48,35 @@ mock (`:351,:372-378`).
 ## Decisions (locked with product owner)
 
 - **Client = Hybrid.** Rich in-app "current plan" card (real state) + **native cancel/reactivate using `cancel_at_period_end`** (end of
-  period, correct copy) + guard the dangerous immediate-cancel; **delegate only card-update / compliance to the Stripe Customer Portal**
-  (a button). Invoices/payment-methods stay as-is.
+  period, correct copy) + guard the dangerous immediate-cancel; **delegate only card-update / compliance to the Stripe Customer Portal** (a
+  button). Invoices/payment-methods stay as-is.
 - **Superadmin = SEPARATE namespace.** New endpoints under `/api/v1/superadmin/*` (dedicated superadmin namespace, `src/routes/superadmin/`
-  + `src/controllers/superadmin/` + `src/services/superadmin/`). **Do NOT extend** the legacy `/api/v1/dashboard/superadmin/venues` mock —
-  it stays intact.
+  - `src/controllers/superadmin/` + `src/services/superadmin/`). **Do NOT extend** the legacy `/api/v1/dashboard/superadmin/venues` mock —
+    it stays intact.
 - **Client endpoints stay in `/dashboard/*`** (venue-scoped; not superadmin).
-- **Permissions standardized on `billing:*`** for the client billing/plan endpoints (align front+back), registered per the
-  permission-policy rule.
+- **Permissions standardized on `billing:*`** for the client billing/plan endpoints (align front+back), registered per the permission-policy
+  rule.
 
 ## Architecture
 
 ### Part A — Shared backend foundation (`avoqado-server`)
 
-**A1. Base-plan state endpoint (client, venue-scoped).** New `GET /api/v1/dashboard/venues/:venueId/plan` →
-`venue.dashboard.controller` → new `planState.service.ts`. Reads the `VenueFeature(code='PLAN_PRO')` and, when a `stripeSubscriptionId`
-exists, the Stripe subscription (for `current_period_end`, `cancel_at_period_end`, interval, status). Returns the **PlanState** shape (see
-Data shapes). `state` is derived by a shared pure helper `derivePlanState(venueFeature, stripeSub?)` reused by Part C.
+**A1. Base-plan state endpoint (client, venue-scoped).** New `GET /api/v1/dashboard/venues/:venueId/plan` → `venue.dashboard.controller` →
+new `planState.service.ts`. Reads the `VenueFeature(code='PLAN_PRO')` and, when a `stripeSubscriptionId` exists, the Stripe subscription
+(for `current_period_end`, `cancel_at_period_end`, interval, status). Returns the **PlanState** shape (see Data shapes). `state` is derived
+by a shared pure helper `derivePlanState(venueFeature, stripeSub?)` reused by Part C.
 
 **A2. Base-plan-aware cancel / reactivate (client).**
 
-- `POST /api/v1/dashboard/venues/:venueId/plan/cancel` → set `cancel_at_period_end = true` on the Stripe subscription (end of period).
-  The `VenueFeature` stays `active` until period end; record intent. Returns updated PlanState.
+- `POST /api/v1/dashboard/venues/:venueId/plan/cancel` → set `cancel_at_period_end = true` on the Stripe subscription (end of period). The
+  `VenueFeature` stays `active` until period end; record intent. Returns updated PlanState.
 - `POST /api/v1/dashboard/venues/:venueId/plan/reactivate` → set `cancel_at_period_end = false`. Returns updated PlanState.
 - These are the ONLY way to cancel the base plan.
 
 **A3. Guard the à-la-carte delete.** `DELETE /api/v1/dashboard/venues/:venueId/features/:featureId` → if the feature's code is in
-`PAID_PLAN_TIER_CODES` (i.e. PLAN_PRO), respond **400** `{ error, message: 'Usa el flujo de plan (cancelar suscripción) para el plan base',
-useEndpoint: '/plan/cancel' }`. Kills the immediate-cancel path for the base plan.
+`PAID_PLAN_TIER_CODES` (i.e. PLAN_PRO), respond **400**
+`{ error, message: 'Usa el flujo de plan (cancelar suscripción) para el plan base', useEndpoint: '/plan/cancel' }`. Kills the
+immediate-cancel path for the base plan.
 
 **A4. Permissions.** Standardize the plan/billing endpoints on `billing:*` (`billing:subscriptions:read`, `billing:subscriptions:manage`,
 `billing:history:read`, `billing:payment-methods:read`, `billing:payment-methods:manage`). Register in `src/lib/permissions.ts`
@@ -127,11 +126,11 @@ type PlanState = {
   hasPlan: boolean
   state: 'none' | 'trial' | 'active' | 'canceling' | 'past_due' | 'suspended' | 'canceled'
   planTier: 'GRATIS' | 'PRO' | 'PREMIUM' | 'ENTERPRISE' | null
-  planName: string | null            // "Plan Avoqado Pro"
+  planName: string | null // "Plan Avoqado Pro"
   interval: 'month' | 'year' | null
-  price: { base: number; gross: number; currency: 'MXN' } | null  // base ex-IVA, gross incl. 16% IVA
-  trialEndsAt: string | null         // ISO
-  currentPeriodEnd: string | null    // ISO, real renewal/next-charge (Stripe)
+  price: { base: number; gross: number; currency: 'MXN' } | null // base ex-IVA, gross incl. 16% IVA
+  trialEndsAt: string | null // ISO
+  currentPeriodEnd: string | null // ISO, real renewal/next-charge (Stripe)
   cancelAtPeriodEnd: boolean
   suspendedAt: string | null
   gracePeriodEndsAt: string | null
@@ -141,21 +140,32 @@ type PlanState = {
 
 // SuperadminVenueSubscription — GET /superadmin/subscriptions/venues
 type SuperadminVenueSubscription = {
-  venueId: string; name: string; slug: string
+  venueId: string
+  name: string
+  slug: string
   planTier: PlanState['planTier']
   state: PlanState['state']
   trialEndsAt: string | null
   currentPeriodEnd: string | null
-  mrr: number                        // monthly-normalized gross MXN; 0 when not active/trial
+  mrr: number // monthly-normalized gross MXN; 0 when not active/trial
   stripeSubscriptionId: string | null
   owner: { name: string | null; email: string | null }
 }
 
 // SubscriptionOverview — GET /superadmin/subscriptions/overview
 type SubscriptionOverview = {
-  counts: { active: number; trial: number; canceling: number; past_due: number; suspended: number; canceled: number; none: number; total: number }
+  counts: {
+    active: number
+    trial: number
+    canceling: number
+    past_due: number
+    suspended: number
+    canceled: number
+    none: number
+    total: number
+  }
   mrr: { total: number; currency: 'MXN' }
-  trialsEndingSoon: Array<{ venueId: string; name: string; trialEndsAt: string }>  // next 7 days
+  trialsEndingSoon: Array<{ venueId: string; name: string; trialEndsAt: string }> // next 7 days
 }
 ```
 
@@ -172,8 +182,8 @@ Given the PLAN_PRO `VenueFeature` (`active, endDate, suspendedAt, gracePeriodEnd
 6. `cancel_at_period_end === true` → `canceling` (still entitled until `current_period_end`).
 7. otherwise → `active`.
 
-`venueHasActiveBasePlan()` remains the canonical "entitled" boolean and is unchanged. MRR = gross monthly amount of the Stripe price
-(annual normalized as `annual / 12`); `0` for non-active/trial states.
+`venueHasActiveBasePlan()` remains the canonical "entitled" boolean and is unchanged. MRR = gross monthly amount of the Stripe price (annual
+normalized as `annual / 12`); `0` for non-active/trial states.
 
 ## Edge cases
 
@@ -187,9 +197,9 @@ Given the PLAN_PRO `VenueFeature` (`active, endDate, suspendedAt, gracePeriodEnd
 
 ## Out of scope (YAGNI — v1)
 
-Plan change annual↔monthly UI (backend proration endpoints already exist), a dedicated full superadmin Subscriptions dashboard,
-persisting `current_period_end` onto `VenueFeature` via webhook (v1 reads Stripe on demand), CFDI/factura generation, and an in-app
-"subscribe" entry point for legacy venues (separate product decision).
+Plan change annual↔monthly UI (backend proration endpoints already exist), a dedicated full superadmin Subscriptions dashboard, persisting
+`current_period_end` onto `VenueFeature` via webhook (v1 reads Stripe on demand), CFDI/factura generation, and an in-app "subscribe" entry
+point for legacy venues (separate product decision).
 
 ## Testing
 

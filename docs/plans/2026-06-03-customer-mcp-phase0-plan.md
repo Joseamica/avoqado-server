@@ -1,29 +1,39 @@
 # Customer MCP — Phase 0 (Scoped Read Loop) Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax.
 
-**Goal:** A real Staff connects a remote MCP over HTTP using a simple audience-bound bearer token and runs ONE read tool (`list_my_venues`) that returns ONLY the venues their role allows — proving auth→scope→guard→tool→transport end to end, cheaply, before any OAuth machinery.
+**Goal:** A real Staff connects a remote MCP over HTTP using a simple audience-bound bearer token and runs ONE read tool (`list_my_venues`)
+that returns ONLY the venues their role allows — proving auth→scope→guard→tool→transport end to end, cheaply, before any OAuth machinery.
 
-**Architecture:** A new `src/mcp/` module in `avoqado-server`: an MCP server over Streamable HTTP at `POST /mcp`, gated by an MCP-audience bearer token (P0: distinct from dashboard `/api/v1` tokens), resolving the Staff's active-org scope via the existing `getUserAccess()` (org OWNER → all org venues; admin/below → assigned venues; permissions per venue), enforced by a central guard. Full OAuth (login page, DCR, token persistence, refresh) is **Phase 1, NOT this plan**.
+**Architecture:** A new `src/mcp/` module in `avoqado-server`: an MCP server over Streamable HTTP at `POST /mcp`, gated by an MCP-audience
+bearer token (P0: distinct from dashboard `/api/v1` tokens), resolving the Staff's active-org scope via the existing `getUserAccess()` (org
+OWNER → all org venues; admin/below → assigned venues; permissions per venue), enforced by a central guard. Full OAuth (login page, DCR,
+token persistence, refresh) is **Phase 1, NOT this plan**.
 
-**Tech Stack:** `@modelcontextprotocol/sdk` (Streamable HTTP transport + `requireBearerAuth`), `jsonwebtoken` (present), Express (present), Prisma (present), Jest/ts-jest (present, `tests/unit/**`).
+**Tech Stack:** `@modelcontextprotocol/sdk` (Streamable HTTP transport + `requireBearerAuth`), `jsonwebtoken` (present), Express (present),
+Prisma (present), Jest/ts-jest (present, `tests/unit/**`).
 
 **Source spec:** `docs/plans/2026-06-03-customer-mcp-design.md` (§8 Phase 0; §7 corrections folded).
 
-**Cost-first rule:** the early tasks deliver the working connected loop. No Redis cache (request-level `createAccessCache` is enough for 1 low-volume tool — that's Phase 1). No OAuth. No login UI.
+**Cost-first rule:** the early tasks deliver the working connected loop. No Redis cache (request-level `createAccessCache` is enough for 1
+low-volume tool — that's Phase 1). No OAuth. No login UI.
 
 ---
 
 ## Prerequisite (Task 0)
 
-- [ ] **Branch + install the SDK** (the customer MCP is NEW code in `src/mcp/`, independent of the internal `scripts/mcp/` on `feat/admin-mcp` — no merge needed, only the SDK dep):
+- [ ] **Branch + install the SDK** (the customer MCP is NEW code in `src/mcp/`, independent of the internal `scripts/mcp/` on
+      `feat/admin-mcp` — no merge needed, only the SDK dep):
 
 ```bash
 git checkout develop && git pull
 git checkout -b feat/customer-mcp-phase0
 npm install @modelcontextprotocol/sdk
 ```
-Expected: SDK added to `dependencies`. Commit: `git add package.json package-lock.json && git commit -m "chore(mcp): add @modelcontextprotocol/sdk for customer MCP"`
+
+Expected: SDK added to `dependencies`. Commit:
+`git add package.json package-lock.json && git commit -m "chore(mcp): add @modelcontextprotocol/sdk for customer MCP"`
 
 ---
 
@@ -46,7 +56,8 @@ tests/unit/mcp-customer/
 
 ## Task 1: MCP-audience token (P0 — the security fix)
 
-**Files:** Create `src/mcp/mcpToken.ts`; Test `tests/unit/mcp-customer/mcpToken.test.ts`; Modify `src/jwt.service.ts` (reject MCP tokens on the dashboard side).
+**Files:** Create `src/mcp/mcpToken.ts`; Test `tests/unit/mcp-customer/mcpToken.test.ts`; Modify `src/jwt.service.ts` (reject MCP tokens on
+the dashboard side).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -55,7 +66,9 @@ import { issueMcpToken, verifyMcpToken, MCP_AUDIENCE } from '../../../src/mcp/mc
 import jwt from 'jsonwebtoken'
 
 describe('mcpToken', () => {
-  beforeAll(() => { process.env.ACCESS_TOKEN_SECRET = 'test-secret' })
+  beforeAll(() => {
+    process.env.ACCESS_TOKEN_SECRET = 'test-secret'
+  })
 
   it('issues a token bound to the MCP audience and round-trips it', () => {
     const t = issueMcpToken('staff-1', 'org-1', 3600)
@@ -102,17 +115,20 @@ export function verifyMcpToken(token: string): McpTokenPayload {
 
 - [ ] **Step 4: Run it, expect PASS.**
 
-- [ ] **Step 5: Close the reverse leak — the dashboard must reject MCP-audience tokens.** In `src/jwt.service.ts`, inside `verifyAccessToken` (after `jwt.verify`), add:
+- [ ] **Step 5: Close the reverse leak — the dashboard must reject MCP-audience tokens.** In `src/jwt.service.ts`, inside
+      `verifyAccessToken` (after `jwt.verify`), add:
 
 ```typescript
-  // An MCP-audience token must never authenticate against the dashboard / /api/v1.
-  if ((decoded as jwt.JwtPayload).aud === 'avoqado-mcp') {
-    throw new jwt.JsonWebTokenError('MCP token not valid for the dashboard API')
-  }
+// An MCP-audience token must never authenticate against the dashboard / /api/v1.
+if ((decoded as jwt.JwtPayload).aud === 'avoqado-mcp') {
+  throw new jwt.JsonWebTokenError('MCP token not valid for the dashboard API')
+}
 ```
+
 (Verify the exact variable name `decoded` in `verifyAccessToken` first; adapt if different.)
 
-- [ ] **Step 6: Commit** — `git add src/mcp/mcpToken.ts tests/unit/mcp-customer/mcpToken.test.ts src/jwt.service.ts && git commit -m "feat(mcp): audience-bound MCP tokens, rejected on the dashboard (P0)"`
+- [ ] **Step 6: Commit** —
+      `git add src/mcp/mcpToken.ts tests/unit/mcp-customer/mcpToken.test.ts src/jwt.service.ts && git commit -m "feat(mcp): audience-bound MCP tokens, rejected on the dashboard (P0)"`
 
 ---
 
@@ -120,7 +136,9 @@ export function verifyMcpToken(token: string): McpTokenPayload {
 
 **Files:** Create `src/mcp/scope.ts`; Test `tests/unit/mcp-customer/scope.test.ts`.
 
-This hits the DB (role → venues), so its test is integration-style against the test DB. Verify the test-DB seeding pattern in `tests/` before writing the test; if no seedable test DB, mark this test `[→INTEGRATION]` and cover the role-branching logic by extracting it (below) — but the org-OWNER-vs-assigned branch is the critical thing to test.
+This hits the DB (role → venues), so its test is integration-style against the test DB. Verify the test-DB seeding pattern in `tests/`
+before writing the test; if no seedable test DB, mark this test `[→INTEGRATION]` and cover the role-branching logic by extracting it (below)
+— but the org-OWNER-vs-assigned branch is the critical thing to test.
 
 - [ ] **Step 1: Implement `src/mcp/scope.ts`**
 
@@ -176,7 +194,9 @@ export async function resolveScope(staffId: string, activeOrg: string): Promise<
 }
 ```
 
-- [ ] **Step 2: Test (against the test DB)** — assert: an org OWNER resolves to ALL the org's venues; an ADMIN with two `StaffVenue` rows resolves to exactly those two; an `OrgRole.ADMIN` with NO `StaffVenue` resolves to **zero** venues (the §7.7 edge case). Run, iterate to green.
+- [ ] **Step 2: Test (against the test DB)** — assert: an org OWNER resolves to ALL the org's venues; an ADMIN with two `StaffVenue` rows
+      resolves to exactly those two; an `OrgRole.ADMIN` with NO `StaffVenue` resolves to **zero** venues (the §7.7 edge case). Run, iterate
+      to green.
 
 - [ ] **Step 3: Commit** — `git commit -m "feat(mcp): resolveScope (org OWNER → all venues; else assigned), per-venue access"`
 
@@ -193,7 +213,9 @@ import { createGuard, ScopeError } from '../../../src/mcp/guard'
 import type { McpScope } from '../../../src/mcp/scope'
 
 const scope = (ids: string[]): McpScope => ({
-  staffId: 's', activeOrg: 'o', allowedVenueIds: ids,
+  staffId: 's',
+  activeOrg: 'o',
+  allowedVenueIds: ids,
   perVenueAccess: new Map(ids.map(id => [id, { corePermissions: ['venue:read'] } as any])),
 })
 
@@ -302,7 +324,8 @@ export function registerVenueTools(server: McpServer, scope: McpScope) {
 
 **Files:** Create `src/mcp/server.ts`; Modify `src/app.ts` (mount `/mcp`).
 
-The exact `@modelcontextprotocol/sdk@1.29.0` API for Streamable HTTP + bearer auth must be confirmed from the installed package — do NOT assume (a prior review caught wrong SDK assumptions).
+The exact `@modelcontextprotocol/sdk@1.29.0` API for Streamable HTTP + bearer auth must be confirmed from the installed package — do NOT
+assume (a prior review caught wrong SDK assumptions).
 
 - [ ] **Step 1: Confirm the SDK surface**
 
@@ -311,7 +334,9 @@ ls node_modules/@modelcontextprotocol/sdk/dist/esm/server/ | grep -iE "stream|ht
 sed -n '1,40p' node_modules/@modelcontextprotocol/sdk/dist/esm/server/streamableHttp.d.ts 2>/dev/null
 sed -n '1,40p' node_modules/@modelcontextprotocol/sdk/dist/esm/server/auth/middleware/bearerAuth.d.ts 2>/dev/null
 ```
-Note the real export names/signatures (e.g. `StreamableHTTPServerTransport`, `requireBearerAuth`, the `verifier`/`tokenVerifier` shape). Implement Step 2 against what you find; the structure below is the target shape.
+
+Note the real export names/signatures (e.g. `StreamableHTTPServerTransport`, `requireBearerAuth`, the `verifier`/`tokenVerifier` shape).
+Implement Step 2 against what you find; the structure below is the target shape.
 
 - [ ] **Step 2: Implement `src/mcp/server.ts`** (adapt names to the confirmed API)
 
@@ -354,6 +379,7 @@ export async function handleMcpRequest(req: Request, res: Response) {
 import { handleMcpRequest } from './mcp/server'
 app.post('/mcp', express.json(), handleMcpRequest)
 ```
+
 (Confirm `express` and `app` are in scope at that point in `app.ts`.)
 
 - [ ] **Step 4: Smoke test the loop locally**
@@ -365,6 +391,7 @@ curl -s -X POST http://localhost:PORT/mcp \
   -H "Authorization: Bearer <DEV_MCP_TOKEN>" -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | head
 ```
+
 Expected: a JSON-RPC response listing `list_my_venues`. A request with no/invalid token → 401.
 
 - [ ] **Step 5: Commit** — `git commit -m "feat(mcp): Streamable HTTP /mcp endpoint with MCP-token bearer auth + per-request scope"`
@@ -375,17 +402,29 @@ Expected: a JSON-RPC response listing `list_my_venues`. A request with no/invali
 
 **Files:** Test `tests/unit/mcp-customer/scope.test.ts` (extend) or a new integration test.
 
-- [ ] **Step 1: The leak test (CRITICAL).** With a real ADMIN staff scoped to venues {A,B} in an org that also has venue C: assert `resolveScope(admin, org).allowedVenueIds` does NOT include C, and `createGuard(scope).venueFilter('C')` throws. (This is the test the whole module exists to pass.)
-- [ ] **Step 2: Real-agent connect.** Deploy to staging (or run locally), register the MCP in a real Claude/ChatGPT with a dev MCP token, ask "list my venues". Confirm it returns ONLY the scoped venues. This is also the Phase-0 answer to "does a real agent complete the loop against our server?" (the spike, folded in).
+- [ ] **Step 1: The leak test (CRITICAL).** With a real ADMIN staff scoped to venues {A,B} in an org that also has venue C: assert
+      `resolveScope(admin, org).allowedVenueIds` does NOT include C, and `createGuard(scope).venueFilter('C')` throws. (This is the test the
+      whole module exists to pass.)
+- [ ] **Step 2: Real-agent connect.** Deploy to staging (or run locally), register the MCP in a real Claude/ChatGPT with a dev MCP token,
+      ask "list my venues". Confirm it returns ONLY the scoped venues. This is also the Phase-0 answer to "does a real agent complete the
+      loop against our server?" (the spike, folded in).
 - [ ] **Step 3: Commit** — `git commit -m "test(mcp): critical tenant-isolation test for scoped venue access"`
 
 ---
 
 ## NOT in Phase 0 (Phase 1)
 
-OAuth (`mcpAuthRouter` + DCR + discovery), the bcrypt login+consent+org-picker page, token persistence/refresh/revocation, the cross-request Redis cache, `switch_active_org`, every read tool beyond `list_my_venues`, all writes. Phase 0 uses a manually-issued dev MCP token; Phase 1 replaces it with the real "Connect to Avoqado" OAuth flow.
+OAuth (`mcpAuthRouter` + DCR + discovery), the bcrypt login+consent+org-picker page, token persistence/refresh/revocation, the cross-request
+Redis cache, `switch_active_org`, every read tool beyond `list_my_venues`, all writes. Phase 0 uses a manually-issued dev MCP token; Phase 1
+replaces it with the real "Connect to Avoqado" OAuth flow.
 
 ## Self-Review
-- **Spec coverage:** §8 Phase 0 (transport + token + scope + guard + 1 tool) → Tasks 1-6 ✓. §7.2 audience → Task 1 ✓. §7.6 redaction → Task 3 ✓. §7.7 role model + zero-venue edge → Task 2 ✓. §3.5 query-level scope (venueFilter, not row-assertion) → Task 3 ✓. §7.9 SDK (install only, no merge needed) → Task 0 ✓; SDK API verified not assumed → Task 5 Step 1 ✓.
-- **Placeholder scan:** Task 5 has a "confirm the SDK API" step — that is the work of integrating an external SDK whose exact 1.29.0 names must be read, not a hand-wave; the target code shape is provided. Task 2's test depends on the repo's test-DB pattern (flagged to verify). No TBD/TODO.
-- **Type consistency:** `McpScope` (scope.ts) consumed by guard.ts + venues.ts + server.ts; `McpTokenPayload.{sub,org}` consistent token↔server; `MCP_AUDIENCE` shared token↔jwt.service rejection.
+
+- **Spec coverage:** §8 Phase 0 (transport + token + scope + guard + 1 tool) → Tasks 1-6 ✓. §7.2 audience → Task 1 ✓. §7.6 redaction → Task
+  3 ✓. §7.7 role model + zero-venue edge → Task 2 ✓. §3.5 query-level scope (venueFilter, not row-assertion) → Task 3 ✓. §7.9 SDK (install
+  only, no merge needed) → Task 0 ✓; SDK API verified not assumed → Task 5 Step 1 ✓.
+- **Placeholder scan:** Task 5 has a "confirm the SDK API" step — that is the work of integrating an external SDK whose exact 1.29.0 names
+  must be read, not a hand-wave; the target code shape is provided. Task 2's test depends on the repo's test-DB pattern (flagged to verify).
+  No TBD/TODO.
+- **Type consistency:** `McpScope` (scope.ts) consumed by guard.ts + venues.ts + server.ts; `McpTokenPayload.{sub,org}` consistent
+  token↔server; `MCP_AUDIENCE` shared token↔jwt.service rejection.

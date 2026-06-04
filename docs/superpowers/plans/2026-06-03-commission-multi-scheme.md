@@ -1,12 +1,18 @@
 # Multi-Scheme Commissions Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Let one venue run multiple commission schemes at once (each scoped to its own product categories, all paying correctly), and let a tiered scheme use each employee's sales goal as a tier boundary.
+**Goal:** Let one venue run multiple commission schemes at once (each scoped to its own product categories, all paying correctly), and let a
+tiered scheme use each employee's sales goal as a tier boundary.
 
-**Architecture:** The payment-completion engine changes from resolving ONE config (`findActiveCommissionConfig`, a `findFirst`) to evaluating ALL active configs per payment — each category-scoped config bills its own categories, an optional catch-all config bills the leftover. A new `STAFF_GOAL` tier-threshold type lets a tier boundary resolve to the staff member's goal at calculation time. Idempotency moves from per-payment to per-(payment, config, staff).
+**Architecture:** The payment-completion engine changes from resolving ONE config (`findActiveCommissionConfig`, a `findFirst`) to
+evaluating ALL active configs per payment — each category-scoped config bills its own categories, an optional catch-all config bills the
+leftover. A new `STAFF_GOAL` tier-threshold type lets a tier boundary resolve to the staff member's goal at calculation time. Idempotency
+moves from per-payment to per-(payment, config, staff).
 
-**Tech Stack:** TypeScript, Express, Prisma/PostgreSQL, Jest (unit, mocked Prisma via `tests/__helpers__/setup.ts`). Frontend: React + Vite (`avoqado-web-dashboard`).
+**Tech Stack:** TypeScript, Express, Prisma/PostgreSQL, Jest (unit, mocked Prisma via `tests/__helpers__/setup.ts`). Frontend: React + Vite
+(`avoqado-web-dashboard`).
 
 **Spec:** [docs/superpowers/specs/2026-06-03-commission-multi-scheme-design.md](../specs/2026-06-03-commission-multi-scheme-design.md)
 
@@ -20,19 +26,20 @@
 
 ## File Structure (Phase 1 backend)
 
-| File | Responsibility | Change |
-|---|---|---|
-| `prisma/schema.prisma` | `CommissionTier` model + `ThresholdType` enum | Modify |
-| `src/services/dashboard/commission/commission-utils.ts` | config lookups, base-amount helpers, types | Modify (add `findActiveCommissionConfigs`, `calculateLeftoverAmount`; extend `CommissionTierData`) |
-| `src/services/dashboard/commission/commission-tier.service.ts` | tier resolution | Modify (`getStaffTierProgress` resolves `STAFF_GOAL` boundaries) |
-| `src/services/dashboard/commission/commission-calculation.service.ts` | per-payment calc | Modify (multi-config loop + `createCalcForConfig` helper; refund mirrors all calcs) |
-| `tests/unit/services/dashboard/commission-multi-scheme.test.ts` | engine tests | Rename from `commission-multi-config-limitation.test.ts` + expand |
+| File                                                                  | Responsibility                                | Change                                                                                             |
+| --------------------------------------------------------------------- | --------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `prisma/schema.prisma`                                                | `CommissionTier` model + `ThresholdType` enum | Modify                                                                                             |
+| `src/services/dashboard/commission/commission-utils.ts`               | config lookups, base-amount helpers, types    | Modify (add `findActiveCommissionConfigs`, `calculateLeftoverAmount`; extend `CommissionTierData`) |
+| `src/services/dashboard/commission/commission-tier.service.ts`        | tier resolution                               | Modify (`getStaffTierProgress` resolves `STAFF_GOAL` boundaries)                                   |
+| `src/services/dashboard/commission/commission-calculation.service.ts` | per-payment calc                              | Modify (multi-config loop + `createCalcForConfig` helper; refund mirrors all calcs)                |
+| `tests/unit/services/dashboard/commission-multi-scheme.test.ts`       | engine tests                                  | Rename from `commission-multi-config-limitation.test.ts` + expand                                  |
 
 ---
 
 ## Task 1: Schema — `STAFF_GOAL` tier threshold type
 
 **Files:**
+
 - Modify: `prisma/schema.prisma` (enum block near `TierType`/`TierPeriod`; model `CommissionTier` ~line 7873)
 - Migration: `prisma/migrations/<generated>/`
 
@@ -60,15 +67,15 @@ In `model CommissionTier`, after the `maxThreshold` field, add:
 
 - [ ] **Step 3: Create the migration**
 
-Run: `npx prisma migrate dev --name commission_tier_goal_threshold`
-Expected: a new migration folder is created; `ThresholdType` enum + two columns added with `DEFAULT 'FIXED'`. All existing tiers keep `FIXED` (non-breaking).
+Run: `npx prisma migrate dev --name commission_tier_goal_threshold` Expected: a new migration folder is created; `ThresholdType` enum + two
+columns added with `DEFAULT 'FIXED'`. All existing tiers keep `FIXED` (non-breaking).
 
-> NOTE: No new Prisma *model* is added, so `scripts/generate-schema-map.ts` / `npm run schema:map` do NOT need updating (that rule applies to new models only).
+> NOTE: No new Prisma _model_ is added, so `scripts/generate-schema-map.ts` / `npm run schema:map` do NOT need updating (that rule applies
+> to new models only).
 
 - [ ] **Step 4: Regenerate client & typecheck**
 
-Run: `npx prisma generate && npx tsc --noEmit`
-Expected: no errors (the new enum + fields are available on `Prisma.CommissionTier`).
+Run: `npx prisma generate && npx tsc --noEmit` Expected: no errors (the new enum + fields are available on `Prisma.CommissionTier`).
 
 - [ ] **Step 5: Commit**
 
@@ -82,6 +89,7 @@ git commit -m "feat(commissions): add STAFF_GOAL tier threshold type"
 ## Task 2: `findActiveCommissionConfigs` (plural) + `calculateLeftoverAmount`
 
 **Files:**
+
 - Modify: `src/services/dashboard/commission/commission-utils.ts`
 - Test: `tests/unit/services/dashboard/commission-utils.test.ts`
 
@@ -96,8 +104,8 @@ import { CommissionRecipient, StaffRole, CommissionCalcType, TierType, TierPerio
 Add the two fields to `interface CommissionTierData`:
 
 ```typescript
-  minThresholdType: ThresholdType
-  maxThresholdType: ThresholdType
+minThresholdType: ThresholdType
+maxThresholdType: ThresholdType
 ```
 
 - [ ] **Step 2: Write the failing test for `calculateLeftoverAmount`**
@@ -125,8 +133,8 @@ describe('calculateLeftoverAmount', () => {
 
 - [ ] **Step 3: Run it to verify it fails**
 
-Run: `npx jest tests/unit/services/dashboard/commission-utils.test.ts -t calculateLeftoverAmount`
-Expected: FAIL — `calculateLeftoverAmount is not a function`.
+Run: `npx jest tests/unit/services/dashboard/commission-utils.test.ts -t calculateLeftoverAmount` Expected: FAIL —
+`calculateLeftoverAmount is not a function`.
 
 - [ ] **Step 4: Implement `calculateLeftoverAmount`**
 
@@ -166,7 +174,8 @@ export async function calculateLeftoverAmount(
 
 - [ ] **Step 5: Add `findActiveCommissionConfigs` (plural)**
 
-Add to `commission-utils.ts` directly below `findActiveCommissionConfig` (keep the singular — `createManualCommission` and the split path still use it):
+Add to `commission-utils.ts` directly below `findActiveCommissionConfig` (keep the singular — `createManualCommission` and the split path
+still use it):
 
 ```typescript
 /**
@@ -227,7 +236,9 @@ describe('findActiveCommissionConfigs', () => {
   })
 
   it('falls back to org configs when no venue configs exist', async () => {
-    prismaMock.commissionConfig.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([{ id: 'org-1', priority: 0, roleRates: null, tiers: [] }])
+    prismaMock.commissionConfig.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: 'org-1', priority: 0, roleRates: null, tiers: [] }])
     prismaMock.venue.findUnique.mockResolvedValue({ organizationId: 'org' })
     const configs = await findActiveCommissionConfigs('venue-1')
     expect(configs.map(c => c.id)).toEqual(['org-1'])
@@ -237,8 +248,7 @@ describe('findActiveCommissionConfigs', () => {
 
 - [ ] **Step 7: Run all `commission-utils` tests**
 
-Run: `npx jest tests/unit/services/dashboard/commission-utils.test.ts`
-Expected: PASS (new + existing).
+Run: `npx jest tests/unit/services/dashboard/commission-utils.test.ts` Expected: PASS (new + existing).
 
 - [ ] **Step 8: Commit**
 
@@ -252,6 +262,7 @@ git commit -m "feat(commissions): findActiveCommissionConfigs + calculateLeftove
 ## Task 3: Resolve `STAFF_GOAL` tier boundaries in tier progress
 
 **Files:**
+
 - Modify: `src/services/dashboard/commission/commission-tier.service.ts`
 - Test: `tests/unit/services/dashboard/commission-goal-tier.test.ts` (existing file — extend it)
 
@@ -275,9 +286,39 @@ import { Decimal } from '@prisma/client/runtime/library'
 
 describe('getStaffTierProgress — STAFF_GOAL boundaries', () => {
   const tiers = [
-    { tierLevel: 1, tierName: 'Base', tierType: 'BY_AMOUNT', tierPeriod: 'MONTHLY', minThreshold: new Decimal(0), maxThreshold: new Decimal(30000), minThresholdType: 'FIXED', maxThresholdType: 'FIXED', rate: new Decimal(0.04) },
-    { tierLevel: 2, tierName: 'Meta', tierType: 'BY_AMOUNT', tierPeriod: 'MONTHLY', minThreshold: new Decimal(30000), maxThreshold: new Decimal(0), minThresholdType: 'FIXED', maxThresholdType: 'STAFF_GOAL', rate: new Decimal(0.06) },
-    { tierLevel: 3, tierName: 'Super', tierType: 'BY_AMOUNT', tierPeriod: 'MONTHLY', minThreshold: new Decimal(0), maxThreshold: null, minThresholdType: 'STAFF_GOAL', maxThresholdType: 'FIXED', rate: new Decimal(0.08) },
+    {
+      tierLevel: 1,
+      tierName: 'Base',
+      tierType: 'BY_AMOUNT',
+      tierPeriod: 'MONTHLY',
+      minThreshold: new Decimal(0),
+      maxThreshold: new Decimal(30000),
+      minThresholdType: 'FIXED',
+      maxThresholdType: 'FIXED',
+      rate: new Decimal(0.04),
+    },
+    {
+      tierLevel: 2,
+      tierName: 'Meta',
+      tierType: 'BY_AMOUNT',
+      tierPeriod: 'MONTHLY',
+      minThreshold: new Decimal(30000),
+      maxThreshold: new Decimal(0),
+      minThresholdType: 'FIXED',
+      maxThresholdType: 'STAFF_GOAL',
+      rate: new Decimal(0.06),
+    },
+    {
+      tierLevel: 3,
+      tierName: 'Super',
+      tierType: 'BY_AMOUNT',
+      tierPeriod: 'MONTHLY',
+      minThreshold: new Decimal(0),
+      maxThreshold: null,
+      minThresholdType: 'STAFF_GOAL',
+      maxThresholdType: 'FIXED',
+      rate: new Decimal(0.08),
+    },
   ]
 
   beforeEach(() => {
@@ -310,12 +351,13 @@ describe('getStaffTierProgress — STAFF_GOAL boundaries', () => {
 
 - [ ] **Step 3: Run it to verify it fails**
 
-Run: `npx jest tests/unit/services/dashboard/commission-goal-tier.test.ts -t STAFF_GOAL`
-Expected: FAIL — currently `maxThreshold` of 0 is treated literally, so tier 2/3 selection is wrong.
+Run: `npx jest tests/unit/services/dashboard/commission-goal-tier.test.ts -t STAFF_GOAL` Expected: FAIL — currently `maxThreshold` of 0 is
+treated literally, so tier 2/3 selection is wrong.
 
 - [ ] **Step 4: Add the boundary resolver and use it in `getStaffTierProgress`**
 
-In `getStaffTierProgress`, after loading `config` and computing `currentValue`, resolve the staff goal once and replace the raw `decimalToNumber(tier.minThreshold)` / `maxThreshold` reads:
+In `getStaffTierProgress`, after loading `config` and computing `currentValue`, resolve the staff goal once and replace the raw
+`decimalToNumber(tier.minThreshold)` / `maxThreshold` reads:
 
 ```typescript
 // Resolve STAFF_GOAL boundaries to the staff member's active goal (matching period).
@@ -358,12 +400,12 @@ tiers: config.tiers.map(tier => {
 }),
 ```
 
-> The `progressToNext` block already uses `config.tiers.find(...).minThreshold`; wrap those two reads in `resolveBoundary(...)` the same way so the progress bar reflects the resolved goal.
+> The `progressToNext` block already uses `config.tiers.find(...).minThreshold`; wrap those two reads in `resolveBoundary(...)` the same way
+> so the progress bar reflects the resolved goal.
 
 - [ ] **Step 5: Run the test to verify it passes**
 
-Run: `npx jest tests/unit/services/dashboard/commission-goal-tier.test.ts`
-Expected: PASS (new + existing).
+Run: `npx jest tests/unit/services/dashboard/commission-goal-tier.test.ts` Expected: PASS (new + existing).
 
 - [ ] **Step 6: Commit**
 
@@ -377,6 +419,7 @@ git commit -m "feat(commissions): resolve STAFF_GOAL tier boundaries per staff"
 ## Task 4: Multi-config evaluation in `createCommissionForPayment`
 
 **Files:**
+
 - Modify: `src/services/dashboard/commission/commission-calculation.service.ts`
 - Test: covered in Task 6 (`commission-multi-scheme.test.ts`)
 
@@ -406,7 +449,8 @@ import {
 
 - [ ] **Step 2: Add the per-config helper**
 
-Add this private helper above `createCommissionForPayment`. It is the existing steps 4–9 scoped to a single config, with per-(payment, config, staff) idempotency:
+Add this private helper above `createCommissionForPayment`. It is the existing steps 4–9 scoped to a single config, with per-(payment,
+config, staff) idempotency:
 
 ```typescript
 type LoadedPayment = {
@@ -441,7 +485,11 @@ async function createCalcForConfig(
     select: { id: true },
   })
   if (existing) {
-    logger.info('Commission already exists for (payment, config, staff)', { paymentId: payment.id, configId: config.id, staffId: recipientStaffId })
+    logger.info('Commission already exists for (payment, config, staff)', {
+      paymentId: payment.id,
+      configId: config.id,
+      staffId: recipientStaffId,
+    })
     return null
   }
 
@@ -459,11 +507,24 @@ async function createCalcForConfig(
       where: { staffId: recipientStaffId, venueId: payment.venueId, status: { not: 'VOIDED' }, calculatedAt: { gte: monthStart } },
       _sum: { baseAmount: true },
     })
-    const goalTierInfo = await resolveGoalBasedTier(recipientStaffId, payment.venueId, config, decimalToNumber(monthlyStats._sum.baseAmount))
-    if (goalTierInfo) { tierLevel = goalTierInfo.tierLevel; tierName = goalTierInfo.tierName; tierRate = goalTierInfo.rate }
+    const goalTierInfo = await resolveGoalBasedTier(
+      recipientStaffId,
+      payment.venueId,
+      config,
+      decimalToNumber(monthlyStats._sum.baseAmount),
+    )
+    if (goalTierInfo) {
+      tierLevel = goalTierInfo.tierLevel
+      tierName = goalTierInfo.tierName
+      tierRate = goalTierInfo.rate
+    }
   } else if (config.calcType === CommissionCalcType.TIERED) {
     const tierInfo = await getApplicableTierRate(config.id, recipientStaffId, payment.venueId)
-    if (tierInfo) { tierLevel = tierInfo.tierLevel; tierName = tierInfo.tierName; tierRate = tierInfo.rate }
+    if (tierInfo) {
+      tierLevel = tierInfo.tierLevel
+      tierName = tierInfo.tierName
+      tierRate = tierInfo.rate
+    }
   }
 
   const effectiveRate = calculateFinalRate(config, override, staffInfo.role, tierRate)
@@ -498,7 +559,17 @@ async function createCalcForConfig(
     },
   })
 
-  return { calculationId: calculation.id, paymentId: payment.id, staffId: recipientStaffId, baseAmount: amounts.baseAmount, effectiveRate, grossCommission, netCommission, tierLevel, tierName }
+  return {
+    calculationId: calculation.id,
+    paymentId: payment.id,
+    staffId: recipientStaffId,
+    baseAmount: amounts.baseAmount,
+    effectiveRate,
+    grossCommission,
+    netCommission,
+    tierLevel,
+    tierName,
+  }
 }
 ```
 
@@ -519,11 +590,20 @@ export async function createCommissionForPayment(paymentId: string): Promise<Com
     },
   })
   if (!payment) throw new NotFoundError(`Payment ${paymentId} not found`)
-  if (payment.type === PaymentType.TEST) { logger.info('Skipping commission: TEST payment', { paymentId }); return [] }
-  if (payment.status !== 'COMPLETED') { logger.info('Skipping commission: not COMPLETED', { paymentId, status: payment.status }); return [] }
+  if (payment.type === PaymentType.TEST) {
+    logger.info('Skipping commission: TEST payment', { paymentId })
+    return []
+  }
+  if (payment.status !== 'COMPLETED') {
+    logger.info('Skipping commission: not COMPLETED', { paymentId, status: payment.status })
+    return []
+  }
 
   const configs = await findActiveCommissionConfigs(payment.venueId, payment.createdAt)
-  if (configs.length === 0) { logger.info('No active commission config', { paymentId, venueId: payment.venueId }); return [] }
+  if (configs.length === 0) {
+    logger.info('No active commission config', { paymentId, venueId: payment.venueId })
+    return []
+  }
 
   const categoryScoped = configs.filter(c => c.filterByCategories && c.categoryIds.length > 0)
   const catchAll = configs.filter(c => !(c.filterByCategories && c.categoryIds.length > 0))
@@ -534,7 +614,10 @@ export async function createCommissionForPayment(paymentId: string): Promise<Com
   // 1) Category-scoped configs — each bills its own categories.
   for (const config of categoryScoped) {
     if (!payment.orderId) continue
-    let base = await calculateCategoryFilteredAmount(payment.orderId, config.categoryIds, { includeTax: config.includeTax, includeDiscount: config.includeDiscount })
+    let base = await calculateCategoryFilteredAmount(payment.orderId, config.categoryIds, {
+      includeTax: config.includeTax,
+      includeDiscount: config.includeDiscount,
+    })
     const tip = config.includeTips ? decimalToNumber(payment.tipAmount) : 0
     if (config.includeTips) base += tip
     if (base <= 0) continue
@@ -549,12 +632,20 @@ export async function createCommissionForPayment(paymentId: string): Promise<Com
     let amounts: { baseAmount: number; tipAmount: number; discountAmount: number; taxAmount: number } | null = null
     if (claimed.length === 0) {
       const r = calculateBaseAmount(
-        { amount: payment.amount, tipAmount: payment.tipAmount, taxAmount: payment.order?.taxAmount, discountAmount: payment.order?.discountAmount },
+        {
+          amount: payment.amount,
+          tipAmount: payment.tipAmount,
+          taxAmount: payment.order?.taxAmount,
+          discountAmount: payment.order?.discountAmount,
+        },
         generalConfig,
       )
       amounts = r
     } else if (payment.orderId) {
-      let base = await calculateLeftoverAmount(payment.orderId, claimed, { includeTax: generalConfig.includeTax, includeDiscount: generalConfig.includeDiscount })
+      let base = await calculateLeftoverAmount(payment.orderId, claimed, {
+        includeTax: generalConfig.includeTax,
+        includeDiscount: generalConfig.includeDiscount,
+      })
       const tip = generalConfig.includeTips ? decimalToNumber(payment.tipAmount) : 0
       if (generalConfig.includeTips) base += tip
       amounts = { baseAmount: base, tipAmount: tip, discountAmount: 0, taxAmount: 0 }
@@ -572,9 +663,9 @@ export async function createCommissionForPayment(paymentId: string): Promise<Com
 
 - [ ] **Step 4: Verify callers still compile (all are fire-and-forget)**
 
-Run: `grep -rn "createCommissionForPayment(" src/ | grep -v commission-calculation.service.ts`
-Confirm each call is `createCommissionForPayment(id).catch(...)` (does not read the return value): `payment.tpv.service.ts:1841,2551`, `paymentLink.service.ts:1568,2320`. No changes needed.
-Run: `npx tsc --noEmit` → Expected: no errors.
+Run: `grep -rn "createCommissionForPayment(" src/ | grep -v commission-calculation.service.ts` Confirm each call is
+`createCommissionForPayment(id).catch(...)` (does not read the return value): `payment.tpv.service.ts:1841,2551`,
+`paymentLink.service.ts:1568,2320`. No changes needed. Run: `npx tsc --noEmit` → Expected: no errors.
 
 - [ ] **Step 5: Commit**
 
@@ -588,12 +679,14 @@ git commit -m "feat(commissions): evaluate all category-scoped configs per payme
 ## Task 5: Refund mirrors ALL original calcs
 
 **Files:**
+
 - Modify: `src/services/dashboard/commission/commission-calculation.service.ts` (`createRefundCommission`)
 - Test: Task 6 file
 
 - [ ] **Step 1: Change `createRefundCommission` to loop**
 
-Replace the single `findFirst` with `findMany`, then create one proportional negative calc per original, with per-(refundPayment, config, staff) idempotency. Return an array:
+Replace the single `findFirst` with `findMany`, then create one proportional negative calc per original, with per-(refundPayment, config,
+staff) idempotency. Return an array:
 
 ```typescript
 export async function createRefundCommission(refundPaymentId: string, originalPaymentId: string): Promise<CommissionCalculationResult[]> {
@@ -615,7 +708,12 @@ export async function createRefundCommission(refundPaymentId: string, originalPa
 
   for (const originalCalc of originalCalcs) {
     const existing = await prisma.commissionCalculation.findFirst({
-      where: { paymentId: refundPaymentId, configId: originalCalc.configId, staffId: originalCalc.staffId, status: { not: CommissionCalcStatus.VOIDED } },
+      where: {
+        paymentId: refundPaymentId,
+        configId: originalCalc.configId,
+        staffId: originalCalc.staffId,
+        status: { not: CommissionCalcStatus.VOIDED },
+      },
       select: { id: true },
     })
     if (existing) continue
@@ -661,8 +759,8 @@ export async function createRefundCommission(refundPaymentId: string, originalPa
 
 - [ ] **Step 2: Verify refund callers (fire-and-forget)**
 
-Run: `grep -rn "createRefundCommission(" src/ | grep -v commission-calculation.service.ts`
-Confirm `refund.tpv.service.ts:468` and `refund.dashboard.service.ts:486` use `.catch(...)`. No changes needed. Run `npx tsc --noEmit`.
+Run: `grep -rn "createRefundCommission(" src/ | grep -v commission-calculation.service.ts` Confirm `refund.tpv.service.ts:468` and
+`refund.dashboard.service.ts:486` use `.catch(...)`. No changes needed. Run `npx tsc --noEmit`.
 
 - [ ] **Step 3: Commit**
 
@@ -676,6 +774,7 @@ git commit -m "feat(commissions): refund mirrors all original calcs across schem
 ## Task 6: Engine tests (multi-scheme, regression, refund)
 
 **Files:**
+
 - Rename: `tests/unit/services/dashboard/commission-multi-config-limitation.test.ts` → `commission-multi-scheme.test.ts`
 - Modify: replace the old "limitation" assertions with the new behavior.
 
@@ -697,23 +796,75 @@ const STAFF_ID = 'staff-1'
 
 function payment(amount = 500, orderId: string | null = 'order-1') {
   return {
-    id: 'pay-1', type: 'CARD', status: 'COMPLETED', venueId: VENUE_ID, orderId,
-    processedById: STAFF_ID, createdAt: new Date('2026-06-03T18:00:00Z'),
-    amount: new Decimal(amount), tipAmount: new Decimal(0),
-    order: { id: orderId, createdById: STAFF_ID, servedById: STAFF_ID, subtotal: new Decimal(amount), discountAmount: new Decimal(0), taxAmount: new Decimal(0) },
-    shift: { id: 'shift-1' }, venue: { id: VENUE_ID, timezone: 'America/Mexico_City' },
+    id: 'pay-1',
+    type: 'CARD',
+    status: 'COMPLETED',
+    venueId: VENUE_ID,
+    orderId,
+    processedById: STAFF_ID,
+    createdAt: new Date('2026-06-03T18:00:00Z'),
+    amount: new Decimal(amount),
+    tipAmount: new Decimal(0),
+    order: {
+      id: orderId,
+      createdById: STAFF_ID,
+      servedById: STAFF_ID,
+      subtotal: new Decimal(amount),
+      discountAmount: new Decimal(0),
+      taxAmount: new Decimal(0),
+    },
+    shift: { id: 'shift-1' },
+    venue: { id: VENUE_ID, timezone: 'America/Mexico_City' },
   }
 }
 
 const baseCfg = {
-  venueId: VENUE_ID, orgId: null, recipient: 'SERVER', trigger: 'PER_PAYMENT',
-  minAmount: null, maxAmount: null, includeTips: false, includeDiscount: false, includeTax: false,
-  roleRates: null, useGoalAsTier: false, goalBonusRate: null,
-  effectiveFrom: new Date('2026-01-01'), effectiveTo: null, tiers: [],
+  venueId: VENUE_ID,
+  orgId: null,
+  recipient: 'SERVER',
+  trigger: 'PER_PAYMENT',
+  minAmount: null,
+  maxAmount: null,
+  includeTips: false,
+  includeDiscount: false,
+  includeTax: false,
+  roleRates: null,
+  useGoalAsTier: false,
+  goalBonusRate: null,
+  effectiveFrom: new Date('2026-01-01'),
+  effectiveTo: null,
+  tiers: [],
 }
-const HIDROGENO = { ...baseCfg, id: 'cfg-hid', name: 'Hidrógeno', priority: 100, calcType: 'PERCENTAGE', defaultRate: new Decimal(0.04), filterByCategories: true, categoryIds: ['cat-hid', 'cat-iyashi'] }
-const LAGREE = { ...baseCfg, id: 'cfg-lag', name: 'Lagree', priority: 50, calcType: 'PERCENTAGE', defaultRate: new Decimal(0.03), filterByCategories: true, categoryIds: ['cat-lagree'] }
-const GENERAL = { ...baseCfg, id: 'cfg-gen', name: 'General', priority: 1, calcType: 'PERCENTAGE', defaultRate: new Decimal(0.02), filterByCategories: false, categoryIds: [] as string[] }
+const HIDROGENO = {
+  ...baseCfg,
+  id: 'cfg-hid',
+  name: 'Hidrógeno',
+  priority: 100,
+  calcType: 'PERCENTAGE',
+  defaultRate: new Decimal(0.04),
+  filterByCategories: true,
+  categoryIds: ['cat-hid', 'cat-iyashi'],
+}
+const LAGREE = {
+  ...baseCfg,
+  id: 'cfg-lag',
+  name: 'Lagree',
+  priority: 50,
+  calcType: 'PERCENTAGE',
+  defaultRate: new Decimal(0.03),
+  filterByCategories: true,
+  categoryIds: ['cat-lagree'],
+}
+const GENERAL = {
+  ...baseCfg,
+  id: 'cfg-gen',
+  name: 'General',
+  priority: 1,
+  calcType: 'PERCENTAGE',
+  defaultRate: new Decimal(0.02),
+  filterByCategories: false,
+  categoryIds: [] as string[],
+}
 
 const ACTIVE_STAFF = { staffId: STAFF_ID, role: 'WAITER', staff: { id: STAFF_ID, active: true } }
 
@@ -782,8 +933,8 @@ describe('multi-scheme commission engine', () => {
     const results = await createCommissionForPayment('pay-1')
 
     expect(results).toHaveLength(2)
-    expect(results.find(r => r.netCommission === 9)).toBeTruthy()  // Lagree 3% of 300
-    expect(results.find(r => r.netCommission === 4)).toBeTruthy()  // General 2% of 200 (leftover)
+    expect(results.find(r => r.netCommission === 9)).toBeTruthy() // Lagree 3% of 300
+    expect(results.find(r => r.netCommission === 4)).toBeTruthy() // General 2% of 200 (leftover)
   })
 
   it('idempotency: a config that already has a calc for this payment+staff is skipped', async () => {
@@ -802,13 +953,11 @@ describe('multi-scheme commission engine', () => {
 
 - [ ] **Step 3: Run the file**
 
-Run: `npx jest tests/unit/services/dashboard/commission-multi-scheme.test.ts`
-Expected: PASS (5 tests).
+Run: `npx jest tests/unit/services/dashboard/commission-multi-scheme.test.ts` Expected: PASS (5 tests).
 
 - [ ] **Step 4: Run the full commission suite + pre-deploy gate**
 
-Run: `npm run test:unit` then `npm run pre-deploy`
-Expected: PASS. Fix any regression before continuing.
+Run: `npm run test:unit` then `npm run pre-deploy` Expected: PASS. Fix any regression before continuing.
 
 - [ ] **Step 5: Commit**
 
@@ -825,7 +974,9 @@ git commit -m "test(commissions): multi-scheme engine + regression coverage"
 - [ ] **Step 2:** Run `npm run pre-deploy` — Expected: PASS.
 - [ ] **Step 3:** Commit any formatting: `git add -A && git commit -m "chore(commissions): format & lint"`
 
-> **Known limitation (documented, deferred — YAGNI):** `createSplitCommissionForPayment` (payment-link multi-staff) still uses a single config. Multi-scheme + payment-link splits is an edge-of-edge case (Mindform uses TPV card payments, not payment-link splits, for these services). Updating it mirrors Task 4's partition; defer until a venue needs it. Note this in the PR description.
+> **Known limitation (documented, deferred — YAGNI):** `createSplitCommissionForPayment` (payment-link multi-staff) still uses a single
+> config. Multi-scheme + payment-link splits is an edge-of-edge case (Mindform uses TPV card payments, not payment-link splits, for these
+> services). Updating it mirrors Task 4's partition; defer until a venue needs it. Note this in the PR description.
 
 ---
 
@@ -836,25 +987,36 @@ git commit -m "test(commissions): multi-scheme engine + regression coverage"
 ## Task 8: Tier boundary "fixed vs employee goal" toggle
 
 **Files (avoqado-web-dashboard):**
+
 - Modify: `src/types/commission.ts` (tier type — add `minThresholdType`/`maxThresholdType: 'FIXED' | 'STAFF_GOAL'`)
 - Modify: `src/pages/Commissions/components/setup-panel/cards/TiersCard.tsx`
 - Modify: `src/pages/Commissions/components/CreateTierDialog.tsx` (if it also edits thresholds)
 - Verify: `src/services/commission.service.ts` and `src/hooks/useCommissions.ts` forward the new fields in create/update payloads.
 
-- [ ] **Step 1:** Add `minThresholdType` / `maxThresholdType` (`'FIXED' | 'STAFF_GOAL'`, default `'FIXED'`) to the tier type in `src/types/commission.ts` and to the create/update tier input types.
-- [ ] **Step 2:** In `TiersCard.tsx`, next to each tier's **max** amount input, add a small toggle/segmented control: "Monto fijo" / "La meta del empleado". When "meta" is selected, disable the numeric input, show a "Meta del empleado" chip, and set `maxThresholdType: 'STAFF_GOAL'` for that tier (and `minThresholdType: 'STAFF_GOAL'` on the next tier whose min equals this boundary, since min auto-syncs from the previous max). All Spanish copy.
-- [ ] **Step 3:** Ensure the payload sent by `commission.service.ts` (`createTier` / `createTiersBatch` / `updateTier`) includes the two new fields. The backend already accepts them after Phase 1.
-- [ ] **Step 4:** Manual check: create a 3-tier scheme with the 2nd tier's max = "meta" and the 3rd tier's min = "meta"; confirm it saves and re-renders correctly.
+- [ ] **Step 1:** Add `minThresholdType` / `maxThresholdType` (`'FIXED' | 'STAFF_GOAL'`, default `'FIXED'`) to the tier type in
+      `src/types/commission.ts` and to the create/update tier input types.
+- [ ] **Step 2:** In `TiersCard.tsx`, next to each tier's **max** amount input, add a small toggle/segmented control: "Monto fijo" / "La
+      meta del empleado". When "meta" is selected, disable the numeric input, show a "Meta del empleado" chip, and set
+      `maxThresholdType: 'STAFF_GOAL'` for that tier (and `minThresholdType: 'STAFF_GOAL'` on the next tier whose min equals this boundary,
+      since min auto-syncs from the previous max). All Spanish copy.
+- [ ] **Step 3:** Ensure the payload sent by `commission.service.ts` (`createTier` / `createTiersBatch` / `updateTier`) includes the two new
+      fields. The backend already accepts them after Phase 1.
+- [ ] **Step 4:** Manual check: create a 3-tier scheme with the 2nd tier's max = "meta" and the 3rd tier's min = "meta"; confirm it saves
+      and re-renders correctly.
 - [ ] **Step 5:** Commit in the dashboard repo: `feat(commissions): employee-goal tier boundary toggle`.
 
 ## Task 9: "Aplica a: [categorías]" label + soft overlap warning
 
 **Files (avoqado-web-dashboard):**
+
 - Modify: `src/pages/Commissions/components/CommissionConfigCard.tsx` (show categories the scheme covers)
 - Modify: `src/pages/Commissions/components/CommissionConfigList.tsx` (detect & warn on category overlap across active schemes)
 
-- [ ] **Step 1:** In `CommissionConfigCard.tsx`, when `filterByCategories`, render an "Aplica a: " line listing the category names (map `categoryIds` → names via the categories already loaded in the page; if not loaded, fetch via the existing categories hook).
-- [ ] **Step 2:** In `CommissionConfigList.tsx`, compute the intersection of `categoryIds` across active configs; if any category appears in 2+ active schemes, render a non-blocking warning banner: "Esta categoría está en más de un esquema; se pagará una sola vez, con el de mayor prioridad."
+- [ ] **Step 1:** In `CommissionConfigCard.tsx`, when `filterByCategories`, render an "Aplica a: " line listing the category names (map
+      `categoryIds` → names via the categories already loaded in the page; if not loaded, fetch via the existing categories hook).
+- [ ] **Step 2:** In `CommissionConfigList.tsx`, compute the intersection of `categoryIds` across active configs; if any category appears in
+      2+ active schemes, render a non-blocking warning banner: "Esta categoría está en más de un esquema; se pagará una sola vez, con el de
+      mayor prioridad."
 - [ ] **Step 3:** Manual check + commit: `feat(commissions): show scheme categories + overlap warning`.
 
 ---
@@ -863,7 +1025,8 @@ git commit -m "test(commissions): multi-scheme engine + regression coverage"
 
 ## Task 10: MCP commission tools (coordinated)
 
-> `scripts/mcp/` does NOT exist on `develop` yet — the MCP servers live in worktrees (`.worktrees/admin-mcp`, `.worktrees/customer-mcp`) under active parallel development. Per CLAUDE.md the MCP must expose new capabilities. Coordinate with the MCP worktree owner.
+> `scripts/mcp/` does NOT exist on `develop` yet — the MCP servers live in worktrees (`.worktrees/admin-mcp`, `.worktrees/customer-mcp`)
+> under active parallel development. Per CLAUDE.md the MCP must expose new capabilities. Coordinate with the MCP worktree owner.
 
 - [ ] **Step 1:** When the MCP lands on `develop`, audit it for commission/goal tools.
 - [ ] **Step 2:** Add/update tools to expose, wrapping the existing services:
@@ -875,20 +1038,31 @@ git commit -m "test(commissions): multi-scheme engine + regression coverage"
 
 ## Task 11: Mindform data cleanup (one-time, after Phase 1 deploy)
 
-> Do via the dashboard UI (preferred) or a one-off `scripts/temp-*.ts` script (cuid v1 IDs per repo rule). Confirm the category decisions with the client (Sumi) first.
+> Do via the dashboard UI (preferred) or a one-off `scripts/temp-*.ts` script (cuid v1 IDs per repo rule). Confirm the category decisions
+> with the client (Sumi) first.
 
-- [ ] **Step 1:** Confirm with Sumi: which services pay commission and the **Merch** decision. Confirm each employee's monthly goal is set and is **> $30,000** (so the 8% band is reachable given the fixed first cut).
-- [ ] **Step 2:** Re-scope "Comisión Grace" (`cmp1o1k2g00b0m2281jpdpy9h`): remove `Lagree` (`cmm1e9b6f001qlq28qv1dxs2v`) from its `categoryIds`; keep/adjust `Merch` per Sumi.
+- [ ] **Step 1:** Confirm with Sumi: which services pay commission and the **Merch** decision. Confirm each employee's monthly goal is set
+      and is **> $30,000** (so the 8% band is reachable given the fixed first cut).
+- [ ] **Step 2:** Re-scope "Comisión Grace" (`cmp1o1k2g00b0m2281jpdpy9h`): remove `Lagree` (`cmm1e9b6f001qlq28qv1dxs2v`) from its
+      `categoryIds`; keep/adjust `Merch` per Sumi.
 - [ ] **Step 3:** Create **Lagree — 3% fijo** (PERCENTAGE, category `cmm1e9b6f001qlq28qv1dxs2v`, recipient SERVER).
-- [ ] **Step 4:** Create **Hidrógeno + Iyashi — escalonado** (TIERED, categories `cmnqsrfbo0070ot29uibd7vqi` [Hidógeno Molecular] + `cmmkvt01w00039kjxuyl0mu3n` [Iyashi y Cryo]; tiers: 4% FIXED 0–30,000 · 6% FIXED 30,000 → STAFF_GOAL · 8% STAFF_GOAL → ∞).
+- [ ] **Step 4:** Create **Hidrógeno + Iyashi — escalonado** (TIERED, categories `cmnqsrfbo0070ot29uibd7vqi` [Hidógeno Molecular] +
+      `cmmkvt01w00039kjxuyl0mu3n` [Iyashi y Cryo]; tiers: 4% FIXED 0–30,000 · 6% FIXED 30,000 → STAFF_GOAL · 8% STAFF_GOAL → ∞).
 - [ ] **Step 5:** Verify against a real ticket per category that the right scheme fires at the right rate.
 
 ---
 
 ## Self-Review notes
 
-- **Spec coverage:** R1→Task 4; R2→Tasks 1,3; R3→Task 4 (claimed-set partition) + Task 9 warning; R4→Task 3. N1→Phase 2 (no new routes). N2→Tasks 4,6 (idempotency + tests). N3→Task 6 regression test. N4→no new tables.
-- **Return-type change** (`createCommissionForPayment`, `createRefundCommission` → arrays) verified safe: all callers are fire-and-forget (`.catch`).
-- **Naming consistency:** `findActiveCommissionConfigs` (plural, new) vs `findActiveCommissionConfig` (singular, kept); `calculateLeftoverAmount`; `createCalcForConfig`; `ThresholdType.{FIXED,STAFF_GOAL}`; `minThresholdType`/`maxThresholdType` used identically in schema, types, resolver, and tests.
+- **Spec coverage:** R1→Task 4; R2→Tasks 1,3; R3→Task 4 (claimed-set partition) + Task 9 warning; R4→Task 3. N1→Phase 2 (no new routes).
+  N2→Tasks 4,6 (idempotency + tests). N3→Task 6 regression test. N4→no new tables.
+- **Return-type change** (`createCommissionForPayment`, `createRefundCommission` → arrays) verified safe: all callers are fire-and-forget
+  (`.catch`).
+- **Naming consistency:** `findActiveCommissionConfigs` (plural, new) vs `findActiveCommissionConfig` (singular, kept);
+  `calculateLeftoverAmount`; `createCalcForConfig`; `ThresholdType.{FIXED,STAFF_GOAL}`; `minThresholdType`/`maxThresholdType` used
+  identically in schema, types, resolver, and tests.
 - **Deferred (YAGNI):** split-commission multi-config (Task 7 note); per-service goals (out of scope per spec).
+
+```
+
 ```

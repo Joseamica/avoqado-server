@@ -268,6 +268,9 @@ async function processCheckoutCompleted(event: VerifiedWebhookEvent) {
               productIdsForWa.length > 0
                 ? formatModifiersForWhatsApp(waModifierRows.map(m => ({ name: m.name, quantity: m.quantity, price: Number(m.price) })))
                 : '',
+            // Feeds the optional "Gestionar mi cita" WhatsApp button.
+            venueSlug: reservation.venue.slug,
+            cancelSecret: reservation.cancelSecret,
           })
         } catch (waError) {
           logger.warn(

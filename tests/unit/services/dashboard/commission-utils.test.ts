@@ -22,6 +22,8 @@ import {
   applyCommissionBounds,
   calculateBaseAmount,
   calculateCategoryFilteredAmount,
+  calculateLeftoverAmount,
+  findActiveCommissionConfigs,
   getPeriodDateRange,
   CommissionConfigWithRelations,
   CommissionOverrideData,
@@ -402,5 +404,47 @@ describe('getPeriodDateRange', () => {
     const { start, end } = getPeriodDateRange(TierPeriod.WEEKLY, referenceDate, 'America/Mexico_City')
     const diffDays = (end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)
     expect(diffDays).toBeCloseTo(7, 0) // Approximately 7 days
+  })
+})
+
+// ============================================
+// calculateLeftoverAmount
+// ============================================
+
+describe('calculateLeftoverAmount', () => {
+  it('sums only items whose category is NOT in the claimed set (incl. uncategorized)', async () => {
+    prismaMock.orderItem.findMany.mockResolvedValue([
+      { quantity: 2, unitPrice: new Decimal(100), taxAmount: new Decimal(0), discountAmount: new Decimal(0) },
+      { quantity: 1, unitPrice: new Decimal(50), taxAmount: new Decimal(0), discountAmount: new Decimal(0) },
+    ])
+    const total = await calculateLeftoverAmount('order-1', ['cat-claimed'], { includeTax: false, includeDiscount: false })
+    expect(total).toBe(250)
+    const where = prismaMock.orderItem.findMany.mock.calls[0][0].where
+    expect(JSON.stringify(where)).toContain('notIn')
+  })
+})
+
+// ============================================
+// findActiveCommissionConfigs
+// ============================================
+
+describe('findActiveCommissionConfigs', () => {
+  it('returns all venue configs (priority desc) without hitting org fallback', async () => {
+    prismaMock.commissionConfig.findMany.mockResolvedValue([
+      { id: 'a', priority: 100, roleRates: null, tiers: [] },
+      { id: 'b', priority: 50, roleRates: null, tiers: [] },
+    ])
+    const configs = await findActiveCommissionConfigs('venue-1')
+    expect(configs.map(c => c.id)).toEqual(['a', 'b'])
+    expect(prismaMock.venue.findUnique).not.toHaveBeenCalled()
+  })
+
+  it('falls back to org configs when no venue configs exist', async () => {
+    prismaMock.commissionConfig.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: 'org-1', priority: 0, roleRates: null, tiers: [] }])
+    prismaMock.venue.findUnique.mockResolvedValue({ organizationId: 'org' })
+    const configs = await findActiveCommissionConfigs('venue-1')
+    expect(configs.map(c => c.id)).toEqual(['org-1'])
   })
 })

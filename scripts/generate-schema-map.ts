@@ -85,6 +85,10 @@ const DOMAINS: Domain[] = [
     description: 'Pay-by-link: links, line items, attribution.',
   },
   {
+    name: 'Facturación (CFDI)',
+    description: 'Mexican CFDI 4.0 e-invoicing: fiscal emisores + CSD, per-merchant config, issued CFDIs, receptor tax profiles.',
+  },
+  {
     name: 'Pricing, Costs & Venue Lending',
     description: 'MCC pricing structures, monthly profit, and SOFOM-style venue credit assessment.',
   },
@@ -271,6 +275,12 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   PaymentLinkItemModifier: 'Payment Links',
   PaymentLinkAttribution: 'Payment Links',
   VenuePaymentLinkSettings: 'Payment Links',
+
+  // Facturación (CFDI)
+  FiscalEmisor: 'Facturación (CFDI)',
+  MerchantFiscalConfig: 'Facturación (CFDI)',
+  Cfdi: 'Facturación (CFDI)',
+  CustomerTaxProfile: 'Facturación (CFDI)',
 
   // 12. Pricing, Costs & Venue Lending
   PricingPolicy: 'Pricing, Costs & Venue Lending',
