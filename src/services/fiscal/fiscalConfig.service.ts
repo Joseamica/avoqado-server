@@ -52,11 +52,14 @@ export interface FiscalConfigDeps {
   /** Load a FiscalEmisor for tenant-guard checks (id + venueId only). */
   findEmisor: (emisorId: string) => Promise<{ id: string; venueId: string } | null>
   /**
-   * Resolve the venueId that owns a given merchant.
+   * Confirm that a merchant belongs to the caller's venue.
+   * Scoped to venueId — never returns a different venue's id.
+   * Returns the caller's venueId when confirmed, null otherwise.
+   *
    * Accepts either merchantAccountId (→ VenuePaymentConfig path) or
-   * ecommerceMerchantId (→ direct venueId path). Returns null when not found.
+   * ecommerceMerchantId (→ direct venueId path).
    */
-  findMerchantVenue: (merchantAccountId?: string, ecommerceMerchantId?: string) => Promise<string | null>
+  findMerchantVenue: (venueId: string, merchantAccountId?: string, ecommerceMerchantId?: string) => Promise<string | null>
   /** Create-or-update a MerchantFiscalConfig row. */
   upsertMerchantConfigRow: (data: Record<string, unknown>) => Promise<any>
   /** List all emisores for a venue. */
@@ -116,8 +119,8 @@ export async function upsertMerchantFiscalConfig(input: MerchantFiscalConfigInpu
     throw new Error('Debe especificar exactamente un merchant (merchantAccountId o ecommerceMerchantId)')
   }
 
-  // Guard 1: merchant belongs to the caller's venue
-  const merchantVenue = await deps.findMerchantVenue(input.merchantAccountId, input.ecommerceMerchantId)
+  // Guard 1: merchant belongs to the caller's venue (scoped query — no cross-venue leak)
+  const merchantVenue = await deps.findMerchantVenue(input.venueId, input.merchantAccountId, input.ecommerceMerchantId)
   if (merchantVenue !== input.venueId) {
     throw new Error('Merchant not found') // tenant guard → 404
   }
