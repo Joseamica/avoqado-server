@@ -35,9 +35,11 @@ import {
   legacyAdmission,
   legacyMatchesFilter,
   bucketOf,
+  computeMerchantAccountBreakdown,
   type PaymentMethodFilter,
   type CardTypeFilter,
 } from '@/services/dashboard/sales-summary.dashboard.service'
+import { prismaMock } from '@tests/__helpers__/setup'
 
 // NULL-safe "not international" OR-form shared by CREDIT / DEBIT / AMEX.
 // Mirrors buildPaymentWhereFilter so the expected shapes stay in one place.
@@ -466,5 +468,62 @@ describe.skip('getSalesSummary (integration — needs a seeded Postgres, deferre
   })
   it('byPaymentMethod skipped under filter; byPaymentMethodDetailed present + CARD subBuckets correct when unfiltered', () => {
     /* requires real DB */
+  })
+})
+
+// ---------------------------------------------------------------------------
+// computeMerchantAccountBreakdown — focused, mock-friendly (touches prisma via
+// $queryRaw + merchantAccount.findMany, both mocked). Unlike getSalesSummary,
+// this helper IS unit-testable under the mocked-Prisma harness.
+// ---------------------------------------------------------------------------
+describe('computeMerchantAccountBreakdown', () => {
+  const VENUE = 'venue-amaena'
+  const START = new Date('2026-05-01T00:00:00.000Z')
+  const END = new Date('2026-05-31T23:59:59.999Z')
+
+  it('groups card payments by merchant, computes net = collected - fee, sorted by collected desc', async () => {
+    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([
+      { merchantAccountId: 'ma-A', collected: 1823, fee: 65.6, txns: 5 },
+      { merchantAccountId: 'ma-ext', collected: 13827, fee: 497.7, txns: 17 },
+    ])
+    ;(prismaMock.merchantAccount.findMany as jest.Mock).mockResolvedValue([
+      { id: 'ma-A', displayName: 'Amaena - A', alias: null, angelpayAffiliation: '7494104', displayOrder: 0, provider: { name: 'AngelPay (Nexgo)' } },
+      { id: 'ma-ext', displayName: 'Amaena - Externo', alias: null, angelpayAffiliation: null, displayOrder: 2, provider: { name: 'Blumon PAX' } },
+    ])
+
+    const result = await computeMerchantAccountBreakdown(VENUE, START, END)
+
+    expect(result).toHaveLength(2)
+    // sorted by collectedOnCard desc → Externo first
+    expect(result[0].merchantAccountId).toBe('ma-ext')
+    expect(result[0].displayName).toBe('Amaena - Externo')
+    expect(result[0].provider).toBe('Blumon PAX')
+    expect(result[0].affiliation).toBeNull()
+    expect(result[0].collectedOnCard).toBe(13827)
+    expect(result[0].platformFee).toBeCloseTo(497.7, 2)
+    expect(result[0].netToReceive).toBeCloseTo(13329.3, 2)
+    expect(result[0].transactionCount).toBe(17)
+
+    expect(result[1].merchantAccountId).toBe('ma-A')
+    expect(result[1].affiliation).toBe('7494104')
+    expect(result[1].netToReceive).toBeCloseTo(1757.4, 2)
+  })
+
+  it('returns [] when there are no card payments (and skips the label query)', async () => {
+    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([])
+    const result = await computeMerchantAccountBreakdown(VENUE, START, END)
+    expect(result).toEqual([])
+    expect(prismaMock.merchantAccount.findMany).not.toHaveBeenCalled()
+  })
+
+  it('falls back to alias, then a generic label, when displayName is missing', async () => {
+    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([
+      { merchantAccountId: 'ma-x', collected: 100, fee: 4, txns: 1 },
+    ])
+    ;(prismaMock.merchantAccount.findMany as jest.Mock).mockResolvedValue([
+      { id: 'ma-x', displayName: null, alias: 'Cuenta vieja', angelpayAffiliation: null, displayOrder: 0, provider: { name: 'AngelPay (Nexgo)' } },
+    ])
+    const result = await computeMerchantAccountBreakdown(VENUE, START, END)
+    expect(result[0].displayName).toBe('Cuenta vieja')
   })
 })

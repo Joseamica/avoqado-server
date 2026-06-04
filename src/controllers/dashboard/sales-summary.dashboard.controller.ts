@@ -42,7 +42,7 @@ import prisma from '@/utils/prismaClient'
 export async function salesSummaryReport(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId } = req.authContext!
-    const { startDate, endDate, groupBy, reportType, merchantAccountId, paymentMethod, cardType } = req.query
+    const { startDate, endDate, groupBy, reportType, merchantAccountId, paymentMethod, cardType, includeMerchantBreakdown } = req.query
 
     // Validate required params
     if (!startDate || typeof startDate !== 'string') {
@@ -98,6 +98,7 @@ export async function salesSummaryReport(req: Request, res: Response, next: Next
       merchantAccountId: typeof merchantAccountId === 'string' ? merchantAccountId : undefined,
       paymentMethod: typeof paymentMethod === 'string' ? (paymentMethod as PaymentMethodFilter) : undefined,
       cardType: typeof cardType === 'string' ? (cardType as CardTypeFilter) : undefined,
+      includeMerchantBreakdown: includeMerchantBreakdown === 'true',
     }
 
     const report = await getSalesSummary(venueId, filters)

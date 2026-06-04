@@ -97,6 +97,17 @@ export interface TimePeriodMetrics {
   metrics: SalesSummaryMetrics
 }
 
+export interface MerchantAccountBreakdown {
+  merchantAccountId: string
+  displayName: string // "Amaena - A" / alias / provider name fallback
+  provider: string // "AngelPay (Nexgo)" / "Blumon PAX"
+  affiliation: string | null // angelpayAffiliation when present
+  collectedOnCard: number // SUM(Payment.amount) — card only (merchantAccountId IS NOT NULL)
+  platformFee: number // SUM(TransactionCost.venueChargeAmount)
+  netToReceive: number // collectedOnCard - platformFee
+  transactionCount: number
+}
+
 export interface SalesSummaryResponse {
   dateRange: {
     startDate: Date
@@ -107,6 +118,7 @@ export interface SalesSummaryResponse {
   byPaymentMethod?: PaymentMethodBreakdown[]
   byPaymentMethodDetailed?: PaymentMethodDetailedBreakdown[]
   byPeriod?: TimePeriodMetrics[] // Time-based breakdown
+  byMerchantAccount?: MerchantAccountBreakdown[] // additive; present only when includeMerchantBreakdown=true
   filtered: boolean
 }
 
@@ -124,6 +136,7 @@ export interface SalesSummaryFilters {
   merchantAccountId?: string
   paymentMethod?: PaymentMethodFilter
   cardType?: CardTypeFilter
+  includeMerchantBreakdown?: boolean // additive opt-in; default off preserves existing payload
 }
 
 // ============================================================
@@ -358,6 +371,72 @@ export function bucketOf(
 // ============================================================
 // Main Service Function
 // ============================================================
+
+/**
+ * Per-merchant-account card breakdown for the reconciliation view.
+ *
+ * Card money only: cash payments have merchantAccountId = NULL, so the
+ * `IS NOT NULL` predicate naturally excludes them. Fees come from the
+ * one-to-one TransactionCost row (paymentId is @unique, so the LEFT JOIN never
+ * fans out the payment rows). Mirrors the same venue + createdAt bounds + status
+ * the platform-fees raw query uses, so this breakdown sums consistently with the
+ * report headline.
+ */
+export async function computeMerchantAccountBreakdown(
+  venueId: string,
+  startDate: Date,
+  endDate: Date,
+): Promise<MerchantAccountBreakdown[]> {
+  const rows = await prisma.$queryRaw<Array<{ merchantAccountId: string; collected: number; fee: number; txns: number }>>(
+    Prisma.sql`
+      SELECT p."merchantAccountId" AS "merchantAccountId",
+             COALESCE(SUM(p.amount), 0)::float AS collected,
+             COALESCE(SUM(tc."venueChargeAmount"), 0)::float AS fee,
+             COUNT(*)::int AS txns
+      FROM "Payment" p
+      LEFT JOIN "TransactionCost" tc ON tc."paymentId" = p.id
+      WHERE p."venueId" = ${venueId}
+        AND p."createdAt" >= ${startDate}
+        AND p."createdAt" <= ${endDate}
+        AND p.status = 'COMPLETED'
+        AND p."merchantAccountId" IS NOT NULL
+      GROUP BY p."merchantAccountId"
+    `,
+  )
+
+  if (rows.length === 0) return []
+
+  const accounts = await prisma.merchantAccount.findMany({
+    where: { id: { in: rows.map(r => r.merchantAccountId) } },
+    select: {
+      id: true,
+      displayName: true,
+      alias: true,
+      angelpayAffiliation: true,
+      displayOrder: true,
+      provider: { select: { name: true } },
+    },
+  })
+  const byId = new Map(accounts.map(a => [a.id, a]))
+
+  return rows
+    .map(r => {
+      const a = byId.get(r.merchantAccountId)
+      const collected = Number(r.collected)
+      const fee = Number(r.fee)
+      return {
+        merchantAccountId: r.merchantAccountId,
+        displayName: a?.displayName || a?.alias || 'Comercio',
+        provider: a?.provider?.name ?? '',
+        affiliation: a?.angelpayAffiliation ?? null,
+        collectedOnCard: collected,
+        platformFee: fee,
+        netToReceive: collected - fee,
+        transactionCount: Number(r.txns),
+      }
+    })
+    .sort((x, y) => y.collectedOnCard - x.collectedOnCard)
+}
 
 /**
  * Get sales summary for a venue within a date range
@@ -949,6 +1028,13 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     )
   }
 
+  // Per-merchant card breakdown for the reconciliation view (additive; opt-in).
+  // Reuses parsedStartDate/parsedEndDate — the same bounds the platform-fees query uses.
+  let byMerchantAccount: MerchantAccountBreakdown[] | undefined
+  if (filters.includeMerchantBreakdown) {
+    byMerchantAccount = await computeMerchantAccountBreakdown(venueId, parsedStartDate, parsedEndDate)
+  }
+
   logger.info('Sales summary calculated', {
     venueId,
     grossSales,
@@ -969,6 +1055,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     byPaymentMethod,
     byPaymentMethodDetailed,
     byPeriod,
+    byMerchantAccount,
     filtered: isFiltered,
   }
 }
