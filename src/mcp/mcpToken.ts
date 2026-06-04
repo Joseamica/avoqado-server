@@ -12,6 +12,7 @@ export interface McpTokenPayload {
   sub: string // Staff.id
   org: string // active organization id
   cid?: string // OAuth client id (Phase 1); absent for dev-server tokens
+  exp?: number // expiry (epoch seconds) — required by the SDK bearer middleware
 }
 
 /** Issue a short-lived, audience-bound MCP token. Distinct from dashboard /api/v1 tokens. */
@@ -27,5 +28,5 @@ export function verifyMcpToken(token: string): McpTokenPayload {
   const org = (decoded as Record<string, unknown>).org
   if (!decoded.sub || typeof org !== 'string') throw new Error('Invalid MCP token payload')
   const cid = (decoded as Record<string, unknown>).cid
-  return { sub: decoded.sub, org, cid: typeof cid === 'string' ? cid : undefined }
+  return { sub: decoded.sub, org, cid: typeof cid === 'string' ? cid : undefined, exp: decoded.exp }
 }

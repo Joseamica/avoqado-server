@@ -7,8 +7,7 @@ import { prismaClientsStore } from './clientsStore'
 import { consumeAuthCode, peekAuthCodeChallenge, createRefreshToken, consumeRefreshToken, revokeRefreshToken } from './tokenStore'
 import { renderLoginPage } from './loginPage'
 import { ACCESS_TTL_SECONDS, MCP_RESOURCE_URL, MCP_SCOPES_SUPPORTED } from './config'
-
-class InvalidGrant extends Error {}
+import { InvalidGrantError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 
 export const provider: OAuthServerProvider = {
   get clientsStore() {
@@ -34,7 +33,7 @@ export const provider: OAuthServerProvider = {
 
   async challengeForAuthorizationCode(_client: OAuthClientInformationFull, authorizationCode: string): Promise<string> {
     const challenge = await peekAuthCodeChallenge(authorizationCode)
-    if (!challenge) throw new InvalidGrant('invalid or expired authorization code')
+    if (!challenge) throw new InvalidGrantError('invalid or expired authorization code')
     return challenge
   },
 
@@ -45,9 +44,9 @@ export const provider: OAuthServerProvider = {
     redirectUri?: string,
   ): Promise<OAuthTokens> {
     const data = await consumeAuthCode(authorizationCode)
-    if (!data) throw new InvalidGrant('invalid or expired authorization code')
-    if (data.clientId !== client.client_id) throw new InvalidGrant('code was issued to a different client')
-    if (redirectUri !== undefined && redirectUri !== data.redirectUri) throw new InvalidGrant('redirect_uri mismatch')
+    if (!data) throw new InvalidGrantError('invalid or expired authorization code')
+    if (data.clientId !== client.client_id) throw new InvalidGrantError('code was issued to a different client')
+    if (redirectUri !== undefined && redirectUri !== data.redirectUri) throw new InvalidGrantError('redirect_uri mismatch')
 
     const access_token = issueMcpToken(data.staffId, data.activeOrg, ACCESS_TTL_SECONDS, client.client_id)
     const { token: refresh_token } = await createRefreshToken({
@@ -61,8 +60,8 @@ export const provider: OAuthServerProvider = {
 
   async exchangeRefreshToken(client: OAuthClientInformationFull, refreshToken: string, scopes?: string[]): Promise<OAuthTokens> {
     const data = await consumeRefreshToken(refreshToken)
-    if (!data) throw new InvalidGrant('invalid or expired refresh token')
-    if (data.clientId !== client.client_id) throw new InvalidGrant('refresh token was issued to a different client')
+    if (!data) throw new InvalidGrantError('invalid or expired refresh token')
+    if (data.clientId !== client.client_id) throw new InvalidGrantError('refresh token was issued to a different client')
 
     const grantedScopes = scopes && scopes.length ? scopes.filter(s => data.scopes.includes(s)) : data.scopes
     const access_token = issueMcpToken(data.staffId, data.activeOrg, ACCESS_TTL_SECONDS, client.client_id)
@@ -84,11 +83,12 @@ export const provider: OAuthServerProvider = {
   },
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
-    const { sub, org, cid } = verifyMcpToken(token) // throws on bad/expired/wrong-audience
+    const { sub, org, cid, exp } = verifyMcpToken(token) // throws on bad/expired/wrong-audience
     return {
       token,
       clientId: cid ?? sub, // dev-server tokens have no cid; fall back to the subject
       scopes: MCP_SCOPES_SUPPORTED,
+      expiresAt: exp, // required by the SDK bearer middleware
       resource: MCP_RESOURCE_URL,
       extra: { staffId: sub, activeOrg: org },
     }
