@@ -63,6 +63,9 @@ import {
   issueCfdiForOrderController,
   getCfdiStatusController,
   cancelCfdiController,
+  getFiscalConfigController,
+  upsertEmisorController,
+  upsertMerchantFiscalConfigController,
 } from '../controllers/dashboard/cfdi.dashboard.controller'
 import {
   assistantActionConfirmSchema,
@@ -223,7 +226,7 @@ import {
   terminalResultSchema,
 } from '../schemas/dashboard/tpv-command.schema'
 import { createTerminalOrderSchema } from '../schemas/dashboard/terminalOrder.schema'
-import { issueCfdiSchema, cancelCfdiSchema } from '../schemas/dashboard/cfdi.schema'
+import { issueCfdiSchema, cancelCfdiSchema, upsertEmisorSchema, upsertMerchantConfigSchema } from '../schemas/dashboard/cfdi.schema'
 import inventoryRoutes from './dashboard/inventory.routes'
 import superadminRoutes from './dashboard/superadmin.routes'
 import venuePaymentConfigRoutes from './dashboard/venuePaymentConfig.routes'
@@ -3019,6 +3022,39 @@ router.post(
   checkFeatureAccess('CFDI'),
   checkPermission('cfdi:configure'), // destructive → OWNER/ADMIN only
   cancelCfdiController,
+)
+
+// ---- Facturación CFDI 4.0 — Fiscal config: emisor metadata + per-merchant toggles ----
+router.get(
+  '/venues/:venueId/fiscal/config',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:view'),
+  getFiscalConfigController,
+)
+router.post(
+  '/venues/:venueId/fiscal/emisores',
+  authenticateTokenMiddleware,
+  validateRequest(upsertEmisorSchema),
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:configure'),
+  upsertEmisorController,
+)
+router.put(
+  '/venues/:venueId/fiscal/emisores/:emisorId',
+  authenticateTokenMiddleware,
+  validateRequest(upsertEmisorSchema),
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:configure'),
+  upsertEmisorController,
+)
+router.put(
+  '/venues/:venueId/fiscal/merchant-config',
+  authenticateTokenMiddleware,
+  validateRequest(upsertMerchantConfigSchema),
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:configure'),
+  upsertMerchantFiscalConfigController,
 )
 
 // Manual Payment routes (ADMIN+) — MUST be registered BEFORE /venues/:venueId/payments/:paymentId

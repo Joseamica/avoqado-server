@@ -53,8 +53,67 @@ export const cancelCfdiSchema = z.object({
 })
 
 // ==========================================
+// FISCAL CONFIG SCHEMAS
+// ==========================================
+
+// ── Emisor upsert ──────────────────────────────────────────────────────────────
+
+const upsertEmisorBodyShape = z.object({
+  rfc: z
+    .string({ required_error: 'El RFC es requerido' })
+    .trim()
+    .regex(/^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$/i, 'El RFC no tiene un formato válido'),
+  legalName: z.string({ required_error: 'La razón social es requerida' }).trim().min(1, 'La razón social es requerida'),
+  regimenFiscal: z
+    .string({ required_error: 'El régimen fiscal es requerido' })
+    .regex(/^\d{3}$/, 'El régimen fiscal debe ser un código de 3 dígitos'),
+  lugarExpedicion: z
+    .string({ required_error: 'El lugar de expedición es requerido' })
+    .regex(/^\d{5}$/, 'El lugar de expedición debe tener 5 dígitos'),
+  serie: z.string().trim().optional(),
+  defaultUsoCfdi: z.string().trim().optional(),
+  globalPeriodicity: z
+    .enum(['DIARIO', 'SEMANAL', 'QUINCENAL', 'MENSUAL', 'BIMESTRAL'], {
+      invalid_type_error: 'La periodicidad global no es válida',
+    })
+    .optional(),
+})
+
+/**
+ * Schema passed to validateRequest() for:
+ *   POST /venues/:venueId/fiscal/emisores
+ *   PUT  /venues/:venueId/fiscal/emisores/:emisorId
+ */
+export const upsertEmisorSchema = z.object({
+  body: upsertEmisorBodyShape,
+})
+
+// ── Merchant fiscal config upsert ──────────────────────────────────────────────
+// XOR (exactly one merchant FK required) is enforced in the SERVICE layer.
+// Zod is shape-only per critical-warnings rule.
+
+const upsertMerchantConfigBodyShape = z.object({
+  merchantAccountId: z.string().min(1, 'El ID de la cuenta de comercio no puede estar vacío').optional(),
+  ecommerceMerchantId: z.string().min(1, 'El ID del comercio e-commerce no puede estar vacío').optional(),
+  fiscalEmisorId: z.string({ required_error: 'El emisor fiscal es requerido' }).min(1, 'El emisor fiscal es requerido'),
+  facturacionEnabled: z.boolean({ required_error: 'El campo facturacionEnabled es requerido' }),
+  autofacturaEnabled: z.boolean({ required_error: 'El campo autofacturaEnabled es requerido' }),
+  includeInGlobal: z.boolean({ required_error: 'El campo includeInGlobal es requerido' }),
+})
+
+/**
+ * Schema passed to validateRequest() for:
+ *   PUT /venues/:venueId/fiscal/merchant-config
+ */
+export const upsertMerchantConfigSchema = z.object({
+  body: upsertMerchantConfigBodyShape,
+})
+
+// ==========================================
 // TYPE EXPORTS
 // ==========================================
 
 export type IssueCfdiBody = z.infer<typeof issueCfdiSchema.shape.body>
 export type CancelCfdiBody = z.infer<typeof cancelCfdiSchema.shape.body>
+export type UpsertEmisorBody = z.infer<typeof upsertEmisorSchema.shape.body>
+export type UpsertMerchantConfigBody = z.infer<typeof upsertMerchantConfigSchema.shape.body>

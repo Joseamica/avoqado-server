@@ -14,6 +14,7 @@ import { Request, Response } from 'express'
 import { env } from '@/config/env'
 import logger from '@/config/logger'
 import { issueCfdiForOrder, cancelCfdi, getCfdiStatus } from '@/services/fiscal/cfdi.service'
+import { upsertEmisor, upsertMerchantFiscalConfig, getFiscalConfig } from '@/services/fiscal/fiscalConfig.service'
 
 /**
  * POST /api/v1/dashboard/venues/:venueId/orders/:orderId/cfdi
@@ -155,5 +156,108 @@ export async function cancelCfdiController(req: Request, res: Response): Promise
     }
 
     res.status(500).json({ error: 'Error interno al cancelar el CFDI' })
+  }
+}
+
+// ─── Fiscal Config controllers ────────────────────────────────────────────────
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/fiscal/config
+ *
+ * Returns all FiscalEmisores + MerchantFiscalConfigs for the caller's venue.
+ * Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:view').
+ */
+export async function getFiscalConfigController(req: Request, res: Response): Promise<void> {
+  const { venueId } = (req as any).authContext ?? {}
+
+  try {
+    const config = await getFiscalConfig({ venueId })
+    res.status(200).json(config)
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    logger.error(`[cfdi.controller] getFiscalConfig failed for venue ${venueId}: ${message}`)
+    res.status(500).json({ error: 'Error interno al obtener la configuración fiscal' })
+  }
+}
+
+/**
+ * POST /api/v1/dashboard/venues/:venueId/fiscal/emisores
+ * PUT  /api/v1/dashboard/venues/:venueId/fiscal/emisores/:emisorId
+ *
+ * Creates or updates a FiscalEmisor for the caller's venue.
+ * Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:configure').
+ * Body validated by validateRequest(upsertEmisorSchema) before this handler runs.
+ */
+export async function upsertEmisorController(req: Request, res: Response): Promise<void> {
+  const { emisorId } = req.params
+  const { rfc, legalName, regimenFiscal, lugarExpedicion, serie, defaultUsoCfdi, globalPeriodicity } = req.body
+  // Tenant isolation: always use authContext.venueId — never trust the path :venueId.
+  const { venueId } = (req as any).authContext ?? {}
+
+  try {
+    const emisor = await upsertEmisor({
+      venueId,
+      emisorId: emisorId ?? undefined,
+      rfc,
+      legalName,
+      regimenFiscal,
+      lugarExpedicion,
+      serie,
+      defaultUsoCfdi,
+      globalPeriodicity,
+    })
+    res.status(200).json({ emisor })
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    logger.error(`[cfdi.controller] upsertEmisor failed for venue ${venueId}: ${message}`)
+
+    if (/not found/i.test(message)) {
+      res.status(404).json({ error: 'Emisor no encontrado' })
+      return
+    }
+
+    res.status(500).json({ error: 'Error interno al guardar el emisor fiscal' })
+  }
+}
+
+/**
+ * PUT /api/v1/dashboard/venues/:venueId/fiscal/merchant-config
+ *
+ * Creates or updates the MerchantFiscalConfig for one merchant.
+ * Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:configure').
+ * Body validated by validateRequest(upsertMerchantConfigSchema) before this handler runs.
+ */
+export async function upsertMerchantFiscalConfigController(req: Request, res: Response): Promise<void> {
+  const { merchantAccountId, ecommerceMerchantId, fiscalEmisorId, facturacionEnabled, autofacturaEnabled, includeInGlobal } = req.body
+  // Tenant isolation: always use authContext.venueId — never trust the path :venueId.
+  const { venueId } = (req as any).authContext ?? {}
+
+  try {
+    const config = await upsertMerchantFiscalConfig({
+      venueId,
+      merchantAccountId,
+      ecommerceMerchantId,
+      fiscalEmisorId,
+      facturacionEnabled,
+      autofacturaEnabled,
+      includeInGlobal,
+    })
+    res.status(200).json({ config })
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    logger.error(`[cfdi.controller] upsertMerchantFiscalConfig failed for venue ${venueId}: ${message}`)
+
+    if (/not found/i.test(message)) {
+      res.status(404).json({ error: 'Comercio o emisor no encontrado' })
+      return
+    }
+
+    // XOR violation (service throws "Debe especificar exactamente un merchant…")
+    if (/merchant/i.test(message)) {
+      res.status(409).json({ error: message })
+      return
+    }
+
+    res.status(500).json({ error: 'Error interno al guardar la configuración de facturación' })
   }
 }

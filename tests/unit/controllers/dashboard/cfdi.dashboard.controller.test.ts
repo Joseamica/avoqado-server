@@ -9,6 +9,15 @@ jest.mock('../../../../src/services/fiscal/cfdi.service', () => ({
   getCfdiStatus: (...a: any[]) => mockGetStatus(...a),
 }))
 
+const mockGetFiscalConfig = jest.fn()
+const mockUpsertEmisor = jest.fn()
+const mockUpsertMerchantFiscalConfig = jest.fn()
+jest.mock('../../../../src/services/fiscal/fiscalConfig.service', () => ({
+  getFiscalConfig: (...a: any[]) => mockGetFiscalConfig(...a),
+  upsertEmisor: (...a: any[]) => mockUpsertEmisor(...a),
+  upsertMerchantFiscalConfig: (...a: any[]) => mockUpsertMerchantFiscalConfig(...a),
+}))
+
 jest.mock('../../../../src/config/logger', () => ({
   error: jest.fn(),
   info: jest.fn(),
@@ -24,6 +33,9 @@ import {
   issueCfdiForOrderController,
   cancelCfdiController,
   getCfdiStatusController,
+  getFiscalConfigController,
+  upsertEmisorController,
+  upsertMerchantFiscalConfigController,
 } from '../../../../src/controllers/dashboard/cfdi.dashboard.controller'
 
 // ==========================================
@@ -296,5 +308,216 @@ describe('getCfdiStatusController', () => {
     await getCfdiStatusController(statusReq({ authContext: { venueId: 'tenantVenue' } }), res)
 
     expect(mockGetStatus).toHaveBeenCalledWith(expect.objectContaining({ cfdiId: 'c1', expectedVenueId: 'tenantVenue' }))
+  })
+})
+
+// ──────────────────────────────────────────────────────────────────────────────
+// getFiscalConfigController
+// ──────────────────────────────────────────────────────────────────────────────
+
+function fiscalConfigReq(overrides: Partial<any> = {}): any {
+  return {
+    params: { venueId: 'v1' },
+    authContext: { venueId: 'v1' },
+    ...overrides,
+  }
+}
+
+describe('getFiscalConfigController', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  it('returns 200 with emisores and merchantConfigs on success', async () => {
+    mockGetFiscalConfig.mockResolvedValue({
+      emisores: [{ id: 'e1', rfc: 'EKU9003173C9' }],
+      merchantConfigs: [{ id: 'mc1', facturacionEnabled: true }],
+    })
+
+    const res = mockRes()
+    await getFiscalConfigController(fiscalConfigReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        emisores: expect.arrayContaining([expect.objectContaining({ id: 'e1' })]),
+        merchantConfigs: expect.arrayContaining([expect.objectContaining({ id: 'mc1' })]),
+      }),
+    )
+  })
+
+  it('passes venueId from authContext to the service', async () => {
+    mockGetFiscalConfig.mockResolvedValue({ emisores: [], merchantConfigs: [] })
+
+    const res = mockRes()
+    await getFiscalConfigController(fiscalConfigReq({ authContext: { venueId: 'myVenue' } }), res)
+
+    expect(mockGetFiscalConfig).toHaveBeenCalledWith(expect.objectContaining({ venueId: 'myVenue' }))
+  })
+
+  it('returns 500 on unexpected errors', async () => {
+    mockGetFiscalConfig.mockRejectedValue(new Error('DB error'))
+
+    const res = mockRes()
+    await getFiscalConfigController(fiscalConfigReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(500)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Error interno al obtener la configuración fiscal' }))
+  })
+})
+
+// ──────────────────────────────────────────────────────────────────────────────
+// upsertEmisorController
+// ──────────────────────────────────────────────────────────────────────────────
+
+function emisorReq(overrides: Partial<any> = {}): any {
+  return {
+    params: { venueId: 'v1' },
+    body: {
+      rfc: 'EKU9003173C9',
+      legalName: 'Empresa Ejemplo SA de CV',
+      regimenFiscal: '601',
+      lugarExpedicion: '64000',
+    },
+    authContext: { venueId: 'v1' },
+    ...overrides,
+  }
+}
+
+describe('upsertEmisorController', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  it('returns 200 with the emisor on success (create)', async () => {
+    mockUpsertEmisor.mockResolvedValue({ id: 'e1', rfc: 'EKU9003173C9', csdStatus: 'NONE' })
+
+    const res = mockRes()
+    await upsertEmisorController(emisorReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ emisor: expect.objectContaining({ id: 'e1' }) }))
+  })
+
+  it('returns 200 with the emisor on success (update with emisorId)', async () => {
+    mockUpsertEmisor.mockResolvedValue({ id: 'e1', rfc: 'EKU9003173C9', csdStatus: 'NONE' })
+
+    const res = mockRes()
+    await upsertEmisorController(emisorReq({ params: { venueId: 'v1', emisorId: 'e1' } }), res)
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(mockUpsertEmisor).toHaveBeenCalledWith(expect.objectContaining({ emisorId: 'e1' }))
+  })
+
+  it('passes authContext.venueId (not path :venueId) to the service', async () => {
+    mockUpsertEmisor.mockResolvedValue({ id: 'e1' })
+
+    const res = mockRes()
+    await upsertEmisorController(emisorReq({ params: { venueId: 'path-v1' }, authContext: { venueId: 'auth-v1' } }), res)
+
+    expect(mockUpsertEmisor).toHaveBeenCalledWith(expect.objectContaining({ venueId: 'auth-v1' }))
+  })
+
+  it('returns 404 when the service throws not found (tenant mismatch)', async () => {
+    mockUpsertEmisor.mockRejectedValue(new Error('Emisor e1 not found'))
+
+    const res = mockRes()
+    await upsertEmisorController(emisorReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(404)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Emisor no encontrado' }))
+  })
+
+  it('returns 500 on unexpected errors', async () => {
+    mockUpsertEmisor.mockRejectedValue(new Error('DB connection failed'))
+
+    const res = mockRes()
+    await upsertEmisorController(emisorReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(500)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Error interno al guardar el emisor fiscal' }))
+  })
+})
+
+// ──────────────────────────────────────────────────────────────────────────────
+// upsertMerchantFiscalConfigController
+// ──────────────────────────────────────────────────────────────────────────────
+
+function merchantConfigReq(overrides: Partial<any> = {}): any {
+  return {
+    params: { venueId: 'v1' },
+    body: {
+      merchantAccountId: 'ma1',
+      fiscalEmisorId: 'e1',
+      facturacionEnabled: true,
+      autofacturaEnabled: false,
+      includeInGlobal: true,
+    },
+    authContext: { venueId: 'v1' },
+    ...overrides,
+  }
+}
+
+describe('upsertMerchantFiscalConfigController', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  it('returns 200 with the config on success', async () => {
+    mockUpsertMerchantFiscalConfig.mockResolvedValue({ id: 'mc1', facturacionEnabled: true })
+
+    const res = mockRes()
+    await upsertMerchantFiscalConfigController(merchantConfigReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ config: expect.objectContaining({ id: 'mc1' }) }))
+  })
+
+  it('passes authContext.venueId (not path :venueId) to the service', async () => {
+    mockUpsertMerchantFiscalConfig.mockResolvedValue({ id: 'mc1' })
+
+    const res = mockRes()
+    await upsertMerchantFiscalConfigController(
+      merchantConfigReq({ params: { venueId: 'path-v1' }, authContext: { venueId: 'auth-v1' } }),
+      res,
+    )
+
+    expect(mockUpsertMerchantFiscalConfig).toHaveBeenCalledWith(expect.objectContaining({ venueId: 'auth-v1' }))
+  })
+
+  it('returns 409 when the service throws XOR violation', async () => {
+    mockUpsertMerchantFiscalConfig.mockRejectedValue(
+      new Error('Debe especificar exactamente un merchant (merchantAccountId o ecommerceMerchantId)'),
+    )
+
+    const res = mockRes()
+    await upsertMerchantFiscalConfigController(merchantConfigReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(409)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: expect.stringMatching(/merchant/i) }))
+  })
+
+  it('returns 404 when the service throws merchant not found (tenant mismatch)', async () => {
+    mockUpsertMerchantFiscalConfig.mockRejectedValue(new Error('Merchant not found'))
+
+    const res = mockRes()
+    await upsertMerchantFiscalConfigController(merchantConfigReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(404)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Comercio o emisor no encontrado' }))
+  })
+
+  it('returns 404 when the service throws emisor not found (tenant mismatch)', async () => {
+    mockUpsertMerchantFiscalConfig.mockRejectedValue(new Error('Emisor e1 not found'))
+
+    const res = mockRes()
+    await upsertMerchantFiscalConfigController(merchantConfigReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(404)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Comercio o emisor no encontrado' }))
+  })
+
+  it('returns 500 on unexpected errors', async () => {
+    mockUpsertMerchantFiscalConfig.mockRejectedValue(new Error('DB connection failed'))
+
+    const res = mockRes()
+    await upsertMerchantFiscalConfigController(merchantConfigReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(500)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Error interno al guardar la configuración de facturación' }))
   })
 })
