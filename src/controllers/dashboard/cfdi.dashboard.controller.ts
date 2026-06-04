@@ -15,6 +15,7 @@ import { env } from '@/config/env'
 import logger from '@/config/logger'
 import { issueCfdiForOrder, cancelCfdi, getCfdiStatus } from '@/services/fiscal/cfdi.service'
 import { upsertEmisor, upsertMerchantFiscalConfig, getFiscalConfig } from '@/services/fiscal/fiscalConfig.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
 
 /**
  * POST /api/v1/dashboard/venues/:venueId/orders/:orderId/cfdi
@@ -59,7 +60,16 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
       return
     }
 
-    // STAMPED — 201 with minimal public fields
+    // STAMPED — audit + 201 with minimal public fields
+    logAction({
+      staffId: (req as any).authContext?.userId,
+      venueId,
+      action: 'CFDI_ISSUED',
+      entity: 'Cfdi',
+      entityId: result.cfdi.id,
+      data: { orderId, uuid: result.cfdi.uuid, serie: result.cfdi.serie, folio: result.cfdi.folio },
+    })
+
     res.status(201).json({
       cfdi: {
         id: result.cfdi.id,
@@ -135,6 +145,15 @@ export async function cancelCfdiController(req: Request, res: Response): Promise
       expectedVenueId: venueId,
     })
 
+    logAction({
+      staffId: (req as any).authContext?.userId,
+      venueId,
+      action: 'CFDI_CANCELLED',
+      entity: 'Cfdi',
+      entityId: cfdiId,
+      data: { motivo, substituteUuid: substituteUuid ?? null, cancelStatus: result.cancelStatus },
+    })
+
     res.status(200).json({
       cancelStatus: result.cancelStatus,
       cancelledAt: result.cancelledAt,
@@ -206,6 +225,16 @@ export async function upsertEmisorController(req: Request, res: Response): Promi
       defaultUsoCfdi,
       globalPeriodicity,
     })
+
+    logAction({
+      staffId: (req as any).authContext?.userId,
+      venueId,
+      action: 'FISCAL_EMISOR_UPSERTED',
+      entity: 'FiscalEmisor',
+      entityId: emisor.id,
+      data: { rfc, legalName, regimenFiscal, lugarExpedicion, isUpdate: !!emisorId },
+    })
+
     res.status(200).json({ emisor })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
@@ -242,6 +271,23 @@ export async function upsertMerchantFiscalConfigController(req: Request, res: Re
       autofacturaEnabled,
       includeInGlobal,
     })
+
+    logAction({
+      staffId: (req as any).authContext?.userId,
+      venueId,
+      action: 'MERCHANT_FISCAL_CONFIG_UPSERTED',
+      entity: 'MerchantFiscalConfig',
+      entityId: config.id,
+      data: {
+        merchantAccountId: merchantAccountId ?? null,
+        ecommerceMerchantId: ecommerceMerchantId ?? null,
+        fiscalEmisorId,
+        facturacionEnabled,
+        autofacturaEnabled,
+        includeInGlobal,
+      },
+    })
+
     res.status(200).json({ config })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)

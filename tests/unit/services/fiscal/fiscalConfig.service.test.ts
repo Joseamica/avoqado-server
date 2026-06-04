@@ -11,7 +11,8 @@ function deps(over: Partial<FiscalConfigDeps> = {}): FiscalConfigDeps {
   return {
     upsertEmisorRow: jest.fn().mockImplementation(async d => ({ id: 'e1', ...d })),
     findEmisor: jest.fn().mockResolvedValue({ id: 'e1', venueId: 'v1' }),
-    findMerchantVenue: jest.fn().mockResolvedValue('v1'), // venueId that owns the merchant
+    // New signature: (venueId, merchantAccountId?, ecommerceMerchantId?) → venueId | null
+    findMerchantVenue: jest.fn().mockResolvedValue('v1'),
     upsertMerchantConfigRow: jest.fn().mockImplementation(async d => ({ id: 'mc1', ...d })),
     listEmisores: jest.fn().mockResolvedValue([{ id: 'e1', rfc: 'EKU9003173C9', csdStatus: 'NONE' }]),
     listMerchantConfigs: jest.fn().mockResolvedValue([{ id: 'mc1', merchantAccountId: 'ma1', facturacionEnabled: true }]),
@@ -99,12 +100,22 @@ describe('upsertMerchantFiscalConfig', () => {
     expect(r.id).toBe('mc1')
   })
 
+  it('passes venueId as first arg to findMerchantVenue (scoped query fix)', async () => {
+    const d = deps()
+    await upsertMerchantFiscalConfig({ ...base, merchantAccountId: 'ma1' }, d)
+    // Guard: venueId must be the first arg so shared merchants can't leak across venues
+    expect((d.findMerchantVenue as jest.Mock).mock.calls[0][0]).toBe('v1')
+    expect((d.findMerchantVenue as jest.Mock).mock.calls[0][1]).toBe('ma1')
+  })
+
   it('upserts with ecommerceMerchantId when provided instead', async () => {
     const d = deps()
     const r = await upsertMerchantFiscalConfig({ ...base, ecommerceMerchantId: 'em1' }, d)
     expect(r.id).toBe('mc1')
-    expect((d.findMerchantVenue as jest.Mock).mock.calls[0][0]).toBeUndefined()
-    expect((d.findMerchantVenue as jest.Mock).mock.calls[0][1]).toBe('em1')
+    // New signature: (venueId, merchantAccountId?, ecommerceMerchantId?)
+    expect((d.findMerchantVenue as jest.Mock).mock.calls[0][0]).toBe('v1')   // venueId
+    expect((d.findMerchantVenue as jest.Mock).mock.calls[0][1]).toBeUndefined() // merchantAccountId
+    expect((d.findMerchantVenue as jest.Mock).mock.calls[0][2]).toBe('em1')   // ecommerceMerchantId
   })
 
   it('rejects when neither merchant FK is set (XOR — neither)', async () => {

@@ -18,6 +18,11 @@ jest.mock('../../../../src/services/fiscal/fiscalConfig.service', () => ({
   upsertMerchantFiscalConfig: (...a: any[]) => mockUpsertMerchantFiscalConfig(...a),
 }))
 
+const mockLogAction = jest.fn()
+jest.mock('../../../../src/services/dashboard/activity-log.service', () => ({
+  logAction: (...a: any[]) => mockLogAction(...a),
+}))
+
 jest.mock('../../../../src/config/logger', () => ({
   error: jest.fn(),
   info: jest.fn(),
@@ -68,7 +73,10 @@ function mockReq(overrides: Partial<any> = {}): any {
 // ==========================================
 
 describe('issueCfdiForOrderController', () => {
-  beforeEach(() => jest.clearAllMocks())
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockLogAction.mockResolvedValue(undefined)
+  })
 
   it('returns 201 with cfdi fields on STAMPED status', async () => {
     mockIssue.mockResolvedValue({
@@ -93,6 +101,37 @@ describe('issueCfdiForOrderController', () => {
         cfdi: expect.objectContaining({ uuid: 'U1', serie: 'F', folio: '2' }),
       }),
     )
+    // ActivityLog: CFDI_ISSUED must fire on STAMPED
+    expect(mockLogAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'CFDI_ISSUED', entity: 'Cfdi', entityId: 'c1' }),
+    )
+  })
+
+  it('does NOT call logAction on VALIDATION_FAILED', async () => {
+    mockIssue.mockResolvedValue({
+      status: 'VALIDATION_FAILED',
+      reasons: ['RFC inválido'],
+      cfdi: { id: 'c1' },
+    })
+
+    const res = mockRes()
+    await issueCfdiForOrderController(mockReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(422)
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+
+  it('does NOT call logAction on STAMP_FAILED', async () => {
+    mockIssue.mockResolvedValue({
+      status: 'STAMP_FAILED',
+      cfdi: { id: 'c1', lastError: 'SAT service unavailable' },
+    })
+
+    const res = mockRes()
+    await issueCfdiForOrderController(mockReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(502)
+    expect(mockLogAction).not.toHaveBeenCalled()
   })
 
   it('returns 422 with reasons on VALIDATION_FAILED status', async () => {
@@ -184,7 +223,10 @@ function cancelReq(overrides: Partial<any> = {}): any {
 }
 
 describe('cancelCfdiController', () => {
-  beforeEach(() => jest.clearAllMocks())
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockLogAction.mockResolvedValue(undefined)
+  })
 
   it('returns 200 with cancelStatus on successful cancel', async () => {
     mockCancel.mockResolvedValue({
@@ -202,6 +244,10 @@ describe('cancelCfdiController', () => {
         cancelStatus: 'ACCEPTED',
         cfdiId: 'c1',
       }),
+    )
+    // ActivityLog: CFDI_CANCELLED must fire on success
+    expect(mockLogAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'CFDI_CANCELLED', entity: 'Cfdi', entityId: 'c1' }),
     )
   })
 
@@ -268,7 +314,10 @@ function statusReq(overrides: Partial<any> = {}): any {
 }
 
 describe('getCfdiStatusController', () => {
-  beforeEach(() => jest.clearAllMocks())
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockLogAction.mockResolvedValue(undefined)
+  })
 
   it('returns 200 with the cfdi on success', async () => {
     const cfdi = { id: 'c1', uuid: 'U1', status: 'STAMPED', cancelStatus: null }
@@ -324,7 +373,10 @@ function fiscalConfigReq(overrides: Partial<any> = {}): any {
 }
 
 describe('getFiscalConfigController', () => {
-  beforeEach(() => jest.clearAllMocks())
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockLogAction.mockResolvedValue(undefined)
+  })
 
   it('returns 200 with emisores and merchantConfigs on success', async () => {
     mockGetFiscalConfig.mockResolvedValue({
@@ -383,7 +435,10 @@ function emisorReq(overrides: Partial<any> = {}): any {
 }
 
 describe('upsertEmisorController', () => {
-  beforeEach(() => jest.clearAllMocks())
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockLogAction.mockResolvedValue(undefined)
+  })
 
   it('returns 200 with the emisor on success (create)', async () => {
     mockUpsertEmisor.mockResolvedValue({ id: 'e1', rfc: 'EKU9003173C9', csdStatus: 'NONE' })
@@ -393,6 +448,10 @@ describe('upsertEmisorController', () => {
 
     expect(res.status).toHaveBeenCalledWith(200)
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ emisor: expect.objectContaining({ id: 'e1' }) }))
+    // ActivityLog: FISCAL_EMISOR_UPSERTED must fire on success
+    expect(mockLogAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'FISCAL_EMISOR_UPSERTED', entity: 'FiscalEmisor', entityId: 'e1' }),
+    )
   })
 
   it('returns 200 with the emisor on success (update with emisorId)', async () => {
@@ -455,7 +514,10 @@ function merchantConfigReq(overrides: Partial<any> = {}): any {
 }
 
 describe('upsertMerchantFiscalConfigController', () => {
-  beforeEach(() => jest.clearAllMocks())
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockLogAction.mockResolvedValue(undefined)
+  })
 
   it('returns 200 with the config on success', async () => {
     mockUpsertMerchantFiscalConfig.mockResolvedValue({ id: 'mc1', facturacionEnabled: true })
@@ -465,6 +527,10 @@ describe('upsertMerchantFiscalConfigController', () => {
 
     expect(res.status).toHaveBeenCalledWith(200)
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ config: expect.objectContaining({ id: 'mc1' }) }))
+    // ActivityLog: MERCHANT_FISCAL_CONFIG_UPSERTED must fire on success
+    expect(mockLogAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'MERCHANT_FISCAL_CONFIG_UPSERTED', entity: 'MerchantFiscalConfig', entityId: 'mc1' }),
+    )
   })
 
   it('passes authContext.venueId (not path :venueId) to the service', async () => {
