@@ -44,17 +44,38 @@ describe('assembleSaleInput', () => {
   it('marks 0%/exempt items and tolerates a deleted product (null → sector default later)', () => {
     const exempt: LoadedOrderForCfdi = {
       ...order,
-      items: [{ productName: 'Libro', quantity: 1, unitPrice: D(100), discountAmount: D(0), product: { satProductKey: null, satUnitKey: null, objetoImp: '01', taxRate: D(0), category: null } }],
+      items: [
+        {
+          productName: 'Libro',
+          quantity: 1,
+          unitPrice: D(100),
+          discountAmount: D(0),
+          product: { satProductKey: null, satUnitKey: null, objetoImp: '01', taxRate: D(0), category: null },
+        },
+      ],
     }
-    const input = assembleSaleInput(exempt, { receptor: order as any && { rfc: 'XAXX010101000', razonSocial: 'P', regimenFiscal: '616', codigoPostal: '83240', usoCfdi: 'S01' }, paymentMethod: 'CASH', metodoPago: 'PUE', idempotencyKey: 'k' })
+    const input = assembleSaleInput(exempt, {
+      receptor: (order as any) && { rfc: 'XAXX010101000', razonSocial: 'P', regimenFiscal: '616', codigoPostal: '83240', usoCfdi: 'S01' },
+      paymentMethod: 'CASH',
+      metodoPago: 'PUE',
+      idempotencyKey: 'k',
+    })
     expect(input.items[0].taxExempt).toBe(true)
     expect(input.items[0].taxRate).toBe(0)
     expect(input.items[0].categoryDefaultProductKey).toBeNull()
   })
 
   it('handles a fully null product (deleted) without throwing', () => {
-    const noProduct: LoadedOrderForCfdi = { ...order, items: [{ productName: 'X', quantity: 1, unitPrice: D(10), discountAmount: D(0), product: null }] }
-    const input = assembleSaleInput(noProduct, { receptor: { rfc: 'XAXX010101000', razonSocial: 'P', regimenFiscal: '616', codigoPostal: '83240', usoCfdi: 'S01' }, paymentMethod: 'CASH', metodoPago: 'PUE', idempotencyKey: 'k' })
+    const noProduct: LoadedOrderForCfdi = {
+      ...order,
+      items: [{ productName: 'X', quantity: 1, unitPrice: D(10), discountAmount: D(0), product: null }],
+    }
+    const input = assembleSaleInput(noProduct, {
+      receptor: { rfc: 'XAXX010101000', razonSocial: 'P', regimenFiscal: '616', codigoPostal: '83240', usoCfdi: 'S01' },
+      paymentMethod: 'CASH',
+      metodoPago: 'PUE',
+      idempotencyKey: 'k',
+    })
     expect(input.items[0].taxRate).toBe(0.16) // default IVA when no product
     expect(input.items[0].satProductKey).toBeNull()
   })

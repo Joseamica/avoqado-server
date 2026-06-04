@@ -2,21 +2,33 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development or executing-plans. Checkbox steps.
 
-**Goal:** Wire a real Avoqado sale to the connector: `issueCfdiForOrder(orderId, receptor)` loads the Order → maps it to a CFDI payload (pure) → validates (D1) → idempotency pre-check → stamps via the 0b connector → persists a `Cfdi` → stores XML/PDF to blob. After this, an order can be stamped end-to-end (sandbox).
+**Goal:** Wire a real Avoqado sale to the connector: `issueCfdiForOrder(orderId, receptor)` loads the Order → maps it to a CFDI payload
+(pure) → validates (D1) → idempotency pre-check → stamps via the 0b connector → persists a `Cfdi` → stores XML/PDF to blob. After this, an
+order can be stamped end-to-end (sandbox).
 
-**Architecture:** Two units. (1) `assembleSaleInput.ts` — a PURE function from loaded Prisma entities → the 0c `AvoqadoSaleInput` (Decimal pesos → integer cents, resolve per-item taxRate, tip). Fully unit-testable, no I/O. (2) `cfdi.service.ts` — the orchestrator, written with **dependency injection** (loader / provider-factory / storage are injected, defaulting to the real impls) so its control-flow branches are unit-testable with plain mocks, no DB. Reuses 0b (`resolveFiscalProvider`, `FiscalProvider`) and 0c (`buildCreateInvoiceParams`, `validateBeforeStamp`).
+**Architecture:** Two units. (1) `assembleSaleInput.ts` — a PURE function from loaded Prisma entities → the 0c `AvoqadoSaleInput` (Decimal
+pesos → integer cents, resolve per-item taxRate, tip). Fully unit-testable, no I/O. (2) `cfdi.service.ts` — the orchestrator, written with
+**dependency injection** (loader / provider-factory / storage are injected, defaulting to the real impls) so its control-flow branches are
+unit-testable with plain mocks, no DB. Reuses 0b (`resolveFiscalProvider`, `FiscalProvider`) and 0c (`buildCreateInvoiceParams`,
+`validateBeforeStamp`).
 
 **Tech Stack:** TypeScript, Prisma, Jest (mocked deps), `uploadFileToStorage`/`buildStoragePath` from `src/services/storage.service.ts`.
 
-**Scope — IN:** `assembleSaleInput.ts` + tests; `cfdi.service.ts` `issueCfdiForOrder` (idempotency, validate, stamp, persist Cfdi, store XML/PDF) + tests. **OUT (later):** HTTP routes/controllers, the `CFDI` Feature + `cfdi:*` permissions + MCP (0d), the autofactura portal + global job (phases 1-3), email delivery (thin add-on later), REP. Carries 0c LOW items (per-line tasa-set check) — NOT added here; tracked for a later hardening pass. Design: spec §7.3, §8, §14.
+**Scope — IN:** `assembleSaleInput.ts` + tests; `cfdi.service.ts` `issueCfdiForOrder` (idempotency, validate, stamp, persist Cfdi, store
+XML/PDF) + tests. **OUT (later):** HTTP routes/controllers, the `CFDI` Feature + `cfdi:*` permissions + MCP (0d), the autofactura portal +
+global job (phases 1-3), email delivery (thin add-on later), REP. Carries 0c LOW items (per-line tasa-set check) — NOT added here; tracked
+for a later hardening pass. Design: spec §7.3, §8, §14.
 
-**Reference rules:** `.claude/rules/critical-warnings.md` (Money = Decimal/cents; `prisma.$transaction` for money; `buildStoragePath`+`venue.slug` for storage; tenant isolation — always filter by venueId). `.claude/rules/testing-and-git.md` (NEVER commit without asking).
+**Reference rules:** `.claude/rules/critical-warnings.md` (Money = Decimal/cents; `prisma.$transaction` for money;
+`buildStoragePath`+`venue.slug` for storage; tenant isolation — always filter by venueId). `.claude/rules/testing-and-git.md` (NEVER commit
+without asking).
 
 ---
 
 ### Task 1: Pure mapping `assembleSaleInput.ts`
 
 **Files:**
+
 - Create: `src/services/fiscal/assembleSaleInput.ts`
 - Test: `tests/unit/services/fiscal/assembleSaleInput.test.ts`
 
@@ -69,17 +81,38 @@ describe('assembleSaleInput', () => {
   it('marks 0%/exempt items and tolerates a deleted product (null → sector default later)', () => {
     const exempt: LoadedOrderForCfdi = {
       ...order,
-      items: [{ productName: 'Libro', quantity: 1, unitPrice: D(100), discountAmount: D(0), product: { satProductKey: null, satUnitKey: null, objetoImp: '01', taxRate: D(0), category: null } }],
+      items: [
+        {
+          productName: 'Libro',
+          quantity: 1,
+          unitPrice: D(100),
+          discountAmount: D(0),
+          product: { satProductKey: null, satUnitKey: null, objetoImp: '01', taxRate: D(0), category: null },
+        },
+      ],
     }
-    const input = assembleSaleInput(exempt, { receptor: order as any && { rfc: 'XAXX010101000', razonSocial: 'P', regimenFiscal: '616', codigoPostal: '83240', usoCfdi: 'S01' }, paymentMethod: 'CASH', metodoPago: 'PUE', idempotencyKey: 'k' })
+    const input = assembleSaleInput(exempt, {
+      receptor: (order as any) && { rfc: 'XAXX010101000', razonSocial: 'P', regimenFiscal: '616', codigoPostal: '83240', usoCfdi: 'S01' },
+      paymentMethod: 'CASH',
+      metodoPago: 'PUE',
+      idempotencyKey: 'k',
+    })
     expect(input.items[0].taxExempt).toBe(true)
     expect(input.items[0].taxRate).toBe(0)
     expect(input.items[0].categoryDefaultProductKey).toBeNull()
   })
 
   it('handles a fully null product (deleted) without throwing', () => {
-    const noProduct: LoadedOrderForCfdi = { ...order, items: [{ productName: 'X', quantity: 1, unitPrice: D(10), discountAmount: D(0), product: null }] }
-    const input = assembleSaleInput(noProduct, { receptor: { rfc: 'XAXX010101000', razonSocial: 'P', regimenFiscal: '616', codigoPostal: '83240', usoCfdi: 'S01' }, paymentMethod: 'CASH', metodoPago: 'PUE', idempotencyKey: 'k' })
+    const noProduct: LoadedOrderForCfdi = {
+      ...order,
+      items: [{ productName: 'X', quantity: 1, unitPrice: D(10), discountAmount: D(0), product: null }],
+    }
+    const input = assembleSaleInput(noProduct, {
+      receptor: { rfc: 'XAXX010101000', razonSocial: 'P', regimenFiscal: '616', codigoPostal: '83240', usoCfdi: 'S01' },
+      paymentMethod: 'CASH',
+      metodoPago: 'PUE',
+      idempotencyKey: 'k',
+    })
     expect(input.items[0].taxRate).toBe(0.16) // default IVA when no product
     expect(input.items[0].satProductKey).toBeNull()
   })
@@ -165,6 +198,7 @@ export function assembleSaleInput(order: LoadedOrderForCfdi, opts: AssembleOptio
 ### Task 2: Orchestrator `cfdi.service.ts` (`issueCfdiForOrder`)
 
 **Files:**
+
 - Create: `src/services/fiscal/cfdi.service.ts`
 - Test: `tests/unit/services/fiscal/cfdi.service.test.ts`
 
@@ -181,15 +215,40 @@ const D = (n: number) => new Prisma.Decimal(n)
 const receptor = { rfc: 'XAXX010101000', razonSocial: 'PUBLICO EN GENERAL', regimenFiscal: '616', codigoPostal: '83240', usoCfdi: 'S01' }
 
 function makeDeps(over: Partial<IssueCfdiDeps> = {}): IssueCfdiDeps {
-  const stamped = { providerInvoiceId: 'fa1', uuid: 'UUID-1', serie: 'F', folio: '2', totalCents: 11600, stampedAt: new Date(), status: 'valid' as const }
+  const stamped = {
+    providerInvoiceId: 'fa1',
+    uuid: 'UUID-1',
+    serie: 'F',
+    folio: '2',
+    totalCents: 11600,
+    stampedAt: new Date(),
+    status: 'valid' as const,
+  }
   return {
     findExistingCfdi: jest.fn().mockResolvedValue(null),
     loadOrderForCfdi: jest.fn().mockResolvedValue({
-      venueId: 'v1', venueSlug: 'demo', venueType: 'RESTAURANT',
+      venueId: 'v1',
+      venueSlug: 'demo',
+      venueType: 'RESTAURANT',
       emisor: { id: 'e1', provider: 'FACTURAPI', providerKeyEnc: null, csdStatus: 'ACTIVE', serie: 'F' },
-      paymentMethod: 'CASH', metodoPago: 'PUE',
-      subtotalCents: 10000, taxCents: 1600, totalCents: 11600,
-      order: { venueType: 'RESTAURANT', tipAmount: D(0), items: [{ productName: 'X', quantity: 1, unitPrice: D(100), discountAmount: D(0), product: { satProductKey: '90101500', satUnitKey: 'E48', objetoImp: '02', taxRate: D(0.16), category: null } }] },
+      paymentMethod: 'CASH',
+      metodoPago: 'PUE',
+      subtotalCents: 10000,
+      taxCents: 1600,
+      totalCents: 11600,
+      order: {
+        venueType: 'RESTAURANT',
+        tipAmount: D(0),
+        items: [
+          {
+            productName: 'X',
+            quantity: 1,
+            unitPrice: D(100),
+            discountAmount: D(0),
+            product: { satProductKey: '90101500', satUnitKey: 'E48', objetoImp: '02', taxRate: D(0.16), category: null },
+          },
+        ],
+      },
     }),
     resolveProvider: jest.fn().mockReturnValue({
       name: 'facturapi',
@@ -198,7 +257,7 @@ function makeDeps(over: Partial<IssueCfdiDeps> = {}): IssueCfdiDeps {
       downloadPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF')),
     } as any),
     storeArtifact: jest.fn().mockImplementation(async (_b, path) => `https://cdn/${path}`),
-    persistCfdi: jest.fn().mockImplementation(async (data) => ({ id: 'cfdi1', ...data })),
+    persistCfdi: jest.fn().mockImplementation(async data => ({ id: 'cfdi1', ...data })),
     ...over,
   }
 }
@@ -234,7 +293,14 @@ describe('issueCfdiForOrder', () => {
 
   it('PAC error: persists STAMP_FAILED with the error', async () => {
     const deps = makeDeps({
-      resolveProvider: jest.fn().mockReturnValue({ name: 'facturapi', createInvoice: jest.fn().mockRejectedValue(new Error('SAT down')), downloadXml: jest.fn(), downloadPdf: jest.fn() } as any),
+      resolveProvider: jest
+        .fn()
+        .mockReturnValue({
+          name: 'facturapi',
+          createInvoice: jest.fn().mockRejectedValue(new Error('SAT down')),
+          downloadXml: jest.fn(),
+          downloadPdf: jest.fn(),
+        } as any),
     })
     const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
     expect(res.status).toBe('STAMP_FAILED')
@@ -331,7 +397,9 @@ export async function issueCfdiForOrder(
     expectedTotalCents: bundle.totalCents,
   })
   if (!validation.valid) {
-    const cfdi = await deps.persistCfdi(baseCfdiData(params, bundle, idempotencyKey, invoiceParams, 'VALIDATION_FAILED', { lastError: validation.reasons.join(' | ') }))
+    const cfdi = await deps.persistCfdi(
+      baseCfdiData(params, bundle, idempotencyKey, invoiceParams, 'VALIDATION_FAILED', { lastError: validation.reasons.join(' | ') }),
+    )
     return { status: 'VALIDATION_FAILED', cfdi, reasons: validation.reasons }
   }
 
@@ -348,7 +416,10 @@ export async function issueCfdiForOrder(
   }
 
   // 6. Store XML + PDF
-  const [xmlBuf, pdfBuf] = await Promise.all([provider.downloadXml(stamped.providerInvoiceId), provider.downloadPdf(stamped.providerInvoiceId)])
+  const [xmlBuf, pdfBuf] = await Promise.all([
+    provider.downloadXml(stamped.providerInvoiceId),
+    provider.downloadPdf(stamped.providerInvoiceId),
+  ])
   const base = `venues/${bundle.venueSlug}/cfdi/${stamped.uuid}`
   const [xmlUrl, pdfUrl] = await Promise.all([
     deps.storeArtifact(xmlBuf, buildStoragePath(`${base}.xml`), 'application/xml'),
@@ -370,7 +441,14 @@ export async function issueCfdiForOrder(
   return { status: 'STAMPED', cfdi }
 }
 
-function baseCfdiData(params: { orderId: string; receptor: IssueReceptor; flow?: string }, bundle: LoadedOrderBundle, idempotencyKey: string, invoiceParams: any, status: string, extra: Record<string, any>) {
+function baseCfdiData(
+  params: { orderId: string; receptor: IssueReceptor; flow?: string },
+  bundle: LoadedOrderBundle,
+  idempotencyKey: string,
+  invoiceParams: any,
+  status: string,
+  extra: Record<string, any>,
+) {
   return {
     venueId: bundle.venueId,
     fiscalEmisorId: bundle.emisor.id,
@@ -394,25 +472,50 @@ function baseCfdiData(params: { orderId: string; receptor: IssueReceptor; flow?:
 
 // ─── real default deps (DB + storage). Tests inject their own. ───
 const defaultDeps: IssueCfdiDeps = {
-  findExistingCfdi: (idempotencyKey) => prisma.cfdi.findUnique({ where: { idempotencyKey } }),
+  findExistingCfdi: idempotencyKey => prisma.cfdi.findUnique({ where: { idempotencyKey } }),
   storeArtifact: (buffer, path, contentType) => uploadFileToStorage(buffer, path, contentType),
   resolveProvider: resolveFiscalProvider,
-  persistCfdi: (data) =>
+  persistCfdi: data =>
     prisma.cfdi.upsert({
       where: { idempotencyKey: data.idempotencyKey },
       create: data as any,
       update: { status: data.status, lastError: data.lastError ?? null, attempts: { increment: 1 }, ...stampedFields(data) },
     }),
-  loadOrderForCfdi: async (orderId) => {
+  loadOrderForCfdi: async orderId => {
     // Tenant-safe load: order + items + product(+category) + venue + the emisor for the payment's merchant.
     const order = await prisma.order.findUnique({
       where: { id: orderId },
       select: {
         venueId: true,
-        subtotal: true, taxAmount: true, total: true, tipAmount: true,
-        venue: { select: { slug: true, type: true, fiscalEmisors: { take: 1, select: { id: true, provider: true, providerKeyEnc: true, csdStatus: true, serie: true } } } },
+        subtotal: true,
+        taxAmount: true,
+        total: true,
+        tipAmount: true,
+        venue: {
+          select: {
+            slug: true,
+            type: true,
+            fiscalEmisors: { take: 1, select: { id: true, provider: true, providerKeyEnc: true, csdStatus: true, serie: true } },
+          },
+        },
         payments: { take: 1, orderBy: { createdAt: 'desc' }, select: { method: true, remainingBalance: true } },
-        items: { select: { productName: true, quantity: true, unitPrice: true, discountAmount: true, product: { select: { satProductKey: true, satUnitKey: true, objetoImp: true, taxRate: true, category: { select: { defaultSatProductKey: true, defaultSatUnitKey: true } } } } } },
+        items: {
+          select: {
+            productName: true,
+            quantity: true,
+            unitPrice: true,
+            discountAmount: true,
+            product: {
+              select: {
+                satProductKey: true,
+                satUnitKey: true,
+                objetoImp: true,
+                taxRate: true,
+                category: { select: { defaultSatProductKey: true, defaultSatUnitKey: true } },
+              },
+            },
+          },
+        },
       },
     })
     if (!order || !order.venue.fiscalEmisors[0]) return null
@@ -439,7 +542,10 @@ function stampedFields(data: Record<string, any>) {
   return out
 }
 ```
-> **Note (SDK/schema accuracy):** confirm against `prisma/schema.prisma` the exact relation names used in the `select` (`venue.fiscalEmisors`, `order.payments`, `items.product.category`, `Payment.remainingBalance`/`method`). Adjust to the real names; keep the public `issueCfdiForOrder` signature + `IssueCfdiDeps` shape as specified so the tests pass.
+
+> **Note (SDK/schema accuracy):** confirm against `prisma/schema.prisma` the exact relation names used in the `select`
+> (`venue.fiscalEmisors`, `order.payments`, `items.product.category`, `Payment.remainingBalance`/`method`). Adjust to the real names; keep
+> the public `issueCfdiForOrder` signature + `IssueCfdiDeps` shape as specified so the tests pass.
 
 - [ ] **Step 4: Run → PASS** · `npm test -- tests/unit/services/fiscal/cfdi.service.test.ts`
 
@@ -449,14 +555,22 @@ function stampedFields(data: Record<string, any>) {
 
 - [ ] **Step 1:** `npm run format && npm run lint:fix`
 - [ ] **Step 2:** `npm run build` (exit 0) + `npm test -- tests/unit/services/fiscal` (all fiscal suites green)
-- [ ] **Step 3:** DO NOT commit. Report files. When approved, stage only `src/services/fiscal/{assembleSaleInput,cfdi.service}.ts` + the 2 new test files.
+- [ ] **Step 3:** DO NOT commit. Report files. When approved, stage only `src/services/fiscal/{assembleSaleInput,cfdi.service}.ts` + the 2
+      new test files.
 
 ---
 
 ## Self-review
 
-**Spec coverage:** maps real Order → CFDI payload §7.3 ✓ (T1); idempotency at OUR layer via `Cfdi.idempotencyKey` (the 0b finding) ✓ (T2); D1 validate-before-stamp ✓; stamp via 0b connector ✓; persist `Cfdi` with status machine (VALIDATION_FAILED / STAMPED / STAMP_FAILED) §14 ✓; store XML+PDF to blob via `buildStoragePath`+`uploadFileToStorage` §14 ✓; tenant-safe load (selects by order id, scoped through venue) ✓. **Deferred:** acuse storage, email delivery, retry job wiring (`cfdi-stamp-retry.job.ts`), global/autofactura flows, routes, Feature/permissions/MCP (0d).
+**Spec coverage:** maps real Order → CFDI payload §7.3 ✓ (T1); idempotency at OUR layer via `Cfdi.idempotencyKey` (the 0b finding) ✓ (T2);
+D1 validate-before-stamp ✓; stamp via 0b connector ✓; persist `Cfdi` with status machine (VALIDATION_FAILED / STAMPED / STAMP_FAILED) §14 ✓;
+store XML+PDF to blob via `buildStoragePath`+`uploadFileToStorage` §14 ✓; tenant-safe load (selects by order id, scoped through venue) ✓.
+**Deferred:** acuse storage, email delivery, retry job wiring (`cfdi-stamp-retry.job.ts`), global/autofactura flows, routes,
+Feature/permissions/MCP (0d).
 
-**Placeholder scan:** none — full implementations. The DI default `loadOrderForCfdi` carries one "confirm relation names against schema" note (legitimate — Prisma select names), not a logic placeholder.
+**Placeholder scan:** none — full implementations. The DI default `loadOrderForCfdi` carries one "confirm relation names against schema"
+note (legitimate — Prisma select names), not a logic placeholder.
 
-**Type consistency:** `IssueCfdiDeps` shape is identical between the test factory and the service; `assembleSaleInput`/`buildCreateInvoiceParams`/`validateBeforeStamp`/`resolveFiscalProvider` reused from 0c/0b, not redefined. `LoadedOrderForCfdi` shared between T1 and T2.
+**Type consistency:** `IssueCfdiDeps` shape is identical between the test factory and the service;
+`assembleSaleInput`/`buildCreateInvoiceParams`/`validateBeforeStamp`/`resolveFiscalProvider` reused from 0c/0b, not redefined.
+`LoadedOrderForCfdi` shared between T1 and T2.

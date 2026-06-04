@@ -459,14 +459,12 @@ describe('getSubscriptionsForSuperadmin', () => {
     // Stripe sub: active, monthly, current_period_end in 30d
     const Stripe = require('stripe')
     Stripe.prototype.subscriptions = {
-      retrieve: jest
-        .fn()
-        .mockResolvedValue({
-          status: 'active',
-          cancel_at_period_end: false,
-          current_period_end: Math.floor(future.getTime() / 1000),
-          items: { data: [{ price: { id: 'price_m', unit_amount: 115884, recurring: { interval: 'month', interval_count: 1 } } }] },
-        }),
+      retrieve: jest.fn().mockResolvedValue({
+        status: 'active',
+        cancel_at_period_end: false,
+        current_period_end: Math.floor(future.getTime() / 1000),
+        items: { data: [{ price: { id: 'price_m', unit_amount: 115884, recurring: { interval: 'month', interval_count: 1 } } }] },
+      }),
     }
   })
 
@@ -524,14 +522,12 @@ describe('getSubscriptionOverview', () => {
     ])
     const Stripe = require('stripe')
     Stripe.prototype.subscriptions = {
-      retrieve: jest
-        .fn()
-        .mockResolvedValue({
-          status: 'active',
-          cancel_at_period_end: false,
-          current_period_end: Math.floor(future.getTime() / 1000),
-          items: { data: [{ price: { id: 'price_m', unit_amount: 115884, recurring: { interval: 'month', interval_count: 1 } } }] },
-        }),
+      retrieve: jest.fn().mockResolvedValue({
+        status: 'active',
+        cancel_at_period_end: false,
+        current_period_end: Math.floor(future.getTime() / 1000),
+        items: { data: [{ price: { id: 'price_m', unit_amount: 115884, recurring: { interval: 'month', interval_count: 1 } } }] },
+      }),
     }
     const ov = await getSubscriptionOverview()
     expect(ov.counts.active).toBe(1)
@@ -557,14 +553,12 @@ describe('getSubscriptionOverview', () => {
     ])
     const Stripe = require('stripe')
     Stripe.prototype.subscriptions = {
-      retrieve: jest
-        .fn()
-        .mockResolvedValue({
-          status: 'active',
-          cancel_at_period_end: false,
-          current_period_end: Math.floor(future.getTime() / 1000),
-          items: { data: [{ price: { id: 'price_y', unit_amount: 1158840, recurring: { interval: 'year', interval_count: 1 } } }] },
-        }),
+      retrieve: jest.fn().mockResolvedValue({
+        status: 'active',
+        cancel_at_period_end: false,
+        current_period_end: Math.floor(future.getTime() / 1000),
+        items: { data: [{ price: { id: 'price_y', unit_amount: 1158840, recurring: { interval: 'year', interval_count: 1 } } }] },
+      }),
     }
     const ov = await getSubscriptionOverview()
     expect(ov.mrr.total).toBeCloseTo(965.7, 1)

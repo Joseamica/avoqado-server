@@ -1,272 +1,550 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="es">
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Avoqado · Setup botón "Gestionar mi cita" en WhatsApp</title>
-<style>
-  :root {
-    --bg: #0f1419;
-    --bg-elevated: #1a2027;
-    --surface: #232b34;
-    --border: #2d3640;
-    --text: #f1f5f9;
-    --text-muted: #94a3b8;
-    --accent: #10b981;
-    --accent-light: #34d399;
-    --warn: #f59e0b;
-    --danger: #ef4444;
-    --wa: #25d366;
-    --code: #0b0f14;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  html { scroll-behavior: smooth; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-    background: var(--bg); color: var(--text); line-height: 1.6;
-    -webkit-font-smoothing: antialiased;
-  }
-  .container { max-width: 820px; margin: 0 auto; padding: 0 24px; }
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Avoqado · Setup botón "Gestionar mi cita" en WhatsApp</title>
+    <style>
+      :root {
+        --bg: #0f1419;
+        --bg-elevated: #1a2027;
+        --surface: #232b34;
+        --border: #2d3640;
+        --text: #f1f5f9;
+        --text-muted: #94a3b8;
+        --accent: #10b981;
+        --accent-light: #34d399;
+        --warn: #f59e0b;
+        --danger: #ef4444;
+        --wa: #25d366;
+        --code: #0b0f14;
+      }
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+      }
+      .container {
+        max-width: 820px;
+        margin: 0 auto;
+        padding: 0 24px;
+      }
 
-  .hero {
-    padding: 64px 24px 40px; text-align: center;
-    background: radial-gradient(ellipse at top, rgba(37,211,102,0.13), transparent 60%), var(--bg);
-    border-bottom: 1px solid var(--border);
-  }
-  .hero-badge {
-    display: inline-flex; align-items: center; gap: 8px;
-    padding: 6px 14px; background: rgba(37,211,102,0.1);
-    border: 1px solid rgba(37,211,102,0.3); color: var(--wa);
-    border-radius: 999px; font-size: 13px; font-weight: 600; margin-bottom: 20px;
-  }
-  .hero h1 { font-size: clamp(26px, 4.5vw, 38px); font-weight: 800; line-height: 1.15; letter-spacing: -0.02em; margin-bottom: 12px; }
-  .hero p { font-size: 16px; color: var(--text-muted); max-width: 600px; margin: 0 auto; }
+      .hero {
+        padding: 64px 24px 40px;
+        text-align: center;
+        background: radial-gradient(ellipse at top, rgba(37, 211, 102, 0.13), transparent 60%), var(--bg);
+        border-bottom: 1px solid var(--border);
+      }
+      .hero-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 14px;
+        background: rgba(37, 211, 102, 0.1);
+        border: 1px solid rgba(37, 211, 102, 0.3);
+        color: var(--wa);
+        border-radius: 999px;
+        font-size: 13px;
+        font-weight: 600;
+        margin-bottom: 20px;
+      }
+      .hero h1 {
+        font-size: clamp(26px, 4.5vw, 38px);
+        font-weight: 800;
+        line-height: 1.15;
+        letter-spacing: -0.02em;
+        margin-bottom: 12px;
+      }
+      .hero p {
+        font-size: 16px;
+        color: var(--text-muted);
+        max-width: 600px;
+        margin: 0 auto;
+      }
 
-  main { padding: 40px 0 80px; }
+      main {
+        padding: 40px 0 80px;
+      }
 
-  .note {
-    border-radius: 12px; padding: 16px 18px; margin: 24px 0; font-size: 14.5px;
-    border: 1px solid var(--border); background: var(--bg-elevated);
-  }
-  .note.ok { border-left: 3px solid var(--accent); background: linear-gradient(135deg, rgba(16,185,129,0.08), transparent); }
-  .note.warn { border-left: 3px solid var(--warn); background: linear-gradient(135deg, rgba(245,158,11,0.08), transparent); }
-  .note strong { color: var(--text); }
-  .note.ok strong { color: var(--accent-light); }
-  .note.warn strong { color: var(--warn); }
+      .note {
+        border-radius: 12px;
+        padding: 16px 18px;
+        margin: 24px 0;
+        font-size: 14.5px;
+        border: 1px solid var(--border);
+        background: var(--bg-elevated);
+      }
+      .note.ok {
+        border-left: 3px solid var(--accent);
+        background: linear-gradient(135deg, rgba(16, 185, 129, 0.08), transparent);
+      }
+      .note.warn {
+        border-left: 3px solid var(--warn);
+        background: linear-gradient(135deg, rgba(245, 158, 11, 0.08), transparent);
+      }
+      .note strong {
+        color: var(--text);
+      }
+      .note.ok strong {
+        color: var(--accent-light);
+      }
+      .note.warn strong {
+        color: var(--warn);
+      }
 
-  .step {
-    background: var(--bg-elevated); border: 1px solid var(--border);
-    border-radius: 18px; padding: 28px; margin-bottom: 24px; position: relative;
-  }
-  .step-num {
-    position: absolute; top: -14px; left: 24px;
-    width: 32px; height: 32px; border-radius: 50%;
-    background: var(--accent); color: #042f1f; font-weight: 800; font-size: 15px;
-    display: flex; align-items: center; justify-content: center;
-  }
-  .step h2 { font-size: 21px; font-weight: 800; margin: 8px 0 4px; letter-spacing: -0.01em; }
-  .step .sub { color: var(--text-muted); font-size: 14px; margin-bottom: 18px; }
-  .step h3 { font-size: 15px; font-weight: 700; margin: 22px 0 10px; color: var(--accent-light); }
+      .step {
+        background: var(--bg-elevated);
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        padding: 28px;
+        margin-bottom: 24px;
+        position: relative;
+      }
+      .step-num {
+        position: absolute;
+        top: -14px;
+        left: 24px;
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        background: var(--accent);
+        color: #042f1f;
+        font-weight: 800;
+        font-size: 15px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .step h2 {
+        font-size: 21px;
+        font-weight: 800;
+        margin: 8px 0 4px;
+        letter-spacing: -0.01em;
+      }
+      .step .sub {
+        color: var(--text-muted);
+        font-size: 14px;
+        margin-bottom: 18px;
+      }
+      .step h3 {
+        font-size: 15px;
+        font-weight: 700;
+        margin: 22px 0 10px;
+        color: var(--accent-light);
+      }
 
-  .field-label {
-    display: flex; align-items: center; justify-content: space-between;
-    font-size: 12px; font-weight: 600; color: var(--text-muted);
-    text-transform: uppercase; letter-spacing: 0.04em; margin: 16px 0 6px;
-  }
+      .field-label {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        margin: 16px 0 6px;
+      }
 
-  /* Copy block */
-  .copy {
-    position: relative; background: var(--code); border: 1px solid var(--border);
-    border-radius: 12px; padding: 14px 52px 14px 16px; margin-bottom: 6px;
-    font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
-    font-size: 13.5px; color: #d6e2ee; white-space: pre-wrap; word-break: break-word;
-    line-height: 1.55;
-  }
-  .copy.short { font-size: 14px; }
-  .copy-btn {
-    position: absolute; top: 10px; right: 10px;
-    background: var(--surface); border: 1px solid var(--border);
-    color: var(--text-muted); border-radius: 8px; padding: 5px 9px;
-    font-size: 11px; font-weight: 700; cursor: pointer; transition: all .15s;
-    display: inline-flex; align-items: center; gap: 5px; font-family: inherit;
-  }
-  .copy-btn:hover { color: var(--text); border-color: var(--accent); }
-  .copy-btn.done { background: var(--accent); color: #042f1f; border-color: var(--accent); }
-  .copy .var { color: var(--accent-light); font-weight: 700; }
+      /* Copy block */
+      .copy {
+        position: relative;
+        background: var(--code);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 14px 52px 14px 16px;
+        margin-bottom: 6px;
+        font-family: 'SF Mono', ui-monospace, Menlo, Consolas, monospace;
+        font-size: 13.5px;
+        color: #d6e2ee;
+        white-space: pre-wrap;
+        word-break: break-word;
+        line-height: 1.55;
+      }
+      .copy.short {
+        font-size: 14px;
+      }
+      .copy-btn {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        color: var(--text-muted);
+        border-radius: 8px;
+        padding: 5px 9px;
+        font-size: 11px;
+        font-weight: 700;
+        cursor: pointer;
+        transition: all 0.15s;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        font-family: inherit;
+      }
+      .copy-btn:hover {
+        color: var(--text);
+        border-color: var(--accent);
+      }
+      .copy-btn.done {
+        background: var(--accent);
+        color: #042f1f;
+        border-color: var(--accent);
+      }
+      .copy .var {
+        color: var(--accent-light);
+        font-weight: 700;
+      }
 
-  .kv { display: grid; grid-template-columns: 1fr; gap: 4px; margin-bottom: 10px; }
-  .hint { font-size: 12.5px; color: var(--text-muted); margin: 4px 0 0; }
+      .kv {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 4px;
+        margin-bottom: 10px;
+      }
+      .hint {
+        font-size: 12.5px;
+        color: var(--text-muted);
+        margin: 4px 0 0;
+      }
 
-  table.cfg { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 14px; }
-  table.cfg td { padding: 9px 12px; border: 1px solid var(--border); vertical-align: top; }
-  table.cfg td:first-child { color: var(--text-muted); width: 38%; font-weight: 600; }
-  table.cfg code { background: var(--code); padding: 2px 6px; border-radius: 6px; font-size: 13px; color: var(--accent-light); }
+      table.cfg {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 10px 0;
+        font-size: 14px;
+      }
+      table.cfg td {
+        padding: 9px 12px;
+        border: 1px solid var(--border);
+        vertical-align: top;
+      }
+      table.cfg td:first-child {
+        color: var(--text-muted);
+        width: 38%;
+        font-weight: 600;
+      }
+      table.cfg code {
+        background: var(--code);
+        padding: 2px 6px;
+        border-radius: 6px;
+        font-size: 13px;
+        color: var(--accent-light);
+      }
 
-  .checklist { list-style: none; }
-  .checklist li { padding: 8px 0 8px 30px; position: relative; font-size: 14.5px; border-bottom: 1px solid var(--border); }
-  .checklist li:last-child { border-bottom: none; }
-  .checklist li::before { content: "☐"; position: absolute; left: 0; color: var(--accent); font-size: 17px; }
+      .checklist {
+        list-style: none;
+      }
+      .checklist li {
+        padding: 8px 0 8px 30px;
+        position: relative;
+        font-size: 14.5px;
+        border-bottom: 1px solid var(--border);
+      }
+      .checklist li:last-child {
+        border-bottom: none;
+      }
+      .checklist li::before {
+        content: '☐';
+        position: absolute;
+        left: 0;
+        color: var(--accent);
+        font-size: 17px;
+      }
 
-  footer { padding: 32px 24px; text-align: center; color: var(--text-muted); font-size: 13px; border-top: 1px solid var(--border); }
-  footer a { color: var(--accent-light); text-decoration: none; }
+      footer {
+        padding: 32px 24px;
+        text-align: center;
+        color: var(--text-muted);
+        font-size: 13px;
+        border-top: 1px solid var(--border);
+      }
+      footer a {
+        color: var(--accent-light);
+        text-decoration: none;
+      }
 
-  @media (max-width: 600px) {
-    .step { padding: 22px 18px; }
-    table.cfg td:first-child { width: 100%; display: block; border-bottom: none; }
-    table.cfg td { display: block; }
-  }
-</style>
-</head>
-<body>
+      @media (max-width: 600px) {
+        .step {
+          padding: 22px 18px;
+        }
+        table.cfg td:first-child {
+          width: 100%;
+          display: block;
+          border-bottom: none;
+        }
+        table.cfg td {
+          display: block;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="hero">
+      <div class="hero-badge">Guía de configuración · Ops</div>
+      <h1>Activar el botón<br />"Gestionar mi cita" en WhatsApp</h1>
+      <p>Para que el cliente pueda cancelar o reagendar desde la confirmación y el recordatorio de WhatsApp. Copia y pega cada bloque.</p>
+    </header>
 
-<header class="hero">
-  <div class="hero-badge">Guía de configuración · Ops</div>
-  <h1>Activar el botón<br>"Gestionar mi cita" en WhatsApp</h1>
-  <p>Para que el cliente pueda cancelar o reagendar desde la confirmación y el recordatorio de WhatsApp. Copia y pega cada bloque.</p>
-</header>
+    <main class="container">
+      <div class="note ok">
+        <strong>El código del backend ya está listo.</strong> Está "dormido": no hace nada hasta que completes los 2 pasos. Mientras tanto,
+        todo sigue igual que hoy (cero riesgo). <strong>No es obligatorio</strong> — la regla de "no cancelar con menos de X horas" ya se
+        respeta en todos lados aunque no actives esto. Esto solo agrega el botón.
+      </div>
 
-<main class="container">
+      <div class="note warn">
+        <strong>¿Por qué te marcó error Meta antes?</strong> Tu primer texto era muy corto para 5 variables y la variable quedaba al final.
+        Meta no lo permite. Los textos de abajo ya están corregidos: más largos y con texto después de la última variable. Úsalos tal cual.
+      </div>
 
-  <div class="note ok">
-    <strong>El código del backend ya está listo.</strong> Está "dormido": no hace nada hasta que completes los 2 pasos. Mientras tanto, todo sigue igual que hoy (cero riesgo). <strong>No es obligatorio</strong> — la regla de "no cancelar con menos de X horas" ya se respeta en todos lados aunque no actives esto. Esto solo agrega el botón.
-  </div>
+      <!-- PASO 1 -->
+      <section class="step">
+        <div class="step-num">1</div>
+        <h2>Crear 2 plantillas en Meta</h2>
+        <p class="sub">
+          business.facebook.com → WhatsApp Manager → Plantillas de mensajes → "Crear plantilla". Para ambas: Categoría
+          <strong>UTILITY</strong>, Idioma <strong>Spanish (MEX) / es_MX</strong>, sin encabezado.
+        </p>
 
-  <div class="note warn">
-    <strong>¿Por qué te marcó error Meta antes?</strong> Tu primer texto era muy corto para 5 variables y la variable quedaba al final. Meta no lo permite. Los textos de abajo ya están corregidos: más largos y con texto después de la última variable. Úsalos tal cual.
-  </div>
+        <h3>📩 Plantilla 1 — Confirmación</h3>
 
-  <!-- PASO 1 -->
-  <section class="step">
-    <div class="step-num">1</div>
-    <h2>Crear 2 plantillas en Meta</h2>
-    <p class="sub">business.facebook.com → WhatsApp Manager → Plantillas de mensajes → "Crear plantilla". Para ambas: Categoría <strong>UTILITY</strong>, Idioma <strong>Spanish (MEX) / es_MX</strong>, sin encabezado.</p>
+        <div class="field-label"><span>Nombre de la plantilla</span></div>
+        <div class="copy short" data-copy="reservation_confirmation_manage">
+          reservation_confirmation_manage<button class="copy-btn">Copiar</button>
+        </div>
 
-    <h3>📩 Plantilla 1 — Confirmación</h3>
+        <div class="field-label"><span>Cuerpo (Body)</span></div>
+        <div
+          class="copy"
+          data-copy="Hola {{1}}, ¡gracias por tu reserva! Confirmamos tu cita en {{2}} para el {{3}} a las {{4}} hrs. Extras: {{5}}. Para cancelar o reagendar tu cita, usa el botón de abajo. ¡Te esperamos!"
+        >
+          Hola <span class="var">{{1}}</span>, ¡gracias por tu reserva! Confirmamos tu cita en <span class="var">{{2}}</span> para el
+          <span class="var">{{3}}</span> a las <span class="var">{{4}}</span> hrs. Extras: <span class="var">{{5}}</span>. Para cancelar o
+          reagendar tu cita, usa el botón de abajo. ¡Te esperamos!<button class="copy-btn">Copiar</button>
+        </div>
 
-    <div class="field-label"><span>Nombre de la plantilla</span></div>
-    <div class="copy short" data-copy="reservation_confirmation_manage">reservation_confirmation_manage<button class="copy-btn">Copiar</button></div>
+        <div class="field-label"><span>Ejemplos para las variables (Meta los pide)</span></div>
+        <table class="cfg">
+          <tr>
+            <td>{{1}}</td>
+            <td>Catalina</td>
+          </tr>
+          <tr>
+            <td>{{2}}</td>
+            <td>Amaena</td>
+          </tr>
+          <tr>
+            <td>{{3}}</td>
+            <td>3 de junio</td>
+          </tr>
+          <tr>
+            <td>{{4}}</td>
+            <td>11:30</td>
+          </tr>
+          <tr>
+            <td>{{5}}</td>
+            <td>Gel semipermanente</td>
+          </tr>
+        </table>
 
-    <div class="field-label"><span>Cuerpo (Body)</span></div>
-    <div class="copy" data-copy="Hola {{1}}, ¡gracias por tu reserva! Confirmamos tu cita en {{2}} para el {{3}} a las {{4}} hrs. Extras: {{5}}. Para cancelar o reagendar tu cita, usa el botón de abajo. ¡Te esperamos!">Hola <span class="var">{{1}}</span>, ¡gracias por tu reserva! Confirmamos tu cita en <span class="var">{{2}}</span> para el <span class="var">{{3}}</span> a las <span class="var">{{4}}</span> hrs. Extras: <span class="var">{{5}}</span>. Para cancelar o reagendar tu cita, usa el botón de abajo. ¡Te esperamos!<button class="copy-btn">Copiar</button></div>
+        <h3 style="color: var(--wa)">Botón de la Plantilla 1</h3>
+        <table class="cfg">
+          <tr>
+            <td>Tipo de botón</td>
+            <td>Visitar sitio web (URL)</td>
+          </tr>
+          <tr>
+            <td>Tipo de URL</td>
+            <td><strong>Dinámica</strong> (Dynamic)</td>
+          </tr>
+          <tr>
+            <td>Texto del botón</td>
+            <td>Gestionar mi cita</td>
+          </tr>
+          <tr>
+            <td>URL del sitio web</td>
+            <td><code>https://book.avoqado.io/{{1}}</code></td>
+          </tr>
+          <tr>
+            <td>Ejemplo / URL de muestra de {{1}}</td>
+            <td>
+              <code>amaena?manage=a8a9aa9c-1234</code>
+              <div class="hint" style="color: var(--warn)">
+                ⚠️ SOLO esto. SIN <code>https://</code> y SIN <code>/</code> al inicio. Es la parte que va después de la URL base. Meta arma
+                la final: <code>https://book.avoqado.io/amaena?manage=a8a9aa9c-1234</code>
+              </div>
+            </td>
+          </tr>
+        </table>
+        <div class="field-label"><span>URL de muestra de {{1}} (para copiar)</span></div>
+        <div class="copy short" data-copy="amaena?manage=a8a9aa9c-1234">
+          amaena?manage=a8a9aa9c-1234<button class="copy-btn">Copiar</button>
+        </div>
+        <div class="field-label"><span>URL del botón (para copiar)</span></div>
+        <div class="copy short" data-copy="https://book.avoqado.io/{{1}}">
+          https://book.avoqado.io/<span class="var">{{1}}</span><button class="copy-btn">Copiar</button>
+        </div>
+        <div class="field-label"><span>Texto del botón (para copiar)</span></div>
+        <div class="copy short" data-copy="Gestionar mi cita">Gestionar mi cita<button class="copy-btn">Copiar</button></div>
 
-    <div class="field-label"><span>Ejemplos para las variables (Meta los pide)</span></div>
-    <table class="cfg">
-      <tr><td>{{1}}</td><td>Catalina</td></tr>
-      <tr><td>{{2}}</td><td>Amaena</td></tr>
-      <tr><td>{{3}}</td><td>3 de junio</td></tr>
-      <tr><td>{{4}}</td><td>11:30</td></tr>
-      <tr><td>{{5}}</td><td>Gel semipermanente</td></tr>
-    </table>
+        <h3>🔔 Plantilla 2 — Recordatorio</h3>
 
-    <h3 style="color:var(--wa)">Botón de la Plantilla 1</h3>
-    <table class="cfg">
-      <tr><td>Tipo de botón</td><td>Visitar sitio web (URL)</td></tr>
-      <tr><td>Tipo de URL</td><td><strong>Dinámica</strong> (Dynamic)</td></tr>
-      <tr><td>Texto del botón</td><td>Gestionar mi cita</td></tr>
-      <tr><td>URL del sitio web</td><td><code>https://book.avoqado.io/{{1}}</code></td></tr>
-      <tr><td>Ejemplo / URL de muestra de {{1}}</td><td><code>amaena?manage=a8a9aa9c-1234</code><div class="hint" style="color:var(--warn)">⚠️ SOLO esto. SIN <code>https://</code> y SIN <code>/</code> al inicio. Es la parte que va después de la URL base. Meta arma la final: <code>https://book.avoqado.io/amaena?manage=a8a9aa9c-1234</code></div></td></tr>
-    </table>
-    <div class="field-label"><span>URL de muestra de {{1}} (para copiar)</span></div>
-    <div class="copy short" data-copy="amaena?manage=a8a9aa9c-1234">amaena?manage=a8a9aa9c-1234<button class="copy-btn">Copiar</button></div>
-    <div class="field-label"><span>URL del botón (para copiar)</span></div>
-    <div class="copy short" data-copy="https://book.avoqado.io/{{1}}">https://book.avoqado.io/<span class="var">{{1}}</span><button class="copy-btn">Copiar</button></div>
-    <div class="field-label"><span>Texto del botón (para copiar)</span></div>
-    <div class="copy short" data-copy="Gestionar mi cita">Gestionar mi cita<button class="copy-btn">Copiar</button></div>
+        <div class="field-label"><span>Nombre de la plantilla</span></div>
+        <div class="copy short" data-copy="reservation_reminder_manage">
+          reservation_reminder_manage<button class="copy-btn">Copiar</button>
+        </div>
 
-    <h3>🔔 Plantilla 2 — Recordatorio</h3>
+        <div class="field-label"><span>Cuerpo (Body)</span></div>
+        <div
+          class="copy"
+          data-copy="Hola {{1}}, te recordamos tu próxima cita en {{2}} el {{3}} a las {{4}} hrs. Si necesitas cancelar o reagendar, usa el botón de abajo. ¡Te esperamos!"
+        >
+          Hola <span class="var">{{1}}</span>, te recordamos tu próxima cita en <span class="var">{{2}}</span> el
+          <span class="var">{{3}}</span> a las <span class="var">{{4}}</span> hrs. Si necesitas cancelar o reagendar, usa el botón de abajo.
+          ¡Te esperamos!<button class="copy-btn">Copiar</button>
+        </div>
 
-    <div class="field-label"><span>Nombre de la plantilla</span></div>
-    <div class="copy short" data-copy="reservation_reminder_manage">reservation_reminder_manage<button class="copy-btn">Copiar</button></div>
+        <div class="field-label"><span>Ejemplos para las variables</span></div>
+        <table class="cfg">
+          <tr>
+            <td>{{1}}</td>
+            <td>Catalina</td>
+          </tr>
+          <tr>
+            <td>{{2}}</td>
+            <td>Amaena</td>
+          </tr>
+          <tr>
+            <td>{{3}}</td>
+            <td>3 de junio</td>
+          </tr>
+          <tr>
+            <td>{{4}}</td>
+            <td>11:30</td>
+          </tr>
+        </table>
 
-    <div class="field-label"><span>Cuerpo (Body)</span></div>
-    <div class="copy" data-copy="Hola {{1}}, te recordamos tu próxima cita en {{2}} el {{3}} a las {{4}} hrs. Si necesitas cancelar o reagendar, usa el botón de abajo. ¡Te esperamos!">Hola <span class="var">{{1}}</span>, te recordamos tu próxima cita en <span class="var">{{2}}</span> el <span class="var">{{3}}</span> a las <span class="var">{{4}}</span> hrs. Si necesitas cancelar o reagendar, usa el botón de abajo. ¡Te esperamos!<button class="copy-btn">Copiar</button></div>
+        <p class="sub" style="margin-top: 14px">
+          El botón de la Plantilla 2 es <strong>idéntico</strong> al de la Plantilla 1 (misma URL
+          <code>https://book.avoqado.io/{{1}}</code> y mismo texto "Gestionar mi cita").
+        </p>
 
-    <div class="field-label"><span>Ejemplos para las variables</span></div>
-    <table class="cfg">
-      <tr><td>{{1}}</td><td>Catalina</td></tr>
-      <tr><td>{{2}}</td><td>Amaena</td></tr>
-      <tr><td>{{3}}</td><td>3 de junio</td></tr>
-      <tr><td>{{4}}</td><td>11:30</td></tr>
-    </table>
+        <div class="note warn" style="margin-top: 18px">
+          <strong>El botón pega UNA variable al final de la URL base.</strong> Por eso la base termina en <code>/{{1}}</code> y Avoqado le
+          manda <code>amaena?manage=&lt;token&gt;</code>. El cliente termina abriendo
+          <code>https://book.avoqado.io/amaena?manage=&lt;token&gt;</code> → su reserva, lista para cancelar/reagendar.
+        </div>
 
-    <p class="sub" style="margin-top:14px">El botón de la Plantilla 2 es <strong>idéntico</strong> al de la Plantilla 1 (misma URL <code>https://book.avoqado.io/{{1}}</code> y mismo texto "Gestionar mi cita").</p>
+        <div class="note ok">
+          <strong>Espera la aprobación.</strong> Meta tarda entre 1 y 48 horas. Las dos plantillas deben quedar en estado
+          <strong>"Aprobada"</strong> antes de hacer el Paso 2.
+        </div>
+      </section>
 
-    <div class="note warn" style="margin-top:18px">
-      <strong>El botón pega UNA variable al final de la URL base.</strong> Por eso la base termina en <code>/{{1}}</code> y Avoqado le manda <code>amaena?manage=&lt;token&gt;</code>. El cliente termina abriendo <code>https://book.avoqado.io/amaena?manage=&lt;token&gt;</code> → su reserva, lista para cancelar/reagendar.
-    </div>
+      <!-- PASO 2 -->
+      <section class="step">
+        <div class="step-num">2</div>
+        <h2>Prender las variables en Render</h2>
+        <p class="sub">
+          dashboard.render.com → servicio del backend de PRODUCCIÓN (avoqado-server) → pestaña "Environment" → Add Environment Variable. El
+          valor debe ser EXACTAMENTE el mismo nombre que registraste en Meta.
+        </p>
 
-    <div class="note ok">
-      <strong>Espera la aprobación.</strong> Meta tarda entre 1 y 48 horas. Las dos plantillas deben quedar en estado <strong>"Aprobada"</strong> antes de hacer el Paso 2.
-    </div>
-  </section>
+        <div class="field-label"><span>Variable 1 (Key = Value)</span></div>
+        <div class="copy short" data-copy="WHATSAPP_TEMPLATE_RESERVATION_CONFIRMATION_MANAGE">
+          WHATSAPP_TEMPLATE_RESERVATION_CONFIRMATION_MANAGE<button class="copy-btn">Copiar Key</button>
+        </div>
+        <div class="copy short" data-copy="reservation_confirmation_manage">
+          reservation_confirmation_manage<button class="copy-btn">Copiar Value</button>
+        </div>
 
-  <!-- PASO 2 -->
-  <section class="step">
-    <div class="step-num">2</div>
-    <h2>Prender las variables en Render</h2>
-    <p class="sub">dashboard.render.com → servicio del backend de PRODUCCIÓN (avoqado-server) → pestaña "Environment" → Add Environment Variable. El valor debe ser EXACTAMENTE el mismo nombre que registraste en Meta.</p>
+        <div class="field-label"><span>Variable 2 (Key = Value)</span></div>
+        <div class="copy short" data-copy="WHATSAPP_TEMPLATE_RESERVATION_REMINDER_MANAGE">
+          WHATSAPP_TEMPLATE_RESERVATION_REMINDER_MANAGE<button class="copy-btn">Copiar Key</button>
+        </div>
+        <div class="copy short" data-copy="reservation_reminder_manage">
+          reservation_reminder_manage<button class="copy-btn">Copiar Value</button>
+        </div>
 
-    <div class="field-label"><span>Variable 1 (Key = Value)</span></div>
-    <div class="copy short" data-copy="WHATSAPP_TEMPLATE_RESERVATION_CONFIRMATION_MANAGE">WHATSAPP_TEMPLATE_RESERVATION_CONFIRMATION_MANAGE<button class="copy-btn">Copiar Key</button></div>
-    <div class="copy short" data-copy="reservation_confirmation_manage">reservation_confirmation_manage<button class="copy-btn">Copiar Value</button></div>
+        <h3>Verifica que estas ya existan (no las dupliques)</h3>
+        <table class="cfg">
+          <tr>
+            <td><code>BOOKING_PUBLIC_URL</code></td>
+            <td>Debe ser <code>https://book.avoqado.io</code> — tiene que coincidir EXACTO con la URL base del botón en Meta.</td>
+          </tr>
+          <tr>
+            <td><code>WHATSAPP_PHONE_NUMBER_ID</code></td>
+            <td>Ya debe estar (WhatsApp ya manda confirmaciones hoy).</td>
+          </tr>
+          <tr>
+            <td><code>WHATSAPP_ACCESS_TOKEN</code></td>
+            <td>Ya debe estar.</td>
+          </tr>
+        </table>
+        <p class="hint">Guarda (Save Changes). Render hace redeploy automático (~3-5 min).</p>
+      </section>
 
-    <div class="field-label"><span>Variable 2 (Key = Value)</span></div>
-    <div class="copy short" data-copy="WHATSAPP_TEMPLATE_RESERVATION_REMINDER_MANAGE">WHATSAPP_TEMPLATE_RESERVATION_REMINDER_MANAGE<button class="copy-btn">Copiar Key</button></div>
-    <div class="copy short" data-copy="reservation_reminder_manage">reservation_reminder_manage<button class="copy-btn">Copiar Value</button></div>
+      <!-- PASO 3 -->
+      <section class="step">
+        <div class="step-num">3</div>
+        <h2>Verificar que quedó bien</h2>
+        <ul class="checklist">
+          <li>Haz una reserva de prueba con un teléfono real de WhatsApp.</li>
+          <li>Te debe llegar la confirmación con un botón verde abajo: <strong>"Gestionar mi cita"</strong>.</li>
+          <li>Toca el botón → debe abrir <strong>tu reserva</strong> (no el catálogo de servicios).</li>
+          <li>
+            Si faltan menos de las horas configuradas (ej. 2h), el botón de cancelar debe verse <strong>deshabilitado</strong> con el
+            mensaje "solo puedes cancelar hasta X horas antes". Eso es correcto.
+          </li>
+        </ul>
+      </section>
 
-    <h3>Verifica que estas ya existan (no las dupliques)</h3>
-    <table class="cfg">
-      <tr><td><code>BOOKING_PUBLIC_URL</code></td><td>Debe ser <code>https://book.avoqado.io</code> — tiene que coincidir EXACTO con la URL base del botón en Meta.</td></tr>
-      <tr><td><code>WHATSAPP_PHONE_NUMBER_ID</code></td><td>Ya debe estar (WhatsApp ya manda confirmaciones hoy).</td></tr>
-      <tr><td><code>WHATSAPP_ACCESS_TOKEN</code></td><td>Ya debe estar.</td></tr>
-    </table>
-    <p class="hint">Guarda (Save Changes). Render hace redeploy automático (~3-5 min).</p>
-  </section>
+      <!-- APAGAR -->
+      <section class="step">
+        <div class="step-num">✕</div>
+        <h2>Cómo apagarlo (si algo sale mal)</h2>
+        <p class="sub" style="margin-bottom: 0">
+          Borra o deja vacías las 2 variables del Paso 2 en Render y guarda. El backend vuelve automáticamente a las plantillas de WhatsApp
+          de hoy (sin botón). Cero riesgo, no hay que tocar código.
+        </p>
+      </section>
 
-  <!-- PASO 3 -->
-  <section class="step">
-    <div class="step-num">3</div>
-    <h2>Verificar que quedó bien</h2>
-    <ul class="checklist">
-      <li>Haz una reserva de prueba con un teléfono real de WhatsApp.</li>
-      <li>Te debe llegar la confirmación con un botón verde abajo: <strong>"Gestionar mi cita"</strong>.</li>
-      <li>Toca el botón → debe abrir <strong>tu reserva</strong> (no el catálogo de servicios).</li>
-      <li>Si faltan menos de las horas configuradas (ej. 2h), el botón de cancelar debe verse <strong>deshabilitado</strong> con el mensaje "solo puedes cancelar hasta X horas antes". Eso es correcto.</li>
-    </ul>
-  </section>
+      <div class="note ok">
+        <strong>Resumen rápido:</strong> 1) Crea las 2 plantillas en Meta con los textos de arriba + botón URL dinámico → 2) Espera
+        aprobación → 3) Pon las 2 env vars en Render → 4) Verifica con una reserva real.
+      </div>
+    </main>
 
-  <!-- APAGAR -->
-  <section class="step">
-    <div class="step-num">✕</div>
-    <h2>Cómo apagarlo (si algo sale mal)</h2>
-    <p class="sub" style="margin-bottom:0">Borra o deja vacías las 2 variables del Paso 2 en Render y guarda. El backend vuelve automáticamente a las plantillas de WhatsApp de hoy (sin botón). Cero riesgo, no hay que tocar código.</p>
-  </section>
+    <footer>Avoqado · Setup interno · <a href="mailto:hola@avoqado.io">hola@avoqado.io</a></footer>
 
-  <div class="note ok">
-    <strong>Resumen rápido:</strong> 1) Crea las 2 plantillas en Meta con los textos de arriba + botón URL dinámico → 2) Espera aprobación → 3) Pon las 2 env vars en Render → 4) Verifica con una reserva real.
-  </div>
-
-</main>
-
-<footer>
-  Avoqado · Setup interno · <a href="mailto:hola@avoqado.io">hola@avoqado.io</a>
-</footer>
-
-<script>
-  document.querySelectorAll('.copy').forEach(function (block) {
-    var btn = block.querySelector('.copy-btn');
-    if (!btn) return;
-    btn.addEventListener('click', function () {
-      var text = block.getAttribute('data-copy') || '';
-      navigator.clipboard.writeText(text).then(function () {
-        var original = btn.textContent;
-        btn.textContent = '✓ Copiado';
-        btn.classList.add('done');
-        setTimeout(function () { btn.textContent = original; btn.classList.remove('done'); }, 1600);
-      });
-    });
-  });
-</script>
-
-</body>
+    <script>
+      document.querySelectorAll('.copy').forEach(function (block) {
+        var btn = block.querySelector('.copy-btn')
+        if (!btn) return
+        btn.addEventListener('click', function () {
+          var text = block.getAttribute('data-copy') || ''
+          navigator.clipboard.writeText(text).then(function () {
+            var original = btn.textContent
+            btn.textContent = '✓ Copiado'
+            btn.classList.add('done')
+            setTimeout(function () {
+              btn.textContent = original
+              btn.classList.remove('done')
+            }, 1600)
+          })
+        })
+      })
+    </script>
+  </body>
 </html>
