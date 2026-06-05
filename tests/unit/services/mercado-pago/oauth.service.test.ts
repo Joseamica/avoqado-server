@@ -4,12 +4,42 @@ import { signState, verifyState, buildAuthUrl, exchangeCodeForTokens, refreshAcc
 import type { MercadoPagoOAuthState } from '@/services/mercado-pago/types'
 
 // Guarantee NO real HTTP calls leak from these tests (would hit MP for real)
+// and pin MP env to deterministic test values. tests/__helpers__/setup.ts uses
+// `process.env.MP_CLIENT_ID || 'test-mp-client-id'`, so when a real .env is
+// already in the process (e.g. `npm run pre-deploy`, which exports the whole
+// .env before running the suite) production credentials leak in and these
+// literal assertions / nock body predicates fail. The service reads these vars
+// at call-time, so pinning + restoring here makes the suite hermetic.
+const PINNED_MP_ENV: Record<string, string> = {
+  MP_CLIENT_ID: 'test-mp-client-id',
+  MP_CLIENT_SECRET: 'test-mp-client-secret',
+  MP_REDIRECT_URI: 'http://localhost:3000/api/v1/integrations/mercadopago/oauth/callback',
+  MP_API_BASE_URL: 'https://api.mercadopago.com',
+  MP_AUTH_BASE_URL: 'https://auth.mercadopago.com.mx',
+}
+const savedMpEnv: Record<string, string | undefined> = {}
+
 beforeAll(() => {
   nock.disableNetConnect()
+  for (const [key, value] of Object.entries(PINNED_MP_ENV)) {
+    savedMpEnv[key] = process.env[key]
+    process.env[key] = value
+  }
+  // MP_SANDBOX_MODE=true appends ?test_token=true and would break the nock path match
+  savedMpEnv.MP_SANDBOX_MODE = process.env.MP_SANDBOX_MODE
+  delete process.env.MP_SANDBOX_MODE
 })
 afterAll(() => {
   nock.cleanAll()
   nock.enableNetConnect()
+  for (const key of Object.keys(savedMpEnv)) {
+    const original = savedMpEnv[key]
+    if (original === undefined) {
+      delete process.env[key]
+    } else {
+      process.env[key] = original
+    }
+  }
 })
 
 describe('MP OAuth state helpers', () => {
