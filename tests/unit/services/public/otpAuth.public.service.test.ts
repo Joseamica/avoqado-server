@@ -101,9 +101,7 @@ describe('OTP Auth Public Service', () => {
         expiresAt: new Date(Date.now() - 1000), // already expired
       })
 
-      await expect(
-        verifyOtp({ venueId: VENUE_ID, channel: 'whatsapp', destination: PHONE_RAW, code: '123456' }),
-      ).rejects.toThrow(/expir/i)
+      await expect(verifyOtp({ venueId: VENUE_ID, channel: 'whatsapp', destination: PHONE_RAW, code: '123456' })).rejects.toThrow(/expir/i)
     })
 
     it('wrong code: increments attempts and throws', async () => {
@@ -118,9 +116,9 @@ describe('OTP Auth Public Service', () => {
       })
       prismaMock.otpChallenge.update.mockResolvedValue({})
 
-      await expect(
-        verifyOtp({ venueId: VENUE_ID, channel: 'whatsapp', destination: PHONE_RAW, code: '000000' }),
-      ).rejects.toThrow(/incorrecto/i)
+      await expect(verifyOtp({ venueId: VENUE_ID, channel: 'whatsapp', destination: PHONE_RAW, code: '000000' })).rejects.toThrow(
+        /incorrecto/i,
+      )
 
       expect(prismaMock.otpChallenge.update).toHaveBeenCalledWith(
         expect.objectContaining({ where: { id: 'otp-1' }, data: { attempts: 1 } }),
@@ -139,9 +137,9 @@ describe('OTP Auth Public Service', () => {
       })
       prismaMock.otpChallenge.update.mockResolvedValue({})
 
-      await expect(
-        verifyOtp({ venueId: VENUE_ID, channel: 'whatsapp', destination: PHONE_RAW, code: '123456' }),
-      ).rejects.toThrow(/intentos/i)
+      await expect(verifyOtp({ venueId: VENUE_ID, channel: 'whatsapp', destination: PHONE_RAW, code: '123456' })).rejects.toThrow(
+        /intentos/i,
+      )
 
       // The exhausted challenge is consumed so it can never be reused
       expect(prismaMock.otpChallenge.update).toHaveBeenCalledWith(

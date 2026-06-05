@@ -43,12 +43,7 @@ export async function requestOtp(args: {
   return { ok: true }
 }
 
-export async function verifyOtp(args: {
-  venueId: string
-  channel: 'whatsapp' | 'email'
-  destination: string
-  code: string
-}): Promise<{
+export async function verifyOtp(args: { venueId: string; channel: 'whatsapp' | 'email'; destination: string; code: string }): Promise<{
   token: string
   customer: { id: string; firstName: string | null; lastName: string | null; email: string | null; phone: string | null }
 }> {
@@ -81,7 +76,8 @@ async function resolveIdentity(venueId: string, key: { phone?: string; email?: s
     if (matches.length > 1) logger.warn(`[OTP] multiple Consumers share phone ${key.phone}; using oldest ${matches[0].id}`)
     consumer = matches[0] ?? (await prisma.consumer.create({ data: { phone: key.phone } }))
   } else {
-    consumer = (await prisma.consumer.findFirst({ where: { email: key.email } })) ?? (await prisma.consumer.create({ data: { email: key.email } }))
+    consumer =
+      (await prisma.consumer.findFirst({ where: { email: key.email } })) ?? (await prisma.consumer.create({ data: { email: key.email } }))
   }
 
   const where = key.phone ? { venueId_phone: { venueId, phone: key.phone } } : { venueId_email: { venueId, email: key.email! } }

@@ -7,6 +7,7 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { getChartData } from '@/services/dashboard/generalStats.dashboard.service'
+import { computeSettlementProjection } from '@/services/dashboard/sales-summary.dashboard.service'
 
 export interface SalesInput {
   amount: number | { toString(): string }
@@ -343,6 +344,31 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
       const data = (await getChartData(venueId, 'tips-over-time', { fromDate, toDate })) as { payments: TipPaymentRow[] }
       const result = summarizeTipsByDay(data.payments, tz)
       return text({ venueId, ...result })
+    },
+  )
+
+  server.tool(
+    'settlement_calendar',
+    'When your card money lands ("¿cuándo cae mi dinero?") for a venue you can access, over a date range (default last 7 days). Estimate based on each merchant account\'s settlement rule (business days + Mexican holidays + cutoff); cash is excluded because it is immediate. Returns a per-day calendar (settlement date + status settled/pending/projected, grouped by merchant with net-to-receive and commission) plus each merchant\'s soonest settlement date. Answers "¿cuándo me depositan / cuándo cae el dinero de tarjeta?". Pass venueId; optionally fromDate/toDate (YYYY-MM-DD).',
+    {
+      venueId: z.string().describe('Venue to analyze (must be in your scope)'),
+      fromDate: z.string().optional().describe('Start date YYYY-MM-DD (default: 7 days ago)'),
+      toDate: z.string().optional().describe('End date YYYY-MM-DD (default: today)'),
+    },
+    async ({ venueId, fromDate, toDate }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+      const tz = venue?.timezone || 'America/Mexico_City'
+      const start = venueStartOfDay(tz, fromDate ? new Date(`${fromDate}T12:00:00`) : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000))
+      const end = venueEndOfDay(tz, toDate ? new Date(`${toDate}T12:00:00`) : undefined)
+      const { calendar, nextByMerchant } = await computeSettlementProjection(venueId, start, end, tz)
+      return text({
+        venueId,
+        window: { start: start.toISOString(), end: end.toISOString() },
+        timezone: tz,
+        calendar,
+        nextByMerchant: Array.from(nextByMerchant.entries()).map(([merchantAccountId, v]) => ({ merchantAccountId, ...v })),
+      })
     },
   )
 }

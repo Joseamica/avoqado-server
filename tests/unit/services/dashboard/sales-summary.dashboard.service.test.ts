@@ -36,6 +36,7 @@ import {
   legacyMatchesFilter,
   bucketOf,
   computeMerchantAccountBreakdown,
+  computeSettlementProjection,
   type PaymentMethodFilter,
   type CardTypeFilter,
 } from '@/services/dashboard/sales-summary.dashboard.service'
@@ -544,5 +545,122 @@ describe('computeMerchantAccountBreakdown', () => {
     ])
     const result = await computeMerchantAccountBreakdown(VENUE, START, END)
     expect(result[0].displayName).toBe('Cuenta vieja')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// computeSettlementProjection (Entrega 2) — projects WHEN card money lands.
+// Touches prisma via payment/settlementConfiguration/merchantAccount findMany
+// (all mocked) and runs the REAL settlement engine (calculateSettlementDate +
+// business-day/MX-holiday math). System time is pinned so day status is stable.
+// ---------------------------------------------------------------------------
+describe('computeSettlementProjection', () => {
+  const VENUE = 'venue-amaena'
+  const TZ = 'America/Mexico_City'
+  const START = new Date('2026-06-01T00:00:00.000Z')
+  const END = new Date('2026-06-30T23:59:59.999Z')
+
+  // Pin "today" well after the projected dates so every day reads as 'settled'.
+  beforeEach(() => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-06-30T12:00:00.000Z'))
+  })
+  afterEach(() => {
+    jest.useRealTimers()
+  })
+
+  const baseConfig = {
+    settlementDays: 1,
+    settlementDayType: 'BUSINESS_DAYS',
+    cutoffTime: '23:00',
+    cutoffTimezone: TZ,
+    effectiveFrom: new Date('2026-01-01T00:00:00.000Z'),
+    effectiveTo: null,
+  }
+
+  function mockRows() {
+    ;(prismaMock.payment.findMany as jest.Mock).mockResolvedValue([
+      // Two ma-A CREDIT payments on Thu 2026-06-04 → settle next business day (Fri 06-05), grouped together.
+      {
+        amount: 1000,
+        tipAmount: 100,
+        createdAt: new Date('2026-06-04T15:00:00.000Z'),
+        merchantAccountId: 'ma-A',
+        transactionCost: { transactionType: 'CREDIT', venueChargeAmount: 30, venueFixedFee: 5 },
+      },
+      {
+        amount: 500,
+        tipAmount: 0,
+        createdAt: new Date('2026-06-04T16:00:00.000Z'),
+        merchantAccountId: 'ma-A',
+        transactionCost: { transactionType: 'CREDIT', venueChargeAmount: 15, venueFixedFee: 5 },
+      },
+      // ma-ext DEBIT on Fri 2026-06-05 → +1 business day skips the weekend → Mon 06-08.
+      {
+        amount: 2000,
+        tipAmount: 0,
+        createdAt: new Date('2026-06-05T10:00:00.000Z'),
+        merchantAccountId: 'ma-ext',
+        transactionCost: { transactionType: 'DEBIT', venueChargeAmount: 60, venueFixedFee: 0 },
+      },
+      // No settlement config for this merchant → must be excluded (honest "—").
+      {
+        amount: 999,
+        tipAmount: 0,
+        createdAt: new Date('2026-06-04T15:00:00.000Z'),
+        merchantAccountId: 'ma-noconf',
+        transactionCost: { transactionType: 'CREDIT', venueChargeAmount: 10, venueFixedFee: 0 },
+      },
+    ])
+    ;(prismaMock.settlementConfiguration.findMany as jest.Mock).mockResolvedValue([
+      { merchantAccountId: 'ma-A', cardType: 'CREDIT', ...baseConfig },
+      { merchantAccountId: 'ma-ext', cardType: 'DEBIT', ...baseConfig },
+    ])
+    ;(prismaMock.merchantAccount.findMany as jest.Mock).mockResolvedValue([
+      { id: 'ma-A', displayName: 'Amaena - A', alias: null },
+      { id: 'ma-ext', displayName: 'Amaena - Externo', alias: null },
+      { id: 'ma-noconf', displayName: 'Sin config', alias: null },
+    ])
+  }
+
+  it('groups by (settlement date, merchant), nets fee+fixed, and projects per-merchant dates', async () => {
+    mockRows()
+    const { calendar, nextByMerchant } = await computeSettlementProjection(VENUE, START, END, TZ)
+
+    // Two settlement days: Fri 06-05 (ma-A) before Mon 06-08 (ma-ext), sorted ascending.
+    expect(calendar.map(d => d.date)).toEqual(['2026-06-05', '2026-06-08'])
+    expect(calendar.every(d => d.status === 'settled')).toBe(true)
+
+    // Day 1 — ma-A, both payments merged: net = (1000+100-35) + (500-20) = 1545, fee 55, 2 txns.
+    const day1 = calendar[0]
+    expect(day1.byMerchant).toHaveLength(1)
+    expect(day1.byMerchant[0].merchantAccountId).toBe('ma-A')
+    expect(day1.byMerchant[0].displayName).toBe('Amaena - A')
+    expect(day1.byMerchant[0].netToReceive).toBeCloseTo(1545, 2)
+    expect(day1.byMerchant[0].platformFee).toBeCloseTo(55, 2)
+    expect(day1.byMerchant[0].transactionCount).toBe(2)
+    expect(day1.totalNet).toBeCloseTo(1545, 2)
+
+    // Day 2 — ma-ext: net = 2000 - 60 = 1940, fee 60, 1 txn.
+    const day2 = calendar[1]
+    expect(day2.byMerchant[0].merchantAccountId).toBe('ma-ext')
+    expect(day2.byMerchant[0].netToReceive).toBeCloseTo(1940, 2)
+    expect(day2.totalNet).toBeCloseTo(1940, 2)
+
+    // The merchant with no config never appears.
+    const allMerchants = calendar.flatMap(d => d.byMerchant.map(m => m.merchantAccountId))
+    expect(allMerchants).not.toContain('ma-noconf')
+
+    // Per-merchant soonest date for the breakdown "Cae" column.
+    expect(nextByMerchant.get('ma-A')).toEqual({ nextDate: '2026-06-05', settlementDays: 1 })
+    expect(nextByMerchant.get('ma-ext')).toEqual({ nextDate: '2026-06-08', settlementDays: 1 })
+    expect(nextByMerchant.has('ma-noconf')).toBe(false)
+  })
+
+  it('returns an empty projection when there are no card payments', async () => {
+    ;(prismaMock.payment.findMany as jest.Mock).mockResolvedValue([])
+    const { calendar, nextByMerchant } = await computeSettlementProjection(VENUE, START, END, TZ)
+    expect(calendar).toEqual([])
+    expect(nextByMerchant.size).toBe(0)
+    expect(prismaMock.settlementConfiguration.findMany).not.toHaveBeenCalled()
   })
 })

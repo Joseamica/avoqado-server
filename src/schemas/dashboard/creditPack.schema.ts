@@ -198,3 +198,18 @@ export const customerUpdateProfileSchema = z.object({
       message: 'Se requiere al menos un campo para actualizar',
     }),
 })
+
+export const otpRequestSchema = z
+  .object({
+    phone: z.string().min(8, 'Teléfono inválido').optional(),
+    email: z.string().email('Correo inválido').optional(),
+  })
+  .refine(d => Boolean(d.phone) || Boolean(d.email), { message: 'Proporciona teléfono o correo', path: ['phone'] })
+
+export const otpVerifySchema = z
+  .object({
+    phone: z.string().min(8, 'Teléfono inválido').optional(),
+    email: z.string().email('Correo inválido').optional(),
+    code: z.string().regex(/^\d{6}$/, 'El código debe ser de 6 dígitos'),
+  })
+  .refine(d => Boolean(d.phone) || Boolean(d.email), { message: 'Proporciona teléfono o correo', path: ['phone'] })

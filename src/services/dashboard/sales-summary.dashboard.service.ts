@@ -26,9 +26,11 @@
  */
 
 import { Prisma } from '@prisma/client'
+import { formatInTimeZone } from 'date-fns-tz'
 
 import logger from '@/config/logger'
 import { BadRequestError } from '@/errors/AppError'
+import { calculateSettlementDate } from '@/services/payments/settlementCalculation.service'
 import {
   MINDFORM_NEW_VENUE_ID,
   getLegacyPayments,
@@ -106,6 +108,32 @@ export interface MerchantAccountBreakdown {
   platformFee: number // SUM(TransactionCost.venueChargeAmount)
   netToReceive: number // collectedOnCard - platformFee
   transactionCount: number
+  // Soonest estimated settlement for this merchant within the range (Entrega 2);
+  // present only when includeSettlementProjection=true. nextDate is YYYY-MM-DD in
+  // venue timezone, or null when no settlement config can project these payments.
+  estimatedSettlement?: {
+    nextDate: string | null
+    settlementDays: number | null
+  }
+}
+
+// Entrega 2 — settlement projection ("¿cuándo cae el dinero?").
+// The date-range picker scopes WHICH sales; the calendar shows WHEN that card
+// money lands, grouped by settlement date and merchant. Estimate only (rule-based
+// until a bank API confirms). Cash is excluded — it is immediate.
+export interface SettlementCalendarMerchant {
+  merchantAccountId: string
+  displayName: string
+  platformFee: number
+  netToReceive: number
+  transactionCount: number
+}
+
+export interface SettlementCalendarDay {
+  date: string // YYYY-MM-DD settlement date in venue timezone
+  status: 'settled' | 'pending' | 'projected' // vs today: past / today / future
+  totalNet: number
+  byMerchant: SettlementCalendarMerchant[]
 }
 
 export interface SalesSummaryResponse {
@@ -119,6 +147,7 @@ export interface SalesSummaryResponse {
   byPaymentMethodDetailed?: PaymentMethodDetailedBreakdown[]
   byPeriod?: TimePeriodMetrics[] // Time-based breakdown
   byMerchantAccount?: MerchantAccountBreakdown[] // additive; present only when includeMerchantBreakdown=true
+  settlementCalendar?: SettlementCalendarDay[] // additive; present only when includeSettlementProjection=true
   filtered: boolean
 }
 
@@ -137,6 +166,7 @@ export interface SalesSummaryFilters {
   paymentMethod?: PaymentMethodFilter
   cardType?: CardTypeFilter
   includeMerchantBreakdown?: boolean // additive opt-in; default off preserves existing payload
+  includeSettlementProjection?: boolean // additive opt-in; adds settlementCalendar + per-merchant estimatedSettlement
 }
 
 // ============================================================
@@ -436,6 +466,154 @@ export async function computeMerchantAccountBreakdown(
       }
     })
     .sort((x, y) => y.collectedOnCard - x.collectedOnCard)
+}
+
+/**
+ * Settlement projection (Entrega 2) — "¿cuándo cae el dinero de tarjeta?"
+ *
+ * Loads the card payments in range, finds the SettlementConfiguration active at
+ * each payment's createdAt (matched by effectiveFrom/effectiveTo, NOT just the
+ * currently-active row), and projects the settlement date with the same engine
+ * Saldo Disponible uses (calculateSettlementDate → business days + MX holidays +
+ * cutoff). It then groups by (settlementDate, merchant).
+ *
+ * Estimate only: a payment with no matching config is skipped (honest "—" — it
+ * can't be projected). Cash never enters here (it's immediate). Returns the
+ * calendar plus, per merchant, the soonest upcoming settlement date for the
+ * breakdown's "Cae" column.
+ */
+export async function computeSettlementProjection(
+  venueId: string,
+  startDate: Date,
+  endDate: Date,
+  venueTimezone: string,
+): Promise<{
+  calendar: SettlementCalendarDay[]
+  nextByMerchant: Map<string, { nextDate: string | null; settlementDays: number | null }>
+}> {
+  const payments = await prisma.payment.findMany({
+    where: {
+      venueId,
+      status: 'COMPLETED',
+      merchantAccountId: { not: null },
+      transactionCost: { isNot: null },
+      createdAt: { gte: startDate, lte: endDate },
+    },
+    select: {
+      amount: true,
+      tipAmount: true,
+      createdAt: true,
+      merchantAccountId: true,
+      transactionCost: {
+        select: { transactionType: true, venueChargeAmount: true, venueFixedFee: true },
+      },
+    },
+  })
+
+  if (payments.length === 0) {
+    return { calendar: [], nextByMerchant: new Map() }
+  }
+
+  const merchantIds = Array.from(new Set(payments.map(p => p.merchantAccountId).filter(Boolean) as string[]))
+
+  // All configs for these merchants — matched per payment by effective window so a
+  // historical range uses the rule that was in force then, not today's rule.
+  const configs = await prisma.settlementConfiguration.findMany({
+    where: { merchantAccountId: { in: merchantIds } },
+    select: {
+      merchantAccountId: true,
+      cardType: true,
+      settlementDays: true,
+      settlementDayType: true,
+      cutoffTime: true,
+      cutoffTimezone: true,
+      effectiveFrom: true,
+      effectiveTo: true,
+    },
+    orderBy: { effectiveFrom: 'desc' },
+  })
+
+  const accounts = await prisma.merchantAccount.findMany({
+    where: { id: { in: merchantIds } },
+    select: { id: true, displayName: true, alias: true },
+  })
+  const nameById = new Map(accounts.map(a => [a.id, a.displayName || a.alias || 'Comercio']))
+
+  const todayKey = formatInTimeZone(new Date(), venueTimezone, 'yyyy-MM-dd')
+
+  // dateKey -> merchantId -> accumulator
+  const days = new Map<string, Map<string, SettlementCalendarMerchant>>()
+  // merchantId -> { dates seen, settlementDays of the matched config }
+  const datesByMerchant = new Map<string, { dates: Set<string>; settlementDays: number | null }>()
+
+  for (const p of payments) {
+    const tc = p.transactionCost
+    const merchantId = p.merchantAccountId
+    if (!tc || !merchantId) continue
+
+    // configs is ordered effectiveFrom desc, so the first match is the most recent
+    // config whose window contains the payment date.
+    const config = configs.find(
+      c =>
+        c.merchantAccountId === merchantId &&
+        c.cardType === tc.transactionType &&
+        c.effectiveFrom <= p.createdAt &&
+        (c.effectiveTo === null || c.effectiveTo >= p.createdAt),
+    )
+    if (!config) continue // no rule → can't project honestly; leave it out of the calendar
+
+    const settlementDate = calculateSettlementDate(p.createdAt, {
+      settlementDays: config.settlementDays,
+      settlementDayType: config.settlementDayType,
+      cutoffTime: config.cutoffTime,
+      cutoffTimezone: config.cutoffTimezone,
+    })
+    const dateKey = formatInTimeZone(settlementDate, venueTimezone, 'yyyy-MM-dd')
+
+    const fee = Number(tc.venueChargeAmount) + Number(tc.venueFixedFee)
+    const net = Number(p.amount) + Number(p.tipAmount ?? 0) - fee
+
+    if (!days.has(dateKey)) days.set(dateKey, new Map())
+    const merchantsForDay = days.get(dateKey)!
+    if (!merchantsForDay.has(merchantId)) {
+      merchantsForDay.set(merchantId, {
+        merchantAccountId: merchantId,
+        displayName: nameById.get(merchantId) ?? 'Comercio',
+        platformFee: 0,
+        netToReceive: 0,
+        transactionCount: 0,
+      })
+    }
+    const slot = merchantsForDay.get(merchantId)!
+    slot.platformFee += fee
+    slot.netToReceive += net
+    slot.transactionCount += 1
+
+    const md = datesByMerchant.get(merchantId) ?? { dates: new Set<string>(), settlementDays: config.settlementDays }
+    md.dates.add(dateKey)
+    md.settlementDays = config.settlementDays
+    datesByMerchant.set(merchantId, md)
+  }
+
+  const calendar: SettlementCalendarDay[] = Array.from(days.entries())
+    .map(([date, merchants]) => {
+      const byMerchant = Array.from(merchants.values()).sort((a, b) => b.netToReceive - a.netToReceive)
+      const totalNet = byMerchant.reduce((s, m) => s + m.netToReceive, 0)
+      const status: SettlementCalendarDay['status'] = date < todayKey ? 'settled' : date === todayKey ? 'pending' : 'projected'
+      return { date, status, totalNet, byMerchant }
+    })
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+
+  // Per merchant: soonest date that is today-or-future; if all are past, the most recent past date.
+  const nextByMerchant = new Map<string, { nextDate: string | null; settlementDays: number | null }>()
+  for (const [merchantId, { dates, settlementDays }] of datesByMerchant) {
+    const sorted = Array.from(dates).sort()
+    const upcoming = sorted.filter(d => d >= todayKey)
+    const nextDate = upcoming.length > 0 ? upcoming[0] : sorted.length > 0 ? sorted[sorted.length - 1] : null
+    nextByMerchant.set(merchantId, { nextDate, settlementDays })
+  }
+
+  return { calendar, nextByMerchant }
 }
 
 /**
@@ -1035,6 +1213,20 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     byMerchantAccount = await computeMerchantAccountBreakdown(venueId, parsedStartDate, parsedEndDate)
   }
 
+  // Settlement projection (Entrega 2; additive, opt-in). Adds the "¿cuándo cae?"
+  // calendar and enriches each merchant row with its soonest settlement date.
+  let settlementCalendar: SettlementCalendarDay[] | undefined
+  if (filters.includeSettlementProjection) {
+    const projection = await computeSettlementProjection(venueId, parsedStartDate, parsedEndDate, timezone)
+    settlementCalendar = projection.calendar
+    if (byMerchantAccount) {
+      byMerchantAccount = byMerchantAccount.map(m => ({
+        ...m,
+        estimatedSettlement: projection.nextByMerchant.get(m.merchantAccountId) ?? { nextDate: null, settlementDays: null },
+      }))
+    }
+  }
+
   logger.info('Sales summary calculated', {
     venueId,
     grossSales,
@@ -1056,6 +1248,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     byPaymentMethodDetailed,
     byPeriod,
     byMerchantAccount,
+    settlementCalendar,
     filtered: isFiltered,
   }
 }

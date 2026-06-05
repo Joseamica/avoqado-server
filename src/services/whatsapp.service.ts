@@ -94,6 +94,14 @@ async function sendTemplateMessage(
    * button — sending it to a button-less template makes Meta reject the call.
    */
   buttonUrlParam?: string,
+  /**
+   * Template translation language code. Defaults to 'es_MX' (matches every
+   * existing transactional template). Override only when a template was
+   * approved under a different locale — e.g. the Authentication template
+   * `otp_verify` exists in 'es', and sending it as 'es_MX' fails with Meta
+   * error #132001 ("does not exist in the translation").
+   */
+  languageCode: string = 'es_MX',
 ): Promise<{ messageId: string }> {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN
@@ -127,7 +135,7 @@ async function sendTemplateMessage(
     type: 'template',
     template: {
       name: templateName,
-      language: { code: 'es_MX' },
+      language: { code: languageCode },
       components,
     },
   }
@@ -473,6 +481,6 @@ export async function sendServiceMessage(phone: string, body: string): Promise<{
  * buttonUrlParam path — same sub_type:'url' component shape).
  */
 export async function sendOtpWhatsApp(phone: string, code: string): Promise<boolean> {
-  await sendTemplateMessage(phone, 'otp_verify', [{ type: 'text', text: code }], code)
+  await sendTemplateMessage(phone, 'otp_verify', [{ type: 'text', text: code }], code, 'es')
   return true
 }

@@ -1,10 +1,15 @@
 # WhatsApp OTP Customer Login — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Passwordless customer portal login via WhatsApp OTP (phone → code → in), keeping email+password and the `?manage=` magic-link working.
+**Goal:** Passwordless customer portal login via WhatsApp OTP (phone → code → in), keeping email+password and the `?manage=` magic-link
+working.
 
-**Architecture:** New `OtpChallenge` table + an isolated `otpAuth.public.service`. `request` generates a hashed 6-digit code and sends it via the approved WhatsApp `otp_verify` template (email fallback). `verify` validates, then does **hybrid identity resolution** (global `Consumer` by phone → per-venue `Customer` → existing `generateCustomerToken`), returning the same `{ token, customer }` shape as `loginCustomer` so the portal/middleware/widget are unchanged. All additive.
+**Architecture:** New `OtpChallenge` table + an isolated `otpAuth.public.service`. `request` generates a hashed 6-digit code and sends it
+via the approved WhatsApp `otp_verify` template (email fallback). `verify` validates, then does **hybrid identity resolution** (global
+`Consumer` by phone → per-venue `Customer` → existing `generateCustomerToken`), returning the same `{ token, customer }` shape as
+`loginCustomer` so the portal/middleware/widget are unchanged. All additive.
 
 **Tech Stack:** Express + TypeScript, Prisma/PostgreSQL, Jest (`prismaMock`), WhatsApp Cloud API, Preact widget.
 
@@ -15,6 +20,7 @@
 ## File structure
 
 **avoqado-server:**
+
 - `prisma/schema.prisma` — add `OtpChallenge` model + `PHONE` to `AuthProvider` (Modify)
 - `src/services/public/otpAuth.public.service.ts` — OTP request/verify + identity resolution (Create)
 - `src/lib/otp.ts` — pure helpers: `generateOtpCode`, `hashOtpCode`, `normalizeEmail` (Create)
@@ -27,6 +33,7 @@
 - `tests/unit/services/public/otpAuth.public.service.test.ts` (Create)
 
 **avoqado-booking-widget:**
+
 - `src/api/booking.ts` — add `requestOtp`, `verifyOtp` (Modify)
 - `src/components/CustomerPortal.tsx` — add "Entrar con WhatsApp" login mode (Modify)
 - `src/i18n/es.json`, `src/i18n/en.json` — OTP strings (Modify)
@@ -36,6 +43,7 @@
 ## Task 1: Prisma — `OtpChallenge` model + `AuthProvider.PHONE`
 
 **Files:**
+
 - Modify: `prisma/schema.prisma` (the `AuthProvider` enum ~line 6015 + add a new model)
 
 - [ ] **Step 1: Add `PHONE` to the `AuthProvider` enum**
@@ -71,15 +79,14 @@ model OtpChallenge {
 }
 ```
 
-- [ ] **Step 3: Create the migration** (coordinate ordering with the parallel CFDI session — run after a fresh `git pull`/their migration lands)
+- [ ] **Step 3: Create the migration** (coordinate ordering with the parallel CFDI session — run after a fresh `git pull`/their migration
+      lands)
 
-Run: `npx prisma migrate dev --name add_otp_challenge_and_phone_provider`
-Expected: migration created + applied; `npx prisma generate` runs.
+Run: `npx prisma migrate dev --name add_otp_challenge_and_phone_provider` Expected: migration created + applied; `npx prisma generate` runs.
 
 - [ ] **Step 4: Verify the client regenerated**
 
-Run: `npx tsc -p tsconfig.build.json --noEmit 2>&1 | grep -c "error TS"`
-Expected: `0`
+Run: `npx tsc -p tsconfig.build.json --noEmit 2>&1 | grep -c "error TS"` Expected: `0`
 
 - [ ] **Step 5: Commit**
 
@@ -95,6 +102,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 2: Pure OTP helpers (`src/lib/otp.ts`)
 
 **Files:**
+
 - Create: `src/lib/otp.ts`
 - Test: `tests/unit/lib/otp.test.ts`
 
@@ -159,8 +167,8 @@ Run: `npx jest tests/unit/lib/otp.test.ts`
 
 - [ ] **Step 5: Add `OTP_PEPPER` to env**
 
-Add to `.env` (and document in `.env.example`): `OTP_PEPPER=<random 32+ char string>`.
-Add to `src/config/env.ts` zod schema: `OTP_PEPPER: z.string().min(16)`.
+Add to `.env` (and document in `.env.example`): `OTP_PEPPER=<random 32+ char string>`. Add to `src/config/env.ts` zod schema:
+`OTP_PEPPER: z.string().min(16)`.
 
 - [ ] **Step 6: Commit**
 
@@ -176,12 +184,15 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 3: WhatsApp + email OTP senders
 
 **Files:**
+
 - Modify: `src/services/whatsapp.service.ts` (add `sendOtpWhatsApp`)
 - Modify: `src/services/email.service.ts` (add `sendOtpCodeEmail`)
 
 - [ ] **Step 1: Add `sendOtpWhatsApp`** at the end of `whatsapp.service.ts`
 
-The `otp_verify` template is Authentication-category: the code goes in the body `{{1}}` AND the copy-code button. The button component shape is identical to the existing `buttonUrlParam` path (`sub_type: 'url'`, index `0`, the value as the text param), so we **reuse** `sendTemplateMessage` by passing the code as both the body param and the button param.
+The `otp_verify` template is Authentication-category: the code goes in the body `{{1}}` AND the copy-code button. The button component shape
+is identical to the existing `buttonUrlParam` path (`sub_type: 'url'`, index `0`, the value as the text param), so we **reuse**
+`sendTemplateMessage` by passing the code as both the body param and the button param.
 
 ```ts
 /**
@@ -196,8 +207,12 @@ export async function sendOtpWhatsApp(phone: string, code: string): Promise<bool
 ```
 
 > ⚠️ Two things to verify on the first real send (Task 9 E2E):
-> 1. **Language code:** `sendTemplateMessage` hardcodes `es_MX`. If `otp_verify` was registered as plain `es`, Meta returns "template name does not exist in es_MX" → register/clone the template as `es_MX` (matching the existing reservation templates) OR parametrize the language. Verify in the WhatsApp send logs.
-> 2. **Button sub_type:** if Meta rejects the `sub_type:'url'` button for an auth template, add an `otpButton` branch in `sendTemplateMessage` emitting `sub_type:'copy_code'` instead. Keep it additive.
+>
+> 1. **Language code:** `sendTemplateMessage` hardcodes `es_MX`. If `otp_verify` was registered as plain `es`, Meta returns "template name
+>    does not exist in es_MX" → register/clone the template as `es_MX` (matching the existing reservation templates) OR parametrize the
+>    language. Verify in the WhatsApp send logs.
+> 2. **Button sub_type:** if Meta rejects the `sub_type:'url'` button for an auth template, add an `otpButton` branch in
+>    `sendTemplateMessage` emitting `sub_type:'copy_code'` instead. Keep it additive.
 
 - [ ] **Step 2: Add `sendOtpCodeEmail`** to `email.service.ts` (mirror `sendEmailVerification`)
 
@@ -230,6 +245,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 4: `otpAuth.public.service` — `requestOtp`
 
 **Files:**
+
 - Create: `src/services/public/otpAuth.public.service.ts`
 - Test: `tests/unit/services/public/otpAuth.public.service.test.ts`
 
@@ -267,9 +283,9 @@ describe('requestOtp', () => {
   it('rate-limits: throws when >=5 challenges in the last hour for the destination', async () => {
     prismaMock.otpChallenge.updateMany.mockResolvedValue({ count: 0 } as any)
     prismaMock.otpChallenge.count.mockResolvedValueOnce(0).mockResolvedValueOnce(5) // 30s ok, hourly hit
-    await expect(
-      requestOtp({ venueId: 'v1', channel: 'whatsapp', destination: '+525555550199', ip: '1.2.3.4' }),
-    ).rejects.toThrow(/demasiad/i)
+    await expect(requestOtp({ venueId: 'v1', channel: 'whatsapp', destination: '+525555550199', ip: '1.2.3.4' })).rejects.toThrow(
+      /demasiad/i,
+    )
   })
 })
 ```
@@ -366,6 +382,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 5: `otpAuth.public.service` — `verifyOtp` + hybrid identity resolution
 
 **Files:**
+
 - Modify: `src/services/public/otpAuth.public.service.ts`
 - Modify: `tests/unit/services/public/otpAuth.public.service.test.ts`
 
@@ -377,32 +394,42 @@ import { generateCustomerToken } from '@/jwt.service'
 jest.mock('@/jwt.service', () => ({ generateCustomerToken: jest.fn(() => 'tok_123') }))
 
 const validChallenge = (over = {}) => ({
-  id: 'otp-1', channel: 'whatsapp', destination: '+525555550199',
+  id: 'otp-1',
+  channel: 'whatsapp',
+  destination: '+525555550199',
   codeHash: require('@/lib/otp').hashOtpCode('123456'),
-  expiresAt: new Date(Date.now() + 60_000), attempts: 0, maxAttempts: 5, consumedAt: null, ...over,
+  expiresAt: new Date(Date.now() + 60_000),
+  attempts: 0,
+  maxAttempts: 5,
+  consumedAt: null,
+  ...over,
 })
 
 describe('verifyOtp', () => {
-  beforeEach(() => { jest.resetAllMocks(); process.env.OTP_PEPPER = 'test-pepper'
-    ;(generateCustomerToken as jest.Mock).mockReturnValue('tok_123') })
+  beforeEach(() => {
+    jest.resetAllMocks()
+    process.env.OTP_PEPPER = 'test-pepper'
+    ;(generateCustomerToken as jest.Mock).mockReturnValue('tok_123')
+  })
 
   it('rejects an expired challenge → 400', async () => {
     prismaMock.otpChallenge.findFirst.mockResolvedValue(validChallenge({ expiresAt: new Date(Date.now() - 1000) }))
-    await expect(verifyOtp({ venueId: 'v1', channel: 'whatsapp', destination: '+525555550199', code: '123456' }))
-      .rejects.toThrow(/expir/i)
+    await expect(verifyOtp({ venueId: 'v1', channel: 'whatsapp', destination: '+525555550199', code: '123456' })).rejects.toThrow(/expir/i)
   })
 
   it('wrong code increments attempts and rejects generically', async () => {
     prismaMock.otpChallenge.findFirst.mockResolvedValue(validChallenge())
-    await expect(verifyOtp({ venueId: 'v1', channel: 'whatsapp', destination: '+525555550199', code: '000000' }))
-      .rejects.toThrow(/incorrecto/i)
+    await expect(verifyOtp({ venueId: 'v1', channel: 'whatsapp', destination: '+525555550199', code: '000000' })).rejects.toThrow(
+      /incorrecto/i,
+    )
     expect(prismaMock.otpChallenge.update).toHaveBeenCalledWith(expect.objectContaining({ data: { attempts: 1 } }))
   })
 
   it('too many attempts → invalidates + rejects', async () => {
     prismaMock.otpChallenge.findFirst.mockResolvedValue(validChallenge({ attempts: 5 }))
-    await expect(verifyOtp({ venueId: 'v1', channel: 'whatsapp', destination: '+525555550199', code: '123456' }))
-      .rejects.toThrow(/intentos/i)
+    await expect(verifyOtp({ venueId: 'v1', channel: 'whatsapp', destination: '+525555550199', code: '123456' })).rejects.toThrow(
+      /intentos/i,
+    )
   })
 
   it('valid code → resolves Consumer+Customer, issues customer-token', async () => {
@@ -436,7 +463,10 @@ export async function verifyOtp(args: {
   channel: 'whatsapp' | 'email'
   destination: string
   code: string
-}): Promise<{ token: string; customer: { id: string; firstName: string | null; lastName: string | null; email: string | null; phone: string | null } }> {
+}): Promise<{
+  token: string
+  customer: { id: string; firstName: string | null; lastName: string | null; email: string | null; phone: string | null }
+}> {
   const destination = args.channel === 'email' ? normalizeEmail(args.destination) : normalizePhone(args.destination)
 
   const challenge = await prisma.otpChallenge.findFirst({
@@ -480,7 +510,8 @@ async function resolveIdentity(venueId: string, key: { phone?: string; email?: s
     if (matches.length > 1) logger.warn(`[OTP] multiple Consumers share phone ${key.phone}; using oldest ${matches[0].id}`)
     consumer = matches[0] ?? (await prisma.consumer.create({ data: { phone: key.phone } }))
   } else {
-    consumer = (await prisma.consumer.findFirst({ where: { email: key.email } })) ?? (await prisma.consumer.create({ data: { email: key.email } }))
+    consumer =
+      (await prisma.consumer.findFirst({ where: { email: key.email } })) ?? (await prisma.consumer.create({ data: { email: key.email } }))
   }
 
   // 2. Per-venue Customer (by phone/email or by consumerId), create+link if none.
@@ -500,7 +531,8 @@ async function resolveIdentity(venueId: string, key: { phone?: string; email?: s
 }
 ```
 
-- [ ] **Step 4: Add `consumer` + `customer` to the prisma mock** if not already present in `tests/__helpers__/setup.ts` (customer is likely there; add `consumer: createMockModel(),` if missing).
+- [ ] **Step 4: Add `consumer` + `customer` to the prisma mock** if not already present in `tests/__helpers__/setup.ts` (customer is likely
+      there; add `consumer: createMockModel(),` if missing).
 
 - [ ] **Step 5: Run — expect PASS**
 
@@ -520,6 +552,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 6: Zod schemas + controllers + routes
 
 **Files:**
+
 - Modify: `src/schemas/dashboard/creditPack.schema.ts` (add OTP schemas)
 - Create: `src/controllers/public/otpAuth.public.controller.ts`
 - Modify: `src/routes/public.routes.ts` (additive — coordinate with CFDI session)
@@ -557,7 +590,9 @@ export async function requestOtp(req: Request, res: Response, next: NextFunction
     const channel = phone ? 'whatsapp' : 'email'
     await otpService.requestOtp({ venueId: venue.id, channel, destination: (phone ?? email)!, ip: req.ip })
     res.json({ ok: true })
-  } catch (error) { next(error) }
+  } catch (error) {
+    next(error)
+  }
 }
 
 export async function verifyOtp(req: Request, res: Response, next: NextFunction) {
@@ -567,31 +602,42 @@ export async function verifyOtp(req: Request, res: Response, next: NextFunction)
     const channel = phone ? 'whatsapp' : 'email'
     const result = await otpService.verifyOtp({ venueId: venue.id, channel, destination: (phone ?? email)!, code })
     res.json(result)
-  } catch (error) { next(error) }
+  } catch (error) {
+    next(error)
+  }
 }
 ```
 
-> If `resolveVenueBySlug` is not exported from `reservation.public.controller.ts`, copy the same venue-lookup the `customerPortal.public.controller.ts` `login` handler uses (it resolves the venue from `:venueSlug`). Do not invent a new lookup.
+> If `resolveVenueBySlug` is not exported from `reservation.public.controller.ts`, copy the same venue-lookup the
+> `customerPortal.public.controller.ts` `login` handler uses (it resolves the venue from `:venueSlug`). Do not invent a new lookup.
 
-- [ ] **Step 3: Wire routes** in `public.routes.ts` — add the import to the `reservation.schema`/`creditPack.schema` import block and register (additive, near the customer routes):
+- [ ] **Step 3: Wire routes** in `public.routes.ts` — add the import to the `reservation.schema`/`creditPack.schema` import block and
+      register (additive, near the customer routes):
 
 ```ts
 import * as otpAuthController from '../controllers/public/otpAuth.public.controller'
 // ...add otpRequestSchema, otpVerifySchema to the creditPack.schema import...
 
-router.post('/venues/:venueSlug/auth/otp/request', writeLimit,
+router.post(
+  '/venues/:venueSlug/auth/otp/request',
+  writeLimit,
   validateRequest(z.object({ params: publicVenueParamsSchema, body: otpRequestSchema })),
-  otpAuthController.requestOtp)
+  otpAuthController.requestOtp,
+)
 
-router.post('/venues/:venueSlug/auth/otp/verify', authLimit,
+router.post(
+  '/venues/:venueSlug/auth/otp/verify',
+  authLimit,
   validateRequest(z.object({ params: publicVenueParamsSchema, body: otpVerifySchema })),
-  otpAuthController.verifyOtp)
+  otpAuthController.verifyOtp,
+)
 ```
 
 - [ ] **Step 4: Typecheck + lint**
 
-Run: `npx tsc -p tsconfig.build.json --noEmit 2>&1 | grep -c "error TS"` → `0`
-Run: `npx eslint src/controllers/public/otpAuth.public.controller.ts src/routes/public.routes.ts src/schemas/dashboard/creditPack.schema.ts` → exit 0
+Run: `npx tsc -p tsconfig.build.json --noEmit 2>&1 | grep -c "error TS"` → `0` Run:
+`npx eslint src/controllers/public/otpAuth.public.controller.ts src/routes/public.routes.ts src/schemas/dashboard/creditPack.schema.ts` →
+exit 0
 
 - [ ] **Step 5: Commit**
 
@@ -607,6 +653,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 7: Widget API client
 
 **Files:**
+
 - Modify: `avoqado-booking-widget/src/api/booking.ts`
 
 - [ ] **Step 1: Add `requestOtp` + `verifyOtp`** (after `customerLogin`)
@@ -639,6 +686,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Task 8: Widget login UI — "Entrar con WhatsApp"
 
 **Files:**
+
 - Modify: `avoqado-booking-widget/src/components/CustomerPortal.tsx`
 - Modify: `avoqado-booking-widget/src/i18n/es.json`, `src/i18n/en.json`
 
@@ -661,9 +709,13 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
   "orPassword": "o entra con correo y contraseña"
 }
 ```
+
 (en.json: English equivalents.)
 
-- [ ] **Step 2: Add the OTP login mode to `CustomerPortal`** — a two-step form (phone → code) that calls `api.requestOtp` then `api.verifyOtp`, stores the returned token via the same mechanism the existing email/password login uses (set the customer token + load portal), with a 30s resend cooldown and a "usar correo" toggle. Keep the existing email+password form behind an "o entra con correo y contraseña" link.
+- [ ] **Step 2: Add the OTP login mode to `CustomerPortal`** — a two-step form (phone → code) that calls `api.requestOtp` then
+      `api.verifyOtp`, stores the returned token via the same mechanism the existing email/password login uses (set the customer token +
+      load portal), with a 30s resend cooldown and a "usar correo" toggle. Keep the existing email+password form behind an "o entra con
+      correo y contraseña" link.
 
 Key handlers (wire into the existing portal state/token storage — follow the current `customerLogin` success path):
 
@@ -676,20 +728,28 @@ const [otpError, setOtpError] = useState<string | null>(null)
 
 async function sendCode() {
   setOtpError(null)
-  try { await api.requestOtp(venueSlug, { phone }); setOtpStep('code'); setCooldown(30) }
-  catch (e: any) { setOtpError(e.data?.message ?? t('errors.generic')) }
+  try {
+    await api.requestOtp(venueSlug, { phone })
+    setOtpStep('code')
+    setCooldown(30)
+  } catch (e: any) {
+    setOtpError(e.data?.message ?? t('errors.generic'))
+  }
 }
 async function submitCode() {
   setOtpError(null)
   try {
     const auth = await api.verifyOtp(venueSlug, { phone, code })
     onAuthenticated(auth) // same callback/token-store the email login uses
-  } catch (e: any) { setOtpError(e.data?.message ?? t('otp.errorInvalid')) }
+  } catch (e: any) {
+    setOtpError(e.data?.message ?? t('otp.errorInvalid'))
+  }
 }
 // cooldown tick: useEffect(() => { if (!cooldown) return; const id=setInterval(()=>setCooldown(c=>c-1),1000); return ()=>clearInterval(id) }, [cooldown])
 ```
 
-> Use the EXACT token-storage path the current `customerLogin` success uses in this component (find where `customerLogin`'s result is consumed and reuse it for `verifyOtp`'s identical `AuthResponse`). Do not invent a new token store.
+> Use the EXACT token-storage path the current `customerLogin` success uses in this component (find where `customerLogin`'s result is
+> consumed and reuse it for `verifyOtp`'s identical `AuthResponse`). Do not invent a new token store.
 
 - [ ] **Step 3: Build**
 
@@ -718,7 +778,9 @@ Run: `npx jest tests/unit/lib/otp.test.ts tests/unit/services/public/otpAuth.pub
 curl -s -X POST "http://localhost:3000/api/v1/public/venues/<slug>/auth/otp/request" \
   -H "Content-Type: application/json" -d '{"phone":"+19565215642"}'
 ```
-Expected: `{"ok":true}` + a WhatsApp message arrives with the code. **Check the backend log** for `WhatsApp template "otp_verify" sent` — if it errors with "template ... does not exist in es_MX" → fix the language (Task 3 ⚠️#1); if it rejects the button → Task 3 ⚠️#2.
+
+Expected: `{"ok":true}` + a WhatsApp message arrives with the code. **Check the backend log** for `WhatsApp template "otp_verify" sent` — if
+it errors with "template ... does not exist in es_MX" → fix the language (Task 3 ⚠️#1); if it rejects the button → Task 3 ⚠️#2.
 
 - [ ] **Step 3: Live verify** with the received code:
 
@@ -726,21 +788,30 @@ Expected: `{"ok":true}` + a WhatsApp message arrives with the code. **Check the 
 curl -s -X POST "http://localhost:3000/api/v1/public/venues/<slug>/auth/otp/verify" \
   -H "Content-Type: application/json" -d '{"phone":"+19565215642","code":"<received>"}'
 ```
+
 Expected: `{ token, customer }`. Verify in DB a `Consumer` (phone) + `Customer` (venue, consumerId, provider=PHONE) exist and are linked.
 
-- [ ] **Step 4: Widget E2E** — build the widget pointing at localhost, open the portal login, "Entrar con WhatsApp" → phone → code → portal loads with the customer's reservations. (Same local-bundle method used for the reschedule E2E.)
+- [ ] **Step 4: Widget E2E** — build the widget pointing at localhost, open the portal login, "Entrar con WhatsApp" → phone → code → portal
+      loads with the customer's reservations. (Same local-bundle method used for the reschedule E2E.)
 
-- [ ] **Step 5: Cleanup any test rows** (delete the test `OtpChallenge`/`Consumer`/`Customer` you created) and confirm email+password login + the `?manage=` magic-link still work (regression).
+- [ ] **Step 5: Cleanup any test rows** (delete the test `OtpChallenge`/`Consumer`/`Customer` you created) and confirm email+password
+      login + the `?manage=` magic-link still work (regression).
 
 ---
 
 ## Self-review (run before handoff)
 
-- **Spec coverage:** OtpChallenge ✓(T1), AuthProvider.PHONE ✓(T1), hashing/expiry/attempts ✓(T2,T4,T5), request/verify routes ✓(T6), hybrid identity (Consumer 0/1/>1 + per-venue Customer upsert) ✓(T5), WhatsApp+email channels ✓(T3,T4), customer-token reuse ✓(T5), widget UI+i18n ✓(T7,T8), security/rate-limit ✓(T4), MCP N/A ✓(none), migration coordination ✓(T1 step 3). No gaps.
-- **Placeholders:** none — every code step has full code; the two send unknowns (language, button sub_type) are explicit verification steps, not hand-waves.
-- **Type consistency:** `verifyOtp` returns `{ token, customer }` matching `loginCustomer`/`AuthResponse`; `generateCustomerToken(customerId, venueId)` matches jwt.service; `requestOtp` args match the controller call.
+- **Spec coverage:** OtpChallenge ✓(T1), AuthProvider.PHONE ✓(T1), hashing/expiry/attempts ✓(T2,T4,T5), request/verify routes ✓(T6), hybrid
+  identity (Consumer 0/1/>1 + per-venue Customer upsert) ✓(T5), WhatsApp+email channels ✓(T3,T4), customer-token reuse ✓(T5), widget UI+i18n
+  ✓(T7,T8), security/rate-limit ✓(T4), MCP N/A ✓(none), migration coordination ✓(T1 step 3). No gaps.
+- **Placeholders:** none — every code step has full code; the two send unknowns (language, button sub_type) are explicit verification steps,
+  not hand-waves.
+- **Type consistency:** `verifyOtp` returns `{ token, customer }` matching `loginCustomer`/`AuthResponse`;
+  `generateCustomerToken(customerId, venueId)` matches jwt.service; `requestOtp` args match the controller call.
 
 ---
 
 ## NOT in scope (deferred)
-- SMS fallback. Auto-unify OAuth(email) ↔ OTP(phone) Consumers. Consumer-app session promotion. "Remember device" longer tokens. MCP tool (auth is not an ops action).
+
+- SMS fallback. Auto-unify OAuth(email) ↔ OTP(phone) Consumers. Consumer-app session promotion. "Remember device" longer tokens. MCP tool
+  (auth is not an ops action).

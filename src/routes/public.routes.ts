@@ -8,6 +8,7 @@ import { submitReviewFromReceipt, checkReviewStatus, getReviewForReceipt } from 
 import * as reservationPublicController from '../controllers/public/reservation.public.controller'
 import * as creditPackPublicController from '../controllers/public/creditPack.public.controller'
 import * as customerPortalController from '../controllers/public/customerPortal.public.controller'
+import * as otpAuthController from '../controllers/public/otpAuth.public.controller'
 import * as paymentLinkPublicController from '../controllers/public/paymentLink.public.controller'
 import * as venueCheckoutController from '../controllers/public/venueCheckout.public.controller'
 import { submitContact, submitLabsBrief } from '../controllers/public/landing.public.controller'
@@ -43,6 +44,8 @@ import {
   customerRegisterSchema,
   customerLoginSchema,
   customerUpdateProfileSchema,
+  otpRequestSchema,
+  otpVerifySchema,
 } from '../schemas/dashboard/creditPack.schema'
 import { autofacturaSchema } from '../schemas/dashboard/cfdi.schema'
 import {
@@ -211,6 +214,21 @@ router.patch(
   authenticateCustomer,
   validateRequest(customerUpdateProfileSchema),
   customerPortalController.updateProfile,
+)
+
+// ---- Passwordless OTP login (WhatsApp / email) ----
+
+router.post(
+  '/venues/:venueSlug/auth/otp/request',
+  writeLimit,
+  validateRequest(z.object({ params: publicVenueParamsSchema, body: otpRequestSchema })),
+  otpAuthController.requestOtp,
+)
+router.post(
+  '/venues/:venueSlug/auth/otp/verify',
+  authLimit,
+  validateRequest(z.object({ params: publicVenueParamsSchema, body: otpVerifySchema })),
+  otpAuthController.verifyOtp,
 )
 
 // ---- Public Payment Link Routes (unauthenticated) ----

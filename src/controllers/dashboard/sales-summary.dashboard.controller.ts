@@ -50,7 +50,17 @@ export async function salesSummaryReport(req: Request, res: Response, next: Next
     if (!venueId) {
       throw new BadRequestError('No venue context for the request')
     }
-    const { startDate, endDate, groupBy, reportType, merchantAccountId, paymentMethod, cardType, includeMerchantBreakdown } = req.query
+    const {
+      startDate,
+      endDate,
+      groupBy,
+      reportType,
+      merchantAccountId,
+      paymentMethod,
+      cardType,
+      includeMerchantBreakdown,
+      includeSettlementProjection,
+    } = req.query
 
     // Validate required params
     if (!startDate || typeof startDate !== 'string') {
@@ -107,6 +117,7 @@ export async function salesSummaryReport(req: Request, res: Response, next: Next
       paymentMethod: typeof paymentMethod === 'string' ? (paymentMethod as PaymentMethodFilter) : undefined,
       cardType: typeof cardType === 'string' ? (cardType as CardTypeFilter) : undefined,
       includeMerchantBreakdown: includeMerchantBreakdown === 'true',
+      includeSettlementProjection: includeSettlementProjection === 'true',
     }
 
     const report = await getSalesSummary(venueId, filters)
