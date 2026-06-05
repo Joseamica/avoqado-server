@@ -1,4 +1,12 @@
-import { summarizeSales, rankTopProducts, rankTopStaff, rankCategories, summarizeByPaymentMethod } from '../../../src/mcp/tools/sales'
+import {
+  summarizeSales,
+  rankTopProducts,
+  rankTopStaff,
+  rankCategories,
+  summarizeByPaymentMethod,
+  rankChannels,
+  summarizePeakHours,
+} from '../../../src/mcp/tools/sales'
 import { auditTerminalConfig } from '../../../src/mcp/tools/terminals'
 
 // Avoid ts-jest compiling the huge access.service graph (the tool modules import it
@@ -157,4 +165,42 @@ describe('summarizeByPaymentMethod', () => {
     expect(out[0].total).toBe(99.99)
   })
   it('handles empty', () => expect(summarizeByPaymentMethod([])).toEqual([]))
+})
+
+describe('rankChannels', () => {
+  const rows = [
+    { channel: 'TAKEOUT', revenue: 300.126, count: 12, percentage: 30.004 },
+    { channel: 'DINE_IN', revenue: 700, count: 40, percentage: 70 },
+  ]
+  it('ranks by revenue (desc), limits, rounds revenue + percentage', () => {
+    const out = rankChannels(rows, 1)
+    expect(out).toHaveLength(1)
+    expect(out[0].channel).toBe('DINE_IN')
+  })
+  it('rounds money + percentage, passes count through', () => {
+    const [takeout] = rankChannels([rows[0]])
+    expect(takeout.revenue).toBe(300.13)
+    expect(takeout.percentage).toBe(30)
+    expect(takeout.count).toBe(12)
+  })
+  it('handles empty', () => expect(rankChannels([])).toEqual([]))
+})
+
+describe('summarizePeakHours', () => {
+  const rows = [
+    { hour: 14, sales: 500.126, transactions: 20 },
+    { hour: 9, sales: 200, transactions: 8 },
+    { hour: 21, sales: 350, transactions: 15 },
+  ]
+  it('orders by hour ascending and rounds sales', () => {
+    const out = summarizePeakHours(rows)
+    expect(out.map(h => h.hour)).toEqual([9, 14, 21])
+    expect(out.find(h => h.hour === 14)).toEqual({ hour: 14, sales: 500.13, transactions: 20 })
+  })
+  it('does not mutate input and handles empty', () => {
+    const copy = JSON.parse(JSON.stringify(rows))
+    summarizePeakHours(rows)
+    expect(rows).toEqual(copy)
+    expect(summarizePeakHours([])).toEqual([])
+  })
 })

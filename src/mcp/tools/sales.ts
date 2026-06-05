@@ -132,6 +132,32 @@ export function summarizeByPaymentMethod(payments: AnalyticsPaymentRow[]): Payme
     .sort((a, b) => b.total - a.total)
 }
 
+export interface ChannelMixRow {
+  channel: string
+  revenue: number
+  count: number
+  percentage: number
+}
+
+/** Top channels by revenue (desc), rounded. The service already sorts; we re-sort defensively. */
+export function rankChannels(rows: ChannelMixRow[], limit = 20): ChannelMixRow[] {
+  return [...rows]
+    .sort((a, b) => b.revenue - a.revenue)
+    .slice(0, limit)
+    .map(c => ({ channel: c.channel, revenue: round2(c.revenue), count: c.count, percentage: round2(c.percentage) }))
+}
+
+export interface PeakHourRow {
+  hour: number
+  sales: number
+  transactions: number
+}
+
+/** Order peak-hour buckets by hour ascending (0–23, venue tz) for a readable daily profile; round sales. */
+export function summarizePeakHours(rows: PeakHourRow[]): PeakHourRow[] {
+  return [...rows].sort((a, b) => a.hour - b.hour).map(h => ({ hour: h.hour, sales: round2(h.sales), transactions: h.transactions }))
+}
+
 export function registerSalesTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
   server.tool(
@@ -228,6 +254,39 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
       const byMethod = summarizeByPaymentMethod(data.payments)
       const gross = round2(byMethod.reduce((s, m) => s + m.total, 0))
       return text({ venueId, gross, byMethod })
+    },
+  )
+
+  server.tool(
+    'channel_mix',
+    'Sales by order channel/type (dine-in, takeout, delivery, etc.) in a venue you can access, over a date range (default last 7 days): revenue, order count, and % of revenue per channel, ranked by revenue. Pass venueId; optionally fromDate/toDate (YYYY-MM-DD) and a limit.',
+    {
+      venueId: z.string().describe('Venue to analyze (must be in your scope)'),
+      fromDate: z.string().optional().describe('Start date YYYY-MM-DD (default: 7 days ago)'),
+      toDate: z.string().optional().describe('End date YYYY-MM-DD (default: today)'),
+      limit: z.number().int().positive().max(50).optional().describe('How many channels to return (default 20)'),
+    },
+    async ({ venueId, fromDate, toDate, limit }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const rows = (await getChartData(venueId, 'channel-mix', { fromDate, toDate })) as ChannelMixRow[]
+      const channels = rankChannels(rows, limit ?? 20)
+      return text({ venueId, count: channels.length, channels })
+    },
+  )
+
+  server.tool(
+    'peak_hours',
+    'Busiest hours of the day in a venue you can access, over a date range (default last 7 days): sales and transaction count per hour of day (0–23, venue timezone), ordered by hour. Answers "¿cuáles son mis horas pico?". Pass venueId; optionally fromDate/toDate (YYYY-MM-DD).',
+    {
+      venueId: z.string().describe('Venue to analyze (must be in your scope)'),
+      fromDate: z.string().optional().describe('Start date YYYY-MM-DD (default: 7 days ago)'),
+      toDate: z.string().optional().describe('End date YYYY-MM-DD (default: today)'),
+    },
+    async ({ venueId, fromDate, toDate }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const rows = (await getChartData(venueId, 'peak-hours', { fromDate, toDate })) as PeakHourRow[]
+      const hours = summarizePeakHours(rows)
+      return text({ venueId, hours })
     },
   )
 }
