@@ -48,7 +48,15 @@ module.exports = {
       displayName: 'unit',
       testMatch: ['<rootDir>/tests/unit/**/*.test.ts'],
       transform: {
-        '^.+\\.(ts|tsx|js|jsx|mjs)$': 'ts-jest',
+        // isolatedModules: transpile-only (no per-file type-checking) in tests.
+        // Type safety is still enforced by `npm run build` / `pre-deploy` (tsc).
+        // Without this, ts-jest keeps the full TS program (incl. the huge Prisma
+        // type graph, 206+ models) in memory → ~3 GB heap PER worker. On the CI
+        // runner, 2 workers × 3 GB + ts-jest native overhead exceed the container
+        // memory → the OS SIGKILLs Jest workers, surfacing as
+        // "Jest worker encountered N child process exceptions, exceeding retry limit".
+        // Transpile-only drops this to ~80 MB/worker and slashes runtime.
+        '^.+\\.(ts|tsx|js|jsx|mjs)$': ['ts-jest', { isolatedModules: true }],
       },
       // satori|satori-html|ultrahtml are pure ESM and ship `import`
       // syntax in their dist. Without transforming them, ts-jest
@@ -72,7 +80,15 @@ module.exports = {
       displayName: 'api-tests',
       testMatch: ['<rootDir>/tests/api-tests/**/*.api.test.ts'],
       transform: {
-        '^.+\\.(ts|tsx|js|jsx|mjs)$': 'ts-jest',
+        // isolatedModules: transpile-only (no per-file type-checking) in tests.
+        // Type safety is still enforced by `npm run build` / `pre-deploy` (tsc).
+        // Without this, ts-jest keeps the full TS program (incl. the huge Prisma
+        // type graph, 206+ models) in memory → ~3 GB heap PER worker. On the CI
+        // runner, 2 workers × 3 GB + ts-jest native overhead exceed the container
+        // memory → the OS SIGKILLs Jest workers, surfacing as
+        // "Jest worker encountered N child process exceptions, exceeding retry limit".
+        // Transpile-only drops this to ~80 MB/worker and slashes runtime.
+        '^.+\\.(ts|tsx|js|jsx|mjs)$': ['ts-jest', { isolatedModules: true }],
       },
       transformIgnorePatterns: ['node_modules/(?!(@scure|@noble|otplib|@otplib|satori|satori-html|ultrahtml))'],
       setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/setup.ts'],
@@ -93,7 +109,15 @@ module.exports = {
       displayName: 'workflows',
       testMatch: ['<rootDir>/tests/workflows/**/*.workflow.test.ts'],
       transform: {
-        '^.+\\.(ts|tsx|js|jsx|mjs)$': 'ts-jest',
+        // isolatedModules: transpile-only (no per-file type-checking) in tests.
+        // Type safety is still enforced by `npm run build` / `pre-deploy` (tsc).
+        // Without this, ts-jest keeps the full TS program (incl. the huge Prisma
+        // type graph, 206+ models) in memory → ~3 GB heap PER worker. On the CI
+        // runner, 2 workers × 3 GB + ts-jest native overhead exceed the container
+        // memory → the OS SIGKILLs Jest workers, surfacing as
+        // "Jest worker encountered N child process exceptions, exceeding retry limit".
+        // Transpile-only drops this to ~80 MB/worker and slashes runtime.
+        '^.+\\.(ts|tsx|js|jsx|mjs)$': ['ts-jest', { isolatedModules: true }],
       },
       transformIgnorePatterns: ['node_modules/(?!(@scure|@noble|otplib|@otplib|satori|satori-html|ultrahtml))'],
       setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/setup.ts'],
@@ -114,7 +138,15 @@ module.exports = {
       displayName: 'integration',
       testMatch: ['<rootDir>/tests/integration/**/*.test.ts'],
       transform: {
-        '^.+\\.(ts|tsx|js|jsx|mjs)$': 'ts-jest',
+        // isolatedModules: transpile-only (no per-file type-checking) in tests.
+        // Type safety is still enforced by `npm run build` / `pre-deploy` (tsc).
+        // Without this, ts-jest keeps the full TS program (incl. the huge Prisma
+        // type graph, 206+ models) in memory → ~3 GB heap PER worker. On the CI
+        // runner, 2 workers × 3 GB + ts-jest native overhead exceed the container
+        // memory → the OS SIGKILLs Jest workers, surfacing as
+        // "Jest worker encountered N child process exceptions, exceeding retry limit".
+        // Transpile-only drops this to ~80 MB/worker and slashes runtime.
+        '^.+\\.(ts|tsx|js|jsx|mjs)$': ['ts-jest', { isolatedModules: true }],
       },
       transformIgnorePatterns: ['node_modules/(?!(@scure|@noble|otplib|@otplib|satori|satori-html|ultrahtml))'],
       setupFilesAfterEnv: ['<rootDir>/tests/__helpers__/integration-setup.ts'],
