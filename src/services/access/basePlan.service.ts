@@ -20,6 +20,22 @@ export async function venueHasActiveBasePlan(venueId: string): Promise<boolean> 
   return true
 }
 
+/**
+ * Whether a venue may use a specific premium feature — mirrors checkFeatureAccess so callers
+ * OUTSIDE the HTTP middleware (e.g. the customer MCP) can enforce the same paid-plan gating and
+ * not bypass it. True when the venue's own `VenueFeature` for `featureCode` is active (not
+ * suspended, trial not expired), OR an active base plan blanket-grants it (for non-tier codes).
+ */
+export async function venueHasFeatureAccess(venueId: string, featureCode: string): Promise<boolean> {
+  const vf = await prisma.venueFeature.findFirst({
+    where: { venueId, feature: { code: featureCode } },
+    select: { active: true, endDate: true, suspendedAt: true },
+  })
+  if (vf && vf.active && !vf.suspendedAt && (!vf.endDate || vf.endDate >= new Date())) return true
+  if (!(PAID_PLAN_TIER_CODES as readonly string[]).includes(featureCode) && (await venueHasActiveBasePlan(venueId))) return true
+  return false
+}
+
 /** IVA rate baked into the inclusive Stripe price. base = gross / (1 + IVA_RATE). */
 export const IVA_RATE = 0.16
 
