@@ -20,6 +20,41 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
 
   server.tool(
+    'list_menu',
+    'List the menu items of a venue you can access: name, price, whether it is active ("86" = disabled), category and type. Optionally filter by name or only available items. Pass venueId. Handy to look up exact names/prices before changing them.',
+    {
+      venueId: z.string().describe('Venue whose menu to list (must be in your scope)'),
+      search: z.string().optional().describe('Filter by item name (partial, case-insensitive)'),
+      activeOnly: z.boolean().optional().describe('Only available items (exclude "86"/disabled)'),
+      limit: z.number().int().positive().max(200).optional().describe('Max items to return (default 100)'),
+    },
+    async ({ venueId, search, activeOnly, limit }) => {
+      const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const products = await prisma.product.findMany({
+        where: {
+          ...where,
+          ...(search ? { name: { contains: search, mode: 'insensitive' as const } } : {}),
+          ...(activeOnly ? { active: true } : {}),
+        },
+        select: { name: true, price: true, active: true, type: true, category: { select: { name: true } } },
+        orderBy: [{ active: 'desc' }, { name: 'asc' }],
+        take: limit ?? 100,
+      })
+      return text({
+        venueId,
+        count: products.length,
+        items: products.map(p => ({
+          name: p.name,
+          price: Number(p.price),
+          active: p.active,
+          type: p.type,
+          category: p.category?.name ?? null,
+        })),
+      })
+    },
+  )
+
+  server.tool(
     'set_menu_item_active',
     'Enable or disable ("86") a menu item in a venue you can access, found by name. Disabled items stop showing/selling. This WRITES — it changes the menu; requires products:update. If the name matches several items it returns the matches so you can be specific.',
     {
