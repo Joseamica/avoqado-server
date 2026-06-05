@@ -45,8 +45,24 @@ describe('resolveScope', () => {
     expect((await resolveScope('admin', 'org-1')).allowedVenueIds).toEqual([])
   })
 
-  it('no/inactive org membership -> empty scope', async () => {
+  it('no org membership but has StaffVenue -> those venues (venue-level owner fallback, e.g. Mindform)', async () => {
     m.staffOrganization.findUnique.mockResolvedValue(null)
-    expect((await resolveScope('x', 'org-1')).allowedVenueIds).toEqual([])
+    m.staffVenue.findMany.mockResolvedValue([{ venueId: 'V-mindform' }])
+    const scope = await resolveScope('venue-owner', 'org-1')
+    expect(scope.allowedVenueIds).toEqual(['V-mindform'])
+    expect(m.venue.findMany).not.toHaveBeenCalled() // not treated as an org-OWNER
+  })
+
+  it('no org membership and no StaffVenue -> empty', async () => {
+    m.staffOrganization.findUnique.mockResolvedValue(null)
+    m.staffVenue.findMany.mockResolvedValue([])
+    expect((await resolveScope('orphan', 'org-1')).allowedVenueIds).toEqual([])
+  })
+
+  it('deactivated org membership -> empty (access revoked; no venue fallback)', async () => {
+    m.staffOrganization.findUnique.mockResolvedValue({ role: 'OWNER', isActive: false })
+    const scope = await resolveScope('revoked', 'org-1')
+    expect(scope.allowedVenueIds).toEqual([])
+    expect(m.staffVenue.findMany).not.toHaveBeenCalled()
   })
 })

@@ -1,7 +1,7 @@
 import express, { type Request, type Response, type Express } from 'express'
 import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js'
 import { authenticateForMcp, McpLoginError } from './credentials'
-import { getPrimaryOrganizationId } from '@/services/staffOrganization.service'
+import { resolveActiveOrganizationId } from '@/services/staffOrganization.service'
 import { createAuthCode } from './tokenStore'
 import { renderLoginPage } from './loginPage'
 import { provider } from './provider'
@@ -34,7 +34,7 @@ function approveHandler() {
 
     let activeOrg: string
     try {
-      activeOrg = await getPrimaryOrganizationId(staffId)
+      activeOrg = await resolveActiveOrganizationId(staffId)
     } catch {
       return reRender('Your account has no active organization.')
     }

@@ -11,23 +11,31 @@ export interface McpScope {
 
 /**
  * What a connected Staff may touch in their active org.
- *   org-level OWNER (OrgRole.OWNER)   -> ALL venues in the org
- *   ADMIN / MEMBER / VIEWER (OrgRole) -> only their StaffVenue assignments in this org
- * Permissions resolved per venue (roles can differ per venue).
+ *   org-level OWNER (OrgRole.OWNER)        -> ALL venues in the org
+ *   ADMIN / MEMBER / VIEWER (OrgRole)      -> only their StaffVenue assignments in this org
+ *   no org membership, but has StaffVenue  -> only their assignments (venue-level owner/staff, e.g. Mindform)
+ *   org membership deactivated             -> nothing (access revoked)
+ * Permissions resolved per venue (getUserAccess is the final authority; roles can differ per venue).
  */
 export async function resolveScope(staffId: string, activeOrg: string): Promise<McpScope> {
-  const empty: McpScope = { staffId, activeOrg, allowedVenueIds: [], perVenueAccess: new Map() }
   const membership = await prisma.staffOrganization.findUnique({
     where: { staffId_organizationId: { staffId, organizationId: activeOrg } },
     select: { role: true, isActive: true },
   })
-  if (!membership || !membership.isActive) return empty
+  // An org membership that exists but is deactivated = access revoked → nothing.
+  if (membership && !membership.isActive) {
+    return { staffId, activeOrg, allowedVenueIds: [], perVenueAccess: new Map() }
+  }
 
   let venueIds: string[]
-  if (membership.role === 'OWNER') {
+  if (membership?.role === 'OWNER') {
+    // Org-level OWNER → every venue in the org.
     const venues = await prisma.venue.findMany({ where: { organizationId: activeOrg }, select: { id: true } })
     venueIds = venues.map(v => v.id)
   } else {
+    // Active ADMIN/MEMBER/VIEWER, OR no org membership at all (venue-level owner/staff with
+    // StaffVenue access but no StaffOrganization row, e.g. the Mindform owner) → only their
+    // assignments in this org. getUserAccess below is the final per-venue authority.
     const assignments = await prisma.staffVenue.findMany({
       where: { staffId, venue: { organizationId: activeOrg } },
       select: { venueId: true },

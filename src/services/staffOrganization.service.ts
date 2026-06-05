@@ -46,6 +46,29 @@ export async function getPrimaryOrganizationId(staffId: string): Promise<string>
 }
 
 /**
+ * Resolve a staff member's active organization for MCP/token scoping. Tries their
+ * org-level membership first (`StaffOrganization`), then falls back to the org of one
+ * of their venues — for venue-level owners/staff who have `StaffVenue` access but NO
+ * `StaffOrganization` row (e.g. an owner added straight to a venue, like the Mindform
+ * owner). Mirrors how dashboard login scopes by the selected venue's org. Still ONE org
+ * per call — downstream scope/permission checks are unchanged. Throws only if the staff
+ * has neither an org membership nor any venue.
+ */
+export async function resolveActiveOrganizationId(staffId: string): Promise<string> {
+  try {
+    return await getPrimaryOrganizationId(staffId)
+  } catch {
+    const sv = await prisma.staffVenue.findFirst({
+      where: { staffId },
+      select: { venueId: true },
+      orderBy: { startDate: 'asc' }, // deterministic; earliest venue assignment
+    })
+    if (!sv) throw new Error(`Staff has no organization membership or venue access: ${staffId}`)
+    return getOrganizationIdFromVenue(sv.venueId)
+  }
+}
+
+/**
  * Get organization ID from a venue.
  * Used when generating tokens with a specific venue context (login, switch).
  */
