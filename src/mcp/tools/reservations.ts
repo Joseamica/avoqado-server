@@ -4,7 +4,14 @@ import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
-import { rescheduleAppointmentReservation, cancelReservation } from '@/services/dashboard/reservation.dashboard.service'
+import {
+  rescheduleAppointmentReservation,
+  cancelReservation,
+  confirmReservation,
+  checkInReservation,
+  completeReservation,
+  markNoShow,
+} from '@/services/dashboard/reservation.dashboard.service'
 import { auditMcpWrite } from '../audit'
 
 export function registerReservationTools(server: McpServer, scope: McpScope) {
@@ -115,6 +122,58 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
           entityId: reservation.id,
           venueId: reservation.venueId,
           data: { confirmationCode, reason },
+        })
+        return text({ ok: true, reservation: updated })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'set_reservation_status',
+    'Advance a reservation through its lifecycle in a venue you can access: confirm it, check it in (guest arrived/seated), complete it, or mark a no-show. Identify it by confirmationCode (e.g. RES-PK6JHD). This WRITES — it changes the reservation status (the service validates the transition + handles notifications); requires reservations:update. To cancel, use cancel_reservation instead.',
+    {
+      venueId: z.string().describe('Venue that owns the reservation (must be in your scope)'),
+      confirmationCode: z.string().min(1).describe('Reservation confirmation code, e.g. RES-PK6JHD'),
+      status: z
+        .enum(['confirmed', 'checked_in', 'completed', 'no_show'])
+        .describe("New status: 'confirmed', 'checked_in' (guest arrived/seated), 'completed' (service delivered), or 'no_show'"),
+    },
+    async ({ venueId, confirmationCode, status }) => {
+      const where = guard.venueFilter(venueId) // throws ScopeError if out of scope
+      guard.requirePermission('reservations:update', venueId) // write gate (per-venue role)
+      const reservation = await prisma.reservation.findFirst({
+        where: { ...where, confirmationCode },
+        select: { id: true, venueId: true, status: true },
+      })
+      if (!reservation) {
+        return text({ ok: false, error: `No encontré la reservación ${confirmationCode} en ese venue.` })
+      }
+      try {
+        // 'SYSTEM' actor → recorded in the reservation's JSON statusLog (not a staff FK);
+        // the service validates the transition and throws on an illegal one.
+        let updated
+        switch (status) {
+          case 'confirmed':
+            updated = await confirmReservation(reservation.venueId, reservation.id, 'SYSTEM')
+            break
+          case 'checked_in':
+            updated = await checkInReservation(reservation.venueId, reservation.id, 'SYSTEM')
+            break
+          case 'completed':
+            updated = await completeReservation(reservation.venueId, reservation.id)
+            break
+          case 'no_show':
+            updated = await markNoShow(reservation.venueId, reservation.id, 'SYSTEM')
+            break
+        }
+        await auditMcpWrite(scope, {
+          action: `RESERVATION_${status.toUpperCase()}`,
+          entity: 'Reservation',
+          entityId: reservation.id,
+          venueId: reservation.venueId,
+          data: { confirmationCode, from: reservation.status, to: status },
         })
         return text({ ok: true, reservation: updated })
       } catch (err) {
