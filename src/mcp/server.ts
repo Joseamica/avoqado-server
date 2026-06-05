@@ -12,6 +12,7 @@ import { registerInventoryTools } from './tools/inventory'
 import { registerCfdiTools } from './tools/cfdi'
 import { registerCommissionTools } from './tools/commissions'
 import { registerSubscriptionTools } from './tools/subscriptions'
+import { registerMenuTools } from './tools/menu'
 
 /** Build a per-request MCP server bound to the caller's resolved scope. */
 async function buildServerForIdentity(staffId: string, activeOrg: string): Promise<McpServer> {
@@ -27,6 +28,7 @@ async function buildServerForIdentity(staffId: string, activeOrg: string): Promi
   registerCfdiTools(server, scope)
   registerCommissionTools(server, scope)
   registerSubscriptionTools(server, scope)
+  registerMenuTools(server, scope)
   return server
 }
 
