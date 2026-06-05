@@ -48,6 +48,7 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, confirmationCode, newStartsAt }) => {
       const where = guard.venueFilter(venueId) // throws if out of scope
+      guard.requirePermission('reservations:update', venueId) // write gate (per-venue role) — no low-role rescheduling
       const reservation = await prisma.reservation.findFirst({
         where: { ...where, confirmationCode },
         select: { id: true, venueId: true, classSessionId: true, status: true },
