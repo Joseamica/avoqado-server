@@ -388,6 +388,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   CustomerGroup: 'Customers, Consumers & Reviews',
   Consumer: 'Customers, Consumers & Reviews',
   ConsumerAuthAccount: 'Customers, Consumers & Reviews',
+  OtpChallenge: 'Customers, Consumers & Reviews',
   Review: 'Customers, Consumers & Reviews',
 
   // 20. System: Audit, Webhooks & Platform
