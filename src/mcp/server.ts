@@ -3,6 +3,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import type { Request, Response } from 'express'
 import { verifyMcpToken } from './mcpToken'
 import { resolveScope } from './scope'
+import { instrumentTools } from './instrument'
 import { registerVenueTools } from './tools/venues'
 import { registerSalesTools } from './tools/sales'
 import { registerOrderTools } from './tools/orders'
@@ -19,6 +20,7 @@ async function buildServerForIdentity(staffId: string, activeOrg: string): Promi
   const scope = await resolveScope(staffId, activeOrg)
 
   const server = new McpServer({ name: 'avoqado-customer-mcp', version: '0.1.0' })
+  instrumentTools(server, { staffId, org: activeOrg }) // log every tool call (must run BEFORE registering tools)
   registerVenueTools(server, scope)
   registerSalesTools(server, scope)
   registerOrderTools(server, scope)
