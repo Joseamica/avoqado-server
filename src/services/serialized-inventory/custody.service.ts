@@ -541,9 +541,18 @@ export class SimCustodyService {
    * Lists SIMs visible to the current promoter on TPV.
    * Filters to (PROMOTER_PENDING | PROMOTER_HELD | SOLD).
    * Excludes PROMOTER_REJECTED (no longer belongs to the promoter).
+   *
+   * For SOLD SIMs we also surface the back-office documentation review status
+   * (SaleVerification) so the TPV "Mis SIMs" badge can match the dashboard
+   * ("Revisar" when the proof-of-sale was rejected, "En revisión" while pending).
+   * SerializedItem and SaleVerification are otherwise fully decoupled — this is a
+   * read-only join, it does NOT change custody/sale state. The join mirrors
+   * GET /serialized-inventory/my-sales (tpv.routes.ts): pick the most recent
+   * payment that has a verification. Fields are nullable for backwards compat with
+   * older TPV clients (they simply ignore them) and for non-serialized venues.
    */
   async listMySims(actor: CustodyActor) {
-    return this.db.serializedItem.findMany({
+    const items = await this.db.serializedItem.findMany({
       where: {
         organizationId: actor.organizationId,
         assignedPromoterId: actor.staffId,
@@ -551,8 +560,47 @@ export class SimCustodyService {
       },
       include: {
         category: { select: { id: true, name: true, suggestedPrice: true } },
+        orderItem: {
+          select: {
+            order: {
+              select: {
+                payments: {
+                  select: {
+                    id: true,
+                    saleVerification: {
+                      select: {
+                        id: true,
+                        status: true,
+                        rejectionReasons: true,
+                        reviewNotes: true,
+                        reviewedAt: true,
+                      },
+                    },
+                  },
+                  orderBy: { createdAt: 'desc' },
+                },
+              },
+            },
+          },
+        },
       },
       orderBy: [{ promoterAcceptedAt: 'asc' }, { assignedPromoterAt: 'asc' }],
+    })
+
+    return items.map(item => {
+      const { orderItem, ...rest } = item
+      const paymentWithVerification = orderItem?.order?.payments?.find(p => p.saleVerification != null) ?? null
+      const verification = paymentWithVerification?.saleVerification ?? null
+      return {
+        ...rest,
+        // Back-office documentation review (nullable — no payment yet / non-serialized venue / legacy client)
+        paymentId: paymentWithVerification?.id ?? null,
+        verificationId: verification?.id ?? null,
+        verificationStatus: verification?.status ?? null,
+        rejectionReasons: verification?.rejectionReasons ?? null,
+        reviewNotes: verification?.reviewNotes ?? null,
+        reviewedAt: verification?.reviewedAt ?? null,
+      }
     })
   }
 

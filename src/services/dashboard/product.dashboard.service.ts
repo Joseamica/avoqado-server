@@ -49,6 +49,11 @@ export interface CreateProductDto {
 
   // General-purpose duration
   durationMinutes?: number
+
+  // Campos fiscales SAT (CFDI 4.0)
+  satProductKey?: string | null
+  satUnitKey?: string | null
+  objetoImp?: '01' | '02' | '03' | '04'
 }
 
 export interface UpdateProductDto {
@@ -97,6 +102,11 @@ export interface UpdateProductDto {
 
   // General-purpose duration
   durationMinutes?: number | null
+
+  // Campos fiscales SAT (CFDI 4.0)
+  satProductKey?: string | null
+  satUnitKey?: string | null
+  objetoImp?: '01' | '02' | '03' | '04'
 }
 
 export interface ReorderProductsDto {
@@ -497,6 +507,11 @@ export async function createProduct(venueId: string, productData: CreateProductD
 
             // General-purpose duration
             durationMinutes: productFields.durationMinutes,
+
+            // Campos fiscales SAT (CFDI 4.0)
+            ...(productFields.satProductKey !== undefined && { satProductKey: productFields.satProductKey }),
+            ...(productFields.satUnitKey !== undefined && { satUnitKey: productFields.satUnitKey }),
+            ...(productFields.objetoImp !== undefined && { objetoImp: productFields.objetoImp }),
 
             // Modifier groups
             modifierGroups: modifierGroupIds?.length

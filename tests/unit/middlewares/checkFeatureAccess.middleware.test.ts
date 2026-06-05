@@ -276,4 +276,49 @@ describe('checkFeatureAccess Middleware - Critical Tests', () => {
       })
     })
   })
+
+  describe('🏷️ TEST 5: Venue resolution (URL :venueId, not token)', () => {
+    it('checks the feature against the URL :venueId, not the token venue', async () => {
+      // Token is scoped to a DIFFERENT venue than the one being accessed in the URL.
+      mockReq.params = { venueId: 'venue_URL' }
+      ;(mockReq as any).authContext.venueId = 'venue_TOKEN'
+
+      const middleware = checkFeatureAccess('CFDI')
+      ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValueOnce({
+        id: 'vf_url',
+        venueId: 'venue_URL',
+        active: true,
+        endDate: null,
+        suspendedAt: null,
+        feature: { code: 'CFDI', name: 'Facturación CFDI 4.0' },
+      })
+
+      await middleware(mockReq as Request, mockRes as Response, mockNext)
+
+      // Resolved venueId must be the URL venue, not the token venue.
+      const where = (prisma.venueFeature.findFirst as jest.Mock).mock.calls[0][0].where
+      expect(where.venueId).toBe('venue_URL')
+      expect(mockNext).toHaveBeenCalled()
+      expect(statusMock).not.toHaveBeenCalledWith(403)
+    })
+
+    it('falls back to the token venue when no URL param / header is present', async () => {
+      // No params/headers → uses authContext.venueId (backward compatible).
+      const middleware = checkFeatureAccess('ANALYTICS')
+      ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValueOnce({
+        id: 'vf_tok',
+        venueId: 'venue_123',
+        active: true,
+        endDate: null,
+        suspendedAt: null,
+        feature: { code: 'ANALYTICS', name: 'Analytics' },
+      })
+
+      await middleware(mockReq as Request, mockRes as Response, mockNext)
+
+      const where = (prisma.venueFeature.findFirst as jest.Mock).mock.calls[0][0].where
+      expect(where.venueId).toBe('venue_123')
+      expect(mockNext).toHaveBeenCalled()
+    })
+  })
 })

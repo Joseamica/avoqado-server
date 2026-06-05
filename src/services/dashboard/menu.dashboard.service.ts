@@ -69,6 +69,9 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
     // availableDays: data.availableDays, // Handled below
     slug, // generated slug
     venue: { connect: { id: venueId } },
+    // Campos fiscales SAT (CFDI 4.0) — defaults para productos de la categoría
+    ...(data.defaultSatProductKey !== undefined && { defaultSatProductKey: data.defaultSatProductKey }),
+    ...(data.defaultSatUnitKey !== undefined && { defaultSatUnitKey: data.defaultSatUnitKey }),
   }
 
   if (data.parentId) {
@@ -241,6 +244,10 @@ export async function updateMenuCategory(venueId: string, categoryId: string, da
     }
     // If data.availableDays is undefined (but key was present), Prisma treats it as no-op for this field.
   }
+
+  // Campos fiscales SAT (CFDI 4.0) — defaults para productos de la categoría
+  if ('defaultSatProductKey' in data) updateData.defaultSatProductKey = data.defaultSatProductKey ?? null
+  if ('defaultSatUnitKey' in data) updateData.defaultSatUnitKey = data.defaultSatUnitKey ?? null
 
   // Handle parentId explicitly
   if ('parentId' in data) {

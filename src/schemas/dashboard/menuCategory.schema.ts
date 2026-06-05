@@ -53,6 +53,23 @@ export const CreateMenuCategorySchema = z.object({
         }),
       )
       .optional(),
+
+    // ═══════════════════════════════════════════════════════════════
+    // Campos fiscales SAT (CFDI 4.0) — defaults para productos de la categoría
+    // ═══════════════════════════════════════════════════════════════
+    defaultSatProductKey: z
+      .string()
+      .trim()
+      .regex(/^\d{8}$/, 'La clave de producto SAT debe tener 8 dígitos')
+      .optional()
+      .nullable(),
+    defaultSatUnitKey: z
+      .string()
+      .trim()
+      .min(1, 'La clave de unidad SAT es requerida')
+      .max(20, 'La clave de unidad SAT no puede exceder 20 caracteres')
+      .optional()
+      .nullable(),
   }),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),

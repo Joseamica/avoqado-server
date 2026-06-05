@@ -206,6 +206,24 @@ const ProductBodyBase = z.object({
   // Credit Packs
   allowCreditRedemption: z.boolean().optional(),
   requireCreditForBooking: z.boolean().optional(),
+
+  // ═══════════════════════════════════════════════════════════════
+  // Campos fiscales SAT (CFDI 4.0)
+  // ═══════════════════════════════════════════════════════════════
+  satProductKey: z
+    .string()
+    .trim()
+    .regex(/^\d{8}$/, 'La clave de producto SAT debe tener 8 dígitos')
+    .optional()
+    .nullable(),
+  satUnitKey: z
+    .string()
+    .trim()
+    .min(1, 'La clave de unidad SAT es requerida')
+    .max(20, 'La clave de unidad SAT no puede exceder 20 caracteres')
+    .optional()
+    .nullable(),
+  objetoImp: z.enum(['01', '02', '03', '04'], { invalid_type_error: 'ObjetoImp inválido' }).optional(),
 })
 
 const nonInventoriableRefine = <T extends { type?: string; trackInventory?: boolean }>(data: T) => {

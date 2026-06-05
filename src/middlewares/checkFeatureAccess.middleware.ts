@@ -18,6 +18,7 @@ import { Request, Response, NextFunction } from 'express'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { venueHasActiveBasePlan, PAID_PLAN_TIER_CODES } from '@/services/access/basePlan.service'
+import { resolveRequestVenueId } from './checkPermission.middleware'
 
 /**
  * Middleware factory to check if venue has access to a specific feature
@@ -30,7 +31,7 @@ export function checkFeatureAccess(featureCode: string) {
     try {
       const authContext = (req as any).authContext
 
-      if (!authContext || !authContext.venueId) {
+      if (!authContext || !authContext.userId) {
         logger.warn('⚠️ Feature access check failed: No auth context', { featureCode })
         res.status(401).json({
           error: 'Unauthorized',
@@ -39,7 +40,16 @@ export function checkFeatureAccess(featureCode: string) {
         return
       }
 
-      const { venueId, userId } = authContext
+      const userId = authContext.userId
+      // Resolve the venue being ACCESSED (URL :venueId → x-venue-id header → token), NOT just the
+      // token's home venue. Mirrors checkPermission's resolveRequestVenueId so the feature gate
+      // tracks the venue the request operates on (fixes false 403s when the active venue ≠ token venue).
+      const venueId = resolveRequestVenueId(req, authContext)
+      if (!venueId) {
+        logger.warn('⚠️ Feature access check failed: No venueId', { featureCode })
+        res.status(401).json({ error: 'Unauthorized', message: 'No venue context found' })
+        return
+      }
 
       // Query VenueFeature to check if feature is active
       const venueFeature = await prisma.venueFeature.findFirst({
@@ -170,7 +180,7 @@ export function checkAnyFeatureAccess(featureCodes: string[]) {
     try {
       const authContext = (req as any).authContext
 
-      if (!authContext || !authContext.venueId) {
+      if (!authContext || !authContext.userId) {
         logger.warn('⚠️ Feature access check failed: No auth context', { featureCodes })
         res.status(401).json({
           error: 'Unauthorized',
@@ -179,7 +189,13 @@ export function checkAnyFeatureAccess(featureCodes: string[]) {
         return
       }
 
-      const { venueId, userId } = authContext
+      const userId = authContext.userId
+      const venueId = resolveRequestVenueId(req, authContext)
+      if (!venueId) {
+        logger.warn('⚠️ Feature access check failed: No venueId', { featureCodes })
+        res.status(401).json({ error: 'Unauthorized', message: 'No venue context found' })
+        return
+      }
 
       // Query for any active feature in the list
       const venueFeature = await prisma.venueFeature.findFirst({
