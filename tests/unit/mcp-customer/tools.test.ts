@@ -1,4 +1,4 @@
-import { summarizeSales, rankTopProducts } from '../../../src/mcp/tools/sales'
+import { summarizeSales, rankTopProducts, rankTopStaff } from '../../../src/mcp/tools/sales'
 import { auditTerminalConfig } from '../../../src/mcp/tools/terminals'
 
 // Avoid ts-jest compiling the huge access.service graph (the tool modules import it
@@ -90,5 +90,29 @@ describe('rankTopProducts', () => {
   })
   it('handles empty', () => {
     expect(rankTopProducts([])).toEqual([])
+  })
+})
+
+describe('rankTopStaff', () => {
+  const rows = [
+    { name: 'Ana', revenue: 1000, orders: 3, tips: 50, averageTicket: 333.3333 },
+    { name: 'Beto', revenue: 3000, orders: 20, tips: 120, averageTicket: 150 },
+    { name: 'Cata', revenue: 2000, orders: 8, tips: 80.126, averageTicket: 250 },
+  ]
+  it('ranks by revenue (desc) and applies the limit', () => {
+    expect(rankTopStaff(rows, 2).map(s => s.name)).toEqual(['Beto', 'Cata'])
+  })
+  it('rounds money fields to 2 decimals', () => {
+    expect(rankTopStaff([rows[0]])[0].averageTicket).toBe(333.33)
+    expect(rankTopStaff([rows[2]])[0].tips).toBe(80.13)
+  })
+  it('passes name/orders through and does not mutate input', () => {
+    const copy = JSON.parse(JSON.stringify(rows))
+    const top = rankTopStaff(rows)
+    expect(top.find(s => s.name === 'Beto')).toEqual({ name: 'Beto', revenue: 3000, orders: 20, tips: 120, averageTicket: 150 })
+    expect(rows).toEqual(copy)
+  })
+  it('handles empty', () => {
+    expect(rankTopStaff([])).toEqual([])
   })
 })

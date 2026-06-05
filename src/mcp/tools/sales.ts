@@ -67,6 +67,30 @@ export function rankTopProducts(products: BestSellingProduct[], limit = 10): Ran
     .map(p => ({ name: p.name, unitsSold: p.quantity, unitPrice: p.price, type: p.type }))
 }
 
+const round2 = (n: number): number => Math.round(n * 100) / 100
+
+export interface StaffRankingRow {
+  name: string
+  revenue: number
+  orders: number
+  tips: number
+  averageTicket: number
+}
+
+/** Take the top N staff by revenue (service already sorts; re-sort defensively) and round money to cents. */
+export function rankTopStaff(rows: StaffRankingRow[], limit = 10): StaffRankingRow[] {
+  return [...rows]
+    .sort((a, b) => b.revenue - a.revenue)
+    .slice(0, limit)
+    .map(s => ({
+      name: s.name,
+      revenue: round2(s.revenue),
+      orders: s.orders,
+      tips: round2(s.tips),
+      averageTicket: round2(s.averageTicket),
+    }))
+}
+
 export function registerSalesTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
   server.tool(
@@ -110,6 +134,23 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
       }
       const top = rankTopProducts(data.products, limit ?? 10)
       return text({ venueId, count: top.length, topProducts: top })
+    },
+  )
+
+  server.tool(
+    'staff_ranking',
+    'Who sells the most — staff ranked by revenue in a venue you can access, over a date range (default last 7 days). Each entry: name, revenue, orders, tips, average ticket. Answers "¿quién vende más / mejor vendedor?". Pass venueId; optionally fromDate/toDate (YYYY-MM-DD) and a limit.',
+    {
+      venueId: z.string().describe('Venue to analyze (must be in your scope)'),
+      fromDate: z.string().optional().describe('Start date YYYY-MM-DD (default: 7 days ago)'),
+      toDate: z.string().optional().describe('End date YYYY-MM-DD (default: today)'),
+      limit: z.number().int().positive().max(50).optional().describe('How many top staff to return (default 10)'),
+    },
+    async ({ venueId, fromDate, toDate, limit }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const ranking = (await getChartData(venueId, 'staff-ranking', { fromDate, toDate })) as StaffRankingRow[]
+      const top = rankTopStaff(ranking, limit ?? 10)
+      return text({ venueId, count: top.length, staff: top })
     },
   )
 }
