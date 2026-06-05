@@ -184,7 +184,7 @@ export async function getAutofacturaStatusController(req: Request<{ accessKey: s
     const cfdi = await prisma.cfdi.findFirst({
       where: { orderId: order.id },
       orderBy: { createdAt: 'desc' },
-      select: { uuid: true, status: true, serie: true, folio: true, pdfUrl: true },
+      select: { uuid: true, status: true, serie: true, folio: true, pdfUrl: true, xmlUrl: true },
     })
 
     res.status(200).json({ cfdi: cfdi ?? null })
