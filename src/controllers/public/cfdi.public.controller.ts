@@ -13,7 +13,7 @@
 import { Request, Response } from 'express'
 import { toZonedTime } from 'date-fns-tz'
 import prisma from '../../utils/prismaClient'
-import { issueCfdiForOrder } from '../../services/fiscal/cfdi.service'
+import { issueCfdiForOrder, loadOrderForCfdiFromDb } from '../../services/fiscal/cfdi.service'
 import { logAction } from '../../services/dashboard/activity-log.service'
 import logger from '../../config/logger'
 import { env } from '../../config/env'
@@ -187,7 +187,19 @@ export async function getAutofacturaStatusController(req: Request<{ accessKey: s
       select: { uuid: true, status: true, serie: true, folio: true, pdfUrl: true, xmlUrl: true },
     })
 
-    res.status(200).json({ cfdi: cfdi ?? null })
+    // Whether the customer may self-invoice this ticket. This is the ADMIN's
+    // decision: the merchant that collected the payment must have BOTH
+    // facturación AND autofactura enabled (and a resolvable emisor for this
+    // venue). If it's off, the receipt must not even OFFER the option — the
+    // widget hides the CTA entirely instead of showing it and then 403-ing,
+    // which would read to the customer as a broken promise rather than an
+    // intentional merchant setting. `loadOrderForCfdiFromDb` is the canonical
+    // resolver (most-recent COMPLETED payment → merchant → MerchantFiscalConfig
+    // → venue-matched emisor); it returns null when invoicing isn't possible.
+    const bundle = await loadOrderForCfdiFromDb(order.id)
+    const autofacturaAvailable = !!bundle && bundle.facturacionEnabled && bundle.autofacturaEnabled
+
+    res.status(200).json({ cfdi: cfdi ?? null, autofacturaAvailable })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     logger.error('[cfdi.public] get status error', { accessKey, error: message })

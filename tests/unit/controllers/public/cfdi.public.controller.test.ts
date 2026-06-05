@@ -20,6 +20,7 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
 jest.mock('../../../../src/services/fiscal/cfdi.service', () => ({
   __esModule: true,
   issueCfdiForOrder: jest.fn(),
+  loadOrderForCfdiFromDb: jest.fn(),
 }))
 
 jest.mock('../../../../src/services/dashboard/activity-log.service', () => ({
@@ -41,7 +42,7 @@ jest.mock('../../../../src/config/env', () => ({
 // ── Imports (after mocks) ─────────────────────────────────────────────────────
 
 import prisma from '../../../../src/utils/prismaClient'
-import { issueCfdiForOrder } from '../../../../src/services/fiscal/cfdi.service'
+import { issueCfdiForOrder, loadOrderForCfdiFromDb } from '../../../../src/services/fiscal/cfdi.service'
 import { logAction } from '../../../../src/services/dashboard/activity-log.service'
 import { autofacturaController, getAutofacturaStatusController } from '../../../../src/controllers/public/cfdi.public.controller'
 
@@ -50,7 +51,20 @@ import { autofacturaController, getAutofacturaStatusController } from '../../../
 const mockFindReceipt = prisma.digitalReceipt.findUnique as jest.Mock
 const mockFindCfdi = prisma.cfdi.findFirst as jest.Mock
 const mockIssueCfdi = issueCfdiForOrder as jest.Mock
+const mockLoadOrder = loadOrderForCfdiFromDb as jest.Mock
 const mockLogAction = logAction as jest.Mock
+
+/**
+ * Builds a LoadedOrderBundle-shaped object for the GET status availability
+ * check. Only the two merchant flags matter for `autofacturaAvailable`; the
+ * rest are filled minimally so the controller's `!!bundle && ...` is truthy.
+ */
+function makeBundle(overrides: { facturacionEnabled?: boolean; autofacturaEnabled?: boolean } = {}) {
+  return {
+    facturacionEnabled: overrides.facturacionEnabled ?? true,
+    autofacturaEnabled: overrides.autofacturaEnabled ?? true,
+  }
+}
 
 // ── Test fixtures ─────────────────────────────────────────────────────────────
 
@@ -316,7 +330,7 @@ describe('autofacturaController (POST /receipt/:accessKey/cfdi)', () => {
 // ── GET /receipt/:accessKey/cfdi tests ────────────────────────────────────────
 
 describe('getAutofacturaStatusController (GET /receipt/:accessKey/cfdi)', () => {
-  it('returns 200 with cfdi when a STAMPED cfdi exists for the order', async () => {
+  it('returns 200 with cfdi + autofacturaAvailable:true when a STAMPED cfdi exists and the merchant has it enabled', async () => {
     mockFindReceipt.mockResolvedValue(makeReceipt())
     mockFindCfdi.mockResolvedValue({
       uuid: 'UUID-1234',
@@ -325,6 +339,7 @@ describe('getAutofacturaStatusController (GET /receipt/:accessKey/cfdi)', () => 
       folio: '1',
       pdfUrl: 'https://storage/cfdi/UUID-1234.pdf',
     })
+    mockLoadOrder.mockResolvedValue(makeBundle())
 
     const req = makeReq({ accessKey: 'key-abc' })
     const res = makeRes()
@@ -340,12 +355,14 @@ describe('getAutofacturaStatusController (GET /receipt/:accessKey/cfdi)', () => 
         folio: '1',
         pdfUrl: 'https://storage/cfdi/UUID-1234.pdf',
       },
+      autofacturaAvailable: true,
     })
   })
 
-  it('returns 200 with cfdi:null when no cfdi exists for the order', async () => {
+  it('returns 200 with cfdi:null + autofacturaAvailable:true when no cfdi exists yet but the merchant allows self-invoicing', async () => {
     mockFindReceipt.mockResolvedValue(makeReceipt())
     mockFindCfdi.mockResolvedValue(null)
+    mockLoadOrder.mockResolvedValue(makeBundle())
 
     const req = makeReq({ accessKey: 'key-abc' })
     const res = makeRes()
@@ -353,7 +370,51 @@ describe('getAutofacturaStatusController (GET /receipt/:accessKey/cfdi)', () => 
     await getAutofacturaStatusController(req as any, res as any)
 
     expect(res.status).toHaveBeenCalledWith(200)
-    expect(res.json).toHaveBeenCalledWith({ cfdi: null })
+    expect(res.json).toHaveBeenCalledWith({ cfdi: null, autofacturaAvailable: true })
+  })
+
+  // ── Regression: the merchant on/off decision must reach the receipt so the
+  //    widget can HIDE the CTA instead of showing-then-403. ───────────────────
+  it('returns autofacturaAvailable:false when the merchant has facturación disabled', async () => {
+    mockFindReceipt.mockResolvedValue(makeReceipt())
+    mockFindCfdi.mockResolvedValue(null)
+    mockLoadOrder.mockResolvedValue(makeBundle({ facturacionEnabled: false }))
+
+    const req = makeReq({ accessKey: 'key-abc' })
+    const res = makeRes()
+
+    await getAutofacturaStatusController(req as any, res as any)
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith({ cfdi: null, autofacturaAvailable: false })
+  })
+
+  it('returns autofacturaAvailable:false when facturación is on but autofactura is disabled', async () => {
+    mockFindReceipt.mockResolvedValue(makeReceipt())
+    mockFindCfdi.mockResolvedValue(null)
+    mockLoadOrder.mockResolvedValue(makeBundle({ autofacturaEnabled: false }))
+
+    const req = makeReq({ accessKey: 'key-abc' })
+    const res = makeRes()
+
+    await getAutofacturaStatusController(req as any, res as any)
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith({ cfdi: null, autofacturaAvailable: false })
+  })
+
+  it('returns autofacturaAvailable:false when no emisor is resolvable (loadOrder returns null)', async () => {
+    mockFindReceipt.mockResolvedValue(makeReceipt())
+    mockFindCfdi.mockResolvedValue(null)
+    mockLoadOrder.mockResolvedValue(null) // no payment / no merchant config / venue mismatch
+
+    const req = makeReq({ accessKey: 'key-abc' })
+    const res = makeRes()
+
+    await getAutofacturaStatusController(req as any, res as any)
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith({ cfdi: null, autofacturaAvailable: false })
   })
 
   it('returns 404 when receipt is not found', async () => {
@@ -366,5 +427,7 @@ describe('getAutofacturaStatusController (GET /receipt/:accessKey/cfdi)', () => 
 
     expect(res.status).toHaveBeenCalledWith(404)
     expect(res.json).toHaveBeenCalledWith({ error: 'Recibo no encontrado' })
+    // Availability must not be probed when there's no order
+    expect(mockLoadOrder).not.toHaveBeenCalled()
   })
 })
