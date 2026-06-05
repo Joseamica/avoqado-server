@@ -958,10 +958,25 @@ export async function createReservation(req: Request, res: Response, next: NextF
     const stripeMerchant = depositPreview.required ? await resolveActiveStripeMerchant(venue.id) : null
 
     if (depositPreview.required && !stripeMerchant) {
-      throw new BadRequestError('Este negocio aun no tiene pagos en linea configurados')
+      // No Stripe rail → we can't collect the deposit online. Don't hard-block the
+      // booking (that left deposit-configured-but-Stripe-less venues unable to take
+      // ANY reservation). Fall back to pay-at-venue: confirm the spot and record the
+      // amount owed on arrival. The dashboard now gates the deposit toggle on an active
+      // Stripe Connect channel, so this is the safety net for venues configured before
+      // that gate (or via API/seed).
+      appointmentOwesAtVenue = true
+      appointmentOwesAmount = depositPreview.amount ?? appointmentOwesAmount
+      settings = {
+        ...settings,
+        deposits: { ...(settings.deposits ?? {}), enabled: false, mode: 'none' },
+      }
+      logger.warn(
+        `⚠️ [BOOKING] deposit required but venue ${venue.id} has no Stripe merchant — falling back to pay-at-venue (owes ${appointmentOwesAmount})`,
+      )
     }
 
-    if (depositPreview.required && depositPreview.amount) {
+    // Stripe deposit bounds — only when we actually have a merchant to charge.
+    if (depositPreview.required && depositPreview.amount && stripeMerchant) {
       const stripeAmount = toStripeAmount(depositPreview.amount)
       const bounds = getStripeChargeBounds()
       if (stripeAmount < bounds.min) {
