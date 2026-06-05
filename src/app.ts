@@ -136,6 +136,19 @@ app.post(
   handleMcpRequest,
 )
 
+// MCP here is JSON-RPC over POST (stateless Streamable HTTP — no standalone GET/SSE stream).
+// Answer GET with 405 + Allow:POST so it reads as a real MCP endpoint, not an Express 404.
+app.get('/mcp', (_req, res) => {
+  res
+    .set('Allow', 'POST')
+    .status(405)
+    .json({
+      jsonrpc: '2.0',
+      error: { code: -32000, message: 'Method Not Allowed. The Avoqado MCP endpoint accepts POST (JSON-RPC) only.' },
+      id: null,
+    })
+})
+
 // ⚠️ Public settlement report route — token-validated, no auth middleware
 // Mounted before configureCoreMiddlewares to avoid auth checks
 app.use('/reports/settlement', express.json(), settlementReportRoutes)
