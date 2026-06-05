@@ -4969,6 +4969,21 @@ model ConsumerAuthAccount {
   @@index([email])
 }
 
+model OtpChallenge {
+  id          String    @id @default(cuid())
+  channel     String    // 'whatsapp' | 'email'
+  destination String    // E.164 phone OR lowercased email
+  codeHash    String    // sha256(code + OTP_PEPPER); never store plaintext
+  expiresAt   DateTime
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(5)
+  consumedAt  DateTime?
+  ip          String?
+  createdAt   DateTime  @default(now())
+
+  @@index([destination, expiresAt])
+}
+
 model CustomerGroup {
   id      String @id @default(cuid())
   venueId String
@@ -6017,6 +6032,7 @@ enum AuthProvider {
   GOOGLE
   FACEBOOK
   APPLE
+  PHONE
 }
 
 enum LoyaltyTransactionType {

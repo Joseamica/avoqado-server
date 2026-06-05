@@ -8,8 +8,11 @@ import {
   CreateOrgResult,
   FiscalProvider,
   GlobalInvoiceParams,
+  InvoiceSearchResult,
+  ProviderInvoiceSummary,
   ReceptorInput,
   ReceptorValidationResult,
+  SearchInvoicesParams,
   StampedInvoice,
   UpdateOrgLegalParams,
   UploadCsdParams,
@@ -183,6 +186,31 @@ export class FacturapiProvider implements FiscalProvider {
     return this.toStamped(inv)
   }
 
+  /**
+   * Searches invoices at the PAC (read-only) for the reconcile job's orphan-detection path.
+   *
+   * facturapi's GET /v2/invoices supports a `date` range filter and a `q` free-text search.
+   * We narrow server-side by date window (the stuck row's createdAt ± a margin) and `q` (the
+   * receptor RFC) so a global search (XAXX010101000) doesn't return every global ever issued.
+   * `truncated` lets the caller refuse to treat "no match" as definitive when paginated.
+   */
+  async searchInvoices(params: SearchInvoicesParams): Promise<InvoiceSearchResult> {
+    const query: Record<string, any> = {
+      limit: 50,
+      'date[gte]': params.since.toISOString(),
+      'date[lte]': params.until.toISOString(),
+    }
+    if (params.q) query.q = params.q
+
+    const res = await this.client.invoices.list(query)
+    const data = res?.data ?? []
+    const invoices = data.map(inv => this.toSummary(inv))
+    const totalResults = res?.total_results ?? invoices.length
+    const totalPages = res?.total_pages ?? 1
+    const truncated = totalPages > 1 || totalResults > invoices.length
+    return { invoices, truncated }
+  }
+
   async downloadXml(providerInvoiceId: string): Promise<Buffer> {
     const stream = await this.client.invoices.downloadXml(providerInvoiceId)
     return this.binaryDownloadToBuffer(stream)
@@ -233,6 +261,20 @@ export class FacturapiProvider implements FiscalProvider {
       totalCents: toCents(Number(inv.total ?? 0)),
       stampedAt: inv.stamp?.date ? new Date(inv.stamp.date) : new Date(),
       status: inv.status === 'canceled' ? 'canceled' : 'valid',
+    }
+  }
+
+  private toSummary(inv: Awaited<ReturnType<typeof this.client.invoices.retrieve>>): ProviderInvoiceSummary {
+    return {
+      providerInvoiceId: inv.id,
+      uuid: inv.uuid ?? null,
+      serie: inv.series ?? null,
+      folio: inv.folio_number != null ? String(inv.folio_number) : null,
+      totalCents: toCents(Number(inv.total ?? 0)),
+      status: inv.status === 'canceled' ? 'canceled' : 'valid',
+      customerTaxId: inv.customer?.tax_id ?? null,
+      isGlobal: inv.global != null,
+      stampedAt: inv.stamp?.date ? new Date(inv.stamp.date) : null,
     }
   }
 

@@ -46,6 +46,7 @@ import { gcalPruningJob } from './jobs/gcal-pruning.job'
 import { gcalHealthCheckJob } from './jobs/gcal-health-check.job'
 import { mercadoPagoTokenRefreshJob } from './jobs/mercadopago-token-refresh.job'
 import { cfdiGlobalJob } from './jobs/cfdiGlobal.job'
+import { cfdiReconcileJob } from './jobs/cfdiReconcile.job'
 // Import the new Socket.io system
 import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
 // Import Firebase Admin initialization
@@ -182,6 +183,9 @@ const gracefulShutdown = async (signal: string) => {
 
       // Stop CFDI Global job
       cfdiGlobalJob.stop()
+
+      // Stop CFDI Reconcile job
+      cfdiReconcileJob.stop()
 
       // Stop live demo cleanup job
       if (liveDemoCleanupJob) {
@@ -405,6 +409,9 @@ const startApplication = async (retries = 3) => {
 
       // CFDI Global (Flow C) — daily 04:00 AM; issues factura global per active emisor
       cfdiGlobalJob.start()
+
+      // CFDI Reconcile — every 5 min; recovers/resets rows stuck in STAMPING (crash-after-stamp guard)
+      cfdiReconcileJob.start()
 
       // Start nightly email jobs only in production (avoid sending emails from dev/staging)
       if (NODE_ENV === 'production') {

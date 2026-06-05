@@ -37,6 +37,7 @@ const envSchema = z.object({
   SESSION_SECRET: z.string().min(16, 'SESSION_SECRET must be at least 16 characters'),
   COOKIE_SECRET: z.string().min(16, 'COOKIE_SECRET must be at least 16 characters'),
   JWT_SECRET: z.string().optional(), // Legacy alias for ACCESS_TOKEN_SECRET
+  OTP_PEPPER: z.string().min(16), // Server secret peppering WhatsApp/email login OTP hashes
 
   // ─────────────────────────────────────────────────────────────────────────
   // INFRASTRUCTURE

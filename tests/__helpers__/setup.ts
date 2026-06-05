@@ -100,6 +100,9 @@ const prismaMock: any = {
   tokenPurchase: createMockModel(),
   // Customer & Loyalty models
   customer: createMockModel(),
+  // Global consumer identity + passwordless OTP login
+  consumer: createMockModel(),
+  otpChallenge: createMockModel(),
   customerGroup: createMockModel(),
   loyaltyConfig: createMockModel(),
   loyaltyTransaction: createMockModel(),

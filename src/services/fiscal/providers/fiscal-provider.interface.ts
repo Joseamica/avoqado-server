@@ -108,6 +108,45 @@ export interface StampedInvoice {
   status: 'valid' | 'canceled'
 }
 
+/**
+ * Lightweight projection of a PAC invoice used by the reconcile job to detect an
+ * orphaned stamp (a document that exists at the PAC but was never persisted on our side).
+ * Carries the few fields needed to match a stuck `Cfdi` row: total, receptor, global flag,
+ * plus the identifiers required to complete the row if a match is found.
+ */
+export interface ProviderInvoiceSummary {
+  providerInvoiceId: string
+  uuid: string | null
+  serie: string | null
+  folio: string | null
+  totalCents: number
+  status: 'valid' | 'canceled'
+  /** receptor RFC (tax_id) — used to match individual CFDIs by RFC, globals by XAXX010101000 */
+  customerTaxId: string | null
+  /** true when the PAC document is a factura global (has a global period block) */
+  isGlobal: boolean
+  stampedAt: Date | null
+}
+
+export interface SearchInvoicesParams {
+  /** lower bound on the PAC invoice date (inclusive) */
+  since: Date
+  /** upper bound on the PAC invoice date (inclusive) */
+  until: Date
+  /** free-text search (PAC matches against receptor RFC / legal name / folio) */
+  q?: string
+}
+
+export interface InvoiceSearchResult {
+  invoices: ProviderInvoiceSummary[]
+  /**
+   * true when the PAC reported MORE results than were returned (pagination). The reconcile
+   * job must NOT treat a "no match" as definitive when results were truncated — otherwise it
+   * could reset a row that actually has an orphaned stamp on a later page and double-stamp it.
+   */
+  truncated: boolean
+}
+
 export interface CancelInvoiceParams {
   providerInvoiceId: string
   motivo: '01' | '02' | '03' | '04'
@@ -132,6 +171,12 @@ export interface FiscalProvider {
   /** Issues a factura global to "Público en General" (RFC XAXX010101000). */
   createGlobalInvoice(params: GlobalInvoiceParams): Promise<StampedInvoice>
   getInvoice(providerInvoiceId: string): Promise<StampedInvoice>
+  /**
+   * Searches the PAC's invoices (read-only). Used by the reconcile job to find an orphaned
+   * stamp when we hold no providerInvoiceId for a stuck row. Returns lightweight summaries
+   * plus a `truncated` flag so the caller can avoid resetting a row when results were paginated.
+   */
+  searchInvoices(params: SearchInvoicesParams): Promise<InvoiceSearchResult>
   downloadXml(providerInvoiceId: string): Promise<Buffer>
   downloadPdf(providerInvoiceId: string): Promise<Buffer>
   cancelInvoice(params: CancelInvoiceParams): Promise<CancelInvoiceResult>

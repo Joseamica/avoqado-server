@@ -466,3 +466,13 @@ export async function sendServiceMessage(phone: string, body: string): Promise<{
   logger.info(`WhatsApp service message sent to ${fullPhone}`, { messageId })
   return { messageId }
 }
+
+/**
+ * Send a login OTP via the approved Authentication template `otp_verify`.
+ * Body {{1}} = code; the copy-code button also receives the code (reuses the
+ * buttonUrlParam path — same sub_type:'url' component shape).
+ */
+export async function sendOtpWhatsApp(phone: string, code: string): Promise<boolean> {
+  await sendTemplateMessage(phone, 'otp_verify', [{ type: 'text', text: code }], code)
+  return true
+}

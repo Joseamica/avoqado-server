@@ -4356,6 +4356,15 @@ Equipo de Avoqado`
     return this.sendEmail({ to: email, subject, html, text })
   }
 
+  async sendOtpCodeEmail(email: string, code: string): Promise<boolean> {
+    return this.sendEmail({
+      to: email,
+      subject: `${code} es tu código de acceso`,
+      html: `<p>Tu código de acceso es <strong style="font-size:20px">${code}</strong>.</p><p>Vence en 10 minutos. Si no lo pediste, ignora este correo.</p>`,
+      text: `Tu código de acceso es ${code}. Vence en 10 minutos.`,
+    })
+  }
+
   async verifyConnection(): Promise<boolean> {
     if (!resend || !this.isAvailable) {
       return false
