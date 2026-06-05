@@ -6,6 +6,7 @@ import { createAuthCode } from './tokenStore'
 import { renderLoginPage } from './loginPage'
 import { provider } from './provider'
 import { MCP_ISSUER_URL, MCP_RESOURCE_URL, MCP_SCOPES_SUPPORTED } from './config'
+import logger from '@/config/logger'
 
 /** POST /mcp-oauth/approve — consent form target. Mirror of the /authorize params + email/password. */
 function approveHandler() {
@@ -29,13 +30,21 @@ function approveHandler() {
     try {
       staffId = await authenticateForMcp(String(email ?? ''), String(password ?? ''))
     } catch (e) {
-      return reRender(e instanceof McpLoginError ? e.message : 'Login failed')
+      const reason = e instanceof McpLoginError ? e.message : 'Login failed'
+      logger.warn(`[MCP OAuth] login failed for "${email}": ${reason}`, { mcpOAuth: true, email: String(email ?? ''), reason })
+      if (!(e instanceof McpLoginError)) logger.error('[MCP OAuth] unexpected login error', { error: (e as Error).message })
+      return reRender(reason)
     }
 
     let activeOrg: string
     try {
       activeOrg = await resolveActiveOrganizationId(staffId)
-    } catch {
+    } catch (e) {
+      logger.warn(`[MCP OAuth] no active organization for staff ${staffId}`, {
+        mcpOAuth: true,
+        staffId,
+        error: (e as Error).message,
+      })
       return reRender('Your account has no active organization.')
     }
 
@@ -48,6 +57,13 @@ function approveHandler() {
       redirectUri: redirect_uri,
       scopes,
       resource: resource || undefined,
+    })
+
+    logger.info(`[MCP OAuth] authorized staff ${staffId} for org ${activeOrg}`, {
+      mcpOAuth: true,
+      staffId,
+      activeOrg,
+      clientId: String(client_id),
     })
 
     const target = new URL(redirect_uri)
