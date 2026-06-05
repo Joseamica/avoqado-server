@@ -5,6 +5,7 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { serializedInventoryService } from '@/services/serialized-inventory/serializedInventory.service'
+import { auditMcpWrite } from '../audit'
 
 export function registerInventoryTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
@@ -50,6 +51,13 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
           action === 'returned'
             ? await serializedInventoryService.markAsReturned(venueId, serialNumber)
             : await serializedInventoryService.markAsDamaged(venueId, serialNumber)
+        await auditMcpWrite(scope, {
+          action: 'SERIALIZED_ITEM_MARKED',
+          entity: 'SerializedItem',
+          entityId: item.id,
+          venueId,
+          data: { serialNumber: item.serialNumber, status: item.status, action },
+        })
         return text({ ok: true, item: { serialNumber: item.serialNumber, status: item.status, custodyState: item.custodyState } })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })

@@ -5,6 +5,7 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { updateProduct } from '@/services/dashboard/product.dashboard.service'
+import { auditMcpWrite } from '../audit'
 
 /** Find products in scope by (partial, case-insensitive) name — shared by the menu write tools. */
 async function matchProductsByName(venueWhere: { venueId: { in: string[] } }, name: string) {
@@ -40,6 +41,13 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
         })
       try {
         const updated = await updateProduct(venueId, matches[0].id, { active })
+        await auditMcpWrite(scope, {
+          action: 'MENU_ITEM_ACTIVE_SET',
+          entity: 'Product',
+          entityId: matches[0].id,
+          venueId,
+          data: { name: updated.name, active: updated.active },
+        })
         return text({ ok: true, item: { name: updated.name, active: updated.active } })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
@@ -69,6 +77,13 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
         })
       try {
         const updated = await updateProduct(venueId, matches[0].id, { price })
+        await auditMcpWrite(scope, {
+          action: 'MENU_ITEM_PRICE_SET',
+          entity: 'Product',
+          entityId: matches[0].id,
+          venueId,
+          data: { name: updated.name, price: Number(updated.price) },
+        })
         return text({ ok: true, item: { name: updated.name, price: Number(updated.price) } })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })

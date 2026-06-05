@@ -5,6 +5,7 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { rescheduleAppointmentReservation, cancelReservation } from '@/services/dashboard/reservation.dashboard.service'
+import { auditMcpWrite } from '../audit'
 
 export function registerReservationTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
@@ -71,6 +72,13 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
           // Ops/MCP path: no hold → the service re-checks pacing inline (excl. self).
           rescheduledBy: 'SYSTEM', // normalized to null staffId by ACTOR_SENTINELS
         })
+        await auditMcpWrite(scope, {
+          action: 'RESERVATION_RESCHEDULED',
+          entity: 'Reservation',
+          entityId: reservation.id,
+          venueId: reservation.venueId,
+          data: { confirmationCode, newStartsAt: parsed.toISOString() },
+        })
         return text({ ok: true, reservation: updated })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
@@ -101,6 +109,13 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
       }
       try {
         const updated = await cancelReservation(reservation.venueId, reservation.id, 'SYSTEM', reason)
+        await auditMcpWrite(scope, {
+          action: 'RESERVATION_CANCELLED',
+          entity: 'Reservation',
+          entityId: reservation.id,
+          venueId: reservation.venueId,
+          data: { confirmationCode, reason },
+        })
         return text({ ok: true, reservation: updated })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
