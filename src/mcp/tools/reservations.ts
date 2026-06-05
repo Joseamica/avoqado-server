@@ -5,6 +5,7 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import {
+  createReservation,
   rescheduleAppointmentReservation,
   cancelReservation,
   confirmReservation,
@@ -16,6 +17,59 @@ import { auditMcpWrite } from '../audit'
 
 export function registerReservationTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
+
+  server.tool(
+    'create_reservation',
+    'Create a NEW reservation in a venue you can access. Give the start date/time (ISO 8601) and party size; optionally the guest name/phone/email, a duration, a service/product to book, and special requests. The service re-validates availability (table/staff overlap, pacing, external calendar) and auto-confirms when no deposit is required. This WRITES — requires reservations:create. Returns the new reservation + its confirmation code. To change/cancel it afterwards use reschedule_reservation / set_reservation_status / cancel_reservation.',
+    {
+      venueId: z.string().describe('Venue for the reservation (must be in your scope)'),
+      startsAt: z.string().min(1).describe('Start date/time, ISO 8601 (e.g. 2026-06-06T19:00:00.000Z)'),
+      partySize: z.number().int().positive().max(100).describe('Number of guests'),
+      durationMinutes: z.number().int().positive().max(1440).optional().describe('Duration in minutes (default 90)'),
+      guestName: z.string().optional().describe('Guest name'),
+      guestPhone: z.string().optional().describe('Guest phone'),
+      guestEmail: z.string().optional().describe('Guest email'),
+      productId: z.string().optional().describe('Service/product to book (appointment venues; omit for a table reservation)'),
+      specialRequests: z.string().optional().describe('Special requests / notes'),
+    },
+    async ({ venueId, startsAt, partySize, durationMinutes, guestName, guestPhone, guestEmail, productId, specialRequests }) => {
+      guard.venueFilter(venueId) // throws ScopeError if out of scope
+      guard.requirePermission('reservations:create', venueId) // write gate (per-venue role)
+      const start = new Date(startsAt)
+      if (Number.isNaN(start.getTime())) {
+        return text({ ok: false, error: 'startsAt inválido. Usa ISO 8601, ej. 2026-06-06T19:00:00.000Z' })
+      }
+      const duration = durationMinutes ?? 90
+      const endsAt = new Date(start.getTime() + duration * 60_000)
+      try {
+        const reservation = await createReservation(
+          venueId,
+          { startsAt: start, endsAt, duration, partySize, guestName, guestPhone, guestEmail, productId, specialRequests },
+          scope.staffId,
+        )
+        await auditMcpWrite(scope, {
+          action: 'RESERVATION_CREATED',
+          entity: 'Reservation',
+          entityId: reservation.id,
+          venueId,
+          data: { confirmationCode: reservation.confirmationCode, startsAt: start.toISOString(), partySize, guestName },
+        })
+        return text({
+          ok: true,
+          reservation: {
+            id: reservation.id,
+            confirmationCode: reservation.confirmationCode,
+            status: reservation.status,
+            startsAt: start.toISOString(),
+            partySize,
+          },
+        })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
   server.tool(
     'reservations',
     'Reservations across your venues (or one venue): when, party size, guest, status, confirmation code. Upcoming only by default, soonest first. Pass venueId to focus one venue; pass includePast to also see recent reservations that already started.',
