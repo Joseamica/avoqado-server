@@ -17,6 +17,7 @@ import {
 } from '@/services/dashboard/sales-summary.dashboard.service'
 import { BadRequestError } from '@/errors/AppError'
 import { MINDFORM_NEW_VENUE_ID } from '@/services/legacy/qrPayments.legacy.service'
+import { resolveRequestVenueId } from '@/middlewares/checkPermission.middleware'
 import prisma from '@/utils/prismaClient'
 
 /**
@@ -41,7 +42,14 @@ import prisma from '@/utils/prismaClient'
  */
 export async function salesSummaryReport(req: Request, res: Response, next: NextFunction) {
   try {
-    const { venueId } = req.authContext!
+    // Resolve the DATA venue the same way checkPermission('reports:read') did
+    // (`:venueId` param -> `x-venue-id` header -> JWT venue), so the report follows
+    // the user's active/URL venue instead of the stale JWT venue from login.
+    // checkPermission already validated reports:read against this same venue.
+    const venueId = resolveRequestVenueId(req, req.authContext!)
+    if (!venueId) {
+      throw new BadRequestError('No venue context for the request')
+    }
     const { startDate, endDate, groupBy, reportType, merchantAccountId, paymentMethod, cardType, includeMerchantBreakdown } = req.query
 
     // Validate required params

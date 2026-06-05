@@ -36,7 +36,7 @@ interface ResolvedUserRole {
  * so a client that lies about the header still gets denied if they don't hold
  * the role in that venue.
  */
-function resolveRequestVenueId(req: Request, authContext: { venueId?: string }): string | undefined {
+export function resolveRequestVenueId(req: Request, authContext: { venueId?: string }): string | undefined {
   const fromParams = req.params?.venueId
   if (fromParams) return fromParams
   const fromHeader = req.headers?.['x-venue-id']

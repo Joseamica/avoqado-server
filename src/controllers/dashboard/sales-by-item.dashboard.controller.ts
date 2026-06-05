@@ -10,6 +10,7 @@ import type { Request, Response, NextFunction } from 'express'
 import logger from '@/config/logger'
 import { getSalesByItem, SalesByItemFilters, ReportType, GroupByOption } from '@/services/dashboard/sales-by-item.dashboard.service'
 import { BadRequestError } from '@/errors/AppError'
+import { resolveRequestVenueId } from '@/middlewares/checkPermission.middleware'
 import prisma from '@/utils/prismaClient'
 
 /**
@@ -29,7 +30,13 @@ import prisma from '@/utils/prismaClient'
  */
 export async function salesByItemReport(req: Request, res: Response, next: NextFunction) {
   try {
-    const { venueId } = req.authContext!
+    // Resolve the DATA venue the same way checkPermission('reports:read') did
+    // (`:venueId` param -> `x-venue-id` header -> JWT venue), so the report follows
+    // the user's active/URL venue instead of the stale JWT venue from login.
+    const venueId = resolveRequestVenueId(req, req.authContext!)
+    if (!venueId) {
+      throw new BadRequestError('No venue context for the request')
+    }
     const { startDate, endDate, reportType, groupBy, startHour, endHour, categoryId, productId, channel, paymentMethod } = req.query
 
     // Validate required params
