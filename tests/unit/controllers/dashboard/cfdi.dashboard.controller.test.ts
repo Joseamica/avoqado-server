@@ -11,6 +11,19 @@ jest.mock('../../../../src/services/fiscal/cfdi.service', () => ({
   listCfdisForVenue: (...a: any[]) => mockListCfdis(...a),
 }))
 
+// resolveRequestVenueId: real implementation (priority: URL param → x-venue-id header → token).
+// We mock the whole module so prisma/logger side-effects don't leak into unit tests,
+// but expose the real resolveRequestVenueId logic so venue-resolution tests are meaningful.
+jest.mock('../../../../src/middlewares/checkPermission.middleware', () => ({
+  resolveRequestVenueId: (req: any, authContext: any) => {
+    const fromParams = req.params?.venueId
+    if (fromParams) return fromParams
+    const fromHeader = req.headers?.['x-venue-id']
+    if (typeof fromHeader === 'string' && fromHeader.length > 0) return fromHeader
+    return authContext?.venueId
+  },
+}))
+
 const mockSearchSatCatalog = jest.fn()
 jest.mock('../../../../src/services/fiscal/satCatalogLookup.service', () => ({
   searchSatCatalog: (...a: any[]) => mockSearchSatCatalog(...a),
@@ -357,13 +370,27 @@ describe('cancelCfdiController', () => {
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Error interno al cancelar el CFDI' }))
   })
 
-  it('passes expectedVenueId from authContext to the service', async () => {
+  it('resolves expectedVenueId from URL :venueId (URL wins over authContext)', async () => {
+    // cancelReq sets params.venueId = 'v1'. resolveRequestVenueId returns 'v1' (URL wins).
     mockCancel.mockResolvedValue({ cancelStatus: 'REQUESTED', cancelledAt: null, cfdi: { id: 'c1' } })
 
     const res = mockRes()
     await cancelCfdiController(cancelReq({ authContext: { venueId: 'myVenue' } }), res)
 
-    expect(mockCancel).toHaveBeenCalledWith(expect.objectContaining({ expectedVenueId: 'myVenue', cfdiId: 'c1', motivo: '02' }))
+    // params.venueId='v1' wins over authContext.venueId='myVenue'
+    expect(mockCancel).toHaveBeenCalledWith(expect.objectContaining({ expectedVenueId: 'v1', cfdiId: 'c1', motivo: '02' }))
+  })
+
+  it('falls back to authContext.venueId when req.params has no venueId', async () => {
+    mockCancel.mockResolvedValue({ cancelStatus: 'REQUESTED', cancelledAt: null, cfdi: { id: 'c1' } })
+
+    const res = mockRes()
+    await cancelCfdiController(
+      cancelReq({ params: { cfdiId: 'c1' /* no venueId */ }, authContext: { venueId: 'token-venue' } }),
+      res,
+    )
+
+    expect(mockCancel).toHaveBeenCalledWith(expect.objectContaining({ expectedVenueId: 'token-venue' }))
   })
 })
 
@@ -416,13 +443,15 @@ describe('getCfdiStatusController', () => {
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Error interno al consultar el CFDI' }))
   })
 
-  it('passes expectedVenueId from authContext to the service', async () => {
+  it('resolves expectedVenueId from URL :venueId (URL wins over authContext)', async () => {
+    // statusReq sets params.venueId = 'v1'. resolveRequestVenueId returns 'v1' (URL wins).
     mockGetStatus.mockResolvedValue({ id: 'c1' })
 
     const res = mockRes()
     await getCfdiStatusController(statusReq({ authContext: { venueId: 'tenantVenue' } }), res)
 
-    expect(mockGetStatus).toHaveBeenCalledWith(expect.objectContaining({ cfdiId: 'c1', expectedVenueId: 'tenantVenue' }))
+    // params.venueId='v1' wins over authContext.venueId='tenantVenue'
+    expect(mockGetStatus).toHaveBeenCalledWith(expect.objectContaining({ cfdiId: 'c1', expectedVenueId: 'v1' }))
   })
 })
 
@@ -462,13 +491,15 @@ describe('getFiscalConfigController', () => {
     )
   })
 
-  it('passes venueId from authContext to the service', async () => {
+  it('resolves venueId from URL :venueId (URL wins over authContext)', async () => {
+    // fiscalConfigReq sets params.venueId = 'v1'. resolveRequestVenueId returns 'v1' (URL wins).
     mockGetFiscalConfig.mockResolvedValue({ emisores: [], merchantConfigs: [] })
 
     const res = mockRes()
     await getFiscalConfigController(fiscalConfigReq({ authContext: { venueId: 'myVenue' } }), res)
 
-    expect(mockGetFiscalConfig).toHaveBeenCalledWith(expect.objectContaining({ venueId: 'myVenue' }))
+    // params.venueId='v1' wins over authContext.venueId='myVenue'
+    expect(mockGetFiscalConfig).toHaveBeenCalledWith(expect.objectContaining({ venueId: 'v1' }))
   })
 
   it('returns 500 on unexpected errors', async () => {
@@ -530,13 +561,24 @@ describe('upsertEmisorController', () => {
     expect(mockUpsertEmisor).toHaveBeenCalledWith(expect.objectContaining({ emisorId: 'e1' }))
   })
 
-  it('passes authContext.venueId (not path :venueId) to the service', async () => {
+  it('resolves venue from URL :venueId (not authContext) when the path param is present', async () => {
+    // resolveRequestVenueId priority: URL param → x-venue-id header → token.
+    // When the URL has :venueId, that wins — matching the venue the checkPermission already verified.
     mockUpsertEmisor.mockResolvedValue({ id: 'e1' })
 
     const res = mockRes()
     await upsertEmisorController(emisorReq({ params: { venueId: 'path-v1' }, authContext: { venueId: 'auth-v1' } }), res)
 
-    expect(mockUpsertEmisor).toHaveBeenCalledWith(expect.objectContaining({ venueId: 'auth-v1' }))
+    expect(mockUpsertEmisor).toHaveBeenCalledWith(expect.objectContaining({ venueId: 'path-v1' }))
+  })
+
+  it('falls back to authContext.venueId when req.params has no venueId', async () => {
+    mockUpsertEmisor.mockResolvedValue({ id: 'e1' })
+
+    const res = mockRes()
+    await upsertEmisorController(emisorReq({ params: { emisorId: 'e1' }, authContext: { venueId: 'token-venue' } }), res)
+
+    expect(mockUpsertEmisor).toHaveBeenCalledWith(expect.objectContaining({ venueId: 'token-venue' }))
   })
 
   it('returns 404 when the service throws not found (tenant mismatch)', async () => {
@@ -599,7 +641,7 @@ describe('upsertMerchantFiscalConfigController', () => {
     )
   })
 
-  it('passes authContext.venueId (not path :venueId) to the service', async () => {
+  it('resolves venue from URL :venueId (not authContext) when the path param is present', async () => {
     mockUpsertMerchantFiscalConfig.mockResolvedValue({ id: 'mc1' })
 
     const res = mockRes()
@@ -608,7 +650,7 @@ describe('upsertMerchantFiscalConfigController', () => {
       res,
     )
 
-    expect(mockUpsertMerchantFiscalConfig).toHaveBeenCalledWith(expect.objectContaining({ venueId: 'auth-v1' }))
+    expect(mockUpsertMerchantFiscalConfig).toHaveBeenCalledWith(expect.objectContaining({ venueId: 'path-v1' }))
   })
 
   it('returns 409 when the service throws XOR violation', async () => {
@@ -697,7 +739,8 @@ describe('provisionEmisorController', () => {
     expect(JSON.stringify(logCall.data)).not.toMatch(/password|cer|key|sk_live|sk_test/i)
   })
 
-  it('uses authContext.venueId for the service call (tenant isolation)', async () => {
+  it('resolves venue from URL :venueId when present, for the service expectedVenueId', async () => {
+    // resolveRequestVenueId: URL param wins. checkPermission already verified access to this venue.
     mockProvisionEmisor.mockResolvedValue({ id: 'e1', providerOrgId: 'org1' })
 
     const res = mockRes()
@@ -706,7 +749,7 @@ describe('provisionEmisorController', () => {
       res,
     )
 
-    expect(mockProvisionEmisor).toHaveBeenCalledWith(expect.objectContaining({ expectedVenueId: 'auth-v1' }))
+    expect(mockProvisionEmisor).toHaveBeenCalledWith(expect.objectContaining({ expectedVenueId: 'path-v1' }))
   })
 
   it('returns 404 when service throws not found (tenant mismatch)', async () => {
@@ -776,7 +819,8 @@ describe('uploadEmisorCsdController', () => {
     expect(JSON.stringify(logCall.data)).not.toMatch(/password|cerBase64|keyBase64/i)
   })
 
-  it('uses authContext.venueId for the service call (tenant isolation)', async () => {
+  it('resolves venue from URL :venueId when present, for the service expectedVenueId', async () => {
+    // resolveRequestVenueId: URL param wins. checkPermission already verified access to this venue.
     mockUploadEmisorCsd.mockResolvedValue({ id: 'e1', csdStatus: 'ACTIVE', csdExpiresAt: null })
 
     const res = mockRes()
@@ -785,7 +829,7 @@ describe('uploadEmisorCsdController', () => {
       res,
     )
 
-    expect(mockUploadEmisorCsd).toHaveBeenCalledWith(expect.objectContaining({ expectedVenueId: 'auth-v1' }))
+    expect(mockUploadEmisorCsd).toHaveBeenCalledWith(expect.objectContaining({ expectedVenueId: 'path-v1' }))
   })
 
   it('returns 404 on not found (tenant mismatch)', async () => {
@@ -1126,23 +1170,49 @@ describe('listCfdisController', () => {
     )
   })
 
-  it('uses authContext.venueId for tenant scope (not req.params.venueId)', async () => {
-    // If a caller somehow passes a different venueId in the path, the controller must
-    // still use the one from authContext. This test verifies that contract.
-    const authVenueId = 'auth-venue-id'
+  it('resolves venue from URL :venueId when present (URL wins over authContext — regression test)', async () => {
+    // This is the core fix: a SUPERADMIN or multi-venue OWNER browsing a venue that differs
+    // from their token venue must operate on the URL venue, not the stale JWT venue.
+    // checkPermission (which runs before this controller) already verified access to
+    // the URL venue via resolveRequestVenueId + resolveUserRoleForVenue, so using
+    // the URL venue here is safe — no cross-venue escalation is possible.
     const req = listReq({
-      params: { venueId: 'path-venue-id' }, // attacker-controlled path param
-      authContext: { venueId: authVenueId },
+      params: { venueId: 'url-venue-id' },
+      authContext: { venueId: 'token-venue-id' }, // stale JWT venue (e.g. after venue-switch)
     })
 
     const res = mockRes()
     await listCfdisController(req, res)
 
-    // listCfdisForVenue must be called with the authContext venueId
-    expect(mockListCfdis).toHaveBeenCalledWith(expect.objectContaining({ venueId: authVenueId }))
-    // The path param 'path-venue-id' must NOT appear in the service call
+    // URL venue must win
+    expect(mockListCfdis).toHaveBeenCalledWith(expect.objectContaining({ venueId: 'url-venue-id' }))
     const callArg = mockListCfdis.mock.calls[0][0]
-    expect(callArg.venueId).not.toBe('path-venue-id')
+    expect(callArg.venueId).not.toBe('token-venue-id')
+  })
+
+  it('falls back to authContext.venueId when req.params has no venueId', async () => {
+    const req = listReq({
+      params: {}, // no venueId in params
+      authContext: { venueId: 'token-venue-id' },
+    })
+
+    const res = mockRes()
+    await listCfdisController(req, res)
+
+    expect(mockListCfdis).toHaveBeenCalledWith(expect.objectContaining({ venueId: 'token-venue-id' }))
+  })
+
+  it('uses x-venue-id header when params has no venueId and header is present', async () => {
+    const req = listReq({
+      params: {},
+      headers: { 'x-venue-id': 'header-venue-id' },
+      authContext: { venueId: 'token-venue-id' },
+    })
+
+    const res = mockRes()
+    await listCfdisController(req, res)
+
+    expect(mockListCfdis).toHaveBeenCalledWith(expect.objectContaining({ venueId: 'header-venue-id' }))
   })
 
   it('passes venue timezone from DB to the service', async () => {

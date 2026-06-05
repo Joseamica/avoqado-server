@@ -20,6 +20,7 @@ import { issueGlobalForEmisor } from '@/services/fiscal/cfdiGlobal.service'
 import { upsertEmisor, upsertMerchantFiscalConfig, getFiscalConfig } from '@/services/fiscal/fiscalConfig.service'
 import { provisionEmisor, uploadEmisorCsd } from '@/services/fiscal/fiscalOnboarding.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { resolveRequestVenueId } from '@/middlewares/checkPermission.middleware'
 
 /**
  * POST /api/v1/dashboard/venues/:venueId/orders/:orderId/cfdi
@@ -31,8 +32,15 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 export async function issueCfdiForOrderController(req: Request, res: Response): Promise<void> {
   const { orderId } = req.params
   const { rfc, razonSocial, regimenFiscal, codigoPostal, usoCfdi, email } = req.body
-  // Tenant isolation: the order must belong to the caller's venue (critical-warnings rule).
-  const { venueId } = (req as any).authContext ?? {}
+  // Tenant isolation: venue resolved via resolveRequestVenueId (URL → x-venue-id → token),
+  // consistent with checkPermission. checkPermission already verified the caller holds
+  // cfdi:issue in this venue, so using the URL venue here is safe.
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
 
   // Sandbox stamps in dev/staging (free, no SAT effect); live key in production.
   const sandbox = env.NODE_ENV !== 'production'
@@ -66,7 +74,7 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
 
     // STAMPED — audit + 201 with minimal public fields
     logAction({
-      staffId: (req as any).authContext?.userId,
+      staffId: authContext.userId,
       venueId,
       action: 'CFDI_ISSUED',
       entity: 'Cfdi',
@@ -118,7 +126,13 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
  */
 export async function getCfdiStatusController(req: Request, res: Response): Promise<void> {
   const { cfdiId } = req.params
-  const { venueId } = (req as any).authContext ?? {}
+  // Venue resolved via resolveRequestVenueId (URL → x-venue-id → token), consistent with checkPermission.
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
 
   try {
     const cfdi = await getCfdiStatus({ cfdiId, expectedVenueId: venueId })
@@ -147,8 +161,13 @@ export async function getCfdiStatusController(req: Request, res: Response): Prom
  * This is a READ — no ActivityLog (critical-warnings rule: do not log reads).
  */
 export async function listCfdisController(req: Request, res: Response): Promise<void> {
-  // Tenant isolation: always from authContext, never from the path :venueId.
-  const { venueId } = (req as any).authContext ?? {}
+  // Venue resolved via resolveRequestVenueId (URL → x-venue-id → token), consistent with checkPermission.
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
   const { status, flow, isGlobal, receptorRfc, from, to, page, pageSize } = req.query as any
 
   try {
@@ -188,7 +207,13 @@ export async function listCfdisController(req: Request, res: Response): Promise<
 export async function cancelCfdiController(req: Request, res: Response): Promise<void> {
   const { cfdiId } = req.params
   const { motivo, substituteUuid } = req.body
-  const { venueId } = (req as any).authContext ?? {}
+  // Venue resolved via resolveRequestVenueId (URL → x-venue-id → token), consistent with checkPermission.
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
 
   // Sandbox stamps in dev/staging; live key in production.
   const sandbox = env.NODE_ENV !== 'production'
@@ -203,7 +228,7 @@ export async function cancelCfdiController(req: Request, res: Response): Promise
     })
 
     logAction({
-      staffId: (req as any).authContext?.userId,
+      staffId: authContext.userId,
       venueId,
       action: 'CFDI_CANCELLED',
       entity: 'Cfdi',
@@ -244,7 +269,13 @@ export async function cancelCfdiController(req: Request, res: Response): Promise
  * Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:view').
  */
 export async function getFiscalConfigController(req: Request, res: Response): Promise<void> {
-  const { venueId } = (req as any).authContext ?? {}
+  // Venue resolved via resolveRequestVenueId (URL → x-venue-id → token), consistent with checkPermission.
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
 
   try {
     const config = await getFiscalConfig({ venueId })
@@ -267,8 +298,13 @@ export async function getFiscalConfigController(req: Request, res: Response): Pr
 export async function upsertEmisorController(req: Request, res: Response): Promise<void> {
   const { emisorId } = req.params
   const { rfc, legalName, regimenFiscal, lugarExpedicion, serie, defaultUsoCfdi, globalPeriodicity } = req.body
-  // Tenant isolation: always use authContext.venueId — never trust the path :venueId.
-  const { venueId } = (req as any).authContext ?? {}
+  // Venue resolved via resolveRequestVenueId (URL → x-venue-id → token), consistent with checkPermission.
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
 
   try {
     const emisor = await upsertEmisor({
@@ -284,7 +320,7 @@ export async function upsertEmisorController(req: Request, res: Response): Promi
     })
 
     logAction({
-      staffId: (req as any).authContext?.userId,
+      staffId: authContext.userId,
       venueId,
       action: 'FISCAL_EMISOR_UPSERTED',
       entity: 'FiscalEmisor',
@@ -315,8 +351,13 @@ export async function upsertEmisorController(req: Request, res: Response): Promi
  */
 export async function upsertMerchantFiscalConfigController(req: Request, res: Response): Promise<void> {
   const { merchantAccountId, ecommerceMerchantId, fiscalEmisorId, facturacionEnabled, autofacturaEnabled, includeInGlobal } = req.body
-  // Tenant isolation: always use authContext.venueId — never trust the path :venueId.
-  const { venueId } = (req as any).authContext ?? {}
+  // Venue resolved via resolveRequestVenueId (URL → x-venue-id → token), consistent with checkPermission.
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
 
   try {
     const config = await upsertMerchantFiscalConfig({
@@ -330,7 +371,7 @@ export async function upsertMerchantFiscalConfigController(req: Request, res: Re
     })
 
     logAction({
-      staffId: (req as any).authContext?.userId,
+      staffId: authContext.userId,
       venueId,
       action: 'MERCHANT_FISCAL_CONFIG_UPSERTED',
       entity: 'MerchantFiscalConfig',
@@ -377,8 +418,14 @@ export async function upsertMerchantFiscalConfigController(req: Request, res: Re
  */
 export async function provisionEmisorController(req: Request, res: Response): Promise<void> {
   const { emisorId } = req.params
-  // Tenant isolation: always use authContext.venueId — never trust the path :venueId.
-  const { venueId, userId } = (req as any).authContext ?? {}
+  // Venue resolved via resolveRequestVenueId (URL → x-venue-id → token), consistent with checkPermission.
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
+  const { userId } = authContext
 
   try {
     const emisor = await provisionEmisor({ emisorId, expectedVenueId: venueId })
@@ -418,8 +465,14 @@ export async function provisionEmisorController(req: Request, res: Response): Pr
 export async function uploadEmisorCsdController(req: Request, res: Response): Promise<void> {
   const { emisorId } = req.params
   const { cerBase64, keyBase64, password } = req.body
-  // Tenant isolation: always use authContext.venueId — never trust the path :venueId.
-  const { venueId, userId } = (req as any).authContext ?? {}
+  // Venue resolved via resolveRequestVenueId (URL → x-venue-id → token), consistent with checkPermission.
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
+  const { userId } = authContext
 
   try {
     // NOTE: cerBase64, keyBase64, password flow straight to facturapi and are NEVER
@@ -512,8 +565,14 @@ export async function searchSatCatalogController(req: Request, res: Response): P
  */
 export async function triggerGlobalCfdiController(req: Request, res: Response): Promise<void> {
   const { emisorId } = req.params
-  // Tenant isolation: always use authContext.venueId — never trust the path :venueId.
-  const { venueId, userId } = (req as any).authContext ?? {}
+  // Venue resolved via resolveRequestVenueId (URL → x-venue-id → token), consistent with checkPermission.
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
+  const { userId } = authContext
 
   // Sandbox in dev/staging; live key in production.
   const sandbox = env.NODE_ENV !== 'production'
