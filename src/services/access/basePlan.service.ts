@@ -36,6 +36,32 @@ export async function venueHasFeatureAccess(venueId: string, featureCode: string
   return false
 }
 
+/**
+ * Batch version of {@link venueHasFeatureAccess}: of the given venues, which ones may use
+ * `featureCode` (own active feature, OR active base plan for non-tier codes). Two queries
+ * regardless of N. Use to scope a multi-venue read to only the entitled venues.
+ */
+export async function venuesWithFeatureAccess(venueIds: string[], featureCode: string): Promise<Set<string>> {
+  if (venueIds.length === 0) return new Set()
+  const now = new Date()
+  const activeWindow = { active: true, suspendedAt: null, OR: [{ endDate: null }, { endDate: { gte: now } }] }
+
+  const withFeature = await prisma.venueFeature.findMany({
+    where: { venueId: { in: venueIds }, feature: { code: featureCode }, ...activeWindow },
+    select: { venueId: true },
+  })
+  const entitled = new Set(withFeature.map(v => v.venueId))
+
+  if (!(PAID_PLAN_TIER_CODES as readonly string[]).includes(featureCode)) {
+    const withBasePlan = await prisma.venueFeature.findMany({
+      where: { venueId: { in: venueIds }, feature: { code: { in: [...PAID_PLAN_TIER_CODES] } }, ...activeWindow },
+      select: { venueId: true },
+    })
+    for (const v of withBasePlan) entitled.add(v.venueId)
+  }
+  return entitled
+}
+
 /** IVA rate baked into the inclusive Stripe price. base = gross / (1 + IVA_RATE). */
 export const IVA_RATE = 0.16
 

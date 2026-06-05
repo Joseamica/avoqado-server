@@ -4,6 +4,7 @@ import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
+import { venuesWithFeatureAccess } from '@/services/access/basePlan.service'
 
 export function registerCfdiTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
@@ -15,7 +16,23 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
       limit: z.number().int().min(1).max(20).default(5).describe('Max recent stamped invoices to return'),
     },
     async ({ venueId, limit }) => {
-      const where = guard.venueFilter(venueId) // throws if out of scope
+      guard.venueFilter(venueId) // scope check (throws if a given venueId is out of scope)
+      // CFDI is a PAID feature — the dashboard gates its routes with checkFeatureAccess('CFDI').
+      // Mirror that so the MCP isn't a billing bypass: only surface venues entitled to CFDI.
+      const entitled = await venuesWithFeatureAccess(scope.allowedVenueIds, 'CFDI')
+      if (venueId && !entitled.has(venueId)) {
+        return text({
+          ok: false,
+          planRequired: true,
+          feature: 'CFDI',
+          error: 'CFDI (facturación) no está activo en este local. Requiere la feature CFDI o un plan Avoqado activo.',
+        })
+      }
+      const cfdiVenueIds = venueId ? [venueId] : [...entitled]
+      if (cfdiVenueIds.length === 0) {
+        return text({ ok: false, planRequired: true, feature: 'CFDI', error: 'Ninguno de tus locales tiene CFDI (facturación) activo.' })
+      }
+      const where = { venueId: { in: cfdiVenueIds } }
       const grouped = await prisma.cfdi.groupBy({ by: ['status'], where, _count: { _all: true } })
       const byStatus: Record<string, number> = {}
       for (const g of grouped) byStatus[g.status] = g._count._all
@@ -41,7 +58,7 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
       })
 
       return text({
-        venuesInScope: venueId ? 1 : scope.allowedVenueIds.length,
+        venuesInScope: cfdiVenueIds.length,
         byStatus,
         stamped: { count: stamped._count._all, totalMxn: (stamped._sum.totalCents ?? 0) / 100 },
         recentStamped: recent.map(r => ({
