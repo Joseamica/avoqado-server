@@ -6,6 +6,7 @@ import {
   summarizeByPaymentMethod,
   rankChannels,
   summarizePeakHours,
+  summarizeTipsByDay,
 } from '../../../src/mcp/tools/sales'
 import { auditTerminalConfig } from '../../../src/mcp/tools/terminals'
 
@@ -203,4 +204,31 @@ describe('summarizePeakHours', () => {
     expect(rows).toEqual(copy)
     expect(summarizePeakHours([])).toEqual([])
   })
+})
+
+describe('summarizeTipsByDay', () => {
+  const tz = 'America/Mexico_City' // UTC-6, no DST → chosen times bucket the same either way
+  const payments = [
+    { createdAt: '2026-06-04T02:00:00.000Z', tips: [{ amount: 20 }] }, // 2026-06-03 local
+    { createdAt: '2026-06-04T18:00:00.000Z', tips: [{ amount: 30 }] }, // 2026-06-04 local
+    { createdAt: '2026-06-04T19:00:00.000Z', tips: [{ amount: 10.5 }] }, // 2026-06-04 local
+    { createdAt: '2026-06-04T20:00:00.000Z', tips: [{ amount: 0 }] }, // no tip → skipped
+  ]
+  it('buckets tips by venue-local day, totals, and counts tipped txns only', () => {
+    const r = summarizeTipsByDay(payments, tz)
+    expect(r.total).toBe(60.5)
+    expect(r.count).toBe(3)
+    expect(r.byDay).toEqual([
+      { date: '2026-06-03', tips: 20, count: 1 },
+      { date: '2026-06-04', tips: 40.5, count: 2 },
+    ])
+  })
+  it('treats null tip amounts as zero', () => {
+    expect(summarizeTipsByDay([{ createdAt: '2026-06-04T18:00:00.000Z', tips: [{ amount: null }] }], tz)).toEqual({
+      total: 0,
+      count: 0,
+      byDay: [],
+    })
+  })
+  it('handles empty', () => expect(summarizeTipsByDay([], tz)).toEqual({ total: 0, count: 0, byDay: [] }))
 })

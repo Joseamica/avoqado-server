@@ -1,5 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
+import { DateTime } from 'luxon'
 import prisma from '@/utils/prismaClient'
 import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
 import type { McpScope } from '../scope'
@@ -158,6 +159,43 @@ export function summarizePeakHours(rows: PeakHourRow[]): PeakHourRow[] {
   return [...rows].sort((a, b) => a.hour - b.hour).map(h => ({ hour: h.hour, sales: round2(h.sales), transactions: h.transactions }))
 }
 
+export interface TipPaymentRow {
+  createdAt: string
+  tips: Array<{ amount: number | { toString(): string } | null }>
+}
+
+export interface DailyTips {
+  date: string
+  tips: number
+  count: number
+}
+
+/**
+ * Aggregate per-payment tip rows into venue-local daily buckets (date in `timezone`),
+ * plus a period total. Counts only payments that actually carried a tip; days with no
+ * tips don't appear. Money rounded to cents.
+ */
+export function summarizeTipsByDay(payments: TipPaymentRow[], timezone: string): { total: number; count: number; byDay: DailyTips[] } {
+  const map = new Map<string, { tips: number; count: number }>()
+  let total = 0
+  let count = 0
+  for (const p of payments) {
+    const tipSum = p.tips.reduce((s, t) => s + Number(t.amount), 0)
+    if (tipSum <= 0) continue
+    const date = DateTime.fromISO(p.createdAt, { zone: 'utc' }).setZone(timezone).toISODate() ?? 'unknown'
+    const existing = map.get(date) || { tips: 0, count: 0 }
+    existing.tips += tipSum
+    existing.count += 1
+    map.set(date, existing)
+    total += tipSum
+    count += 1
+  }
+  const byDay = Array.from(map.entries())
+    .map(([date, d]) => ({ date, tips: round2(d.tips), count: d.count }))
+    .sort((a, b) => a.date.localeCompare(b.date))
+  return { total: round2(total), count, byDay }
+}
+
 export function registerSalesTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
   server.tool(
@@ -287,6 +325,24 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
       const rows = (await getChartData(venueId, 'peak-hours', { fromDate, toDate })) as PeakHourRow[]
       const hours = summarizePeakHours(rows)
       return text({ venueId, hours })
+    },
+  )
+
+  server.tool(
+    'tips_over_time',
+    'Tips collected in a venue you can access, bucketed by day (venue timezone), over a date range (default last 7 days): per-day tip total + tipped-transaction count, plus the period total. Answers "¿cómo van las propinas?". Pass venueId; optionally fromDate/toDate (YYYY-MM-DD).',
+    {
+      venueId: z.string().describe('Venue to analyze (must be in your scope)'),
+      fromDate: z.string().optional().describe('Start date YYYY-MM-DD (default: 7 days ago)'),
+      toDate: z.string().optional().describe('End date YYYY-MM-DD (default: today)'),
+    },
+    async ({ venueId, fromDate, toDate }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+      const tz = venue?.timezone || 'America/Mexico_City'
+      const data = (await getChartData(venueId, 'tips-over-time', { fromDate, toDate })) as { payments: TipPaymentRow[] }
+      const result = summarizeTipsByDay(data.payments, tz)
+      return text({ venueId, ...result })
     },
   )
 }
