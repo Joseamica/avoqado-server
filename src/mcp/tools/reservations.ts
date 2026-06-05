@@ -4,7 +4,7 @@ import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
-import { rescheduleAppointmentReservation } from '@/services/dashboard/reservation.dashboard.service'
+import { rescheduleAppointmentReservation, cancelReservation } from '@/services/dashboard/reservation.dashboard.service'
 
 export function registerReservationTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
@@ -71,6 +71,36 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
           // Ops/MCP path: no hold → the service re-checks pacing inline (excl. self).
           rescheduledBy: 'SYSTEM', // normalized to null staffId by ACTOR_SENTINELS
         })
+        return text({ ok: true, reservation: updated })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'cancel_reservation',
+    'Cancel a reservation in a venue you can access. Identify it by confirmationCode (e.g. RES-PK6JHD); optionally pass a reason. This WRITES — it cancels the booking (the service handles status transition + notifications); requires reservations:cancel.',
+    {
+      venueId: z.string().describe('Venue that owns the reservation (must be in your scope)'),
+      confirmationCode: z.string().min(1).describe('Reservation confirmation code, e.g. RES-PK6JHD'),
+      reason: z.string().optional().describe('Optional cancellation reason'),
+    },
+    async ({ venueId, confirmationCode, reason }) => {
+      const where = guard.venueFilter(venueId) // throws if out of scope
+      guard.requirePermission('reservations:cancel', venueId) // write gate (per-venue role)
+      const reservation = await prisma.reservation.findFirst({
+        where: { ...where, confirmationCode },
+        select: { id: true, venueId: true, status: true },
+      })
+      if (!reservation) {
+        return text({ ok: false, error: `No encontré la reservación ${confirmationCode} en ese venue.` })
+      }
+      if (reservation.status === 'CANCELLED') {
+        return text({ ok: false, error: 'Esa reservación ya está cancelada.' })
+      }
+      try {
+        const updated = await cancelReservation(reservation.venueId, reservation.id, 'SYSTEM', reason)
         return text({ ok: true, reservation: updated })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
