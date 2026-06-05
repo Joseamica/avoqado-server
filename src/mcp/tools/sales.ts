@@ -5,6 +5,7 @@ import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
+import { getChartData } from '@/services/dashboard/generalStats.dashboard.service'
 
 export interface SalesInput {
   amount: number | { toString(): string }
@@ -43,6 +44,29 @@ export function summarizeSales(payments: SalesInput[]): SalesSummary {
   return s
 }
 
+export interface BestSellingProduct {
+  id: string
+  name: string
+  type: string
+  quantity: number
+  price: number
+}
+
+export interface RankedProduct {
+  name: string
+  unitsSold: number
+  unitPrice: number
+  type: string
+}
+
+/** Rank best-selling products by units sold (desc) and take the top N (default 10). */
+export function rankTopProducts(products: BestSellingProduct[], limit = 10): RankedProduct[] {
+  return [...products]
+    .sort((a, b) => b.quantity - a.quantity)
+    .slice(0, limit)
+    .map(p => ({ name: p.name, unitsSold: p.quantity, unitPrice: p.price, type: p.type }))
+}
+
 export function registerSalesTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
   server.tool(
@@ -67,6 +91,25 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
         venuesInScope: venueId ? 1 : scope.allowedVenueIds.length,
         ...summary,
       })
+    },
+  )
+
+  server.tool(
+    'top_products',
+    'Best-selling menu items in a venue you can access, over a date range (defaults to the last 7 days), ranked by units sold. Answers "what sells the most?". Pass venueId; optionally fromDate/toDate (YYYY-MM-DD) and a limit.',
+    {
+      venueId: z.string().describe('Venue to analyze (must be in your scope)'),
+      fromDate: z.string().optional().describe('Start date YYYY-MM-DD (default: 7 days ago)'),
+      toDate: z.string().optional().describe('End date YYYY-MM-DD (default: today)'),
+      limit: z.number().int().positive().max(50).optional().describe('How many top items to return (default 10)'),
+    },
+    async ({ venueId, fromDate, toDate, limit }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const data = (await getChartData(venueId, 'best-selling-products', { fromDate, toDate })) as {
+        products: BestSellingProduct[]
+      }
+      const top = rankTopProducts(data.products, limit ?? 10)
+      return text({ venueId, count: top.length, topProducts: top })
     },
   )
 }

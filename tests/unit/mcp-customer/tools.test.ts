@@ -1,4 +1,4 @@
-import { summarizeSales } from '../../../src/mcp/tools/sales'
+import { summarizeSales, rankTopProducts } from '../../../src/mcp/tools/sales'
 import { auditTerminalConfig } from '../../../src/mcp/tools/terminals'
 
 // Avoid ts-jest compiling the huge access.service graph (the tool modules import it
@@ -66,5 +66,29 @@ describe('auditTerminalConfig', () => {
   it('handles null config without throwing', () => {
     const r = auditTerminalConfig({ name: 'T3', serialNumber: null, status: 'INACTIVE', config: null, configOverrides: null })
     expect(r.flags).toEqual([])
+  })
+})
+
+describe('rankTopProducts', () => {
+  const products = [
+    { id: 'p1', name: 'Tacos', type: 'FOOD', quantity: 5, price: 30 },
+    { id: 'p2', name: 'Carnitas', type: 'FOOD', quantity: 20, price: 120 },
+    { id: 'p3', name: 'Agua', type: 'BEVERAGE', quantity: 12, price: 25 },
+  ]
+  it('ranks by units sold (desc) and reshapes to name/unitsSold/unitPrice/type', () => {
+    const top = rankTopProducts(products)
+    expect(top.map(p => p.name)).toEqual(['Carnitas', 'Agua', 'Tacos'])
+    expect(top[0]).toEqual({ name: 'Carnitas', unitsSold: 20, unitPrice: 120, type: 'FOOD' })
+  })
+  it('applies the limit', () => {
+    expect(rankTopProducts(products, 2).map(p => p.name)).toEqual(['Carnitas', 'Agua'])
+  })
+  it('does not mutate the input array', () => {
+    const copy = [...products]
+    rankTopProducts(products)
+    expect(products).toEqual(copy)
+  })
+  it('handles empty', () => {
+    expect(rankTopProducts([])).toEqual([])
   })
 })
