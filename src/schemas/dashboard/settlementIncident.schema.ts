@@ -44,9 +44,9 @@ export const escalateIncidentSchema = z.object({
 export const bulkConfirmIncidentSchema = z.object({
   body: z.object({
     incidentIds: z
-      .array(z.string().cuid('Each incidentId must be a valid CUID'))
-      .min(1, 'At least one incidentId is required')
-      .max(100, 'Cannot confirm more than 100 incidents at once'),
+      .array(z.string().cuid('Cada incidentId debe ser un CUID válido'))
+      .min(1, 'Se requiere al menos un incidente para confirmar')
+      .max(2000, 'No se pueden confirmar más de 2000 liquidaciones a la vez'),
     settlementArrived: z.boolean({
       required_error: 'settlementArrived is required',
       invalid_type_error: 'settlementArrived must be a boolean',

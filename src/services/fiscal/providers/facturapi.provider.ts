@@ -7,6 +7,7 @@ import {
   CreateOrgParams,
   CreateOrgResult,
   FiscalProvider,
+  GlobalInvoiceParams,
   ReceptorInput,
   ReceptorValidationResult,
   StampedInvoice,
@@ -116,6 +117,63 @@ export class FacturapiProvider implements FiscalProvider {
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
       logger.error(`[facturapi] createInvoice failed: ${message}`)
+      throw err
+    }
+  }
+
+  /**
+   * Issues a factura global to "Público en General" (RFC XAXX010101000).
+   *
+   * Verified against facturapi SDK types (invoice.d.ts GlobalInfo, enums.d.ts InvoicingPeriod):
+   *   - global.periodicity: InvoicingPeriod = 'day'|'week'|'fortnight'|'month'|'two_months'
+   *   - global.months: string — SAT c_Meses code (e.g. '05' = May, '13' = Jan+Feb bimestral)
+   *   - global.year: number
+   *
+   * NOTE: idempotency is NOT forwarded to facturapi (it rejects it). We own idempotency
+   * via the unique Cfdi.idempotencyKey pre-check before calling this method.
+   */
+  async createGlobalInvoice(params: GlobalInvoiceParams): Promise<StampedInvoice> {
+    const payload = {
+      type: 'I',
+      customer: {
+        legal_name: params.receptor.legal_name,
+        tax_id: params.receptor.tax_id,
+        tax_system: params.receptor.tax_system,
+        address: { zip: params.receptor.address.zip },
+      },
+      use: params.use,
+      payment_form: params.payment_form,
+      payment_method: 'PUE', // global invoices are always single-payment (PUE)
+      ...(params.serie ? { series: params.serie } : {}),
+      global: {
+        periodicity: params.global.periodicity,
+        months: params.global.months,
+        year: params.global.year,
+      },
+      items: params.items.map(it => ({
+        quantity: it.quantity,
+        discount: toPesos(it.discountCents),
+        product: {
+          description: it.description,
+          product_key: it.satProductKey,
+          unit_key: it.satUnitKey,
+          price: toPesos(it.unitPriceCents), // NET pesos (tax_included: false)
+          tax_included: false,
+          taxes: it.taxes.map(t => ({
+            type: t.type,
+            rate: t.rate,
+            factor: t.factor,
+            withholding: t.withholding,
+          })),
+        },
+      })),
+    }
+    try {
+      const inv = await this.client.invoices.create(payload)
+      return this.toStamped(inv)
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
+      logger.error(`[facturapi] createGlobalInvoice failed: ${message}`)
       throw err
     }
   }

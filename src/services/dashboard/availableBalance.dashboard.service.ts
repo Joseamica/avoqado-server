@@ -40,9 +40,11 @@ export interface AvailableBalanceSummary {
 
 export interface CardTypeBreakdown {
   cardType: ExtendedCardType
-  totalSales: number
+  baseSales: number // Venta (monto sin propina)
+  tips: number // Propina
+  totalSales: number // monto + propina (lo que el cliente cargó a la tarjeta)
   fees: number
-  netAmount: number
+  netAmount: number // totalSales - fees
   settlementDays: number | null // Typical settlement days (0 for cash - instant)
   pendingAmount: number
   settledAmount: number
@@ -128,7 +130,8 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
 
   // Process card payments
   for (const payment of cardPayments) {
-    const amount = Number(payment.amount)
+    // Include the tip: customer charged amount + tip; commission is on amount+tip.
+    const amount = Number(payment.amount) + Number(payment.tipAmount ?? 0)
     const fees = payment.transactionCost ? Number(payment.transactionCost.venueChargeAmount) : 0
     const netAmount = amount - fees
 
@@ -293,7 +296,9 @@ export async function getBalanceByCardType(venueId: string, dateRange?: { from: 
   const byCardType = new Map<
     ExtendedCardType,
     {
-      totalSales: number
+      baseSales: number // monto sin propina
+      tips: number // propina
+      totalSales: number // monto + propina
       fees: number
       pendingAmount: number
       settledAmount: number
@@ -306,13 +311,19 @@ export async function getBalanceByCardType(venueId: string, dateRange?: { from: 
     if (!payment.transactionCost) continue
 
     const cardType = payment.transactionCost.transactionType
-    const amount = Number(payment.amount)
+    // The customer charged amount + tip on the card; the commission was charged
+    // on amount+tip too. Dropping the tip understated the net the venue receives.
+    const baseAmount = Number(payment.amount)
+    const tip = Number(payment.tipAmount ?? 0)
+    const amount = baseAmount + tip
     const fees = Number(payment.transactionCost.venueChargeAmount)
     const netAmount = amount - fees
 
     // Get or initialize card type entry
     if (!byCardType.has(cardType)) {
       byCardType.set(cardType, {
+        baseSales: 0,
+        tips: 0,
         totalSales: 0,
         fees: 0,
         pendingAmount: 0,
@@ -323,6 +334,8 @@ export async function getBalanceByCardType(venueId: string, dateRange?: { from: 
     }
 
     const entry = byCardType.get(cardType)!
+    entry.baseSales += baseAmount
+    entry.tips += tip
     entry.totalSales += amount
     entry.fees += fees
     entry.transactionCount += 1
@@ -345,8 +358,12 @@ export async function getBalanceByCardType(venueId: string, dateRange?: { from: 
 
   // Add CASH payments as synthetic card type (instant settlement, 0 fees)
   if (cashPayments.length > 0) {
-    const cashTotalSales = cashPayments.reduce((sum, p) => sum + Number(p.amount) + Number(p.tipAmount ?? 0), 0)
+    const cashBase = cashPayments.reduce((sum, p) => sum + Number(p.amount), 0)
+    const cashTips = cashPayments.reduce((sum, p) => sum + Number(p.tipAmount ?? 0), 0)
+    const cashTotalSales = cashBase + cashTips
     byCardType.set('CASH', {
+      baseSales: cashBase,
+      tips: cashTips,
       totalSales: cashTotalSales,
       fees: 0, // Cash has no processing fees
       pendingAmount: 0, // Cash is never pending
@@ -361,6 +378,8 @@ export async function getBalanceByCardType(venueId: string, dateRange?: { from: 
   for (const [cardType, data] of byCardType) {
     breakdown.push({
       cardType,
+      baseSales: data.baseSales,
+      tips: data.tips,
       totalSales: data.totalSales,
       fees: data.fees,
       netAmount: data.totalSales - data.fees,
@@ -427,7 +446,8 @@ export async function getSettlementTimeline(venueId: string, dateRange: { from: 
     const cardType: ExtendedCardType =
       payment.method === PaymentMethod.CASH ? 'CASH' : (payment.transactionCost?.transactionType ?? TransactionCardType.OTHER)
     const groupKey = `${dateKey}::${cardType}`
-    const amount = Number(payment.amount)
+    // Include the tip: customer charged amount + tip; commission is on amount+tip.
+    const amount = Number(payment.amount) + Number(payment.tipAmount ?? 0)
     const fees = payment.transactionCost ? Number(payment.transactionCost.venueChargeAmount) : 0
     const netAmount = amount - fees
 

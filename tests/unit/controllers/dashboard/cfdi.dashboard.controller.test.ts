@@ -9,6 +9,22 @@ jest.mock('../../../../src/services/fiscal/cfdi.service', () => ({
   getCfdiStatus: (...a: any[]) => mockGetStatus(...a),
 }))
 
+const mockIssueGlobal = jest.fn()
+jest.mock('../../../../src/services/fiscal/cfdiGlobal.service', () => ({
+  issueGlobalForEmisor: (...a: any[]) => mockIssueGlobal(...a),
+}))
+
+// Mock prisma for the tenant guard in triggerGlobalCfdiController.
+// prismaClient uses `export default prisma` (ESM default) so jest needs __esModule:true.
+const mockPrismaFiscalEmisorFindFirst = jest.fn()
+jest.mock('../../../../src/utils/prismaClient', () => ({
+  __esModule: true,
+  default: {
+    fiscalEmisor: { findFirst: (...a: any[]) => mockPrismaFiscalEmisorFindFirst(...a) },
+    cfdi: { findUnique: jest.fn(), upsert: jest.fn() },
+  },
+}))
+
 const mockGetFiscalConfig = jest.fn()
 const mockUpsertEmisor = jest.fn()
 const mockUpsertMerchantFiscalConfig = jest.fn()
@@ -50,6 +66,7 @@ import {
   upsertMerchantFiscalConfigController,
   provisionEmisorController,
   uploadEmisorCsdController,
+  triggerGlobalCfdiController,
 } from '../../../../src/controllers/dashboard/cfdi.dashboard.controller'
 
 // ==========================================
@@ -195,6 +212,39 @@ describe('issueCfdiForOrderController', () => {
 
     expect(res.status).toHaveBeenCalledWith(500)
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Error interno al facturar' }))
+  })
+
+  it('returns 403 when the service throws "Facturación no habilitada para este merchant"', async () => {
+    mockIssue.mockRejectedValue(new Error('Facturación no habilitada para este merchant'))
+
+    const res = mockRes()
+    await issueCfdiForOrderController(mockReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(403)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Facturación no habilitada para este merchant' }))
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+
+  it('returns 403 when the service throws "Autofactura no habilitada para este merchant"', async () => {
+    mockIssue.mockRejectedValue(new Error('Autofactura no habilitada para este merchant'))
+
+    const res = mockRes()
+    await issueCfdiForOrderController(mockReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(403)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Autofactura no habilitada para este merchant' }))
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+
+  it('returns 409 when the service throws "CFDI en proceso para esta orden" (concurrent in-flight)', async () => {
+    mockIssue.mockRejectedValue(new Error('CFDI en proceso para esta orden'))
+
+    const res = mockRes()
+    await issueCfdiForOrderController(mockReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(409)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'CFDI en proceso para esta orden' }))
+    expect(mockLogAction).not.toHaveBeenCalled()
   })
 
   it('calls issueCfdiForOrder with the correct receptor and orderId', async () => {
@@ -757,6 +807,143 @@ describe('uploadEmisorCsdController', () => {
 
     expect(res.status).toHaveBeenCalledWith(500)
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Error interno al subir el CSD del emisor fiscal' }))
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+})
+
+// ==========================================
+// triggerGlobalCfdiController
+// ==========================================
+
+describe('triggerGlobalCfdiController', () => {
+  function globalReq(overrides: Partial<any> = {}): any {
+    return {
+      params: { venueId: 'v1', emisorId: 'e1' },
+      body: {},
+      authContext: { venueId: 'v1', userId: 'u1' },
+      ...overrides,
+    }
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockLogAction.mockResolvedValue(undefined)
+    // Default: emisor belongs to the venue (tenant guard passes)
+    mockPrismaFiscalEmisorFindFirst.mockResolvedValue({ id: 'e1' })
+  })
+
+  it('returns 201 with cfdi fields and calls logAction on STAMPED', async () => {
+    mockIssueGlobal.mockResolvedValue({
+      status: 'STAMPED',
+      cfdi: {
+        id: 'cfdi-g1',
+        uuid: 'GLOBAL-UUID-1',
+        serie: null,
+        folio: '1',
+        globalPeriod: { periodicidad: '04', meses: '05', anio: 2026 },
+        pdfUrl: 'https://cdn/cfdi.pdf',
+      },
+      period: { meses: '05', anio: 2026, satPeriodicidad: '04' },
+      candidateCount: 3,
+    })
+
+    const res = mockRes()
+    await triggerGlobalCfdiController(globalReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(201)
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cfdi: expect.objectContaining({ uuid: 'GLOBAL-UUID-1', globalPeriod: expect.objectContaining({ meses: '05' }) }),
+      }),
+    )
+    expect(mockLogAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'CFDI_GLOBAL_ISSUED',
+        entity: 'Cfdi',
+        entityId: 'cfdi-g1',
+        staffId: 'u1',
+        venueId: 'v1',
+      }),
+    )
+  })
+
+  it('returns 200 with NOTHING_TO_INVOICE message when no candidates in period', async () => {
+    mockIssueGlobal.mockResolvedValue({ status: 'NOTHING_TO_INVOICE' })
+
+    const res = mockRes()
+    await triggerGlobalCfdiController(globalReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'NOTHING_TO_INVOICE', message: expect.stringContaining('No hay') }),
+    )
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+
+  it('returns 409 when SKIPPED (inactive CSD)', async () => {
+    mockIssueGlobal.mockResolvedValue({ status: 'SKIPPED', reason: 'CSD inactivo' })
+
+    const res = mockRes()
+    await triggerGlobalCfdiController(globalReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(409)
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+
+  it('returns 422 on VALIDATION_FAILED', async () => {
+    mockIssueGlobal.mockResolvedValue({ status: 'VALIDATION_FAILED', reasons: ['El código postal no es válido'] })
+
+    const res = mockRes()
+    await triggerGlobalCfdiController(globalReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(422)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ reasons: expect.arrayContaining(['El código postal no es válido']) }))
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+
+  it('returns 502 on STAMP_FAILED', async () => {
+    mockIssueGlobal.mockResolvedValue({ status: 'STAMP_FAILED', cfdi: { lastError: 'PAC timeout' } })
+
+    const res = mockRes()
+    await triggerGlobalCfdiController(globalReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(502)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'El PAC rechazó el timbrado de la factura global' }))
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+
+  it('returns 404 when the emisor does not belong to the caller venue (foreign emisor guard)', async () => {
+    // Tenant guard returns null → 404
+    mockPrismaFiscalEmisorFindFirst.mockResolvedValue(null)
+
+    const res = mockRes()
+    await triggerGlobalCfdiController(globalReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(404)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Emisor fiscal no encontrado' }))
+    // Service must NOT be called for a foreign emisor
+    expect(mockIssueGlobal).not.toHaveBeenCalled()
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+
+  it('returns 500 on unexpected error from issueGlobalForEmisor', async () => {
+    mockIssueGlobal.mockRejectedValue(new Error('Database connection failed'))
+
+    const res = mockRes()
+    await triggerGlobalCfdiController(globalReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(500)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Error interno al generar la factura global' }))
+  })
+
+  it('returns 409 when issueGlobalForEmisor throws "Global en proceso" (concurrent in-flight)', async () => {
+    mockIssueGlobal.mockRejectedValue(new Error('Global en proceso para este emisor y periodo'))
+
+    const res = mockRes()
+    await triggerGlobalCfdiController(globalReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(409)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Global en proceso para este emisor y periodo' }))
     expect(mockLogAction).not.toHaveBeenCalled()
   })
 })

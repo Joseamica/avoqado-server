@@ -232,6 +232,14 @@ export async function confirmSettlementIncident(
     throw new Error('Incident not found')
   }
 
+  // When the user confirms the money arrived but doesn't give an exact date,
+  // fall back to the estimated settlement date so the incident still RESOLVES
+  // and the underlying transaction is marked SETTLED. Previously, confirming
+  // "arrived" without a date left the transaction PENDING forever (so it kept
+  // showing in the "Saldo Disponible" as pending) — and bulk "Confirmar Todo"
+  // hit the same trap.
+  const effectiveActualDate = settlementArrived ? (actualDate ?? incident.estimatedSettlementDate) : null
+
   // Create confirmation
   const confirmation = await prisma.settlementConfirmation.create({
     data: {
@@ -240,7 +248,7 @@ export async function confirmSettlementIncident(
       venueId: incident.venueId,
       confirmedBy,
       settlementArrived,
-      actualDate: actualDate || null,
+      actualDate: effectiveActualDate,
       notes,
     },
   })
@@ -249,17 +257,17 @@ export async function confirmSettlementIncident(
   let newStatus = incident.status
   let delayDays = null
 
-  if (settlementArrived && actualDate) {
+  if (settlementArrived && effectiveActualDate) {
     // Money arrived - resolve the incident
     newStatus = IncidentStatus.RESOLVED
-    delayDays = Math.floor((actualDate.getTime() - incident.estimatedSettlementDate.getTime()) / (1000 * 60 * 60 * 24))
+    delayDays = Math.floor((effectiveActualDate.getTime() - incident.estimatedSettlementDate.getTime()) / (1000 * 60 * 60 * 24))
 
     // Update transaction with actual settlement date
     if (incident.transactionId) {
       await prisma.venueTransaction.update({
         where: { id: incident.transactionId },
         data: {
-          actualSettlementDate: actualDate,
+          actualSettlementDate: effectiveActualDate,
           settlementVarianceDays: delayDays,
           status: SettlementStatus.SETTLED,
           confirmationMethod: 'MANUAL',
@@ -276,7 +284,7 @@ export async function confirmSettlementIncident(
     where: { id: incidentId },
     data: {
       status: newStatus,
-      actualSettlementDate: actualDate || null,
+      actualSettlementDate: effectiveActualDate,
       delayDays,
       resolutionDate: settlementArrived ? new Date() : null,
       resolvedBy: settlementArrived ? confirmedBy : null,
@@ -354,19 +362,33 @@ export async function bulkConfirmSettlementIncidents(
     }
   }
 
-  // Process valid incidents
-  for (const incidentId of validIncidentIds) {
-    try {
-      await confirmSettlementIncident(incidentId, confirmedBy, settlementArrived, actualDate, notes)
-      results.push({ incidentId, success: true })
-    } catch (error) {
-      logger.error(`Failed to confirm incident ${incidentId}:`, error)
-      results.push({
-        incidentId,
-        success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
-      })
-    }
+  // Process valid incidents in parallel chunks. Doing this one-by-one
+  // sequentially (the old behavior) meant ~5 round-trips × N incidents of
+  // serial DB latency — for 290+ incidents that blew past the HTTP timeout and
+  // surfaced as the "Confirmar Todo" error. Chunked Promise.all keeps the
+  // per-incident logic intact (delayDays, transaction settle) while bounding
+  // concurrency so we don't exhaust the connection pool.
+  const CHUNK_SIZE = 20
+  const validIds = Array.from(validIncidentIds)
+
+  for (let i = 0; i < validIds.length; i += CHUNK_SIZE) {
+    const chunk = validIds.slice(i, i + CHUNK_SIZE)
+    const chunkResults = await Promise.all(
+      chunk.map(async incidentId => {
+        try {
+          await confirmSettlementIncident(incidentId, confirmedBy, settlementArrived, actualDate, notes)
+          return { incidentId, success: true }
+        } catch (error) {
+          logger.error(`Failed to confirm incident ${incidentId}:`, error)
+          return {
+            incidentId,
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error',
+          }
+        }
+      }),
+    )
+    results.push(...chunkResults)
   }
 
   const confirmed = results.filter(r => r.success).length

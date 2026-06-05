@@ -1,5 +1,5 @@
 // src/services/fiscal/cfdi.service.ts
-import { CsdStatus, FiscalProviderType, PaymentMethod, VenueType } from '@prisma/client'
+import { CsdStatus, FiscalProviderType, PaymentMethod, VenueType, Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { buildStoragePath, uploadFileToStorage } from '../storage.service'
@@ -22,6 +22,8 @@ export interface LoadedOrderBundle {
   venueSlug: string
   venueType: VenueType
   emisor: { id: string; provider: FiscalProviderType; providerKeyEnc: string | null; csdStatus: CsdStatus; serie: string | null }
+  facturacionEnabled: boolean
+  autofacturaEnabled: boolean
   paymentMethod: PaymentMethod
   metodoPago: 'PUE' | 'PPD'
   subtotalCents: number
@@ -36,6 +38,11 @@ export interface IssueCfdiDeps {
   resolveProvider: typeof resolveFiscalProvider
   storeArtifact: (buffer: Buffer, path: string, contentType: string) => Promise<string>
   persistCfdi: (data: Record<string, any>) => Promise<any>
+  /**
+   * Reserves the idempotency slot BEFORE calling the PAC — prevents concurrent double-stamp.
+   * Must INSERT a row with status:'STAMPING'. On unique-key conflict the caller handles P2002.
+   */
+  reserveCfdi: (data: Record<string, any>) => Promise<any>
 }
 
 export interface IssueCfdiResult {
@@ -43,6 +50,10 @@ export interface IssueCfdiResult {
   cfdi: any
   reasons?: string[]
 }
+
+// A reservation older than this is treated as stale (crashed/deployed mid-stamp) and may be reclaimed,
+// so a stuck STAMPING row never permanently locks an order's invoicing.
+const STAMPING_TTL_MS = 3 * 60_000
 
 export async function issueCfdiForOrder(
   params: { orderId: string; receptor: IssueReceptor; sandbox: boolean; flow?: 'STAFF_B' | 'AUTOFACTURA_A'; expectedVenueId?: string },
@@ -62,7 +73,12 @@ export async function issueCfdiForOrder(
     throw new Error(`Order ${params.orderId} not found`) // → 404, no cross-venue leak
   }
 
-  // 3. Assemble + build
+  // Merchant gating: issuance requires facturacionEnabled on the payment merchant.
+  if (!bundle.facturacionEnabled) throw new Error('Facturación no habilitada para este comercio')
+  // Flow-A gating: autofactura requires autofacturaEnabled in addition.
+  if (params.flow === 'AUTOFACTURA_A' && !bundle.autofacturaEnabled) throw new Error('Autofactura no habilitada para este comercio')
+
+  // 3. Assemble + build (pure — no PAC calls, safe to run before reservation)
   const saleInput = assembleSaleInput(bundle.order, {
     receptor: params.receptor,
     paymentMethod: bundle.paymentMethod,
@@ -71,6 +87,39 @@ export async function issueCfdiForOrder(
     idempotencyKey,
   })
   const invoiceParams = buildCreateInvoiceParams(saleInput)
+
+  // 3b. Reserve the idempotency slot BEFORE calling the PAC.
+  //     This INSERT prevents a second concurrent request from reaching facturapi
+  //     and producing two real fiscal documents (double-stamp / double-charge).
+  //     The unique constraint on idempotencyKey is the gate.
+  try {
+    await deps.reserveCfdi(baseCfdiData(params, bundle, idempotencyKey, invoiceParams, 'STAMPING', {}))
+  } catch (err: unknown) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+      // Slot already taken — inspect the current status to decide the response.
+      const existing = await deps.findExistingCfdi(idempotencyKey)
+      if (existing?.status === 'STAMPED') {
+        // Another request already succeeded — idempotent success.
+        return { status: 'STAMPED', cfdi: existing }
+      }
+      if (existing?.status === 'STAMPING') {
+        // Another request is in-flight. But a process crash / rolling deploy mid-stamp could
+        // leave a STAMPING row stuck forever, permanently locking this order's invoicing.
+        // Bound the lock: only block if the reservation is FRESH; reclaim a stale one.
+        const ageMs = Date.now() - new Date(existing.updatedAt ?? existing.createdAt).getTime()
+        if (ageMs < STAMPING_TTL_MS) {
+          throw new Error('CFDI en proceso para esta orden') // → 409 in controllers
+        }
+        // Stale reservation — reclaim and retry. (Residual rare risk: the original may have
+        // stamped at the PAC just before crashing; the getInvoice reconcile job is the proper guard.)
+        logger.warn(`[cfdi] reclaiming stale STAMPING reservation for order ${params.orderId} (age ${Math.round(ageMs / 1000)}s)`)
+      }
+      // Terminal failure (VALIDATION_FAILED / STAMP_FAILED) — proceed to retry;
+      // the existing row will be overwritten by the persistCfdi upsert below.
+    } else {
+      throw err
+    }
+  }
 
   // 4. Validate (D1) — never send garbage to the PAC
   const validation = validateBeforeStamp({
@@ -81,6 +130,7 @@ export async function issueCfdiForOrder(
     expectedSubtotalCents: bundle.subtotalCents,
     expectedTaxCents: bundle.taxCents,
     expectedTotalCents: bundle.totalCents,
+    isGlobal: false, // individual issuance — XAXX010101000 ("Público en General") is blocked here
   })
   if (!validation.valid) {
     const cfdi = await deps.persistCfdi(
@@ -161,79 +211,117 @@ const defaultDeps: IssueCfdiDeps = {
   findExistingCfdi: idempotencyKey => prisma.cfdi.findUnique({ where: { idempotencyKey } }),
   storeArtifact: (buffer, path, contentType) => uploadFileToStorage(buffer, path, contentType),
   resolveProvider: resolveFiscalProvider,
+  // Reserves the idempotency slot (INSERT only — raises P2002 on conflict).
+  reserveCfdi: data => prisma.cfdi.create({ data: data as any }),
   persistCfdi: data =>
     prisma.cfdi.upsert({
       where: { idempotencyKey: data.idempotencyKey },
       create: data as any,
       update: { status: data.status, lastError: data.lastError ?? null, attempts: { increment: 1 }, ...stampedFields(data) },
     }),
-  loadOrderForCfdi: async orderId => {
-    // Tenant-safe load: order + items + product(+category) + venue + the emisor for this venue.
-    // Schema-verified field names:
-    //   Order → venue (slug, type, fiscalEmisors), payments (method), items, subtotal, taxAmount, total, tipAmount
-    //   OrderItem → productName, quantity, unitPrice, discountAmount, product → { satProductKey, satUnitKey, objetoImp, taxRate, category }
-    //   MenuCategory → defaultSatProductKey, defaultSatUnitKey
-    //   Payment → method  (NOT paymentMethod — schema field is "method")
-    //   Venue → fiscalEmisors (relation name at schema line 455)
-    const order = await prisma.order.findUnique({
-      where: { id: orderId },
-      select: {
-        venueId: true,
-        subtotal: true,
-        taxAmount: true,
-        total: true,
-        tipAmount: true,
-        venue: {
-          select: {
-            slug: true,
-            type: true,
-            fiscalEmisors: {
-              take: 1,
-              select: { id: true, provider: true, providerKeyEnc: true, csdStatus: true, serie: true },
-            },
-          },
+  loadOrderForCfdi: loadOrderForCfdiFromDb,
+}
+
+/**
+ * DB-backed order loader for CFDI issuance — extracted from defaultDeps so the tenant guard
+ * (emisor.venueId MUST equal order.venueId) and merchant-resolution edge cases are unit-testable.
+ */
+export async function loadOrderForCfdiFromDb(orderId: string): Promise<LoadedOrderBundle | null> {
+  // Tenant-safe load: order + items + product(+category) + venue.
+  // Emisor is now resolved via the most-recent payment's merchant → MerchantFiscalConfig → fiscalEmisor.
+  // Schema-verified field names:
+  //   Order → venue (slug, type), payments (method, merchantAccountId, ecommerceMerchantId),
+  //           items, subtotal, taxAmount, total, tipAmount
+  //   OrderItem → productName, quantity, unitPrice, discountAmount, product → { satProductKey, satUnitKey, objetoImp, taxRate, category }
+  //   MenuCategory → defaultSatProductKey, defaultSatUnitKey
+  //   Payment → method  (NOT paymentMethod — schema field is "method")
+  //   MerchantFiscalConfig → facturacionEnabled, autofacturaEnabled, fiscalEmisor (unique on merchantAccountId XOR ecommerceMerchantId)
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    select: {
+      venueId: true,
+      subtotal: true,
+      taxAmount: true,
+      total: true,
+      tipAmount: true,
+      venue: {
+        select: {
+          slug: true,
+          type: true,
         },
-        payments: {
-          take: 1,
-          orderBy: { createdAt: 'desc' },
-          select: { method: true },
-        },
-        items: {
-          select: {
-            productName: true,
-            quantity: true,
-            unitPrice: true,
-            discountAmount: true,
-            product: {
-              select: {
-                satProductKey: true,
-                satUnitKey: true,
-                objetoImp: true,
-                taxRate: true,
-                category: {
-                  select: { defaultSatProductKey: true, defaultSatUnitKey: true },
-                },
+      },
+      payments: {
+        // Only a SETTLED payment identifies the merchant that actually collected the revenue.
+        // Without this, a later REFUND (different/no merchant) could resolve the wrong emisor.
+        where: { status: 'COMPLETED' },
+        take: 1,
+        orderBy: { createdAt: 'desc' },
+        select: { method: true, merchantAccountId: true, ecommerceMerchantId: true },
+      },
+      items: {
+        select: {
+          productName: true,
+          quantity: true,
+          unitPrice: true,
+          discountAmount: true,
+          product: {
+            select: {
+              satProductKey: true,
+              satUnitKey: true,
+              objetoImp: true,
+              taxRate: true,
+              category: {
+                select: { defaultSatProductKey: true, defaultSatUnitKey: true },
               },
             },
           },
         },
       },
-    })
-    if (!order || !order.venue.fiscalEmisors[0]) return null
-    const peso = (d: any) => Math.round(Number(d) * 100)
-    return {
-      venueId: order.venueId,
-      venueSlug: order.venue.slug,
-      venueType: order.venue.type,
-      emisor: order.venue.fiscalEmisors[0],
-      paymentMethod: order.payments[0]?.method ?? 'CASH',
-      metodoPago: 'PUE', // POS = PUE (PPD/REP deferred)
-      subtotalCents: peso(order.subtotal),
-      taxCents: peso(order.taxAmount),
-      totalCents: peso(order.total),
-      order: { venueType: order.venue.type, tipAmount: order.tipAmount, items: order.items as any },
-    }
-  },
+    },
+  })
+  if (!order) return null
+
+  const pay = order.payments[0]
+  // No payment or no merchant on the payment → cannot resolve an emisor
+  if (!pay || (!pay.merchantAccountId && !pay.ecommerceMerchantId)) return null
+
+  // Resolve MerchantFiscalConfig via the unique merchantAccountId XOR ecommerceMerchantId
+  const cfg = await prisma.merchantFiscalConfig.findUnique({
+    where: pay.merchantAccountId ? { merchantAccountId: pay.merchantAccountId } : { ecommerceMerchantId: pay.ecommerceMerchantId! },
+    select: {
+      facturacionEnabled: true,
+      autofacturaEnabled: true,
+      fiscalEmisor: { select: { id: true, venueId: true, provider: true, providerKeyEnc: true, csdStatus: true, serie: true } },
+    },
+  })
+  // No merchant config or emisor not set up → cannot invoice
+  if (!cfg || !cfg.fiscalEmisor) return null
+
+  // Tenant isolation: a MerchantAccount can be shared across venues in the same org (via VenuePaymentConfig
+  // primary/secondary/tertiary slots). The emisor it maps to MUST belong to THIS order's venue — otherwise
+  // venue B could stamp a CFDI under venue A's RFC. FiscalEmisor is venue-scoped (@@unique([venueId, rfc])).
+  if (cfg.fiscalEmisor.venueId !== order.venueId) {
+    logger.warn(
+      `[cfdi] emisor/venue mismatch for order ${orderId}: order.venueId=${order.venueId}, emisor.venueId=${cfg.fiscalEmisor.venueId} — refusing to stamp`,
+    )
+    return null
+  }
+
+  const peso = (d: any) => Math.round(Number(d) * 100)
+  return {
+    venueId: order.venueId,
+    venueSlug: order.venue.slug,
+    venueType: order.venue.type,
+    emisor: cfg.fiscalEmisor,
+    facturacionEnabled: cfg.facturacionEnabled,
+    autofacturaEnabled: cfg.autofacturaEnabled,
+    paymentMethod: pay.method,
+    metodoPago: 'PUE', // POS = PUE (PPD/REP deferred)
+    subtotalCents: peso(order.subtotal),
+    taxCents: peso(order.taxAmount),
+    totalCents: peso(order.total),
+    order: { venueType: order.venue.type, tipAmount: order.tipAmount, items: order.items as any },
+  }
 }
 
 function stampedFields(data: Record<string, any>) {

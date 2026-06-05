@@ -127,6 +127,38 @@ export const uploadCsdSchema = z.object({
 })
 
 // ==========================================
+// PUBLIC AUTOFACTURA SCHEMA
+// ==========================================
+
+/**
+ * Schema for POST /api/v1/public/receipt/:accessKey/cfdi
+ *
+ * Customer self-service autofactura (Flow A). Mirrors issueCfdiBodyShape
+ * field names so the same receptor object passes to issueCfdiForOrder.
+ * `email` is REQUIRED here — the customer must receive the CFDI.
+ */
+const autofacturaBodyShape = z.object({
+  rfc: z
+    .string({ required_error: 'El RFC es requerido' })
+    .trim()
+    .min(12, 'El RFC debe tener al menos 12 caracteres')
+    .max(13, 'El RFC no puede tener más de 13 caracteres')
+    .toUpperCase(),
+  razonSocial: z.string({ required_error: 'La razón social es requerida' }).trim().min(1, 'La razón social es requerida'),
+  regimenFiscal: z
+    .string({ required_error: 'El régimen fiscal es requerido' })
+    .regex(/^\d{3}$/, 'El régimen fiscal debe ser un código de 3 dígitos'),
+  codigoPostal: z.string({ required_error: 'El código postal es requerido' }).regex(/^\d{5}$/, 'El código postal debe tener 5 dígitos'),
+  usoCfdi: z.string({ required_error: 'El uso de CFDI es requerido' }).trim().min(1, 'El uso de CFDI es requerido'),
+  email: z.string({ required_error: 'El correo es requerido' }).email('Correo inválido'),
+})
+
+/** Schema passed to validateRequest() for POST /public/receipt/:accessKey/cfdi */
+export const autofacturaSchema = z.object({
+  body: autofacturaBodyShape,
+})
+
+// ==========================================
 // TYPE EXPORTS
 // ==========================================
 
@@ -135,3 +167,4 @@ export type CancelCfdiBody = z.infer<typeof cancelCfdiSchema.shape.body>
 export type UpsertEmisorBody = z.infer<typeof upsertEmisorSchema.shape.body>
 export type UpsertMerchantConfigBody = z.infer<typeof upsertMerchantConfigSchema.shape.body>
 export type UploadCsdBody = z.infer<typeof uploadCsdSchema.shape.body>
+export type AutofacturaBody = z.infer<typeof autofacturaSchema.shape.body>

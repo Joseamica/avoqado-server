@@ -20,10 +20,22 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
       const byStatus: Record<string, number> = {}
       for (const g of grouped) byStatus[g.status] = g._count._all
 
-      const stamped = await prisma.cfdi.aggregate({ where: { ...where, status: 'STAMPED' }, _sum: { totalCents: true }, _count: { _all: true } })
+      const stamped = await prisma.cfdi.aggregate({
+        where: { ...where, status: 'STAMPED' },
+        _sum: { totalCents: true },
+        _count: { _all: true },
+      })
       const recent = await prisma.cfdi.findMany({
         where: { ...where, status: 'STAMPED' },
-        select: { serie: true, folio: true, uuid: true, totalCents: true, receptorNombre: true, stampedAt: true, venue: { select: { name: true } } },
+        select: {
+          serie: true,
+          folio: true,
+          uuid: true,
+          totalCents: true,
+          receptorNombre: true,
+          stampedAt: true,
+          venue: { select: { name: true } },
+        },
         orderBy: { stampedAt: 'desc' },
         take: limit,
       })

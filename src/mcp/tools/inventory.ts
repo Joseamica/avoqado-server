@@ -36,7 +36,7 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'mark_serialized_item',
-    "Mark a serialized item (SIM / ICCID / barcode) as RETURNED (reverses a sale and frees it back up the custody chain) or DAMAGED (removes it from the sellable chain). Identify it by serial number within a venue you can access. This WRITES — it changes inventory state; requires inventory:adjust.",
+    'Mark a serialized item (SIM / ICCID / barcode) as RETURNED (reverses a sale and frees it back up the custody chain) or DAMAGED (removes it from the sellable chain). Identify it by serial number within a venue you can access. This WRITES — it changes inventory state; requires inventory:adjust.',
     {
       venueId: z.string().describe('Venue that owns the item (must be in your scope)'),
       serialNumber: z.string().min(1).describe('Serial number / ICCID / barcode of the item'),

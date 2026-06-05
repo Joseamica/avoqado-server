@@ -44,6 +44,7 @@ export async function getExpectedCashAmount(venueId: string): Promise<{
   transactionCount: number
   daysSinceLastCloseout: number
   hasCloseouts: boolean
+  needsCloseout: boolean
 }> {
   // Check if there are any closeouts first
   const lastCloseout = await prisma.cashCloseout.findFirst({
@@ -81,12 +82,19 @@ export async function getExpectedCashAmount(venueId: string): Promise<{
   const expectedAmount = cashPayments.reduce((sum, p) => sum + Number(p.amount) + Number(p.tipAmount ?? 0), 0)
   const daysSinceLastCloseout = Math.floor((Date.now() - periodStart.getTime()) / (1000 * 60 * 60 * 24))
 
+  // Only prompt for a cash cut when there's actually cash to cut. A card-only
+  // venue (e.g. no efectivo) was getting "Han pasado N días desde el último
+  // corte" forever even though there's nothing to close out — the reminder
+  // must be gated on real cash activity, not just elapsed days.
+  const needsCloseout = cashPayments.length > 0
+
   return {
     expectedAmount,
     periodStart,
     transactionCount: cashPayments.length,
     daysSinceLastCloseout,
     hasCloseouts,
+    needsCloseout,
   }
 }
 

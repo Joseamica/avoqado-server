@@ -31,7 +31,13 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
       guard.requirePermission('products:update', venueId) // write gate (per-venue role)
       const matches = await matchProductsByName(where, name)
       if (matches.length === 0) return text({ ok: false, error: `No menu item matching "${name}" in that venue.` })
-      if (matches.length > 1) return text({ ok: false, ambiguous: true, error: `"${name}" matches several items — be more specific.`, matches: matches.map(m => m.name) })
+      if (matches.length > 1)
+        return text({
+          ok: false,
+          ambiguous: true,
+          error: `"${name}" matches several items — be more specific.`,
+          matches: matches.map(m => m.name),
+        })
       try {
         const updated = await updateProduct(venueId, matches[0].id, { active })
         return text({ ok: true, item: { name: updated.name, active: updated.active } })
@@ -54,7 +60,13 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
       guard.requirePermission('products:update', venueId) // write gate (per-venue role)
       const matches = await matchProductsByName(where, name)
       if (matches.length === 0) return text({ ok: false, error: `No menu item matching "${name}" in that venue.` })
-      if (matches.length > 1) return text({ ok: false, ambiguous: true, error: `"${name}" matches several items — be more specific.`, matches: matches.map(m => m.name) })
+      if (matches.length > 1)
+        return text({
+          ok: false,
+          ambiguous: true,
+          error: `"${name}" matches several items — be more specific.`,
+          matches: matches.map(m => m.name),
+        })
       try {
         const updated = await updateProduct(venueId, matches[0].id, { price })
         return text({ ok: true, item: { name: updated.name, price: Number(updated.price) } })

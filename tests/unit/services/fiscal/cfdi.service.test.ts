@@ -2,8 +2,25 @@
 import { Prisma } from '@prisma/client'
 import { issueCfdiForOrder, IssueCfdiDeps } from '../../../../src/services/fiscal/cfdi.service'
 
+/** Helper: build a realistic P2002 unique-violation error as Prisma would throw. */
+function makeP2002(): Prisma.PrismaClientKnownRequestError {
+  return new Prisma.PrismaClientKnownRequestError('Unique constraint failed on the fields: (`idempotencyKey`)', {
+    code: 'P2002',
+    clientVersion: 'x',
+    meta: { target: ['idempotencyKey'] },
+  })
+}
+
 const D = (n: number) => new Prisma.Decimal(n)
-const receptor = { rfc: 'XAXX010101000', razonSocial: 'PUBLICO EN GENERAL', regimenFiscal: '616', codigoPostal: '83240', usoCfdi: 'S01' }
+// Use a real individual RFC for the happy-path/default service tests.
+// XAXX010101000 ("Público en General") is only valid on the global CFDI; individual issuance blocks it.
+const receptor = {
+  rfc: 'EKU9003173C9',
+  razonSocial: 'ESCUELA KEMPER URGATE SA DE CV',
+  regimenFiscal: '601',
+  codigoPostal: '64000',
+  usoCfdi: 'G03',
+}
 
 function makeDeps(over: Partial<IssueCfdiDeps> = {}): IssueCfdiDeps {
   const stamped = {
@@ -17,11 +34,15 @@ function makeDeps(over: Partial<IssueCfdiDeps> = {}): IssueCfdiDeps {
   }
   return {
     findExistingCfdi: jest.fn().mockResolvedValue(null),
+    // By default, reservation succeeds (no conflict)
+    reserveCfdi: jest.fn().mockResolvedValue({}),
     loadOrderForCfdi: jest.fn().mockResolvedValue({
       venueId: 'v1',
       venueSlug: 'demo',
       venueType: 'RESTAURANT',
       emisor: { id: 'e1', provider: 'FACTURAPI', providerKeyEnc: null, csdStatus: 'ACTIVE', serie: 'F' },
+      facturacionEnabled: true,
+      autofacturaEnabled: true,
       paymentMethod: 'CASH',
       metodoPago: 'PUE',
       subtotalCents: 10000,
@@ -103,5 +124,114 @@ describe('issueCfdiForOrder', () => {
     const persisted = (deps.persistCfdi as jest.Mock).mock.calls.at(-1)[0]
     expect(persisted.status).toBe('STAMP_FAILED')
     expect(persisted.lastError).toMatch(/SAT down/)
+  })
+
+  // ── Merchant gating tests ──────────────────────────────────────────────────
+
+  it('rejects when facturacionEnabled is false, never calls the PAC', async () => {
+    const deps = makeDeps({
+      loadOrderForCfdi: jest.fn().mockResolvedValue({
+        venueId: 'v1',
+        venueSlug: 'demo',
+        venueType: 'RESTAURANT',
+        emisor: { id: 'e1', provider: 'FACTURAPI', providerKeyEnc: null, csdStatus: 'ACTIVE', serie: 'F' },
+        facturacionEnabled: false,
+        autofacturaEnabled: false,
+        paymentMethod: 'CASH',
+        metodoPago: 'PUE',
+        subtotalCents: 10000,
+        taxCents: 1600,
+        totalCents: 11600,
+        order: { venueType: 'RESTAURANT', tipAmount: D(0), items: [] },
+      }),
+    })
+    await expect(issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)).rejects.toThrow(/no habilitada/i)
+    expect(deps.resolveProvider).not.toHaveBeenCalled()
+    expect(deps.persistCfdi).not.toHaveBeenCalled()
+  })
+
+  it('rejects AUTOFACTURA_A flow when autofacturaEnabled is false, never calls the PAC', async () => {
+    const deps = makeDeps({
+      loadOrderForCfdi: jest.fn().mockResolvedValue({
+        venueId: 'v1',
+        venueSlug: 'demo',
+        venueType: 'RESTAURANT',
+        emisor: { id: 'e1', provider: 'FACTURAPI', providerKeyEnc: null, csdStatus: 'ACTIVE', serie: 'F' },
+        facturacionEnabled: true,
+        autofacturaEnabled: false,
+        paymentMethod: 'CASH',
+        metodoPago: 'PUE',
+        subtotalCents: 10000,
+        taxCents: 1600,
+        totalCents: 11600,
+        order: { venueType: 'RESTAURANT', tipAmount: D(0), items: [] },
+      }),
+    })
+    await expect(issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true, flow: 'AUTOFACTURA_A' }, deps)).rejects.toThrow(
+      /Autofactura no habilitada/i,
+    )
+    expect(deps.resolveProvider).not.toHaveBeenCalled()
+    expect(deps.persistCfdi).not.toHaveBeenCalled()
+  })
+
+  it('proceeds to STAMPED for AUTOFACTURA_A when both flags are enabled', async () => {
+    const autofacturaReceptor = {
+      rfc: 'EKU9003173C9',
+      razonSocial: 'ESCUELA KEMPER',
+      regimenFiscal: '601',
+      codigoPostal: '64000',
+      usoCfdi: 'G03',
+    }
+    const deps = makeDeps()
+    // default makeDeps has facturacionEnabled:true, autofacturaEnabled:true
+    const res = await issueCfdiForOrder({ orderId: 'o1', receptor: autofacturaReceptor, sandbox: true, flow: 'AUTOFACTURA_A' }, deps)
+    expect(res.status).toBe('STAMPED')
+    expect(deps.resolveProvider).toHaveBeenCalled()
+  })
+
+  // ── Concurrent double-stamp reservation tests ──────────────────────────────
+
+  it('concurrent in-flight (fresh STAMPING): P2002 + recent STAMPING → rejects with /en proceso/, never calls PAC', async () => {
+    const deps = makeDeps({
+      reserveCfdi: jest.fn().mockRejectedValue(makeP2002()),
+      findExistingCfdi: jest.fn().mockResolvedValue({ id: 'c0', status: 'STAMPING', updatedAt: new Date() }),
+    })
+    await expect(issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)).rejects.toThrow(/en proceso/)
+    expect(deps.resolveProvider).not.toHaveBeenCalled()
+  })
+
+  it('stale STAMPING (crashed mid-stamp): P2002 + STAMPING older than TTL → reclaims and proceeds to STAMPED', async () => {
+    const stale = new Date(Date.now() - 5 * 60_000) // 5 min ago (> 3 min TTL)
+    const deps = makeDeps({
+      reserveCfdi: jest.fn().mockRejectedValue(makeP2002()),
+      findExistingCfdi: jest.fn().mockResolvedValue({ id: 'c0', status: 'STAMPING', updatedAt: stale }),
+    })
+    const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
+    expect(res.status).toBe('STAMPED') // not permanently locked
+    expect(deps.resolveProvider).toHaveBeenCalled()
+  })
+
+  it('concurrent already succeeded (STAMPED): P2002 + existing STAMPED → returns that STAMPED without calling PAC', async () => {
+    const alreadyStamped = { id: 'c0', status: 'STAMPED', uuid: 'ALREADY-UUID' }
+    const deps = makeDeps({
+      reserveCfdi: jest.fn().mockRejectedValue(makeP2002()),
+      findExistingCfdi: jest.fn().mockResolvedValue(alreadyStamped),
+    })
+    const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
+    expect(res.status).toBe('STAMPED')
+    expect(res.cfdi.uuid).toBe('ALREADY-UUID')
+    expect(deps.resolveProvider).not.toHaveBeenCalled()
+  })
+
+  it('retry after terminal failure (STAMP_FAILED): P2002 + existing STAMP_FAILED → proceeds to stamp (PAC called)', async () => {
+    const failedRow = { id: 'c0', status: 'STAMP_FAILED' }
+    const deps = makeDeps({
+      reserveCfdi: jest.fn().mockRejectedValue(makeP2002()),
+      findExistingCfdi: jest.fn().mockResolvedValue(failedRow),
+    })
+    const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
+    // Should proceed all the way to STAMPED on retry
+    expect(res.status).toBe('STAMPED')
+    expect(deps.resolveProvider).toHaveBeenCalled()
   })
 })

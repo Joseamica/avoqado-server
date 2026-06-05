@@ -10,6 +10,8 @@ export interface PreStampInput {
   expectedSubtotalCents: number
   expectedTaxCents: number
   expectedTotalCents: number
+  /** True only for the month-end global CFDI (Flow C). Individual issuance (Flow B/A) must pass false or omit. */
+  isGlobal?: boolean
 }
 
 const RFC_RE = /^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$/i
@@ -23,6 +25,10 @@ export function validateBeforeStamp(input: PreStampInput): ReceptorValidationRes
 
   // Receptor
   if (!RFC_RE.test(input.receptor.rfc)) reasons.push('El RFC del receptor no tiene un formato válido.')
+  // XAXX010101000 "Público en General" is ONLY valid on the global CFDI (Flow C), never on an individual invoice.
+  if (!input.isGlobal && input.receptor.rfc?.toUpperCase() === 'XAXX010101000') {
+    reasons.push('El RFC "Público en General" (XAXX010101000) solo es válido en la factura global, no en una factura individual.')
+  }
   if (!/^\d{5}$/.test(input.receptor.codigoPostal)) reasons.push('El código postal del receptor debe tener 5 dígitos.')
   if (!input.receptor.razonSocial?.trim()) reasons.push('La razón social del receptor es obligatoria.')
   if (!/^\d{3}$/.test(input.receptor.regimenFiscal)) reasons.push('El régimen fiscal del receptor no es válido.')

@@ -45,6 +45,7 @@ import { gcalHorizonRefreshJob } from './jobs/gcal-horizon-refresh.job'
 import { gcalPruningJob } from './jobs/gcal-pruning.job'
 import { gcalHealthCheckJob } from './jobs/gcal-health-check.job'
 import { mercadoPagoTokenRefreshJob } from './jobs/mercadopago-token-refresh.job'
+import { cfdiGlobalJob } from './jobs/cfdiGlobal.job'
 // Import the new Socket.io system
 import { initializeSocketServer, shutdownSocketServer } from './communication/sockets'
 // Import Firebase Admin initialization
@@ -178,6 +179,9 @@ const gracefulShutdown = async (signal: string) => {
 
       // Stop Mercado Pago marketplace jobs
       mercadoPagoTokenRefreshJob.stop()
+
+      // Stop CFDI Global job
+      cfdiGlobalJob.stop()
 
       // Stop live demo cleanup job
       if (liveDemoCleanupJob) {
@@ -398,6 +402,9 @@ const startApplication = async (retries = 3) => {
 
       // Mercado Pago — refresh access_tokens expiring within 30 days (daily 03:00)
       mercadoPagoTokenRefreshJob.start()
+
+      // CFDI Global (Flow C) — daily 04:00 AM; issues factura global per active emisor
+      cfdiGlobalJob.start()
 
       // Start nightly email jobs only in production (avoid sending emails from dev/staging)
       if (NODE_ENV === 'production') {

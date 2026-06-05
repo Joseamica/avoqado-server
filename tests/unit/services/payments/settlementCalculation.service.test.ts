@@ -53,6 +53,33 @@ describe('Settlement Calculation Service', () => {
       expect(netAmount).toBeCloseTo(93.5, 2)
     })
 
+    it('should INCLUDE the tip in gross (BUG FIX: tip was dropped from settled net)', async () => {
+      // $100 sale + $15 tip. The customer charged $115 on the card and the
+      // commission is calculated on amount+tip ($115 × 7% = $8.05). Previously
+      // net used `amount` only, dropping the tip while still charging on it.
+      const paymentWithTip = { id: 'payment-tip', amount: new Decimal(100), tipAmount: new Decimal(15) } as Payment
+      ;(prisma.transactionCost.findUnique as jest.Mock).mockResolvedValue({
+        providerCostAmount: new Decimal(0),
+        venueChargeAmount: new Decimal(8.05), // 7% of (100 + 15)
+        venueFixedFee: new Decimal(0),
+      })
+
+      const netAmount = await calculateNetSettlementAmount(paymentWithTip)
+
+      // (100 + 15) - 8.05 = 106.95 — the tip MUST be settled to the venue
+      expect(netAmount).toBeCloseTo(106.95, 2)
+    })
+
+    it('should fall back to gross WITH tip when no transaction cost found', async () => {
+      const paymentWithTip = { id: 'no-cost', amount: new Decimal(200), tipAmount: new Decimal(30) } as Payment
+      ;(prisma.transactionCost.findUnique as jest.Mock).mockResolvedValue(null)
+
+      const netAmount = await calculateNetSettlementAmount(paymentWithTip)
+
+      // 200 + 30 = 230 (no fees found → return full gross incl. tip)
+      expect(netAmount).toBeCloseTo(230, 2)
+    })
+
     it('should handle zero fixed fee correctly', async () => {
       ;(prisma.transactionCost.findUnique as jest.Mock).mockResolvedValue({
         providerCostAmount: new Decimal(1.5),

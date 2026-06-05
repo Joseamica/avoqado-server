@@ -68,6 +68,7 @@ import {
   upsertMerchantFiscalConfigController,
   provisionEmisorController,
   uploadEmisorCsdController,
+  triggerGlobalCfdiController,
 } from '../controllers/dashboard/cfdi.dashboard.controller'
 import {
   assistantActionConfirmSchema,
@@ -3080,6 +3081,16 @@ router.post(
   checkFeatureAccess('CFDI'),
   checkPermission('cfdi:configure'),
   uploadEmisorCsdController,
+)
+
+// ---- Facturación CFDI 4.0 — Flow C: admin manual-trigger for factura global ----
+// Reuses cfdi:configure permission (OWNER/ADMIN). No body required.
+router.post(
+  '/venues/:venueId/fiscal/emisores/:emisorId/global',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:configure'),
+  triggerGlobalCfdiController,
 )
 
 // Manual Payment routes (ADMIN+) — MUST be registered BEFORE /venues/:venueId/payments/:paymentId

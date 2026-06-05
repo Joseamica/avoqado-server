@@ -13,7 +13,9 @@
 import { Request, Response } from 'express'
 import { env } from '@/config/env'
 import logger from '@/config/logger'
+import prisma from '@/utils/prismaClient'
 import { issueCfdiForOrder, cancelCfdi, getCfdiStatus } from '@/services/fiscal/cfdi.service'
+import { issueGlobalForEmisor } from '@/services/fiscal/cfdiGlobal.service'
 import { upsertEmisor, upsertMerchantFiscalConfig, getFiscalConfig } from '@/services/fiscal/fiscalConfig.service'
 import { provisionEmisor, uploadEmisorCsd } from '@/services/fiscal/fiscalOnboarding.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -88,6 +90,18 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
 
     if (/not found|no fiscal emisor/i.test(message)) {
       res.status(404).json({ error: 'Orden no encontrada o sin emisor fiscal configurado' })
+      return
+    }
+
+    // Merchant gating: facturacionEnabled or autofacturaEnabled is false → 403 (feature disabled, not missing)
+    if (/no habilitada/i.test(message)) {
+      res.status(403).json({ error: message })
+      return
+    }
+
+    // Concurrent in-flight reservation — surface as 409 so the client can retry after the first request resolves
+    if (/en proceso/i.test(message)) {
+      res.status(409).json({ error: message })
       return
     }
 
@@ -403,5 +417,106 @@ export async function uploadEmisorCsdController(req: Request, res: Response): Pr
     }
 
     res.status(500).json({ error: 'Error interno al subir el CSD del emisor fiscal' })
+  }
+}
+
+// ─── Flow C: Manual global CFDI trigger ──────────────────────────────────────
+
+/**
+ * POST /api/v1/dashboard/venues/:venueId/fiscal/emisores/:emisorId/global
+ *
+ * Admin manual trigger for Flow C: issues the most-recent closed-period factura global for the
+ * given FiscalEmisor. Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:configure').
+ *
+ * Status mapping:
+ *   STAMPED           → 201 { cfdi: { id, uuid, serie, folio, globalPeriod, pdfUrl } }
+ *   NOTHING_TO_INVOICE → 200 { status, message }
+ *   SKIPPED           → 409 (inactive CSD)
+ *   VALIDATION_FAILED → 422 { error, reasons }
+ *   STAMP_FAILED      → 502 { error, message }
+ */
+export async function triggerGlobalCfdiController(req: Request, res: Response): Promise<void> {
+  const { emisorId } = req.params
+  // Tenant isolation: always use authContext.venueId — never trust the path :venueId.
+  const { venueId, userId } = (req as any).authContext ?? {}
+
+  // Sandbox in dev/staging; live key in production.
+  const sandbox = env.NODE_ENV !== 'production'
+
+  try {
+    // Tenant guard: emisor must belong to the caller's venue
+    const emisor = await prisma.fiscalEmisor.findFirst({
+      where: { id: emisorId, venueId },
+      select: { id: true },
+    })
+    if (!emisor) {
+      res.status(404).json({ error: 'Emisor fiscal no encontrado' })
+      return
+    }
+
+    const result = await issueGlobalForEmisor({ emisorId, now: new Date(), sandbox })
+
+    switch (result.status) {
+      case 'NOTHING_TO_INVOICE':
+        res.status(200).json({ status: 'NOTHING_TO_INVOICE', message: 'No hay tickets por facturar en el periodo.' })
+        return
+
+      case 'SKIPPED':
+        res.status(409).json({ error: 'El sello digital (CSD) del emisor no está activo.', reason: result.reason })
+        return
+
+      case 'VALIDATION_FAILED':
+        res.status(422).json({ error: 'No se pudo generar la factura global', reasons: result.reasons })
+        return
+
+      case 'STAMP_FAILED':
+        res.status(502).json({ error: 'El PAC rechazó el timbrado de la factura global', message: result.cfdi?.lastError })
+        return
+
+      case 'STAMPED': {
+        // ActivityLog: CFDI_GLOBAL_ISSUED — audit mutation (critical-warnings rule)
+        logAction({
+          staffId: userId,
+          venueId,
+          action: 'CFDI_GLOBAL_ISSUED',
+          entity: 'Cfdi',
+          entityId: result.cfdi.id,
+          data: {
+            emisorId,
+            period: result.period ? `${result.period.meses}/${result.period.anio}` : null,
+            count: result.candidateCount ?? 0,
+            uuid: result.cfdi.uuid,
+          },
+        })
+
+        res.status(201).json({
+          cfdi: {
+            id: result.cfdi.id,
+            uuid: result.cfdi.uuid,
+            serie: result.cfdi.serie,
+            folio: result.cfdi.folio,
+            globalPeriod: result.cfdi.globalPeriod,
+            pdfUrl: result.cfdi.pdfUrl,
+          },
+        })
+        return
+      }
+    }
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    logger.error(`[cfdi.controller] triggerGlobalCfdi failed for emisor ${emisorId}: ${message}`)
+
+    if (/not found/i.test(message)) {
+      res.status(404).json({ error: 'Emisor fiscal no encontrado' })
+      return
+    }
+
+    // Concurrent in-flight reservation — surface as 409 so the client can retry
+    if (/en proceso/i.test(message)) {
+      res.status(409).json({ error: message })
+      return
+    }
+
+    res.status(500).json({ error: 'Error interno al generar la factura global' })
   }
 }

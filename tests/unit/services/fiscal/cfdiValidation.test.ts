@@ -70,4 +70,36 @@ describe('validateBeforeStamp (D1)', () => {
       }).valid,
     ).toBe(false)
   })
+
+  // ── XAXX010101000 "Público en General" gating ────────────────────────────
+
+  it('rejects XAXX010101000 on an individual CFDI (isGlobal omitted → false)', () => {
+    const r = validateBeforeStamp({
+      ...ok,
+      receptor: { ...ok.receptor, rfc: 'XAXX010101000' },
+    })
+    expect(r.valid).toBe(false)
+    expect(r.reasons.join(' ')).toMatch(/Público en General|global/i)
+  })
+
+  it('rejects XAXX010101000 on an individual CFDI (isGlobal explicitly false)', () => {
+    const r = validateBeforeStamp({
+      ...ok,
+      receptor: { ...ok.receptor, rfc: 'XAXX010101000' },
+      isGlobal: false,
+    })
+    expect(r.valid).toBe(false)
+    expect(r.reasons.join(' ')).toMatch(/Público en General|global/i)
+  })
+
+  it('allows XAXX010101000 on the global CFDI (isGlobal: true)', () => {
+    const r = validateBeforeStamp({
+      ...ok,
+      receptor: { ...ok.receptor, rfc: 'XAXX010101000' },
+      isGlobal: true,
+    })
+    // The XAXX reason must NOT appear; other fields may still be valid
+    const xaxxReason = r.reasons.find(reason => /Público en General|XAXX/i.test(reason))
+    expect(xaxxReason).toBeUndefined()
+  })
 })

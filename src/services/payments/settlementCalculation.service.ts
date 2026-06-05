@@ -277,7 +277,13 @@ export async function calculateNetSettlementAmount(
     }
   }
 
-  const grossAmount = Number(payment.amount)
+  // Gross MUST include the tip: the customer paid amount + tip on the card, and
+  // the venue commission (venueChargeAmount) is already calculated on amount+tip
+  // (see transactionCost.service: `amount = baseAmount + tipAmount`). Using
+  // `payment.amount` alone dropped the tip from the settled net while STILL
+  // charging commission on it — understating what the venue is owed in the
+  // "Saldo Disponible" calendar/summary.
+  const grossAmount = Number(payment.amount) + Number(payment.tipAmount ?? 0)
 
   if (!transactionCost) {
     // No transaction cost found, return gross amount

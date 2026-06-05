@@ -3,6 +3,7 @@ import { z } from 'zod'
 import cors from 'cors'
 import rateLimit from 'express-rate-limit'
 import { getPublicReceipt } from '../controllers/public/receipt.public.controller'
+import { autofacturaController, getAutofacturaStatusController } from '../controllers/public/cfdi.public.controller'
 import { submitReviewFromReceipt, checkReviewStatus, getReviewForReceipt } from '../controllers/public/receiptReview.public.controller'
 import * as reservationPublicController from '../controllers/public/reservation.public.controller'
 import * as creditPackPublicController from '../controllers/public/creditPack.public.controller'
@@ -43,6 +44,7 @@ import {
   customerLoginSchema,
   customerUpdateProfileSchema,
 } from '../schemas/dashboard/creditPack.schema'
+import { autofacturaSchema } from '../schemas/dashboard/cfdi.schema'
 import {
   publicShortCodeSchema,
   publicCheckoutSchema as plCheckoutSchema,
@@ -71,9 +73,25 @@ const readLimit = rateLimit({ windowMs: 60_000, max: 60, standardHeaders: true, 
 const writeLimit = rateLimit({ windowMs: 60_000, max: 5, standardHeaders: true, legacyHeaders: false })
 const cancelLimit = rateLimit({ windowMs: 60_000, max: 10, standardHeaders: true, legacyHeaders: false })
 const authLimit = rateLimit({ windowMs: 60_000, max: 10, standardHeaders: true, legacyHeaders: false })
+// CFDI stamping costs money — tight per-IP cap to prevent abuse
+const cfdiLimit = rateLimit({ windowMs: 60_000, max: 5, standardHeaders: true, legacyHeaders: false })
+// Second limiter keyed on the receipt accessKey: no single ticket can be hammered regardless of IP.
+// Mitigates wallet-drain + slot-denial velocity (e.g. a customer double-tapping the autofactura button).
+const cfdiPerKeyLimit = rateLimit({
+  windowMs: 60_000,
+  max: 3,
+  keyGenerator: req => (req.params as any).accessKey ?? req.ip ?? 'unknown',
+  standardHeaders: true,
+  legacyHeaders: false,
+})
 
 // Digital Receipt routes
 router.get('/receipt/:accessKey', getPublicReceipt)
+
+// CFDI autofactura (Flow A) — customer self-service invoice from receipt page
+// Both cfdiLimit (per-IP) and cfdiPerKeyLimit (per-accessKey) must pass to reach the controller.
+router.post('/receipt/:accessKey/cfdi', cfdiLimit, cfdiPerKeyLimit, validateRequest(autofacturaSchema), autofacturaController)
+router.get('/receipt/:accessKey/cfdi', readLimit, getAutofacturaStatusController)
 
 // Receipt Review routes
 router.post('/receipt/:accessKey/review', submitReviewFromReceipt)

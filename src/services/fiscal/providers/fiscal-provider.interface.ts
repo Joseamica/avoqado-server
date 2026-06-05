@@ -69,6 +69,35 @@ export interface CreateInvoiceParams {
   idempotencyKey: string
 }
 
+/** SAT c_Periodicidad: 01=Diario, 02=Semanal, 03=Quincenal, 04=Mensual, 05=Bimestral */
+export type SatPeriodicidadCode = '01' | '02' | '03' | '04' | '05'
+
+/** facturapi InvoicingPeriod enum values (verified against SDK enums.d.ts GlobalInvoicePeriodicity). */
+export type FacturapiPeriodicity = 'day' | 'week' | 'fortnight' | 'month' | 'two_months'
+
+export interface GlobalInvoiceParams {
+  /** XAXX010101000 público-en-general receptor */
+  receptor: {
+    legal_name: 'PÚBLICO EN GENERAL'
+    tax_id: 'XAXX010101000'
+    tax_system: '616'
+    address: { zip: string }
+  }
+  /** Factura global items — one per order/ticket */
+  items: CfdiItemInput[]
+  /** c_FormaPago — typically '01' (efectivo) for mixed-method global; '99' if ambiguous */
+  payment_form: string
+  /** Use S01 (Sin efectos fiscales) — mandatory for público en general */
+  use: 'S01'
+  serie?: string
+  /** facturapi global period object */
+  global: {
+    periodicity: FacturapiPeriodicity
+    months: string // SAT c_Meses code string (e.g. '05' for May, '13' for Jan+Feb bimestral)
+    year: number
+  }
+}
+
 export interface StampedInvoice {
   providerInvoiceId: string
   uuid: string // folio fiscal
@@ -92,8 +121,6 @@ export interface CancelInvoiceResult {
 
 /**
  * A CFDI provider (PAC integration layer). facturapi is the first adapter.
- * Receipts + global-invoice methods are intentionally NOT in this contract yet —
- * they arrive with the A/C issuance phases.
  */
 export interface FiscalProvider {
   readonly name: string
@@ -102,6 +129,8 @@ export interface FiscalProvider {
   uploadCsd(params: UploadCsdParams): Promise<UploadCsdResult>
   validateReceptor(params: ReceptorInput): Promise<ReceptorValidationResult>
   createInvoice(params: CreateInvoiceParams): Promise<StampedInvoice>
+  /** Issues a factura global to "Público en General" (RFC XAXX010101000). */
+  createGlobalInvoice(params: GlobalInvoiceParams): Promise<StampedInvoice>
   getInvoice(providerInvoiceId: string): Promise<StampedInvoice>
   downloadXml(providerInvoiceId: string): Promise<Buffer>
   downloadPdf(providerInvoiceId: string): Promise<Buffer>

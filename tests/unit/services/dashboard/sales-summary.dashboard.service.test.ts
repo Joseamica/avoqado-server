@@ -487,8 +487,22 @@ describe('computeMerchantAccountBreakdown', () => {
       { merchantAccountId: 'ma-ext', collected: 13827, fee: 497.7, txns: 17 },
     ])
     ;(prismaMock.merchantAccount.findMany as jest.Mock).mockResolvedValue([
-      { id: 'ma-A', displayName: 'Amaena - A', alias: null, angelpayAffiliation: '7494104', displayOrder: 0, provider: { name: 'AngelPay (Nexgo)' } },
-      { id: 'ma-ext', displayName: 'Amaena - Externo', alias: null, angelpayAffiliation: null, displayOrder: 2, provider: { name: 'Blumon PAX' } },
+      {
+        id: 'ma-A',
+        displayName: 'Amaena - A',
+        alias: null,
+        angelpayAffiliation: '7494104',
+        displayOrder: 0,
+        provider: { name: 'AngelPay (Nexgo)' },
+      },
+      {
+        id: 'ma-ext',
+        displayName: 'Amaena - Externo',
+        alias: null,
+        angelpayAffiliation: null,
+        displayOrder: 2,
+        provider: { name: 'Blumon PAX' },
+      },
     ])
 
     const result = await computeMerchantAccountBreakdown(VENUE, START, END)
@@ -517,11 +531,16 @@ describe('computeMerchantAccountBreakdown', () => {
   })
 
   it('falls back to alias, then a generic label, when displayName is missing', async () => {
-    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([
-      { merchantAccountId: 'ma-x', collected: 100, fee: 4, txns: 1 },
-    ])
+    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([{ merchantAccountId: 'ma-x', collected: 100, fee: 4, txns: 1 }])
     ;(prismaMock.merchantAccount.findMany as jest.Mock).mockResolvedValue([
-      { id: 'ma-x', displayName: null, alias: 'Cuenta vieja', angelpayAffiliation: null, displayOrder: 0, provider: { name: 'AngelPay (Nexgo)' } },
+      {
+        id: 'ma-x',
+        displayName: null,
+        alias: 'Cuenta vieja',
+        angelpayAffiliation: null,
+        displayOrder: 0,
+        provider: { name: 'AngelPay (Nexgo)' },
+      },
     ])
     const result = await computeMerchantAccountBreakdown(VENUE, START, END)
     expect(result[0].displayName).toBe('Cuenta vieja')
