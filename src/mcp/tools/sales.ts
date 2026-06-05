@@ -91,6 +91,47 @@ export function rankTopStaff(rows: StaffRankingRow[], limit = 10): StaffRankingR
     }))
 }
 
+export interface CategoryMixRow {
+  category: string
+  revenue: number
+  quantity: number
+  percentage: number
+}
+
+/** Top categories by revenue (desc), rounded. The service already sorts; we re-sort defensively. */
+export function rankCategories(rows: CategoryMixRow[], limit = 20): CategoryMixRow[] {
+  return [...rows]
+    .sort((a, b) => b.revenue - a.revenue)
+    .slice(0, limit)
+    .map(c => ({ category: c.category, revenue: round2(c.revenue), quantity: c.quantity, percentage: round2(c.percentage) }))
+}
+
+export interface AnalyticsPaymentRow {
+  amount: number | { toString(): string }
+  method: string
+}
+
+export interface PaymentMethodTotal {
+  method: string
+  total: number
+  count: number
+}
+
+/** Aggregate per-payment analytics rows into per-method totals (desc by total), money rounded to cents. */
+export function summarizeByPaymentMethod(payments: AnalyticsPaymentRow[]): PaymentMethodTotal[] {
+  const map = new Map<string, { total: number; count: number }>()
+  for (const p of payments) {
+    const method = p.method || 'UNKNOWN'
+    const existing = map.get(method) || { total: 0, count: 0 }
+    existing.total += Number(p.amount)
+    existing.count += 1
+    map.set(method, existing)
+  }
+  return Array.from(map.entries())
+    .map(([method, d]) => ({ method, total: round2(d.total), count: d.count }))
+    .sort((a, b) => b.total - a.total)
+}
+
 export function registerSalesTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
   server.tool(
@@ -151,6 +192,42 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
       const ranking = (await getChartData(venueId, 'staff-ranking', { fromDate, toDate })) as StaffRankingRow[]
       const top = rankTopStaff(ranking, limit ?? 10)
       return text({ venueId, count: top.length, staff: top })
+    },
+  )
+
+  server.tool(
+    'category_mix',
+    'Sales mix by menu category in a venue you can access, over a date range (default last 7 days): revenue, units, and % of revenue per category, ranked by revenue. Answers "¿qué categorías venden más?". Pass venueId; optionally fromDate/toDate (YYYY-MM-DD) and a limit.',
+    {
+      venueId: z.string().describe('Venue to analyze (must be in your scope)'),
+      fromDate: z.string().optional().describe('Start date YYYY-MM-DD (default: 7 days ago)'),
+      toDate: z.string().optional().describe('End date YYYY-MM-DD (default: today)'),
+      limit: z.number().int().positive().max(50).optional().describe('How many categories to return (default 20)'),
+    },
+    async ({ venueId, fromDate, toDate, limit }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const rows = (await getChartData(venueId, 'category-mix', { fromDate, toDate })) as CategoryMixRow[]
+      const categories = rankCategories(rows, limit ?? 20)
+      return text({ venueId, count: categories.length, categories })
+    },
+  )
+
+  server.tool(
+    'sales_by_payment_method',
+    'Sales totals grouped by payment method (cash, card, etc.) in a venue you can access, over a date range (default last 7 days): total and transaction count per method, ranked by total. Answers "¿cuánto en efectivo vs tarjeta?". Pass venueId; optionally fromDate/toDate (YYYY-MM-DD).',
+    {
+      venueId: z.string().describe('Venue to analyze (must be in your scope)'),
+      fromDate: z.string().optional().describe('Start date YYYY-MM-DD (default: 7 days ago)'),
+      toDate: z.string().optional().describe('End date YYYY-MM-DD (default: today)'),
+    },
+    async ({ venueId, fromDate, toDate }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const data = (await getChartData(venueId, 'sales-by-payment-method', { fromDate, toDate })) as {
+        payments: AnalyticsPaymentRow[]
+      }
+      const byMethod = summarizeByPaymentMethod(data.payments)
+      const gross = round2(byMethod.reduce((s, m) => s + m.total, 0))
+      return text({ venueId, gross, byMethod })
     },
   )
 }

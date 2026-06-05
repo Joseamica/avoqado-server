@@ -1,4 +1,4 @@
-import { summarizeSales, rankTopProducts, rankTopStaff } from '../../../src/mcp/tools/sales'
+import { summarizeSales, rankTopProducts, rankTopStaff, rankCategories, summarizeByPaymentMethod } from '../../../src/mcp/tools/sales'
 import { auditTerminalConfig } from '../../../src/mcp/tools/terminals'
 
 // Avoid ts-jest compiling the huge access.service graph (the tool modules import it
@@ -115,4 +115,46 @@ describe('rankTopStaff', () => {
   it('handles empty', () => {
     expect(rankTopStaff([])).toEqual([])
   })
+})
+
+describe('rankCategories', () => {
+  const rows = [
+    { category: 'Bebidas', revenue: 500.126, quantity: 40, percentage: 25.004 },
+    { category: 'Tacos', revenue: 1500, quantity: 100, percentage: 75 },
+  ]
+  it('ranks by revenue (desc) and applies the limit', () => {
+    const out = rankCategories(rows, 1)
+    expect(out).toHaveLength(1)
+    expect(out[0].category).toBe('Tacos')
+  })
+  it('rounds revenue + percentage to 2 decimals', () => {
+    const [bebidas] = rankCategories([rows[0]])
+    expect(bebidas.revenue).toBe(500.13)
+    expect(bebidas.percentage).toBe(25)
+    expect(bebidas.quantity).toBe(40)
+  })
+  it('handles empty', () => expect(rankCategories([])).toEqual([]))
+})
+
+describe('summarizeByPaymentMethod', () => {
+  const payments = [
+    { amount: 100, method: 'CASH' },
+    { amount: 200, method: 'CREDIT_CARD' },
+    { amount: 50.5, method: 'CASH' },
+    { amount: 25, method: '' }, // empty method → UNKNOWN
+  ]
+  it('aggregates total + count per method', () => {
+    const out = summarizeByPaymentMethod(payments)
+    expect(out.find(m => m.method === 'CASH')).toEqual({ method: 'CASH', total: 150.5, count: 2 })
+    expect(out.find(m => m.method === 'CREDIT_CARD')).toEqual({ method: 'CREDIT_CARD', total: 200, count: 1 })
+    expect(out.find(m => m.method === 'UNKNOWN')).toEqual({ method: 'UNKNOWN', total: 25, count: 1 })
+  })
+  it('ranks methods by total (desc)', () => {
+    expect(summarizeByPaymentMethod(payments).map(m => m.method)).toEqual(['CREDIT_CARD', 'CASH', 'UNKNOWN'])
+  })
+  it('accepts Decimal-like amounts (toString)', () => {
+    const out = summarizeByPaymentMethod([{ amount: { toString: () => '99.99' }, method: 'CASH' }])
+    expect(out[0].total).toBe(99.99)
+  })
+  it('handles empty', () => expect(summarizeByPaymentMethod([])).toEqual([]))
 })
