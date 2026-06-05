@@ -96,6 +96,7 @@ export class CfdiReconcileJob {
               isGlobal: true,
               orderId: true,
               facturapiId: true,
+              idempotencyKey: true,
               receptorRfc: true,
               totalCents: true,
               createdAt: true,

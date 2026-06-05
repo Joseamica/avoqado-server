@@ -86,6 +86,31 @@ describe('issueCfdiForOrder', () => {
     expect(persisted.xmlUrl).toMatch(/\.xml$/)
   })
 
+  it('passes externalId = idempotencyKey to createInvoice so the PAC stamps external_id', async () => {
+    const createInvoice = jest.fn().mockResolvedValue({
+      providerInvoiceId: 'fa1',
+      uuid: 'UUID-1',
+      serie: 'F',
+      folio: '2',
+      totalCents: 11600,
+      stampedAt: new Date(),
+      status: 'valid' as const,
+    })
+    const deps = makeDeps({
+      resolveProvider: jest.fn().mockReturnValue({
+        name: 'facturapi',
+        createInvoice,
+        downloadXml: jest.fn().mockResolvedValue(Buffer.from('<xml/>')),
+        downloadPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF')),
+      } as any),
+    })
+    await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
+    expect(createInvoice).toHaveBeenCalledTimes(1)
+    const invoiceParams = createInvoice.mock.calls[0][0]
+    // externalId must equal the idempotencyKey built from orderId
+    expect(invoiceParams.externalId).toBe('cfdi-order-o1')
+  })
+
   it('idempotent: returns the existing STAMPED Cfdi without calling the PAC', async () => {
     const existing = { id: 'c0', status: 'STAMPED', uuid: 'OLD' }
     const deps = makeDeps({ findExistingCfdi: jest.fn().mockResolvedValue(existing) })

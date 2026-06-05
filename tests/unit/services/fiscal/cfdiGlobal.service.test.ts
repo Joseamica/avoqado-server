@@ -130,6 +130,23 @@ describe('issueGlobalForEmisor', () => {
       expect(callArgs.idempotency_key).toBeUndefined()
     })
 
+    it('passes externalId = idempotencyKey to createGlobalInvoice so the PAC stamps external_id', async () => {
+      const createGlobalInvoice = jest.fn().mockResolvedValue(STAMPED_RESULT)
+      const deps = makeDeps({
+        resolveProvider: jest.fn().mockReturnValue({
+          name: 'facturapi',
+          createGlobalInvoice,
+          downloadXml: jest.fn().mockResolvedValue(Buffer.from('<xml/>')),
+          downloadPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF')),
+        } as any),
+      })
+      await issueGlobalForEmisor({ emisorId: 'e1', now: NOW, sandbox: true }, deps)
+      expect(createGlobalInvoice).toHaveBeenCalledTimes(1)
+      const callArgs = createGlobalInvoice.mock.calls[0][0]
+      // externalId must equal the idempotencyKey built from emisorId + period
+      expect(callArgs.externalId).toBe('cfdi-global-e1-2026-05-04')
+    })
+
     it('period and candidateCount are returned', async () => {
       const deps = makeDeps()
       const result = await issueGlobalForEmisor({ emisorId: 'e1', now: NOW, sandbox: true }, deps)

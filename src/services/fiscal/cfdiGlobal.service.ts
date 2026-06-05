@@ -114,6 +114,10 @@ export async function issueGlobalForEmisor(
 
   // 7. Build payload
   const params_ = buildGlobalInvoiceParams(emisor, candidates, period)
+  // Stamp our idempotencyKey as the PAC external_id — mirrors cfdi.service.ts.
+  // Enables the reconcile job to look up the document deterministically instead of
+  // relying solely on attribute matching (RFC + total + global flag + date window).
+  params_.externalId = idempotencyKey
 
   // 8. Reconcile money: ensures each line's subtotal+tax=total and returns aggregated totals
   const { subtotalCents, taxCents, totalCents } = reconcileGlobalLines(candidates)

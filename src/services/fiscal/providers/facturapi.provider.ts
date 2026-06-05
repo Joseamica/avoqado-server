@@ -96,6 +96,12 @@ export class FacturapiProvider implements FiscalProvider {
       // nor body `i_key` are accepted inputs — verified live in sandbox). Idempotency is enforced at
       // our service layer via the unique `Cfdi.idempotencyKey` (pre-check before calling the PAC).
       // `params.idempotencyKey` stays in the interface for that orchestration use; not forwarded here.
+      //
+      // external_id, however, IS accepted as a body field on invoices.create and is stored on the
+      // PAC document — confirmed via facturapi Invoice type (external_id?: string | null). We use it
+      // to stamp our idempotencyKey onto the document so the reconcile job can look it up
+      // deterministically via GET /v2/invoices?external_id= instead of relying on attribute search.
+      ...(params.externalId ? { external_id: params.externalId } : {}),
       items: params.items.map(it => ({
         quantity: it.quantity,
         discount: toPesos(it.discountCents),
@@ -148,6 +154,7 @@ export class FacturapiProvider implements FiscalProvider {
       payment_form: params.payment_form,
       payment_method: 'PUE', // global invoices are always single-payment (PUE)
       ...(params.serie ? { series: params.serie } : {}),
+      ...(params.externalId ? { external_id: params.externalId } : {}),
       global: {
         periodicity: params.global.periodicity,
         months: params.global.months,
@@ -184,6 +191,28 @@ export class FacturapiProvider implements FiscalProvider {
   async getInvoice(providerInvoiceId: string): Promise<StampedInvoice> {
     const inv = await this.client.invoices.retrieve(providerInvoiceId)
     return this.toStamped(inv)
+  }
+
+  /**
+   * Looks up a PAC invoice by `external_id` (which we set equal to our `idempotencyKey`).
+   *
+   * facturapi's GET /v2/invoices accepts `external_id` as a query-param filter and returns
+   * matching invoices. The SDK's `list()` forwards all params as query params, so passing
+   * `{ external_id: value }` reaches the API as `?external_id=<value>`.
+   *
+   * Contract:
+   *   - Returns the first 'valid' match if any exist.
+   *   - Returns the first match (whatever status) when no 'valid' exists but results were returned.
+   *   - Returns null when the list is empty (no document with that external_id — definitive NONE).
+   *   - Does NOT suppress errors: PAC network errors bubble to the caller (→ INCONCLUSIVE, not RESET).
+   */
+  async findByExternalId(externalId: string): Promise<ProviderInvoiceSummary | null> {
+    const res = await this.client.invoices.list({ external_id: externalId, limit: 10 })
+    const data = res?.data ?? []
+    if (data.length === 0) return null
+    // Prefer the first valid document; fall back to the first result (e.g. canceled)
+    const valid = data.find((inv: any) => inv.status !== 'canceled')
+    return this.toSummary(valid ?? data[0])
   }
 
   /**

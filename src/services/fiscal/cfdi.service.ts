@@ -197,6 +197,10 @@ export async function issueCfdiForOrder(
     idempotencyKey,
   })
   const invoiceParams = buildCreateInvoiceParams(saleInput)
+  // Stamp our idempotencyKey as the PAC external_id so the reconcile job can look up
+  // the document deterministically (GET /v2/invoices?external_id=...) instead of relying
+  // solely on attribute matching (RFC + total + global flag + date window).
+  invoiceParams.externalId = idempotencyKey
 
   // 3b. Reserve the idempotency slot BEFORE calling the PAC.
   //     This INSERT prevents a second concurrent request from reaching facturapi

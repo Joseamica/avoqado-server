@@ -67,6 +67,8 @@ export interface CreateInvoiceParams {
   metodoPago: 'PUE' | 'PPD'
   serie?: string
   idempotencyKey: string
+  /** Stamped as `external_id` on the PAC document — enables deterministic orphan lookup in reconcile. */
+  externalId?: string
 }
 
 /** SAT c_Periodicidad: 01=Diario, 02=Semanal, 03=Quincenal, 04=Mensual, 05=Bimestral */
@@ -96,6 +98,8 @@ export interface GlobalInvoiceParams {
     months: string // SAT c_Meses code string (e.g. '05' for May, '13' for Jan+Feb bimestral)
     year: number
   }
+  /** Stamped as `external_id` on the PAC document — enables deterministic orphan lookup in reconcile. */
+  externalId?: string
 }
 
 export interface StampedInvoice {
@@ -171,6 +175,17 @@ export interface FiscalProvider {
   /** Issues a factura global to "Público en General" (RFC XAXX010101000). */
   createGlobalInvoice(params: GlobalInvoiceParams): Promise<StampedInvoice>
   getInvoice(providerInvoiceId: string): Promise<StampedInvoice>
+  /**
+   * Looks up a PAC invoice by the `external_id` we stamped on it at creation time
+   * (= our `idempotencyKey`). Returns the matching summary, or null when none is found.
+   *
+   * Contract:
+   *   - A result with status 'valid' → the document is a valid stamp.
+   *   - A result with status 'canceled' → a stamp happened but was later canceled; caller treats as INCONCLUSIVE.
+   *   - null → no document found with that external_id (deterministic NONE for reconcile).
+   *   - If the PAC returns >1 match (shouldn't happen), returns the first 'valid' one, else the first result.
+   */
+  findByExternalId(externalId: string): Promise<ProviderInvoiceSummary | null>
   /**
    * Searches the PAC's invoices (read-only). Used by the reconcile job to find an orphaned
    * stamp when we hold no providerInvoiceId for a stuck row. Returns lightweight summaries

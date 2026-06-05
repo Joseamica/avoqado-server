@@ -24,7 +24,7 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { buildStoragePath, uploadFileToStorage } from '../storage.service'
 import { resolveFiscalProvider } from './fiscalProvider.factory'
-import { ProviderInvoiceSummary, StampedInvoice } from './providers/fiscal-provider.interface'
+import { FiscalProvider, ProviderInvoiceSummary, StampedInvoice } from './providers/fiscal-provider.interface'
 
 // ─── Result types ─────────────────────────────────────────────────────────────
 
@@ -52,6 +52,11 @@ export interface StuckCfdi {
   orderId: string | null
   /** Provider invoice id — null on a STAMPING reservation (set only at the final STAMPED persist). */
   facturapiId: string | null
+  /**
+   * Our idempotencyKey — also stamped as `external_id` on the PAC document at create time.
+   * When present, enables a deterministic lookup that short-circuits the attribute-search fallback.
+   */
+  idempotencyKey: string | null
   receptorRfc: string
   totalCents: number
   createdAt: Date
@@ -75,6 +80,12 @@ export interface ReconcileCfdiDeps {
   completeCfdi: (cfdiId: string, data: Record<string, any>) => Promise<any>
   /** Resets the row to STAMP_FAILED with a clear lastError so the next issuance retries cleanly. */
   failCfdi: (cfdiId: string, lastError: string) => Promise<any>
+  /**
+   * Deterministic lookup — delegates to `provider.findByExternalId(externalId)`.
+   * Extracted into deps so tests can mock it independently of the provider mock.
+   * Default implementation calls provider.findByExternalId directly.
+   */
+  findByExternalId: (provider: FiscalProvider, externalId: string) => Promise<ProviderInvoiceSummary | null>
 }
 
 // How wide a window around the row's createdAt to search the PAC. The reconcile job only picks up
@@ -113,11 +124,36 @@ export async function reconcileStuckCfdi(
   const provider = deps.resolveProvider(emisor as any, { sandbox })
 
   // ── Find whether a document exists at the PAC ───────────────────────────────
-  // Two paths, exactly as the residual-risk guard requires:
+  // Three paths, in order of reliability:
+  //   (0) idempotencyKey present → findByExternalId (deterministic — external_id stamped at creation)
+  //       Hit: short-circuit with VALID / CANCELED. Miss: fall through (don't conclude NONE alone).
   //   (a) facturapiId present → getInvoice(id) (defensive — STAMPING reservations normally carry none)
-  //   (b) facturapiId null    → search by reference to detect an orphaned stamp
+  //   (b) facturapiId null    → search by reference (RFC + total + global flag + date window)
+  //
+  // "Never reset on doubt" is preserved: external_id miss alone is not treated as NONE; we still
+  // run the attribute search. Only when both miss do we conclude NONE (safe to reset).
   let lookup: PacLookup
   try {
+    // (0) Deterministic path: externalId lookup short-circuits on a hit
+    if (cfdi.idempotencyKey) {
+      const summary = await deps.findByExternalId(provider, cfdi.idempotencyKey)
+      if (summary !== null) {
+        // Found a document with our external_id — resolve immediately
+        if (summary.status === 'canceled') {
+          logger.warn(`[cfdiReconcile] INCONCLUSIVE cfdi=${cfdi.id} (external_id lookup: CANCELED) — left STAMPING for manual review`)
+          return { outcome: 'INCONCLUSIVE', cfdiId: cfdi.id, detail: 'external_id match: canceled' }
+        }
+        // Valid stamp found deterministically — complete without attribute search
+        logger.info(`[cfdiReconcile] COMPLETED cfdi=${cfdi.id} via external_id lookup (deterministic)`)
+        const completed = await completeFromPac(deps, cfdi, emisor, provider, summary, now)
+        return { outcome: 'COMPLETED', cfdiId: cfdi.id, detail: `uuid=${completed.uuid ?? '?'} (external_id)` }
+      }
+      // external_id returned null — PAC has no document with this external_id.
+      // Fall through to the id/attribute paths — the document may predate external_id stamping.
+      logger.debug(`[cfdiReconcile] external_id miss for cfdi=${cfdi.id} — falling back to id/attribute search`)
+    }
+
+    // (a)/(b) Fallback: id lookup or attribute search
     lookup = cfdi.facturapiId ? await lookupById(provider, cfdi.facturapiId) : await lookupByReference(provider, cfdi, now)
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
@@ -296,4 +332,6 @@ const defaultDeps: ReconcileCfdiDeps = {
       where: { id: cfdiId },
       data: { status: 'STAMP_FAILED', lastError, attempts: { increment: 1 } },
     }),
+
+  findByExternalId: (provider: FiscalProvider, externalId: string) => provider.findByExternalId(externalId),
 }
