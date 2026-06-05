@@ -385,10 +385,7 @@ describe('cancelCfdiController', () => {
     mockCancel.mockResolvedValue({ cancelStatus: 'REQUESTED', cancelledAt: null, cfdi: { id: 'c1' } })
 
     const res = mockRes()
-    await cancelCfdiController(
-      cancelReq({ params: { cfdiId: 'c1' /* no venueId */ }, authContext: { venueId: 'token-venue' } }),
-      res,
-    )
+    await cancelCfdiController(cancelReq({ params: { cfdiId: 'c1' /* no venueId */ }, authContext: { venueId: 'token-venue' } }), res)
 
     expect(mockCancel).toHaveBeenCalledWith(expect.objectContaining({ expectedVenueId: 'token-venue' }))
   })
