@@ -218,7 +218,32 @@ const defaultDeps: FiscalConfigDeps = {
     })
   },
 
-  listEmisores: venueId => prisma.fiscalEmisor.findMany({ where: { venueId } }),
+  // Explicit safe select: surface CSD health (csdStatus/csdExpiresAt) for the dashboard badge,
+  // but NEVER ship providerKeyEnc (the encrypted per-emisor PAC key) to the client.
+  listEmisores: venueId =>
+    prisma.fiscalEmisor.findMany({
+      where: { venueId },
+      orderBy: { createdAt: 'asc' },
+      select: {
+        id: true,
+        venueId: true,
+        rfc: true,
+        legalName: true,
+        regimenFiscal: true,
+        lugarExpedicion: true,
+        provider: true,
+        providerOrgId: true,
+        csdStatus: true,
+        csdExpiresAt: true,
+        csdLastCheckedAt: true,
+        serie: true,
+        defaultUsoCfdi: true,
+        globalPeriodicity: true,
+        createdAt: true,
+        updatedAt: true,
+        // providerKeyEnc intentionally omitted (sensitive)
+      },
+    }),
 
   listMerchantConfigs: venueId =>
     prisma.merchantFiscalConfig.findMany({

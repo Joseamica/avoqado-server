@@ -644,3 +644,47 @@ work — this is it.)
 - Facturama Multiemisor (runner-up): apisandbox.facturama.mx/guias/{diferencias,api-multi/csds,cfdi40/multiemisor},
   facturama.mx/api-facturacion-electronica
 - SAT 2026 compliance (CSD/17-H Bis, constancia, REP, cancelación): see `sat-2026-compliance-facts.md`
+
+---
+
+## 20. Dashboard UI — "Facturación" sidebar dropdown (avoqado-web-dashboard) — TO BUILD
+
+> Status: **backend complete (3 flows + hardening, 2026-06-04); the UI below is NOT built yet.** Lives in `avoqado-web-dashboard` (different
+> repo). It is the operator surface for everything in §6–§15. Gated by feature **CFDI** (Pro) + permission `cfdi:view` (the dropdown only
+> renders when both pass); write actions gated per sub-page (`cfdi:configure` / `cfdi:issue`).
+
+A single collapsible **sidebar dropdown "Facturación"** (icon: receipt/file-invoice; sector term via `useTerminology()` — "Facturación"
+everywhere in MX) groups the sub-pages below. Mirror the existing sidebar dropdown pattern (`app-sidebar.tsx`); guard the parent with the
+CFDI feature flag (`useAccess`/`FeatureProtectedRoute`) so non-Pro venues see a locked teaser → billing.
+
+### 20.1 Sub-pages
+
+| #   | Sub-page                         | What it does                                                                                                                                                                                                                                                                                                   | Backend it consumes                                                                                                                            | Min permission                          |
+| --- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| 1   | **Emisores (RFC + CSD)**         | List/create/edit `FiscalEmisor` (RFC, razón social, régimen fiscal, lugar de expedición, serie, `defaultUsoCfdi`, `globalPeriodicity`). "Conectar al PAC" → provision facturapi org. Upload CSD (.cer/.key/contraseña) → status badge **NONE/ACTIVE/EXPIRED** (+ `csdExpiresAt`).                              | `GET /dashboard/venues/:venueId/fiscal/config`, `POST/PUT …/fiscal/emisores[/:id]`, `POST …/emisores/:id/provision`, `POST …/emisores/:id/csd` | `cfdi:configure` (read = `cfdi:view`)   |
+| 2   | **Comercios (enablement)**       | Per-merchant `MerchantFiscalConfig`: map each merchant (MerchantAccount / EcommerceMerchant) → an emisor, and toggle **`facturacionEnabled`**, **`autofacturaEnabled`** (customer self-invoice), **`includeInGlobal`** (month-end sweep). This is the §6.1b "core requirement" control.                        | `GET …/fiscal/config`, `POST/PUT …/fiscal/merchant-config`                                                                                     | `cfdi:configure`                        |
+| 3   | **Facturas (CFDI list)**         | Table of issued `Cfdi` (individual **and** global). Filters: status, flow (STAFF_B/AUTOFACTURA_A/GLOBAL_C), date range, receptor. Columns: serie-folio, UUID, receptor, total, status, fecha. Row actions: descargar **XML/PDF**, **cancelar** (motivo 01–04 + sustituto). Detail drawer shows `cancelStatus`. | **NEW `GET /dashboard/venues/:venueId/cfdi` (list+filters) — backend addition needed**; `GET …/cfdi/:id`; `POST …/cfdi/:id/cancel`             | `cfdi:view` (cancel = `cfdi:configure`) |
+| 4   | **Factura global**               | Per emisor: show `globalPeriodicity`, the last global per closed period, and a **"Generar factura global ahora"** button (manual trigger; confirm dialog showing candidate-ticket count + period). Shows NOTHING_TO_INVOICE / SKIPPED (CSD inactivo) states.                                                   | `POST …/fiscal/emisores/:id/global` (returns STAMPED / NOTHING_TO_INVOICE / SKIPPED)                                                           | `cfdi:configure`                        |
+| 5   | **Facturar una cuenta (Flow B)** | From a closed order (bill detail or this page), staff captures receptor (RFC, razón social, régimen, CP, UsoCFDI, email) → timbra. Reuse the receptor form component with the autofactura page.                                                                                                                | `POST /dashboard/venues/:venueId/orders/:orderId/cfdi`                                                                                         | `cfdi:issue`                            |
+| 6   | **SAT keys de productos**        | Edit `MenuCategory.defaultSatProductKey/defaultSatUnitKey` (default-by-category) + per-`Product` override + `objetoImp` (§6.3). Searchable SAT catalog picker (ClaveProdServ/ClaveUnidad).                                                                                                                     | product/category update endpoints + a SAT-catalog lookup (facturapi `catalogs` or a bundled JSON)                                              | `cfdi:configure` (or `menu:update`)     |
+
+### 20.2 Customer-facing autofactura page (Flow A — NOT in the dashboard)
+
+A **public** page (host in `avoqado-checkout` or a public route) at the digital-receipt link `…/receipt/:accessKey` with a **"Facturar"**
+CTA → receptor form → `POST /api/v1/public/receipt/:accessKey/cfdi`. Shows the merchant's `autofacturaEnabled` gate (hide CTA / "no
+disponible" = 403), the same-month window message, "ya facturada" (409) with a **download** button via `GET …/receipt/:accessKey/cfdi`.
+TPV/printed receipts expose the link as a **QR**. Rate-limited per-IP and per-accessKey (already enforced server-side).
+
+### 20.3 Backend additions the UI needs (small)
+
+1. **`GET /dashboard/venues/:venueId/cfdi`** — paginated CFDI list with filters (status/flow/date/receptor) for sub-page 3. (Today only
+   `GET …/cfdi/:id` exists; the founder's customer MCP `cfdi_status` lists recent CFDIs but the dashboard needs a REST list.)
+2. **SAT-catalog lookup** for the product-keys picker (proxy facturapi `catalogs` or bundle the c_ClaveProdServ / c_ClaveUnidad JSON).
+3. Surface `csdExpiresAt` in the emisor read payload for the CSD-status badge (add to the `getFiscalConfig` select if not already present).
+
+### 20.4 Cross-repo lockstep
+
+Per `.claude/rules/critical-warnings.md`: the **customer MCP (`src/mcp/`)** already exposes `cfdi_status` (read). When sub-pages 1/2/4 ship
+their write endpoints, add matching **MCP write tools** at that time (configure emisor, toggle merchant flags, trigger global) — same
+`cfdi:configure` gate. Permission strings (`cfdi:view/issue/configure`) must match exactly across server ↔ dashboard `<PermissionGate>`
+(`.claude/rules/permissions-policy.md`).

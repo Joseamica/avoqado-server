@@ -61,6 +61,7 @@ import * as cryptoConfigController from '../controllers/dashboard/cryptoConfig.d
 import * as tpvMessageController from '../controllers/dashboard/tpv-message.dashboard.controller'
 import {
   issueCfdiForOrderController,
+  listCfdisController,
   getCfdiStatusController,
   cancelCfdiController,
   getFiscalConfigController,
@@ -69,6 +70,7 @@ import {
   provisionEmisorController,
   uploadEmisorCsdController,
   triggerGlobalCfdiController,
+  searchSatCatalogController,
 } from '../controllers/dashboard/cfdi.dashboard.controller'
 import {
   assistantActionConfirmSchema,
@@ -231,10 +233,12 @@ import {
 import { createTerminalOrderSchema } from '../schemas/dashboard/terminalOrder.schema'
 import {
   issueCfdiSchema,
+  listCfdisSchema,
   cancelCfdiSchema,
   upsertEmisorSchema,
   upsertMerchantConfigSchema,
   uploadCsdSchema,
+  satCatalogSchema,
 } from '../schemas/dashboard/cfdi.schema'
 import inventoryRoutes from './dashboard/inventory.routes'
 import superadminRoutes from './dashboard/superadmin.routes'
@@ -3016,6 +3020,16 @@ router.post(
   issueCfdiForOrderController,
 )
 
+// ---- CFDI list (paginated) — MUST be registered BEFORE /:cfdiId so bare /cfdi is matched first ----
+router.get(
+  '/venues/:venueId/cfdi',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:view'),
+  validateRequest(listCfdisSchema),
+  listCfdisController,
+)
+
 // ---- CFDI lifecycle: status read + cancel ----
 router.get(
   '/venues/:venueId/cfdi/:cfdiId',
@@ -3091,6 +3105,18 @@ router.post(
   checkFeatureAccess('CFDI'),
   checkPermission('cfdi:configure'),
   triggerGlobalCfdiController,
+)
+
+// ---- Facturación CFDI 4.0 — SAT catalog lookup (spec §20.3 add-on #2) ----
+// Read-only reference data (ClaveProdServ / ClaveUnidad). Reuses cfdi:view permission — no new perm.
+// No ActivityLog — this is a pure read of SAT reference data (critical-warnings rule).
+router.get(
+  '/venues/:venueId/fiscal/sat-catalog',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:view'),
+  validateRequest(satCatalogSchema),
+  searchSatCatalogController,
 )
 
 // Manual Payment routes (ADMIN+) — MUST be registered BEFORE /venues/:venueId/payments/:paymentId

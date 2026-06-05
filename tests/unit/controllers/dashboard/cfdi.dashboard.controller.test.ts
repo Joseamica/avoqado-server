@@ -3,10 +3,17 @@
 const mockIssue = jest.fn()
 const mockCancel = jest.fn()
 const mockGetStatus = jest.fn()
+const mockListCfdis = jest.fn()
 jest.mock('../../../../src/services/fiscal/cfdi.service', () => ({
   issueCfdiForOrder: (...a: any[]) => mockIssue(...a),
   cancelCfdi: (...a: any[]) => mockCancel(...a),
   getCfdiStatus: (...a: any[]) => mockGetStatus(...a),
+  listCfdisForVenue: (...a: any[]) => mockListCfdis(...a),
+}))
+
+const mockSearchSatCatalog = jest.fn()
+jest.mock('../../../../src/services/fiscal/satCatalogLookup.service', () => ({
+  searchSatCatalog: (...a: any[]) => mockSearchSatCatalog(...a),
 }))
 
 const mockIssueGlobal = jest.fn()
@@ -14,13 +21,15 @@ jest.mock('../../../../src/services/fiscal/cfdiGlobal.service', () => ({
   issueGlobalForEmisor: (...a: any[]) => mockIssueGlobal(...a),
 }))
 
-// Mock prisma for the tenant guard in triggerGlobalCfdiController.
+// Mock prisma for tenant guards (triggerGlobalCfdiController + listCfdisController).
 // prismaClient uses `export default prisma` (ESM default) so jest needs __esModule:true.
 const mockPrismaFiscalEmisorFindFirst = jest.fn()
+const mockPrismaVenueFindUnique = jest.fn()
 jest.mock('../../../../src/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     fiscalEmisor: { findFirst: (...a: any[]) => mockPrismaFiscalEmisorFindFirst(...a) },
+    venue: { findUnique: (...a: any[]) => mockPrismaVenueFindUnique(...a) },
     cfdi: { findUnique: jest.fn(), upsert: jest.fn() },
   },
 }))
@@ -59,6 +68,7 @@ jest.mock('../../../../src/config/env', () => ({
 
 import {
   issueCfdiForOrderController,
+  listCfdisController,
   cancelCfdiController,
   getCfdiStatusController,
   getFiscalConfigController,
@@ -67,6 +77,7 @@ import {
   provisionEmisorController,
   uploadEmisorCsdController,
   triggerGlobalCfdiController,
+  searchSatCatalogController,
 } from '../../../../src/controllers/dashboard/cfdi.dashboard.controller'
 
 // ==========================================
@@ -945,5 +956,259 @@ describe('triggerGlobalCfdiController', () => {
     expect(res.status).toHaveBeenCalledWith(409)
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Global en proceso para este emisor y periodo' }))
     expect(mockLogAction).not.toHaveBeenCalled()
+  })
+})
+
+// ==========================================
+// searchSatCatalogController
+// ==========================================
+
+describe('searchSatCatalogController', () => {
+  function satReq(overrides: Partial<any> = {}): any {
+    return {
+      params: { venueId: 'v1' },
+      query: { type: 'product', q: 'restaurante' },
+      authContext: { venueId: 'v1' },
+      ...overrides,
+    }
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockLogAction.mockResolvedValue(undefined)
+  })
+
+  it('returns 200 with { results } for type=product', async () => {
+    mockSearchSatCatalog.mockResolvedValue({
+      results: [{ key: '90101500', description: 'Servicio de restaurante' }],
+    })
+
+    const res = mockRes()
+    await searchSatCatalogController(satReq({ query: { type: 'product', q: 'restaurante' } }), res)
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith({
+      results: [{ key: '90101500', description: 'Servicio de restaurante' }],
+    })
+    expect(mockSearchSatCatalog).toHaveBeenCalledWith({ type: 'product', q: 'restaurante' })
+  })
+
+  it('returns 200 with { results } for type=unit', async () => {
+    mockSearchSatCatalog.mockResolvedValue({
+      results: [{ key: 'E48', description: 'Unidad de servicio' }],
+    })
+
+    const res = mockRes()
+    await searchSatCatalogController(satReq({ query: { type: 'unit', q: 'servicio' } }), res)
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith({
+      results: [{ key: 'E48', description: 'Unidad de servicio' }],
+    })
+  })
+
+  it('returns 200 with empty results array when no matches', async () => {
+    mockSearchSatCatalog.mockResolvedValue({ results: [] })
+
+    const res = mockRes()
+    await searchSatCatalogController(satReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith({ results: [] })
+  })
+
+  it('does NOT call logAction (this is a READ)', async () => {
+    mockSearchSatCatalog.mockResolvedValue({ results: [] })
+
+    const res = mockRes()
+    await searchSatCatalogController(satReq(), res)
+
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+
+  it('returns 502 when service throws a facturapi provider error', async () => {
+    mockSearchSatCatalog.mockRejectedValue(new Error('facturapi: upstream catalog error'))
+
+    const res = mockRes()
+    await searchSatCatalogController(satReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(502)
+    expect(res.json).toHaveBeenCalledWith({ error: 'No se pudo consultar el catálogo SAT' })
+  })
+
+  it('returns 502 when service throws an error matching /catalog/i', async () => {
+    mockSearchSatCatalog.mockRejectedValue(new Error('catalog service unavailable'))
+
+    const res = mockRes()
+    await searchSatCatalogController(satReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(502)
+    expect(res.json).toHaveBeenCalledWith({ error: 'No se pudo consultar el catálogo SAT' })
+  })
+
+  it('returns 500 on unexpected errors not matching the provider pattern', async () => {
+    mockSearchSatCatalog.mockRejectedValue(new Error('Database connection refused'))
+
+    const res = mockRes()
+    await searchSatCatalogController(satReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(500)
+    expect(res.json).toHaveBeenCalledWith({ error: 'Error interno al consultar el catálogo SAT' })
+  })
+})
+
+// ==========================================
+// listCfdisController
+// ==========================================
+
+describe('listCfdisController', () => {
+  const VENUE_ID = 'venue-xyz'
+
+  function listReq(overrides: Partial<any> = {}): any {
+    return {
+      params: { venueId: VENUE_ID },
+      query: { page: 1, pageSize: 20 },
+      authContext: { venueId: VENUE_ID },
+      ...overrides,
+    }
+  }
+
+  const SAMPLE_RESULT = {
+    cfdis: [
+      {
+        id: 'c1',
+        type: 'INGRESO',
+        status: 'STAMPED',
+        flow: 'STAFF_B',
+        isGlobal: false,
+        orderId: 'o1',
+        receptorRfc: 'XAXX010101000',
+        receptorNombre: 'Público en General',
+        serie: 'F',
+        folio: '1',
+        uuid: 'uuid-1',
+        subtotalCents: 10000,
+        taxCents: 1600,
+        totalCents: 11600,
+        stampedAt: new Date('2026-06-01T19:00:00.000Z'),
+        createdAt: new Date('2026-06-01T19:00:00.000Z'),
+        cancelStatus: null,
+        xmlUrl: 'https://example.com/cfdi.xml',
+        pdfUrl: 'https://example.com/cfdi.pdf',
+        globalPeriod: null,
+      },
+    ],
+    total: 1,
+    page: 1,
+    pageSize: 20,
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockLogAction.mockResolvedValue(undefined)
+    // Default: venue exists with Mexico timezone
+    mockPrismaVenueFindUnique.mockResolvedValue({ timezone: 'America/Mexico_City' })
+    mockListCfdis.mockResolvedValue(SAMPLE_RESULT)
+  })
+
+  it('returns 200 with { cfdis, total, page, pageSize } on success', async () => {
+    const res = mockRes()
+    await listCfdisController(listReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cfdis: expect.any(Array),
+        total: 1,
+        page: 1,
+        pageSize: 20,
+      }),
+    )
+  })
+
+  it('uses authContext.venueId for tenant scope (not req.params.venueId)', async () => {
+    // If a caller somehow passes a different venueId in the path, the controller must
+    // still use the one from authContext. This test verifies that contract.
+    const authVenueId = 'auth-venue-id'
+    const req = listReq({
+      params: { venueId: 'path-venue-id' }, // attacker-controlled path param
+      authContext: { venueId: authVenueId },
+    })
+
+    const res = mockRes()
+    await listCfdisController(req, res)
+
+    // listCfdisForVenue must be called with the authContext venueId
+    expect(mockListCfdis).toHaveBeenCalledWith(expect.objectContaining({ venueId: authVenueId }))
+    // The path param 'path-venue-id' must NOT appear in the service call
+    const callArg = mockListCfdis.mock.calls[0][0]
+    expect(callArg.venueId).not.toBe('path-venue-id')
+  })
+
+  it('passes venue timezone from DB to the service', async () => {
+    mockPrismaVenueFindUnique.mockResolvedValue({ timezone: 'America/Monterrey' })
+
+    const res = mockRes()
+    await listCfdisController(listReq(), res)
+
+    expect(mockListCfdis).toHaveBeenCalledWith(expect.objectContaining({ venueTimezone: 'America/Monterrey' }))
+  })
+
+  it('falls back to America/Mexico_City when venue is not found', async () => {
+    mockPrismaVenueFindUnique.mockResolvedValue(null)
+
+    const res = mockRes()
+    await listCfdisController(listReq(), res)
+
+    expect(mockListCfdis).toHaveBeenCalledWith(expect.objectContaining({ venueTimezone: 'America/Mexico_City' }))
+  })
+
+  it('does NOT call logAction (this is a READ)', async () => {
+    const res = mockRes()
+    await listCfdisController(listReq(), res)
+
+    expect(mockLogAction).not.toHaveBeenCalled()
+  })
+
+  it('returns 500 with Spanish message on unexpected error', async () => {
+    mockListCfdis.mockRejectedValue(new Error('DB connection refused'))
+
+    const res = mockRes()
+    await listCfdisController(listReq(), res)
+
+    expect(res.status).toHaveBeenCalledWith(500)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: 'Error interno al listar los CFDIs' }))
+  })
+
+  it('passes query filters to the service', async () => {
+    const req = listReq({
+      query: {
+        status: 'STAMPED',
+        flow: 'STAFF_B',
+        isGlobal: false,
+        receptorRfc: 'XAXX',
+        from: '2026-06-01',
+        to: '2026-06-30',
+        page: 2,
+        pageSize: 10,
+      },
+      authContext: { venueId: VENUE_ID },
+    })
+
+    const res = mockRes()
+    await listCfdisController(req, res)
+
+    expect(mockListCfdis).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: 'STAMPED',
+        flow: 'STAFF_B',
+        isGlobal: false,
+        receptorRfc: 'XAXX',
+        from: '2026-06-01',
+        to: '2026-06-30',
+        page: 2,
+        pageSize: 10,
+      }),
+    )
   })
 })

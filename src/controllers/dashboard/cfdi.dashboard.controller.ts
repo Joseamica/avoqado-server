@@ -14,7 +14,8 @@ import { Request, Response } from 'express'
 import { env } from '@/config/env'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
-import { issueCfdiForOrder, cancelCfdi, getCfdiStatus } from '@/services/fiscal/cfdi.service'
+import { issueCfdiForOrder, cancelCfdi, getCfdiStatus, listCfdisForVenue } from '@/services/fiscal/cfdi.service'
+import { searchSatCatalog } from '@/services/fiscal/satCatalogLookup.service'
 import { issueGlobalForEmisor } from '@/services/fiscal/cfdiGlobal.service'
 import { upsertEmisor, upsertMerchantFiscalConfig, getFiscalConfig } from '@/services/fiscal/fiscalConfig.service'
 import { provisionEmisor, uploadEmisorCsd } from '@/services/fiscal/fiscalOnboarding.service'
@@ -133,6 +134,47 @@ export async function getCfdiStatusController(req: Request, res: Response): Prom
     }
 
     res.status(500).json({ error: 'Error interno al consultar el CFDI' })
+  }
+}
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/cfdi
+ *
+ * Returns a paginated list of CFDIs for the caller's venue.
+ * Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:view').
+ * Query params are validated by validateRequest(listCfdisSchema) before this handler runs.
+ *
+ * This is a READ — no ActivityLog (critical-warnings rule: do not log reads).
+ */
+export async function listCfdisController(req: Request, res: Response): Promise<void> {
+  // Tenant isolation: always from authContext, never from the path :venueId.
+  const { venueId } = (req as any).authContext ?? {}
+  const { status, flow, isGlobal, receptorRfc, from, to, page, pageSize } = req.query as any
+
+  try {
+    // Fetch venue timezone so date range boundaries are correct (critical-warnings rule).
+    // This is a lightweight select — only one extra round-trip, shared by all filter paths.
+    const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+    const venueTimezone = venue?.timezone ?? 'America/Mexico_City'
+
+    const result = await listCfdisForVenue({
+      venueId,
+      status: status as any,
+      flow: flow as any,
+      isGlobal: isGlobal as boolean | undefined,
+      receptorRfc: receptorRfc as string | undefined,
+      from: from as string | undefined,
+      to: to as string | undefined,
+      page: Number(page ?? 1),
+      pageSize: Number(pageSize ?? 20),
+      venueTimezone,
+    })
+
+    res.status(200).json(result)
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    logger.error(`[cfdi.controller] listCfdis failed for venue ${venueId}: ${message}`)
+    res.status(500).json({ error: 'Error interno al listar los CFDIs' })
   }
 }
 
@@ -417,6 +459,39 @@ export async function uploadEmisorCsdController(req: Request, res: Response): Pr
     }
 
     res.status(500).json({ error: 'Error interno al subir el CSD del emisor fiscal' })
+  }
+}
+
+// ─── SAT Catalog lookup ───────────────────────────────────────────────────────
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/fiscal/sat-catalog?type=product|unit&q=<texto>
+ *
+ * Proxies facturapi's SAT catalog search so the dashboard product-key picker can
+ * resolve ClaveProdServ (type=product) and ClaveUnidad (type=unit) by text query.
+ *
+ * Read-only — NO ActivityLog (critical-warnings rule: do not log reads).
+ * The catalog is SAT reference data; no per-venue or per-tenant scope needed.
+ * Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:view') — reuses existing
+ * permission, no new permission required (spec §20.3 add-on #2).
+ */
+export async function searchSatCatalogController(req: Request, res: Response): Promise<void> {
+  const { type, q } = req.query as { type: 'product' | 'unit'; q: string }
+
+  try {
+    const result = await searchSatCatalog({ type, q })
+    res.status(200).json(result)
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    logger.error(`[cfdi.controller] searchSatCatalog failed type=${type} q="${q}": ${message}`)
+
+    // Surface facturapi / catalog provider errors as 502 so the client knows it's upstream
+    if (/facturapi|catalog/i.test(message)) {
+      res.status(502).json({ error: 'No se pudo consultar el catálogo SAT' })
+      return
+    }
+
+    res.status(500).json({ error: 'Error interno al consultar el catálogo SAT' })
   }
 }
 

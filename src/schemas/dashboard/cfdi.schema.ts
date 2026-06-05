@@ -127,6 +127,54 @@ export const uploadCsdSchema = z.object({
 })
 
 // ==========================================
+// LIST CFDIS SCHEMA (paginated query)
+// ==========================================
+
+/**
+ * Schema passed to validateRequest() for:
+ *   GET /venues/:venueId/cfdi
+ *
+ * All query params are optional. validateRequest() supports `schema.shape.query`
+ * and assigns the parsed (coerced) values back to req.query.
+ * Coercions: page/pageSize → number, isGlobal → boolean.
+ */
+export const listCfdisSchema = z.object({
+  query: z.object({
+    status: z
+      .enum(['DRAFT', 'VALIDATING', 'VALIDATION_FAILED', 'STAMPING', 'STAMPED', 'STAMP_FAILED', 'CANCEL_REQUESTED', 'CANCELLED'], {
+        invalid_type_error: 'El estado del CFDI no es válido',
+      })
+      .optional(),
+    flow: z
+      .enum(['STAFF_B', 'AUTOFACTURA_A', 'GLOBAL_C'], {
+        invalid_type_error: 'El flujo del CFDI no es válido',
+      })
+      .optional(),
+    isGlobal: z
+      .string()
+      .transform(v => v === 'true')
+      .pipe(z.boolean())
+      .optional(),
+    receptorRfc: z.string().trim().optional(),
+    from: z.string().trim().optional(),
+    to: z.string().trim().optional(),
+    page: z.coerce
+      .number({ invalid_type_error: 'La página debe ser un número' })
+      .int('La página debe ser un entero')
+      .min(1, 'La página mínima es 1')
+      .default(1),
+    pageSize: z.coerce
+      .number({ invalid_type_error: 'El tamaño de página debe ser un número' })
+      .int('El tamaño de página debe ser un entero')
+      .min(1, 'El tamaño de página mínimo es 1')
+      .max(100, 'El tamaño de página máximo es 100')
+      .default(20),
+  }),
+})
+
+export type ListCfdisQuery = z.infer<typeof listCfdisSchema.shape.query>
+
+// ==========================================
 // PUBLIC AUTOFACTURA SCHEMA
 // ==========================================
 
@@ -168,3 +216,25 @@ export type UpsertEmisorBody = z.infer<typeof upsertEmisorSchema.shape.body>
 export type UpsertMerchantConfigBody = z.infer<typeof upsertMerchantConfigSchema.shape.body>
 export type UploadCsdBody = z.infer<typeof uploadCsdSchema.shape.body>
 export type AutofacturaBody = z.infer<typeof autofacturaSchema.shape.body>
+
+// ==========================================
+// SAT CATALOG LOOKUP SCHEMA
+// ==========================================
+
+/**
+ * Schema passed to validateRequest() for:
+ *   GET /venues/:venueId/fiscal/sat-catalog?type=product|unit&q=<texto>
+ *
+ * Uses `query` envelope — validateRequest() writes the parsed values back to req.query.
+ * Spanish error messages per critical-warnings rule.
+ */
+export const satCatalogSchema = z.object({
+  query: z.object({
+    type: z.enum(['product', 'unit'], {
+      errorMap: () => ({ message: 'Tipo inválido (product|unit)' }),
+    }),
+    q: z.string().min(1, 'La búsqueda es requerida'),
+  }),
+})
+
+export type SatCatalogQuery = z.infer<typeof satCatalogSchema.shape.query>

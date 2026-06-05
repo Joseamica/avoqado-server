@@ -1,12 +1,122 @@
 // src/services/fiscal/cfdi.service.ts
-import { CsdStatus, FiscalProviderType, PaymentMethod, VenueType, Prisma } from '@prisma/client'
+import { CsdStatus, FiscalProviderType, PaymentMethod, VenueType, CfdiStatus, CfdiFlow, Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
+import { venueStartOfDay, venueEndOfDay, DEFAULT_TIMEZONE } from '../../utils/datetime'
 import { buildStoragePath, uploadFileToStorage } from '../storage.service'
 import { resolveFiscalProvider } from './fiscalProvider.factory'
 import { buildCreateInvoiceParams } from './cfdiPayloadBuilder'
 import { validateBeforeStamp } from './cfdiValidation'
 import { assembleSaleInput, LoadedOrderForCfdi } from './assembleSaleInput'
+
+// ─── List CFDIs ───────────────────────────────────────────────────────────────
+
+export interface ListCfdisParams {
+  venueId: string
+  status?: CfdiStatus
+  flow?: CfdiFlow
+  isGlobal?: boolean
+  receptorRfc?: string
+  from?: string // ISO date string, venue-local day start (e.g. "2026-06-01")
+  to?: string // ISO date string, venue-local day end
+  page: number
+  pageSize: number
+  /** Venue IANA timezone — used to convert from/to to real UTC for Prisma queries */
+  venueTimezone?: string
+}
+
+export interface ListCfdisResult {
+  cfdis: any[]
+  total: number
+  page: number
+  pageSize: number
+}
+
+/** Subset of Cfdi fields returned on the list endpoint (no sensitive internals). */
+const CFDI_LIST_SELECT = {
+  id: true,
+  type: true,
+  status: true,
+  flow: true,
+  isGlobal: true,
+  orderId: true,
+  receptorRfc: true,
+  receptorNombre: true,
+  serie: true,
+  folio: true,
+  uuid: true,
+  subtotalCents: true,
+  taxCents: true,
+  totalCents: true,
+  stampedAt: true,
+  createdAt: true,
+  cancelStatus: true,
+  xmlUrl: true,
+  pdfUrl: true,
+  globalPeriod: true,
+} as const
+
+/**
+ * Returns a paginated list of CFDIs for the given venue.
+ *
+ * Tenant isolation: `venueId` is ALWAYS applied to the `where` clause — it is
+ * never optional and is never derived from the request (controller passes
+ * authContext.venueId). This prevents cross-venue data leaks.
+ *
+ * Date range: `from`/`to` are ISO date strings interpreted as venue-local day
+ * boundaries (midnight → 23:59:59.999) and converted to real UTC via
+ * `venueStartOfDay`/`venueEndOfDay` before being passed to Prisma.
+ */
+export async function listCfdisForVenue(params: ListCfdisParams): Promise<ListCfdisResult> {
+  const { venueId, status, flow, isGlobal, receptorRfc, from, to, page, pageSize } = params
+  const timezone = params.venueTimezone ?? DEFAULT_TIMEZONE
+
+  // Build the where clause — venueId is always the first clause (tenant isolation)
+  const where: Prisma.CfdiWhereInput = { venueId }
+
+  if (status !== undefined) {
+    where.status = status
+  }
+  if (flow !== undefined) {
+    where.flow = flow
+  }
+  if (isGlobal !== undefined) {
+    where.isGlobal = isGlobal
+  }
+  if (receptorRfc) {
+    // Case-insensitive substring search (mode: 'insensitive' maps to ILIKE in PostgreSQL)
+    where.receptorRfc = { contains: receptorRfc, mode: 'insensitive' }
+  }
+
+  // Date range: convert venue-local day boundaries → real UTC (critical-warnings rule)
+  if (from || to) {
+    where.createdAt = {}
+    if (from) {
+      const parsedFrom = new Date(`${from}T00:00:00`)
+      where.createdAt.gte = venueStartOfDay(timezone, parsedFrom)
+    }
+    if (to) {
+      const parsedTo = new Date(`${to}T00:00:00`)
+      where.createdAt.lte = venueEndOfDay(timezone, parsedTo)
+    }
+  }
+
+  const skip = (page - 1) * pageSize
+  const take = pageSize
+
+  const [cfdis, total] = await Promise.all([
+    prisma.cfdi.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      skip,
+      take,
+      select: CFDI_LIST_SELECT,
+    }),
+    prisma.cfdi.count({ where }),
+  ])
+
+  return { cfdis, total, page, pageSize }
+}
 
 export interface IssueReceptor {
   rfc: string
