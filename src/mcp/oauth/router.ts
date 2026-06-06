@@ -76,17 +76,24 @@ function approveHandler() {
   router.use(cookieParser()) // read the session cookie for the SSO path
   router.post('/mcp-oauth/approve', async (req: Request, res: Response) => {
     const { email, password, client_id, redirect_uri, code_challenge, state, scope, resource, sso } = req.body ?? {}
+    // The login page submits via fetch so it works inside sandboxed iframes that block native form
+    // posts (no 'allow-forms'). Fetch requests get JSON {redirect}/{error}; native posts get 302/HTML.
+    const isFetch = req.get('X-Mcp-Submit') === 'fetch'
     const reRender = (error: string) =>
-      res
-        .status(401)
-        .send(
-          renderLoginPage(
-            { clientId: client_id, redirectUri: redirect_uri, codeChallenge: code_challenge, state, scope, resource },
-            { error },
-          ),
-        )
+      isFetch
+        ? res.status(401).json({ error })
+        : res
+            .status(401)
+            .send(
+              renderLoginPage(
+                { clientId: client_id, redirectUri: redirect_uri, codeChallenge: code_challenge, state, scope, resource },
+                { error },
+              ),
+            )
 
-    if (!client_id || !redirect_uri || !code_challenge) return res.status(400).send('Missing OAuth parameters')
+    if (!client_id || !redirect_uri || !code_challenge) {
+      return isFetch ? res.status(400).json({ error: 'Missing OAuth parameters' }) : res.status(400).send('Missing OAuth parameters')
+    }
 
     let staffId: string
     if (sso === '1') {
@@ -138,7 +145,7 @@ function approveHandler() {
     const target = new URL(redirect_uri)
     target.searchParams.set('code', code)
     if (state) target.searchParams.set('state', String(state))
-    return res.redirect(302, target.href)
+    return isFetch ? res.json({ redirect: target.href }) : res.redirect(302, target.href)
   })
   return router
 }

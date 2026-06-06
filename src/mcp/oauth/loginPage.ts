@@ -60,7 +60,7 @@ export function renderLoginPage(
   opts: { error?: string; session?: { email: string }; switchAccountUrl?: string } = {},
 ): string {
   const app = p.clientName ? escapeHtml(p.clientName) : 'Una aplicación'
-  const banner = opts.error ? `<p class="err">${escapeHtml(opts.error)}</p>` : ''
+  const banner = `<p class="err" id="mcp-err"${opts.error ? '' : ' style="display:none"'}>${opts.error ? escapeHtml(opts.error) : ''}</p>`
   const brand = `<div class="brand"><span class="dot">A</span><b>Avoqado</b></div>`
   const note = `<p class="note">Acceso de solo lectura, limitado a tu rol y tus locales. Puedes desconectarlo cuando quieras.</p>`
   const intro = `<p class="sub"><strong>${app}</strong> quiere acceder a los datos de tus locales en tu nombre.</p>`
@@ -92,5 +92,9 @@ export function renderLoginPage(
 <style>${STYLE}</style></head>
 <body><form class="card" method="post" action="/mcp-oauth/approve">
   ${brand}${body}
-</form></body></html>`
+</form>
+<script>
+(function(){var form=document.querySelector('form');if(!form)return;var errBox=document.getElementById('mcp-err');function showError(m){if(errBox){errBox.textContent=m;errBox.style.display='block';}}function navigate(u){try{if(window.top&&window.top!==window){window.top.location.href=u;return;}}catch(e){}window.location.href=u;}form.addEventListener('submit',function(e){e.preventDefault();var btn=form.querySelector('button[type=submit]');if(btn)btn.disabled=true;fetch('/mcp-oauth/approve',{method:'POST',headers:{'X-Mcp-Submit':'fetch'},body:new URLSearchParams(new FormData(form))}).then(function(r){return r.json();}).then(function(d){if(d&&d.redirect){navigate(d.redirect);return;}showError((d&&d.error)||'No se pudo conectar. Intenta de nuevo.');if(btn)btn.disabled=false;}).catch(function(){showError('No se pudo conectar. Intenta de nuevo.');if(btn)btn.disabled=false;});});})();
+</script>
+</body></html>`
 }
