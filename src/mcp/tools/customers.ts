@@ -4,6 +4,21 @@ import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
+import { auditMcpWrite } from '../audit'
+
+/** Pure: merge tag changes onto a customer's current tags — add, remove, dedupe (case-insensitive, keeps first-seen casing & order). */
+export function applyTagChanges(current: string[], add: string[] = [], remove: string[] = []): string[] {
+  const removeSet = new Set(remove.map(t => t.toLowerCase()))
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const t of [...current, ...add]) {
+    const key = t.toLowerCase()
+    if (removeSet.has(key) || seen.has(key)) continue
+    seen.add(key)
+    result.push(t)
+  }
+  return result
+}
 
 export function registerCustomerTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
@@ -136,6 +151,72 @@ export function registerCustomerTools(server: McpServer, scope: McpScope) {
           date: o.createdAt.toISOString(),
         })),
       })
+    },
+  )
+
+  server.tool(
+    'set_customer_tags',
+    'Add and/or remove tags on a customer of a venue you can access — e.g. mark VIP, flag an allergy, note a birthday month. Find them by name/email/phone, then pass tags to add and/or remove (tags are free-text segmentation labels, merged onto their existing ones). This WRITES — it changes the customer; requires customers:update. If the search matches several customers it returns them so you can be specific. Does NOT touch money, balances or loyalty points.',
+    {
+      venueId: z.string().describe('Venue that owns the customer (must be in your scope)'),
+      search: z.string().min(1).describe('Customer name, email or phone (partial, case-insensitive)'),
+      add: z.array(z.string().min(1)).optional().describe('Tags to add, e.g. ["VIP","Alergico-Nueces"]'),
+      remove: z.array(z.string().min(1)).optional().describe('Tags to remove (case-insensitive)'),
+    },
+    async ({ venueId, search, add, remove }) => {
+      const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('customers:update', venueId) // write gate (per-venue role; custom roles honored)
+      if (!add?.length && !remove?.length) return text({ ok: false, error: 'Pasa al menos un tag en add o remove.' })
+
+      const matches = await prisma.customer.findMany({
+        where: {
+          ...base,
+          OR: [
+            { firstName: { contains: search, mode: 'insensitive' as const } },
+            { lastName: { contains: search, mode: 'insensitive' as const } },
+            { email: { contains: search, mode: 'insensitive' as const } },
+            { phone: { contains: search } },
+          ],
+        },
+        select: { id: true, firstName: true, lastName: true, tags: true },
+        orderBy: { totalSpent: 'desc' },
+        take: 5,
+      })
+      if (matches.length === 0) {
+        return text({ ok: false, error: `No encontré ningún cliente que coincida con "${search}" en este local.` })
+      }
+      if (matches.length > 1) {
+        return text({
+          ok: false,
+          ambiguous: true,
+          error: `"${search}" coincide con varios clientes — sé más específico.`,
+          matches: matches.map(m => `${m.firstName ?? ''} ${m.lastName ?? ''}`.trim() || '(sin nombre)'),
+        })
+      }
+
+      const c = matches[0]
+      const newTags = applyTagChanges(c.tags, add ?? [], remove ?? [])
+      try {
+        // Customer was resolved from a venue-scoped query, so update-by-id stays in-tenant.
+        const updated = await prisma.customer.update({
+          where: { id: c.id },
+          data: { tags: newTags },
+          select: { firstName: true, lastName: true, tags: true },
+        })
+        await auditMcpWrite(scope, {
+          action: 'CUSTOMER_TAGS_SET',
+          entity: 'Customer',
+          entityId: c.id,
+          venueId,
+          data: { added: add ?? [], removed: remove ?? [], tags: updated.tags },
+        })
+        return text({
+          ok: true,
+          customer: { name: `${updated.firstName ?? ''} ${updated.lastName ?? ''}`.trim() || null, tags: updated.tags },
+        })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
     },
   )
 }
