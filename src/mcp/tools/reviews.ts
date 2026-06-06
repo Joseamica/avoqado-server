@@ -4,6 +4,8 @@ import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
+import { submitResponse } from '@/services/reviewResponse.service'
+import { auditMcpWrite } from '../audit'
 
 const round1 = (n: number | null): number | null => (n == null ? null : Math.round(n * 10) / 10)
 
@@ -30,6 +32,7 @@ export function registerReviewTools(server: McpServer, scope: McpScope) {
         prisma.review.findMany({
           where: reviewWhere,
           select: {
+            id: true,
             overallRating: true,
             foodRating: true,
             serviceRating: true,
@@ -55,6 +58,7 @@ export function registerReviewTools(server: McpServer, scope: McpScope) {
           avgAmbience: round1(agg._avg.ambienceRating),
         },
         recent: recent.map(r => ({
+          id: r.id,
           stars: r.overallRating,
           food: r.foodRating,
           service: r.serviceRating,
@@ -67,6 +71,37 @@ export function registerReviewTools(server: McpServer, scope: McpScope) {
           date: r.createdAt.toISOString(),
         })),
       })
+    },
+  )
+
+  server.tool(
+    'respond_to_review',
+    'Post a public reply to a customer review in a venue you can access. Identify the review by its id (from list_reviews). If it is a Google review and the venue has Google Business Profile connected, the reply is also posted to Google. This WRITES — requires reviews:respond.',
+    {
+      reviewId: z.string().min(1).describe('The review id (from list_reviews)'),
+      responseText: z.string().min(1).describe('Your public reply to the review'),
+    },
+    async ({ reviewId, responseText }) => {
+      // Scope-check the review by venue (submitResponse does not) so you can't reply to another tenant's review.
+      const review = await prisma.review.findFirst({
+        where: { id: reviewId, venueId: { in: scope.allowedVenueIds } },
+        select: { venueId: true },
+      })
+      if (!review) return text({ ok: false, error: 'No encontré esa reseña en tus locales.' })
+      guard.requirePermission('reviews:respond', review.venueId) // write gate (per-venue role)
+      try {
+        const updated = await submitResponse(reviewId, responseText)
+        await auditMcpWrite(scope, {
+          action: 'REVIEW_RESPONDED',
+          entity: 'Review',
+          entityId: reviewId,
+          venueId: review.venueId,
+          data: { responseLength: responseText.length },
+        })
+        return text({ ok: true, reviewId, respondedAt: updated.respondedAt })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
     },
   )
 }
