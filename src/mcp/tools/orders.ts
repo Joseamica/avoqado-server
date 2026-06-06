@@ -1,9 +1,12 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
+import { OrderStatus, PaymentStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
+
+const num = (d: { toString(): string } | null): number => (d == null ? 0 : Number(d))
 
 export function registerOrderTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
@@ -70,6 +73,69 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
       })
       if (!order) return text({ found: false, reason: 'Order not found, or it is outside your venues' })
       return text({ found: true, order })
+    },
+  )
+
+  server.tool(
+    'open_orders',
+    'Open / unpaid tabs RIGHT NOW across your venues (or one venue): orders still owing money (paymentStatus PENDING or PARTIAL, not cancelled) — table, covers, type, status, total, already paid, remaining balance, item count, and when it was opened. Oldest first (the tabs to chase). Plus the total still owed across all of them. Answers "¿qué cuentas tengo abiertas? ¿qué mesas no han pagado? ¿cuánto me deben ahorita?". Pass venueId to focus one venue.',
+    {
+      venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues'),
+      limit: z.number().int().min(1).max(50).default(25).describe('Max open orders to return (oldest first)'),
+    },
+    async ({ venueId, limit }) => {
+      const where = {
+        ...guard.venueFilter(venueId), // throws ScopeError if the venue is out of scope
+        paymentStatus: { in: [PaymentStatus.PENDING, PaymentStatus.PARTIAL] },
+        status: { notIn: [OrderStatus.CANCELLED, OrderStatus.DELETED] },
+      }
+      const [summary, orders] = await Promise.all([
+        prisma.order.aggregate({ where, _count: { _all: true }, _sum: { remainingBalance: true, total: true, paidAmount: true } }),
+        prisma.order.findMany({
+          where,
+          select: {
+            id: true,
+            orderNumber: true,
+            type: true,
+            status: true,
+            paymentStatus: true,
+            total: true,
+            paidAmount: true,
+            remainingBalance: true,
+            covers: true,
+            createdAt: true,
+            table: { select: { number: true } },
+            venue: { select: { name: true } },
+            _count: { select: { items: true } },
+          },
+          orderBy: { createdAt: 'asc' }, // oldest open first — the tabs to chase
+          take: limit,
+        }),
+      ])
+      return text({
+        count: orders.length,
+        outstanding: {
+          openOrders: summary._count._all,
+          totalOwed: num(summary._sum.remainingBalance), // what you're still owed across all open tabs
+          grossTotal: num(summary._sum.total),
+          alreadyPaid: num(summary._sum.paidAmount),
+        },
+        orders: orders.map(o => ({
+          id: o.id,
+          orderNumber: o.orderNumber,
+          venue: o.venue?.name ?? null,
+          table: o.table?.number ?? null,
+          covers: o.covers,
+          type: o.type,
+          status: o.status,
+          paymentStatus: o.paymentStatus, // PENDING | PARTIAL
+          total: num(o.total),
+          paid: num(o.paidAmount),
+          balance: num(o.remainingBalance),
+          items: o._count.items,
+          openedAt: o.createdAt.toISOString(),
+        })),
+      })
     },
   )
 }
