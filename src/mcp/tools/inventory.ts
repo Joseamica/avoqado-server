@@ -6,6 +6,14 @@ import { createGuard } from '../guard'
 import { text } from '../respond'
 import { serializedInventoryService } from '@/services/serialized-inventory/serializedInventory.service'
 import { auditMcpWrite } from '../audit'
+import { adjustInventoryStock } from '@/services/dashboard/productInventory.service'
+import { MovementType } from '@prisma/client'
+
+const MOVEMENT_TYPE = {
+  adjustment: MovementType.ADJUSTMENT,
+  purchase: MovementType.PURCHASE,
+  loss: MovementType.LOSS,
+} as const
 
 export function registerInventoryTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
@@ -43,6 +51,59 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
         .sort((a, b) => b.shortBy - a.shortBy)
         .slice(0, limit ?? 50)
       return text({ venueId, count: lowStock.length, lowStock })
+    },
+  )
+
+  server.tool(
+    'adjust_stock',
+    'Adjust the stock of a QUANTITY-tracked product in a venue you can access, found by name. `delta` is the CHANGE (not the new total): positive adds (e.g. 50 = stock received), negative subtracts (e.g. -10 = waste/correction). Cannot push stock below 0. This WRITES — changes inventory; requires inventory:adjust. If the name matches several products it returns them so you can be specific.',
+    {
+      venueId: z.string().describe('Venue that owns the product (must be in your scope)'),
+      name: z.string().min(1).describe('Product name or part of it'),
+      delta: z.number().describe('Stock CHANGE: positive adds (50 received), negative subtracts (-10 waste). NOT the new total.'),
+      type: z
+        .enum(['adjustment', 'purchase', 'loss'])
+        .optional()
+        .describe("Reason category: 'adjustment' (default), 'purchase' (stock received), 'loss' (waste/damage)"),
+      reason: z.string().optional().describe('Free-text reason (e.g. "merma", "recepción de mercancía")'),
+    },
+    async ({ venueId, name, delta, type, reason }) => {
+      const where = guard.venueFilter(venueId) // throws ScopeError if out of scope
+      guard.requirePermission('inventory:adjust', venueId) // write gate (per-venue role)
+      const matches = await prisma.product.findMany({
+        where: { ...where, name: { contains: name, mode: 'insensitive' as const }, trackInventory: true, inventoryMethod: 'QUANTITY' },
+        select: { id: true, name: true },
+        take: 10,
+      })
+      if (matches.length === 0) {
+        return text({ ok: false, error: `No encontré un producto con inventario por cantidad que coincida con "${name}".` })
+      }
+      if (matches.length > 1) {
+        return text({
+          ok: false,
+          ambiguous: true,
+          error: `"${name}" coincide con varios productos — sé más específico.`,
+          matches: matches.map(m => m.name),
+        })
+      }
+      try {
+        const result = await adjustInventoryStock(
+          venueId,
+          matches[0].id,
+          { quantity: delta, type: MOVEMENT_TYPE[type ?? 'adjustment'], reason },
+          scope.staffId,
+        )
+        await auditMcpWrite(scope, {
+          action: 'INVENTORY_STOCK_ADJUSTED',
+          entity: 'Product',
+          entityId: matches[0].id,
+          venueId,
+          data: { name: matches[0].name, delta, type: type ?? 'adjustment', reason, newStock: result.currentStock },
+        })
+        return text({ ok: true, product: matches[0].name, newStock: result.currentStock, minimumStock: result.minimumStock })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
     },
   )
 
