@@ -12,6 +12,11 @@ process.env.ACCESS_TOKEN_SECRET = 'test-access-token-secret'
 process.env.REFRESH_TOKEN_SECRET = 'test-refresh-token-secret'
 process.env.SESSION_SECRET = 'test-session-secret'
 process.env.COOKIE_SECRET = 'test-cookie-secret'
+// OTP_PEPPER is REQUIRED (min 16 chars) in src/config/env.ts — peppers WhatsApp/email
+// login OTP hashes. Without it here, CI (no .env file) fails env validation and env.ts
+// calls process.exit(1) at import time, crashing Jest workers → "Jest worker encountered
+// N child process exceptions, exceeding retry limit". Locally it passes because .env has it.
+process.env.OTP_PEPPER = 'test-otp-pepper-secret-1234567890'
 process.env.DATABASE_URL = 'postgresql://test:test@localhost:5432/test'
 process.env.RABBITMQ_URL = 'amqp://test:test@localhost:5672'
 // Stripe key must be set before any service module imports — TokenBudgetService
