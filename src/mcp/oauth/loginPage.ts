@@ -37,8 +37,8 @@ const STYLE = `
   label{display:block;font-size:.8rem;font-weight:500;color:#334155;margin:.85rem 0 .3rem}
   input[type=email],input[type=password]{width:100%;padding:.65rem .75rem;border-radius:10px;border:1px solid #cbd5e1;background:#fff;color:#0f172a;font-size:.95rem;outline:none;transition:border .15s,box-shadow .15s}
   input:focus{border-color:#2563eb;box-shadow:0 0 0 3px rgba(37,99,235,.15)}
-  button{margin-top:1.4rem;width:100%;padding:.75rem;border:0;border-radius:10px;background:#2563eb;color:#fff;font-weight:600;font-size:.95rem;cursor:pointer;transition:background .15s}
-  button:hover{background:#1d4ed8}
+  button{margin-top:1.4rem;width:100%;padding:.75rem;border:0;border-radius:10px;background:#0f172a;color:#fff;font-weight:600;font-size:.95rem;cursor:pointer;transition:background .15s}
+  button:hover{background:#1e293b}
   .err{background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;padding:.6rem .75rem;border-radius:10px;font-size:.85rem;margin-bottom:.25rem}
   .who{display:flex;align-items:center;gap:.65rem;background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:.7rem .85rem;margin:.25rem 0}
   .who .av{width:2.1rem;height:2.1rem;border-radius:999px;background:#dbeafe;color:#1d4ed8;display:grid;place-items:center;font-weight:700;flex:0 0 auto}
@@ -47,29 +47,29 @@ const STYLE = `
   .alt{display:block;text-align:center;margin-top:.9rem;font-size:.8rem;color:#2563eb;text-decoration:none}
   .alt:hover{text-decoration:underline}
   .sparkles{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden}
-  .sparkles span{position:absolute;display:block;opacity:0;animation:mcp-twinkle 3.2s ease-in-out infinite}
-  @keyframes mcp-twinkle{0%,100%{opacity:0;transform:scale(.4) rotate(-15deg)}50%{opacity:.85;transform:scale(1) rotate(12deg)}}
-  @media (prefers-reduced-motion: reduce){.sparkles span{animation:none;opacity:.35}}
+  .sparkles span{position:absolute;display:block;opacity:.35;filter:drop-shadow(0 0 6px rgba(37,99,235,.55));animation:mcp-twinkle 3s ease-in-out infinite}
+  @keyframes mcp-twinkle{0%,100%{opacity:.35;transform:scale(.6) rotate(-15deg)}50%{opacity:1;transform:scale(1.15) rotate(12deg)}}
+  @media (prefers-reduced-motion: reduce){.sparkles span{animation:none;opacity:.65}}
 `
 
 // Twinkling "chispitas" scattered across the page (mirrors the Home banner's CornerSparkles), CSS-only.
 const SPARKLE_SVG =
   '<svg viewBox="0 0 24 24" fill="currentColor" width="100%" height="100%"><path d="M12 2 L13.6 10.4 L22 12 L13.6 13.6 L12 22 L10.4 13.6 L2 12 L10.4 10.4 Z"/></svg>'
 const SPARKLE_SPECS: Array<{ pos: string; size: number; delay: number; color: string }> = [
-  { pos: 'top:7%;left:11%', size: 26, delay: 0, color: '#93c5fd' },
-  { pos: 'top:21%;left:6%', size: 16, delay: 0.8, color: '#c4b5fd' },
-  { pos: 'top:6%;left:47%', size: 18, delay: 1.4, color: '#60a5fa' },
-  { pos: 'top:13%;right:13%', size: 24, delay: 0.5, color: '#93c5fd' },
-  { pos: 'top:30%;right:8%', size: 14, delay: 1.9, color: '#c4b5fd' },
-  { pos: 'top:45%;left:8%', size: 20, delay: 1.1, color: '#60a5fa' },
-  { pos: 'top:62%;left:14%', size: 14, delay: 2.3, color: '#93c5fd' },
-  { pos: 'top:48%;right:10%', size: 22, delay: 0.3, color: '#93c5fd' },
-  { pos: 'top:66%;right:7%', size: 16, delay: 1.6, color: '#c4b5fd' },
-  { pos: 'bottom:11%;left:19%', size: 24, delay: 0.9, color: '#60a5fa' },
-  { pos: 'bottom:9%;right:21%', size: 18, delay: 2.0, color: '#93c5fd' },
-  { pos: 'bottom:22%;left:49%', size: 14, delay: 1.3, color: '#c4b5fd' },
-  { pos: 'top:38%;left:30%', size: 12, delay: 2.5, color: '#93c5fd' },
-  { pos: 'bottom:30%;right:30%', size: 12, delay: 0.6, color: '#60a5fa' },
+  { pos: 'top:7%;left:11%', size: 34, delay: 0, color: '#3b82f6' },
+  { pos: 'top:21%;left:6%', size: 22, delay: 0.8, color: '#a78bfa' },
+  { pos: 'top:6%;left:47%', size: 24, delay: 1.4, color: '#2563eb' },
+  { pos: 'top:13%;right:13%', size: 32, delay: 0.5, color: '#3b82f6' },
+  { pos: 'top:30%;right:8%', size: 20, delay: 1.9, color: '#a78bfa' },
+  { pos: 'top:45%;left:8%', size: 28, delay: 1.1, color: '#60a5fa' },
+  { pos: 'top:62%;left:14%', size: 20, delay: 2.3, color: '#3b82f6' },
+  { pos: 'top:48%;right:10%', size: 30, delay: 0.3, color: '#2563eb' },
+  { pos: 'top:66%;right:7%', size: 22, delay: 1.6, color: '#a78bfa' },
+  { pos: 'bottom:11%;left:19%', size: 32, delay: 0.9, color: '#60a5fa' },
+  { pos: 'bottom:9%;right:21%', size: 24, delay: 2.0, color: '#3b82f6' },
+  { pos: 'bottom:22%;left:49%', size: 20, delay: 1.3, color: '#a78bfa' },
+  { pos: 'top:38%;left:30%', size: 18, delay: 2.5, color: '#2563eb' },
+  { pos: 'bottom:30%;right:30%', size: 18, delay: 0.6, color: '#60a5fa' },
 ]
 const SPARKLES = `<div class="sparkles" aria-hidden="true">${SPARKLE_SPECS.map(
   s => `<span style="${s.pos};width:${s.size}px;height:${s.size}px;color:${s.color};animation-delay:${s.delay}s">${SPARKLE_SVG}</span>`,
