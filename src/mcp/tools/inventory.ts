@@ -9,6 +9,43 @@ import { auditMcpWrite } from '../audit'
 
 export function registerInventoryTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
+
+  server.tool(
+    'low_stock',
+    'Products running low in a venue you can access: items whose current stock is at or below their minimum (reorder) level. Returns the product, current vs minimum stock, how short it is, and when it was last restocked — most depleted first. Answers "¿qué se me está acabando? ¿qué necesito reordenar?". Pass venueId.',
+    {
+      venueId: z.string().describe('Venue whose inventory to check (must be in your scope)'),
+      limit: z.number().int().positive().max(100).optional().describe('Max items to return (default 50)'),
+    },
+    async ({ venueId, limit }) => {
+      const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      // Only items with a configured minimum (> 0). Prisma can't compare two columns in `where`,
+      // so fetch the tracked set and filter currentStock <= minimumStock in memory.
+      const tracked = await prisma.inventory.findMany({
+        where: { ...where, minimumStock: { gt: 0 } },
+        select: {
+          currentStock: true,
+          minimumStock: true,
+          lastRestockedAt: true,
+          product: { select: { name: true, sku: true } },
+        },
+      })
+      const lowStock = tracked
+        .filter(i => Number(i.currentStock) <= Number(i.minimumStock))
+        .map(i => ({
+          product: i.product?.name ?? null,
+          sku: i.product?.sku ?? null,
+          currentStock: Number(i.currentStock),
+          minimumStock: Number(i.minimumStock),
+          shortBy: Math.round((Number(i.minimumStock) - Number(i.currentStock)) * 100) / 100,
+          lastRestockedAt: i.lastRestockedAt?.toISOString() ?? null,
+        }))
+        .sort((a, b) => b.shortBy - a.shortBy)
+        .slice(0, limit ?? 50)
+      return text({ venueId, count: lowStock.length, lowStock })
+    },
+  )
+
   server.tool(
     'serialized_inventory',
     'Inventory of serialized items (SIMs, barcoded units, certificates) across your venues, counted by status: AVAILABLE, SOLD, RETURNED, DAMAGED. Pass venueId to focus one venue. (Org-level items not tied to a venue are not counted here.)',
