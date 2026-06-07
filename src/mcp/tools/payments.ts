@@ -125,9 +125,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
             feeAmount: true,
             netAmount: true,
             cardBrand: true,
-            maskedPan: true,
             processor: true,
-            authorizationNumber: true,
             createdAt: true,
             processedBy: { select: { firstName: true, lastName: true } },
             terminal: { select: { name: true } },
@@ -153,9 +151,8 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
           tip: num(p.tipAmount),
           processorFee: num(p.feeAmount),
           net: num(p.netAmount), // what actually lands after the processor fee
-          card: p.cardBrand ? { brand: p.cardBrand, pan: p.maskedPan } : null,
+          cardBrand: p.cardBrand ?? null, // brand only — maskedPan/authorizationNumber are redacted (SENSITIVE_PAYMENT_FIELDS)
           processor: p.processor,
-          authorization: p.authorizationNumber,
           processedBy: p.processedBy ? `${p.processedBy.firstName} ${p.processedBy.lastName}`.trim() : null,
           terminal: p.terminal?.name ?? null,
           orderNumber: p.order?.orderNumber ?? null,

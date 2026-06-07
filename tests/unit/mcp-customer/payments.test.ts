@@ -98,11 +98,15 @@ describe('list_payments', () => {
     expect(out.payments[0]).toMatchObject({
       id: 'pay1',
       status: 'REFUNDED',
-      card: { brand: 'VISA', pan: '4111******1111' },
+      cardBrand: 'VISA',
       terminal: 'Caja 1',
       orderNumber: 'A-1023',
       processedBy: 'Ana López',
     })
+    // sensitive fields must NOT leak to the LLM vendor
+    expect(out.payments[0].card).toBeUndefined()
+    expect(out.payments[0].authorization).toBeUndefined()
+    expect(JSON.stringify(out)).not.toContain('4111')
     expect(mockGroupBy).toHaveBeenCalledTimes(1)
     expect(mockFindMany).toHaveBeenCalledTimes(1)
   })
