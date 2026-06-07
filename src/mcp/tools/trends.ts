@@ -62,4 +62,39 @@ export function registerTrendTools(server: McpServer, scope: McpScope) {
       })
     },
   )
+
+  server.tool(
+    'revenue_by_venue',
+    'Completed sales broken down BY VENUE across all the venues you can access, over the last N days (default 30): each venue\'s gross and transaction count, ranked highest first, plus the combined total. For multi-venue operators — answers "¿cuál de mis locales vende más? ¿cómo se comparan mis sucursales?". A single-venue operator just sees one row. days defaults to 30.',
+    {
+      days: z.number().int().min(1).max(365).default(30).describe('Window length in days (default 30)'),
+    },
+    async ({ days }) => {
+      const base = guard.venueFilter() // all venues in the caller's scope
+      const windowDays = days ?? 30
+      const start = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000)
+
+      const [groups, venues] = await Promise.all([
+        prisma.payment.groupBy({
+          by: ['venueId'],
+          where: { ...base, status: TransactionStatus.COMPLETED, createdAt: { gte: start } },
+          _sum: { amount: true },
+          _count: { _all: true },
+        }),
+        prisma.venue.findMany({ where: { id: { in: scope.allowedVenueIds } }, select: { id: true, name: true } }),
+      ])
+
+      const byVenue = new Map(groups.map(g => [g.venueId, g]))
+      // Build from the full scoped venue list so venues with zero sales still show (ranked last).
+      const rows = venues
+        .map(v => {
+          const g = byVenue.get(v.id)
+          return { venue: v.name, gross: round2(num(g?._sum.amount ?? null)), transactions: g?._count._all ?? 0 }
+        })
+        .sort((a, b) => b.gross - a.gross)
+      const total = round2(rows.reduce((s, r) => s + r.gross, 0))
+
+      return text({ days: windowDays, since: start.toISOString(), venueCount: rows.length, total, venues: rows })
+    },
+  )
 }
