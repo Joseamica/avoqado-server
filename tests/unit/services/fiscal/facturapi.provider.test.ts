@@ -86,9 +86,23 @@ describe('FacturapiProvider', () => {
     expect(body.i_key).toBeUndefined()
     expect(body.idempotency_key).toBeUndefined()
     expect(mockCreate.mock.calls[0][1]).toBeUndefined() // no second-arg query param
-    // unit price sent to SDK is pesos (net), not cents
+    // unit price sent to SDK is pesos, not cents
     const sentItems = body.items
     expect(sentItems[0].product.price).toBe(100)
+    // BASE params carry no taxIncluded flag → NET semantics (PAC adds IVA on top)
+    expect(sentItems[0].product.tax_included).toBe(false)
+  })
+
+  it('createInvoice sends tax_included:true for IVA-included (gross) items so the PAC keeps the paid total', async () => {
+    mockCreate.mockResolvedValue(MOCK_INVOICE_RESPONSE)
+    const provider = new FacturapiProvider('sk_test_x')
+    await provider.createInvoice({
+      ...BASE_CREATE_PARAMS,
+      items: [{ ...BASE_CREATE_PARAMS.items[0], unitPriceCents: 11600, taxIncluded: true }],
+    })
+    const product = mockCreate.mock.calls[0][0].items[0].product
+    expect(product.price).toBe(116) // gross pesos sent as-is
+    expect(product.tax_included).toBe(true) // PAC back-computes base+IVA → stamped total stays 116
   })
 
   it('createInvoice passes external_id when externalId is provided', async () => {

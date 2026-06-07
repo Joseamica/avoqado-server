@@ -54,10 +54,18 @@ export interface CfdiItemInput {
   satUnitKey: string // ClaveUnidad
   description: string
   quantity: number
-  unitPriceCents: number // NET (sin IVA)
+  /**
+   * Unit price in integer cents. Interpreted per `taxIncluded`:
+   *   - taxIncluded=true  → IVA-INCLUDED (gross) — the PAC extracts the IVA so the stamped
+   *                          total equals what the customer paid (Mexican POS convention).
+   *   - taxIncluded=false → NET (sin IVA) — the PAC adds the IVA on top (separated-tax sources).
+   */
+  unitPriceCents: number
   discountCents: number
   objetoImp: string // 01/02/03
   taxes: CfdiItemTax[]
+  /** When true, `unitPriceCents` is IVA-included and the PAC must back-compute the base (tax_included). Default false. */
+  taxIncluded?: boolean
 }
 
 export interface CreateInvoiceParams {

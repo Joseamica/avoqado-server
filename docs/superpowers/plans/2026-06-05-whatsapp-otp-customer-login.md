@@ -458,12 +458,7 @@ Run: `npx jest tests/unit/services/public/otpAuth.public.service.test.ts -t veri
 ```ts
 import { generateCustomerToken } from '../../jwt.service'
 
-export async function verifyOtp(args: {
-  venueId: string
-  channel: 'whatsapp' | 'email'
-  destination: string
-  code: string
-}): Promise<{
+export async function verifyOtp(args: { venueId: string; channel: 'whatsapp' | 'email'; destination: string; code: string }): Promise<{
   token: string
   customer: { id: string; firstName: string | null; lastName: string | null; email: string | null; phone: string | null }
 }> {

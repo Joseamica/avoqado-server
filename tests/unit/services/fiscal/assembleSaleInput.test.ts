@@ -39,6 +39,18 @@ describe('assembleSaleInput', () => {
     expect(input.items[0].taxExempt).toBe(false)
     expect(input.items[0].categoryDefaultProductKey).toBe('90101500')
     expect(input.items[0].description).toBe('Tacos')
+    expect(input.items[0].taxIncluded).toBe(false) // default order (no pricesIncludeIva) → NET
+  })
+
+  it('propagates pricesIncludeIva → every item is taxIncluded (gross/IVA-included sale, e.g. TPV)', () => {
+    const grossOrder: LoadedOrderForCfdi = { ...order, pricesIncludeIva: true }
+    const input = assembleSaleInput(grossOrder, {
+      receptor: { rfc: 'XAXX010101000', razonSocial: 'P', regimenFiscal: '616', codigoPostal: '83240', usoCfdi: 'S01' },
+      paymentMethod: 'CASH',
+      metodoPago: 'PUE',
+      idempotencyKey: 'k',
+    })
+    expect(input.items.every(it => it.taxIncluded === true)).toBe(true)
   })
 
   it('marks 0%/exempt items and tolerates a deleted product (null → sector default later)', () => {

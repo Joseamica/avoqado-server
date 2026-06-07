@@ -8,6 +8,7 @@ import { resolveFiscalProvider } from './fiscalProvider.factory'
 import { buildCreateInvoiceParams } from './cfdiPayloadBuilder'
 import { validateBeforeStamp } from './cfdiValidation'
 import { assembleSaleInput, LoadedOrderForCfdi } from './assembleSaleInput'
+import { splitIvaIncluded } from './ivaMath'
 
 // ─── List CFDIs ───────────────────────────────────────────────────────────────
 
@@ -422,6 +423,35 @@ export async function loadOrderForCfdiFromDb(orderId: string): Promise<LoadedOrd
   }
 
   const peso = (d: any) => Math.round(Number(d) * 100)
+
+  // Mexican POS prices are IVA-included (gross): the customer's out-of-pocket already contains the
+  // tax, and these orders carry taxAmount=0 (e.g. TPV). A non-zero taxAmount means a separated-tax
+  // source (reservations, pos-sync) whose subtotal/taxAmount/total are already the real split.
+  const pricesIncludeIva = peso(order.taxAmount) === 0
+
+  let subtotalCents: number
+  let taxCents: number
+  let totalCents: number
+  if (pricesIncludeIva) {
+    // Derive base + IVA per concepto from the gross line so the row cuadra al centavo AND the total
+    // stays equal to what the customer paid (tax_included stamping preserves the gross at the PAC).
+    subtotalCents = 0
+    taxCents = 0
+    totalCents = 0
+    for (const it of order.items) {
+      const rate = it.product ? Number(it.product.taxRate) : 0.16
+      const grossLine = peso(it.unitPrice) * it.quantity - peso(it.discountAmount)
+      const split = splitIvaIncluded(grossLine, rate)
+      subtotalCents += split.netCents
+      taxCents += split.taxCents
+      totalCents += grossLine
+    }
+  } else {
+    subtotalCents = peso(order.subtotal)
+    taxCents = peso(order.taxAmount)
+    totalCents = peso(order.total)
+  }
+
   return {
     venueId: order.venueId,
     venueSlug: order.venue.slug,
@@ -431,10 +461,10 @@ export async function loadOrderForCfdiFromDb(orderId: string): Promise<LoadedOrd
     autofacturaEnabled: cfg.autofacturaEnabled,
     paymentMethod: pay.method,
     metodoPago: 'PUE', // POS = PUE (PPD/REP deferred)
-    subtotalCents: peso(order.subtotal),
-    taxCents: peso(order.taxAmount),
-    totalCents: peso(order.total),
-    order: { venueType: order.venue.type, tipAmount: order.tipAmount, items: order.items as any },
+    subtotalCents,
+    taxCents,
+    totalCents,
+    order: { venueType: order.venue.type, tipAmount: order.tipAmount, items: order.items as any, pricesIncludeIva },
   }
 }
 

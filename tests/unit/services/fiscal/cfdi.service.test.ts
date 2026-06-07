@@ -111,6 +111,67 @@ describe('issueCfdiForOrder', () => {
     expect(invoiceParams.externalId).toBe('cfdi-order-o1')
   })
 
+  it('REGRESSION: a GROSS (IVA-included) order stamps tax_included so the CFDI total == what was paid', async () => {
+    // The over-invoicing bug: TPV orders carry IVA-included prices (taxAmount=0). The PAC must be told
+    // the price already includes IVA, otherwise it adds 16% on top and the CFDI total exceeds the ticket.
+    const createInvoice = jest.fn().mockResolvedValue({
+      providerInvoiceId: 'fa1',
+      uuid: 'UUID-1',
+      serie: 'F',
+      folio: '2',
+      totalCents: 11600,
+      stampedAt: new Date(),
+      status: 'valid' as const,
+    })
+    const deps = makeDeps({
+      loadOrderForCfdi: jest.fn().mockResolvedValue({
+        venueId: 'v1',
+        venueSlug: 'demo',
+        venueType: 'RESTAURANT',
+        emisor: { id: 'e1', provider: 'FACTURAPI', providerKeyEnc: null, csdStatus: 'ACTIVE', serie: 'F' },
+        facturacionEnabled: true,
+        autofacturaEnabled: true,
+        paymentMethod: 'CASH',
+        metodoPago: 'PUE',
+        // derived gross breakdown: 116 paid → 100 base + 16 IVA
+        subtotalCents: 10000,
+        taxCents: 1600,
+        totalCents: 11600,
+        order: {
+          venueType: 'RESTAURANT',
+          tipAmount: D(0),
+          pricesIncludeIva: true, // ← gross convention
+          items: [
+            {
+              productName: 'X',
+              quantity: 1,
+              unitPrice: D(116), // IVA-included price the customer paid
+              discountAmount: D(0),
+              product: { satProductKey: '90101500', satUnitKey: 'E48', objetoImp: '02', taxRate: D(0.16), category: null },
+            },
+          ],
+        },
+      }),
+      resolveProvider: jest.fn().mockReturnValue({
+        name: 'facturapi',
+        createInvoice,
+        downloadXml: jest.fn().mockResolvedValue(Buffer.from('<xml/>')),
+        downloadPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF')),
+      } as any),
+    })
+
+    const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
+    expect(res.status).toBe('STAMPED')
+
+    const sentItem = createInvoice.mock.calls[0][0].items[0]
+    expect(sentItem.taxIncluded).toBe(true) // PAC keeps the gross → stamped total stays 116, not 134.56
+    expect(sentItem.unitPriceCents).toBe(11600) // sends the IVA-included price the customer actually paid
+    // and the persisted row records the real split (taxCents ≠ 0), cuadra al centavo
+    const persisted = (deps.persistCfdi as jest.Mock).mock.calls.at(-1)[0]
+    expect(persisted.subtotalCents + persisted.taxCents).toBe(persisted.totalCents)
+    expect(persisted.totalCents).toBe(11600)
+  })
+
   it('idempotent: returns the existing STAMPED Cfdi without calling the PAC', async () => {
     const existing = { id: 'c0', status: 'STAMPED', uuid: 'OLD' }
     const deps = makeDeps({ findExistingCfdi: jest.fn().mockResolvedValue(existing) })

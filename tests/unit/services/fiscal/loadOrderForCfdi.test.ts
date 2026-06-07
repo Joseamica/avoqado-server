@@ -133,4 +133,81 @@ describe('loadOrderForCfdiFromDb', () => {
     const arg = orderMock.mock.calls[0][0]
     expect(arg.select.payments.where).toEqual({ status: 'COMPLETED' })
   })
+
+  // ── IVA-included (GROSS) orders — the live TPV reality (taxAmount=0, prices include IVA) ──────
+
+  it('GROSS order (taxAmount=0): derives base+IVA from items so total == paid and taxCents ≠ 0', async () => {
+    // Customer paid 116 (IVA-included). taxAmount=0 marks the gross convention.
+    orderMock.mockResolvedValue(
+      anOrder({
+        subtotal: D(116),
+        taxAmount: D(0),
+        total: D(116),
+        items: [
+          {
+            productName: 'X',
+            quantity: 1,
+            unitPrice: D(116), // IVA-included price the customer actually paid
+            discountAmount: D(0),
+            product: { satProductKey: '90101500', satUnitKey: 'E48', objetoImp: '02', taxRate: D(0.16), category: null },
+          },
+        ],
+      }),
+    )
+    cfgMock.mockResolvedValue(aConfig())
+
+    const bundle = await loadOrderForCfdiFromDb('o1')
+
+    expect(bundle).not.toBeNull()
+    expect(bundle!.totalCents).toBe(11600) // == what the customer paid (NOT 11600 × 1.16)
+    expect(bundle!.subtotalCents).toBe(10000) // 11600 / 1.16
+    expect(bundle!.taxCents).toBe(1600) // no longer 0 — real IVA recorded
+    expect(bundle!.subtotalCents + bundle!.taxCents).toBe(bundle!.totalCents) // cuadra al centavo
+    expect(bundle!.order.pricesIncludeIva).toBe(true) // → items stamped tax_included downstream
+  })
+
+  it('GROSS mixed cart (16% + exento): splits each line per its own rate, total stays == paid', async () => {
+    orderMock.mockResolvedValue(
+      anOrder({
+        subtotal: D(216),
+        taxAmount: D(0),
+        total: D(216),
+        items: [
+          {
+            productName: 'Comida',
+            quantity: 1,
+            unitPrice: D(116), // 16% gross
+            discountAmount: D(0),
+            product: { satProductKey: '90101500', satUnitKey: 'E48', objetoImp: '02', taxRate: D(0.16), category: null },
+          },
+          {
+            productName: 'Libro',
+            quantity: 1,
+            unitPrice: D(100), // exento
+            discountAmount: D(0),
+            product: { satProductKey: '55101500', satUnitKey: 'H87', objetoImp: '01', taxRate: D(0), category: null },
+          },
+        ],
+      }),
+    )
+    cfgMock.mockResolvedValue(aConfig())
+
+    const bundle = await loadOrderForCfdiFromDb('o1')
+
+    expect(bundle!.totalCents).toBe(21600) // 11600 + 10000 = exactly what was paid
+    expect(bundle!.subtotalCents).toBe(20000) // 10000 (net of 116) + 10000 (exento)
+    expect(bundle!.taxCents).toBe(1600) // only the 16% line carries IVA
+    expect(bundle!.subtotalCents + bundle!.taxCents).toBe(bundle!.totalCents)
+    expect(bundle!.order.pricesIncludeIva).toBe(true)
+  })
+
+  it('NET order (taxAmount>0, e.g. reservation/pos-sync): keeps the separated split unchanged', async () => {
+    orderMock.mockResolvedValue(anOrder()) // subtotal 100, tax 16, total 116
+    cfgMock.mockResolvedValue(aConfig())
+    const bundle = await loadOrderForCfdiFromDb('o1')
+    expect(bundle!.subtotalCents).toBe(10000)
+    expect(bundle!.taxCents).toBe(1600)
+    expect(bundle!.totalCents).toBe(11600)
+    expect(bundle!.order.pricesIncludeIva).toBe(false) // NET → tax_included:false (no regression)
+  })
 })

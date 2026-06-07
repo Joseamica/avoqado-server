@@ -109,8 +109,10 @@ export class FacturapiProvider implements FiscalProvider {
           description: it.description,
           product_key: it.satProductKey,
           unit_key: it.satUnitKey,
-          price: toPesos(it.unitPriceCents), // NET pesos (tax_included: false)
-          tax_included: false,
+          // IVA-included (gross) when taxIncluded → facturapi back-computes the base so the
+          // stamped Total equals what the customer paid; NET (+IVA on top) otherwise.
+          price: toPesos(it.unitPriceCents),
+          tax_included: it.taxIncluded === true,
           taxes: it.taxes.map(t => ({
             type: t.type,
             rate: t.rate,
@@ -167,8 +169,10 @@ export class FacturapiProvider implements FiscalProvider {
           description: it.description,
           product_key: it.satProductKey,
           unit_key: it.satUnitKey,
-          price: toPesos(it.unitPriceCents), // NET pesos (tax_included: false)
-          tax_included: false,
+          // IVA-included (gross) when taxIncluded → facturapi back-computes the base so the
+          // stamped Total equals what the customer paid; NET (+IVA on top) otherwise.
+          price: toPesos(it.unitPriceCents),
+          tax_included: it.taxIncluded === true,
           taxes: it.taxes.map(t => ({
             type: t.type,
             rate: t.rate,

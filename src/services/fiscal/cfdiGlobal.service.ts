@@ -13,7 +13,14 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { buildStoragePath, uploadFileToStorage } from '../storage.service'
 import { resolveFiscalProvider } from './fiscalProvider.factory'
-import { buildGlobalInvoiceParams, GlobalInvoiceLine, reconcileGlobalLines } from './cfdiPayloadBuilder'
+import {
+  buildGlobalInvoiceParams,
+  GlobalInvoiceLine,
+  GlobalLineItemInput,
+  groupOrderIntoGlobalLines,
+  reconcileGlobalLines,
+} from './cfdiPayloadBuilder'
+import { splitIvaIncluded } from './ivaMath'
 import { closedPeriodFor, ClosedPeriod } from './globalPeriod'
 import { validateBeforeStamp } from './cfdiValidation'
 import { mapFormaPago } from './satCatalog'
@@ -345,25 +352,58 @@ const defaultDeps: IssueGlobalDeps = {
           orderBy: { createdAt: 'desc' },
           select: { method: true },
         },
+        // Items carry each product's real tax treatment (rate + objetoImp) so the global lines
+        // declare the actual IVA per product instead of assuming 16% for the whole ticket.
+        items: {
+          select: {
+            quantity: true,
+            unitPrice: true,
+            discountAmount: true,
+            taxAmount: true,
+            product: { select: { taxRate: true, objetoImp: true } },
+          },
+        },
       },
     })
 
     const peso = (d: any): number => Math.round(Number(d) * 100)
 
-    return orders.map(o => {
-      const subtotalCents = peso(o.subtotal)
-      const taxCents = peso(o.taxAmount)
-      const totalCents = peso(o.total)
+    // One order → one or more global lines, grouped by each product's REAL tax rate (16/8/0/exento).
+    // taxAmount=0 ⇒ gross (IVA-included) prices, e.g. TPV. Non-zero taxAmount ⇒ separated-tax source.
+    return orders.flatMap((o): GlobalInvoiceLine[] => {
+      const priceIncludesIva = peso(o.taxAmount) === 0
       const method = o.payments[0]?.method
       const formaPago = method ? mapFormaPago(method) : '99'
-      return {
-        orderId: o.id,
-        orderNumber: o.orderNumber,
-        subtotalCents,
-        taxCents,
-        totalCents,
-        formaPago,
+      const meta = { orderId: o.id, orderNumber: o.orderNumber, formaPago, priceIncludesIva }
+
+      // Preferred path: derive per-product tax groups from the items.
+      if (o.items.length > 0) {
+        const lineItems: GlobalLineItemInput[] = o.items.map(it => {
+          const rate = it.product ? Number(it.product.taxRate) : 0.16
+          const objetoImp = it.product?.objetoImp ?? (rate > 0 ? '02' : '01')
+          const lineNet = peso(it.unitPrice) * it.quantity - peso(it.discountAmount)
+          // Gross items already include IVA; net items add their separated tax to reach the paid gross.
+          const grossCents = priceIncludesIva ? lineNet : lineNet + peso(it.taxAmount)
+          return { grossCents, taxRate: rate, objetoImp }
+        })
+        return groupOrderIntoGlobalLines(lineItems, meta)
       }
+
+      // Fallback (order with no items): one line from the aggregate total, assuming 16%.
+      const totalCents = peso(o.total)
+      const { netCents, taxCents } = priceIncludesIva
+        ? splitIvaIncluded(totalCents, 0.16)
+        : { netCents: peso(o.subtotal), taxCents: peso(o.taxAmount) }
+      return [
+        {
+          ...meta,
+          totalCents,
+          subtotalCents: netCents,
+          taxCents,
+          taxRate: 0.16,
+          objetoImp: '02',
+        },
+      ]
     })
   },
 
