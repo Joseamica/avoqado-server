@@ -212,4 +212,26 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
       })
     },
   )
+
+  server.tool(
+    'menu_categories',
+    'The menu categories of a venue you can access: name, description, whether active, and how many products are in each. Defaults to active categories. Answers "¿qué categorías de menú tengo?". Pass venueId. (For the items themselves use list_menu.)',
+    {
+      venueId: z.string().describe('Venue whose menu categories to list (must be in your scope)'),
+      includeInactive: z.boolean().optional().describe('Also include inactive categories'),
+    },
+    async ({ venueId, includeInactive }) => {
+      const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const cats = await prisma.menuCategory.findMany({
+        where: { ...where, ...(includeInactive ? {} : { active: true }) },
+        select: { name: true, description: true, active: true, _count: { select: { products: true } } },
+        orderBy: { displayOrder: 'asc' },
+      })
+      return text({
+        venueId,
+        count: cats.length,
+        categories: cats.map(c => ({ name: c.name, description: c.description, active: c.active, products: c._count.products })),
+      })
+    },
+  )
 }

@@ -62,4 +62,25 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
       })
     },
   )
+
+  server.tool(
+    'list_areas',
+    'The areas / sections of a venue you can access (e.g. Terraza, Barra, Salón): each with its description and how many tables it has. Answers "¿qué áreas / secciones tengo?". Pass venueId. (For live occupancy use tables_status.)',
+    {
+      venueId: z.string().describe('Venue whose areas to list (must be in your scope)'),
+    },
+    async ({ venueId }) => {
+      const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const areas = await prisma.area.findMany({
+        where,
+        select: { name: true, description: true, _count: { select: { tables: true } } },
+        orderBy: { name: 'asc' },
+      })
+      return text({
+        venueId,
+        count: areas.length,
+        areas: areas.map(a => ({ name: a.name, description: a.description, tables: a._count.tables })),
+      })
+    },
+  )
 }
