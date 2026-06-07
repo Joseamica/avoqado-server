@@ -7,7 +7,9 @@ import { text } from '../respond'
 import { updateProduct } from '@/services/dashboard/product.dashboard.service'
 import { auditMcpWrite } from '../audit'
 
-/** Find products in scope by (partial, case-insensitive) name — shared by the menu write tools. */
+const round2 = (n: number): number => Math.round(n * 100) / 100
+
+/** Find products in scope by (partial, case-insensitive) name — shared by the menu tools. */
 async function matchProductsByName(venueWhere: { venueId: { in: string[] } }, name: string) {
   return prisma.product.findMany({
     where: { ...venueWhere, name: { contains: name, mode: 'insensitive' } },
@@ -123,6 +125,91 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
       }
+    },
+  )
+
+  server.tool(
+    'menu_item_detail',
+    'Full detail of ONE menu item in a venue you can access, found by name: description, category, type, price, cost & margin (ONLY if a real cost is set on the item — never estimated), prep time, calories, whether it is active ("86"), how its stock is tracked, and its modifier/option groups (each option with its extra price). The drill-down after list_menu — answers "¿qué lleva / qué opciones tiene / cuánto me deja la X?". If the name matches several items it returns them so you can be specific.',
+    {
+      venueId: z.string().describe('Venue that owns the item (must be in your scope)'),
+      name: z.string().min(1).describe('Menu item name or part of it, e.g. "Hamburguesa"'),
+    },
+    async ({ venueId, name }) => {
+      const where = guard.venueFilter(venueId) // throws ScopeError if out of scope
+      const matches = await matchProductsByName(where, name)
+      if (matches.length === 0) return text({ found: false, error: `No menu item matching "${name}" in that venue.` })
+      if (matches.length > 1)
+        return text({
+          found: false,
+          ambiguous: true,
+          error: `"${name}" matches several items — be more specific.`,
+          matches: matches.map(m => m.name),
+        })
+
+      const p = await prisma.product.findFirst({
+        where: { id: matches[0].id, ...where },
+        select: {
+          name: true,
+          sku: true,
+          description: true,
+          type: true,
+          price: true,
+          cost: true,
+          active: true,
+          prepTime: true,
+          calories: true,
+          imageUrl: true,
+          trackInventory: true,
+          inventoryMethod: true,
+          category: { select: { name: true } },
+          modifierGroups: {
+            select: {
+              group: {
+                select: {
+                  name: true,
+                  required: true,
+                  allowMultiple: true,
+                  minSelections: true,
+                  maxSelections: true,
+                  modifiers: { where: { active: true }, select: { name: true, price: true }, orderBy: { name: 'asc' } },
+                },
+              },
+            },
+            orderBy: { displayOrder: 'asc' },
+          },
+        },
+      })
+      if (!p) return text({ found: false, error: 'Item not found, or it is outside your venues' })
+
+      const price = Number(p.price)
+      const cost = p.cost == null ? null : Number(p.cost)
+      return text({
+        found: true,
+        item: {
+          name: p.name,
+          sku: p.sku,
+          description: p.description,
+          type: p.type,
+          category: p.category?.name ?? null,
+          price,
+          cost, // real stored cost, or null if none is set — NEVER estimated
+          margin: cost != null && price > 0 ? { amount: round2(price - cost), percent: round2(((price - cost) / price) * 100) } : null,
+          active: p.active,
+          prepTimeMinutes: p.prepTime,
+          calories: p.calories,
+          hasImage: !!p.imageUrl,
+          inventoryTracking: p.trackInventory ? p.inventoryMethod : null,
+          modifierGroups: p.modifierGroups.map(mg => ({
+            name: mg.group.name,
+            required: mg.group.required,
+            allowMultiple: mg.group.allowMultiple,
+            min: mg.group.minSelections,
+            max: mg.group.maxSelections,
+            options: mg.group.modifiers.map(m => ({ name: m.name, extraPrice: Number(m.price) })),
+          })),
+        },
+      })
     },
   )
 }
