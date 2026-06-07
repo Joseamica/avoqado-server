@@ -219,4 +219,67 @@ export function registerCustomerTools(server: McpServer, scope: McpScope) {
       }
     },
   )
+
+  server.tool(
+    'add_customer_note',
+    'Append a free-text note to a customer of a venue you can access — for longer context than a tag (e.g. "prefiere mesa junto a la ventana", "se quejó del servicio el 5/jun"). Find them by name/email/phone; the note is APPENDED to their existing notes (nothing is overwritten). This WRITES — requires customers:update. If the search matches several customers it returns them so you can be specific. Does NOT touch money, balances or loyalty.',
+    {
+      venueId: z.string().describe('Venue that owns the customer (must be in your scope)'),
+      search: z.string().min(1).describe('Customer name, email or phone (partial, case-insensitive)'),
+      note: z.string().min(1).describe('The note text to append'),
+    },
+    async ({ venueId, search, note }) => {
+      const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('customers:update', venueId) // write gate (per-venue role; custom roles honored)
+
+      const matches = await prisma.customer.findMany({
+        where: {
+          ...base,
+          OR: [
+            { firstName: { contains: search, mode: 'insensitive' as const } },
+            { lastName: { contains: search, mode: 'insensitive' as const } },
+            { email: { contains: search, mode: 'insensitive' as const } },
+            { phone: { contains: search } },
+          ],
+        },
+        select: { id: true, firstName: true, lastName: true, notes: true },
+        orderBy: { totalSpent: 'desc' },
+        take: 5,
+      })
+      if (matches.length === 0) {
+        return text({ ok: false, error: `No encontré ningún cliente que coincida con "${search}" en este local.` })
+      }
+      if (matches.length > 1) {
+        return text({
+          ok: false,
+          ambiguous: true,
+          error: `"${search}" coincide con varios clientes — sé más específico.`,
+          matches: matches.map(m => `${m.firstName ?? ''} ${m.lastName ?? ''}`.trim() || '(sin nombre)'),
+        })
+      }
+
+      const c = matches[0]
+      const newNotes = c.notes ? `${c.notes}\n${note}` : note // append — never overwrite existing context
+      try {
+        const updated = await prisma.customer.update({
+          where: { id: c.id },
+          data: { notes: newNotes },
+          select: { firstName: true, lastName: true, notes: true },
+        })
+        await auditMcpWrite(scope, {
+          action: 'CUSTOMER_NOTE_ADDED',
+          entity: 'Customer',
+          entityId: c.id,
+          venueId,
+          data: { note },
+        })
+        return text({
+          ok: true,
+          customer: { name: `${updated.firstName ?? ''} ${updated.lastName ?? ''}`.trim() || null, notes: updated.notes },
+        })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
 }
