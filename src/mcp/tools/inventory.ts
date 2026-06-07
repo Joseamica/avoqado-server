@@ -15,6 +15,8 @@ const MOVEMENT_TYPE = {
   loss: MovementType.LOSS,
 } as const
 
+const round2 = (n: number): number => Math.round(n * 100) / 100
+
 export function registerInventoryTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
 
@@ -160,6 +162,55 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
       }
+    },
+  )
+
+  server.tool(
+    'stock_value',
+    'The value of a venue\'s QUANTITY-tracked inventory: total cost value (current stock × unit cost) and total retail value (current stock × price), the potential margin between them, and how many in-stock items are missing a cost. Lists the top items by cost value. Only items WITH a cost set count toward the cost total — never estimated. Answers "¿cuánto vale mi inventario? ¿cuánto tengo invertido en stock?". Pass venueId. (Serialized items — SIMs/barcodes — are not included; use serialized_inventory.)',
+    {
+      venueId: z.string().describe('Venue whose inventory value to compute (must be in your scope)'),
+      limit: z.number().int().positive().max(100).optional().describe('How many top items (by cost value) to list (default 20)'),
+    },
+    async ({ venueId, limit }) => {
+      const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      // currentStock × cost can't be multiplied in a SQL aggregate; fetch in-stock items and compute in memory.
+      const rows = await prisma.inventory.findMany({
+        where: { ...where, currentStock: { gt: 0 } },
+        select: { currentStock: true, product: { select: { name: true, sku: true, cost: true, price: true } } },
+      })
+
+      let costValue = 0
+      let retailValue = 0
+      let itemsWithoutCost = 0
+      const items = rows.map(r => {
+        const stock = Number(r.currentStock)
+        const cost = r.product?.cost == null ? null : Number(r.product.cost)
+        const price = r.product?.price == null ? 0 : Number(r.product.price)
+        const itemCost = cost == null ? null : round2(stock * cost)
+        if (itemCost == null) itemsWithoutCost += 1
+        else costValue += itemCost
+        retailValue += stock * price
+        return {
+          product: r.product?.name ?? null,
+          sku: r.product?.sku ?? null,
+          stock,
+          unitCost: cost, // null if no cost set on the product
+          costValue: itemCost,
+          retailValue: round2(stock * price),
+        }
+      })
+      items.sort((a, b) => (b.costValue ?? 0) - (a.costValue ?? 0))
+
+      return text({
+        venueId,
+        productsInStock: rows.length,
+        itemsWithoutCost,
+        totalCostValue: round2(costValue), // items that have a cost only
+        totalRetailValue: round2(retailValue),
+        potentialMargin: round2(retailValue - costValue),
+        topItems: items.slice(0, limit ?? 20),
+      })
     },
   )
 }
