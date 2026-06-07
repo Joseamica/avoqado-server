@@ -1,0 +1,94 @@
+import { registerReservationTools } from '../../../src/mcp/tools/reservations'
+import type { McpScope } from '../../../src/mcp/scope'
+
+const mockReservationFindFirst = jest.fn()
+
+jest.mock('@/mcp/guard', () => ({
+  createGuard: () => ({
+    venueFilter: (v?: string) => {
+      if (v === 'foreign') throw new Error('ScopeError: venue out of scope')
+      return v ? { venueId: { in: [v] } } : { venueId: { in: ['v1'] } }
+    },
+    requirePermission: jest.fn(),
+  }),
+}))
+// reservation write tools import these at module load — stub so registration succeeds
+jest.mock('@/services/dashboard/reservation.dashboard.service', () => ({
+  createReservation: jest.fn(),
+  rescheduleAppointmentReservation: jest.fn(),
+  cancelReservation: jest.fn(),
+  confirmReservation: jest.fn(),
+  checkInReservation: jest.fn(),
+  completeReservation: jest.fn(),
+  markNoShow: jest.fn(),
+}))
+jest.mock('@/mcp/audit', () => ({ auditMcpWrite: jest.fn() }))
+jest.mock('@/utils/prismaClient', () => ({
+  __esModule: true,
+  default: { reservation: { findFirst: (...a: unknown[]) => mockReservationFindFirst(...(a as [])), findMany: jest.fn() } },
+}))
+
+const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
+const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map() } as McpScope
+const call = (args: Record<string, unknown>) => handlers.get('reservation_detail')!(args, {})
+const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
+
+beforeAll(() => {
+  registerReservationTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
+})
+beforeEach(() => jest.clearAllMocks())
+
+describe('reservation_detail', () => {
+  it('rejects a venue outside the caller scope (cross-tenant guard)', async () => {
+    await expect(call({ venueId: 'foreign', confirmationCode: 'ABC' })).rejects.toThrow('out of scope')
+    expect(mockReservationFindFirst).not.toHaveBeenCalled()
+  })
+
+  it('returns found:false for an unknown code (scoped to the venue)', async () => {
+    mockReservationFindFirst.mockResolvedValueOnce(null)
+    const out = parse(await call({ venueId: 'v1', confirmationCode: 'NOPE' }))
+    expect(out.found).toBe(false)
+    expect((mockReservationFindFirst.mock.calls[0][0] as { where: Record<string, unknown> }).where).toMatchObject({
+      venueId: { in: ['v1'] },
+      confirmationCode: 'NOPE',
+    })
+  })
+
+  it('maps the full detail and never leaks the deposit processor reference', async () => {
+    mockReservationFindFirst.mockResolvedValueOnce({
+      confirmationCode: 'ABC123',
+      status: 'CONFIRMED',
+      startsAt: new Date('2026-06-10T20:00:00Z'),
+      endsAt: new Date('2026-06-10T22:00:00Z'),
+      partySize: 4,
+      guestName: 'Ana',
+      guestPhone: '555',
+      guestEmail: 'ana@x.com',
+      specialRequests: 'Cumpleaños',
+      internalNotes: 'Cliente VIP',
+      depositAmount: 200,
+      depositStatus: 'PAID',
+      depositPaidAt: new Date('2026-06-05T10:00:00Z'),
+      checkedInAt: null,
+      noShowAt: null,
+      createdAt: new Date('2026-06-01T10:00:00Z'),
+      table: { number: '7' },
+      product: null,
+    })
+    const out = parse(await call({ venueId: 'v1', confirmationCode: 'ABC123' }))
+
+    expect(out.found).toBe(true)
+    expect(out.reservation).toMatchObject({
+      confirmationCode: 'ABC123',
+      status: 'CONFIRMED',
+      partySize: 4,
+      guest: { name: 'Ana', phone: '555', email: 'ana@x.com' },
+      table: '7',
+      service: null,
+      deposit: { amount: 200, status: 'PAID' },
+      specialRequests: 'Cumpleaños',
+      internalNotes: 'Cliente VIP',
+    })
+    expect(JSON.stringify(out)).not.toContain('depositProcessorRef')
+  })
+})

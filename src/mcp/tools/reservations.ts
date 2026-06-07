@@ -235,4 +235,62 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
       }
     },
   )
+
+  server.tool(
+    'reservation_detail',
+    'Full detail of ONE reservation in a venue you can access, by its confirmation code: status, when (start/end), party size, guest (name/phone/email), the table or the service booked, deposit (amount, status, paid-at), check-in / no-show timestamps, special requests and internal notes. The drill-down after the reservations list. Answers "dame los detalles de la reserva ABC123". Does NOT expose payment-processor references. Pass venueId + confirmationCode.',
+    {
+      venueId: z.string().describe('Venue that owns the reservation (must be in your scope)'),
+      confirmationCode: z.string().min(1).describe('The reservation confirmation code'),
+    },
+    async ({ venueId, confirmationCode }) => {
+      const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const r = await prisma.reservation.findFirst({
+        where: { ...where, confirmationCode },
+        select: {
+          confirmationCode: true,
+          status: true,
+          startsAt: true,
+          endsAt: true,
+          partySize: true,
+          guestName: true,
+          guestPhone: true,
+          guestEmail: true,
+          specialRequests: true,
+          internalNotes: true,
+          depositAmount: true,
+          depositStatus: true,
+          depositPaidAt: true,
+          checkedInAt: true,
+          noShowAt: true,
+          createdAt: true,
+          table: { select: { number: true } },
+          product: { select: { name: true } },
+        },
+      })
+      if (!r) return text({ found: false, error: `No encontré una reserva con código "${confirmationCode}" en este local.` })
+      return text({
+        found: true,
+        reservation: {
+          confirmationCode: r.confirmationCode,
+          status: r.status,
+          startsAt: r.startsAt.toISOString(),
+          endsAt: r.endsAt.toISOString(),
+          partySize: r.partySize,
+          guest: { name: r.guestName, phone: r.guestPhone, email: r.guestEmail },
+          table: r.table?.number ?? null,
+          service: r.product?.name ?? null, // booked service (appointment venues)
+          deposit:
+            r.depositAmount != null
+              ? { amount: Number(r.depositAmount), status: r.depositStatus, paidAt: r.depositPaidAt?.toISOString() ?? null }
+              : null,
+          checkedInAt: r.checkedInAt?.toISOString() ?? null,
+          noShowAt: r.noShowAt?.toISOString() ?? null,
+          specialRequests: r.specialRequests,
+          internalNotes: r.internalNotes,
+          createdAt: r.createdAt.toISOString(),
+        },
+      })
+    },
+  )
 }
