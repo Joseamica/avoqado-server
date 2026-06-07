@@ -49,4 +49,53 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
       })
     },
   )
+
+  server.tool(
+    'staff_detail',
+    'Detail of ONE team member of a venue you can access, found by name: their account status and the role they hold at EACH of your venues where they work. The drill-down after list_staff — answers "¿qué rol tiene Juan? ¿en qué locales trabaja? ¿está activo?". Does NOT expose contact details (email/phone). If the name matches several people it returns them so you can be specific. Pass venueId + name.',
+    {
+      venueId: z.string().describe('Venue to search within (must be in your scope)'),
+      name: z.string().min(1).describe('Team member name or part of it'),
+    },
+    async ({ venueId, name }) => {
+      const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const matches = await prisma.staffVenue.findMany({
+        where: {
+          ...base,
+          staff: {
+            OR: [
+              { firstName: { contains: name, mode: 'insensitive' as const } },
+              { lastName: { contains: name, mode: 'insensitive' as const } },
+            ],
+          },
+        },
+        select: { staffId: true, staff: { select: { firstName: true, lastName: true, active: true } } },
+        take: 5,
+      })
+      if (matches.length === 0) {
+        return text({ found: false, error: `No encontré ningún miembro del equipo que coincida con "${name}" en este local.` })
+      }
+      if (matches.length > 1) {
+        return text({
+          found: false,
+          ambiguous: true,
+          error: `"${name}" coincide con varias personas — sé más específico.`,
+          matches: matches.map(m => `${m.staff.firstName} ${m.staff.lastName}`.trim()),
+        })
+      }
+
+      const m = matches[0]
+      // The role they hold at each of the CALLER's venues (scope-limited — never reveals venues outside scope).
+      const assignments = await prisma.staffVenue.findMany({
+        where: { staffId: m.staffId, ...guard.venueFilter() },
+        select: { role: true, venue: { select: { name: true } } },
+        orderBy: { venue: { name: 'asc' } },
+      })
+      return text({
+        found: true,
+        staff: { name: `${m.staff.firstName} ${m.staff.lastName}`.trim(), active: m.staff.active },
+        venues: assignments.map(a => ({ venue: a.venue?.name ?? null, role: a.role })),
+      })
+    },
+  )
 }
