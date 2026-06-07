@@ -12,6 +12,8 @@ import {
   checkInReservation,
   completeReservation,
   markNoShow,
+  updateReservation,
+  type UpdateReservationInput,
 } from '@/services/dashboard/reservation.dashboard.service'
 import { auditMcpWrite } from '../audit'
 
@@ -291,6 +293,50 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
           createdAt: r.createdAt.toISOString(),
         },
       })
+    },
+  )
+
+  server.tool(
+    'update_reservation',
+    'Edit the editable details of a PENDING or CONFIRMED reservation in a venue you can access, by confirmation code: party size, guest contact (name/phone/email), special requests, and internal notes. Capacity is re-checked when party size changes. To change the TIME use reschedule_reservation; to cancel use cancel_reservation. This WRITES — requires reservations:update. Pass venueId + confirmationCode + only the fields you want to change.',
+    {
+      venueId: z.string().describe('Venue that owns the reservation (must be in your scope)'),
+      confirmationCode: z.string().min(1).describe('The reservation confirmation code'),
+      partySize: z.number().int().positive().optional().describe('New party size (capacity is re-checked)'),
+      guestName: z.string().optional().describe('Guest name'),
+      guestPhone: z.string().optional().describe('Guest phone'),
+      guestEmail: z.string().optional().describe('Guest email'),
+      specialRequests: z.string().optional().describe('Special requests / notes for staff'),
+      internalNotes: z.string().optional().describe('Internal notes'),
+    },
+    async ({ venueId, confirmationCode, partySize, guestName, guestPhone, guestEmail, specialRequests, internalNotes }) => {
+      const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('reservations:update', venueId) // write gate (per-venue role)
+      const reservation = await prisma.reservation.findFirst({ where: { ...where, confirmationCode }, select: { id: true, venueId: true } })
+      if (!reservation) return text({ ok: false, error: `No encontré una reserva con código "${confirmationCode}" en este local.` })
+
+      const data: UpdateReservationInput = {}
+      if (partySize !== undefined) data.partySize = partySize
+      if (guestName !== undefined) data.guestName = guestName
+      if (guestPhone !== undefined) data.guestPhone = guestPhone
+      if (guestEmail !== undefined) data.guestEmail = guestEmail
+      if (specialRequests !== undefined) data.specialRequests = specialRequests
+      if (internalNotes !== undefined) data.internalNotes = internalNotes
+      if (Object.keys(data).length === 0) return text({ ok: false, error: 'No pasaste ningún campo para actualizar.' })
+
+      try {
+        const updated = await updateReservation(reservation.venueId, reservation.id, data, scope.staffId)
+        await auditMcpWrite(scope, {
+          action: 'RESERVATION_UPDATED',
+          entity: 'Reservation',
+          entityId: reservation.id,
+          venueId: reservation.venueId,
+          data: { confirmationCode, fields: Object.keys(data) },
+        })
+        return text({ ok: true, reservation: updated })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
     },
   )
 }
