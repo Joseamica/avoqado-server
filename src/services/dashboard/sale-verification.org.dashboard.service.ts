@@ -93,16 +93,17 @@ function derivePaymentForm(method: PaymentMethod | null | undefined): 'CASH' | '
 }
 
 /**
- * "Tipo de venta" → one of three values (per Isaac/PlayTelecom Asana spec
- * 2026-05-27): ESIM, PORTABILIDAD, or LINEA_NUEVA.
+ * "Tipo de venta" → PORTABILIDAD or LINEA_NUEVA, decided solely by the
+ * isPortabilidad toggle captured at sale time (PlayTelecom, 2026-06-08).
  *
- * eSIM is detected from the SIM category name ("E-SIM de promotor") and takes
- * precedence — an eSIM sale surfaces as "eSIM". Otherwise the isPortabilidad
- * toggle decides portability vs new line. "SIM de intercambio" is NOT a sale
- * type; it falls through to línea nueva / portabilidad like any other SIM.
+ * eSIM is a *SIM type* (the category "E-SIM de promotor"), NOT a sale type, so
+ * it no longer surfaces here — an eSIM sale is classified as portabilidad or
+ * línea nueva like any physical SIM. Because saleType is derived at read time,
+ * this reclassifies existing eSIM sales retroactively from their stored
+ * isPortabilidad flag (no data migration). The ESIM union member is kept for
+ * backwards compatibility with older filters but is never produced anymore.
  */
-function deriveSaleType(isPortabilidad: boolean, categoryName: string | null | undefined): 'LINEA_NUEVA' | 'PORTABILIDAD' | 'ESIM' {
-  if (categoryName && /e-?sim/i.test(categoryName)) return 'ESIM'
+function deriveSaleType(isPortabilidad: boolean, _categoryName?: string | null): 'LINEA_NUEVA' | 'PORTABILIDAD' | 'ESIM' {
   return isPortabilidad ? 'PORTABILIDAD' : 'LINEA_NUEVA'
 }
 
