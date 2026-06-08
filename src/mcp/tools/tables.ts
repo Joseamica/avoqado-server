@@ -4,6 +4,15 @@ import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
+import { auditMcpWrite } from '../audit'
+import { TableStatus } from '@prisma/client'
+
+const STATUS_MAP: Record<string, TableStatus> = {
+  available: TableStatus.AVAILABLE,
+  occupied: TableStatus.OCCUPIED,
+  reserved: TableStatus.RESERVED,
+  cleaning: TableStatus.CLEANING,
+}
 
 export function registerTableTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
@@ -81,6 +90,49 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
         count: areas.length,
         areas: areas.map(a => ({ name: a.name, description: a.description, tables: a._count.tables })),
       })
+    },
+  )
+
+  server.tool(
+    'set_table_status',
+    'Set the status of a table in a venue you can access, found by its number: available, occupied, reserved or cleaning. Safety: a table with a live (open) order CANNOT be marked available — close/pay that order first. This WRITES — it changes the floor; requires tables:update. Pass venueId + table number + the new status.',
+    {
+      venueId: z.string().describe('Venue that owns the table (must be in your scope)'),
+      number: z.string().min(1).describe('Table number, e.g. "12"'),
+      status: z.enum(['available', 'occupied', 'reserved', 'cleaning']).describe('New status for the table'),
+    },
+    async ({ venueId, number, status }) => {
+      const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('tables:update', venueId) // write gate (per-venue role)
+      const table = await prisma.table.findFirst({
+        where: { ...where, number, active: true },
+        select: { id: true, number: true, status: true, currentOrderId: true },
+      })
+      if (!table) return text({ ok: false, error: `No encontré la mesa "${number}" activa en este local.` })
+
+      const target = STATUS_MAP[status]
+      // Don't strand an open tab: a table with a live order can't be freed to AVAILABLE here.
+      if (target === TableStatus.AVAILABLE && table.currentOrderId) {
+        return text({ ok: false, error: `La mesa ${number} tiene una cuenta abierta — ciérrala o cóbrala antes de marcarla disponible.` })
+      }
+
+      try {
+        const updated = await prisma.table.update({
+          where: { id: table.id },
+          data: { status: target },
+          select: { number: true, status: true },
+        })
+        await auditMcpWrite(scope, {
+          action: 'TABLE_STATUS_SET',
+          entity: 'Table',
+          entityId: table.id,
+          venueId,
+          data: { number: updated.number, from: table.status, to: updated.status },
+        })
+        return text({ ok: true, table: { number: updated.number, status: updated.status } })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
     },
   )
 }
