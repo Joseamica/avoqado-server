@@ -5,10 +5,14 @@ import { hasPermission } from '@/services/access/access.service'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
+import { CommissionPayoutStatus } from '@prisma/client'
 
 // COMMISSIONS module code (mirrors MODULE_CODES.COMMISSIONS in module.service —
 // hardcoded here to keep this tool module's import graph light for unit tests).
 const COMMISSIONS_MODULE_CODE = 'COMMISSIONS'
+
+const num = (d: { toString(): string } | null): number => (d == null ? 0 : Number(d))
+const round2 = (n: number): number => Math.round(n * 100) / 100
 
 interface TierRow {
   tierLevel: number
@@ -142,6 +146,74 @@ export function registerCommissionTools(server: McpServer, scope: McpScope) {
         }),
       )
       return text({ venuesInScope: venueIds.length, venues })
+    },
+  )
+
+  server.tool(
+    'commission_payouts',
+    'Staff commission payouts for your venues: each shows the staff member, amount, payment method (cash/transfer/payroll), status (pending/approved/processing/paid/failed/cancelled) and when it was paid — plus totals already paid vs still pending. Defaults to all statuses. Answers "¿cuánto he pagado de comisiones? ¿qué comisiones están pendientes? ¿cuánto le debo a X?". Requires commissions:read. Pass venueId to focus one venue; optionally status.',
+    {
+      venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues'),
+      status: z.enum(['pending', 'paid', 'all']).optional().describe("Filter: 'pending' (not yet paid), 'paid', or 'all' (default)"),
+      limit: z.number().int().positive().max(100).optional().describe('Max payouts to list (default 50, newest first)'),
+    },
+    async ({ venueId, status, limit }) => {
+      const venueIds = readableVenues(venueId)
+      if (venueIds.length === 0) return text({ venuesInScope: 0, payouts: [], note: 'No tienes acceso de comisiones en este alcance.' })
+
+      const statusFilter =
+        status === 'paid'
+          ? { status: CommissionPayoutStatus.PAID }
+          : status === 'pending'
+            ? { status: { in: [CommissionPayoutStatus.PENDING, CommissionPayoutStatus.APPROVED, CommissionPayoutStatus.PROCESSING] } }
+            : {}
+
+      const [summary, payouts] = await Promise.all([
+        prisma.commissionPayout.groupBy({
+          by: ['status'],
+          where: { venueId: { in: venueIds } },
+          _sum: { amount: true },
+          _count: { _all: true },
+        }),
+        prisma.commissionPayout.findMany({
+          where: { venueId: { in: venueIds }, ...statusFilter },
+          select: {
+            amount: true,
+            paymentMethod: true,
+            status: true,
+            paidAt: true,
+            processedAt: true,
+            createdAt: true,
+            notes: true,
+            staff: { select: { firstName: true, lastName: true } },
+            venue: { select: { name: true } },
+          },
+          orderBy: { createdAt: 'desc' },
+          take: limit ?? 50,
+        }),
+      ])
+
+      const byStatus: Record<string, { count: number; amount: number }> = {}
+      for (const g of summary) byStatus[g.status] = { count: g._count._all, amount: round2(num(g._sum.amount)) }
+      const totalPending = round2(['PENDING', 'APPROVED', 'PROCESSING'].reduce((s, k) => s + (byStatus[k]?.amount ?? 0), 0))
+
+      return text({
+        venuesInScope: venueIds.length,
+        totals: { paid: byStatus.PAID?.amount ?? 0, pending: totalPending },
+        byStatus,
+        count: payouts.length,
+        payouts: payouts.map(p => ({
+          staff: `${p.staff.firstName} ${p.staff.lastName}`.trim(),
+          venue: p.venue?.name ?? null,
+          amount: num(p.amount),
+          method: p.paymentMethod, // CASH | BANK_TRANSFER | PAYROLL
+          status: p.status,
+          paidAt: p.paidAt?.toISOString() ?? null,
+          processedAt: p.processedAt?.toISOString() ?? null,
+          createdAt: p.createdAt.toISOString(),
+          notes: p.notes,
+        })),
+      })
     },
   )
 }

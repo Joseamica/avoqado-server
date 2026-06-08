@@ -1,6 +1,6 @@
 import { Router, Request, Response, NextFunction } from 'express'
 import { requirePartnerKey } from '@/middlewares/partner-auth.middleware'
-import { partnerService } from '@/services/partner/partner.service'
+import { partnerService, resolvePartnerBoundary } from '@/services/partner/partner.service'
 import { BadRequestError } from '@/errors/AppError'
 
 const router = Router()
@@ -9,8 +9,10 @@ const router = Router()
  * GET /api/v1/partner/sales
  *
  * Query params:
- *   from (required) - ISO date string, start of range
- *   to   (required) - ISO date string, end of range
+ *   from (required) - ISO date, start of range. Date-only ("2026-03-01") is
+ *                     read as Mexico-local 00:00. No lower bound — any history.
+ *   to   (required) - ISO date, end of range. Date-only ("2026-03-31") is read
+ *                     as Mexico-local 23:59:59.999 (full day, inclusive).
  *   venue_slug      - Filter by venue slug (e.g., "dona-simona")
  *   status          - exitosa | cancelada | fallida
  *   page            - Page number (default: 1)
@@ -25,8 +27,8 @@ router.get('/sales', requirePartnerKey, async (req: Request, res: Response, next
       throw new BadRequestError('Query params "from" and "to" are required (ISO date format)')
     }
 
-    const fromDate = new Date(from as string)
-    const toDate = new Date(to as string)
+    const fromDate = resolvePartnerBoundary(from as string, 'start')
+    const toDate = resolvePartnerBoundary(to as string, 'end')
 
     if (isNaN(fromDate.getTime()) || isNaN(toDate.getTime())) {
       throw new BadRequestError('Invalid date format. Use ISO 8601 (e.g., 2026-03-01)')
@@ -36,11 +38,7 @@ router.get('/sales', requirePartnerKey, async (req: Request, res: Response, next
       throw new BadRequestError('"from" must be before "to"')
     }
 
-    // Max range: 90 days
-    const diffDays = (toDate.getTime() - fromDate.getTime()) / (1000 * 60 * 60 * 24)
-    if (diffDays > 90) {
-      throw new BadRequestError('Date range cannot exceed 90 days')
-    }
+    // No artificial range cap: BAIT pulls full historical periods for its ETL.
 
     // Validate status if provided
     const validStatuses = ['exitosa', 'cancelada', 'fallida']
