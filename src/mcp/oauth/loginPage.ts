@@ -29,7 +29,8 @@ const STYLE = `
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;background:#f1f5f9;color:#0f172a;display:grid;place-items:center;min-height:100vh;margin:0;padding:1rem}
   .card{background:#fff;padding:2rem;border-radius:18px;width:min(94vw,400px);box-shadow:0 12px 40px rgba(15,23,42,.10);border:1px solid #e2e8f0;position:relative;z-index:1}
   .brand{display:flex;align-items:center;gap:.55rem;margin-bottom:1.25rem}
-  .brand .dot{width:1.7rem;height:1.7rem;border-radius:9px;background:#2563eb;display:grid;place-items:center;color:#fff;font-weight:700;font-size:1rem}
+  .brand .dot{width:2rem;height:2rem;display:grid;place-items:center}
+  .brand .dot svg{width:100%;height:100%;display:block}
   .brand b{font-weight:700;font-size:1.05rem;color:#0f172a}
   h1{font-size:1.2rem;margin:0 0 .35rem;font-weight:700}
   p.sub{color:#64748b;font-size:.9rem;margin:0 0 1.25rem;line-height:1.45}
@@ -88,7 +89,7 @@ export function renderLoginPage(
 ): string {
   const app = p.clientName ? escapeHtml(p.clientName) : 'Una aplicación'
   const banner = `<p class="err" id="mcp-err"${opts.error ? '' : ' style="display:none"'}>${opts.error ? escapeHtml(opts.error) : ''}</p>`
-  const brand = `<div class="brand"><span class="dot">A</span><b>Avoqado</b></div>`
+  const brand = `<div class="brand"><span class="dot"><svg viewBox="0 0 732.5 893.3" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill="#69E185" d="M712.7,486.2c-3.3-83.5-37.8-157.2-99.8-213.1c-27.9-28.7-63.2-57.2-104.9-84.8c16-81.7,12.9-116.7-31.4-155.5l-2.4-2.1l-3.1-0.9c-33-9.4-58.6-7.7-78.1,5.1c-29.8,19.5-39.9,60.9-45.2,117.3c-131.6,12.1-242.1,95.5-296.3,224.2c-56.5,134-37,280.8,49.8,374.1c3.4,3.5,10.3,10.6,157,98l1.1,0.7l1.2,0.5c36,13.2,72.6,19.8,108.8,19.8c39.2,0,78.1-7.7,115.4-23.2c63.9-26.5,121.9-75.8,163.3-138.7C692.8,639.9,715.7,561.3,712.7,486.2z M580.3,507.4c-0.3,58-40.2,116.3-118.7,173.3C374.3,744.2,279.3,710,228,651.3c-43.8-50-65.3-119.8-56.1-182c4.8-32.5,20.5-77.7,68-108.3c64.6-41.7,110-56.7,144.4-56.7c45.6,0,71.8,26.4,97.4,52.4c10.4,10.5,20.2,20.4,31.3,28.6C545.7,409.4,580.5,454.2,580.3,507.4z"/><path fill="#C9712F" d="M362.2,412c-26.8,0-53.6,17.9-75.5,50.5c-18.4,27.3-30.3,61.1-30.3,86c0,49.5,47.4,89.7,105.7,89.7S468,598,468,548.5c0-24.9-11.9-58.7-30.3-86C415.8,430,389,412,362.2,412z"/></svg></span><b>Avoqado</b></div>`
   const note = `<p class="note">Acceso de solo lectura, limitado a tu rol y tus locales. Puedes desconectarlo cuando quieras.</p>`
   const intro = `<p class="sub"><strong>${app}</strong> quiere acceder a los datos de tus locales en tu nombre.</p>`
 
