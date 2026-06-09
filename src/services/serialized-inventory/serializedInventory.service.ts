@@ -672,7 +672,7 @@ export class SerializedInventoryService {
    * (business assumption — refund triage happens at the org level).
    */
   async markAsReturned(venueId: string, serialNumber: string): Promise<SerializedItem> {
-    serialNumber = normalizeSerial(serialNumber)
+    serialNumber = await this.resolveStoredSerial(venueId, serialNumber)
     return this.db.serializedItem.update({
       where: { venueId_serialNumber: { venueId, serialNumber } },
       data: {
@@ -697,7 +697,7 @@ export class SerializedInventoryService {
    * mirroring a `STAFF_TERMINATED`/`DAMAGED_SIM` collect-to-admin path.
    */
   async markAsDamaged(venueId: string, serialNumber: string): Promise<SerializedItem> {
-    serialNumber = normalizeSerial(serialNumber)
+    serialNumber = await this.resolveStoredSerial(venueId, serialNumber)
     return this.db.serializedItem.update({
       where: { venueId_serialNumber: { venueId, serialNumber } },
       data: {
@@ -711,6 +711,26 @@ export class SerializedInventoryService {
         promoterRejectedAt: null,
       },
     })
+  }
+
+  /**
+   * Resolve the actually-stored serial within a venue, tolerant of legacy
+   * lower-cased rows. normalizeSerial() upper-cases (the canonical form for all
+   * new items), but a handful of legacy items predate that and are stored
+   * lower-cased; the search path already matches case variants, so the
+   * return/damage mutators must too — otherwise those legacy items can never be
+   * returned/damaged. Falls back to the normalized serial when nothing matches,
+   * so a genuinely-missing item still surfaces the same P2025 not-found on update.
+   */
+  private async resolveStoredSerial(venueId: string, serialNumber: string): Promise<string> {
+    const normalized = normalizeSerial(serialNumber)
+    const trimmed = serialNumber.trim()
+    const variants = Array.from(new Set([normalized, trimmed, trimmed.toLowerCase()]))
+    const item = await this.db.serializedItem.findFirst({
+      where: { venueId, serialNumber: { in: variants } },
+      select: { serialNumber: true },
+    })
+    return item?.serialNumber ?? normalized
   }
 
   /**
