@@ -65,8 +65,12 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
       const where = guard.venueFilter() // {venueId:{in:[...]}} — enforces scope
       let id = orderId
       if (!id && serialNumber) {
+        // Serials are stored canonically UPPERCASE, but a handful of legacy items are lower-cased —
+        // match case-insensitively so a scan/paste in either case still resolves the order.
+        const trimmed = serialNumber.trim()
+        const serialVariants = Array.from(new Set([trimmed, trimmed.toUpperCase(), trimmed.toLowerCase()]))
         const item = await prisma.serializedItem.findFirst({
-          where: { serialNumber },
+          where: { serialNumber: { in: serialVariants } },
           select: { orderItem: { select: { orderId: true } } },
         })
         id = item?.orderItem?.orderId ?? undefined
