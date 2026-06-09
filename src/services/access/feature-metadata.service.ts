@@ -1,6 +1,6 @@
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
-import { venueHasActiveBasePlan, PAID_PLAN_TIER_CODES } from '@/services/access/basePlan.service'
+import { getVenueBaseTier, PAID_PLAN_TIER_CODES, PREMIUM_ONLY_CODES } from '@/services/access/basePlan.service'
 
 /**
  * Gate states that already grant the venue access to a feature. When the base
@@ -69,7 +69,7 @@ function buildFeatureCheckoutUrl(venueId: string): string {
 }
 
 export async function getFeatureMetadataForVenue(venueId: string): Promise<Record<string, FeatureMetadata>> {
-  const [features, venueFeatures, hasBasePlan] = await Promise.all([
+  const [features, venueFeatures, baseTier] = await Promise.all([
     prisma.feature.findMany({
       where: { active: true },
       select: {
@@ -94,10 +94,11 @@ export async function getFeatureMetadataForVenue(venueId: string): Promise<Recor
         },
       },
     }),
-    // Blanket grant mirror: an active base plan (PLAN_PRO active or trialing)
-    // unlocks ALL premium features in the payload too, so the dashboard UI
-    // matches what checkFeatureAccess/hasFeatureAccess allow at the API layer.
-    venueHasActiveBasePlan(venueId),
+    // Tier-aware blanket grant mirror: the venue's base tier (PREMIUM | PRO | null)
+    // unlocks premium features in the payload too, so the dashboard UI matches what
+    // the access gate allows at the API layer. PREMIUM unlocks ALL non-tier features;
+    // PRO unlocks all non-tier features EXCEPT the Premium-only differentiators.
+    getVenueBaseTier(venueId),
   ])
 
   const now = new Date()
@@ -114,16 +115,32 @@ export async function getFeatureMetadataForVenue(venueId: string): Promise<Recor
   )
 
   const isPlanTierCode = (code: string): boolean => (PAID_PLAN_TIER_CODES as readonly string[]).includes(code)
+  const isPremiumOnlyCode = (code: string): boolean => (PREMIUM_ONLY_CODES as readonly string[]).includes(code)
+
+  /**
+   * Tier-aware blanket grant for a single non-tier feature code:
+   *   - PREMIUM tier grants every non-tier feature.
+   *   - PRO tier grants every non-tier feature EXCEPT the Premium-only differentiators.
+   *   - no tier grants nothing.
+   * The venue's OWN à-la-carte state (grandfather) is handled separately below — this
+   * only decides the blanket grant from the base plan.
+   */
+  const tierGrants = (code: string): boolean => {
+    if (isPlanTierCode(code)) return false // tier codes never self-grant via the blanket
+    if (baseTier === 'PREMIUM') return true
+    if (baseTier === 'PRO') return !isPremiumOnlyCode(code)
+    return false
+  }
 
   const featureMetadata = features.reduce<Record<string, FeatureMetadata>>((acc, feature) => {
     const venueFeature = venueFeatureByCode.get(feature.code)
     const individualState = resolveFeatureGateState(venueFeature, now)
 
-    // UNION the base-plan grant: when the venue has an active base plan, every
-    // premium feature (all codes except the plan tiers themselves) is unlocked.
-    // Preserve the richer à-la-carte state when it already grants access; only
-    // upgrade non-access states (LOCKED / TRIAL_EXPIRED / SUSPENDED) to ACTIVE.
-    const grantedByBasePlan = hasBasePlan && !isPlanTierCode(feature.code) && !ACCESS_GRANTING_STATES.has(individualState)
+    // UNION the tier-aware base-plan grant: the venue's base tier unlocks the features
+    // its tier covers (PREMIUM = all; PRO = all except Premium-only differentiators).
+    // Preserve the richer à-la-carte state when it already grants access (grandfather);
+    // only upgrade non-access states (LOCKED / TRIAL_EXPIRED / SUSPENDED) to ACTIVE.
+    const grantedByBasePlan = tierGrants(feature.code) && !ACCESS_GRANTING_STATES.has(individualState)
     const state: FeatureGateState = grantedByBasePlan ? 'ACTIVE' : individualState
 
     acc[feature.code] = {

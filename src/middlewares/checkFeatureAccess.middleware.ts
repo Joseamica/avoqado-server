@@ -17,7 +17,7 @@
 import { Request, Response, NextFunction } from 'express'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
-import { venueHasActiveBasePlan, PAID_PLAN_TIER_CODES } from '@/services/access/basePlan.service'
+import { PAID_PLAN_TIER_CODES, PREMIUM_ONLY_CODES, getVenueBaseTier } from '@/services/access/basePlan.service'
 import { resolveRequestVenueId } from './checkPermission.middleware'
 
 /**
@@ -66,11 +66,17 @@ export function checkFeatureAccess(featureCode: string) {
 
       // Feature not found or not active
       if (!venueFeature || !venueFeature.active) {
-        // Blanket grant: an active base plan (or trial) unlocks all premium features,
-        // except the plan tiers themselves. Phase 1 has no ALWAYS_ADDON features.
-        if (!PAID_PLAN_TIER_CODES.includes(featureCode as any) && (await venueHasActiveBasePlan(venueId))) {
-          ;(req as any).venueFeature = { featureCode, grantedBy: 'BASE_PLAN' }
-          return next()
+        // Tier-aware blanket grant: the venue's base plan unlocks features included in its tier
+        // (mirrors venueHasFeatureAccess). PREMIUM unlocks all non-tier features; PRO unlocks all
+        // except the Premium-only differentiators (PREMIUM_ONLY_CODES). The plan tiers themselves
+        // are never blanket-granted. An explicit own VenueFeature (checked above) always wins.
+        if (!PAID_PLAN_TIER_CODES.includes(featureCode as any)) {
+          const tier = await getVenueBaseTier(venueId)
+          const grantedByPlan = tier === 'PREMIUM' || (tier === 'PRO' && !(PREMIUM_ONLY_CODES as readonly string[]).includes(featureCode))
+          if (grantedByPlan) {
+            ;(req as any).venueFeature = { featureCode, grantedBy: 'BASE_PLAN' }
+            return next()
+          }
         }
 
         logger.warn('⚠️ Feature access denied: Feature not active', {
@@ -335,10 +341,14 @@ export async function hasFeatureAccess(
     })
 
     if (!venueFeature || !venueFeature.active) {
-      // Blanket grant: an active base plan (or trial) unlocks all premium features,
-      // except the plan tiers themselves. Phase 1 has no ALWAYS_ADDON features.
-      if (!PAID_PLAN_TIER_CODES.includes(featureCode as any) && (await venueHasActiveBasePlan(venueId))) {
-        return { hasAccess: true, isTrialing: false, trialEndsAt: null }
+      // Tier-aware blanket grant (mirrors venueHasFeatureAccess): PREMIUM unlocks all non-tier
+      // features; PRO unlocks all except PREMIUM_ONLY_CODES. An explicit own VenueFeature wins.
+      if (!PAID_PLAN_TIER_CODES.includes(featureCode as any)) {
+        const tier = await getVenueBaseTier(venueId)
+        const grantedByPlan = tier === 'PREMIUM' || (tier === 'PRO' && !(PREMIUM_ONLY_CODES as readonly string[]).includes(featureCode))
+        if (grantedByPlan) {
+          return { hasAccess: true, isTrialing: false, trialEndsAt: null }
+        }
       }
       return {
         hasAccess: false,

@@ -551,6 +551,68 @@ export async function reactivateVenuePlan(req: Request<{ venueId: string }>, res
 }
 
 /**
+ * Apply a cancellation-retention offer to the venue's base plan: a 30%-off-3-months
+ * discount ('discount', default) or a ~2-month collection pause ('pause'). Allowed once
+ * while no discount is active (anti-abuse), and only with an active base plan.
+ * POST /api/v1/dashboard/venues/:venueId/plan/retention-offer
+ */
+export async function applyVenueRetentionOffer(
+  req: Request<{ venueId: string }, any, { offer?: 'discount' | 'pause' }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const offer = req.body.offer ?? 'discount'
+    const planState = await planStateService.applyRetentionOffer(venueId, offer)
+    res.status(200).json({ success: true, data: planState })
+  } catch (error) {
+    logger.error('Error applying venue retention offer', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      venueId: req.params?.venueId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Create a Stripe Checkout session so the venue can self-serve subscribe to a
+ * base plan (Pro o Premium) via Stripe's hosted checkout.
+ * POST /api/v1/dashboard/venues/:venueId/plan/checkout
+ */
+export async function createVenuePlanCheckoutSession(
+  req: Request<{ venueId: string }, any, { interval?: 'monthly' | 'annual'; tier?: 'PRO' | 'PREMIUM' }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const orgId = req.authContext?.orgId
+    if (!orgId) {
+      return next(new Error('Contexto de organización no encontrado'))
+    }
+
+    const venueId: string = req.params.venueId
+    const interval = req.body.interval ?? 'monthly'
+    const tier = req.body.tier ?? 'PRO'
+
+    const skipOrgCheck = req.authContext?.role === 'SUPERADMIN'
+    const checkoutUrl = await venueDashboardService.createVenuePlanCheckoutSession(orgId, venueId, interval, tier, { skipOrgCheck })
+
+    res.status(200).json({
+      success: true,
+      url: checkoutUrl,
+    })
+  } catch (error) {
+    logger.error('Error creating plan checkout session', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      orgId: req.authContext?.orgId,
+      venueId: req.params?.venueId,
+    })
+    next(error)
+  }
+}
+
+/**
  * Set default payment method for a venue
  */
 export async function setVenueDefaultPaymentMethod(

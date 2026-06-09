@@ -213,6 +213,8 @@ import {
   updatePaymentMethodSchema,
   createBillingPortalSessionSchema,
   planParamsSchema,
+  createPlanCheckoutSessionSchema,
+  applyRetentionOfferSchema,
 } from '../schemas/dashboard/venue.schema'
 import {
   // Wrapped schemas for route validation (use these with validateRequest)
@@ -2076,6 +2078,92 @@ router.post(
   checkPermission('billing:subscriptions:manage'),
   validateRequest(planParamsSchema) as RequestHandler,
   venueController.reactivateVenuePlan,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/plan/retention-offer:
+ *   post:
+ *     tags: [Venues]
+ *     summary: Apply a cancellation-retention offer to the base plan
+ *     description: >-
+ *       Applies a retention offer to the venue's base-plan Stripe subscription so a
+ *       merchant about to cancel stays: 'discount' (default) applies a 30%-off-3-months
+ *       coupon (RETENTION_30_3M); 'pause' pauses collection for ~2 months. Requires an
+ *       active base plan. Anti-abuse: refused (400) if the subscription already carries a
+ *       discount.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               offer:
+ *                 type: string
+ *                 enum: [discount, pause]
+ *                 default: discount
+ *     responses:
+ *       200: { description: Updated PlanState }
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.post(
+  '/venues/:venueId/plan/retention-offer',
+  authenticateTokenMiddleware,
+  checkPermission('billing:subscriptions:manage'),
+  validateRequest(applyRetentionOfferSchema) as RequestHandler,
+  venueController.applyVenueRetentionOffer,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/plan/checkout:
+ *   post:
+ *     tags: [Venues]
+ *     summary: Create a Stripe Checkout session to self-serve subscribe to PLAN_PRO
+ *     description: >-
+ *       Returns the URL of a Stripe-hosted Checkout session (mode subscription)
+ *       for the venue's PLAN_PRO base plan. The dashboard redirects the browser
+ *       to this URL. Fails if the venue is already on an active Pro plan.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               interval:
+ *                 type: string
+ *                 enum: [monthly, annual]
+ *                 default: monthly
+ *     responses:
+ *       200:
+ *         description: Checkout session URL generated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 url: { type: string, format: uri, example: https://checkout.stripe.com/c/pay/... }
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.post(
+  '/venues/:venueId/plan/checkout',
+  authenticateTokenMiddleware,
+  checkPermission('billing:subscriptions:manage'),
+  validateRequest(createPlanCheckoutSessionSchema) as RequestHandler,
+  venueController.createVenuePlanCheckoutSession,
 )
 
 /**

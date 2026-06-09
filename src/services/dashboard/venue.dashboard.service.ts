@@ -37,12 +37,14 @@ import {
   updatePaymentMethod,
   createTrialSubscriptions,
   createCustomerPortalSession,
+  createPlanCheckoutSession,
   syncFeaturesToStripe,
   listPaymentMethods,
   detachPaymentMethod,
   setDefaultPaymentMethod,
   createTrialSetupIntent,
 } from '../stripe.service'
+import { getVenueBaseTier } from '../access/basePlan.service'
 import { notifySuperadminsNewKycSubmission } from '../superadmin/kycReview.service'
 import { cleanDemoData } from '../onboarding/demoCleanup.service'
 import { deleteOnboardingProgress } from '../onboarding/onboardingProgress.service'
@@ -1520,6 +1522,146 @@ export async function createVenueBillingPortalSession(
   })
 
   return portalUrl
+}
+
+/**
+ * Create a Stripe Checkout Session (mode: 'subscription') so a venue can
+ * self-serve subscribe to a base plan (Pro o Premium) via Stripe's hosted checkout.
+ * Ensures a Stripe customer exists (reusing the billing-portal create flow),
+ * resolves the tier price for the requested interval, and short-circuits if the
+ * venue already has ANY active base plan (Pro or Premium) — a fresh checkout would
+ * create a duplicate base subscription. Tier upgrades/downgrades with proration are
+ * a separate future flow (contact support).
+ *
+ * @param orgId - Organization ID
+ * @param venueId - Venue ID
+ * @param interval - Billing interval ('monthly' | 'annual')
+ * @param tier - Base-plan tier to subscribe to ('PRO' | 'PREMIUM')
+ * @param options - Optional parameters
+ * @returns Hosted Stripe Checkout URL to redirect the browser to
+ */
+export async function createVenuePlanCheckoutSession(
+  orgId: string,
+  venueId: string,
+  interval: 'monthly' | 'annual',
+  tier: 'PRO' | 'PREMIUM',
+  options: { skipOrgCheck?: boolean } = {},
+): Promise<string> {
+  const tierCode = tier === 'PREMIUM' ? 'PLAN_PREMIUM' : 'PLAN_PRO'
+  logger.info('Creating plan checkout session', { venueId, interval, tier })
+
+  // Get venue with Stripe customer ID
+  const venue = await prisma.venue.findFirst({
+    where: {
+      id: venueId,
+      ...(options.skipOrgCheck ? {} : { organizationId: orgId }),
+    },
+    select: {
+      id: true,
+      name: true,
+      slug: true,
+      stripeCustomerId: true,
+      organizationId: true,
+    },
+  })
+
+  if (!venue) {
+    throw new NotFoundError(`Venue with ID ${venueId} not found`)
+  }
+
+  // Guard: don't create a duplicate base subscription if the venue already has ANY
+  // active base plan (PLAN_PRO or PLAN_PREMIUM). A fresh checkout would stack a second
+  // base subscription on the customer. Tier upgrades/downgrades with proration are a
+  // separate future flow — for now, changing plans goes through support.
+  // A venue with NO active base plan may checkout either tier.
+  const currentTier = await getVenueBaseTier(venueId)
+  if (currentTier !== null) {
+    throw new BadRequestError('Este venue ya tiene un plan activo. Para cambiar de plan, contacta a soporte.')
+  }
+
+  // If venue doesn't have Stripe customer, create one (same flow as billing-portal).
+  let stripeCustomerId = venue.stripeCustomerId
+  if (!stripeCustomerId) {
+    logger.info('🆕 Venue has no Stripe customer - creating one now', {
+      venueId,
+      venueName: venue.name,
+      orgId: venue.organizationId,
+    })
+
+    // Get organization details
+    const organization = await prisma.organization.findUnique({
+      where: { id: venue.organizationId },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+      },
+    })
+
+    if (!organization) {
+      throw new NotFoundError('Organization not found')
+    }
+
+    // Find an OWNER of this organization (via any venue in the org)
+    const ownerStaffVenue = await prisma.staffVenue.findFirst({
+      where: {
+        role: 'OWNER',
+        venue: {
+          organizationId: organization.id,
+        },
+      },
+      select: {
+        staff: {
+          select: {
+            email: true,
+            firstName: true,
+            lastName: true,
+          },
+        },
+      },
+    })
+
+    const ownerEmail = ownerStaffVenue?.staff.email || organization.email
+    const ownerName = ownerStaffVenue ? `${ownerStaffVenue.staff.firstName} ${ownerStaffVenue.staff.lastName}` : organization.name
+
+    // Create Stripe customer for this venue
+    stripeCustomerId = await getOrCreateStripeCustomer(venueId, ownerEmail, ownerName, venue.name, venue.slug)
+
+    // Update venue with new customer ID
+    await prisma.venue.update({
+      where: { id: venueId },
+      data: { stripeCustomerId },
+    })
+
+    logger.info('✅ Stripe customer created and linked to venue', {
+      venueId,
+      stripeCustomerId,
+    })
+  }
+
+  // Build success/cancel return URLs pointing at the dashboard billing subscriptions page.
+  const FRONTEND_URL = process.env.FRONTEND_URL || 'https://dashboard.avoqado.io'
+  const billingBase = `${FRONTEND_URL}/venues/${venue.slug}/settings/billing/subscriptions`
+
+  const checkoutUrl = await createPlanCheckoutSession({
+    venueId,
+    customerId: stripeCustomerId,
+    interval,
+    tierCode,
+    successUrl: `${billingBase}?checkout=success`,
+    cancelUrl: `${billingBase}?checkout=cancel`,
+    venueName: venue.name,
+    venueSlug: venue.slug,
+  })
+
+  logger.info('✅ Plan checkout session created', {
+    venueId,
+    venueName: venue.name,
+    interval,
+    tierCode,
+  })
+
+  return checkoutUrl
 }
 
 /**

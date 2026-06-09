@@ -130,6 +130,21 @@ export interface PlanWinbackEmailData {
   reactivateUrl: string
 }
 
+export interface PlanCancellationEmailData {
+  locale: 'es' | 'en'
+  venueName: string
+  /** When the plan actually ends (end of the paid period the venue already paid for). */
+  accessUntil: Date
+  /** Win-back: deadline to redeem the offer (e.g. now + 7 days). */
+  redeemBy: Date
+  /** Win-back: promo code to redeem (when a Stripe promotion code was minted); falls back to a generic message. */
+  winbackCode?: string
+  /** Win-back: discount percent surfaced in the copy (e.g. 30). */
+  winbackPercentOff: number
+  /** CTA → reactivate/billing page (carries ?winback=1). */
+  reactivateUrl: string
+}
+
 interface EmailVerificationData {
   firstName: string
   verificationCode: string
@@ -4340,6 +4355,89 @@ Avoqado Team`
 Te extrañamos. Reactiva Avoqado Pro y tu primer mes es gratis. Tus datos siguen intactos y el acceso se reactiva al instante.
 
 Reactivar con 1 mes gratis: ${data.reactivateUrl}
+
+Equipo de Avoqado`
+    }
+
+    const html = this.buildPlanEmailHtml({
+      locale: data.locale,
+      title: subject,
+      venueName: data.venueName,
+      bodyHtml,
+      ctaLabel,
+      ctaUrl: data.reactivateUrl,
+    })
+
+    return this.sendEmail({ to: email, subject, html, text })
+  }
+
+  /**
+   * Plan cancellation confirmation email. Sent right after a merchant schedules cancellation
+   * (cancel_at_period_end). Confirms when access ends AND carries a time-limited win-back
+   * offer (a % discount that must be redeemed before `redeemBy`) to nudge a reconsider.
+   * Mirrors the other plan emails' structure (buildPlanEmailHtml shell, es/en).
+   */
+  async sendPlanCancellationEmail(email: string, data: PlanCancellationEmailData): Promise<boolean> {
+    const dateOpts = { year: 'numeric', month: 'long', day: 'numeric' } as const
+    const accessUntilFormatted = data.accessUntil.toLocaleDateString(data.locale === 'en' ? 'en-US' : 'es-MX', dateOpts)
+    const redeemByFormatted = data.redeemBy.toLocaleDateString(data.locale === 'en' ? 'en-US' : 'es-MX', dateOpts)
+    const pct = `${data.winbackPercentOff}%`
+
+    const subject = data.locale === 'en' ? 'Your Avoqado plan cancellation is scheduled' : 'Programamos la cancelación de tu plan Avoqado'
+    const ctaLabel = data.locale === 'en' ? `Reconsider — ${pct} off` : `Reconsiderar — ${pct} de descuento`
+
+    // Win-back line: prefer the concrete promo code, else a generic "use this offer" message.
+    const codeLineEn = data.winbackCode
+      ? `Use code <strong>${data.winbackCode}</strong> for <strong>${pct} off</strong> when you come back — but hurry, it expires <strong>${redeemByFormatted}</strong>.`
+      : `Come back before <strong>${redeemByFormatted}</strong> and get <strong>${pct} off</strong>.`
+    const codeLineEs = data.winbackCode
+      ? `Usa el código <strong>${data.winbackCode}</strong> y obtén <strong>${pct} de descuento</strong> al regresar — pero apúrate, vence el <strong>${redeemByFormatted}</strong>.`
+      : `Regresa antes del <strong>${redeemByFormatted}</strong> y obtén <strong>${pct} de descuento</strong>.`
+
+    let bodyHtml: string
+    let text: string
+    if (data.locale === 'en') {
+      bodyHtml = `
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Hi,</p>
+      <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
+        We've scheduled the cancellation of your Avoqado plan for ${data.venueName}. You'll keep full access until <strong>${accessUntilFormatted}</strong> — nothing changes before then.
+      </p>
+      <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin: 24px 0;">
+        <p style="font-size: 14px; margin: 0; color: #666;">Changed your mind? ${codeLineEn}</p>
+      </div>`
+      text = `Hi,
+
+We've scheduled the cancellation of your Avoqado plan for ${data.venueName}. You'll keep full access until ${accessUntilFormatted} — nothing changes before then.
+
+Changed your mind? ${
+        data.winbackCode
+          ? `Use code ${data.winbackCode} for ${pct} off when you come back — it expires ${redeemByFormatted}.`
+          : `Come back before ${redeemByFormatted} and get ${pct} off.`
+      }
+
+Reconsider — ${pct} off: ${data.reactivateUrl}
+
+Avoqado Team`
+    } else {
+      bodyHtml = `
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Hola,</p>
+      <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
+        Programamos la cancelación de tu plan Avoqado para ${data.venueName}. Conservarás el acceso completo hasta el <strong>${accessUntilFormatted}</strong> — nada cambia antes de esa fecha.
+      </p>
+      <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin: 24px 0;">
+        <p style="font-size: 14px; margin: 0; color: #666;">¿Cambiaste de opinión? ${codeLineEs}</p>
+      </div>`
+      text = `Hola,
+
+Programamos la cancelación de tu plan Avoqado para ${data.venueName}. Conservarás el acceso completo hasta el ${accessUntilFormatted} — nada cambia antes de esa fecha.
+
+¿Cambiaste de opinión? ${
+        data.winbackCode
+          ? `Usa el código ${data.winbackCode} y obtén ${pct} de descuento al regresar — vence el ${redeemByFormatted}.`
+          : `Regresa antes del ${redeemByFormatted} y obtén ${pct} de descuento.`
+      }
+
+Reconsiderar — ${pct} de descuento: ${data.reactivateUrl}
 
 Equipo de Avoqado`
     }

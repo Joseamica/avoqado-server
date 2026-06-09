@@ -205,3 +205,30 @@ export const planParamsSchema = z.object({
 })
 
 export type PlanParamsDto = z.infer<typeof planParamsSchema.shape.params>
+
+// Schema for creating a Stripe Checkout session for a base plan (Pro o Premium).
+export const createPlanCheckoutSessionSchema = z.object({
+  params: z.object({
+    venueId: z.string({ required_error: 'El ID del venue es requerido' }).min(1, { message: 'El ID del venue es requerido' }),
+  }),
+  body: z.object({
+    interval: z
+      .enum(['monthly', 'annual'], { errorMap: () => ({ message: "El intervalo debe ser 'monthly' o 'annual'" }) })
+      .default('monthly'),
+    tier: z.enum(['PRO', 'PREMIUM'], { errorMap: () => ({ message: "El plan debe ser 'PRO' o 'PREMIUM'" }) }).default('PRO'),
+  }),
+})
+
+export type CreatePlanCheckoutSessionDto = z.infer<typeof createPlanCheckoutSessionSchema.shape.body>
+
+// Schema for applying a cancellation-retention offer (POST /venues/:venueId/plan/retention-offer).
+export const applyRetentionOfferSchema = z.object({
+  params: z.object({
+    venueId: z.string({ required_error: 'El ID del venue es requerido' }).min(1, { message: 'El ID del venue es requerido' }),
+  }),
+  body: z.object({
+    offer: z.enum(['discount', 'pause'], { errorMap: () => ({ message: "La oferta debe ser 'discount' o 'pause'" }) }).default('discount'),
+  }),
+})
+
+export type ApplyRetentionOfferDto = z.infer<typeof applyRetentionOfferSchema.shape.body>

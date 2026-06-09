@@ -12,7 +12,8 @@ import emailService from './email.service'
 import { resolvePlanNotificationTarget } from './access/planNotification.service'
 import { createNotification } from './dashboard/notification.dashboard.service'
 import { NotificationType, NotificationChannel, NotificationPriority, StaffRole } from '@prisma/client'
-import { handlePaymentFailure, generateBillingPortalUrl } from './stripe.service'
+import { handlePaymentFailure, generateBillingPortalUrl, fulfillPlanCheckout } from './stripe.service'
+import { PAID_PLAN_TIER_CODES } from './access/basePlan.service'
 import socketManager from '../communication/sockets'
 import { tokenBudgetService } from './dashboard/token-budget.service'
 import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
@@ -1179,6 +1180,38 @@ export async function handleStripeWebhookEvent(event: Stripe.Event) {
         if (session.metadata?.terminalOrderId) {
           const { handleTerminalOrderCheckoutCompleted } = await import('./stripe-webhooks/terminalOrderCheckoutCompleted.handler')
           await handleTerminalOrderCheckoutCompleted(session)
+        }
+        // Base-plan self-serve checkout (createPlanCheckoutSession), PLAN_PRO or PLAN_PREMIUM.
+        // Stripe creates the subscription, but nothing creates the local VenueFeature tier row —
+        // fulfill it here.
+        if (
+          session.metadata?.tierCode &&
+          (PAID_PLAN_TIER_CODES as readonly string[]).includes(session.metadata.tierCode) &&
+          session.metadata.venueId
+        ) {
+          logger.info('📥 Webhook: base-plan checkout completed', {
+            sessionId: session.id,
+            venueId: session.metadata.venueId,
+            tierCode: session.metadata.tierCode,
+            interval: session.metadata.interval,
+          })
+          const result = await fulfillPlanCheckout(session)
+
+          // 🔔 Emit socket event for real-time UI update (mirrors handleSubscriptionUpdated)
+          if (result && socketManager.getServer()) {
+            socketManager.broadcastToVenue(result.venueId, 'subscription.activated' as any, {
+              featureId: result.featureId,
+              featureCode: result.featureCode,
+              subscriptionId: result.subscriptionId,
+              status: 'active',
+              endDate: result.endDate,
+              timestamp: new Date(),
+            })
+            logger.info('📡 Socket event emitted: subscription.activated', {
+              venueId: result.venueId,
+              featureCode: result.featureCode,
+            })
+          }
         }
         break
       }

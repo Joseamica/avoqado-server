@@ -39,6 +39,29 @@ export function summarizeSubscriptions(rows: SuperadminVenueSubscription[]): Sub
   return { counts, mrrTotal: Math.round(mrrTotal * 100) / 100, currency: 'MXN' }
 }
 
+// CAPABILITY NOTE (MCP sync): the backend exposes a self-serve base-plan checkout
+// endpoint — POST /api/v1/dashboard/venues/:venueId/plan/checkout (controller
+// venueDashboardService.createVenuePlanCheckoutSession). It accepts { interval,
+// tier } where tier is 'PRO' | 'PREMIUM' (PLAN_PRO / PLAN_PREMIUM), creates a Stripe
+// Checkout Session in mode 'subscription' for that tier, and returns { success, url }
+// for the browser to redirect to. It is intentionally NOT exposed as an MCP tool yet:
+// every tool here is read-only, whereas this is a payment/write action that mints a
+// live Stripe redirect URL. Exposing it to agents needs a deliberate decision
+// (confirmation UX, idempotency, scope, tier selection). TODO: add a
+// `start_plan_checkout` action tool once the MCP gains a vetted action/write surface.
+// Read state via `subscription_status` below in the meantime.
+//
+// CAPABILITY NOTE (MCP sync): the backend also exposes a cancellation-retention action —
+// POST /api/v1/dashboard/venues/:venueId/plan/retention-offer (controller
+// venueDashboardService → planStateService.applyRetentionOffer). It accepts
+// { offer: 'discount' | 'pause' } and either applies the RETENTION_30_3M coupon (30% off,
+// 3 months) to the live base-plan subscription or pauses collection for ~2 months. Like
+// plan/checkout it is intentionally NOT exposed as an MCP tool yet: it is a billing WRITE
+// that mutates a live Stripe subscription's price/collection and is gated by an anti-abuse
+// once-per-discount-window check — exposing it to agents needs a vetted action/write surface
+// (confirmation UX, idempotency, scope). TODO: add an `apply_retention_offer` action tool
+// alongside `start_plan_checkout` once that surface lands. Read state via
+// `subscription_status` below in the meantime.
 export function registerSubscriptionTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
 

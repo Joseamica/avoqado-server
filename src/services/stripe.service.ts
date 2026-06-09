@@ -661,6 +661,201 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
   return subscription.id
 }
 
+/** Base-plan tier code accepted by the plan checkout/subscription flows. */
+export type PlanTierCode = 'PLAN_PRO' | 'PLAN_PREMIUM'
+
+/**
+ * Resolve the Stripe price lookup_key for a base-plan tier + interval, e.g.
+ * (PLAN_PRO, 'annual') → 'plan_pro_annual', (PLAN_PREMIUM, 'monthly') → 'plan_premium_monthly'.
+ * Single source of truth so checkout (and any future flow) stay in lockstep.
+ */
+function planLookupKey(tierCode: PlanTierCode, interval: 'monthly' | 'annual'): string {
+  const prefix = tierCode === 'PLAN_PREMIUM' ? 'plan_premium' : 'plan_pro'
+  const suffix = interval === 'annual' ? 'annual' : 'monthly'
+  return `${prefix}_${suffix}`
+}
+
+/** Human-friendly plan label for Stripe subscription descriptions. */
+function planLabel(tierCode: PlanTierCode): string {
+  return tierCode === 'PLAN_PREMIUM' ? 'Premium' : 'Pro'
+}
+
+export interface CreatePlanCheckoutSessionInput {
+  venueId: string
+  customerId: string
+  interval: 'monthly' | 'annual'
+  successUrl: string
+  cancelUrl: string
+  /** Base-plan tier to subscribe to. Defaults to PLAN_PRO for back-compat. */
+  tierCode?: PlanTierCode
+  venueName?: string
+  venueSlug?: string
+}
+
+/**
+ * Creates a Stripe Checkout Session (mode: 'subscription') for the venue's
+ * base plan (PLAN_PRO or PLAN_PREMIUM) so the merchant can self-serve subscribe
+ * via Stripe's hosted checkout. Resolves the price the same way createPlanSubscription
+ * does, via lookup_key (plan_pro_* / plan_premium_*, monthly|annual). IVA is baked into
+ * the price (tax_behavior 'inclusive'), so Stripe Tax is intentionally NOT enabled.
+ * Returns the hosted-checkout URL the frontend redirects the browser to.
+ */
+export async function createPlanCheckoutSession(input: CreatePlanCheckoutSessionInput): Promise<string> {
+  const tierCode: PlanTierCode = input.tierCode ?? 'PLAN_PRO'
+
+  const feature = await prisma.feature.findFirst({ where: { code: tierCode, active: true } })
+  if (!feature) throw new Error(`Feature ${tierCode} not found or inactive`)
+
+  const lookupKey = planLookupKey(tierCode, input.interval)
+  const prices = await stripe.prices.list({ lookup_keys: [lookupKey], limit: 1 })
+  const price = prices.data[0]
+  if (!price) throw new Error(`Stripe price not found for lookup_key ${lookupKey} — run scripts/seed-plan-pro.ts`)
+
+  const description = input.venueName ? `Plan Avoqado ${planLabel(tierCode)} - ${input.venueName}` : `Plan Avoqado ${planLabel(tierCode)}`
+
+  const session = await retry(
+    () =>
+      stripe.checkout.sessions.create({
+        mode: 'subscription',
+        customer: input.customerId,
+        line_items: [{ price: price.id, quantity: 1 }],
+        allow_promotion_codes: true,
+        subscription_data: {
+          description,
+          metadata: {
+            venueId: input.venueId,
+            tierCode,
+            featureId: feature.id,
+            featureCode: feature.code,
+            interval: input.interval,
+            ...(input.venueName ? { venueName: input.venueName } : {}),
+            ...(input.venueSlug ? { venueSlug: input.venueSlug } : {}),
+          },
+        },
+        metadata: {
+          venueId: input.venueId,
+          tierCode,
+          interval: input.interval,
+        },
+        success_url: input.successUrl,
+        cancel_url: input.cancelUrl,
+      }),
+    { retries: 3, shouldRetry: shouldRetryStripeError, context: 'stripe.createPlanCheckoutSession' },
+  )
+
+  if (!session.url) throw new Error('Stripe Checkout Session created without a URL')
+
+  logger.info(`✅ createPlanCheckoutSession: ${session.id} (${tierCode}, ${input.interval}) for venue ${input.venueId}`)
+  return session.url
+}
+
+export interface FulfillPlanCheckoutResult {
+  venueId: string
+  featureId: string
+  featureCode: string
+  subscriptionId: string
+  endDate: Date | null
+}
+
+/**
+ * Fulfills a completed base-plan Stripe Checkout Session (mode: 'subscription'),
+ * for either tier (PLAN_PRO or PLAN_PREMIUM).
+ *
+ * The plan checkout (createPlanCheckoutSession) hands Stripe the subscription to create,
+ * but nothing creates the local VenueFeature tier row — `handleSubscriptionUpdated`
+ * keys off an EXISTING VenueFeature by stripeSubscriptionId and returns early when none
+ * exists. This bridges that gap: on `checkout.session.completed` we look up the subscription
+ * that Stripe just created and upsert the VenueFeature for the tier carried in the session
+ * metadata, mirroring the exact upsert shape of `createPlanSubscription` so both code paths
+ * converge on the same row.
+ *
+ * Idempotent: uses `prisma.venueFeature.upsert` on the (venueId, featureId) unique key, so a
+ * re-delivered webhook (Stripe retries) is a no-op update, never a duplicate.
+ *
+ * Returns the resulting row identifiers so the webhook layer can broadcast `subscription.activated`,
+ * or `null` when it can't be fulfilled (e.g. missing subscription id) — caller logs + skips.
+ */
+export async function fulfillPlanCheckout(session: Stripe.Checkout.Session): Promise<FulfillPlanCheckoutResult | null> {
+  const venueId = session.metadata?.venueId
+  if (!venueId) {
+    logger.warn('⚠️ fulfillPlanCheckout: session has no metadata.venueId — skipping', { sessionId: session.id })
+    return null
+  }
+
+  // Resolve the tier from the session metadata (set by createPlanCheckoutSession). Default to
+  // PLAN_PRO for back-compat with any in-flight session created before tier was threaded through.
+  const tierCode: PlanTierCode = session.metadata?.tierCode === 'PLAN_PREMIUM' ? 'PLAN_PREMIUM' : 'PLAN_PRO'
+
+  // On a completed subscription-mode session, `subscription` is the created subscription id (string).
+  let subscriptionId = typeof session.subscription === 'string' ? session.subscription : (session.subscription?.id ?? null)
+  if (!subscriptionId) {
+    // Defensive: re-fetch the session expanding the subscription in case it wasn't inlined.
+    const full = await retry(() => stripe.checkout.sessions.retrieve(session.id, { expand: ['subscription'] }), {
+      retries: 3,
+      shouldRetry: shouldRetryStripeError,
+      context: 'stripe.fulfillPlanCheckout.retrieveSession',
+    })
+    subscriptionId = typeof full.subscription === 'string' ? full.subscription : (full.subscription?.id ?? null)
+  }
+  if (!subscriptionId) {
+    logger.warn('⚠️ fulfillPlanCheckout: completed session has no subscription id — skipping', {
+      sessionId: session.id,
+      venueId,
+    })
+    return null
+  }
+
+  const feature = await prisma.feature.findFirst({ where: { code: tierCode, active: true } })
+  if (!feature) throw new Error(`Feature ${tierCode} not found or inactive`)
+
+  // Pull the real price + trial state from the subscription Stripe created so monthlyPrice/
+  // stripePriceId/endDate reflect what the customer actually subscribed to.
+  const subscription = await retry(() => stripe.subscriptions.retrieve(subscriptionId as string), {
+    retries: 3,
+    shouldRetry: shouldRetryStripeError,
+    context: 'stripe.fulfillPlanCheckout.retrieveSubscription',
+  })
+  const stripePriceId = subscription.items?.data?.[0]?.price?.id ?? null
+  // trial_end is unix-seconds while the subscription is trialing; mirrors createPlanSubscription's
+  // endDate/trialEndDate semantics (not-null = trial window, null = paid subscription).
+  const trialEnd = subscription.status === 'trialing' && subscription.trial_end ? new Date(subscription.trial_end * 1000) : null
+
+  // Idempotent upsert on the (venueId, featureId) unique key — mirrors createPlanSubscription exactly.
+  await prisma.venueFeature.upsert({
+    where: { venueId_featureId: { venueId, featureId: feature.id } },
+    update: {
+      active: true,
+      stripeSubscriptionId: subscription.id,
+      stripePriceId,
+      monthlyPrice: feature.monthlyPrice,
+      endDate: trialEnd,
+      trialEndDate: trialEnd,
+      suspendedAt: null,
+      paymentFailureCount: 0,
+    },
+    create: {
+      venueId,
+      featureId: feature.id,
+      active: true,
+      monthlyPrice: feature.monthlyPrice,
+      stripeSubscriptionId: subscription.id,
+      stripePriceId,
+      endDate: trialEnd,
+      trialEndDate: trialEnd,
+    },
+  })
+
+  logger.info(`✅ fulfillPlanCheckout: ${tierCode} activated for venue ${venueId} (sub ${subscription.id}, trial=${!!trialEnd})`)
+
+  return {
+    venueId,
+    featureId: feature.id,
+    featureCode: feature.code,
+    subscriptionId: subscription.id,
+    endDate: trialEnd,
+  }
+}
+
 /**
  * Convert trial to paid subscription
  * Called when trial period ends successfully
@@ -729,6 +924,122 @@ export async function setSubscriptionCancelAtPeriodEnd(subscriptionId: string, c
   })
   logger.info(`✅ Set cancel_at_period_end=${cancel} on subscription ${subscriptionId}`)
   return updated
+}
+
+/**
+ * Whether a Stripe subscription currently carries an active discount (coupon/promotion
+ * code). Used as the anti-abuse gate for the retention offer: a venue that already has a
+ * discount on its base-plan subscription cannot stack another retention offer. Reads the
+ * single-discount `discount` field AND the newer `discounts` array (Stripe SDK v19 exposes
+ * both depending on how the discount was applied), so either representation counts.
+ *
+ * Tolerant: a Stripe read failure throws (caller decides), but a subscription with no
+ * discount returns false.
+ *
+ * @param subscriptionId - Stripe subscription ID
+ */
+export async function subscriptionHasActiveDiscount(subscriptionId: string): Promise<boolean> {
+  const sub = await retry(() => stripe.subscriptions.retrieve(subscriptionId), {
+    retries: 3,
+    shouldRetry: shouldRetryStripeError,
+    context: 'stripe.subscriptionHasActiveDiscount',
+  })
+  // SDK v19 may surface a single `discount` object and/or a `discounts` array.
+  const single = (sub as any).discount
+  const list = (sub as any).discounts as unknown[] | undefined
+  return Boolean(single) || (Array.isArray(list) && list.length > 0)
+}
+
+/**
+ * Apply a coupon to an existing subscription (the retention "stay" offer). Uses the
+ * `discounts` API the codebase already uses for createPlanSubscription's intro coupon, so
+ * the discount applies on top of the IVA-inclusive price. Does NOT touch the VenueFeature
+ * row — the venue keeps the same plan, just at a reduced price for the coupon's duration.
+ *
+ * Callers MUST gate with {@link subscriptionHasActiveDiscount} first (anti-abuse): Stripe
+ * would otherwise silently replace any existing discount.
+ *
+ * @param subscriptionId - Stripe subscription ID
+ * @param coupon - Stripe coupon id (e.g. 'RETENTION_30_3M')
+ * @returns the updated Stripe subscription
+ */
+export async function applySubscriptionCoupon(subscriptionId: string, coupon: string): Promise<Stripe.Subscription> {
+  const updated = await retry(() => stripe.subscriptions.update(subscriptionId, { discounts: [{ coupon }] }), {
+    retries: 3,
+    shouldRetry: shouldRetryStripeError,
+    context: 'stripe.applySubscriptionCoupon',
+  })
+  logger.info(`✅ Applied coupon ${coupon} to subscription ${subscriptionId}`)
+  return updated
+}
+
+/**
+ * Pause collection on a subscription (the retention "pause" offer): Stripe stops generating
+ * payable invoices while the subscription stays alive, so the venue keeps its data/config.
+ * Uses behavior 'mark_uncollectible' (invoices are still created but immediately marked
+ * uncollectible — no charge, no dunning). `resumesAt` is a unix-seconds resume timestamp;
+ * Stripe auto-resumes collection then. Does NOT touch the VenueFeature row.
+ *
+ * @param subscriptionId - Stripe subscription ID
+ * @param resumesAt - Date when collection auto-resumes
+ * @returns the updated Stripe subscription
+ */
+export async function pauseSubscriptionCollection(subscriptionId: string, resumesAt: Date): Promise<Stripe.Subscription> {
+  const updated = await retry(
+    () =>
+      stripe.subscriptions.update(subscriptionId, {
+        pause_collection: { behavior: 'mark_uncollectible', resumes_at: Math.floor(resumesAt.getTime() / 1000) },
+      }),
+    {
+      retries: 3,
+      shouldRetry: shouldRetryStripeError,
+      context: 'stripe.pauseSubscriptionCollection',
+    },
+  )
+  logger.info(`✅ Paused collection on subscription ${subscriptionId} until ${resumesAt.toISOString()}`)
+  return updated
+}
+
+/**
+ * Create a single-use Stripe promotion code for a coupon with a redemption deadline. Used by
+ * the cancellation confirmation email's win-back CTA: the merchant gets a human-redeemable
+ * code (not a raw coupon id) that EXPIRES, creating urgency. `expiresAt` maps to Stripe's
+ * `expires_at` (unix seconds). Returns the generated code string (e.g. 'REGRESA-AB12CD') and
+ * the promotion-code id.
+ *
+ * Tolerant by contract for the email flow: callers wrap in try/catch and fall back to a
+ * deadline-only message if code creation fails (the coupon itself still works in Checkout's
+ * promo field).
+ *
+ * @param coupon - Stripe coupon id (e.g. 'WINBACK_30_1M')
+ * @param expiresAt - Date the promotion code stops being redeemable
+ * @param codePrefix - Optional human-readable prefix for the generated code
+ */
+export async function createWinbackPromotionCode(
+  coupon: string,
+  expiresAt: Date,
+  codePrefix = 'REGRESA',
+): Promise<{ code: string; promotionCodeId: string }> {
+  // Stripe promotion-code `code` must be unique per account; suffix with a short random token.
+  const suffix = Math.random().toString(36).slice(2, 8).toUpperCase()
+  const code = `${codePrefix}-${suffix}`
+  const promo = await retry(
+    () =>
+      stripe.promotionCodes.create({
+        // SDK v19: the coupon is nested under `promotion` (type 'coupon'), not a top-level field.
+        promotion: { type: 'coupon', coupon },
+        code,
+        max_redemptions: 1,
+        expires_at: Math.floor(expiresAt.getTime() / 1000),
+      }),
+    {
+      retries: 3,
+      shouldRetry: shouldRetryStripeError,
+      context: 'stripe.createWinbackPromotionCode',
+    },
+  )
+  logger.info(`✅ Created win-back promotion code ${promo.code} (coupon ${coupon}, expires ${expiresAt.toISOString()})`)
+  return { code: promo.code ?? code, promotionCodeId: promo.id }
 }
 
 /**
@@ -1479,4 +1790,10 @@ export default {
   detachPaymentMethod,
   setDefaultPaymentMethod,
   handlePaymentFailure,
+  setSubscriptionCancelAtPeriodEnd,
+  retrievePlanSubscription,
+  subscriptionHasActiveDiscount,
+  applySubscriptionCoupon,
+  pauseSubscriptionCollection,
+  createWinbackPromotionCode,
 }

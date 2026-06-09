@@ -11,8 +11,81 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { derivePlanState, PAID_PLAN_TIER_CODES, IVA_RATE, type PlanStateValue } from '@/services/access/basePlan.service'
-import { retrievePlanSubscription, setSubscriptionCancelAtPeriodEnd } from '../stripe.service'
+import { getVenueBaseTier } from '@/services/access/basePlan.service'
+import {
+  retrievePlanSubscription,
+  setSubscriptionCancelAtPeriodEnd,
+  subscriptionHasActiveDiscount,
+  applySubscriptionCoupon,
+  pauseSubscriptionCollection,
+  createWinbackPromotionCode,
+} from '../stripe.service'
 import { logAction } from './activity-log.service'
+import emailService from '../email.service'
+import { resolvePlanNotificationTarget } from '@/services/access/planNotification.service'
+
+/** Win-back coupon offered in the cancellation confirmation email (see scripts/seed-retention-coupon.ts). */
+const CANCELLATION_WINBACK_COUPON = 'WINBACK_30_1M'
+const CANCELLATION_WINBACK_PERCENT_OFF = 30
+/** Days the cancellation-email win-back offer stays redeemable. */
+const CANCELLATION_WINBACK_VALID_DAYS = 7
+
+/**
+ * Best-effort cancellation confirmation email with a time-limited win-back offer.
+ * NEVER throws — a failure here must not block the cancellation (wrapped in try/catch,
+ * matching the other plan-email sends). Mints a single-use Stripe promotion code for the
+ * WINBACK_30_1M coupon with `expires_at = redeemBy`; if code creation fails, the email still
+ * goes out with a deadline-only message.
+ *
+ * @param accessUntil - end of the already-paid period (currentPeriodEnd) the venue keeps access to
+ */
+async function sendCancellationEmail(venueId: string, subscriptionId: string, accessUntil: Date | null): Promise<void> {
+  try {
+    const target = await resolvePlanNotificationTarget(venueId)
+    if (!target.email) {
+      logger.warn(`cancellation-email: no recipient for venue ${venueId}; skipping`)
+      return
+    }
+
+    const now = new Date()
+    const redeemBy = new Date(now.getTime() + CANCELLATION_WINBACK_VALID_DAYS * 86400000)
+
+    // Mint a single-use promo code with an expiry; tolerate failure (fall back to deadline-only copy).
+    let winbackCode: string | undefined
+    try {
+      const { code } = await createWinbackPromotionCode(CANCELLATION_WINBACK_COUPON, redeemBy)
+      winbackCode = code
+    } catch (codeErr) {
+      logger.warn('cancellation-email: failed to mint win-back promotion code; sending deadline-only offer', {
+        venueId,
+        subscriptionId,
+        error: codeErr instanceof Error ? codeErr.message : 'Unknown error',
+      })
+    }
+
+    const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { slug: true } })
+    const FRONTEND_URL = process.env.FRONTEND_URL || 'https://dashboard.avoqado.io'
+    const slugOrId = venue?.slug ?? venueId
+    const reactivateUrl = `${FRONTEND_URL}/dashboard/venues/${slugOrId}/billing?winback=1`
+
+    await emailService.sendPlanCancellationEmail(target.email, {
+      locale: target.locale,
+      venueName: target.venueName,
+      accessUntil: accessUntil ?? redeemBy, // fall back to redeemBy if Stripe period end is unknown
+      redeemBy,
+      winbackCode,
+      winbackPercentOff: CANCELLATION_WINBACK_PERCENT_OFF,
+      reactivateUrl,
+    })
+  } catch (emailErr) {
+    // Non-blocking: cancellation already succeeded; just log.
+    logger.error('cancellation-email: failed to send', {
+      venueId,
+      subscriptionId,
+      error: emailErr instanceof Error ? emailErr.message : 'Unknown error',
+    })
+  }
+}
 
 export interface PlanState {
   hasPlan: boolean
@@ -138,6 +211,23 @@ async function setCancelIntent(venueId: string, cancel: boolean): Promise<PlanSt
     throw new BadRequestError('No hay suscripción de Stripe que cancelar. Contacta a soporte.')
   }
 
+  // Read the prior Stripe state BEFORE flipping so the cancellation email only fires on a
+  // genuine transition (not a re-cancel of an already-canceling sub). Tolerant: if Stripe is
+  // unreachable we proceed and treat it as "was not canceling" so the flow never blocks.
+  let wasCanceling = false
+  let currentPeriodEnd: Date | null = null
+  try {
+    const prior = await retrievePlanSubscription(vf.stripeSubscriptionId)
+    wasCanceling = prior.cancelAtPeriodEnd
+    currentPeriodEnd = prior.currentPeriodEnd
+  } catch (error) {
+    logger.warn('setCancelIntent: failed to read prior Stripe state; proceeding', {
+      venueId,
+      subscriptionId: vf.stripeSubscriptionId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+  }
+
   await setSubscriptionCancelAtPeriodEnd(vf.stripeSubscriptionId, cancel)
 
   logAction({
@@ -147,6 +237,13 @@ async function setCancelIntent(venueId: string, cancel: boolean): Promise<PlanSt
     entityId: vf.id,
     data: { subscriptionId: vf.stripeSubscriptionId, cancelAtPeriodEnd: cancel },
   })
+
+  // Cancellation confirmation + win-back email — ONLY on a fresh cancel transition
+  // (idempotent: a re-cancel where the sub was already canceling does not re-send).
+  // Non-blocking by contract (sendCancellationEmail never throws).
+  if (cancel && !wasCanceling) {
+    await sendCancellationEmail(venueId, vf.stripeSubscriptionId, currentPeriodEnd)
+  }
 
   return getPlanState(venueId)
 }
@@ -161,4 +258,76 @@ export async function reactivatePlan(venueId: string): Promise<PlanState> {
   return setCancelIntent(venueId, false)
 }
 
-export default { getPlanState, cancelPlan, reactivatePlan }
+/** Stripe coupon applied when a merchant accepts the "stay" retention offer (see scripts/seed-retention-coupon.ts). */
+export const RETENTION_DISCOUNT_COUPON = 'RETENTION_30_3M'
+
+/** Months the "pause" retention offer keeps collection paused before Stripe auto-resumes. */
+const RETENTION_PAUSE_MONTHS = 2
+
+export type RetentionOffer = 'discount' | 'pause'
+
+/**
+ * Apply a cancellation-retention offer to the venue's base-plan Stripe subscription.
+ *
+ *   - 'discount' → apply the RETENTION_30_3M coupon (30% off, 3 months) to the live
+ *     subscription so the merchant stays at a reduced price. Mirrors the intro-coupon
+ *     `discounts` API used by createPlanSubscription.
+ *   - 'pause'    → pause collection for ~2 months (mark_uncollectible, auto-resumes) so the
+ *     merchant keeps their data/config without being charged.
+ *
+ * Requires an active base plan (getVenueBaseTier !== null) and a Stripe subscription.
+ *
+ * Anti-abuse (chosen approach: Stripe-discount check, no DB migration): the offer is allowed
+ * only once while no discount is active. Before applying, we check whether the subscription
+ * already carries a discount; if it does, we refuse with 400 "Ya tienes una oferta activa."
+ * Because RETENTION_30_3M lasts 3 months (repeating), the discount stays active for that
+ * window and naturally blocks re-application for ~3 months — satisfying the "once per ~6
+ * months" intent without a schema change. (The 'pause' branch reuses the same discount gate
+ * to avoid stacking a pause on top of an already-discounted/abused subscription.)
+ *
+ * Does NOT touch the VenueFeature row — the venue keeps the same plan/entitlement.
+ * Returns the fresh PlanState (same envelope as cancel/reactivate).
+ */
+export async function applyRetentionOffer(venueId: string, offer: RetentionOffer = 'discount'): Promise<PlanState> {
+  // Active base plan required (any paid tier).
+  const tier = await getVenueBaseTier(venueId)
+  if (tier === null) throw new BadRequestError('Este venue no tiene un plan base activo.')
+
+  const vf = await findPlanProFeature(venueId)
+  if (!vf?.stripeSubscriptionId) {
+    throw new BadRequestError('No hay suscripción de Stripe sobre la cual aplicar la oferta. Contacta a soporte.')
+  }
+  const subscriptionId = vf.stripeSubscriptionId
+
+  // Anti-abuse: refuse if the subscription already carries an active discount.
+  const hasDiscount = await subscriptionHasActiveDiscount(subscriptionId)
+  if (hasDiscount) throw new BadRequestError('Ya tienes una oferta activa.')
+
+  if (offer === 'pause') {
+    const resumesAt = new Date()
+    resumesAt.setMonth(resumesAt.getMonth() + RETENTION_PAUSE_MONTHS)
+    await pauseSubscriptionCollection(subscriptionId, resumesAt)
+
+    logAction({
+      venueId,
+      action: 'PLAN_RETENTION_PAUSE',
+      entity: 'VenueFeature',
+      entityId: vf.id,
+      data: { subscriptionId, resumesAt: resumesAt.toISOString() },
+    })
+  } else {
+    await applySubscriptionCoupon(subscriptionId, RETENTION_DISCOUNT_COUPON)
+
+    logAction({
+      venueId,
+      action: 'PLAN_RETENTION_DISCOUNT',
+      entity: 'VenueFeature',
+      entityId: vf.id,
+      data: { subscriptionId, coupon: RETENTION_DISCOUNT_COUPON },
+    })
+  }
+
+  return getPlanState(venueId)
+}
+
+export default { getPlanState, cancelPlan, reactivatePlan, applyRetentionOffer }
