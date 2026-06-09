@@ -5,6 +5,7 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
+import { createCustomer } from '@/services/dashboard/customer.dashboard.service'
 
 /** Pure: merge tag changes onto a customer's current tags — add, remove, dedupe (case-insensitive, keeps first-seen casing & order). */
 export function applyTagChanges(current: string[], add: string[] = [], remove: string[] = []): string[] {
@@ -276,6 +277,48 @@ export function registerCustomerTools(server: McpServer, scope: McpScope) {
         return text({
           ok: true,
           customer: { name: `${updated.firstName ?? ''} ${updated.lastName ?? ''}`.trim() || null, notes: updated.notes },
+        })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'create_customer',
+    'Create a NEW customer in a venue you can access. Requires at least an email OR a phone (one is enough); optionally first/last name, notes, tags, marketing consent. Fails if a customer with the same email or phone already exists in the venue. This WRITES — requires customers:create.',
+    {
+      venueId: z.string().describe('Venue to create the customer in (must be in your scope)'),
+      firstName: z.string().optional().describe('First name'),
+      lastName: z.string().optional().describe('Last name'),
+      email: z.string().optional().describe('Email (email or phone required)'),
+      phone: z.string().optional().describe('Phone (email or phone required)'),
+      notes: z.string().optional().describe('Free-text notes'),
+      tags: z.array(z.string().min(1)).optional().describe('Tags, e.g. ["VIP"]'),
+      marketingConsent: z.boolean().optional().describe('Whether the customer consented to marketing'),
+    },
+    async ({ venueId, firstName, lastName, email, phone, notes, tags, marketingConsent }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('customers:create', venueId) // write gate (per-venue role)
+      if (!email && !phone) return text({ ok: false, error: 'Pasa al menos un email o un teléfono.' })
+
+      try {
+        const customer = await createCustomer(venueId, { firstName, lastName, email, phone, notes, tags, marketingConsent })
+        await auditMcpWrite(scope, {
+          action: 'CUSTOMER_CREATED',
+          entity: 'Customer',
+          entityId: customer.id,
+          venueId,
+          data: { email: email ?? null, phone: phone ?? null, name: `${firstName ?? ''} ${lastName ?? ''}`.trim() || null },
+        })
+        return text({
+          ok: true,
+          customer: {
+            id: customer.id,
+            name: `${customer.firstName ?? ''} ${customer.lastName ?? ''}`.trim() || null,
+            email: customer.email,
+            phone: customer.phone,
+          },
         })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
