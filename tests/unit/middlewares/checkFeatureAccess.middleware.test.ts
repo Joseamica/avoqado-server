@@ -17,6 +17,7 @@ jest.mock('@/utils/prismaClient', () => ({
   default: {
     venueFeature: {
       findFirst: jest.fn(),
+      findMany: jest.fn(),
     },
   },
 }))
@@ -39,6 +40,9 @@ describe('checkFeatureAccess Middleware - Critical Tests', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
+
+    // getVenueBaseTier (tier-aware blanket grant) queries findMany; default = no active base plan.
+    ;(prisma.venueFeature.findMany as jest.Mock).mockResolvedValue([])
 
     jsonMock = jest.fn()
     statusMock = jest.fn(() => mockRes as Response)
