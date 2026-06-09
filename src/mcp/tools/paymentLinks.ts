@@ -5,6 +5,8 @@ import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
+import { auditMcpWrite } from '../audit'
+import { createPaymentLink } from '@/services/dashboard/paymentLink.service'
 
 const STATUS_MAP: Record<string, PaymentLinkStatus> = {
   active: PaymentLinkStatus.ACTIVE,
@@ -59,6 +61,59 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
           createdAt: l.createdAt.toISOString(),
         })),
       })
+    },
+  )
+
+  server.tool(
+    'create_payment_link',
+    'Create a NEW payment link (pay.avoqado.io) in a venue you can access — a shareable link to collect a payment. Set a title and either a fixed amount or leave it open (the payer chooses how much). Optionally a description, purpose (payment / donation) and an expiry. Returns the short code. This WRITES — requires payment-link:create. (Item-based links with product line items are not created here — use the dashboard.)',
+    {
+      venueId: z.string().describe('Venue to create the link in (must be in your scope)'),
+      title: z.string().min(1).describe('What the payment is for, e.g. "Anticipo boda"'),
+      amount: z.number().positive().optional().describe('Fixed amount to charge; omit for an OPEN amount the payer chooses'),
+      purpose: z.enum(['payment', 'donation']).optional().describe("'payment' (default) or 'donation'"),
+      description: z.string().optional().describe('Description shown to the payer'),
+      currency: z.string().optional().describe('Currency (default the venue currency, usually MXN)'),
+      expiresAt: z.string().optional().describe('Expiry, ISO 8601 (e.g. 2026-07-01T00:00:00.000Z)'),
+    },
+    async ({ venueId, title, amount, purpose, description, currency, expiresAt }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('payment-link:create', venueId) // write gate (per-venue role)
+      try {
+        const link = await createPaymentLink(
+          venueId,
+          {
+            title,
+            amountType: amount !== undefined ? 'FIXED' : 'OPEN',
+            purpose: purpose === 'donation' ? 'DONATION' : 'PAYMENT',
+            ...(amount !== undefined ? { amount } : {}),
+            ...(description ? { description } : {}),
+            ...(currency ? { currency } : {}),
+            ...(expiresAt ? { expiresAt } : {}),
+          },
+          scope.staffId,
+        )
+        await auditMcpWrite(scope, {
+          action: 'PAYMENT_LINK_CREATED',
+          entity: 'PaymentLink',
+          entityId: link.id,
+          venueId,
+          data: { title, amountType: amount !== undefined ? 'FIXED' : 'OPEN', amount: amount ?? null },
+        })
+        return text({
+          ok: true,
+          paymentLink: {
+            id: link.id,
+            shortCode: link.shortCode,
+            title: link.title,
+            amountType: link.amountType,
+            amount: link.amount != null ? Number(link.amount) : null,
+            status: link.status,
+          },
+        })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
     },
   )
 }
