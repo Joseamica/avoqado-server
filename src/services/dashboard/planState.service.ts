@@ -15,7 +15,6 @@ import { getVenueBaseTier } from '@/services/access/basePlan.service'
 import {
   retrievePlanSubscription,
   setSubscriptionCancelAtPeriodEnd,
-  subscriptionHasActiveDiscount,
   applySubscriptionCoupon,
   pauseSubscriptionCollection,
   createWinbackPromotionCode,
@@ -101,6 +100,27 @@ export interface PlanState {
   gracePeriodEndsAt: string | null
   paymentMethod: { brand: string; last4: string; expMonth: number; expYear: number } | null
   stripeSubscriptionId: string | null
+  /**
+   * Whether the venue qualifies for the cancellation-retention DISCOUNT offer. True only when
+   * there is an active base-plan Stripe subscription, its tenure is ≥ 30 days (past the first
+   * billing cycle — the key anti-farm rule), and no discount is already active. DB-only/comped
+   * plans (no Stripe sub) are never eligible. The frontend uses this to decide whether to show
+   * the retention offer step; the server re-enforces it in applyRetentionOffer.
+   */
+  retentionOfferEligible: boolean
+}
+
+/**
+ * Minimum subscription tenure before the retention DISCOUNT offer unlocks. THE key anti-farm
+ * rule: a brand-new subscriber can't buy → cancel → farm the discount within the first cycle.
+ */
+const RETENTION_MIN_TENURE_DAYS = 30
+const RETENTION_MIN_TENURE_MS = RETENTION_MIN_TENURE_DAYS * 24 * 60 * 60 * 1000
+
+/** True when the Stripe subscription was created ≥ RETENTION_MIN_TENURE_DAYS ago. */
+function meetsRetentionTenure(createdAt: Date | null | undefined): boolean {
+  if (!createdAt) return false
+  return Date.now() - createdAt.getTime() >= RETENTION_MIN_TENURE_MS
 }
 
 /** Round to 2 decimals (peso cents). */
@@ -154,6 +174,7 @@ export async function getPlanState(venueId: string): Promise<PlanState> {
       gracePeriodEndsAt: null,
       paymentMethod: null,
       stripeSubscriptionId: null,
+      retentionOfferEligible: false,
     }
   }
 
@@ -186,6 +207,11 @@ export async function getPlanState(venueId: string): Promise<PlanState> {
     price = { base, gross: round2(base * (1 + IVA_RATE)), currency: 'MXN' }
   }
 
+  // Retention DISCOUNT eligibility (mirrors the server-side gate in applyRetentionOffer):
+  // requires a live Stripe sub, tenure ≥ 30d, and no discount already active. Without a
+  // reachable Stripe sub (DB-only/comped plan, or Stripe degraded) → not eligible.
+  const retentionOfferEligible = Boolean(stripeSub && meetsRetentionTenure(stripeSub.createdAt) && !stripeSub.hasActiveDiscount)
+
   return {
     hasPlan,
     state,
@@ -200,6 +226,7 @@ export async function getPlanState(venueId: string): Promise<PlanState> {
     gracePeriodEndsAt: vf.gracePeriodEndsAt ? vf.gracePeriodEndsAt.toISOString() : null,
     paymentMethod: null, // payment-method summary handled by the existing /payment-methods endpoint (out of scope here)
     stripeSubscriptionId: vf.stripeSubscriptionId,
+    retentionOfferEligible,
   }
 }
 
@@ -277,13 +304,21 @@ export type RetentionOffer = 'discount' | 'pause'
  *
  * Requires an active base plan (getVenueBaseTier !== null) and a Stripe subscription.
  *
- * Anti-abuse (chosen approach: Stripe-discount check, no DB migration): the offer is allowed
- * only once while no discount is active. Before applying, we check whether the subscription
- * already carries a discount; if it does, we refuse with 400 "Ya tienes una oferta activa."
- * Because RETENTION_30_3M lasts 3 months (repeating), the discount stays active for that
- * window and naturally blocks re-application for ~3 months — satisfying the "once per ~6
- * months" intent without a schema change. (The 'pause' branch reuses the same discount gate
- * to avoid stacking a pause on top of an already-discounted/abused subscription.)
+ * Anti-abuse (chosen approach: Stripe-derived checks, no DB migration). The DISCOUNT offer is
+ * the real gate — it must satisfy ALL of:
+ *   1. an active base-plan Stripe subscription (DB-only/comped plans have nothing to discount),
+ *   2. tenure ≥ 30 days since the Stripe subscription was created — THE key anti-farm rule
+ *      that stops a brand-new subscriber from buy → cancel → farm-the-discount within the first
+ *      billing cycle (refused with "Esta oferta está disponible después de tu primer mes…"), and
+ *   3. no discount already active — non-stackable (refused with "Ya tienes una oferta activa.").
+ * Because RETENTION_30_3M lasts 3 months (repeating), check (3) also naturally blocks
+ * re-application for ~3 months once granted — without a schema change.
+ *
+ * The 'pause' branch keeps the no-active-discount gate (so a pause can't stack on an
+ * already-discounted/abused sub) but intentionally does NOT require the 30-day tenure: a pause
+ * grants no monetary discount to farm — it just defers collection while the venue keeps its
+ * data — so the buy→cancel farming vector doesn't apply, and a struggling brand-new customer
+ * who needs to pause is exactly who the pause offer is for.
  *
  * Does NOT touch the VenueFeature row — the venue keeps the same plan/entitlement.
  * Returns the fresh PlanState (same envelope as cancel/reactivate).
@@ -299,9 +334,17 @@ export async function applyRetentionOffer(venueId: string, offer: RetentionOffer
   }
   const subscriptionId = vf.stripeSubscriptionId
 
-  // Anti-abuse: refuse if the subscription already carries an active discount.
-  const hasDiscount = await subscriptionHasActiveDiscount(subscriptionId)
-  if (hasDiscount) throw new BadRequestError('Ya tienes una oferta activa.')
+  // Read the live subscription once to re-check eligibility server-side (tenure + active discount).
+  // This is the authoritative gate — never trust the client's view of eligibility.
+  const sub = await retrievePlanSubscription(subscriptionId)
+
+  // Anti-abuse (both offers): refuse if the subscription already carries an active discount.
+  if (sub.hasActiveDiscount) throw new BadRequestError('Ya tienes una oferta activa.')
+
+  // Anti-farm (discount only): refuse before the first billing cycle has elapsed.
+  if (offer !== 'pause' && !meetsRetentionTenure(sub.createdAt)) {
+    throw new BadRequestError('Esta oferta está disponible después de tu primer mes de suscripción.')
+  }
 
   if (offer === 'pause') {
     const resumesAt = new Date()

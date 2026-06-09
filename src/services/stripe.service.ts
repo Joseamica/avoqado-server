@@ -1054,6 +1054,10 @@ export async function retrievePlanSubscription(subscriptionId: string): Promise<
   status: string
   cancelAtPeriodEnd: boolean
   currentPeriodEnd: Date | null
+  /** Subscription creation timestamp (Stripe `created`, unix seconds → Date) — used for tenure/anti-abuse checks. */
+  createdAt: Date | null
+  /** Whether the subscription currently carries an active discount (single `discount` or `discounts[]`). */
+  hasActiveDiscount: boolean
   interval: 'month' | 'year' | null
   grossAmountCents: number | null
 }> {
@@ -1063,11 +1067,17 @@ export async function retrievePlanSubscription(subscriptionId: string): Promise<
     context: 'stripe.retrievePlanSubscription',
   })
   const periodEndRaw = (sub as any).current_period_end as number | undefined
+  const createdRaw = (sub as any).created as number | undefined
   const rawInterval = sub.items.data[0]?.price.recurring?.interval
+  // SDK v19 may surface a single `discount` object and/or a `discounts` array (see subscriptionHasActiveDiscount).
+  const singleDiscount = (sub as any).discount
+  const discountList = (sub as any).discounts as unknown[] | undefined
   return {
     status: sub.status,
     cancelAtPeriodEnd: Boolean((sub as any).cancel_at_period_end),
     currentPeriodEnd: periodEndRaw ? new Date(periodEndRaw * 1000) : null,
+    createdAt: createdRaw ? new Date(createdRaw * 1000) : null,
+    hasActiveDiscount: Boolean(singleDiscount) || (Array.isArray(discountList) && discountList.length > 0),
     interval: rawInterval === 'year' ? 'year' : rawInterval === 'month' ? 'month' : null,
     grossAmountCents: sub.items.data[0]?.price.unit_amount ?? null,
   }

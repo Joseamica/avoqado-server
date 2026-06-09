@@ -987,15 +987,18 @@ describe('Stripe Service - Comprehensive Tests', () => {
     })
 
     describe('retrievePlanSubscription()', () => {
-      it('should return the typed summary the plan endpoint needs', async () => {
+      it('should return the typed summary the plan endpoint needs (incl. createdAt + active discount)', async () => {
         const mockSubId = 'sub_plan_pro'
         const periodEndSec = 1893456000 // 2030-01-01T00:00:00Z
+        const createdSec = 1735689600 // 2025-01-01T00:00:00Z
 
         mockStripeInstance.subscriptions.retrieve.mockResolvedValueOnce({
           id: mockSubId,
           status: 'active',
           cancel_at_period_end: true,
           current_period_end: periodEndSec,
+          created: createdSec,
+          discount: { id: 'di_1', coupon: { id: 'RETENTION_30_3M' } }, // single-discount form
           items: {
             data: [{ price: { recurring: { interval: 'month' }, unit_amount: 115884 } }],
           },
@@ -1008,9 +1011,26 @@ describe('Stripe Service - Comprehensive Tests', () => {
           status: 'active',
           cancelAtPeriodEnd: true,
           currentPeriodEnd: new Date(periodEndSec * 1000),
+          createdAt: new Date(createdSec * 1000),
+          hasActiveDiscount: true,
           interval: 'month',
           grossAmountCents: 115884,
         })
+      })
+
+      it('should detect an active discount from the discounts[] array form', async () => {
+        mockStripeInstance.subscriptions.retrieve.mockResolvedValueOnce({
+          id: 'sub_disc_array',
+          status: 'active',
+          cancel_at_period_end: false,
+          current_period_end: 1893456000,
+          created: 1735689600,
+          discounts: [{ id: 'di_2' }], // newer discounts[] form
+          items: { data: [{ price: { recurring: { interval: 'month' }, unit_amount: 115884 } }] },
+        })
+
+        const result = await stripeService.retrievePlanSubscription('sub_disc_array')
+        expect(result.hasActiveDiscount).toBe(true)
       })
 
       it('should normalize a yearly interval', async () => {
@@ -1026,14 +1046,16 @@ describe('Stripe Service - Comprehensive Tests', () => {
 
         expect(result.interval).toBe('year')
         expect(result.cancelAtPeriodEnd).toBe(false)
+        expect(result.hasActiveDiscount).toBe(false) // no discount field/array
       })
 
-      it('should null out missing/unknown fields (no period end, weekly interval, no unit_amount)', async () => {
+      it('should null out missing/unknown fields (no period end, no created, weekly interval, no unit_amount)', async () => {
         mockStripeInstance.subscriptions.retrieve.mockResolvedValueOnce({
           id: 'sub_sparse',
           status: 'incomplete',
           // cancel_at_period_end absent → false
           // current_period_end absent → currentPeriodEnd null
+          // created absent → createdAt null
           items: { data: [{ price: { recurring: { interval: 'week' } } }] },
         })
 
@@ -1043,6 +1065,8 @@ describe('Stripe Service - Comprehensive Tests', () => {
           status: 'incomplete',
           cancelAtPeriodEnd: false,
           currentPeriodEnd: null,
+          createdAt: null,
+          hasActiveDiscount: false,
           interval: null, // 'week' is neither month nor year
           grossAmountCents: null,
         })

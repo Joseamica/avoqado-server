@@ -57,11 +57,13 @@ export function summarizeSubscriptions(rows: SuperadminVenueSubscription[]): Sub
 // { offer: 'discount' | 'pause' } and either applies the RETENTION_30_3M coupon (30% off,
 // 3 months) to the live base-plan subscription or pauses collection for ~2 months. Like
 // plan/checkout it is intentionally NOT exposed as an MCP tool yet: it is a billing WRITE
-// that mutates a live Stripe subscription's price/collection and is gated by an anti-abuse
-// once-per-discount-window check — exposing it to agents needs a vetted action/write surface
-// (confirmation UX, idempotency, scope). TODO: add an `apply_retention_offer` action tool
-// alongside `start_plan_checkout` once that surface lands. Read state via
-// `subscription_status` below in the meantime.
+// that mutates a live Stripe subscription's price/collection and is gated by anti-abuse
+// eligibility (the DISCOUNT offer requires a live Stripe sub, ≥30-day subscription tenure, and
+// no discount already active — so a brand-new subscriber can't buy → cancel → farm the
+// discount) — exposing it to agents needs a vetted action/write surface (confirmation UX,
+// idempotency, scope). TODO: add an `apply_retention_offer` action tool alongside
+// `start_plan_checkout` once that surface lands. Read state (incl. retentionOfferEligible) via
+// the plan endpoint / `subscription_status` below in the meantime.
 export function registerSubscriptionTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
 
