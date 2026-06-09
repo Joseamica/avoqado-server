@@ -5,6 +5,7 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { updateProduct, createProduct } from '@/services/dashboard/product.dashboard.service'
+import { createMenuCategory, createModifierGroup } from '@/services/dashboard/menu.dashboard.service'
 import { auditMcpWrite } from '../audit'
 import { ProductType } from '@prisma/client'
 
@@ -306,6 +307,73 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
           ok: true,
           product: { id: product.id, name: product.name, sku: product.sku, type: product.type, price: Number(product.price) },
         })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'create_category',
+    'Create a NEW menu category in a venue you can access (e.g. "Entradas", "Bebidas", "Servicios"). Products are organized into categories. Optionally a description and display order. This WRITES — requires menu:create.',
+    {
+      venueId: z.string().describe('Venue to create the category in (must be in your scope)'),
+      name: z.string().min(1).describe('Category name, e.g. "Bebidas"'),
+      description: z.string().optional().describe('Description'),
+      displayOrder: z.number().int().min(0).optional().describe('Sort order (lower shows first)'),
+    },
+    async ({ venueId, name, description, displayOrder }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('menu:create', venueId) // write gate (per-venue role)
+      try {
+        const cat = await createMenuCategory(venueId, {
+          name,
+          ...(description ? { description } : {}),
+          ...(displayOrder !== undefined ? { displayOrder } : {}),
+        })
+        await auditMcpWrite(scope, { action: 'MENU_CATEGORY_CREATED', entity: 'MenuCategory', entityId: cat.id, venueId, data: { name } })
+        return text({ ok: true, category: { id: cat.id, name: cat.name } })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'create_modifier_group',
+    'Create a NEW modifier / option group in a venue you can access (e.g. "Extras", "Término de la carne") with its options — each option has a name and an optional extra price. Set whether a selection is required, whether multiple are allowed, and min/max selections. Attach it to products afterward. This WRITES — requires menu:create.',
+    {
+      venueId: z.string().describe('Venue to create the group in (must be in your scope)'),
+      name: z.string().min(1).describe('Group name, e.g. "Extras"'),
+      options: z
+        .array(z.object({ name: z.string().min(1), extraPrice: z.number().min(0).optional() }))
+        .min(1)
+        .describe('The options, e.g. [{name:"Queso extra", extraPrice:15}]'),
+      required: z.boolean().optional().describe('Must the customer pick one? (default no)'),
+      allowMultiple: z.boolean().optional().describe('Can the customer pick more than one? (default no)'),
+      minSelections: z.number().int().min(0).optional().describe('Minimum options to select'),
+      maxSelections: z.number().int().positive().optional().describe('Maximum options to select'),
+    },
+    async ({ venueId, name, options, required, allowMultiple, minSelections, maxSelections }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('menu:create', venueId) // write gate (per-venue role)
+      try {
+        const group = await createModifierGroup(venueId, {
+          name,
+          ...(required !== undefined ? { required } : {}),
+          ...(allowMultiple !== undefined ? { allowMultiple } : {}),
+          ...(minSelections !== undefined ? { minSelections } : {}),
+          ...(maxSelections !== undefined ? { maxSelections } : {}),
+          modifiers: options.map(o => ({ name: o.name, price: o.extraPrice ?? 0 })),
+        })
+        await auditMcpWrite(scope, {
+          action: 'MODIFIER_GROUP_CREATED',
+          entity: 'ModifierGroup',
+          entityId: group.id,
+          venueId,
+          data: { name, options: options.length },
+        })
+        return text({ ok: true, modifierGroup: { id: group.id, name: group.name, options: options.length } })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
       }
