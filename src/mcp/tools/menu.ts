@@ -4,10 +4,21 @@ import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
-import { updateProduct } from '@/services/dashboard/product.dashboard.service'
+import { updateProduct, createProduct } from '@/services/dashboard/product.dashboard.service'
 import { auditMcpWrite } from '../audit'
+import { ProductType } from '@prisma/client'
 
 const round2 = (n: number): number => Math.round(n * 100) / 100
+
+const PRODUCT_TYPE_MAP: Record<string, ProductType> = {
+  product: ProductType.REGULAR,
+  food_or_beverage: ProductType.FOOD_AND_BEV,
+  service: ProductType.APPOINTMENTS_SERVICE,
+  class: ProductType.CLASS,
+  event: ProductType.EVENT,
+  digital: ProductType.DIGITAL,
+  donation: ProductType.DONATION,
+}
 
 /** Find products in scope by (partial, case-insensitive) name — shared by the menu tools. */
 async function matchProductsByName(venueWhere: { venueId: { in: string[] } }, name: string) {
@@ -232,6 +243,72 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
         count: cats.length,
         categories: cats.map(c => ({ name: c.name, description: c.description, active: c.active, products: c._count.products })),
       })
+    },
+  )
+
+  server.tool(
+    'create_product',
+    'Create a NEW product / service / class in a venue you can access: name, price, type (product / food_or_beverage / service / class / event / digital / donation) and the category it belongs to (BY NAME — must already exist; see menu_categories). Optionally description, SKU (auto-generated from the name if omitted), durationMinutes (for services/classes), isAlcoholic (for food_or_beverage). This WRITES — requires products:create. If a required type-specific field is missing the service says so.',
+    {
+      venueId: z.string().describe('Venue to create the item in (must be in your scope)'),
+      name: z.string().min(1).describe('Item name, e.g. "Corte de cabello"'),
+      price: z.number().nonnegative().describe('Price in major units (e.g. 250 for $250.00; 0 allowed for donations)'),
+      type: z.enum(['product', 'food_or_beverage', 'service', 'class', 'event', 'digital', 'donation']).describe('What kind of item it is'),
+      category: z.string().min(1).describe('Existing category name it belongs to (see menu_categories)'),
+      description: z.string().optional().describe('Description'),
+      sku: z.string().optional().describe('Stock code (auto-generated from the name if omitted)'),
+      durationMinutes: z.number().int().positive().optional().describe('Duration in minutes (services / classes / appointments)'),
+      isAlcoholic: z.boolean().optional().describe('Only for food_or_beverage'),
+    },
+    async ({ venueId, name, price, type, category, description, sku, durationMinutes, isAlcoholic }) => {
+      const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('products:create', venueId) // write gate (per-venue role)
+
+      const cat = await prisma.menuCategory.findFirst({
+        where: { ...where, name: { equals: category, mode: 'insensitive' } },
+        select: { id: true },
+      })
+      if (!cat) {
+        const cats = await prisma.menuCategory.findMany({ where: { ...where, active: true }, select: { name: true }, take: 30 })
+        return text({
+          ok: false,
+          error: `No encontré la categoría "${category}". Disponibles: ${cats.map(c => c.name).join(', ') || '(ninguna — créala primero)'}`,
+        })
+      }
+      const finalSku =
+        sku?.trim() ||
+        `${
+          name
+            .toUpperCase()
+            .replace(/[^A-Z0-9]/g, '')
+            .slice(0, 8) || 'PROD'
+        }-${Date.now().toString(36).slice(-5).toUpperCase()}`
+
+      try {
+        const product = await createProduct(venueId, {
+          name,
+          price,
+          type: PRODUCT_TYPE_MAP[type],
+          sku: finalSku,
+          categoryId: cat.id,
+          ...(description ? { description } : {}),
+          ...(durationMinutes ? { duration: durationMinutes } : {}),
+          ...(isAlcoholic !== undefined ? { isAlcoholic } : {}),
+        })
+        await auditMcpWrite(scope, {
+          action: 'PRODUCT_CREATED',
+          entity: 'Product',
+          entityId: product.id,
+          venueId,
+          data: { name, type: PRODUCT_TYPE_MAP[type], price, category },
+        })
+        return text({
+          ok: true,
+          product: { id: product.id, name: product.name, sku: product.sku, type: product.type, price: Number(product.price) },
+        })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
     },
   )
 }
