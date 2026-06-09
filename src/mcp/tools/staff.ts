@@ -4,6 +4,21 @@ import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
+import { auditMcpWrite } from '../audit'
+import { inviteTeamMember } from '@/services/dashboard/team.dashboard.service'
+import { StaffRole } from '@prisma/client'
+
+// SUPERADMIN deliberately excluded — an agent must never be able to grant it.
+const INVITE_ROLE_MAP: Record<string, StaffRole> = {
+  owner: StaffRole.OWNER,
+  admin: StaffRole.ADMIN,
+  manager: StaffRole.MANAGER,
+  cashier: StaffRole.CASHIER,
+  waiter: StaffRole.WAITER,
+  kitchen: StaffRole.KITCHEN,
+  host: StaffRole.HOST,
+  viewer: StaffRole.VIEWER,
+}
 
 export function registerStaffTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
@@ -96,6 +111,64 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
         staff: { name: `${m.staff.firstName} ${m.staff.lastName}`.trim(), active: m.staff.active },
         venues: assignments.map(a => ({ venue: a.venue?.name ?? null, role: a.role })),
       })
+    },
+  )
+
+  server.tool(
+    'invite_staff',
+    '🔴 CRITICAL (grants access). Invite a NEW team member to a venue you can access — sends them an invitation (email when an email is given). By DEFAULT this only PREVIEWS the invite; to actually send it you must call again with confirm:true. Pass first/last name, their role, and optionally an email + message. SUPERADMIN cannot be granted here. This WRITES — requires teams:invite.',
+    {
+      venueId: z.string().describe('Venue to invite into (must be in your scope)'),
+      firstName: z.string().min(1).describe('First name'),
+      lastName: z.string().min(1).describe('Last name'),
+      role: z
+        .enum(['owner', 'admin', 'manager', 'cashier', 'waiter', 'kitchen', 'host', 'viewer'])
+        .describe('Role to grant (no superadmin)'),
+      email: z.string().optional().describe('Email to send the invitation to'),
+      message: z.string().optional().describe('Optional personal message in the invite'),
+      confirm: z.boolean().optional().describe('Must be true to actually send the invite; without it you get a preview'),
+    },
+    async ({ venueId, firstName, lastName, role, email, message, confirm }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('teams:invite', venueId) // write gate (per-venue role)
+      const mappedRole = INVITE_ROLE_MAP[role]
+
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview: { name: `${firstName} ${lastName}`.trim(), role: mappedRole, email: email ?? null },
+          message: `Esto INVITARÁ a ${firstName} ${lastName} como ${mappedRole}${email ? ` y le enviará un correo a ${email}` : ''}. Vuelve a llamar con confirm:true para enviar.`,
+        })
+      }
+
+      try {
+        const result = await inviteTeamMember(venueId, scope.staffId, {
+          firstName,
+          lastName,
+          role: mappedRole,
+          ...(email ? { email } : {}),
+          ...(message ? { message } : {}),
+        })
+        await auditMcpWrite(scope, {
+          action: 'STAFF_INVITED',
+          entity: 'Invitation',
+          entityId: (result.invitation as { id?: string } | null)?.id ?? 'invitation',
+          venueId,
+          data: { name: `${firstName} ${lastName}`.trim(), role: mappedRole, email: email ?? null, emailSent: result.emailSent },
+        })
+        return text({
+          ok: true,
+          invited: {
+            name: `${firstName} ${lastName}`.trim(),
+            role: mappedRole,
+            emailSent: result.emailSent,
+            inviteLink: result.inviteLink ?? null,
+          },
+        })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
     },
   )
 }
