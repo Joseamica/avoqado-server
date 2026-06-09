@@ -3,6 +3,23 @@
 Multi-tenant B2B SaaS for restaurant/venue management (POS, payments, inventory, staff). Express.js + TypeScript, PostgreSQL/Prisma,
 Socket.IO, Redis, RabbitMQ. Payments via Blumon (TPV + E-commerce) and Stripe (subscriptions).
 
+## 🔴 CRITICAL — Ask which payment tier BEFORE building or changing anything
+
+Avoqado is a tier-gated SaaS (**FREE · PRO · PREMIUM · ENTERPRISE**). Whenever you add a new
+feature, modify existing behavior, or expose a new capability, **STOP and ask the founder which
+paid tier it falls under** — then wire the gating to match. A change shipped without a tier
+decision is unfinished: it either leaks paid value into a lower tier or hides a free capability
+behind a paywall. This repo is the **authoritative** gate — get it right here first.
+
+- **Backend (authoritative):** `src/services/access/basePlan.service.ts` +
+  `src/middlewares/checkFeatureAccess.middleware.ts`. Obligatory gating questions live in
+  `.claude/rules/feature-gating.md` (Module vs Feature decision). PREMIUM-only codes today: `CFDI`, `INVENTORY_TRACKING`.
+- **Dashboard display/CTA map:** `avoqado-web-dashboard/src/config/plan-catalog.ts`
+  (`TierId`, `PLAN_TIERS`, `getTierForFeature()` → FeatureGate upsell).
+- **Enforcement status:** ✅ only **avoqado-web-dashboard** enforces tiers today.
+  ⚠️ **avoqado-ios** and **avoqado-android** have NO tier gating yet — they will mirror the backend
+  feature codes by exact name. Treat tier codes like permissions: a name mismatch fails silently.
+
 ## Sister Repos (this repo is the hub of 10)
 
 `avoqado-server` is the backend hub; 9 client repos talk to it over `/api/v1/`. Full ecosystem map: workspace-root `../CLAUDE.md`.

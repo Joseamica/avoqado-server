@@ -344,7 +344,11 @@ app.use((err: Error, req: ExpressRequest, res: ExpressResponse, _next: NextFunct
   }
 
   if (err instanceof AppError) {
-    logger.error(`AppError: ${err.message}, StatusCode: ${err.statusCode}, CorrelationID: ${correlationId}`, {
+    // 4xx operational errors are client-side "fail" outcomes (bad input, not found,
+    // unauthorized) — expected, not backend faults — so log them as warnings to keep
+    // error alerting focused on real 5xx server problems.
+    const logLevel = err.isOperational && err.statusCode >= 400 && err.statusCode < 500 ? 'warn' : 'error'
+    logger[logLevel](`AppError: ${err.message}, StatusCode: ${err.statusCode}, CorrelationID: ${correlationId}`, {
       name: err.name,
       statusCode: err.statusCode,
       isOperational: err.isOperational,

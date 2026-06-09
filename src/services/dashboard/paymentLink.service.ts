@@ -352,6 +352,31 @@ export interface ListPaymentLinksFilters {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
+ * Whether a merchant can actually process an online charge right now.
+ *
+ * Usability is provider-specific, so a single flag is not enough:
+ *   - BLUMON: needs an `accessToken` in providerCredentials. Blumon has no
+ *     onboarding flow that flips `chargesEnabled`, so that flag stays false even
+ *     for working channels — we must look at the credential instead.
+ *   - STRIPE_CONNECT / MERCADO_PAGO: expose readiness via `chargesEnabled`
+ *     (set by their onboarding/OAuth webhooks).
+ *
+ * Used by the auto-pick below so we never bind a new link to a dead channel
+ * that throws "Configuración de pago incompleta" at checkout.
+ */
+function isEcommerceMerchantChargeable(merchant: {
+  chargesEnabled: boolean
+  providerCredentials: unknown
+  provider: { code: string } | null
+}): boolean {
+  if (merchant.provider?.code === 'BLUMON') {
+    const accessToken = (merchant.providerCredentials as { accessToken?: unknown } | null)?.accessToken
+    return typeof accessToken === 'string' && accessToken.length > 0
+  }
+  return merchant.chargesEnabled === true
+}
+
+/**
  * Creates a new payment link for a venue
  */
 export async function createPaymentLink(venueId: string, data: CreatePaymentLinkData, staffId: string) {
@@ -361,9 +386,11 @@ export async function createPaymentLink(venueId: string, data: CreatePaymentLink
   //   A. Caller specifies `ecommerceMerchantId` → use it but verify it
   //      belongs to this venue and is active. Lets the user pick when there
   //      are multiple active channels (e.g. Stripe + Blumon).
-  //   B. Not specified → keep legacy auto-pick (Blumon first because of
-  //      OAuth token setup, then any active merchant). Used by venues with
-  //      a single channel where the UI can skip the picker.
+  //   B. Not specified → auto-pick. Only consider channels that can ACTUALLY
+  //      charge (see isEcommerceMerchantChargeable); prefer Blumon for its
+  //      inline card-capture UX, then any other chargeable channel. This stops
+  //      us from binding a link to an unconfigured channel that would throw
+  //      "Configuración de pago incompleta" at checkout.
   let ecommerceMerchant: { id: string } | null = null
 
   if (data.ecommerceMerchantId) {
@@ -375,19 +402,24 @@ export async function createPaymentLink(venueId: string, data: CreatePaymentLink
       throw new BadRequestError('El canal de e-commerce seleccionado no existe, no está activo, o no pertenece a este venue.')
     }
   } else {
-    ecommerceMerchant =
-      (await prisma.ecommerceMerchant.findFirst({
-        where: { venueId, active: true, provider: { code: 'BLUMON' } },
-        select: { id: true },
-      })) ||
-      (await prisma.ecommerceMerchant.findFirst({
-        where: { venueId, active: true },
-        select: { id: true },
-      }))
+    const candidates = await prisma.ecommerceMerchant.findMany({
+      where: { venueId, active: true },
+      select: {
+        id: true,
+        chargesEnabled: true,
+        providerCredentials: true,
+        provider: { select: { code: true } },
+      },
+    })
+
+    const chargeable = candidates.filter(isEcommerceMerchantChargeable)
+    ecommerceMerchant = chargeable.find(m => m.provider?.code === 'BLUMON') ?? chargeable[0] ?? null
   }
 
   if (!ecommerceMerchant) {
-    throw new BadRequestError('Este venue no tiene una afiliación de e-commerce activa. Contacta a soporte para activarla.')
+    throw new BadRequestError(
+      'Este venue no tiene un canal de e-commerce listo para cobrar. Completa la activación del canal (Stripe, Mercado Pago o Blumon) o contacta a soporte.',
+    )
   }
 
   // 2. ITEM links: validate the line items array (+ modifiers). Bundle model

@@ -1,6 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
-import { PaymentMethod, TransactionStatus } from '@prisma/client'
+import { PaymentMethod, PaymentType, TransactionStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
 import type { McpScope } from '../scope'
@@ -158,6 +158,85 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
           orderNumber: p.order?.orderNumber ?? null,
           at: p.createdAt.toISOString(),
         })),
+      })
+    },
+  )
+
+  server.tool(
+    'list_refunds',
+    'Refunds ISSUED for a venue you can access, over a date range (default last 7 days). Mirrors the dashboard "Reembolsos" report. Each refund: amount given back (sale + tip, as positive magnitudes), payment method, reason (RETURNED_GOODS/ACCIDENTAL_CHARGE/CANCELLED_ORDER/FRAUDULENT_CHARGE/OTHER), free-text note, the original order number, who processed it, and when. Plus totals (count + total refunded) and a breakdown BY REASON. Use this for "¿cuánto devolvimos esta semana?", "¿por qué se hicieron los reembolsos?", "¿quién procesó los reembolsos?". Refunds are Payment rows with type=REFUND — list_payments (filtered by status) does NOT surface these. Pass venueId; optionally fromDate/toDate (YYYY-MM-DD).',
+    {
+      venueId: z.string().describe('Venue whose refunds to read (must be in your scope)'),
+      fromDate: z.string().optional().describe('Start date YYYY-MM-DD (default: 7 days ago)'),
+      toDate: z.string().optional().describe('End date YYYY-MM-DD (default: today)'),
+      limit: z.number().int().positive().max(100).optional().describe('Max refunds to list (default 25, newest first)'),
+    },
+    async ({ venueId, fromDate, toDate, limit }) => {
+      const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+      const tz = venue?.timezone || 'America/Mexico_City'
+      const start = venueStartOfDay(tz, fromDate ? new Date(`${fromDate}T12:00:00`) : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000))
+      const end = venueEndOfDay(tz, toDate ? new Date(`${toDate}T12:00:00`) : undefined)
+      const where = {
+        ...base,
+        type: PaymentType.REFUND,
+        status: { not: TransactionStatus.PENDING },
+        createdAt: { gte: start, lte: end },
+      }
+
+      const rows = await prisma.payment.findMany({
+        where,
+        select: {
+          id: true,
+          amount: true,
+          tipAmount: true,
+          status: true,
+          method: true,
+          createdAt: true,
+          processorData: true,
+          processedBy: { select: { firstName: true, lastName: true } },
+          order: { select: { orderNumber: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: limit ?? 25,
+      })
+
+      const refunds = rows.map(r => {
+        const pd = (r.processorData as Record<string, unknown> | null) || {}
+        const sale = Math.abs(num(r.amount))
+        const tip = Math.abs(num(r.tipAmount))
+        return {
+          id: r.id,
+          at: r.createdAt.toISOString(),
+          orderNumber: r.order?.orderNumber ?? null,
+          method: r.method,
+          reason: typeof pd.refundReason === 'string' ? pd.refundReason : null,
+          note: typeof pd.note === 'string' ? pd.note : null,
+          saleAmount: sale,
+          tipAmount: tip,
+          totalAmount: round2(sale + tip),
+          status: r.status,
+          processedBy: r.processedBy ? `${r.processedBy.firstName} ${r.processedBy.lastName}`.trim() : null,
+        }
+      })
+
+      const byReason: Record<string, { count: number; amount: number }> = {}
+      let totalRefunded = 0
+      for (const r of refunds) {
+        totalRefunded += r.totalAmount
+        const key = r.reason ?? 'UNKNOWN'
+        byReason[key] = byReason[key] || { count: 0, amount: 0 }
+        byReason[key].count += 1
+        byReason[key].amount = round2(byReason[key].amount + r.totalAmount)
+      }
+
+      return text({
+        venueId,
+        window: { start: start.toISOString(), end: end.toISOString() },
+        timezone: tz,
+        summary: { count: refunds.length, totalRefunded: round2(totalRefunded), byReason },
+        count: refunds.length,
+        refunds,
       })
     },
   )

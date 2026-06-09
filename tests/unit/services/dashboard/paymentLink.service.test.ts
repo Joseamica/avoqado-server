@@ -48,6 +48,11 @@ const VENUE_ID = 'venue-123'
 const STAFF_ID = 'staff-123'
 const PRODUCT_ID = 'product-456'
 
+// Auto-pick (no ecommerceMerchantId passed) reads active merchants via findMany
+// and keeps only ones that can actually charge. A Stripe Connect merchant with
+// chargesEnabled=true qualifies.
+const chargeableMerchants = [{ id: 'merchant-123', chargesEnabled: true, providerCredentials: {}, provider: { code: 'STRIPE_CONNECT' } }]
+
 const createMockPaymentLink = (overrides: Record<string, any> = {}) => ({
   id: 'pl-123',
   shortCode: 'abc12345',
@@ -154,7 +159,7 @@ describe('PaymentLink Service', () => {
   // ─── CREATE ──────────────────────────────────────
   describe('createPaymentLink', () => {
     it('should create a PAYMENT link with FIXED amount', async () => {
-      prismaMock.ecommerceMerchant.findFirst.mockResolvedValueOnce({ id: 'merchant-123' })
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValueOnce(chargeableMerchants)
       prismaMock.paymentLink.create.mockResolvedValueOnce(createMockPaymentLink())
 
       const result = await createPaymentLink(
@@ -183,7 +188,7 @@ describe('PaymentLink Service', () => {
     })
 
     it('should create an ITEM link with items[]', async () => {
-      prismaMock.ecommerceMerchant.findFirst.mockResolvedValueOnce({ id: 'merchant-123' })
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValueOnce(chargeableMerchants)
       // validateBundleItems uses product.findMany (plural) to look up all
       // distinct product IDs with their modifier groups for validation.
       prismaMock.product.findMany.mockResolvedValueOnce([{ id: PRODUCT_ID, modifierGroups: [] }])
@@ -205,7 +210,7 @@ describe('PaymentLink Service', () => {
     })
 
     it('should reject ITEM link without items[]', async () => {
-      prismaMock.ecommerceMerchant.findFirst.mockResolvedValueOnce({ id: 'merchant-123' })
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValueOnce(chargeableMerchants)
 
       await expect(
         createPaymentLink(
@@ -223,7 +228,7 @@ describe('PaymentLink Service', () => {
     })
 
     it('should reject ITEM link with product from another venue', async () => {
-      prismaMock.ecommerceMerchant.findFirst.mockResolvedValueOnce({ id: 'merchant-123' })
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValueOnce(chargeableMerchants)
       // Empty product list = the requested productId doesn't belong to this venue
       prismaMock.product.findMany.mockResolvedValueOnce([])
 
@@ -243,7 +248,7 @@ describe('PaymentLink Service', () => {
     })
 
     it('should reject if no ecommerce merchant', async () => {
-      prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(null)
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValue([])
 
       await expect(
         createPaymentLink(
@@ -256,6 +261,60 @@ describe('PaymentLink Service', () => {
           STAFF_ID,
         ),
       ).rejects.toThrow(BadRequestError)
+    })
+
+    // ─── AUTO-PICK USABILITY (regression for Mobanq "Configuración de pago
+    //     incompleta") ──────────────────────────────────────────────────────
+    it('auto-pick skips an unconfigured Blumon channel and binds to a chargeable one', async () => {
+      // Mobanq's real state: an active Blumon merchant that was never onboarded
+      // (no accessToken) plus a fully onboarded Stripe Connect channel. The old
+      // code blindly preferred Blumon and produced a link that threw at checkout.
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValueOnce([
+        { id: 'blumon-dead', chargesEnabled: false, providerCredentials: { environment: 'SANDBOX' }, provider: { code: 'BLUMON' } },
+        {
+          id: 'stripe-live',
+          chargesEnabled: true,
+          providerCredentials: { connectAccountId: 'acct_1' },
+          provider: { code: 'STRIPE_CONNECT' },
+        },
+      ])
+      prismaMock.paymentLink.create.mockResolvedValueOnce(createMockPaymentLink())
+
+      await createPaymentLink(VENUE_ID, { title: 'X', amountType: 'FIXED', amount: 80, purpose: 'PAYMENT' }, STAFF_ID)
+
+      expect(prismaMock.paymentLink.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ ecommerceMerchantId: 'stripe-live' }) }),
+      )
+    })
+
+    it('auto-pick prefers a properly configured Blumon channel (inline card UX) over others', async () => {
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValueOnce([
+        {
+          id: 'stripe-live',
+          chargesEnabled: true,
+          providerCredentials: { connectAccountId: 'acct_1' },
+          provider: { code: 'STRIPE_CONNECT' },
+        },
+        { id: 'blumon-live', chargesEnabled: false, providerCredentials: { accessToken: 'tok_live_123' }, provider: { code: 'BLUMON' } },
+      ])
+      prismaMock.paymentLink.create.mockResolvedValueOnce(createMockPaymentLink())
+
+      await createPaymentLink(VENUE_ID, { title: 'X', amountType: 'FIXED', amount: 80, purpose: 'PAYMENT' }, STAFF_ID)
+
+      expect(prismaMock.paymentLink.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ ecommerceMerchantId: 'blumon-live' }) }),
+      )
+    })
+
+    it('auto-pick rejects when the only channel is an unconfigured Blumon (no accessToken)', async () => {
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValueOnce([
+        { id: 'blumon-dead', chargesEnabled: false, providerCredentials: { environment: 'SANDBOX' }, provider: { code: 'BLUMON' } },
+      ])
+
+      await expect(
+        createPaymentLink(VENUE_ID, { title: 'X', amountType: 'FIXED', amount: 80, purpose: 'PAYMENT' }, STAFF_ID),
+      ).rejects.toThrow(BadRequestError)
+      expect(prismaMock.paymentLink.create).not.toHaveBeenCalled()
     })
   })
 
@@ -617,7 +676,7 @@ describe('PaymentLink Service', () => {
   // ─── REGRESSION: Existing features still work ─────
   describe('Regression tests', () => {
     it('DONATION links should work with OPEN amount', async () => {
-      prismaMock.ecommerceMerchant.findFirst.mockResolvedValueOnce({ id: 'merchant-123' })
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValueOnce(chargeableMerchants)
       prismaMock.paymentLink.create.mockResolvedValueOnce(
         createMockPaymentLink({
           purpose: 'DONATION',
@@ -650,7 +709,7 @@ describe('PaymentLink Service', () => {
     })
 
     it('default purpose should be PAYMENT when not specified', async () => {
-      prismaMock.ecommerceMerchant.findFirst.mockResolvedValueOnce({ id: 'merchant-123' })
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValueOnce(chargeableMerchants)
       prismaMock.paymentLink.create.mockResolvedValueOnce(createMockPaymentLink())
 
       await createPaymentLink(

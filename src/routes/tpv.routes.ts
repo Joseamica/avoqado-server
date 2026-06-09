@@ -6349,7 +6349,13 @@ router.post('/geolocation/cell-towers', authenticateTokenMiddleware, async (req:
 
     return res.status(200).json(result)
   } catch (error) {
-    logger.error(`❌ [GEOLOCATION] Error in network location lookup`, {
+    // A 404 here just means the providers couldn't resolve a location from the
+    // supplied network data — an expected outcome, not a backend failure. Log it
+    // as a warning so it doesn't trip error alerting. Anything else is a real error.
+    const isExpectedNoLocation = error instanceof AppError && error.statusCode === 404
+    const logLevel = isExpectedNoLocation ? 'warn' : 'error'
+    const logPrefix = isExpectedNoLocation ? '⚠️' : '❌'
+    logger[logLevel](`${logPrefix} [GEOLOCATION] Could not determine network location`, {
       correlationId: req.correlationId,
       error: error instanceof Error ? error.message : 'Unknown error',
     })

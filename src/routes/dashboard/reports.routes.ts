@@ -9,6 +9,7 @@ import express from 'express'
 import { payLaterAgingReport } from '@/controllers/dashboard/reports.dashboard.controller'
 import { salesSummaryReport } from '@/controllers/dashboard/sales-summary.dashboard.controller'
 import { salesByItemReport } from '@/controllers/dashboard/sales-by-item.dashboard.controller'
+import { refundsReport } from '@/controllers/dashboard/refunds.dashboard.controller'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
 
 const router = express.Router()
@@ -54,5 +55,20 @@ router.get('/sales-summary', checkPermission('reports:read'), salesSummaryReport
  * @permission reports:read
  */
 router.get('/sales-by-item', checkPermission('reports:read'), salesByItemReport)
+
+/**
+ * GET /api/v1/dashboard/reports/refunds
+ *
+ * Refunds Report
+ * Every refund issued for a venue over a date range (amount, tip, method, reason,
+ * note, original order, who processed it) plus totals and a breakdown by reason.
+ *
+ * Query params:
+ * - startDate: ISO date string (required)
+ * - endDate: ISO date string (required)
+ *
+ * @permission reports:read
+ */
+router.get('/refunds', checkPermission('reports:read'), refundsReport)
 
 export default router
