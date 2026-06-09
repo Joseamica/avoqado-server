@@ -11,7 +11,7 @@
  *   - stripe.service.retrievePlanSubscription is mocked for the period-end fallback path.
  */
 import { prismaMock } from '../../../__helpers__/setup'
-import { StaffRole } from '@prisma/client'
+import { InvitationStatus, StaffRole } from '@prisma/client'
 import { BadRequestError } from '@/errors/AppError'
 
 jest.mock('@/services/dashboard/planState.service', () => ({
@@ -36,6 +36,7 @@ import {
   executeSeatReconciliation,
   reactivateSeatCapDeactivated,
   clearPendingReconciliation,
+  getVenueSeatStatus,
 } from '@/services/dashboard/seatReconciliation.service'
 
 const cancelPlanMock = planState.cancelPlan as jest.Mock
@@ -296,6 +297,53 @@ describe('seatReconciliation.service', () => {
       const cleared = await clearPendingReconciliation('venue_1')
       expect(cleared).toBe(false)
       expect(prismaMock.venue.update).not.toHaveBeenCalled()
+    })
+  })
+
+  // ── getVenueSeatStatus (active + pending breakdown) ──────────────────────────────────────────
+  describe('getVenueSeatStatus', () => {
+    // getActiveSeatCount is mocked (drives `active`); getPendingInvitationCount is REAL and reads
+    // prismaMock.invitation.count (drives `pending`); getVenueBaseTier is REAL and reads
+    // prismaMock.venueFeature.findMany (→ [] = Free tier → cap 2). seatCapExempt comes from
+    // prismaMock.venue.findUnique.
+    beforeEach(() => {
+      prismaMock.venueFeature.findMany.mockResolvedValue([]) // no paid base plan → Free tier
+    })
+
+    it('Free venue: current = active + pending; blocked when current === cap', async () => {
+      prismaMock.venue.findUnique.mockResolvedValue({ seatCapExempt: false })
+      activeCountMock.mockResolvedValue(1)
+      prismaMock.invitation.count.mockResolvedValue(1) // one outstanding invite
+      const status = await getVenueSeatStatus('venue_1')
+      expect(status).toEqual({ cap: 2, active: 1, pending: 1, current: 2, allowed: false, exempt: false })
+    })
+
+    it('Free venue under cap: 1 active + 0 pending → allowed', async () => {
+      prismaMock.venue.findUnique.mockResolvedValue({ seatCapExempt: false })
+      activeCountMock.mockResolvedValue(1)
+      prismaMock.invitation.count.mockResolvedValue(0)
+      const status = await getVenueSeatStatus('venue_1')
+      expect(status).toEqual({ cap: 2, active: 1, pending: 0, current: 1, allowed: true, exempt: false })
+    })
+
+    it('exempt (grandfathered) venue: cap null, always allowed, still reports active/pending', async () => {
+      prismaMock.venue.findUnique.mockResolvedValue({ seatCapExempt: true })
+      activeCountMock.mockResolvedValue(5)
+      prismaMock.invitation.count.mockResolvedValue(4)
+      const status = await getVenueSeatStatus('venue_1')
+      expect(status).toEqual({ cap: null, active: 5, pending: 4, current: 9, allowed: true, exempt: true })
+    })
+
+    it('pending invitation count filters PENDING, not-yet-expired, non-SUPERADMIN', async () => {
+      prismaMock.venue.findUnique.mockResolvedValue({ seatCapExempt: false })
+      activeCountMock.mockResolvedValue(0)
+      prismaMock.invitation.count.mockResolvedValue(0)
+      await getVenueSeatStatus('venue_1')
+      const where = prismaMock.invitation.count.mock.calls[0][0].where
+      expect(where.venueId).toBe('venue_1')
+      expect(where.status).toBe(InvitationStatus.PENDING)
+      expect(where.role).toEqual({ not: StaffRole.SUPERADMIN })
+      expect(where.expiresAt.gt).toBeInstanceOf(Date)
     })
   })
 })

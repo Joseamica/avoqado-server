@@ -244,8 +244,10 @@ export async function loginWithGoogle(
 
     // Free-tier seat cap: this is a brand-new Google-signup accepting an invite, so the
     // create below always adds a new seat. Enforce before creating it. Exempt/paid venues
-    // are unlimited (no-op).
-    await assertCanAddSeat(venueId)
+    // are unlimited (no-op). Cap usage now includes pending invitations; this very invite is
+    // STILL PENDING (it's marked ACCEPTED in the parallel update below), so EXCLUDE it from
+    // the pending count to avoid the off-by-one that would wrongly block a legitimate accept.
+    await assertCanAddSeat(venueId, { excludeInvitationId: invitation.id })
 
     await Promise.all([
       prisma.staffVenue.create({

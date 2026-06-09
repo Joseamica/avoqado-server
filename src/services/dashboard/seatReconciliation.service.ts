@@ -25,7 +25,7 @@ import { StaffRole } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { BadRequestError } from '../../errors/AppError'
-import { FREE_TIER_SEAT_CAP, getVenueSeatCap, getActiveSeatCount } from '@/services/access/seatCap.service'
+import { FREE_TIER_SEAT_CAP, getVenueSeatCap, getActiveSeatCount, getPendingInvitationCount } from '@/services/access/seatCap.service'
 import { cancelPlan, type PlanState } from './planState.service'
 import { retrievePlanSubscription } from '../stripe.service'
 
@@ -319,20 +319,34 @@ export async function clearPendingReconciliation(venueId: string): Promise<boole
   return true
 }
 
-/** Read-only helper for the MCP seat-status tool: the venue's cap, current count and exempt flag. */
+/**
+ * Read-only helper for the MCP seat-status tool + the dashboard's plan/seat-status endpoint:
+ * the venue's cap, its usage breakdown, whether one more seat can be added, and the exempt flag.
+ *
+ * Cap usage `current = active + pending`, where `pending` = outstanding (PENDING, not-yet-expired)
+ * invitations that each reserve a seat. The legacy fields (`cap` / `current` / `allowed` / `exempt`)
+ * are unchanged in meaning except that `current` now includes pending invites; `active` / `pending`
+ * are additive so existing callers keep working.
+ */
 export async function getVenueSeatStatus(venueId: string): Promise<{
   cap: number | null
+  active: number
+  pending: number
   current: number
   allowed: boolean
   exempt: boolean
 }> {
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { seatCapExempt: true } })
   const exempt = venue?.seatCapExempt ?? false
-  const cap = await getVenueSeatCap(venueId)
-  const current = await getActiveSeatCount(venueId)
+  const [cap, active, pending] = await Promise.all([
+    getVenueSeatCap(venueId),
+    getActiveSeatCount(venueId),
+    getPendingInvitationCount(venueId),
+  ])
+  const current = active + pending
   // Unlimited (cap null) is always allowed; otherwise allowed only while current < cap.
   const allowed = cap === null ? true : current < cap
-  return { cap, current, allowed, exempt }
+  return { cap, active, pending, current, allowed, exempt }
 }
 
 export default {

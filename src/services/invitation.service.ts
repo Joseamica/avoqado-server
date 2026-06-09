@@ -373,7 +373,15 @@ export async function acceptInvitation(token: string, userData: AcceptInvitation
           // Free-tier seat cap: enforce per target venue before adding a brand-new seat.
           // Re-activating an existing assignment (the `if` branch above) is intentionally
           // not blocked here. Exempt/paid venues are unlimited (no-op).
-          await assertCanAddSeat(v.id)
+          //
+          // Defense in depth on top of the send-time check. Cap usage = active seats +
+          // pending invitations; this invite is STILL PENDING right now (it's marked ACCEPTED
+          // below), so we EXCLUDE it from the pending count for the PRIMARY venue — otherwise
+          // it would be counted twice (once as a pending seat, once as the active seat it's
+          // about to become) and wrongly block the legitimate accept (off-by-one). For
+          // inviteToAllVenues fan-out, only the invitation's own venue carries that pending
+          // row, so the exclusion only applies there.
+          await assertCanAddSeat(v.id, v.id === invitation.venueId ? { excludeInvitationId: invitation.id } : {})
 
           // Create new assignment
           await tx.staffVenue.create({

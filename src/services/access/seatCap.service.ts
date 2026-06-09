@@ -1,4 +1,4 @@
-import { StaffRole } from '@prisma/client'
+import { InvitationStatus, StaffRole } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { ForbiddenError } from '@/errors/AppError'
 import { getVenueBaseTier } from './basePlan.service'
@@ -6,10 +6,13 @@ import { getVenueBaseTier } from './basePlan.service'
 /**
  * Free-plan seat cap.
  *
- * Product rule: the Free tier allows at most {@link FREE_TIER_SEAT_CAP} ACTIVE users
- * per VENUE. Paid tiers (PLAN_PRO / PLAN_PREMIUM) are unlimited. The OWNER counts as
- * one of the seats. Platform support (StaffRole.SUPERADMIN) never counts and is never
- * blocked.
+ * Product rule: the Free tier allows at most {@link FREE_TIER_SEAT_CAP} users per VENUE,
+ * where "users" = ACTIVE non-support StaffVenue rows PLUS OUTSTANDING (pending, not-yet-
+ * expired) invitations — because an outstanding invite is a seat that's about to be filled.
+ * Counting pending invites toward the cap stops a Free venue at 1 active user from blasting
+ * out 5 invites that all pass the send-time check only to be 403'd one-by-one at accept time.
+ * Paid tiers (PLAN_PRO / PLAN_PREMIUM) are unlimited. The OWNER counts as one of the seats.
+ * Platform support (StaffRole.SUPERADMIN) never counts and is never blocked.
  *
  * Grandfathering: a venue with `seatCapExempt = true` is exempt forever (every venue
  * that existed at rollout is backfilled to true by the venue_seat_cap_exempt migration,
@@ -68,33 +71,86 @@ export async function getActiveSeatCount(venueId: string): Promise<number> {
 }
 
 /**
- * Whether another seat can be added to the venue right now.
- *   - `cap === null` → unlimited → always allowed.
- *   - otherwise allowed only while `current < cap`.
+ * Count of OUTSTANDING invitations that each reserve a seat at this venue: status PENDING
+ * (so NOT accepted / declined / revoked) AND not yet expired (`expiresAt > now`), targeting
+ * THIS venueId, EXCLUDING StaffRole.SUPERADMIN invites (support is never counted — same as
+ * active seats). Each such invite is a seat about to be filled, so it counts against the cap
+ * at SEND time — that's what stops a Free venue from over-inviting.
+ *
+ * An EXPIRED-but-still-PENDING row (status PENDING, expiresAt in the past) does NOT count:
+ * it can never be accepted (accept rejects expired invites) so it reserves nothing. The
+ * dashboard already renders those as "EXPIRED".
+ *
+ * `excludeInvitationId` drops one specific invitation from the count. The accept flow uses it
+ * to avoid double-counting the very invite being accepted: at accept time that invite is still
+ * PENDING (it's marked ACCEPTED later in the same transaction), so without excluding it the
+ * defense-in-depth accept-time check would count it once as a pending seat AND once as the
+ * active seat it's about to become — an off-by-one that wrongly blocks a legitimate accept.
  */
-export async function canAddSeat(venueId: string): Promise<{ allowed: boolean; cap: number | null; current: number }> {
+export async function getPendingInvitationCount(venueId: string, opts: { excludeInvitationId?: string } = {}): Promise<number> {
+  return prisma.invitation.count({
+    where: {
+      venueId,
+      status: InvitationStatus.PENDING,
+      expiresAt: { gt: new Date() }, // expired-but-pending reserves nothing — never counts
+      role: { not: StaffRole.SUPERADMIN },
+      ...(opts.excludeInvitationId ? { id: { not: opts.excludeInvitationId } } : {}),
+    },
+  })
+}
+
+/** Options shared by {@link canAddSeat} / {@link assertCanAddSeat}. */
+export interface SeatCheckOptions {
+  /**
+   * Invitation id to EXCLUDE from the pending count — used by the accept flow so the invite
+   * being accepted isn't counted as both a pending seat and the active seat it becomes
+   * (off-by-one). See {@link getPendingInvitationCount}.
+   */
+  excludeInvitationId?: string
+}
+
+/**
+ * Whether another seat can be added to the venue right now. Cap usage =
+ * active seats + outstanding (pending) invitations.
+ *   - `cap === null` → unlimited → always allowed.
+ *   - otherwise allowed only while `current < cap` (current = active + pending).
+ *
+ * Returns the breakdown so callers can surface it.
+ */
+export async function canAddSeat(
+  venueId: string,
+  opts: SeatCheckOptions = {},
+): Promise<{ allowed: boolean; cap: number | null; current: number; active: number; pending: number }> {
   const cap = await getVenueSeatCap(venueId)
+  const [active, pending] = await Promise.all([
+    getActiveSeatCount(venueId),
+    getPendingInvitationCount(venueId, { excludeInvitationId: opts.excludeInvitationId }),
+  ])
+  const current = active + pending
   if (cap === null) {
-    // Unlimited: no need to count for the decision (but report a count for callers that want it).
-    const current = await getActiveSeatCount(venueId)
-    return { allowed: true, cap: null, current }
+    // Unlimited: always allowed (but still report the breakdown for callers that want it).
+    return { allowed: true, cap: null, current, active, pending }
   }
-  const current = await getActiveSeatCount(venueId)
-  return { allowed: current < cap, cap, current }
+  return { allowed: current < cap, cap, current, active, pending }
 }
 
 /**
  * Throws a 403 {@link ForbiddenError} (code {@link SEAT_CAP_REACHED_CODE}) when the venue
- * is at/over its Free-tier seat cap. No-op for exempt / paid (unlimited) venues, and for
- * Free venues still under the cap. Call this BEFORE creating a new StaffVenue for the venue.
+ * is at/over its Free-tier seat cap, counting active seats AND outstanding (pending)
+ * invitations. No-op for exempt / paid (unlimited) venues, and for Free venues still under
+ * the cap. Call this BEFORE creating a new StaffVenue OR a new Invitation for the venue.
+ *
+ * Pass `excludeInvitationId` from the accept flow so the invite being accepted is not counted
+ * as both a pending seat and the active seat it becomes (off-by-one guard).
  *
  * The message is user-facing Spanish (it surfaces raw to the dashboard).
  */
-export async function assertCanAddSeat(venueId: string): Promise<void> {
-  const { allowed, cap } = await canAddSeat(venueId)
+export async function assertCanAddSeat(venueId: string, opts: SeatCheckOptions = {}): Promise<void> {
+  const { allowed, cap } = await canAddSeat(venueId, opts)
   if (allowed) return
   throw new ForbiddenError(
-    `Llegaste al límite de ${cap} usuarios del plan Gratis. Mejora a Pro para agregar usuarios ilimitados.`,
+    `Llegaste al límite de ${cap} usuarios del plan Gratis (incluye invitaciones pendientes). ` +
+      `Mejora a Pro para agregar usuarios ilimitados.`,
     SEAT_CAP_REACHED_CODE,
   )
 }

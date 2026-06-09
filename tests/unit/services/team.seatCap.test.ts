@@ -39,6 +39,9 @@ beforeEach(() => {
   prismaMock.staffVenue.findFirst.mockResolvedValue(null)
   prismaMock.staffVenue.findUnique.mockResolvedValue(null)
   prismaMock.invitation.findFirst.mockResolvedValue(null)
+  // Seat-cap usage = active seats + pending invitations. Default to 0 pending invites so the
+  // existing tests' staffVenue.count value IS the full usage; pending-aware tests override this.
+  prismaMock.invitation.count.mockResolvedValue(0)
   prismaMock.invitation.create.mockResolvedValue({
     id: 'inv-1',
     email: 'tpv@free.local',
@@ -137,13 +140,29 @@ describe('inviteTeamMember — Free-tier seat cap enforced at email invite SEND 
     expect(prismaMock.staff.create).not.toHaveBeenCalled()
   })
 
-  it('allows the email invite (creates the Invitation row) when the Free venue is under the cap (1 active seat)', async () => {
+  it('allows the email invite (creates the Invitation row) when the Free venue is under the cap (1 active + 0 pending)', async () => {
     prismaMock.staffVenue.count.mockResolvedValue(1) // under cap
+    prismaMock.invitation.count.mockResolvedValue(0) // no pending invites
     prismaMock.staff.create.mockResolvedValue({ id: 'staff-new', email: emailRequest.email } as any)
 
     await inviteTeamMember(VENUE_ID, INVITER_ID, emailRequest)
 
     expect(prismaMock.invitation.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('THROWS and creates NO Invitation row when the Free venue is full via 1 active + 1 PENDING invite (the founder bug)', async () => {
+    // 1 active seat + 1 outstanding invitation = 2 = the Free cap. A 2nd invite must be blocked
+    // at SEND time, not deferred to a confusing accept-time 403.
+    prismaMock.staffVenue.count.mockResolvedValue(1) // 1 active
+    prismaMock.invitation.count.mockResolvedValue(1) // 1 outstanding (pending) invite
+
+    await expect(inviteTeamMember(VENUE_ID, INVITER_ID, emailRequest)).rejects.toMatchObject({
+      statusCode: 403,
+      code: SEAT_CAP_REACHED_CODE,
+    })
+
+    expect(prismaMock.invitation.create).not.toHaveBeenCalled()
+    expect(prismaMock.staff.create).not.toHaveBeenCalled()
   })
 
   it('does NOT block the email invite for a grandfathered (exempt) venue even when over the cap', async () => {

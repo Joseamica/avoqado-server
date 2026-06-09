@@ -18,7 +18,7 @@ export function registerSeatTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'get_venue_seat_status',
-    'Free-tier user-seat status for a venue you can access: the seat cap (null = unlimited on a paid plan or grandfathered venue), how many ACTIVE non-support users it has right now, whether another user can still be added, and whether the venue is exempt (grandfathered) from the cap. Answers "¿cuántos usuarios puedo tener? ¿ya llegué al límite? ¿puedo agregar a alguien más?". Pass venueId. Read-only — does not add, remove or change any user.',
+    'Free-tier user-seat status for a venue you can access: the seat cap (null = unlimited on a paid plan or grandfathered venue), how many seats are in use right now broken down into ACTIVE non-support users and OUTSTANDING (pending, not-yet-expired) invitations, the combined total, whether another user can still be invited/added, and whether the venue is exempt (grandfathered) from the cap. Pending invitations COUNT against the cap (a venue at the cap via pending invites can\'t send more). Answers "¿cuántos usuarios puedo tener? ¿ya llegué al límite (contando invitaciones pendientes)? ¿puedo agregar a alguien más?". Pass venueId. Read-only — does not add, remove or change any user.',
     {
       venueId: z.string().describe('Venue whose seat status to read (must be in your scope)'),
     },
@@ -28,8 +28,10 @@ export function registerSeatTools(server: McpServer, scope: McpScope) {
       return text({
         venueId,
         cap: status.cap, // null = unlimited (paid plan or grandfathered)
-        current: status.current, // active, non-SUPERADMIN users counting against the cap
-        allowed: status.allowed, // whether one more seat can be added right now
+        active: status.active, // active, non-SUPERADMIN users
+        pending: status.pending, // outstanding (pending, not-yet-expired) invitations — also count against the cap
+        current: status.current, // active + pending — total seats counting against the cap
+        allowed: status.allowed, // whether one more seat can be added/invited right now
         exempt: status.exempt, // grandfathered → cap never enforced
       })
     },
