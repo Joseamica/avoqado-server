@@ -189,7 +189,7 @@ export async function getPlanState(venueId: string): Promise<PlanState> {
   return {
     hasPlan,
     state,
-    planTier: 'PRO', // PLAN_PRO. Multi-tier mapping is a future concern (Plan 2 / YAGNI).
+    planTier: vf.feature.code === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO', // derive tier from the active base-plan feature
     planName: vf.feature.name,
     interval: stripeSub?.interval ?? null,
     price,
