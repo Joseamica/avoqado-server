@@ -34,6 +34,11 @@ describe('Invite to All Venues Feature', () => {
     slug: 'test-venue',
     name: 'Test Venue',
     organizationId: mockOrganizationId,
+    // Grandfathered: this suite predates and is unrelated to the Free-tier seat cap.
+    // Marking the venue exempt makes assertCanAddSeat a no-op so the cap doesn't
+    // interfere with the inviteToAllVenues assertions. Seat-cap behavior itself is
+    // covered by seatCap.service.test.ts + team.seatCap.test.ts.
+    seatCapExempt: true,
     organization: {
       id: mockOrganizationId,
       name: 'Test Organization',

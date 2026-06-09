@@ -88,6 +88,13 @@ jest.mock('../../../src/services/staffOrganization.service', () => ({
   getOrganizationIdFromVenue: jest.fn().mockResolvedValue('org-1'),
 }))
 
+// Seat cap is enforced at StaffVenue creation, but this suite's prismaClient mock only
+// stubs $transaction (no top-level venue/staffVenue). Stub assertCanAddSeat to a no-op —
+// the Free-tier cap itself is covered by seatCap.service.test.ts + team.seatCap.test.ts.
+jest.mock('../../../src/services/access/seatCap.service', () => ({
+  assertCanAddSeat: jest.fn().mockResolvedValue(undefined),
+}))
+
 import { acceptInvitation } from '../../../src/services/invitation.service'
 
 describe('Invitation - StaffOrganization', () => {

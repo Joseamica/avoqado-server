@@ -9,6 +9,7 @@ import { getRoleDisplayName } from './dashboard/venueRoleConfig.dashboard.servic
 import { ROLE_HIERARCHY } from '../lib/permissions'
 import { createStaffOrganizationMembership, getPrimaryOrganizationId, getOrganizationIdFromVenue } from './staffOrganization.service'
 import { logAction } from './dashboard/activity-log.service'
+import { assertCanAddSeat } from './access/seatCap.service'
 
 interface AcceptInvitationData {
   firstName?: string
@@ -369,6 +370,11 @@ export async function acceptInvitation(token: string, userData: AcceptInvitation
             },
           })
         } else {
+          // Free-tier seat cap: enforce per target venue before adding a brand-new seat.
+          // Re-activating an existing assignment (the `if` branch above) is intentionally
+          // not blocked here. Exempt/paid venues are unlimited (no-op).
+          await assertCanAddSeat(v.id)
+
           // Create new assignment
           await tx.staffVenue.create({
             data: {

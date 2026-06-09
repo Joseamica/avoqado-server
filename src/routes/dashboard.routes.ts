@@ -215,6 +215,7 @@ import {
   planParamsSchema,
   createPlanCheckoutSessionSchema,
   applyRetentionOfferSchema,
+  downgradeToFreeSchema,
 } from '../schemas/dashboard/venue.schema'
 import {
   // Wrapped schemas for route validation (use these with validateRequest)
@@ -2078,6 +2079,100 @@ router.post(
   checkPermission('billing:subscriptions:manage'),
   validateRequest(planParamsSchema) as RequestHandler,
   venueController.reactivateVenuePlan,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/plan/downgrade-preview:
+ *   get:
+ *     tags: [Venues]
+ *     summary: Preview a Pro→Free downgrade (whether a "choose who stays" selection is required)
+ *     description: >-
+ *       Returns whether the venue has more active users than the Free seat cap allows
+ *       (required=true), the cap, the current active-seat count, and the cap-counting roster the
+ *       owner picks from (the OWNER row is flagged isOwner and is always kept).
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: Downgrade preview }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.get(
+  '/venues/:venueId/plan/downgrade-preview',
+  authenticateTokenMiddleware,
+  checkPermission('billing:subscriptions:read'),
+  validateRequest(planParamsSchema) as RequestHandler,
+  venueController.getVenueDowngradePreview,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/plan/seat-status:
+ *   get:
+ *     tags: [Venues]
+ *     summary: Free-plan seat cap status (used to gate the Invite CTA proactively)
+ *     description: >-
+ *       Returns the Free-tier seat cap (null = unlimited for paid/exempt venues), the current
+ *       active cap-counting seat count, whether another seat may be added, and whether the venue
+ *       is grandfathered/exempt from the cap.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *     responses:
+ *       200: { description: Seat status }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.get(
+  '/venues/:venueId/plan/seat-status',
+  authenticateTokenMiddleware,
+  checkPermission('billing:subscriptions:read'),
+  validateRequest(planParamsSchema) as RequestHandler,
+  venueController.getVenueSeatStatus,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/plan/downgrade:
+ *   post:
+ *     tags: [Venues]
+ *     summary: Schedule a Pro→Free downgrade with the "choose who stays" selection
+ *     description: >-
+ *       Cancels the paid base plan at period end (cancel-at-period-end) and captures which
+ *       StaffVenue ids stay active on Free. The selection is executed at period end (non-kept
+ *       seats deactivated) by the Stripe webhook; reactivating before period end cancels it.
+ *       Validation: every id must be an active, cap-counting StaffVenue of this venue; the OWNER
+ *       must be included; at most the Free cap (2). An empty list is allowed only when the venue
+ *       is already at/under the cap (skip). Returns the updated PlanState.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string } }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               keepStaffVenueIds:
+ *                 type: array
+ *                 items: { type: string }
+ *     responses:
+ *       200: { description: Updated PlanState }
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.post(
+  '/venues/:venueId/plan/downgrade',
+  authenticateTokenMiddleware,
+  checkPermission('billing:subscriptions:manage'),
+  validateRequest(downgradeToFreeSchema) as RequestHandler,
+  venueController.downgradeVenueToFree,
 )
 
 /**

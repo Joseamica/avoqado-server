@@ -280,9 +280,26 @@ export async function cancelPlan(venueId: string): Promise<PlanState> {
   return setCancelIntent(venueId, true)
 }
 
-/** Undo a scheduled cancellation. */
+/**
+ * Undo a scheduled cancellation. Also cancels any pending Pro→Free seat reconciliation: if the
+ * owner scheduled a downgrade-to-Free (capturing a "who stays" selection) and then reactivates
+ * before period end, nobody should be deactivated. Best-effort — clearing the pending selection
+ * must never block reactivation (a leftover selection would otherwise only execute if the plan
+ * actually ends, which reactivation just prevented; we clear it anyway to keep state clean).
+ */
 export async function reactivatePlan(venueId: string): Promise<PlanState> {
-  return setCancelIntent(venueId, false)
+  const planState = await setCancelIntent(venueId, false)
+  try {
+    // Imported lazily to avoid a require cycle (seatReconciliation.service imports planState.service).
+    const { clearPendingReconciliation } = await import('./seatReconciliation.service')
+    await clearPendingReconciliation(venueId)
+  } catch (error) {
+    logger.warn('reactivatePlan: failed to clear pending seat reconciliation (non-fatal)', {
+      venueId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+  }
+  return planState
 }
 
 /** Stripe coupon applied when a merchant accepts the "stay" retention offer (see scripts/seed-retention-coupon.ts). */

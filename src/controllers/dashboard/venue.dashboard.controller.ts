@@ -24,6 +24,7 @@
 import { NextFunction, Request, Response } from 'express'
 import * as venueDashboardService from '../../services/dashboard/venue.dashboard.service'
 import * as planStateService from '../../services/dashboard/planState.service'
+import * as seatReconciliationService from '../../services/dashboard/seatReconciliation.service'
 
 import { CreateVenueDto, ListVenuesQueryDto, ConvertDemoVenueDto } from '../../schemas/dashboard/venue.schema'
 import { EnhancedCreateVenueBody } from '../../schemas/dashboard/cost-management.schema'
@@ -568,6 +569,71 @@ export async function applyVenueRetentionOffer(
     res.status(200).json({ success: true, data: planState })
   } catch (error) {
     logger.error('Error applying venue retention offer', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      venueId: req.params?.venueId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Preview a Pro→Free downgrade: whether a "choose who stays" selection is required (the venue
+ * has more active users than the Free seat cap allows), the cap, the current active-seat count,
+ * and the roster the owner picks from (OWNER row flagged isOwner).
+ * GET /api/v1/dashboard/venues/:venueId/plan/downgrade-preview
+ */
+export async function getVenueDowngradePreview(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const preview = await seatReconciliationService.getDowngradePreview(venueId)
+    res.status(200).json({ success: true, data: preview })
+  } catch (error) {
+    logger.error('Error getting venue downgrade preview', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      venueId: req.params?.venueId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Schedule a Pro→Free downgrade (cancel-at-period-end) capturing the "choose who stays"
+ * selection. The selection is executed at period end (non-kept seats deactivated) by the
+ * Stripe webhook; reactivating before period end cancels it. Returns the updated PlanState.
+ * POST /api/v1/dashboard/venues/:venueId/plan/downgrade
+ */
+export async function downgradeVenueToFree(
+  req: Request<{ venueId: string }, any, { keepStaffVenueIds?: string[] }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const keepStaffVenueIds = req.body.keepStaffVenueIds ?? []
+    const planState = await seatReconciliationService.scheduleDowngradeToFree(venueId, keepStaffVenueIds)
+    res.status(200).json({ success: true, data: planState })
+  } catch (error) {
+    logger.error('Error scheduling venue downgrade to Free', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      venueId: req.params?.venueId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Free-plan seat cap status for a venue (used by the dashboard to gate the "Invite" CTA
+ * proactively). Returns the cap (null = unlimited), the current active-seat count, whether
+ * another seat may be added, and whether the venue is grandfathered/exempt.
+ * GET /api/v1/dashboard/venues/:venueId/plan/seat-status
+ */
+export async function getVenueSeatStatus(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const status = await seatReconciliationService.getVenueSeatStatus(venueId)
+    res.status(200).json({ success: true, data: status })
+  } catch (error) {
+    logger.error('Error getting venue seat status', {
       error: error instanceof Error ? error.message : 'Unknown error',
       venueId: req.params?.venueId,
     })

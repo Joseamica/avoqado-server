@@ -5,6 +5,7 @@ import { StaffRole, OrgRole, InvitationStatus } from '@prisma/client'
 import * as jwtService from '../../jwt.service'
 import logger from '@/config/logger'
 import { getPrimaryOrganizationId } from '../staffOrganization.service'
+import { assertCanAddSeat } from '../access/seatCap.service'
 
 // Validate Google OAuth configuration
 if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET || !process.env.FRONTEND_URL) {
@@ -240,6 +241,12 @@ export async function loginWithGoogle(
     // Create staff-venue relationship and mark invitation as accepted IN PARALLEL
     // These operations are independent and can run concurrently
     const venueId = invitation.venueId || invitation.venue.id
+
+    // Free-tier seat cap: this is a brand-new Google-signup accepting an invite, so the
+    // create below always adds a new seat. Enforce before creating it. Exempt/paid venues
+    // are unlimited (no-op).
+    await assertCanAddSeat(venueId)
+
     await Promise.all([
       prisma.staffVenue.create({
         data: {

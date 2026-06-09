@@ -219,6 +219,24 @@ model Venue {
   // docs/superpowers/specs/2026-06-02-venue-base-subscription-design.md
   planTier PlanTier?
 
+  // Free-plan seat cap grandfathering. true = exempt forever from the Free-tier
+  // active-user cap (2 users/venue); the seat cap is NEVER enforced for this venue.
+  // Every venue that existed at rollout is backfilled to true (grandfathered) so the
+  // 47 legacy venues already over 2 users don't break. New venues default to false
+  // (enforced once they end up on the Free tier). See seatCap.service.ts.
+  seatCapExempt Boolean @default(false)
+
+  /// Pending Pro→Free DOWNGRADE seat reconciliation (the "choose who stays" selection),
+  /// captured NOW but EXECUTED at period end. Set by scheduleDowngradeToFree when a venue
+  /// over the Free seat cap schedules a cancel-at-period-end; cleared on reactivation
+  /// (clearPendingReconciliation) or after execution (executeSeatReconciliation). When the
+  /// paid subscription actually ends (Stripe webhook canceled/deleted), every ACTIVE
+  /// non-SUPERADMIN StaffVenue NOT in keepStaffVenueIds is deactivated (active=false,
+  /// endDate=now) — never deleted, so it stays reactivatable. NULL = nothing pending.
+  /// JSON shape: { keepStaffVenueIds: string[], scheduledFor: string (ISO period end),
+  ///   createdAt: string (ISO) }. See seatReconciliation.service.ts.
+  pendingSeatReconciliation Json?
+
   // POS Integration
   posType   PosType?
   posConfig Json? // Encrypted POS credentials
@@ -896,6 +914,12 @@ model StaffVenue {
   active    Boolean   @default(true)
   startDate DateTime  @default(now())
   endDate   DateTime?
+
+  // True ONLY for rows the Free-tier seat cap deactivated on a Pro→Free downgrade
+  // (executeSeatReconciliation). Lets a later RE-UPGRADE to Pro/Premium auto-reactivate
+  // exactly these seats (reactivateSeatCapDeactivated) — without touching people who were
+  // fired/quit. Reset to false whenever the seat is reactivated.
+  deactivatedBySeatCap Boolean @default(false)
 
   // Relations
   loyaltyTransactionsCreated LoyaltyTransaction[] @relation("LoyaltyTransactionCreatedBy")

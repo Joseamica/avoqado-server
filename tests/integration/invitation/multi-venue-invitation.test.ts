@@ -101,6 +101,14 @@ jest.mock('../../../src/utils/prismaClient', () => ({
   default: mockPrismaClient,
 }))
 
+// Seat cap is enforced at StaffVenue creation. This suite drives a hand-rolled
+// mockPrismaClient that doesn't stub the base-plan/seat-count reads, and these tests are
+// about multi-venue PIN/role behavior, not the cap. Stub assertCanAddSeat to a no-op —
+// the Free-tier cap is covered by seatCap.service.test.ts + team.seatCap.test.ts.
+jest.mock('../../../src/services/access/seatCap.service', () => ({
+  assertCanAddSeat: jest.fn().mockResolvedValue(undefined),
+}))
+
 // Import after mocks
 import { v4 as uuidv4 } from 'uuid'
 import bcrypt from 'bcrypt'

@@ -64,6 +64,17 @@ export function summarizeSubscriptions(rows: SuperadminVenueSubscription[]): Sub
 // idempotency, scope). TODO: add an `apply_retention_offer` action tool alongside
 // `start_plan_checkout` once that surface lands. Read state (incl. retentionOfferEligible) via
 // the plan endpoint / `subscription_status` below in the meantime.
+//
+// CAPABILITY NOTE (MCP sync): the backend also exposes the Pro→Free DOWNGRADE seat-reconciliation
+// flow — GET /api/v1/dashboard/venues/:venueId/plan/downgrade-preview (read) and
+// POST /api/v1/dashboard/venues/:venueId/plan/downgrade (write, body { keepStaffVenueIds }),
+// backed by seatReconciliation.service (scheduleDowngradeToFree → planStateService.cancelPlan +
+// pendingSeatReconciliation; executeSeatReconciliation runs on the paid→Free Stripe webhook).
+// The downgrade POST is a billing WRITE that schedules a cancel-at-period-end AND captures which
+// seats get deactivated at period end — intentionally NOT an MCP tool yet for the same reason as
+// plan/checkout and retention-offer (needs a vetted action/write surface: confirmation UX,
+// idempotency, scope). The READ side IS exposed: `get_venue_seat_status` (tools/seats.ts) returns
+// the venue's seat cap / current count / allowed / exempt, read-only.
 export function registerSubscriptionTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
 

@@ -232,3 +232,23 @@ export const applyRetentionOfferSchema = z.object({
 })
 
 export type ApplyRetentionOfferDto = z.infer<typeof applyRetentionOfferSchema.shape.body>
+
+// Schema for scheduling a Pro→Free downgrade with the "choose who stays" selection
+// (POST /venues/:venueId/plan/downgrade). The body carries the StaffVenue ids to keep active
+// on Free. Empty is allowed (skip — only needed when the venue is over the Free seat cap; the
+// service does the cap / ownership / owner-must-stay validation). Messages are user-facing
+// Spanish (they surface raw to the dashboard).
+export const downgradeToFreeSchema = z.object({
+  params: z.object({
+    venueId: z.string({ required_error: 'El ID del venue es requerido' }).min(1, { message: 'El ID del venue es requerido' }),
+  }),
+  body: z.object({
+    keepStaffVenueIds: z
+      .array(z.string({ invalid_type_error: 'Cada ID de usuario debe ser un texto.' }).min(1, { message: 'ID de usuario inválido.' }), {
+        invalid_type_error: 'La lista de usuarios a conservar debe ser un arreglo.',
+      })
+      .default([]),
+  }),
+})
+
+export type DowngradeToFreeDto = z.infer<typeof downgradeToFreeSchema.shape.body>

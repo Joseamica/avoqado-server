@@ -8,7 +8,7 @@ import Stripe from 'stripe'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
-import { venueHasActiveBasePlan, PAID_PLAN_TIER_CODES } from '@/services/access/basePlan.service'
+import { getVenueBaseTier, PAID_PLAN_TIER_CODES, PREMIUM_ONLY_CODES } from '@/services/access/basePlan.service'
 import { cancelSubscription, createTrialSubscriptions } from '../stripe.service'
 import { logAction } from './activity-log.service'
 
@@ -295,16 +295,29 @@ export async function getVenueFeatureStatus(venueId: string) {
   const activeFeatureIds = venue.features.map(vf => vf.featureId)
   const availableFeatures = allFeatures.filter(f => !activeFeatureIds.includes(f.id))
 
-  // Base-plan blanket grant (mirror of checkFeatureAccess + getFeatureMetadataForVenue):
-  // when the venue has an active base plan (PLAN_PRO active or trialing) every PREMIUM
-  // feature it doesn't already own à-la-carte must surface as UNLOCKED in this paywall
-  // payload too — otherwise a paying venue still sees premium features as locked upsell
-  // cards. This is a pure UNION: features the venue already owns (real VenueFeature rows
-  // in `venue.features`) keep their richer state untouched; we only promote the ones that
-  // would otherwise be in `availableFeatures`. The plan-tier codes themselves are excluded.
-  const hasBasePlan = await venueHasActiveBasePlan(venueId)
+  // Tier-aware base-plan blanket grant (mirror of checkFeatureAccess + getFeatureMetadataForVenue):
+  // a premium feature the venue doesn't already own à-la-carte surfaces as UNLOCKED in this paywall
+  // payload ONLY when the venue's base tier actually covers it — otherwise a paying venue still sees
+  // premium features as locked upsell cards, and (the bug this fixes) a PRO venue was incorrectly
+  // shown CFDI / INVENTORY_TRACKING as granted even though the access gate 403s them.
+  //   - PREMIUM tier unlocks ALL non-tier features.
+  //   - PRO tier unlocks all non-tier features EXCEPT the Premium-only differentiators (PREMIUM_ONLY_CODES).
+  //   - no active tier unlocks nothing.
+  // This is a pure UNION: features the venue already owns (real VenueFeature rows in `venue.features`)
+  // keep their richer state untouched; we only promote the ones that would otherwise be in
+  // `availableFeatures`. The plan-tier codes themselves are never blanket-granted.
+  const baseTier = await getVenueBaseTier(venueId)
   const isPlanTierCode = (code: string): boolean => (PAID_PLAN_TIER_CODES as readonly string[]).includes(code)
-  const basePlanGrantedFeatures = hasBasePlan ? availableFeatures.filter(f => !isPlanTierCode(f.code)) : []
+  const isPremiumOnlyCode = (code: string): boolean => (PREMIUM_ONLY_CODES as readonly string[]).includes(code)
+  // Tier-aware grant predicate — same rule as the checkFeatureAccess middleware:
+  // grantedByPlan = tier === 'PREMIUM' || (tier === 'PRO' && !PREMIUM_ONLY_CODES.includes(code))
+  const tierGrants = (code: string): boolean => {
+    if (isPlanTierCode(code)) return false // tier codes never self-grant via the blanket
+    if (baseTier === 'PREMIUM') return true
+    if (baseTier === 'PRO') return !isPremiumOnlyCode(code)
+    return false
+  }
+  const basePlanGrantedFeatures = availableFeatures.filter(f => tierGrants(f.code))
   const basePlanGrantedIds = new Set(basePlanGrantedFeatures.map(f => f.id))
   // Features that remain genuinely locked (no base plan, or the plan-tier feature itself).
   const lockedAvailableFeatures = availableFeatures.filter(f => !basePlanGrantedIds.has(f.id))

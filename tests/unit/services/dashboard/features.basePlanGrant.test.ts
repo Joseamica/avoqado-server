@@ -2,32 +2,55 @@ import { prismaMock } from '@tests/__helpers__/setup'
 import { getVenueFeatureStatus } from '@/services/dashboard/venueFeature.dashboard.service'
 
 /**
- * Verifies the base-plan blanket grant is mirrored into the dashboard paywall
- * payload (getVenueFeatureStatus → GET /dashboard/venues/:venueId/features).
+ * Verifies the TIER-AWARE base-plan blanket grant is mirrored into the dashboard
+ * paywall payload (getVenueFeatureStatus → GET /dashboard/venues/:venueId/features).
  *
  * This endpoint expresses "gate state" as a TWO-ARRAY partition rather than an
  * enum: `activeFeatures` (owned / unlocked, rendered with billing badge) vs
  * `availableFeatures` (locked upsell cards with a Subscribe button). The base
  * plan grant must therefore PROMOTE premium features the venue lacks à-la-carte
- * from `availableFeatures` into `activeFeatures` when PLAN_PRO is active — a pure
- * UNION that never removes access a venue already has, and never touches the
- * plan-tier feature itself.
+ * from `availableFeatures` into `activeFeatures` — but ONLY the ones the venue's
+ * tier actually covers, mirroring the checkFeatureAccess middleware:
+ *   - PREMIUM tier unlocks ALL non-tier features.
+ *   - PRO tier unlocks all non-tier features EXCEPT the Premium-only
+ *     differentiators (PREMIUM_ONLY_CODES = CFDI, INVENTORY_TRACKING).
+ *   - no active tier unlocks nothing.
+ * It is a pure UNION that never removes access a venue already has, and never
+ * touches the plan-tier feature itself.
+ *
+ * Mock routing: getVenueBaseTier scans VenueFeature via findMany with a
+ * `where.feature.code.in` filter; the historical-usage query is a findMany
+ * WITHOUT that filter. We route findMany by the presence of that filter so the
+ * tier scan returns the venue's PLAN_* rows and the history query returns [].
  */
-describe('getVenueFeatureStatus base-plan blanket grant', () => {
+describe('getVenueFeatureStatus tier-aware base-plan blanket grant', () => {
   const VENUE_ID = 'venue_baseplan'
 
-  const PREMIUM_FEATURE = {
-    id: 'feat_inventory',
-    code: 'INVENTORY',
-    name: 'Inventory',
-    description: 'Inventory tracking',
-    monthlyPrice: '89.00',
-    stripeProductId: 'prod_inv',
-    stripePriceId: 'price_inv',
+  // Premium-only differentiator (CFDI). Pro must NOT blanket-grant this.
+  const PREMIUM_ONLY_FEATURE = {
+    id: 'feat_cfdi',
+    code: 'CFDI',
+    name: 'Facturación CFDI',
+    description: 'CFDI 4.0 invoicing',
+    monthlyPrice: '0.00',
+    stripeProductId: 'prod_cfdi',
+    stripePriceId: 'price_cfdi',
     active: true,
   }
 
-  const PLAN_TIER_FEATURE = {
+  // Normal premium feature — granted by BOTH Pro and Premium tiers.
+  const NORMAL_FEATURE = {
+    id: 'feat_loyalty',
+    code: 'LOYALTY_PROGRAM',
+    name: 'Loyalty',
+    description: 'Loyalty program',
+    monthlyPrice: '599.00',
+    stripeProductId: 'prod_loyalty',
+    stripePriceId: 'price_loyalty',
+    active: true,
+  }
+
+  const PLAN_PRO_FEATURE = {
     id: 'feat_plan_pro',
     code: 'PLAN_PRO',
     name: 'Plan Pro',
@@ -38,9 +61,27 @@ describe('getVenueFeatureStatus base-plan blanket grant', () => {
     active: true,
   }
 
-  beforeEach(() => {
-    // Venue with NO à-la-carte VenueFeature rows and no Stripe payment method
-    // (so the Stripe paymentMethods.retrieve branch is skipped entirely).
+  const PLAN_PREMIUM_FEATURE = {
+    id: 'feat_plan_premium',
+    code: 'PLAN_PREMIUM',
+    name: 'Plan Premium',
+    description: 'Base plan',
+    monthlyPrice: '1699.00',
+    stripeProductId: 'prod_plan_premium',
+    stripePriceId: 'price_plan_premium',
+    active: true,
+  }
+
+  const CATALOG = [PREMIUM_ONLY_FEATURE, NORMAL_FEATURE, PLAN_PRO_FEATURE, PLAN_PREMIUM_FEATURE]
+
+  /** Active-window VenueFeature snapshot fields getVenueBaseTier reads. */
+  const ACTIVE_TIER_SNAP = { active: true, suspendedAt: null, endDate: null }
+
+  /**
+   * Wire the prisma mocks for a venue with NO à-la-carte VenueFeature rows.
+   * @param tierCodes  PLAN_* codes the venue currently has active (the tier scan result)
+   */
+  function mockVenueWithTier(tierCodes: string[]) {
     prismaMock.venue.findUnique.mockResolvedValue({
       id: VENUE_ID,
       name: 'Test Venue',
@@ -48,63 +89,85 @@ describe('getVenueFeatureStatus base-plan blanket grant', () => {
       stripePaymentMethodId: null,
       features: [],
     } as any)
-    // All active platform features.
-    prismaMock.feature.findMany.mockResolvedValue([PREMIUM_FEATURE, PLAN_TIER_FEATURE] as any)
-    // No historical (canceled) VenueFeature rows.
-    prismaMock.venueFeature.findMany.mockResolvedValue([] as any)
-  })
+    prismaMock.feature.findMany.mockResolvedValue(CATALOG as any)
+    prismaMock.venueFeature.findMany.mockImplementation(async ({ where }: any) => {
+      if (where?.feature?.code?.in) {
+        // getVenueBaseTier tier scan → only the venue's active PLAN_* rows.
+        return tierCodes
+          .filter(code => where.feature.code.in.includes(code))
+          .map(code => ({ ...ACTIVE_TIER_SNAP, feature: { code } })) as any
+      }
+      // Historical (canceled) usage query → none.
+      return [] as any
+    })
+  }
 
-  it('promotes a premium feature with NO à-la-carte row into activeFeatures when the base plan is active', async () => {
-    // venueHasActiveBasePlan() → true (active PLAN_PRO, paid, not suspended)
-    prismaMock.venueFeature.findFirst.mockResolvedValue({
-      active: true,
-      suspendedAt: null,
-      endDate: null,
-    } as any)
-
-    const status = await getVenueFeatureStatus(VENUE_ID)
-
-    const inventoryActive = status.activeFeatures.find(f => f.feature.code === 'INVENTORY')
-    expect(inventoryActive).toBeDefined()
-    expect(inventoryActive?.active).toBe(true)
-    // Synthesized grant carries the marker + no Stripe subscription.
-    expect((inventoryActive as any)?.grantedByBasePlan).toBe(true)
-    expect(inventoryActive?.stripeSubscriptionId).toBeNull()
-    // ...and it is no longer offered as a locked upsell card.
-    expect(status.availableFeatures.find(f => f.code === 'INVENTORY')).toBeUndefined()
-  })
-
-  it('leaves the premium feature LOCKED (in availableFeatures) when the base plan is inactive', async () => {
-    // venueHasActiveBasePlan() → false (no PLAN_PRO row)
-    prismaMock.venueFeature.findFirst.mockResolvedValue(null as any)
+  it('PRO tier: promotes a NORMAL premium feature but does NOT promote a Premium-only feature (CFDI)', async () => {
+    mockVenueWithTier(['PLAN_PRO'])
 
     const status = await getVenueFeatureStatus(VENUE_ID)
 
-    expect(status.activeFeatures.find(f => f.feature.code === 'INVENTORY')).toBeUndefined()
-    const inventoryAvailable = status.availableFeatures.find(f => f.code === 'INVENTORY')
-    expect(inventoryAvailable).toBeDefined()
+    // Normal feature is granted-by-plan and removed from the locked upsell list.
+    const loyaltyActive = status.activeFeatures.find(f => f.feature.code === 'LOYALTY_PROGRAM')
+    expect(loyaltyActive).toBeDefined()
+    expect((loyaltyActive as any)?.grantedByBasePlan).toBe(true)
+    expect(loyaltyActive?.stripeSubscriptionId).toBeNull()
+    expect(status.availableFeatures.find(f => f.code === 'LOYALTY_PROGRAM')).toBeUndefined()
+
+    // REGRESSION: Pro must NOT synthesize CFDI (Premium-only) as grantedByBasePlan —
+    // the access middleware 403s it, so the paywall must keep it as a locked upsell.
+    expect(status.activeFeatures.find(f => f.feature.code === 'CFDI')).toBeUndefined()
+    expect(status.availableFeatures.find(f => f.code === 'CFDI')).toBeDefined()
+  })
+
+  it('PREMIUM tier: promotes BOTH the normal feature and the Premium-only feature (CFDI)', async () => {
+    mockVenueWithTier(['PLAN_PREMIUM'])
+
+    const status = await getVenueFeatureStatus(VENUE_ID)
+
+    const loyaltyActive = status.activeFeatures.find(f => f.feature.code === 'LOYALTY_PROGRAM')
+    expect(loyaltyActive).toBeDefined()
+    expect((loyaltyActive as any)?.grantedByBasePlan).toBe(true)
+
+    // Premium DOES blanket-grant CFDI.
+    const cfdiActive = status.activeFeatures.find(f => f.feature.code === 'CFDI')
+    expect(cfdiActive).toBeDefined()
+    expect((cfdiActive as any)?.grantedByBasePlan).toBe(true)
+    expect(cfdiActive?.stripeSubscriptionId).toBeNull()
+    expect(status.availableFeatures.find(f => f.code === 'CFDI')).toBeUndefined()
+  })
+
+  it('leaves every premium feature LOCKED (in availableFeatures) when there is no active base plan', async () => {
+    mockVenueWithTier([]) // no PLAN_* rows → tier null
+
+    const status = await getVenueFeatureStatus(VENUE_ID)
+
+    expect(status.activeFeatures.find(f => f.feature.code === 'LOYALTY_PROGRAM')).toBeUndefined()
+    expect(status.activeFeatures.find(f => f.feature.code === 'CFDI')).toBeUndefined()
+    expect(status.availableFeatures.find(f => f.code === 'LOYALTY_PROGRAM')).toBeDefined()
+    expect(status.availableFeatures.find(f => f.code === 'CFDI')).toBeDefined()
   })
 
   it('never force-promotes the plan-tier feature itself via the blanket grant', async () => {
-    // Base plan active, but PLAN_PRO has no separate active VenueFeature row in
-    // this snapshot → it must stay in availableFeatures (its real state), NOT be
-    // unlocked by the grant it represents. A normal premium feature IS promoted.
-    prismaMock.venueFeature.findFirst.mockResolvedValue({
-      active: true,
-      suspendedAt: null,
-      endDate: null,
-    } as any)
+    mockVenueWithTier(['PLAN_PREMIUM'])
 
     const status = await getVenueFeatureStatus(VENUE_ID)
 
+    // The PLAN_* catalog entries have no own active VenueFeature row in `venue.features`
+    // here, so they must stay in availableFeatures — the grant they represent must not
+    // unlock the tier code itself.
     expect(status.activeFeatures.find(f => f.feature.code === 'PLAN_PRO')).toBeUndefined()
+    expect(status.activeFeatures.find(f => f.feature.code === 'PLAN_PREMIUM')).toBeUndefined()
     expect(status.availableFeatures.find(f => f.code === 'PLAN_PRO')).toBeDefined()
-    // Sanity: the union still granted the real premium feature in the same call.
-    expect(status.activeFeatures.find(f => f.feature.code === 'INVENTORY')).toBeDefined()
+    expect(status.availableFeatures.find(f => f.code === 'PLAN_PREMIUM')).toBeDefined()
+    // Sanity: the union still granted a real premium feature in the same call.
+    expect(status.activeFeatures.find(f => f.feature.code === 'LOYALTY_PROGRAM')).toBeDefined()
   })
 
-  it('preserves an existing à-la-carte active feature untouched (pure UNION, no duplication)', async () => {
-    // Venue already owns INVENTORY à-la-carte (real VenueFeature row, trialing).
+  it('PRO tier + own active CFDI grant (grandfather): CFDI stays in activeFeatures as a real à-la-carte row', async () => {
+    // REGRESSION guard for the "explicit grants always show" rule: a PRO venue that
+    // grandfathered CFDI à-la-carte must still see CFDI as owned (its REAL VenueFeature
+    // row), even though the tier-aware blanket grant would NOT synthesize it for Pro.
     const trialEnd = new Date(Date.now() + 7 * 86400000)
     prismaMock.venue.findUnique.mockResolvedValue({
       id: VENUE_ID,
@@ -113,35 +176,39 @@ describe('getVenueFeatureStatus base-plan blanket grant', () => {
       stripePaymentMethodId: null,
       features: [
         {
-          id: 'vf_inventory',
+          id: 'vf_cfdi',
           venueId: VENUE_ID,
-          featureId: PREMIUM_FEATURE.id,
-          feature: PREMIUM_FEATURE,
+          featureId: PREMIUM_ONLY_FEATURE.id,
+          feature: PREMIUM_ONLY_FEATURE,
           active: true,
-          monthlyPrice: '89.00',
+          monthlyPrice: '0.00',
           startDate: new Date(),
           endDate: trialEnd,
-          stripeSubscriptionId: 'sub_inv',
-          stripePriceId: 'price_inv',
+          stripeSubscriptionId: 'sub_cfdi',
+          stripePriceId: 'price_cfdi',
         },
       ],
     } as any)
-    // Base plan ALSO active.
-    prismaMock.venueFeature.findFirst.mockResolvedValue({
-      active: true,
-      suspendedAt: null,
-      endDate: null,
-    } as any)
+    prismaMock.feature.findMany.mockResolvedValue(CATALOG as any)
+    prismaMock.venueFeature.findMany.mockImplementation(async ({ where }: any) => {
+      if (where?.feature?.code?.in) {
+        // Tier scan → active PLAN_PRO.
+        return where.feature.code.in.includes('PLAN_PRO') ? [{ ...ACTIVE_TIER_SNAP, feature: { code: 'PLAN_PRO' } }] : ([] as any)
+      }
+      return [] as any
+    })
 
     const status = await getVenueFeatureStatus(VENUE_ID)
 
-    // Exactly one INVENTORY entry, the original à-la-carte one (not duplicated,
-    // not relabeled by the grant). Its trial endDate + real subscription survive.
-    const inventoryEntries = status.activeFeatures.filter(f => f.feature.code === 'INVENTORY')
-    expect(inventoryEntries).toHaveLength(1)
-    expect(inventoryEntries[0].id).toBe('vf_inventory')
-    expect(inventoryEntries[0].stripeSubscriptionId).toBe('sub_inv')
-    expect(inventoryEntries[0].endDate).toEqual(trialEnd)
-    expect((inventoryEntries[0] as any).grantedByBasePlan).toBeUndefined()
+    // Exactly one CFDI entry, the original à-la-carte one (not duplicated, not relabeled,
+    // not dropped just because Pro doesn't blanket-grant it). Its trial + real sub survive.
+    const cfdiEntries = status.activeFeatures.filter(f => f.feature.code === 'CFDI')
+    expect(cfdiEntries).toHaveLength(1)
+    expect(cfdiEntries[0].id).toBe('vf_cfdi')
+    expect(cfdiEntries[0].stripeSubscriptionId).toBe('sub_cfdi')
+    expect(cfdiEntries[0].endDate).toEqual(trialEnd)
+    expect((cfdiEntries[0] as any).grantedByBasePlan).toBeUndefined()
+    // ...and CFDI is not offered as a locked upsell card.
+    expect(status.availableFeatures.find(f => f.code === 'CFDI')).toBeUndefined()
   })
 })
