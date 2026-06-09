@@ -7,7 +7,8 @@ import { text } from '../respond'
 import { serializedInventoryService } from '@/services/serialized-inventory/serializedInventory.service'
 import { auditMcpWrite } from '../audit'
 import { adjustInventoryStock } from '@/services/dashboard/productInventory.service'
-import { MovementType } from '@prisma/client'
+import { createRawMaterial } from '@/services/dashboard/rawMaterial.service'
+import { MovementType, RawMaterialCategory, Unit } from '@prisma/client'
 
 const MOVEMENT_TYPE = {
   adjustment: MovementType.ADJUSTMENT,
@@ -211,6 +212,71 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
         potentialMargin: round2(retailValue - costValue),
         topItems: items.slice(0, limit ?? 20),
       })
+    },
+  )
+
+  server.tool(
+    'create_raw_material',
+    'Create a NEW raw material / ingredient (for recipe-based inventory) in a venue you can access: name, category, unit of measure, current stock, minimum stock, reorder point and cost per unit. Recipes consume these. This WRITES — requires inventory:create. category ∈ {MEAT, POULTRY, SEAFOOD, DAIRY, CHEESE, EGGS, VEGETABLES, FRUITS, GRAINS, BREAD, PASTA, RICE, BEANS, SPICES, HERBS, OILS, SAUCES, CONDIMENTS, BEVERAGES, ALCOHOL, CLEANING, PACKAGING, OTHER}. unit ∈ {KILOGRAM, GRAM, POUND, OUNCE, LITER, MILLILITER, GALLON, CUP, TABLESPOON, TEASPOON, PIECE, UNIT, DOZEN, BOX, BAG, BOTTLE, CAN, JAR, …}.',
+    {
+      venueId: z.string().describe('Venue to create the raw material in (must be in your scope)'),
+      name: z.string().min(1).describe('Ingredient name, e.g. "Harina"'),
+      category: z.string().min(1).describe('Category (see list in the tool description)'),
+      unit: z.string().min(1).describe('Unit of measure (see list in the tool description)'),
+      currentStock: z.number().min(0).describe('Current stock on hand (in the chosen unit)'),
+      minimumStock: z.number().min(0).describe('Minimum stock before it is "low" (must be ≤ reorderPoint)'),
+      reorderPoint: z.number().min(0).describe('Stock level at which to reorder'),
+      costPerUnit: z.number().positive().describe('Cost per unit (money)'),
+      sku: z.string().optional().describe('Stock code (auto-generated from the name if omitted)'),
+      description: z.string().optional().describe('Description'),
+      perishable: z.boolean().optional().describe('Whether it is perishable'),
+    },
+    async ({ venueId, name, category, unit, currentStock, minimumStock, reorderPoint, costPerUnit, sku, description, perishable }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('inventory:create', venueId) // write gate (per-venue role)
+
+      const catU = category.trim().toUpperCase()
+      const unitU = unit.trim().toUpperCase()
+      if (!(Object.values(RawMaterialCategory) as string[]).includes(catU)) {
+        return text({ ok: false, error: `Categoría "${category}" inválida. Opciones: ${Object.values(RawMaterialCategory).join(', ')}` })
+      }
+      if (!(Object.values(Unit) as string[]).includes(unitU)) {
+        return text({ ok: false, error: `Unidad "${unit}" inválida. Opciones: ${Object.values(Unit).join(', ')}` })
+      }
+      if (minimumStock > reorderPoint) return text({ ok: false, error: 'minimumStock debe ser menor o igual a reorderPoint.' })
+
+      const finalSku =
+        sku?.trim() ||
+        `${
+          name
+            .toUpperCase()
+            .replace(/[^A-Z0-9]/g, '')
+            .slice(0, 8) || 'RAW'
+        }-${Date.now().toString(36).slice(-5).toUpperCase()}`
+      try {
+        const rm = await createRawMaterial(venueId, {
+          name,
+          sku: finalSku,
+          category: catU as RawMaterialCategory,
+          unit: unitU as Unit,
+          currentStock,
+          minimumStock,
+          reorderPoint,
+          costPerUnit,
+          perishable: perishable ?? false,
+          ...(description ? { description } : {}),
+        })
+        await auditMcpWrite(scope, {
+          action: 'RAW_MATERIAL_CREATED',
+          entity: 'RawMaterial',
+          entityId: rm.id,
+          venueId,
+          data: { name, category: catU, unit: unitU, currentStock, costPerUnit },
+        })
+        return text({ ok: true, rawMaterial: { id: rm.id, name: rm.name, sku: rm.sku, category: catU, unit: unitU, currentStock } })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
     },
   )
 }
