@@ -6,6 +6,17 @@ import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
+import { auditMcpWrite } from '../audit'
+import { issueRefund, type RefundReason } from '@/services/dashboard/refund.dashboard.service'
+
+// Maps the tool's friendly reasons to the service's RefundReason values.
+const REFUND_REASON_MAP: Record<string, RefundReason> = {
+  returned_goods: 'RETURNED_GOODS',
+  accidental_charge: 'ACCIDENTAL_CHARGE',
+  cancelled_order: 'CANCELLED_ORDER',
+  fraudulent_charge: 'FRAUDULENT_CHARGE',
+  other: 'OTHER',
+}
 
 const num = (d: { toString(): string } | null): number => (d == null ? 0 : Number(d))
 const round2 = (n: number): number => Math.round(n * 100) / 100
@@ -238,6 +249,88 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
         count: refunds.length,
         refunds,
       })
+    },
+  )
+
+  server.tool(
+    'issue_refund',
+    '🔴 CRITICAL (returns money to a customer). Issue a refund on a COMPLETED payment of a venue you can access. Identify the payment by its id (from list_payments), give the amount in pesos (partial allowed; the service enforces the remaining refundable) and a reason. By DEFAULT this only PREVIEWS the refund (payment details + what would be returned); to actually execute it call again with confirm:true. Cash refunds are recorded; card refunds follow the processor flow. This WRITES MONEY — requires payments:refund.',
+    {
+      venueId: z.string().describe('Venue that owns the payment (must be in your scope)'),
+      paymentId: z.string().min(1).describe('The payment id (from list_payments)'),
+      amount: z.number().positive().describe('Amount to refund in pesos (major units), e.g. 150.50'),
+      reason: z
+        .enum(['returned_goods', 'accidental_charge', 'cancelled_order', 'fraudulent_charge', 'other'])
+        .describe('Why the refund is issued'),
+      note: z.string().optional().describe('Free-text note for the audit trail'),
+      confirm: z.boolean().optional().describe('Must be true to actually issue the refund; without it you get a preview'),
+    },
+    async ({ venueId, paymentId, amount, reason, note, confirm }) => {
+      const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('payments:refund', venueId) // write gate (per-venue role)
+
+      // Resolve the payment WITHIN scope for the preview (the service re-validates everything under a row lock).
+      const payment = await prisma.payment.findFirst({
+        where: { id: paymentId, ...base },
+        select: { amount: true, tipAmount: true, method: true, status: true, type: true, createdAt: true, order: { select: { orderNumber: true } } },
+      })
+      if (!payment) return text({ ok: false, error: 'No encontré ese pago en tus locales.' })
+      if (payment.status !== TransactionStatus.COMPLETED) {
+        return text({ ok: false, error: `Solo se puede reembolsar un pago COMPLETED (este está ${payment.status}).` })
+      }
+      const originalTotal = round2(num(payment.amount) + num(payment.tipAmount))
+      if (amount > originalTotal) {
+        return text({ ok: false, error: `El reembolso ($${amount}) excede el total original del pago ($${originalTotal}).` })
+      }
+
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview: {
+            payment: {
+              id: paymentId,
+              orderNumber: payment.order?.orderNumber ?? null,
+              method: payment.method,
+              originalTotal,
+              paidAt: payment.createdAt.toISOString(),
+            },
+            refundAmount: amount,
+            reason: REFUND_REASON_MAP[reason],
+            note: note ?? null,
+          },
+          message: `Esto DEVOLVERÁ $${amount} del pago de $${originalTotal} (orden ${payment.order?.orderNumber ?? 's/n'}). Vuelve a llamar con confirm:true para ejecutar.`,
+        })
+      }
+
+      try {
+        const result = await issueRefund({
+          venueId,
+          paymentId,
+          amount: Math.round(amount * 100), // service expects cents
+          reason: REFUND_REASON_MAP[reason],
+          staffId: scope.staffId,
+          ...(note ? { note } : {}),
+        })
+        await auditMcpWrite(scope, {
+          action: 'REFUND_ISSUED',
+          entity: 'Payment',
+          entityId: result.refundId,
+          venueId,
+          data: { originalPaymentId: paymentId, amount: result.amount, reason: REFUND_REASON_MAP[reason], note: note ?? null },
+        })
+        return text({
+          ok: true,
+          refund: {
+            refundId: result.refundId,
+            amount: result.amount,
+            remainingRefundable: result.remainingRefundable,
+            status: result.status,
+          },
+        })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
     },
   )
 }
