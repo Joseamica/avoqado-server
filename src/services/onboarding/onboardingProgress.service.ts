@@ -129,6 +129,12 @@ export function parseV2Step9(v2SetupData: unknown): V2Step9Data | null {
 }
 
 export interface V2PlanData {
+  /**
+   * Tier selected in the wizard's 4-tier plan step. Defaults to 'PRO' for payloads
+   * saved before the tier field existed (the step used to be a single Pro offer).
+   * 'FREE' completes onboarding without a payment method (no base subscription).
+   */
+  tier: 'FREE' | 'PRO' | 'PREMIUM'
   paymentMethodId: string | null
   interval: 'monthly' | 'annual'
   payNow: boolean
@@ -156,6 +162,7 @@ export function parseV2Plan(v2SetupData: unknown): V2PlanData | null {
   }
   if (!plan || typeof plan !== 'object') return null
   return {
+    tier: plan.tier === 'FREE' || plan.tier === 'PREMIUM' ? plan.tier : 'PRO',
     paymentMethodId: typeof plan.paymentMethodId === 'string' ? plan.paymentMethodId : null,
     interval: plan.interval === 'annual' ? 'annual' : 'monthly',
     payNow: plan.payNow === true,

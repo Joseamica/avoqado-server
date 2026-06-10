@@ -571,19 +571,19 @@ export interface CreatePlanSubscriptionInput {
   venueId: string
   customerId: string
   paymentMethodId: string
-  tierCode: 'PLAN_PRO'
+  tierCode: PlanTierCode
   interval: 'monthly' | 'annual'
   trialPeriodDays: number // 0 = pay-now (no trial), 30 = trial
-  coupon?: string // e.g. 'INTRO_PRO_3M' (monthly pay-now only)
+  coupon?: string // e.g. 'INTRO_PRO_3M' (PRO monthly pay-now only)
   venueName?: string
   venueSlug?: string
 }
 
 /**
- * Creates the venue's base-plan subscription (PLAN_PRO). Sibling of
+ * Creates the venue's base-plan subscription (PLAN_PRO or PLAN_PREMIUM). Sibling of
  * createTrialSubscriptions but supports interval (monthly/annual price),
  * pay-now (trialPeriodDays:0), an intro coupon, and Stripe Tax (16% IVA).
- * Idempotent: reuses an existing PLAN_PRO subscription if one already exists.
+ * Idempotent: reuses an existing subscription for the venue+tier if one already exists.
  */
 export async function createPlanSubscription(input: CreatePlanSubscriptionInput): Promise<string> {
   const feature = await prisma.feature.findFirst({ where: { code: input.tierCode, active: true } })
@@ -599,7 +599,7 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
     return existing.stripeSubscriptionId
   }
 
-  const lookupKey = input.interval === 'annual' ? 'plan_pro_annual' : 'plan_pro_monthly'
+  const lookupKey = planLookupKey(input.tierCode, input.interval)
   const prices = await stripe.prices.list({ lookup_keys: [lookupKey], limit: 1 })
   const price = prices.data[0]
   if (!price) throw new Error(`Stripe price not found for lookup_key ${lookupKey} — run scripts/seed-plan-pro.ts`)
@@ -614,7 +614,9 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
         // No Stripe Tax: IVA is baked into the price (tax_behavior 'inclusive'), so we charge the
         // price as-is and the merchant remits/itemizes the IVA on their own CFDI factura.
         ...(input.coupon ? { discounts: [{ coupon: input.coupon }] } : {}),
-        description: input.venueName ? `Plan Avoqado Pro - ${input.venueName}` : 'Plan Avoqado Pro',
+        description: input.venueName
+          ? `Plan Avoqado ${planLabel(input.tierCode)} - ${input.venueName}`
+          : `Plan Avoqado ${planLabel(input.tierCode)}`,
         metadata: {
           venueId: input.venueId,
           featureId: feature.id,

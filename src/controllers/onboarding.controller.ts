@@ -941,11 +941,17 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
     const { progress, businessInfo, bankInfo, identityInfo, entityInfo } =
       await onboardingProgressService.getV2SetupDataForCompletion(organizationId)
 
-    // HARD GATE: when the venue base subscription feature is on, the plan step's
-    // payment method is mandatory — onboarding cannot complete without it.
+    // HARD GATE: when the venue base subscription feature is on, the plan step is
+    // mandatory — onboarding cannot complete without it. Paid tiers (PRO/PREMIUM)
+    // additionally require a payment method; FREE completes without a card (the
+    // venue simply stays on the Free plan, no base subscription is created).
+    // Old payloads have no `tier` — parseV2Plan defaults them to PRO (back-compat).
     const planEnabled = process.env.ENABLE_VENUE_BASE_SUBSCRIPTION === 'true'
     const planData = onboardingProgressService.parseV2Plan(progress.v2SetupData)
-    if (planEnabled && !planData?.paymentMethodId) {
+    if (planEnabled && !planData) {
+      throw new BadRequestError('Falta elegir tu plan. Completa el paso de plan para terminar.')
+    }
+    if (planEnabled && planData && planData.tier !== 'FREE' && !planData.paymentMethodId) {
       throw new BadRequestError('Falta el método de pago del plan. Completa el paso de plan para terminar.')
     }
 
@@ -1061,11 +1067,16 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
       })
     }
 
-    // Create the PLAN_PRO base subscription in Stripe. The hard gate above
-    // already guaranteed a paymentMethodId when the feature is enabled. This is
-    // wrapped in try/catch so a Stripe hiccup never blocks onboarding completion
+    // Create the base-plan subscription in Stripe (PLAN_PRO or PLAN_PREMIUM,
+    // per the tier chosen in the wizard). FREE skips this entirely — no base
+    // subscription, the venue resolves as Free. The hard gate above already
+    // guaranteed a paymentMethodId for paid tiers when the feature is enabled.
+    // Wrapped in try/catch so a Stripe hiccup never blocks onboarding completion
     // (the venue already exists at this point).
-    if (planEnabled && planData?.paymentMethodId) {
+    if (planEnabled && planData && planData.tier !== 'FREE' && planData.paymentMethodId) {
+      const tierCode = planData.tier === 'PREMIUM' ? ('PLAN_PREMIUM' as const) : ('PLAN_PRO' as const)
+      // The $599×3 intro promo is a PRO-monthly-pay-now-only commercial offer.
+      const introPromo = planData.tier === 'PRO' && planData.payNow && planData.interval === 'monthly'
       try {
         const venueRecord = await prisma.venue.findUnique({
           where: { id: result.venue.id },
@@ -1082,14 +1093,14 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
           venueId: result.venue.id,
           customerId,
           paymentMethodId: planData.paymentMethodId,
-          tierCode: 'PLAN_PRO',
+          tierCode,
           interval: planData.interval,
           trialPeriodDays: planData.payNow ? 0 : 30,
-          coupon: planData.payNow && planData.interval === 'monthly' ? 'INTRO_PRO_3M' : undefined,
+          coupon: introPromo ? 'INTRO_PRO_3M' : undefined,
           venueName: result.venue.name,
           venueSlug: result.venue.slug,
         })
-        await prisma.venue.update({ where: { id: result.venue.id }, data: { planTier: 'PRO' } })
+        await prisma.venue.update({ where: { id: result.venue.id }, data: { planTier: planData.tier } })
 
         // Send the plan confirmation email (non-blocking). The venue's `language`
         // was persisted above, so the resolver returns the right locale. A null
@@ -1097,7 +1108,15 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
         try {
           const target = await resolvePlanNotificationTarget(result.venue.id)
           if (target.email) {
-            const grossCents = planData.interval === 'annual' ? 1158840 : 115884 // IVA-inclusive
+            // IVA-inclusive gross amounts: PRO $999/mo · $9,990/yr — PREMIUM $1,699/mo · $16,990/yr.
+            const grossCents =
+              planData.tier === 'PREMIUM'
+                ? planData.interval === 'annual'
+                  ? 1970840
+                  : 197084
+                : planData.interval === 'annual'
+                  ? 1158840
+                  : 115884
             const now = new Date()
             const firstChargeDate = planData.payNow
               ? new Date(now.getTime() + (planData.interval === 'annual' ? 365 : 30) * 86400000)
@@ -1106,11 +1125,12 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
             await emailService.sendPlanConfirmationEmail(target.email, {
               locale: target.locale,
               venueName: target.venueName,
+              planName: planData.tier === 'PREMIUM' ? 'Premium' : 'Pro',
               payNow: planData.payNow,
               interval: planData.interval,
               firstChargeDate,
               firstChargeAmountCents: grossCents,
-              introAmountCents: planData.payNow && planData.interval === 'monthly' ? 69484 : undefined,
+              introAmountCents: introPromo ? 69484 : undefined,
               billingPortalUrl: `${FRONTEND_URL}/dashboard/venues/${result.venue.slug}/billing`,
             })
           } else {
@@ -1120,7 +1140,7 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
           logger.error(`⚠️ Plan confirmation email failed for venue ${result.venue.id}`, mailErr)
         }
       } catch (planErr) {
-        logger.error(`⚠️ PLAN_PRO subscription creation failed for venue ${result.venue.id}`, planErr)
+        logger.error(`⚠️ ${tierCode} subscription creation failed for venue ${result.venue.id}`, planErr)
       }
     }
 

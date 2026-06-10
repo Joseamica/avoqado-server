@@ -66,6 +66,7 @@ jest.mock('../../../src/utils/prismaClient', () => ({
 
 import { completeV2Onboarding } from '../../../src/controllers/onboarding.controller'
 import * as onboardingProgressService from '../../../src/services/onboarding/onboardingProgress.service'
+import * as stripeService from '../../../src/services/stripe.service'
 import * as venueCreationService from '../../../src/services/onboarding/venueCreation.service'
 import { resolvePlanNotificationTarget } from '../../../src/services/access/planNotification.service'
 import emailService from '../../../src/services/email.service'
@@ -98,6 +99,7 @@ function primeHappyPath(planOverrides: Record<string, any> = {}, targetOverrides
     entityInfo: null,
   })
   ;(onboardingProgressService.parseV2Plan as jest.Mock).mockReturnValue({
+    tier: 'PRO',
     paymentMethodId: 'pm_1',
     interval: 'monthly',
     payNow: false,
@@ -185,6 +187,56 @@ describe('completeV2Onboarding — plan confirmation email + venue.language', ()
 
     const [, data] = (emailService.sendPlanConfirmationEmail as jest.Mock).mock.calls[0]
     expect(data.introAmountCents).toBe(69484)
+  })
+
+  // ---------------------------------------------------------------------------
+  // 4-tier plan step (2026-06): PREMIUM subscribes PLAN_PREMIUM, FREE skips the
+  // base subscription entirely (no card, no email) and still completes.
+  // ---------------------------------------------------------------------------
+
+  it('PREMIUM: creates a PLAN_PREMIUM subscription, premium gross cents, no intro promo', async () => {
+    primeHappyPath({ tier: 'PREMIUM', payNow: true, interval: 'monthly' })
+    const next: NextFunction = jest.fn()
+    const res = buildRes()
+
+    await completeV2Onboarding(buildReq({ language: 'es' }) as Request, res as Response, next)
+
+    expect(stripeService.createPlanSubscription).toHaveBeenCalledWith(
+      expect.objectContaining({ tierCode: 'PLAN_PREMIUM', coupon: undefined }),
+    )
+    const [, data] = (emailService.sendPlanConfirmationEmail as jest.Mock).mock.calls[0]
+    expect(data).toMatchObject({ planName: 'Premium', firstChargeAmountCents: 197084 })
+    expect(data.introAmountCents).toBeUndefined() // $599×3 intro is PRO-monthly only
+    // venue planTier persisted as PREMIUM
+    const planTierUpdate = (prisma.venue.update as jest.Mock).mock.calls.map(c => c[0]).find(u => u?.data?.planTier !== undefined)
+    expect(planTierUpdate?.data.planTier).toBe('PREMIUM')
+    expect(res.status).toHaveBeenCalledWith(201)
+  })
+
+  it('FREE: completes without a paymentMethodId, creates no subscription and sends no email', async () => {
+    primeHappyPath({ tier: 'FREE', paymentMethodId: null, payNow: false })
+    const next: NextFunction = jest.fn()
+    const res = buildRes()
+
+    await completeV2Onboarding(buildReq({ language: 'es' }) as Request, res as Response, next)
+
+    expect(stripeService.createPlanSubscription).not.toHaveBeenCalled()
+    expect(emailService.sendPlanConfirmationEmail).not.toHaveBeenCalled()
+    const planTierUpdate = (prisma.venue.update as jest.Mock).mock.calls.map(c => c[0]).find(u => u?.data?.planTier !== undefined)
+    expect(planTierUpdate).toBeUndefined() // FREE never writes planTier
+    expect(res.status).toHaveBeenCalledWith(201)
+    expect(next).not.toHaveBeenCalled()
+  })
+
+  it('PRO legacy payload (no tier from parse) still gates: paid tier without card rejects', async () => {
+    primeHappyPath({ tier: 'PRO', paymentMethodId: null })
+    const next: NextFunction = jest.fn()
+    const res = buildRes()
+
+    await completeV2Onboarding(buildReq({ language: 'es' }) as Request, res as Response, next)
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('método de pago') }))
+    expect(stripeService.createPlanSubscription).not.toHaveBeenCalled()
   })
 
   it('skips the email (logger.warn) when no recipient, without throwing', async () => {

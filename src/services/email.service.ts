@@ -107,6 +107,8 @@ interface TrialExpiredEmailData {
 export interface PlanConfirmationEmailData {
   locale: 'es' | 'en'
   venueName: string
+  /** Display name of the base plan ('Pro' | 'Premium'). Defaults to 'Pro' for legacy callers. */
+  planName?: string
   payNow: boolean // true = paid today, false = trial
   interval: 'monthly' | 'annual'
   firstChargeDate: Date // trial end (trial) OR next renewal (pay-now)
@@ -4150,6 +4152,7 @@ Servicios Tecnologicos Avo S.A. de C.V.`
 
     const firstAmount = fmt(data.firstChargeAmountCents)
     const introAmount = data.introAmountCents != null ? fmt(data.introAmountCents) : null
+    const planName = data.planName ?? 'Pro'
 
     let subject: string
     let greeting: string
@@ -4159,7 +4162,7 @@ Servicios Tecnologicos Avo S.A. de C.V.`
 
     if (data.payNow) {
       // Pay-now variant
-      subject = data.locale === 'en' ? 'Welcome to Avoqado Pro!' : '¡Bienvenido a Avoqado Pro!'
+      subject = data.locale === 'en' ? `Welcome to Avoqado ${planName}!` : `¡Bienvenido a Avoqado ${planName}!`
       ctaLabel = data.locale === 'en' ? 'View billing' : 'Ver facturación'
       if (data.locale === 'en') {
         greeting = 'Hi,'
@@ -4169,14 +4172,14 @@ Servicios Tecnologicos Avo S.A. de C.V.`
         bodyHtml = `
       <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${greeting}</p>
       <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
-        Your <strong>Avoqado Pro</strong> plan for ${data.venueName} is active. ${introClause}
+        Your <strong>Avoqado ${planName}</strong> plan for ${data.venueName} is active. ${introClause}
       </p>
       <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin: 24px 0;">
         <p style="font-size: 14px; margin: 0; color: #666;">Next renewal: <strong>${dateFormatted}</strong> · <strong>${firstAmount}</strong>/${intervalLabel}.</p>
       </div>`
         text = `Hi,
 
-Your Avoqado Pro plan for ${data.venueName} is active. ${
+Your Avoqado ${planName} plan for ${data.venueName} is active. ${
           introAmount
             ? `We received your payment of ${introAmount}. You'll keep paying ${introAmount} for the first 3 months, then ${firstAmount}/${intervalLabel}.`
             : `We received your payment of ${firstAmount}. Your plan renews at ${firstAmount}/${intervalLabel}.`
@@ -4195,14 +4198,14 @@ Avoqado Team`
         bodyHtml = `
       <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${greeting}</p>
       <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
-        Tu plan <strong>Avoqado Pro</strong> para ${data.venueName} está activo. ${introClause}
+        Tu plan <strong>Avoqado ${planName}</strong> para ${data.venueName} está activo. ${introClause}
       </p>
       <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin: 24px 0;">
         <p style="font-size: 14px; margin: 0; color: #666;">Próxima renovación: <strong>${dateFormatted}</strong> · <strong>${firstAmount}</strong>/${intervalLabel}.</p>
       </div>`
         text = `Hola,
 
-Tu plan Avoqado Pro para ${data.venueName} está activo. ${
+Tu plan Avoqado ${planName} para ${data.venueName} está activo. ${
           introAmount
             ? `Recibimos tu pago de ${introAmount}. Seguirás con ${introAmount} los primeros 3 meses, luego ${firstAmount}/${intervalLabel}.`
             : `Recibimos tu pago de ${firstAmount}. Tu plan se renueva en ${firstAmount}/${intervalLabel}.`
@@ -4216,7 +4219,7 @@ Equipo de Avoqado`
       }
     } else {
       // Trial variant
-      subject = data.locale === 'en' ? 'Your Avoqado Pro trial has started' : 'Tu prueba de Avoqado Pro empezó'
+      subject = data.locale === 'en' ? `Your Avoqado ${planName} trial has started` : `Tu prueba de Avoqado ${planName} empezó`
       ctaLabel = data.locale === 'en' ? 'View billing' : 'Ver facturación'
       if (data.locale === 'en') {
         greeting = 'Hi,'
