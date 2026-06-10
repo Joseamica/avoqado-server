@@ -5,7 +5,7 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
-import { inviteTeamMember } from '@/services/dashboard/team.dashboard.service'
+import { inviteTeamMember, updateTeamMember } from '@/services/dashboard/team.dashboard.service'
 import { StaffRole } from '@prisma/client'
 
 // SUPERADMIN deliberately excluded — an agent must never be able to grant it.
@@ -166,6 +166,85 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
             inviteLink: result.inviteLink ?? null,
           },
         })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'update_staff_member',
+    '🔴 CRITICAL (changes access). Change a team member\'s ROLE and/or ACTIVATE/DEACTIVATE them in a venue you can access, found by name. Deactivating blocks their access (it does NOT delete them); the service refuses to remove the last administrator. SUPERADMIN cannot be granted. By DEFAULT this only PREVIEWS the change (current → new); to apply it call again with confirm:true. This WRITES — requires teams:update.',
+    {
+      venueId: z.string().describe('Venue where the member works (must be in your scope)'),
+      name: z.string().min(1).describe('Team member name or part of it'),
+      role: z
+        .enum(['owner', 'admin', 'manager', 'cashier', 'waiter', 'kitchen', 'host', 'viewer'])
+        .optional()
+        .describe('New role (omit to keep; no superadmin)'),
+      active: z.boolean().optional().describe('true = activate, false = deactivate (omit to keep)'),
+      confirm: z.boolean().optional().describe('Must be true to actually apply; without it you get a preview'),
+    },
+    async ({ venueId, name, role, active, confirm }) => {
+      const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('teams:update', venueId) // write gate (per-venue role)
+      if (role === undefined && active === undefined) return text({ ok: false, error: 'Pasa al menos role o active.' })
+
+      const matches = await prisma.staffVenue.findMany({
+        where: {
+          ...base,
+          staff: {
+            OR: [
+              { firstName: { contains: name, mode: 'insensitive' as const } },
+              { lastName: { contains: name, mode: 'insensitive' as const } },
+            ],
+          },
+        },
+        select: { id: true, role: true, staff: { select: { firstName: true, lastName: true, active: true } } },
+        take: 5,
+      })
+      if (matches.length === 0) return text({ ok: false, error: `No encontré ningún miembro que coincida con "${name}" en este local.` })
+      if (matches.length > 1) {
+        return text({
+          ok: false,
+          ambiguous: true,
+          error: `"${name}" coincide con varias personas — sé más específico.`,
+          matches: matches.map(m => `${m.staff.firstName} ${m.staff.lastName}`.trim()),
+        })
+      }
+
+      const m = matches[0]
+      const fullName = `${m.staff.firstName} ${m.staff.lastName}`.trim()
+      const newRole = role ? INVITE_ROLE_MAP[role] : undefined
+      const changes = {
+        ...(newRole && newRole !== m.role ? { role: { from: m.role, to: newRole } } : {}),
+        ...(active !== undefined && active !== m.staff.active ? { active: { from: m.staff.active, to: active } } : {}),
+      }
+      if (Object.keys(changes).length === 0) return text({ ok: false, error: `${fullName} ya está exactamente así — nada que cambiar.` })
+
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview: { member: fullName, changes },
+          message: `Esto CAMBIARÁ a ${fullName}: ${JSON.stringify(changes)}. Vuelve a llamar con confirm:true para aplicar.`,
+        })
+      }
+
+      try {
+        await updateTeamMember(venueId, m.id, {
+          ...(newRole ? { role: newRole } : {}),
+          ...(active !== undefined ? { active } : {}),
+          performedBy: scope.staffId,
+        })
+        await auditMcpWrite(scope, {
+          action: 'STAFF_MEMBER_UPDATED',
+          entity: 'StaffVenue',
+          entityId: m.id,
+          venueId,
+          data: { member: fullName, changes },
+        })
+        return text({ ok: true, member: fullName, applied: changes })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
       }
