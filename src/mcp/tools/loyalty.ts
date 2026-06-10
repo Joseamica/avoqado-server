@@ -5,7 +5,7 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
-import { adjustPoints } from '@/services/dashboard/loyalty.dashboard.service'
+import { adjustPoints, updateLoyaltyConfig } from '@/services/dashboard/loyalty.dashboard.service'
 
 export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
@@ -114,6 +114,57 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
           data: { points, reason, newBalance: result.newBalance },
         })
         return text({ ok: true, customer: name, change: points, newBalance: result.newBalance })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'configure_loyalty',
+    'Configure (or activate/deactivate) the loyalty / rewards PROGRAM of a venue you can access: points earned per dollar spent, points per visit, the redemption rate (money value of one point, e.g. 0.05 = 5 centavos per point), the minimum points to redeem, and after how many days points expire (null/omit = never). Only the fields you pass are changed. This WRITES program settings (does NOT touch any customer\'s points — use adjust_loyalty_points for that); requires loyalty:update.',
+    {
+      venueId: z.string().describe('Venue whose program to configure (must be in your scope)'),
+      active: z.boolean().optional().describe('Turn the program on/off'),
+      pointsPerDollar: z.number().min(0).optional().describe('Points earned per $1 spent'),
+      pointsPerVisit: z.number().int().min(0).optional().describe('Points earned per visit'),
+      redemptionRate: z.number().min(0).optional().describe('Money value of 1 point (e.g. 0.05)'),
+      minPointsToRedeem: z.number().int().min(0).optional().describe('Minimum points required to redeem'),
+      pointsExpireDays: z.number().int().positive().nullable().optional().describe('Days until points expire; null = never'),
+    },
+    async ({ venueId, active, pointsPerDollar, pointsPerVisit, redemptionRate, minPointsToRedeem, pointsExpireDays }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('loyalty:update', venueId) // write gate (per-venue role)
+      const data = {
+        ...(active !== undefined ? { active } : {}),
+        ...(pointsPerDollar !== undefined ? { pointsPerDollar } : {}),
+        ...(pointsPerVisit !== undefined ? { pointsPerVisit } : {}),
+        ...(redemptionRate !== undefined ? { redemptionRate } : {}),
+        ...(minPointsToRedeem !== undefined ? { minPointsRedeem: minPointsToRedeem } : {}),
+        ...(pointsExpireDays !== undefined ? { pointsExpireDays } : {}),
+      }
+      if (Object.keys(data).length === 0) return text({ ok: false, error: 'No pasaste ningún campo para configurar.' })
+
+      try {
+        const cfg = await updateLoyaltyConfig(venueId, data) // service validates non-negative etc.
+        await auditMcpWrite(scope, {
+          action: 'LOYALTY_CONFIG_UPDATED',
+          entity: 'LoyaltyConfig',
+          entityId: (cfg as { id?: string })?.id ?? venueId,
+          venueId,
+          data,
+        })
+        return text({
+          ok: true,
+          program: {
+            active: (cfg as { active: boolean }).active,
+            pointsPerDollar: Number((cfg as { pointsPerDollar: unknown }).pointsPerDollar),
+            pointsPerVisit: (cfg as { pointsPerVisit: number }).pointsPerVisit,
+            redemptionRate: Number((cfg as { redemptionRate: unknown }).redemptionRate),
+            minPointsToRedeem: (cfg as { minPointsRedeem: number }).minPointsRedeem,
+            pointsExpireDays: (cfg as { pointsExpireDays: number | null }).pointsExpireDays,
+          },
+        })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
       }
