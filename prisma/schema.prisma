@@ -219,11 +219,19 @@ model Venue {
   // docs/superpowers/specs/2026-06-02-venue-base-subscription-design.md
   planTier PlanTier?
 
-  // Free-plan seat cap grandfathering. true = exempt forever from the Free-tier
-  // active-user cap (2 users/venue); the seat cap is NEVER enforced for this venue.
+  // GRANDFATHER FLAG. true = this venue is grandfathered: it operates as it did
+  // BEFORE the tier monetization, exempt from the new tier gating on BOTH axes:
+  //   (1) the Free-tier active-user seat cap (2 users/venue) is NEVER enforced, AND
+  //   (2) FEATURE paywalls are NEVER enforced — a grandfathered venue has full
+  //       feature access for ANY feature code, regardless of its base plan
+  //       (so legacy venues like Mobanq, a hotel using reservations with no
+  //       RESERVATIONS grant, keep working exactly as before).
   // Every venue that existed at rollout is backfilled to true (grandfathered) so the
-  // 47 legacy venues already over 2 users don't break. New venues default to false
-  // (enforced once they end up on the Free tier). See seatCap.service.ts.
+  // legacy venues don't break. New venues default to false (subject to seat cap + tier
+  // feature paywalls). The column keeps its original name to avoid migration churn,
+  // but it is the single grandfather signal governing both the seat cap AND feature
+  // access. See seatCap.service.ts, basePlan.service.ts (venueIsGrandfathered /
+  // venueHasFeatureAccess) and checkFeatureAccess.middleware.ts.
   seatCapExempt Boolean @default(false)
 
   /// Pending Pro→Free DOWNGRADE seat reconciliation (the "choose who stays" selection),

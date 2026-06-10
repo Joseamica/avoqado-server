@@ -10,7 +10,14 @@
  */
 jest.mock('../../../../src/utils/prismaClient', () => ({
   __esModule: true,
-  default: { venueFeature: { findFirst: jest.fn(), findMany: jest.fn() } },
+  default: {
+    // venue.findUnique is consumed by venueIsGrandfathered (path-0 short-circuit in
+    // venueHasFeatureAccess). These tier-logic tests describe NON-grandfathered venues, so it
+    // defaults to seatCapExempt: false (see beforeEach) — the short-circuit stays dormant and
+    // the tier path is exercised. Grandfathered behavior has its own suite (basePlan.grandfathered.test.ts).
+    venue: { findUnique: jest.fn() },
+    venueFeature: { findFirst: jest.fn(), findMany: jest.fn() },
+  },
 }))
 import prisma from '../../../../src/utils/prismaClient'
 import {

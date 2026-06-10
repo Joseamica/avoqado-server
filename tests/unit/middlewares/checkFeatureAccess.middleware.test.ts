@@ -19,6 +19,9 @@ jest.mock('@/utils/prismaClient', () => ({
       findFirst: jest.fn(),
       findMany: jest.fn(),
     },
+    venue: {
+      findUnique: jest.fn(),
+    },
   },
 }))
 
@@ -43,6 +46,10 @@ describe('checkFeatureAccess Middleware - Critical Tests', () => {
 
     // getVenueBaseTier (tier-aware blanket grant) queries findMany; default = no active base plan.
     ;(prisma.venueFeature.findMany as jest.Mock).mockResolvedValue([])
+
+    // isVenueGrandfathered (grandfather short-circuit) queries venue.findUnique;
+    // default = NOT grandfathered so the tier/grant paths under test still run.
+    ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ seatCapExempt: false })
 
     jsonMock = jest.fn()
     statusMock = jest.fn(() => mockRes as Response)

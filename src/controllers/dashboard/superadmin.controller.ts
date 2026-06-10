@@ -277,6 +277,98 @@ export async function grantTrialForVenue(req: Request, res: Response, next: Next
 }
 
 /**
+ * Toggle a venue's GRANDFATHERED status (Venue.seatCapExempt — exempt from BOTH the Free seat
+ * cap AND every feature paywall). Body `{ grandfathered: boolean }` validated by Zod in routes.
+ * Returns the fresh PlanState.
+ */
+export async function setVenuePlanGrandfathered(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const { grandfathered } = req.body // Validated by Zod: boolean
+
+    logger.info('Setting venue grandfathered status', {
+      venueId,
+      grandfathered,
+      userId: req.authContext?.userId,
+    })
+
+    const planState = await superadminService.setVenueGrandfathered(venueId, grandfathered)
+
+    res.json({ success: true, data: planState, message: 'Venue grandfathered status updated successfully' })
+  } catch (error) {
+    logger.error('Error setting venue grandfathered status', {
+      venueId: req.params.venueId,
+      grandfathered: req.body?.grandfathered,
+      error: error instanceof Error ? error.message : 'Unknown error',
+      userId: req.authContext?.userId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Assign a COMP (complimentary) base plan to a venue — NO Stripe subscription, NO expiry.
+ * Body `{ tier: 'FREE'|'PRO'|'PREMIUM' }` validated by Zod in routes. FREE drops to Free
+ * (removes the plan). Returns the fresh PlanState.
+ */
+export async function assignVenueCompPlan(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const { tier } = req.body // Validated by Zod: 'FREE' | 'PRO' | 'PREMIUM'
+
+    logger.info('Assigning comp plan to venue', {
+      venueId,
+      tier,
+      userId: req.authContext?.userId,
+    })
+
+    const planState = await superadminService.assignCompPlan(venueId, tier)
+
+    res.json({ success: true, data: planState, message: 'Comp plan assigned successfully' })
+  } catch (error) {
+    logger.error('Error assigning comp plan to venue', {
+      venueId: req.params.venueId,
+      tier: req.body?.tier,
+      error: error instanceof Error ? error.message : 'Unknown error',
+      userId: req.authContext?.userId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Extend (or set) a base-plan TRIAL for a venue — DB-only (no Stripe), endDate = now + days.
+ * Body `{ tier: 'PRO'|'PREMIUM', days: number }` validated by Zod in routes (days 1..365).
+ * Returns the fresh PlanState.
+ */
+export async function extendVenuePlanTrial(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const { tier, days } = req.body // Validated by Zod: tier 'PRO'|'PREMIUM', days 1-365
+
+    logger.info('Extending venue plan trial', {
+      venueId,
+      tier,
+      days,
+      userId: req.authContext?.userId,
+    })
+
+    const planState = await superadminService.extendPlanTrial(venueId, tier, days)
+
+    res.json({ success: true, data: planState, message: 'Plan trial extended successfully' })
+  } catch (error) {
+    logger.error('Error extending venue plan trial', {
+      venueId: req.params.venueId,
+      tier: req.body?.tier,
+      days: req.body?.days,
+      error: error instanceof Error ? error.message : 'Unknown error',
+      userId: req.authContext?.userId,
+    })
+    next(error)
+  }
+}
+
+/**
  * Get revenue metrics for a date range
  */
 export async function getRevenueMetrics(req: Request, res: Response, next: NextFunction): Promise<void> {

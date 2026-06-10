@@ -17,7 +17,7 @@
 import { Request, Response, NextFunction } from 'express'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
-import { PAID_PLAN_TIER_CODES, PREMIUM_ONLY_CODES, getVenueBaseTier } from '@/services/access/basePlan.service'
+import { PAID_PLAN_TIER_CODES, PREMIUM_ONLY_CODES, getVenueBaseTier, venueIsGrandfathered } from '@/services/access/basePlan.service'
 import { resolveRequestVenueId } from './checkPermission.middleware'
 
 /**
@@ -49,6 +49,16 @@ export function checkFeatureAccess(featureCode: string) {
         logger.warn('⚠️ Feature access check failed: No venueId', { featureCode })
         res.status(401).json({ error: 'Unauthorized', message: 'No venue context found' })
         return
+      }
+
+      // GRANDFATHERED short-circuit: a grandfathered venue (Venue.seatCapExempt === true)
+      // operates as it did before tier monetization — full feature access for ANY code, no
+      // paywall. Checked here, BEFORE the tier check, the same place superadmin would be let
+      // through, so legacy venues (e.g. a hotel using reservations with no RESERVATIONS grant)
+      // never 403 on a feature-gated endpoint.
+      if (await venueIsGrandfathered(venueId)) {
+        ;(req as any).venueFeature = { featureCode, grantedBy: 'GRANDFATHERED' }
+        return next()
       }
 
       // Query VenueFeature to check if feature is active
@@ -203,6 +213,13 @@ export function checkAnyFeatureAccess(featureCodes: string[]) {
         return
       }
 
+      // GRANDFATHERED short-circuit (same as checkFeatureAccess): a grandfathered venue is
+      // exempt from feature paywalls and gets through any of the requested codes.
+      if (await venueIsGrandfathered(venueId)) {
+        ;(req as any).venueFeature = { featureCodes, grantedBy: 'GRANDFATHERED' }
+        return next()
+      }
+
       // Query for any active feature in the list
       const venueFeature = await prisma.venueFeature.findFirst({
         where: {
@@ -328,6 +345,12 @@ export async function hasFeatureAccess(
   reason?: string
 }> {
   try {
+    // GRANDFATHERED short-circuit: grandfathered venues are exempt from feature paywalls and
+    // have access to any feature, mirroring venueHasFeatureAccess + the middleware.
+    if (await venueIsGrandfathered(venueId)) {
+      return { hasAccess: true, isTrialing: false, trialEndsAt: null }
+    }
+
     const venueFeature = await prisma.venueFeature.findFirst({
       where: {
         venueId,

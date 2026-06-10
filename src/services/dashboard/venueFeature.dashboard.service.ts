@@ -274,6 +274,9 @@ export async function getVenueFeatureStatus(venueId: string) {
       name: true,
       stripeCustomerId: true,
       stripePaymentMethodId: true,
+      // Grandfather flag (see schema.prisma): true = venue is exempt from feature paywalls
+      // and every available feature must surface as granted (no upsell cards).
+      seatCapExempt: true,
       features: {
         where: { active: true },
         include: {
@@ -307,12 +310,17 @@ export async function getVenueFeatureStatus(venueId: string) {
   // keep their richer state untouched; we only promote the ones that would otherwise be in
   // `availableFeatures`. The plan-tier codes themselves are never blanket-granted.
   const baseTier = await getVenueBaseTier(venueId)
+  // Grandfathered venues (Venue.seatCapExempt === true) are exempt from feature paywalls —
+  // EVERY available non-tier feature must surface as granted (mirror of venueHasFeatureAccess +
+  // the checkFeatureAccess middleware short-circuit), so the dashboard shows no upsell cards.
+  const isGrandfathered = venue.seatCapExempt === true
   const isPlanTierCode = (code: string): boolean => (PAID_PLAN_TIER_CODES as readonly string[]).includes(code)
   const isPremiumOnlyCode = (code: string): boolean => (PREMIUM_ONLY_CODES as readonly string[]).includes(code)
   // Tier-aware grant predicate — same rule as the checkFeatureAccess middleware:
-  // grantedByPlan = tier === 'PREMIUM' || (tier === 'PRO' && !PREMIUM_ONLY_CODES.includes(code))
+  // grantedByPlan = grandfathered || tier === 'PREMIUM' || (tier === 'PRO' && !PREMIUM_ONLY_CODES.includes(code))
   const tierGrants = (code: string): boolean => {
     if (isPlanTierCode(code)) return false // tier codes never self-grant via the blanket
+    if (isGrandfathered) return true // grandfathered → every non-tier feature granted, no paywall
     if (baseTier === 'PREMIUM') return true
     if (baseTier === 'PRO') return !isPremiumOnlyCode(code)
     return false

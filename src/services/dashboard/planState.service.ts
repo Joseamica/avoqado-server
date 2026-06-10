@@ -101,6 +101,12 @@ export interface PlanState {
   paymentMethod: { brand: string; last4: string; expMonth: number; expYear: number } | null
   stripeSubscriptionId: string | null
   /**
+   * Whether the venue is GRANDFATHERED (Venue.seatCapExempt === true): it operates as it did
+   * before the tier monetization and is exempt from BOTH the Free seat cap AND every feature
+   * paywall. The dashboard reads this to suppress all FeatureGate upsells for the venue.
+   */
+  grandfathered: boolean
+  /**
    * Whether the venue qualifies for the cancellation-retention DISCOUNT offer. True only when
    * there is an active base-plan Stripe subscription, its tenure is ≥ 30 days (past the first
    * billing cycle — the key anti-farm rule), and no discount is already active. DB-only/comped
@@ -152,9 +158,12 @@ async function findPlanProFeature(venueId: string) {
 export async function getPlanState(venueId: string): Promise<PlanState> {
   const venue = await prisma.venue.findUnique({
     where: { id: venueId },
-    select: { id: true, stripeCustomerId: true },
+    select: { id: true, stripeCustomerId: true, seatCapExempt: true },
   })
   if (!venue) throw new NotFoundError(`Venue ${venueId} no encontrado`)
+
+  // Grandfather flag — exempt from BOTH the seat cap AND feature paywalls (see schema.prisma).
+  const grandfathered = venue.seatCapExempt === true
 
   const vf = await findPlanProFeature(venueId)
 
@@ -174,6 +183,7 @@ export async function getPlanState(venueId: string): Promise<PlanState> {
       gracePeriodEndsAt: null,
       paymentMethod: null,
       stripeSubscriptionId: null,
+      grandfathered,
       retentionOfferEligible: false,
     }
   }
@@ -226,6 +236,7 @@ export async function getPlanState(venueId: string): Promise<PlanState> {
     gracePeriodEndsAt: vf.gracePeriodEndsAt ? vf.gracePeriodEndsAt.toISOString() : null,
     paymentMethod: null, // payment-method summary handled by the existing /payment-methods endpoint (out of scope here)
     stripeSubscriptionId: vf.stripeSubscriptionId,
+    grandfathered,
     retentionOfferEligible,
   }
 }

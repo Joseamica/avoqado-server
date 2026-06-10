@@ -74,9 +74,23 @@ export async function venueHasActiveBasePlan(venueId: string): Promise<boolean> 
 }
 
 /**
+ * Whether the venue is GRANDFATHERED — i.e. exempt from the tier monetization and operating
+ * as it did before tiers. Reads {@link Venue.seatCapExempt} (the grandfather flag; the column
+ * keeps its legacy name to avoid migration churn). A grandfathered venue is exempt from BOTH
+ * the Free seat cap AND every feature paywall. Returns false when the venue doesn't exist.
+ */
+export async function venueIsGrandfathered(venueId: string): Promise<boolean> {
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { seatCapExempt: true } })
+  return venue?.seatCapExempt === true
+}
+
+/**
  * Whether a venue may use a specific feature — tier-aware mirror of the access gate so callers
  * OUTSIDE the HTTP middleware (e.g. the customer MCP) enforce the same paid-plan gating and
  * never bypass it. Resolution order:
+ *   0. GRANDFATHERED venue ({@link Venue.seatCapExempt} === true) → true for ANY feature code
+ *      (operates as before tiers; the same short-circuit point where superadmin is allowed in
+ *      the middleware). Checked BEFORE the tier logic so legacy venues never hit a paywall.
  *   1. Own active VenueFeature for `featureCode` (active, !suspended, trial null/future) → true (grandfather; explicit grant ALWAYS wins, regardless of tier).
  *   2. Tier codes themselves are not self-granting here → false.
  *   3. PLAN_PREMIUM → true for any non-tier feature.
@@ -84,6 +98,9 @@ export async function venueHasActiveBasePlan(venueId: string): Promise<boolean> 
  *   5. No active base plan → false.
  */
 export async function venueHasFeatureAccess(venueId: string, featureCode: string): Promise<boolean> {
+  // 0. Grandfathered venue → full feature access, no paywall (operates as before tiers).
+  if (await venueIsGrandfathered(venueId)) return true
+
   const vf = await prisma.venueFeature.findFirst({
     where: { venueId, feature: { code: featureCode } },
     select: { active: true, endDate: true, suspendedAt: true },

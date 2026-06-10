@@ -78,6 +78,48 @@ const grantTrialSchema = z.object({
   }),
 })
 
+// ───── Plan-admin schemas (superadmin plan actions — Spanish messages surface to users)
+
+// Schema for toggling a venue's GRANDFATHERED status
+const setPlanGrandfatheredSchema = z.object({
+  body: z.object({
+    grandfathered: z.boolean({
+      required_error: 'El campo "grandfathered" es requerido',
+      invalid_type_error: 'El campo "grandfathered" debe ser un booleano (true o false)',
+    }),
+  }),
+})
+
+// Schema for assigning a COMP base plan (FREE removes the plan)
+const assignCompPlanSchema = z.object({
+  body: z.object({
+    tier: z.enum(['FREE', 'PRO', 'PREMIUM'], {
+      required_error: 'El campo "tier" es requerido',
+      invalid_type_error: 'El tier debe ser uno de: FREE, PRO o PREMIUM',
+      message: 'El tier debe ser uno de: FREE, PRO o PREMIUM',
+    }),
+  }),
+})
+
+// Schema for extending a base-plan TRIAL (only PRO/PREMIUM carry a trial)
+const extendPlanTrialSchema = z.object({
+  body: z.object({
+    tier: z.enum(['PRO', 'PREMIUM'], {
+      required_error: 'El campo "tier" es requerido',
+      invalid_type_error: 'El tier debe ser PRO o PREMIUM',
+      message: 'El tier debe ser PRO o PREMIUM',
+    }),
+    days: z
+      .number({
+        required_error: 'El campo "days" es requerido',
+        invalid_type_error: 'Los días deben ser un número',
+      })
+      .int('Los días deben ser un número entero')
+      .min(1, 'La prueba debe ser de al menos 1 día')
+      .max(365, 'La prueba no puede exceder los 365 días'),
+  }),
+})
+
 // Schema for feature creation
 const createFeatureSchema = z.object({
   body: z.object({
@@ -290,6 +332,16 @@ router.post(
   validateRequest(grantTrialSchema),
   superadminController.grantTrialForVenue,
 )
+
+// ───── Plan-admin routes (grandfather toggle, comp plan, trial extension)
+// Each returns the fresh PlanState for the venue.
+router.post(
+  '/venues/:venueId/plan/grandfathered',
+  validateRequest(setPlanGrandfatheredSchema),
+  superadminController.setVenuePlanGrandfathered,
+)
+router.post('/venues/:venueId/plan/comp', validateRequest(assignCompPlanSchema), superadminController.assignVenueCompPlan)
+router.post('/venues/:venueId/plan/trial', validateRequest(extendPlanTrialSchema), superadminController.extendVenuePlanTrial)
 
 // Revenue tracking routes
 router.get('/revenue/metrics', superadminController.getRevenueMetrics)

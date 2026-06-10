@@ -811,6 +811,133 @@ export async function grantTrialForVenue(venueId: string, featureCode: string, t
   }
 }
 
+// ===== PLAN ADMINISTRATION (superadmin comp / grandfather / trial extension) =====
+//
+// Reuses the existing feature helpers (enableFeatureForVenue / disableFeatureForVenue /
+// grantTrialForVenue). The base-plan tier feature codes are PLAN_PRO / PLAN_PREMIUM.
+// All three actions return the fresh PlanState so the caller (and the dashboard) re-derives
+// the venue's tier/grandfather status in one round-trip.
+
+/** Base-plan tier the superadmin can comp/extend. FREE means "no paid plan" (disable the PLAN_* features). */
+export type PlanAdminTier = 'FREE' | 'PRO' | 'PREMIUM'
+/** Tiers that can carry a trial (FREE has no trial to extend). */
+export type PlanAdminTrialTier = 'PRO' | 'PREMIUM'
+
+/** Map a comp/trial tier to its base-plan Feature.code. */
+const TIER_TO_PLAN_CODE: Record<PlanAdminTrialTier, 'PLAN_PRO' | 'PLAN_PREMIUM'> = {
+  PRO: 'PLAN_PRO',
+  PREMIUM: 'PLAN_PREMIUM',
+}
+
+/**
+ * Toggle a venue's GRANDFATHERED status (Venue.seatCapExempt — the grandfather flag governing
+ * BOTH the seat cap and feature paywalls). `true` keeps/puts the venue on the legacy "operates as
+ * before tiers" model; `false` flips it ONTO the new tier model (seat cap + feature paywalls
+ * enforced). Returns the fresh PlanState (whose `grandfathered` reflects the new value).
+ */
+export async function setVenueGrandfathered(venueId: string, value: boolean) {
+  const { getPlanState } = await import('./planState.service')
+
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { id: true } })
+  if (!venue) throw new Error('Venue not found')
+
+  await prisma.venue.update({ where: { id: venueId }, data: { seatCapExempt: value } })
+
+  logAction({
+    venueId,
+    action: 'VENUE_GRANDFATHERED_SET',
+    entity: 'Venue',
+    entityId: venueId,
+    data: { grandfathered: value },
+  })
+
+  logger.info(`Venue ${venueId} grandfathered set to ${value}`)
+  return getPlanState(venueId)
+}
+
+/**
+ * Assign a COMP (complimentary) base plan to a venue — NO Stripe subscription, NO expiry
+ * (endDate null = permanent). Mutually-exclusive base tiers:
+ *   - 'PRO'     → enable PLAN_PRO   (and remove PLAN_PREMIUM if present)
+ *   - 'PREMIUM' → enable PLAN_PREMIUM (and remove PLAN_PRO if present)
+ *   - 'FREE'    → disable BOTH PLAN_* features (drop to Free)
+ * After this, getPlanState derives the right tier (PRO/PREMIUM) or null (Free). Reuses the
+ * existing enable/disable helpers (which upsert with endDate null and log their own actions).
+ */
+export async function assignCompPlan(venueId: string, tier: PlanAdminTier) {
+  const { getPlanState } = await import('./planState.service')
+
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { id: true } })
+  if (!venue) throw new Error('Venue not found')
+
+  if (tier === 'FREE') {
+    // Drop to Free: disable whichever PLAN_* features are currently active (idempotent).
+    await disablePlanCodeIfActive(venueId, 'PLAN_PRO')
+    await disablePlanCodeIfActive(venueId, 'PLAN_PREMIUM')
+  } else {
+    const targetCode = TIER_TO_PLAN_CODE[tier]
+    const otherCode = targetCode === 'PLAN_PRO' ? 'PLAN_PREMIUM' : 'PLAN_PRO'
+    // Remove the other tier first so the two never coexist, then comp the target (endDate null).
+    await disablePlanCodeIfActive(venueId, otherCode)
+    await enableFeatureForVenue(venueId, targetCode)
+  }
+
+  logAction({
+    venueId,
+    action: 'PLAN_COMP_ASSIGNED',
+    entity: 'Venue',
+    entityId: venueId,
+    data: { tier },
+  })
+
+  logger.info(`Comp plan ${tier} assigned to venue ${venueId} (no Stripe, no expiry)`)
+  return getPlanState(venueId)
+}
+
+/**
+ * Disable a PLAN_* feature ONLY if the venue currently has an active row for it — avoids
+ * disableFeatureForVenue's update() throwing when no VenueFeature row exists (it updates by
+ * the composite unique key, which fails if the row was never created).
+ */
+async function disablePlanCodeIfActive(venueId: string, planCode: 'PLAN_PRO' | 'PLAN_PREMIUM'): Promise<void> {
+  const existing = await prisma.venueFeature.findFirst({
+    where: { venueId, active: true, feature: { code: planCode } },
+    select: { id: true },
+  })
+  if (existing) await disableFeatureForVenue(venueId, planCode)
+}
+
+/**
+ * Extend (or set) a base-plan TRIAL for a venue: a DB-only trial (no Stripe) whose endDate is
+ * now + `days`. Reuses grantTrialForVenue, which upserts the PLAN_* VenueFeature with the new
+ * endDate and clears any Stripe linkage. `days` must be 1..365 (validated by the caller's Zod
+ * schema; re-checked here defensively). Returns the fresh PlanState (state 'trial', trialEndsAt set).
+ */
+export async function extendPlanTrial(venueId: string, tier: PlanAdminTrialTier, days: number) {
+  const { getPlanState } = await import('./planState.service')
+
+  if (!Number.isInteger(days) || days < 1 || days > 365) {
+    throw new Error('Trial days must be an integer between 1 and 365')
+  }
+
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { id: true } })
+  if (!venue) throw new Error('Venue not found')
+
+  const planCode = TIER_TO_PLAN_CODE[tier]
+  await grantTrialForVenue(venueId, planCode, days)
+
+  logAction({
+    venueId,
+    action: 'PLAN_TRIAL_EXTENDED',
+    entity: 'Venue',
+    entityId: venueId,
+    data: { tier, days },
+  })
+
+  logger.info(`Plan trial extended for venue ${venueId}: ${tier} +${days}d`)
+  return getPlanState(venueId)
+}
+
 /**
  * Get venue details by ID
  */
