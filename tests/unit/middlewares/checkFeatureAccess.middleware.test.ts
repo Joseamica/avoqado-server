@@ -47,9 +47,10 @@ describe('checkFeatureAccess Middleware - Critical Tests', () => {
     // getVenueBaseTier (tier-aware blanket grant) queries findMany; default = no active base plan.
     ;(prisma.venueFeature.findMany as jest.Mock).mockResolvedValue([])
 
-    // isVenueGrandfathered (grandfather short-circuit) queries venue.findUnique;
-    // default = NOT grandfathered so the tier/grant paths under test still run.
-    ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ seatCapExempt: false })
+    // venueIsExemptFromPlanGating (grandfather + demo short-circuit) queries venue.findUnique
+    // selecting seatCapExempt AND status; default = NOT grandfathered, regular ACTIVE venue,
+    // so the tier/grant paths under test still run.
+    ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ seatCapExempt: false, status: 'ACTIVE' })
 
     jsonMock = jest.fn()
     statusMock = jest.fn(() => mockRes as Response)
@@ -286,6 +287,48 @@ describe('checkFeatureAccess Middleware - Critical Tests', () => {
         message: 'Failed to verify feature access',
       })
     })
+  })
+
+  describe('🎭 TEST 4b: Exemption short-circuit (grandfathered + demo venues)', () => {
+    it.each([['LIVE_DEMO'], ['TRIAL']])('allows ANY feature code for a %s (demo) venue without querying VenueFeature', async status => {
+      ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ seatCapExempt: false, status })
+
+      const middleware = checkFeatureAccess('RESERVATIONS')
+      await middleware(mockReq as Request, mockRes as Response, mockNext)
+
+      expect(mockNext).toHaveBeenCalledTimes(1)
+      expect(statusMock).not.toHaveBeenCalled()
+      expect((mockReq as any).venueFeature).toEqual({ featureCode: 'RESERVATIONS', grantedBy: 'GRANDFATHERED_OR_DEMO' })
+      // Short-circuited BEFORE the VenueFeature / tier queries.
+      expect(prisma.venueFeature.findFirst).not.toHaveBeenCalled()
+      expect(prisma.venueFeature.findMany).not.toHaveBeenCalled()
+    })
+
+    it('allows ANY feature code for a GRANDFATHERED venue (seatCapExempt=true) regardless of status', async () => {
+      ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ seatCapExempt: true, status: 'ACTIVE' })
+
+      const middleware = checkFeatureAccess('LOYALTY_PROGRAM')
+      await middleware(mockReq as Request, mockRes as Response, mockNext)
+
+      expect(mockNext).toHaveBeenCalledTimes(1)
+      expect(statusMock).not.toHaveBeenCalled()
+      expect((mockReq as any).venueFeature).toEqual({ featureCode: 'LOYALTY_PROGRAM', grantedBy: 'GRANDFATHERED_OR_DEMO' })
+      expect(prisma.venueFeature.findFirst).not.toHaveBeenCalled()
+    })
+
+    it.each([['ACTIVE'], ['ONBOARDING'], ['SUSPENDED']])(
+      'still blocks a Free venue with non-demo status %s (no grant, no tier)',
+      async status => {
+        ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ seatCapExempt: false, status })
+        ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValueOnce(null)
+
+        const middleware = checkFeatureAccess('RESERVATIONS')
+        await middleware(mockReq as Request, mockRes as Response, mockNext)
+
+        expect(mockNext).not.toHaveBeenCalled()
+        expect(statusMock).toHaveBeenCalledWith(403)
+      },
+    )
   })
 
   describe('🏷️ TEST 5: Venue resolution (URL :venueId, not token)', () => {

@@ -17,7 +17,13 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
   },
 }))
 import prisma from '../../../../src/utils/prismaClient'
-import { venueHasFeatureAccess, venueIsGrandfathered, PREMIUM_ONLY_CODES } from '../../../../src/services/access/basePlan.service'
+import {
+  venueHasFeatureAccess,
+  venueIsGrandfathered,
+  venueIsExemptFromPlanGating,
+  DEMO_VENUE_STATUSES,
+  PREMIUM_ONLY_CODES,
+} from '../../../../src/services/access/basePlan.service'
 
 const venueFindUnique = (prisma as any).venue.findUnique as jest.Mock
 const vfFindFirst = (prisma as any).venueFeature.findFirst as jest.Mock
@@ -68,4 +74,43 @@ describe('venueHasFeatureAccess — grandfathered short-circuit (path 0)', () =>
 
     expect(await venueHasFeatureAccess('v', PREMIUM_FEATURE)).toBe(false)
   })
+})
+
+describe('venueIsExemptFromPlanGating — grandfathered OR demo-status', () => {
+  it.each(DEMO_VENUE_STATUSES.map(s => [s]))('true for a demo venue (status %s) even when NOT grandfathered', async status => {
+    venueFindUnique.mockResolvedValue({ seatCapExempt: false, status })
+    expect(await venueIsExemptFromPlanGating('v')).toBe(true)
+  })
+
+  it('true for a grandfathered venue regardless of status', async () => {
+    venueFindUnique.mockResolvedValue({ seatCapExempt: true, status: 'ACTIVE' })
+    expect(await venueIsExemptFromPlanGating('v')).toBe(true)
+  })
+
+  it.each([['ACTIVE'], ['ONBOARDING'], ['PENDING_ACTIVATION'], ['SUSPENDED'], ['ADMIN_SUSPENDED'], ['CLOSED']])(
+    'false for a non-grandfathered venue with production status %s',
+    async status => {
+      venueFindUnique.mockResolvedValue({ seatCapExempt: false, status })
+      expect(await venueIsExemptFromPlanGating('v')).toBe(false)
+    },
+  )
+
+  it('false when the venue does not exist', async () => {
+    venueFindUnique.mockResolvedValue(null)
+    expect(await venueIsExemptFromPlanGating('v')).toBe(false)
+  })
+})
+
+describe('venueHasFeatureAccess — demo short-circuit (path 0, same as grandfathered)', () => {
+  it.each(DEMO_VENUE_STATUSES.map(s => [s]))(
+    '%s venue → ANY feature code = true, with NO grant and NO base plan, before any VenueFeature lookup',
+    async status => {
+      venueFindUnique.mockResolvedValue({ seatCapExempt: false, status })
+      vfFindFirst.mockResolvedValue(null)
+
+      expect(await venueHasFeatureAccess('v', 'RESERVATIONS')).toBe(true)
+      expect(await venueHasFeatureAccess('v', PREMIUM_FEATURE)).toBe(true)
+      expect(vfFindFirst).not.toHaveBeenCalled()
+    },
+  )
 })

@@ -17,7 +17,7 @@
 import { Request, Response, NextFunction } from 'express'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
-import { PAID_PLAN_TIER_CODES, PREMIUM_ONLY_CODES, getVenueBaseTier, venueIsGrandfathered } from '@/services/access/basePlan.service'
+import { PAID_PLAN_TIER_CODES, PREMIUM_ONLY_CODES, getVenueBaseTier, venueIsExemptFromPlanGating } from '@/services/access/basePlan.service'
 import { resolveRequestVenueId } from './checkPermission.middleware'
 
 /**
@@ -51,13 +51,14 @@ export function checkFeatureAccess(featureCode: string) {
         return
       }
 
-      // GRANDFATHERED short-circuit: a grandfathered venue (Venue.seatCapExempt === true)
-      // operates as it did before tier monetization — full feature access for ANY code, no
-      // paywall. Checked here, BEFORE the tier check, the same place superadmin would be let
-      // through, so legacy venues (e.g. a hotel using reservations with no RESERVATIONS grant)
-      // never 403 on a feature-gated endpoint.
-      if (await venueIsGrandfathered(venueId)) {
-        ;(req as any).venueFeature = { featureCode, grantedBy: 'GRANDFATHERED' }
+      // EXEMPT short-circuit: a grandfathered venue (Venue.seatCapExempt === true) operates
+      // as it did before tier monetization, and a DEMO venue (Venue.status LIVE_DEMO / TRIAL)
+      // must showcase every feature — full feature access for ANY code, no paywall, for both.
+      // Checked here, BEFORE the tier check, the same place superadmin would be let through,
+      // so legacy venues (e.g. a hotel using reservations with no RESERVATIONS grant) and
+      // demos never 403 on a feature-gated endpoint. Single venue lookup (seatCapExempt+status).
+      if (await venueIsExemptFromPlanGating(venueId)) {
+        ;(req as any).venueFeature = { featureCode, grantedBy: 'GRANDFATHERED_OR_DEMO' }
         return next()
       }
 
@@ -213,10 +214,10 @@ export function checkAnyFeatureAccess(featureCodes: string[]) {
         return
       }
 
-      // GRANDFATHERED short-circuit (same as checkFeatureAccess): a grandfathered venue is
-      // exempt from feature paywalls and gets through any of the requested codes.
-      if (await venueIsGrandfathered(venueId)) {
-        ;(req as any).venueFeature = { featureCodes, grantedBy: 'GRANDFATHERED' }
+      // EXEMPT short-circuit (same as checkFeatureAccess): a grandfathered or demo-status
+      // venue is exempt from feature paywalls and gets through any of the requested codes.
+      if (await venueIsExemptFromPlanGating(venueId)) {
+        ;(req as any).venueFeature = { featureCodes, grantedBy: 'GRANDFATHERED_OR_DEMO' }
         return next()
       }
 
@@ -345,9 +346,9 @@ export async function hasFeatureAccess(
   reason?: string
 }> {
   try {
-    // GRANDFATHERED short-circuit: grandfathered venues are exempt from feature paywalls and
-    // have access to any feature, mirroring venueHasFeatureAccess + the middleware.
-    if (await venueIsGrandfathered(venueId)) {
+    // EXEMPT short-circuit: grandfathered and demo-status venues are exempt from feature
+    // paywalls and have access to any feature, mirroring venueHasFeatureAccess + the middleware.
+    if (await venueIsExemptFromPlanGating(venueId)) {
       return { hasAccess: true, isTrialing: false, trialEndsAt: null }
     }
 

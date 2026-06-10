@@ -3916,13 +3916,16 @@ router.put(
 router.use('/venues/:venueId/inventory', authenticateTokenMiddleware, inventoryRoutes)
 
 // Referral Program routes (program config + capture + reads)
-router.use('/venues/:venueId/referrals', authenticateTokenMiddleware, referralsRoutes)
+// Plan-tier gate: Pro feature REFERRAL_PROGRAM (grandfathered/demo venues bypass inside the middleware)
+router.use('/venues/:venueId/referrals', authenticateTokenMiddleware, checkFeatureAccess('REFERRAL_PROGRAM'), referralsRoutes)
 
-// Reservation / Booking System (core feature, permission-gated)
-router.use('/venues/:venueId/reservations', authenticateTokenMiddleware, reservationRoutes)
+// Reservation / Booking System (permission-gated + plan-tier gated)
+// Plan-tier gate: Pro feature RESERVATIONS (grandfathered/demo venues bypass inside the middleware)
+router.use('/venues/:venueId/reservations', authenticateTokenMiddleware, checkFeatureAccess('RESERVATIONS'), reservationRoutes)
 
-// Class Sessions (group classes / workshops)
-router.use('/venues/:venueId/class-sessions', authenticateTokenMiddleware, classSessionRoutes)
+// Class Sessions (group classes / workshops) — part of the reservations/appointments product
+// (uses reservations:* permissions; attendees ARE reservations), so it shares the RESERVATIONS gate.
+router.use('/venues/:venueId/class-sessions', authenticateTokenMiddleware, checkFeatureAccess('RESERVATIONS'), classSessionRoutes)
 
 // Google Calendar Sync — venue-scoped status / ops endpoints (Phase 3)
 router.use('/venues/:venueId/google-calendar', authenticateTokenMiddleware, googleCalendarStatusRoutes)
@@ -9190,6 +9193,13 @@ router.post(
 // Loyalty Program Routes (Phase 1b: Loyalty System)
 // ============================================================================
 
+// Plan-tier gate for the WHOLE loyalty group (both URL shapes): Pro feature LOYALTY_PROGRAM.
+// Registered BEFORE the loyalty routes below so every one of them passes through it.
+// Grandfathered/demo venues bypass inside the middleware. Auth runs first so the gate has
+// authContext (the per-route authenticateTokenMiddleware below is then an idempotent no-op).
+router.use('/venues/:venueId/loyalty', authenticateTokenMiddleware, checkFeatureAccess('LOYALTY_PROGRAM'))
+router.use('/venues/:venueId/customers/:customerId/loyalty', authenticateTokenMiddleware, checkFeatureAccess('LOYALTY_PROGRAM'))
+
 /**
  * @openapi
  * /api/v1/dashboard/venues/{venueId}/loyalty/config:
@@ -9517,6 +9527,13 @@ router.post(
 // ============================================================================
 // Discount Routes (Phase 2: Discount System)
 // ============================================================================
+
+// Plan-tier gate for the WHOLE dashboard discounts group (management/CRUD): Pro feature
+// PROMOTIONS (discounts + coupons). Order-flow discount APPLICATION (TPV applying a discount
+// to an order) lives in tpv.routes.ts and is deliberately NOT gated here.
+// Grandfathered/demo venues bypass inside the middleware.
+router.use('/venues/:venueId/discounts', authenticateTokenMiddleware, checkFeatureAccess('PROMOTIONS'))
+router.use('/venues/:venueId/customers/:customerId/discounts', authenticateTokenMiddleware, checkFeatureAccess('PROMOTIONS'))
 
 /**
  * @openapi
@@ -9914,6 +9931,11 @@ router.get(
 // ============================================================================
 // Coupon Routes (Phase 2: Coupon System)
 // ============================================================================
+
+// Plan-tier gate for the WHOLE dashboard coupons group (management/CRUD + validate/redeem
+// from the dashboard): Pro feature PROMOTIONS — same code as discounts.
+// Grandfathered/demo venues bypass inside the middleware.
+router.use('/venues/:venueId/coupons', authenticateTokenMiddleware, checkFeatureAccess('PROMOTIONS'))
 
 /**
  * @openapi

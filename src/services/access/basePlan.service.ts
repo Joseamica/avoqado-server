@@ -85,12 +85,36 @@ export async function venueIsGrandfathered(venueId: string): Promise<boolean> {
 }
 
 /**
+ * Demo venue statuses (VenueStatus): venues that exist to SHOWCASE the product — the public
+ * live demo and private onboarding trials. Demo venues must demonstrate every feature, so
+ * they are exempt from plan-tier paywalls (a demo that 403s on Reservations sells nothing).
+ */
+export const DEMO_VENUE_STATUSES = ['LIVE_DEMO', 'TRIAL'] as const
+
+/**
+ * Whether the venue is EXEMPT from plan-tier gating entirely. True when the venue is either:
+ *   - GRANDFATHERED ({@link Venue.seatCapExempt} === true — see {@link venueIsGrandfathered}), or
+ *   - a DEMO venue ({@link Venue.status} in {@link DEMO_VENUE_STATUSES}: LIVE_DEMO / TRIAL),
+ *     which must showcase every feature.
+ * Single venue lookup (seatCapExempt + status). Returns false when the venue doesn't exist.
+ * This is the short-circuit used by the feature-access middleware and {@link venueHasFeatureAccess}.
+ */
+export async function venueIsExemptFromPlanGating(venueId: string): Promise<boolean> {
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { seatCapExempt: true, status: true } })
+  if (!venue) return false
+  if (venue.seatCapExempt === true) return true
+  return (DEMO_VENUE_STATUSES as readonly string[]).includes(venue.status as string)
+}
+
+/**
  * Whether a venue may use a specific feature — tier-aware mirror of the access gate so callers
  * OUTSIDE the HTTP middleware (e.g. the customer MCP) enforce the same paid-plan gating and
  * never bypass it. Resolution order:
- *   0. GRANDFATHERED venue ({@link Venue.seatCapExempt} === true) → true for ANY feature code
- *      (operates as before tiers; the same short-circuit point where superadmin is allowed in
- *      the middleware). Checked BEFORE the tier logic so legacy venues never hit a paywall.
+ *   0. EXEMPT venue (GRANDFATHERED {@link Venue.seatCapExempt} === true, OR demo-status
+ *      LIVE_DEMO / TRIAL — see {@link venueIsExemptFromPlanGating}) → true for ANY feature code
+ *      (operates as before tiers / showcases everything; the same short-circuit point where
+ *      superadmin is allowed in the middleware). Checked BEFORE the tier logic so legacy and
+ *      demo venues never hit a paywall.
  *   1. Own active VenueFeature for `featureCode` (active, !suspended, trial null/future) → true (grandfather; explicit grant ALWAYS wins, regardless of tier).
  *   2. Tier codes themselves are not self-granting here → false.
  *   3. PLAN_PREMIUM → true for any non-tier feature.
@@ -98,8 +122,8 @@ export async function venueIsGrandfathered(venueId: string): Promise<boolean> {
  *   5. No active base plan → false.
  */
 export async function venueHasFeatureAccess(venueId: string, featureCode: string): Promise<boolean> {
-  // 0. Grandfathered venue → full feature access, no paywall (operates as before tiers).
-  if (await venueIsGrandfathered(venueId)) return true
+  // 0. Exempt venue (grandfathered OR demo-status) → full feature access, no paywall.
+  if (await venueIsExemptFromPlanGating(venueId)) return true
 
   const vf = await prisma.venueFeature.findFirst({
     where: { venueId, feature: { code: featureCode } },
