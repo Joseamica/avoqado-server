@@ -61,8 +61,11 @@ describe('MP OAuth state helpers', () => {
 
   it('rejects a tampered token', () => {
     const token = signState(payload)
-    // Flip the last char to invalidate the signature
-    const tampered = token.slice(0, -2) + (token.endsWith('a') ? 'b' : 'a') + token.slice(-1)
+    // Flip the second-to-last char to invalidate the signature. The replacement
+    // must differ from the char being replaced, or the "tampered" token equals
+    // the original (~1.5% of signatures) and the test flakes.
+    const idx = token.length - 2
+    const tampered = token.slice(0, idx) + (token[idx] === 'a' ? 'b' : 'a') + token.slice(idx + 1)
     expect(() => verifyState(tampered)).toThrow()
   })
 
