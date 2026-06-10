@@ -15,13 +15,28 @@ export const PAID_PLAN_TIER_CODES = ['PLAN_PRO', 'PLAN_PREMIUM'] as const
  * venue only gets them via its OWN explicit, active VenueFeature row (grandfather),
  * never from the tier grant.
  *
- * Keep this list tight: we enumerate ONLY the Premium-exclusive set (small), so Pro
- * keeps today's blanket behavior for everything else (lower regression risk than
- * enumerating Pro's full set). Every code here MUST exist as a real Feature row,
- * otherwise it silently mis-gates nothing (a non-existent code can never be the
- * featureCode passed in) — verified against the Feature table.
+ * MUST mirror the PREMIUM tier's `includes` in the dashboard catalog
+ * (avoqado-web-dashboard/src/config/plan-catalog.ts) by exact name — a mismatch
+ * means the server blanket-grants to Pro something the catalog sells as Premium.
+ * Codes without a Feature row are still valid here: the gate works off the code
+ * string (the explicit-grant lookup simply finds nothing).
  */
-export const PREMIUM_ONLY_CODES = ['CFDI', 'INVENTORY_TRACKING'] as const
+export const PREMIUM_ONLY_CODES = [
+  'CFDI',
+  'INVENTORY_TRACKING',
+  'ADVANCED_ANALYTICS',
+  'COMMISSIONS',
+  'ATTENDANCE_TRACKING',
+  'SERIALIZED_INVENTORY',
+] as const
+
+/**
+ * Free-tier codes (Feature.code): capabilities the FREE plan PROMISES (dashboard
+ * catalog FREE `includes`), granted to EVERY venue regardless of plan — even with
+ * no base plan at all. Without this, a brand-new Free venue gets 403 on routes the
+ * pricing page says are included (e.g. the chatbot). Mirror plan-catalog.ts FREE.
+ */
+export const FREE_TIER_CODES = ['AVAILABLE_BALANCE', 'CHATBOT'] as const
 
 export type BaseTier = 'PREMIUM' | 'PRO'
 
@@ -135,6 +150,9 @@ export async function venueHasFeatureAccess(venueId: string, featureCode: string
   // 2. Tier codes are not self-granting via the blanket logic.
   if ((PAID_PLAN_TIER_CODES as readonly string[]).includes(featureCode)) return false
 
+  // 2.5. Free-tier promises are granted to everyone (even venues with no plan).
+  if ((FREE_TIER_CODES as readonly string[]).includes(featureCode)) return true
+
   // 3-5. Otherwise the tier decides.
   const tier = await getVenueBaseTier(venueId)
   if (tier === 'PREMIUM') return true
@@ -166,6 +184,9 @@ export async function venuesWithFeatureAccess(venueIds: string[], featureCode: s
 
   // Tier codes are not blanket-granted: only an own grant (above) entitles them.
   if ((PAID_PLAN_TIER_CODES as readonly string[]).includes(featureCode)) return entitled
+
+  // Free-tier promises entitle every venue (even with no plan).
+  if ((FREE_TIER_CODES as readonly string[]).includes(featureCode)) return new Set(venueIds)
 
   const isPremiumOnly = (PREMIUM_ONLY_CODES as readonly string[]).includes(featureCode)
 

@@ -8,7 +8,7 @@ import Stripe from 'stripe'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
-import { getVenueBaseTier, PAID_PLAN_TIER_CODES, PREMIUM_ONLY_CODES } from '@/services/access/basePlan.service'
+import { getVenueBaseTier, PAID_PLAN_TIER_CODES, PREMIUM_ONLY_CODES, FREE_TIER_CODES } from '@/services/access/basePlan.service'
 import { cancelSubscription, createTrialSubscriptions } from '../stripe.service'
 import { logAction } from './activity-log.service'
 
@@ -317,10 +317,11 @@ export async function getVenueFeatureStatus(venueId: string) {
   const isPlanTierCode = (code: string): boolean => (PAID_PLAN_TIER_CODES as readonly string[]).includes(code)
   const isPremiumOnlyCode = (code: string): boolean => (PREMIUM_ONLY_CODES as readonly string[]).includes(code)
   // Tier-aware grant predicate — same rule as the checkFeatureAccess middleware:
-  // grantedByPlan = grandfathered || tier === 'PREMIUM' || (tier === 'PRO' && !PREMIUM_ONLY_CODES.includes(code))
+  // grantedByPlan = grandfathered || FREE_TIER_CODES || tier === 'PREMIUM' || (tier === 'PRO' && !PREMIUM_ONLY_CODES.includes(code))
   const tierGrants = (code: string): boolean => {
     if (isPlanTierCode(code)) return false // tier codes never self-grant via the blanket
     if (isGrandfathered) return true // grandfathered → every non-tier feature granted, no paywall
+    if ((FREE_TIER_CODES as readonly string[]).includes(code)) return true // Free-tier promises: everyone
     if (baseTier === 'PREMIUM') return true
     if (baseTier === 'PRO') return !isPremiumOnlyCode(code)
     return false

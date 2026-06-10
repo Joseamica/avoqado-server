@@ -114,3 +114,41 @@ describe('venueHasFeatureAccess — demo short-circuit (path 0, same as grandfat
     },
   )
 })
+
+/**
+ * Catalog mirror (plan-catalog.ts ←→ basePlan.service): FREE_TIER_CODES are promised to every
+ * venue (even with no plan), and the EXPANDED PREMIUM_ONLY_CODES are never blanket-granted to PRO.
+ */
+describe('catalog mirror: FREE_TIER_CODES + expanded PREMIUM_ONLY_CODES', () => {
+  const vfFindMany = (prisma as any).venueFeature.findMany as jest.Mock
+
+  it('venue with NO plan → Free-tier promises (CHATBOT, AVAILABLE_BALANCE) = true', async () => {
+    venueFindUnique.mockResolvedValue({ seatCapExempt: false, status: 'ACTIVE' })
+    vfFindFirst.mockResolvedValue(null)
+    vfFindMany.mockResolvedValue([])
+
+    expect(await venueHasFeatureAccess('v', 'CHATBOT')).toBe(true)
+    expect(await venueHasFeatureAccess('v', 'AVAILABLE_BALANCE')).toBe(true)
+  })
+
+  it('PRO venue → the 4 newly-premium-only catalog codes are NOT blanket-granted', async () => {
+    venueFindUnique.mockResolvedValue({ seatCapExempt: false, status: 'ACTIVE' })
+    vfFindFirst.mockResolvedValue(null)
+    vfFindMany.mockResolvedValue([{ active: true, suspendedAt: null, endDate: null, feature: { code: 'PLAN_PRO' } }])
+
+    for (const code of ['SERIALIZED_INVENTORY', 'ADVANCED_ANALYTICS', 'COMMISSIONS', 'ATTENDANCE_TRACKING']) {
+      expect(await venueHasFeatureAccess('v', code)).toBe(false)
+    }
+    // ...while regular Pro-tier features stay blanket-granted.
+    expect(await venueHasFeatureAccess('v', 'RESERVATIONS')).toBe(true)
+  })
+
+  it('PREMIUM venue → premium-only catalog codes ARE granted', async () => {
+    venueFindUnique.mockResolvedValue({ seatCapExempt: false, status: 'ACTIVE' })
+    vfFindFirst.mockResolvedValue(null)
+    vfFindMany.mockResolvedValue([{ active: true, suspendedAt: null, endDate: null, feature: { code: 'PLAN_PREMIUM' } }])
+
+    expect(await venueHasFeatureAccess('v', 'SERIALIZED_INVENTORY')).toBe(true)
+    expect(await venueHasFeatureAccess('v', 'ADVANCED_ANALYTICS')).toBe(true)
+  })
+})
