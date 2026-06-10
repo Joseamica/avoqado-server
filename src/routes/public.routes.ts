@@ -17,6 +17,7 @@ import * as tpvOrderPublicController from '../controllers/public/tpvOrder.public
 import { assignSerialsPublicSchema, rejectSpeiSchema } from '../schemas/public/tpvOrder.public.schema'
 import { validateRequest } from '../middlewares/validation'
 import { authenticateCustomer } from '../middlewares/customerAuth.middleware'
+import { checkPublicVenueFeature } from '../middlewares/checkFeatureAccess.middleware'
 import { venueChatAuth } from '../middlewares/venueChatAuth.middleware'
 import {
   createSessionBodySchema,
@@ -103,6 +104,17 @@ router.get('/receipt/:accessKey/review', getReviewForReceipt)
 
 // ---- Public Reservation / Booking Routes (unauthenticated) ----
 
+// Plan-tier gate (RESERVATIONS · Pro) — CREATE-NEW-booking surface ONLY.
+// GOLDEN RULE: never gate manage-existing flows (magic-link :cancelSecret
+// cancel/reschedule, customer portal/login/OTP, balance reads) — a customer who
+// already booked must always be able to manage that booking, regardless of the
+// venue's current plan. The 403 wording is CUSTOMER-facing: it's the venue's
+// plan, not the customer's, so it never mentions plans or upgrades.
+const requireReservationsPlan = checkPublicVenueFeature(
+  'RESERVATIONS',
+  'Este negocio no tiene reservaciones en línea disponibles por el momento.',
+)
+
 router.get(
   '/venues/:venueSlug/info',
   readLimit,
@@ -113,6 +125,7 @@ router.get(
 router.get(
   '/venues/:venueSlug/availability',
   readLimit,
+  requireReservationsPlan,
   validateRequest(z.object({ params: publicVenueParamsSchema, query: getAvailabilityQuerySchema })),
   reservationPublicController.getAvailability,
 )
@@ -120,6 +133,7 @@ router.get(
 router.post(
   '/venues/:venueSlug/reservations',
   writeLimit,
+  requireReservationsPlan,
   validateRequest(z.object({ params: publicVenueParamsSchema, body: publicCreateReservationBodySchema })),
   reservationPublicController.createReservation,
 )
@@ -127,16 +141,19 @@ router.post(
 // Slot hold (Square "Cita reservada durante 9:56" countdown). The widget
 // creates a hold when the customer reaches the payment step and consumes it
 // (deletion) on successful reservation. The cancel route lets the widget
-// release a hold if the customer navigates back.
+// release a hold if the customer navigates back. Both hold routes are part of
+// the CREATE flow, so the pair is gated consistently with the create POST.
 router.post(
   '/venues/:venueSlug/reservations/hold',
   writeLimit,
+  requireReservationsPlan,
   validateRequest(z.object({ params: publicVenueParamsSchema, body: publicCreateHoldBodySchema })),
   reservationPublicController.createHold,
 )
 router.delete(
   '/venues/:venueSlug/reservations/hold/:holdId',
   cancelLimit,
+  requireReservationsPlan,
   validateRequest(z.object({ params: publicHoldParamsSchema })),
   reservationPublicController.cancelHold,
 )
@@ -193,9 +210,13 @@ router.get(
   creditPackPublicController.getCustomerBalance,
 )
 
+// Checkout is a PRE-PAYMENT to book (create-flow surface) → gated. The pack
+// LIST + BALANCE reads above stay UNGATED: existing credit holders must always
+// be able to see what they already paid for, regardless of the venue's plan.
 router.post(
   '/venues/:venueSlug/credit-packs/:packId/checkout',
   writeLimit,
+  requireReservationsPlan,
   validateRequest(publicCheckoutSchema),
   creditPackPublicController.createCheckout,
 )

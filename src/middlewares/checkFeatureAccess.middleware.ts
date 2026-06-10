@@ -17,7 +17,13 @@
 import { Request, Response, NextFunction } from 'express'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
-import { PAID_PLAN_TIER_CODES, PREMIUM_ONLY_CODES, getVenueBaseTier, venueIsExemptFromPlanGating } from '@/services/access/basePlan.service'
+import {
+  PAID_PLAN_TIER_CODES,
+  PREMIUM_ONLY_CODES,
+  getVenueBaseTier,
+  venueHasFeatureAccess,
+  venueIsExemptFromPlanGating,
+} from '@/services/access/basePlan.service'
 import { resolveRequestVenueId } from './checkPermission.middleware'
 
 /**
@@ -182,6 +188,76 @@ export function checkFeatureAccess(featureCode: string) {
         error: 'Internal server error',
         message: 'Failed to verify feature access',
       })
+    }
+  }
+}
+
+/**
+ * PUBLIC (unauthenticated) plan-gate variant of {@link checkFeatureAccess} for venue-scoped
+ * public routes (`/venues/:venueSlug/...`). Those requests carry NO authContext and identify
+ * the venue by SLUG, so the dashboard middleware (authContext + :venueId) cannot be reused.
+ *
+ * Behavior — deliberately different from the dashboard gate in three ways:
+ *   1. Slug resolution mirrors the public controllers' `resolveVenueBySlug`
+ *      (findFirst on `slug` + `active: true`), selecting ONLY the id.
+ *   2. Unknown slug → pass through (next()) so the controller produces its existing
+ *      404 ('Negocio no encontrado') — never a misleading 403 for a venue that doesn't exist.
+ *   3. FAIL-OPEN on unexpected errors (log + next()): a gating bug must never take down
+ *      public booking for entitled venues. The dashboard gate fails closed (500); here the
+ *      stakes are inverted — a lost end-customer booking costs the venue real money.
+ *
+ * Entitlement uses {@link venueHasFeatureAccess}, the same resolver the dashboard relies on
+ * (grandfathered/demo exemption → own grant → tier blanket), so both planes can never disagree.
+ *
+ * The 403 body is CUSTOMER-facing: the end customer is not the one with the plan, so the
+ * message never mentions plans/upgrades — just that the venue doesn't offer the capability.
+ *
+ * Usage:
+ * router.post('/venues/:venueSlug/reservations', limiter, checkPublicVenueFeature('RESERVATIONS', msg), ...)
+ *
+ * @param featureCode - The feature code to check (e.g., 'RESERVATIONS')
+ * @param customerMessage - Optional Spanish, customer-friendly 403 message override
+ * @returns Express middleware function
+ */
+export function checkPublicVenueFeature(featureCode: string, customerMessage?: string) {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const venueSlug = req.params?.venueSlug
+      if (!venueSlug) return next() // no slug param on this route — nothing to gate on
+
+      // Same slug→venue resolution as the public controllers (slug + active), id only.
+      const venue = await prisma.venue.findFirst({
+        where: { slug: venueSlug, active: true },
+        select: { id: true },
+      })
+
+      // Unknown slug → let the controller produce its existing 404.
+      if (!venue) return next()
+
+      const allowed = await venueHasFeatureAccess(venue.id, featureCode)
+      if (!allowed) {
+        logger.warn('⚠️ Public feature access denied: venue plan does not include feature', {
+          venueSlug,
+          venueId: venue.id,
+          featureCode,
+        })
+        res.status(403).json({
+          error: 'Feature not available',
+          code: 'PLAN_REQUIRED',
+          message: customerMessage ?? 'Este negocio no tiene esta función disponible en línea por el momento.',
+        })
+        return
+      }
+
+      next()
+    } catch (error) {
+      // FAIL-OPEN: never let a gating bug 500 the public booking surface (see JSDoc).
+      logger.error('❌ Public feature access check error — failing open', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        featureCode,
+        venueSlug: req.params?.venueSlug,
+      })
+      next()
     }
   }
 }
@@ -425,6 +501,7 @@ export async function hasFeatureAccess(
 
 export default {
   checkFeatureAccess,
+  checkPublicVenueFeature,
   checkAnyFeatureAccess,
   hasFeatureAccess,
 }

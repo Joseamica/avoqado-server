@@ -2,6 +2,7 @@ import { Router } from 'express'
 import rateLimit from 'express-rate-limit'
 import { validateRequest } from '@/middlewares/validation'
 import { authenticateConsumer } from '@/middlewares/consumerAuth.middleware'
+import { checkPublicVenueFeature } from '@/middlewares/checkFeatureAccess.middleware'
 import * as authController from '@/controllers/consumer/auth.consumer.controller'
 import * as venueController from '@/controllers/consumer/venue.consumer.controller'
 import * as reservationController from '@/controllers/consumer/reservation.consumer.controller'
@@ -23,6 +24,16 @@ const authLimit = rateLimit({ windowMs: 60_000, max: 20, standardHeaders: true, 
 const readLimit = rateLimit({ windowMs: 60_000, max: 80, standardHeaders: true, legacyHeaders: false })
 const writeLimit = rateLimit({ windowMs: 60_000, max: 10, standardHeaders: true, legacyHeaders: false })
 
+// Plan-tier gate (RESERVATIONS · Pro) — CREATE-NEW-booking surface ONLY, mirroring
+// public.routes.ts. Manage-existing flows (my reservations list, deposit payment /
+// finalize for an existing reservation, credit balance) stay UNGATED: a consumer who
+// already booked must always be able to manage that booking. Customer-facing 403
+// wording — it's the venue's plan, not the consumer's, so no plan/upgrade talk.
+const requireReservationsPlan = checkPublicVenueFeature(
+  'RESERVATIONS',
+  'Este negocio no tiene reservaciones en línea disponibles por el momento.',
+)
+
 router.post('/auth/oauth', authLimit, validateRequest(consumerOAuthSchema), authController.oauthLogin)
 router.get('/me', readLimit, authenticateConsumer, authController.me)
 
@@ -32,6 +43,7 @@ router.post(
   '/venues/:venueSlug/reservations',
   writeLimit,
   authenticateConsumer,
+  requireReservationsPlan,
   validateRequest(consumerCreateReservationSchema),
   reservationController.create,
 )
@@ -52,10 +64,12 @@ router.post(
   validateRequest(consumerFinalizeReservationDepositCheckoutSchema),
   reservationController.finalizeDepositCheckout,
 )
+// Pre-payment to book (create-flow surface) → gated, like the public sibling.
 router.post(
   '/venues/:venueSlug/credit-packs/:packId/checkout',
   writeLimit,
   authenticateConsumer,
+  requireReservationsPlan,
   validateRequest(consumerCreateCreditCheckoutSchema),
   creditController.createCheckout,
 )
