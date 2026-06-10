@@ -259,13 +259,13 @@ build-vs-integrar (facturapi nómina vs partner).
   /1.16; 8% → /1.08; 0%/exento → /1.0), por línea según `product.taxRate`. Coincide con el JSDoc de `cfdiPayloadBuilder`
   (`net = total/1.16`). Capa A: ingreso neto = Σ(`Payment.amount`/(1+taxRate)), ex-propina; bruto como línea secundaria. Capa B: "IVA
   trasladado cobrado" (208) = la parte de IVA embebida. Tasas a soportar (validado en Alegra): **16/8/0/ exento** + IVA no acreditable +
-  IEPS, flag **acreditable Sí/No**. **🔴 POSIBLE BUG VIVO de facturación (verificado en código 2026-06-07):** el CFDI trata
-  `OrderItem.unitPrice` (= `product.price`, el precio del menú) como **NET** y le manda a facturapi `tax_included: false` → facturapi **SUMA
-  16% encima** (`assembleSaleInput.ts:10,44` + `cfdiPayloadBuilder.ts:37,103`). Pero si el precio del menú **ya incluye IVA** (norma en
-  México, confirmado por founder), el CFDI timbra un total **~16% MAYOR** que lo que el cliente pagó (sobre-factura base + IVA). No hay flag
-  "precios con IVA incluido". **Confirmar contra una factura real de producción** (¿total del CFDI == ticket pagado, o ×1.16?). Si confirma,
-  el módulo CFDI debe tratar el precio como GROSS (`net = price/1.16`, `tax_included:true` o derivar). Independiente del módulo de
-  contabilidad — es del módulo de facturación en prod.
+  IEPS, flag **acreditable Sí/No**. **✅ Bug de sobre-facturación: ENCONTRADO Y ARREGLADO (2026-06-07, pre-launch).** El CFDI trataba el
+  precio del menú (IVA-incluido en TPV, `taxAmount=0`) como NET y facturapi sumaba 16% encima → total timbrado = pagado × 1.16. Verificado
+  contra prod: la tabla `Cfdi` tenía 0 filas → **ninguna factura mal emitida llegó a clientes**. Fix (commiteado en develop): regla
+  `order.taxAmount === 0 ⇒ pricesIncludeIva` → conceptos con `tax_included:true` (el total timbrado == lo pagado, al centavo) + helper
+  `ivaMath.splitIvaIncluded` para el desglose; fuentes NET (reservaciones/pos-sync, `taxAmount>0`) sin cambio. La factura global además
+  deriva la tasa REAL por `product.taxRate`/`objetoImp` (ya no asume 16%). 205 tests fiscales en verde. **La Capa B debe reusar exactamente
+  esta regla** (`pricesIncludeIva` por fuente + `splitIvaIncluded`) — ya existe en el código, no reinventar.
 - **🟠 COGS de QUANTITY y serializado:** hoy NO se graba costo en la venta para retail (QUANTITY) ni serializado (SIMs/PlayTelecom).
   ¿Capturar snapshot del costo al deducir (cambio en el flujo de inventario), o estimar con `Product.cost`? Afecta directo el margen de tus
   sectores retail/PlayTelecom.
