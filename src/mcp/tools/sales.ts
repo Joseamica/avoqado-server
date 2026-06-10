@@ -7,6 +7,7 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { getChartData } from '@/services/dashboard/generalStats.dashboard.service'
+import { planGateMessage } from '../planGate'
 import { computeSettlementProjection } from '@/services/dashboard/sales-summary.dashboard.service'
 
 export interface SalesInput {
@@ -235,6 +236,8 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, fromDate, toDate, limit }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Los reportes avanzados') // PRO tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
       const data = (await getChartData(venueId, 'best-selling-products', { fromDate, toDate })) as {
         products: BestSellingProduct[]
       }
@@ -254,6 +257,8 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, fromDate, toDate, limit }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Los reportes avanzados') // PRO tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
       const ranking = (await getChartData(venueId, 'staff-ranking', { fromDate, toDate })) as StaffRankingRow[]
       const top = rankTopStaff(ranking, limit ?? 10)
       return text({ venueId, count: top.length, staff: top })
@@ -271,6 +276,8 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, fromDate, toDate, limit }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Los reportes avanzados') // PRO tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
       const rows = (await getChartData(venueId, 'category-mix', { fromDate, toDate })) as CategoryMixRow[]
       const categories = rankCategories(rows, limit ?? 20)
       return text({ venueId, count: categories.length, categories })
@@ -287,6 +294,8 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, fromDate, toDate }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Los reportes avanzados') // PRO tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
       const data = (await getChartData(venueId, 'sales-by-payment-method', { fromDate, toDate })) as {
         payments: AnalyticsPaymentRow[]
       }
@@ -307,6 +316,8 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, fromDate, toDate, limit }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Los reportes avanzados') // PRO tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
       const rows = (await getChartData(venueId, 'channel-mix', { fromDate, toDate })) as ChannelMixRow[]
       const channels = rankChannels(rows, limit ?? 20)
       return text({ venueId, count: channels.length, channels })
@@ -323,6 +334,8 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, fromDate, toDate }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Los reportes avanzados') // PRO tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
       const rows = (await getChartData(venueId, 'peak-hours', { fromDate, toDate })) as PeakHourRow[]
       const hours = summarizePeakHours(rows)
       return text({ venueId, hours })
@@ -341,6 +354,8 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
       const tz = venue?.timezone || 'America/Mexico_City'
+      const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Los reportes avanzados') // PRO tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
       const data = (await getChartData(venueId, 'tips-over-time', { fromDate, toDate })) as { payments: TipPaymentRow[] }
       const result = summarizeTipsByDay(data.payments, tz)
       return text({ venueId, ...result })

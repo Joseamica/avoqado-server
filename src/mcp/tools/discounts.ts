@@ -7,6 +7,7 @@ import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { createDiscount } from '@/services/dashboard/discount.dashboard.service'
 import { createCouponCode } from '@/services/dashboard/coupon.dashboard.service'
+import { planGateMessage } from '../planGate'
 import { DiscountType } from '@prisma/client'
 
 const DISCOUNT_TYPE_MAP: Record<string, DiscountType> = {
@@ -78,6 +79,8 @@ export function registerDiscountTools(server: McpServer, scope: McpScope) {
     async ({ venueId, name, type, value, description, minPurchase, maxDiscount, automatic }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('discounts:create', venueId) // write gate (per-venue role)
+      const gate = await planGateMessage(venueId, 'PROMOTIONS', 'Las promociones') // PRO tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
       try {
         const d = await createDiscount(
           venueId,
@@ -122,6 +125,8 @@ export function registerDiscountTools(server: McpServer, scope: McpScope) {
     async ({ venueId, discountName, code, maxUses, maxUsesPerCustomer, minPurchase, validFrom, validUntil }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('coupons:create', venueId) // write gate (per-venue role)
+      const gate = await planGateMessage(venueId, 'PROMOTIONS', 'Las promociones') // PRO tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
 
       const matches = await prisma.discount.findMany({
         where: { ...where, name: { contains: discountName, mode: 'insensitive' as const } },

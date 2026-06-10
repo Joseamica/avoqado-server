@@ -5,6 +5,7 @@ import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
+import { venuesWithFeatureAccess } from '@/services/access/basePlan.service'
 
 const num = (d: { toString(): string } | null): number => (d == null ? 0 : Number(d))
 const round2 = (n: number): number => Math.round(n * 100) / 100
@@ -27,6 +28,12 @@ export function registerTrendTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, days }) => {
       const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      // ADVANCED_REPORTS (PRO tier) — restrict to entitled venues (cfdi_status pattern).
+      const entitledIds = [...(await venuesWithFeatureAccess(venueId ? [venueId] : scope.allowedVenueIds, 'ADVANCED_REPORTS'))]
+      if (entitledIds.length === 0) {
+        return text({ ok: false, planRequired: true, error: 'Los reportes avanzados no están incluidos en el plan actual (requiere ADVANCED_REPORTS / plan PRO).' })
+      }
+      base.venueId = { in: entitledIds }
       const windowDays = days ?? 7 // zod applies the default in prod; stay robust if called raw
       const ms = windowDays * 24 * 60 * 60 * 1000
       const now = new Date()
@@ -70,7 +77,13 @@ export function registerTrendTools(server: McpServer, scope: McpScope) {
       days: z.number().int().min(1).max(365).default(30).describe('Window length in days (default 30)'),
     },
     async ({ days }) => {
-      const base = guard.venueFilter() // all venues in the caller's scope
+      guard.venueFilter() // scope sanity (no specific venue)
+      // ADVANCED_REPORTS (PRO tier) — only entitled venues participate in the comparison.
+      const entitledIds = [...(await venuesWithFeatureAccess(scope.allowedVenueIds, 'ADVANCED_REPORTS'))]
+      if (entitledIds.length === 0) {
+        return text({ ok: false, planRequired: true, error: 'Los reportes avanzados no están incluidos en el plan actual (requiere ADVANCED_REPORTS / plan PRO).' })
+      }
+      const base = { venueId: { in: entitledIds } }
       const windowDays = days ?? 30
       const start = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000)
 
@@ -81,7 +94,7 @@ export function registerTrendTools(server: McpServer, scope: McpScope) {
           _sum: { amount: true },
           _count: { _all: true },
         }),
-        prisma.venue.findMany({ where: { id: { in: scope.allowedVenueIds } }, select: { id: true, name: true } }),
+        prisma.venue.findMany({ where: { id: { in: entitledIds } }, select: { id: true, name: true } }),
       ])
 
       const byVenue = new Map(groups.map(g => [g.venueId, g]))

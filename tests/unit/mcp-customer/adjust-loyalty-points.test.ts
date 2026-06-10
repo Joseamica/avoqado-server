@@ -5,6 +5,7 @@ const mockCustomerFind = jest.fn()
 const mockAdjust = jest.fn()
 const mockAudit = jest.fn()
 
+jest.mock('@/mcp/planGate', () => ({ planGateMessage: jest.fn().mockResolvedValue(null) }))
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({
     venueFilter: (v: string) => {

@@ -6,6 +6,7 @@ import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
+import { planGateMessage } from '../planGate'
 
 const num = (d: { toString(): string } | null): number => (d == null ? 0 : Number(d))
 const round2 = (n: number): number => Math.round(n * 100) / 100
@@ -24,6 +25,8 @@ export function registerProductTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, name, fromDate, toDate }) => {
       const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Los reportes avanzados') // PRO tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
       const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
       const tz = venue?.timezone || 'America/Mexico_City'
       const start = venueStartOfDay(tz, fromDate ? new Date(`${fromDate}T12:00:00`) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000))

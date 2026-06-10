@@ -3,6 +3,7 @@ import type { McpScope } from '../../../src/mcp/scope'
 
 const mockAgg = jest.fn()
 
+jest.mock('@/services/access/basePlan.service', () => ({ venuesWithFeatureAccess: jest.fn(async (ids: string[]) => ids) }))
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({
     venueFilter: (v?: string) => {

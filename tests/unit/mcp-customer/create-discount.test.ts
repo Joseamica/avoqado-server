@@ -4,6 +4,7 @@ import type { McpScope } from '../../../src/mcp/scope'
 const mockCreate = jest.fn()
 const mockAudit = jest.fn()
 
+jest.mock('@/mcp/planGate', () => ({ planGateMessage: jest.fn().mockResolvedValue(null) }))
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({
     venueFilter: (v: string) => {

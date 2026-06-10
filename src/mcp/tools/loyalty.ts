@@ -6,6 +6,7 @@ import { createGuard } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { adjustPoints, updateLoyaltyConfig } from '@/services/dashboard/loyalty.dashboard.service'
+import { planGateMessage } from '../planGate'
 
 export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
@@ -18,6 +19,8 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const gate = await planGateMessage(venueId, 'LOYALTY_PROGRAM', 'El programa de lealtad') // PRO tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
       // Read the config directly (NOT the get-or-create service) so this read never writes a default row.
       const cfg = await prisma.loyaltyConfig.findFirst({
         where,
@@ -60,6 +63,8 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
     async ({ venueId, search, points, reason, confirm }) => {
       const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('loyalty:adjust', venueId) // write gate (per-venue role)
+      const gate = await planGateMessage(venueId, 'LOYALTY_PROGRAM', 'El programa de lealtad') // PRO tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
       if (points === 0) return text({ ok: false, error: 'points no puede ser 0.' })
 
       const matches = await prisma.customer.findMany({
@@ -135,6 +140,8 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
     async ({ venueId, active, pointsPerDollar, pointsPerVisit, redemptionRate, minPointsToRedeem, pointsExpireDays }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('loyalty:update', venueId) // write gate (per-venue role)
+      const planGate = await planGateMessage(venueId, 'LOYALTY_PROGRAM', 'El programa de lealtad') // PRO tier
+      if (planGate) return text({ ok: false, planRequired: true, error: planGate })
       const data = {
         ...(active !== undefined ? { active } : {}),
         ...(pointsPerDollar !== undefined ? { pointsPerDollar } : {}),

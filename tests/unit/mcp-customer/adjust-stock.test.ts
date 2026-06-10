@@ -11,6 +11,8 @@ jest.mock('@/services/serialized-inventory/serializedInventory.service', () => (
   serializedInventoryService: { markAsReturned: jest.fn(), markAsDamaged: jest.fn() },
 }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: (...a: unknown[]) => mockLogAction(...(a as [])) }))
+jest.mock('@/mcp/planGate', () => ({ planGateMessage: jest.fn().mockResolvedValue(null) }))
+jest.mock('@/services/access/basePlan.service', () => ({ venuesWithFeatureAccess: jest.fn(async (ids: string[]) => ids) }))
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({ venueFilter: (v: string) => ({ venueId: { in: [v] } }), requirePermission: jest.fn() }),
 }))

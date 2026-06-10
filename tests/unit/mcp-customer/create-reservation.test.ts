@@ -17,6 +17,7 @@ jest.mock('@/services/dashboard/reservation.dashboard.service', () => ({
 }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: (...a: unknown[]) => mockLogAction(...(a as [])) }))
 jest.mock('@/utils/prismaClient', () => ({ __esModule: true, default: { reservation: { findFirst: jest.fn(), findMany: jest.fn() } } }))
+jest.mock('@/mcp/planGate', () => ({ planGateMessage: jest.fn().mockResolvedValue(null) }))
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({ venueFilter: (v: string) => ({ venueId: { in: [v] } }), requirePermission: jest.fn() }),
 }))

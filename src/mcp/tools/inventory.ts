@@ -8,6 +8,8 @@ import { serializedInventoryService } from '@/services/serialized-inventory/seri
 import { auditMcpWrite } from '../audit'
 import { adjustInventoryStock } from '@/services/dashboard/productInventory.service'
 import { createRawMaterial } from '@/services/dashboard/rawMaterial.service'
+import { planGateMessage } from '../planGate'
+import { venuesWithFeatureAccess } from '@/services/access/basePlan.service'
 import { MovementType, RawMaterialCategory, Unit } from '@prisma/client'
 
 const MOVEMENT_TYPE = {
@@ -30,6 +32,8 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, limit }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'El control de inventario') // PREMIUM tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
       // Only items with a configured minimum (> 0). Prisma can't compare two columns in `where`,
       // so fetch the tracked set and filter currentStock <= minimumStock in memory.
       const tracked = await prisma.inventory.findMany({
@@ -73,6 +77,8 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
     async ({ venueId, name, delta, type, reason }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if out of scope
       guard.requirePermission('inventory:adjust', venueId) // write gate (per-venue role)
+      const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'El control de inventario') // PREMIUM tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
       const matches = await prisma.product.findMany({
         where: { ...where, name: { contains: name, mode: 'insensitive' as const }, trackInventory: true, inventoryMethod: 'QUANTITY' },
         select: { id: true, name: true },
@@ -118,6 +124,13 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId }) => {
       const where = guard.venueFilter(venueId) // throws if out of scope
+      // SERIALIZED_INVENTORY is a PREMIUM capability — filter to entitled venues (cfdi_status pattern).
+      const requestedIds = venueId ? [venueId] : scope.allowedVenueIds
+      const entitledIds = [...(await venuesWithFeatureAccess(requestedIds, 'SERIALIZED_INVENTORY'))]
+      if (entitledIds.length === 0) {
+        return text({ ok: false, planRequired: true, error: 'El inventario serializado no está incluido en el plan actual (requiere SERIALIZED_INVENTORY).' })
+      }
+      where.venueId = { in: entitledIds }
       const grouped = await prisma.serializedItem.groupBy({
         by: ['status'],
         where,
@@ -147,6 +160,8 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
     async ({ venueId, serialNumber, action }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('inventory:adjust', venueId) // write gate (per-venue role)
+      const gate = await planGateMessage(venueId, 'SERIALIZED_INVENTORY', 'El inventario serializado') // PREMIUM tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
       try {
         const item =
           action === 'returned'
@@ -175,6 +190,8 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, limit }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'El control de inventario') // PREMIUM tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
       // currentStock × cost can't be multiplied in a SQL aggregate; fetch in-stock items and compute in memory.
       const rows = await prisma.inventory.findMany({
         where: { ...where, currentStock: { gt: 0 } },
@@ -234,6 +251,8 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
     async ({ venueId, name, category, unit, currentStock, minimumStock, reorderPoint, costPerUnit, sku, description, perishable }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('inventory:create', venueId) // write gate (per-venue role)
+      const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'El control de inventario') // PREMIUM tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
 
       const catU = category.trim().toUpperCase()
       const unitU = unit.trim().toUpperCase()

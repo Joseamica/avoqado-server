@@ -16,6 +16,9 @@ import {
   type UpdateReservationInput,
 } from '@/services/dashboard/reservation.dashboard.service'
 import { auditMcpWrite } from '../audit'
+import { planGateMessage } from '../planGate'
+
+const RESERVATIONS_GATE = ['RESERVATIONS', 'Las reservaciones'] as const
 
 export function registerReservationTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
@@ -37,6 +40,8 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
     async ({ venueId, startsAt, partySize, durationMinutes, guestName, guestPhone, guestEmail, productId, specialRequests }) => {
       guard.venueFilter(venueId) // throws ScopeError if out of scope
       guard.requirePermission('reservations:create', venueId) // write gate (per-venue role)
+      const gate = await planGateMessage(venueId, ...RESERVATIONS_GATE) // PRO tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
       const start = new Date(startsAt)
       if (Number.isNaN(start.getTime())) {
         return text({ ok: false, error: 'startsAt inválido. Usa ISO 8601, ej. 2026-06-06T19:00:00.000Z' })
@@ -113,6 +118,8 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
     async ({ venueId, confirmationCode, newStartsAt }) => {
       const where = guard.venueFilter(venueId) // throws if out of scope
       guard.requirePermission('reservations:update', venueId) // write gate (per-venue role) — no low-role rescheduling
+      const gate = await planGateMessage(venueId, ...RESERVATIONS_GATE) // PRO tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
       const reservation = await prisma.reservation.findFirst({
         where: { ...where, confirmationCode },
         select: { id: true, venueId: true, classSessionId: true, status: true },
@@ -160,6 +167,8 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
     async ({ venueId, confirmationCode, reason }) => {
       const where = guard.venueFilter(venueId) // throws if out of scope
       guard.requirePermission('reservations:cancel', venueId) // write gate (per-venue role)
+      const gate = await planGateMessage(venueId, ...RESERVATIONS_GATE) // PRO tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
       const reservation = await prisma.reservation.findFirst({
         where: { ...where, confirmationCode },
         select: { id: true, venueId: true, status: true },
@@ -199,6 +208,8 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
     async ({ venueId, confirmationCode, status }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if out of scope
       guard.requirePermission('reservations:update', venueId) // write gate (per-venue role)
+      const gate = await planGateMessage(venueId, ...RESERVATIONS_GATE) // PRO tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
       const reservation = await prisma.reservation.findFirst({
         where: { ...where, confirmationCode },
         select: { id: true, venueId: true, status: true },
@@ -312,6 +323,8 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
     async ({ venueId, confirmationCode, partySize, guestName, guestPhone, guestEmail, specialRequests, internalNotes }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('reservations:update', venueId) // write gate (per-venue role)
+      const gate = await planGateMessage(venueId, ...RESERVATIONS_GATE) // PRO tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
       const reservation = await prisma.reservation.findFirst({ where: { ...where, confirmationCode }, select: { id: true, venueId: true } })
       if (!reservation) return text({ ok: false, error: `No encontré una reserva con código "${confirmationCode}" en este local.` })
 
