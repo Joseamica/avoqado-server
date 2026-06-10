@@ -240,10 +240,32 @@ jobs:
           service-id: ${{ secrets.RENDER_PRODUCTION_SERVICE_ID }}
           api-key: ${{ secrets.RENDER_API_KEY }}
 
-      - name: ⏳ Wait for deployment to stabilize
+      - name: ⏳ Wait for Render deploy to go LIVE (honest verification)
+        # A blind sleep + /health curl passes even when the deploy failed or went to the
+        # wrong service (the OLD version answers 200). Instead: poll the Render API until
+        # the triggered deploy reaches a terminal state AND verify the live commit is THIS one.
         run: |
-          echo "⏳ Waiting for production deployment to complete..."
-          sleep 120
+          echo "⏳ Polling Render for the deploy of ${GITHUB_SHA:0:10}..."
+          for i in $(seq 1 90); do
+            RESP=$(curl -s -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+              "https://api.render.com/v1/services/${{ secrets.RENDER_PRODUCTION_SERVICE_ID }}/deploys?limit=1")
+            STATUS=$(echo "$RESP" | jq -r '.[0].deploy.status // "unknown"')
+            COMMIT=$(echo "$RESP" | jq -r '.[0].deploy.commit.id // ""')
+            echo "[$i] status=$STATUS commit=${COMMIT:0:10}"
+            case "$STATUS" in
+              live)
+                if [ "$COMMIT" = "$GITHUB_SHA" ]; then
+                  echo "✅ Deploy LIVE and serving THIS commit."
+                  exit 0
+                fi
+                echo "❌ Live deploy is a DIFFERENT commit ($COMMIT) — the trigger did not take."
+                exit 1;;
+              build_failed|update_failed|canceled|deactivated)
+                echo "❌ Deploy ended in: $STATUS"; exit 1;;
+            esac
+            sleep 20
+          done
+          echo "❌ Timed out (30m) waiting for the deploy to finish"; exit 1
 
       - name: 🏥 Production health verification
         run: |
