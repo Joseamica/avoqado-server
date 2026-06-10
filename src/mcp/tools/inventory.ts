@@ -128,7 +128,11 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
       const requestedIds = venueId ? [venueId] : scope.allowedVenueIds
       const entitledIds = [...(await venuesWithFeatureAccess(requestedIds, 'SERIALIZED_INVENTORY'))]
       if (entitledIds.length === 0) {
-        return text({ ok: false, planRequired: true, error: 'El inventario serializado no está incluido en el plan actual (requiere SERIALIZED_INVENTORY).' })
+        return text({
+          ok: false,
+          planRequired: true,
+          error: 'El inventario serializado no está incluido en el plan actual (requiere SERIALIZED_INVENTORY).',
+        })
       }
       where.venueId = { in: entitledIds }
       const grouped = await prisma.serializedItem.groupBy({

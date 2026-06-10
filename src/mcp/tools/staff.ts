@@ -174,7 +174,7 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'update_staff_member',
-    '🔴 CRITICAL (changes access). Change a team member\'s ROLE and/or ACTIVATE/DEACTIVATE them in a venue you can access, found by name. Deactivating blocks their access (it does NOT delete them); the service refuses to remove the last administrator. SUPERADMIN cannot be granted. By DEFAULT this only PREVIEWS the change (current → new); to apply it call again with confirm:true. This WRITES — requires teams:update.',
+    "🔴 CRITICAL (changes access). Change a team member's ROLE and/or ACTIVATE/DEACTIVATE them in a venue you can access, found by name. Deactivating blocks their access (it does NOT delete them); the service refuses to remove the last administrator. SUPERADMIN cannot be granted. By DEFAULT this only PREVIEWS the change (current → new); to apply it call again with confirm:true. This WRITES — requires teams:update.",
     {
       venueId: z.string().describe('Venue where the member works (must be in your scope)'),
       name: z.string().min(1).describe('Team member name or part of it'),

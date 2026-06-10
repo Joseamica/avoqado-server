@@ -15,11 +15,7 @@
 
 import type { NextFunction, Request, Response } from 'express'
 
-import {
-  setVenuePlanGrandfathered,
-  assignVenueCompPlan,
-  extendVenuePlanTrial,
-} from '@/controllers/dashboard/superadmin.controller'
+import { setVenuePlanGrandfathered, assignVenueCompPlan, extendVenuePlanTrial } from '@/controllers/dashboard/superadmin.controller'
 import * as superadminService from '@/services/dashboard/superadmin.service'
 
 jest.mock('@/services/dashboard/superadmin.service', () => ({

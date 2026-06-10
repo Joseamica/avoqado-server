@@ -31,7 +31,11 @@ export function registerTrendTools(server: McpServer, scope: McpScope) {
       // ADVANCED_REPORTS (PRO tier) — restrict to entitled venues (cfdi_status pattern).
       const entitledIds = [...(await venuesWithFeatureAccess(venueId ? [venueId] : scope.allowedVenueIds, 'ADVANCED_REPORTS'))]
       if (entitledIds.length === 0) {
-        return text({ ok: false, planRequired: true, error: 'Los reportes avanzados no están incluidos en el plan actual (requiere ADVANCED_REPORTS / plan PRO).' })
+        return text({
+          ok: false,
+          planRequired: true,
+          error: 'Los reportes avanzados no están incluidos en el plan actual (requiere ADVANCED_REPORTS / plan PRO).',
+        })
       }
       base.venueId = { in: entitledIds }
       const windowDays = days ?? 7 // zod applies the default in prod; stay robust if called raw
@@ -81,7 +85,11 @@ export function registerTrendTools(server: McpServer, scope: McpScope) {
       // ADVANCED_REPORTS (PRO tier) — only entitled venues participate in the comparison.
       const entitledIds = [...(await venuesWithFeatureAccess(scope.allowedVenueIds, 'ADVANCED_REPORTS'))]
       if (entitledIds.length === 0) {
-        return text({ ok: false, planRequired: true, error: 'Los reportes avanzados no están incluidos en el plan actual (requiere ADVANCED_REPORTS / plan PRO).' })
+        return text({
+          ok: false,
+          planRequired: true,
+          error: 'Los reportes avanzados no están incluidos en el plan actual (requiere ADVANCED_REPORTS / plan PRO).',
+        })
       }
       const base = { venueId: { in: entitledIds } }
       const windowDays = days ?? 30

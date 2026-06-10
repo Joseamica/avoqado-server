@@ -87,12 +87,25 @@ describe('issue_refund (critical money write, confirm-gated)', () => {
 
   it('with confirm:true: converts pesos->cents, issues, and audits', async () => {
     mockPaymentFindFirst.mockResolvedValueOnce(completedPayment)
-    mockIssue.mockResolvedValueOnce({ refundId: 'ref-1', originalPaymentId: 'pay-1', amount: 100, remainingRefundable: 350, status: 'COMPLETED' })
+    mockIssue.mockResolvedValueOnce({
+      refundId: 'ref-1',
+      originalPaymentId: 'pay-1',
+      amount: 100,
+      remainingRefundable: 350,
+      status: 'COMPLETED',
+    })
 
     const out = parse(await call({ ...base, note: 'cliente insatisfecho', confirm: true }))
 
     expect(mockIssue).toHaveBeenCalledWith(
-      expect.objectContaining({ venueId: 'v1', paymentId: 'pay-1', amount: 10000, reason: 'ACCIDENTAL_CHARGE', staffId: 's1', note: 'cliente insatisfecho' }),
+      expect.objectContaining({
+        venueId: 'v1',
+        paymentId: 'pay-1',
+        amount: 10000,
+        reason: 'ACCIDENTAL_CHARGE',
+        staffId: 's1',
+        note: 'cliente insatisfecho',
+      }),
     )
     expect(out).toMatchObject({ ok: true, refund: { refundId: 'ref-1', amount: 100, remainingRefundable: 350 } })
     expect(mockAudit.mock.calls[0][1]).toMatchObject({ action: 'REFUND_ISSUED', entity: 'Payment', entityId: 'ref-1', venueId: 'v1' })

@@ -58,7 +58,10 @@ describe('configure_loyalty (config write)', () => {
     const out = parse(await call({ venueId: 'v1', pointsPerDollar: 2, redemptionRate: 0.05, minPointsToRedeem: 200 }))
 
     expect(mockUpdate).toHaveBeenCalledWith('v1', { pointsPerDollar: 2, redemptionRate: 0.05, minPointsRedeem: 200 })
-    expect(out).toMatchObject({ ok: true, program: { pointsPerDollar: 2, redemptionRate: 0.05, minPointsToRedeem: 200, pointsExpireDays: null } })
+    expect(out).toMatchObject({
+      ok: true,
+      program: { pointsPerDollar: 2, redemptionRate: 0.05, minPointsToRedeem: 200, pointsExpireDays: null },
+    })
     expect(mockAudit.mock.calls[0][1]).toMatchObject({ action: 'LOYALTY_CONFIG_UPDATED', venueId: 'v1' })
   })
 })

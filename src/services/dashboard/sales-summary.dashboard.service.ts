@@ -104,9 +104,14 @@ export interface MerchantAccountBreakdown {
   displayName: string // "Amaena - A" / alias / provider name fallback
   provider: string // "AngelPay (Nexgo)" / "Blumon PAX"
   affiliation: string | null // angelpayAffiliation when present
-  collectedOnCard: number // SUM(Payment.amount) — card only (merchantAccountId IS NOT NULL)
-  platformFee: number // SUM(TransactionCost.venueChargeAmount)
-  netToReceive: number // collectedOnCard - platformFee
+  // What was charged to the card INCLUDING tips (amount + tipAmount) — card only
+  // (merchantAccountId IS NOT NULL). Tips ride the card and land in the bank, and
+  // the venue commission is charged on amount+tip (see transactionCost.service), so
+  // excluding them understated what the venue receives AND made this panel disagree
+  // with the settlement calendar. Decision: Jose 2026-06-10 — include tips.
+  collectedOnCard: number
+  platformFee: number // SUM(TransactionCost.venueChargeAmount + venueFixedFee) — same fee the settlement engine nets out
+  netToReceive: number // collectedOnCard - platformFee — reconciles with settlementCalendar nets
   transactionCount: number
   // Soonest estimated settlement for this merchant within the range (Entrega 2);
   // present only when includeSettlementProjection=true. nextDate is YYYY-MM-DD in
@@ -168,6 +173,9 @@ export interface SalesSummaryFilters {
   includeMerchantBreakdown?: boolean // additive opt-in; default off preserves existing payload
   includeSettlementProjection?: boolean // additive opt-in; adds settlementCalendar + per-merchant estimatedSettlement
 }
+
+/** Round money to cents — keeps API/MCP payloads free of float-accumulation noise. */
+const round2 = (n: number): number => Math.round(n * 100) / 100
 
 // ============================================================
 // Payment Filter Helpers
@@ -420,8 +428,8 @@ export async function computeMerchantAccountBreakdown(
   const rows = await prisma.$queryRaw<Array<{ merchantAccountId: string; collected: number; fee: number; txns: number }>>(
     Prisma.sql`
       SELECT p."merchantAccountId" AS "merchantAccountId",
-             COALESCE(SUM(p.amount), 0)::float AS collected,
-             COALESCE(SUM(tc."venueChargeAmount"), 0)::float AS fee,
+             COALESCE(SUM(p.amount + COALESCE(p."tipAmount", 0)), 0)::float AS collected,
+             COALESCE(SUM(COALESCE(tc."venueChargeAmount", 0) + COALESCE(tc."venueFixedFee", 0)), 0)::float AS fee,
              COUNT(*)::int AS txns
       FROM "Payment" p
       LEFT JOIN "TransactionCost" tc ON tc."paymentId" = p.id
@@ -452,8 +460,8 @@ export async function computeMerchantAccountBreakdown(
   return rows
     .map(r => {
       const a = byId.get(r.merchantAccountId)
-      const collected = Number(r.collected)
-      const fee = Number(r.fee)
+      const collected = round2(Number(r.collected))
+      const fee = round2(Number(r.fee))
       return {
         merchantAccountId: r.merchantAccountId,
         displayName: a?.displayName || a?.alias || 'Comercio',
@@ -461,7 +469,7 @@ export async function computeMerchantAccountBreakdown(
         affiliation: a?.angelpayAffiliation ?? null,
         collectedOnCard: collected,
         platformFee: fee,
-        netToReceive: collected - fee,
+        netToReceive: round2(collected - fee),
         transactionCount: Number(r.txns),
       }
     })
@@ -589,16 +597,25 @@ export async function computeSettlementProjection(
     slot.netToReceive += net
     slot.transactionCount += 1
 
-    const md = datesByMerchant.get(merchantId) ?? { dates: new Set<string>(), settlementDays: config.settlementDays }
-    md.dates.add(dateKey)
-    md.settlementDays = config.settlementDays
-    datesByMerchant.set(merchantId, md)
+    const md = datesByMerchant.get(merchantId)
+    if (!md) {
+      datesByMerchant.set(merchantId, { dates: new Set([dateKey]), settlementDays: config.settlementDays })
+    } else {
+      md.dates.add(dateKey)
+      // Only report a rule when it is unambiguous: a merchant whose card types
+      // settle differently (e.g. debit 1 day, Amex 3) gets null instead of a
+      // last-write-wins value that depends on payment iteration order.
+      if (md.settlementDays !== config.settlementDays) md.settlementDays = null
+    }
   }
 
   const calendar: SettlementCalendarDay[] = Array.from(days.entries())
     .map(([date, merchants]) => {
-      const byMerchant = Array.from(merchants.values()).sort((a, b) => b.netToReceive - a.netToReceive)
-      const totalNet = byMerchant.reduce((s, m) => s + m.netToReceive, 0)
+      // Accumulate raw, round once at the output boundary (cents).
+      const byMerchant = Array.from(merchants.values())
+        .map(m => ({ ...m, platformFee: round2(m.platformFee), netToReceive: round2(m.netToReceive) }))
+        .sort((a, b) => b.netToReceive - a.netToReceive)
+      const totalNet = round2(byMerchant.reduce((s, m) => s + m.netToReceive, 0))
       const status: SettlementCalendarDay['status'] = date < todayKey ? 'settled' : date === todayKey ? 'pending' : 'projected'
       return { date, status, totalNet, byMerchant }
     })
@@ -1216,7 +1233,10 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // Settlement projection (Entrega 2; additive, opt-in). Adds the "¿cuándo cae?"
   // calendar and enriches each merchant row with its soonest settlement date.
   let settlementCalendar: SettlementCalendarDay[] | undefined
-  if (filters.includeSettlementProjection) {
+  // Skipped under a payment-method filter: the UI hides the reconciliation block
+  // there (a filtered view can't honestly answer "¿dónde está tu dinero?"), so
+  // computing the full-card projection would be wasted work and a confusing payload.
+  if (filters.includeSettlementProjection && !paymentMethod) {
     const projection = await computeSettlementProjection(venueId, parsedStartDate, parsedEndDate, timezone)
     settlementCalendar = projection.calendar
     if (byMerchantAccount) {

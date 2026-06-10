@@ -133,9 +133,18 @@ export function registerDiscountTools(server: McpServer, scope: McpScope) {
         select: { id: true, name: true },
         take: 5,
       })
-      if (matches.length === 0) return text({ ok: false, error: `No encontré un descuento que coincida con "${discountName}". Créalo primero con create_discount.` })
+      if (matches.length === 0)
+        return text({
+          ok: false,
+          error: `No encontré un descuento que coincida con "${discountName}". Créalo primero con create_discount.`,
+        })
       if (matches.length > 1) {
-        return text({ ok: false, ambiguous: true, error: `"${discountName}" coincide con varios descuentos — sé más específico.`, matches: matches.map(m => m.name) })
+        return text({
+          ok: false,
+          ambiguous: true,
+          error: `"${discountName}" coincide con varios descuentos — sé más específico.`,
+          matches: matches.map(m => m.name),
+        })
       }
 
       try {

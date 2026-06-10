@@ -503,9 +503,7 @@ export class SimCustodyService {
         // holder so the SIM lands in their "En almacén" instead of dropping out
         // of every supervisor view again. SIMs with a supervisor keep them
         // (existing elevated-collect behavior unchanged).
-        ...(item.assignedSupervisorId == null
-          ? { assignedSupervisorId: actor.staffId, assignedSupervisorAt: new Date() }
-          : {}),
+        ...(item.assignedSupervisorId == null ? { assignedSupervisorId: actor.staffId, assignedSupervisorAt: new Date() } : {}),
       })
       await this.writeEvent(tx, {
         item: updated,

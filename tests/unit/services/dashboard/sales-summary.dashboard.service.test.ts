@@ -663,4 +663,60 @@ describe('computeSettlementProjection', () => {
     expect(nextByMerchant.size).toBe(0)
     expect(prismaMock.settlementConfiguration.findMany).not.toHaveBeenCalled()
   })
+
+  it('reports settlementDays=null when a merchant settles card types under different rules', async () => {
+    // ma-mix: DEBIT settles in 1 business day, AMEX in 3 — a single "rule" number
+    // would be a lie (the old code did last-write-wins). nextDate still projects.
+    ;(prismaMock.payment.findMany as jest.Mock).mockResolvedValue([
+      {
+        amount: 1000,
+        tipAmount: 0,
+        createdAt: new Date('2026-06-04T15:00:00.000Z'), // Thu → +1 bd = Fri 06-05
+        merchantAccountId: 'ma-mix',
+        transactionCost: { transactionType: 'DEBIT', venueChargeAmount: 20, venueFixedFee: 0 },
+      },
+      {
+        amount: 500,
+        tipAmount: 0,
+        createdAt: new Date('2026-06-04T15:00:00.000Z'), // Thu → +3 bd = Tue 06-09
+        merchantAccountId: 'ma-mix',
+        transactionCost: { transactionType: 'AMEX', venueChargeAmount: 25, venueFixedFee: 0 },
+      },
+    ])
+    ;(prismaMock.settlementConfiguration.findMany as jest.Mock).mockResolvedValue([
+      { merchantAccountId: 'ma-mix', cardType: 'DEBIT', ...baseConfig },
+      { merchantAccountId: 'ma-mix', cardType: 'AMEX', ...baseConfig, settlementDays: 3 },
+    ])
+    ;(prismaMock.merchantAccount.findMany as jest.Mock).mockResolvedValue([{ id: 'ma-mix', displayName: 'Mixto', alias: null }])
+
+    const { calendar, nextByMerchant } = await computeSettlementProjection(VENUE, START, END, TZ)
+
+    expect(calendar.map(d => d.date)).toEqual(['2026-06-05', '2026-06-09'])
+    // Today is pinned to 06-30 → both dates are past → nextDate falls back to the
+    // MOST RECENT past settlement (06-09), and the ambiguous rule reports null.
+    expect(nextByMerchant.get('ma-mix')).toEqual({ nextDate: '2026-06-09', settlementDays: null })
+  })
+
+  it('rounds calendar money to cents (no float-accumulation noise in the payload)', async () => {
+    ;(prismaMock.payment.findMany as jest.Mock).mockResolvedValue([
+      // 3 × fee 0.1 accumulates to 0.30000000000000004 in raw float math.
+      ...[1, 2, 3].map(i => ({
+        amount: 100.1,
+        tipAmount: 0,
+        createdAt: new Date(`2026-06-04T1${i}:00:00.000Z`),
+        merchantAccountId: 'ma-A',
+        transactionCost: { transactionType: 'CREDIT', venueChargeAmount: 0.1, venueFixedFee: 0 },
+      })),
+    ])
+    ;(prismaMock.settlementConfiguration.findMany as jest.Mock).mockResolvedValue([
+      { merchantAccountId: 'ma-A', cardType: 'CREDIT', ...baseConfig },
+    ])
+    ;(prismaMock.merchantAccount.findMany as jest.Mock).mockResolvedValue([{ id: 'ma-A', displayName: 'A', alias: null }])
+
+    const { calendar } = await computeSettlementProjection(VENUE, START, END, TZ)
+    expect(calendar).toHaveLength(1)
+    expect(calendar[0].byMerchant[0].platformFee).toBe(0.3) // exact, not 0.30000000000000004
+    expect(calendar[0].byMerchant[0].netToReceive).toBe(300)
+    expect(calendar[0].totalNet).toBe(300)
+  })
 })

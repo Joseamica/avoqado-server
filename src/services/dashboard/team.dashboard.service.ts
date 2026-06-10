@@ -590,10 +590,12 @@ export async function inviteTeamMember(
       // existing assignment is left alone. Exempt/paid venues are unlimited (no-op).
       // `existingStaffVenue` is only fetched above for the inviteToAllVenues branch, so do
       // an explicit per-venue existence check to know whether this upsert creates a row.
-      const alreadyAssigned = existingStaffVenue ?? (await prisma.staffVenue.findUnique({
-        where: { staffId_venueId: { staffId: staff.id, venueId: v.id } },
-        select: { id: true },
-      }))
+      const alreadyAssigned =
+        existingStaffVenue ??
+        (await prisma.staffVenue.findUnique({
+          where: { staffId_venueId: { staffId: staff.id, venueId: v.id } },
+          select: { id: true },
+        }))
       if (!alreadyAssigned) {
         await assertCanAddSeat(v.id)
       }

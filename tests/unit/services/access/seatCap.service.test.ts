@@ -185,7 +185,7 @@ describe('assertCanAddSeat', () => {
     await expect(assertCanAddSeat('v')).resolves.toBeUndefined()
   })
 
-  it('THROWS for a Free venue at 1 active + 1 pending (the founder bug: can\'t send a 2nd invite)', async () => {
+  it("THROWS for a Free venue at 1 active + 1 pending (the founder bug: can't send a 2nd invite)", async () => {
     setup({ exempt: false, tier: null, seats: 1, pending: 1 })
     await expect(assertCanAddSeat('v')).rejects.toMatchObject({
       statusCode: 403,
@@ -224,4 +224,3 @@ describe('assertCanAddSeat', () => {
     expect(err.message).toContain('Mejora a Pro')
   })
 })
-

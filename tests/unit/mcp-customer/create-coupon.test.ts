@@ -18,7 +18,9 @@ jest.mock('@/mcp/guard', () => ({
   }),
 }))
 jest.mock('@/services/dashboard/discount.dashboard.service', () => ({ createDiscount: jest.fn() }))
-jest.mock('@/services/dashboard/coupon.dashboard.service', () => ({ createCouponCode: (...a: unknown[]) => mockCreateCoupon(...(a as [])) }))
+jest.mock('@/services/dashboard/coupon.dashboard.service', () => ({
+  createCouponCode: (...a: unknown[]) => mockCreateCoupon(...(a as [])),
+}))
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: (...a: unknown[]) => mockAudit(...(a as [])) }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,

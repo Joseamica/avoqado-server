@@ -18,6 +18,7 @@ import {
 import { BadRequestError } from '@/errors/AppError'
 import { MINDFORM_NEW_VENUE_ID } from '@/services/legacy/qrPayments.legacy.service'
 import { resolveRequestVenueId } from '@/middlewares/checkPermission.middleware'
+import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import prisma from '@/utils/prismaClient'
 
 /**
@@ -107,6 +108,15 @@ export async function salesSummaryReport(req: Request, res: Response, next: Next
       select: { timezone: true },
     })
 
+    // PRO gate (decision: Jose 2026-06-10) — the merchant reconciliation block
+    // (per-merchant breakdown + settlement projection) rides the ADVANCED_REPORTS
+    // feature code (PRO tier in plan-catalog). The flags are silently dropped for
+    // non-entitled venues (additive endpoint — no 403; the UI shows the upsell).
+    // SUPERADMIN bypasses, mirroring the platform-wide guard rule.
+    const wantsReconciliation = includeMerchantBreakdown === 'true' || includeSettlementProjection === 'true'
+    const reconciliationAllowed =
+      wantsReconciliation && (req.authContext?.role === 'SUPERADMIN' || (await venueHasFeatureAccess(venueId, 'ADVANCED_REPORTS')))
+
     const filters: SalesSummaryFilters = {
       startDate,
       endDate,
@@ -116,8 +126,8 @@ export async function salesSummaryReport(req: Request, res: Response, next: Next
       merchantAccountId: typeof merchantAccountId === 'string' ? merchantAccountId : undefined,
       paymentMethod: typeof paymentMethod === 'string' ? (paymentMethod as PaymentMethodFilter) : undefined,
       cardType: typeof cardType === 'string' ? (cardType as CardTypeFilter) : undefined,
-      includeMerchantBreakdown: includeMerchantBreakdown === 'true',
-      includeSettlementProjection: includeSettlementProjection === 'true',
+      includeMerchantBreakdown: includeMerchantBreakdown === 'true' && reconciliationAllowed,
+      includeSettlementProjection: includeSettlementProjection === 'true' && reconciliationAllowed,
     }
 
     const report = await getSalesSummary(venueId, filters)

@@ -272,7 +272,15 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
       // Resolve the payment WITHIN scope for the preview (the service re-validates everything under a row lock).
       const payment = await prisma.payment.findFirst({
         where: { id: paymentId, ...base },
-        select: { amount: true, tipAmount: true, method: true, status: true, type: true, createdAt: true, order: { select: { orderNumber: true } } },
+        select: {
+          amount: true,
+          tipAmount: true,
+          method: true,
+          status: true,
+          type: true,
+          createdAt: true,
+          order: { select: { orderNumber: true } },
+        },
       })
       if (!payment) return text({ ok: false, error: 'No encontré ese pago en tus locales.' })
       if (payment.status !== TransactionStatus.COMPLETED) {

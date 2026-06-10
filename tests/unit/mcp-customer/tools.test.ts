@@ -48,6 +48,15 @@ describe('summarizeSales', () => {
     ])
     expect(s.byMerchantAccount).toEqual({ 'ma-A': 500 })
   })
+  it('byMerchantAccount includes tips (bank-landing money); gross/byMethod stay amount-only', () => {
+    const s = summarizeSales([
+      { amount: 200, tipAmount: 30, method: 'CREDIT_CARD', type: 'REGULAR', status: 'COMPLETED', merchantAccountId: 'ma-A' },
+      { amount: 100, tipAmount: null, method: 'DEBIT_CARD', type: 'REGULAR', status: 'COMPLETED', merchantAccountId: 'ma-A' },
+    ])
+    expect(s.byMerchantAccount).toEqual({ 'ma-A': 330 }) // 200+30 + 100+0
+    expect(s.gross).toBe(300) // tips NOT in gross
+    expect(s.byMethod.CREDIT_CARD).toBe(200) // nor in byMethod
+  })
 })
 
 describe('auditTerminalConfig', () => {

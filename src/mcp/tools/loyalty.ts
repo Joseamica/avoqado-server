@@ -127,7 +127,7 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'configure_loyalty',
-    'Configure (or activate/deactivate) the loyalty / rewards PROGRAM of a venue you can access: points earned per dollar spent, points per visit, the redemption rate (money value of one point, e.g. 0.05 = 5 centavos per point), the minimum points to redeem, and after how many days points expire (null/omit = never). Only the fields you pass are changed. This WRITES program settings (does NOT touch any customer\'s points — use adjust_loyalty_points for that); requires loyalty:update.',
+    "Configure (or activate/deactivate) the loyalty / rewards PROGRAM of a venue you can access: points earned per dollar spent, points per visit, the redemption rate (money value of one point, e.g. 0.05 = 5 centavos per point), the minimum points to redeem, and after how many days points expire (null/omit = never). Only the fields you pass are changed. This WRITES program settings (does NOT touch any customer's points — use adjust_loyalty_points for that); requires loyalty:update.",
     {
       venueId: z.string().describe('Venue whose program to configure (must be in your scope)'),
       active: z.boolean().optional().describe('Turn the program on/off'),

@@ -120,11 +120,7 @@ describe('seatReconciliation.service', () => {
   // ── scheduleDowngradeToFree ──────────────────────────────────────────────────────────────
   describe('scheduleDowngradeToFree', () => {
     function overCapSetup() {
-      prismaMock.staffVenue.findMany.mockResolvedValue([
-        sv('o', StaffRole.OWNER),
-        sv('a', StaffRole.MANAGER),
-        sv('b', StaffRole.WAITER),
-      ])
+      prismaMock.staffVenue.findMany.mockResolvedValue([sv('o', StaffRole.OWNER), sv('a', StaffRole.MANAGER), sv('b', StaffRole.WAITER)])
       prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'o', staffId: 'staff_o' }) // owner
       activeCountMock.mockResolvedValue(3) // over cap (2)
     }

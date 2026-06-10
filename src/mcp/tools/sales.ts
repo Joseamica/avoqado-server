@@ -12,6 +12,7 @@ import { computeSettlementProjection } from '@/services/dashboard/sales-summary.
 
 export interface SalesInput {
   amount: number | { toString(): string }
+  tipAmount?: number | { toString(): string } | null
   method: string
   type: string | null
   status: string
@@ -23,9 +24,10 @@ export interface SalesSummary {
   gross: number
   byMethod: Record<string, number>
   byType: Record<string, number>
-  // Card money grouped by merchant account id (cash/null excluded). Labels by id;
-  // the dashboard resolves display names. Keeps the MCP in sync with the
-  // sales-summary per-merchant breakdown.
+  // Card money grouped by merchant account id (cash/null excluded), INCLUDING tips
+  // — what actually lands in the merchant's bank. Lockstep with the dashboard's
+  // per-merchant breakdown (tip-inclusive since 2026-06-10). `gross`/`byMethod`
+  // stay amount-only (sale value; tips are reported by tips_over_time).
   byMerchantAccount: Record<string, number>
 }
 
@@ -41,7 +43,8 @@ export function summarizeSales(payments: SalesInput[]): SalesSummary {
     const t = p.type ?? 'UNKNOWN'
     s.byType[t] = (s.byType[t] ?? 0) + amt
     if (p.merchantAccountId) {
-      s.byMerchantAccount[p.merchantAccountId] = (s.byMerchantAccount[p.merchantAccountId] ?? 0) + amt
+      const withTip = amt + Number(p.tipAmount ?? 0)
+      s.byMerchantAccount[p.merchantAccountId] = (s.byMerchantAccount[p.merchantAccountId] ?? 0) + withTip
     }
   }
   return s
@@ -214,7 +217,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
       const end = venueEndOfDay('America/Mexico_City', ref)
       const payments = await prisma.payment.findMany({
         where: { ...where, createdAt: { gte: start, lte: end } },
-        select: { amount: true, method: true, type: true, status: true, merchantAccountId: true },
+        select: { amount: true, tipAmount: true, method: true, type: true, status: true, merchantAccountId: true },
       })
       const summary = summarizeSales(payments as SalesInput[])
       return text({
@@ -372,6 +375,8 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, fromDate, toDate }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'El calendario de liquidación') // PRO tier (same code as the dashboard reconciliation block)
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
       const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
       const tz = venue?.timezone || 'America/Mexico_City'
       const start = venueStartOfDay(tz, fromDate ? new Date(`${fromDate}T12:00:00`) : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000))
