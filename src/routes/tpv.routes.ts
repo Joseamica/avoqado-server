@@ -6087,6 +6087,126 @@ router.get(
 )
 
 /**
+ * GET /tpv/v1/serialized-inventory/sales-to-review
+ * Cross-month feed of THIS promoter's sales that still need attention:
+ * back-office REJECTED (FAILED → must re-upload docs) or still under review
+ * (PENDING / PROCESSING). Powers the pinned "Por revisar" section at the top of
+ * "Mis Ventas" so promoters don't miss rejected sales among many correct ones
+ * (field finding 2026-06: with many correct sales they get complacent and skip
+ * the unapproved ones). Same SaleItem shape as /my-sales, but NOT month-scoped.
+ * Always scoped by venueId (tenant isolation). Requires serialized-inventory:sell.
+ */
+router.get(
+  '/serialized-inventory/sales-to-review',
+  authenticateTokenMiddleware,
+  checkPermission('serialized-inventory:sell'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { venueId, userId: staffId } = (req as any).authContext
+
+      // Statuses the promoter should still look at. COMPLETED / SKIPPED are done.
+      const REVIEW_STATUSES = ['PENDING', 'PROCESSING', 'FAILED'] as const
+
+      const whereClause = {
+        venueId,
+        createdById: staffId,
+        orderNumber: { startsWith: 'SN' },
+        paymentStatus: PaymentStatus.PAID,
+        status: { not: 'CANCELLED' as const },
+        // Only orders whose proof-of-sale review is still pending or was rejected.
+        payments: { some: { saleVerification: { is: { status: { in: [...REVIEW_STATUSES] } } } } },
+      }
+
+      const orders = await prisma.order.findMany({
+        where: whereClause,
+        include: {
+          items: true,
+          payments: {
+            include: {
+              saleVerification: {
+                select: {
+                  id: true,
+                  status: true,
+                  reviewedAt: true,
+                  reviewNotes: true,
+                  rejectionReasons: true,
+                  photos: true,
+                },
+              },
+            },
+            orderBy: { createdAt: 'desc' },
+          },
+        },
+        // Oldest first → the most overdue review floats to the top of the section.
+        orderBy: { createdAt: 'asc' },
+        take: 200, // hard cap (1GB RAM target); a promoter should never have this many open.
+      })
+
+      const sales = orders
+        .map(order => {
+          const firstItem = order.items[0]
+          const price = parseFloat(order.total.toString())
+
+          // Prefer the payment whose verification is actually in a review state; an order
+          // could in theory carry multiple payments/verifications.
+          const paymentWithReview =
+            order.payments.find(
+              p => p.saleVerification != null && (REVIEW_STATUSES as readonly string[]).includes(p.saleVerification.status),
+            ) ??
+            order.payments.find(p => p.saleVerification != null) ??
+            null
+          const verification = paymentWithReview?.saleVerification ?? null
+
+          return {
+            id: order.id,
+            orderNumber: order.orderNumber,
+            serialNumber: firstItem?.productSku || null,
+            categoryName: firstItem?.categoryName || firstItem?.productName || null,
+            price,
+            date: order.createdAt.toISOString(),
+            paymentStatus: order.paymentStatus === PaymentStatus.PAID ? 'COMPLETED' : order.paymentStatus,
+            isGift: price === 0,
+            paymentId: paymentWithReview?.id ?? null,
+            verificationId: verification?.id ?? null,
+            verificationStatus: verification?.status ?? null,
+            reviewedAt: verification?.reviewedAt ? verification.reviewedAt.toISOString() : null,
+            reviewNotes: verification?.reviewNotes ?? null,
+            rejectionReasons: verification?.rejectionReasons ?? null,
+            hasPhotos: (verification?.photos?.length ?? 0) > 0,
+          }
+        })
+        // Defensive: drop rows whose chosen verification isn't actually in review.
+        .filter(s => s.verificationStatus != null && (REVIEW_STATUSES as readonly string[]).includes(s.verificationStatus))
+
+      // FAILED (action required) first, then PENDING/PROCESSING. Stable sort keeps the
+      // oldest-first ordering inside each group.
+      const rank = (st: string | null) => (st === 'FAILED' ? 0 : 1)
+      sales.sort((a, b) => rank(a.verificationStatus) - rank(b.verificationStatus))
+
+      logger.info(`✅ [SERIALIZED INV] Sales-to-review returned ${sales.length}`, {
+        venueId,
+        staffId,
+        correlationId: req.correlationId,
+      })
+
+      return res.status(200).json({
+        success: true,
+        data: {
+          totalToReview: sales.length,
+          sales,
+        },
+      })
+    } catch (error) {
+      logger.error(`❌ [SERIALIZED INV] Error fetching sales-to-review`, {
+        correlationId: req.correlationId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      })
+      next(error)
+    }
+  },
+)
+
+/**
  * POST /tpv/v1/serialized-inventory/sell
  * Quick sell a serialized item (creates order + item in one shot).
  * Requires serialized-inventory:sell permission.
