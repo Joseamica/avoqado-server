@@ -6,6 +6,7 @@ import { computeOverrides, getOrgDefaultsForTerminal } from '@/services/dashboar
 import { isProviderCompatibleWithBrand } from '@/lib/providerDeviceCompatibility'
 import { decryptCredentials } from '@/services/superadmin/merchantAccount.service'
 import { getAngelPayUserAccountForTerminal, getAngelPayUserAccountsForTerminal } from '@/services/superadmin/angelpayUserAccount.service'
+import { VenuePlanInfo, getVenuePlanInfo } from '@/services/access/basePlan.service'
 import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 import prisma from '@/utils/prismaClient'
 import logger from '../../config/logger'
@@ -373,13 +374,27 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
     // Step 4: Extract TPV settings from terminal config
     const terminalTpvSettings = getTpvSettingsFromConfig(terminal.config)
 
-    // Step 5: Fetch venue-level settings from VenueSettings (only enableShifts is venue-level)
-    const venueSettings = await prisma.venueSettings.findUnique({
-      where: { venueId: terminal.venueId },
-      select: {
-        enableShifts: true,
-      },
-    })
+    // Step 5: Fetch venue-level settings from VenueSettings (only enableShifts is venue-level),
+    // in parallel with the venue's plan-tier info (additive `plan` field — the TPV gates UI by
+    // plan: REFERRAL_PROGRAM / PROMOTIONS / ADVANCED_REPORTS / SERIALIZED_INVENTORY teasers).
+    // RESILIENT: a plan-lookup failure must NEVER break terminal config fetch — log it and
+    // return the config WITHOUT the plan field (the TPV fails open and behaves as today).
+    const [venueSettings, plan] = await Promise.all([
+      prisma.venueSettings.findUnique({
+        where: { venueId: terminal.venueId },
+        select: {
+          enableShifts: true,
+        },
+      }),
+      getVenuePlanInfo(terminal.venueId).catch((error): VenuePlanInfo | undefined => {
+        logger.error('Failed to resolve plan info for terminal config — returning config without plan', {
+          venueId: terminal.venueId,
+          serialNumber: terminal.serialNumber,
+          error,
+        })
+        return undefined
+      }),
+    ])
 
     // Merge terminal settings with venue-level settings
     // Note: requireClockInPhoto/requireClockOutPhoto are terminal-level settings (from Terminal.config)
@@ -518,6 +533,11 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
         // for the venue. Always present (possibly empty []) when the terminal
         // is NEXGO; omitted entirely on non-NEXGO terminals.
         angelpayAccounts: terminal.brand === 'NEXGO' ? angelpayAccounts : undefined,
+        // Plan-tier gating (2026-06) — ADDITIVE and OPTIONAL (omitted when the lookup
+        // failed): { tier, grandfathered, exempt }. Old TPV versions ignore it; new
+        // ones gate UI by plan and fail open when absent. Existing fields must never
+        // be removed/renamed (old app versions depend on them).
+        ...(plan ? { plan } : {}),
       },
     })
   } catch (error) {

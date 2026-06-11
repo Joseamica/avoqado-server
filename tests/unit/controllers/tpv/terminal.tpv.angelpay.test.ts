@@ -23,6 +23,12 @@ jest.mock('@/utils/prismaClient', () => ({
     terminal: { findFirst: jest.fn() },
     merchantAccount: { findMany: jest.fn() },
     venueSettings: { findUnique: jest.fn() },
+    // Plan-tier info (2026-06): getTerminalConfig now resolves the venue's plan
+    // via basePlan.service (venueFeature + venue lookups). These tests don't
+    // assert on `plan`, but the models must exist so the lookup resolves
+    // instead of crashing the worker with an unhandled rejection.
+    venueFeature: { findMany: jest.fn() },
+    venue: { findUnique: jest.fn() },
   },
 }))
 
@@ -62,6 +68,8 @@ const mockedPrisma = prisma as unknown as {
   terminal: { findFirst: jest.Mock }
   merchantAccount: { findMany: jest.Mock }
   venueSettings: { findUnique: jest.Mock }
+  venueFeature: { findMany: jest.Mock }
+  venue: { findUnique: jest.Mock }
 }
 
 const mockedIsCompat = isProviderCompatibleWithBrand as jest.Mock
@@ -88,6 +96,10 @@ describe('GET /tpv/terminals/:serialNumber/config — Task 13 (AngelPay)', () =>
   beforeEach(() => {
     jest.clearAllMocks()
     mockedPrisma.venueSettings.findUnique.mockResolvedValue({ enableShifts: false })
+    // Plan lookup defaults: no base plan, regular venue → plan { FREE, false, false }.
+    // Additive field — none of these tests assert on it.
+    mockedPrisma.venueFeature.findMany.mockResolvedValue([])
+    mockedPrisma.venue.findUnique.mockResolvedValue({ seatCapExempt: false, status: 'ACTIVE' })
     // Multi-account per venue (2026-05-18): default the plural variant to []
     // so each existing test continues to exercise the legacy single-account
     // code path (which uses `getAngelPayUserAccountForTerminal`). Tests that
