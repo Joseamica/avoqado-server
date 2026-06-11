@@ -8,6 +8,7 @@ import { Request, Response, NextFunction } from 'express'
 import * as liveDemoService from '@/services/liveDemo.service'
 import logger from '@/config/logger'
 import { v4 as uuidv4 } from 'uuid'
+import { ForbiddenError, TooManyRequestsError, UnauthorizedError } from '@/errors/AppError'
 
 /**
  * Auto-login endpoint for live demo
@@ -146,6 +147,53 @@ export async function extendSessionController(req: Request, res: Response, next:
     })
   } catch (error) {
     logger.error('❌ Error extending live demo session:', error)
+    next(error)
+  }
+}
+
+/**
+ * Simulate a TPV fast payment in the visitor's LIVE_DEMO venue (Avoqado Tour F2)
+ * Auth = the liveDemoSessionId cookie (same validation as POST /extend).
+ *
+ * POST /api/v1/live-demo/sim/fast-payment
+ */
+export async function simFastPaymentController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const sessionId = req.cookies?.liveDemoSessionId
+
+    if (!sessionId) {
+      res.status(401).json({ error: 'No demo session' })
+      return
+    }
+
+    const { amountCents, tipCents } = req.body as { amountCents: number; tipCents?: number }
+
+    const result = await liveDemoService.simulateFastPayment(sessionId, amountCents, tipCents ?? 0)
+
+    res.status(200).json({
+      success: true,
+      data: result,
+    })
+  } catch (error) {
+    // Missing/expired session — same contract as the cookie-less case
+    if (error instanceof UnauthorizedError) {
+      res.status(401).json({ error: 'No demo session' })
+      return
+    }
+
+    // Tampered/stale session pointing at a non-LIVE_DEMO venue
+    if (error instanceof ForbiddenError) {
+      res.status(403).json({ error: error.message })
+      return
+    }
+
+    // Per-session sim payment cap exceeded
+    if (error instanceof TooManyRequestsError) {
+      res.status(429).json({ error: error.message })
+      return
+    }
+
+    logger.error('❌ Error simulating live demo fast payment:', error)
     next(error)
   }
 }

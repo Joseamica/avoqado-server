@@ -72,6 +72,12 @@ export class ValidationError extends AppError {
   }
 }
 
+export class TooManyRequestsError extends AppError {
+  constructor(message: string = 'Demasiadas solicitudes. Intenta de nuevo más tarde.') {
+    super(message, 429)
+  }
+}
+
 export class IncompatibleDeviceError extends AppError {
   constructor(message: string = 'Dispositivo incompatible con el procesador de pagos') {
     super(message, 409, true, 'INCOMPATIBLE_DEVICE')

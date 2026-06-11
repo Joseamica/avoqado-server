@@ -209,6 +209,8 @@ const prismaMock: any = {
   venueChatMessage: createMockModel(),
   // Audit trail
   activityLog: createMockModel(),
+  // Live demo sessions (demo.dashboard.avoqado.io)
+  liveDemoSession: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),

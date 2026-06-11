@@ -8,16 +8,29 @@
 
 import { StaffRole, VenueStatus, OrgRole } from '@prisma/client'
 import { addHours, addDays } from 'date-fns'
+import { v4 as uuidv4 } from 'uuid'
 import prisma from '@/utils/prismaClient'
 import { generateSlug as slugify } from '@/utils/slugify'
 import { seedDemoVenue } from './onboarding/demoSeed.service'
+import { recordFastPayment } from './tpv/payment.tpv.service'
 import * as jwtService from '@/jwt.service'
 import logger from '@/config/logger'
 import { isLiveDemoVenue as isLiveDemoStatus } from '@/lib/venueStatus.constants'
+import { ForbiddenError, TooManyRequestsError, UnauthorizedError } from '@/errors/AppError'
 
 const LIVE_DEMO_DURATION_HOURS = 5
 const LIVE_DEMO_ORG_NAME = 'Live Demo Organization'
 const LIVE_DEMO_VENUE_PREFIX = 'live-demo'
+
+/**
+ * Recognizable marker for simulated demo payments (Avoqado Tour F2).
+ * Stored in the existing Payment.referenceNumber field — NO schema changes.
+ * Also used to count sim payments for the per-session cap.
+ */
+export const SIM_PAYMENT_REFERENCE_PREFIX = 'LIVE-DEMO-SIM'
+
+/** Max simulated payments allowed per live-demo session (anti-abuse cap). */
+export const MAX_SIM_PAYMENTS_PER_SESSION = 20
 
 export interface LiveDemoSession {
   sessionId: string
@@ -323,4 +336,114 @@ export async function isLiveDemoVenue(venueId: string): Promise<boolean> {
   })
 
   return venue ? isLiveDemoStatus(venue.status) : false
+}
+
+export interface SimFastPaymentResult {
+  paymentId: string
+  amountCents: number
+  tipCents: number
+}
+
+/**
+ * Simulates a TPV fast payment inside the visitor's ephemeral LIVE_DEMO venue.
+ * (Avoqado Tour F2 — the "wow moment": the public guided demo simulates a TPV
+ * charge, then the demo dashboard POSTs here so a REAL payment appears in Ventas.)
+ *
+ * Reuses the exact TPV path (`recordFastPayment`) so ALL side-effects are
+ * preserved — most importantly the Socket.IO PAYMENT_COMPLETED / ORDER_UPDATED
+ * broadcasts that make the payment appear in the dashboard in realtime.
+ *
+ * Security:
+ * - Auth = the live-demo session itself (cookie validated by the caller +
+ *   re-validated here against the DB, including expiry).
+ * - HARD venue check: writes are refused unless the session's venue status is
+ *   LIVE_DEMO — a tampered/stale session can never write into a real venue.
+ * - Cap: max MAX_SIM_PAYMENTS_PER_SESSION sim payments per demo venue
+ *   (counted via the SIM_PAYMENT_REFERENCE_PREFIX marker).
+ *
+ * @param sessionId - liveDemoSessionId cookie value
+ * @param amountCents - Payment base amount in cents (> 0)
+ * @param tipCents - Tip in cents (>= 0)
+ */
+export async function simulateFastPayment(sessionId: string, amountCents: number, tipCents: number = 0): Promise<SimFastPaymentResult> {
+  // 1. Validate the live-demo session (existence + expiry) — this IS the auth
+  const session = await prisma.liveDemoSession.findUnique({
+    where: { sessionId },
+  })
+
+  if (!session || new Date() >= session.expiresAt) {
+    throw new UnauthorizedError('No demo session')
+  }
+
+  // 2. HARD verify the venue is a LIVE_DEMO venue — never write to a real venue
+  const isDemo = await isLiveDemoVenue(session.venueId)
+  if (!isDemo) {
+    logger.error(`🚨 simulateFastPayment refused: venue ${session.venueId} is NOT a LIVE_DEMO venue (session ${sessionId})`)
+    throw new ForbiddenError('Esta operación solo está disponible en venues de demo.')
+  }
+
+  // 3. Per-session cap — count only sim-marked payments (the seeded demo data
+  //    also contains payments; those must not eat into the cap)
+  const simPaymentCount = await prisma.payment.count({
+    where: {
+      venueId: session.venueId,
+      referenceNumber: { startsWith: SIM_PAYMENT_REFERENCE_PREFIX },
+    },
+  })
+
+  if (simPaymentCount >= MAX_SIM_PAYMENTS_PER_SESSION) {
+    throw new TooManyRequestsError('Límite de pagos simulados alcanzado para esta sesión de demo.')
+  }
+
+  // 4. Record the payment EXACTLY like the TPV fast-payment path does.
+  //    recordFastPayment creates the fast Order + Payment (method CARD,
+  //    status COMPLETED) + VenueTransaction + allocation, and emits the
+  //    Socket.IO PAYMENT_COMPLETED + ORDER_UPDATED events to the venue room.
+  const referenceNumber = `${SIM_PAYMENT_REFERENCE_PREFIX}-${uuidv4()}`
+
+  const payment = await recordFastPayment(
+    session.venueId,
+    {
+      venueId: session.venueId,
+      amount: amountCents,
+      tip: tipCents,
+      status: 'COMPLETED',
+      method: 'CREDIT_CARD',
+      source: 'TPV', // Shows up in Ventas exactly like a real TPV charge
+      splitType: 'FULLPAYMENT',
+      tpvId: 'LIVE_DEMO_SIM',
+      staffId: session.staffId, // The demo venue's seeded OWNER staff
+      paidProductsId: [],
+      currency: 'MXN',
+      isInternational: false,
+      // Friendly fake card metadata so the Ventas row looks real
+      cardBrand: 'VISA',
+      last4: '4242',
+      typeOfCard: 'CREDIT',
+      // ⭐ Recognizable sim marker on an EXISTING field (no schema changes).
+      // Unique per request so the referenceNumber idempotency check never
+      // collapses two intentional sim payments into one.
+      referenceNumber,
+      idempotencyKey: uuidv4(),
+    },
+    session.staffId,
+  )
+
+  // Keep the demo session alive — the visitor is clearly active
+  await updateLiveDemoActivity(sessionId)
+
+  logger.info(`🎭 Simulated fast payment created for live demo`, {
+    sessionId,
+    venueId: session.venueId,
+    paymentId: payment.id,
+    amountCents,
+    tipCents,
+    referenceNumber,
+  })
+
+  return {
+    paymentId: payment.id,
+    amountCents,
+    tipCents,
+  }
 }
