@@ -67,6 +67,7 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       note,
       splitType,
       reservationId,
+      externalId,
     } = req.body
 
     // Validate required fields
@@ -122,6 +123,7 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       note,
       splitType,
       reservationId: typeof reservationId === 'string' ? reservationId : null,
+      externalId: typeof externalId === 'string' ? externalId : null,
     })
 
     res.status(201).json({

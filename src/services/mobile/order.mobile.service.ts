@@ -45,6 +45,10 @@ export interface CreateOrderInput {
   /** Links the sale to a class/appointment reservation (walk-in flow).
    *  Validated against the venue before use; ignored if it doesn't belong. */
   reservationId?: string | null
+  /** Client-generated idempotency key for offline retries. Mirrors the TPV
+   *  pattern (order.tpv.service.ts createOrder): a repeated venueId+externalId
+   *  returns the existing order instead of creating a duplicate. */
+  externalId?: string | null
 }
 
 export interface CreatedOrderResponse {
@@ -259,11 +263,65 @@ export async function listOrders(venueId: string, input: ListOrdersInput) {
   }
 }
 
+/** Include needed to build a CreatedOrderResponse from an Order row. */
+const createdOrderInclude = {
+  items: {
+    include: {
+      product: {
+        select: {
+          id: true,
+          name: true,
+          price: true,
+        },
+      },
+      modifiers: {
+        include: {
+          modifier: true,
+        },
+      },
+    },
+  },
+} as const
+
+function toCreatedOrderResponse(order: any): CreatedOrderResponse {
+  const flattenedOrder = flattenOrderModifiers(order)
+  return {
+    id: flattenedOrder.id,
+    orderNumber: flattenedOrder.orderNumber,
+    status: flattenedOrder.status,
+    paymentStatus: flattenedOrder.paymentStatus,
+    subtotal: Number(flattenedOrder.subtotal),
+    taxAmount: Number(flattenedOrder.taxAmount),
+    discountAmount: Number(flattenedOrder.discountAmount),
+    total: Number(flattenedOrder.total),
+    items: flattenedOrder.items.map((item: any) => ({
+      id: item.id,
+      productId: item.productId,
+      productName: item.productName || item.product?.name,
+      quantity: item.quantity,
+      unitPrice: Number(item.unitPrice),
+      total: Number(item.total),
+      modifiers: item.modifiers || [],
+    })),
+    createdAt: flattenedOrder.createdAt,
+  }
+}
+
+function normalizeExternalId(externalId?: string | null): string | null {
+  if (!externalId) return null
+  const trimmed = externalId.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
 /**
  * Create a new order with items (for mobile order-based payment flow)
  *
  * This is called by iOS/Android before initiating payment via BLE to TPV.
  * The TPV will then complete the payment using the orderId.
+ *
+ * Idempotent when the client sends `externalId` (offline-retry safety): a
+ * repeated venueId+externalId returns the existing order — same contract as
+ * the TPV's createOrder.
  *
  * @param venueId Venue ID (tenant isolation)
  * @param input Order creation parameters including items
@@ -273,6 +331,25 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
   logger.info(
     `📱 [ORDER.MOBILE] Creating order with ${input.items.length} items | venue=${venueId} | type=${input.orderType || 'DINE_IN'} | source=${input.source || 'AVOQADO_IOS'}`,
   )
+
+  // Idempotency short-circuit BEFORE any validation/creation work: an offline
+  // client retrying after a lost response must get the original order back.
+  const externalId = normalizeExternalId(input.externalId)
+  if (externalId) {
+    const existingOrder = await prisma.order.findUnique({
+      where: {
+        venueId_externalId: {
+          venueId,
+          externalId,
+        },
+      },
+      include: createdOrderInclude,
+    })
+    if (existingOrder) {
+      logger.warn(`🔄 [ORDER.MOBILE] Duplicate createOrderWithItems detected (externalId=${externalId}) — returning existing order`)
+      return toCreatedOrderResponse(existingOrder)
+    }
+  }
 
   const validatedStaffId = await validateStaffVenue(input.staffId, venueId)
 
@@ -446,63 +523,70 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
   }
 
   // Create order with items in a transaction
-  const order = await prisma.order.create({
-    data: {
-      venueId,
-      orderNumber,
-      reservationId: linkedReservationId,
-      tableId: input.tableId || null,
-      servedById: validatedStaffId || null,
-      createdById: validatedStaffId || null,
-      status: 'CONFIRMED',
-      paymentStatus: 'PENDING',
-      kitchenStatus: 'PENDING',
-      type: input.orderType || 'DINE_IN',
-      source: input.source || 'AVOQADO_IOS',
-      customerId: normalizedCustomerId,
-      subtotal: new Prisma.Decimal(subtotal),
-      discountAmount: new Prisma.Decimal(discountDecimal),
-      taxAmount: new Prisma.Decimal(0),
-      tipAmount: new Prisma.Decimal(tipDecimal),
-      total: new Prisma.Decimal(total),
-      remainingBalance: new Prisma.Decimal(total),
-      customerName: resolvedCustomerName,
-      customerPhone: resolvedCustomerPhone,
-      specialRequests: input.note || input.specialRequests || null,
-      version: 1,
-      orderCustomers: normalizedCustomerId
-        ? {
-            create: [
-              {
-                customerId: normalizedCustomerId,
-                isPrimary: true,
-              },
-            ],
-          }
-        : undefined,
-      items: {
-        create: itemsData,
-      },
-    },
-    include: {
-      items: {
-        include: {
-          product: {
-            select: {
-              id: true,
-              name: true,
-              price: true,
-            },
-          },
-          modifiers: {
-            include: {
-              modifier: true,
-            },
-          },
+  let order
+  try {
+    order = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber,
+        externalId,
+        reservationId: linkedReservationId,
+        tableId: input.tableId || null,
+        servedById: validatedStaffId || null,
+        createdById: validatedStaffId || null,
+        status: 'CONFIRMED',
+        paymentStatus: 'PENDING',
+        kitchenStatus: 'PENDING',
+        type: input.orderType || 'DINE_IN',
+        source: input.source || 'AVOQADO_IOS',
+        customerId: normalizedCustomerId,
+        subtotal: new Prisma.Decimal(subtotal),
+        discountAmount: new Prisma.Decimal(discountDecimal),
+        taxAmount: new Prisma.Decimal(0),
+        tipAmount: new Prisma.Decimal(tipDecimal),
+        total: new Prisma.Decimal(total),
+        remainingBalance: new Prisma.Decimal(total),
+        customerName: resolvedCustomerName,
+        customerPhone: resolvedCustomerPhone,
+        specialRequests: input.note || input.specialRequests || null,
+        version: 1,
+        orderCustomers: normalizedCustomerId
+          ? {
+              create: [
+                {
+                  customerId: normalizedCustomerId,
+                  isPrimary: true,
+                },
+              ],
+            }
+          : undefined,
+        items: {
+          create: itemsData,
         },
       },
-    },
-  })
+      include: createdOrderInclude,
+    })
+  } catch (error) {
+    // Concurrent-retry race: two identical offline retries can both pass the
+    // pre-check; the unique index (venueId, externalId) blocks the loser —
+    // return the winner instead of failing the retry. Mirrors recordFastPayment.
+    if (externalId && error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      const winner = await prisma.order.findUnique({
+        where: {
+          venueId_externalId: {
+            venueId,
+            externalId,
+          },
+        },
+        include: createdOrderInclude,
+      })
+      if (winner) {
+        logger.warn(`🛡️ [ORDER.MOBILE] Concurrent duplicate blocked by unique index (externalId=${externalId}) — returning winner`)
+        return toCreatedOrderResponse(winner)
+      }
+    }
+    throw error
+  }
 
   logger.info(
     `✅ [ORDER.MOBILE] Order created | id=${order.id} | number=${order.orderNumber} | subtotal=${subtotal} | discount=${discountDecimal} | tip=${tipDecimal} | total=${total}`,
@@ -521,28 +605,7 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
   }
 
   // Flatten and return response
-  const flattenedOrder = flattenOrderModifiers(order)
-
-  return {
-    id: flattenedOrder.id,
-    orderNumber: flattenedOrder.orderNumber,
-    status: flattenedOrder.status,
-    paymentStatus: flattenedOrder.paymentStatus,
-    subtotal: Number(flattenedOrder.subtotal),
-    taxAmount: Number(flattenedOrder.taxAmount),
-    discountAmount: Number(flattenedOrder.discountAmount),
-    total: Number(flattenedOrder.total),
-    items: flattenedOrder.items.map((item: any) => ({
-      id: item.id,
-      productId: item.productId,
-      productName: item.productName || item.product?.name,
-      quantity: item.quantity,
-      unitPrice: Number(item.unitPrice),
-      total: Number(item.total),
-      modifiers: item.modifiers || [],
-    })),
-    createdAt: flattenedOrder.createdAt,
-  }
+  return toCreatedOrderResponse(order)
 }
 
 /**

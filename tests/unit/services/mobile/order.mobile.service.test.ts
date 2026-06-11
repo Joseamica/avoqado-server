@@ -1,4 +1,5 @@
 import { Decimal } from '@prisma/client/runtime/library'
+import { Prisma } from '@prisma/client'
 import { createOrderWithItems, payCashOrder } from '@/services/mobile/order.mobile.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
@@ -213,5 +214,153 @@ describe('order.mobile.service', () => {
         }),
       }),
     )
+  })
+})
+
+// ── Idempotency via externalId (offline-retry safety, mirrors TPV createOrder) ──
+
+describe('createOrderWithItems idempotency (externalId)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock))
+  })
+
+  const existingOrderRow = {
+    id: 'order-existing',
+    orderNumber: 'ORD-OLD',
+    status: 'CONFIRMED',
+    paymentStatus: 'PENDING',
+    subtotal: new Decimal(100),
+    discountAmount: new Decimal(0),
+    taxAmount: new Decimal(0),
+    total: new Decimal(100),
+    createdAt: new Date('2026-06-01T10:00:00.000Z'),
+    items: [
+      {
+        id: 'oi-1',
+        productId: 'prod-1',
+        productName: 'Hamburguesa',
+        quantity: 1,
+        unitPrice: new Decimal(100),
+        total: new Decimal(100),
+        product: { id: 'prod-1', name: 'Hamburguesa', price: new Decimal(100) },
+        modifiers: [],
+      },
+    ],
+  }
+
+  function mockHappyCreatePath() {
+    prismaMock.staff.findUnique.mockResolvedValue({ id: 'staff-1', venueId: 'venue-1' })
+    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: 'venue-1', active: true })
+    prismaMock.product.findMany.mockResolvedValue([
+      { id: 'prod-1', name: 'Hamburguesa', price: new Decimal(100), sku: 'BURG-1', category: { name: 'Comida' } },
+    ])
+    prismaMock.modifier.findMany.mockResolvedValue([])
+  }
+
+  // 1. NEW FEATURE TESTS
+
+  it('returns the existing order without creating when externalId matches', async () => {
+    prismaMock.order.findUnique.mockResolvedValue(existingOrderRow)
+
+    const result = await createOrderWithItems('venue-1', {
+      staffId: 'staff-1',
+      items: [{ productId: 'prod-1', quantity: 1 }],
+      externalId: 'retry-key-1',
+    })
+
+    expect(prismaMock.order.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { venueId_externalId: { venueId: 'venue-1', externalId: 'retry-key-1' } },
+      }),
+    )
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+    expect(result.id).toBe('order-existing')
+    expect(result.orderNumber).toBe('ORD-OLD')
+  })
+
+  it('persists the normalized externalId on the created order', async () => {
+    mockHappyCreatePath()
+    prismaMock.order.findUnique.mockResolvedValue(null)
+    prismaMock.order.create.mockResolvedValue(existingOrderRow)
+
+    await createOrderWithItems('venue-1', {
+      staffId: 'staff-1',
+      items: [{ productId: 'prod-1', quantity: 1 }],
+      externalId: '  retry-key-2  ',
+    })
+
+    expect(prismaMock.order.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ externalId: 'retry-key-2' }),
+      }),
+    )
+  })
+
+  it('returns the winner when a concurrent duplicate is blocked by the unique index (P2002)', async () => {
+    mockHappyCreatePath()
+    prismaMock.order.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(existingOrderRow)
+    const p2002 = new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+      code: 'P2002',
+      clientVersion: 'test',
+      meta: { target: ['venueId', 'externalId'] },
+    } as any)
+    prismaMock.order.create.mockRejectedValue(p2002)
+
+    const result = await createOrderWithItems('venue-1', {
+      staffId: 'staff-1',
+      items: [{ productId: 'prod-1', quantity: 1 }],
+      externalId: 'retry-key-3',
+    })
+
+    expect(result.id).toBe('order-existing')
+  })
+
+  it('treats blank externalId as absent (no lookup, created with null)', async () => {
+    mockHappyCreatePath()
+    prismaMock.order.create.mockResolvedValue(existingOrderRow)
+
+    await createOrderWithItems('venue-1', {
+      staffId: 'staff-1',
+      items: [{ productId: 'prod-1', quantity: 1 }],
+      externalId: '   ',
+    })
+
+    expect(prismaMock.order.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.order.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ externalId: null }),
+      }),
+    )
+  })
+
+  // 2. REGRESSION TESTS
+
+  it('still creates orders normally when externalId is not provided', async () => {
+    mockHappyCreatePath()
+    prismaMock.order.create.mockResolvedValue(existingOrderRow)
+
+    const result = await createOrderWithItems('venue-1', {
+      staffId: 'staff-1',
+      items: [{ productId: 'prod-1', quantity: 1 }],
+    })
+
+    expect(prismaMock.order.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.order.create).toHaveBeenCalledTimes(1)
+    expect(result.id).toBe('order-existing')
+  })
+
+  it('still rethrows non-P2002 create errors unchanged', async () => {
+    mockHappyCreatePath()
+    prismaMock.order.findUnique.mockResolvedValue(null)
+    prismaMock.order.create.mockRejectedValue(new Error('db down'))
+
+    await expect(
+      createOrderWithItems('venue-1', {
+        staffId: 'staff-1',
+        items: [{ productId: 'prod-1', quantity: 1 }],
+        externalId: 'retry-key-4',
+      }),
+    ).rejects.toThrow('db down')
   })
 })
