@@ -194,3 +194,16 @@ Every **audit-worthy mutation** — create/update/delete of domain entities, mon
 unfinished (treat it like permissions/MCP: kept in lockstep). Do NOT log reads or high-frequency events (heartbeats, scans, request logging)
 — that just bloats the audit trail. Full rule + example: `.claude/rules/critical-warnings.md`. (Backend-only — clients call the API;
 `avoqado-server` audits.)
+
+## 🔴 CRITICAL — Keep the sales presentation in sync
+
+The partner sales presentation (`~/Documents/Programming/Avoqado-HQ/operations/marketing/platform-presentation/`)
+is the canonical "what Avoqado does" document — third parties sell from it. It must never fall
+behind the platform.
+
+**Whenever you add, change, or remove a customer-visible capability (feature, module, product,
+payment method, supported sector, tier packaging), you MUST update BOTH deliverables as part of
+the SAME change — never "later":** the full deck (`avoqado-presentacion.html`) AND the one-pager
+(`avoqado-one-pager.html`), then regenerate both PDFs following that folder's `README.md`.
+Updating only one of the two is an incomplete change. Internal refactors and bugfixes with no
+customer-visible impact are exempt.

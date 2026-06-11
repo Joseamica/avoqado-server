@@ -122,6 +122,44 @@ export async function venueIsExemptFromPlanGating(venueId: string): Promise<bool
 }
 
 /**
+ * Plan tier as exposed to POS/mobile clients (the optional `plan.tier` field on the mobile
+ * venue-settings payload). Maps {@link BaseTier} | null → client string: no active base plan
+ * → 'FREE'. 'ENTERPRISE' is reserved — no enterprise base-plan Feature code exists today, so
+ * it is never emitted yet; clients must still accept it (forward compatibility).
+ */
+export type ClientPlanTier = 'FREE' | 'PRO' | 'PREMIUM' | 'ENTERPRISE'
+
+/** Plan info for client payloads — see {@link getVenuePlanInfo}. */
+export interface VenuePlanInfo {
+  tier: ClientPlanTier
+  grandfathered: boolean
+  exempt: boolean
+}
+
+/**
+ * The venue's plan info as exposed to POS/mobile clients so they can gate UI by plan.
+ * Composes the semantics of {@link getVenueBaseTier}, {@link venueIsGrandfathered} and
+ * {@link venueIsExemptFromPlanGating} in exactly 2 indexed queries (one VenueFeature scan
+ * + ONE Venue PK fetch shared by both flags, instead of the two separate venue lookups the
+ * individual helpers would make):
+ *   - `tier`: 'PREMIUM' / 'PRO' from the active base plan, 'FREE' when none.
+ *   - `grandfathered`: {@link venueIsGrandfathered} semantics (Venue.seatCapExempt === true).
+ *   - `exempt`: {@link venueIsExemptFromPlanGating} semantics (grandfathered OR demo status
+ *     LIVE_DEMO / TRIAL) — what clients should actually use to skip ALL plan gating.
+ * Nonexistent venue → { tier: 'FREE', grandfathered: false, exempt: false } (same false
+ * defaults as the individual helpers).
+ */
+export async function getVenuePlanInfo(venueId: string): Promise<VenuePlanInfo> {
+  const [tier, venue] = await Promise.all([
+    getVenueBaseTier(venueId),
+    prisma.venue.findUnique({ where: { id: venueId }, select: { seatCapExempt: true, status: true } }),
+  ])
+  const grandfathered = venue?.seatCapExempt === true
+  const exempt = grandfathered || (venue != null && (DEMO_VENUE_STATUSES as readonly string[]).includes(venue.status as string))
+  return { tier: tier ?? 'FREE', grandfathered, exempt }
+}
+
+/**
  * Whether a venue may use a specific feature — tier-aware mirror of the access gate so callers
  * OUTSIDE the HTTP middleware (e.g. the customer MCP) enforce the same paid-plan gating and
  * never bypass it. Resolution order:
