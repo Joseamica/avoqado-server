@@ -10,11 +10,7 @@
  */
 
 import prisma from '@/utils/prismaClient'
-import {
-  simulateReservation,
-  SIM_RESERVATION_NOTE_PREFIX,
-  MAX_SIM_RESERVATIONS_PER_SESSION,
-} from '@/services/liveDemo.service'
+import { simulateReservation, SIM_RESERVATION_NOTE_PREFIX, MAX_SIM_RESERVATIONS_PER_SESSION } from '@/services/liveDemo.service'
 import { createReservation } from '@/services/dashboard/reservation.dashboard.service'
 import { ForbiddenError, TooManyRequestsError, UnauthorizedError } from '@/errors/AppError'
 
