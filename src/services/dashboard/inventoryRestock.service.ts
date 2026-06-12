@@ -36,6 +36,8 @@ export async function restockItem(args: {
   quantity: number
   refundPaymentId: string
   staffId?: string
+  /** Override del motivo del movimiento (p.ej. reversa por rollback de pago). */
+  reason?: string
 }) {
   const { venueId, productId, quantity, refundPaymentId, staffId } = args
 
@@ -64,7 +66,7 @@ export async function restockItem(args: {
           quantity: new Prisma.Decimal(quantity),
           previousStock,
           newStock,
-          reason: `Refund restock (paymentId=${refundPaymentId})`,
+          reason: args.reason ?? `Refund restock (paymentId=${refundPaymentId})`,
           reference: refundPaymentId,
           createdBy: staffId,
         },
@@ -97,7 +99,7 @@ export async function restockItem(args: {
           {
             quantity: addQty,
             type: RawMaterialMovementType.ADJUSTMENT,
-            reason: `Refund restock for ${product.name} (paymentId=${refundPaymentId})`,
+            reason: args.reason ?? `Refund restock for ${product.name} (paymentId=${refundPaymentId})`,
             reference: refundPaymentId,
           },
           staffId,

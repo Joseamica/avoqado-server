@@ -1,170 +1,420 @@
 <!doctype html>
 <html lang="es">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Avoqado — Módulo de Contabilidad · Resumen para el contador</title>
-<style>
-  :root{
-    --ink:#0f172a; --muted:#64748b; --line:#e2e8f0; --bg:#f8fafc;
-    --green:#16a34a; --green-soft:#f0fdf4; --green-line:#bbf7d0;
-    --blue:#1d4ed8; --blue-soft:#eff6ff; --blue-line:#bfdbfe;
-    --amber-soft:#fffbeb; --amber-line:#fde68a;
-  }
-  *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--ink);
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif;
-    font-size:16px;line-height:1.65;-webkit-text-size-adjust:100%}
-  .page{max-width:760px;margin:0 auto;padding:2rem 1.25rem 4rem;background:#fff;
-    box-shadow:0 0 40px rgba(15,23,42,.06)}
-  header{display:flex;align-items:center;gap:.75rem;padding-bottom:1.25rem;border-bottom:2px solid var(--line);margin-bottom:1.5rem}
-  header svg{width:44px;height:44px;flex:0 0 auto}
-  header .t b{font-size:1.25rem;display:block}
-  header .t span{color:var(--muted);font-size:.9rem}
-  h1{font-size:1.45rem;line-height:1.3;margin:.25rem 0 1rem}
-  h2{font-size:1.12rem;margin:2.2rem 0 .6rem;padding-top:1.2rem;border-top:1px solid var(--line)}
-  h2 .n{display:inline-grid;place-items:center;width:1.6rem;height:1.6rem;border-radius:999px;
-    background:var(--ink);color:#fff;font-size:.85rem;margin-right:.5rem;vertical-align:-0.25rem}
-  p{margin:.7rem 0}
-  .meta{color:var(--muted);font-size:.92rem;margin-bottom:1rem}
-  .ask{background:var(--green-soft);border:1px solid var(--green-line);border-left:4px solid var(--green);
-    border-radius:10px;padding: .9rem 1.1rem;margin:1.2rem 0}
-  .ask b{color:var(--green)}
-  table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.93rem}
-  th,td{border:1px solid var(--line);padding:.55rem .7rem;text-align:left;vertical-align:top}
-  th{background:var(--bg)}
-  thead th:nth-child(2){background:#f0fdf4}
-  thead th:nth-child(3){background:#eff6ff}
-  ul,ol{padding-left:1.35rem;margin:.6rem 0}
-  li{margin:.4rem 0}
-  li::marker{color:var(--muted)}
-  .opinion{background:var(--blue-soft);border:1px solid var(--blue-line);border-radius:12px;padding:1rem 1.2rem;margin:1rem 0}
-  .opinion h2{border:none;margin-top:0;padding-top:0;color:var(--blue)}
-  .opinion ol>li{margin:.8rem 0}
-  .nota{background:var(--amber-soft);border:1px solid var(--amber-line);border-radius:8px;
-    padding:.5rem .8rem;font-size:.9rem;color:#92400e;display:block;margin:.4rem 0}
-  .num{font-variant-numeric:tabular-nums;background:var(--bg);border:1px solid var(--line);
-    border-radius:6px;padding:0 .35rem;white-space:nowrap}
-  .firma{margin-top:2.5rem;padding-top:1.25rem;border-top:2px solid var(--line);color:var(--muted);font-size:.95rem}
-  .pill{display:inline-block;background:var(--bg);border:1px solid var(--line);border-radius:999px;
-    padding:.15rem .7rem;font-size:.85rem;margin:.15rem .15rem .15rem 0;white-space:nowrap}
-  @media print{ body{background:#fff} .page{box-shadow:none;max-width:100%} }
-</style>
-</head>
-<body>
-<div class="page">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Avoqado — Módulo de Contabilidad · Resumen para el contador</title>
+    <style>
+      :root {
+        --ink: #0f172a;
+        --muted: #64748b;
+        --line: #e2e8f0;
+        --bg: #f8fafc;
+        --green: #16a34a;
+        --green-soft: #f0fdf4;
+        --green-line: #bbf7d0;
+        --blue: #1d4ed8;
+        --blue-soft: #eff6ff;
+        --blue-line: #bfdbfe;
+        --amber-soft: #fffbeb;
+        --amber-line: #fde68a;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, system-ui, sans-serif;
+        font-size: 16px;
+        line-height: 1.65;
+        -webkit-text-size-adjust: 100%;
+      }
+      .page {
+        max-width: 760px;
+        margin: 0 auto;
+        padding: 2rem 1.25rem 4rem;
+        background: #fff;
+        box-shadow: 0 0 40px rgba(15, 23, 42, 0.06);
+      }
+      header {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding-bottom: 1.25rem;
+        border-bottom: 2px solid var(--line);
+        margin-bottom: 1.5rem;
+      }
+      header svg {
+        width: 44px;
+        height: 44px;
+        flex: 0 0 auto;
+      }
+      header .t b {
+        font-size: 1.25rem;
+        display: block;
+      }
+      header .t span {
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+      h1 {
+        font-size: 1.45rem;
+        line-height: 1.3;
+        margin: 0.25rem 0 1rem;
+      }
+      h2 {
+        font-size: 1.12rem;
+        margin: 2.2rem 0 0.6rem;
+        padding-top: 1.2rem;
+        border-top: 1px solid var(--line);
+      }
+      h2 .n {
+        display: inline-grid;
+        place-items: center;
+        width: 1.6rem;
+        height: 1.6rem;
+        border-radius: 999px;
+        background: var(--ink);
+        color: #fff;
+        font-size: 0.85rem;
+        margin-right: 0.5rem;
+        vertical-align: -0.25rem;
+      }
+      p {
+        margin: 0.7rem 0;
+      }
+      .meta {
+        color: var(--muted);
+        font-size: 0.92rem;
+        margin-bottom: 1rem;
+      }
+      .ask {
+        background: var(--green-soft);
+        border: 1px solid var(--green-line);
+        border-left: 4px solid var(--green);
+        border-radius: 10px;
+        padding: 0.9rem 1.1rem;
+        margin: 1.2rem 0;
+      }
+      .ask b {
+        color: var(--green);
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 1rem 0;
+        font-size: 0.93rem;
+      }
+      th,
+      td {
+        border: 1px solid var(--line);
+        padding: 0.55rem 0.7rem;
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        background: var(--bg);
+      }
+      thead th:nth-child(2) {
+        background: #f0fdf4;
+      }
+      thead th:nth-child(3) {
+        background: #eff6ff;
+      }
+      ul,
+      ol {
+        padding-left: 1.35rem;
+        margin: 0.6rem 0;
+      }
+      li {
+        margin: 0.4rem 0;
+      }
+      li::marker {
+        color: var(--muted);
+      }
+      .opinion {
+        background: var(--blue-soft);
+        border: 1px solid var(--blue-line);
+        border-radius: 12px;
+        padding: 1rem 1.2rem;
+        margin: 1rem 0;
+      }
+      .opinion h2 {
+        border: none;
+        margin-top: 0;
+        padding-top: 0;
+        color: var(--blue);
+      }
+      .opinion ol > li {
+        margin: 0.8rem 0;
+      }
+      .nota {
+        background: var(--amber-soft);
+        border: 1px solid var(--amber-line);
+        border-radius: 8px;
+        padding: 0.5rem 0.8rem;
+        font-size: 0.9rem;
+        color: #92400e;
+        display: block;
+        margin: 0.4rem 0;
+      }
+      .num {
+        font-variant-numeric: tabular-nums;
+        background: var(--bg);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 0 0.35rem;
+        white-space: nowrap;
+      }
+      .firma {
+        margin-top: 2.5rem;
+        padding-top: 1.25rem;
+        border-top: 2px solid var(--line);
+        color: var(--muted);
+        font-size: 0.95rem;
+      }
+      .pill {
+        display: inline-block;
+        background: var(--bg);
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 0.15rem 0.7rem;
+        font-size: 0.85rem;
+        margin: 0.15rem 0.15rem 0.15rem 0;
+        white-space: nowrap;
+      }
+      @media print {
+        body {
+          background: #fff;
+        }
+        .page {
+          box-shadow: none;
+          max-width: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <header>
+        <svg viewBox="0 0 732.5 893.3" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <path
+            fill="#69E185"
+            d="M712.7,486.2c-3.3-83.5-37.8-157.2-99.8-213.1c-27.9-28.7-63.2-57.2-104.9-84.8c16-81.7,12.9-116.7-31.4-155.5l-2.4-2.1l-3.1-0.9c-33-9.4-58.6-7.7-78.1,5.1c-29.8,19.5-39.9,60.9-45.2,117.3c-131.6,12.1-242.1,95.5-296.3,224.2c-56.5,134-37,280.8,49.8,374.1c3.4,3.5,10.3,10.6,157,98l1.1,0.7l1.2,0.5c36,13.2,72.6,19.8,108.8,19.8c39.2,0,78.1-7.7,115.4-23.2c63.9-26.5,121.9-75.8,163.3-138.7C692.8,639.9,715.7,561.3,712.7,486.2z M580.3,507.4c-0.3,58-40.2,116.3-118.7,173.3C374.3,744.2,279.3,710,228,651.3c-43.8-50-65.3-119.8-56.1-182c4.8-32.5,20.5-77.7,68-108.3c64.6-41.7,110-56.7,144.4-56.7c45.6,0,71.8,26.4,97.4,52.4c10.4,10.5,20.2,20.4,31.3,28.6C545.7,409.4,580.5,454.2,580.3,507.4z"
+          />
+          <path
+            fill="#C9712F"
+            d="M362.2,412c-26.8,0-53.6,17.9-75.5,50.5c-18.4,27.3-30.3,61.1-30.3,86c0,49.5,47.4,89.7,105.7,89.7S468,598,468,548.5c0-24.9-11.9-58.7-30.3-86C415.8,430,389,412,362.2,412z"
+          />
+        </svg>
+        <div class="t"><b>Avoqado</b><span>Punto de venta · Pagos · Facturación CFDI</span></div>
+      </header>
 
-<header>
-  <svg viewBox="0 0 732.5 893.3" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-    <path fill="#69E185" d="M712.7,486.2c-3.3-83.5-37.8-157.2-99.8-213.1c-27.9-28.7-63.2-57.2-104.9-84.8c16-81.7,12.9-116.7-31.4-155.5l-2.4-2.1l-3.1-0.9c-33-9.4-58.6-7.7-78.1,5.1c-29.8,19.5-39.9,60.9-45.2,117.3c-131.6,12.1-242.1,95.5-296.3,224.2c-56.5,134-37,280.8,49.8,374.1c3.4,3.5,10.3,10.6,157,98l1.1,0.7l1.2,0.5c36,13.2,72.6,19.8,108.8,19.8c39.2,0,78.1-7.7,115.4-23.2c63.9-26.5,121.9-75.8,163.3-138.7C692.8,639.9,715.7,561.3,712.7,486.2z M580.3,507.4c-0.3,58-40.2,116.3-118.7,173.3C374.3,744.2,279.3,710,228,651.3c-43.8-50-65.3-119.8-56.1-182c4.8-32.5,20.5-77.7,68-108.3c64.6-41.7,110-56.7,144.4-56.7c45.6,0,71.8,26.4,97.4,52.4c10.4,10.5,20.2,20.4,31.3,28.6C545.7,409.4,580.5,454.2,580.3,507.4z"/>
-    <path fill="#C9712F" d="M362.2,412c-26.8,0-53.6,17.9-75.5,50.5c-18.4,27.3-30.3,61.1-30.3,86c0,49.5,47.4,89.7,105.7,89.7S468,598,468,548.5c0-24.9-11.9-58.7-30.3-86C415.8,430,389,412,362.2,412z"/>
-  </svg>
-  <div class="t"><b>Avoqado</b><span>Punto de venta · Pagos · Facturación CFDI</span></div>
-</header>
+      <h1>Módulo de Contabilidad — resumen para revisión del contador</h1>
+      <p class="meta">
+        <b>Para:</b> el contador (y dueño de negocio) que revisará y aprobará el enfoque.<br />
+        <b>De:</b> Avoqado — plataforma de POS + pagos + facturación CFDI para comercios en México.<br />
+        <b>Fecha:</b> junio 2026 · <b>Estatus:</b> diseño para aprobación (aún no construido).
+      </p>
 
-<h1>Módulo de Contabilidad — resumen para revisión del contador</h1>
-<p class="meta">
-  <b>Para:</b> el contador (y dueño de negocio) que revisará y aprobará el enfoque.<br>
-  <b>De:</b> Avoqado — plataforma de POS + pagos + facturación CFDI para comercios en México.<br>
-  <b>Fecha:</b> junio 2026 · <b>Estatus:</b> diseño para aprobación (aún no construido).
-</p>
+      <div class="ask">
+        <b>Qué te pedimos:</b> que leas esto con ojo de contador, nos digas si el <b>enfoque fiscal es correcto</b>, qué <b>ajustarías</b>,
+        y nos des tu <b>visto bueno</b> (o tus correcciones) en los puntos marcados
+        <b style="color: var(--blue)">🔵 Necesitamos tu opinión</b>.
+      </div>
 
-<div class="ask"><b>Qué te pedimos:</b> que leas esto con ojo de contador, nos digas si el <b>enfoque fiscal es correcto</b>, qué <b>ajustarías</b>, y nos des tu <b>visto bueno</b> (o tus correcciones) en los puntos marcados <b style="color:var(--blue)">🔵 Necesitamos tu opinión</b>.</div>
+      <h2><span class="n">1</span>El concepto en una frase</h2>
+      <p>
+        Avoqado ya es el <b>punto de venta, el cobro y la facturación (CFDI)</b> del comercio. Eso significa que
+        <b>ya tiene de origen</b> los datos que un sistema contable normalmente tiene que <i>importar o capturar a mano</i>: ventas, cobros,
+        costos, comisiones y facturas. La idea es usar esos datos para llevar la contabilidad
+        <b>automáticamente y correcta desde el origen</b> — que el dueño vea cómo va su negocio, y que tú (su contador) tengas los libros y
+        reportes formales sin recapturar nada.
+      </p>
 
-<h2><span class="n">1</span>El concepto en una frase</h2>
-<p>Avoqado ya es el <b>punto de venta, el cobro y la facturación (CFDI)</b> del comercio. Eso significa que <b>ya tiene de origen</b> los datos que un sistema contable normalmente tiene que <i>importar o capturar a mano</i>: ventas, cobros, costos, comisiones y facturas. La idea es usar esos datos para llevar la contabilidad <b>automáticamente y correcta desde el origen</b> — que el dueño vea cómo va su negocio, y que tú (su contador) tengas los libros y reportes formales sin recapturar nada.</p>
+      <h2><span class="n">2</span>Son DOS contabilidades, no una</h2>
+      <p>Esta es la decisión de diseño más importante. Las separamos a propósito:</p>
+      <table>
+        <thead>
+          <tr>
+            <th></th>
+            <th>Capa A — Gerencial</th>
+            <th>Capa B — Fiscal</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><b>¿Para quién?</b></td>
+            <td>El <b>dueño</b> (“¿cómo voy este mes?”)</td>
+            <td><b>Tú (el contador) y el SAT</b></td>
+          </tr>
+          <tr>
+            <td><b>¿Qué muestra?</b></td>
+            <td>TODAS las ventas, incluido el efectivo</td>
+            <td>Solo lo que se factura/declara</td>
+          </tr>
+          <tr>
+            <td><b>¿Obligatorio?</b></td>
+            <td>Siempre visible</td>
+            <td><b>Opcional</b> (se prende solo si el comercio quiere libros formales)</td>
+          </tr>
+          <tr>
+            <td><b>Tecnología</b></td>
+            <td>Tablero de reportes</td>
+            <td><b>Libros de doble partida</b> (contabilidad formal)</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>
+        La <b>Capa A</b> es un tablero para el dueño (utilidad, márgenes, gastos). La <b>Capa B</b> es la contabilidad formal de verdad:
+        catálogo de cuentas, pólizas, balanza y la contabilidad electrónica del SAT. Tú trabajas con la Capa B.
+      </p>
 
-<h2><span class="n">2</span>Son DOS contabilidades, no una</h2>
-<p>Esta es la decisión de diseño más importante. Las separamos a propósito:</p>
-<table>
-  <thead><tr><th></th><th>Capa A — Gerencial</th><th>Capa B — Fiscal</th></tr></thead>
-  <tbody>
-    <tr><td><b>¿Para quién?</b></td><td>El <b>dueño</b> (“¿cómo voy este mes?”)</td><td><b>Tú (el contador) y el SAT</b></td></tr>
-    <tr><td><b>¿Qué muestra?</b></td><td>TODAS las ventas, incluido el efectivo</td><td>Solo lo que se factura/declara</td></tr>
-    <tr><td><b>¿Obligatorio?</b></td><td>Siempre visible</td><td><b>Opcional</b> (se prende solo si el comercio quiere libros formales)</td></tr>
-    <tr><td><b>Tecnología</b></td><td>Tablero de reportes</td><td><b>Libros de doble partida</b> (contabilidad formal)</td></tr>
-  </tbody>
-</table>
-<p>La <b>Capa A</b> es un tablero para el dueño (utilidad, márgenes, gastos). La <b>Capa B</b> es la contabilidad formal de verdad: catálogo de cuentas, pólizas, balanza y la contabilidad electrónica del SAT. Tú trabajas con la Capa B.</p>
+      <h2><span class="n">3</span>Cómo cumple con el SAT (la Capa B — lo que más te importa)</h2>
+      <p>Todo esto está <b>verificado contra el Anexo 24 de la RMF 2026</b> (DOF 13-ene-2026) y los esquemas XSD vigentes (v1.3):</p>
+      <ul>
+        <li>
+          <b>Contabilidad electrónica completa:</b>
+          <ul>
+            <li>
+              <b>Catálogo de cuentas</b> con el <b>código agrupador del SAT</b> por cada cuenta (campo obligatorio). Traeremos un catálogo
+              base por giro (restaurante, retail, etc.) ya mapeado al agrupador, que tú puedas <b>ajustar o importar el tuyo</b>.
+            </li>
+            <li><b>Balanza de comprobación mensual</b> en XML (Saldo inicial · Debe · Haber · Saldo final por cuenta).</li>
+            <li>
+              <b>Pólizas</b> en XML <b>solo a solicitud</b> (auditoría, devolución, compensación) — no mensuales, como marca la regla.
+            </li>
+          </ul>
+        </li>
+        <li>
+          <b>Doble partida real:</b> cada póliza cuadra (Σ Debe = Σ Haber) — es una regla dura del sistema, no puede registrar algo
+          descuadrado.
+        </li>
+        <li>
+          <b>IVA en flujo de efectivo:</b> el IVA se reconoce <b>cuando se cobra/paga efectivamente</b> (Arts. 11, 17 y 1o-B LIVA), no al
+          facturar. Manejamos cuentas puente de <i>IVA trasladado cobrado vs. no cobrado</i> e <i>IVA acreditable pagado vs. pendiente</i>.
+        </li>
+        <li><b>DIOT:</b> reporte mensual de operaciones con proveedores, con IVA desglosado por tasa y por RFC del tercero.</li>
+        <li><b>REP (complemento de pago)</b> para pagos en parcialidades/diferidos (PPD).</li>
+        <li>
+          <b>El CFDI es el respaldo:</b> cada ingreso y gasto deducible se liga a su <b>UUID de CFDI</b>, como exige la contabilidad
+          electrónica.
+        </li>
+        <li>
+          <b>Régimen fiscal:</b> el sistema <b>sabe el régimen</b> de cada contribuyente y ajusta las obligaciones. Importante:
+          <b>RESICO (PF y PM), Arrendamiento, Servicios Profesionales y RIF están relevados del <i>envío</i> mensual</b> de contabilidad
+          electrónica — para esos solo llevamos los libros internos; el envío XML aplica a régimen general (PM 601 y mayores).
+        </li>
+        <li>
+          <b>Saldos iniciales:</b> captura de saldos de apertura por cuenta (para comercios que ya operan) → genera el asiento de apertura
+          fechado.
+        </li>
+        <li><b>Cierre de periodo</b> y control de periodos (bloqueo).</li>
+      </ul>
 
-<h2><span class="n">3</span>Cómo cumple con el SAT (la Capa B — lo que más te importa)</h2>
-<p>Todo esto está <b>verificado contra el Anexo 24 de la RMF 2026</b> (DOF 13-ene-2026) y los esquemas XSD vigentes (v1.3):</p>
-<ul>
-  <li><b>Contabilidad electrónica completa:</b>
-    <ul>
-      <li><b>Catálogo de cuentas</b> con el <b>código agrupador del SAT</b> por cada cuenta (campo obligatorio). Traeremos un catálogo base por giro (restaurante, retail, etc.) ya mapeado al agrupador, que tú puedas <b>ajustar o importar el tuyo</b>.</li>
-      <li><b>Balanza de comprobación mensual</b> en XML (Saldo inicial · Debe · Haber · Saldo final por cuenta).</li>
-      <li><b>Pólizas</b> en XML <b>solo a solicitud</b> (auditoría, devolución, compensación) — no mensuales, como marca la regla.</li>
-    </ul>
-  </li>
-  <li><b>Doble partida real:</b> cada póliza cuadra (Σ Debe = Σ Haber) — es una regla dura del sistema, no puede registrar algo descuadrado.</li>
-  <li><b>IVA en flujo de efectivo:</b> el IVA se reconoce <b>cuando se cobra/paga efectivamente</b> (Arts. 11, 17 y 1o-B LIVA), no al facturar. Manejamos cuentas puente de <i>IVA trasladado cobrado vs. no cobrado</i> e <i>IVA acreditable pagado vs. pendiente</i>.</li>
-  <li><b>DIOT:</b> reporte mensual de operaciones con proveedores, con IVA desglosado por tasa y por RFC del tercero.</li>
-  <li><b>REP (complemento de pago)</b> para pagos en parcialidades/diferidos (PPD).</li>
-  <li><b>El CFDI es el respaldo:</b> cada ingreso y gasto deducible se liga a su <b>UUID de CFDI</b>, como exige la contabilidad electrónica.</li>
-  <li><b>Régimen fiscal:</b> el sistema <b>sabe el régimen</b> de cada contribuyente y ajusta las obligaciones. Importante: <b>RESICO (PF y PM), Arrendamiento, Servicios Profesionales y RIF están relevados del <i>envío</i> mensual</b> de contabilidad electrónica — para esos solo llevamos los libros internos; el envío XML aplica a régimen general (PM 601 y mayores).</li>
-  <li><b>Saldos iniciales:</b> captura de saldos de apertura por cuenta (para comercios que ya operan) → genera el asiento de apertura fechado.</li>
-  <li><b>Cierre de periodo</b> y control de periodos (bloqueo).</li>
-</ul>
+      <h2><span class="n">4</span>El motor: “el sistema lleva los libros, tú los revisas”</h2>
+      <p>
+        La pieza clave es un <b>mapeo de cuentas</b> (qué cuenta usa cada tipo de movimiento: ventas → cuenta de ingresos, IVA → su cuenta,
+        costo de ventas, gastos, comisiones, etc.). Se configura una vez (con valores recomendados), y de ahí
+        <b>cada póliza se genera sola</b> leyendo ese mapeo. La diferencia con otros sistemas: como Avoqado <b>genera</b> los CFDI (no los
+        importa del SAT), el registro es <b>correcto desde el origen</b> — tú <b>revisas y apruebas</b>, no recapturas.
+      </p>
+      <p>Para varios negocios/sucursales de un mismo dueño:</p>
+      <ul>
+        <li>Si comparten <b>un solo RFC</b> → un solo juego de libros, <b>rebanado por sucursal</b> (centro de costos).</li>
+        <li>Si son <b>RFCs distintos</b> → libros separados por contribuyente, con vista <b>consolidada</b> para el dueño.</li>
+      </ul>
 
-<h2><span class="n">4</span>El motor: “el sistema lleva los libros, tú los revisas”</h2>
-<p>La pieza clave es un <b>mapeo de cuentas</b> (qué cuenta usa cada tipo de movimiento: ventas → cuenta de ingresos, IVA → su cuenta, costo de ventas, gastos, comisiones, etc.). Se configura una vez (con valores recomendados), y de ahí <b>cada póliza se genera sola</b> leyendo ese mapeo. La diferencia con otros sistemas: como Avoqado <b>genera</b> los CFDI (no los importa del SAT), el registro es <b>correcto desde el origen</b> — tú <b>revisas y apruebas</b>, no recapturas.</p>
-<p>Para varios negocios/sucursales de un mismo dueño:</p>
-<ul>
-  <li>Si comparten <b>un solo RFC</b> → un solo juego de libros, <b>rebanado por sucursal</b> (centro de costos).</li>
-  <li>Si son <b>RFCs distintos</b> → libros separados por contribuyente, con vista <b>consolidada</b> para el dueño.</li>
-</ul>
+      <h2><span class="n">5</span>Reportes que genera</h2>
+      <p>
+        <span class="pill">Estado de resultados</span>
+        <span class="pill">Estado de situación financiera (balance)</span>
+        <span class="pill"><b>Balanza de comprobación</b></span>
+        <span class="pill">Libro diario</span>
+        <span class="pill">Auxiliares (por cuenta y por tercero)</span>
+        <span class="pill">Flujo de caja</span>
+        <span class="pill"><b>Reporte DIOT</b></span>
+        <span class="pill">Impuestos y retenciones</span>
+      </p>
 
-<h2><span class="n">5</span>Reportes que genera</h2>
-<p>
-  <span class="pill">Estado de resultados</span>
-  <span class="pill">Estado de situación financiera (balance)</span>
-  <span class="pill"><b>Balanza de comprobación</b></span>
-  <span class="pill">Libro diario</span>
-  <span class="pill">Auxiliares (por cuenta y por tercero)</span>
-  <span class="pill">Flujo de caja</span>
-  <span class="pill"><b>Reporte DIOT</b></span>
-  <span class="pill">Impuestos y retenciones</span>
-</p>
+      <h2><span class="n">6</span>Lo que NO hace (por ahora — para que sepas los límites)</h2>
+      <ul>
+        <li>
+          <b>Nómina</b> (CFDI de nómina, IMSS, ISR retenido, subsidio) — <b>no incluida</b> en esta etapa.
+          <span class="nota">Nota: el competidor principal, Alegra, tampoco trae nómina en su producto de contabilidad en México.</span>
+        </li>
+        <li>
+          <b>Declaraciones de ISR</b> (pagos provisionales, coeficiente de utilidad, anual) — no incluido aún; queremos tu opinión sobre la
+          prioridad.
+        </li>
+        <li><b>Reexpresión por inflación (NIF B-10)</b> y temas avanzados de NIF — no incluido aún.</li>
+        <li>
+          <b>Conexión directa a bancos</b> — en su lugar, la conciliación se hará <b>subiendo el estado de cuenta (PDF/CSV)</b>, que es más
+          simple y suficiente.
+        </li>
+      </ul>
 
-<h2><span class="n">6</span>Lo que NO hace (por ahora — para que sepas los límites)</h2>
-<ul>
-  <li><b>Nómina</b> (CFDI de nómina, IMSS, ISR retenido, subsidio) — <b>no incluida</b> en esta etapa. <span class="nota">Nota: el competidor principal, Alegra, tampoco trae nómina en su producto de contabilidad en México.</span></li>
-  <li><b>Declaraciones de ISR</b> (pagos provisionales, coeficiente de utilidad, anual) — no incluido aún; queremos tu opinión sobre la prioridad.</li>
-  <li><b>Reexpresión por inflación (NIF B-10)</b> y temas avanzados de NIF — no incluido aún.</li>
-  <li><b>Conexión directa a bancos</b> — en su lugar, la conciliación se hará <b>subiendo el estado de cuenta (PDF/CSV)</b>, que es más simple y suficiente.</li>
-</ul>
+      <div class="opinion">
+        <h2>🔵 7 · Necesitamos tu opinión profesional (los puntos de aprobación)</h2>
+        <ol>
+          <li>
+            <b>Tratamiento del IVA (el más importante).</b> Partimos de que en México <b>el precio al público ya incluye el IVA</b>: si el
+            menú dice <span class="num">$100</span>, el cliente paga <span class="num">$100</span> y ese monto ya trae el 16% adentro →
+            <b>neto = <span class="num">$100 / 1.16 = $86.21</span></b
+            >, <b>IVA trasladado = <span class="num">$13.79</span></b
+            >.
+            <ul>
+              <li>¿Confirmas que ese es el tratamiento correcto para este tipo de comercios?</li>
+              <li>
+                <i
+                  >El sistema de facturación de Avoqado ya timbra exactamente así: el total de la factura coincide al centavo con lo que
+                  pagó el cliente.</i
+                >
+              </li>
+            </ul>
+          </li>
+          <li>
+            <b>Catálogo de cuentas base.</b> ¿Te parece bien partir de un catálogo estándar por giro, ya mapeado al código agrupador, que tú
+            puedas ajustar/importar? ¿O prefieres siempre cargar el tuyo?
+          </li>
+          <li>
+            <b>Efectivo hacia el SAT.</b> El dueño decide, por canal de cobro, si el efectivo entra o no a los libros fiscales
+            (interruptor). ¿Te parece correcto manejarlo así?
+          </li>
+          <li>
+            <b>Reconocimiento por flujo de efectivo</b> (ingreso/IVA al cobrar, no al facturar). ¿De acuerdo, dado que es lo que exige la
+            LIVA para estos contribuyentes?
+          </li>
+          <li>
+            <b>Prioridades.</b> De lo que NO está incluido (nómina, ISR, NIF inflación), ¿qué consideras indispensable y qué puede esperar?
+          </li>
+        </ol>
+      </div>
 
-<div class="opinion">
-<h2>🔵 7 · Necesitamos tu opinión profesional (los puntos de aprobación)</h2>
-<ol>
-  <li><b>Tratamiento del IVA (el más importante).</b> Partimos de que en México <b>el precio al público ya incluye el IVA</b>: si el menú dice <span class="num">$100</span>, el cliente paga <span class="num">$100</span> y ese monto ya trae el 16% adentro → <b>neto = <span class="num">$100 / 1.16 = $86.21</span></b>, <b>IVA trasladado = <span class="num">$13.79</span></b>.
-    <ul>
-      <li>¿Confirmas que ese es el tratamiento correcto para este tipo de comercios?</li>
-      <li><i>El sistema de facturación de Avoqado ya timbra exactamente así: el total de la factura coincide al centavo con lo que pagó el cliente.</i></li>
-    </ul>
-  </li>
-  <li><b>Catálogo de cuentas base.</b> ¿Te parece bien partir de un catálogo estándar por giro, ya mapeado al código agrupador, que tú puedas ajustar/importar? ¿O prefieres siempre cargar el tuyo?</li>
-  <li><b>Efectivo hacia el SAT.</b> El dueño decide, por canal de cobro, si el efectivo entra o no a los libros fiscales (interruptor). ¿Te parece correcto manejarlo así?</li>
-  <li><b>Reconocimiento por flujo de efectivo</b> (ingreso/IVA al cobrar, no al facturar). ¿De acuerdo, dado que es lo que exige la LIVA para estos contribuyentes?</li>
-  <li><b>Prioridades.</b> De lo que NO está incluido (nómina, ISR, NIF inflación), ¿qué consideras indispensable y qué puede esperar?</li>
-</ol>
-</div>
+      <h2><span class="n">8</span>Cómo lo construiríamos (alto nivel, por fases)</h2>
+      <ol>
+        <li>
+          <b>Fase 1 — Tablero del dueño</b> (“¿cuánto gané?”): ingreso − costo − gastos, márgenes. Rápido, sobre datos que ya existen.
+        </li>
+        <li><b>Fase 2 — Gastos y proveedores:</b> captura de gastos + CFDI recibidos, cuentas por pagar, datos para DIOT.</li>
+        <li>
+          <b>Fase 3 — Contabilidad formal:</b> libros de doble partida, catálogo, balanza y contabilidad electrónica del SAT, saldos
+          iniciales, cierre de periodo.
+        </li>
+        <li><b>Fase 4 — (a evaluar) Nómina</b>, según demanda.</li>
+      </ol>
 
-<h2><span class="n">8</span>Cómo lo construiríamos (alto nivel, por fases)</h2>
-<ol>
-  <li><b>Fase 1 — Tablero del dueño</b> (“¿cuánto gané?”): ingreso − costo − gastos, márgenes. Rápido, sobre datos que ya existen.</li>
-  <li><b>Fase 2 — Gastos y proveedores:</b> captura de gastos + CFDI recibidos, cuentas por pagar, datos para DIOT.</li>
-  <li><b>Fase 3 — Contabilidad formal:</b> libros de doble partida, catálogo, balanza y contabilidad electrónica del SAT, saldos iniciales, cierre de periodo.</li>
-  <li><b>Fase 4 — (a evaluar) Nómina</b>, según demanda.</li>
-</ol>
+      <h2><span class="n">9</span>En resumen</h2>
+      <p>
+        Avoqado quiere ser el <b>sistema de registro</b> del comercio (lleva los libros correctos desde el origen) y dejarte a ti, el
+        contador, en el rol de <b>revisar, ajustar y aprobar</b> — no de recapturar. Queremos que el enfoque fiscal sea
+        <b>correcto y aprobado por un profesional antes de construir</b>.
+      </p>
+      <p><b>Tu visto bueno:</b> ¿apruebas el enfoque? ¿Qué corregirías? ¿Cuáles de los puntos 🔵 te preocupan o cambiarías?</p>
 
-<h2><span class="n">9</span>En resumen</h2>
-<p>Avoqado quiere ser el <b>sistema de registro</b> del comercio (lleva los libros correctos desde el origen) y dejarte a ti, el contador, en el rol de <b>revisar, ajustar y aprobar</b> — no de recapturar. Queremos que el enfoque fiscal sea <b>correcto y aprobado por un profesional antes de construir</b>.</p>
-<p><b>Tu visto bueno:</b> ¿apruebas el enfoque? ¿Qué corregirías? ¿Cuáles de los puntos 🔵 te preocupan o cambiarías?</p>
-
-<div class="firma">Gracias por tu tiempo y tu criterio.<br><b>Avoqado</b> · avoqado.io</div>
-
-</div>
-</body>
+      <div class="firma">Gracias por tu tiempo y tu criterio.<br /><b>Avoqado</b> · avoqado.io</div>
+    </div>
+  </body>
 </html>

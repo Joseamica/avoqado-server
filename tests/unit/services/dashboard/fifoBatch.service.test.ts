@@ -133,6 +133,7 @@ describe('FIFO Batch Service - Row-Level Locking', () => {
           },
           rawMaterial: {
             findUnique: jest.fn().mockResolvedValue(mockRawMaterial),
+            findFirst: jest.fn().mockResolvedValue(mockRawMaterial),
             update: jest.fn().mockResolvedValue(mockRawMaterial),
           },
         }
@@ -163,6 +164,7 @@ describe('FIFO Batch Service - Row-Level Locking', () => {
         rawMaterialMovement: { create: jest.fn() },
         rawMaterial: {
           findUnique: jest.fn().mockResolvedValue(mockRawMaterial),
+          findFirst: jest.fn().mockResolvedValue(mockRawMaterial),
           update: jest.fn().mockResolvedValue(mockRawMaterial),
         },
       }
@@ -235,6 +237,7 @@ describe('FIFO Batch Service - Row-Level Locking', () => {
           },
           rawMaterial: {
             findUnique: jest.fn().mockResolvedValue(mockRawMaterial),
+            findFirst: jest.fn().mockResolvedValue(mockRawMaterial),
             update: jest.fn().mockResolvedValue(mockRawMaterial),
           },
         }
@@ -270,6 +273,15 @@ describe('FIFO Batch Service - Row-Level Locking', () => {
       ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback: any) => {
         const mockTx = {
           $queryRaw: jest.fn().mockResolvedValue(mockLockedBatches),
+          rawMaterial: {
+            findFirst: jest.fn().mockResolvedValue({
+              id: mockRawMaterialId,
+              venueId: mockVenueId,
+              name: 'Carne',
+              currentStock: new Decimal(3),
+              unit: 'KG',
+            }),
+          },
         }
 
         return await callback(mockTx)
@@ -330,6 +342,7 @@ describe('FIFO Batch Service - Row-Level Locking', () => {
           },
           rawMaterial: {
             findUnique: jest.fn().mockResolvedValue(mockRawMaterial),
+            findFirst: jest.fn().mockResolvedValue(mockRawMaterial),
             update: jest.fn().mockResolvedValue(mockRawMaterial),
           },
         }
@@ -388,6 +401,7 @@ describe('FIFO Batch Service - Row-Level Locking', () => {
           },
           rawMaterial: {
             findUnique: jest.fn().mockResolvedValue(mockRawMaterial),
+            findFirst: jest.fn().mockResolvedValue(mockRawMaterial),
             update: jest.fn().mockImplementation((args: any) => {
               rawMaterialUpdateCalls.push(args)
               return Promise.resolve(mockRawMaterial)

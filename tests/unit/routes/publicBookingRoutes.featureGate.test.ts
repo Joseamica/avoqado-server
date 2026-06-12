@@ -74,24 +74,71 @@ jest.mock('@/middlewares/consumerAuth.middleware', () => ({
 
 // Controllers behind the routers are not under test — any handler returns 200 {ok}.
 // (Inlined per factory: jest.mock hoisting forbids out-of-scope helpers here.)
-/* eslint-disable max-len */
-jest.mock('@/controllers/public/receipt.public.controller', () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }))
-jest.mock('@/controllers/public/cfdi.public.controller', () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }))
-jest.mock('@/controllers/public/receiptReview.public.controller', () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }))
-jest.mock('@/controllers/public/reservation.public.controller', () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }))
-jest.mock('@/controllers/public/creditPack.public.controller', () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }))
-jest.mock('@/controllers/public/customerPortal.public.controller', () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }))
-jest.mock('@/controllers/public/otpAuth.public.controller', () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }))
-jest.mock('@/controllers/public/paymentLink.public.controller', () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }))
-jest.mock('@/controllers/public/venueCheckout.public.controller', () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }))
-jest.mock('@/controllers/public/landing.public.controller', () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }))
-jest.mock('@/controllers/public/venueChat.public.controller', () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }))
-jest.mock('@/controllers/public/tpvOrder.public.controller', () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }))
-jest.mock('@/controllers/consumer/auth.consumer.controller', () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }))
-jest.mock('@/controllers/consumer/venue.consumer.controller', () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }))
-jest.mock('@/controllers/consumer/reservation.consumer.controller', () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }))
-jest.mock('@/controllers/consumer/credit.consumer.controller', () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }))
-/* eslint-enable max-len */
+
+jest.mock(
+  '@/controllers/public/receipt.public.controller',
+  () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }),
+)
+jest.mock(
+  '@/controllers/public/cfdi.public.controller',
+  () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }),
+)
+jest.mock(
+  '@/controllers/public/receiptReview.public.controller',
+  () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }),
+)
+jest.mock(
+  '@/controllers/public/reservation.public.controller',
+  () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }),
+)
+jest.mock(
+  '@/controllers/public/creditPack.public.controller',
+  () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }),
+)
+jest.mock(
+  '@/controllers/public/customerPortal.public.controller',
+  () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }),
+)
+jest.mock(
+  '@/controllers/public/otpAuth.public.controller',
+  () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }),
+)
+jest.mock(
+  '@/controllers/public/paymentLink.public.controller',
+  () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }),
+)
+jest.mock(
+  '@/controllers/public/venueCheckout.public.controller',
+  () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }),
+)
+jest.mock(
+  '@/controllers/public/landing.public.controller',
+  () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }),
+)
+jest.mock(
+  '@/controllers/public/venueChat.public.controller',
+  () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }),
+)
+jest.mock(
+  '@/controllers/public/tpvOrder.public.controller',
+  () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }),
+)
+jest.mock(
+  '@/controllers/consumer/auth.consumer.controller',
+  () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }),
+)
+jest.mock(
+  '@/controllers/consumer/venue.consumer.controller',
+  () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }),
+)
+jest.mock(
+  '@/controllers/consumer/reservation.consumer.controller',
+  () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }),
+)
+jest.mock(
+  '@/controllers/consumer/credit.consumer.controller',
+  () => new Proxy({}, { get: () => (_req: any, res: any) => res.json({ ok: true }) }),
+)
 
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
@@ -294,7 +341,9 @@ describe('wiring — the gates are actually present in the route files (source r
 
   it('consumer.routes.ts wires the gate on EXACTLY the 2 create-surface routes', () => {
     expect((consumerRoutesSrc.match(/^\s*requireReservationsPlan,$/gm) || []).length).toBe(2)
-    expect(consumerRoutesSrc).toMatch(/'\/venues\/:venueSlug\/reservations',\s*writeLimit,\s*authenticateConsumer,\s*requireReservationsPlan,/)
+    expect(consumerRoutesSrc).toMatch(
+      /'\/venues\/:venueSlug\/reservations',\s*writeLimit,\s*authenticateConsumer,\s*requireReservationsPlan,/,
+    )
     expect(consumerRoutesSrc).toMatch(
       /'\/venues\/:venueSlug\/credit-packs\/:packId\/checkout',\s*writeLimit,\s*authenticateConsumer,\s*requireReservationsPlan,/,
     )

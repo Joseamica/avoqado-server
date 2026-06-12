@@ -5,20 +5,18 @@ Socket.IO, Redis, RabbitMQ. Payments via Blumon (TPV + E-commerce) and Stripe (s
 
 ## 🔴 CRITICAL — Ask which payment tier BEFORE building or changing anything
 
-Avoqado is a tier-gated SaaS (**FREE · PRO · PREMIUM · ENTERPRISE**). Whenever you add a new
-feature, modify existing behavior, or expose a new capability, **STOP and ask the founder which
-paid tier it falls under** — then wire the gating to match. A change shipped without a tier
-decision is unfinished: it either leaks paid value into a lower tier or hides a free capability
-behind a paywall. This repo is the **authoritative** gate — get it right here first.
+Avoqado is a tier-gated SaaS (**FREE · PRO · PREMIUM · ENTERPRISE**). Whenever you add a new feature, modify existing behavior, or expose a
+new capability, **STOP and ask the founder which paid tier it falls under** — then wire the gating to match. A change shipped without a tier
+decision is unfinished: it either leaks paid value into a lower tier or hides a free capability behind a paywall. This repo is the
+**authoritative** gate — get it right here first.
 
-- **Backend (authoritative):** `src/services/access/basePlan.service.ts` +
-  `src/middlewares/checkFeatureAccess.middleware.ts`. Obligatory gating questions live in
-  `.claude/rules/feature-gating.md` (Module vs Feature decision). PREMIUM-only codes today: `CFDI`, `INVENTORY_TRACKING`.
-- **Dashboard display/CTA map:** `avoqado-web-dashboard/src/config/plan-catalog.ts`
-  (`TierId`, `PLAN_TIERS`, `getTierForFeature()` → FeatureGate upsell).
-- **Enforcement status:** ✅ only **avoqado-web-dashboard** enforces tiers today.
-  ⚠️ **avoqado-ios** and **avoqado-android** have NO tier gating yet — they will mirror the backend
-  feature codes by exact name. Treat tier codes like permissions: a name mismatch fails silently.
+- **Backend (authoritative):** `src/services/access/basePlan.service.ts` + `src/middlewares/checkFeatureAccess.middleware.ts`. Obligatory
+  gating questions live in `.claude/rules/feature-gating.md` (Module vs Feature decision). PREMIUM-only codes today: `CFDI`,
+  `INVENTORY_TRACKING`.
+- **Dashboard display/CTA map:** `avoqado-web-dashboard/src/config/plan-catalog.ts` (`TierId`, `PLAN_TIERS`, `getTierForFeature()` →
+  FeatureGate upsell).
+- **Enforcement status:** ✅ only **avoqado-web-dashboard** enforces tiers today. ⚠️ **avoqado-ios** and **avoqado-android** have NO tier
+  gating yet — they will mirror the backend feature codes by exact name. Treat tier codes like permissions: a name mismatch fails silently.
 
 ## Sister Repos (this repo is the hub of 10)
 
@@ -197,13 +195,10 @@ unfinished (treat it like permissions/MCP: kept in lockstep). Do NOT log reads o
 
 ## 🔴 CRITICAL — Keep the sales presentation in sync
 
-The partner sales presentation (`~/Documents/Programming/Avoqado-HQ/operations/marketing/platform-presentation/`)
-is the canonical "what Avoqado does" document — third parties sell from it. It must never fall
-behind the platform.
+The partner sales presentation (`~/Documents/Programming/Avoqado-HQ/operations/marketing/platform-presentation/`) is the canonical "what
+Avoqado does" document — third parties sell from it. It must never fall behind the platform.
 
-**Whenever you add, change, or remove a customer-visible capability (feature, module, product,
-payment method, supported sector, tier packaging), you MUST update BOTH deliverables as part of
-the SAME change — never "later":** the full deck (`avoqado-presentacion.html`) AND the one-pager
-(`avoqado-one-pager.html`), then regenerate both PDFs following that folder's `README.md`.
-Updating only one of the two is an incomplete change. Internal refactors and bugfixes with no
-customer-visible impact are exempt.
+**Whenever you add, change, or remove a customer-visible capability (feature, module, product, payment method, supported sector, tier
+packaging), you MUST update BOTH deliverables as part of the SAME change — never "later":** the full deck (`avoqado-presentacion.html`) AND
+the one-pager (`avoqado-one-pager.html`), then regenerate both PDFs following that folder's `README.md`. Updating only one of the two is an
+incomplete change. Internal refactors and bugfixes with no customer-visible impact are exempt.

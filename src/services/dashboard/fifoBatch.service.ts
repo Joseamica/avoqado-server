@@ -193,7 +193,10 @@ type LockedStockBatch = {
  *
  * @throws Error if batches are already locked (code 55P03 - lock_not_available)
  */
-async function lockBatchesForAllocation(tx: Prisma.TransactionClient, rawMaterialId: string): Promise<LockedStockBatch[]> {
+async function lockBatchesForAllocation(tx: Prisma.TransactionClient, rawMaterialId: string, venueId: string): Promise<LockedStockBatch[]> {
+  // venueId en el WHERE: aislamiento multi-tenant a nivel de la función, no
+  // solo del caller HTTP — un rawMaterialId ajeno no debe bloquear ni deducir
+  // lotes de otro venue.
   return await tx.$queryRaw<LockedStockBatch[]>`
     SELECT
       id,
@@ -204,6 +207,7 @@ async function lockBatchesForAllocation(tx: Prisma.TransactionClient, rawMateria
       unit
     FROM "StockBatch"
     WHERE "rawMaterialId" = ${rawMaterialId}
+      AND "venueId" = ${venueId}
       AND status = 'ACTIVE'
       AND "remainingQuantity" > 0
     ORDER BY "receivedDate" ASC
@@ -347,8 +351,19 @@ export async function deductStockFIFO(
 ): Promise<any[]> {
   return await prisma.$transaction(
     async tx => {
+      // 0. El rawMaterial debe pertenecer al venue que deduce — venueId no es
+      // decorativo. Sin esto, cualquier caller interno con un rawMaterialId
+      // ajeno cruzaba tenants.
+      const rawMaterial = await tx.rawMaterial.findFirst({
+        where: { id: rawMaterialId, venueId },
+      })
+
+      if (!rawMaterial) {
+        throw new AppError(`Raw material not found`, 404)
+      }
+
       // 1. Lock batches FIRST (inside transaction) - prevents race conditions
-      const lockedBatches = await lockBatchesForAllocation(tx, rawMaterialId)
+      const lockedBatches = await lockBatchesForAllocation(tx, rawMaterialId, venueId)
 
       if (lockedBatches.length === 0) {
         throw new AppError(`No active batches available for raw material ${rawMaterialId}`, 400)
@@ -359,15 +374,6 @@ export async function deductStockFIFO(
 
       if (result.remainingToAllocate.greaterThan(0)) {
         throw new AppError(`Insufficient stock. Needed: ${quantityToDeduct}, Available: ${result.totalAvailable.toNumber()}`, 400)
-      }
-
-      // 3. Get current raw material stock (also lock this row)
-      const rawMaterial = await tx.rawMaterial.findUnique({
-        where: { id: rawMaterialId },
-      })
-
-      if (!rawMaterial) {
-        throw new AppError(`Raw material not found`, 404)
       }
 
       const movements: any[] = []
@@ -524,13 +530,21 @@ export async function getBatchesForRawMaterial(
 }
 
 /**
- * Mark expired batches as EXPIRED status
- * Should be run as a scheduled job
+ * Mark expired batches as EXPIRED status — and take their remaining quantity
+ * OUT of RawMaterial.currentStock.
+ *
+ * INVARIANT: currentStock === Σ remainingQuantity de lotes ACTIVE. Un lote
+ * EXPIRED ya no participa en deductStockFIFO, así que su remanente debe
+ * descontarse del agregado (con movimiento SPOILAGE) o el dashboard mostrará
+ * stock que no se puede vender. El remainingQuantity del lote se conserva
+ * como registro de cuánto se perdió.
+ *
+ * Ejecutado por el cron diario `batch-expiration.job.ts`.
  */
 export async function markExpiredBatches(venueId?: string): Promise<number> {
   const now = new Date()
 
-  const result = await prisma.stockBatch.updateMany({
+  const expiredBatches = await prisma.stockBatch.findMany({
     where: {
       ...(venueId && { venueId }),
       status: BatchStatus.ACTIVE,
@@ -538,16 +552,90 @@ export async function markExpiredBatches(venueId?: string): Promise<number> {
         lte: now,
       },
     },
-    data: {
-      status: BatchStatus.EXPIRED,
+    select: {
+      id: true,
+      venueId: true,
+      rawMaterialId: true,
+      batchNumber: true,
+      unit: true,
+      costPerUnit: true,
     },
   })
 
-  return result.count
+  let expiredCount = 0
+
+  for (const batch of expiredBatches) {
+    const didExpire = await prisma.$transaction(async tx => {
+      // Claim condicional: si otro proceso ya lo expiró (o lo agotó una venta
+      // concurrente), no tocamos el stock dos veces.
+      const claimed = await tx.stockBatch.updateMany({
+        where: { id: batch.id, status: BatchStatus.ACTIVE },
+        data: { status: BatchStatus.EXPIRED },
+      })
+      if (claimed.count === 0) return false
+
+      // Releer el remanente DENTRO de la tx: una deducción concurrente pudo
+      // consumir parte del lote después del findMany inicial.
+      const fresh = await tx.stockBatch.findUnique({
+        where: { id: batch.id },
+        select: { remainingQuantity: true },
+      })
+      const remaining = fresh?.remainingQuantity ?? new Decimal(0)
+      if (remaining.lessThanOrEqualTo(0)) return true
+
+      const rawMaterial = await tx.rawMaterial.findUnique({ where: { id: batch.rawMaterialId } })
+      if (!rawMaterial) return true
+
+      const previousStock = rawMaterial.currentStock
+      const newStock = previousStock.sub(remaining)
+
+      await tx.rawMaterial.update({
+        where: { id: batch.rawMaterialId },
+        data: { currentStock: newStock },
+      })
+
+      await tx.rawMaterialMovement.create({
+        data: {
+          rawMaterialId: batch.rawMaterialId,
+          venueId: batch.venueId,
+          batchId: batch.id,
+          type: RawMaterialMovementType.SPOILAGE,
+          quantity: remaining.neg(),
+          unit: batch.unit,
+          previousStock,
+          newStock,
+          costImpact: batch.costPerUnit.mul(remaining).neg(),
+          reason: `Lote ${batch.batchNumber} caducado`,
+          reference: batch.id,
+        },
+      })
+
+      return true
+    })
+
+    if (didExpire) {
+      expiredCount++
+      logAction({
+        venueId: batch.venueId,
+        action: 'STOCK_BATCH_EXPIRED',
+        entity: 'StockBatch',
+        entityId: batch.id,
+        data: { batchNumber: batch.batchNumber, rawMaterialId: batch.rawMaterialId },
+      })
+    }
+  }
+
+  return expiredCount
 }
 
 /**
  * Quarantine a batch (quality issue, damage, etc.)
+ *
+ * INVARIANT: currentStock === Σ remainingQuantity de lotes ACTIVE. Un lote
+ * QUARANTINED sale de circulación FIFO, así que su remanente se descuenta del
+ * agregado con un movimiento SPOILAGE por la cantidad real. El
+ * remainingQuantity del lote se conserva como registro de cuánto quedó
+ * retenido.
  */
 export async function quarantineBatch(venueId: string, batchId: string, reason: string): Promise<any> {
   const batch = await prisma.stockBatch.findFirst({
@@ -561,14 +649,57 @@ export async function quarantineBatch(venueId: string, batchId: string, reason: 
     throw new AppError(`Batch not found`, 404)
   }
 
-  const updatedBatch = await prisma.stockBatch.update({
-    where: { id: batchId },
-    data: {
-      status: BatchStatus.QUARANTINED,
-    },
-    include: {
-      rawMaterial: true,
-    },
+  const wasActive = batch.status === BatchStatus.ACTIVE
+
+  const updatedBatch = await prisma.$transaction(async tx => {
+    const updated = await tx.stockBatch.update({
+      where: { id: batchId },
+      data: {
+        status: BatchStatus.QUARANTINED,
+      },
+      include: {
+        rawMaterial: true,
+      },
+    })
+
+    // Releer el remanente dentro de la tx (una venta concurrente pudo consumirlo)
+    const fresh = await tx.stockBatch.findUnique({
+      where: { id: batchId },
+      select: { remainingQuantity: true },
+    })
+    const remaining = fresh?.remainingQuantity ?? new Decimal(0)
+
+    // Solo los lotes que estaban ACTIVE con remanente afectan el stock: un
+    // lote DEPLETED/EXPIRED ya no contaba en currentStock.
+    if (!wasActive || remaining.lessThanOrEqualTo(0)) {
+      return updated
+    }
+
+    const previousStock = updated.rawMaterial.currentStock
+    const newStock = previousStock.sub(remaining)
+
+    await tx.rawMaterial.update({
+      where: { id: batch.rawMaterialId },
+      data: { currentStock: newStock },
+    })
+
+    await tx.rawMaterialMovement.create({
+      data: {
+        rawMaterialId: batch.rawMaterialId,
+        venueId,
+        batchId,
+        type: RawMaterialMovementType.SPOILAGE,
+        quantity: remaining.neg(),
+        unit: batch.unit,
+        previousStock,
+        newStock,
+        costImpact: batch.costPerUnit.mul(remaining).neg(),
+        reason: `Batch quarantined: ${reason}`,
+        reference: batchId,
+      },
+    })
+
+    return updated
   })
 
   logAction({
@@ -577,22 +708,6 @@ export async function quarantineBatch(venueId: string, batchId: string, reason: 
     entity: 'StockBatch',
     entityId: batchId,
     data: { reason, batchNumber: batch.batchNumber },
-  })
-
-  // Create a movement record for the quarantine
-  await prisma.rawMaterialMovement.create({
-    data: {
-      rawMaterialId: batch.rawMaterialId,
-      venueId,
-      batchId,
-      type: RawMaterialMovementType.SPOILAGE,
-      quantity: new Decimal(0), // No quantity change yet, just status change
-      unit: batch.unit,
-      previousStock: updatedBatch.rawMaterial.currentStock,
-      newStock: updatedBatch.rawMaterial.currentStock,
-      reason: `Batch quarantined: ${reason}`,
-      reference: batchId,
-    },
   })
 
   return updatedBatch

@@ -15,11 +15,7 @@
 import prisma from '@/utils/prismaClient'
 import { socketManager } from '@/communication/sockets/managers/socketManager'
 import { SocketEventType } from '@/communication/sockets/types'
-import {
-  simulateFastPayment,
-  SIM_PAYMENT_REFERENCE_PREFIX,
-  MAX_SIM_PAYMENTS_PER_SESSION,
-} from '@/services/liveDemo.service'
+import { simulateFastPayment, SIM_PAYMENT_REFERENCE_PREFIX, MAX_SIM_PAYMENTS_PER_SESSION } from '@/services/liveDemo.service'
 import { ForbiddenError, TooManyRequestsError, UnauthorizedError } from '@/errors/AppError'
 
 jest.mock('@/communication/sockets/managers/socketManager', () => ({

@@ -146,7 +146,7 @@ async function resolveUserRoleForVenue(params: {
  * @returns Express middleware function
  */
 export const checkPermission = (requiredPermission: string) => {
-  return async (req: Request, res: Response, next: NextFunction) => {
+  const middleware = async (req: Request, res: Response, next: NextFunction) => {
     try {
       // authContext should be attached by authenticateToken middleware
       const authContext = (req as any).authContext
@@ -318,6 +318,11 @@ export const checkPermission = (requiredPermission: string) => {
       })
     }
   }
+
+  // Expuesto para tests de auditoría de rutas: permite afirmar qué permiso
+  // exige cada endpoint sin ejecutar el middleware.
+  ;(middleware as any).requiredPermission = requiredPermission
+  return middleware
 }
 
 /**

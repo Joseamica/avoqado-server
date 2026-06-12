@@ -168,7 +168,7 @@ export const AdjustStockSchema = z.object({
     rawMaterialId: cuidLikeId(),
   }),
   body: z.object({
-    quantity: z.number(),
+    quantity: z.number().finite('La cantidad debe ser un número finito'),
     type: z.nativeEnum(RawMaterialMovementType),
     reason: z.string().optional(),
     reference: z.string().optional(),
@@ -684,11 +684,11 @@ export const AdjustProductInventoryStockSchema = z.object({
     productId: cuidLikeId(),
   }),
   body: z.object({
-    quantity: z.number(),
+    quantity: z.number().finite('La cantidad debe ser un número finito'),
     type: z.nativeEnum(MovementType),
     reason: z.string().optional(),
     reference: z.string().optional(),
-    unitCost: z.number().positive('Unit cost must be positive').optional(),
+    unitCost: z.number().positive('El costo unitario debe ser positivo').optional(),
     supplier: z.string().optional(),
   }),
 })

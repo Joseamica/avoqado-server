@@ -9,6 +9,7 @@ import { socketManager } from '../../communication/sockets/managers/socketManage
 import { SocketEventType } from '../../communication/sockets/types'
 import { createTransactionCost } from '../payments/transactionCost.service'
 import { deductInventoryForProduct, getProductInventoryStatus } from '../dashboard/productInventoryIntegration.service'
+import { restockItem } from '../dashboard/inventoryRestock.service'
 import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service'
 import { parseDateRange } from '@/utils/datetime'
 import { earnPoints } from '../dashboard/loyalty.dashboard.service'
@@ -527,6 +528,9 @@ async function updateOrderTotalsForStandalonePayment(
   // ✅ WORLD-CLASS PATTERN: Fail payment if inventory deduction fails (Shopify, Square, Toast)
   if (isFullyPaid) {
     const deductionErrors: Array<{ productId: string; productName: string; error: string }> = []
+    // Items cuya deducción SÍ se aplicó — si otro item falla, esto es lo que
+    // hay que revertir antes de regresar la orden a PENDING.
+    const deductedItems: Array<{ productId: string; quantity: number }> = []
 
     logger.info('🎯 Starting inventory deduction for completed order', {
       orderId,
@@ -607,6 +611,8 @@ async function updateOrderTotalsForStandalonePayment(
           orderModifiers,
         )
 
+        deductedItems.push({ productId: item.productId, quantity: item.quantity })
+
         logger.info('✅ Stock deducted successfully for product', {
           orderId,
           productId: item.productId,
@@ -633,9 +639,11 @@ async function updateOrderTotalsForStandalonePayment(
           reason: errorReason,
         })
 
-        // Only track critical errors (insufficient stock, concurrent access)
-        // Skip NO_RECIPE errors for products without inventory tracking
-        if (errorReason === 'INSUFFICIENT_STOCK' || errorReason === 'CONCURRENT_TRANSACTION') {
+        // Solo NO_RECIPE es benigno (producto sin receta/tracking de inventario).
+        // Cualquier otro error — incluido UNKNOWN (p.ej. unidades incompatibles
+        // por una receta mal configurada) — debe fallar la orden: tragarlo en
+        // silencio dejaba ventas completadas SIN deducción de stock.
+        if (errorReason !== 'NO_RECIPE') {
           deductionErrors.push({
             productId: item.productId!,
             productName: item.product?.name || item.productName || 'Unknown',
@@ -677,10 +685,41 @@ async function updateOrderTotalsForStandalonePayment(
         data: {
           source: 'TPV',
           failedProducts: deductionErrors,
+          restoredProducts: deductedItems,
           previousStatus: 'COMPLETED',
           rolledBackTo: 'PENDING',
         },
       })
+
+      // Compensación: restaura el stock de los items que SÍ alcanzaron a
+      // deducirse antes del fallo. Sin esto, el reintento del pago volvía a
+      // deducirlos (doble deducción permanente). Nota: los modificadores
+      // ADDITION no se reversan aquí — misma limitación documentada que el
+      // restock de refunds (inventoryRestock.service.ts).
+      for (const deducted of deductedItems) {
+        try {
+          await restockItem({
+            venueId: updatedOrder.venueId,
+            productId: deducted.productId,
+            quantity: deducted.quantity,
+            refundPaymentId: orderId,
+            staffId,
+            reason: `Reversa de inventario: fallo al completar la orden ${orderId}`,
+          })
+          logger.info('🔄 Restored deducted stock during rollback', {
+            orderId,
+            productId: deducted.productId,
+            quantity: deducted.quantity,
+          })
+        } catch (restoreError: any) {
+          logger.error('❌ Failed to restore deducted stock during rollback — stock drift, requires manual adjustment', {
+            orderId,
+            productId: deducted.productId,
+            quantity: deducted.quantity,
+            error: restoreError.message,
+          })
+        }
+      }
 
       // Rollback serialized items that were marked as SOLD before the failure
       // Without this, serials stay SOLD while the order reverts to PENDING (ghost SOLD bug)

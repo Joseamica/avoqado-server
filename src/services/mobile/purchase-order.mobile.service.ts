@@ -8,7 +8,9 @@
 import prisma from '../../utils/prismaClient'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
-import { PurchaseOrderStatus } from '@prisma/client'
+import { applyItemReceiveStatusInTx } from '../dashboard/purchaseOrder.service'
+import type { UpdatePurchaseOrderItemStatusDto } from '../../schemas/dashboard/inventory.schema'
+import { PurchaseOrderItemStatus, PurchaseOrderStatus } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 
 // ============================================================================
@@ -350,7 +352,13 @@ interface ReceiveItem {
 
 /**
  * Receive stock for a purchase order.
- * Creates InventoryMovement records for each item received.
+ *
+ * Delegates each item to applyItemReceiveStatusInTx — the same receive
+ * state-machine used by the dashboard — inside ONE transaction, so every
+ * received item gets its FIFO StockBatch, the quantity is converted from the
+ * PO unit to the raw material's storage unit, currentStock and the PURCHASE
+ * movement commit atomically, and over-receiving beyond quantityOrdered is
+ * rejected.
  */
 export async function receiveStock(poId: string, venueId: string, items: ReceiveItem[], staffId: string) {
   const po = await prisma.purchaseOrder.findFirst({
@@ -373,52 +381,35 @@ export async function receiveStock(poId: string, venueId: string, items: Receive
     throw new BadRequestError(`No se puede recibir stock en estado ${po.status}`)
   }
 
-  // Process each received item
-  for (const receiveItem of items) {
-    const poItem = po.items.find(i => i.id === receiveItem.itemId)
-    if (!poItem) continue
+  // Mobile sends DELTAS (quantity received in this scan); the shared
+  // state-machine takes the ABSOLUTE accumulated target, so convert first.
+  await prisma.$transaction(async tx => {
+    for (const receiveItem of items) {
+      const poItem = po.items.find(i => i.id === receiveItem.itemId)
+      if (!poItem) continue
+      if (!(receiveItem.receivedQuantity > 0)) continue
 
-    const newReceived = Number(poItem.quantityReceived) + receiveItem.receivedQuantity
+      const targetQty = Number(poItem.quantityReceived) + receiveItem.receivedQuantity
+      if (targetQty > Number(poItem.quantityOrdered)) {
+        throw new BadRequestError(
+          `No se puede recibir ${receiveItem.receivedQuantity} ${poItem.unit} de "${poItem.rawMaterial?.name ?? 'insumo'}": ` +
+            `excede la cantidad ordenada (${Number(poItem.quantityOrdered)} ${poItem.unit}).`,
+        )
+      }
 
-    // Update PurchaseOrderItem received quantity
-    await prisma.purchaseOrderItem.update({
-      where: { id: poItem.id },
-      data: {
-        quantityReceived: new Decimal(newReceived.toFixed(3)),
-        receiveStatus: newReceived >= Number(poItem.quantityOrdered) ? 'RECEIVED' : 'PENDING',
-      },
-    })
-
-    // Update raw material stock
-    const rawMaterial = poItem.rawMaterial
-    if (rawMaterial) {
-      const previousStock = Number(rawMaterial.currentStock)
-      const newStock = previousStock + receiveItem.receivedQuantity
-
-      await prisma.rawMaterial.update({
-        where: { id: rawMaterial.id },
-        data: {
-          currentStock: new Decimal(newStock.toFixed(3)),
-        },
-      })
-
-      // Create a RawMaterialMovement record for the purchase
-      await prisma.rawMaterialMovement.create({
-        data: {
-          rawMaterialId: rawMaterial.id,
-          venueId,
-          type: 'PURCHASE',
-          quantity: new Decimal(receiveItem.receivedQuantity.toFixed(3)),
-          unit: rawMaterial.unit,
-          previousStock: new Decimal(previousStock.toFixed(3)),
-          newStock: new Decimal(newStock.toFixed(3)),
-          reason: `Recepción de OC ${po.orderNumber}`,
-          reference: po.id,
-          createdBy: staffId,
-        },
-      })
+      await applyItemReceiveStatusInTx(
+        tx,
+        venueId,
+        poId,
+        poItem.id,
+        {
+          receiveStatus: PurchaseOrderItemStatus.RECEIVED,
+          quantityReceived: targetQty,
+        } as UpdatePurchaseOrderItemStatusDto,
+        staffId,
+      )
     }
-  }
+  })
 
   // Determine overall PO status
   const updatedPO = await prisma.purchaseOrder.findFirst({

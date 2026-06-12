@@ -197,7 +197,7 @@ router.put(
  */
 router.post(
   '/raw-materials/:rawMaterialId/adjust-stock',
-  checkPermission('inventory:read'),
+  checkPermission('inventory:update'),
   validateRequest(AdjustStockSchema),
   rawMaterialController.adjustStock,
 )
@@ -257,7 +257,7 @@ router.get(
  */
 router.post(
   '/products/:productId/recipe',
-  checkPermission('inventory:read'),
+  checkPermission('inventory:create'),
   validateRequest(CreateRecipeSchema),
   recipeController.createRecipe,
 )
@@ -271,7 +271,7 @@ router.post(
  */
 router.put(
   '/products/:productId/recipe',
-  checkPermission('inventory:read'),
+  checkPermission('inventory:update'),
   validateRequest(UpdateRecipeSchema),
   recipeController.updateRecipe,
 )
@@ -299,7 +299,7 @@ router.delete(
  */
 router.post(
   '/products/:productId/recipe/lines',
-  checkPermission('inventory:read'),
+  checkPermission('inventory:create'),
   validateRequest(AddRecipeLineSchema),
   recipeController.addRecipeLine,
 )
@@ -384,7 +384,7 @@ router.get(
  */
 router.post(
   '/products/:productId/pricing-policy',
-  checkPermission('inventory:read'),
+  checkPermission('inventory:create'),
   validateRequest(CreatePricingPolicySchema),
   pricingController.createPricingPolicy,
 )
@@ -398,7 +398,7 @@ router.post(
  */
 router.put(
   '/products/:productId/pricing-policy',
-  checkPermission('inventory:read'),
+  checkPermission('inventory:update'),
   validateRequest(UpdatePricingPolicySchema),
   pricingController.updatePricingPolicy,
 )
@@ -424,7 +424,7 @@ router.get(
  *     tags: [Inventory - Pricing]
  *     summary: Apply suggested price to product
  */
-router.post('/products/:productId/apply-suggested-price', checkPermission('inventory:read'), pricingController.applySuggestedPrice)
+router.post('/products/:productId/apply-suggested-price', checkPermission('inventory:update'), pricingController.applySuggestedPrice)
 
 /**
  * @openapi
@@ -496,7 +496,7 @@ router.get(
  *     tags: [Inventory - Suppliers]
  *     summary: Create a new supplier
  */
-router.post('/suppliers', checkPermission('inventory:read'), validateRequest(CreateSupplierSchema), supplierController.createSupplier)
+router.post('/suppliers', checkPermission('inventory:create'), validateRequest(CreateSupplierSchema), supplierController.createSupplier)
 
 /**
  * @openapi
@@ -507,7 +507,7 @@ router.post('/suppliers', checkPermission('inventory:read'), validateRequest(Cre
  */
 router.put(
   '/suppliers/:supplierId',
-  checkPermission('inventory:read'),
+  checkPermission('inventory:update'),
   validateRequest(UpdateSupplierSchema),
   supplierController.updateSupplier,
 )
@@ -535,7 +535,7 @@ router.delete(
  */
 router.post(
   '/suppliers/:supplierId/pricing',
-  checkPermission('inventory:read'),
+  checkPermission('inventory:create'),
   validateRequest(CreateSupplierPricingSchema),
   supplierController.createSupplierPricing,
 )
@@ -617,7 +617,7 @@ router.get(
  */
 router.post(
   '/purchase-orders',
-  checkPermission('inventory:read'),
+  checkPermission('inventory:create'),
   validateRequest(CreatePurchaseOrderSchema),
   purchaseOrderController.createPurchaseOrder,
 )
@@ -631,7 +631,7 @@ router.post(
  */
 router.put(
   '/purchase-orders/:purchaseOrderId',
-  checkPermission('inventory:read'),
+  checkPermission('inventory:update'),
   validateRequest(UpdatePurchaseOrderSchema),
   purchaseOrderController.updatePurchaseOrder,
 )
@@ -645,7 +645,7 @@ router.put(
  */
 router.delete(
   '/purchase-orders/:purchaseOrderId',
-  checkPermission('inventory:read'),
+  checkPermission('inventory:delete'),
   validateRequest(PurchaseOrderIdParamsSchema),
   purchaseOrderController.deletePurchaseOrder,
 )
@@ -657,7 +657,7 @@ router.delete(
  *     tags: [Inventory - Purchase Orders]
  *     summary: Approve a purchase order
  */
-router.post('/purchase-orders/:purchaseOrderId/approve', checkPermission('inventory:read'), purchaseOrderController.approvePurchaseOrder)
+router.post('/purchase-orders/:purchaseOrderId/approve', checkPermission('inventory:update'), purchaseOrderController.approvePurchaseOrder)
 
 /**
  * @openapi
@@ -668,7 +668,7 @@ router.post('/purchase-orders/:purchaseOrderId/approve', checkPermission('invent
  */
 router.post(
   '/purchase-orders/:purchaseOrderId/receive',
-  checkPermission('inventory:read'),
+  checkPermission('inventory:update'),
   validateRequest(ReceivePurchaseOrderSchema),
   purchaseOrderController.receivePurchaseOrder,
 )
@@ -680,7 +680,7 @@ router.post(
  *     tags: [Inventory - Purchase Orders]
  *     summary: Cancel a purchase order
  */
-router.post('/purchase-orders/:purchaseOrderId/cancel', checkPermission('inventory:read'), purchaseOrderController.cancelPurchaseOrder)
+router.post('/purchase-orders/:purchaseOrderId/cancel', checkPermission('inventory:update'), purchaseOrderController.cancelPurchaseOrder)
 
 /**
  * @openapi
@@ -841,7 +841,7 @@ router.get('/alerts/by-category', checkPermission('inventory:read'), alertContro
  */
 router.post(
   '/alerts/:alertId/acknowledge',
-  checkPermission('inventory:read'),
+  checkPermission('inventory:update'),
   validateRequest(AcknowledgeAlertSchema),
   alertController.acknowledgeAlert,
 )
@@ -855,7 +855,7 @@ router.post(
  */
 router.post(
   '/alerts/:alertId/resolve',
-  checkPermission('inventory:read'),
+  checkPermission('inventory:update'),
   validateRequest(ResolveAlertSchema),
   alertController.resolveAlert,
 )
@@ -867,7 +867,7 @@ router.post(
  *     tags: [Inventory - Alerts]
  *     summary: Dismiss an alert
  */
-router.post('/alerts/:alertId/dismiss', checkPermission('inventory:read'), alertController.dismissAlert)
+router.post('/alerts/:alertId/dismiss', checkPermission('inventory:update'), alertController.dismissAlert)
 
 /**
  * @openapi
@@ -894,7 +894,7 @@ router.get('/alerts/stats', checkPermission('inventory:read'), alertController.g
  *     tags: [Inventory - Alerts]
  *     summary: Create manual alert
  */
-router.post('/alerts', checkPermission('inventory:read'), alertController.createManualAlert)
+router.post('/alerts', checkPermission('inventory:create'), alertController.createManualAlert)
 
 // ===========================================
 // REPORTS ROUTES
@@ -982,7 +982,7 @@ router.get(
  */
 router.post(
   '/wizard/step1',
-  checkPermission('inventory:read'),
+  checkPermission('inventory:create'),
   validateRequest(ProductWizardStep1Schema),
   productWizardController.createProductStep1,
 )
@@ -996,7 +996,7 @@ router.post(
  */
 router.post(
   '/products/:productId/wizard/step2',
-  checkPermission('inventory:read'),
+  checkPermission('inventory:update'),
   validateRequest(ProductWizardStep2Schema),
   productWizardController.configureInventoryStep2,
 )
@@ -1010,7 +1010,7 @@ router.post(
  */
 router.post(
   '/products/:productId/wizard/step3-simple',
-  checkPermission('inventory:read'),
+  checkPermission('inventory:update'),
   validateRequest(ProductWizardStep3SimpleStockSchema),
   productWizardController.setupSimpleStockStep3,
 )
@@ -1024,7 +1024,7 @@ router.post(
  */
 router.post(
   '/products/:productId/wizard/step3-recipe',
-  checkPermission('inventory:read'),
+  checkPermission('inventory:update'),
   validateRequest(ProductWizardStep3RecipeSchema),
   productWizardController.setupRecipeStep3,
 )
@@ -1052,7 +1052,7 @@ router.get(
  */
 router.post(
   '/wizard/complete',
-  checkPermission('inventory:read'),
+  checkPermission('inventory:update'),
   validateRequest(CreateProductWithInventorySchema),
   productWizardController.createProductWithInventory,
 )
@@ -1088,7 +1088,7 @@ router.get('/products/:productId/inventory-method', checkPermission('inventory:r
  */
 router.put(
   '/products/:productId/inventory-method',
-  checkPermission('inventory:read'),
+  checkPermission('inventory:update'),
   validateRequest(SetProductInventoryMethodSchema),
   productWizardController.setProductInventoryMethod,
 )
@@ -1103,7 +1103,7 @@ router.put(
  */
 router.post(
   '/products/:productId/switch-inventory-method',
-  checkPermission('inventory:read'),
+  checkPermission('inventory:update'),
   validateRequest(SetProductInventoryMethodSchema), // Requires inventoryMethod in body (QUANTITY or RECIPE)
   productWizardController.switchInventoryMethod,
 )
@@ -1169,7 +1169,7 @@ router.get(
  */
 router.post(
   '/raw-materials/:rawMaterialId/trigger-cost-recalculation',
-  checkPermission('inventory:read'),
+  checkPermission('inventory:update'),
   validateRequest(TriggerCostRecalculationSchema),
   productWizardController.triggerCostRecalculation,
 )
@@ -1197,7 +1197,7 @@ router.get(
  */
 router.post(
   '/recalculate-stale-recipes',
-  checkPermission('inventory:read'),
+  checkPermission('inventory:update'),
   validateRequest(VenueIdParamsSchema),
   productWizardController.recalculateStaleRecipes,
 )
@@ -1211,7 +1211,7 @@ router.post(
  */
 router.post(
   '/recalculate-all-recipes',
-  checkPermission('inventory:read'),
+  checkPermission('inventory:update'),
   validateRequest(VenueIdParamsSchema),
   productWizardController.recalculateAllRecipes,
 )

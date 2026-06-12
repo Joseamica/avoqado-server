@@ -25,6 +25,7 @@ import { planRenewalReminderJob } from './jobs/plan-renewal-reminder.job'
 import { planWinbackJob } from './jobs/plan-winback.job'
 import { settlementDetectionJob } from './jobs/settlement-detection.job'
 import { abandonedOrdersCleanupJob } from './jobs/abandoned-orders-cleanup.job'
+import { batchExpirationJob } from './jobs/batch-expiration.job'
 import { tpvOrderExpiryJob } from './jobs/tpv-order-expiry.job'
 import { blumonWebhookReconciliationJob } from './jobs/blumon-webhook-reconciliation.job'
 import { reservationDepositReconciliationJob } from './jobs/reservation-deposit-reconciliation.job'
@@ -132,6 +133,10 @@ const gracefulShutdown = async (signal: string) => {
       // Stop abandoned orders cleanup job
       logger.info('Stopping abandoned orders cleanup job...')
       abandonedOrdersCleanupJob.stop()
+
+      // Stop FIFO batch expiration job
+      logger.info('Stopping batch expiration job...')
+      batchExpirationJob.stop()
 
       // Stop TPV order expiry/reminder job
       logger.info('Stopping TPV order expiry job...')
@@ -361,6 +366,10 @@ const startApplication = async (retries = 3) => {
 
       // Start abandoned orders cleanup job
       abandonedOrdersCleanupJob.start()
+
+      // Start FIFO batch expiration job (daily — expires batches past
+      // expirationDate, deducts remaining stock, logs SPOILAGE movements)
+      batchExpirationJob.start()
 
       // Start TPV order expiry/reminder job (every 6h — expires Stripe AWAITING_PAYMENT > 7d,
       // SPEI AWAITING_PROOF > 14d, and sends SPEI reminders on day 3 + day 7)
