@@ -155,4 +155,41 @@ router.post(
   liveDemoController.simFastPaymentController,
 )
 
+/**
+ * @swagger
+ * /api/v1/live-demo/sim/reservation:
+ *   post:
+ *     summary: Simulate an online reservation in the visitor's live-demo venue
+ *     description: |
+ *       Avoqado Tour — journey "reserva": creates a REAL confirmed reservation
+ *       (channel WEB, guest "Sofía Ramírez", next half-hour slot ≥1h away) in
+ *       the session's ephemeral LIVE_DEMO venue so it appears in the
+ *       Reservations calendar. Auth is the liveDemoSessionId cookie (no JWT).
+ *       Hard-refuses venues whose status is not LIVE_DEMO. No request body.
+ *     tags:
+ *       - Live Demo
+ *     responses:
+ *       200:
+ *         description: Simulated reservation created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     reservationId: { type: string }
+ *                     confirmationCode: { type: string }
+ *                     startsAt: { type: string, format: date-time }
+ *       401:
+ *         description: No demo session (missing or expired cookie)
+ *       403:
+ *         description: Session venue is not a LIVE_DEMO venue
+ *       429:
+ *         description: Sim reservation cap reached for this session
+ */
+router.post('/sim/reservation', simPaymentRateLimiter, liveDemoController.simReservationController)
+
 export default router

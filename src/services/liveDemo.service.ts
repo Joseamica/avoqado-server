@@ -13,6 +13,7 @@ import prisma from '@/utils/prismaClient'
 import { generateSlug as slugify } from '@/utils/slugify'
 import { seedDemoVenue } from './onboarding/demoSeed.service'
 import { recordFastPayment } from './tpv/payment.tpv.service'
+import { createReservation as createDashboardReservation } from './dashboard/reservation.dashboard.service'
 import * as jwtService from '@/jwt.service'
 import logger from '@/config/logger'
 import { isLiveDemoVenue as isLiveDemoStatus } from '@/lib/venueStatus.constants'
@@ -445,5 +446,94 @@ export async function simulateFastPayment(sessionId: string, amountCents: number
     paymentId: payment.id,
     amountCents,
     tipCents,
+  }
+}
+
+/* ==========================================================================
+ * Avoqado Tour — simulated reservation (journey "reserva")
+ * ========================================================================== */
+
+/** Marker prefix on internalNotes — identifies sim reservations (cap + audit). */
+export const SIM_RESERVATION_NOTE_PREFIX = 'LIVE-DEMO-SIM'
+
+/** Per-demo-session cap of simulated reservations. */
+export const MAX_SIM_RESERVATIONS_PER_SESSION = 10
+
+export interface SimReservationResult {
+  reservationId: string
+  confirmationCode: string
+  startsAt: string
+}
+
+/**
+ * Create a REAL reservation in the visitor's LIVE_DEMO venue so the demo-tour
+ * journey can show it in the Reservations calendar ("tu reserva, en vivo").
+ *
+ * Mirrors simulateFastPayment's security model:
+ * - Auth = the live-demo session cookie (re-validated here, incl. expiry).
+ * - HARD venue check: refuses non-LIVE_DEMO venues.
+ * - Cap: MAX_SIM_RESERVATIONS_PER_SESSION, counted via the internalNotes marker.
+ *
+ * Reuses the dashboard createReservation service (no moduleConfig → permissive
+ * booking window + autoConfirm CONFIRMED), channel WEB — exactly what a booking
+ * made from the venue's page looks like.
+ */
+export async function simulateReservation(sessionId: string): Promise<SimReservationResult> {
+  const session = await prisma.liveDemoSession.findUnique({
+    where: { sessionId },
+  })
+
+  if (!session || new Date() >= session.expiresAt) {
+    throw new UnauthorizedError('No demo session')
+  }
+
+  const isDemo = await isLiveDemoVenue(session.venueId)
+  if (!isDemo) {
+    logger.error(`🚨 simulateReservation refused: venue ${session.venueId} is NOT a LIVE_DEMO venue (session ${sessionId})`)
+    throw new ForbiddenError('Esta operación solo está disponible en venues de demo.')
+  }
+
+  const simCount = await prisma.reservation.count({
+    where: {
+      venueId: session.venueId,
+      internalNotes: { startsWith: SIM_RESERVATION_NOTE_PREFIX },
+    },
+  })
+  if (simCount >= MAX_SIM_RESERVATIONS_PER_SESSION) {
+    throw new TooManyRequestsError('Límite de reservas simuladas alcanzado para esta sesión de demo.')
+  }
+
+  // Next half-hour boundary at least 1h away — lands today in the calendar's
+  // day view for almost every visit (UTC instants; display uses venue TZ).
+  const DURATION_MIN = 45
+  const startsAt = new Date(Math.ceil((Date.now() + 60 * 60_000) / (30 * 60_000)) * 30 * 60_000)
+  const endsAt = new Date(startsAt.getTime() + DURATION_MIN * 60_000)
+
+  const reservation = await createDashboardReservation(session.venueId, {
+    startsAt,
+    endsAt,
+    duration: DURATION_MIN,
+    channel: 'WEB', // customer self-service — same as the real booking widget
+    guestName: 'Sofía Ramírez',
+    guestPhone: '5512345678',
+    partySize: 1,
+    specialRequests: 'Corte de cabello — reserva creada desde el demo interactivo de avoqado.io',
+    internalNotes: `${SIM_RESERVATION_NOTE_PREFIX}-${uuidv4()}`,
+  })
+
+  await updateLiveDemoActivity(sessionId)
+
+  logger.info(`🎭 Simulated reservation created for live demo`, {
+    sessionId,
+    venueId: session.venueId,
+    reservationId: reservation.id,
+    confirmationCode: reservation.confirmationCode,
+    startsAt: startsAt.toISOString(),
+  })
+
+  return {
+    reservationId: reservation.id,
+    confirmationCode: reservation.confirmationCode,
+    startsAt: startsAt.toISOString(),
   }
 }
