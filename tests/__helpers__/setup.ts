@@ -25,6 +25,14 @@ process.env.RABBITMQ_URL = 'amqp://test:test@localhost:5672'
 // no STRIPE_SECRET_KEY) skips Stripe init and chargeOverage returns 'no_stripe'.
 process.env.STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || 'sk_test_dummy_for_jest'
 
+// OpenAI key must be set before any service module imports — AssistantDashboardService
+// builds its OpenAI client in the constructor and is exported as a module-load singleton
+// (`export default new AssistantDashboardService()`), reached transitively by importing
+// dashboard.routes (e.g. route-permission tests). Without this, CI (no .env file) throws
+// "OPENAI_API_KEY is required" at import time and the whole suite fails to run. Locally it
+// passes because .env has it. The dummy is never used for a real call in unit tests.
+process.env.OPENAI_API_KEY = process.env.OPENAI_API_KEY || 'sk-test-dummy-for-jest'
+
 // Google Calendar Sync (Phase 1) — services that read these at module-load time
 // need deterministic test values BEFORE any import. The token key must be 32-byte
 // hex (64 chars) to satisfy GoogleCalendarTokenEncryption's getKey() validator.
