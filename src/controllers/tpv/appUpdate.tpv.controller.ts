@@ -1,6 +1,6 @@
 // src/controllers/tpv/appUpdate.tpv.controller.ts
 import { Request, Response } from 'express'
-import { AppEnvironment } from '@prisma/client'
+import { AppEnvironment, AppPlatform } from '@prisma/client'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 
@@ -57,10 +57,21 @@ export async function checkForUpdate(req: Request, res: Response) {
       })
     }
 
-    // Find the latest active version for this environment
+    // Optional platform (new clients only). Old TPV APKs don't send it →
+    // default ANDROID_TPV preserves their behavior exactly.
+    const platformParam = ((req.query.platform as string) || 'ANDROID_TPV').toUpperCase()
+    if (!['ANDROID_TPV', 'WINDOWS_DESKTOP'].includes(platformParam)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid platform: must be ANDROID_TPV or WINDOWS_DESKTOP',
+      })
+    }
+
+    // Find the latest active version for this environment + platform
     const latestUpdate = await prisma.appUpdate.findFirst({
       where: {
         environment: env as AppEnvironment,
+        platform: platformParam as AppPlatform,
         isActive: true,
       },
       orderBy: { versionCode: 'desc' },
