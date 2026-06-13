@@ -6,7 +6,7 @@ jest.mock('@/utils/prismaClient', () => ({
   default: {
     staffOrganization: { findUnique: jest.fn() },
     venue: { findMany: jest.fn() },
-    staffVenue: { findMany: jest.fn() },
+    staffVenue: { findMany: jest.fn(), findFirst: jest.fn() },
   },
 }))
 jest.mock('@/services/access/access.service', () => ({
@@ -17,11 +17,30 @@ jest.mock('@/services/access/access.service', () => ({
 const m = prisma as unknown as {
   staffOrganization: { findUnique: jest.Mock }
   venue: { findMany: jest.Mock }
-  staffVenue: { findMany: jest.Mock }
+  staffVenue: { findMany: jest.Mock; findFirst: jest.Mock }
 }
 
 describe('resolveScope', () => {
-  beforeEach(() => jest.clearAllMocks())
+  beforeEach(() => {
+    jest.clearAllMocks()
+    m.staffVenue.findFirst.mockResolvedValue(null) // default: NOT a platform superadmin
+  })
+
+  it('platform SUPERADMIN -> ALL venues across ALL orgs, wildcard access, isSuperAdmin', async () => {
+    m.staffVenue.findFirst.mockResolvedValue({ id: 'sv-super' }) // has a SUPERADMIN StaffVenue
+    m.venue.findMany.mockResolvedValue([
+      { id: 'A', organizationId: 'org-1' },
+      { id: 'B', organizationId: 'org-2' }, // another org — still in scope
+    ])
+    const scope = await resolveScope('super', 'org-1')
+
+    expect(scope.isSuperAdmin).toBe(true)
+    expect(scope.allowedVenueIds.sort()).toEqual(['A', 'B'])
+    // synthesized wildcard access — hasPermission short-circuits on role SUPERADMIN
+    expect(scope.perVenueAccess.get('B')).toMatchObject({ role: 'SUPERADMIN', corePermissions: ['*:*'], organizationId: 'org-2' })
+    // and the org-membership path was never consulted
+    expect(m.staffOrganization.findUnique).not.toHaveBeenCalled()
+  })
 
   it('org OWNER -> all venues in the org', async () => {
     m.staffOrganization.findUnique.mockResolvedValue({ role: 'OWNER', isActive: true })
