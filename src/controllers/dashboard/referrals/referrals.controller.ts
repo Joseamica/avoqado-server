@@ -156,6 +156,68 @@ export async function getHallOfFameHandler(req: Request, res: Response, next: Ne
   }
 }
 
+/**
+ * GET /api/v1/dashboard/venues/:venueId/referrals/customers/:customerId/referrals
+ *
+ * Full referral history where the customer is the referrer. Powers the
+ * per-customer ReferralCard on the Customers page.
+ */
+export async function getCustomerReferralsHandler(req: Request, res: Response, next: NextFunction) {
+  try {
+    const result = await reads.listCustomerReferrals(req.params.venueId, req.params.customerId)
+    res.json(result)
+  } catch (e) {
+    next(e)
+  }
+}
+
+/**
+ * POST /api/v1/dashboard/venues/:venueId/referrals/customers/:customerId/generate-code
+ *
+ * Retroactively issue a `referralCode` to a legacy customer (created before
+ * the program activated, or missed by the activation backfill). Idempotent:
+ * returns the existing code when one is already assigned.
+ */
+export async function generateCustomerCodeHandler(req: Request, res: Response, next: NextFunction) {
+  try {
+    const customer = await prisma.customer.findUnique({
+      where: { id: req.params.customerId },
+      select: {
+        id: true,
+        venueId: true,
+        referralCode: true,
+        firstName: true,
+        lastName: true,
+        venue: { select: { name: true } },
+      },
+    })
+    if (!customer || customer.venueId !== req.params.venueId) {
+      return res.status(404).json({ error: 'Customer not found' })
+    }
+    if (customer.referralCode) {
+      return res.json({ referralCode: customer.referralCode })
+    }
+    const cfg = await prisma.referralProgramConfig.findUnique({
+      where: { venueId: customer.venueId },
+      select: { codePrefix: true },
+    })
+    if (!cfg) {
+      return res.status(404).json({ error: 'No code or program' })
+    }
+    const { generateReferralCode } = await import('../../../services/referrals/referralCode.service')
+    const customerName = [customer.firstName, customer.lastName].filter(Boolean).join(' ') || null
+    const referralCode = await generateReferralCode({
+      venueId: customer.venueId,
+      venuePrefix: cfg.codePrefix || customer.venue.name,
+      customerName,
+    })
+    await prisma.customer.update({ where: { id: customer.id }, data: { referralCode } })
+    res.json({ referralCode })
+  } catch (e) {
+    next(e)
+  }
+}
+
 // ==========================================
 // WHATSAPP SHARE LINK (Phase 4 / Path B)
 // ==========================================

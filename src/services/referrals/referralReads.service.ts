@@ -11,6 +11,23 @@ export interface ListReferralsInput {
   pageSize?: number
 }
 
+/**
+ * Full referral history where one customer is the REFERRER. Powers the
+ * dashboard's per-customer ReferralCard (un-paginated: a single referrer's
+ * history is small by nature).
+ */
+export async function listCustomerReferrals(venueId: string, customerId: string) {
+  return prisma.referral.findMany({
+    where: { venueId, referrerCustomerId: customerId },
+    include: {
+      referrerCustomer: { select: { id: true, firstName: true, lastName: true, referralTier: true } },
+      referredCustomer: { select: { id: true, firstName: true, lastName: true } },
+      rewardDiscount: { select: { id: true, value: true, active: true } },
+    },
+    orderBy: { createdAt: 'desc' },
+  })
+}
+
 export async function listReferrals(input: ListReferralsInput) {
   const page = input.page ?? 1
   const pageSize = input.pageSize ?? 25

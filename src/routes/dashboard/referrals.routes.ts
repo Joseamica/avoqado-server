@@ -180,4 +180,30 @@ router.get('/hall-of-fame', checkPermission('referral:read'), referralsControlle
  */
 router.get('/customers/:customerId/share-link', checkPermission('referral:read'), referralsController.getShareLink)
 
+// ===========================================
+// PER-CUSTOMER REFERRAL CARD (Customers page)
+// ===========================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/referrals/customers/{customerId}/referrals:
+ *   get:
+ *     tags: [Referrals]
+ *     summary: Full referral history where the customer is the referrer
+ *     security: [{ bearerAuth: [] }]
+ */
+router.get('/customers/:customerId/referrals', checkPermission('referral:read'), referralsController.getCustomerReferralsHandler)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/referrals/customers/{customerId}/generate-code:
+ *   post:
+ *     tags: [Referrals]
+ *     summary: Retroactively issue a referral code to a legacy customer (idempotent)
+ *     security: [{ bearerAuth: [] }]
+ */
+// `referral:read` on a POST mirrors the existing /capture and /validate
+// operational endpoints — staff-facing actions, not program configuration.
+router.post('/customers/:customerId/generate-code', checkPermission('referral:read'), referralsController.generateCustomerCodeHandler)
+
 export default router
