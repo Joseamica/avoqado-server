@@ -36,8 +36,16 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
       groupBy: z
         .enum(['summary', 'month', 'city', 'store', 'supervisor', 'promoter'])
         .describe('Aggregation: summary KPIs, or confirmed sales grouped by month / city / store / supervisor / promoter'),
-      fromDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Window start (YYYY-MM-DD, venue timezone). Omit for full history'),
-      toDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Window end (YYYY-MM-DD, venue timezone). Omit for full history'),
+      fromDate: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .optional()
+        .describe('Window start (YYYY-MM-DD, venue timezone). Omit for full history'),
+      toDate: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .optional()
+        .describe('Window end (YYYY-MM-DD, venue timezone). Omit for full history'),
     },
     async ({ groupBy, fromDate, toDate }) => {
       requireReviewAccess()

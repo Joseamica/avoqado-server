@@ -73,7 +73,9 @@ describe('POST /api/v1/webhooks/whatsapp (dispatch — integration with real DB)
     expect(ev).not.toBeNull()
     expect(ev?.messageType).toBe('text')
     expect(ev?.processedAt).not.toBeNull()
-    expect(ev?.routedAs).toBe('IGNORED')
+    // Since venue-chat routing (dcf9c5a2), plain text without quote context is
+    // answered with the "no context" nudge instead of being silently ignored.
+    expect(ev?.routedAs).toBe('VENUE_REPLY_NO_CONTEXT')
   })
 
   it('skips duplicate wamid and returns 200', async () => {

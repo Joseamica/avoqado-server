@@ -529,7 +529,13 @@ export async function getSalesBySupervisor(
   orgId: string,
   range: AggregationRange,
 ): Promise<
-  Array<{ supervisorId: string | null; supervisorName: string; byWeek: Record<string, number>; byMonth: Record<string, number>; total: number }>
+  Array<{
+    supervisorId: string | null
+    supervisorName: string
+    byWeek: Record<string, number>
+    byMonth: Record<string, number>
+    total: number
+  }>
 > {
   const verifications = await prisma.saleVerification.findMany({
     where: baseAggregationWhere(orgId, range),
