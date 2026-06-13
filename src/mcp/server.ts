@@ -30,6 +30,7 @@ import { registerPaymentLinkTools } from './tools/paymentLinks'
 import { registerLoyaltyTools } from './tools/loyalty'
 import { registerSeatTools } from './tools/seats'
 import { registerPlanAdminTools } from './tools/planAdmin'
+import { registerSaleVerificationTools } from './tools/saleVerifications'
 
 /** Build a per-request MCP server bound to the caller's resolved scope. */
 async function buildServerForIdentity(staffId: string, activeOrg: string): Promise<McpServer> {
@@ -63,6 +64,7 @@ async function buildServerForIdentity(staffId: string, activeOrg: string): Promi
   registerSeatTools(server, scope)
   registerLoyaltyTools(server, scope)
   registerPlanAdminTools(server, scope)
+  registerSaleVerificationTools(server, scope)
   return server
 }
 
