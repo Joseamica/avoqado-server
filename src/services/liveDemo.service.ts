@@ -127,12 +127,30 @@ export async function getOrCreateLiveDemo(sessionId: string): Promise<LiveDemoSe
 }
 
 /**
+ * Hard ceiling of CONCURRENT live-demo sessions platform-wide. Each new
+ * session creates (and seeds) a full ephemeral venue — without a cap, a bot
+ * hitting /auto-login without cookies could mass-create venues in prod.
+ * Returning visitors reuse their session, so legit traffic is unaffected.
+ */
+export const MAX_CONCURRENT_LIVE_DEMOS = Number(process.env.MAX_CONCURRENT_LIVE_DEMOS ?? 150)
+
+/**
  * Creates a new live demo session with venue, staff, and seeded data
  *
  * @param sessionId - Browser session cookie identifier
  * @returns Created live demo session
  */
 async function createLiveDemoSession(sessionId: string): Promise<LiveDemoSession> {
+  // Global concurrency cap — refuses NEW demos when the pool is full
+  // (existing sessions keep working; the hourly cleanup frees slots).
+  const activeSessions = await prisma.liveDemoSession.count({
+    where: { expiresAt: { gt: new Date() } },
+  })
+  if (activeSessions >= MAX_CONCURRENT_LIVE_DEMOS) {
+    logger.warn(`🚦 Live demo pool full: ${activeSessions}/${MAX_CONCURRENT_LIVE_DEMOS} active sessions — refusing new session`)
+    throw new TooManyRequestsError('El demo está lleno en este momento. Intenta de nuevo en unos minutos.')
+  }
+
   // Get or create the shared Live Demo organization
   let organization = await prisma.organization.findFirst({
     where: { name: LIVE_DEMO_ORG_NAME },

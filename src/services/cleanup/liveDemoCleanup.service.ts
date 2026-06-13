@@ -202,6 +202,26 @@ export async function getLiveDemoStats(): Promise<{
  * @param venueId - Venue ID to delete data for
  */
 async function deleteVenueData(venueId: string): Promise<void> {
+  // 🔒 HARD GUARD — this function ERASES a venue and everything in it.
+  // It must be physically impossible to point it at a real business: if a
+  // LiveDemoSession row ever references a non-LIVE_DEMO venue (bug, manual
+  // data edit, tampering), we refuse loudly instead of destroying it.
+  const venue = await prisma.venue.findUnique({
+    where: { id: venueId },
+    select: { status: true, name: true },
+  })
+  if (!venue) {
+    logger.warn(`🗑️ deleteVenueData: venue ${venueId} no longer exists — nothing to delete`)
+    return
+  }
+  if (venue.status !== 'LIVE_DEMO') {
+    logger.error(
+      `🚨 deleteVenueData REFUSED: venue ${venueId} ("${venue.name}") has status ${venue.status}, not LIVE_DEMO. ` +
+        `A live-demo session is pointing at a REAL venue — investigate immediately.`,
+    )
+    throw new Error(`Refusing to delete non-LIVE_DEMO venue ${venueId} (status: ${venue.status})`)
+  }
+
   logger.info(`🗑️ Deleting all data for venue ${venueId}...`)
 
   // Delete in correct order (most dependent first)

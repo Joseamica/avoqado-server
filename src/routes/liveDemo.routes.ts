@@ -34,6 +34,24 @@ const simPaymentRateLimiter = rateLimit({
 })
 
 /**
+ * Rate limiter for auto-login: each cookie-less hit creates (and seeds) a
+ * full ephemeral venue, so this endpoint must never be hammerable. Keyed by
+ * IP — returning visitors send their cookie and reuse the session, so 20/h
+ * is far above any legit usage. The durable guard is the global
+ * MAX_CONCURRENT_LIVE_DEMOS cap enforced in liveDemo.service.
+ */
+const autoLoginRateLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: Request) => `live-demo-login:${req.ip || req.socket.remoteAddress || 'unknown'}`,
+  message: {
+    error: 'Demasiados intentos de demo desde esta conexión. Intenta de nuevo más tarde.',
+  },
+})
+
+/**
  * @swagger
  * /api/v1/live-demo/auto-login:
  *   get:
@@ -59,7 +77,7 @@ const simPaymentRateLimiter = rateLimit({
  *       500:
  *         description: Server error
  */
-router.get('/auto-login', liveDemoController.autoLoginController)
+router.get('/auto-login', autoLoginRateLimiter, liveDemoController.autoLoginController)
 
 /**
  * @swagger
