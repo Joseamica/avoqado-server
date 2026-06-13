@@ -24,6 +24,7 @@
 import { NextFunction, Request, Response } from 'express'
 import * as venueDashboardService from '../../services/dashboard/venue.dashboard.service'
 import * as planStateService from '../../services/dashboard/planState.service'
+import { getVenuePlanInfo } from '../../services/access/basePlan.service'
 import * as seatReconciliationService from '../../services/dashboard/seatReconciliation.service'
 
 import { CreateVenueDto, ListVenuesQueryDto, ConvertDemoVenueDto } from '../../schemas/dashboard/venue.schema'
@@ -508,6 +509,30 @@ export async function getVenuePlan(req: Request<{ venueId: string }>, res: Respo
     res.status(200).json({ success: true, data: planState })
   } catch (error) {
     logger.error('Error getting venue plan state', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      venueId: req.params?.venueId,
+    })
+    next(error)
+  }
+}
+
+/**
+ * Get ONLY the venue's plan-tier gating signal: { tier, grandfathered, exempt }.
+ * GET /api/v1/dashboard/venues/:venueId/plan-tier
+ *
+ * Unlike GET /plan (billing:subscriptions:read — ADMIN/OWNER only, returns price + Stripe ids),
+ * this is the minimal, non-sensitive signal the tier-gate needs and is readable by EVERY venue
+ * role (features:read). Without it, sub-ADMIN staff (MANAGER/CASHIER/…) can't discover their
+ * venue is grandfathered or which tier it's on, so the dashboard FeatureGate wrongly paywalls
+ * them. Mirrors the mobile settings `plan` field — same getVenuePlanInfo() source.
+ */
+export async function getVenuePlanTier(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const plan = await getVenuePlanInfo(venueId)
+    res.status(200).json({ success: true, data: plan })
+  } catch (error) {
+    logger.error('Error getting venue plan tier', {
       error: error instanceof Error ? error.message : 'Unknown error',
       venueId: req.params?.venueId,
     })
