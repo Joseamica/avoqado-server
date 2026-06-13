@@ -153,6 +153,19 @@ export async function getSalesByStore(req: Request, res: Response): Promise<void
   }
 }
 
+export async function getSalesByPromoter(req: Request, res: Response): Promise<void> {
+  try {
+    const { orgId } = req.params
+    const { fromDate, toDate } = req.query
+    const range = svc.parseRange(fromDate as string | undefined, toDate as string | undefined)
+    const data = await svc.getSalesByPromoter(orgId, range)
+    res.status(200).json({ success: true, data })
+  } catch (error: any) {
+    logger.error(`[ORG SALE VERIFICATION] by-promoter error: ${error.message}`)
+    res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Internal server error' })
+  }
+}
+
 /**
  * PATCH /dashboard/organizations/:orgId/sale-verifications/:id/review
  *

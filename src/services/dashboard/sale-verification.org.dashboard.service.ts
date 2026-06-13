@@ -340,6 +340,8 @@ export async function getOrgSalesSummary(
   range: AggregationRange,
 ): Promise<{
   totalRevenue: number
+  /** Revenue from CONFIRMED sales only (SaleVerification.status=COMPLETED). The "Monto confirmado" KPI must use this, not totalRevenue. */
+  confirmedRevenue: number
   totalCount: number
   completedCount: number
   pendingCount: number
@@ -360,24 +362,29 @@ export async function getOrgSalesSummary(
   })
 
   let totalRevenue = 0
+  let confirmedRevenue = 0
   let completedCount = 0
   let pendingCount = 0
   let failedCount = 0
   let withoutVerificationCount = 0
 
   for (const p of payments) {
-    totalRevenue += typeof p.amount === 'number' ? p.amount : Number(p.amount)
+    const amount = typeof p.amount === 'number' ? p.amount : Number(p.amount)
+    totalRevenue += amount
     if (!p.saleVerification) {
       withoutVerificationCount++
       continue
     }
-    if (p.saleVerification.status === 'COMPLETED') completedCount++
-    else if (p.saleVerification.status === 'PENDING') pendingCount++
+    if (p.saleVerification.status === 'COMPLETED') {
+      completedCount++
+      confirmedRevenue += amount
+    } else if (p.saleVerification.status === 'PENDING') pendingCount++
     else if (p.saleVerification.status === 'FAILED') failedCount++
   }
 
   return {
     totalRevenue,
+    confirmedRevenue,
     totalCount: payments.length,
     completedCount,
     pendingCount,
@@ -508,23 +515,29 @@ export async function getSalesByCity(
 }
 
 /**
- * Sales grouped by supervisor × ISO week.
+ * Sales grouped by supervisor × ISO week and × month.
  *
- * Supervisor attribution: for each sale, the supervisor is the ADMIN/MANAGER
- * of the venue where the sale happened (taking the first active one if
- * multiple). This matches `organizationDashboardService.getOrgManagers`'s
- * definition of "manager" since Staff has no direct supervisor FK.
+ * Supervisor attribution: in the PlayTelecom hierarchy the "Supervisor
+ * responsable" of a store is its MANAGER (Admin=OWNER/ADMIN → Supervisor=MANAGER
+ * → Promoter=WAITER), so a venue's active MANAGER takes precedence. ADMIN is
+ * only a fallback for venues with no MANAGER assigned — org admins must NOT
+ * displace the real supervisor (Asana 1215613218390496: org admins were being
+ * reported as supervisors because attribution took the first ADMIN/MANAGER by
+ * staffId). Staff has no direct supervisor FK.
  */
 export async function getSalesBySupervisor(
   orgId: string,
   range: AggregationRange,
-): Promise<Array<{ supervisorId: string | null; supervisorName: string; byWeek: Record<string, number>; total: number }>> {
+): Promise<
+  Array<{ supervisorId: string | null; supervisorName: string; byWeek: Record<string, number>; byMonth: Record<string, number>; total: number }>
+> {
   const verifications = await prisma.saleVerification.findMany({
     where: baseAggregationWhere(orgId, range),
     select: { createdAt: true, venueId: true },
   })
 
-  // Bulk lookup of one supervisor per venue (deterministic by staffId asc).
+  // Bulk lookup of one supervisor per venue: MANAGER first, ADMIN as fallback,
+  // deterministic by staffId asc within each role.
   const venueIds = Array.from(new Set(verifications.map(v => v.venueId).filter(Boolean) as string[]))
   const venueManagers = await prisma.staffVenue.findMany({
     where: {
@@ -536,23 +549,28 @@ export async function getSalesBySupervisor(
     include: { staff: { select: { id: true, firstName: true, lastName: true } } },
   })
   const supervisorByVenue = new Map<string, { id: string; name: string }>()
-  for (const sv of venueManagers) {
-    if (!supervisorByVenue.has(sv.venueId)) {
-      supervisorByVenue.set(sv.venueId, {
-        id: sv.staff.id,
-        name: `${sv.staff.firstName} ${sv.staff.lastName}`.trim(),
-      })
+  for (const role of ['MANAGER', 'ADMIN'] as const) {
+    for (const sv of venueManagers) {
+      if (sv.role !== role) continue
+      if (!supervisorByVenue.has(sv.venueId)) {
+        supervisorByVenue.set(sv.venueId, {
+          id: sv.staff.id,
+          name: `${sv.staff.firstName} ${sv.staff.lastName}`.trim(),
+        })
+      }
     }
   }
 
-  const map = new Map<string, { name: string; byWeek: Record<string, number> }>()
+  const map = new Map<string, { name: string; byWeek: Record<string, number>; byMonth: Record<string, number> }>()
   for (const v of verifications) {
     const supervisor = v.venueId ? supervisorByVenue.get(v.venueId) : undefined
     const key = supervisor?.id ?? 'unassigned'
     const name = supervisor?.name ?? 'Sin supervisor'
     const week = toWeekLabel(v.createdAt)
-    const row = map.get(key) ?? { name, byWeek: {} }
+    const month = toMonthKey(v.createdAt)
+    const row = map.get(key) ?? { name, byWeek: {}, byMonth: {} }
     row.byWeek[week] = (row.byWeek[week] ?? 0) + 1
+    row.byMonth[month] = (row.byMonth[month] ?? 0) + 1
     map.set(key, row)
   }
   return Array.from(map.entries())
@@ -562,34 +580,70 @@ export async function getSalesBySupervisor(
         supervisorId: supervisorId === 'unassigned' ? null : supervisorId,
         supervisorName: val.name,
         byWeek: val.byWeek,
+        byMonth: val.byMonth,
         total,
       }
     })
     .sort((a, b) => b.total - a.total)
 }
 
-/** Sales grouped by venue × ISO week. */
+/** Sales grouped by venue × ISO week and × month. */
 export async function getSalesByStore(
   orgId: string,
   range: AggregationRange,
-): Promise<Array<{ venueId: string; venueName: string; byWeek: Record<string, number>; total: number }>> {
+): Promise<Array<{ venueId: string; venueName: string; byWeek: Record<string, number>; byMonth: Record<string, number>; total: number }>> {
   const verifications = await prisma.saleVerification.findMany({
     where: baseAggregationWhere(orgId, range),
     include: { venue: { select: { id: true, name: true } } },
   })
-  const map = new Map<string, { name: string; byWeek: Record<string, number> }>()
+  const map = new Map<string, { name: string; byWeek: Record<string, number>; byMonth: Record<string, number> }>()
   for (const v of verifications) {
     const id = v.venue?.id ?? 'unknown'
     const name = v.venue?.name ?? 'Sin tienda'
     const week = toWeekLabel(v.createdAt)
-    const row = map.get(id) ?? { name, byWeek: {} }
+    const month = toMonthKey(v.createdAt)
+    const row = map.get(id) ?? { name, byWeek: {}, byMonth: {} }
     row.byWeek[week] = (row.byWeek[week] ?? 0) + 1
+    row.byMonth[month] = (row.byMonth[month] ?? 0) + 1
     map.set(id, row)
   }
   return Array.from(map.entries())
     .map(([venueId, val]) => {
       const total = Object.values(val.byWeek).reduce((a, b) => a + b, 0)
-      return { venueId, venueName: val.name, byWeek: val.byWeek, total }
+      return { venueId, venueName: val.name, byWeek: val.byWeek, byMonth: val.byMonth, total }
+    })
+    .sort((a, b) => b.total - a.total)
+}
+
+/**
+ * Sales grouped by promoter (the staff who registered the sale on the TPV) × month.
+ * Promoter attribution comes straight from `SaleVerification.staffId` — no
+ * role lookup needed, unlike supervisors.
+ */
+export async function getSalesByPromoter(
+  orgId: string,
+  range: AggregationRange,
+): Promise<Array<{ staffId: string | null; promoterName: string; byMonth: Record<string, number>; total: number }>> {
+  const verifications = await prisma.saleVerification.findMany({
+    where: baseAggregationWhere(orgId, range),
+    select: {
+      createdAt: true,
+      staff: { select: { id: true, firstName: true, lastName: true } },
+    },
+  })
+  const map = new Map<string, { name: string; byMonth: Record<string, number> }>()
+  for (const v of verifications) {
+    const key = v.staff?.id ?? 'unassigned'
+    const name = v.staff ? `${v.staff.firstName} ${v.staff.lastName}`.trim() : 'Sin promotor'
+    const month = toMonthKey(v.createdAt)
+    const row = map.get(key) ?? { name, byMonth: {} }
+    row.byMonth[month] = (row.byMonth[month] ?? 0) + 1
+    map.set(key, row)
+  }
+  return Array.from(map.entries())
+    .map(([staffId, val]) => {
+      const total = Object.values(val.byMonth).reduce((a, b) => a + b, 0)
+      return { staffId: staffId === 'unassigned' ? null : staffId, promoterName: val.name, byMonth: val.byMonth, total }
     })
     .sort((a, b) => b.total - a.total)
 }

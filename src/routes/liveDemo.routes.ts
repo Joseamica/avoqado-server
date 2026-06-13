@@ -210,4 +210,44 @@ router.post(
  */
 router.post('/sim/reservation', simPaymentRateLimiter, liveDemoController.simReservationController)
 
+/**
+ * @swagger
+ * /api/v1/live-demo/sim/payment-link:
+ *   post:
+ *     summary: Simulate a payment link + its web payment in the visitor's live-demo venue
+ *     description: |
+ *       Avoqado Tour — journey "liga": creates a REAL payment link ("Sesión de
+ *       fotos", FIXED $350 MXN, 1 pago cobrado) plus its COMPLETED web payment
+ *       (source WEB, VISA •4242) in the session's ephemeral LIVE_DEMO venue —
+ *       so the journey can show the liga in Ligas de Pago AND the charge in
+ *       Transacciones. Auth is the liveDemoSessionId cookie (no JWT).
+ *       Hard-refuses venues whose status is not LIVE_DEMO. No request body.
+ *     tags:
+ *       - Live Demo
+ *     responses:
+ *       200:
+ *         description: Simulated payment link + payment created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     paymentLinkId: { type: string }
+ *                     shortCode: { type: string }
+ *                     title: { type: string }
+ *                     amountCents: { type: integer }
+ *                     paymentId: { type: string }
+ *       401:
+ *         description: No demo session (missing or expired cookie)
+ *       403:
+ *         description: Session venue is not a LIVE_DEMO venue
+ *       429:
+ *         description: Sim payment-link cap reached for this session
+ */
+router.post('/sim/payment-link', simPaymentRateLimiter, liveDemoController.simPaymentLinkController)
+
 export default router

@@ -9,6 +9,8 @@
 import { StaffRole, VenueStatus, OrgRole } from '@prisma/client'
 import { addHours, addDays } from 'date-fns'
 import { v4 as uuidv4 } from 'uuid'
+import { nanoid } from 'nanoid'
+import crypto from 'crypto'
 import prisma from '@/utils/prismaClient'
 import { generateSlug as slugify } from '@/utils/slugify'
 import { seedDemoVenue } from './onboarding/demoSeed.service'
@@ -553,5 +555,141 @@ export async function simulateReservation(sessionId: string): Promise<SimReserva
     reservationId: reservation.id,
     confirmationCode: reservation.confirmationCode,
     startsAt: startsAt.toISOString(),
+  }
+}
+
+/* ==========================================================================
+ * Avoqado Tour — simulated payment link + its payment (journey "liga")
+ * ========================================================================== */
+
+/** Per-demo-venue cap of payment links (any link in a LIVE_DEMO venue is sim). */
+export const MAX_SIM_PAYMENT_LINKS_PER_SESSION = 10
+
+/** Demo liga amount: $350.00 MXN — matches the marketing tour's mockup. */
+const SIM_LINK_AMOUNT_PESOS = 350
+const SIM_LINK_AMOUNT_CENTS = SIM_LINK_AMOUNT_PESOS * 100
+
+export interface SimPaymentLinkResult {
+  paymentLinkId: string
+  shortCode: string
+  title: string
+  amountCents: number
+  paymentId: string
+}
+
+/**
+ * Create a REAL payment link ("Sesión de fotos", FIXED $350) plus its
+ * COMPLETED web payment in the visitor's LIVE_DEMO venue, so the demo-tour
+ * journey can show BOTH: the liga in Ligas de Pago (1 pago, $350 cobrado)
+ * and the charge in Transacciones (source WEB, VISA •4242).
+ *
+ * Same security model as the other sims: cookie session auth, HARD LIVE_DEMO
+ * venue check, per-venue cap. The demo venue has no e-commerce merchant, so a
+ * fake one (provider-backed, deterministic per venue) is created on demand.
+ */
+export async function simulatePaymentLink(sessionId: string): Promise<SimPaymentLinkResult> {
+  const session = await prisma.liveDemoSession.findUnique({
+    where: { sessionId },
+  })
+
+  if (!session || new Date() >= session.expiresAt) {
+    throw new UnauthorizedError('No demo session')
+  }
+
+  const isDemo = await isLiveDemoVenue(session.venueId)
+  if (!isDemo) {
+    logger.error(`🚨 simulatePaymentLink refused: venue ${session.venueId} is NOT a LIVE_DEMO venue (session ${sessionId})`)
+    throw new ForbiddenError('Esta operación solo está disponible en venues de demo.')
+  }
+
+  const linkCount = await prisma.paymentLink.count({ where: { venueId: session.venueId } })
+  if (linkCount >= MAX_SIM_PAYMENT_LINKS_PER_SESSION) {
+    throw new TooManyRequestsError('Límite de ligas simuladas alcanzado para esta sesión de demo.')
+  }
+
+  // E-commerce merchant: required FK for PaymentLink. The demo venue has none,
+  // so create a deterministic fake one (idempotent per venue via findFirst).
+  let merchant = await prisma.ecommerceMerchant.findFirst({ where: { venueId: session.venueId } })
+  if (!merchant) {
+    const provider = await prisma.paymentProvider.findFirst({ where: { active: true } })
+    if (!provider) {
+      logger.error('🚨 simulatePaymentLink: no active PaymentProvider exists — cannot create demo merchant')
+      throw new ForbiddenError('El demo de ligas no está disponible en este momento.')
+    }
+    merchant = await prisma.ecommerceMerchant.create({
+      data: {
+        venueId: session.venueId,
+        channelName: 'Web (demo)',
+        businessName: 'Live Demo',
+        contactEmail: `live-demo-${session.venueId}@avoqado.io`,
+        publicKey: `pk_demo_${session.venueId}`,
+        secretKeyHash: crypto.createHash('sha256').update(uuidv4()).digest('hex'),
+        providerId: provider.id,
+        providerCredentials: { demo: true },
+      },
+    })
+  }
+
+  // The liga itself — single-use FIXED $350, already "cobrada 1 vez"
+  const paymentLink = await prisma.paymentLink.create({
+    data: {
+      shortCode: nanoid(8),
+      venueId: session.venueId,
+      ecommerceMerchantId: merchant.id,
+      createdById: session.staffId,
+      purpose: 'PAYMENT',
+      title: 'Sesión de fotos',
+      description: 'Sesión de 1 hora en estudio',
+      amountType: 'FIXED',
+      amount: SIM_LINK_AMOUNT_PESOS,
+      currency: 'MXN',
+      isReusable: false,
+      status: 'ACTIVE',
+      totalCollected: SIM_LINK_AMOUNT_PESOS,
+      paymentCount: 1,
+    },
+  })
+
+  // Its payment in Ventas — same trusted path as the TPV sim, but source WEB
+  const payment = await recordFastPayment(
+    session.venueId,
+    {
+      venueId: session.venueId,
+      amount: SIM_LINK_AMOUNT_CENTS,
+      tip: 0,
+      status: 'COMPLETED',
+      method: 'CREDIT_CARD',
+      source: 'WEB',
+      splitType: 'FULLPAYMENT',
+      tpvId: 'LIVE_DEMO_SIM',
+      staffId: session.staffId,
+      paidProductsId: [],
+      currency: 'MXN',
+      isInternational: false,
+      cardBrand: 'VISA',
+      last4: '4242',
+      typeOfCard: 'CREDIT',
+      referenceNumber: `${SIM_PAYMENT_REFERENCE_PREFIX}-${uuidv4()}`,
+      idempotencyKey: uuidv4(),
+    },
+    session.staffId,
+  )
+
+  await updateLiveDemoActivity(sessionId)
+
+  logger.info(`🎭 Simulated payment link + payment created for live demo`, {
+    sessionId,
+    venueId: session.venueId,
+    paymentLinkId: paymentLink.id,
+    shortCode: paymentLink.shortCode,
+    paymentId: payment.id,
+  })
+
+  return {
+    paymentLinkId: paymentLink.id,
+    shortCode: paymentLink.shortCode,
+    title: paymentLink.title,
+    amountCents: SIM_LINK_AMOUNT_CENTS,
+    paymentId: payment.id,
   }
 }

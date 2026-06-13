@@ -237,3 +237,43 @@ export async function simReservationController(req: Request, res: Response, next
     next(error)
   }
 }
+
+/**
+ * Simulate a payment link + its web payment in the visitor's LIVE_DEMO venue
+ * (Avoqado Tour — journey "liga"). Auth = the liveDemoSessionId cookie.
+ *
+ * POST /api/v1/live-demo/sim/payment-link
+ */
+export async function simPaymentLinkController(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const sessionId = req.cookies?.liveDemoSessionId
+
+    if (!sessionId) {
+      res.status(401).json({ error: 'No demo session' })
+      return
+    }
+
+    const result = await liveDemoService.simulatePaymentLink(sessionId)
+
+    res.status(200).json({
+      success: true,
+      data: result,
+    })
+  } catch (error) {
+    if (error instanceof UnauthorizedError) {
+      res.status(401).json({ error: 'No demo session' })
+      return
+    }
+    if (error instanceof ForbiddenError) {
+      res.status(403).json({ error: error.message })
+      return
+    }
+    if (error instanceof TooManyRequestsError) {
+      res.status(429).json({ error: error.message })
+      return
+    }
+
+    logger.error('❌ Error simulating live demo payment link:', error)
+    next(error)
+  }
+}
