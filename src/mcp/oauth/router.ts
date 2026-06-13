@@ -9,6 +9,7 @@ import { provider } from './provider'
 import { prismaClientsStore } from './clientsStore'
 import { MCP_ISSUER_URL, MCP_RESOURCE_URL, MCP_SCOPES_SUPPORTED } from './config'
 import { staffIdFromDashboardSession } from './session'
+import { issueOrgPickToken, verifyOrgPickToken, listActiveOrganizations } from './orgPick'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 
@@ -74,8 +75,55 @@ function approveHandler() {
   const router = express.Router()
   router.use(express.urlencoded({ extended: false }))
   router.use(cookieParser()) // read the session cookie for the SSO path
+  // Step-2 consent: GET org picker (multi-org accounts land here after authenticating).
+  router.get('/mcp-oauth/pick-org', async (req: Request, res: Response) => {
+    const q = (k: string) => (req.query[k] ? String(req.query[k]) : undefined)
+    const token = q('token')
+    const clientId = q('client_id') ?? ''
+    const redirectUri = q('redirect_uri') ?? ''
+    const backToLogin = () =>
+      res.redirect(
+        302,
+        '/authorize?' +
+          new URLSearchParams({
+            response_type: 'code',
+            client_id: clientId,
+            redirect_uri: redirectUri,
+            code_challenge: q('code_challenge') ?? '',
+            code_challenge_method: 'S256',
+            ...(q('scope') ? { scope: q('scope')! } : {}),
+            ...(q('state') ? { state: q('state')! } : {}),
+            ...(q('resource') ? { resource: q('resource')! } : {}),
+            prompt: 'login',
+          }).toString(),
+      )
+
+    const staffId = token ? verifyOrgPickToken(token) : null
+    if (!staffId) return backToLogin() // expired/tampered → re-authenticate
+    const client = await prismaClientsStore.getClient(clientId)
+    if (!client || !(client.redirect_uris ?? []).includes(redirectUri)) return backToLogin()
+    const orgs = await listActiveOrganizations(staffId)
+    if (orgs.length < 2) return backToLogin() // nothing to pick — normal flow handles it
+
+    res.setHeader('Cache-Control', 'no-store')
+    return res.status(200).send(
+      renderLoginPage(
+        {
+          clientId,
+          clientName: client.client_name,
+          redirectUri,
+          codeChallenge: q('code_challenge') ?? '',
+          state: q('state'),
+          scope: q('scope'),
+          resource: q('resource'),
+        },
+        { orgPick: { orgs, token: token! } },
+      ),
+    )
+  })
+
   router.post('/mcp-oauth/approve', async (req: Request, res: Response) => {
-    const { email, password, client_id, redirect_uri, code_challenge, state, scope, resource, sso } = req.body ?? {}
+    const { email, password, client_id, redirect_uri, code_challenge, state, scope, resource, sso, org, orgPickToken } = req.body ?? {}
     // The login page submits via fetch so it works inside sandboxed iframes that block native form
     // posts (no 'allow-forms'). Fetch requests get JSON {redirect}/{error}; native posts get 302/HTML.
     const isFetch = req.get('X-Mcp-Submit') === 'fetch'
@@ -96,7 +144,15 @@ function approveHandler() {
     }
 
     let staffId: string
-    if (sso === '1') {
+    if (typeof orgPickToken === 'string' && orgPickToken) {
+      // Step-2 (org picker) submit: identity carried by the short-lived signed token, never re-typed credentials.
+      const sid = verifyOrgPickToken(orgPickToken)
+      if (!sid) {
+        logger.warn('[MCP OAuth] org-pick token invalid/expired', { mcpOAuth: true, clientId: String(client_id) })
+        return reRender('La selección de organización expiró. Vuelve a iniciar sesión.')
+      }
+      staffId = sid
+    } else if (sso === '1') {
       // One-click connect: trust ONLY a freshly re-verified session cookie, never the form flag alone.
       const sid = staffIdFromDashboardSession(req)
       if (!sid) {
@@ -116,11 +172,44 @@ function approveHandler() {
     }
 
     let activeOrg: string
-    try {
-      activeOrg = await resolveActiveOrganizationId(staffId)
-    } catch (e) {
-      logger.warn(`[MCP OAuth] no active organization for staff ${staffId}`, { mcpOAuth: true, staffId, error: (e as Error).message })
-      return reRender('Tu cuenta no tiene una organización ni local activo.')
+    if (typeof orgPickToken === 'string' && orgPickToken && typeof org === 'string' && org) {
+      // Step-2: validate the chosen org against the staff's REAL active memberships (server-side).
+      const orgs = await listActiveOrganizations(staffId)
+      const chosen = orgs.find(o => o.id === org)
+      if (!chosen) {
+        logger.warn('[MCP OAuth] org pick rejected — not a membership', { mcpOAuth: true, staffId, org: String(org) })
+        return reRender('Esa organización no pertenece a tu cuenta.')
+      }
+      activeOrg = chosen.id
+    } else {
+      const orgs = await listActiveOrganizations(staffId)
+      if (orgs.length > 1) {
+        // Multi-org account → second consent step: pick which org this connection binds to.
+        const pickUrl =
+          '/mcp-oauth/pick-org?' +
+          new URLSearchParams({
+            token: issueOrgPickToken(staffId),
+            client_id: String(client_id),
+            redirect_uri: String(redirect_uri),
+            code_challenge: String(code_challenge),
+            ...(scope ? { scope: String(scope) } : {}),
+            ...(state ? { state: String(state) } : {}),
+            ...(resource ? { resource: String(resource) } : {}),
+          }).toString()
+        logger.info(`[MCP OAuth] multi-org staff ${staffId} → org picker (${orgs.length} orgs)`, { mcpOAuth: true, staffId })
+        // self:true → the page script navigates the iframe itself (not window.top) to the picker.
+        return isFetch ? res.json({ redirect: pickUrl, self: true }) : res.redirect(302, pickUrl)
+      }
+      if (orgs.length === 1) {
+        activeOrg = orgs[0].id
+      } else {
+        try {
+          activeOrg = await resolveActiveOrganizationId(staffId) // venue-level fallback (e.g. Mindform owner)
+        } catch (e) {
+          logger.warn(`[MCP OAuth] no active organization for staff ${staffId}`, { mcpOAuth: true, staffId, error: (e as Error).message })
+          return reRender('Tu cuenta no tiene una organización ni local activo.')
+        }
+      }
     }
 
     const scopes = scope ? String(scope).split(' ').filter(Boolean) : []

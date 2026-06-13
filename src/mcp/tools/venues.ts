@@ -10,15 +10,45 @@ export function registerVenueTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'list_my_venues',
-    'List the venues you can access in your active organization (id, name, slug, status, city).',
+    'List the venues you can access (id, name, slug, status, city). The connection is bound to ONE active organization — if a venue the user mentions is NOT here, it may belong to another of their organizations: check list_my_organizations and tell them to reconnect choosing that org. NEVER substitute a different venue for one that is missing.',
     {},
     async () => {
-      const venues = await prisma.venue.findMany({
-        where: { id: { in: scope.allowedVenueIds } },
-        select: { id: true, name: true, slug: true, status: true, city: true },
-        orderBy: { name: 'asc' },
-      })
-      return { content: [{ type: 'text' as const, text: JSON.stringify({ count: venues.length, venues }, null, 2) }] }
+      const [venues, orgName, otherOrgs] = await Promise.all([
+        prisma.venue.findMany({
+          where: { id: { in: scope.allowedVenueIds } },
+          select: { id: true, name: true, slug: true, status: true, city: true },
+          orderBy: { name: 'asc' },
+        }),
+        prisma.organization.findUnique({ where: { id: scope.activeOrg }, select: { name: true } }).then(o => o?.name ?? null),
+        scope.isSuperAdmin
+          ? Promise.resolve(0)
+          : prisma.staffOrganization.count({ where: { staffId: scope.staffId, isActive: true, organizationId: { not: scope.activeOrg } } }),
+      ])
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(
+              {
+                count: venues.length,
+                ...(scope.isSuperAdmin
+                  ? { note: 'Conexión SUPERADMIN: acceso global a todas las organizaciones.' }
+                  : {
+                      activeOrganization: orgName,
+                      ...(otherOrgs > 0
+                        ? {
+                            note: `El usuario pertenece a ${otherOrgs} organización(es) más que NO están en esta conexión. Si busca un venue que no aparece aquí, probablemente está en otra — sugiérele reconectar el conector eligiendo esa organización. No uses otro venue como sustituto.`,
+                          }
+                        : {}),
+                    }),
+                venues,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      }
     },
   )
 

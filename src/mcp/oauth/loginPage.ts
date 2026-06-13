@@ -47,6 +47,11 @@ const STYLE = `
   .note{margin-top:1rem;font-size:.78rem;color:#64748b;line-height:1.45}
   .alt{display:block;text-align:center;margin-top:.9rem;font-size:.8rem;color:#2563eb;text-decoration:none}
   .alt:hover{text-decoration:underline}
+  .org{display:flex;align-items:center;gap:.6rem;border:1px solid #e2e8f0;border-radius:12px;padding:.7rem .85rem;margin:.45rem 0;cursor:pointer;transition:border .15s}
+  .org:hover{border-color:#2563eb}
+  .org input{accent-color:#2563eb;flex:0 0 auto}
+  .org .nm{font-size:.92rem;font-weight:600;color:#0f172a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .org .rl{margin-left:auto;font-size:.7rem;color:#64748b;background:#f1f5f9;border-radius:999px;padding:.15rem .5rem;flex:0 0 auto}
   .sparkles{position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden}
   .sparkles span{position:absolute;display:block;opacity:.35;filter:drop-shadow(0 0 6px rgba(37,99,235,.55));animation:mcp-twinkle 3s ease-in-out infinite}
   @keyframes mcp-twinkle{0%,100%{opacity:.35;transform:scale(.6) rotate(-15deg)}50%{opacity:1;transform:scale(1.15) rotate(12deg)}}
@@ -85,7 +90,13 @@ const SPARKLES = `<div class="sparkles" aria-hidden="true">${SPARKLE_SPECS.map(
  */
 export function renderLoginPage(
   p: LoginPageParams,
-  opts: { error?: string; session?: { email: string }; switchAccountUrl?: string } = {},
+  opts: {
+    error?: string
+    session?: { email: string }
+    switchAccountUrl?: string
+    /** Step-2 consent: the staff belongs to several orgs — pick which ONE this connection binds to. */
+    orgPick?: { orgs: Array<{ id: string; name: string; role: string }>; token: string }
+  } = {},
 ): string {
   const app = p.clientName ? escapeHtml(p.clientName) : 'Una aplicación'
   const banner = `<p class="err" id="mcp-err"${opts.error ? '' : ' style="display:none"'}>${opts.error ? escapeHtml(opts.error) : ''}</p>`
@@ -93,8 +104,23 @@ export function renderLoginPage(
   const note = `<p class="note">Acceso de solo lectura, limitado a tu rol y tus locales. Puedes desconectarlo cuando quieras.</p>`
   const intro = `<p class="sub"><strong>${app}</strong> quiere acceder a los datos de tus locales en tu nombre.</p>`
 
-  const body = opts.session
+  const body = opts.orgPick
     ? `
+  <h1>Elige la organización</h1>
+  <p class="sub">Tu cuenta pertenece a varias organizaciones. <strong>${app}</strong> quedará conectado a <strong>una</strong> — elige cuál:</p>
+  ${banner}
+  ${opts.orgPick.orgs
+    .map(
+      (o, i) =>
+        `<label class="org"><input type="radio" name="org" value="${escapeHtml(o.id)}"${i === 0 ? ' checked' : ''}><span class="nm">${escapeHtml(o.name)}</span><span class="rl">${escapeHtml(o.role.toLowerCase())}</span></label>`,
+    )
+    .join('')}
+  ${hidden('orgPickToken', opts.orgPick.token)}
+  ${oauthHidden(p)}
+  <button type="submit">Conectar</button>
+  <p class="note">Para usar otra organización después, desconecta el conector y vuelve a conectarlo.</p>`
+    : opts.session
+      ? `
   <h1>Conectar a Avoqado</h1>
   ${intro}
   ${banner}
@@ -104,7 +130,7 @@ export function renderLoginPage(
   <button type="submit">Conectar como ${escapeHtml(opts.session.email)}</button>
   ${opts.switchAccountUrl ? `<a class="alt" href="${escapeHtml(opts.switchAccountUrl)}">Usar otra cuenta</a>` : ''}
   ${note}`
-    : `
+      : `
   <h1>Conecta tu IA a Avoqado</h1>
   ${intro}
   ${banner}
@@ -122,7 +148,7 @@ export function renderLoginPage(
   ${brand}${body}
 </form>
 <script>
-(function(){var form=document.querySelector('form');if(!form)return;var errBox=document.getElementById('mcp-err');function showError(m){if(errBox){errBox.textContent=m;errBox.style.display='block';}}function navigate(u){try{if(window.top&&window.top!==window){window.top.location.href=u;return;}}catch(e){}window.location.href=u;}form.addEventListener('submit',function(e){e.preventDefault();var btn=form.querySelector('button[type=submit]');if(btn)btn.disabled=true;fetch('/mcp-oauth/approve',{method:'POST',headers:{'X-Mcp-Submit':'fetch'},body:new URLSearchParams(new FormData(form))}).then(function(r){return r.json();}).then(function(d){if(d&&d.redirect){navigate(d.redirect);return;}showError((d&&d.error)||'No se pudo conectar. Intenta de nuevo.');if(btn)btn.disabled=false;}).catch(function(){showError('No se pudo conectar. Intenta de nuevo.');if(btn)btn.disabled=false;});});})();
+(function(){var form=document.querySelector('form');if(!form)return;var errBox=document.getElementById('mcp-err');function showError(m){if(errBox){errBox.textContent=m;errBox.style.display='block';}}function navigate(u,self){if(!self){try{if(window.top&&window.top!==window){window.top.location.href=u;return;}}catch(e){}}window.location.href=u;}form.addEventListener('submit',function(e){e.preventDefault();var btn=form.querySelector('button[type=submit]');if(btn)btn.disabled=true;fetch('/mcp-oauth/approve',{method:'POST',headers:{'X-Mcp-Submit':'fetch'},body:new URLSearchParams(new FormData(form))}).then(function(r){return r.json();}).then(function(d){if(d&&d.redirect){navigate(d.redirect,d.self===true);return;}showError((d&&d.error)||'No se pudo conectar. Intenta de nuevo.');if(btn)btn.disabled=false;}).catch(function(){showError('No se pudo conectar. Intenta de nuevo.');if(btn)btn.disabled=false;});});})();
 </script>
 </body></html>`
 }

@@ -11,7 +11,9 @@ export function createGuard(scope: McpScope) {
     venueFilter(requestedVenueId?: string): { venueId: { in: string[] } } {
       if (requestedVenueId) {
         if (!scope.allowedVenueIds.includes(requestedVenueId)) {
-          throw new ScopeError(`Venue ${requestedVenueId} is not in your scope`)
+          throw new ScopeError(
+            `Venue ${requestedVenueId} is not in your scope. Esta conexión está limitada a tu organización activa — usa list_my_organizations para ver tus organizaciones; si el venue pertenece a otra, desconecta y vuelve a conectar eligiéndola. NO uses otro venue como sustituto.`,
+          )
         }
         return { venueId: { in: [requestedVenueId] } }
       }
