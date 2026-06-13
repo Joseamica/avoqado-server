@@ -2140,10 +2140,16 @@ router.get(
  *       403: { $ref: '#/components/responses/ForbiddenError' }
  *       404: { $ref: '#/components/responses/NotFoundError' }
  */
+// Seat-cap status ({ cap, current, allowed, exempt } — no price/Stripe) drives the PROACTIVE
+// seat-cap upsell on the Teams "Invitar" CTA, which MANAGER (the main team-inviter) reaches. It
+// must be readable by every team-managing role, so guard it with `teams:read` (held by all roles
+// that reach the Teams page) — NOT billing:subscriptions:read (ADMIN/OWNER only), which 403'd for
+// MANAGER and silently hid the Free-plan seat-cap paywall. The backend still enforces the cap on
+// the invite itself; this only restores the proactive prompt.
 router.get(
   '/venues/:venueId/plan/seat-status',
   authenticateTokenMiddleware,
-  checkPermission('billing:subscriptions:read'),
+  checkPermission('teams:read'),
   validateRequest(planParamsSchema) as RequestHandler,
   venueController.getVenueSeatStatus,
 )
