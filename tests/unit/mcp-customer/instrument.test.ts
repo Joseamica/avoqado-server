@@ -54,7 +54,27 @@ describe('instrumentTools', () => {
     expect(mockedLogger.info).toHaveBeenCalledTimes(1)
     expect(mockedLogger.warn).not.toHaveBeenCalled()
     expect(mockedLogger.error).not.toHaveBeenCalled()
-    expect(mockedLogger.info.mock.calls[0][1]).toMatchObject({ mcp: true, tool: 'list_sales', staffId: 'staff-1', org: 'org-1' })
+    expect(mockedLogger.info.mock.calls[0][1]).toMatchObject({
+      mcp: true,
+      tool: 'list_sales',
+      staffId: 'staff-1',
+      org: 'org-1',
+      venueId: 'v1', // captured from params → enables sector (venue.type) segmentation
+    })
+  })
+
+  it('captures venueId from the params for sector attribution, and omits it for org-level tools', async () => {
+    const { server, original } = makeServer()
+    instrumentTools(server, ctx)
+    const handler = jest.fn().mockResolvedValue(okResult)
+    callTool(server, 'list_my_venues', {}, handler)
+    const wrapped = original.mock.calls[0][2] as (...a: unknown[]) => Promise<unknown>
+
+    await wrapped({ venueId: 'venue-abc' }, {}) // venue-scoped call
+    await wrapped({}, {}) // org-level call, no venueId
+
+    expect(mockedLogger.info.mock.calls[0][1]).toMatchObject({ venueId: 'venue-abc' })
+    expect(mockedLogger.info.mock.calls[1][1]).not.toHaveProperty('venueId')
   })
 
   it('logs WARN (not error) when a tool returns ok:false, with the error detail', async () => {

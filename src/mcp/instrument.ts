@@ -36,12 +36,15 @@ function resultOutcome(result: unknown): { ok: boolean; detail?: string } {
  * Monkey-patches `.tool` once, BEFORE the tool modules register — so current AND
  * future tools get observability for free (kept in lockstep, never an afterthought).
  *
- * We log: tool name, caller identity (staffId/org), duration, and outcome —
+ * We log: tool name, caller identity (staffId/org), venueId, duration, and outcome —
  * `ok` (ran fine), `returned error` (handed the AI a failure: out of scope /
  * permission denied / not found), or `threw` (unexpected exception). In production
  * this is JSON on stdout → shipped to BetterStack, queryable by `tool`/`mcp:true`.
  *
- * We deliberately do NOT log tool arguments or full results (they carry venue
+ * `venueId` is the ONLY argument we keep — it's an opaque id (already in
+ * ActivityLog/logs), NOT venue data, and it lets us segment usage by `venue.type`
+ * (sector) downstream, the raw material for the product/moat signal. We still
+ * deliberately do NOT log other tool arguments or full results (they carry venue
  * data) — only the tool name and a short error detail. What the LLM ultimately
  * tells the user happens in their client and is not visible to us; this captures
  * everything the server itself sees.
@@ -55,16 +58,19 @@ export function instrumentTools(server: McpServer, ctx: ToolCallContext): void {
     const base = { mcp: true as const, tool: name, staffId: ctx.staffId, org: ctx.org }
     const wrapped: ToolFn = async (...cbArgs: unknown[]) => {
       const start = Date.now()
+      // The handler is called (params, extra); pull venueId from params when present.
+      const params = cbArgs[0] as { venueId?: unknown } | undefined
+      const meta = typeof params?.venueId === 'string' ? { ...base, venueId: params.venueId } : base
       try {
         const result = await cb(...cbArgs)
         const ms = Date.now() - start
         const { ok, detail } = resultOutcome(result)
-        if (ok) logger.info(`mcp.tool ${name} ok`, { ...base, ms })
-        else logger.warn(`mcp.tool ${name} returned error`, { ...base, ms, detail })
+        if (ok) logger.info(`mcp.tool ${name} ok`, { ...meta, ms })
+        else logger.warn(`mcp.tool ${name} returned error`, { ...meta, ms, detail })
         return result
       } catch (err) {
         const ms = Date.now() - start
-        logger.error(`mcp.tool ${name} threw`, { ...base, ms, error: (err as Error).message })
+        logger.error(`mcp.tool ${name} threw`, { ...meta, ms, error: (err as Error).message })
         throw err
       }
     }
