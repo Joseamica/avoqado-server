@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-06-13T01:26:24.640Z",
+  "generatedAt": "2026-06-13T01:46:21.218Z",
   "assistantTools": [
     "activeShifts",
     "adHocAnalytics",
@@ -23217,6 +23217,68 @@
       "assistantTools": [],
       "notes": [
         "No assistant capability mapped yet."
+      ]
+    },
+    {
+      "method": "POST",
+      "fullPath": "/api/v1/dashboard/venues/:venueId/referrals/customers/:customerId/generate-code",
+      "localPath": "/customers/:customerId/generate-code",
+      "mountPrefix": "/api/v1/dashboard/venues/:venueId/referrals",
+      "routeFile": "src/routes/dashboard/referrals.routes.ts",
+      "controller": "referralsController.generateCustomerCodeHandler",
+      "controllerFile": "src/controllers/dashboard/referrals/referrals.controller.ts",
+      "services": [
+        "src/services/referrals/referralProgram.service.ts"
+      ],
+      "permissions": [
+        "referral:read"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [],
+      "classification": "action",
+      "scope": "venue",
+      "assistantCoverage": "partial",
+      "assistantTools": [
+        "customers.summary",
+        "customers.detail",
+        "creditPacks.balance"
+      ],
+      "notes": [
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
+      ]
+    },
+    {
+      "method": "GET",
+      "fullPath": "/api/v1/dashboard/venues/:venueId/referrals/customers/:customerId/referrals",
+      "localPath": "/customers/:customerId/referrals",
+      "mountPrefix": "/api/v1/dashboard/venues/:venueId/referrals",
+      "routeFile": "src/routes/dashboard/referrals.routes.ts",
+      "controller": "referralsController.getCustomerReferralsHandler",
+      "controllerFile": "src/controllers/dashboard/referrals/referrals.controller.ts",
+      "services": [
+        "src/services/referrals/referralReads.service.ts"
+      ],
+      "permissions": [
+        "referral:read"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [],
+      "classification": "read",
+      "scope": "venue",
+      "assistantCoverage": "partial",
+      "assistantTools": [
+        "customers.summary",
+        "customers.detail",
+        "creditPacks.balance"
+      ],
+      "notes": [
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {

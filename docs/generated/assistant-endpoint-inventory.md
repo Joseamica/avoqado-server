@@ -1,14 +1,14 @@
 # Assistant Endpoint Inventory
 
-Generated: 2026-06-13T01:26:24.652Z
+Generated: 2026-06-13T01:46:21.230Z
 
 ## Summary
 
-- Total endpoints: 1543
+- Total endpoints: 1545
 - Assistant tools registered: 80
-- Coverage: missing 571, blocked 489, partial 478, covered 5
-- Classifications: read 474, adminOnly 422, action 318, dangerousMutation 136, mutation 126, public 67
-- Scopes: venue 756, superadmin 379, unknown 185, organization 121, public 102
+- Coverage: missing 571, blocked 489, partial 480, covered 5
+- Classifications: read 475, adminOnly 422, action 319, dangerousMutation 136, mutation 126, public 67
+- Scopes: venue 758, superadmin 379, unknown 185, organization 121, public 102
 
 ## Top Missing Domains
 
@@ -1003,6 +1003,8 @@ Generated: 2026-06-13T01:26:24.652Z
 | POST | `/api/v1/dashboard/venues/:venueId/referrals/capture` | action | venue | missing | referral:read | CaptureReferralSchema | referralsController.captureCode |
 | GET | `/api/v1/dashboard/venues/:venueId/referrals/config` | read | venue | missing | referral:read | - | referralsController.getConfig |
 | PATCH | `/api/v1/dashboard/venues/:venueId/referrals/config` | mutation | venue | missing | referral:configure | UpdateReferralConfigSchema | referralsController.updateConfig |
+| POST | `/api/v1/dashboard/venues/:venueId/referrals/customers/:customerId/generate-code` | action | venue | partial | referral:read | - | referralsController.generateCustomerCodeHandler |
+| GET | `/api/v1/dashboard/venues/:venueId/referrals/customers/:customerId/referrals` | read | venue | partial | referral:read | - | referralsController.getCustomerReferralsHandler |
 | GET | `/api/v1/dashboard/venues/:venueId/referrals/customers/:customerId/share-link` | read | venue | partial | referral:read | - | referralsController.getShareLink |
 | POST | `/api/v1/dashboard/venues/:venueId/referrals/deactivate` | action | venue | missing | referral:configure | DeactivateReferralProgramSchema | referralsController.deactivate |
 | POST | `/api/v1/dashboard/venues/:venueId/referrals/force-override` | action | venue | missing | referral:override-existing-customer | ForceOverrideReferralSchema | referralsController.forceOverride |
