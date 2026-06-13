@@ -166,6 +166,17 @@ export async function getSalesByPromoter(req: Request, res: Response): Promise<v
   }
 }
 
+export async function getSalesByPromoterDaily(req: Request, res: Response): Promise<void> {
+  try {
+    const { orgId } = req.params
+    const data = await svc.getSalesByPromoterDaily(orgId)
+    res.status(200).json({ success: true, data })
+  } catch (error: any) {
+    logger.error(`[ORG SALE VERIFICATION] by-promoter-daily error: ${error.message}`)
+    res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Internal server error' })
+  }
+}
+
 /**
  * PATCH /dashboard/organizations/:orgId/sale-verifications/:id/review
  *

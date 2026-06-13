@@ -654,6 +654,96 @@ export async function getSalesByPromoter(
     .sort((a, b) => b.total - a.total)
 }
 
+/** "YYYY-MM-DD" day key in venue timezone (same tz convention as toMonthKey/toWeekLabel). */
+function toDayKey(d: Date, tz: string = VENUE_TIMEZONE_DEFAULT): string {
+  const local = new Date(d.toLocaleString('en-US', { timeZone: tz }))
+  return `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, '0')}-${String(local.getDate()).padStart(2, '0')}`
+}
+
+export interface PromoterDailyRow {
+  staffId: string | null
+  promoterName: string
+  /** Confirmed (COMPLETED) sales per day key ("YYYY-MM-DD"). */
+  byDay: Record<string, number>
+  /** Confirmed total for the current month (sum of byDay). Excludes toReview. */
+  total: number
+  /**
+   * Count of FAILED verifications — sales the PROMOTER must fix on the TPV
+   * ("Pendientes de revisar por el promotor en TPV"). NOT part of `total`.
+   */
+  toReview: number
+}
+
+export interface PromoterDailyResult {
+  /** Current month "YYYY-MM". */
+  month: string
+  /** Ordered day keys of the current month, day 1 → today (venue tz). */
+  days: string[]
+  rows: PromoterDailyRow[]
+}
+
+/**
+ * "Ventas Totales por Promotor por día" — current month only (PlayTelecom, Asana
+ * 1215613218390496). Per promoter: confirmed (COMPLETED) sales broken down by day,
+ * the monthly confirmed total, and a `toReview` count of FAILED verifications the
+ * promoter must correct on the TPV. Sales "to review" are NEVER added to `total`.
+ * Rows sorted by confirmed total desc. Always the current month, ignores any range.
+ */
+export async function getSalesByPromoterDaily(orgId: string): Promise<PromoterDailyResult> {
+  const tz = VENUE_TIMEZONE_DEFAULT
+  // "Now" in venue local time → current month boundaries.
+  const nowLocal = new Date(new Date().toLocaleString('en-US', { timeZone: tz }))
+  const year = nowLocal.getFullYear()
+  const month0 = nowLocal.getMonth() // 0-based
+  const mm = String(month0 + 1).padStart(2, '0')
+  const monthKey = `${year}-${mm}`
+  const rangeStart = fromZonedTime(new Date(`${monthKey}-01T00:00:00`), tz)
+
+  // Day columns: 01 → today.
+  const days: string[] = []
+  for (let d = 1; d <= nowLocal.getDate(); d++) days.push(`${monthKey}-${String(d).padStart(2, '0')}`)
+
+  // Need both COMPLETED (daily/total) and FAILED (toReview) for the current month.
+  const verifications = await prisma.saleVerification.findMany({
+    where: {
+      venue: { organizationId: orgId },
+      status: { in: ['COMPLETED', 'FAILED'] },
+      createdAt: { gte: rangeStart },
+    },
+    select: {
+      createdAt: true,
+      status: true,
+      staff: { select: { id: true, firstName: true, lastName: true } },
+    },
+  })
+
+  const map = new Map<string, { name: string; byDay: Record<string, number>; toReview: number }>()
+  for (const v of verifications) {
+    const key = v.staff?.id ?? 'unassigned'
+    const name = v.staff ? `${v.staff.firstName} ${v.staff.lastName}`.trim() : 'Sin promotor'
+    const row = map.get(key) ?? { name, byDay: {}, toReview: 0 }
+    if (v.status === 'COMPLETED') {
+      const dayKey = toDayKey(v.createdAt, tz)
+      row.byDay[dayKey] = (row.byDay[dayKey] ?? 0) + 1
+    } else if (v.status === 'FAILED') {
+      row.toReview += 1
+    }
+    map.set(key, row)
+  }
+
+  const rows: PromoterDailyRow[] = Array.from(map.entries())
+    .map(([staffId, val]) => ({
+      staffId: staffId === 'unassigned' ? null : staffId,
+      promoterName: val.name,
+      byDay: val.byDay,
+      total: Object.values(val.byDay).reduce((a, b) => a + b, 0),
+      toReview: val.toReview,
+    }))
+    .sort((a, b) => b.total - a.total)
+
+  return { month: monthKey, days, rows }
+}
+
 // ============================================================
 // Review (approve/reject) — delegates to venue-scoped service
 // ============================================================

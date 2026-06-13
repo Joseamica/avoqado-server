@@ -52,6 +52,7 @@ router.get('/by-city', checkPermission('sale-verifications:review'), ctrl.getSal
 router.get('/by-supervisor', checkPermission('sale-verifications:review'), ctrl.getSalesBySupervisor)
 router.get('/by-store', checkPermission('sale-verifications:review'), ctrl.getSalesByStore)
 router.get('/by-promoter', checkPermission('sale-verifications:review'), ctrl.getSalesByPromoter)
+router.get('/by-promoter-daily', checkPermission('sale-verifications:review'), ctrl.getSalesByPromoterDaily)
 
 router.patch('/:id/review', checkPermission('sale-verifications:review'), ctrl.reviewOrgSaleVerification)
 router.post('/:id/reopen', checkPermission('sale-verifications:reopen'), ctrl.reopenOrgSaleVerification)

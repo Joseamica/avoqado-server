@@ -20,6 +20,7 @@ import {
   getSalesBySupervisor,
   getSalesByStore,
   getSalesByPromoter,
+  getSalesByPromoterDaily,
 } from '@/services/dashboard/sale-verification.org.dashboard.service'
 import prisma from '@/utils/prismaClient'
 
@@ -191,5 +192,60 @@ describe('getSalesByPromoter — monthly grouping', () => {
         where: expect.objectContaining({ status: 'COMPLETED', venue: { organizationId: ORG_ID } }),
       }),
     )
+  })
+})
+
+describe('getSalesByPromoterDaily — current month, per-day + toReview', () => {
+  // "Now" in venue tz (CDMX), exactly how the service derives the current month.
+  function cdmxNow(): Date {
+    return new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }))
+  }
+  // 18:00 UTC on the 1st = 12:00 CDMX on the 1st → day key `${month}-01`, TZ-stable,
+  // and aligned to the SAME CDMX month the service computes (no month-boundary flake).
+  function firstOfThisMonthMidday(): Date {
+    const c = cdmxNow()
+    return new Date(Date.UTC(c.getFullYear(), c.getMonth(), 1, 18, 0, 0))
+  }
+
+  it('counts COMPLETED per day in total, and FAILED as toReview (excluded from total), sorted desc', async () => {
+    const d1 = firstOfThisMonthMidday()
+    mockedSvFindMany.mockResolvedValue([
+      // staff A: 2 confirmed + 1 to-review
+      { createdAt: d1, status: 'COMPLETED', staff: { id: 'A', firstName: 'Nancy', lastName: 'Casillas' } },
+      { createdAt: d1, status: 'COMPLETED', staff: { id: 'A', firstName: 'Nancy', lastName: 'Casillas' } },
+      { createdAt: d1, status: 'FAILED', staff: { id: 'A', firstName: 'Nancy', lastName: 'Casillas' } },
+      // staff B: 1 confirmed
+      { createdAt: d1, status: 'COMPLETED', staff: { id: 'B', firstName: 'Patricia', lastName: 'Navarro' } },
+      // staff C: ONLY a to-review sale → must still appear (promoter must act), total 0
+      { createdAt: d1, status: 'FAILED', staff: { id: 'C', firstName: 'Lucía', lastName: 'Briones' } },
+    ])
+
+    const result = await getSalesByPromoterDaily(ORG_ID)
+
+    expect(result.rows[0]).toMatchObject({ staffId: 'A', total: 2, toReview: 1 })
+    expect(result.rows[1]).toMatchObject({ staffId: 'B', total: 1, toReview: 0 })
+    const cRow = result.rows.find(r => r.staffId === 'C')!
+    expect(cRow).toMatchObject({ total: 0, toReview: 1 })
+    // Confirmed-only day buckets; the 1st carries staff A's two confirmed sales
+    const dayKey = `${result.month}-01`
+    expect(result.rows[0].byDay[dayKey]).toBe(2)
+    // byDay never includes FAILED → sum of byDay equals total
+    expect(Object.values(result.rows[0].byDay).reduce((a, b) => a + b, 0)).toBe(result.rows[0].total)
+  })
+
+  it('queries the CURRENT month for COMPLETED + FAILED only (so toReview is available)', async () => {
+    mockedSvFindMany.mockResolvedValue([])
+
+    const result = await getSalesByPromoterDaily(ORG_ID)
+
+    const call = mockedSvFindMany.mock.calls[0][0]
+    expect(call.where.venue).toEqual({ organizationId: ORG_ID })
+    expect(call.where.status).toEqual({ in: ['COMPLETED', 'FAILED'] })
+    expect(call.where.createdAt.gte).toBeInstanceOf(Date)
+    // month is the current CDMX YYYY-MM; days run 1..today
+    const c = cdmxNow()
+    expect(result.month).toBe(`${c.getFullYear()}-${String(c.getMonth() + 1).padStart(2, '0')}`)
+    expect(result.days.length).toBe(c.getDate())
+    expect(result.days[0]).toBe(`${result.month}-01`)
   })
 })

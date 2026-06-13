@@ -11,6 +11,7 @@ import {
   getSalesByStore,
   getSalesBySupervisor,
   getSalesByPromoter,
+  getSalesByPromoterDaily,
   parseRange,
 } from '@/services/dashboard/sale-verification.org.dashboard.service'
 
@@ -31,11 +32,11 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
 
   server.tool(
     'org_confirmed_sales_report',
-    'CONFIRMED sales report for the connected organization (serialized-inventory / PlayTelecom back-office). Only counts sales whose back-office verification is COMPLETED ("venta correcta") — sales "en revisión" or without evidence are EXCLUDED from every figure. groupBy: "summary" (KPIs incl. confirmedRevenue + pending/failed counters), "month", "city", "store", "supervisor" (the venue MANAGER responsible), or "promoter" (the staff who sold). Monthly buckets per row where applicable. Answers "¿cuántas ventas confirmadas llevamos por ciudad/tienda/promotor mes a mes?". Optional fromDate/toDate (YYYY-MM-DD) limit the window; omit for full history.',
+    'CONFIRMED sales report for the connected organization (serialized-inventory / PlayTelecom back-office). Only counts sales whose back-office verification is COMPLETED ("venta correcta") — sales "en revisión" or without evidence are EXCLUDED from every figure. groupBy: "summary" (KPIs incl. confirmedRevenue + pending/failed counters), "month", "city", "store", "supervisor" (the venue MANAGER responsible), "promoter" (the staff who sold, monthly), or "promoterDaily" (CURRENT MONTH only — per promoter per day, plus a `toReview` count of FAILED sales the promoter must fix on the TPV, which are NOT in the total). Answers "¿cuántas ventas confirmadas llevamos por ciudad/tienda/promotor? ¿cuáles tiene que corregir cada promotor?". Optional fromDate/toDate (YYYY-MM-DD) limit the window (ignored for promoterDaily); omit for full history.',
     {
       groupBy: z
-        .enum(['summary', 'month', 'city', 'store', 'supervisor', 'promoter'])
-        .describe('Aggregation: summary KPIs, or confirmed sales grouped by month / city / store / supervisor / promoter'),
+        .enum(['summary', 'month', 'city', 'store', 'supervisor', 'promoter', 'promoterDaily'])
+        .describe('Aggregation: summary KPIs, or confirmed sales grouped by month / city / store / supervisor / promoter / promoterDaily (current month, per day + toReview)'),
       fromDate: z
         .string()
         .regex(/^\d{4}-\d{2}-\d{2}$/)
@@ -65,6 +66,8 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
           return text(await getSalesBySupervisor(orgId, range))
         case 'promoter':
           return text(await getSalesByPromoter(orgId, range))
+        case 'promoterDaily':
+          return text(await getSalesByPromoterDaily(orgId))
       }
     },
   )
