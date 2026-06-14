@@ -275,3 +275,61 @@ export async function reopenOrgSaleVerification(req: Request, res: Response): Pr
     res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Internal server error' })
   }
 }
+
+/**
+ * PATCH /dashboard/organizations/:orgId/sale-verifications/:id
+ *
+ * Edit/correct a sale (OWNER-only via `sale-verifications:edit`). Body fields
+ * are all optional except `reason` (min 5 chars). Delegates to the service.
+ */
+export async function editOrgSaleVerification(req: Request, res: Response): Promise<void> {
+  try {
+    const { orgId, id } = req.params
+    const { amount, paymentForm, isPortabilidad, status, reason } = req.body as {
+      amount?: number
+      paymentForm?: string
+      isPortabilidad?: boolean
+      status?: string
+      reason?: string
+    }
+
+    const editedById = (req as any).authContext?.userId
+    if (!editedById) {
+      res.status(401).json({ success: false, message: 'No staff context' })
+      return
+    }
+    if (typeof reason !== 'string' || reason.trim().length < 5) {
+      res.status(400).json({ success: false, message: 'Un motivo de al menos 5 caracteres es obligatorio' })
+      return
+    }
+    if (paymentForm != null && !['CASH', 'CARD', 'OTHER'].includes(paymentForm)) {
+      res.status(400).json({ success: false, message: `Forma de pago inválida: ${paymentForm}` })
+      return
+    }
+    if (status != null && !['PENDING', 'COMPLETED', 'FAILED'].includes(status)) {
+      res.status(400).json({ success: false, message: `Estado inválido: ${status}` })
+      return
+    }
+    if (isPortabilidad != null && typeof isPortabilidad !== 'boolean') {
+      res.status(400).json({ success: false, message: 'isPortabilidad debe ser booleano' })
+      return
+    }
+
+    logger.info(`[ORG SALE VERIFICATION] PATCH ${id} (edit) org=${orgId} by=${editedById}`)
+
+    const updated = await svc.editOrgSaleVerification(orgId, {
+      saleVerificationId: id,
+      editedById,
+      amount,
+      paymentForm: paymentForm as 'CASH' | 'CARD' | 'OTHER' | undefined,
+      isPortabilidad,
+      status: status as SaleVerificationStatus | undefined,
+      reason,
+    })
+
+    res.status(200).json({ success: true, data: updated })
+  } catch (error: any) {
+    logger.error(`[ORG SALE VERIFICATION] edit error: ${error.message}`)
+    res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Internal server error' })
+  }
+}
