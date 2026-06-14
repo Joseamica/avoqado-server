@@ -81,7 +81,7 @@ async function generateOrderNumber(venueId: string): Promise<string> {
 /**
  * Helper function to send Purchase Order email (async, non-blocking)
  */
-async function sendPurchaseOrderEmailAsync(venueId: string, purchaseOrderId: string, staffId?: string): Promise<void> {
+export async function sendPurchaseOrderEmailAsync(venueId: string, purchaseOrderId: string, staffId?: string): Promise<boolean> {
   try {
     // Fetch complete PO data
     const po = await prisma.purchaseOrder.findUnique({
@@ -107,13 +107,13 @@ async function sendPurchaseOrderEmailAsync(venueId: string, purchaseOrderId: str
 
     if (!po) {
       logger.warn(`Purchase Order ${purchaseOrderId} not found for email sending`)
-      return
+      return false
     }
 
     // Check if supplier has email
     if (!po.supplier.email) {
       logger.warn(`Supplier ${po.supplier.name} (ID: ${po.supplierId}) has no email address - skipping PO email`)
-      return
+      return false
     }
 
     // Fetch staff details if staffId provided
@@ -177,9 +177,11 @@ async function sendPurchaseOrderEmailAsync(venueId: string, purchaseOrderId: str
     } else {
       logger.warn(`⚠️ Purchase Order email sending failed for ${po.orderNumber} (non-critical)`)
     }
+    return emailSent
   } catch (error) {
     logger.error(`Error in sendPurchaseOrderEmailAsync for PO ${purchaseOrderId}:`, error)
     // Don't throw - email failure should not affect PO creation
+    return false
   }
 }
 

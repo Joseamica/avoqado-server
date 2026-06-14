@@ -15,6 +15,8 @@ import emailService from '../services/email.service'
 import socketManager from '../communication/sockets'
 import { NotificationChannel, NotificationPriority, NotificationType, Prisma, StaffRole, VenueStatus } from '@prisma/client'
 import { FRONTEND_URL } from '../config/env'
+import { runAutoReorderForVenue, parseAutoReorderConfig } from '../services/dashboard/autoReorder.service'
+import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
 // ============================================================
 // Types
@@ -101,37 +103,42 @@ export class NightlyLowStockJob {
       logger.info('Starting nightly low stock digest job...')
 
       // Get all active venues
-      const venues = await prisma.venue.findMany({
-        where: {
-          ...(specificVenueId ? { id: specificVenueId } : {}),
-          status: {
-            in: [VenueStatus.ACTIVE, VenueStatus.TRIAL, VenueStatus.LIVE_DEMO],
-          },
-        },
-        select: {
-          id: true,
-          name: true,
-          slug: true,
-          staff: {
+      const venues = await retry(
+        () =>
+          prisma.venue.findMany({
             where: {
-              active: true,
-              role: {
-                in: [StaffRole.OWNER, StaffRole.ADMIN, StaffRole.MANAGER],
+              ...(specificVenueId ? { id: specificVenueId } : {}),
+              status: {
+                in: [VenueStatus.ACTIVE, VenueStatus.TRIAL, VenueStatus.LIVE_DEMO],
               },
             },
             select: {
+              id: true,
+              name: true,
+              slug: true,
+              autoReorderConfig: true,
               staff: {
+                where: {
+                  active: true,
+                  role: {
+                    in: [StaffRole.OWNER, StaffRole.ADMIN, StaffRole.MANAGER],
+                  },
+                },
                 select: {
-                  id: true,
-                  email: true,
-                  firstName: true,
-                  lastName: true,
+                  staff: {
+                    select: {
+                      id: true,
+                      email: true,
+                      firstName: true,
+                      lastName: true,
+                    },
+                  },
                 },
               },
             },
-          },
-        },
-      })
+          }),
+        { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'nightly-low-stock.venues' },
+      )
 
       logger.info(`Found ${venues.length} active venues to scan for low stock`)
 
@@ -384,6 +391,21 @@ export class NightlyLowStockJob {
                 },
               })
             }
+          }
+
+          // Auto-reorder (PREMIUM AUTO_REORDER): create POs + email suppliers for venues that opted in.
+          // PO creation + email sends are intentionally OUTSIDE any retry (cron-jobs.md: never retry sends).
+          try {
+            const arConfig = parseAutoReorderConfig(venue.autoReorderConfig)
+            if (arConfig.enabled) {
+              const ar = await runAutoReorderForVenue(venue.id, arConfig)
+              if (ar.ordersCreated > 0) {
+                logger.info(`Auto-reorder for ${venue.name}: ${ar.ordersCreated} PO(s), ${ar.emailsSent} email(s)`, { venueId: venue.id })
+              }
+            }
+          } catch (autoReorderError) {
+            errors++
+            logger.error(`Auto-reorder failed for venue ${venue.name}`, { error: autoReorderError, venueId: venue.id })
           }
 
           venuesProcessed++

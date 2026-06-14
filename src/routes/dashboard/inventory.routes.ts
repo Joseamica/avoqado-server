@@ -1,6 +1,8 @@
 import { Router } from 'express'
 import { validateRequest } from '../../middlewares/validation'
 import { checkPermission } from '../../middlewares/checkPermission.middleware'
+import { checkFeatureAccess } from '../../middlewares/checkFeatureAccess.middleware'
+import * as autoReorderController from '../../controllers/dashboard/auto-reorder.controller'
 
 // Import controllers
 import * as rawMaterialController from '../../controllers/dashboard/inventory/rawMaterial.controller'
@@ -1335,5 +1337,36 @@ router.get('/transfers', checkPermission('inventory:read'), inventoryTransferCon
  *     summary: Get a single transfer with its items (read-only audit)
  */
 router.get('/transfers/:transferId', checkPermission('inventory:read'), inventoryTransferController.getTransfer)
+
+// ===========================================
+// AUTO-REORDER (PREMIUM AUTO_REORDER)
+// ===========================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/auto-reorder:
+ *   get:
+ *     tags: [Inventory - Auto-Reorder]
+ *     summary: Get auto-reorder settings and live preview
+ */
+router.get('/auto-reorder', checkPermission('inventory:read'), autoReorderController.getSettings)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/auto-reorder:
+ *   put:
+ *     tags: [Inventory - Auto-Reorder]
+ *     summary: Update auto-reorder settings (PREMIUM)
+ */
+router.put('/auto-reorder', checkFeatureAccess('AUTO_REORDER'), checkPermission('inventory:update'), autoReorderController.updateSettings)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/auto-reorder/run-now:
+ *   post:
+ *     tags: [Inventory - Auto-Reorder]
+ *     summary: Execute auto-reorder immediately (PREMIUM)
+ */
+router.post('/auto-reorder/run-now', checkFeatureAccess('AUTO_REORDER'), checkPermission('inventory:update'), autoReorderController.runNow)
 
 export default router
