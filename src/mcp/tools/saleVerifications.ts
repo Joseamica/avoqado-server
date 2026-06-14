@@ -36,7 +36,9 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
     {
       groupBy: z
         .enum(['summary', 'month', 'city', 'store', 'supervisor', 'promoter', 'promoterDaily'])
-        .describe('Aggregation: summary KPIs, or confirmed sales grouped by month / city / store / supervisor / promoter / promoterDaily (current month, per day + toReview)'),
+        .describe(
+          'Aggregation: summary KPIs, or confirmed sales grouped by month / city / store / supervisor / promoter / promoterDaily (current month, per day + toReview)',
+        ),
       fromDate: z
         .string()
         .regex(/^\d{4}-\d{2}-\d{2}$/)
