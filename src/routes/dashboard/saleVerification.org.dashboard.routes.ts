@@ -56,5 +56,6 @@ router.get('/by-promoter-daily', checkPermission('sale-verifications:review'), c
 
 router.patch('/:id/review', checkPermission('sale-verifications:review'), ctrl.reviewOrgSaleVerification)
 router.post('/:id/reopen', checkPermission('sale-verifications:reopen'), ctrl.reopenOrgSaleVerification)
+router.patch('/:id', checkPermission('sale-verifications:edit'), ctrl.editOrgSaleVerification)
 
 export default router
