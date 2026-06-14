@@ -175,10 +175,7 @@ describe('PATCH /api/v1/dashboard/organizations/:orgId/sale-verifications/:id (e
   it('400 when reason is too short', async () => {
     seedFailedSale()
     const token = makeToken('OWNER')
-    const res = await request(app)
-      .patch(`${BASE}/${SALE_ID}`)
-      .set('Authorization', `Bearer ${token}`)
-      .send({ amount: 50, reason: 'x' })
+    const res = await request(app).patch(`${BASE}/${SALE_ID}`).set('Authorization', `Bearer ${token}`).send({ amount: 50, reason: 'x' })
 
     expect(res.status).toBe(400)
     // Validation failed before any write happened.
