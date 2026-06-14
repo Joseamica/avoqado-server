@@ -892,6 +892,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'serialized-inventory:create', // Can register (Alta de Productos)
     'sale-verifications:review', // Can approve/reject SIM-sale documentation from dashboard
     'sale-verifications:reopen', // Can revert an approved sale back to PENDING for re-review (OWNER only)
+    'sale-verifications:edit', // Can edit/correct any sale (amount, forma de pago, tipo, estado) — OWNER only
     // Org-level management
     'goals:org-manage', // Manage org-level sales goal defaults
     'inventory:org-manage', // Manage org-level item categories & serialized items
@@ -927,6 +928,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
   [StaffRole.SUPERADMIN]: [
     '*:*', // All permissions (covers sale-verifications:reopen and any future perm)
     'sale-verifications:reopen', // Explicit for clarity — reopen approved sales for re-review
+    'sale-verifications:edit', // Explicit for clarity — edit/correct sales
   ],
 }
 
@@ -1309,7 +1311,7 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   // Serialized Inventory (SIMs, jewelry, etc.)
   'serialized-inventory': ['serialized-inventory:sell', 'serialized-inventory:create'],
   // Sale Verifications back-office review (PlayTelecom / Walmart documentation flow)
-  'sale-verifications': ['sale-verifications:review', 'sale-verifications:reopen'],
+  'sale-verifications': ['sale-verifications:review', 'sale-verifications:reopen', 'sale-verifications:edit'],
   // SIM custody (PlayTelecom chain-of-custody: Admin → Supervisor → Promoter)
   'sim-custody': [
     'sim-custody:assign-to-supervisor',
