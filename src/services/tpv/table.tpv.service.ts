@@ -45,7 +45,9 @@ export async function getTablesWithStatus(venueId: string): Promise<TableStatusR
   logger.info(`📋 [TABLE SERVICE] Getting tables with status for venue ${venueId}`)
 
   const tables = await prisma.table.findMany({
-    where: { venueId },
+    // Only active tables — soft-deleted ones (active: false) must not resurface
+    // on the floor plan. Mirrors getFloorElements, which already filters active.
+    where: { venueId, active: true },
     include: {
       area: {
         select: { id: true, name: true },
