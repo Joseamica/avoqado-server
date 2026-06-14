@@ -28,6 +28,7 @@ export const PREMIUM_ONLY_CODES = [
   'COMMISSIONS',
   'ATTENDANCE_TRACKING',
   'SERIALIZED_INVENTORY',
+  'AUTO_REORDER',
 ] as const
 
 /**
