@@ -901,6 +901,154 @@ export async function reopenOrgSaleVerification(
   return updated
 }
 
+type EditableForm = 'CASH' | 'CARD' | 'OTHER'
+
+// Reverse of derivePaymentForm: the UI's 3 buckets map back to a canonical
+// PaymentMethod. CREDIT_CARD round-trips to 'CARD' so the row redisplays stably.
+const PAYMENT_FORM_TO_METHOD: Record<EditableForm, PaymentMethod> = {
+  CASH: 'CASH',
+  CARD: 'CREDIT_CARD',
+  OTHER: 'OTHER',
+}
+
+/**
+ * Edit/correct a sale verification at org scope (back-office, OWNER-only).
+ *
+ * P1 fields: amount + forma de pago (Payment), isPortabilidad + status
+ * (SaleVerification). Writes are atomic; an ActivityLog row records before/after
+ * + reason for audit (this mutates a financial record). Commissions are NOT
+ * recomputed (PlayTelecom doesn't use them; revenue charts are query-time and
+ * self-correct). `reason` is mandatory (min 5 chars).
+ */
+export async function editOrgSaleVerification(
+  orgId: string,
+  params: {
+    saleVerificationId: string
+    editedById: string
+    amount?: number
+    paymentForm?: EditableForm
+    isPortabilidad?: boolean
+    status?: SaleVerificationStatus
+    reason: string
+  },
+) {
+  const trimmedReason = params.reason?.trim() ?? ''
+  if (trimmedReason.length < 5) {
+    throw createServiceError('Un motivo de al menos 5 caracteres es obligatorio para editar la venta', 400)
+  }
+  if (params.amount != null && (!Number.isFinite(params.amount) || params.amount < 0)) {
+    throw createServiceError('El monto debe ser un número mayor o igual a 0', 400)
+  }
+
+  const existing = await prisma.saleVerification.findUnique({
+    where: { id: params.saleVerificationId },
+    select: {
+      id: true,
+      venueId: true,
+      staffId: true,
+      paymentId: true,
+      status: true,
+      isPortabilidad: true,
+      payment: { select: { id: true, amount: true, method: true } },
+      venue: { select: { organizationId: true } },
+    },
+  })
+
+  if (!existing) throw createServiceError('Venta no encontrada', 404)
+  if (existing.venue?.organizationId !== orgId) {
+    throw createServiceError('La venta no pertenece a esta organización', 403)
+  }
+
+  const before = {
+    status: existing.status,
+    isPortabilidad: existing.isPortabilidad,
+    amount: existing.payment ? Number(existing.payment.amount) : null,
+    method: existing.payment?.method ?? null,
+  }
+  const nextStatus: SaleVerificationStatus = params.status ?? existing.status
+
+  const updated = await prisma.$transaction(async tx => {
+    // 1. Payment (monto / forma de pago)
+    if (existing.payment && (params.amount != null || params.paymentForm != null)) {
+      await tx.payment.update({
+        where: { id: existing.payment.id },
+        data: {
+          ...(params.amount != null ? { amount: params.amount } : {}),
+          ...(params.paymentForm != null ? { method: PAYMENT_FORM_TO_METHOD[params.paymentForm] } : {}),
+        },
+      })
+    }
+
+    // 2. SaleVerification (tipo de venta + estado + metadata de revisión)
+    const reviewMeta =
+      nextStatus === 'PENDING'
+        ? { reviewedById: null, reviewedAt: null, reviewNotes: null, rejectionReasons: [] }
+        : nextStatus === 'COMPLETED'
+          ? { reviewedById: params.editedById, reviewedAt: new Date(), rejectionReasons: [] }
+          : { reviewedById: params.editedById, reviewedAt: new Date() } // FAILED keeps existing reasons/notes
+
+    const sv = await tx.saleVerification.update({
+      where: { id: existing.id },
+      data: {
+        ...(params.isPortabilidad != null ? { isPortabilidad: params.isPortabilidad } : {}),
+        status: nextStatus,
+        ...reviewMeta,
+      },
+      include: {
+        staff: { select: { id: true, firstName: true, lastName: true, email: true, photoUrl: true } },
+        reviewedBy: { select: { id: true, firstName: true, lastName: true } },
+        payment: { select: { id: true, amount: true, method: true, status: true, createdAt: true } },
+      },
+    })
+
+    // 3. Audit (financial edit → DB record, not just logs)
+    await tx.activityLog.create({
+      data: {
+        staffId: params.editedById,
+        venueId: existing.venueId,
+        action: 'SALE_VERIFICATION_EDIT',
+        entity: 'SaleVerification',
+        entityId: existing.id,
+        data: {
+          reason: trimmedReason,
+          before,
+          after: {
+            status: nextStatus,
+            isPortabilidad: params.isPortabilidad ?? existing.isPortabilidad,
+            amount: params.amount ?? before.amount,
+            method: params.paymentForm ? PAYMENT_FORM_TO_METHOD[params.paymentForm] : before.method,
+          },
+        } as Prisma.InputJsonValue,
+      },
+    })
+
+    return sv
+  })
+
+  logger.info(
+    `[SALE_VERIFICATION_EDIT] verification=${existing.id} org=${orgId} by=${params.editedById} ` +
+      `status=${before.status}->${nextStatus} amount=${before.amount}->${params.amount ?? before.amount} ` +
+      `reason="${trimmedReason.replace(/"/g, '\\"')}"`,
+  )
+
+  // Best-effort: refresh the promoter's TPV badge (harmless if the promoter left).
+  try {
+    socketManager.broadcastToUser(existing.staffId, SocketEventType.SALE_VERIFICATION_REVIEWED, {
+      saleVerificationId: updated.id,
+      paymentId: updated.paymentId,
+      status: updated.status,
+      reviewedAt: updated.reviewedAt,
+      reviewNotes: updated.reviewNotes ?? null,
+      rejectionReasons: updated.rejectionReasons ?? [],
+      reviewedBy: updated.reviewedBy ?? null,
+    })
+  } catch (err: any) {
+    logger.warn(`[SALE_VERIFICATION_EDIT] socket emit failed for staff ${existing.staffId}: ${err?.message ?? err}`)
+  }
+
+  return updated
+}
+
 // Utility — parse query dates with venue-timezone-aware day boundaries
 export function parseRange(fromDateStr?: string, toDateStr?: string): AggregationRange {
   const range: AggregationRange = {}
