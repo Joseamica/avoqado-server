@@ -8,6 +8,7 @@ import { serializedInventoryService } from '@/services/serialized-inventory/seri
 import { auditMcpWrite } from '../audit'
 import { adjustInventoryStock } from '@/services/dashboard/productInventory.service'
 import { createRawMaterial } from '@/services/dashboard/rawMaterial.service'
+import { getReorderSuggestions, getAutoReorderConfig, setAutoReorderConfig } from '@/services/dashboard/autoReorder.service'
 import { planGateMessage } from '../planGate'
 import { venuesWithFeatureAccess } from '@/services/access/basePlan.service'
 import { MovementType, RawMaterialCategory, Unit } from '@prisma/client'
@@ -58,6 +59,74 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
         .sort((a, b) => b.shortBy - a.shortBy)
         .slice(0, limit ?? 50)
       return text({ venueId, count: lowStock.length, lowStock })
+    },
+  )
+
+  server.tool(
+    'reorder_suggestions',
+    'What to re-order right now in a venue you can access: raw materials at/below their reorder point, with the suggested quantity, the best supplier (by price/lead-time/rating), estimated cost and urgency. Also returns whether auto-reorder is enabled. Answers "¿qué pido y a quién?". Pass venueId. Requires the PREMIUM auto-reorder feature.',
+    {
+      venueId: z.string().describe('Venue whose reorder suggestions to compute (must be in your scope)'),
+    },
+    async ({ venueId }) => {
+      guard.venueFilter(venueId) // throws if out of scope
+      const entitled = [...(await venuesWithFeatureAccess([venueId], 'AUTO_REORDER'))]
+      if (entitled.length === 0) {
+        return text({ ok: false, planRequired: true, error: 'El re-orden automático requiere el plan PREMIUM (AUTO_REORDER).' })
+      }
+      const config = await getAutoReorderConfig(venueId)
+      const { suggestions, totalSuggestions, criticalCount } = await getReorderSuggestions(venueId)
+      return text({
+        venueId,
+        autoReorderEnabled: config.enabled,
+        totalSuggestions,
+        criticalCount,
+        suggestions: suggestions.slice(0, 50).map(s => ({
+          name: s.rawMaterial.name,
+          currentStock: s.rawMaterial.currentStock,
+          reorderPoint: s.rawMaterial.reorderPoint,
+          urgency: s.suggestion.urgency,
+          suggestedQuantity: s.suggestion.suggestedQuantity,
+          estimatedCost: s.suggestion.estimatedCost,
+          supplier: s.suggestion.recommendedSupplier?.name ?? null,
+        })),
+      })
+    },
+  )
+
+  server.tool(
+    'configure_auto_reorder',
+    'Turn automatic supplier re-ordering ON or OFF for a venue you can access, and set the optional daily spend cap (MXN) and minimum urgency. When ON, the nightly job creates approved purchase orders for low-stock ingredients and EMAILS the supplier automatically. This WRITES — requires inventory:update and the PREMIUM AUTO_REORDER feature.',
+    {
+      venueId: z.string().describe('Venue to configure (must be in your scope)'),
+      enabled: z.boolean().describe('true = turn auto-reorder ON (will email suppliers automatically), false = OFF'),
+      dailyCapMxn: z.number().positive().nullable().optional().describe('Optional daily auto-spend cap in MXN. null/omit = no cap.'),
+      minUrgency: z
+        .enum(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'])
+        .optional()
+        .describe("Only auto-order items at/above this urgency. Default 'LOW' (everything below reorder point)."),
+    },
+    async ({ venueId, enabled, dailyCapMxn, minUrgency }) => {
+      guard.venueFilter(venueId) // throws if out of scope
+      guard.requirePermission('inventory:update', venueId) // write gate
+      const entitled = [...(await venuesWithFeatureAccess([venueId], 'AUTO_REORDER'))]
+      if (entitled.length === 0) {
+        return text({ ok: false, planRequired: true, error: 'El re-orden automático requiere el plan PREMIUM (AUTO_REORDER).' })
+      }
+      const current = await getAutoReorderConfig(venueId)
+      const config = await setAutoReorderConfig(venueId, {
+        enabled,
+        dailyCapMxn: dailyCapMxn !== undefined ? dailyCapMxn : current.dailyCapMxn,
+        minUrgency: minUrgency ?? current.minUrgency,
+      })
+      await auditMcpWrite(scope, {
+        action: 'AUTO_REORDER_CONFIG_UPDATED',
+        entity: 'Venue',
+        entityId: venueId,
+        venueId,
+        data: { enabled: config.enabled, dailyCapMxn: config.dailyCapMxn, minUrgency: config.minUrgency },
+      })
+      return text({ ok: true, config })
     },
   )
 
