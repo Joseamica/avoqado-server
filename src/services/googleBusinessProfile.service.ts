@@ -5,18 +5,24 @@ import AppError from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID
-const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET
-const GOOGLE_BP_REDIRECT_URI = process.env.GOOGLE_BP_REDIRECT_URI || process.env.GOOGLE_REDIRECT_URI
-
-if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_BP_REDIRECT_URI) {
-  throw new Error('Missing Google OAuth environment variables (GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_BP_REDIRECT_URI)')
-}
-
 /**
- * Create and configure OAuth2 client
+ * Create and configure OAuth2 client.
+ *
+ * The Google OAuth env vars are validated HERE (lazily, at call-time) rather than at
+ * module load. Validating at import time crashes any module that transitively imports this
+ * service when the vars are absent (test suites, CI, staging boot) — e.g.
+ * dashboard.routes → googleIntegration.controller → this service. Call-time validation keeps
+ * the import side-effect-free; the error still surfaces the moment the integration is actually used.
  */
 export function createOAuth2Client(): OAuth2Client {
+  const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID
+  const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET
+  const GOOGLE_BP_REDIRECT_URI = process.env.GOOGLE_BP_REDIRECT_URI || process.env.GOOGLE_REDIRECT_URI
+
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_BP_REDIRECT_URI) {
+    throw new AppError('Missing Google OAuth environment variables (GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_BP_REDIRECT_URI)', 500)
+  }
+
   return new google.auth.OAuth2(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_BP_REDIRECT_URI)
 }
 
