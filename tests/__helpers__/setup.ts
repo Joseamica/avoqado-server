@@ -217,6 +217,8 @@ const prismaMock: any = {
   venueChatMessage: createMockModel(),
   // Audit trail
   activityLog: createMockModel(),
+  // Sale verification (PlayTelecom SIM-sale documentation / back-office review)
+  saleVerification: createMockModel(),
   // Live demo sessions (demo.dashboard.avoqado.io)
   liveDemoSession: createMockModel(),
   // Add $connect and $disconnect for connection management
