@@ -1358,7 +1358,13 @@ router.get('/auto-reorder', checkPermission('inventory:read'), autoReorderContro
  *     tags: [Inventory - Auto-Reorder]
  *     summary: Update auto-reorder settings (PREMIUM)
  */
-router.put('/auto-reorder', checkFeatureAccess('AUTO_REORDER'), checkPermission('inventory:update'), autoReorderController.updateSettings)
+router.put(
+  '/auto-reorder',
+  checkFeatureAccess('AUTO_REORDER'),
+  checkPermission('inventory:update'),
+  validateRequest(autoReorderController.updateAutoReorderSchema),
+  autoReorderController.updateSettings,
+)
 
 /**
  * @openapi

@@ -15,10 +15,13 @@ const configSchema = z.object({
   minUrgency: z.enum(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'], { required_error: 'La urgencia mínima es requerida' }),
 })
 
+/** Route-level body validation schema — use with validateRequest so bad input returns 400 (not 500). */
+export const updateAutoReorderSchema = z.object({ body: configSchema })
+
 /** GET settings + a live preview of what would be re-ordered. */
 export async function getSettings(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { venueId } = (req as any).authContext
+    const { venueId } = req.params
     const config = await getAutoReorderConfig(venueId)
     const { suggestions, totalSuggestions, criticalCount } = await getReorderSuggestions(venueId)
     res.json({
@@ -45,9 +48,10 @@ export async function getSettings(req: Request, res: Response, next: NextFunctio
 /** PUT settings (gated by AUTO_REORDER feature at the route). */
 export async function updateSettings(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { venueId, userId } = (req as any).authContext
-    const parsed = configSchema.parse(req.body) as AutoReorderConfig
-    const saved = await setAutoReorderConfig(venueId, parsed)
+    const { venueId } = req.params
+    const { userId } = (req as any).authContext
+    // Body already validated by validateRequest(updateAutoReorderSchema) at the route → 400 on bad input.
+    const saved = await setAutoReorderConfig(venueId, req.body as AutoReorderConfig)
     await logAction({
       staffId: userId,
       venueId,
@@ -65,7 +69,7 @@ export async function updateSettings(req: Request, res: Response, next: NextFunc
 /** POST run-now — execute the auto-reorder immediately (testing / manual trigger). */
 export async function runNow(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { venueId } = (req as any).authContext
+    const { venueId } = req.params
     const result = await runAutoReorderForVenue(venueId)
     res.json({ result })
   } catch (error) {
