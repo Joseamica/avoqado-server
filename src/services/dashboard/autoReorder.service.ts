@@ -599,8 +599,26 @@ export async function getAutoReorderConfig(venueId: string): Promise<AutoReorder
   return parseAutoReorderConfig(venue?.autoReorderConfig ?? null)
 }
 
+/**
+ * True when the venue has a delivery address (street). Auto-reorder emails a purchase order to the
+ * supplier with the venue as ship-to; without an address that PO would say "N/A", so enabling
+ * auto-reorder requires an address.
+ */
+export async function venueHasDeliveryAddress(venueId: string): Promise<boolean> {
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { address: true } })
+  return !!venue?.address && venue.address.trim().length > 0
+}
+
+/** Message shown when trying to enable auto-reorder without a venue delivery address. */
+export const AUTO_REORDER_NO_ADDRESS_MSG =
+  'Para activar el re-orden automático, primero agrega la dirección de tu sucursal — es a dónde tus proveedores entregarán los pedidos.'
+
 /** Persist a new auto-reorder config (full overwrite of the JSON singleton). */
 export async function setAutoReorderConfig(venueId: string, config: AutoReorderConfig): Promise<AutoReorderConfig> {
+  // Block enabling without a delivery address — the supplier PO email needs a ship-to address.
+  if (config.enabled && !(await venueHasDeliveryAddress(venueId))) {
+    throw new AppError(AUTO_REORDER_NO_ADDRESS_MSG, 400)
+  }
   await prisma.venue.update({
     where: { id: venueId },
     data: { autoReorderConfig: config as unknown as Prisma.InputJsonValue },

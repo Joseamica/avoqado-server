@@ -114,19 +114,24 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
         return text({ ok: false, planRequired: true, error: 'El re-orden automático requiere el plan PREMIUM (AUTO_REORDER).' })
       }
       const current = await getAutoReorderConfig(venueId)
-      const config = await setAutoReorderConfig(venueId, {
-        enabled,
-        dailyCapMxn: dailyCapMxn !== undefined ? dailyCapMxn : current.dailyCapMxn,
-        minUrgency: minUrgency ?? current.minUrgency,
-      })
-      await auditMcpWrite(scope, {
-        action: 'AUTO_REORDER_CONFIG_UPDATED',
-        entity: 'Venue',
-        entityId: venueId,
-        venueId,
-        data: { enabled: config.enabled, dailyCapMxn: config.dailyCapMxn, minUrgency: config.minUrgency },
-      })
-      return text({ ok: true, config })
+      try {
+        const config = await setAutoReorderConfig(venueId, {
+          enabled,
+          dailyCapMxn: dailyCapMxn !== undefined ? dailyCapMxn : current.dailyCapMxn,
+          minUrgency: minUrgency ?? current.minUrgency,
+        })
+        await auditMcpWrite(scope, {
+          action: 'AUTO_REORDER_CONFIG_UPDATED',
+          entity: 'Venue',
+          entityId: venueId,
+          venueId,
+          data: { enabled: config.enabled, dailyCapMxn: config.dailyCapMxn, minUrgency: config.minUrgency },
+        })
+        return text({ ok: true, config })
+      } catch (err) {
+        // e.g. enabling without a venue delivery address (blocked by setAutoReorderConfig)
+        return text({ ok: false, error: (err as Error).message })
+      }
     },
   )
 

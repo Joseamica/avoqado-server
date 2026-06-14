@@ -5,6 +5,7 @@ import {
   setAutoReorderConfig,
   getReorderSuggestions,
   runAutoReorderForVenue,
+  venueHasDeliveryAddress,
   type AutoReorderConfig,
 } from '../../services/dashboard/autoReorder.service'
 import { logAction } from '../../services/dashboard/activity-log.service'
@@ -23,9 +24,11 @@ export async function getSettings(req: Request, res: Response, next: NextFunctio
   try {
     const { venueId } = req.params
     const config = await getAutoReorderConfig(venueId)
+    const hasDeliveryAddress = await venueHasDeliveryAddress(venueId)
     const { suggestions, totalSuggestions, criticalCount } = await getReorderSuggestions(venueId)
     res.json({
       config,
+      hasDeliveryAddress,
       preview: {
         totalSuggestions,
         criticalCount,
