@@ -183,4 +183,31 @@ describe('PATCH /api/v1/dashboard/organizations/:orgId/sale-verifications/:id (e
     expect(prismaMock.saleVerification.update).not.toHaveBeenCalled()
     expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
   })
+
+  it('403 (cross-org) when the sale belongs to a DIFFERENT organization', async () => {
+    // Security-critical: tenant isolation. The sale loads fine but its
+    // venue.organizationId does NOT match the route :orgId (token.orgId === :orgId),
+    // so the service must reject before any write.
+    prismaMock.saleVerification.findUnique.mockResolvedValue({
+      id: SALE_ID,
+      venueId: VENUE_ID,
+      staffId: PROMOTER_ID,
+      paymentId: PAYMENT_ID,
+      status: 'FAILED',
+      isPortabilidad: false,
+      payment: { id: PAYMENT_ID, amount: '0', method: 'OTHER' },
+      venue: { organizationId: 'clotherorgsve01234567890123' }, // different org
+    })
+    const token = makeToken('OWNER')
+    const res = await request(app)
+      .patch(`${BASE}/${SALE_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ amount: 100, paymentForm: 'CASH', status: 'COMPLETED', reason: 'corrección de monto' })
+
+    expect(res.status).not.toBe(200)
+    expect(res.status).toBe(403)
+    // No financial write may happen on a cross-org sale.
+    expect(prismaMock.payment.update).not.toHaveBeenCalled()
+    expect(prismaMock.saleVerification.update).not.toHaveBeenCalled()
+  })
 })

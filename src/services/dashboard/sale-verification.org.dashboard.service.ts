@@ -901,7 +901,7 @@ export async function reopenOrgSaleVerification(
   return updated
 }
 
-type EditableForm = 'CASH' | 'CARD' | 'OTHER'
+export type EditableForm = 'CASH' | 'CARD' | 'OTHER'
 
 // Reverse of derivePaymentForm: the UI's 3 buckets map back to a canonical
 // PaymentMethod. CREDIT_CARD round-trips to 'CARD' so the row redisplays stably.
@@ -939,6 +939,12 @@ export async function editOrgSaleVerification(
   if (params.amount != null && (!Number.isFinite(params.amount) || params.amount < 0)) {
     throw createServiceError('El monto debe ser un número mayor o igual a 0', 400)
   }
+  if (params.paymentForm != null && !['CASH', 'CARD', 'OTHER'].includes(params.paymentForm)) {
+    throw createServiceError('Forma de pago inválida', 400)
+  }
+  if (params.status != null && !['PENDING', 'COMPLETED', 'FAILED'].includes(params.status)) {
+    throw createServiceError('Estado inválido', 400)
+  }
 
   const existing = await prisma.saleVerification.findUnique({
     where: { id: params.saleVerificationId },
@@ -968,24 +974,32 @@ export async function editOrgSaleVerification(
   const nextStatus: SaleVerificationStatus = params.status ?? existing.status
 
   const updated = await prisma.$transaction(async tx => {
-    // 1. Payment (monto / forma de pago)
-    if (existing.payment && (params.amount != null || params.paymentForm != null)) {
+    // 1. Payment (monto / forma de pago). Only rewrite `method` when the user
+    // actually changed the payment-form bucket — otherwise an unrelated edit would
+    // silently flip e.g. DEBIT_CARD → CREDIT_CARD (both render as "Tarjeta").
+    const methodChanged =
+      params.paymentForm != null && existing.payment != null && derivePaymentForm(existing.payment.method) !== params.paymentForm
+    if (existing.payment && (params.amount != null || methodChanged)) {
       await tx.payment.update({
         where: { id: existing.payment.id },
         data: {
           ...(params.amount != null ? { amount: params.amount } : {}),
-          ...(params.paymentForm != null ? { method: PAYMENT_FORM_TO_METHOD[params.paymentForm] } : {}),
+          ...(methodChanged ? { method: PAYMENT_FORM_TO_METHOD[params.paymentForm!] } : {}),
         },
       })
     }
 
-    // 2. SaleVerification (tipo de venta + estado + metadata de revisión)
-    const reviewMeta =
-      nextStatus === 'PENDING'
+    // 2. SaleVerification (tipo de venta + estado + metadata de revisión).
+    // Only touch reviewer metadata when the status actually TRANSITIONS — editing
+    // data on an already-COMPLETED sale must not rewrite who/when it was approved.
+    const statusChanged = nextStatus !== existing.status
+    const reviewMeta = !statusChanged
+      ? {}
+      : nextStatus === 'PENDING'
         ? { reviewedById: null, reviewedAt: null, reviewNotes: null, rejectionReasons: [] }
         : nextStatus === 'COMPLETED'
           ? { reviewedById: params.editedById, reviewedAt: new Date(), rejectionReasons: [] }
-          : { reviewedById: params.editedById, reviewedAt: new Date() } // FAILED keeps existing reasons/notes
+          : { reviewedById: params.editedById, reviewedAt: new Date(), reviewNotes: null, rejectionReasons: [] } // FAILED: clear stale notes/reasons (P1 doesn't collect a promoter note on edit)
 
     const sv = await tx.saleVerification.update({
       where: { id: existing.id },
@@ -1016,7 +1030,7 @@ export async function editOrgSaleVerification(
             status: nextStatus,
             isPortabilidad: params.isPortabilidad ?? existing.isPortabilidad,
             amount: params.amount ?? before.amount,
-            method: params.paymentForm ? PAYMENT_FORM_TO_METHOD[params.paymentForm] : before.method,
+            method: methodChanged ? PAYMENT_FORM_TO_METHOD[params.paymentForm!] : before.method,
           },
         } as Prisma.InputJsonValue,
       },
@@ -1040,7 +1054,7 @@ export async function editOrgSaleVerification(
       reviewedAt: updated.reviewedAt,
       reviewNotes: updated.reviewNotes ?? null,
       rejectionReasons: updated.rejectionReasons ?? [],
-      reviewedBy: updated.reviewedBy ?? null,
+      reviewedBy: updated.reviewedBy ? `${updated.reviewedBy.firstName} ${updated.reviewedBy.lastName}`.trim() : null,
     })
   } catch (err: any) {
     logger.warn(`[SALE_VERIFICATION_EDIT] socket emit failed for staff ${existing.staffId}: ${err?.message ?? err}`)
