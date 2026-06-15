@@ -11,6 +11,9 @@ import { createRawMaterial } from '@/services/dashboard/rawMaterial.service'
 import { getReorderSuggestions, getAutoReorderConfig, setAutoReorderConfig } from '@/services/dashboard/autoReorder.service'
 import { planGateMessage } from '../planGate'
 import { venuesWithFeatureAccess } from '@/services/access/basePlan.service'
+import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
+
+const SERIALIZED_OFF_MSG = 'El inventario serializado no está activo en este local (módulo SERIALIZED_INVENTORY apagado).'
 import { MovementType, RawMaterialCategory, Unit } from '@prisma/client'
 
 const MOVEMENT_TYPE = {
@@ -198,15 +201,14 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId }) => {
       const where = guard.venueFilter(venueId) // throws if out of scope
-      // SERIALIZED_INVENTORY is a PREMIUM capability — filter to entitled venues (cfdi_status pattern).
+      // SERIALIZED_INVENTORY is a MODULE (VenueModule), gated platform-wide via moduleService
+      // .isModuleEnabled (NOT the Feature/tier resolver) — incl. its org-level fallback. Filter to
+      // venues where the module is actually on, so only module-enabled venues (e.g. PlayTelecom) see it.
       const requestedIds = venueId ? [venueId] : scope.allowedVenueIds
-      const entitledIds = [...(await venuesWithFeatureAccess(requestedIds, 'SERIALIZED_INVENTORY'))]
+      const enabledFlags = await Promise.all(requestedIds.map(id => moduleService.isModuleEnabled(id, MODULE_CODES.SERIALIZED_INVENTORY)))
+      const entitledIds = requestedIds.filter((_, i) => enabledFlags[i])
       if (entitledIds.length === 0) {
-        return text({
-          ok: false,
-          planRequired: true,
-          error: 'El inventario serializado no está incluido en el plan actual (requiere SERIALIZED_INVENTORY).',
-        })
+        return text({ ok: false, moduleRequired: true, error: SERIALIZED_OFF_MSG })
       }
       where.venueId = { in: entitledIds }
       const grouped = await prisma.serializedItem.groupBy({
@@ -238,8 +240,11 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
     async ({ venueId, serialNumber, action }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('inventory:adjust', venueId) // write gate (per-venue role)
-      const gate = await planGateMessage(venueId, 'SERIALIZED_INVENTORY', 'El inventario serializado') // PREMIUM tier
-      if (gate) return text({ ok: false, planRequired: true, error: gate })
+      // SERIALIZED_INVENTORY is a MODULE — gate the same way the platform does (isModuleEnabled,
+      // incl. org-level fallback), NOT the Feature/tier resolver. Only module-on venues can write.
+      if (!(await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY))) {
+        return text({ ok: false, moduleRequired: true, error: SERIALIZED_OFF_MSG })
+      }
       try {
         const item =
           action === 'returned'
