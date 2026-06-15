@@ -65,7 +65,7 @@ services:
   - type: web
     name: avoqado-server
     env: node
-    plan: starter
+    plan: standard
     region: oregon
     autoDeploy: false
     branch: main
