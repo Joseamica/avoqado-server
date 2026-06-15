@@ -249,10 +249,7 @@ describe('getSalesByPromoterDaily — current month, per-day + toReview', () => 
     const call = mockedSvFindMany.mock.calls[0][0]
     expect(call.where.venue).toEqual({ organizationId: ORG_ID })
     // OR: COMPLETED scoped to current month, FAILED unscoped (all dates)
-    expect(call.where.OR).toEqual([
-      { status: 'COMPLETED', createdAt: { gte: expect.any(Date) } },
-      { status: 'FAILED' },
-    ])
+    expect(call.where.OR).toEqual([{ status: 'COMPLETED', createdAt: { gte: expect.any(Date) } }, { status: 'FAILED' }])
     // month is the current CDMX YYYY-MM; days run 1..today
     const c = cdmxNow()
     expect(result.month).toBe(`${c.getFullYear()}-${String(c.getMonth() + 1).padStart(2, '0')}`)
