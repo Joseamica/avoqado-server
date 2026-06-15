@@ -13,6 +13,11 @@ decision is unfinished: it either leaks paid value into a lower tier or hides a 
 - **Backend (authoritative):** `src/services/access/basePlan.service.ts` + `src/middlewares/checkFeatureAccess.middleware.ts`. Obligatory
   gating questions live in `.claude/rules/feature-gating.md` (Module vs Feature decision). PREMIUM-only codes today: `CFDI`,
   `INVENTORY_TRACKING`.
+- **Module vs Feature — use the RIGHT resolver (crossing them fails silently; grandfathered venues pass a wrong-system gate):** `Module`
+  codes (`SERIALIZED_INVENTORY`, `WHITE_LABEL_DASHBOARD`, `COMMISSIONS`) gate via `moduleService.isModuleEnabled` (incl. org-level fallback);
+  `Feature` codes (`INVENTORY_TRACKING`, `CFDI`, `ADVANCED_REPORTS`…) via `venueHasFeatureAccess`. **Every MCP serialized-inventory tool
+  (`src/mcp/tools/`) MUST gate with `isModuleEnabled(SERIALIZED_INVENTORY)`** — never the Feature/tier resolver; only serialized tools carry
+  it (per-tool gating, not coupled to white-label). Full rule: `.claude/rules/feature-gating.md`.
 - **Dashboard display/CTA map:** `avoqado-web-dashboard/src/config/plan-catalog.ts` (`TierId`, `PLAN_TIERS`, `getTierForFeature()` →
   FeatureGate upsell).
 - **Enforcement status:** ✅ only **avoqado-web-dashboard** enforces tiers today. ⚠️ **avoqado-ios** and **avoqado-android** have NO tier
