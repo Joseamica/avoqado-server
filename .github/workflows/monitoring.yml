@@ -12,9 +12,11 @@ name: 📊 Service Monitoring & Health Checks
 # 3. Make alerts more strict
 
 on:
-  # Temporarily disable scheduled health checks to stop hourly emails
-  # schedule:
-  #   - cron: '0 * * * *'
+  # Schedule drives ONLY the memory-alert job (production is paid / always-on).
+  # The legacy health/staging/database jobs are gated to manual-only below to
+  # avoid the historical hourly-email noise that caused the schedule to be disabled.
+  schedule:
+    - cron: '*/15 * * * *'
   workflow_dispatch:
     inputs:
       check_type:
@@ -43,9 +45,8 @@ jobs:
     name: 🏥 Production Health Check
     runs-on: ubuntu-latest
     if: |
-      github.event_name == 'schedule' ||
-      (github.event_name == 'workflow_dispatch' && 
-       (github.event.inputs.check_type == 'all' || github.event.inputs.check_type == 'production'))
+      github.event_name == 'workflow_dispatch' &&
+      (github.event.inputs.check_type == 'all' || github.event.inputs.check_type == 'production')
 
     steps:
       - name: 🔍 Production API Health Check (Free Tier Friendly)
@@ -133,9 +134,8 @@ jobs:
     name: 🧪 Staging Health Check
     runs-on: ubuntu-latest
     if: |
-      github.event_name == 'schedule' ||
-      (github.event_name == 'workflow_dispatch' && 
-       (github.event.inputs.check_type == 'all' || github.event.inputs.check_type == 'staging'))
+      github.event_name == 'workflow_dispatch' &&
+      (github.event.inputs.check_type == 'all' || github.event.inputs.check_type == 'staging')
 
     steps:
       - name: 🔍 Staging API Health Check (Free Tier Friendly)
@@ -180,9 +180,8 @@ jobs:
     name: 🗄️ Database Health Check
     runs-on: ubuntu-latest
     if: |
-      github.event_name == 'schedule' ||
-      (github.event_name == 'workflow_dispatch' && 
-       (github.event.inputs.check_type == 'all' || github.event.inputs.check_type == 'database'))
+      github.event_name == 'workflow_dispatch' &&
+      (github.event.inputs.check_type == 'all' || github.event.inputs.check_type == 'database')
 
     steps:
       - name: 📥 Checkout code
@@ -216,6 +215,82 @@ jobs:
             echo "❌ Production database issue detected"
             exit 1
           fi
+
+  # 🧠 Production Memory Alert (pre-OOM early warning) — the ONLY scheduled job
+  memory-alert-production:
+    name: 🧠 Production Memory Alert
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' &&
+       (github.event.inputs.check_type == 'all' || github.event.inputs.check_type == 'production'))
+
+    steps:
+      - name: 🧠 Read production memory metrics
+        id: mem
+        run: |
+          echo "🧠 Fetching production memory metrics..."
+          METRICS=$(curl -s --connect-timeout 15 --max-time 30 "$PRODUCTION_URL/api/public/metrics" || echo '{}')
+          RSS_PCT=$(echo "$METRICS" | jq -r '.memory.rssPercent // empty')
+          RSS_MB=$(echo "$METRICS" | jq -r '.memory.rssMb // empty')
+          LIMIT_MB=$(echo "$METRICS" | jq -r '.memory.limitMb // empty')
+          HEAP_MB=$(echo "$METRICS" | jq -r '.memory.heapUsedMb // empty')
+          EL_P99=$(echo "$METRICS" | jq -r '.eventLoop.lagP99Ms // empty')
+
+          if [ -z "$RSS_PCT" ]; then
+            echo "⚠️ Could not read /api/public/metrics (service may be down). Skipping."
+            echo "status=unknown" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "📊 RSS ${RSS_MB}MB / ${LIMIT_MB}MB = ${RSS_PCT}% | heap ${HEAP_MB}MB | eventLoop p99 ${EL_P99}ms"
+          echo "rss_pct=$RSS_PCT" >> "$GITHUB_OUTPUT"
+          echo "rss_mb=$RSS_MB" >> "$GITHUB_OUTPUT"
+          echo "limit_mb=$LIMIT_MB" >> "$GITHUB_OUTPUT"
+          echo "heap_mb=$HEAP_MB" >> "$GITHUB_OUTPUT"
+
+          # Pre-OOM threshold: warn at 80% of the container limit (plan-agnostic).
+          if (( $(echo "$RSS_PCT >= 80" | bc -l) )); then
+            echo "🚨 Memory above threshold: ${RSS_PCT}% >= 80%"
+            echo "status=breach" >> "$GITHUB_OUTPUT"
+          else
+            echo "✅ Memory healthy: ${RSS_PCT}% < 80%"
+            echo "status=ok" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 🚨 Open/refresh memory alert issue
+        if: steps.mem.outputs.status == 'breach'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const rssPct = '${{ steps.mem.outputs.rss_pct }}';
+            const rssMb = '${{ steps.mem.outputs.rss_mb }}';
+            const limitMb = '${{ steps.mem.outputs.limit_mb }}';
+            const heapMb = '${{ steps.mem.outputs.heap_mb }}';
+            const body = [
+              `Production RSS at **${rssPct}%** (${rssMb}MB / ${limitMb}MB), heap ${heapMb}MB — ${new Date().toISOString()}.`,
+              ``,
+              `Threshold: 80% of the container limit (pre-OOM warning). Likely causes: concurrent heavy analytics loads (PlayTelecom sale-verifications / stores-analysis), an Excel export, or a memory leak.`,
+              `Action: review the audited SQL-aggregation fix before this becomes an OOM restart.`,
+              ``,
+              `_Source: /api/public/metrics via .github/workflows/monitoring.yml_`,
+            ].join('\n');
+            const { data: open } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'memory-alert',
+            });
+            if (open.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: open[0].number, body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title: '🚨 Production memory high (avoqado-server)',
+                body, labels: ['memory-alert'],
+              });
+            }
 
   # 📊 Generate Health Report
   health-report:
