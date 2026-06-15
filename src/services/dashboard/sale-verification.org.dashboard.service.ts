@@ -668,10 +668,16 @@ export interface PromoterDailyRow {
   /** Confirmed total for the current month (sum of byDay). Excludes toReview. */
   total: number
   /**
-   * Count of FAILED verifications — sales the PROMOTER must fix on the TPV
-   * ("Pendientes de revisar por el promotor en TPV"). NOT part of `total`.
+   * Count of FAILED verifications created THIS month — sales the PROMOTER must
+   * fix on the TPV ("Pendientes de revisar por el promotor en TPV" → current
+   * month column). NOT part of `total`.
    */
   toReview: number
+  /**
+   * Count of still-FAILED verifications created in PREVIOUS months — sales the
+   * promoter never corrected ("Meses anteriores" column). NOT part of `total`.
+   */
+  toReviewPrevious: number
 }
 
 export interface PromoterDailyResult {
@@ -685,9 +691,11 @@ export interface PromoterDailyResult {
 /**
  * "Ventas Totales por Promotor por día" — current month only (PlayTelecom, Asana
  * 1215613218390496). Per promoter: confirmed (COMPLETED) sales broken down by day,
- * the monthly confirmed total, and a `toReview` count of FAILED verifications the
- * promoter must correct on the TPV. Sales "to review" are NEVER added to `total`.
- * Rows sorted by confirmed total desc. Always the current month, ignores any range.
+ * the monthly confirmed total, and TWO "to review" counts of FAILED verifications
+ * the promoter must correct on the TPV — `toReview` (created this month) and
+ * `toReviewPrevious` (created in earlier months, never corrected). Neither "to
+ * review" count is EVER added to `total`. Rows sorted by confirmed total desc.
+ * Always the current month for the daily/total breakdown.
  */
 export async function getSalesByPromoterDaily(orgId: string): Promise<PromoterDailyResult> {
   const tz = VENUE_TIMEZONE_DEFAULT
@@ -703,12 +711,12 @@ export async function getSalesByPromoterDaily(orgId: string): Promise<PromoterDa
   const days: string[] = []
   for (let d = 1; d <= nowLocal.getDate(); d++) days.push(`${monthKey}-${String(d).padStart(2, '0')}`)
 
-  // Need both COMPLETED (daily/total) and FAILED (toReview) for the current month.
+  // COMPLETED is scoped to the current month (daily/total); FAILED is fetched for
+  // ALL dates so we can split it into this-month vs previous-months "to review".
   const verifications = await prisma.saleVerification.findMany({
     where: {
       venue: { organizationId: orgId },
-      status: { in: ['COMPLETED', 'FAILED'] },
-      createdAt: { gte: rangeStart },
+      OR: [{ status: 'COMPLETED', createdAt: { gte: rangeStart } }, { status: 'FAILED' }],
     },
     select: {
       createdAt: true,
@@ -717,16 +725,17 @@ export async function getSalesByPromoterDaily(orgId: string): Promise<PromoterDa
     },
   })
 
-  const map = new Map<string, { name: string; byDay: Record<string, number>; toReview: number }>()
+  const map = new Map<string, { name: string; byDay: Record<string, number>; toReview: number; toReviewPrevious: number }>()
   for (const v of verifications) {
     const key = v.staff?.id ?? 'unassigned'
     const name = v.staff ? `${v.staff.firstName} ${v.staff.lastName}`.trim() : 'Sin promotor'
-    const row = map.get(key) ?? { name, byDay: {}, toReview: 0 }
+    const row = map.get(key) ?? { name, byDay: {}, toReview: 0, toReviewPrevious: 0 }
     if (v.status === 'COMPLETED') {
       const dayKey = toDayKey(v.createdAt, tz)
       row.byDay[dayKey] = (row.byDay[dayKey] ?? 0) + 1
     } else if (v.status === 'FAILED') {
-      row.toReview += 1
+      if (v.createdAt >= rangeStart) row.toReview += 1
+      else row.toReviewPrevious += 1
     }
     map.set(key, row)
   }
@@ -738,6 +747,7 @@ export async function getSalesByPromoterDaily(orgId: string): Promise<PromoterDa
       byDay: val.byDay,
       total: Object.values(val.byDay).reduce((a, b) => a + b, 0),
       toReview: val.toReview,
+      toReviewPrevious: val.toReviewPrevious,
     }))
     .sort((a, b) => b.total - a.total)
 
