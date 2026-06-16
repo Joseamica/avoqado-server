@@ -5,6 +5,7 @@
  */
 import prisma from '../../utils/prismaClient'
 import { venueStartOfDay, venueStartOfDayOffset } from '../../utils/datetime'
+import { normalizeSerial } from '../serialized-inventory/serializedInventory.service'
 
 // Types for the service responses
 export interface StockMetrics {
@@ -357,9 +358,13 @@ class StockDashboardService {
    */
   async processBulkUpload(venueId: string, categoryId: string, csvContent: string, createdBy: string): Promise<BulkUploadResult> {
     // Parse CSV content
+    // normalizeSerial = trim + UPPERCASE. ICCIDs are case-insensitive by spec and
+    // the TPV scan looks them up upper-cased, so storing lowercase made SIMs
+    // unsellable ("SIM no registrado"). Normalizing here also makes the dedup
+    // check below case-consistent. (Asana 1215767957979215, 2026-06-16.)
     const lines = csvContent
       .split(/[\r\n,]+/)
-      .map(l => l.trim())
+      .map(l => normalizeSerial(l))
       .filter(l => l.length > 0)
 
     if (lines.length === 0) {
@@ -808,9 +813,13 @@ class StockDashboardService {
     }
 
     // Parse CSV content
+    // normalizeSerial = trim + UPPERCASE. ICCIDs are case-insensitive by spec and
+    // the TPV scan looks them up upper-cased, so storing lowercase made SIMs
+    // unsellable ("SIM no registrado"). Normalizing here also makes the dedup
+    // check below case-consistent. (Asana 1215767957979215, 2026-06-16.)
     const lines = csvContent
       .split(/[\r\n,]+/)
-      .map(l => l.trim())
+      .map(l => normalizeSerial(l))
       .filter(l => l.length > 0)
 
     if (lines.length === 0) {

@@ -44,8 +44,10 @@ function makeItem(overrides: Partial<SerializedItem> = {}): SerializedItem {
 function makeMockDb(item: SerializedItem | null, enforcementMode: SimCustodyEnforcementMode, categoryName: string | null = null) {
   return {
     serializedItem: {
-      findUnique: jest.fn().mockResolvedValue(item),
-      findFirst: jest.fn().mockResolvedValue(null), // findOrgItem fallback — not used here
+      // ensureSellable() now looks up the item via findFirst (case-insensitive,
+      // post 2026-06-16 fix) instead of findUnique; the same mock also covers the
+      // findOrgItem fallback, but the venue-level hit short-circuits it via `??`.
+      findFirst: jest.fn().mockResolvedValue(item),
     },
     organization: {
       findUnique: jest.fn().mockResolvedValue({ simCustodyEnforcementMode: enforcementMode }),

@@ -112,9 +112,13 @@ export class SerializedInventoryService {
       }
     }
 
-    // 1. Search for existing item at venue level
-    const item = await this.db.serializedItem.findUnique({
-      where: { venueId_serialNumber: { venueId, serialNumber } },
+    // 1. Search for existing item at venue level.
+    // Case-insensitive defense-in-depth: `serialNumber` is normalized upper-case
+    // above, but a few legacy rows were stored lowercase (bulk-upload bug), which
+    // made them wrongly "not_registered" and unsellable. Match case-insensitively
+    // so the scan always finds the SIM. (Asana 1215767957979215, 2026-06-16.)
+    const item = await this.db.serializedItem.findFirst({
+      where: { venueId, serialNumber: { equals: serialNumber, mode: 'insensitive' } },
       include: { category: true },
     })
 
@@ -352,9 +356,11 @@ export class SerializedInventoryService {
     opts: { staffId: string; appVersionCode?: number; minimumVersionWithMisSims?: number },
   ): Promise<{ deprecationWarning: string | null }> {
     serialNumber = normalizeSerial(serialNumber)
+    // Case-insensitive defense-in-depth (matches scan()): tolerate legacy
+    // lowercase serials so a sellable SIM is never blocked at the sell gate.
     const item =
-      (await this.db.serializedItem.findUnique({
-        where: { venueId_serialNumber: { venueId, serialNumber } },
+      (await this.db.serializedItem.findFirst({
+        where: { venueId, serialNumber: { equals: serialNumber, mode: 'insensitive' } },
       })) ?? (await this.findOrgItem(venueId, serialNumber, this.db))
     if (!item) return { deprecationWarning: null }
     const deprecationWarning = await this.applyCustodyPrecheck(item, opts)
@@ -845,7 +851,9 @@ export class SerializedInventoryService {
       where: {
         organizationId: venue.organizationId,
         venueId: null,
-        serialNumber,
+        // Case-insensitive defense-in-depth (matches scan()/ensureSellable()):
+        // tolerate legacy lowercase serials. (Asana 1215767957979215.)
+        serialNumber: { equals: serialNumber, mode: 'insensitive' },
       },
       include: { category: true },
     })
