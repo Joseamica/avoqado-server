@@ -250,6 +250,7 @@ import ecommerceMerchantRoutes from './dashboard/ecommerceMerchant.routes'
 import paymentLinkRoutes from './dashboard/paymentLink.routes'
 import manualPaymentRoutes from './dashboard/manualPayment.routes'
 import reportsRoutes from './dashboard/reports.routes'
+import accountingRoutes from './dashboard/accounting.routes'
 import commissionRoutes from './dashboard/commission.routes'
 import reservationRoutes from './dashboard/reservation.routes'
 import classSessionRoutes from './dashboard/classSession.routes'
@@ -3935,6 +3936,8 @@ router.put(
 )
 // Inventory Management routes (ADMIN and MANAGER)
 router.use('/venues/:venueId/inventory', authenticateTokenMiddleware, inventoryRoutes)
+// Accounting Capa A (estado de resultados / "¿cuánto gané?") — incluido, gateado por permiso accounting:read
+router.use('/venues/:venueId/accounting', authenticateTokenMiddleware, accountingRoutes)
 
 // Referral Program routes (program config + capture + reads)
 // Plan-tier gate: Pro feature REFERRAL_PROGRAM (grandfathered/demo venues bypass inside the middleware)

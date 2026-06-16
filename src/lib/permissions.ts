@@ -247,6 +247,11 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'settlements:simulate': ['settlements:read', 'settlements:simulate'],
 
   // ===========================
+  // ACCOUNTING - Capa A (estado de resultados, incluido para todos los venues)
+  // ===========================
+  'accounting:read': ['accounting:read', 'payments:read', 'orders:read'],
+
+  // ===========================
   // VENUES - Settings
   // ===========================
   'venues:read': ['venues:read'],
@@ -618,6 +623,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'reports:read', // Dashboard reports (Sales Summary, Sales by Item, etc.)
     'settlements:read',
     'settlements:simulate',
+    'accounting:read', // Capa A — estado de resultados (¿cuánto gané?), incluido
     'menu:read',
     'menu:create',
     'menu:update',
@@ -730,6 +736,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'analytics:*',
     'reports:*', // Dashboard reports (Sales Summary, Sales by Item, etc.)
     'settlements:*', // Available Balance (settlements) - was missing!
+    'accounting:read', // Capa A — estado de resultados (¿cuánto gané?), incluido
     'menu:*',
     'orders:*',
     'payments:*',
@@ -825,6 +832,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'analytics:*',
     'reports:*', // Dashboard reports (Sales Summary, Sales by Item, etc.)
     'settlements:*', // Available Balance (settlements) - was missing!
+    'accounting:read', // Capa A — estado de resultados (¿cuánto gané?), incluido
     'commissions:*', // Commission system (full control including payout)
     'menu:*',
     'orders:*',
@@ -1237,6 +1245,7 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   home: ['home:read'],
   analytics: ['analytics:read', 'analytics:export'],
   settlements: ['settlements:read', 'settlements:simulate'],
+  accounting: ['accounting:read'],
   reports: ['reports:read', 'reports:export'],
   menu: ['menu:read', 'menu:create', 'menu:update', 'menu:delete', 'menu:import'],
   orders: ['orders:read', 'orders:create', 'orders:update', 'orders:cancel', 'orders:comp', 'orders:void'],

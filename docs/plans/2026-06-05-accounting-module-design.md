@@ -225,6 +225,19 @@ rebana por centro de costos.
 
 ## 7. Secuencia de construcción (orden, no recorte — el alcance es TODO)
 
+> **✅ Validación de contador-empresario (2026-06-15).** Un contador (que además es dueño de negocio) revisó el enfoque vía el resumen de 1
+> página (`2026-06-07-resumen-contador-CORTO`). **Aprobó las 4 preguntas fiscales:** (1) desglosar IVA para que el CFDI cuadre con el depósito
+> bancario, (2) catálogo **muestra adaptable** al giro de cada empresa, (3) que **bancos y lo facturado cuadren**, (4) reconocimiento de
+> ingreso e IVA **por flujo de efectivo** ("igual que la PF"). Núcleo fiscal del diseño = validado por un profesional externo.
+>
+> **Orden de prioridades que dio para lo que aún NO incluye (su pregunta 5):** `Nómina → Declaraciones de ISR → Conciliación bancaria`. **No
+> mencionó NIF B-10 (reexpresión por inflación) → confirma que va al final.** Señal cruzada importante: la **conciliación bancaria** fue su
+> ancla recurrente — la nombró en DOS respuestas distintas ("cuadre con el depósito" en P1, "bancos y lo facturado cuadre" en P3), aunque la
+> listó 3ª. Para él el valor #1 es _banco = facturado_ → pesa más en el roadmap real de lo que su lista sugiere. **Nómina** es la pieza más
+> grande y la que **Alegra ni tiene**: tratarla como **señal de demanda fuerte (1 contador), NO como compromiso** hasta validar con 2-3
+> contadores/dueños más. Las dependencias técnicas (ledger antes de contabilidad electrónica) mandan sobre el orden de "deseos"; lo que sí
+> sube de prioridad sin romper dependencias es **conciliación bancaria** (ya barata vía subir estado de cuenta, ver §10).
+
 **Fase 0 — Cimiento mínimo (sin ledger).** Resolución pago→merchant→emisor (reusa cadena de `loadOrderForCfdiFromDb`, pero leyendo TODOS los
 pagos del periodo, no `take:1`); helpers de periodo (ya existen); Feature `ACCOUNTING` + permisos + rol Contador; flag `facturado` derivado.
 
@@ -279,10 +292,11 @@ build-vs-integrar (facturapi nómina vs partner).
 
 - Ledger en Fase 1 (es read-model). Pólizas XML mensuales (son on-demand). Nómina/ISR/NIF (no investigados).
 - Multi-moneda (MXN-only por ahora). `FiscalTaxpayer` (hasta Fase 3).
-- **Conciliación bancaria (Fase 3+) — vía SUBIR estado de cuenta, NO integración bancaria.** Patrón validado en Alegra: el venue sube su
+- **Conciliación bancaria — vía SUBIR estado de cuenta, NO integración bancaria.** Patrón validado en Alegra: el venue sube su
   estado de cuenta (PDF/CSV) y se concilia contra los Payment/Settlement con matching automático + anti-duplicados. **Evita construir 40+
   integraciones bancarias** (lo caro/riesgoso). Esa es la forma de enviar conciliación barato; la conexión directa a bancos queda para mucho
-  después, si acaso.
+  después, si acaso. **⬆️ Prioridad elevada (contador 2026-06-15):** fue su ancla recurrente (_banco = facturado_); por su bajo costo de
+  construcción debería adelantarse, no quedar relegada a "Fase 3+". Candidata a ser un entregable temprano una vez que exista la Capa A.
 
 ## 11. The Assignment (gate real antes de codear)
 
