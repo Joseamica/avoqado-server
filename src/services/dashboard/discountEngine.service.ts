@@ -13,6 +13,7 @@ import logger from '@/config/logger'
 import { NotFoundError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
 import { DiscountScope, DiscountType } from '@prisma/client'
+import { logAction } from './activity-log.service'
 
 // ==========================================
 // TYPES & INTERFACES
@@ -747,6 +748,15 @@ export async function applyDiscountToOrder(
 
     logger.info(`🎟️ Discount applied to order ${orderId}: ${discount.name} (-$${discount.amount})`)
 
+    void logAction({
+      staffId: appliedById ?? authorizedById ?? null,
+      venueId: order.venueId,
+      action: 'DISCOUNT_APPLIED',
+      entity: 'Order',
+      entityId: orderId,
+      data: { discountId: discount.discountId, amount: discount.amount, source: 'catalog' },
+    })
+
     return {
       success: true,
       orderDiscountId: orderDiscount.id,
@@ -809,6 +819,15 @@ export async function removeDiscountFromOrder(orderId: string, orderDiscountId: 
     }
 
     logger.info(`🗑️ Discount removed from order ${orderId}: ${orderDiscount.name} (+$${orderDiscount.amount})`)
+
+    void logAction({
+      staffId: null,
+      venueId: order.venueId,
+      action: 'DISCOUNT_REMOVED',
+      entity: 'Order',
+      entityId: orderId,
+      data: { discountId: orderDiscount.discountId },
+    })
 
     return {
       success: true,

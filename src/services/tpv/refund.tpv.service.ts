@@ -7,6 +7,7 @@ import { Decimal } from '@prisma/client/runtime/library'
 import { createRefundTransactionCost } from '../payments/transactionCost.service'
 import { createRefundCommission } from '../dashboard/commission/commission-calculation.service'
 import { restockOrderItems } from '../dashboard/inventoryRestock.service'
+import { logAction } from '../dashboard/activity-log.service'
 
 /**
  * Refund request data from TPV Android app
@@ -391,6 +392,20 @@ export async function recordRefund(
     refundPaymentId: result.id,
     originalPaymentId: refundData.originalPaymentId,
     amount: refundAmountInPesos,
+  })
+
+  void logAction({
+    staffId: refundData.staffId ?? null,
+    venueId,
+    action: 'REFUND_CREATED',
+    entity: 'Payment',
+    entityId: result.id,
+    data: {
+      amount: Number(refundAmountInPesos),
+      reason: refundData.reason,
+      method: originalPayment.method,
+      source: 'TPV',
+    },
   })
 
   // REFERRAL HOOK: trigger referral void if the original order had a QUALIFIED referral
