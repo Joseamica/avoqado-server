@@ -1,9 +1,5 @@
 import { NextFunction, Request, Response } from 'express'
-import {
-  queryVenueActivityLogs,
-  getVenueDistinctActions,
-  getVenueDistinctEntities,
-} from '../../services/dashboard/activity-log.service'
+import { queryVenueActivityLogs, getVenueDistinctActions, getVenueDistinctEntities } from '../../services/dashboard/activity-log.service'
 
 export async function getActivityLog(req: Request, res: Response, next: NextFunction) {
   try {

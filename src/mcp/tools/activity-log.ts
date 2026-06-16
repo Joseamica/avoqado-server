@@ -11,7 +11,7 @@ export function registerActivityLogTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
   server.tool(
     'get_activity_log',
-    "Audit trail for your venue(s): who did what and when — orders (comp/void/discount), payments, refunds, shifts, staff/access changes, inventory receiving and SIM custody, config changes. Most recent first. Pass venueId to focus one venue; filter by action code or date range. Requires the activity:read permission (owner-level).",
+    'Audit trail for your venue(s): who did what and when — orders (comp/void/discount), payments, refunds, shifts, staff/access changes, inventory receiving and SIM custody, config changes. Most recent first. Pass venueId to focus one venue; filter by action code or date range. Requires the activity:read permission (owner-level).',
     {
       venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues'),
       action: z.string().optional().describe('Filter by exact action code, e.g. PAYMENT_COMPLETED or SIM_CUSTODY_ASSIGNED_TO_PROMOTER'),

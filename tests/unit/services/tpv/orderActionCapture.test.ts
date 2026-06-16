@@ -203,9 +203,7 @@ describe('ActivityLog dual-write in order.tpv.service', () => {
         staffId: STAFF_ID,
       })
 
-      expect(mockLogAction).toHaveBeenCalledWith(
-        expect.objectContaining({ action: 'ITEM_COMPED', entity: 'Order', entityId: ORDER_ID }),
-      )
+      expect(mockLogAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'ITEM_COMPED', entity: 'Order', entityId: ORDER_ID }))
     })
   })
 

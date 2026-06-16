@@ -159,14 +159,7 @@ describe('applyItemReceiveStatusInTx — PURCHASE_ORDER_ITEM_RECEIVED audit capt
     mockedPrisma.purchaseOrderItem.findFirst.mockResolvedValue(item)
 
     const tx = makeTxProxy()
-    await applyItemReceiveStatusInTx(
-      tx as any,
-      VENUE_ID,
-      PO_ID,
-      ITEM_ID,
-      { receiveStatus: PurchaseOrderItemStatus.DAMAGED },
-      STAFF_ID,
-    )
+    await applyItemReceiveStatusInTx(tx as any, VENUE_ID, PO_ID, ITEM_ID, { receiveStatus: PurchaseOrderItemStatus.DAMAGED }, STAFF_ID)
 
     expect(mockLogAction).toHaveBeenCalledTimes(1)
     expect(mockLogAction).toHaveBeenCalledWith(

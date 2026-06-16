@@ -115,9 +115,7 @@ describe('discountEngine.applyDiscountToOrder — audit capture', () => {
 
   it('does NOT fire logAction when discount is already applied', async () => {
     // Order already has the same discount
-    prismaMock.order.findUnique.mockResolvedValue(
-      makeOrder({ orderDiscounts: [{ discountId: 'discount-abc' }] }),
-    )
+    prismaMock.order.findUnique.mockResolvedValue(makeOrder({ orderDiscounts: [{ discountId: 'discount-abc' }] }))
 
     const discount = makeDiscount()
     const result = await applyDiscountToOrder('order-xyz', discount)

@@ -1446,10 +1446,7 @@ export async function closeShiftForVenue(venueId: string, shiftId: string, close
       endingCash: updatedShift.endingCash?.toNumber() ?? undefined,
       totalSales: Number(totalSales ?? 0),
       totalTips: Number(totalTips ?? 0),
-      cashDiscrepancy:
-        closeData?.cashDeclared != null
-          ? new Decimal(closeData.cashDeclared).sub(totalCashPayments).toNumber()
-          : undefined,
+      cashDiscrepancy: closeData?.cashDeclared != null ? new Decimal(closeData.cashDeclared).sub(totalCashPayments).toNumber() : undefined,
     },
   })
 

@@ -37,12 +37,7 @@ router.get(
  * GET /api/v1/dashboard/venues/:venueId/activity-log/actions
  * Returns distinct action values for filter dropdowns.
  */
-router.get(
-  '/actions',
-  checkFeatureAccess('VENUE_AUDIT_LOG'),
-  checkPermission('activity:read'),
-  activityLogController.getActivityLogActions,
-)
+router.get('/actions', checkFeatureAccess('VENUE_AUDIT_LOG'), checkPermission('activity:read'), activityLogController.getActivityLogActions)
 
 /**
  * GET /api/v1/dashboard/venues/:venueId/activity-log/entities

@@ -288,9 +288,7 @@ describe('ActivityLog dual-write in shift.tpv.service', () => {
       const updated = makeUpdatedShift()
       mockPrisma.shift.update.mockResolvedValue(updated)
       // One cash payment of 600; declared 700 → discrepancy = 700 - 600 = 100
-      mockPrisma.payment.findMany.mockResolvedValue([
-        { id: 'p1', amount: new Decimal(600), tipAmount: new Decimal(0), method: 'CASH' },
-      ])
+      mockPrisma.payment.findMany.mockResolvedValue([{ id: 'p1', amount: new Decimal(600), tipAmount: new Decimal(0), method: 'CASH' }])
 
       await closeShiftForVenue(VENUE_ID, SHIFT_ID, { cashDeclared: 700 } as any)
 

@@ -24,7 +24,17 @@ describe('queryVenueActivityLogs', () => {
     mockPrisma.venue.findUnique.mockResolvedValue({ id: 'v1', name: 'Sucursal Centro' })
     mockPrisma.activityLog.count.mockResolvedValue(1)
     mockPrisma.activityLog.findMany.mockResolvedValue([
-      { id: 'a1', action: 'ITEM_VOIDED', entity: 'Order', entityId: 'o1', data: {}, ipAddress: null, createdAt: new Date(), staff: null, venueId: 'v1' },
+      {
+        id: 'a1',
+        action: 'ITEM_VOIDED',
+        entity: 'Order',
+        entityId: 'o1',
+        data: {},
+        ipAddress: null,
+        createdAt: new Date(),
+        staff: null,
+        venueId: 'v1',
+      },
     ])
 
     const result = await queryVenueActivityLogs({ venueId: 'v1', page: 1, pageSize: 25 })

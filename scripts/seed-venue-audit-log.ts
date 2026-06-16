@@ -21,8 +21,7 @@ async function main() {
     create: {
       code: 'VENUE_AUDIT_LOG',
       name: 'Bitácora de auditoría',
-      description:
-        'Historial de actividad por sucursal: quién hizo qué y cuándo (incluido en el plan Pro)',
+      description: 'Historial de actividad por sucursal: quién hizo qué y cuándo (incluido en el plan Pro)',
       category: 'OPERATIONS',
       monthlyPrice: 0,
       active: true,
