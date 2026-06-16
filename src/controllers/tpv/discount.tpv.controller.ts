@@ -226,8 +226,9 @@ export async function validateCoupon(req: Request, res: Response, next: NextFunc
 export async function removeDiscount(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId, orderId, discountId } = req.params
+    const { userId: staffId } = (req as any).authContext
 
-    const result = await discountTpvService.removeDiscount(venueId, orderId, discountId)
+    const result = await discountTpvService.removeDiscount(venueId, orderId, discountId, staffId)
 
     if (result.success) {
       res.status(200).json({

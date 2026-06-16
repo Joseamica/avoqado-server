@@ -834,7 +834,7 @@ export async function cancelPurchaseOrder(
     },
   })
 
-  logAction({
+  void logAction({
     staffId,
     venueId,
     action: 'PURCHASE_ORDER_CANCELLED',

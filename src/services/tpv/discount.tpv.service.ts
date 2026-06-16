@@ -460,6 +460,7 @@ export async function removeDiscount(
   venueId: string,
   orderId: string,
   orderDiscountId: string,
+  staffId?: string,
 ): Promise<{ success: boolean; amount: number; newOrderTotal: number; error?: string }> {
   logger.info(`🗑️ TPV Removing discount`, { venueId, orderId, orderDiscountId })
 
@@ -476,8 +477,8 @@ export async function removeDiscount(
     throw new BadRequestError('Cannot remove discount from a paid order')
   }
 
-  // Remove discount via engine
-  const result = await discountEngine.removeDiscountFromOrder(orderId, orderDiscountId)
+  // Remove discount via engine (thread the actor for the audit log)
+  const result = await discountEngine.removeDiscountFromOrder(orderId, orderDiscountId, staffId)
 
   return result
 }

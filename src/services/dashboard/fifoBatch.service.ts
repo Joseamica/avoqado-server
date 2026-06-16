@@ -125,7 +125,7 @@ export async function createStockBatch(
     },
   })
 
-  logAction({
+  void logAction({
     staffId,
     venueId,
     action: 'STOCK_BATCH_CREATED',
@@ -704,7 +704,7 @@ export async function quarantineBatch(venueId: string, batchId: string, reason: 
     return updated
   })
 
-  logAction({
+  void logAction({
     staffId,
     venueId,
     action: 'STOCK_BATCH_QUARANTINED',

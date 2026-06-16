@@ -772,7 +772,7 @@ export async function applyDiscountToOrder(
  * @param orderId - Order ID
  * @param orderDiscountId - OrderDiscount record ID
  */
-export async function removeDiscountFromOrder(orderId: string, orderDiscountId: string): Promise<ApplyDiscountResult> {
+export async function removeDiscountFromOrder(orderId: string, orderDiscountId: string, staffId?: string): Promise<ApplyDiscountResult> {
   return prisma.$transaction(async tx => {
     const orderDiscount = await tx.orderDiscount.findFirst({
       where: { id: orderDiscountId, orderId },
@@ -821,7 +821,7 @@ export async function removeDiscountFromOrder(orderId: string, orderDiscountId: 
     logger.info(`🗑️ Discount removed from order ${orderId}: ${orderDiscount.name} (+$${orderDiscount.amount})`)
 
     void logAction({
-      staffId: null,
+      staffId: staffId ?? null,
       venueId: order.venueId,
       action: 'DISCOUNT_REMOVED',
       entity: 'Order',
