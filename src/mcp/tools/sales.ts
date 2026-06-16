@@ -6,9 +6,17 @@ import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
-import { getChartData } from '@/services/dashboard/generalStats.dashboard.service'
+import { getVenueChartData } from '../chartData'
+import { fetchPaymentsForAnalytics } from '@/services/legacy/mergedPayments.service'
 import { planGateMessage } from '../planGate'
-import { computeSettlementProjection } from '@/services/dashboard/sales-summary.dashboard.service'
+import {
+  computeSettlementProjection,
+  getSalesSummary,
+  flattenSalesSummaryForExport,
+  countSalesSummaryDetailRows,
+  fetchSalesSummaryDetailRows,
+  type SalesSummaryExportSection,
+} from '@/services/dashboard/sales-summary.dashboard.service'
 
 export interface SalesInput {
   amount: number | { toString(): string }
@@ -241,7 +249,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Los reportes avanzados') // PRO tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
-      const data = (await getChartData(venueId, 'best-selling-products', { fromDate, toDate })) as {
+      const data = (await getVenueChartData(venueId, 'best-selling-products', { fromDate, toDate })) as {
         products: BestSellingProduct[]
       }
       const top = rankTopProducts(data.products, limit ?? 10)
@@ -262,7 +270,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Los reportes avanzados') // PRO tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
-      const ranking = (await getChartData(venueId, 'staff-ranking', { fromDate, toDate })) as StaffRankingRow[]
+      const ranking = (await getVenueChartData(venueId, 'staff-ranking', { fromDate, toDate })) as StaffRankingRow[]
       const top = rankTopStaff(ranking, limit ?? 10)
       return text({ venueId, count: top.length, staff: top })
     },
@@ -281,7 +289,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Los reportes avanzados') // PRO tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
-      const rows = (await getChartData(venueId, 'category-mix', { fromDate, toDate })) as CategoryMixRow[]
+      const rows = (await getVenueChartData(venueId, 'category-mix', { fromDate, toDate })) as CategoryMixRow[]
       const categories = rankCategories(rows, limit ?? 20)
       return text({ venueId, count: categories.length, categories })
     },
@@ -289,22 +297,39 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'sales_by_payment_method',
-    'Sales totals grouped by payment method (cash, card, etc.) in a venue you can access, over a date range (default last 7 days): total and transaction count per method, ranked by total. Answers "¿cuánto en efectivo vs tarjeta?". Pass venueId; optionally fromDate/toDate (YYYY-MM-DD).',
+    'Sales by payment method (cash, card, etc.) in a venue you can access, over a date range (default last 7 days). Returns TWO figures per method so the operator can reconcile with the dashboard: `grossCollected` = everything collected (INCLUDES refunds + cancelled orders) — matches the dashboard "Métodos de Pago" panel; and `netSales` = net of refunds + cancelled orders. Answers "¿cuánto en efectivo vs tarjeta?". Dates are venue-LOCAL and the full toDate day is included. Pass venueId; optionally fromDate/toDate (YYYY-MM-DD).',
     {
       venueId: z.string().describe('Venue to analyze (must be in your scope)'),
-      fromDate: z.string().optional().describe('Start date YYYY-MM-DD (default: 7 days ago)'),
-      toDate: z.string().optional().describe('End date YYYY-MM-DD (default: today)'),
+      fromDate: z.string().optional().describe('Start date YYYY-MM-DD venue-local (default: 7 days ago)'),
+      toDate: z.string().optional().describe('End date YYYY-MM-DD venue-local, INCLUSIVE of the whole day (default: today)'),
     },
     async ({ venueId, fromDate, toDate }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Los reportes avanzados') // PRO tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
-      const data = (await getChartData(venueId, 'sales-by-payment-method', { fromDate, toDate })) as {
-        payments: AnalyticsPaymentRow[]
-      }
-      const byMethod = summarizeByPaymentMethod(data.payments)
-      const gross = round2(byMethod.reduce((s, m) => s + m.total, 0))
-      return text({ venueId, gross, byMethod })
+
+      // Venue-local day boundaries in real UTC — fromDate→start, toDate→END of day (inclusive).
+      const tz = (await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }))?.timezone || 'America/Mexico_City'
+      const from = fromDate
+        ? venueStartOfDay(tz, new Date(`${fromDate}T12:00:00`))
+        : venueStartOfDay(tz, new Date(Date.now() - 7 * 24 * 60 * 60 * 1000))
+      const to = toDate ? venueEndOfDay(tz, new Date(`${toDate}T12:00:00`)) : venueEndOfDay(tz)
+
+      // Two passes: gross (everything collected, incl. refunds + cancelled = dashboard panel) and net.
+      const [grossRows, netRows] = await Promise.all([
+        fetchPaymentsForAnalytics(venueId, { fromDate: from, toDate: to, includeRefunds: true, excludeCancelledOrders: false }),
+        fetchPaymentsForAnalytics(venueId, { fromDate: from, toDate: to, includeRefunds: false, excludeCancelledOrders: true }),
+      ])
+      const grossByMethod = summarizeByPaymentMethod(grossRows as unknown as AnalyticsPaymentRow[])
+      const netByMethod = summarizeByPaymentMethod(netRows as unknown as AnalyticsPaymentRow[])
+
+      return text({
+        venueId,
+        window: { from: from.toISOString(), to: to.toISOString(), timezone: tz },
+        grossCollected: { total: round2(grossByMethod.reduce((s, m) => s + m.total, 0)), byMethod: grossByMethod },
+        netSales: { total: round2(netByMethod.reduce((s, m) => s + m.total, 0)), byMethod: netByMethod },
+        note: 'grossCollected = todo lo cobrado por método (incluye reembolsos y órdenes canceladas) — coincide con el panel "Métodos de Pago" del dashboard. netSales = ventas netas (excluye reembolsos y canceladas).',
+      })
     },
   )
 
@@ -321,7 +346,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Los reportes avanzados') // PRO tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
-      const rows = (await getChartData(venueId, 'channel-mix', { fromDate, toDate })) as ChannelMixRow[]
+      const rows = (await getVenueChartData(venueId, 'channel-mix', { fromDate, toDate })) as ChannelMixRow[]
       const channels = rankChannels(rows, limit ?? 20)
       return text({ venueId, count: channels.length, channels })
     },
@@ -339,7 +364,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Los reportes avanzados') // PRO tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
-      const rows = (await getChartData(venueId, 'peak-hours', { fromDate, toDate })) as PeakHourRow[]
+      const rows = (await getVenueChartData(venueId, 'peak-hours', { fromDate, toDate })) as PeakHourRow[]
       const hours = summarizePeakHours(rows)
       return text({ venueId, hours })
     },
@@ -359,7 +384,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
       const tz = venue?.timezone || 'America/Mexico_City'
       const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Los reportes avanzados') // PRO tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
-      const data = (await getChartData(venueId, 'tips-over-time', { fromDate, toDate })) as { payments: TipPaymentRow[] }
+      const data = (await getVenueChartData(venueId, 'tips-over-time', { fromDate, toDate })) as { payments: TipPaymentRow[] }
       const result = summarizeTipsByDay(data.payments, tz)
       return text({ venueId, ...result })
     },
@@ -389,6 +414,66 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
         calendar,
         nextByMerchant: Array.from(nextByMerchant.entries()).map(([merchantAccountId, v]) => ({ merchantAccountId, ...v })),
       })
+    },
+  )
+
+  server.tool(
+    'export_sales_summary',
+    'Export the sales summary for a venue you can access ("exporta mis ventas"). mode=summary returns the flattened totals + chosen sections; mode=detailed (Premium) returns the matching per-transaction rows. Honors the same date range + payment-method/card-type/merchant filters as the dashboard report. Pass venueId; optionally fromDate/toDate (YYYY-MM-DD), mode, sections (comma list), paymentMethod, cardType, merchantAccountId.',
+    {
+      venueId: z.string().describe('Venue to export (must be in your scope)'),
+      mode: z.enum(['summary', 'detailed']).optional().describe('summary totals (default) or detailed transactions (Premium)'),
+      fromDate: z.string().optional().describe('Start date YYYY-MM-DD (default: 7 days ago)'),
+      toDate: z.string().optional().describe('End date YYYY-MM-DD (default: today)'),
+      sections: z
+        .string()
+        .optional()
+        .describe('Summary sections, comma-separated: totals,paymentMethods,cardTypes,merchantAccounts,byPeriod'),
+      paymentMethod: z.enum(['CASH', 'CARD', 'QR_LEGACY', 'OTHER']).optional().describe('Filter to one payment bucket'),
+      cardType: z.enum(['CREDIT', 'DEBIT', 'AMEX', 'INTERNATIONAL']).optional().describe('Card sub-filter (only when paymentMethod=CARD)'),
+      merchantAccountId: z.string().optional().describe('Filter to one merchant account'),
+    },
+    async ({ venueId, mode, fromDate, toDate, sections, paymentMethod, cardType, merchantAccountId }) => {
+      guard.venueFilter(venueId) // throws ScopeError if out of scope
+      const reportGate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'La exportación de ventas')
+      if (reportGate) return text({ ok: false, planRequired: true, error: reportGate })
+
+      const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+      const tz = venue?.timezone || 'America/Mexico_City'
+      const start = venueStartOfDay(tz, fromDate ? new Date(`${fromDate}T12:00:00`) : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000))
+      const end = venueEndOfDay(tz, toDate ? new Date(`${toDate}T12:00:00`) : undefined)
+      const range = { startDate: start.toISOString(), endDate: end.toISOString() }
+
+      if (mode === 'detailed') {
+        const detailGate = await planGateMessage(venueId, 'TRANSACTION_EXPORT', 'La exportación detallada de transacciones')
+        if (detailGate) return text({ ok: false, planRequired: true, error: detailGate })
+        const filters = { ...range, paymentMethod, cardType, merchantAccountId }
+        const total = await countSalesSummaryDetailRows(venueId, filters)
+        const rows = await fetchSalesSummaryDetailRows(venueId, filters, 200) // cap MCP payload
+        return text({ venueId, mode: 'detailed', window: range, timezone: tz, total, returned: rows.length, rows })
+      }
+
+      const requested = (sections ?? 'totals,paymentMethods')
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean) as SalesSummaryExportSection[]
+      // includeMerchantBreakdown: true is SAFE here (no tier leak) — the whole tool already
+      // gated on ADVANCED_REPORTS via `reportGate` at the top and returned early if the venue
+      // is not entitled. So by this line the venue holds ADVANCED_REPORTS (the same code that
+      // unlocks byMerchantAccount). This is the MCP analogue of the report controller's
+      // reconciliationAllowed gate — kept in lockstep, never an afterthought.
+      const report = await getSalesSummary(venueId, {
+        ...range,
+        groupBy: 'paymentMethod',
+        reportType: 'summary',
+        timezone: tz,
+        paymentMethod,
+        cardType,
+        merchantAccountId,
+        includeMerchantBreakdown: true,
+      })
+      const { rows } = flattenSalesSummaryForExport(report, requested)
+      return text({ venueId, mode: 'summary', window: range, timezone: tz, sections: requested, rows })
     },
   )
 }
