@@ -7,6 +7,7 @@
  * under TZ=UTC before the fix.
  */
 import { parseDbDateRange } from '../../../src/utils/datetime'
+import { BadRequestError } from '../../../src/errors/AppError'
 
 describe('parseDbDateRange — venue-local day boundaries, runtime-TZ-independent', () => {
   it('bare YYYY-MM-DD range → exact venue-local boundaries in real UTC (Mexico, UTC-6)', () => {
@@ -30,5 +31,35 @@ describe('parseDbDateRange — venue-local day boundaries, runtime-TZ-independen
     const { from, to } = parseDbDateRange('2026-06-02T06:00:00.000Z', '2026-06-02T06:00:00.000Z', 'America/Mexico_City')
     expect(from.toISOString()).toBe('2026-06-02T06:00:00.000Z')
     expect(to.toISOString()).toBe('2026-06-03T05:59:59.999Z')
+  })
+})
+
+/**
+ * Regresión (2026-06-16, hallazgo de /full-testing): una fecha con FORMATO válido pero
+ * IRREAL (mes 13, día 99, 30-feb) pasaba el regex de Zod y reventaba aquí con un Error
+ * genérico → HTTP 500. Ahora lanza BadRequestError → HTTP 400. Cubre income-statement,
+ * business-summary y banks (todos via parseDbDateRange) + cualquier otro caller.
+ */
+describe('parseDbDateRange — fechas inválidas → BadRequestError (400, no 500)', () => {
+  it('mes inexistente (2026-13-99) lanza BadRequestError', () => {
+    expect(() => parseDbDateRange('2026-13-99', '2026-12-31', 'America/Mexico_City')).toThrow(BadRequestError)
+  })
+
+  it('día inexistente (30 de febrero) lanza BadRequestError', () => {
+    expect(() => parseDbDateRange('2026-01-01', '2026-02-30', 'America/Mexico_City')).toThrow(BadRequestError)
+  })
+
+  it('el error es 400 (statusCode), no 500', () => {
+    try {
+      parseDbDateRange('2026-99-99', '2026-12-31', 'America/Mexico_City')
+      throw new Error('no lanzó')
+    } catch (e: any) {
+      expect(e).toBeInstanceOf(BadRequestError)
+      expect(e.statusCode).toBe(400)
+    }
+  })
+
+  it('una fecha real sigue funcionando (no rompimos el camino feliz)', () => {
+    expect(() => parseDbDateRange('2026-02-28', '2026-12-31', 'America/Mexico_City')).not.toThrow()
   })
 })

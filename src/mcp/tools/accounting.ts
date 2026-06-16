@@ -2,6 +2,8 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 
 import { getBankAndCashSummary, getBusinessSummary, getIncomeStatement } from '@/services/dashboard/accounting.dashboard.service'
+import { createAccount, getCatalog, seedBaseChart } from '@/services/fiscal/chartOfAccounts.service'
+import { getMappings, setMapping } from '@/services/fiscal/accountMapping.service'
 import { listStatements } from '@/services/dashboard/bankReconciliation.service'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
@@ -160,6 +162,150 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           estadosDeCuenta: d.reconciliation.statements,
           movimientos: d.reconciliation.lineCount,
           conciliados: d.reconciliation.matchedCount,
+        },
+      })
+    },
+  )
+
+  server.tool(
+    'chart_of_accounts',
+    'Catálogo de cuentas (contabilidad fiscal, Capa B — PREMIUM, bundle con CFDI) de un local: las cuentas contables con su código agrupador del SAT (c_CuentasSAT / Anexo 24), tipo (activo/pasivo/capital/ingreso/costo/gasto), naturaleza (deudora/acreedora) y jerarquía. Responde "¿qué cuentas tengo en mi contabilidad?". Si el local aún no tiene RFC/emisor fiscal devuelve needsFiscalSetup. Pasa venueId.',
+    {
+      venueId: z.string().describe('Local a reportar (debe estar en tu alcance)'),
+    },
+    async ({ venueId }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:read', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'El catálogo de cuentas (contabilidad fiscal)')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+
+      const catalog = await getCatalog(venueId)
+      if (catalog.needsFiscalSetup) {
+        return text({ ok: true, needsFiscalSetup: true, mensaje: 'Este local aún no tiene RFC/emisor fiscal configurado.' })
+      }
+      return text({
+        ok: true,
+        rfc: catalog.rfc,
+        sembrado: catalog.seeded,
+        totalCuentas: catalog.accounts.length,
+        cuentas: catalog.accounts.map(a => ({
+          codigo: a.code,
+          nombre: a.name,
+          codigoAgrupadorSat: a.satGroupingCode,
+          tipo: a.type,
+          naturaleza: a.nature,
+          nivel: a.level,
+          afectable: a.isPostable,
+          activa: a.isActive,
+        })),
+      })
+    },
+  )
+
+  server.tool(
+    'seed_chart_of_accounts',
+    'Genera (siembra) el catálogo de cuentas BASE de un local, ya mapeado al código agrupador del SAT y adaptado a su giro. Idempotente: solo inserta las cuentas que falten, NUNCA sobrescribe lo que el usuario editó. Úsalo cuando el local aún no tiene catálogo (chart_of_accounts → sembrado:false). Escritura: requiere permiso accounting:manage y la feature CFDI (PREMIUM). Pasa venueId.',
+    {
+      venueId: z.string().describe('Local (debe estar en tu alcance)'),
+    },
+    async ({ venueId }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:manage', venueId) // write gate
+      const gate = await planGateMessage(venueId, 'CFDI', 'El catálogo de cuentas (contabilidad fiscal)')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+
+      const result = await seedBaseChart(venueId, { staffId: scope.staffId }) // el servicio se auto-audita
+      return text({ ok: true, rfc: result.rfc, totalCuentas: result.accounts.length })
+    },
+  )
+
+  server.tool(
+    'add_ledger_account',
+    'Agrega UNA cuenta nueva al catálogo de cuentas de un local. La naturaleza (deudora/acreedora) se asigna sola por el tipo; si das un código padre, la subcuenta hereda el tipo del padre. Escritura: requiere permiso accounting:manage y la feature CFDI (PREMIUM). Pasa venueId, code (NumCta SAT, p.ej. "102.01.01"), name, satGroupingCode (código agrupador) y type; opcionalmente parentCode y nature.',
+    {
+      venueId: z.string().describe('Local (debe estar en tu alcance)'),
+      code: z.string().describe('Número de cuenta SAT, p.ej. 102.01.01'),
+      name: z.string().describe('Nombre de la cuenta'),
+      satGroupingCode: z.string().describe('Código agrupador del SAT, p.ej. 102'),
+      type: z.enum(['ACTIVO', 'PASIVO', 'CAPITAL', 'INGRESO', 'COSTO', 'GASTO', 'ORDEN']).describe('Tipo de cuenta'),
+      parentCode: z.string().optional().describe('Código de la cuenta padre (opcional; omite para cuenta de mayor)'),
+      nature: z.enum(['DEUDORA', 'ACREEDORA']).optional().describe('Naturaleza (opcional; default por tipo)'),
+    },
+    async ({ venueId, code, name, satGroupingCode, type, parentCode, nature }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:manage', venueId) // write gate
+      const gate = await planGateMessage(venueId, 'CFDI', 'El catálogo de cuentas (contabilidad fiscal)')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+
+      const a = await createAccount(
+        venueId,
+        { code, name, satGroupingCode, type, parentCode: parentCode ?? null, nature },
+        { staffId: scope.staffId },
+      )
+      return text({
+        ok: true,
+        cuenta: {
+          codigo: a.code,
+          nombre: a.name,
+          codigoAgrupadorSat: a.satGroupingCode,
+          tipo: a.type,
+          naturaleza: a.nature,
+          nivel: a.level,
+          afectable: a.isPostable,
+        },
+      })
+    },
+  )
+
+  server.tool(
+    'account_mapping',
+    'Configuración contable (Capa B fiscal, PREMIUM): el mapa "tipo de movimiento → cuenta del catálogo" que hace que el sistema postee los asientos solo (ventas, costo de venta, comisiones, propinas por pagar, etc.). Devuelve los 16 movimientos con la cuenta que tienen asignada (o sin asignar). Responde "¿a qué cuenta cae cada cosa?". Pasa venueId.',
+    {
+      venueId: z.string().describe('Local (debe estar en tu alcance)'),
+    },
+    async ({ venueId }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:read', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'La configuración contable')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+
+      const r = await getMappings(venueId)
+      if (r.needsFiscalSetup) return text({ ok: true, needsFiscalSetup: true })
+      return text({
+        ok: true,
+        rfc: r.rfc,
+        catalogoSembrado: r.catalogSeeded,
+        mapeos: r.mappings.map(m => ({
+          movimiento: m.movementType,
+          concepto: m.label,
+          cuenta: m.account ? `${m.account.code} ${m.account.name}` : null,
+          cuentaDefault: m.defaultCode,
+        })),
+      })
+    },
+  )
+
+  server.tool(
+    'set_account_mapping',
+    'Reasigna UN movimiento contable a una cuenta del catálogo (Configuración contable, PREMIUM). Solo se puede mapear a cuentas afectables (hojas). Escritura: requiere accounting:manage + feature CFDI. Pasa venueId, movementType (p.ej. SALES_REVENUE, COST_OF_GOODS_SOLD) y ledgerAccountId (o null para limpiar).',
+    {
+      venueId: z.string().describe('Local (debe estar en tu alcance)'),
+      movementType: z.string().describe('Tipo de movimiento, p.ej. SALES_REVENUE / COST_OF_GOODS_SOLD'),
+      ledgerAccountId: z.string().nullable().describe('Id de la cuenta del catálogo (o null para dejar sin asignar)'),
+    },
+    async ({ venueId, movementType, ledgerAccountId }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:manage', venueId) // write gate
+      const gate = await planGateMessage(venueId, 'CFDI', 'La configuración contable')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+
+      const row = await setMapping(venueId, movementType, ledgerAccountId, { staffId: scope.staffId })
+      return text({
+        ok: true,
+        mapeo: {
+          movimiento: row.movementType,
+          concepto: row.label,
+          cuenta: row.account ? `${row.account.code} ${row.account.name}` : null,
         },
       })
     },

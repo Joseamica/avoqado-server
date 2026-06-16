@@ -83,6 +83,10 @@ model Organization {
   // SIM registration approval layer (additive, sits on top of SerializedItem custody)
   simRegistrationRequests SimRegistrationRequest[]
 
+  // Contabilidad fiscal (Capa B): catálogo de cuentas + configuración contable por (org, RFC)
+  ledgerAccounts  LedgerAccount[]
+  accountMappings AccountMapping[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -10689,4 +10693,96 @@ enum ReconMatchStatus {
   MATCHED
   DUPLICATE
   CONFIRMED
+}
+
+// ============================================
+// CONTABILIDAD FISCAL (Capa B) — Catálogo de cuentas
+// Scope = (organizationId, rfc) = el CONTRIBUYENTE, NO por venue (una org puede tener
+// varios RFCs vía FiscalEmisor; cada RFC lleva su propio catálogo). Códigos del catálogo
+// agrupador del SAT (c_CuentasSAT / Anexo 24). Es la ESTRUCTURA, sin saldos (los saldos
+// se computan de JournalEntryLine cuando llegue el ledger). Gated PREMIUM (bundle con CFDI).
+// Ver chartOfAccounts.service.ts + chartOfAccounts.catalog.ts (catálogo base verificado).
+// ============================================
+
+model LedgerAccount {
+  id              String              @id @default(cuid())
+  organizationId  String
+  organization    Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  rfc             String // contribuyente (junto con organizationId); UPPERCASE-normalizado en el servicio
+  code            String // NumCta (Anexo 24), formato SAT (p.ej. "102.01"); clave de negocio dentro de (org, rfc)
+  satGroupingCode String // código agrupador del SAT (c_CuentasSAT); muchas cuentas comparten uno (no único)
+  name            String // Descripción de la cuenta (Anexo 24)
+  type            LedgerAccountType
+  nature          LedgerAccountNature // 'D'/'A' en el XML; se mapea enum→letra en el serializador
+  parentId        String? // SubCtaDe (FK self-relación). NULL solo en cuentas de mayor (nivel 1)
+  parent          LedgerAccount?      @relation("LedgerAccountHierarchy", fields: [parentId], references: [id], onDelete: Restrict)
+  children        LedgerAccount[]     @relation("LedgerAccountHierarchy")
+  accountMappings AccountMapping[] // configuración contable: movimientos que postean a esta cuenta
+  level           Int                 @default(1) // DENORMALIZADO: derivado de parentId (1 = mayor). Recalcular en la misma tx
+  isPostable      Boolean             @default(true) // TRUE solo en hojas; una acumulativa (con hijos) DEBE ser false
+  isActive        Boolean             @default(true) // soft-delete: cuentas con pólizas nunca se borran (inmutabilidad fiscal)
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  @@unique([organizationId, rfc, code]) // clave de negocio = base de la idempotencia del seed
+  @@index([organizationId, rfc, parentId]) // recorridos del árbol / hijos de un nodo
+  @@index([organizationId, rfc, satGroupingCode]) // rollup por código agrupador (balanza / catálogo XML)
+  @@index([organizationId, rfc, isPostable]) // pickers de pólizas: solo hojas afectables
+}
+
+enum LedgerAccountType {
+  ACTIVO
+  PASIVO
+  CAPITAL
+  INGRESO
+  COSTO
+  GASTO
+  ORDEN
+}
+
+enum LedgerAccountNature {
+  DEUDORA
+  ACREEDORA
+}
+
+// ============================================
+// CONFIGURACIÓN CONTABLE — AccountMapping (Capa B)
+// Mapa "tipo de movimiento → cuenta del catálogo" por (org, RFC). Hace que el motor de
+// pólizas "dicte" los asientos sin que un humano escoja cuenta cada vez. Defaults por giro
+// verificados (chartOfAccounts/accountMapping.catalog.ts), editables por el contador.
+// Gated PREMIUM (bundle con CFDI). Ver accountMapping.service.ts.
+// ============================================
+
+model AccountMapping {
+  id              String              @id @default(cuid())
+  organizationId  String
+  organization    Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  rfc             String // contribuyente (junto con organizationId)
+  movementType    AccountMovementType // qué evento contable (SALES_REVENUE, COST_OF_GOODS_SOLD, …)
+  ledgerAccountId String? // la cuenta a la que postea ese movimiento (null = aún sin asignar)
+  ledgerAccount   LedgerAccount?      @relation(fields: [ledgerAccountId], references: [id], onDelete: SetNull)
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  @@unique([organizationId, rfc, movementType]) // un mapeo por movimiento por contribuyente (idempotencia del seed)
+  @@index([organizationId, rfc])
+}
+
+enum AccountMovementType {
+  SALES_REVENUE
+  SALES_RETURN
+  CASH_RECEIPT
+  BANK_RECEIPT
+  PETTY_CASH
+  TIPS_PAYABLE
+  ACCOUNTS_RECEIVABLE
+  ACCOUNTS_PAYABLE
+  INVENTORY
+  INVENTORY_ADJUSTMENT
+  COST_OF_GOODS_SOLD
+  PROCESSOR_FEE
+  ROUNDING_DIFFERENCE
+  NET_INCOME_PROFIT
+  NET_INCOME_LOSS
+  RETAINED_EARNINGS
 }

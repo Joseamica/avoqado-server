@@ -67,7 +67,7 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'reorder_suggestions',
-    'What to re-order right now in a venue you can access: raw materials at/below their reorder point, with the suggested quantity, the best supplier (by price/lead-time/rating), estimated cost and urgency. Also returns whether auto-reorder is enabled. Answers "¿qué pido y a quién?". Pass venueId. Requires the PREMIUM auto-reorder feature.',
+    'What to re-order right now in a venue you can access: raw materials at/below their reorder point, with the suggested quantity, the best supplier (by price/lead-time/rating), estimated cost and urgency. Also returns whether auto-reorder is enabled. Answers "¿qué pido y a quién?". Pass venueId. The server enforces plan access and returns a clear message if the venue is not entitled — do NOT pre-judge plan eligibility yourself.',
     {
       venueId: z.string().describe('Venue whose reorder suggestions to compute (must be in your scope)'),
     },
@@ -99,7 +99,7 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'configure_auto_reorder',
-    'Turn automatic supplier re-ordering ON or OFF for a venue you can access, and set the optional daily spend cap (MXN) and minimum urgency. When ON, the nightly job creates approved purchase orders for low-stock ingredients and EMAILS the supplier automatically. This WRITES — requires inventory:update and the PREMIUM AUTO_REORDER feature.',
+    'Turn automatic supplier re-ordering ON or OFF for a venue you can access, and set the optional daily spend cap (MXN) and minimum urgency. When ON, the nightly job creates approved purchase orders for low-stock ingredients and EMAILS the supplier automatically. This WRITES — requires the inventory:update permission; the server enforces plan access and returns a clear message if the venue is not entitled, so do NOT pre-judge plan eligibility yourself.',
     {
       venueId: z.string().describe('Venue to configure (must be in your scope)'),
       enabled: z.boolean().describe('true = turn auto-reorder ON (will email suppliers automatically), false = OFF'),

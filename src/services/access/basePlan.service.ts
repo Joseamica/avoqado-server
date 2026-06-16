@@ -215,14 +215,30 @@ export async function venuesWithFeatureAccess(venueIds: string[], featureCode: s
   const now = new Date()
   const activeWindow = activeWindowWhere(now)
 
-  // 1. Own active grant for the code (always entitles — grandfather).
+  // 0. EXEMPT venues (GRANDFATHERED Venue.seatCapExempt OR demo status LIVE_DEMO/TRIAL) → entitled
+  //    for ANY feature code, exactly like the single-venue venueHasFeatureAccess short-circuit
+  //    (venueIsExemptFromPlanGating). WITHOUT this, the batch gate wrongly blocks grandfathered
+  //    venues — they carry no PLAN_PRO/PLAN_PREMIUM row, so they fell through to "not entitled"
+  //    (the prod incident where a grandfathered PlayTelecom venue was told sales_comparison
+  //    "requiere plan PRO" via the MCP). Checked FIRST so legacy/demo venues never hit a paywall.
+  const venuesForExemption = await prisma.venue.findMany({
+    where: { id: { in: venueIds } },
+    select: { id: true, seatCapExempt: true, status: true },
+  })
+  const entitled = new Set(
+    venuesForExemption
+      .filter(v => v.seatCapExempt === true || (DEMO_VENUE_STATUSES as readonly string[]).includes(v.status as string))
+      .map(v => v.id),
+  )
+
+  // 1. Own active grant for the code (always entitles — grandfather à-la-carte).
   const withFeature = await prisma.venueFeature.findMany({
     where: { venueId: { in: venueIds }, feature: { code: featureCode }, ...activeWindow },
     select: { venueId: true },
   })
-  const entitled = new Set(withFeature.map(v => v.venueId))
+  for (const v of withFeature) entitled.add(v.venueId)
 
-  // Tier codes are not blanket-granted: only an own grant (above) entitles them.
+  // Tier codes are not blanket-granted: only an own grant (or exemption above) entitles them.
   if ((PAID_PLAN_TIER_CODES as readonly string[]).includes(featureCode)) return entitled
 
   // Free-tier promises entitle every venue (even with no plan).

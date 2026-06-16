@@ -45,6 +45,8 @@
 import { startOfDay, endOfDay, subDays, startOfWeek, endOfWeek, startOfMonth, endOfMonth, parseISO, isValid, formatISO } from 'date-fns'
 import { fromZonedTime, toZonedTime, format as formatTz } from 'date-fns-tz'
 
+import { BadRequestError } from '../errors/AppError'
+
 /**
  * Default timezone for Mexico (most common for Avoqado venues)
  */
@@ -165,14 +167,15 @@ export function parseDbDateRange(
   const isBareDay = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s)
 
   if (fromDate) {
-    if (!isValid(parseISO(fromDate))) throw new Error(`Invalid fromDate: ${fromDate}`)
+    // 400 (no 500): una fecha con formato válido pero irreal (mes 13, día 99, 30-feb) llega aquí.
+    if (!isValid(parseISO(fromDate))) throw new BadRequestError(`La fecha inicial '${fromDate}' no es una fecha válida.`)
     from = isBareDay(fromDate) ? fromZonedTime(`${fromDate}T00:00:00.000`, timezone) : venueStartOfDay(timezone, parseISO(fromDate))
   } else {
     from = venueStartOfDayOffset(timezone, -defaultDays)
   }
 
   if (toDate) {
-    if (!isValid(parseISO(toDate))) throw new Error(`Invalid toDate: ${toDate}`)
+    if (!isValid(parseISO(toDate))) throw new BadRequestError(`La fecha final '${toDate}' no es una fecha válida.`)
     to = isBareDay(toDate) ? fromZonedTime(`${toDate}T23:59:59.999`, timezone) : venueEndOfDay(timezone, parseISO(toDate))
   } else {
     to = venueEndOfDay(timezone)

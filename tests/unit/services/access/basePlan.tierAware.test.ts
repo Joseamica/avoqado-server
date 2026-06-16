@@ -15,7 +15,7 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
     // venueHasFeatureAccess). These tier-logic tests describe NON-grandfathered venues, so it
     // defaults to seatCapExempt: false (see beforeEach) — the short-circuit stays dormant and
     // the tier path is exercised. Grandfathered behavior has its own suite (basePlan.grandfathered.test.ts).
-    venue: { findUnique: jest.fn() },
+    venue: { findUnique: jest.fn(), findMany: jest.fn() },
     venueFeature: { findFirst: jest.fn(), findMany: jest.fn() },
   },
 }))
@@ -200,7 +200,10 @@ describe('venuesWithFeatureAccess (batch) mirrors single-venue results', () => {
    * (1) own feature rows for the code, (2) active PLAN_PREMIUM, (3) active PLAN_PRO.
    * We answer each by inspecting the `feature.code` filter.
    */
-  function mockBatch(opts: { code: string; ownGrants: string[]; premium: string[]; pro: string[] }) {
+  function mockBatch(opts: { code: string; ownGrants: string[]; premium: string[]; pro: string[]; exempt?: string[] }) {
+    const exempt = opts.exempt ?? []
+    // venuesWithFeatureAccess now fetches seatCapExempt+status FIRST (the exemption short-circuit).
+    ;(prisma as any).venue.findMany.mockResolvedValue(ALL.map(id => ({ id, seatCapExempt: exempt.includes(id), status: 'ACTIVE' })))
     findMany.mockImplementation(async ({ where }: any) => {
       const { single } = codeFilter(where)
       if (single === opts.code) return opts.ownGrants.map(venueId => ({ venueId }))
@@ -237,5 +240,20 @@ describe('venuesWithFeatureAccess (batch) mirrors single-venue results', () => {
     const set = await venuesWithFeatureAccess([], PRO_FEATURE)
     expect(set.size).toBe(0)
     expect(findMany).not.toHaveBeenCalled()
+  })
+
+  it('GRANDFATHERED (seatCapExempt) with NO own grant and NO base plan → entitled for ANY code', async () => {
+    // Regression (prod MCP incident 2026-06-16): a grandfathered PlayTelecom venue (seatCapExempt
+    // true, no PLAN_PRO/PLAN_PREMIUM row, no own grant) was told sales_comparison "requiere plan PRO"
+    // — because the BATCH venuesWithFeatureAccess skipped the exemption the single venueHasFeatureAccess
+    // applies. It must now entitle exempt venues for ANY feature, like the single version.
+    mockBatch({ code: PRO_FEATURE, ownGrants: [], premium: [], pro: [], exempt: ['vGrand'] })
+    expect((await venuesWithFeatureAccess(ALL, PRO_FEATURE)).has('vGrand')).toBe(true)
+    // ...and even for a Premium-only differentiator (exempt = every feature, no paywall ever).
+    mockBatch({ code: PREMIUM_FEATURE, ownGrants: [], premium: [], pro: [], exempt: ['vGrand'] })
+    expect((await venuesWithFeatureAccess(ALL, PREMIUM_FEATURE)).has('vGrand')).toBe(true)
+    // a NON-exempt venue with no plan/grant stays excluded (control — gate still works).
+    mockBatch({ code: PRO_FEATURE, ownGrants: [], premium: [], pro: [], exempt: [] })
+    expect((await venuesWithFeatureAccess(ALL, PRO_FEATURE)).has('vNone')).toBe(false)
   })
 })

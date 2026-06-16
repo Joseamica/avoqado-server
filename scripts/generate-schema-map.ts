@@ -287,6 +287,8 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   MerchantFiscalConfig: 'Facturación (CFDI)',
   Cfdi: 'Facturación (CFDI)',
   CustomerTaxProfile: 'Facturación (CFDI)',
+  LedgerAccount: 'Facturación (CFDI)',
+  AccountMapping: 'Facturación (CFDI)',
 
   // 12. Pricing, Costs & Venue Lending
   PricingPolicy: 'Pricing, Costs & Venue Lending',

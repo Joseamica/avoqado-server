@@ -419,10 +419,13 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'export_sales_summary',
-    'Export the sales summary for a venue you can access ("exporta mis ventas"). mode=summary returns the flattened totals + chosen sections; mode=detailed (Premium) returns the matching per-transaction rows. Honors the same date range + payment-method/card-type/merchant filters as the dashboard report. Pass venueId; optionally fromDate/toDate (YYYY-MM-DD), mode, sections (comma list), paymentMethod, cardType, merchantAccountId.',
+    'Export the sales summary for a venue you can access ("exporta mis ventas"). mode=summary returns the flattened totals + chosen sections; mode=detailed returns the matching per-transaction rows. Honors the same date range + payment-method/card-type/merchant filters as the dashboard report. Pass venueId; optionally fromDate/toDate (YYYY-MM-DD), mode, sections (comma list), paymentMethod, cardType, merchantAccountId. The server enforces plan access and returns a clear message if the venue is not entitled — do NOT pre-judge plan eligibility yourself.',
     {
       venueId: z.string().describe('Venue to export (must be in your scope)'),
-      mode: z.enum(['summary', 'detailed']).optional().describe('summary totals (default) or detailed transactions (Premium)'),
+      mode: z
+        .enum(['summary', 'detailed'])
+        .optional()
+        .describe('summary totals (default) or detailed per-transaction rows (the server enforces plan access)'),
       fromDate: z.string().optional().describe('Start date YYYY-MM-DD (default: 7 days ago)'),
       toDate: z.string().optional().describe('End date YYYY-MM-DD (default: today)'),
       sections: z
