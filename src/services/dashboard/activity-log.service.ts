@@ -218,6 +218,97 @@ export async function getDistinctActions(organizationId: string): Promise<string
 }
 
 // ==========================================
+// VENUE-SCOPED — Owner audit log (single venue)
+// ==========================================
+
+export interface QueryVenueActivityLogsParams {
+  venueId: string
+  staffId?: string
+  action?: string
+  entity?: string
+  search?: string
+  startDate?: string
+  endDate?: string
+  page?: number
+  pageSize?: number
+}
+
+/** Query activity logs for ONE venue with filters + pagination. */
+export async function queryVenueActivityLogs(params: QueryVenueActivityLogsParams): Promise<PaginatedActivityLogs> {
+  const { venueId, page = 1, pageSize = 25 } = params
+
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { id: true, name: true } })
+  if (!venue) {
+    return { logs: [], pagination: { page, pageSize, total: 0, totalPages: 0 } }
+  }
+
+  const where: Record<string, unknown> = { venueId }
+  if (params.staffId) where.staffId = params.staffId
+  if (params.action) where.action = params.action
+  if (params.entity) where.entity = params.entity
+  if (params.search) {
+    where.OR = [
+      { action: { contains: params.search, mode: 'insensitive' } },
+      { entity: { contains: params.search, mode: 'insensitive' } },
+      { entityId: { contains: params.search, mode: 'insensitive' } },
+    ]
+  }
+  if (params.startDate || params.endDate) {
+    const createdAt: Record<string, Date> = {}
+    if (params.startDate) createdAt.gte = new Date(params.startDate)
+    if (params.endDate) createdAt.lte = new Date(params.endDate)
+    where.createdAt = createdAt
+  }
+
+  const [total, logs] = await Promise.all([
+    prisma.activityLog.count({ where: where as any }),
+    prisma.activityLog.findMany({
+      where: where as any,
+      include: { staff: { select: { id: true, firstName: true, lastName: true } } },
+      orderBy: { createdAt: 'desc' },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    }),
+  ])
+
+  const enrichedLogs: ActivityLogEntry[] = logs.map(log => ({
+    id: log.id,
+    action: log.action,
+    entity: log.entity,
+    entityId: log.entityId,
+    data: log.data,
+    ipAddress: log.ipAddress,
+    createdAt: log.createdAt,
+    staff: log.staff,
+    venueName: venue.name,
+  }))
+
+  return { logs: enrichedLogs, pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) } }
+}
+
+/** Distinct action strings for ONE venue (filter dropdown). */
+export async function getVenueDistinctActions(venueId: string): Promise<string[]> {
+  const results = await prisma.activityLog.findMany({
+    where: { venueId },
+    select: { action: true },
+    distinct: ['action'],
+    orderBy: { action: 'asc' },
+  })
+  return results.map(r => r.action)
+}
+
+/** Distinct entity strings for ONE venue (filter dropdown). */
+export async function getVenueDistinctEntities(venueId: string): Promise<string[]> {
+  const results = await prisma.activityLog.findMany({
+    where: { venueId, entity: { not: null } },
+    select: { entity: true },
+    distinct: ['entity'],
+    orderBy: { entity: 'asc' },
+  })
+  return results.map(r => r.entity!).filter(Boolean)
+}
+
+// ==========================================
 // SUPERADMIN — Global Activity Logs
 // ==========================================
 
