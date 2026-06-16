@@ -9,6 +9,7 @@ import { simRegistrationService } from '../serialized-inventory/simRegistration.
 import { moduleService, MODULE_CODES } from '../modules/module.service'
 import { deductInventoryForProduct, getProductInventoryMethod } from '../dashboard/productInventoryIntegration.service'
 import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service'
+import { logAction } from '../dashboard/activity-log.service'
 
 /**
  * Helper function to flatten OrderItemModifier structure for Android compatibility
@@ -2010,6 +2011,14 @@ export async function removeOrderItem(
   logger.info(
     `✅ [ORDER SERVICE] Removed item from order ${order.orderNumber}. New total: $${newTotal} (version: ${order.version} → ${updatedOrder.version})`,
   )
+  void logAction({
+    staffId: null,
+    venueId,
+    action: 'ITEM_REMOVED',
+    entity: 'Order',
+    entityId: orderId,
+    data: { itemId: orderItemId, amount: Number(itemToRemove.total ?? 0) },
+  })
 
   // Emit Socket.IO event for real-time order updates
   const broadcastingService = socketManager.getBroadcastingService()
@@ -2174,6 +2183,14 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
         notes: input.notes,
       },
     },
+  })
+  void logAction({
+    staffId: input.staffId ?? null,
+    venueId,
+    action: 'ITEM_COMPED',
+    entity: 'Order',
+    entityId: orderId,
+    data: { itemIds: input.itemIds, amount: Number(compAmount), reason: input.reason ?? undefined },
   })
 
   logger.info(`✅ [ORDER SERVICE] Comped ${itemsToComp.length} items | discount: $${compAmount} | new total: $${newTotal}`)
@@ -2395,6 +2412,14 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       },
     },
   })
+  void logAction({
+    staffId: input.staffId ?? null,
+    venueId,
+    action: 'ITEM_VOIDED',
+    entity: 'Order',
+    entityId: orderId,
+    data: { itemIds: input.itemIds, amount: Number(voidAmount), reason: input.reason ?? undefined },
+  })
 
   logger.info(`✅ [ORDER SERVICE] Voided ${itemsToVoid.length} items | voided amount: $${voidAmount} | new total: $${newTotal}`)
 
@@ -2607,6 +2632,14 @@ export async function applyDiscount(
         itemLevel: !!input.itemIds,
       },
     },
+  })
+  void logAction({
+    staffId: input.staffId ?? null,
+    venueId,
+    action: 'DISCOUNT_APPLIED',
+    entity: 'Order',
+    entityId: orderId,
+    data: { amount: Number(discountAmount), reason: input.reason ?? undefined },
   })
 
   logger.info(`✅ [ORDER SERVICE] Applied discount | amount: $${discountAmount} | new total: $${newTotal}`)
