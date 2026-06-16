@@ -15,7 +15,7 @@ import express, { Request, Response, NextFunction } from 'express'
 import { formatInTimeZone } from 'date-fns-tz'
 
 import { payLaterAgingReport } from '@/controllers/dashboard/reports.dashboard.controller'
-import { salesSummaryReport } from '@/controllers/dashboard/sales-summary.dashboard.controller'
+import { salesSummaryReport, salesSummaryExport } from '@/controllers/dashboard/sales-summary.dashboard.controller'
 import { salesByItemReport } from '@/controllers/dashboard/sales-by-item.dashboard.controller'
 import { refundsReport } from '@/controllers/dashboard/refunds.dashboard.controller'
 import { checkPermission, resolveRequestVenueId } from '@/middlewares/checkPermission.middleware'
@@ -101,6 +101,14 @@ router.get('/venues/:venueId/pay-later-aging', checkPermission('tpv-reports:pay-
  * @permission reports:read
  */
 router.get('/sales-summary', checkPermission('reports:read'), clampSalesSummaryRangeToToday, salesSummaryReport)
+
+/**
+ * GET /api/v1/dashboard/reports/sales-summary/export
+ * Streams CSV/XLSX/PDF. mode=summary (Free=today via clamp) | mode=detailed (PREMIUM TRANSACTION_EXPORT).
+ * @permission reports:read
+ */
+router.get('/sales-summary/export', checkPermission('reports:read'), clampSalesSummaryRangeToToday, salesSummaryExport)
+router.get('/venues/:venueId/sales-summary/export', checkPermission('reports:read'), clampSalesSummaryRangeToToday, salesSummaryExport)
 
 /**
  * GET /api/v1/dashboard/reports/sales-by-item

@@ -447,6 +447,12 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
       if (mode === 'detailed') {
         const detailGate = await planGateMessage(venueId, 'TRANSACTION_EXPORT', 'La exportación detallada de transacciones')
         if (detailGate) return text({ ok: false, planRequired: true, error: detailGate })
+        // QR_LEGACY has no per-payment representation in the Payment table (legacy QR rows live in
+        // the legacy store). Letting it through would reach buildPaymentWhereFilter('QR_LEGACY'),
+        // which THROWS. Mirror the HTTP controller's guard (salesSummaryExport) and reject cleanly.
+        if (paymentMethod === 'QR_LEGACY') {
+          return text({ ok: false, error: 'QR_LEGACY no tiene representación por transacción; usa mode=summary.' })
+        }
         const filters = { ...range, paymentMethod, cardType, merchantAccountId }
         const total = await countSalesSummaryDetailRows(venueId, filters)
         const rows = await fetchSalesSummaryDetailRows(venueId, filters, 200) // cap MCP payload

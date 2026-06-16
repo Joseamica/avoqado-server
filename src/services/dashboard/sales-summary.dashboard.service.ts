@@ -1274,6 +1274,128 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
 }
 
 // ============================================================
+// Sales Summary Export (summary flatten + detailed rows + caps)
+// ============================================================
+
+/** Section ids the summary export can include. */
+export type SalesSummaryExportSection = 'totals' | 'paymentMethods' | 'cardTypes' | 'merchantAccounts' | 'byPeriod'
+
+/** One flattened row for the summary-mode export (rendered by encodeExport columns). */
+export interface SalesSummaryExportRow {
+  section: SalesSummaryExportSection
+  label: string
+  count: number | null
+  amount: number | null
+  percentage: number | null
+}
+
+/** Detailed-mode + summary-mode filter inputs (superset of SalesSummaryFilters used by the report). */
+export interface SalesSummaryExportFilters {
+  startDate: string
+  endDate: string
+  paymentMethod?: PaymentMethodFilter
+  cardType?: CardTypeFilter
+  merchantAccountId?: string
+  /** Detailed mode only — single or multi staff. */
+  staffIds?: string[]
+  /** Detailed mode only — cash-session / shift scope. */
+  shiftId?: string
+}
+
+const round2x = (n: number | null | undefined): number | null => (n == null ? null : Math.round(n * 100) / 100)
+
+/**
+ * Flatten an already-computed SalesSummaryResponse into labeled rows, one per requested section.
+ * Order-derived totals can be null under a payment-method filter — preserved as null (the
+ * export columns render null as '').
+ */
+export function flattenSalesSummaryForExport(
+  report: SalesSummaryResponse,
+  sections: SalesSummaryExportSection[],
+): { rows: SalesSummaryExportRow[] } {
+  const want = new Set(sections)
+  const rows: SalesSummaryExportRow[] = []
+  const s = report.summary
+
+  if (want.has('totals')) {
+    const t = (label: string, amount: number | null, count: number | null = null): SalesSummaryExportRow => ({
+      section: 'totals', label, count, amount: round2x(amount), percentage: null,
+    })
+    rows.push(t('Ventas brutas', s.grossSales, s.transactionCount))
+    rows.push(t('Descuentos', s.discounts == null ? null : -s.discounts))
+    rows.push(t('Reembolsos', -s.refunds))
+    rows.push(t('Ventas netas', s.netSales))
+    rows.push(t('Impuestos', s.taxes))
+    rows.push(t('Propinas', s.tips))
+    rows.push(t('Comisiones de plataforma', -s.platformFees))
+    rows.push(t('Total cobrado', s.totalCollected))
+  }
+  if (want.has('paymentMethods') && report.byPaymentMethod) {
+    for (const m of report.byPaymentMethod) {
+      rows.push({ section: 'paymentMethods', label: m.method, count: m.count, amount: round2x(m.amount), percentage: round2x(m.percentage) })
+    }
+  }
+  // NOTE (see Task 6 FIX 7): getSalesSummary only populates byPaymentMethodDetailed when
+  // groupBy==='paymentMethod' AND no paymentMethod filter is active (it is the unfiltered
+  // card-type sub-bucketing). So when the caller has an active paymentMethod filter, this
+  // section is silently empty — the dialog disables the "Card-type detail" checkbox in that
+  // case so the user can never select a section that yields nothing.
+  if (want.has('cardTypes') && report.byPaymentMethodDetailed) {
+    for (const b of report.byPaymentMethodDetailed) {
+      for (const sub of b.subBuckets ?? []) {
+        rows.push({ section: 'cardTypes', label: sub.type, count: sub.count, amount: round2x(sub.amount), percentage: round2x(sub.percentage) })
+      }
+    }
+  }
+  if (want.has('merchantAccounts') && report.byMerchantAccount) {
+    for (const ma of report.byMerchantAccount) {
+      rows.push({ section: 'merchantAccounts', label: ma.displayName, count: ma.transactionCount, amount: round2x(ma.netToReceive), percentage: null })
+    }
+  }
+  if (want.has('byPeriod') && report.byPeriod) {
+    for (const p of report.byPeriod) {
+      rows.push({ section: 'byPeriod', label: p.periodLabel || p.period, count: p.metrics.transactionCount, amount: round2x(p.metrics.totalCollected), percentage: null })
+    }
+  }
+  return { rows }
+}
+
+/** Shared WHERE used by both count + fetch for detailed-mode rows (honors the active filter). */
+function buildSalesSummaryDetailWhere(venueId: string, filters: SalesSummaryExportFilters): Prisma.PaymentWhereInput {
+  const paymentWhereFilter = buildPaymentWhereFilter(filters.paymentMethod, filters.cardType)
+  const where: Prisma.PaymentWhereInput = {
+    venueId,
+    status: 'COMPLETED',
+    createdAt: { gte: new Date(filters.startDate), lte: new Date(filters.endDate) },
+    ...(filters.merchantAccountId ? { merchantAccountId: filters.merchantAccountId } : {}),
+    ...(filters.staffIds && filters.staffIds.length > 0 ? { processedById: { in: filters.staffIds } } : {}),
+    ...(filters.shiftId ? { shiftId: filters.shiftId } : {}),
+    ...paymentWhereFilter,
+  }
+  return where
+}
+
+/** Pre-flight count for detailed-mode export (caller compares against the row cap before fetching). */
+export async function countSalesSummaryDetailRows(venueId: string, filters: SalesSummaryExportFilters): Promise<number> {
+  return prisma.payment.count({ where: buildSalesSummaryDetailWhere(venueId, filters) })
+}
+
+/** Fetch capped detailed-mode payment rows; flat select with everything the export columns pluck. */
+export async function fetchSalesSummaryDetailRows(venueId: string, filters: SalesSummaryExportFilters, limit: number) {
+  return prisma.payment.findMany({
+    where: buildSalesSummaryDetailWhere(venueId, filters),
+    select: {
+      id: true, createdAt: true, method: true, cardBrand: true, maskedPan: true,
+      processorData: true, amount: true, tipAmount: true, status: true, source: true, orderId: true,
+      processedBy: { select: { firstName: true, lastName: true } },
+      merchantAccount: { select: { displayName: true, externalMerchantId: true } },
+    },
+    orderBy: { createdAt: 'desc' },
+    take: limit,
+  })
+}
+
+// ============================================================
 // Helper: Calculate Time-Period Metrics
 // ============================================================
 

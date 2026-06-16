@@ -42,6 +42,7 @@ jest.mock('@/controllers/dashboard/reports.dashboard.controller', () => ({
 }))
 jest.mock('@/controllers/dashboard/sales-summary.dashboard.controller', () => ({
   salesSummaryReport: (_req: any, res: any) => res.json({ report: 'sales-summary' }),
+  salesSummaryExport: (_req: any, res: any) => res.json({ report: 'sales-summary-export' }),
 }))
 jest.mock('@/controllers/dashboard/sales-by-item.dashboard.controller', () => ({
   salesByItemReport: (_req: any, res: any) => res.json({ report: 'sales-by-item' }),
