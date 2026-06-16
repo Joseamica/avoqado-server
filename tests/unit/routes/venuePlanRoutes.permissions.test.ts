@@ -32,9 +32,11 @@ describe('venue plan/seat routes — permission guards', () => {
   const audited = collectAuditedRoutes(router)
   const find = (method: string, path: string) => audited.find(r => r.method === method && r.path === path)
 
-  it('GET /venues/:venueId/plan-tier → features:read (readable by EVERY role for tier gating)', () => {
-    // The minimal { tier, grandfathered, exempt } gating signal — no price/Stripe.
-    expect(find('get', '/venues/:venueId/plan-tier')?.permission).toBe('features:read')
+  it('GET /venues/:venueId/plan-tier → home:read (the ONLY read perm held by EVERY venue role)', () => {
+    // The minimal { tier, grandfathered, exempt } gating signal — no price/Stripe. The gate hook
+    // runs on every page for every role, so the guard must be universal: features:read is missing on
+    // HOST/KITCHEN/WAITER/CASHIER and teams:read is missing on KITCHEN — only home:read covers all.
+    expect(find('get', '/venues/:venueId/plan-tier')?.permission).toBe('home:read')
   })
 
   it('GET /venues/:venueId/plan/seat-status → teams:read (NOT billing — the Free seat-cap upsell)', () => {

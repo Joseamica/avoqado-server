@@ -98,4 +98,16 @@ describe('feature-metadata tier-aware blanket grant', () => {
     expect(md.PLAN_PRO.state).toBe('LOCKED')
     expect(md.PLAN_PREMIUM.state).toBe('LOCKED')
   })
+
+  it('GRANDFATHERED (exempt) with NO plan: every non-tier feature ACTIVE — no wrong LOCKED', async () => {
+    // Regression (audit 2026-06-15): getFeatureMetadataForVenue ignored the exempt short-circuit, so
+    // a grandfathered venue (seatCapExempt=true → baseTier null) showed ALL features LOCKED in the
+    // /me/access payload, contradicting venueHasFeatureAccess (which exempts it). Now it mirrors.
+    mockVenue([]) // no base plan, no à-la-carte grants
+    prismaMock.venue.findUnique.mockResolvedValue({ seatCapExempt: true, status: 'ACTIVE' } as any)
+    const md = await getFeatureMetadataForVenue('vGrandfathered')
+    expect(md.CFDI.state).toBe('ACTIVE') // Premium-only, yet granted by the exempt short-circuit
+    expect(md.LOYALTY_PROGRAM.state).toBe('ACTIVE')
+    expect(md.PLAN_PRO.state).toBe('LOCKED') // tier codes still never force-ACTIVE
+  })
 })

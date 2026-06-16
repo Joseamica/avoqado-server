@@ -2040,14 +2040,16 @@ router.get(
 )
 
 // Minimal plan-tier gating signal ({ tier, grandfathered, exempt }) readable by EVERY venue role.
-// The dashboard FeatureGate needs grandfathered/tier to decide whether to paywall — but GET /plan
-// above is ADMIN/OWNER-only (it returns price + Stripe ids), so sub-ADMIN staff (MANAGER/CASHIER/…)
-// were wrongly paywalled. This carries only the non-sensitive gating signal, guarded by features:read
-// (held by every role incl. VIEWER). No price, no Stripe ids — see getVenuePlanInfo().
+// The dashboard FeatureGate (useVenueTier) runs this on EVERY page for EVERY role to decide whether
+// to paywall — but GET /plan above is ADMIN/OWNER-only (it returns price + Stripe ids). Guarded by
+// `home:read` because that is the ONLY read permission held by ALL venue roles — `features:read`
+// is missing on HOST/KITCHEN/WAITER/CASHIER, and `teams:read` is missing on KITCHEN, so either would
+// 403 those roles and make the gate fall back to fail-open (fragile + leaks premium UI on FREE
+// venues). This carries only the non-sensitive gating signal — no price, no Stripe ids.
 router.get(
   '/venues/:venueId/plan-tier',
   authenticateTokenMiddleware,
-  checkPermission('features:read'),
+  checkPermission('home:read'),
   validateRequest(planParamsSchema) as RequestHandler,
   venueController.getVenuePlanTier,
 )

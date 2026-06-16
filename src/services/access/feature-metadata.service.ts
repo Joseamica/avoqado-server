@@ -1,6 +1,12 @@
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
-import { getVenueBaseTier, PAID_PLAN_TIER_CODES, PREMIUM_ONLY_CODES } from '@/services/access/basePlan.service'
+import {
+  getVenueBaseTier,
+  venueIsExemptFromPlanGating,
+  PAID_PLAN_TIER_CODES,
+  PREMIUM_ONLY_CODES,
+  FREE_TIER_CODES,
+} from '@/services/access/basePlan.service'
 
 /**
  * Gate states that already grant the venue access to a feature. When the base
@@ -69,7 +75,7 @@ function buildFeatureCheckoutUrl(venueId: string): string {
 }
 
 export async function getFeatureMetadataForVenue(venueId: string): Promise<Record<string, FeatureMetadata>> {
-  const [features, venueFeatures, baseTier] = await Promise.all([
+  const [features, venueFeatures, baseTier, isExempt] = await Promise.all([
     prisma.feature.findMany({
       where: { active: true },
       select: {
@@ -99,6 +105,9 @@ export async function getFeatureMetadataForVenue(venueId: string): Promise<Recor
     // the access gate allows at the API layer. PREMIUM unlocks ALL non-tier features;
     // PRO unlocks all non-tier features EXCEPT the Premium-only differentiators.
     getVenueBaseTier(venueId),
+    // EXEMPT (grandfathered legacy OR demo) → every feature granted, no paywall — mirrors the
+    // venueHasFeatureAccess short-circuit so a grandfathered venue never shows features as LOCKED.
+    venueIsExemptFromPlanGating(venueId),
   ])
 
   const now = new Date()
@@ -127,6 +136,8 @@ export async function getFeatureMetadataForVenue(venueId: string): Promise<Recor
    */
   const tierGrants = (code: string): boolean => {
     if (isPlanTierCode(code)) return false // tier codes never self-grant via the blanket
+    if (isExempt) return true // grandfathered/demo → exempt from ALL paywalls (every non-tier feature)
+    if ((FREE_TIER_CODES as readonly string[]).includes(code)) return true // Free-tier promises: everyone
     if (baseTier === 'PREMIUM') return true
     if (baseTier === 'PRO') return !isPremiumOnlyCode(code)
     return false
