@@ -56,7 +56,8 @@ export async function getStaffById(req: Request, res: Response, next: NextFuncti
 
 export async function createStaff(req: Request, res: Response, next: NextFunction) {
   try {
-    const staff = await staffService.createStaff(req.body)
+    const { userId } = (req as any).authContext
+    const staff = await staffService.createStaff(req.body, userId)
     return res.status(201).json({ staff })
   } catch (error: any) {
     if (error.statusCode) {
@@ -74,7 +75,8 @@ export async function createStaff(req: Request, res: Response, next: NextFunctio
 export async function updateStaff(req: Request, res: Response, next: NextFunction) {
   try {
     const { staffId } = req.params
-    const staff = await staffService.updateStaff(staffId, req.body)
+    const { userId } = (req as any).authContext
+    const staff = await staffService.updateStaff(staffId, req.body, userId)
     return res.status(200).json({ staff })
   } catch (error: any) {
     if (error.statusCode) {
@@ -93,7 +95,8 @@ export async function assignToOrganization(req: Request, res: Response, next: Ne
   try {
     const { staffId } = req.params
     const { organizationId, role } = req.body
-    const staff = await staffService.assignToOrganization(staffId, organizationId, role)
+    const { userId } = (req as any).authContext
+    const staff = await staffService.assignToOrganization(staffId, organizationId, role, userId)
     return res.status(200).json({ staff })
   } catch (error: any) {
     if (error.statusCode) {
@@ -111,7 +114,8 @@ export async function assignToOrganization(req: Request, res: Response, next: Ne
 export async function removeFromOrganization(req: Request, res: Response, next: NextFunction) {
   try {
     const { staffId, organizationId } = req.params
-    const staff = await staffService.removeFromOrganization(staffId, organizationId)
+    const { userId } = (req as any).authContext
+    const staff = await staffService.removeFromOrganization(staffId, organizationId, userId)
     return res.status(200).json({ staff })
   } catch (error: any) {
     if (error.statusCode) {
@@ -130,7 +134,8 @@ export async function assignToVenue(req: Request, res: Response, next: NextFunct
   try {
     const { staffId } = req.params
     const { venueId, role, pin } = req.body
-    const staff = await staffService.assignToVenue(staffId, venueId, role, pin)
+    const { userId } = (req as any).authContext
+    const staff = await staffService.assignToVenue(staffId, venueId, role, pin, userId)
     return res.status(200).json({ staff })
   } catch (error: any) {
     if (error.statusCode) {
@@ -148,7 +153,8 @@ export async function assignToVenue(req: Request, res: Response, next: NextFunct
 export async function updateVenueAssignment(req: Request, res: Response, next: NextFunction) {
   try {
     const { staffId, venueId } = req.params
-    const staff = await staffService.updateVenueAssignment(staffId, venueId, req.body)
+    const { userId } = (req as any).authContext
+    const staff = await staffService.updateVenueAssignment(staffId, venueId, req.body, userId)
     return res.status(200).json({ staff })
   } catch (error: any) {
     if (error.statusCode) {
@@ -166,7 +172,8 @@ export async function updateVenueAssignment(req: Request, res: Response, next: N
 export async function removeFromVenue(req: Request, res: Response, next: NextFunction) {
   try {
     const { staffId, venueId } = req.params
-    const staff = await staffService.removeFromVenue(staffId, venueId)
+    const { userId } = (req as any).authContext
+    const staff = await staffService.removeFromVenue(staffId, venueId, userId)
     return res.status(200).json({ staff })
   } catch (error: any) {
     if (error.statusCode) {
@@ -185,7 +192,7 @@ export async function deleteStaff(req: Request, res: Response, next: NextFunctio
   try {
     const { staffId } = req.params
     const { userId } = (req as any).authContext
-    const result = await staffService.deleteStaff(staffId, userId)
+    const result = await staffService.deleteStaff(staffId, userId, userId)
     return res.status(200).json(result)
   } catch (error: any) {
     if (error.statusCode) {
@@ -204,7 +211,8 @@ export async function resetPassword(req: Request, res: Response, next: NextFunct
   try {
     const { staffId } = req.params
     const { newPassword } = req.body
-    const result = await staffService.resetPassword(staffId, newPassword)
+    const { userId } = (req as any).authContext
+    const result = await staffService.resetPassword(staffId, newPassword, userId)
     return res.status(200).json(result)
   } catch (error: any) {
     if (error.statusCode) {
