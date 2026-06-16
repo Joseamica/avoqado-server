@@ -155,18 +155,25 @@ export function parseDbDateRange(
   let from: Date
   let to: Date
 
+  // A bare `YYYY-MM-DD` is a venue-LOCAL calendar day. We must NOT parse it with
+  // parseISO (→ midnight in the Node RUNTIME tz): on a UTC host (prod default, no
+  // TZ set) parseISO('2026-06-02') = 2026-06-02T00:00:00Z = jun-1 18:00 in Mexico,
+  // so venueStartOfDay floored it to jun-1 — the whole range shifted a day earlier
+  // (income statement / org dashboard reported the wrong days on prod). fromZonedTime
+  // interprets the naive string in the VENUE tz, runtime-independent. Full ISO instants
+  // (e.g. "...Z") are already absolute, so keep the venue-day-of-that-instant behaviour.
+  const isBareDay = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s)
+
   if (fromDate) {
-    const parsed = parseISO(fromDate)
-    if (!isValid(parsed)) throw new Error(`Invalid fromDate: ${fromDate}`)
-    from = venueStartOfDay(timezone, parsed)
+    if (!isValid(parseISO(fromDate))) throw new Error(`Invalid fromDate: ${fromDate}`)
+    from = isBareDay(fromDate) ? fromZonedTime(`${fromDate}T00:00:00.000`, timezone) : venueStartOfDay(timezone, parseISO(fromDate))
   } else {
     from = venueStartOfDayOffset(timezone, -defaultDays)
   }
 
   if (toDate) {
-    const parsed = parseISO(toDate)
-    if (!isValid(parsed)) throw new Error(`Invalid toDate: ${toDate}`)
-    to = venueEndOfDay(timezone, parsed)
+    if (!isValid(parseISO(toDate))) throw new Error(`Invalid toDate: ${toDate}`)
+    to = isBareDay(toDate) ? fromZonedTime(`${toDate}T23:59:59.999`, timezone) : venueEndOfDay(timezone, parseISO(toDate))
   } else {
     to = venueEndOfDay(timezone)
   }
