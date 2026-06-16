@@ -3,7 +3,12 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
   default: { payment: { findMany: jest.fn() } },
 }))
 
-import { matchLines, parseBankCsv, type DepositCandidate, type ParsedBankLine } from '../../../../src/services/dashboard/bankReconciliation.service'
+import {
+  matchLines,
+  parseBankCsv,
+  type DepositCandidate,
+  type ParsedBankLine,
+} from '../../../../src/services/dashboard/bankReconciliation.service'
 
 const noon = (ymd: string): Date => new Date(`${ymd}T12:00:00`)
 const line = (
@@ -53,7 +58,10 @@ describe('bankReconciliation — matchLines (the moat)', () => {
   })
 
   it('one candidate consumed once: two equal deposits, one expected day → 1 MATCHED, 1 UNMATCHED', () => {
-    const r = matchLines([line(0, '2026-06-10', 5000, { reference: 'A' }), line(1, '2026-06-10', 5000, { reference: 'B' })], [cand('2026-06-10', 5000)])
+    const r = matchLines(
+      [line(0, '2026-06-10', 5000, { reference: 'A' }), line(1, '2026-06-10', 5000, { reference: 'B' })],
+      [cand('2026-06-10', 5000)],
+    )
     const statuses = r.map(x => x.matchStatus).sort()
     expect(statuses).toEqual(['MATCHED', 'UNMATCHED'])
   })
@@ -77,7 +85,11 @@ describe('bankReconciliation — matchLines (the moat)', () => {
 
 describe('bankReconciliation — parseBankCsv', () => {
   it('parses separate cargo/abono columns (Banorte/BBVA style)', () => {
-    const csv = ['Fecha,Concepto,Referencia,Cargo,Abono', '10/06/2026,DEPOSITO TPV,REF123,,"1,234.56"', '11/06/2026,COMISION,REF124,50.00,'].join('\n')
+    const csv = [
+      'Fecha,Concepto,Referencia,Cargo,Abono',
+      '10/06/2026,DEPOSITO TPV,REF123,,"1,234.56"',
+      '11/06/2026,COMISION,REF124,50.00,',
+    ].join('\n')
     const lines = parseBankCsv(csv)
     expect(lines).toHaveLength(2)
     expect(lines[0]).toMatchObject({ amountCents: 123_456, direction: 'CREDIT', reference: 'REF123' })

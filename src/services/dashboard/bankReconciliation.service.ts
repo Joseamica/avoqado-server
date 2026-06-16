@@ -61,7 +61,10 @@ function parseAmountCents(raw: string | undefined): number {
   if (!raw) return 0
   let s = raw.trim()
   const negative = /^\(.*\)$/.test(s) || s.startsWith('-')
-  s = s.replace(/[()$\s]/g, '').replace(/,/g, '').replace(/^-/, '')
+  s = s
+    .replace(/[()$\s]/g, '')
+    .replace(/,/g, '')
+    .replace(/^-/, '')
   const n = parseFloat(s)
   if (!Number.isFinite(n)) return 0
   return Math.round(n * 100) * (negative ? -1 : 1)
@@ -159,7 +162,12 @@ export function parseBankCsv(content: string): ParsedBankLine[] {
  * agrupación por día con `formatInVenueTimezone` (nunca deja que el runtime parsee una
  * fecha pelada — ver regla de timezone).
  */
-export async function loadDepositCandidates(venueId: string, fromYmd: string, toYmd: string, timezone: string): Promise<DepositCandidate[]> {
+export async function loadDepositCandidates(
+  venueId: string,
+  fromYmd: string,
+  toYmd: string,
+  timezone: string,
+): Promise<DepositCandidate[]> {
   // Noon-anchor pattern (host-tz-safe): the venue-local calendar day survives any host TZ.
   const from = venueStartOfDay(timezone, new Date(`${fromYmd}T12:00:00`))
   const to = venueEndOfDay(timezone, new Date(`${toYmd}T12:00:00`))
@@ -220,7 +228,9 @@ export function matchLines(
     seen.add(dupKey)
 
     const cands = candidates
-      .filter(c => !used.has(c.key) && Math.abs(c.netCents - line.amountCents) <= amountTol && daysBetween(c.date, line.postedDate) <= dateWindow)
+      .filter(
+        c => !used.has(c.key) && Math.abs(c.netCents - line.amountCents) <= amountTol && daysBetween(c.date, line.postedDate) <= dateWindow,
+      )
       .sort(
         (a, b) =>
           Math.abs(a.netCents - line.amountCents) - Math.abs(b.netCents - line.amountCents) ||
@@ -239,4 +249,5 @@ export function matchLines(
   return results
 }
 
-const formatDay = (d: Date): string => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+const formatDay = (d: Date): string =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
