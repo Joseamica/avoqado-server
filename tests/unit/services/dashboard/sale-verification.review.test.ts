@@ -162,7 +162,9 @@ describe('reviewSaleVerification', () => {
 
   it('marks verification REJECTED (terminal "Rechazada") on REJECT_FINAL — no reasons required, reasons cleared', async () => {
     mockedFindUnique.mockResolvedValue(baseExisting)
-    mockedUpdate.mockResolvedValue(buildUpdatedRow({ status: 'REJECTED', reviewNotes: 'No se pudo portar, cliente perdido', rejectionReasons: [] }))
+    mockedUpdate.mockResolvedValue(
+      buildUpdatedRow({ status: 'REJECTED', reviewNotes: 'No se pudo portar, cliente perdido', rejectionReasons: [] }),
+    )
 
     const result = await reviewSaleVerification(VENUE_ID, {
       saleVerificationId: VERIFICATION_ID,

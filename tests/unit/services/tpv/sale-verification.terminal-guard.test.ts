@@ -89,7 +89,5 @@ it('still allows re-upload on a FAILED sale ("Revisar" is correctable)', async (
   await createOrUpdateProofOfSale(VENUE_ID, PAYMENT_ID, ['https://x/photo.jpg'], STAFF_ID)
 
   // FAILED → re-upload returns it to the review queue (PENDING)
-  expect(mockedSvUpdate).toHaveBeenCalledWith(
-    expect.objectContaining({ data: expect.objectContaining({ status: 'PENDING' }) }),
-  )
+  expect(mockedSvUpdate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'PENDING' }) }))
 })
