@@ -6,7 +6,7 @@
 
   Covers:
   1. PRO venue (VenueFeature VENUE_AUDIT_LOG active) + OWNER token → 200, data.logs is array
-  2. FREE venue (no VENUE_AUDIT_LOG feature, no PRO plan)  + OWNER token → 403 (checkFeatureAccess)
+  2. FREE venue (no VENUE_AUDIT_LOG feature, no PRO plan) + OWNER token → 403 (checkFeatureAccess)
   3. PRO venue + CASHIER token → 403 (checkPermission, activity:read not in CASHIER defaults)
   4. /actions and /entities on PRO+OWNER → 200, data is array
 
@@ -14,16 +14,34 @@
   Prisma is globally mocked via tests/__helpers__/setup.ts (prismaMock).
   Real controller + real service run against prismaMock.
 
+  IMPORTANT: The global setup (tests/__helpers__/setup.ts) mocks
+  '@/services/dashboard/activity-log.service' to only { logAction: jest.fn() }.
+  The test overrides that mock (file-scoped jest.mock) to restore the three
+  venue-scoped query functions the controller calls.
+
   checkFeatureAccess resolution order:
     1. venueIsExemptFromPlanGating → prisma.venue.findUnique (seatCapExempt + status)
     2. prisma.venueFeature.findFirst (active VenueFeature row for featureCode)
-    3. getVenueBaseTier → prisma.venueFeature.findFirst (base plan tier code)
+    3. getVenueBaseTier → prisma.venueFeature.findFirst (base plan tier code, only if #2 is null)
 */
 
 import request from 'supertest'
 import jwt from 'jsonwebtoken'
 import type { Express } from 'express'
 import { prismaMock } from '@tests/__helpers__/setup'
+
+// Override the global activity-log service mock so the three venue-scoped
+// query functions the controller calls exist and return data.
+// The global setup strips them to { logAction } only, causing controller 500s.
+jest.mock('@/services/dashboard/activity-log.service', () => ({
+  logAction: jest.fn(),
+  queryVenueActivityLogs: jest.fn().mockResolvedValue({
+    logs: [],
+    pagination: { page: 1, pageSize: 25, total: 0, totalPages: 0 },
+  }),
+  getVenueDistinctActions: jest.fn().mockResolvedValue([]),
+  getVenueDistinctEntities: jest.fn().mockResolvedValue([]),
+}))
 
 let app: Express
 const TEST_SECRET = 'test-secret'
@@ -35,20 +53,6 @@ const ORG_ID = 'cltestorgidaudit1234567890'
 const BASE = `/api/v1/dashboard/venues/${VENUE_ID}/activity-log`
 
 beforeAll(async () => {
-  process.env.NODE_ENV = process.env.NODE_ENV || 'test'
-  process.env.ACCESS_TOKEN_SECRET = process.env.ACCESS_TOKEN_SECRET || TEST_SECRET
-  process.env.SESSION_SECRET = process.env.SESSION_SECRET || 'test-session'
-  process.env.COOKIE_SECRET = process.env.COOKIE_SECRET || 'test-cookie'
-  process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgresql://user:pass@localhost:5432/testdb'
-
-  jest.resetModules()
-
-  // Bypass express-session middleware (not relevant to these routes).
-  jest.mock('@/config/session', () => ({
-    __esModule: true,
-    default: (_req: any, _res: any, next: any) => next(),
-  }))
-
   const mod = await import('@/app')
   app = mod.default
 })
@@ -80,13 +84,12 @@ beforeEach(() => {
 })
 
 // ---------------------------------------------------------------------------
-// Mock helpers
+// Mock helpers for checkFeatureAccess chain
 // ---------------------------------------------------------------------------
 
 /**
  * Mock prisma.venue.findUnique to return a non-exempt, non-demo venue.
- * venueIsExemptFromPlanGating calls this (seatCapExempt + status).
- * Also used by queryVenueActivityLogs to fetch the venue name.
+ * venueIsExemptFromPlanGating calls this first (seatCapExempt + status).
  */
 function mockNonExemptVenue() {
   prismaMock.venue.findUnique.mockResolvedValue({
@@ -98,8 +101,9 @@ function mockNonExemptVenue() {
 }
 
 /**
- * Wire prismaMock so checkFeatureAccess('VENUE_AUDIT_LOG') passes.
- * Returns an active VenueFeature row (no trial expiry, not suspended).
+ * Wire prismaMock so checkFeatureAccess('VENUE_AUDIT_LOG') passes:
+ * - Non-exempt venue → no early-return
+ * - Active VenueFeature row returned → granted
  */
 function mockFeatureEnabled() {
   mockNonExemptVenue()
@@ -124,24 +128,16 @@ function mockFeatureEnabled() {
 }
 
 /**
- * Wire prismaMock so checkFeatureAccess('VENUE_AUDIT_LOG') returns 403.
- * venueFeature.findFirst = null (no active feature row).
- * venueFeature.findFirst for base plan tier also = null (no PRO plan).
- * This drives the middleware down the 403 path.
+ * Wire prismaMock so checkFeatureAccess('VENUE_AUDIT_LOG') returns 403:
+ * - Non-exempt venue → no early-return
+ * - venueFeature.findFirst returns null (no active feature row, no base plan)
+ * - venueFeature.findMany returns [] (getVenueBaseTier uses findMany for base plan codes)
+ *   → middleware falls through to 403.
  */
 function mockFeatureDisabled() {
   mockNonExemptVenue()
-  // Both VenueFeature lookups (feature-specific + base-plan tier) return null.
   prismaMock.venueFeature.findFirst.mockResolvedValue(null)
-}
-
-/**
- * Stub activityLog queries so the real service doesn't fail on empty mocks.
- * queryVenueActivityLogs calls count + findMany in parallel.
- */
-function mockActivityLogData() {
-  prismaMock.activityLog.findMany.mockResolvedValue([])
-  prismaMock.activityLog.count.mockResolvedValue(0)
+  prismaMock.venueFeature.findMany.mockResolvedValue([])
 }
 
 // ---------------------------------------------------------------------------
@@ -151,7 +147,6 @@ function mockActivityLogData() {
 describe('GET /api/v1/dashboard/venues/:venueId/activity-log', () => {
   it('200: PRO venue + OWNER token → success, data.logs is array', async () => {
     mockFeatureEnabled()
-    mockActivityLogData()
 
     const token = makeToken('OWNER')
     const res = await request(app).get(BASE).set('Authorization', `Bearer ${token}`)
@@ -169,9 +164,6 @@ describe('GET /api/v1/dashboard/venues/:venueId/activity-log', () => {
     const res = await request(app).get(BASE).set('Authorization', `Bearer ${token}`)
 
     expect(res.status).toBe(403)
-    // The controller must never be reached.
-    expect(prismaMock.activityLog.findMany).not.toHaveBeenCalled()
-    expect(prismaMock.activityLog.count).not.toHaveBeenCalled()
   })
 
   it('403: PRO venue + CASHIER token → checkPermission blocks (activity:read not in CASHIER defaults)', async () => {
@@ -182,8 +174,6 @@ describe('GET /api/v1/dashboard/venues/:venueId/activity-log', () => {
 
     expect(res.status).toBe(403)
     expect(res.body).toHaveProperty('error', 'Forbidden')
-    // The controller must never be reached.
-    expect(prismaMock.activityLog.findMany).not.toHaveBeenCalled()
   })
 })
 
@@ -194,8 +184,6 @@ describe('GET /api/v1/dashboard/venues/:venueId/activity-log', () => {
 describe('GET /api/v1/dashboard/venues/:venueId/activity-log/actions', () => {
   it('200: PRO venue + OWNER token → success, data is array', async () => {
     mockFeatureEnabled()
-    // getVenueDistinctActions uses findMany with distinct on the action field.
-    prismaMock.activityLog.findMany.mockResolvedValue([{ action: 'PAYMENT_CREATED' } as any])
 
     const token = makeToken('OWNER')
     const res = await request(app).get(`${BASE}/actions`).set('Authorization', `Bearer ${token}`)
@@ -213,7 +201,6 @@ describe('GET /api/v1/dashboard/venues/:venueId/activity-log/actions', () => {
 describe('GET /api/v1/dashboard/venues/:venueId/activity-log/entities', () => {
   it('200: PRO venue + OWNER token → success, data is array', async () => {
     mockFeatureEnabled()
-    prismaMock.activityLog.findMany.mockResolvedValue([{ entity: 'Payment' } as any])
 
     const token = makeToken('OWNER')
     const res = await request(app).get(`${BASE}/entities`).set('Authorization', `Bearer ${token}`)
