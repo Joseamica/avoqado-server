@@ -546,16 +546,21 @@ export async function adjustStock(venueId: string, rawMaterialId: string, data: 
   // Handle stock additions by creating a new batch
   else if (data.quantity > 0) {
     // Create a new batch for manual additions
-    const batch = await createStockBatch(venueId, rawMaterialId, {
-      quantity: data.quantity,
-      unit: rawMaterial.unit,
-      costPerUnit: rawMaterial.costPerUnit.toNumber(), // Use current cost
-      receivedDate: new Date(),
-      expirationDate:
-        rawMaterial.perishable && rawMaterial.shelfLifeDays
-          ? new Date(Date.now() + rawMaterial.shelfLifeDays * 24 * 60 * 60 * 1000)
-          : undefined,
-    })
+    const batch = await createStockBatch(
+      venueId,
+      rawMaterialId,
+      {
+        quantity: data.quantity,
+        unit: rawMaterial.unit,
+        costPerUnit: rawMaterial.costPerUnit.toNumber(), // Use current cost
+        receivedDate: new Date(),
+        expirationDate:
+          rawMaterial.perishable && rawMaterial.shelfLifeDays
+            ? new Date(Date.now() + rawMaterial.shelfLifeDays * 24 * 60 * 60 * 1000)
+            : undefined,
+      },
+      staffId,
+    )
 
     // Update raw material stock
     const operations = [

@@ -228,9 +228,10 @@ export async function rejectPurchaseOrder(venueId: string, purchaseOrderId: stri
 /**
  * Send purchase order to supplier
  */
-export async function sendToSupplier(venueId: string, purchaseOrderId: string) {
+export async function sendToSupplier(venueId: string, purchaseOrderId: string, performedBy?: string) {
   const order = await prisma.purchaseOrder.findFirst({
     where: { id: purchaseOrderId, venueId },
+    include: { supplier: { select: { id: true, email: true } } },
   })
 
   if (!order) {
@@ -241,7 +242,7 @@ export async function sendToSupplier(venueId: string, purchaseOrderId: string) {
     throw new AppError(`Cannot send order with status ${order.status}. Order must be approved first.`, 400)
   }
 
-  return prisma.purchaseOrder.update({
+  const updated = await prisma.purchaseOrder.update({
     where: { id: purchaseOrderId },
     data: {
       status: PurchaseOrderStatus.SENT,
@@ -255,6 +256,21 @@ export async function sendToSupplier(venueId: string, purchaseOrderId: string) {
       },
     },
   })
+
+  void logAction({
+    staffId: performedBy ?? null,
+    venueId,
+    action: 'PURCHASE_ORDER_SENT_TO_SUPPLIER',
+    entity: 'PurchaseOrder',
+    entityId: purchaseOrderId,
+    data: {
+      orderNumber: order.orderNumber,
+      supplierId: order.supplierId,
+      supplierEmail: order.supplier?.email ?? null,
+    },
+  })
+
+  return updated
 }
 
 /**

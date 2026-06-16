@@ -833,6 +833,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
    */
   [StaffRole.OWNER]: [
     'home:*',
+    'activity:read', // Bitácora de auditoría por-venue (Pro-tier, owner-only)
     'analytics:*',
     'reports:*', // Dashboard reports (Sales Summary, Sales by Item, etc.)
     'settlements:*', // Available Balance (settlements) - was missing!
@@ -1249,6 +1250,7 @@ export function validatePermissionFormat(permission: string): string | null {
  */
 const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   home: ['home:read'],
+  activity: ['activity:read'],
   analytics: ['analytics:read', 'analytics:export'],
   settlements: ['settlements:read', 'settlements:simulate'],
   accounting: ['accounting:read', 'accounting:reconcile', 'accounting:manage'],

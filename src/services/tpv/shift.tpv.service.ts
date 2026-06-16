@@ -5,6 +5,7 @@ import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { publishCommand } from '../../communication/rabbitmq/publisher'
 import socketManager from '../../communication/sockets'
+import { logAction } from '../dashboard/activity-log.service'
 
 interface ShiftFilters {
   staffId?: string
@@ -1069,6 +1070,15 @@ export async function openShiftForVenue(
     isIntegratedPOS,
   })
 
+  void logAction({
+    staffId: staffId ?? null,
+    venueId: venueId,
+    action: 'SHIFT_OPENED',
+    entity: 'Shift',
+    entityId: shift.id,
+    data: { startingCash: startingCash, stationId: stationId ?? undefined, isIntegratedPOS: isIntegratedPOS },
+  })
+
   // Emit Socket.IO event for real-time dashboard updates
   try {
     const broadcastingService = socketManager.getBroadcastingService()
@@ -1423,6 +1433,23 @@ export async function closeShiftForVenue(venueId: string, shiftId: string, close
       productsSold: totalProductsSold,
       inventoryConsumed: inventoryConsumed.length,
       duration: `${shiftDuration} minutes`,
+    },
+  })
+
+  void logAction({
+    staffId: shift.staffId ?? null,
+    venueId: venueId,
+    action: 'SHIFT_CLOSED',
+    entity: 'Shift',
+    entityId: shift.id,
+    data: {
+      endingCash: updatedShift.endingCash?.toNumber() ?? undefined,
+      totalSales: Number(totalSales ?? 0),
+      totalTips: Number(totalTips ?? 0),
+      cashDiscrepancy:
+        closeData?.cashDeclared != null
+          ? new Decimal(closeData.cashDeclared).sub(totalCashPayments).toNumber()
+          : undefined,
     },
   })
 

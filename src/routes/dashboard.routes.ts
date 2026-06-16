@@ -249,6 +249,7 @@ import venuePaymentConfigRoutes from './dashboard/venuePaymentConfig.routes'
 import ecommerceMerchantRoutes from './dashboard/ecommerceMerchant.routes'
 import paymentLinkRoutes from './dashboard/paymentLink.routes'
 import manualPaymentRoutes from './dashboard/manualPayment.routes'
+import activityLogRoutes from './dashboard/activityLog.routes'
 import reportsRoutes from './dashboard/reports.routes'
 import accountingRoutes from './dashboard/accounting.routes'
 import * as bankReconciliationController from '../controllers/dashboard/bankReconciliation.controller'
@@ -3340,6 +3341,9 @@ router.get(
 // Manual Payment routes (ADMIN+) — MUST be registered BEFORE /venues/:venueId/payments/:paymentId
 // so that `/manual` and `/external-sources` are not captured by the `:paymentId` param.
 router.use('/venues/:venueId/payments', authenticateTokenMiddleware, manualPaymentRoutes)
+
+// Activity Log routes (PRO+, OWNER+) — per-venue audit trail read endpoints.
+router.use('/venues/:venueId/activity-log', authenticateTokenMiddleware, activityLogRoutes)
 
 router.get(
   '/venues/:venueId/payments/:paymentId',

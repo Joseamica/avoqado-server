@@ -10,6 +10,7 @@ import {
 import prisma from '../../utils/prismaClient'
 import { SimCustodyError, type SimCustodyErrorCode } from '../../lib/sim-custody-error-codes'
 import { notifySimCustody } from './custody.notifications'
+import { logAction } from '../dashboard/activity-log.service'
 
 // ==========================================
 // TYPES
@@ -717,6 +718,27 @@ export class SimCustodyService {
       },
       select: { id: true },
     })
+
+    // Dual-write to ActivityLog so the owner per-venue audit screen (which reads
+    // ActivityLog, filtered by venueId) can see the full SIM custody chain.
+    // Org-level items have venueId=null, so we prefer the selling/registration
+    // venue to keep these events visible on a venue-scoped audit view.
+    void logAction({
+      staffId: e.actorStaffId ?? null,
+      venueId: e.item.sellingVenueId ?? e.item.registeredFromVenueId ?? e.item.venueId ?? null,
+      action: `SIM_CUSTODY_${String(e.eventType)}`,
+      entity: 'SerializedItem',
+      entityId: e.item.id,
+      data: {
+        serialNumber: e.item.serialNumber,
+        fromState: e.fromState,
+        toState: e.toState,
+        fromStaffId: e.fromStaffId,
+        toStaffId: e.toStaffId,
+        reason: e.reason ?? undefined,
+      },
+    })
+
     return row.id
   }
 

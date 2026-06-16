@@ -82,9 +82,12 @@ async function generateOrderNumber(venueId: string): Promise<string> {
  * Helper function to send Purchase Order email (async, non-blocking)
  */
 export async function sendPurchaseOrderEmailAsync(venueId: string, purchaseOrderId: string, staffId?: string): Promise<boolean> {
+  // Declared outside try so it is accessible in the catch block for the email-failure audit log
+
+  let po: any = null
   try {
     // Fetch complete PO data
-    const po = await prisma.purchaseOrder.findUnique({
+    po = await prisma.purchaseOrder.findUnique({
       where: { id: purchaseOrderId },
       include: {
         supplier: true,
@@ -142,7 +145,7 @@ export async function sendPurchaseOrderEmailAsync(venueId: string, purchaseOrder
     const shippingZipCode = useCustomShipping ? po.shippingZipCode! : po.venue?.zipCode || 'N/A'
 
     // Format items for email
-    const formattedItems = po.items.map(item => ({
+    const formattedItems = po.items.map((item: any) => ({
       name: item.rawMaterial.name,
       quantity: item.quantityOrdered.toNumber(),
       unit: item.unit,
@@ -181,6 +184,18 @@ export async function sendPurchaseOrderEmailAsync(venueId: string, purchaseOrder
     return emailSent
   } catch (error) {
     logger.error(`Error in sendPurchaseOrderEmailAsync for PO ${purchaseOrderId}:`, error)
+    void logAction({
+      staffId: null,
+      venueId,
+      action: 'PURCHASE_ORDER_EMAIL_FAILED',
+      entity: 'PurchaseOrder',
+      entityId: purchaseOrderId,
+      data: {
+        orderNumber: po?.orderNumber ?? null,
+        supplierId: po?.supplierId ?? null,
+        error: error instanceof Error ? error.message : String(error),
+      },
+    })
     // Don't throw - email failure should not affect PO creation
     return false
   }
@@ -644,14 +659,19 @@ export async function receivePurchaseOrder(
     // (quantity, unit, costPerUnit) to the raw material's storage unit
     // internally — we still need to compute the same normalized quantity here
     // because RawMaterial.currentStock and the movement record use the RM unit.
-    const batchPromise = createStockBatch(venueId, orderItem.rawMaterialId, {
-      purchaseOrderItemId: orderItem.id,
-      quantity: receivedItem.quantityReceived,
-      unit: orderItem.unit,
-      costPerUnit: orderItem.unitPrice.toNumber(),
-      receivedDate: new Date(data.receivedDate),
-      expirationDate,
-    })
+    const batchPromise = createStockBatch(
+      venueId,
+      orderItem.rawMaterialId,
+      {
+        purchaseOrderItemId: orderItem.id,
+        quantity: receivedItem.quantityReceived,
+        unit: orderItem.unit,
+        costPerUnit: orderItem.unitPrice.toNumber(),
+        receivedDate: new Date(data.receivedDate),
+        expirationDate,
+      },
+      staffId,
+    )
 
     batchCreations.push({ itemId: orderItem.id, batchPromise })
 
@@ -781,7 +801,7 @@ export async function cancelPurchaseOrder(
   venueId: string,
   purchaseOrderId: string,
   reason?: string,
-  _staffId?: string,
+  staffId?: string,
 ): Promise<PurchaseOrder> {
   const order = await prisma.purchaseOrder.findFirst({
     where: {
@@ -814,7 +834,8 @@ export async function cancelPurchaseOrder(
     },
   })
 
-  logAction({
+  void logAction({
+    staffId,
     venueId,
     action: 'PURCHASE_ORDER_CANCELLED',
     entity: 'PurchaseOrder',
@@ -1088,6 +1109,21 @@ export async function applyItemReceiveStatusInTx(
             : item.quantityReceived
           : new Decimal(0),
       notes: data.notes !== undefined ? data.notes : item.notes,
+    },
+  })
+
+  // ── Audit: capture how each item was received (condition per item) ────────
+  void logAction({
+    staffId: staffId ?? null,
+    venueId,
+    action: 'PURCHASE_ORDER_ITEM_RECEIVED',
+    entity: 'PurchaseOrder',
+    entityId: purchaseOrderId,
+    data: {
+      purchaseOrderItemId: itemId,
+      rawMaterialId: item.rawMaterialId,
+      status: newReceiveStatus,
+      quantityReceived: Number(newQtyReceivedInPoUnit ?? 0),
     },
   })
 

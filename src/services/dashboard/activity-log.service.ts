@@ -12,6 +12,7 @@
 import prisma from '../../utils/prismaClient'
 import { Prisma } from '@prisma/client'
 import logger from '../../config/logger'
+import { fromZonedTime } from 'date-fns-tz'
 
 export interface LogActionParams {
   staffId?: string | null
@@ -215,6 +216,100 @@ export async function getDistinctActions(organizationId: string): Promise<string
   })
 
   return results.map(r => r.action)
+}
+
+// ==========================================
+// VENUE-SCOPED — Owner audit log (single venue)
+// ==========================================
+
+export interface QueryVenueActivityLogsParams {
+  venueId: string
+  staffId?: string
+  action?: string
+  entity?: string
+  search?: string
+  startDate?: string
+  endDate?: string
+  page?: number
+  pageSize?: number
+}
+
+/** Query activity logs for ONE venue with filters + pagination. */
+export async function queryVenueActivityLogs(params: QueryVenueActivityLogsParams): Promise<PaginatedActivityLogs> {
+  const { venueId, page = 1, pageSize = 25 } = params
+
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { id: true, name: true, timezone: true } })
+  if (!venue) {
+    return { logs: [], pagination: { page, pageSize, total: 0, totalPages: 0 } }
+  }
+
+  const where: Record<string, unknown> = { venueId }
+  if (params.staffId) where.staffId = params.staffId
+  if (params.action) where.action = params.action
+  if (params.entity) where.entity = params.entity
+  if (params.search) {
+    where.OR = [
+      { action: { contains: params.search, mode: 'insensitive' } },
+      { entity: { contains: params.search, mode: 'insensitive' } },
+      { entityId: { contains: params.search, mode: 'insensitive' } },
+    ]
+  }
+  if (params.startDate || params.endDate) {
+    // Parse the bare YYYY-MM-DD in the VENUE timezone (pass a STRING, not new Date()) so a
+    // venue-local day range is correct under any host TZ (prod runs UTC). See critical-warnings.md.
+    const venueTz = venue.timezone || 'America/Mexico_City'
+    const createdAt: Record<string, Date> = {}
+    if (params.startDate) createdAt.gte = fromZonedTime(`${params.startDate}T00:00:00.000`, venueTz)
+    if (params.endDate) createdAt.lte = fromZonedTime(`${params.endDate}T23:59:59.999`, venueTz)
+    where.createdAt = createdAt
+  }
+
+  const [total, logs] = await Promise.all([
+    prisma.activityLog.count({ where: where as any }),
+    prisma.activityLog.findMany({
+      where: where as any,
+      include: { staff: { select: { id: true, firstName: true, lastName: true } } },
+      orderBy: { createdAt: 'desc' },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    }),
+  ])
+
+  const enrichedLogs: ActivityLogEntry[] = logs.map(log => ({
+    id: log.id,
+    action: log.action,
+    entity: log.entity,
+    entityId: log.entityId,
+    data: log.data,
+    ipAddress: log.ipAddress,
+    createdAt: log.createdAt,
+    staff: log.staff,
+    venueName: venue.name,
+  }))
+
+  return { logs: enrichedLogs, pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) } }
+}
+
+/** Distinct action strings for ONE venue (filter dropdown). */
+export async function getVenueDistinctActions(venueId: string): Promise<string[]> {
+  const results = await prisma.activityLog.findMany({
+    where: { venueId },
+    select: { action: true },
+    distinct: ['action'],
+    orderBy: { action: 'asc' },
+  })
+  return results.map(r => r.action)
+}
+
+/** Distinct entity strings for ONE venue (filter dropdown). */
+export async function getVenueDistinctEntities(venueId: string): Promise<string[]> {
+  const results = await prisma.activityLog.findMany({
+    where: { venueId, entity: { not: null } },
+    select: { entity: true },
+    distinct: ['entity'],
+    orderBy: { entity: 'asc' },
+  })
+  return results.map(r => r.entity!).filter(Boolean)
 }
 
 // ==========================================

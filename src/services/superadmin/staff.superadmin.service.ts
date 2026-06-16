@@ -4,6 +4,7 @@ import bcrypt from 'bcryptjs'
 import logger from '../../config/logger'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
+import { logAction } from '../dashboard/activity-log.service'
 
 // ===========================================
 // TYPES
@@ -194,7 +195,7 @@ export async function getStaffById(staffId: string) {
 // CREATE STAFF (atomic: Staff + StaffOrg + StaffVenue?)
 // ===========================================
 
-export async function createStaff(data: CreateStaffData) {
+export async function createStaff(data: CreateStaffData, performedBy?: string) {
   const { email, firstName, lastName, phone, password, organizationId, orgRole, venueId, venueRole, pin } = data
 
   // 1. Check email uniqueness
@@ -279,6 +280,15 @@ export async function createStaff(data: CreateStaffData) {
 
   logger.info(`[STAFF-SUPERADMIN] Created staff: ${email}`, { staffId: staff.id, organizationId })
 
+  void logAction({
+    staffId: performedBy ?? null,
+    venueId: venueId ?? null,
+    action: 'STAFF_CREATED',
+    entity: 'Staff',
+    entityId: staff.id,
+    data: { email, firstName, lastName, organizationId, orgRole, venueRole },
+  })
+
   // Return full detail
   return getStaffById(staff.id)
 }
@@ -287,7 +297,7 @@ export async function createStaff(data: CreateStaffData) {
 // UPDATE STAFF
 // ===========================================
 
-export async function updateStaff(staffId: string, data: UpdateStaffData) {
+export async function updateStaff(staffId: string, data: UpdateStaffData, performedBy?: string) {
   const staff = await prisma.staff.findUnique({ where: { id: staffId } })
   if (!staff) {
     throw new NotFoundError('Usuario no encontrado')
@@ -299,6 +309,16 @@ export async function updateStaff(staffId: string, data: UpdateStaffData) {
   })
 
   logger.info(`[STAFF-SUPERADMIN] Updated staff: ${updated.email}`, { staffId })
+
+  void logAction({
+    staffId: performedBy ?? null,
+    venueId: null,
+    action: 'STAFF_UPDATED',
+    entity: 'Staff',
+    entityId: staffId,
+    data: { changes: { ...data } },
+  })
+
   return getStaffById(staffId)
 }
 
@@ -306,7 +326,7 @@ export async function updateStaff(staffId: string, data: UpdateStaffData) {
 // ASSIGN TO ORGANIZATION (upsert)
 // ===========================================
 
-export async function assignToOrganization(staffId: string, organizationId: string, role: OrgRole) {
+export async function assignToOrganization(staffId: string, organizationId: string, role: OrgRole, performedBy?: string) {
   // Validate staff exists
   const staff = await prisma.staff.findUnique({ where: { id: staffId } })
   if (!staff) {
@@ -343,6 +363,16 @@ export async function assignToOrganization(staffId: string, organizationId: stri
   })
 
   logger.info(`[STAFF-SUPERADMIN] Assigned staff to org`, { staffId, organizationId, role })
+
+  void logAction({
+    staffId: performedBy ?? null,
+    venueId: null,
+    action: 'STAFF_ROLE_ASSIGNED',
+    entity: 'Staff',
+    entityId: staffId,
+    data: { organizationId, role },
+  })
+
   return getStaffById(staffId)
 }
 
@@ -350,7 +380,7 @@ export async function assignToOrganization(staffId: string, organizationId: stri
 // REMOVE FROM ORGANIZATION (soft delete)
 // ===========================================
 
-export async function removeFromOrganization(staffId: string, organizationId: string) {
+export async function removeFromOrganization(staffId: string, organizationId: string, performedBy?: string) {
   // Validate membership exists
   const membership = await prisma.staffOrganization.findUnique({
     where: { staffId_organizationId: { staffId, organizationId } },
@@ -392,6 +422,16 @@ export async function removeFromOrganization(staffId: string, organizationId: st
   })
 
   logger.info(`[STAFF-SUPERADMIN] Removed staff from org`, { staffId, organizationId })
+
+  void logAction({
+    staffId: performedBy ?? null,
+    venueId: null,
+    action: 'STAFF_ROLE_REMOVED',
+    entity: 'Staff',
+    entityId: staffId,
+    data: { organizationId, role: membership.role },
+  })
+
   return getStaffById(staffId)
 }
 
@@ -469,13 +509,23 @@ export async function upsertVenueAssignment(
   })
 }
 
-export async function assignToVenue(staffId: string, venueId: string, role: StaffRole, pin?: string) {
+export async function assignToVenue(staffId: string, venueId: string, role: StaffRole, pin?: string, performedBy?: string) {
   // Delegates the validation + upsert to the tx-aware helper (passing the global
   // prisma client; PrismaClient is assignable to Prisma.TransactionClient), then
   // returns the hydrated staff for the existing superadmin assign route.
   await upsertVenueAssignment(prisma, staffId, venueId, role, pin)
 
   logger.info(`[STAFF-SUPERADMIN] Assigned staff to venue`, { staffId, venueId, role })
+
+  void logAction({
+    staffId: performedBy ?? null,
+    venueId,
+    action: 'STAFF_ROLE_ASSIGNED',
+    entity: 'Staff',
+    entityId: staffId,
+    data: { venueId, role },
+  })
+
   return getStaffById(staffId)
 }
 
@@ -487,6 +537,7 @@ export async function updateVenueAssignment(
   staffId: string,
   venueId: string,
   data: { role?: StaffRole; pin?: string | null; active?: boolean },
+  performedBy?: string,
 ) {
   const assignment = await prisma.staffVenue.findUnique({
     where: { staffId_venueId: { staffId, venueId } },
@@ -520,6 +571,16 @@ export async function updateVenueAssignment(
   })
 
   logger.info(`[STAFF-SUPERADMIN] Updated venue assignment`, { staffId, venueId })
+
+  void logAction({
+    staffId: performedBy ?? null,
+    venueId,
+    action: 'STAFF_ROLE_ASSIGNED',
+    entity: 'Staff',
+    entityId: staffId,
+    data: { venueId, role: data.role },
+  })
+
   return getStaffById(staffId)
 }
 
@@ -527,7 +588,7 @@ export async function updateVenueAssignment(
 // REMOVE FROM VENUE (soft delete)
 // ===========================================
 
-export async function removeFromVenue(staffId: string, venueId: string) {
+export async function removeFromVenue(staffId: string, venueId: string, performedBy?: string) {
   const assignment = await prisma.staffVenue.findUnique({
     where: { staffId_venueId: { staffId, venueId } },
   })
@@ -541,6 +602,16 @@ export async function removeFromVenue(staffId: string, venueId: string) {
   })
 
   logger.info(`[STAFF-SUPERADMIN] Removed staff from venue`, { staffId, venueId })
+
+  void logAction({
+    staffId: performedBy ?? null,
+    venueId,
+    action: 'STAFF_ROLE_REMOVED',
+    entity: 'Staff',
+    entityId: staffId,
+    data: { venueId, role: assignment.role },
+  })
+
   return getStaffById(staffId)
 }
 
@@ -548,7 +619,7 @@ export async function removeFromVenue(staffId: string, venueId: string) {
 // DELETE STAFF (hard delete — cascades StaffVenue, StaffOrganization)
 // ===========================================
 
-export async function deleteStaff(staffId: string, currentUserId: string) {
+export async function deleteStaff(staffId: string, currentUserId: string, performedBy?: string) {
   if (staffId === currentUserId) {
     throw new BadRequestError('No puedes eliminarte a ti mismo')
   }
@@ -561,6 +632,16 @@ export async function deleteStaff(staffId: string, currentUserId: string) {
   await prisma.staff.delete({ where: { id: staffId } })
 
   logger.info(`[STAFF-SUPERADMIN] Deleted staff: ${staff.email}`, { staffId })
+
+  void logAction({
+    staffId: performedBy ?? currentUserId ?? null,
+    venueId: null,
+    action: 'STAFF_DELETED',
+    entity: 'Staff',
+    entityId: staffId,
+    data: { email: staff.email },
+  })
+
   return { success: true }
 }
 
@@ -568,7 +649,7 @@ export async function deleteStaff(staffId: string, currentUserId: string) {
 // RESET PASSWORD
 // ===========================================
 
-export async function resetPassword(staffId: string, newPassword: string) {
+export async function resetPassword(staffId: string, newPassword: string, performedBy?: string) {
   const staff = await prisma.staff.findUnique({ where: { id: staffId } })
   if (!staff) {
     throw new NotFoundError('Usuario no encontrado')
@@ -581,5 +662,16 @@ export async function resetPassword(staffId: string, newPassword: string) {
   })
 
   logger.info(`[STAFF-SUPERADMIN] Password reset for staff`, { staffId, email: staff.email })
+
+  // NEVER include the password (or its hash) in the audit data.
+  void logAction({
+    staffId: performedBy ?? null,
+    venueId: null,
+    action: 'STAFF_PASSWORD_RESET',
+    entity: 'Staff',
+    entityId: staffId,
+    data: {},
+  })
+
   return { success: true, message: 'Contraseña actualizada correctamente' }
 }
