@@ -1106,6 +1106,21 @@ export async function applyItemReceiveStatusInTx(
     },
   })
 
+  // ── Audit: capture how each item was received (condition per item) ────────
+  void logAction({
+    staffId: staffId ?? null,
+    venueId,
+    action: 'PURCHASE_ORDER_ITEM_RECEIVED',
+    entity: 'PurchaseOrder',
+    entityId: purchaseOrderId,
+    data: {
+      purchaseOrderItemId: itemId,
+      rawMaterialId: item.rawMaterialId,
+      status: newReceiveStatus,
+      quantityReceived: Number(newQtyReceivedInPoUnit ?? 0),
+    },
+  })
+
   // ── 2. Apply inventory side-effects only when there's an actual delta ────
   if (deltaInRmUnit.isZero()) {
     return
