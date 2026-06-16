@@ -12,6 +12,7 @@
 import prisma from '../../utils/prismaClient'
 import { Prisma } from '@prisma/client'
 import logger from '../../config/logger'
+import { fromZonedTime } from 'date-fns-tz'
 
 export interface LogActionParams {
   staffId?: string | null
@@ -237,7 +238,7 @@ export interface QueryVenueActivityLogsParams {
 export async function queryVenueActivityLogs(params: QueryVenueActivityLogsParams): Promise<PaginatedActivityLogs> {
   const { venueId, page = 1, pageSize = 25 } = params
 
-  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { id: true, name: true } })
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { id: true, name: true, timezone: true } })
   if (!venue) {
     return { logs: [], pagination: { page, pageSize, total: 0, totalPages: 0 } }
   }
@@ -254,9 +255,12 @@ export async function queryVenueActivityLogs(params: QueryVenueActivityLogsParam
     ]
   }
   if (params.startDate || params.endDate) {
+    // Parse the bare YYYY-MM-DD in the VENUE timezone (pass a STRING, not new Date()) so a
+    // venue-local day range is correct under any host TZ (prod runs UTC). See critical-warnings.md.
+    const venueTz = venue.timezone || 'America/Mexico_City'
     const createdAt: Record<string, Date> = {}
-    if (params.startDate) createdAt.gte = new Date(params.startDate)
-    if (params.endDate) createdAt.lte = new Date(params.endDate)
+    if (params.startDate) createdAt.gte = fromZonedTime(`${params.startDate}T00:00:00.000`, venueTz)
+    if (params.endDate) createdAt.lte = fromZonedTime(`${params.endDate}T23:59:59.999`, venueTz)
     where.createdAt = createdAt
   }
 

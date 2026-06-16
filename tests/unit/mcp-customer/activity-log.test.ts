@@ -3,14 +3,18 @@ import type { McpScope } from '../../../src/mcp/scope'
 
 const mockFindMany = jest.fn()
 
+// Guard: requirePermission throws unless the venue is 'v1' (the only one the caller may audit).
+// This models BOTH out-of-scope and lacking-activity:read for an explicitly requested venue.
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({
-    venueFilter: (v?: string) => {
-      if (v === 'foreign') throw new Error('ScopeError: venue out of scope')
-      return v ? { venueId: { in: [v] } } : { venueId: { in: ['v1'] } }
+    requirePermission: (_perm: string, venueId: string) => {
+      if (venueId !== 'v1') throw new Error(`Missing permission activity:read for venue ${venueId}`)
     },
-    requirePermission: jest.fn(),
   }),
+}))
+// hasPermission drives the all-venues filtering: only access objects flagged { canRead: true } pass.
+jest.mock('@/services/access/access.service', () => ({
+  hasPermission: (access: { canRead?: boolean } | undefined) => access?.canRead === true,
 }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -22,7 +26,16 @@ jest.mock('@/utils/prismaClient', () => ({
 }))
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
-const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map() } as McpScope
+// v1 has activity:read; v2 is in scope but LACKS it (canRead:false).
+const scope = {
+  staffId: 's1',
+  activeOrg: 'o1',
+  allowedVenueIds: ['v1', 'v2'],
+  perVenueAccess: new Map<string, { canRead: boolean }>([
+    ['v1', { canRead: true }],
+    ['v2', { canRead: false }],
+  ]),
+} as unknown as McpScope
 const call = (args: Record<string, unknown>) => handlers.get('get_activity_log')!(args, {})
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
 
@@ -32,7 +45,7 @@ beforeAll(() => {
 beforeEach(() => jest.clearAllMocks())
 
 describe('get_activity_log', () => {
-  it('returns logs scoped to the requested venue', async () => {
+  it('returns logs scoped to the requested venue (caller has activity:read)', async () => {
     mockFindMany.mockResolvedValueOnce([
       {
         id: 'log-1',
@@ -55,10 +68,11 @@ describe('get_activity_log', () => {
     expect(out.logs[0].staff).toEqual({ firstName: 'Ana', lastName: 'Lopez' })
   })
 
-  it('returns logs for all venues when no venueId is given', async () => {
+  it('all-venues query returns ONLY venues where the caller has activity:read', async () => {
     mockFindMany.mockResolvedValueOnce([])
     await call({ limit: 5 })
     const whereArg = (mockFindMany.mock.calls[0][0] as { where: Record<string, unknown> }).where
+    // v2 is in scope but lacks activity:read → excluded. Only v1 remains.
     expect(whereArg).toEqual({ venueId: { in: ['v1'] } })
   })
 
@@ -69,18 +83,19 @@ describe('get_activity_log', () => {
     expect(whereArg.action).toBe('SIM_CUSTODY_ASSIGNED_TO_PROMOTER')
   })
 
-  it('applies date range filter when startDate and endDate are given', async () => {
+  it('applies a venue-tz date range filter (parsed as Dates, not host-tz bare dates)', async () => {
     mockFindMany.mockResolvedValueOnce([])
-    await call({ startDate: '2026-06-01', endDate: '2026-06-15', limit: 25 })
-    const whereArg = (mockFindMany.mock.calls[0][0] as { where: Record<string, unknown> }).where
-    expect(whereArg.createdAt).toMatchObject({
-      gte: new Date('2026-06-01'),
-      lte: new Date('2026-06-15'),
-    })
+    await call({ venueId: 'v1', startDate: '2026-06-01', endDate: '2026-06-15', limit: 25 })
+    const whereArg = (mockFindMany.mock.calls[0][0] as { where: { createdAt: { gte: Date; lte: Date } } }).where
+    expect(whereArg.createdAt.gte).toBeInstanceOf(Date)
+    expect(whereArg.createdAt.lte).toBeInstanceOf(Date)
+    // America/Mexico_City is UTC-6 → 2026-06-01 local 00:00 = 06:00Z (NOT 00:00Z, which the old bare-date bug produced)
+    expect(whereArg.createdAt.gte.toISOString()).toBe('2026-06-01T06:00:00.000Z')
   })
 
-  it('throws when the requested venueId is outside the caller scope (cross-tenant guard)', async () => {
-    await expect(call({ venueId: 'foreign', limit: 10 })).rejects.toThrow('out of scope')
+  it('throws for an explicit venueId the caller cannot audit (out-of-scope OR no activity:read)', async () => {
+    await expect(call({ venueId: 'v2', limit: 10 })).rejects.toThrow('Missing permission activity:read')
+    await expect(call({ venueId: 'foreign', limit: 10 })).rejects.toThrow('Missing permission activity:read')
     expect(mockFindMany).not.toHaveBeenCalled()
   })
 
