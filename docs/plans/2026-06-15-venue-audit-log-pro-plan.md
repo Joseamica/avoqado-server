@@ -523,131 +523,184 @@ git commit -m "feat(activity-log): venue-scoped read endpoint (PRO + owner gated
 
 ---
 
-## Phase 3 — Backend event capture
+## Phase 3 — Backend event capture (CORRECTED via census 2026-06-15)
 
-> Each task adds `logAction()` at a success path. `logAction` is fire-and-forget (`void`, never throws). Pass `staffId` from the function's params (services have no `authContext`); `null` is fine for system actions (sentinels normalized internally). **Refund is already logged** (`src/services/mobile/refund.mobile.service.ts:119` — `REFUND_CREATED`), so it's excluded.
+> **Census finding:** `ActivityLog` already covers ~327 actions. Do **NOT** log `ORDER_CREATED` or routine `PAYMENT_COMPLETED` (high-volume noise — verified: payment success isn't logged today and shouldn't be). Mobile refund already logs `REFUND_CREATED` (`src/services/mobile/refund.mobile.service.ts:119`) — excluded. The real gaps are the **high-signal** audit events below.
+>
+> Each task adds `logAction()` at a success path. `logAction` is fire-and-forget (`void`, never throws). Pass `staffId` from the function's params (services have no `authContext`); `null` is fine for system actions (sentinels normalized internally).
+>
+> **OrderAction bridge:** comp/void/discount already write to the siloed `OrderAction` table (`prisma.orderAction.create` with `actionType` COMP/VOID/DISCOUNT). The owner screen reads `ActivityLog`, so we **dual-write** to `ActivityLog` at the same spots. Do NOT touch `OrderAction` — it keeps working.
 
-### Task 7: Capture `ORDER_CREATED`
+### Task 7: Bridge TPV order-item actions to ActivityLog (comp / void / discount / remove)
 
 **Files:**
 - Modify: `src/services/tpv/order.tpv.service.ts`
-- Modify: `src/services/mobile/order.mobile.service.ts`
-- Test: `tests/unit/services/tpv/orderCapture.test.ts`
+- Test: `tests/unit/services/tpv/orderActionCapture.test.ts`
 
-- [ ] **Step 1: Identify the canonical public creation function**
+These already write to the `OrderAction` table; we **dual-write** to `ActivityLog` so the owner screen sees them. `removeOrderItem` has no trail at all → add one.
 
-Run: `grep -n "export async function create" src/services/tpv/order.tpv.service.ts src/services/mobile/order.mobile.service.ts`
-Goal: find the public order-creation entry point(s) called by controllers. `order.tpv.service.ts` has two `prisma.order.create` sites (~line 393 and ~line 1154 inside a `$transaction` that returns `createdOrder`). **Log once per public function**, not per inner create — verify the 393 path isn't an inner helper of the 1154 flow (if it is, log only the outer). Record which functions you'll instrument.
+- [ ] **Step 1: Confirm the insertion points**
+
+Run: `grep -n "orderAction.create\|export async function compItems\|export async function voidItems\|export async function applyDiscount\|export async function removeOrderItem" src/services/tpv/order.tpv.service.ts`
+Expected sites: `compItems` (~2056) writes `orderAction.create` `actionType:'COMP'` (~2164); `voidItems` (~2218) writes `'VOID'` (~2382); `applyDiscount` (~2447) writes `'DISCOUNT'` (~2596); `removeOrderItem` (~1850) writes nothing. Note the `input.staffId`, `orderId`, item ids, and amount vars in scope in each.
 
 - [ ] **Step 2: Write the failing test**
 
-Create `tests/unit/services/tpv/orderCapture.test.ts`. Mock `logAction` and the order-creation deps, call the public TPV order-create function, assert `logAction` was called once with `action: 'ORDER_CREATED'`, `entity: 'Order'`, the created `entityId`, and `venueId`:
+Create `tests/unit/services/tpv/orderActionCapture.test.ts`. Spy on `logAction`; drive each of the 4 functions (mock prisma so they reach the success path) and assert one `logAction` call each: `ITEM_COMPED`, `ITEM_VOIDED`, `DISCOUNT_APPLIED`, `ITEM_REMOVED`, all `entity: 'Order'`, with `entityId` = the order id and `venueId`.
 
 ```typescript
 import * as activityLog from '../../../../src/services/dashboard/activity-log.service'
-// ... mock prisma + other deps the function needs, then:
 const spy = jest.spyOn(activityLog, 'logAction').mockResolvedValue()
-// call the public createOrder... function with a minimal valid input
-expect(spy).toHaveBeenCalledWith(expect.objectContaining({ action: 'ORDER_CREATED', entity: 'Order', venueId: expect.any(String) }))
+// call compItems(...) then assert:
+expect(spy).toHaveBeenCalledWith(expect.objectContaining({ action: 'ITEM_COMPED', entity: 'Order', venueId: expect.any(String) }))
 ```
 
 - [ ] **Step 3: Run it to verify it fails**
 
-Run: `npm test -- orderCapture`
-Expected: FAIL (logAction not called).
+Run: `npm test -- orderActionCapture`
+Expected: FAIL.
 
-- [ ] **Step 4: Add the import + logAction calls**
+- [ ] **Step 4: Add the import + 4 dual-write calls**
 
-At the top of `src/services/tpv/order.tpv.service.ts` (if not already imported):
+At the top of `src/services/tpv/order.tpv.service.ts` add (if missing): `import { logAction } from '../dashboard/activity-log.service'`.
 
-```typescript
-import { logAction } from '../dashboard/activity-log.service'
-```
-
-In the canonical TPV creation function, immediately after the order is created/resolved (e.g. after `fetchOrderForTpvResponse(createdOrder.id)` resolves, ~line 1157, or after the `prisma.order.create` at ~line 440 if that's the public path):
+Immediately **after** each `prisma.orderAction.create({...})` (and after the totals update in `removeOrderItem`), add the matching dual-write. Comp (after the `'COMP'` orderAction.create ~2164):
 
 ```typescript
 void logAction({
-  staffId: input.staffId ?? input.waiterId ?? null,
+  staffId: input.staffId ?? null,
   venueId,
-  action: 'ORDER_CREATED',
+  action: 'ITEM_COMPED',
   entity: 'Order',
-  entityId: createdOrder.id,
-  data: { orderNumber: createdOrder.orderNumber, type: input.orderType, source: input.source, itemCount: input.items?.length },
+  entityId: orderId,
+  data: { itemIds: input.itemIds, amount: Number(compAmount), reason: input.reason },
 })
 ```
 
-(Adjust the entity-id variable name to whatever the function holds — `order.id` vs `createdOrder.id`.)
-
-Then in `src/services/mobile/order.mobile.service.ts`, add the import and, after the `prisma.order.create` success (~line 568):
+Void (after the `'VOID'` orderAction.create ~2382):
 
 ```typescript
 void logAction({
-  staffId: validatedStaffId ?? null,
+  staffId: input.staffId ?? null,
   venueId,
-  action: 'ORDER_CREATED',
+  action: 'ITEM_VOIDED',
   entity: 'Order',
-  entityId: order.id,
-  data: { orderNumber, total: Number(order.total), source: input.source, itemCount: input.items.length },
+  entityId: orderId,
+  data: { itemIds: input.itemIds, amount: Number(voidAmount), reason: input.reason },
 })
 ```
+
+Discount (after the `'DISCOUNT'` orderAction.create ~2596):
+
+```typescript
+void logAction({
+  staffId: input.staffId ?? null,
+  venueId,
+  action: 'DISCOUNT_APPLIED',
+  entity: 'Order',
+  entityId: orderId,
+  data: { amount: Number(discountAmount), kind: input.discountType, reason: input.reason },
+})
+```
+
+Remove item (in `removeOrderItem`, after the item delete + totals update succeed ~2014):
+
+```typescript
+void logAction({
+  staffId: input.staffId ?? null,
+  venueId,
+  action: 'ITEM_REMOVED',
+  entity: 'Order',
+  entityId: orderId,
+  data: { itemId: input.itemId, amount: Number(removedAmount) },
+})
+```
+
+(Adjust each local name — `compAmount`/`voidAmount`/`discountAmount`/`removedAmount`, `orderId`, `input.staffId` — to the actual vars in each function.)
 
 - [ ] **Step 5: Run the test to verify it passes**
 
-Run: `npm test -- orderCapture`
+Run: `npm test -- orderActionCapture`
 Expected: PASS.
 
 - [ ] **Step 6: Type-check + commit**
 
 ```bash
-git add src/services/tpv/order.tpv.service.ts src/services/mobile/order.mobile.service.ts tests/unit/services/tpv/orderCapture.test.ts
-git commit -m "feat(activity-log): capture ORDER_CREATED (tpv + mobile)"
+git add src/services/tpv/order.tpv.service.ts tests/unit/services/tpv/orderActionCapture.test.ts
+git commit -m "feat(activity-log): bridge comp/void/discount + capture item-removed to ActivityLog"
 ```
 
 ---
 
-### Task 8: Capture `PAYMENT_COMPLETED`
+### Task 8: Capture order discounts (engine) + TPV refund
 
 **Files:**
-- Modify: `src/services/tpv/payment.tpv.service.ts`
-- Test: `tests/unit/services/tpv/paymentCapture.test.ts`
+- Modify: `src/services/dashboard/discountEngine.service.ts`
+- Modify: `src/services/tpv/refund.tpv.service.ts`
+- Test: `tests/unit/services/dashboard/discountRefundCapture.test.ts`
 
 - [ ] **Step 1: Write the failing test**
 
-Create `tests/unit/services/tpv/paymentCapture.test.ts`. Spy on `logAction`, drive `recordOrderPayment` through its success path (mock prisma so the payment + order-total update succeed), assert one call with `action: 'PAYMENT_COMPLETED'`, `entity: 'Payment'`, the payment id, and `venueId`.
+Create `tests/unit/services/dashboard/discountRefundCapture.test.ts`. Spy on `logAction`; (1) call `applyDiscountToOrder` → assert `DISCOUNT_APPLIED`; (2) call `removeDiscountFromOrder` → assert `DISCOUNT_REMOVED`; (3) call `recordRefund` (TPV) → assert `REFUND_CREATED`, `entity: 'Payment'`.
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `npm test -- paymentCapture`
+Run: `npm test -- discountRefundCapture`
 Expected: FAIL.
 
-- [ ] **Step 3: Add the logAction call**
+- [ ] **Step 3: Add imports + logAction calls**
 
-`logAction` is already imported in `src/services/tpv/payment.tpv.service.ts` (~line 20). After the success log `logger.info('Payment recorded successfully', ...)` (~line 2017), add:
+In `src/services/dashboard/discountEngine.service.ts` add `import { logAction } from './activity-log.service'`. After `applyDiscountToOrder` succeeds (~757):
 
 ```typescript
 void logAction({
-  staffId: validatedStaffId ?? paymentData.staffId ?? null,
+  staffId: appliedById ?? authorizedById ?? null,
   venueId,
-  action: 'PAYMENT_COMPLETED',
-  entity: 'Payment',
-  entityId: payment.id,
-  data: { amount: Number(totalAmount), tip: Number(tipAmount), method: payment.method, orderId: activeOrder.id },
+  action: 'DISCOUNT_APPLIED',
+  entity: 'Order',
+  entityId: orderId,
+  data: { amount: Number(discountAmount), source: 'catalog' },
 })
 ```
 
-(Confirm `validatedStaffId`, `paymentData`, `totalAmount`, `tipAmount`, `payment`, `activeOrder` are in scope at that line; adjust names to the actual locals.)
+After `removeDiscountFromOrder` succeeds (~819):
+
+```typescript
+void logAction({
+  staffId: appliedById ?? null,
+  venueId,
+  action: 'DISCOUNT_REMOVED',
+  entity: 'Order',
+  entityId: orderId,
+  data: { discountId },
+})
+```
+
+In `src/services/tpv/refund.tpv.service.ts` add `import { logAction } from '../dashboard/activity-log.service'`. After `recordRefund` creates the refund Payment (success, ~end of the function), mirror the mobile pattern:
+
+```typescript
+void logAction({
+  staffId: refundData.staffId ?? null,
+  venueId,
+  action: 'REFUND_CREATED',
+  entity: 'Payment',
+  entityId: payment.id,
+  data: { amount: Number(amountDecimal), reason: refundData.reason, method: refundData.method, source: 'TPV' },
+})
+```
+
+(Confirm `venueId`, `orderId`, `appliedById`, `discountAmount`, `refundData`, `payment`, `amountDecimal` are the real locals; adjust names.)
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `npm test -- paymentCapture`
+Run: `npm test -- discountRefundCapture`
 Expected: PASS.
 
 - [ ] **Step 5: Type-check + commit**
 
 ```bash
-git add src/services/tpv/payment.tpv.service.ts tests/unit/services/tpv/paymentCapture.test.ts
-git commit -m "feat(activity-log): capture PAYMENT_COMPLETED on recordOrderPayment success"
+git add src/services/dashboard/discountEngine.service.ts src/services/tpv/refund.tpv.service.ts tests/unit/services/dashboard/discountRefundCapture.test.ts
+git commit -m "feat(activity-log): capture catalog discounts + TPV refund"
 ```
 
 ---
@@ -711,15 +764,18 @@ git commit -m "feat(activity-log): capture SHIFT_OPENED + SHIFT_CLOSED"
 
 ---
 
-### Task 10: Capture `STAFF_CREATED` / `STAFF_UPDATED` / `STAFF_DELETED`
+### Task 10: Capture staff/access ops (9 functions) + thread the actor
 
 **Files:**
-- Modify: `src/services/superadmin/staff.superadmin.service.ts`
+- Modify: `src/services/superadmin/staff.superadmin.service.ts` (9 functions, all currently unlogged)
+- Modify: the controller(s) that call them (to pass `performedBy` = the acting user's id)
 - Test: `tests/unit/services/superadmin/staffCapture.test.ts`
+
+> Census flagged these 9 as **zero-logged and actor-less**: `createStaff`, `updateStaff`, `deleteStaff`, `assignToOrganization`, `removeFromOrganization`, `assignToVenue`, `updateVenueAssignment`, `removeFromVenue`, `resetPassword`. Action names: `STAFF_CREATED/UPDATED/DELETED`, `STAFF_ROLE_ASSIGNED` (org+venue assign/update), `STAFF_ROLE_REMOVED` (org+venue remove), `STAFF_PASSWORD_RESET`. **Add a `performedBy?: string` param** to each (passed from the controller's `authContext.userId`) and use it as `staffId` so the audit records WHO did it — without it the log is far less useful.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `tests/unit/services/superadmin/staffCapture.test.ts`. Spy on `logAction`; drive create/update/delete (mock prisma) and assert each logs the matching action + `entity: 'Staff'` + the staff id.
+Create `tests/unit/services/superadmin/staffCapture.test.ts`. Spy on `logAction`; drive create / update / delete / assign-role / remove-role / reset-password (mock prisma) and assert each logs the matching action + `entity: 'Staff'` + the staff id + the `performedBy` actor.
 
 - [ ] **Step 2: Run it to verify it fails**
 
@@ -767,7 +823,9 @@ void logAction({
 })
 ```
 
-> `staffId: null` (actor) here because the superadmin service has no authContext. Optional follow-up: thread the acting superadmin's id from the controller so the actor is recorded — out of scope for this task.
+In the same pass add the remaining ones following the identical pattern (action / entity `Staff` / entityId / `performedBy`): `assignToOrganization` + `assignToVenue` + `updateVenueAssignment` → `STAFF_ROLE_ASSIGNED` (data: `{ role, organizationId, venueId }`); `removeFromOrganization` + `removeFromVenue` → `STAFF_ROLE_REMOVED`; `resetPassword` → `STAFF_PASSWORD_RESET` (data: `{}` — never log the password). For the create/update/delete snippets above, replace `staffId: null` with `staffId: performedBy ?? null`.
+
+> **Actor threading is IN scope here** (census flagged actor-less logs as a real defect): give each of the 9 functions a `performedBy?: string` param and pass `(req as any).authContext.userId` from the controller. For venue/org-scoped actions, set `venueId` when the action targets a specific venue (assign/remove venue), else `null`.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
@@ -778,7 +836,7 @@ Expected: PASS.
 
 ```bash
 git add src/services/superadmin/staff.superadmin.service.ts tests/unit/services/superadmin/staffCapture.test.ts
-git commit -m "feat(activity-log): capture STAFF_CREATED/UPDATED/DELETED"
+git commit -m "feat(activity-log): capture staff/access ops + thread actor (9 fns)"
 ```
 
 ---
@@ -1119,7 +1177,7 @@ git commit -m "docs(sales): PRO now includes per-venue audit log"
 | §4.2 Permission `activity:read` (OWNER) | Task 1 (server) + Task 2 (dashboard mirror) |
 | §4.3 Endpoint + guards | Task 6 |
 | §4.4 Service `queryVenueActivityLogs` + distinct helpers | Task 4 |
-| §4.5 Event capture (orders, payment, refund, shifts, staff) | Tasks 7–10 (refund already done — noted) |
+| §4.5 Event capture (CORRECTED — high-signal gaps only) | Task 7 (comp/void/discount/remove, OrderAction bridge), Task 8 (catalog discount + TPV refund), Task 9 (shifts), Task 10 (staff/access + actor). ORDER_CREATED + routine PAYMENT skipped as noise; mobile refund already done. |
 | §4.6 MCP tool | Task 11 |
 | §5 Dashboard page/route/catalog/registry/i18n | Tasks 13–15 |
 | §6 Sales presentation | Task 16 |
@@ -1129,7 +1187,7 @@ git commit -m "docs(sales): PRO now includes per-venue audit log"
 - Task 3: `FeatureCategory` enum has `OPERATIONS` (else pick `REPORTING`).
 - Task 5: `validateRequest` envelope shape (`{ query: {...} }`) — copy a sibling query-schema.
 - Task 6: `validateRequest` import path; `mergeParams: true` propagates `:venueId`.
-- Task 7: which `order.tpv.service.ts` create site is the public path (avoid double-logging nested creates).
+- Task 7: confirm the exact local var names at each `orderAction.create` site (amount/orderId/staffId differ per function); the dual-write goes right after each, inside the same tx/flow.
 - Task 14: real `FeatureGate` component path/API + whether a `useStaff(venueId)` hook exists for the staff filter.
 
 ## Notes / risks

@@ -12,7 +12,7 @@ Varios dueños (owners) piden ver el **ActivityLog de toda su sucursal** para au
 
 Hoy existe parcialmente:
 - El modelo `ActivityLog` es maduro (130+ tipos de acción) y hay un endpoint **a nivel organización** (`GET /api/v1/dashboard/organizations/:orgId/activity-log`) con una pantalla (`OrganizationActivityLog.tsx`) que un owner ya puede usar filtrando por venue.
-- **Pero:** (a) no hay una bitácora **dedicada por-venue**; (b) los eventos operativos POS más valiosos (creación de orden, pago exitoso, turnos, ciclo de vida de staff) **nunca se registran** en `ActivityLog`; (c) el acceso no está gateado por tier ni catalogado como permiso.
+- **Pero:** (a) no hay una bitácora **dedicada por-venue**; (b) `ActivityLog` ya cubre ~327 acciones, **pero** faltan eventos de auditoría de alta señal — anular/cortesía/descuento de ítems (hoy solo en la tabla siloeada `OrderAction`), refund desde TPV, cierre de turno, y las ops de staff de superadmin (sin log y sin actor); (c) el acceso no está gateado por tier ni catalogado como permiso.
 
 ## 2. Objetivo
 
@@ -57,18 +57,28 @@ authenticateTokenMiddleware
 ### 4.4 Servicio
 Nueva función `queryVenueActivityLogs(venueId, filters)` en `src/services/dashboard/activity-log.service.ts` — versión **venue-scoped** (sin el rodeo org→venues de `queryActivityLogs`). Reusa la forma de `where`/enriquecido existente. Filtros soportados: `staffId, action, entity, search, startDate, endDate, page, pageSize`. + `getVenueDistinctActions(venueId)` y `getVenueDistinctEntities(venueId)` para los dropdowns.
 
-### 4.5 Captura de eventos faltantes (Opción A)
-Agregar `logAction()` (siempre activa, **no** gateada por feature — capturar es barato y evita estrenar la pantalla vacía al subir a PRO) en los puntos de mutación hoy sin auditar. Acciones en SCREAMING_SNAKE:
+### 4.5 Captura de eventos faltantes (Opción A) — CORREGIDO tras censo (2026-06-15)
 
-| Acción | Entity | Dónde (servicio) |
-|---|---|---|
-| `ORDER_CREATED` | `Order` | `src/services/tpv/order.tpv.service.ts`, `src/services/mobile/order.mobile.service.ts` |
-| `PAYMENT_COMPLETED` | `Payment` | `src/services/tpv/payment.tpv.service.ts` (success path de `recordOrderPayment`), pago mobile equivalente |
-| `REFUND_ISSUED` | `Payment`/`Refund` | `src/services/mobile/refund.mobile.service.ts` |
-| `SHIFT_OPENED` / `SHIFT_CLOSED` | `Shift` | `src/services/tpv/shift.tpv.service.ts` |
-| `STAFF_CREATED` / `STAFF_UPDATED` / `STAFF_DELETED` | `Staff` | servicio de staff (hoy solo `logger.info`) |
+**Hallazgo del censo:** `ActivityLog` ya cubre ~327 acciones (productos, precios, stock, cajón de efectivo, corte de caja, refund móvil, cancelar/settle de órdenes desde dashboard, pago manual, roles/permisos, features, KYC, planes). La captura faltante es **menor y distinta** al borrador. Verificado en código (2026-06-15): el pago exitoso de venta normal NO se loguea pero es **ruido** (alto volumen, baja señal) → **NO** se captura. Tampoco `ORDER_CREATED`.
 
-Cada llamada incluye `staffId` (de `authContext.userId`), `venueId`, `entity`, `entityId`, y un `data` con contexto relevante (monto, método de pago, etc.). **NO** loguear heartbeats/scans/retries.
+Agregar `logAction()` (siempre activa, **no** gateada por feature) SOLO en estos huecos de alta señal de auditoría:
+
+| Acción | Entity | Dónde | Estado hoy |
+|---|---|---|---|
+| `ITEM_COMPED` | `Order` | `tpv/order.tpv.service.ts` `compItems` (~2164) | solo en tabla `OrderAction` → **doble-escribir** a ActivityLog |
+| `ITEM_VOIDED` | `Order` | `tpv/order.tpv.service.ts` `voidItems` (~2382) | solo en `OrderAction` → doble-escribir |
+| `DISCOUNT_APPLIED` | `Order` | `tpv/order.tpv.service.ts` `applyDiscount` (~2596) | solo en `OrderAction` → doble-escribir |
+| `ITEM_REMOVED` | `Order` | `tpv/order.tpv.service.ts` `removeOrderItem` (~1850) | sin rastro → agregar |
+| `DISCOUNT_APPLIED` / `DISCOUNT_REMOVED` | `Order` | `dashboard/discountEngine.service.ts` apply/removeDiscountToOrder | sin log → agregar |
+| `REFUND_CREATED` | `Payment` | `tpv/refund.tpv.service.ts` `recordRefund` | sin log (móvil sí) → agregar, **mismo action** que móvil |
+| `SHIFT_OPENED` / `SHIFT_CLOSED` | `Shift` | `tpv/shift.tpv.service.ts` | sin log → agregar (el cierre incluye descuadre de caja) |
+| `STAFF_CREATED/UPDATED/DELETED`, `STAFF_ROLE_ASSIGNED/REMOVED`, `STAFF_PASSWORD_RESET` | `Staff` | `superadmin/staff.superadmin.service.ts` (9 funciones) | sin log **y sin actor** → agregar + pasar `performedBy` desde el controlador |
+
+**Decisión OrderAction (doble-escritura):** comp/void/descuento ya se auditan en la tabla `OrderAction` (siloeada, separada del log que lee la pantalla). Para que la bitácora del dueño los vea, se **escribe TAMBIÉN** a `ActivityLog` en el mismo punto. `OrderAction` **no se toca** (sigue funcionando). Alternativa descartada: que la query una ambas tablas (más complejo).
+
+**Opcional / fase posterior** (settings, prioridad menor, hoy sin actor): `grantTrialForVenue`, `assignProcessorAndApproveKyc`, módulos venue/org on/off, `VenuePaymentConfig` CRUD.
+
+`staffId` viene de los params del servicio (`input.staffId`) o `performedBy` (staff-superadmin); `null` para acciones de sistema (sentinels normalizados internamente). **NO** loguear heartbeats/scans/retries ni la venta/orden rutinaria. Refund móvil ya logueado (`REFUND_CREATED`) — sin cambio.
 
 ### 4.6 MCP cliente (obligatorio — regla "keep the customer MCP in sync")
 Nuevo tool de **lectura** `get_activity_log` en `src/mcp/tools/`, scoped por `getUserAccess()` (mismo gating de venue/permiso), registrado en `src/mcp/server.ts`. Permite a un owner preguntar a su IA "¿qué pasó en mi negocio?".
