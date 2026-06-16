@@ -95,8 +95,9 @@ export async function updateSupplier(req: Request, res: Response, next: NextFunc
 export async function deleteSupplier(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId, supplierId } = req.params
+    const { userId: staffId } = (req as any).authContext
 
-    await supplierService.deleteSupplier(venueId, supplierId)
+    await supplierService.deleteSupplier(venueId, supplierId, staffId)
 
     res.json({
       success: true,

@@ -50,6 +50,7 @@ export async function createStockBatch(
     receivedDate: Date
     expirationDate?: Date
   },
+  staffId?: string,
 ): Promise<any> {
   // Verify raw material exists
   const rawMaterial = await prisma.rawMaterial.findFirst({
@@ -125,6 +126,7 @@ export async function createStockBatch(
   })
 
   logAction({
+    staffId,
     venueId,
     action: 'STOCK_BATCH_CREATED',
     entity: 'StockBatch',
@@ -637,7 +639,7 @@ export async function markExpiredBatches(venueId?: string): Promise<number> {
  * remainingQuantity del lote se conserva como registro de cuánto quedó
  * retenido.
  */
-export async function quarantineBatch(venueId: string, batchId: string, reason: string): Promise<any> {
+export async function quarantineBatch(venueId: string, batchId: string, reason: string, staffId?: string): Promise<any> {
   const batch = await prisma.stockBatch.findFirst({
     where: {
       id: batchId,
@@ -703,6 +705,7 @@ export async function quarantineBatch(venueId: string, batchId: string, reason: 
   })
 
   logAction({
+    staffId,
     venueId,
     action: 'STOCK_BATCH_QUARANTINED',
     entity: 'StockBatch',
