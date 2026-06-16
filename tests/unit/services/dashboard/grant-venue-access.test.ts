@@ -2,6 +2,7 @@ import prisma from '@/utils/prismaClient'
 import { grantVenueAccessBatch } from '@/services/dashboard/venue-access.service'
 import * as staffSvc from '@/services/superadmin/staff.superadmin.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import AppError from '@/errors/AppError'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -57,6 +58,27 @@ describe('grantVenueAccessBatch', () => {
       ),
     ).rejects.toThrow('mismo PIN')
     expect(m.$transaction).not.toHaveBeenCalled()
+  })
+
+  // Regression: batch pre-validation failures must be AppError instances so the global
+  // handler returns a 4xx + the real Spanish message instead of a generic 500.
+  it('throws a 400 AppError (not a plain Error) for an empty batch', async () => {
+    const err = await grantVenueAccessBatch('venue-1', [], actor as any).catch(e => e)
+    expect(err).toBeInstanceOf(AppError)
+    expect(err.statusCode).toBe(400)
+  })
+
+  it('throws a 400 AppError when two people share a PIN', async () => {
+    const err = await grantVenueAccessBatch(
+      'venue-1',
+      [
+        { staffId: 's1', role: 'MANAGER' as any, pin: '1111' },
+        { staffId: 's2', role: 'WAITER' as any, pin: '1111' },
+      ],
+      actor as any,
+    ).catch(e => e)
+    expect(err).toBeInstanceOf(AppError)
+    expect(err.statusCode).toBe(400)
   })
 
   it('rejects the same person appearing twice', async () => {

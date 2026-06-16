@@ -1,6 +1,7 @@
 import prisma from '@/utils/prismaClient'
 import { grantVenueAccessBatch, listVenueAccessCandidates, type VenueAccessGrant } from '@/services/dashboard/venue-access.service'
 import type { TerminalActor } from '@/services/dashboard/terminals.superadmin.service'
+import { ForbiddenError } from '@/errors/AppError'
 
 /**
  * Org-scoped wrappers around the venue-access service. Every venue touched by an
@@ -12,9 +13,7 @@ import type { TerminalActor } from '@/services/dashboard/terminals.superadmin.se
 async function assertVenueInOrg(venueId: string, orgId: string) {
   const venue = await prisma.venue.findFirst({ where: { id: venueId, organizationId: orgId }, select: { id: true } })
   if (!venue) {
-    const error: any = new Error('La sucursal no pertenece a esta organización')
-    error.statusCode = 403
-    throw error
+    throw new ForbiddenError('La sucursal no pertenece a esta organización')
   }
 }
 

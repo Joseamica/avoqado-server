@@ -1,6 +1,7 @@
 import prisma from '@/utils/prismaClient'
 import { grantVenueAccessForOrg, listVenueAccessCandidatesForOrg } from '@/services/organization-dashboard/orgVenueAccess.service'
 import * as venueAccess from '@/services/dashboard/venue-access.service'
+import AppError from '@/errors/AppError'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -21,6 +22,17 @@ describe('grantVenueAccessForOrg', () => {
       grantVenueAccessForOrg('org-1', 'venue-x', [{ staffId: 's1', role: 'MANAGER' as any }], { staffId: 'o' } as any),
     ).rejects.toThrow('no pertenece a esta organización')
     expect(grantBatch).not.toHaveBeenCalled()
+  })
+
+  // Regression: cross-tenant guard must throw an AppError (403) so the dashboard shows the
+  // real message instead of a generic 500.
+  it('throws a 403 AppError when the destination venue is not in the org', async () => {
+    m.venue.findFirst.mockResolvedValue(null)
+    const err = await grantVenueAccessForOrg('org-1', 'venue-x', [{ staffId: 's1', role: 'MANAGER' as any }], {
+      staffId: 'o',
+    } as any).catch(e => e)
+    expect(err).toBeInstanceOf(AppError)
+    expect(err.statusCode).toBe(403)
   })
 
   it('delegates to grantVenueAccessBatch when the venue is in the org', async () => {

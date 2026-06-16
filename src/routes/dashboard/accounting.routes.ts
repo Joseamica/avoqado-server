@@ -18,7 +18,8 @@ import { validateRequest } from '@/middlewares/validation'
 
 const router = express.Router({ mergeParams: true })
 
-const incomeStatementSchema = z.object({
+// Las tres rutas comparten el mismo contrato: :venueId cuid + rango from/to AAAA-MM-DD.
+const periodSchema = z.object({
   params: z.object({
     venueId: z.string().cuid({ message: 'El ID del local no es válido.' }),
   }),
@@ -40,11 +41,23 @@ const incomeStatementSchema = z.object({
  *
  * @permission accounting:read
  */
-router.get(
-  '/income-statement',
-  checkPermission('accounting:read'),
-  validateRequest(incomeStatementSchema),
-  accountingController.getIncomeStatement,
-)
+router.get('/income-statement', checkPermission('accounting:read'), validateRequest(periodSchema), accountingController.getIncomeStatement)
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/accounting/business-summary?from=&to=
+ *
+ * Resumen del negocio (portada de Contabilidad): ingreso del periodo, facturación
+ * (CFDIs timbrados), cobro efectivo vs banco, comisiones, propinas y estado de la
+ * conciliación bancaria. Read-model, incluido. @permission accounting:read
+ */
+router.get('/business-summary', checkPermission('accounting:read'), validateRequest(periodSchema), accountingController.getBusinessSummary)
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/accounting/banks?from=&to=
+ *
+ * Bancos y cajas: entradas por método de cobro del periodo, separando caja
+ * (efectivo) de banco (electrónico, neto de comisiones). @permission accounting:read
+ */
+router.get('/banks', checkPermission('accounting:read'), validateRequest(periodSchema), accountingController.getBankAndCashSummary)
 
 export default router

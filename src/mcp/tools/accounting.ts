@@ -1,7 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 
-import { getIncomeStatement } from '@/services/dashboard/accounting.dashboard.service'
+import { getBankAndCashSummary, getBusinessSummary, getIncomeStatement } from '@/services/dashboard/accounting.dashboard.service'
 import { listStatements } from '@/services/dashboard/bankReconciliation.service'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
@@ -53,6 +53,113 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           ventas: data.metrics.salesCount,
           devoluciones: data.metrics.refundCount,
           ticketPromedio: pesos(data.metrics.averageTicketCents),
+        },
+      })
+    },
+  )
+
+  server.tool(
+    'accounting_business_summary',
+    'Resumen del negocio (Capa A, gerencial — portada de Contabilidad) de un local en un periodo. Reúne: ingreso neto cobrado (base + IVA), facturación del periodo (CFDIs timbrados, % del ingreso ya facturado y cuánto falta por facturar), cómo cobró (efectivo/caja vs banco/electrónico), comisiones de procesamiento, propinas y el estatus de la conciliación bancaria. Responde "¿cómo me fue este mes/periodo?". Pasa venueId y el rango from/to en formato YYYY-MM-DD (zona horaria del local).',
+    {
+      venueId: z.string().describe('Local a reportar (debe estar en tu alcance)'),
+      from: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .describe('Fecha inicial YYYY-MM-DD (zona del local)'),
+      to: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .describe('Fecha final YYYY-MM-DD (zona del local)'),
+    },
+    async ({ venueId, from, to }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:read', venueId)
+
+      const d = await getBusinessSummary(venueId, { from, to })
+      return text({
+        venue: d.venueName,
+        venueId: d.venueId,
+        currency: d.currency,
+        period: d.period,
+        ingresos: {
+          ventasBrutas: pesos(d.revenue.grossSalesCents),
+          devoluciones: pesos(d.revenue.refundsCents),
+          ingresoNeto: pesos(d.revenue.netRevenueCents),
+          baseGravable: pesos(d.revenue.taxableBaseCents),
+          ivaTrasladado: pesos(d.revenue.ivaCents),
+        },
+        facturacion: {
+          cfdisTimbrados: d.invoicing.stampedCount,
+          nominativos: d.invoicing.nominativeCount,
+          globales: d.invoicing.globalCount,
+          totalFacturado: pesos(d.invoicing.invoicedApproxCents),
+          sinFacturar: pesos(d.invoicing.uninvoicedApproxCents),
+          porcentajeFacturado: d.invoicing.invoicedPct,
+        },
+        cobro: {
+          efectivo: pesos(d.collection.cashCents),
+          electronico: pesos(d.collection.electronicCents),
+          porcentajeEfectivo: d.collection.cashPct,
+        },
+        comisiones: pesos(d.costs.processingFeesCents),
+        ingresoMenosComisiones: pesos(d.result.netAfterFeesCents),
+        propinas: pesos(d.tips.totalCents),
+        conciliacionBancaria: {
+          estadosDeCuenta: d.reconciliation.statements,
+          movimientos: d.reconciliation.lineCount,
+          conciliados: d.reconciliation.matchedCount,
+        },
+        metricas: {
+          ventas: d.metrics.salesCount,
+          devoluciones: d.metrics.refundCount,
+          ticketPromedio: pesos(d.metrics.averageTicketCents),
+        },
+      })
+    },
+  )
+
+  server.tool(
+    'accounting_banks_summary',
+    'Bancos y cajas (Capa A) de un local en un periodo: cuánto entró por cada forma de cobro (efectivo, tarjetas, transferencias, monederos, cripto…), separando lo que se quedó en CAJA (efectivo) de lo que va al BANCO (electrónico, neto de comisiones). Responde "¿cuánto tengo en efectivo y cuánto me deposita el banco?". Pasa venueId y el rango from/to en formato YYYY-MM-DD (zona horaria del local).',
+    {
+      venueId: z.string().describe('Local a reportar (debe estar en tu alcance)'),
+      from: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .describe('Fecha inicial YYYY-MM-DD (zona del local)'),
+      to: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .describe('Fecha final YYYY-MM-DD (zona del local)'),
+    },
+    async ({ venueId, from, to }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:read', venueId)
+
+      const d = await getBankAndCashSummary(venueId, { from, to })
+      return text({
+        venue: d.venueName,
+        venueId: d.venueId,
+        currency: d.currency,
+        period: d.period,
+        cuentas: d.accounts.map(a => ({
+          cuenta: a.key,
+          tipo: a.kind === 'cash' ? 'caja' : 'banco',
+          metodos: a.methods,
+          entradas: pesos(a.inflowCents),
+          ventas: a.count,
+        })),
+        totales: {
+          efectivoCaja: pesos(d.totals.cashInflowCents),
+          electronicoBruto: pesos(d.totals.electronicInflowCents),
+          comisiones: pesos(d.totals.feesCents),
+          netoAlBanco: pesos(d.totals.netToBankCents),
+        },
+        conciliacionBancaria: {
+          estadosDeCuenta: d.reconciliation.statements,
+          movimientos: d.reconciliation.lineCount,
+          conciliados: d.reconciliation.matchedCount,
         },
       })
     },

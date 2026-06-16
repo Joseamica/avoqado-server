@@ -3,6 +3,7 @@ import { StaffRole } from '@prisma/client'
 import { upsertVenueAssignment } from '@/services/superadmin/staff.superadmin.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import type { TerminalActor } from '@/services/dashboard/terminals.superadmin.service'
+import { BadRequestError, NotFoundError } from '@/errors/AppError'
 
 export interface VenueAccessGrant {
   staffId: string
@@ -30,23 +31,17 @@ export interface GrantResult {
  */
 export async function grantVenueAccessBatch(venueId: string, grants: VenueAccessGrant[], actor: TerminalActor): Promise<GrantResult[]> {
   if (grants.length === 0) {
-    const error: any = new Error('Selecciona al menos una persona')
-    error.statusCode = 400
-    throw error
+    throw new BadRequestError('Selecciona al menos una persona')
   }
 
   const ids = grants.map(g => g.staffId)
   if (new Set(ids).size !== ids.length) {
-    const error: any = new Error('Una persona aparece dos veces en la lista.')
-    error.statusCode = 400
-    throw error
+    throw new BadRequestError('Una persona aparece dos veces en la lista.')
   }
 
   const pins = grants.map(g => g.pin).filter((p): p is string => !!p)
   if (new Set(pins).size !== pins.length) {
-    const error: any = new Error('Dos personas tienen el mismo PIN. Cada PIN debe ser distinto.')
-    error.statusCode = 400
-    throw error
+    throw new BadRequestError('Dos personas tienen el mismo PIN. Cada PIN debe ser distinto.')
   }
 
   await prisma.$transaction(async tx => {
@@ -98,9 +93,7 @@ function mostCommon(arr: string[]): string | null {
 export async function listVenueAccessCandidates(destVenueId: string, sourceVenueId?: string): Promise<AccessCandidate[]> {
   const venue = await prisma.venue.findUnique({ where: { id: destVenueId }, select: { id: true, organizationId: true } })
   if (!venue) {
-    const error: any = new Error('Sucursal no encontrada')
-    error.statusCode = 404
-    throw error
+    throw new NotFoundError('Sucursal no encontrada')
   }
 
   const staff = await prisma.staff.findMany({

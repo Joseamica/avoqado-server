@@ -1,5 +1,6 @@
 import prisma from '@/utils/prismaClient'
 import { upsertVenueAssignment } from '@/services/superadmin/staff.superadmin.service'
+import AppError from '@/errors/AppError'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -55,5 +56,35 @@ describe('upsertVenueAssignment', () => {
     m.staffVenue.findFirst.mockResolvedValue({ id: 'other' })
     await expect(upsertVenueAssignment(prisma as any, 'staff-1', 'venue-1', 'WAITER' as any, '3987')).rejects.toThrow('PIN ya está en uso')
     expect(m.staffVenue.upsert).not.toHaveBeenCalled()
+  })
+
+  // Regression: these validation failures MUST be AppError instances. The global error
+  // handler (app.ts) only honors a custom statusCode + message when `err instanceof AppError`;
+  // a plain Error with a monkey-patched .statusCode falls through to a generic HTTP 500,
+  // which is exactly the "error genérico sin retroalimentación" the migration wizard hit.
+  it('throws a ConflictError (409 AppError) when the PIN collides — not a generic 500', async () => {
+    healthy()
+    m.staffVenue.findFirst.mockResolvedValue({ id: 'other' })
+    const err = await upsertVenueAssignment(prisma as any, 'staff-1', 'venue-1', 'WAITER' as any, '3987').catch(e => e)
+    expect(err).toBeInstanceOf(AppError)
+    expect(err.statusCode).toBe(409)
+    expect(err.isOperational).toBe(true)
+    expect(err.message).toMatch('PIN ya está en uso')
+  })
+
+  it('throws a 400 AppError when the staff does not belong to the venue org', async () => {
+    healthy()
+    m.staffOrganization.findUnique.mockResolvedValue(null)
+    const err = await upsertVenueAssignment(prisma as any, 'staff-1', 'venue-1', 'MANAGER' as any).catch(e => e)
+    expect(err).toBeInstanceOf(AppError)
+    expect(err.statusCode).toBe(400)
+  })
+
+  it('throws a 404 AppError when the venue does not exist', async () => {
+    healthy()
+    m.venue.findUnique.mockResolvedValue(null)
+    const err = await upsertVenueAssignment(prisma as any, 'staff-1', 'venue-1', 'MANAGER' as any).catch(e => e)
+    expect(err).toBeInstanceOf(AppError)
+    expect(err.statusCode).toBe(404)
   })
 })

@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs'
 
 import logger from '../../config/logger'
 import prisma from '@/utils/prismaClient'
+import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 
 // ===========================================
 // TYPES
@@ -199,17 +200,13 @@ export async function createStaff(data: CreateStaffData) {
   // 1. Check email uniqueness
   const existing = await prisma.staff.findUnique({ where: { email } })
   if (existing) {
-    const error: any = new Error('Ya existe un usuario con este correo electrónico')
-    error.statusCode = 409
-    throw error
+    throw new ConflictError('Ya existe un usuario con este correo electrónico')
   }
 
   // 2. Validate org exists
   const org = await prisma.organization.findUnique({ where: { id: organizationId } })
   if (!org) {
-    const error: any = new Error('Organización no encontrada')
-    error.statusCode = 404
-    throw error
+    throw new NotFoundError('Organización no encontrada')
   }
 
   // 3. If venueId, validate venue belongs to org
@@ -218,9 +215,7 @@ export async function createStaff(data: CreateStaffData) {
       where: { id: venueId, organizationId },
     })
     if (!venue) {
-      const error: any = new Error('La sucursal no pertenece a la organización seleccionada')
-      error.statusCode = 400
-      throw error
+      throw new BadRequestError('La sucursal no pertenece a la organización seleccionada')
     }
 
     // 4. If pin, check uniqueness within venue
@@ -229,9 +224,7 @@ export async function createStaff(data: CreateStaffData) {
         where: { venueId, pin, active: true },
       })
       if (existingPin) {
-        const error: any = new Error('Este PIN ya está en uso en esta sucursal')
-        error.statusCode = 400
-        throw error
+        throw new ConflictError('Este PIN ya está en uso en esta sucursal')
       }
     }
   }
@@ -297,9 +290,7 @@ export async function createStaff(data: CreateStaffData) {
 export async function updateStaff(staffId: string, data: UpdateStaffData) {
   const staff = await prisma.staff.findUnique({ where: { id: staffId } })
   if (!staff) {
-    const error: any = new Error('Usuario no encontrado')
-    error.statusCode = 404
-    throw error
+    throw new NotFoundError('Usuario no encontrado')
   }
 
   const updated = await prisma.staff.update({
@@ -319,17 +310,13 @@ export async function assignToOrganization(staffId: string, organizationId: stri
   // Validate staff exists
   const staff = await prisma.staff.findUnique({ where: { id: staffId } })
   if (!staff) {
-    const error: any = new Error('Usuario no encontrado')
-    error.statusCode = 404
-    throw error
+    throw new NotFoundError('Usuario no encontrado')
   }
 
   // Validate org exists
   const org = await prisma.organization.findUnique({ where: { id: organizationId } })
   if (!org) {
-    const error: any = new Error('Organización no encontrada')
-    error.statusCode = 404
-    throw error
+    throw new NotFoundError('Organización no encontrada')
   }
 
   // Check if already has a primary org — don't override
@@ -369,9 +356,7 @@ export async function removeFromOrganization(staffId: string, organizationId: st
     where: { staffId_organizationId: { staffId, organizationId } },
   })
   if (!membership) {
-    const error: any = new Error('El usuario no pertenece a esta organización')
-    error.statusCode = 404
-    throw error
+    throw new NotFoundError('El usuario no pertenece a esta organización')
   }
 
   // Check not removing last OWNER
@@ -380,9 +365,7 @@ export async function removeFromOrganization(staffId: string, organizationId: st
       where: { organizationId, role: OrgRole.OWNER, isActive: true },
     })
     if (ownerCount <= 1) {
-      const error: any = new Error('No se puede eliminar al último propietario de la organización')
-      error.statusCode = 400
-      throw error
+      throw new BadRequestError('No se puede eliminar al último propietario de la organización')
     }
   }
 
@@ -431,9 +414,7 @@ export async function upsertVenueAssignment(
   // Validate staff exists
   const staff = await client.staff.findUnique({ where: { id: staffId }, select: { id: true } })
   if (!staff) {
-    const error: any = new Error('Usuario no encontrado')
-    error.statusCode = 404
-    throw error
+    throw new NotFoundError('Usuario no encontrado')
   }
 
   // Validate venue exists and get its org
@@ -442,9 +423,7 @@ export async function upsertVenueAssignment(
     select: { id: true, organizationId: true, name: true },
   })
   if (!venue) {
-    const error: any = new Error('Sucursal no encontrada')
-    error.statusCode = 404
-    throw error
+    throw new NotFoundError('Sucursal no encontrada')
   }
 
   // Validate staff belongs to the venue's org
@@ -452,9 +431,7 @@ export async function upsertVenueAssignment(
     where: { staffId_organizationId: { staffId, organizationId: venue.organizationId } },
   })
   if (!orgMembership || !orgMembership.isActive) {
-    const error: any = new Error('El usuario no pertenece a la organización de esta sucursal. Asígnelo primero a la organización.')
-    error.statusCode = 400
-    throw error
+    throw new BadRequestError('El usuario no pertenece a la organización de esta sucursal. Asígnelo primero a la organización.')
   }
 
   // Check PIN uniqueness if provided
@@ -468,9 +445,7 @@ export async function upsertVenueAssignment(
       },
     })
     if (existingPin) {
-      const error: any = new Error('Este PIN ya está en uso en esta sucursal')
-      error.statusCode = 400
-      throw error
+      throw new ConflictError('Este PIN ya está en uso en esta sucursal')
     }
   }
 
@@ -517,9 +492,7 @@ export async function updateVenueAssignment(
     where: { staffId_venueId: { staffId, venueId } },
   })
   if (!assignment) {
-    const error: any = new Error('El usuario no está asignado a esta sucursal')
-    error.statusCode = 404
-    throw error
+    throw new NotFoundError('El usuario no está asignado a esta sucursal')
   }
 
   // Check PIN uniqueness if changing
@@ -533,9 +506,7 @@ export async function updateVenueAssignment(
       },
     })
     if (existingPin) {
-      const error: any = new Error('Este PIN ya está en uso en esta sucursal')
-      error.statusCode = 400
-      throw error
+      throw new ConflictError('Este PIN ya está en uso en esta sucursal')
     }
   }
 
@@ -561,9 +532,7 @@ export async function removeFromVenue(staffId: string, venueId: string) {
     where: { staffId_venueId: { staffId, venueId } },
   })
   if (!assignment) {
-    const error: any = new Error('El usuario no está asignado a esta sucursal')
-    error.statusCode = 404
-    throw error
+    throw new NotFoundError('El usuario no está asignado a esta sucursal')
   }
 
   await prisma.staffVenue.update({
@@ -581,16 +550,12 @@ export async function removeFromVenue(staffId: string, venueId: string) {
 
 export async function deleteStaff(staffId: string, currentUserId: string) {
   if (staffId === currentUserId) {
-    const error: any = new Error('No puedes eliminarte a ti mismo')
-    error.statusCode = 400
-    throw error
+    throw new BadRequestError('No puedes eliminarte a ti mismo')
   }
 
   const staff = await prisma.staff.findUnique({ where: { id: staffId } })
   if (!staff) {
-    const error: any = new Error('Usuario no encontrado')
-    error.statusCode = 404
-    throw error
+    throw new NotFoundError('Usuario no encontrado')
   }
 
   await prisma.staff.delete({ where: { id: staffId } })
@@ -606,9 +571,7 @@ export async function deleteStaff(staffId: string, currentUserId: string) {
 export async function resetPassword(staffId: string, newPassword: string) {
   const staff = await prisma.staff.findUnique({ where: { id: staffId } })
   if (!staff) {
-    const error: any = new Error('Usuario no encontrado')
-    error.statusCode = 404
-    throw error
+    throw new NotFoundError('Usuario no encontrado')
   }
 
   const hashed = await bcrypt.hash(newPassword, 10)

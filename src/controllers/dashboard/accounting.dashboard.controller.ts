@@ -25,3 +25,41 @@ export async function getIncomeStatement(
     next(error)
   }
 }
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/accounting/business-summary?from=&to=
+ * Resumen del negocio (Capa A) — portada de Contabilidad. @permission accounting:read
+ */
+export async function getBusinessSummary(
+  req: Request<{ venueId: string }, {}, {}, { from: string; to: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const { from, to } = req.query
+    const summary = await accountingService.getBusinessSummary(venueId, { from, to })
+    res.status(200).json(summary)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/accounting/banks?from=&to=
+ * Bancos y cajas (Capa A) — cuentas de dinero del local. @permission accounting:read
+ */
+export async function getBankAndCashSummary(
+  req: Request<{ venueId: string }, {}, {}, { from: string; to: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const { from, to } = req.query
+    const summary = await accountingService.getBankAndCashSummary(venueId, { from, to })
+    res.status(200).json(summary)
+  } catch (error) {
+    next(error)
+  }
+}
