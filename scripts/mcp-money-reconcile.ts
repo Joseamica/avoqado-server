@@ -34,7 +34,8 @@ function check(label: string, mcp: number, db: number, mcpCount?: number, dbCoun
   const moneyOk = cents(mcp) === cents(db)
   const countOk = mcpCount === undefined || mcpCount === dbCount
   const ok = moneyOk && countOk
-  ok ? pass++ : fail++
+  if (ok) pass++
+  else fail++
   const cnt = mcpCount !== undefined ? `  (count mcp=${mcpCount} db=${dbCount})` : ''
   console.log(
     `${ok ? '✅' : '❌'}  ${label.padEnd(46)} mcp=${cents(mcp).toFixed(2)}  db=${cents(db).toFixed(2)}${cnt}${moneyOk ? '' : `  ⚠️ DIFF $${cents(mcp - db).toFixed(2)}`}`,
