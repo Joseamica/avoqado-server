@@ -82,9 +82,12 @@ async function generateOrderNumber(venueId: string): Promise<string> {
  * Helper function to send Purchase Order email (async, non-blocking)
  */
 export async function sendPurchaseOrderEmailAsync(venueId: string, purchaseOrderId: string, staffId?: string): Promise<boolean> {
+  // Declared outside try so it is accessible in the catch block for the email-failure audit log
+
+  let po: any = null
   try {
     // Fetch complete PO data
-    const po = await prisma.purchaseOrder.findUnique({
+    po = await prisma.purchaseOrder.findUnique({
       where: { id: purchaseOrderId },
       include: {
         supplier: true,
@@ -142,7 +145,7 @@ export async function sendPurchaseOrderEmailAsync(venueId: string, purchaseOrder
     const shippingZipCode = useCustomShipping ? po.shippingZipCode! : po.venue?.zipCode || 'N/A'
 
     // Format items for email
-    const formattedItems = po.items.map(item => ({
+    const formattedItems = po.items.map((item: any) => ({
       name: item.rawMaterial.name,
       quantity: item.quantityOrdered.toNumber(),
       unit: item.unit,
@@ -181,6 +184,18 @@ export async function sendPurchaseOrderEmailAsync(venueId: string, purchaseOrder
     return emailSent
   } catch (error) {
     logger.error(`Error in sendPurchaseOrderEmailAsync for PO ${purchaseOrderId}:`, error)
+    void logAction({
+      staffId: null,
+      venueId,
+      action: 'PURCHASE_ORDER_EMAIL_FAILED',
+      entity: 'PurchaseOrder',
+      entityId: purchaseOrderId,
+      data: {
+        orderNumber: po?.orderNumber ?? null,
+        supplierId: po?.supplierId ?? null,
+        error: error instanceof Error ? error.message : String(error),
+      },
+    })
     // Don't throw - email failure should not affect PO creation
     return false
   }
