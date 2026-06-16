@@ -4,7 +4,9 @@ import tseslint from 'typescript-eslint'
 import prettierPlugin from 'eslint-plugin-prettier'
 
 export default tseslint.config(
-  { ignores: ['dist/**', 'node_modules/**', 'coverage/**', '*.config.js', '*.config.mjs'] },
+  // `.worktrees/**` = sibling git worktrees (other branches/sessions). Linting them from the
+  // main checkout surfaces stale/other-branch code as false errors — never lint another worktree.
+  { ignores: ['dist/**', 'node_modules/**', 'coverage/**', '.worktrees/**', '*.config.js', '*.config.mjs'] },
   {
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
     files: ['**/*.{ts,tsx}'],

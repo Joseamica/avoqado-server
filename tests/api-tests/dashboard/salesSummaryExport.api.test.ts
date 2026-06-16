@@ -167,7 +167,9 @@ describe('GET /api/v1/dashboard/reports/venues/:venueId/sales-summary/export', (
     mockVenueHasFeatureAccess.mockResolvedValue(true)
     mockGetSalesSummary.mockResolvedValue(makeFakeReport())
 
-    const res = await request(app).get(exportUrl(`mode=summary&format=csv&${RANGE}`)).set(authHeader('OWNER'))
+    const res = await request(app)
+      .get(exportUrl(`mode=summary&format=csv&${RANGE}`))
+      .set(authHeader('OWNER'))
 
     expect(res.status).toBe(200)
     expect(res.headers['content-type']).toContain('text/csv')
@@ -178,7 +180,9 @@ describe('GET /api/v1/dashboard/reports/venues/:venueId/sales-summary/export', (
     // ADVANCED_REPORTS true (clamp passes) but TRANSACTION_EXPORT false → controller 403.
     mockVenueHasFeatureAccess.mockImplementation(async (_v, code) => code === 'ADVANCED_REPORTS')
 
-    const res = await request(app).get(exportUrl(`mode=detailed&format=csv&${RANGE}`)).set(authHeader('OWNER'))
+    const res = await request(app)
+      .get(exportUrl(`mode=detailed&format=csv&${RANGE}`))
+      .set(authHeader('OWNER'))
 
     expect(res.status).toBe(403)
     // Must match the platform-wide feature-gate contract verbatim — featureCode +
@@ -191,7 +195,9 @@ describe('GET /api/v1/dashboard/reports/venues/:venueId/sales-summary/export', (
     mockVenueHasFeatureAccess.mockResolvedValue(true)
     mockCountSalesSummaryDetailRows.mockResolvedValue(20_000)
 
-    const res = await request(app).get(exportUrl(`mode=detailed&format=csv&${RANGE}`)).set(authHeader('OWNER'))
+    const res = await request(app)
+      .get(exportUrl(`mode=detailed&format=csv&${RANGE}`))
+      .set(authHeader('OWNER'))
 
     expect(res.status).toBe(413)
     expect(res.body.success).toBe(false)
@@ -202,7 +208,9 @@ describe('GET /api/v1/dashboard/reports/venues/:venueId/sales-summary/export', (
     mockCountSalesSummaryDetailRows.mockResolvedValue(3)
     mockFetchSalesSummaryDetailRows.mockResolvedValue([])
 
-    const res = await request(app).get(exportUrl(`mode=detailed&format=csv&${RANGE}`)).set(authHeader('OWNER'))
+    const res = await request(app)
+      .get(exportUrl(`mode=detailed&format=csv&${RANGE}`))
+      .set(authHeader('OWNER'))
 
     expect(res.status).toBe(200)
     expect(res.headers['content-type']).toContain('text/csv')
@@ -230,7 +238,9 @@ describe('GET /api/v1/dashboard/reports/venues/:venueId/sales-summary/export', (
     )
     const mindformUrl = `/api/v1/dashboard/reports/venues/${MINDFORM_VENUE_ID}/sales-summary/export?mode=detailed&format=csv&paymentMethod=QR_LEGACY&${RANGE}`
 
-    const res = await request(app).get(mindformUrl).set({ Authorization: `Bearer ${mindformToken}` })
+    const res = await request(app)
+      .get(mindformUrl)
+      .set({ Authorization: `Bearer ${mindformToken}` })
 
     expect(res.status).toBe(400)
     // The per-payment fetch must NEVER run for QR_LEGACY (would have thrown → 500).

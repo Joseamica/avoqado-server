@@ -19,9 +19,20 @@ describe('flattenSalesSummaryForExport', () => {
     dateRange: { startDate: new Date('2026-06-01'), endDate: new Date('2026-06-07') },
     reportType: 'summary',
     summary: {
-      grossSales: 1000, items: 50, serviceCosts: 0, discounts: 100, refunds: 25,
-      netSales: 875, deferredSales: 0, taxes: 140, tips: 60, platformFees: 12,
-      staffCommissions: 0, commissions: 12, totalCollected: 935, netProfit: 863,
+      grossSales: 1000,
+      items: 50,
+      serviceCosts: 0,
+      discounts: 100,
+      refunds: 25,
+      netSales: 875,
+      deferredSales: 0,
+      taxes: 140,
+      tips: 60,
+      platformFees: 12,
+      staffCommissions: 0,
+      commissions: 12,
+      totalCollected: 935,
+      netProfit: 863,
       transactionCount: 42,
     },
     byPaymentMethod: [{ method: 'CARD', amount: 700, count: 30, percentage: 70 }],
@@ -44,7 +55,9 @@ describe('detailed rows where-clause + cap', () => {
   it('countSalesSummaryDetailRows scopes to venue+date+COMPLETED and honors payment filter', async () => {
     paymentCount.mockResolvedValue(5)
     const total = await svc.countSalesSummaryDetailRows('v1', {
-      startDate: '2026-06-01', endDate: '2026-06-07', paymentMethod: 'CASH',
+      startDate: '2026-06-01',
+      endDate: '2026-06-07',
+      paymentMethod: 'CASH',
     })
     expect(total).toBe(5)
     const where = paymentCount.mock.calls[0][0].where

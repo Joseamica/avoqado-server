@@ -1319,7 +1319,11 @@ export function flattenSalesSummaryForExport(
 
   if (want.has('totals')) {
     const t = (label: string, amount: number | null, count: number | null = null): SalesSummaryExportRow => ({
-      section: 'totals', label, count, amount: round2x(amount), percentage: null,
+      section: 'totals',
+      label,
+      count,
+      amount: round2x(amount),
+      percentage: null,
     })
     rows.push(t('Ventas brutas', s.grossSales, s.transactionCount))
     rows.push(t('Descuentos', s.discounts == null ? null : -s.discounts))
@@ -1332,7 +1336,13 @@ export function flattenSalesSummaryForExport(
   }
   if (want.has('paymentMethods') && report.byPaymentMethod) {
     for (const m of report.byPaymentMethod) {
-      rows.push({ section: 'paymentMethods', label: m.method, count: m.count, amount: round2x(m.amount), percentage: round2x(m.percentage) })
+      rows.push({
+        section: 'paymentMethods',
+        label: m.method,
+        count: m.count,
+        amount: round2x(m.amount),
+        percentage: round2x(m.percentage),
+      })
     }
   }
   // NOTE (see Task 6 FIX 7): getSalesSummary only populates byPaymentMethodDetailed when
@@ -1343,18 +1353,36 @@ export function flattenSalesSummaryForExport(
   if (want.has('cardTypes') && report.byPaymentMethodDetailed) {
     for (const b of report.byPaymentMethodDetailed) {
       for (const sub of b.subBuckets ?? []) {
-        rows.push({ section: 'cardTypes', label: sub.type, count: sub.count, amount: round2x(sub.amount), percentage: round2x(sub.percentage) })
+        rows.push({
+          section: 'cardTypes',
+          label: sub.type,
+          count: sub.count,
+          amount: round2x(sub.amount),
+          percentage: round2x(sub.percentage),
+        })
       }
     }
   }
   if (want.has('merchantAccounts') && report.byMerchantAccount) {
     for (const ma of report.byMerchantAccount) {
-      rows.push({ section: 'merchantAccounts', label: ma.displayName, count: ma.transactionCount, amount: round2x(ma.netToReceive), percentage: null })
+      rows.push({
+        section: 'merchantAccounts',
+        label: ma.displayName,
+        count: ma.transactionCount,
+        amount: round2x(ma.netToReceive),
+        percentage: null,
+      })
     }
   }
   if (want.has('byPeriod') && report.byPeriod) {
     for (const p of report.byPeriod) {
-      rows.push({ section: 'byPeriod', label: p.periodLabel || p.period, count: p.metrics.transactionCount, amount: round2x(p.metrics.totalCollected), percentage: null })
+      rows.push({
+        section: 'byPeriod',
+        label: p.periodLabel || p.period,
+        count: p.metrics.transactionCount,
+        amount: round2x(p.metrics.totalCollected),
+        percentage: null,
+      })
     }
   }
   return { rows }
@@ -1385,8 +1413,17 @@ export async function fetchSalesSummaryDetailRows(venueId: string, filters: Sale
   return prisma.payment.findMany({
     where: buildSalesSummaryDetailWhere(venueId, filters),
     select: {
-      id: true, createdAt: true, method: true, cardBrand: true, maskedPan: true,
-      processorData: true, amount: true, tipAmount: true, status: true, source: true, orderId: true,
+      id: true,
+      createdAt: true,
+      method: true,
+      cardBrand: true,
+      maskedPan: true,
+      processorData: true,
+      amount: true,
+      tipAmount: true,
+      status: true,
+      source: true,
+      orderId: true,
       processedBy: { select: { firstName: true, lastName: true } },
       merchantAccount: { select: { displayName: true, externalMerchantId: true } },
     },
