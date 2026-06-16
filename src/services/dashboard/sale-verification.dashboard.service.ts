@@ -93,6 +93,8 @@ interface SalesSummary {
   pendingCount: number
   completedCount: number
   failedCount: number
+  /** Terminal "Rechazada" (REJECTED) sales — started but lost (couldn't link/port). */
+  rejectedCount: number
   avgAmount: number
   /** Count of payments without any sale verification */
   withoutVerificationCount: number
@@ -300,6 +302,7 @@ export async function getSaleVerificationsSummary(venueId: string, fromDate?: Da
   let completedCount = 0
   let pendingCount = 0
   let failedCount = 0
+  let rejectedCount = 0
   let withoutVerificationCount = 0
 
   for (const p of payments) {
@@ -317,6 +320,9 @@ export async function getSaleVerificationsSummary(venueId: string, fromDate?: Da
         case 'FAILED':
           failedCount++
           break
+        case 'REJECTED':
+          rejectedCount++
+          break
       }
     } else {
       withoutVerificationCount++
@@ -333,6 +339,7 @@ export async function getSaleVerificationsSummary(venueId: string, fromDate?: Da
     pendingCount,
     completedCount,
     failedCount,
+    rejectedCount,
     avgAmount,
     withoutVerificationCount,
   }
@@ -427,7 +434,13 @@ export async function getStaffWithVerifications(venueId: string): Promise<
 // Back-Office Review (PlayTelecom / Walmart documentation flow)
 // ============================================================
 
-export type ReviewDecision = 'APPROVE' | 'REJECT'
+/**
+ * Back-office review decisions:
+ *   - APPROVE      → COMPLETED ("Venta correcta")
+ *   - REJECT       → FAILED ("Revisar" — promoter can re-upload/correct on TPV)
+ *   - REJECT_FINAL → REJECTED ("Rechazada" — terminal lost sale; no promoter correction)
+ */
+export type ReviewDecision = 'APPROVE' | 'REJECT' | 'REJECT_FINAL'
 
 export interface ReviewSaleVerificationParams {
   saleVerificationId: string
@@ -451,13 +464,14 @@ function createServiceError(message: string, statusCode: number): ServiceError {
  * Approve or reject a sale verification (back-office documentation review).
  *
  * Decisions:
- *   - APPROVE → status=COMPLETED, rejectionReasons cleared
- *   - REJECT  → status=FAILED, rejectionReasons stored, reviewNotes optional but encouraged
+ *   - APPROVE      → status=COMPLETED, rejectionReasons cleared
+ *   - REJECT       → status=FAILED, rejectionReasons stored, reviewNotes optional but encouraged
+ *   - REJECT_FINAL → status=REJECTED (terminal "Rechazada"), reviewNotes optional, no reasons required
  *
  * Validations:
  *   - Verification must exist and belong to the given venue
  *   - Verification must be in PENDING status (no double-review)
- *   - Rejection requires at least one rejectionReason OR reviewNotes (not silent rejection)
+ *   - REJECT requires at least one rejectionReason OR reviewNotes (not silent rejection)
  *
  * Side-effects:
  *   - Emits SALE_VERIFICATION_REVIEWED socket event to the promoter (staff) so their TPV refreshes in real time
@@ -494,7 +508,8 @@ export async function reviewSaleVerification(
     throw createServiceError('Rejection requires at least one reason or notes', 400)
   }
 
-  const newStatus: 'COMPLETED' | 'FAILED' = params.decision === 'APPROVE' ? 'COMPLETED' : 'FAILED'
+  const newStatus: 'COMPLETED' | 'FAILED' | 'REJECTED' =
+    params.decision === 'APPROVE' ? 'COMPLETED' : params.decision === 'REJECT_FINAL' ? 'REJECTED' : 'FAILED'
 
   const updated = await prisma.saleVerification.update({
     where: { id: params.saleVerificationId },
@@ -503,6 +518,7 @@ export async function reviewSaleVerification(
       reviewedById: params.reviewedById,
       reviewedAt: new Date(),
       reviewNotes: trimmedNotes,
+      // Reasons only apply to the fixable "Revisar" (FAILED) path. REJECTED is terminal.
       rejectionReasons: params.decision === 'REJECT' ? reasons : [],
     },
     include: {

@@ -446,6 +446,14 @@ export async function createOrUpdateProofOfSale(
     : payment.saleVerification
 
   if (existing) {
+    // Terminal guard: a REJECTED ("Rechazada") sale is a lost sale — the promoter
+    // cannot revive it by re-uploading evidence (unlike FAILED/"Revisar"). Only an
+    // admin can reopen it via the dashboard edit. Enforced server-side so it holds
+    // regardless of TPV app version. (Asana 1215725049493387)
+    if (existing.status === 'REJECTED') {
+      throw new BadRequestError('Esta venta fue rechazada y no puede modificarse desde el TPV')
+    }
+
     let updatedPhotos: string[]
 
     // Determine the target index from photoLabel (fixed slots: Vinculacion=0, Portabilidad=1)

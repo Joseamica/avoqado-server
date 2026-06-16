@@ -3,6 +3,8 @@ import Papa from 'papaparse'
 
 import prisma from '../../utils/prismaClient'
 import { formatInVenueTimezone, venueEndOfDay, venueStartOfDay } from '../../utils/datetime'
+import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { buildStoragePath, uploadFileToStorage } from '../storage.service'
 
 /**
  * Bank Reconciliation (Conciliación bancaria con IA) — Slice 1 core.
@@ -247,6 +249,153 @@ export function matchLines(
     }
   }
   return results
+}
+
+// ============================================================================
+// Orquestación (persiste: DB + Firebase Storage + ActivityLog). Gateada por el
+// Feature PRO `BANK_RECONCILIATION` y el permiso accounting:read/reconcile en la ruta.
+// ============================================================================
+
+export const BANK_RECONCILIATION_FEATURE = 'BANK_RECONCILIATION'
+
+export interface UploadedFile {
+  buffer: Buffer
+  originalname: string
+  mimetype: string
+}
+
+/** Sube + parsea + concilia + persiste un estado de cuenta. Devuelve el resumen. */
+export async function processBankStatement(
+  venueId: string,
+  staffId: string,
+  file: UploadedFile,
+): Promise<{ statementId: string; lineCount: number; matchedCount: number }> {
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { slug: true, timezone: true } })
+  if (!venue) throw new NotFoundError(`Venue ${venueId} no encontrado`)
+  const tz = venue.timezone || 'America/Mexico_City'
+
+  const lines = parseBankCsv(file.buffer.toString('utf8'))
+  if (lines.length === 0) {
+    throw new BadRequestError(
+      'No se detectaron movimientos. Sube un estado de cuenta CSV con columnas de fecha y monto (cargo/abono o importe).',
+    )
+  }
+
+  const allDates = lines.map(l => l.postedDate).sort((a, b) => a.getTime() - b.getTime())
+  const periodStart = allDates[0]
+  const periodEnd = allDates[allDates.length - 1]
+
+  const candidates = await loadDepositCandidates(venueId, formatDay(periodStart), formatDay(periodEnd), tz)
+  const results = matchLines(lines, candidates)
+  const resultByRow = new Map(results.map(r => [r.rowIndex, r]))
+  const matchedCount = results.filter(r => r.matchStatus === 'MATCHED').length
+
+  const safeSlug = venue.slug || venueId
+  const storagePath = buildStoragePath(`venues/${safeSlug}/bank-statements/${formatDay(periodEnd)}-${Date.now()}.csv`)
+  const fileUrl = await uploadFileToStorage(file.buffer, storagePath, 'text/csv')
+
+  const statement = await prisma.bankStatement.create({
+    data: {
+      venueId,
+      fileName: file.originalname,
+      fileUrl,
+      storagePath,
+      source: 'CSV',
+      status: 'PARSED',
+      periodStart,
+      periodEnd,
+      lineCount: lines.length,
+      matchedCount,
+      uploadedById: staffId,
+      lines: {
+        create: lines.map(l => {
+          const r = resultByRow.get(l.rowIndex)
+          return {
+            venueId,
+            rowIndex: l.rowIndex,
+            postedDate: l.postedDate,
+            description: l.description,
+            reference: l.reference,
+            amountCents: l.amountCents,
+            direction: l.direction,
+            matchStatus: r?.matchStatus ?? 'UNMATCHED',
+            matchScore: r?.matchScore ?? null,
+            matchedKey: r?.matchedKey ?? null,
+          }
+        }),
+      },
+    },
+  })
+
+  await prisma.activityLog.create({
+    data: {
+      action: 'RECON_STATEMENT_UPLOADED',
+      entity: 'BankStatement',
+      entityId: statement.id,
+      staffId,
+      venueId,
+      data: { fileName: file.originalname, lineCount: lines.length, matchedCount },
+    },
+  })
+
+  return { statementId: statement.id, lineCount: lines.length, matchedCount }
+}
+
+/** Lista los estados de cuenta del venue (más reciente primero). */
+export async function listStatements(venueId: string) {
+  return prisma.bankStatement.findMany({
+    where: { venueId },
+    orderBy: { createdAt: 'desc' },
+    select: {
+      id: true,
+      fileName: true,
+      status: true,
+      periodStart: true,
+      periodEnd: true,
+      lineCount: true,
+      matchedCount: true,
+      createdAt: true,
+    },
+  })
+}
+
+/** Detalle de un estado de cuenta + sus líneas. Aislado por tenant. */
+export async function getStatementDetail(venueId: string, statementId: string) {
+  const statement = await prisma.bankStatement.findFirst({
+    where: { id: statementId, venueId },
+    include: { lines: { orderBy: { rowIndex: 'asc' } } },
+  })
+  if (!statement) throw new NotFoundError('Estado de cuenta no encontrado')
+  return statement
+}
+
+/** Confirma (acepta) la conciliación de líneas específicas. */
+export async function confirmMatches(
+  venueId: string,
+  staffId: string,
+  statementId: string,
+  lineIds: string[],
+): Promise<{ confirmed: number }> {
+  const statement = await prisma.bankStatement.findFirst({ where: { id: statementId, venueId }, select: { id: true } })
+  if (!statement) throw new NotFoundError('Estado de cuenta no encontrado')
+
+  const result = await prisma.bankStatementLine.updateMany({
+    where: { id: { in: lineIds }, venueId, bankStatementId: statementId },
+    data: { matchStatus: 'CONFIRMED', confirmedById: staffId, confirmedAt: new Date() },
+  })
+
+  await prisma.activityLog.create({
+    data: {
+      action: 'RECON_MATCH_CONFIRMED',
+      entity: 'BankStatement',
+      entityId: statementId,
+      staffId,
+      venueId,
+      data: { lineIds, confirmed: result.count },
+    },
+  })
+
+  return { confirmed: result.count }
 }
 
 const formatDay = (d: Date): string =>

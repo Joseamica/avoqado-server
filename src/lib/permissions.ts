@@ -250,6 +250,7 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // ACCOUNTING - Capa A (estado de resultados, incluido para todos los venues)
   // ===========================
   'accounting:read': ['accounting:read', 'payments:read', 'orders:read'],
+  'accounting:reconcile': ['accounting:reconcile', 'accounting:read', 'payments:read'],
 
   // ===========================
   // VENUES - Settings
@@ -737,6 +738,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'reports:*', // Dashboard reports (Sales Summary, Sales by Item, etc.)
     'settlements:*', // Available Balance (settlements) - was missing!
     'accounting:read', // Capa A — estado de resultados (¿cuánto gané?), incluido
+    'accounting:reconcile', // Conciliación bancaria (confirmar matches) — PRO
     'menu:*',
     'orders:*',
     'payments:*',
@@ -833,6 +835,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'reports:*', // Dashboard reports (Sales Summary, Sales by Item, etc.)
     'settlements:*', // Available Balance (settlements) - was missing!
     'accounting:read', // Capa A — estado de resultados (¿cuánto gané?), incluido
+    'accounting:reconcile', // Conciliación bancaria (confirmar matches) — PRO
     'commissions:*', // Commission system (full control including payout)
     'menu:*',
     'orders:*',
@@ -1245,7 +1248,7 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   home: ['home:read'],
   analytics: ['analytics:read', 'analytics:export'],
   settlements: ['settlements:read', 'settlements:simulate'],
-  accounting: ['accounting:read'],
+  accounting: ['accounting:read', 'accounting:reconcile'],
   reports: ['reports:read', 'reports:export'],
   menu: ['menu:read', 'menu:create', 'menu:update', 'menu:delete', 'menu:import'],
   orders: ['orders:read', 'orders:create', 'orders:update', 'orders:cancel', 'orders:comp', 'orders:void'],

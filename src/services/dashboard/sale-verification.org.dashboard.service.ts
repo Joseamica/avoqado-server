@@ -346,6 +346,8 @@ export async function getOrgSalesSummary(
   completedCount: number
   pendingCount: number
   failedCount: number
+  /** Terminal "Rechazada" (REJECTED) sales — started but lost (couldn't link/port). */
+  rejectedCount: number
   withoutVerificationCount: number
 }> {
   const paymentWhere: Prisma.PaymentWhereInput = {
@@ -366,6 +368,7 @@ export async function getOrgSalesSummary(
   let completedCount = 0
   let pendingCount = 0
   let failedCount = 0
+  let rejectedCount = 0
   let withoutVerificationCount = 0
 
   for (const p of payments) {
@@ -380,6 +383,7 @@ export async function getOrgSalesSummary(
       confirmedRevenue += amount
     } else if (p.saleVerification.status === 'PENDING') pendingCount++
     else if (p.saleVerification.status === 'FAILED') failedCount++
+    else if (p.saleVerification.status === 'REJECTED') rejectedCount++
   }
 
   return {
@@ -389,6 +393,7 @@ export async function getOrgSalesSummary(
     completedCount,
     pendingCount,
     failedCount,
+    rejectedCount,
     withoutVerificationCount,
   }
 }
@@ -952,7 +957,7 @@ export async function editOrgSaleVerification(
   if (params.paymentForm != null && !['CASH', 'CARD', 'OTHER'].includes(params.paymentForm)) {
     throw createServiceError('Forma de pago inválida', 400)
   }
-  if (params.status != null && !['PENDING', 'COMPLETED', 'FAILED'].includes(params.status)) {
+  if (params.status != null && !['PENDING', 'COMPLETED', 'FAILED', 'REJECTED'].includes(params.status)) {
     throw createServiceError('Estado inválido', 400)
   }
 
@@ -1009,7 +1014,7 @@ export async function editOrgSaleVerification(
         ? { reviewedById: null, reviewedAt: null, reviewNotes: null, rejectionReasons: [] }
         : nextStatus === 'COMPLETED'
           ? { reviewedById: params.editedById, reviewedAt: new Date(), rejectionReasons: [] }
-          : { reviewedById: params.editedById, reviewedAt: new Date(), reviewNotes: null, rejectionReasons: [] } // FAILED: clear stale notes/reasons (P1 doesn't collect a promoter note on edit)
+          : { reviewedById: params.editedById, reviewedAt: new Date(), reviewNotes: null, rejectionReasons: [] } // FAILED / REJECTED: stamp reviewer, clear stale notes/reasons (P1 doesn't collect a promoter note on edit)
 
     const sv = await tx.saleVerification.update({
       where: { id: existing.id },

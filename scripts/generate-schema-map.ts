@@ -243,6 +243,8 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   Payment: 'Payments & Fees',
   PaymentAllocation: 'Payments & Fees',
   VenueTransaction: 'Payments & Fees',
+  BankStatement: 'Payments & Fees',
+  BankStatementLine: 'Payments & Fees',
   DigitalReceipt: 'Payments & Fees',
   IdempotencyRequest: 'Payments & Fees',
   FeeSchedule: 'Payments & Fees',

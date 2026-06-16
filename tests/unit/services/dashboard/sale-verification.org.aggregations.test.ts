@@ -64,11 +64,12 @@ beforeEach(() => {
 })
 
 describe('getOrgSalesSummary — confirmedRevenue', () => {
-  it('only sums payments whose verification is COMPLETED', async () => {
+  it('only sums payments whose verification is COMPLETED, and counts each status', async () => {
     mockedPaymentFindMany.mockResolvedValue([
       { amount: 100, saleVerification: { status: 'COMPLETED' } },
-      { amount: 50, saleVerification: { status: 'PENDING' } }, // en revisión — NO entra
-      { amount: 25, saleVerification: { status: 'FAILED' } }, // rechazada — NO entra
+      { amount: 50, saleVerification: { status: 'PENDING' } }, // pendiente — NO entra
+      { amount: 25, saleVerification: { status: 'FAILED' } }, // "Revisar" (corregible) — NO entra
+      { amount: 30, saleVerification: { status: 'REJECTED' } }, // "Rechazada" (terminal) — NO entra
       { amount: 10, saleVerification: null }, // sin verificación — NO entra
     ])
 
@@ -76,10 +77,11 @@ describe('getOrgSalesSummary — confirmedRevenue', () => {
 
     expect(summary.confirmedRevenue).toBe(100)
     // totalRevenue keeps legacy semantics (every completed payment) for backwards compat
-    expect(summary.totalRevenue).toBe(185)
+    expect(summary.totalRevenue).toBe(215)
     expect(summary.completedCount).toBe(1)
     expect(summary.pendingCount).toBe(1)
     expect(summary.failedCount).toBe(1)
+    expect(summary.rejectedCount).toBe(1)
     expect(summary.withoutVerificationCount).toBe(1)
   })
 

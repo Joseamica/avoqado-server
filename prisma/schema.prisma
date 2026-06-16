@@ -487,6 +487,9 @@ model Venue {
   fiscalEmisors FiscalEmisor[]
   cfdis         Cfdi[]
 
+  // CONCILIACIÓN BANCARIA
+  bankStatements BankStatement[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -6037,8 +6040,9 @@ enum SyncStatus {
 enum SaleVerificationStatus {
   PENDING // Just created, awaiting processing
   PROCESSING // Processing inventory deduction
-  COMPLETED // Successfully processed
-  FAILED // Failed to process
+  COMPLETED // Successfully processed → "Venta correcta"
+  FAILED // Back-office found a fixable issue → "Revisar" (promoter can re-upload/correct on TPV)
+  REJECTED // Terminal: sale lost (couldn't link/port the line, customer gone) → "Rechazada". No promoter correction; only an admin can reopen via edit.
   SKIPPED // User skipped verification
 }
 
@@ -10612,4 +10616,77 @@ model CustomerTaxProfile {
   updatedAt DateTime @updatedAt
 
   @@index([venueId, rfc])
+}
+
+// ============================================
+// CONCILIACIÓN BANCARIA (Bank Reconciliation con IA) — Feature PRO
+// Slice 1: subir estado de cuenta (CSV) → conciliar vs depósitos esperados
+// (pagos electrónicos netos por día). Ver bankReconciliation.service.ts.
+// ============================================
+
+model BankStatement {
+  id           String              @id @default(cuid())
+  venueId      String
+  venue        Venue               @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  fileName     String
+  fileUrl      String
+  storagePath  String
+  source       BankStatementSource @default(CSV)
+  status       BankStatementStatus @default(PARSED)
+  periodStart  DateTime?
+  periodEnd    DateTime?
+  lineCount    Int                 @default(0)
+  matchedCount Int                 @default(0)
+  uploadedById String? // Staff id (sin relación; el quién queda en ActivityLog)
+  createdAt    DateTime            @default(now())
+  lines        BankStatementLine[]
+
+  @@index([venueId])
+  @@index([venueId, createdAt])
+}
+
+model BankStatementLine {
+  id              String            @id @default(cuid())
+  bankStatementId String
+  bankStatement   BankStatement     @relation(fields: [bankStatementId], references: [id], onDelete: Cascade)
+  venueId         String // denormalizado para aislamiento por tenant en queries directas
+  rowIndex        Int
+  postedDate      DateTime
+  description     String
+  reference       String?
+  amountCents     Int // con signo; depósitos (CREDIT) > 0
+  direction       BankLineDirection @default(CREDIT)
+  matchStatus     ReconMatchStatus  @default(UNMATCHED)
+  matchScore      Decimal?          @db.Decimal(4, 3)
+  matchedKey      String? // día-candidato conciliado (YYYY-MM-DD), o null
+  confirmedById   String?
+  confirmedAt     DateTime?
+  createdAt       DateTime          @default(now())
+
+  @@index([venueId])
+  @@index([bankStatementId])
+  @@index([venueId, matchStatus])
+}
+
+enum BankStatementSource {
+  CSV
+  PDF
+}
+
+enum BankStatementStatus {
+  PARSED
+  RECONCILED
+  FAILED
+}
+
+enum BankLineDirection {
+  CREDIT
+  DEBIT
+}
+
+enum ReconMatchStatus {
+  UNMATCHED
+  MATCHED
+  DUPLICATE
+  CONFIRMED
 }

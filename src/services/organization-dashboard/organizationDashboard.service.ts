@@ -2794,6 +2794,7 @@ class OrganizationDashboardService {
       //   COMPLETED → "Venta correcta"
       //   PENDING   → "En revisión"
       //   FAILED    → "Venta sin documentación completa"
+      //   REJECTED  → "Rechazada" (terminal — sale lost, couldn't link/port)
       //   null      → "Sin verificación" (no photos uploaded — separate from FAILED)
       const saleStatus =
         verification == null
@@ -2802,7 +2803,9 @@ class OrganizationDashboardService {
             ? 'Venta correcta'
             : verification.status === 'FAILED'
               ? 'Venta sin documentación completa'
-              : 'En revisión'
+              : verification.status === 'REJECTED'
+                ? 'Rechazada'
+                : 'En revisión'
 
       return {
         row: idx + 1,

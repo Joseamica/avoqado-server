@@ -198,8 +198,9 @@ export async function reviewOrgSaleVerification(req: Request, res: Response): Pr
       return
     }
 
-    if (decision !== 'APPROVE' && decision !== 'REJECT') {
-      res.status(400).json({ success: false, message: "decision must be 'APPROVE' or 'REJECT'" })
+    // APPROVE → Venta correcta · REJECT → Revisar (fixable) · REJECT_FINAL → Rechazada (terminal)
+    if (decision !== 'APPROVE' && decision !== 'REJECT' && decision !== 'REJECT_FINAL') {
+      res.status(400).json({ success: false, message: "decision must be 'APPROVE', 'REJECT' or 'REJECT_FINAL'" })
       return
     }
 
@@ -306,7 +307,7 @@ export async function editOrgSaleVerification(req: Request, res: Response): Prom
       res.status(400).json({ success: false, message: `Forma de pago inválida: ${paymentForm}` })
       return
     }
-    if (status != null && !['PENDING', 'COMPLETED', 'FAILED'].includes(status)) {
+    if (status != null && !['PENDING', 'COMPLETED', 'FAILED', 'REJECTED'].includes(status)) {
       res.status(400).json({ success: false, message: `Estado inválido: ${status}` })
       return
     }

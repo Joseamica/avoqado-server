@@ -160,6 +160,48 @@ describe('reviewSaleVerification', () => {
     )
   })
 
+  it('marks verification REJECTED (terminal "Rechazada") on REJECT_FINAL — no reasons required, reasons cleared', async () => {
+    mockedFindUnique.mockResolvedValue(baseExisting)
+    mockedUpdate.mockResolvedValue(buildUpdatedRow({ status: 'REJECTED', reviewNotes: 'No se pudo portar, cliente perdido', rejectionReasons: [] }))
+
+    const result = await reviewSaleVerification(VENUE_ID, {
+      saleVerificationId: VERIFICATION_ID,
+      reviewedById: REVIEWER_ID,
+      decision: 'REJECT_FINAL',
+      reviewNotes: 'No se pudo portar, cliente perdido',
+    })
+
+    expect(result.status).toBe('REJECTED')
+    expect(mockedUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'REJECTED',
+          reviewedById: REVIEWER_ID,
+          rejectionReasons: [], // terminal — reasons are only for the fixable "Revisar" path
+        }),
+      }),
+    )
+    expect(mockedBroadcast).toHaveBeenCalledWith(
+      STAFF_ID,
+      SocketEventType.SALE_VERIFICATION_REVIEWED,
+      expect.objectContaining({ status: 'REJECTED' }),
+    )
+  })
+
+  it('allows REJECT_FINAL with no reasons and no notes (lost sale needs no fix feedback)', async () => {
+    mockedFindUnique.mockResolvedValue(baseExisting)
+    mockedUpdate.mockResolvedValue(buildUpdatedRow({ status: 'REJECTED', reviewNotes: null, rejectionReasons: [] }))
+
+    const result = await reviewSaleVerification(VENUE_ID, {
+      saleVerificationId: VERIFICATION_ID,
+      reviewedById: REVIEWER_ID,
+      decision: 'REJECT_FINAL',
+    })
+
+    expect(result.status).toBe('REJECTED')
+    expect(mockedUpdate).toHaveBeenCalled()
+  })
+
   it('rejects REJECT with no reasons and no notes (must give feedback)', async () => {
     mockedFindUnique.mockResolvedValue(baseExisting)
 

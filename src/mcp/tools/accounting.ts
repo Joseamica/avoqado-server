@@ -2,8 +2,10 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 
 import { getIncomeStatement } from '@/services/dashboard/accounting.dashboard.service'
+import { listStatements } from '@/services/dashboard/bankReconciliation.service'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
+import { planGateMessage } from '../planGate'
 import { text } from '../respond'
 
 /** Centavos enteros → pesos con 2 decimales (para lectura humana/LLM). */
@@ -52,6 +54,34 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           devoluciones: data.metrics.refundCount,
           ticketPromedio: pesos(data.metrics.averageTicketCents),
         },
+      })
+    },
+  )
+
+  server.tool(
+    'bank_reconciliation_summary',
+    'Conciliación bancaria (PRO): lista los estados de cuenta subidos de un local y cuántos depósitos del banco ya cuadraron contra lo que Avoqado depositó (conciliados/movimientos). Responde "¿ya cuadró mi banco?". Pasa venueId.',
+    {
+      venueId: z.string().describe('Local a reportar (debe estar en tu alcance)'),
+    },
+    async ({ venueId }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:read', venueId)
+      const gate = await planGateMessage(venueId, 'BANK_RECONCILIATION', 'La conciliación bancaria')
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+
+      const statements = await listStatements(venueId)
+      return text({
+        ok: true,
+        estadosDeCuenta: statements.map(s => ({
+          id: s.id,
+          archivo: s.fileName,
+          periodo: { desde: s.periodStart, hasta: s.periodEnd },
+          movimientos: s.lineCount,
+          conciliados: s.matchedCount,
+          estatus: s.status,
+          subido: s.createdAt,
+        })),
       })
     },
   )

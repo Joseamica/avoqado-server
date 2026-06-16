@@ -251,6 +251,7 @@ import paymentLinkRoutes from './dashboard/paymentLink.routes'
 import manualPaymentRoutes from './dashboard/manualPayment.routes'
 import reportsRoutes from './dashboard/reports.routes'
 import accountingRoutes from './dashboard/accounting.routes'
+import * as bankReconciliationController from '../controllers/dashboard/bankReconciliation.controller'
 import commissionRoutes from './dashboard/commission.routes'
 import reservationRoutes from './dashboard/reservation.routes'
 import classSessionRoutes from './dashboard/classSession.routes'
@@ -315,6 +316,18 @@ const documentUpload = multer({
     } else {
       cb(new Error('Only PDF, JPG, JPEG, and PNG files are allowed'))
     }
+  },
+})
+
+// Bank-statement CSV upload (conciliación bancaria) — memoria, 5MB, solo CSV
+const bankStatementUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const ok =
+      /\.csv$/i.test(file.originalname) || ['text/csv', 'application/csv', 'application/vnd.ms-excel', 'text/plain'].includes(file.mimetype)
+    if (ok) cb(null, true)
+    else cb(new Error('Solo se aceptan archivos CSV'))
   },
 })
 
@@ -3938,6 +3951,37 @@ router.put(
 router.use('/venues/:venueId/inventory', authenticateTokenMiddleware, inventoryRoutes)
 // Accounting Capa A (estado de resultados / "¿cuánto gané?") — incluido, gateado por permiso accounting:read
 router.use('/venues/:venueId/accounting', authenticateTokenMiddleware, accountingRoutes)
+
+// Conciliación bancaria (Feature PRO BANK_RECONCILIATION): subir estado de cuenta CSV → conciliar vs depósitos
+router.post(
+  '/venues/:venueId/bank-reconciliation/statements',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('BANK_RECONCILIATION'),
+  checkPermission('accounting:read'),
+  bankStatementUpload.single('file'),
+  bankReconciliationController.uploadBankStatement,
+)
+router.get(
+  '/venues/:venueId/bank-reconciliation/statements',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('BANK_RECONCILIATION'),
+  checkPermission('accounting:read'),
+  bankReconciliationController.listBankStatements,
+)
+router.get(
+  '/venues/:venueId/bank-reconciliation/statements/:statementId',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('BANK_RECONCILIATION'),
+  checkPermission('accounting:read'),
+  bankReconciliationController.getBankStatement,
+)
+router.post(
+  '/venues/:venueId/bank-reconciliation/statements/:statementId/confirm',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('BANK_RECONCILIATION'),
+  checkPermission('accounting:reconcile'),
+  bankReconciliationController.confirmBankMatches,
+)
 
 // Referral Program routes (program config + capture + reads)
 // Plan-tier gate: Pro feature REFERRAL_PROGRAM (grandfathered/demo venues bypass inside the middleware)
