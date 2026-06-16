@@ -15,6 +15,8 @@ import { z } from 'zod'
 import * as accountingController from '@/controllers/dashboard/accounting.dashboard.controller'
 import * as chartController from '@/controllers/dashboard/chartOfAccounts.controller'
 import * as mappingController from '@/controllers/dashboard/accountMapping.controller'
+import * as journalController from '@/controllers/dashboard/journalEntry.controller'
+import { getTrialBalanceController } from '@/controllers/dashboard/trialBalance.controller'
 import { checkFeatureAccess } from '@/middlewares/checkFeatureAccess.middleware'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import { validateRequest } from '@/middlewares/validation'
@@ -191,6 +193,69 @@ router.patch(
   checkPermission('accounting:manage'),
   validateRequest(setMappingSchema),
   mappingController.setAccountMapping,
+)
+
+// ───────────────────────────────────────────────────────────────────────────
+// Libro diario · Pólizas (JournalEntry) — gated PREMIUM (bundle con CFDI).
+// ───────────────────────────────────────────────────────────────────────────
+
+const createEntrySchema = z.object({
+  params: z.object({ venueId: z.string().cuid({ message: 'El ID del local no es válido.' }) }),
+  body: z.object({
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, { message: 'La fecha debe tener formato AAAA-MM-DD.' }),
+    concept: z.string().min(1, { message: 'El concepto de la póliza es requerido.' }).max(300),
+    lines: z
+      .array(
+        z.object({
+          ledgerAccountId: z.string().cuid({ message: 'El ID de la cuenta no es válido.' }),
+          debitCents: z.number().int().min(0),
+          creditCents: z.number().int().min(0),
+          description: z.string().max(300).nullable().optional(),
+        }),
+      )
+      .min(2, { message: 'Una póliza necesita al menos dos líneas.' }),
+  }),
+})
+
+/** GET /accounting/journal?period=YYYY-MM — libro diario. */
+router.get(
+  '/journal',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:read'),
+  validateRequest(venueParamSchema),
+  journalController.getJournal,
+)
+
+/** POST /accounting/journal — crea una póliza manual (balanceada). */
+router.post(
+  '/journal',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:manage'),
+  validateRequest(createEntrySchema),
+  journalController.createJournalEntry,
+)
+
+// ───────────────────────────────────────────────────────────────────────────
+// Balanza de comprobación — read-model sobre pólizas. Gated PREMIUM (CFDI).
+// ───────────────────────────────────────────────────────────────────────────
+
+const trialBalanceSchema = z.object({
+  params: z.object({ venueId: z.string().cuid({ message: 'El ID del local no es válido.' }) }),
+  query: z.object({
+    period: z
+      .string()
+      .regex(/^\d{4}-\d{2}$/, { message: 'El periodo debe tener formato AAAA-MM.' })
+      .optional(),
+  }),
+})
+
+/** GET /accounting/trial-balance?period=YYYY-MM — balanza de comprobación (default: mes actual). */
+router.get(
+  '/trial-balance',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:read'),
+  validateRequest(trialBalanceSchema),
+  getTrialBalanceController,
 )
 
 export default router

@@ -4,6 +4,8 @@ import { z } from 'zod'
 import { getBankAndCashSummary, getBusinessSummary, getIncomeStatement } from '@/services/dashboard/accounting.dashboard.service'
 import { createAccount, getCatalog, seedBaseChart } from '@/services/fiscal/chartOfAccounts.service'
 import { getMappings, setMapping } from '@/services/fiscal/accountMapping.service'
+import { createManualEntry, listEntries } from '@/services/fiscal/journalEntry.service'
+import { currentPeriod, getTrialBalance } from '@/services/fiscal/trialBalance.service'
 import { listStatements } from '@/services/dashboard/bankReconciliation.service'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
@@ -307,6 +309,122 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           concepto: row.label,
           cuenta: row.account ? `${row.account.code} ${row.account.name}` : null,
         },
+      })
+    },
+  )
+
+  server.tool(
+    'journal_entries',
+    'Libro diario — las pólizas (asientos de doble partida) de un local (Capa B fiscal, PREMIUM). Cada póliza está balanceada (Σcargo = Σabono). Devuelve folio, fecha, concepto, total y sus líneas (cuenta, cargo, abono). Responde "¿qué asientos tengo?". Pasa venueId y opcionalmente period (YYYY-MM).',
+    {
+      venueId: z.string().describe('Local (debe estar en tu alcance)'),
+      period: z
+        .string()
+        .regex(/^\d{4}-\d{2}$/)
+        .optional()
+        .describe('Periodo YYYY-MM (opcional)'),
+    },
+    async ({ venueId, period }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:read', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'El libro diario')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+
+      const r = await listEntries(venueId, { period })
+      if (r.needsFiscalSetup) return text({ ok: true, needsFiscalSetup: true })
+      return text({
+        ok: true,
+        rfc: r.rfc,
+        polizas: r.entries.map(e => ({
+          folio: e.folio,
+          fecha: e.date,
+          tipo: e.type,
+          origen: e.source,
+          concepto: e.concept,
+          total: pesos(e.totalDebitCents),
+          lineas: e.lines.map(l => ({
+            cuenta: `${l.accountCode} ${l.accountName}`,
+            cargo: pesos(l.debitCents),
+            abono: pesos(l.creditCents),
+          })),
+        })),
+      })
+    },
+  )
+
+  server.tool(
+    'add_journal_entry',
+    'Crea una póliza MANUAL (asiento de doble partida) en el libro diario (Capa B, PREMIUM). DEBE cuadrar: Σcargo = Σabono (en centavos enteros) y cada cuenta debe ser afectable. Escritura: requiere accounting:manage + feature CFDI. Pasa venueId, date (AAAA-MM-DD), concept y lines (≥2; cada una con ledgerAccountId y UNO de debitCents/creditCents > 0).',
+    {
+      venueId: z.string().describe('Local (debe estar en tu alcance)'),
+      date: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .describe('Fecha del asiento AAAA-MM-DD'),
+      concept: z.string().describe('Concepto / descripción de la póliza'),
+      lines: z
+        .array(
+          z.object({
+            ledgerAccountId: z.string(),
+            debitCents: z.number().int().min(0).describe('Cargo en centavos enteros (0 si es abono)'),
+            creditCents: z.number().int().min(0).describe('Abono en centavos enteros (0 si es cargo)'),
+            description: z.string().optional(),
+          }),
+        )
+        .min(2)
+        .describe('Líneas de la póliza (mínimo 2; Σcargo = Σabono)'),
+    },
+    async ({ venueId, date, concept, lines }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:manage', venueId) // write gate
+      const gate = await planGateMessage(venueId, 'CFDI', 'El libro diario')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+
+      const e = await createManualEntry(venueId, { date, concept, lines }, { staffId: scope.staffId })
+      return text({
+        ok: true,
+        poliza: { folio: e.folio, fecha: e.date, concepto: e.concept, total: pesos(e.totalDebitCents), lineas: e.lines.length },
+      })
+    },
+  )
+
+  server.tool(
+    'trial_balance',
+    'Balanza de comprobación de un local para un periodo (Capa B fiscal, PREMIUM). Sale de las pólizas: por cuenta da saldo inicial, cargos, abonos y saldo final, y verifica el CUADRE (Σcargos=Σabonos y saldo deudor=saldo acreedor). Responde "¿cuadra mi contabilidad este mes?". Pasa venueId y opcionalmente period (YYYY-MM; default = mes actual).',
+    {
+      venueId: z.string().describe('Local (debe estar en tu alcance)'),
+      period: z
+        .string()
+        .regex(/^\d{4}-\d{2}$/)
+        .optional()
+        .describe('Periodo YYYY-MM (opcional; default mes actual)'),
+    },
+    async ({ venueId, period }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:read', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'La balanza de comprobación')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+
+      const b = await getTrialBalance(venueId, period || currentPeriod())
+      if (b.needsFiscalSetup) return text({ ok: true, needsFiscalSetup: true })
+      return text({
+        ok: true,
+        rfc: b.rfc,
+        periodo: b.period,
+        cuadra: b.balanced.movements && b.balanced.balances,
+        totales: {
+          cargos: pesos(b.totals.debeCents),
+          abonos: pesos(b.totals.haberCents),
+          saldoFinalDeudor: pesos(b.totals.saldoFinalDeudorCents),
+          saldoFinalAcreedor: pesos(b.totals.saldoFinalAcreedorCents),
+        },
+        cuentas: b.rows.map(r => ({
+          cuenta: `${r.code} ${r.name}`,
+          saldoInicial: pesos(r.saldoInicialCents),
+          cargos: pesos(r.debeCents),
+          abonos: pesos(r.haberCents),
+          saldoFinal: pesos(r.saldoFinalCents),
+        })),
       })
     },
   )

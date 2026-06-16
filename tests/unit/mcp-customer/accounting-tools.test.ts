@@ -13,6 +13,9 @@ const mockSeed = jest.fn()
 const mockCreate = jest.fn()
 const mockGetMappings = jest.fn()
 const mockSetMapping = jest.fn()
+const mockListEntries = jest.fn()
+const mockCreateManual = jest.fn()
+const mockTrialBalance = jest.fn()
 
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({ venueFilter: jest.fn(), requirePermission: (...a: unknown[]) => mockRequirePermission(...(a as [])) }),
@@ -26,6 +29,14 @@ jest.mock('@/services/fiscal/chartOfAccounts.service', () => ({
 jest.mock('@/services/fiscal/accountMapping.service', () => ({
   getMappings: (...a: unknown[]) => mockGetMappings(...(a as [])),
   setMapping: (...a: unknown[]) => mockSetMapping(...(a as [])),
+}))
+jest.mock('@/services/fiscal/journalEntry.service', () => ({
+  listEntries: (...a: unknown[]) => mockListEntries(...(a as [])),
+  createManualEntry: (...a: unknown[]) => mockCreateManual(...(a as [])),
+}))
+jest.mock('@/services/fiscal/trialBalance.service', () => ({
+  getTrialBalance: (...a: unknown[]) => mockTrialBalance(...(a as [])),
+  currentPeriod: () => '2026-06',
 }))
 jest.mock('@/services/dashboard/accounting.dashboard.service', () => ({
   getIncomeStatement: jest.fn(),
@@ -211,5 +222,138 @@ describe('set_account_mapping (write) — gated CFDI + accounting:manage', () =>
     const out = parse(await call('set_account_mapping', { venueId: 'v1', movementType: 'SALES_REVENUE', ledgerAccountId: 'a' }))
     expect(out.planRequired).toBe(true)
     expect(mockSetMapping).not.toHaveBeenCalled()
+  })
+})
+
+describe('journal_entries (read) — gated CFDI + accounting:read', () => {
+  it('con CFDI → devuelve las pólizas con líneas', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    mockListEntries.mockResolvedValue({
+      needsFiscalSetup: false,
+      rfc: 'TESC900101AAA',
+      entries: [
+        {
+          id: 'je1',
+          date: '2026-06-15',
+          period: '2026-06',
+          folio: 1,
+          type: 'DIARIO',
+          source: 'MANUAL',
+          status: 'POSTED',
+          concept: 'Venta',
+          totalDebitCents: 11600,
+          totalCreditCents: 11600,
+          lines: [
+            {
+              id: 'l1',
+              ledgerAccountId: 'a',
+              accountCode: '101.01',
+              accountName: 'Caja',
+              debitCents: 11600,
+              creditCents: 0,
+              description: null,
+            },
+          ],
+        },
+      ],
+    })
+    const out = parse(await call('journal_entries', { venueId: 'v1' }))
+    expect(mockRequirePermission).toHaveBeenCalledWith('accounting:read', 'v1')
+    expect(out.ok).toBe(true)
+    expect(out.polizas[0].folio).toBe(1)
+    expect(out.polizas[0].lineas[0].cuenta).toBe('101.01 Caja')
+  })
+})
+
+describe('add_journal_entry (write) — gated CFDI + accounting:manage', () => {
+  it('crea una póliza manual con el staff del scope', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    mockCreateManual.mockResolvedValue({
+      id: 'je1',
+      folio: 5,
+      date: '2026-06-15',
+      concept: 'Ajuste',
+      totalDebitCents: 5000,
+      totalCreditCents: 5000,
+      lines: [{}, {}],
+    })
+    const lines = [
+      { ledgerAccountId: 'a', debitCents: 5000, creditCents: 0 },
+      { ledgerAccountId: 'b', debitCents: 0, creditCents: 5000 },
+    ]
+    const out = parse(await call('add_journal_entry', { venueId: 'v1', date: '2026-06-15', concept: 'Ajuste', lines }))
+    expect(mockRequirePermission).toHaveBeenCalledWith('accounting:manage', 'v1')
+    expect(mockCreateManual).toHaveBeenCalledWith('v1', { date: '2026-06-15', concept: 'Ajuste', lines }, { staffId: 'staff-1' })
+    expect(out.ok).toBe(true)
+    expect(out.poliza.folio).toBe(5)
+  })
+
+  it('venue sin CFDI → planRequired, NO crea', async () => {
+    mockPlanGate.mockResolvedValue('CFDI no activo')
+    const out = parse(
+      await call('add_journal_entry', {
+        venueId: 'v1',
+        date: '2026-06-15',
+        concept: 'x',
+        lines: [
+          { ledgerAccountId: 'a', debitCents: 1, creditCents: 0 },
+          { ledgerAccountId: 'b', debitCents: 0, creditCents: 1 },
+        ],
+      }),
+    )
+    expect(out.planRequired).toBe(true)
+    expect(mockCreateManual).not.toHaveBeenCalled()
+  })
+})
+
+describe('trial_balance (read) — gated CFDI + accounting:read', () => {
+  it('con CFDI → devuelve la balanza con el cuadre', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    mockTrialBalance.mockResolvedValue({
+      needsFiscalSetup: false,
+      rfc: 'TESC900101AAA',
+      period: '2026-06',
+      rows: [
+        {
+          code: '101.01',
+          name: 'Caja',
+          type: 'ACTIVO',
+          nature: 'DEUDORA',
+          saldoInicialCents: 1000,
+          debeCents: 3000,
+          haberCents: 0,
+          saldoFinalCents: 4000,
+        },
+      ],
+      totals: {
+        debeCents: 3000,
+        haberCents: 3000,
+        saldoInicialDeudorCents: 1000,
+        saldoInicialAcreedorCents: 1000,
+        saldoFinalDeudorCents: 4000,
+        saldoFinalAcreedorCents: 4000,
+      },
+      balanced: { movements: true, balances: true },
+    })
+    const out = parse(await call('trial_balance', { venueId: 'v1', period: '2026-06' }))
+    expect(mockRequirePermission).toHaveBeenCalledWith('accounting:read', 'v1')
+    expect(mockTrialBalance).toHaveBeenCalledWith('v1', '2026-06')
+    expect(out.ok).toBe(true)
+    expect(out.cuadra).toBe(true)
+    expect(out.cuentas[0].cuenta).toBe('101.01 Caja')
+  })
+
+  it('sin period usa el mes actual (currentPeriod)', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    mockTrialBalance.mockResolvedValue({ needsFiscalSetup: true, rows: [], totals: {}, balanced: { movements: true, balances: true } })
+    await call('trial_balance', { venueId: 'v1' })
+    expect(mockTrialBalance).toHaveBeenCalledWith('v1', '2026-06')
+  })
+
+  it('venue sin CFDI → planRequired', async () => {
+    mockPlanGate.mockResolvedValue('CFDI no activo')
+    const out = parse(await call('trial_balance', { venueId: 'v1' }))
+    expect(out.planRequired).toBe(true)
+    expect(mockTrialBalance).not.toHaveBeenCalled()
   })
 })

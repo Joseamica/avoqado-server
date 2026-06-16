@@ -83,9 +83,10 @@ model Organization {
   // SIM registration approval layer (additive, sits on top of SerializedItem custody)
   simRegistrationRequests SimRegistrationRequest[]
 
-  // Contabilidad fiscal (Capa B): catálogo de cuentas + configuración contable por (org, RFC)
+  // Contabilidad fiscal (Capa B): catálogo de cuentas + configuración contable + pólizas por (org, RFC)
   ledgerAccounts  LedgerAccount[]
   accountMappings AccountMapping[]
+  journalEntries  JournalEntry[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -10718,6 +10719,7 @@ model LedgerAccount {
   parent          LedgerAccount?      @relation("LedgerAccountHierarchy", fields: [parentId], references: [id], onDelete: Restrict)
   children        LedgerAccount[]     @relation("LedgerAccountHierarchy")
   accountMappings AccountMapping[] // configuración contable: movimientos que postean a esta cuenta
+  journalLines    JournalLine[] // pólizas: líneas (cargo/abono) que afectan esta cuenta
   level           Int                 @default(1) // DENORMALIZADO: derivado de parentId (1 = mayor). Recalcular en la misma tx
   isPostable      Boolean             @default(true) // TRUE solo en hojas; una acumulativa (con hijos) DEBE ser false
   isActive        Boolean             @default(true) // soft-delete: cuentas con pólizas nunca se borran (inmutabilidad fiscal)
@@ -10785,4 +10787,76 @@ enum AccountMovementType {
   NET_INCOME_PROFIT
   NET_INCOME_LOSS
   RETAINED_EARNINGS
+}
+
+// ============================================
+// LIBRO DIARIO · PÓLIZAS — motor de doble partida (Capa B)
+// Cada póliza (JournalEntry) es un asiento BALANCEADO: Σdebe == Σhaber (invariante duro,
+// validado al postear). Money en CENTAVOS enteros, MXN. Posteo idempotente por idempotencyKey.
+// Scope (org, RFC) = contribuyente; venueId = centro de costos (informativo). Gated PREMIUM (CFDI).
+// Ver journalEntry.service.ts.
+// ============================================
+
+model JournalEntry {
+  id              String             @id @default(cuid())
+  organizationId  String
+  organization    Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  rfc             String // contribuyente (junto con organizationId)
+  venueId         String? // centro de costos (informativo; de qué local salió)
+  date            DateTime // fecha del asiento (devengo/flujo)
+  period          String // YYYY-MM, derivado de date (para balanza/cierre)
+  folio           Int // consecutivo por (org, rfc)
+  type            JournalEntryType   @default(DIARIO) // INGRESO / EGRESO / DIARIO (tipo de póliza SAT)
+  source          JournalEntrySource @default(MANUAL) // MANUAL o el evento que la generó
+  sourceId        String? // id del evento origen (Payment, Cfdi, …) para trazabilidad
+  idempotencyKey  String? // posteo idempotente del motor automático (manual = null)
+  status          JournalEntryStatus @default(POSTED)
+  concept         String // descripción de la póliza
+  totalDebitCents Int // denormalizado = Σ líneas debe (== totalCreditCents por el invariante)
+  totalCreditCents Int
+  createdById     String? // staff que la creó (manual); null = motor
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+  lines           JournalLine[]
+
+  @@unique([organizationId, rfc, idempotencyKey]) // idempotencia (múltiples NULL permitidos en Postgres)
+  @@unique([organizationId, rfc, folio]) // consecutivo ÚNICO por contribuyente (integridad fiscal; bloquea folios duplicados a nivel DB)
+  @@index([organizationId, rfc, period])
+  @@index([organizationId, rfc, date])
+}
+
+model JournalLine {
+  id             String       @id @default(cuid())
+  journalEntryId String
+  journalEntry   JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+  ledgerAccountId String
+  ledgerAccount  LedgerAccount @relation(fields: [ledgerAccountId], references: [id], onDelete: Restrict)
+  debitCents     Int          @default(0) // cargo (uno de los dos es > 0, el otro 0)
+  creditCents    Int          @default(0) // abono
+  description    String?
+  createdAt      DateTime     @default(now())
+
+  @@index([journalEntryId])
+  @@index([ledgerAccountId])
+}
+
+enum JournalEntryType {
+  INGRESO
+  EGRESO
+  DIARIO
+}
+
+enum JournalEntrySource {
+  MANUAL
+  PAYMENT
+  REFUND
+  CFDI
+  COGS
+  ADJUSTMENT
+  OPENING
+}
+
+enum JournalEntryStatus {
+  POSTED
+  CANCELLED
 }
