@@ -292,7 +292,7 @@ describe('ActivityLog dual-write in shift.tpv.service', () => {
         { id: 'p1', amount: new Decimal(600), tipAmount: new Decimal(0), method: 'CASH' },
       ])
 
-      await closeShiftForVenue(VENUE_ID, SHIFT_ID, { cashDeclared: 700 })
+      await closeShiftForVenue(VENUE_ID, SHIFT_ID, { cashDeclared: 700 } as any)
 
       expect(mockLogAction).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -308,7 +308,7 @@ describe('ActivityLog dual-write in shift.tpv.service', () => {
 
       const callArg = mockLogAction.mock.calls[0][0]
       // cashDiscrepancy key is present but explicitly undefined (no cashDeclared supplied)
-      expect(callArg.data?.cashDiscrepancy).toBeUndefined()
+      expect((callArg.data as any)?.cashDiscrepancy).toBeUndefined()
     })
 
     // ── Regression: return value unchanged ──────────────────────────────────
