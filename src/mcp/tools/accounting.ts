@@ -8,6 +8,7 @@ import { createManualEntry, listEntries } from '@/services/fiscal/journalEntry.s
 import { currentPeriod, getTrialBalance } from '@/services/fiscal/trialBalance.service'
 import { getAccountingReports } from '@/services/fiscal/accountingReports.service'
 import { getIvaCashflow } from '@/services/fiscal/ivaFlujo.service'
+import { generatePoliciesForVenue } from '@/services/fiscal/autoPosting.service'
 import { listStatements } from '@/services/dashboard/bankReconciliation.service'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
@@ -510,6 +511,39 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         sinVentasRecuerdaDeclararEnCeros: r.zeroActivity,
         diotDisponible: r.diotDisponible,
         nota: 'PRELIMINAR — solo lado ventas (IVA cobrado). Falta tu IVA de gastos (acreditable, Fase 2); el real a enterar será MENOR. Es flujo de efectivo (cobrado), no facturado; no cuadra 1:1 con tus CFDIs. No lo uses como pago final sin tu contador.',
+      })
+    },
+  )
+
+  server.tool(
+    'generate_journal_entries',
+    'Posteo AUTOMÁTICO de pólizas (Capa B, PREMIUM, escritura): genera los asientos de doble partida del periodo desde los pagos COMPLETED del local (venta → banco/caja + ventas + IVA + propinas; devolución → contracuenta). Hace que el libro diario / balanza / reportes se llenen solos, sin captura manual. Es idempotente: re-correr no duplica. Responde "generá mis pólizas del mes". Pasa venueId y opcionalmente period (YYYY-MM; default mes actual). Requiere el catálogo + la configuración contable sembrados.',
+    {
+      venueId: z.string().describe('Local (debe estar en tu alcance)'),
+      period: z
+        .string()
+        .regex(/^\d{4}-\d{2}$/)
+        .optional()
+        .describe('Periodo YYYY-MM (opcional; default mes actual)'),
+    },
+    async ({ venueId, period }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:manage', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'El posteo automático de pólizas')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+
+      const r = await generatePoliciesForVenue(venueId, { period: period || currentPeriod(), actorStaffId: scope.staffId })
+      if (r.needsFiscalSetup) return text({ ok: true, needsFiscalSetup: true })
+      if (r.missingMappings.length > 0)
+        return text({ ok: false, needsMapping: true, faltanMapeos: r.missingMappings, error: 'Faltan cuentas por asignar en Configuración contable antes de postear.' })
+      return text({
+        ok: true,
+        periodo: r.period,
+        pagosElegibles: r.candidates,
+        polizasGeneradas: r.posted,
+        yaEstaban: r.alreadyPosted,
+        omitidos: r.skipped,
+        nota: 'Idempotente: re-correr no duplica. Devoluciones y voids se postean como contracuenta (402.01).',
       })
     },
   )

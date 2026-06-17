@@ -35,6 +35,7 @@ export const MOVEMENT_TYPES: MovementTypeDef[] = [
     side: 'DEBIT',
     group: 'INGRESOS',
   },
+  { movementType: 'IVA_OUTPUT', label: 'IVA trasladado cobrado (de ventas)', defaultCode: '208.01', side: 'CREDIT', group: 'INGRESOS' },
   // Tesorería
   { movementType: 'CASH_RECEIPT', label: 'Cobro en efectivo (caja)', defaultCode: '101.01', side: 'BOTH', group: 'TESORERIA' },
   { movementType: 'BANK_RECEIPT', label: 'Cobro electrónico / depósito en banco', defaultCode: '102.01', side: 'BOTH', group: 'TESORERIA' },

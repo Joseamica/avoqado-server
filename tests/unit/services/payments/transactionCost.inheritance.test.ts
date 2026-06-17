@@ -263,3 +263,110 @@ describe('TransactionCost Service — Org Inheritance', () => {
     })
   })
 })
+
+/**
+ * TransactionCost Service — Account Routing
+ *
+ * A venue can have several merchant accounts (PRIMARY / SECONDARY / TERTIARY),
+ * each with its OWN venue pricing. The TPV routing layer records which account
+ * actually processed the card on `Payment.merchantAccountId`. The cost engine
+ * MUST honor that account so the venue is charged with the pricing of the
+ * account that ran the transaction — not always the PRIMARY one.
+ *
+ * Regression: amaena's cards ran on the SECONDARY account "Amaena - B" (8%),
+ * but costs were calculated against PRIMARY "Amaena - A" (3.6%+IVA = 4.18%),
+ * silently undercharging the venue on every payment.
+ */
+describe('TransactionCost Service — Account Routing', () => {
+  const PRIMARY_ID = 'merchant-primary'
+  const SECONDARY_ID = 'merchant-secondary'
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  // Pricing keyed off the resolved accountType, mirroring amaena:
+  // PRIMARY = 3.6% (no-tax→would be 4.18%), SECONDARY = 8% (tax incl.).
+  function pricingByAccountType(_venueId: string, accountType: 'PRIMARY' | 'SECONDARY' | 'TERTIARY') {
+    const rate = accountType === 'SECONDARY' ? '0.08' : '0.036'
+    return {
+      pricing: [
+        {
+          id: `pricing-${accountType}`,
+          active: true,
+          debitRate: { toString: () => rate },
+          creditRate: { toString: () => rate },
+          amexRate: { toString: () => rate },
+          internationalRate: { toString: () => rate },
+          fixedFeePerTransaction: { toString: () => '0' },
+          includesTax: true, // keep effective rate == base rate for a clean assertion
+          taxRate: { toString: () => '0.16' },
+          effectiveFrom: new Date('2026-01-01'),
+          effectiveTo: null,
+        },
+      ],
+      source: 'venue' as const,
+    }
+  }
+
+  function configWithTwoAccounts() {
+    return {
+      config: {
+        primaryAccount: { id: PRIMARY_ID, displayName: 'Amaena - A' },
+        secondaryAccount: { id: SECONDARY_ID, displayName: 'Amaena - B' },
+        tertiaryAccount: null,
+      },
+      source: 'venue',
+    }
+  }
+
+  it('uses the SECONDARY account + pricing when the payment was processed by the secondary merchant account', async () => {
+    prismaMock.payment.findUnique.mockResolvedValue(
+      createMockPayment({ merchantAccountId: SECONDARY_ID, tipAmount: { toString: () => '0.00' } }),
+    )
+    mockGetEffectivePaymentConfig.mockResolvedValue(configWithTwoAccounts())
+    prismaMock.providerCostStructure.findFirst.mockResolvedValue({
+      ...createMockProviderCostStructure(),
+      merchantAccountId: SECONDARY_ID,
+    })
+    mockGetEffectivePricing.mockImplementation((venueId: string, accountType: any) => pricingByAccountType(venueId, accountType))
+    prismaMock.transactionCost.create.mockResolvedValue({ id: 'tc-sec' })
+
+    await createTransactionCost(PAYMENT_ID)
+
+    // Venue pricing resolved for the SECONDARY slot, not PRIMARY
+    expect(mockGetEffectivePricing).toHaveBeenCalledWith(VENUE_ID, 'SECONDARY')
+    // Provider cost looked up against the SECONDARY merchant account
+    expect(prismaMock.providerCostStructure.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ merchantAccountId: SECONDARY_ID }) }),
+    )
+    // Cost row recorded against the SECONDARY merchant account, with its 8% rate
+    expect(prismaMock.transactionCost.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          merchantAccountId: SECONDARY_ID,
+          venueRate: expect.closeTo(0.08, 5),
+          venueChargeAmount: expect.closeTo(40, 2), // $500 × 8%
+        }),
+      }),
+    )
+  })
+
+  it('falls back to PRIMARY when payment.merchantAccountId is null', async () => {
+    prismaMock.payment.findUnique.mockResolvedValue(createMockPayment({ merchantAccountId: null, tipAmount: { toString: () => '0.00' } }))
+    mockGetEffectivePaymentConfig.mockResolvedValue(configWithTwoAccounts())
+    prismaMock.providerCostStructure.findFirst.mockResolvedValue({
+      ...createMockProviderCostStructure(),
+      merchantAccountId: PRIMARY_ID,
+    })
+    mockGetEffectivePricing.mockImplementation((venueId: string, accountType: any) => pricingByAccountType(venueId, accountType))
+    prismaMock.transactionCost.create.mockResolvedValue({ id: 'tc-pri' })
+
+    await createTransactionCost(PAYMENT_ID)
+
+    expect(mockGetEffectivePricing).toHaveBeenCalledWith(VENUE_ID, 'PRIMARY')
+    expect(prismaMock.transactionCost.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ merchantAccountId: PRIMARY_ID }) }),
+    )
+  })
+})

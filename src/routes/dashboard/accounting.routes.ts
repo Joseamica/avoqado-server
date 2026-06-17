@@ -19,6 +19,7 @@ import * as journalController from '@/controllers/dashboard/journalEntry.control
 import { getTrialBalanceController } from '@/controllers/dashboard/trialBalance.controller'
 import { getAccountingReportsController } from '@/controllers/dashboard/accountingReports.controller'
 import { getIvaCashflowController } from '@/controllers/dashboard/ivaFlujo.controller'
+import { generatePoliciesController } from '@/controllers/dashboard/autoPosting.controller'
 import { checkFeatureAccess } from '@/middlewares/checkFeatureAccess.middleware'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import { validateRequest } from '@/middlewares/validation'
@@ -276,6 +277,15 @@ router.get(
   checkPermission('accounting:read'),
   validateRequest(trialBalanceSchema),
   getIvaCashflowController,
+)
+
+/** POST /accounting/generate-policies?period=YYYY-MM — posteo automático de pólizas desde los pagos. */
+router.post(
+  '/generate-policies',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:manage'),
+  validateRequest(trialBalanceSchema),
+  generatePoliciesController,
 )
 
 export default router

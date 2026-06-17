@@ -254,13 +254,40 @@ export async function createTransactionCost(paymentId: string): Promise<{
 
   const { config: paymentConfig, source: configSource } = effective
 
-  // Use PRIMARY account by default (TODO: support routing to SECONDARY/TERTIARY based on BIN/amount)
-  const merchantAccount = paymentConfig.primaryAccount
-  if (!merchantAccount) {
-    throw new BadRequestError(`Venue ${payment.venueId} has no primary merchant account configured`)
+  // Resolve WHICH configured account actually processed this payment. A venue
+  // can have PRIMARY / SECONDARY / TERTIARY merchant accounts, each with its
+  // own venue pricing. The TPV routing layer persists the processing account on
+  // `payment.merchantAccountId` — honor it so the venue is charged with the
+  // pricing of the account that actually ran the card (e.g. an aggregator
+  // account at 8%), instead of always assuming PRIMARY. Falls back to PRIMARY
+  // when the payment has no recorded account (manual/QR payments) or it doesn't
+  // match any configured slot.
+  let merchantAccount = paymentConfig.primaryAccount
+  let accountType: 'PRIMARY' | 'SECONDARY' | 'TERTIARY' = 'PRIMARY'
+
+  if (payment.merchantAccountId) {
+    if (paymentConfig.secondaryAccount?.id === payment.merchantAccountId) {
+      merchantAccount = paymentConfig.secondaryAccount
+      accountType = 'SECONDARY'
+    } else if (paymentConfig.tertiaryAccount?.id === payment.merchantAccountId) {
+      merchantAccount = paymentConfig.tertiaryAccount
+      accountType = 'TERTIARY'
+    } else if (paymentConfig.primaryAccount?.id === payment.merchantAccountId) {
+      accountType = 'PRIMARY'
+    } else {
+      logger.warn('Payment processed by an account not in the venue payment config; falling back to PRIMARY pricing', {
+        paymentId,
+        paymentMerchantAccountId: payment.merchantAccountId,
+        primaryAccountId: paymentConfig.primaryAccount?.id,
+        secondaryAccountId: paymentConfig.secondaryAccount?.id,
+        tertiaryAccountId: paymentConfig.tertiaryAccount?.id,
+      })
+    }
   }
 
-  const accountType = 'PRIMARY' // TODO: Determine actual account type used for this payment
+  if (!merchantAccount) {
+    throw new BadRequestError(`Venue ${payment.venueId} has no ${accountType.toLowerCase()} merchant account configured`)
+  }
 
   logger.info('Merchant account identified', {
     paymentId,

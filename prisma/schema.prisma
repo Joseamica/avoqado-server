@@ -10773,6 +10773,7 @@ model AccountMapping {
 enum AccountMovementType {
   SALES_REVENUE
   SALES_RETURN
+  IVA_OUTPUT
   CASH_RECEIPT
   BANK_RECEIPT
   PETTY_CASH

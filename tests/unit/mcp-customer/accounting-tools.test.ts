@@ -18,6 +18,7 @@ const mockCreateManual = jest.fn()
 const mockTrialBalance = jest.fn()
 const mockReports = jest.fn()
 const mockIva = jest.fn()
+const mockGenerate = jest.fn()
 
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({ venueFilter: jest.fn(), requirePermission: (...a: unknown[]) => mockRequirePermission(...(a as [])) }),
@@ -45,6 +46,9 @@ jest.mock('@/services/fiscal/accountingReports.service', () => ({
 }))
 jest.mock('@/services/fiscal/ivaFlujo.service', () => ({
   getIvaCashflow: (...a: unknown[]) => mockIva(...(a as [])),
+}))
+jest.mock('@/services/fiscal/autoPosting.service', () => ({
+  generatePoliciesForVenue: (...a: unknown[]) => mockGenerate(...(a as [])),
 }))
 jest.mock('@/services/dashboard/accounting.dashboard.service', () => ({
   getIncomeStatement: jest.fn(),
@@ -472,5 +476,34 @@ describe('accounting_iva_cashflow (read) — gated CFDI + accounting:read', () =
     expect(out.planRequired).toBe(true)
     expect(out.feature).toBe('CFDI')
     expect(mockIva).not.toHaveBeenCalled()
+  })
+})
+
+describe('generate_journal_entries (write) — gated CFDI + accounting:manage', () => {
+  it('exige accounting:manage (no read) y postea con el staff del scope', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    mockGenerate.mockResolvedValue({ needsFiscalSetup: false, missingMappings: [], period: '2026-06', candidates: 22, posted: 22, alreadyPosted: 0, skipped: 2 })
+    const out = parse(await call('generate_journal_entries', { venueId: 'v1', period: '2026-06' }))
+    expect(mockRequirePermission).toHaveBeenCalledWith('accounting:manage', 'v1')
+    expect(mockGenerate).toHaveBeenCalledWith('v1', { period: '2026-06', actorStaffId: 'staff-1' })
+    expect(out.ok).toBe(true)
+    expect(out.polizasGeneradas).toBe(22)
+    expect(out.omitidos).toBe(2)
+  })
+
+  it('faltan mapeos → needsMapping, NO ok', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    mockGenerate.mockResolvedValue({ needsFiscalSetup: false, missingMappings: ['IVA_OUTPUT'], period: '2026-06', candidates: 0, posted: 0, alreadyPosted: 0, skipped: 0 })
+    const out = parse(await call('generate_journal_entries', { venueId: 'v1' }))
+    expect(out.ok).toBe(false)
+    expect(out.needsMapping).toBe(true)
+    expect(out.faltanMapeos).toContain('IVA_OUTPUT')
+  })
+
+  it('venue sin CFDI → planRequired, NO postea', async () => {
+    mockPlanGate.mockResolvedValue('CFDI no activo')
+    const out = parse(await call('generate_journal_entries', { venueId: 'v1' }))
+    expect(out.planRequired).toBe(true)
+    expect(mockGenerate).not.toHaveBeenCalled()
   })
 })

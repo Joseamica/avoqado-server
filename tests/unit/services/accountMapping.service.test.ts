@@ -50,11 +50,11 @@ describe('getMappings', () => {
     expect(r.mappings).toEqual([])
   })
 
-  it('devuelve los 16 movimientos; sin mapeos → todos sin cuenta', async () => {
+  it('devuelve los 17 movimientos; sin mapeos → todos sin cuenta', async () => {
     const r = await getMappings('v1')
     expect(r.needsFiscalSetup).toBe(false)
     expect(r.catalogSeeded).toBe(true)
-    expect(r.mappings).toHaveLength(16)
+    expect(r.mappings).toHaveLength(17)
     expect(r.mappings.every(m => m.account === null)).toBe(true)
   })
 
@@ -80,9 +80,9 @@ describe('seedDefaultMappings', () => {
     await expect(seedDefaultMappings('v1', { staffId: 's' })).rejects.toThrow(BadRequestError)
   })
 
-  it('crea los 16 mapeos resolviendo cada default a su cuenta', async () => {
+  it('crea los 17 mapeos resolviendo cada default a su cuenta', async () => {
     await seedDefaultMappings('v1', { staffId: 's' })
-    expect(p.accountMapping.create).toHaveBeenCalledTimes(16)
+    expect(p.accountMapping.create).toHaveBeenCalledTimes(17)
     const byType = (mt: string) => p.accountMapping.create.mock.calls.find(c => c[0].data.movementType === mt)?.[0].data
     expect(byType('SALES_REVENUE').ledgerAccountId).toBe('acc-401.01')
     expect(byType('COST_OF_GOODS_SOLD').ledgerAccountId).toBe('acc-501.01')
@@ -94,7 +94,7 @@ describe('seedDefaultMappings', () => {
     await seedDefaultMappings('v1', { staffId: 's' })
     const createdTypes = p.accountMapping.create.mock.calls.map(c => c[0].data.movementType)
     expect(createdTypes).not.toContain('SALES_REVENUE')
-    expect(p.accountMapping.create).toHaveBeenCalledTimes(15)
+    expect(p.accountMapping.create).toHaveBeenCalledTimes(16)
   })
 })
 
