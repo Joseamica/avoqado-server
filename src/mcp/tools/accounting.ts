@@ -7,6 +7,7 @@ import { getMappings, setMapping } from '@/services/fiscal/accountMapping.servic
 import { createManualEntry, listEntries } from '@/services/fiscal/journalEntry.service'
 import { currentPeriod, getTrialBalance } from '@/services/fiscal/trialBalance.service'
 import { getAccountingReports } from '@/services/fiscal/accountingReports.service'
+import { getIvaCashflow } from '@/services/fiscal/ivaFlujo.service'
 import { listStatements } from '@/services/dashboard/bankReconciliation.service'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
@@ -469,6 +470,46 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           resultadoDelEjercicio: pesos(bs.resultadoEjercicioCents),
           cuadra: bs.balanced,
         },
+      })
+    },
+  )
+
+  server.tool(
+    'accounting_iva_cashflow',
+    'IVA en flujo de efectivo de un contribuyente (Capa B, PREMIUM): el IVA TRASLADADO COBRADO del mes (lado ventas), calculado sobre lo efectivamente cobrado (LIVA art 1-B), sumando TODOS los locales del mismo RFC. Responde "¿cuánto IVA causé este mes por lo que cobré?". ⚠️ Es PRELIMINAR y solo lado ventas: NO incluye tu IVA acreditable de gastos (Fase 2), así que el "a pagar" mostrado es un TECHO; el real será MENOR. Asume tasa 16% (locales con 0%/8%/exento quedan sobreestimados). La DIOT no se genera (lado proveedores, Fase 2). Pasa venueId y opcionalmente period (YYYY-MM; default = mes actual).',
+    {
+      venueId: z.string().describe('Local del contribuyente (debe estar en tu alcance)'),
+      period: z
+        .string()
+        .regex(/^\d{4}-\d{2}$/)
+        .optional()
+        .describe('Periodo YYYY-MM (opcional; default mes actual)'),
+    },
+    async ({ venueId, period }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:read', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'El resumen de IVA en flujo de efectivo')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+
+      const r = await getIvaCashflow(venueId, period || currentPeriod())
+      if (r.needsFiscalSetup) return text({ ok: true, needsFiscalSetup: true })
+      return text({
+        ok: true,
+        rfc: r.rfc,
+        periodo: r.period,
+        localesIncluidos: r.venueIds.length,
+        ivaTrasladadoCobrado: pesos(r.ivaTrasladadoCobradoCents),
+        baseGravable: pesos(r.baseGravableCents),
+        ivaAmparadoPorCfdiContraste: pesos(r.ivaAmparadoPorCfdiCents),
+        ivaAcreditablePagado: r.acreditablePagadoCents === null ? null : pesos(r.acreditablePagadoCents),
+        ivaAPagarPreliminarTecho: pesos(r.ivaAPagarPreliminarCents),
+        saldoAFavorDelPeriodo: pesos(r.saldoAFavorDelPeriodoCents),
+        // Banderas de honestidad fiscal
+        estimadoAl16Pct: r.computedAt16Percent,
+        incompletoPorFaltaDeGastos: r.incompletoPorFaltaDeGastos,
+        sinVentasRecuerdaDeclararEnCeros: r.zeroActivity,
+        diotDisponible: r.diotDisponible,
+        nota: 'PRELIMINAR — solo lado ventas (IVA cobrado). Falta tu IVA de gastos (acreditable, Fase 2); el real a enterar será MENOR. Es flujo de efectivo (cobrado), no facturado; no cuadra 1:1 con tus CFDIs. No lo uses como pago final sin tu contador.',
       })
     },
   )

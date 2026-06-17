@@ -17,6 +17,7 @@ const mockListEntries = jest.fn()
 const mockCreateManual = jest.fn()
 const mockTrialBalance = jest.fn()
 const mockReports = jest.fn()
+const mockIva = jest.fn()
 
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({ venueFilter: jest.fn(), requirePermission: (...a: unknown[]) => mockRequirePermission(...(a as [])) }),
@@ -41,6 +42,9 @@ jest.mock('@/services/fiscal/trialBalance.service', () => ({
 }))
 jest.mock('@/services/fiscal/accountingReports.service', () => ({
   getAccountingReports: (...a: unknown[]) => mockReports(...(a as [])),
+}))
+jest.mock('@/services/fiscal/ivaFlujo.service', () => ({
+  getIvaCashflow: (...a: unknown[]) => mockIva(...(a as [])),
 }))
 jest.mock('@/services/dashboard/accounting.dashboard.service', () => ({
   getIncomeStatement: jest.fn(),
@@ -411,5 +415,62 @@ describe('accounting_reports (read) — gated CFDI + accounting:read', () => {
     expect(out.planRequired).toBe(true)
     expect(out.feature).toBe('CFDI')
     expect(mockReports).not.toHaveBeenCalled()
+  })
+})
+
+describe('accounting_iva_cashflow (read) — gated CFDI + accounting:read', () => {
+  it('registra el tool', () => {
+    expect(handlers.has('accounting_iva_cashflow')).toBe(true)
+  })
+
+  it('con CFDI → devuelve IVA trasladado cobrado en pesos + placeholders honestos', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    mockIva.mockResolvedValue({
+      needsFiscalSetup: false,
+      rfc: 'EKU9003173C9',
+      period: '2026-06',
+      venueIds: ['v1', 'v2'],
+      baseGravableCents: 111638,
+      ivaTrasladadoCobradoCents: 17862,
+      ivaAmparadoPorCfdiCents: 0,
+      cfdiCount: 0,
+      acreditablePagadoCents: null,
+      retencionesCents: null,
+      saldoAFavorAplicadoCents: null,
+      ivaAPagarPreliminarCents: 17862,
+      saldoAFavorDelPeriodoCents: 0,
+      computedAt16Percent: true,
+      acreditableDisponible: false,
+      diotDisponible: false,
+      incompletoPorFaltaDeGastos: true,
+      rfcSpansMultipleOrgs: false,
+      zeroActivity: false,
+      diot: { disponible: false, motivo: 'Fase 2' },
+    })
+    const out = parse(await call('accounting_iva_cashflow', { venueId: 'v1', period: '2026-06' }))
+    expect(mockRequirePermission).toHaveBeenCalledWith('accounting:read', 'v1')
+    expect(mockIva).toHaveBeenCalledWith('v1', '2026-06')
+    expect(out.ok).toBe(true)
+    expect(out.ivaTrasladadoCobrado).toBeCloseTo(178.62)
+    expect(out.localesIncluidos).toBe(2)
+    expect(out.ivaAcreditablePagado).toBeNull() // honesto: null, NO 0
+    expect(out.ivaAPagarPreliminarTecho).toBeCloseTo(178.62)
+    expect(out.estimadoAl16Pct).toBe(true)
+    expect(out.incompletoPorFaltaDeGastos).toBe(true)
+  })
+
+  it('sin period usa el mes actual (currentPeriod)', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    mockIva.mockResolvedValue({ needsFiscalSetup: true })
+    await call('accounting_iva_cashflow', { venueId: 'v1' })
+    expect(mockIva).toHaveBeenCalledWith('v1', '2026-06')
+  })
+
+  it('venue sin CFDI → planRequired, NO calcula', async () => {
+    mockPlanGate.mockResolvedValue('CFDI no activo')
+    const out = parse(await call('accounting_iva_cashflow', { venueId: 'v1' }))
+    expect(out.planRequired).toBe(true)
+    expect(out.feature).toBe('CFDI')
+    expect(mockIva).not.toHaveBeenCalled()
   })
 })

@@ -18,6 +18,7 @@ import * as mappingController from '@/controllers/dashboard/accountMapping.contr
 import * as journalController from '@/controllers/dashboard/journalEntry.controller'
 import { getTrialBalanceController } from '@/controllers/dashboard/trialBalance.controller'
 import { getAccountingReportsController } from '@/controllers/dashboard/accountingReports.controller'
+import { getIvaCashflowController } from '@/controllers/dashboard/ivaFlujo.controller'
 import { checkFeatureAccess } from '@/middlewares/checkFeatureAccess.middleware'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import { validateRequest } from '@/middlewares/validation'
@@ -266,6 +267,15 @@ router.get(
   checkPermission('accounting:read'),
   validateRequest(trialBalanceSchema),
   getAccountingReportsController,
+)
+
+/** GET /accounting/vat-flow?period=YYYY-MM — IVA en flujo de efectivo (trasladado cobrado del contribuyente). */
+router.get(
+  '/vat-flow',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:read'),
+  validateRequest(trialBalanceSchema),
+  getIvaCashflowController,
 )
 
 export default router
