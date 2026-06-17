@@ -56,6 +56,13 @@ services:
         sync: false
       - key: GOOGLE_CLIENT_SECRET
         sync: false
+      # Facturación CFDI (Facturapi). Valores se teclean en el Render Dashboard (secrets).
+      - key: FACTURAPI_USER_KEY
+        sync: false
+      - key: FACTURAPI_TEST_KEY
+        sync: false
+      - key: FISCAL_PROVIDER_KEY
+        sync: false
       - key: FRONTEND_URL
         value: https://develop.avoqado-web-dashboard.pages.dev
 
@@ -107,6 +114,12 @@ services:
       - key: GOOGLE_CLIENT_ID
         sync: false
       - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      # Facturación CFDI (Facturapi). Valores se teclean en el Render Dashboard (secrets).
+      # FACTURAPI_USER_KEY = sk_user_… (provisiona emisores) · FISCAL_PROVIDER_KEY = openssl rand -hex 32
+      - key: FACTURAPI_USER_KEY
+        sync: false
+      - key: FISCAL_PROVIDER_KEY
         sync: false
       - key: FRONTEND_URL
         value: https://dashboardv2.avoqado.io
