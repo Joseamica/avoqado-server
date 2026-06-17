@@ -122,8 +122,8 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `Invoice` → `schema.prisma:L3080`
 - `InvoiceItem` → `schema.prisma:L3106`
 - `ItemCategory` → `schema.prisma:L7459`
-- `JournalEntry` → `schema.prisma:L10800`
-- `JournalLine` → `schema.prisma:L10828`
+- `JournalEntry` → `schema.prisma:L10801`
+- `JournalLine` → `schema.prisma:L10829`
 - `KdsOrder` → `schema.prisma:L10241`
 - `KdsOrderItem` → `schema.prisma:L10258`
 - `LearnedPatterns` → `schema.prisma:L6436`
