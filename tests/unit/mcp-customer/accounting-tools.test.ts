@@ -16,6 +16,7 @@ const mockSetMapping = jest.fn()
 const mockListEntries = jest.fn()
 const mockCreateManual = jest.fn()
 const mockTrialBalance = jest.fn()
+const mockReports = jest.fn()
 
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({ venueFilter: jest.fn(), requirePermission: (...a: unknown[]) => mockRequirePermission(...(a as [])) }),
@@ -37,6 +38,9 @@ jest.mock('@/services/fiscal/journalEntry.service', () => ({
 jest.mock('@/services/fiscal/trialBalance.service', () => ({
   getTrialBalance: (...a: unknown[]) => mockTrialBalance(...(a as [])),
   currentPeriod: () => '2026-06',
+}))
+jest.mock('@/services/fiscal/accountingReports.service', () => ({
+  getAccountingReports: (...a: unknown[]) => mockReports(...(a as [])),
 }))
 jest.mock('@/services/dashboard/accounting.dashboard.service', () => ({
   getIncomeStatement: jest.fn(),
@@ -355,5 +359,57 @@ describe('trial_balance (read) — gated CFDI + accounting:read', () => {
     const out = parse(await call('trial_balance', { venueId: 'v1' }))
     expect(out.planRequired).toBe(true)
     expect(mockTrialBalance).not.toHaveBeenCalled()
+  })
+})
+
+describe('accounting_reports (read) — gated CFDI + accounting:read', () => {
+  it('registra el tool', () => {
+    expect(handlers.has('accounting_reports')).toBe(true)
+  })
+
+  it('con CFDI → devuelve estado de resultados + balance general en pesos', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    mockReports.mockResolvedValue({
+      needsFiscalSetup: false,
+      rfc: 'TESC900101AAA',
+      period: '2026-06',
+      fiscalYearStart: '2026-01',
+      incomeStatement: {
+        ingresos: { lines: [], totalCents: 10000 },
+        costos: { lines: [], totalCents: 4000 },
+        utilidadBrutaCents: 6000,
+        gastos: { lines: [], totalCents: 2000 },
+        resultadoCents: 4000,
+      },
+      balanceSheet: {
+        activo: { lines: [], totalCents: 5600 },
+        pasivo: { lines: [], totalCents: 1600 },
+        capital: { lines: [], totalCents: 4000 },
+        resultadoEjercicioCents: 4000,
+        balanced: true,
+      },
+    })
+    const out = parse(await call('accounting_reports', { venueId: 'v1', period: '2026-06' }))
+    expect(mockRequirePermission).toHaveBeenCalledWith('accounting:read', 'v1')
+    expect(mockReports).toHaveBeenCalledWith('v1', '2026-06')
+    expect(out.ok).toBe(true)
+    expect(out.estadoDeResultados.resultado).toBeCloseTo(40)
+    expect(out.balanceGeneral.activo).toBeCloseTo(56)
+    expect(out.balanceGeneral.cuadra).toBe(true)
+  })
+
+  it('sin period usa el mes actual (currentPeriod)', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    mockReports.mockResolvedValue({ needsFiscalSetup: true })
+    await call('accounting_reports', { venueId: 'v1' })
+    expect(mockReports).toHaveBeenCalledWith('v1', '2026-06')
+  })
+
+  it('venue sin CFDI → planRequired, NO consulta', async () => {
+    mockPlanGate.mockResolvedValue('CFDI no activo')
+    const out = parse(await call('accounting_reports', { venueId: 'v1' }))
+    expect(out.planRequired).toBe(true)
+    expect(out.feature).toBe('CFDI')
+    expect(mockReports).not.toHaveBeenCalled()
   })
 })

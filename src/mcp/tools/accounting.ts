@@ -6,6 +6,7 @@ import { createAccount, getCatalog, seedBaseChart } from '@/services/fiscal/char
 import { getMappings, setMapping } from '@/services/fiscal/accountMapping.service'
 import { createManualEntry, listEntries } from '@/services/fiscal/journalEntry.service'
 import { currentPeriod, getTrialBalance } from '@/services/fiscal/trialBalance.service'
+import { getAccountingReports } from '@/services/fiscal/accountingReports.service'
 import { listStatements } from '@/services/dashboard/bankReconciliation.service'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
@@ -425,6 +426,49 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           abonos: pesos(r.haberCents),
           saldoFinal: pesos(r.saldoFinalCents),
         })),
+      })
+    },
+  )
+
+  server.tool(
+    'accounting_reports',
+    'Reportes contables fiscales de un local (Capa B, PREMIUM): Estado de resultados del ejercicio (ingresos − costos − gastos = utilidad/pérdida) + Balance general al cierre (activo = pasivo + capital). Salen de las pólizas. Responde "¿cuánto gané según mis libros?" y "¿cómo está mi balance?". Pasa venueId y opcionalmente period (YYYY-MM; default = mes actual).',
+    {
+      venueId: z.string().describe('Local (debe estar en tu alcance)'),
+      period: z
+        .string()
+        .regex(/^\d{4}-\d{2}$/)
+        .optional()
+        .describe('Periodo YYYY-MM (opcional; default mes actual)'),
+    },
+    async ({ venueId, period }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:read', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'Los reportes contables')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+
+      const r = await getAccountingReports(venueId, period || currentPeriod())
+      if (r.needsFiscalSetup) return text({ ok: true, needsFiscalSetup: true })
+      const is = r.incomeStatement
+      const bs = r.balanceSheet
+      return text({
+        ok: true,
+        rfc: r.rfc,
+        periodo: r.period,
+        estadoDeResultados: {
+          ingresos: pesos(is.ingresos.totalCents),
+          costos: pesos(is.costos.totalCents),
+          utilidadBruta: pesos(is.utilidadBrutaCents),
+          gastos: pesos(is.gastos.totalCents),
+          resultado: pesos(is.resultadoCents),
+        },
+        balanceGeneral: {
+          activo: pesos(bs.activo.totalCents),
+          pasivo: pesos(bs.pasivo.totalCents),
+          capital: pesos(bs.capital.totalCents),
+          resultadoDelEjercicio: pesos(bs.resultadoEjercicioCents),
+          cuadra: bs.balanced,
+        },
       })
     },
   )

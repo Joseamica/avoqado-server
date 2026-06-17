@@ -22,6 +22,9 @@ jest.mock('@/utils/prismaClient', () => ({
     venue: {
       findUnique: jest.fn(),
     },
+    staffVenue: {
+      findFirst: jest.fn(),
+    },
   },
 }))
 
@@ -51,6 +54,10 @@ describe('checkFeatureAccess Middleware - Critical Tests', () => {
     // selecting seatCapExempt AND status; default = NOT grandfathered, regular ACTIVE venue,
     // so the tier/grant paths under test still run.
     ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ seatCapExempt: false, status: 'ACTIVE' })
+
+    // requestIsSuperAdmin queries staffVenue.findFirst (role SUPERADMIN); default = NOT a superadmin,
+    // so the tier/grant/exempt paths under test still run. The superadmin-bypass test overrides this.
+    ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(null)
 
     jsonMock = jest.fn()
     statusMock = jest.fn(() => mockRes as Response)
@@ -329,6 +336,37 @@ describe('checkFeatureAccess Middleware - Critical Tests', () => {
         expect(statusMock).toHaveBeenCalledWith(403)
       },
     )
+  })
+
+  describe('👑 TEST 4c: SUPERADMIN bypass', () => {
+    it('a platform superadmin gets through ANY feature code on a non-entitled, non-grandfathered venue', async () => {
+      // Regression (prod 2026-06-16): a superadmin inspecting a Pro venue 403'd on accounting/CFDI
+      // routes because checkFeatureAccess had no superadmin bypass (only grandfathered/demo).
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv_super' }) // has a SUPERADMIN venue
+
+      const middleware = checkFeatureAccess('CFDI')
+      await middleware(mockReq as Request, mockRes as Response, mockNext)
+
+      expect(mockNext).toHaveBeenCalledTimes(1)
+      expect(statusMock).not.toHaveBeenCalled()
+      expect((mockReq as any).venueFeature).toEqual({ featureCode: 'CFDI', grantedBy: 'SUPERADMIN' })
+      // Short-circuited BEFORE the VenueFeature / tier queries (mirrors the exempt short-circuit).
+      expect(prisma.venueFeature.findFirst).not.toHaveBeenCalled()
+      expect(prisma.venue.findUnique).not.toHaveBeenCalled()
+    })
+
+    it('the superadmin bypass is DISABLED while impersonating (evaluate the target venue tier)', async () => {
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv_super' })
+      ;(mockReq as any).authContext.isImpersonating = true
+      ;(prisma.venueFeature.findFirst as jest.Mock).mockResolvedValueOnce(null) // target not entitled
+
+      const middleware = checkFeatureAccess('CFDI')
+      await middleware(mockReq as Request, mockRes as Response, mockNext)
+
+      // Impersonating → no bypass → the non-entitled target gets the normal 403.
+      expect(mockNext).not.toHaveBeenCalled()
+      expect(statusMock).toHaveBeenCalledWith(403)
+    })
   })
 
   describe('🏷️ TEST 5: Venue resolution (URL :venueId, not token)', () => {

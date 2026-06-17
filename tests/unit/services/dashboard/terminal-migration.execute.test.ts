@@ -80,13 +80,34 @@ describe('migrateExecute', () => {
     expect(mockedUpdate).toHaveBeenCalledTimes(2)
   })
 
-  it('does NOT make the second updateTerminal call when no merchants are provided', async () => {
+  // Regression (TPV migration left payment-dead): when the operator uses the
+  // "Comercio por defecto de la sucursal (recomendado)" option, the wizard sends NO
+  // merchant. migrateExecute MUST fall back to the destination venue's configured
+  // default (VenuePaymentConfig.primaryAccountId) so the terminal can still charge —
+  // otherwise it lands with assignedMerchantIds = [] and cannot process payments.
+  it('falls back to the destination venue default merchant (primaryAccountId) when no merchants are provided', async () => {
+    m.venuePaymentConfig.findFirst.mockResolvedValue({ id: 'vpc-1', primaryAccountId: 'ma-default' })
     await migrateExecute('term-1', 'venue-new', { staffId: 'admin-1' })
-    expect(mockedUpdate).toHaveBeenCalledTimes(1)
+    expect(mockedUpdate).toHaveBeenNthCalledWith(1, 'term-1', { venueId: 'venue-new' }, expect.objectContaining({ staffId: 'admin-1' }))
+    expect(mockedUpdate).toHaveBeenNthCalledWith(
+      2,
+      'term-1',
+      { assignedMerchantIds: ['ma-default'] },
+      expect.objectContaining({ staffId: 'admin-1' }),
+    )
+    expect(mockedUpdate).toHaveBeenCalledTimes(2)
   })
 
-  it('does NOT make the second updateTerminal call for an empty merchant array', async () => {
+  it('falls back to the venue default merchant for an empty merchant array too', async () => {
+    m.venuePaymentConfig.findFirst.mockResolvedValue({ id: 'vpc-1', primaryAccountId: 'ma-default' })
     await migrateExecute('term-1', 'venue-new', { staffId: 'admin-1' }, [])
+    expect(mockedUpdate).toHaveBeenNthCalledWith(2, 'term-1', { assignedMerchantIds: ['ma-default'] }, expect.anything())
+    expect(mockedUpdate).toHaveBeenCalledTimes(2)
+  })
+
+  it('does NOT make a second updateTerminal call when the venue has no default merchant configured', async () => {
+    m.venuePaymentConfig.findFirst.mockResolvedValue({ id: 'vpc-1', primaryAccountId: null })
+    await migrateExecute('term-1', 'venue-new', { staffId: 'admin-1' })
     expect(mockedUpdate).toHaveBeenCalledTimes(1)
   })
 

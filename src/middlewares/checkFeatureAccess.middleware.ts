@@ -15,6 +15,7 @@
  */
 
 import { Request, Response, NextFunction } from 'express'
+import { StaffRole } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import {
@@ -26,6 +27,21 @@ import {
   venueIsExemptFromPlanGating,
 } from '@/services/access/basePlan.service'
 import { resolveRequestVenueId } from './checkPermission.middleware'
+
+/**
+ * Platform SUPERADMIN bypass — mirrors checkPermission's superadmin rule (any StaffVenue with role
+ * SUPERADMIN, disabled while impersonating) and the dashboard's useVenueTier (`isSuperadmin → true`).
+ * A superadmin sees EVERY feature on EVERY venue, so feature gates must let them through too — without
+ * this, a superadmin inspecting a non-Premium venue (e.g. a Pro venue's accounting) wrongly 403s.
+ */
+async function requestIsSuperAdmin(authContext: { userId: string; isImpersonating?: boolean }): Promise<boolean> {
+  if (authContext.isImpersonating) return false
+  const superAdminVenue = await prisma.staffVenue.findFirst({
+    where: { staffId: authContext.userId, role: StaffRole.SUPERADMIN },
+    select: { id: true },
+  })
+  return !!superAdminVenue
+}
 
 /**
  * Middleware factory to check if venue has access to a specific feature
@@ -58,10 +74,18 @@ export function checkFeatureAccess(featureCode: string) {
         return
       }
 
+      // SUPERADMIN bypass: a platform superadmin sees EVERY feature on EVERY venue (mirrors
+      // checkPermission + useVenueTier). Without this, a superadmin inspecting a non-Premium venue
+      // 403s on feature-gated endpoints (e.g. a Pro venue's accounting/CFDI routes).
+      if (await requestIsSuperAdmin(authContext)) {
+        ;(req as any).venueFeature = { featureCode, grantedBy: 'SUPERADMIN' }
+        return next()
+      }
+
       // EXEMPT short-circuit: a grandfathered venue (Venue.seatCapExempt === true) operates
       // as it did before tier monetization, and a DEMO venue (Venue.status LIVE_DEMO / TRIAL)
       // must showcase every feature — full feature access for ANY code, no paywall, for both.
-      // Checked here, BEFORE the tier check, the same place superadmin would be let through,
+      // Checked here, BEFORE the tier check, the same place superadmin is let through (above),
       // so legacy venues (e.g. a hotel using reservations with no RESERVATIONS grant) and
       // demos never 403 on a feature-gated endpoint. Single venue lookup (seatCapExempt+status).
       if (await venueIsExemptFromPlanGating(venueId)) {
@@ -294,6 +318,12 @@ export function checkAnyFeatureAccess(featureCodes: string[]) {
         logger.warn('⚠️ Feature access check failed: No venueId', { featureCodes })
         res.status(401).json({ error: 'Unauthorized', message: 'No venue context found' })
         return
+      }
+
+      // SUPERADMIN bypass (same as checkFeatureAccess): a platform superadmin sees every feature.
+      if (await requestIsSuperAdmin(authContext)) {
+        ;(req as any).venueFeature = { featureCodes, grantedBy: 'SUPERADMIN' }
+        return next()
       }
 
       // EXEMPT short-circuit (same as checkFeatureAccess): a grandfathered or demo-status

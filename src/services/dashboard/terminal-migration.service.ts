@@ -142,14 +142,33 @@ export async function migrateExecute(
   //    We do NOT queue the wipe here ourselves: that would double-wipe.
   await updateTerminal(terminalId, { venueId: toVenueId }, actor)
 
-  // 2) Optional: set the destination merchant(s) AFTER the re-parent. This is a
-  //    SECOND updateTerminal call with the venue unchanged, so it does NOT
-  //    re-queue a wipe — it only validates brand/merchant compatibility via the
-  //    existing logic and writes assignedMerchantIds. Setting them before the
-  //    device's post-wipe config fetch means the freshly-wiped TPV pulls the
-  //    correct merchant on first reconnect.
-  if (assignedMerchantIds && assignedMerchantIds.length > 0) {
-    await updateTerminal(terminalId, { assignedMerchantIds }, actor)
+  // 2) Set the destination merchant(s) AFTER the re-parent. This is a SECOND
+  //    updateTerminal call with the venue unchanged, so it does NOT re-queue a
+  //    wipe — it only validates brand/merchant compatibility via the existing
+  //    logic and writes assignedMerchantIds. Setting them before the device's
+  //    post-wipe config fetch means the freshly-wiped TPV pulls the correct
+  //    merchant on first reconnect.
+  //
+  //    If the operator did NOT pick specific merchants (the wizard's "Comercio por
+  //    defecto de la sucursal (recomendado)" option sends none), fall back to the
+  //    destination venue's configured default merchant (VenuePaymentConfig
+  //    .primaryAccountId — the same merchant migratePreflight's NO_PAYMENT_CONFIG
+  //    blocker guarantees exists). WITHOUT this fallback the move clears the old
+  //    merchant and assigns nothing, leaving the terminal with an empty
+  //    assignedMerchantIds — online but unable to process payments ("migró pero no
+  //    cobra"). The "recommended default" must therefore resolve to a real merchant.
+  let merchantsToAssign = assignedMerchantIds
+  if (!merchantsToAssign || merchantsToAssign.length === 0) {
+    const paymentConfig = await prisma.venuePaymentConfig.findFirst({
+      where: { venueId: toVenueId },
+      select: { primaryAccountId: true },
+    })
+    if (paymentConfig?.primaryAccountId) {
+      merchantsToAssign = [paymentConfig.primaryAccountId]
+    }
+  }
+  if (merchantsToAssign && merchantsToAssign.length > 0) {
+    await updateTerminal(terminalId, { assignedMerchantIds: merchantsToAssign }, actor)
   }
 
   // 3) Recover the queued wipe's commandId. updateTerminal does not return it

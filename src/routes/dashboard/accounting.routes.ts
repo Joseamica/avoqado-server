@@ -17,6 +17,7 @@ import * as chartController from '@/controllers/dashboard/chartOfAccounts.contro
 import * as mappingController from '@/controllers/dashboard/accountMapping.controller'
 import * as journalController from '@/controllers/dashboard/journalEntry.controller'
 import { getTrialBalanceController } from '@/controllers/dashboard/trialBalance.controller'
+import { getAccountingReportsController } from '@/controllers/dashboard/accountingReports.controller'
 import { checkFeatureAccess } from '@/middlewares/checkFeatureAccess.middleware'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import { validateRequest } from '@/middlewares/validation'
@@ -256,6 +257,15 @@ router.get(
   checkPermission('accounting:read'),
   validateRequest(trialBalanceSchema),
   getTrialBalanceController,
+)
+
+/** GET /accounting/reports?period=YYYY-MM — estado de resultados + balance general. */
+router.get(
+  '/reports',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:read'),
+  validateRequest(trialBalanceSchema),
+  getAccountingReportsController,
 )
 
 export default router
