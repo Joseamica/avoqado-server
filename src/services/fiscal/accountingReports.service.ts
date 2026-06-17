@@ -64,8 +64,20 @@ const emptyReports = (period: string, scope: { organizationId: string; rfc: stri
   rfc: scope?.rfc ?? null,
   period,
   fiscalYearStart: `${period.slice(0, 4)}-01`,
-  incomeStatement: { ingresos: { lines: [], totalCents: 0 }, costos: { lines: [], totalCents: 0 }, utilidadBrutaCents: 0, gastos: { lines: [], totalCents: 0 }, resultadoCents: 0 },
-  balanceSheet: { activo: { lines: [], totalCents: 0 }, pasivo: { lines: [], totalCents: 0 }, capital: { lines: [], totalCents: 0 }, resultadoEjercicioCents: 0, balanced: true },
+  incomeStatement: {
+    ingresos: { lines: [], totalCents: 0 },
+    costos: { lines: [], totalCents: 0 },
+    utilidadBrutaCents: 0,
+    gastos: { lines: [], totalCents: 0 },
+    resultadoCents: 0,
+  },
+  balanceSheet: {
+    activo: { lines: [], totalCents: 0 },
+    pasivo: { lines: [], totalCents: 0 },
+    capital: { lines: [], totalCents: 0 },
+    resultadoEjercicioCents: 0,
+    balanced: true,
+  },
 })
 
 /**
@@ -82,8 +94,16 @@ export async function getAccountingReports(venueId: string, period: string): Pro
 
   // Resultados = del año fiscal al periodo; Balance = acumulado de todo hasta el periodo.
   const [ytdAgg, allAgg] = await Promise.all([
-    prisma.journalLine.groupBy({ by: ['ledgerAccountId'], where: { journalEntry: { ...base, period: { gte: fiscalYearStart, lte: period } } }, _sum: { debitCents: true, creditCents: true } }),
-    prisma.journalLine.groupBy({ by: ['ledgerAccountId'], where: { journalEntry: { ...base, period: { lte: period } } }, _sum: { debitCents: true, creditCents: true } }),
+    prisma.journalLine.groupBy({
+      by: ['ledgerAccountId'],
+      where: { journalEntry: { ...base, period: { gte: fiscalYearStart, lte: period } } },
+      _sum: { debitCents: true, creditCents: true },
+    }),
+    prisma.journalLine.groupBy({
+      by: ['ledgerAccountId'],
+      where: { journalEntry: { ...base, period: { lte: period } } },
+      _sum: { debitCents: true, creditCents: true },
+    }),
   ])
 
   const ytdById = new Map(ytdAgg.map(g => [g.ledgerAccountId, g._sum]))
