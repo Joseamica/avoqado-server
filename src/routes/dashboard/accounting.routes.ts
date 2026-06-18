@@ -20,6 +20,12 @@ import { getTrialBalanceController } from '@/controllers/dashboard/trialBalance.
 import { getAccountingReportsController } from '@/controllers/dashboard/accountingReports.controller'
 import { getIvaCashflowController } from '@/controllers/dashboard/ivaFlujo.controller'
 import { generatePoliciesController } from '@/controllers/dashboard/autoPosting.controller'
+import {
+  createExpenseController,
+  listExpensesController,
+  generateExpensePoliciesController,
+  getDiotController,
+} from '@/controllers/dashboard/expense.controller'
 import { checkFeatureAccess } from '@/middlewares/checkFeatureAccess.middleware'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import { validateRequest } from '@/middlewares/validation'
@@ -287,5 +293,97 @@ router.post(
   validateRequest(trialBalanceSchema),
   generatePoliciesController,
 )
+
+// ───────────────────────────────────────────────────────────────────────────
+// Buzón de CFDIs / Gastos (Capa B, Pilar #2) — gated PREMIUM (bundle con CFDI).
+// Captura de CFDIs recibidos → IVA acreditable + DIOT + costos/gastos reales.
+// ───────────────────────────────────────────────────────────────────────────
+
+const cents = (label: string) =>
+  z
+    .number({ invalid_type_error: `El monto '${label}' debe ser un número en centavos.` })
+    .int({ message: `El monto '${label}' debe ser un entero en centavos.` })
+    .min(0, { message: `El monto '${label}' no puede ser negativo.` })
+const dateStr = (label: string) => z.string().regex(/^\d{4}-\d{2}-\d{2}$/, { message: `La ${label} debe tener formato AAAA-MM-DD.` })
+
+const createExpenseSchema = z.object({
+  params: z.object({ venueId: z.string().cuid({ message: 'El ID del local no es válido.' }) }),
+  body: z.object({
+    proveedorRfc: z.string().min(1, { message: 'El RFC del proveedor es requerido.' }).max(20),
+    proveedorNombre: z.string().min(1, { message: 'El nombre del proveedor es requerido.' }).max(300),
+    proveedorRegimen: z.string().max(10).nullable().optional(),
+    tipoTercero: z.enum(['NACIONAL', 'EXTRANJERO', 'GLOBAL']).optional(),
+    comprobanteTipo: z.enum(['INGRESO', 'EGRESO', 'NOMINA', 'PAGO', 'TRASLADO']).optional(),
+    usoCfdi: z.string().max(10).nullable().optional(),
+    metodoPago: z.enum(['PUE', 'PPD']).optional(),
+    formaPago: z.string().max(10).nullable().optional(),
+    categoria: z.enum(['COSTO_MERCANCIA', 'GASTO_GENERAL', 'ARRENDAMIENTO', 'COMBUSTIBLE', 'HONORARIOS', 'SERVICIOS', 'OTRO']).optional(),
+    fechaEmision: dateStr('fecha de emisión'),
+    fechaPago: dateStr('fecha de pago').nullable().optional(),
+    subtotalCents: cents('subtotal'),
+    descuentoCents: cents('descuento').optional(),
+    ivaCents: cents('IVA').optional(),
+    iva16Cents: cents('IVA 16%').optional(),
+    iva8Cents: cents('IVA 8%').optional(),
+    iva0BaseCents: cents('base 0%').optional(),
+    exentoBaseCents: cents('base exenta').optional(),
+    iepsCents: cents('IEPS').optional(),
+    isrRetenidoCents: cents('ISR retenido').optional(),
+    ivaRetenidoCents: cents('IVA retenido').optional(),
+    totalCents: cents('total'),
+    deducible: z.boolean().optional(),
+    ivaAcreditable: z.boolean().optional(),
+    paid: z.boolean().optional(),
+    uuid: z.string().max(60).nullable().optional(),
+    serie: z.string().max(40).nullable().optional(),
+    folio: z.string().max(40).nullable().optional(),
+    source: z.enum(['MANUAL', 'XML_UPLOAD', 'SAT_DESCARGA']).optional(),
+    supplierId: z.string().cuid({ message: 'El ID del proveedor no es válido.' }).nullable().optional(),
+  }),
+})
+
+const listExpensesSchema = z.object({
+  params: z.object({ venueId: z.string().cuid({ message: 'El ID del local no es válido.' }) }),
+  query: z.object({
+    period: z
+      .string()
+      .regex(/^\d{4}-\d{2}$/, { message: 'El periodo debe tener formato AAAA-MM.' })
+      .optional(),
+    paymentStatus: z.enum(['UNPAID', 'PARTIALLY_PAID', 'PAID']).optional(),
+    proveedorRfc: z.string().max(20).optional(),
+    includeCancelled: z.enum(['true', 'false']).optional(),
+    limit: z.coerce.number().int().min(1).max(500).optional(),
+  }),
+})
+
+/** POST /accounting/expenses — registra un gasto / CFDI recibido. */
+router.post(
+  '/expenses',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:manage'),
+  validateRequest(createExpenseSchema),
+  createExpenseController,
+)
+
+/** GET /accounting/expenses?period=&paymentStatus=&proveedorRfc= — lista los gastos del contribuyente. */
+router.get(
+  '/expenses',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:read'),
+  validateRequest(listExpensesSchema),
+  listExpensesController,
+)
+
+/** POST /accounting/expenses/generate-policies?period=YYYY-MM — postea las pólizas de gasto del periodo. */
+router.post(
+  '/expenses/generate-policies',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:manage'),
+  validateRequest(trialBalanceSchema),
+  generateExpensePoliciesController,
+)
+
+/** GET /accounting/diot?period=YYYY-MM — DIOT (IVA pagado a proveedores por tercero y tasa). */
+router.get('/diot', checkFeatureAccess('CFDI'), checkPermission('accounting:read'), validateRequest(trialBalanceSchema), getDiotController)
 
 export default router

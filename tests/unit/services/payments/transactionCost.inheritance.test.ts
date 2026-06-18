@@ -369,4 +369,41 @@ describe('TransactionCost Service — Account Routing', () => {
       expect.objectContaining({ data: expect.objectContaining({ merchantAccountId: PRIMARY_ID }) }),
     )
   })
+
+  // Safety net: routing by slot must never be WORSE than the old always-PRIMARY
+  // behavior. If the resolved slot has no pricing structure of its own (a real
+  // prod case: berthe SECONDARY, amaena TERTIARY), we must still produce a cost
+  // by falling back to PRIMARY pricing — NOT throw and leave the payment with no
+  // TransactionCost / netSettlementAmount.
+  it('falls back to PRIMARY pricing (does not fail) when the resolved slot has no pricing structure', async () => {
+    prismaMock.payment.findUnique.mockResolvedValue(
+      createMockPayment({ merchantAccountId: SECONDARY_ID, tipAmount: { toString: () => '0.00' } }),
+    )
+    mockGetEffectivePaymentConfig.mockResolvedValue(configWithTwoAccounts())
+    prismaMock.providerCostStructure.findFirst.mockResolvedValue({
+      ...createMockProviderCostStructure(),
+      merchantAccountId: SECONDARY_ID,
+    })
+    // SECONDARY slot has NO pricing (empty array → resolves to null); PRIMARY does.
+    mockGetEffectivePricing.mockImplementation((venueId: string, accountType: any) =>
+      accountType === 'PRIMARY' ? pricingByAccountType(venueId, 'PRIMARY') : { pricing: [], source: 'venue' },
+    )
+    prismaMock.transactionCost.create.mockResolvedValue({ id: 'tc-fallback' })
+
+    const result = await createTransactionCost(PAYMENT_ID)
+
+    // Did NOT throw; tried the slot first, then fell back to PRIMARY pricing
+    expect(result).not.toBeNull()
+    expect(mockGetEffectivePricing).toHaveBeenCalledWith(VENUE_ID, 'SECONDARY')
+    expect(mockGetEffectivePricing).toHaveBeenCalledWith(VENUE_ID, 'PRIMARY')
+    // Cost still recorded against the account that processed it, priced at PRIMARY's rate
+    expect(prismaMock.transactionCost.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          merchantAccountId: SECONDARY_ID,
+          venueRate: expect.closeTo(0.036, 5),
+        }),
+      }),
+    )
+  })
 })

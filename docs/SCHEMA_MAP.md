@@ -1,6 +1,6 @@
 # Schema Domain Map — avoqado-server
 
-`prisma/schema.prisma` is **229 models / 209 enums / ~10,800 lines**. Nobody reads it top to bottom. This file is the **index**: 20 domains,
+`prisma/schema.prisma` is **230 models / 216 enums / ~10,900 lines**. Nobody reads it top to bottom. This file is the **index**: 20 domains,
 what each is for, and where it lives. Find your domain → jump to the `schema.prisma:LINE` → for field-level detail read
 `docs/DATABASE_SCHEMA.md`.
 
@@ -28,7 +28,7 @@ primary domain.
 | 9   | **Payments & Fees**                     | The payment record itself + allocations, receipts, fee schedules.                                              | `BankStatement`, `BankStatementLine`, `DigitalReceipt`, `FeeSchedule`, `FeeTier`, `IdempotencyRequest`, `Payment`, `PaymentAllocation`, `TransactionCost`, `VenueTransaction`                                                                                                                                                                                                                                                                                                                                                 |
 | 10  | **Payment Providers & Settlement**      | Blumon / Stripe / MercadoPago / AngelPay merchant accounts, webhooks, settlement.                              | `Aggregator`, `AngelPayUserAccount`, `CheckoutSession`, `EcommerceMerchant`, `MercadoPagoWebhookEvent`, `MerchantAccount`, `MerchantRevenueShare`, `OrganizationPaymentConfig`, `OrganizationPayoutConfig`, `PaymentProvider`, `ProcessedStripeEvent`, `ProcessorReliabilityMetric`, `ProviderCostStructure`, `ProviderEventLog`, `RateCorrectionBatch`, `RateCorrectionEntry`, `SettlementConfiguration`, `SettlementConfirmation`, `SettlementIncident`, `SettlementSimulation`, `StripeWebhookEvent`, `VenuePaymentConfig` |
 | 11  | **Payment Links**                       | Pay-by-link: links, line items, attribution.                                                                   | `PaymentLink`, `PaymentLinkAttribution`, `PaymentLinkItem`, `PaymentLinkItemModifier`, `VenuePaymentLinkSettings`                                                                                                                                                                                                                                                                                                                                                                                                             |
-| 12  | **Facturación (CFDI)**                  | Mexican CFDI 4.0 e-invoicing: fiscal emisores + CSD, per-merchant config, issued CFDIs, receptor tax profiles. | `AccountMapping`, `Cfdi`, `CustomerTaxProfile`, `FiscalEmisor`, `JournalEntry`, `JournalLine`, `LedgerAccount`, `MerchantFiscalConfig`                                                                                                                                                                                                                                                                                                                                                                                        |
+| 12  | **Facturación (CFDI)**                  | Mexican CFDI 4.0 e-invoicing: fiscal emisores + CSD, per-merchant config, issued CFDIs, receptor tax profiles. | `AccountMapping`, `Cfdi`, `CustomerTaxProfile`, `Expense`, `FiscalEmisor`, `JournalEntry`, `JournalLine`, `LedgerAccount`, `MerchantFiscalConfig`                                                                                                                                                                                                                                                                                                                                                                             |
 | 13  | **Pricing, Costs & Venue Lending**      | MCC pricing structures, monthly profit, and SOFOM-style venue credit assessment.                               | `CreditAssessmentHistory`, `CreditOffer`, `MonthlyVenueProfit`, `OrganizationPricingStructure`, `PricingPolicy`, `VenueCreditAssessment`, `VenuePricingStructure`                                                                                                                                                                                                                                                                                                                                                             |
 | 14  | **Discounts, Loyalty & Credit Packs**   | Discounts/coupons, loyalty points, and prepaid credit-pack bundles.                                            | `CouponCode`, `CouponRedemption`, `CreditItemBalance`, `CreditPack`, `CreditPackItem`, `CreditPackPurchase`, `CreditTransaction`, `CustomerDiscount`, `Discount`, `LoyaltyConfig`, `LoyaltyTransaction`, `Referral`, `ReferralProgramConfig`                                                                                                                                                                                                                                                                                  |
 | 15  | **Commissions & Sales Goals**           | Sales-rep commission tiers, payouts, clawbacks, org goals (CommandCenter).                                     | `CommissionCalculation`, `CommissionClawback`, `CommissionConfig`, `CommissionMilestone`, `CommissionOverride`, `CommissionPayout`, `CommissionSummary`, `CommissionTier`, `MilestoneAchievement`, `OrganizationGoal`, `OrganizationSalesGoalConfig`, `PerformanceGoal`, `VenueCommission`                                                                                                                                                                                                                                    |
@@ -102,6 +102,7 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `EmailTemplate` → `schema.prisma:L8584`
 - `Estimate` → `schema.prisma:L10108`
 - `EstimateItem` → `schema.prisma:L10136`
+- `Expense` → `schema.prisma:L10871`
 - `ExternalBusyBlock` → `schema.prisma:L9497`
 - `Feature` → `schema.prisma:L2979`
 - `FeeSchedule` → `schema.prisma:L3057`
@@ -122,8 +123,8 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `Invoice` → `schema.prisma:L3080`
 - `InvoiceItem` → `schema.prisma:L3106`
 - `ItemCategory` → `schema.prisma:L7459`
-- `JournalEntry` → `schema.prisma:L10801`
-- `JournalLine` → `schema.prisma:L10829`
+- `JournalEntry` → `schema.prisma:L10808`
+- `JournalLine` → `schema.prisma:L10836`
 - `KdsOrder` → `schema.prisma:L10241`
 - `KdsOrderItem` → `schema.prisma:L10258`
 - `LearnedPatterns` → `schema.prisma:L6436`

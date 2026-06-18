@@ -10788,6 +10788,13 @@ enum AccountMovementType {
   NET_INCOME_PROFIT
   NET_INCOME_LOSS
   RETAINED_EARNINGS
+  IVA_INPUT
+  IVA_INPUT_PENDING
+  IVA_WITHHELD
+  ISR_WITHHELD
+  EXPENSE_GENERAL
+  EXPENSE_RENT
+  EXPENSE_FUEL
 }
 
 // ============================================
@@ -10855,6 +10862,132 @@ enum JournalEntrySource {
   COGS
   ADJUSTMENT
   OPENING
+  EXPENSE
+}
+
+/// Gasto / CFDI recibido de proveedor (Buzón). Lado de ENTRADAS de Capa B: habilita IVA acreditable
+/// (cash-basis), DIOT y costos/gastos reales. Scope = contribuyente (organizationId, rfc). FK escalares
+/// (sin @relation): los registros fiscales NO se borran en cascada.
+model Expense {
+  id             String  @id @default(cuid())
+  organizationId String
+  rfc            String // receptor = nuestro contribuyente (UPPERCASE). (org, rfc) = scope.
+  venueId        String? // informativo: centro de costo / quién lo subió
+
+  // Proveedor (emisor) — snapshot denormalizado al ingestar
+  proveedorRfc     String
+  proveedorNombre  String
+  proveedorRegimen String?
+  tipoTercero      DiotTipoTercero @default(NACIONAL)
+
+  // Clasificación
+  comprobanteTipo ReceivedComprobanteTipo @default(INGRESO)
+  usoCfdi         String?
+  metodoPago      ExpenseMetodoPago       @default(PUE)
+  formaPago       String?
+
+  // Fechas
+  fechaEmision DateTime
+  fechaPago    DateTime?
+
+  // Money (centavos enteros, MXN). Invariante: subtotal−descuento+iva+ieps−ivaRet−isrRet == total
+  subtotalCents    Int
+  descuentoCents   Int   @default(0)
+  ivaCents         Int   @default(0)
+  iva16Cents       Int   @default(0)
+  iva8Cents        Int   @default(0)
+  iva0BaseCents    Int   @default(0)
+  exentoBaseCents  Int   @default(0)
+  iepsCents        Int   @default(0)
+  isrRetenidoCents Int   @default(0)
+  ivaRetenidoCents Int   @default(0)
+  totalCents       Int
+  taxBreakdown     Json? // [{impuesto,tipoFactor,tasa,base,importe}] — SÍ se escribe (la DIOT-por-tasa depende)
+
+  // Deducibilidad (criterio fiscal; default permisivo)
+  deducible      Boolean @default(true)
+  ivaAcreditable Boolean @default(true)
+
+  // Contable
+  expenseAccountCode String?
+  ledgerAccountId    String?
+  categoria          ExpenseCategoria @default(GASTO_GENERAL)
+  journalEntryId     String?          @unique
+  posted             Boolean          @default(false)
+
+  // Pago (cash-basis): el IVA se acredita cuando se PAGA
+  paymentStatus ExpensePaymentStatus @default(UNPAID)
+  paidCents     Int                  @default(0)
+  paidPeriod    String? // 'YYYY-MM' de fechaPago — campo que agregan IVA-flujo + DIOT
+
+  // IDs fiscales / provenance
+  uuid   String? // folio fiscal (nullable: extranjero/ticket)
+  serie  String?
+  folio  String?
+  source ExpenseSource @default(MANUAL)
+  xmlUrl String?
+  pdfUrl String?
+
+  supplierId String? // cross-link opcional al Supplier de inventario (no es la fuente de verdad fiscal)
+  dedupeKey  String // = uuid si existe; si no, hash(proveedorRfc|fechaEmision|totalCents|folio)
+  status     ExpenseStatus @default(REGISTERED)
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([organizationId, rfc, uuid])
+  @@unique([organizationId, rfc, dedupeKey])
+  @@index([organizationId, rfc, paidPeriod])
+  @@index([organizationId, rfc, proveedorRfc])
+  @@index([organizationId, rfc, paymentStatus])
+  @@index([venueId])
+}
+
+enum DiotTipoTercero {
+  NACIONAL
+  EXTRANJERO
+  GLOBAL
+}
+
+enum ReceivedComprobanteTipo {
+  INGRESO
+  EGRESO
+  NOMINA
+  PAGO
+  TRASLADO
+}
+
+enum ExpenseMetodoPago {
+  PUE
+  PPD
+}
+
+enum ExpensePaymentStatus {
+  UNPAID
+  PARTIALLY_PAID
+  PAID
+}
+
+enum ExpenseSource {
+  MANUAL
+  XML_UPLOAD
+  SAT_DESCARGA
+}
+
+enum ExpenseStatus {
+  REGISTERED
+  CANCELLED
+}
+
+enum ExpenseCategoria {
+  COSTO_MERCANCIA
+  GASTO_GENERAL
+  ARRENDAMIENTO
+  COMBUSTIBLE
+  HONORARIOS
+  SERVICIOS
+  OTRO
 }
 
 enum JournalEntryStatus {

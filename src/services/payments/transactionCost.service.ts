@@ -310,11 +310,31 @@ export async function createTransactionCost(paymentId: string): Promise<{
   // Step 4: Get Venue Pricing Structure
   // ========================================
 
-  const venuePricingStructure = await findActiveVenuePricingStructure(payment.venueId, accountType, payment.createdAt)
+  // Prefer the resolved slot's pricing. If that slot has no active pricing
+  // structure (a real prod case: a SECONDARY/TERTIARY account that was never
+  // given its own venue rate), fall back to PRIMARY pricing instead of failing.
+  // Failing here would leave the payment with NO TransactionCost at all (and no
+  // netSettlementAmount) — strictly worse than the old always-PRIMARY behavior.
+  // This keeps routing-by-slot "never worse than PRIMARY" while still using the
+  // correct slot pricing whenever it exists; the warning surfaces the config gap
+  // so the missing slot pricing can be created and the payments recomputed.
+  let pricingAccountType: 'PRIMARY' | 'SECONDARY' | 'TERTIARY' = accountType
+  let venuePricingStructure = await findActiveVenuePricingStructure(payment.venueId, accountType, payment.createdAt)
+
+  if (!venuePricingStructure && accountType !== 'PRIMARY') {
+    logger.warn('No venue pricing for resolved slot; falling back to PRIMARY pricing', {
+      paymentId,
+      venueId: payment.venueId,
+      resolvedAccountType: accountType,
+      merchantAccountId: merchantAccount.id,
+    })
+    pricingAccountType = 'PRIMARY'
+    venuePricingStructure = await findActiveVenuePricingStructure(payment.venueId, 'PRIMARY', payment.createdAt)
+  }
 
   if (!venuePricingStructure && payment.type !== 'TEST') {
     throw new BadRequestError(
-      `No active venue pricing structure found for venue ${payment.venueId}, account type ${accountType} at ${payment.createdAt}`,
+      `No active venue pricing structure found for venue ${payment.venueId}, account type ${pricingAccountType} at ${payment.createdAt}`,
     )
   }
 

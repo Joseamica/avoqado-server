@@ -7,12 +7,13 @@
  * crítico de completitud (que cazó TIPS_PAYABLE, un gap que rompía el balance de las
  * pólizas de pago con propina). Cada `defaultCode` existe en el catálogo base (BASE_CHART).
  *
- * `side` es informativo (lado típico del asiento); el IVA y las retenciones se configuran
- * en la sección de Impuestos (IVA/DIOT), APARTE — por eso no aparecen aquí.
+ * `side` es informativo (lado típico del asiento). El IVA trasladado (ventas) y el IVA
+ * acreditable + retenciones (gastos) viven aquí en el grupo IMPUESTOS — son las cuentas que
+ * el motor de pólizas necesita para que los asientos de cobro y de gasto cuadren solos.
  */
 
 export type MovementSide = 'DEBIT' | 'CREDIT' | 'BOTH'
-export type MovementGroup = 'INGRESOS' | 'TESORERIA' | 'CARTERA' | 'INVENTARIO' | 'COSTOS_GASTOS' | 'RESULTADO'
+export type MovementGroup = 'INGRESOS' | 'TESORERIA' | 'CARTERA' | 'INVENTARIO' | 'COSTOS_GASTOS' | 'IMPUESTOS' | 'RESULTADO'
 
 export interface MovementTypeDef {
   /** Coincide con el enum Prisma AccountMovementType. */
@@ -24,7 +25,7 @@ export interface MovementTypeDef {
   group: MovementGroup
 }
 
-/** Los 16 movimientos OPERATIVOS (no IVA/retenciones). El orden define el orden en la UI. */
+/** Los 24 movimientos (operativos + impuestos). El orden define el orden en la UI. */
 export const MOVEMENT_TYPES: MovementTypeDef[] = [
   // Ingresos
   { movementType: 'SALES_REVENUE', label: 'Ingreso por ventas / servicios', defaultCode: '401.01', side: 'CREDIT', group: 'INGRESOS' },
@@ -35,7 +36,6 @@ export const MOVEMENT_TYPES: MovementTypeDef[] = [
     side: 'DEBIT',
     group: 'INGRESOS',
   },
-  { movementType: 'IVA_OUTPUT', label: 'IVA trasladado cobrado (de ventas)', defaultCode: '208.01', side: 'CREDIT', group: 'INGRESOS' },
   // Tesorería
   { movementType: 'CASH_RECEIPT', label: 'Cobro en efectivo (caja)', defaultCode: '101.01', side: 'BOTH', group: 'TESORERIA' },
   { movementType: 'BANK_RECEIPT', label: 'Cobro electrónico / depósito en banco', defaultCode: '102.01', side: 'BOTH', group: 'TESORERIA' },
@@ -68,6 +68,57 @@ export const MOVEMENT_TYPES: MovementTypeDef[] = [
     defaultCode: '703',
     side: 'BOTH',
     group: 'COSTOS_GASTOS',
+  },
+  {
+    movementType: 'EXPENSE_GENERAL',
+    label: 'Gasto general (CFDI de proveedor)',
+    defaultCode: '601.84',
+    side: 'DEBIT',
+    group: 'COSTOS_GASTOS',
+  },
+  {
+    movementType: 'EXPENSE_RENT',
+    label: 'Arrendamiento (CFDI de proveedor)',
+    defaultCode: '601.45',
+    side: 'DEBIT',
+    group: 'COSTOS_GASTOS',
+  },
+  {
+    movementType: 'EXPENSE_FUEL',
+    label: 'Combustibles y lubricantes (CFDI de proveedor)',
+    defaultCode: '601.48',
+    side: 'DEBIT',
+    group: 'COSTOS_GASTOS',
+  },
+  // Impuestos (IVA trasladado de ventas + IVA acreditable y retenciones de gastos)
+  { movementType: 'IVA_OUTPUT', label: 'IVA trasladado cobrado (de ventas)', defaultCode: '208.01', side: 'CREDIT', group: 'IMPUESTOS' },
+  {
+    movementType: 'IVA_INPUT',
+    label: 'IVA acreditable pagado (de gastos)',
+    defaultCode: '118.01',
+    side: 'DEBIT',
+    group: 'IMPUESTOS',
+  },
+  {
+    movementType: 'IVA_INPUT_PENDING',
+    label: 'IVA acreditable pendiente de pago (PPD)',
+    defaultCode: '119.01',
+    side: 'DEBIT',
+    group: 'IMPUESTOS',
+  },
+  {
+    movementType: 'IVA_WITHHELD',
+    label: 'IVA retenido a proveedores',
+    defaultCode: '216.10',
+    side: 'CREDIT',
+    group: 'IMPUESTOS',
+  },
+  {
+    movementType: 'ISR_WITHHELD',
+    label: 'ISR retenido a proveedores (servicios profesionales)',
+    defaultCode: '216.04',
+    side: 'CREDIT',
+    group: 'IMPUESTOS',
   },
   // Resultado / patrimonio
   {

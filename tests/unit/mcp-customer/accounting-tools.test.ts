@@ -19,6 +19,10 @@ const mockTrialBalance = jest.fn()
 const mockReports = jest.fn()
 const mockIva = jest.fn()
 const mockGenerate = jest.fn()
+const mockCreateExpense = jest.fn()
+const mockListExpenses = jest.fn()
+const mockGenExpensePolicies = jest.fn()
+const mockGetDiot = jest.fn()
 
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({ venueFilter: jest.fn(), requirePermission: (...a: unknown[]) => mockRequirePermission(...(a as [])) }),
@@ -49,6 +53,16 @@ jest.mock('@/services/fiscal/ivaFlujo.service', () => ({
 }))
 jest.mock('@/services/fiscal/autoPosting.service', () => ({
   generatePoliciesForVenue: (...a: unknown[]) => mockGenerate(...(a as [])),
+}))
+jest.mock('@/services/fiscal/expense.service', () => ({
+  createExpense: (...a: unknown[]) => mockCreateExpense(...(a as [])),
+  listExpenses: (...a: unknown[]) => mockListExpenses(...(a as [])),
+}))
+jest.mock('@/services/fiscal/expensePosting.service', () => ({
+  generateExpensePoliciesForVenue: (...a: unknown[]) => mockGenExpensePolicies(...(a as [])),
+}))
+jest.mock('@/services/fiscal/diot.service', () => ({
+  getDiot: (...a: unknown[]) => mockGetDiot(...(a as [])),
 }))
 jest.mock('@/services/dashboard/accounting.dashboard.service', () => ({
   getIncomeStatement: jest.fn(),
@@ -427,7 +441,7 @@ describe('accounting_iva_cashflow (read) — gated CFDI + accounting:read', () =
     expect(handlers.has('accounting_iva_cashflow')).toBe(true)
   })
 
-  it('con CFDI → devuelve IVA trasladado cobrado en pesos + placeholders honestos', async () => {
+  it('con CFDI → IVA trasladado − acreditable de gastos, IVA retenido a proveedores aparte', async () => {
     mockPlanGate.mockResolvedValue(null)
     mockIva.mockResolvedValue({
       needsFiscalSetup: false,
@@ -438,18 +452,19 @@ describe('accounting_iva_cashflow (read) — gated CFDI + accounting:read', () =
       ivaTrasladadoCobradoCents: 17862,
       ivaAmparadoPorCfdiCents: 0,
       cfdiCount: 0,
-      acreditablePagadoCents: null,
+      acreditablePagadoCents: 10000,
       retencionesCents: null,
+      ivaRetenidoTercerosCents: 500,
       saldoAFavorAplicadoCents: null,
-      ivaAPagarPreliminarCents: 17862,
+      ivaAPagarPreliminarCents: 7862,
       saldoAFavorDelPeriodoCents: 0,
       computedAt16Percent: true,
-      acreditableDisponible: false,
-      diotDisponible: false,
-      incompletoPorFaltaDeGastos: true,
+      acreditableDisponible: true,
+      diotDisponible: true,
+      incompletoPorFaltaDeGastos: false,
       rfcSpansMultipleOrgs: false,
       zeroActivity: false,
-      diot: { disponible: false, motivo: 'Fase 2' },
+      diot: { disponible: true, motivo: 'DIOT' },
     })
     const out = parse(await call('accounting_iva_cashflow', { venueId: 'v1', period: '2026-06' }))
     expect(mockRequirePermission).toHaveBeenCalledWith('accounting:read', 'v1')
@@ -457,10 +472,12 @@ describe('accounting_iva_cashflow (read) — gated CFDI + accounting:read', () =
     expect(out.ok).toBe(true)
     expect(out.ivaTrasladadoCobrado).toBeCloseTo(178.62)
     expect(out.localesIncluidos).toBe(2)
-    expect(out.ivaAcreditablePagado).toBeNull() // honesto: null, NO 0
-    expect(out.ivaAPagarPreliminarTecho).toBeCloseTo(178.62)
+    expect(out.ivaAcreditablePagado).toBeCloseTo(100) // 10000 centavos
+    expect(out.ivaRetenidoAProveedores).toBeCloseTo(5) // obligación aparte
+    expect(out.ivaAPagarPreliminar).toBeCloseTo(78.62) // 17862 − 10000
     expect(out.estimadoAl16Pct).toBe(true)
-    expect(out.incompletoPorFaltaDeGastos).toBe(true)
+    expect(out.acreditableDisponible).toBe(true)
+    expect(out.diotDisponible).toBe(true)
   })
 
   it('sin period usa el mes actual (currentPeriod)', async () => {
@@ -505,5 +522,92 @@ describe('generate_journal_entries (write) — gated CFDI + accounting:manage', 
     const out = parse(await call('generate_journal_entries', { venueId: 'v1' }))
     expect(out.planRequired).toBe(true)
     expect(mockGenerate).not.toHaveBeenCalled()
+  })
+})
+
+describe('register_expense (write) — gated CFDI + accounting:manage', () => {
+  it('registra el tool', () => {
+    expect(handlers.has('register_expense')).toBe(true)
+  })
+
+  it('venue sin CFDI → planRequired, NO crea', async () => {
+    mockPlanGate.mockResolvedValue('Requiere PREMIUM')
+    const out = parse(await call('register_expense', { venueId: 'v1', proveedorRfc: 'AAA010101AAA', proveedorNombre: 'X', fechaEmision: '2026-06-10', subtotalCents: 10000, ivaCents: 1600, totalCents: 11600 }))
+    expect(out.planRequired).toBe(true)
+    expect(mockRequirePermission).toHaveBeenCalledWith('accounting:manage', 'v1')
+    expect(mockCreateExpense).not.toHaveBeenCalled()
+  })
+
+  it('con CFDI → crea el gasto y devuelve resumen en pesos', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    mockCreateExpense.mockResolvedValue({
+      id: 'exp1', proveedorRfc: 'AAA010101AAA', proveedorNombre: 'Café', fechaEmision: '2026-06-10',
+      subtotalCents: 100000, ivaCents: 16000, totalCents: 116000, metodoPago: 'PUE', paymentStatus: 'PAID',
+      paidPeriod: '2026-06', deducible: true, ivaAcreditable: true,
+    })
+    const out = parse(await call('register_expense', { venueId: 'v1', proveedorRfc: 'AAA010101AAA', proveedorNombre: 'Café', fechaEmision: '2026-06-10', subtotalCents: 100000, ivaCents: 16000, totalCents: 116000 }))
+    expect(out.ok).toBe(true)
+    expect(out.gasto.total).toBeCloseTo(1160)
+    expect(out.gasto.estatusPago).toBe('PAID')
+    expect(mockCreateExpense).toHaveBeenCalled()
+  })
+})
+
+describe('expenses (read) — gated CFDI + accounting:read', () => {
+  it('con CFDI → lista + resumen en pesos', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    mockListExpenses.mockResolvedValue({
+      needsFiscalSetup: false, rfc: 'EKU9003173C9',
+      summary: { count: 2, totalCents: 17400, ivaCents: 2400, deducibleCents: 15000 },
+      expenses: [{ id: 'e1', proveedorRfc: 'AAA010101AAA', proveedorNombre: 'X', fechaEmision: '2026-06-10', totalCents: 11600, ivaCents: 1600, metodoPago: 'PUE', paymentStatus: 'PAID', posted: false }],
+    })
+    const out = parse(await call('expenses', { venueId: 'v1', period: '2026-06' }))
+    expect(mockRequirePermission).toHaveBeenCalledWith('accounting:read', 'v1')
+    expect(out.resumen.total).toBeCloseTo(174)
+    expect(out.gastos).toHaveLength(1)
+  })
+})
+
+describe('generate_expense_policies (write) — gated CFDI + accounting:manage', () => {
+  it('con CFDI → postea y reporta el conteo', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    mockGenExpensePolicies.mockResolvedValue({ needsFiscalSetup: false, missingMappings: [], period: '2026-06', candidates: 3, posted: 3, alreadyPosted: 0, skipped: 0 })
+    const out = parse(await call('generate_expense_policies', { venueId: 'v1', period: '2026-06' }))
+    expect(mockRequirePermission).toHaveBeenCalledWith('accounting:manage', 'v1')
+    expect(out.ok).toBe(true)
+    expect(out.polizasGeneradas).toBe(3)
+  })
+
+  it('faltan mapeos → ok:false con faltanMapeos', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    mockGenExpensePolicies.mockResolvedValue({ needsFiscalSetup: false, missingMappings: ['IVA_INPUT'], period: '2026-06', candidates: 1, posted: 0, alreadyPosted: 0, skipped: 1 })
+    const out = parse(await call('generate_expense_policies', { venueId: 'v1' }))
+    expect(out.ok).toBe(false)
+    expect(out.faltanMapeos).toContain('IVA_INPUT')
+  })
+})
+
+describe('diot (read) — gated CFDI + accounting:read', () => {
+  it('con CFDI → DIOT por proveedor + totales + cuadre', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    mockGetDiot.mockResolvedValue({
+      needsFiscalSetup: false, rfc: 'EKU9003173C9', period: '2026-06',
+      rows: [{ proveedorRfc: 'AAA010101AAA', proveedorNombre: 'X', tipoTercero: 'NACIONAL', tipoTerceroCodigo: '04', base16Cents: 100000, iva16Cents: 16000, base8Cents: 0, iva8Cents: 0, base0Cents: 0, exentoCents: 0, ivaRetenidoCents: 0, ivaAcreditableCents: 16000, comprobantes: 1 }],
+      totals: { proveedores: 1, comprobantes: 1, base16Cents: 100000, iva16Cents: 16000, base8Cents: 0, iva8Cents: 0, base0Cents: 0, exentoCents: 0, ivaRetenidoCents: 0, ivaAcreditableCents: 16000 },
+      cuadraConIvaFlujo: true,
+    })
+    const out = parse(await call('diot', { venueId: 'v1', period: '2026-06' }))
+    expect(mockRequirePermission).toHaveBeenCalledWith('accounting:read', 'v1')
+    expect(out.ok).toBe(true)
+    expect(out.totales.ivaAcreditable).toBeCloseTo(160)
+    expect(out.cuadraConIvaFlujo).toBe(true)
+    expect(out.proveedores[0].tipoTercero).toBe('04 NACIONAL')
+  })
+
+  it('venue sin CFDI → planRequired', async () => {
+    mockPlanGate.mockResolvedValue('Requiere PREMIUM')
+    const out = parse(await call('diot', { venueId: 'v1' }))
+    expect(out.planRequired).toBe(true)
+    expect(mockGetDiot).not.toHaveBeenCalled()
   })
 })

@@ -12,9 +12,10 @@ import { getReorderSuggestions, getAutoReorderConfig, setAutoReorderConfig } fro
 import { planGateMessage } from '../planGate'
 import { venuesWithFeatureAccess } from '@/services/access/basePlan.service'
 import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
+import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
 
 const SERIALIZED_OFF_MSG = 'El inventario serializado no está activo en este local (módulo SERIALIZED_INVENTORY apagado).'
-import { MovementType, RawMaterialCategory, Unit } from '@prisma/client'
+import { MovementType, RawMaterialMovementType, RawMaterialCategory, Unit } from '@prisma/client'
 
 const MOVEMENT_TYPE = {
   adjustment: MovementType.ADJUSTMENT,
@@ -379,6 +380,147 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
       }
+    },
+  )
+
+  server.tool(
+    'get_inventory_movements',
+    'Movement history (kardex / bitácora) of a venue\'s inventory: every stock change — purchases, sales, manual ADJUSTMENTs, losses, counts, transfers — with WHO made it, WHEN, the change in quantity, the stock BEFORE and AFTER, and the reason. Covers BOTH QUANTITY-tracked products and raw materials/ingredients. Filter by `type` (use ADJUSTMENT to spot manual edits — e.g. someone lowering stock by hand), by item `name`, and by date range; newest first. Answers "¿quién bajó el inventario manualmente?", "¿qué ajustes se hicieron del 1 al 15?", "¿por qué cambió el stock de X?". A negative quantity = stock went DOWN. Pass venueId. PREMIUM (INVENTORY_TRACKING).',
+    {
+      venueId: z.string().describe('Venue whose movement history to read (must be in your scope)'),
+      type: z
+        .enum(['ADJUSTMENT', 'PURCHASE', 'SALE', 'USAGE', 'LOSS', 'SPOILAGE', 'TRANSFER', 'COUNT', 'RETURN'])
+        .optional()
+        .describe('Only this movement type. ADJUSTMENT = manual edit (best for spotting hand-lowered stock). Omit for all types.'),
+      name: z.string().optional().describe('Only movements of products/ingredients whose name contains this text'),
+      fromDate: z.string().optional().describe('Venue-local start date YYYY-MM-DD (inclusive). Omit for no lower bound.'),
+      toDate: z.string().optional().describe('Venue-local end date YYYY-MM-DD (inclusive, whole day). Omit for no upper bound.'),
+      limit: z.number().int().positive().max(200).optional().describe('Max movements to return (default 50)'),
+    },
+    async ({ venueId, type, name, fromDate, toDate, limit }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'El control de inventario') // PREMIUM tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+
+      const take = limit ?? 50
+      // Venue-local day window → real UTC instants (noon-anchor keeps the calendar day under any host TZ).
+      const tz = (await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }))?.timezone || 'America/Mexico_City'
+      const gte = fromDate ? venueStartOfDay(tz, new Date(`${fromDate}T12:00:00`)) : undefined
+      const lte = toDate ? venueEndOfDay(tz, new Date(`${toDate}T12:00:00`)) : undefined
+      const createdAt = gte || lte ? { ...(gte ? { gte } : {}), ...(lte ? { lte } : {}) } : undefined
+      const nameFilter = name ? { contains: name, mode: 'insensitive' as const } : undefined
+
+      // `type` is the union of both enums; only apply it to a source where it is a valid member,
+      // so e.g. type=SALE returns only product movements and type=USAGE only raw-material ones.
+      const productType = type && (Object.values(MovementType) as string[]).includes(type) ? (type as MovementType) : undefined
+      const rawType =
+        type && (Object.values(RawMaterialMovementType) as string[]).includes(type) ? (type as RawMaterialMovementType) : undefined
+      const skipProducts = type !== undefined && productType === undefined
+      const skipRaw = type !== undefined && rawType === undefined
+
+      const [productMoves, rawMoves] = await Promise.all([
+        skipProducts
+          ? []
+          : prisma.inventoryMovement.findMany({
+              where: {
+                inventory: { venueId, ...(nameFilter ? { product: { name: nameFilter } } : {}) },
+                ...(productType ? { type: productType } : {}),
+                ...(createdAt ? { createdAt } : {}),
+              },
+              select: {
+                type: true,
+                quantity: true,
+                previousStock: true,
+                newStock: true,
+                reason: true,
+                reference: true,
+                createdBy: true,
+                createdAt: true,
+                inventory: { select: { product: { select: { name: true, sku: true } } } },
+              },
+              orderBy: { createdAt: 'desc' },
+              take,
+            }),
+        skipRaw
+          ? []
+          : prisma.rawMaterialMovement.findMany({
+              where: {
+                venueId,
+                ...(nameFilter ? { rawMaterial: { name: nameFilter } } : {}),
+                ...(rawType ? { type: rawType } : {}),
+                ...(createdAt ? { createdAt } : {}),
+              },
+              select: {
+                type: true,
+                quantity: true,
+                unit: true,
+                previousStock: true,
+                newStock: true,
+                reason: true,
+                reference: true,
+                createdBy: true,
+                createdAt: true,
+                rawMaterial: { select: { name: true, sku: true } },
+              },
+              orderBy: { createdAt: 'desc' },
+              take,
+            }),
+      ])
+
+      // Resolve every createdBy staffId → "First Last" in one query.
+      const staffIds = [
+        ...new Set([...productMoves, ...rawMoves].map(m => m.createdBy).filter((id): id is string => !!id)),
+      ]
+      const staff = staffIds.length
+        ? await prisma.staff.findMany({ where: { id: { in: staffIds } }, select: { id: true, firstName: true, lastName: true } })
+        : []
+      const staffName = new Map(staff.map(s => [s.id, `${s.firstName} ${s.lastName}`.trim()]))
+
+      const merged = [
+        ...productMoves.map(m => ({
+          kind: 'product' as const,
+          item: m.inventory?.product?.name ?? null,
+          sku: m.inventory?.product?.sku ?? null,
+          unit: 'unit',
+          type: m.type as string,
+          quantity: Number(m.quantity), // negative = stock went down
+          previousStock: Number(m.previousStock),
+          newStock: Number(m.newStock),
+          reason: m.reason ?? null,
+          reference: m.reference ?? null,
+          by: m.createdBy ? (staffName.get(m.createdBy) ?? m.createdBy) : null,
+          at: m.createdAt.toISOString(),
+        })),
+        ...rawMoves.map(m => ({
+          kind: 'rawMaterial' as const,
+          item: m.rawMaterial?.name ?? null,
+          sku: m.rawMaterial?.sku ?? null,
+          unit: m.unit as string,
+          type: m.type as string,
+          quantity: Number(m.quantity), // negative = stock went down
+          previousStock: Number(m.previousStock),
+          newStock: Number(m.newStock),
+          reason: m.reason ?? null,
+          reference: m.reference ?? null,
+          by: m.createdBy ? (staffName.get(m.createdBy) ?? m.createdBy) : null,
+          at: m.createdAt.toISOString(),
+        })),
+      ]
+        .sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0)) // newest first
+        .slice(0, take)
+
+      // Quick anti-fraud summary: how many manual adjustments and the net hand-applied change.
+      const adjustments = merged.filter(m => m.type === 'ADJUSTMENT')
+      const netAdjustmentQuantity = round2(adjustments.reduce((sum, m) => sum + m.quantity, 0))
+
+      return text({
+        venueId,
+        count: merged.length,
+        filters: { type: type ?? null, name: name ?? null, fromDate: fromDate ?? null, toDate: toDate ?? null },
+        adjustmentCount: adjustments.length,
+        netAdjustmentQuantity, // sum of ADJUSTMENT deltas in this window; negative = net hand-removed
+        movements: merged,
+      })
     },
   )
 }

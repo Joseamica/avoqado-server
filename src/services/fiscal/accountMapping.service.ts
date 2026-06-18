@@ -50,7 +50,7 @@ async function requireScope(venueId: string) {
   return scope
 }
 
-/** Devuelve SIEMPRE los 16 movimientos, con su cuenta asignada (o null). */
+/** Devuelve SIEMPRE los 24 movimientos, con su cuenta asignada (o null). */
 export async function getMappings(venueId: string): Promise<MappingResult> {
   const scope = await resolveScopeOrNull(venueId)
   if (!scope) {

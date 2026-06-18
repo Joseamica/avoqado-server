@@ -5,6 +5,7 @@ import prisma from '../../utils/prismaClient'
 import { parseDbDateRange } from '../../utils/datetime'
 import { getIncomeStatement } from '../dashboard/accounting.dashboard.service'
 import { resolveScopeOrNull } from './chartOfAccounts.service'
+import { getAcreditablePagado } from './expense.service'
 import { splitIvaIncluded } from './ivaMath'
 
 /**
@@ -24,10 +25,14 @@ import { splitIvaIncluded } from './ivaMath'
  *    (Σ de splits ≠ split de Σ → cuadra al centavo al filer).
  *  - **Tasa 16% asumida** (`getIncomeStatement` hardcodea `DEFAULT_IVA_RATE`, no une `Product.taxRate`)
  *    → flag `computedAt16Percent`; venues con 0%/8%/exento ven el IVA SOBREESTIMADO (caveat en UI).
- *  - **IVA acreditable pagado, retenciones, DIOT = NO disponibles** (lado proveedores): no existe
- *    modelo de gastos/CFDIs recibidos → placeholders `null` (NUNCA 0 silencioso), Fase 2 (Buzón de CFDIs).
+ *  - **IVA acreditable pagado = DISPONIBLE** (Fase 2 / Buzón de CFDIs): `getAcreditablePagado` suma el
+ *    `ivaCents` de los gastos PAGADOS, deducibles y acreditables del periodo (lado proveedores). Ya
+ *    resta al IVA a cargo. El IVA que NOSOTROS retuvimos a proveedores (`ivaRetenidoTerceros`) se
+ *    reporta APARTE (obligación a enterar, no resta). La **retención AL contribuyente** (lado ventas,
+ *    cuando un cliente nos retiene) sigue `null` (no se captura aún) — NUNCA 0 silencioso.
  *  - El número grande es **"IVA trasladado cobrado (causado)"**, NUNCA "IVA a cargo a enterar"; el
- *    `ivaAPagarPreliminar` es un **TECHO** (solo lado ventas; el real será MENOR al restar el acreditable).
+ *    `ivaAPagarPreliminar` ya descuenta el acreditable, pero sigue siendo preliminar por el supuesto
+ *    de 16% y la retención de ventas aún no capturada.
  *
  * Gated PREMIUM (CFDI). Read-only (sin ActivityLog). Money en centavos enteros.
  */
@@ -35,8 +40,8 @@ import { splitIvaIncluded } from './ivaMath'
 const PERIOD_RE = /^\d{4}-(0[1-9]|1[0-2])$/ // AAAA-MM con mes real 01-12
 const IVA_RATE = 0.16
 
-const DIOT_MOTIVO =
-  'La DIOT lista el IVA pagado a tus PROVEEDORES (lado gastos). Requiere registrar tus CFDIs recibidos — disponible en Fase 2 (Buzón de CFDIs).'
+const DIOT_DISPONIBLE_MOTIVO =
+  'La DIOT lista el IVA pagado a tus PROVEEDORES (lado gastos) por proveedor y tasa. Disponible en su propia vista (Buzón de CFDIs / Gastos).'
 
 export interface IvaCashflowResult {
   needsFiscalSetup: boolean
@@ -52,9 +57,13 @@ export interface IvaCashflowResult {
   /** Contraste informativo: Σ Cfdi.taxCents timbrados en el periodo (NO es la base). */
   ivaAmparadoPorCfdiCents: number
   cfdiCount: number
-  // ── Lado ENTRADAS (Fase 2 — placeholders, NUNCA 0 silencioso) ──
+  // ── Lado ENTRADAS (Fase 2 / Buzón de CFDIs) ──
+  /** IVA acreditable PAGADO a proveedores en el periodo (resta al IVA a cargo). */
   acreditablePagadoCents: number | null
+  /** Retención de IVA AL contribuyente (lado ventas: un cliente nos retuvo). Aún no capturado → null. */
   retencionesCents: number | null
+  /** IVA que el contribuyente RETUVO a proveedores — obligación SEPARADA a enterar (no resta aquí). */
+  ivaRetenidoTercerosCents: number | null
   saldoAFavorAplicadoCents: number | null
   // ── Derivados (PRELIMINARES — solo lado ventas) ──
   /** Techo preliminar: trasladado − (acreditable||0) − (retenciones||0) − (saldoAplicado||0), sin negativos. */
@@ -87,6 +96,7 @@ const emptyResult = (period: string, scope: { organizationId: string; rfc: strin
   cfdiCount: 0,
   acreditablePagadoCents: null,
   retencionesCents: null,
+  ivaRetenidoTercerosCents: null,
   saldoAFavorAplicadoCents: null,
   ivaAPagarPreliminarCents: 0,
   saldoAFavorDelPeriodoCents: 0,
@@ -96,7 +106,7 @@ const emptyResult = (period: string, scope: { organizationId: string; rfc: strin
   incompletoPorFaltaDeGastos: true,
   rfcSpansMultipleOrgs: false,
   zeroActivity: true,
-  diot: { disponible: false, motivo: DIOT_MOTIVO },
+  diot: { disponible: false, motivo: 'Configura la facturación (CFDI) del local para ver la DIOT.' },
 })
 
 /**
@@ -150,11 +160,14 @@ export async function getIvaCashflow(venueId: string, period: string): Promise<I
     _count: { _all: true },
   })
 
-  // Lado entradas = Fase 2 (placeholders null). El neto se calcula sin truncar para detectar saldo a favor.
-  const acreditablePagadoCents = null
+  // Lado entradas (Fase 2): IVA acreditable pagado real del periodo (Buzón de CFDIs).
+  const acreditable = await getAcreditablePagado(venueId, period)
+  const acreditablePagadoCents = acreditable?.acreditablePagadoCents ?? 0
+  const ivaRetenidoTercerosCents = acreditable?.ivaRetenidoTercerosCents ?? 0
+  // Retención AL contribuyente (lado ventas) aún no capturada; saldo a favor aplicado tampoco. NUNCA 0 silencioso.
   const retencionesCents = null
   const saldoAFavorAplicadoCents = null
-  const neto = ivaTrasladadoCobradoCents - (acreditablePagadoCents ?? 0) - (retencionesCents ?? 0) - (saldoAFavorAplicadoCents ?? 0)
+  const neto = ivaTrasladadoCobradoCents - acreditablePagadoCents - (retencionesCents ?? 0) - (saldoAFavorAplicadoCents ?? 0)
 
   return {
     needsFiscalSetup: false,
@@ -168,15 +181,16 @@ export async function getIvaCashflow(venueId: string, period: string): Promise<I
     cfdiCount: cfdiAgg._count._all,
     acreditablePagadoCents,
     retencionesCents,
+    ivaRetenidoTercerosCents,
     saldoAFavorAplicadoCents,
     ivaAPagarPreliminarCents: Math.max(0, neto),
     saldoAFavorDelPeriodoCents: neto < 0 ? -neto : 0,
     computedAt16Percent: true,
-    acreditableDisponible: false,
-    diotDisponible: false,
-    incompletoPorFaltaDeGastos: true,
+    acreditableDisponible: true,
+    diotDisponible: true,
+    incompletoPorFaltaDeGastos: false,
     rfcSpansMultipleOrgs,
     zeroActivity: totalSalesCount === 0,
-    diot: { disponible: false, motivo: DIOT_MOTIVO },
+    diot: { disponible: true, motivo: DIOT_DISPONIBLE_MOTIVO },
   }
 }

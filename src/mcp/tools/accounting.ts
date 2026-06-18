@@ -9,6 +9,9 @@ import { currentPeriod, getTrialBalance } from '@/services/fiscal/trialBalance.s
 import { getAccountingReports } from '@/services/fiscal/accountingReports.service'
 import { getIvaCashflow } from '@/services/fiscal/ivaFlujo.service'
 import { generatePoliciesForVenue } from '@/services/fiscal/autoPosting.service'
+import { createExpense, listExpenses } from '@/services/fiscal/expense.service'
+import { generateExpensePoliciesForVenue } from '@/services/fiscal/expensePosting.service'
+import { getDiot } from '@/services/fiscal/diot.service'
 import { listStatements } from '@/services/dashboard/bankReconciliation.service'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
@@ -264,7 +267,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'account_mapping',
-    'Configuración contable (Capa B fiscal, PREMIUM): el mapa "tipo de movimiento → cuenta del catálogo" que hace que el sistema postee los asientos solo (ventas, costo de venta, comisiones, propinas por pagar, etc.). Devuelve los 16 movimientos con la cuenta que tienen asignada (o sin asignar). Responde "¿a qué cuenta cae cada cosa?". Pasa venueId.',
+    'Configuración contable (Capa B fiscal, PREMIUM): el mapa "tipo de movimiento → cuenta del catálogo" que hace que el sistema postee los asientos solo (ventas, costo de venta, comisiones, propinas por pagar, IVA, gastos, retenciones, etc.). Devuelve los 24 movimientos con la cuenta que tienen asignada (o sin asignar). Responde "¿a qué cuenta cae cada cosa?". Pasa venueId.',
     {
       venueId: z.string().describe('Local (debe estar en tu alcance)'),
     },
@@ -477,7 +480,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'accounting_iva_cashflow',
-    'IVA en flujo de efectivo de un contribuyente (Capa B, PREMIUM): el IVA TRASLADADO COBRADO del mes (lado ventas), calculado sobre lo efectivamente cobrado (LIVA art 1-B), sumando TODOS los locales del mismo RFC. Responde "¿cuánto IVA causé este mes por lo que cobré?". ⚠️ Es PRELIMINAR y solo lado ventas: NO incluye tu IVA acreditable de gastos (Fase 2), así que el "a pagar" mostrado es un TECHO; el real será MENOR. Asume tasa 16% (locales con 0%/8%/exento quedan sobreestimados). La DIOT no se genera (lado proveedores, Fase 2). Pasa venueId y opcionalmente period (YYYY-MM; default = mes actual).',
+    'IVA en flujo de efectivo de un contribuyente (Capa B, PREMIUM): el IVA del mes calculado sobre flujo (LIVA art 1-B), sumando TODOS los locales del mismo RFC. Da el IVA TRASLADADO COBRADO (ventas) MENOS el IVA ACREDITABLE PAGADO (gastos del Buzón de CFDIs) = IVA a pagar (o saldo a favor). Responde "¿cuánto IVA debo este mes?". Reporta APARTE el IVA que retuviste a proveedores (obligación a enterar). ⚠️ Sigue siendo preliminar: asume tasa 16% (locales con 0%/8%/exento sobreestimados) y NO incluye retenciones de IVA que clientes te hayan hecho en ventas. Pasa venueId y opcionalmente period (YYYY-MM; default = mes actual).',
     {
       venueId: z.string().describe('Local del contribuyente (debe estar en tu alcance)'),
       period: z
@@ -503,14 +506,15 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         baseGravable: pesos(r.baseGravableCents),
         ivaAmparadoPorCfdiContraste: pesos(r.ivaAmparadoPorCfdiCents),
         ivaAcreditablePagado: r.acreditablePagadoCents === null ? null : pesos(r.acreditablePagadoCents),
-        ivaAPagarPreliminarTecho: pesos(r.ivaAPagarPreliminarCents),
+        ivaRetenidoAProveedores: r.ivaRetenidoTercerosCents === null ? null : pesos(r.ivaRetenidoTercerosCents),
+        ivaAPagarPreliminar: pesos(r.ivaAPagarPreliminarCents),
         saldoAFavorDelPeriodo: pesos(r.saldoAFavorDelPeriodoCents),
         // Banderas de honestidad fiscal
         estimadoAl16Pct: r.computedAt16Percent,
-        incompletoPorFaltaDeGastos: r.incompletoPorFaltaDeGastos,
+        acreditableDisponible: r.acreditableDisponible,
         sinVentasRecuerdaDeclararEnCeros: r.zeroActivity,
         diotDisponible: r.diotDisponible,
-        nota: 'PRELIMINAR — solo lado ventas (IVA cobrado). Falta tu IVA de gastos (acreditable, Fase 2); el real a enterar será MENOR. Es flujo de efectivo (cobrado), no facturado; no cuadra 1:1 con tus CFDIs. No lo uses como pago final sin tu contador.',
+        nota: 'Ya descuenta tu IVA acreditable de gastos pagados (Buzón de CFDIs). El IVA retenido a proveedores se entera APARTE (no resta aquí). Sigue siendo flujo de efectivo (cobrado/pagado), no facturado; asume 16% y no incluye IVA que clientes te hayan retenido en ventas. No lo uses como pago final sin tu contador.',
       })
     },
   )
@@ -535,7 +539,12 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
       const r = await generatePoliciesForVenue(venueId, { period: period || currentPeriod(), actorStaffId: scope.staffId })
       if (r.needsFiscalSetup) return text({ ok: true, needsFiscalSetup: true })
       if (r.missingMappings.length > 0)
-        return text({ ok: false, needsMapping: true, faltanMapeos: r.missingMappings, error: 'Faltan cuentas por asignar en Configuración contable antes de postear.' })
+        return text({
+          ok: false,
+          needsMapping: true,
+          faltanMapeos: r.missingMappings,
+          error: 'Faltan cuentas por asignar en Configuración contable antes de postear.',
+        })
       return text({
         ok: true,
         periodo: r.period,
@@ -544,6 +553,191 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         yaEstaban: r.alreadyPosted,
         omitidos: r.skipped,
         nota: 'Idempotente: re-correr no duplica. Devoluciones y voids se postean como contracuenta (402.01).',
+      })
+    },
+  )
+
+  server.tool(
+    'register_expense',
+    'Registra un GASTO / CFDI recibido de un proveedor en el Buzón (Capa B fiscal, PREMIUM, escritura). Habilita tu IVA acreditable (cuando lo pagas), la DIOT y tus costos/gastos reales. Valida que el comprobante cuadre (subtotal − descuento + IVA + IEPS − retenciones = total) y deduplica por folio fiscal (UUID). Montos en CENTAVOS enteros. Por defecto un PUE se marca pagado (IVA acreditable este periodo); pasa paid=false si aún no lo desembolsas, o metodoPago=PPD (se acredita al pagarlo). Escritura: requiere accounting:manage + feature CFDI. Pasa venueId, proveedorRfc, proveedorNombre, fechaEmision (AAAA-MM-DD), subtotalCents, ivaCents y totalCents; opcional el resto.',
+    {
+      venueId: z.string().describe('Local que registra el gasto (debe estar en tu alcance)'),
+      proveedorRfc: z.string().describe('RFC del proveedor (emisor del CFDI)'),
+      proveedorNombre: z.string().describe('Razón social / nombre del proveedor'),
+      fechaEmision: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .describe('Fecha de emisión del CFDI AAAA-MM-DD'),
+      subtotalCents: z.number().int().min(0).describe('Subtotal (base, sin IVA) en centavos enteros'),
+      ivaCents: z.number().int().min(0).default(0).describe('IVA trasladado en centavos enteros'),
+      totalCents: z.number().int().min(0).describe('Total del comprobante en centavos enteros'),
+      descuentoCents: z.number().int().min(0).optional().describe('Descuento en centavos'),
+      iepsCents: z.number().int().min(0).optional().describe('IEPS en centavos'),
+      ivaRetenidoCents: z.number().int().min(0).optional().describe('IVA retenido al proveedor en centavos'),
+      isrRetenidoCents: z.number().int().min(0).optional().describe('ISR retenido al proveedor en centavos'),
+      metodoPago: z.enum(['PUE', 'PPD']).optional().describe('PUE (pago en una exhibición) o PPD (parcialidades/diferido)'),
+      categoria: z
+        .enum(['COSTO_MERCANCIA', 'GASTO_GENERAL', 'ARRENDAMIENTO', 'COMBUSTIBLE', 'HONORARIOS', 'SERVICIOS', 'OTRO'])
+        .optional()
+        .describe('Categoría del gasto (rutea a su cuenta contable)'),
+      fechaPago: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .optional()
+        .describe('Fecha de pago AAAA-MM-DD (opcional; default = emisión para PUE)'),
+      paid: z.boolean().optional().describe('¿Ya lo pagaste? default: PUE=sí, PPD=no'),
+      deducible: z.boolean().optional().describe('¿Es deducible? (default sí)'),
+      ivaAcreditable: z.boolean().optional().describe('¿El IVA es acreditable? (default sí; si no, va al costo)'),
+      uuid: z.string().optional().describe('Folio fiscal (UUID) del CFDI, para deduplicar'),
+      folio: z.string().optional().describe('Folio interno del comprobante'),
+    },
+    async args => {
+      const { venueId } = args
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:manage', venueId) // write gate
+      const gate = await planGateMessage(venueId, 'CFDI', 'El registro de gastos (Buzón de CFDIs)')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+
+      const e = await createExpense(venueId, args, { staffId: scope.staffId })
+      return text({
+        ok: true,
+        gasto: {
+          id: e.id,
+          proveedor: `${e.proveedorRfc} ${e.proveedorNombre}`,
+          fechaEmision: e.fechaEmision,
+          subtotal: pesos(e.subtotalCents),
+          iva: pesos(e.ivaCents),
+          total: pesos(e.totalCents),
+          metodoPago: e.metodoPago,
+          estatusPago: e.paymentStatus,
+          periodoPago: e.paidPeriod,
+          deducible: e.deducible,
+          ivaAcreditable: e.ivaAcreditable,
+        },
+        nota: 'El IVA se vuelve acreditable cuando el gasto está PAGADO (cash-basis). Corre generate_expense_policies para postear su póliza.',
+      })
+    },
+  )
+
+  server.tool(
+    'expenses',
+    'Lista los GASTOS / CFDIs recibidos del contribuyente (Buzón, Capa B fiscal, PREMIUM) de TODOS los locales del mismo RFC. Devuelve cada gasto (proveedor, fechas, montos, estatus de pago) y un resumen (conteo, total, IVA, base deducible). Responde "¿qué gastos registré este mes?". Pasa venueId y opcionalmente period (YYYY-MM, por fecha de emisión), paymentStatus o proveedorRfc.',
+    {
+      venueId: z.string().describe('Local del contribuyente (debe estar en tu alcance)'),
+      period: z
+        .string()
+        .regex(/^\d{4}-\d{2}$/)
+        .optional()
+        .describe('Periodo YYYY-MM por fecha de emisión (opcional)'),
+      paymentStatus: z.enum(['UNPAID', 'PARTIALLY_PAID', 'PAID']).optional().describe('Filtra por estatus de pago'),
+      proveedorRfc: z.string().optional().describe('Filtra por RFC de proveedor'),
+    },
+    async ({ venueId, period, paymentStatus, proveedorRfc }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:read', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'El Buzón de gastos')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+
+      const r = await listExpenses(venueId, { period, paymentStatus, proveedorRfc })
+      if (r.needsFiscalSetup) return text({ ok: true, needsFiscalSetup: true })
+      return text({
+        ok: true,
+        rfc: r.rfc,
+        resumen: {
+          gastos: r.summary.count,
+          total: pesos(r.summary.totalCents),
+          iva: pesos(r.summary.ivaCents),
+          baseDeducible: pesos(r.summary.deducibleCents),
+        },
+        gastos: r.expenses.map(e => ({
+          id: e.id,
+          proveedor: `${e.proveedorRfc} ${e.proveedorNombre}`,
+          fechaEmision: e.fechaEmision,
+          total: pesos(e.totalCents),
+          iva: pesos(e.ivaCents),
+          metodoPago: e.metodoPago,
+          estatusPago: e.paymentStatus,
+          posteado: e.posted,
+        })),
+      })
+    },
+  )
+
+  server.tool(
+    'generate_expense_policies',
+    'Posteo AUTOMÁTICO de las pólizas de GASTOS del periodo (Capa B, PREMIUM, escritura): genera el asiento de doble partida de cada CFDI recibido sin postear (gasto/costo + IVA acreditable o pendiente + retenciones + banco/caja o Proveedores). Idempotente: re-correr no duplica. Sólo procesa comprobantes tipo INGRESO. Responde "postea mis gastos del mes". Pasa venueId y opcionalmente period (YYYY-MM; default mes actual). Requiere catálogo + configuración contable sembrados.',
+    {
+      venueId: z.string().describe('Local (debe estar en tu alcance)'),
+      period: z
+        .string()
+        .regex(/^\d{4}-\d{2}$/)
+        .optional()
+        .describe('Periodo YYYY-MM (opcional; default mes actual)'),
+    },
+    async ({ venueId, period }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:manage', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'El posteo de pólizas de gastos')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+
+      const r = await generateExpensePoliciesForVenue(venueId, { period: period || currentPeriod(), actorStaffId: scope.staffId })
+      if (r.needsFiscalSetup) return text({ ok: true, needsFiscalSetup: true })
+      return text({
+        ok: r.missingMappings.length === 0,
+        periodo: r.period,
+        gastosCandidatos: r.candidates,
+        polizasGeneradas: r.posted,
+        yaEstaban: r.alreadyPosted,
+        omitidos: r.skipped,
+        faltanMapeos: r.missingMappings.length > 0 ? r.missingMappings : undefined,
+        nota: 'Idempotente: re-correr no duplica. Sólo postea CFDIs INGRESO; notas de crédito y REP se omiten. Un gasto se omite si le falta una cuenta en Configuración contable.',
+      })
+    },
+  )
+
+  server.tool(
+    'diot',
+    'DIOT (Declaración Informativa de Operaciones con Terceros) de un contribuyente (Capa B, PREMIUM): lista, por proveedor, el IVA que PAGASTE en el mes (cash-basis), separado por tipo de tercero (04 nacional / 05 extranjero / 15 global) y por tasa, más las retenciones. Sale de los CFDIs recibidos pagados (Buzón). Responde "¿qué le declaro al SAT de mis proveedores este mes?". Pasa venueId y opcionalmente period (YYYY-MM; default mes actual).',
+    {
+      venueId: z.string().describe('Local del contribuyente (debe estar en tu alcance)'),
+      period: z
+        .string()
+        .regex(/^\d{4}-\d{2}$/)
+        .optional()
+        .describe('Periodo YYYY-MM (opcional; default mes actual)'),
+    },
+    async ({ venueId, period }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:read', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'La DIOT')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+
+      const r = await getDiot(venueId, period || currentPeriod())
+      if (r.needsFiscalSetup) return text({ ok: true, needsFiscalSetup: true })
+      return text({
+        ok: true,
+        rfc: r.rfc,
+        periodo: r.period,
+        totales: {
+          proveedores: r.totals.proveedores,
+          comprobantes: r.totals.comprobantes,
+          ivaAcreditable: pesos(r.totals.ivaAcreditableCents),
+          ivaRetenido: pesos(r.totals.ivaRetenidoCents),
+        },
+        cuadraConIvaFlujo: r.cuadraConIvaFlujo,
+        proveedores: r.rows.map(row => ({
+          proveedor: `${row.proveedorRfc} ${row.proveedorNombre}`,
+          tipoTercero: `${row.tipoTerceroCodigo} ${row.tipoTercero}`,
+          base16: pesos(row.base16Cents),
+          iva16: pesos(row.iva16Cents),
+          base8: pesos(row.base8Cents),
+          iva8: pesos(row.iva8Cents),
+          base0: pesos(row.base0Cents),
+          exento: pesos(row.exentoCents),
+          ivaRetenido: pesos(row.ivaRetenidoCents),
+          ivaAcreditable: pesos(row.ivaAcreditableCents),
+          comprobantes: row.comprobantes,
+        })),
       })
     },
   )

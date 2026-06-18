@@ -460,6 +460,15 @@ export const BASE_CHART: SeedAccount[] = [
     level: 2,
     parentCode: '601',
   },
+  {
+    code: '601.84',
+    name: 'Otros gastos generales',
+    satGroupingCode: '601.84',
+    type: 'GASTO',
+    nature: 'DEUDORA',
+    level: 2,
+    parentCode: '601',
+  },
   { code: '602', name: 'Gastos de venta', satGroupingCode: '602', type: 'GASTO', nature: 'DEUDORA', level: 1, parentCode: null },
   {
     code: '602.01',

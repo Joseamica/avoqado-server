@@ -1,7 +1,8 @@
 /**
  * Unit tests (mock-first) para IVA en flujo de efectivo (Capa B).
  * Lock fiscal: (1) suma multi-venue por RFC y hace el split de IVA UNA sola vez a nivel
- * contribuyente (Σ(splits) ≠ split(Σ)); (2) acreditable/retenciones/DIOT = null/false, NUNCA 0;
+ * contribuyente (Σ(splits) ≠ split(Σ)); (2) IVA acreditable pagado (Fase 2) resta al IVA a cargo y
+ * el IVA retenido a proveedores se reporta aparte; la retención de ventas sigue null (NUNCA 0);
  * (3) periodo inválido → 400; (4) zeroActivity recuerda declarar en ceros.
  */
 import { BadRequestError } from '../../../src/errors/AppError'
@@ -19,6 +20,9 @@ jest.mock('../../../src/services/fiscal/chartOfAccounts.service', () => ({
 jest.mock('../../../src/services/dashboard/accounting.dashboard.service', () => ({
   getIncomeStatement: jest.fn(),
 }))
+jest.mock('../../../src/services/fiscal/expense.service', () => ({
+  getAcreditablePagado: jest.fn(),
+}))
 jest.mock('../../../src/utils/datetime', () => ({
   parseDbDateRange: () => ({ from: new Date('2026-06-01T06:00:00Z'), to: new Date('2026-07-01T05:59:59Z') }),
 }))
@@ -26,6 +30,7 @@ jest.mock('../../../src/utils/datetime', () => ({
 import prisma from '../../../src/utils/prismaClient'
 import { resolveScopeOrNull } from '../../../src/services/fiscal/chartOfAccounts.service'
 import { getIncomeStatement } from '../../../src/services/dashboard/accounting.dashboard.service'
+import { getAcreditablePagado } from '../../../src/services/fiscal/expense.service'
 import { getIvaCashflow } from '../../../src/services/fiscal/ivaFlujo.service'
 
 const p = prisma as unknown as {
@@ -34,6 +39,16 @@ const p = prisma as unknown as {
 }
 const mockScope = resolveScopeOrNull as jest.Mock
 const mockIncome = getIncomeStatement as jest.Mock
+const mockAcreditable = getAcreditablePagado as jest.Mock
+const acreditableResult = (acreditablePagadoCents: number, ivaRetenidoTercerosCents = 0) => ({
+  organizationId: 'org1',
+  rfc: 'EKU9003173C9',
+  period: '2026-06',
+  acreditablePagadoCents,
+  ivaRetenidoTercerosCents,
+  isrRetenidoTercerosCents: 0,
+  expenseCount: acreditablePagadoCents > 0 ? 1 : 0,
+})
 
 const income = (netRevenueCents: number, salesCount = 1) => ({
   revenue: { grossSalesCents: netRevenueCents, refundsCents: 0, netRevenueCents, taxableBaseCents: 0, ivaCents: 0 },
@@ -45,6 +60,7 @@ beforeEach(() => {
   jest.clearAllMocks()
   mockScope.mockResolvedValue({ organizationId: 'org1', rfc: 'EKU9003173C9', venueType: 'FOOD_SERVICE' })
   p.cfdi.aggregate.mockResolvedValue({ _sum: { taxCents: 0 }, _count: { _all: 0 } })
+  mockAcreditable.mockResolvedValue(acreditableResult(0)) // por defecto: sin gastos acreditables
 })
 
 it('periodo inválido (mes 13) → 400', async () => {
@@ -76,22 +92,45 @@ it('suma multi-venue del MISMO RFC y hace el split de IVA UNA vez a nivel contri
   expect(mockIncome).toHaveBeenCalledTimes(2)
 })
 
-it('placeholders Fase 2 = null (NUNCA 0) y el "a pagar" preliminar = trasladado (techo)', async () => {
+it('sin gastos acreditables: acreditable=0 disponible, retención de ventas null (NUNCA 0), a pagar = trasladado', async () => {
   p.venue.findMany.mockResolvedValue([{ id: 'v1', organizationId: 'org1', timezone: 'America/Mexico_City' }])
   mockIncome.mockResolvedValue(income(116000))
 
   const r = await getIvaCashflow('v1', '2026-06')
 
-  expect(r.acreditablePagadoCents).toBeNull()
-  expect(r.retencionesCents).toBeNull()
+  expect(r.acreditablePagadoCents).toBe(0) // disponible (lado gastos existe), 0 legítimo
+  expect(r.acreditableDisponible).toBe(true)
+  expect(r.incompletoPorFaltaDeGastos).toBe(false)
+  expect(r.retencionesCents).toBeNull() // retención AL contribuyente (ventas) aún no capturada
   expect(r.saldoAFavorAplicadoCents).toBeNull()
-  expect(r.incompletoPorFaltaDeGastos).toBe(true)
-  expect(r.diot.disponible).toBe(false)
   expect(r.computedAt16Percent).toBe(true)
-  // 116000 → split: base 100000, tax 16000; a pagar preliminar == trasladado (acreditable null→0)
+  // 116000 → split: base 100000, tax 16000; sin acreditable, a pagar == trasladado
   expect(r.ivaTrasladadoCobradoCents).toBe(16000)
   expect(r.ivaAPagarPreliminarCents).toBe(16000)
   expect(r.saldoAFavorDelPeriodoCents).toBe(0)
+})
+
+it('con IVA acreditable pagado: resta al IVA a cargo y reporta el IVA retenido a proveedores aparte', async () => {
+  p.venue.findMany.mockResolvedValue([{ id: 'v1', organizationId: 'org1', timezone: 'America/Mexico_City' }])
+  mockIncome.mockResolvedValue(income(116000)) // trasladado 16000
+  mockAcreditable.mockResolvedValue(acreditableResult(10000, 500)) // acreditable 10000, IVA retenido a terceros 500
+
+  const r = await getIvaCashflow('v1', '2026-06')
+
+  expect(r.acreditablePagadoCents).toBe(10000)
+  expect(r.ivaRetenidoTercerosCents).toBe(500) // obligación separada, NO resta al neto
+  expect(r.ivaAPagarPreliminarCents).toBe(6000) // 16000 − 10000
+  expect(r.saldoAFavorDelPeriodoCents).toBe(0)
+})
+
+it('acreditable > trasladado → saldo a favor del periodo (neto negativo)', async () => {
+  p.venue.findMany.mockResolvedValue([{ id: 'v1', organizationId: 'org1', timezone: 'America/Mexico_City' }])
+  mockIncome.mockResolvedValue(income(116000)) // trasladado 16000
+  mockAcreditable.mockResolvedValue(acreditableResult(20000)) // acreditable 20000 > 16000
+
+  const r = await getIvaCashflow('v1', '2026-06')
+  expect(r.ivaAPagarPreliminarCents).toBe(0)
+  expect(r.saldoAFavorDelPeriodoCents).toBe(4000) // 20000 − 16000
 })
 
 it('sin ventas cobradas → zeroActivity (recordar declarar en ceros)', async () => {
