@@ -36,12 +36,15 @@ const line = (over: Record<string, unknown> = {}) =>
     ...over,
   }) as any
 
-const run = (over: Record<string, unknown> = {}) => ({ period: '2026-06', periodicidad: 'MENSUAL', fechaPago: new Date('2026-06-30T12:00:00Z'), ...over }) as any
+const run = (over: Record<string, unknown> = {}) =>
+  ({ period: '2026-06', periodicidad: 'MENSUAL', fechaPago: new Date('2026-06-30T12:00:00Z'), ...over }) as any
 
 describe('buildPayrollReceiptParams', () => {
   it('mapea percepción 001, deducciones ISR(002)+IMSS(001), periodicidad y fechas', () => {
     const p = buildPayrollReceiptParams(emp(), line(), run(), '06700')
-    expect(p.percepciones).toEqual([{ clave: '001', concepto: 'Sueldos, Salarios Rayas y Jornales', gravadoCents: 20_000_00, exentoCents: 0 }])
+    expect(p.percepciones).toEqual([
+      { clave: '001', concepto: 'Sueldos, Salarios Rayas y Jornales', gravadoCents: 20_000_00, exentoCents: 0 },
+    ])
     expect(p.deducciones).toEqual([
       { clave: '002', concepto: 'ISR', importeCents: 2_604_00 },
       { clave: '001', concepto: 'Seguridad social (IMSS)', importeCents: 475_00 },
@@ -62,7 +65,9 @@ describe('buildPayrollReceiptParams', () => {
 
   it('subsidio > 0 → otrosPagos clave 002 con subsidio causado', () => {
     const p = buildPayrollReceiptParams(emp(), line({ isrCents: 0, subsidioCents: 535_65 }), run(), '06700')
-    expect(p.otrosPagos).toEqual([{ clave: '002', concepto: 'Subsidio para el empleo', importeCents: 535_65, subsidioCausadoCents: 535_65 }])
+    expect(p.otrosPagos).toEqual([
+      { clave: '002', concepto: 'Subsidio para el empleo', importeCents: 535_65, subsidioCausadoCents: 535_65 },
+    ])
   })
 
   it('sin subsidio → otrosPagos vacío', () => {
