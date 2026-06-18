@@ -8,11 +8,13 @@ import { createManualEntry, listEntries } from '@/services/fiscal/journalEntry.s
 import { currentPeriod, getTrialBalance } from '@/services/fiscal/trialBalance.service'
 import { getAccountingReports } from '@/services/fiscal/accountingReports.service'
 import { getIvaCashflow } from '@/services/fiscal/ivaFlujo.service'
+import { getAccountLedger } from '@/services/fiscal/accountLedger.service'
 import { generatePoliciesForVenue } from '@/services/fiscal/autoPosting.service'
 import { createExpense, importExpenseFromXml, listExpenses } from '@/services/fiscal/expense.service'
 import { generateExpensePoliciesForVenue, markExpensePaid } from '@/services/fiscal/expensePosting.service'
 import { getDiot } from '@/services/fiscal/diot.service'
-import { getCatalogoXml, getBalanzaXml } from '@/services/fiscal/contabilidadElectronica.service'
+import { getAccountsPayableAging } from '@/services/fiscal/accountsPayable.service'
+import { getCatalogoXml, getBalanzaXml, getPolizasXml } from '@/services/fiscal/contabilidadElectronica.service'
 import { getIsrProvisional } from '@/services/fiscal/isr.service'
 import { computePayrollPreview, createEmployee, listEmployees, runPayroll } from '@/services/fiscal/nomina.service'
 import { stampPayrollReceipts } from '@/services/fiscal/nominaCfdi.service'
@@ -441,6 +443,48 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
   )
 
   server.tool(
+    'account_ledger',
+    'Auxiliar de cuenta (libro mayor por cuenta, Capa B fiscal, PREMIUM): el DRILL-DOWN de la balanza. Para UNA cuenta y un periodo da el saldo inicial, cada movimiento (fecha, folio, concepto, cargo, abono) con su SALDO CORRIDO, y el saldo final. Responde "¿qué movimientos tuvo la cuenta de Bancos este mes?". Mismo universo que la balanza (sólo pólizas posteadas). Pasa venueId, accountCode (p.ej. "102.01") y opcionalmente period (YYYY-MM; default mes actual).',
+    {
+      venueId: z.string().describe('Local (debe estar en tu alcance)'),
+      accountCode: z.string().describe('Código de la cuenta a auditar, p.ej. 102.01'),
+      period: z
+        .string()
+        .regex(/^\d{4}-\d{2}$/)
+        .optional()
+        .describe('Periodo YYYY-MM (opcional; default mes actual)'),
+    },
+    async ({ venueId, accountCode, period }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:read', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'El auxiliar de cuenta')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+
+      const r = await getAccountLedger(venueId, accountCode, period || currentPeriod())
+      if (r.needsFiscalSetup) return text({ ok: true, needsFiscalSetup: true })
+      if (r.notFound) return text({ ok: false, notFound: true, error: `No existe la cuenta ${accountCode} en el catálogo.` })
+      return text({
+        ok: true,
+        rfc: r.rfc,
+        periodo: r.period,
+        cuenta: `${r.account!.code} ${r.account!.name}`,
+        saldoInicial: pesos(r.saldoInicialCents),
+        cargos: pesos(r.totalDebeCents),
+        abonos: pesos(r.totalHaberCents),
+        saldoFinal: pesos(r.saldoFinalCents),
+        movimientos: r.movements.map(m => ({
+          fecha: m.date,
+          folio: m.folio,
+          concepto: m.description || m.concept,
+          cargo: pesos(m.debitCents),
+          abono: pesos(m.creditCents),
+          saldo: pesos(m.saldoCents),
+        })),
+      })
+    },
+  )
+
+  server.tool(
     'accounting_reports',
     'Reportes contables fiscales de un local (Capa B, PREMIUM): Estado de resultados del ejercicio (ingresos − costos − gastos = utilidad/pérdida) + Balance general al cierre (activo = pasivo + capital). Salen de las pólizas. Responde "¿cuánto gané según mis libros?" y "¿cómo está mi balance?". Pasa venueId y opcionalmente period (YYYY-MM; default = mes actual).',
     {
@@ -812,6 +856,52 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
   )
 
   server.tool(
+    'accounts_payable',
+    'Cuentas por pagar (antigüedad de saldos a proveedores, Capa B fiscal, PREMIUM): "¿a quién le debo, cuánto y desde cuándo?". Agrupa por proveedor los CFDIs recibidos (Buzón) con saldo pendiente (total − pagado) y lo reparte en cubetas de antigüedad por días desde la emisión: corriente (0-30), 31-60, 61-90 y 90+. Por contribuyente (suma todos los locales del RFC). Responde "mis cuentas por pagar". Pasa venueId y opcionalmente asOf (AAAA-MM-DD; default hoy).',
+    {
+      venueId: z.string().describe('Local del contribuyente (debe estar en tu alcance)'),
+      asOf: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .optional()
+        .describe('Fecha de corte AAAA-MM-DD (opcional; default hoy)'),
+    },
+    async ({ venueId, asOf }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:read', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'Las cuentas por pagar')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+
+      const r = await getAccountsPayableAging(venueId, asOf)
+      if (r.needsFiscalSetup) return text({ ok: true, needsFiscalSetup: true })
+      return text({
+        ok: true,
+        rfc: r.rfc,
+        alCorte: r.asOf,
+        totales: {
+          proveedores: r.totals.proveedores,
+          comprobantes: r.totals.comprobantes,
+          pendiente: pesos(r.totals.pendienteCents),
+          corriente0_30: pesos(r.totals.corrienteCents),
+          d31_60: pesos(r.totals.d31_60Cents),
+          d61_90: pesos(r.totals.d61_90Cents),
+          mas90: pesos(r.totals.mas90Cents),
+        },
+        proveedores: r.suppliers.map(s => ({
+          proveedor: `${s.proveedorRfc} ${s.proveedorNombre}`,
+          comprobantes: s.comprobantes,
+          pendiente: pesos(s.pendienteCents),
+          corriente0_30: pesos(s.corrienteCents),
+          d31_60: pesos(s.d31_60Cents),
+          d61_90: pesos(s.d61_90Cents),
+          mas90: pesos(s.mas90Cents),
+          diasMasAntiguo: s.maxDiasVencido,
+        })),
+      })
+    },
+  )
+
+  server.tool(
     'isr_provisional',
     'Estimación del PAGO PROVISIONAL de ISR del periodo (persona física, Capa B, PREMIUM). regime="RESICO" (default): ingresos cobrados del mes × tasa fija por tramo (1%–2.5%), sin deducciones. regime="GENERAL": (ingresos − deducciones autorizadas) acumulado del ejercicio × tarifa art-96 acumulada − pagos provisionales previos. Responde "¿cuánto ISR debo este mes?". ⚠️ Es ESTIMACIÓN (asume 16% de IVA en el ingreso, no resta pérdidas ni retenciones de ventas; tarifa art-96 = 2024/2025 mientras el SAT no publique 2026). Lo valida el contador. Pasa venueId, opcionalmente period (YYYY-MM) y regime.',
     {
@@ -912,6 +1002,47 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         archivo: r.filename,
         xml: r.xml,
         nota: 'XML sin sellar — tu contador lo sella con la e.firma y lo envía al SAT.',
+      })
+    },
+  )
+
+  server.tool(
+    'electronic_accounting_polizas',
+    'Contabilidad electrónica del SAT (Anexo 24, Capa B, PREMIUM): genera el XML de las PÓLIZAS del periodo (esquema PolizasPeriodo 1.3). El SAT lo pide bajo solicitud (devolución, compensación o auditoría), no de oficio. Una póliza por asiento posteado (mismo universo que la balanza) con sus transacciones (cuenta, concepto, debe, haber). Devuelve el XML y el nombre de archivo oficial (RFC+Año+Mes+PL.xml). Responde "dame mis pólizas en XML para el SAT". Pasa venueId, opcionalmente period (YYYY-MM), tipoSolicitud (AF/FC/DE/CO, default DE) y el folio (numOrden para AF/CO, numTramite para FC/DE).',
+    {
+      venueId: z.string().describe('Local del contribuyente (debe estar en tu alcance)'),
+      period: z
+        .string()
+        .regex(/^\d{4}-\d{2}$/)
+        .optional()
+        .describe('Periodo YYYY-MM (opcional; default mes actual)'),
+      tipoSolicitud: z
+        .enum(['AF', 'FC', 'DE', 'CO'])
+        .optional()
+        .describe('AF=acto fiscalización, FC=compulsa, DE=devolución (default), CO=compensación'),
+      numOrden: z.string().optional().describe('Número de orden (requerido por el SAT para AF/CO)'),
+      numTramite: z.string().optional().describe('Número de trámite (requerido por el SAT para FC/DE)'),
+    },
+    async ({ venueId, period, tipoSolicitud, numOrden, numTramite }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:read', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'La contabilidad electrónica')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+
+      const r = await getPolizasXml(venueId, period || currentPeriod(), {
+        tipoSolicitud: tipoSolicitud ?? 'DE',
+        numOrden: numOrden ?? null,
+        numTramite: numTramite ?? null,
+      })
+      if (r.needsFiscalSetup) return text({ ok: true, needsFiscalSetup: true })
+      if (r.empty) return text({ ok: true, vacio: true, nota: 'No hay pólizas posteadas en el periodo; genera tus pólizas primero.' })
+      return text({
+        ok: true,
+        rfc: r.rfc,
+        periodo: r.period,
+        archivo: r.filename,
+        xml: r.xml,
+        nota: 'XML sin sellar — tu contador lo sella con la e.firma y lo envía al SAT. AF/CO requieren NumOrden; FC/DE requieren NumTramite.',
       })
     },
   )

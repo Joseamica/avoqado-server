@@ -2,6 +2,7 @@ import { BadRequestError } from '../../errors/AppError'
 import { getCatalog } from './chartOfAccounts.service'
 import { resolveScopeOrNull } from './chartOfAccounts.service'
 import { getTrialBalance } from './trialBalance.service'
+import { listPeriodEntries } from './journalEntry.service'
 
 /**
  * Contabilidad electrónica (SAT, Anexo 24) — genera el XML del Catálogo de cuentas y de la Balanza
@@ -17,6 +18,7 @@ import { getTrialBalance } from './trialBalance.service'
 const PERIOD_RE = /^\d{4}-(0[1-9]|1[0-2])$/
 const CAT_NS = 'http://www.sat.gob.mx/esquemas/ContabilidadE/1_3/CatalogoCuentas'
 const BCE_NS = 'http://www.sat.gob.mx/esquemas/ContabilidadE/1_3/BalanzaComprobacion'
+const PLZ_NS = 'http://www.sat.gob.mx/esquemas/ContabilidadE/1_3/PolizasPeriodo'
 
 /** Escapa los 5 caracteres especiales de XML para atributos/contenido. */
 function esc(s: string): string {
@@ -121,4 +123,62 @@ export async function getBalanzaXml(venueId: string, period: string, tipoEnvio: 
     `</BCE:Balanza>\n`
 
   return { needsFiscalSetup: false, empty: false, rfc: tb.rfc, period, filename: `${tb.rfc}${anio}${mes}B${tipo}.xml`, xml }
+}
+
+/** Tipo de solicitud del SAT para las pólizas (Anexo 24): AF/CO llevan NumOrden; FC/DE llevan NumTramite. */
+export type PolizasTipoSolicitud = 'AF' | 'FC' | 'DE' | 'CO'
+
+export interface PolizasXmlOptions {
+  tipoSolicitud?: PolizasTipoSolicitud
+  /** Número de orden (AF=acto de fiscalización / CO=compensación). */
+  numOrden?: string | null
+  /** Número de trámite (FC=fiscalización compulsa / DE=devolución). */
+  numTramite?: string | null
+}
+
+/**
+ * XML de las PÓLIZAS del periodo (Anexo 24, esquema PolizasPeriodo 1.3). El SAT lo pide bajo
+ * solicitud (devolución/compensación/auditoría), no mensual de oficio. Una `PLZ:Poliza` por asiento
+ * POSTED (mismo universo que la balanza), con sus `PLZ:Transaccion` (cuenta, concepto, debe, haber).
+ * El comprobante nacional por transacción (`CompNal` con UUID del CFDI) es opcional en el esquema y
+ * se omite por ahora (no hay enlace línea→UUID). `tipoSolicitud` rige el atributo de referencia
+ * (AF/CO→NumOrden, FC/DE→NumTramite); si no se captura, el XML sale sin él para que el contador lo complete.
+ */
+export async function getPolizasXml(venueId: string, period: string, opts: PolizasXmlOptions = {}): Promise<ContaElectronicaResult> {
+  if (!PERIOD_RE.test(period)) throw new BadRequestError('El periodo debe tener formato AAAA-MM (mes 01-12).')
+  const scope = await resolveScopeOrNull(venueId)
+  if (!scope) return emptyResult(period, null, true, false)
+
+  const entries = await listPeriodEntries(venueId, period)
+  if (entries.length === 0) return emptyResult(period, scope.rfc, false, true)
+
+  const [anio, mes] = period.split('-')
+  const tipo: PolizasTipoSolicitud = opts.tipoSolicitud ?? 'DE'
+  const usaOrden = tipo === 'AF' || tipo === 'CO'
+  const ref = (usaOrden ? opts.numOrden : opts.numTramite)?.trim() || null
+  const refAttr = ref ? (usaOrden ? ` NumOrden="${esc(ref)}"` : ` NumTramite="${esc(ref)}"`) : ''
+
+  const polizas = entries
+    .map(e => {
+      const trans = e.lines
+        .map(
+          l =>
+            `    <PLZ:Transaccion NumCta="${esc(l.accountCode)}" DesCta="${esc(l.accountName)}"` +
+            ` Concepto="${esc(l.description || e.concept)}" Debe="${pesos(l.debitCents)}" Haber="${pesos(l.creditCents)}"/>`,
+        )
+        .join('\n')
+      return `  <PLZ:Poliza NumUnIdenPol="${esc(String(e.folio))}" Fecha="${e.date}" Concepto="${esc(e.concept)}">\n${trans}\n  </PLZ:Poliza>`
+    })
+    .join('\n')
+
+  const xml =
+    `<?xml version="1.0" encoding="UTF-8"?>\n` +
+    `<PLZ:Polizas xmlns:PLZ="${PLZ_NS}" ` +
+    `xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" ` +
+    `xsi:schemaLocation="${PLZ_NS} ${PLZ_NS}/PolizasPeriodo_1_3.xsd" ` +
+    `Version="1.3" RFC="${esc(scope.rfc)}" Mes="${mes}" Anio="${anio}" TipoSolicitud="${tipo}"${refAttr}>\n` +
+    `${polizas}\n` +
+    `</PLZ:Polizas>\n`
+
+  return { needsFiscalSetup: false, empty: false, rfc: scope.rfc, period, filename: `${scope.rfc}${anio}${mes}PL.xml`, xml }
 }

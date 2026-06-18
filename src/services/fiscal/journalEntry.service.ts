@@ -1,4 +1,4 @@
-import { JournalEntrySource, JournalEntryType, Prisma } from '@prisma/client'
+import { JournalEntrySource, JournalEntryStatus, JournalEntryType, Prisma } from '@prisma/client'
 
 import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
@@ -374,4 +374,42 @@ export async function listEntries(venueId: string, filters: ListFilters = {}): P
   }))
 
   return { needsFiscalSetup: false, organizationId: scope.organizationId, rfc: scope.rfc, entries }
+}
+
+/**
+ * TODAS las pólizas POSTED de un periodo en orden CRONOLÓGICO (fecha/folio asc) — para la
+ * contabilidad electrónica (PLZ del Anexo 24). Sin el tope de 500 de `listEntries` y solo POSTED,
+ * para que el conjunto coincida exactamente con la balanza. Devuelve [] si el local no tiene RFC.
+ */
+export async function listPeriodEntries(venueId: string, period: string): Promise<JournalEntryDTO[]> {
+  const scope = await resolveScopeOrNull(venueId)
+  if (!scope || !/^\d{4}-\d{2}$/.test(period)) return []
+
+  const rows = await prisma.journalEntry.findMany({
+    where: { organizationId: scope.organizationId, rfc: scope.rfc, status: JournalEntryStatus.POSTED, period },
+    include: { lines: { include: { ledgerAccount: { select: { code: true, name: true } } }, orderBy: { createdAt: 'asc' } } },
+    orderBy: [{ date: 'asc' }, { folio: 'asc' }],
+  })
+
+  return rows.map(e => ({
+    id: e.id,
+    date: e.date.toISOString().slice(0, 10),
+    period: e.period,
+    folio: e.folio,
+    type: e.type,
+    source: e.source,
+    status: e.status,
+    concept: e.concept,
+    totalDebitCents: e.totalDebitCents,
+    totalCreditCents: e.totalCreditCents,
+    lines: e.lines.map(l => ({
+      id: l.id,
+      ledgerAccountId: l.ledgerAccountId,
+      accountCode: l.ledgerAccount.code,
+      accountName: l.ledgerAccount.name,
+      debitCents: l.debitCents,
+      creditCents: l.creditCents,
+      description: l.description,
+    })),
+  }))
 }

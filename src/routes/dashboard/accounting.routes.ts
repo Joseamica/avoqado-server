@@ -28,9 +28,15 @@ import {
   markExpensePaidController,
   getDiotController,
 } from '@/controllers/dashboard/expense.controller'
-import { getCatalogoXmlController, getBalanzaXmlController } from '@/controllers/dashboard/contabilidadElectronica.controller'
+import {
+  getCatalogoXmlController,
+  getBalanzaXmlController,
+  getPolizasXmlController,
+} from '@/controllers/dashboard/contabilidadElectronica.controller'
 import { getIsrProvisionalController } from '@/controllers/dashboard/isr.controller'
 import { getFiscalReadinessController } from '@/controllers/dashboard/fiscalReadiness.controller'
+import { getAccountLedgerController } from '@/controllers/dashboard/accountLedger.controller'
+import { getAccountsPayableController } from '@/controllers/dashboard/accountsPayable.controller'
 import {
   createEmployeeController,
   listEmployeesController,
@@ -292,6 +298,26 @@ router.get(
   getTrialBalanceController,
 )
 
+const accountLedgerSchema = z.object({
+  params: z.object({ venueId: z.string().cuid({ message: 'El ID del local no es válido.' }) }),
+  query: z.object({
+    accountCode: z.string().min(1, { message: 'El código de la cuenta es requerido.' }).max(40),
+    period: z
+      .string()
+      .regex(/^\d{4}-\d{2}$/, { message: 'El periodo debe tener formato AAAA-MM.' })
+      .optional(),
+  }),
+})
+
+/** GET /accounting/account-ledger?accountCode=&period=YYYY-MM — auxiliar de cuenta (movimientos + saldo corrido). */
+router.get(
+  '/account-ledger',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:read'),
+  validateRequest(accountLedgerSchema),
+  getAccountLedgerController,
+)
+
 /** GET /accounting/reports?period=YYYY-MM — estado de resultados + balance general. */
 router.get(
   '/reports',
@@ -445,6 +471,25 @@ router.post(
 /** GET /accounting/diot?period=YYYY-MM — DIOT (IVA pagado a proveedores por tercero y tasa). */
 router.get('/diot', checkFeatureAccess('CFDI'), checkPermission('accounting:read'), validateRequest(trialBalanceSchema), getDiotController)
 
+const accountsPayableSchema = z.object({
+  params: z.object({ venueId: z.string().cuid({ message: 'El ID del local no es válido.' }) }),
+  query: z.object({
+    asOf: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/, { message: 'La fecha (asOf) debe tener formato AAAA-MM-DD.' })
+      .optional(),
+  }),
+})
+
+/** GET /accounting/accounts-payable?asOf=YYYY-MM-DD — antigüedad de saldos de proveedores (CxP). */
+router.get(
+  '/accounts-payable',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:read'),
+  validateRequest(accountsPayableSchema),
+  getAccountsPayableController,
+)
+
 // ───────────────────────────────────────────────────────────────────────────
 // Contabilidad electrónica (SAT, Anexo 24) — XML del catálogo + balanza. Gated PREMIUM (CFDI).
 // ───────────────────────────────────────────────────────────────────────────
@@ -476,6 +521,28 @@ router.get(
   checkPermission('accounting:read'),
   validateRequest(balanzaXmlSchema),
   getBalanzaXmlController,
+)
+
+const polizasXmlSchema = z.object({
+  params: z.object({ venueId: z.string().cuid({ message: 'El ID del local no es válido.' }) }),
+  query: z.object({
+    period: z
+      .string()
+      .regex(/^\d{4}-\d{2}$/, { message: 'El periodo debe tener formato AAAA-MM.' })
+      .optional(),
+    tipoSolicitud: z.enum(['AF', 'FC', 'DE', 'CO']).optional(),
+    numOrden: z.string().max(40).optional(),
+    numTramite: z.string().max(40).optional(),
+  }),
+})
+
+/** GET /accounting/electronic/polizas?period=YYYY-MM&tipoSolicitud=&numOrden=&numTramite= — XML de pólizas (Anexo 24, 1.3). */
+router.get(
+  '/electronic/polizas',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:read'),
+  validateRequest(polizasXmlSchema),
+  getPolizasXmlController,
 )
 
 // ───────────────────────────────────────────────────────────────────────────

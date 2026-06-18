@@ -3,6 +3,8 @@
  *  - Catálogo: namespace + Version + RFC/Mes/Anio; toda SubCtaDe resuelve a un NumCta presente
  *    (integridad jerárquica); Natur D/A; nombre de archivo <RFC><Año><Mes>CT.xml.
  *  - Balanza: importes en pesos con 2 decimales (valor absoluto en saldos); TipoEnvio; nombre BN/BC.
+ *  - Pólizas (PLZ): una Poliza por asiento + sus Transaccion (debe/haber en pesos); TipoSolicitud
+ *    rige NumOrden (AF/CO) vs NumTramite (FC/DE); nombre <RFC><Año><Mes>PL.xml.
  */
 import { BadRequestError } from '../../../src/errors/AppError'
 
@@ -13,14 +15,19 @@ jest.mock('../../../src/services/fiscal/chartOfAccounts.service', () => ({
 jest.mock('../../../src/services/fiscal/trialBalance.service', () => ({
   getTrialBalance: jest.fn(),
 }))
+jest.mock('../../../src/services/fiscal/journalEntry.service', () => ({
+  listPeriodEntries: jest.fn(),
+}))
 
 import { resolveScopeOrNull, getCatalog } from '../../../src/services/fiscal/chartOfAccounts.service'
 import { getTrialBalance } from '../../../src/services/fiscal/trialBalance.service'
-import { getCatalogoXml, getBalanzaXml } from '../../../src/services/fiscal/contabilidadElectronica.service'
+import { listPeriodEntries } from '../../../src/services/fiscal/journalEntry.service'
+import { getCatalogoXml, getBalanzaXml, getPolizasXml } from '../../../src/services/fiscal/contabilidadElectronica.service'
 
 const mScope = resolveScopeOrNull as jest.Mock
 const mCatalog = getCatalog as jest.Mock
 const mTb = getTrialBalance as jest.Mock
+const mEntries = listPeriodEntries as jest.Mock
 
 const acc = (
   id: string,
@@ -169,5 +176,100 @@ describe('getBalanzaXml', () => {
     mTb.mockResolvedValue({ needsFiscalSetup: true, rfc: null, period: '2026-06', rows: [] })
     const r = await getBalanzaXml('v1', '2026-06')
     expect(r.needsFiscalSetup).toBe(true)
+  })
+})
+
+describe('getPolizasXml', () => {
+  const entry = (over: Record<string, unknown> = {}) => ({
+    id: 'je1',
+    date: '2026-06-15',
+    period: '2026-06',
+    folio: 7,
+    type: 'INGRESO',
+    source: 'AUTO_PAYMENT',
+    status: 'POSTED',
+    concept: 'Venta del día',
+    totalDebitCents: 116000,
+    totalCreditCents: 116000,
+    lines: [
+      {
+        id: 'l1',
+        ledgerAccountId: 'a1',
+        accountCode: '102.01',
+        accountName: 'Bancos',
+        debitCents: 116000,
+        creditCents: 0,
+        description: null,
+      },
+      {
+        id: 'l2',
+        ledgerAccountId: 'a2',
+        accountCode: '401.01',
+        accountName: 'Ventas',
+        debitCents: 0,
+        creditCents: 100000,
+        description: 'Ingreso',
+      },
+      {
+        id: 'l3',
+        ledgerAccountId: 'a3',
+        accountCode: '208.01',
+        accountName: 'IVA trasladado',
+        debitCents: 0,
+        creditCents: 16000,
+        description: null,
+      },
+    ],
+    ...over,
+  })
+
+  beforeEach(() => mScope.mockResolvedValue({ organizationId: 'org1', rfc: 'EKU9003173C9', venueType: 'AUTO_SERVICE' }))
+
+  it('periodo inválido → BadRequestError', async () => {
+    await expect(getPolizasXml('v1', '2026-13')).rejects.toThrow(BadRequestError)
+  })
+
+  it('sin RFC → needsFiscalSetup (no consulta pólizas)', async () => {
+    mScope.mockResolvedValue(null)
+    const r = await getPolizasXml('v1', '2026-06')
+    expect(r.needsFiscalSetup).toBe(true)
+    expect(mEntries).not.toHaveBeenCalled()
+  })
+
+  it('sin pólizas → empty', async () => {
+    mEntries.mockResolvedValue([])
+    const r = await getPolizasXml('v1', '2026-06')
+    expect(r.empty).toBe(true)
+    expect(r.xml).toBeNull()
+  })
+
+  it('genera XML 1.3: namespace, Poliza+Transaccion, pesos 2 decimales, nombre PL, TipoSolicitud default DE', async () => {
+    mEntries.mockResolvedValue([entry()])
+    const r = await getPolizasXml('v1', '2026-06')
+    expect(r.filename).toBe('EKU9003173C9202606PL.xml')
+    expect(r.xml).toContain('http://www.sat.gob.mx/esquemas/ContabilidadE/1_3/PolizasPeriodo')
+    expect(r.xml).toContain('Version="1.3" RFC="EKU9003173C9" Mes="06" Anio="2026" TipoSolicitud="DE"')
+    expect(r.xml).toContain('<PLZ:Poliza NumUnIdenPol="7" Fecha="2026-06-15" Concepto="Venta del día">')
+    expect(r.xml).toContain('NumCta="102.01" DesCta="Bancos" Concepto="Venta del día" Debe="1160.00" Haber="0.00"')
+    // la línea con description propia la usa como Concepto
+    expect(r.xml).toContain('NumCta="401.01" DesCta="Ventas" Concepto="Ingreso" Debe="0.00" Haber="1000.00"')
+  })
+
+  it('TipoSolicitud DE/FC → NumTramite; AF/CO → NumOrden', async () => {
+    mEntries.mockResolvedValue([entry()])
+    const de = await getPolizasXml('v1', '2026-06', { tipoSolicitud: 'DE', numTramite: 'AB123456789012' })
+    expect(de.xml).toContain('TipoSolicitud="DE" NumTramite="AB123456789012"')
+    expect(de.xml).not.toContain('NumOrden')
+    const af = await getPolizasXml('v1', '2026-06', { tipoSolicitud: 'AF', numOrden: 'ABC1234567/89' })
+    expect(af.xml).toContain('TipoSolicitud="AF" NumOrden="ABC1234567/89"')
+    expect(af.xml).not.toContain('NumTramite')
+  })
+
+  it('sin folio de referencia → emite sin NumOrden/NumTramite (el contador lo completa)', async () => {
+    mEntries.mockResolvedValue([entry()])
+    const r = await getPolizasXml('v1', '2026-06', { tipoSolicitud: 'CO' })
+    expect(r.xml).toContain('TipoSolicitud="CO">')
+    expect(r.xml).not.toContain('NumOrden')
+    expect(r.xml).not.toContain('NumTramite')
   })
 })
