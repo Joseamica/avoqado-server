@@ -1,6 +1,6 @@
 # Schema Domain Map — avoqado-server
 
-`prisma/schema.prisma` is **233 models / 219 enums / ~11,100 lines**. Nobody reads it top to bottom. This file is the **index**: 20 domains,
+`prisma/schema.prisma` is **233 models / 220 enums / ~11,100 lines**. Nobody reads it top to bottom. This file is the **index**: 20 domains,
 what each is for, and where it lives. Find your domain → jump to the `schema.prisma:LINE` → for field-level detail read
 `docs/DATABASE_SCHEMA.md`.
 
@@ -180,8 +180,8 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `PaymentLinkItem` → `schema.prisma:L9962`
 - `PaymentLinkItemModifier` → `schema.prisma:L9989`
 - `PaymentProvider` → `schema.prisma:L3499`
-- `PayrollLine` → `schema.prisma:L11078`
-- `PayrollRun` → `schema.prisma:L11047`
+- `PayrollLine` → `schema.prisma:L11087`
+- `PayrollRun` → `schema.prisma:L11056`
 - `PerformanceGoal` → `schema.prisma:L8363`
 - `PermissionSet` → `schema.prisma:L1062`
 - `PlatformSettings` → `schema.prisma:L3877`
