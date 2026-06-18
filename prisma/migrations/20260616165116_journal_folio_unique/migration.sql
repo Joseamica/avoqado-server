@@ -1,2 +1,10 @@
 -- Folio ÚNICO por contribuyente (integridad fiscal): bloquea consecutivos duplicados a nivel DB.
-CREATE UNIQUE INDEX "JournalEntry_organizationId_rfc_folio_key" ON "JournalEntry"("organizationId", "rfc", "folio");
+--
+-- NO-OP INTENCIONAL: esta migración originalmente creaba el índice único sobre "JournalEntry",
+-- pero su timestamp (16:51) la ordena ANTES de 20260616223308_add_journal_entry (22:33), que
+-- es la que CREA la tabla. En una base limpia (producción) esto fallaba con
+-- 42P01 relation "JournalEntry" does not exist (P3018).
+--
+-- El índice se crea ahora en 20260618170000_journal_folio_unique_index, que corre DESPUÉS de
+-- que la tabla existe. Esta migración se deja vacía a propósito para no romper el orden ni el
+-- historial de bases donde ya se registró.
