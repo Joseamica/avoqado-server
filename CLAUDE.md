@@ -195,7 +195,10 @@ Every **audit-worthy mutation** — create/update/delete of domain entities, mon
 (plan activate/deactivate, grant-trial, adjust-end-date), and status changes — MUST write an `ActivityLog` row (`action`, `entity`,
 `entityId`, `staffId` from authContext, `venueId`, `data`) in the SAME change, never "later". A mutating endpoint without `ActivityLog` is
 unfinished (treat it like permissions/MCP: kept in lockstep). Do NOT log reads or high-frequency events (heartbeats, scans, request logging)
-— that just bloats the audit trail. Full rule + example: `.claude/rules/critical-warnings.md`. (Backend-only — clients call the API;
+— that just bloats the audit trail. **If a mutation already writes to a SILOED audit/event table (`OrderAction`, `SerializedItemCustodyEvent`,
+`InventoryMovement`/`RawMaterialMovement`…), DUAL-WRITE to `ActivityLog` too** — the owner audit screen reads ONLY `ActivityLog`, so siloed-only
+writes are invisible to it. Stamp `venueId` on org-level events + thread the actor (`performedBy`) from the controller. Full rule + examples:
+`.claude/rules/critical-warnings.md`. (Backend-only — clients call the API;
 `avoqado-server` audits.)
 
 ## 🔴 CRITICAL — Keep the sales presentation in sync

@@ -169,3 +169,24 @@ await prisma.activityLog.create({
 
 A mutating endpoint without an `ActivityLog` write is **unfinished** — treat it like permissions and the MCP: kept in lockstep, never an
 afterthought. (Backend-only: client repos call the API; `avoqado-server` is what audits.)
+
+### Siloed audit tables → DUAL-WRITE to ActivityLog (lesson: venue audit-log review, 2026-06-16)
+
+Many mutations record their audit ONLY to a domain-specific side table, NOT to `ActivityLog` — so the owner audit trail (which reads
+`ActivityLog`) is **blind** to them. When a mutation already writes to a siloed audit/event table, **ALSO `logAction(...)` at the same spot**
+(do NOT remove the siloed write — dual-write):
+
+| Mutation | Siloed table (keep) | ALSO log to ActivityLog |
+| --- | --- | --- |
+| Order comp / void / discount (TPV) | `OrderAction` (`actionType` COMP/VOID/DISCOUNT) | `ITEM_COMPED` / `ITEM_VOIDED` / `DISCOUNT_APPLIED` |
+| SIM custody assign/accept/reject/collect | `SerializedItemCustodyEvent` | `SIM_CUSTODY_<EVENT>` |
+| Stock receive / adjust / batch | `RawMaterialMovement` / `InventoryMovement` / `StockBatch` | the receive/adjust/quarantine action |
+
+- **Stamp `venueId` on org-level events** (e.g. SIM custody items have `venueId: null`) from the item's venue
+  (`sellingVenueId ?? registeredFromVenueId ?? venueId`) — the per-venue audit screen filters `where: { venueId }`, so a null venueId is invisible there.
+- **Thread the actor:** services have no `authContext` — give each an optional `performedBy?: string` (or `staffId?: string`) param and pass
+  `authContext.userId` from the controller. Never log `staffId: null` when the actor is known (it kills accountability).
+- **`logAction` is fire-and-forget** (`void logAction(...)`, never throws, OUTSIDE any `prisma.$transaction`) — so an audit failure can't roll
+  back or break a money/DB op.
+- **Skip routine high-volume noise** even if it's technically a mutation: `ORDER_CREATED`, routine `PAYMENT_COMPLETED`, add-item. Log the
+  ANOMALIES an owner actually audits — void / comp / discount / refund / cancel / delete / role-or-permission change / cash discrepancy.
