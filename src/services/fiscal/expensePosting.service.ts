@@ -350,7 +350,14 @@ export async function markExpensePaid(
   opts: { fechaPago: string; formaPago?: string | null },
   actor: { staffId?: string | null },
 ): Promise<MarkPaidResult> {
-  const base: MarkPaidResult = { needsFiscalSetup: false, notFound: false, alreadyPaid: false, marked: false, paymentPosted: false, missingMappings: [] }
+  const base: MarkPaidResult = {
+    needsFiscalSetup: false,
+    notFound: false,
+    alreadyPaid: false,
+    marked: false,
+    paymentPosted: false,
+    missingMappings: [],
+  }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(opts.fechaPago)) throw new BadRequestError('La fecha de pago debe tener formato AAAA-MM-DD.')
 
   const scope = await resolveScopeOrNull(venueId)
@@ -367,7 +374,13 @@ export async function markExpensePaid(
 
   await prisma.expense.update({
     where: { id: expense.id },
-    data: { paymentStatus: 'PAID', fechaPago: new Date(`${opts.fechaPago}T12:00:00.000Z`), paidPeriod, paidCents: expense.totalCents, formaPago },
+    data: {
+      paymentStatus: 'PAID',
+      fechaPago: new Date(`${opts.fechaPago}T12:00:00.000Z`),
+      paidPeriod,
+      paidCents: expense.totalCents,
+      formaPago,
+    },
   })
   base.marked = true
 

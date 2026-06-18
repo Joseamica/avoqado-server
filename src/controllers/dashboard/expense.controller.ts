@@ -72,7 +72,12 @@ export async function markExpensePaidController(
 ): Promise<void> {
   try {
     const staffId = (req as any).authContext?.userId ?? null
-    const result = await markExpensePaid(req.params.venueId, req.params.expenseId, { fechaPago: req.body.fechaPago, formaPago: req.body.formaPago }, { staffId })
+    const result = await markExpensePaid(
+      req.params.venueId,
+      req.params.expenseId,
+      { fechaPago: req.body.fechaPago, formaPago: req.body.formaPago },
+      { staffId },
+    )
     res.status(200).json(result)
   } catch (error) {
     next(error)

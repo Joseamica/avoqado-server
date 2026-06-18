@@ -21,7 +21,13 @@ import prisma from '../../../src/utils/prismaClient'
 import { postJournalEntry } from '../../../src/services/fiscal/journalEntry.service'
 import { getMappings } from '../../../src/services/fiscal/accountMapping.service'
 import { resolveScopeOrNull } from '../../../src/services/fiscal/chartOfAccounts.service'
-import { planExpenseEntry, planExpensePayment, generateExpensePoliciesForVenue, postExpensePolicy, markExpensePaid } from '../../../src/services/fiscal/expensePosting.service'
+import {
+  planExpenseEntry,
+  planExpensePayment,
+  generateExpensePoliciesForVenue,
+  postExpensePolicy,
+  markExpensePaid,
+} from '../../../src/services/fiscal/expensePosting.service'
 
 const p = prisma as unknown as {
   venue: { findUnique: jest.Mock }
@@ -310,7 +316,9 @@ describe('markExpensePaid', () => {
     expect(r.marked).toBe(true)
     expect(r.paymentPosted).toBe(false)
     expect(mPost).not.toHaveBeenCalled()
-    expect(p.expense.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ paymentStatus: 'PAID', paidPeriod: '2026-07', paidCents: 116_00 }) }))
+    expect(p.expense.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ paymentStatus: 'PAID', paidPeriod: '2026-07', paidCents: 116_00 }) }),
+    )
   })
 
   it('PPD ya posteado en devengo → postea la póliza de pago (cuadra)', async () => {
