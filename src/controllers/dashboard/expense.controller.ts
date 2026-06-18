@@ -1,7 +1,7 @@
 import { NextFunction, Request, Response } from 'express'
 
 import { createExpense, listExpenses, type CreateExpenseInput, type ListExpensesFilters } from '../../services/fiscal/expense.service'
-import { generateExpensePoliciesForVenue } from '../../services/fiscal/expensePosting.service'
+import { generateExpensePoliciesForVenue, markExpensePaid } from '../../services/fiscal/expensePosting.service'
 import { getDiot } from '../../services/fiscal/diot.service'
 import { currentPeriod } from '../../services/fiscal/trialBalance.service'
 
@@ -59,6 +59,21 @@ export async function generateExpensePoliciesController(
     const period = req.query.period || currentPeriod()
     const staffId = (req as any).authContext?.userId ?? null
     res.status(200).json(await generateExpensePoliciesForVenue(venueId, { period, actorStaffId: staffId }))
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** POST /accounting/expenses/:expenseId/pay — marca un gasto como pagado (cash-basis) + póliza de pago si aplica. */
+export async function markExpensePaidController(
+  req: Request<{ venueId: string; expenseId: string }, {}, { fechaPago: string; formaPago?: string | null }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const staffId = (req as any).authContext?.userId ?? null
+    const result = await markExpensePaid(req.params.venueId, req.params.expenseId, { fechaPago: req.body.fechaPago, formaPago: req.body.formaPago }, { staffId })
+    res.status(200).json(result)
   } catch (error) {
     next(error)
   }

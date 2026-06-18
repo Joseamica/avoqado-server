@@ -15,12 +15,13 @@ jest.mock('../../../src/utils/prismaClient', () => ({
 jest.mock('../../../src/services/fiscal/journalEntry.service', () => ({ postJournalEntry: jest.fn() }))
 jest.mock('../../../src/services/fiscal/accountMapping.service', () => ({ getMappings: jest.fn() }))
 jest.mock('../../../src/services/fiscal/chartOfAccounts.service', () => ({ resolveScopeOrNull: jest.fn() }))
+jest.mock('../../../src/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 
 import prisma from '../../../src/utils/prismaClient'
 import { postJournalEntry } from '../../../src/services/fiscal/journalEntry.service'
 import { getMappings } from '../../../src/services/fiscal/accountMapping.service'
 import { resolveScopeOrNull } from '../../../src/services/fiscal/chartOfAccounts.service'
-import { planExpenseEntry, generateExpensePoliciesForVenue, postExpensePolicy } from '../../../src/services/fiscal/expensePosting.service'
+import { planExpenseEntry, planExpensePayment, generateExpensePoliciesForVenue, postExpensePolicy, markExpensePaid } from '../../../src/services/fiscal/expensePosting.service'
 
 const p = prisma as unknown as {
   venue: { findUnique: jest.Mock }
@@ -252,5 +253,88 @@ describe('postExpensePolicy (uno)', () => {
     const r = await postExpensePolicy('v1', 'e1', { staffId: 's' })
     expect(r.posted).toBe(1)
     expect(mPost).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('planExpensePayment — póliza de pago PPD', () => {
+  it('201.01→banco + 119.01→118.01, cuadra', () => {
+    const { lines, movements } = planExpensePayment(exp({ paymentStatus: 'UNPAID' }) as any)
+    const s = sum(lines)
+    expect(s.debe).toBe(s.haber)
+    expect(byMov(lines, 'ACCOUNTS_PAYABLE')!.debitCents).toBe(116_00)
+    expect(byMov(lines, 'BANK_RECEIPT')!.creditCents).toBe(116_00)
+    expect(byMov(lines, 'IVA_INPUT')!.debitCents).toBe(16_00)
+    expect(byMov(lines, 'IVA_INPUT_PENDING')!.creditCents).toBe(16_00)
+    expect(movements).toContain('ACCOUNTS_PAYABLE')
+  })
+
+  it('efectivo (formaPago 01) → CASH_RECEIPT', () => {
+    expect(byMov(planExpensePayment(exp({ formaPago: '01' }) as any).lines, 'CASH_RECEIPT')!.creditCents).toBe(116_00)
+  })
+
+  it('IVA no acreditable → sin líneas de IVA (sólo 201.01 ↔ banco)', () => {
+    const { lines } = planExpensePayment(exp({ ivaAcreditable: false }) as any)
+    expect(byMov(lines, 'IVA_INPUT')).toBeUndefined()
+    expect(byMov(lines, 'IVA_INPUT_PENDING')).toBeUndefined()
+    expect(sum(lines).debe).toBe(sum(lines).haber)
+  })
+})
+
+describe('markExpensePaid', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mScope.mockResolvedValue({ organizationId: 'org1', rfc: 'EKU9003173C9', venueType: 'AUTO_SERVICE' })
+    mMappings.mockResolvedValue(FULL_MAPPINGS)
+    p.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' })
+    mPost.mockResolvedValue({ id: 'jepay' })
+    p.expense.update.mockResolvedValue({})
+  })
+
+  it('gasto inexistente → notFound', async () => {
+    p.expense.findFirst.mockResolvedValue(null)
+    const r = await markExpensePaid('v1', 'nope', { fechaPago: '2026-06-20' }, { staffId: 's' })
+    expect(r.notFound).toBe(true)
+    expect(p.expense.update).not.toHaveBeenCalled()
+  })
+
+  it('ya pagado → alreadyPaid, no re-postea', async () => {
+    p.expense.findFirst.mockResolvedValue(dbExpense({ paymentStatus: 'PAID' }))
+    const r = await markExpensePaid('v1', 'e1', { fechaPago: '2026-06-20' }, { staffId: 's' })
+    expect(r.alreadyPaid).toBe(true)
+    expect(p.expense.update).not.toHaveBeenCalled()
+  })
+
+  it('PPD no posteado → sólo flipa estado (paidPeriod del pago), sin póliza de pago', async () => {
+    p.expense.findFirst.mockResolvedValue(dbExpense({ paymentStatus: 'UNPAID', posted: false }))
+    const r = await markExpensePaid('v1', 'e1', { fechaPago: '2026-07-05' }, { staffId: 's' })
+    expect(r.marked).toBe(true)
+    expect(r.paymentPosted).toBe(false)
+    expect(mPost).not.toHaveBeenCalled()
+    expect(p.expense.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ paymentStatus: 'PAID', paidPeriod: '2026-07', paidCents: 116_00 }) }))
+  })
+
+  it('PPD ya posteado en devengo → postea la póliza de pago (cuadra)', async () => {
+    p.expense.findFirst.mockResolvedValue(dbExpense({ paymentStatus: 'UNPAID', posted: true }))
+    const r = await markExpensePaid('v1', 'e1', { fechaPago: '2026-07-05' }, { staffId: 's' })
+    expect(r.paymentPosted).toBe(true)
+    expect(mPost).toHaveBeenCalledTimes(1)
+    const call = mPost.mock.calls[0][1]
+    expect(call.idempotencyKey).toBe('expense-pay:e1:v1')
+    const lines = call.lines
+    expect(lines.reduce((n: number, l: any) => n + l.debitCents, 0)).toBe(lines.reduce((n: number, l: any) => n + l.creditCents, 0))
+  })
+
+  it('mapeo faltante (sin ACCOUNTS_PAYABLE) → marca pagado pero reporta faltanMapeos, no postea', async () => {
+    mMappings.mockResolvedValue({ mappings: FULL_MAPPINGS.mappings.filter(m => m.movementType !== 'ACCOUNTS_PAYABLE') })
+    p.expense.findFirst.mockResolvedValue(dbExpense({ paymentStatus: 'UNPAID', posted: true }))
+    const r = await markExpensePaid('v1', 'e1', { fechaPago: '2026-07-05' }, { staffId: 's' })
+    expect(r.marked).toBe(true)
+    expect(r.paymentPosted).toBe(false)
+    expect(r.missingMappings).toContain('ACCOUNTS_PAYABLE')
+    expect(mPost).not.toHaveBeenCalled()
+  })
+
+  it('fecha inválida → BadRequestError', async () => {
+    await expect(markExpensePaid('v1', 'e1', { fechaPago: '2026/07/05' }, { staffId: 's' })).rejects.toThrow()
   })
 })

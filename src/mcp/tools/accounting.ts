@@ -10,7 +10,7 @@ import { getAccountingReports } from '@/services/fiscal/accountingReports.servic
 import { getIvaCashflow } from '@/services/fiscal/ivaFlujo.service'
 import { generatePoliciesForVenue } from '@/services/fiscal/autoPosting.service'
 import { createExpense, listExpenses } from '@/services/fiscal/expense.service'
-import { generateExpensePoliciesForVenue } from '@/services/fiscal/expensePosting.service'
+import { generateExpensePoliciesForVenue, markExpensePaid } from '@/services/fiscal/expensePosting.service'
 import { getDiot } from '@/services/fiscal/diot.service'
 import { listStatements } from '@/services/dashboard/bankReconciliation.service'
 import type { McpScope } from '../scope'
@@ -691,6 +691,38 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         omitidos: r.skipped,
         faltanMapeos: r.missingMappings.length > 0 ? r.missingMappings : undefined,
         nota: 'Idempotente: re-correr no duplica. Sólo postea CFDIs INGRESO; notas de crédito y REP se omiten. Un gasto se omite si le falta una cuenta en Configuración contable.',
+      })
+    },
+  )
+
+  server.tool(
+    'mark_expense_paid',
+    'Marca un GASTO / CFDI recibido como PAGADO (Capa B fiscal, PREMIUM, escritura). El IVA se vuelve acreditable en el mes del pago (cash-basis) y entra a la DIOT; si el gasto ya estaba posteado en devengo (PPD), genera la póliza de pago (Proveedores→banco, IVA pendiente→acreditable). Escritura: requiere accounting:manage + feature CFDI. Pasa venueId, expenseId y fechaPago (AAAA-MM-DD); opcional formaPago (catálogo SAT, "01"=efectivo).',
+    {
+      venueId: z.string().describe('Local (debe estar en tu alcance)'),
+      expenseId: z.string().describe('Id del gasto a marcar pagado'),
+      fechaPago: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .describe('Fecha de pago AAAA-MM-DD'),
+      formaPago: z.string().optional().describe('Forma de pago SAT (opcional; "01"=efectivo → caja, si no → banco)'),
+    },
+    async ({ venueId, expenseId, fechaPago, formaPago }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:manage', venueId) // write gate
+      const gate = await planGateMessage(venueId, 'CFDI', 'El registro de pago de gastos')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+
+      const r = await markExpensePaid(venueId, expenseId, { fechaPago, formaPago }, { staffId: scope.staffId })
+      if (r.needsFiscalSetup) return text({ ok: true, needsFiscalSetup: true })
+      if (r.notFound) return text({ ok: false, notFound: true, error: 'No se encontró el gasto (o ya está cancelado).' })
+      if (r.alreadyPaid) return text({ ok: true, alreadyPaid: true, nota: 'El gasto ya estaba marcado como pagado.' })
+      return text({
+        ok: true,
+        marcadoPagado: r.marked,
+        polizaDePagoGenerada: r.paymentPosted,
+        faltanMapeos: r.missingMappings.length > 0 ? r.missingMappings : undefined,
+        nota: 'El IVA de este gasto ya es acreditable en el mes del pago y entra a la DIOT.',
       })
     },
   )

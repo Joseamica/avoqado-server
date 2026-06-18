@@ -311,3 +311,107 @@ export async function postExpensePolicy(
   }
   return base
 }
+
+/** Líneas de la póliza de PAGO de un gasto PPD ya devengado: 201.01→banco/caja, 119.01→118.01. */
+export function planExpensePayment(e: ExpenseForPlan): { lines: PlanLine[]; movements: string[] } {
+  const acreditable = e.deducible && e.ivaAcreditable
+  const payMovement = isCashForma(e.formaPago) ? 'CASH_RECEIPT' : 'BANK_RECEIPT'
+  const lines: PlanLine[] = []
+  // Pagamos a Proveedores el total (ya neto de retenciones, que se enteraron en el devengo).
+  lines.push({ movement: 'ACCOUNTS_PAYABLE', debitCents: e.totalCents, creditCents: 0 })
+  lines.push({ movement: payMovement, debitCents: 0, creditCents: e.totalCents })
+  if (acreditable && e.ivaCents > 0) {
+    // El IVA pasa de pendiente (119.01) a acreditable (118.01).
+    lines.push({ movement: 'IVA_INPUT', debitCents: e.ivaCents, creditCents: 0 })
+    lines.push({ movement: 'IVA_INPUT_PENDING', debitCents: 0, creditCents: e.ivaCents })
+  }
+  return { lines, movements: [...new Set(lines.map(l => l.movement))] }
+}
+
+export interface MarkPaidResult {
+  needsFiscalSetup: boolean
+  notFound: boolean
+  alreadyPaid: boolean
+  marked: boolean
+  /** Se posteó la póliza de pago (sólo si el gasto ya estaba devengado/posteado). */
+  paymentPosted: boolean
+  missingMappings: string[]
+}
+
+/**
+ * Marca un gasto como PAGADO (cash-basis): registra fechaPago/paidPeriod/paidCents y, si el gasto ya
+ * estaba posteado en DEVENGO (caso PPD), postea la póliza de PAGO (201.01→banco, 119.01→118.01). Si
+ * aún no se había posteado, sólo flipa el estado y la próxima generación lo postea como PAGADO directo.
+ * Idempotente por `expense-pay:<id>:v1`.
+ */
+export async function markExpensePaid(
+  venueId: string,
+  expenseId: string,
+  opts: { fechaPago: string; formaPago?: string | null },
+  actor: { staffId?: string | null },
+): Promise<MarkPaidResult> {
+  const base: MarkPaidResult = { needsFiscalSetup: false, notFound: false, alreadyPaid: false, marked: false, paymentPosted: false, missingMappings: [] }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(opts.fechaPago)) throw new BadRequestError('La fecha de pago debe tener formato AAAA-MM-DD.')
+
+  const scope = await resolveScopeOrNull(venueId)
+  if (!scope) return { ...base, needsFiscalSetup: true }
+
+  const expense = await prisma.expense.findFirst({
+    where: { id: expenseId, organizationId: scope.organizationId, rfc: scope.rfc, status: 'REGISTERED' },
+  })
+  if (!expense) return { ...base, notFound: true }
+  if (expense.paymentStatus === 'PAID') return { ...base, alreadyPaid: true }
+
+  const paidPeriod = opts.fechaPago.slice(0, 7)
+  const formaPago = opts.formaPago ?? expense.formaPago
+
+  await prisma.expense.update({
+    where: { id: expense.id },
+    data: { paymentStatus: 'PAID', fechaPago: new Date(`${opts.fechaPago}T12:00:00.000Z`), paidPeriod, paidCents: expense.totalCents, formaPago },
+  })
+  base.marked = true
+
+  // Si el gasto YA estaba posteado en devengo (PPD), postea ahora la póliza de pago.
+  if (expense.posted) {
+    const mapResult = await getMappings(venueId)
+    const accountByMovement = new Map<string, string>()
+    for (const m of mapResult.mappings) if (m.account) accountByMovement.set(m.movementType, m.account.id)
+    const acct = (m: string): string | undefined => accountByMovement.get(m)
+
+    const { lines, movements } = planExpensePayment({ ...expense, formaPago })
+    const missing = movements.filter(m => !acct(m))
+    if (missing.length > 0) {
+      base.missingMappings = missing
+    } else {
+      const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+      const tz = venue?.timezone || DEFAULT_TZ
+      const ref = expense.uuid ? expense.uuid.slice(0, 8) : (expense.folio ?? '')
+      await postJournalEntry(
+        venueId,
+        {
+          date: formatInTimeZone(new Date(`${opts.fechaPago}T12:00:00.000Z`), tz, 'yyyy-MM-dd'),
+          type: JournalEntryType.EGRESO,
+          source: JournalEntrySource.EXPENSE,
+          sourceId: expense.id,
+          idempotencyKey: `expense-pay:${expense.id}:v1`,
+          concept: `Pago gasto · ${expense.proveedorNombre}${ref ? ` · ${ref}` : ''}`,
+          venueId,
+          lines: lines.map(l => ({ ledgerAccountId: acct(l.movement)!, debitCents: l.debitCents, creditCents: l.creditCents })),
+        },
+        { staffId: actor.staffId ?? null },
+      )
+      base.paymentPosted = true
+    }
+  }
+
+  await logAction({
+    action: 'EXPENSE_MARKED_PAID',
+    entity: 'Expense',
+    entityId: expense.id,
+    staffId: actor.staffId ?? null,
+    venueId,
+    data: { proveedorRfc: expense.proveedorRfc, totalCents: expense.totalCents, paidPeriod, paymentPosted: base.paymentPosted },
+  })
+
+  return base
+}

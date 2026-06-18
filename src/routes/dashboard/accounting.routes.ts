@@ -24,6 +24,7 @@ import {
   createExpenseController,
   listExpensesController,
   generateExpensePoliciesController,
+  markExpensePaidController,
   getDiotController,
 } from '@/controllers/dashboard/expense.controller'
 import { checkFeatureAccess } from '@/middlewares/checkFeatureAccess.middleware'
@@ -381,6 +382,26 @@ router.post(
   checkPermission('accounting:manage'),
   validateRequest(trialBalanceSchema),
   generateExpensePoliciesController,
+)
+
+const markPaidSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del local no es válido.' }),
+    expenseId: z.string().cuid({ message: 'El ID del gasto no es válido.' }),
+  }),
+  body: z.object({
+    fechaPago: dateStr('fecha de pago'),
+    formaPago: z.string().max(10).nullable().optional(),
+  }),
+})
+
+/** POST /accounting/expenses/:expenseId/pay — marca un gasto como pagado (cash-basis) + póliza de pago. */
+router.post(
+  '/expenses/:expenseId/pay',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:manage'),
+  validateRequest(markPaidSchema),
+  markExpensePaidController,
 )
 
 /** GET /accounting/diot?period=YYYY-MM — DIOT (IVA pagado a proveedores por tercero y tasa). */
