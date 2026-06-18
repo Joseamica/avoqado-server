@@ -24,6 +24,9 @@ import request from 'supertest'
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    // staffVenue powers the SUPERADMIN bypass in checkFeatureAccess (requestIsSuperAdmin).
+    // Without it, prisma.staffVenue is undefined → the gate throws → catch returns 500.
+    staffVenue: { findFirst: jest.fn() },
     venue: { findUnique: jest.fn() },
     venueFeature: { findFirst: jest.fn(), findMany: jest.fn() },
   },
@@ -53,6 +56,7 @@ import prisma from '@/utils/prismaClient'
 import { checkFeatureAccess } from '@/middlewares/checkFeatureAccess.middleware'
 import reservationRoutes from '@/routes/dashboard/reservation.routes'
 
+const staffVenueFindFirst = (prisma as any).staffVenue.findFirst as jest.Mock
 const venueFindUnique = (prisma as any).venue.findUnique as jest.Mock
 const vfFindFirst = (prisma as any).venueFeature.findFirst as jest.Mock
 const vfFindMany = (prisma as any).venueFeature.findMany as jest.Mock
@@ -77,6 +81,7 @@ const SETTINGS_URL = `/api/v1/dashboard/venues/${VENUE_ID}/reservations/settings
 
 beforeEach(() => {
   jest.clearAllMocks()
+  staffVenueFindFirst.mockResolvedValue(null) // requester is NOT a platform superadmin
   vfFindFirst.mockResolvedValue(null) // no own VenueFeature grant by default
   vfFindMany.mockResolvedValue([]) // no paid base plan by default
 })
