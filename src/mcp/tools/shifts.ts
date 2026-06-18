@@ -5,8 +5,10 @@ import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
+import { getExpectedCashAmount, getCloseoutHistory } from '@/services/dashboard/cashCloseout.dashboard.service'
 
 const money = (d: { toString(): string } | null): number | null => (d == null ? null : Number(d))
+const round2 = (n: number): number => Math.round(n * 100) / 100
 
 export function registerShiftTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
@@ -62,6 +64,46 @@ export function registerShiftTools(server: McpServer, scope: McpScope) {
           startingCash: money(s.startingCash),
           endingCash: money(s.endingCash),
           cashDifference: money(s.cashDifference),
+        })),
+      })
+    },
+  )
+
+  server.tool(
+    'cash_closeout',
+    'Cash register closeout (corte de caja) for a venue you can access. Two parts: (1) the cash EXPECTED in the drawer RIGHT NOW since the last cut — the sum of completed cash payments minus cash refunds — with how many cash transactions and whether a cut is due; and (2) the history of past closeouts, each showing expected vs the actual counted amount, the variance (faltante if negative / sobrante if positive), the deposit method, who closed it and when. Answers "¿cuánto efectivo debería haber en caja?", "¿cuál fue el corte de hoy/ayer?", "¿hubo faltante o sobrante?". Pass venueId. Read-only; requires the settlements:read permission.',
+    {
+      venueId: z.string().describe('Venue whose cash closeout to read (must be in your scope)'),
+      limit: z.number().int().positive().max(50).optional().describe('How many past closeouts to list (default 10)'),
+    },
+    async ({ venueId, limit }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('settlements:read', venueId) // same gate as the dashboard cash-closeouts endpoints
+      const [expected, history] = await Promise.all([getExpectedCashAmount(venueId), getCloseoutHistory(venueId, 1, limit ?? 10)])
+      return text({
+        venueId,
+        // What SHOULD be in the drawer now, before the next cut.
+        currentDrawer: {
+          expectedCash: round2(expected.expectedAmount),
+          cashTransactions: expected.transactionCount,
+          sinceLastCloseout: expected.periodStart.toISOString(),
+          daysSinceLastCloseout: expected.daysSinceLastCloseout,
+          hasPriorCloseouts: expected.hasCloseouts,
+          needsCloseout: expected.needsCloseout, // true only when there is real cash activity to cut
+        },
+        totalCloseouts: history.pagination.total,
+        recentCloseouts: history.data.map(c => ({
+          id: c.id,
+          periodStart: c.periodStart.toISOString(),
+          periodEnd: c.periodEnd.toISOString(),
+          expected: money(c.expectedAmount),
+          actual: money(c.actualAmount),
+          variance: money(c.variance), // negative = faltante, positive = sobrante
+          variancePercent: money(c.variancePercent),
+          depositMethod: c.depositMethod,
+          closedBy: c.closedBy ? `${c.closedBy.firstName} ${c.closedBy.lastName}`.trim() : null,
+          notes: c.notes ?? null,
+          at: c.createdAt.toISOString(),
         })),
       })
     },
