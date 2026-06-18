@@ -468,9 +468,7 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
       ])
 
       // Resolve every createdBy staffId → "First Last" in one query.
-      const staffIds = [
-        ...new Set([...productMoves, ...rawMoves].map(m => m.createdBy).filter((id): id is string => !!id)),
-      ]
+      const staffIds = [...new Set([...productMoves, ...rawMoves].map(m => m.createdBy).filter((id): id is string => !!id))]
       const staff = staffIds.length
         ? await prisma.staff.findMany({ where: { id: { in: staffIds } }, select: { id: true, firstName: true, lastName: true } })
         : []

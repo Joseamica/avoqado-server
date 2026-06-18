@@ -62,7 +62,8 @@ beforeEach(() => {
 /** Última póliza enviada a postJournalEntry. */
 const lastEntry = () => mockPost.mock.calls[mockPost.mock.calls.length - 1][1]
 const sum = (lines: { debitCents: number; creditCents: number }[], k: 'debitCents' | 'creditCents') => lines.reduce((s, l) => s + l[k], 0)
-const acctOf = (lines: { ledgerAccountId: string; debitCents: number; creditCents: number }[], id: string) => lines.find(l => l.ledgerAccountId === id)
+const acctOf = (lines: { ledgerAccountId: string; debitCents: number; creditCents: number }[], id: string) =>
+  lines.find(l => l.ledgerAccountId === id)
 
 it('sin RFC → needsFiscalSetup, no postea', async () => {
   mockScope.mockResolvedValue(null)
@@ -108,7 +109,9 @@ it('VENTA efectivo → caja (G+T), sin línea de comisión, cuadra', async () =>
 })
 
 it('DEVOLUCIÓN (type=REFUND, monto negativo) → 402.01, espejo invertido, cuadra', async () => {
-  p.payment.findMany.mockResolvedValue([pay({ id: 'r1', amount: -116, tipAmount: 0, feeAmount: 0, type: PaymentType.REFUND, method: PaymentMethod.CREDIT_CARD })])
+  p.payment.findMany.mockResolvedValue([
+    pay({ id: 'r1', amount: -116, tipAmount: 0, feeAmount: 0, type: PaymentType.REFUND, method: PaymentMethod.CREDIT_CARD }),
+  ])
   const r = await generatePoliciesForVenue('v1')
   expect(r.posted).toBe(1)
   const e = lastEntry()

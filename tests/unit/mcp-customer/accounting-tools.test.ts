@@ -499,7 +499,15 @@ describe('accounting_iva_cashflow (read) — gated CFDI + accounting:read', () =
 describe('generate_journal_entries (write) — gated CFDI + accounting:manage', () => {
   it('exige accounting:manage (no read) y postea con el staff del scope', async () => {
     mockPlanGate.mockResolvedValue(null)
-    mockGenerate.mockResolvedValue({ needsFiscalSetup: false, missingMappings: [], period: '2026-06', candidates: 22, posted: 22, alreadyPosted: 0, skipped: 2 })
+    mockGenerate.mockResolvedValue({
+      needsFiscalSetup: false,
+      missingMappings: [],
+      period: '2026-06',
+      candidates: 22,
+      posted: 22,
+      alreadyPosted: 0,
+      skipped: 2,
+    })
     const out = parse(await call('generate_journal_entries', { venueId: 'v1', period: '2026-06' }))
     expect(mockRequirePermission).toHaveBeenCalledWith('accounting:manage', 'v1')
     expect(mockGenerate).toHaveBeenCalledWith('v1', { period: '2026-06', actorStaffId: 'staff-1' })
@@ -510,7 +518,15 @@ describe('generate_journal_entries (write) — gated CFDI + accounting:manage', 
 
   it('faltan mapeos → needsMapping, NO ok', async () => {
     mockPlanGate.mockResolvedValue(null)
-    mockGenerate.mockResolvedValue({ needsFiscalSetup: false, missingMappings: ['IVA_OUTPUT'], period: '2026-06', candidates: 0, posted: 0, alreadyPosted: 0, skipped: 0 })
+    mockGenerate.mockResolvedValue({
+      needsFiscalSetup: false,
+      missingMappings: ['IVA_OUTPUT'],
+      period: '2026-06',
+      candidates: 0,
+      posted: 0,
+      alreadyPosted: 0,
+      skipped: 0,
+    })
     const out = parse(await call('generate_journal_entries', { venueId: 'v1' }))
     expect(out.ok).toBe(false)
     expect(out.needsMapping).toBe(true)
@@ -532,7 +548,17 @@ describe('register_expense (write) — gated CFDI + accounting:manage', () => {
 
   it('venue sin CFDI → planRequired, NO crea', async () => {
     mockPlanGate.mockResolvedValue('Requiere PREMIUM')
-    const out = parse(await call('register_expense', { venueId: 'v1', proveedorRfc: 'AAA010101AAA', proveedorNombre: 'X', fechaEmision: '2026-06-10', subtotalCents: 10000, ivaCents: 1600, totalCents: 11600 }))
+    const out = parse(
+      await call('register_expense', {
+        venueId: 'v1',
+        proveedorRfc: 'AAA010101AAA',
+        proveedorNombre: 'X',
+        fechaEmision: '2026-06-10',
+        subtotalCents: 10000,
+        ivaCents: 1600,
+        totalCents: 11600,
+      }),
+    )
     expect(out.planRequired).toBe(true)
     expect(mockRequirePermission).toHaveBeenCalledWith('accounting:manage', 'v1')
     expect(mockCreateExpense).not.toHaveBeenCalled()
@@ -541,11 +567,30 @@ describe('register_expense (write) — gated CFDI + accounting:manage', () => {
   it('con CFDI → crea el gasto y devuelve resumen en pesos', async () => {
     mockPlanGate.mockResolvedValue(null)
     mockCreateExpense.mockResolvedValue({
-      id: 'exp1', proveedorRfc: 'AAA010101AAA', proveedorNombre: 'Café', fechaEmision: '2026-06-10',
-      subtotalCents: 100000, ivaCents: 16000, totalCents: 116000, metodoPago: 'PUE', paymentStatus: 'PAID',
-      paidPeriod: '2026-06', deducible: true, ivaAcreditable: true,
+      id: 'exp1',
+      proveedorRfc: 'AAA010101AAA',
+      proveedorNombre: 'Café',
+      fechaEmision: '2026-06-10',
+      subtotalCents: 100000,
+      ivaCents: 16000,
+      totalCents: 116000,
+      metodoPago: 'PUE',
+      paymentStatus: 'PAID',
+      paidPeriod: '2026-06',
+      deducible: true,
+      ivaAcreditable: true,
     })
-    const out = parse(await call('register_expense', { venueId: 'v1', proveedorRfc: 'AAA010101AAA', proveedorNombre: 'Café', fechaEmision: '2026-06-10', subtotalCents: 100000, ivaCents: 16000, totalCents: 116000 }))
+    const out = parse(
+      await call('register_expense', {
+        venueId: 'v1',
+        proveedorRfc: 'AAA010101AAA',
+        proveedorNombre: 'Café',
+        fechaEmision: '2026-06-10',
+        subtotalCents: 100000,
+        ivaCents: 16000,
+        totalCents: 116000,
+      }),
+    )
     expect(out.ok).toBe(true)
     expect(out.gasto.total).toBeCloseTo(1160)
     expect(out.gasto.estatusPago).toBe('PAID')
@@ -557,9 +602,22 @@ describe('expenses (read) — gated CFDI + accounting:read', () => {
   it('con CFDI → lista + resumen en pesos', async () => {
     mockPlanGate.mockResolvedValue(null)
     mockListExpenses.mockResolvedValue({
-      needsFiscalSetup: false, rfc: 'EKU9003173C9',
+      needsFiscalSetup: false,
+      rfc: 'EKU9003173C9',
       summary: { count: 2, totalCents: 17400, ivaCents: 2400, deducibleCents: 15000 },
-      expenses: [{ id: 'e1', proveedorRfc: 'AAA010101AAA', proveedorNombre: 'X', fechaEmision: '2026-06-10', totalCents: 11600, ivaCents: 1600, metodoPago: 'PUE', paymentStatus: 'PAID', posted: false }],
+      expenses: [
+        {
+          id: 'e1',
+          proveedorRfc: 'AAA010101AAA',
+          proveedorNombre: 'X',
+          fechaEmision: '2026-06-10',
+          totalCents: 11600,
+          ivaCents: 1600,
+          metodoPago: 'PUE',
+          paymentStatus: 'PAID',
+          posted: false,
+        },
+      ],
     })
     const out = parse(await call('expenses', { venueId: 'v1', period: '2026-06' }))
     expect(mockRequirePermission).toHaveBeenCalledWith('accounting:read', 'v1')
@@ -571,7 +629,15 @@ describe('expenses (read) — gated CFDI + accounting:read', () => {
 describe('generate_expense_policies (write) — gated CFDI + accounting:manage', () => {
   it('con CFDI → postea y reporta el conteo', async () => {
     mockPlanGate.mockResolvedValue(null)
-    mockGenExpensePolicies.mockResolvedValue({ needsFiscalSetup: false, missingMappings: [], period: '2026-06', candidates: 3, posted: 3, alreadyPosted: 0, skipped: 0 })
+    mockGenExpensePolicies.mockResolvedValue({
+      needsFiscalSetup: false,
+      missingMappings: [],
+      period: '2026-06',
+      candidates: 3,
+      posted: 3,
+      alreadyPosted: 0,
+      skipped: 0,
+    })
     const out = parse(await call('generate_expense_policies', { venueId: 'v1', period: '2026-06' }))
     expect(mockRequirePermission).toHaveBeenCalledWith('accounting:manage', 'v1')
     expect(out.ok).toBe(true)
@@ -580,7 +646,15 @@ describe('generate_expense_policies (write) — gated CFDI + accounting:manage',
 
   it('faltan mapeos → ok:false con faltanMapeos', async () => {
     mockPlanGate.mockResolvedValue(null)
-    mockGenExpensePolicies.mockResolvedValue({ needsFiscalSetup: false, missingMappings: ['IVA_INPUT'], period: '2026-06', candidates: 1, posted: 0, alreadyPosted: 0, skipped: 1 })
+    mockGenExpensePolicies.mockResolvedValue({
+      needsFiscalSetup: false,
+      missingMappings: ['IVA_INPUT'],
+      period: '2026-06',
+      candidates: 1,
+      posted: 0,
+      alreadyPosted: 0,
+      skipped: 1,
+    })
     const out = parse(await call('generate_expense_policies', { venueId: 'v1' }))
     expect(out.ok).toBe(false)
     expect(out.faltanMapeos).toContain('IVA_INPUT')
@@ -591,9 +665,38 @@ describe('diot (read) — gated CFDI + accounting:read', () => {
   it('con CFDI → DIOT por proveedor + totales + cuadre', async () => {
     mockPlanGate.mockResolvedValue(null)
     mockGetDiot.mockResolvedValue({
-      needsFiscalSetup: false, rfc: 'EKU9003173C9', period: '2026-06',
-      rows: [{ proveedorRfc: 'AAA010101AAA', proveedorNombre: 'X', tipoTercero: 'NACIONAL', tipoTerceroCodigo: '04', base16Cents: 100000, iva16Cents: 16000, base8Cents: 0, iva8Cents: 0, base0Cents: 0, exentoCents: 0, ivaRetenidoCents: 0, ivaAcreditableCents: 16000, comprobantes: 1 }],
-      totals: { proveedores: 1, comprobantes: 1, base16Cents: 100000, iva16Cents: 16000, base8Cents: 0, iva8Cents: 0, base0Cents: 0, exentoCents: 0, ivaRetenidoCents: 0, ivaAcreditableCents: 16000 },
+      needsFiscalSetup: false,
+      rfc: 'EKU9003173C9',
+      period: '2026-06',
+      rows: [
+        {
+          proveedorRfc: 'AAA010101AAA',
+          proveedorNombre: 'X',
+          tipoTercero: 'NACIONAL',
+          tipoTerceroCodigo: '04',
+          base16Cents: 100000,
+          iva16Cents: 16000,
+          base8Cents: 0,
+          iva8Cents: 0,
+          base0Cents: 0,
+          exentoCents: 0,
+          ivaRetenidoCents: 0,
+          ivaAcreditableCents: 16000,
+          comprobantes: 1,
+        },
+      ],
+      totals: {
+        proveedores: 1,
+        comprobantes: 1,
+        base16Cents: 100000,
+        iva16Cents: 16000,
+        base8Cents: 0,
+        iva8Cents: 0,
+        base0Cents: 0,
+        exentoCents: 0,
+        ivaRetenidoCents: 0,
+        ivaAcreditableCents: 16000,
+      },
       cuadraConIvaFlujo: true,
     })
     const out = parse(await call('diot', { venueId: 'v1', period: '2026-06' }))

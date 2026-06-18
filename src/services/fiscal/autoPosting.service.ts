@@ -36,7 +36,15 @@ const PERIOD_RE = /^\d{4}-(0[1-9]|1[0-2])$/
 const toCents = (d: Prisma.Decimal | number | null): number => (d == null ? 0 : Math.round(Number(d) * 100))
 
 /** Movimientos que el motor necesita mapeados para poder postear. */
-const REQUIRED_MOVEMENTS = ['SALES_REVENUE', 'SALES_RETURN', 'IVA_OUTPUT', 'CASH_RECEIPT', 'BANK_RECEIPT', 'TIPS_PAYABLE', 'PROCESSOR_FEE'] as const
+const REQUIRED_MOVEMENTS = [
+  'SALES_REVENUE',
+  'SALES_RETURN',
+  'IVA_OUTPUT',
+  'CASH_RECEIPT',
+  'BANK_RECEIPT',
+  'TIPS_PAYABLE',
+  'PROCESSOR_FEE',
+] as const
 
 export interface GenerateResult {
   needsFiscalSetup: boolean
@@ -65,7 +73,10 @@ interface PaymentRow {
 }
 
 /** Construye las líneas BALANCEADAS de una póliza de VENTA. null si es una anomalía no posteable. */
-function buildSaleLines(p: PaymentRow, acct: (m: string) => string): { lines: { ledgerAccountId: string; debitCents: number; creditCents: number }[] } | null {
+function buildSaleLines(
+  p: PaymentRow,
+  acct: (m: string) => string,
+): { lines: { ledgerAccountId: string; debitCents: number; creditCents: number }[] } | null {
   const G = Math.abs(toCents(p.amount))
   const T = Math.abs(toCents(p.tipAmount))
   const F = Math.abs(toCents(p.feeAmount))
@@ -76,7 +87,8 @@ function buildSaleLines(p: PaymentRow, acct: (m: string) => string): { lines: { 
   if (depositCents < 0) return null // comisión > cobro: anomalía, no postear
 
   const lines: { ledgerAccountId: string; debitCents: number; creditCents: number }[] = []
-  if (depositCents > 0) lines.push({ ledgerAccountId: acct(isCash ? 'CASH_RECEIPT' : 'BANK_RECEIPT'), debitCents: depositCents, creditCents: 0 })
+  if (depositCents > 0)
+    lines.push({ ledgerAccountId: acct(isCash ? 'CASH_RECEIPT' : 'BANK_RECEIPT'), debitCents: depositCents, creditCents: 0 })
   if (!isCash && F > 0) lines.push({ ledgerAccountId: acct('PROCESSOR_FEE'), debitCents: F, creditCents: 0 })
   if (netCents > 0) lines.push({ ledgerAccountId: acct('SALES_REVENUE'), debitCents: 0, creditCents: netCents })
   if (taxCents > 0) lines.push({ ledgerAccountId: acct('IVA_OUTPUT'), debitCents: 0, creditCents: taxCents })
@@ -85,7 +97,10 @@ function buildSaleLines(p: PaymentRow, acct: (m: string) => string): { lines: { 
 }
 
 /** Líneas de una DEVOLUCIÓN (espejo invertido). Usa los montos de la propia fila refund. */
-function buildRefundLines(p: PaymentRow, acct: (m: string) => string): { lines: { ledgerAccountId: string; debitCents: number; creditCents: number }[] } | null {
+function buildRefundLines(
+  p: PaymentRow,
+  acct: (m: string) => string,
+): { lines: { ledgerAccountId: string; debitCents: number; creditCents: number }[] } | null {
   const rG = Math.abs(toCents(p.amount))
   const rT = Math.abs(toCents(p.tipAmount))
   const rF = Math.abs(toCents(p.feeAmount)) // normalmente 0: el procesador conserva la comisión
@@ -98,7 +113,8 @@ function buildRefundLines(p: PaymentRow, acct: (m: string) => string): { lines: 
   if (netCents > 0) lines.push({ ledgerAccountId: acct('SALES_RETURN'), debitCents: netCents, creditCents: 0 })
   if (taxCents > 0) lines.push({ ledgerAccountId: acct('IVA_OUTPUT'), debitCents: taxCents, creditCents: 0 })
   if (rT > 0) lines.push({ ledgerAccountId: acct('TIPS_PAYABLE'), debitCents: rT, creditCents: 0 })
-  if (refundCents > 0) lines.push({ ledgerAccountId: acct(isCash ? 'CASH_RECEIPT' : 'BANK_RECEIPT'), debitCents: 0, creditCents: refundCents })
+  if (refundCents > 0)
+    lines.push({ ledgerAccountId: acct(isCash ? 'CASH_RECEIPT' : 'BANK_RECEIPT'), debitCents: 0, creditCents: refundCents })
   if (rF > 0) lines.push({ ledgerAccountId: acct('PROCESSOR_FEE'), debitCents: 0, creditCents: rF })
   return lines.length >= 2 ? { lines } : null
 }
@@ -117,9 +133,20 @@ function isEligible(p: PaymentRow): boolean {
  * Genera (o completa) las pólizas automáticas de los pagos COMPLETED de un local.
  * Idempotente: re-correr no duplica. Si falta algún mapeo, no postea y lo reporta.
  */
-export async function generatePoliciesForVenue(venueId: string, opts: { period?: string; actorStaffId?: string | null } = {}): Promise<GenerateResult> {
+export async function generatePoliciesForVenue(
+  venueId: string,
+  opts: { period?: string; actorStaffId?: string | null } = {},
+): Promise<GenerateResult> {
   const period = opts.period ?? null
-  const base: GenerateResult = { needsFiscalSetup: false, missingMappings: [], period, candidates: 0, posted: 0, alreadyPosted: 0, skipped: 0 }
+  const base: GenerateResult = {
+    needsFiscalSetup: false,
+    missingMappings: [],
+    period,
+    candidates: 0,
+    posted: 0,
+    alreadyPosted: 0,
+    skipped: 0,
+  }
 
   const scope = await resolveScopeOrNull(venueId)
   if (!scope) return { ...base, needsFiscalSetup: true }
@@ -146,7 +173,12 @@ export async function generatePoliciesForVenue(venueId: string, opts: { period?:
   }
 
   const payments = (await prisma.payment.findMany({
-    where: { venueId, status: TransactionStatus.COMPLETED, ...(createdAt ? { createdAt } : {}), order: { status: { not: OrderStatus.CANCELLED } } },
+    where: {
+      venueId,
+      status: TransactionStatus.COMPLETED,
+      ...(createdAt ? { createdAt } : {}),
+      order: { status: { not: OrderStatus.CANCELLED } },
+    },
     select: {
       id: true,
       amount: true,

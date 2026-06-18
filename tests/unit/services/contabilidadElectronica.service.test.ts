@@ -22,8 +22,25 @@ const mScope = resolveScopeOrNull as jest.Mock
 const mCatalog = getCatalog as jest.Mock
 const mTb = getTrialBalance as jest.Mock
 
-const acc = (id: string, code: string, name: string, level: number, parentId: string | null, nature: 'DEUDORA' | 'ACREEDORA', isActive = true) => ({
-  id, code, satGroupingCode: code.split('.')[0], name, type: 'ACTIVO', nature, level, parentId, isPostable: level > 1, isActive,
+const acc = (
+  id: string,
+  code: string,
+  name: string,
+  level: number,
+  parentId: string | null,
+  nature: 'DEUDORA' | 'ACREEDORA',
+  isActive = true,
+) => ({
+  id,
+  code,
+  satGroupingCode: code.split('.')[0],
+  name,
+  type: 'ACTIVO',
+  nature,
+  level,
+  parentId,
+  isPostable: level > 1,
+  isActive,
 })
 
 beforeEach(() => {
@@ -46,7 +63,11 @@ describe('getCatalogoXml', () => {
   it('genera XML 1.3 válido: namespace, Version, RFC/Mes/Anio, Natur D/A, nombre CT', async () => {
     mCatalog.mockResolvedValue({
       needsFiscalSetup: false,
-      accounts: [acc('i101', '101', 'Caja', 1, null, 'DEUDORA'), acc('i10101', '101.01', 'Caja general', 2, 'i101', 'DEUDORA'), acc('i208', '208', 'IVA', 1, null, 'ACREEDORA')],
+      accounts: [
+        acc('i101', '101', 'Caja', 1, null, 'DEUDORA'),
+        acc('i10101', '101.01', 'Caja general', 2, 'i101', 'DEUDORA'),
+        acc('i208', '208', 'IVA', 1, null, 'ACREEDORA'),
+      ],
     })
     const r = await getCatalogoXml('v1', '2026-06')
     expect(r.filename).toBe('EKU9003173C9202606CT.xml')
@@ -64,7 +85,11 @@ describe('getCatalogoXml', () => {
     // SubCtaDe SÍ resuelve. Un huérfano real (parentId inexistente) NO debe emitir SubCtaDe.
     mCatalog.mockResolvedValue({
       needsFiscalSetup: false,
-      accounts: [acc('i101', '101', 'Caja', 1, null, 'DEUDORA', false), acc('i10101', '101.01', 'Caja general', 2, 'i101', 'DEUDORA'), acc('iorph', '999.99', 'Huérfana', 2, 'iGONE', 'DEUDORA')],
+      accounts: [
+        acc('i101', '101', 'Caja', 1, null, 'DEUDORA', false),
+        acc('i10101', '101.01', 'Caja general', 2, 'i101', 'DEUDORA'),
+        acc('iorph', '999.99', 'Huérfana', 2, 'iGONE', 'DEUDORA'),
+      ],
     })
     const r = await getCatalogoXml('v1', '2026-06')
     // el padre inactivo SÍ se incluye → la subcuenta resuelve
@@ -93,8 +118,24 @@ describe('getBalanzaXml', () => {
       rfc: 'EKU9003173C9',
       period: '2026-06',
       rows: [
-        { code: '102.01', name: 'Bancos', nature: 'DEUDORA', saldoInicialCents: 0, debeCents: 116000, haberCents: 0, saldoFinalCents: 116000 },
-        { code: '208.01', name: 'IVA', nature: 'ACREEDORA', saldoInicialCents: 0, debeCents: 0, haberCents: 16000, saldoFinalCents: -16000 },
+        {
+          code: '102.01',
+          name: 'Bancos',
+          nature: 'DEUDORA',
+          saldoInicialCents: 0,
+          debeCents: 116000,
+          haberCents: 0,
+          saldoFinalCents: 116000,
+        },
+        {
+          code: '208.01',
+          name: 'IVA',
+          nature: 'ACREEDORA',
+          saldoInicialCents: 0,
+          debeCents: 0,
+          haberCents: 16000,
+          saldoFinalCents: -16000,
+        },
       ],
     })
     const r = await getBalanzaXml('v1', '2026-06', 'N')
@@ -106,7 +147,12 @@ describe('getBalanzaXml', () => {
   })
 
   it('tipoEnvio C → nombre BC', async () => {
-    mTb.mockResolvedValue({ needsFiscalSetup: false, rfc: 'EKU9003173C9', period: '2026-06', rows: [{ code: '101', name: 'Caja', nature: 'DEUDORA', saldoInicialCents: 0, debeCents: 100, haberCents: 0, saldoFinalCents: 100 }] })
+    mTb.mockResolvedValue({
+      needsFiscalSetup: false,
+      rfc: 'EKU9003173C9',
+      period: '2026-06',
+      rows: [{ code: '101', name: 'Caja', nature: 'DEUDORA', saldoInicialCents: 0, debeCents: 100, haberCents: 0, saldoFinalCents: 100 }],
+    })
     const r = await getBalanzaXml('v1', '2026-06', 'C')
     expect(r.filename).toBe('EKU9003173C9202606BC.xml')
     expect(r.xml).toContain('TipoEnvio="C"')
