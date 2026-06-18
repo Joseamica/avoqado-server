@@ -3,6 +3,7 @@ import { Request, Response } from 'express'
 import { AppEnvironment, AppPlatform } from '@prisma/client'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
+import { buildAudienceConditions } from '../../services/appUpdate/audienceTargeting'
 
 /**
  * TPV App Update Controller
@@ -67,12 +68,35 @@ export async function checkForUpdate(req: Request, res: Response) {
       })
     }
 
-    // Find the latest active version for this environment + platform
+    // ── Audience targeting ──────────────────────────────────────────────────
+    // Resolve which targeted versions apply to THIS terminal:
+    //  • ALL       → every terminal (default — today's behavior)
+    //  • VENUES    → only if the terminal reports a venue (X-Venue-Id) that's in the list
+    //  • TERMINALS → only if we can identify the terminal serial (X-Terminal-Serial) and
+    //                it's in the list. INERT until the APK starts sending its serial.
+    // An unknown/unactivated terminal only ever matches ALL rows → fail-safe: it can never
+    // receive a build scoped to a venue/terminal it doesn't belong to.
+    const venueIdHeader = (req.headers['x-venue-id'] as string | undefined)?.trim() || undefined
+    const terminalSerialHeader = (req.headers['x-terminal-serial'] as string | undefined)?.trim() || undefined
+
+    let terminalId: string | undefined
+    if (terminalSerialHeader) {
+      const terminal = await prisma.terminal.findFirst({
+        where: { serialNumber: { equals: terminalSerialHeader, mode: 'insensitive' } },
+        select: { id: true },
+      })
+      terminalId = terminal?.id
+    }
+
+    const audienceConditions = buildAudienceConditions(venueIdHeader, terminalId)
+
+    // Find the latest active version for this environment + platform that targets this terminal
     const latestUpdate = await prisma.appUpdate.findFirst({
       where: {
         environment: env as AppEnvironment,
         platform: platformParam as AppPlatform,
         isActive: true,
+        OR: audienceConditions,
       },
       orderBy: { versionCode: 'desc' },
       select: {

@@ -6,6 +6,7 @@ import logger from '../../config/logger'
 import crypto from 'crypto'
 import { extractApkMetadata, validatePackageName } from '../../services/apk-parser.service'
 import prisma from '../../utils/prismaClient'
+import { normalizeTargeting, type AppUpdateTargetTypeValue } from '../../services/appUpdate/audienceTargeting'
 
 /**
  * AppUpdate Controller
@@ -276,6 +277,12 @@ export async function createAppUpdate(req: Request, res: Response) {
       })
     }
 
+    // Validate + normalize audience targeting (defaults to ALL = every terminal)
+    const targeting = normalizeTargeting(req.body)
+    if ('error' in targeting) {
+      return res.status(400).json({ success: false, error: targeting.error })
+    }
+
     // Create database record
     const appUpdate = await prisma.appUpdate.create({
       data: {
@@ -289,6 +296,9 @@ export async function createAppUpdate(req: Request, res: Response) {
         fileSize: BigInt(fileSize),
         checksum,
         uploadedById,
+        targetType: targeting.targetType,
+        targetVenueIds: targeting.targetVenueIds,
+        targetTerminalIds: targeting.targetTerminalIds,
       },
       include: {
         uploadedBy: {
@@ -303,6 +313,31 @@ export async function createAppUpdate(req: Request, res: Response) {
     })
 
     logger.info(`App update created: ${versionName} (${versionCodeInt}) for ${environment} by ${uploadedById}`)
+
+    // Audit: superadmin uploaded a (possibly targeted) APK rollout. Global action → venueId null.
+    // Best-effort: an audit failure must NOT roll back / 500 a row that's already created + uploaded.
+    try {
+      await prisma.activityLog.create({
+        data: {
+          action: 'SUPERADMIN_APP_UPDATE_CREATED',
+          entity: 'AppUpdate',
+          entityId: appUpdate.id,
+          staffId: uploadedById,
+          venueId: null,
+          data: {
+            versionName,
+            versionCode: versionCodeInt,
+            environment,
+            updateMode,
+            targetType: targeting.targetType,
+            targetVenueIds: targeting.targetVenueIds,
+            targetTerminalIds: targeting.targetTerminalIds,
+          },
+        },
+      })
+    } catch (auditError) {
+      logger.warn('Failed to write ActivityLog for app update create (non-fatal):', auditError)
+    }
 
     return res.status(201).json({
       success: true,
@@ -362,12 +397,27 @@ export async function updateAppUpdate(req: Request, res: Response) {
       }
     }
 
+    // Audience targeting is only touched if the caller sent targetType
+    let targeting: { targetType: AppUpdateTargetTypeValue; targetVenueIds: string[]; targetTerminalIds: string[] } | undefined
+    if (req.body.targetType !== undefined) {
+      const result = normalizeTargeting(req.body)
+      if ('error' in result) {
+        return res.status(400).json({ success: false, error: result.error })
+      }
+      targeting = result
+    }
+
     const updated = await prisma.appUpdate.update({
       where: { id },
       data: {
         ...(releaseNotes !== undefined && { releaseNotes }),
         ...(updateMode !== undefined && { updateMode: updateMode as UpdateMode }),
         ...(isActive !== undefined && { isActive }),
+        ...(targeting && {
+          targetType: targeting.targetType,
+          targetVenueIds: targeting.targetVenueIds,
+          targetTerminalIds: targeting.targetTerminalIds,
+        }),
       },
       include: {
         uploadedBy: {
@@ -382,6 +432,34 @@ export async function updateAppUpdate(req: Request, res: Response) {
     })
 
     logger.info(`App update ${id} updated`)
+
+    // Audit: superadmin edited an APK rollout (targeting/mode/active). Global action → venueId null.
+    // Best-effort: an audit failure must NOT 500 an update that already succeeded.
+    try {
+      await prisma.activityLog.create({
+        data: {
+          action: 'SUPERADMIN_APP_UPDATE_UPDATED',
+          entity: 'AppUpdate',
+          entityId: updated.id,
+          staffId: req.authContext?.userId ?? null,
+          venueId: null,
+          data: {
+            versionName: updated.versionName,
+            versionCode: updated.versionCode,
+            ...(releaseNotes !== undefined && { releaseNotes }),
+            ...(updateMode !== undefined && { updateMode }),
+            ...(isActive !== undefined && { isActive }),
+            ...(targeting && {
+              targetType: targeting.targetType,
+              targetVenueIds: targeting.targetVenueIds,
+              targetTerminalIds: targeting.targetTerminalIds,
+            }),
+          },
+        },
+      })
+    } catch (auditError) {
+      logger.warn('Failed to write ActivityLog for app update edit (non-fatal):', auditError)
+    }
 
     return res.json({
       success: true,
