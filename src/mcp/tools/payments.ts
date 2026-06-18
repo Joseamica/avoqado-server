@@ -1,6 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
-import { PaymentMethod, PaymentType, TransactionStatus } from '@prisma/client'
+import { PaymentMethod, PaymentSource, PaymentType, TransactionStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
 import type { McpScope } from '../scope'
@@ -8,6 +8,7 @@ import { createGuard } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { issueRefund, type RefundReason } from '@/services/dashboard/refund.dashboard.service'
+import { createManualPayment } from '@/services/dashboard/manualPayment.service'
 
 // Maps the tool's friendly reasons to the service's RefundReason values.
 const REFUND_REASON_MAP: Record<string, RefundReason> = {
@@ -17,6 +18,24 @@ const REFUND_REASON_MAP: Record<string, RefundReason> = {
   fraudulent_charge: 'FRAUDULENT_CHARGE',
   other: 'OTHER',
 }
+
+// Friendly tool enums → Prisma enums for manual payments.
+const MANUAL_METHOD_MAP: Record<string, PaymentMethod> = {
+  cash: PaymentMethod.CASH,
+  credit_card: PaymentMethod.CREDIT_CARD,
+  debit_card: PaymentMethod.DEBIT_CARD,
+  bank_transfer: PaymentMethod.BANK_TRANSFER,
+  digital_wallet: PaymentMethod.DIGITAL_WALLET,
+  other: PaymentMethod.OTHER,
+}
+const MANUAL_SOURCE_MAP: Record<string, PaymentSource> = {
+  pos: PaymentSource.POS,
+  phone: PaymentSource.PHONE,
+  web: PaymentSource.WEB,
+  app: PaymentSource.APP,
+  other: PaymentSource.OTHER,
+}
+const money2 = (n: number): string => n.toFixed(2) // service expects Decimal-as-string, pesos 1:1
 
 const num = (d: { toString(): string } | null): number => (d == null ? 0 : Number(d))
 const round2 = (n: number): number => Math.round(n * 100) / 100
@@ -334,6 +353,97 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
             amount: result.amount,
             remainingRefundable: result.remainingRefundable,
             status: result.status,
+          },
+        })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'record_manual_payment',
+    'Record a payment manually (registrar un pago a mano) in a venue you can access — cash, transfer, card-on-file, or money that came through an external channel (delivery app, etc.). Two modes: pass orderId to attach it to an existing order (cannot exceed the order total), or omit orderId for a bookkeeping entry that never passed through Avoqado (a shadow MANUAL_ENTRY order is created so revenue reports still count it). Amounts in pesos (1 = 1 peso, e.g. 150.50). By DEFAULT this only PREVIEWS what will be recorded; call again with confirm:true to actually write it. This WRITES — requires the payment:create-manual permission.',
+    {
+      venueId: z.string().describe('Venue to record the payment in (must be in your scope)'),
+      amount: z.number().positive().describe('Payment amount in pesos (major units), e.g. 150.50'),
+      method: z.enum(['cash', 'credit_card', 'debit_card', 'bank_transfer', 'digital_wallet', 'other']).describe('How it was paid'),
+      source: z
+        .enum(['pos', 'phone', 'web', 'app', 'other'])
+        .optional()
+        .describe("Where the payment originated. Default 'pos'. Use 'other' for an external channel (then set externalSource)."),
+      tipAmount: z.number().min(0).optional().describe('Tip in pesos (default 0)'),
+      orderId: z.string().optional().describe('Attach to this existing order; omit for a standalone bookkeeping entry'),
+      customerId: z.string().optional().describe('Attribute to this customer (triggers loyalty points if enabled)'),
+      waiterId: z.string().optional().describe('Attribute tip/commission to this waiter'),
+      externalSource: z.string().max(50).optional().describe("Name of the external provider — REQUIRED when source='other' (e.g. 'Rappi')"),
+      reason: z.string().max(500).optional().describe('Free-text note for the audit trail'),
+      confirm: z.boolean().optional().describe('Must be true to actually record the payment; without it you get a preview'),
+    },
+    async ({ venueId, amount, method, source, tipAmount, orderId, customerId, waiterId, externalSource, reason, confirm }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('payment:create-manual', venueId) // write gate — same permission as the dashboard endpoint
+
+      const src = source ?? 'pos'
+      // Mirror the schema's superRefine so the LLM gets a clear message instead of a 500.
+      if (src === 'other' && !externalSource) {
+        return text({ ok: false, error: "Cuando source='other' debes indicar externalSource (el nombre del proveedor externo)." })
+      }
+      if (src !== 'other' && externalSource) {
+        return text({ ok: false, error: "externalSource solo aplica cuando source='other'." })
+      }
+
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview: {
+            amount: round2(amount),
+            tip: round2(tipAmount ?? 0),
+            method: MANUAL_METHOD_MAP[method],
+            source: MANUAL_SOURCE_MAP[src],
+            mode: orderId ? 'attach-to-order' : 'standalone-bookkeeping-entry',
+            orderId: orderId ?? null,
+            externalSource: externalSource ?? null,
+          },
+          message: `Esto REGISTRARÁ un pago de $${round2(amount)}${tipAmount ? ` (+ $${round2(tipAmount)} propina)` : ''} (${MANUAL_METHOD_MAP[method]})${orderId ? ` en la orden ${orderId}` : ' como entrada de contabilidad'}. Vuelve a llamar con confirm:true para ejecutar.`,
+        })
+      }
+
+      try {
+        const payment = await createManualPayment(venueId, scope.staffId, {
+          amount: money2(amount),
+          tipAmount: money2(tipAmount ?? 0),
+          method: MANUAL_METHOD_MAP[method],
+          source: MANUAL_SOURCE_MAP[src],
+          ...(orderId ? { orderId } : {}),
+          ...(customerId ? { customerId } : {}),
+          ...(waiterId ? { waiterId } : {}),
+          ...(externalSource ? { externalSource } : {}),
+          ...(reason ? { reason } : {}),
+        })
+        await auditMcpWrite(scope, {
+          action: 'MANUAL_PAYMENT_RECORDED',
+          entity: 'Payment',
+          entityId: payment.id,
+          venueId,
+          data: {
+            amount: num(payment.amount),
+            tip: num(payment.tipAmount),
+            method: payment.method,
+            orderId: payment.orderId,
+            source: MANUAL_SOURCE_MAP[src],
+          },
+        })
+        return text({
+          ok: true,
+          payment: {
+            id: payment.id,
+            amount: num(payment.amount),
+            tip: num(payment.tipAmount),
+            method: payment.method,
+            status: payment.status,
+            orderId: payment.orderId,
           },
         })
       } catch (err) {
