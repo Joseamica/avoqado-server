@@ -292,6 +292,9 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   JournalEntry: 'Facturación (CFDI)',
   JournalLine: 'Facturación (CFDI)',
   Expense: 'Facturación (CFDI)',
+  Employee: 'Facturación (CFDI)',
+  PayrollRun: 'Facturación (CFDI)',
+  PayrollLine: 'Facturación (CFDI)',
 
   // 12. Pricing, Costs & Venue Lending
   PricingPolicy: 'Pricing, Costs & Venue Lending',

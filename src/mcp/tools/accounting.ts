@@ -9,9 +9,12 @@ import { currentPeriod, getTrialBalance } from '@/services/fiscal/trialBalance.s
 import { getAccountingReports } from '@/services/fiscal/accountingReports.service'
 import { getIvaCashflow } from '@/services/fiscal/ivaFlujo.service'
 import { generatePoliciesForVenue } from '@/services/fiscal/autoPosting.service'
-import { createExpense, listExpenses } from '@/services/fiscal/expense.service'
+import { createExpense, importExpenseFromXml, listExpenses } from '@/services/fiscal/expense.service'
 import { generateExpensePoliciesForVenue, markExpensePaid } from '@/services/fiscal/expensePosting.service'
 import { getDiot } from '@/services/fiscal/diot.service'
+import { getCatalogoXml, getBalanzaXml } from '@/services/fiscal/contabilidadElectronica.service'
+import { getIsrProvisional } from '@/services/fiscal/isr.service'
+import { computePayrollPreview, createEmployee, listEmployees, runPayroll } from '@/services/fiscal/nomina.service'
 import { listStatements } from '@/services/dashboard/bankReconciliation.service'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
@@ -620,6 +623,38 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
   )
 
   server.tool(
+    'import_expense_xml',
+    'Importa un GASTO desde el XML de un CFDI 4.0 recibido de un proveedor (Buzón, Capa B fiscal, PREMIUM, escritura). Parsea el XML timbrado, valida que el RECEPTOR seas tú, y crea el gasto con su desglose de impuestos y folio fiscal — sin captura manual. Escritura: requiere accounting:manage + feature CFDI. Pasa venueId y el contenido del XML como texto.',
+    {
+      venueId: z.string().describe('Local que registra el gasto (debe estar en tu alcance)'),
+      xml: z.string().describe('Contenido completo del XML del CFDI recibido'),
+    },
+    async ({ venueId, xml }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:manage', venueId) // write gate
+      const gate = await planGateMessage(venueId, 'CFDI', 'La importación de gastos por XML')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+
+      const e = await importExpenseFromXml(venueId, xml, { staffId: scope.staffId })
+      return text({
+        ok: true,
+        gasto: {
+          id: e.id,
+          proveedor: `${e.proveedorRfc} ${e.proveedorNombre}`,
+          fechaEmision: e.fechaEmision,
+          subtotal: pesos(e.subtotalCents),
+          iva: pesos(e.ivaCents),
+          total: pesos(e.totalCents),
+          metodoPago: e.metodoPago,
+          estatusPago: e.paymentStatus,
+          uuid: e.uuid,
+        },
+        nota: 'Importado del CFDI. Corre generate_expense_policies para postear su póliza.',
+      })
+    },
+  )
+
+  server.tool(
     'expenses',
     'Lista los GASTOS / CFDIs recibidos del contribuyente (Buzón, Capa B fiscal, PREMIUM) de TODOS los locales del mismo RFC. Devuelve cada gasto (proveedor, fechas, montos, estatus de pago) y un resumen (conteo, total, IVA, base deducible). Responde "¿qué gastos registré este mes?". Pasa venueId y opcionalmente period (YYYY-MM, por fecha de emisión), paymentStatus o proveedorRfc.',
     {
@@ -770,6 +805,210 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           ivaAcreditable: pesos(row.ivaAcreditableCents),
           comprobantes: row.comprobantes,
         })),
+      })
+    },
+  )
+
+  server.tool(
+    'isr_provisional',
+    'Estimación del PAGO PROVISIONAL de ISR del periodo (persona física, Capa B, PREMIUM). regime="RESICO" (default): ingresos cobrados del mes × tasa fija por tramo (1%–2.5%), sin deducciones. regime="GENERAL": (ingresos − deducciones autorizadas) acumulado del ejercicio × tarifa art-96 acumulada − pagos provisionales previos. Responde "¿cuánto ISR debo este mes?". ⚠️ Es ESTIMACIÓN (asume 16% de IVA en el ingreso, no resta pérdidas ni retenciones de ventas; tarifa art-96 = 2024/2025 mientras el SAT no publique 2026). Lo valida el contador. Pasa venueId, opcionalmente period (YYYY-MM) y regime.',
+    {
+      venueId: z.string().describe('Local del contribuyente (debe estar en tu alcance)'),
+      period: z
+        .string()
+        .regex(/^\d{4}-\d{2}$/)
+        .optional()
+        .describe('Periodo YYYY-MM (opcional; default mes actual)'),
+      regime: z.enum(['RESICO', 'GENERAL']).optional().describe('RESICO (default) o GENERAL (actividad empresarial)'),
+    },
+    async ({ venueId, period, regime }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:read', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'La estimación de ISR')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+
+      const r = await getIsrProvisional(venueId, period || currentPeriod(), regime === 'GENERAL' ? 'GENERAL' : 'RESICO')
+      if (r.needsFiscalSetup) return text({ ok: true, needsFiscalSetup: true })
+      return text({
+        ok: true,
+        rfc: r.rfc,
+        periodo: r.period,
+        regimen: r.regime,
+        ingresosDelMes: pesos(r.ingresosMesCents),
+        ingresosAcumulados: pesos(r.ingresosAcumCents),
+        ...(r.regime === 'RESICO'
+          ? { tasaResico: r.tasaResico, excedeTopeResico: r.excedeTopeResico }
+          : {
+              deduccionesAcumuladas: pesos(r.deduccionesAcumCents),
+              utilidadFiscal: pesos(r.utilidadFiscalCents),
+              pagosProvisionalesPrevios: pesos(r.pagosProvisionalesPreviosCents),
+            }),
+        isrCausado: pesos(r.isrCausadoCents),
+        isrAPagarEstimado: pesos(r.isrAPagarCents),
+        sinVentas: r.zeroActivity,
+        nota: 'ESTIMACIÓN — no incluye retenciones de ISR en ventas, pérdidas de ejercicios anteriores ni PTU; asume 16% de IVA en el ingreso. La tarifa art-96 es la 2024/2025 (vigente en 2026 salvo publicación nueva). Confírmalo con tu contador.',
+      })
+    },
+  )
+
+  server.tool(
+    'electronic_accounting_catalog',
+    'Contabilidad electrónica del SAT (Anexo 24, Capa B, PREMIUM): genera el XML del CATÁLOGO DE CUENTAS (esquema CatalogoCuentas 1.3) de un contribuyente, listo para que su contador lo selle con la e.firma y lo suba al SAT. Devuelve el XML y el nombre de archivo oficial (RFC+Año+Mes+CT.xml). Responde "dame mi catálogo para contabilidad electrónica". Pasa venueId y opcionalmente period (YYYY-MM; default mes actual).',
+    {
+      venueId: z.string().describe('Local del contribuyente (debe estar en tu alcance)'),
+      period: z
+        .string()
+        .regex(/^\d{4}-\d{2}$/)
+        .optional()
+        .describe('Periodo YYYY-MM (opcional; default mes actual)'),
+    },
+    async ({ venueId, period }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:read', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'La contabilidad electrónica')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+
+      const r = await getCatalogoXml(venueId, period || currentPeriod())
+      if (r.needsFiscalSetup) return text({ ok: true, needsFiscalSetup: true })
+      if (r.empty) return text({ ok: true, vacio: true, nota: 'El catálogo de cuentas aún no está sembrado.' })
+      return text({
+        ok: true,
+        rfc: r.rfc,
+        periodo: r.period,
+        archivo: r.filename,
+        xml: r.xml,
+        nota: 'XML sin sellar — tu contador lo sella con la e.firma y lo envía al SAT.',
+      })
+    },
+  )
+
+  server.tool(
+    'electronic_accounting_balance',
+    'Contabilidad electrónica del SAT (Anexo 24, Capa B, PREMIUM): genera el XML de la BALANZA DE COMPROBACIÓN (esquema BalanzaComprobacion 1.3) del periodo, listo para sellar y enviar al SAT. Sale de las pólizas (mismo cálculo que la balanza de pantalla). Devuelve el XML y el nombre de archivo oficial (RFC+Año+Mes+BN.xml). Responde "dame mi balanza para el SAT". Pasa venueId, opcionalmente period (YYYY-MM) y tipoEnvio (N=normal, C=complementaria).',
+    {
+      venueId: z.string().describe('Local del contribuyente (debe estar en tu alcance)'),
+      period: z
+        .string()
+        .regex(/^\d{4}-\d{2}$/)
+        .optional()
+        .describe('Periodo YYYY-MM (opcional; default mes actual)'),
+      tipoEnvio: z.enum(['N', 'C']).optional().describe('N=normal (default), C=complementaria'),
+    },
+    async ({ venueId, period, tipoEnvio }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:read', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'La contabilidad electrónica')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+
+      const r = await getBalanzaXml(venueId, period || currentPeriod(), tipoEnvio === 'C' ? 'C' : 'N')
+      if (r.needsFiscalSetup) return text({ ok: true, needsFiscalSetup: true })
+      if (r.empty) return text({ ok: true, vacio: true, nota: 'No hay pólizas en el periodo; genera tus pólizas primero.' })
+      return text({
+        ok: true,
+        rfc: r.rfc,
+        periodo: r.period,
+        archivo: r.filename,
+        xml: r.xml,
+        nota: 'XML sin sellar — tu contador lo sella con la e.firma y lo envía al SAT.',
+      })
+    },
+  )
+
+  server.tool(
+    'add_employee',
+    'Da de alta un EMPLEADO para la nómina (Capa B fiscal, PREMIUM, escritura). Escritura: requiere accounting:manage + feature CFDI. Pasa venueId, nombre, rfcEmpleado y salarioMensualBrutoCents (centavos enteros); opcional curp, nss, puesto, sbcMensualCents (salario base de cotización IMSS), periodicidadPago.',
+    {
+      venueId: z.string().describe('Local (debe estar en tu alcance)'),
+      nombre: z.string().describe('Nombre del empleado'),
+      rfcEmpleado: z.string().describe('RFC del empleado'),
+      salarioMensualBrutoCents: z.number().int().min(1).describe('Salario mensual bruto en centavos enteros'),
+      curp: z.string().optional(),
+      nss: z.string().optional().describe('Número de seguridad social'),
+      puesto: z.string().optional(),
+      sbcMensualCents: z.number().int().min(0).optional().describe('Salario base de cotización (IMSS) mensual en centavos'),
+      periodicidadPago: z.enum(['SEMANAL', 'QUINCENAL', 'MENSUAL']).optional(),
+    },
+    async args => {
+      const { venueId } = args
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:manage', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'La nómina')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+      const e = await createEmployee(venueId, args, { staffId: scope.staffId })
+      return text({
+        ok: true,
+        empleado: { id: e.id, nombre: e.nombre, rfc: e.rfcEmpleado, salarioMensual: pesos(e.salarioMensualBrutoCents) },
+      })
+    },
+  )
+
+  server.tool(
+    'employees',
+    'Lista los EMPLEADOS del patrón (nómina, Capa B, PREMIUM). Devuelve nombre, RFC, puesto y salario. Responde "¿quiénes están en mi nómina?". Pasa venueId.',
+    { venueId: z.string().describe('Local (debe estar en tu alcance)') },
+    async ({ venueId }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:read', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'La nómina')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+      const r = await listEmployees(venueId)
+      if (r.needsFiscalSetup) return text({ ok: true, needsFiscalSetup: true })
+      return text({
+        ok: true,
+        rfc: r.rfc,
+        empleados: r.employees.map(e => ({
+          id: e.id,
+          nombre: e.nombre,
+          rfc: e.rfcEmpleado,
+          puesto: e.puesto,
+          salarioMensual: pesos(e.salarioMensualBrutoCents),
+          activo: e.activo,
+        })),
+      })
+    },
+  )
+
+  server.tool(
+    'payroll_run',
+    'Corre la NÓMINA del periodo (Capa B fiscal, PREMIUM, escritura): por cada empleado activo calcula percepción → ISR a retener (tarifa art-96 − subsidio para el empleo) → cuota IMSS obrera → neto, persiste la corrida y postea su póliza (601.01 sueldos · 216.01 ISR · 216.07 IMSS · 205.06 sueldos por pagar). Idempotente por periodo+periodicidad. ⚠️ ESTIMACIÓN; el cálculo definitivo (prestaciones, IMSS exacto, timbrado del CFDI de nómina) lo hace el nominista. Escritura: requiere accounting:manage + feature CFDI. Pasa venueId, fechaPago (AAAA-MM-DD); opcional period (YYYY-MM) y periodicidad.',
+    {
+      venueId: z.string().describe('Local (debe estar en tu alcance)'),
+      fechaPago: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .describe('Fecha de pago AAAA-MM-DD'),
+      period: z
+        .string()
+        .regex(/^\d{4}-\d{2}$/)
+        .optional()
+        .describe('Periodo YYYY-MM (opcional; default mes actual)'),
+      periodicidad: z.enum(['SEMANAL', 'QUINCENAL', 'MENSUAL']).optional().describe('Periodicidad (default MENSUAL)'),
+    },
+    async ({ venueId, fechaPago, period, periodicidad }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:manage', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'La nómina')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+      const r = await runPayroll(
+        venueId,
+        period || currentPeriod(),
+        periodicidad === 'SEMANAL' || periodicidad === 'QUINCENAL' ? periodicidad : 'MENSUAL',
+        fechaPago,
+        { staffId: scope.staffId },
+      )
+      if (r.needsFiscalSetup) return text({ ok: true, needsFiscalSetup: true })
+      if (r.missingMappings.length > 0)
+        return text({ ok: false, faltanMapeos: r.missingMappings, error: 'Faltan cuentas de nómina en Configuración contable.' })
+      return text({
+        ok: true,
+        yaExistia: r.alreadyExists,
+        polizaPosteada: r.posted,
+        empleados: r.totals.empleados,
+        percepciones: pesos(r.totals.percepcionesCents),
+        isrRetenido: pesos(r.totals.isrCents),
+        imssObrero: pesos(r.totals.imssCents),
+        neto: pesos(r.totals.netoCents),
+        nota: 'ESTIMACIÓN — falta el cálculo fino de IMSS por SBC y el timbrado del CFDI de nómina. Confírmalo con tu nominista.',
       })
     },
   )

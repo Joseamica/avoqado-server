@@ -297,6 +297,15 @@ export const BASE_CHART: SeedAccount[] = [
     level: 2,
     parentCode: '216',
   },
+  {
+    code: '216.07',
+    name: 'Cuotas de seguridad social retenidas a los trabajadores',
+    satGroupingCode: '216.07',
+    type: 'PASIVO',
+    nature: 'ACREEDORA',
+    level: 2,
+    parentCode: '216',
+  },
   { code: '301', name: 'Capital social', satGroupingCode: '301', type: 'CAPITAL', nature: 'ACREEDORA', level: 1, parentCode: null },
   { code: '301.01', name: 'Capital fijo', satGroupingCode: '301.01', type: 'CAPITAL', nature: 'ACREEDORA', level: 2, parentCode: '301' },
   {

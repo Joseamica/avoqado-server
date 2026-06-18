@@ -13,7 +13,7 @@
  */
 
 export type MovementSide = 'DEBIT' | 'CREDIT' | 'BOTH'
-export type MovementGroup = 'INGRESOS' | 'TESORERIA' | 'CARTERA' | 'INVENTARIO' | 'COSTOS_GASTOS' | 'IMPUESTOS' | 'RESULTADO'
+export type MovementGroup = 'INGRESOS' | 'TESORERIA' | 'CARTERA' | 'INVENTARIO' | 'COSTOS_GASTOS' | 'IMPUESTOS' | 'NOMINA' | 'RESULTADO'
 
 export interface MovementTypeDef {
   /** Coincide con el enum Prisma AccountMovementType. */
@@ -25,7 +25,7 @@ export interface MovementTypeDef {
   group: MovementGroup
 }
 
-/** Los 24 movimientos (operativos + impuestos). El orden define el orden en la UI. */
+/** Los 28 movimientos (operativos + impuestos). El orden define el orden en la UI. */
 export const MOVEMENT_TYPES: MovementTypeDef[] = [
   // Ingresos
   { movementType: 'SALES_REVENUE', label: 'Ingreso por ventas / servicios', defaultCode: '401.01', side: 'CREDIT', group: 'INGRESOS' },
@@ -119,6 +119,29 @@ export const MOVEMENT_TYPES: MovementTypeDef[] = [
     defaultCode: '216.04',
     side: 'CREDIT',
     group: 'IMPUESTOS',
+  },
+  // Nómina (sueldos y salarios)
+  { movementType: 'PAYROLL_SALARIES', label: 'Sueldos y salarios (nómina)', defaultCode: '601.01', side: 'DEBIT', group: 'NOMINA' },
+  {
+    movementType: 'ISR_PAYROLL_WITHHELD',
+    label: 'ISR retenido por sueldos (nómina)',
+    defaultCode: '216.01',
+    side: 'CREDIT',
+    group: 'NOMINA',
+  },
+  {
+    movementType: 'IMSS_PAYABLE',
+    label: 'Cuota IMSS obrera retenida (nómina)',
+    defaultCode: '216.07',
+    side: 'CREDIT',
+    group: 'NOMINA',
+  },
+  {
+    movementType: 'SALARIES_PAYABLE',
+    label: 'Sueldos por pagar (neto de nómina)',
+    defaultCode: '205.06',
+    side: 'CREDIT',
+    group: 'NOMINA',
   },
   // Resultado / patrimonio
   {

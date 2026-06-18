@@ -1,6 +1,12 @@
 import { NextFunction, Request, Response } from 'express'
 
-import { createExpense, listExpenses, type CreateExpenseInput, type ListExpensesFilters } from '../../services/fiscal/expense.service'
+import {
+  createExpense,
+  importExpenseFromXml,
+  listExpenses,
+  type CreateExpenseInput,
+  type ListExpensesFilters,
+} from '../../services/fiscal/expense.service'
 import { generateExpensePoliciesForVenue, markExpensePaid } from '../../services/fiscal/expensePosting.service'
 import { getDiot } from '../../services/fiscal/diot.service'
 import { currentPeriod } from '../../services/fiscal/trialBalance.service'
@@ -59,6 +65,21 @@ export async function generateExpensePoliciesController(
     const period = req.query.period || currentPeriod()
     const staffId = (req as any).authContext?.userId ?? null
     res.status(200).json(await generateExpensePoliciesForVenue(venueId, { period, actorStaffId: staffId }))
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** POST /accounting/expenses/import-xml — importa un gasto desde el XML de un CFDI recibido. */
+export async function importExpenseXmlController(
+  req: Request<{ venueId: string }, {}, { xml: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const staffId = (req as any).authContext?.userId ?? null
+    const dto = await importExpenseFromXml(req.params.venueId, req.body.xml, { staffId })
+    res.status(201).json(dto)
   } catch (error) {
     next(error)
   }

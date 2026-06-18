@@ -11,6 +11,7 @@ import {
 import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
+import { parseCfdiXml } from './cfdiReceived.parser'
 import { resolveScopeOrNull, type CatalogScope } from './chartOfAccounts.service'
 
 /**
@@ -431,6 +432,20 @@ export async function listExpenses(venueId: string, filters: ListExpensesFilters
   )
 
   return { needsFiscalSetup: false, organizationId: scope.organizationId, rfc: scope.rfc, expenses: rows.map(mapExpense), summary }
+}
+
+/**
+ * Importa un gasto desde el XML de un CFDI recibido. Resuelve el RFC del contribuyente (receptor),
+ * parsea el CFDI (valida que el receptor seamos nosotros), y crea el gasto. Reusa toda la validación
+ * de createExpense (cuadre, dedupe por UUID, estado de pago).
+ */
+export async function importExpenseFromXml(venueId: string, xml: string, actor: { staffId?: string | null }): Promise<ExpenseDTO> {
+  const scope = await resolveScopeOrNull(venueId)
+  if (!scope) {
+    throw new BadRequestError('Este local aún no tiene un RFC/emisor fiscal configurado. Configura la facturación (CFDI) primero.')
+  }
+  const input = parseCfdiXml(xml, scope.rfc)
+  return createExpense(venueId, { ...input, venueId }, actor)
 }
 
 export interface AcreditableResult {

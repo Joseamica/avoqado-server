@@ -22,11 +22,20 @@ import { getIvaCashflowController } from '@/controllers/dashboard/ivaFlujo.contr
 import { generatePoliciesController } from '@/controllers/dashboard/autoPosting.controller'
 import {
   createExpenseController,
+  importExpenseXmlController,
   listExpensesController,
   generateExpensePoliciesController,
   markExpensePaidController,
   getDiotController,
 } from '@/controllers/dashboard/expense.controller'
+import { getCatalogoXmlController, getBalanzaXmlController } from '@/controllers/dashboard/contabilidadElectronica.controller'
+import { getIsrProvisionalController } from '@/controllers/dashboard/isr.controller'
+import {
+  createEmployeeController,
+  listEmployeesController,
+  payrollPreviewController,
+  runPayrollController,
+} from '@/controllers/dashboard/nomina.controller'
 import { checkFeatureAccess } from '@/middlewares/checkFeatureAccess.middleware'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import { validateRequest } from '@/middlewares/validation'
@@ -384,6 +393,20 @@ router.post(
   generateExpensePoliciesController,
 )
 
+const importXmlSchema = z.object({
+  params: z.object({ venueId: z.string().cuid({ message: 'El ID del local no es válido.' }) }),
+  body: z.object({ xml: z.string().min(1, { message: 'El XML del CFDI es requerido.' }).max(2_000_000) }),
+})
+
+/** POST /accounting/expenses/import-xml — importa un gasto desde el XML de un CFDI recibido. */
+router.post(
+  '/expenses/import-xml',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:manage'),
+  validateRequest(importXmlSchema),
+  importExpenseXmlController,
+)
+
 const markPaidSchema = z.object({
   params: z.object({
     venueId: z.string().cuid({ message: 'El ID del local no es válido.' }),
@@ -406,5 +429,137 @@ router.post(
 
 /** GET /accounting/diot?period=YYYY-MM — DIOT (IVA pagado a proveedores por tercero y tasa). */
 router.get('/diot', checkFeatureAccess('CFDI'), checkPermission('accounting:read'), validateRequest(trialBalanceSchema), getDiotController)
+
+// ───────────────────────────────────────────────────────────────────────────
+// Contabilidad electrónica (SAT, Anexo 24) — XML del catálogo + balanza. Gated PREMIUM (CFDI).
+// ───────────────────────────────────────────────────────────────────────────
+
+const balanzaXmlSchema = z.object({
+  params: z.object({ venueId: z.string().cuid({ message: 'El ID del local no es válido.' }) }),
+  query: z.object({
+    period: z
+      .string()
+      .regex(/^\d{4}-\d{2}$/, { message: 'El periodo debe tener formato AAAA-MM.' })
+      .optional(),
+    tipoEnvio: z.enum(['N', 'C']).optional(),
+  }),
+})
+
+/** GET /accounting/electronic/catalogo?period=YYYY-MM — XML del catálogo de cuentas (Anexo 24, 1.3). */
+router.get(
+  '/electronic/catalogo',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:read'),
+  validateRequest(trialBalanceSchema),
+  getCatalogoXmlController,
+)
+
+/** GET /accounting/electronic/balanza?period=YYYY-MM&tipoEnvio=N|C — XML de la balanza de comprobación (Anexo 24, 1.3). */
+router.get(
+  '/electronic/balanza',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:read'),
+  validateRequest(balanzaXmlSchema),
+  getBalanzaXmlController,
+)
+
+// ───────────────────────────────────────────────────────────────────────────
+// ISR — pago provisional (estimación). Gated PREMIUM (CFDI).
+// ───────────────────────────────────────────────────────────────────────────
+
+const isrSchema = z.object({
+  params: z.object({ venueId: z.string().cuid({ message: 'El ID del local no es válido.' }) }),
+  query: z.object({
+    period: z
+      .string()
+      .regex(/^\d{4}-\d{2}$/, { message: 'El periodo debe tener formato AAAA-MM.' })
+      .optional(),
+    regime: z.enum(['RESICO', 'GENERAL']).optional(),
+  }),
+})
+
+/** GET /accounting/isr?period=YYYY-MM&regime=RESICO|GENERAL — estimación del pago provisional de ISR. */
+router.get('/isr', checkFeatureAccess('CFDI'), checkPermission('accounting:read'), validateRequest(isrSchema), getIsrProvisionalController)
+
+// ───────────────────────────────────────────────────────────────────────────
+// Nómina (Capa B) — empleados + corrida de nómina. Gated PREMIUM (CFDI).
+// ───────────────────────────────────────────────────────────────────────────
+
+const PERIODICIDAD = ['SEMANAL', 'QUINCENAL', 'MENSUAL'] as const
+
+const createEmployeeSchema = z.object({
+  params: z.object({ venueId: z.string().cuid({ message: 'El ID del local no es válido.' }) }),
+  body: z.object({
+    nombre: z.string().min(1, { message: 'El nombre del empleado es requerido.' }).max(200),
+    rfcEmpleado: z.string().min(1, { message: 'El RFC del empleado es requerido.' }).max(20),
+    curp: z.string().max(20).nullable().optional(),
+    nss: z.string().max(20).nullable().optional(),
+    puesto: z.string().max(120).nullable().optional(),
+    salarioMensualBrutoCents: cents('salario mensual'),
+    sbcMensualCents: cents('SBC').nullable().optional(),
+    periodicidadPago: z.enum(PERIODICIDAD).optional(),
+    fechaIngreso: dateStr('fecha de ingreso').nullable().optional(),
+    activo: z.boolean().optional(),
+  }),
+})
+
+const payrollPreviewSchema = z.object({
+  params: z.object({ venueId: z.string().cuid({ message: 'El ID del local no es válido.' }) }),
+  query: z.object({
+    period: z
+      .string()
+      .regex(/^\d{4}-\d{2}$/, { message: 'El periodo debe tener formato AAAA-MM.' })
+      .optional(),
+    periodicidad: z.enum(PERIODICIDAD).optional(),
+  }),
+})
+
+const runPayrollSchema = z.object({
+  params: z.object({ venueId: z.string().cuid({ message: 'El ID del local no es válido.' }) }),
+  body: z.object({
+    period: z
+      .string()
+      .regex(/^\d{4}-\d{2}$/, { message: 'El periodo debe tener formato AAAA-MM.' })
+      .optional(),
+    periodicidad: z.enum(PERIODICIDAD).optional(),
+    fechaPago: dateStr('fecha de pago'),
+  }),
+})
+
+/** POST /accounting/payroll/employees — alta de empleado. */
+router.post(
+  '/payroll/employees',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:manage'),
+  validateRequest(createEmployeeSchema),
+  createEmployeeController,
+)
+
+/** GET /accounting/payroll/employees — empleados del patrón. */
+router.get(
+  '/payroll/employees',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:read'),
+  validateRequest(venueParamSchema),
+  listEmployeesController,
+)
+
+/** GET /accounting/payroll/preview?period=&periodicidad= — preview del cálculo de nómina. */
+router.get(
+  '/payroll/preview',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:read'),
+  validateRequest(payrollPreviewSchema),
+  payrollPreviewController,
+)
+
+/** POST /accounting/payroll/run — corre la nómina del periodo (postea la póliza). */
+router.post(
+  '/payroll/run',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:manage'),
+  validateRequest(runPayrollSchema),
+  runPayrollController,
+)
 
 export default router

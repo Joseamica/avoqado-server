@@ -5018,9 +5018,9 @@ model ConsumerAuthAccount {
 
 model OtpChallenge {
   id          String    @id @default(cuid())
-  channel     String    // 'whatsapp' | 'email'
-  destination String    // E.164 phone OR lowercased email
-  codeHash    String    // sha256(code + OTP_PEPPER); never store plaintext
+  channel     String // 'whatsapp' | 'email'
+  destination String // E.164 phone OR lowercased email
+  codeHash    String // sha256(code + OTP_PEPPER); never store plaintext
   expiresAt   DateTime
   attempts    Int       @default(0)
   maxAttempts Int       @default(5)
@@ -7700,21 +7700,21 @@ enum SimRegistrationItemStatus {
 /// está en modo ENFORCE. Al aprobar, se crean SerializedItem en ADMIN_HELD.
 /// Capa aditiva: NO reemplaza ni modifica SerializedItem.
 model SimRegistrationRequest {
-  id                    String   @id @default(cuid())
+  id                    String                       @id @default(cuid())
   organizationId        String
-  organization          Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organization          Organization                 @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   registeredFromVenueId String?
-  registeredFromVenue   Venue?   @relation("SimRegRequestVenue", fields: [registeredFromVenueId], references: [id])
+  registeredFromVenue   Venue?                       @relation("SimRegRequestVenue", fields: [registeredFromVenueId], references: [id])
   requestedByStaffId    String
-  requestedBy           Staff    @relation("SimRegRequestRequester", fields: [requestedByStaffId], references: [id])
+  requestedBy           Staff                        @relation("SimRegRequestRequester", fields: [requestedByStaffId], references: [id])
   proposedCategoryId    String?
-  proposedCategory      ItemCategory? @relation("SimRegRequestCategory", fields: [proposedCategoryId], references: [id])
+  proposedCategory      ItemCategory?                @relation("SimRegRequestCategory", fields: [proposedCategoryId], references: [id])
   status                SimRegistrationRequestStatus @default(PENDING)
   reviewedByStaffId     String?
-  reviewedBy            Staff?   @relation("SimRegRequestReviewer", fields: [reviewedByStaffId], references: [id])
+  reviewedBy            Staff?                       @relation("SimRegRequestReviewer", fields: [reviewedByStaffId], references: [id])
   reviewedAt            DateTime?
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
+  createdAt             DateTime                     @default(now())
+  updatedAt             DateTime                     @updatedAt
   items                 SimRegistrationRequestItem[]
 
   @@index([organizationId, status])
@@ -7722,14 +7722,14 @@ model SimRegistrationRequest {
 }
 
 model SimRegistrationRequestItem {
-  id                      String  @id @default(cuid())
+  id                      String                    @id @default(cuid())
   requestId               String
-  request                 SimRegistrationRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  request                 SimRegistrationRequest    @relation(fields: [requestId], references: [id], onDelete: Cascade)
   serialNumber            String
   status                  SimRegistrationItemStatus @default(PENDING)
   rejectionReason         String?
   createdSerializedItemId String?
-  createdAt               DateTime @default(now())
+  createdAt               DateTime                  @default(now())
 
   @@unique([requestId, serialNumber])
   @@index([serialNumber])
@@ -8489,6 +8489,17 @@ enum AppPlatform {
   WINDOWS_DESKTOP // avoqado-desktop portable build
 }
 
+/// How an AppUpdate is targeted to terminals. Default ALL keeps old behavior
+/// (every terminal in the environment gets it). VENUES scopes by the venue the
+/// terminal reports (X-Venue-Id, always present once activated) — server-only,
+/// no APK change. TERMINALS scopes by individual terminal serial; it stays inert
+/// until the TPV app starts sending its serial on the update check (next APK).
+enum AppUpdateTargetType {
+  ALL // Todas las TPV (comportamiento por defecto)
+  VENUES // Solo las TPV de los venues en targetVenueIds
+  TERMINALS // Solo las terminales en targetTerminalIds (requiere APK que mande su serie)
+}
+
 /// Tracks TPV app versions uploaded by superadmin
 /// Enables self-managed updates independent of Blumon
 model AppUpdate {
@@ -8501,6 +8512,13 @@ model AppUpdate {
   // Environment + platform targeting
   environment AppEnvironment
   platform    AppPlatform    @default(ANDROID_TPV)
+
+  // Audience targeting — which terminals this version rolls out to. Default ALL = every
+  // terminal (today's behavior). VENUES uses targetVenueIds (resolved from X-Venue-Id, no
+  // APK change). TERMINALS uses targetTerminalIds (inert until the APK sends its serial).
+  targetType        AppUpdateTargetType @default(ALL)
+  targetVenueIds    String[]            @default([]) // used when targetType = VENUES
+  targetTerminalIds String[]            @default([]) // Terminal.id list, used when targetType = TERMINALS
 
   // Release info
   releaseNotes String?    @db.Text // Markdown changelog
@@ -10513,8 +10531,8 @@ model FiscalEmisor {
 model MerchantFiscalConfig {
   id String @id @default(cuid())
 
-  merchantAccountId   String?          @unique // in-person POS merchant
-  merchantAccount     MerchantAccount? @relation(fields: [merchantAccountId], references: [id], onDelete: Cascade)
+  merchantAccountId   String?            @unique // in-person POS merchant
+  merchantAccount     MerchantAccount?   @relation(fields: [merchantAccountId], references: [id], onDelete: Cascade)
   ecommerceMerchantId String?            @unique // online channel merchant
   ecommerceMerchant   EcommerceMerchant? @relation(fields: [ecommerceMerchantId], references: [id], onDelete: Cascade)
 
@@ -10523,7 +10541,7 @@ model MerchantFiscalConfig {
 
   facturacionEnabled Boolean @default(false) // master switch for this merchant
   autofacturaEnabled Boolean @default(false) // customer self-invoice (Flow A) allowed
-  includeInGlobal    Boolean @default(true)  // included in month-end global sweep (Flow C)
+  includeInGlobal    Boolean @default(true) // included in month-end global sweep (Flow C)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -10563,7 +10581,7 @@ model Cfdi {
 
   // Money — integer cents (cuadra al centavo)
   subtotalCents Int
-  discountCents Int  @default(0)
+  discountCents Int   @default(0)
   taxCents      Int
   totalCents    Int
   taxBreakdown  Json? // [{ impuesto:002, tipo:Traslado, base, tasa, importe }, ...]
@@ -10795,6 +10813,10 @@ enum AccountMovementType {
   EXPENSE_GENERAL
   EXPENSE_RENT
   EXPENSE_FUEL
+  PAYROLL_SALARIES
+  ISR_PAYROLL_WITHHELD
+  IMSS_PAYABLE
+  SALARIES_PAYABLE
 }
 
 // ============================================
@@ -10806,26 +10828,26 @@ enum AccountMovementType {
 // ============================================
 
 model JournalEntry {
-  id              String             @id @default(cuid())
-  organizationId  String
-  organization    Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  rfc             String // contribuyente (junto con organizationId)
-  venueId         String? // centro de costos (informativo; de qué local salió)
-  date            DateTime // fecha del asiento (devengo/flujo)
-  period          String // YYYY-MM, derivado de date (para balanza/cierre)
-  folio           Int // consecutivo por (org, rfc)
-  type            JournalEntryType   @default(DIARIO) // INGRESO / EGRESO / DIARIO (tipo de póliza SAT)
-  source          JournalEntrySource @default(MANUAL) // MANUAL o el evento que la generó
-  sourceId        String? // id del evento origen (Payment, Cfdi, …) para trazabilidad
-  idempotencyKey  String? // posteo idempotente del motor automático (manual = null)
-  status          JournalEntryStatus @default(POSTED)
-  concept         String // descripción de la póliza
-  totalDebitCents Int // denormalizado = Σ líneas debe (== totalCreditCents por el invariante)
+  id               String             @id @default(cuid())
+  organizationId   String
+  organization     Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  rfc              String // contribuyente (junto con organizationId)
+  venueId          String? // centro de costos (informativo; de qué local salió)
+  date             DateTime // fecha del asiento (devengo/flujo)
+  period           String // YYYY-MM, derivado de date (para balanza/cierre)
+  folio            Int // consecutivo por (org, rfc)
+  type             JournalEntryType   @default(DIARIO) // INGRESO / EGRESO / DIARIO (tipo de póliza SAT)
+  source           JournalEntrySource @default(MANUAL) // MANUAL o el evento que la generó
+  sourceId         String? // id del evento origen (Payment, Cfdi, …) para trazabilidad
+  idempotencyKey   String? // posteo idempotente del motor automático (manual = null)
+  status           JournalEntryStatus @default(POSTED)
+  concept          String // descripción de la póliza
+  totalDebitCents  Int // denormalizado = Σ líneas debe (== totalCreditCents por el invariante)
   totalCreditCents Int
-  createdById     String? // staff que la creó (manual); null = motor
-  createdAt       DateTime           @default(now())
-  updatedAt       DateTime           @updatedAt
-  lines           JournalLine[]
+  createdById      String? // staff que la creó (manual); null = motor
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+  lines            JournalLine[]
 
   @@unique([organizationId, rfc, idempotencyKey]) // idempotencia (múltiples NULL permitidos en Postgres)
   @@unique([organizationId, rfc, folio]) // consecutivo ÚNICO por contribuyente (integridad fiscal; bloquea folios duplicados a nivel DB)
@@ -10834,15 +10856,15 @@ model JournalEntry {
 }
 
 model JournalLine {
-  id             String       @id @default(cuid())
-  journalEntryId String
-  journalEntry   JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+  id              String        @id @default(cuid())
+  journalEntryId  String
+  journalEntry    JournalEntry  @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
   ledgerAccountId String
-  ledgerAccount  LedgerAccount @relation(fields: [ledgerAccountId], references: [id], onDelete: Restrict)
-  debitCents     Int          @default(0) // cargo (uno de los dos es > 0, el otro 0)
-  creditCents    Int          @default(0) // abono
-  description    String?
-  createdAt      DateTime     @default(now())
+  ledgerAccount   LedgerAccount @relation(fields: [ledgerAccountId], references: [id], onDelete: Restrict)
+  debitCents      Int           @default(0) // cargo (uno de los dos es > 0, el otro 0)
+  creditCents     Int           @default(0) // abono
+  description     String?
+  createdAt       DateTime      @default(now())
 
   @@index([journalEntryId])
   @@index([ledgerAccountId])
@@ -10988,6 +11010,104 @@ enum ExpenseCategoria {
   HONORARIOS
   SERVICIOS
   OTRO
+}
+
+/// Empleado (nómina, Capa B). Scope = patrón (organizationId, rfc). FK escalares (sin @relation).
+model Employee {
+  id             String  @id @default(cuid())
+  organizationId String
+  rfc            String // RFC del PATRÓN (contribuyente). (org, rfc) = scope.
+  venueId        String? // centro de costo (local donde trabaja)
+
+  nombre       String
+  rfcEmpleado  String // RFC del trabajador
+  curp         String?
+  nss          String? // número de seguridad social
+  puesto       String?
+
+  /// Sueldo mensual bruto (percepción gravable base), en centavos.
+  salarioMensualBrutoCents Int
+  /// Salario base de cotización (SBC) mensual para IMSS, en centavos. Si null, se estima del bruto.
+  sbcMensualCents          Int?
+  periodicidadPago         PayrollPeriodicity @default(MENSUAL)
+
+  fechaIngreso DateTime?
+  activo       Boolean   @default(true)
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([organizationId, rfc, rfcEmpleado])
+  @@index([organizationId, rfc])
+  @@index([venueId])
+}
+
+/// Corrida de nómina de un periodo (Capa B). Scope = patrón (organizationId, rfc).
+model PayrollRun {
+  id             String  @id @default(cuid())
+  organizationId String
+  rfc            String
+  venueId        String?
+
+  period       String // 'YYYY-MM'
+  periodicidad PayrollPeriodicity @default(MENSUAL)
+  fechaPago    DateTime
+  status       PayrollRunStatus   @default(DRAFT)
+
+  empleados               Int @default(0)
+  totalPercepcionesCents  Int @default(0)
+  totalIsrCents           Int @default(0)
+  totalSubsidioCents      Int @default(0)
+  totalImssObreroCents    Int @default(0)
+  totalOtrasDeduccCents   Int @default(0)
+  totalNetoCents          Int @default(0)
+
+  journalEntryId String?  @unique
+  posted         Boolean  @default(false)
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([organizationId, rfc, period, periodicidad])
+  @@index([organizationId, rfc, period])
+}
+
+/// Renglón por empleado de una corrida de nómina (snapshot del cálculo).
+model PayrollLine {
+  id           String @id @default(cuid())
+  payrollRunId String
+  employeeId   String
+
+  nombre      String // snapshot
+  rfcEmpleado String // snapshot
+
+  diasPagados             Int @default(30)
+  percepcionGravadaCents  Int @default(0)
+  percepcionExentaCents   Int @default(0)
+  totalPercepcionesCents  Int @default(0)
+  isrCents                Int @default(0)
+  subsidioCents           Int @default(0)
+  imssObreroCents         Int @default(0)
+  otrasDeduccionesCents   Int @default(0)
+  netoCents               Int @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@index([payrollRunId])
+  @@index([employeeId])
+}
+
+enum PayrollPeriodicity {
+  SEMANAL
+  QUINCENAL
+  MENSUAL
+}
+
+enum PayrollRunStatus {
+  DRAFT
+  POSTED
 }
 
 enum JournalEntryStatus {
