@@ -15,10 +15,57 @@ import {
   updateReservation,
   type UpdateReservationInput,
 } from '@/services/dashboard/reservation.dashboard.service'
+import { getReservationSettings, updateReservationSettings } from '@/services/dashboard/reservationSettings.service'
 import { auditMcpWrite } from '../audit'
 import { planGateMessage } from '../planGate'
 
 const RESERVATIONS_GATE = ['RESERVATIONS', 'Las reservaciones'] as const
+
+// Human labels for the configure_reservations preview, so the operator can verify
+// each change (current → new) in plain Spanish BEFORE confirming — and catch a
+// misread command at the gate instead of after the write.
+const RESERVATION_FIELD_LABELS: Record<string, string> = {
+  slotIntervalMin: 'Intervalo de slots (min)',
+  defaultDurationMin: 'Duración predeterminada (min)',
+  autoConfirm: 'Confirmar automáticamente',
+  maxAdvanceDays: 'Días máximos de anticipación',
+  minNoticeMin: 'Aviso mínimo (min)',
+  noShowGraceMin: 'Gracia para no-show (min)',
+  pacingMaxPerSlot: 'Máximo por slot',
+  onlineCapacityPercent: 'Capacidad online (%)',
+  depositMode: 'Modo de depósito',
+  depositFixedAmount: 'Depósito fijo ($)',
+  depositPercentage: 'Depósito (% del total)',
+  depositPartySizeGte: 'Depósito si party ≥',
+  depositPaymentWindow: 'Ventana de pago del depósito (h)',
+  appointmentUpfrontDefault: 'Cobro adelantado en citas',
+  classUpfrontDefault: 'Cobro adelantado en clases',
+  allowCustomerCancel: 'Permitir cancelación por cliente',
+  allowCustomerReschedule: 'Permitir cambio de horario',
+  minHoursBeforeCancel: 'Horas mínimas antes de cancelar',
+  forfeitDeposit: 'Perder depósito al cancelar',
+  noShowFeePercent: 'Cargo por no-show (%)',
+  creditRefundMode: 'Política de reembolso de créditos',
+  creditFreeRefundHoursBefore: 'Reembolso 100% si cancela con (h)',
+  creditLateRefundPercent: '% de reembolso si cancela tarde',
+  creditNoShowRefund: 'Devolver créditos en no-show',
+  waitlistEnabled: 'Lista de espera habilitada',
+  waitlistMaxSize: 'Tamaño máximo de lista de espera',
+  waitlistPriorityMode: 'Modo de prioridad de lista de espera',
+  waitlistNotifyWindow: 'Ventana de notificación (min)',
+  publicBookingEnabled: 'Reservaciones online habilitadas',
+  requirePhone: 'Requerir teléfono',
+  requireEmail: 'Requerir email',
+  requireAccount: 'Requerir cuenta',
+  remindersEnabled: 'Enviar recordatorios',
+  reminderChannels: 'Canales de recordatorio',
+  reminderMinBefore: 'Minutos antes de recordar',
+}
+// Prisma Decimal → number for display; everything else passes through unchanged.
+const displayValue = (v: unknown): unknown =>
+  v != null && typeof v === 'object' && !Array.isArray(v) && typeof (v as { toNumber?: unknown }).toNumber === 'function'
+    ? (v as { toNumber: () => number }).toNumber()
+    : v
 
 export function registerReservationTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
@@ -347,6 +394,140 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
           data: { confirmationCode, fields: Object.keys(data) },
         })
         return text({ ok: true, reservation: updated })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'reservation_settings',
+    'Read the WHOLE reservation-engine configuration for a venue you can access — everything on the "Configuración de Reservaciones" screen: scheduling (slot interval, default duration, max advance days, min notice, no-show grace, auto-confirm), pacing (max per slot, online capacity %), deposits (mode + amount/percentage + party-size threshold + payment window), type-aware upfront payment defaults (appointments vs classes), cancellation policy (who can cancel/reschedule, min hours, forfeit deposit, no-show fee), class credit-refund policy, waitlist (size + priority mode + notify window), public online booking toggles, reminders (channels + when), and Google Calendar sync. Use this FIRST when an operator wants to change reservation settings: show them the current values, ask what they want, then call configure_reservations with ONLY the fields to change. Pass venueId. PRO feature (RESERVATIONS).',
+    {
+      venueId: z.string().describe('Venue whose reservation settings to read (must be in your scope)'),
+    },
+    async ({ venueId }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('reservations:read', venueId)
+      const gate = await planGateMessage(venueId, ...RESERVATIONS_GATE) // PRO tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+      const settings = await getReservationSettings(venueId)
+      return text({ venueId, settings })
+    },
+  )
+
+  server.tool(
+    'configure_reservations',
+    'Change the reservation-engine configuration for a venue you can access — set any subset of the settings shown by reservation_settings. ALWAYS read reservation_settings first, ask the operator what they want for each thing, then call this with ONLY the fields to change (everything omitted stays as-is). By DEFAULT this only PREVIEWS the change; call again with confirm:true to save. This WRITES — requires reservations:update. PRO feature (RESERVATIONS).',
+    {
+      venueId: z.string().describe('Venue to configure (must be in your scope)'),
+      // Scheduling
+      slotIntervalMin: z.number().int().positive().optional().describe('Minutes between bookable slots (e.g. 15, 30)'),
+      defaultDurationMin: z.number().int().positive().optional().describe('Default reservation/appointment length in minutes'),
+      autoConfirm: z.boolean().optional().describe('Auto-confirm new bookings instead of leaving them PENDING'),
+      maxAdvanceDays: z.number().int().positive().optional().describe('How many days ahead guests can book'),
+      minNoticeMin: z.number().int().min(0).optional().describe('Minimum minutes of notice before a booking start'),
+      noShowGraceMin: z.number().int().min(0).optional().describe('Grace minutes before a booking counts as a no-show'),
+      pacingMaxPerSlot: z.number().int().positive().nullable().optional().describe('Max bookings per slot; null = no limit'),
+      onlineCapacityPercent: z.number().int().min(0).max(100).optional().describe('% of capacity exposed to online booking (e.g. 100, 50)'),
+      // Deposits
+      depositMode: z
+        .enum(['none', 'card_hold', 'deposit', 'prepaid'])
+        .optional()
+        .describe('Deposit handling (needs Stripe for anything but none)'),
+      depositFixedAmount: z.number().min(0).nullable().optional().describe('Fixed deposit amount in pesos (or null)'),
+      depositPercentage: z.number().min(0).max(100).nullable().optional().describe('Deposit as % of total (or null)'),
+      depositPartySizeGte: z
+        .number()
+        .int()
+        .positive()
+        .nullable()
+        .optional()
+        .describe('Only require a deposit when party size ≥ this (or null)'),
+      depositPaymentWindow: z.number().int().positive().nullable().optional().describe('Hours the guest has to pay the deposit (or null)'),
+      // Type-aware upfront payment
+      appointmentUpfrontDefault: z
+        .enum(['required', 'at_venue', 'optional'])
+        .optional()
+        .describe('Default upfront payment for appointments'),
+      classUpfrontDefault: z.enum(['required', 'at_venue', 'optional']).optional().describe('Default upfront payment for classes'),
+      // Cancellation
+      allowCustomerCancel: z.boolean().optional().describe('Allow the guest to cancel'),
+      allowCustomerReschedule: z.boolean().optional().describe('Allow the guest to reschedule'),
+      minHoursBeforeCancel: z.number().int().min(0).nullable().optional().describe('Min hours before start to cancel/reschedule (or null)'),
+      forfeitDeposit: z.boolean().optional().describe('Forfeit the deposit when the guest cancels'),
+      noShowFeePercent: z.number().min(0).max(100).nullable().optional().describe('No-show fee as % (or null = no fee)'),
+      // Class credit refunds
+      creditRefundMode: z.enum(['NEVER', 'ALWAYS', 'TIME_BASED']).optional().describe('How class credits are refunded on cancel'),
+      creditFreeRefundHoursBefore: z.number().int().min(0).optional().describe('Full credit refund if cancelled ≥ this many hours before'),
+      creditLateRefundPercent: z.number().min(0).max(100).optional().describe('% credit refunded for a late cancel'),
+      creditNoShowRefund: z.boolean().optional().describe('Refund credits on a no-show'),
+      // Waitlist
+      waitlistEnabled: z.boolean().optional().describe('Enable the waitlist'),
+      waitlistMaxSize: z.number().int().positive().optional().describe('Max people on the waitlist'),
+      waitlistPriorityMode: z.enum(['fifo', 'party_size', 'broadcast']).optional().describe('Waitlist priority strategy'),
+      waitlistNotifyWindow: z.number().int().positive().optional().describe('Minutes a notified guest has to claim a freed slot'),
+      // Public online booking
+      publicBookingEnabled: z.boolean().optional().describe('Enable online (public) booking'),
+      requirePhone: z.boolean().optional().describe('Require phone for online booking'),
+      requireEmail: z.boolean().optional().describe('Require email for online booking'),
+      requireAccount: z.boolean().optional().describe('Require an account for online booking'),
+      // Reminders
+      remindersEnabled: z.boolean().optional().describe('Send booking reminders'),
+      reminderChannels: z
+        .array(z.enum(['email', 'sms', 'whatsapp']))
+        .optional()
+        .describe('Reminder channels'),
+      reminderMinBefore: z.array(z.number().int().positive()).optional().describe('Minutes-before to send each reminder, e.g. [120, 1440]'),
+      confirm: z.boolean().optional().describe('Must be true to actually save; without it you get a preview of the changes'),
+    },
+    async ({ venueId, confirm, ...fields }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('reservations:update', venueId) // write gate (per-venue role)
+      const gate = await planGateMessage(venueId, ...RESERVATIONS_GATE) // PRO tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+
+      // Only the fields the operator actually set (undefined = leave as-is). null is a real value (clears).
+      const update = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined))
+      if (Object.keys(update).length === 0) {
+        return text({
+          ok: false,
+          error: 'No indicaste ningún ajuste a cambiar. Pasa al menos un campo (lee reservation_settings para ver las opciones).',
+        })
+      }
+
+      if (!confirm) {
+        // Show each change as label + CURRENT → NEW so the operator can catch a
+        // misread instruction before anything is written. Read the current row flat
+        // (same column names as the update keys); null/absent → '(predeterminado)'.
+        const current = (await prisma.reservationSettings.findUnique({ where: { venueId } })) as Record<string, unknown> | null
+        const changes = Object.entries(update).map(([field, to]) => ({
+          field,
+          label: RESERVATION_FIELD_LABELS[field] ?? field,
+          from: current ? (displayValue(current[field]) ?? null) : null,
+          to,
+        }))
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          changes,
+          message: `Vas a cambiar ${changes.length} ajuste(s):\n${changes
+            .map(c => `• ${c.label}: ${JSON.stringify(c.from)} → ${JSON.stringify(c.to)}`)
+            .join('\n')}\n\nConfirma con el operador que esto es lo que pidió; luego vuelve a llamar con confirm:true.`,
+        })
+      }
+
+      try {
+        await updateReservationSettings(venueId, update)
+        await auditMcpWrite(scope, {
+          action: 'RESERVATION_SETTINGS_UPDATED',
+          entity: 'ReservationSettings',
+          entityId: venueId,
+          venueId,
+          data: { fields: Object.keys(update) },
+        })
+        const settings = await getReservationSettings(venueId) // return the fresh, full config
+        return text({ ok: true, changed: Object.keys(update), settings })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
       }

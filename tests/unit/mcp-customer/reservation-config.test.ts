@@ -1,0 +1,145 @@
+/**
+ * reservation_settings (read) + configure_reservations (write) MCP tools (2026-06-18):
+ * expose the whole reservation-engine config so an operator can tell their AI "configura
+ * mis reservaciones así" — Claude reads the current settings, asks, then writes only the
+ * changed fields. PRO feature (RESERVATIONS), same gate as every other reservation tool;
+ * write also needs reservations:update + is confirm-gated + audited.
+ *
+ * Tests: the PRO gate fires, the read returns the config, the write only forwards the
+ * fields the operator set (undefined omitted, null kept), confirm-gating, and the audit.
+ */
+import { registerReservationTools } from '../../../src/mcp/tools/reservations'
+import type { McpScope } from '../../../src/mcp/scope'
+
+const mockGet = jest.fn()
+const mockUpdate = jest.fn()
+const mockAudit = jest.fn()
+const mockPlanGate = jest.fn()
+
+jest.mock('@/services/dashboard/reservationSettings.service', () => ({
+  getReservationSettings: (...a: unknown[]) => mockGet(...(a as [])),
+  updateReservationSettings: (...a: unknown[]) => mockUpdate(...(a as [])),
+}))
+jest.mock('@/services/dashboard/reservation.dashboard.service', () => ({
+  createReservation: jest.fn(),
+  rescheduleAppointmentReservation: jest.fn(),
+  cancelReservation: jest.fn(),
+  confirmReservation: jest.fn(),
+  checkInReservation: jest.fn(),
+  completeReservation: jest.fn(),
+  markNoShow: jest.fn(),
+  updateReservation: jest.fn(),
+}))
+jest.mock('@/mcp/audit', () => ({ auditMcpWrite: (...a: unknown[]) => mockAudit(...(a as [])) }))
+jest.mock('@/mcp/planGate', () => ({ planGateMessage: (...a: unknown[]) => mockPlanGate(...(a as [])) }))
+jest.mock('@/mcp/guard', () => ({
+  createGuard: () => ({
+    venueFilter: (v?: string) => {
+      if (v && v !== 'v1') throw new Error('out of scope')
+      return { venueId: { in: ['v1'] } }
+    },
+    requirePermission: (perm: string) => {
+      if (perm === 'reservations:update' && !global.__canUpdate) throw new Error('Forbidden: missing reservations:update')
+    },
+  }),
+}))
+const mockSettingsFindUnique = jest.fn()
+jest.mock('@/utils/prismaClient', () => ({
+  __esModule: true,
+  default: {
+    reservation: { findFirst: jest.fn(), findMany: jest.fn() },
+    reservationSettings: { findUnique: (...a: unknown[]) => mockSettingsFindUnique(...(a as [])) },
+  },
+}))
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __canUpdate: boolean
+}
+
+const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
+const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map() } as McpScope
+const call = (n: string, args: Record<string, unknown>) => handlers.get(n)!(args, {})
+const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
+const fakeConfig = { scheduling: { slotIntervalMin: 30 }, deposits: { mode: 'none' }, waitlist: { enabled: true } }
+
+beforeAll(() => {
+  registerReservationTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
+})
+beforeEach(() => {
+  jest.clearAllMocks()
+  global.__canUpdate = true
+  mockPlanGate.mockResolvedValue(null) // entitled (PRO) by default
+  mockGet.mockResolvedValue(fakeConfig)
+  mockUpdate.mockResolvedValue({ id: 'rs1' })
+  mockSettingsFindUnique.mockResolvedValue({ slotIntervalMin: 30, waitlistEnabled: false, pacingMaxPerSlot: 4 }) // current row for the preview
+})
+
+describe('reservation_settings (read)', () => {
+  it('returns the full config when entitled', async () => {
+    const out = parse(await call('reservation_settings', { venueId: 'v1' }))
+    expect(out.settings).toEqual(fakeConfig)
+    expect(mockGet).toHaveBeenCalledWith('v1')
+  })
+
+  it('PRO-gated: not entitled → planRequired, no read', async () => {
+    mockPlanGate.mockResolvedValue('Las reservaciones requieren el plan PRO.')
+    const out = parse(await call('reservation_settings', { venueId: 'v1' }))
+    expect(out.planRequired).toBe(true)
+    expect(mockGet).not.toHaveBeenCalled()
+  })
+
+  it('throws on out-of-scope venue', async () => {
+    await expect(call('reservation_settings', { venueId: 'other' })).rejects.toThrow()
+  })
+})
+
+describe('configure_reservations (write)', () => {
+  it('without confirm → human-readable preview (label + current→new), the service is NOT called', async () => {
+    const out = parse(await call('configure_reservations', { venueId: 'v1', slotIntervalMin: 15 }))
+    expect(out.requiresConfirmation).toBe(true)
+    // changes is now an array of {field, label, from, to} so the operator can catch a misread
+    expect(out.changes).toEqual([{ field: 'slotIntervalMin', label: 'Intervalo de slots (min)', from: 30, to: 15 }])
+    expect(mockUpdate).not.toHaveBeenCalled()
+  })
+
+  it('confirm:true forwards ONLY the set fields (undefined omitted, null kept) + audits', async () => {
+    await call('configure_reservations', {
+      venueId: 'v1',
+      slotIntervalMin: 15,
+      pacingMaxPerSlot: null, // explicit clear — must be forwarded
+      waitlistEnabled: true,
+      confirm: true,
+    })
+    expect(mockUpdate).toHaveBeenCalledTimes(1)
+    const [venueId, update] = mockUpdate.mock.calls[0]
+    expect(venueId).toBe('v1')
+    expect(update).toEqual({ slotIntervalMin: 15, pacingMaxPerSlot: null, waitlistEnabled: true })
+    expect('confirm' in update).toBe(false) // control field never leaks into the update
+    expect('venueId' in update).toBe(false)
+    expect(mockAudit).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: 'RESERVATION_SETTINGS_UPDATED', entity: 'ReservationSettings' }),
+    )
+  })
+
+  it('no fields to change → clean error, no write', async () => {
+    const out = parse(await call('configure_reservations', { venueId: 'v1', confirm: true }))
+    expect(out.ok).toBe(false)
+    expect(out.error).toMatch(/ning[uú]n ajuste/i)
+    expect(mockUpdate).not.toHaveBeenCalled()
+  })
+
+  it('requires reservations:update (write permission)', async () => {
+    global.__canUpdate = false
+    await expect(call('configure_reservations', { venueId: 'v1', slotIntervalMin: 15, confirm: true })).rejects.toThrow('Forbidden')
+    expect(mockUpdate).not.toHaveBeenCalled()
+  })
+
+  it('PRO-gated: not entitled → planRequired, no write', async () => {
+    mockPlanGate.mockResolvedValue('Las reservaciones requieren el plan PRO.')
+    const out = parse(await call('configure_reservations', { venueId: 'v1', slotIntervalMin: 15, confirm: true }))
+    expect(out.planRequired).toBe(true)
+    expect(mockUpdate).not.toHaveBeenCalled()
+  })
+})
