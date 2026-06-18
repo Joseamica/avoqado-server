@@ -16,6 +16,7 @@ import { getCatalogoXml, getBalanzaXml } from '@/services/fiscal/contabilidadEle
 import { getIsrProvisional } from '@/services/fiscal/isr.service'
 import { computePayrollPreview, createEmployee, listEmployees, runPayroll } from '@/services/fiscal/nomina.service'
 import { stampPayrollReceipts } from '@/services/fiscal/nominaCfdi.service'
+import { getFiscalReadiness } from '@/services/fiscal/fiscalReadiness.service'
 import { listStatements } from '@/services/dashboard/bankReconciliation.service'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
@@ -1040,6 +1041,39 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         yaTimbrados: r.alreadyStamped,
         errores: r.errors.length > 0 ? r.errors : undefined,
         nota: 'Idempotente: re-correr no re-timbra. Requiere el CSD activo y la clave de entidad federativa de cada empleado.',
+      })
+    },
+  )
+
+  server.tool(
+    'fiscal_readiness',
+    'Diagnóstico de PREPARACIÓN FISCAL (onboarding) de un local (Capa B, PREMIUM): "¿qué le falta para empezar a operar la contabilidad fiscal?". Revisa RFC, emisor (régimen + lugar de expedición), CSD (sello digital) activo/por vencer, código postal, catálogo de cuentas sembrado, configuración contable (movimientos con cuenta asignada) y empleados con sus datos para timbrar nómina. Devuelve un checklist con estatus (ok/warn/missing + qué hacer) y las CAPACIDADES desbloqueadas (puede facturar / timbrar nómina / contabilidad electrónica). Sólo lectura. Pasa venueId.',
+    {
+      venueId: z.string().describe('Local a diagnosticar (debe estar en tu alcance)'),
+    },
+    async ({ venueId }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:read', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'El diagnóstico de preparación fiscal')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+
+      const r = await getFiscalReadiness(venueId)
+      if (r.needsFiscalSetup) {
+        return text({ ok: true, needsFiscalSetup: true, mensaje: 'Este local aún no tiene RFC/emisor fiscal configurado.' })
+      }
+      return text({
+        ok: true,
+        rfc: r.rfc,
+        razonSocial: r.legalName,
+        regimenFiscal: r.regimenFiscal,
+        resumen: r.resumen,
+        capacidades: {
+          puedeFacturar: r.capabilities.puedeFacturar,
+          puedeTimbrarNomina: r.capabilities.puedeTimbrarNomina,
+          contabilidadElectronicaLista: r.capabilities.contabilidadElectronicaLista,
+        },
+        checklist: r.checks.map(c => ({ punto: c.label, estatus: c.status, detalle: c.detail })),
+        nota: 'estatus: ok = listo · warn = revisa · missing = falta. Las capacidades resumen qué puedes hacer ya con la configuración actual.',
       })
     },
   )

@@ -30,6 +30,7 @@ import {
 } from '@/controllers/dashboard/expense.controller'
 import { getCatalogoXmlController, getBalanzaXmlController } from '@/controllers/dashboard/contabilidadElectronica.controller'
 import { getIsrProvisionalController } from '@/controllers/dashboard/isr.controller'
+import { getFiscalReadinessController } from '@/controllers/dashboard/fiscalReadiness.controller'
 import {
   createEmployeeController,
   listEmployeesController,
@@ -131,6 +132,19 @@ router.get('/business-summary', checkPermission('accounting:read'), validateRequ
  * (efectivo) de banco (electrónico, neto de comisiones). @permission accounting:read
  */
 router.get('/banks', checkPermission('accounting:read'), validateRequest(periodSchema), accountingController.getBankAndCashSummary)
+
+// ───────────────────────────────────────────────────────────────────────────
+// Preparación fiscal (onboarding) — diagnóstico read-only. Gated PREMIUM (CFDI).
+// ───────────────────────────────────────────────────────────────────────────
+
+/** GET /accounting/readiness — checklist de preparación fiscal + capacidades desbloqueadas. */
+router.get(
+  '/readiness',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:read'),
+  validateRequest(venueParamSchema),
+  getFiscalReadinessController,
+)
 
 // ───────────────────────────────────────────────────────────────────────────
 // Catálogo de cuentas (Capa B fiscal) — gated PREMIUM (bundle con CFDI).
