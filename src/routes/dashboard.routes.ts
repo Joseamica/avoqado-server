@@ -3466,6 +3466,7 @@ router.get(
   '/venues/:venueId/available-balance',
   authenticateTokenMiddleware,
   checkPermission('settlements:read'),
+  checkFeatureAccess('ADVANCED_REPORTS'), // Available Balance is a PRO feature
   validateRequest(dateRangeQuerySchema),
   availableBalanceController.getAvailableBalance,
 )
@@ -3491,6 +3492,7 @@ router.get(
   '/venues/:venueId/available-balance/by-card-type',
   authenticateTokenMiddleware,
   checkPermission('settlements:read'),
+  checkFeatureAccess('ADVANCED_REPORTS'), // Available Balance is a PRO feature
   validateRequest(dateRangeQuerySchema),
   availableBalanceController.getBalanceByCardType,
 )
@@ -3516,6 +3518,7 @@ router.get(
   '/venues/:venueId/available-balance/timeline',
   authenticateTokenMiddleware,
   checkPermission('settlements:read'),
+  checkFeatureAccess('ADVANCED_REPORTS'), // Available Balance is a PRO feature
   validateRequest(timelineQuerySchema),
   availableBalanceController.getSettlementTimeline,
 )
@@ -3542,6 +3545,7 @@ router.get(
   '/venues/:venueId/available-balance/settlement-calendar',
   authenticateTokenMiddleware,
   checkPermission('settlements:read'),
+  checkFeatureAccess('ADVANCED_REPORTS'), // Available Balance is a PRO feature
   validateRequest(dateRangeQuerySchema),
   availableBalanceController.getSettlementCalendar,
 )
@@ -3583,6 +3587,7 @@ router.post(
   '/venues/:venueId/available-balance/simulate',
   authenticateTokenMiddleware,
   checkPermission('settlements:read'),
+  checkFeatureAccess('ADVANCED_REPORTS'), // Available Balance is a PRO feature
   validateRequest(simulateTransactionSchema),
   availableBalanceController.simulateTransaction,
 )
@@ -3607,6 +3612,7 @@ router.get(
   '/venues/:venueId/available-balance/projection',
   authenticateTokenMiddleware,
   checkPermission('settlements:read'),
+  checkFeatureAccess('ADVANCED_REPORTS'), // Available Balance is a PRO feature
   validateRequest(balanceProjectionQuerySchema),
   availableBalanceController.getBalanceProjection,
 )

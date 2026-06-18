@@ -17,6 +17,7 @@ import {
   fetchSalesSummaryDetailRows,
   type SalesSummaryExportSection,
 } from '@/services/dashboard/sales-summary.dashboard.service'
+import { getAvailableBalance, getBalanceByCardType } from '@/services/dashboard/availableBalance.dashboard.service'
 
 export interface SalesInput {
   amount: number | { toString(): string }
@@ -413,6 +414,56 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
         timezone: tz,
         calendar,
         nextByMerchant: Array.from(nextByMerchant.entries()).map(([merchantAccountId, v]) => ({ merchantAccountId, ...v })),
+      })
+    },
+  )
+
+  server.tool(
+    'available_balance',
+    'How much money a venue you can access actually has — "¿cuánto tengo disponible? ¿cuánto pendiente? ¿cuándo y cuánto me depositan?". Returns: availableNow (already settled, withdrawable), pendingSettlement (card money still in transit), the estimated NEXT settlement (date + amount), plus the period totalSales and totalFees. Also a per-card-type breakdown (debit/credit/amex/cash) with how much is settled vs pending and the typical settlement days — so you can see which card is slow. Cash counts as instant (0 fees) and only since the last cash closeout. Pass venueId; optionally fromDate/toDate (YYYY-MM-DD) to bound the period (default: all time). Read-only. PRO feature (ADVANCED_REPORTS) — the server enforces plan access and returns a clear message if the venue is not entitled, so do NOT pre-judge plan eligibility yourself.',
+    {
+      venueId: z.string().describe('Venue whose balance to read (must be in your scope)'),
+      fromDate: z.string().optional().describe('Start date YYYY-MM-DD (default: all time)'),
+      toDate: z.string().optional().describe('End date YYYY-MM-DD (default: today)'),
+    },
+    async ({ venueId, fromDate, toDate }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('settlements:read', venueId) // mirrors the dashboard available-balance permission gate
+      const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'El saldo disponible') // PRO tier (same as the dashboard available-balance feature gate)
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+      const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+      const tz = venue?.timezone || 'America/Mexico_City'
+      // Only bound the period when the operator gives a date; otherwise it's an all-time balance.
+      const dateRange =
+        fromDate || toDate
+          ? {
+              from: venueStartOfDay(tz, fromDate ? new Date(`${fromDate}T12:00:00`) : new Date(0)),
+              to: venueEndOfDay(tz, toDate ? new Date(`${toDate}T12:00:00`) : undefined),
+            }
+          : undefined
+      const [summary, byCard] = await Promise.all([getAvailableBalance(venueId, dateRange), getBalanceByCardType(venueId, dateRange)])
+      return text({
+        venueId,
+        timezone: tz,
+        window: dateRange ? { from: dateRange.from.toISOString(), to: dateRange.to.toISOString() } : 'all-time',
+        availableNow: summary.availableNow, // already settled — withdrawable
+        pendingSettlement: summary.pendingSettlement, // card money still in transit
+        estimatedNextSettlement: {
+          date: summary.estimatedNextSettlement.date ? summary.estimatedNextSettlement.date.toISOString() : null,
+          amount: summary.estimatedNextSettlement.amount,
+        },
+        totalSales: summary.totalSales,
+        totalFees: summary.totalFees,
+        byCardType: byCard.map(c => ({
+          cardType: c.cardType,
+          totalSales: c.totalSales,
+          fees: c.fees,
+          netAmount: c.netAmount,
+          settledAmount: c.settledAmount,
+          pendingAmount: c.pendingAmount,
+          settlementDays: c.settlementDays,
+          transactionCount: c.transactionCount,
+        })),
       })
     },
   )
