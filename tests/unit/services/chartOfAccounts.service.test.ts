@@ -83,7 +83,7 @@ describe('seedBaseChart', () => {
 
     await seedBaseChart('venue-1', { staffId: 'staff-1' })
 
-    expect(create).toHaveBeenCalledTimes(86) // 83 base + 3 extras de 'servicios'
+    expect(create).toHaveBeenCalledTimes(88) // 85 base (incl. 601.84 + 216.07) + 3 extras de 'servicios'
     const byCode = (code: string) => create.mock.calls.find(c => c[0].data.code === code)?.[0].data
     expect(byCode('101').isPostable).toBe(false) // 101 (Caja) tiene hijos → acumulativa
     expect(byCode('101.01').isPostable).toBe(true) // hoja
@@ -109,7 +109,7 @@ describe('seedBaseChart', () => {
     const createdCodes = create.mock.calls.map(c => c[0].data.code)
     expect(createdCodes).not.toContain('101') // existente → preservado
     expect(createdCodes).not.toContain('101.01')
-    expect(create).toHaveBeenCalledTimes(84) // 86 - 2 existentes
+    expect(create).toHaveBeenCalledTimes(86) // 88 - 2 existentes
   })
 })
 
