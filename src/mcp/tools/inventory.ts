@@ -17,6 +17,17 @@ import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
 const SERIALIZED_OFF_MSG = 'El inventario serializado no está activo en este local (módulo SERIALIZED_INVENTORY apagado).'
 import { MovementType, RawMaterialMovementType, RawMaterialCategory, Unit } from '@prisma/client'
 
+// Plain-Spanish gloss for each custody state, so the SIM custody timeline reads
+// like the dashboard instead of raw enum values.
+const CUSTODY_STATE_ES: Record<string, string> = {
+  ADMIN_HELD: 'En almacén (sin supervisor)',
+  SUPERVISOR_HELD: 'En poder del supervisor',
+  PROMOTER_PENDING: 'Asignado a promotor (pendiente de aceptar en TPV)',
+  PROMOTER_HELD: 'En poder del promotor (vendible)',
+  PROMOTER_REJECTED: 'Rechazado por el promotor (requiere recolección del supervisor)',
+  SOLD: 'Vendido',
+}
+
 const MOVEMENT_TYPE = {
   adjustment: MovementType.ADJUSTMENT,
   purchase: MovementType.PURCHASE,
@@ -518,6 +529,85 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
         adjustmentCount: adjustments.length,
         netAdjustmentQuantity, // sum of ADJUSTMENT deltas in this window; negative = net hand-removed
         movements: merged,
+      })
+    },
+  )
+
+  server.tool(
+    'sim_custody',
+    'Chain of custody (cadena de custodia) of ONE serialized item — a SIM / ICCID / barcoded unit — in an organization you can access. Given the serial number, returns the item\'s CURRENT custody state (in the warehouse / with a supervisor / with a promoter / sold), who currently holds it (supervisor + promoter), and the full timeline of every handoff: who passed it to whom, when, the state change, the actor, and the reason (e.g. employee terminated, damaged SIM). Answers "¿quién tiene este SIM ahora? ¿por las manos de quién pasó? ¿quién lo perdió?". Only for venues with the SERIALIZED_INVENTORY module (e.g. telecom). Pass venueId + serialNumber.',
+    {
+      venueId: z.string().describe('A venue in the org that owns the item (must be in your scope) — used for the module gate'),
+      serialNumber: z.string().min(1).describe('Serial number / ICCID / barcode of the item'),
+    },
+    async ({ venueId, serialNumber }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      // SERIALIZED_INVENTORY is a MODULE — gate exactly like the platform (isModuleEnabled, incl.
+      // org-level fallback), NOT the Feature/tier resolver. Only module-on venues may read custody.
+      if (!(await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY))) {
+        return text({ ok: false, moduleRequired: true, error: SERIALIZED_OFF_MSG })
+      }
+      const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { organizationId: true } })
+      const orgId = venue?.organizationId
+      // Case-insensitive serial lookup (legacy lowercase rows exist — serial bug class).
+      // Scope to THIS venue or its org so an operator never reads another org's custody chain.
+      const item = await prisma.serializedItem.findFirst({
+        where: {
+          serialNumber: { equals: serialNumber, mode: 'insensitive' as const },
+          OR: [{ venueId }, ...(orgId ? [{ organizationId: orgId }] : [])],
+        },
+        select: {
+          id: true,
+          serialNumber: true,
+          status: true,
+          custodyState: true,
+          assignedSupervisor: { select: { firstName: true, lastName: true } },
+          assignedPromoter: { select: { firstName: true, lastName: true } },
+        },
+      })
+      if (!item) {
+        return text({ ok: false, error: `No encontré un ítem serializado con serial "${serialNumber}" en tu organización.` })
+      }
+      const events = await prisma.serializedItemCustodyEvent.findMany({
+        where: { serializedItemId: item.id },
+        orderBy: { createdAt: 'asc' }, // chronological: first handoff → latest
+        take: 200,
+      })
+      // Events use plain String staff FKs (survive Staff deletion for forensics) — resolve names in one query.
+      const staffIds = [
+        ...new Set(
+          events.flatMap(e => [e.fromStaffId, e.toStaffId, e.actorStaffId].filter((id): id is string => !!id)),
+        ),
+      ]
+      const staff = staffIds.length
+        ? await prisma.staff.findMany({ where: { id: { in: staffIds } }, select: { id: true, firstName: true, lastName: true } })
+        : []
+      const nameOf = new Map(staff.map(s => [s.id, `${s.firstName} ${s.lastName}`.trim()]))
+      const who = (id: string | null) => (id ? (nameOf.get(id) ?? id) : null)
+      const fullName = (p: { firstName: string | null; lastName: string | null } | null) =>
+        p ? `${p.firstName ?? ''} ${p.lastName ?? ''}`.trim() || null : null
+
+      return text({
+        venueId,
+        item: {
+          serialNumber: item.serialNumber,
+          status: item.status,
+          custodyState: item.custodyState,
+          custodyStateLabel: CUSTODY_STATE_ES[item.custodyState] ?? item.custodyState,
+          heldBySupervisor: fullName(item.assignedSupervisor),
+          heldByPromoter: fullName(item.assignedPromoter),
+        },
+        eventCount: events.length,
+        timeline: events.map(e => ({
+          at: e.createdAt.toISOString(),
+          eventType: e.eventType,
+          fromState: e.fromState,
+          toState: e.toState,
+          fromStaff: who(e.fromStaffId),
+          toStaff: who(e.toStaffId),
+          actor: who(e.actorStaffId),
+          reason: e.reason ?? null,
+        })),
       })
     },
   )
