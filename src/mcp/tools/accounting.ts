@@ -15,6 +15,7 @@ import { getDiot } from '@/services/fiscal/diot.service'
 import { getCatalogoXml, getBalanzaXml } from '@/services/fiscal/contabilidadElectronica.service'
 import { getIsrProvisional } from '@/services/fiscal/isr.service'
 import { computePayrollPreview, createEmployee, listEmployees, runPayroll } from '@/services/fiscal/nomina.service'
+import { stampPayrollReceipts } from '@/services/fiscal/nominaCfdi.service'
 import { listStatements } from '@/services/dashboard/bankReconciliation.service'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
@@ -1009,6 +1010,36 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         imssObrero: pesos(r.totals.imssCents),
         neto: pesos(r.totals.netoCents),
         nota: 'ESTIMACIÓN — falta el cálculo fino de IMSS por SBC y el timbrado del CFDI de nómina. Confírmalo con tu nominista.',
+      })
+    },
+  )
+
+  server.tool(
+    'stamp_payroll_receipts',
+    'Timbra los RECIBOS DE NÓMINA (CFDI 4.0 + complemento Nómina 1.2) de una corrida de nómina ya posteada (Capa B, PREMIUM, escritura). Por cada empleado genera y timbra su recibo con el PAC del emisor; guarda el folio fiscal (UUID). Idempotente (salta los ya timbrados). Requiere el CSD del emisor ACTIVO y la clave de entidad federativa del empleado. Escritura: requiere accounting:manage + feature CFDI. Pasa venueId y payrollRunId.',
+    {
+      venueId: z.string().describe('Local (debe estar en tu alcance)'),
+      payrollRunId: z.string().describe('Id de la corrida de nómina (PayrollRun) ya posteada'),
+    },
+    async ({ venueId, payrollRunId }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:manage', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'El timbrado de recibos de nómina')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+      const r = await stampPayrollReceipts(venueId, payrollRunId, { staffId: scope.staffId })
+      if (r.needsFiscalSetup) return text({ ok: true, needsFiscalSetup: true })
+      if (r.needsCsd)
+        return text({
+          ok: false,
+          needsCsd: true,
+          error: 'El emisor no tiene su CSD (sello digital) activo; súbelo en Facturación para poder timbrar nómina.',
+        })
+      return text({
+        ok: r.errors.length === 0,
+        recibosTimbrados: r.stamped,
+        yaTimbrados: r.alreadyStamped,
+        errores: r.errors.length > 0 ? r.errors : undefined,
+        nota: 'Idempotente: re-correr no re-timbra. Requiere el CSD activo y la clave de entidad federativa de cada empleado.',
       })
     },
   )

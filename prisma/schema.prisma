@@ -11031,6 +11031,15 @@ model Employee {
   sbcMensualCents          Int?
   periodicidadPago         PayrollPeriodicity @default(MENSUAL)
 
+  // Datos fiscales para el CFDI de nómina (complemento Nómina 1.2).
+  tipoContrato     String  @default("01") // c_TipoContrato (01 = indeterminado)
+  tipoRegimen      String  @default("02") // c_TipoRegimenContratacion (02 = sueldos y salarios)
+  claveEntFed      String? // c_Estado (CMX, JAL, NLE...) — requerido para timbrar
+  numEmpleado      String?
+  registroPatronal String? // registro patronal IMSS del patrón (opcional en el CFDI)
+  /// Salario diario integrado (SDI) en centavos. Si null, se estima del SBC.
+  salarioDiarioIntegradoCents Int?
+
   fechaIngreso DateTime?
   activo       Boolean   @default(true)
 
@@ -11093,6 +11102,12 @@ model PayrollLine {
   otrasDeduccionesCents   Int @default(0)
   netoCents               Int @default(0)
 
+  // Recibo de nómina (CFDI 4.0 + complemento Nómina 1.2) timbrado para este empleado.
+  cfdiStatus     PayrollCfdiStatus @default(PENDING)
+  cfdiUuid       String? // folio fiscal del recibo timbrado
+  cfdiProviderId String? // id del documento en el PAC (Facturapi)
+  cfdiError      String? // último error de timbrado, si lo hubo
+
   createdAt DateTime @default(now())
 
   @@index([payrollRunId])
@@ -11108,6 +11123,12 @@ enum PayrollPeriodicity {
 enum PayrollRunStatus {
   DRAFT
   POSTED
+}
+
+enum PayrollCfdiStatus {
+  PENDING
+  STAMPED
+  ERROR
 }
 
 enum JournalEntryStatus {

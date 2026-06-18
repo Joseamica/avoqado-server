@@ -8,6 +8,7 @@ import {
   runPayroll,
   type CreateEmployeeInput,
 } from '../../services/fiscal/nomina.service'
+import { stampPayrollReceipts } from '../../services/fiscal/nominaCfdi.service'
 import { currentPeriod } from '../../services/fiscal/trialBalance.service'
 
 /**
@@ -71,6 +72,20 @@ export async function runPayrollController(
     const staffId = (req as any).authContext?.userId ?? null
     const period = req.body.period || currentPeriod()
     res.status(200).json(await runPayroll(req.params.venueId, period, periodicidad(req.body.periodicidad), req.body.fechaPago, { staffId }))
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** POST /accounting/payroll/:payrollRunId/stamp — timbra los recibos de nómina (CFDI) de la corrida. */
+export async function stampPayrollController(
+  req: Request<{ venueId: string; payrollRunId: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const staffId = (req as any).authContext?.userId ?? null
+    res.status(200).json(await stampPayrollReceipts(req.params.venueId, req.params.payrollRunId, { staffId }))
   } catch (error) {
     next(error)
   }

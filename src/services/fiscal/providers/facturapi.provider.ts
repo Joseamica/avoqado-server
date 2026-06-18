@@ -9,6 +9,7 @@ import {
   FiscalProvider,
   GlobalInvoiceParams,
   InvoiceSearchResult,
+  PayrollReceiptParams,
   ProviderInvoiceSummary,
   ReceptorInput,
   ReceptorValidationResult,
@@ -128,6 +129,90 @@ export class FacturapiProvider implements FiscalProvider {
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
       logger.error(`[facturapi] createInvoice failed: ${message}`)
+      throw err
+    }
+  }
+
+  /**
+   * Timbra un recibo de NÓMINA (CFDI 4.0 tipo "N" + complemento Nómina 1.2). El receptor (trabajador)
+   * tributa en régimen 605 (Sueldos y salarios). Importes del builder vienen en centavos → pesos.
+   */
+  async createPayrollReceipt(params: PayrollReceiptParams): Promise<StampedInvoice> {
+    const r = params.receptor
+    // Antigüedad en semanas (formato ISO 8601 de duración, p.ej. 'P52W').
+    let antiguedad = 'P1W'
+    if (r.fechaInicioRelLaboral) {
+      const weeks = Math.max(
+        1,
+        Math.floor(
+          (new Date(`${params.fechaFinalPago}T00:00:00Z`).getTime() - new Date(`${r.fechaInicioRelLaboral}T00:00:00Z`).getTime()) /
+            (7 * 86400000),
+        ),
+      )
+      antiguedad = `P${weeks}W`
+    }
+    const payload: any = {
+      type: 'N', // InvoiceType.NOMINA
+      customer: {
+        legal_name: r.nombre,
+        tax_id: r.rfc,
+        tax_system: '605', // receptor de nómina = Sueldos y salarios
+        address: { zip: r.codigoPostal },
+      },
+      complements: [
+        {
+          type: 'nomina',
+          data: {
+            tipo_nomina: params.tipoNomina,
+            fecha_pago: params.fechaPago,
+            fecha_inicial_pago: params.fechaInicialPago,
+            fecha_final_pago: params.fechaFinalPago,
+            num_dias_pagados: params.numDiasPagados,
+            ...(params.registroPatronal ? { emisor: { registro_patronal: params.registroPatronal } } : {}),
+            receptor: {
+              ...(r.curp ? { curp: r.curp } : {}),
+              ...(r.numSeguridadSocial ? { num_seguridad_social: r.numSeguridadSocial } : {}),
+              ...(r.fechaInicioRelLaboral ? { fecha_inicio_rel_laboral: r.fechaInicioRelLaboral } : {}),
+              antiguedad,
+              tipo_contrato: r.tipoContrato,
+              tipo_regimen: r.tipoRegimen,
+              num_empleado: r.numEmpleado,
+              periodicidad_pago: r.periodicidadPago,
+              clave_ent_fed: r.claveEntFed,
+              ...(r.salarioBaseCotAporCents ? { salario_base_cot_apor: toPesos(r.salarioBaseCotAporCents) } : {}),
+              ...(r.salarioDiarioIntegradoCents ? { salario_diario_integrado: toPesos(r.salarioDiarioIntegradoCents) } : {}),
+              ...(r.puesto ? { puesto: r.puesto } : {}),
+            },
+            percepciones: params.percepciones.map(p => ({
+              clave: p.clave,
+              concepto: p.concepto,
+              gravado: toPesos(p.gravadoCents),
+              exento: toPesos(p.exentoCents),
+            })),
+            deducciones: params.deducciones.map(d => ({ clave: d.clave, concepto: d.concepto, importe: toPesos(d.importeCents) })),
+            ...(params.otrosPagos.length > 0
+              ? {
+                  otros_pagos: params.otrosPagos.map(o => ({
+                    clave: o.clave,
+                    concepto: o.concepto,
+                    importe: toPesos(o.importeCents),
+                    ...(o.subsidioCausadoCents != null
+                      ? { subsidio_al_empleo: { subsidio_causado: toPesos(o.subsidioCausadoCents) } }
+                      : {}),
+                  })),
+                }
+              : {}),
+          },
+        },
+      ],
+      ...(params.idempotencyKey ? { external_id: params.idempotencyKey } : {}),
+    }
+    try {
+      const inv = await this.client.invoices.create(payload)
+      return this.toStamped(inv)
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
+      logger.error(`[facturapi] createPayrollReceipt failed: ${message}`)
       throw err
     }
   }

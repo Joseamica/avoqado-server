@@ -203,4 +203,61 @@ export interface FiscalProvider {
   downloadXml(providerInvoiceId: string): Promise<Buffer>
   downloadPdf(providerInvoiceId: string): Promise<Buffer>
   cancelInvoice(params: CancelInvoiceParams): Promise<CancelInvoiceResult>
+  /** Timbra un recibo de NÓMINA (CFDI 4.0 tipo "N" + complemento Nómina 1.2). Opcional por proveedor. */
+  createPayrollReceipt?(params: PayrollReceiptParams): Promise<StampedInvoice>
+}
+
+/** Una percepción del recibo de nómina (c_TipoPercepcion). Importes en centavos. */
+export interface PayrollPercepcion {
+  clave: string // c_TipoPercepcion, p.ej. '001' (sueldos)
+  concepto: string
+  gravadoCents: number
+  exentoCents: number
+}
+
+/** Una deducción del recibo de nómina (c_TipoDeduccion). Importe en centavos. */
+export interface PayrollDeduccion {
+  clave: string // c_TipoDeduccion, p.ej. '002' (ISR), '001' (IMSS), '004' (otros)
+  concepto: string
+  importeCents: number
+}
+
+/** Un "otro pago" del recibo (c_TipoOtroPago). El subsidio para el empleo va aquí (clave '002'). */
+export interface PayrollOtroPago {
+  clave: string // c_TipoOtroPago, p.ej. '002' (subsidio para el empleo)
+  concepto: string
+  importeCents: number
+  /** Si es subsidio (clave 002): el subsidio CAUSADO (SAT lo exige en el nodo SubsidioAlEmpleo). */
+  subsidioCausadoCents?: number
+}
+
+export interface PayrollReceiptReceptor {
+  rfc: string
+  nombre: string
+  curp?: string | null
+  numSeguridadSocial?: string | null
+  fechaInicioRelLaboral?: string | null // YYYY-MM-DD
+  tipoContrato: string // c_TipoContrato
+  tipoRegimen: string // c_TipoRegimenContratacion
+  numEmpleado: string
+  periodicidadPago: string // c_PeriodicidadPago (02 semanal, 03 quincenal, 04 mensual)
+  claveEntFed: string // c_Estado
+  salarioBaseCotAporCents?: number | null
+  salarioDiarioIntegradoCents?: number | null
+  puesto?: string | null
+  codigoPostal: string // CP del receptor (lo exige el PAC para el customer)
+}
+
+export interface PayrollReceiptParams {
+  receptor: PayrollReceiptReceptor
+  registroPatronal?: string | null
+  tipoNomina: 'O' | 'E' // ordinaria / extraordinaria
+  fechaPago: string // YYYY-MM-DD
+  fechaInicialPago: string
+  fechaFinalPago: string
+  numDiasPagados: number
+  percepciones: PayrollPercepcion[]
+  deducciones: PayrollDeduccion[]
+  otrosPagos: PayrollOtroPago[]
+  idempotencyKey: string
 }

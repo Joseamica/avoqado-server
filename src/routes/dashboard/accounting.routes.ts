@@ -35,6 +35,7 @@ import {
   listEmployeesController,
   payrollPreviewController,
   runPayrollController,
+  stampPayrollController,
 } from '@/controllers/dashboard/nomina.controller'
 import { checkFeatureAccess } from '@/middlewares/checkFeatureAccess.middleware'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
@@ -497,9 +498,22 @@ const createEmployeeSchema = z.object({
     puesto: z.string().max(120).nullable().optional(),
     salarioMensualBrutoCents: cents('salario mensual'),
     sbcMensualCents: cents('SBC').nullable().optional(),
+    salarioDiarioIntegradoCents: cents('SDI').nullable().optional(),
     periodicidadPago: z.enum(PERIODICIDAD).optional(),
+    tipoContrato: z.string().max(2).optional(),
+    tipoRegimen: z.string().max(2).optional(),
+    claveEntFed: z.string().max(3).nullable().optional(),
+    numEmpleado: z.string().max(15).nullable().optional(),
+    registroPatronal: z.string().max(20).nullable().optional(),
     fechaIngreso: dateStr('fecha de ingreso').nullable().optional(),
     activo: z.boolean().optional(),
+  }),
+})
+
+const stampPayrollSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del local no es válido.' }),
+    payrollRunId: z.string().cuid({ message: 'El ID de la corrida no es válido.' }),
   }),
 })
 
@@ -560,6 +574,15 @@ router.post(
   checkPermission('accounting:manage'),
   validateRequest(runPayrollSchema),
   runPayrollController,
+)
+
+/** POST /accounting/payroll/:payrollRunId/stamp — timbra los recibos de nómina (CFDI) de la corrida. */
+router.post(
+  '/payroll/:payrollRunId/stamp',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:manage'),
+  validateRequest(stampPayrollSchema),
+  stampPayrollController,
 )
 
 export default router

@@ -129,6 +129,12 @@ export interface EmployeeDTO {
   salarioMensualBrutoCents: number
   sbcMensualCents: number | null
   periodicidadPago: PayrollPeriodicity
+  tipoContrato: string
+  tipoRegimen: string
+  claveEntFed: string | null
+  numEmpleado: string | null
+  registroPatronal: string | null
+  salarioDiarioIntegradoCents: number | null
   fechaIngreso: string | null
   activo: boolean
 }
@@ -142,6 +148,13 @@ export interface CreateEmployeeInput {
   salarioMensualBrutoCents: number
   sbcMensualCents?: number | null
   periodicidadPago?: PayrollPeriodicity
+  // Datos fiscales para el CFDI de nómina (opcionales; claveEntFed requerido para timbrar).
+  tipoContrato?: string
+  tipoRegimen?: string
+  claveEntFed?: string | null
+  numEmpleado?: string | null
+  registroPatronal?: string | null
+  salarioDiarioIntegradoCents?: number | null
   fechaIngreso?: string | null
   activo?: boolean
   venueId?: string | null
@@ -157,6 +170,12 @@ function mapEmployee(e: {
   salarioMensualBrutoCents: number
   sbcMensualCents: number | null
   periodicidadPago: PayrollPeriodicity
+  tipoContrato: string
+  tipoRegimen: string
+  claveEntFed: string | null
+  numEmpleado: string | null
+  registroPatronal: string | null
+  salarioDiarioIntegradoCents: number | null
   fechaIngreso: Date | null
   activo: boolean
 }): EmployeeDTO {
@@ -170,6 +189,12 @@ function mapEmployee(e: {
     salarioMensualBrutoCents: e.salarioMensualBrutoCents,
     sbcMensualCents: e.sbcMensualCents,
     periodicidadPago: e.periodicidadPago,
+    tipoContrato: e.tipoContrato,
+    tipoRegimen: e.tipoRegimen,
+    claveEntFed: e.claveEntFed,
+    numEmpleado: e.numEmpleado,
+    registroPatronal: e.registroPatronal,
+    salarioDiarioIntegradoCents: e.salarioDiarioIntegradoCents,
     fechaIngreso: e.fechaIngreso ? e.fechaIngreso.toISOString().slice(0, 10) : null,
     activo: e.activo,
   }
@@ -212,6 +237,12 @@ export async function createEmployee(
         salarioMensualBrutoCents: input.salarioMensualBrutoCents,
         sbcMensualCents: input.sbcMensualCents ?? null,
         periodicidadPago: input.periodicidadPago ?? 'MENSUAL',
+        tipoContrato: input.tipoContrato ?? '01',
+        tipoRegimen: input.tipoRegimen ?? '02',
+        claveEntFed: input.claveEntFed ?? null,
+        numEmpleado: input.numEmpleado ?? null,
+        registroPatronal: input.registroPatronal ?? null,
+        salarioDiarioIntegradoCents: input.salarioDiarioIntegradoCents ?? null,
         fechaIngreso: input.fechaIngreso ? new Date(`${input.fechaIngreso}T12:00:00.000Z`) : null,
         activo: input.activo ?? true,
         createdById: actor.staffId ?? null,
