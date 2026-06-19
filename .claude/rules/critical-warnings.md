@@ -60,15 +60,23 @@ const dayEnd = fromZonedTime(`${dateStr}T23:59:59.999`, venueTz) // INCLUSIVE en
 
 ### 🔴 A bare `YYYY-MM-DD` is a RUNTIME-TZ trap (real LIVE prod money bug, 2026-06-15)
 
-`parseISO('2026-06-02')`, `new Date('2026-06-02')`, **and even** `fromZonedTime(new Date('2026-06-02T00:00:00'), tz)` all resolve to **midnight in the Node HOST timezone**, not the venue's. **Prod sets no `TZ` (check Dockerfile/render.yaml — none) → Node runs UTC**, so `parseISO('2026-06-02')` = jun-2 00:00Z = jun-1 18:00 Mexico → a venue-local day range shifts a WHOLE DAY earlier (income statements / sales reports wrong). It hides in dev because dev hosts often run `TZ=America/Mexico_City`. This bit `parseDbDateRange` (income statement — dashboard **and** MCP) and `parseDateRange` (MCP analytics). Fixes: `c41b03d6`, `a8aa70a0`.
+`parseISO('2026-06-02')`, `new Date('2026-06-02')`, **and even** `fromZonedTime(new Date('2026-06-02T00:00:00'), tz)` all resolve to
+**midnight in the Node HOST timezone**, not the venue's. **Prod sets no `TZ` (check Dockerfile/render.yaml — none) → Node runs UTC**, so
+`parseISO('2026-06-02')` = jun-2 00:00Z = jun-1 18:00 Mexico → a venue-local day range shifts a WHOLE DAY earlier (income statements / sales
+reports wrong). It hides in dev because dev hosts often run `TZ=America/Mexico_City`. This bit `parseDbDateRange` (income statement —
+dashboard **and** MCP) and `parseDateRange` (MCP analytics). Fixes: `c41b03d6`, `a8aa70a0`.
 
 **For a venue-local day range, NEVER let the runtime parse a bare date. Use ONE of:**
 
-- `fromZonedTime(\`${date}T00:00:00.000\`, venueTz)` / `…T23:59:59.999` — pass a **STRING** (host-tz-independent). ✅
-- `venueStartOfDay(tz, new Date(\`${date}T12:00:00\`))` / `venueEndOfDay(tz, …)` — the **noon anchor** keeps the calendar day under any host tz. ✅
-- `parseDbDateRange(from, to, venueTz)` (now host-tz-safe) for direct queries; `getVenueChartData()` (`src/mcp/chartData.ts`) for the `getChartData` path.
+- `fromZonedTime(\`${date}T00:00:00.000\`, venueTz)`/`…T23:59:59.999` — pass a **STRING** (host-tz-independent). ✅
+- `venueStartOfDay(tz, new Date(\`${date}T12:00:00\`))`/`venueEndOfDay(tz, …)` — the **noon anchor** keeps the calendar day under any host
+  tz. ✅
+- `parseDbDateRange(from, to, venueTz)` (now host-tz-safe) for direct queries; `getVenueChartData()` (`src/mcp/chartData.ts`) for the
+  `getChartData` path.
 
-**Verify under prod's tz**, not just yours: run date tests with `TZ=UTC npx jest …`. For money, `scripts/mcp-money-reconcile.ts` proves MCP totals == DB to the cent. (Setting `TZ=America/Mexico_City` in the deploy is belt-and-suspenders, but the CODE must be host-tz-independent regardless — never rely on the env.)
+**Verify under prod's tz**, not just yours: run date tests with `TZ=UTC npx jest …`. For money, `scripts/mcp-money-reconcile.ts` proves MCP
+totals == DB to the cent. (Setting `TZ=America/Mexico_City` in the deploy is belt-and-suspenders, but the CODE must be host-tz-independent
+regardless — never rely on the env.)
 
 - Frontend: dates arrive as UTC → `useVenueDateTime()` or browser locale converts for display
 - **NEVER add `timeZone: 'UTC'` to frontend formatting** — displays raw UTC instead of local
@@ -173,20 +181,21 @@ afterthought. (Backend-only: client repos call the API; `avoqado-server` is what
 ### Siloed audit tables → DUAL-WRITE to ActivityLog (lesson: venue audit-log review, 2026-06-16)
 
 Many mutations record their audit ONLY to a domain-specific side table, NOT to `ActivityLog` — so the owner audit trail (which reads
-`ActivityLog`) is **blind** to them. When a mutation already writes to a siloed audit/event table, **ALSO `logAction(...)` at the same spot**
-(do NOT remove the siloed write — dual-write):
+`ActivityLog`) is **blind** to them. When a mutation already writes to a siloed audit/event table, **ALSO `logAction(...)` at the same
+spot** (do NOT remove the siloed write — dual-write):
 
-| Mutation | Siloed table (keep) | ALSO log to ActivityLog |
-| --- | --- | --- |
-| Order comp / void / discount (TPV) | `OrderAction` (`actionType` COMP/VOID/DISCOUNT) | `ITEM_COMPED` / `ITEM_VOIDED` / `DISCOUNT_APPLIED` |
-| SIM custody assign/accept/reject/collect | `SerializedItemCustodyEvent` | `SIM_CUSTODY_<EVENT>` |
-| Stock receive / adjust / batch | `RawMaterialMovement` / `InventoryMovement` / `StockBatch` | the receive/adjust/quarantine action |
+| Mutation                                 | Siloed table (keep)                                        | ALSO log to ActivityLog                            |
+| ---------------------------------------- | ---------------------------------------------------------- | -------------------------------------------------- |
+| Order comp / void / discount (TPV)       | `OrderAction` (`actionType` COMP/VOID/DISCOUNT)            | `ITEM_COMPED` / `ITEM_VOIDED` / `DISCOUNT_APPLIED` |
+| SIM custody assign/accept/reject/collect | `SerializedItemCustodyEvent`                               | `SIM_CUSTODY_<EVENT>`                              |
+| Stock receive / adjust / batch           | `RawMaterialMovement` / `InventoryMovement` / `StockBatch` | the receive/adjust/quarantine action               |
 
 - **Stamp `venueId` on org-level events** (e.g. SIM custody items have `venueId: null`) from the item's venue
-  (`sellingVenueId ?? registeredFromVenueId ?? venueId`) — the per-venue audit screen filters `where: { venueId }`, so a null venueId is invisible there.
+  (`sellingVenueId ?? registeredFromVenueId ?? venueId`) — the per-venue audit screen filters `where: { venueId }`, so a null venueId is
+  invisible there.
 - **Thread the actor:** services have no `authContext` — give each an optional `performedBy?: string` (or `staffId?: string`) param and pass
   `authContext.userId` from the controller. Never log `staffId: null` when the actor is known (it kills accountability).
-- **`logAction` is fire-and-forget** (`void logAction(...)`, never throws, OUTSIDE any `prisma.$transaction`) — so an audit failure can't roll
-  back or break a money/DB op.
+- **`logAction` is fire-and-forget** (`void logAction(...)`, never throws, OUTSIDE any `prisma.$transaction`) — so an audit failure can't
+  roll back or break a money/DB op.
 - **Skip routine high-volume noise** even if it's technically a mutation: `ORDER_CREATED`, routine `PAYMENT_COMPLETED`, add-item. Log the
   ANOMALIES an owner actually audits — void / comp / discount / refund / cancel / delete / role-or-permission change / cash discrepancy.

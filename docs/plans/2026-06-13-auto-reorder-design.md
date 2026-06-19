@@ -1,133 +1,132 @@
 # Auto-Reorder con envío automático al proveedor — Design Spec
 
-**Fecha:** 2026-06-13
-**Estado:** Diseño aprobado por el founder. Pendiente: plan de implementación + build.
-**Repos tocados:** `avoqado-server` (hub), `avoqado-web-dashboard`, presentación de ventas (Avoqado-HQ).
+**Fecha:** 2026-06-13 **Estado:** Diseño aprobado por el founder. Pendiente: plan de implementación + build. **Repos tocados:**
+`avoqado-server` (hub), `avoqado-web-dashboard`, presentación de ventas (Avoqado-HQ).
 
 ---
 
 ## 1. Problema / objetivo
 
-Hoy un usuario puede configurar un **punto de reorden** (`reorderPoint`) por ingrediente y
-recibe alertas cuando el stock baja, pero esas alertas van **al equipo del venue**, nunca al
-proveedor. No existe forma (dashboard ni MCP) de que el sistema, al cruzarse el umbral,
+Hoy un usuario puede configurar un **punto de reorden** (`reorderPoint`) por ingrediente y recibe alertas cuando el stock baja, pero esas
+alertas van **al equipo del venue**, nunca al proveedor. No existe forma (dashboard ni MCP) de que el sistema, al cruzarse el umbral,
 **genere la orden de compra y mande el email al proveedor automáticamente**.
 
-**Objetivo:** cuando un ingrediente baja a su `reorderPoint`, el sistema crea automáticamente
-una orden de compra (agrupada por proveedor), la aprueba y le manda el email al proveedor —
-sin intervención humana — para los venues que activen la función.
+**Objetivo:** cuando un ingrediente baja a su `reorderPoint`, el sistema crea automáticamente una orden de compra (agrupada por proveedor),
+la aprueba y le manda el email al proveedor — sin intervención humana — para los venues que activen la función.
 
 ## 2. Qué ya existe (no se reconstruye)
 
-| Pieza | Ubicación | Estado |
-|---|---|---|
-| Punto de reorden / stock mínimo por ítem | `RawMaterial.reorderPoint`, `.minimumStock`, `.notifyOnLowStock` (schema ~L1564) | ✅ funciona |
-| Detección de bajo stock (en cada descuento + nocturna) | `rawMaterial.service.ts`, `nightly-low-stock.job.ts` (cron 22:33 MX) | ✅ funciona, avisa a STAFF |
-| Motor de auto-reorden (sugerencias + crear POs agrupadas por proveedor) | `autoReorder.service.ts` (`getReorderSuggestions`, `createPurchaseOrdersFromSuggestions`) | ⚠️ completo pero **0 call-sites** (código muerto) |
-| Selección de mejor proveedor (precio/lead-time/rating) | `supplier.service.ts` `getSupplierRecommendations` | ✅ usado por el motor |
-| Email a proveedor | `purchaseOrder.service.ts:84` `sendPurchaseOrderEmailAsync(venueId, poId, staffId?)` → `resend.service` `sendPurchaseOrderEmail` | ✅ hoy solo lo dispara la creación **manual** de PO |
-| Workflow de PurchaseOrder (DRAFT→APPROVED→…, recepción) | `PurchaseOrder` model + `purchaseOrder.service.ts` | ✅ funciona |
+| Pieza                                                                   | Ubicación                                                                                                                        | Estado                                              |
+| ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| Punto de reorden / stock mínimo por ítem                                | `RawMaterial.reorderPoint`, `.minimumStock`, `.notifyOnLowStock` (schema ~L1564)                                                 | ✅ funciona                                         |
+| Detección de bajo stock (en cada descuento + nocturna)                  | `rawMaterial.service.ts`, `nightly-low-stock.job.ts` (cron 22:33 MX)                                                             | ✅ funciona, avisa a STAFF                          |
+| Motor de auto-reorden (sugerencias + crear POs agrupadas por proveedor) | `autoReorder.service.ts` (`getReorderSuggestions`, `createPurchaseOrdersFromSuggestions`)                                        | ⚠️ completo pero **0 call-sites** (código muerto)   |
+| Selección de mejor proveedor (precio/lead-time/rating)                  | `supplier.service.ts` `getSupplierRecommendations`                                                                               | ✅ usado por el motor                               |
+| Email a proveedor                                                       | `purchaseOrder.service.ts:84` `sendPurchaseOrderEmailAsync(venueId, poId, staffId?)` → `resend.service` `sendPurchaseOrderEmail` | ✅ hoy solo lo dispara la creación **manual** de PO |
+| Workflow de PurchaseOrder (DRAFT→APPROVED→…, recepción)                 | `PurchaseOrder` model + `purchaseOrder.service.ts`                                                                               | ✅ funciona                                         |
 
 **Conclusión:** esto es **cablear + gating + UI + guardrails**, no construir desde cero.
 
 ## 3. Decisiones (founder, 2026-06-13)
 
-| Tema | Decisión | Razón |
-|---|---|---|
-| **Tier** | Código nuevo **`AUTO_REORDER`** dentro de **PREMIUM** (no bundleado en `INVENTORY_TRACKING`) | Depende del inventario que ya es PREMIUM (un venue PRO ni tiene materias primas). Gating propio = poder moverlo a ENTERPRISE / add-on después sin tocar el inventario. |
-| **Automatización** | **100% automático**: crear → aprobar → email al proveedor, sin humano | Elección explícita del founder. |
-| **Disparo** | **Nocturno**, reusando el job de las 22:33 | Junta los bajos del día en 1 PO por proveedor = 1 correo limpio, evita spam y pedidos fragmentados. Reusa infra existente (cron + dedupe 24h). |
-| **Selección de proveedor** | Auto-mejor por scoring existente | Cero campos nuevos; si el ítem no tiene precio de proveedor cargado, se omite. |
+| Tema                       | Decisión                                                                                     | Razón                                                                                                                                                                  |
+| -------------------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Tier**                   | Código nuevo **`AUTO_REORDER`** dentro de **PREMIUM** (no bundleado en `INVENTORY_TRACKING`) | Depende del inventario que ya es PREMIUM (un venue PRO ni tiene materias primas). Gating propio = poder moverlo a ENTERPRISE / add-on después sin tocar el inventario. |
+| **Automatización**         | **100% automático**: crear → aprobar → email al proveedor, sin humano                        | Elección explícita del founder.                                                                                                                                        |
+| **Disparo**                | **Nocturno**, reusando el job de las 22:33                                                   | Junta los bajos del día en 1 PO por proveedor = 1 correo limpio, evita spam y pedidos fragmentados. Reusa infra existente (cron + dedupe 24h).                         |
+| **Selección de proveedor** | Auto-mejor por scoring existente                                                             | Cero campos nuevos; si el ítem no tiene precio de proveedor cargado, se omite.                                                                                         |
 
 ## 4. Arquitectura — 8 piezas
 
 ### 4.1 Schema (1 migración)
-- **`Venue.autoReorderConfig Json?`** — singleton de config por venue (mismo patrón que
-  `paymentLinkBranding`/`reservationBranding`). Shape:
+
+- **`Venue.autoReorderConfig Json?`** — singleton de config por venue (mismo patrón que `paymentLinkBranding`/`reservationBranding`). Shape:
   ```jsonc
   {
-    "enabled": false,          // master toggle, OFF por defecto
-    "dailyCapMxn": 5000,       // opcional: tope de gasto auto por día (null = sin tope)
-    "minUrgency": "LOW"        // opcional: solo re-ordenar items con urgencia >= (LOW|MEDIUM|HIGH|CRITICAL)
+    "enabled": false, // master toggle, OFF por defecto
+    "dailyCapMxn": 5000, // opcional: tope de gasto auto por día (null = sin tope)
+    "minUrgency": "LOW", // opcional: solo re-ordenar items con urgencia >= (LOW|MEDIUM|HIGH|CRITICAL)
   }
   ```
-- **`PurchaseOrder.autoGenerated Boolean @default(false)`** — distingue POs creadas por el
-  sistema (para el badge "Automático" en UI y auditoría). `createdBy` queda null para POs auto.
+- **`PurchaseOrder.autoGenerated Boolean @default(false)`** — distingue POs creadas por el sistema (para el badge "Automático" en UI y
+  auditoría). `createdBy` queda null para POs auto.
 - Migración con `npx prisma migrate dev --name add_auto_reorder` (NUNCA `db push`).
 - Regenerar `docs/SCHEMA_MAP.md` (`npm run schema:map`) — no hay modelos nuevos, solo campos.
 
 ### 4.2 Gating (`AUTO_REORDER` PREMIUM)
-- Backend: agregar `'AUTO_REORDER'` a `PREMIUM_ONLY_CODES` en
-  `src/services/access/basePlan.service.ts`.
-- Frontend: agregar `'AUTO_REORDER'` al `includes` del tier PREMIUM en
-  `avoqado-web-dashboard/src/config/plan-catalog.ts` (mirror exacto por nombre).
-- El endpoint de config se protege con `checkFeatureAccess('AUTO_REORDER')` +
-  `checkPermission('inventory:update')`.
-- No requiere producto Stripe nuevo: es un differentiator del plan PREMIUM (igual que
-  `INVENTORY_TRACKING`), se concede por el grant del tier.
+
+- Backend: agregar `'AUTO_REORDER'` a `PREMIUM_ONLY_CODES` en `src/services/access/basePlan.service.ts`.
+- Frontend: agregar `'AUTO_REORDER'` al `includes` del tier PREMIUM en `avoqado-web-dashboard/src/config/plan-catalog.ts` (mirror exacto por
+  nombre).
+- El endpoint de config se protege con `checkFeatureAccess('AUTO_REORDER')` + `checkPermission('inventory:update')`.
+- No requiere producto Stripe nuevo: es un differentiator del plan PREMIUM (igual que `INVENTORY_TRACKING`), se concede por el grant del
+  tier.
 
 ### 4.3 Backend — el corazón (`autoReorder.service.ts`)
-Nueva función `runAutoReorderForVenue(venueId): Promise<{ ordersCreated, emailsSent, skipped }>`:
-1. Verifica feature + toggle (`venue.autoReorderConfig.enabled === true` && venue tiene
-   `AUTO_REORDER` activo). Si no, return temprano.
-2. `getReorderSuggestions(venueId)` (motor existente).
-3. **Guardrail — dedupe de PO abierta:** descartar ítems que ya están en una PO con status
-   `DRAFT | PENDING | APPROVED | PARTIALLY_RECEIVED` (no recibida). Sin esto, el job re-ordena
-   lo mismo cada noche hasta que llegue la mercancía (delivery tarda días) → spam al proveedor.
-4. **Guardrail — urgencia mínima** (si `minUrgency` configurada): filtra por urgencia.
-5. **Guardrail — cap diario:** sumar costo estimado; recortar/omitir lo que exceda
-   `dailyCapMxn` (ordenando por urgencia primero, CRITICAL gana). Registrar lo omitido por cap.
-6. `createPurchaseOrdersFromSuggestions(venueId, ids, { autoApprove: true })` (status APPROVED,
-   `autoGenerated: true`). **Refactor menor:** pasar el flag `autoGenerated` al create del motor.
-7. Por cada PO creada → `sendPurchaseOrderEmailAsync(venueId, po.id)` (reusa el helper que ya
-   existe). **Fuera de cualquier `retry()` / transacción** (regla cron-jobs.md: sends nunca se reintentan).
-8. `ActivityLog` por venue: `action: 'AUTO_REORDER_RUN'`, data `{ ordersCreated, emailsSent,
-   skippedOpenPo, skippedCap }` (regla CRÍTICA de auditoría).
 
-**Disparo:** extender `nightly-low-stock.job.ts`. Después del digest a staff, para cada venue
-con toggle ON + feature activo, llamar `runAutoReorderForVenue`. Cumplir `cron-jobs.md`:
+Nueva función `runAutoReorderForVenue(venueId): Promise<{ ordersCreated, emailsSent, skipped }>`:
+
+1. Verifica feature + toggle (`venue.autoReorderConfig.enabled === true` && venue tiene `AUTO_REORDER` activo). Si no, return temprano.
+2. `getReorderSuggestions(venueId)` (motor existente).
+3. **Guardrail — dedupe de PO abierta:** descartar ítems que ya están en una PO con status `DRAFT | PENDING | APPROVED | PARTIALLY_RECEIVED`
+   (no recibida). Sin esto, el job re-ordena lo mismo cada noche hasta que llegue la mercancía (delivery tarda días) → spam al proveedor.
+4. **Guardrail — urgencia mínima** (si `minUrgency` configurada): filtra por urgencia.
+5. **Guardrail — cap diario:** sumar costo estimado; recortar/omitir lo que exceda `dailyCapMxn` (ordenando por urgencia primero, CRITICAL
+   gana). Registrar lo omitido por cap.
+6. `createPurchaseOrdersFromSuggestions(venueId, ids, { autoApprove: true })` (status APPROVED, `autoGenerated: true`). **Refactor menor:**
+   pasar el flag `autoGenerated` al create del motor.
+7. Por cada PO creada → `sendPurchaseOrderEmailAsync(venueId, po.id)` (reusa el helper que ya existe). **Fuera de cualquier `retry()` /
+   transacción** (regla cron-jobs.md: sends nunca se reintentan).
+8. `ActivityLog` por venue: `action: 'AUTO_REORDER_RUN'`, data `{ ordersCreated, emailsSent, skippedOpenPo, skippedCap }` (regla CRÍTICA de
+   auditoría).
+
+**Disparo:** extender `nightly-low-stock.job.ts`. Después del digest a staff, para cada venue con toggle ON + feature activo, llamar
+`runAutoReorderForVenue`. Cumplir `cron-jobs.md`:
+
 - el read de entrada (venues / suggestions) envuelto en `retry(..., shouldRetryDbConnectionError)`;
 - emails y `createPurchaseOrder*` (transacción) **fuera** del retry.
 
 ### 4.4 Endpoints de config
-- `GET  /api/v1/dashboard/venues/:venueId/inventory/auto-reorder` → settings + (opcional) preview
-  de `getReorderSuggestions` (`checkPermission('inventory:read')`).
-- `PUT  /api/v1/dashboard/venues/:venueId/inventory/auto-reorder` → actualizar
-  `autoReorderConfig` (`checkFeatureAccess('AUTO_REORDER')` + `checkPermission('inventory:update')`
-  + `ActivityLog 'AUTO_REORDER_CONFIG_UPDATED'`). Zod en español.
-- (Opcional) `POST .../auto-reorder/run-now` → corre `runAutoReorderForVenue` on-demand (para
-  pruebas / botón "ejecutar ahora"). Mismo gating que el PUT.
+
+- `GET  /api/v1/dashboard/venues/:venueId/inventory/auto-reorder` → settings + (opcional) preview de `getReorderSuggestions`
+  (`checkPermission('inventory:read')`).
+- `PUT  /api/v1/dashboard/venues/:venueId/inventory/auto-reorder` → actualizar `autoReorderConfig` (`checkFeatureAccess('AUTO_REORDER')` +
+  `checkPermission('inventory:update')`
+  - `ActivityLog 'AUTO_REORDER_CONFIG_UPDATED'`). Zod en español.
+- (Opcional) `POST .../auto-reorder/run-now` → corre `runAutoReorderForVenue` on-demand (para pruebas / botón "ejecutar ahora"). Mismo
+  gating que el PUT.
 
 ### 4.5 Dashboard UI (`avoqado-web-dashboard`)
-- Panel en ajustes de inventario: toggle maestro "Re-orden automático", input de cap diario,
-  selector de urgencia mínima, y **preview** "estos ítems se re-ordenarían hoy" (reusa el GET).
-  Envuelto en `<FeatureProtectedRoute>` / `<FeatureGate code="AUTO_REORDER">` → upsell si no PREMIUM.
+
+- Panel en ajustes de inventario: toggle maestro "Re-orden automático", input de cap diario, selector de urgencia mínima, y **preview**
+  "estos ítems se re-ordenarían hoy" (reusa el GET). Envuelto en `<FeatureProtectedRoute>` / `<FeatureGate code="AUTO_REORDER">` → upsell si
+  no PREMIUM.
 - Lista de Purchase Orders: badge "Automático" cuando `autoGenerated === true`.
 - i18n en + es (regla i18n). Tokens de tema, sin colores hardcoded. `data-tour` en el toggle.
-- UX: diseñar para el usuario menos técnico — copy claro de que **manda correos reales al
-  proveedor solo**, con la advertencia visible.
+- UX: diseñar para el usuario menos técnico — copy claro de que **manda correos reales al proveedor solo**, con la advertencia visible.
 
 ### 4.6 Customer MCP (`avoqado-server/src/mcp/tools/inventory.ts`) — OBLIGATORIO
+
 - `reorder_suggestions` (read) — qué se re-ordenaría y a qué proveedor (`inventory:read`).
-- `configure_auto_reorder` (write) — prender/apagar + cap (`inventory:update`, gated por
-  `AUTO_REORDER`, auditado vía `instrument.ts`/`audit.ts`). Registrar en `src/mcp/server.ts`.
-- Regla CRÍTICA: el MCP cliente (`src/mcp/`, NO `scripts/mcp/`) debe quedar en lockstep en el
-  MISMO cambio.
+- `configure_auto_reorder` (write) — prender/apagar + cap (`inventory:update`, gated por `AUTO_REORDER`, auditado vía
+  `instrument.ts`/`audit.ts`). Registrar en `src/mcp/server.ts`.
+- Regla CRÍTICA: el MCP cliente (`src/mcp/`, NO `scripts/mcp/`) debe quedar en lockstep en el MISMO cambio.
 
 ### 4.7 Presentación de ventas (regla CRÍTICA)
-Auto-reorden es capacidad visible PREMIUM → actualizar deck (`avoqado-presentacion.html`) +
-one-pager (`avoqado-one-pager.html`) + regenerar ambos PDFs siguiendo el `README.md` de esa
-carpeta. En el MISMO cambio.
+
+Auto-reorden es capacidad visible PREMIUM → actualizar deck (`avoqado-presentacion.html`) + one-pager (`avoqado-one-pager.html`) + regenerar
+ambos PDFs siguiendo el `README.md` de esa carpeta. En el MISMO cambio.
 
 ### 4.8 Tests
-- Unit `runAutoReorderForVenue`: (a) crea+aprueba+emailea cuando hay bajos con proveedor;
-  (b) **omite ítem con PO abierta** (regresión clave); (c) respeta cap diario; (d) respeta
-  `minUrgency`; (e) no hace nada si toggle OFF / sin feature.
+
+- Unit `runAutoReorderForVenue`: (a) crea+aprueba+emailea cuando hay bajos con proveedor; (b) **omite ítem con PO abierta** (regresión
+  clave); (c) respeta cap diario; (d) respeta `minUrgency`; (e) no hace nada si toggle OFF / sin feature.
 - Regresión: el digest nocturno a staff sigue mandándose (no romper el job existente).
 - `tsc --noEmit` después de escribir tests (jest es transpile-only).
 - `npm run pre-deploy` verde antes de PR.
 
 ## 5. Guardrails (resumen — porque es 100% automático)
+
 1. Toggle maestro **OFF por defecto** (opt-in explícito por venue).
 2. **Dedupe de PO abierta** (no re-ordenar lo ya pedido y no recibido).
 3. **Cap de gasto diario** configurable.
@@ -136,6 +135,7 @@ carpeta. En el MISMO cambio.
 6. Todo run + email → `ActivityLog`.
 
 ## 6. Fuera de alcance (v1)
+
 - Productos de retail / inventario serializado (el motor es sobre `RawMaterial`/recetas). Solo ingredientes.
 - Config por-ítem (qué ítem auto-envía y cuál no) — v1 es toggle a nivel venue.
 - Disparo en tiempo real al cruzar el umbral — v1 es nocturno.
@@ -143,15 +143,16 @@ carpeta. En el MISMO cambio.
 - Gating en iOS/Android (no tienen tier gating aún; fuera de este cambio).
 
 ## 7. Riesgos / notas
-- **Email real a terceros:** son correos a proveedores reales. El toggle OFF-por-defecto + el
-  cap + el dedupe son la defensa. Validar plantilla de email de PO antes de activar en prod.
-- **Timing nocturno vs expectativa "inmediato":** el founder eligió 100% auto; el disparo
-  nocturno significa que el correo sale esa noche, no al instante. Documentar en el copy del UI.
-- **`createPurchaseOrdersFromSuggestions` hoy no setea `autoGenerated` ni manda email** — ambos
-  son el trabajo de cableado de 4.3.
+
+- **Email real a terceros:** son correos a proveedores reales. El toggle OFF-por-defecto + el cap + el dedupe son la defensa. Validar
+  plantilla de email de PO antes de activar en prod.
+- **Timing nocturno vs expectativa "inmediato":** el founder eligió 100% auto; el disparo nocturno significa que el correo sale esa noche,
+  no al instante. Documentar en el copy del UI.
+- **`createPurchaseOrdersFromSuggestions` hoy no setea `autoGenerated` ni manda email** — ambos son el trabajo de cableado de 4.3.
 - Migrar de Feature code requiere mirror exacto backend↔dashboard (un typo falla en silencio).
 
 ## 8. Definition of Done
+
 - [ ] Migración aplicada + SCHEMA_MAP regenerado
 - [ ] `AUTO_REORDER` en PREMIUM_ONLY_CODES + plan-catalog (mirror exacto)
 - [ ] `runAutoReorderForVenue` + cableado en job nocturno (cumpliendo cron-jobs.md)

@@ -14,10 +14,10 @@ decision is unfinished: it either leaks paid value into a lower tier or hides a 
   gating questions live in `.claude/rules/feature-gating.md` (Module vs Feature decision). PREMIUM-only codes today: `CFDI`,
   `INVENTORY_TRACKING`.
 - **Module vs Feature — use the RIGHT resolver (crossing them fails silently; grandfathered venues pass a wrong-system gate):** `Module`
-  codes (`SERIALIZED_INVENTORY`, `WHITE_LABEL_DASHBOARD`, `COMMISSIONS`) gate via `moduleService.isModuleEnabled` (incl. org-level fallback);
-  `Feature` codes (`INVENTORY_TRACKING`, `CFDI`, `ADVANCED_REPORTS`…) via `venueHasFeatureAccess`. **Every MCP serialized-inventory tool
-  (`src/mcp/tools/`) MUST gate with `isModuleEnabled(SERIALIZED_INVENTORY)`** — never the Feature/tier resolver; only serialized tools carry
-  it (per-tool gating, not coupled to white-label). Full rule: `.claude/rules/feature-gating.md`.
+  codes (`SERIALIZED_INVENTORY`, `WHITE_LABEL_DASHBOARD`, `COMMISSIONS`) gate via `moduleService.isModuleEnabled` (incl. org-level
+  fallback); `Feature` codes (`INVENTORY_TRACKING`, `CFDI`, `ADVANCED_REPORTS`…) via `venueHasFeatureAccess`. **Every MCP
+  serialized-inventory tool (`src/mcp/tools/`) MUST gate with `isModuleEnabled(SERIALIZED_INVENTORY)`** — never the Feature/tier resolver;
+  only serialized tools carry it (per-tool gating, not coupled to white-label). Full rule: `.claude/rules/feature-gating.md`.
 - **Dashboard display/CTA map:** `avoqado-web-dashboard/src/config/plan-catalog.ts` (`TierId`, `PLAN_TIERS`, `getTierForFeature()` →
   FeatureGate upsell).
 - **Enforcement status:** ✅ only **avoqado-web-dashboard** enforces tiers today. ⚠️ **avoqado-ios** and **avoqado-android** have NO tier
@@ -195,11 +195,10 @@ Every **audit-worthy mutation** — create/update/delete of domain entities, mon
 (plan activate/deactivate, grant-trial, adjust-end-date), and status changes — MUST write an `ActivityLog` row (`action`, `entity`,
 `entityId`, `staffId` from authContext, `venueId`, `data`) in the SAME change, never "later". A mutating endpoint without `ActivityLog` is
 unfinished (treat it like permissions/MCP: kept in lockstep). Do NOT log reads or high-frequency events (heartbeats, scans, request logging)
-— that just bloats the audit trail. **If a mutation already writes to a SILOED audit/event table (`OrderAction`, `SerializedItemCustodyEvent`,
-`InventoryMovement`/`RawMaterialMovement`…), DUAL-WRITE to `ActivityLog` too** — the owner audit screen reads ONLY `ActivityLog`, so siloed-only
-writes are invisible to it. Stamp `venueId` on org-level events + thread the actor (`performedBy`) from the controller. Full rule + examples:
-`.claude/rules/critical-warnings.md`. (Backend-only — clients call the API;
-`avoqado-server` audits.)
+— that just bloats the audit trail. **If a mutation already writes to a SILOED audit/event table (`OrderAction`,
+`SerializedItemCustodyEvent`, `InventoryMovement`/`RawMaterialMovement`…), DUAL-WRITE to `ActivityLog` too** — the owner audit screen reads
+ONLY `ActivityLog`, so siloed-only writes are invisible to it. Stamp `venueId` on org-level events + thread the actor (`performedBy`) from
+the controller. Full rule + examples: `.claude/rules/critical-warnings.md`. (Backend-only — clients call the API; `avoqado-server` audits.)
 
 ## 🔴 CRITICAL — Keep the sales presentation in sync
 

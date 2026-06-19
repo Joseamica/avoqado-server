@@ -574,11 +574,7 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
         take: 200,
       })
       // Events use plain String staff FKs (survive Staff deletion for forensics) — resolve names in one query.
-      const staffIds = [
-        ...new Set(
-          events.flatMap(e => [e.fromStaffId, e.toStaffId, e.actorStaffId].filter((id): id is string => !!id)),
-        ),
-      ]
+      const staffIds = [...new Set(events.flatMap(e => [e.fromStaffId, e.toStaffId, e.actorStaffId].filter((id): id is string => !!id)))]
       const staff = staffIds.length
         ? await prisma.staff.findMany({ where: { id: { in: staffIds } }, select: { id: true, firstName: true, lastName: true } })
         : []

@@ -74,8 +74,26 @@ beforeEach(() => {
     assignedPromoter: { firstName: 'Promo', lastName: 'Dos' },
   })
   mockEventsFind.mockResolvedValue([
-    { createdAt: new Date('2026-06-10T10:00:00Z'), eventType: 'ASSIGN_TO_SUPERVISOR', fromState: 'ADMIN_HELD', toState: 'SUPERVISOR_HELD', fromStaffId: null, toStaffId: 'st-sup', actorStaffId: 'st-admin', reason: null },
-    { createdAt: new Date('2026-06-11T10:00:00Z'), eventType: 'ASSIGN_TO_PROMOTER', fromState: 'SUPERVISOR_HELD', toState: 'PROMOTER_HELD', fromStaffId: 'st-sup', toStaffId: 'st-promo', actorStaffId: 'st-sup', reason: null },
+    {
+      createdAt: new Date('2026-06-10T10:00:00Z'),
+      eventType: 'ASSIGN_TO_SUPERVISOR',
+      fromState: 'ADMIN_HELD',
+      toState: 'SUPERVISOR_HELD',
+      fromStaffId: null,
+      toStaffId: 'st-sup',
+      actorStaffId: 'st-admin',
+      reason: null,
+    },
+    {
+      createdAt: new Date('2026-06-11T10:00:00Z'),
+      eventType: 'ASSIGN_TO_PROMOTER',
+      fromState: 'SUPERVISOR_HELD',
+      toState: 'PROMOTER_HELD',
+      fromStaffId: 'st-sup',
+      toStaffId: 'st-promo',
+      actorStaffId: 'st-sup',
+      reason: null,
+    },
   ])
   mockStaffFind.mockResolvedValue([
     { id: 'st-admin', firstName: 'Admin', lastName: 'A' },
@@ -106,7 +124,12 @@ describe('sim_custody — current state + timeline', () => {
     const out = parse(await call({ venueId: 'v1', serialNumber: 'sim-abc' }))
     expect(out.eventCount).toBe(2)
     expect(out.timeline[0]).toMatchObject({ toState: 'SUPERVISOR_HELD', fromStaff: null, toStaff: 'Sup Uno', actor: 'Admin A' })
-    expect(out.timeline[1]).toMatchObject({ fromState: 'SUPERVISOR_HELD', toState: 'PROMOTER_HELD', fromStaff: 'Sup Uno', toStaff: 'Promo Dos' })
+    expect(out.timeline[1]).toMatchObject({
+      fromState: 'SUPERVISOR_HELD',
+      toState: 'PROMOTER_HELD',
+      fromStaff: 'Sup Uno',
+      toStaff: 'Promo Dos',
+    })
   })
 
   it('does a CASE-INSENSITIVE serial lookup, scoped to the venue OR its org', async () => {
