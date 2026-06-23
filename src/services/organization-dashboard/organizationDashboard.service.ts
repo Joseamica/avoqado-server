@@ -2791,21 +2791,21 @@ class OrganizationDashboardService {
       const isPortabilidad: boolean = verification?.isPortabilidad ?? (Array.isArray(order.tags) && order.tags.includes('portabilidad'))
 
       // Map verification status → human-readable label expected by back-office (per Asana spec):
-      //   COMPLETED → "Venta correcta"
-      //   PENDING   → "En revisión"
-      //   FAILED    → "Venta sin documentación completa"
+      //   COMPLETED → "Aprobada"
+      //   PENDING   → "En revisión por administración"
+      //   FAILED    → "Revisar por promotor"
       //   REJECTED  → "Rechazada" (terminal — sale lost, couldn't link/port)
       //   null      → "Sin verificación" (no photos uploaded — separate from FAILED)
       const saleStatus =
         verification == null
           ? 'Sin verificación'
           : verification.status === 'COMPLETED'
-            ? 'Venta correcta'
+            ? 'Aprobada'
             : verification.status === 'FAILED'
-              ? 'Venta sin documentación completa'
+              ? 'Revisar por promotor'
               : verification.status === 'REJECTED'
                 ? 'Rechazada'
-                : 'En revisión'
+                : 'En revisión por administración'
 
       return {
         row: idx + 1,
