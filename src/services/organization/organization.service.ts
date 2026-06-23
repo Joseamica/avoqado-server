@@ -1078,7 +1078,12 @@ export async function getOrganizationVenues(orgId: string, filter?: DateRangeFil
  */
 export async function getOrganizationTeam(orgId: string): Promise<OrganizationTeamMember[]> {
   const staff = await prisma.staff.findMany({
-    where: { organizations: { some: { organizationId: orgId } } },
+    // Only CURRENT members: a user removed from the org (StaffOrganization.isActive
+    // = false via removeFromOrganization) must disappear from the team list. A
+    // venue-level deactivation leaves isActive=true, so those members stay visible
+    // and can be reactivated. Without this filter, soft-deleted ex-collaborators
+    // kept showing up in the dashboard. See Asana 1215884464715725.
+    where: { organizations: { some: { organizationId: orgId, isActive: true } } },
     select: {
       id: true,
       firstName: true,

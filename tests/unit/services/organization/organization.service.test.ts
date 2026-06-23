@@ -4,6 +4,7 @@ import {
   getOrganizationOverview,
   getVenueBenchmarks,
   getOrganizationVenues,
+  getOrganizationTeam,
 } from '@/services/organization/organization.service'
 import { NotFoundError } from '@/errors/AppError'
 
@@ -312,6 +313,53 @@ describe('Organization Service', () => {
       expect(venueC.rank.byRevenue).toBe(3)
       // Venue C is below average: (1000-2000)/2000 * 100 = -50%
       expect(venueC.benchmarks.revenueVsAverage).toBe(-50)
+    })
+  })
+
+  // ─── getOrganizationTeam ──────────────────────────────────────
+  // Regression: soft-deleted ex-collaborators (StaffOrganization.isActive=false)
+  // kept appearing in the org "Usuarios" list because the query matched any org
+  // membership regardless of isActive. See Asana 1215884464715725.
+
+  describe('getOrganizationTeam', () => {
+    const MEMBER = {
+      id: 'staff-1',
+      firstName: 'Active',
+      lastName: 'Member',
+      email: 'active@test.com',
+      phone: '555-1111',
+      employeeCode: 'PT-001',
+      createdAt: new Date('2025-01-01'),
+      venues: [{ venueId: 'v-a', role: 'CASHIER', venue: { name: 'Venue A', slug: 'venue-a' } }],
+    }
+
+    it('only queries CURRENT members (StaffOrganization.isActive = true)', async () => {
+      prismaMock.staff.findMany.mockResolvedValue([MEMBER])
+
+      await getOrganizationTeam(ORG_ID)
+
+      // The active-membership filter is the fix: without `isActive: true`, removed
+      // users (isActive=false) leak back into the team list.
+      expect(prismaMock.staff.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { organizations: { some: { organizationId: ORG_ID, isActive: true } } },
+        }),
+      )
+    })
+
+    it('maps members with their venues', async () => {
+      prismaMock.staff.findMany.mockResolvedValue([MEMBER])
+
+      const result = await getOrganizationTeam(ORG_ID)
+
+      expect(result).toHaveLength(1)
+      expect(result[0]).toMatchObject({
+        id: 'staff-1',
+        firstName: 'Active',
+        lastName: 'Member',
+        employeeCode: 'PT-001',
+        venues: [{ venueId: 'v-a', venueName: 'Venue A', venueSlug: 'venue-a', role: 'CASHIER' }],
+      })
     })
   })
 })
