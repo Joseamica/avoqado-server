@@ -14,56 +14,66 @@ import prisma from '@/utils/prismaClient'
  * and `req.params.orgId` to contain the requested organization ID.
  */
 export const checkOwnerAccess = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-  // Ensure authContext exists (should be set by authentication middleware)
-  if (!req.authContext || !req.authContext.role) {
-    res.status(401).json({
-      error: 'Unauthorized',
-      message: 'Authentication context not found. Ensure authentication middleware runs first.',
-    })
-    return
-  }
+  try {
+    // Ensure authContext exists (should be set by authentication middleware)
+    if (!req.authContext || !req.authContext.role) {
+      res.status(401).json({
+        error: 'Unauthorized',
+        message: 'Authentication context not found. Ensure authentication middleware runs first.',
+      })
+      return
+    }
 
-  const { userId, role } = req.authContext
-  const { orgId: requestedOrgId } = req.params
+    const { userId, role } = req.authContext
+    const { orgId: requestedOrgId } = req.params
 
-  // Validate that orgId parameter exists
-  if (!requestedOrgId) {
-    res.status(400).json({
-      error: 'Bad Request',
-      message: 'Organization ID (orgId) parameter is required.',
-    })
-    return
-  }
+    // Validate that orgId parameter exists
+    if (!requestedOrgId) {
+      res.status(400).json({
+        error: 'Bad Request',
+        message: 'Organization ID (orgId) parameter is required.',
+      })
+      return
+    }
 
-  // SUPERADMIN can access any organization
-  if (role === StaffRole.SUPERADMIN) {
-    return next()
-  }
+    // SUPERADMIN can access any organization
+    if (role === StaffRole.SUPERADMIN) {
+      return next()
+    }
 
-  // Check if user has OWNER role in any venue of the requested organization
-  // This supports multi-org scenarios where a user can be OWNER in multiple organizations
-  // IMPORTANT: We check the database regardless of the token's role, because:
-  // - User may have logged in from a venue where they're CASHIER
-  // - But they could be OWNER in the organization they're trying to access
-  const ownerVenueInOrg = await prisma.staffVenue.findFirst({
-    where: {
-      staffId: userId,
-      role: StaffRole.OWNER,
-      venue: {
-        organizationId: requestedOrgId,
+    // Check if user has OWNER role in any venue of the requested organization
+    // This supports multi-org scenarios where a user can be OWNER in multiple organizations
+    // IMPORTANT: We check the database regardless of the token's role, because:
+    // - User may have logged in from a venue where they're CASHIER
+    // - But they could be OWNER in the organization they're trying to access
+    const ownerVenueInOrg = await prisma.staffVenue.findFirst({
+      where: {
+        staffId: userId,
+        role: StaffRole.OWNER,
+        venue: {
+          organizationId: requestedOrgId,
+        },
       },
-    },
-  })
+    })
 
-  if (ownerVenueInOrg) {
-    return next()
+    if (ownerVenueInOrg) {
+      return next()
+    }
+
+    // Deny access if user is not OWNER in any venue of the requested organization
+    res.status(403).json({
+      error: 'Forbidden',
+      message: `Access denied. You don't have permission to access this organization.`,
+    })
+  } catch (error) {
+    // A transient DB error (e.g. P1017 connection closed, P2024 pool timeout) on the
+    // StaffVenue lookup must NOT escape as an unhandledRejection: Express 4 does not
+    // catch rejections from an async middleware, so an uncaught reject here would crash
+    // the whole process (gracefulShutdown in server.ts). Forwarding to next(error) lets
+    // the global error handler (app.ts) return a clean 500. The reject happens before any
+    // res.json(), so there is no "headers already sent" risk.
+    next(error)
   }
-
-  // Deny access if user is not OWNER in any venue of the requested organization
-  res.status(403).json({
-    error: 'Forbidden',
-    message: `Access denied. You don't have permission to access this organization.`,
-  })
 }
 
 /**
@@ -73,53 +83,60 @@ export const checkOwnerAccess = async (req: Request, res: Response, next: NextFu
  */
 export const checkOrganizationAccess = (allowAdmin: boolean = false) => {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    if (!req.authContext || !req.authContext.role) {
-      res.status(401).json({
-        error: 'Unauthorized',
-        message: 'Authentication context not found.',
-      })
-      return
-    }
+    try {
+      if (!req.authContext || !req.authContext.role) {
+        res.status(401).json({
+          error: 'Unauthorized',
+          message: 'Authentication context not found.',
+        })
+        return
+      }
 
-    const { userId, role } = req.authContext
-    const { orgId: requestedOrgId } = req.params
+      const { userId, role } = req.authContext
+      const { orgId: requestedOrgId } = req.params
 
-    if (!requestedOrgId) {
-      res.status(400).json({
-        error: 'Bad Request',
-        message: 'Organization ID (orgId) parameter is required.',
-      })
-      return
-    }
+      if (!requestedOrgId) {
+        res.status(400).json({
+          error: 'Bad Request',
+          message: 'Organization ID (orgId) parameter is required.',
+        })
+        return
+      }
 
-    // SUPERADMIN always has access
-    if (role === StaffRole.SUPERADMIN) {
-      return next()
-    }
+      // SUPERADMIN always has access
+      if (role === StaffRole.SUPERADMIN) {
+        return next()
+      }
 
-    // Check if user has the required role in any venue of the requested organization
-    // IMPORTANT: We check the database regardless of the token's role, because:
-    // - User may have logged in from a venue where they have a different role
-    // - But they could have the required role in the organization they're accessing
-    const allowedRoles = allowAdmin ? [StaffRole.OWNER, StaffRole.ADMIN] : [StaffRole.OWNER]
+      // Check if user has the required role in any venue of the requested organization
+      // IMPORTANT: We check the database regardless of the token's role, because:
+      // - User may have logged in from a venue where they have a different role
+      // - But they could have the required role in the organization they're accessing
+      const allowedRoles = allowAdmin ? [StaffRole.OWNER, StaffRole.ADMIN] : [StaffRole.OWNER]
 
-    const staffVenueInOrg = await prisma.staffVenue.findFirst({
-      where: {
-        staffId: userId,
-        role: { in: allowedRoles },
-        venue: {
-          organizationId: requestedOrgId,
+      const staffVenueInOrg = await prisma.staffVenue.findFirst({
+        where: {
+          staffId: userId,
+          role: { in: allowedRoles },
+          venue: {
+            organizationId: requestedOrgId,
+          },
         },
-      },
-    })
+      })
 
-    if (staffVenueInOrg) {
-      return next()
+      if (staffVenueInOrg) {
+        return next()
+      }
+
+      res.status(403).json({
+        error: 'Forbidden',
+        message: `Access denied. Required role: ${allowAdmin ? 'OWNER or ADMIN' : 'OWNER'}.`,
+      })
+    } catch (error) {
+      // Same rationale as checkOwnerAccess: a transient DB reject on the StaffVenue
+      // lookup must reach the Express error handler (clean 500), never escape as a
+      // process-level unhandledRejection that triggers gracefulShutdown.
+      next(error)
     }
-
-    res.status(403).json({
-      error: 'Forbidden',
-      message: `Access denied. Required role: ${allowAdmin ? 'OWNER or ADMIN' : 'OWNER'}.`,
-    })
   }
 }

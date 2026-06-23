@@ -113,6 +113,37 @@ export function shouldRetryDbConnectionError(error: any): boolean {
 }
 
 /**
+ * Classifier for the PROCESS-LEVEL `unhandledRejection` handler (src/server.ts) —
+ * NOT a cron retry predicate. Answers: "is this rejection a known, self-healing
+ * DB / connection-pool blip?" so the handler can log it loudly (with a marker for
+ * monitoring) instead of treating it as an unexplained fatal crash.
+ *
+ * Superset of {@link shouldRetryDbConnectionError} that ALSO matches **P2024**
+ * ("Timed out fetching a new connection from the connection pool"). The two
+ * predicates intentionally diverge — do NOT collapse them:
+ *   - shouldRetryDbConnectionError → cron-safe, EXCLUDES P2024: retrying a
+ *     pool-timeout piles more work onto an already-exhausted pool.
+ *   - isTransientDbConnectionError → process-handler classifier, INCLUDES P2024:
+ *     a single request hitting a pool timeout is a transient symptom to recognize,
+ *     not a retry trigger.
+ *
+ * Defensive: the `unhandledRejection` reason may be ANY value (string, null,
+ * non-Error), so this reads `code` via a typeof guard and never throws.
+ */
+export function isTransientDbConnectionError(error: unknown): boolean {
+  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined
+  if (typeof code !== 'string') return false
+
+  // Prisma connection-level codes + the P2024 pool-timeout (NOT other P2xxx data/constraint errors)
+  if (['P1001', 'P1002', 'P1008', 'P1017', 'P2024'].includes(code)) return true
+
+  // Underlying socket/network errors (pg client)
+  if (['ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'ECONNRESET', 'EPIPE'].includes(code)) return true
+
+  return false
+}
+
+/**
  * Calculate delay for next retry attempt
  *
  * @param attempt - Current attempt number (0-indexed)

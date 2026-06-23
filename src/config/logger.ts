@@ -116,19 +116,12 @@ const logger = winston.createLogger({
   exitOnError: false, // No salir en excepciones manejadas por Winston
 })
 
-// Manejar excepciones no capturadas
-process.on('uncaughtException', (error: Error) => {
-  logger.error('Uncaught Exception:', { message: error.message, stack: error.stack })
-  // Es crítico salir del proceso después de una excepción no capturada
-  // pero asegúrate de que el log se haya escrito.
-  logger.on('finish', () => process.exit(1))
-  logger.end()
-})
-
-// Manejar promesas rechazadas no manejadas
-process.on('unhandledRejection', (reason: any, promise: Promise<any>) => {
-  logger.error('Unhandled Rejection at:', { promiseDetails: promise, reason })
-})
+// NOTE: process-level 'uncaughtException' / 'unhandledRejection' handlers are
+// intentionally NOT registered here. `src/server.ts` is the SINGLE owner of those
+// handlers. Registering them here too caused a race on uncaughtException — this
+// file's `logger.on('finish', () => process.exit(1))` could fire before (and cut
+// off) server.ts's gracefulShutdown DB/Rabbit/Socket cleanup, and emit a false
+// crash exit code to Render. Keep this module logging-only.
 
 if (!SIMPLE_LOGGING) {
   logger.info(`Logger initialized. Log level: ${LOG_LEVEL}. NODE_ENV: ${process.env.NODE_ENV}. Log directory: ${path.resolve(LOG_DIR)}`)

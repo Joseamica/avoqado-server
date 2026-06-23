@@ -1,4 +1,4 @@
-import { retry, shouldRetryDbConnectionError, shouldRetryStripeError } from '@/utils/retry'
+import { retry, shouldRetryDbConnectionError, isTransientDbConnectionError, shouldRetryStripeError } from '@/utils/retry'
 
 // Keep test output clean — retry() logs on every retry/failure.
 jest.mock('@/config/logger', () => ({
@@ -31,6 +31,51 @@ describe('retry utility', () => {
     it('does NOT throw on null/undefined', () => {
       expect(shouldRetryDbConnectionError(null)).toBe(false)
       expect(shouldRetryDbConnectionError(undefined)).toBe(false)
+    })
+
+    // REGRESSION GUARD: P2024 (pool timeout) must stay EXCLUDED here — retrying a
+    // pool-timeout in a cron worsens exhaustion. (It IS recognized by the separate
+    // process-handler classifier isTransientDbConnectionError below.)
+    it('does NOT retry P2024 pool timeout (cron-safe — would worsen exhaustion)', () => {
+      expect(shouldRetryDbConnectionError({ code: 'P2024' })).toBe(false)
+    })
+  })
+
+  // ──────────────────────────────────────────────────────────────────
+  // NEW FEATURE: isTransientDbConnectionError (process-handler classifier)
+  // ──────────────────────────────────────────────────────────────────
+  describe('isTransientDbConnectionError', () => {
+    it.each(['P1001', 'P1002', 'P1008', 'P1017'])('classifies Prisma connection error %s as transient', code => {
+      expect(isTransientDbConnectionError({ code })).toBe(true)
+    })
+
+    // The whole reason this predicate exists separately from shouldRetryDbConnectionError:
+    // it ALSO recognizes the connection-pool timeout.
+    it('classifies P2024 pool timeout as transient (the key divergence from shouldRetryDbConnectionError)', () => {
+      expect(isTransientDbConnectionError({ code: 'P2024' })).toBe(true)
+      // Proven divergence: the cron predicate must NOT match P2024.
+      expect(shouldRetryDbConnectionError({ code: 'P2024' })).toBe(false)
+    })
+
+    it.each(['ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'ECONNRESET', 'EPIPE'])('classifies socket error %s as transient', code => {
+      expect(isTransientDbConnectionError({ code })).toBe(true)
+    })
+
+    it.each(['P2002', 'P2025', 'P2003', 'P2000'])('does NOT classify data/constraint error %s as transient', code => {
+      expect(isTransientDbConnectionError({ code })).toBe(false)
+    })
+
+    it('does NOT classify an error with no code', () => {
+      expect(isTransientDbConnectionError(new Error('boom'))).toBe(false)
+    })
+
+    // The unhandledRejection `reason` can be ANY value — must never throw.
+    it('does NOT throw on non-object / non-Error reasons', () => {
+      expect(isTransientDbConnectionError(null)).toBe(false)
+      expect(isTransientDbConnectionError(undefined)).toBe(false)
+      expect(isTransientDbConnectionError('connection lost')).toBe(false)
+      expect(isTransientDbConnectionError(42)).toBe(false)
+      expect(isTransientDbConnectionError({ code: 1234 })).toBe(false) // non-string code
     })
   })
 

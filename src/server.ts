@@ -10,6 +10,7 @@ import logger from './config/logger'
 import { PORT, NODE_ENV, DATABASE_URL } from './config/env'
 import pgPool from './config/database' // Import pgPool for graceful shutdown
 import prisma from './utils/prismaClient' // Import Prisma client for graceful shutdown
+import { isTransientDbConnectionError } from './utils/retry'
 import { connectToRabbitMQ, closeRabbitMQConnection } from './communication/rabbitmq/connection'
 import { CommandListener } from './communication/rabbitmq/commandListener'
 import { CommandRetryService } from './communication/rabbitmq/commandRetryService'
@@ -243,16 +244,34 @@ process.on('uncaughtException', error => {
   }
 })
 process.on('unhandledRejection', (reason, promise) => {
+  // Classify transient DB / connection-pool rejections (P1017 closed connection,
+  // P2024 pool timeout, etc.) and log them with a marker so they're visible and
+  // alertable in monitoring — these are the self-healing blips behind the
+  // PlayTelecom pool-exhaustion crashes. We STILL gracefulShutdown afterwards: an
+  // unhandledRejection means an UNGUARDED async site leaked, so process state is
+  // unknown — suppressing the exit here could hang the originating request or leak
+  // a half-finished side effect, and would mask sustained pool exhaustion. The real
+  // fix is at the source (guarded middlewares); this only upgrades observability.
+  if (isTransientDbConnectionError(reason)) {
+    const r = reason as { code?: string; meta?: { modelName?: string }; message?: string }
+    logger.error('Unhandled Rejection (TRANSIENT_DB_REJECTION)', {
+      marker: 'TRANSIENT_DB_REJECTION',
+      code: r?.code,
+      modelName: r?.meta?.modelName,
+      message: r?.message,
+    })
+  } else {
+    logger.error('Unhandled Rejection', { reason, promise })
+  }
   // Dev: log loudly but keep the process alive. A single unhandled rejection
   // (e.g. from a logger crash or a stray third-party promise) shouldn't kill
   // the dev server — the developer needs to see the rejection and fix it,
   // not respawn tsx watch.
-  // Prod/staging: standard Node practice — gracefulShutdown and let the
-  // orchestrator respawn. State could be corrupted after an unhandled rejection.
-  logger.error('Unhandled Rejection', { reason, promise })
   if (NODE_ENV === 'development') {
     return
   }
+  // Prod/staging: standard Node practice — gracefulShutdown and let the
+  // orchestrator respawn. State could be corrupted after an unhandled rejection.
   gracefulShutdown('unhandledRejection')
 })
 
