@@ -360,4 +360,25 @@ describe('verifyAccess Middleware', () => {
       expect((mockReq as any).access).toEqual(mockUserAccess)
     })
   })
+
+  // ──────────────────────────────────────────────────────────────────
+  // Async rejection containment (the 2026-06-23 crash class).
+  // The "Fail-Closed Error Handling" block above already covers a rejecting
+  // getUserAccess (the INNER await). This pins the OUTER await — the SUPERADMIN
+  // prisma.staffVenue.findFirst lookup — so a transient DB error there is contained
+  // (fail-closed → ForbiddenError) and never escapes as an unhandledRejection.
+  // ──────────────────────────────────────────────────────────────────
+  describe('async rejection containment (the crash class)', () => {
+    it.each(['P1017', 'P2024'])('contains a %s rejection from the SUPERADMIN check (fail-closed, no escape)', async code => {
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockRejectedValueOnce(Object.assign(new Error(`prisma ${code}`), { code }))
+
+      const middleware = verifyAccess({ permission: 'menu:read' })
+
+      // Must not reject the returned promise (no unhandledRejection escapes)...
+      await expect(middleware(mockReq as Request, mockRes as Response, mockNext)).resolves.toBeUndefined()
+      // ...and fails closed via the error handler rather than self-producing a response.
+      expect(mockNext).toHaveBeenCalledWith(expect.any(ForbiddenError))
+      expect(statusMock).not.toHaveBeenCalled()
+    })
+  })
 })
