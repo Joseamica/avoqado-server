@@ -45,6 +45,7 @@
     "format": "prettier --write .",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
+    "typecheck": "NODE_OPTIONS='--max-old-space-size=8192' tsc --noEmit",
     "audit:permissions": "tsx scripts/audit-permissions.ts",
     "audit:permissions:strict": "tsx scripts/audit-permissions.ts --strict",
     "check:unused": "unimported",

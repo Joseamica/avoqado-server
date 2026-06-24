@@ -47,7 +47,7 @@ echo ""
 
 # 2. TypeScript compilation check
 echo "🔍 Step 2/10: TypeScript compilation check..."
-if npx tsc --noEmit; then
+if npm run typecheck; then
   echo -e "${GREEN}✅ TypeScript compilation check passed!${NC}"
 else
   echo -e "${RED}❌ TypeScript compilation failed!${NC}"
