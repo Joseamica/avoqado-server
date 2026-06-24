@@ -69,19 +69,75 @@ export async function getEffectivePaymentConfig(venueId: string) {
 /**
  * Resolve the effective pricing structure for a venue + account type.
  * Checks venue-level first, then falls back to organization-level.
+ *
+ * @param venueId      Venue to resolve pricing for.
+ * @param accountType  Legacy slot accountType (PRIMARY/SECONDARY/TERTIARY).
+ * @param opts.effectiveAt        Date the pricing must be active at. Defaults to
+ *                                `new Date()`. Pass the PAYMENT's date when costing
+ *                                historically (recompute) so rates are not anchored
+ *                                to today (was a latent bug — the function used
+ *                                `new Date()` unconditionally).
+ * @param opts.merchantAccountId  When set, per-account pricing
+ *                                (VenuePricingStructure.merchantAccountId, PR-1) is
+ *                                tried FIRST and wins over the legacy accountType
+ *                                rows. Forward-compatible: no per-account rows exist
+ *                                yet, so this currently always falls through to the
+ *                                legacy path (zero behavior change for live calls).
  */
-export async function getEffectivePricing(venueId: string, accountType?: AccountType) {
-  const now = new Date()
-  const baseWhere = {
+export async function getEffectivePricing(
+  venueId: string,
+  accountType?: AccountType,
+  opts?: { merchantAccountId?: string; effectiveAt?: Date },
+) {
+  const at = opts?.effectiveAt ?? new Date()
+  const window = {
     active: true,
-    effectiveFrom: { lte: now },
-    OR: [{ effectiveTo: null }, { effectiveTo: { gte: now } }],
+    effectiveFrom: { lte: at },
+    OR: [{ effectiveTo: null }, { effectiveTo: { gte: at } }],
+  }
+
+  // Resolve the org lazily and at most once (used by both org-level fallbacks).
+  let organizationId: string | null | undefined
+  const orgId = async () => {
+    if (organizationId === undefined) {
+      const v = await prisma.venue.findUnique({ where: { id: venueId }, select: { organizationId: true } })
+      organizationId = v?.organizationId ?? null
+    }
+    return organizationId
+  }
+
+  // (A) Per-account pricing (PR-2): a row keyed to the exact merchant account that
+  // processed the payment wins over the legacy accountType rows. Today this returns
+  // nothing (no per-account rows seeded) and we fall through to (B) below.
+  if (opts?.merchantAccountId) {
+    const venuePerAccount = await prisma.venuePricingStructure.findMany({
+      where: { venueId, merchantAccountId: opts.merchantAccountId, ...window },
+      orderBy: [{ effectiveFrom: 'desc' }],
+    })
+    if (venuePerAccount.length > 0) return { pricing: venuePerAccount, source: 'venue' as ConfigSource }
+
+    const oid = await orgId()
+    if (oid) {
+      const orgPerAccount = await prisma.organizationPricingStructure.findMany({
+        where: { organizationId: oid, merchantAccountId: opts.merchantAccountId, ...window },
+        orderBy: [{ effectiveFrom: 'desc' }],
+      })
+      if (orgPerAccount.length > 0) return { pricing: orgPerAccount, source: 'organization' as ConfigSource }
+    }
+  }
+
+  // (B) Legacy accountType-keyed pricing (today's behavior). `merchantAccountId: null`
+  // selects ONLY legacy rows so per-account rows (PR-4+) never leak into this path;
+  // today every row has a null merchantAccountId, so this filter is behavior-preserving.
+  const legacyWhere = {
+    ...window,
+    merchantAccountId: null,
     ...(accountType ? { accountType } : {}),
   }
 
   // 1. Check venue-level pricing
   const venuePricing = await prisma.venuePricingStructure.findMany({
-    where: { venueId, ...baseWhere },
+    where: { venueId, ...legacyWhere },
     orderBy: [{ accountType: 'asc' }, { effectiveFrom: 'desc' }],
   })
 
@@ -90,15 +146,11 @@ export async function getEffectivePricing(venueId: string, accountType?: Account
   }
 
   // 2. Fallback to organization-level pricing
-  const venue = await prisma.venue.findUnique({
-    where: { id: venueId },
-    select: { organizationId: true },
-  })
-
-  if (!venue) return null
+  const oid = await orgId()
+  if (!oid) return null
 
   const orgPricing = await prisma.organizationPricingStructure.findMany({
-    where: { organizationId: venue.organizationId, ...baseWhere },
+    where: { organizationId: oid, ...legacyWhere },
     orderBy: [{ accountType: 'asc' }, { effectiveFrom: 'desc' }],
   })
 

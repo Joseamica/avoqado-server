@@ -21,6 +21,7 @@ import { BadRequestError, ConflictError, NotFoundError, ValidationError } from '
 import logger from '../../config/logger'
 import { isNumericMerchantId } from '../../lib/angelpayValidators'
 import { encryptCredentials } from './merchantAccount.service'
+import { assignMerchantToTerminal } from '../payments/assignMerchantToTerminal.service'
 import type { FullSetupAngelPayInput } from '../../schemas/dashboard/angelpay-full-setup.schema'
 
 const SLOT_COLUMN = {
@@ -216,13 +217,9 @@ export async function fullSetupAngelPayMerchant(input: FullSetupAngelPayInput, c
             if (terminal.venueId !== input.venueId) {
               throw new BadRequestError(`La terminal ${terminalId} no pertenece a este venue`)
             }
-            const current = terminal.assignedMerchantIds ?? []
-            if (!current.includes(merchantAccount.id)) {
-              await tx.terminal.update({
-                where: { id: terminalId },
-                data: { assignedMerchantIds: { set: [...current, merchantAccount.id] } },
-              })
-            }
+            // PR-2 (T6): funnel through the choke-point (in this tx) so the venue
+            // roster + TerminalMerchantAccount link are maintained, not just the array.
+            await assignMerchantToTerminal({ terminalId, merchantAccountId: merchantAccount.id, db: tx })
             terminalIds.push(terminalId)
           }
         }

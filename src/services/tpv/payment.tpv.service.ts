@@ -17,6 +17,7 @@ import { updateCustomerMetrics } from '../dashboard/customer.dashboard.service'
 import { createCommissionForPayment } from '../dashboard/commission/commission-calculation.service'
 import { serializedInventoryService } from '../serialized-inventory/serializedInventory.service'
 import { getEffectivePaymentConfig } from '../organization-payment-config.service'
+import { classifyMerchantResolution } from '../payments/merchantResolution'
 import { logAction } from '../dashboard/activity-log.service'
 import { validateStaffVenue as validateStaffVenueShared } from '../../utils/staff-venue.util'
 
@@ -1585,6 +1586,15 @@ export async function recordOrderPayment(
   // above, the @@unique([venueId, idempotencyKey]) constraint will throw P2002 on
   // the second request. We catch that below and return the winning payment, making
   // the concurrent retry behave exactly like an idempotent success.
+  // PR-2 (T3): durable record of HOW the merchant account resolved (the account the
+  // TPV provided vs the final one after the 3-tier strategy), so reconciliation can
+  // find/repair mis-attributed payments. Pure audit — does not change which account
+  // is used to charge.
+  const merchantResolution = classifyMerchantResolution({
+    provided: paymentData.merchantAccountId,
+    final: merchantAccountId,
+  })
+
   let payment: Awaited<ReturnType<typeof prisma.payment.create>>
   try {
     payment = await prisma.$transaction(async tx => {
@@ -1625,6 +1635,10 @@ export async function recordOrderPayment(
           entryMode: paymentData.entryMode ? (paymentData.entryMode.toUpperCase() as any) : null,
           // ⭐ Provider-agnostic merchant account tracking
           merchantAccountId,
+          // ⭐ PR-2 (T3): durable merchant-resolution audit (how the account above resolved)
+          merchantResolutionStatus: merchantResolution.merchantResolutionStatus,
+          merchantResolutionReason: merchantResolution.merchantResolutionReason,
+          originalMerchantAccountId: merchantResolution.originalMerchantAccountId,
           // ⭐ Terminal that processed this payment (resolved from deviceSerialNumber)
           terminalId,
           processedById: validatedStaffId, // ✅ CORRECTED: Use validated staff ID
@@ -2279,6 +2293,12 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   // above, the @@unique([venueId, idempotencyKey]) constraint will throw P2002 on
   // the second request. We catch that below and return the winning payment, making
   // the concurrent retry behave exactly like an idempotent success.
+  // PR-2 (T3): durable merchant-resolution mark (see recordPayment). Pure audit.
+  const merchantResolution = classifyMerchantResolution({
+    provided: paymentData.merchantAccountId,
+    final: merchantAccountId,
+  })
+
   let payment: Awaited<ReturnType<typeof prisma.payment.create>> & { processedBy: any }
   let fastOrder: Awaited<ReturnType<typeof prisma.order.create>>
   try {
@@ -2352,6 +2372,10 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           entryMode: paymentData.entryMode ? (paymentData.entryMode.toUpperCase() as any) : null,
           // ⭐ Provider-agnostic merchant account tracking
           merchantAccountId,
+          // ⭐ PR-2 (T3): durable merchant-resolution audit (how the account above resolved)
+          merchantResolutionStatus: merchantResolution.merchantResolutionStatus,
+          merchantResolutionReason: merchantResolution.merchantResolutionReason,
+          originalMerchantAccountId: merchantResolution.originalMerchantAccountId,
           // ⭐ Terminal that processed this payment (resolved from deviceSerialNumber)
           terminalId,
           processedById: validatedStaffId, // ✅ CORRECTED: Use validated staff ID
@@ -2828,6 +2852,12 @@ export async function getPaymentRouting(venueId: string, routingData: PaymentRou
   const { config: paymentConfig, source } = effective
   logger.info('Resolved payment config for routing', { venueId, source })
 
+  // PR-2 rollout flag (same as the cost engine). OFF → only the 3 legacy slots are
+  // routable (historical behavior). ON → a 4th+ account that lives in the venue
+  // roster (but no legacy slot) is also routable, so the TPV can charge on it
+  // instead of getting "account not found". Flag lives on VenuePaymentConfig only.
+  const rosterEnabled = source === 'venue' && (paymentConfig as any).rosterRolloutEnabled === true
+
   // Find the specific merchant account by ID from the venue's configured accounts
   // The user has already selected which account they want to use (primary/secondary/tertiary)
   let selectedAccount: any = null
@@ -2842,6 +2872,33 @@ export async function getPaymentRouting(venueId: string, routingData: PaymentRou
   } else if (paymentConfig.tertiaryAccount?.id === routingData.merchantAccountId) {
     selectedAccount = paymentConfig.tertiaryAccount
     accountType = 'TERTIARY'
+  } else if (rosterEnabled) {
+    // Roster path (PR-2): the selected account isn't one of the 3 slots. If it's a
+    // member of the venue roster, route to it anyway (this is the whole point of the
+    // N-account model — a terminal can charge on more than 3 accounts).
+    const rosterRow = await prisma.venueMerchantAccount.findFirst({
+      where: { venueId, merchantAccountId: routingData.merchantAccountId },
+      select: { legacySlotType: true },
+    })
+    if (rosterRow) {
+      const rosterAccount = await prisma.merchantAccount.findFirst({
+        where: { id: routingData.merchantAccountId },
+        include: { provider: true },
+      })
+      if (rosterAccount) {
+        selectedAccount = rosterAccount
+        // `route`/accountType is a label; the TPV charges with the returned
+        // credentials, not the label. Use the account's legacy slot anchor when it
+        // has one, else PRIMARY (the most-tested route value) so an old APK that
+        // still branches on `route` gets a familiar value.
+        accountType = rosterRow.legacySlotType ?? 'PRIMARY'
+        logger.info('Routing to a roster account outside the 3 legacy slots (PR-2)', {
+          venueId,
+          merchantAccountId: routingData.merchantAccountId,
+          legacySlotType: rosterRow.legacySlotType,
+        })
+      }
+    }
   }
 
   if (!selectedAccount || !selectedAccount.active) {

@@ -371,7 +371,10 @@ export async function createVenueWizard(req: Request, res: Response, next: NextF
             name: payload.terminal.name || `Terminal ${payload.terminal.serialNumber}`,
             type: 'TPV_ANDROID',
             status: 'ACTIVE',
-            // If a merchant account was linked, attach it to the terminal
+            // If a merchant account was linked, attach it to the terminal.
+            // assignedMerchantIds-raw-write-ok: terminal create-time (terminal id doesn't
+            // exist yet); this first account becomes the venue's primary slot and is
+            // materialized into the roster by the backfill.
             ...(payload.pricing?.merchantAccountId ? { assignedMerchantIds: [payload.pricing.merchantAccountId] } : {}),
           },
         })

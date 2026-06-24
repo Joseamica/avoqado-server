@@ -154,6 +154,10 @@ const prismaMock: any = {
   organizationPricingStructure: createMockModel(),
   settlementConfiguration: createMockModel(),
   transactionCost: createMockModel(),
+  // N-merchant-accounts roster (PR-1): venue/org account rosters + per-terminal links
+  venueMerchantAccount: createMockModel(),
+  organizationMerchantAccount: createMockModel(),
+  terminalMerchantAccount: createMockModel(),
   // Time entry models
   timeEntry: createMockModel(),
   timeEntryBreak: createMockModel(),

@@ -12,6 +12,7 @@ import { assertMerchantTerminalCompatible } from '@/lib/providerDeviceCompatibil
 import { IncompatibleDeviceError } from '@/errors/AppError'
 import { fullSetupAngelPaySchema } from '../../schemas/dashboard/angelpay-full-setup.schema'
 import { fullSetupAngelPayMerchant as fullSetupAngelPayMerchantService } from '../../services/superadmin/angelpayFullSetup.service'
+import { assignMerchantToTerminal } from '../../services/payments/assignMerchantToTerminal.service'
 
 /**
  * MerchantAccount Controller
@@ -1397,12 +1398,9 @@ export async function batchAutoFetchBlumonCredentials(req: Request, res: Respons
                   throw err
                 }
 
-                await prisma.terminal.update({
-                  where: { id: term.id },
-                  data: {
-                    assignedMerchantIds: { push: merchantAccount.id },
-                  },
-                })
+                // PR-2 (T6): funnel through the choke-point so the roster +
+                // TerminalMerchantAccount link are maintained, not just the legacy array.
+                await assignMerchantToTerminal({ terminalId: term.id, merchantAccountId: merchantAccount.id })
                 attachedCount++
               }
             }
@@ -1570,14 +1568,7 @@ export async function batchAssignTerminals(req: Request, res: Response, next: Ne
         // incompatibility as a per-terminal error so the UI can show it.
         await assertMerchantTerminalCompatible(terminalId, merchantAccountId)
 
-        await prisma.terminal.update({
-          where: { id: terminalId },
-          data: {
-            assignedMerchantIds: {
-              push: merchantAccountId,
-            },
-          },
-        })
+        await assignMerchantToTerminal({ terminalId, merchantAccountId }) // PR-2 (T6): maintain roster + link
         attached++
       } catch (err: any) {
         errors.push(`Error asignando terminal ${terminalId}: ${err.message}`)
@@ -1937,10 +1928,7 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
           throw err
         }
 
-        await prisma.terminal.update({
-          where: { id: terminal.id },
-          data: { assignedMerchantIds: { push: merchantAccountId } },
-        })
+        await assignMerchantToTerminal({ terminalId: terminal.id, merchantAccountId }) // PR-2 (T6): maintain roster + link
         autoAttached.push(terminal.id)
       }
     }
@@ -1958,10 +1946,7 @@ export async function fullSetupBlumonMerchant(req: Request, res: Response, next:
           // point #2). Explicit operator-selected terminal — fail hard.
           await assertMerchantTerminalCompatible(terminalId, merchantAccountId)
 
-          await prisma.terminal.update({
-            where: { id: terminalId },
-            data: { assignedMerchantIds: { push: merchantAccountId } },
-          })
+          await assignMerchantToTerminal({ terminalId, merchantAccountId }) // PR-2 (T6): maintain roster + link
           batchAttached++
         }
       }

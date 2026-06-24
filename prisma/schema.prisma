@@ -2710,6 +2710,11 @@ model Payment {
   merchantAccountId String?
   merchantAccount   MerchantAccount? @relation(fields: [merchantAccountId], references: [id], onDelete: Restrict)
 
+  // PR-1: resolución durable del merchant (reconciliación si una TPV stale/offline manda una cuenta inválida) (§4.3).
+  merchantResolutionStatus  MerchantResolutionStatus?
+  merchantResolutionReason  String?
+  originalMerchantAccountId String?
+
   // Terminal that processed this payment (for payment reconciliation by device)
   terminalId String?
   terminal   Terminal? @relation("PaymentTerminal", fields: [terminalId], references: [id], onDelete: SetNull)
@@ -3210,6 +3215,9 @@ model Terminal {
   // DO NOT delete merchants via direct SQL - always use API endpoints
   assignedMerchantIds String[] @default([])
 
+  // PR-1: reemplazo con FK real de assignedMerchantIds. El array se conserva (dual-write) hasta el contract.
+  terminalMerchantAccounts TerminalMerchantAccount[]
+
   // Preferred processor for this TPV (LEGACY/MENTA/AUTO)
   preferredProcessor PaymentProcessor @default(AUTO)
 
@@ -3578,16 +3586,18 @@ model MerchantAccount {
   aggregator   Aggregator? @relation(fields: [aggregatorId], references: [id])
 
   // Relations
-  venueConfigsPrimary   VenuePaymentConfig[]        @relation("PrimaryAccount")
-  venueConfigsSecondary VenuePaymentConfig[]        @relation("SecondaryAccount")
-  venueConfigsTertiary  VenuePaymentConfig[]        @relation("TertiaryAccount")
-  orgConfigsPrimary     OrganizationPaymentConfig[] @relation("OrgPrimaryAccount")
-  orgConfigsSecondary   OrganizationPaymentConfig[] @relation("OrgSecondaryAccount")
-  orgConfigsTertiary    OrganizationPaymentConfig[] @relation("OrgTertiaryAccount")
+  venueConfigsPrimary   VenuePaymentConfig[]          @relation("PrimaryAccount")
+  venueConfigsSecondary VenuePaymentConfig[]          @relation("SecondaryAccount")
+  venueConfigsTertiary  VenuePaymentConfig[]          @relation("TertiaryAccount")
+  orgConfigsPrimary     OrganizationPaymentConfig[]   @relation("OrgPrimaryAccount")
+  orgConfigsSecondary   OrganizationPaymentConfig[]   @relation("OrgSecondaryAccount")
+  orgConfigsTertiary    OrganizationPaymentConfig[]   @relation("OrgTertiaryAccount")
   costStructures        ProviderCostStructure[]
   transactionCosts      TransactionCost[]
   settlementConfigs     SettlementConfiguration[]
   payments              Payment[] // ⭐ Track all payments processed by this merchant account
+  venueRosterAccounts   VenueMerchantAccount[]        @relation("VenueRosterAccount") // PR-1
+  orgRosterAccounts     OrganizationMerchantAccount[] @relation("OrgRosterAccount") // PR-1
   // Revenue-share configurable (cadena provider/agregador/Avoqado). Opcional:
   // un merchant sin fila aquí mantiene el comportamiento histórico (toda la
   // ganancia atribuida a Avoqado en reportes).
@@ -4048,6 +4058,14 @@ model VenuePaymentConfig {
   tertiaryAccountId String?
   tertiaryAccount   MerchantAccount? @relation("TertiaryAccount", fields: [tertiaryAccountId], references: [id], onDelete: Restrict)
 
+  merchantAccounts VenueMerchantAccount[] // PR-1: roster N-cuentas (futuro reemplazo de los 3 slots)
+
+  /// PR-2 rollout flag (default OFF). When false, cost/routing resolve via the 3
+  /// legacy slots exactly as today (zero behavior change). Flipped per-venue to
+  /// true ONLY after the recompute-diff gate passes for that venue, switching it
+  /// to roster-based resolution. Internal migration state — NOT a paid-tier gate.
+  rosterRolloutEnabled Boolean @default(false)
+
   // Routing rules (JSON for flexibility)
   /// Optional dynamic rules (e.g. BIN routing, amount thresholds) that decide
   /// which merchant account handles a given payment.
@@ -4082,6 +4100,8 @@ model OrganizationPaymentConfig {
   tertiaryAccountId String?
   tertiaryAccount   MerchantAccount? @relation("OrgTertiaryAccount", fields: [tertiaryAccountId], references: [id], onDelete: Restrict)
 
+  merchantAccounts OrganizationMerchantAccount[] // PR-1: roster N-cuentas a nivel org
+
   // Routing rules (JSON for flexibility)
   routingRules Json?
 
@@ -4107,6 +4127,9 @@ model OrganizationPricingStructure {
 
   // Account type this pricing applies to
   accountType AccountType // PRIMARY, SECONDARY, TERTIARY
+
+  // PR-1: pricing por cuenta (org). FK + CHECK exactly-one en SQL crudo (§3.3).
+  merchantAccountId String?
 
   // Pricing by transaction type (with Avoqado's margin included)
   debitRate         Decimal @db.Decimal(5, 4)
@@ -4146,6 +4169,90 @@ model OrganizationPricingStructure {
   @@index([organizationId])
   @@index([accountType])
   @@index([effectiveFrom])
+}
+
+// ==========================================
+// PR-1 — N MERCHANT ACCOUNTS POR VENUE (feat/venue-merchant-accounts)
+// Spec: docs/specs/2026-06-17-venue-merchant-accounts-design.md
+// Solo aditivo. Nada lee estos modelos todavía (eso es PR-2 + flag).
+// ==========================================
+
+/// Roster de cuentas de merchant de un venue. Reemplaza (a futuro) los 3 slots fijos. §3.1.
+model VenueMerchantAccount {
+  id                   String             @id @default(cuid())
+  venuePaymentConfigId String
+  venuePaymentConfig   VenuePaymentConfig @relation(fields: [venuePaymentConfigId], references: [id], onDelete: Cascade)
+  venueId              String
+  merchantAccountId    String
+  merchantAccount      MerchantAccount    @relation("VenueRosterAccount", fields: [merchantAccountId], references: [id], onDelete: Restrict)
+  priority             Int // SOLO orden de display (NO ruteo)
+  legacySlotType       AccountType? // INMUTABLE, set en backfill. Única fuente del pricing/contrato legacy.
+  inheritedFromOrg     Boolean            @default(false)
+  label                String?
+  active               Boolean            @default(true)
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  terminalMerchantAccounts TerminalMerchantAccount[]
+
+  @@unique([venuePaymentConfigId, merchantAccountId])
+  @@unique([venueId, merchantAccountId]) // requerido por la FK compuesta de TerminalMerchantAccount
+  @@index([merchantAccountId])
+  @@index([venueId])
+}
+
+/// Roster a nivel org (plantilla). Las cuentas se MATERIALIZAN por venue en VenueMerchantAccount. §3.1.
+model OrganizationMerchantAccount {
+  id                          String                    @id @default(cuid())
+  organizationPaymentConfigId String
+  organizationPaymentConfig   OrganizationPaymentConfig @relation(fields: [organizationPaymentConfigId], references: [id], onDelete: Cascade)
+  organizationId              String
+  merchantAccountId           String
+  merchantAccount             MerchantAccount           @relation("OrgRosterAccount", fields: [merchantAccountId], references: [id], onDelete: Restrict)
+  priority                    Int
+  legacySlotType              AccountType?
+  label                       String?
+  active                      Boolean                   @default(true)
+  createdAt                   DateTime                  @default(now())
+  updatedAt                   DateTime                  @updatedAt
+
+  @@unique([organizationPaymentConfigId, merchantAccountId])
+  @@unique([organizationId, merchantAccountId])
+  @@index([merchantAccountId])
+  @@index([organizationId])
+}
+
+/// Cuentas que puede usar una terminal. Reemplaza Terminal.assignedMerchantIds (String[] sin FK).
+/// La FK COMPUESTA a VenueMerchantAccount(venueId, merchantAccountId) garantiza que la cuenta esté en
+/// el roster del venue. NO garantiza active ni pricing (eso se enforza en §4). §3.2.
+model TerminalMerchantAccount {
+  id                   String               @id @default(cuid())
+  terminalId           String
+  terminal             Terminal             @relation(fields: [terminalId], references: [id], onDelete: Cascade)
+  venueId              String
+  merchantAccountId    String
+  venueMerchantAccount VenueMerchantAccount @relation(fields: [venueId, merchantAccountId], references: [venueId, merchantAccountId], onDelete: Restrict)
+  perTerminalOrder     Int?
+  isDefault            Boolean              @default(false) // reemplaza kioskDefaultMerchantId (JSON); unique parcial "un default por terminal" en SQL crudo
+  active               Boolean              @default(true)
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+
+  @@unique([terminalId, merchantAccountId])
+  @@index([merchantAccountId])
+}
+
+/// PR-1: nivel del que salió el pricing de un TransactionCost (§3.4).
+enum PricingStructureSource {
+  VENUE
+  ORG
+}
+
+/// PR-1: resolución del merchant de un pago, para reconciliación durable (§4.3).
+enum MerchantResolutionStatus {
+  RESOLVED
+  FALLBACK_PRIMARY
+  UNRESOLVED
 }
 
 // Generic webhook subscription (works for any provider)
@@ -4395,6 +4502,9 @@ model VenuePricingStructure {
   // Account type this pricing applies to
   accountType AccountType // PRIMARY, SECONDARY, TERTIARY
 
+  // PR-1: pricing por cuenta. Cuando está set, gana sobre accountType. FK + CHECK exactly-one(accountType,merchantAccountId) en SQL crudo (§3.3).
+  merchantAccountId String?
+
   // Pricing by transaction type (with Avoqado's margin included)
   debitRate         Decimal @db.Decimal(5, 4) // e.g., 0.0200 (2.0% - includes margin)
   creditRate        Decimal @db.Decimal(5, 4) // e.g., 0.0300 (3.0% - includes margin)
@@ -4481,6 +4591,12 @@ model TransactionCost {
 
   venuePricingStructureId String?
   venuePricingStructure   VenuePricingStructure? @relation(fields: [venuePricingStructureId], references: [id])
+
+  // PR-1: pricing org (FK en SQL crudo) + fuente + flags de fallback (§3.4). CHECK de consistencia de source en SQL crudo.
+  organizationPricingStructureId String?
+  pricingStructureSource         PricingStructureSource?
+  providerCostFallbackUsed       Boolean                 @default(false)
+  venuePricingFallbackUsed       Boolean                 @default(false)
 
   createdAt DateTime @default(now())
 
@@ -11019,11 +11135,11 @@ model Employee {
   rfc            String // RFC del PATRÓN (contribuyente). (org, rfc) = scope.
   venueId        String? // centro de costo (local donde trabaja)
 
-  nombre       String
-  rfcEmpleado  String // RFC del trabajador
-  curp         String?
-  nss          String? // número de seguridad social
-  puesto       String?
+  nombre      String
+  rfcEmpleado String // RFC del trabajador
+  curp        String?
+  nss         String? // número de seguridad social
+  puesto      String?
 
   /// Sueldo mensual bruto (percepción gravable base), en centavos.
   salarioMensualBrutoCents Int
@@ -11032,11 +11148,11 @@ model Employee {
   periodicidadPago         PayrollPeriodicity @default(MENSUAL)
 
   // Datos fiscales para el CFDI de nómina (complemento Nómina 1.2).
-  tipoContrato     String  @default("01") // c_TipoContrato (01 = indeterminado)
-  tipoRegimen      String  @default("02") // c_TipoRegimenContratacion (02 = sueldos y salarios)
-  claveEntFed      String? // c_Estado (CMX, JAL, NLE...) — requerido para timbrar
-  numEmpleado      String?
-  registroPatronal String? // registro patronal IMSS del patrón (opcional en el CFDI)
+  tipoContrato                String  @default("01") // c_TipoContrato (01 = indeterminado)
+  tipoRegimen                 String  @default("02") // c_TipoRegimenContratacion (02 = sueldos y salarios)
+  claveEntFed                 String? // c_Estado (CMX, JAL, NLE...) — requerido para timbrar
+  numEmpleado                 String?
+  registroPatronal            String? // registro patronal IMSS del patrón (opcional en el CFDI)
   /// Salario diario integrado (SDI) en centavos. Si null, se estima del SBC.
   salarioDiarioIntegradoCents Int?
 
@@ -11064,16 +11180,16 @@ model PayrollRun {
   fechaPago    DateTime
   status       PayrollRunStatus   @default(DRAFT)
 
-  empleados               Int @default(0)
-  totalPercepcionesCents  Int @default(0)
-  totalIsrCents           Int @default(0)
-  totalSubsidioCents      Int @default(0)
-  totalImssObreroCents    Int @default(0)
-  totalOtrasDeduccCents   Int @default(0)
-  totalNetoCents          Int @default(0)
+  empleados              Int @default(0)
+  totalPercepcionesCents Int @default(0)
+  totalIsrCents          Int @default(0)
+  totalSubsidioCents     Int @default(0)
+  totalImssObreroCents   Int @default(0)
+  totalOtrasDeduccCents  Int @default(0)
+  totalNetoCents         Int @default(0)
 
-  journalEntryId String?  @unique
-  posted         Boolean  @default(false)
+  journalEntryId String? @unique
+  posted         Boolean @default(false)
 
   createdById String?
   createdAt   DateTime @default(now())
@@ -11092,15 +11208,15 @@ model PayrollLine {
   nombre      String // snapshot
   rfcEmpleado String // snapshot
 
-  diasPagados             Int @default(30)
-  percepcionGravadaCents  Int @default(0)
-  percepcionExentaCents   Int @default(0)
-  totalPercepcionesCents  Int @default(0)
-  isrCents                Int @default(0)
-  subsidioCents           Int @default(0)
-  imssObreroCents         Int @default(0)
-  otrasDeduccionesCents   Int @default(0)
-  netoCents               Int @default(0)
+  diasPagados            Int @default(30)
+  percepcionGravadaCents Int @default(0)
+  percepcionExentaCents  Int @default(0)
+  totalPercepcionesCents Int @default(0)
+  isrCents               Int @default(0)
+  subsidioCents          Int @default(0)
+  imssObreroCents        Int @default(0)
+  otrasDeduccionesCents  Int @default(0)
+  netoCents              Int @default(0)
 
   // Recibo de nómina (CFDI 4.0 + complemento Nómina 1.2) timbrado para este empleado.
   cfdiStatus     PayrollCfdiStatus @default(PENDING)

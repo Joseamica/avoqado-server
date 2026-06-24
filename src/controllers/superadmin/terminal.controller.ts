@@ -3,6 +3,7 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { assertMerchantsTerminalCompatible } from '../../lib/providerDeviceCompatibility'
+import { setTerminalMerchants } from '../../services/payments/assignMerchantToTerminal.service'
 
 /**
  * Terminal Controller
@@ -140,13 +141,12 @@ export async function assignMerchantsToTerminal(req: Request, res: Response, nex
     // Rejects ANGELPAY merchants on PAX, BLUMON merchants on NEXGO, etc.
     await assertMerchantsTerminalCompatible(terminalId, merchantAccountIds)
 
-    // Step 3: Update terminal with assigned merchant IDs
-    const updatedTerminal = await prisma.terminal.update({
+    // Step 3: Sync the terminal's merchant accounts through the choke-point (PR-2 · T6)
+    // so the venue roster + TerminalMerchantAccount links are maintained — not just the
+    // legacy array — then re-read for the response.
+    await setTerminalMerchants({ terminalId, merchantAccountIds })
+    const updatedTerminal = await prisma.terminal.findUniqueOrThrow({
       where: { id: terminalId },
-      data: {
-        assignedMerchantIds: merchantAccountIds,
-        updatedAt: new Date(),
-      },
       include: {
         venue: {
           select: {

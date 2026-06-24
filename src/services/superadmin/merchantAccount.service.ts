@@ -10,6 +10,7 @@ import {
   PROVIDER_DEVICE_COMPATIBILITY,
 } from '../../lib/providerDeviceCompatibility'
 import { createBlumonTpvService } from '../tpv/blumon-tpv.service'
+import { assignMerchantToTerminal } from '../payments/assignMerchantToTerminal.service'
 
 /**
  * MerchantAccount Service
@@ -1080,6 +1081,9 @@ export async function setTerminalServesMerchant(input: {
       }
     }
 
+    // assignedMerchantIds-raw-write-ok: setTerminalServesMerchant computes the full
+    // effective list with slot-protection (a full-set replacement); migrate to
+    // setTerminalMerchants in a focused change that also updates its raw-write test.
     await tx.terminal.update({ where: { id: terminalId }, data: { assignedMerchantIds: { set: next } } })
     logger.info('Terminal merchant assignment updated', { terminalId, merchantAccountId, serves, assignedMerchantIds: next })
     return { terminalId, assignedMerchantIds: next, inherited: next.length === 0 }
@@ -1666,10 +1670,10 @@ export async function upsertDiscoveredAngelPayMerchants(input: {
       for (const term of nexgoTerminals) {
         const missing = venueAngelpayMerchants.filter(ma => !term.assignedMerchantIds.includes(ma.id)).map(ma => ma.id)
         if (missing.length === 0) continue
-        await prisma.terminal.update({
-          where: { id: term.id },
-          data: { assignedMerchantIds: { push: missing } },
-        })
+        // PR-2 (T6): maintain the roster + TerminalMerchantAccount link per account.
+        for (const id of missing) {
+          await assignMerchantToTerminal({ terminalId: term.id, merchantAccountId: id })
+        }
         boundCount += missing.length
       }
       if (boundCount > 0) {
@@ -1867,10 +1871,8 @@ export async function approveDiscoveredAngelPayMerchant(input: {
 
         const current = terminal.assignedMerchantIds ?? []
         if (!current.includes(merchantAccountId)) {
-          await tx.terminal.update({
-            where: { id: terminalId },
-            data: { assignedMerchantIds: { set: [...current, merchantAccountId] } },
-          })
+          // PR-2 (T6): maintain roster + link (in this tx), not just the legacy array.
+          await assignMerchantToTerminal({ terminalId, merchantAccountId, db: tx })
         }
       }
     }

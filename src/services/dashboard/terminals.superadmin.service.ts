@@ -623,6 +623,8 @@ export async function updateTerminal(
       // Task 54: clear assignedMerchantIds on venue change (cross-tenant
       // assignments are never valid). When venue isn't changing, defer to
       // explicit `assignedMerchantIds` from the caller.
+      // assignedMerchantIds-raw-write-ok: Task 54 clears the array atomically with the
+      // cross-venue venueId change (the old roster/links are invalid for the new venue).
       ...(venueChanged
         ? { venueId: data.venueId!, assignedMerchantIds: [] }
         : data.assignedMerchantIds !== undefined

@@ -1,6 +1,6 @@
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { PaymentMethod, CardBrand, TransactionCardType, OriginSystem } from '@prisma/client'
+import { PaymentMethod, CardBrand, TransactionCardType, OriginSystem, AccountType, PricingStructureSource } from '@prisma/client'
 import { NotFoundError, BadRequestError } from '../../errors/AppError'
 import { getEffectivePaymentConfig, getEffectivePricing } from '../organization-payment-config.service'
 import { calculatePaymentSettlement } from './settlementCalculation.service'
@@ -116,6 +116,130 @@ export async function findActiveVenuePricingStructure(
 }
 
 /**
+ * Resolved cost context for the ROSTER path (PR-2, flag ON). Mirrors the locals the
+ * legacy slot path produces, plus the durable audit fields the new schema records.
+ */
+interface RosterCostContext {
+  merchantAccount: { id: string } | null
+  providerCostStructure: any
+  venuePricingStructure: any
+  pricingStructureSource: PricingStructureSource
+  organizationPricingStructureId: string | null
+  providerCostFallbackUsed: boolean
+  venuePricingFallbackUsed: boolean
+}
+
+/**
+ * Roster-based resolution (PR-2). Active only when a venue's
+ * `VenuePaymentConfig.rosterRolloutEnabled` is true.
+ *
+ * Resolves cost/pricing against the venue ROSTER (`VenueMerchantAccount`, which
+ * already includes materialized org accounts) keyed by the account that actually
+ * processed the card (`Payment.merchantAccountId`) — NOT the 3 legacy slots. This
+ * lets a 4th+ account resolve correctly instead of silently falling back to PRIMARY
+ * (the amaena bug class).
+ *
+ * Resolution order:
+ *   - account      = payment.merchantAccountId (the card's processor) ?? primary slot
+ *   - provider cost= that account's active structure at the payment's date; if missing,
+ *                    fall back to PRIMARY's cost (NEVER drop the cost record), flagged.
+ *   - venue price  = per-account → legacy(legacySlotType) → PRIMARY (flagged), all
+ *                    resolved at the payment's date (historical-correct).
+ */
+export async function resolveRosterCostContext(payment: any): Promise<RosterCostContext> {
+  const venueId: string = payment.venueId
+
+  // The venue roster: the universe of accounts (incl. materialized org accounts).
+  const roster = await prisma.venueMerchantAccount.findMany({
+    where: { venueId },
+    select: { merchantAccountId: true, legacySlotType: true },
+  })
+
+  // Resolve the account that ran the card. Manual/QR payments (no recorded account)
+  // anchor to the PRIMARY slot, mirroring the legacy path.
+  const primaryRow = roster.find(r => r.legacySlotType === AccountType.PRIMARY)
+  const processingAccountId: string | undefined = payment.merchantAccountId ?? primaryRow?.merchantAccountId
+
+  if (!processingAccountId) {
+    return {
+      merchantAccount: null,
+      providerCostStructure: null,
+      venuePricingStructure: null,
+      pricingStructureSource: PricingStructureSource.VENUE,
+      organizationPricingStructureId: null,
+      providerCostFallbackUsed: false,
+      venuePricingFallbackUsed: false,
+    }
+  }
+
+  const row = roster.find(r => r.merchantAccountId === processingAccountId)
+  const legacySlotType = row?.legacySlotType ?? undefined
+
+  if (payment.merchantAccountId && !row) {
+    // Account isn't in the roster (stale/offline TPV, or pre-backfill). We still cost
+    // it against the processing account; pricing falls back to PRIMARY below.
+    logger.warn('Roster path: payment account not found in venue roster', {
+      paymentId: payment.id,
+      venueId,
+      merchantAccountId: payment.merchantAccountId,
+    })
+  }
+
+  // ----- Provider cost (what Avoqado pays), keyed by the processing account -----
+  let providerCostFallbackUsed = false
+  let providerCostStructure = await findActiveProviderCostStructure(processingAccountId, payment.createdAt)
+  if (!providerCostStructure && payment.type !== 'TEST') {
+    const primaryId = primaryRow?.merchantAccountId
+    if (primaryId && primaryId !== processingAccountId) {
+      const primaryCost = await findActiveProviderCostStructure(primaryId, payment.createdAt)
+      if (primaryCost) {
+        providerCostStructure = primaryCost
+        providerCostFallbackUsed = true
+        logger.warn('Roster path: no provider cost for processing account; fell back to PRIMARY provider cost', {
+          paymentId: payment.id,
+          venueId,
+          processingAccountId,
+          primaryId,
+        })
+      }
+    }
+  }
+
+  // ----- Venue pricing (what Avoqado charges): per-account → legacy(slot) → PRIMARY -----
+  let venuePricingFallbackUsed = false
+  let pricingResult = await getEffectivePricing(venueId, legacySlotType as AccountType | undefined, {
+    merchantAccountId: processingAccountId,
+    effectiveAt: payment.createdAt,
+  })
+
+  const empty = (r: typeof pricingResult) => !r || r.pricing.length === 0
+  if (empty(pricingResult) && legacySlotType !== AccountType.PRIMARY) {
+    // Never worse than PRIMARY: an account with no per-account / no slot pricing still
+    // gets a cost row, priced at PRIMARY's rate, flagged for the config-gap follow-up.
+    const primaryPricing = await getEffectivePricing(venueId, AccountType.PRIMARY, { effectiveAt: payment.createdAt })
+    if (!empty(primaryPricing)) {
+      pricingResult = primaryPricing
+      venuePricingFallbackUsed = true
+    }
+  }
+
+  const structure = pricingResult && pricingResult.pricing.length > 0 ? pricingResult.pricing[0] : null
+  const fromOrg = pricingResult?.source === 'organization'
+
+  return {
+    merchantAccount: { id: processingAccountId },
+    providerCostStructure,
+    venuePricingStructure: structure,
+    // Org pricing is NOT materialized — record WHICH org structure was used so refunds
+    // and reconciliation can mirror the exact context (spec R7/R8).
+    pricingStructureSource: fromOrg ? PricingStructureSource.ORG : PricingStructureSource.VENUE,
+    organizationPricingStructureId: fromOrg ? (structure?.id ?? null) : null,
+    providerCostFallbackUsed,
+    venuePricingFallbackUsed,
+  }
+}
+
+/**
  * Get the rate for a specific transaction type from a cost/pricing structure
  *
  * @param structure - ProviderCostStructure or VenuePricingStructure
@@ -164,6 +288,77 @@ function applyTaxIfNeeded(structure: any, baseRate: number): number {
     return baseRate * (1 + tax)
   }
   return baseRate
+}
+
+export interface CostAmounts {
+  amount: number
+  providerRate: number
+  providerFixedFee: number
+  providerCostAmount: number
+  venueRate: number
+  venueFixedFee: number
+  venueChargeAmount: number
+  totalProviderCost: number
+  totalVenueCharge: number
+  grossProfit: number
+  profitMargin: number
+}
+
+/**
+ * Pure cost/revenue math for one transaction. Extracted so the live cost engine
+ * (createTransactionCost) and the read-only recompute-diff gate compute the EXACT
+ * same numbers from the same inputs — no DB, no side effects. Commission is charged
+ * on the total processed amount (base + tip).
+ */
+export function computeCostAmounts(params: {
+  baseAmount: number
+  tipAmount: number
+  isTest: boolean
+  transactionType: TransactionCardType
+  providerCostStructure: any
+  venuePricingStructure: any
+}): CostAmounts {
+  const { baseAmount, tipAmount, isTest, transactionType, providerCostStructure, venuePricingStructure } = params
+  const amount = baseAmount + tipAmount
+
+  // TEST payments are zero-rated (audit trail only).
+  let providerRate = 0
+  let providerFixedFee = 0
+  let venueRate = 0
+  let venueFixedFee = 0
+
+  if (!isTest) {
+    const providerBaseRate = getRateForTransactionType(providerCostStructure, transactionType)
+    providerRate = applyTaxIfNeeded(providerCostStructure, providerBaseRate)
+    providerFixedFee = providerCostStructure?.fixedCostPerTransaction
+      ? parseFloat(providerCostStructure.fixedCostPerTransaction.toString())
+      : 0
+
+    const venueBaseRate = getRateForTransactionType(venuePricingStructure, transactionType)
+    venueRate = applyTaxIfNeeded(venuePricingStructure, venueBaseRate)
+    venueFixedFee = venuePricingStructure?.fixedFeePerTransaction ? parseFloat(venuePricingStructure.fixedFeePerTransaction.toString()) : 0
+  }
+
+  const providerCostAmount = amount * providerRate
+  const venueChargeAmount = amount * venueRate
+  const totalProviderCost = providerCostAmount + providerFixedFee
+  const totalVenueCharge = venueChargeAmount + venueFixedFee
+  const grossProfit = totalVenueCharge - totalProviderCost
+  const profitMargin = totalVenueCharge > 0 ? grossProfit / totalVenueCharge : 0
+
+  return {
+    amount,
+    providerRate,
+    providerFixedFee,
+    providerCostAmount,
+    venueRate,
+    venueFixedFee,
+    venueChargeAmount,
+    totalProviderCost,
+    totalVenueCharge,
+    grossProfit,
+    profitMargin,
+  }
 }
 
 /**
@@ -254,138 +449,166 @@ export async function createTransactionCost(paymentId: string): Promise<{
 
   const { config: paymentConfig, source: configSource } = effective
 
-  // Resolve WHICH configured account actually processed this payment. A venue
-  // can have PRIMARY / SECONDARY / TERTIARY merchant accounts, each with its
-  // own venue pricing. The TPV routing layer persists the processing account on
-  // `payment.merchantAccountId` — honor it so the venue is charged with the
-  // pricing of the account that actually ran the card (e.g. an aggregator
-  // account at 8%), instead of always assuming PRIMARY. Falls back to PRIMARY
-  // when the payment has no recorded account (manual/QR payments) or it doesn't
-  // match any configured slot.
-  let merchantAccount = paymentConfig.primaryAccount
-  let accountType: 'PRIMARY' | 'SECONDARY' | 'TERTIARY' = 'PRIMARY'
+  // PR-2 rollout flag. When a venue opts in (after its recompute-diff gate passes),
+  // cost/pricing resolve against the full account ROSTER instead of the 3 legacy
+  // slots. Default OFF → byte-for-byte the historical slot behavior below. The flag
+  // lives on VenuePaymentConfig only; org-inherited configs have none → stay OFF.
+  const rosterEnabled = configSource === 'venue' && (paymentConfig as any).rosterRolloutEnabled === true
 
-  if (payment.merchantAccountId) {
-    if (paymentConfig.secondaryAccount?.id === payment.merchantAccountId) {
-      merchantAccount = paymentConfig.secondaryAccount
-      accountType = 'SECONDARY'
-    } else if (paymentConfig.tertiaryAccount?.id === payment.merchantAccountId) {
-      merchantAccount = paymentConfig.tertiaryAccount
-      accountType = 'TERTIARY'
-    } else if (paymentConfig.primaryAccount?.id === payment.merchantAccountId) {
-      accountType = 'PRIMARY'
-    } else {
-      logger.warn('Payment processed by an account not in the venue payment config; falling back to PRIMARY pricing', {
-        paymentId,
-        paymentMerchantAccountId: payment.merchantAccountId,
-        primaryAccountId: paymentConfig.primaryAccount?.id,
-        secondaryAccountId: paymentConfig.secondaryAccount?.id,
-        tertiaryAccountId: paymentConfig.tertiaryAccount?.id,
-      })
+  // Cost context produced by whichever path runs, then consumed by Steps 5-7.
+  let merchantAccount: { id: string } | null = null
+  let providerCostStructure: any = null
+  let venuePricingStructure: any = null
+  let pricingStructureSource: PricingStructureSource = PricingStructureSource.VENUE
+  let organizationPricingStructureId: string | null = null
+  let providerCostFallbackUsed = false
+  let venuePricingFallbackUsed = false
+
+  if (rosterEnabled) {
+    // ===== Step 2-4 · ROSTER path (PR-2) =====
+    const ctx = await resolveRosterCostContext(payment)
+    merchantAccount = ctx.merchantAccount
+    providerCostStructure = ctx.providerCostStructure
+    venuePricingStructure = ctx.venuePricingStructure
+    pricingStructureSource = ctx.pricingStructureSource
+    organizationPricingStructureId = ctx.organizationPricingStructureId
+    providerCostFallbackUsed = ctx.providerCostFallbackUsed
+    venuePricingFallbackUsed = ctx.venuePricingFallbackUsed
+
+    if (!merchantAccount) {
+      throw new BadRequestError(`Venue ${payment.venueId} has no merchant account to attribute payment ${paymentId} to`)
     }
-  }
-
-  if (!merchantAccount) {
-    throw new BadRequestError(`Venue ${payment.venueId} has no ${accountType.toLowerCase()} merchant account configured`)
-  }
-
-  logger.info('Merchant account identified', {
-    paymentId,
-    merchantAccountId: merchantAccount.id,
-    accountType,
-    configSource,
-  })
-
-  // ========================================
-  // Step 3: Get Provider Cost Structure
-  // ========================================
-
-  const providerCostStructure = await findActiveProviderCostStructure(merchantAccount.id, payment.createdAt)
-
-  if (!providerCostStructure && payment.type !== 'TEST') {
-    throw new BadRequestError(`No active provider cost structure found for merchant account ${merchantAccount.id} at ${payment.createdAt}`)
-  }
-
-  // ========================================
-  // Step 4: Get Venue Pricing Structure
-  // ========================================
-
-  // Prefer the resolved slot's pricing. If that slot has no active pricing
-  // structure (a real prod case: a SECONDARY/TERTIARY account that was never
-  // given its own venue rate), fall back to PRIMARY pricing instead of failing.
-  // Failing here would leave the payment with NO TransactionCost at all (and no
-  // netSettlementAmount) — strictly worse than the old always-PRIMARY behavior.
-  // This keeps routing-by-slot "never worse than PRIMARY" while still using the
-  // correct slot pricing whenever it exists; the warning surfaces the config gap
-  // so the missing slot pricing can be created and the payments recomputed.
-  let pricingAccountType: 'PRIMARY' | 'SECONDARY' | 'TERTIARY' = accountType
-  let venuePricingStructure = await findActiveVenuePricingStructure(payment.venueId, accountType, payment.createdAt)
-
-  if (!venuePricingStructure && accountType !== 'PRIMARY') {
-    logger.warn('No venue pricing for resolved slot; falling back to PRIMARY pricing', {
+    logger.info('Merchant account identified (roster path)', {
       paymentId,
-      venueId: payment.venueId,
-      resolvedAccountType: accountType,
       merchantAccountId: merchantAccount.id,
+      configSource,
+      pricingStructureSource,
+      providerCostFallbackUsed,
+      venuePricingFallbackUsed,
     })
-    pricingAccountType = 'PRIMARY'
-    venuePricingStructure = await findActiveVenuePricingStructure(payment.venueId, 'PRIMARY', payment.createdAt)
-  }
+    if (!providerCostStructure && payment.type !== 'TEST') {
+      throw new BadRequestError(
+        `No active provider cost structure found for payment ${paymentId} (roster path, incl. PRIMARY fallback) at ${payment.createdAt}`,
+      )
+    }
+    if (!venuePricingStructure && payment.type !== 'TEST') {
+      throw new BadRequestError(
+        `No active venue pricing structure found for venue ${payment.venueId} (roster path, incl. PRIMARY fallback) at ${payment.createdAt}`,
+      )
+    }
+  } else {
+    // ===== Step 2-4 · LEGACY slot path (unchanged; guarded by the regression suite) =====
 
-  if (!venuePricingStructure && payment.type !== 'TEST') {
-    throw new BadRequestError(
-      `No active venue pricing structure found for venue ${payment.venueId}, account type ${pricingAccountType} at ${payment.createdAt}`,
-    )
+    // Resolve WHICH configured account actually processed this payment. A venue
+    // can have PRIMARY / SECONDARY / TERTIARY merchant accounts, each with its
+    // own venue pricing. The TPV routing layer persists the processing account on
+    // `payment.merchantAccountId` — honor it so the venue is charged with the
+    // pricing of the account that actually ran the card (e.g. an aggregator
+    // account at 8%), instead of always assuming PRIMARY. Falls back to PRIMARY
+    // when the payment has no recorded account (manual/QR payments) or it doesn't
+    // match any configured slot.
+    let slotAccount = paymentConfig.primaryAccount
+    let accountType: 'PRIMARY' | 'SECONDARY' | 'TERTIARY' = 'PRIMARY'
+
+    if (payment.merchantAccountId) {
+      if (paymentConfig.secondaryAccount?.id === payment.merchantAccountId) {
+        slotAccount = paymentConfig.secondaryAccount
+        accountType = 'SECONDARY'
+      } else if (paymentConfig.tertiaryAccount?.id === payment.merchantAccountId) {
+        slotAccount = paymentConfig.tertiaryAccount
+        accountType = 'TERTIARY'
+      } else if (paymentConfig.primaryAccount?.id === payment.merchantAccountId) {
+        accountType = 'PRIMARY'
+      } else {
+        logger.warn('Payment processed by an account not in the venue payment config; falling back to PRIMARY pricing', {
+          paymentId,
+          paymentMerchantAccountId: payment.merchantAccountId,
+          primaryAccountId: paymentConfig.primaryAccount?.id,
+          secondaryAccountId: paymentConfig.secondaryAccount?.id,
+          tertiaryAccountId: paymentConfig.tertiaryAccount?.id,
+        })
+      }
+    }
+
+    if (!slotAccount) {
+      throw new BadRequestError(`Venue ${payment.venueId} has no ${accountType.toLowerCase()} merchant account configured`)
+    }
+    merchantAccount = slotAccount
+
+    logger.info('Merchant account identified', {
+      paymentId,
+      merchantAccountId: merchantAccount.id,
+      accountType,
+      configSource,
+    })
+
+    // Step 3: Get Provider Cost Structure
+    providerCostStructure = await findActiveProviderCostStructure(merchantAccount.id, payment.createdAt)
+
+    if (!providerCostStructure && payment.type !== 'TEST') {
+      throw new BadRequestError(`No active provider cost structure found for merchant account ${merchantAccount.id} at ${payment.createdAt}`)
+    }
+
+    // Step 4: Get Venue Pricing Structure
+    //
+    // Prefer the resolved slot's pricing. If that slot has no active pricing
+    // structure (a real prod case: a SECONDARY/TERTIARY account that was never
+    // given its own venue rate), fall back to PRIMARY pricing instead of failing.
+    // Failing here would leave the payment with NO TransactionCost at all (and no
+    // netSettlementAmount) — strictly worse than the old always-PRIMARY behavior.
+    // This keeps routing-by-slot "never worse than PRIMARY" while still using the
+    // correct slot pricing whenever it exists; the warning surfaces the config gap
+    // so the missing slot pricing can be created and the payments recomputed.
+    let pricingAccountType: 'PRIMARY' | 'SECONDARY' | 'TERTIARY' = accountType
+    venuePricingStructure = await findActiveVenuePricingStructure(payment.venueId, accountType, payment.createdAt)
+
+    if (!venuePricingStructure && accountType !== 'PRIMARY') {
+      logger.warn('No venue pricing for resolved slot; falling back to PRIMARY pricing', {
+        paymentId,
+        venueId: payment.venueId,
+        resolvedAccountType: accountType,
+        merchantAccountId: merchantAccount.id,
+      })
+      pricingAccountType = 'PRIMARY'
+      venuePricingStructure = await findActiveVenuePricingStructure(payment.venueId, 'PRIMARY', payment.createdAt)
+    }
+
+    if (!venuePricingStructure && payment.type !== 'TEST') {
+      throw new BadRequestError(
+        `No active venue pricing structure found for venue ${payment.venueId}, account type ${pricingAccountType} at ${payment.createdAt}`,
+      )
+    }
   }
 
   // ========================================
   // Step 5: Calculate Costs and Revenue
   // ========================================
 
-  // IMPORTANT: Use total processed amount (including tip) for cost calculation
-  // The payment processor charges commission on ALL money that passes through the terminal
+  // IMPORTANT: Use total processed amount (including tip) for cost calculation. The
+  // math lives in computeCostAmounts (pure) so the recompute-diff gate produces
+  // byte-identical numbers. La tasa efectiva considera `includesTax` (tasa BASE +
+  // IVA cuando includesTax=false) dentro de computeCostAmounts.
   const baseAmount = parseFloat(payment.amount.toString())
   const tipAmount = parseFloat(payment.tipAmount?.toString() || '0')
-  const amount = baseAmount + tipAmount
 
-  logger.info('Transaction amount calculated', {
-    paymentId,
+  const {
+    amount,
+    providerRate,
+    providerFixedFee,
+    providerCostAmount,
+    venueRate,
+    venueFixedFee,
+    venueChargeAmount,
+    grossProfit,
+    profitMargin,
+  } = computeCostAmounts({
     baseAmount,
     tipAmount,
-    totalAmount: amount,
+    isTest: payment.type === 'TEST',
+    transactionType,
+    providerCostStructure,
+    venuePricingStructure,
   })
-
-  // For TEST payments, use zero rates
-  let providerRate = 0
-  let providerFixedFee = 0
-  let venueRate = 0
-  let venueFixedFee = 0
-
-  if (payment.type !== 'TEST') {
-    // Get rates from cost/pricing structures. La tasa efectiva considera
-    // el flag `includesTax`: si la estructura tiene includesTax=false, la
-    // tasa guardada es BASE y se le aplica IVA encima al calcular el fee.
-    const providerBaseRate = getRateForTransactionType(providerCostStructure!, transactionType)
-    providerRate = applyTaxIfNeeded(providerCostStructure!, providerBaseRate)
-    providerFixedFee = providerCostStructure!.fixedCostPerTransaction
-      ? parseFloat(providerCostStructure!.fixedCostPerTransaction.toString())
-      : 0
-
-    const venueBaseRate = getRateForTransactionType(venuePricingStructure!, transactionType)
-    venueRate = applyTaxIfNeeded(venuePricingStructure!, venueBaseRate)
-    venueFixedFee = venuePricingStructure!.fixedFeePerTransaction ? parseFloat(venuePricingStructure!.fixedFeePerTransaction.toString()) : 0
-  }
-
-  // Calculate costs
-  const providerCostAmount = amount * providerRate
-  const venueChargeAmount = amount * venueRate
-
-  const totalProviderCost = providerCostAmount + providerFixedFee
-  const totalVenueCharge = venueChargeAmount + venueFixedFee
-
-  // Calculate profit
-  const grossProfit = totalVenueCharge - totalProviderCost
-  const profitMargin = totalVenueCharge > 0 ? grossProfit / totalVenueCharge : 0
 
   logger.info('Transaction cost calculated', {
     paymentId,
@@ -405,6 +628,12 @@ export async function createTransactionCost(paymentId: string): Promise<{
   // Step 6: Create TransactionCost Record
   // ========================================
 
+  // On the roster path, when the rate came from ORG-level pricing the venue FK must
+  // stay null (org pricing is not materialized) and the org structure is recorded via
+  // organizationPricingStructureId instead. The legacy path is unchanged.
+  const venuePricingStructureIdToStore =
+    rosterEnabled && pricingStructureSource === PricingStructureSource.ORG ? null : venuePricingStructure?.id
+
   const transactionCost = await prisma.transactionCost.create({
     data: {
       paymentId: payment.id,
@@ -422,11 +651,22 @@ export async function createTransactionCost(paymentId: string): Promise<{
       venueRate,
       venueChargeAmount,
       venueFixedFee,
-      venuePricingStructureId: venuePricingStructure?.id,
+      venuePricingStructureId: venuePricingStructureIdToStore,
 
       // Profit calculation
       grossProfit,
       profitMargin,
+
+      // Roster path (PR-2): durable resolution audit so reconciliation and refunds
+      // can mirror the exact pricing context. Omitted on the legacy path (no change).
+      ...(rosterEnabled
+        ? {
+            pricingStructureSource,
+            organizationPricingStructureId,
+            providerCostFallbackUsed,
+            venuePricingFallbackUsed,
+          }
+        : {}),
     },
   })
 

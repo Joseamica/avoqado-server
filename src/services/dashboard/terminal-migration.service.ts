@@ -168,6 +168,9 @@ export async function migrateExecute(
     }
   }
   if (merchantsToAssign && merchantsToAssign.length > 0) {
+    // assignedMerchantIds-raw-write-ok: cross-venue migration sets the full list for the
+    // destination venue; the roster/TerminalMerchantAccount links are venue-scoped and
+    // reconciled by the migration flow + periodic reconciler, not this choke-point.
     await updateTerminal(terminalId, { assignedMerchantIds: merchantsToAssign }, actor)
   }
 
@@ -247,6 +250,8 @@ export async function migrateCancel(terminalId: string, actor: TerminalActor): P
   // 4) Revert the terminal directly (BYPASS updateTerminal so blindar does NOT
   //    re-queue a wipe on the revert). Restore both the origin venue and the
   //    merchant assignments captured at migration time.
+  // assignedMerchantIds-raw-write-ok: migration rollback restores the captured array AND
+  // the origin venueId atomically; roster/links are reconciled by the migration flow.
   await prisma.terminal.update({
     where: { id: terminalId },
     data: { venueId: fromVenueId, assignedMerchantIds: previousMerchantIds ?? [] },
