@@ -72,6 +72,19 @@ export async function getTeamMembers(
 ): Promise<PaginatedTeamResponse> {
   const skip = (page - 1) * pageSize
 
+  // Resolve the venue's org so we can hide members removed from the org
+  // (removeFromOrganization / ex-collaborator cleanup set StaffOrganization.isActive=false).
+  // Venue-deactivated members (status toggle sets StaffVenue.active=false, isActive
+  // stays true) remain visible so they can be reactivated. Mirrors getOrganizationTeam
+  // (Asana 1215884464715725).
+  const venueOrg = await prisma.venue.findUnique({
+    where: { id: venueId },
+    select: { organizationId: true },
+  })
+  const activeOrgMemberFilter = venueOrg?.organizationId
+    ? { staff: { organizations: { some: { organizationId: venueOrg.organizationId, isActive: true } } } }
+    : {}
+
   // Build search conditions
   const searchConditions = search
     ? {
@@ -106,6 +119,7 @@ export async function getTeamMembers(
 
   const whereCondition = {
     venueId,
+    ...activeOrgMemberFilter,
     ...searchConditions,
   }
 

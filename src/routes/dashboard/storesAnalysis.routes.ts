@@ -628,9 +628,13 @@ router.get('/team', whiteLabelAccess, async (req: Request, res: Response, next: 
 
     let staffOrgs
     if (showAllOrgStaff) {
-      // OWNER/SUPERADMIN requesting org scope: get all staff in the organization
+      // OWNER/SUPERADMIN requesting org scope: get all staff in the organization.
+      // isActive:true hides members removed from the org (removeFromOrganization /
+      // ex-collaborator cleanup set isActive=false) while keeping venue-deactivated
+      // members (status toggle sets StaffVenue.active=false, isActive stays true)
+      // visible so they can be reactivated. Mirrors getOrganizationTeam (Asana 1215884464715725).
       staffOrgs = await prisma.staffOrganization.findMany({
-        where: { organizationId: orgId },
+        where: { organizationId: orgId, isActive: true },
         include: {
           staff: {
             include: {
@@ -656,8 +660,9 @@ router.get('/team', whiteLabelAccess, async (req: Request, res: Response, next: 
       })
       const staffIds = venueStaff.map(sv => sv.staffId)
 
+      // isActive:true hides org-removed members (see org-scope branch above).
       staffOrgs = await prisma.staffOrganization.findMany({
-        where: { organizationId: orgId, staffId: { in: staffIds } },
+        where: { organizationId: orgId, staffId: { in: staffIds }, isActive: true },
         include: {
           staff: {
             include: {

@@ -420,8 +420,12 @@ router.get('/team', orgOwnerAccess, async (req: Request, res: Response, next: Ne
   try {
     const { orgId } = req.params
 
+    // isActive:true hides members removed from the org (removeFromOrganization /
+    // ex-collaborator cleanup set isActive=false) while keeping venue-deactivated
+    // members (status toggle sets StaffVenue.active=false, isActive stays true)
+    // visible so they can be reactivated. Mirrors getOrganizationTeam (Asana 1215884464715725).
     const staffOrgs = await prisma.staffOrganization.findMany({
-      where: { organizationId: orgId },
+      where: { organizationId: orgId, isActive: true },
       include: {
         staff: {
           include: {
