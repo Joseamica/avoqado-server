@@ -2,6 +2,7 @@ import { Request, Response } from 'express'
 import { SaleVerificationStatus, SaleVerificationRejectionReason, PaymentMethod } from '@prisma/client'
 import * as svc from '../../services/dashboard/sale-verification.org.dashboard.service'
 import logger from '../../config/logger'
+import { analyticsLimiter } from '../../utils/concurrencyLimiter'
 
 // ============================================================
 // Org-Scoped Sale Verification Dashboard Controller
@@ -67,7 +68,7 @@ export async function getOrgSalesSummary(req: Request, res: Response): Promise<v
     const { orgId } = req.params
     const { fromDate, toDate } = req.query
     const range = svc.parseRange(fromDate as string | undefined, toDate as string | undefined)
-    const data = await svc.getOrgSalesSummary(orgId, range)
+    const data = await analyticsLimiter.run(() => svc.getOrgSalesSummary(orgId, range))
     res.status(200).json({ success: true, data })
   } catch (error: any) {
     logger.error(`[ORG SALE VERIFICATION] summary error: ${error.message}`)
@@ -80,7 +81,7 @@ export async function getSalesByMonth(req: Request, res: Response): Promise<void
     const { orgId } = req.params
     const { fromDate, toDate } = req.query
     const range = svc.parseRange(fromDate as string | undefined, toDate as string | undefined)
-    const data = await svc.getSalesByMonth(orgId, range)
+    const data = await analyticsLimiter.run(() => svc.getSalesByMonth(orgId, range))
     res.status(200).json({ success: true, data })
   } catch (error: any) {
     logger.error(`[ORG SALE VERIFICATION] by-month error: ${error.message}`)
@@ -93,7 +94,7 @@ export async function getSalesBySimType(req: Request, res: Response): Promise<vo
     const { orgId } = req.params
     const { fromDate, toDate } = req.query
     const range = svc.parseRange(fromDate as string | undefined, toDate as string | undefined)
-    const data = await svc.getSalesBySimType(orgId, range)
+    const data = await analyticsLimiter.run(() => svc.getSalesBySimType(orgId, range))
     res.status(200).json({ success: true, data })
   } catch (error: any) {
     logger.error(`[ORG SALE VERIFICATION] by-sim-type error: ${error.message}`)
@@ -106,7 +107,7 @@ export async function getSalesByWeek(req: Request, res: Response): Promise<void>
     const { orgId } = req.params
     const { fromDate, toDate } = req.query
     const range = svc.parseRange(fromDate as string | undefined, toDate as string | undefined)
-    const data = await svc.getSalesByWeek(orgId, range)
+    const data = await analyticsLimiter.run(() => svc.getSalesByWeek(orgId, range))
     res.status(200).json({ success: true, data })
   } catch (error: any) {
     logger.error(`[ORG SALE VERIFICATION] by-week error: ${error.message}`)
@@ -119,7 +120,7 @@ export async function getSalesByCity(req: Request, res: Response): Promise<void>
     const { orgId } = req.params
     const { fromDate, toDate } = req.query
     const range = svc.parseRange(fromDate as string | undefined, toDate as string | undefined)
-    const data = await svc.getSalesByCity(orgId, range)
+    const data = await analyticsLimiter.run(() => svc.getSalesByCity(orgId, range))
     res.status(200).json({ success: true, data })
   } catch (error: any) {
     logger.error(`[ORG SALE VERIFICATION] by-city error: ${error.message}`)
@@ -132,7 +133,7 @@ export async function getSalesBySupervisor(req: Request, res: Response): Promise
     const { orgId } = req.params
     const { fromDate, toDate } = req.query
     const range = svc.parseRange(fromDate as string | undefined, toDate as string | undefined)
-    const data = await svc.getSalesBySupervisor(orgId, range)
+    const data = await analyticsLimiter.run(() => svc.getSalesBySupervisor(orgId, range))
     res.status(200).json({ success: true, data })
   } catch (error: any) {
     logger.error(`[ORG SALE VERIFICATION] by-supervisor error: ${error.message}`)
@@ -145,7 +146,7 @@ export async function getSalesByStore(req: Request, res: Response): Promise<void
     const { orgId } = req.params
     const { fromDate, toDate } = req.query
     const range = svc.parseRange(fromDate as string | undefined, toDate as string | undefined)
-    const data = await svc.getSalesByStore(orgId, range)
+    const data = await analyticsLimiter.run(() => svc.getSalesByStore(orgId, range))
     res.status(200).json({ success: true, data })
   } catch (error: any) {
     logger.error(`[ORG SALE VERIFICATION] by-store error: ${error.message}`)
@@ -158,7 +159,7 @@ export async function getSalesByPromoter(req: Request, res: Response): Promise<v
     const { orgId } = req.params
     const { fromDate, toDate } = req.query
     const range = svc.parseRange(fromDate as string | undefined, toDate as string | undefined)
-    const data = await svc.getSalesByPromoter(orgId, range)
+    const data = await analyticsLimiter.run(() => svc.getSalesByPromoter(orgId, range))
     res.status(200).json({ success: true, data })
   } catch (error: any) {
     logger.error(`[ORG SALE VERIFICATION] by-promoter error: ${error.message}`)
@@ -169,7 +170,7 @@ export async function getSalesByPromoter(req: Request, res: Response): Promise<v
 export async function getSalesByPromoterDaily(req: Request, res: Response): Promise<void> {
   try {
     const { orgId } = req.params
-    const data = await svc.getSalesByPromoterDaily(orgId)
+    const data = await analyticsLimiter.run(() => svc.getSalesByPromoterDaily(orgId))
     res.status(200).json({ success: true, data })
   } catch (error: any) {
     logger.error(`[ORG SALE VERIFICATION] by-promoter-daily error: ${error.message}`)
