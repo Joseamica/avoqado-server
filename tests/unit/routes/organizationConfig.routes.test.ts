@@ -259,6 +259,35 @@ describe('Organization Config Routes', () => {
   })
 
   // ═══════════════════════════════════════════════════════════════════════════════
+  // ORG TEAM LIST (GET /team)
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // Regression: members removed from the org (StaffOrganization.isActive=false via
+  // removeFromOrganization / ex-collaborator cleanup) kept appearing in the org
+  // "Usuarios" list because the query matched any org membership regardless of
+  // isActive. See Asana 1215884464715725.
+
+  describe('GET /team', () => {
+    const header = authHeader(superadminContext)
+
+    it('only returns CURRENT members (StaffOrganization.isActive = true)', async () => {
+      prismaMock.staffOrganization.findMany.mockResolvedValue([])
+
+      const res = await request(app)
+        .get(`/dashboard/organizations/${ORG_ID}/team`)
+        .set(...header)
+
+      expect(res.status).toBe(200)
+      // The active-membership filter is the fix: without `isActive: true`, removed
+      // users (isActive=false) leak back into the team list.
+      expect(prismaMock.staffOrganization.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { organizationId: ORG_ID, isActive: true },
+        }),
+      )
+    })
+  })
+
+  // ═══════════════════════════════════════════════════════════════════════════════
   // ORG CATEGORIES CRUD
   // ═══════════════════════════════════════════════════════════════════════════════
 
