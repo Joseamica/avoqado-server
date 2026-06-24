@@ -1,4 +1,14 @@
 import express, { Express, Request as ExpressRequest, Response as ExpressResponse, NextFunction } from 'express'
+// Crash guardrail (defense-in-depth). Express 4 does NOT forward a REJECTED promise from an
+// async route/middleware to next(err): the rejection escapes as a process-level
+// unhandledRejection and crashes the server via server.ts's gracefulShutdown — the exact
+// 2026-06-23 incident where a transient DB error (P1017/P2024) in the bare-async
+// checkOwnerAccess middleware took the whole process down. This side-effect import patches
+// Express so any such rejection reaches the global error handler below (clean 500) instead.
+// It is a NO-OP for handlers that already try/catch (their promise resolves). MUST be imported
+// after `express` is loaded and before any router is mounted. Proven by
+// tests/unit/middlewares/async-error-guardrail.test.ts.
+import 'express-async-errors'
 import jwt from 'jsonwebtoken'
 import type { StringValue } from 'ms'
 import cors from 'cors'
@@ -322,6 +332,15 @@ if (NODE_ENV === 'development') {
 // --- Global Error Handling Middleware ---
 // This must be the last middleware added to the app.
 app.use((err: Error, req: ExpressRequest, res: ExpressResponse, _next: NextFunction) => {
+  // If a response has already started, don't write a second time. The express-async-errors
+  // patch (imported above) now auto-forwards LATE rejections to this handler — including the
+  // rare "respond-then-reject" shape where a handler already sent a response and its trailing
+  // async work then rejects. Delegate to Express's default finalhandler, which safely aborts,
+  // instead of throwing ERR_HTTP_HEADERS_SENT on a second res.status().json().
+  if (res.headersSent) {
+    return _next(err)
+  }
+
   const correlationId = (req as any).correlationId || 'N/A'
   const bodyParseError = err as Error & { status?: number; type?: string; body?: unknown }
 
