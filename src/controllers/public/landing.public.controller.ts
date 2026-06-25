@@ -143,7 +143,7 @@ function renderLabsBriefHtml(payload: LabsSubmitPayload): string {
   const transcriptHtml = payload.transcript
     .map(
       m =>
-        `<div style="margin:8px 0;padding:8px 12px;border-left:3px solid ${m.role === 'user' ? '#c9712f' : '#888'};background:#fafafa;font-size:13px;">
+        `<div style="margin:8px 0;padding:8px 12px;border-left:3px solid ${m.role === 'user' ? '#d97452' : '#888'};background:#fafafa;font-size:13px;">
           <strong>${m.role === 'user' ? 'Cliente' : 'Agente'}:</strong>
           <div style="white-space:pre-wrap;margin-top:4px;">${escapeHtml(m.content)}</div>
         </div>`,
@@ -164,7 +164,7 @@ function renderLabsBriefHtml(payload: LabsSubmitPayload): string {
   .field { margin: 8px 0; }
   .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: #999; }
   .value { font-size: 15px; line-height: 1.5; }
-  .pill { display: inline-block; background: #f5e8df; color: #c9712f; padding: 2px 10px; border-radius: 999px; font-size: 12px; margin: 0 4px 4px 0; }
+  .pill { display: inline-block; background: #f5e8df; color: #d97452; padding: 2px 10px; border-radius: 999px; font-size: 12px; margin: 0 4px 4px 0; }
   .meta { background: #fafafa; padding: 12px; border-radius: 8px; font-size: 12px; color: #666; margin-top: 24px; }
 </style></head><body>
   <h1>Nuevo brief de Avoqado Labs</h1>
