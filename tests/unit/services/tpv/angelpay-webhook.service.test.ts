@@ -231,6 +231,35 @@ describe('processAngelPayWebhook — MATCHED happy path', () => {
       data: { angelpayWebhookLastReceivedAt: expect.any(Date) },
     })
   })
+
+  it('treats tip as part of the charged amount: base + tip == webhook → MATCHED (regression)', async () => {
+    mockedProviderEventLogFindFirst.mockResolvedValue(null)
+    mockedProviderEventLogCreate.mockResolvedValue({ id: 'evt_tip' })
+    // Card charged base($100) + tip($10) = $110. Webhook = 11000 cents = $110.00.
+    // Comparing against base alone ($100) would WRONGLY flag a $10 discrepancy.
+    mockedPaymentFindFirst.mockResolvedValueOnce({ id: 'pay_tip', amount: 100, tipAmount: 10, processorData: null, venueId: 'venue_1' })
+
+    const result = await processAngelPayWebhook({
+      payload: {
+        event_type: 'send_transaction',
+        payload: {
+          integratorReference: 'ref-tip',
+          amount: '000000011000', // 11000 cents = $110.00 = base + tip
+          status: 'approved',
+          transactionId: 'tx_tip',
+        },
+      } as any,
+      eventId: 'msg_tip',
+      merchantAccount: TEST_MERCHANT,
+      retryDelaysMs: [0, 0, 0],
+    })
+
+    expect(result.action).toBe('MATCHED')
+    expect(mockedProviderEventLogUpdate).toHaveBeenCalledWith({
+      where: { id: 'evt_tip' },
+      data: expect.objectContaining({ status: 'PROCESSED', paymentId: 'pay_tip' }),
+    })
+  })
 })
 
 describe('processAngelPayWebhook — DISCREPANCY', () => {
@@ -430,6 +459,7 @@ describe('reconcileAngelPayWebhookForPayment', () => {
     referenceNumber: null,
     venueId: 'venue_x',
     amount: 100,
+    tipAmount: 0,
   }
 
   const pendingEvent = {
@@ -488,6 +518,36 @@ describe('reconcileAngelPayWebhookForPayment', () => {
           venueId: 'venue_x',
           errorReason: null,
         }),
+      }),
+    )
+  })
+
+  it('treats tip as part of the charged amount on backfill: base + tip == webhook → MATCHED (regression)', async () => {
+    // Card charged base($100) + tip($10) = $110. Pending webhook = 11000 cents = $110.00.
+    const tippedEvent = {
+      id: 'evt_pending_tip',
+      payload: {
+        event_type: 'send_transaction',
+        payload: {
+          amount: '000000011000', // 11000 cents = $110.00 = base + tip
+          integratorReference: 'idem-abc',
+          transactionId: 'tx_ap_tip',
+          status: 'approved',
+        },
+      },
+    }
+    mockedProviderEventLogFindMany.mockResolvedValue([tippedEvent])
+
+    await reconcileAngelPayWebhookForPayment({ ...basePayment, amount: 100, tipAmount: 10 })
+
+    // MATCHED → stamps angelpayWebhook (not angelpayDiscrepancy), event PROCESSED.
+    const updateCall = mockedPaymentUpdate.mock.calls[0][0]
+    expect(updateCall.data.processorData).toHaveProperty('angelpayWebhook')
+    expect(updateCall.data.processorData).not.toHaveProperty('angelpayDiscrepancy')
+    expect(mockedProviderEventLogUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'evt_pending_tip' },
+        data: expect.objectContaining({ status: 'PROCESSED', errorReason: null }),
       }),
     )
   })

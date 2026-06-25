@@ -129,6 +129,7 @@ const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, m
 export interface MatchedPayment {
   id: string
   amount: Prisma.Decimal | number | string
+  tipAmount: Prisma.Decimal | number | string
   processorData: Prisma.JsonValue | null
   venueId: string
 }
@@ -166,7 +167,7 @@ export async function attemptPaymentMatch(args: {
     if (delays[i] > 0) await delay(delays[i])
     const payment = await prisma.payment.findFirst({
       where,
-      select: { id: true, amount: true, processorData: true, venueId: true },
+      select: { id: true, amount: true, tipAmount: true, processorData: true, venueId: true },
     })
     if (payment) return payment as MatchedPayment
   }
@@ -287,7 +288,9 @@ export async function processAngelPayWebhook(args: ProcessArgs): Promise<AngelPa
   // Payment.amount is stored in PESOS (e.g. Decimal("1.00")).
   // Divide by 100 to convert centavos → pesos before comparing.
   const webhookAmount = Number(payload.payload.amount) / 100
-  const recordedAmount = Number(payment.amount)
+  // AngelPay charges the card base + tip, so reconcile against `amount + tipAmount`
+  // (not `amount` alone — that mis-flags every tipped payment as a discrepancy).
+  const recordedAmount = Number(payment.amount) + Number(payment.tipAmount ?? 0)
   const diff = Math.abs(webhookAmount - recordedAmount)
 
   if (diff < 0.01) {
@@ -374,6 +377,7 @@ export async function reconcileAngelPayWebhookForPayment(payment: {
   referenceNumber: string | null
   venueId: string
   amount: Prisma.Decimal | number | string
+  tipAmount: Prisma.Decimal | number | string
 }): Promise<void> {
   try {
     const orFilters: Prisma.ProviderEventLogWhereInput[] = []
@@ -398,7 +402,8 @@ export async function reconcileAngelPayWebhookForPayment(payment: {
     for (const event of pendingEvents) {
       const webhookPayload = event.payload as unknown as AngelPayWebhookPayload
       const webhookAmount = Number(webhookPayload?.payload?.amount) / 100 // centavos → pesos
-      const recordedAmount = Number(payment.amount)
+      // Compare against base + tip (the full amount charged to the card).
+      const recordedAmount = Number(payment.amount) + Number(payment.tipAmount ?? 0)
       const diff = Math.abs(webhookAmount - recordedAmount)
 
       // Fetch the current payment's processorData to spread (preserve existing keys)

@@ -2044,6 +2044,7 @@ export async function recordOrderPayment(
       referenceNumber: payment.referenceNumber,
       venueId,
       amount: payment.amount,
+      tipAmount: payment.tipAmount,
     }).catch(err => {
       logger.error('🪝 [AngelPay backfill] Failed to reconcile pending webhooks for order payment', {
         paymentId: payment.id,
@@ -2671,6 +2672,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       referenceNumber: payment.referenceNumber,
       venueId,
       amount: payment.amount,
+      tipAmount: payment.tipAmount,
     }).catch(err => {
       logger.error('🪝 [AngelPay backfill] Failed to reconcile pending webhooks for fast payment', {
         paymentId: payment.id,

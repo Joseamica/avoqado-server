@@ -767,8 +767,13 @@ async function attemptPaymentMatch(
         })
       }
 
-      // Payment found - verify amounts match
-      const recordedAmount = parseFloat(payment.amount.toString())
+      // Payment found - verify amounts match.
+      // Blumon charges the card the FULL amount the customer pays (base + tip),
+      // so we must compare against `amount + tipAmount`. Comparing against
+      // `amount` alone mis-flagged every tipped TPV payment as a discrepancy
+      // (prod investigation 2026-06-24: 67/67 historical "discrepancies" were
+      // exactly the tip).
+      const recordedAmount = parseFloat(payment.amount.toString()) + parseFloat((payment.tipAmount ?? 0).toString())
       const difference = Math.abs(blumonAmount - recordedAmount)
 
       if (difference < 0.01) {
