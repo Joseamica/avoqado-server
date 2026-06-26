@@ -38,7 +38,7 @@ export const PREMIUM_ONLY_CODES = [
  * no base plan at all. Without this, a brand-new Free venue gets 403 on routes the
  * pricing page says are included (e.g. the chatbot). Mirror plan-catalog.ts FREE.
  */
-export const FREE_TIER_CODES = ['AVAILABLE_BALANCE', 'CHATBOT'] as const
+export const FREE_TIER_CODES = ['CHATBOT'] as const // AVAILABLE_BALANCE moved to PRO (founder: available balance = PRO)
 
 export type BaseTier = 'PREMIUM' | 'PRO'
 

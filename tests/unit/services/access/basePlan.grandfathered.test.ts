@@ -122,13 +122,14 @@ describe('venueHasFeatureAccess — demo short-circuit (path 0, same as grandfat
 describe('catalog mirror: FREE_TIER_CODES + expanded PREMIUM_ONLY_CODES', () => {
   const vfFindMany = (prisma as any).venueFeature.findMany as jest.Mock
 
-  it('venue with NO plan → Free-tier promises (CHATBOT, AVAILABLE_BALANCE) = true', async () => {
+  it('venue with NO plan → CHATBOT (free promise) = true, but AVAILABLE_BALANCE (now PRO) = false', async () => {
     venueFindUnique.mockResolvedValue({ seatCapExempt: false, status: 'ACTIVE' })
     vfFindFirst.mockResolvedValue(null)
     vfFindMany.mockResolvedValue([])
 
     expect(await venueHasFeatureAccess('v', 'CHATBOT')).toBe(true)
-    expect(await venueHasFeatureAccess('v', 'AVAILABLE_BALANCE')).toBe(true)
+    // AVAILABLE_BALANCE was moved out of FREE_TIER_CODES to PRO — a no-plan venue must NOT get it.
+    expect(await venueHasFeatureAccess('v', 'AVAILABLE_BALANCE')).toBe(false)
   })
 
   it('PRO venue → the 4 newly-premium-only catalog codes are NOT blanket-granted', async () => {
