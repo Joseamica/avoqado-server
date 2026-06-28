@@ -33,6 +33,7 @@ import { reservationDepositReconciliationJob } from './jobs/reservation-deposit-
 import { reservationReminderJob } from './jobs/reservation-reminder.job'
 import { reservationAutoNoShowJob } from './jobs/reservation-auto-no-show.job'
 import { commissionAggregationJob } from './jobs/commission-aggregation.job'
+import { cashOutSettlementJob } from './jobs/cash-out-settlement.job'
 import { autoClockOutJob } from './jobs/auto-clockout.job'
 import { monthlyOverageBillingJob } from './jobs/monthly-overage-billing.job'
 import { nightlySalesSummaryJob } from './jobs/nightly-sales-summary.job'
@@ -159,6 +160,9 @@ const gracefulShutdown = async (signal: string) => {
       // Stop commission aggregation job
       logger.info('Stopping commission aggregation job...')
       commissionAggregationJob.stop()
+
+      // Stop cash-out settlement job
+      cashOutSettlementJob.stop()
 
       // Stop auto clock-out job
       logger.info('Stopping auto clock-out job...')
@@ -403,6 +407,9 @@ const startApplication = async (retries = 3) => {
 
       // Start commission aggregation job (daily at 3:00 AM Mexico City)
       commissionAggregationJob.start()
+
+      // Start cash-out settlement corte (daily at 18:15 Mexico City)
+      cashOutSettlementJob.start()
 
       // Disabled:  / Externo settlement jobs
       // .start()

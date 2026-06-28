@@ -254,6 +254,7 @@ import reportsRoutes from './dashboard/reports.routes'
 import accountingRoutes from './dashboard/accounting.routes'
 import * as bankReconciliationController from '../controllers/dashboard/bankReconciliation.controller'
 import commissionRoutes from './dashboard/commission.routes'
+import cashOutRoutes from './dashboard/cash-out.routes'
 import reservationRoutes from './dashboard/reservation.routes'
 import classSessionRoutes from './dashboard/classSession.routes'
 import googleCalendarStatusRoutes from './dashboard/googleCalendarStatus.routes'
@@ -4067,6 +4068,9 @@ router.use('/reports', authenticateTokenMiddleware, reportsRoutes)
 
 // Commission routes (OWNER/ADMIN for config, STAFF for view own)
 router.use('/commissions', authenticateTokenMiddleware, commissionRoutes)
+
+// Cash Out (PlayTelecom white-label) — config layer; service additionally gates by CASH_OUT module
+router.use('/cash-out', authenticateTokenMiddleware, cashOutRoutes)
 
 /**
  * @openapi
