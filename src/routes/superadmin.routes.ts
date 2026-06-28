@@ -33,6 +33,7 @@ import angelpayUserAccountRoutes from './superadmin/angelpayUserAccount.routes'
 import rateCorrectionRoutes from './superadmin/rateCorrection.routes'
 import terminalOrderSuperadminRoutes from './superadmin/terminalOrder.routes'
 import subscriptionRoutes from './superadmin/subscription.routes'
+import billingRoutes from './superadmin/billing.routes'
 // NOTE: appUpdateRoutes are mounted EARLY in app.ts with 100MB body limit for APK uploads
 // Do NOT mount here to avoid duplicate route registration
 
@@ -67,6 +68,7 @@ router.use('/aggregators', aggregatorRoutes)
 router.use('/holidays', holidaysRoutes)
 router.use('/venue-commissions', venueCommissionRoutes)
 router.use('/subscriptions', subscriptionRoutes)
+router.use('/billing', billingRoutes) // Platform billing CFDI (Avoqado factura a sus propios clientes)
 // Aditivo (2026-05): mismos controllers que ya viven en /api/v1/dashboard/superadmin/*,
 // expuestos también aquí para que el frontend superadmin use un solo namespace.
 router.use('/settlement-configurations', settlementConfigRoutes)

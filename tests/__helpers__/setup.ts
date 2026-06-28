@@ -107,6 +107,10 @@ const prismaMock: any = {
   feature: createMockModel(),
   venueFeature: createMockModel(),
   webhookEvent: createMockModel(),
+  // Platform billing CFDI (Avoqado factura a sus propios clientes)
+  platformEmisor: createMockModel(),
+  billingTaxProfile: createMockModel(),
+  platformCfdi: createMockModel(),
   // Token budget models
   chatbotTokenBudget: createMockModel(),
   tokenUsageRecord: createMockModel(),

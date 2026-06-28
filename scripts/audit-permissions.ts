@@ -96,6 +96,11 @@ const SUPERADMIN_ONLY_ALLOWLIST = new Set<string>([
   'tpv-commands:bulk',
   'tpv-commands:schedule',
   'tpv-commands:geofence',
+  // Platform billing CFDI (Avoqado factura a sus propios clientes) — founder-only back-office,
+  // mounted under /api/v1/superadmin/* (authorizeRole([SUPERADMIN])). Intentionally SUPERADMIN-only.
+  'platform-billing:view',
+  'platform-billing:configure',
+  'platform-billing:issue',
 ])
 
 // Permissions intentionally absent from INDIVIDUAL_PERMISSIONS_BY_RESOURCE.

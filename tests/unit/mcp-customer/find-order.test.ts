@@ -61,9 +61,15 @@ describe('find_order by serial — case-insensitive (regression 2026-06-09)', ()
 describe('find_order by orderNumber — the human identifier operators have (2026-06-26)', () => {
   it('resolves an order by its human number, case-insensitive AND scoped to your venues', async () => {
     // call 1: resolve number → id (within scope); call 2: fetch the full order
-    mockOrderFind
-      .mockResolvedValueOnce({ id: 'ord-9' })
-      .mockResolvedValueOnce({ id: 'ord-9', orderNumber: 'ORD-5454', status: 'COMPLETED', total: 358, venue: { name: 'Mobanq' }, items: [], payments: [] })
+    mockOrderFind.mockResolvedValueOnce({ id: 'ord-9' }).mockResolvedValueOnce({
+      id: 'ord-9',
+      orderNumber: 'ORD-5454',
+      status: 'COMPLETED',
+      total: 358,
+      venue: { name: 'Mobanq' },
+      items: [],
+      payments: [],
+    })
 
     const out = parse(await call({ orderNumber: 'ord-5454' })) // lower-case input
     const lookupWhere = (mockOrderFind.mock.calls[0][0] as { where: Record<string, unknown> }).where
