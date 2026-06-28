@@ -11019,11 +11019,11 @@ model Employee {
   rfc            String // RFC del PATRÓN (contribuyente). (org, rfc) = scope.
   venueId        String? // centro de costo (local donde trabaja)
 
-  nombre       String
-  rfcEmpleado  String // RFC del trabajador
-  curp         String?
-  nss          String? // número de seguridad social
-  puesto       String?
+  nombre      String
+  rfcEmpleado String // RFC del trabajador
+  curp        String?
+  nss         String? // número de seguridad social
+  puesto      String?
 
   /// Sueldo mensual bruto (percepción gravable base), en centavos.
   salarioMensualBrutoCents Int
@@ -11032,11 +11032,11 @@ model Employee {
   periodicidadPago         PayrollPeriodicity @default(MENSUAL)
 
   // Datos fiscales para el CFDI de nómina (complemento Nómina 1.2).
-  tipoContrato     String  @default("01") // c_TipoContrato (01 = indeterminado)
-  tipoRegimen      String  @default("02") // c_TipoRegimenContratacion (02 = sueldos y salarios)
-  claveEntFed      String? // c_Estado (CMX, JAL, NLE...) — requerido para timbrar
-  numEmpleado      String?
-  registroPatronal String? // registro patronal IMSS del patrón (opcional en el CFDI)
+  tipoContrato                String  @default("01") // c_TipoContrato (01 = indeterminado)
+  tipoRegimen                 String  @default("02") // c_TipoRegimenContratacion (02 = sueldos y salarios)
+  claveEntFed                 String? // c_Estado (CMX, JAL, NLE...) — requerido para timbrar
+  numEmpleado                 String?
+  registroPatronal            String? // registro patronal IMSS del patrón (opcional en el CFDI)
   /// Salario diario integrado (SDI) en centavos. Si null, se estima del SBC.
   salarioDiarioIntegradoCents Int?
 
@@ -11064,16 +11064,16 @@ model PayrollRun {
   fechaPago    DateTime
   status       PayrollRunStatus   @default(DRAFT)
 
-  empleados               Int @default(0)
-  totalPercepcionesCents  Int @default(0)
-  totalIsrCents           Int @default(0)
-  totalSubsidioCents      Int @default(0)
-  totalImssObreroCents    Int @default(0)
-  totalOtrasDeduccCents   Int @default(0)
-  totalNetoCents          Int @default(0)
+  empleados              Int @default(0)
+  totalPercepcionesCents Int @default(0)
+  totalIsrCents          Int @default(0)
+  totalSubsidioCents     Int @default(0)
+  totalImssObreroCents   Int @default(0)
+  totalOtrasDeduccCents  Int @default(0)
+  totalNetoCents         Int @default(0)
 
-  journalEntryId String?  @unique
-  posted         Boolean  @default(false)
+  journalEntryId String? @unique
+  posted         Boolean @default(false)
 
   createdById String?
   createdAt   DateTime @default(now())
@@ -11092,15 +11092,15 @@ model PayrollLine {
   nombre      String // snapshot
   rfcEmpleado String // snapshot
 
-  diasPagados             Int @default(30)
-  percepcionGravadaCents  Int @default(0)
-  percepcionExentaCents   Int @default(0)
-  totalPercepcionesCents  Int @default(0)
-  isrCents                Int @default(0)
-  subsidioCents           Int @default(0)
-  imssObreroCents         Int @default(0)
-  otrasDeduccionesCents   Int @default(0)
-  netoCents               Int @default(0)
+  diasPagados            Int @default(30)
+  percepcionGravadaCents Int @default(0)
+  percepcionExentaCents  Int @default(0)
+  totalPercepcionesCents Int @default(0)
+  isrCents               Int @default(0)
+  subsidioCents          Int @default(0)
+  imssObreroCents        Int @default(0)
+  otrasDeduccionesCents  Int @default(0)
+  netoCents              Int @default(0)
 
   // Recibo de nómina (CFDI 4.0 + complemento Nómina 1.2) timbrado para este empleado.
   cfdiStatus     PayrollCfdiStatus @default(PENDING)
@@ -11134,4 +11134,304 @@ enum PayrollCfdiStatus {
 enum JournalEntryStatus {
   POSTED
   CANCELLED
+}
+
+// ==========================================
+// CASH OUT SYSTEM (PlayTelecom promoter same-day commission withdrawal)
+// Bespoke + module-gated (MODULE_CODES.CASH_OUT), org-level white-label ONLY.
+// Isolated by design: NO @relation into existing models (plain String ids +
+// indexes; tenant isolation enforced in the service layer) so the scalable
+// product's models stay untouched. Spec: Avoqado-HQ/specs/2026-06-25-cash-out-promoter-commissions.md
+// ==========================================
+
+enum PromoterSaleType {
+  LINEA_NUEVA
+  PORTABILIDAD
+}
+
+enum CashOutEntryStatus {
+  AVAILABLE // Approved sale, withdrawable
+  WITHDRAWN // Included in a withdrawal (Retirar)
+  CLAWED_BACK // Source sale left COMPLETED after the fact (reconciliation)
+}
+
+enum CashOutWithdrawalStatus {
+  REQUESTED // Promoter tapped Retirar (or back-office selected) — pending 18:15 corte
+  REPORTED // Included in the 18:15 Finanzas SPEI dispersion report
+  PAID // Finanzas confirmed the SPEI transfer
+  FAILED // SPEI failed / reversed
+}
+
+/// Editable escalated commission table: FIXED peso amount per approved sale by
+/// sale type and accumulated weekly sales count. Org- or venue-scoped. Backs the
+/// Dashboard "Comisiones" editable table.
+model CashOutCommissionRate {
+  id       String           @id @default(cuid())
+  orgId    String? // org-level config ...
+  venueId  String? // ... or venue-level override
+  saleType PromoterSaleType
+  minCount Int // tier lower bound (accumulated sales this week), inclusive
+  maxCount Int? // upper bound inclusive; null = open-ended top tier
+  amount   Decimal          @db.Decimal(10, 2) // pesos per sale at this tier
+
+  effectiveFrom DateTime  @default(now())
+  effectiveTo   DateTime?
+  active        Boolean   @default(true)
+
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([orgId, saleType, active])
+  @@index([venueId, saleType, active])
+}
+
+/// Which calendar days the cash-out scheme is active (ADMIN day-selection).
+/// "Mutually exclusive with concurso" is enforced by the admin choosing days.
+model CashOutScheduleDay {
+  id          String   @id @default(cuid())
+  orgId       String?
+  venueId     String?
+  day         DateTime @db.Date // a specific active day (venue-local)
+  active      Boolean  @default(true)
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([venueId, day])
+  @@index([orgId, day])
+}
+
+/// Promoter bank account (CLABE) for SPEI dispersion, captured by back-office.
+/// Isolated from Staff (no change to the Staff model).
+model PromoterBankAccount {
+  id          String   @id @default(cuid())
+  staffId     String   @unique // the promoter (plain ref; no FK by design)
+  venueId     String?
+  orgId       String?
+  clabe       String // 18-digit CLABE
+  holderName  String?
+  active      Boolean  @default(true)
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([venueId])
+  @@index([orgId])
+}
+
+/// Ledger: one entry per COMPLETED SaleVerification for a cash-out venue.
+/// Amount/tier are LOCKED at materialization (count-so-far + 1). Status is
+/// reconciled against the source sale's current status (clawback).
+model PromoterCommissionEntry {
+  id                 String             @id @default(cuid())
+  saleVerificationId String             @unique // plain ref to SaleVerification (no FK by design)
+  venueId            String
+  staffId            String // the promoter
+  saleType           PromoterSaleType
+  businessDate       DateTime           @db.Date // venue-local day of the sale
+  weekStart          DateTime           @db.Date // Monday of the Lun–Dom escalation week
+  tier               Int // accumulated-count tier at materialization
+  amount             Decimal            @db.Decimal(10, 2) // locked pesos
+  status             CashOutEntryStatus @default(AVAILABLE)
+
+  withdrawalId String?
+  withdrawal   CashOutWithdrawal? @relation(fields: [withdrawalId], references: [id])
+
+  clawedBackAt DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([venueId, staffId, status])
+  @@index([venueId, businessDate])
+  @@index([staffId, weekStart])
+  @@index([withdrawalId])
+}
+
+/// A withdrawal (Retirar): sums AVAILABLE entries for a promoter, feeds the
+/// 18:15 Finanzas SPEI dispersion report, then the comprobante.
+model CashOutWithdrawal {
+  id           String                  @id @default(cuid())
+  venueId      String
+  staffId      String // the promoter
+  businessDate DateTime                @db.Date
+  grossAmount  Decimal                 @db.Decimal(12, 2)
+  feeMxn       Decimal                 @default(0) @db.Decimal(10, 2)
+  netAmount    Decimal                 @db.Decimal(12, 2)
+  clabe        String? // snapshot of the promoter's CLABE at request time
+  folio        String                  @unique // human-facing receipt folio
+  status       CashOutWithdrawalStatus @default(REQUESTED)
+
+  requestedById String? // who triggered (promoter on TPV, or back-office)
+  reportedAt    DateTime?
+  paidAt        DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  entries PromoterCommissionEntry[]
+
+  @@index([venueId, businessDate, status])
+  @@index([staffId])
+  @@index([status])
+}
+
+// ==========================================
+// PLATFORM BILLING CFDI (Avoqado factura a sus propios clientes)
+// Avoqado-as-emisor: CFDIs que la PLATAFORMA timbra a SUS clientes (orgs, venues
+// o receptores externos) por suscripción, setup, venta de TPV, etc. Distinto del
+// motor tenant (FiscalEmisor/Cfdi) donde el venue factura a sus consumidores.
+// Isolated by design (igual que CASH OUT): NO @relation a modelos existentes (ids
+// String + índices; acceso forzado en la capa de servicio superadmin). Reusa el
+// motor fiscal (src/services/fiscal/*: FacturapiProvider, fiscalKey, ivaMath) a
+// nivel de servicio. Spec: docs/superpowers/specs/2026-06-26-platform-billing-cfdi-design.md
+// ==========================================
+
+enum PlatformCfdiStatus {
+  DRAFT
+  STAMPING
+  STAMPED
+  STAMP_FAILED
+  CANCEL_REQUESTED
+  CANCELLED
+}
+
+enum PlatformCfdiType {
+  INGRESO // CFDI tipo I (la factura)
+  PAGO // CFDI tipo P (complemento de pago / REP) — fase 2
+}
+
+enum BillingCustomerType {
+  ORGANIZATION
+  VENUE
+  STANDALONE // receptor externo no dado de alta (ej. venta de TPV)
+}
+
+/// Avoqado como emisor (RFC + CSD + org de Facturapi). ≈ singleton (1 activo),
+/// pero como tabla por si en el futuro hay >1 RFC emisor de plataforma.
+model PlatformEmisor {
+  id              String @id @default(cuid())
+  rfc             String
+  legalName       String
+  regimenFiscal   String // c_RegimenFiscal (3 dígitos)
+  lugarExpedicion String // fiscal CP
+
+  provider         FiscalProviderType @default(FACTURAPI)
+  providerOrgId    String? // facturapi org id
+  providerKeyEnc   String? // encrypted live key (fiscalKey.service)
+  csdStatus        CsdStatus          @default(NONE)
+  csdExpiresAt     DateTime?
+  csdLastCheckedAt DateTime?
+
+  serie          String  @default("A")
+  defaultUsoCfdi String?
+  isActive       Boolean @default(true)
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([isActive])
+}
+
+/// Datos fiscales del receptor (cliente de Avoqado): org, venue o externo
+/// (STANDALONE). Capturable a mano desde superadmin; constancia opcional.
+model BillingTaxProfile {
+  id             String              @id @default(cuid())
+  customerType   BillingCustomerType
+  organizationId String? // set si customerType=ORGANIZATION
+  venueId        String? // set si customerType=VENUE (STANDALONE = ambos null)
+  displayName    String? // etiqueta para STANDALONE
+
+  rfc            String
+  razonSocial    String
+  regimenFiscal  String // c_RegimenFiscal
+  codigoPostal   String // CP del receptor
+  defaultUsoCfdi String  @default("G03")
+  email          String?
+
+  constanciaUrl    String? // PDF en Firebase Storage (opcional)
+  validationStatus String    @default("PENDING") // PENDING | VALID | INVALID
+  validatedAt      DateTime?
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([organizationId])
+  @@unique([venueId])
+  @@index([rfc])
+}
+
+/// Un CFDI emitido por Avoqado a un cliente (ingreso; PAGO/REP en fase 2).
+/// Espeja Cfdi pero a nivel plataforma. Money en centavos enteros (MXN).
+model PlatformCfdi {
+  id               String @id @default(cuid())
+  platformEmisorId String
+
+  billingTaxProfileId  String?
+  type                 PlatformCfdiType @default(INGRESO)
+  parentPlatformCfdiId String? // si type=PAGO: la factura de ingreso (PPD) que liquida
+
+  // destinatario (denormalizado para listado/filtro); STANDALONE → ambos null
+  organizationId String?
+  venueId        String?
+
+  // Receptor snapshot (inmutable al timbrar)
+  receptorRfc     String
+  receptorNombre  String
+  receptorRegimen String
+  receptorCp      String
+  usoCfdi         String
+
+  // Conceptos (JSON en MVP). Solo type=INGRESO.
+  lines Json? // [{ description, satProductKey, satUnitKey, quantity, unitPriceCents, discountCents, taxRate, taxExempt }]
+
+  // SAT payment classification
+  formaPago  String // c_FormaPago
+  metodoPago String @default("PUE") // PUE | PPD (solo INGRESO)
+
+  // Money — integer cents
+  subtotalCents Int    @default(0)
+  discountCents Int    @default(0)
+  taxCents      Int    @default(0)
+  totalCents    Int    @default(0)
+  currency      String @default("MXN")
+  taxBreakdown  Json?
+
+  // Seguimiento de pago PPD (derivado de los REP hijos) + detalle del REP
+  amountPaidCents Int   @default(0)
+  paymentInfo     Json? // solo type=PAGO
+
+  status      PlatformCfdiStatus @default(DRAFT)
+  facturapiId String?
+  uuid        String?            @unique // folio fiscal (timbre)
+  serie       String?
+  folio       String?
+  stampedAt   DateTime?
+
+  xmlUrl String?
+  pdfUrl String?
+
+  lastError      String? @db.Text
+  attempts       Int     @default(0)
+  idempotencyKey String? @unique
+
+  cancelMotivo         String?
+  cancelSubstituteUuid String?
+  cancelStatus         String?
+  cancelledAt          DateTime?
+
+  emailSentAt DateTime?
+
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([venueId])
+  @@index([status])
+  @@index([type])
+  @@index([parentPlatformCfdiId])
+  @@index([createdAt])
 }

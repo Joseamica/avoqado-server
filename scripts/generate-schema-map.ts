@@ -295,6 +295,10 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   Employee: 'Facturación (CFDI)',
   PayrollRun: 'Facturación (CFDI)',
   PayrollLine: 'Facturación (CFDI)',
+  // Platform billing CFDI (Avoqado factura a sus propios clientes)
+  PlatformEmisor: 'Facturación (CFDI)',
+  BillingTaxProfile: 'Facturación (CFDI)',
+  PlatformCfdi: 'Facturación (CFDI)',
 
   // 12. Pricing, Costs & Venue Lending
   PricingPolicy: 'Pricing, Costs & Venue Lending',
@@ -334,6 +338,11 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   OrganizationSalesGoalConfig: 'Commissions & Sales Goals',
   PerformanceGoal: 'Commissions & Sales Goals',
   MilestoneAchievement: 'Commissions & Sales Goals',
+  CashOutCommissionRate: 'Commissions & Sales Goals',
+  CashOutScheduleDay: 'Commissions & Sales Goals',
+  PromoterBankAccount: 'Commissions & Sales Goals',
+  PromoterCommissionEntry: 'Commissions & Sales Goals',
+  CashOutWithdrawal: 'Commissions & Sales Goals',
 
   // 15. Reservations & Booking
   Reservation: 'Reservations & Booking',

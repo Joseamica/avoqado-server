@@ -195,6 +195,10 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // used the legacy venues:* / features:* names before this surface moved to billing:*.
   // ===========================
   'billing:read': ['billing:read'],
+  // Platform billing CFDI (Avoqado factura a sus propios clientes) — superadmin-only, distinct from billing:* (venue subscription mgmt)
+  'platform-billing:view': ['platform-billing:view'],
+  'platform-billing:configure': ['platform-billing:configure', 'platform-billing:view'],
+  'platform-billing:issue': ['platform-billing:issue', 'platform-billing:view'],
   'billing:subscriptions:read': ['billing:subscriptions:read', 'billing:read', 'venues:read', 'features:read'],
   'billing:subscriptions:manage': [
     'billing:subscriptions:manage',
@@ -336,6 +340,15 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'commissions:view_own': ['commissions:view_own'], // Staff can view their own commissions
   'commissions:approve': ['commissions:read', 'commissions:approve', 'teams:read'],
   'commissions:payout': ['commissions:read', 'commissions:approve', 'commissions:payout'],
+
+  // ===========================
+  // CASH OUT (PlayTelecom promoter same-day commission — module-gated, white-label)
+  // ===========================
+  'cash-out:read': ['cash-out:read', 'teams:read'],
+  'cash-out:view_own': ['cash-out:view_own'],
+  'cash-out:withdraw': ['cash-out:withdraw', 'cash-out:view_own'],
+  'cash-out:manage': ['cash-out:manage', 'cash-out:read'],
+  'cash-out:report': ['cash-out:report', 'cash-out:read'],
 
   // ===========================
   // ORG-LEVEL MANAGEMENT
@@ -572,6 +585,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // SIM custody (PlayTelecom chain-of-custody) — TPV-only actions for Promoter
     'tpv-sim-custody:accept', // Accept SIM reception on TPV
     'tpv-sim-custody:reject', // Reject a pending SIM on TPV
+    // Cash Out (PlayTelecom promoter same-day commission — module-gated; TPV self-service in v2)
+    'cash-out:view_own', // View own daily commission balance
+    'cash-out:withdraw', // Request a withdrawal (Retirar) on TPV
     // Google Calendar Sync — staff can connect their own personal calendar
     'calendar:connect_self',
   ],
@@ -682,6 +698,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'referral:override-existing-customer', // Referral Program: can override existing-customer guard
     'commissions:read', // Can view commission configs and staff earnings
     'commissions:view_own', // Can view own commission earnings
+    // Cash Out (PlayTelecom back-office — view balances + generate Finanzas report; module-gated)
+    'cash-out:read',
+    'cash-out:report',
     'features:read',
     'features:write',
     'role-config:read', // Can view custom role display names
@@ -771,6 +790,10 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'commissions:delete',
     'commissions:view_own',
     'commissions:approve',
+    // Cash Out (PlayTelecom back-office — config rate tables + calendar, generate report; module-gated)
+    'cash-out:read',
+    'cash-out:manage',
+    'cash-out:report',
     'features:*',
     'notifications:*', // Can send push notifications
     'venues:*', // Can manage venue settings, billing, payment methods
@@ -841,6 +864,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'accounting:reconcile', // Conciliación bancaria (confirmar matches) — PRO
     'accounting:manage', // Capa B fiscal — catálogo de cuentas (editar/seed) — PREMIUM (bundle CFDI)
     'commissions:*', // Commission system (full control including payout)
+    'cash-out:*', // Cash Out (PlayTelecom same-day promoter commission) — full control
     'menu:*',
     'orders:*',
     'payments:*',
@@ -1353,6 +1377,8 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
     'commissions:payout',
     'commissions:org-manage',
   ],
+  // Cash Out (PlayTelecom same-day promoter commission — module-gated, white-label)
+  'cash-out': ['cash-out:read', 'cash-out:view_own', 'cash-out:withdraw', 'cash-out:manage', 'cash-out:report'],
   // Org-level goals management
   goals: ['goals:org-manage'],
   // Google Calendar Sync (Phase 1)
@@ -1366,6 +1392,8 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   // - issue:     stamp & send a CFDI to the SAT (OWNER/ADMIN/MANAGER)
   // - view:      read-only access to issued invoices and fiscal config (OWNER/ADMIN/MANAGER)
   cfdi: ['cfdi:configure', 'cfdi:issue', 'cfdi:view'],
+  // Platform billing CFDI (Avoqado factura a sus propios clientes) — superadmin-only back-office
+  'platform-billing': ['platform-billing:view', 'platform-billing:configure', 'platform-billing:issue'],
 }
 
 /**
