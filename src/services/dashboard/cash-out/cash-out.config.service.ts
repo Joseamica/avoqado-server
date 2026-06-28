@@ -1,9 +1,9 @@
 /**
  * Cash Out — configuration service (rate tables + active-days calendar).
  *
- * EVERY exported operation is gated by the CASH_OUT module so cash-out data is
- * reachable only for white-label (PlayTelecom) venues — the scalable product is
- * never touched. Spec: Avoqado-HQ/specs/2026-06-25-cash-out-promoter-commissions.md
+ * EVERY exported operation is gated by SERIALIZED_INVENTORY so cash-out appears
+ * by default wherever serialized inventory is on (SIM sellers / PlayTelecom) —
+ * NOT a separate module. Spec: Avoqado-HQ/specs/2026-06-25-cash-out-promoter-commissions.md
  */
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
@@ -15,14 +15,14 @@ import { validateRateTable, type RateTier } from './cash-out.domain'
 export class CashOutModuleDisabledError extends Error {
   statusCode = 403
   constructor(venueId: string) {
-    super(`El módulo Cash Out no está habilitado para este venue (${venueId}).`)
+    super(`El esquema Cash Out requiere el módulo de inventario serializado (SERIALIZED_INVENTORY), que no está activo en este local (${venueId}).`)
     this.name = 'CashOutModuleDisabledError'
   }
 }
 
 /** Isolation gate — call at the top of every cash-out config operation. */
 export async function assertCashOutEnabled(venueId: string): Promise<void> {
-  const enabled = await moduleService.isModuleEnabled(venueId, MODULE_CODES.CASH_OUT)
+  const enabled = await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY)
   if (!enabled) throw new CashOutModuleDisabledError(venueId)
 }
 
@@ -49,7 +49,7 @@ export class CashOutValidationError extends Error {
 /**
  * Replace a venue's escalated rate table: validate the ladder first, then
  * atomically deactivate the current active tiers and create the new ones.
- * Audited via ActivityLog. Gated by the CASH_OUT module.
+ * Audited via ActivityLog. Gated by SERIALIZED_INVENTORY.
  */
 export async function replaceCommissionRates(venueId: string, rates: RateTier[], actor: { staffId: string; orgId?: string | null }) {
   await assertCashOutEnabled(venueId)

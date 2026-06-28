@@ -13,7 +13,7 @@ jest.mock('@/utils/prismaClient', () => ({
 }))
 jest.mock('@/services/modules/module.service', () => ({
   __esModule: true,
-  MODULE_CODES: { CASH_OUT: 'CASH_OUT' },
+  MODULE_CODES: { SERIALIZED_INVENTORY: 'SERIALIZED_INVENTORY' },
   moduleService: { isModuleEnabled: jest.fn() },
 }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
@@ -51,7 +51,7 @@ describe('cash-out config service — module gating (isolation invariant)', () =
   it('rejects listCommissionRates when the venue does NOT have the CASH_OUT module — and never queries', async () => {
     mockEnabled.mockResolvedValue(false)
     await expect(listCommissionRates('venue_not_pt')).rejects.toThrow(/módulo|cash out|module/i)
-    expect(mockEnabled).toHaveBeenCalledWith('venue_not_pt', 'CASH_OUT')
+    expect(mockEnabled).toHaveBeenCalledWith('venue_not_pt', 'SERIALIZED_INVENTORY')
     expect(p.cashOutCommissionRate.findMany).not.toHaveBeenCalled()
   })
 

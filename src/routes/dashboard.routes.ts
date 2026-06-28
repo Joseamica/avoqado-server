@@ -4069,7 +4069,7 @@ router.use('/reports', authenticateTokenMiddleware, reportsRoutes)
 // Commission routes (OWNER/ADMIN for config, STAFF for view own)
 router.use('/commissions', authenticateTokenMiddleware, commissionRoutes)
 
-// Cash Out (PlayTelecom white-label) — config layer; service additionally gates by CASH_OUT module
+// Cash Out (PlayTelecom) — config layer; service gates by SERIALIZED_INVENTORY (on wherever serialized inventory is)
 router.use('/cash-out', authenticateTokenMiddleware, cashOutRoutes)
 
 /**

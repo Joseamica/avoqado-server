@@ -20,7 +20,7 @@ jest.mock('@/utils/prismaClient', () => ({
 }))
 jest.mock('@/services/modules/module.service', () => ({
   __esModule: true,
-  MODULE_CODES: { CASH_OUT: 'CASH_OUT' },
+  MODULE_CODES: { SERIALIZED_INVENTORY: 'SERIALIZED_INVENTORY' },
   moduleService: { isModuleEnabled: jest.fn() },
 }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))

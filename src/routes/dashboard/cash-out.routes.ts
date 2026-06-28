@@ -3,7 +3,7 @@
  *
  * Mounted at /dashboard/cash-out from dashboard.routes.ts (behind authenticateToken).
  * Pipeline per endpoint: authenticateToken → checkPermission → validateRequest → controller.
- * The service additionally gates every operation by the CASH_OUT module (white-label only).
+ * The service additionally gates every operation by SERIALIZED_INVENTORY (cash-out is on wherever serialized inventory is).
  */
 import { Router } from 'express'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'

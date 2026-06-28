@@ -5,7 +5,7 @@
  * atomically marks those entries WITHDRAWN. TOCTOU-safe: the claim is a
  * conditional updateMany (status:'AVAILABLE') whose row count must match — a
  * concurrent withdrawal claiming the same entries rolls the whole thing back.
- * Money is PESOS, 1:1. Gated by the CASH_OUT module.
+ * Money is PESOS, 1:1. Gated by SERIALIZED_INVENTORY.
  */
 import { Prisma, CashOutWithdrawalStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'

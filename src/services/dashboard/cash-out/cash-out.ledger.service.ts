@@ -7,7 +7,8 @@
  *  - reconcileClawbacks: marks entries whose source sale is no longer COMPLETED.
  *  - getSaldo: Σ AVAILABLE entries (pesos).
  *
- * Gated by the CASH_OUT module (white-label only). Dates: DB timestamps are UTC,
+ * Gated by SERIALIZED_INVENTORY (cash-out appears wherever serialized inventory is on).
+ * Dates: DB timestamps are UTC,
  * converted to venue.timezone (venueBusinessDate) to derive calendar dates.
  * Money is PESOS, 1:1. Spec: Avoqado-HQ/specs/2026-06-25-cash-out-promoter-commissions.md
  */
@@ -31,7 +32,7 @@ function dbDate(yyyymmdd: string): Date {
  * than aborting the whole batch.
  */
 export async function materializeEntries(venueId: string): Promise<{ created: number }> {
-  if (!(await moduleService.isModuleEnabled(venueId, MODULE_CODES.CASH_OUT))) return { created: 0 }
+  if (!(await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY))) return { created: 0 }
 
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
   if (!venue) return { created: 0 }
@@ -121,7 +122,7 @@ export async function getSaldo(venueId: string, staffId: string): Promise<Prisma
  * CLAWED_BACK. Resilient to ANY path that changed the sale's status.
  */
 export async function reconcileClawbacks(venueId: string): Promise<{ clawedBack: number }> {
-  if (!(await moduleService.isModuleEnabled(venueId, MODULE_CODES.CASH_OUT))) return { clawedBack: 0 }
+  if (!(await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY))) return { clawedBack: 0 }
 
   const entries = await prisma.promoterCommissionEntry.findMany({
     where: { venueId, status: { in: ['AVAILABLE', 'WITHDRAWN'] } },

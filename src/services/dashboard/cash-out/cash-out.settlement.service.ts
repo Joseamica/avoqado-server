@@ -14,16 +14,16 @@ import { generateDispersionReport } from './cash-out.report.service'
 
 const SYSTEM_ACTOR = { staffId: 'SYSTEM' }
 
-/** Every venue with the CASH_OUT module enabled (org-level inherited + venue-level). */
+/** Every venue with SERIALIZED_INVENTORY enabled (cash-out runs wherever serialized inventory is on; org-level inherited + venue-level). */
 export async function listCashOutVenueIds(): Promise<string[]> {
   const [orgMods, venueMods] = await retry(
     () =>
       Promise.all([
         prisma.organizationModule.findMany({
-          where: { enabled: true, module: { code: MODULE_CODES.CASH_OUT } },
+          where: { enabled: true, module: { code: MODULE_CODES.SERIALIZED_INVENTORY } },
           select: { organizationId: true },
         }),
-        prisma.venueModule.findMany({ where: { enabled: true, module: { code: MODULE_CODES.CASH_OUT } }, select: { venueId: true } }),
+        prisma.venueModule.findMany({ where: { enabled: true, module: { code: MODULE_CODES.SERIALIZED_INVENTORY } }, select: { venueId: true } }),
       ]),
     { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'cash-out-settlement.listVenues' },
   )

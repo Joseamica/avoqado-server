@@ -11138,7 +11138,7 @@ enum JournalEntryStatus {
 
 // ==========================================
 // CASH OUT SYSTEM (PlayTelecom promoter same-day commission withdrawal)
-// Bespoke + module-gated (MODULE_CODES.CASH_OUT), org-level white-label ONLY.
+// Bespoke; gated by SERIALIZED_INVENTORY (appears wherever serialized inventory is on).
 // Isolated by design: NO @relation into existing models (plain String ids +
 // indexes; tenant isolation enforced in the service layer) so the scalable
 // product's models stay untouched. Spec: Avoqado-HQ/specs/2026-06-25-cash-out-promoter-commissions.md

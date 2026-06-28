@@ -13,7 +13,6 @@ export const MODULE_CODES = {
   ATTENDANCE_TRACKING: 'ATTENDANCE_TRACKING',
   WHITE_LABEL_DASHBOARD: 'WHITE_LABEL_DASHBOARD',
   COMMISSIONS: 'COMMISSIONS',
-  CASH_OUT: 'CASH_OUT', // PlayTelecom promoter same-day commission withdrawal (white-label, org-level)
 } as const
 
 export type ModuleCode = (typeof MODULE_CODES)[keyof typeof MODULE_CODES]
