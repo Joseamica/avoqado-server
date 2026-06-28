@@ -9,6 +9,7 @@ import {
   FiscalProvider,
   GlobalInvoiceParams,
   InvoiceSearchResult,
+  PaymentComplementParams,
   PayrollReceiptParams,
   ProviderInvoiceSummary,
   ReceptorInput,
@@ -213,6 +214,58 @@ export class FacturapiProvider implements FiscalProvider {
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
       logger.error(`[facturapi] createPayrollReceipt failed: ${message}`)
+      throw err
+    }
+  }
+
+  /**
+   * Timbra un CFDI 4.0 tipo "P" (Recibo Electrónico de Pago). El comprobante de pago
+   * lleva Total 0; el importe pagado vive en el complemento `pago` → related_documents.
+   * Importes del builder vienen en centavos → pesos en el boundary del PAC.
+   */
+  async createPaymentComplement(params: PaymentComplementParams): Promise<StampedInvoice> {
+    const payload: any = {
+      type: 'P', // CFDI tipo Pago (receptor uso CP01 — facturapi lo fija para type P)
+      customer: {
+        legal_name: params.receptor.razonSocial,
+        tax_id: params.receptor.rfc,
+        tax_system: params.receptor.regimenFiscal,
+        address: { zip: params.receptor.codigoPostal },
+        email: params.receptor.email,
+      },
+      series: params.serie,
+      complements: [
+        {
+          type: 'pago',
+          data: [
+            {
+              payment_form: params.paymentForm,
+              date: params.paymentDate,
+              related_documents: params.relatedDocuments.map(d => ({
+                uuid: d.uuid,
+                amount: toPesos(d.amountCents),
+                installment: d.installment,
+                last_balance: toPesos(d.lastBalanceCents),
+                taxes: d.taxes.map(t => ({
+                  base: toPesos(t.baseCents),
+                  rate: t.rate,
+                  type: t.type,
+                  factor: t.factor,
+                  withholding: t.withholding,
+                })),
+              })),
+            },
+          ],
+        },
+      ],
+      ...(params.externalId ? { external_id: params.externalId } : {}),
+    }
+    try {
+      const inv = await this.client.invoices.create(payload)
+      return this.toStamped(inv)
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
+      logger.error(`[facturapi] createPaymentComplement failed: ${message}`)
       throw err
     }
   }

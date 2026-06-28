@@ -11,6 +11,7 @@ import {
   issueInvoiceSchema,
   listInvoicesSchema,
   cancelInvoiceSchema,
+  registerPaymentSchema,
 } from './billing.schemas'
 
 /**
@@ -71,6 +72,12 @@ router.get('/invoices', validateRequest(listInvoicesSchema), checkPermission('pl
 router.get('/invoices/:id', checkPermission('platform-billing:view'), controller.getInvoice)
 router.get('/invoices/:id/pdf', checkPermission('platform-billing:view'), controller.downloadPdf)
 router.get('/invoices/:id/xml', checkPermission('platform-billing:view'), controller.downloadXml)
+router.post(
+  '/invoices/:id/payments',
+  validateRequest(registerPaymentSchema),
+  checkPermission('platform-billing:issue'),
+  controller.registerPayment,
+)
 router.post(
   '/invoices/:id/cancel',
   validateRequest(cancelInvoiceSchema),

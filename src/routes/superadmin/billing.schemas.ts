@@ -136,3 +136,11 @@ export const cancelInvoiceSchema = z.object({
     substituteUuid: z.string().trim().optional(),
   }),
 })
+
+export const registerPaymentSchema = z.object({
+  body: z.object({
+    paymentDate: z.string({ required_error: 'La fecha de pago es requerida' }).trim().min(1, 'La fecha de pago es requerida'),
+    formaPago: z.string({ required_error: 'La forma de pago es requerida' }).trim().min(1, 'La forma de pago es requerida'),
+    idempotencyKey: z.string().trim().min(1).optional(),
+  }),
+})

@@ -12,9 +12,15 @@
 import { Prisma, type PlatformCfdi } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { resolveFiscalProvider } from '@/services/fiscal/fiscalProvider.factory'
-import type { CfdiItemInput, CreateInvoiceParams } from '@/services/fiscal/providers/fiscal-provider.interface'
+import type { CfdiItemInput, CreateInvoiceParams, PaymentComplementTax } from '@/services/fiscal/providers/fiscal-provider.interface'
 import { getActivePlatformEmisor, PlatformBillingError } from './platformEmisor.service'
-import type { IssuePlatformCfdiInput, ListPlatformCfdisFilters, PlatformCfdiLineInput, PlatformCfdiTotals } from './types'
+import type {
+  IssuePlatformCfdiInput,
+  ListPlatformCfdisFilters,
+  PlatformCfdiLineInput,
+  PlatformCfdiTotals,
+  RegisterPaymentInput,
+} from './types'
 
 const DEFAULT_IVA_RATE = 0.16
 const MAX_PAGE_SIZE = 100
@@ -207,6 +213,146 @@ export async function cancelPlatformCfdi(
       cancelledAt: res.cancelledAt ?? new Date(),
     },
   })
+}
+
+/** Build the related-document tax breakdown (Pago 2.0) for a FULL payment, grouping lines by rate. */
+function buildRelatedDocTaxes(lines: PlatformCfdiLineInput[]): PaymentComplementTax[] {
+  const byRate = new Map<number, number>()
+  let exemptBaseCents = 0
+  for (const line of lines) {
+    const importe = Math.round(line.quantity * line.unitPriceCents)
+    const baseCents = importe - Math.round(line.discountCents ?? 0)
+    if (line.taxExempt) {
+      exemptBaseCents += baseCents
+    } else {
+      const rate = line.taxRate ?? DEFAULT_IVA_RATE
+      byRate.set(rate, (byRate.get(rate) ?? 0) + baseCents)
+    }
+  }
+  const taxes: PaymentComplementTax[] = []
+  for (const [rate, baseCents] of byRate) taxes.push({ baseCents, rate, type: 'IVA', factor: 'Tasa', withholding: false })
+  if (exemptBaseCents > 0) taxes.push({ baseCents: exemptBaseCents, rate: 0, type: 'IVA', factor: 'Exento', withholding: false })
+  return taxes
+}
+
+/**
+ * Register a payment against a PPD income CFDI by stamping a Complemento de Pago (REP, type P).
+ * MVP: a single FULL payment of the remaining balance (parcialidades = future work).
+ * Idempotent by idempotencyKey. Updates the parent's amountPaidCents atomically.
+ */
+export async function registerPlatformPayment(input: RegisterPaymentInput): Promise<PlatformCfdi> {
+  const prior = await prisma.platformCfdi.findUnique({ where: { idempotencyKey: input.idempotencyKey } })
+  if (prior) return prior
+
+  const parent = await prisma.platformCfdi.findUnique({ where: { id: input.platformCfdiId } })
+  if (!parent) throw new PlatformBillingError('CFDI no encontrado', 'NO_CFDI')
+  if (parent.type !== 'INGRESO') throw new PlatformBillingError('Solo las facturas de ingreso reciben complemento de pago', 'VALIDATION')
+  if (parent.metodoPago !== 'PPD') throw new PlatformBillingError('Solo las facturas PPD requieren complemento de pago', 'VALIDATION')
+  if (parent.status !== 'STAMPED') throw new PlatformBillingError('La factura debe estar timbrada', 'VALIDATION')
+  if (!parent.uuid) throw new PlatformBillingError('La factura no tiene folio fiscal (UUID)', 'VALIDATION')
+  if (parent.amountPaidCents > 0)
+    throw new PlatformBillingError('La factura ya tiene un pago registrado; las parcialidades aún no están soportadas', 'VALIDATION')
+
+  const remainingCents = parent.totalCents - parent.amountPaidCents
+  if (remainingCents <= 0) throw new PlatformBillingError('La factura ya está saldada', 'VALIDATION')
+
+  const lines = (parent.lines as unknown as PlatformCfdiLineInput[] | null) ?? []
+  const taxes = buildRelatedDocTaxes(lines)
+
+  const emisor = await getActivePlatformEmisor()
+  if (!emisor) throw new PlatformBillingError('No hay emisor de plataforma configurado', 'NO_EMISOR')
+  const sandbox = input.sandbox ?? false
+
+  // Reserve the REP row (unique idempotencyKey) before calling the PAC.
+  let row: PlatformCfdi
+  try {
+    row = await prisma.platformCfdi.create({
+      data: {
+        platformEmisorId: emisor.id,
+        billingTaxProfileId: parent.billingTaxProfileId,
+        type: 'PAGO',
+        parentPlatformCfdiId: parent.id,
+        organizationId: parent.organizationId,
+        venueId: parent.venueId,
+        receptorRfc: parent.receptorRfc,
+        receptorNombre: parent.receptorNombre,
+        receptorRegimen: parent.receptorRegimen,
+        receptorCp: parent.receptorCp,
+        usoCfdi: 'CP01', // CFDI tipo P → uso "Pagos"
+        formaPago: input.formaPago,
+        subtotalCents: 0,
+        taxCents: 0,
+        totalCents: 0, // CFDI tipo P lleva Total 0; el importe vive en el complemento
+        status: 'STAMPING',
+        serie: parent.serie,
+        idempotencyKey: input.idempotencyKey,
+        createdById: input.performedById,
+        paymentInfo: {
+          fechaPago: input.paymentDate,
+          formaPago: input.formaPago,
+          montoCents: remainingCents,
+          parcialidad: 1,
+          saldoAnteriorCents: remainingCents,
+          saldoInsolutoCents: 0,
+        } as unknown as Prisma.InputJsonValue,
+      },
+    })
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+      const dup = await prisma.platformCfdi.findUnique({ where: { idempotencyKey: input.idempotencyKey } })
+      if (dup) return dup
+    }
+    throw e
+  }
+
+  try {
+    const provider = resolveFiscalProvider({ provider: emisor.provider, providerKeyEnc: emisor.providerKeyEnc }, { sandbox })
+    if (!provider.createPaymentComplement) throw new PlatformBillingError('El proveedor fiscal no soporta complemento de pago', 'PROVIDER')
+
+    const stamped = await provider.createPaymentComplement({
+      receptor: {
+        rfc: parent.receptorRfc,
+        razonSocial: parent.receptorNombre,
+        regimenFiscal: parent.receptorRegimen,
+        codigoPostal: parent.receptorCp,
+      },
+      paymentDate: new Date(input.paymentDate),
+      paymentForm: input.formaPago,
+      serie: parent.serie ?? undefined,
+      externalId: input.idempotencyKey,
+      relatedDocuments: [{ uuid: parent.uuid, amountCents: remainingCents, installment: 1, lastBalanceCents: remainingCents, taxes }],
+    })
+
+    const updated = await prisma.$transaction(async tx => {
+      const rep = await tx.platformCfdi.update({
+        where: { id: row.id },
+        data: {
+          status: 'STAMPED',
+          facturapiId: stamped.providerInvoiceId,
+          uuid: stamped.uuid,
+          serie: stamped.serie ?? parent.serie,
+          folio: stamped.folio,
+          stampedAt: stamped.stampedAt,
+        },
+      })
+      await tx.platformCfdi.update({ where: { id: parent.id }, data: { amountPaidCents: { increment: remainingCents } } })
+      return rep
+    })
+    return updated
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    await prisma.platformCfdi.update({
+      where: { id: row.id },
+      data: { status: 'STAMP_FAILED', lastError: message, attempts: { increment: 1 } },
+    })
+    if (err instanceof PlatformBillingError) throw err
+    throw new PlatformBillingError(`Error al timbrar el complemento de pago: ${message}`, 'PROVIDER')
+  }
+}
+
+/** List the payment complements (REPs) registered against a parent income CFDI. */
+export async function listPlatformCfdiPayments(parentId: string): Promise<PlatformCfdi[]> {
+  return prisma.platformCfdi.findMany({ where: { parentPlatformCfdiId: parentId, type: 'PAGO' }, orderBy: { createdAt: 'asc' } })
 }
 
 /** Fetch the stamped XML/PDF bytes from the PAC for download. */

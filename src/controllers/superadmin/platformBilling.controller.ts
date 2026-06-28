@@ -22,6 +22,8 @@ import {
   getPlatformCfdi,
   cancelPlatformCfdi,
   fetchPlatformCfdiArtifact,
+  registerPlatformPayment,
+  listPlatformCfdiPayments,
 } from '@/services/superadmin/platform-billing/platformCfdi.service'
 import type { BillingCustomerKind } from '@/services/superadmin/platform-billing/types'
 
@@ -222,9 +224,39 @@ export async function getInvoice(req: Request, res: Response, next: NextFunction
       res.status(404).json({ success: false, error: 'CFDI no encontrado' })
       return
     }
-    res.json({ success: true, data: cfdi })
+    // Income CFDIs include their payment complements (REPs) for the detail view.
+    const payments = cfdi.type === 'INGRESO' ? await listPlatformCfdiPayments(cfdi.id) : []
+    res.json({ success: true, data: { ...cfdi, payments } })
   } catch (error) {
     next(error)
+  }
+}
+
+/** POST /api/v1/superadmin/billing/invoices/:id/payments — register a payment → stamp a REP (PPD only). */
+export async function registerPayment(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { userId } = (req as any).authContext
+    const { paymentDate, formaPago, idempotencyKey } = req.body as { paymentDate: string; formaPago: string; idempotencyKey?: string }
+    const rep = await registerPlatformPayment({
+      platformCfdiId: req.params.id,
+      paymentDate,
+      formaPago,
+      idempotencyKey: idempotencyKey ?? randomUUID(),
+      performedById: userId,
+    })
+    await prisma.activityLog.create({
+      data: {
+        staffId: userId,
+        venueId: rep.venueId,
+        action: 'PLATFORM_PAYMENT_RECEIVED',
+        entity: 'PlatformCfdi',
+        entityId: rep.id,
+        data: { parentId: rep.parentPlatformCfdiId, uuid: rep.uuid },
+      },
+    })
+    res.status(201).json({ success: true, data: rep })
+  } catch (error) {
+    handleBillingError(error, res, next)
   }
 }
 

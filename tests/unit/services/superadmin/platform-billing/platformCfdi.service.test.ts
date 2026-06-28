@@ -9,6 +9,7 @@ import {
   computePlatformCfdiTotals,
   issuePlatformCfdi,
   cancelPlatformCfdi,
+  registerPlatformPayment,
 } from '@/services/superadmin/platform-billing/platformCfdi.service'
 import { PlatformBillingError } from '@/services/superadmin/platform-billing/platformEmisor.service'
 
@@ -160,6 +161,96 @@ describe('platformCfdi.service', () => {
     it('refuses to cancel a CFDI that is not STAMPED', async () => {
       prismaMock.platformCfdi.findUnique.mockResolvedValue({ id: 'c1', status: 'DRAFT', facturapiId: null, platformEmisorId: 'em1' })
       await expect(cancelPlatformCfdi('c1', '02')).rejects.toMatchObject({ code: 'VALIDATION' })
+    })
+  })
+
+  describe('registerPlatformPayment (NEW — complemento de pago / REP)', () => {
+    const PPD_PARENT = {
+      id: 'inv1',
+      type: 'INGRESO',
+      metodoPago: 'PPD',
+      status: 'STAMPED',
+      uuid: 'UUID-PPD',
+      totalCents: 185484,
+      amountPaidCents: 0,
+      subtotalCents: 159900,
+      discountCents: 0,
+      taxCents: 25584,
+      serie: 'A',
+      billingTaxProfileId: 'p1',
+      organizationId: 'org1',
+      venueId: null,
+      receptorRfc: 'XAXX010101000',
+      receptorNombre: 'Cliente Demo',
+      receptorRegimen: '601',
+      receptorCp: '06000',
+      lines: [
+        { description: 'Mensualidad', satProductKey: '81161700', satUnitKey: 'E48', quantity: 1, unitPriceCents: 159900, taxRate: 0.16 },
+      ],
+    }
+    const baseInput = {
+      platformCfdiId: 'inv1',
+      paymentDate: '2026-06-28T12:00:00',
+      formaPago: '03',
+      idempotencyKey: 'pay-1',
+      performedById: 'staff-1',
+    }
+
+    it('stamps a REP, increments parent amountPaidCents, sends the right related-doc taxes', async () => {
+      prismaMock.platformCfdi.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(PPD_PARENT)
+      prismaMock.platformEmisor.findFirst.mockResolvedValue(ACTIVE_EMISOR)
+      prismaMock.platformCfdi.create.mockResolvedValue({ id: 'rep1', status: 'STAMPING' })
+      prismaMock.platformCfdi.update.mockImplementation((args: any) => Promise.resolve({ id: args.where.id, ...args.data }))
+      const createPaymentComplement = jest.fn().mockResolvedValue({
+        providerInvoiceId: 'fa-rep',
+        uuid: 'UUID-REP',
+        serie: 'A',
+        folio: '9',
+        stampedAt: new Date('2026-06-28T12:00:00Z'),
+        status: 'valid',
+      })
+      mockResolve.mockReturnValue({ createPaymentComplement })
+
+      const rep = await registerPlatformPayment(baseInput)
+
+      expect(createPaymentComplement).toHaveBeenCalledWith(
+        expect.objectContaining({
+          paymentForm: '03',
+          relatedDocuments: [
+            expect.objectContaining({
+              uuid: 'UUID-PPD',
+              amountCents: 185484,
+              installment: 1,
+              lastBalanceCents: 185484,
+              taxes: [{ baseCents: 159900, rate: 0.16, type: 'IVA', factor: 'Tasa', withholding: false }],
+            }),
+          ],
+        }),
+      )
+      expect(prismaMock.platformCfdi.update).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'inv1' }, data: { amountPaidCents: { increment: 185484 } } }),
+      )
+      expect(rep.status).toBe('STAMPED')
+      expect(rep.uuid).toBe('UUID-REP')
+    })
+
+    it('rejects a PUE invoice (no complemento needed)', async () => {
+      prismaMock.platformCfdi.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce({ ...PPD_PARENT, metodoPago: 'PUE' })
+      await expect(registerPlatformPayment({ ...baseInput, idempotencyKey: 'p2' })).rejects.toMatchObject({ code: 'VALIDATION' })
+    })
+
+    it('rejects when a payment is already registered (parcialidades unsupported in MVP)', async () => {
+      prismaMock.platformCfdi.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce({ ...PPD_PARENT, amountPaidCents: 185484 })
+      await expect(registerPlatformPayment({ ...baseInput, idempotencyKey: 'p3' })).rejects.toMatchObject({ code: 'VALIDATION' })
+    })
+
+    it('is idempotent: a repeated key returns the prior REP without re-stamping', async () => {
+      prismaMock.platformCfdi.findUnique.mockResolvedValueOnce({ id: 'repX', status: 'STAMPED' })
+      const createPaymentComplement = jest.fn()
+      mockResolve.mockReturnValue({ createPaymentComplement })
+      const rep = await registerPlatformPayment({ ...baseInput, idempotencyKey: 'dup' })
+      expect(rep.id).toBe('repX')
+      expect(createPaymentComplement).not.toHaveBeenCalled()
     })
   })
 })

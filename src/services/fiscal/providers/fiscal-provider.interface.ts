@@ -170,6 +170,34 @@ export interface CancelInvoiceResult {
   cancelledAt: Date | null
 }
 
+/** Tax line of a related document inside a payment complement (Pago 2.0). Money in CENTS. */
+export interface PaymentComplementTax {
+  baseCents: number
+  rate: number
+  type: 'IVA' | 'IEPS' | 'ISR'
+  factor: 'Tasa' | 'Cuota' | 'Exento'
+  withholding: boolean
+}
+
+/** A document settled by a payment (the original PPD invoice). Money in CENTS. */
+export interface PaymentComplementRelatedDoc {
+  uuid: string
+  amountCents: number // importe pagado en este recibo
+  installment: number // num_parcialidad (1-based)
+  lastBalanceCents: number // imp_saldo_ant (saldo antes de este pago)
+  taxes: PaymentComplementTax[]
+}
+
+/** Params to stamp a CFDI 4.0 tipo "P" (Recibo Electrónico de Pago / complemento de pago). */
+export interface PaymentComplementParams {
+  receptor: ReceptorInput & { email?: string }
+  paymentDate: Date
+  paymentForm: string // c_FormaPago (forma real del pago recibido)
+  serie?: string
+  externalId?: string
+  relatedDocuments: PaymentComplementRelatedDoc[]
+}
+
 /**
  * A CFDI provider (PAC integration layer). facturapi is the first adapter.
  */
@@ -205,6 +233,8 @@ export interface FiscalProvider {
   cancelInvoice(params: CancelInvoiceParams): Promise<CancelInvoiceResult>
   /** Timbra un recibo de NÓMINA (CFDI 4.0 tipo "N" + complemento Nómina 1.2). Opcional por proveedor. */
   createPayrollReceipt?(params: PayrollReceiptParams): Promise<StampedInvoice>
+  /** Timbra un CFDI 4.0 tipo "P" (Recibo Electrónico de Pago / complemento de pago). Opcional por proveedor. */
+  createPaymentComplement?(params: PaymentComplementParams): Promise<StampedInvoice>
 }
 
 /** Una percepción del recibo de nómina (c_TipoPercepcion). Importes en centavos. */

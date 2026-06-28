@@ -88,3 +88,16 @@ export interface ListPlatformCfdisFilters {
   page?: number
   pageSize?: number
 }
+
+export interface RegisterPaymentInput {
+  /** The parent PPD income CFDI being settled. */
+  platformCfdiId: string
+  /** ISO datetime when the payment was received. */
+  paymentDate: string
+  /** c_FormaPago of the actual payment (e.g. "03" transferencia, "04" tarjeta). */
+  formaPago: string
+  /** Staff who registered it (authContext.userId). */
+  performedById: string
+  idempotencyKey: string
+  sandbox?: boolean
+}
