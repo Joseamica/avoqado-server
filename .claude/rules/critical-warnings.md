@@ -20,7 +20,7 @@ Fields: `{ userId: string, orgId: string, venueId: string, role: StaffRole }` So
 
 EVERY database query MUST filter by `venueId` or `orgId`. No exceptions.
 
-## Money = Decimal, Never Float
+## Money = Decimal, Never Float — and PESOS 1:1 (NOT cents)
 
 ```typescript
 amount: new Prisma.Decimal(100.5) // CORRECT
@@ -28,6 +28,25 @@ amount: 100.5 // WRONG - precision loss
 ```
 
 Always use `prisma.$transaction()` for money operations.
+
+### 🔴 Units: the whole platform works in PESOS, major units, 1:1 — `1.00` = one peso
+
+We do **NOT** do the Stripe thing where 1 peso = 100. Internally a peso is literally `1` (`Decimal(x,2)`).
+Every service, query, MCP tool I/O, dashboard field and report is in **pesos (major units)**. **Never `* 100`
+for storage, queries, business logic, or any MCP/API response.**
+
+**`* 100` (cents / minor units) is allowed ONLY at an external boundary, then immediately back to pesos:**
+
+| Boundary | Helper / field |
+|---|---|
+| Stripe | `toStripeAmount` (`src/services/payments/providers/money.ts`) = `decimal.mul(100).round(0)` |
+| Refund service (internal cents) | `toCents` |
+| CFDI / fiscal | `totalCents` |
+| MercadoPago · AngelPay · B4BIT | all cents at the provider call |
+| Accounting ledger | `JournalEntry.totalDebitCents` / `JournalLine.debitCents` are cents **internally**; convert **÷100** for any display / MCP output |
+
+If you find yourself writing `Math.round(amount * 100)` anywhere that is NOT one of those boundaries, it's a bug.
+Verify money to the cent with `scripts/mcp-money-reconcile.ts` (MCP totals == DB).
 
 ## Webhook Mounting Order
 
@@ -144,6 +163,15 @@ Avoqado has **two separate MCP servers**. Confusing them causes branch chaos:
 - **Customer MCP** = `src/mcp/` — the customer-facing **product** (Streamable HTTP + OAuth, scoped by `getUserAccess()`), on **`develop`**.
   **New feature tools go HERE**, in `src/mcp/tools/`, registered in `src/mcp/server.ts`.
 - **Admin MCP** = `scripts/mcp/` — an **internal** founder-ops tool (stdio), separate, only on `feat/admin-mcp` (unmerged).
+
+**Invariants EVERY customer-MCP tool must honor** (verified to the cent across the suite — don't regress them):
+
+1. **Money in PESOS, 1:1.** Tool inputs and outputs are major units (`150.50` = 150 pesos 50 cents). NEVER cents — see
+   "Money = Decimal … PESOS 1:1" above. The ledger tools convert `…Cents` ÷100 before returning.
+2. **Dates are VENUE-LOCAL.** Every date filter goes through `getVenueChartData()` (`src/mcp/chartData.ts`),
+   `venueStartOfDay`/`venueEndOfDay` (noon anchor), or `parseDbDateRange(from, to, venueTz)` — NEVER a bare
+   `new Date('YYYY-MM-DD')` / `parseISO`. See the "bare `YYYY-MM-DD` is a RUNTIME-TZ trap" rule above.
+3. **Prove it.** New/changed money tools must pass `scripts/mcp-money-reconcile.ts` (tool totals == DB to the cent).
 
 **This rule targets the CUSTOMER MCP (`src/mcp/`).** Whenever you add or change a feature, model, service, endpoint, permission, or any
 capability an operator should be able to read (later: act on), add/update the matching tool in `src/mcp/tools/` as part of the SAME change.

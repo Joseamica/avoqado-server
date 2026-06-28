@@ -189,6 +189,11 @@ unfinished. Treat it like permissions: kept in lockstep.
 **Do NOT** add product feature tools to the admin MCP (`scripts/mcp/`), and **do NOT** merge `feat/admin-mcp` into develop just to add a
 tool — it is a separate internal tool, not driven by this rule.
 
+**Every customer-MCP tool MUST honor these invariants** (full detail in `.claude/rules/critical-warnings.md`):
+(1) **money in PESOS, 1:1** — inputs/outputs in major units (`150.50`), NEVER cents (`* 100` only at Stripe/CFDI/provider boundaries;
+ledger `…Cents` fields convert ÷100 before returning); (2) **dates are VENUE-LOCAL** — via `getVenueChartData` / `venueStartOfDay` /
+`parseDbDateRange`, never a bare `new Date('YYYY-MM-DD')`; (3) money tools must cuadrar to the cent (`scripts/mcp-money-reconcile.ts`).
+
 ## 🔴 CRITICAL — Audit mutations with ActivityLog
 
 Every **audit-worthy mutation** — create/update/delete of domain entities, money ops, access/permission changes, **superadmin overrides**
@@ -209,3 +214,17 @@ Avoqado does" document — third parties sell from it. It must never fall behind
 packaging), you MUST update BOTH deliverables as part of the SAME change — never "later":** the full deck (`avoqado-presentacion.html`) AND
 the one-pager (`avoqado-one-pager.html`), then regenerate both PDFs following that folder's `README.md`. Updating only one of the two is an
 incomplete change. Internal refactors and bugfixes with no customer-visible impact are exempt.
+
+---
+
+## Fetching Asana task attachments / screenshots
+
+When given an Asana task URL, you **can** see its screenshots and attachments — don't claim you can't.
+
+- `mcp__asana__*` reads task text/comments but **not** files; the `mcp__claude_ai_Asana__` connector is often unauthorized. Don't stop there — use the Asana Personal Access Token directly (it's what powers the `asana` MCP server):
+  1. Read the token (use it, **never print or commit the value**): key `ASANA_ACCESS_TOKEN` under `mcpServers.asana.env` in `~/.claude.json`. Example:
+     `TOKEN=$(python3 -c "import json,os; print(json.load(open(os.path.expanduser('~/.claude.json')))['mcpServers']['asana']['env']['ASANA_ACCESS_TOKEN'])")`
+  2. List attachments + signed URLs (task GID = the long number after `/task/` in the URL):
+     `curl -s -H "Authorization: Bearer $TOKEN" "https://app.asana.com/api/1.0/tasks/<GID>/attachments?opt_fields=name,download_url,created_at"`
+  3. `curl` each `download_url` (pre-signed, needs no auth) to a temp file in the scratchpad, then Read the image. Inline description images are attachments too, so this returns all of them — not just the ones embedded in the text.
+- If slide/screenshot text is unreadable after Read downscales a large image, crop it into regions with PIL and upscale (LANCZOS) before re-reading.
