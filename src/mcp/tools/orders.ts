@@ -56,14 +56,27 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'find_order',
-    'Find one order by its id, or by a serial number (SIM/ICCID/barcode) of an item sold on it. Returns the order header, line items, and payments — but only if the order belongs to one of your venues. Pass exactly one of orderId or serialNumber.',
+    'Find one order by its human ORDER NUMBER (what the operator sees on receipts/screens, e.g. ORD-5454 or FAST-1781718731451), by its internal id, or by a serial number (SIM/ICCID/barcode) of an item sold on it. Returns the order header, line items, and payments — but only if the order belongs to one of your venues. Pass exactly one of orderNumber, orderId, or serialNumber. Prefer orderNumber — it is the identifier operators actually have.',
     {
-      orderId: z.string().optional().describe('The order id (cuid)'),
+      orderNumber: z.string().optional().describe('The human order number shown on receipts/screens (e.g. ORD-5454, FAST-1781718731451) — case-insensitive'),
+      orderId: z.string().optional().describe('The internal order id (cuid) — operators rarely have this; prefer orderNumber'),
       serialNumber: z.string().optional().describe('A serial number / barcode / ICCID of an item sold on the order'),
     },
-    async ({ orderId, serialNumber }) => {
+    async ({ orderNumber, orderId, serialNumber }) => {
       const where = guard.venueFilter() // {venueId:{in:[...]}} — enforces scope
       let id = orderId
+      if (!id && orderNumber) {
+        // Resolve the human order number → id WITHIN scope (so you can't probe another venue's numbers).
+        // Case-insensitive; order numbers can repeat across venues, so take the most recent match.
+        const trimmed = orderNumber.trim()
+        const byNumber = await prisma.order.findFirst({
+          where: { ...where, orderNumber: { equals: trimmed, mode: 'insensitive' as const } },
+          select: { id: true },
+          orderBy: { createdAt: 'desc' },
+        })
+        id = byNumber?.id ?? undefined
+        if (!id) return text({ found: false, reason: `No order found with number "${orderNumber}" in your venues` })
+      }
       if (!id && serialNumber) {
         // Serials are stored canonically UPPERCASE, but a handful of legacy items are lower-cased —
         // match case-insensitively so a scan/paste in either case still resolves the order.
@@ -76,7 +89,7 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
         id = item?.orderItem?.orderId ?? undefined
         if (!id) return text({ found: false, reason: `No order found for serial "${serialNumber}"` })
       }
-      if (!id) return text({ found: false, reason: 'Pass orderId or serialNumber' })
+      if (!id) return text({ found: false, reason: 'Pass orderNumber, orderId, or serialNumber' })
       const order = await prisma.order.findFirst({
         where: { id, ...where }, // scope: null if the order is not one of your venues'
         select: {
