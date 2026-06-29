@@ -84,7 +84,15 @@ describe('customer_history', () => {
     expect(out.otherMatches).toEqual(['Juana Ruiz'])
     expect(out.orderCount).toBe(2)
     expect(out.orders[0]).toEqual({ orderNumber: 'A-1009', total: 520, status: 'COMPLETED', date: '2026-06-04T20:00:00.000Z' })
-    // orders are scoped to the resolved customer AND the venue
-    expect(mockOrderFind).toHaveBeenCalledWith(expect.objectContaining({ where: { venueId: { in: ['v1'] }, customerId: 'cust1' } }))
+    // orders are scoped to the venue AND match the customer via EITHER the direct FK or the
+    // OrderCustomer junction (the TPV flow links via the junction — FK-only would drop those orders).
+    expect(mockOrderFind).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          venueId: { in: ['v1'] },
+          OR: [{ customerId: 'cust1' }, { orderCustomers: { some: { customerId: 'cust1' } } }],
+        },
+      }),
+    )
   })
 })

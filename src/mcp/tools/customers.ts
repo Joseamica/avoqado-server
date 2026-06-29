@@ -120,8 +120,11 @@ export function registerCustomerTools(server: McpServer, scope: McpScope) {
       }
 
       const c = matches[0]
+      // Customers link to orders TWO ways: the direct Order.customerId FK AND the OrderCustomer
+      // junction (what the TPV payment flow uses — see payment.tpv.service `oc.customerId`). Match
+      // EITHER so a customer's orders aren't silently dropped when only the junction is set.
       const orders = await prisma.order.findMany({
-        where: { ...base, customerId: c.id },
+        where: { ...base, OR: [{ customerId: c.id }, { orderCustomers: { some: { customerId: c.id } } }] },
         select: { orderNumber: true, total: true, status: true, createdAt: true },
         orderBy: { createdAt: 'desc' },
         take: limit ?? 20,
