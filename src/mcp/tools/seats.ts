@@ -60,10 +60,20 @@ export function registerSeatTools(server: McpServer, scope: McpScope) {
         .describe(
           'staffVenueId values to KEEP active on Free (≤2, MUST include the owner). Empty only when the venue is already at/under the cap.',
         ),
+      confirm: z.boolean().optional().describe('Must be true to actually schedule the downgrade; without it you get a preview'),
     },
-    async ({ venueId, keepStaffVenueIds }) => {
+    async ({ venueId, keepStaffVenueIds, confirm }) => {
       guard.venueFilter(venueId) // throws ScopeError if out of scope
       guard.requirePermission('billing:subscriptions:manage', venueId) // write gate (per-venue role)
+      if (!confirm) {
+        // High-impact (plan/billing + deactivates users) → never act on a vague request without confirmation.
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          change: { label: 'Plan', from: 'PRO', to: 'FREE (al fin del periodo)', keepUsers: keepStaffVenueIds.length },
+          message: `Esto AGENDARÁ la baja del plan PRO → FREE al FIN DEL PERIODO. Mantendrá ${keepStaffVenueIds.length} usuario(s) activo(s); el resto se DESACTIVA (reversible si vuelves a PRO). Revisa el roster con get_venue_downgrade_preview, confirma con el operador, y vuelve a llamar con confirm:true.`,
+        })
+      }
       try {
         const planState = await scheduleDowngradeToFree(venueId, keepStaffVenueIds)
         await auditMcpWrite(scope, {

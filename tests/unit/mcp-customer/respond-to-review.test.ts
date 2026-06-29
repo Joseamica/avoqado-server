@@ -32,9 +32,17 @@ beforeAll(() => {
 beforeEach(() => jest.clearAllMocks())
 
 describe('respond_to_review', () => {
-  it('responds to an in-scope review: submits + audits with staff attribution', async () => {
+  it('without confirm → preview of the public text, does NOT post', async () => {
     mockReviewFindFirst.mockResolvedValueOnce({ venueId: 'v1' })
     const out = parse(await call({ reviewId: 'rev-1', responseText: 'Gracias!' }))
+    expect(out.requiresConfirmation).toBe(true)
+    expect(out.preview).toMatchObject({ willPostPublicly: 'Gracias!' })
+    expect(mockSubmit).not.toHaveBeenCalled()
+  })
+
+  it('confirm:true → submits + audits with staff attribution', async () => {
+    mockReviewFindFirst.mockResolvedValueOnce({ venueId: 'v1' })
+    const out = parse(await call({ reviewId: 'rev-1', responseText: 'Gracias!', confirm: true }))
 
     expect(mockSubmit).toHaveBeenCalledWith('rev-1', 'Gracias!')
     expect(out.ok).toBe(true)

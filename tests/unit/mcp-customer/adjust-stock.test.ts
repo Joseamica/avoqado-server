@@ -37,9 +37,17 @@ beforeAll(() => {
 beforeEach(() => jest.clearAllMocks())
 
 describe('adjust_stock', () => {
-  it('adjusts a single match by delta (default ADJUSTMENT), audits, returns new stock', async () => {
-    mockProductFindMany.mockResolvedValueOnce([{ id: 'p1', name: 'Coca Cola' }])
-    const out = parse(await call({ venueId: 'v1', name: 'coca', delta: -5, reason: 'merma' }))
+  it('without confirm → preview (current → new), NO service call', async () => {
+    mockProductFindMany.mockResolvedValueOnce([{ id: 'p1', name: 'Coca Cola', inventory: { currentStock: 45 } }])
+    const out = parse(await call({ venueId: 'v1', name: 'coca', delta: -5 }))
+    expect(out.requiresConfirmation).toBe(true)
+    expect(out.change).toMatchObject({ product: 'Coca Cola', from: 45, delta: -5, to: 40 })
+    expect(mockAdjust).not.toHaveBeenCalled()
+  })
+
+  it('adjusts a single match by delta (default ADJUSTMENT) WITH confirm, audits, returns new stock', async () => {
+    mockProductFindMany.mockResolvedValueOnce([{ id: 'p1', name: 'Coca Cola', inventory: { currentStock: 45 } }])
+    const out = parse(await call({ venueId: 'v1', name: 'coca', delta: -5, reason: 'merma', confirm: true }))
 
     expect(mockAdjust).toHaveBeenCalledTimes(1)
     const [venueId, productId, data, staffId] = dataArg()
@@ -58,12 +66,12 @@ describe('adjust_stock', () => {
     })
   })
 
-  it("maps type 'loss' → LOSS and 'purchase' → PURCHASE", async () => {
-    mockProductFindMany.mockResolvedValue([{ id: 'p1', name: 'X' }])
-    await call({ venueId: 'v1', name: 'x', delta: -2, type: 'loss' })
+  it("maps type 'loss' → LOSS and 'purchase' → PURCHASE (with confirm)", async () => {
+    mockProductFindMany.mockResolvedValue([{ id: 'p1', name: 'X', inventory: { currentStock: 20 } }])
+    await call({ venueId: 'v1', name: 'x', delta: -2, type: 'loss', confirm: true })
     expect(dataArg()[2].type).toBe('LOSS')
     mockAdjust.mockClear()
-    await call({ venueId: 'v1', name: 'x', delta: 10, type: 'purchase' })
+    await call({ venueId: 'v1', name: 'x', delta: 10, type: 'purchase', confirm: true })
     expect(dataArg()[2].type).toBe('PURCHASE')
   })
 

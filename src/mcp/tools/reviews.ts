@@ -76,12 +76,13 @@ export function registerReviewTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'respond_to_review',
-    'Post a public reply to a customer review in a venue you can access. Identify the review by its id (from list_reviews). If it is a Google review and the venue has Google Business Profile connected, the reply is also posted to Google. This WRITES — requires reviews:respond.',
+    'Post a PUBLIC reply to a customer review in a venue you can access. Identify the review by its id (from list_reviews). If it is a Google review and the venue has Google Business Profile connected, the reply is also posted to Google. Because the reply is public (and hard to retract), by DEFAULT this only PREVIEWS the exact text that would be posted; call again with confirm:true to publish it. This WRITES — requires reviews:respond.',
     {
       reviewId: z.string().min(1).describe('The review id (from list_reviews)'),
       responseText: z.string().min(1).describe('Your public reply to the review'),
+      confirm: z.boolean().optional().describe('Must be true to actually publish the public reply; without it you get a preview'),
     },
-    async ({ reviewId, responseText }) => {
+    async ({ reviewId, responseText, confirm }) => {
       // Scope-check the review by venue (submitResponse does not) so you can't reply to another tenant's review.
       const review = await prisma.review.findFirst({
         where: { id: reviewId, venueId: { in: scope.allowedVenueIds } },
@@ -89,6 +90,14 @@ export function registerReviewTools(server: McpServer, scope: McpScope) {
       })
       if (!review) return text({ ok: false, error: 'No encontré esa reseña en tus locales.' })
       guard.requirePermission('reviews:respond', review.venueId) // write gate (per-venue role)
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview: { willPostPublicly: responseText },
+          message: `Esto PUBLICARÁ esta respuesta visible al cliente: "${responseText}". Confirma con el operador que el texto es correcto; luego vuelve a llamar con confirm:true.`,
+        })
+      }
       try {
         const updated = await submitResponse(reviewId, responseText)
         await auditMcpWrite(scope, {

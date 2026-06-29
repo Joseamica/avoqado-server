@@ -120,8 +120,12 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
         .enum(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'])
         .optional()
         .describe("Only auto-order items at/above this urgency. Default 'LOW' (everything below reorder point)."),
+      confirm: z
+        .boolean()
+        .optional()
+        .describe('Must be true to actually apply; without it you get a preview (auto-reorder emails suppliers)'),
     },
-    async ({ venueId, enabled, dailyCapMxn, minUrgency }) => {
+    async ({ venueId, enabled, dailyCapMxn, minUrgency, confirm }) => {
       guard.venueFilter(venueId) // throws if out of scope
       guard.requirePermission('inventory:update', venueId) // write gate
       const entitled = [...(await venuesWithFeatureAccess([venueId], 'AUTO_REORDER'))]
@@ -129,6 +133,15 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
         return text({ ok: false, planRequired: true, error: 'El re-orden automático requiere el plan PREMIUM (AUTO_REORDER).' })
       }
       const current = await getAutoReorderConfig(venueId)
+      if (!confirm) {
+        // High-impact: turning this ON makes the nightly job auto-create POs and EMAIL suppliers. Never on a vague request.
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          change: { label: 'Auto-reorden', from: current.enabled ? 'ON' : 'OFF', to: enabled ? 'ON' : 'OFF' },
+          message: `Esto ${enabled ? 'ENCENDERÁ' : 'apagará'} el re-orden automático${enabled ? ' — el job nocturno creará órdenes de compra y ENVIARÁ correos a proveedores solo' : ''}. Confirma con el operador; luego vuelve a llamar con confirm:true.`,
+        })
+      }
       try {
         const config = await setAutoReorderConfig(venueId, {
           enabled,
@@ -152,7 +165,7 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'adjust_stock',
-    'Adjust the stock of a QUANTITY-tracked product in a venue you can access, found by name. `delta` is the CHANGE (not the new total): positive adds (e.g. 50 = stock received), negative subtracts (e.g. -10 = waste/correction). Cannot push stock below 0. This WRITES — changes inventory; requires inventory:adjust. If the name matches several products it returns them so you can be specific.',
+    'Adjust the stock of a QUANTITY-tracked product in a venue you can access, found by name. `delta` is the CHANGE (not the new total): positive adds (e.g. 50 = stock received), negative subtracts (e.g. -10 = waste/correction). Cannot push stock below 0. By DEFAULT this only PREVIEWS the change (current stock → new stock); call again with confirm:true to actually apply it. This WRITES — requires inventory:adjust. If the name matches several products it returns them so you can be specific.',
     {
       venueId: z.string().describe('Venue that owns the product (must be in your scope)'),
       name: z.string().min(1).describe('Product name or part of it'),
@@ -162,15 +175,16 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
         .optional()
         .describe("Reason category: 'adjustment' (default), 'purchase' (stock received), 'loss' (waste/damage)"),
       reason: z.string().optional().describe('Free-text reason (e.g. "merma", "recepción de mercancía")'),
+      confirm: z.boolean().optional().describe('Must be true to actually apply the adjustment; without it you get a preview'),
     },
-    async ({ venueId, name, delta, type, reason }) => {
+    async ({ venueId, name, delta, type, reason, confirm }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if out of scope
       guard.requirePermission('inventory:adjust', venueId) // write gate (per-venue role)
       const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'El control de inventario') // PREMIUM tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
       const matches = await prisma.product.findMany({
         where: { ...where, name: { contains: name, mode: 'insensitive' as const }, trackInventory: true, inventoryMethod: 'QUANTITY' },
-        select: { id: true, name: true },
+        select: { id: true, name: true, inventory: { select: { currentStock: true } } },
         take: 10,
       })
       if (matches.length === 0) {
@@ -182,6 +196,15 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
           ambiguous: true,
           error: `"${name}" coincide con varios productos — sé más específico.`,
           matches: matches.map(m => m.name),
+        })
+      }
+      const currentStock = Number(matches[0].inventory?.currentStock ?? 0)
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          change: { product: matches[0].name, label: 'Stock', from: currentStock, delta, to: round2(currentStock + delta) },
+          message: `Esto ajustará el stock de "${matches[0].name}": ${currentStock} ${delta >= 0 ? '+' : ''}${delta} → ${round2(currentStock + delta)}. Confirma con el operador; luego vuelve a llamar con confirm:true.`,
         })
       }
       try {
@@ -243,19 +266,32 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'mark_serialized_item',
-    'Mark a serialized item (SIM / ICCID / barcode) as RETURNED (reverses a sale and frees it back up the custody chain) or DAMAGED (removes it from the sellable chain). Identify it by serial number within a venue you can access. This WRITES — it changes inventory state; requires inventory:adjust.',
+    'Mark a serialized item (SIM / ICCID / barcode) as RETURNED (reverses a sale and frees it back up the custody chain) or DAMAGED (removes it from the sellable chain). Identify it by serial number within a venue you can access. Because it changes custody/sale state, by DEFAULT it only PREVIEWS the action; call again with confirm:true to apply. This WRITES — requires inventory:adjust.',
     {
       venueId: z.string().describe('Venue that owns the item (must be in your scope)'),
       serialNumber: z.string().min(1).describe('Serial number / ICCID / barcode of the item'),
       action: z.enum(['returned', 'damaged']).describe("'returned' reverses a sale; 'damaged' marks it unsellable"),
+      confirm: z.boolean().optional().describe('Must be true to actually change the item state; without it you get a preview'),
     },
-    async ({ venueId, serialNumber, action }) => {
+    async ({ venueId, serialNumber, action, confirm }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('inventory:adjust', venueId) // write gate (per-venue role)
       // SERIALIZED_INVENTORY is a MODULE — gate the same way the platform does (isModuleEnabled,
       // incl. org-level fallback), NOT the Feature/tier resolver. Only module-on venues can write.
       if (!(await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY))) {
         return text({ ok: false, moduleRequired: true, error: SERIALIZED_OFF_MSG })
+      }
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          change: {
+            serialNumber,
+            action,
+            effect: action === 'returned' ? 'revierte la venta y libera el item' : 'marca el item como no vendible',
+          },
+          message: `Esto marcará el serial "${serialNumber}" como ${action === 'returned' ? 'DEVUELTO (revierte la venta)' : 'DAÑADO (no vendible)'}. Confirma con el operador; luego vuelve a llamar con confirm:true.`,
+        })
       }
       try {
         const item =

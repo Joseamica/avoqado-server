@@ -84,10 +84,17 @@ describe('mark_serialized_item (write) — module-gated', () => {
     expect(mockDamaged).not.toHaveBeenCalled()
   })
 
-  it('module ON → marks returned + audits as customer-mcp', async () => {
+  it('without confirm → preview, does NOT mark (even with module ON)', async () => {
+    mockIsEnabled.mockResolvedValue(true)
+    const out = parse(await call('mark_serialized_item', base))
+    expect(out.requiresConfirmation).toBe(true)
+    expect(mockReturned).not.toHaveBeenCalled()
+  })
+
+  it('module ON + confirm → marks returned + audits as customer-mcp', async () => {
     mockIsEnabled.mockResolvedValue(true)
     mockReturned.mockResolvedValueOnce({ id: 'si1', serialNumber: 'ICC123', status: 'RETURNED', custodyState: 'IN_STOCK' })
-    const out = parse(await call('mark_serialized_item', base))
+    const out = parse(await call('mark_serialized_item', { ...base, confirm: true }))
     expect(mockReturned).toHaveBeenCalledWith('v1', 'ICC123')
     expect(out).toMatchObject({ ok: true, item: { status: 'RETURNED' } })
     expect(mockAudit.mock.calls[0][1]).toMatchObject({ action: 'SERIALIZED_ITEM_MARKED', entityId: 'si1' })

@@ -70,13 +70,14 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'set_menu_item_active',
-    'Enable or disable ("86") a menu item in a venue you can access, found by name. Disabled items stop showing/selling. This WRITES — it changes the menu; requires products:update. If the name matches several items it returns the matches so you can be specific.',
+    'Enable or disable ("86") a menu item in a venue you can access, found by name. Disabled items stop showing/selling — a customer-visible change, so by DEFAULT it only PREVIEWS (current → new state); call again with confirm:true to apply. This WRITES — requires products:update. If the name matches several items it returns the matches so you can be specific.',
     {
       venueId: z.string().describe('Venue that owns the item (must be in your scope)'),
       name: z.string().min(1).describe('Menu item name or part of it, e.g. "Carnitas"'),
       active: z.boolean().describe('true = available; false = "86" (disabled / out of stock)'),
+      confirm: z.boolean().optional().describe('Must be true to actually change availability; without it you get a preview'),
     },
-    async ({ venueId, name, active }) => {
+    async ({ venueId, name, active, confirm }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if out of scope
       guard.requirePermission('products:update', venueId) // write gate (per-venue role)
       const matches = await matchProductsByName(where, name)
@@ -88,6 +89,20 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
           error: `"${name}" matches several items — be more specific.`,
           matches: matches.map(m => m.name),
         })
+      if (!confirm) {
+        const wasActive = matches[0].active
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          change: {
+            item: matches[0].name,
+            label: 'Disponibilidad',
+            from: wasActive ? 'disponible' : '86 (deshabilitado)',
+            to: active ? 'disponible' : '86 (deshabilitado)',
+          },
+          message: `Esto ${active ? 'HABILITARÁ' : 'deshabilitará ("86")'} "${matches[0].name}" (visible al cliente). Confirma con el operador; luego vuelve a llamar con confirm:true.`,
+        })
+      }
       try {
         const updated = await updateProduct(venueId, matches[0].id, { active })
         await auditMcpWrite(scope, {
@@ -106,13 +121,14 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'set_menu_item_price',
-    'Change the price of a menu item in a venue you can access, found by name. Price is in the venue currency (major units, e.g. 120 = $120.00). This WRITES — it changes the price; requires products:update. If the name matches several items it returns the matches so you can be specific.',
+    'Change the price of a menu item in a venue you can access, found by name. Price is in the venue currency (major units, e.g. 120 = $120.00). This is a customer-visible change, so by DEFAULT it only PREVIEWS (current price → new price); call again with confirm:true to actually change it. This WRITES — requires products:update. If the name matches several items it returns the matches so you can be specific.',
     {
       venueId: z.string().describe('Venue that owns the item (must be in your scope)'),
       name: z.string().min(1).describe('Menu item name or part of it, e.g. "Carnitas"'),
       price: z.number().positive().describe('New price in major units (e.g. 120 for $120.00)'),
+      confirm: z.boolean().optional().describe('Must be true to actually change the price; without it you get a preview'),
     },
-    async ({ venueId, name, price }) => {
+    async ({ venueId, name, price, confirm }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if out of scope
       guard.requirePermission('products:update', venueId) // write gate (per-venue role)
       const matches = await matchProductsByName(where, name)
@@ -124,6 +140,15 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
           error: `"${name}" matches several items — be more specific.`,
           matches: matches.map(m => m.name),
         })
+      const currentPrice = Number(matches[0].price)
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          change: { item: matches[0].name, label: 'Precio', from: currentPrice, to: price },
+          message: `Esto cambiará el precio de "${matches[0].name}": $${currentPrice} → $${price}. Confirma con el operador; luego vuelve a llamar con confirm:true.`,
+        })
+      }
       try {
         const updated = await updateProduct(venueId, matches[0].id, { price })
         await auditMcpWrite(scope, {
