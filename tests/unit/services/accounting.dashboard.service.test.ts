@@ -121,12 +121,13 @@ describe('getBankAndCashSummary (Bancos y cajas)', () => {
     expect(card.methods.sort()).toEqual(['CREDIT_CARD', 'DEBIT_CARD'])
   })
 
-  it('totals: net-to-bank = electrónico − comisiones', async () => {
+  it('totals: net-to-bank = electrónico + propina − comisiones', async () => {
     const r = await getBankAndCashSummary('venue-1', FILTERS)
     expect(r.totals.cashInflowCents).toBe(20000)
     expect(r.totals.electronicInflowCents).toBe(12000)
+    expect(r.totals.electronicTipsCents).toBe(1500) // propina de tarjeta (10+5); la de efectivo/refund no
     expect(r.totals.feesCents).toBe(450)
-    expect(r.totals.netToBankCents).toBe(11550) // 12000-450
+    expect(r.totals.netToBankCents).toBe(13050) // 12000 + 1500 − 450 (la propina de tarjeta SÍ se deposita)
   })
 
   it('matches getBusinessSummary collection (single source of truth)', async () => {
