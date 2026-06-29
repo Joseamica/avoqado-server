@@ -5,7 +5,7 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
-import { adjustPoints, updateLoyaltyConfig } from '@/services/dashboard/loyalty.dashboard.service'
+import { adjustPoints, updateLoyaltyConfig, getLoyaltyConfig } from '@/services/dashboard/loyalty.dashboard.service'
 import { planGateMessage } from '../planGate'
 
 export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
@@ -127,7 +127,7 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'configure_loyalty',
-    "Configure (or activate/deactivate) the loyalty / rewards PROGRAM of a venue you can access: points earned per dollar spent, points per visit, the redemption rate (money value of one point, e.g. 0.05 = 5 centavos per point), the minimum points to redeem, and after how many days points expire (null/omit = never). Only the fields you pass are changed. This WRITES program settings (does NOT touch any customer's points — use adjust_loyalty_points for that); requires loyalty:update.",
+    "Configure (or activate/deactivate) the loyalty / rewards PROGRAM of a venue you can access: points earned per dollar spent, points per visit, the redemption rate (money value of one point, e.g. 0.05 = 5 centavos per point), the minimum points to redeem, and after how many days points expire (null/omit = never). Only the fields you pass are changed. Because this changes the program's MONEY economics (earning + redemption value), by DEFAULT it only PREVIEWS (current → new per field); call again with confirm:true to apply. This WRITES program settings (does NOT touch any customer's points — use adjust_loyalty_points for that); requires loyalty:update.",
     {
       venueId: z.string().describe('Venue whose program to configure (must be in your scope)'),
       active: z.boolean().optional().describe('Turn the program on/off'),
@@ -136,8 +136,9 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
       redemptionRate: z.number().min(0).optional().describe('Money value of 1 point (e.g. 0.05)'),
       minPointsToRedeem: z.number().int().min(0).optional().describe('Minimum points required to redeem'),
       pointsExpireDays: z.number().int().positive().nullable().optional().describe('Days until points expire; null = never'),
+      confirm: z.boolean().optional().describe('Must be true to actually apply; without it you get a preview (current → new)'),
     },
-    async ({ venueId, active, pointsPerDollar, pointsPerVisit, redemptionRate, minPointsToRedeem, pointsExpireDays }) => {
+    async ({ venueId, active, pointsPerDollar, pointsPerVisit, redemptionRate, minPointsToRedeem, pointsExpireDays, confirm }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('loyalty:update', venueId) // write gate (per-venue role)
       const planGate = await planGateMessage(venueId, 'LOYALTY_PROGRAM', 'El programa de lealtad') // PRO tier
@@ -151,6 +152,27 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
         ...(pointsExpireDays !== undefined ? { pointsExpireDays } : {}),
       }
       if (Object.keys(data).length === 0) return text({ ok: false, error: 'No pasaste ningún campo para configurar.' })
+
+      if (!confirm) {
+        // Money economics change → preview current → new so a typo (e.g. redemptionRate 0.05 → 100) is caught.
+        const cur = (await getLoyaltyConfig(venueId)) as Record<string, unknown> | null
+        const LBL: Record<string, string> = {
+          active: 'Programa activo',
+          pointsPerDollar: 'Puntos por $1',
+          pointsPerVisit: 'Puntos por visita',
+          redemptionRate: 'Valor de 1 punto ($)',
+          minPointsRedeem: 'Mínimo para canjear',
+          pointsExpireDays: 'Días para expirar',
+        }
+        const num = (v: unknown) => (v != null && typeof v === 'object' && 'toString' in v ? Number(v) : v)
+        const changes = Object.entries(data).map(([k, to]) => ({ label: LBL[k] ?? k, from: cur ? (num(cur[k]) ?? null) : null, to }))
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          changes,
+          message: `Esto cambiará la economía del programa de lealtad:\n${changes.map(c => `• ${c.label}: ${JSON.stringify(c.from)} → ${JSON.stringify(c.to)}`).join('\n')}\n\nConfirma con el operador; luego vuelve a llamar con confirm:true.`,
+        })
+      }
 
       try {
         const cfg = await updateLoyaltyConfig(venueId, data) // service validates non-negative etc.

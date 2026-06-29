@@ -2,6 +2,7 @@ import { registerLoyaltyTools } from '../../../src/mcp/tools/loyalty'
 import type { McpScope } from '../../../src/mcp/scope'
 
 const mockUpdate = jest.fn()
+const mockGetConfig = jest.fn()
 const mockAudit = jest.fn()
 
 jest.mock('@/mcp/planGate', () => ({ planGateMessage: jest.fn().mockResolvedValue(null) }))
@@ -20,6 +21,7 @@ jest.mock('@/mcp/audit', () => ({ auditMcpWrite: (...a: unknown[]) => mockAudit(
 jest.mock('@/services/dashboard/loyalty.dashboard.service', () => ({
   adjustPoints: jest.fn(),
   updateLoyaltyConfig: (...a: unknown[]) => mockUpdate(...(a as [])),
+  getLoyaltyConfig: (...a: unknown[]) => mockGetConfig(...(a as [])),
 }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -45,7 +47,20 @@ describe('configure_loyalty (config write)', () => {
     expect(mockUpdate).not.toHaveBeenCalled()
   })
 
-  it('passes only supplied fields (mapping minPointsToRedeem) and audits', async () => {
+  it('without confirm → previews current → new (money economics), does NOT write', async () => {
+    mockGetConfig.mockResolvedValueOnce({ pointsPerDollar: 1, redemptionRate: 0.01, minPointsRedeem: 100 })
+    const out = parse(await call({ venueId: 'v1', redemptionRate: 100, pointsPerDollar: 50 }))
+    expect(out.requiresConfirmation).toBe(true)
+    expect(out.changes).toEqual(
+      expect.arrayContaining([
+        { label: 'Valor de 1 punto ($)', from: 0.01, to: 100 },
+        { label: 'Puntos por $1', from: 1, to: 50 },
+      ]),
+    )
+    expect(mockUpdate).not.toHaveBeenCalled()
+  })
+
+  it('confirm:true passes only supplied fields (mapping minPointsToRedeem) and audits', async () => {
     mockUpdate.mockResolvedValueOnce({
       id: 'lc1',
       active: true,
@@ -55,7 +70,7 @@ describe('configure_loyalty (config write)', () => {
       minPointsRedeem: 200,
       pointsExpireDays: null,
     })
-    const out = parse(await call({ venueId: 'v1', pointsPerDollar: 2, redemptionRate: 0.05, minPointsToRedeem: 200 }))
+    const out = parse(await call({ venueId: 'v1', pointsPerDollar: 2, redemptionRate: 0.05, minPointsToRedeem: 200, confirm: true }))
 
     expect(mockUpdate).toHaveBeenCalledWith('v1', { pointsPerDollar: 2, redemptionRate: 0.05, minPointsRedeem: 200 })
     expect(out).toMatchObject({

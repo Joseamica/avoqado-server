@@ -81,6 +81,13 @@ export function registerDiscountTools(server: McpServer, scope: McpScope) {
       guard.requirePermission('discounts:create', venueId) // write gate (per-venue role)
       const gate = await planGateMessage(venueId, 'PROMOTIONS', 'Las promociones') // PRO tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
+      // A percentage discount caps at 100% — nothing else enforces this (a 500% typo would zero out + overshoot the order).
+      if (type === 'percentage' && value > 100) {
+        return text({
+          ok: false,
+          error: `Un descuento porcentual no puede ser mayor a 100% (pediste ${value}%). Para un monto fijo usa type:"fixed_amount".`,
+        })
+      }
       try {
         const d = await createDiscount(
           venueId,
