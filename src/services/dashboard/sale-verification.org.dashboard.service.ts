@@ -22,6 +22,19 @@ import { SocketEventType } from '../../communication/sockets/types'
 
 const VENUE_TIMEZONE_DEFAULT = 'America/Mexico_City'
 
+// SIM-type buckets for the org Ventas tables/charts. The 3 fixed names are
+// tenant data (confirmed against PlayTelecom's ItemCategory records); everything
+// else — incl. "E-SIM de promotor", null, legacy "Otro" — collapses to "Otros SIMs"
+// so row sums always reconcile with the weekly total.
+export type SimBucket = 'SIM de Intercambio' | '$100 de Promotor' | 'SIM de Evento' | 'Otros SIMs'
+export const SIM_OTHERS: SimBucket = 'Otros SIMs'
+export const SIM_FIXED_BUCKETS: readonly SimBucket[] = ['SIM de Intercambio', '$100 de Promotor', 'SIM de Evento']
+
+export function toSimBucket(categoryName: string | null | undefined): SimBucket {
+  const n = (categoryName ?? '').trim().toLowerCase()
+  return SIM_FIXED_BUCKETS.find(b => b.toLowerCase() === n) ?? SIM_OTHERS
+}
+
 export interface OrgSaleListFilters {
   pageSize: number
   pageNumber: number
@@ -329,6 +342,17 @@ function toWeekLabel(d: Date, tz: string = VENUE_TIMEZONE_DEFAULT): string {
   return `W${String(week).padStart(2, '0')}`
 }
 
+/** ISO year-week key "YYYY-Www" in venue timezone. Sortable across years. */
+function toIsoWeekKey(d: Date, tz: string = VENUE_TIMEZONE_DEFAULT): string {
+  const local = new Date(d.toLocaleString('en-US', { timeZone: tz }))
+  const day = local.getUTCDay() || 7
+  local.setUTCDate(local.getUTCDate() + 4 - day) // shift to the week's Thursday
+  const isoYear = local.getUTCFullYear()
+  const yearStart = new Date(Date.UTC(isoYear, 0, 1))
+  const week = Math.ceil(((local.getTime() - yearStart.getTime()) / 86400000 + 1) / 7)
+  return `${isoYear}-W${String(week).padStart(2, '0')}`
+}
+
 function toMonthKey(d: Date, tz: string = VENUE_TIMEZONE_DEFAULT): string {
   const local = new Date(d.toLocaleString('en-US', { timeZone: tz }))
   return `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, '0')}`
@@ -492,6 +516,35 @@ export async function getSalesByWeek(
   return Array.from(map.entries())
     .map(([week, agg]) => ({ week, ...agg }))
     .sort((a, b) => b.week.localeCompare(a.week))
+}
+
+/**
+ * Confirmed sales by Tipo de Venta (Línea Nueva vs Portabilidad) × ISO week.
+ * Same COMPLETED base as getSalesByWeek so weekly totals reconcile exactly.
+ * Always returns both rows in fixed order, even if a week/type is empty.
+ */
+export async function getSalesBySaleTypeWeekly(
+  orgId: string,
+  range: AggregationRange,
+): Promise<Array<{ name: 'Líneas Nuevas' | 'Portabilidades'; byWeek: Record<string, number>; total: number }>> {
+  const verifications = await prisma.saleVerification.findMany({
+    where: baseAggregationWhere(orgId, range),
+    select: { createdAt: true, isPortabilidad: true },
+  })
+  const rows: Record<'Líneas Nuevas' | 'Portabilidades', { byWeek: Record<string, number>; total: number }> = {
+    'Líneas Nuevas': { byWeek: {}, total: 0 },
+    Portabilidades: { byWeek: {}, total: 0 },
+  }
+  for (const v of verifications) {
+    const key = v.isPortabilidad ? 'Portabilidades' : 'Líneas Nuevas'
+    const wk = toIsoWeekKey(v.createdAt)
+    rows[key].byWeek[wk] = (rows[key].byWeek[wk] ?? 0) + 1
+    rows[key].total += 1
+  }
+  return [
+    { name: 'Líneas Nuevas', ...rows['Líneas Nuevas'] },
+    { name: 'Portabilidades', ...rows.Portabilidades },
+  ]
 }
 
 /** Sales grouped by venue.city × month. */

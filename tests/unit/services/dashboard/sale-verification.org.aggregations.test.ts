@@ -21,6 +21,8 @@ import {
   getSalesByStore,
   getSalesByPromoter,
   getSalesByPromoterDaily,
+  getSalesBySaleTypeWeekly,
+  toSimBucket,
 } from '@/services/dashboard/sale-verification.org.dashboard.service'
 import prisma from '@/utils/prismaClient'
 
@@ -257,5 +259,65 @@ describe('getSalesByPromoterDaily — current month, per-day + toReview', () => 
     expect(result.month).toBe(`${c.getFullYear()}-${String(c.getMonth() + 1).padStart(2, '0')}`)
     expect(result.days.length).toBe(c.getDate())
     expect(result.days[0]).toBe(`${result.month}-01`)
+  })
+})
+
+describe('toSimBucket', () => {
+  it('maps the three fixed categories exactly', () => {
+    expect(toSimBucket('SIM de Intercambio')).toBe('SIM de Intercambio')
+    expect(toSimBucket('$100 de Promotor')).toBe('$100 de Promotor')
+    expect(toSimBucket('SIM de Evento')).toBe('SIM de Evento')
+  })
+  it('is trim/case-insensitive', () => {
+    expect(toSimBucket('  sim de intercambio ')).toBe('SIM de Intercambio')
+  })
+  it('routes E-SIM de promotor, null and unknowns to "Otros SIMs"', () => {
+    expect(toSimBucket('E-SIM de promotor')).toBe('Otros SIMs')
+    expect(toSimBucket(null)).toBe('Otros SIMs')
+    expect(toSimBucket('Cualquier otra')).toBe('Otros SIMs')
+  })
+})
+
+describe('getSalesBySaleTypeWeekly', () => {
+  it('splits COMPLETED sales by isPortabilidad into fixed weekly rows', async () => {
+    const w1 = new Date('2026-03-09T18:00:00Z') // 2026-W11
+    const w2 = new Date('2026-03-16T18:00:00Z') // 2026-W12
+    mockedSvFindMany.mockResolvedValue([
+      { createdAt: w1, isPortabilidad: false },
+      { createdAt: w1, isPortabilidad: true },
+      { createdAt: w2, isPortabilidad: false },
+    ])
+    const rows = await getSalesBySaleTypeWeekly(ORG_ID, {})
+    expect(rows.map(r => r.name)).toEqual(['Líneas Nuevas', 'Portabilidades'])
+    expect(rows[0]).toMatchObject({ total: 2, byWeek: { '2026-W11': 1, '2026-W12': 1 } })
+    expect(rows[1]).toMatchObject({ total: 1, byWeek: { '2026-W11': 1 } })
+  })
+  it('returns both rows even when one type has zero sales', async () => {
+    mockedSvFindMany.mockResolvedValue([{ createdAt: new Date('2026-03-09T18:00:00Z'), isPortabilidad: false }])
+    const rows = await getSalesBySaleTypeWeekly(ORG_ID, {})
+    expect(rows.map(r => r.name)).toEqual(['Líneas Nuevas', 'Portabilidades'])
+    expect(rows[1]).toMatchObject({ total: 0, byWeek: {} })
+  })
+  it('only queries CONFIRMED verifications', async () => {
+    mockedSvFindMany.mockResolvedValue([])
+    await getSalesBySaleTypeWeekly(ORG_ID, {})
+    expect(mockedSvFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ status: 'COMPLETED', venue: { organizationId: ORG_ID } }) }),
+    )
+  })
+})
+
+describe('toIsoWeekKey (via getSalesBySaleTypeWeekly week keys)', () => {
+  it('produces ISO year-week keys and orders correctly across a year boundary', async () => {
+    // 2025-12-29 (Mon) is ISO 2026-W01; 2026-01-05 (Mon) is 2026-W02
+    const dec29 = new Date('2025-12-29T18:00:00Z')
+    const jan05 = new Date('2026-01-05T18:00:00Z')
+    mockedSvFindMany.mockResolvedValue([
+      { createdAt: dec29, isPortabilidad: false },
+      { createdAt: jan05, isPortabilidad: false },
+    ])
+    const rows = await getSalesBySaleTypeWeekly(ORG_ID, {})
+    const lineas = rows.find(r => r.name === 'Líneas Nuevas')!
+    expect(Object.keys(lineas.byWeek).sort()).toEqual(['2026-W01', '2026-W02'])
   })
 })
