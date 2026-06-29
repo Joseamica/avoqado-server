@@ -368,8 +368,14 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'sim-custody:collect-from-supervisor': ['sim-custody:collect-from-supervisor', 'inventory:read'], // Admin reclaims from Supervisor
   'sim-custody:view-all-supervisors': ['sim-custody:view-all-supervisors', 'inventory:read'], // Read-only cross-supervisor visibility (no mutation authority)
   'sim-custody:approve-registration': ['sim-custody:approve-registration', 'sim-custody:assign-to-supervisor', 'inventory:read'], // OWNER aprueba/rechaza solicitudes de alta de SIMs creadas por promotores en la TPV
+  'sim-custody:reassign': ['sim-custody:reassign', 'inventory:read'], // Admin moves a held/pending SIM from one promotor to another
   'tpv-sim-custody:accept': ['tpv-sim-custody:accept'], // Promoter accepts SIM reception on TPV
   'tpv-sim-custody:reject': ['tpv-sim-custody:reject'], // Promoter rejects a pending SIM on TPV
+
+  // ===========================
+  // SERIALIZED INVENTORY — admin bulk operations
+  // ===========================
+  'serialized-inventory:change-category': ['serialized-inventory:change-category', 'inventory:org-manage'], // Admin bulk-changes the category of non-sold SIMs
 
   // ===========================
   // COUPONS (Phase 2)
@@ -836,6 +842,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // SIM custody inbox (ADMIN operates TPV in some venues too).
     'tpv-sim-custody:accept',
     'tpv-sim-custody:reject',
+    // SIM custody admin operations — reassign SIMs between promotores + change category
+    'sim-custody:reassign', // Bulk-move a held SIM from one promotor to another
+    'serialized-inventory:change-category', // Bulk-change category of non-sold SIMs
     // Google Calendar Sync — full venue control
     'calendar:manage_venue',
     'calendar:connect_self',
@@ -929,6 +938,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // Serialized Inventory (SIMs, jewelry, etc.)
     'serialized-inventory:sell', // Can sell serialized items
     'serialized-inventory:create', // Can register (Alta de Productos)
+    'serialized-inventory:change-category', // Bulk-change category of non-sold SIMs
     'sale-verifications:review', // Can approve/reject SIM-sale documentation from dashboard
     'sale-verifications:reopen', // Can revert an approved sale back to PENDING for re-review (OWNER only)
     'sale-verifications:edit', // Can edit/correct any sale (amount, forma de pago, tipo, estado) — OWNER only
@@ -944,6 +954,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'sim-custody:collect-from-supervisor', // Admin reclaims from Supervisor
     'sim-custody:view-all-supervisors', // Full cross-supervisor visibility
     'sim-custody:approve-registration', // Aprobar/rechazar solicitudes de alta de SIMs
+    'sim-custody:reassign', // Bulk-move a held SIM from one promotor to another
     // Allow OWNER to use TPV inbox too (edge case: venue owner also operates as promoter).
     'tpv-sim-custody:accept',
     'tpv-sim-custody:reject',
@@ -1350,7 +1361,7 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   'tpv-messages': ['tpv-messages:read', 'tpv-messages:send'],
   'tpv-factory-reset': ['tpv-factory-reset:execute'],
   // Serialized Inventory (SIMs, jewelry, etc.)
-  'serialized-inventory': ['serialized-inventory:sell', 'serialized-inventory:create'],
+  'serialized-inventory': ['serialized-inventory:sell', 'serialized-inventory:create', 'serialized-inventory:change-category'],
   // Sale Verifications back-office review (PlayTelecom / Walmart documentation flow)
   'sale-verifications': ['sale-verifications:review', 'sale-verifications:reopen', 'sale-verifications:edit'],
   // SIM custody (PlayTelecom chain-of-custody: Admin → Supervisor → Promoter)
@@ -1362,6 +1373,7 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
     'sim-custody:collect-from-supervisor',
     'sim-custody:view-all-supervisors',
     'sim-custody:approve-registration',
+    'sim-custody:reassign',
   ],
   'tpv-sim-custody': ['tpv-sim-custody:accept', 'tpv-sim-custody:reject'],
   // Venue Crypto Config (per-venue B4Bit device management)

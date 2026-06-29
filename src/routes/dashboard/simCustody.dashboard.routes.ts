@@ -5,13 +5,18 @@
  *
  * Pipeline per endpoint:
  *   authenticateToken → rate-limit → idempotency (bulk only) → checkPermission → controller
+ *
+ * New admin bulk endpoints also gate on SERIALIZED_INVENTORY module:
+ *   authenticateToken → requireSerializedInventoryModule → checkPermission →
+ *     idempotency → bulkLimiter → validateRequest → controller
  */
 
-import { Router } from 'express'
+import { Router, Request, Response, NextFunction } from 'express'
 import rateLimit from 'express-rate-limit'
 import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken.middleware'
 import { checkPermission } from '../../middlewares/checkPermission.middleware'
 import { simCustodyIdempotency } from '../../middlewares/simCustodyIdempotency.middleware'
+import { moduleService, MODULE_CODES } from '../../services/modules/module.service'
 import {
   assignToPromoter,
   assignToPromoterDirect,
@@ -19,6 +24,8 @@ import {
   collectFromPromoter,
   collectFromSupervisor,
   listEvents,
+  reassignPromoter,
+  changeCategory,
 } from '../../controllers/dashboard/simCustody.dashboard.controller'
 
 const router = Router({ mergeParams: true })
@@ -92,5 +99,53 @@ router.post(
 )
 
 router.get('/sim-custody/events', authenticateTokenMiddleware, singleLimiter, listEvents)
+
+// ─── Module gate ──────────────────────────────────────────────────────────────
+//
+// The SERIALIZED_INVENTORY module is org-level for PlayTelecom (OrganizationModule).
+// moduleService.isModuleEnabled(venueId, ...) already has the org-level fallback:
+//   1. Check VenueModule for the venue from authContext
+//   2. If absent, fall back to OrganizationModule for the venue's org
+// So authContext.venueId is sufficient — no extra DB lookup needed.
+
+async function requireSerializedInventoryModule(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId } = (req as any).authContext ?? {}
+    if (!venueId) {
+      return res.status(403).json({ ok: false, moduleRequired: true, error: 'Venue no identificado para verificar el módulo.' })
+    }
+    const enabled = await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY)
+    if (!enabled) {
+      return res
+        .status(403)
+        .json({ ok: false, moduleRequired: true, error: 'El módulo de inventario serializado no está habilitado para esta organización.' })
+    }
+    next()
+  } catch (err) {
+    next(err)
+  }
+}
+
+// ─── Admin bulk endpoints (Task 6) ────────────────────────────────────────────
+
+router.post(
+  '/sim-custody/reassign-promoter',
+  authenticateTokenMiddleware,
+  requireSerializedInventoryModule,
+  checkPermission('sim-custody:reassign'),
+  simCustodyIdempotency({ required: true }),
+  bulkLimiter,
+  reassignPromoter,
+)
+
+router.post(
+  '/sim-custody/change-category',
+  authenticateTokenMiddleware,
+  requireSerializedInventoryModule,
+  checkPermission('serialized-inventory:change-category'),
+  simCustodyIdempotency({ required: true }),
+  bulkLimiter,
+  changeCategory,
+)
 
 export default router

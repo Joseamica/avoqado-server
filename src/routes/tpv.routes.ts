@@ -27,6 +27,7 @@ import * as trainingController from '../controllers/tpv/training.tpv.controller'
 import * as venueController from '../controllers/tpv/venue.tpv.controller'
 import * as angelpayValidationController from '../controllers/tpv/angelpayValidation.tpv.controller'
 import AppError from '../errors/AppError'
+import { getPromoterCashOut, withdrawAsPromoter } from '../services/dashboard/cash-out/cash-out.promoter.service'
 import { DEFAULT_PERMISSIONS, expandWildcards, resolvePermissions } from '../lib/permissions'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
@@ -5935,6 +5936,51 @@ router.post(
         correlationId: req.correlationId,
         error: error instanceof Error ? error.message : 'Unknown error',
       })
+      next(error)
+    }
+  },
+)
+
+/**
+ * GET /tpv/v1/cash-out/my-saldo
+ * The current promoter's OWN available cash-out balance + whether today is an
+ * active withdrawal day. Self-scoped to the authenticated promoter (authContext).
+ * Gated by SERIALIZED_INVENTORY (module, inside the service) + cash-out:view_own.
+ */
+router.get(
+  '/cash-out/my-saldo',
+  authenticateTokenMiddleware,
+  checkPermission('cash-out:view_own'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { venueId, userId: staffId } = (req as any).authContext
+      const result = await getPromoterCashOut(venueId, staffId)
+      res.json({ data: result })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * POST /tpv/v1/cash-out/withdraw
+ * The current promoter requests a withdrawal ("Retirar") of their full available
+ * balance. Self-scoped; only allowed on a configured active day. Returns the
+ * created withdrawal (folio + net amount, pesos 1:1).
+ * Gated by SERIALIZED_INVENTORY (module) + cash-out:withdraw (active-day enforced).
+ */
+router.post(
+  '/cash-out/withdraw',
+  authenticateTokenMiddleware,
+  checkPermission('cash-out:withdraw'),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { venueId, userId: staffId } = (req as any).authContext
+      const result = await withdrawAsPromoter(venueId, staffId)
+      res.status(201).json({
+        data: { ...result, grossAmount: result.grossAmount.toString(), netAmount: result.netAmount.toString() },
+      })
+    } catch (error) {
       next(error)
     }
   },

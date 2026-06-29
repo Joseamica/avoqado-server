@@ -7656,6 +7656,7 @@ enum SerializedItemCustodyEventType {
   COLLECTED_FROM_PROMOTER
   COLLECTED_FROM_SUPERVISOR
   MARKED_SOLD // mirror de la venta para timeline unificada
+  REASSIGNED_PROMOTER_TO_PROMOTER // Admin moved a held/pending SIM from one promotor to another
 }
 
 // Append-only audit log for custody transitions. Source of truth for dispute

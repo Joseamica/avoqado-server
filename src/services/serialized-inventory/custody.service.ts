@@ -77,6 +77,20 @@ export interface CollectInput {
   reason: SerializedItemCollectionReason
 }
 
+export interface ReassignPromoterInput {
+  actor: CustodyActor
+  toPromoterStaffId: string
+  serialNumbers: string[]
+  idempotencyRequestId?: string | null
+}
+
+export interface ChangeCategoryInput {
+  actor: CustodyActor
+  serialNumbers: string[]
+  categoryId: string
+  idempotencyRequestId?: string | null
+}
+
 // ==========================================
 // STATE MACHINE (SINGLE SOURCE OF TRUTH)
 // ==========================================
@@ -564,6 +578,219 @@ export class SimCustodyService {
   }
 
   /**
+   * Admin override: reassigns a PROMOTER_HELD or PROMOTER_PENDING SIM from one
+   * promotor to another without requiring supervisor involvement.
+   *
+   * Validates that `toPromoterStaffId` is an active WAITER/CASHIER in the actor's
+   * org before the loop; if not, all rows immediately return PROMOTER_NOT_FOUND.
+   *
+   * Per-SIM in a transaction with the version lock:
+   *   - SIM_SOLD if item.status === 'SOLD' || item.custodyState === 'SOLD'
+   *   - NOT_IN_PROMOTER_STATE if custodyState is not PROMOTER_HELD/PROMOTER_PENDING
+   *   - Idempotent no-op if already on target promotor (status: ok)
+   *   - Otherwise: update assignedPromoterId + assignedPromoterAt, stamp
+   *     promoterAcceptedAt when custodyState is PROMOTER_HELD, KEEP custodyState,
+   *     bump custodyVersion, and write a REASSIGNED_PROMOTER_TO_PROMOTER event.
+   *
+   * Authorization is gated at the route layer (OWNER / SUPERADMIN).
+   */
+  async reassignPromoter(input: ReassignPromoterInput): Promise<BulkResult> {
+    const { actor, toPromoterStaffId, serialNumbers, idempotencyRequestId } = input
+
+    // Validate target promotor is an active WAITER/CASHIER in the actor's org.
+    // Checked once before the loop — a bad target fails ALL rows upfront.
+    const isPromoter = await this.db.staffVenue.findFirst({
+      where: {
+        staffId: toPromoterStaffId,
+        active: true,
+        role: { in: ['WAITER', 'CASHIER'] },
+        venue: { organizationId: actor.organizationId },
+      },
+      select: { id: true },
+    })
+
+    if (!isPromoter) {
+      const error = new SimCustodyError('PROMOTER_NOT_FOUND')
+      const results: BulkResultRow[] = serialNumbers.map(serialNumber => ({
+        serialNumber,
+        status: 'error' as const,
+        code: error.code,
+        message: error.message,
+      }))
+      return buildSummary(results)
+    }
+
+    const results: BulkResultRow[] = []
+    for (const serialNumber of serialNumbers) {
+      results.push(
+        await this.processOneRow(serialNumber, async tx => {
+          const item = await this.findOrgItem(tx, actor.organizationId, serialNumber)
+          if (!item) throw new SimCustodyError('NOT_FOUND')
+          if (item.status === 'SOLD' || item.custodyState === 'SOLD') throw new SimCustodyError('SIM_SOLD')
+          if (item.custodyState !== 'PROMOTER_HELD' && item.custodyState !== 'PROMOTER_PENDING') {
+            throw new SimCustodyError('NOT_IN_PROMOTER_STATE')
+          }
+          // Idempotent: already on target promotor — no state change, no event.
+          if (item.assignedPromoterId === toPromoterStaffId) {
+            return { event: 'REASSIGNED_PROMOTER_TO_PROMOTER' as SerializedItemCustodyEventType, item }
+          }
+
+          const updated = await this.updateWithVersion(tx, item, {
+            custodyState: item.custodyState, // KEEP current state
+            assignedPromoterId: toPromoterStaffId,
+            assignedPromoterAt: new Date(),
+            // When PROMOTER_HELD the previous promotor had already accepted;
+            // stamp acceptance for the new holder so the timeline is accurate.
+            ...(item.custodyState === 'PROMOTER_HELD' ? { promoterAcceptedAt: new Date() } : {}),
+          })
+
+          await this.writeEvent(tx, {
+            item: updated,
+            eventType: 'REASSIGNED_PROMOTER_TO_PROMOTER',
+            fromState: item.custodyState,
+            toState: item.custodyState,
+            fromStaffId: item.assignedPromoterId,
+            toStaffId: toPromoterStaffId,
+            actorStaffId: actor.staffId,
+            idempotencyRequestId,
+          })
+
+          return { event: 'REASSIGNED_PROMOTER_TO_PROMOTER' as SerializedItemCustodyEventType, item: updated }
+        }),
+      )
+    }
+
+    return buildSummary(results)
+  }
+
+  /**
+   * Admin bulk reclassification: moves SIMs from one ItemCategory to another
+   * without touching the custody chain (no custody event, no state transition).
+   * Partial-success semantics — each row processed in its own short transaction.
+   *
+   * Validates that `categoryId` exists and belongs to the actor's org before
+   * entering the per-row loop; if not, all rows immediately return
+   * CATEGORY_NOT_FOUND.
+   *
+   * Per-SIM:
+   *   - NOT_FOUND if the serial cannot be resolved in this org.
+   *   - SIM_SOLD if item.status === 'SOLD'.
+   *   - Idempotent no-op if item.categoryId === categoryId (status: ok).
+   *   - Otherwise: updateMany with (id, categoryId) as the optimistic lock;
+   *     VERSION_CONFLICT if count !== 1 (concurrent update won the race).
+   *
+   * Audit: ActivityLog only (no SerializedItemCustodyEvent — category change
+   * is not a custody transfer). Fire-and-forget void logAction(...), fired
+   * AFTER the per-row tx commits (never inside it — a rollback must not leave a
+   * phantom audit row; see .claude/rules/critical-warnings.md).
+   *
+   * Authorization is gated at the route layer (OWNER / SUPERADMIN).
+   */
+  async changeCategory(input: ChangeCategoryInput): Promise<BulkResult> {
+    const { actor, serialNumbers, categoryId } = input
+
+    // Load the org's categories once into an id→name map. Serves two purposes:
+    //   1. Validate the target category exists & belongs to the actor's org
+    //      (checked once before the loop — an invalid target fails ALL rows).
+    //   2. Resolve fromCategoryName/toCategoryName for the audit log without a
+    //      per-row lookup (category counts are tiny — a handful per org).
+    const categories = await this.db.itemCategory.findMany({
+      where: {
+        OR: [{ organizationId: actor.organizationId }, { venue: { organizationId: actor.organizationId } }],
+      },
+      select: { id: true, name: true },
+    })
+    const categoryNameById = new Map(categories.map(c => [c.id, c.name]))
+
+    if (!categoryNameById.has(categoryId)) {
+      const error = new SimCustodyError('CATEGORY_NOT_FOUND')
+      const results: BulkResultRow[] = serialNumbers.map(serialNumber => ({
+        serialNumber,
+        status: 'error' as const,
+        code: error.code,
+        message: error.message,
+      }))
+      return buildSummary(results)
+    }
+    const toCategoryName = categoryNameById.get(categoryId) ?? null
+
+    // Audit payload captured per row (see loop).
+    type CategoryChangeAudit = {
+      entityId: string
+      venueId: string | null
+      serialNumber: string
+      fromCategoryId: string
+      fromCategoryName: string | null
+    }
+
+    const results: BulkResultRow[] = []
+    for (const serialNumber of serialNumbers) {
+      // Per-row audit capture: set inside the tx ONLY when a real category
+      // change committed. logAction is then fired AFTER processOneRow resolves
+      // (i.e. AFTER the tx commits) so a rollback can't leave a phantom audit
+      // row — see .claude/rules/critical-warnings.md ("logAction OUTSIDE tx").
+      //
+      // Held in a box (object property) rather than a bare `let`: the assignment
+      // happens inside the processOneRow closure, which TS control-flow analysis
+      // doesn't track for a local — it would keep the outer var narrowed to its
+      // `null` initializer and collapse the guard below to `never`. Reading a
+      // property after a function call resets to the declared union instead.
+      const auditBox: { current: CategoryChangeAudit | null } = { current: null }
+
+      const row = await this.processOneRow(serialNumber, async tx => {
+        const item = await this.findOrgItem(tx, actor.organizationId, serialNumber)
+        if (!item) throw new SimCustodyError('NOT_FOUND')
+        if (item.status === 'SOLD') throw new SimCustodyError('SIM_SOLD')
+
+        // Idempotent: already in target category — no update, no audit.
+        if (item.categoryId === categoryId) {
+          return { item }
+        }
+
+        const fromCategoryId = item.categoryId
+        const upd = await tx.serializedItem.updateMany({
+          where: { id: item.id, categoryId: item.categoryId },
+          data: { categoryId },
+        })
+        if (upd.count !== 1) throw new SimCustodyError('VERSION_CONFLICT')
+
+        auditBox.current = {
+          entityId: item.id,
+          venueId: item.sellingVenueId ?? item.registeredFromVenueId ?? item.venueId ?? null,
+          serialNumber: item.serialNumber,
+          fromCategoryId,
+          fromCategoryName: categoryNameById.get(fromCategoryId) ?? null,
+        }
+        return { item }
+      })
+      results.push(row)
+
+      // Audit: ActivityLog only (category change is NOT a custody event).
+      // Fire-and-forget, OUTSIDE the transaction; only when a real change
+      // committed (auditBox.current stays null for NOT_FOUND/SIM_SOLD/idempotent rows).
+      const committedAudit = auditBox.current
+      if (row.status === 'ok' && committedAudit) {
+        void logAction({
+          staffId: actor.staffId,
+          venueId: committedAudit.venueId,
+          action: 'SERIALIZED_ITEM_CATEGORY_CHANGED',
+          entity: 'SerializedItem',
+          entityId: committedAudit.entityId,
+          data: {
+            serialNumber: committedAudit.serialNumber,
+            fromCategoryId: committedAudit.fromCategoryId,
+            fromCategoryName: committedAudit.fromCategoryName,
+            toCategoryId: categoryId,
+            toCategoryName,
+          },
+        })
+      }
+    }
+
+    return buildSummary(results)
+  }
+
+  /**
    * Lists SIMs visible to the current promoter on TPV.
    * Filters to (PROMOTER_PENDING | PROMOTER_HELD | SOLD).
    * Excludes PROMOTER_REJECTED (no longer belongs to the promoter).
@@ -821,7 +1048,7 @@ export class SimCustodyService {
    */
   private async processOneRow(
     serialNumber: string,
-    handler: (tx: Prisma.TransactionClient) => Promise<{ event: SerializedItemCustodyEventType; item: SerializedItem }>,
+    handler: (tx: Prisma.TransactionClient) => Promise<{ event?: SerializedItemCustodyEventType; item: SerializedItem }>,
   ): Promise<BulkResultRow> {
     try {
       const { event } = await this.db.$transaction(handler)

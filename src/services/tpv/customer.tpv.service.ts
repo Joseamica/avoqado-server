@@ -423,13 +423,13 @@ export async function quickCreateCustomer(venueId: string, data: QuickCreateCust
             })
           }
         } catch (emailErr) {
-          console.error('[referral-welcome-email] failed', { customerId: customer.id, err: emailErr })
+          logger.error('[referral-welcome-email] failed', { customerId: customer.id, err: emailErr })
         }
       }
     }
   } catch (err) {
     // Don't fail customer creation if referral hook fails — just log
-    console.error('[referral hook] Failed to auto-generate referralCode for customer', customer.id, err)
+    logger.error('[referral hook] Failed to auto-generate referralCode for customer', customer.id, err)
   }
 
   // Strip referralCode from response (kept above only for the hook check)

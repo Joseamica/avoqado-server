@@ -106,11 +106,19 @@ export async function createWithdrawal(
   return result
 }
 
-/** List a venue's withdrawals (back-office history), newest first. Gated. */
+/** List a venue's withdrawals (back-office history), newest first. Gated.
+ *  Enriches each row with the promoter's display name (staffId is a plain-String
+ *  ref by design — no FK relation — so resolve it with a separate Staff read). */
 export async function listWithdrawals(venueId: string, opts: { businessDate?: string; status?: CashOutWithdrawalStatus } = {}) {
   await assertCashOutEnabled(venueId)
   const where: Prisma.CashOutWithdrawalWhereInput = { venueId }
   if (opts.businessDate) where.businessDate = new Date(`${opts.businessDate}T00:00:00.000Z`)
   if (opts.status) where.status = opts.status
-  return prisma.cashOutWithdrawal.findMany({ where, orderBy: { createdAt: 'desc' }, take: 200 })
+  const withdrawals = await prisma.cashOutWithdrawal.findMany({ where, orderBy: { createdAt: 'desc' }, take: 200 })
+  const staff = await prisma.staff.findMany({
+    where: { id: { in: withdrawals.map(w => w.staffId) } },
+    select: { id: true, firstName: true, lastName: true },
+  })
+  const nameById = new Map(staff.map(s => [s.id, `${s.firstName ?? ''} ${s.lastName ?? ''}`.trim()]))
+  return withdrawals.map(w => ({ ...w, promoterName: nameById.get(w.staffId) || w.staffId }))
 }

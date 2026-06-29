@@ -1,23 +1,31 @@
 # Programa de Referidos — Premios Configurables por Nivel · Plan de Implementación (avoqado-server)
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Hacer configurable el tipo de premio por nivel del programa de referidos (cupón %, % permanente, producto gratis), con emisión idempotente y refund por grants, sin romper el sistema vivo en producción.
+**Goal:** Hacer configurable el tipo de premio por nivel del programa de referidos (cupón %, % permanente, producto gratis), con emisión
+idempotente y refund por grants, sin romper el sistema vivo en producción.
 
-**Architecture:** Se separa CONFIG (`ReferralTierReward`) de EMISIÓN (`ReferralRewardGrant`) + un guard de desbloqueo de por vida (`ReferralTierUnlock`). La emisión corre en una transacción con claim atómico por orden. El dashboard y el MCP son fachadas finas sobre el mismo `referralProgram.service`. Spec fuente: `docs/superpowers/specs/2026-06-26-referral-configurable-rewards-design.md` (v5, 4 rondas de auditoría Codex).
+**Architecture:** Se separa CONFIG (`ReferralTierReward`) de EMISIÓN (`ReferralRewardGrant`) + un guard de desbloqueo de por vida
+(`ReferralTierUnlock`). La emisión corre en una transacción con claim atómico por orden. El dashboard y el MCP son fachadas finas sobre el
+mismo `referralProgram.service`. Spec fuente: `docs/superpowers/specs/2026-06-26-referral-configurable-rewards-design.md` (v5, 4 rondas de
+auditoría Codex).
 
 **Tech Stack:** TypeScript, Express, Prisma/PostgreSQL, Jest (unit con `prismaMock`), MCP (`src/mcp/`).
 
 ## Global Constraints
 
-- **Sistema VIVO en producción.** Migración `20260529012230_add_referral_program` ya aplicada; venue `Mindform` (`cmisvi38o001fhr2828ygmxi2`) con 1,941 clientes. Nada debe alterar el comportamiento actual de venues que solo usan `PERCENT_COUPON`.
+- **Sistema VIVO en producción.** Migración `20260529012230_add_referral_program` ya aplicada; venue `Mindform`
+  (`cmisvi38o001fhr2828ygmxi2`) con 1,941 clientes. Nada debe alterar el comportamiento actual de venues que solo usan `PERCENT_COUPON`.
 - **Migraciones:** SIEMPRE `npx prisma migrate dev --name <desc>`. NUNCA `npx prisma db push`.
 - **Dinero/porcentaje = `Prisma.Decimal`**, nunca float. Money ops dentro de `prisma.$transaction()`.
 - **Tenant isolation:** toda query filtra por `venueId`. `authContext` (NO `req.user`): `{ userId, orgId, venueId, role }`.
 - **Zod en español, shape-only.** Reglas de negocio en el servicio, no en el schema.
 - **ActivityLog** en toda mutación audit-worthy (`action`, `entity`, `entityId`, `staffId` desde authContext, `venueId`, `data`).
-- **Schema map obligatorio** al agregar modelos: actualizar `scripts/generate-schema-map.ts` (`MODEL_TO_DOMAIN`) + `npm run schema:map`, en el mismo commit.
-- **prismaMock es registro manual** (`tests/__helpers__/setup.ts`): cada `prisma.<model>` nuevo debe registrarse ahí o los tests lanzan `Cannot read undefined`.
+- **Schema map obligatorio** al agregar modelos: actualizar `scripts/generate-schema-map.ts` (`MODEL_TO_DOMAIN`) + `npm run schema:map`, en
+  el mismo commit.
+- **prismaMock es registro manual** (`tests/__helpers__/setup.ts`): cada `prisma.<model>` nuevo debe registrarse ahí o los tests lanzan
+  `Cannot read undefined`.
 - **Test dates:** relativas (`Date.now() + N días`), nunca hardcoded. Correr date-sensitive con `TZ=UTC`.
 - **Tras editar:** `npm run format && npm run lint:fix`. Antes de push: `npm run pre-deploy`.
 - **NO commits sin permiso explícito del usuario.** Los pasos "Commit" se ejecutan solo si el usuario lo autorizó.
@@ -27,16 +35,21 @@
 ### Task 1: Schema — enums, 3 tablas, relaciones, partial-unique
 
 **Files:**
-- Modify: `prisma/schema.prisma` (modelos `ReferralProgramConfig`, `Referral`, `Customer`, `Venue`, `Discount`, `Product`; + 3 modelos y 3 enums nuevos)
+
+- Modify: `prisma/schema.prisma` (modelos `ReferralProgramConfig`, `Referral`, `Customer`, `Venue`, `Discount`, `Product`; + 3 modelos y 3
+  enums nuevos)
 - Modify: `scripts/generate-schema-map.ts` (`MODEL_TO_DOMAIN`)
 - Create: `prisma/migrations/<timestamp>_referral_configurable_rewards/migration.sql` (generado)
 
 **Interfaces:**
-- Produces: modelos `ReferralTierReward`, `ReferralRewardGrant`, `ReferralTierUnlock`; enums `ReferralRewardType`, `ReferralRewardRecurrence`, `ReferralGrantStatus`. Estos los consumen las Tasks 2–9.
+
+- Produces: modelos `ReferralTierReward`, `ReferralRewardGrant`, `ReferralTierUnlock`; enums `ReferralRewardType`,
+  `ReferralRewardRecurrence`, `ReferralGrantStatus`. Estos los consumen las Tasks 2–9.
 
 - [ ] **Step 1: Añadir enums y modelos al schema**
 
-Copiar los enums (§4.1), `ReferralTierReward` (§4.2), `ReferralRewardGrant` (§4.3) y `ReferralTierUnlock` (§4.3b) del spec **verbatim** en `prisma/schema.prisma`. Añadir las back-relations a modelos existentes:
+Copiar los enums (§4.1), `ReferralTierReward` (§4.2), `ReferralRewardGrant` (§4.3) y `ReferralTierUnlock` (§4.3b) del spec **verbatim** en
+`prisma/schema.prisma`. Añadir las back-relations a modelos existentes:
 
 ```prisma
 // en model Customer:
@@ -56,11 +69,13 @@ tierRewards ReferralTierReward[]
 
 - [ ] **Step 2: Añadir el partial-unique de `Referral`**
 
-Prisma no expresa índices parciales con `@@unique`; se hace en SQL crudo en la migración. En el modelo `Referral` deja solo el índice existente; el partial-unique se crea en Step 5.
+Prisma no expresa índices parciales con `@@unique`; se hace en SQL crudo en la migración. En el modelo `Referral` deja solo el índice
+existente; el partial-unique se crea en Step 5.
 
 - [ ] **Step 3: Registrar los 3 modelos en el schema map**
 
-En `scripts/generate-schema-map.ts`, añadir a `MODEL_TO_DOMAIN` (mismo dominio que `Referral` / `ReferralProgramConfig` — buscar dónde están y copiar su placement):
+En `scripts/generate-schema-map.ts`, añadir a `MODEL_TO_DOMAIN` (mismo dominio que `Referral` / `ReferralProgramConfig` — buscar dónde están
+y copiar su placement):
 
 ```typescript
 ReferralTierReward: '<mismo dominio que Referral>',
@@ -70,12 +85,13 @@ ReferralTierUnlock: '<mismo dominio que Referral>',
 
 - [ ] **Step 4: Generar la migración**
 
-Run: `npx prisma migrate dev --name referral_configurable_rewards`
-Expected: crea `prisma/migrations/<ts>_referral_configurable_rewards/` y aplica en dev sin error. Prisma Client regenerado.
+Run: `npx prisma migrate dev --name referral_configurable_rewards` Expected: crea `prisma/migrations/<ts>_referral_configurable_rewards/` y
+aplica en dev sin error. Prisma Client regenerado.
 
 - [ ] **Step 5: Añadir el partial-unique + preflight a mano en el SQL de la migración**
 
-Editar el `migration.sql` recién generado y añadir AL INICIO (antes del `CREATE UNIQUE INDEX`) el preflight de dedupe, y luego el índice parcial (§4.5.b):
+Editar el `migration.sql` recién generado y añadir AL INICIO (antes del `CREATE UNIQUE INDEX`) el preflight de dedupe, y luego el índice
+parcial (§4.5.b):
 
 ```sql
 -- PREFLIGHT: void de referrals duplicados por orden (conservar el más antiguo)
@@ -97,8 +113,8 @@ CREATE UNIQUE INDEX "Referral_qualifyingOrderId_active_key"
 
 - [ ] **Step 6: Regenerar el schema map y verificar build**
 
-Run: `npm run schema:map && npx tsc --noEmit -p tsconfig.json 2>&1 | head -20`
-Expected: `docs/SCHEMA_MAP.md` actualizado con los 3 modelos; typecheck sin errores nuevos en archivos de schema.
+Run: `npm run schema:map && npx tsc --noEmit -p tsconfig.json 2>&1 | head -20` Expected: `docs/SCHEMA_MAP.md` actualizado con los 3 modelos;
+typecheck sin errores nuevos en archivos de schema.
 
 - [ ] **Step 7: Registrar los modelos nuevos en `prismaMock`**
 
@@ -122,12 +138,15 @@ git commit -m "feat(referrals): schema for configurable tier rewards (grant + un
 ### Task 2: Migración de datos — backfill ReferralTierReward + ReferralTierUnlock
 
 **Files:**
+
 - Create: `prisma/migrations/<ts>_referral_backfill/migration.sql` (data-only, generada con `--create-only`)
 - Test: `tests/integration/referrals/migration-backfill.integration.test.ts`
 
 **Interfaces:**
+
 - Consumes: tablas de Task 1.
-- Produces: cada `ReferralProgramConfig` tiene 3 `ReferralTierReward` (`PERCENT_COUPON`); cada `Customer` con `referralTier ≥ TIER_1` tiene filas `ReferralTierUnlock` para TODOS los niveles ganados.
+- Produces: cada `ReferralProgramConfig` tiene 3 `ReferralTierReward` (`PERCENT_COUPON`); cada `Customer` con `referralTier ≥ TIER_1` tiene
+  filas `ReferralTierUnlock` para TODOS los niveles ganados.
 
 - [ ] **Step 1: Escribir el test de integración (red)**
 
@@ -149,8 +168,7 @@ it('backfills tier-unlock rows for ALL earned levels, not just current', async (
 
 - [ ] **Step 2: Correr el test (verificar que falla)**
 
-Run: `npm run test:api -- migration-backfill`
-Expected: FAIL (el SQL de backfill aún no existe).
+Run: `npm run test:api -- migration-backfill` Expected: FAIL (el SQL de backfill aún no existe).
 
 - [ ] **Step 3: Escribir el SQL de backfill**
 
@@ -174,8 +192,7 @@ WHERE cu."referralTier" IS NOT NULL
 
 - [ ] **Step 4: Aplicar y correr el test (verde)**
 
-Run: `npx prisma migrate dev && npm run test:api -- migration-backfill`
-Expected: PASS ambos tests.
+Run: `npx prisma migrate dev && npm run test:api -- migration-backfill` Expected: PASS ambos tests.
 
 - [ ] **Step 5: Commit**
 
@@ -189,35 +206,43 @@ git commit -m "feat(referrals): data migration backfill for tier rewards + lifet
 ### Task 3: Config service — premios por nivel (activate/update + validación)
 
 **Files:**
+
 - Modify: `src/services/referrals/referralProgram.service.ts`
 - Modify: `src/schemas/dashboard/referrals.schemas.ts`
 - Test: `tests/unit/services/referrals/referralProgram.service.test.ts`
 
 **Interfaces:**
-- Produces: `updateReferralConfig(input: { venueId, tiers: TierRewardInput[] })` y `activateReferralProgram` que escriben `ReferralTierReward` (no los campos planos). `TierRewardInput = { tierLevel, rewardType, recurrence?, rewardPercent?, rewardProductId?, rewardQuantity? }`.
+
+- Produces: `updateReferralConfig(input: { venueId, tiers: TierRewardInput[] })` y `activateReferralProgram` que escriben
+  `ReferralTierReward` (no los campos planos).
+  `TierRewardInput = { tierLevel, rewardType, recurrence?, rewardPercent?, rewardProductId?, rewardQuantity? }`.
 
 - [ ] **Step 1: Escribir el test (red)**
 
 ```typescript
 it('rejects FREE_PRODUCT whose product belongs to another venue', async () => {
   prismaMock.product.findFirst.mockResolvedValue(null) // no existe en este venue
-  await expect(updateReferralConfig({ venueId: 'v1', tiers: [
-    { tierLevel: 3, rewardType: 'FREE_PRODUCT', rewardProductId: 'p-other-venue', rewardQuantity: 1 },
-  ]})).rejects.toThrow('PRODUCTO_NO_PERTENECE_AL_VENUE')
+  await expect(
+    updateReferralConfig({
+      venueId: 'v1',
+      tiers: [{ tierLevel: 3, rewardType: 'FREE_PRODUCT', rewardProductId: 'p-other-venue', rewardQuantity: 1 }],
+    }),
+  ).rejects.toThrow('PRODUCTO_NO_PERTENECE_AL_VENUE')
 })
 it('persists a percent reward as a ReferralTierReward row', async () => {
   prismaMock.referralProgramConfig.findUnique.mockResolvedValue({ id: 'cfg1', venueId: 'v1' } as any)
   await updateReferralConfig({ venueId: 'v1', tiers: [{ tierLevel: 1, rewardType: 'PERCENT_COUPON', rewardPercent: 15 }] })
-  expect(prismaMock.referralTierReward.create).toHaveBeenCalledWith(expect.objectContaining({
-    data: expect.objectContaining({ tierLevel: 1, rewardType: 'PERCENT_COUPON' }),
-  }))
+  expect(prismaMock.referralTierReward.create).toHaveBeenCalledWith(
+    expect.objectContaining({
+      data: expect.objectContaining({ tierLevel: 1, rewardType: 'PERCENT_COUPON' }),
+    }),
+  )
 })
 ```
 
 - [ ] **Step 2: Correr el test (falla)**
 
-Run: `npm run test:unit -- referralProgram.service`
-Expected: FAIL (`updateReferralConfig` no acepta `tiers`).
+Run: `npm run test:unit -- referralProgram.service` Expected: FAIL (`updateReferralConfig` no acepta `tiers`).
 
 - [ ] **Step 3: Implementar la validación + persistencia**
 
@@ -229,7 +254,10 @@ for (const t of input.tiers) {
     const product = await prisma.product.findFirst({ where: { id: t.rewardProductId, venueId: input.venueId }, select: { id: true } })
     if (!product) throw new Error('PRODUCTO_NO_PERTENECE_AL_VENUE')
   }
-  if ((t.rewardType === 'PERCENT_COUPON' || t.rewardType === 'PERMANENT_DISCOUNT') && (t.rewardPercent == null || Number(t.rewardPercent) < 0))
+  if (
+    (t.rewardType === 'PERCENT_COUPON' || t.rewardType === 'PERMANENT_DISCOUNT') &&
+    (t.rewardPercent == null || Number(t.rewardPercent) < 0)
+  )
     throw new Error('PORCENTAJE_INVALIDO')
 }
 // Versionado: desactivar filas viejas con grants, recrear (ver spec §4.2)
@@ -239,8 +267,7 @@ Actualizar `referrals.schemas.ts` para aceptar `tiers` (Zod shape-only, mensajes
 
 - [ ] **Step 4: Correr el test (verde)**
 
-Run: `npm run test:unit -- referralProgram.service`
-Expected: PASS.
+Run: `npm run test:unit -- referralProgram.service` Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -254,18 +281,26 @@ git commit -m "feat(referrals): config service accepts per-tier reward types wit
 ### Task 4: Emisión idempotente de premios (`emitTierReward` por grant)
 
 **Files:**
+
 - Modify: `src/services/referrals/referralQualification.service.ts`
 - Test: `tests/unit/services/referrals/referralQualification.service.test.ts`
 
 **Interfaces:**
+
 - Consumes: `ReferralTierReward` (Task 3), grant/unlock tables (Task 1).
-- Produces: `emitTierRewards(tx, { venueId, customer, tierLevel })` que itera los `ReferralTierReward` ACTIVOS del nivel y crea un `ReferralRewardGrant` por cada uno (idempotente vía unique), emitiendo el artefacto según `rewardType`. `computeTier` se mantiene sin cambios.
+- Produces: `emitTierRewards(tx, { venueId, customer, tierLevel })` que itera los `ReferralTierReward` ACTIVOS del nivel y crea un
+  `ReferralRewardGrant` por cada uno (idempotente vía unique), emitiendo el artefacto según `rewardType`. `computeTier` se mantiene sin
+  cambios.
 
 - [ ] **Step 1: Escribir tests (red) — uno por rewardType + idempotencia**
 
 ```typescript
-it('PERCENT_COUPON emits Discount+CustomerDiscount+CouponCode and an ISSUED grant', async () => { /* mock tierReward PERCENT_COUPON; assert grant.create con status ISSUED + discount.create */ })
-it('PERMANENT_DISCOUNT emits an isAutomatic Discount with no validUntil/maxUses', async () => { /* assert discount.create con isAutomatic:true, validUntil:null, maxUses:null */ })
+it('PERCENT_COUPON emits Discount+CustomerDiscount+CouponCode and an ISSUED grant', async () => {
+  /* mock tierReward PERCENT_COUPON; assert grant.create con status ISSUED + discount.create */
+})
+it('PERMANENT_DISCOUNT emits an isAutomatic Discount with no validUntil/maxUses', async () => {
+  /* assert discount.create con isAutomatic:true, validUntil:null, maxUses:null */
+})
 it('FREE_PRODUCT emits NO discount, only a MANUAL_PENDING grant', async () => {
   // assert: discount.create NO llamado; grant.create con status 'MANUAL_PENDING', discountId null
 })
@@ -278,17 +313,18 @@ it('skips emission when the grant already exists (unique conflict)', async () =>
 
 - [ ] **Step 2: Correr (falla)**
 
-Run: `npm run test:unit -- referralQualification.service`
-Expected: FAIL (`emitTierRewards` no existe).
+Run: `npm run test:unit -- referralQualification.service` Expected: FAIL (`emitTierRewards` no existe).
 
 - [ ] **Step 3: Implementar `emitTierRewards`**
 
-Reescribir el `emitTierReward` actual (hoy emite un solo cupón, líneas ~52–125) como `emitTierRewards` que itera los `ReferralTierReward` activos del nivel. Para cada uno, `create` el grant (capturando P2002 como skip idempotente) y emitir según tipo (tabla §5). El `Discount` de `PERCENT_COUPON` conserva la forma actual; el `PERMANENT_DISCOUNT` usa `isAutomatic:true`, sin `validUntil`/`maxUses`; `FREE_PRODUCT` no emite artefacto (`status:'MANUAL_PENDING'`).
+Reescribir el `emitTierReward` actual (hoy emite un solo cupón, líneas ~52–125) como `emitTierRewards` que itera los `ReferralTierReward`
+activos del nivel. Para cada uno, `create` el grant (capturando P2002 como skip idempotente) y emitir según tipo (tabla §5). El `Discount`
+de `PERCENT_COUPON` conserva la forma actual; el `PERMANENT_DISCOUNT` usa `isAutomatic:true`, sin `validUntil`/`maxUses`; `FREE_PRODUCT` no
+emite artefacto (`status:'MANUAL_PENDING'`).
 
 - [ ] **Step 4: Correr (verde)**
 
-Run: `npm run test:unit -- referralQualification.service`
-Expected: PASS los 4 tests.
+Run: `npm run test:unit -- referralQualification.service` Expected: PASS los 4 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -302,10 +338,12 @@ git commit -m "feat(referrals): emit N rewards per tier as grants, idempotent by
 ### Task 5: `onOrderPaid` — claim atómico por orden + unlock guard
 
 **Files:**
+
 - Modify: `src/services/referrals/referralQualification.service.ts`
 - Test: `tests/unit/services/referrals/onOrderPaid.test.ts`
 
 **Interfaces:**
+
 - Consumes: `emitTierRewards` (Task 4).
 - Produces: `onOrderPaid({ orderId, venueId })` transaccional, idempotente por orden y por desbloqueo.
 
@@ -327,17 +365,18 @@ it('aborts emission if the tier unlock already exists', async () => {
 
 - [ ] **Step 2: Correr (falla)**
 
-Run: `npm run test:unit -- onOrderPaid`
-Expected: FAIL.
+Run: `npm run test:unit -- onOrderPaid` Expected: FAIL.
 
 - [ ] **Step 3: Implementar el flujo §5**
 
-Reescribir `onOrderPaid` siguiendo los 7 pasos del §5: CAS `referral.updateMany({ where: { qualifyingOrderId: orderId, status: 'PENDING' }, data: { status: 'QUALIFIED', qualifiedAt } })` → si `count === 0` return; incrementar count; recomputar tier; `INSERT ReferralTierUnlock` (P2002 → return); `emitTierRewards`; actualizar `referralTier`; `ActivityLog`. Todo en `prisma.$transaction`. Email tier-up se mantiene fire-and-forget FUERA de la tx.
+Reescribir `onOrderPaid` siguiendo los 7 pasos del §5: CAS
+`referral.updateMany({ where: { qualifyingOrderId: orderId, status: 'PENDING' }, data: { status: 'QUALIFIED', qualifiedAt } })` → si
+`count === 0` return; incrementar count; recomputar tier; `INSERT ReferralTierUnlock` (P2002 → return); `emitTierRewards`; actualizar
+`referralTier`; `ActivityLog`. Todo en `prisma.$transaction`. Email tier-up se mantiene fire-and-forget FUERA de la tx.
 
 - [ ] **Step 4: Correr (verde)**
 
-Run: `npm run test:unit -- onOrderPaid`
-Expected: PASS.
+Run: `npm run test:unit -- onOrderPaid` Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -351,41 +390,51 @@ git commit -m "feat(referrals): atomic per-order claim + lifetime unlock guard i
 ### Task 6: Refund — revocación por grants
 
 **Files:**
+
 - Modify: `src/services/referrals/referralRefund.service.ts`
 - Test: `tests/unit/services/referrals/referralRefund.service.test.ts`
 
 **Interfaces:**
+
 - Consumes: grants (Task 1).
 - Produces: `onOrderRefunded({ orderId, venueId })` que revoca todos los grants del tier desbloqueado por la orden, por tipo (§6).
 
 - [ ] **Step 1: Escribir tests (red)**
 
 ```typescript
-it('revokes an unredeemed PERCENT_COUPON grant', async () => { /* grant ISSUED PERCENT_COUPON → discount/couponCode deactivated, grant REVOKED */ })
-it('does NOT revoke a REDEEMED coupon grant', async () => { /* grant REDEEMED → sin cambios */ })
+it('revokes an unredeemed PERCENT_COUPON grant', async () => {
+  /* grant ISSUED PERCENT_COUPON → discount/couponCode deactivated, grant REVOKED */
+})
+it('does NOT revoke a REDEEMED coupon grant', async () => {
+  /* grant REDEEMED → sin cambios */
+})
 it('marks an already-applied PERMANENT_DISCOUNT grant REVOKED (no clawback)', async () => {
   prismaMock.orderDiscount.findFirst.mockResolvedValue({ id: 'od1' } as any) // ya aplicado
   await onOrderRefunded({ orderId, venueId })
-  expect(prismaMock.referralRewardGrant.update).toHaveBeenCalledWith(expect.objectContaining({
-    data: expect.objectContaining({ status: 'REVOKED', revokeReason: expect.stringContaining('permanente') }),
-  }))
+  expect(prismaMock.referralRewardGrant.update).toHaveBeenCalledWith(
+    expect.objectContaining({
+      data: expect.objectContaining({ status: 'REVOKED', revokeReason: expect.stringContaining('permanente') }),
+    }),
+  )
 })
-it('does not delete the ReferralTierUnlock on refund', async () => { /* assert referralTierUnlock.delete NO llamado */ })
+it('does not delete the ReferralTierUnlock on refund', async () => {
+  /* assert referralTierUnlock.delete NO llamado */
+})
 ```
 
 - [ ] **Step 2: Correr (falla)**
 
-Run: `npm run test:unit -- referralRefund.service`
-Expected: FAIL.
+Run: `npm run test:unit -- referralRefund.service` Expected: FAIL.
 
 - [ ] **Step 3: Implementar §6**
 
-Reescribir `onOrderRefunded`: buscar los `ReferralRewardGrant` del referral/tier de la orden; por cada uno, ramificar por `rewardType` y `status` según la tabla §6. Para `PERMANENT_DISCOUNT`, consultar `OrderDiscount` (no `CouponRedemption`) para decidir. NO borrar `ReferralTierUnlock`.
+Reescribir `onOrderRefunded`: buscar los `ReferralRewardGrant` del referral/tier de la orden; por cada uno, ramificar por `rewardType` y
+`status` según la tabla §6. Para `PERMANENT_DISCOUNT`, consultar `OrderDiscount` (no `CouponRedemption`) para decidir. NO borrar
+`ReferralTierUnlock`.
 
 - [ ] **Step 4: Correr (verde)**
 
-Run: `npm run test:unit -- referralRefund.service`
-Expected: PASS.
+Run: `npm run test:unit -- referralRefund.service` Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -399,11 +448,13 @@ git commit -m "feat(referrals): refund revokes all tier grants by type via grant
 ### Task 7: Mover lectores de campos planos a grants/rewards
 
 **Files:**
+
 - Modify: `src/services/referrals/referralReads.service.ts:19`
 - Modify: `src/controllers/dashboard/referrals/referrals.controller.ts:14` (getConfig)
 - Test: `tests/unit/services/referrals/referralReads.service.test.ts`
 
 **Interfaces:**
+
 - Consumes: grants (Task 1), `ReferralTierReward` (Task 3).
 - Produces: reads que proyectan los `ReferralRewardGrant` (varios) por referral, y config que devuelve `tierRewards`.
 
@@ -419,17 +470,17 @@ it('projects multiple reward grants per referral (not a single rewardDiscount)',
 
 - [ ] **Step 2: Correr (falla)**
 
-Run: `npm run test:unit -- referralReads.service`
-Expected: FAIL.
+Run: `npm run test:unit -- referralReads.service` Expected: FAIL.
 
 - [ ] **Step 3: Implementar**
 
-En `referralReads.service.ts`, reemplazar la proyección de `rewardDiscount` (uno) por `referralGrants` (varios). En `referrals.controller.ts` `getConfig`, devolver `tierRewards` además de los umbrales. Ningún lector debe leer `tier{N}RewardPercent`.
+En `referralReads.service.ts`, reemplazar la proyección de `rewardDiscount` (uno) por `referralGrants` (varios). En
+`referrals.controller.ts` `getConfig`, devolver `tierRewards` además de los umbrales. Ningún lector debe leer `tier{N}RewardPercent`.
 
 - [ ] **Step 4: Correr (verde) + grep de seguridad**
 
-Run: `npm run test:unit -- referralReads.service && grep -rn "tier1RewardPercent\|tier2RewardPercent\|tier3RewardPercent" src/`
-Expected: tests PASS; el grep NO devuelve lecturas en `src/` (solo, a lo sumo, la migración de Task 2).
+Run: `npm run test:unit -- referralReads.service && grep -rn "tier1RewardPercent\|tier2RewardPercent\|tier3RewardPercent" src/` Expected:
+tests PASS; el grep NO devuelve lecturas en `src/` (solo, a lo sumo, la migración de Task 2).
 
 - [ ] **Step 5: Commit**
 
@@ -443,6 +494,7 @@ git commit -m "feat(referrals): reads project reward grants; config returns tier
 ### Task 8: FREE_PRODUCT manual — fulfill endpoint
 
 **Files:**
+
 - Modify: `src/services/referrals/referralReads.service.ts` (o nuevo `referralGrant.service.ts`)
 - Modify: `src/routes/dashboard/referrals.routes.ts`
 - Modify: `src/controllers/dashboard/referrals/referrals.controller.ts`
@@ -450,7 +502,9 @@ git commit -m "feat(referrals): reads project reward grants; config returns tier
 - Test: `tests/unit/services/referrals/fulfillGrant.test.ts`
 
 **Interfaces:**
-- Produces: `POST /referrals/grants/:grantId/fulfill` → marca un grant `MANUAL_PENDING` como `MANUAL_FULFILLED` con `fulfilledByStaffVenueId` + `ActivityLog`.
+
+- Produces: `POST /referrals/grants/:grantId/fulfill` → marca un grant `MANUAL_PENDING` como `MANUAL_FULFILLED` con
+  `fulfilledByStaffVenueId` + `ActivityLog`.
 
 - [ ] **Step 1: Escribir el test (red)**
 
@@ -458,26 +512,31 @@ git commit -m "feat(referrals): reads project reward grants; config returns tier
 it('marks a MANUAL_PENDING grant as MANUAL_FULFILLED', async () => {
   prismaMock.referralRewardGrant.findUnique.mockResolvedValue({ id: 'g1', status: 'MANUAL_PENDING', venueId } as any)
   await fulfillGrant({ grantId: 'g1', venueId, performedBy: 'sv1' })
-  expect(prismaMock.referralRewardGrant.update).toHaveBeenCalledWith(expect.objectContaining({
-    data: expect.objectContaining({ status: 'MANUAL_FULFILLED', fulfilledByStaffVenueId: 'sv1' }),
-  }))
+  expect(prismaMock.referralRewardGrant.update).toHaveBeenCalledWith(
+    expect.objectContaining({
+      data: expect.objectContaining({ status: 'MANUAL_FULFILLED', fulfilledByStaffVenueId: 'sv1' }),
+    }),
+  )
 })
-it('rejects fulfilling a non-pending grant', async () => { /* status ISSUED → throw 'GRANT_NO_PENDIENTE' */ })
+it('rejects fulfilling a non-pending grant', async () => {
+  /* status ISSUED → throw 'GRANT_NO_PENDIENTE' */
+})
 ```
 
 - [ ] **Step 2: Correr (falla)**
 
-Run: `npm run test:unit -- fulfillGrant`
-Expected: FAIL.
+Run: `npm run test:unit -- fulfillGrant` Expected: FAIL.
 
 - [ ] **Step 3: Implementar servicio + ruta + permiso**
 
-`fulfillGrant` valida `status === 'MANUAL_PENDING'` (si no, throw), actualiza a `MANUAL_FULFILLED`, escribe `ActivityLog` (`action:'REFERRAL_COURTESY_FULFILLED'`). Añadir permiso `referral:fulfill-courtesy` a `INDIVIDUAL_PERMISSIONS_BY_RESOURCE` + `DEFAULT_PERMISSIONS` (MANAGER+) en `permissions.ts`. Ruta con `checkPermission('referral:fulfill-courtesy')`. Correr `npm run audit:permissions` (exit 0).
+`fulfillGrant` valida `status === 'MANUAL_PENDING'` (si no, throw), actualiza a `MANUAL_FULFILLED`, escribe `ActivityLog`
+(`action:'REFERRAL_COURTESY_FULFILLED'`). Añadir permiso `referral:fulfill-courtesy` a `INDIVIDUAL_PERMISSIONS_BY_RESOURCE` +
+`DEFAULT_PERMISSIONS` (MANAGER+) en `permissions.ts`. Ruta con `checkPermission('referral:fulfill-courtesy')`. Correr
+`npm run audit:permissions` (exit 0).
 
 - [ ] **Step 4: Correr (verde)**
 
-Run: `npm run test:unit -- fulfillGrant && npm run audit:permissions`
-Expected: tests PASS; audit exit 0.
+Run: `npm run test:unit -- fulfillGrant && npm run audit:permissions` Expected: tests PASS; audit exit 0.
 
 - [ ] **Step 5: Commit**
 
@@ -491,14 +550,17 @@ git commit -m "feat(referrals): manual courtesy fulfill endpoint for FREE_PRODUC
 ### Task 9: MCP — `configure_referral` + `referral_status` + plan-gate
 
 **Files:**
+
 - Create: `src/mcp/tools/referrals.ts`
 - Modify: `src/mcp/server.ts` (registrar)
 - Modify: `src/mcp/planGate.ts` (aceptar `REFERRAL_PROGRAM` si falta)
 - Test: `tests/unit/mcp/tools/referrals.test.ts`
 
 **Interfaces:**
+
 - Consumes: `referralProgram.service` (Task 3).
-- Produces: tools MCP `configure_referral` (write) y `referral_status` (read), calcados de `configure_loyalty` (`src/mcp/tools/loyalty.ts:128`).
+- Produces: tools MCP `configure_referral` (write) y `referral_status` (read), calcados de `configure_loyalty`
+  (`src/mcp/tools/loyalty.ts:128`).
 
 - [ ] **Step 1: Escribir el test (red)**
 
@@ -514,17 +576,19 @@ it('configure_referral calls updateReferralConfig and audits the write', async (
 
 - [ ] **Step 2: Correr (falla)**
 
-Run: `npm run test:unit -- mcp/tools/referrals`
-Expected: FAIL.
+Run: `npm run test:unit -- mcp/tools/referrals` Expected: FAIL.
 
 - [ ] **Step 3: Implementar las tools**
 
-Copiar la estructura de `registerLoyaltyTools` (`loyalty.ts:128`): `guard.venueFilter` + `guard.requirePermission('referral:configure', venueId)` + `planGateMessage(venueId, 'REFERRAL_PROGRAM', 'El programa de referidos')` + llamar `updateReferralConfig`/lectura + `auditMcpWrite({ action:'REFERRAL_CONFIG_UPDATED', entity:'ReferralProgramConfig', ... })` + `return text({ ok:true, ... })`. Registrar `registerReferralTools(server, scope)` en `src/mcp/server.ts`. Asegurar que `REFERRAL_PROGRAM` esté en el catálogo de `planGate.ts`.
+Copiar la estructura de `registerLoyaltyTools` (`loyalty.ts:128`): `guard.venueFilter` +
+`guard.requirePermission('referral:configure', venueId)` + `planGateMessage(venueId, 'REFERRAL_PROGRAM', 'El programa de referidos')` +
+llamar `updateReferralConfig`/lectura + `auditMcpWrite({ action:'REFERRAL_CONFIG_UPDATED', entity:'ReferralProgramConfig', ... })` +
+`return text({ ok:true, ... })`. Registrar `registerReferralTools(server, scope)` en `src/mcp/server.ts`. Asegurar que `REFERRAL_PROGRAM`
+esté en el catálogo de `planGate.ts`.
 
 - [ ] **Step 4: Correr (verde)**
 
-Run: `npm run test:unit -- mcp/tools/referrals`
-Expected: PASS.
+Run: `npm run test:unit -- mcp/tools/referrals` Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -538,10 +602,12 @@ git commit -m "feat(mcp): configure_referral + referral_status tools (gated by R
 ### Task 10: Regresión, verificación TPV y suite completa
 
 **Files:**
+
 - Test: `tests/unit/services/referrals/regression.test.ts`
 - Doc: `docs/superpowers/specs/2026-06-26-referral-configurable-rewards-design.md` (§16 — resolver la pregunta abierta)
 
 **Interfaces:**
+
 - Consumes: todo lo anterior.
 
 - [ ] **Step 1: Test golden de regresión (red→green)**
@@ -557,13 +623,13 @@ Run: `npm run test:unit -- regression` → PASS.
 
 - [ ] **Step 2: Verificar la dependencia del `/discounts/auto` en TPV (§8)**
 
-Run: `grep -rn "discounts/auto\|applyAutomaticDiscounts" ../avoqado-tpv/app/src 2>/dev/null | head`
-Si el TPV NO invoca el endpoint en el cobro: anotar en §16 del spec que `PERMANENT_DISCOUNT` requiere un cambio en TPV (fuera de este plan) y NO marcar el feature como entregado para ese tipo. Si SÍ lo invoca: resolver §16 como "verificado".
+Run: `grep -rn "discounts/auto\|applyAutomaticDiscounts" ../avoqado-tpv/app/src 2>/dev/null | head` Si el TPV NO invoca el endpoint en el
+cobro: anotar en §16 del spec que `PERMANENT_DISCOUNT` requiere un cambio en TPV (fuera de este plan) y NO marcar el feature como entregado
+para ese tipo. Si SÍ lo invoca: resolver §16 como "verificado".
 
 - [ ] **Step 3: Suite completa + pre-deploy**
 
-Run: `npm run test:unit && npm run pre-deploy`
-Expected: toda la suite verde; pre-deploy exit 0.
+Run: `npm run test:unit && npm run pre-deploy` Expected: toda la suite verde; pre-deploy exit 0.
 
 - [ ] **Step 4: Format + lint**
 
@@ -580,12 +646,19 @@ git commit -m "test(referrals): golden regression + resolve TPV auto-apply verif
 
 ## Fuera de alcance de este plan (planes complementarios)
 
-- **Dashboard UI** (`avoqado-web-dashboard`): ampliar `ReferralsSettings.tsx` con el dropdown de tipo de premio + revelación progresiva, y mostrar "cortesía pendiente" en `ReferralCard.tsx`. Repo distinto → plan separado.
-- **Presentación de ventas** (`Avoqado-HQ/.../platform-presentation/`): actualizar deck + one-pager + PDFs por el Nivel 3 con producto gratis (capacidad customer-visible).
-- **v2** (spec §9): `FREE_PRODUCT` automático (arreglar canje de cupón item-scope), `MONTHLY` con cron, WhatsApp automático, captura manual en dashboard.
+- **Dashboard UI** (`avoqado-web-dashboard`): ampliar `ReferralsSettings.tsx` con el dropdown de tipo de premio + revelación progresiva, y
+  mostrar "cortesía pendiente" en `ReferralCard.tsx`. Repo distinto → plan separado.
+- **Presentación de ventas** (`Avoqado-HQ/.../platform-presentation/`): actualizar deck + one-pager + PDFs por el Nivel 3 con producto
+  gratis (capacidad customer-visible).
+- **v2** (spec §9): `FREE_PRODUCT` automático (arreglar canje de cupón item-scope), `MONTHLY` con cron, WhatsApp automático, captura manual
+  en dashboard.
 
 ## Self-Review (hecho)
 
-- **Cobertura del spec:** §4 (Tasks 1–2) · §5 emisión (Tasks 4–5) · §6 refund (Task 6) · §4.5 lectores (Task 7) · FREE_PRODUCT manual (Task 8) · §7 MCP (Task 9) · §8 verificación TPV (Task 10) · §12 pruebas (cada task) · §10 gating (Task 9). Dashboard (§7) → plan complementario, declarado arriba.
-- **Sin placeholders:** cada task tiene tests y código clave concretos; los detalles extensos referencian la sección exacta del spec ya verificado.
-- **Consistencia de tipos:** `emitTierRewards`, `onOrderPaid`, `onOrderRefunded`, `updateReferralConfig`, `fulfillGrant` usados con las mismas firmas entre tasks.
+- **Cobertura del spec:** §4 (Tasks 1–2) · §5 emisión (Tasks 4–5) · §6 refund (Task 6) · §4.5 lectores (Task 7) · FREE_PRODUCT manual
+  (Task 8) · §7 MCP (Task 9) · §8 verificación TPV (Task 10) · §12 pruebas (cada task) · §10 gating (Task 9). Dashboard (§7) → plan
+  complementario, declarado arriba.
+- **Sin placeholders:** cada task tiene tests y código clave concretos; los detalles extensos referencian la sección exacta del spec ya
+  verificado.
+- **Consistencia de tipos:** `emitTierRewards`, `onOrderPaid`, `onOrderRefunded`, `updateReferralConfig`, `fulfillGrant` usados con las
+  mismas firmas entre tasks.

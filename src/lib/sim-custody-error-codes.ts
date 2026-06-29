@@ -28,6 +28,8 @@ export type SimCustodyErrorCode =
   | 'REASON_REQUIRED'
   | 'TENANT_MISMATCH'
   | 'IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_BODY'
+  | 'PROMOTER_NOT_FOUND'
+  | 'NOT_IN_PROMOTER_STATE'
 
 export interface SimCustodyErrorEntry {
   /** Canonical code used across backend/dashboard/TPV. */
@@ -168,6 +170,22 @@ export const SIM_CUSTODY_ERROR_CODES: Record<SimCustodyErrorCode, SimCustodyErro
     messages: {
       es: 'La llave de idempotencia se usó previamente con un cuerpo diferente.',
       en: 'Idempotency key was previously used with a different request body.',
+    },
+  },
+  PROMOTER_NOT_FOUND: {
+    code: 'PROMOTER_NOT_FOUND',
+    httpStatus: 404,
+    messages: {
+      es: 'El promotor destino no existe o no pertenece a esta organización.',
+      en: 'The target promoter does not exist or does not belong to this organization.',
+    },
+  },
+  NOT_IN_PROMOTER_STATE: {
+    code: 'NOT_IN_PROMOTER_STATE',
+    httpStatus: 409,
+    messages: {
+      es: 'El SIM no está asignado a un promotor (usa asignación a promotor/supervisor).',
+      en: 'The SIM is not assigned to a promoter (use the assign-to-promoter/supervisor flow).',
     },
   },
 }

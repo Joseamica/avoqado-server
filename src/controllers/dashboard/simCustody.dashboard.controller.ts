@@ -7,6 +7,8 @@
  *   POST /collect-from-promoter    MANAGER
  *   POST /collect-from-supervisor  OWNER
  *   GET  /events                   OWNER | MANAGER (timeline)
+ *   POST /reassign-promoter        OWNER | ADMIN (bulk reassign between promoters)
+ *   POST /change-category          OWNER | ADMIN (bulk category change)
  *
  * Thin controllers: validate input (Zod ES), assert tenant, delegate to
  * SimCustodyService. All error codes match sim-custody-error-codes.ts.
@@ -47,6 +49,16 @@ const CollectBody = z.object({
   reason: z.enum(['STAFF_TERMINATED', 'DAMAGED_SIM', 'SUPERVISOR_COLLECTION'], {
     errorMap: () => ({ message: 'Motivo inválido' }),
   }),
+})
+
+export const ReassignPromoterBody = z.object({
+  toPromoterStaffId: z.string().min(1, 'El promotor destino es requerido'),
+  serialNumbers: z.array(z.string().min(1)).min(1, 'Debes incluir al menos un SIM').max(500, 'Máximo 500 SIMs por solicitud'),
+})
+
+export const ChangeCategoryBody = z.object({
+  categoryId: z.string().min(1, 'La categoría destino es requerida'),
+  serialNumbers: z.array(z.string().min(1)).min(1, 'Debes incluir al menos un SIM').max(500, 'Máximo 500 SIMs por solicitud'),
 })
 
 // ==========================================
@@ -204,6 +216,64 @@ export async function collectFromSupervisor(req: Request, res: Response, next: N
       actor: { staffId: userId, organizationId: paramOrgId, role },
       serialNumber: parse.data.serialNumber,
       reason: parse.data.reason,
+    })
+    res.status(200).json(result)
+  } catch (err) {
+    if (respondSimCustodyError(res, err)) return
+    next(err)
+  }
+}
+
+/**
+ * OWNER/ADMIN: Bulk reassign SIMs from one promoter to another.
+ * Requires: sim-custody:reassign + SERIALIZED_INVENTORY module.
+ */
+export async function reassignPromoter(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { userId, orgId, role } = (req as any).authContext ?? {}
+    const { orgId: paramOrgId } = req.params
+    if (orgId !== paramOrgId && role !== 'SUPERADMIN') {
+      const entry = SIM_CUSTODY_ERROR_CODES.TENANT_MISMATCH
+      return res.status(entry.httpStatus).json({ error: entry.code, message: entry.messages.es })
+    }
+
+    const parse = ReassignPromoterBody.safeParse(req.body)
+    if (!parse.success) return mapZodError(res, parse.error)
+
+    const result = await simCustodyService.reassignPromoter({
+      actor: { staffId: userId, organizationId: paramOrgId, role },
+      toPromoterStaffId: parse.data.toPromoterStaffId,
+      serialNumbers: parse.data.serialNumbers,
+      idempotencyRequestId: req.idempotency?.requestId ?? null,
+    })
+    res.status(200).json(result)
+  } catch (err) {
+    if (respondSimCustodyError(res, err)) return
+    next(err)
+  }
+}
+
+/**
+ * OWNER/ADMIN: Bulk change the category of non-sold SIMs.
+ * Requires: serialized-inventory:change-category + SERIALIZED_INVENTORY module.
+ */
+export async function changeCategory(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { userId, orgId, role } = (req as any).authContext ?? {}
+    const { orgId: paramOrgId } = req.params
+    if (orgId !== paramOrgId && role !== 'SUPERADMIN') {
+      const entry = SIM_CUSTODY_ERROR_CODES.TENANT_MISMATCH
+      return res.status(entry.httpStatus).json({ error: entry.code, message: entry.messages.es })
+    }
+
+    const parse = ChangeCategoryBody.safeParse(req.body)
+    if (!parse.success) return mapZodError(res, parse.error)
+
+    const result = await simCustodyService.changeCategory({
+      actor: { staffId: userId, organizationId: paramOrgId, role },
+      categoryId: parse.data.categoryId,
+      serialNumbers: parse.data.serialNumbers,
+      idempotencyRequestId: req.idempotency?.requestId ?? null,
     })
     res.status(200).json(result)
   } catch (err) {

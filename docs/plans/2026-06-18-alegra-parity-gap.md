@@ -50,8 +50,8 @@ bancaria con matcher determinista (`bankReconciliation.service.ts` — `matchLin
 ### ⚪ P2 — cola larga / nice-to-have
 
 - **Descarga masiva automática de CFDIs del SAT** (Buzón se llena solo; hoy manual + XML).
-- **CxC/CxP con antigüedad de saldos** — ✅ CxP (proveedores) HECHO 2026-06-18 (ver abajo); falta el lado **CxC (clientes/cobrar)** —
-  no hay modelo de cuentas por cobrar (ventas se cobran en POS).
+- **CxC/CxP con antigüedad de saldos** — ✅ CxP (proveedores) HECHO 2026-06-18 (ver abajo); falta el lado **CxC (clientes/cobrar)** — no hay
+  modelo de cuentas por cobrar (ventas se cobran en POS).
 - **Depreciación de activos fijos** (LISR 34-35) — solo cuentas placeholder, sin servicio.
 - **Conciliación bancaria "con IA" real** (parseo de PDF + fuzzy match) — hoy matcher exacto/casi (`bankReconciliation.service.ts:209`
   `matchLines`, "slice 2" pendiente por diseño).
