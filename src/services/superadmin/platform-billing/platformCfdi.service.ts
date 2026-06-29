@@ -218,7 +218,7 @@ export async function cancelPlatformCfdi(
   })
 }
 
-/** Build the related-document tax breakdown (Pago 2.0) for a FULL payment, grouping lines by rate. */
+/** Build the FULL related-document tax breakdown (Pago 2.0), grouping lines by rate (+ exempt). */
 function buildRelatedDocTaxes(lines: PlatformCfdiLineInput[]): PaymentComplementTax[] {
   const byRate = new Map<number, number>()
   let exemptBaseCents = 0
@@ -238,10 +238,31 @@ function buildRelatedDocTaxes(lines: PlatformCfdiLineInput[]): PaymentComplement
   return taxes
 }
 
+/** If every line is taxed at exactly one IVA rate (no exempt), return that rate; else null. */
+function singleIvaRate(lines: PlatformCfdiLineInput[]): number | null {
+  const rates = new Set<number>()
+  for (const line of lines) {
+    if (line.taxExempt) return null
+    rates.add(line.taxRate ?? DEFAULT_IVA_RATE)
+  }
+  return rates.size === 1 ? [...rates][0] : null
+}
+
+/**
+ * Pago 2.0 DR tax breakdown for a (possibly partial) payment of `amountCents` (gross) on a
+ * single-rate invoice: BaseDR = amount / (1 + rate); ImporteDR = BaseDR * rate (computed by the
+ * provider). BaseDR + ImporteDR === amount, so installments always sum to the invoice total.
+ */
+function partialRepTaxes(amountCents: number, rate: number): PaymentComplementTax[] {
+  return [{ baseCents: Math.round(amountCents / (1 + rate)), rate, type: 'IVA', factor: 'Tasa', withholding: false }]
+}
+
 /**
  * Register a payment against a PPD income CFDI by stamping a Complemento de Pago (REP, type P).
- * MVP: a single FULL payment of the remaining balance (parcialidades = future work).
- * Idempotent by idempotencyKey. Updates the parent's amountPaidCents atomically.
+ * Supports PARCIALIDADES: pass `amountCents` for a partial payment (defaults to the full remaining
+ * balance). Each payment is one REP carrying NumParcialidad / ImpSaldoAnt / ImpSaldoInsoluto and IVA
+ * proportional to the amount; the parent's amountPaidCents is bumped atomically. Idempotent by
+ * idempotencyKey. Partial payments require a single IVA rate; mixed/exempt invoices must be paid in full.
  */
 export async function registerPlatformPayment(input: RegisterPaymentInput): Promise<PlatformCfdi> {
   const prior = await prisma.platformCfdi.findUnique({ where: { idempotencyKey: input.idempotencyKey } })
@@ -253,14 +274,32 @@ export async function registerPlatformPayment(input: RegisterPaymentInput): Prom
   if (parent.metodoPago !== 'PPD') throw new PlatformBillingError('Solo las facturas PPD requieren complemento de pago', 'VALIDATION')
   if (parent.status !== 'STAMPED') throw new PlatformBillingError('La factura debe estar timbrada', 'VALIDATION')
   if (!parent.uuid) throw new PlatformBillingError('La factura no tiene folio fiscal (UUID)', 'VALIDATION')
-  if (parent.amountPaidCents > 0)
-    throw new PlatformBillingError('La factura ya tiene un pago registrado; las parcialidades aún no están soportadas', 'VALIDATION')
 
-  const remainingCents = parent.totalCents - parent.amountPaidCents
-  if (remainingCents <= 0) throw new PlatformBillingError('La factura ya está saldada', 'VALIDATION')
+  const saldoAnteriorCents = parent.totalCents - parent.amountPaidCents
+  if (saldoAnteriorCents <= 0) throw new PlatformBillingError('La factura ya está saldada', 'VALIDATION')
+
+  const amountCents = input.amountCents ?? saldoAnteriorCents
+  if (amountCents <= 0) throw new PlatformBillingError('El monto del pago debe ser mayor a 0', 'VALIDATION')
+  if (amountCents > saldoAnteriorCents) throw new PlatformBillingError('El monto excede el saldo pendiente de la factura', 'VALIDATION')
 
   const lines = (parent.lines as unknown as PlatformCfdiLineInput[] | null) ?? []
-  const taxes = buildRelatedDocTaxes(lines)
+  const rate = singleIvaRate(lines)
+  const isFullSinglePayment = parent.amountPaidCents === 0 && amountCents === parent.totalCents
+  let taxes: PaymentComplementTax[]
+  if (rate != null) {
+    taxes = partialRepTaxes(amountCents, rate)
+  } else if (isFullSinglePayment) {
+    taxes = buildRelatedDocTaxes(lines) // factura con IVA mixto/exento, pagada de una sola vez
+  } else {
+    throw new PlatformBillingError(
+      'Las parcialidades solo están soportadas para facturas con una sola tasa de IVA; registra el pago total',
+      'VALIDATION',
+    )
+  }
+
+  const priorStampedReps = await prisma.platformCfdi.count({ where: { parentPlatformCfdiId: parent.id, type: 'PAGO', status: 'STAMPED' } })
+  const installment = priorStampedReps + 1
+  const saldoInsolutoCents = saldoAnteriorCents - amountCents
 
   const emisor = await getActivePlatformEmisor()
   if (!emisor) throw new PlatformBillingError('No hay emisor de plataforma configurado', 'NO_EMISOR')
@@ -293,10 +332,10 @@ export async function registerPlatformPayment(input: RegisterPaymentInput): Prom
         paymentInfo: {
           fechaPago: input.paymentDate,
           formaPago: input.formaPago,
-          montoCents: remainingCents,
-          parcialidad: 1,
-          saldoAnteriorCents: remainingCents,
-          saldoInsolutoCents: 0,
+          montoCents: amountCents,
+          parcialidad: installment,
+          saldoAnteriorCents,
+          saldoInsolutoCents,
         } as unknown as Prisma.InputJsonValue,
       },
     })
@@ -323,7 +362,7 @@ export async function registerPlatformPayment(input: RegisterPaymentInput): Prom
       paymentForm: input.formaPago,
       serie: parent.serie ?? undefined,
       externalId: input.idempotencyKey,
-      relatedDocuments: [{ uuid: parent.uuid, amountCents: remainingCents, installment: 1, lastBalanceCents: remainingCents, taxes }],
+      relatedDocuments: [{ uuid: parent.uuid, amountCents, installment, lastBalanceCents: saldoAnteriorCents, taxes }],
     })
 
     const updated = await prisma.$transaction(async tx => {
@@ -338,7 +377,7 @@ export async function registerPlatformPayment(input: RegisterPaymentInput): Prom
           stampedAt: stamped.stampedAt,
         },
       })
-      await tx.platformCfdi.update({ where: { id: parent.id }, data: { amountPaidCents: { increment: remainingCents } } })
+      await tx.platformCfdi.update({ where: { id: parent.id }, data: { amountPaidCents: { increment: amountCents } } })
       return rep
     })
     return updated

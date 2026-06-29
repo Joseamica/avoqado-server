@@ -141,6 +141,8 @@ export const registerPaymentSchema = z.object({
   body: z.object({
     paymentDate: z.string({ required_error: 'La fecha de pago es requerida' }).trim().min(1, 'La fecha de pago es requerida'),
     formaPago: z.string({ required_error: 'La forma de pago es requerida' }).trim().min(1, 'La forma de pago es requerida'),
+    // Monto del abono en centavos enteros. Omitir = pago total del saldo (parcialidad).
+    amountCents: z.number().int('El monto debe estar en centavos enteros').positive('El monto debe ser mayor a 0').optional(),
     idempotencyKey: z.string().trim().min(1).optional(),
   }),
 })

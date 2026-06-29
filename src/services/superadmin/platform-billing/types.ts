@@ -96,6 +96,8 @@ export interface RegisterPaymentInput {
   paymentDate: string
   /** c_FormaPago of the actual payment (e.g. "03" transferencia, "04" tarjeta). */
   formaPago: string
+  /** Amount paid in integer cents. Omit for a full payment of the remaining balance (parcialidad). */
+  amountCents?: number
   /** Staff who registered it (authContext.userId). */
   performedById: string
   idempotencyKey: string

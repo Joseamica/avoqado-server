@@ -237,11 +237,17 @@ export async function getInvoice(req: Request, res: Response, next: NextFunction
 export async function registerPayment(req: Request, res: Response, next: NextFunction) {
   try {
     const { userId } = (req as any).authContext
-    const { paymentDate, formaPago, idempotencyKey } = req.body as { paymentDate: string; formaPago: string; idempotencyKey?: string }
+    const { paymentDate, formaPago, amountCents, idempotencyKey } = req.body as {
+      paymentDate: string
+      formaPago: string
+      amountCents?: number
+      idempotencyKey?: string
+    }
     const rep = await registerPlatformPayment({
       platformCfdiId: req.params.id,
       paymentDate,
       formaPago,
+      amountCents,
       idempotencyKey: idempotencyKey ?? randomUUID(),
       performedById: userId,
     })
