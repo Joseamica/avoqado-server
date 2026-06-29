@@ -48,6 +48,8 @@ router.get('/summary', checkPermission('sale-verifications:review'), ctrl.getOrg
 router.get('/by-month', checkPermission('sale-verifications:review'), ctrl.getSalesByMonth)
 router.get('/by-sim-type', checkPermission('sale-verifications:review'), ctrl.getSalesBySimType)
 router.get('/by-week', checkPermission('sale-verifications:review'), ctrl.getSalesByWeek)
+router.get('/by-sale-type-weekly', checkPermission('sale-verifications:review'), ctrl.getSalesBySaleTypeWeekly)
+router.get('/by-sim-type-weekly', checkPermission('sale-verifications:review'), ctrl.getSalesBySimTypeWeekly)
 router.get('/by-city', checkPermission('sale-verifications:review'), ctrl.getSalesByCity)
 router.get('/by-supervisor', checkPermission('sale-verifications:review'), ctrl.getSalesBySupervisor)
 router.get('/by-store', checkPermission('sale-verifications:review'), ctrl.getSalesByStore)
