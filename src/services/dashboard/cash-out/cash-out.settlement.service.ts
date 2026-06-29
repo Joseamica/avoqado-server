@@ -23,7 +23,10 @@ export async function listCashOutVenueIds(): Promise<string[]> {
           where: { enabled: true, module: { code: MODULE_CODES.SERIALIZED_INVENTORY } },
           select: { organizationId: true },
         }),
-        prisma.venueModule.findMany({ where: { enabled: true, module: { code: MODULE_CODES.SERIALIZED_INVENTORY } }, select: { venueId: true } }),
+        prisma.venueModule.findMany({
+          where: { enabled: true, module: { code: MODULE_CODES.SERIALIZED_INVENTORY } },
+          select: { venueId: true },
+        }),
       ]),
     { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'cash-out-settlement.listVenues' },
   )
