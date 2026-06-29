@@ -1166,14 +1166,30 @@ export async function editOrgSaleVerification(
   return updated
 }
 
+// Utility — parse a single query date as a venue-local day boundary, converted
+// to the UTC instant stored in the DB. A malformed/invalid string is IGNORED
+// (returns undefined → the bound is simply not applied, matching "no param =
+// no filter") so it never reaches Prisma as `new Date("Invalid Date")`, which
+// Prisma rejects with a 500.
+function parseVenueDayBoundary(dateStr: string, boundary: 'start' | 'end'): Date | undefined {
+  // Expect a calendar day "YYYY-MM-DD" in venue-local time.
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return undefined
+  const time = boundary === 'end' ? 'T23:59:59.999' : 'T00:00:00'
+  const local = new Date(`${dateStr}${time}`)
+  if (Number.isNaN(local.getTime())) return undefined // shape ok but not a real date (e.g. 2026-13-99)
+  return fromZonedTime(local, VENUE_TIMEZONE_DEFAULT)
+}
+
 // Utility — parse query dates with venue-timezone-aware day boundaries
 export function parseRange(fromDateStr?: string, toDateStr?: string): AggregationRange {
   const range: AggregationRange = {}
   if (fromDateStr) {
-    range.fromDate = fromZonedTime(new Date(`${fromDateStr}T00:00:00`), VENUE_TIMEZONE_DEFAULT)
+    const from = parseVenueDayBoundary(fromDateStr, 'start')
+    if (from) range.fromDate = from
   }
   if (toDateStr) {
-    range.toDate = fromZonedTime(new Date(`${toDateStr}T23:59:59.999`), VENUE_TIMEZONE_DEFAULT)
+    const to = parseVenueDayBoundary(toDateStr, 'end')
+    if (to) range.toDate = to
   }
   return range
 }

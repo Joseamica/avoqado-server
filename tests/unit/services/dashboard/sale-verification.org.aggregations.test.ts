@@ -26,7 +26,9 @@ import {
   getSalesBySimTypeWeekly,
   getSalesBySimType,
   toSimBucket,
+  parseRange,
 } from '@/services/dashboard/sale-verification.org.dashboard.service'
+import { fromZonedTime } from 'date-fns-tz'
 import prisma from '@/utils/prismaClient'
 
 jest.mock('@/utils/prismaClient', () => ({
@@ -426,5 +428,31 @@ describe('getSalesBySimType — regrouped into SIM buckets', () => {
         where: expect.objectContaining({ status: 'COMPLETED', venue: { organizationId: ORG_ID } }),
       }),
     )
+  })
+})
+
+describe('parseRange — rejects malformed dates without breaking the venue-tz conversion', () => {
+  it('ignores a non-date string instead of yielding an Invalid Date (was a Prisma 500)', () => {
+    expect(parseRange('notadate', undefined)).toEqual({})
+    expect(parseRange(undefined, 'garbage')).toEqual({})
+    expect(parseRange("'; DROP TABLE \"Payment\"--", undefined)).toEqual({})
+  })
+
+  it('ignores well-shaped but impossible dates (2026-13-99, 0000-00-00)', () => {
+    expect(parseRange('2026-13-99', '0000-00-00')).toEqual({})
+  })
+
+  it('preserves the EXACT venue-timezone → UTC conversion for valid dates (DB stores UTC)', () => {
+    const r = parseRange('2026-05-01', '2026-05-31')
+    // Identical formula to the original implementation — proves the tz conversion is untouched.
+    expect(r.fromDate).toEqual(fromZonedTime(new Date('2026-05-01T00:00:00'), 'America/Mexico_City'))
+    expect(r.toDate).toEqual(fromZonedTime(new Date('2026-05-31T23:59:59.999'), 'America/Mexico_City'))
+    expect(Number.isNaN(r.fromDate!.getTime())).toBe(false)
+  })
+
+  it('applies only the valid bound when the other is malformed', () => {
+    const r = parseRange('notadate', '2026-05-31')
+    expect(r.fromDate).toBeUndefined()
+    expect(r.toDate).toEqual(fromZonedTime(new Date('2026-05-31T23:59:59.999'), 'America/Mexico_City'))
   })
 })
