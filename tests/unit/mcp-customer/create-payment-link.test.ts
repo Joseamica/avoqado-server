@@ -36,7 +36,15 @@ describe('create_payment_link (write)', () => {
     expect(mockCreate).not.toHaveBeenCalled()
   })
 
-  it('creates a FIXED-amount link + audits', async () => {
+  it('without confirm → PREVIEWS the link and does NOT create', async () => {
+    const out = parse(await call({ venueId: 'v1', title: 'Anticipo', amount: 500 }))
+    expect(out.requiresConfirmation).toBe(true)
+    expect(out.preview).toMatchObject({ title: 'Anticipo', amountType: 'FIXED', amount: 500, purpose: 'PAYMENT' })
+    expect(out.message).toMatch(/500\.00/)
+    expect(mockCreate).not.toHaveBeenCalled()
+  })
+
+  it('confirm:true creates a FIXED-amount link + audits', async () => {
     mockCreate.mockResolvedValueOnce({
       id: 'pl-1',
       shortCode: 'AB12',
@@ -45,7 +53,7 @@ describe('create_payment_link (write)', () => {
       amount: 500,
       status: 'ACTIVE',
     })
-    const out = parse(await call({ venueId: 'v1', title: 'Anticipo', amount: 500 }))
+    const out = parse(await call({ venueId: 'v1', title: 'Anticipo', amount: 500, confirm: true }))
     expect(mockCreate).toHaveBeenCalledWith(
       'v1',
       expect.objectContaining({ title: 'Anticipo', amountType: 'FIXED', amount: 500, purpose: 'PAYMENT' }),
@@ -55,9 +63,9 @@ describe('create_payment_link (write)', () => {
     expect(mockAudit.mock.calls[0][1]).toMatchObject({ action: 'PAYMENT_LINK_CREATED', entityId: 'pl-1' })
   })
 
-  it('creates an OPEN-amount link when no amount is given', async () => {
+  it('confirm:true creates an OPEN-amount link when no amount is given', async () => {
     mockCreate.mockResolvedValueOnce({ id: 'pl-2', shortCode: 'ZZ', title: 'Donativo', amountType: 'OPEN', amount: null, status: 'ACTIVE' })
-    await call({ venueId: 'v1', title: 'Donativo', purpose: 'donation' })
+    await call({ venueId: 'v1', title: 'Donativo', purpose: 'donation', confirm: true })
     expect(mockCreate).toHaveBeenCalledWith('v1', expect.objectContaining({ amountType: 'OPEN', purpose: 'DONATION' }), 's1')
   })
 })

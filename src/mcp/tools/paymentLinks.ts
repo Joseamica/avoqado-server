@@ -66,19 +66,47 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'create_payment_link',
-    'Create a NEW payment link (pay.avoqado.io) in a venue you can access — a shareable link to collect a payment. Set a title and either a fixed amount or leave it open (the payer chooses how much). Optionally a description, purpose (payment / donation) and an expiry. Returns the short code. This WRITES — requires payment-link:create. (Item-based links with product line items are not created here — use the dashboard.)',
+    'Create a NEW payment link (pay.avoqado.io) in a venue you can access — a shareable link to collect a payment. Set a title and either a fixed amount (in PESOS, e.g. 150.50) or leave it open (the payer chooses how much). Optionally a description, purpose (payment / donation) and an expiry. Because it mints a PUBLIC, shareable checkout that anyone can pay, by DEFAULT it only PREVIEWS the link; call again with confirm:true to actually create it. Returns the short code. This WRITES — requires payment-link:create. (Item-based links with product line items are not created here — use the dashboard.)',
     {
       venueId: z.string().describe('Venue to create the link in (must be in your scope)'),
       title: z.string().min(1).describe('What the payment is for, e.g. "Anticipo boda"'),
-      amount: z.number().positive().optional().describe('Fixed amount to charge; omit for an OPEN amount the payer chooses'),
+      amount: z
+        .number()
+        .positive()
+        .optional()
+        .describe('Fixed amount to charge in PESOS (e.g. 150.50); omit for an OPEN amount the payer chooses'),
       purpose: z.enum(['payment', 'donation']).optional().describe("'payment' (default) or 'donation'"),
       description: z.string().optional().describe('Description shown to the payer'),
       currency: z.string().optional().describe('Currency (default the venue currency, usually MXN)'),
       expiresAt: z.string().optional().describe('Expiry, ISO 8601 (e.g. 2026-07-01T00:00:00.000Z)'),
+      confirm: z.boolean().optional().describe('Must be true to actually create the link; without it you get a preview'),
     },
-    async ({ venueId, title, amount, purpose, description, currency, expiresAt }) => {
+    async ({ venueId, title, amount, purpose, description, currency, expiresAt, confirm }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('payment-link:create', venueId) // write gate (per-venue role)
+
+      // A payment link is a PUBLIC, shareable checkout carrying a money amount —
+      // a wrong-magnitude amount (150 vs 150000) from a vague request would mint
+      // a live link anyone could pay. Preview before creating (confirm-gate).
+      if (!confirm) {
+        const amountLabel =
+          amount !== undefined ? `monto fijo $${amount.toFixed(2)} ${currency ?? 'MXN'}` : 'monto ABIERTO (el pagador elige cuánto)'
+        const purposeLabel = purpose === 'donation' ? 'donativo' : 'pago'
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview: {
+            title,
+            amountType: amount !== undefined ? 'FIXED' : 'OPEN',
+            amount: amount ?? null,
+            purpose: purpose === 'donation' ? 'DONATION' : 'PAYMENT',
+            currency: currency ?? 'MXN',
+            expiresAt: expiresAt ?? null,
+          },
+          message: `Voy a CREAR un link de cobro público (pay.avoqado.io): "${title}" — ${amountLabel}, ${purposeLabel}${expiresAt ? `, vence ${expiresAt}` : ', sin expiración'}. Cualquiera con el link podrá pagar. Vuelve a llamar con confirm:true para crearlo.`,
+        })
+      }
+
       try {
         const link = await createPaymentLink(
           venueId,
