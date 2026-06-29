@@ -288,7 +288,10 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
           change: {
             serialNumber,
             action,
-            effect: action === 'returned' ? 'libera el SIM al inventario y lo desliga de la orden (NO reembolsa al cliente)' : 'marca el item como no vendible',
+            effect:
+              action === 'returned'
+                ? 'libera el SIM al inventario y lo desliga de la orden (NO reembolsa al cliente)'
+                : 'marca el item como no vendible',
           },
           message: `Esto marcará el serial "${serialNumber}" como ${action === 'returned' ? 'DEVUELTO — libera el SIM al inventario y lo desliga de la venta, pero NO reembolsa al cliente (el reembolso, si aplica, se maneja aparte: efectivo a mano o tarjeta en la terminal)' : 'DAÑADO (no vendible)'}. Confirma con el operador; luego vuelve a llamar con confirm:true.`,
         })
