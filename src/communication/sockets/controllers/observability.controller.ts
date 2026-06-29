@@ -8,6 +8,25 @@ import { LogLevel } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
 
 /**
+ * Per-terminal debounce for heartbeat DB writes.
+ *
+ * When a terminal reconnects after a long socket outage, the Socket.IO client
+ * flushes its whole backlog of buffered `tpv:heartbeat` emits at once (observed
+ * 2026-06-29: 187 heartbeats spanning ~15h delivered in ~2s). Each ran a
+ * 2-statement `prisma.$transaction`, and the burst exhausted the Prisma pool
+ * (limit 18) → "Timed out fetching a connection from the pool". Health
+ * heartbeats are telemetry; persisting one per terminal per 30s is plenty.
+ *
+ * Debounce is on the SERVER clock — never on `payload.timestamp` (the device's,
+ * which can be skewed) — so a wrong device clock can never suppress writes. The
+ * normal 5-min cadence never debounces; only reconnect-flush bursts do. The
+ * in-memory map is bounded by the number of terminals (mirrors the existing
+ * 30s debounce in touchTerminalHeartbeat.middleware.ts).
+ */
+const HEARTBEAT_WRITE_DEBOUNCE_MS = 30_000
+const lastHeartbeatWriteAt = new Map<string, number>()
+
+/**
  * Observability Controller
  * Handles terminal logging and health monitoring via Socket.IO
  *
@@ -230,13 +249,28 @@ export class ObservabilityController {
 
       const resolvedTerminalId = terminal.id
 
-      // Register terminal in registry (for Socket.IO payment routing)
-      logger.info(`📡 [Heartbeat] Registering terminal ${payload.terminalId} (socket: ${socket.id}, venue: ${payload.venueId})`)
+      // Register terminal in registry (for Socket.IO payment routing).
+      // ALWAYS runs — even for debounced heartbeats below — so a reconnected
+      // socket's id is always published for routing (payments are unaffected).
       terminalRegistry.register(payload.terminalId, socket.id, payload.venueId)
+
+      // Debounce DB writes per terminal (server clock) to survive reconnect-flush
+      // bursts; see the note at the top of this file. Done AFTER register() so it
+      // never affects payment routing. The next non-debounced heartbeat still
+      // refreshes Terminal.lastHeartbeat (online status), so this can never cause
+      // a false offline — only redundant telemetry rows are skipped.
+      const nowMs = Date.now()
+      const lastWriteMs = lastHeartbeatWriteAt.get(resolvedTerminalId)
+      if (lastWriteMs !== undefined && nowMs - lastWriteMs < HEARTBEAT_WRITE_DEBOUNCE_MS) {
+        if (callback) callback({ success: true, debounced: true })
+        return
+      }
+      lastHeartbeatWriteAt.set(resolvedTerminalId, nowMs)
 
       // Store health metrics + sync denormalized columns on Terminal in ONE
       // transaction. The org dashboard sorts by Terminal.latestHealthScore;
       // these MUST stay in sync with the latest TerminalHealth row.
+      logger.info(`📡 [Heartbeat] Registering terminal ${payload.terminalId} (socket: ${socket.id}, venue: ${payload.venueId})`)
       const now = new Date()
       const [terminalHealth] = await prisma.$transaction([
         prisma.terminalHealth.create({

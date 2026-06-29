@@ -3964,11 +3964,13 @@ router.use('/venues/:venueId/inventory', authenticateTokenMiddleware, inventoryR
 router.use('/venues/:venueId/accounting', authenticateTokenMiddleware, accountingRoutes)
 
 // Conciliación bancaria (Feature PRO BANK_RECONCILIATION): subir estado de cuenta CSV → conciliar vs depósitos
+// Subir es una ESCRITURA (crea BankStatement + líneas, sube archivo, escribe ActivityLog): requiere
+// accounting:reconcile, igual que confirmar — NO el accounting:read de solo-lectura (ver/listar).
 router.post(
   '/venues/:venueId/bank-reconciliation/statements',
   authenticateTokenMiddleware,
   checkFeatureAccess('BANK_RECONCILIATION'),
-  checkPermission('accounting:read'),
+  checkPermission('accounting:reconcile'),
   bankStatementUpload.single('file'),
   bankReconciliationController.uploadBankStatement,
 )

@@ -21,7 +21,7 @@ jest.mock('../../../src/services/fiscal/accountMapping.service', () => ({ getMap
 jest.mock('../../../src/services/fiscal/chartOfAccounts.service', () => ({ resolveScopeOrNull: jest.fn() }))
 jest.mock('../../../src/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 
-import { computePayrollLine, runPayroll } from '../../../src/services/fiscal/nomina.service'
+import { computePayrollLine, computePayrollPreview, runPayroll } from '../../../src/services/fiscal/nomina.service'
 import prisma from '../../../src/utils/prismaClient'
 import { postJournalEntry } from '../../../src/services/fiscal/journalEntry.service'
 import { getMappings } from '../../../src/services/fiscal/accountMapping.service'
@@ -106,6 +106,28 @@ const existingRun = (over: Record<string, unknown> = {}) => ({
   totalImssObreroCents: 475_00,
   totalNetoCents: 16_921_00,
   ...over,
+})
+
+describe('computePayrollPreview — filtra por periodicidad del empleado', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mScope.mockResolvedValue({ organizationId: 'org1', rfc: 'EKU9003173C9', venueType: 'AUTO_SERVICE' })
+    p.employee.findMany.mockResolvedValue([])
+  })
+
+  it('una corrida SEMANAL sólo considera empleados con periodicidadPago SEMANAL (no barre a los mensuales)', async () => {
+    await computePayrollPreview('v1', '2026-06', 'SEMANAL')
+    expect(p.employee.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ periodicidadPago: 'SEMANAL', activo: true }) }),
+    )
+  })
+
+  it('una corrida MENSUAL sólo considera empleados MENSUAL', async () => {
+    await computePayrollPreview('v1', '2026-06', 'MENSUAL')
+    expect(p.employee.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ periodicidadPago: 'MENSUAL' }) }),
+    )
+  })
 })
 
 describe('runPayroll — atomicidad y recuperación', () => {

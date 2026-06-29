@@ -337,8 +337,10 @@ export async function computePayrollPreview(
   }
   if (!scope) return base
 
+  // Sólo los empleados de ESTA periodicidad. Si no se filtra, una corrida SEMANAL/QUINCENAL barre a
+  // los empleados mensuales y los escala con el periodFactor equivocado (defecto del audit C4).
   const employees = await prisma.employee.findMany({
-    where: { organizationId: scope.organizationId, rfc: scope.rfc, activo: true },
+    where: { organizationId: scope.organizationId, rfc: scope.rfc, activo: true, periodicidadPago: periodicidad },
     orderBy: { nombre: 'asc' },
   })
   for (const e of employees) {
