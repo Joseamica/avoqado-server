@@ -332,14 +332,25 @@ describe('markExpensePaid', () => {
     expect(lines.reduce((n: number, l: any) => n + l.debitCents, 0)).toBe(lines.reduce((n: number, l: any) => n + l.creditCents, 0))
   })
 
-  it('mapeo faltante (sin ACCOUNTS_PAYABLE) → marca pagado pero reporta faltanMapeos, no postea', async () => {
+  it('mapeo faltante (sin ACCOUNTS_PAYABLE) en PPD ya posteado → NO marca pagado (un gasto pagado SIN póliza de pago sería irrecuperable), reporta faltanMapeos', async () => {
     mMappings.mockResolvedValue({ mappings: FULL_MAPPINGS.mappings.filter(m => m.movementType !== 'ACCOUNTS_PAYABLE') })
     p.expense.findFirst.mockResolvedValue(dbExpense({ paymentStatus: 'UNPAID', posted: true }))
     const r = await markExpensePaid('v1', 'e1', { fechaPago: '2026-07-05' }, { staffId: 's' })
-    expect(r.marked).toBe(true)
+    expect(r.marked).toBe(false)
     expect(r.paymentPosted).toBe(false)
     expect(r.missingMappings).toContain('ACCOUNTS_PAYABLE')
     expect(mPost).not.toHaveBeenCalled()
+    // no se debe flipar a PAID: como no hay otro camino que postee `expense-pay:<id>`,
+    // marcarlo pagado dejaría Proveedores/IVA-pendiente abiertos para siempre.
+    expect(p.expense.update).not.toHaveBeenCalled()
+  })
+
+  it('PPD ya posteado: si el posteo de la póliza de pago FALLA, NO deja el gasto en PAID (sin huérfano, reintentable)', async () => {
+    p.expense.findFirst.mockResolvedValue(dbExpense({ paymentStatus: 'UNPAID', posted: true }))
+    mPost.mockRejectedValueOnce(new Error('serialization failure'))
+    await expect(markExpensePaid('v1', 'e1', { fechaPago: '2026-07-05' }, { staffId: 's' })).rejects.toThrow()
+    // el flip a PAID NO debe haberse commiteado antes de que la póliza de pago exista
+    expect(p.expense.update).not.toHaveBeenCalled()
   })
 
   it('fecha inválida → BadRequestError', async () => {

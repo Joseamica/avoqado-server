@@ -372,6 +372,47 @@ export async function markExpensePaid(
   const paidPeriod = opts.fechaPago.slice(0, 7)
   const formaPago = opts.formaPago ?? expense.formaPago
 
+  // Si el gasto YA estaba devengado (PPD), la póliza de PAGO debe quedar posteada ANTES de marcar
+  // PAID. No hay otro camino que postee `expense-pay:<id>` (generateExpensePolicies sólo postea el
+  // devengo de gastos no posteados), así que marcar PAID primero y fallar el posteo —o faltar un
+  // mapeo— perdería la póliza de pago para siempre (el corte `alreadyPaid` bloquea el reintento) y
+  // dejaría Proveedores/IVA-pendiente abiertos sin respaldo. postJournalEntry es idempotente por la
+  // clave, así que postear-antes-de-flipar es seguro ante reintentos.
+  if (expense.posted) {
+    const mapResult = await getMappings(venueId)
+    const accountByMovement = new Map<string, string>()
+    for (const m of mapResult.mappings) if (m.account) accountByMovement.set(m.movementType, m.account.id)
+    const acct = (m: string): string | undefined => accountByMovement.get(m)
+
+    const { lines, movements } = planExpensePayment({ ...expense, formaPago })
+    const missing = movements.filter(m => !acct(m))
+    if (missing.length > 0) {
+      // No marcar PAID: sin la póliza de pago el gasto quedaría pagado sin asiento que lo respalde e
+      // irrecuperable. Devolvemos los mapeos faltantes para configurarlos y reintentar.
+      return { ...base, missingMappings: missing }
+    }
+    const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+    const tz = venue?.timezone || DEFAULT_TZ
+    const ref = expense.uuid ? expense.uuid.slice(0, 8) : (expense.folio ?? '')
+    await postJournalEntry(
+      venueId,
+      {
+        date: formatInTimeZone(new Date(`${opts.fechaPago}T12:00:00.000Z`), tz, 'yyyy-MM-dd'),
+        type: JournalEntryType.EGRESO,
+        source: JournalEntrySource.EXPENSE,
+        sourceId: expense.id,
+        idempotencyKey: `expense-pay:${expense.id}:v1`,
+        concept: `Pago gasto · ${expense.proveedorNombre}${ref ? ` · ${ref}` : ''}`,
+        venueId,
+        lines: lines.map(l => ({ ledgerAccountId: acct(l.movement)!, debitCents: l.debitCents, creditCents: l.creditCents })),
+      },
+      { staffId: actor.staffId ?? null },
+    )
+    base.paymentPosted = true
+  }
+
+  // La póliza de pago (si aplicaba) ya quedó posteada → ahora sí marcamos PAID. Para el caso no-PPD
+  // (gasto aún sin devengar) no hay póliza de pago aquí: la próxima generación lo postea PAID directo.
   await prisma.expense.update({
     where: { id: expense.id },
     data: {
@@ -383,39 +424,6 @@ export async function markExpensePaid(
     },
   })
   base.marked = true
-
-  // Si el gasto YA estaba posteado en devengo (PPD), postea ahora la póliza de pago.
-  if (expense.posted) {
-    const mapResult = await getMappings(venueId)
-    const accountByMovement = new Map<string, string>()
-    for (const m of mapResult.mappings) if (m.account) accountByMovement.set(m.movementType, m.account.id)
-    const acct = (m: string): string | undefined => accountByMovement.get(m)
-
-    const { lines, movements } = planExpensePayment({ ...expense, formaPago })
-    const missing = movements.filter(m => !acct(m))
-    if (missing.length > 0) {
-      base.missingMappings = missing
-    } else {
-      const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
-      const tz = venue?.timezone || DEFAULT_TZ
-      const ref = expense.uuid ? expense.uuid.slice(0, 8) : (expense.folio ?? '')
-      await postJournalEntry(
-        venueId,
-        {
-          date: formatInTimeZone(new Date(`${opts.fechaPago}T12:00:00.000Z`), tz, 'yyyy-MM-dd'),
-          type: JournalEntryType.EGRESO,
-          source: JournalEntrySource.EXPENSE,
-          sourceId: expense.id,
-          idempotencyKey: `expense-pay:${expense.id}:v1`,
-          concept: `Pago gasto · ${expense.proveedorNombre}${ref ? ` · ${ref}` : ''}`,
-          venueId,
-          lines: lines.map(l => ({ ledgerAccountId: acct(l.movement)!, debitCents: l.debitCents, creditCents: l.creditCents })),
-        },
-        { staffId: actor.staffId ?? null },
-      )
-      base.paymentPosted = true
-    }
-  }
 
   await logAction({
     action: 'EXPENSE_MARKED_PAID',

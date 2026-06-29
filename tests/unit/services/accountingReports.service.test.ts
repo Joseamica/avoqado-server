@@ -80,7 +80,36 @@ it('estado de resultados + balance general que cuadra con la ecuación contable'
   expect(bs.activo.totalCents).toBe(5600) // banco 9600 - inventario 4000
   expect(bs.pasivo.totalCents).toBe(1600)
   expect(bs.resultadoEjercicioCents).toBe(4000)
+  expect(bs.resultadoEjerciciosAnterioresCents).toBe(0) // ejercicio único → sin acumulado anterior
   expect(bs.capital.totalCents).toBe(4000) // 0 capital + resultado
   expect(bs.capital.lines.some(l => l.name === 'Resultado del ejercicio' && l.amountCents === 4000)).toBe(true)
   expect(bs.balanced).toBe(true) // 5600 == 1600 + 4000
+})
+
+it('FY2+: el resultado de ejercicios ANTERIORES se reconoce en capital → la ecuación cuadra entre años', async () => {
+  // FY2026 dejó +1000 (banco 1000 / ventas 1000); FY2027 (periodo actual) suma +500 más.
+  // Balance = acumulado de TODO (banco 1500, ventas all 1500); P&L del ejercicio = sólo 2027 (500).
+  const ytd = [
+    { ledgerAccountId: 'banco', _sum: { debitCents: 500, creditCents: 0 } },
+    { ledgerAccountId: 'ventas', _sum: { debitCents: 0, creditCents: 500 } },
+  ]
+  const all = [
+    { ledgerAccountId: 'banco', _sum: { debitCents: 1500, creditCents: 0 } },
+    { ledgerAccountId: 'ventas', _sum: { debitCents: 0, creditCents: 1500 } },
+  ]
+  p.journalLine.groupBy.mockResolvedValueOnce(ytd).mockResolvedValueOnce(all)
+  p.ledgerAccount.findMany.mockResolvedValue([
+    { id: 'banco', code: '102.01', name: 'Bancos', type: 'ACTIVO' },
+    { id: 'ventas', code: '401.01', name: 'Ventas', type: 'INGRESO' },
+  ])
+
+  const r = await getAccountingReports('v1', '2027-06')
+  const bs = r.balanceSheet
+
+  expect(r.incomeStatement.resultadoCents).toBe(500) // resultado del EJERCICIO (sólo FY2027)
+  expect(bs.resultadoEjercicioCents).toBe(500)
+  expect(bs.resultadoEjerciciosAnterioresCents).toBe(1000) // FY2026 acumulado (antes: se perdía)
+  expect(bs.capital.lines.some(l => l.name === 'Resultados de ejercicios anteriores' && l.amountCents === 1000)).toBe(true)
+  expect(bs.capital.totalCents).toBe(1500) // 0 capital + 1000 anteriores + 500 ejercicio
+  expect(bs.balanced).toBe(true) // 1500 == 0 + 1500  (antes daba FALSE: faltaba el resultado anterior)
 })

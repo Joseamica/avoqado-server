@@ -371,9 +371,71 @@ export interface RunPayrollResult {
 const PAYROLL_MOVEMENTS = ['PAYROLL_SALARIES', 'ISR_PAYROLL_WITHHELD', 'IMSS_PAYABLE', 'SALARIES_PAYABLE'] as const
 
 /**
+ * Líneas de la póliza de nómina a partir de los totales. DEBE sueldos (percepciones) [+ DEBE 216.01
+ * subsidio entregado, que el patrón recupera] · HABER ISR ret · HABER IMSS ret · HABER sueldos por
+ * pagar (neto). Cuadra por la identidad del neto: neto = percepciones + subsidioEntregado − isr − imss.
+ */
+function buildPayrollJournalLines(
+  acct: Map<string, string>,
+  t: { percepcionesCents: number; subsidioEntregadoCents: number; isrCents: number; imssCents: number; netoCents: number },
+) {
+  return [
+    { ledgerAccountId: acct.get('PAYROLL_SALARIES')!, debitCents: t.percepcionesCents, creditCents: 0 },
+    { ledgerAccountId: acct.get('ISR_PAYROLL_WITHHELD')!, debitCents: t.subsidioEntregadoCents, creditCents: 0 },
+    { ledgerAccountId: acct.get('ISR_PAYROLL_WITHHELD')!, debitCents: 0, creditCents: t.isrCents },
+    { ledgerAccountId: acct.get('IMSS_PAYABLE')!, debitCents: 0, creditCents: t.imssCents },
+    { ledgerAccountId: acct.get('SALARIES_PAYABLE')!, debitCents: 0, creditCents: t.netoCents },
+  ].filter(l => l.debitCents > 0 || l.creditCents > 0)
+}
+
+/**
+ * Postea la póliza de una corrida y la marca POSTED. Idempotente por `payroll:<runId>:v1`: si la póliza
+ * ya existía (p. ej. el posteo había quedado a medias), postJournalEntry devuelve la existente y aquí
+ * sólo se completa el marcado POSTED. El posteo va ANTES del update, así que una corrida nunca queda
+ * marcada POSTED sin su póliza.
+ */
+async function postAndMarkPayrollRun(args: {
+  venueId: string
+  runId: string
+  date: string
+  lines: { ledgerAccountId: string; debitCents: number; creditCents: number }[]
+  period: string
+  periodicidad: PayrollPeriodicity
+  empleados: number
+  netoCents: number
+  actorStaffId: string | null
+}): Promise<void> {
+  const dto = await postJournalEntry(
+    args.venueId,
+    {
+      date: args.date,
+      type: JournalEntryType.EGRESO,
+      source: JournalEntrySource.EXPENSE,
+      sourceId: args.runId,
+      idempotencyKey: `payroll:${args.runId}:v1`,
+      concept: `Nómina ${args.period} (${args.periodicidad.toLowerCase()})`,
+      venueId: args.venueId,
+      lines: args.lines,
+    },
+    { staffId: args.actorStaffId },
+  )
+  await prisma.payrollRun.update({ where: { id: args.runId }, data: { posted: true, status: 'POSTED', journalEntryId: dto.id } })
+  await logAction({
+    action: 'PAYROLL_RUN_POSTED',
+    entity: 'PayrollRun',
+    entityId: args.runId,
+    staffId: args.actorStaffId,
+    venueId: args.venueId,
+    data: { period: args.period, periodicidad: args.periodicidad, empleados: args.empleados, netoCents: args.netoCents },
+  })
+}
+
+/**
  * Corre la nómina del periodo: calcula, persiste PayrollRun + PayrollLine y postea la póliza
  * (601.01 sueldos · 216.01 ISR ret · 216.07 IMSS ret · 205.06 sueldos por pagar). Idempotente por
- * (org, rfc, period, periodicidad) — re-correr devuelve la existente.
+ * (org, rfc, period, periodicidad) — re-correr devuelve la existente; si la existente quedó SIN postear
+ * (la póliza falló o el marcado no se completó), se recupera re-disparando el posteo en vez de dejarla
+ * atascada en DRAFT.
  */
 export async function runPayroll(
   venueId: string,
@@ -401,21 +463,55 @@ export async function runPayroll(
     where: { organizationId_rfc_period_periodicidad: { organizationId: scope.organizationId, rfc: scope.rfc, period, periodicidad } },
   })
   if (existing) {
-    return {
-      ...base,
-      alreadyExists: true,
-      payrollRunId: existing.id,
-      posted: existing.posted,
-      totals: {
-        empleados: existing.empleados,
+    const existingTotals = {
+      empleados: existing.empleados,
+      percepcionesCents: existing.totalPercepcionesCents,
+      isrCents: existing.totalIsrCents,
+      subsidioCents: existing.totalSubsidioCents,
+      subsidioEntregadoCents: 0,
+      imssCents: existing.totalImssObreroCents,
+      netoCents: existing.totalNetoCents,
+    }
+    // Recuperación: una corrida previa quedó SIN postear (la póliza falló, o el marcado POSTED no se
+    // completó tras postearla). NO la dejamos atascada en DRAFT: re-disparamos el posteo —idempotente
+    // por `payroll:<id>:v1`, así que si la póliza ya existía no se duplica— y la marcamos POSTED. La
+    // póliza se reconstruye EXACTA desde lo persistido: el subsidio entregado se deriva de la identidad
+    // del neto (neto = percepciones + subsidioEntregado − isr − imss), sin recalcular contra empleados
+    // (que pudieron cambiar) → sin drift.
+    if (!existing.posted) {
+      const mapResult = await getMappings(venueId)
+      const acct = new Map<string, string>()
+      for (const m of mapResult.mappings) if (m.account) acct.set(m.movementType, m.account.id)
+      const missing = PAYROLL_MOVEMENTS.filter(m => !acct.has(m))
+      if (missing.length > 0) {
+        return { ...base, alreadyExists: true, payrollRunId: existing.id, posted: false, missingMappings: missing, totals: existingTotals }
+      }
+
+      const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+      const tz = venue?.timezone || DEFAULT_TZ
+      const subsidioEntregadoCents =
+        existing.totalNetoCents - existing.totalPercepcionesCents + existing.totalIsrCents + existing.totalImssObreroCents
+      const lines = buildPayrollJournalLines(acct, {
         percepcionesCents: existing.totalPercepcionesCents,
+        subsidioEntregadoCents,
         isrCents: existing.totalIsrCents,
-        subsidioCents: existing.totalSubsidioCents,
-        subsidioEntregadoCents: 0,
         imssCents: existing.totalImssObreroCents,
         netoCents: existing.totalNetoCents,
-      },
+      })
+      await postAndMarkPayrollRun({
+        venueId,
+        runId: existing.id,
+        date: formatInTimeZone(existing.fechaPago, tz, 'yyyy-MM-dd'),
+        lines,
+        period,
+        periodicidad,
+        empleados: existing.empleados,
+        netoCents: existing.totalNetoCents,
+        actorStaffId: actor.staffId ?? null,
+      })
+      return { ...base, alreadyExists: true, payrollRunId: existing.id, posted: true, totals: existingTotals }
     }
+    return { ...base, alreadyExists: true, payrollRunId: existing.id, posted: existing.posted, totals: existingTotals }
   }
 
   const preview = await computePayrollPreview(venueId, period, periodicidad)
@@ -432,74 +528,63 @@ export async function runPayroll(
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
   const tz = venue?.timezone || DEFAULT_TZ
 
-  // Persiste la corrida + renglones, y postea la póliza.
-  const run = await prisma.payrollRun.create({
-    data: {
-      organizationId: scope.organizationId,
-      rfc: scope.rfc,
-      venueId,
-      period,
-      periodicidad,
-      fechaPago: new Date(`${fechaPago}T12:00:00.000Z`),
-      empleados: preview.totals.empleados,
-      totalPercepcionesCents: preview.totals.percepcionesCents,
-      totalIsrCents: preview.totals.isrCents,
-      totalSubsidioCents: preview.totals.subsidioCents,
-      totalImssObreroCents: preview.totals.imssCents,
-      totalNetoCents: preview.totals.netoCents,
-      createdById: actor.staffId ?? null,
-    },
+  // Corrida + renglones en UNA transacción → nunca una corrida sin sus líneas. La póliza se postea
+  // DESPUÉS (postJournalEntry abre su propia tx Serializable); si fallara, la corrida queda en DRAFT
+  // y la PRÓXIMA llamada la recupera por el bloque `existing` de arriba — nunca queda POSTED sin póliza.
+  const run = await prisma.$transaction(async tx => {
+    const created = await tx.payrollRun.create({
+      data: {
+        organizationId: scope.organizationId,
+        rfc: scope.rfc,
+        venueId,
+        period,
+        periodicidad,
+        fechaPago: new Date(`${fechaPago}T12:00:00.000Z`),
+        empleados: preview.totals.empleados,
+        totalPercepcionesCents: preview.totals.percepcionesCents,
+        totalIsrCents: preview.totals.isrCents,
+        totalSubsidioCents: preview.totals.subsidioCents,
+        totalImssObreroCents: preview.totals.imssCents,
+        totalNetoCents: preview.totals.netoCents,
+        createdById: actor.staffId ?? null,
+      },
+    })
+    await tx.payrollLine.createMany({
+      data: preview.lines.map(l => ({
+        payrollRunId: created.id,
+        employeeId: l.employeeId,
+        nombre: l.nombre,
+        rfcEmpleado: l.rfcEmpleado,
+        percepcionGravadaCents: l.percepcionGravadaCents,
+        percepcionExentaCents: l.percepcionExentaCents,
+        totalPercepcionesCents: l.totalPercepcionesCents,
+        isrCents: l.isrRetenidoCents,
+        subsidioCents: l.subsidioCents,
+        imssObreroCents: l.imssObreroCents,
+        otrasDeduccionesCents: l.otrasDeduccionesCents,
+        netoCents: l.netoCents,
+      })),
+    })
+    return created
   })
-  await prisma.payrollLine.createMany({
-    data: preview.lines.map(l => ({
-      payrollRunId: run.id,
-      employeeId: l.employeeId,
-      nombre: l.nombre,
-      rfcEmpleado: l.rfcEmpleado,
-      percepcionGravadaCents: l.percepcionGravadaCents,
-      percepcionExentaCents: l.percepcionExentaCents,
-      totalPercepcionesCents: l.totalPercepcionesCents,
-      isrCents: l.isrRetenidoCents,
-      subsidioCents: l.subsidioCents,
-      imssObreroCents: l.imssObreroCents,
-      otrasDeduccionesCents: l.otrasDeduccionesCents,
-      netoCents: l.netoCents,
-    })),
+
+  const lines = buildPayrollJournalLines(acct, {
+    percepcionesCents: preview.totals.percepcionesCents,
+    subsidioEntregadoCents: preview.totals.subsidioEntregadoCents,
+    isrCents: preview.totals.isrCents,
+    imssCents: preview.totals.imssCents,
+    netoCents: preview.totals.netoCents,
   })
-
-  // Póliza: DEBE sueldos (percepciones) [+ DEBE 216.01 subsidio entregado, que el patrón recupera] ·
-  // HABER ISR ret · HABER IMSS ret · HABER sueldos por pagar (neto). Cuadra por la identidad del neto.
-  const lines = [
-    { ledgerAccountId: acct.get('PAYROLL_SALARIES')!, debitCents: preview.totals.percepcionesCents, creditCents: 0 },
-    { ledgerAccountId: acct.get('ISR_PAYROLL_WITHHELD')!, debitCents: preview.totals.subsidioEntregadoCents, creditCents: 0 },
-    { ledgerAccountId: acct.get('ISR_PAYROLL_WITHHELD')!, debitCents: 0, creditCents: preview.totals.isrCents },
-    { ledgerAccountId: acct.get('IMSS_PAYABLE')!, debitCents: 0, creditCents: preview.totals.imssCents },
-    { ledgerAccountId: acct.get('SALARIES_PAYABLE')!, debitCents: 0, creditCents: preview.totals.netoCents },
-  ].filter(l => l.debitCents > 0 || l.creditCents > 0)
-
-  const dto = await postJournalEntry(
+  await postAndMarkPayrollRun({
     venueId,
-    {
-      date: formatInTimeZone(new Date(`${fechaPago}T12:00:00.000Z`), tz, 'yyyy-MM-dd'),
-      type: JournalEntryType.EGRESO,
-      source: JournalEntrySource.EXPENSE,
-      sourceId: run.id,
-      idempotencyKey: `payroll:${run.id}:v1`,
-      concept: `Nómina ${period} (${periodicidad.toLowerCase()})`,
-      venueId,
-      lines,
-    },
-    { staffId: actor.staffId ?? null },
-  )
-
-  await prisma.payrollRun.update({ where: { id: run.id }, data: { posted: true, status: 'POSTED', journalEntryId: dto.id } })
-  await logAction({
-    action: 'PAYROLL_RUN_POSTED',
-    entity: 'PayrollRun',
-    entityId: run.id,
-    staffId: actor.staffId ?? null,
-    venueId,
-    data: { period, periodicidad, empleados: preview.totals.empleados, netoCents: preview.totals.netoCents },
+    runId: run.id,
+    date: formatInTimeZone(new Date(`${fechaPago}T12:00:00.000Z`), tz, 'yyyy-MM-dd'),
+    lines,
+    period,
+    periodicidad,
+    empleados: preview.totals.empleados,
+    netoCents: preview.totals.netoCents,
+    actorStaffId: actor.staffId ?? null,
   })
 
   return { ...base, payrollRunId: run.id, posted: true }

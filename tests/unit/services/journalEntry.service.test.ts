@@ -113,6 +113,15 @@ describe('postJournalEntry — invariante de doble partida', () => {
       /fecha/i,
     )
   })
+
+  it('fecha imposible con día desbordado (31-feb) → rechaza, NO la normaliza a marzo', async () => {
+    // new Date('2026-02-31T12:00:00Z') NO es NaN: V8 la corre a 2026-03-03. Un asiento quedaría en
+    // periodo '2026-02' con fecha marzo → póliza fuera de su mes declarado (inconsistencia SAT).
+    await expect(createManualEntry('v1', { date: '2026-02-31', concept: 'x', lines: balanced.lines }, { staffId: 's' })).rejects.toThrow(
+      /fecha/i,
+    )
+    expect(p.$transaction).not.toHaveBeenCalled()
+  })
 })
 
 describe('postJournalEntry — validación de cuentas', () => {

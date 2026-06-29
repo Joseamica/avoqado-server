@@ -160,7 +160,13 @@ export async function postJournalEntry(
 
   if (!DATE_RE.test(input.date)) throw new BadRequestError('La fecha debe tener formato AAAA-MM-DD.')
   const date = new Date(`${input.date}T12:00:00.000Z`) // mediodía UTC: el día no se corre por zona horaria
-  if (Number.isNaN(date.getTime())) throw new BadRequestError(`La fecha '${input.date}' no es válida.`)
+  // Un día desbordado (31-feb, 31-abr…) NO es NaN: V8 lo corre al mes siguiente. Verificamos que sea
+  // un día de calendario REAL comparando los componentes UTC con la cadena, o el asiento quedaría en
+  // un periodo distinto a su fecha (p. ej. '2026-02-31' → fecha marzo, periodo '2026-02' → inconsistencia SAT).
+  const [yy, mm, dd] = input.date.split('-').map(Number)
+  if (Number.isNaN(date.getTime()) || date.getUTCFullYear() !== yy || date.getUTCMonth() + 1 !== mm || date.getUTCDate() !== dd) {
+    throw new BadRequestError(`La fecha '${input.date}' no es válida.`)
+  }
   const period = input.date.slice(0, 7)
   if (!input.concept || !input.concept.trim()) throw new BadRequestError('El concepto de la póliza es requerido.')
 

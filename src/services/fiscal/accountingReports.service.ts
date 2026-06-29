@@ -38,9 +38,11 @@ export interface IncomeStatement {
 export interface BalanceSheet {
   activo: { lines: ReportLine[]; totalCents: number }
   pasivo: { lines: ReportLine[]; totalCents: number }
-  /** Incluye una línea "Resultado del ejercicio" para que cuadre la ecuación. */
+  /** Incluye "Resultado del ejercicio" + "Resultados de ejercicios anteriores" para que cuadre la ecuación. */
   capital: { lines: ReportLine[]; totalCents: number }
   resultadoEjercicioCents: number
+  /** Resultado ACUMULADO de ejercicios anteriores (utilidades retenidas calculadas al vuelo, sin póliza de cierre). */
+  resultadoEjerciciosAnterioresCents: number
   /** activo == pasivo + capital (la ecuación contable). */
   balanced: boolean
 }
@@ -76,6 +78,7 @@ const emptyReports = (period: string, scope: { organizationId: string; rfc: stri
     pasivo: { lines: [], totalCents: 0 },
     capital: { lines: [], totalCents: 0 },
     resultadoEjercicioCents: 0,
+    resultadoEjerciciosAnterioresCents: 0,
     balanced: true,
   },
 })
@@ -122,12 +125,17 @@ export async function getAccountingReports(venueId: string, period: string): Pro
   const activo: ReportLine[] = []
   const pasivo: ReportLine[] = []
   const capital: ReportLine[] = []
+  // Resultado ACUMULADO de toda la historia (Σ haber−debe de las cuentas de resultados). Sirve para
+  // reconocer en capital lo de ejercicios anteriores, no sólo lo del ejercicio en curso.
+  let resultadoAllHistoryCents = 0
 
   for (const a of accounts) {
     if (RESULT_TYPES.has(a.type)) {
       const s = ytdById.get(a.id)
       const debe = s?.debitCents ?? 0
       const haber = s?.creditCents ?? 0
+      const sAll = allById.get(a.id)
+      resultadoAllHistoryCents += (sAll?.creditCents ?? 0) - (sAll?.debitCents ?? 0)
       if (a.type === LedgerAccountType.INGRESO) {
         const amount = haber - debe // acreedora → ingreso positivo
         if (amount !== 0) ingresos.push({ code: a.code, name: a.name, amountCents: amount })
@@ -165,11 +173,19 @@ export async function getAccountingReports(venueId: string, period: string): Pro
   const utilidadBruta = ingresosTotal - costosTotal
   const resultado = utilidadBruta - gastosTotal
 
-  // El resultado del ejercicio se suma al capital (aún no cerrado) para cuadrar la ecuación.
-  const capitalLines = [...byCode(capital), { code: '~RESULT', name: 'Resultado del ejercicio', amountCents: resultado }]
+  // El capital incluye el resultado ACUMULADO (todos los ejercicios). Como aún no hay póliza de cierre
+  // anual que mueva el resultado de años previos a utilidades retenidas, lo reconocemos al vuelo: el del
+  // ejercicio en curso (YTD) + los "ejercicios anteriores" (acumulado − ejercicio). Sin esto la ecuación
+  // se rompía a partir del 2º año fiscal (el resultado de años previos quedaba fuera del capital).
+  const resultadoAnteriores = resultadoAllHistoryCents - resultado
+  const capitalLines = [...byCode(capital)]
+  if (resultadoAnteriores !== 0) {
+    capitalLines.push({ code: '~RETAINED', name: 'Resultados de ejercicios anteriores', amountCents: resultadoAnteriores })
+  }
+  capitalLines.push({ code: '~RESULT', name: 'Resultado del ejercicio', amountCents: resultado })
   const activoTotal = sum(activo)
   const pasivoTotal = sum(pasivo)
-  const capitalTotal = sum(capital) + resultado
+  const capitalTotal = sum(capital) + resultadoAllHistoryCents
 
   return {
     needsFiscalSetup: false,
@@ -189,6 +205,7 @@ export async function getAccountingReports(venueId: string, period: string): Pro
       pasivo: { lines: byCode(pasivo), totalCents: pasivoTotal },
       capital: { lines: capitalLines, totalCents: capitalTotal },
       resultadoEjercicioCents: resultado,
+      resultadoEjerciciosAnterioresCents: resultadoAnteriores,
       balanced: activoTotal === pasivoTotal + capitalTotal,
     },
   }

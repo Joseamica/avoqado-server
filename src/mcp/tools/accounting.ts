@@ -521,6 +521,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           pasivo: pesos(bs.pasivo.totalCents),
           capital: pesos(bs.capital.totalCents),
           resultadoDelEjercicio: pesos(bs.resultadoEjercicioCents),
+          resultadoEjerciciosAnteriores: pesos(bs.resultadoEjerciciosAnterioresCents),
           cuadra: bs.balanced,
         },
       })
