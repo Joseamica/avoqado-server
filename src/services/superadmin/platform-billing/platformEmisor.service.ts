@@ -72,13 +72,19 @@ export async function provisionPlatformEmisor(emisorId: string, provider: Factur
   const emisor = await prisma.platformEmisor.findUnique({ where: { id: emisorId } })
   if (!emisor) throw new PlatformBillingError('Emisor no encontrado', 'NO_EMISOR')
 
-  const org = await provider.createOrganization({ legalName: emisor.legalName, email: 'facturacion@avoqado.io' })
-  await provider.updateOrgLegal({
-    providerOrgId: org.providerOrgId,
-    legalName: emisor.legalName,
-    taxSystem: emisor.regimenFiscal,
-    zip: emisor.lugarExpedicion,
-  })
+  let org: Awaited<ReturnType<FacturapiProvider['createOrganization']>>
+  try {
+    org = await provider.createOrganization({ legalName: emisor.legalName, email: 'facturacion@avoqado.io' })
+    await provider.updateOrgLegal({
+      providerOrgId: org.providerOrgId,
+      legalName: emisor.legalName,
+      taxSystem: emisor.regimenFiscal,
+      zip: emisor.lugarExpedicion,
+    })
+  } catch (err) {
+    // Surface Facturapi's (Spanish, actionable) message instead of a bare 500.
+    throw new PlatformBillingError(`No se pudo provisionar en Facturapi: ${err instanceof Error ? err.message : String(err)}`, 'PROVIDER')
+  }
 
   return prisma.platformEmisor.update({
     where: { id: emisor.id },
@@ -106,12 +112,19 @@ export async function uploadPlatformEmisorCsd(
   if (!emisor) throw new PlatformBillingError('Emisor no encontrado', 'NO_EMISOR')
   if (!emisor.providerOrgId) throw new PlatformBillingError('El emisor debe provisionarse antes de subir el CSD', 'VALIDATION')
 
-  const result = await provider.uploadCsd({
-    providerOrgId: emisor.providerOrgId,
-    cerBase64: csd.cerBase64,
-    keyBase64: csd.keyBase64,
-    csdPassword: csd.csdPassword,
-  })
+  let result: Awaited<ReturnType<FacturapiProvider['uploadCsd']>>
+  try {
+    result = await provider.uploadCsd({
+      providerOrgId: emisor.providerOrgId,
+      cerBase64: csd.cerBase64,
+      keyBase64: csd.keyBase64,
+      csdPassword: csd.csdPassword,
+    })
+  } catch (err) {
+    // CSD errors are user-input (FIEL en vez de CSD, contraseña incorrecta, RFC que no coincide).
+    // Surface Facturapi's Spanish message as a 422 instead of a generic 500.
+    throw new PlatformBillingError(err instanceof Error ? err.message : String(err), 'VALIDATION')
+  }
 
   return prisma.platformEmisor.update({
     where: { id: emisor.id },
