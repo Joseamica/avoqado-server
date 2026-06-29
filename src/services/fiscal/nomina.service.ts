@@ -465,23 +465,28 @@ export async function runPayroll(
     where: { organizationId_rfc_period_periodicidad: { organizationId: scope.organizationId, rfc: scope.rfc, period, periodicidad } },
   })
   if (existing) {
+    // El venueId que CREÓ la corrida (su centro de costos), NO el del llamador — que podría ser otro
+    // local del mismo (org,rfc), ya que la corrida es idempotente por (org,rfc,period,periodicidad).
+    const runVenueId = existing.venueId ?? venueId
+    // Subsidio entregado: no se persiste en PayrollRun, pero se deriva EXACTO de la identidad del neto
+    // (neto = percepciones + subsidioEntregado − isr − imss). Sirve para el retorno Y para reconstruir
+    // la póliza en la recuperación, sin recalcular contra empleados (que pudieron cambiar) → sin drift.
+    const subsidioEntregadoCents =
+      existing.totalNetoCents - existing.totalPercepcionesCents + existing.totalIsrCents + existing.totalImssObreroCents
     const existingTotals = {
       empleados: existing.empleados,
       percepcionesCents: existing.totalPercepcionesCents,
       isrCents: existing.totalIsrCents,
       subsidioCents: existing.totalSubsidioCents,
-      subsidioEntregadoCents: 0,
+      subsidioEntregadoCents,
       imssCents: existing.totalImssObreroCents,
       netoCents: existing.totalNetoCents,
     }
     // Recuperación: una corrida previa quedó SIN postear (la póliza falló, o el marcado POSTED no se
     // completó tras postearla). NO la dejamos atascada en DRAFT: re-disparamos el posteo —idempotente
-    // por `payroll:<id>:v1`, así que si la póliza ya existía no se duplica— y la marcamos POSTED. La
-    // póliza se reconstruye EXACTA desde lo persistido: el subsidio entregado se deriva de la identidad
-    // del neto (neto = percepciones + subsidioEntregado − isr − imss), sin recalcular contra empleados
-    // (que pudieron cambiar) → sin drift.
+    // por `payroll:<id>:v1`, así que si la póliza ya existía no se duplica— y la marcamos POSTED.
     if (!existing.posted) {
-      const mapResult = await getMappings(venueId)
+      const mapResult = await getMappings(runVenueId)
       const acct = new Map<string, string>()
       for (const m of mapResult.mappings) if (m.account) acct.set(m.movementType, m.account.id)
       const missing = PAYROLL_MOVEMENTS.filter(m => !acct.has(m))
@@ -489,10 +494,8 @@ export async function runPayroll(
         return { ...base, alreadyExists: true, payrollRunId: existing.id, posted: false, missingMappings: missing, totals: existingTotals }
       }
 
-      const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+      const venue = await prisma.venue.findUnique({ where: { id: runVenueId }, select: { timezone: true } })
       const tz = venue?.timezone || DEFAULT_TZ
-      const subsidioEntregadoCents =
-        existing.totalNetoCents - existing.totalPercepcionesCents + existing.totalIsrCents + existing.totalImssObreroCents
       const lines = buildPayrollJournalLines(acct, {
         percepcionesCents: existing.totalPercepcionesCents,
         subsidioEntregadoCents,
@@ -501,7 +504,7 @@ export async function runPayroll(
         netoCents: existing.totalNetoCents,
       })
       await postAndMarkPayrollRun({
-        venueId,
+        venueId: runVenueId,
         runId: existing.id,
         date: formatInTimeZone(existing.fechaPago, tz, 'yyyy-MM-dd'),
         lines,

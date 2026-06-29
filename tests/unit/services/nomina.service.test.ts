@@ -167,6 +167,28 @@ describe('runPayroll — atomicidad y recuperación', () => {
     expect(r.alreadyExists).toBe(true)
   })
 
+  it('recuperación: postea bajo el venueId ORIGINAL de la corrida (no el del llamador) y reporta el subsidio entregado derivado', async () => {
+    // Corrida creada por otro local del mismo (org,rfc), empleado de salario bajo → subsidio entregado > 0.
+    p.payrollRun.findUnique.mockResolvedValue(
+      existingRun({
+        venueId: 'vOriginal',
+        posted: false,
+        totalPercepcionesCents: 5_000_00,
+        totalIsrCents: 0,
+        totalImssObreroCents: 118_75,
+        totalSubsidioCents: 535_65,
+        totalNetoCents: 5_130_33,
+      }),
+    )
+    const r = await runPayroll('vCaller', '2026-06', 'MENSUAL', '2026-06-28', { staffId: 's' })
+    // la póliza se postea bajo el local que CREÓ la corrida, no el que disparó la recuperación
+    expect(mPost.mock.calls[0][0]).toBe('vOriginal')
+    // el retorno reporta el subsidio entregado REAL (derivado de la identidad del neto), no 0
+    expect(r.totals.subsidioEntregadoCents).toBe(249_08) // 5130.33 − 5000 + 0 + 118.75
+    const lines = mPost.mock.calls[0][1].lines
+    expect(lines.reduce((n: number, l: any) => n + l.debitCents, 0)).toBe(lines.reduce((n: number, l: any) => n + l.creditCents, 0))
+  })
+
   it('corrida previa YA posteada → no re-postea (idempotente)', async () => {
     p.payrollRun.findUnique.mockResolvedValue(existingRun({ posted: true, journalEntryId: 'je-old', status: 'POSTED' }))
     const r = await runPayroll('v1', '2026-06', 'MENSUAL', '2026-06-28', { staffId: 's' })
