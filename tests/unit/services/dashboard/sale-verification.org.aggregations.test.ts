@@ -22,6 +22,7 @@ import {
   getSalesByPromoter,
   getSalesByPromoterDaily,
   getSalesBySaleTypeWeekly,
+  getSalesBySimTypeWeekly,
   toSimBucket,
 } from '@/services/dashboard/sale-verification.org.dashboard.service'
 import prisma from '@/utils/prismaClient'
@@ -319,5 +320,37 @@ describe('toIsoWeekKey (via getSalesBySaleTypeWeekly week keys)', () => {
     const rows = await getSalesBySaleTypeWeekly(ORG_ID, {})
     const lineas = rows.find(r => r.name === 'Líneas Nuevas')!
     expect(Object.keys(lineas.byWeek).sort()).toEqual(['2026-W01', '2026-W02'])
+  })
+})
+
+describe('getSalesBySimTypeWeekly', () => {
+  const w11 = new Date('2026-03-09T18:00:00Z') // 2026-W11
+  const cat = (name: string | null) => ({ payment: { order: { items: name === null ? [] : [{ serializedItem: { category: { name } } }] } } })
+
+  it('groups by SIM bucket per week; 3 fixed always present; Otros only when > 0', async () => {
+    mockedSvFindMany.mockResolvedValue([
+      { createdAt: w11, ...cat('SIM de Intercambio') },
+      { createdAt: w11, ...cat('SIM de Intercambio') },
+      { createdAt: w11, ...cat('SIM de Evento') },
+      { createdAt: w11, ...cat('E-SIM de promotor') }, // → Otros SIMs
+    ])
+    const rows = await getSalesBySimTypeWeekly(ORG_ID, {})
+    expect(rows.map(r => r.name)).toEqual(['SIM de Intercambio', '$100 de Promotor', 'SIM de Evento', 'Otros SIMs'])
+    expect(rows[0]).toMatchObject({ total: 2, byWeek: { '2026-W11': 2 } })
+    expect(rows[1]).toMatchObject({ total: 0, byWeek: {} }) // $100 fixed, zero, still present
+    expect(rows[2]).toMatchObject({ total: 1 })
+    expect(rows[3]).toMatchObject({ name: 'Otros SIMs', total: 1 })
+  })
+
+  it('omits "Otros SIMs" when every sale is a fixed category', async () => {
+    mockedSvFindMany.mockResolvedValue([{ createdAt: w11, ...cat('$100 de Promotor') }])
+    const rows = await getSalesBySimTypeWeekly(ORG_ID, {})
+    expect(rows.map(r => r.name)).toEqual(['SIM de Intercambio', '$100 de Promotor', 'SIM de Evento'])
+  })
+
+  it('treats a sale with no serialized item as Otros SIMs', async () => {
+    mockedSvFindMany.mockResolvedValue([{ createdAt: w11, ...cat(null) }])
+    const rows = await getSalesBySimTypeWeekly(ORG_ID, {})
+    expect(rows.find(r => r.name === 'Otros SIMs')).toMatchObject({ total: 1 })
   })
 })

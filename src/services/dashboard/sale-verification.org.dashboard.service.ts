@@ -547,6 +547,48 @@ export async function getSalesBySaleTypeWeekly(
   ]
 }
 
+/**
+ * Confirmed sales by Tipo de SIM × ISO week. Category resolved through
+ * payment→order→items→serializedItem→category, mapped to 3 fixed buckets +
+ * "Otros SIMs". Same COMPLETED base as getSalesByWeek → totals reconcile.
+ * The 3 fixed rows are always present (fixed order); "Otros SIMs" only if > 0.
+ */
+export async function getSalesBySimTypeWeekly(
+  orgId: string,
+  range: AggregationRange,
+): Promise<Array<{ name: SimBucket; byWeek: Record<string, number>; total: number }>> {
+  const verifications = await prisma.saleVerification.findMany({
+    where: baseAggregationWhere(orgId, range),
+    select: {
+      createdAt: true,
+      payment: {
+        select: {
+          order: { select: { items: { select: { serializedItem: { select: { category: { select: { name: true } } } } } } } },
+        },
+      },
+    },
+  })
+  const acc = new Map<SimBucket, { byWeek: Record<string, number>; total: number }>()
+  const ensure = (b: SimBucket) => {
+    let r = acc.get(b)
+    if (!r) { r = { byWeek: {}, total: 0 }; acc.set(b, r) }
+    return r
+  }
+  for (const b of SIM_FIXED_BUCKETS) ensure(b) // fixed rows always present
+  for (const v of verifications) {
+    const first = v.payment?.order?.items?.find(oi => oi.serializedItem)?.serializedItem
+    const bucket = toSimBucket(first?.category?.name ?? null)
+    const wk = toIsoWeekKey(v.createdAt)
+    const r = ensure(bucket)
+    r.byWeek[wk] = (r.byWeek[wk] ?? 0) + 1
+    r.total += 1
+  }
+  const ordered: SimBucket[] = [...SIM_FIXED_BUCKETS]
+  const others = acc.get(SIM_OTHERS)
+  if (others && others.total > 0) ordered.push(SIM_OTHERS)
+  return ordered.map(name => ({ name, ...ensure(name) }))
+}
+
 /** Sales grouped by venue.city × month. */
 export async function getSalesByCity(
   orgId: string,
