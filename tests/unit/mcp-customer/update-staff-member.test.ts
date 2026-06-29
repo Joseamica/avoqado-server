@@ -30,12 +30,16 @@ const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Pro
 const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map() } as McpScope
 const call = (args: Record<string, unknown>) => handlers.get('update_staff_member')!(args, {})
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
-const juan = { id: 'sv1', role: 'WAITER', staff: { firstName: 'Juan', lastName: 'Pérez', active: true } }
+const juan = { id: 'sv1', staffId: 'juan-staff', role: 'WAITER', staff: { firstName: 'Juan', lastName: 'Pérez', active: true } }
 
 beforeAll(() => {
   registerStaffTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
 })
-beforeEach(() => jest.clearAllMocks())
+beforeEach(() => {
+  jest.clearAllMocks()
+  // Caller is OWNER at v1 → outranks every grantable role (ceiling tests override per-case).
+  scope.perVenueAccess.set('v1', { role: 'OWNER' } as never)
+})
 
 describe('update_staff_member (critical write, confirm-gated)', () => {
   it('rejects out-of-scope / no-perm / empty change', async () => {
@@ -78,5 +82,31 @@ describe('update_staff_member (critical write, confirm-gated)', () => {
     const out = parse(await call({ venueId: 'v1', name: 'juan', active: false, confirm: true }))
     expect(out.ok).toBe(false)
     expect(out.error).toMatch(/last venue administrator/)
+  })
+
+  it('ceiling: a MANAGER cannot manage a member who OUTRANKS them', async () => {
+    scope.perVenueAccess.set('v1', { role: 'MANAGER' } as never) // caller MANAGER (6)
+    mockStaffVenueFind.mockResolvedValueOnce([{ ...juan, role: 'OWNER' }]) // target OWNER (8) outranks
+    const out = parse(await call({ venueId: 'v1', name: 'juan', active: false, confirm: true }))
+    expect(out.ok).toBe(false)
+    expect(out.error).toMatch(/superior al tuyo/)
+    expect(mockUpdate).not.toHaveBeenCalled()
+  })
+
+  it('ceiling: cannot GRANT a role above your own (MANAGER → ADMIN blocked)', async () => {
+    scope.perVenueAccess.set('v1', { role: 'MANAGER' } as never) // caller MANAGER (6)
+    mockStaffVenueFind.mockResolvedValueOnce([juan]) // target WAITER (4) — manageable
+    const out = parse(await call({ venueId: 'v1', name: 'juan', role: 'admin', confirm: true })) // ADMIN (7) > 6
+    expect(out.ok).toBe(false)
+    expect(out.error).toMatch(/otorgar el rol ADMIN/)
+    expect(mockUpdate).not.toHaveBeenCalled()
+  })
+
+  it('refuses self-management — cannot change your OWN role/status via the agent', async () => {
+    mockStaffVenueFind.mockResolvedValueOnce([{ ...juan, staffId: 's1' }]) // the matched member IS the caller
+    const out = parse(await call({ venueId: 'v1', name: 'juan', active: false, confirm: true }))
+    expect(out.ok).toBe(false)
+    expect(out.error).toMatch(/tu propio rol o estado/)
+    expect(mockUpdate).not.toHaveBeenCalled()
   })
 })

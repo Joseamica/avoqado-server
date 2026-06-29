@@ -28,7 +28,11 @@ const base = { venueId: 'v1', firstName: 'Ana', lastName: 'López', role: 'cashi
 beforeAll(() => {
   registerStaffTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
 })
-beforeEach(() => jest.clearAllMocks())
+beforeEach(() => {
+  jest.clearAllMocks()
+  // Caller is ADMIN at v1 → can grant up to ADMIN, never OWNER (role ceiling).
+  scope.perVenueAccess.set('v1', { role: 'ADMIN' } as never)
+})
 
 describe('invite_staff (critical write, confirm-gated)', () => {
   it('rejects out-of-scope / no-perm', async () => {
@@ -61,5 +65,12 @@ describe('invite_staff (critical write, confirm-gated)', () => {
   it('does not offer superadmin as a role option', () => {
     // the enum on the tool excludes superadmin — a sanity guard on the role map
     expect(['owner', 'admin', 'manager', 'cashier', 'waiter', 'kitchen', 'host', 'viewer']).not.toContain('superadmin')
+  })
+
+  it('enforces the role ceiling — an ADMIN cannot grant OWNER (above their own role)', async () => {
+    const out = parse(await call({ ...base, role: 'owner', confirm: true })) // even with confirm, blocked
+    expect(out.ok).toBe(false)
+    expect(out.error).toMatch(/superior a tu propio rol/)
+    expect(mockInvite).not.toHaveBeenCalled()
   })
 })

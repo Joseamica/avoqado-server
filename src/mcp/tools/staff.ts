@@ -6,6 +6,7 @@ import { createGuard } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { inviteTeamMember, updateTeamMember } from '@/services/dashboard/team.dashboard.service'
+import { ROLE_HIERARCHY } from '@/lib/permissions'
 import { StaffRole } from '@prisma/client'
 
 // SUPERADMIN deliberately excluded — an agent must never be able to grant it.
@@ -133,6 +134,18 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
       guard.requirePermission('teams:invite', venueId) // write gate (per-venue role)
       const mappedRole = INVITE_ROLE_MAP[role]
 
+      // Role ceiling: the AI can never grant a role ABOVE the connected user's own
+      // role at this venue (least-privilege on the LLM surface). teams:invite alone
+      // would otherwise let a MANAGER mint an OWNER/ADMIN. requirePermission already
+      // proved an access entry exists for this venue, so callerRole is defined.
+      const callerLevel = ROLE_HIERARCHY[scope.perVenueAccess.get(venueId)?.role as StaffRole] ?? 0
+      if ((ROLE_HIERARCHY[mappedRole] ?? 0) > callerLevel) {
+        return text({
+          ok: false,
+          error: `No puedes otorgar el rol ${mappedRole}: es superior a tu propio rol. Solo puedes invitar con un rol igual o menor al tuyo.`,
+        })
+      }
+
       if (!confirm) {
         return text({
           ok: false,
@@ -200,7 +213,7 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
             ],
           },
         },
-        select: { id: true, role: true, staff: { select: { firstName: true, lastName: true, active: true } } },
+        select: { id: true, staffId: true, role: true, staff: { select: { firstName: true, lastName: true, active: true } } },
         take: 5,
       })
       if (matches.length === 0) return text({ ok: false, error: `No encontré ningún miembro que coincida con "${name}" en este local.` })
@@ -216,6 +229,23 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
       const m = matches[0]
       const fullName = `${m.staff.firstName} ${m.staff.lastName}`.trim()
       const newRole = role ? INVITE_ROLE_MAP[role] : undefined
+
+      // Role ceiling (least-privilege on the LLM surface). requirePermission already
+      // proved an access entry exists for this venue, so callerLevel is defined.
+      //   1. can't change your OWN role/status via the agent (self-escalation),
+      //   2. can't manage a member who already OUTRANKS you,
+      //   3. can't GRANT a role above your own.
+      const callerLevel = ROLE_HIERARCHY[scope.perVenueAccess.get(venueId)?.role as StaffRole] ?? 0
+      if (m.staffId === scope.staffId) {
+        return text({ ok: false, error: 'No puedes cambiar tu propio rol o estado desde el agente. Pídeselo a otro administrador.' })
+      }
+      if ((ROLE_HIERARCHY[m.role] ?? 0) > callerLevel) {
+        return text({ ok: false, error: `No puedes modificar a ${fullName}: su rol (${m.role}) es superior al tuyo.` })
+      }
+      if (newRole && (ROLE_HIERARCHY[newRole] ?? 0) > callerLevel) {
+        return text({ ok: false, error: `No puedes otorgar el rol ${newRole}: es superior a tu propio rol.` })
+      }
+
       const changes = {
         ...(newRole && newRole !== m.role ? { role: { from: m.role, to: newRole } } : {}),
         ...(active !== undefined && active !== m.staff.active ? { active: { from: m.staff.active, to: active } } : {}),
