@@ -484,9 +484,9 @@ export async function getSalesBySimType(
   for (const p of payments) {
     const month = toMonthKey(p.createdAt)
     const first = p.order?.items?.find(oi => oi.serializedItem)?.serializedItem
-    const categoryName = first?.category?.name ?? 'Otro'
+    const bucket = toSimBucket(first?.category?.name ?? null)
     const row = map.get(month) ?? {}
-    row[categoryName] = (row[categoryName] ?? 0) + 1
+    row[bucket] = (row[bucket] ?? 0) + 1
     map.set(month, row)
   }
   return Array.from(map.entries())
