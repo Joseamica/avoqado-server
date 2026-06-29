@@ -266,7 +266,7 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'mark_serialized_item',
-    'Mark a serialized item (SIM / ICCID / barcode) as RETURNED (reverses a sale and frees it back up the custody chain) or DAMAGED (removes it from the sellable chain). Identify it by serial number within a venue you can access. Because it changes custody/sale state, by DEFAULT it only PREVIEWS the action; call again with confirm:true to apply. This WRITES — requires inventory:adjust.',
+    'Mark a serialized item (SIM / ICCID / barcode) as RETURNED (frees it back into inventory / the custody chain and unlinks it from the order it was sold on) or DAMAGED (removes it from the sellable chain). Identify it by serial number within a venue you can access. IMPORTANT: this changes INVENTORY state only — it does NOT refund the customer or reverse the payment. Any money refund is separate (cash by hand, or a card refund done physically on the terminal). By DEFAULT it only PREVIEWS; call again with confirm:true to apply. This WRITES — requires inventory:adjust.',
     {
       venueId: z.string().describe('Venue that owns the item (must be in your scope)'),
       serialNumber: z.string().min(1).describe('Serial number / ICCID / barcode of the item'),
@@ -288,9 +288,9 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
           change: {
             serialNumber,
             action,
-            effect: action === 'returned' ? 'revierte la venta y libera el item' : 'marca el item como no vendible',
+            effect: action === 'returned' ? 'libera el SIM al inventario y lo desliga de la orden (NO reembolsa al cliente)' : 'marca el item como no vendible',
           },
-          message: `Esto marcará el serial "${serialNumber}" como ${action === 'returned' ? 'DEVUELTO (revierte la venta)' : 'DAÑADO (no vendible)'}. Confirma con el operador; luego vuelve a llamar con confirm:true.`,
+          message: `Esto marcará el serial "${serialNumber}" como ${action === 'returned' ? 'DEVUELTO — libera el SIM al inventario y lo desliga de la venta, pero NO reembolsa al cliente (el reembolso, si aplica, se maneja aparte: efectivo a mano o tarjeta en la terminal)' : 'DAÑADO (no vendible)'}. Confirma con el operador; luego vuelve a llamar con confirm:true.`,
         })
       }
       try {
