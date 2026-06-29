@@ -12,6 +12,7 @@ import {
   listInvoicesSchema,
   cancelInvoiceSchema,
   registerPaymentSchema,
+  sendEmailSchema,
 } from './billing.schemas'
 
 /**
@@ -78,6 +79,7 @@ router.post(
   checkPermission('platform-billing:issue'),
   controller.registerPayment,
 )
+router.post('/invoices/:id/email', validateRequest(sendEmailSchema), checkPermission('platform-billing:issue'), controller.sendInvoiceEmail)
 router.post(
   '/invoices/:id/cancel',
   validateRequest(cancelInvoiceSchema),

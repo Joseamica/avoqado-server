@@ -235,6 +235,8 @@ export interface FiscalProvider {
   createPayrollReceipt?(params: PayrollReceiptParams): Promise<StampedInvoice>
   /** Timbra un CFDI 4.0 tipo "P" (Recibo Electrónico de Pago / complemento de pago). Opcional por proveedor. */
   createPaymentComplement?(params: PaymentComplementParams): Promise<StampedInvoice>
+  /** Envía el CFDI (PDF+XML) por correo al receptor. Si `email` es null, usa el del cliente registrado. Opcional. */
+  sendInvoiceByEmail?(providerInvoiceId: string, email?: string): Promise<void>
 }
 
 /** Una percepción del recibo de nómina (c_TipoPercepcion). Importes en centavos. */

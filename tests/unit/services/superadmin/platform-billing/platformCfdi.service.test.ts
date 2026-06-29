@@ -10,6 +10,7 @@ import {
   issuePlatformCfdi,
   cancelPlatformCfdi,
   registerPlatformPayment,
+  sendPlatformCfdiEmail,
 } from '@/services/superadmin/platform-billing/platformCfdi.service'
 import { PlatformBillingError } from '@/services/superadmin/platform-billing/platformEmisor.service'
 
@@ -251,6 +252,63 @@ describe('platformCfdi.service', () => {
       const rep = await registerPlatformPayment({ ...baseInput, idempotencyKey: 'dup' })
       expect(rep.id).toBe('repX')
       expect(createPaymentComplement).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('sendPlatformCfdiEmail (NEW)', () => {
+    it('sends a stamped CFDI with the override email and stamps emailSentAt', async () => {
+      prismaMock.platformCfdi.findUnique.mockResolvedValue({
+        id: 'c1',
+        status: 'STAMPED',
+        facturapiId: 'fa1',
+        platformEmisorId: 'em1',
+        billingTaxProfileId: 'p1',
+      })
+      prismaMock.platformEmisor.findUnique.mockResolvedValue(ACTIVE_EMISOR)
+      prismaMock.platformCfdi.update.mockImplementation((args: any) => Promise.resolve({ id: 'c1', ...args.data }))
+      const sendInvoiceByEmail = jest.fn().mockResolvedValue(undefined)
+      mockResolve.mockReturnValue({ sendInvoiceByEmail })
+
+      const res = await sendPlatformCfdiEmail('c1', 'cliente@demo.mx')
+
+      expect(sendInvoiceByEmail).toHaveBeenCalledWith('fa1', 'cliente@demo.mx')
+      expect(res.emailSentAt).toBeTruthy()
+    })
+
+    it('falls back to the receptor profile email when no override is given', async () => {
+      prismaMock.platformCfdi.findUnique.mockResolvedValue({
+        id: 'c1',
+        status: 'STAMPED',
+        facturapiId: 'fa1',
+        platformEmisorId: 'em1',
+        billingTaxProfileId: 'p1',
+      })
+      prismaMock.billingTaxProfile.findUnique.mockResolvedValue({ id: 'p1', email: 'perfil@demo.mx' })
+      prismaMock.platformEmisor.findUnique.mockResolvedValue(ACTIVE_EMISOR)
+      prismaMock.platformCfdi.update.mockImplementation((args: any) => Promise.resolve({ id: 'c1', ...args.data }))
+      const sendInvoiceByEmail = jest.fn().mockResolvedValue(undefined)
+      mockResolve.mockReturnValue({ sendInvoiceByEmail })
+
+      await sendPlatformCfdiEmail('c1')
+
+      expect(sendInvoiceByEmail).toHaveBeenCalledWith('fa1', 'perfil@demo.mx')
+    })
+
+    it('rejects when there is no email (override nor profile)', async () => {
+      prismaMock.platformCfdi.findUnique.mockResolvedValue({
+        id: 'c1',
+        status: 'STAMPED',
+        facturapiId: 'fa1',
+        platformEmisorId: 'em1',
+        billingTaxProfileId: 'p1',
+      })
+      prismaMock.billingTaxProfile.findUnique.mockResolvedValue({ id: 'p1', email: null })
+      await expect(sendPlatformCfdiEmail('c1')).rejects.toMatchObject({ code: 'VALIDATION' })
+    })
+
+    it('rejects sending a CFDI that is not STAMPED', async () => {
+      prismaMock.platformCfdi.findUnique.mockResolvedValue({ id: 'c1', status: 'DRAFT', facturapiId: null, platformEmisorId: 'em1' })
+      await expect(sendPlatformCfdiEmail('c1', 'x@y.com')).rejects.toMatchObject({ code: 'VALIDATION' })
     })
   })
 })

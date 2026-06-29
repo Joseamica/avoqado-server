@@ -144,3 +144,9 @@ export const registerPaymentSchema = z.object({
     idempotencyKey: z.string().trim().min(1).optional(),
   }),
 })
+
+export const sendEmailSchema = z.object({
+  body: z.object({
+    email: z.string().trim().email('El correo no es válido').optional(),
+  }),
+})

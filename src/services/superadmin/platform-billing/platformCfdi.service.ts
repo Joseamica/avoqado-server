@@ -140,7 +140,7 @@ export async function issuePlatformCfdi(input: IssuePlatformCfdiInput): Promise<
       externalId: input.idempotencyKey, // deterministic orphan recovery
     }
     const stamped = await provider.createInvoice(params)
-    return prisma.platformCfdi.update({
+    const updated = await prisma.platformCfdi.update({
       where: { id: row.id },
       data: {
         status: 'STAMPED',
@@ -151,6 +151,9 @@ export async function issuePlatformCfdi(input: IssuePlatformCfdiInput): Promise<
         stampedAt: stamped.stampedAt,
       },
     })
+    // Best-effort: entregar el CFDI por correo al timbrar. No bloquea ni hace fallar la emisión.
+    if (profile.email) void sendPlatformCfdiEmail(updated.id, profile.email, sandbox).catch(() => undefined)
+    return updated
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     await prisma.platformCfdi.update({
@@ -353,6 +356,32 @@ export async function registerPlatformPayment(input: RegisterPaymentInput): Prom
 /** List the payment complements (REPs) registered against a parent income CFDI. */
 export async function listPlatformCfdiPayments(parentId: string): Promise<PlatformCfdi[]> {
   return prisma.platformCfdi.findMany({ where: { parentPlatformCfdiId: parentId, type: 'PAGO' }, orderBy: { createdAt: 'asc' } })
+}
+
+/**
+ * Send a stamped CFDI (PDF + XML) to the receptor by email via the PAC. Uses the
+ * override email, else the receptor profile's email. Stamps emailSentAt on success.
+ */
+export async function sendPlatformCfdiEmail(id: string, emailOverride?: string, sandbox = false): Promise<PlatformCfdi> {
+  const row = await prisma.platformCfdi.findUnique({ where: { id } })
+  if (!row) throw new PlatformBillingError('CFDI no encontrado', 'NO_CFDI')
+  if (row.status !== 'STAMPED' || !row.facturapiId) throw new PlatformBillingError('Solo se puede enviar un CFDI timbrado', 'VALIDATION')
+
+  let email = emailOverride
+  if (!email && row.billingTaxProfileId) {
+    const profile = await prisma.billingTaxProfile.findUnique({ where: { id: row.billingTaxProfileId } })
+    email = profile?.email ?? undefined
+  }
+  if (!email) throw new PlatformBillingError('El receptor no tiene correo registrado; captura uno o envíalo manualmente', 'VALIDATION')
+
+  const emisor = await prisma.platformEmisor.findUnique({ where: { id: row.platformEmisorId } })
+  if (!emisor) throw new PlatformBillingError('Emisor no encontrado', 'NO_EMISOR')
+
+  const provider = resolveFiscalProvider({ provider: emisor.provider, providerKeyEnc: emisor.providerKeyEnc }, { sandbox })
+  if (!provider.sendInvoiceByEmail) throw new PlatformBillingError('El proveedor fiscal no soporta envío por correo', 'PROVIDER')
+
+  await provider.sendInvoiceByEmail(row.facturapiId, email)
+  return prisma.platformCfdi.update({ where: { id: row.id }, data: { emailSentAt: new Date() } })
 }
 
 /** Fetch the stamped XML/PDF bytes from the PAC for download. */

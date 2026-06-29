@@ -270,6 +270,17 @@ export class FacturapiProvider implements FiscalProvider {
     }
   }
 
+  /** Envía el CFDI por correo (Facturapi adjunta PDF + XML). Sin email → usa el del cliente registrado. */
+  async sendInvoiceByEmail(providerInvoiceId: string, email?: string): Promise<void> {
+    try {
+      await this.client.invoices.sendByEmail(providerInvoiceId, email ? { email } : undefined)
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
+      logger.error(`[facturapi] sendByEmail failed: ${message}`)
+      throw err
+    }
+  }
+
   /**
    * Issues a factura global to "Público en General" (RFC XAXX010101000).
    *

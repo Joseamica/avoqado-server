@@ -24,6 +24,7 @@ import {
   fetchPlatformCfdiArtifact,
   registerPlatformPayment,
   listPlatformCfdiPayments,
+  sendPlatformCfdiEmail,
 } from '@/services/superadmin/platform-billing/platformCfdi.service'
 import type { BillingCustomerKind } from '@/services/superadmin/platform-billing/types'
 
@@ -255,6 +256,28 @@ export async function registerPayment(req: Request, res: Response, next: NextFun
       },
     })
     res.status(201).json({ success: true, data: rep })
+  } catch (error) {
+    handleBillingError(error, res, next)
+  }
+}
+
+/** POST /api/v1/superadmin/billing/invoices/:id/email — (re)enviar el CFDI por correo al receptor. */
+export async function sendInvoiceEmail(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { userId } = (req as any).authContext
+    const { email } = req.body as { email?: string }
+    const cfdi = await sendPlatformCfdiEmail(req.params.id, email)
+    await prisma.activityLog.create({
+      data: {
+        staffId: userId,
+        venueId: cfdi.venueId,
+        action: 'PLATFORM_CFDI_EMAILED',
+        entity: 'PlatformCfdi',
+        entityId: cfdi.id,
+        data: { email: email ?? null },
+      },
+    })
+    res.json({ success: true, data: cfdi })
   } catch (error) {
     handleBillingError(error, res, next)
   }
