@@ -16,10 +16,31 @@ import {
   type UpdateReservationInput,
 } from '@/services/dashboard/reservation.dashboard.service'
 import { getReservationSettings, updateReservationSettings } from '@/services/dashboard/reservationSettings.service'
+import { getClassSession } from '@/services/dashboard/classSession.dashboard.service'
+import { getWaitlist } from '@/services/dashboard/reservationWaitlist.service'
 import { auditMcpWrite } from '../audit'
 import { planGateMessage } from '../planGate'
+import { ClassSessionStatus, WaitlistStatus, type ReservationStatus } from '@prisma/client'
 
 const RESERVATIONS_GATE = ['RESERVATIONS', 'Las reservaciones'] as const
+
+// Reservation statuses that occupy a seat in a class — mirrors classSession.dashboard.service
+// (a CANCELLED / NO_SHOW booking frees its seat, so it must NOT count toward enrolled).
+const OCCUPYING_STATUSES = ['PENDING', 'CONFIRMED', 'CHECKED_IN'] as ReservationStatus[]
+
+const CLASS_STATUS_MAP: Record<string, ClassSessionStatus> = {
+  scheduled: ClassSessionStatus.SCHEDULED,
+  cancelled: ClassSessionStatus.CANCELLED,
+  completed: ClassSessionStatus.COMPLETED,
+}
+
+const WAITLIST_STATUS_MAP: Record<string, WaitlistStatus> = {
+  waiting: WaitlistStatus.WAITING,
+  notified: WaitlistStatus.NOTIFIED,
+  promoted: WaitlistStatus.PROMOTED,
+  expired: WaitlistStatus.EXPIRED,
+  cancelled: WaitlistStatus.CANCELLED,
+}
 
 // Human labels for the configure_reservations preview, so the operator can verify
 // each change (current → new) in plain Spanish BEFORE confirming — and catch a
@@ -531,6 +552,139 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
       }
+    },
+  )
+
+  server.tool(
+    'list_class_sessions',
+    'Group classes / scheduled sessions of a venue you can access (e.g. yoga 6pm, spinning) — each with its class name, when (start/end), duration, capacity, how many are ENROLLED and how many seats are AVAILABLE, the assigned instructor, and status (scheduled/cancelled/completed). Upcoming only by default, soonest first. Answers "¿qué clases tengo hoy/esta semana? ¿cuántos inscritos en la de las 6? ¿hay cupo?". Pass venueId. For the actual roster (who is enrolled) use class_session_detail.',
+    {
+      venueId: z.string().describe('Venue whose class sessions to read (must be in your scope)'),
+      includePast: z.boolean().default(false).describe('Include sessions that already started (default: only upcoming)'),
+      status: z.enum(['scheduled', 'cancelled', 'completed']).optional().describe('Filter by session status'),
+      limit: z.number().int().min(1).max(50).default(20).describe('Max sessions to return'),
+    },
+    async ({ venueId, includePast, status, limit }) => {
+      const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const gate = await planGateMessage(venueId, ...RESERVATIONS_GATE) // PRO tier — mirrors checkFeatureAccess('RESERVATIONS') on the route
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+
+      const sessions = await prisma.classSession.findMany({
+        where: {
+          ...where,
+          ...(includePast ? {} : { startsAt: { gte: new Date() } }),
+          ...(status ? { status: CLASS_STATUS_MAP[status] } : {}),
+        },
+        select: {
+          id: true,
+          startsAt: true,
+          endsAt: true,
+          duration: true,
+          capacity: true,
+          status: true,
+          product: { select: { name: true } },
+          assignedStaff: { select: { firstName: true, lastName: true } },
+          // Only seat-occupying bookings count toward enrolled (same filter as the dashboard service).
+          reservations: { where: { status: { in: OCCUPYING_STATUSES } }, select: { partySize: true } },
+        },
+        orderBy: { startsAt: includePast ? 'desc' : 'asc' },
+        take: limit,
+      })
+
+      return text({
+        venueId,
+        count: sessions.length,
+        upcoming: !includePast,
+        sessions: sessions.map(s => {
+          const enrolled = s.reservations.reduce((sum, r) => sum + r.partySize, 0)
+          return {
+            sessionId: s.id,
+            className: s.product?.name ?? null,
+            startsAt: s.startsAt.toISOString(),
+            endsAt: s.endsAt.toISOString(),
+            durationMin: s.duration,
+            capacity: s.capacity,
+            enrolled,
+            available: s.capacity - enrolled,
+            instructor: s.assignedStaff ? `${s.assignedStaff.firstName} ${s.assignedStaff.lastName}`.trim() : null,
+            status: s.status, // SCHEDULED | CANCELLED | COMPLETED
+          }
+        }),
+      })
+    },
+  )
+
+  server.tool(
+    'class_session_detail',
+    'The roster of ONE class session in a venue you can access, by its sessionId (from list_class_sessions): the class, when, capacity / enrolled / available, the instructor, and the list of ATTENDEES (name, party size, status, confirmation code). Answers "¿quién está inscrito en la clase de las 6?". Pass venueId + sessionId.',
+    {
+      venueId: z.string().describe('Venue that owns the session (must be in your scope)'),
+      sessionId: z.string().min(1).describe('Class session id (from list_class_sessions)'),
+    },
+    async ({ venueId, sessionId }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const gate = await planGateMessage(venueId, ...RESERVATIONS_GATE) // PRO tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+      try {
+        // Service scopes by venueId (own venues only — already proven by venueFilter) and computes enrolled/available.
+        const s = await getClassSession(venueId, sessionId)
+        return text({
+          found: true,
+          session: {
+            sessionId: s.id,
+            className: s.product?.name ?? null,
+            startsAt: s.startsAt.toISOString(),
+            endsAt: s.endsAt.toISOString(),
+            durationMin: s.duration,
+            capacity: s.capacity,
+            enrolled: s.enrolled,
+            available: s.available,
+            instructor: s.assignedStaff ? `${s.assignedStaff.firstName} ${s.assignedStaff.lastName}`.trim() : null,
+            status: s.status,
+          },
+          attendees: s.reservations.map(r => ({
+            name: r.customer ? `${r.customer.firstName ?? ''} ${r.customer.lastName ?? ''}`.trim() || null : (r.guestName ?? null),
+            phone: r.customer?.phone ?? r.guestPhone ?? null,
+            partySize: r.partySize,
+            status: r.status, // PENDING | CONFIRMED | CHECKED_IN
+            confirmationCode: r.confirmationCode,
+          })),
+        })
+      } catch {
+        return text({ found: false, error: `No encontré la sesión "${sessionId}" en este local.` })
+      }
+    },
+  )
+
+  server.tool(
+    'list_waitlist',
+    'The reservation/appointment WAITLIST (lista de espera) of a venue you can access: each entry in queue order with its position, the guest (name/phone or linked customer), party size, the desired date/time, status (waiting/notified/promoted/expired/cancelled) and — if it was converted — the resulting reservation code. Defaults to the live queue (waiting + notified). Answers "¿quién está en lista de espera? ¿a qué hora quería?". Pass venueId.',
+    {
+      venueId: z.string().describe('Venue whose waitlist to read (must be in your scope)'),
+      status: z
+        .enum(['waiting', 'notified', 'promoted', 'expired', 'cancelled'])
+        .optional()
+        .describe('Filter by status (default: the live queue — waiting + notified)'),
+    },
+    async ({ venueId, status }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const gate = await planGateMessage(venueId, ...RESERVATIONS_GATE) // PRO tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+      // Service scopes by venueId; default (no status) returns the live WAITING+NOTIFIED queue.
+      const entries = await getWaitlist(venueId, status ? WAITLIST_STATUS_MAP[status] : undefined)
+      return text({
+        venueId,
+        count: entries.length,
+        waitlist: entries.map(e => ({
+          position: e.position,
+          name: e.customer ? `${e.customer.firstName ?? ''} ${e.customer.lastName ?? ''}`.trim() || null : (e.guestName ?? null),
+          phone: e.customer?.phone ?? e.guestPhone ?? null,
+          partySize: e.partySize,
+          desiredStartAt: e.desiredStartAt.toISOString(),
+          status: e.status, // WAITING | NOTIFIED | PROMOTED | EXPIRED | CANCELLED
+          promotedReservation: e.promotedReservation?.confirmationCode ?? null,
+        })),
+      })
     },
   )
 }
