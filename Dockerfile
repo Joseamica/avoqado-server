@@ -24,8 +24,8 @@ FROM base AS build
 # Install all dependencies including devDependencies for building
 RUN npm ci --include=dev
 COPY . .
-# Increase Node.js heap size for TypeScript compilation (default 512MB is not enough)
-ENV NODE_OPTIONS="--max-old-space-size=4096"
+# Increase Node.js heap size for TypeScript compilation (4GB OOMs on this codebase; matches `typecheck`/CI at 8GB)
+ENV NODE_OPTIONS="--max-old-space-size=8192"
 RUN npm run build
 
 # Production stage
