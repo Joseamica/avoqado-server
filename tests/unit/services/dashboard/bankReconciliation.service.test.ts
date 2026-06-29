@@ -1,14 +1,27 @@
 jest.mock('../../../../src/utils/prismaClient', () => ({
   __esModule: true,
-  default: { payment: { findMany: jest.fn() } },
+  default: {
+    payment: { findMany: jest.fn() },
+    bankStatement: { findFirst: jest.fn() },
+    bankStatementLine: { updateMany: jest.fn() },
+    activityLog: { create: jest.fn() },
+  },
 }))
 
+import prisma from '../../../../src/utils/prismaClient'
 import {
+  confirmMatches,
   matchLines,
   parseBankCsv,
   type DepositCandidate,
   type ParsedBankLine,
 } from '../../../../src/services/dashboard/bankReconciliation.service'
+
+const p = prisma as unknown as {
+  bankStatement: { findFirst: jest.Mock }
+  bankStatementLine: { updateMany: jest.Mock }
+  activityLog: { create: jest.Mock }
+}
 
 const noon = (ymd: string): Date => new Date(`${ymd}T12:00:00`)
 const line = (
@@ -80,6 +93,28 @@ describe('bankReconciliation — matchLines (the moat)', () => {
 
   it('empty inputs → empty result (no throw)', () => {
     expect(matchLines([], [])).toEqual([])
+  })
+})
+
+describe('bankReconciliation — confirmMatches', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    p.bankStatement.findFirst.mockResolvedValue({ id: 'st1' })
+    p.bankStatementLine.updateMany.mockResolvedValue({ count: 1 })
+    p.activityLog.create.mockResolvedValue({})
+  })
+
+  it('SÓLO confirma líneas MATCHED — una línea UNMATCHED/DUPLICATE no es conciliable', async () => {
+    const r = await confirmMatches('v1', 's1', 'st1', ['lineMatched', 'lineUnmatched'])
+    // el filtro DEBE exigir matchStatus MATCHED: confirmar una línea sin match afirmaría una
+    // conciliación que no existe (mentira en la bitácora).
+    expect(p.bankStatementLine.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ matchStatus: 'MATCHED', bankStatementId: 'st1', venueId: 'v1' }),
+        data: expect.objectContaining({ matchStatus: 'CONFIRMED' }),
+      }),
+    )
+    expect(r.confirmed).toBe(1)
   })
 })
 

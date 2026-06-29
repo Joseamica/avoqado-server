@@ -379,8 +379,10 @@ export async function confirmMatches(
   const statement = await prisma.bankStatement.findFirst({ where: { id: statementId, venueId }, select: { id: true } })
   if (!statement) throw new NotFoundError('Estado de cuenta no encontrado')
 
+  // SÓLO se confirman líneas MATCHED (auto-conciliadas). UNMATCHED / DUPLICATE / DEBIT no son
+  // conciliables: confirmarlas afirmaría una conciliación que no existe (registro falso en la bitácora).
   const result = await prisma.bankStatementLine.updateMany({
-    where: { id: { in: lineIds }, venueId, bankStatementId: statementId },
+    where: { id: { in: lineIds }, venueId, bankStatementId: statementId, matchStatus: 'MATCHED' },
     data: { matchStatus: 'CONFIRMED', confirmedById: staffId, confirmedAt: new Date() },
   })
 
