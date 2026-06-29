@@ -12,19 +12,18 @@ import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { assertCashOutEnabled } from './cash-out.config.service'
 import { venueBusinessDate } from './cash-out.domain'
+import AppError from '@/errors/AppError'
 
-export class NothingToWithdrawError extends Error {
-  statusCode = 400
+export class NothingToWithdrawError extends AppError {
   constructor() {
-    super('No hay saldo disponible para retirar.')
+    super('No hay saldo disponible para retirar.', 400)
     this.name = 'NothingToWithdrawError'
   }
 }
 
-export class ConcurrentWithdrawalError extends Error {
-  statusCode = 409
+export class ConcurrentWithdrawalError extends AppError {
   constructor() {
-    super('El saldo cambió durante el retiro; intenta de nuevo.')
+    super('El saldo cambió durante el retiro; intenta de nuevo.', 409)
     this.name = 'ConcurrentWithdrawalError'
   }
 }

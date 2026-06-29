@@ -10,12 +10,15 @@ import prisma from '@/utils/prismaClient'
 import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { validateRateTable, type RateTier } from './cash-out.domain'
+import AppError from '@/errors/AppError'
 
 /** Thrown when a non-CASH_OUT venue tries to reach a cash-out path. Spanish (shown to users). */
-export class CashOutModuleDisabledError extends Error {
-  statusCode = 403
+export class CashOutModuleDisabledError extends AppError {
   constructor(venueId: string) {
-    super(`El esquema Cash Out requiere el módulo de inventario serializado (SERIALIZED_INVENTORY), que no está activo en este local (${venueId}).`)
+    super(
+      `El esquema Cash Out requiere el módulo de inventario serializado (SERIALIZED_INVENTORY), que no está activo en este local (${venueId}).`,
+      403,
+    )
     this.name = 'CashOutModuleDisabledError'
   }
 }
@@ -36,11 +39,10 @@ export async function listCommissionRates(venueId: string) {
 }
 
 /** Thrown when a rate table fails validation. Carries the Spanish messages. statusCode 400. */
-export class CashOutValidationError extends Error {
-  statusCode = 400
+export class CashOutValidationError extends AppError {
   errors: string[]
   constructor(errors: string[]) {
-    super(errors.join(' '))
+    super(errors.join(' '), 400)
     this.name = 'CashOutValidationError'
     this.errors = errors
   }
