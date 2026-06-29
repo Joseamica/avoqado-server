@@ -449,41 +449,34 @@ export async function getSalesByMonth(
 
 /**
  * Sales grouped by month × SIM type (ItemCategory.name). Stacked bar.
- * Each row = one month; `byCategory` is a map of categoryName → count.
+ * Each row = one month; `byCategory` is a map of SimBucket → count.
+ *
+ * Uses the same COMPLETED SaleVerification base as getSalesBySimTypeWeekly so
+ * the monthly chart's grand total reconciles with the weekly bar (Isaac: "el
+ * total debe cuadrar en todas las tablas y gráficas", 2026-06-29).
+ * Category is resolved via payment→order→items→serializedItem→category, identical
+ * to the weekly variant — same join path, bucketed by month instead of week.
  */
 export async function getSalesBySimType(
   orgId: string,
   range: AggregationRange,
 ): Promise<Array<{ month: string; byCategory: Record<string, number>; total: number }>> {
-  // Need to join through Payment → Order → OrderItem → SerializedItem → ItemCategory
-  // The SaleVerification doesn't have a direct FK to category, so we use payment-driven.
-  const paymentWhere: Prisma.PaymentWhereInput = {
-    status: 'COMPLETED',
-    order: { venue: { organizationId: orgId } },
-    saleVerification: { status: 'COMPLETED' },
-  }
-  if (range.fromDate && range.toDate) paymentWhere.createdAt = { gte: range.fromDate, lte: range.toDate }
-  else if (range.fromDate) paymentWhere.createdAt = { gte: range.fromDate }
-  else if (range.toDate) paymentWhere.createdAt = { lte: range.toDate }
-
-  const payments = await prisma.payment.findMany({
-    where: paymentWhere,
+  const verifications = await prisma.saleVerification.findMany({
+    where: baseAggregationWhere(orgId, range),
     select: {
       createdAt: true,
-      order: {
+      payment: {
         select: {
-          items: {
-            select: { serializedItem: { select: { category: { select: { name: true } } } } },
-          },
+          order: { select: { items: { select: { serializedItem: { select: { category: { select: { name: true } } } } } } } },
         },
       },
     },
   })
 
   const map = new Map<string, Record<string, number>>()
-  for (const p of payments) {
-    const month = toMonthKey(p.createdAt)
-    const first = p.order?.items?.find(oi => oi.serializedItem)?.serializedItem
+  for (const v of verifications) {
+    const month = toMonthKey(v.createdAt)
+    const first = v.payment?.order?.items?.find(oi => oi.serializedItem)?.serializedItem
     const bucket = toSimBucket(first?.category?.name ?? null)
     const row = map.get(month) ?? {}
     row[bucket] = (row[bucket] ?? 0) + 1

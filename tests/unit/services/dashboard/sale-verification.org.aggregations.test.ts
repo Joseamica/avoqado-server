@@ -402,13 +402,29 @@ describe('weekly tables reconcile with the weekly bar', () => {
 
 describe('getSalesBySimType — regrouped into SIM buckets', () => {
   it('collapses raw categories into the 3 fixed + Otros SIMs', async () => {
-    mockedPaymentFindMany.mockResolvedValue([
-      { createdAt: new Date('2026-03-15T18:00:00Z'), order: { items: [{ serializedItem: { category: { name: 'SIM de Intercambio' } } }] } },
-      { createdAt: new Date('2026-03-16T18:00:00Z'), order: { items: [{ serializedItem: { category: { name: 'E-SIM de promotor' } } }] } },
+    mockedSvFindMany.mockResolvedValue([
+      {
+        createdAt: new Date('2026-03-15T18:00:00Z'),
+        payment: { order: { items: [{ serializedItem: { category: { name: 'SIM de Intercambio' } } }] } },
+      },
+      {
+        createdAt: new Date('2026-03-16T18:00:00Z'),
+        payment: { order: { items: [{ serializedItem: { category: { name: 'E-SIM de promotor' } } }] } },
+      },
     ])
     const rows = await getSalesBySimType(ORG_ID, {})
     expect(rows).toHaveLength(1)
     expect(rows[0].byCategory).toEqual({ 'SIM de Intercambio': 1, 'Otros SIMs': 1 })
     expect(rows[0].total).toBe(2)
+  })
+
+  it('queries the COMPLETED SaleVerification base (same as weekly bar)', async () => {
+    mockedSvFindMany.mockResolvedValue([])
+    await getSalesBySimType(ORG_ID, {})
+    expect(mockedSvFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ status: 'COMPLETED', venue: { organizationId: ORG_ID } }),
+      }),
+    )
   })
 })
