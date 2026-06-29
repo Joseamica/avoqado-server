@@ -8,8 +8,11 @@
  */
 import prisma from '@/utils/prismaClient'
 import type { BillingTaxProfile } from '@prisma/client'
+import { buildStoragePath, deleteFileFromStorage, uploadFileToStorage } from '@/services/storage.service'
 import { PlatformBillingError } from './platformEmisor.service'
 import type { BillingCustomerKind, UpsertTaxProfileInput } from './types'
+
+const CONSTANCIA_EXT: Record<string, string> = { 'application/pdf': 'pdf', 'image/png': 'png', 'image/jpeg': 'jpg' }
 
 export async function getBillingTaxProfileById(id: string): Promise<BillingTaxProfile | null> {
   return prisma.billingTaxProfile.findUnique({ where: { id } })
@@ -64,9 +67,24 @@ export async function upsertBillingTaxProfile(input: UpsertTaxProfileInput): Pro
   })
 }
 
-/** Attach (or replace) the uploaded constancia PDF URL on a profile. */
-export async function attachConstancia(profileId: string, constanciaUrl: string): Promise<BillingTaxProfile> {
-  return prisma.billingTaxProfile.update({ where: { id: profileId }, data: { constanciaUrl } })
+/**
+ * Upload the receptor's constancia (PDF/imagen) to Firebase Storage and store its URL on the
+ * profile. Overwrites the prior file (best-effort delete) so a profile keeps one constancia.
+ */
+export async function uploadConstancia(profileId: string, fileBase64: string, contentType = 'application/pdf'): Promise<BillingTaxProfile> {
+  const profile = await prisma.billingTaxProfile.findUnique({ where: { id: profileId } })
+  if (!profile) throw new PlatformBillingError('Perfil fiscal no encontrado', 'NO_PROFILE')
+
+  const buffer = Buffer.from(fileBase64, 'base64')
+  if (buffer.length === 0) throw new PlatformBillingError('El archivo de la constancia está vacío', 'VALIDATION')
+
+  const ext = CONSTANCIA_EXT[contentType] ?? 'pdf'
+  const path = buildStoragePath(`platform-billing/tax-profiles/${profileId}/constancia.${ext}`)
+
+  if (profile.constanciaUrl) void deleteFileFromStorage(profile.constanciaUrl) // best-effort, replace
+  const url = await uploadFileToStorage(buffer, path, contentType)
+
+  return prisma.billingTaxProfile.update({ where: { id: profileId }, data: { constanciaUrl: url } })
 }
 
 export interface CustomerSearchRow {

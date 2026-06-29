@@ -73,9 +73,10 @@ export const upsertTaxProfileSchema = z.object({
   }),
 })
 
-export const attachConstanciaSchema = z.object({
+export const uploadConstanciaSchema = z.object({
   body: z.object({
-    constanciaUrl: z.string({ required_error: 'La URL de la constancia es requerida' }).trim().url('La URL de la constancia no es válida'),
+    fileBase64: z.string({ required_error: 'El archivo de la constancia es requerido' }).min(1, 'El archivo de la constancia es requerido'),
+    contentType: z.string().trim().optional(),
   }),
 })
 

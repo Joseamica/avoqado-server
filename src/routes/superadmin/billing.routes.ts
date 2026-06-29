@@ -7,7 +7,7 @@ import {
   provisionEmisorSchema,
   uploadCsdSchema,
   upsertTaxProfileSchema,
-  attachConstanciaSchema,
+  uploadConstanciaSchema,
   issueInvoiceSchema,
   listInvoicesSchema,
   cancelInvoiceSchema,
@@ -62,7 +62,7 @@ router.put(
 router.get('/tax-profiles/:id', checkPermission('platform-billing:view'), controller.getTaxProfile)
 router.post(
   '/tax-profiles/:id/constancia',
-  validateRequest(attachConstanciaSchema),
+  validateRequest(uploadConstanciaSchema),
   checkPermission('platform-billing:configure'),
   controller.attachConstanciaController,
 )

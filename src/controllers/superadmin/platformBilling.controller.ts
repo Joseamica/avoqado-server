@@ -13,7 +13,7 @@ import {
   upsertBillingTaxProfile,
   getBillingTaxProfileById,
   getBillingTaxProfileForCustomer,
-  attachConstancia,
+  uploadConstancia,
   searchBillingCustomers,
 } from '@/services/superadmin/platform-billing/billingTaxProfile.service'
 import {
@@ -162,10 +162,22 @@ export async function upsertTaxProfile(req: Request, res: Response, next: NextFu
   }
 }
 
-/** POST /api/v1/superadmin/billing/tax-profiles/:id/constancia */
+/** POST /api/v1/superadmin/billing/tax-profiles/:id/constancia — sube el PDF/imagen a Firebase. */
 export async function attachConstanciaController(req: Request, res: Response, next: NextFunction) {
   try {
-    const profile = await attachConstancia(req.params.id, req.body.constanciaUrl)
+    const { userId } = (req as any).authContext
+    const { fileBase64, contentType } = req.body as { fileBase64: string; contentType?: string }
+    const profile = await uploadConstancia(req.params.id, fileBase64, contentType)
+    await prisma.activityLog.create({
+      data: {
+        staffId: userId,
+        venueId: profile.venueId,
+        action: 'PLATFORM_TAXPROFILE_CONSTANCIA_UPLOADED',
+        entity: 'BillingTaxProfile',
+        entityId: profile.id,
+        data: { contentType: contentType ?? 'application/pdf' },
+      },
+    })
     res.json({ success: true, data: profile })
   } catch (error) {
     handleBillingError(error, res, next)
