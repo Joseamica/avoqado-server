@@ -273,7 +273,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'issue_refund',
-    '🔴 CRITICAL (returns money to a customer). Issue a refund on a COMPLETED payment of a venue you can access. Identify the payment by its id (from list_payments), give the amount in pesos (partial allowed; the service enforces the remaining refundable) and a reason. By DEFAULT this only PREVIEWS the refund (payment details + what would be returned); to actually execute it call again with confirm:true. Cash refunds are recorded; card refunds follow the processor flow. This WRITES MONEY — requires payments:refund.',
+    '🔴 CRITICAL. Refund a COMPLETED payment of a venue you can access — ONLY for CASH / non-card payments (the cash you hand back is recorded as a refund). CARD payments (credit/debit) are BLOCKED here: a Blumon/terminal card refund must be done PHYSICALLY on the terminal with the card present — it cannot be processed by API. Identify the payment by its id (from list_payments), give the amount in pesos (partial allowed; the service enforces the remaining refundable) and a reason. By DEFAULT this only PREVIEWS; call again with confirm:true to execute. This WRITES MONEY — requires payments:refund.',
     {
       venueId: z.string().describe('Venue that owns the payment (must be in your scope)'),
       paymentId: z.string().min(1).describe('The payment id (from list_payments)'),
@@ -304,6 +304,18 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
       if (!payment) return text({ ok: false, error: 'No encontré ese pago en tus locales.' })
       if (payment.status !== TransactionStatus.COMPLETED) {
         return text({ ok: false, error: `Solo se puede reembolsar un pago COMPLETED (este está ${payment.status}).` })
+      }
+      // CARD refunds CANNOT be processed here. A Blumon/TPV card refund needs the physical card on the
+      // terminal; this path only RECORDS a bookkeeping refund (no money moves via API). Block it for the
+      // MCP so an AI never records a card "refund" that was never physically processed (the founder's rule:
+      // "blumon/tpv no hacemos reembolsos por API, solo poniendo la tarjeta físicamente").
+      if (payment.method === PaymentMethod.CREDIT_CARD || payment.method === PaymentMethod.DEBIT_CARD) {
+        return text({
+          ok: false,
+          cardRefundNotSupported: true,
+          method: payment.method,
+          error: `Este pago es con TARJETA (${payment.method}). Los reembolsos de tarjeta NO se procesan por aquí: la tarjeta se reembolsa FÍSICAMENTE en la terminal (Blumon) con la tarjeta presente — no por API. Una vez hecho en la terminal, regístralo desde el dashboard. Por el MCP solo puedes reembolsar pagos en EFECTIVO/transferencia.`,
+        })
       }
       const originalTotal = round2(num(payment.amount) + num(payment.tipAmount))
       if (amount > originalTotal) {

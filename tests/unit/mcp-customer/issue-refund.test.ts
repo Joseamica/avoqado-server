@@ -33,7 +33,7 @@ const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[
 const completedPayment = {
   amount: 400,
   tipAmount: 50,
-  method: 'CREDIT_CARD',
+  method: 'CASH', // CASH is refundable here; CARD is blocked (separate test below)
   status: 'COMPLETED',
   type: 'REGULAR',
   createdAt: new Date('2026-06-08T20:00:00Z'),
@@ -78,11 +78,22 @@ describe('issue_refund (critical money write, confirm-gated)', () => {
     const out = parse(await call(base))
     expect(out.requiresConfirmation).toBe(true)
     expect(out.preview).toMatchObject({
-      payment: { id: 'pay-1', orderNumber: 'A-77', method: 'CREDIT_CARD', originalTotal: 450 },
+      payment: { id: 'pay-1', orderNumber: 'A-77', method: 'CASH', originalTotal: 450 },
       refundAmount: 100,
       reason: 'ACCIDENTAL_CHARGE',
     })
     expect(mockIssue).not.toHaveBeenCalled()
+  })
+
+  it('BLOCKS card payments — Blumon card refunds are done on the terminal, not via API', async () => {
+    for (const method of ['CREDIT_CARD', 'DEBIT_CARD']) {
+      mockPaymentFindFirst.mockResolvedValueOnce({ ...completedPayment, method })
+      const out = parse(await call({ ...base, confirm: true })) // even with confirm, must not proceed
+      expect(out.ok).toBe(false)
+      expect(out.cardRefundNotSupported).toBe(true)
+      expect(out.error).toMatch(/terminal/i)
+      expect(mockIssue).not.toHaveBeenCalled() // never records a bookkeeping refund for a card
+    }
   })
 
   it('with confirm:true: converts pesos->cents, issues, and audits', async () => {
