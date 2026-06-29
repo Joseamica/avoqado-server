@@ -10,6 +10,7 @@ import { registerOrderTools } from './tools/orders'
 import { registerTerminalTools } from './tools/terminals'
 import { registerReservationTools } from './tools/reservations'
 import { registerInventoryTools } from './tools/inventory'
+import { registerProcurementTools } from './tools/procurement'
 import { registerCfdiTools } from './tools/cfdi'
 import { registerCommissionTools } from './tools/commissions'
 import { registerSubscriptionTools } from './tools/subscriptions'
@@ -17,6 +18,7 @@ import { registerMenuTools } from './tools/menu'
 import { registerStaffTools } from './tools/staff'
 import { registerReviewTools } from './tools/reviews'
 import { registerCustomerTools } from './tools/customers'
+import { registerCustomerGroupTools } from './tools/customerGroups'
 import { registerShiftTools } from './tools/shifts'
 import { registerDiscountTools } from './tools/discounts'
 import { registerPaymentTools } from './tools/payments'
@@ -47,6 +49,7 @@ async function buildServerForIdentity(staffId: string, activeOrg: string): Promi
   registerTerminalTools(server, scope)
   registerReservationTools(server, scope)
   registerInventoryTools(server, scope)
+  registerProcurementTools(server, scope)
   registerCfdiTools(server, scope)
   registerCommissionTools(server, scope)
   registerSubscriptionTools(server, scope)
@@ -54,6 +57,7 @@ async function buildServerForIdentity(staffId: string, activeOrg: string): Promi
   registerStaffTools(server, scope)
   registerReviewTools(server, scope)
   registerCustomerTools(server, scope)
+  registerCustomerGroupTools(server, scope)
   registerShiftTools(server, scope)
   registerDiscountTools(server, scope)
   registerPaymentTools(server, scope)
