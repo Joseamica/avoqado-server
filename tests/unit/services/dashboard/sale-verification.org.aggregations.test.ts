@@ -21,6 +21,7 @@ import {
   getSalesByStore,
   getSalesByPromoter,
   getSalesByPromoterDaily,
+  getSalesByWeek,
   getSalesBySaleTypeWeekly,
   getSalesBySimTypeWeekly,
   toSimBucket,
@@ -352,5 +353,48 @@ describe('getSalesBySimTypeWeekly', () => {
     mockedSvFindMany.mockResolvedValue([{ createdAt: w11, ...cat(null) }])
     const rows = await getSalesBySimTypeWeekly(ORG_ID, {})
     expect(rows.find(r => r.name === 'Otros SIMs')).toMatchObject({ total: 1 })
+  })
+})
+
+describe('weekly tables reconcile with the weekly bar', () => {
+  it('grand totals: Σ sale-type == Σ sim-type == Σ by-week count', async () => {
+    // Helper to build a sale record with a serialized item category name
+    const c = (name: string) => ({
+      payment: { amount: 100, order: { items: [{ serializedItem: { category: { name } } }] } },
+    })
+    const W11 = '2026-03-09T18:00:00Z' // ISO week 2026-W11
+    const W12 = '2026-03-16T18:00:00Z' // ISO week 2026-W12
+    // 4 sales across 2 weeks, 2 sale types, 3 SIM buckets (incl. Otros)
+    const dataset = [
+      { createdAt: new Date(W11), isPortabilidad: false, ...c('SIM de Intercambio') },
+      { createdAt: new Date(W11), isPortabilidad: true, ...c('SIM de Evento') },
+      { createdAt: new Date(W11), isPortabilidad: false, ...c('E-SIM de promotor') }, // → Otros SIMs
+      { createdAt: new Date(W12), isPortabilidad: true, ...c('$100 de Promotor') },
+    ]
+    // All three functions share the same COMPLETED base query — one mock feeds all.
+    mockedSvFindMany.mockResolvedValue(dataset)
+
+    const byWeek = await getSalesByWeek(ORG_ID, {})
+    const sale = await getSalesBySaleTypeWeekly(ORG_ID, {})
+    const sim = await getSalesBySimTypeWeekly(ORG_ID, {})
+
+    // Grand total from the bar chart (Σ count across all weeks)
+    const grand = byWeek.reduce((a, r) => a + r.count, 0)
+
+    // The two new weekly tables must agree with the bar's grand total.
+    // (Per-week key reconciliation is skipped: getSalesByWeek keys by "Wxx"
+    // while the two tables key by "YYYY-Www" — different formats, same invariant
+    // is fully captured by the grand totals below.)
+    expect(sale.reduce((a, r) => a + r.total, 0)).toBe(grand)
+    expect(sim.reduce((a, r) => a + r.total, 0)).toBe(grand)
+
+    // Additionally: the two new tables share the same "YYYY-Www" key format,
+    // so we can verify per-week equality between them.
+    const allWeeks = new Set([...sale.flatMap(r => Object.keys(r.byWeek)), ...sim.flatMap(r => Object.keys(r.byWeek))])
+    for (const wk of allWeeks) {
+      const saleWkTotal = sale.reduce((a, r) => a + (r.byWeek[wk] ?? 0), 0)
+      const simWkTotal = sim.reduce((a, r) => a + (r.byWeek[wk] ?? 0), 0)
+      expect(simWkTotal).toBe(saleWkTotal)
+    }
   })
 })
