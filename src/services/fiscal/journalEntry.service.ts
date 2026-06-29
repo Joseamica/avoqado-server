@@ -3,6 +3,7 @@ import { JournalEntrySource, JournalEntryStatus, JournalEntryType, Prisma } from
 import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
+import { isPeriodLocked } from './accountingPeriodLock.service'
 import { resolveScopeOrNull, type CatalogScope } from './chartOfAccounts.service'
 
 /**
@@ -181,6 +182,12 @@ export async function postJournalEntry(
       select: { id: true },
     })
     if (existing) return loadEntryDTO(existing.id)
+  }
+
+  // Candado de periodo: no se postean pólizas NUEVAS dentro de un periodo cerrado (un re-post idempotente
+  // de una póliza ya existente salió arriba). Para corregir, hay que reabrir el periodo.
+  if (await isPeriodLocked(scope.organizationId, scope.rfc, period)) {
+    throw new BadRequestError(`El periodo ${period} está cerrado. Reábrelo para poder postear o corregir pólizas en él.`)
   }
 
   // Toda cuenta referenciada debe ser del contribuyente Y afectable (hoja) Y activa.

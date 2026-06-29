@@ -20,7 +20,9 @@ import { computePayrollPreview, createEmployee, listEmployees, runPayroll } from
 import { stampPayrollReceipts } from '@/services/fiscal/nominaCfdi.service'
 import { getFiscalReadiness } from '@/services/fiscal/fiscalReadiness.service'
 import { listStatements } from '@/services/dashboard/bankReconciliation.service'
+import { closePeriod, listPeriodLocks, reopenPeriod } from '@/services/fiscal/accountingPeriodLock.service'
 import type { McpScope } from '../scope'
+import { auditMcpWrite } from '../audit'
 import { createGuard } from '../guard'
 import { planGateMessage } from '../planGate'
 import { text } from '../respond'
@@ -1236,6 +1238,117 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           subido: s.createdAt,
         })),
       })
+    },
+  )
+
+  server.tool(
+    'accounting_period_locks',
+    'Lista los candados de periodo contables del contribuyente (Capa B, PREMIUM): qué meses están CERRADOS (no admiten pólizas nuevas) o reabiertos, con fecha y motivo. Lectura: accounting:read + CFDI. Pasa venueId.',
+    { venueId: z.string().describe('Local del contribuyente (debe estar en tu alcance)') },
+    async ({ venueId }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:read', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'El candado de periodo')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+      const r = await listPeriodLocks(venueId)
+      if (r.needsFiscalSetup) return text({ ok: true, needsFiscalSetup: true })
+      return text({
+        ok: true,
+        rfc: r.rfc,
+        candados: r.locks.map(l => ({
+          periodo: l.period,
+          estado: l.status === 'CLOSED' ? 'CERRADO' : 'ABIERTO',
+          cerradoEl: l.closedAt,
+          reabiertoEl: l.reopenedAt,
+          motivo: l.reason,
+        })),
+      })
+    },
+  )
+
+  server.tool(
+    'close_accounting_period',
+    'CIERRA un periodo contable (Capa B, PREMIUM): tras cerrarlo NO se pueden postear ni corregir pólizas dentro de ese mes — protege lo ya declarado al SAT. Escritura de alto impacto: requiere accounting:manage + CFDI y va CONFIRM-GATED (primera llamada = preview; vuelve a llamar con confirm:true). Pasa venueId, period (AAAA-MM) y opcionalmente reason.',
+    {
+      venueId: z.string().describe('Local del contribuyente (debe estar en tu alcance)'),
+      period: z
+        .string()
+        .regex(/^\d{4}-(0[1-9]|1[0-2])$/)
+        .describe('Periodo a cerrar AAAA-MM (mes 01-12)'),
+      reason: z.string().max(500).optional().describe('Motivo del cierre (bitácora)'),
+      confirm: z.boolean().optional().describe('Debe ser true para cerrar; sin él recibes un preview'),
+    },
+    async ({ venueId, period, reason, confirm }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:manage', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'El candado de periodo')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview: {
+            periodo: period,
+            accion: 'CERRAR',
+            efecto: 'No se podrán postear ni corregir pólizas dentro de este mes',
+            motivo: reason ?? null,
+          },
+          message: `Esto CERRARÁ el periodo ${period}: ninguna póliza nueva podrá postearse dentro. Vuelve a llamar con confirm:true para cerrar.`,
+        })
+      }
+      const r = await closePeriod(venueId, period, { staffId: scope.staffId }, reason)
+      if (r.needsFiscalSetup) return text({ ok: false, needsFiscalSetup: true })
+      await auditMcpWrite(scope, {
+        action: 'ACCOUNTING_PERIOD_CLOSED',
+        entity: 'AccountingPeriodLock',
+        entityId: period,
+        venueId,
+        data: { period, reason: reason ?? null },
+      })
+      return text({ ok: true, periodo: period, estado: 'CERRADO' })
+    },
+  )
+
+  server.tool(
+    'reopen_accounting_period',
+    'REABRE un periodo contable cerrado (Capa B, PREMIUM): permite volver a postear/corregir pólizas en ese mes. Sensible (el mes pudo ya declararse al SAT). Escritura: accounting:manage + CFDI, CONFIRM-GATED. Pasa venueId, period (AAAA-MM) y opcionalmente reason.',
+    {
+      venueId: z.string().describe('Local del contribuyente (debe estar en tu alcance)'),
+      period: z
+        .string()
+        .regex(/^\d{4}-(0[1-9]|1[0-2])$/)
+        .describe('Periodo a reabrir AAAA-MM'),
+      reason: z.string().max(500).optional().describe('Motivo de la reapertura (bitácora)'),
+      confirm: z.boolean().optional().describe('Debe ser true para reabrir; sin él recibes un preview'),
+    },
+    async ({ venueId, period, reason, confirm }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:manage', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'El candado de periodo')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview: {
+            periodo: period,
+            accion: 'REABRIR',
+            efecto: 'Se podrán volver a postear/corregir pólizas en este mes',
+            motivo: reason ?? null,
+          },
+          message: `Esto REABRIRÁ el periodo ${period} (pudo ya estar declarado al SAT). Vuelve a llamar con confirm:true para reabrir.`,
+        })
+      }
+      const r = await reopenPeriod(venueId, period, { staffId: scope.staffId }, reason)
+      if (r.needsFiscalSetup) return text({ ok: false, needsFiscalSetup: true })
+      await auditMcpWrite(scope, {
+        action: 'ACCOUNTING_PERIOD_REOPENED',
+        entity: 'AccountingPeriodLock',
+        entityId: period,
+        venueId,
+        data: { period, reason: reason ?? null },
+      })
+      return text({ ok: true, periodo: period, estado: 'ABIERTO' })
     },
   )
 }

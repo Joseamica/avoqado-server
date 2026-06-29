@@ -10871,6 +10871,27 @@ model JournalLine {
   @@index([ledgerAccountId])
 }
 
+/// Candado de periodo contable (Capa B fiscal). Un periodo CERRADO no admite pólizas nuevas ni
+/// edición dentro de él (integridad de lo ya declarado). Scope = (organizationId, rfc). Reabrir deja
+/// el row con status OPEN + bitácora (quién/cuándo), nunca se borra. Ref escalar a org (sin FK).
+model AccountingPeriodLock {
+  id             String                 @id @default(cuid())
+  organizationId String // contribuyente = (organizationId, rfc)
+  rfc            String
+  period         String // YYYY-MM cerrado
+  status         AccountingPeriodStatus @default(CLOSED)
+  reason         String? // motivo del cierre / reapertura (bitácora)
+  closedById     String? // staff que cerró el periodo
+  closedAt       DateTime               @default(now())
+  reopenedById   String? // staff que lo reabrió (si status = OPEN)
+  reopenedAt     DateTime?
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+
+  @@unique([organizationId, rfc, period]) // un candado por periodo por contribuyente
+  @@index([organizationId, rfc, status])
+}
+
 enum JournalEntryType {
   INGRESO
   EGRESO
@@ -10886,6 +10907,11 @@ enum JournalEntrySource {
   ADJUSTMENT
   OPENING
   EXPENSE
+}
+
+enum AccountingPeriodStatus {
+  CLOSED
+  OPEN
 }
 
 /// Gasto / CFDI recibido de proveedor (Buzón). Lado de ENTRADAS de Capa B: habilita IVA acreditable

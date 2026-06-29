@@ -16,6 +16,7 @@ import * as accountingController from '@/controllers/dashboard/accounting.dashbo
 import * as chartController from '@/controllers/dashboard/chartOfAccounts.controller'
 import * as mappingController from '@/controllers/dashboard/accountMapping.controller'
 import * as journalController from '@/controllers/dashboard/journalEntry.controller'
+import * as periodLockController from '@/controllers/dashboard/periodLock.controller'
 import { getTrialBalanceController } from '@/controllers/dashboard/trialBalance.controller'
 import { getAccountingReportsController } from '@/controllers/dashboard/accountingReports.controller'
 import { getIvaCashflowController } from '@/controllers/dashboard/ivaFlujo.controller'
@@ -273,6 +274,46 @@ router.post(
   checkPermission('accounting:manage'),
   validateRequest(createEntrySchema),
   journalController.createJournalEntry,
+)
+
+// ───────────────────────────────────────────────────────────────────────────
+// Candado de periodo — cerrar/reabrir meses contables. Gated PREMIUM (CFDI).
+// Ver = accounting:read; cerrar/reabrir = accounting:manage.
+// ───────────────────────────────────────────────────────────────────────────
+
+const periodLockSchema = z.object({
+  params: z.object({ venueId: z.string().cuid({ message: 'El ID del local no es válido.' }) }),
+  body: z.object({
+    period: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, { message: 'El periodo debe tener formato AAAA-MM (mes 01-12).' }),
+    reason: z.string().max(500, { message: 'El motivo es demasiado largo (máx. 500).' }).optional(),
+  }),
+})
+
+/** GET /accounting/period-locks — candados de periodo del contribuyente. */
+router.get(
+  '/period-locks',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:read'),
+  validateRequest(venueParamSchema),
+  periodLockController.getPeriodLocks,
+)
+
+/** POST /accounting/period-locks/close — cierra un periodo (bloquea pólizas nuevas dentro). */
+router.post(
+  '/period-locks/close',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:manage'),
+  validateRequest(periodLockSchema),
+  periodLockController.closePeriodController,
+)
+
+/** POST /accounting/period-locks/reopen — reabre un periodo cerrado (permite correcciones). */
+router.post(
+  '/period-locks/reopen',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:manage'),
+  validateRequest(periodLockSchema),
+  periodLockController.reopenPeriodController,
 )
 
 // ───────────────────────────────────────────────────────────────────────────

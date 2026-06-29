@@ -7,6 +7,7 @@ import { JournalEntrySource, Prisma } from '@prisma/client'
 import { BadRequestError } from '../../../src/errors/AppError'
 
 jest.mock('../../../src/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
+jest.mock('../../../src/services/fiscal/accountingPeriodLock.service', () => ({ isPeriodLocked: jest.fn() }))
 jest.mock('../../../src/utils/prismaClient', () => ({
   __esModule: true,
   default: {
@@ -19,6 +20,7 @@ jest.mock('../../../src/utils/prismaClient', () => ({
 }))
 
 import prisma from '../../../src/utils/prismaClient'
+import { isPeriodLocked } from '../../../src/services/fiscal/accountingPeriodLock.service'
 import { createManualEntry, listEntries, postJournalEntry } from '../../../src/services/fiscal/journalEntry.service'
 
 const p = prisma as unknown as {
@@ -75,6 +77,7 @@ const DTO = {
 
 beforeEach(() => {
   jest.clearAllMocks()
+  ;(isPeriodLocked as jest.Mock).mockResolvedValue(false)
   p.venue.findUnique.mockResolvedValue({ organizationId: 'org1', rfc: 'TESC900101AAA', type: 'AUTO_SERVICE' })
   p.fiscalEmisor.findFirst.mockResolvedValue(null)
   p.ledgerAccount.findMany.mockResolvedValue(POSTABLE)
@@ -112,6 +115,12 @@ describe('postJournalEntry — invariante de doble partida', () => {
     await expect(createManualEntry('v1', { date: '2026-13-40', concept: 'x', lines: balanced.lines }, { staffId: 's' })).rejects.toThrow(
       /fecha/i,
     )
+  })
+
+  it('periodo CERRADO (candado) → rechaza el posteo, no toca la DB', async () => {
+    ;(isPeriodLocked as jest.Mock).mockResolvedValue(true)
+    await expect(createManualEntry('v1', balanced, { staffId: 's' })).rejects.toThrow(/cerrado/i)
+    expect(p.$transaction).not.toHaveBeenCalled()
   })
 
   it('fecha imposible con día desbordado (31-feb) → rechaza, NO la normaliza a marzo', async () => {
