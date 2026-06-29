@@ -1,4 +1,4 @@
-import { OrderStatus, PaymentMethod, TransactionStatus } from '@prisma/client'
+import { OrderStatus, PaymentMethod, PaymentType, TransactionStatus } from '@prisma/client'
 import Papa from 'papaparse'
 
 import prisma from '../../utils/prismaClient'
@@ -169,24 +169,34 @@ export async function loadDepositCandidates(
   fromYmd: string,
   toYmd: string,
   timezone: string,
+  windowDays = 2,
 ): Promise<DepositCandidate[]> {
   // Noon-anchor pattern (host-tz-safe): the venue-local calendar day survives any host TZ.
   const from = venueStartOfDay(timezone, new Date(`${fromYmd}T12:00:00`))
   const to = venueEndOfDay(timezone, new Date(`${toYmd}T12:00:00`))
+  // Amplía el rango por la ventana de match: un depósito postea T+1/T+2 respecto a la venta, así que
+  // una línea del banco cerca del borde del estado corresponde a una venta de hasta `windowDays` días
+  // FUERA del periodo. Sin esto, esos depósitos del borde quedan UNMATCHED (falsos negativos).
+  from.setUTCDate(from.getUTCDate() - windowDays)
+  to.setUTCDate(to.getUTCDate() + windowDays)
 
   const payments = await prisma.payment.findMany({
     where: {
       venueId,
       status: TransactionStatus.COMPLETED,
-      method: { not: PaymentMethod.CASH }, // efectivo no se deposita electrónicamente
+      // Ni efectivo ni crypto se depositan electrónicamente al banco → no son depósitos esperados.
+      method: { notIn: [PaymentMethod.CASH, PaymentMethod.CRYPTOCURRENCY] },
       createdAt: { gte: from, lte: to },
       order: { status: { not: OrderStatus.CANCELLED } },
     },
-    select: { netAmount: true, createdAt: true },
+    select: { netAmount: true, createdAt: true, type: true },
   })
 
   const byDay = new Map<string, { cents: number; count: number }>()
   for (const p of payments) {
+    // TEST = no es dinero real; ADJUSTMENT = no es un depósito (semántica ambigua → revisión manual).
+    // Conservamos null (legacy = venta real), REGULAR, FAST y REFUND (neto de devoluciones).
+    if (p.type === PaymentType.TEST || p.type === PaymentType.ADJUSTMENT) continue
     const ymd = formatInVenueTimezone(p.createdAt, timezone, 'yyyy-MM-dd')
     const e = byDay.get(ymd) ?? { cents: 0, count: 0 }
     e.cents += toCents(p.netAmount)

@@ -8,9 +8,12 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
   },
 }))
 
+import { PaymentMethod } from '@prisma/client'
+
 import prisma from '../../../../src/utils/prismaClient'
 import {
   confirmMatches,
+  loadDepositCandidates,
   matchLines,
   parseBankCsv,
   type DepositCandidate,
@@ -18,6 +21,7 @@ import {
 } from '../../../../src/services/dashboard/bankReconciliation.service'
 
 const p = prisma as unknown as {
+  payment: { findMany: jest.Mock }
   bankStatement: { findFirst: jest.Mock }
   bankStatementLine: { updateMany: jest.Mock }
   activityLog: { create: jest.Mock }
@@ -93,6 +97,38 @@ describe('bankReconciliation — matchLines (the moat)', () => {
 
   it('empty inputs → empty result (no throw)', () => {
     expect(matchLines([], [])).toEqual([])
+  })
+})
+
+describe('bankReconciliation — loadDepositCandidates (pool + ventana)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    p.payment.findMany.mockResolvedValue([])
+  })
+
+  it('excluye pagos TEST y ADJUSTMENT del pool (no son depósitos reales); conserva los legacy null', async () => {
+    p.payment.findMany.mockResolvedValue([
+      { netAmount: 100, createdAt: new Date('2026-06-10T18:00:00Z'), type: 'REGULAR' },
+      { netAmount: 999, createdAt: new Date('2026-06-10T18:00:00Z'), type: 'TEST' }, // prueba → fuera
+      { netAmount: 555, createdAt: new Date('2026-06-10T18:00:00Z'), type: 'ADJUSTMENT' }, // ajuste → fuera
+      { netAmount: 50, createdAt: new Date('2026-06-10T18:00:00Z'), type: null }, // legacy = venta real
+    ])
+    const cands = await loadDepositCandidates('v1', '2026-06-10', '2026-06-10', 'America/Mexico_City')
+    const totalCents = cands.reduce((n, c) => n + c.netCents, 0)
+    expect(totalCents).toBe(15000) // (100 + 50) pesos → 15000 centavos; TEST/ADJUSTMENT NO cuentan
+  })
+
+  it('excluye CASH y CRYPTOCURRENCY del query (no se depositan electrónicamente al banco)', async () => {
+    await loadDepositCandidates('v1', '2026-06-10', '2026-06-10', 'America/Mexico_City')
+    const where = p.payment.findMany.mock.calls[0][0].where
+    expect(where.method).toEqual({ notIn: [PaymentMethod.CASH, PaymentMethod.CRYPTOCURRENCY] })
+  })
+
+  it('amplía el rango por la ventana de match (T+1/T+2 del borde no se pierden)', async () => {
+    await loadDepositCandidates('v1', '2026-06-10', '2026-06-10', 'America/Mexico_City')
+    const where = p.payment.findMany.mock.calls[0][0].where
+    const spanMs = (where.createdAt.lte as Date).getTime() - (where.createdAt.gte as Date).getTime()
+    expect(spanMs).toBeGreaterThan(3 * 86_400_000) // un solo día ampliado ±2 ≈ 5 días
   })
 })
 
