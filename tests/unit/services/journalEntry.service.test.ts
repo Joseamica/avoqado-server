@@ -123,6 +123,14 @@ describe('postJournalEntry — invariante de doble partida', () => {
     expect(p.$transaction).not.toHaveBeenCalled()
   })
 
+  it('candado DENTRO de la tx: si el periodo se cierra ENTRE el check externo y la tx → igual rechaza (anti-TOCTOU)', async () => {
+    ;(isPeriodLocked as jest.Mock).mockResolvedValueOnce(false).mockResolvedValueOnce(true) // abierto fuera, cerrado dentro
+    const { tx } = txMock()
+    p.$transaction.mockImplementation(async (cb: any) => cb(tx))
+    await expect(createManualEntry('v1', balanced, { staffId: 's' })).rejects.toThrow(/cerrado/i)
+    expect((isPeriodLocked as jest.Mock).mock.calls[1][3]).toBe(tx) // la 2ª llamada (la interna) usa el cliente de la tx
+  })
+
   it('fecha imposible con día desbordado (31-feb) → rechaza, NO la normaliza a marzo', async () => {
     // new Date('2026-02-31T12:00:00Z') NO es NaN: V8 la corre a 2026-03-03. Un asiento quedaría en
     // periodo '2026-02' con fecha marzo → póliza fuera de su mes declarado (inconsistencia SAT).

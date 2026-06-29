@@ -1,4 +1,4 @@
-import { AccountingPeriodStatus } from '@prisma/client'
+import { AccountingPeriodStatus, Prisma } from '@prisma/client'
 
 import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
@@ -13,9 +13,18 @@ import { resolveScopeOrNull } from './chartOfAccounts.service'
 
 const PERIOD_RE = /^\d{4}-(0[1-9]|1[0-2])$/
 
-/** ¿El periodo (YYYY-MM) está CERRADO para este contribuyente? Bloquea postear pólizas dentro de él. */
-export async function isPeriodLocked(organizationId: string, rfc: string, period: string): Promise<boolean> {
-  const lock = await prisma.accountingPeriodLock.findUnique({
+/**
+ * ¿El periodo (YYYY-MM) está CERRADO para este contribuyente? Bloquea postear pólizas dentro de él.
+ * Acepta un cliente de transacción (`db`) para chequear DENTRO de la tx Serializable del posteo y
+ * cerrar el race TOCTOU (que el periodo se cierre entre el check y el commit de la póliza).
+ */
+export async function isPeriodLocked(
+  organizationId: string,
+  rfc: string,
+  period: string,
+  db: Prisma.TransactionClient = prisma,
+): Promise<boolean> {
+  const lock = await db.accountingPeriodLock.findUnique({
     where: { organizationId_rfc_period: { organizationId, rfc, period } },
     select: { status: true },
   })
@@ -40,26 +49,33 @@ export async function closePeriod(
   const scope = await resolveScopeOrNull(venueId)
   if (!scope) return { needsFiscalSetup: true, period, status: null }
 
-  await prisma.accountingPeriodLock.upsert({
-    where: { organizationId_rfc_period: { organizationId: scope.organizationId, rfc: scope.rfc, period } },
-    create: {
-      organizationId: scope.organizationId,
-      rfc: scope.rfc,
-      period,
-      status: AccountingPeriodStatus.CLOSED,
-      closedById: actor.staffId ?? null,
-      reason: reason ?? null,
-    },
-    // Re-cerrar un periodo reabierto: vuelve a CLOSED y limpia los datos de reapertura.
-    update: {
-      status: AccountingPeriodStatus.CLOSED,
-      closedById: actor.staffId ?? null,
-      closedAt: new Date(),
-      reopenedById: null,
-      reopenedAt: null,
-      reason: reason ?? null,
-    },
-  })
+  // Serializable: si una póliza se está posteando concurrentemente en este periodo (su tx también lee
+  // el candado bajo Serializable), SSI detecta el conflicto read-write y aborta una de las dos — el
+  // posteo reintenta, re-lee CLOSED y se rechaza. Sin esto, una póliza podría colarse al cerrar.
+  await prisma.$transaction(
+    async tx =>
+      tx.accountingPeriodLock.upsert({
+        where: { organizationId_rfc_period: { organizationId: scope.organizationId, rfc: scope.rfc, period } },
+        create: {
+          organizationId: scope.organizationId,
+          rfc: scope.rfc,
+          period,
+          status: AccountingPeriodStatus.CLOSED,
+          closedById: actor.staffId ?? null,
+          reason: reason ?? null,
+        },
+        // Re-cerrar un periodo reabierto: vuelve a CLOSED y limpia los datos de reapertura.
+        update: {
+          status: AccountingPeriodStatus.CLOSED,
+          closedById: actor.staffId ?? null,
+          closedAt: new Date(),
+          reopenedById: null,
+          reopenedAt: null,
+          reason: reason ?? null,
+        },
+      }),
+    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+  )
 
   await logAction({
     action: 'ACCOUNTING_PERIOD_CLOSED',

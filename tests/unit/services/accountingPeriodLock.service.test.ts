@@ -8,6 +8,7 @@ jest.mock('../../../src/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     accountingPeriodLock: { findUnique: jest.fn(), upsert: jest.fn(), update: jest.fn(), findMany: jest.fn() },
+    $transaction: jest.fn(),
   },
 }))
 jest.mock('../../../src/services/fiscal/chartOfAccounts.service', () => ({ resolveScopeOrNull: jest.fn() }))
@@ -20,6 +21,7 @@ import { resolveScopeOrNull } from '../../../src/services/fiscal/chartOfAccounts
 
 const p = prisma as unknown as {
   accountingPeriodLock: { findUnique: jest.Mock; upsert: jest.Mock; update: jest.Mock; findMany: jest.Mock }
+  $transaction: jest.Mock
 }
 const mScope = resolveScopeOrNull as jest.Mock
 const mLog = logAction as jest.Mock
@@ -27,6 +29,7 @@ const mLog = logAction as jest.Mock
 beforeEach(() => {
   jest.clearAllMocks()
   mScope.mockResolvedValue({ organizationId: 'org1', rfc: 'EKU9003173C9' })
+  p.$transaction.mockImplementation(async (cb: any) => cb(prisma)) // tx Serializable → ejecuta con el mock
   p.accountingPeriodLock.upsert.mockResolvedValue({})
   p.accountingPeriodLock.update.mockResolvedValue({})
   mLog.mockResolvedValue(undefined)

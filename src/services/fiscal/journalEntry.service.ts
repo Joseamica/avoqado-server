@@ -228,6 +228,12 @@ export async function postJournalEntry(
             })
             if (ex) return { id: ex.id, isNew: false }
           }
+          // Candado de periodo DENTRO de la tx Serializable: una póliza NUEVA no entra a un mes cerrado.
+          // (El re-post idempotente ya retornó arriba.) Si el periodo se cierra concurrentemente, el
+          // conflicto read-write de SSI aborta esta tx → reintenta → re-lee CLOSED y rechaza (cierra el TOCTOU).
+          if (await isPeriodLocked(scope.organizationId, scope.rfc, period, tx)) {
+            throw new BadRequestError(`El periodo ${period} está cerrado. Reábrelo para poder postear o corregir pólizas en él.`)
+          }
           // Folio consecutivo por (org, rfc); si colisiona (carrera), el @@unique lanza P2002 y reintentamos.
           const max = await tx.journalEntry.aggregate({
             where: { organizationId: scope.organizationId, rfc: scope.rfc },

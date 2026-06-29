@@ -174,11 +174,11 @@ export async function loadDepositCandidates(
   // Noon-anchor pattern (host-tz-safe): the venue-local calendar day survives any host TZ.
   const from = venueStartOfDay(timezone, new Date(`${fromYmd}T12:00:00`))
   const to = venueEndOfDay(timezone, new Date(`${toYmd}T12:00:00`))
-  // Amplía el rango por la ventana de match: un depósito postea T+1/T+2 respecto a la venta, así que
-  // una línea del banco cerca del borde del estado corresponde a una venta de hasta `windowDays` días
-  // FUERA del periodo. Sin esto, esos depósitos del borde quedan UNMATCHED (falsos negativos).
+  // Amplía SÓLO el borde inferior por la ventana de match: el depósito llega T+1/T+2 DESPUÉS de la venta,
+  // así que una línea del banco cerca del INICIO del estado corresponde a una venta de hasta `windowDays`
+  // días ANTES del periodo. NO ampliamos el borde superior: una venta posterior al periodo liquidaría
+  // fuera de él, y meterla sólo crearía falsos candidatos que cuadran con líneas del final del estado.
   from.setUTCDate(from.getUTCDate() - windowDays)
-  to.setUTCDate(to.getUTCDate() + windowDays)
 
   const payments = await prisma.payment.findMany({
     where: {

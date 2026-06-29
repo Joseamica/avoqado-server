@@ -124,11 +124,15 @@ describe('bankReconciliation — loadDepositCandidates (pool + ventana)', () => 
     expect(where.method).toEqual({ notIn: [PaymentMethod.CASH, PaymentMethod.CRYPTOCURRENCY] })
   })
 
-  it('amplía el rango por la ventana de match (T+1/T+2 del borde no se pierden)', async () => {
+  it('amplía SÓLO el borde inferior (el depósito llega T+1/T+2 DESPUÉS de la venta; no mete ventas post-periodo)', async () => {
     await loadDepositCandidates('v1', '2026-06-10', '2026-06-10', 'America/Mexico_City')
     const where = p.payment.findMany.mock.calls[0][0].where
-    const spanMs = (where.createdAt.lte as Date).getTime() - (where.createdAt.gte as Date).getTime()
-    expect(spanMs).toBeGreaterThan(3 * 86_400_000) // un solo día ampliado ±2 ≈ 5 días
+    const gte = (where.createdAt.gte as Date).getTime()
+    const lte = (where.createdAt.lte as Date).getTime()
+    const dayStart = new Date('2026-06-10T06:00:00.000Z').getTime() // 10-jun 00:00 America/Mexico_City
+    const dayEnd = new Date('2026-06-11T05:59:59.999Z').getTime() // 10-jun 23:59:59.999 MX
+    expect(gte).toBeLessThanOrEqual(dayStart - 86_400_000) // borde inferior corrido ≥1 día hacia atrás
+    expect(lte).toBeLessThan(dayEnd + 86_400_000) // borde superior NO corrido al futuro (sigue ~fin del estado)
   })
 })
 
