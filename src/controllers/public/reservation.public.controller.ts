@@ -213,6 +213,11 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
         type: true,
         address: true,
         phone: true,
+        // Venue-chat mode — drives whether the booking surfaces expose a
+        // "message us" affordance. RELAY = in-widget chat works; WA_ME_FALLBACK
+        // = only usable if a phone exists (deep-links to wa.me); DISABLED = off.
+        // The widget + host page compute `chat.canMessage` from this below.
+        whatsappContactMode: true,
         products: {
           where: { active: true, type: { in: ['APPOINTMENTS_SERVICE', 'EVENT', 'CLASS'] } },
           select: {
@@ -302,15 +307,30 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
 
     // Strip the raw reservationBranding out of the spread and expose the merged
     // `branding` (accentColor resolved from primaryColor) the widget consumes.
-    const { reservationBranding, ...venueInfoRest } = (venueInfo ?? {}) as NonNullable<typeof venueInfo> & {
+    const { reservationBranding, whatsappContactMode, ...venueInfoRest } = (venueInfo ?? {}) as NonNullable<typeof venueInfo> & {
       reservationBranding?: unknown
     }
+
+    // Resolve a single `canMessage` the booking surfaces can trust: in-widget
+    // chat works in RELAY mode regardless of phone; WA_ME_FALLBACK only works
+    // when a phone exists to deep-link into (wa.me); DISABLED is always off.
+    // Computing it here keeps the policy in one place — the widget's shadow-DOM
+    // FAB and the host page's "message us" pill both read chat.canMessage rather
+    // than each re-deriving the rule and risking a silent mismatch.
+    const chatMode = whatsappContactMode ?? 'WA_ME_FALLBACK'
+    const canMessage = chatMode === 'RELAY' || (chatMode === 'WA_ME_FALLBACK' && !!venueInfoRest.phone)
     res.json({
       ...venueInfoRest,
       branding: mergeReservationBranding(reservationBranding, venueInfoRest.primaryColor),
       products,
       timezone: venue.timezone || 'America/Mexico_City',
       publicBooking: settings.publicBooking,
+      // Venue-chat availability. `canMessage` is the single gate the booking
+      // surfaces use to decide whether to render a "message us" affordance, so
+      // a dead-end (no relay + no phone) never shows the customer a button that
+      // only fails after they fill out the form. `mode` is exposed for clients
+      // that want to branch (e.g. skip the doomed relay POST for wa.me venues).
+      chat: { mode: chatMode, canMessage },
       operatingHours: settings.operatingHours,
       payments: settings.payments,
       // Scheduling window — exposed so the date picker caps exactly at the
