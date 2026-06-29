@@ -5,11 +5,12 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
   default: {
     venue: { findUnique: jest.fn() },
     payment: { findMany: jest.fn() },
+    bankStatement: { count: jest.fn(), aggregate: jest.fn() },
   },
 }))
 
 import prisma from '../../../../src/utils/prismaClient'
-import { getIncomeStatement } from '../../../../src/services/dashboard/accounting.dashboard.service'
+import { getBankAndCashSummary, getIncomeStatement } from '../../../../src/services/dashboard/accounting.dashboard.service'
 
 const venueFindUnique = (prisma as any).venue.findUnique as jest.Mock
 const paymentFindMany = (prisma as any).payment.findMany as jest.Mock
@@ -85,5 +86,25 @@ describe('getIncomeStatement (Capa A — estado de resultados)', () => {
     expect(where.venueId).toBe(VENUE)
     expect(where.status).toBe(TransactionStatus.COMPLETED)
     expect(where.order).toEqual({ status: { not: OrderStatus.CANCELLED } })
+  })
+})
+
+describe('getBankAndCashSummary (Capa A — bancos y cajas)', () => {
+  beforeEach(() => {
+    ;(prisma as any).bankStatement.count.mockResolvedValue(0)
+    ;(prisma as any).bankStatement.aggregate.mockResolvedValue({ _sum: { lineCount: 0, matchedCount: 0 } })
+  })
+
+  it('netToBank = venta electrónica + propina − comisión; la propina en EFECTIVO no llega al banco', async () => {
+    // El procesador liquida venta + propina − comisión; el neto al banco debe reflejar lo mismo.
+    paymentFindMany.mockResolvedValue([
+      { amount: 100, tipAmount: 20, type: 'REGULAR', method: 'CREDIT_CARD', feeAmount: 3 }, // tarjeta → banco
+      { amount: 50, tipAmount: 10, type: 'REGULAR', method: 'CASH', feeAmount: 0 }, // efectivo → caja
+    ])
+    const r = await getBankAndCashSummary(VENUE, FILTERS)
+    expect(r.totals.electronicInflowCents).toBe(10000) // venta de tarjeta, SIN propina
+    expect(r.totals.electronicTipsCents).toBe(2000) // sólo la propina de tarjeta
+    expect(r.totals.feesCents).toBe(300)
+    expect(r.totals.netToBankCents).toBe(11700) // 100 + 20 − 3 (la propina en efectivo de 10 NO entra)
   })
 })

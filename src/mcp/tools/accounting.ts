@@ -170,6 +170,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         totales: {
           efectivoCaja: pesos(d.totals.cashInflowCents),
           electronicoBruto: pesos(d.totals.electronicInflowCents),
+          propinaElectronica: pesos(d.totals.electronicTipsCents),
           comisiones: pesos(d.totals.feesCents),
           netoAlBanco: pesos(d.totals.netToBankCents),
         },

@@ -151,7 +151,8 @@ interface PeriodAccount {
   key: string
   kind: 'cash' | 'bank'
   methods: PaymentMethod[]
-  inflowCents: number // con signo (las devoluciones restan)
+  inflowCents: number // VENTA con signo (las devoluciones restan); NO incluye propina
+  tipCents: number // propina del método con signo (las devoluciones restan)
   count: number // ventas (no devoluciones)
 }
 
@@ -159,6 +160,8 @@ interface PeriodPaymentAgg {
   accounts: PeriodAccount[]
   cashInflowCents: number
   electronicInflowCents: number
+  /** Propina cobrada por métodos electrónicos: se deposita al banco junto con la venta. */
+  electronicTipsCents: number
   feesCents: number
 }
 
@@ -184,7 +187,7 @@ async function aggregatePeriodPayments(venueId: string, from: Date, to: Date): P
       createdAt: { gte: from, lte: to },
       order: { status: { not: OrderStatus.CANCELLED } },
     },
-    select: { amount: true, type: true, method: true, feeAmount: true },
+    select: { amount: true, tipAmount: true, type: true, method: true, feeAmount: true },
   })
 
   const buckets = new Map<string, PeriodAccount>()
@@ -196,13 +199,14 @@ async function aggregatePeriodPayments(venueId: string, from: Date, to: Date): P
     const def = METHOD_BUCKET[method] ?? METHOD_BUCKET.OTHER
     let acc = buckets.get(def.key)
     if (!acc) {
-      acc = { key: def.key, kind: def.kind, methods: [], inflowCents: 0, count: 0 }
+      acc = { key: def.key, kind: def.kind, methods: [], inflowCents: 0, tipCents: 0, count: 0 }
       buckets.set(def.key, acc)
     }
     if (!acc.methods.includes(method)) acc.methods.push(method)
 
     const amountCents = toCents(r.amount) // devoluciones ya vienen negativas
     acc.inflowCents += amountCents
+    acc.tipCents += toCents(r.tipAmount) // propina con signo (las devoluciones traen propina negativa)
     if (r.type === PaymentType.REFUND) continue // no suma conteo ni comisión
     acc.count += 1
     feesCents += toCents(r.feeAmount)
@@ -211,12 +215,17 @@ async function aggregatePeriodPayments(venueId: string, from: Date, to: Date): P
   const accounts = [...buckets.values()].sort((a, b) => b.inflowCents - a.inflowCents)
   let cashInflowCents = 0
   let electronicInflowCents = 0
+  let electronicTipsCents = 0
   for (const a of accounts) {
-    if (a.kind === 'cash') cashInflowCents += a.inflowCents
-    else electronicInflowCents += a.inflowCents
+    if (a.kind === 'cash') {
+      cashInflowCents += a.inflowCents
+    } else {
+      electronicInflowCents += a.inflowCents
+      electronicTipsCents += a.tipCents // sólo las propinas electrónicas llegan al banco (las de caja no)
+    }
   }
 
-  return { accounts, cashInflowCents, electronicInflowCents, feesCents }
+  return { accounts, cashInflowCents, electronicInflowCents, electronicTipsCents, feesCents }
 }
 
 /** Estados de cuenta subidos + cuántos depósitos cuadraron (conciliación bancaria). */
@@ -334,8 +343,10 @@ export interface BankAndCashSummary {
   totals: {
     cashInflowCents: number
     electronicInflowCents: number
+    /** Propina electrónica: se deposita al banco junto con la venta. */
+    electronicTipsCents: number
     feesCents: number
-    /** Lo que debería llegar al banco = electrónico − comisiones. */
+    /** Lo que debería llegar al banco = venta electrónica + propina electrónica − comisiones. */
     netToBankCents: number
   }
   reconciliation: { statements: number; lineCount: number; matchedCount: number }
@@ -364,8 +375,10 @@ export async function getBankAndCashSummary(venueId: string, filters: IncomeStat
     totals: {
       cashInflowCents: payAgg.cashInflowCents,
       electronicInflowCents: payAgg.electronicInflowCents,
+      electronicTipsCents: payAgg.electronicTipsCents,
       feesCents: payAgg.feesCents,
-      netToBankCents: payAgg.electronicInflowCents - payAgg.feesCents,
+      // El procesador liquida venta + propina − comisión; el neto al banco refleja lo mismo.
+      netToBankCents: payAgg.electronicInflowCents + payAgg.electronicTipsCents - payAgg.feesCents,
     },
     reconciliation: recon,
   }
