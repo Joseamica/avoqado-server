@@ -247,16 +247,14 @@ describe('platformCfdi.service', () => {
       prismaMock.platformEmisor.findFirst.mockResolvedValue(ACTIVE_EMISOR)
       prismaMock.platformCfdi.create.mockResolvedValue({ id: 'rep1', status: 'STAMPING' })
       prismaMock.platformCfdi.update.mockImplementation((args: any) => Promise.resolve({ id: args.where.id, ...args.data }))
-      const createPaymentComplement = jest
-        .fn()
-        .mockResolvedValue({
-          providerInvoiceId: 'fa-rep',
-          uuid: 'UUID-REP',
-          serie: 'A',
-          folio: '9',
-          stampedAt: new Date(),
-          status: 'valid',
-        })
+      const createPaymentComplement = jest.fn().mockResolvedValue({
+        providerInvoiceId: 'fa-rep',
+        uuid: 'UUID-REP',
+        serie: 'A',
+        folio: '9',
+        stampedAt: new Date(),
+        status: 'valid',
+      })
       mockResolve.mockReturnValue({ createPaymentComplement })
 
       // Pago de la mitad (92742¢ de 185484¢) → base = round(92742/1.16) = 79950
@@ -285,16 +283,14 @@ describe('platformCfdi.service', () => {
       prismaMock.platformEmisor.findFirst.mockResolvedValue(ACTIVE_EMISOR)
       prismaMock.platformCfdi.create.mockResolvedValue({ id: 'rep2', status: 'STAMPING' })
       prismaMock.platformCfdi.update.mockImplementation((args: any) => Promise.resolve({ id: args.where.id, ...args.data }))
-      const createPaymentComplement = jest
-        .fn()
-        .mockResolvedValue({
-          providerInvoiceId: 'fa-rep2',
-          uuid: 'UUID-REP2',
-          serie: 'A',
-          folio: '10',
-          stampedAt: new Date(),
-          status: 'valid',
-        })
+      const createPaymentComplement = jest.fn().mockResolvedValue({
+        providerInvoiceId: 'fa-rep2',
+        uuid: 'UUID-REP2',
+        serie: 'A',
+        folio: '10',
+        stampedAt: new Date(),
+        status: 'valid',
+      })
       mockResolve.mockReturnValue({ createPaymentComplement })
 
       await registerPlatformPayment({ ...baseInput, idempotencyKey: 'partial-2' }) // sin monto → saldo restante 92742
