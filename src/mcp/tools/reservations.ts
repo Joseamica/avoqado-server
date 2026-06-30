@@ -17,7 +17,7 @@ import {
 } from '@/services/dashboard/reservation.dashboard.service'
 import { getReservationSettings, updateReservationSettings } from '@/services/dashboard/reservationSettings.service'
 import { getClassSession } from '@/services/dashboard/classSession.dashboard.service'
-import { getWaitlist } from '@/services/dashboard/reservationWaitlist.service'
+import { getWaitlist, addToWaitlist } from '@/services/dashboard/reservationWaitlist.service'
 import { auditMcpWrite } from '../audit'
 import { planGateMessage } from '../planGate'
 import { ClassSessionStatus, WaitlistStatus, type ReservationStatus } from '@prisma/client'
@@ -685,6 +685,99 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
           promotedReservation: e.promotedReservation?.confirmationCode ?? null,
         })),
       })
+    },
+  )
+
+  server.tool(
+    'add_to_waitlist',
+    'Add someone to the reservation/appointment WAITLIST (lista de espera) of a venue you can access — e.g. "mete a María a la lista de espera para hoy 8pm". Either link a known customer (pass `search` by name/email/phone) OR a walk-in (pass guestName + guestPhone). Give the desired date/time and party size. The service assigns the queue position and refuses if the waitlist is disabled or full. This WRITES — requires reservations:create.',
+    {
+      venueId: z.string().describe('Venue whose waitlist to add to (must be in your scope)'),
+      desiredStartAt: z.string().min(1).describe('Desired date/time, ISO 8601 (e.g. 2026-06-29T20:00:00.000Z)'),
+      partySize: z.number().int().positive().max(100).optional().describe('Party size (default 1)'),
+      search: z.string().optional().describe('Link a KNOWN customer by name/email/phone (partial). Omit for a walk-in guest.'),
+      guestName: z.string().optional().describe('Walk-in guest name (use instead of search)'),
+      guestPhone: z.string().optional().describe('Walk-in guest phone'),
+      notes: z.string().optional().describe('Optional notes'),
+    },
+    async ({ venueId, desiredStartAt, partySize, search, guestName, guestPhone, notes }) => {
+      const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('reservations:create', venueId) // write gate (per-venue role) — mirrors POST /waitlist
+      const gate = await planGateMessage(venueId, ...RESERVATIONS_GATE) // PRO tier
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+
+      const start = new Date(desiredStartAt)
+      if (Number.isNaN(start.getTime()))
+        return text({ ok: false, error: 'desiredStartAt inválido. Usa ISO 8601, ej. 2026-06-29T20:00:00.000Z' })
+
+      // Either link a known customer (resolve-don't-guess) or take a walk-in guest.
+      let customerId: string | undefined
+      let who: string
+      if (search) {
+        const matches = await prisma.customer.findMany({
+          where: {
+            ...base,
+            OR: [
+              { firstName: { contains: search, mode: 'insensitive' as const } },
+              { lastName: { contains: search, mode: 'insensitive' as const } },
+              { email: { contains: search, mode: 'insensitive' as const } },
+              { phone: { contains: search } },
+            ],
+          },
+          select: { id: true, firstName: true, lastName: true },
+          orderBy: { totalSpent: 'desc' },
+          take: 5,
+        })
+        if (matches.length === 0)
+          return text({ ok: false, error: `No encontré ningún cliente que coincida con "${search}" en este local.` })
+        if (matches.length > 1) {
+          return text({
+            ok: false,
+            ambiguous: true,
+            error: `"${search}" coincide con varios clientes — sé más específico o usa guestName.`,
+            matches: matches.map(m => `${m.firstName ?? ''} ${m.lastName ?? ''}`.trim() || '(sin nombre)'),
+          })
+        }
+        customerId = matches[0].id
+        who = `${matches[0].firstName ?? ''} ${matches[0].lastName ?? ''}`.trim() || '(cliente)'
+      } else if (guestName) {
+        who = guestName
+      } else {
+        return text({ ok: false, error: 'Pasa "search" (cliente existente) o "guestName" (invitado de paso).' })
+      }
+
+      try {
+        const settings = await getReservationSettings(venueId) // waitlist enabled/maxSize/priority config
+        const entry = await addToWaitlist(
+          venueId,
+          {
+            ...(customerId ? { customerId } : { guestName, guestPhone }),
+            partySize: partySize ?? 1,
+            desiredStartAt: start,
+            ...(notes ? { notes } : {}),
+          },
+          settings,
+        )
+        await auditMcpWrite(scope, {
+          action: 'WAITLIST_ADDED',
+          entity: 'ReservationWaitlistEntry',
+          entityId: (entry as { id: string }).id,
+          venueId,
+          data: { who, partySize: partySize ?? 1, desiredStartAt: start.toISOString() },
+        })
+        return text({
+          ok: true,
+          waitlistEntry: {
+            who,
+            position: (entry as { position: number }).position,
+            partySize: (entry as { partySize: number }).partySize,
+            desiredStartAt: start.toISOString(),
+            status: (entry as { status: string }).status,
+          },
+        })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
     },
   )
 }

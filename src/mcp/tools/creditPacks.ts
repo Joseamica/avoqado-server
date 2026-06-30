@@ -4,7 +4,8 @@ import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
-import { getCreditPacks, getCustomerPurchases } from '@/services/dashboard/creditPack.dashboard.service'
+import { getCreditPacks, getCustomerPurchases, redeemItemManually } from '@/services/dashboard/creditPack.dashboard.service'
+import { auditMcpWrite } from '../audit'
 import { CreditPurchaseStatus } from '@prisma/client'
 
 // Credit packs ("paquete de 10 clases / 10 masajes" — buy N, redeem over time): core to the
@@ -109,6 +110,138 @@ export function registerCreditPackTools(server: McpServer, scope: McpScope) {
             })) ?? [],
         })),
       })
+    },
+  )
+
+  server.tool(
+    'redeem_credit',
+    'Redeem ONE prepaid credit from a customer\'s pack in a venue you can access — e.g. mark that they used a class/session today ("redime una clase a Juan"). Find the customer by name/email/phone; if their pack covers several services pass `product` to pick which credit to use. Because it CONSUMES a prepaid credit (customer value, not trivially reversible), by DEFAULT it only PREVIEWS (remaining → remaining-1); call again with confirm:true to apply. This WRITES — requires creditPacks:update.',
+    {
+      venueId: z.string().describe('Venue that owns the customer (must be in your scope)'),
+      search: z.string().min(1).describe('Customer name, email or phone (partial, case-insensitive)'),
+      product: z
+        .string()
+        .optional()
+        .describe('Which credit to redeem, by product/service name — required if the customer has credits for several'),
+      reason: z.string().optional().describe('Optional note for the audit trail (e.g. "asistió a clase 7pm")'),
+      confirm: z.boolean().optional().describe('Must be true to actually redeem; without it you get a preview'),
+    },
+    async ({ venueId, search, product, reason, confirm }) => {
+      const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('creditPacks:update', venueId) // write gate (per-venue role)
+
+      const matches = await prisma.customer.findMany({
+        where: {
+          ...base,
+          OR: [
+            { firstName: { contains: search, mode: 'insensitive' as const } },
+            { lastName: { contains: search, mode: 'insensitive' as const } },
+            { email: { contains: search, mode: 'insensitive' as const } },
+            { phone: { contains: search } },
+          ],
+        },
+        select: { id: true, firstName: true, lastName: true },
+        orderBy: { totalSpent: 'desc' },
+        take: 5,
+      })
+      if (matches.length === 0) return text({ ok: false, error: `No encontré ningún cliente que coincida con "${search}" en este local.` })
+      if (matches.length > 1) {
+        return text({
+          ok: false,
+          ambiguous: true,
+          error: `"${search}" coincide con varios clientes — sé más específico.`,
+          matches: matches.map(m => `${m.firstName ?? ''} ${m.lastName ?? ''}`.trim() || '(sin nombre)'),
+        })
+      }
+      const c = matches[0]
+      const name = `${c.firstName ?? ''} ${c.lastName ?? ''}`.trim() || '(sin nombre)'
+
+      // Available = ACTIVE purchase, credits remaining, optionally filtered to the named product.
+      const balances = await prisma.creditItemBalance.findMany({
+        where: {
+          remainingQuantity: { gt: 0 },
+          creditPackPurchase: { venueId, customerId: c.id, status: CreditPurchaseStatus.ACTIVE },
+          ...(product ? { product: { name: { contains: product, mode: 'insensitive' as const } } } : {}),
+        },
+        select: {
+          id: true,
+          remainingQuantity: true,
+          product: { select: { name: true } },
+          creditPackPurchase: { select: { expiresAt: true, creditPack: { select: { name: true } } } },
+        },
+      })
+      if (balances.length === 0) {
+        return text({
+          ok: false,
+          error: product
+            ? `${name} no tiene créditos disponibles de "${product}".`
+            : `${name} no tiene créditos activos disponibles para canjear.`,
+        })
+      }
+      // If no product filter and the customer has credits for several DIFFERENT services, ask which.
+      const distinctProducts = [...new Set(balances.map(b => b.product?.name ?? ''))]
+      if (!product && distinctProducts.length > 1) {
+        return text({
+          ok: false,
+          ambiguous: true,
+          error: `${name} tiene créditos de varios servicios — especifica cuál con "product".`,
+          available: distinctProducts,
+        })
+      }
+      // Auto-pick the soonest-expiring matching balance (nulls last) — shown in the preview so the
+      // operator confirms the exact pack; never silently picks across services (handled above).
+      const target = [...balances].sort((a, b) => {
+        const ea = a.creditPackPurchase.expiresAt?.getTime() ?? Infinity
+        const eb = b.creditPackPurchase.expiresAt?.getTime() ?? Infinity
+        return ea - eb
+      })[0]
+      const productName = target.product?.name ?? '(servicio)'
+      const packName = target.creditPackPurchase.creditPack?.name ?? '(paquete)'
+
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview: {
+            customer: name,
+            product: productName,
+            pack: packName,
+            expiresAt: target.creditPackPurchase.expiresAt?.toISOString() ?? null,
+            remaining: target.remainingQuantity,
+            after: target.remainingQuantity - 1,
+          },
+          message: `Esto CANJEARÁ 1 crédito de "${productName}" (paquete "${packName}") de ${name}: ${target.remainingQuantity} → ${target.remainingQuantity - 1}. Vuelve a llamar con confirm:true para aplicar.`,
+        })
+      }
+
+      // CreditTransaction.createdById FKs to StaffVenue.id (NOT Staff.id) — resolve the caller's
+      // staff-venue row for attribution, exactly like the dashboard controller (getStaffVenueId).
+      // Passing scope.staffId (a Staff.id) would violate the FK and roll the redemption back.
+      const sv = await prisma.staffVenue.findFirst({ where: { staffId: scope.staffId, venueId }, select: { id: true } })
+      if (!sv) return text({ ok: false, error: 'No pude resolver tu asignación a este local para registrar el canje.' })
+
+      try {
+        const tx = await redeemItemManually(venueId, target.id, sv.id, reason) // service re-validates active/expiry/remaining
+        await auditMcpWrite(scope, {
+          action: 'CREDIT_REDEEMED',
+          entity: 'CreditItemBalance',
+          entityId: target.id,
+          venueId,
+          data: { customer: name, product: productName, pack: packName, reason: reason ?? null },
+        })
+        return text({
+          ok: true,
+          redeemed: {
+            customer: name,
+            product: productName,
+            pack: packName,
+            remaining: target.remainingQuantity - 1,
+            transactionId: (tx as { id?: string })?.id ?? null,
+          },
+        })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
     },
   )
 }
