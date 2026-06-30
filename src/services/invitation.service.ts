@@ -9,7 +9,7 @@ import { getRoleDisplayName } from './dashboard/venueRoleConfig.dashboard.servic
 import { ROLE_HIERARCHY } from '../lib/permissions'
 import { createStaffOrganizationMembership, getPrimaryOrganizationId, getOrganizationIdFromVenue } from './staffOrganization.service'
 import { logAction } from './dashboard/activity-log.service'
-import { assertCanAddSeat } from './access/seatCap.service'
+import { assertCanAddSeatsBulk } from './access/seatCap.service'
 
 interface AcceptInvitationData {
   firstName?: string
@@ -130,338 +130,362 @@ export async function acceptInvitation(token: string, userData: AcceptInvitation
   let acceptedStaffId: string | null = null
   let acceptedRole: string | null = null
 
-  // Start a transaction to ensure data consistency
-  const result = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-    // Get and validate invitation
-    const invitation = await tx.invitation.findFirst({
-      where: {
-        token,
-        status: InvitationStatus.PENDING,
-      },
-      include: {
-        organization: true,
-        venue: true,
-      },
-    })
+  // Hash the password OUTSIDE the transaction (bcrypt is ~250ms of CPU and needs no DB state) —
+  // never hold a pooled connection open while hashing. Only existing users without a password and
+  // brand-new users consume it. null when no password was provided (existing user verifying via PIN).
+  const hashedPassword = userData.password ? await bcrypt.hash(userData.password, 12) : null
 
-    if (!invitation) {
-      throw new AppError('Invitación no encontrada o ya utilizada', 404)
-    }
-
-    // Check if invitation is expired
-    if (new Date() > invitation.expiresAt) {
-      throw new AppError('La invitación ha expirado', 410)
-    }
-
-    // Enforce PIN requirement if set by inviter
-    if (invitation.requirePin && !userData.pin) {
-      throw new AppError('El PIN es requerido para esta invitación', 400)
-    }
-
-    // Check if user with this email already exists GLOBALLY
-    // Staff.email is globally unique - one person = one Staff account
-    // Use toLowerCase() for consistent case-insensitive email lookups
-    const existingStaff = await tx.staff.findUnique({
-      where: {
-        email: invitation.email.toLowerCase(),
-      },
-      include: {
-        venues: {
-          where: {
-            active: true,
-          },
+  // Start a transaction to ensure data consistency.
+  //
+  // ⚠️ Explicit timeout below (NOT Prisma's 5000ms default): an OWNER invitation with
+  // `permissions.inviteToAllVenues` fans out StaffVenue creation across EVERY venue in the org.
+  // The transaction is kept O(1) in round-trips (batched existence lookup + one bulk seat-cap check
+  // instead of ~4 queries per venue) so a large org (e.g. PlayTelecom, 40 venues) finishes well
+  // under a second; the generous timeout is now only a safety net. The original per-venue fan-out
+  // (existence lookup + per-venue seat-cap reads + create + in-transaction bcrypt) crossed Prisma's
+  // 5s default, so Prisma aborted the transaction and the next staffVenue read threw P2028
+  // ("Transaction not found ... old closed transaction"), leaving the invite stuck PENDING
+  // (prod incident 2026-06-30).
+  const result = await prisma.$transaction(
+    async (tx: Prisma.TransactionClient) => {
+      // Get and validate invitation
+      const invitation = await tx.invitation.findFirst({
+        where: {
+          token,
+          status: InvitationStatus.PENDING,
         },
-        organizations: {
-          where: { isActive: true },
-          select: { organizationId: true },
+        include: {
+          organization: true,
+          venue: true,
         },
-      },
-    })
-
-    // Multi-org support: Staff can belong to multiple organizations
-    // If user exists in a DIFFERENT organization, we create a new StaffOrganization membership
-    // If user exists in the SAME organization, we just add them to the new venue
-    const existingStaffOrgId = existingStaff?.organizations?.[0]?.organizationId
-    const isCrossOrgInvitation = existingStaff && existingStaffOrgId !== invitation.organizationId
-
-    // Hash the password (only if provided — existing users don't need to send it)
-    const hashedPassword = userData.password ? await bcrypt.hash(userData.password, 12) : null
-
-    // Validate PIN if provided (stored as PLAIN TEXT for fast TPV login)
-    // ⚠️ PIN is NOT hashed - auth.tpv.service.ts does plain text comparison
-    let validatedPin: string | null = null
-    if (userData.pin) {
-      // Check if PIN is already used in this venue (plain text comparison)
-      if (invitation.venueId) {
-        const existingPinUser = await tx.staffVenue.findFirst({
-          where: {
-            venueId: invitation.venueId,
-            pin: userData.pin, // Plain text comparison
-            active: true,
-          },
-        })
-
-        if (existingPinUser) {
-          throw new AppError('PIN no disponible. Por favor, elige otro diferente.', 409)
-        }
-      }
-
-      validatedPin = userData.pin // Store as plain text
-    }
-
-    // Create or reuse the staff record
-    let staff
-    if (existingStaff) {
-      // User already exists - verify password if they have one and one was provided
-      // This allows existing users to accept invitations by verifying their password
-      // instead of going through the full login flow (which fails if they have no active venues)
-      if (existingStaff.password && userData.password) {
-        const isPasswordValid = await bcrypt.compare(userData.password, existingStaff.password)
-        if (!isPasswordValid) {
-          throw new AppError('Contraseña incorrecta', 401)
-        }
-      } else if (existingStaff.password && !userData.password) {
-        // User has a password but didn't provide one - they need to verify
-        throw new AppError('Se requiere contraseña para verificar tu identidad', 400)
-      }
-
-      // User already exists in this organization
-      // DON'T overwrite their password or name - they already have valid credentials
-      // Just ensure they're active and verified
-      const updateData: Prisma.StaffUpdateInput = {
-        active: true,
-        emailVerified: true, // Since they responded to email invitation
-      }
-
-      // Only update password if they don't have one (PIN-only users being upgraded)
-      if (!existingStaff.password && hashedPassword) {
-        updateData.password = hashedPassword
-      }
-
-      // Only update name if they don't have one set
-      if (!existingStaff.firstName && userData.firstName) {
-        updateData.firstName = userData.firstName
-      }
-      if (!existingStaff.lastName && userData.lastName) {
-        updateData.lastName = userData.lastName
-      }
-
-      staff = await tx.staff.update({
-        where: { id: existingStaff.id },
-        data: updateData,
       })
 
-      // If cross-org invitation, create StaffOrganization for the new org
-      if (isCrossOrgInvitation) {
-        // Use OWNER OrgRole if invitation role is OWNER, otherwise derive from existing roles
-        let orgRoleForCrossOrg: OrgRole = OrgRole.MEMBER
-        if (invitation.role === StaffRole.OWNER) {
-          orgRoleForCrossOrg = OrgRole.OWNER
-        } else {
-          const venueRoles = existingStaff.venues.map(v => v.role as StaffRole)
-          orgRoleForCrossOrg = venueRoles.includes(StaffRole.OWNER) || venueRoles.includes(StaffRole.ADMIN) ? OrgRole.ADMIN : OrgRole.MEMBER
-        }
-        await createStaffOrganizationMembership({
-          staffId: staff.id,
-          organizationId: invitation.organizationId,
-          role: orgRoleForCrossOrg,
-          isPrimary: false,
-          joinedById: invitation.invitedById ?? undefined,
-        })
+      if (!invitation) {
+        throw new AppError('Invitación no encontrada o ya utilizada', 404)
       }
 
-      logger.info('Existing staff member invited to new venue', {
-        staffId: staff.id,
-        email: staff.email,
-        newVenueId: invitation.venueId,
-        existingVenuesCount: existingStaff.venues.length,
-        isCrossOrgInvitation,
-      })
-    } else {
-      // Brand new user - require firstName, lastName, password
-      if (!userData.firstName || !userData.lastName || !hashedPassword) {
-        throw new AppError('Se requiere nombre, apellido y contrasena para crear una cuenta nueva', 400)
+      // Check if invitation is expired
+      if (new Date() > invitation.expiresAt) {
+        throw new AppError('La invitación ha expirado', 410)
       }
 
-      // Validate password format for NEW accounts only.
-      // Existing users verify via bcrypt compare, so format rules don't apply to them
-      // (their legacy password may not comply with current format requirements).
-      if (userData.password!.length < 8) {
-        throw new AppError('La contraseña debe tener al menos 8 caracteres', 400)
-      }
-      if (!/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/.test(userData.password!)) {
-        throw new AppError('La contraseña debe contener al menos una minúscula, una mayúscula y un número', 400)
+      // Enforce PIN requirement if set by inviter
+      if (invitation.requirePin && !userData.pin) {
+        throw new AppError('El PIN es requerido para esta invitación', 400)
       }
 
-      // Create staff record with all provided data
-      // IMPORTANT: Normalize email to lowercase for consistent login lookups
-      staff = await tx.staff.create({
-        data: {
-          id: uuidv4(),
+      // Check if user with this email already exists GLOBALLY
+      // Staff.email is globally unique - one person = one Staff account
+      // Use toLowerCase() for consistent case-insensitive email lookups
+      const existingStaff = await tx.staff.findUnique({
+        where: {
           email: invitation.email.toLowerCase(),
-          password: hashedPassword,
-          firstName: userData.firstName,
-          lastName: userData.lastName,
+        },
+        include: {
+          venues: {
+            where: {
+              active: true,
+            },
+          },
+          organizations: {
+            where: { isActive: true },
+            select: { organizationId: true },
+          },
+        },
+      })
+
+      // Multi-org support: Staff can belong to multiple organizations
+      // If user exists in a DIFFERENT organization, we create a new StaffOrganization membership
+      // If user exists in the SAME organization, we just add them to the new venue
+      const existingStaffOrgId = existingStaff?.organizations?.[0]?.organizationId
+      const isCrossOrgInvitation = existingStaff && existingStaffOrgId !== invitation.organizationId
+
+      // Validate PIN if provided (stored as PLAIN TEXT for fast TPV login)
+      // ⚠️ PIN is NOT hashed - auth.tpv.service.ts does plain text comparison
+      let validatedPin: string | null = null
+      if (userData.pin) {
+        // Check if PIN is already used in this venue (plain text comparison)
+        if (invitation.venueId) {
+          const existingPinUser = await tx.staffVenue.findFirst({
+            where: {
+              venueId: invitation.venueId,
+              pin: userData.pin, // Plain text comparison
+              active: true,
+            },
+          })
+
+          if (existingPinUser) {
+            throw new AppError('PIN no disponible. Por favor, elige otro diferente.', 409)
+          }
+        }
+
+        validatedPin = userData.pin // Store as plain text
+      }
+
+      // Create or reuse the staff record
+      let staff
+      if (existingStaff) {
+        // User already exists - verify password if they have one and one was provided
+        // This allows existing users to accept invitations by verifying their password
+        // instead of going through the full login flow (which fails if they have no active venues)
+        if (existingStaff.password && userData.password) {
+          const isPasswordValid = await bcrypt.compare(userData.password, existingStaff.password)
+          if (!isPasswordValid) {
+            throw new AppError('Contraseña incorrecta', 401)
+          }
+        } else if (existingStaff.password && !userData.password) {
+          // User has a password but didn't provide one - they need to verify
+          throw new AppError('Se requiere contraseña para verificar tu identidad', 400)
+        }
+
+        // User already exists in this organization
+        // DON'T overwrite their password or name - they already have valid credentials
+        // Just ensure they're active and verified
+        const updateData: Prisma.StaffUpdateInput = {
           active: true,
           emailVerified: true, // Since they responded to email invitation
-        },
-      })
+        }
 
-      // Create StaffOrganization membership for new staff
-      // Use OWNER OrgRole if invitation role is OWNER
-      const orgRoleForNewStaff = invitation.role === StaffRole.OWNER ? OrgRole.OWNER : OrgRole.MEMBER
-      await tx.staffOrganization.create({
-        data: {
-          staffId: staff.id,
-          organizationId: invitation.organizationId,
-          role: orgRoleForNewStaff,
-          isPrimary: true,
-          isActive: true,
-          joinedById: invitation.invitedById,
-        },
-      })
-    }
+        // Only update password if they don't have one (PIN-only users being upgraded)
+        if (!existingStaff.password && hashedPassword) {
+          updateData.password = hashedPassword
+        }
 
-    // Create the staff-venue relationship if venue is specified
-    if (invitation.venueId) {
-      // Check if invitation has inviteToAllVenues flag (for OWNER invitations)
-      const permissions = invitation.permissions as { inviteToAllVenues?: boolean } | null
-      const shouldInviteToAllVenues = permissions?.inviteToAllVenues === true
+        // Only update name if they don't have one set
+        if (!existingStaff.firstName && userData.firstName) {
+          updateData.firstName = userData.firstName
+        }
+        if (!existingStaff.lastName && userData.lastName) {
+          updateData.lastName = userData.lastName
+        }
 
-      // Get all venues for the organization if inviteToAllVenues is true
-      let venuesToAssign = [{ id: invitation.venueId }]
-      if (shouldInviteToAllVenues) {
-        const orgVenues = await tx.venue.findMany({
-          where: { organizationId: invitation.organizationId },
-          select: { id: true },
+        staff = await tx.staff.update({
+          where: { id: existingStaff.id },
+          data: updateData,
         })
-        venuesToAssign = orgVenues
-        logger.info('Assigning staff to all organization venues', {
-          staffId: staff.id,
-          organizationId: invitation.organizationId,
-          venueCount: orgVenues.length,
-        })
-      }
 
-      // Create StaffVenue for each venue
-      for (const v of venuesToAssign) {
-        const existingAssignment = await tx.staffVenue.findUnique({
-          where: {
-            staffId_venueId: {
-              staffId: staff.id,
-              venueId: v.id,
-            },
+        // If cross-org invitation, create StaffOrganization for the new org
+        if (isCrossOrgInvitation) {
+          // Use OWNER OrgRole if invitation role is OWNER, otherwise derive from existing roles
+          let orgRoleForCrossOrg: OrgRole = OrgRole.MEMBER
+          if (invitation.role === StaffRole.OWNER) {
+            orgRoleForCrossOrg = OrgRole.OWNER
+          } else {
+            const venueRoles = existingStaff.venues.map(v => v.role as StaffRole)
+            orgRoleForCrossOrg =
+              venueRoles.includes(StaffRole.OWNER) || venueRoles.includes(StaffRole.ADMIN) ? OrgRole.ADMIN : OrgRole.MEMBER
+          }
+          await createStaffOrganizationMembership({
+            staffId: staff.id,
+            organizationId: invitation.organizationId,
+            role: orgRoleForCrossOrg,
+            isPrimary: false,
+            joinedById: invitation.invitedById ?? undefined,
+          })
+        }
+
+        logger.info('Existing staff member invited to new venue', {
+          staffId: staff.id,
+          email: staff.email,
+          newVenueId: invitation.venueId,
+          existingVenuesCount: existingStaff.venues.length,
+          isCrossOrgInvitation,
+        })
+      } else {
+        // Brand new user - require firstName, lastName, password
+        if (!userData.firstName || !userData.lastName || !hashedPassword) {
+          throw new AppError('Se requiere nombre, apellido y contrasena para crear una cuenta nueva', 400)
+        }
+
+        // Validate password format for NEW accounts only.
+        // Existing users verify via bcrypt compare, so format rules don't apply to them
+        // (their legacy password may not comply with current format requirements).
+        if (userData.password!.length < 8) {
+          throw new AppError('La contraseña debe tener al menos 8 caracteres', 400)
+        }
+        if (!/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/.test(userData.password!)) {
+          throw new AppError('La contraseña debe contener al menos una minúscula, una mayúscula y un número', 400)
+        }
+
+        // Create staff record with all provided data
+        // IMPORTANT: Normalize email to lowercase for consistent login lookups
+        staff = await tx.staff.create({
+          data: {
+            id: uuidv4(),
+            email: invitation.email.toLowerCase(),
+            password: hashedPassword,
+            firstName: userData.firstName,
+            lastName: userData.lastName,
+            active: true,
+            emailVerified: true, // Since they responded to email invitation
           },
         })
 
-        if (existingAssignment) {
-          // Only upgrade role, never downgrade (protects existing higher-role assignments)
-          const effectiveRole =
-            ROLE_HIERARCHY[existingAssignment.role] > ROLE_HIERARCHY[invitation.role] ? existingAssignment.role : invitation.role
+        // Create StaffOrganization membership for new staff
+        // Use OWNER OrgRole if invitation role is OWNER
+        const orgRoleForNewStaff = invitation.role === StaffRole.OWNER ? OrgRole.OWNER : OrgRole.MEMBER
+        await tx.staffOrganization.create({
+          data: {
+            staffId: staff.id,
+            organizationId: invitation.organizationId,
+            role: orgRoleForNewStaff,
+            isPrimary: true,
+            isActive: true,
+            joinedById: invitation.invitedById,
+          },
+        })
+      }
 
-          // Update existing assignment
-          await tx.staffVenue.update({
-            where: { id: existingAssignment.id },
-            data: {
-              role: effectiveRole,
-              pin: v.id === invitation.venueId ? validatedPin : null, // PIN only for primary venue
-              active: true,
-              startDate: new Date(),
-            },
+      // Create the staff-venue relationship if venue is specified
+      if (invitation.venueId) {
+        // Check if invitation has inviteToAllVenues flag (for OWNER invitations)
+        const permissions = invitation.permissions as { inviteToAllVenues?: boolean } | null
+        const shouldInviteToAllVenues = permissions?.inviteToAllVenues === true
+
+        // Get all venues for the organization if inviteToAllVenues is true
+        let venuesToAssign = [{ id: invitation.venueId }]
+        if (shouldInviteToAllVenues) {
+          const orgVenues = await tx.venue.findMany({
+            where: { organizationId: invitation.organizationId },
+            select: { id: true },
           })
-        } else {
-          // Free-tier seat cap: enforce per target venue before adding a brand-new seat.
-          // Re-activating an existing assignment (the `if` branch above) is intentionally
-          // not blocked here. Exempt/paid venues are unlimited (no-op).
-          //
-          // Defense in depth on top of the send-time check. Cap usage = active seats +
-          // pending invitations; this invite is STILL PENDING right now (it's marked ACCEPTED
-          // below), so we EXCLUDE it from the pending count for the PRIMARY venue — otherwise
-          // it would be counted twice (once as a pending seat, once as the active seat it's
-          // about to become) and wrongly block the legitimate accept (off-by-one). For
-          // inviteToAllVenues fan-out, only the invitation's own venue carries that pending
-          // row, so the exclusion only applies there.
-          await assertCanAddSeat(v.id, v.id === invitation.venueId ? { excludeInvitationId: invitation.id } : {})
-
-          // Create new assignment
-          await tx.staffVenue.create({
-            data: {
-              staffId: staff.id,
-              venueId: v.id,
-              role: invitation.role,
-              pin: v.id === invitation.venueId ? validatedPin : null, // PIN only for primary venue
-              active: true,
-              startDate: new Date(),
-              totalSales: 0,
-              totalTips: 0,
-              averageRating: 0,
-              totalOrders: 0,
-            },
+          venuesToAssign = orgVenues
+          logger.info('Assigning staff to all organization venues', {
+            staffId: staff.id,
+            organizationId: invitation.organizationId,
+            venueCount: orgVenues.length,
           })
         }
+
+        const venueIds = venuesToAssign.map(v => v.id)
+
+        // Existence lookup for the whole set in ONE query (was one findUnique per venue — the
+        // fan-out's per-venue round-trips are what blew the transaction budget). Map by venueId so
+        // the loop below decides create-vs-update in memory.
+        const existingAssignments = await tx.staffVenue.findMany({
+          where: { staffId: staff.id, venueId: { in: venueIds } },
+        })
+        const existingByVenue = new Map(existingAssignments.map(a => [a.venueId, a]))
+
+        // Free-tier seat cap: enforce ONLY for venues that would get a BRAND-NEW seat (re-activating
+        // an existing assignment is intentionally not blocked). Exempt/paid venues are unlimited
+        // (no-op). One BULK check (≤4 queries for the whole set) replaces ~4 queries per venue.
+        //
+        // Defense in depth on top of the send-time check. Cap usage = active seats + pending
+        // invitations; this invite is STILL PENDING right now (it's marked ACCEPTED below), so for
+        // the PRIMARY venue we EXCLUDE it from the pending count — otherwise it would be counted
+        // twice (a pending seat AND the active seat it's about to become) and wrongly block the
+        // legitimate accept (off-by-one). For an inviteToAllVenues fan-out only the invitation's
+        // own venue carries that pending row, so the exclusion applies there only.
+        const newVenueIds = venueIds.filter(id => !existingByVenue.has(id))
+        if (newVenueIds.length > 0) {
+          await assertCanAddSeatsBulk(newVenueIds, { primaryVenueId: invitation.venueId, excludeInvitationId: invitation.id })
+        }
+
+        // Create / update StaffVenue for each venue (writes only — all reads/cap checks done above).
+        for (const v of venuesToAssign) {
+          const existingAssignment = existingByVenue.get(v.id)
+
+          if (existingAssignment) {
+            // Only upgrade role, never downgrade (protects existing higher-role assignments)
+            const effectiveRole =
+              ROLE_HIERARCHY[existingAssignment.role] > ROLE_HIERARCHY[invitation.role] ? existingAssignment.role : invitation.role
+
+            // Update existing assignment
+            await tx.staffVenue.update({
+              where: { id: existingAssignment.id },
+              data: {
+                role: effectiveRole,
+                pin: v.id === invitation.venueId ? validatedPin : null, // PIN only for primary venue
+                active: true,
+                startDate: new Date(),
+              },
+            })
+          } else {
+            // Create new assignment
+            await tx.staffVenue.create({
+              data: {
+                staffId: staff.id,
+                venueId: v.id,
+                role: invitation.role,
+                pin: v.id === invitation.venueId ? validatedPin : null, // PIN only for primary venue
+                active: true,
+                startDate: new Date(),
+                totalSales: 0,
+                totalTips: 0,
+                averageRating: 0,
+                totalOrders: 0,
+              },
+            })
+          }
+        }
       }
-    }
 
-    // Mark invitation as accepted
-    await tx.invitation.update({
-      where: { id: invitation.id },
-      data: {
-        status: InvitationStatus.ACCEPTED,
-        acceptedAt: new Date(),
-        acceptedById: staff.id,
-      },
-    })
-
-    // Generate tokens for immediate login
-    // We need a venue ID to generate access token, so we'll use the invitation venue or find user's first venue
-    let venueId = invitation.venueId
-    let role = invitation.role
-
-    if (!venueId) {
-      // If no specific venue, find user's first venue assignment
-      const firstVenueAssignment = await tx.staffVenue.findFirst({
-        where: { staffId: staff.id },
-        include: { venue: true },
+      // Mark invitation as accepted
+      await tx.invitation.update({
+        where: { id: invitation.id },
+        data: {
+          status: InvitationStatus.ACCEPTED,
+          acceptedAt: new Date(),
+          acceptedById: staff.id,
+        },
       })
 
-      if (firstVenueAssignment) {
-        venueId = firstVenueAssignment.venueId
-        role = firstVenueAssignment.role
+      // Generate tokens for immediate login
+      // We need a venue ID to generate access token, so we'll use the invitation venue or find user's first venue
+      let venueId = invitation.venueId
+      let role = invitation.role
+
+      if (!venueId) {
+        // If no specific venue, find user's first venue assignment
+        const firstVenueAssignment = await tx.staffVenue.findFirst({
+          where: { staffId: staff.id },
+          include: { venue: true },
+        })
+
+        if (firstVenueAssignment) {
+          venueId = firstVenueAssignment.venueId
+          role = firstVenueAssignment.role
+        }
       }
-    }
 
-    // Derive orgId from venue (preferred) or primary organization (fallback)
-    const orgId = venueId ? await getOrganizationIdFromVenue(venueId) : await getPrimaryOrganizationId(staff.id)
+      // Derive orgId from venue (preferred) or primary organization (fallback)
+      const orgId = venueId ? await getOrganizationIdFromVenue(venueId) : await getPrimaryOrganizationId(staff.id)
 
-    const tokens = {
-      accessToken: venueId ? generateAccessToken(staff.id, orgId, venueId, role) : null,
-      refreshToken: generateRefreshToken(staff.id, orgId),
-    }
+      const tokens = {
+        accessToken: venueId ? generateAccessToken(staff.id, orgId, venueId, role) : null,
+        refreshToken: generateRefreshToken(staff.id, orgId),
+      }
 
-    logger.info('Invitation accepted and user created', {
-      staffId: staff.id,
-      email: staff.email,
-      organizationId: invitation.organizationId,
-      venueId: invitation.venueId,
-      role: invitation.role,
-    })
-
-    // Capture for post-transaction activity log
-    acceptedVenueId = invitation.venueId
-    acceptedStaffId = staff.id
-    acceptedRole = invitation.role
-
-    return {
-      user: {
-        id: staff.id,
+      logger.info('Invitation accepted and user created', {
+        staffId: staff.id,
         email: staff.email,
-        firstName: staff.firstName,
-        lastName: staff.lastName,
         organizationId: invitation.organizationId,
-      },
-      tokens,
-    }
-  })
+        venueId: invitation.venueId,
+        role: invitation.role,
+      })
+
+      // Capture for post-transaction activity log
+      acceptedVenueId = invitation.venueId
+      acceptedStaffId = staff.id
+      acceptedRole = invitation.role
+
+      return {
+        user: {
+          id: staff.id,
+          email: staff.email,
+          firstName: staff.firstName,
+          lastName: staff.lastName,
+          organizationId: invitation.organizationId,
+        },
+        tokens,
+      }
+    },
+    {
+      maxWait: 10000, // wait up to 10s to acquire a pooled connection before giving up
+      timeout: 30000, // allow the multi-venue (inviteToAllVenues) fan-out to finish; default was 5s
+    },
+  )
 
   if (acceptedVenueId) {
     logAction({
