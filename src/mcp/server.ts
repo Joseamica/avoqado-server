@@ -39,11 +39,27 @@ import { registerAccountingTools } from './tools/accounting'
 import { registerActivityLogTools } from './tools/activity-log'
 import { registerCashOutTools } from './tools/cash-out'
 
+/**
+ * Server-level guidance the client (Claude/ChatGPT) hands to the model on every connection.
+ * Born from a real incident: an operator pasted a COMBINED external sales report (Avoqado POS +
+ * their own Stripe webpage + Fitpass) and the assistant summed the FILE and presented $461k as
+ * "Avoqado sales" — when Avoqado had actually recorded $125k. The tools were never called. These
+ * instructions make the live tools the source of truth and stop the assistant from trusting
+ * pasted numbers, while setting the correct expectation about what Avoqado can and cannot see.
+ */
+const AVOQADO_MCP_INSTRUCTIONS = `These tools expose the LIVE data of the operator's Avoqado venues and are the SOURCE OF TRUTH for what actually happened in Avoqado (sales, payments, orders, inventory, customers, reservations, CFDI…).
+
+When the operator asks about their real numbers:
+1. ALWAYS answer by CALLING these tools. Never compute the answer from a file, screenshot, export or figure the user pasted — that data may come from another system and be wrong for Avoqado.
+2. If the user provides a report/export/number, treat it as UNVERIFIED. Call the matching tool, compare, and explicitly FLAG any mismatch ("tu archivo dice X, pero en Avoqado son Y"). Never restate the file's numbers as if they were Avoqado's.
+3. SCOPE — say this when it matters: Avoqado only records money that flows THROUGH Avoqado (in-person POS terminal + cash, Avoqado payment links, Avoqado-processed card/CFDI). It does NOT see the venue's OTHER systems — their own Stripe webpage, Fitpass, other apps. So a combined/external report is normally LARGER than Avoqado and will NOT reconcile; that is expected, not a data error.
+4. Money is Mexican pesos in major units (e.g. 150.50, never cents). Dates are venue-local (America/Mexico_City).`
+
 /** Build a per-request MCP server bound to the caller's resolved scope. */
 async function buildServerForIdentity(staffId: string, activeOrg: string): Promise<McpServer> {
   const scope = await resolveScope(staffId, activeOrg)
 
-  const server = new McpServer({ name: 'avoqado-customer-mcp', version: '0.1.0' })
+  const server = new McpServer({ name: 'avoqado-customer-mcp', version: '0.1.0' }, { instructions: AVOQADO_MCP_INSTRUCTIONS })
   instrumentTools(server, { staffId, org: activeOrg }) // log every tool call (must run BEFORE registering tools)
   registerVenueTools(server, scope)
   registerSalesTools(server, scope)
