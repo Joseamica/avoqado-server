@@ -1,7 +1,7 @@
 import { InvitationStatus, StaffRole } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { ForbiddenError } from '@/errors/AppError'
-import { getVenueBaseTier } from './basePlan.service'
+import { getVenueBaseTier, PAID_PLAN_TIER_CODES } from './basePlan.service'
 
 /**
  * Free-plan seat cap.
@@ -153,4 +153,97 @@ export async function assertCanAddSeat(venueId: string, opts: SeatCheckOptions =
       `Mejora a Pro para agregar usuarios ilimitados.`,
     SEAT_CAP_REACHED_CODE,
   )
+}
+
+/** The Free-tier seat-cap exhaustion message (also used by the bulk path). */
+const seatCapReachedMessage =
+  `Llegaste al límite de ${FREE_TIER_SEAT_CAP} usuarios del plan Gratis (incluye invitaciones pendientes). ` +
+  `Mejora a Pro para agregar usuarios ilimitados.`
+
+/**
+ * BATCH counterpart to {@link assertCanAddSeat}: throws a 403 {@link ForbiddenError}
+ * (code {@link SEAT_CAP_REACHED_CODE}) if ANY venue in `venueIds` is at/over its Free-tier
+ * seat cap (active seats + outstanding pending invitations). No-op for exempt (grandfathered)
+ * and paid (PLAN_PRO / PLAN_PREMIUM) venues, and for Free venues still under the cap.
+ *
+ * Mirrors {@link getVenueSeatCap} + {@link canAddSeat} semantics EXACTLY, but resolves the whole
+ * set in a small CONSTANT number of queries (≤4 regardless of N) instead of ~4 per venue. This is
+ * what lets an OWNER `inviteToAllVenues` fan-out across a large org (PlayTelecom, 40 venues) run
+ * its accept transaction in O(1) round-trips instead of ~4N — the per-venue sequential reads blew
+ * Prisma's interactive-transaction timeout and threw P2028 (prod incident 2026-06-30).
+ *
+ * Short-circuits: an org whose venues are all exempt (grandfathered) returns after ONE query.
+ *
+ * `primaryVenueId` + `excludeInvitationId` reproduce the single-venue off-by-one guard: the invite
+ * being accepted is still PENDING and reserves a seat ONLY on its own (primary) venue, so for THAT
+ * venue its own pending row is excluded from the count (it's about to BECOME the active seat).
+ * The other fan-out venues carry no pending row for this invite, so no exclusion applies there.
+ */
+export async function assertCanAddSeatsBulk(
+  venueIds: string[],
+  opts: { primaryVenueId?: string; excludeInvitationId?: string } = {},
+): Promise<void> {
+  if (venueIds.length === 0) return
+  const ids = [...new Set(venueIds)]
+  const now = new Date()
+  const activeWindow = { active: true, suspendedAt: null, OR: [{ endDate: null }, { endDate: { gte: now } }] }
+
+  // 1. Exempt (grandfathered) venues → unlimited (cap null). Unknown venues → fail open (no cap),
+  //    same as getVenueSeatCap. Candidates that could still be capped: known AND not exempt.
+  const venues = await prisma.venue.findMany({ where: { id: { in: ids } }, select: { id: true, seatCapExempt: true } })
+  const known = new Map(venues.map(v => [v.id, v]))
+  let capped = ids.filter(id => known.has(id) && known.get(id)!.seatCapExempt !== true)
+  if (capped.length === 0) return // all exempt/unknown → nothing to enforce (the PlayTelecom short-circuit)
+
+  // 2. Paid base plan (PLAN_PRO / PLAN_PREMIUM in the active window) → unlimited. Drop from candidates.
+  const paidRows = await prisma.venueFeature.findMany({
+    where: { venueId: { in: capped }, feature: { code: { in: [...PAID_PLAN_TIER_CODES] } }, ...activeWindow },
+    select: { venueId: true },
+  })
+  const paid = new Set(paidRows.map(r => r.venueId))
+  capped = capped.filter(id => !paid.has(id))
+  if (capped.length === 0) return // every remaining candidate has a paid plan → unlimited
+
+  // 3. Remaining candidates are Free-tier (cap = FREE_TIER_SEAT_CAP). Count active seats + pending
+  //    invites per venue in two grouped queries (same predicates as getActiveSeatCount /
+  //    getPendingInvitationCount), then enforce.
+  const [activeRows, pendingRows] = await Promise.all([
+    prisma.staffVenue.groupBy({
+      by: ['venueId'],
+      where: { venueId: { in: capped }, active: true, role: { not: StaffRole.SUPERADMIN } },
+      _count: { _all: true },
+    }),
+    prisma.invitation.groupBy({
+      by: ['venueId'],
+      where: { venueId: { in: capped }, status: InvitationStatus.PENDING, expiresAt: { gt: now }, role: { not: StaffRole.SUPERADMIN } },
+      _count: { _all: true },
+    }),
+  ])
+  const activeByVenue = new Map(activeRows.map(r => [r.venueId, r._count._all]))
+  const pendingByVenue = new Map(pendingRows.map(r => [r.venueId, r._count._all]))
+
+  // Off-by-one: exclude the invite being accepted from its primary venue's pending count (only
+  // that venue carries this invite's pending row). One extra count, ONLY when the primary venue
+  // is itself a Free-tier capped candidate (rare — owner fan-outs are usually paid/exempt orgs).
+  if (opts.primaryVenueId && opts.excludeInvitationId && capped.includes(opts.primaryVenueId)) {
+    pendingByVenue.set(
+      opts.primaryVenueId,
+      await prisma.invitation.count({
+        where: {
+          venueId: opts.primaryVenueId,
+          status: InvitationStatus.PENDING,
+          expiresAt: { gt: now },
+          role: { not: StaffRole.SUPERADMIN },
+          id: { not: opts.excludeInvitationId },
+        },
+      }),
+    )
+  }
+
+  for (const id of capped) {
+    const current = (activeByVenue.get(id) ?? 0) + (pendingByVenue.get(id) ?? 0)
+    if (current >= FREE_TIER_SEAT_CAP) {
+      throw new ForbiddenError(seatCapReachedMessage, SEAT_CAP_REACHED_CODE)
+    }
+  }
 }

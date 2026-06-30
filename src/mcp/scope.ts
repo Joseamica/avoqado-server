@@ -74,14 +74,26 @@ export async function resolveScope(staffId: string, activeOrg: string): Promise<
     venueIds = assignments.map(a => a.venueId)
   }
 
+  // Resolve per-venue access CONCURRENTLY (bounded). This used to be a sequential
+  // `for ... await getUserAccess()` loop — O(venues) and the heaviest part of the connect,
+  // which runs on EVERY MCP request. An org OWNER with many venues (e.g. 40) took ~45s,
+  // blowing the MCP client's connect timeout ("authorized but error connecting"). Cap the
+  // fan-out so we never exhaust the Prisma pool. Same per-venue semantics as before.
   const cache = createAccessCache()
   const perVenueAccess = new Map<string, UserAccess>()
-  for (const venueId of venueIds) {
-    try {
-      perVenueAccess.set(venueId, await getUserAccess(staffId, venueId, cache))
-    } catch {
-      // getUserAccess throws when the staff has no access to that venue — skip defensively.
-    }
+  const CONCURRENCY = 12
+  for (let i = 0; i < venueIds.length; i += CONCURRENCY) {
+    const batch = await Promise.all(
+      venueIds.slice(i, i + CONCURRENCY).map(async venueId => {
+        try {
+          return [venueId, await getUserAccess(staffId, venueId, cache)] as const
+        } catch {
+          // getUserAccess throws when the staff has no access to that venue — skip defensively.
+          return null
+        }
+      }),
+    )
+    for (const entry of batch) if (entry) perVenueAccess.set(entry[0], entry[1])
   }
   return { staffId, activeOrg, allowedVenueIds: [...perVenueAccess.keys()], perVenueAccess }
 }

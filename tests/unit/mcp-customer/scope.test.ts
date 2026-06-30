@@ -1,5 +1,6 @@
 import { resolveScope } from '../../../src/mcp/scope'
 import prisma from '@/utils/prismaClient'
+import { getUserAccess } from '@/services/access/access.service'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -19,11 +20,13 @@ const m = prisma as unknown as {
   venue: { findMany: jest.Mock }
   staffVenue: { findMany: jest.Mock; findFirst: jest.Mock }
 }
+const mockGetUserAccess = getUserAccess as jest.Mock
 
 describe('resolveScope', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     m.staffVenue.findFirst.mockResolvedValue(null) // default: NOT a platform superadmin
+    mockGetUserAccess.mockImplementation(async (_s: string, venueId: string) => ({ venueId, corePermissions: ['venue:read'] }))
   })
 
   it('platform SUPERADMIN -> ALL venues across ALL orgs, wildcard access, isSuperAdmin', async () => {
@@ -83,5 +86,27 @@ describe('resolveScope', () => {
     const scope = await resolveScope('revoked', 'org-1')
     expect(scope.allowedVenueIds).toEqual([])
     expect(m.staffVenue.findMany).not.toHaveBeenCalled()
+  })
+
+  // Perf-fix regression guards: per-venue access is resolved CONCURRENTLY in bounded batches
+  // (was a sequential await-loop → ~45s for an owner with 40 venues → MCP connect timeout).
+  it('org OWNER with MANY venues -> ALL resolve across concurrency batches', async () => {
+    m.staffOrganization.findUnique.mockResolvedValue({ role: 'OWNER', isActive: true })
+    m.venue.findMany.mockResolvedValue(Array.from({ length: 40 }, (_, i) => ({ id: `V${i}` })))
+    const scope = await resolveScope('owner', 'org-1')
+    expect(scope.allowedVenueIds).toHaveLength(40)
+    expect(scope.perVenueAccess.size).toBe(40)
+    expect(mockGetUserAccess).toHaveBeenCalledTimes(40) // one per venue, just batched not serial
+  })
+
+  it('a per-venue access failure is isolated (skipped, not fatal to the whole scope)', async () => {
+    m.staffOrganization.findUnique.mockResolvedValue({ role: 'OWNER', isActive: true })
+    m.venue.findMany.mockResolvedValue([{ id: 'A' }, { id: 'B' }, { id: 'C' }])
+    mockGetUserAccess.mockImplementation(async (_s: string, venueId: string) => {
+      if (venueId === 'B') throw new Error('no access to this venue')
+      return { venueId, corePermissions: ['venue:read'] }
+    })
+    const scope = await resolveScope('owner', 'org-1')
+    expect(scope.allowedVenueIds.sort()).toEqual(['A', 'C']) // B skipped, A + C still resolved
   })
 })

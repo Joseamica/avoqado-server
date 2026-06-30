@@ -106,7 +106,7 @@ jest.mock('../../../src/utils/prismaClient', () => ({
 // about multi-venue PIN/role behavior, not the cap. Stub assertCanAddSeat to a no-op —
 // the Free-tier cap is covered by seatCap.service.test.ts + team.seatCap.test.ts.
 jest.mock('../../../src/services/access/seatCap.service', () => ({
-  assertCanAddSeat: jest.fn().mockResolvedValue(undefined),
+  assertCanAddSeatsBulk: jest.fn().mockResolvedValue(undefined),
 }))
 
 // Import after mocks
@@ -146,6 +146,10 @@ describe('Multi-Venue Invitation Flow', () => {
     mockPrismaClient.$transaction.mockImplementation(async (callback: any) => {
       return callback(mockPrismaClient)
     })
+
+    // Batched existence lookup: default to "no existing assignment" (create path). The re-invite
+    // scenario overrides this to return the existing StaffVenue (update path).
+    mockPrismaClient.staffVenue.findMany.mockResolvedValue([])
   })
 
   describe('Scenario 1: New user invited to a venue', () => {
@@ -566,14 +570,17 @@ describe('Multi-Venue Invitation Flow', () => {
       // Mock venue lookup for token generation
       mockPrismaClient.venue.findUnique.mockResolvedValue({ organizationId: org1Id })
 
-      // StaffVenue EXISTS for this venue
-      mockPrismaClient.staffVenue.findUnique.mockResolvedValue({
+      // StaffVenue EXISTS for this venue — the batched existence lookup returns it so the accept
+      // takes the UPDATE path (role upgrade) instead of creating a duplicate.
+      const existingAssignment = {
         id: existingAssignmentId,
         staffId: existingUserId,
         venueId: venueAId,
         role: StaffRole.WAITER,
         active: true,
-      })
+      }
+      mockPrismaClient.staffVenue.findUnique.mockResolvedValue(existingAssignment)
+      mockPrismaClient.staffVenue.findMany.mockResolvedValue([existingAssignment])
 
       // Mock StaffVenue update
       mockPrismaClient.staffVenue.update.mockResolvedValue({

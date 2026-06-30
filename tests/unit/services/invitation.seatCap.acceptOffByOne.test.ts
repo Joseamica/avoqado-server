@@ -51,8 +51,9 @@ jest.mock('../../../src/utils/prismaClient', () => ({
           }),
         },
         staffVenue: {
-          findUnique: jest.fn().mockResolvedValue(null), // no existing assignment → new seat (cap checked)
+          findUnique: jest.fn().mockResolvedValue(null),
           findFirst: jest.fn().mockResolvedValue(null),
+          findMany: jest.fn().mockResolvedValue([]), // no existing assignment → new seat (cap checked)
           create: jest.fn().mockResolvedValue({}),
         },
         staffOrganization: {
@@ -85,11 +86,11 @@ jest.mock('../../../src/services/staffOrganization.service', () => ({
   getOrganizationIdFromVenue: jest.fn().mockResolvedValue('org-1'),
 }))
 
-// Spy on assertCanAddSeat so we can assert HOW the accept flow calls it (no-op so the accept
+// Spy on assertCanAddSeatsBulk so we can assert HOW the accept flow calls it (no-op so the accept
 // itself proceeds — proves a legit accept is not blocked).
-const assertCanAddSeat = jest.fn().mockResolvedValue(undefined)
+const assertCanAddSeatsBulk = jest.fn().mockResolvedValue(undefined)
 jest.mock('../../../src/services/access/seatCap.service', () => ({
-  assertCanAddSeat,
+  assertCanAddSeatsBulk,
 }))
 
 import { acceptInvitation } from '../../../src/services/invitation.service'
@@ -107,7 +108,11 @@ describe('acceptInvitation — accept-time seat-cap off-by-one guard', () => {
     // The accept succeeded (a legit accept is NOT wrongly blocked).
     expect(result.user.id).toBe('new-staff-1')
 
-    // The cap check ran for the target venue, EXCLUDING the very invite being accepted.
-    expect(assertCanAddSeat).toHaveBeenCalledWith('venue-1', { excludeInvitationId: 'inv-accept-1' })
+    // The bulk cap check ran for the target venue, with the primary venue EXCLUDING the very invite
+    // being accepted from its pending count (off-by-one guard).
+    expect(assertCanAddSeatsBulk).toHaveBeenCalledWith(['venue-1'], {
+      primaryVenueId: 'venue-1',
+      excludeInvitationId: 'inv-accept-1',
+    })
   })
 })

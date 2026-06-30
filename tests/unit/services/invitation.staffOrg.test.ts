@@ -49,6 +49,7 @@ jest.mock('../../../src/utils/prismaClient', () => ({
         staffVenue: {
           findUnique: jest.fn().mockResolvedValue(null),
           findFirst: jest.fn().mockResolvedValue(null),
+          findMany: jest.fn().mockResolvedValue([]),
           create: jest.fn().mockResolvedValue({}),
         },
         staffOrganization: {
@@ -92,7 +93,7 @@ jest.mock('../../../src/services/staffOrganization.service', () => ({
 // stubs $transaction (no top-level venue/staffVenue). Stub assertCanAddSeat to a no-op —
 // the Free-tier cap itself is covered by seatCap.service.test.ts + team.seatCap.test.ts.
 jest.mock('../../../src/services/access/seatCap.service', () => ({
-  assertCanAddSeat: jest.fn().mockResolvedValue(undefined),
+  assertCanAddSeatsBulk: jest.fn().mockResolvedValue(undefined),
 }))
 
 import { acceptInvitation } from '../../../src/services/invitation.service'

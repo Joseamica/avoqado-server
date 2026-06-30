@@ -3,6 +3,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import type { Request, Response } from 'express'
 import { verifyMcpToken } from './mcpToken'
 import { resolveScope } from './scope'
+import logger from '@/config/logger'
 import { instrumentTools } from './instrument'
 import { registerVenueTools } from './tools/venues'
 import { registerSalesTools } from './tools/sales'
@@ -106,7 +107,14 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
     })
     await server.connect(transport)
     await transport.handleRequest(req, res, req.body)
-  } catch {
-    if (!res.headersSent) res.status(401).json({ error: 'unauthorized' })
+  } catch (err) {
+    // The old bare `catch {}` swallowed EVERY error as a silent 401 — which made connect
+    // failures invisible (a bad token and a server-side error looked identical). Log it, and
+    // return 401 only for genuine auth failures; everything else (scope resolution, DB,
+    // transport) is a 500 so the client doesn't get stuck re-authenticating against a server bug.
+    const message = (err as Error)?.message ?? String(err)
+    const isAuth = /token|unauthorized|audience|expired|jwt|invalid_grant/i.test(message)
+    logger.error('[MCP] connect failed', { mcp: true, status: isAuth ? 401 : 500, message })
+    if (!res.headersSent) res.status(isAuth ? 401 : 500).json({ error: isAuth ? 'unauthorized' : 'server_error' })
   }
 }
