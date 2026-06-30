@@ -22,17 +22,25 @@ import { SocketEventType } from '../../communication/sockets/types'
 
 const VENUE_TIMEZONE_DEFAULT = 'America/Mexico_City'
 
-// SIM-type buckets for the org Ventas tables/charts. The 3 fixed names are
-// tenant data (confirmed against PlayTelecom's ItemCategory records); everything
-// else — incl. "E-SIM de promotor", null, legacy "Otro" — collapses to "Otros SIMs"
-// so row sums always reconcile with the weekly total.
-export type SimBucket = 'SIM de Intercambio' | '$100 de Promotor' | 'SIM de Evento' | 'Otros SIMs'
+// SIM-type buckets for the org Ventas tables/charts. Names are tenant data
+// (confirmed against PlayTelecom's ItemCategory records). The 3 exact buckets +
+// "e-SIM" (matched by substring, like the rest of the backend's eSIM detection)
+// are always-present rows; everything else — null, legacy "Otro", the "de caja"
+// family, etc. — collapses to "Otros SIMs" so row sums always reconcile with the
+// weekly total. eSIM was split out of "Otros SIMs" on Isaac's request (2026-06-30).
+export type SimBucket = 'SIM de Intercambio' | '$100 de Promotor' | 'SIM de Evento' | 'e-SIM' | 'Otros SIMs'
 export const SIM_OTHERS: SimBucket = 'Otros SIMs'
-export const SIM_FIXED_BUCKETS: readonly SimBucket[] = ['SIM de Intercambio', '$100 de Promotor', 'SIM de Evento']
+/** Exact-name buckets (matched verbatim, case/space-insensitive). */
+const SIM_EXACT_BUCKETS = ['SIM de Intercambio', '$100 de Promotor', 'SIM de Evento'] as const
+/** Display/row order for the SIM-type tables: 3 exact + e-SIM ("Otros SIMs" appended last when > 0). */
+export const SIM_FIXED_BUCKETS: readonly SimBucket[] = [...SIM_EXACT_BUCKETS, 'e-SIM']
 
 export function toSimBucket(categoryName: string | null | undefined): SimBucket {
   const n = (categoryName ?? '').trim().toLowerCase()
-  return SIM_FIXED_BUCKETS.find(b => b.toLowerCase() === n) ?? SIM_OTHERS
+  // eSIM by substring ("E-SIM de promotor" and any e-sim/esim variant), matching how
+  // the rest of the backend detects eSIMs.
+  if (n.includes('e-sim') || n.includes('esim')) return 'e-SIM'
+  return SIM_EXACT_BUCKETS.find(b => b.toLowerCase() === n) ?? SIM_OTHERS
 }
 
 export interface OrgSaleListFilters {

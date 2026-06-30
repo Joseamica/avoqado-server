@@ -39,7 +39,7 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
       groupBy: z
         .enum(['summary', 'month', 'city', 'store', 'supervisor', 'promoter', 'promoterDaily', 'saleTypeWeekly', 'simTypeWeekly'])
         .describe(
-          'Aggregation: summary KPIs; confirmed sales by month / city / store / supervisor / promoter / promoterDaily; or WEEKLY tables saleTypeWeekly (Líneas Nuevas vs Portabilidades) and simTypeWeekly (SIM de Intercambio / $100 de Promotor / SIM de Evento / Otros SIMs)',
+          'Aggregation: summary KPIs; confirmed sales by month / city / store / supervisor / promoter / promoterDaily; or WEEKLY tables saleTypeWeekly (Líneas Nuevas vs Portabilidades) and simTypeWeekly (SIM de Intercambio / $100 de Promotor / SIM de Evento / e-SIM / Otros SIMs)',
         ),
       fromDate: z
         .string()

@@ -276,10 +276,15 @@ describe('toSimBucket', () => {
   it('is trim/case-insensitive', () => {
     expect(toSimBucket('  sim de intercambio ')).toBe('SIM de Intercambio')
   })
-  it('routes E-SIM de promotor, null and unknowns to "Otros SIMs"', () => {
-    expect(toSimBucket('E-SIM de promotor')).toBe('Otros SIMs')
+  it('routes eSIM categories to "e-SIM" via substring match', () => {
+    expect(toSimBucket('E-SIM de promotor')).toBe('e-SIM')
+    expect(toSimBucket('eSIM')).toBe('e-SIM')
+    expect(toSimBucket('E-Sim Telcel')).toBe('e-SIM')
+  })
+  it('routes null and unknown categories (incl. "de caja") to "Otros SIMs"', () => {
     expect(toSimBucket(null)).toBe('Otros SIMs')
     expect(toSimBucket('Cualquier otra')).toBe('Otros SIMs')
+    expect(toSimBucket('$40 de caja')).toBe('Otros SIMs')
   })
 })
 
@@ -333,25 +338,27 @@ describe('getSalesBySimTypeWeekly', () => {
     payment: { order: { items: name === null ? [] : [{ serializedItem: { category: { name } } }] } },
   })
 
-  it('groups by SIM bucket per week; 3 fixed always present; Otros only when > 0', async () => {
+  it('groups by SIM bucket per week; fixed rows (incl. e-SIM) always present; Otros only when > 0', async () => {
     mockedSvFindMany.mockResolvedValue([
       { createdAt: w11, ...cat('SIM de Intercambio') },
       { createdAt: w11, ...cat('SIM de Intercambio') },
       { createdAt: w11, ...cat('SIM de Evento') },
-      { createdAt: w11, ...cat('E-SIM de promotor') }, // → Otros SIMs
+      { createdAt: w11, ...cat('E-SIM de promotor') }, // → e-SIM (its own row)
+      { createdAt: w11, ...cat('$40 de caja') }, // → Otros SIMs
     ])
     const rows = await getSalesBySimTypeWeekly(ORG_ID, {})
-    expect(rows.map(r => r.name)).toEqual(['SIM de Intercambio', '$100 de Promotor', 'SIM de Evento', 'Otros SIMs'])
+    expect(rows.map(r => r.name)).toEqual(['SIM de Intercambio', '$100 de Promotor', 'SIM de Evento', 'e-SIM', 'Otros SIMs'])
     expect(rows[0]).toMatchObject({ total: 2, byWeek: { '2026-W11': 2 } })
-    expect(rows[1]).toMatchObject({ total: 0, byWeek: {} }) // $100 fixed, zero, still present
-    expect(rows[2]).toMatchObject({ total: 1 })
-    expect(rows[3]).toMatchObject({ name: 'Otros SIMs', total: 1 })
+    expect(rows[1]).toMatchObject({ name: '$100 de Promotor', total: 0, byWeek: {} }) // fixed, zero, still present
+    expect(rows[2]).toMatchObject({ name: 'SIM de Evento', total: 1 })
+    expect(rows[3]).toMatchObject({ name: 'e-SIM', total: 1 })
+    expect(rows[4]).toMatchObject({ name: 'Otros SIMs', total: 1 })
   })
 
   it('omits "Otros SIMs" when every sale is a fixed category', async () => {
     mockedSvFindMany.mockResolvedValue([{ createdAt: w11, ...cat('$100 de Promotor') }])
     const rows = await getSalesBySimTypeWeekly(ORG_ID, {})
-    expect(rows.map(r => r.name)).toEqual(['SIM de Intercambio', '$100 de Promotor', 'SIM de Evento'])
+    expect(rows.map(r => r.name)).toEqual(['SIM de Intercambio', '$100 de Promotor', 'SIM de Evento', 'e-SIM'])
   })
 
   it('treats a sale with no serialized item as Otros SIMs', async () => {
@@ -373,7 +380,7 @@ describe('weekly tables reconcile with the weekly bar', () => {
     const dataset = [
       { createdAt: new Date(W11), isPortabilidad: false, ...c('SIM de Intercambio') },
       { createdAt: new Date(W11), isPortabilidad: true, ...c('SIM de Evento') },
-      { createdAt: new Date(W11), isPortabilidad: false, ...c('E-SIM de promotor') }, // → Otros SIMs
+      { createdAt: new Date(W11), isPortabilidad: false, ...c('E-SIM de promotor') }, // → e-SIM
       { createdAt: new Date(W12), isPortabilidad: true, ...c('$100 de Promotor') },
     ]
     // All three functions share the same COMPLETED base query — one mock feeds all.
@@ -405,7 +412,7 @@ describe('weekly tables reconcile with the weekly bar', () => {
 })
 
 describe('getSalesBySimType — regrouped into SIM buckets', () => {
-  it('collapses raw categories into the 3 fixed + Otros SIMs', async () => {
+  it('collapses raw categories into the fixed buckets (incl. e-SIM) + Otros SIMs', async () => {
     mockedSvFindMany.mockResolvedValue([
       {
         createdAt: new Date('2026-03-15T18:00:00Z'),
@@ -418,7 +425,7 @@ describe('getSalesBySimType — regrouped into SIM buckets', () => {
     ])
     const rows = await getSalesBySimType(ORG_ID, {})
     expect(rows).toHaveLength(1)
-    expect(rows[0].byCategory).toEqual({ 'SIM de Intercambio': 1, 'Otros SIMs': 1 })
+    expect(rows[0].byCategory).toEqual({ 'SIM de Intercambio': 1, 'e-SIM': 1 })
     expect(rows[0].total).toBe(2)
   })
 
