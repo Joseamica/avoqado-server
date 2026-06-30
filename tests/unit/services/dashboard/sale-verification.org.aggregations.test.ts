@@ -329,7 +329,9 @@ describe('toIsoWeekKey (via getSalesBySaleTypeWeekly week keys)', () => {
 
 describe('getSalesBySimTypeWeekly', () => {
   const w11 = new Date('2026-03-09T18:00:00Z') // 2026-W11
-  const cat = (name: string | null) => ({ payment: { order: { items: name === null ? [] : [{ serializedItem: { category: { name } } }] } } })
+  const cat = (name: string | null) => ({
+    payment: { order: { items: name === null ? [] : [{ serializedItem: { category: { name } } }] } },
+  })
 
   it('groups by SIM bucket per week; 3 fixed always present; Otros only when > 0', async () => {
     mockedSvFindMany.mockResolvedValue([
@@ -435,7 +437,7 @@ describe('parseRange — rejects malformed dates without breaking the venue-tz c
   it('ignores a non-date string instead of yielding an Invalid Date (was a Prisma 500)', () => {
     expect(parseRange('notadate', undefined)).toEqual({})
     expect(parseRange(undefined, 'garbage')).toEqual({})
-    expect(parseRange("'; DROP TABLE \"Payment\"--", undefined)).toEqual({})
+    expect(parseRange('\'; DROP TABLE "Payment"--', undefined)).toEqual({})
   })
 
   it('ignores well-shaped but impossible dates (2026-13-99, 0000-00-00)', () => {

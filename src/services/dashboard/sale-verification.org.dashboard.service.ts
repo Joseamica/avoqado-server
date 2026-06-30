@@ -564,7 +564,10 @@ export async function getSalesBySimTypeWeekly(
   const acc = new Map<SimBucket, { byWeek: Record<string, number>; total: number }>()
   const ensure = (b: SimBucket) => {
     let r = acc.get(b)
-    if (!r) { r = { byWeek: {}, total: 0 }; acc.set(b, r) }
+    if (!r) {
+      r = { byWeek: {}, total: 0 }
+      acc.set(b, r)
+    }
     return r
   }
   for (const b of SIM_FIXED_BUCKETS) ensure(b) // fixed rows always present
