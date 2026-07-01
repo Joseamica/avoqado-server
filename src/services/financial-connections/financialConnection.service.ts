@@ -66,72 +66,145 @@ export async function startConnection(input: {
   })
   const deviceIdentifier = stableDeviceId(conn.id)
   const client = clientFor(provider.code)
-  const r = await client.connect({ email: input.email, password: input.password, deviceIdentifier })
+  // Todo el cuerpo vive en un solo try (en vez de declarar `let r` afuera y
+  // asignarlo adentro) para que la compilación pueda angostar `r.kind` sin
+  // cruzar el límite del try/catch — la separación causó un bug real de
+  // narrowing en la Tarea 11 (ver scripts/test-external-bank-balance.ts).
+  try {
+    const r = await client.connect({ email: input.email, password: input.password, deviceIdentifier })
 
-  if (r.kind === 'need_two_factor_auth') {
+    await logAction({
+      staffId: input.staffId ?? null,
+      venueId: input.venueId,
+      action: 'FINANCIAL_CONNECTION_STARTED',
+      entity: 'FinancialConnection',
+      entityId: conn.id,
+      data: { provider: provider.code, outcome: r.kind },
+    })
+
+    if (r.kind === 'need_two_factor_auth') {
+      await prisma.financialConnection.update({
+        where: { id: conn.id },
+        data: {
+          deviceIdentifier,
+          challengeEnc: encryptGrant({ accessToken: r.challenge.accessToken, email: input.email, password: input.password }),
+          challengeExpiresAt: new Date(Date.now() + CHALLENGE_TTL_MS),
+          status: 'PENDING_TWO_FACTOR_AUTH',
+        },
+      })
+      return { connectionId: conn.id, status: 'PENDING_TWO_FACTOR_AUTH' as const }
+    }
+    if (r.kind === 'need_device_validation') {
+      await prisma.financialConnection.update({
+        where: { id: conn.id },
+        data: {
+          deviceIdentifier,
+          challengeEnc: encryptGrant({ ...r.challenge, email: input.email, password: input.password }),
+          challengeExpiresAt: new Date(Date.now() + CHALLENGE_TTL_MS),
+          status: 'PENDING_DEVICE_VALIDATION',
+        },
+      })
+      return { connectionId: conn.id, status: 'PENDING_DEVICE_VALIDATION' as const }
+    }
+    return await finishConnected(conn.id, deviceIdentifier, r.grant, r.accounts)
+  } catch (e) {
+    // Sin esto, un connect() fallido (credenciales incorrectas, red) deja la fila
+    // recién creada huérfana en PENDING_DEVICE_VALIDATION para siempre, sin pista
+    // de qué pasó. Se marca ERROR con el motivo y se relanza para que el
+    // controller siga respondiendo 400 igual que antes.
     await prisma.financialConnection.update({
       where: { id: conn.id },
-      data: {
-        deviceIdentifier,
-        challengeEnc: encryptGrant({ accessToken: r.challenge.accessToken, email: input.email, password: input.password }),
-        challengeExpiresAt: new Date(Date.now() + CHALLENGE_TTL_MS),
-        status: 'PENDING_TWO_FACTOR_AUTH',
-      },
+      data: { status: 'ERROR', lastError: (e as Error).message },
     })
-    return { connectionId: conn.id, status: 'PENDING_TWO_FACTOR_AUTH' as const }
-  }
-  if (r.kind === 'need_device_validation') {
-    await prisma.financialConnection.update({
-      where: { id: conn.id },
-      data: {
-        deviceIdentifier,
-        challengeEnc: encryptGrant({ ...r.challenge, email: input.email, password: input.password }),
-        challengeExpiresAt: new Date(Date.now() + CHALLENGE_TTL_MS),
-        status: 'PENDING_DEVICE_VALIDATION',
-      },
+    await logAction({
+      staffId: input.staffId ?? null,
+      venueId: input.venueId,
+      action: 'FINANCIAL_CONNECTION_FAILED',
+      entity: 'FinancialConnection',
+      entityId: conn.id,
+      data: { provider: provider.code, step: 'connect', error: (e as Error).message },
     })
-    return { connectionId: conn.id, status: 'PENDING_DEVICE_VALIDATION' as const }
+    throw e
   }
-  return finishConnected(conn.id, deviceIdentifier, r.grant, r.accounts)
 }
 
-export async function validateDevice(connectionId: string, code: string): Promise<ConnectionStepResult> {
+export async function validateDevice(connectionId: string, code: string, staffId?: string): Promise<ConnectionStepResult> {
   const conn = await prisma.financialConnection.findUniqueOrThrow({ where: { id: connectionId }, include: { provider: true } })
-  if (!conn.challengeEnc || !conn.challengeExpiresAt || conn.challengeExpiresAt < new Date()) {
-    throw new BadRequestError('El reto de validación expiró; vuelve a iniciar la conexión.')
+  try {
+    if (!conn.challengeEnc || !conn.challengeExpiresAt || conn.challengeExpiresAt < new Date()) {
+      throw new BadRequestError('El reto de validación expiró; vuelve a iniciar la conexión.')
+    }
+    const ch = decryptGrant<{ accessToken: string; processId: string; email: string; password: string }>(conn.challengeEnc)
+    const client = clientFor(conn.provider.code)
+    const r = await client.validateDevice({
+      email: ch.email,
+      password: ch.password,
+      deviceIdentifier: conn.deviceIdentifier!,
+      challenge: { accessToken: ch.accessToken, processId: ch.processId },
+      code,
+    })
+    if (r.kind !== 'connected') throw new BadRequestError('Validación incompleta.')
+    // El reto ya se consumió: limpiarlo de inmediato (no dejarlo vivo tras el handshake).
+    await prisma.financialConnection.update({ where: { id: connectionId }, data: { challengeEnc: null, challengeExpiresAt: null } })
+    await logAction({
+      staffId: staffId ?? null,
+      venueId: conn.venueId,
+      action: 'FINANCIAL_CONNECTION_DEVICE_VALIDATED',
+      entity: 'FinancialConnection',
+      entityId: connectionId,
+      data: { provider: conn.provider.code },
+    })
+    return await finishConnected(connectionId, conn.deviceIdentifier!, r.grant, r.accounts)
+  } catch (e) {
+    await logAction({
+      staffId: staffId ?? null,
+      venueId: conn.venueId,
+      action: 'FINANCIAL_CONNECTION_FAILED',
+      entity: 'FinancialConnection',
+      entityId: connectionId,
+      data: { provider: conn.provider.code, step: 'validate_device', error: (e as Error).message },
+    })
+    throw e
   }
-  const ch = decryptGrant<{ accessToken: string; processId: string; email: string; password: string }>(conn.challengeEnc)
-  const client = clientFor(conn.provider.code)
-  const r = await client.validateDevice({
-    email: ch.email,
-    password: ch.password,
-    deviceIdentifier: conn.deviceIdentifier!,
-    challenge: { accessToken: ch.accessToken, processId: ch.processId },
-    code,
-  })
-  if (r.kind !== 'connected') throw new BadRequestError('Validación incompleta.')
-  // El reto ya se consumió: limpiarlo de inmediato (no dejarlo vivo tras el handshake).
-  await prisma.financialConnection.update({ where: { id: connectionId }, data: { challengeEnc: null, challengeExpiresAt: null } })
-  return finishConnected(connectionId, conn.deviceIdentifier!, r.grant, r.accounts)
 }
 
-export async function validateTwoFactorAuth(connectionId: string, code: string): Promise<ConnectionStepResult> {
+export async function validateTwoFactorAuth(connectionId: string, code: string, staffId?: string): Promise<ConnectionStepResult> {
   const conn = await prisma.financialConnection.findUniqueOrThrow({ where: { id: connectionId }, include: { provider: true } })
-  if (!conn.challengeEnc || !conn.challengeExpiresAt || conn.challengeExpiresAt < new Date()) {
-    throw new BadRequestError('El reto de 2FA expiró; vuelve a iniciar la conexión.')
+  try {
+    if (!conn.challengeEnc || !conn.challengeExpiresAt || conn.challengeExpiresAt < new Date()) {
+      throw new BadRequestError('El reto de 2FA expiró; vuelve a iniciar la conexión.')
+    }
+    const ch = decryptGrant<{ accessToken: string; email: string }>(conn.challengeEnc)
+    const client = clientFor(conn.provider.code)
+    const r = await client.validateTwoFactorCode({
+      email: ch.email,
+      deviceIdentifier: conn.deviceIdentifier!,
+      challenge: { accessToken: ch.accessToken },
+      code,
+    })
+    if (r.kind !== 'connected') throw new BadRequestError('El proveedor pidió otro paso adicional no soportado todavía.')
+    // El reto ya se consumió: limpiarlo de inmediato (no dejarlo vivo tras el handshake).
+    await prisma.financialConnection.update({ where: { id: connectionId }, data: { challengeEnc: null, challengeExpiresAt: null } })
+    await logAction({
+      staffId: staffId ?? null,
+      venueId: conn.venueId,
+      action: 'FINANCIAL_CONNECTION_TWO_FACTOR_VALIDATED',
+      entity: 'FinancialConnection',
+      entityId: connectionId,
+      data: { provider: conn.provider.code },
+    })
+    return await finishConnected(connectionId, conn.deviceIdentifier!, r.grant, r.accounts)
+  } catch (e) {
+    await logAction({
+      staffId: staffId ?? null,
+      venueId: conn.venueId,
+      action: 'FINANCIAL_CONNECTION_FAILED',
+      entity: 'FinancialConnection',
+      entityId: connectionId,
+      data: { provider: conn.provider.code, step: 'validate_2fa', error: (e as Error).message },
+    })
+    throw e
   }
-  const ch = decryptGrant<{ accessToken: string; email: string }>(conn.challengeEnc)
-  const client = clientFor(conn.provider.code)
-  const r = await client.validateTwoFactorCode({
-    email: ch.email,
-    deviceIdentifier: conn.deviceIdentifier!,
-    challenge: { accessToken: ch.accessToken },
-    code,
-  })
-  if (r.kind !== 'connected') throw new BadRequestError('El proveedor pidió otro paso adicional no soportado todavía.')
-  // El reto ya se consumió: limpiarlo de inmediato (no dejarlo vivo tras el handshake).
-  await prisma.financialConnection.update({ where: { id: connectionId }, data: { challengeEnc: null, challengeExpiresAt: null } })
-  return finishConnected(connectionId, conn.deviceIdentifier!, r.grant, r.accounts)
 }
 
 async function finishConnected(
@@ -157,17 +230,37 @@ async function finishConnected(
   return { connectionId, status, accountOptions }
 }
 
-export async function selectAccount(connectionId: string, externalId: string, merchantAccountId?: string) {
+export async function selectAccount(connectionId: string, externalId: string, merchantAccountId?: string, staffId?: string) {
   const conn = await prisma.financialConnection.findUniqueOrThrow({ where: { id: connectionId }, include: { accounts: true } })
-  // Nunca confiar en un externalId enviado por el cliente: debe estar entre las
-  // opciones que el propio servidor ya persistió (desde connect/listAccounts).
-  const chosen = conn.accounts.find(a => a.externalId === externalId)
-  if (!chosen) throw new BadRequestError(`La cuenta ${externalId} no está entre las opciones guardadas.`)
-  if (merchantAccountId) {
-    await prisma.merchantAccount.update({ where: { id: merchantAccountId }, data: { financialAccountId: chosen.id } })
+  try {
+    // Nunca confiar en un externalId enviado por el cliente: debe estar entre las
+    // opciones que el propio servidor ya persistió (desde connect/listAccounts).
+    const chosen = conn.accounts.find(a => a.externalId === externalId)
+    if (!chosen) throw new BadRequestError(`La cuenta ${externalId} no está entre las opciones guardadas.`)
+    if (merchantAccountId) {
+      await prisma.merchantAccount.update({ where: { id: merchantAccountId }, data: { financialAccountId: chosen.id } })
+    }
+    await prisma.financialConnection.update({ where: { id: connectionId }, data: { status: 'CONNECTED' } })
+    await logAction({
+      staffId: staffId ?? null,
+      venueId: conn.venueId,
+      action: 'FINANCIAL_CONNECTION_ACCOUNT_SELECTED',
+      entity: 'FinancialConnection',
+      entityId: connectionId,
+      data: { externalId, merchantAccountId: merchantAccountId ?? null },
+    })
+    return { status: 'CONNECTED' as const }
+  } catch (e) {
+    await logAction({
+      staffId: staffId ?? null,
+      venueId: conn.venueId,
+      action: 'FINANCIAL_CONNECTION_FAILED',
+      entity: 'FinancialConnection',
+      entityId: connectionId,
+      data: { step: 'select_account', error: (e as Error).message },
+    })
+    throw e
   }
-  await prisma.financialConnection.update({ where: { id: connectionId }, data: { status: 'CONNECTED' } })
-  return { status: 'CONNECTED' as const }
 }
 
 /** Devuelve un access token válido, refrescando bajo lock si hace falta (el refreshToken rota). */

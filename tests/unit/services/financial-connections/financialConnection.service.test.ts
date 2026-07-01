@@ -11,6 +11,7 @@ jest.mock('@/utils/prismaClient', () => ({ __esModule: true, default: db }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 
 import * as svc from '@/services/financial-connections/financialConnection.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
 
 beforeAll(() => {
   process.env.FINANCIAL_CONNECTION_KEY = 'a'.repeat(64)
@@ -43,6 +44,20 @@ it('startConnection: single negocio → auto-selects, CONNECTED', async () => {
   const r = await svc.startConnection({ venueId: 'v1', providerId: 'prov-1', email: 'a@b.co', password: 'p' })
   expect(r.status).toBe('CONNECTED')
   expect(db.financialAccount.createMany).toHaveBeenCalled()
+  expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'FINANCIAL_CONNECTION_STARTED', entityId: 'c1' }))
+})
+
+it('startConnection: connect() throws → marks the row ERROR with lastError instead of orphaning it, still rejects', async () => {
+  db.financialConnection.create.mockResolvedValue({ id: 'c-bad', deviceIdentifier: 'dev-c-bad' })
+  clientMock.connect.mockRejectedValue(new Error('Este usuario no tiene una cuenta.'))
+  await expect(
+    svc.startConnection({ venueId: 'v1', providerId: 'prov-1', email: 'bad@b.co', password: 'wrong' }),
+  ).rejects.toThrow('Este usuario no tiene una cuenta.')
+  expect(db.financialConnection.update).toHaveBeenCalledWith({
+    where: { id: 'c-bad' },
+    data: { status: 'ERROR', lastError: 'Este usuario no tiene una cuenta.' },
+  })
+  expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'FINANCIAL_CONNECTION_FAILED', entityId: 'c-bad' }))
 })
 
 it('startConnection: several negocios → PENDING_ACCOUNT_SELECTION with options', async () => {
@@ -77,16 +92,18 @@ it('validateTwoFactorAuth: valid code → CONNECTED', async () => {
     challengeEnc: enc2faFixture(), challengeExpiresAt: new Date(Date.now() + 60_000),
   })
   clientMock.validateTwoFactorCode.mockResolvedValue({ kind: 'connected', grant: { refreshToken: 'ref-x' }, accounts: [{ externalId: 'neg-1' }] })
-  const r = await svc.validateTwoFactorAuth('c4', '123456')
+  const r = await svc.validateTwoFactorAuth('c4', '123456', 'staff-1')
   expect(r.status).toBe('CONNECTED')
+  expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'FINANCIAL_CONNECTION_TWO_FACTOR_VALIDATED', staffId: 'staff-1', entityId: 'c4' }))
 })
 
-it('selectAccount: rejects an externalId not in the stored options', async () => {
+it('selectAccount: rejects an externalId not in the stored options, logs FINANCIAL_CONNECTION_FAILED', async () => {
   db.financialConnection.findUniqueOrThrow.mockResolvedValue({
-    id: 'c2', status: 'PENDING_ACCOUNT_SELECTION',
+    id: 'c2', status: 'PENDING_ACCOUNT_SELECTION', venueId: 'v1',
     accounts: [{ id: 'fa1', externalId: 'neg-1' }, { id: 'fa2', externalId: 'neg-2' }],
   })
   await expect(svc.selectAccount('c2', 'neg-999')).rejects.toThrow()
+  expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'FINANCIAL_CONNECTION_FAILED', entityId: 'c2' }))
 })
 
 it('getBalanceForConnectionAccount: provider null saldo → state ERROR, not OK', async () => {
