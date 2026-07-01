@@ -247,6 +247,7 @@ import inventoryRoutes from './dashboard/inventory.routes'
 import superadminRoutes from './dashboard/superadmin.routes'
 import venuePaymentConfigRoutes from './dashboard/venuePaymentConfig.routes'
 import ecommerceMerchantRoutes from './dashboard/ecommerceMerchant.routes'
+import { venueFinancialConnectionRoutes, venueFinancialAccountRoutes, financialProviderRoutes } from './dashboard/financialConnection.routes'
 import paymentLinkRoutes from './dashboard/paymentLink.routes'
 import manualPaymentRoutes from './dashboard/manualPayment.routes'
 import activityLogRoutes from './dashboard/activityLog.routes'
@@ -3929,6 +3930,13 @@ router.use('/venues/:venueId/payment-config', authenticateTokenMiddleware, venue
 
 // E-commerce Merchant Management routes (OWNER, ADMIN)
 router.use('/venues/:venueId/ecommerce-merchants', authenticateTokenMiddleware, ecommerceMerchantRoutes)
+
+// Financial Connections (self-connect bank accounts for balance lookup). Permission
+// (financialConnections:manage, OWNER-only) + per-resource venue ownership check are
+// enforced inside financialConnection.routes.ts / the controller — not here.
+router.use('/venues/:venueId/financial-connections', authenticateTokenMiddleware, venueFinancialConnectionRoutes)
+router.use('/venues/:venueId/financial-accounts', authenticateTokenMiddleware, venueFinancialAccountRoutes)
+router.use('/', authenticateTokenMiddleware, financialProviderRoutes)
 
 // Payment Link Management routes (ADMIN+)
 router.use('/venues/:venueId/payment-links', authenticateTokenMiddleware, checkPermission('payment-link:read'), paymentLinkRoutes)

@@ -872,6 +872,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'accounting:read', // Capa A — estado de resultados (¿cuánto gané?), incluido
     'accounting:reconcile', // Conciliación bancaria (confirmar matches) — PRO
     'accounting:manage', // Capa B fiscal — catálogo de cuentas (editar/seed) — PREMIUM (bundle CFDI)
+    'financialConnections:*', // Conectar/leer/desconectar cuentas bancarias del venue (self-connect)
     'commissions:*', // Commission system (full control including payout)
     'cash-out:*', // Cash Out (PlayTelecom same-day promoter commission) — full control
     'menu:*',
