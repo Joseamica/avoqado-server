@@ -66,7 +66,7 @@ export const CreateCustomerSchema = z.object({
       marketingConsent: z.boolean().default(false),
     })
     .refine(data => data.email || data.phone, {
-      message: 'Either email or phone must be provided',
+      message: 'Se requiere email o teléfono',
       path: ['email'], // Show error on email field
     }),
 })

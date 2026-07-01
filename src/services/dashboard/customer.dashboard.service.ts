@@ -301,7 +301,7 @@ export async function getCustomerById(venueId: string, customerId: string) {
 export async function createCustomer(venueId: string, data: CreateCustomerRequest) {
   // Validate email or phone is provided
   if (!data.email && !data.phone) {
-    throw new BadRequestError('Either email or phone must be provided')
+    throw new BadRequestError('Se requiere email o teléfono')
   }
 
   // Normalize email to lowercase for consistent lookups
