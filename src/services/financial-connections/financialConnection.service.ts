@@ -112,10 +112,17 @@ export async function startConnection(input: {
     // recién creada huérfana en PENDING_DEVICE_VALIDATION para siempre, sin pista
     // de qué pasó. Se marca ERROR con el motivo y se relanza para que el
     // controller siga respondiendo 400 igual que antes.
-    await prisma.financialConnection.update({
-      where: { id: conn.id },
-      data: { status: 'ERROR', lastError: (e as Error).message },
-    })
+    // Best-effort (misma convención que la ruta de error de getBalance): si este
+    // update también falla, el error original de connect() es el que debe
+    // propagarse — nunca enmascararlo, y el logAction de abajo debe correr igual.
+    try {
+      await prisma.financialConnection.update({
+        where: { id: conn.id },
+        data: { status: 'ERROR', lastError: (e as Error).message },
+      })
+    } catch {
+      /* best-effort */
+    }
     await logAction({
       staffId: input.staffId ?? null,
       venueId: input.venueId,
