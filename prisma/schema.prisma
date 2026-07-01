@@ -683,10 +683,6 @@ model VenueSettings {
   latenessThresholdMinutes Int? // Minutes of tolerance after expectedCheckInTime (null = use org default)
   geofenceRadiusMeters     Int? // Max distance (meters) from venue for valid clock-in (null = use org default)
 
-  // Field-promoter geolocation tracking ("cambaceo"). OFF by default — only venues
-  // explicitly enabled emit/accept periodic location pings. Backend-authoritative gate.
-  trackPromoterLocation Boolean @default(false)
-
   // Auto Clock-Out (HR automation - Square-style)
   autoClockOutEnabled     Boolean @default(false) // Enable automatic clock-out at fixed time
   autoClockOutTime        String? // "HH:mm" format - e.g., "03:00" for 3 AM
