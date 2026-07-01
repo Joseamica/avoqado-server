@@ -220,7 +220,7 @@ describe('Customer Dashboard Service', () => {
         createCustomer('venue-123', {
           firstName: 'NoContact',
         }),
-      ).rejects.toThrow('Either email or phone must be provided')
+      ).rejects.toThrow('Se requiere email o teléfono')
     })
 
     it('should throw BadRequestError if email already exists in venue', async () => {
