@@ -37,6 +37,23 @@ async function assertAccountBelongsToVenue(financialAccountId: string, venueId: 
   })
   if (!acc || acc.connection.venueId !== venueId) throw new NotFoundError('Cuenta no encontrada.')
 }
+// MerchantAccount no tiene FK a venue: su pertenencia se resuelve por dónde está
+// cableada — los slots de VenuePaymentConfig, los assignedMerchantIds de las
+// terminales de la sucursal, o el config a nivel organización de esa sucursal.
+// Sin este guard, cualquier OWNER podría re-apuntar el merchant de OTRO tenant
+// a su propia cuenta bancaria con solo conocer el cuid.
+async function assertMerchantAccountBelongsToVenue(merchantAccountId: string, venueId: string): Promise<void> {
+  const bySlot = { OR: [{ primaryAccountId: merchantAccountId }, { secondaryAccountId: merchantAccountId }, { tertiaryAccountId: merchantAccountId }] }
+  const [venueCfg, terminal, orgCfg] = await Promise.all([
+    prisma.venuePaymentConfig.findFirst({ where: { venueId, ...bySlot }, select: { id: true } }),
+    prisma.terminal.findFirst({ where: { venueId, assignedMerchantIds: { has: merchantAccountId } }, select: { id: true } }),
+    prisma.organizationPaymentConfig.findFirst({
+      where: { organization: { venues: { some: { id: venueId } } }, ...bySlot },
+      select: { id: true },
+    }),
+  ])
+  if (!venueCfg && !terminal && !orgCfg) throw new NotFoundError('Cuenta de cobro no encontrada.')
+}
 
 export async function validateDevice(req: Request, res: Response, next: NextFunction) {
   try {
@@ -61,6 +78,7 @@ export async function selectAccount(req: Request, res: Response, next: NextFunct
     const { externalId, merchantAccountId } = req.body ?? {}
     if (!externalId) throw new BadRequestError('externalId es requerido.')
     await assertConnectionBelongsToVenue(req.params.id, req.params.venueId)
+    if (merchantAccountId) await assertMerchantAccountBelongsToVenue(String(merchantAccountId), req.params.venueId)
     const staffId = (req as any).authContext?.userId
     res.json({ success: true, data: await svc.selectAccount(req.params.id, String(externalId), merchantAccountId, staffId) })
   } catch (e) { next(e) }
