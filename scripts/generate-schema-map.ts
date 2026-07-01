@@ -254,6 +254,9 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   // 10. Payment Providers & Settlement
   PaymentProvider: 'Payment Providers & Settlement',
   MerchantAccount: 'Payment Providers & Settlement',
+  FinancialProvider: 'Payment Providers & Settlement',
+  FinancialConnection: 'Payment Providers & Settlement',
+  FinancialAccount: 'Payment Providers & Settlement',
   EcommerceMerchant: 'Payment Providers & Settlement',
   CheckoutSession: 'Payment Providers & Settlement',
   AngelPayUserAccount: 'Payment Providers & Settlement',
