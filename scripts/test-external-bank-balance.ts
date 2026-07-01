@@ -44,6 +44,9 @@ async function main() {
   if (r.kind === 'need_device_validation') {
     throw new Error('Dispositivo requiere validación OTP — ya debería estar confiable desde el setup previo.')
   }
+  if (r.kind !== 'connected') {
+    throw new Error(`El proveedor pidió otro paso adicional no soportado por este script (kind=${r.kind}).`)
+  }
 
   console.log(`Cuenta ve ${r.accounts.length} negocio(s):\n`)
   for (const a of r.accounts) {
