@@ -12,11 +12,32 @@
 
 import express, { Request, Response, NextFunction } from 'express'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
+import { checkFeatureAccess } from '@/middlewares/checkFeatureAccess.middleware'
+import { venueHasCommissionsAccess } from '@/services/access/basePlan.service'
 import * as controller from '@/controllers/dashboard/commission.dashboard.controller'
 import * as commissionResolution from '@/services/dashboard/commission/commission-resolution.service'
 import * as payoutResolution from '@/services/dashboard/commission/payout-resolution.service'
 
 const router = express.Router()
+
+// ==========================================
+// PLAN GATE — whole commission namespace
+// ==========================================
+// COMMISSIONS is a PREMIUM-only differentiator, DUAL-GRANTED (venueHasCommissionsAccess):
+// module grant (VenueModule/OrganizationModule — legacy + white-label orgs like PlayTelecom)
+// OR tier access (grandfathered/demo → own VenueFeature → PLAN_PREMIUM). Every route below
+// hangs off /venues/:venueId, so this single gate covers the namespace. Venues not
+// dual-granted fall through to the standard checkFeatureAccess middleware so denials keep
+// the canonical 403 shape ({ featureCode, subscriptionRequired: true }) and superadmins
+// keep their bypass.
+router.use('/venues/:venueId', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    if (await venueHasCommissionsAccess(req.params.venueId)) return next()
+  } catch {
+    // Resolver error → let checkFeatureAccess own the error handling below.
+  }
+  return checkFeatureAccess('COMMISSIONS')(req, res, next)
+})
 
 // ==========================================
 // COMMISSION CONFIGS

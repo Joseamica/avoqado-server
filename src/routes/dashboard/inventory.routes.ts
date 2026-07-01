@@ -77,6 +77,16 @@ import {
 const router = Router({ mergeParams: true })
 
 // ===========================================
+// PLAN GATE — whole inventory namespace
+// ===========================================
+// INVENTORY_TRACKING is a PREMIUM-only differentiator (PREMIUM_ONLY_CODES ↔ plan-catalog.ts).
+// Grandfathered/demo venues, explicit VenueFeature grants and superadmins all pass inside
+// checkFeatureAccess. The auto-reorder routes below ADDITIONALLY gate on AUTO_REORDER (their
+// own premium code). Mirrors the dashboard's <FeatureGate feature="INVENTORY_TRACKING"> and
+// the MCP's planGateMessage — this closes the server side of that same paywall.
+router.use(checkFeatureAccess('INVENTORY_TRACKING'))
+
+// ===========================================
 // RAW MATERIALS ROUTES
 // ===========================================
 

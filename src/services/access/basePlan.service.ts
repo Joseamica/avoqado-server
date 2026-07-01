@@ -1,4 +1,5 @@
 import prisma from '@/utils/prismaClient'
+import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 
 /**
  * Paid base-plan tier codes (Feature.code), highest tier last in conceptual order.
@@ -262,6 +263,38 @@ export async function venuesWithFeatureAccess(venueIds: string[], featureCode: s
     for (const v of withPro) entitled.add(v.venueId)
   }
 
+  return entitled
+}
+
+/**
+ * COMMISSIONS is DUAL-GRANTED — the one differentiator that lives in BOTH gating systems:
+ *   - Module grant: `VenueModule`/`OrganizationModule` 'COMMISSIONS' (legacy + white-label
+ *     orgs, e.g. PlayTelecom stores get it org-wide) — resolved via
+ *     {@link moduleService.isModuleEnabled} (includes the org-level fallback).
+ *   - Tier grant: PREMIUM-only differentiator via {@link venueHasFeatureAccess}
+ *     (grandfathered/demo → own VenueFeature grant → PLAN_PREMIUM blanket).
+ * Access = module enabled OR tier access. The dashboard commission routes AND the customer-MCP
+ * commission tools must BOTH resolve through these helpers so the two planes never disagree
+ * (see `.claude/rules/feature-gating.md` — crossing Module/Feature resolvers fails silently).
+ */
+export async function venueHasCommissionsAccess(venueId: string): Promise<boolean> {
+  if (await moduleService.isModuleEnabled(venueId, MODULE_CODES.COMMISSIONS)) return true
+  return venueHasFeatureAccess(venueId, 'COMMISSIONS')
+}
+
+/**
+ * Batch version of {@link venueHasCommissionsAccess}: of the given venues, which ones may use
+ * commissions (module grant OR tier access). Tier side is the ≤3-query batch resolver; the
+ * module side only checks the venues the tier didn't already entitle.
+ */
+export async function venuesWithCommissionsAccess(venueIds: string[]): Promise<Set<string>> {
+  if (venueIds.length === 0) return new Set()
+  const entitled = await venuesWithFeatureAccess(venueIds, 'COMMISSIONS')
+  const rest = venueIds.filter(id => !entitled.has(id))
+  const moduleFlags = await Promise.all(rest.map(id => moduleService.isModuleEnabled(id, MODULE_CODES.COMMISSIONS)))
+  rest.forEach((id, i) => {
+    if (moduleFlags[i]) entitled.add(id)
+  })
   return entitled
 }
 

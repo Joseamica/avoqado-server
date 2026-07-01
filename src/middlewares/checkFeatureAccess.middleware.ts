@@ -1,17 +1,17 @@
 /**
- * @pending-implementation
- * Feature Access Control Middleware
+ * Feature Access Control Middleware — the TIER SYSTEM's server-side gate (NOT legacy).
  *
- * STATUS: Implemented but not yet applied to routes.
- * This middleware is ready to use but hasn't been added to route definitions yet.
- * It will be gradually applied to premium/paid feature endpoints.
- *
- * Validates if a venue has an active subscription for a specific feature.
- * This middleware enforces that only venues with paid/trial subscriptions
- * can access feature-specific endpoints.
+ * STATUS: Live in production — applied to 60+ routes (CFDI/accounting, advanced reports,
+ * inventory, auto-reorder, chatbot, commissions…). Despite its pay-per-feature-era name, it
+ * was rewired to the base-plan tier system and is the canonical enforcement point:
+ * exemption (grandfathered/demo) → explicit VenueFeature grant → tier blanket grant
+ * (PLAN_PREMIUM = all; PLAN_PRO = all except PREMIUM_ONLY_CODES). Mirrors
+ * `venueHasFeatureAccess` (src/services/access/basePlan.service.ts) and the dashboard's
+ * <FeatureGate>/useTierFeatureAccess. Do NOT confuse it with the dashboard AuthContext's
+ * `checkFeatureAccess`, which is white-label-only and cannot tier-gate.
  *
  * Usage:
- * router.get('/analytics', authenticateTokenMiddleware, checkFeatureAccess('ANALYTICS'), ...)
+ * router.get('/analytics', authenticateTokenMiddleware, checkFeatureAccess('ADVANCED_REPORTS'), ...)
  */
 
 import { Request, Response, NextFunction } from 'express'
@@ -293,6 +293,11 @@ export function checkPublicVenueFeature(featureCode: string, customerMessage?: s
 }
 
 /**
+ * @deprecated UNUSED and NOT tier-aware — it never got the tier blanket grant that
+ * checkFeatureAccess (above) has, so a PLAN_PREMIUM venue without an explicit VenueFeature
+ * row would wrongly 403. No route uses it today. If you need an any-of gate, add the tier
+ * blanket logic first (mirror checkFeatureAccess lines ~110-127) or compose checkFeatureAccess.
+ *
  * Middleware to check if venue has access to ANY of the specified features
  *
  * @param featureCodes - Array of feature codes (e.g., ['ANALYTICS', 'REPORTS'])

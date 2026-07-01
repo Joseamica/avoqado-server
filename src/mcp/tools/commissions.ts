@@ -2,6 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
 import { hasPermission } from '@/services/access/access.service'
+import { venuesWithCommissionsAccess } from '@/services/access/basePlan.service'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
@@ -74,14 +75,21 @@ export function formatScheme(config: SchemeRow, categoryName: Map<string, string
 export function registerCommissionTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
 
-  /** Venues in scope where the caller can read commissions. Throws if a requested venue is out of scope. */
-  const readableVenues = (requestedVenueId?: string): string[] => {
+  /**
+   * Venues in scope where the caller can read commissions AND the venue is plan-entitled.
+   * Throws if a requested venue is out of scope. Plan gate mirrors the dashboard commission
+   * routes exactly (venuesWithCommissionsAccess: COMMISSIONS module grant OR tier access —
+   * grandfathered/demo → own VenueFeature → PLAN_PREMIUM) so the MCP can never read what the
+   * dashboard paywalls.
+   */
+  const readableVenues = async (requestedVenueId?: string): Promise<string[]> => {
     guard.venueFilter(requestedVenueId) // throws on out-of-scope venue
-    const ids = requestedVenueId ? [requestedVenueId] : scope.allowedVenueIds
-    return ids.filter(id => {
+    const ids = (requestedVenueId ? [requestedVenueId] : scope.allowedVenueIds).filter(id => {
       const access = scope.perVenueAccess.get(id)
       return !!access && hasPermission(access, 'commissions:read')
     })
+    const entitled = await venuesWithCommissionsAccess(ids)
+    return ids.filter(id => entitled.has(id))
   }
 
   server.tool(
@@ -89,8 +97,12 @@ export function registerCommissionTools(server: McpServer, scope: McpScope) {
     'List active staff commission schemes for your venues. Each scheme shows how commission is calculated (flat %, tiered, or fixed amount), which product categories it applies to (multiple schemes can run per venue, each on its own categories), and its tiers. A tier boundary can be a fixed amount or "EMPLOYEE_GOAL" — the staff member\'s own sales goal. Requires commissions:read.',
     { venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues') },
     async ({ venueId }) => {
-      const venueIds = readableVenues(venueId)
-      if (venueIds.length === 0) return text({ schemes: [], note: 'No venues in scope with commissions:read.' })
+      const venueIds = await readableVenues(venueId)
+      if (venueIds.length === 0)
+        return text({
+          schemes: [],
+          note: 'Ningún venue en tu alcance tiene commissions:read Y el plan/módulo de comisiones (requiere Premium o el módulo COMMISSIONS).',
+        })
 
       const configs = (await prisma.commissionConfig.findMany({
         where: { venueId: { in: venueIds }, active: true, deletedAt: null },
@@ -113,8 +125,12 @@ export function registerCommissionTools(server: McpServer, scope: McpScope) {
     'List staff sales goals (metas) for your venues — per-employee or venue-wide targets with their period (DAILY/WEEKLY/MONTHLY). These goals also drive any commission tier whose boundary is EMPLOYEE_GOAL. Requires commissions:read.',
     { venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues') },
     async ({ venueId }) => {
-      const venueIds = readableVenues(venueId)
-      if (venueIds.length === 0) return text({ goals: [], note: 'No venues in scope with commissions:read.' })
+      const venueIds = await readableVenues(venueId)
+      if (venueIds.length === 0)
+        return text({
+          goals: [],
+          note: 'Ningún venue en tu alcance tiene commissions:read Y el plan/módulo de comisiones (requiere Premium o el módulo COMMISSIONS).',
+        })
 
       const venues = await Promise.all(
         venueIds.map(async vId => {
@@ -158,8 +174,13 @@ export function registerCommissionTools(server: McpServer, scope: McpScope) {
       limit: z.number().int().positive().max(100).optional().describe('Max payouts to list (default 50, newest first)'),
     },
     async ({ venueId, status, limit }) => {
-      const venueIds = readableVenues(venueId)
-      if (venueIds.length === 0) return text({ venuesInScope: 0, payouts: [], note: 'No tienes acceso de comisiones en este alcance.' })
+      const venueIds = await readableVenues(venueId)
+      if (venueIds.length === 0)
+        return text({
+          venuesInScope: 0,
+          payouts: [],
+          note: 'Ningún venue en tu alcance tiene commissions:read Y el plan/módulo de comisiones (requiere Premium o el módulo COMMISSIONS).',
+        })
 
       const statusFilter =
         status === 'paid'

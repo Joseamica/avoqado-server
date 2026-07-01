@@ -4,6 +4,7 @@ import type { McpScope } from '../../../src/mcp/scope'
 const mockGroupBy = jest.fn()
 const mockFindMany = jest.fn()
 const mockHasPermission = jest.fn()
+const mockVenuesWithCommissionsAccess = jest.fn()
 
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({
@@ -15,6 +16,11 @@ jest.mock('@/mcp/guard', () => ({
   }),
 }))
 jest.mock('@/services/access/access.service', () => ({ hasPermission: (...a: unknown[]) => mockHasPermission(...(a as [])) }))
+// Plan gate (dual grant: COMMISSIONS module OR tier) — mocked; its own semantics are covered by
+// basePlan tests + commissionRoutes.featureGate.test.ts. Default (beforeEach): all venues entitled.
+jest.mock('@/services/access/basePlan.service', () => ({
+  venuesWithCommissionsAccess: (...a: unknown[]) => mockVenuesWithCommissionsAccess(...(a as [])),
+}))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
@@ -38,7 +44,10 @@ const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[
 beforeAll(() => {
   registerCommissionTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
 })
-beforeEach(() => jest.clearAllMocks())
+beforeEach(() => {
+  jest.clearAllMocks()
+  mockVenuesWithCommissionsAccess.mockImplementation(async (ids: string[]) => new Set(ids))
+})
 
 describe('commission_payouts', () => {
   it('rejects a venue outside the caller scope (cross-tenant guard)', async () => {
@@ -51,6 +60,15 @@ describe('commission_payouts', () => {
     mockHasPermission.mockReturnValue(false)
     const out = parse(await call({ venueId: 'v1' }))
     expect(out.venuesInScope).toBe(0)
+    expect(mockGroupBy).not.toHaveBeenCalled()
+  })
+
+  it('returns nothing (no DB read) when the venue plan/module does not include commissions (plan gate)', async () => {
+    mockHasPermission.mockReturnValue(true)
+    mockVenuesWithCommissionsAccess.mockResolvedValue(new Set()) // not entitled: no module, no PREMIUM
+    const out = parse(await call({ venueId: 'v1' }))
+    expect(out.venuesInScope).toBe(0)
+    expect(out.note).toContain('plan/módulo')
     expect(mockGroupBy).not.toHaveBeenCalled()
   })
 
