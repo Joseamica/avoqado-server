@@ -31,6 +31,11 @@ router.get('/:id/blockers', merchantAccountController.getMerchantAccountBlockers
 // SECURITY: Only use when needed for payment processing setup
 router.get('/:id/credentials', merchantAccountController.getMerchantAccountCredentials)
 
+// GET /api/v1/superadmin/merchant-accounts/:id/balance
+// Live balance from this account's configured BalanceProvider.
+// Requires balanceProviderId + balanceProviderAccountId to be set first via PUT /:id.
+router.get('/:id/balance', merchantAccountController.getBalance)
+
 // GET /api/v1/superadmin/merchant-accounts/:id/terminals
 // Get terminals that have this merchant account assigned
 router.get('/:id/terminals', merchantAccountController.getTerminalsByMerchantAccount)

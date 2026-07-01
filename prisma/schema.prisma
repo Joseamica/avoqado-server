@@ -299,6 +299,7 @@ model Venue {
   floorElements         FloorElement[]
   shifts                Shift[]
   timeEntries           TimeEntry[]
+  promoterLocationPings PromoterLocationPing[]
   orders                Order[]
   payments              Payment[]
   transactions          VenueTransaction[]
@@ -791,6 +792,9 @@ model Staff {
 
   // Time tracking
   timeEntries TimeEntry[]
+
+  // Field-promoter geolocation ("cambaceo" tracking)
+  promoterLocationPings PromoterLocationPing[]
 
   // Role permission management
   modifiedRolePermissions VenueRolePermission[] @relation("ModifiedRolePermissions")
@@ -2336,6 +2340,36 @@ model TimeEntryBreak {
   @@map("time_entry_breaks")
 }
 
+/// Periodic geolocation pings for field promoters selling without a fixed store
+/// ("cambaceo"). Append-only breadcrumb; captured hourly during the venue-local
+/// work window. Distinct from TimeEntry clock-in/out points (single snapshots).
+model PromoterLocationPing {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  staffId String
+  staff   Staff  @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  latitude  Decimal @db.Decimal(10, 8)
+  longitude Decimal @db.Decimal(11, 8)
+  accuracy  Float? // GPS accuracy in meters
+
+  capturedAt DateTime // when the device captured the position (venue-local intent)
+  source     PromoterLocationSource @default(PERIODIC)
+
+  createdAt DateTime @default(now())
+
+  @@index([venueId, staffId, capturedAt])
+  @@index([capturedAt]) // for retention purge (> 90 days)
+  @@map("promoter_location_pings")
+}
+
+enum PromoterLocationSource {
+  PERIODIC
+  CLOCK_IN
+  CLOCK_OUT
+}
+
 model Order {
   id      String @id @default(cuid())
   venueId String
@@ -3576,6 +3610,15 @@ model MerchantAccount {
   // Aggregator relationship (e.g., Moneygiver)
   aggregatorId String?
   aggregator   Aggregator? @relation(fields: [aggregatorId], references: [id])
+
+  // 🆕 Balance provider (2026-06-30) — which banking/fintech account THIS
+  // venue's sub-merchant has integrated, if any. Generic on purpose: not
+  // every merchant uses the same provider (an external bank today, others later).
+  balanceProviderId        String?
+  balanceProvider          BalanceProvider? @relation(fields: [balanceProviderId], references: [id])
+  // Provider-specific account identifier (e.g. the external bank's `idNegocio`).
+  // Opaque to everything except that provider's own client implementation.
+  balanceProviderAccountId String?
 
   // Relations
   venueConfigsPrimary   VenuePaymentConfig[]        @relation("PrimaryAccount")
@@ -10231,6 +10274,27 @@ model Aggregator {
 
   merchants        MerchantAccount[]
   venueCommissions VenueCommission[]
+
+  @@index([active])
+}
+
+/// Catalog of banking/fintech providers a merchant's settled funds can live
+/// in (read-only balance lookup). Generic on purpose — each MerchantAccount
+/// picks whichever one it actually has integrated via
+/// `balanceProviderId` + `balanceProviderAccountId` (the second one is
+/// opaque, provider-specific: e.g. the external bank's `idNegocio`). Today
+/// there's only one row (EXTERNAL_BANK); adding a second provider is a new
+/// row here + a new client under `src/services/balance-providers/`, no schema change.
+model BalanceProvider {
+  id     String  @id @default(cuid())
+  code   String  @unique // "EXTERNAL_BANK", future: "STP", "BANORTE_DIRECT", etc.
+  name   String // Display name, e.g. "Proveedor bancario externo"
+  active Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  merchantAccounts MerchantAccount[]
 
   @@index([active])
 }

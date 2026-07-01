@@ -74,6 +74,26 @@ export async function getMerchantAccount(req: Request, res: Response, next: Next
 }
 
 /**
+ * GET /api/v1/superadmin/merchant-accounts/:id/balance
+ * Live balance of this account's configured BalanceProvider. Requires
+ * `balanceProviderId` + `balanceProviderAccountId` to already be set on the account.
+ */
+export async function getBalance(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { id } = req.params
+
+    const balance = await merchantAccountService.getBalance(id)
+
+    res.json({
+      success: true,
+      data: balance,
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
  * GET /api/v1/superadmin/merchant-accounts/:id/credentials
  * Get decrypted credentials for a merchant account
  * SECURITY: Only use this endpoint when needed for payment processing setup
@@ -216,6 +236,10 @@ export async function updateMerchantAccount(req: Request, res: Response, next: N
       // string | null → re-bind or detach the merchant's AngelPay account.
       // undefined leaves the field unchanged.
       angelpayUserAccountId,
+      // string | null → set/clear which BalanceProvider (and its provider-specific
+      // account id) this MerchantAccount uses for live balance lookups.
+      balanceProviderId,
+      balanceProviderAccountId,
     } = req.body
 
     const account = await merchantAccountService.updateMerchantAccount(id, {
@@ -227,6 +251,8 @@ export async function updateMerchantAccount(req: Request, res: Response, next: N
       credentials,
       providerConfig,
       angelpayUserAccountId,
+      balanceProviderId,
+      balanceProviderAccountId,
     })
 
     logger.info('Merchant account updated via API', {

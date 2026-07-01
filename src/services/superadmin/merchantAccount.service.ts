@@ -10,6 +10,7 @@ import {
   PROVIDER_DEVICE_COMPATIBILITY,
 } from '../../lib/providerDeviceCompatibility'
 import { createBlumonTpvService } from '../tpv/blumon-tpv.service'
+import { getBalanceProviderClient } from '../balance-providers/registry'
 
 /**
  * MerchantAccount Service
@@ -231,6 +232,13 @@ interface UpdateMerchantAccountData {
    * - undefined → leave unchanged (default behavior).
    */
   angelpayUserAccountId?: string | null
+  /**
+   * Which banking/fintech BalanceProvider this venue's sub-merchant has
+   * integrated, if any — and its provider-specific account identifier (e.g.
+   * the external provider's `idNegocio`). Both null to clear; set together.
+   */
+  balanceProviderId?: string | null
+  balanceProviderAccountId?: string | null
 }
 
 /**
@@ -501,6 +509,44 @@ export async function getMerchantAccount(id: string, includeCredentials: boolean
 }
 
 /**
+ * Get the live balance for a merchant account's sucursal, from whichever
+ * BalanceProvider it has configured. Requires `balanceProviderId` +
+ * `balanceProviderAccountId` to already be set (via `updateMerchantAccount`)
+ * — there's no auto-discovery/matching yet.
+ */
+export async function getBalance(id: string) {
+  const account = await prisma.merchantAccount.findUnique({
+    where: { id },
+    select: {
+      id: true,
+      displayName: true,
+      externalMerchantId: true,
+      balanceProviderAccountId: true,
+      balanceProvider: { select: { code: true, name: true } },
+    },
+  })
+
+  if (!account) {
+    throw new NotFoundError(`Merchant account ${id} not found`)
+  }
+  if (!account.balanceProvider || !account.balanceProviderAccountId) {
+    throw new BadRequestError(
+      `Merchant account ${account.displayName || account.externalMerchantId} no tiene un proveedor de saldo ` +
+        'configurado. Edítalo primero seleccionando un proveedor y su id de cuenta.',
+    )
+  }
+
+  const client = getBalanceProviderClient(account.balanceProvider.code)
+  if (!client) {
+    throw new BadRequestError(
+      `El proveedor "${account.balanceProvider.name}" (${account.balanceProvider.code}) no tiene una implementación todavía.`,
+    )
+  }
+
+  return client.getBalance(account.balanceProviderAccountId)
+}
+
+/**
  * Create a new merchant account
  * @param data Merchant account creation data
  * @returns Created merchant account
@@ -738,6 +784,28 @@ export async function updateMerchantAccount(id: string, data: UpdateMerchantAcco
   // `onDelete: SetNull` in Prisma so null is a valid assignment.
   if (data.angelpayUserAccountId !== undefined) {
     updateData.angelpayUserAccountId = data.angelpayUserAccountId
+  }
+  // `balanceProviderId`/`balanceProviderAccountId` both accept null (clear) —
+  // discriminate explicitly so an absent key doesn't wipe them out. Setting a
+  // non-null accountId is validated against the provider's own client first
+  // (if it implements `validateAccountId`), so a typo fails loudly here
+  // instead of silently as a confusing 404 on the next balance fetch.
+  if (data.balanceProviderId !== undefined) {
+    updateData.balanceProviderId = data.balanceProviderId
+  }
+  if (data.balanceProviderAccountId !== undefined) {
+    if (data.balanceProviderAccountId) {
+      const effectiveProviderId = data.balanceProviderId !== undefined ? data.balanceProviderId : existingAccount.balanceProviderId
+      const provider = effectiveProviderId ? await prisma.balanceProvider.findUnique({ where: { id: effectiveProviderId } }) : null
+      if (!provider) {
+        throw new BadRequestError('balanceProviderAccountId requiere un balanceProviderId válido configurado primero.')
+      }
+      const client = getBalanceProviderClient(provider.code)
+      if (client?.validateAccountId) {
+        await client.validateAccountId(data.balanceProviderAccountId)
+      }
+    }
+    updateData.balanceProviderAccountId = data.balanceProviderAccountId
   }
 
   const account = await prisma.merchantAccount.update({

@@ -18,7 +18,15 @@ export async function getAggregatorById(id: string) {
     where: { id },
     include: {
       merchants: {
-        select: { id: true, displayName: true, externalMerchantId: true, active: true },
+        select: {
+          id: true,
+          displayName: true,
+          externalMerchantId: true,
+          active: true,
+          balanceProviderId: true,
+          balanceProviderAccountId: true,
+          balanceProvider: { select: { code: true, name: true } },
+        },
       },
       venueCommissions: {
         include: { venue: { select: { id: true, name: true, slug: true } } },
