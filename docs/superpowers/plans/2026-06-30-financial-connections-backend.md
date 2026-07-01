@@ -16,7 +16,7 @@
 - **Refresh serializado entre instancias** con `pg_advisory_xact_lock(hashtext(connectionId))`.
 - **Saldo `OK` ⇒ `amount` y `syncedAt` no nulos.** Saldo nulo/malformado del proveedor ⇒ `ERROR`/`UNKNOWN`, nunca `OK` en blanco.
 - **Invariante `venueId IS NULL ⇔ mode = SHARED_BROKER`.**
-- **Authz:** endpoints bajo `/venues/:venueId/financial-connections` con `authenticateTokenMiddleware` + `checkOwnerAccess`.
+- **Authz:** endpoints bajo `/venues/:venueId/financial-connections` con `authenticateTokenMiddleware` + `checkPermission('financialConnections:manage')`. **Corrección post-Task-4** (`checkOwnerAccess` NO sirve aquí: lee `req.params.orgId` — es para rutas `/organizations/:orgId/...`, no `/venues/:venueId/...`; `checkPermission` sí resuelve el rol correcto contra el `:venueId` específico de la URL vía lookup a `StaffVenue`, que es lo que estas rutas necesitan). Requiere agregar `'financialConnections:*'` a `DEFAULT_PERMISSIONS[StaffRole.OWNER]` en `src/lib/permissions.ts` (mismo patrón que `settlements:*`/`accounting:*`) — OWNER únicamente, ADMIN/MANAGER no lo tienen.
 - **API base del proveedor:** `env.EXTERNAL_BANK_API_BASE`; header `mgPlatform: env.EXTERNAL_BANK_MG_PLATFORM`.
 - **NO correr `prisma migrate reset` nunca.** Si `migrate dev` detecta drift, usar el patrón `migrate diff --script` → `psql` → `migrate resolve --applied`.
 - TDD estricto; `npm run typecheck`, `npm run lint`, `npm test` limpios al final.
@@ -949,11 +949,14 @@ git commit -m "feat(financial-connections): orchestration service (connect/devic
 - Create: `src/controllers/dashboard/financialConnection.controller.ts`
 - Create: `src/routes/dashboard/financialConnection.routes.ts`
 - Modify: `src/routes/dashboard.routes.ts` (mount)
+- Modify: `src/lib/permissions.ts` (agregar `'financialConnections:*'` a `DEFAULT_PERMISSIONS[StaffRole.OWNER]`)
 - Test: `tests/unit/controllers/financialConnection.controller.test.ts` (opcional light) — o cubrir vía el servicio ya testeado
 
 **Interfaces:**
 - Consumes: el servicio (Task 5).
-- Produces: rutas `GET /financial-providers`, `GET|POST /venues/:venueId/financial-connections`, `POST /financial-connections/:id/validate-device`, `POST /financial-connections/:id/select-account`, `GET /financial-accounts/:id/balance`, `DELETE /financial-connections/:id`.
+- Produces: rutas `GET /financial-providers`, `GET|POST /venues/:venueId/financial-connections`, `POST /venues/:venueId/financial-connections/:id/validate-device`, `POST /venues/:venueId/financial-connections/:id/select-account`, `GET /venues/:venueId/financial-accounts/:id/balance`, `DELETE /venues/:venueId/financial-connections/:id`.
+
+> **Corrección post-Task-4 (importante — cambia la forma de las rutas vs. el borrador original):** TODAS las rutas por `:id` se anidan bajo `/venues/:venueId/…` (igual que el patrón de referencia `ecommerce-merchants`, que anida `/venues/:venueId/ecommerce-merchants/:id/toggle` etc.). Esto es necesario por DOS razones: (1) `checkPermission` resuelve el rol efectivo contra el `:venueId` del path — sin él no hay forma de autorizar correctamente; (2) sin verificar que la conexión/cuenta `:id` en verdad pertenece a `:venueId`, un OWNER de la sucursal A podría operar sobre una conexión de la sucursal B (IDOR) con solo adivinar/enumerar el id. Por eso el controlador agrega una verificación de pertenencia (`assertBelongsToVenue`) antes de delegar al servicio.
 
 - [ ] **Step 1: Controlador**
 
@@ -962,7 +965,7 @@ git commit -m "feat(financial-connections): orchestration service (connect/devic
 import { Request, Response, NextFunction } from 'express'
 import prisma from '@/utils/prismaClient'
 import * as svc from '@/services/financial-connections/financialConnection.service'
-import { BadRequestError } from '@/errors/AppError'
+import { BadRequestError, NotFoundError } from '@/errors/AppError'
 
 export async function listProviders(_req: Request, res: Response, next: NextFunction) {
   try {
@@ -982,10 +985,28 @@ export async function createConnection(req: Request, res: Response, next: NextFu
     res.status(201).json({ success: true, data: r })
   } catch (e) { next(e) }
 }
+
+// Defense-in-depth: :venueId (del path, ya autorizado por checkPermission) debe coincidir
+// con la sucursal REAL dueña de la conexión/cuenta :id — si no, 404 (no 403: no confirmamos
+// existencia del recurso a quien no tiene acceso). Sin esto, un OWNER de otra sucursal podría
+// operar sobre una conexión ajena con solo adivinar el id.
+async function assertConnectionBelongsToVenue(connectionId: string, venueId: string): Promise<void> {
+  const conn = await prisma.financialConnection.findUnique({ where: { id: connectionId }, select: { venueId: true } })
+  if (!conn || conn.venueId !== venueId) throw new NotFoundError('Conexión no encontrada.')
+}
+async function assertAccountBelongsToVenue(financialAccountId: string, venueId: string): Promise<void> {
+  const acc = await prisma.financialAccount.findUnique({
+    where: { id: financialAccountId },
+    select: { connection: { select: { venueId: true } } },
+  })
+  if (!acc || acc.connection.venueId !== venueId) throw new NotFoundError('Cuenta no encontrada.')
+}
+
 export async function validateDevice(req: Request, res: Response, next: NextFunction) {
   try {
     const { code } = req.body ?? {}
     if (!code) throw new BadRequestError('code es requerido.')
+    await assertConnectionBelongsToVenue(req.params.id, req.params.venueId)
     res.json({ success: true, data: await svc.validateDevice(req.params.id, String(code)) })
   } catch (e) { next(e) }
 }
@@ -993,14 +1014,19 @@ export async function selectAccount(req: Request, res: Response, next: NextFunct
   try {
     const { externalId, merchantAccountId } = req.body ?? {}
     if (!externalId) throw new BadRequestError('externalId es requerido.')
+    await assertConnectionBelongsToVenue(req.params.id, req.params.venueId)
     res.json({ success: true, data: await svc.selectAccount(req.params.id, String(externalId), merchantAccountId) })
   } catch (e) { next(e) }
 }
 export async function getBalance(req: Request, res: Response, next: NextFunction) {
-  try { res.json({ success: true, data: await svc.getBalanceForConnectionAccount(req.params.id) }) } catch (e) { next(e) }
+  try {
+    await assertAccountBelongsToVenue(req.params.id, req.params.venueId)
+    res.json({ success: true, data: await svc.getBalanceForConnectionAccount(req.params.id) })
+  } catch (e) { next(e) }
 }
 export async function disconnect(req: Request, res: Response, next: NextFunction) {
   try {
+    await assertConnectionBelongsToVenue(req.params.id, req.params.venueId)
     await svc.disconnect(req.params.id, (req as any).authContext?.userId)
     res.json({ success: true })
   } catch (e) { next(e) }
@@ -1012,34 +1038,47 @@ export async function disconnect(req: Request, res: Response, next: NextFunction
 `src/routes/dashboard/financialConnection.routes.ts`:
 ```typescript
 import { Router } from 'express'
-import { checkOwnerAccess } from '@/middlewares/checkOwnerAccess.middleware'
+import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import * as ctrl from '@/controllers/dashboard/financialConnection.controller'
 
-// venue-scoped (montado bajo /venues/:venueId/…). mergeParams hereda :venueId.
+// TODO anidado bajo /venues/:venueId/… (mergeParams hereda :venueId). checkPermission
+// resuelve el rol efectivo contra ESE :venueId (lookup a StaffVenue, no confía en el JWT a
+// ciegas) — es el único middleware de este codebase que hace esa verificación por-request.
 export const venueFinancialConnectionRoutes = Router({ mergeParams: true })
-venueFinancialConnectionRoutes.get('/', checkOwnerAccess, ctrl.listConnections)
-venueFinancialConnectionRoutes.post('/', checkOwnerAccess, ctrl.createConnection)
+venueFinancialConnectionRoutes.get('/', checkPermission('financialConnections:manage'), ctrl.listConnections)
+venueFinancialConnectionRoutes.post('/', checkPermission('financialConnections:manage'), ctrl.createConnection)
+venueFinancialConnectionRoutes.post('/:id/validate-device', checkPermission('financialConnections:manage'), ctrl.validateDevice)
+venueFinancialConnectionRoutes.post('/:id/select-account', checkPermission('financialConnections:manage'), ctrl.selectAccount)
+venueFinancialConnectionRoutes.delete('/:id', checkPermission('financialConnections:manage'), ctrl.disconnect)
 
-// no venue-scoped (por id de conexión / cuenta).
-export const financialConnectionRoutes = Router()
-financialConnectionRoutes.post('/financial-connections/:id/validate-device', checkOwnerAccess, ctrl.validateDevice)
-financialConnectionRoutes.post('/financial-connections/:id/select-account', checkOwnerAccess, ctrl.selectAccount)
-financialConnectionRoutes.delete('/financial-connections/:id', checkOwnerAccess, ctrl.disconnect)
-financialConnectionRoutes.get('/financial-accounts/:id/balance', checkOwnerAccess, ctrl.getBalance)
-financialConnectionRoutes.get('/financial-providers', ctrl.listProviders)
+// Cuentas (saldo en vivo) — mismo prefijo de venue, recurso distinto.
+export const venueFinancialAccountRoutes = Router({ mergeParams: true })
+venueFinancialAccountRoutes.get('/:id/balance', checkPermission('financialConnections:manage'), ctrl.getBalance)
+
+// Catálogo — de solo lectura, sin scope de venue, cualquier usuario autenticado.
+export const financialProviderRoutes = Router()
+financialProviderRoutes.get('/financial-providers', ctrl.listProviders)
 ```
-> Nota: `checkOwnerAccess` valida OWNER/SUPERADMIN a nivel org. Los endpoints por `:id` (no scoped por venue) confían en ese gate; si se requiere aislar por venue del owner de esa conexión, agregar una verificación en el servicio (fuera de alcance del v1).
+
+- [ ] **Step 2.5: Agregar el permiso al matriz de roles**
+
+En `src/lib/permissions.ts`, dentro de `DEFAULT_PERMISSIONS[StaffRole.OWNER]` (mismo bloque donde están `settlements:*`/`accounting:*`), agregar una línea:
+```typescript
+    'financialConnections:*', // Conectar/leer/desconectar cuentas bancarias del venue (self-connect)
+```
+**Solo en el array de `StaffRole.OWNER`** — no agregar a ADMIN/MANAGER/etc. (SUPERADMIN ya tiene bypass total en `hasPermission`, no necesita entrada explícita).
 
 - [ ] **Step 3: Montar en el router de dashboard**
 
 En `src/routes/dashboard.routes.ts`, junto a los otros `router.use('/venues/:venueId/…')` (ej. cerca de `ecommerce-merchants`, ~línea 3931) agregar:
 ```typescript
-import { venueFinancialConnectionRoutes, financialConnectionRoutes } from './dashboard/financialConnection.routes'
+import { venueFinancialConnectionRoutes, venueFinancialAccountRoutes, financialProviderRoutes } from './dashboard/financialConnection.routes'
 // …
 router.use('/venues/:venueId/financial-connections', authenticateTokenMiddleware, venueFinancialConnectionRoutes)
-router.use('/', authenticateTokenMiddleware, financialConnectionRoutes)
+router.use('/venues/:venueId/financial-accounts', authenticateTokenMiddleware, venueFinancialAccountRoutes)
+router.use('/', authenticateTokenMiddleware, financialProviderRoutes)
 ```
-(Usar el mismo identificador de middleware de auth que ya usan las rutas vecinas — `authenticateTokenMiddleware`.)
+(Mismo middleware de auth que las rutas vecinas — `authenticateTokenMiddleware`.)
 
 - [ ] **Step 4: Typecheck + smoke de rutas**
 
@@ -1049,25 +1088,30 @@ Run (con server levantado en dev): `curl -s -H "Authorization: Bearer <token-dev
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/controllers/dashboard/financialConnection.controller.ts src/routes/dashboard/financialConnection.routes.ts src/routes/dashboard.routes.ts
-git commit -m "feat(financial-connections): REST endpoints (providers catalog + venue-scoped connections)"
+git add src/controllers/dashboard/financialConnection.controller.ts src/routes/dashboard/financialConnection.routes.ts src/routes/dashboard.routes.ts src/lib/permissions.ts
+git commit -m "feat(financial-connections): REST endpoints (providers catalog + venue-scoped connections, financialConnections:manage permission)"
 ```
 
 ---
 
-### Task 7: Reapuntar superadmin/aggregator al modelo nuevo + seed + smoke script
+### Task 7: Reapuntar superadmin/aggregator al modelo nuevo + seed + retirar código V1 superseded
 
 **Files:**
 - Modify: `src/services/superadmin/merchantAccount.service.ts` (`getBalance`, `updateMerchantAccount`, `UpdateMerchantAccountData`, imports)
 - Modify: `src/controllers/superadmin/merchantAccount.controller.ts` (body destructure de update, `getBalance`)
 - Modify: `src/routes/superadmin/merchantAccount.routes.ts` (ruta `/:id/balance`)
 - Modify: `src/services/superadmin/aggregator.service.ts` (`getAggregatorById` select)
+- Modify: `src/services/superadmin/balanceProvider.service.ts` → repuntar a `prisma.financialProvider`
 - Modify: `scripts/seed-balance-providers.ts` → seedear `FinancialProvider`
-- Modify: `scripts/test-external-bank-balance.ts` (opcional, dejar el broker)
-- Modify: `src/routes/superadmin.routes.ts` / `src/routes/dashboard/superadmin.routes.ts` (si el mount de `balance-providers` cambia de nombre) y `balanceProvider.*` (renombrar a `financialProvider` o dejar leyendo `financialProvider`)
+- Modify: `scripts/test-external-bank-balance.ts` → usar el cliente nuevo directo (no la clase vieja que se borra)
+- **Delete:** `src/services/balance-providers/` (dir completo: `types.ts`, `registry.ts`, `externalBank.client.ts`) — código V1 superseded por `src/services/financial-connections/` (Tasks 3-4), sin consumidores una vez fijo el Step 1.
+- **Delete:** `src/services/externalBank/externalBankAuth.service.ts`, `src/services/externalBank/externalBankApi.service.ts` — mismo motivo. **NO borrar** `src/services/externalBank/pick.ts` (lo sigue usando `financial-connections/externalBank.client.ts`).
+- **Delete:** `tests/unit/services/externalBank/` (dir completo — tests de los 2 archivos que se borran).
 
 **Interfaces:**
 - Consumes: `getBalanceForMerchant` (Task 5), modelo `FinancialProvider`/`FinancialAccount` (Task 1).
+
+> **Nota (descubierta al preparar el dispatch):** Task 1 dejó vivo el código V1 (`src/services/balance-providers/`, y 2 de los 3 archivos en `src/services/externalBank/`) que esta misma tarea supersede — no rompía el build (no referencian `prisma.balanceProvider` directamente, solo texto incidental en comentarios/mensajes de error), pero queda como implementación duplicada y muerta si no se retira. Verificado: NADA fuera de esos dos directorios los importa excepto `merchantAccount.service.ts` (que este Task ya repunta) — seguro borrarlos. `scripts/test-external-bank-balance.ts` SÍ importaba la clase vieja que se borra, por eso también se actualiza (Step 6 abajo), no queda opcional.
 
 - [ ] **Step 1: `merchantAccount.service.ts` — reemplazar `getBalance` y limpiar el update**
 
@@ -1107,25 +1151,369 @@ En `scripts/seed-balance-providers.ts`, cambiar el upsert a `prisma.financialPro
 Run: `npx tsx -r tsconfig-paths/register scripts/seed-balance-providers.ts` → imprime el id.
 Migrar la fila existente en dev: `psql "$DATABASE_URL" -c "SELECT code FROM \"FinancialProvider\";"` → `EXTERNAL_BANK`.
 
-- [ ] **Step 5: Renombrar el endpoint de catálogo superadmin (si aplica)**
+- [ ] **Step 5: Repuntar el catálogo superadmin al modelo nuevo**
 
-Si `balanceProvider.service.ts`/`controller`/`routes` (superadmin) siguen leyendo `prisma.balanceProvider`, cambiarlos a `prisma.financialProvider`. Alternativa mínima: dejar esos archivos pero cambiar la query al nuevo modelo. Confirmar con `grep -rn "prisma.balanceProvider\|balanceProvider\." src` → 0 resultados.
+`balanceProvider.service.ts`/`controller`/`routes` (superadmin) se QUEDAN tal cual están estructurados (los sigue llamando el frontend viejo, que se actualiza en un plan aparte) — solo cambia la query de `prisma.balanceProvider` a `prisma.financialProvider` en `src/services/superadmin/balanceProvider.service.ts`:
+```typescript
+  return prisma.financialProvider.findMany({
+    where,
+    orderBy: { name: 'asc' },
+  })
+```
+No renombrar el archivo/función/ruta en este paso (eso es scope del plan de frontend, que consume estos nombres).
 
-- [ ] **Step 6: Typecheck limpio (cero refs a los campos viejos)**
+- [ ] **Step 6: Retirar código V1 superseded + arreglar el smoke script**
+
+Borrar (ya sin consumidores tras el Step 1):
+```bash
+rm -rf src/services/balance-providers
+rm src/services/externalBank/externalBankAuth.service.ts src/services/externalBank/externalBankApi.service.ts
+rm -rf tests/unit/services/externalBank
+```
+(`src/services/externalBank/pick.ts` NO se borra — lo sigue usando `src/services/financial-connections/externalBank.client.ts`.)
+
+`scripts/test-external-bank-balance.ts` importaba la clase que se acaba de borrar (`externalBankApiService` de `../src/services/externalBank/externalBankApi.service`) — reescribirlo para usar el cliente nuevo directamente (sin pasar por la DB/orquestación, sigue siendo un smoke test de credenciales+API, no de la feature de conexiones):
+```typescript
+import 'dotenv/config'
+import { externalBankClient } from '../src/services/financial-connections/externalBank.client'
+import { env } from '../src/config/env'
+
+async function main() {
+  const idNegocio = process.argv[2]
+  const email = env.EXTERNAL_BANK_EMAIL
+  const password = env.EXTERNAL_BANK_PASSWORD
+  if (!email || !password) throw new Error('Faltan EXTERNAL_BANK_EMAIL / EXTERNAL_BANK_PASSWORD en .env')
+
+  console.log('External bank provider: authenticating + fetching negocios...\n')
+  const r = await externalBankClient.connect({ email, password, deviceIdentifier: 'avoqado-server-moneygiver-balance-lookup' })
+  if (r.kind === 'need_device_validation') {
+    throw new Error('Dispositivo requiere validación OTP — ya debería estar confiable desde el setup previo.')
+  }
+
+  console.log(`Cuenta ve ${r.accounts.length} negocio(s):\n`)
+  for (const a of r.accounts) {
+    console.log(`  - ${a.label ?? '(sin nombre)'}  idNegocio=${a.externalId}  saldo=${a.balance ?? '—'}`)
+  }
+
+  if (idNegocio) {
+    const ctx = await externalBankClient.refresh(r.grant, 'avoqado-server-moneygiver-balance-lookup')
+    const balance = await externalBankClient.getBalance(ctx.ctx, idNegocio)
+    console.log(`\nBalance puntual para idNegocio=${idNegocio}:`, balance)
+  }
+}
+
+main()
+  .then(() => process.exit(0))
+  .catch(err => {
+    console.error('\nFalló:', err instanceof Error ? err.message : err)
+    process.exit(1)
+  })
+```
+⚠️ El `deviceIdentifier` (`'avoqado-server-moneygiver-balance-lookup'`) es el mismo string ya registrado/confiable en producción desde la sesión anterior — **no cambiarlo**, o hay que rehacer el handshake de OTP manualmente.
+
+- [ ] **Step 7: Typecheck limpio (cero refs a los campos viejos, cero refs al código borrado)**
 
 Run: `npm run typecheck` → sin errores.
-Run: `grep -rn "balanceProviderId\|balanceProviderAccountId\|getBalanceProviderClient\|prisma.balanceProvider" src scripts` → `(vacío)`.
+Run: `grep -rn "balanceProviderId\|balanceProviderAccountId\|getBalanceProviderClient\|prisma.balanceProvider\b" src scripts` → `(vacío)`.
+Run: `grep -rln "services/balance-providers\|externalBank/externalBankAuth\|externalBank/externalBankApi" src scripts tests` → `(vacío)`.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add src/services/superadmin/merchantAccount.service.ts src/controllers/superadmin/merchantAccount.controller.ts src/routes/superadmin/merchantAccount.routes.ts src/services/superadmin/aggregator.service.ts scripts/seed-balance-providers.ts src/services/superadmin/balanceProvider.service.ts src/controllers/superadmin/balanceProvider.controller.ts src/routes/superadmin/balanceProvider.routes.ts
-git commit -m "refactor(financial-connections): repoint superadmin getBalance + aggregator + catalog seed to new model; drop old MerchantAccount balance fields"
+git add -A src/services/superadmin/merchantAccount.service.ts src/controllers/superadmin/merchantAccount.controller.ts src/routes/superadmin/merchantAccount.routes.ts src/services/superadmin/aggregator.service.ts src/services/superadmin/balanceProvider.service.ts scripts/seed-balance-providers.ts scripts/test-external-bank-balance.ts
+git add src/services/balance-providers src/services/externalBank/externalBankAuth.service.ts src/services/externalBank/externalBankApi.service.ts tests/unit/services/externalBank
+git commit -m "refactor(financial-connections): repoint superadmin/aggregator/catalog to new model, retire superseded V1 balance-providers/externalBank code"
+```
+(El segundo `git add` de rutas ya borradas las marca como deleted en el commit — es la forma correcta de stagear un `rm`.)
+
+---
+
+### Task 9: Schema — nuevo estado `PENDING_TWO_FACTOR_AUTH`
+
+> **Por qué esta tarea existe:** Task 8 (verificación) corrió el smoke test en vivo contra producción real y encontró que la cuenta broker (que tiene 2FA activo) recibe `refreshToken: null` en el login inicial — rompiendo la premisa central del diseño ("conecta una vez, nunca vuelvas a loguearte"). Se investigó en vivo (con códigos reales de Google Authenticator) y se confirmó la causa exacta: falta un paso documentado del flujo de login que el cliente nunca implementó. La doc (`docs/api/api-doc/01-Identidad-y-Acceso.md`, líneas 12-17 y 558-605) describe la secuencia completa: `needSetupTwoFactorAuth` → **`needTwoFactorAuth` (paso 3, endpoint `POST /api/auth/validate-two-factor-code`)** → `needDeviceValidation` (paso 4, ya implementado) → `needPasswordReset`. El cliente (Task 4) solo implementó el paso 4, saltándose el 3.
+>
+> **Confirmado en vivo (2026-07-01, con 2 códigos TOTP reales):**
+> 1. Login inicial con `needTwoFactorAuth:true` → `refreshToken: null` (reproduce el hallazgo de Task 8).
+> 2. `POST /api/auth/validate-two-factor-code` con `{code, user: email, dispositivo}` (Bearer: el `token` corto del paso 1) → responde `{isLoggedIn:true, token, refreshToken, expiresIn, user, needTwoFactorAuth:false, ...}` — **el refreshToken SÍ viene aquí**, aunque la doc de esa respuesta (que solo lista `{success,message,httpStatusCode,idOperacion}`) esté incompleta.
+> 3. Un login posterior desde cero vuelve a mostrar `needTwoFactorAuth:true` — 2FA se revisa en cada login (no es como la validación de dispositivo, que es una sola vez).
+>
+> **Sin confirmar (queda como riesgo conocido, a validar en Task 11 con la implementación real):** si el refresh silencioso (`POST /api/auth/sign-in/token`) evita pedir 2FA de nuevo usando el refreshToken ya obtenido. Una prueba en vivo dio un error genérico de servidor (no un rechazo de 2FA), no concluyente. Si en producción resultara que SÍ hay que repetir 2FA en cada refresh, el fallback ya existe: `NEEDS_REAUTH` (igual que cualquier otro fallo de refresh).
+
+**Files:**
+- Modify: `prisma/schema.prisma` (agregar valor al enum `FinancialConnectionStatus`)
+
+**Interfaces:**
+- Produces: nuevo valor `PENDING_TWO_FACTOR_AUTH`. Lo usa Task 10.
+
+- [ ] **Step 1: Agregar el valor al enum**
+
+En `prisma/schema.prisma`, en `enum FinancialConnectionStatus`, agregar `PENDING_TWO_FACTOR_AUTH` (entre `PENDING_DEVICE_VALIDATION` y `PENDING_ACCOUNT_SELECTION`, reflejando el orden real de la doc: 2FA se resuelve antes que la selección de cuenta):
+```prisma
+enum FinancialConnectionStatus {
+  PENDING_DEVICE_VALIDATION
+  PENDING_TWO_FACTOR_AUTH
+  PENDING_ACCOUNT_SELECTION
+  CONNECTED
+  NEEDS_REAUTH
+  REVOKED
+  ERROR
+}
+```
+
+- [ ] **Step 2: Generar la migración**
+
+Run: `npx prisma migrate dev --name financial_connection_two_factor_status`
+Expected: crea la migración y aplica (agregar un valor a un enum de Postgres vía Prisma es un `ALTER TYPE ... ADD VALUE`, no destructivo). Mismo protocolo que Task 1 si hay drift: NUNCA `migrate reset`, usar `migrate diff --script` → `psql` → `migrate resolve --applied`.
+
+- [ ] **Step 3: Verificar**
+
+Run: `npx prisma migrate status` → up to date.
+Run: `node -e "const {PrismaClient}=require('@prisma/client'); console.log(Object.values(require('@prisma/client').FinancialConnectionStatus))"` → incluye `PENDING_TWO_FACTOR_AUTH`.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add prisma/schema.prisma prisma/migrations
+git commit -m "feat(financial-connections): add PENDING_TWO_FACTOR_AUTH status (2FA step was missing from connect flow)"
 ```
 
 ---
 
-### Task 8: Verificación backend (typecheck/lint/test + smoke en vivo)
+### Task 10: Manejar `needTwoFactorAuth` en el flujo de conexión (cliente + servicio + endpoint)
+
+**Files:**
+- Modify: `src/services/financial-connections/types.ts` (nuevo variante de `ConnectResult`, nuevo método en `FinancialProviderClient`)
+- Modify: `src/services/financial-connections/externalBank.client.ts` (branch de `needTwoFactorAuth` en `connect()`, nuevo método `validateTwoFactorCode`)
+- Modify: `src/services/financial-connections/financialConnection.service.ts` (branch en `finishConnected`/`startConnection`, nueva función `validateTwoFactorAuth`)
+- Modify: `src/controllers/dashboard/financialConnection.controller.ts` (nuevo handler `validateTwoFactorAuth`)
+- Modify: `src/routes/dashboard/financialConnection.routes.ts` (nueva ruta `POST /:id/validate-2fa`)
+- Modify: `scripts/test-external-bank-balance.ts` (manejar el 3er variante de `ConnectResult`, o simplemente lanzar con mensaje claro si toca — no se espera que el broker caiga en device-validation ni en 2FA sin resolver en smoke tests normales, pero el tipo ahora tiene 3 miembros y TypeScript lo exige)
+- Test: `tests/unit/services/financial-connections/externalBank.client.test.ts` (agregar casos), `tests/unit/services/financial-connections/financialConnection.service.test.ts` (agregar casos)
+
+**Interfaces:**
+- Consumes: `FinancialConnectionStatus.PENDING_TWO_FACTOR_AUTH` (Task 9).
+- Produces: `POST /venues/:venueId/financial-connections/:id/validate-2fa` — mismo patrón de authz/ownership-guard que `validate-device` (Task 6).
+
+- [ ] **Step 1: `types.ts` — nuevo variante + método**
+
+En `ConnectResult`, agregar:
+```typescript
+export type ConnectResult =
+  | { kind: 'connected'; grant: Grant; accounts: ProviderAccount[] }
+  | { kind: 'need_device_validation'; challenge: { accessToken: string; processId: string } }
+  | { kind: 'need_two_factor_auth'; challenge: { accessToken: string } }
+```
+En `FinancialProviderClient`, agregar el método (junto a `validateDevice`):
+```typescript
+  validateTwoFactorCode(input: {
+    email: string; deviceIdentifier: string
+    challenge: { accessToken: string }; code: string
+  }): Promise<ConnectResult>
+```
+
+- [ ] **Step 2: Tests del cliente (fallan) — agregar a `externalBank.client.test.ts`**
+
+Agregar, respetando el orden real de la API (2FA se revisa ANTES que device-validation — confirmado en vivo: esta cuenta tiene `needDeviceValidation:false` y `needTwoFactorAuth:true` simultáneamente):
+```typescript
+it('connect: needTwoFactorAuth (no device validation needed) → returns 2FA challenge', async () => {
+  nock(BASE).post('/api/auth/sign-in/merchant').reply(200, {
+    signedIn: true, token: 'tmp-tok-2fa', refreshToken: null,
+    needTwoFactorAuth: true, needDeviceValidation: false,
+    expiresIn: new Date(Date.now() + 3600e3).toISOString(),
+  })
+  const client = await loadClient()
+  const r = await client.connect({ email: 'a@b.co', password: 'p', deviceIdentifier: DEVICE })
+  expect(r.kind).toBe('need_two_factor_auth')
+  if (r.kind === 'need_two_factor_auth') expect(r.challenge).toEqual({ accessToken: 'tmp-tok-2fa' })
+})
+
+it('validateTwoFactorCode: valid code → returns full grant + accounts', async () => {
+  nock(BASE).post('/api/auth/validate-two-factor-code').reply(200, {
+    isLoggedIn: true, success: true, token: 'acc-2fa', refreshToken: 'ref-2fa',
+    expiresIn: new Date(Date.now() + 3600e3).toISOString(), needTwoFactorAuth: false,
+  })
+  nock(BASE).get('/api/auth').reply(200, NEGOCIOS)
+  const client = await loadClient()
+  const r = await client.validateTwoFactorCode({
+    email: 'a@b.co', deviceIdentifier: DEVICE,
+    challenge: { accessToken: 'tmp-tok-2fa' }, code: '123456',
+  })
+  expect(r.kind).toBe('connected')
+  if (r.kind === 'connected') expect(r.grant.refreshToken).toBe('ref-2fa')
+})
+
+it('validateTwoFactorCode: invalid code → throws', async () => {
+  nock(BASE).post('/api/auth/validate-two-factor-code').reply(400, {
+    Success: false, Message: 'Código inválido', HttpStatusCode: 400, IdOperacion: null,
+  })
+  const client = await loadClient()
+  await expect(client.validateTwoFactorCode({
+    email: 'a@b.co', deviceIdentifier: DEVICE,
+    challenge: { accessToken: 'tmp-tok-2fa' }, code: '000000',
+  })).rejects.toThrow(/inválid|inv[aá]lido/i)
+})
+```
+
+- [ ] **Step 3: Correr → fallan** (el método no existe). Expected: FAIL.
+
+- [ ] **Step 4: Implementar en `externalBank.client.ts`**
+
+En `connect()`, el orden real (confirmado en vivo) es: revisar `needTwoFactorAuth` ANTES que `needDeviceValidation` (la doc también lista 2FA como paso 3 y device-validation como paso 4). Insertar el branch de 2FA primero:
+```typescript
+    if (pick<boolean>(data, 'needTwoFactorAuth')) {
+      const accessToken = accessTokenOf(data)
+      return { kind: 'need_two_factor_auth', challenge: { accessToken } }
+    }
+    if (pick<boolean>(data, 'needDeviceValidation')) {
+      // ... (código existente sin cambios)
+    }
+```
+Nuevo método, junto a `validateDevice`:
+```typescript
+  async validateTwoFactorCode({ email, deviceIdentifier, challenge, code }): Promise<ConnectResult> {
+    let v: unknown
+    try {
+      ;({ data: v } = await axios.post(`${base()}/api/auth/validate-two-factor-code`,
+        { code, user: email, dispositivo: dispositivo(deviceIdentifier) },
+        { headers: headers(challenge.accessToken), timeout: 20_000 }))
+    } catch (e) {
+      if (axios.isAxiosError(e)) throw new BadRequestError(pick<string>(e.response?.data, 'message') || 'Código 2FA inválido o expirado.')
+      throw e
+    }
+    if (!pick<boolean>(v, 'success') && !pick<boolean>(v, 'isLoggedIn')) {
+      throw new BadRequestError(pick<string>(v, 'message') || 'Código 2FA inválido o expirado.')
+    }
+    const grant = toGrant(v)
+    const accounts = normalizeAccounts(await fetchMe(accessTokenOf(v)))
+    return { kind: 'connected', grant, accounts }
+  },
+```
+Nota: la respuesta real de `validate-two-factor-code` no trae `negocios` — por eso se llama `fetchMe` con el token fresco, igual que ya hace `validateDevice`.
+
+- [ ] **Step 5: Correr los tests → pasan**
+
+Run: `npx jest tests/unit/services/financial-connections/externalBank.client.test.ts` → PASS (todos, incluidos los 3 nuevos).
+
+- [ ] **Step 6: Servicio — `financialConnection.service.ts`**
+
+En `finishConnected`/donde se resuelve el `ConnectResult` de `connect()`/`validateDevice()`, agregar el branch de `need_two_factor_auth` (mismo patrón que `need_device_validation`: guardar `challengeEnc` cifrado — aquí solo `{accessToken, email, password}`, sin `processId` — con expiry, `status: PENDING_TWO_FACTOR_AUTH`). Nueva función exportada:
+```typescript
+export async function validateTwoFactorAuth(connectionId: string, code: string) {
+  const conn = await prisma.financialConnection.findUniqueOrThrow({ where: { id: connectionId }, include: { provider: true } })
+  if (!conn.challengeEnc || !conn.challengeExpiresAt || conn.challengeExpiresAt < new Date()) {
+    throw new BadRequestError('El reto de 2FA expiró; vuelve a iniciar la conexión.')
+  }
+  const ch = decryptGrant<{ accessToken: string; email: string }>(conn.challengeEnc)
+  const client = clientFor(conn.provider.code)
+  const r = await client.validateTwoFactorCode({
+    email: ch.email, deviceIdentifier: conn.deviceIdentifier!,
+    challenge: { accessToken: ch.accessToken }, code,
+  })
+  if (r.kind !== 'connected') throw new BadRequestError('El proveedor pidió otro paso adicional no soportado todavía.')
+  await prisma.financialConnection.update({ where: { id: connectionId }, data: { challengeEnc: null, challengeExpiresAt: null } })
+  return finishConnected(connectionId, conn.deviceIdentifier!, r.grant, r.accounts)
+}
+```
+Y en el punto donde `startConnection`/`validateDevice` reciben un `ConnectResult`, agregar el branch `need_two_factor_auth` análogo al de `need_device_validation` (guardando `challengeEnc = encryptGrant({ accessToken: r.challenge.accessToken, email: input.email, password: input.password })`, `status: 'PENDING_TWO_FACTOR_AUTH'`).
+
+- [ ] **Step 7: Tests del servicio (agregar a `financialConnection.service.test.ts`)**
+
+```typescript
+it('startConnection: needTwoFactorAuth → stores challenge, PENDING_TWO_FACTOR_AUTH', async () => {
+  db.financialConnection.create.mockResolvedValue({ id: 'c4', deviceIdentifier: 'dev-c4' })
+  clientMock.connect.mockResolvedValue({ kind: 'need_two_factor_auth', challenge: { accessToken: 'tmp-2fa' } })
+  const r = await svc.startConnection({ venueId: 'v1', providerId: 'prov-1', email: 'a@b.co', password: 'p' })
+  expect(r.status).toBe('PENDING_TWO_FACTOR_AUTH')
+})
+
+it('validateTwoFactorAuth: valid code → CONNECTED', async () => {
+  db.financialConnection.findUniqueOrThrow.mockResolvedValue({
+    id: 'c4', deviceIdentifier: 'dev-c4', provider: { code: 'EXTERNAL_BANK' },
+    challengeEnc: enc2faFixture(), challengeExpiresAt: new Date(Date.now() + 60_000),
+  })
+  clientMock.validateTwoFactorCode.mockResolvedValue({ kind: 'connected', grant: { refreshToken: 'ref-x' }, accounts: [{ externalId: 'neg-1' }] })
+  const r = await svc.validateTwoFactorAuth('c4', '123456')
+  expect(r.status).toBe('CONNECTED')
+})
+```
+(`enc2faFixture()`: mismo patrón que `encFixture()` ya usado en este archivo — `encryptGrant({ accessToken: 'tmp-2fa', email: 'a@b.co', password: 'p' })`.)
+
+Run: `npx jest tests/unit/services/financial-connections/financialConnection.service.test.ts` → PASS.
+
+- [ ] **Step 8: Endpoint REST**
+
+En `financialConnection.controller.ts`, junto a `validateDevice`:
+```typescript
+export async function validateTwoFactorAuth(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { code } = req.body ?? {}
+    if (!code) throw new BadRequestError('code es requerido.')
+    await assertConnectionBelongsToVenue(req.params.id, req.params.venueId)
+    res.json({ success: true, data: await svc.validateTwoFactorAuth(req.params.id, String(code)) })
+  } catch (e) { next(e) }
+}
+```
+En `financialConnection.routes.ts`, junto a `/:id/validate-device`:
+```typescript
+venueFinancialConnectionRoutes.post('/:id/validate-2fa', checkPermission('financialConnections:manage'), ctrl.validateTwoFactorAuth)
+```
+
+- [ ] **Step 9: `scripts/test-external-bank-balance.ts` — soportar el código 2FA (necesario para probar esta cuenta real, que SIEMPRE lo pide)**
+
+La cuenta broker de prueba tiene 2FA activo — todo login normal (incluyendo este smoke test) va a caer en `need_two_factor_auth`. Agregar un 3er argumento opcional (código TOTP) para poder completar el flujo cuando haga falta:
+```typescript
+async function main() {
+  const idNegocio = process.argv[2]
+  const twoFactorCode = process.argv[3]
+  const email = env.EXTERNAL_BANK_EMAIL
+  const password = env.EXTERNAL_BANK_PASSWORD
+  if (!email || !password) throw new Error('Faltan EXTERNAL_BANK_EMAIL / EXTERNAL_BANK_PASSWORD en .env')
+
+  console.log('External bank provider: authenticating + fetching negocios...\n')
+  let r = await externalBankClient.connect({ email, password, deviceIdentifier: 'avoqado-server-moneygiver-balance-lookup' })
+
+  if (r.kind === 'need_two_factor_auth') {
+    if (!twoFactorCode) {
+      throw new Error('Cuenta requiere código 2FA. Re-ejecuta: tsx scripts/test-external-bank-balance.ts <idNegocio> <codigo2FA>')
+    }
+    r = await externalBankClient.validateTwoFactorCode({
+      email, deviceIdentifier: 'avoqado-server-moneygiver-balance-lookup',
+      challenge: r.challenge, code: twoFactorCode,
+    })
+  }
+  if (r.kind === 'need_device_validation') {
+    throw new Error('Dispositivo requiere validación OTP — ya debería estar confiable desde el setup previo.')
+  }
+
+  console.log(`Cuenta ve ${r.accounts.length} negocio(s):\n`)
+  for (const a of r.accounts) {
+    console.log(`  - ${a.label ?? '(sin nombre)'}  idNegocio=${a.externalId}  saldo=${a.balance ?? '—'}`)
+  }
+
+  if (idNegocio) {
+    const ctx = await externalBankClient.refresh(r.grant, 'avoqado-server-moneygiver-balance-lookup')
+    const balance = await externalBankClient.getBalance(ctx.ctx, idNegocio)
+    console.log(`\nBalance puntual para idNegocio=${idNegocio}:`, balance)
+  }
+}
+```
+(Reemplaza el cuerpo completo de `main()`; el resto del archivo — imports, `main().then/catch` — no cambia.)
+
+- [ ] **Step 10: Typecheck + lint limpios**
+
+Run: `npm run typecheck` → sin errores.
+Run: `npm run lint` → sin errores nuevos.
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add src/services/financial-connections/types.ts src/services/financial-connections/externalBank.client.ts src/services/financial-connections/financialConnection.service.ts src/controllers/dashboard/financialConnection.controller.ts src/routes/dashboard/financialConnection.routes.ts scripts/test-external-bank-balance.ts tests/unit/services/financial-connections/externalBank.client.test.ts tests/unit/services/financial-connections/financialConnection.service.test.ts
+git commit -m "fix(financial-connections): handle needTwoFactorAuth in connect flow (was silently missing — broker account has 2FA enabled and got refreshToken:null without this step)"
+```
+
+---
+
+### Task 11: Verificación backend (typecheck/lint/test + smoke en vivo)
 
 **Files:** ninguno nuevo (verificación).
 
@@ -1136,10 +1524,12 @@ Run: `npm run lint` → limpio (arreglar imports sin usar, etc.).
 Run: `npx jest tests/unit/services/financial-connections` → todos verde.
 Run: `npx jest tests/unit/services/superadmin/merchantAccount` → sin regresiones.
 
-- [ ] **Step 2: Smoke en vivo contra el negocio de prueba (broker)**
+- [ ] **Step 2: Smoke en vivo contra el negocio de prueba (broker) — REQUIERE un código 2FA en vivo**
 
-Run: `npx tsx -r tsconfig-paths/register scripts/test-external-bank-balance.ts 3c45a403-d1ca-4449-c735-08de70ba745e`
-Expected: imprime el saldo real del negocio `AV-MoneyGiver` (confirma que el cliente/tokens siguen sirviendo).
+Esta cuenta tiene 2FA activo (confirmado en la investigación de Task 9) — **este paso no se puede automatizar sin coordinación humana** (pedir un código fresco de Google Authenticator, con <1 min de vigencia, y correr de inmediato). Quien ejecute este Step debe pedirle el código al usuario en el momento, no adivinarlo ni reusar uno viejo.
+
+Run: `npx tsx -r tsconfig-paths/register scripts/test-external-bank-balance.ts 3c45a403-d1ca-4449-c735-08de70ba745e <codigo2FA-fresco>`
+Expected: imprime el saldo real del negocio `AV-MoneyGiver`. El propio script llama `refresh()` internamente para el balance puntual — si esa llamada tiene éxito sin pedir 2FA de nuevo, confirma que el refresh silencioso SÍ evita repetir 2FA (la pregunta que quedó abierta en Task 9). Si `refresh()` fallara con un error relacionado a 2FA, documentarlo como hallazgo (no bloquea el resto del plan — el fallback `NEEDS_REAUTH` ya existe para ese caso).
 
 - [ ] **Step 3: (Manual, opcional) Smoke self-connect end-to-end**
 
@@ -1159,3 +1549,4 @@ git add -A && git commit -m "test(financial-connections): backend verification g
 - **Cobertura de spec:** §3 modelo (Task 1) · §4 cliente/adaptador (Tasks 3-4) · §5 flujo connect+device+select (Tasks 4-5) · §6.1 cripto dedicada (Task 2) · §6.3 refresh serializado con `pg_advisory_xact_lock` (Task 5) · §6.4 disconnect+revoke+audit (Task 5) · §7 contrato de saldo OK/ERROR (Task 5) · §8 REST (Task 6) · §9 broker/superadmin + migración (Task 7) · §10 pruebas/rollout (Task 8). Invariante `venueId⇔mode` y `OK⇒amount no nulo` cubiertas en Tasks 1/5.
 - **Fuera de este plan (frontend, plan aparte):** sección "Cuentas de banco" en `Integrations.tsx`, wizard de connect, `BalanceCell` del `AggregatorDetailSheet`, y los services del dashboard (`paymentProvider.service.ts`/`aggregator.service.ts`/nuevo `financialConnection.service.ts`).
 - **Riesgo conocido:** `createTokenCipher` — confirmar en `src/lib/token-encryption.ts` que expone `encryptToBase64`/`decryptFromBase64`; si no, ajustar `crypto.ts` (Task 2) a la API real. El endpoint `Log-Out` del proveedor no está verificado empíricamente; `revoke` es best-effort y no bloquea.
+- **Tasks 9-10 (agregadas post-Task-8):** el smoke test en vivo de Task 8 encontró que el flujo de conexión nunca manejó `needTwoFactorAuth` — confirmado en producción real (con códigos TOTP reales) que sin este paso, cuentas con 2FA activo reciben `refreshToken:null` y no pueden conectarse. Fix confirmado y acotado: el endpoint documentado `POST /api/auth/validate-two-factor-code` sí devuelve el grant completo. Sigue sin confirmar si el refresh silencioso evita repetir 2FA indefinidamente — se valida en Task 11 con un smoke test en vivo (requiere coordinación humana por el código OTP).
