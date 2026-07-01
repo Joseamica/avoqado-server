@@ -1,5 +1,5 @@
 const clientMock = {
-  connect: jest.fn(), validateDevice: jest.fn(), refresh: jest.fn(),
+  connect: jest.fn(), validateDevice: jest.fn(), validateTwoFactorCode: jest.fn(), refresh: jest.fn(),
   revoke: jest.fn(), listAccounts: jest.fn(), getBalance: jest.fn(),
 }
 jest.mock('@/services/financial-connections/registry', () => ({
@@ -31,6 +31,10 @@ const encFixture = () => {
   const { encryptGrant } = require('@/services/financial-connections/crypto')
   return encryptGrant({ refreshToken: 'r1' })
 }
+const enc2faFixture = () => {
+  const { encryptGrant } = require('@/services/financial-connections/crypto')
+  return encryptGrant({ accessToken: 'tmp-2fa', email: 'a@b.co', password: 'p' })
+}
 
 it('startConnection: single negocio → auto-selects, CONNECTED', async () => {
   db.financialConnection.create.mockResolvedValue({ id: 'c1', deviceIdentifier: 'dev-c1' })
@@ -58,6 +62,23 @@ it('startConnection: needDeviceValidation → stores challenge, PENDING_DEVICE_V
   const upd = db.financialConnection.update.mock.calls.at(-1)[0].data
   expect(upd.challengeEnc).toBeTruthy()
   expect(JSON.stringify(upd)).not.toContain('p9') // el processId va cifrado, no en claro
+})
+
+it('startConnection: needTwoFactorAuth → stores challenge, PENDING_TWO_FACTOR_AUTH', async () => {
+  db.financialConnection.create.mockResolvedValue({ id: 'c4', deviceIdentifier: 'dev-c4' })
+  clientMock.connect.mockResolvedValue({ kind: 'need_two_factor_auth', challenge: { accessToken: 'tmp-2fa' } })
+  const r = await svc.startConnection({ venueId: 'v1', providerId: 'prov-1', email: 'a@b.co', password: 'p' })
+  expect(r.status).toBe('PENDING_TWO_FACTOR_AUTH')
+})
+
+it('validateTwoFactorAuth: valid code → CONNECTED', async () => {
+  db.financialConnection.findUniqueOrThrow.mockResolvedValue({
+    id: 'c4', deviceIdentifier: 'dev-c4', provider: { code: 'EXTERNAL_BANK' },
+    challengeEnc: enc2faFixture(), challengeExpiresAt: new Date(Date.now() + 60_000),
+  })
+  clientMock.validateTwoFactorCode.mockResolvedValue({ kind: 'connected', grant: { refreshToken: 'ref-x' }, accounts: [{ externalId: 'neg-1' }] })
+  const r = await svc.validateTwoFactorAuth('c4', '123456')
+  expect(r.status).toBe('CONNECTED')
 })
 
 it('selectAccount: rejects an externalId not in the stored options', async () => {

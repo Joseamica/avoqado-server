@@ -9,6 +9,7 @@ export const venueFinancialConnectionRoutes = Router({ mergeParams: true })
 venueFinancialConnectionRoutes.get('/', checkPermission('financialConnections:manage'), ctrl.listConnections)
 venueFinancialConnectionRoutes.post('/', checkPermission('financialConnections:manage'), ctrl.createConnection)
 venueFinancialConnectionRoutes.post('/:id/validate-device', checkPermission('financialConnections:manage'), ctrl.validateDevice)
+venueFinancialConnectionRoutes.post('/:id/validate-2fa', checkPermission('financialConnections:manage'), ctrl.validateTwoFactorAuth)
 venueFinancialConnectionRoutes.post('/:id/select-account', checkPermission('financialConnections:manage'), ctrl.selectAccount)
 venueFinancialConnectionRoutes.delete('/:id', checkPermission('financialConnections:manage'), ctrl.disconnect)
 

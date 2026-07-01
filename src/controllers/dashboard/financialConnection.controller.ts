@@ -46,6 +46,14 @@ export async function validateDevice(req: Request, res: Response, next: NextFunc
     res.json({ success: true, data: await svc.validateDevice(req.params.id, String(code)) })
   } catch (e) { next(e) }
 }
+export async function validateTwoFactorAuth(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { code } = req.body ?? {}
+    if (!code) throw new BadRequestError('code es requerido.')
+    await assertConnectionBelongsToVenue(req.params.id, req.params.venueId)
+    res.json({ success: true, data: await svc.validateTwoFactorAuth(req.params.id, String(code)) })
+  } catch (e) { next(e) }
+}
 export async function selectAccount(req: Request, res: Response, next: NextFunction) {
   try {
     const { externalId, merchantAccountId } = req.body ?? {}

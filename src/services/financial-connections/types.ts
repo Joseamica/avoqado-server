@@ -21,10 +21,11 @@ export interface BalanceSnapshot {
   providerAccountLabel: string | null
 }
 
-/** Resultado de connect/validateDevice. */
+/** Resultado de connect/validateDevice/validateTwoFactorCode. */
 export type ConnectResult =
   | { kind: 'connected'; grant: Grant; accounts: ProviderAccount[] }
   | { kind: 'need_device_validation'; challenge: { accessToken: string; processId: string } }
+  | { kind: 'need_two_factor_auth'; challenge: { accessToken: string } }
 
 /** Lo que el cliente necesita para operar ya autenticado. */
 export interface ConnectionContext {
@@ -42,6 +43,10 @@ export interface FinancialProviderClient {
   validateDevice(input: {
     email: string; password: string; deviceIdentifier: string
     challenge: { accessToken: string; processId: string }; code: string
+  }): Promise<ConnectResult>
+  validateTwoFactorCode(input: {
+    email: string; deviceIdentifier: string
+    challenge: { accessToken: string }; code: string
   }): Promise<ConnectResult>
   refresh(grant: Grant, deviceIdentifier: string): Promise<{ grant: Grant; ctx: ConnectionContext }>
   revoke(ctx: ConnectionContext): Promise<void>

@@ -66,6 +66,10 @@ async function signIn(email: string, password: string, deviceIdentifier: string)
 export const externalBankClient: FinancialProviderClient = {
   async connect({ email, password, deviceIdentifier }: ConnectInput): Promise<ConnectResult> {
     const data = await signIn(email, password, deviceIdentifier)
+    if (pick<boolean>(data, 'needTwoFactorAuth')) {
+      const accessToken = accessTokenOf(data)
+      return { kind: 'need_two_factor_auth', challenge: { accessToken } }
+    }
     if (pick<boolean>(data, 'needDeviceValidation')) {
       const accessToken = accessTokenOf(data)
       const { data: started } = await axios.post(`${base()}/api/identity/start/web`,
@@ -87,6 +91,24 @@ export const externalBankClient: FinancialProviderClient = {
     const data = await signIn(email, password, deviceIdentifier)
     const grant = toGrant(data)
     const accounts = normalizeAccounts(await fetchMe(accessTokenOf(data)))
+    return { kind: 'connected', grant, accounts }
+  },
+
+  async validateTwoFactorCode({ email, deviceIdentifier, challenge, code }): Promise<ConnectResult> {
+    let v: unknown
+    try {
+      ;({ data: v } = await axios.post(`${base()}/api/auth/validate-two-factor-code`,
+        { code, user: email, dispositivo: dispositivo(deviceIdentifier) },
+        { headers: headers(challenge.accessToken), timeout: 20_000 }))
+    } catch (e) {
+      if (axios.isAxiosError(e)) throw new BadRequestError(pick<string>(e.response?.data, 'message') || 'Código 2FA inválido o expirado.')
+      throw e
+    }
+    if (!pick<boolean>(v, 'success') && !pick<boolean>(v, 'isLoggedIn')) {
+      throw new BadRequestError(pick<string>(v, 'message') || 'Código 2FA inválido o expirado.')
+    }
+    const grant = toGrant(v)
+    const accounts = normalizeAccounts(await fetchMe(accessTokenOf(v)))
     return { kind: 'connected', grant, accounts }
   },
 

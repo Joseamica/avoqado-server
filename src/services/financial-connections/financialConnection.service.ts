@@ -68,6 +68,18 @@ export async function startConnection(input: {
   const client = clientFor(provider.code)
   const r = await client.connect({ email: input.email, password: input.password, deviceIdentifier })
 
+  if (r.kind === 'need_two_factor_auth') {
+    await prisma.financialConnection.update({
+      where: { id: conn.id },
+      data: {
+        deviceIdentifier,
+        challengeEnc: encryptGrant({ accessToken: r.challenge.accessToken, email: input.email, password: input.password }),
+        challengeExpiresAt: new Date(Date.now() + CHALLENGE_TTL_MS),
+        status: 'PENDING_TWO_FACTOR_AUTH',
+      },
+    })
+    return { connectionId: conn.id, status: 'PENDING_TWO_FACTOR_AUTH' as const }
+  }
   if (r.kind === 'need_device_validation') {
     await prisma.financialConnection.update({
       where: { id: conn.id },
@@ -98,6 +110,25 @@ export async function validateDevice(connectionId: string, code: string): Promis
     code,
   })
   if (r.kind !== 'connected') throw new BadRequestError('Validación incompleta.')
+  // El reto ya se consumió: limpiarlo de inmediato (no dejarlo vivo tras el handshake).
+  await prisma.financialConnection.update({ where: { id: connectionId }, data: { challengeEnc: null, challengeExpiresAt: null } })
+  return finishConnected(connectionId, conn.deviceIdentifier!, r.grant, r.accounts)
+}
+
+export async function validateTwoFactorAuth(connectionId: string, code: string): Promise<ConnectionStepResult> {
+  const conn = await prisma.financialConnection.findUniqueOrThrow({ where: { id: connectionId }, include: { provider: true } })
+  if (!conn.challengeEnc || !conn.challengeExpiresAt || conn.challengeExpiresAt < new Date()) {
+    throw new BadRequestError('El reto de 2FA expiró; vuelve a iniciar la conexión.')
+  }
+  const ch = decryptGrant<{ accessToken: string; email: string }>(conn.challengeEnc)
+  const client = clientFor(conn.provider.code)
+  const r = await client.validateTwoFactorCode({
+    email: ch.email,
+    deviceIdentifier: conn.deviceIdentifier!,
+    challenge: { accessToken: ch.accessToken },
+    code,
+  })
+  if (r.kind !== 'connected') throw new BadRequestError('El proveedor pidió otro paso adicional no soportado todavía.')
   // El reto ya se consumió: limpiarlo de inmediato (no dejarlo vivo tras el handshake).
   await prisma.financialConnection.update({ where: { id: connectionId }, data: { challengeEnc: null, challengeExpiresAt: null } })
   return finishConnected(connectionId, conn.deviceIdentifier!, r.grant, r.accounts)

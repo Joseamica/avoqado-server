@@ -40,6 +40,44 @@ it('connect: device already trusted → returns grant + accounts', async () => {
   }
 })
 
+it('connect: needTwoFactorAuth (no device validation needed) → returns 2FA challenge', async () => {
+  nock(BASE).post('/api/auth/sign-in/merchant').reply(200, {
+    signedIn: true, token: 'tmp-tok-2fa', refreshToken: null,
+    needTwoFactorAuth: true, needDeviceValidation: false,
+    expiresIn: new Date(Date.now() + 3600e3).toISOString(),
+  })
+  const client = await loadClient()
+  const r = await client.connect({ email: 'a@b.co', password: 'p', deviceIdentifier: DEVICE })
+  expect(r.kind).toBe('need_two_factor_auth')
+  if (r.kind === 'need_two_factor_auth') expect(r.challenge).toEqual({ accessToken: 'tmp-tok-2fa' })
+})
+
+it('validateTwoFactorCode: valid code → returns full grant + accounts', async () => {
+  nock(BASE).post('/api/auth/validate-two-factor-code').reply(200, {
+    isLoggedIn: true, success: true, token: 'acc-2fa', refreshToken: 'ref-2fa',
+    expiresIn: new Date(Date.now() + 3600e3).toISOString(), needTwoFactorAuth: false,
+  })
+  nock(BASE).get('/api/auth').reply(200, NEGOCIOS)
+  const client = await loadClient()
+  const r = await client.validateTwoFactorCode({
+    email: 'a@b.co', deviceIdentifier: DEVICE,
+    challenge: { accessToken: 'tmp-tok-2fa' }, code: '123456',
+  })
+  expect(r.kind).toBe('connected')
+  if (r.kind === 'connected') expect(r.grant.refreshToken).toBe('ref-2fa')
+})
+
+it('validateTwoFactorCode: invalid code → throws', async () => {
+  nock(BASE).post('/api/auth/validate-two-factor-code').reply(400, {
+    Success: false, Message: 'Código inválido', HttpStatusCode: 400, IdOperacion: null,
+  })
+  const client = await loadClient()
+  await expect(client.validateTwoFactorCode({
+    email: 'a@b.co', deviceIdentifier: DEVICE,
+    challenge: { accessToken: 'tmp-tok-2fa' }, code: '000000',
+  })).rejects.toThrow(/inválid|inv[aá]lido/i)
+})
+
 it('connect: needDeviceValidation → starts identity + returns challenge', async () => {
   nock(BASE).post('/api/auth/sign-in/merchant').reply(200, { needDeviceValidation: true, token: 'tmp-tok' })
   nock(BASE).post('/api/identity/start/web').reply(200, { proccessId: 'proc-9', needValidateOtp: true })

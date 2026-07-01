@@ -8,10 +8,14 @@
  * Usage:
  *   npx tsx -r tsconfig-paths/register scripts/test-external-bank-balance.ts
  *   npx tsx -r tsconfig-paths/register scripts/test-external-bank-balance.ts <idNegocio>
+ *   npx tsx -r tsconfig-paths/register scripts/test-external-bank-balance.ts <idNegocio> <codigo2FA>
  *
  * Without an idNegocio it just lists every negocio (sucursal) the broker
  * account can see — use one of those `idNegocio` values to link a merchant
  * via the financial-connections `selectAccount` flow.
+ *
+ * The broker test account has 2FA enabled on EVERY sign-in, so a first run
+ * (without a 2FA code) will stop and tell you to re-run with one.
  */
 
 import 'dotenv/config'
@@ -20,12 +24,23 @@ import { env } from '../src/config/env'
 
 async function main() {
   const idNegocio = process.argv[2]
+  const twoFactorCode = process.argv[3]
   const email = env.EXTERNAL_BANK_EMAIL
   const password = env.EXTERNAL_BANK_PASSWORD
   if (!email || !password) throw new Error('Faltan EXTERNAL_BANK_EMAIL / EXTERNAL_BANK_PASSWORD en .env')
 
   console.log('External bank provider: authenticating + fetching negocios...\n')
-  const r = await externalBankClient.connect({ email, password, deviceIdentifier: 'avoqado-server-moneygiver-balance-lookup' })
+  let r = await externalBankClient.connect({ email, password, deviceIdentifier: 'avoqado-server-moneygiver-balance-lookup' })
+
+  if (r.kind === 'need_two_factor_auth') {
+    if (!twoFactorCode) {
+      throw new Error('Cuenta requiere código 2FA. Re-ejecuta: tsx scripts/test-external-bank-balance.ts <idNegocio> <codigo2FA>')
+    }
+    r = await externalBankClient.validateTwoFactorCode({
+      email, deviceIdentifier: 'avoqado-server-moneygiver-balance-lookup',
+      challenge: r.challenge, code: twoFactorCode,
+    })
+  }
   if (r.kind === 'need_device_validation') {
     throw new Error('Dispositivo requiere validación OTP — ya debería estar confiable desde el setup previo.')
   }
