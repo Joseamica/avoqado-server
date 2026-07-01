@@ -23,9 +23,7 @@ export async function getAggregatorById(id: string) {
           displayName: true,
           externalMerchantId: true,
           active: true,
-          balanceProviderId: true,
-          balanceProviderAccountId: true,
-          balanceProvider: { select: { code: true, name: true } },
+          financialAccount: { select: { id: true, label: true, lastBalance: true, balanceState: true, connection: { select: { provider: { select: { code: true, name: true } } } } } },
         },
       },
       venueCommissions: {

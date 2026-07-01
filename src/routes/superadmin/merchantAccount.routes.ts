@@ -32,8 +32,7 @@ router.get('/:id/blockers', merchantAccountController.getMerchantAccountBlockers
 router.get('/:id/credentials', merchantAccountController.getMerchantAccountCredentials)
 
 // GET /api/v1/superadmin/merchant-accounts/:id/balance
-// Live balance from this account's configured BalanceProvider.
-// Requires balanceProviderId + balanceProviderAccountId to be set first via PUT /:id.
+// Live balance from this account's linked FinancialAccount (financial-connections domain).
 router.get('/:id/balance', merchantAccountController.getBalance)
 
 // GET /api/v1/superadmin/merchant-accounts/:id/terminals

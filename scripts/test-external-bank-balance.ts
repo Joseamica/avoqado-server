@@ -10,28 +10,35 @@
  *   npx tsx -r tsconfig-paths/register scripts/test-external-bank-balance.ts <idNegocio>
  *
  * Without an idNegocio it just lists every negocio (sucursal) the broker
- * account can see — copy one of those into a MerchantAccount.balanceProviderAccountId.
+ * account can see — use one of those `idNegocio` values to link a merchant
+ * via the financial-connections `selectAccount` flow.
  */
 
 import 'dotenv/config'
-import { externalBankApiService } from '../src/services/externalBank/externalBankApi.service'
+import { externalBankClient } from '../src/services/financial-connections/externalBank.client'
+import { env } from '../src/config/env'
 
 async function main() {
   const idNegocio = process.argv[2]
+  const email = env.EXTERNAL_BANK_EMAIL
+  const password = env.EXTERNAL_BANK_PASSWORD
+  if (!email || !password) throw new Error('Faltan EXTERNAL_BANK_EMAIL / EXTERNAL_BANK_PASSWORD en .env')
 
   console.log('External bank provider: authenticating + fetching negocios...\n')
-  const me = await externalBankApiService.getMe({ forceRefresh: true })
-  const negocios = me.negocios ?? []
+  const r = await externalBankClient.connect({ email, password, deviceIdentifier: 'avoqado-server-moneygiver-balance-lookup' })
+  if (r.kind === 'need_device_validation') {
+    throw new Error('Dispositivo requiere validación OTP — ya debería estar confiable desde el setup previo.')
+  }
 
-  console.log(`Cuenta ve ${negocios.length} negocio(s):\n`)
-  for (const n of negocios) {
-    console.log(`  - ${n.nombre ?? '(sin nombre)'}  idNegocio=${n.idNegocio}  saldo=${n.cuentaDispersion?.saldo ?? '—'}`)
+  console.log(`Cuenta ve ${r.accounts.length} negocio(s):\n`)
+  for (const a of r.accounts) {
+    console.log(`  - ${a.label ?? '(sin nombre)'}  idNegocio=${a.externalId}  saldo=${a.balance ?? '—'}`)
   }
 
   if (idNegocio) {
-    console.log(`\nBalance puntual para idNegocio=${idNegocio}:`)
-    const balance = await externalBankApiService.getBalanceByIdNegocio(idNegocio, { forceRefresh: true })
-    console.log(balance)
+    const ctx = await externalBankClient.refresh(r.grant, 'avoqado-server-moneygiver-balance-lookup')
+    const balance = await externalBankClient.getBalance(ctx.ctx, idNegocio)
+    console.log(`\nBalance puntual para idNegocio=${idNegocio}:`, balance)
   }
 }
 

@@ -9,7 +9,7 @@ export async function getBalanceProviders(filters: { active?: boolean } = {}) {
   const where: { active?: boolean } = {}
   if (filters.active !== undefined) where.active = filters.active
 
-  return prisma.balanceProvider.findMany({
+  return prisma.financialProvider.findMany({
     where,
     orderBy: { name: 'asc' },
   })
