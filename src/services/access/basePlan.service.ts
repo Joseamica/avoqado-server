@@ -25,7 +25,9 @@ export const PAID_PLAN_TIER_CODES = ['PLAN_PRO', 'PLAN_PREMIUM'] as const
 export const PREMIUM_ONLY_CODES = [
   'CFDI',
   'INVENTORY_TRACKING',
-  'ADVANCED_ANALYTICS',
+  // 'ADVANCED_ANALYTICS' removed 2026-07-01: dead pay-per-feature code (deactivated as sellable
+  // in Jan 2025, never gated any route/tool). Do NOT re-add from old docs — the Premium "analítica
+  // predictiva" sales bullet is featureKeys copy, not a real code. See plan-catalog.ts PREMIUM.
   'COMMISSIONS',
   'ATTENDANCE_TRACKING',
   'SERIALIZED_INVENTORY',

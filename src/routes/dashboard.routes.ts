@@ -247,7 +247,11 @@ import inventoryRoutes from './dashboard/inventory.routes'
 import superadminRoutes from './dashboard/superadmin.routes'
 import venuePaymentConfigRoutes from './dashboard/venuePaymentConfig.routes'
 import ecommerceMerchantRoutes from './dashboard/ecommerceMerchant.routes'
-import { venueFinancialConnectionRoutes, venueFinancialAccountRoutes, financialProviderRoutes } from './dashboard/financialConnection.routes'
+import {
+  venueFinancialConnectionRoutes,
+  venueFinancialAccountRoutes,
+  financialProviderRoutes,
+} from './dashboard/financialConnection.routes'
 import paymentLinkRoutes from './dashboard/paymentLink.routes'
 import manualPaymentRoutes from './dashboard/manualPayment.routes'
 import activityLogRoutes from './dashboard/activityLog.routes'
@@ -2568,7 +2572,7 @@ router.get(
  *               featureCodes:
  *                 type: array
  *                 items: { type: string }
- *                 example: ['CHATBOT', 'ADVANCED_ANALYTICS']
+ *                 example: ['CHATBOT', 'CFDI']
  *               trialPeriodDays:
  *                 type: number
  *                 default: 5

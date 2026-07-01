@@ -137,7 +137,7 @@ describe('catalog mirror: FREE_TIER_CODES + expanded PREMIUM_ONLY_CODES', () => 
     vfFindFirst.mockResolvedValue(null)
     vfFindMany.mockResolvedValue([{ active: true, suspendedAt: null, endDate: null, feature: { code: 'PLAN_PRO' } }])
 
-    for (const code of ['SERIALIZED_INVENTORY', 'ADVANCED_ANALYTICS', 'COMMISSIONS', 'ATTENDANCE_TRACKING']) {
+    for (const code of ['SERIALIZED_INVENTORY', 'TRANSACTION_EXPORT', 'COMMISSIONS', 'ATTENDANCE_TRACKING']) {
       expect(await venueHasFeatureAccess('v', code)).toBe(false)
     }
     // ...while regular Pro-tier features stay blanket-granted.
@@ -150,6 +150,6 @@ describe('catalog mirror: FREE_TIER_CODES + expanded PREMIUM_ONLY_CODES', () => 
     vfFindMany.mockResolvedValue([{ active: true, suspendedAt: null, endDate: null, feature: { code: 'PLAN_PREMIUM' } }])
 
     expect(await venueHasFeatureAccess('v', 'SERIALIZED_INVENTORY')).toBe(true)
-    expect(await venueHasFeatureAccess('v', 'ADVANCED_ANALYTICS')).toBe(true)
+    expect(await venueHasFeatureAccess('v', 'TRANSACTION_EXPORT')).toBe(true)
   })
 })
