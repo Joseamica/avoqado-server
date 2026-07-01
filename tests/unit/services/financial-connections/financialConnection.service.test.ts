@@ -20,7 +20,7 @@ beforeAll(() => {
 beforeEach(() => {
   jest.clearAllMocks()
   db.financialProvider = { findUniqueOrThrow: jest.fn().mockResolvedValue({ id: 'prov-1', code: 'EXTERNAL_BANK' }) }
-  db.financialConnection = { create: jest.fn(), update: jest.fn(), findUniqueOrThrow: jest.fn(), findUnique: jest.fn(), findMany: jest.fn() }
+  db.financialConnection = { create: jest.fn(), update: jest.fn(), updateMany: jest.fn(), findUniqueOrThrow: jest.fn(), findUnique: jest.fn(), findMany: jest.fn() }
   db.financialAccount = { createMany: jest.fn(), findUniqueOrThrow: jest.fn(), findFirst: jest.fn(), update: jest.fn() }
   db.$transaction = jest.fn(async (fn: any) => fn(db))
   db.$executeRaw = jest.fn()
@@ -34,7 +34,8 @@ const encFixture = () => {
 }
 const enc2faFixture = () => {
   const { encryptGrant } = require('@/services/financial-connections/crypto')
-  return encryptGrant({ accessToken: 'tmp-2fa', email: 'a@b.co', password: 'p' })
+  // El blob 2FA deliberadamente NO incluye password (retención mínima).
+  return encryptGrant({ accessToken: 'tmp-2fa', email: 'a@b.co' })
 }
 
 it('startConnection: single negocio → auto-selects, CONNECTED', async () => {
@@ -79,11 +80,27 @@ it('startConnection: needDeviceValidation → stores challenge, PENDING_DEVICE_V
   expect(JSON.stringify(upd)).not.toContain('p9') // el processId va cifrado, no en claro
 })
 
-it('startConnection: needTwoFactorAuth → stores challenge, PENDING_TWO_FACTOR_AUTH', async () => {
+it('startConnection: needTwoFactorAuth → stores challenge WITHOUT the password, PENDING_TWO_FACTOR_AUTH', async () => {
   db.financialConnection.create.mockResolvedValue({ id: 'c4', deviceIdentifier: 'dev-c4' })
   clientMock.connect.mockResolvedValue({ kind: 'need_two_factor_auth', challenge: { accessToken: 'tmp-2fa' } })
-  const r = await svc.startConnection({ venueId: 'v1', providerId: 'prov-1', email: 'a@b.co', password: 'p' })
+  const r = await svc.startConnection({ venueId: 'v1', providerId: 'prov-1', email: 'a@b.co', password: 'super-secret' })
   expect(r.status).toBe('PENDING_TWO_FACTOR_AUTH')
+  const { decryptGrant } = require('@/services/financial-connections/crypto')
+  const upd = db.financialConnection.update.mock.calls.at(-1)[0].data
+  const blob = decryptGrant(upd.challengeEnc)
+  expect(blob).toEqual({ accessToken: 'tmp-2fa', email: 'a@b.co' }) // sin password: validate-2fa no lo necesita
+})
+
+it('validateDevice/2FA: expired challenge is wiped from the row, not left encrypted forever', async () => {
+  db.financialConnection.findUniqueOrThrow.mockResolvedValue({
+    id: 'c5', deviceIdentifier: 'dev-c5', venueId: 'v1', provider: { code: 'EXTERNAL_BANK' },
+    challengeEnc: enc2faFixture(), challengeExpiresAt: new Date(Date.now() - 1_000),
+  })
+  await expect(svc.validateTwoFactorAuth('c5', '123456')).rejects.toThrow('expiró')
+  expect(db.financialConnection.update).toHaveBeenCalledWith({
+    where: { id: 'c5' },
+    data: { challengeEnc: null, challengeExpiresAt: null },
+  })
 })
 
 it('validateTwoFactorAuth: valid code → CONNECTED', async () => {
@@ -121,6 +138,32 @@ it('getBalanceForConnectionAccount: provider null saldo → state ERROR, not OK'
   const r = await svc.getBalanceForConnectionAccount('fa1')
   expect(r.state).toBe('ERROR')
   expect(r.amount).toBeNull()
+})
+
+it('selectAccount: rejects on a revoked connection (no resurrection to CONNECTED)', async () => {
+  db.financialConnection.findUniqueOrThrow.mockResolvedValue({
+    id: 'c7', status: 'REVOKED', venueId: 'v1',
+    accounts: [{ id: 'fa1', externalId: 'neg-1' }],
+  })
+  await expect(svc.selectAccount('c7', 'neg-1')).rejects.toThrow('no está activa')
+  expect(db.financialConnection.update).not.toHaveBeenCalled()
+})
+
+it('refresh guard: a connection revoked before the lock re-read is never refreshed nor resurrected', async () => {
+  db.financialAccount.findUniqueOrThrow.mockResolvedValue({
+    id: 'fa9', externalId: 'neg-1', currency: 'MXN', lastSyncedAt: null,
+    connection: { id: 'c9', mode: 'SELF_CONNECT', grantEnc: encFixture(), tokenVersion: 3, deviceIdentifier: 'dev', provider: { code: 'EXTERNAL_BANK' } },
+  })
+  // La re-lectura BAJO el lock ve el disconnect que ganó la carrera:
+  db.financialConnection.findUniqueOrThrow.mockResolvedValue({ id: 'c9', status: 'REVOKED', grantEnc: null, tokenVersion: 4 })
+  const r = await svc.getBalanceForConnectionAccount('fa9')
+  expect(r.state).toBe('ERROR')
+  expect(clientMock.refresh).not.toHaveBeenCalled() // jamás rotó el token de una fila revocada
+  expect(db.financialConnection.update).not.toHaveBeenCalled() // jamás re-persistió CONNECTED
+  // El downgrade del catch va filtrado por status — no pisa REVOKED:
+  expect(db.financialConnection.updateMany).toHaveBeenCalledWith(
+    expect.objectContaining({ where: expect.objectContaining({ status: { in: ['CONNECTED', 'NEEDS_REAUTH'] } }) }),
+  )
 })
 
 it('refresh path takes the advisory lock (pg_advisory_xact_lock) inside a tx', async () => {

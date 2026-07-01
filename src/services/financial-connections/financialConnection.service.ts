@@ -87,7 +87,11 @@ export async function startConnection(input: {
         where: { id: conn.id },
         data: {
           deviceIdentifier,
-          challengeEnc: encryptGrant({ accessToken: r.challenge.accessToken, email: input.email, password: input.password }),
+          // A diferencia del reto de dispositivo, validate-two-factor-code NO
+          // re-loguea con credenciales — el password no se necesita y por eso
+          // NO se guarda (retención mínima; el reto de device sí lo requiere
+          // porque el provider obliga a re-login tras el OTP).
+          challengeEnc: encryptGrant({ accessToken: r.challenge.accessToken, email: input.email }),
           challengeExpiresAt: new Date(Date.now() + CHALLENGE_TTL_MS),
           status: 'PENDING_TWO_FACTOR_AUTH',
         },
@@ -135,10 +139,20 @@ export async function startConnection(input: {
   }
 }
 
+/** Reto vencido = credenciales cifradas que ya no sirven — no dejarlas vivir en la fila. */
+async function clearExpiredChallenge(connectionId: string) {
+  try {
+    await prisma.financialConnection.update({ where: { id: connectionId }, data: { challengeEnc: null, challengeExpiresAt: null } })
+  } catch {
+    /* best-effort: el throw de expiración de abajo debe salir igual */
+  }
+}
+
 export async function validateDevice(connectionId: string, code: string, staffId?: string): Promise<ConnectionStepResult> {
   const conn = await prisma.financialConnection.findUniqueOrThrow({ where: { id: connectionId }, include: { provider: true } })
   try {
     if (!conn.challengeEnc || !conn.challengeExpiresAt || conn.challengeExpiresAt < new Date()) {
+      if (conn.challengeEnc) await clearExpiredChallenge(connectionId)
       throw new BadRequestError('El reto de validación expiró; vuelve a iniciar la conexión.')
     }
     const ch = decryptGrant<{ accessToken: string; processId: string; email: string; password: string }>(conn.challengeEnc)
@@ -179,6 +193,7 @@ export async function validateTwoFactorAuth(connectionId: string, code: string, 
   const conn = await prisma.financialConnection.findUniqueOrThrow({ where: { id: connectionId }, include: { provider: true } })
   try {
     if (!conn.challengeEnc || !conn.challengeExpiresAt || conn.challengeExpiresAt < new Date()) {
+      if (conn.challengeEnc) await clearExpiredChallenge(connectionId)
       throw new BadRequestError('El reto de 2FA expiró; vuelve a iniciar la conexión.')
     }
     const ch = decryptGrant<{ accessToken: string; email: string }>(conn.challengeEnc)
@@ -240,6 +255,10 @@ async function finishConnected(
 export async function selectAccount(connectionId: string, externalId: string, merchantAccountId?: string, staffId?: string) {
   const conn = await prisma.financialConnection.findUniqueOrThrow({ where: { id: connectionId }, include: { accounts: true } })
   try {
+    // Una conexión revocada/errónea no debe poder "revivir" a CONNECTED por esta vía.
+    if (conn.status === 'REVOKED' || conn.status === 'ERROR') {
+      throw new BadRequestError('La conexión no está activa; vuelve a conectarla.')
+    }
     // Nunca confiar en un externalId enviado por el cliente: debe estar entre las
     // opciones que el propio servidor ya persistió (desde connect/listAccounts).
     const chosen = conn.accounts.find(a => a.externalId === externalId)
@@ -283,33 +302,48 @@ async function accessTokenFor(conn: {
   if (conn.mode !== 'SELF_CONNECT' || !conn.grantEnc) throw new BadRequestError('Conexión sin grant utilizable.')
   const client = clientFor(conn.provider.code)
 
-  return prisma.$transaction(async tx => {
-    // Serializa el refresh entre instancias: solo uno refresca a la vez esta conexión.
-    // El refreshToken ROTA en cada uso — dos refrescos concurrentes no deben
-    // consumir/persistir ambos contra el mismo token ya obsoleto.
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${conn.id}))`
-    const fresh = await tx.financialConnection.findUniqueOrThrow({ where: { id: conn.id } })
-    // Otro proceso pudo haber refrescado mientras esperábamos el lock.
-    const recheck = tokenCache.get(conn.id)
-    if (recheck && recheck.exp - 60_000 > Date.now()) return recheck.accessToken
-    const grant = decryptGrant<Grant>(fresh.grantEnc!)
-    const { grant: rotated, ctx } = await client.refresh(grant, conn.deviceIdentifier ?? stableDeviceId(conn.id))
-    // CAS: solo persiste si tokenVersion no cambió desde la lectura — evita pisar
-    // un refresh concurrente si, por lo que sea, dos procesos llegaron a refrescar.
-    await tx.financialConnection.update({
-      where: { id: conn.id, tokenVersion: fresh.tokenVersion },
-      data: {
-        grantEnc: encryptGrant(rotated),
-        tokenVersion: { increment: 1 },
-        expiresAt: rotated.expiresAt ? new Date(rotated.expiresAt) : null,
-        status: 'CONNECTED',
-        lastError: null,
-      },
-    })
-    const exp = rotated.expiresAt ? new Date(rotated.expiresAt).getTime() : Date.now() + 55 * 60_000
-    tokenCache.set(conn.id, { accessToken: ctx.accessToken, exp })
-    return ctx.accessToken
-  })
+  return prisma.$transaction(
+    async tx => {
+      // Serializa el refresh entre instancias: solo uno refresca a la vez esta conexión.
+      // El refreshToken ROTA en cada uso — dos refrescos concurrentes no deben
+      // consumir/persistir ambos contra el mismo token ya obsoleto.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${conn.id}))`
+      const fresh = await tx.financialConnection.findUniqueOrThrow({ where: { id: conn.id } })
+      // Estado re-leído BAJO el lock: si un disconnect ganó la carrera (REVOKED,
+      // grant borrado), abortar aquí — jamás refrescar/persistir sobre una fila
+      // revocada (eso la "resucitaría" a CONNECTED con un grant nuevo).
+      if (fresh.status === 'REVOKED' || fresh.status === 'ERROR' || !fresh.grantEnc) {
+        throw new BadRequestError('Conexión sin grant utilizable.')
+      }
+      // Otro proceso pudo haber refrescado mientras esperábamos el lock.
+      const recheck = tokenCache.get(conn.id)
+      if (recheck && recheck.exp - 60_000 > Date.now()) return recheck.accessToken
+      const grant = decryptGrant<Grant>(fresh.grantEnc)
+      const { grant: rotated, ctx } = await client.refresh(grant, conn.deviceIdentifier ?? stableDeviceId(conn.id))
+      // CAS: solo persiste si tokenVersion no cambió desde la lectura — evita pisar
+      // un refresh concurrente si, por lo que sea, dos procesos llegaron a refrescar.
+      // disconnect() también incrementa tokenVersion, así que un revoke que aterrice
+      // después de nuestra re-lectura hace fallar este update en vez de ser pisado.
+      await tx.financialConnection.update({
+        where: { id: conn.id, tokenVersion: fresh.tokenVersion },
+        data: {
+          grantEnc: encryptGrant(rotated),
+          tokenVersion: { increment: 1 },
+          expiresAt: rotated.expiresAt ? new Date(rotated.expiresAt) : null,
+          status: 'CONNECTED',
+          lastError: null,
+        },
+      })
+      const exp = rotated.expiresAt ? new Date(rotated.expiresAt).getTime() : Date.now() + 55 * 60_000
+      tokenCache.set(conn.id, { accessToken: ctx.accessToken, exp })
+      return ctx.accessToken
+    },
+    // El default de Prisma (timeout 5s / maxWait 2s) NO alcanza: adentro va una
+    // llamada HTTP al proveedor (axios timeout 20s) + posible espera del advisory
+    // lock. Si la tx aborta DESPUÉS de que el proveedor rotó el refreshToken, el
+    // grant guardado queda muerto → NEEDS_REAUTH forzado. 30s cubre el peor caso.
+    { timeout: 30_000, maxWait: 10_000 },
+  )
 }
 
 export async function getBalanceForConnectionAccount(financialAccountId: string) {
@@ -348,8 +382,11 @@ export async function getBalanceForConnectionAccount(financialAccountId: string)
     // impedir el retorno del estado ERROR honesto de abajo. try/catch en vez
     // de encadenar .catch() — así funciona aunque la llamada no sea thenable.
     try {
-      await prisma.financialConnection.update({
-        where: { id: fa.connection.id },
+      // updateMany con filtro de status: NUNCA pisar REVOKED/ERROR/PENDING_* con
+      // NEEDS_REAUTH — solo una conexión que estaba operando (CONNECTED) o que ya
+      // pedía re-auth degrada por esta vía. También evita el P2025 de update().
+      await prisma.financialConnection.updateMany({
+        where: { id: fa.connection.id, status: { in: ['CONNECTED', 'NEEDS_REAUTH'] } },
         data: { status: 'NEEDS_REAUTH', lastError: (e as Error).message },
       })
     } catch {
@@ -411,7 +448,10 @@ export async function disconnect(connectionId: string, staffId?: string) {
   tokenCache.delete(conn.id)
   await prisma.financialConnection.update({
     where: { id: conn.id },
-    data: { status: 'REVOKED', grantEnc: null, challengeEnc: null, revokedAt: new Date() },
+    // tokenVersion++ hace fallar el CAS de cualquier refresh en vuelo que re-leyó
+    // ANTES de este revoke — sin esto, ese refresh re-persistiría CONNECTED + un
+    // grant fresco sobre la fila recién revocada.
+    data: { status: 'REVOKED', grantEnc: null, challengeEnc: null, revokedAt: new Date(), tokenVersion: { increment: 1 } },
   })
   await logAction({
     staffId: staffId ?? null,
