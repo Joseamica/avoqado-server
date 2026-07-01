@@ -251,3 +251,17 @@ Superadmin: `getBalance(merchantAccountId)` → sigue `merchantAccount.financial
 - Dueño de la conexión = **sucursal (`venueId`)**; ORG-level queda para después. ✅
 - **Llave dedicada** `FINANCIAL_CONNECTION_KEY` + AES-GCM sin fallback (sin versión de rotación por ahora). ✅
 - Mantener el mandato **"no overengineer"**: 2 tablas, sin dual-write, sin rotación, sin adaptador de pagos todavía. ✅
+
+---
+
+## Addendum 2026-07-01 — desviaciones y decisiones post-review (Fable 5, rama completa)
+
+Revisión adversarial de los 16 commits contra este spec. Correcciones aplicadas y desviaciones que ahora quedan documentadas como contrato real:
+
+1. **Reto de dispositivo SÍ guarda credenciales cifradas (excepción a §5).** El provider obliga a re-login con email+password después del OTP de dispositivo, así que `challengeEnc` del flujo device incluye `{accessToken, processId, email, password}` (AES-GCM, TTL 5 min, se limpia al consumirse o al detectarse vencido). El flujo **2FA no guarda password** (`{accessToken, email}`) porque `validate-two-factor-code` no lo necesita. §0.3 sigue siendo cierto para el grant persistente: solo el refreshToken.
+2. **`select-account` acepta `merchantAccountId` opcional** (extensión a §8) para ligar la cuenta bancaria a un merchant. Va venue-scoped en el controller: el merchant debe estar cableado a la sucursal vía `VenuePaymentConfig`, `Terminal.assignedMerchantIds` o el `OrganizationPaymentConfig` de su org — 404 si no. Además rechaza conexiones REVOKED/ERROR.
+3. **Refresh serializado con presupuesto real:** la tx del advisory lock corre con `{timeout: 30s, maxWait: 10s}` (el default de 5s abortaba DESPUÉS de que el provider ya rotó el token → grant muerto). Bajo el lock se re-verifica `status`/`grantEnc` (un disconnect que ganó la carrera aborta el refresh) y `disconnect()` incrementa `tokenVersion` para invalidar el CAS de cualquier refresh en vuelo.
+4. **`NEEDS_REAUTH` solo degrada conexiones operando:** el catch de balance usa `updateMany` filtrado a `status IN (CONNECTED, NEEDS_REAUTH)` — nunca pisa REVOKED/ERROR/PENDING_*.
+5. **Rate limit propio** (`financial-connection-rate-limit.middleware.ts`, patrón pin-login: prod 10/15min por staff+venue) en create/validate-device/validate-2fa — §6.5 asumía un limiter global que no existe.
+6. **`SHARED_BROKER` queda DIFERIDO a nivel runtime** (objetivo 6): el schema y el guard `mode !== 'SELF_CONNECT'` están, pero nada materializa conexiones broker todavía; `EXTERNAL_BANK_EMAIL/PASSWORD` solo los usa el smoke script manual. El saldo superadmin funciona una vez que el OWNER se auto-conecta y liga la cuenta.
+7. **Deuda aceptada** (menores del review, sin bloquear): mapeo P2025→500 en ids inexistentes de catálogo/merchant, default dev de `EXTERNAL_BANK_API_BASE`, filas ERROR/PENDING acumulables visibles en el listado, franja de test de concurrencia real (CAS) solo cubierta con mocks.
