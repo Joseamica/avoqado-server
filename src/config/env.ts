@@ -91,6 +91,9 @@ const envSchema = z.object({
   EXTERNAL_BANK_EMAIL: z.string().optional(),
   EXTERNAL_BANK_PASSWORD: z.string().optional(),
 
+  // Llave dedicada (hex 32 bytes) para cifrar el refreshToken de conexiones bancarias (AES-256-GCM).
+  FINANCIAL_CONNECTION_KEY: z.string().length(64, 'FINANCIAL_CONNECTION_KEY debe ser hex de 32 bytes (64 chars)').optional(),
+
   // Mercado Pago — Marketplace (Split Payments via Checkout Bricks)
   // CLIENT_ID = "Número de aplicación" from MP DevPanel; CLIENT_SECRET lives in
   // Credenciales de producción (applies to both test and prod — same value).
