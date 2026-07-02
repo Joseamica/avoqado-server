@@ -1,4 +1,4 @@
-import { listReferrals, getReferralSummary, getHallOfFame } from '@/services/referrals/referralReads.service'
+import { listReferrals, getReferralSummary, getHallOfFame, listCustomerReferrals } from '@/services/referrals/referralReads.service'
 import prisma from '@/utils/prismaClient'
 
 jest.mock('@/utils/prismaClient', () => ({
@@ -14,6 +14,55 @@ const mockedPrisma = prisma as any
 
 describe('referralReads.service', () => {
   beforeEach(() => jest.clearAllMocks())
+
+  describe('listCustomerReferrals', () => {
+    it('projects multiple reward grants per referral (not a single rewardDiscount)', async () => {
+      mockedPrisma.referral.findMany.mockResolvedValue([
+        {
+          id: 'r1',
+          rewardDiscount: { id: 'd1', value: '15', active: true },
+          referralGrants: [
+            {
+              id: 'g1',
+              rewardType: 'PERCENT_COUPON',
+              rewardPercent: '15',
+              rewardProductId: null,
+              rewardQuantity: 1,
+              status: 'ISSUED',
+              discount: { couponCodes: [{ code: 'SAVE15' }] },
+            },
+            {
+              id: 'g2',
+              rewardType: 'FREE_PRODUCT',
+              rewardPercent: null,
+              rewardProductId: 'p1',
+              rewardQuantity: 1,
+              status: 'MANUAL_PENDING',
+              discount: null,
+            },
+          ],
+        },
+      ])
+
+      const res = await listCustomerReferrals('v1', 'c1')
+
+      expect(res[0].rewards).toHaveLength(2)
+      expect(res[0].rewards[0]).toMatchObject({ id: 'g1', rewardType: 'PERCENT_COUPON', couponCode: 'SAVE15' })
+      expect(res[0].rewards[1]).toMatchObject({ id: 'g2', rewardType: 'FREE_PRODUCT', couponCode: null })
+      // Backward-compat: deprecated single `rewardDiscount` still present.
+      expect(res[0].rewardDiscount).toMatchObject({ id: 'd1' })
+      // The raw `referralGrants` relation payload isn't leaked verbatim.
+      expect(res[0]).not.toHaveProperty('referralGrants')
+    })
+
+    it('returns an empty rewards array when the referral has no grants yet', async () => {
+      mockedPrisma.referral.findMany.mockResolvedValue([{ id: 'r2', rewardDiscount: null, referralGrants: [] }])
+
+      const res = await listCustomerReferrals('v1', 'c1')
+
+      expect(res[0].rewards).toEqual([])
+    })
+  })
 
   describe('listReferrals', () => {
     it('returns paginated list with default page/pageSize', async () => {

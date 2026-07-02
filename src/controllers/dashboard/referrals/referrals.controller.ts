@@ -11,8 +11,15 @@ import { ReferralStatus, ReferralTier } from '@prisma/client'
 
 export async function getConfig(req: Request, res: Response, next: NextFunction) {
   try {
+    // `tierRewards` (ACTIVE rows only) is the authoritative per-tier reward
+    // config (Task 3). The flat `tier{N}RewardPercent` columns above are
+    // DEPRECATED — kept in the response (never remove API response fields)
+    // for callers not yet migrated, but no business logic reads them anymore.
     const config = await prisma.referralProgramConfig.findUnique({
       where: { venueId: req.params.venueId },
+      include: {
+        tierRewards: { where: { active: true }, orderBy: { tierLevel: 'asc' } },
+      },
     })
     res.json(config ?? { active: false })
   } catch (e) {
