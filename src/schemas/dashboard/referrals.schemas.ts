@@ -1,8 +1,30 @@
 import { z } from 'zod'
+import { ReferralRewardType, ReferralRewardRecurrence } from '@prisma/client'
 
 // ==========================================
 // REFERRAL PROGRAM CONFIG SCHEMAS
 // ==========================================
+
+// Per-tier reward configuration (spec §4.2/§7). Shape-only: business rules
+// (rewardPercent required for PERCENT_COUPON/PERMANENT_DISCOUNT, rewardProductId
+// must belong to the venue for FREE_PRODUCT, ascending thresholds) live in
+// `referralProgram.service.ts`, NOT here.
+const TierRewardSchema = z.object({
+  tierLevel: z.union([z.literal(1), z.literal(2), z.literal(3)], {
+    errorMap: () => ({ message: 'El nivel debe ser 1, 2 o 3' }),
+  }),
+  rewardType: z.nativeEnum(ReferralRewardType, {
+    errorMap: () => ({ message: 'Tipo de premio inválido. Valores permitidos: PERCENT_COUPON, PERMANENT_DISCOUNT, FREE_PRODUCT.' }),
+  }),
+  recurrence: z
+    .nativeEnum(ReferralRewardRecurrence, {
+      errorMap: () => ({ message: 'Recurrencia inválida. Valores permitidos: ONE_TIME, MONTHLY.' }),
+    })
+    .optional(),
+  rewardPercent: z.number().min(0, 'El porcentaje debe ser mayor o igual a 0').max(100, 'El porcentaje no puede superar 100').optional(),
+  rewardProductId: z.string().min(1).optional(),
+  rewardQuantity: z.number().int().min(1, 'La cantidad debe ser al menos 1').optional(),
+})
 
 export const ActivateReferralProgramSchema = z.object({
   params: z.object({
@@ -11,15 +33,13 @@ export const ActivateReferralProgramSchema = z.object({
   body: z.object({
     newCustomerDiscountPercent: z.number().min(0).max(100),
     tier1ReferralsRequired: z.number().int().min(1),
-    tier1RewardPercent: z.number().min(0).max(100),
     tier2ReferralsRequired: z.number().int().min(2),
-    tier2RewardPercent: z.number().min(0).max(100),
     tier3ReferralsRequired: z.number().int().min(3),
-    tier3RewardPercent: z.number().min(0).max(100),
     rewardCouponExpiryDays: z.number().int().min(1),
     codePrefix: z.string().min(1).max(8).optional(),
     welcomeMessageTemplate: z.string().optional(),
     tierUpMessageTemplate: z.string().optional(),
+    tiers: z.array(TierRewardSchema).optional(),
   }),
 })
 
@@ -31,15 +51,13 @@ export const UpdateReferralConfigSchema = z.object({
     .object({
       newCustomerDiscountPercent: z.number().min(0).max(100).optional(),
       tier1ReferralsRequired: z.number().int().min(1).optional(),
-      tier1RewardPercent: z.number().min(0).max(100).optional(),
       tier2ReferralsRequired: z.number().int().min(2).optional(),
-      tier2RewardPercent: z.number().min(0).max(100).optional(),
       tier3ReferralsRequired: z.number().int().min(3).optional(),
-      tier3RewardPercent: z.number().min(0).max(100).optional(),
       rewardCouponExpiryDays: z.number().int().min(1).optional(),
       codePrefix: z.string().min(1).max(8).optional(),
       welcomeMessageTemplate: z.string().optional(),
       tierUpMessageTemplate: z.string().optional(),
+      tiers: z.array(TierRewardSchema).optional(),
     })
     .refine(data => Object.keys(data).length > 0, {
       message: 'Al menos un campo debe ser proporcionado',

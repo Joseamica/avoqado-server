@@ -33,6 +33,11 @@ jest.mock('@/utils/prismaClient', () => ({
       update: jest.fn(),
       findUnique: jest.fn(),
     },
+    referralTierReward: {
+      create: jest.fn(),
+      updateMany: jest.fn(),
+    },
+    product: { findFirst: jest.fn() },
     venue: { findUnique: jest.fn() },
     customer: { findMany: jest.fn(), update: jest.fn() },
     activityLog: { create: jest.fn() },
@@ -50,6 +55,11 @@ const mockedPrisma = prisma as unknown as {
     update: jest.Mock
     findUnique: jest.Mock
   }
+  referralTierReward: {
+    create: jest.Mock
+    updateMany: jest.Mock
+  }
+  product: { findFirst: jest.Mock }
   venue: { findUnique: jest.Mock }
   customer: { findMany: jest.Mock; update: jest.Mock }
   activityLog: { create: jest.Mock }
@@ -80,13 +90,18 @@ describe('referralProgram.service', () => {
       venueId: 'venue_1',
       newCustomerDiscountPercent: 10,
       tier1ReferralsRequired: 7,
-      tier1RewardPercent: 15,
       tier2ReferralsRequired: 12,
-      tier2RewardPercent: 20,
       tier3ReferralsRequired: 20,
-      tier3RewardPercent: 25,
       rewardCouponExpiryDays: 90,
       codePrefix: 'TESTMF',
+      // Mirrors the pre-configurable-rewards behavior (15/20/25% one-time
+      // coupons) but now expressed as ReferralTierReward rows instead of
+      // the legacy flat tier{N}RewardPercent columns.
+      tiers: [
+        { tierLevel: 1, rewardType: 'PERCENT_COUPON', rewardPercent: 15 },
+        { tierLevel: 2, rewardType: 'PERCENT_COUPON', rewardPercent: 20 },
+        { tierLevel: 3, rewardType: 'PERCENT_COUPON', rewardPercent: 25 },
+      ],
     }
 
     it('creates config with active=true and activatedAt set', async () => {
@@ -126,7 +141,38 @@ describe('referralProgram.service', () => {
     })
 
     it('rejects negative numbers', async () => {
-      await expect(activateReferralProgram({ ...input, tier1RewardPercent: -5 })).rejects.toThrow(/non-negative/i)
+      // tier1RewardPercent (etc.) is now deprecated/ignored — the non-negative
+      // guard is exercised through a still-live scalar field instead.
+      await expect(activateReferralProgram({ ...input, newCustomerDiscountPercent: -5 })).rejects.toThrow(/non-negative/i)
+    })
+
+    it('rejects a PERCENT_COUPON tier reward with a negative rewardPercent (PORCENTAJE_INVALIDO)', async () => {
+      await expect(
+        activateReferralProgram({
+          ...input,
+          tiers: [{ tierLevel: 1, rewardType: 'PERCENT_COUPON', rewardPercent: -5 }],
+        }),
+      ).rejects.toThrow('PORCENTAJE_INVALIDO')
+    })
+
+    it('REGRESSION: does not touch ReferralTierReward when tiers is omitted', async () => {
+      mockedPrisma.referralProgramConfig.upsert.mockResolvedValue({ id: 'cfg_1', codePrefix: 'TESTMF' })
+      await activateReferralProgram({ ...input, tiers: undefined })
+      await flush()
+      expect(mockedPrisma.referralTierReward.create).not.toHaveBeenCalled()
+      expect(mockedPrisma.referralTierReward.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('persists each configured tier as a ReferralTierReward row tied to the new config', async () => {
+      mockedPrisma.referralProgramConfig.upsert.mockResolvedValue({ id: 'cfg_1', codePrefix: 'TESTMF' })
+      await activateReferralProgram(input)
+      await flush()
+      expect(mockedPrisma.referralTierReward.create).toHaveBeenCalledTimes(3)
+      expect(mockedPrisma.referralTierReward.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ configId: 'cfg_1', tierLevel: 1, rewardType: 'PERCENT_COUPON' }),
+        }),
+      )
     })
 
     it('writes activity log entry tagged backfillScheduled', async () => {
@@ -220,11 +266,13 @@ describe('referralProgram.service', () => {
       mockedPrisma.referralProgramConfig.update.mockResolvedValue({})
       await updateReferralConfig({
         venueId: 'venue_1',
-        patch: { tier1RewardPercent: 18 },
+        // tier1RewardPercent is retired from the patch shape — this now
+        // exercises a still-live scalar field (see REGRESSION note below).
+        patch: { newCustomerDiscountPercent: 18 },
       })
       expect(mockedPrisma.referralProgramConfig.update).toHaveBeenCalledWith({
         where: { venueId: 'venue_1' },
-        data: { tier1RewardPercent: 18 },
+        data: { newCustomerDiscountPercent: 18 },
       })
     })
 
@@ -235,6 +283,104 @@ describe('referralProgram.service', () => {
           patch: { tier2ReferralsRequired: 5, tier1ReferralsRequired: 10 },
         }),
       ).rejects.toThrow(/ascending/i)
+    })
+
+    it('REGRESSION: never writes the legacy flat tier{N}RewardPercent columns, even if a caller still sends them', async () => {
+      mockedPrisma.referralProgramConfig.update.mockResolvedValue({})
+      await updateReferralConfig({
+        venueId: 'venue_1',
+        // `tier1RewardPercent` is a deprecated field kept ONLY so stale callers
+        // still type-check; the service must strip it before writing.
+        patch: { newCustomerDiscountPercent: 18, tier1RewardPercent: 99 },
+      })
+      expect(mockedPrisma.referralProgramConfig.update).toHaveBeenCalledWith({
+        where: { venueId: 'venue_1' },
+        data: { newCustomerDiscountPercent: 18 },
+      })
+    })
+
+    it('rejects FREE_PRODUCT whose product belongs to another venue', async () => {
+      mockedPrisma.product.findFirst.mockResolvedValue(null) // no existe en este venue
+      await expect(
+        updateReferralConfig({
+          venueId: 'v1',
+          tiers: [{ tierLevel: 3, rewardType: 'FREE_PRODUCT', rewardProductId: 'p-other-venue', rewardQuantity: 1 }],
+        }),
+      ).rejects.toThrow('PRODUCTO_NO_PERTENECE_AL_VENUE')
+      expect(mockedPrisma.referralTierReward.create).not.toHaveBeenCalled()
+    })
+
+    it('accepts FREE_PRODUCT whose product belongs to the venue', async () => {
+      mockedPrisma.product.findFirst.mockResolvedValue({ id: 'p1' })
+      mockedPrisma.referralProgramConfig.findUnique.mockResolvedValue({ id: 'cfg1', venueId: 'v1' })
+      await updateReferralConfig({
+        venueId: 'v1',
+        tiers: [{ tierLevel: 3, rewardType: 'FREE_PRODUCT', rewardProductId: 'p1', rewardQuantity: 1 }],
+      })
+      expect(mockedPrisma.product.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'p1', venueId: 'v1' } }))
+      expect(mockedPrisma.referralTierReward.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ configId: 'cfg1', tierLevel: 3, rewardType: 'FREE_PRODUCT', rewardProductId: 'p1' }),
+        }),
+      )
+    })
+
+    it('persists a percent reward as a ReferralTierReward row', async () => {
+      mockedPrisma.referralProgramConfig.findUnique.mockResolvedValue({ id: 'cfg1', venueId: 'v1' })
+      await updateReferralConfig({ venueId: 'v1', tiers: [{ tierLevel: 1, rewardType: 'PERCENT_COUPON', rewardPercent: 15 }] })
+      expect(mockedPrisma.referralTierReward.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ tierLevel: 1, rewardType: 'PERCENT_COUPON' }),
+        }),
+      )
+    })
+
+    it('rejects PERCENT_COUPON / PERMANENT_DISCOUNT without a rewardPercent (PORCENTAJE_INVALIDO)', async () => {
+      await expect(updateReferralConfig({ venueId: 'v1', tiers: [{ tierLevel: 2, rewardType: 'PERMANENT_DISCOUNT' }] })).rejects.toThrow(
+        'PORCENTAJE_INVALIDO',
+      )
+    })
+
+    it('versioning: deactivates existing active rows for the tier BEFORE creating the replacement row', async () => {
+      mockedPrisma.referralProgramConfig.findUnique.mockResolvedValue({ id: 'cfg1', venueId: 'v1' })
+      const callOrder: string[] = []
+      mockedPrisma.referralTierReward.updateMany.mockImplementation(async () => {
+        callOrder.push('updateMany')
+        return { count: 1 }
+      })
+      mockedPrisma.referralTierReward.create.mockImplementation(async () => {
+        callOrder.push('create')
+        return {}
+      })
+      await updateReferralConfig({ venueId: 'v1', tiers: [{ tierLevel: 1, rewardType: 'PERCENT_COUPON', rewardPercent: 20 }] })
+      expect(mockedPrisma.referralTierReward.updateMany).toHaveBeenCalledWith({
+        where: { configId: 'cfg1', tierLevel: 1, active: true },
+        data: { active: false },
+      })
+      expect(callOrder).toEqual(['updateMany', 'create'])
+    })
+
+    it('supports several rewards for the same tier level in one call (e.g. coupon + free product)', async () => {
+      mockedPrisma.product.findFirst.mockResolvedValue({ id: 'p1' })
+      mockedPrisma.referralProgramConfig.findUnique.mockResolvedValue({ id: 'cfg1', venueId: 'v1' })
+      await updateReferralConfig({
+        venueId: 'v1',
+        tiers: [
+          { tierLevel: 3, rewardType: 'PERCENT_COUPON', rewardPercent: 25 },
+          { tierLevel: 3, rewardType: 'FREE_PRODUCT', rewardProductId: 'p1', rewardQuantity: 1 },
+        ],
+      })
+      expect(mockedPrisma.referralTierReward.create).toHaveBeenCalledTimes(2)
+      // Deactivation of prior tier-3 rows happens exactly once per tier level, not per reward.
+      expect(mockedPrisma.referralTierReward.updateMany).toHaveBeenCalledTimes(1)
+    })
+
+    it('REGRESSION: does not touch ReferralTierReward when tiers is omitted', async () => {
+      mockedPrisma.referralProgramConfig.update.mockResolvedValue({})
+      await updateReferralConfig({ venueId: 'venue_1', patch: { newCustomerDiscountPercent: 5 } })
+      expect(mockedPrisma.referralTierReward.create).not.toHaveBeenCalled()
+      expect(mockedPrisma.referralTierReward.updateMany).not.toHaveBeenCalled()
+      expect(mockedPrisma.referralProgramConfig.findUnique).not.toHaveBeenCalled()
     })
   })
 })
