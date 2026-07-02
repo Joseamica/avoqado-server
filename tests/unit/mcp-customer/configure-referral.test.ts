@@ -83,7 +83,7 @@ describe('configure_referral — happy paths', () => {
     })
     mockFindUnique.mockResolvedValueOnce({ id: 'cfg1', active: true }) // post-update refetch
 
-    const out = parse(await call({ venueId: 'v1', rewardCouponExpiryDays: 60 }))
+    const out = parse(await call({ venueId: 'v1', rewardCouponExpiryDays: 60, confirm: true }))
 
     expect(mockUpdate).toHaveBeenCalledWith({ venueId: 'v1', patch: { rewardCouponExpiryDays: 60 }, tiers: undefined })
     expect(mockActivate).not.toHaveBeenCalled()
@@ -102,7 +102,7 @@ describe('configure_referral — happy paths', () => {
     mockFindUnique.mockResolvedValueOnce({ id: 'cfg1', active: true })
 
     const tiers = [{ tierLevel: 1 as const, rewardType: ReferralRewardType.PERCENT_COUPON, rewardPercent: 15 }]
-    await call({ venueId: 'v1', tiers })
+    await call({ venueId: 'v1', tiers, confirm: true })
 
     expect(mockUpdate).toHaveBeenCalledWith({ venueId: 'v1', patch: {}, tiers })
   })
@@ -136,6 +136,7 @@ describe('configure_referral — happy paths', () => {
         tier3ReferralsRequired: 20,
         rewardCouponExpiryDays: 90,
         tiers,
+        confirm: true,
       }),
     )
 
@@ -168,7 +169,7 @@ describe('configure_referral — happy paths', () => {
     })
     mockFindUnique.mockResolvedValueOnce({ id: 'cfg1', active: true })
 
-    await call({ venueId: 'v1', active: true }) // no scalar fields passed at all
+    await call({ venueId: 'v1', active: true, confirm: true }) // no scalar fields passed at all
 
     expect(mockActivate).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -186,7 +187,7 @@ describe('configure_referral — happy paths', () => {
   it('active:false deactivates an existing program (default reason) and audits', async () => {
     mockFindUnique.mockResolvedValueOnce({ id: 'cfg1', active: true })
 
-    const out = parse(await call({ venueId: 'v1', active: false }))
+    const out = parse(await call({ venueId: 'v1', active: false, confirm: true }))
 
     expect(mockDeactivate).toHaveBeenCalledWith({ venueId: 'v1', reason: 'Desactivado vía MCP' })
     expect(mockAudit.mock.calls[0][1]).toMatchObject({
@@ -200,7 +201,7 @@ describe('configure_referral — happy paths', () => {
 
   it('active:false with an explicit reason forwards it', async () => {
     mockFindUnique.mockResolvedValueOnce({ id: 'cfg1', active: true })
-    await call({ venueId: 'v1', active: false, reason: 'fraude detectado' })
+    await call({ venueId: 'v1', active: false, reason: 'fraude detectado', confirm: true })
     expect(mockDeactivate).toHaveBeenCalledWith({ venueId: 'v1', reason: 'fraude detectado' })
   })
 
@@ -214,8 +215,97 @@ describe('configure_referral — happy paths', () => {
   it('surfaces a service validation error as text({ ok:false }) instead of throwing', async () => {
     mockFindUnique.mockResolvedValueOnce({ id: 'cfg1', active: true })
     mockUpdate.mockRejectedValueOnce(new Error('Tier requirements must be ascending: tier2 > tier1'))
-    const out = parse(await call({ venueId: 'v1', tier2ReferralsRequired: 1 }))
+    const out = parse(await call({ venueId: 'v1', tier2ReferralsRequired: 1, confirm: true }))
     expect(out.ok).toBe(false)
     expect(out.error).toMatch(/ascending/)
+  })
+})
+
+describe('configure_referral — confirm-gate (high-impact economics writes)', () => {
+  it('deactivate WITHOUT confirm returns a preview and writes nothing', async () => {
+    mockFindUnique.mockResolvedValueOnce({ id: 'cfg1', active: true })
+
+    const out = parse(await call({ venueId: 'v1', active: false }))
+
+    expect(out.ok).toBe(false)
+    expect(out.requiresConfirmation).toBe(true)
+    expect(out.preview).toEqual(expect.arrayContaining([expect.objectContaining({ from: 'sí', to: 'no' })]))
+    expect(out.message).toEqual(expect.any(String))
+    expect(mockDeactivate).not.toHaveBeenCalled()
+    expect(mockUpdate).not.toHaveBeenCalled()
+    expect(mockActivate).not.toHaveBeenCalled()
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+
+  it('first-time activation WITHOUT confirm returns a preview and writes nothing', async () => {
+    mockFindUnique.mockResolvedValueOnce(null) // existing check
+
+    const out = parse(
+      await call({
+        venueId: 'v1',
+        active: true,
+        newCustomerDiscountPercent: 10,
+        tier1ReferralsRequired: 7,
+        tier2ReferralsRequired: 12,
+        tier3ReferralsRequired: 20,
+        rewardCouponExpiryDays: 90,
+      }),
+    )
+
+    expect(out.ok).toBe(false)
+    expect(out.requiresConfirmation).toBe(true)
+    expect(out.preview).toEqual(expect.any(Array))
+    expect(mockActivate).not.toHaveBeenCalled()
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+
+  it('ongoing edit WITHOUT confirm returns a current → new preview and writes nothing', async () => {
+    mockFindUnique.mockResolvedValueOnce({
+      id: 'cfg1',
+      active: true,
+      newCustomerDiscountPercent: 10,
+      tier1ReferralsRequired: 7,
+      tier2ReferralsRequired: 12,
+      tier3ReferralsRequired: 20,
+      rewardCouponExpiryDays: 90,
+      codePrefix: 'ABC',
+    })
+
+    const out = parse(await call({ venueId: 'v1', newCustomerDiscountPercent: 5 }))
+
+    expect(out.ok).toBe(false)
+    expect(out.requiresConfirmation).toBe(true)
+    expect(out.preview).toEqual(
+      expect.arrayContaining([expect.objectContaining({ label: 'Descuento a cliente nuevo (%)', from: 10, to: 5 })]),
+    )
+    expect(mockUpdate).not.toHaveBeenCalled()
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+
+  it('ongoing edit WITH confirm:true applies the change and audits', async () => {
+    mockFindUnique.mockResolvedValueOnce({ id: 'cfg1', active: true, newCustomerDiscountPercent: 10 })
+    mockFindUnique.mockResolvedValueOnce({ id: 'cfg1', active: true }) // post-update refetch
+
+    const out = parse(await call({ venueId: 'v1', newCustomerDiscountPercent: 5, confirm: true }))
+
+    expect(mockUpdate).toHaveBeenCalledWith({ venueId: 'v1', patch: { newCustomerDiscountPercent: 5 }, tiers: undefined })
+    expect(mockAudit).toHaveBeenCalledTimes(1)
+    expect(out).toMatchObject({ ok: true })
+  })
+
+  it('tiers-only preview describes the per-level reward change', async () => {
+    mockFindUnique.mockResolvedValueOnce({
+      id: 'cfg1',
+      active: true,
+      tierRewards: [{ tierLevel: 3, rewardType: ReferralRewardType.PERCENT_COUPON, rewardPercent: 25, recurrence: 'ONE_TIME' }],
+    })
+
+    const tiers = [{ tierLevel: 3 as const, rewardType: ReferralRewardType.PERMANENT_DISCOUNT, rewardPercent: 5 }]
+    const out = parse(await call({ venueId: 'v1', tiers }))
+
+    expect(out.ok).toBe(false)
+    expect(out.requiresConfirmation).toBe(true)
+    expect(out.tierPreview).toEqual([{ tierLevel: 3, from: 'cupón 25%', to: '5% permanente' }])
+    expect(mockUpdate).not.toHaveBeenCalled()
   })
 })

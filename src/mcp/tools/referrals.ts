@@ -43,14 +43,93 @@ const tierRewardShape = {
 }
 const tierRewardZod = z.object(tierRewardShape)
 
+/** Spanish labels for the scalar ReferralProgramConfig fields shown in confirm-gate previews. */
+const FIELD_LABELS: Record<string, string> = {
+  active: 'Programa activo',
+  newCustomerDiscountPercent: 'Descuento a cliente nuevo (%)',
+  tier1ReferralsRequired: 'Referencias para nivel 1',
+  tier2ReferralsRequired: 'Referencias para nivel 2',
+  tier3ReferralsRequired: 'Referencias para nivel 3',
+  rewardCouponExpiryDays: 'Vigencia del cupón (días)',
+  codePrefix: 'Prefijo de código',
+  welcomeMessageTemplate: 'Mensaje de bienvenida',
+  tierUpMessageTemplate: 'Mensaje de subida de nivel',
+}
+
+/** Formats a single reward row for a human preview, e.g. "cupón 25%" / "5% permanente" / "producto gratis x2". */
+function formatTierReward(r: {
+  rewardType: ReferralRewardType
+  recurrence?: ReferralRewardRecurrence | null
+  rewardPercent?: unknown
+  rewardQuantity?: number | null
+}): string {
+  const percent = r.rewardPercent != null ? Number(r.rewardPercent) : null
+  if (r.rewardType === ReferralRewardType.PERCENT_COUPON) {
+    return `cupón ${percent}%${r.recurrence === ReferralRewardRecurrence.MONTHLY ? ' mensual' : ''}`
+  }
+  if (r.rewardType === ReferralRewardType.PERMANENT_DISCOUNT) {
+    return `${percent}% permanente`
+  }
+  if (r.rewardType === ReferralRewardType.FREE_PRODUCT) {
+    return `producto gratis${r.rewardQuantity && r.rewardQuantity > 1 ? ` x${r.rewardQuantity}` : ''}`
+  }
+  return String(r.rewardType)
+}
+
+/** Joins every reward configured for one tier level into a single readable string (a level can carry >1 reward). */
+function formatTierGroup(
+  rewards: Array<{
+    rewardType: ReferralRewardType
+    recurrence?: ReferralRewardRecurrence | null
+    rewardPercent?: unknown
+    rewardQuantity?: number | null
+  }>,
+): string {
+  if (!rewards || rewards.length === 0) return 'sin premio'
+  return rewards.map(formatTierReward).join(' + ')
+}
+
+/** Builds the "nivel N: actual → nuevo" preview rows for the tier levels present in the incoming `tiers` payload. */
+function buildTierPreview(
+  currentRewards: Array<{
+    tierLevel: number
+    rewardType: ReferralRewardType
+    recurrence?: ReferralRewardRecurrence | null
+    rewardPercent?: unknown
+    rewardQuantity?: number | null
+  }>,
+  incomingTiers: TierRewardInput[] | undefined,
+): Array<{ tierLevel: number; from: string; to: string }> {
+  if (!incomingTiers || incomingTiers.length === 0) return []
+  const levels = Array.from(new Set(incomingTiers.map(t => t.tierLevel))).sort((a, b) => a - b)
+  return levels.map(tierLevel => ({
+    tierLevel,
+    from: formatTierGroup((currentRewards ?? []).filter(r => r.tierLevel === tierLevel)),
+    to: formatTierGroup(incomingTiers.filter(t => t.tierLevel === tierLevel)),
+  }))
+}
+
+/** Renders the scalar + tier preview rows into the Spanish confirm-gate message. */
+function buildConfirmMessage(
+  intro: string,
+  scalarPreview: Array<{ label: string; from: unknown; to: unknown }>,
+  tierPreview: Array<{ tierLevel: number; from: string; to: string }>,
+): string {
+  const lines = [
+    ...scalarPreview.map(p => `• ${p.label}: ${p.from ?? '(sin definir)'} → ${p.to}`),
+    ...tierPreview.map(t => `• Nivel ${t.tierLevel}: ${t.from} → ${t.to}`),
+  ]
+  return `${intro}\n${lines.join('\n')}\n\nConfirma con el operador; luego vuelve a llamar con confirm:true para aplicar.`
+}
+
 export function registerReferralTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
 
   server.tool(
     'referral_status',
-    'The referral / "recomienda y gana" program settings for a venue you can access: whether it is active, the discount % a new referred customer gets, how many referrals unlock tier 1/2/3, how many days an unlocked coupon lasts, and the per-tier reward configuration (type/percent/product/quantity/recurrence). Also returns this month\'s referral activity summary (counts vs last month, conversion rate, coupons emitted, top referrer). Pass venueId. Answers "¿cómo funciona mi programa de referidos? ¿cuántas referencias van este mes?".',
+    'La configuración del programa de referidos / "recomienda y gana" de un venue al que tienes acceso: si está activo, el % de descuento que recibe un nuevo cliente referido, cuántas referencias desbloquean el nivel 1/2/3, cuántos días dura vigente un cupón desbloqueado, y la configuración de premios por nivel (tipo/porcentaje/producto/cantidad/recurrencia). También devuelve el resumen de actividad de referidos de este mes (conteos vs. mes pasado, tasa de conversión, cupones emitidos, mejor referidor). Pasa venueId. Responde "¿cómo funciona mi programa de referidos? ¿cuántas referencias van este mes?".',
     {
-      venueId: z.string().describe('Venue whose referral program to read (must be in your scope)'),
+      venueId: z.string().describe('Venue cuyo programa de referidos quieres leer (debe estar en tu scope)'),
     },
     async ({ venueId }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
@@ -112,14 +191,20 @@ export function registerReferralTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'configure_referral',
-    'Configure the referral / "recomienda y gana" PROGRAM of a venue you can access: activate/deactivate it, set the new-customer discount %, the referral counts needed per tier (1/2/3), the coupon expiry days, and per-tier rewards (percent coupon, permanent discount, or free product). Pass active:true to activate — the FIRST TIME this requires newCustomerDiscountPercent + all 3 tier thresholds + rewardCouponExpiryDays (later re-activations reuse the current values for anything you omit). Pass active:false + reason to deactivate (preserves all history, non-destructive). Omit active to just edit settings on an already-active program — only the fields you pass are changed. Editing a tier level supersedes ALL its previous active rewards (versioned, never physically deleted). This WRITES program settings; requires referral:configure.',
+    '🔴 CRÍTICO (cambia la economía de premios del programa). Configura el PROGRAMA de referidos / "recomienda y gana" de un venue al que tienes acceso: actívalo/desactívalo, define el % de descuento al cliente nuevo, las referencias necesarias por nivel (1/2/3), los días de vigencia del cupón, y los premios por nivel (cupón %, descuento permanente o producto gratis). Pasa active:true para activar — la PRIMERA VEZ esto requiere newCustomerDiscountPercent + los 3 umbrales de nivel + rewardCouponExpiryDays (reactivaciones posteriores reusan los valores actuales de lo que omitas). Pasa active:false + reason para desactivar (preserva todo el historial, no destructivo). Omite active para solo editar configuración de un programa ya activo — solo se cambian los campos que pasas. Editar un nivel reemplaza (versiona) TODOS sus premios activos anteriores. Por DEFAULT solo PREVISUALIZA (actual → nuevo); llama de nuevo con confirm:true para aplicar. Esto ESCRIBE la configuración del programa; requiere referral:configure.',
     {
-      venueId: z.string().describe('Venue whose program to configure (must be in your scope)'),
+      venueId: z.string().describe('Venue cuyo programa quieres configurar (debe estar en tu scope)'),
       active: z
         .boolean()
         .optional()
-        .describe('true = activate/re-activate the program, false = deactivate it, omit = just edit settings on an already-active program'),
-      reason: z.string().optional().describe('Why you are deactivating — only used with active:false (default: "Desactivado vía MCP")'),
+        .describe(
+          'true = activar/reactivar el programa, false = desactivarlo, omitir = solo editar configuración de un programa ya activo',
+        ),
+      reason: z.string().optional().describe('Por qué estás desactivando — solo se usa con active:false (default: "Desactivado vía MCP")'),
+      confirm: z
+        .boolean()
+        .optional()
+        .describe('Debe ser true para aplicar los cambios; sin él se devuelve una vista previa (actual → nuevo) sin escribir nada'),
       newCustomerDiscountPercent: z
         .number()
         .min(0)
@@ -157,6 +242,7 @@ export function registerReferralTools(server: McpServer, scope: McpScope) {
       venueId,
       active,
       reason,
+      confirm,
       newCustomerDiscountPercent,
       tier1ReferralsRequired,
       tier2ReferralsRequired,
@@ -172,7 +258,10 @@ export function registerReferralTools(server: McpServer, scope: McpScope) {
       const gate = await planGateMessage(venueId, 'REFERRAL_PROGRAM', 'El programa de referidos')
       if (gate) return text({ ok: false, planRequired: true, error: gate })
 
-      const existing = await prisma.referralProgramConfig.findUnique({ where: { venueId } })
+      const existing = await prisma.referralProgramConfig.findUnique({
+        where: { venueId },
+        include: { tierRewards: { where: { active: true } } },
+      })
 
       try {
         // --- Deactivate: only valid when a config row already exists. -----------
@@ -181,6 +270,17 @@ export function registerReferralTools(server: McpServer, scope: McpScope) {
             return text({ ok: false, error: 'El programa de referidos no está configurado; no hay nada que desactivar.' })
           }
           const deactivateReason = reason ?? 'Desactivado vía MCP'
+
+          if (!confirm) {
+            const preview = [{ label: FIELD_LABELS.active, from: existing.active ? 'sí' : 'no', to: 'no' }]
+            return text({
+              ok: false,
+              requiresConfirmation: true,
+              preview,
+              message: buildConfirmMessage(`Esto desactivará el programa de referidos (razón: "${deactivateReason}"):`, preview, []),
+            })
+          }
+
           await deactivateReferralProgram({ venueId, reason: deactivateReason })
           await auditMcpWrite(scope, {
             action: 'REFERRAL_CONFIG_UPDATED',
@@ -230,6 +330,30 @@ export function registerReferralTools(server: McpServer, scope: McpScope) {
             tierUpMessageTemplate,
             tiers: tiers as TierRewardInput[] | undefined,
           }
+
+          if (!confirm) {
+            const preview = [
+              { label: FIELD_LABELS.active, from: existing?.active ? 'sí' : 'no', to: 'sí' },
+              {
+                label: FIELD_LABELS.newCustomerDiscountPercent,
+                from: existing ? Number(existing.newCustomerDiscountPercent) : null,
+                to: resolvedDiscount,
+              },
+              { label: FIELD_LABELS.tier1ReferralsRequired, from: existing?.tier1ReferralsRequired ?? null, to: resolvedTier1 },
+              { label: FIELD_LABELS.tier2ReferralsRequired, from: existing?.tier2ReferralsRequired ?? null, to: resolvedTier2 },
+              { label: FIELD_LABELS.tier3ReferralsRequired, from: existing?.tier3ReferralsRequired ?? null, to: resolvedTier3 },
+              { label: FIELD_LABELS.rewardCouponExpiryDays, from: existing?.rewardCouponExpiryDays ?? null, to: resolvedExpiry },
+            ]
+            const tierPreview = buildTierPreview(existing?.tierRewards ?? [], tiers as TierRewardInput[] | undefined)
+            return text({
+              ok: false,
+              requiresConfirmation: true,
+              preview,
+              tierPreview,
+              message: buildConfirmMessage(`Esto ${existing ? 'REACTIVARÁ' : 'ACTIVARÁ'} el programa de referidos:`, preview, tierPreview),
+            })
+          }
+
           await activateReferralProgram(activateInput)
 
           const cfg = await prisma.referralProgramConfig.findUnique({ where: { venueId }, select: { id: true, active: true } })
@@ -256,6 +380,22 @@ export function registerReferralTools(server: McpServer, scope: McpScope) {
 
         if (Object.keys(patch).length === 0 && (!tiers || tiers.length === 0)) {
           return text({ ok: false, error: 'No pasaste ningún campo para configurar.' })
+        }
+
+        if (!confirm) {
+          const preview = Object.entries(patch).map(([key, to]) => ({
+            label: FIELD_LABELS[key] ?? key,
+            from: existing ? ((existing as unknown as Record<string, unknown>)[key] ?? null) : null,
+            to,
+          }))
+          const tierPreview = buildTierPreview(existing?.tierRewards ?? [], tiers as TierRewardInput[] | undefined)
+          return text({
+            ok: false,
+            requiresConfirmation: true,
+            preview,
+            tierPreview,
+            message: buildConfirmMessage('Esto cambiará la configuración del programa de referidos:', preview, tierPreview),
+          })
         }
 
         await updateReferralConfig({ venueId, patch, tiers: tiers as TierRewardInput[] | undefined })
