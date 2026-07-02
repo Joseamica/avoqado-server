@@ -70,15 +70,17 @@ const { generateReferralCode } = require('@/services/referrals/referralCode.serv
 describe('referralProgram.service', () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    // The interactive transaction must ONLY touch config + activityLog. The tx
-    // client we hand the callback deliberately omits `customer` and `venue`, so
-    // if activation ever moves per-customer work back INTO the transaction, the
+    // The interactive transaction must ONLY touch config + activityLog (+ tier
+    // rewards, for the separate persistTierRewards transaction). The tx client
+    // we hand the callback deliberately omits `customer` and `venue`, so if
+    // activation ever moves per-customer work back INTO the transaction, the
     // callback throws (tx.customer is undefined) and the test fails. This is the
     // structural guard for the 2026-05-29 production incident (txn 5s timeout).
     mockedPrisma.$transaction.mockImplementation(async (fn: any) =>
       fn({
         referralProgramConfig: mockedPrisma.referralProgramConfig,
         activityLog: mockedPrisma.activityLog,
+        referralTierReward: mockedPrisma.referralTierReward,
       }),
     )
     // Default: backfill (fire-and-forget) finds nothing → clean no-op.
@@ -310,6 +312,23 @@ describe('referralProgram.service', () => {
       expect(mockedPrisma.referralTierReward.create).not.toHaveBeenCalled()
     })
 
+    it('rejects FREE_PRODUCT with a MISSING rewardProductId, even if Prisma would ignore the undefined filter and match an arbitrary product in the venue', async () => {
+      // Real Prisma behavior: findFirst({ where: { id: undefined, venueId } }) DROPS the
+      // undefined `id` filter and matches an arbitrary product in the venue — simulated
+      // here by resolving a truthy row. Without an explicit upfront guard, the missing-id
+      // case would slip through validateTierRewards exactly like a valid product would.
+      mockedPrisma.product.findFirst.mockResolvedValue({ id: 'arbitrary-product-in-venue' })
+      await expect(
+        updateReferralConfig({
+          venueId: 'v1',
+          tiers: [{ tierLevel: 3, rewardType: 'FREE_PRODUCT', rewardQuantity: 1 }],
+        }),
+      ).rejects.toThrow('PRODUCTO_NO_PERTENECE_AL_VENUE')
+      // The guard must fire BEFORE ever querying the DB with an undefined id filter.
+      expect(mockedPrisma.product.findFirst).not.toHaveBeenCalled()
+      expect(mockedPrisma.referralTierReward.create).not.toHaveBeenCalled()
+    })
+
     it('accepts FREE_PRODUCT whose product belongs to the venue', async () => {
       mockedPrisma.product.findFirst.mockResolvedValue({ id: 'p1' })
       mockedPrisma.referralProgramConfig.findUnique.mockResolvedValue({ id: 'cfg1', venueId: 'v1' })
@@ -341,7 +360,7 @@ describe('referralProgram.service', () => {
       )
     })
 
-    it('versioning: deactivates existing active rows for the tier BEFORE creating the replacement row', async () => {
+    it('versioning: deactivates existing active rows for the tier BEFORE creating the replacement row, atomically inside $transaction', async () => {
       mockedPrisma.referralProgramConfig.findUnique.mockResolvedValue({ id: 'cfg1', venueId: 'v1' })
       const callOrder: string[] = []
       mockedPrisma.referralTierReward.updateMany.mockImplementation(async () => {
@@ -353,6 +372,11 @@ describe('referralProgram.service', () => {
         return {}
       })
       await updateReferralConfig({ venueId: 'v1', tiers: [{ tierLevel: 1, rewardType: 'PERCENT_COUPON', rewardPercent: 20 }] })
+      // Atomicity guard: the updateMany + create pair MUST run through
+      // prisma.$transaction, not as two independent top-level calls — a
+      // transient DB error between them would otherwise leave the tier with
+      // zero active rewards (real risk per documented P1001/P2024 blips).
+      expect(mockedPrisma.$transaction).toHaveBeenCalledTimes(1)
       expect(mockedPrisma.referralTierReward.updateMany).toHaveBeenCalledWith({
         where: { configId: 'cfg1', tierLevel: 1, active: true },
         data: { active: false },

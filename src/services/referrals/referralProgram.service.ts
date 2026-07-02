@@ -101,6 +101,11 @@ function validateConfig(input: Partial<ActivateInput>): void {
 async function validateTierRewards(venueId: string, tiers: TierRewardInput[]): Promise<void> {
   for (const t of tiers) {
     if (t.rewardType === ReferralRewardType.FREE_PRODUCT) {
+      // Guard BEFORE the query: Prisma's `findFirst` silently IGNORES an
+      // `undefined` filter value, so `{ where: { id: undefined, venueId } }`
+      // would match an arbitrary product in the venue instead of failing —
+      // letting a FREE_PRODUCT row persist with `rewardProductId: null`.
+      if (!t.rewardProductId) throw new Error('PRODUCTO_NO_PERTENECE_AL_VENUE')
       const product = await prisma.product.findFirst({
         where: { id: t.rewardProductId, venueId },
         select: { id: true },
@@ -129,6 +134,13 @@ async function validateTierRewards(venueId: string, tiers: TierRewardInput[]): P
  * Tier levels NOT present in `tiers` are left completely untouched, so a
  * caller can edit just one level per call (matches the existing partial-
  * update semantics of `updateReferralConfig`).
+ *
+ * The whole thing runs inside ONE `$transaction`: a transient DB blip
+ * (this repo has documented P1001/P2024 blips) between a tier's `updateMany`
+ * and its `create`(s) would otherwise leave that tier with ZERO active
+ * rewards. Both callers (`activateReferralProgram`, `updateReferralConfig`)
+ * invoke this OUTSIDE any surrounding transaction, so nesting `$transaction`
+ * here is safe (no interactive-transaction-inside-transaction issue).
  */
 async function persistTierRewards(configId: string, tiers: TierRewardInput[]): Promise<void> {
   const rewardsByTier = new Map<number, TierRewardInput[]>()
@@ -138,25 +150,27 @@ async function persistTierRewards(configId: string, tiers: TierRewardInput[]): P
     rewardsByTier.set(t.tierLevel, bucket)
   }
 
-  for (const [tierLevel, rewards] of rewardsByTier) {
-    await prisma.referralTierReward.updateMany({
-      where: { configId, tierLevel, active: true },
-      data: { active: false },
-    })
-    for (const reward of rewards) {
-      await prisma.referralTierReward.create({
-        data: {
-          configId,
-          tierLevel: reward.tierLevel,
-          rewardType: reward.rewardType,
-          recurrence: reward.recurrence ?? ReferralRewardRecurrence.ONE_TIME,
-          rewardPercent: reward.rewardPercent != null ? new Prisma.Decimal(reward.rewardPercent) : null,
-          rewardProductId: reward.rewardProductId ?? null,
-          rewardQuantity: reward.rewardQuantity ?? 1,
-        },
+  await prisma.$transaction(async (tx: any) => {
+    for (const [tierLevel, rewards] of rewardsByTier) {
+      await tx.referralTierReward.updateMany({
+        where: { configId, tierLevel, active: true },
+        data: { active: false },
       })
+      for (const reward of rewards) {
+        await tx.referralTierReward.create({
+          data: {
+            configId,
+            tierLevel: reward.tierLevel,
+            rewardType: reward.rewardType,
+            recurrence: reward.recurrence ?? ReferralRewardRecurrence.ONE_TIME,
+            rewardPercent: reward.rewardPercent != null ? new Prisma.Decimal(reward.rewardPercent) : null,
+            rewardProductId: reward.rewardProductId ?? null,
+            rewardQuantity: reward.rewardQuantity ?? 1,
+          },
+        })
+      }
     }
-  }
+  })
 }
 
 /**
