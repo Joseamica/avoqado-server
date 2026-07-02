@@ -157,6 +157,54 @@ async function requireOrgManager(req: Request, res: Response, next: NextFunction
 }
 
 /**
+ * Middleware: require an ADMIN-or-above role for the target organization — a
+ * STRICTER floor than requireOrgManager (which also allows supervisors/MANAGER).
+ * Used for the most destructive fleet op: DELETING a payment terminal. Supervisors
+ * may message / command / create terminals, but only admins/owners may delete one.
+ *
+ * "Admin or above" = holds StaffRole ADMIN/OWNER/SUPERADMIN in ANY venue of the
+ * org, OR is an org-level OWNER/ADMIN. SUPERADMIN bypasses. MANAGER (supervisor)
+ * and floor staff are blocked.
+ */
+async function requireOrgAdmin(req: Request, res: Response, next: NextFunction) {
+  try {
+    const authContext = (req as any).authContext
+    const orgId = req.params.orgId
+
+    if (authContext?.role === 'SUPERADMIN') return next()
+
+    const [venueRole, orgRole] = await Promise.all([
+      prisma.staffVenue.findFirst({
+        where: {
+          staffId: authContext?.userId,
+          active: true,
+          venue: { organizationId: orgId },
+          role: { in: ['SUPERADMIN', 'OWNER', 'ADMIN'] },
+        },
+        select: { id: true },
+      }),
+      prisma.staffOrganization.findFirst({
+        where: {
+          staffId: authContext?.userId,
+          organizationId: orgId,
+          isActive: true,
+          role: { in: ['OWNER', 'ADMIN'] },
+        },
+        select: { id: true },
+      }),
+    ])
+
+    if (!venueRole && !orgRole) {
+      return res.status(403).json({ success: false, error: 'admin_required', message: 'Se requiere rol de administrador o superior' })
+    }
+
+    next()
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
  * GET /dashboard/organizations/:orgId/vision-global
  * Returns: Aggregate KPIs across all venues in the organization
  */
@@ -867,7 +915,7 @@ router.delete(
   '/:orgId/terminals/:terminalId',
   authenticateTokenMiddleware,
   checkOrgAccess,
-  requireOrgManager,
+  requireOrgAdmin,
   validateRequest(DeleteOrgTerminalSchema),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
