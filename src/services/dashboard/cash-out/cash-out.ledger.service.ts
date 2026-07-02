@@ -17,7 +17,7 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
-import { assertCashOutEnabled } from './cash-out.config.service'
+import { assertCashOutEnabled, listActiveDays } from './cash-out.config.service'
 import { buildCommissionEntry, venueBusinessDate, weekStartMonday, type RateTier, type CashOutSaleType } from './cash-out.domain'
 
 /** A calendar date ('yyyy-MM-dd') → @db.Date value (fake-UTC midnight, tz-stable). */
@@ -38,6 +38,16 @@ export async function materializeEntries(venueId: string): Promise<{ created: nu
   if (!venue) return { created: 0 }
   const tz = venue.timezone
 
+  // Cash-out commission is generated ONLY for sales made on a day the ADMIN activated
+  // (spec: "ADMIN define los días que aplica el esquema cash out"). This day-based scheme
+  // never pays retroactively on pre-scheme history. Without this filter the sweep priced
+  // EVERY historical COMPLETED sale — spamming "[cash-out] materialize skipped" warnings
+  // while no rate table exists, and (once rates were loaded) would have paid commission on
+  // months of past sales. No active days configured → nothing to materialize (fast no-op:
+  // also avoids scanning every historical sale on each promoter balance check).
+  const activeDays = new Set(await listActiveDays(venueId))
+  if (activeDays.size === 0) return { created: 0 }
+
   const rateRows = await prisma.cashOutCommissionRate.findMany({ where: { venueId, active: true } })
   const rates: RateTier[] = rateRows.map(r => ({
     saleType: r.saleType as CashOutSaleType,
@@ -53,7 +63,9 @@ export async function materializeEntries(venueId: string): Promise<{ created: nu
     orderBy: { createdAt: 'asc' },
     select: { id: true, staffId: true, isPortabilidad: true, createdAt: true },
   })
-  const pending = sales.filter(s => !have.has(s.id))
+  // Skip sales that already have an entry (idempotent) AND sales made on a day the ADMIN
+  // did not activate (their venue-local business date is not in the calendar → no commission).
+  const pending = sales.filter(s => !have.has(s.id) && activeDays.has(venueBusinessDate(s.createdAt, tz)))
 
   let created = 0
   const counters = new Map<string, number>() // `${staffId}|${weekStart}` → count materialized so far

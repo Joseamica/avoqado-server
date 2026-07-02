@@ -16,6 +16,7 @@ jest.mock('@/utils/prismaClient', () => ({
       aggregate: jest.fn(),
       updateMany: jest.fn(),
     },
+    cashOutScheduleDay: { findMany: jest.fn() },
   },
 }))
 jest.mock('@/services/modules/module.service', () => ({
@@ -35,6 +36,7 @@ const p = prisma as unknown as {
   cashOutCommissionRate: { findMany: jest.Mock }
   saleVerification: { findMany: jest.Mock }
   promoterCommissionEntry: { findMany: jest.Mock; count: jest.Mock; create: jest.Mock; aggregate: jest.Mock; updateMany: jest.Mock }
+  cashOutScheduleDay: { findMany: jest.Mock }
 }
 const mockEnabled = moduleService.isModuleEnabled as jest.Mock
 
@@ -47,6 +49,9 @@ beforeEach(() => {
     { saleType: 'LINEA_NUEVA', minCount: 6, maxCount: null, amount: new Prisma.Decimal(40) },
     { saleType: 'PORTABILIDAD', minCount: 1, maxCount: null, amount: new Prisma.Decimal(25) },
   ])
+  // The 22nd is an active cash-out day by default so the existing materialization tests
+  // (sales dated 2026-06-22) still produce entries under the new active-days gate.
+  p.cashOutScheduleDay.findMany.mockResolvedValue([{ day: new Date('2026-06-22T00:00:00.000Z') }])
 })
 
 describe('cash-out ledger — materializeEntries', () => {
@@ -80,6 +85,28 @@ describe('cash-out ledger — materializeEntries', () => {
     const res = await materializeEntries('v_other')
     expect(res.created).toBe(0)
     expect(p.saleVerification.findMany).not.toHaveBeenCalled()
+  })
+
+  it('is a no-op when NO cash-out day is active (retroactive/noise guard) and never scans sales', async () => {
+    p.cashOutScheduleDay.findMany.mockResolvedValue([]) // ADMIN has not activated any day yet
+    const res = await materializeEntries('v_pt')
+    expect(res.created).toBe(0)
+    expect(p.saleVerification.findMany).not.toHaveBeenCalled() // early return, no history scan
+    expect(p.promoterCommissionEntry.create).not.toHaveBeenCalled()
+  })
+
+  it('materializes only sales on an active cash-out day (skips pre-scheme history — no retroactive pay)', async () => {
+    p.cashOutScheduleDay.findMany.mockResolvedValue([{ day: new Date('2026-06-22T00:00:00.000Z') }]) // only the 22nd active
+    p.promoterCommissionEntry.findMany.mockResolvedValue([])
+    p.promoterCommissionEntry.count.mockResolvedValue(0)
+    p.saleVerification.findMany.mockResolvedValue([
+      { id: 's_active', staffId: 'p1', isPortabilidad: false, createdAt: new Date('2026-06-22T18:00:00Z') }, // active day
+      { id: 's_history', staffId: 'p1', isPortabilidad: false, createdAt: new Date('2026-06-15T18:00:00Z') }, // NOT active
+    ])
+    const res = await materializeEntries('v_pt')
+    expect(res.created).toBe(1)
+    expect(p.promoterCommissionEntry.create).toHaveBeenCalledTimes(1)
+    expect(p.promoterCommissionEntry.create.mock.calls[0][0].data).toMatchObject({ saleVerificationId: 's_active' })
   })
 })
 
