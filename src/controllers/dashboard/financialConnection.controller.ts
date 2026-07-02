@@ -107,6 +107,39 @@ export async function getBalance(req: Request, res: Response, next: NextFunction
     next(e)
   }
 }
+
+const MAX_MOVEMENTS_PAGE_SIZE = 50
+
+function parseIsoDateParam(v: unknown, name: string): string | undefined {
+  if (v == null || v === '') return undefined
+  const d = new Date(String(v))
+  if (Number.isNaN(d.getTime())) throw new BadRequestError(`${name} debe ser fecha ISO válida.`)
+  return d.toISOString()
+}
+
+export async function getMovements(req: Request, res: Response, next: NextFunction) {
+  try {
+    await assertAccountBelongsToVenue(req.params.id, req.params.venueId)
+    const page = Math.max(0, Number(req.query.page ?? 0) || 0)
+    const size = Math.min(MAX_MOVEMENTS_PAGE_SIZE, Math.max(1, Number(req.query.size ?? 10) || 10))
+    const from = parseIsoDateParam(req.query.from, 'from')
+    const to = parseIsoDateParam(req.query.to, 'to')
+    res.json({ success: true, data: await svc.getMovementsForAccount(req.params.id, { page, size, from, to }) })
+  } catch (e) {
+    next(e)
+  }
+}
+
+export async function getMovementStats(req: Request, res: Response, next: NextFunction) {
+  try {
+    await assertAccountBelongsToVenue(req.params.id, req.params.venueId)
+    const from = parseIsoDateParam(req.query.from, 'from')
+    const to = parseIsoDateParam(req.query.to, 'to')
+    res.json({ success: true, data: await svc.getMovementStatsForAccount(req.params.id, { from, to }) })
+  } catch (e) {
+    next(e)
+  }
+}
 export async function disconnect(req: Request, res: Response, next: NextFunction) {
   try {
     await assertConnectionBelongsToVenue(req.params.id, req.params.venueId)

@@ -4,7 +4,7 @@ import { BadRequestError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { getFinancialProviderClient } from './registry'
 import { encryptGrant, decryptGrant } from './crypto'
-import type { Grant, ProviderAccount } from './types'
+import type { Grant, ProviderAccount, MovementPage, MovementQuery, MovementStats } from './types'
 
 /**
  * Forma única de retorno para connect/validateDevice/select. Deliberadamente UN
@@ -375,6 +375,43 @@ async function accessTokenFor(conn: {
     // grant guardado queda muerto → NEEDS_REAUTH forzado. 30s cubre el peor caso.
     { timeout: 30_000, maxWait: 10_000 },
   )
+}
+
+/** Resuelve el idCuenta del provider para una FinancialAccount, backfilleando filas pre-columna. */
+async function resolveCuentaId(
+  fa: { id: string; externalId: string; externalCuentaId: string | null },
+  conn: Parameters<typeof accessTokenFor>[0],
+): Promise<{ cuentaId: string; accessToken: string }> {
+  const accessToken = await accessTokenFor(conn)
+  if (fa.externalCuentaId) return { cuentaId: fa.externalCuentaId, accessToken }
+  // Fila creada antes de la columna: pedir las cuentas al provider y backfillear.
+  const client = clientFor(conn.provider.code)
+  const accounts = await client.listAccounts({ accessToken })
+  const match = accounts.find(a => a.externalId === fa.externalId)
+  if (!match?.cuentaId) throw new BadRequestError('El proveedor no reporta cuenta de movimientos para este negocio.')
+  await prisma.financialAccount.update({ where: { id: fa.id }, data: { externalCuentaId: match.cuentaId } })
+  return { cuentaId: match.cuentaId, accessToken }
+}
+
+export async function getMovementsForAccount(financialAccountId: string, q: MovementQuery): Promise<MovementPage> {
+  const fa = await prisma.financialAccount.findUniqueOrThrow({
+    where: { id: financialAccountId },
+    include: { connection: { include: { provider: true } } },
+  })
+  const { cuentaId, accessToken } = await resolveCuentaId(fa, fa.connection)
+  return clientFor(fa.connection.provider.code).listMovements({ accessToken }, cuentaId, q)
+}
+
+export async function getMovementStatsForAccount(
+  financialAccountId: string,
+  range: { from?: string; to?: string },
+): Promise<MovementStats> {
+  const fa = await prisma.financialAccount.findUniqueOrThrow({
+    where: { id: financialAccountId },
+    include: { connection: { include: { provider: true } } },
+  })
+  const { cuentaId, accessToken } = await resolveCuentaId(fa, fa.connection)
+  return clientFor(fa.connection.provider.code).getMovementStats({ accessToken }, cuentaId, range)
 }
 
 export async function getBalanceForConnectionAccount(financialAccountId: string) {

@@ -6,6 +6,8 @@ const clientMock = {
   revoke: jest.fn(),
   listAccounts: jest.fn(),
   getBalance: jest.fn(),
+  listMovements: jest.fn(),
+  getMovementStats: jest.fn(),
 }
 jest.mock('@/services/financial-connections/registry', () => ({
   getFinancialProviderClient: () => clientMock,
@@ -222,6 +224,44 @@ it('refresh guard: a connection revoked before the lock re-read is never refresh
   expect(db.financialConnection.updateMany).toHaveBeenCalledWith(
     expect.objectContaining({ where: expect.objectContaining({ status: { in: ['CONNECTED', 'NEEDS_REAUTH'] } }) }),
   )
+})
+
+it('getMovementsForAccount: usa externalCuentaId y delega al client', async () => {
+  db.financialAccount.findUniqueOrThrow.mockResolvedValue({
+    id: 'fa1', externalId: 'neg-1', externalCuentaId: 'cta-1',
+    connection: { id: 'cm-1', mode: 'SELF_CONNECT', grantEnc: encFixture(), tokenVersion: 0, deviceIdentifier: 'dev', status: 'CONNECTED', provider: { code: 'EXTERNAL_BANK' } },
+  })
+  db.financialConnection.findUniqueOrThrow.mockResolvedValue({ id: 'cm-1', grantEnc: encFixture(), tokenVersion: 0, status: 'CONNECTED' })
+  clientMock.refresh.mockResolvedValue({ grant: { refreshToken: 'r2' }, ctx: { accessToken: 'acc' } })
+  clientMock.listMovements.mockResolvedValue({ movements: [], total: 0 })
+  const r = await svc.getMovementsForAccount('fa1', { page: 0, size: 10 })
+  expect(clientMock.listMovements).toHaveBeenCalledWith(expect.objectContaining({ accessToken: expect.any(String) }), 'cta-1', { page: 0, size: 10 })
+  expect(r.total).toBe(0)
+})
+
+it('getMovementsForAccount: backfillea externalCuentaId perezosamente cuando es null (fila pre-columna)', async () => {
+  db.financialAccount.findUniqueOrThrow.mockResolvedValue({
+    id: 'fa2', externalId: 'neg-1', externalCuentaId: null,
+    connection: { id: 'cm-2', mode: 'SELF_CONNECT', grantEnc: encFixture(), tokenVersion: 0, deviceIdentifier: 'dev', status: 'CONNECTED', provider: { code: 'EXTERNAL_BANK' } },
+  })
+  db.financialConnection.findUniqueOrThrow.mockResolvedValue({ id: 'cm-2', grantEnc: encFixture(), tokenVersion: 0, status: 'CONNECTED' })
+  clientMock.refresh.mockResolvedValue({ grant: { refreshToken: 'r2' }, ctx: { accessToken: 'acc' } })
+  clientMock.listAccounts.mockResolvedValue([{ externalId: 'neg-1', cuentaId: 'cta-9', label: null, clabe: null, active: null, balance: null }])
+  clientMock.listMovements.mockResolvedValue({ movements: [], total: 0 })
+  await svc.getMovementsForAccount('fa2', { page: 0, size: 10 })
+  expect(db.financialAccount.update).toHaveBeenCalledWith({ where: { id: 'fa2' }, data: { externalCuentaId: 'cta-9' } })
+  expect(clientMock.listMovements).toHaveBeenCalledWith(expect.anything(), 'cta-9', expect.anything())
+})
+
+it('getMovementsForAccount: si el provider no reporta cuentaId → BadRequest, no 500', async () => {
+  db.financialAccount.findUniqueOrThrow.mockResolvedValue({
+    id: 'fa3', externalId: 'neg-x', externalCuentaId: null,
+    connection: { id: 'cm-3', mode: 'SELF_CONNECT', grantEnc: encFixture(), tokenVersion: 0, deviceIdentifier: 'dev', status: 'CONNECTED', provider: { code: 'EXTERNAL_BANK' } },
+  })
+  db.financialConnection.findUniqueOrThrow.mockResolvedValue({ id: 'cm-3', grantEnc: encFixture(), tokenVersion: 0, status: 'CONNECTED' })
+  clientMock.refresh.mockResolvedValue({ grant: { refreshToken: 'r2' }, ctx: { accessToken: 'acc' } })
+  clientMock.listAccounts.mockResolvedValue([])
+  await expect(svc.getMovementsForAccount('fa3', { page: 0, size: 10 })).rejects.toThrow()
 })
 
 it('refresh path takes the advisory lock (pg_advisory_xact_lock) inside a tx', async () => {
