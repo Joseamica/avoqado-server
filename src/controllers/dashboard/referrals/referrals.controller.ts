@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express'
 import * as program from '../../../services/referrals/referralProgram.service'
 import * as capture from '../../../services/referrals/referralCapture.service'
 import * as reads from '../../../services/referrals/referralReads.service'
+import * as grants from '../../../services/referrals/referralGrant.service'
 import prisma from '../../../utils/prismaClient'
 import { ReferralStatus, ReferralTier } from '@prisma/client'
 
@@ -115,6 +116,43 @@ export async function manualVoid(req: Request, res: Response, next: NextFunction
         return res.status(404).json({ error: 'Referral not found' })
       }
       if (/already qualified/i.test(e.message)) {
+        return res.status(409).json({ error: e.message })
+      }
+    }
+    next(e)
+  }
+}
+
+// ==========================================
+// GRANTS (FREE_PRODUCT manual fulfillment — Task 8)
+// ==========================================
+
+/**
+ * POST /api/v1/dashboard/venues/:venueId/referrals/grants/:grantId/fulfill
+ *
+ * Marks a `MANUAL_PENDING` FREE_PRODUCT `ReferralRewardGrant` as
+ * `MANUAL_FULFILLED` once a staff member has physically handed the
+ * product over to the referrer. Resolves the authenticated caller's
+ * `Staff.id` (authContext.userId) into a `StaffVenue.id` for THIS venue
+ * (same mapping `referralCapture.service`'s `resolveStaffVenueId` uses
+ * for `capturedByStaffVenueId`) before delegating to the service.
+ */
+export async function fulfillGrantHandler(req: Request, res: Response, next: NextFunction) {
+  try {
+    const authContext = (req as any).authContext
+    const resolvedStaffVenueId = await capture.resolveStaffVenueId(req.params.venueId, authContext?.userId)
+    const grant = await grants.fulfillGrant({
+      grantId: req.params.grantId,
+      venueId: req.params.venueId,
+      performedBy: resolvedStaffVenueId ?? authContext?.userId ?? 'unknown',
+    })
+    res.json(grant)
+  } catch (e: any) {
+    if (e && typeof e.message === 'string') {
+      if (e.message === 'GRANT_NOT_FOUND') {
+        return res.status(404).json({ error: 'Grant not found' })
+      }
+      if (e.message === 'GRANT_NO_PENDIENTE') {
         return res.status(409).json({ error: e.message })
       }
     }

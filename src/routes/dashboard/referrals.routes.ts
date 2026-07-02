@@ -15,6 +15,7 @@ import {
   ForceOverrideReferralSchema,
   ManualVoidReferralSchema,
   ListReferralsQuerySchema,
+  FulfillGrantSchema,
 } from '../../schemas/dashboard/referrals.schemas'
 
 const router = Router({ mergeParams: true })
@@ -130,6 +131,25 @@ router.post(
   checkPermission('referral:void-manual'),
   validateRequest(ManualVoidReferralSchema),
   referralsController.manualVoid,
+)
+
+// ===========================================
+// GRANT ROUTES (FREE_PRODUCT manual fulfillment)
+// ===========================================
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/referrals/grants/{grantId}/fulfill:
+ *   post:
+ *     tags: [Referrals]
+ *     summary: Mark a MANUAL_PENDING FREE_PRODUCT grant as handed over (MANUAL_FULFILLED)
+ *     security: [{ bearerAuth: [] }]
+ */
+router.post(
+  '/grants/:grantId/fulfill',
+  checkPermission('referral:fulfill-courtesy'),
+  validateRequest(FulfillGrantSchema),
+  referralsController.fulfillGrantHandler,
 )
 
 // ===========================================

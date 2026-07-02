@@ -122,6 +122,17 @@ export const ManualVoidReferralSchema = z.object({
 })
 
 // ==========================================
+// REFERRAL GRANT SCHEMAS
+// ==========================================
+
+export const FulfillGrantSchema = z.object({
+  params: z.object({
+    venueId: z.string().min(1),
+    grantId: z.string().min(1, 'El identificador del premio es requerido'),
+  }),
+})
+
+// ==========================================
 // REFERRAL READS SCHEMAS
 // ==========================================
 
