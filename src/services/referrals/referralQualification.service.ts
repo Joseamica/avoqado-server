@@ -217,6 +217,7 @@ async function mintPermanentDiscount(
 export async function emitTierRewards(tx: Prisma.TransactionClient, input: EmitTierRewardsInput): Promise<EmittedTierReward[]> {
   const activeRewards = await tx.referralTierReward.findMany({
     where: { configId: input.config.id, tierLevel: input.tierLevel, active: true },
+    orderBy: { createdAt: 'asc' },
   })
 
   const emitted: EmittedTierReward[] = []

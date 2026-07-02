@@ -247,6 +247,7 @@ describe('emitTierRewards', () => {
 
     expect(mockedPrisma.referralTierReward.findMany).toHaveBeenCalledWith({
       where: { configId: 'config_1', tierLevel: 1, active: true },
+      orderBy: { createdAt: 'asc' },
     })
     expect(result).toHaveLength(2)
   })
@@ -258,6 +259,7 @@ describe('emitTierRewards', () => {
     await emitTierRewards(mockedPrisma, { ...baseInput, tierLevel: 2 })
     expect(mockedPrisma.referralTierReward.findMany).toHaveBeenCalledWith({
       where: { configId: 'config_1', tierLevel: 2, active: true },
+      orderBy: { createdAt: 'asc' },
     })
   })
 })
