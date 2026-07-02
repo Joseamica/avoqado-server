@@ -67,8 +67,22 @@ async function handleMasterTotpLogin(totpCode: string, rememberMe?: boolean) {
 
   if (!isValid) {
     logger.warn(`🔐 [MASTER LOGIN] FAILED - Invalid TOTP code for dashboard`)
-    // Note: Audit log skipped for failed attempts (venueId required)
-    // Security monitoring relies on server logs with timestamp
+    // Audit the failed attempt on the platform break-glass login — a wrong master
+    // TOTP is a high-value security anomaly. venueId is null (no venue context on a
+    // dashboard master attempt); logAction accepts null, so it lands in the global /
+    // superadmin audit view. Fire-and-forget: never blocks the auth path. Mirrors the
+    // MASTER_LOGIN_FAILED write the TPV master login already does.
+    void logAction({
+      venueId: null,
+      action: 'MASTER_LOGIN_FAILED',
+      entity: 'Dashboard',
+      entityId: 'DASHBOARD_MASTER',
+      data: {
+        reason: 'Invalid TOTP code',
+        source: 'dashboard',
+        timestamp: new Date().toISOString(),
+      },
+    })
     throw new AuthenticationError('Código inválido o expirado')
   }
 
@@ -239,6 +253,19 @@ export async function loginStaff(loginData: LoginDto) {
       await prisma.staff.update({
         where: { id: staff.id },
         data: updates,
+      })
+      // Audit trail: an account lockout from repeated failed logins is a security
+      // anomaly an owner audits — dual-write to ActivityLog. Fire-and-forget: never
+      // block or fail the auth path. Individual wrong-password attempts (1-4) are
+      // intentionally NOT logged here — that is high-frequency noise, and the 401
+      // flood is already alertable from the request logs.
+      void logAction({
+        staffId: staff.id,
+        venueId: venueId ?? staff.venues[0]?.venue?.id ?? null,
+        action: 'ACCOUNT_LOCKED',
+        entity: 'Staff',
+        entityId: staff.id,
+        data: { reason: 'too_many_failed_logins', failedAttempts: newAttempts },
       })
       throw new ForbiddenError('Account locked due to too many failed login attempts. Please try again in 60 minutes.')
     }

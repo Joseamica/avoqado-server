@@ -52,10 +52,20 @@ jest.mock('../../../src/services/email.service', () => ({
     sendEmailVerification: jest.fn().mockResolvedValue(true),
   },
 }))
+// Force master-TOTP verification to report "invalid" so we can exercise the failed
+// master-login path deterministically. Non-master scenarios never construct a TOTP.
+jest.mock('otplib', () => ({
+  TOTP: jest.fn().mockImplementation(() => ({
+    verify: jest.fn().mockResolvedValue({ valid: false }),
+  })),
+  NobleCryptoPlugin: jest.fn(),
+  ScureBase32Plugin: jest.fn(),
+}))
 
 import prisma from '../../../src/utils/prismaClient'
 import * as jwtService from '../../../src/jwt.service'
 import { loginStaff } from '../../../src/services/dashboard/auth.service'
+import { logAction } from '../../../src/services/dashboard/activity-log.service' // globally mocked in tests/__helpers__/setup.ts
 
 // Type the mocks
 const mockPrisma = prisma as jest.Mocked<typeof prisma>
@@ -575,6 +585,8 @@ describe('Login Scenarios', () => {
         where: { id: 'staff-1' },
         data: { failedLoginAttempts: 3 },
       })
+      // A non-final failed attempt (2 → 3) is NOT audited — only the lockout is.
+      expect(logAction).not.toHaveBeenCalled()
     })
 
     it('should lock account after 5 failed attempts', async () => {
@@ -590,6 +602,17 @@ describe('Login Scenarios', () => {
           lockedUntil: expect.any(Date),
         }),
       })
+      // Lockout is a security anomaly → dual-write to ActivityLog (ACCOUNT_LOCKED).
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'ACCOUNT_LOCKED',
+          entity: 'Staff',
+          entityId: 'staff-1',
+          staffId: 'staff-1',
+          venueId: 'venue-1',
+          data: expect.objectContaining({ reason: 'too_many_failed_logins', failedAttempts: 5 }),
+        }),
+      )
     })
   })
 
@@ -839,6 +862,29 @@ describe('Login Scenarios', () => {
           where: expect.objectContaining({
             status: InvitationStatus.PENDING,
           }),
+        }),
+      )
+    })
+  })
+
+  // ============================================
+  // SCENARIO 17: Master TOTP (break-glass) login — failed attempt is audited
+  // ============================================
+  describe('Scenario 17: Master TOTP failed attempt', () => {
+    it('audits an invalid master TOTP code as MASTER_LOGIN_FAILED', async () => {
+      // otplib is mocked at module level to report the code as invalid.
+      process.env.TOTP_MASTER_SECRET = 'test-master-secret'
+      const masterEmail = process.env.MASTER_LOGIN_EMAIL || 'master@avoqado.io'
+
+      await expect(loginStaff({ email: masterEmail, password: '00000000' })).rejects.toThrow(/inválido o expirado/i)
+
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'MASTER_LOGIN_FAILED',
+          entity: 'Dashboard',
+          entityId: 'DASHBOARD_MASTER',
+          venueId: null,
+          data: expect.objectContaining({ source: 'dashboard', reason: 'Invalid TOTP code' }),
         }),
       )
     })
