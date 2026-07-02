@@ -14,6 +14,12 @@ export interface FulfillGrantInput {
    * `Referral.capturedByStaffVenueId`), so an unresolved id is safe here.
    */
   performedBy: string
+  /**
+   * The authenticated `Staff.id` (from authContext.userId), threaded into
+   * ActivityLog.staffId for audit accountability. Distinct from `performedBy`
+   * (StaffVenue.id) — this is the real FK the audit trail expects.
+   */
+  staffId?: string
 }
 
 /**
@@ -45,20 +51,13 @@ export async function fulfillGrant(input: FulfillGrantInput): Promise<ReferralRe
     },
   })
 
-  // `staffId` is intentionally left unset (not a top-level ActivityLog
-  // column write) — `performedBy` here is a `StaffVenue.id`, but
-  // `ActivityLog.staffId` is a real FK to `Staff.id` (different id space).
-  // Writing a StaffVenue id there would violate the constraint. The actor
-  // is still recorded, just inside `data` — the same precaution already
-  // taken by `manualVoidReferral` / `forceOverrideReferral` in
-  // `referralCapture.service.ts`, neither of which sets a top-level
-  // `staffId` for the same reason.
   await prisma.activityLog.create({
     data: {
       venueId: input.venueId,
       action: 'REFERRAL_COURTESY_FULFILLED',
       entity: 'ReferralRewardGrant',
       entityId: grant.id,
+      staffId: input.staffId ?? null,
       data: {
         rewardProductId: grant.rewardProductId,
         rewardQuantity: grant.rewardQuantity,

@@ -82,13 +82,14 @@ describe('fulfillGrant', () => {
       rewardQuantity: 2,
       customerId: 'cust_1',
     } as any)
-    await fulfillGrant({ grantId: 'g1', venueId, performedBy: 'sv1' })
+    await fulfillGrant({ grantId: 'g1', venueId, performedBy: 'sv1', staffId: 'staff_1' })
     expect(prismaMock.activityLog.create).toHaveBeenCalledWith({
       data: {
         venueId,
         action: 'REFERRAL_COURTESY_FULFILLED',
         entity: 'ReferralRewardGrant',
         entityId: 'g1',
+        staffId: 'staff_1',
         data: {
           rewardProductId: 'prod_1',
           rewardQuantity: 2,
@@ -97,6 +98,25 @@ describe('fulfillGrant', () => {
         },
       },
     })
+  })
+
+  it('sets ActivityLog staffId to null when not provided', async () => {
+    prismaMock.referralRewardGrant.findUnique.mockResolvedValue({
+      id: 'g1',
+      status: 'MANUAL_PENDING',
+      venueId,
+      rewardProductId: 'prod_1',
+      rewardQuantity: 2,
+      customerId: 'cust_1',
+    } as any)
+    await fulfillGrant({ grantId: 'g1', venueId, performedBy: 'sv1' })
+    expect(prismaMock.activityLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          staffId: null,
+        }),
+      }),
+    )
   })
 
   // ==========================================

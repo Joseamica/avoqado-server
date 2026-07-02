@@ -145,6 +145,7 @@ export async function fulfillGrantHandler(req: Request, res: Response, next: Nex
       grantId: req.params.grantId,
       venueId: req.params.venueId,
       performedBy: resolvedStaffVenueId ?? authContext?.userId ?? 'unknown',
+      staffId: authContext?.userId,
     })
     res.json(grant)
   } catch (e: any) {
