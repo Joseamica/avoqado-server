@@ -148,7 +148,7 @@ const prismaMock: any = {
     findUnique: jest.fn(),
     findFirst: jest.fn(),
   },
-  referralTierUnlock: { createMany: jest.fn().mockResolvedValue({ count: 1 }), findUnique: jest.fn() },
+  referralTierUnlock: { createMany: jest.fn().mockResolvedValue({ count: 1 }), findUnique: jest.fn(), delete: jest.fn() },
   // Venue Role Config (custom role display names)
   venueRoleConfig: createMockModel(),
   // Invitation and StaffOrganization models

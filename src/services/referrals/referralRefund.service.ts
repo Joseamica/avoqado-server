@@ -1,4 +1,5 @@
 import prisma from '@/utils/prismaClient'
+import { ReferralRewardGrant } from '@prisma/client'
 import { computeTier } from './referralQualification.service'
 
 /**
@@ -51,23 +52,108 @@ export interface OnOrderRefundedInput {
 }
 
 /**
+ * Revoke a single `PERCENT_COUPON` grant per spec §6:
+ *   - `status !== 'ISSUED'` (already REVOKED, or REDEEMED) → no-op, leave it.
+ *   - `status === 'ISSUED'` and a CouponRedemption already exists (state
+ *     drift — the coupon WAS used but nothing corrected the grant) →
+ *     self-heal to REDEEMED. Do NOT touch the Discount/CouponCode; the
+ *     customer keeps what they used.
+ *   - `status === 'ISSUED'` and unredeemed → deactivate Discount +
+ *     CouponCode (+ CustomerDiscount), grant → REVOKED.
+ * Returns the grant id if it was REVOKED (for the ActivityLog summary).
+ */
+async function revokePercentCouponGrant(grant: ReferralRewardGrant, reason: string): Promise<string | null> {
+  if (grant.status !== 'ISSUED') return null
+
+  const redeemed = grant.discountId ? await isRewardRedeemed(grant.discountId) : false
+  if (redeemed) {
+    // Grant fell out of sync with reality (redeemed but never marked) —
+    // keep the state truthful without clawing back an already-used reward.
+    await prisma.referralRewardGrant.update({
+      where: { id: grant.id },
+      data: { status: 'REDEEMED' },
+    })
+    return null
+  }
+
+  if (grant.discountId) {
+    await revokeTierReward(grant.discountId, reason)
+  }
+  await prisma.referralRewardGrant.update({
+    where: { id: grant.id },
+    data: { status: 'REVOKED', revokedAt: new Date(), revokeReason: reason },
+  })
+  return grant.id
+}
+
+/**
+ * Revoke a single `PERMANENT_DISCOUNT` grant per spec §6. Usage is decided
+ * via `OrderDiscount` — NOT `CouponRedemption` (a permanent discount has no
+ * coupon to redeem, it just auto-applies on every order):
+ *   - `status !== 'ISSUED'` → no-op.
+ *   - Never applied (no `OrderDiscount` row references this Discount) →
+ *     deactivate Discount + CustomerDiscount, grant → REVOKED.
+ *   - Already applied at least once → STILL deactivate going forward (no
+ *     retroactive clawback of the historical `OrderDiscount` rows) AND the
+ *     grant → REVOKED with a reason documenting why — it must NEVER stay
+ *     ISSUED (that would be a lie: the reward is gone, applied or not).
+ */
+async function revokePermanentDiscountGrant(grant: ReferralRewardGrant, reason: string): Promise<string | null> {
+  if (grant.status !== 'ISSUED') return null
+
+  const applied = grant.discountId ? await prisma.orderDiscount.findFirst({ where: { discountId: grant.discountId } }) : null
+  const revokeReason = applied ? 'permanente ya consumido, desactivado sin clawback' : reason
+
+  if (grant.discountId) {
+    await revokeTierReward(grant.discountId, revokeReason)
+  }
+  await prisma.referralRewardGrant.update({
+    where: { id: grant.id },
+    data: { status: 'REVOKED', revokedAt: new Date(), revokeReason },
+  })
+  return grant.id
+}
+
+/**
+ * Revoke a single `FREE_PRODUCT` grant per spec §6:
+ *   - `MANUAL_PENDING` (staff hasn't handed it over yet) → REVOKED.
+ *   - `MANUAL_FULFILLED` (already handed over) → left alone, nothing to
+ *     claw back from a physical product already given.
+ */
+async function revokeFreeProductGrant(grant: ReferralRewardGrant, reason: string): Promise<string | null> {
+  if (grant.status !== 'MANUAL_PENDING') return null
+
+  await prisma.referralRewardGrant.update({
+    where: { id: grant.id },
+    data: { status: 'REVOKED', revokedAt: new Date(), revokeReason: reason },
+  })
+  return grant.id
+}
+
+/**
  * Event handler called from the refund / cancellation webhook. Reverses
- * the qualification side effects, with one carefully scoped exception:
+ * the qualification side effects:
  *
  *   1. Find the QUALIFIED Referral attached to this order; if none,
  *      no-op (idempotent).
  *   2. Flip it to VOID with reason `ORDER_REFUNDED`.
  *   3. Decrement the referrer's `referralCount`.
- *   4. Re-derive their tier. If it dropped:
- *        a. If the previously-emitted reward is still UNREDEEMED, revoke
- *           the whole bundle (Discount + CouponCode + CustomerDiscount).
- *        b. If the referrer already cashed the reward in on a real order
- *           (CouponRedemption row exists), DO NOT revoke — the customer
- *           keeps what they earned and used. The tier drop is recorded
- *           in ActivityLog for audit, but the discount stays valid.
- *      Then persist the new (possibly null) tier on Customer.
- *   5. Always emit a `REFERRAL_TIER_REVERSED` ActivityLog with old + new
- *      tier so finance can reconcile.
+ *   4. Re-derive their tier. If it did NOT drop, stop — no grant is
+ *      touched (referralTier is a live projection of referralCount, per
+ *      Task 5's design: if other referrals still support the tier, the
+ *      rewards this one triggered stay untouched).
+ *   5. If it DID drop, load every `ReferralRewardGrant` this referral's
+ *      tier-crossing emitted (`referralId: referral.id`) and revoke each
+ *      per its own `rewardType` + `status` (spec §6 table):
+ *        - PERCENT_COUPON     → `revokePercentCouponGrant`
+ *        - PERMANENT_DISCOUNT → `revokePermanentDiscountGrant`
+ *        - FREE_PRODUCT       → `revokeFreeProductGrant`
+ *      `ReferralTierUnlock` is NEVER deleted here (D11: a tier is earned
+ *      once per lifetime — refund revokes the grants, not the unlock, so
+ *      re-crossing the threshold later does not re-mint the reward).
+ *   6. Persist the new (possibly null) tier on Customer.
+ *   7. Always emit a `REFERRAL_TIER_REVERSED` ActivityLog with old + new
+ *      tier + the list of revoked grant ids so finance can reconcile.
  */
 export async function onOrderRefunded(input: OnOrderRefundedInput): Promise<void> {
   const referral = await prisma.referral.findFirst({
@@ -93,13 +179,23 @@ export async function onOrderRefunded(input: OnOrderRefundedInput): Promise<void
   const newTier = computeTier(referrer.referralCount, config)
   if (newTier === referrer.referralTier) return
 
-  // Tier dropped — handle reward revocation
-  if (referral.rewardDiscountId) {
-    const redeemed = await isRewardRedeemed(referral.rewardDiscountId)
-    if (!redeemed) {
-      await revokeTierReward(referral.rewardDiscountId, 'TIER_REVERSED_BY_REFUND')
+  // Tier dropped — revoke every grant this referral's tier-crossing
+  // emitted, each per its own type/status (spec §6).
+  const grants = await prisma.referralRewardGrant.findMany({
+    where: { referralId: referral.id },
+  })
+
+  const revokedGrantIds: string[] = []
+  for (const grant of grants) {
+    let revokedId: string | null = null
+    if (grant.rewardType === 'PERCENT_COUPON') {
+      revokedId = await revokePercentCouponGrant(grant, 'TIER_REVERSED_BY_REFUND')
+    } else if (grant.rewardType === 'PERMANENT_DISCOUNT') {
+      revokedId = await revokePermanentDiscountGrant(grant, 'TIER_REVERSED_BY_REFUND')
+    } else if (grant.rewardType === 'FREE_PRODUCT') {
+      revokedId = await revokeFreeProductGrant(grant, 'TIER_REVERSED_BY_REFUND')
     }
-    // If already redeemed: leave it. Customer keeps what they used.
+    if (revokedId) revokedGrantIds.push(revokedId)
   }
 
   await prisma.customer.update({
@@ -121,6 +217,7 @@ export async function onOrderRefunded(input: OnOrderRefundedInput): Promise<void
         newTier,
         triggeringReferralId: referral.id,
         refundedOrderId: input.orderId,
+        revokedGrantIds,
       },
     },
   })
