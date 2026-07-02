@@ -15,6 +15,8 @@ import type {
   MovementCategoryStats,
   MovementStats,
   MovementQuery,
+  MgAltAccount,
+  InternalTransferResult,
 } from './types'
 
 const base = () => env.EXTERNAL_BANK_API_BASE
@@ -50,9 +52,11 @@ function normalizeAccounts(me: unknown): ProviderAccount[] {
       if (!externalId) return null
       const cuenta = pick(n, 'cuentaDispersion')
       const saldo = pick(cuenta, 'saldo')
+      const altIdRaw = pick(cuenta, 'idCuentaAlt')
       return {
         externalId,
         cuentaId: pick<string>(cuenta, 'idCuenta') ?? null,
+        altId: typeof altIdRaw === 'number' ? altIdRaw : null,
         label: pick<string>(n, 'nombre') ?? null,
         clabe: pick<string>(cuenta, 'cuentaClabe') ?? null,
         active: typeof pick(cuenta, 'activo') === 'boolean' ? (pick<boolean>(cuenta, 'activo') as boolean) : null,
@@ -246,6 +250,59 @@ export const externalBankClient: FinancialProviderClient = {
       speiOut: cat('SpeiOut'),
       internalTransfers: cat('TransferenciaInterna'),
       dispersions: cat('Dispersion'),
+    }
+  },
+
+  async resolveMgAlt(ctx: ConnectionContext, accountNumber: string): Promise<MgAltAccount | null> {
+    try {
+      const { data } = await axios.get(`${base()}/api/transferencia/get-MoneyGiverAlt`, {
+        headers: headers(ctx.accessToken),
+        params: { idClienteWalletAlt: accountNumber },
+        timeout: 20_000,
+      })
+      const altRaw = pick(data, 'idCuentaAlt')
+      // El proveedor devuelve idCuentaAlt como string; add-transferenciaMG lo exige como entero.
+      const altId = typeof altRaw === 'number' ? altRaw : typeof altRaw === 'string' && altRaw.trim() !== '' ? Number(altRaw) : NaN
+      if (!Number.isFinite(altId)) return null
+      return { altId, name: pick<string>(data, 'nombre') ?? null, accountType: pick<string>(data, 'tipoCuenta') ?? null }
+    } catch (e) {
+      if (axios.isAxiosError(e) && e.response?.status === 404) return null
+      throw e
+    }
+  },
+
+  async internalTransfer(
+    ctx: ConnectionContext,
+    input: { sourceAltId: number; destAltId: number; amount: number; concept: string },
+  ): Promise<InternalTransferResult> {
+    // Espejo de la petición probada del dashboard de producción de Q-Pay (features/spei/api.ts):
+    // idTipo:1 = TRANSFERENCIA. Se omite idCatTipoAutenticacion cuando no se usa 2FA (traspaso simple).
+    // El proveedor NO acepta clave de idempotencia — el caller ya deduplicó antes de llegar aquí.
+    try {
+      const { data } = await axios.post(
+        `${base()}/api/transferencia/add-transferenciaMG`,
+        {
+          idCuentaAltSalida: input.sourceAltId,
+          idCuentaAltRecibe: input.destAltId,
+          idTipo: 1,
+          monto: Math.round(input.amount * 100) / 100,
+          concepto: input.concept.trim() || 'Sin concepto',
+          latitud: '0',
+          longitud: '0',
+        },
+        { headers: headers(ctx.accessToken), timeout: 30_000 },
+      )
+      const ok = pick<boolean>(data, 'success') === true
+      return {
+        ok,
+        movementId: pick<string>(data, 'idMovimiento') ?? pick<string>(data, 'idOperacion') ?? null,
+        message: pick<string>(data, 'message') ?? null,
+      }
+    } catch (e) {
+      if (axios.isAxiosError(e)) {
+        return { ok: false, movementId: null, message: pick<string>(e.response?.data, 'message') || `traspaso falló (status ${e.response?.status})` }
+      }
+      throw e
     }
   },
 }

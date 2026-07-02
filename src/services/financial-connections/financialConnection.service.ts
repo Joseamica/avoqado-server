@@ -4,7 +4,7 @@ import { BadRequestError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { getFinancialProviderClient } from './registry'
 import { encryptGrant, decryptGrant } from './crypto'
-import type { Grant, ProviderAccount, MovementPage, MovementQuery, MovementStats } from './types'
+import type { Grant, ProviderAccount, MovementPage, MovementQuery, MovementStats, InternalTransferResult } from './types'
 
 /**
  * Forma única de retorno para connect/validateDevice/select. Deliberadamente UN
@@ -446,6 +446,60 @@ export async function getMovementStatsForAccount(
     await markConnectionNeedsReauth(fa.connection.id, e as Error)
     throw e instanceof BadRequestError ? e : new BadRequestError('No se pudieron obtener las estadísticas; vuelve a conectar la cuenta.')
   }
+}
+
+/**
+ * Traspaso interno MG→MG desde la cuenta conectada `financialAccountId` a la cuenta destino
+ * (número interno). MUEVE DINERO — siempre se audita en ActivityLog (a diferencia de las lecturas).
+ * Origen = idCuentaAlt de la cuenta conectada (del payload del proveedor); destino se resuelve
+ * por su número. NO idempotente en el proveedor: el endpoint va rate-limited y la UI deshabilita
+ * el botón; una capa de dedup persistente sería una mejora futura.
+ */
+export async function sendInternalTransfer(
+  financialAccountId: string,
+  input: { destAccountNumber: string; amount: number; concept: string; staffId?: string },
+): Promise<InternalTransferResult> {
+  if (!(input.amount > 0)) throw new BadRequestError('El monto debe ser mayor a 0.')
+  const fa = await prisma.financialAccount.findUniqueOrThrow({
+    where: { id: financialAccountId },
+    include: { connection: { include: { provider: true } } },
+  })
+  const accessToken = await accessTokenFor(fa.connection)
+  const client = clientFor(fa.connection.provider.code)
+
+  // Origen: el idCuentaAlt de la cuenta conectada, tal como lo reporta el proveedor.
+  const source = (await client.listAccounts({ accessToken })).find(a => a.externalId === fa.externalId)
+  if (source?.altId == null) throw new BadRequestError('La cuenta origen no tiene id de traspaso disponible.')
+
+  // Destino: resolver el número interno (4-6 dígitos) a su idCuentaAlt real.
+  const dest = await client.resolveMgAlt({ accessToken }, input.destAccountNumber.trim())
+  if (!dest) throw new BadRequestError(`No se encontró la cuenta destino ${input.destAccountNumber}.`)
+  if (dest.altId === source.altId) throw new BadRequestError('El origen y el destino son la misma cuenta.')
+
+  const result = await client.internalTransfer({ accessToken }, {
+    sourceAltId: source.altId,
+    destAltId: dest.altId,
+    amount: input.amount,
+    concept: input.concept,
+  })
+
+  // Auditoría obligatoria de movimiento de dinero: quién, cuánto, a dónde, resultado.
+  await logAction({
+    staffId: input.staffId ?? null,
+    venueId: fa.connection.venueId,
+    action: 'FINANCIAL_INTERNAL_TRANSFER',
+    entity: 'FinancialAccount',
+    entityId: fa.id,
+    data: {
+      destAccount: input.destAccountNumber,
+      destName: dest.name,
+      amount: input.amount,
+      ok: result.ok,
+      movementId: result.movementId,
+      message: result.message,
+    },
+  })
+  return result
 }
 
 export async function getBalanceForConnectionAccount(financialAccountId: string) {

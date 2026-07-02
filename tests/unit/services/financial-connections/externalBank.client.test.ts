@@ -27,6 +27,36 @@ const NEGOCIOS = {
   ],
 }
 
+it('resolveMgAlt: número interno → idCuentaAlt (string del proveedor → entero); 404 → null', async () => {
+  nock(BASE).get('/api/transferencia/get-MoneyGiverAlt').query({ idClienteWalletAlt: '155525' }).reply(200, {
+    idCuentaAlt: '4521',
+    nombre: 'AV Destino',
+    tipoCuenta: 'wallet',
+  })
+  let client = await loadClient()
+  const r = await client.resolveMgAlt({ accessToken: 't' }, '155525')
+  expect(r).toEqual({ altId: 4521, name: 'AV Destino', accountType: 'wallet' })
+
+  nock(BASE).get('/api/transferencia/get-MoneyGiverAlt').query({ idClienteWalletAlt: '999999' }).reply(404, {})
+  client = await loadClient()
+  expect(await client.resolveMgAlt({ accessToken: 't' }, '999999')).toBeNull()
+})
+
+it('internalTransfer: POST add-transferenciaMG con el body probado; success:true → ok, success:false → no ok', async () => {
+  nock(BASE)
+    .post('/api/transferencia/add-transferenciaMG', b => b.idCuentaAltSalida === 10 && b.idCuentaAltRecibe === 20 && b.idTipo === 1 && b.monto === 1 && b.concepto === 'Prueba')
+    .reply(200, { success: true, idMovimiento: 'mov-1', message: 'OK' })
+  let client = await loadClient()
+  const ok = await client.internalTransfer({ accessToken: 't' }, { sourceAltId: 10, destAltId: 20, amount: 1, concept: 'Prueba' })
+  expect(ok).toEqual({ ok: true, movementId: 'mov-1', message: 'OK' })
+
+  nock(BASE).post('/api/transferencia/add-transferenciaMG').reply(200, { success: false, message: 'Saldo insuficiente' })
+  client = await loadClient()
+  const bad = await client.internalTransfer({ accessToken: 't' }, { sourceAltId: 10, destAltId: 20, amount: 1, concept: '' })
+  expect(bad.ok).toBe(false)
+  expect(bad.message).toBe('Saldo insuficiente')
+})
+
 it('connect: device already trusted → returns grant + accounts', async () => {
   nock(BASE)
     .post('/api/auth/sign-in/merchant')

@@ -9,10 +9,26 @@ export interface ProviderAccount {
   externalId: string
   /** idCuenta de la cuenta de dispersión — necesario para movimientos. Null si el provider no lo reporta. */
   cuentaId: string | null
+  /** idCuentaAlt de la cuenta de dispersión — el id "alt" que exige add-transferenciaMG como ORIGEN. */
+  altId: number | null
   label: string | null
   clabe: string | null
   active: boolean | null
   balance: number | null // saldo si viene en el listado; null si no
+}
+
+/** Cuenta MG resuelta por número (get-MoneyGiverAlt) — usada para el DESTINO de un traspaso. */
+export interface MgAltAccount {
+  altId: number
+  name: string | null
+  accountType: string | null
+}
+
+/** Resultado de un traspaso interno. `ok` solo si el proveedor confirmó success. */
+export interface InternalTransferResult {
+  ok: boolean
+  movementId: string | null
+  message: string | null
 }
 
 /** Snapshot de saldo de UNA cuenta. */
@@ -113,4 +129,11 @@ export interface FinancialProviderClient {
   // ajenos). Las ESTADÍSTICAS sí van por idCuenta en la ruta (ahí sí acota a la cuenta).
   listMovements(ctx: ConnectionContext, idNegocio: string, cuentaId: string, query: MovementQuery): Promise<MovementPage>
   getMovementStats(ctx: ConnectionContext, cuentaId: string, range: { from?: string; to?: string }): Promise<MovementStats>
+  /** Resuelve una cuenta MG por su número interno (4-6 dígitos) → su idCuentaAlt + nombre. Null si no existe. */
+  resolveMgAlt(ctx: ConnectionContext, accountNumber: string): Promise<MgAltAccount | null>
+  /** Traspaso interno MG→MG (sin CLABE). `amount` en pesos. NO idempotente en el proveedor — el caller deduplica. */
+  internalTransfer(
+    ctx: ConnectionContext,
+    input: { sourceAltId: number; destAltId: number; amount: number; concept: string },
+  ): Promise<InternalTransferResult>
 }

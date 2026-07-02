@@ -36,6 +36,13 @@ export const venueFinancialAccountRoutes = Router({ mergeParams: true })
 venueFinancialAccountRoutes.get('/:id/balance', checkPermission('financialConnections:manage'), ctrl.getBalance)
 venueFinancialAccountRoutes.get('/:id/movements', checkPermission('financialConnections:manage'), ctrl.getMovements)
 venueFinancialAccountRoutes.get('/:id/movements/stats', checkPermission('financialConnections:manage'), ctrl.getMovementStats)
+// MUEVE DINERO: permiso OWNER + rate limit (dedup del proveedor no existe → el límite acota el daño de un doble-envío accidental).
+venueFinancialAccountRoutes.post(
+  '/:id/internal-transfer',
+  checkPermission('financialConnections:manage'),
+  financialConnectionRateLimiter,
+  ctrl.internalTransfer,
+)
 
 // Catálogo — de solo lectura, sin scope de venue, cualquier usuario autenticado.
 export const financialProviderRoutes = Router()

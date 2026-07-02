@@ -140,6 +140,28 @@ export async function getMovementStats(req: Request, res: Response, next: NextFu
     next(e)
   }
 }
+
+// MUEVE DINERO. Va con checkPermission + assertAccountBelongsToVenue + rate limit (en las rutas).
+export async function internalTransfer(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { destinationAccount, amount, concept } = req.body ?? {}
+    if (!destinationAccount || typeof destinationAccount !== 'string') throw new BadRequestError('destinationAccount es requerido.')
+    const monto = Number(amount)
+    if (!Number.isFinite(monto) || monto <= 0) throw new BadRequestError('amount debe ser un número mayor a 0.')
+    await assertAccountBelongsToVenue(req.params.id, req.params.venueId)
+    const staffId = (req as any).authContext?.userId
+    const data = await svc.sendInternalTransfer(req.params.id, {
+      destAccountNumber: String(destinationAccount),
+      amount: monto,
+      concept: typeof concept === 'string' ? concept : '',
+      staffId,
+    })
+    // El proveedor puede responder 200 con success:false (traspaso rechazado) — lo reflejamos honesto.
+    res.status(data.ok ? 200 : 422).json({ success: data.ok, data })
+  } catch (e) {
+    next(e)
+  }
+}
 export async function disconnect(req: Request, res: Response, next: NextFunction) {
   try {
     await assertConnectionBelongsToVenue(req.params.id, req.params.venueId)
