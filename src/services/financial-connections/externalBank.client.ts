@@ -172,10 +172,17 @@ export const externalBankClient: FinancialProviderClient = {
     return { kind: 'connected', grant, accounts, accessToken: at }
   },
 
-  async refresh(grant: Grant, deviceIdentifier: string): Promise<{ grant: Grant; ctx: ConnectionContext }> {
+  async refresh(grant: Grant): Promise<{ grant: Grant; ctx: ConnectionContext }> {
+    // Renovación silenciosa vía /api/auth/refresh-token (renovación PURA del access token)
+    // — NO /api/auth/sign-in/token. Ese último "además valida dispositivo" y hace login
+    // completo → re-chequea 2FA y truena con 400 "Object reference not set..." para
+    // refreshTokens obtenidos por el flujo validate-two-factor-code. Confirmado EN VIVO con
+    // un token 2FA real: sign-in/token→400, refresh-token→200. Esto permite "conectar una
+    // vez, refrescar para siempre" sin re-pedir el TOTP. El `token` puede ir vacío: el
+    // endpoint identifica la sesión por el refreshToken (verificado en vivo).
     const { data } = await axios.post(
-      `${base()}/api/auth/sign-in/token`,
-      { refreshToken: grant.refreshToken, dispositivo: dispositivo(deviceIdentifier) },
+      `${base()}/api/auth/refresh-token`,
+      { token: '', refreshToken: grant.refreshToken, expiresIn: grant.expiresAt ?? new Date().toISOString() },
       { headers: headers(), timeout: 20_000 },
     )
     return { grant: toGrant(data), ctx: { accessToken: accessTokenOf(data) } }

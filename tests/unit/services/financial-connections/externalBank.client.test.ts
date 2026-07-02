@@ -153,11 +153,13 @@ it('validateDevice: invalid OTP → throws', async () => {
   ).rejects.toThrow(/OTP|código|inválid/i)
 })
 
-it('refresh: silent re-login returns a new (rotated) grant', async () => {
+it('refresh: usa /api/auth/refresh-token (NO sign-in/token) y devuelve el grant rotado', async () => {
+  // sign-in/token truena con 400 para tokens de 2FA (bug .NET del proveedor, confirmado en
+  // vivo); refresh-token renueva sin validar dispositivo/2FA. El body lleva token/refreshToken/expiresIn.
   nock(BASE)
-    .post('/api/auth/sign-in/token')
+    .post('/api/auth/refresh-token', body => body.refreshToken === 'ref-2')
     .reply(200, {
-      signedIn: true,
+      success: true,
       token: 'acc-3',
       refreshToken: 'ref-3-rotated',
       expiresIn: new Date(Date.now() + 3600e3).toISOString(),
