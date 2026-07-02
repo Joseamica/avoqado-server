@@ -36,6 +36,7 @@ async function persistAccounts(connectionId: string, accounts: ProviderAccount[]
     data: accounts.map(a => ({
       connectionId,
       externalId: a.externalId,
+      externalCuentaId: a.cuentaId ?? null,
       label: a.label ?? null,
       clabe: a.clabe ?? null,
       active: a.active ?? null,

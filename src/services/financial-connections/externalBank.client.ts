@@ -47,6 +47,7 @@ function normalizeAccounts(me: unknown): ProviderAccount[] {
       const saldo = pick(cuenta, 'saldo')
       return {
         externalId,
+        cuentaId: pick<string>(cuenta, 'idCuenta') ?? null,
         label: pick<string>(n, 'nombre') ?? null,
         clabe: pick<string>(cuenta, 'cuentaClabe') ?? null,
         active: typeof pick(cuenta, 'activo') === 'boolean' ? (pick<boolean>(cuenta, 'activo') as boolean) : null,

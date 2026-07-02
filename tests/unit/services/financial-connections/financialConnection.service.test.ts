@@ -55,11 +55,13 @@ it('startConnection: single negocio → auto-selects, CONNECTED', async () => {
   clientMock.connect.mockResolvedValue({
     kind: 'connected',
     grant: { refreshToken: 'r1' },
-    accounts: [{ externalId: 'neg-1', label: 'Centro', clabe: '01', active: true, balance: 100 }],
+    accounts: [{ externalId: 'neg-1', cuentaId: 'cta-1', label: 'Centro', clabe: '01', active: true, balance: 100 }],
   })
   const r = await svc.startConnection({ venueId: 'v1', providerId: 'prov-1', email: 'a@b.co', password: 'p' })
   expect(r.status).toBe('CONNECTED')
   expect(db.financialAccount.createMany).toHaveBeenCalled()
+  const args = db.financialAccount.createMany.mock.calls.at(-1)[0]
+  expect(args.data[0].externalCuentaId).toBe('cta-1')
   expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'FINANCIAL_CONNECTION_STARTED', entityId: 'c1' }))
 })
 

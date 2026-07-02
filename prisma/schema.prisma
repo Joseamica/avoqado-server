@@ -10356,6 +10356,10 @@ model FinancialAccount {
   connectionId     String
   connection       FinancialConnection   @relation(fields: [connectionId], references: [id], onDelete: Cascade)
   externalId       String
+  /// idCuenta de la cuenta de dispersión del proveedor (viene en cuentaDispersion.idCuenta
+  /// del payload de sesión). Requerido para consultar movimientos; null en filas creadas
+  /// antes de esta columna — se backfillea perezosamente al primer uso (ver service).
+  externalCuentaId String?
   label            String?
   institution      String?
   clabe            String?

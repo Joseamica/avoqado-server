@@ -7,6 +7,8 @@ export interface Grant {
 /** Cuenta tal como la reporta el proveedor (negocio). */
 export interface ProviderAccount {
   externalId: string
+  /** idCuenta de la cuenta de dispersión — necesario para movimientos. Null si el provider no lo reporta. */
+  cuentaId: string | null
   label: string | null
   clabe: string | null
   active: boolean | null
