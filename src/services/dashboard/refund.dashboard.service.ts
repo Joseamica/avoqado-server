@@ -17,6 +17,7 @@ import { restockItem } from './inventoryRestock.service'
 import { generateAndStoreReceipt } from './receipt.dashboard.service'
 import { createRefundCommission } from './commission/commission-calculation.service'
 import { createRefundTransactionCost } from '../payments/transactionCost.service'
+import { logAction } from './activity-log.service'
 
 export type RefundReason = 'RETURNED_GOODS' | 'ACCIDENTAL_CHARGE' | 'CANCELLED_ORDER' | 'FRAUDULENT_CHARGE' | 'OTHER'
 
@@ -508,6 +509,26 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
     originalPaymentId: result.originalPaymentId,
     amount: centsToNumber(result.refundAmountCents),
     remainingRefundable: centsToNumber(result.remainingAfterCents),
+  })
+
+  // Audit trail: a refund is a money op, so dual-write to ActivityLog (the owner
+  // audit screen reads ONLY ActivityLog). Fire-and-forget, OUTSIDE the tx — a
+  // logging failure must never roll back or fail the refund itself. Mirrors the
+  // REFUND_CREATED action written by the TPV + mobile refund services.
+  void logAction({
+    staffId: input.staffId ?? null,
+    venueId: input.venueId,
+    action: 'REFUND_CREATED',
+    entity: 'Payment',
+    entityId: result.refundPaymentId,
+    data: {
+      amount: centsToNumber(result.refundAmountCents), // pesos (major units), NOT cents
+      reason: input.reason,
+      originalPaymentId: result.originalPaymentId,
+      note: input.note ?? null,
+      refundedItemCount: result.refundedItems.length,
+      source: 'DASHBOARD',
+    },
   })
 
   return {

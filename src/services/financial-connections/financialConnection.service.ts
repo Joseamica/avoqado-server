@@ -164,6 +164,28 @@ export async function validateDevice(connectionId: string, code: string, staffId
       challenge: { accessToken: ch.accessToken, processId: ch.processId },
       code,
     })
+    if (r.kind === 'need_two_factor_auth') {
+      // El dispositivo quedó validado, pero la cuenta ADEMÁS tiene 2FA: el proveedor
+      // pide el segundo factor antes de soltar el refreshToken. Se reemplaza el reto de
+      // dispositivo por el de 2FA y se transiciona — el wizard sigue al paso de código 2FA.
+      await prisma.financialConnection.update({
+        where: { id: connectionId },
+        data: {
+          challengeEnc: encryptGrant({ accessToken: r.challenge.accessToken, email: ch.email }),
+          challengeExpiresAt: new Date(Date.now() + CHALLENGE_TTL_MS),
+          status: 'PENDING_TWO_FACTOR_AUTH',
+        },
+      })
+      await logAction({
+        staffId: staffId ?? null,
+        venueId: conn.venueId,
+        action: 'FINANCIAL_CONNECTION_DEVICE_VALIDATED',
+        entity: 'FinancialConnection',
+        entityId: connectionId,
+        data: { provider: conn.provider.code, next: 'two_factor' },
+      })
+      return { connectionId, status: 'PENDING_TWO_FACTOR_AUTH' as const }
+    }
     if (r.kind !== 'connected') throw new BadRequestError('Validación incompleta.')
     // El reto ya se consumió: limpiarlo de inmediato (no dejarlo vivo tras el handshake).
     await prisma.financialConnection.update({ where: { id: connectionId }, data: { challengeEnc: null, challengeExpiresAt: null } })

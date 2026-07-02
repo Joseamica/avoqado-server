@@ -1,7 +1,11 @@
 import { PaymentType, TransactionStatus } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import { prismaMock } from '../../../__helpers__/setup'
+
+// logAction is globally mocked to a no-op jest.fn in tests/__helpers__/setup.ts,
+// so we assert the audit dual-write on the mock itself (not prismaMock.activityLog).
 
 jest.mock('@/services/dashboard/rawMaterial.service', () => ({
   adjustStock: jest.fn(),
@@ -166,6 +170,56 @@ describe('refund.dashboard.service', () => {
             refundedAmount: 10,
             refundedAmountCents: 1000,
           }),
+        }),
+      }),
+    )
+  })
+
+  it('writes a REFUND_CREATED ActivityLog row for a successful refund (audit trail)', async () => {
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([
+        {
+          id: 'payment-original',
+          venueId: 'venue-1',
+          status: TransactionStatus.COMPLETED,
+          type: PaymentType.REGULAR,
+          method: 'CASH',
+          source: 'APP',
+          amount: 10,
+          tipAmount: 0,
+          orderId: 'order-1',
+          shiftId: null,
+          merchantAccountId: null,
+          processorData: {},
+        },
+      ])
+      .mockResolvedValueOnce([]) // no existing refunds
+    prismaMock.payment.create.mockResolvedValue({ id: 'refund-amount-1' })
+
+    const result = await issueRefund({
+      venueId: 'venue-1',
+      paymentId: 'payment-original',
+      amount: 500, // cents → 5.00
+      reason: 'ACCIDENTAL_CHARGE',
+      staffId: 'staff-9',
+      note: 'customer double-charged',
+    })
+
+    expect(result.amount).toBe(5)
+    // Money op → must dual-write to ActivityLog. The owner audit screen reads only
+    // ActivityLog, so a refund without this row is invisible to it.
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'REFUND_CREATED',
+        entity: 'Payment',
+        entityId: 'refund-amount-1',
+        staffId: 'staff-9',
+        venueId: 'venue-1',
+        data: expect.objectContaining({
+          amount: 5, // pesos (major units), NOT cents
+          reason: 'ACCIDENTAL_CHARGE',
+          originalPaymentId: 'payment-original',
+          source: 'DASHBOARD',
         }),
       }),
     )

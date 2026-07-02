@@ -104,8 +104,14 @@ export const externalBankClient: FinancialProviderClient = {
       { headers: headers(challenge.accessToken), timeout: 20_000 },
     )
     if (!pick<boolean>(v, 'isValid')) throw new BadRequestError('Código OTP inválido o expirado.')
-    // Dispositivo ya confiable → re-login para obtener refreshToken definitivo.
+    // Dispositivo ya confiable → re-login. Pero si la cuenta ADEMÁS tiene 2FA, el
+    // re-login tras validar el dispositivo NO devuelve refreshToken todavía: pide el
+    // segundo factor. Encadenar al paso 2FA (idéntico a lo que hace connect()).
     const data = await signIn(email, password, deviceIdentifier)
+    if (pick<boolean>(data, 'needTwoFactorAuth')) {
+      const accessToken = accessTokenOf(data)
+      return { kind: 'need_two_factor_auth', challenge: { accessToken } }
+    }
     const grant = toGrant(data)
     const accounts = normalizeAccounts(await fetchMe(accessTokenOf(data)))
     return { kind: 'connected', grant, accounts }

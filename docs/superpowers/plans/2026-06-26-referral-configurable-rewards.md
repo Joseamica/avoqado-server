@@ -94,7 +94,10 @@ Editar el `migration.sql` recién generado y añadir AL INICIO (antes del `CREAT
 parcial (§4.5.b):
 
 ```sql
--- PREFLIGHT: void de referrals duplicados por orden (conservar el más antiguo)
+-- PREFLIGHT: void de referrals duplicados por orden (conservar el más antiguo).
+-- Desempate por (createdAt, id): con timestamps IGUALES, el par (createdAt,id) sigue
+-- siendo un orden total → sobrevive exactamente uno (Codex r5: sin el tie-breaker,
+-- empates de createdAt dejaban varios activos y el índice único abortaba igual).
 UPDATE "Referral" r SET "status" = 'VOID', "voidedAt" = now(),
   "voidReason" = 'dedupe_for_partial_unique_migration'
 WHERE r."qualifyingOrderId" IS NOT NULL
@@ -103,7 +106,7 @@ WHERE r."qualifyingOrderId" IS NOT NULL
     SELECT 1 FROM "Referral" r2
     WHERE r2."qualifyingOrderId" = r."qualifyingOrderId"
       AND r2."status" IN ('PENDING','QUALIFIED')
-      AND r2."createdAt" < r."createdAt"
+      AND (r2."createdAt", r2."id") < (r."createdAt", r."id")
   );
 
 CREATE UNIQUE INDEX "Referral_qualifyingOrderId_active_key"
@@ -122,8 +125,8 @@ En `tests/__helpers__/setup.ts`, añadir al registro manual (copiar el patrón d
 
 ```typescript
 referralTierReward: { findMany: jest.fn().mockResolvedValue([]), create: jest.fn(), update: jest.fn(), findUnique: jest.fn() },
-referralRewardGrant: { findMany: jest.fn().mockResolvedValue([]), create: jest.fn(), update: jest.fn(), updateMany: jest.fn(), findUnique: jest.fn() },
-referralTierUnlock: { create: jest.fn(), findUnique: jest.fn() },
+referralRewardGrant: { findMany: jest.fn().mockResolvedValue([]), create: jest.fn(), createMany: jest.fn().mockResolvedValue({ count: 1 }), update: jest.fn(), updateMany: jest.fn(), findUnique: jest.fn(), findFirst: jest.fn() },
+referralTierUnlock: { createMany: jest.fn().mockResolvedValue({ count: 1 }), findUnique: jest.fn() },
 ```
 
 - [ ] **Step 8: Commit**
@@ -175,16 +178,19 @@ Run: `npm run test:api -- migration-backfill` Expected: FAIL (el SQL de backfill
 `npx prisma migrate dev --create-only --name referral_backfill`, luego en el `migration.sql`:
 
 ```sql
+-- IDs en formato cuid-compatible (25 chars, prefijo 'c') per regla del repo
+-- (CLAUDE.md "Production Data Inserts: IDs MUST be cuid format"). En SQL puro no
+-- hay cuid v1 real; 'c' + 24 hex de md5(uuid) respeta el formato del catálogo.
 -- a. 3 ReferralTierReward por config desde los campos planos
 INSERT INTO "ReferralTierReward" ("id","configId","tierLevel","rewardType","recurrence","rewardPercent","rewardQuantity","active","createdAt","updatedAt")
-SELECT gen_random_uuid()::text, c."id", lvl.n, 'PERCENT_COUPON', 'ONE_TIME',
+SELECT 'c' || substr(md5(gen_random_uuid()::text), 1, 24), c."id", lvl.n, 'PERCENT_COUPON', 'ONE_TIME',
        CASE lvl.n WHEN 1 THEN c."tier1RewardPercent" WHEN 2 THEN c."tier2RewardPercent" ELSE c."tier3RewardPercent" END,
        1, true, now(), now()
 FROM "ReferralProgramConfig" c CROSS JOIN (VALUES (1),(2),(3)) AS lvl(n);
 
 -- c. ReferralTierUnlock para TODOS los niveles ya alcanzados (TIER_3 => 1,2,3)
 INSERT INTO "ReferralTierUnlock" ("id","customerId","tierLevel","unlockedAt")
-SELECT gen_random_uuid()::text, cu."id", lvl.n, now()
+SELECT 'c' || substr(md5(gen_random_uuid()::text), 1, 24), cu."id", lvl.n, now()
 FROM "Customer" cu CROSS JOIN (VALUES (1),(2),(3)) AS lvl(n)
 WHERE cu."referralTier" IS NOT NULL
   AND lvl.n <= CASE cu."referralTier" WHEN 'TIER_1' THEN 1 WHEN 'TIER_2' THEN 2 WHEN 'TIER_3' THEN 3 ELSE 0 END;
@@ -304,8 +310,10 @@ it('PERMANENT_DISCOUNT emits an isAutomatic Discount with no validUntil/maxUses'
 it('FREE_PRODUCT emits NO discount, only a MANUAL_PENDING grant', async () => {
   // assert: discount.create NO llamado; grant.create con status 'MANUAL_PENDING', discountId null
 })
-it('skips emission when the grant already exists (unique conflict)', async () => {
-  prismaMock.referralRewardGrant.create.mockRejectedValueOnce({ code: 'P2002' }) // unique violation
+it('skips emission when the grant already exists (createMany count 0)', async () => {
+  // ⚠️ NO capturar P2002 dentro de la tx: un constraint error ABORTA la tx de
+  // Postgres entera (Codex r5). Idempotencia = createMany skipDuplicates + count.
+  prismaMock.referralRewardGrant.createMany.mockResolvedValueOnce({ count: 0 }) // ya existía
   await emitTierRewards(txMock, { venueId, customer, tierLevel: 1 })
   expect(prismaMock.discount.create).not.toHaveBeenCalled() // no doble-minteo
 })
@@ -318,7 +326,7 @@ Run: `npm run test:unit -- referralQualification.service` Expected: FAIL (`emitT
 - [ ] **Step 3: Implementar `emitTierRewards`**
 
 Reescribir el `emitTierReward` actual (hoy emite un solo cupón, líneas ~52–125) como `emitTierRewards` que itera los `ReferralTierReward`
-activos del nivel. Para cada uno, `create` el grant (capturando P2002 como skip idempotente) y emitir según tipo (tabla §5). El `Discount`
+activos del nivel. Para cada uno, `createMany({ data: [grant], skipDuplicates: true })` y si `count === 0` → skip idempotente (⚠️ NUNCA capturar P2002 dentro de la tx: el constraint error aborta la tx de Postgres — Codex r5); si `count === 1` → emitir según tipo (tabla §5) y `update` del grant con los ids del artefacto. El `Discount`
 de `PERCENT_COUPON` conserva la forma actual; el `PERMANENT_DISCOUNT` usa `isAutomatic:true`, sin `validUntil`/`maxUses`; `FREE_PRODUCT` no
 emite artefacto (`status:'MANUAL_PENDING'`).
 
@@ -356,10 +364,10 @@ it('claims the referral by qualifyingOrderId; second run is a no-op', async () =
   await onOrderPaid({ orderId: 'o1', venueId: 'v1' }) // count 0 → aborta
   expect(prismaMock.customer.update).toHaveBeenCalledTimes(1) // un solo incremento
 })
-it('aborts emission if the tier unlock already exists', async () => {
-  prismaMock.referralTierUnlock.create.mockRejectedValueOnce({ code: 'P2002' })
+it('aborts emission if the tier unlock already exists (createMany count 0)', async () => {
+  prismaMock.referralTierUnlock.createMany.mockResolvedValueOnce({ count: 0 }) // ya desbloqueado
   await onOrderPaid({ orderId: 'o2', venueId: 'v1' })
-  expect(prismaMock.referralRewardGrant.create).not.toHaveBeenCalled()
+  expect(prismaMock.referralRewardGrant.createMany).not.toHaveBeenCalled()
 })
 ```
 
@@ -371,7 +379,7 @@ Run: `npm run test:unit -- onOrderPaid` Expected: FAIL.
 
 Reescribir `onOrderPaid` siguiendo los 7 pasos del §5: CAS
 `referral.updateMany({ where: { qualifyingOrderId: orderId, status: 'PENDING' }, data: { status: 'QUALIFIED', qualifiedAt } })` → si
-`count === 0` return; incrementar count; recomputar tier; `INSERT ReferralTierUnlock` (P2002 → return); `emitTierRewards`; actualizar
+`count === 0` return; incrementar count; recomputar tier; `referralTierUnlock.createMany({ data: [...], skipDuplicates: true })` y si `count === 0` → return (⚠️ NO capturar P2002: aborta la tx); `emitTierRewards`; actualizar
 `referralTier`; `ActivityLog`. Todo en `prisma.$transaction`. Email tier-up se mantiene fire-and-forget FUERA de la tx.
 
 - [ ] **Step 4: Correr (verde)**
