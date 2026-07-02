@@ -5,7 +5,7 @@ import logger from '../../config/logger'
 import emailService from '../email.service'
 import { getRoleDisplayName } from './venueRoleConfig.dashboard.service'
 import { logAction } from './activity-log.service'
-import { ROLE_HIERARCHY, canAssignRole } from '../../lib/permissions'
+import { ROLE_HIERARCHY, canAssignRole, ungrantablePermissions } from '../../lib/permissions'
 import { assertCanAddSeat } from '../access/seatCap.service'
 
 interface TeamMember {
@@ -1259,7 +1259,7 @@ export async function cancelInvitation(venueId: string, invitationId: string): P
  * Assign or remove a permission set from a staff member
  * @param permissionSetId - null to remove (falls back to role-based permissions)
  */
-export async function assignPermissionSet(venueId: string, staffVenueId: string, permissionSetId: string | null) {
+export async function assignPermissionSet(venueId: string, staffVenueId: string, permissionSetId: string | null, callerRole?: StaffRole) {
   const staffVenue = await prisma.staffVenue.findFirst({
     where: { id: staffVenueId, venueId },
   })
@@ -1276,6 +1276,16 @@ export async function assignPermissionSet(venueId: string, staffVenueId: string,
 
     if (!permissionSet) {
       throw new NotFoundError('Conjunto de permisos no encontrado en este venue')
+    }
+
+    // Privilege-escalation guard: a caller may only assign a set whose permissions are
+    // within their own role's grant. Blocks an ADMIN assigning an OWNER-made `*:*` set
+    // (to themselves or anyone) to exceed their level — mirrors the role ceiling above.
+    if (callerRole) {
+      const ungrantable = ungrantablePermissions(callerRole, permissionSet.permissions as string[])
+      if (ungrantable.length > 0) {
+        throw new ForbiddenError(`No puedes asignar un conjunto con permisos que tu rol no tiene: ${ungrantable.join(', ')}`)
+      }
     }
   }
 

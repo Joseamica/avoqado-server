@@ -33,7 +33,9 @@ export async function create(req: Request, res: Response, next: NextFunction): P
       throw new AuthenticationError('Authentication context missing')
     }
 
-    const data = await permissionSetService.create(venueId, req.body, userId)
+    // resolvedRole = caller's role for THIS venue (set by checkPermission('settings:manage')).
+    // Enforces the caller can't grant permissions above their own role.
+    const data = await permissionSetService.create(venueId, req.body, userId, (req as any).resolvedRole)
 
     res.status(201).json({ success: true, data })
   } catch (error) {
@@ -44,7 +46,7 @@ export async function create(req: Request, res: Response, next: NextFunction): P
 export async function update(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId, id } = req.params
-    const data = await permissionSetService.update(venueId, id, req.body)
+    const data = await permissionSetService.update(venueId, id, req.body, (req as any).resolvedRole)
 
     res.status(200).json({ success: true, data })
   } catch (error) {
@@ -73,7 +75,7 @@ export async function duplicate(req: Request, res: Response, next: NextFunction)
     }
 
     const { name } = req.body
-    const data = await permissionSetService.duplicate(venueId, id, name, userId)
+    const data = await permissionSetService.duplicate(venueId, id, name, userId, (req as any).resolvedRole)
 
     res.status(201).json({ success: true, data })
   } catch (error) {

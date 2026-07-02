@@ -1188,6 +1188,39 @@ export function canAssignRole(assignerRole: StaffRole, targetRole: StaffRole): b
 }
 
 /**
+ * Can the caller GRANT a single permission (put it in a permission set / custom role)?
+ * A caller may only grant permissions their own role already holds — the permission
+ * analog of `canAssignRole`. Prevents an ADMIN from folding `*:*` (or OWNER-only perms
+ * like `commissions:payout`) into a set and assigning it to escalate past their level.
+ * Wildcards are handled literally: only a `*:*` holder can grant `*:*`, only a `res:*`
+ * holder can grant `res:*`, etc.
+ */
+function callerCanGrant(callerPerms: string[], perm: string): boolean {
+  if (perm === '*:*') return callerPerms.includes('*:*')
+  if (perm.endsWith(':*')) {
+    const resource = perm.slice(0, -2)
+    return callerPerms.includes('*:*') || callerPerms.includes(`${resource}:*`)
+  }
+  if (perm.startsWith('*:')) {
+    const action = perm.slice(2)
+    return callerPerms.includes('*:*') || callerPerms.includes(`*:${action}`)
+  }
+  return evaluatePermissionList(callerPerms, perm)
+}
+
+/**
+ * Returns the subset of `requested` permissions the caller (by role) may NOT grant.
+ * Empty array = the caller is allowed to grant every requested permission. SUPERADMIN
+ * (and any future `*:*` role) can grant anything. Callers should reject the write when
+ * this is non-empty. Uses the caller's ROLE DEFAULTS as the grantable ceiling.
+ */
+export function ungrantablePermissions(callerRole: StaffRole, requested: string[]): string[] {
+  const callerPerms = DEFAULT_PERMISSIONS[callerRole] ?? []
+  if (callerPerms.includes('*:*')) return [] // full-wildcard caller can grant anything
+  return requested.filter(perm => !callerCanGrant(callerPerms, perm))
+}
+
+/**
  * Check if a permission is critical (should not be removed from own role)
  *
  * @param permission Permission string (e.g., "settings:manage")

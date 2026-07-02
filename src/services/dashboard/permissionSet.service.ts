@@ -1,11 +1,26 @@
 import prisma from '../../utils/prismaClient'
-import { BadRequestError, NotFoundError } from '../../errors/AppError'
-import { validatePermissionFormat } from '../../lib/permissions'
+import { BadRequestError, ForbiddenError, NotFoundError } from '../../errors/AppError'
+import { validatePermissionFormat, ungrantablePermissions } from '../../lib/permissions'
+import type { StaffRole } from '@prisma/client'
 import logger from '@/config/logger'
 import type { CreatePermissionSetInput, UpdatePermissionSetInput } from '../../schemas/dashboard/permissionSet.schema'
 import { logAction } from './activity-log.service'
 
 const MAX_PERMISSION_SETS_PER_VENUE = 20
+
+/**
+ * Privilege-escalation guard: a caller may only put permissions in a set that their own
+ * role already grants. Without this, an ADMIN could fold `*:*` (or OWNER-only perms) into
+ * a set and assign it to exceed their level — the same escalation `canAssignRole` blocks
+ * on the role path. `callerRole` is optional: absent = internal/system caller (no ceiling).
+ */
+function assertCanGrant(callerRole: StaffRole | undefined, permissions: string[]): void {
+  if (!callerRole) return
+  const ungrantable = ungrantablePermissions(callerRole, permissions)
+  if (ungrantable.length > 0) {
+    throw new ForbiddenError(`No puedes otorgar permisos que tu rol no tiene: ${ungrantable.join(', ')}`)
+  }
+}
 
 export async function getAll(venueId: string) {
   return prisma.permissionSet.findMany({
@@ -32,7 +47,7 @@ export async function getById(venueId: string, id: string) {
   return permissionSet
 }
 
-export async function create(venueId: string, data: CreatePermissionSetInput, createdBy: string) {
+export async function create(venueId: string, data: CreatePermissionSetInput, createdBy: string, callerRole?: StaffRole) {
   // Check venue limit
   const count = await prisma.permissionSet.count({ where: { venueId } })
   if (count >= MAX_PERMISSION_SETS_PER_VENUE) {
@@ -41,6 +56,8 @@ export async function create(venueId: string, data: CreatePermissionSetInput, cr
 
   // Validate all permissions
   validatePermissions(data.permissions)
+  // Privilege-escalation guard: can't grant permissions above the caller's own role.
+  assertCanGrant(callerRole, data.permissions)
 
   const permissionSet = await prisma.permissionSet.create({
     data: {
@@ -82,7 +99,7 @@ export async function create(venueId: string, data: CreatePermissionSetInput, cr
   return permissionSet
 }
 
-export async function update(venueId: string, id: string, data: UpdatePermissionSetInput) {
+export async function update(venueId: string, id: string, data: UpdatePermissionSetInput, callerRole?: StaffRole) {
   // Verify it exists and belongs to the venue
   const existing = await prisma.permissionSet.findFirst({
     where: { id, venueId },
@@ -95,6 +112,8 @@ export async function update(venueId: string, id: string, data: UpdatePermission
   // Validate permissions if provided
   if (data.permissions) {
     validatePermissions(data.permissions)
+    // Privilege-escalation guard: can't grant permissions above the caller's own role.
+    assertCanGrant(callerRole, data.permissions)
   }
 
   const permissionSet = await prisma.permissionSet.update({
@@ -167,7 +186,7 @@ export async function remove(venueId: string, id: string) {
   return { deleted: true, affectedStaff: existing._count.staffVenues }
 }
 
-export async function duplicate(venueId: string, id: string, newName: string, createdBy: string) {
+export async function duplicate(venueId: string, id: string, newName: string, createdBy: string, callerRole?: StaffRole) {
   const existing = await prisma.permissionSet.findFirst({
     where: { id, venueId },
   })
@@ -175,6 +194,10 @@ export async function duplicate(venueId: string, id: string, newName: string, cr
   if (!existing) {
     throw new NotFoundError('Conjunto de permisos no encontrado')
   }
+
+  // Privilege-escalation guard: can't duplicate a set whose permissions exceed the caller's
+  // role (e.g. an ADMIN duplicating an OWNER-made `*:*` set to then assign it to themselves).
+  assertCanGrant(callerRole, existing.permissions as string[])
 
   // Check venue limit
   const count = await prisma.permissionSet.count({ where: { venueId } })

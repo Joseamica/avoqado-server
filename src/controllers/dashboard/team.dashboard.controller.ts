@@ -247,7 +247,9 @@ export async function assignPermissionSet(req: Request, res: Response, next: Nex
     const { venueId, teamMemberId } = req.params
     const { permissionSetId } = req.body
 
-    const result = await teamService.assignPermissionSet(venueId, teamMemberId, permissionSetId ?? null)
+    // resolvedRole = caller's role for THIS venue (set by checkPermission('settings:manage')).
+    // Blocks assigning a set with permissions above the caller's own role.
+    const result = await teamService.assignPermissionSet(venueId, teamMemberId, permissionSetId ?? null, (req as any).resolvedRole)
 
     res.status(200).json({
       success: true,
