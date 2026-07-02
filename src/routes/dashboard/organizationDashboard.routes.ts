@@ -107,36 +107,47 @@ export async function requireOrgOwner(req: Request, res: Response, next: NextFun
 }
 
 /**
- * Middleware: require OrgRole OWNER or ADMIN for the target organization.
+ * Middleware: require a SUPERVISOR-or-above role for the target organization.
  * Used for fleet-affecting terminal operations (create/delete terminal, bulk
- * commands, org-wide broadcast). `checkOrgAccess` alone only proves membership,
- * which would let any member (a cashier/promoter) provision/delete terminals or
- * broadcast to the entire fleet. SUPERADMIN bypasses.
+ * commands, org-wide broadcast/message). `checkOrgAccess` alone only proves
+ * membership, which would let a floor employee (cashier/waiter/promoter) provision
+ * terminals or message the whole fleet.
  *
- * ⚠️ Floor chosen conservatively at ADMIN+. If org supervisors who are OrgRole
- * MEMBER legitimately manage the terminal fleet, widen this to include them.
+ * "Supervisor or above" = holds StaffRole MANAGER/ADMIN/OWNER/SUPERADMIN in ANY
+ * venue of the org (supervisors are venue-level MANAGER but org-level MEMBER, so an
+ * OrgRole-only check would wrongly block them), OR is an org-level OWNER/ADMIN.
+ * SUPERADMIN bypasses. Floor staff (WAITER, CASHIER, HOST, VIEWER) are blocked.
  */
-async function requireOrgAdmin(req: Request, res: Response, next: NextFunction) {
+async function requireOrgManager(req: Request, res: Response, next: NextFunction) {
   try {
     const authContext = (req as any).authContext
     const orgId = req.params.orgId
 
     if (authContext?.role === 'SUPERADMIN') return next()
 
-    const membership = await prisma.staffOrganization.findFirst({
-      where: {
-        staffId: authContext?.userId,
-        organizationId: orgId,
-        isActive: true,
-        role: { in: ['OWNER', 'ADMIN'] },
-      },
-      select: { id: true },
-    })
+    const [venueRole, orgRole] = await Promise.all([
+      prisma.staffVenue.findFirst({
+        where: {
+          staffId: authContext?.userId,
+          active: true,
+          venue: { organizationId: orgId },
+          role: { in: ['SUPERADMIN', 'OWNER', 'ADMIN', 'MANAGER'] },
+        },
+        select: { id: true },
+      }),
+      prisma.staffOrganization.findFirst({
+        where: {
+          staffId: authContext?.userId,
+          organizationId: orgId,
+          isActive: true,
+          role: { in: ['OWNER', 'ADMIN'] },
+        },
+        select: { id: true },
+      }),
+    ])
 
-    if (!membership) {
-      return res
-        .status(403)
-        .json({ success: false, error: 'admin_required', message: 'Se requiere rol de administrador de la organización' })
+    if (!venueRole && !orgRole) {
+      return res.status(403).json({ success: false, error: 'insufficient_role', message: 'Se requiere rol de supervisor o superior' })
     }
 
     next()
@@ -803,7 +814,7 @@ router.post(
   '/:orgId/terminals',
   authenticateTokenMiddleware,
   checkOrgAccess,
-  requireOrgAdmin,
+  requireOrgManager,
   validateRequest(CreateOrgTerminalSchema),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -856,7 +867,7 @@ router.delete(
   '/:orgId/terminals/:terminalId',
   authenticateTokenMiddleware,
   checkOrgAccess,
-  requireOrgAdmin,
+  requireOrgManager,
   validateRequest(DeleteOrgTerminalSchema),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -973,7 +984,7 @@ router.post(
   '/:orgId/terminals/bulk-command',
   authenticateTokenMiddleware,
   checkOrgAccess,
-  requireOrgAdmin,
+  requireOrgManager,
   validateRequest(BulkCommandSchema),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -1417,7 +1428,7 @@ router.post(
   '/:orgId/messages/broadcast',
   authenticateTokenMiddleware,
   checkOrgAccess,
-  requireOrgAdmin,
+  requireOrgManager,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { orgId } = req.params
