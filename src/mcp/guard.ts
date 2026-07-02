@@ -1,4 +1,5 @@
 import { hasPermission } from '@/services/access/access.service'
+import logger from '@/config/logger'
 import type { McpScope } from './scope'
 
 const SENSITIVE_PAYMENT_FIELDS = ['maskedPan', 'referenceNumber', 'authorizationNumber'] as const
@@ -11,6 +12,15 @@ export function createGuard(scope: McpScope) {
     venueFilter(requestedVenueId?: string): { venueId: { in: string[] } } {
       if (requestedVenueId) {
         if (!scope.allowedVenueIds.includes(requestedVenueId)) {
+          // Visible-in-logs (alertable) denial. The MCP is LLM-driven, so a spike of
+          // out-of-scope venue attempts = probing worth surfacing. Not persisted to
+          // ActivityLog on purpose (hot path; would flood the audit trail).
+          logger.warn('[MCP] venue out of scope (denied)', {
+            mcp: true,
+            staffId: scope.staffId,
+            activeOrg: scope.activeOrg,
+            requestedVenueId,
+          })
           throw new ScopeError(
             `Venue ${requestedVenueId} is not in your scope. Esta conexión está limitada a tu organización activa — usa list_my_organizations para ver tus organizaciones; si el venue pertenece a otra, desconecta y vuelve a conectar eligiéndola. NO uses otro venue como sustituto.`,
           )
@@ -23,6 +33,15 @@ export function createGuard(scope: McpScope) {
     requirePermission(permission: string, venueId: string): void {
       const access = scope.perVenueAccess.get(venueId)
       if (!access || !hasPermission(access, permission)) {
+        // Visible-in-logs (alertable) denial; a spike = an LLM probing for access.
+        // Winston only (not ActivityLog) — hot path, keep the audit trail clean.
+        logger.warn('[MCP] permission denied', {
+          mcp: true,
+          staffId: scope.staffId,
+          activeOrg: scope.activeOrg,
+          permission,
+          venueId,
+        })
         throw new ScopeError(`Missing permission ${permission} for venue ${venueId}`)
       }
     },
