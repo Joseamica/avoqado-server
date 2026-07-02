@@ -179,6 +179,16 @@ describe('onOrderRefunded', () => {
 
       await onOrderRefunded({ orderId: 'o1', venueId: 'v1' })
 
+      // Grants must be scoped by customer + tier level — NOT by referralId
+      // (a grant's referralId only records the ONE referral that triggered
+      // the original unlock; the refunded order is usually a different one).
+      expect(mockedPrisma.referralRewardGrant.findMany).toHaveBeenCalledWith({
+        where: {
+          customerId: 'cust_ref',
+          tierLevel: { gt: 0 },
+          status: { in: ['ISSUED', 'MANUAL_PENDING'] },
+        },
+      })
       expect(mockedPrisma.discount.update).toHaveBeenCalledWith(
         expect.objectContaining({
           where: { id: 'disc_1' },
@@ -191,6 +201,53 @@ describe('onOrderRefunded', () => {
       })
       expect(mockedPrisma.referralRewardGrant.update).toHaveBeenCalledWith({
         where: { id: 'grant_1' },
+        data: expect.objectContaining({ status: 'REVOKED', revokedAt: expect.any(Date) }),
+      })
+    })
+
+    it('scopes the grant lookup by customerId + tierLevel, NOT by referralId, when the refunded order belongs to a DIFFERENT referral than the one that triggered the tier unlock (the common case)', async () => {
+      // The referral being refunded (`ref_1`, referrerCustomerId 'cust_ref')
+      // is NOT the referral that originally triggered the TIER_1 grant —
+      // the grant below carries a completely different `referralId`
+      // ('ref_TRIGGER', not 'ref_1'). A `where: { referralId: referral.id }`
+      // lookup would return `[]` here and silently leave the reward alive.
+      mockedPrisma.referralRewardGrant.findMany.mockResolvedValue([
+        {
+          id: 'grant_other_trigger',
+          rewardType: 'PERCENT_COUPON',
+          status: 'ISSUED',
+          discountId: 'disc_other',
+          couponCodeId: 'coupon_other',
+          referralId: 'ref_TRIGGER',
+        },
+      ])
+      mockedPrisma.couponRedemption.findFirst.mockResolvedValue(null)
+      mockedPrisma.discount.update.mockResolvedValue({ id: 'disc_other' })
+      mockedPrisma.couponCode.updateMany.mockResolvedValue({ count: 1 })
+      mockedPrisma.customerDiscount.updateMany.mockResolvedValue({ count: 1 })
+
+      await onOrderRefunded({ orderId: 'o1', venueId: 'v1' })
+
+      // Assert the WHERE clause itself — the fix must query by customer +
+      // tier level, never by referralId.
+      expect(mockedPrisma.referralRewardGrant.findMany).toHaveBeenCalledWith({
+        where: {
+          customerId: 'cust_ref',
+          tierLevel: { gt: 0 },
+          status: { in: ['ISSUED', 'MANUAL_PENDING'] },
+        },
+      })
+      const callArgs = mockedPrisma.referralRewardGrant.findMany.mock.calls[0][0]
+      expect(callArgs.where).not.toHaveProperty('referralId')
+
+      // And the grant — despite belonging to a different referralId — must
+      // still get revoked, because it belongs to the same customer and its
+      // tier level is no longer supported by the (lowered) referralCount.
+      expect(mockedPrisma.discount.update).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'disc_other' }, data: expect.objectContaining({ active: false }) }),
+      )
+      expect(mockedPrisma.referralRewardGrant.update).toHaveBeenCalledWith({
+        where: { id: 'grant_other_trigger' },
         data: expect.objectContaining({ status: 'REVOKED', revokedAt: expect.any(Date) }),
       })
     })
@@ -246,6 +303,13 @@ describe('onOrderRefunded', () => {
 
       await onOrderRefunded({ orderId: 'o1', venueId: 'v1' })
 
+      expect(mockedPrisma.referralRewardGrant.findMany).toHaveBeenCalledWith({
+        where: {
+          customerId: 'cust_ref',
+          tierLevel: { gt: 0 },
+          status: { in: ['ISSUED', 'MANUAL_PENDING'] },
+        },
+      })
       expect(mockedPrisma.orderDiscount.findFirst).toHaveBeenCalledWith({ where: { discountId: 'disc_2' } })
       expect(mockedPrisma.discount.update).toHaveBeenCalledWith(
         expect.objectContaining({ where: { id: 'disc_2' }, data: expect.objectContaining({ active: false }) }),
@@ -343,6 +407,13 @@ describe('onOrderRefunded', () => {
 
       await onOrderRefunded({ orderId: 'o1', venueId: 'v1' })
 
+      expect(mockedPrisma.referralRewardGrant.findMany).toHaveBeenCalledWith({
+        where: {
+          customerId: 'cust_ref',
+          tierLevel: { gt: 0 },
+          status: { in: ['ISSUED', 'MANUAL_PENDING'] },
+        },
+      })
       expect(mockedPrisma.referralRewardGrant.update).toHaveBeenCalledTimes(3)
       expect(mockedPrisma.activityLog.create).toHaveBeenCalledWith(
         expect.objectContaining({
