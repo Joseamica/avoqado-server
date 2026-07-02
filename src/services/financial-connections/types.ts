@@ -108,6 +108,9 @@ export interface FinancialProviderClient {
   revoke(ctx: ConnectionContext): Promise<void>
   listAccounts(ctx: ConnectionContext): Promise<ProviderAccount[]>
   getBalance(ctx: ConnectionContext, externalId: string): Promise<BalanceSnapshot>
-  listMovements(ctx: ConnectionContext, cuentaId: string, query: MovementQuery): Promise<MovementPage>
+  // La LISTA de movimientos scopea por idNegocio en la ruta + idCuenta como query param
+  // (con solo idCuenta en la ruta el proveedor devuelve un pool global de ~5M movimientos
+  // ajenos). Las ESTADÍSTICAS sí van por idCuenta en la ruta (ahí sí acota a la cuenta).
+  listMovements(ctx: ConnectionContext, idNegocio: string, cuentaId: string, query: MovementQuery): Promise<MovementPage>
   getMovementStats(ctx: ConnectionContext, cuentaId: string, range: { from?: string; to?: string }): Promise<MovementStats>
 }

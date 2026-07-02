@@ -235,7 +235,8 @@ it('getMovementsForAccount: usa externalCuentaId y delega al client', async () =
   clientMock.refresh.mockResolvedValue({ grant: { refreshToken: 'r2' }, ctx: { accessToken: 'acc' } })
   clientMock.listMovements.mockResolvedValue({ movements: [], total: 0 })
   const r = await svc.getMovementsForAccount('fa1', { page: 0, size: 10 })
-  expect(clientMock.listMovements).toHaveBeenCalledWith(expect.objectContaining({ accessToken: expect.any(String) }), 'cta-1', { page: 0, size: 10 })
+  // (ctx, idNegocio='neg-1', cuentaId='cta-1', query)
+  expect(clientMock.listMovements).toHaveBeenCalledWith(expect.objectContaining({ accessToken: expect.any(String) }), 'neg-1', 'cta-1', { page: 0, size: 10 })
   expect(r.total).toBe(0)
 })
 
@@ -250,7 +251,7 @@ it('getMovementsForAccount: backfillea externalCuentaId perezosamente cuando es 
   clientMock.listMovements.mockResolvedValue({ movements: [], total: 0 })
   await svc.getMovementsForAccount('fa2', { page: 0, size: 10 })
   expect(db.financialAccount.update).toHaveBeenCalledWith({ where: { id: 'fa2' }, data: { externalCuentaId: 'cta-9' } })
-  expect(clientMock.listMovements).toHaveBeenCalledWith(expect.anything(), 'cta-9', expect.anything())
+  expect(clientMock.listMovements).toHaveBeenCalledWith(expect.anything(), 'neg-1', 'cta-9', expect.anything())
 })
 
 it('getMovementsForAccount: si el provider no reporta cuentaId → BadRequest, no 500', async () => {

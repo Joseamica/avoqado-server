@@ -419,7 +419,8 @@ export async function getMovementsForAccount(financialAccountId: string, q: Move
   })
   try {
     const { cuentaId, accessToken } = await resolveCuentaId(fa, fa.connection)
-    return await clientFor(fa.connection.provider.code).listMovements({ accessToken }, cuentaId, q)
+    // idNegocio (fa.externalId) en la ruta + cuentaId como query (ver client.listMovements).
+    return await clientFor(fa.connection.provider.code).listMovements({ accessToken }, fa.externalId, cuentaId, q)
   } catch (e) {
     // A diferencia del saldo (que muestra el último valor cacheado), movimientos es
     // siempre una lectura en vivo: si el token murió y el refresh silencioso falla,

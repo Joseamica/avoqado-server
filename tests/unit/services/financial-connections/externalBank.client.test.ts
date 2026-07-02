@@ -184,9 +184,10 @@ it('getBalance: unknown negocio → throws NotFound', async () => {
 })
 
 it('listMovements: pagina con notación punteada y normaliza el movimiento', async () => {
+  // Ruta = idNegocio; idCuenta como query param (acota a la cuenta real, no al pool global).
   nock(BASE)
-    .get('/api/clients/movimientos/cta-1')
-    .query({ 'Pagination.Page': '0', 'Pagination.Size': '10', FechaInicio: '2026-07-01T00:00:00.000Z' })
+    .get('/api/clients/movimientos/neg-1')
+    .query({ 'Pagination.Page': '0', 'Pagination.Size': '10', idCuenta: 'cta-1', FechaInicio: '2026-07-01T00:00:00.000Z' })
     .reply(200, {
       total: 1,
       data: [
@@ -205,7 +206,7 @@ it('listMovements: pagina con notación punteada y normaliza el movimiento', asy
       ],
     })
   const client = await loadClient()
-  const r = await client.listMovements({ accessToken: 't' }, 'cta-1', { page: 0, size: 10, from: '2026-07-01T00:00:00.000Z' })
+  const r = await client.listMovements({ accessToken: 't' }, 'neg-1', 'cta-1', { page: 0, size: 10, from: '2026-07-01T00:00:00.000Z' })
   expect(r.total).toBe(1)
   expect(r.movements[0]).toMatchObject({ id: 'op1', type: 'SPEI IN', amount: 150.5, originator: 'ACME', beneficiary: null })
 })

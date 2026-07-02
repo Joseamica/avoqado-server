@@ -206,11 +206,14 @@ export const externalBankClient: FinancialProviderClient = {
     return { amount: acc.balance, currency: 'MXN', active: acc.active, providerAccountLabel: acc.label }
   },
 
-  async listMovements(ctx: ConnectionContext, cuentaId: string, query: MovementQuery): Promise<MovementPage> {
-    const params: Record<string, unknown> = { 'Pagination.Page': query.page, 'Pagination.Size': query.size }
+  async listMovements(ctx: ConnectionContext, idNegocio: string, cuentaId: string, query: MovementQuery): Promise<MovementPage> {
+    // Ruta = idNegocio, `idCuenta` como query param → acota a la cuenta real del negocio.
+    // (Confirmado en vivo: con cuentaId en la ruta el proveedor ignora el filtro y devuelve
+    //  un pool global de ~5.1M movimientos ajenos; con idNegocio+query idCuenta da los reales.)
+    const params: Record<string, unknown> = { 'Pagination.Page': query.page, 'Pagination.Size': query.size, idCuenta: cuentaId }
     if (query.from) params.FechaInicio = query.from
     if (query.to) params.FechaFinal = query.to
-    const { data } = await axios.get(`${base()}/api/clients/movimientos/${cuentaId}`, {
+    const { data } = await axios.get(`${base()}/api/clients/movimientos/${idNegocio}`, {
       headers: headers(ctx.accessToken),
       params,
       timeout: 20_000,
