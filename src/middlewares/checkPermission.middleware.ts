@@ -192,6 +192,9 @@ export const checkPermission = (requiredPermission: string) => {
 
       // SUPERADMIN has all permissions - skip further checks
       if (isSuperAdmin) {
+        // Expose the effective role for downstream controllers (role assignment /
+        // permission editing) — additive, does not affect this authorization.
+        ;(req as any).resolvedRole = StaffRole.SUPERADMIN
         logger.debug(`checkPermission: SUPERADMIN ${authContext.userId} granted '${requiredPermission}' in venue ${venueId}`)
         return next()
       }
@@ -237,6 +240,11 @@ export const checkPermission = (requiredPermission: string) => {
           message: 'No access to this venue',
         })
       }
+
+      // Expose the venue-resolved role so downstream controllers authorize role
+      // assignments / permission edits against the caller's role IN THIS VENUE,
+      // never their raw JWT role (which may belong to a different venue).
+      ;(req as any).resolvedRole = userRole
 
       // If a permission set is assigned, evaluate that effective list directly.
       let authorized: boolean

@@ -1162,6 +1162,32 @@ export function canModifyRole(modifierRole: StaffRole, targetRole: StaffRole): b
 }
 
 /**
+ * Whether a user with `assignerRole` may ASSIGN `targetRole` to a person
+ * (invite a new member, change a member's role, or set an org-wide role).
+ *
+ * This is deliberately DIFFERENT from `canModifyRole`, which governs editing a
+ * role's permission SET (and treats MANAGER/below as managing no roles at all).
+ * Assigning a role to a person is a normal team operation a MANAGER legitimately
+ * does (e.g. inviting a WAITER), so the rule here is purely hierarchical:
+ *
+ * - You may assign any role at or below your own level (`<=`), so co-OWNERs can
+ *   still invite OWNERs and a MANAGER can still invite a WAITER.
+ * - You may NEVER assign SUPERADMIN unless you already are a SUPERADMIN. This is
+ *   the platform-admin boundary and must not be crossable from an org/venue role
+ *   endpoint (see the privilege-escalation fix: an OWNER writing role=SUPERADMIN
+ *   was becoming a global superadmin via checkPermission's SUPERADMIN bypass).
+ *
+ * `assignerRole` MUST be the caller's role resolved for the TARGET venue/org,
+ * not their raw JWT role (which may be for a different venue).
+ */
+export function canAssignRole(assignerRole: StaffRole, targetRole: StaffRole): boolean {
+  if (targetRole === StaffRole.SUPERADMIN) {
+    return assignerRole === StaffRole.SUPERADMIN
+  }
+  return (ROLE_HIERARCHY[targetRole] || 0) <= (ROLE_HIERARCHY[assignerRole] || 0)
+}
+
+/**
  * Check if a permission is critical (should not be removed from own role)
  *
  * @param permission Permission string (e.g., "settings:manage")

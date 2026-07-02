@@ -10,7 +10,12 @@ import * as ctrl from '@/controllers/dashboard/financialConnection.controller'
 // (fuerza bruta de TOTP / prueba de credenciales por proxy).
 export const venueFinancialConnectionRoutes = Router({ mergeParams: true })
 venueFinancialConnectionRoutes.get('/', checkPermission('financialConnections:manage'), ctrl.listConnections)
-venueFinancialConnectionRoutes.post('/', checkPermission('financialConnections:manage'), financialConnectionRateLimiter, ctrl.createConnection)
+venueFinancialConnectionRoutes.post(
+  '/',
+  checkPermission('financialConnections:manage'),
+  financialConnectionRateLimiter,
+  ctrl.createConnection,
+)
 venueFinancialConnectionRoutes.post(
   '/:id/validate-device',
   checkPermission('financialConnections:manage'),

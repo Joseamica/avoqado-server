@@ -66,7 +66,10 @@ export async function updateRolePermissions(req: Request, res: Response, next: N
     const { venueId, role } = req.params
     const { permissions } = req.body
     const modifiedById = req.authContext?.userId
-    const modifierRole = req.authContext?.role
+    // Use the role RESOLVED for :venueId by checkPermission('settings:manage'),
+    // NOT the raw JWT role — the JWT role may belong to a different venue, which
+    // would let a user edit permissions in a venue where they hold a lower role.
+    const modifierRole = (req as any).resolvedRole ?? req.authContext?.role
 
     if (!modifiedById || !modifierRole) {
       throw new AuthenticationError('Authentication context missing')

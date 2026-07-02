@@ -158,13 +158,20 @@ export async function getPaymentReceipts(
   }
 }
 
-// Ruta: GET /receipts/:receiptId
-export async function getReceiptById(req: Request<{ receiptId: string }>, res: Response, next: NextFunction): Promise<void> {
+// Ruta: GET /venues/:venueId/receipts/:receiptId
+export async function getReceiptById(
+  req: Request<{ receiptId: string; venueId: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
   try {
-    const { receiptId } = req.params
-    // Este endpoint sería para uso interno del dashboard
-    const receipt = await prisma.digitalReceipt.findUnique({
-      where: { id: receiptId },
+    const { receiptId, venueId } = req.params
+    // Scope by venue: the receipt (and its PII) must belong to a payment in THIS
+    // venue. Without the `payment: { venueId }` filter, a member of venue A could
+    // read any receiptId from venue B (IDOR) — checkPermission only proves access
+    // to :venueId, it does not scope the looked-up receipt.
+    const receipt = await prisma.digitalReceipt.findFirst({
+      where: { id: receiptId, payment: { venueId } },
       // incluimos el pago para referencia pero lo importante es el dataSnapshot que ya contiene toda la info
       include: { payment: true },
     })

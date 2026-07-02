@@ -1,11 +1,11 @@
 import prisma from '../../utils/prismaClient'
 import { StaffRole, InvitationType, InvitationStatus, OrgRole } from '@prisma/client'
-import { BadRequestError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
+import { BadRequestError, ForbiddenError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import emailService from '../email.service'
 import { getRoleDisplayName } from './venueRoleConfig.dashboard.service'
 import { logAction } from './activity-log.service'
-import { ROLE_HIERARCHY } from '../../lib/permissions'
+import { ROLE_HIERARCHY, canAssignRole } from '../../lib/permissions'
 import { assertCanAddSeat } from '../access/seatCap.service'
 
 interface TeamMember {
@@ -51,6 +51,10 @@ interface InviteTeamMemberRequest {
   pin?: string // For TPV-only invitations, set PIN directly
   inviteToAllVenues?: boolean // When true (OWNER role only), creates StaffVenue for all org venues
   requirePin?: boolean // When true, PIN is required when accepting the invitation
+  /** Caller's role RESOLVED for this venue (from req.resolvedRole). Used to block
+   *  inviting someone at or above the inviter's level. Undefined only for internal
+   *  callers (system/tests) that bypass the hierarchy check. */
+  callerRole?: StaffRole
 }
 
 interface UpdateTeamMemberRequest {
@@ -59,6 +63,9 @@ interface UpdateTeamMemberRequest {
   pin?: string
   /** Staff ID of who is performing this action (for audit log) */
   performedBy?: string
+  /** Caller's role RESOLVED for this venue (from req.resolvedRole). Used to block
+   *  promoting a member (or oneself) to a role at or above the caller's level. */
+  callerRole?: StaffRole
 }
 
 /**
@@ -371,6 +378,14 @@ export async function inviteTeamMember(
   // Validate role - can't invite SUPERADMIN
   if (request.role === StaffRole.SUPERADMIN) {
     throw new BadRequestError('Cannot invite SUPERADMIN role')
+  }
+
+  // Prevent privilege escalation: the inviter may only invite roles at or below
+  // their own level. `callerRole` is the inviter's role resolved for THIS venue
+  // (set by the controller from req.resolvedRole). When absent (internal/system
+  // callers), the check is skipped — the HTTP routes always provide it.
+  if (request.callerRole && !canAssignRole(request.callerRole, request.role)) {
+    throw new ForbiddenError(`No puedes invitar con el rol ${request.role}`)
   }
 
   const isTPVOnly = request.type === 'tpv-only'
@@ -792,6 +807,20 @@ export async function updateTeamMember(venueId: string, teamMemberId: string, up
 
   if (!existingStaffVenue) {
     throw new NotFoundError('Team member not found')
+  }
+
+  // Prevent privilege escalation via role change. `callerRole` is the caller's
+  // role resolved for THIS venue (controller sets it from req.resolvedRole). A
+  // caller may only assign — and only touch members currently holding — roles at
+  // or below their own level. This blocks a MANAGER promoting themselves (or
+  // anyone) to OWNER/ADMIN. Absent only for internal/system callers.
+  if (updates.callerRole && updates.role && updates.role !== existingStaffVenue.role) {
+    if (!canAssignRole(updates.callerRole, updates.role)) {
+      throw new ForbiddenError(`No puedes asignar el rol ${updates.role}`)
+    }
+    if (!canAssignRole(updates.callerRole, existingStaffVenue.role)) {
+      throw new ForbiddenError('No puedes modificar el rol de este miembro')
+    }
   }
 
   // Prevent modifying an org-level OWNER's role or active status per-venue

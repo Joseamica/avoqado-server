@@ -97,6 +97,9 @@ export async function inviteTeamMember(req: Request, res: Response, next: NextFu
       pin,
       inviteToAllVenues,
       requirePin,
+      // Caller's role resolved for THIS venue by checkPermission('teams:invite').
+      // Used to block inviting someone at or above the inviter's level.
+      callerRole: (req as any).resolvedRole,
     })
 
     res.status(201).json({
@@ -132,6 +135,9 @@ export async function updateTeamMember(req: Request, res: Response, next: NextFu
       active,
       pin,
       performedBy: authContext?.userId,
+      // Caller's role resolved for THIS venue by checkPermission('teams:update').
+      // Used to block promoting a member (or oneself) to a role at/above the caller.
+      callerRole: (req as any).resolvedRole,
     })
 
     res.status(200).json({

@@ -10,7 +10,7 @@ export interface ProviderAccount {
   label: string | null
   clabe: string | null
   active: boolean | null
-  balance: number | null   // saldo si viene en el listado; null si no
+  balance: number | null // saldo si viene en el listado; null si no
 }
 
 /** Snapshot de saldo de UNA cuenta. */
@@ -41,12 +41,17 @@ export interface ConnectInput {
 export interface FinancialProviderClient {
   connect(input: ConnectInput): Promise<ConnectResult>
   validateDevice(input: {
-    email: string; password: string; deviceIdentifier: string
-    challenge: { accessToken: string; processId: string }; code: string
+    email: string
+    password: string
+    deviceIdentifier: string
+    challenge: { accessToken: string; processId: string }
+    code: string
   }): Promise<ConnectResult>
   validateTwoFactorCode(input: {
-    email: string; deviceIdentifier: string
-    challenge: { accessToken: string }; code: string
+    email: string
+    deviceIdentifier: string
+    challenge: { accessToken: string }
+    code: string
   }): Promise<ConnectResult>
   refresh(grant: Grant, deviceIdentifier: string): Promise<{ grant: Grant; ctx: ConnectionContext }>
   revoke(ctx: ConnectionContext): Promise<void>

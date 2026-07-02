@@ -2860,7 +2860,7 @@ class OrganizationDashboardService {
   // ADMIN PASSWORD RESET
   // ==========================================
 
-  async resetUserPassword(orgId: string, userId: string) {
+  async resetUserPassword(orgId: string, userId: string, performedBy?: string) {
     // Verify user belongs to org
     const staffOrg = await prisma.staffOrganization.findFirst({
       where: { staffId: userId, organizationId: orgId },
@@ -2880,10 +2880,15 @@ class OrganizationDashboardService {
       data: { password: hashedPassword },
     })
 
+    // Audit WHO reset WHOM. `performedBy` (the caller's staffId) is required for a
+    // meaningful trail — a password reset without it is unattributable. Authorization
+    // is enforced at the route layer (owner-only), never here.
     logAction({
+      staffId: performedBy || null,
       action: 'USER_PASSWORD_RESET',
       entity: 'Staff',
       entityId: userId,
+      data: { organizationId: orgId },
     })
 
     return { tempPassword, message: 'Password reset successfully. Share the temporary password securely.' }

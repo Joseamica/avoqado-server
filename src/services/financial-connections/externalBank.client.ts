@@ -3,8 +3,13 @@ import { env } from '@/config/env'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { pick } from '@/services/externalBank/pick'
 import type {
-  FinancialProviderClient, ConnectInput, ConnectResult, Grant, ProviderAccount,
-  BalanceSnapshot, ConnectionContext,
+  FinancialProviderClient,
+  ConnectInput,
+  ConnectResult,
+  Grant,
+  ProviderAccount,
+  BalanceSnapshot,
+  ConnectionContext,
 } from './types'
 
 const base = () => env.EXTERNAL_BANK_API_BASE
@@ -14,8 +19,11 @@ const headers = (token?: string) => ({
   ...(token ? { Authorization: `Bearer ${token}` } : {}),
 })
 const dispositivo = (deviceIdentifier: string) => ({
-  marca: 'avoqado-server', sistemaOperativo: `node-${process.version}`,
-  identificador: deviceIdentifier, latitud: '0', longitud: '0',
+  marca: 'avoqado-server',
+  sistemaOperativo: `node-${process.version}`,
+  identificador: deviceIdentifier,
+  latitud: '0',
+  longitud: '0',
 })
 
 function toGrant(data: unknown): Grant {
@@ -53,12 +61,15 @@ async function fetchMe(token: string): Promise<unknown> {
 }
 async function signIn(email: string, password: string, deviceIdentifier: string): Promise<unknown> {
   try {
-    const { data } = await axios.post(`${base()}/api/auth/sign-in/merchant`,
+    const { data } = await axios.post(
+      `${base()}/api/auth/sign-in/merchant`,
       { email, password, dispositivo: dispositivo(deviceIdentifier) },
-      { headers: { ...headers(), twoFactorEnabled: 'true' }, timeout: 20_000 })
+      { headers: { ...headers(), twoFactorEnabled: 'true' }, timeout: 20_000 },
+    )
     return data
   } catch (e) {
-    if (axios.isAxiosError(e)) throw new BadRequestError(pick<string>(e.response?.data, 'message') || `sign-in falló (status ${e.response?.status})`)
+    if (axios.isAxiosError(e))
+      throw new BadRequestError(pick<string>(e.response?.data, 'message') || `sign-in falló (status ${e.response?.status})`)
     throw e
   }
 }
@@ -72,8 +83,11 @@ export const externalBankClient: FinancialProviderClient = {
     }
     if (pick<boolean>(data, 'needDeviceValidation')) {
       const accessToken = accessTokenOf(data)
-      const { data: started } = await axios.post(`${base()}/api/identity/start/web`,
-        { identificadorDispositivo: deviceIdentifier }, { headers: headers(accessToken), timeout: 20_000 })
+      const { data: started } = await axios.post(
+        `${base()}/api/identity/start/web`,
+        { identificadorDispositivo: deviceIdentifier },
+        { headers: headers(accessToken), timeout: 20_000 },
+      )
       const processId = pick<string>(started, 'proccessId')
       if (!processId) throw new BadRequestError('identity/start no devolvió proccessId.')
       return { kind: 'need_device_validation', challenge: { accessToken, processId } }
@@ -84,8 +98,11 @@ export const externalBankClient: FinancialProviderClient = {
   },
 
   async validateDevice({ email, password, deviceIdentifier, challenge, code }): Promise<ConnectResult> {
-    const { data: v } = await axios.post(`${base()}/api/identity/validate-otp-code/web`,
-      { proccessId: challenge.processId, code }, { headers: headers(challenge.accessToken), timeout: 20_000 })
+    const { data: v } = await axios.post(
+      `${base()}/api/identity/validate-otp-code/web`,
+      { proccessId: challenge.processId, code },
+      { headers: headers(challenge.accessToken), timeout: 20_000 },
+    )
     if (!pick<boolean>(v, 'isValid')) throw new BadRequestError('Código OTP inválido o expirado.')
     // Dispositivo ya confiable → re-login para obtener refreshToken definitivo.
     const data = await signIn(email, password, deviceIdentifier)
@@ -97,9 +114,11 @@ export const externalBankClient: FinancialProviderClient = {
   async validateTwoFactorCode({ email, deviceIdentifier, challenge, code }): Promise<ConnectResult> {
     let v: unknown
     try {
-      ;({ data: v } = await axios.post(`${base()}/api/auth/validate-two-factor-code`,
+      ;({ data: v } = await axios.post(
+        `${base()}/api/auth/validate-two-factor-code`,
         { code, user: email, dispositivo: dispositivo(deviceIdentifier) },
-        { headers: headers(challenge.accessToken), timeout: 20_000 }))
+        { headers: headers(challenge.accessToken), timeout: 20_000 },
+      ))
     } catch (e) {
       if (axios.isAxiosError(e)) throw new BadRequestError(pick<string>(e.response?.data, 'message') || 'Código 2FA inválido o expirado.')
       throw e
@@ -113,15 +132,20 @@ export const externalBankClient: FinancialProviderClient = {
   },
 
   async refresh(grant: Grant, deviceIdentifier: string): Promise<{ grant: Grant; ctx: ConnectionContext }> {
-    const { data } = await axios.post(`${base()}/api/auth/sign-in/token`,
+    const { data } = await axios.post(
+      `${base()}/api/auth/sign-in/token`,
       { refreshToken: grant.refreshToken, dispositivo: dispositivo(deviceIdentifier) },
-      { headers: headers(), timeout: 20_000 })
+      { headers: headers(), timeout: 20_000 },
+    )
     return { grant: toGrant(data), ctx: { accessToken: accessTokenOf(data) } }
   },
 
   async revoke(ctx: ConnectionContext): Promise<void> {
-    try { await axios.post(`${base()}/api/auth/Log-Out`, {}, { headers: headers(ctx.accessToken), timeout: 10_000 }) }
-    catch { /* best-effort; no bloquear la desconexión local */ }
+    try {
+      await axios.post(`${base()}/api/auth/Log-Out`, {}, { headers: headers(ctx.accessToken), timeout: 10_000 })
+    } catch {
+      /* best-effort; no bloquear la desconexión local */
+    }
   },
 
   async listAccounts(ctx: ConnectionContext): Promise<ProviderAccount[]> {

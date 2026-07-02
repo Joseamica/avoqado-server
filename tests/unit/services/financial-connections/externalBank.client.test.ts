@@ -14,7 +14,10 @@ async function loadClient() {
 }
 
 beforeAll(() => nock.disableNetConnect())
-afterAll(() => { nock.cleanAll(); nock.enableNetConnect() })
+afterAll(() => {
+  nock.cleanAll()
+  nock.enableNetConnect()
+})
 afterEach(() => nock.cleanAll())
 
 const NEGOCIOS = {
@@ -25,10 +28,14 @@ const NEGOCIOS = {
 }
 
 it('connect: device already trusted → returns grant + accounts', async () => {
-  nock(BASE).post('/api/auth/sign-in/merchant').reply(200, {
-    signedIn: true, token: 'acc-1', refreshToken: 'ref-1',
-    expiresIn: new Date(Date.now() + 3600e3).toISOString(),
-  })
+  nock(BASE)
+    .post('/api/auth/sign-in/merchant')
+    .reply(200, {
+      signedIn: true,
+      token: 'acc-1',
+      refreshToken: 'ref-1',
+      expiresIn: new Date(Date.now() + 3600e3).toISOString(),
+    })
   nock(BASE).get('/api/auth').reply(200, NEGOCIOS)
   const client = await loadClient()
   const r = await client.connect({ email: 'a@b.co', password: 'p', deviceIdentifier: DEVICE })
@@ -41,11 +48,16 @@ it('connect: device already trusted → returns grant + accounts', async () => {
 })
 
 it('connect: needTwoFactorAuth (no device validation needed) → returns 2FA challenge', async () => {
-  nock(BASE).post('/api/auth/sign-in/merchant').reply(200, {
-    signedIn: true, token: 'tmp-tok-2fa', refreshToken: null,
-    needTwoFactorAuth: true, needDeviceValidation: false,
-    expiresIn: new Date(Date.now() + 3600e3).toISOString(),
-  })
+  nock(BASE)
+    .post('/api/auth/sign-in/merchant')
+    .reply(200, {
+      signedIn: true,
+      token: 'tmp-tok-2fa',
+      refreshToken: null,
+      needTwoFactorAuth: true,
+      needDeviceValidation: false,
+      expiresIn: new Date(Date.now() + 3600e3).toISOString(),
+    })
   const client = await loadClient()
   const r = await client.connect({ email: 'a@b.co', password: 'p', deviceIdentifier: DEVICE })
   expect(r.kind).toBe('need_two_factor_auth')
@@ -53,15 +65,23 @@ it('connect: needTwoFactorAuth (no device validation needed) → returns 2FA cha
 })
 
 it('validateTwoFactorCode: valid code → returns full grant + accounts', async () => {
-  nock(BASE).post('/api/auth/validate-two-factor-code').reply(200, {
-    isLoggedIn: true, success: true, token: 'acc-2fa', refreshToken: 'ref-2fa',
-    expiresIn: new Date(Date.now() + 3600e3).toISOString(), needTwoFactorAuth: false,
-  })
+  nock(BASE)
+    .post('/api/auth/validate-two-factor-code')
+    .reply(200, {
+      isLoggedIn: true,
+      success: true,
+      token: 'acc-2fa',
+      refreshToken: 'ref-2fa',
+      expiresIn: new Date(Date.now() + 3600e3).toISOString(),
+      needTwoFactorAuth: false,
+    })
   nock(BASE).get('/api/auth').reply(200, NEGOCIOS)
   const client = await loadClient()
   const r = await client.validateTwoFactorCode({
-    email: 'a@b.co', deviceIdentifier: DEVICE,
-    challenge: { accessToken: 'tmp-tok-2fa' }, code: '123456',
+    email: 'a@b.co',
+    deviceIdentifier: DEVICE,
+    challenge: { accessToken: 'tmp-tok-2fa' },
+    code: '123456',
   })
   expect(r.kind).toBe('connected')
   if (r.kind === 'connected') expect(r.grant.refreshToken).toBe('ref-2fa')
@@ -69,13 +89,20 @@ it('validateTwoFactorCode: valid code → returns full grant + accounts', async 
 
 it('validateTwoFactorCode: invalid code → throws', async () => {
   nock(BASE).post('/api/auth/validate-two-factor-code').reply(400, {
-    Success: false, Message: 'Código inválido', HttpStatusCode: 400, IdOperacion: null,
+    Success: false,
+    Message: 'Código inválido',
+    HttpStatusCode: 400,
+    IdOperacion: null,
   })
   const client = await loadClient()
-  await expect(client.validateTwoFactorCode({
-    email: 'a@b.co', deviceIdentifier: DEVICE,
-    challenge: { accessToken: 'tmp-tok-2fa' }, code: '000000',
-  })).rejects.toThrow(/inválid|inv[aá]lido/i)
+  await expect(
+    client.validateTwoFactorCode({
+      email: 'a@b.co',
+      deviceIdentifier: DEVICE,
+      challenge: { accessToken: 'tmp-tok-2fa' },
+      code: '000000',
+    }),
+  ).rejects.toThrow(/inválid|inv[aá]lido/i)
 })
 
 it('connect: needDeviceValidation → starts identity + returns challenge', async () => {
@@ -91,15 +118,22 @@ it('connect: needDeviceValidation → starts identity + returns challenge', asyn
 
 it('validateDevice: valid OTP → re-signs in and returns grant', async () => {
   nock(BASE).post('/api/identity/validate-otp-code/web').reply(200, { isValid: true })
-  nock(BASE).post('/api/auth/sign-in/merchant').reply(200, {
-    signedIn: true, token: 'acc-2', refreshToken: 'ref-2',
-    expiresIn: new Date(Date.now() + 3600e3).toISOString(),
-  })
+  nock(BASE)
+    .post('/api/auth/sign-in/merchant')
+    .reply(200, {
+      signedIn: true,
+      token: 'acc-2',
+      refreshToken: 'ref-2',
+      expiresIn: new Date(Date.now() + 3600e3).toISOString(),
+    })
   nock(BASE).get('/api/auth').reply(200, NEGOCIOS)
   const client = await loadClient()
   const r = await client.validateDevice({
-    email: 'a@b.co', password: 'p', deviceIdentifier: DEVICE,
-    challenge: { accessToken: 'tmp-tok', processId: 'proc-9' }, code: '123456',
+    email: 'a@b.co',
+    password: 'p',
+    deviceIdentifier: DEVICE,
+    challenge: { accessToken: 'tmp-tok', processId: 'proc-9' },
+    code: '123456',
   })
   expect(r.kind).toBe('connected')
   if (r.kind === 'connected') expect(r.grant.refreshToken).toBe('ref-2')
@@ -108,17 +142,26 @@ it('validateDevice: valid OTP → re-signs in and returns grant', async () => {
 it('validateDevice: invalid OTP → throws', async () => {
   nock(BASE).post('/api/identity/validate-otp-code/web').reply(200, { isValid: false })
   const client = await loadClient()
-  await expect(client.validateDevice({
-    email: 'a@b.co', password: 'p', deviceIdentifier: DEVICE,
-    challenge: { accessToken: 'tmp-tok', processId: 'proc-9' }, code: '000000',
-  })).rejects.toThrow(/OTP|código|inválid/i)
+  await expect(
+    client.validateDevice({
+      email: 'a@b.co',
+      password: 'p',
+      deviceIdentifier: DEVICE,
+      challenge: { accessToken: 'tmp-tok', processId: 'proc-9' },
+      code: '000000',
+    }),
+  ).rejects.toThrow(/OTP|código|inválid/i)
 })
 
 it('refresh: silent re-login returns a new (rotated) grant', async () => {
-  nock(BASE).post('/api/auth/sign-in/token').reply(200, {
-    signedIn: true, token: 'acc-3', refreshToken: 'ref-3-rotated',
-    expiresIn: new Date(Date.now() + 3600e3).toISOString(),
-  })
+  nock(BASE)
+    .post('/api/auth/sign-in/token')
+    .reply(200, {
+      signedIn: true,
+      token: 'acc-3',
+      refreshToken: 'ref-3-rotated',
+      expiresIn: new Date(Date.now() + 3600e3).toISOString(),
+    })
   const client = await loadClient()
   const { grant, ctx } = await client.refresh({ refreshToken: 'ref-2' }, DEVICE)
   expect(grant.refreshToken).toBe('ref-3-rotated')

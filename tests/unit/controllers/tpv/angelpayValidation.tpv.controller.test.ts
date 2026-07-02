@@ -13,6 +13,7 @@ import type { NextFunction, Request, Response } from 'express'
 
 import { reportAngelPayMerchantSwitch, reportAngelPayValidation } from '@/controllers/tpv/angelpayValidation.tpv.controller'
 import { markAngelPayUserAccountValidated, recordAngelPayUserAccountError } from '@/services/superadmin/angelpayUserAccount.service'
+import { prismaMock } from '@tests/__helpers__/setup'
 
 jest.mock('@/services/superadmin/angelpayUserAccount.service', () => ({
   markAngelPayUserAccountValidated: jest.fn(),
@@ -47,6 +48,9 @@ describe('POST /tpv/angelpay/report-validation — Task 14', () => {
     jest.clearAllMocks()
     mockedMarkValidated.mockResolvedValue({ id: 'acct-1' })
     mockedRecordError.mockResolvedValue({ id: 'acct-1' })
+    // SECURITY: the controller now scopes accountId to the terminal's venue before
+    // mutating. Default the lookup to an account in the token's venue ('venue-1').
+    prismaMock.angelPayUserAccount.findUnique.mockResolvedValue({ id: 'acct-1', venueId: 'venue-1' } as any)
   })
 
   it('AUTHENTICATED → calls markAngelPayUserAccountValidated and returns 204', async () => {
@@ -141,6 +145,22 @@ describe('POST /tpv/angelpay/report-validation — Task 14', () => {
     const err = (next as jest.Mock).mock.calls[0][0]
     expect(err.statusCode).toBe(400)
     expect(err.message).toMatch(/accountId/)
+  })
+
+  it('SECURITY: rejects an accountId belonging to another venue (no cross-venue write)', async () => {
+    // Account lives in venue-2, but the terminal token is scoped to venue-1.
+    prismaMock.angelPayUserAccount.findUnique.mockResolvedValue({ id: 'acct-x', venueId: 'venue-2' } as any)
+    const req = makeReq({ accountId: 'acct-x', state: 'AUTHENTICATED', externalUserId: 4242 })
+    const res = makeRes()
+    const next = jest.fn() as unknown as NextFunction
+
+    await reportAngelPayValidation(req, res, next)
+
+    expect(mockedMarkValidated).not.toHaveBeenCalled()
+    expect(mockedRecordError).not.toHaveBeenCalled()
+    expect(next).toHaveBeenCalledTimes(1)
+    const err = (next as jest.Mock).mock.calls[0][0]
+    expect(err.statusCode).toBe(403)
   })
 })
 

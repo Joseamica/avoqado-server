@@ -299,6 +299,7 @@ model Venue {
   floorElements         FloorElement[]
   shifts                Shift[]
   timeEntries           TimeEntry[]
+  promoterLocationPings PromoterLocationPing[]
   orders                Order[]
   payments              Payment[]
   transactions          VenueTransaction[]
@@ -682,6 +683,10 @@ model VenueSettings {
   latenessThresholdMinutes Int? // Minutes of tolerance after expectedCheckInTime (null = use org default)
   geofenceRadiusMeters     Int? // Max distance (meters) from venue for valid clock-in (null = use org default)
 
+  // Field-promoter geolocation tracking ("cambaceo"). OFF by default — only venues
+  // explicitly enabled emit/accept periodic location pings. Backend-authoritative gate.
+  trackPromoterLocation Boolean @default(false)
+
   // Auto Clock-Out (HR automation - Square-style)
   autoClockOutEnabled     Boolean @default(false) // Enable automatic clock-out at fixed time
   autoClockOutTime        String? // "HH:mm" format - e.g., "03:00" for 3 AM
@@ -794,6 +799,9 @@ model Staff {
 
   // Time tracking
   timeEntries TimeEntry[]
+
+  // Field-promoter geolocation ("cambaceo" tracking)
+  promoterLocationPings PromoterLocationPing[]
 
   // Role permission management
   modifiedRolePermissions VenueRolePermission[] @relation("ModifiedRolePermissions")
@@ -2337,6 +2345,36 @@ model TimeEntryBreak {
 
   @@index([timeEntryId])
   @@map("time_entry_breaks")
+}
+
+/// Periodic geolocation pings for field promoters selling without a fixed store
+/// ("cambaceo"). Append-only breadcrumb; captured hourly during the venue-local
+/// work window. Distinct from TimeEntry clock-in/out points (single snapshots).
+model PromoterLocationPing {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  staffId String
+  staff   Staff  @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  latitude  Decimal @db.Decimal(10, 8)
+  longitude Decimal @db.Decimal(11, 8)
+  accuracy  Float? // GPS accuracy in meters
+
+  capturedAt DateTime // when the device captured the position (venue-local intent)
+  source     PromoterLocationSource @default(PERIODIC)
+
+  createdAt DateTime @default(now())
+
+  @@index([venueId, staffId, capturedAt])
+  @@index([capturedAt]) // for retention purge (> 90 days)
+  @@map("promoter_location_pings")
+}
+
+enum PromoterLocationSource {
+  PERIODIC
+  CLOCK_IN
+  CLOCK_OUT
 }
 
 model Order {

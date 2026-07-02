@@ -7,10 +7,16 @@ export async function listProviders(_req: Request, res: Response, next: NextFunc
   try {
     const data = await prisma.financialProvider.findMany({ where: { active: true }, orderBy: { name: 'asc' } })
     res.json({ success: true, data })
-  } catch (e) { next(e) }
+  } catch (e) {
+    next(e)
+  }
 }
 export async function listConnections(req: Request, res: Response, next: NextFunction) {
-  try { res.json({ success: true, data: await svc.listConnectionsForVenue(req.params.venueId) }) } catch (e) { next(e) }
+  try {
+    res.json({ success: true, data: await svc.listConnectionsForVenue(req.params.venueId) })
+  } catch (e) {
+    next(e)
+  }
 }
 export async function createConnection(req: Request, res: Response, next: NextFunction) {
   try {
@@ -19,7 +25,9 @@ export async function createConnection(req: Request, res: Response, next: NextFu
     const staffId = (req as any).authContext?.userId
     const r = await svc.startConnection({ venueId: req.params.venueId, providerId, email, password, staffId })
     res.status(201).json({ success: true, data: r })
-  } catch (e) { next(e) }
+  } catch (e) {
+    next(e)
+  }
 }
 
 // Defense-in-depth: :venueId (del path, ya autorizado por checkPermission) debe coincidir
@@ -43,7 +51,9 @@ async function assertAccountBelongsToVenue(financialAccountId: string, venueId: 
 // Sin este guard, cualquier OWNER podría re-apuntar el merchant de OTRO tenant
 // a su propia cuenta bancaria con solo conocer el cuid.
 async function assertMerchantAccountBelongsToVenue(merchantAccountId: string, venueId: string): Promise<void> {
-  const bySlot = { OR: [{ primaryAccountId: merchantAccountId }, { secondaryAccountId: merchantAccountId }, { tertiaryAccountId: merchantAccountId }] }
+  const bySlot = {
+    OR: [{ primaryAccountId: merchantAccountId }, { secondaryAccountId: merchantAccountId }, { tertiaryAccountId: merchantAccountId }],
+  }
   const [venueCfg, terminal, orgCfg] = await Promise.all([
     prisma.venuePaymentConfig.findFirst({ where: { venueId, ...bySlot }, select: { id: true } }),
     prisma.terminal.findFirst({ where: { venueId, assignedMerchantIds: { has: merchantAccountId } }, select: { id: true } }),
@@ -62,7 +72,9 @@ export async function validateDevice(req: Request, res: Response, next: NextFunc
     await assertConnectionBelongsToVenue(req.params.id, req.params.venueId)
     const staffId = (req as any).authContext?.userId
     res.json({ success: true, data: await svc.validateDevice(req.params.id, String(code), staffId) })
-  } catch (e) { next(e) }
+  } catch (e) {
+    next(e)
+  }
 }
 export async function validateTwoFactorAuth(req: Request, res: Response, next: NextFunction) {
   try {
@@ -71,7 +83,9 @@ export async function validateTwoFactorAuth(req: Request, res: Response, next: N
     await assertConnectionBelongsToVenue(req.params.id, req.params.venueId)
     const staffId = (req as any).authContext?.userId
     res.json({ success: true, data: await svc.validateTwoFactorAuth(req.params.id, String(code), staffId) })
-  } catch (e) { next(e) }
+  } catch (e) {
+    next(e)
+  }
 }
 export async function selectAccount(req: Request, res: Response, next: NextFunction) {
   try {
@@ -81,18 +95,24 @@ export async function selectAccount(req: Request, res: Response, next: NextFunct
     if (merchantAccountId) await assertMerchantAccountBelongsToVenue(String(merchantAccountId), req.params.venueId)
     const staffId = (req as any).authContext?.userId
     res.json({ success: true, data: await svc.selectAccount(req.params.id, String(externalId), merchantAccountId, staffId) })
-  } catch (e) { next(e) }
+  } catch (e) {
+    next(e)
+  }
 }
 export async function getBalance(req: Request, res: Response, next: NextFunction) {
   try {
     await assertAccountBelongsToVenue(req.params.id, req.params.venueId)
     res.json({ success: true, data: await svc.getBalanceForConnectionAccount(req.params.id) })
-  } catch (e) { next(e) }
+  } catch (e) {
+    next(e)
+  }
 }
 export async function disconnect(req: Request, res: Response, next: NextFunction) {
   try {
     await assertConnectionBelongsToVenue(req.params.id, req.params.venueId)
     await svc.disconnect(req.params.id, (req as any).authContext?.userId)
     res.json({ success: true })
-  } catch (e) { next(e) }
+  } catch (e) {
+    next(e)
+  }
 }

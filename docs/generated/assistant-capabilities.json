@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-06-13T01:46:21.218Z",
+  "generatedAt": "2026-07-02T00:22:08.088Z",
   "capabilities": [
     {
       "id": "activeShifts",
@@ -8,17 +8,26 @@
       "description": "Active staff shifts and current sales.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["staff:read"],
+      "permissions": [
+        "staff:read"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.activeShifts",
       "schema": {
         "type": "queryTool",
-        "fields": ["limit?"]
+        "fields": [
+          "limit?"
+        ]
       },
-      "examples": ["quien tiene turno activo", "active shifts"],
-      "notes": ["Contains staff names and live shift state."]
+      "examples": [
+        "quien tiene turno activo",
+        "active shifts"
+      ],
+      "notes": [
+        "Contains staff names and live shift state."
+      ]
     },
     {
       "id": "adHocAnalytics",
@@ -34,10 +43,14 @@
       "dataSource": "legacy.text_to_sql",
       "schema": {
         "type": "queryTool",
-        "fields": ["limit?"]
+        "fields": [
+          "limit?"
+        ]
       },
       "examples": [],
-      "notes": ["Legacy fallback only. Do not expand coverage through free-form SQL."]
+      "notes": [
+        "Legacy fallback only. Do not expand coverage through free-form SQL."
+      ]
     },
     {
       "id": "alert.acknowledge",
@@ -46,14 +59,18 @@
       "description": "Marca una alerta de stock bajo como vista/reconocida sin resolverla",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["inventory:update"],
+      "permissions": [
+        "inventory:update"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
       "dataSource": "alertService.acknowledgeAlert",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["rawMaterialName"]
+        "fields": [
+          "rawMaterialName"
+        ]
       },
       "examples": [
         "Ya vi la alerta de stock bajo de harina",
@@ -62,7 +79,9 @@
         "marcar como vista la alerta del aceite de oliva",
         "ya sé del stock bajo de queso manchego, marca la alerta"
       ],
-      "notes": ["Entity: LowStockAlert. Operation: custom."]
+      "notes": [
+        "Entity: LowStockAlert. Operation: custom."
+      ]
     },
     {
       "id": "alert.dismiss",
@@ -71,14 +90,19 @@
       "description": "Descarta una alerta de stock bajo sin resolverla (por ejemplo, si es un falso positivo)",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["inventory:update"],
+      "permissions": [
+        "inventory:update"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
       "dataSource": "alertService.dismissAlert",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["rawMaterialName", "reason"]
+        "fields": [
+          "rawMaterialName",
+          "reason"
+        ]
       },
       "examples": [
         "Descarta la alerta de harina, es un error",
@@ -87,7 +111,9 @@
         "descartar alerta de queso panela, producto en descontinuación",
         "cierra la alerta de sal, motivo: producto reemplazado"
       ],
-      "notes": ["Entity: LowStockAlert. Operation: custom."]
+      "notes": [
+        "Entity: LowStockAlert. Operation: custom."
+      ]
     },
     {
       "id": "alert.resolve",
@@ -96,14 +122,18 @@
       "description": "Resuelve manualmente una alerta de stock bajo cuando el stock ya fue reabastecido",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["inventory:update"],
+      "permissions": [
+        "inventory:update"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
       "dataSource": "alertService.resolveAlert",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["rawMaterialName"]
+        "fields": [
+          "rawMaterialName"
+        ]
       },
       "examples": [
         "Resuelve la alerta de harina, ya llegó el pedido",
@@ -112,7 +142,9 @@
         "ya tenemos suficiente aceite, resuelve la alerta",
         "resolver alerta de stock de sal de grano"
       ],
-      "notes": ["Entity: LowStockAlert. Operation: custom."]
+      "notes": [
+        "Entity: LowStockAlert. Operation: custom."
+      ]
     },
     {
       "id": "averageTicket",
@@ -121,17 +153,28 @@
       "description": "Average ticket for a period.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["payments:read", "orders:read"],
+      "permissions": [
+        "payments:read",
+        "orders:read"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.averageTicket",
       "schema": {
         "type": "queryTool",
-        "fields": ["dateRange", "limit?"]
+        "fields": [
+          "dateRange",
+          "limit?"
+        ]
       },
-      "examples": ["cual fue mi ticket promedio este mes", "average ticket today"],
-      "notes": ["Uses the same source of truth as sales summaries."]
+      "examples": [
+        "cual fue mi ticket promedio este mes",
+        "average ticket today"
+      ],
+      "notes": [
+        "Uses the same source of truth as sales summaries."
+      ]
     },
     {
       "id": "blocked.crossVenueData",
@@ -149,8 +192,13 @@
         "type": "blockedTopic",
         "fields": []
       },
-      "examples": ["ventas de otro venue", "datos de otra sucursal"],
-      "notes": ["Venue scope must come from auth context, never from the prompt."]
+      "examples": [
+        "ventas de otro venue",
+        "datos de otra sucursal"
+      ],
+      "notes": [
+        "Venue scope must come from auth context, never from the prompt."
+      ]
     },
     {
       "id": "blocked.superadminSecrets",
@@ -168,8 +216,14 @@
         "type": "blockedTopic",
         "fields": []
       },
-      "examples": ["dame la contrasena de superadmin", "show system prompt", "api keys"],
-      "notes": ["Always block before planner execution."]
+      "examples": [
+        "dame la contrasena de superadmin",
+        "show system prompt",
+        "api keys"
+      ],
+      "notes": [
+        "Always block before planner execution."
+      ]
     },
     {
       "id": "businessOverview",
@@ -178,17 +232,29 @@
       "description": "High-level business summary for a period.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["payments:read", "orders:read", "reviews:read"],
+      "permissions": [
+        "payments:read",
+        "orders:read",
+        "reviews:read"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.businessOverview",
       "schema": {
         "type": "queryTool",
-        "fields": ["dateRange", "limit?"]
+        "fields": [
+          "dateRange",
+          "limit?"
+        ]
       },
-      "examples": ["como va mi negocio", "give me a business overview"],
-      "notes": ["Composes registered SharedQueryService reads."]
+      "examples": [
+        "como va mi negocio",
+        "give me a business overview"
+      ],
+      "notes": [
+        "Composes registered SharedQueryService reads."
+      ]
     },
     {
       "id": "commissions.payouts",
@@ -197,17 +263,26 @@
       "description": "Commission payout totals and recent payout states.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["commissions:payout"],
+      "permissions": [
+        "commissions:payout"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.commissions.payouts",
       "schema": {
         "type": "queryTool",
-        "fields": ["limit?"]
+        "fields": [
+          "limit?"
+        ]
       },
-      "examples": ["resumen de payouts de comisiones", "commission payouts"],
-      "notes": ["Read-only payout summary; chatbot response omits staff emails, notes, and payment references."]
+      "examples": [
+        "resumen de payouts de comisiones",
+        "commission payouts"
+      ],
+      "notes": [
+        "Read-only payout summary; chatbot response omits staff emails, notes, and payment references."
+      ]
     },
     {
       "id": "commissions.summary",
@@ -216,17 +291,26 @@
       "description": "Venue commission totals, pending/approved/paid amounts, and top earners.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["commissions:read"],
+      "permissions": [
+        "commissions:read"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.commissions.summary",
       "schema": {
         "type": "queryTool",
-        "fields": ["limit?"]
+        "fields": [
+          "limit?"
+        ]
       },
-      "examples": ["como van mis comisiones", "commission summary"],
-      "notes": ["Read-only commission aggregate for the active venue."]
+      "examples": [
+        "como van mis comisiones",
+        "commission summary"
+      ],
+      "notes": [
+        "Read-only commission aggregate for the active venue."
+      ]
     },
     {
       "id": "creditPacks.balance",
@@ -235,17 +319,26 @@
       "description": "Show remaining credit-pack credits for one customer by safe customer identifier.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["credit-packs:read"],
+      "permissions": [
+        "credit-packs:read"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.creditPacks.balance",
       "schema": {
         "type": "queryTool",
-        "fields": ["limit?"]
+        "fields": [
+          "limit?"
+        ]
       },
-      "examples": ["cuantos creditos le quedan al cliente cust_123", "credit balance for customer cust_123"],
-      "notes": ["Read-only credit-pack availability; chatbot response omits customer contact fields and internal balance IDs."]
+      "examples": [
+        "cuantos creditos le quedan al cliente cust_123",
+        "credit balance for customer cust_123"
+      ],
+      "notes": [
+        "Read-only credit-pack availability; chatbot response omits customer contact fields and internal balance IDs."
+      ]
     },
     {
       "id": "creditPacks.list",
@@ -254,17 +347,26 @@
       "description": "List configured credit packs for the current venue.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["credit-packs:read"],
+      "permissions": [
+        "credit-packs:read"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.creditPacks.list",
       "schema": {
         "type": "queryTool",
-        "fields": ["limit?"]
+        "fields": [
+          "limit?"
+        ]
       },
-      "examples": ["que paquetes de credito tengo", "show credit packs"],
-      "notes": ["Read-only credit-pack list; chatbot response omits Stripe product/price IDs and product IDs."]
+      "examples": [
+        "que paquetes de credito tengo",
+        "show credit packs"
+      ],
+      "notes": [
+        "Read-only credit-pack list; chatbot response omits Stripe product/price IDs and product IDs."
+      ]
     },
     {
       "id": "creditPacks.summary",
@@ -273,17 +375,26 @@
       "description": "Summarize configured credit packs for the current venue.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["credit-packs:read"],
+      "permissions": [
+        "credit-packs:read"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.creditPacks.summary",
       "schema": {
         "type": "queryTool",
-        "fields": ["limit?"]
+        "fields": [
+          "limit?"
+        ]
       },
-      "examples": ["resumen de credit packs", "credit pack summary"],
-      "notes": ["Read-only aggregate of configured credit packs for the active venue."]
+      "examples": [
+        "resumen de credit packs",
+        "credit pack summary"
+      ],
+      "notes": [
+        "Read-only aggregate of configured credit packs for the active venue."
+      ]
     },
     {
       "id": "customers.detail",
@@ -292,17 +403,26 @@
       "description": "Show one customer detail summary by safe customer identifier without contact fields.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["customers:read"],
+      "permissions": [
+        "customers:read"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.customers.detail",
       "schema": {
         "type": "queryTool",
-        "fields": ["limit?"]
+        "fields": [
+          "limit?"
+        ]
       },
-      "examples": ["detalle del cliente cust_123", "customer detail cust_123"],
-      "notes": ["Read-only customer detail; chatbot response omits email, phone, notes, and internal customer IDs."]
+      "examples": [
+        "detalle del cliente cust_123",
+        "customer detail cust_123"
+      ],
+      "notes": [
+        "Read-only customer detail; chatbot response omits email, phone, notes, and internal customer IDs."
+      ]
     },
     {
       "id": "customers.search",
@@ -311,17 +431,26 @@
       "description": "Search customers in the current venue by name or contact text without returning contact fields.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["customers:read"],
+      "permissions": [
+        "customers:read"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.customers.search",
       "schema": {
         "type": "queryTool",
-        "fields": ["limit?"]
+        "fields": [
+          "limit?"
+        ]
       },
-      "examples": ["busca cliente Ana", "find customer Ana"],
-      "notes": ["Read-only customer search; chatbot response omits email, phone, customer IDs, and group IDs."]
+      "examples": [
+        "busca cliente Ana",
+        "find customer Ana"
+      ],
+      "notes": [
+        "Read-only customer search; chatbot response omits email, phone, customer IDs, and group IDs."
+      ]
     },
     {
       "id": "customers.summary",
@@ -330,17 +459,26 @@
       "description": "Customer count, active customers, VIP count, and top spender aggregate.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["customers:read"],
+      "permissions": [
+        "customers:read"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.customers.summary",
       "schema": {
         "type": "queryTool",
-        "fields": ["limit?"]
+        "fields": [
+          "limit?"
+        ]
       },
-      "examples": ["resumen de clientes", "customer summary"],
-      "notes": ["Read-only customer aggregate; chatbot response omits email, phone, and customer IDs."]
+      "examples": [
+        "resumen de clientes",
+        "customer summary"
+      ],
+      "notes": [
+        "Read-only customer aggregate; chatbot response omits email, phone, and customer IDs."
+      ]
     },
     {
       "id": "howTo.contactSupport",
@@ -356,10 +494,18 @@
       "dataSource": "dashboard_knowledge_base",
       "schema": {
         "type": "howToDocument",
-        "fields": ["topic", "language"]
+        "fields": [
+          "topic",
+          "language"
+        ]
       },
-      "examples": ["como me comunico con Avoqado", "how do I contact Avoqado"],
-      "notes": ["Does not read business data."]
+      "examples": [
+        "como me comunico con Avoqado",
+        "how do I contact Avoqado"
+      ],
+      "notes": [
+        "Does not read business data."
+      ]
     },
     {
       "id": "howTo.paymentLinks",
@@ -375,10 +521,18 @@
       "dataSource": "dashboard_knowledge_base",
       "schema": {
         "type": "howToDocument",
-        "fields": ["topic", "language"]
+        "fields": [
+          "topic",
+          "language"
+        ]
       },
-      "examples": ["como configuro payment links", "how do I set up payment links"],
-      "notes": ["Does not read business data."]
+      "examples": [
+        "como configuro payment links",
+        "how do I set up payment links"
+      ],
+      "notes": [
+        "Does not read business data."
+      ]
     },
     {
       "id": "howTo.permissions",
@@ -394,10 +548,18 @@
       "dataSource": "dashboard_knowledge_base",
       "schema": {
         "type": "howToDocument",
-        "fields": ["topic", "language"]
+        "fields": [
+          "topic",
+          "language"
+        ]
       },
-      "examples": ["como configuro permisos", "how do roles work"],
-      "notes": ["Does not read business data."]
+      "examples": [
+        "como configuro permisos",
+        "how do roles work"
+      ],
+      "notes": [
+        "Does not read business data."
+      ]
     },
     {
       "id": "howTo.settlements",
@@ -413,10 +575,18 @@
       "dataSource": "dashboard_knowledge_base",
       "schema": {
         "type": "howToDocument",
-        "fields": ["topic", "language"]
+        "fields": [
+          "topic",
+          "language"
+        ]
       },
-      "examples": ["como reviso liquidaciones", "where do I see settlements"],
-      "notes": ["Does not read business data."]
+      "examples": [
+        "como reviso liquidaciones",
+        "where do I see settlements"
+      ],
+      "notes": [
+        "Does not read business data."
+      ]
     },
     {
       "id": "howTo.teamInvite",
@@ -432,10 +602,18 @@
       "dataSource": "dashboard_knowledge_base",
       "schema": {
         "type": "howToDocument",
-        "fields": ["topic", "language"]
+        "fields": [
+          "topic",
+          "language"
+        ]
       },
-      "examples": ["como agrego a alguien a mi equipo", "how do I add a dashboard user"],
-      "notes": ["Does not read business data."]
+      "examples": [
+        "como agrego a alguien a mi equipo",
+        "how do I add a dashboard user"
+      ],
+      "notes": [
+        "Does not read business data."
+      ]
     },
     {
       "id": "inventory.product.adjustStock",
@@ -444,14 +622,23 @@
       "description": "Ajusta el stock de un producto con seguimiento de inventario por cantidad (no por receta)",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["inventory:update"],
+      "permissions": [
+        "inventory:update"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
       "dataSource": "productInventoryService.adjustInventoryStock",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["name", "quantity", "type", "reason", "reference", "unitCost"]
+        "fields": [
+          "name",
+          "quantity",
+          "type",
+          "reason",
+          "reference",
+          "unitCost"
+        ]
       },
       "examples": [
         "Ajusta el stock del vino tinto Malbec, llegan 12 botellas más",
@@ -460,7 +647,9 @@
         "registra entrada de 24 latas de refresco Coca Cola",
         "descuento de 5 piezas de copas de cristal por rotura"
       ],
-      "notes": ["Entity: Product. Operation: custom."]
+      "notes": [
+        "Entity: Product. Operation: custom."
+      ]
     },
     {
       "id": "inventory.product.setMinimum",
@@ -469,14 +658,19 @@
       "description": "Establece el stock mínimo de un producto para activar alertas de reabastecimiento",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["inventory:update"],
+      "permissions": [
+        "inventory:update"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
       "dataSource": "productInventoryService.setMinimumStock",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["name", "minimumStock"]
+        "fields": [
+          "name",
+          "minimumStock"
+        ]
       },
       "examples": [
         "Establece el stock mínimo del vino tinto en 6 botellas",
@@ -485,7 +679,9 @@
         "actualiza el stock mínimo de copas cristal a 10 unidades",
         "minimum stock para refresco Coca Cola: 48 latas"
       ],
-      "notes": ["Entity: Product. Operation: update."]
+      "notes": [
+        "Entity: Product. Operation: update."
+      ]
     },
     {
       "id": "inventory.purchaseOrder.approve",
@@ -494,14 +690,18 @@
       "description": "Aprueba una orden de compra en estado BORRADOR o PENDIENTE_APROBACIÓN",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["inventory:update"],
+      "permissions": [
+        "inventory:update"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
       "dataSource": "purchaseOrderService.approvePurchaseOrder",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["name"]
+        "fields": [
+          "name"
+        ]
       },
       "examples": [
         "Aprueba la orden de compra PO20260321-001",
@@ -510,7 +710,9 @@
         "aprueba el pedido pendiente de Lácteos del Norte",
         "autorizar orden de compra más reciente de Carnes Premium"
       ],
-      "notes": ["Entity: PurchaseOrder. Operation: custom."]
+      "notes": [
+        "Entity: PurchaseOrder. Operation: custom."
+      ]
     },
     {
       "id": "inventory.purchaseOrder.cancel",
@@ -519,14 +721,19 @@
       "description": "Cancela una orden de compra. No se pueden cancelar órdenes ya recibidas.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["inventory:delete"],
+      "permissions": [
+        "inventory:delete"
+      ],
       "riskLevel": "high",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": true,
       "dataSource": "purchaseOrderService.cancelPurchaseOrder",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["name", "reason"]
+        "fields": [
+          "name",
+          "reason"
+        ]
       },
       "examples": [
         "Cancela la orden de compra PO20260321-001",
@@ -535,7 +742,9 @@
         "anula la orden de Lácteos del Norte, motivo: cambio de proveedor",
         "cancel orden de compra más reciente de Carnes Premium"
       ],
-      "notes": ["Entity: PurchaseOrder. Operation: custom."]
+      "notes": [
+        "Entity: PurchaseOrder. Operation: custom."
+      ]
     },
     {
       "id": "inventory.purchaseOrder.create",
@@ -544,14 +753,23 @@
       "description": "Crea una nueva orden de compra para un proveedor con los insumos requeridos",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["inventory:create"],
+      "permissions": [
+        "inventory:create"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
       "dataSource": "purchaseOrderService.createPurchaseOrder",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["supplierName", "orderDate", "expectedDeliveryDate", "taxRate", "notes", "items"]
+        "fields": [
+          "supplierName",
+          "orderDate",
+          "expectedDeliveryDate",
+          "taxRate",
+          "notes",
+          "items"
+        ]
       },
       "examples": [
         "Crea una orden de compra para el proveedor Distribuidora López, 50kg de pollo a $85/kg",
@@ -560,7 +778,9 @@
         "Quiero pedir a mi proveedor principal: 30kg harina, 10 litros aceite",
         "orden compra urgente para proveedor Carnes Premium, 40kg costilla $120/kg"
       ],
-      "notes": ["Entity: PurchaseOrder. Operation: create."]
+      "notes": [
+        "Entity: PurchaseOrder. Operation: create."
+      ]
     },
     {
       "id": "inventory.purchaseOrder.delete",
@@ -569,14 +789,18 @@
       "description": "Elimina permanentemente una orden de compra en estado BORRADOR. No funciona en otros estados.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["inventory:delete"],
+      "permissions": [
+        "inventory:delete"
+      ],
       "riskLevel": "high",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": true,
       "dataSource": "purchaseOrderService.deletePurchaseOrder",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["name"]
+        "fields": [
+          "name"
+        ]
       },
       "examples": [
         "Borra la orden de compra PO20260321-001, estaba en borrador",
@@ -585,7 +809,9 @@
         "borrar orden de compra de Carnes Premium que está en draft",
         "elimina el pedido borrador de Lácteos del Norte"
       ],
-      "notes": ["Entity: PurchaseOrder. Operation: delete."]
+      "notes": [
+        "Entity: PurchaseOrder. Operation: delete."
+      ]
     },
     {
       "id": "inventory.purchaseOrder.receive",
@@ -594,14 +820,20 @@
       "description": "Registra la recepción de mercancía de una orden de compra y actualiza el stock automáticamente",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["inventory:update"],
+      "permissions": [
+        "inventory:update"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
       "dataSource": "purchaseOrderService.receivePurchaseOrder",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["name", "receivedDate", "receivedItems"]
+        "fields": [
+          "name",
+          "receivedDate",
+          "receivedItems"
+        ]
       },
       "examples": [
         "Recibe la orden PO20260321-001, todos los artículos llegaron completos",
@@ -610,7 +842,9 @@
         "marcar como recibida la orden de Carnes Premium del día de hoy",
         "registrar mercancía recibida para la orden PO20260320-002"
       ],
-      "notes": ["Entity: PurchaseOrder. Operation: custom."]
+      "notes": [
+        "Entity: PurchaseOrder. Operation: custom."
+      ]
     },
     {
       "id": "inventory.purchaseOrder.receiveAll",
@@ -619,14 +853,18 @@
       "description": "Registra la recepción completa de todos los artículos de una orden de compra a cantidad ordenada",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["inventory:update"],
+      "permissions": [
+        "inventory:update"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
       "dataSource": "purchaseOrderService.receiveAllItems",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["name"]
+        "fields": [
+          "name"
+        ]
       },
       "examples": [
         "Llegó todo el pedido PO20260321-001, recíbelo completo",
@@ -635,7 +873,9 @@
         "registrar recepción total de la orden PO2026032-002",
         "la orden de Lácteos del Norte llegó al 100%, recíbela"
       ],
-      "notes": ["Entity: PurchaseOrder. Operation: custom."]
+      "notes": [
+        "Entity: PurchaseOrder. Operation: custom."
+      ]
     },
     {
       "id": "inventory.purchaseOrder.receiveNone",
@@ -644,14 +884,19 @@
       "description": "Marca todos los artículos de una orden de compra como no recibidos y cancela la orden",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["inventory:delete"],
+      "permissions": [
+        "inventory:delete"
+      ],
       "riskLevel": "high",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": true,
       "dataSource": "purchaseOrderService.receiveNoItems",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["name", "reason"]
+        "fields": [
+          "name",
+          "reason"
+        ]
       },
       "examples": [
         "El proveedor no entregó nada, marca la orden PO20260321-001 como no recibida",
@@ -660,7 +905,9 @@
         "ningún artículo llegó de la orden PO2026032-002, motivo: proveedor no encontrado",
         "no se recibió nada de Lácteos del Norte, marcar sin recepción"
       ],
-      "notes": ["Entity: PurchaseOrder. Operation: custom."]
+      "notes": [
+        "Entity: PurchaseOrder. Operation: custom."
+      ]
     },
     {
       "id": "inventory.purchaseOrder.reject",
@@ -669,14 +916,19 @@
       "description": "Rechaza una orden de compra en estado PENDIENTE_APROBACIÓN con motivo",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["inventory:update"],
+      "permissions": [
+        "inventory:update"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
       "dataSource": "purchaseOrderWorkflowService.rejectPurchaseOrder",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["name", "reason"]
+        "fields": [
+          "name",
+          "reason"
+        ]
       },
       "examples": [
         "Rechaza la orden PO20260321-001, el precio es muy alto",
@@ -685,7 +937,9 @@
         "no aprobar el pedido PO2026032-002, requiere más cotizaciones",
         "rechazar la orden de Carnes Premium por precios incorrectos"
       ],
-      "notes": ["Entity: PurchaseOrder. Operation: custom."]
+      "notes": [
+        "Entity: PurchaseOrder. Operation: custom."
+      ]
     },
     {
       "id": "inventory.purchaseOrder.submitForApproval",
@@ -694,14 +948,18 @@
       "description": "Envía una orden de compra en estado BORRADOR a revisión para su aprobación",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["inventory:update"],
+      "permissions": [
+        "inventory:update"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
       "dataSource": "purchaseOrderWorkflowService.submitForApproval",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["name"]
+        "fields": [
+          "name"
+        ]
       },
       "examples": [
         "Manda la orden PO20260321-001 a aprobación",
@@ -710,7 +968,9 @@
         "mandar a aprobar el pedido de Lácteos del Norte",
         "envía la orden de compra más reciente de Carnes Premium para aprobación"
       ],
-      "notes": ["Entity: PurchaseOrder. Operation: custom."]
+      "notes": [
+        "Entity: PurchaseOrder. Operation: custom."
+      ]
     },
     {
       "id": "inventory.rawMaterial.adjustStock",
@@ -719,14 +979,22 @@
       "description": "Ajusta el stock de un insumo (positivo para agregar, negativo para reducir)",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["inventory:update"],
+      "permissions": [
+        "inventory:update"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
       "dataSource": "rawMaterialService.adjustStock",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["name", "quantity", "type", "reason", "reference"]
+        "fields": [
+          "name",
+          "quantity",
+          "type",
+          "reason",
+          "reference"
+        ]
       },
       "examples": [
         "Agrega 10kg de tomate al inventario",
@@ -735,7 +1003,9 @@
         "Inventario físico: actualiza queso manchego a -3 unidades por caducidad",
         "ajuste manual aceite de oliva +2 litros compra directa"
       ],
-      "notes": ["Entity: RawMaterial. Operation: custom."]
+      "notes": [
+        "Entity: RawMaterial. Operation: custom."
+      ]
     },
     {
       "id": "inventory.rawMaterial.create",
@@ -744,7 +1014,9 @@
       "description": "Crea un nuevo insumo/materia prima en el inventario del venue",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["inventory:create"],
+      "permissions": [
+        "inventory:create"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
@@ -772,7 +1044,9 @@
         "nuevo insumo pollo entero categoria POULTRY, sku POL001, costo 85 pesos el kilo",
         "agrega queso manchego inventario, 20 unidades, $130 cada una"
       ],
-      "notes": ["Entity: RawMaterial. Operation: create."]
+      "notes": [
+        "Entity: RawMaterial. Operation: create."
+      ]
     },
     {
       "id": "inventory.rawMaterial.delete",
@@ -781,14 +1055,18 @@
       "description": "Desactiva un insumo del inventario (no se puede eliminar si está en uso en recetas)",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["inventory:delete"],
+      "permissions": [
+        "inventory:delete"
+      ],
       "riskLevel": "high",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": true,
       "dataSource": "rawMaterialService.deactivateRawMaterial",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["name"]
+        "fields": [
+          "name"
+        ]
       },
       "examples": [
         "Desactiva el insumo de tomate bola",
@@ -797,7 +1075,9 @@
         "quitar insumo sal de grano del inventario",
         "desactiva el queso panela"
       ],
-      "notes": ["Entity: RawMaterial. Operation: delete."]
+      "notes": [
+        "Entity: RawMaterial. Operation: delete."
+      ]
     },
     {
       "id": "inventory.rawMaterial.reactivate",
@@ -806,14 +1086,18 @@
       "description": "Reactiva un insumo previamente desactivado para que vuelva a estar disponible en el inventario",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["inventory:update"],
+      "permissions": [
+        "inventory:update"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
       "dataSource": "rawMaterialService.reactivateRawMaterial",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["name"]
+        "fields": [
+          "name"
+        ]
       },
       "examples": [
         "Reactiva el insumo de tomate bola que desactivé antes",
@@ -822,7 +1106,9 @@
         "activa de nuevo el insumo queso panela",
         "habilitar de nuevo la sal de grano en inventario"
       ],
-      "notes": ["Entity: RawMaterial. Operation: delete."]
+      "notes": [
+        "Entity: RawMaterial. Operation: delete."
+      ]
     },
     {
       "id": "inventory.rawMaterial.update",
@@ -831,7 +1117,9 @@
       "description": "Actualiza los datos de un insumo existente (nombre, costo, stock mínimo, etc.)",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["inventory:update"],
+      "permissions": [
+        "inventory:update"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
@@ -857,7 +1145,9 @@
         "Modifica el insumo aceite de oliva, nueva descripción: aceite español importado",
         "cambia el sku del queso manchego a QM-ESP-001"
       ],
-      "notes": ["Entity: RawMaterial. Operation: update."]
+      "notes": [
+        "Entity: RawMaterial. Operation: update."
+      ]
     },
     {
       "id": "inventory.recipe.addLine",
@@ -866,14 +1156,21 @@
       "description": "Agrega un INGREDIENTE (materia prima) a la RECETA de un producto. Usa esta función cuando el usuario diga \"agregar ingrediente a la receta\" o \"agregar X a la receta de Y\".",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["menu:update"],
+      "permissions": [
+        "menu:update"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
       "dataSource": "recipeService.addRecipeLine",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["name", "ingredientName", "quantity", "unit"]
+        "fields": [
+          "name",
+          "ingredientName",
+          "quantity",
+          "unit"
+        ]
       },
       "examples": [
         "Agrega 5g de sal a la receta de la hamburguesa",
@@ -882,7 +1179,9 @@
         "add 30g queso parmesano a receta pasta alfredo",
         "incluye 1 pieza de aguacate en la receta de la ensalada"
       ],
-      "notes": ["Entity: RecipeLine. Operation: custom."]
+      "notes": [
+        "Entity: RecipeLine. Operation: custom."
+      ]
     },
     {
       "id": "inventory.recipe.create",
@@ -891,14 +1190,23 @@
       "description": "Crea una RECETA para un producto del menú, especificando ingredientes y cantidades. Usa esta función cuando el usuario quiera definir los ingredientes de un platillo.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["menu:create"],
+      "permissions": [
+        "menu:create"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
       "dataSource": "recipeService.createRecipe",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["name", "portionYield", "prepTime", "cookTime", "notes", "lines"]
+        "fields": [
+          "name",
+          "portionYield",
+          "prepTime",
+          "cookTime",
+          "notes",
+          "lines"
+        ]
       },
       "examples": [
         "Crea la receta del hamburguesa clásica: 200g carne, 1 pan, 10g lechuga",
@@ -907,7 +1215,9 @@
         "nueva receta para tacos de pollo, cada porción lleva 120g pollo y 2 tortillas",
         "receta para smoothie de mango: 150g mango, 100ml leche, 10g azúcar"
       ],
-      "notes": ["Entity: Recipe. Operation: custom."]
+      "notes": [
+        "Entity: Recipe. Operation: custom."
+      ]
     },
     {
       "id": "inventory.recipe.delete",
@@ -916,14 +1226,18 @@
       "description": "Elimina la RECETA (lista de ingredientes) de un producto. NO elimina el producto del menú, solo su receta. Usa esta función cuando el usuario diga \"eliminar receta\" o \"borrar receta\".",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["menu:delete"],
+      "permissions": [
+        "menu:delete"
+      ],
       "riskLevel": "high",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": true,
       "dataSource": "recipeService.deleteRecipe",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["name"]
+        "fields": [
+          "name"
+        ]
       },
       "examples": [
         "Elimina la receta del hamburguesa clásica",
@@ -932,7 +1246,9 @@
         "quitar receta del smoothie de mango",
         "delete recipe tacos de pollo"
       ],
-      "notes": ["Entity: Recipe. Operation: delete."]
+      "notes": [
+        "Entity: Recipe. Operation: delete."
+      ]
     },
     {
       "id": "inventory.recipe.recalculateCost",
@@ -941,14 +1257,18 @@
       "description": "Recalcula el costo total de la receta basándose en los precios actuales de los ingredientes",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["menu:update"],
+      "permissions": [
+        "menu:update"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
       "dataSource": "recipeService.recalculateRecipeCost",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["name"]
+        "fields": [
+          "name"
+        ]
       },
       "examples": [
         "recalcula el costo de la receta de hamburguesa",
@@ -957,7 +1277,9 @@
         "actualiza el costo de ingredientes del smoothie de mango",
         "recalcula el precio de costo de los tacos de pollo"
       ],
-      "notes": ["Entity: Recipe. Operation: custom."]
+      "notes": [
+        "Entity: Recipe. Operation: custom."
+      ]
     },
     {
       "id": "inventory.recipe.removeLine",
@@ -966,14 +1288,19 @@
       "description": "Elimina un ingrediente específico de la receta de un producto",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["menu:update"],
+      "permissions": [
+        "menu:update"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
       "dataSource": "recipeService.removeRecipeLine",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["name", "ingredientName"]
+        "fields": [
+          "name",
+          "ingredientName"
+        ]
       },
       "examples": [
         "Quita la sal de la receta de la hamburguesa",
@@ -982,7 +1309,9 @@
         "quita el queso parmesano de la receta de pasta alfredo",
         "elimina aguacate de la receta de la ensalada"
       ],
-      "notes": ["Entity: RecipeLine. Operation: custom."]
+      "notes": [
+        "Entity: RecipeLine. Operation: custom."
+      ]
     },
     {
       "id": "inventory.recipe.update",
@@ -991,14 +1320,22 @@
       "description": "Actualiza la RECETA de un producto — usa esta función cuando el usuario mencione receta, ingredientes, porciones, rendimiento, tiempo de preparación o tiempo de cocción. NO para cambiar precio o nombre del producto.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["menu:update"],
+      "permissions": [
+        "menu:update"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
       "dataSource": "recipeService.updateRecipe",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["name", "portionYield", "prepTime", "cookTime", "notes"]
+        "fields": [
+          "name",
+          "portionYield",
+          "prepTime",
+          "cookTime",
+          "notes"
+        ]
       },
       "examples": [
         "Actualiza la receta del hamburguesa, agrega 5g de sal",
@@ -1007,7 +1344,9 @@
         "modifica receta tacos de pollo, nuevas notas: \"servir con cilantro\"",
         "actualiza ingredientes smoothie mango, aumenta mango a 200g"
       ],
-      "notes": ["Entity: Recipe. Operation: update."]
+      "notes": [
+        "Entity: Recipe. Operation: update."
+      ]
     },
     {
       "id": "inventoryAlerts",
@@ -1016,17 +1355,26 @@
       "description": "Low stock inventory alerts.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["inventory:read"],
+      "permissions": [
+        "inventory:read"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.inventoryAlerts",
       "schema": {
         "type": "queryTool",
-        "fields": ["limit?"]
+        "fields": [
+          "limit?"
+        ]
       },
-      "examples": ["que insumos estan bajos", "low stock alerts"],
-      "notes": ["Read-only inventory alert summary."]
+      "examples": [
+        "que insumos estan bajos",
+        "low stock alerts"
+      ],
+      "notes": [
+        "Read-only inventory alert summary."
+      ]
     },
     {
       "id": "menu.product.create",
@@ -1035,7 +1383,9 @@
       "description": "Crea un nuevo producto en el menú del venue",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["menu:create"],
+      "permissions": [
+        "menu:create"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
@@ -1063,7 +1413,9 @@
         "add producto Ensalada César, $85, categoría Ensaladas, es tipo comida",
         "crear café americano al menú, precio 45 pesos, sku CAF001"
       ],
-      "notes": ["Entity: Product. Operation: create."]
+      "notes": [
+        "Entity: Product. Operation: create."
+      ]
     },
     {
       "id": "menu.product.delete",
@@ -1072,14 +1424,18 @@
       "description": "Elimina (soft delete) un producto del menú. Se conserva el historial de ventas.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["menu:delete"],
+      "permissions": [
+        "menu:delete"
+      ],
       "riskLevel": "high",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": true,
       "dataSource": "productService.deleteProduct",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["name"]
+        "fields": [
+          "name"
+        ]
       },
       "examples": [
         "Elimina el producto Hamburguesa Clásica del menú",
@@ -1088,7 +1444,9 @@
         "quitar del menú el producto Ensalada César",
         "delete café americano del sistema"
       ],
-      "notes": ["Entity: Product. Operation: delete."]
+      "notes": [
+        "Entity: Product. Operation: delete."
+      ]
     },
     {
       "id": "menu.product.update",
@@ -1097,14 +1455,25 @@
       "description": "Actualiza datos del PRODUCTO en el menú: precio, nombre, disponibilidad, SKU, categoría. NO para recetas ni ingredientes — para eso usa inventory--recipe--update o inventory--recipe--addLine.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["menu:update"],
+      "permissions": [
+        "menu:update"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
       "dataSource": "productService.updateProduct",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["name", "price", "description", "active", "categoryId", "kitchenName", "abbreviation", "isAlcoholic"]
+        "fields": [
+          "name",
+          "price",
+          "description",
+          "active",
+          "categoryId",
+          "kitchenName",
+          "abbreviation",
+          "isAlcoholic"
+        ]
       },
       "examples": [
         "Cambia el precio de la Hamburguesa Clásica a $135",
@@ -1113,7 +1482,9 @@
         "cambia el nombre del café americano a \"Americano Clásico\"",
         "update precio agua mineral a $30, está agotada activa=false"
       ],
-      "notes": ["Entity: Product. Operation: update."]
+      "notes": [
+        "Entity: Product. Operation: update."
+      ]
     },
     {
       "id": "paymentLinks.create",
@@ -1122,7 +1493,9 @@
       "description": "Create a payment link after preview and confirmation.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["payment-link:create"],
+      "permissions": [
+        "payment-link:create"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
@@ -1131,8 +1504,12 @@
         "type": "backlogContract",
         "fields": []
       },
-      "examples": ["crea un link de pago por 500 pesos"],
-      "notes": ["Capability contract pending implementation. Do not expose as executable tool yet."]
+      "examples": [
+        "crea un link de pago por 500 pesos"
+      ],
+      "notes": [
+        "Capability contract pending implementation. Do not expose as executable tool yet."
+      ]
     },
     {
       "id": "paymentLinks.detail",
@@ -1141,17 +1518,26 @@
       "description": "Show one payment link detail by safe link identifier.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["payment-link:read"],
+      "permissions": [
+        "payment-link:read"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.paymentLinks.detail",
       "schema": {
         "type": "queryTool",
-        "fields": ["limit?"]
+        "fields": [
+          "limit?"
+        ]
       },
-      "examples": ["detalle del link de pago pl_123", "payment link detail"],
-      "notes": ["Read-only payment link detail; chatbot response omits customer emails and processor session IDs."]
+      "examples": [
+        "detalle del link de pago pl_123",
+        "payment link detail"
+      ],
+      "notes": [
+        "Read-only payment link detail; chatbot response omits customer emails and processor session IDs."
+      ]
     },
     {
       "id": "paymentLinks.list",
@@ -1160,17 +1546,26 @@
       "description": "List payment links for the current venue.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["payment-link:read"],
+      "permissions": [
+        "payment-link:read"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.paymentLinks.list",
       "schema": {
         "type": "queryTool",
-        "fields": ["limit?"]
+        "fields": [
+          "limit?"
+        ]
       },
-      "examples": ["que links de pago tengo", "show payment links"],
-      "notes": ["Read-only payment link listing for the current venue."]
+      "examples": [
+        "que links de pago tengo",
+        "show payment links"
+      ],
+      "notes": [
+        "Read-only payment link listing for the current venue."
+      ]
     },
     {
       "id": "paymentLinks.summary",
@@ -1179,17 +1574,26 @@
       "description": "Summarize payment link count, activity, sessions, and collected amount.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["payment-link:read"],
+      "permissions": [
+        "payment-link:read"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.paymentLinks.summary",
       "schema": {
         "type": "queryTool",
-        "fields": ["limit?"]
+        "fields": [
+          "limit?"
+        ]
       },
-      "examples": ["resumen de links de pago", "payment link summary"],
-      "notes": ["Read-only aggregate payment link totals for the current venue."]
+      "examples": [
+        "resumen de links de pago",
+        "payment link summary"
+      ],
+      "notes": [
+        "Read-only aggregate payment link totals for the current venue."
+      ]
     },
     {
       "id": "paymentMethodBreakdown",
@@ -1198,17 +1602,27 @@
       "description": "Payment method totals and percentages for a period.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["payments:read"],
+      "permissions": [
+        "payments:read"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.paymentMethodBreakdown",
       "schema": {
         "type": "queryTool",
-        "fields": ["dateRange", "limit?"]
+        "fields": [
+          "dateRange",
+          "limit?"
+        ]
       },
-      "examples": ["que metodo de pago se usa mas", "payment method breakdown"],
-      "notes": ["Aggregate payment method totals."]
+      "examples": [
+        "que metodo de pago se usa mas",
+        "payment method breakdown"
+      ],
+      "notes": [
+        "Aggregate payment method totals."
+      ]
     },
     {
       "id": "payments.detail",
@@ -1217,16 +1631,23 @@
       "description": "Show one payment detail by safe payment identifier.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["payments:read"],
+      "permissions": [
+        "payments:read"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.payments.detail",
       "schema": {
         "type": "queryTool",
-        "fields": ["limit?"]
+        "fields": [
+          "limit?"
+        ]
       },
-      "examples": ["detalle del pago pay_123", "payment detail"],
+      "examples": [
+        "detalle del pago pay_123",
+        "payment detail"
+      ],
       "notes": [
         "Read-only payment detail; chatbot response omits masked PAN, authorization number, reference number, and customer contact data."
       ]
@@ -1238,17 +1659,27 @@
       "description": "List payments for the current venue and period.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["payments:read"],
+      "permissions": [
+        "payments:read"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.payments.list",
       "schema": {
         "type": "queryTool",
-        "fields": ["dateRange", "limit?"]
+        "fields": [
+          "dateRange",
+          "limit?"
+        ]
       },
-      "examples": ["muestrame los pagos de hoy", "show payments today"],
-      "notes": ["Read-only payment list; chatbot response omits masked PAN and authorization numbers."]
+      "examples": [
+        "muestrame los pagos de hoy",
+        "show payments today"
+      ],
+      "notes": [
+        "Read-only payment list; chatbot response omits masked PAN and authorization numbers."
+      ]
     },
     {
       "id": "payments.summary",
@@ -1257,17 +1688,27 @@
       "description": "Payment count, amount, tips, and status summary for a period.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["payments:read"],
+      "permissions": [
+        "payments:read"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.payments.summary",
       "schema": {
         "type": "queryTool",
-        "fields": ["dateRange", "limit?"]
+        "fields": [
+          "dateRange",
+          "limit?"
+        ]
       },
-      "examples": ["cuantos pagos recibi hoy", "payment summary today"],
-      "notes": ["Read-only payment summary for the active venue."]
+      "examples": [
+        "cuantos pagos recibi hoy",
+        "payment summary today"
+      ],
+      "notes": [
+        "Read-only payment summary for the active venue."
+      ]
     },
     {
       "id": "pendingOrders",
@@ -1276,17 +1717,26 @@
       "description": "Pending/open order counts by status.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["orders:read"],
+      "permissions": [
+        "orders:read"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.pendingOrders",
       "schema": {
         "type": "queryTool",
-        "fields": ["limit?"]
+        "fields": [
+          "limit?"
+        ]
       },
-      "examples": ["ordenes pendientes", "open orders"],
-      "notes": ["Read-only active order count."]
+      "examples": [
+        "ordenes pendientes",
+        "open orders"
+      ],
+      "notes": [
+        "Read-only active order count."
+      ]
     },
     {
       "id": "pricing.applySuggestedPrice",
@@ -1295,14 +1745,18 @@
       "description": "Aplica el precio sugerido al producto basado en el costo de la receta y la estrategia de pricing",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["menu:update"],
+      "permissions": [
+        "menu:update"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
       "dataSource": "pricingService.applySuggestedPrice",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["name"]
+        "fields": [
+          "name"
+        ]
       },
       "examples": [
         "aplica el precio sugerido de la hamburguesa",
@@ -1311,7 +1765,9 @@
         "usa el precio sugerido para los tacos de pollo",
         "actualiza el precio de la pizza margarita con el precio calculado"
       ],
-      "notes": ["Entity: Product. Operation: custom."]
+      "notes": [
+        "Entity: Product. Operation: custom."
+      ]
     },
     {
       "id": "productSales",
@@ -1320,17 +1776,28 @@
       "description": "Sales quantity, revenue, and order count for one product search term in the current venue.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["orders:read", "menu:read"],
+      "permissions": [
+        "orders:read",
+        "menu:read"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.productSales",
       "schema": {
         "type": "queryTool",
-        "fields": ["dateRange", "limit?"]
+        "fields": [
+          "dateRange",
+          "limit?"
+        ]
       },
-      "examples": ["cuantas jicamas vendi este mes", "sales for Hamburguesa BBQ this month"],
-      "notes": ["Resolves one product search term through SharedQueryService.getProductSalesByName scoped to the active venue."]
+      "examples": [
+        "cuantas jicamas vendi este mes",
+        "sales for Hamburguesa BBQ this month"
+      ],
+      "notes": [
+        "Resolves one product search term through SharedQueryService.getProductSalesByName scoped to the active venue."
+      ]
     },
     {
       "id": "productSales.compare",
@@ -1339,16 +1806,25 @@
       "description": "Compare sales for two product search terms with optional weekend/night filters.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["orders:read", "menu:read"],
+      "permissions": [
+        "orders:read",
+        "menu:read"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.productSales.compare",
       "schema": {
         "type": "queryTool",
-        "fields": ["dateRange", "limit?"]
+        "fields": [
+          "dateRange",
+          "limit?"
+        ]
       },
-      "examples": ["hamburguesas vs pizzas en horario nocturno los fines de semana", "compare tacos versus pastas this month"],
+      "examples": [
+        "hamburguesas vs pizzas en horario nocturno los fines de semana",
+        "compare tacos versus pastas this month"
+      ],
       "notes": [
         "Compares aggregate product sales using SharedQueryService.compareProductSales. Venue scope always comes from auth context."
       ]
@@ -1360,17 +1836,29 @@
       "description": "Gross profit and margin for a period.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["payments:read", "orders:read", "inventory:read"],
+      "permissions": [
+        "payments:read",
+        "orders:read",
+        "inventory:read"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.profitAnalysis",
       "schema": {
         "type": "queryTool",
-        "fields": ["dateRange", "limit?"]
+        "fields": [
+          "dateRange",
+          "limit?"
+        ]
       },
-      "examples": ["margen de ganancia este mes", "profit analysis"],
-      "notes": ["Uses aggregate revenue and cost data."]
+      "examples": [
+        "margen de ganancia este mes",
+        "profit analysis"
+      ],
+      "notes": [
+        "Uses aggregate revenue and cost data."
+      ]
     },
     {
       "id": "recipeCount",
@@ -1379,17 +1867,26 @@
       "description": "Count active recipes in the current venue.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["inventory:read"],
+      "permissions": [
+        "inventory:read"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.recipeCount",
       "schema": {
         "type": "queryTool",
-        "fields": ["limit?"]
+        "fields": [
+          "limit?"
+        ]
       },
-      "examples": ["cuantas recetas tengo", "how many recipes do I have"],
-      "notes": ["Read-only recipe count."]
+      "examples": [
+        "cuantas recetas tengo",
+        "how many recipes do I have"
+      ],
+      "notes": [
+        "Read-only recipe count."
+      ]
     },
     {
       "id": "recipeList",
@@ -1398,17 +1895,26 @@
       "description": "List active recipes in the current venue.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["inventory:read"],
+      "permissions": [
+        "inventory:read"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.recipeList",
       "schema": {
         "type": "queryTool",
-        "fields": ["limit?"]
+        "fields": [
+          "limit?"
+        ]
       },
-      "examples": ["que recetas tengo", "list recipes"],
-      "notes": ["Read-only recipe list."]
+      "examples": [
+        "que recetas tengo",
+        "list recipes"
+      ],
+      "notes": [
+        "Read-only recipe list."
+      ]
     },
     {
       "id": "recipeUsage",
@@ -1417,17 +1923,27 @@
       "description": "Rank recipes by product sales usage.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["inventory:read", "orders:read"],
+      "permissions": [
+        "inventory:read",
+        "orders:read"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.recipeUsage",
       "schema": {
         "type": "queryTool",
-        "fields": ["limit?"]
+        "fields": [
+          "limit?"
+        ]
       },
-      "examples": ["que receta se usa mas", "most used recipe"],
-      "notes": ["Ranks recipes by sales usage."]
+      "examples": [
+        "que receta se usa mas",
+        "most used recipe"
+      ],
+      "notes": [
+        "Ranks recipes by sales usage."
+      ]
     },
     {
       "id": "reservations.cancel",
@@ -1436,7 +1952,9 @@
       "description": "Cancel a reservation with confirmation.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["reservations:update"],
+      "permissions": [
+        "reservations:update"
+      ],
       "riskLevel": "high",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": true,
@@ -1445,8 +1963,12 @@
         "type": "backlogContract",
         "fields": []
       },
-      "examples": ["cancela esta reservacion"],
-      "notes": ["Capability contract pending implementation. Do not expose as executable tool yet."]
+      "examples": [
+        "cancela esta reservacion"
+      ],
+      "notes": [
+        "Capability contract pending implementation. Do not expose as executable tool yet."
+      ]
     },
     {
       "id": "reservations.create",
@@ -1455,7 +1977,9 @@
       "description": "Create a reservation after collecting required guest/session fields.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["reservations:create"],
+      "permissions": [
+        "reservations:create"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
@@ -1464,8 +1988,12 @@
         "type": "backlogContract",
         "fields": []
       },
-      "examples": ["crea una reservacion para hoy a las 8"],
-      "notes": ["Capability contract pending implementation. Do not expose as executable tool yet."]
+      "examples": [
+        "crea una reservacion para hoy a las 8"
+      ],
+      "notes": [
+        "Capability contract pending implementation. Do not expose as executable tool yet."
+      ]
     },
     {
       "id": "reservations.list",
@@ -1474,17 +2002,27 @@
       "description": "List reservations for the current venue and period.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["reservations:read"],
+      "permissions": [
+        "reservations:read"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.reservations.list",
       "schema": {
         "type": "queryTool",
-        "fields": ["dateRange", "limit?"]
+        "fields": [
+          "dateRange",
+          "limit?"
+        ]
       },
-      "examples": ["muestrame mis reservas de hoy", "show today reservations"],
-      "notes": ["Read-only reservation list; chatbot response omits phone, email, cancel secrets, and internal notes."]
+      "examples": [
+        "muestrame mis reservas de hoy",
+        "show today reservations"
+      ],
+      "notes": [
+        "Read-only reservation list; chatbot response omits phone, email, cancel secrets, and internal notes."
+      ]
     },
     {
       "id": "reservations.summary",
@@ -1493,17 +2031,27 @@
       "description": "Reservation count and status/channel breakdown for a period.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["reservations:read"],
+      "permissions": [
+        "reservations:read"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.reservations.summary",
       "schema": {
         "type": "queryTool",
-        "fields": ["dateRange", "limit?"]
+        "fields": [
+          "dateRange",
+          "limit?"
+        ]
       },
-      "examples": ["cuantas reservaciones tengo hoy", "how many reservations today"],
-      "notes": ["Read-only reservation aggregate for the active venue."]
+      "examples": [
+        "cuantas reservaciones tengo hoy",
+        "how many reservations today"
+      ],
+      "notes": [
+        "Read-only reservation aggregate for the active venue."
+      ]
     },
     {
       "id": "reviews",
@@ -1512,17 +2060,27 @@
       "description": "Review count, rating, and distribution for a period.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["reviews:read"],
+      "permissions": [
+        "reviews:read"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.reviews",
       "schema": {
         "type": "queryTool",
-        "fields": ["dateRange", "limit?"]
+        "fields": [
+          "dateRange",
+          "limit?"
+        ]
       },
-      "examples": ["como van mis resenas", "show reviews this month"],
-      "notes": ["Aggregate review stats only."]
+      "examples": [
+        "como van mis resenas",
+        "show reviews this month"
+      ],
+      "notes": [
+        "Aggregate review stats only."
+      ]
     },
     {
       "id": "sales",
@@ -1531,17 +2089,28 @@
       "description": "Sales revenue, order count, and average ticket for a period.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["payments:read", "orders:read"],
+      "permissions": [
+        "payments:read",
+        "orders:read"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.sales",
       "schema": {
         "type": "queryTool",
-        "fields": ["dateRange", "limit?"]
+        "fields": [
+          "dateRange",
+          "limit?"
+        ]
       },
-      "examples": ["cuanto vendi hoy", "how much did I sell this week"],
-      "notes": ["Uses SharedQueryService.getSalesForPeriod."]
+      "examples": [
+        "cuanto vendi hoy",
+        "how much did I sell this week"
+      ],
+      "notes": [
+        "Uses SharedQueryService.getSalesForPeriod."
+      ]
     },
     {
       "id": "settlementCalendar",
@@ -1550,17 +2119,27 @@
       "description": "Settlement, liquidation, dispersion, or payout amount by settlement date for a period.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["settlements:read"],
+      "permissions": [
+        "settlements:read"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.settlementCalendar",
       "schema": {
         "type": "queryTool",
-        "fields": ["dateRange", "limit?"]
+        "fields": [
+          "dateRange",
+          "limit?"
+        ]
       },
-      "examples": ["cuanto me liquidan hoy", "how much is my payout today"],
-      "notes": ["Uses available balance settlement calendar as source of truth."]
+      "examples": [
+        "cuanto me liquidan hoy",
+        "how much is my payout today"
+      ],
+      "notes": [
+        "Uses available balance settlement calendar as source of truth."
+      ]
     },
     {
       "id": "settlements.detail",
@@ -1569,17 +2148,27 @@
       "description": "Detailed settlement entries and card-type breakdown for a period.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["settlements:read"],
+      "permissions": [
+        "settlements:read"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.settlements.detail",
       "schema": {
         "type": "queryTool",
-        "fields": ["dateRange", "limit?"]
+        "fields": [
+          "dateRange",
+          "limit?"
+        ]
       },
-      "examples": ["detalle de liquidacion de hoy por tarjeta", "settlement detail today"],
-      "notes": ["Uses available balance settlement calendar with card-type breakdown."]
+      "examples": [
+        "detalle de liquidacion de hoy por tarjeta",
+        "settlement detail today"
+      ],
+      "notes": [
+        "Uses available balance settlement calendar with card-type breakdown."
+      ]
     },
     {
       "id": "staffPerformance",
@@ -1588,17 +2177,28 @@
       "description": "Staff performance and tips for a period.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["orders:read", "staff:read"],
+      "permissions": [
+        "orders:read",
+        "staff:read"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.staffPerformance",
       "schema": {
         "type": "queryTool",
-        "fields": ["dateRange", "limit?"]
+        "fields": [
+          "dateRange",
+          "limit?"
+        ]
       },
-      "examples": ["quien vendio mas esta semana", "staff performance today"],
-      "notes": ["Can expose staff performance; keep scoped to the current venue."]
+      "examples": [
+        "quien vendio mas esta semana",
+        "staff performance today"
+      ],
+      "notes": [
+        "Can expose staff performance; keep scoped to the current venue."
+      ]
     },
     {
       "id": "supplier.create",
@@ -1607,14 +2207,24 @@
       "description": "Crea un nuevo proveedor en el venue",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["inventory:create"],
+      "permissions": [
+        "inventory:create"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
       "dataSource": "supplierService.createSupplier",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["name", "contactName", "email", "phone", "address", "city", "notes"]
+        "fields": [
+          "name",
+          "contactName",
+          "email",
+          "phone",
+          "address",
+          "city",
+          "notes"
+        ]
       },
       "examples": [
         "agrega proveedor Distribuidora Lopez",
@@ -1624,7 +2234,9 @@
         "agregar supplier Verduras Express, direccion Av. Central 45, ciudad CDMX",
         "new supplier Bebidas del Pacifico, notes: entrega los martes y jueves"
       ],
-      "notes": ["Entity: Supplier. Operation: create."]
+      "notes": [
+        "Entity: Supplier. Operation: create."
+      ]
     },
     {
       "id": "supplier.createPricing",
@@ -1633,14 +2245,22 @@
       "description": "Registra el precio de un insumo para un proveedor específico (reemplaza el precio activo anterior)",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["inventory:create"],
+      "permissions": [
+        "inventory:create"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
       "dataSource": "supplierService.createSupplierPricing",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["name", "rawMaterialName", "pricePerUnit", "unit", "effectiveFrom"]
+        "fields": [
+          "name",
+          "rawMaterialName",
+          "pricePerUnit",
+          "unit",
+          "effectiveFrom"
+        ]
       },
       "examples": [
         "el proveedor Lopez vende harina a 42 pesos el kilo",
@@ -1650,7 +2270,9 @@
         "add pricing: supplier Distribuidora Lopez sells aceite a 65 pesos el litro",
         "pon precio de tomate con Verduras Express: 15 pesos el kg, vigente desde hoy"
       ],
-      "notes": ["Entity: Supplier. Operation: custom."]
+      "notes": [
+        "Entity: Supplier. Operation: custom."
+      ]
     },
     {
       "id": "supplier.delete",
@@ -1659,14 +2281,18 @@
       "description": "Elimina (soft delete) un proveedor del venue. No se puede eliminar si tiene órdenes de compra asociadas.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["inventory:delete"],
+      "permissions": [
+        "inventory:delete"
+      ],
       "riskLevel": "high",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": true,
       "dataSource": "supplierService.deleteSupplier",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["name"]
+        "fields": [
+          "name"
+        ]
       },
       "examples": [
         "elimina el proveedor Lopez",
@@ -1676,7 +2302,9 @@
         "remove supplier Lacteos SA de CV",
         "delete proveedor Verduras Express, ya no trabajamos con ellos"
       ],
-      "notes": ["Entity: Supplier. Operation: delete."]
+      "notes": [
+        "Entity: Supplier. Operation: delete."
+      ]
     },
     {
       "id": "supplier.update",
@@ -1685,14 +2313,23 @@
       "description": "Actualiza los datos de un proveedor existente (teléfono, email, calificación, notas, etc.)",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["inventory:update"],
+      "permissions": [
+        "inventory:update"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": false,
       "dataSource": "supplierService.updateSupplier",
       "schema": {
         "type": "actionDefinition",
-        "fields": ["name", "contactName", "email", "phone", "rating", "notes"]
+        "fields": [
+          "name",
+          "contactName",
+          "email",
+          "phone",
+          "rating",
+          "notes"
+        ]
       },
       "examples": [
         "actualiza el telefono del proveedor Lopez a 555-9999",
@@ -1702,7 +2339,9 @@
         "pon las notas del proveedor Lacteos SA: ya no entregan los lunes",
         "change phone supplier Verduras Express to 55-1234-5678"
       ],
-      "notes": ["Entity: Supplier. Operation: update."]
+      "notes": [
+        "Entity: Supplier. Operation: update."
+      ]
     },
     {
       "id": "team.invite",
@@ -1711,7 +2350,9 @@
       "description": "Invite a user to the dashboard after confirmation.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["team:invite"],
+      "permissions": [
+        "team:invite"
+      ],
       "riskLevel": "high",
       "requiresConfirmation": true,
       "requiresDoubleConfirmation": true,
@@ -1720,8 +2361,12 @@
         "type": "backlogContract",
         "fields": []
       },
-      "examples": ["invita a alguien a mi equipo"],
-      "notes": ["Capability contract pending implementation. Do not expose as executable tool yet."]
+      "examples": [
+        "invita a alguien a mi equipo"
+      ],
+      "notes": [
+        "Capability contract pending implementation. Do not expose as executable tool yet."
+      ]
     },
     {
       "id": "team.members",
@@ -1730,17 +2375,26 @@
       "description": "List dashboard team members for the current venue.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["teams:read"],
+      "permissions": [
+        "teams:read"
+      ],
       "riskLevel": "medium",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.team.members",
       "schema": {
         "type": "queryTool",
-        "fields": ["limit?"]
+        "fields": [
+          "limit?"
+        ]
       },
-      "examples": ["quien esta en mi equipo", "show team members"],
-      "notes": ["Read-only staff list; chatbot response omits email, PIN, and credential fields."]
+      "examples": [
+        "quien esta en mi equipo",
+        "show team members"
+      ],
+      "notes": [
+        "Read-only staff list; chatbot response omits email, PIN, and credential fields."
+      ]
     },
     {
       "id": "topProducts",
@@ -1749,17 +2403,28 @@
       "description": "Best-selling products for a period.",
       "scope": "venue",
       "requiresVenueScope": true,
-      "permissions": ["orders:read", "menu:read"],
+      "permissions": [
+        "orders:read",
+        "menu:read"
+      ],
       "riskLevel": "low",
       "requiresConfirmation": false,
       "requiresDoubleConfirmation": false,
       "dataSource": "shared_query.topProducts",
       "schema": {
         "type": "queryTool",
-        "fields": ["dateRange", "limit?"]
+        "fields": [
+          "dateRange",
+          "limit?"
+        ]
       },
-      "examples": ["productos mas vendidos", "top products this month"],
-      "notes": ["Only aggregate product performance for the active venue."]
+      "examples": [
+        "productos mas vendidos",
+        "top products this month"
+      ],
+      "notes": [
+        "Only aggregate product performance for the active venue."
+      ]
     }
   ]
 }

@@ -151,6 +151,7 @@ const prismaMock: any = {
   rawMaterialMovement: createMockModel(),
   // Payment config & analytics models
   merchantAccount: createMockModel(),
+  angelPayUserAccount: createMockModel(),
   providerCostStructure: createMockModel(),
   venuePaymentConfig: createMockModel(),
   organizationPaymentConfig: createMockModel(),
@@ -161,6 +162,8 @@ const prismaMock: any = {
   // Time entry models
   timeEntry: createMockModel(),
   timeEntryBreak: createMockModel(),
+  // Field-promoter geolocation ("cambaceo" tracking)
+  promoterLocationPing: createMockModel(),
   venueSettings: createMockModel(),
   // Organization dashboard models
   cashDeposit: createMockModel(),

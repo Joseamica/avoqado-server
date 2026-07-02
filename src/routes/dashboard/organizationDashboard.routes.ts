@@ -107,6 +107,45 @@ export async function requireOrgOwner(req: Request, res: Response, next: NextFun
 }
 
 /**
+ * Middleware: require OrgRole OWNER or ADMIN for the target organization.
+ * Used for fleet-affecting terminal operations (create/delete terminal, bulk
+ * commands, org-wide broadcast). `checkOrgAccess` alone only proves membership,
+ * which would let any member (a cashier/promoter) provision/delete terminals or
+ * broadcast to the entire fleet. SUPERADMIN bypasses.
+ *
+ * ⚠️ Floor chosen conservatively at ADMIN+. If org supervisors who are OrgRole
+ * MEMBER legitimately manage the terminal fleet, widen this to include them.
+ */
+async function requireOrgAdmin(req: Request, res: Response, next: NextFunction) {
+  try {
+    const authContext = (req as any).authContext
+    const orgId = req.params.orgId
+
+    if (authContext?.role === 'SUPERADMIN') return next()
+
+    const membership = await prisma.staffOrganization.findFirst({
+      where: {
+        staffId: authContext?.userId,
+        organizationId: orgId,
+        isActive: true,
+        role: { in: ['OWNER', 'ADMIN'] },
+      },
+      select: { id: true },
+    })
+
+    if (!membership) {
+      return res
+        .status(403)
+        .json({ success: false, error: 'admin_required', message: 'Se requiere rol de administrador de la organización' })
+    }
+
+    next()
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
  * GET /dashboard/organizations/:orgId/vision-global
  * Returns: Aggregate KPIs across all venues in the organization
  */
@@ -764,6 +803,7 @@ router.post(
   '/:orgId/terminals',
   authenticateTokenMiddleware,
   checkOrgAccess,
+  requireOrgAdmin,
   validateRequest(CreateOrgTerminalSchema),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -816,6 +856,7 @@ router.delete(
   '/:orgId/terminals/:terminalId',
   authenticateTokenMiddleware,
   checkOrgAccess,
+  requireOrgAdmin,
   validateRequest(DeleteOrgTerminalSchema),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -932,6 +973,7 @@ router.post(
   '/:orgId/terminals/bulk-command',
   authenticateTokenMiddleware,
   checkOrgAccess,
+  requireOrgAdmin,
   validateRequest(BulkCommandSchema),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -1285,11 +1327,16 @@ router.post(
   '/:orgId/users/:userId/reset-password',
   authenticateTokenMiddleware,
   checkOrgAccess,
+  // Owner-only: resetting another user's password returns a temporary password and
+  // is a full account-takeover primitive. checkOrgAccess alone only proves org
+  // membership, so without this ANY member (a cashier/waiter) could reset the OWNER.
+  requireOrgOwner,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const { orgId, visitorId: _userId } = req.params
+      const { orgId } = req.params
+      const authContext = (req as any).authContext
 
-      const result = await organizationDashboardService.resetUserPassword(orgId, req.params.userId)
+      const result = await organizationDashboardService.resetUserPassword(orgId, req.params.userId, authContext?.userId)
 
       res.json({
         success: true,
@@ -1370,6 +1417,7 @@ router.post(
   '/:orgId/messages/broadcast',
   authenticateTokenMiddleware,
   checkOrgAccess,
+  requireOrgAdmin,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { orgId } = req.params

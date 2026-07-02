@@ -174,6 +174,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   DeviceToken: 'Staff, Auth, Permissions & Time',
   TimeEntry: 'Staff, Auth, Permissions & Time',
   TimeEntryBreak: 'Staff, Auth, Permissions & Time',
+  PromoterLocationPing: 'Staff, Auth, Permissions & Time',
 
   // 4. Onboarding & Training
   OnboardingProgress: 'Onboarding & Training',
@@ -257,6 +258,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   FinancialProvider: 'Payment Providers & Settlement',
   FinancialConnection: 'Payment Providers & Settlement',
   FinancialAccount: 'Payment Providers & Settlement',
+  BalanceProvider: 'Payment Providers & Settlement',
   EcommerceMerchant: 'Payment Providers & Settlement',
   CheckoutSession: 'Payment Providers & Settlement',
   AngelPayUserAccount: 'Payment Providers & Settlement',

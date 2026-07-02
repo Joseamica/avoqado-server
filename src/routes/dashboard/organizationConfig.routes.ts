@@ -13,6 +13,7 @@ import * as goalResolutionService from '../../services/dashboard/commission/goal
 import { logAction } from '../../services/dashboard/activity-log.service'
 import prisma from '../../utils/prismaClient'
 import { StaffRole } from '@prisma/client'
+import { canAssignRole } from '../../lib/permissions'
 
 const router = Router({ mergeParams: true })
 
@@ -492,6 +493,16 @@ router.patch('/team/:staffId/role', orgOwnerAccess, async (req: Request, res: Re
       return res.status(400).json({ success: false, error: 'validation', message: 'Rol inválido' })
     }
 
+    // Prevent privilege escalation. requireOrgOwner guarantees the caller is at
+    // least an org OWNER (or a real SUPERADMIN). They may only assign roles at or
+    // below their own level, and NEVER SUPERADMIN — otherwise any OWNER could set
+    // role=SUPERADMIN on themselves and become a platform-wide superadmin on the
+    // next request (checkPermission treats ANY StaffVenue SUPERADMIN row as global *:*).
+    const callerRole = authContext?.role === StaffRole.SUPERADMIN ? StaffRole.SUPERADMIN : StaffRole.OWNER
+    if (!canAssignRole(callerRole, role)) {
+      return res.status(403).json({ success: false, error: 'forbidden', message: `No puedes asignar el rol ${role}` })
+    }
+
     // Verify staff belongs to org
     const staffOrg = await prisma.staffOrganization.findFirst({
       where: { staffId, organizationId: orgId },
@@ -849,7 +860,7 @@ router.post('/team/:staffId/reset-password', orgOwnerAccess, async (req: Request
     const { orgId, staffId } = req.params
     const authContext = (req as any).authContext
 
-    const result = await organizationDashboardService.resetUserPassword(orgId, staffId)
+    const result = await organizationDashboardService.resetUserPassword(orgId, staffId, authContext?.userId)
 
     logAction({
       staffId: authContext?.userId || null,

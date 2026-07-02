@@ -37,8 +37,10 @@ async function main() {
       throw new Error('Cuenta requiere código 2FA. Re-ejecuta: tsx scripts/test-external-bank-balance.ts <idNegocio> <codigo2FA>')
     }
     r = await externalBankClient.validateTwoFactorCode({
-      email, deviceIdentifier: 'avoqado-server-moneygiver-balance-lookup',
-      challenge: r.challenge, code: twoFactorCode,
+      email,
+      deviceIdentifier: 'avoqado-server-moneygiver-balance-lookup',
+      challenge: r.challenge,
+      code: twoFactorCode,
     })
   }
   if (r.kind === 'need_device_validation') {

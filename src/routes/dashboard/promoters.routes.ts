@@ -12,6 +12,7 @@ import { Router, Request, Response, NextFunction } from 'express'
 import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken.middleware'
 import { verifyAccess } from '../../middlewares/verifyAccess.middleware'
 import { promotersService } from '../../services/promoters/promoters.service'
+import { getPromoterTrackForVenue } from '../../services/promoters/promoterLocation.service'
 
 // mergeParams: true allows access to :venueId from parent route
 const router = Router({ mergeParams: true })
@@ -64,6 +65,35 @@ router.get('/:promoterId', whiteLabelAccess, async (req: Request, res: Response,
       success: true,
       data,
     })
+  } catch (error) {
+    next(error)
+  }
+})
+
+/**
+ * GET /dashboard/promoters/:promoterId/track
+ * Returns: the promoter's location track for one venue-local day —
+ *   `track.latest` (live pin) + `track.points[]` (the day's route / breadcrumb).
+ * Query: date (optional, YYYY-MM-DD; defaults to venue-local today).
+ */
+router.get('/:promoterId/track', whiteLabelAccess, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const venueId = req.params.venueId || (req as any).authContext?.venueId
+    const { promoterId } = req.params
+    const dateRaw = req.query.date
+    const date = typeof dateRaw === 'string' && dateRaw.length > 0 ? dateRaw : undefined
+
+    if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({
+        success: false,
+        error: 'validation_error',
+        message: 'El parámetro date debe tener formato YYYY-MM-DD',
+      })
+    }
+
+    const data = await getPromoterTrackForVenue({ venueId, promoterId, date })
+
+    res.json({ success: true, data })
   } catch (error) {
     next(error)
   }

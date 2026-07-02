@@ -3933,7 +3933,13 @@ router.post(
 router.use('/venues/:venueId/payment-config', authenticateTokenMiddleware, venuePaymentConfigRoutes)
 
 // E-commerce Merchant Management routes (OWNER, ADMIN)
-router.use('/venues/:venueId/ecommerce-merchants', authenticateTokenMiddleware, ecommerceMerchantRoutes)
+// checkPermission('venues:manage') here does double duty: it enforces the
+// permission AND (critically) that the caller actually belongs to :venueId — the
+// sub-router only verified the merchant belongs to the venue, not that YOU do, so
+// without this any authenticated user could read/rotate another venue's payment
+// keys. Matches the sibling venue/payment routers. platform-fee keeps its stricter
+// system:manage on top of this.
+router.use('/venues/:venueId/ecommerce-merchants', authenticateTokenMiddleware, checkPermission('venues:manage'), ecommerceMerchantRoutes)
 
 // Financial Connections (self-connect bank accounts for balance lookup). Permission
 // (financialConnections:manage, OWNER-only) + per-resource venue ownership check are

@@ -9,10 +9,25 @@ import { Router, Request, Response, NextFunction } from 'express'
 import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken.middleware'
 import { verifyAccess } from '../../middlewares/verifyAccess.middleware'
 import * as orgCategoryService from '../../services/dashboard/orgItemCategory.dashboard.service'
+import { ROLE_HIERARCHY } from '../../lib/permissions'
+import { StaffRole } from '@prisma/client'
 
 const router = Router({ mergeParams: true })
 
 const whiteLabelAccess = [authenticateTokenMiddleware, verifyAccess({ requireWhiteLabel: true })]
+
+// Mutating org-level categories (org-wide effect) requires MANAGER or above.
+// verifyAccess only proves membership + white-label, so without this any member
+// (a WAITER/CASHIER/promoter) could create/edit/delete org categories. The
+// venue-resolved role is on req.access.role (set by verifyAccess above).
+function requireWhiteLabelManager(req: Request, res: Response, next: NextFunction) {
+  const role = (req as any).access?.role as StaffRole | undefined
+  if (!role || (ROLE_HIERARCHY[role] || 0) < ROLE_HIERARCHY[StaffRole.MANAGER]) {
+    return res.status(403).json({ success: false, error: 'forbidden', message: 'Se requiere rol MANAGER o superior' })
+  }
+  next()
+}
+const whiteLabelWrite = [...whiteLabelAccess, requireWhiteLabelManager]
 
 /**
  * GET /org-item-categories
@@ -33,7 +48,7 @@ router.get('/', whiteLabelAccess, async (req: Request, res: Response, next: Next
  * POST /org-item-categories
  * Create a new org-level category
  */
-router.post('/', whiteLabelAccess, async (req: Request, res: Response, next: NextFunction) => {
+router.post('/', whiteLabelWrite, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const venueId = req.params.venueId || (req as any).authContext?.venueId
     const { name, description, color, sortOrder, requiresPreRegistration, suggestedPrice, barcodePattern } = req.body
@@ -66,7 +81,7 @@ router.post('/', whiteLabelAccess, async (req: Request, res: Response, next: Nex
  * PUT /org-item-categories/:categoryId
  * Update an org-level category
  */
-router.put('/:categoryId', whiteLabelAccess, async (req: Request, res: Response, next: NextFunction) => {
+router.put('/:categoryId', whiteLabelWrite, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const venueId = req.params.venueId || (req as any).authContext?.venueId
     const { categoryId } = req.params
@@ -93,7 +108,7 @@ router.put('/:categoryId', whiteLabelAccess, async (req: Request, res: Response,
  * DELETE /org-item-categories/:categoryId
  * Delete an org-level category (soft if has items, hard if empty)
  */
-router.delete('/:categoryId', whiteLabelAccess, async (req: Request, res: Response, next: NextFunction) => {
+router.delete('/:categoryId', whiteLabelWrite, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const venueId = req.params.venueId || (req as any).authContext?.venueId
     const { categoryId } = req.params

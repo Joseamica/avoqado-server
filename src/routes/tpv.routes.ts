@@ -35,6 +35,8 @@ import { pinLoginRateLimiter } from '../middlewares/pin-login-rate-limit.middlew
 import { touchTerminalHeartbeatMiddleware } from '../middlewares/touchTerminalHeartbeat.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { activateTerminalSchema } from '../schemas/activation.schema'
+import { recordPromoterPingSchema } from '../schemas/promoterLocation.schema'
+import { recordPromoterPing } from '../services/promoters/promoterLocation.service'
 import { getStaffProgressQuerySchema, trainingIdParamSchema, updateProgressSchema } from '../schemas/superadmin/training.schema'
 import {
   addOrderCustomerSchema,
@@ -6528,6 +6530,40 @@ router.post('/geolocation/cell-towers', authenticateTokenMiddleware, async (req:
     next(error)
   }
 })
+
+/**
+ * POST /tpv/v1/geolocation/promoter-ping
+ * Record ONE periodic location ping for a field promoter ("cambaceo").
+ * Called hourly by the TPV during the venue-local work window.
+ *
+ * venueId + staffId come from the auth token (tenant isolation), NOT the body.
+ * A null/failed capture is simply not sent by the TPV, so there is no partial write here.
+ */
+router.post(
+  '/geolocation/promoter-ping',
+  authenticateTokenMiddleware,
+  validateRequest(recordPromoterPingSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { userId, venueId } = (req as any).authContext
+      const { latitude, longitude, accuracy, capturedAt, source } = req.body
+
+      const ping = await recordPromoterPing({
+        venueId,
+        staffId: userId,
+        latitude,
+        longitude,
+        accuracy: accuracy ?? null,
+        capturedAt: capturedAt ? new Date(capturedAt) : new Date(),
+        source: source ?? 'PERIODIC',
+      })
+
+      res.status(201).json({ success: true, data: { id: ping.id } })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
 
 /**
  * Maximum acceptable accuracy in meters.

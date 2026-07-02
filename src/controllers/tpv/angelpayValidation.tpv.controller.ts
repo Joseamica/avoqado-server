@@ -20,7 +20,7 @@
 import { NextFunction, Request, Response } from 'express'
 
 import logger from '../../config/logger'
-import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ForbiddenError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { markAngelPayUserAccountValidated, recordAngelPayUserAccountError } from '../../services/superadmin/angelpayUserAccount.service'
 import { upsertDiscoveredAngelPayMerchants } from '../../services/superadmin/merchantAccount.service'
@@ -45,6 +45,20 @@ export async function reportAngelPayValidation(req: Request, res: Response, next
     }
 
     const terminalSerial = req.authContext?.terminalSerialNumber
+
+    // Scope to the terminal's venue. accountId comes from the request body, so
+    // without this a TPV token for venue A could mutate the validation state of an
+    // AngelPay account owned by venue B. Fail-closed if the token has no venue.
+    const scopeAccount = await prisma.angelPayUserAccount.findUnique({
+      where: { id: accountId },
+      select: { venueId: true },
+    })
+    if (!scopeAccount) {
+      throw new NotFoundError(`AngelPayUserAccount ${accountId} not found`)
+    }
+    if (scopeAccount.venueId !== req.authContext?.venueId) {
+      throw new ForbiddenError('Account does not belong to this venue')
+    }
 
     switch (state) {
       case 'AUTHENTICATED': {
@@ -161,6 +175,10 @@ export async function reportDiscoveredMerchants(req: Request, res: Response, nex
     const account = await prisma.angelPayUserAccount.findUnique({ where: { id: accountId } })
     if (!account) {
       throw new NotFoundError(`AngelPayUserAccount ${accountId} not found`)
+    }
+    // Scope to the terminal's venue — accountId is attacker-controllable (body).
+    if (account.venueId !== req.authContext?.venueId) {
+      throw new ForbiddenError('Account does not belong to this venue')
     }
 
     // Discovery mode (2026-05-24 update — invert default to PREVIEW_ONLY):

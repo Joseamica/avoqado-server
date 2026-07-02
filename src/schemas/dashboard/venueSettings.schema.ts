@@ -44,6 +44,7 @@ export const UpdateVenueSettingsSchema = z.object({
     enableShifts: z.boolean().optional(),
     requirePinLogin: z.boolean().optional(),
     requireClockInPhoto: z.boolean().optional(), // Anti-fraud: require photo on clock-in
+    trackPromoterLocation: z.boolean().optional(), // "Cambaceo": emit/accept periodic promoter location pings
 
     // Attendance — lateness detection
     // null = remove venue-level override so the venue inherits from

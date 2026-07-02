@@ -717,7 +717,23 @@ router.get('/team', whiteLabelAccess, async (req: Request, res: Response, next: 
  */
 router.post('/admin/reset-password/:userId', whiteLabelAccess, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const venueId = req.params.venueId || (req as any).authContext?.venueId
+    const authContext = (req as any).authContext
+
+    // Owner-only. whiteLabelAccess (verifyAccess requireWhiteLabel with no
+    // permission/feature) only proves membership + white-label — it does NOT
+    // enforce a role. Resetting a password returns a temporary password (an
+    // account-takeover primitive), so restrict to OWNER/SUPERADMIN. verifyAccess
+    // attaches the venue-resolved role on req.access.
+    const callerRole = (req as any).access?.role
+    if (callerRole !== 'OWNER' && callerRole !== 'SUPERADMIN') {
+      return res.status(403).json({
+        success: false,
+        error: 'forbidden',
+        message: 'Solo el propietario puede resetear contraseñas',
+      })
+    }
+
+    const venueId = req.params.venueId || authContext?.venueId
     const { userId } = req.params
     const orgId = await getOrgIdFromVenue(venueId)
 
@@ -729,10 +745,9 @@ router.post('/admin/reset-password/:userId', whiteLabelAccess, async (req: Reque
       })
     }
 
-    const result = await organizationDashboardService.resetUserPassword(orgId, userId)
+    const result = await organizationDashboardService.resetUserPassword(orgId, userId, authContext?.userId)
 
     // Audit log
-    const authContext = (req as any).authContext
     logAction({
       staffId: authContext?.userId || null,
       venueId,

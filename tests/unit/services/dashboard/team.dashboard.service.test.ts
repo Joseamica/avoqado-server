@@ -10,8 +10,9 @@
  * See Asana 1215884464715725.
  */
 
-import { getTeamMembers } from '@/services/dashboard/team.dashboard.service'
+import { getTeamMembers, updateTeamMember, inviteTeamMember } from '@/services/dashboard/team.dashboard.service'
 import { prismaMock } from '@tests/__helpers__/setup'
+import { StaffRole } from '@prisma/client'
 
 const VENUE_ID = 'venue-1'
 const ORG_ID = 'org-1'
@@ -62,5 +63,81 @@ describe('getTeamMembers', () => {
         }),
       }),
     )
+  })
+})
+
+/**
+ * SECURITY regression: role-assignment privilege escalation.
+ * A MANAGER (who holds teams:update / teams:invite by default) must NOT be able to
+ * promote themselves or anyone to a role at/above their own level, nor assign
+ * SUPERADMIN. `callerRole` is the caller's role RESOLVED for the venue (threaded
+ * from req.resolvedRole by the controller). When absent (internal callers) the
+ * guard is skipped, so existing invite/update tests are unaffected.
+ */
+describe('updateTeamMember — privilege-escalation guard', () => {
+  const existingManager = {
+    id: 'sv-mgr',
+    venueId: VENUE_ID,
+    staffId: 'staff-mgr',
+    role: StaffRole.MANAGER,
+    active: true,
+    staff: { id: 'staff-mgr', firstName: 'M', lastName: 'X' },
+  }
+
+  beforeEach(() => {
+    prismaMock.staffVenue.findFirst.mockResolvedValue(existingManager as any)
+  })
+
+  it('blocks a MANAGER from promoting themselves to OWNER (self-promotion vector)', async () => {
+    await expect(updateTeamMember(VENUE_ID, 'sv-mgr', { role: StaffRole.OWNER, callerRole: StaffRole.MANAGER })).rejects.toThrow(
+      /No puedes asignar el rol/i,
+    )
+  })
+
+  it('blocks a MANAGER from promoting a member to ADMIN', async () => {
+    await expect(updateTeamMember(VENUE_ID, 'sv-mgr', { role: StaffRole.ADMIN, callerRole: StaffRole.MANAGER })).rejects.toThrow(
+      /No puedes asignar el rol/i,
+    )
+  })
+
+  it('still blocks assigning SUPERADMIN outright', async () => {
+    await expect(updateTeamMember(VENUE_ID, 'sv-mgr', { role: StaffRole.SUPERADMIN, callerRole: StaffRole.OWNER })).rejects.toThrow(
+      /SUPERADMIN/i,
+    )
+  })
+})
+
+describe('inviteTeamMember — privilege-escalation guard', () => {
+  it('blocks a MANAGER from inviting an OWNER', async () => {
+    await expect(
+      inviteTeamMember(VENUE_ID, 'inviter', {
+        firstName: 'A',
+        lastName: 'B',
+        role: StaffRole.OWNER,
+        callerRole: StaffRole.MANAGER,
+      }),
+    ).rejects.toThrow(/No puedes invitar con el rol/i)
+  })
+
+  it('blocks a MANAGER from inviting an ADMIN', async () => {
+    await expect(
+      inviteTeamMember(VENUE_ID, 'inviter', {
+        firstName: 'A',
+        lastName: 'B',
+        role: StaffRole.ADMIN,
+        callerRole: StaffRole.MANAGER,
+      }),
+    ).rejects.toThrow(/No puedes invitar con el rol/i)
+  })
+
+  it('still blocks inviting SUPERADMIN regardless of caller role', async () => {
+    await expect(
+      inviteTeamMember(VENUE_ID, 'inviter', {
+        firstName: 'A',
+        lastName: 'B',
+        role: StaffRole.SUPERADMIN,
+        callerRole: StaffRole.OWNER,
+      }),
+    ).rejects.toThrow(/SUPERADMIN/i)
   })
 })

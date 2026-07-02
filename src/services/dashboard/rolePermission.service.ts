@@ -9,6 +9,7 @@ import {
   ROLE_HIERARCHY,
   validatePermissionFormat,
   expandWildcards,
+  hasPermission,
 } from '../../lib/permissions'
 import logger from '@/config/logger'
 import { logAction } from './activity-log.service'
@@ -134,6 +135,27 @@ export async function updateRolePermissions(
       `${modifierRole} cannot modify permissions for ${role}. ` +
         `You can only modify: ${MODIFIABLE_ROLES_BY_LEVEL[modifierRole].join(', ')}`,
     )
+  }
+
+  // 3b. Privilege-escalation guard: a modifier may not GRANT an elevated permission
+  // they do not themselves hold. Scoped to the escalation-sensitive tier — the
+  // global wildcard `*:*` and the `system:*` namespace that gates
+  // /dashboard/superadmin/* — because ordinary role defaults are NOT strict
+  // supersets of one another (e.g. MANAGER holds `tpv-payments:pay-later` that
+  // OWNER's defaults omit), so a blanket subset check would wrongly block
+  // legitimate edits. Without this an ADMIN could add `system:manage`/`*:*` to a
+  // role and then reach the superadmin API. Only SUPERADMIN holds `*:*`, so only
+  // they can grant these. NOTE: `modifierRole` MUST be the caller's role resolved
+  // for THIS venue (controller passes req.resolvedRole), not their raw JWT role.
+  const modifierPermRow = await prisma.venueRolePermission.findUnique({
+    where: { venueId_role: { venueId, role: modifierRole } },
+    select: { permissions: true },
+  })
+  const modifierCustomPerms = (modifierPermRow?.permissions as string[] | undefined) ?? null
+  const isEscalationSensitive = (p: string) => p === '*:*' || p.startsWith('system:')
+  const escalatedPermissions = permissions.filter(p => isEscalationSensitive(p) && !hasPermission(modifierRole, modifierCustomPerms, p))
+  if (escalatedPermissions.length > 0) {
+    throw new ForbiddenError(`No puedes otorgar permisos que tú no posees: ${escalatedPermissions.join(', ')}`)
   }
 
   // 4. Self-lockout protection: if modifying own role, ensure critical permissions remain
