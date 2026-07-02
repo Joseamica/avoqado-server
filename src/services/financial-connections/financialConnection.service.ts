@@ -110,7 +110,7 @@ export async function startConnection(input: {
       })
       return { connectionId: conn.id, status: 'PENDING_DEVICE_VALIDATION' as const }
     }
-    return await finishConnected(conn.id, deviceIdentifier, r.grant, r.accounts)
+    return await finishConnected(conn.id, deviceIdentifier, r.grant, r.accounts, r.accessToken)
   } catch (e) {
     // Sin esto, un connect() fallido (credenciales incorrectas, red) deja la fila
     // recién creada huérfana en PENDING_DEVICE_VALIDATION para siempre, sin pista
@@ -197,7 +197,7 @@ export async function validateDevice(connectionId: string, code: string, staffId
       entityId: connectionId,
       data: { provider: conn.provider.code },
     })
-    return await finishConnected(connectionId, conn.deviceIdentifier!, r.grant, r.accounts)
+    return await finishConnected(connectionId, conn.deviceIdentifier!, r.grant, r.accounts, r.accessToken)
   } catch (e) {
     await logAction({
       staffId: staffId ?? null,
@@ -237,7 +237,7 @@ export async function validateTwoFactorAuth(connectionId: string, code: string, 
       entityId: connectionId,
       data: { provider: conn.provider.code },
     })
-    return await finishConnected(connectionId, conn.deviceIdentifier!, r.grant, r.accounts)
+    return await finishConnected(connectionId, conn.deviceIdentifier!, r.grant, r.accounts, r.accessToken)
   } catch (e) {
     await logAction({
       staffId: staffId ?? null,
@@ -256,6 +256,7 @@ async function finishConnected(
   deviceIdentifier: string,
   grant: Grant,
   accounts: ProviderAccount[],
+  accessToken?: string,
 ): Promise<ConnectionStepResult> {
   await persistAccounts(connectionId, accounts)
   const many = accounts.length > 1
@@ -269,6 +270,13 @@ async function finishConnected(
       status: many ? 'PENDING_ACCOUNT_SELECTION' : 'CONNECTED',
     },
   })
+  // Cachea el access token recién obtenido: la primera lectura de saldo lo usa
+  // directamente en vez de intentar un refresh silencioso (que el proveedor rechaza
+  // con 400 en sesiones validadas con 2FA). Ventana = vida del token (o 55 min).
+  if (accessToken) {
+    const exp = grant.expiresAt ? new Date(grant.expiresAt).getTime() : Date.now() + 55 * 60_000
+    tokenCache.set(connectionId, { accessToken, exp })
+  }
   const accountOptions = many ? accounts : undefined
   const status: 'PENDING_ACCOUNT_SELECTION' | 'CONNECTED' = many ? 'PENDING_ACCOUNT_SELECTION' : 'CONNECTED'
   return { connectionId, status, accountOptions }

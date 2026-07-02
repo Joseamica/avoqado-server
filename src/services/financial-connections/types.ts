@@ -23,7 +23,10 @@ export interface BalanceSnapshot {
 
 /** Resultado de connect/validateDevice/validateTwoFactorCode. */
 export type ConnectResult =
-  | { kind: 'connected'; grant: Grant; accounts: ProviderAccount[] }
+  // `accessToken`: el token de sesión ya válido con el que se acaba de autenticar.
+  // Se cachea para que la primera lectura de saldo use ESTE token en vez de disparar
+  // un refresh silencioso (que el proveedor rechaza en sesiones validadas con 2FA).
+  | { kind: 'connected'; grant: Grant; accounts: ProviderAccount[]; accessToken?: string }
   | { kind: 'need_device_validation'; challenge: { accessToken: string; processId: string } }
   | { kind: 'need_two_factor_auth'; challenge: { accessToken: string } }
 

@@ -92,9 +92,10 @@ export const externalBankClient: FinancialProviderClient = {
       if (!processId) throw new BadRequestError('identity/start no devolvió proccessId.')
       return { kind: 'need_device_validation', challenge: { accessToken, processId } }
     }
+    const at = accessTokenOf(data)
     const grant = toGrant(data)
-    const accounts = normalizeAccounts(await fetchMe(accessTokenOf(data)))
-    return { kind: 'connected', grant, accounts }
+    const accounts = normalizeAccounts(await fetchMe(at))
+    return { kind: 'connected', grant, accounts, accessToken: at }
   },
 
   async validateDevice({ email, password, deviceIdentifier, challenge, code }): Promise<ConnectResult> {
@@ -112,9 +113,10 @@ export const externalBankClient: FinancialProviderClient = {
       const accessToken = accessTokenOf(data)
       return { kind: 'need_two_factor_auth', challenge: { accessToken } }
     }
+    const at = accessTokenOf(data)
     const grant = toGrant(data)
-    const accounts = normalizeAccounts(await fetchMe(accessTokenOf(data)))
-    return { kind: 'connected', grant, accounts }
+    const accounts = normalizeAccounts(await fetchMe(at))
+    return { kind: 'connected', grant, accounts, accessToken: at }
   },
 
   async validateTwoFactorCode({ email, deviceIdentifier, challenge, code }): Promise<ConnectResult> {
@@ -132,9 +134,10 @@ export const externalBankClient: FinancialProviderClient = {
     if (!pick<boolean>(v, 'success') && !pick<boolean>(v, 'isLoggedIn')) {
       throw new BadRequestError(pick<string>(v, 'message') || 'Código 2FA inválido o expirado.')
     }
+    const at = accessTokenOf(v)
     const grant = toGrant(v)
-    const accounts = normalizeAccounts(await fetchMe(accessTokenOf(v)))
-    return { kind: 'connected', grant, accounts }
+    const accounts = normalizeAccounts(await fetchMe(at))
+    return { kind: 'connected', grant, accounts, accessToken: at }
   },
 
   async refresh(grant: Grant, deviceIdentifier: string): Promise<{ grant: Grant; ctx: ConnectionContext }> {
