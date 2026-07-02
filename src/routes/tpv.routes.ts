@@ -6300,7 +6300,12 @@ router.post(
 
       return res.status(201).json(result)
     } catch (error) {
-      logger.error(`❌ [SERIALIZED INV] Error in quick sell`, {
+      // Expected 4xx rejections (e.g. "ya fue vendido" re-submits of an already-completed
+      // sale) are user-flow noise, not incidents — log as warn so error dashboards only
+      // surface real failures. The global error handler still records the AppError.
+      const isOperational = error instanceof AppError && error.statusCode < 500
+      const logQuickSellError = isOperational ? logger.warn.bind(logger) : logger.error.bind(logger)
+      logQuickSellError(`❌ [SERIALIZED INV] Error in quick sell`, {
         correlationId: req.correlationId,
         error: error instanceof Error ? error.message : 'Unknown error',
       })
