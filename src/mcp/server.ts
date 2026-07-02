@@ -32,6 +32,7 @@ import { registerTrendTools } from './tools/trends'
 import { registerOrganizationTools } from './tools/organizations'
 import { registerPaymentLinkTools } from './tools/paymentLinks'
 import { registerLoyaltyTools } from './tools/loyalty'
+import { registerReferralTools } from './tools/referrals'
 import { registerSeatTools } from './tools/seats'
 import { registerPlanAdminTools } from './tools/planAdmin'
 import { registerSaleVerificationTools } from './tools/saleVerifications'
@@ -89,6 +90,7 @@ async function buildServerForIdentity(staffId: string, activeOrg: string): Promi
   registerPaymentLinkTools(server, scope)
   registerSeatTools(server, scope)
   registerLoyaltyTools(server, scope)
+  registerReferralTools(server, scope)
   registerPlanAdminTools(server, scope)
   registerSaleVerificationTools(server, scope)
   registerAccountingTools(server, scope)
