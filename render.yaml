@@ -122,4 +122,4 @@ services:
       - key: FISCAL_PROVIDER_KEY
         sync: false
       - key: FRONTEND_URL
-        value: https://dashboardv2.avoqado.io
+        value: https://dashboard.avoqado.io
