@@ -130,6 +130,8 @@ const prismaMock: any = {
   customerDiscount: createMockModel(),
   orderDiscount: createMockModel(),
   // Referral Program — configurable tier rewards (grant + unlock tables)
+  referral: createMockModel(),
+  referralProgramConfig: createMockModel(),
   referralTierReward: {
     findMany: jest.fn().mockResolvedValue([]),
     create: jest.fn(),
