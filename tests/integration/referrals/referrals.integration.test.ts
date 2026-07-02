@@ -116,11 +116,16 @@ describe('Referral Program — end-to-end integration', () => {
       venueId,
       newCustomerDiscountPercent: 10,
       tier1ReferralsRequired: 1, // tier-up immediately on first qualified referral
-      tier1RewardPercent: 15,
       tier2ReferralsRequired: 2,
-      tier2RewardPercent: 20,
       tier3ReferralsRequired: 3,
-      tier3RewardPercent: 25,
+      // NEW config API (Task 3): rewards are configured via `tiers`, not
+      // the deprecated flat `tier{N}RewardPercent` fields — those are
+      // type-compat only and are never written/read by the service anymore.
+      tiers: [
+        { tierLevel: 1, rewardType: 'PERCENT_COUPON', rewardPercent: 15 },
+        { tierLevel: 2, rewardType: 'PERCENT_COUPON', rewardPercent: 20 },
+        { tierLevel: 3, rewardType: 'PERCENT_COUPON', rewardPercent: 25 },
+      ],
       rewardCouponExpiryDays: 90,
       codePrefix: 'TESTSMOKE',
     })
@@ -214,11 +219,16 @@ describe('Referral Program — end-to-end integration', () => {
       venueId,
       newCustomerDiscountPercent: 10,
       tier1ReferralsRequired: 1,
-      tier1RewardPercent: 15,
       tier2ReferralsRequired: 2,
-      tier2RewardPercent: 20,
       tier3ReferralsRequired: 3,
-      tier3RewardPercent: 25,
+      // NEW config API (Task 3): rewards are configured via `tiers`, not
+      // the deprecated flat `tier{N}RewardPercent` fields — those are
+      // type-compat only and are never written/read by the service anymore.
+      tiers: [
+        { tierLevel: 1, rewardType: 'PERCENT_COUPON', rewardPercent: 15 },
+        { tierLevel: 2, rewardType: 'PERCENT_COUPON', rewardPercent: 20 },
+        { tierLevel: 3, rewardType: 'PERCENT_COUPON', rewardPercent: 25 },
+      ],
       rewardCouponExpiryDays: 90,
       codePrefix: 'TESTSMOKE',
     })
@@ -321,11 +331,16 @@ describe('Referral Program — end-to-end integration', () => {
       venueId,
       newCustomerDiscountPercent: 10,
       tier1ReferralsRequired: 1,
-      tier1RewardPercent: 15,
       tier2ReferralsRequired: 2,
-      tier2RewardPercent: 20,
       tier3ReferralsRequired: 3,
-      tier3RewardPercent: 25,
+      // NEW config API (Task 3): rewards are configured via `tiers`, not
+      // the deprecated flat `tier{N}RewardPercent` fields — those are
+      // type-compat only and are never written/read by the service anymore.
+      tiers: [
+        { tierLevel: 1, rewardType: 'PERCENT_COUPON', rewardPercent: 15 },
+        { tierLevel: 2, rewardType: 'PERCENT_COUPON', rewardPercent: 20 },
+        { tierLevel: 3, rewardType: 'PERCENT_COUPON', rewardPercent: 25 },
+      ],
       rewardCouponExpiryDays: 90,
       codePrefix: 'TESTSMOKE',
     })
@@ -405,11 +420,16 @@ describe('Referral Program — end-to-end integration', () => {
       venueId,
       newCustomerDiscountPercent: 10,
       tier1ReferralsRequired: 7,
-      tier1RewardPercent: 15,
       tier2ReferralsRequired: 12,
-      tier2RewardPercent: 20,
       tier3ReferralsRequired: 20,
-      tier3RewardPercent: 25,
+      // NEW config API (Task 3): rewards are configured via `tiers`, not
+      // the deprecated flat `tier{N}RewardPercent` fields — those are
+      // type-compat only and are never written/read by the service anymore.
+      tiers: [
+        { tierLevel: 1, rewardType: 'PERCENT_COUPON', rewardPercent: 15 },
+        { tierLevel: 2, rewardType: 'PERCENT_COUPON', rewardPercent: 20 },
+        { tierLevel: 3, rewardType: 'PERCENT_COUPON', rewardPercent: 25 },
+      ],
       rewardCouponExpiryDays: 90,
       codePrefix: 'TESTSMOKE',
     })
@@ -438,11 +458,16 @@ describe('Referral Program — end-to-end integration', () => {
       venueId,
       newCustomerDiscountPercent: 10,
       tier1ReferralsRequired: 7,
-      tier1RewardPercent: 15,
       tier2ReferralsRequired: 12,
-      tier2RewardPercent: 20,
       tier3ReferralsRequired: 20,
-      tier3RewardPercent: 25,
+      // NEW config API (Task 3): rewards are configured via `tiers`, not
+      // the deprecated flat `tier{N}RewardPercent` fields — those are
+      // type-compat only and are never written/read by the service anymore.
+      tiers: [
+        { tierLevel: 1, rewardType: 'PERCENT_COUPON', rewardPercent: 15 },
+        { tierLevel: 2, rewardType: 'PERCENT_COUPON', rewardPercent: 20 },
+        { tierLevel: 3, rewardType: 'PERCENT_COUPON', rewardPercent: 25 },
+      ],
       rewardCouponExpiryDays: 90,
       codePrefix: 'TESTSMOKE',
     })
@@ -465,11 +490,16 @@ describe('Referral Program — end-to-end integration', () => {
       venueId,
       newCustomerDiscountPercent: 10,
       tier1ReferralsRequired: 7,
-      tier1RewardPercent: 15,
       tier2ReferralsRequired: 12,
-      tier2RewardPercent: 20,
       tier3ReferralsRequired: 20,
-      tier3RewardPercent: 25,
+      // NEW config API (Task 3): rewards are configured via `tiers`, not
+      // the deprecated flat `tier{N}RewardPercent` fields — those are
+      // type-compat only and are never written/read by the service anymore.
+      tiers: [
+        { tierLevel: 1, rewardType: 'PERCENT_COUPON', rewardPercent: 15 },
+        { tierLevel: 2, rewardType: 'PERCENT_COUPON', rewardPercent: 20 },
+        { tierLevel: 3, rewardType: 'PERCENT_COUPON', rewardPercent: 25 },
+      ],
       rewardCouponExpiryDays: 90,
       codePrefix: 'TESTSMOKE',
     })
@@ -510,11 +540,16 @@ describe('Referral Program — end-to-end integration', () => {
       venueId,
       newCustomerDiscountPercent: 10,
       tier1ReferralsRequired: 1,
-      tier1RewardPercent: 15,
       tier2ReferralsRequired: 2,
-      tier2RewardPercent: 20,
       tier3ReferralsRequired: 3,
-      tier3RewardPercent: 25,
+      // NEW config API (Task 3): rewards are configured via `tiers`, not
+      // the deprecated flat `tier{N}RewardPercent` fields — those are
+      // type-compat only and are never written/read by the service anymore.
+      tiers: [
+        { tierLevel: 1, rewardType: 'PERCENT_COUPON', rewardPercent: 15 },
+        { tierLevel: 2, rewardType: 'PERCENT_COUPON', rewardPercent: 20 },
+        { tierLevel: 3, rewardType: 'PERCENT_COUPON', rewardPercent: 25 },
+      ],
       rewardCouponExpiryDays: 90,
       codePrefix: 'TESTSMOKE',
     })
