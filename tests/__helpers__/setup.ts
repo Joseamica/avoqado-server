@@ -129,6 +129,18 @@ const prismaMock: any = {
   couponRedemption: createMockModel(),
   customerDiscount: createMockModel(),
   orderDiscount: createMockModel(),
+  // Referral Program — configurable tier rewards (grant + unlock tables)
+  referralTierReward: { findMany: jest.fn().mockResolvedValue([]), create: jest.fn(), update: jest.fn(), findUnique: jest.fn() },
+  referralRewardGrant: {
+    findMany: jest.fn().mockResolvedValue([]),
+    create: jest.fn(),
+    createMany: jest.fn().mockResolvedValue({ count: 1 }),
+    update: jest.fn(),
+    updateMany: jest.fn(),
+    findUnique: jest.fn(),
+    findFirst: jest.fn(),
+  },
+  referralTierUnlock: { createMany: jest.fn().mockResolvedValue({ count: 1 }), findUnique: jest.fn() },
   // Venue Role Config (custom role display names)
   venueRoleConfig: createMockModel(),
   // Invitation and StaffOrganization models
