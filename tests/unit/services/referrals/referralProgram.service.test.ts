@@ -406,5 +406,66 @@ describe('referralProgram.service', () => {
       expect(mockedPrisma.referralTierReward.updateMany).not.toHaveBeenCalled()
       expect(mockedPrisma.referralProgramConfig.findUnique).not.toHaveBeenCalled()
     })
+
+    // ==========================================
+    // AUDIT — REFERRAL_CONFIG_UPDATED (final-review fix: config edits change
+    // reward economics with no audit trail otherwise)
+    // ==========================================
+
+    it('writes a REFERRAL_CONFIG_UPDATED ActivityLog row with staffId on a scalar patch', async () => {
+      mockedPrisma.referralProgramConfig.update.mockResolvedValue({ id: 'cfg1', venueId: 'venue_1' })
+      await updateReferralConfig({
+        venueId: 'venue_1',
+        patch: { newCustomerDiscountPercent: 18 },
+        staffId: 'staff_1',
+      })
+      expect(mockedPrisma.activityLog.create).toHaveBeenCalledWith({
+        data: {
+          staffId: 'staff_1',
+          venueId: 'venue_1',
+          action: 'REFERRAL_CONFIG_UPDATED',
+          entity: 'ReferralProgramConfig',
+          entityId: 'cfg1',
+          data: {
+            changedFields: ['newCustomerDiscountPercent'],
+            tiersChanged: [],
+          },
+        },
+      })
+    })
+
+    it('writes a REFERRAL_CONFIG_UPDATED ActivityLog row for a tiers-only update', async () => {
+      mockedPrisma.referralProgramConfig.findUnique.mockResolvedValue({ id: 'cfg1', venueId: 'v1' })
+      await updateReferralConfig({
+        venueId: 'v1',
+        tiers: [{ tierLevel: 1, rewardType: 'PERCENT_COUPON', rewardPercent: 15 }],
+        staffId: 'staff_2',
+      })
+      expect(mockedPrisma.activityLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            staffId: 'staff_2',
+            entityId: 'cfg1',
+            action: 'REFERRAL_CONFIG_UPDATED',
+          }),
+        }),
+      )
+    })
+
+    it('defaults ActivityLog staffId to null when not provided', async () => {
+      mockedPrisma.referralProgramConfig.update.mockResolvedValue({ id: 'cfg1', venueId: 'venue_1' })
+      await updateReferralConfig({ venueId: 'venue_1', patch: { newCustomerDiscountPercent: 18 } })
+      expect(mockedPrisma.activityLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ staffId: null }),
+        }),
+      )
+    })
+
+    it('REGRESSION: does not write ActivityLog on a true no-op call (no patch, no tiers)', async () => {
+      await updateReferralConfig({ venueId: 'venue_1' })
+      expect(mockedPrisma.activityLog.create).not.toHaveBeenCalled()
+      expect(mockedPrisma.referralProgramConfig.update).not.toHaveBeenCalled()
+    })
   })
 })

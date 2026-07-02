@@ -5242,6 +5242,25 @@ model Referral {
   @@index([referrerCustomerId])
   @@index([referredCustomerId])
   @@index([status])
+  // 🔴 MANUALLY-MAINTAINED PARTIAL UNIQUE INDEX — NOT expressible in Prisma's schema DSL.
+  // Prisma has no `where:` clause for `@@unique`/`@@index`, so this index is invisible here
+  // and lives ONLY as raw SQL in migration `20260702173915_referral_configurable_rewards`:
+  //
+  //   CREATE UNIQUE INDEX "Referral_qualifyingOrderId_active_key"
+  //     ON "Referral" ("qualifyingOrderId")
+  //     WHERE "status" IN ('PENDING','QUALIFIED') AND "qualifyingOrderId" IS NOT NULL;
+  //
+  // Purpose: guards once-per-order referral claims (an Order can qualify at most ONE
+  // active — PENDING/QUALIFIED — Referral at a time; VOIDed rows are excluded so a
+  // dedupe/void doesn't permanently block reuse of the same qualifyingOrderId).
+  //
+  // Verified 2026-07-02: `prisma migrate diff --from-url $DATABASE_URL --to-schema-datamodel
+  // prisma/schema.prisma` reports "No difference detected" (exit 0) — Prisma's diff engine
+  // does not currently attempt to manage/drop indexes it cannot represent. Still, this is NOT
+  // a guarantee across Prisma versions. If a FUTURE generated migration (`prisma migrate dev`)
+  // ever proposes `DROP INDEX "Referral_qualifyingOrderId_active_key"`, REMOVE that statement
+  // by hand before applying — dropping it would allow duplicate active referral claims on the
+  // same order.
 }
 
 model ReferralTierReward {

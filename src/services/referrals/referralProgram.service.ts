@@ -365,6 +365,13 @@ export interface UpdateConfigInput {
    * top-level `tiers` wins.
    */
   tiers?: TierRewardInput[]
+  /**
+   * The authenticated `Staff.id` (authContext.userId), threaded into
+   * ActivityLog.staffId for audit accountability — this endpoint changes
+   * reward economics (thresholds, per-tier rewards) so it must be
+   * attributable, same as `fulfillGrant`'s `staffId`.
+   */
+  staffId?: string
 }
 
 /**
@@ -373,6 +380,15 @@ export interface UpdateConfigInput {
  * activation; `tiers` (if present) go through `validateTierRewards` and
  * are persisted to `ReferralTierReward` via the versioning rule in
  * `persistTierRewards` — NEVER written to the legacy flat columns.
+ *
+ * Audit: on any actual change (scalar patch and/or tiers), writes a
+ * `REFERRAL_CONFIG_UPDATED` ActivityLog row AFTER the update(s) succeed —
+ * mirrors `deactivateReferralProgram`'s pattern of separate, non-nested
+ * `update` + `activityLog.create` calls (this function's two branches are
+ * independently optional and already run outside a shared transaction, so
+ * there is no single tx to fold the log into). A no-op call (empty patch,
+ * no tiers) writes nothing, same as the "don't log no-ops" rule elsewhere
+ * in the codebase.
  */
 export async function updateReferralConfig(input: UpdateConfigInput): Promise<void> {
   const patch = input.patch ?? {}
@@ -388,11 +404,15 @@ export async function updateReferralConfig(input: UpdateConfigInput): Promise<vo
   // update — the service must never write them (spec §4.5).
   const { tier1RewardPercent: _t1, tier2RewardPercent: _t2, tier3RewardPercent: _t3, tiers: _tiersInPatch, ...cleanPatch } = patch
 
-  if (Object.keys(cleanPatch).length > 0) {
-    await prisma.referralProgramConfig.update({
+  let configId: string | undefined
+  const scalarChanged = Object.keys(cleanPatch).length > 0
+
+  if (scalarChanged) {
+    const updated = await prisma.referralProgramConfig.update({
       where: { venueId: input.venueId },
       data: cleanPatch,
     })
+    configId = updated.id
   }
 
   if (tiers.length > 0) {
@@ -401,6 +421,23 @@ export async function updateReferralConfig(input: UpdateConfigInput): Promise<vo
       select: { id: true },
     })
     if (!config) throw new Error('REFERRAL_PROGRAM_NOT_CONFIGURED')
+    configId = config.id
     await persistTierRewards(config.id, tiers)
+  }
+
+  if (configId && (scalarChanged || tiers.length > 0)) {
+    await prisma.activityLog.create({
+      data: {
+        staffId: input.staffId ?? null,
+        venueId: input.venueId,
+        action: 'REFERRAL_CONFIG_UPDATED',
+        entity: 'ReferralProgramConfig',
+        entityId: configId,
+        data: {
+          changedFields: Object.keys(cleanPatch),
+          tiersChanged: tiers.map(t => t.tierLevel),
+        },
+      },
+    })
   }
 }

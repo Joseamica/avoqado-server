@@ -42,29 +42,37 @@ export async function fulfillGrant(input: FulfillGrantInput): Promise<ReferralRe
     throw new Error('GRANT_NO_PENDIENTE')
   }
 
-  const updated = await prisma.referralRewardGrant.update({
-    where: { id: input.grantId },
-    data: {
-      status: 'MANUAL_FULFILLED',
-      fulfilledAt: new Date(),
-      fulfilledByStaffVenueId: input.performedBy,
-    },
-  })
-
-  await prisma.activityLog.create({
-    data: {
-      venueId: input.venueId,
-      action: 'REFERRAL_COURTESY_FULFILLED',
-      entity: 'ReferralRewardGrant',
-      entityId: grant.id,
-      staffId: input.staffId ?? null,
+  // Update + audit log are wrapped in ONE transaction (mirrors onOrderPaid's
+  // tx.activityLog.create pattern in referralQualification.service) so a
+  // transient DB blip between the two can never leave the grant flipped to
+  // MANUAL_FULFILLED with no ActivityLog row to show for it.
+  const updated = await prisma.$transaction(async tx => {
+    const result = await tx.referralRewardGrant.update({
+      where: { id: input.grantId },
       data: {
-        rewardProductId: grant.rewardProductId,
-        rewardQuantity: grant.rewardQuantity,
-        customerId: grant.customerId,
+        status: 'MANUAL_FULFILLED',
+        fulfilledAt: new Date(),
         fulfilledByStaffVenueId: input.performedBy,
       },
-    },
+    })
+
+    await tx.activityLog.create({
+      data: {
+        venueId: input.venueId,
+        action: 'REFERRAL_COURTESY_FULFILLED',
+        entity: 'ReferralRewardGrant',
+        entityId: grant.id,
+        staffId: input.staffId ?? null,
+        data: {
+          rewardProductId: grant.rewardProductId,
+          rewardQuantity: grant.rewardQuantity,
+          customerId: grant.customerId,
+          fulfilledByStaffVenueId: input.performedBy,
+        },
+      },
+    })
+
+    return result
   })
 
   return updated

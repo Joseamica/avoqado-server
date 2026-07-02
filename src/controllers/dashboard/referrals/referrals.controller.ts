@@ -39,7 +39,8 @@ export async function activate(req: Request, res: Response, next: NextFunction) 
 
 export async function updateConfig(req: Request, res: Response, next: NextFunction) {
   try {
-    await program.updateReferralConfig({ venueId: req.params.venueId, patch: req.body })
+    const authContext = (req as any).authContext
+    await program.updateReferralConfig({ venueId: req.params.venueId, patch: req.body, staffId: authContext?.userId })
     res.json({ ok: true })
   } catch (e) {
     next(e)
