@@ -377,6 +377,25 @@ async function accessTokenFor(conn: {
   )
 }
 
+/**
+ * Efecto compartido ante un fallo de token/proveedor en una LECTURA (saldo o
+ * movimientos): invalida el access token cacheado (para no reusar uno muerto) y
+ * degrada la conexión operante a NEEDS_REAUTH — así la UI muestra "Reconectar" en
+ * vez de dejar la conexión como "Conectada" cuando en realidad el refresh silencioso
+ * ya no funciona. Best-effort y filtrado por status: nunca pisa REVOKED/ERROR/PENDING_*.
+ */
+async function markConnectionNeedsReauth(connectionId: string, error: Error) {
+  tokenCache.delete(connectionId)
+  try {
+    await prisma.financialConnection.updateMany({
+      where: { id: connectionId, status: { in: ['CONNECTED', 'NEEDS_REAUTH'] } },
+      data: { status: 'NEEDS_REAUTH', lastError: error.message },
+    })
+  } catch {
+    /* best-effort: nunca enmascarar el error original */
+  }
+}
+
 /** Resuelve el idCuenta del provider para una FinancialAccount, backfilleando filas pre-columna. */
 async function resolveCuentaId(
   fa: { id: string; externalId: string; externalCuentaId: string | null },
@@ -398,8 +417,17 @@ export async function getMovementsForAccount(financialAccountId: string, q: Move
     where: { id: financialAccountId },
     include: { connection: { include: { provider: true } } },
   })
-  const { cuentaId, accessToken } = await resolveCuentaId(fa, fa.connection)
-  return clientFor(fa.connection.provider.code).listMovements({ accessToken }, cuentaId, q)
+  try {
+    const { cuentaId, accessToken } = await resolveCuentaId(fa, fa.connection)
+    return await clientFor(fa.connection.provider.code).listMovements({ accessToken }, cuentaId, q)
+  } catch (e) {
+    // A diferencia del saldo (que muestra el último valor cacheado), movimientos es
+    // siempre una lectura en vivo: si el token murió y el refresh silencioso falla,
+    // se degrada la conexión a NEEDS_REAUTH y se responde un 400 honesto ("reconéctate")
+    // en vez de un 500 crudo con el AxiosError del proveedor.
+    await markConnectionNeedsReauth(fa.connection.id, e as Error)
+    throw e instanceof BadRequestError ? e : new BadRequestError('No se pudieron obtener los movimientos; vuelve a conectar la cuenta.')
+  }
 }
 
 export async function getMovementStatsForAccount(
@@ -410,8 +438,13 @@ export async function getMovementStatsForAccount(
     where: { id: financialAccountId },
     include: { connection: { include: { provider: true } } },
   })
-  const { cuentaId, accessToken } = await resolveCuentaId(fa, fa.connection)
-  return clientFor(fa.connection.provider.code).getMovementStats({ accessToken }, cuentaId, range)
+  try {
+    const { cuentaId, accessToken } = await resolveCuentaId(fa, fa.connection)
+    return await clientFor(fa.connection.provider.code).getMovementStats({ accessToken }, cuentaId, range)
+  } catch (e) {
+    await markConnectionNeedsReauth(fa.connection.id, e as Error)
+    throw e instanceof BadRequestError ? e : new BadRequestError('No se pudieron obtener las estadísticas; vuelve a conectar la cuenta.')
+  }
 }
 
 export async function getBalanceForConnectionAccount(financialAccountId: string) {
@@ -443,23 +476,10 @@ export async function getBalanceForConnectionAccount(financialAccountId: string)
       state: state as 'OK' | 'ERROR',
     }
   } catch (e) {
-    // Invalida el cache para que la próxima llamada no reutilice un access token muerto.
-    tokenCache.delete(fa.connection.id)
-    // Estos updates son de mejor esfuerzo: si fallan (o el mock/cliente no
-    // devuelve una promesa real), NUNCA deben enmascarar el error original ni
-    // impedir el retorno del estado ERROR honesto de abajo. try/catch en vez
-    // de encadenar .catch() — así funciona aunque la llamada no sea thenable.
-    try {
-      // updateMany con filtro de status: NUNCA pisar REVOKED/ERROR/PENDING_* con
-      // NEEDS_REAUTH — solo una conexión que estaba operando (CONNECTED) o que ya
-      // pedía re-auth degrada por esta vía. También evita el P2025 de update().
-      await prisma.financialConnection.updateMany({
-        where: { id: fa.connection.id, status: { in: ['CONNECTED', 'NEEDS_REAUTH'] } },
-        data: { status: 'NEEDS_REAUTH', lastError: (e as Error).message },
-      })
-    } catch {
-      /* best-effort */
-    }
+    // Invalida el cache + degrada la conexión a NEEDS_REAUTH (helper compartido con
+    // movimientos). El saldo, además, marca la cuenta en ERROR y devuelve un estado
+    // honesto (null, nunca un $0 falso) en vez de propagar el error.
+    await markConnectionNeedsReauth(fa.connection.id, e as Error)
     try {
       await prisma.financialAccount.update({ where: { id: fa.id }, data: { balanceState: 'ERROR', lastError: (e as Error).message } })
     } catch {

@@ -264,6 +264,23 @@ it('getMovementsForAccount: si el provider no reporta cuentaId → BadRequest, n
   await expect(svc.getMovementsForAccount('fa3', { page: 0, size: 10 })).rejects.toThrow()
 })
 
+it('getMovementsForAccount: token/provider muere → degrada la conexión a NEEDS_REAUTH y lanza 400 honesto (no 500 crudo)', async () => {
+  db.financialAccount.findUniqueOrThrow.mockResolvedValue({
+    id: 'fa-mov-err', externalId: 'neg-1', externalCuentaId: 'cta-1',
+    connection: { id: 'cm-moverr', mode: 'SELF_CONNECT', grantEnc: encFixture(), tokenVersion: 0, deviceIdentifier: 'dev', status: 'CONNECTED', provider: { code: 'EXTERNAL_BANK' } },
+  })
+  db.financialConnection.findUniqueOrThrow.mockResolvedValue({ id: 'cm-moverr', grantEnc: encFixture(), tokenVersion: 0, status: 'CONNECTED' })
+  // El refresh silencioso truena (bug de QPay con 2FA cuando el token cacheado murió).
+  clientMock.refresh.mockRejectedValue(new Error('Request failed with status code 400'))
+  const { BadRequestError } = require('@/errors/AppError')
+  await expect(svc.getMovementsForAccount('fa-mov-err', { page: 0, size: 10 })).rejects.toBeInstanceOf(BadRequestError)
+  // Degradó la conexión operante a NEEDS_REAUTH (filtrado por status) → la UI muestra "Reconectar".
+  expect(db.financialConnection.updateMany).toHaveBeenCalledWith(
+    expect.objectContaining({ where: expect.objectContaining({ status: { in: ['CONNECTED', 'NEEDS_REAUTH'] } }), data: expect.objectContaining({ status: 'NEEDS_REAUTH' }) }),
+  )
+  expect(clientMock.listMovements).not.toHaveBeenCalled()
+})
+
 it('refresh path takes the advisory lock (pg_advisory_xact_lock) inside a tx', async () => {
   // Distinct connection/account ids from the previous test — the service keeps an
   // in-memory tokenCache keyed by connectionId that outlives a single it() block
