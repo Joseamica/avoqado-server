@@ -215,6 +215,13 @@ export const externalBankClient: FinancialProviderClient = {
     // (Confirmado en vivo: con cuentaId en la ruta el proveedor ignora el filtro y devuelve
     //  un pool global de ~5.1M movimientos ajenos; con idNegocio+query idCuenta da los reales.)
     const params: Record<string, unknown> = { 'Pagination.Page': query.page, 'Pagination.Size': query.size, idCuenta: cuentaId }
+    // Estado de cuenta = más reciente primero. Sin esto QPay devuelve su orden interno (NO por
+    // fechaCreacion), lo que con paginación deja la página 1 barajada en vez de los 10 más nuevos.
+    // El orden debe pedirse server-side: ordenar en el cliente solo reordenaría los 10 de la página
+    // actual, no el conjunto. El valor de SortByFecha no está documentado; en el API .NET un valor
+    // de query no reconocido se ignora (no truena), así que 'desc' es fix en el mejor caso y no-op
+    // en el peor — a validar contra el estado de cuenta real.
+    params.SortByFecha = 'desc'
     if (query.from) params.FechaInicio = query.from
     if (query.to) params.FechaFinal = query.to
     const { data } = await axios.get(`${base()}/api/clients/movimientos/${idNegocio}`, {
