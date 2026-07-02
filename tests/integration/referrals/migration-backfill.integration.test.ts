@@ -104,6 +104,7 @@ async function runBackfillSql(opts: { configId?: string; customerId?: string }) 
 }
 
 describe('Referral backfill migration — ReferralTierReward + ReferralTierUnlock', () => {
+  let orgId: string
   let venueId: string
   let configId: string
   let tier2CustomerId: string
@@ -121,6 +122,7 @@ describe('Referral backfill migration — ReferralTierReward + ReferralTierUnloc
     await prisma.customer.deleteMany({ where: { venueId } })
     await prisma.referralProgramConfig.deleteMany({ where: { venueId } })
     await prisma.venue.deleteMany({ where: { id: venueId } })
+    await prisma.organization.deleteMany({ where: { id: orgId } })
   }
 
   beforeAll(async () => {
@@ -133,6 +135,7 @@ describe('Referral backfill migration — ReferralTierReward + ReferralTierUnloc
         phone: '5550000001',
       },
     })
+    orgId = org.id
 
     const venue = await prisma.venue.create({
       data: {
@@ -153,23 +156,25 @@ describe('Referral backfill migration — ReferralTierReward + ReferralTierUnloc
     })
     configId = config.id
 
+    const phoneDigits = suffix.replace(/\D/g, '').slice(-5)
+
     const tier2Customer = await prisma.customer.create({
-      data: { venueId, firstName: 'Tier2', lastName: 'Backfill', phone: `55900${suffix}`.slice(0, 10), referralTier: 'TIER_2' },
+      data: { venueId, firstName: 'Tier2', lastName: 'Backfill', phone: `55900${phoneDigits}`, referralTier: 'TIER_2' },
     })
     tier2CustomerId = tier2Customer.id
 
     const tier3Customer = await prisma.customer.create({
-      data: { venueId, firstName: 'Tier3', lastName: 'Backfill', phone: `55901${suffix}`.slice(0, 10), referralTier: 'TIER_3' },
+      data: { venueId, firstName: 'Tier3', lastName: 'Backfill', phone: `55901${phoneDigits}`, referralTier: 'TIER_3' },
     })
     tier3CustomerId = tier3Customer.id
 
     const noTierCustomer = await prisma.customer.create({
-      data: { venueId, firstName: 'NoTier', lastName: 'Backfill', phone: `55902${suffix}`.slice(0, 10) },
+      data: { venueId, firstName: 'NoTier', lastName: 'Backfill', phone: `55902${phoneDigits}` },
     })
     noTierCustomerId = noTierCustomer.id
 
     const tier1RepeatCustomer = await prisma.customer.create({
-      data: { venueId, firstName: 'Tier1Repeat', lastName: 'Backfill', phone: `55903${suffix}`.slice(0, 10), referralTier: 'TIER_1' },
+      data: { venueId, firstName: 'Tier1Repeat', lastName: 'Backfill', phone: `55903${phoneDigits}`, referralTier: 'TIER_1' },
     })
     tier1RepeatCustomerId = tier1RepeatCustomer.id
   })
