@@ -10,6 +10,11 @@ import type {
   ProviderAccount,
   BalanceSnapshot,
   ConnectionContext,
+  ProviderMovement,
+  MovementPage,
+  MovementCategoryStats,
+  MovementStats,
+  MovementQuery,
 } from './types'
 
 const base = () => env.EXTERNAL_BANK_API_BASE
@@ -72,6 +77,32 @@ async function signIn(email: string, password: string, deviceIdentifier: string)
     if (axios.isAxiosError(e))
       throw new BadRequestError(pick<string>(e.response?.data, 'message') || `sign-in falló (status ${e.response?.status})`)
     throw e
+  }
+}
+
+/** Números del provider que llegan como string ("1500.75") — u honestamente null. */
+function toNum(v: unknown): number | null {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v)
+    return Number.isFinite(n) ? n : null
+  }
+  return null
+}
+
+function normalizeMovement(m: unknown): ProviderMovement {
+  return {
+    id: pick<string>(m, 'idOperacion') ?? null,
+    type: pick<string>(m, 'tipoMovimiento') ?? null,
+    operationType: pick<string>(m, 'tipoOperacion') ?? null,
+    concept: pick<string>(m, 'concepto') ?? null,
+    date: pick<string>(m, 'fechaCreacion') ?? null,
+    amount: toNum(pick(m, 'monto')),
+    status: pick<string>(m, 'estatus') ?? null,
+    statusId: toNum(pick(m, 'idEstatus')),
+    beneficiary: pick<string>(m, 'nombreBeneficiario') ?? null,
+    originator: pick<string>(m, 'nombreOrdenante') ?? null,
+    reference: pick<string>(m, 'referencia') ?? null,
   }
 }
 
@@ -166,5 +197,45 @@ export const externalBankClient: FinancialProviderClient = {
     const acc = normalizeAccounts(await fetchMe(ctx.accessToken)).find(a => a.externalId === externalId)
     if (!acc) throw new NotFoundError(`No se encontró el negocio ${externalId} en la cuenta.`)
     return { amount: acc.balance, currency: 'MXN', active: acc.active, providerAccountLabel: acc.label }
+  },
+
+  async listMovements(ctx: ConnectionContext, cuentaId: string, query: MovementQuery): Promise<MovementPage> {
+    const params: Record<string, unknown> = { 'Pagination.Page': query.page, 'Pagination.Size': query.size }
+    if (query.from) params.FechaInicio = query.from
+    if (query.to) params.FechaFinal = query.to
+    const { data } = await axios.get(`${base()}/api/clients/movimientos/${cuentaId}`, {
+      headers: headers(ctx.accessToken),
+      params,
+      timeout: 20_000,
+    })
+    const raw = pick<unknown[]>(data, 'data')
+    return {
+      movements: Array.isArray(raw) ? raw.map(normalizeMovement) : [],
+      total: toNum(pick(data, 'total')) ?? 0,
+    }
+  },
+
+  async getMovementStats(ctx: ConnectionContext, cuentaId: string, range: { from?: string; to?: string }): Promise<MovementStats> {
+    const params: Record<string, unknown> = {}
+    if (range.from) params.FechaInicio = range.from
+    if (range.to) params.FechaFinal = range.to
+    const { data } = await axios.get(`${base()}/api/clients/movimientos/Estadisticas/${cuentaId}`, {
+      headers: headers(ctx.accessToken),
+      params,
+      timeout: 20_000,
+    })
+    const cat = (suffix: string): MovementCategoryStats => ({
+      amount: toNum(pick(data, `montoTransaccionado${suffix}`)),
+      fee: toNum(pick(data, `comisionCobrada${suffix}`)),
+      count: toNum(pick(data, `numeroOperaciones${suffix}`)),
+    })
+    return {
+      accountName: pick<string>(data, 'nombre') ?? null,
+      clabe: pick<string>(data, 'cuentaClabe') ?? null,
+      speiIn: cat('SpeiIn'),
+      speiOut: cat('SpeiOut'),
+      internalTransfers: cat('TransferenciaInterna'),
+      dispersions: cat('Dispersion'),
+    }
   },
 }

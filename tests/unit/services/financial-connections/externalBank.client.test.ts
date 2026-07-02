@@ -180,3 +180,57 @@ it('getBalance: unknown negocio → throws NotFound', async () => {
   const client = await loadClient()
   await expect(client.getBalance({ accessToken: 'acc-x' }, 'nope')).rejects.toThrow()
 })
+
+it('listMovements: pagina con notación punteada y normaliza el movimiento', async () => {
+  nock(BASE)
+    .get('/api/clients/movimientos/cta-1')
+    .query({ 'Pagination.Page': '0', 'Pagination.Size': '10', FechaInicio: '2026-07-01T00:00:00.000Z' })
+    .reply(200, {
+      total: 1,
+      data: [
+        {
+          idOperacion: 'op1',
+          tipoMovimiento: 'SPEI IN',
+          tipoOperacion: 'Abono',
+          concepto: 'Pago',
+          fechaCreacion: '2026-07-01T10:00:00Z',
+          monto: 150.5,
+          estatus: 'Liquidado',
+          idEstatus: 3,
+          nombreOrdenante: 'ACME',
+          referencia: '777',
+        },
+      ],
+    })
+  const client = await loadClient()
+  const r = await client.listMovements({ accessToken: 't' }, 'cta-1', { page: 0, size: 10, from: '2026-07-01T00:00:00.000Z' })
+  expect(r.total).toBe(1)
+  expect(r.movements[0]).toMatchObject({ id: 'op1', type: 'SPEI IN', amount: 150.5, originator: 'ACME', beneficiary: null })
+})
+
+it('getMovementStats: parsea los montos-string a número y preserva null en no-parseables', async () => {
+  nock(BASE)
+    .get('/api/clients/movimientos/Estadisticas/cta-1')
+    .query(true)
+    .reply(200, {
+      nombre: 'AV-X',
+      cuentaClabe: '7381',
+      montoTransaccionadoSpeiIn: '1500.75',
+      numeroOperacionesSpeiIn: '3',
+      comisionCobradaSpeiIn: '12.5',
+      montoTransaccionadoSpeiOut: 'garbage',
+      numeroOperacionesSpeiOut: '1',
+      comisionCobradaSpeiOut: '0',
+      montoTransaccionadoTransferenciaInterna: '0',
+      numeroOperacionesTransferenciaInterna: '0',
+      comisionCobradaTransferenciaInterna: '0',
+      montoTransaccionadoDispersion: '200',
+      numeroOperacionesDispersion: '2',
+      comisionCobradaDispersion: '1',
+    })
+  const client = await loadClient()
+  const s = await client.getMovementStats({ accessToken: 't' }, 'cta-1', { from: '2026-07-01T00:00:00.000Z' })
+  expect(s.speiIn).toEqual({ amount: 1500.75, count: 3, fee: 12.5 })
+  expect(s.speiOut.amount).toBeNull() // 'garbage' NO se convierte en 0
+  expect(s.dispersions.amount).toBe(200)
+})

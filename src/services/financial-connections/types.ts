@@ -23,6 +23,52 @@ export interface BalanceSnapshot {
   providerAccountLabel: string | null
 }
 
+/** Un movimiento (SPEI in/out, transferencia interna, dispersión) tal como lo normaliza el client. */
+export interface ProviderMovement {
+  id: string | null
+  type: string | null // tipoMovimiento
+  operationType: string | null // tipoOperacion
+  concept: string | null
+  date: string | null // fechaCreacion (ISO del provider, passthrough)
+  amount: number | null
+  status: string | null
+  statusId: number | null
+  beneficiary: string | null
+  originator: string | null
+  reference: string | null
+}
+
+/** Página de movimientos. */
+export interface MovementPage {
+  movements: ProviderMovement[]
+  total: number
+}
+
+/** Agregados de una categoría de movimiento (SPEI in, SPEI out, transferencia interna, dispersión). */
+export interface MovementCategoryStats {
+  amount: number | null
+  fee: number | null
+  count: number | null
+}
+
+/** Estadísticas de movimientos de una cuenta, por categoría. */
+export interface MovementStats {
+  accountName: string | null
+  clabe: string | null
+  speiIn: MovementCategoryStats
+  speiOut: MovementCategoryStats
+  internalTransfers: MovementCategoryStats
+  dispersions: MovementCategoryStats
+}
+
+/** Query de paginación/rango para listMovements. */
+export interface MovementQuery {
+  page: number
+  size: number
+  from?: string
+  to?: string
+}
+
 /** Resultado de connect/validateDevice/validateTwoFactorCode. */
 export type ConnectResult =
   // `accessToken`: el token de sesión ya válido con el que se acaba de autenticar.
@@ -62,4 +108,6 @@ export interface FinancialProviderClient {
   revoke(ctx: ConnectionContext): Promise<void>
   listAccounts(ctx: ConnectionContext): Promise<ProviderAccount[]>
   getBalance(ctx: ConnectionContext, externalId: string): Promise<BalanceSnapshot>
+  listMovements(ctx: ConnectionContext, cuentaId: string, query: MovementQuery): Promise<MovementPage>
+  getMovementStats(ctx: ConnectionContext, cuentaId: string, range: { from?: string; to?: string }): Promise<MovementStats>
 }
