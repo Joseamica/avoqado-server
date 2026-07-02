@@ -242,7 +242,7 @@ export function enforceBookingWindow(startsAt: Date, scheduling?: { maxAdvanceDa
   if (maxAdvanceDays !== null && maxAdvanceDays !== undefined && maxAdvanceDays > 0) {
     const latestAllowed = now + maxAdvanceDays * 24 * 60 * 60 * 1000
     if (startMs > latestAllowed) {
-      throw new ValidationError(`No puedes reservar con tanta anticipacion. Maximo ${maxAdvanceDays} dias.`)
+      throw new ValidationError(`No puedes reservar con tanta anticipación. Máximo ${maxAdvanceDays} días.`)
     }
   }
 
@@ -250,7 +250,7 @@ export function enforceBookingWindow(startsAt: Date, scheduling?: { maxAdvanceDa
   if (minNoticeMin !== null && minNoticeMin !== undefined && minNoticeMin > 0) {
     const earliestAllowed = now + minNoticeMin * 60 * 1000
     if (startMs < earliestAllowed) {
-      throw new ValidationError(`Esta reservacion requiere al menos ${minNoticeMin} minutos de anticipacion.`)
+      throw new ValidationError(`Esta reservación requiere al menos ${minNoticeMin} minutos de anticipación.`)
     }
   }
 }

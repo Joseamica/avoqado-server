@@ -1671,10 +1671,10 @@ export async function cancelReservation(req: Request, res: Response, next: NextF
       const minHours = settings.cancellation.minHoursBeforeStart
       const message =
         decision.reason === 'TOO_LATE' && minHours != null
-          ? `No se puede cancelar con menos de ${minHours} horas de anticipacion. Contacta al negocio directamente.`
+          ? `No se puede cancelar con menos de ${minHours} horas de anticipación. Contacta al negocio directamente.`
           : decision.reason === 'NOT_CANCELLABLE_STATUS'
-            ? 'Esta reservacion ya no se puede cancelar en linea. Contacta al negocio directamente.'
-            : 'La cancelacion en linea no esta permitida. Contacta al negocio directamente.'
+            ? 'Esta reservación ya no se puede cancelar en línea. Contacta al negocio directamente.'
+            : 'La cancelación en línea no está permitida. Contacta al negocio directamente.'
       throw new BadRequestError(message)
     }
 
