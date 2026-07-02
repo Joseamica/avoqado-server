@@ -38,6 +38,8 @@ beforeEach(() => {
     findMany: jest.fn(),
   }
   db.financialAccount = { createMany: jest.fn(), findUniqueOrThrow: jest.fn(), findFirst: jest.fn(), update: jest.fn() }
+  // Dedup de traspasos internos lee ActivityLog: por defecto vacío (sin traspaso previo).
+  db.activityLog = { findMany: jest.fn().mockResolvedValue([]) }
   db.$transaction = jest.fn(async (fn: any) => fn(db))
   db.$executeRaw = jest.fn()
 })
@@ -314,6 +316,43 @@ it('sendInternalTransfer: origen sin altId → BadRequest y NO intenta enviar', 
 
 it('sendInternalTransfer: monto <= 0 → BadRequest (ni siquiera toca al proveedor)', async () => {
   await expect(svc.sendInternalTransfer('fa-x', { destAccountNumber: '155525', amount: 0, concept: '' })).rejects.toThrow('mayor a 0')
+})
+
+it('sendInternalTransfer: dedup — un traspaso idéntico reciente NO se reenvía (no toca al proveedor, devuelve el previo)', async () => {
+  db.financialAccount.findUniqueOrThrow.mockResolvedValue({
+    id: 'fa-dup', externalId: 'neg-1',
+    connection: { id: 'cm-dup', mode: 'SELF_CONNECT', grantEnc: encFixture(), tokenVersion: 0, deviceIdentifier: 'dev', status: 'CONNECTED', venueId: 'v1', provider: { code: 'EXTERNAL_BANK' } },
+  })
+  // Auditoría previa: mismo destino (155525) + mismo monto (1) hace instantes.
+  db.activityLog.findMany.mockResolvedValue([
+    { data: { destAccount: '155525', amount: 1, ok: true, movementId: 'mov-prev', message: 'OK' } },
+  ])
+  const r = await svc.sendInternalTransfer('fa-dup', { destAccountNumber: '155525', amount: 1, concept: 'Prueba' })
+  expect(clientMock.internalTransfer).not.toHaveBeenCalled() // jamás reenvió al proveedor
+  expect(clientMock.listAccounts).not.toHaveBeenCalled() // corta antes de resolver origen/destino
+  expect(r.ok).toBe(true)
+  expect(r.movementId).toBe('mov-prev') // devuelve el resultado del traspaso original
+  // No re-audita un envío que no ocurrió.
+  expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'FINANCIAL_INTERNAL_TRANSFER' }))
+})
+
+it('sendInternalTransfer: destino/monto DISTINTO a lo reciente NO se deduplica (sí envía)', async () => {
+  db.financialAccount.findUniqueOrThrow.mockResolvedValue({
+    id: 'fa-nd', externalId: 'neg-1',
+    connection: { id: 'cm-nd', mode: 'SELF_CONNECT', grantEnc: encFixture(), tokenVersion: 0, deviceIdentifier: 'dev', status: 'CONNECTED', venueId: 'v1', provider: { code: 'EXTERNAL_BANK' } },
+  })
+  db.financialConnection.findUniqueOrThrow.mockResolvedValue({ id: 'cm-nd', grantEnc: encFixture(), tokenVersion: 0, status: 'CONNECTED' })
+  clientMock.refresh.mockResolvedValue({ grant: { refreshToken: 'r2' }, ctx: { accessToken: 'acc' } })
+  // Reciente fue a 155525 monto 1; este va a la MISMA cuenta pero monto 2 → no es el mismo traspaso.
+  db.activityLog.findMany.mockResolvedValue([
+    { data: { destAccount: '155525', amount: 1, ok: true, movementId: 'mov-prev', message: 'OK' } },
+  ])
+  clientMock.listAccounts.mockResolvedValue([{ externalId: 'neg-1', altId: 10, cuentaId: 'c', label: null, clabe: null, active: null, balance: null }])
+  clientMock.resolveMgAlt.mockResolvedValue({ altId: 20, name: 'Destino', accountType: 'wallet' })
+  clientMock.internalTransfer.mockResolvedValue({ ok: true, movementId: 'mov-new', message: 'OK' })
+  const r = await svc.sendInternalTransfer('fa-nd', { destAccountNumber: '155525', amount: 2, concept: '' })
+  expect(clientMock.internalTransfer).toHaveBeenCalled()
+  expect(r.movementId).toBe('mov-new')
 })
 
 it('refresh path takes the advisory lock (pg_advisory_xact_lock) inside a tx', async () => {

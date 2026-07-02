@@ -277,7 +277,8 @@ export const externalBankClient: FinancialProviderClient = {
   ): Promise<InternalTransferResult> {
     // Espejo de la petición probada del dashboard de producción de Q-Pay (features/spei/api.ts):
     // idTipo:1 = TRANSFERENCIA. Se omite idCatTipoAutenticacion cuando no se usa 2FA (traspaso simple).
-    // El proveedor NO acepta clave de idempotencia — el caller ya deduplicó antes de llegar aquí.
+    // El proveedor NO acepta clave de idempotencia; la dedup por contenido (mismo destino + monto,
+    // ventana corta) vive en el service (sendInternalTransfer) para atajar el doble-cobro por reintento.
     try {
       const { data } = await axios.post(
         `${base()}/api/transferencia/add-transferenciaMG`,

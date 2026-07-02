@@ -131,7 +131,7 @@ export interface FinancialProviderClient {
   getMovementStats(ctx: ConnectionContext, cuentaId: string, range: { from?: string; to?: string }): Promise<MovementStats>
   /** Resuelve una cuenta MG por su número interno (4-6 dígitos) → su idCuentaAlt + nombre. Null si no existe. */
   resolveMgAlt(ctx: ConnectionContext, accountNumber: string): Promise<MgAltAccount | null>
-  /** Traspaso interno MG→MG (sin CLABE). `amount` en pesos. NO idempotente en el proveedor — el caller deduplica. */
+  /** Traspaso interno MG→MG (sin CLABE). `amount` en pesos. NO idempotente en el proveedor — el service deduplica por contenido (ventana corta). */
   internalTransfer(
     ctx: ConnectionContext,
     input: { sourceAltId: number; destAltId: number; amount: number; concept: string },

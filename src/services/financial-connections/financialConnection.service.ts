@@ -19,6 +19,9 @@ interface ConnectionStepResult {
 }
 
 const CHALLENGE_TTL_MS = 5 * 60_000
+// Ventana de dedup por contenido para traspasos internos (mismo destino + mismo monto). Corta a
+// propósito: cubre el reintento tras un timeout sin bloquear por mucho un 2º traspaso legítimo.
+const INTERNAL_TRANSFER_DEDUP_WINDOW_MS = 5 * 60_000
 // Cache en memoria del access token por conexión (fast-path; evita re-login por lectura).
 const tokenCache = new Map<string, { accessToken: string; exp: number }>()
 
@@ -452,18 +455,51 @@ export async function getMovementStatsForAccount(
  * Traspaso interno MG→MG desde la cuenta conectada `financialAccountId` a la cuenta destino
  * (número interno). MUEVE DINERO — siempre se audita en ActivityLog (a diferencia de las lecturas).
  * Origen = idCuentaAlt de la cuenta conectada (del payload del proveedor); destino se resuelve
- * por su número. NO idempotente en el proveedor: el endpoint va rate-limited y la UI deshabilita
- * el botón; una capa de dedup persistente sería una mejora futura.
+ * por su número. El proveedor NO es idempotente, así que ANTES de enviar se hace una dedup por
+ * contenido (misma cuenta destino + mismo monto en una ventana corta) apoyada en la auditoría:
+ * un reintento tras un timeout NO vuelve a cobrar. La UI además deshabilita el botón (doble-click)
+ * y el endpoint va rate-limited.
  */
 export async function sendInternalTransfer(
   financialAccountId: string,
   input: { destAccountNumber: string; amount: number; concept: string; staffId?: string },
 ): Promise<InternalTransferResult> {
   if (!(input.amount > 0)) throw new BadRequestError('El monto debe ser mayor a 0.')
+  const destAccount = input.destAccountNumber.trim()
   const fa = await prisma.financialAccount.findUniqueOrThrow({
     where: { id: financialAccountId },
     include: { connection: { include: { provider: true } } },
   })
+
+  // Dedup por contenido ANTES de mover dinero. Como el proveedor no acepta clave de idempotencia,
+  // si un traspaso idéntico (misma cuenta destino + mismo monto) desde esta cuenta se registró en
+  // los últimos minutos, NO se reenvía: se devuelve el resultado previo. Ataja el caso peligroso
+  // del review — el primer envío se debitó pero la respuesta se perdió (timeout) y el usuario
+  // reintenta. Se apoya en la auditoría que ya escribimos (destAccount + amount + ok); ventana
+  // corta para no bloquear por mucho un 2º traspaso legítimo. (Residual: si el logAction del
+  // intento previo no llegó a persistir —es best-effort— la dedup no lo verá; misma garantía
+  // que la propia auditoría.)
+  const recent = await prisma.activityLog.findMany({
+    where: {
+      action: 'FINANCIAL_INTERNAL_TRANSFER',
+      entityId: fa.id,
+      createdAt: { gte: new Date(Date.now() - INTERNAL_TRANSFER_DEDUP_WINDOW_MS) },
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 25,
+    select: { data: true },
+  })
+  const prior = recent
+    .map(r => r.data as { destAccount?: unknown; amount?: unknown; ok?: unknown; movementId?: unknown } | null)
+    .find(d => d != null && d.destAccount === destAccount && d.amount === input.amount)
+  if (prior) {
+    return {
+      ok: prior.ok === true,
+      movementId: (prior.movementId as string | null) ?? null,
+      message: 'Se detectó un traspaso idéntico muy reciente; no se reenvió. Verifica tus movimientos.',
+    }
+  }
+
   const accessToken = await accessTokenFor(fa.connection)
   const client = clientFor(fa.connection.provider.code)
 
@@ -472,8 +508,8 @@ export async function sendInternalTransfer(
   if (source?.altId == null) throw new BadRequestError('La cuenta origen no tiene id de traspaso disponible.')
 
   // Destino: resolver el número interno (4-6 dígitos) a su idCuentaAlt real.
-  const dest = await client.resolveMgAlt({ accessToken }, input.destAccountNumber.trim())
-  if (!dest) throw new BadRequestError(`No se encontró la cuenta destino ${input.destAccountNumber}.`)
+  const dest = await client.resolveMgAlt({ accessToken }, destAccount)
+  if (!dest) throw new BadRequestError(`No se encontró la cuenta destino ${destAccount}.`)
   if (dest.altId === source.altId) throw new BadRequestError('El origen y el destino son la misma cuenta.')
 
   const result = await client.internalTransfer({ accessToken }, {
@@ -484,6 +520,7 @@ export async function sendInternalTransfer(
   })
 
   // Auditoría obligatoria de movimiento de dinero: quién, cuánto, a dónde, resultado.
+  // destAccount va normalizado (trim) — es también la clave de la dedup de arriba.
   await logAction({
     staffId: input.staffId ?? null,
     venueId: fa.connection.venueId,
@@ -491,7 +528,7 @@ export async function sendInternalTransfer(
     entity: 'FinancialAccount',
     entityId: fa.id,
     data: {
-      destAccount: input.destAccountNumber,
+      destAccount,
       destName: dest.name,
       amount: input.amount,
       ok: result.ok,
