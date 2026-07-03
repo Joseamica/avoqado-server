@@ -67,6 +67,9 @@ export interface AnalyticsPayment {
   type: string
   status: string
   createdAt: Date
+  /** Staff who processed (charged) the payment — the tip-attribution axis the cash-closeout uses. Null for QR/self-serve and legacy rows. */
+  processedById?: string | null
+  processedByName?: string | null
 }
 
 /**
@@ -94,6 +97,8 @@ export async function fetchPaymentsForAnalytics(venueId: string, filters: Analyt
       type: true,
       status: true,
       createdAt: true,
+      processedById: true,
+      processedBy: { select: { firstName: true, lastName: true } },
     },
     orderBy: { createdAt: 'desc' },
   })
@@ -106,6 +111,8 @@ export async function fetchPaymentsForAnalytics(venueId: string, filters: Analyt
     type: String(p.type),
     status: String(p.status),
     createdAt: p.createdAt,
+    processedById: p.processedById ?? null,
+    processedByName: p.processedBy ? `${p.processedBy.firstName ?? ''} ${p.processedBy.lastName ?? ''}`.trim() || null : null,
   }))
 
   // ⚠️ Gate: short-circuit for non-MindForm venues. DO NOT move this below the
@@ -144,6 +151,9 @@ export async function fetchPaymentsForAnalytics(venueId: string, filters: Analyt
     type: p.type,
     status: p.status,
     createdAt: p.createdAt,
+    // Legacy QR payments were customer-initiated — no staff processed them.
+    processedById: null,
+    processedByName: null,
   }))
 
   logger.info('[MergedPayments] Legacy merge complete', {

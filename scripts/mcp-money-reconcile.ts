@@ -57,7 +57,13 @@ async function main() {
   // Register the tools against a scope that can see this venue.
   const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
   const server = { tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never
-  const scope = { staffId: 's', activeOrg: 'o', allowedVenueIds: [VENUE], perVenueAccess: new Map() } as McpScope
+  // Synthetic full-read access — guard.requirePermission hard-denies venues missing from perVenueAccess.
+  const scope = {
+    staffId: 's',
+    activeOrg: 'o',
+    allowedVenueIds: [VENUE],
+    perVenueAccess: new Map([[VENUE, { role: 'OWNER', corePermissions: ['*:*'] }]]),
+  } as unknown as McpScope
   registerSalesTools(server, scope)
   registerPaymentTools(server, scope)
   const callTool = async (n: string, a: Record<string, unknown>) => JSON.parse((await handlers.get(n)!(a, {})).content[0].text)
@@ -103,6 +109,34 @@ async function main() {
   console.log('── list_payments ──')
   if (lpTotal != null) check('COMPLETED total', lpTotal, lpDb.s)
   else console.log('  (shape de list_payments distinto — revisar manualmente)', JSON.stringify(lp.summary ?? lp).slice(0, 160))
+
+  // ---- 3) staff_tips: per-staff tips == DB grouped by processedById (corte-de-caja rule) ----
+  // Ground truth mirrors fetchPaymentsForAnalytics defaults: COMPLETED, no REFUND, no cancelled orders,
+  // tipped payments only. NOTE: for MindForm, legacy QR rows live in another DB and land in `unattributed`
+  // on the MCP side but not in this SQL — per-staff rows are exact for every venue regardless.
+  const st = await callTool('staff_tips', { venueId: VENUE, fromDate: fromStr, toDate: toStr })
+  const tipsDb = await prisma.$queryRawUnsafe<{ sid: string | null; name: string | null; c: number; s: number }[]>(
+    `SELECT p."processedById" sid, trim(concat(st."firstName", ' ', st."lastName")) name, count(*)::int c, COALESCE(sum(p."tipAmount"),0)::float8 s
+     FROM "Payment" p LEFT JOIN "Order" o ON o.id=p."orderId" LEFT JOIN "Staff" st ON st.id=p."processedById"
+     WHERE p."venueId"=$1 AND p.status='COMPLETED' AND p.type!='REFUND' AND (o.status IS NULL OR o.status!='CANCELLED')
+       AND p."tipAmount">0 AND p."createdAt">=$2 AND p."createdAt"<=$3
+     GROUP BY p."processedById", name ORDER BY s DESC`,
+    VENUE,
+    start,
+    end,
+  )
+  console.log('── staff_tips ──')
+  for (const r of tipsDb) {
+    if (r.sid === null) {
+      check('unattributed (sin cajero)', st.unattributed.tips, r.s, st.unattributed.payments, r.c)
+      continue
+    }
+    const mcpS = st.staff.find((x: { staffId: string }) => x.staffId === r.sid) ?? { tips: 0, payments: 0 }
+    check(`tips ${(r.name || r.sid).slice(0, 24)}`, mcpS.tips, r.s, mcpS.payments, r.c)
+  }
+  // Internal consistency: staff_tips venue total must equal tips_over_time for the same window.
+  const tot = await callTool('tips_over_time', { venueId: VENUE, fromDate: fromStr, toDate: toStr })
+  check('total == tips_over_time', st.total, tot.total, st.tippedPayments, tot.count)
 
   console.log(`\n  ${pass} ✅ / ${fail} ❌  — todo verde = cada cifra del MCP cuadra al centavo con la DB\n`)
   await prisma.$disconnect()

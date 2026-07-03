@@ -211,6 +211,71 @@ export function summarizeTipsByDay(payments: TipPaymentRow[], timezone: string):
   return { total: round2(total), count, byDay }
 }
 
+export interface StaffTipPaymentRow {
+  tipAmount: number | { toString(): string } | null
+  processedById?: string | null
+  processedByName?: string | null
+}
+
+export interface StaffTipsRow {
+  staffId: string
+  name: string
+  tips: number
+  payments: number
+}
+
+/**
+ * Attribute each payment's tip to the staff who PROCESSED it (Payment.processedById) —
+ * the SAME rule the cash-closeout (corte de caja) uses — ranked by tips desc. Payments
+ * nobody processed (QR/self-serve, legacy) land in `unattributed`, so `total` still
+ * matches tips_over_time to the cent. Counts only payments that actually carried a tip
+ * (mirrors summarizeTipsByDay).
+ */
+export function aggregateStaffTips(payments: StaffTipPaymentRow[]): {
+  total: number
+  count: number
+  staff: StaffTipsRow[]
+  unattributed: { tips: number; payments: number }
+} {
+  const map = new Map<string, { name: string; tips: number; payments: number }>()
+  const unattributed = { tips: 0, payments: 0 }
+  let total = 0
+  let count = 0
+  for (const p of payments) {
+    const tip = Number(p.tipAmount ?? 0)
+    if (tip <= 0) continue
+    total += tip
+    count += 1
+    if (!p.processedById) {
+      unattributed.tips += tip
+      unattributed.payments += 1
+      continue
+    }
+    const existing = map.get(p.processedById) || { name: p.processedByName || 'Sin nombre', tips: 0, payments: 0 }
+    existing.tips += tip
+    existing.payments += 1
+    map.set(p.processedById, existing)
+  }
+  const staff = Array.from(map.entries())
+    .map(([staffId, s]) => ({ staffId, name: s.name, tips: round2(s.tips), payments: s.payments }))
+    .sort((a, b) => b.tips - a.tips)
+  return { total: round2(total), count, staff, unattributed: { tips: round2(unattributed.tips), payments: unattributed.payments } }
+}
+
+/**
+ * YYYY-MM-DD that exists on the calendar — rejects rollover traps like 2026-02-30
+ * (JS Date silently becomes March 2) and 2026-13-01 (Invalid Date → RangeError).
+ * Component math only (no Date-parsing of the string), so it is host-tz-independent.
+ */
+const isoVenueDay = () =>
+  z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, 'Formato de fecha inválido: usa YYYY-MM-DD')
+    .refine(s => {
+      const [y, m, d] = s.split('-').map(Number)
+      return m >= 1 && m <= 12 && d >= 1 && d <= new Date(Date.UTC(y, m, 0)).getUTCDate()
+    }, 'Fecha inválida: no existe en el calendario')
+
 export function registerSalesTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
   server.tool(
@@ -272,7 +337,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'staff_ranking',
-    'Who sells the most — staff ranked by revenue in a venue you can access, over a date range (default last 7 days). Each entry: name, revenue, orders, tips, average ticket. Answers "¿quién vende más / mejor vendedor?". Revenue here is attributed to the order CREATOR and is total sales — it is NOT a commission base. ⚠️ To answer anything about COMMISSIONS ("¿cuánto de comisión le toca a X?") do NOT multiply this revenue by a rate — use the staff_commission tool (commission is paid to the SERVER, only over commissionable categories, at the tiered rate). Pass venueId; optionally fromDate/toDate (YYYY-MM-DD) and a limit.',
+    'Who sells the most — staff ranked by revenue in a venue you can access, over a date range (default last 7 days). Each entry: name, revenue, orders, tips, average ticket. Answers "¿quién vende más / mejor vendedor?". Revenue here is attributed to the order CREATOR and is total sales — it is NOT a commission base. ⚠️ To answer anything about COMMISSIONS ("¿cuánto de comisión le toca a X?") do NOT multiply this revenue by a rate — use the staff_commission tool (commission is paid to the SERVER, only over commissionable categories, at the tiered rate). The `tips` column is ALSO creator-attributed — for what an employee actually COLLECTED in tips ("¿cuánta propina le toca a X?") use the staff_tips tool (tips follow the payment PROCESSOR, same rule as the cash-closeout), never this column. Pass venueId; optionally fromDate/toDate (YYYY-MM-DD) and a limit.',
     {
       venueId: z.string().describe('Venue to analyze (must be in your scope)'),
       fromDate: z.string().optional().describe('Start date YYYY-MM-DD (default: 7 days ago)'),
@@ -390,7 +455,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'tips_over_time',
-    'Tips collected in a venue you can access, bucketed by day (venue timezone), over a date range (default last 7 days): per-day tip total + tipped-transaction count, plus the period total. Answers "¿cómo van las propinas?". Pass venueId; optionally fromDate/toDate (YYYY-MM-DD).',
+    'Tips collected in a venue you can access, bucketed by day (venue timezone), over a date range (default last 7 days): per-day tip total + tipped-transaction count, plus the period total. Answers "¿cómo van las propinas?". VENUE-level only — for tips PER EMPLOYEE ("¿cuánta propina le toca a X?") use the staff_tips tool, never split this total yourself. Pass venueId; optionally fromDate/toDate (YYYY-MM-DD).',
     {
       venueId: z.string().describe('Venue to analyze (must be in your scope)'),
       fromDate: z.string().optional().describe('Start date YYYY-MM-DD (default: 7 days ago)'),
@@ -406,6 +471,44 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
       const data = (await getVenueChartData(venueId, 'tips-over-time', { fromDate, toDate })) as { payments: TipPaymentRow[] }
       const result = summarizeTipsByDay(data.payments, tz)
       return text({ venueId, ...result })
+    },
+  )
+
+  server.tool(
+    'staff_tips',
+    'Tips each employee COLLECTED in a venue you can access, over a date range (default last 7 days) — the SOURCE OF TRUTH for per-employee tips. Attribution rule: each payment\'s tip goes to the staff who PROCESSED that payment (Payment.processedById), the SAME rule as the cash-closeout ("corte de caja"), so figures match what the venue already reviews there. Per staff: total tips + tipped-payment count; QR/self-serve payments nobody processed appear under `unattributed`; `total` equals tips_over_time for the same window. Answers "¿cuánta propina le toca a X? / propinas por empleado". ⚠️ Do NOT answer per-employee tip questions from staff_ranking — its `tips` column is attributed to the order CREATOR (a different rule) and is NOT what an employee collected. Pass venueId; optionally staffId, fromDate/toDate (YYYY-MM-DD, venue-local, toDate inclusive).',
+    {
+      venueId: z.string().describe('Venue to analyze (must be in your scope)'),
+      staffId: z.string().optional().describe('Focus one employee; omit for all staff'),
+      fromDate: isoVenueDay().optional().describe('Start date YYYY-MM-DD venue-local (default: 7 days ago)'),
+      toDate: isoVenueDay().optional().describe('End date YYYY-MM-DD venue-local, INCLUSIVE of the whole day (default: today)'),
+    },
+    async ({ venueId, staffId, fromDate, toDate }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('analytics:read', venueId) // read gate — mirror the dashboard's advanced-reports permission
+      const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Las propinas por empleado') // PRO tier — same family as staff_ranking/tips_over_time
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+      const tz = (await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }))?.timezone || 'America/Mexico_City'
+      // Explicit dates: venue-local day boundaries (noon anchor — same construction as
+      // getVenueChartData). Omitted dates: rolling last-7-days instants, mirroring
+      // tips_over_time's parseDateRange fall-through — so `total == tips_over_time`
+      // holds with AND without dates.
+      const from = fromDate ? venueStartOfDay(tz, new Date(`${fromDate}T12:00:00`)) : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+      const to = toDate ? venueEndOfDay(tz, new Date(`${toDate}T12:00:00`)) : new Date()
+      // Same payment universe as tips_over_time (COMPLETED, no refunds, no cancelled orders,
+      // MindForm legacy QR included) so both tools cuadran to the cent.
+      const payments = await fetchPaymentsForAnalytics(venueId, { fromDate: from, toDate: to })
+      const result = aggregateStaffTips(payments)
+      const staff = staffId ? result.staff.filter(s => s.staffId === staffId) : result.staff
+      return text({
+        venueId,
+        window: { from: from.toISOString(), to: to.toISOString(), timezone: tz },
+        total: result.total, // venue total for the window (== tips_over_time), even when staffId narrows `staff`
+        tippedPayments: result.count,
+        staff,
+        unattributed: result.unattributed,
+        note: 'Propina atribuida a quien COBRÓ cada pago (Payment.processedById) — la misma regla que el corte de caja. `unattributed` = pagos sin cajero (QR/autoservicio). NO uses los "tips" de staff_ranking para esta pregunta (ésos van al creador de la orden).',
+      })
     },
   )
 
