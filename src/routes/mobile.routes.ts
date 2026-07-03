@@ -34,6 +34,7 @@ import * as estimateMobileController from '../controllers/mobile/estimate.mobile
 import * as productOptionMobileController from '../controllers/mobile/product-option.mobile.controller'
 import * as measurementUnitMobileController from '../controllers/mobile/measurement-unit.mobile.controller'
 import * as kdsMobileController from '../controllers/mobile/kds.mobile.controller'
+import * as tableMobileController from '../controllers/mobile/table.mobile.controller'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { validateRequest } from '../middlewares/validation'
@@ -1465,6 +1466,29 @@ router.delete('/notifications/:notificationId', authenticateTokenMiddleware, not
 // ============================================================================
 
 router.get('/venues/:venueId/suppliers', authenticateTokenMiddleware, supplierMobileController.listSuppliers)
+
+// ============================================================================
+// TABLES (reservation MESA picker — reuses the same table.tpv.service the
+// /tpv/venues/:venueId/tables endpoint uses; identical response shape)
+// ============================================================================
+
+/**
+ * @openapi
+ * /mobile/venues/{venueId}/tables:
+ *   get:
+ *     summary: Get all tables with current status (for reservation table picker)
+ *     tags: [Mobile - Tables]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: List of tables with their current status and orders
+ */
+router.get('/venues/:venueId/tables', authenticateTokenMiddleware, checkPermission('tables:read'), tableMobileController.getTables)
 
 // ============================================================================
 // INVENTORY
