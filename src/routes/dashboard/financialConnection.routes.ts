@@ -36,6 +36,8 @@ export const venueFinancialAccountRoutes = Router({ mergeParams: true })
 venueFinancialAccountRoutes.get('/:id/balance', checkPermission('financialConnections:manage'), ctrl.getBalance)
 venueFinancialAccountRoutes.get('/:id/movements', checkPermission('financialConnections:manage'), ctrl.getMovements)
 venueFinancialAccountRoutes.get('/:id/movements/stats', checkPermission('financialConnections:manage'), ctrl.getMovementStats)
+// Read-only: verifica el nombre del beneficiario de una cuenta destino antes de enviar (confirmar nombre, no solo número).
+venueFinancialAccountRoutes.get('/:id/resolve-destination', checkPermission('financialConnections:manage'), ctrl.resolveDestination)
 // MUEVE DINERO: permiso OWNER + rate limit (dedup del proveedor no existe → el límite acota el daño de un doble-envío accidental).
 venueFinancialAccountRoutes.post(
   '/:id/internal-transfer',

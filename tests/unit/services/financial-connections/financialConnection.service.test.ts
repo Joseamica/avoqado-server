@@ -232,26 +232,51 @@ it('refresh guard: a connection revoked before the lock re-read is never refresh
 
 it('getMovementsForAccount: usa externalCuentaId y delega al client', async () => {
   db.financialAccount.findUniqueOrThrow.mockResolvedValue({
-    id: 'fa1', externalId: 'neg-1', externalCuentaId: 'cta-1',
-    connection: { id: 'cm-1', mode: 'SELF_CONNECT', grantEnc: encFixture(), tokenVersion: 0, deviceIdentifier: 'dev', status: 'CONNECTED', provider: { code: 'EXTERNAL_BANK' } },
+    id: 'fa1',
+    externalId: 'neg-1',
+    externalCuentaId: 'cta-1',
+    connection: {
+      id: 'cm-1',
+      mode: 'SELF_CONNECT',
+      grantEnc: encFixture(),
+      tokenVersion: 0,
+      deviceIdentifier: 'dev',
+      status: 'CONNECTED',
+      provider: { code: 'EXTERNAL_BANK' },
+    },
   })
   db.financialConnection.findUniqueOrThrow.mockResolvedValue({ id: 'cm-1', grantEnc: encFixture(), tokenVersion: 0, status: 'CONNECTED' })
   clientMock.refresh.mockResolvedValue({ grant: { refreshToken: 'r2' }, ctx: { accessToken: 'acc' } })
   clientMock.listMovements.mockResolvedValue({ movements: [], total: 0 })
   const r = await svc.getMovementsForAccount('fa1', { page: 0, size: 10 })
   // (ctx, idNegocio='neg-1', cuentaId='cta-1', query)
-  expect(clientMock.listMovements).toHaveBeenCalledWith(expect.objectContaining({ accessToken: expect.any(String) }), 'neg-1', 'cta-1', { page: 0, size: 10 })
+  expect(clientMock.listMovements).toHaveBeenCalledWith(expect.objectContaining({ accessToken: expect.any(String) }), 'neg-1', 'cta-1', {
+    page: 0,
+    size: 10,
+  })
   expect(r.total).toBe(0)
 })
 
 it('getMovementsForAccount: backfillea externalCuentaId perezosamente cuando es null (fila pre-columna)', async () => {
   db.financialAccount.findUniqueOrThrow.mockResolvedValue({
-    id: 'fa2', externalId: 'neg-1', externalCuentaId: null,
-    connection: { id: 'cm-2', mode: 'SELF_CONNECT', grantEnc: encFixture(), tokenVersion: 0, deviceIdentifier: 'dev', status: 'CONNECTED', provider: { code: 'EXTERNAL_BANK' } },
+    id: 'fa2',
+    externalId: 'neg-1',
+    externalCuentaId: null,
+    connection: {
+      id: 'cm-2',
+      mode: 'SELF_CONNECT',
+      grantEnc: encFixture(),
+      tokenVersion: 0,
+      deviceIdentifier: 'dev',
+      status: 'CONNECTED',
+      provider: { code: 'EXTERNAL_BANK' },
+    },
   })
   db.financialConnection.findUniqueOrThrow.mockResolvedValue({ id: 'cm-2', grantEnc: encFixture(), tokenVersion: 0, status: 'CONNECTED' })
   clientMock.refresh.mockResolvedValue({ grant: { refreshToken: 'r2' }, ctx: { accessToken: 'acc' } })
-  clientMock.listAccounts.mockResolvedValue([{ externalId: 'neg-1', cuentaId: 'cta-9', label: null, clabe: null, active: null, balance: null }])
+  clientMock.listAccounts.mockResolvedValue([
+    { externalId: 'neg-1', cuentaId: 'cta-9', label: null, clabe: null, active: null, balance: null },
+  ])
   clientMock.listMovements.mockResolvedValue({ movements: [], total: 0 })
   await svc.getMovementsForAccount('fa2', { page: 0, size: 10 })
   expect(db.financialAccount.update).toHaveBeenCalledWith({ where: { id: 'fa2' }, data: { externalCuentaId: 'cta-9' } })
@@ -260,8 +285,18 @@ it('getMovementsForAccount: backfillea externalCuentaId perezosamente cuando es 
 
 it('getMovementsForAccount: si el provider no reporta cuentaId → BadRequest, no 500', async () => {
   db.financialAccount.findUniqueOrThrow.mockResolvedValue({
-    id: 'fa3', externalId: 'neg-x', externalCuentaId: null,
-    connection: { id: 'cm-3', mode: 'SELF_CONNECT', grantEnc: encFixture(), tokenVersion: 0, deviceIdentifier: 'dev', status: 'CONNECTED', provider: { code: 'EXTERNAL_BANK' } },
+    id: 'fa3',
+    externalId: 'neg-x',
+    externalCuentaId: null,
+    connection: {
+      id: 'cm-3',
+      mode: 'SELF_CONNECT',
+      grantEnc: encFixture(),
+      tokenVersion: 0,
+      deviceIdentifier: 'dev',
+      status: 'CONNECTED',
+      provider: { code: 'EXTERNAL_BANK' },
+    },
   })
   db.financialConnection.findUniqueOrThrow.mockResolvedValue({ id: 'cm-3', grantEnc: encFixture(), tokenVersion: 0, status: 'CONNECTED' })
   clientMock.refresh.mockResolvedValue({ grant: { refreshToken: 'r2' }, ctx: { accessToken: 'acc' } })
@@ -271,45 +306,92 @@ it('getMovementsForAccount: si el provider no reporta cuentaId → BadRequest, n
 
 it('getMovementsForAccount: token/provider muere → degrada la conexión a NEEDS_REAUTH y lanza 400 honesto (no 500 crudo)', async () => {
   db.financialAccount.findUniqueOrThrow.mockResolvedValue({
-    id: 'fa-mov-err', externalId: 'neg-1', externalCuentaId: 'cta-1',
-    connection: { id: 'cm-moverr', mode: 'SELF_CONNECT', grantEnc: encFixture(), tokenVersion: 0, deviceIdentifier: 'dev', status: 'CONNECTED', provider: { code: 'EXTERNAL_BANK' } },
+    id: 'fa-mov-err',
+    externalId: 'neg-1',
+    externalCuentaId: 'cta-1',
+    connection: {
+      id: 'cm-moverr',
+      mode: 'SELF_CONNECT',
+      grantEnc: encFixture(),
+      tokenVersion: 0,
+      deviceIdentifier: 'dev',
+      status: 'CONNECTED',
+      provider: { code: 'EXTERNAL_BANK' },
+    },
   })
-  db.financialConnection.findUniqueOrThrow.mockResolvedValue({ id: 'cm-moverr', grantEnc: encFixture(), tokenVersion: 0, status: 'CONNECTED' })
+  db.financialConnection.findUniqueOrThrow.mockResolvedValue({
+    id: 'cm-moverr',
+    grantEnc: encFixture(),
+    tokenVersion: 0,
+    status: 'CONNECTED',
+  })
   // El refresh silencioso truena (bug de QPay con 2FA cuando el token cacheado murió).
   clientMock.refresh.mockRejectedValue(new Error('Request failed with status code 400'))
   const { BadRequestError } = require('@/errors/AppError')
   await expect(svc.getMovementsForAccount('fa-mov-err', { page: 0, size: 10 })).rejects.toBeInstanceOf(BadRequestError)
   // Degradó la conexión operante a NEEDS_REAUTH (filtrado por status) → la UI muestra "Reconectar".
   expect(db.financialConnection.updateMany).toHaveBeenCalledWith(
-    expect.objectContaining({ where: expect.objectContaining({ status: { in: ['CONNECTED', 'NEEDS_REAUTH'] } }), data: expect.objectContaining({ status: 'NEEDS_REAUTH' }) }),
+    expect.objectContaining({
+      where: expect.objectContaining({ status: { in: ['CONNECTED', 'NEEDS_REAUTH'] } }),
+      data: expect.objectContaining({ status: 'NEEDS_REAUTH' }),
+    }),
   )
   expect(clientMock.listMovements).not.toHaveBeenCalled()
 })
 
 it('sendInternalTransfer: resuelve origen (altId) + destino y ejecuta el traspaso, auditando', async () => {
   db.financialAccount.findUniqueOrThrow.mockResolvedValue({
-    id: 'fa-tr', externalId: 'neg-1',
-    connection: { id: 'cm-tr', mode: 'SELF_CONNECT', grantEnc: encFixture(), tokenVersion: 0, deviceIdentifier: 'dev', status: 'CONNECTED', venueId: 'v1', provider: { code: 'EXTERNAL_BANK' } },
+    id: 'fa-tr',
+    externalId: 'neg-1',
+    connection: {
+      id: 'cm-tr',
+      mode: 'SELF_CONNECT',
+      grantEnc: encFixture(),
+      tokenVersion: 0,
+      deviceIdentifier: 'dev',
+      status: 'CONNECTED',
+      venueId: 'v1',
+      provider: { code: 'EXTERNAL_BANK' },
+    },
   })
   db.financialConnection.findUniqueOrThrow.mockResolvedValue({ id: 'cm-tr', grantEnc: encFixture(), tokenVersion: 0, status: 'CONNECTED' })
   clientMock.refresh.mockResolvedValue({ grant: { refreshToken: 'r2' }, ctx: { accessToken: 'acc' } })
-  clientMock.listAccounts.mockResolvedValue([{ externalId: 'neg-1', altId: 10, cuentaId: 'c', label: null, clabe: null, active: null, balance: null }])
+  clientMock.listAccounts.mockResolvedValue([
+    { externalId: 'neg-1', altId: 10, cuentaId: 'c', label: null, clabe: null, active: null, balance: null },
+  ])
   clientMock.resolveMgAlt.mockResolvedValue({ altId: 20, name: 'Destino', accountType: 'wallet' })
   clientMock.internalTransfer.mockResolvedValue({ ok: true, movementId: 'mov-9', message: 'OK' })
   const r = await svc.sendInternalTransfer('fa-tr', { destAccountNumber: '155525', amount: 1, concept: 'Prueba', staffId: 'staff-1' })
-  expect(clientMock.internalTransfer).toHaveBeenCalledWith(expect.anything(), { sourceAltId: 10, destAltId: 20, amount: 1, concept: 'Prueba' })
+  expect(clientMock.internalTransfer).toHaveBeenCalledWith(expect.anything(), {
+    sourceAltId: 10,
+    destAltId: 20,
+    amount: 1,
+    concept: 'Prueba',
+  })
   expect(r.ok).toBe(true)
   expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'FINANCIAL_INTERNAL_TRANSFER', entityId: 'fa-tr' }))
 })
 
 it('sendInternalTransfer: origen sin altId → BadRequest y NO intenta enviar', async () => {
   db.financialAccount.findUniqueOrThrow.mockResolvedValue({
-    id: 'fa-tr2', externalId: 'neg-1',
-    connection: { id: 'cm-tr2', mode: 'SELF_CONNECT', grantEnc: encFixture(), tokenVersion: 0, deviceIdentifier: 'dev', status: 'CONNECTED', venueId: 'v1', provider: { code: 'EXTERNAL_BANK' } },
+    id: 'fa-tr2',
+    externalId: 'neg-1',
+    connection: {
+      id: 'cm-tr2',
+      mode: 'SELF_CONNECT',
+      grantEnc: encFixture(),
+      tokenVersion: 0,
+      deviceIdentifier: 'dev',
+      status: 'CONNECTED',
+      venueId: 'v1',
+      provider: { code: 'EXTERNAL_BANK' },
+    },
   })
   db.financialConnection.findUniqueOrThrow.mockResolvedValue({ id: 'cm-tr2', grantEnc: encFixture(), tokenVersion: 0, status: 'CONNECTED' })
   clientMock.refresh.mockResolvedValue({ grant: { refreshToken: 'r2' }, ctx: { accessToken: 'acc' } })
-  clientMock.listAccounts.mockResolvedValue([{ externalId: 'neg-1', altId: null, cuentaId: 'c', label: null, clabe: null, active: null, balance: null }])
+  clientMock.listAccounts.mockResolvedValue([
+    { externalId: 'neg-1', altId: null, cuentaId: 'c', label: null, clabe: null, active: null, balance: null },
+  ])
   await expect(svc.sendInternalTransfer('fa-tr2', { destAccountNumber: '155525', amount: 1, concept: '' })).rejects.toThrow()
   expect(clientMock.internalTransfer).not.toHaveBeenCalled()
 })
@@ -320,8 +402,18 @@ it('sendInternalTransfer: monto <= 0 → BadRequest (ni siquiera toca al proveed
 
 it('sendInternalTransfer: dedup — un traspaso idéntico reciente NO se reenvía (no toca al proveedor, devuelve el previo)', async () => {
   db.financialAccount.findUniqueOrThrow.mockResolvedValue({
-    id: 'fa-dup', externalId: 'neg-1',
-    connection: { id: 'cm-dup', mode: 'SELF_CONNECT', grantEnc: encFixture(), tokenVersion: 0, deviceIdentifier: 'dev', status: 'CONNECTED', venueId: 'v1', provider: { code: 'EXTERNAL_BANK' } },
+    id: 'fa-dup',
+    externalId: 'neg-1',
+    connection: {
+      id: 'cm-dup',
+      mode: 'SELF_CONNECT',
+      grantEnc: encFixture(),
+      tokenVersion: 0,
+      deviceIdentifier: 'dev',
+      status: 'CONNECTED',
+      venueId: 'v1',
+      provider: { code: 'EXTERNAL_BANK' },
+    },
   })
   // Auditoría previa: mismo destino (155525) + mismo monto (1) hace instantes.
   db.activityLog.findMany.mockResolvedValue([
@@ -338,8 +430,18 @@ it('sendInternalTransfer: dedup — un traspaso idéntico reciente NO se reenví
 
 it('sendInternalTransfer: destino/monto DISTINTO a lo reciente NO se deduplica (sí envía)', async () => {
   db.financialAccount.findUniqueOrThrow.mockResolvedValue({
-    id: 'fa-nd', externalId: 'neg-1',
-    connection: { id: 'cm-nd', mode: 'SELF_CONNECT', grantEnc: encFixture(), tokenVersion: 0, deviceIdentifier: 'dev', status: 'CONNECTED', venueId: 'v1', provider: { code: 'EXTERNAL_BANK' } },
+    id: 'fa-nd',
+    externalId: 'neg-1',
+    connection: {
+      id: 'cm-nd',
+      mode: 'SELF_CONNECT',
+      grantEnc: encFixture(),
+      tokenVersion: 0,
+      deviceIdentifier: 'dev',
+      status: 'CONNECTED',
+      venueId: 'v1',
+      provider: { code: 'EXTERNAL_BANK' },
+    },
   })
   db.financialConnection.findUniqueOrThrow.mockResolvedValue({ id: 'cm-nd', grantEnc: encFixture(), tokenVersion: 0, status: 'CONNECTED' })
   clientMock.refresh.mockResolvedValue({ grant: { refreshToken: 'r2' }, ctx: { accessToken: 'acc' } })
@@ -347,12 +449,40 @@ it('sendInternalTransfer: destino/monto DISTINTO a lo reciente NO se deduplica (
   db.activityLog.findMany.mockResolvedValue([
     { data: { destAccount: '155525', amount: 1, ok: true, movementId: 'mov-prev', message: 'OK' } },
   ])
-  clientMock.listAccounts.mockResolvedValue([{ externalId: 'neg-1', altId: 10, cuentaId: 'c', label: null, clabe: null, active: null, balance: null }])
+  clientMock.listAccounts.mockResolvedValue([
+    { externalId: 'neg-1', altId: 10, cuentaId: 'c', label: null, clabe: null, active: null, balance: null },
+  ])
   clientMock.resolveMgAlt.mockResolvedValue({ altId: 20, name: 'Destino', accountType: 'wallet' })
   clientMock.internalTransfer.mockResolvedValue({ ok: true, movementId: 'mov-new', message: 'OK' })
   const r = await svc.sendInternalTransfer('fa-nd', { destAccountNumber: '155525', amount: 2, concept: '' })
   expect(clientMock.internalTransfer).toHaveBeenCalled()
   expect(r.movementId).toBe('mov-new')
+})
+
+it('resolveTransferDestination: devuelve nombre del beneficiario y NO expone el altId (PK interno)', async () => {
+  db.financialAccount.findUniqueOrThrow.mockResolvedValue({
+    id: 'fa-rd', externalId: 'neg-1',
+    connection: { id: 'cm-rd', mode: 'SELF_CONNECT', grantEnc: encFixture(), tokenVersion: 0, deviceIdentifier: 'dev', status: 'CONNECTED', venueId: 'v1', provider: { code: 'EXTERNAL_BANK' } },
+  })
+  db.financialConnection.findUniqueOrThrow.mockResolvedValue({ id: 'cm-rd', grantEnc: encFixture(), tokenVersion: 0, status: 'CONNECTED' })
+  clientMock.refresh.mockResolvedValue({ grant: { refreshToken: 'r2' }, ctx: { accessToken: 'acc' } })
+  clientMock.resolveMgAlt.mockResolvedValue({ altId: 999, name: 'Mardonio Calvo', accountType: 'wallet' })
+  const r = await svc.resolveTransferDestination('fa-rd', '155525')
+  expect(r).toEqual({ name: 'Mardonio Calvo', accountType: 'wallet' }) // exactamente esto: sin altId
+  expect((r as Record<string, unknown>)?.altId).toBeUndefined()
+})
+
+it('resolveTransferDestination: cuenta inexistente → null (el controller lo traduce a 404)', async () => {
+  db.financialAccount.findUniqueOrThrow.mockResolvedValue({
+    id: 'fa-rd2', externalId: 'neg-1',
+    connection: { id: 'cm-rd2', mode: 'SELF_CONNECT', grantEnc: encFixture(), tokenVersion: 0, deviceIdentifier: 'dev', status: 'CONNECTED', venueId: 'v1', provider: { code: 'EXTERNAL_BANK' } },
+  })
+  db.financialConnection.findUniqueOrThrow.mockResolvedValue({ id: 'cm-rd2', grantEnc: encFixture(), tokenVersion: 0, status: 'CONNECTED' })
+  clientMock.refresh.mockResolvedValue({ grant: { refreshToken: 'r2' }, ctx: { accessToken: 'acc' } })
+  clientMock.resolveMgAlt.mockResolvedValue(null)
+  const r = await svc.resolveTransferDestination('fa-rd2', '999999')
+  expect(r).toBeNull()
+  expect(clientMock.internalTransfer).not.toHaveBeenCalled() // jamás mueve dinero: es solo lectura
 })
 
 it('refresh path takes the advisory lock (pg_advisory_xact_lock) inside a tx', async () => {

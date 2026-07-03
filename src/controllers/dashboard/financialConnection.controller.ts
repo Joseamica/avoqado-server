@@ -141,6 +141,23 @@ export async function getMovementStats(req: Request, res: Response, next: NextFu
   }
 }
 
+// Read-only: resuelve un número de cuenta destino a su nombre de beneficiario, para MOSTRARLO en la
+// confirmación del traspaso ANTES de mover dinero. Va con checkPermission + assertAccountBelongsToVenue.
+export async function resolveDestination(req: Request, res: Response, next: NextFunction) {
+  try {
+    const account = req.query.account
+    if (typeof account !== 'string' || !/^\d{4,6}$/.test(account.trim())) {
+      throw new BadRequestError('account debe ser un número interno de 4 a 6 dígitos.')
+    }
+    await assertAccountBelongsToVenue(req.params.id, req.params.venueId)
+    const data = await svc.resolveTransferDestination(req.params.id, account.trim())
+    if (!data) throw new NotFoundError('Cuenta destino no encontrada.')
+    res.json({ success: true, data })
+  } catch (e) {
+    next(e)
+  }
+}
+
 // MUEVE DINERO. Va con checkPermission + assertAccountBelongsToVenue + rate limit (en las rutas).
 export async function internalTransfer(req: Request, res: Response, next: NextFunction) {
   try {

@@ -452,6 +452,34 @@ export async function getMovementStatsForAccount(
 }
 
 /**
+ * Resuelve una cuenta destino (número interno 4-6 dígitos) a su NOMBRE de beneficiario, para
+ * mostrarlo en la confirmación del traspaso ANTES de enviar — el usuario confirma un nombre, no
+ * solo un número (un dígito mal tecleado se cacha a simple vista). Read-only: no mueve dinero.
+ * Devuelve null si la cuenta no existe (→ 404 en el controller). NO expone el altId (PK interno
+ * del proveedor) — solo lo que el usuario necesita para verificar.
+ */
+export async function resolveTransferDestination(
+  financialAccountId: string,
+  accountNumber: string,
+): Promise<{ name: string | null; accountType: string | null } | null> {
+  const fa = await prisma.financialAccount.findUniqueOrThrow({
+    where: { id: financialAccountId },
+    include: { connection: { include: { provider: true } } },
+  })
+  try {
+    const accessToken = await accessTokenFor(fa.connection)
+    const dest = await clientFor(fa.connection.provider.code).resolveMgAlt({ accessToken }, accountNumber.trim())
+    if (!dest) return null
+    return { name: dest.name, accountType: dest.accountType }
+  } catch (e) {
+    // Misma política honesta que las otras lecturas en vivo: si el token murió y el refresh
+    // silencioso falla, degrada la conexión a NEEDS_REAUTH y responde 400 ("reconéctate"), no 500.
+    await markConnectionNeedsReauth(fa.connection.id, e as Error)
+    throw e instanceof BadRequestError ? e : new BadRequestError('No se pudo verificar la cuenta destino; vuelve a conectar la cuenta.')
+  }
+}
+
+/**
  * Traspaso interno MG→MG desde la cuenta conectada `financialAccountId` a la cuenta destino
  * (número interno). MUEVE DINERO — siempre se audita en ActivityLog (a diferencia de las lecturas).
  * Origen = idCuentaAlt de la cuenta conectada (del payload del proveedor); destino se resuelve
@@ -512,12 +540,15 @@ export async function sendInternalTransfer(
   if (!dest) throw new BadRequestError(`No se encontró la cuenta destino ${destAccount}.`)
   if (dest.altId === source.altId) throw new BadRequestError('El origen y el destino son la misma cuenta.')
 
-  const result = await client.internalTransfer({ accessToken }, {
-    sourceAltId: source.altId,
-    destAltId: dest.altId,
-    amount: input.amount,
-    concept: input.concept,
-  })
+  const result = await client.internalTransfer(
+    { accessToken },
+    {
+      sourceAltId: source.altId,
+      destAltId: dest.altId,
+      amount: input.amount,
+      concept: input.concept,
+    },
+  )
 
   // Auditoría obligatoria de movimiento de dinero: quién, cuánto, a dónde, resultado.
   // destAccount va normalizado (trim) — es también la clave de la dedup de arriba.
