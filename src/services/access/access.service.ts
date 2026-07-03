@@ -156,6 +156,7 @@ const PERMISSION_TO_FEATURE_MAP: Record<string, string> = {
   'referral:override-existing-customer': 'REFERRAL_PROGRAM',
   'referral:void-manual': 'REFERRAL_PROGRAM',
   'referral:export-csv': 'REFERRAL_PROGRAM',
+  'referral:fulfill-courtesy': 'REFERRAL_PROGRAM',
 
   // Facturación CFDI (Pro-tier feature)
   'cfdi:configure': 'CFDI',

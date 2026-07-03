@@ -317,6 +317,7 @@ model Venue {
   // Referral Program
   referralProgramConfig ReferralProgramConfig?
   referrals             Referral[]
+  referralGrants        ReferralRewardGrant[]
 
   // Discount System (Phase 2)
   discounts Discount[]
@@ -1501,6 +1502,9 @@ model Product {
 
   // Demo data flag (for cleanup on conversion)
   isDemo Boolean @default(false)
+
+  // Referral Program — productos configurados como premio FREE_PRODUCT
+  referralRewardConfigs ReferralTierReward[] @relation("ReferralRewardProduct")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -4973,6 +4977,9 @@ model Customer {
   referralsAsReferrer Referral[] @relation("ReferralsAsReferrer")
   referralsAsReferred Referral[] @relation("ReferralsAsReferred")
 
+  referralGrants      ReferralRewardGrant[]
+  referralTierUnlocks ReferralTierUnlock[]
+
   // Additional info
   notes String?  @db.Text
   tags  String[] // ["VIP", "Allergic-Nuts", "Birthday-Dec"]
@@ -5189,6 +5196,8 @@ model ReferralProgramConfig {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  tierRewards ReferralTierReward[]
 }
 
 model Referral {
@@ -5227,10 +5236,116 @@ model Referral {
 
   createdAt DateTime @default(now())
 
+  referralGrants ReferralRewardGrant[]
+
   @@index([venueId])
   @@index([referrerCustomerId])
   @@index([referredCustomerId])
   @@index([status])
+  // 🔴 MANUALLY-MAINTAINED PARTIAL UNIQUE INDEX — NOT expressible in Prisma's schema DSL.
+  // Prisma has no `where:` clause for `@@unique`/`@@index`, so this index is invisible here
+  // and lives ONLY as raw SQL in migration `20260702173915_referral_configurable_rewards`:
+  //
+  //   CREATE UNIQUE INDEX "Referral_qualifyingOrderId_active_key"
+  //     ON "Referral" ("qualifyingOrderId")
+  //     WHERE "status" IN ('PENDING','QUALIFIED') AND "qualifyingOrderId" IS NOT NULL;
+  //
+  // Purpose: guards once-per-order referral claims (an Order can qualify at most ONE
+  // active — PENDING/QUALIFIED — Referral at a time; VOIDed rows are excluded so a
+  // dedupe/void doesn't permanently block reuse of the same qualifyingOrderId).
+  //
+  // Verified 2026-07-02: `prisma migrate diff --from-url $DATABASE_URL --to-schema-datamodel
+  // prisma/schema.prisma` reports "No difference detected" (exit 0) — Prisma's diff engine
+  // does not currently attempt to manage/drop indexes it cannot represent. Still, this is NOT
+  // a guarantee across Prisma versions. If a FUTURE generated migration (`prisma migrate dev`)
+  // ever proposes `DROP INDEX "Referral_qualifyingOrderId_active_key"`, REMOVE that statement
+  // by hand before applying — dropping it would allow duplicate active referral claims on the
+  // same order.
+}
+
+model ReferralTierReward {
+  id       String                @id @default(cuid())
+  configId String
+  config   ReferralProgramConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
+
+  tierLevel  Int // 1 | 2 | 3
+  rewardType ReferralRewardType
+  recurrence ReferralRewardRecurrence @default(ONE_TIME)
+
+  rewardPercent   Decimal? @db.Decimal(5, 2) // PERCENT_COUPON / PERMANENT_DISCOUNT
+  rewardProductId String? // FREE_PRODUCT (validar mismo venue en servicio)
+  rewardProduct   Product? @relation("ReferralRewardProduct", fields: [rewardProductId], references: [id], onDelete: SetNull)
+  rewardQuantity  Int      @default(1)
+
+  // Soft-delete / versionado: "editar" un nivel que YA emitió grants desactiva
+  // la fila vieja (active=false) y crea una nueva; nunca se borra físicamente.
+  // Así ReferralRewardGrant.tierRewardId (NON-NULL, onDelete: Restrict) nunca
+  // queda huérfano y la idempotencia (§4.3) se sostiene.
+  active Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  grants ReferralRewardGrant[]
+
+  @@index([configId, tierLevel])
+}
+
+model ReferralRewardGrant {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  customerId String // el referidor que recibe el premio
+  customer   Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  tierLevel  Int // 1 | 2 | 3
+  referralId String? // el Referral cuyo PAID desbloqueó el tier
+  referral   Referral? @relation(fields: [referralId], references: [id], onDelete: SetNull)
+
+  // Snapshot del config al momento de emitir (sobrevive a cambios de config)
+  tierRewardId    String // NON-NULL — la idempotencia (unique abajo) lo exige
+  tierReward      ReferralTierReward @relation(fields: [tierRewardId], references: [id], onDelete: Restrict)
+  rewardType      ReferralRewardType
+  rewardPercent   Decimal?           @db.Decimal(5, 2)
+  rewardProductId String?
+  rewardQuantity  Int                @default(1)
+
+  // Artefactos emitidos (null para FREE_PRODUCT manual)
+  discountId   String?
+  discount     Discount? @relation(fields: [discountId], references: [id], onDelete: SetNull)
+  couponCodeId String?
+
+  status                  ReferralGrantStatus @default(ISSUED)
+  revokedAt               DateTime?
+  revokeReason            String?
+  fulfilledAt             DateTime? // FREE_PRODUCT manual
+  fulfilledByStaffVenueId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // 🔑 Defensa secundaria de idempotencia: un grant por (customer, tier, reward).
+  // tierRewardId NON-NULL (Postgres permite múltiples NULLs en un UNIQUE) (Codex v2 [P1]).
+  @@unique([customerId, tierLevel, tierRewardId])
+  @@index([venueId])
+  @@index([customerId])
+  @@index([referralId])
+  @@index([status])
+}
+
+// Un desbloqueo de nivel por cliente, de por vida. El INSERT aquí es el guard
+// idempotente PRIMARIO del desbloqueo: si ya existe, el nivel ya se otorgó →
+// skip toda la emisión (independiente de qué premios tenga la config ahora).
+model ReferralTierUnlock {
+  id                   String   @id @default(cuid())
+  customerId           String
+  customer             Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  tierLevel            Int
+  unlockedByReferralId String?
+  unlockedAt           DateTime @default(now())
+
+  @@unique([customerId, tierLevel]) // un nivel, una vez de por vida
+  @@index([customerId])
 }
 
 // ==========================================
@@ -5327,7 +5442,8 @@ model Discount {
   orderItems        OrderItem[]        @relation("OrderItemAppliedDiscount")
 
   // Referral Program — Referrals para las que este Discount es el premio emitido.
-  referralRewards Referral[] @relation("ReferralReward")
+  referralRewards Referral[]            @relation("ReferralReward")
+  referralGrants  ReferralRewardGrant[]
 
   @@index([venueId])
   @@index([isAutomatic])
@@ -10523,6 +10639,25 @@ enum ReferralTier {
   TIER_1
   TIER_2
   TIER_3
+}
+
+enum ReferralRewardType {
+  PERCENT_COUPON // Cupón de % de un solo uso (comportamiento actual)
+  PERMANENT_DISCOUNT // % automático permanente en todas las compras
+  FREE_PRODUCT // 1 unidad gratis de un producto del catálogo (v1: manual)
+}
+
+enum ReferralRewardRecurrence {
+  ONE_TIME // Default. Aplica a todos los tipos.
+  MONTHLY // Solo relevante para FREE_PRODUCT (el circuito mensual). v1 = manual; v2 = cron.
+}
+
+enum ReferralGrantStatus {
+  ISSUED // Emitido y activo (cupón sin canjear / permanente vigente)
+  REDEEMED // Cupón canjeado (o permanente aplicado al menos una vez)
+  REVOKED // Revertido por refund (incl. permanente ya consumido sin clawback)
+  MANUAL_PENDING // FREE_PRODUCT manual: pendiente de que el staff lo entregue
+  MANUAL_FULFILLED // FREE_PRODUCT manual: entregado por el staff
 }
 
 /// Dynamically-registered OAuth client (RFC 7591 DCR) for the customer-facing MCP.

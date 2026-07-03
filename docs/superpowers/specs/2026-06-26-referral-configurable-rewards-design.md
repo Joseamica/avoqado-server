@@ -282,13 +282,34 @@ Núcleo `referralProgram.service.ts` ampliado para aceptar premios por nivel y *
   `planGateMessage(venueId, 'REFERRAL_PROGRAM', …)`. Registrar en `src/mcp/server.ts`. Cierra el hueco actual (no hay tools de referral en
   el customer MCP).
 
-## 8. Aplicación del descuento permanente (dependencia cross-repo)
+## 8. Aplicación del descuento permanente (dependencia cross-repo) — **VERIFICADO (Task 10, 2026-07-02): NO se aplica hoy**
 
 El motor de auto-descuento existe (`discountEngine.service.ts`: `getCustomerDiscounts` fuerza `isAutomatic`), **pero el pago no lo dispara
-solo**: `payment.tpv.service.ts` solo finaliza cupones; el auto-apply vive en `POST /discounts/auto` y **depende de que el cliente TPV lo
-invoque en el cobro** (Codex [P2]). **Tarea de verificación obligatoria:** confirmar que el flujo de cobro del TPV llama `/discounts/auto`
-cuando la orden tiene `customerId`. Si no, el 5% permanente no se aplica → cambio en TPV (o auto-apply server-side en el pago). Bloquea la
-entrega funcional del `PERMANENT_DISCOUNT`.
+solo**: `payment.tpv.service.ts` solo finaliza cupones; el auto-apply vive en
+`POST /api/v1/tpv/venues/:venueId/orders/:orderId/discounts/auto` (`discount.tpv.controller.ts:applyAutomaticDiscounts` →
+`discount.tpv.service.ts:applyAutomaticDiscounts` → `discountEngine.service.ts:846 applyAutomaticDiscounts`, la ÚNICA ruta de invocación en
+todo el backend — sin cron, sin hook en el pago) y **depende de que el cliente TPV lo invoque en el cobro** (Codex [P2]).
+
+**Verificación obligatoria — HECHA.** `avoqado-tpv` (repo hermano, solo lectura) **NO invoca este endpoint en ningún flujo**:
+
+- `DiscountApiService.kt` (retrofit, `features/ordering/data/api/`) define `getAvailableDiscounts` (GET `.../discounts/available`),
+  `applyPredefinedDiscount` (POST `.../discounts/apply`), `applyManualDiscount` (POST `.../discounts/manual`), `removeDiscount`,
+  `validateCoupon` + `applyCoupon` (POST `.../discounts/coupon`) — **ningún método mapea a `POST .../discounts/auto`**; no existe
+  `applyAutomaticDiscounts` en ningún archivo `.kt` del repo.
+- `CheckoutViewModel.kt` (`features/checkout/presentation/`) solo aplica descuentos por 3 vías: predefinido/manual, cupón tecleado
+  (`validateAndApplyCoupon`, vía `discountRepository.validateCoupon`) y el descuento de "referido nuevo cliente" (Plan 5A,
+  `applyReferralDiscount`, calculado **client-side** como descuento manual — no relacionado con `PERMANENT_DISCOUNT` de este spec). Ninguno
+  de los tres llama `/discounts/auto`.
+- `PaymentViewModel.kt` (`features/payment/presentation/`, variantes `production` y `sandbox`) solo **lee** `discountAmount` para el recibo
+  impreso — nunca llama un endpoint de aplicar descuento durante el cobro.
+
+**Conclusión:** el 5% (o el % configurado) de `PERMANENT_DISCOUNT` **NO se aplica** en las órdenes futuras del referrer en el TPV hoy — el
+`CustomerDiscount`/`Discount(isAutomatic:true)` se crea correctamente al cruzar el nivel, pero nada en el cobro del TPV lo dispara. Entregar
+`PERMANENT_DISCOUNT` como funcional **requiere un cambio en `avoqado-tpv`** (llamar `/discounts/auto` con `customerId` al armar/cobrar la
+orden) **o mover el auto-apply al servidor** (ej. engancharlo en `payment.tpv.service.ts` al confirmar el pago, sin depender del cliente) —
+ambos fuera de alcance de este plan (backend-only, `avoqado-server`). **Bloquea la entrega funcional del `PERMANENT_DISCOUNT`: NO
+comercializar/anunciar este tipo de premio como entregado hasta que uno de los dos cambios aterrice.** `PERCENT_COUPON` y `FREE_PRODUCT`
+(manual) no dependen de esto y SÍ están completos.
 
 ## 9. Alcance v1 vs v2
 
@@ -390,5 +411,15 @@ verificación); WhatsApp infra existe sin template de referral (v2); política d
 
 ## 16. Preguntas abiertas
 
-- **§8:** ¿el cobro del TPV ya invoca `/discounts/auto`? Determina si el `PERMANENT_DISCOUNT` necesita trabajo extra en TPV. A verificar
-  antes de implementar.
+- **§8 — RESUELTA (Task 10, 2026-07-02).** ¿El cobro del TPV ya invoca `/discounts/auto`? **NO.** Verificado por lectura exhaustiva de
+  `avoqado-tpv` (repo hermano): `DiscountApiService.kt`, `CheckoutViewModel.kt` y ambas variantes de `PaymentViewModel.kt` (`production` +
+  `sandbox`) no tienen ninguna llamada a `POST .../discounts/auto` ni a nada nombrado `applyAutomaticDiscounts`/`autoDiscount`/
+  `automaticDiscount`. Del lado del backend, `discountEngine.applyAutomaticDiscounts`
+  (`src/services/dashboard/discountEngine.service.ts:846`) tiene un único caller en todo el repo (`discount.tpv.service.ts:177`), alcanzable
+  solo vía esa ruta HTTP — no hay cron ni hook en el pago que lo dispare server-side. **Consecuencia:** `PERMANENT_DISCOUNT` queda
+  correctamente emitido/persistido (grant + `Discount` + `CustomerDiscount` con `isAutomatic:true`) pero **NUNCA se aplica** a una orden
+  futura del referrer hasta que exista uno de: (a) un cambio en `avoqado-tpv` para invocar `/discounts/auto` con `customerId` durante el
+  cobro, o (b) mover el auto-apply al servidor enganchándolo en `payment.tpv.service.ts` al confirmar el pago. Ambos son cambios de un
+  repo/capa distinta y quedan **fuera de alcance de este plan** (backend-only, Tasks 1–10 de `avoqado-server`). **No vender/anunciar
+  `PERMANENT_DISCOUNT` como entregado** (ni en la presentación de ventas §11.5) hasta que uno de los dos aterrice — `PERCENT_COUPON` y
+  `FREE_PRODUCT` (manual) sí están completos y no dependen de esto.

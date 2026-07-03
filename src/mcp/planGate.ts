@@ -10,7 +10,7 @@ import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
  * tool should surface as { ok:false, planRequired:true, error } — consistent
  * with cfdi_status. Feature CODES per capability follow the pricing catalog
  * (avoqado-web-dashboard/src/config/plan-catalog.ts):
- *   PRO     → ADVANCED_REPORTS · LOYALTY_PROGRAM · PROMOTIONS · RESERVATIONS
+ *   PRO     → ADVANCED_REPORTS · LOYALTY_PROGRAM · PROMOTIONS · RESERVATIONS · REFERRAL_PROGRAM
  *   PREMIUM → CFDI · INVENTORY_TRACKING · SERIALIZED_INVENTORY · COMMISSIONS
  */
 export async function planGateMessage(venueId: string, featureCode: string, capability: string): Promise<string | null> {

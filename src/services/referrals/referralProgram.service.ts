@@ -1,6 +1,22 @@
+import { Prisma, ReferralRewardType, ReferralRewardRecurrence } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { generateReferralCode } from './referralCode.service'
+
+/**
+ * One configured reward for one tier level. Several rewards per tier are
+ * allowed (e.g. Tier 3 = 25% coupon + a free product), so callers send an
+ * array rather than one row per tier. Persisted to `ReferralTierReward`
+ * (see spec §4.2) — never to the legacy flat `tier{N}RewardPercent` columns.
+ */
+export interface TierRewardInput {
+  tierLevel: 1 | 2 | 3
+  rewardType: ReferralRewardType
+  recurrence?: ReferralRewardRecurrence
+  rewardPercent?: number
+  rewardProductId?: string
+  rewardQuantity?: number
+}
 
 /**
  * Inputs accepted by `activateReferralProgram`. Optional template /
@@ -11,15 +27,30 @@ export interface ActivateInput {
   venueId: string
   newCustomerDiscountPercent: number
   tier1ReferralsRequired: number
-  tier1RewardPercent: number
   tier2ReferralsRequired: number
-  tier2RewardPercent: number
   tier3ReferralsRequired: number
-  tier3RewardPercent: number
   rewardCouponExpiryDays: number
   codePrefix?: string
   welcomeMessageTemplate?: string
   tierUpMessageTemplate?: string
+  /**
+   * Per-tier reward configuration (spec §4.2/§4.5). Optional so a caller
+   * that only wants to touch thresholds/messaging need not resend it —
+   * omitting it (or passing `[]`) leaves existing `ReferralTierReward`
+   * rows untouched.
+   */
+  tiers?: TierRewardInput[]
+  /**
+   * @deprecated Superseded by `tiers` / `ReferralTierReward`. Kept ONLY so
+   * older call sites still type-check during the migration window — the
+   * service NEVER writes these to `ReferralProgramConfig` anymore (the
+   * columns are dead per spec §4.5, retired in a later cleanup migration).
+   */
+  tier1RewardPercent?: number
+  /** @deprecated see `tier1RewardPercent` */
+  tier2RewardPercent?: number
+  /** @deprecated see `tier1RewardPercent` */
+  tier3RewardPercent?: number
 }
 
 /**
@@ -34,11 +65,8 @@ function validateConfig(input: Partial<ActivateInput>): void {
   const numericFields: (keyof ActivateInput)[] = [
     'newCustomerDiscountPercent',
     'tier1ReferralsRequired',
-    'tier1RewardPercent',
     'tier2ReferralsRequired',
-    'tier2RewardPercent',
     'tier3ReferralsRequired',
-    'tier3RewardPercent',
     'rewardCouponExpiryDays',
   ]
   for (const f of numericFields) {
@@ -56,6 +84,93 @@ function validateConfig(input: Partial<ActivateInput>): void {
   if (t2r !== undefined && t3r !== undefined && t3r <= t2r) {
     throw new Error('Tier requirements must be ascending: tier3 > tier2')
   }
+}
+
+/**
+ * Business-rule validation for per-tier reward configuration (spec §7):
+ *
+ *   - `FREE_PRODUCT` must reference a product that exists AND belongs to
+ *     the SAME venue (the FK on `ReferralTierReward.rewardProductId` does
+ *     NOT enforce this — Codex [P2] — so the service must).
+ *   - `PERCENT_COUPON` / `PERMANENT_DISCOUNT` require a non-negative
+ *     `rewardPercent`.
+ *
+ * Runs to completion validating every tier BEFORE any DB write, so a bad
+ * entry anywhere in the batch aborts the whole call with nothing persisted.
+ */
+async function validateTierRewards(venueId: string, tiers: TierRewardInput[]): Promise<void> {
+  for (const t of tiers) {
+    if (t.rewardType === ReferralRewardType.FREE_PRODUCT) {
+      // Guard BEFORE the query: Prisma's `findFirst` silently IGNORES an
+      // `undefined` filter value, so `{ where: { id: undefined, venueId } }`
+      // would match an arbitrary product in the venue instead of failing —
+      // letting a FREE_PRODUCT row persist with `rewardProductId: null`.
+      if (!t.rewardProductId) throw new Error('PRODUCTO_NO_PERTENECE_AL_VENUE')
+      const product = await prisma.product.findFirst({
+        where: { id: t.rewardProductId, venueId },
+        select: { id: true },
+      })
+      if (!product) throw new Error('PRODUCTO_NO_PERTENECE_AL_VENUE')
+    }
+    if (
+      (t.rewardType === ReferralRewardType.PERCENT_COUPON || t.rewardType === ReferralRewardType.PERMANENT_DISCOUNT) &&
+      (t.rewardPercent == null || Number(t.rewardPercent) < 0)
+    ) {
+      throw new Error('PORCENTAJE_INVALIDO')
+    }
+  }
+}
+
+/**
+ * Persist per-tier reward configuration to `ReferralTierReward`.
+ *
+ * Versioning rule (spec §4.2, binding): a tier edit NEVER physically
+ * deletes existing rows — `ReferralRewardGrant.tierRewardId` is NON-NULL
+ * with `onDelete: Restrict`, so a delete would either orphan issued grants
+ * or fail outright. Instead, for every tier level present in `tiers`:
+ *   1. Deactivate (`active=false`) all currently-active rows for that level.
+ *   2. Create a fresh row for each reward supplied for that level.
+ *
+ * Tier levels NOT present in `tiers` are left completely untouched, so a
+ * caller can edit just one level per call (matches the existing partial-
+ * update semantics of `updateReferralConfig`).
+ *
+ * The whole thing runs inside ONE `$transaction`: a transient DB blip
+ * (this repo has documented P1001/P2024 blips) between a tier's `updateMany`
+ * and its `create`(s) would otherwise leave that tier with ZERO active
+ * rewards. Both callers (`activateReferralProgram`, `updateReferralConfig`)
+ * invoke this OUTSIDE any surrounding transaction, so nesting `$transaction`
+ * here is safe (no interactive-transaction-inside-transaction issue).
+ */
+async function persistTierRewards(configId: string, tiers: TierRewardInput[]): Promise<void> {
+  const rewardsByTier = new Map<number, TierRewardInput[]>()
+  for (const t of tiers) {
+    const bucket = rewardsByTier.get(t.tierLevel) ?? []
+    bucket.push(t)
+    rewardsByTier.set(t.tierLevel, bucket)
+  }
+
+  await prisma.$transaction(async (tx: any) => {
+    for (const [tierLevel, rewards] of rewardsByTier) {
+      await tx.referralTierReward.updateMany({
+        where: { configId, tierLevel, active: true },
+        data: { active: false },
+      })
+      for (const reward of rewards) {
+        await tx.referralTierReward.create({
+          data: {
+            configId,
+            tierLevel: reward.tierLevel,
+            rewardType: reward.rewardType,
+            recurrence: reward.recurrence ?? ReferralRewardRecurrence.ONE_TIME,
+            rewardPercent: reward.rewardPercent != null ? new Prisma.Decimal(reward.rewardPercent) : null,
+            rewardProductId: reward.rewardProductId ?? null,
+            rewardQuantity: reward.rewardQuantity ?? 1,
+          },
+        })
+      }
+    }
+  })
 }
 
 /**
@@ -96,8 +211,14 @@ function composeName(firstName: string | null | undefined, lastName: string | nu
  */
 export async function activateReferralProgram(input: ActivateInput): Promise<void> {
   validateConfig(input)
+  const tiers = input.tiers ?? []
+  if (tiers.length > 0) {
+    await validateTierRewards(input.venueId, tiers)
+  }
 
   // Step 1 — atomic, fast: config + audit log only. No per-customer work here.
+  // Note: the legacy tier{N}RewardPercent columns are intentionally NOT
+  // written anymore — reward config lives in `ReferralTierReward` (below).
   const config = await prisma.$transaction(async (tx: any) => {
     const cfg = await tx.referralProgramConfig.upsert({
       where: { venueId: input.venueId },
@@ -107,11 +228,8 @@ export async function activateReferralProgram(input: ActivateInput): Promise<voi
         activatedAt: new Date(),
         newCustomerDiscountPercent: input.newCustomerDiscountPercent,
         tier1ReferralsRequired: input.tier1ReferralsRequired,
-        tier1RewardPercent: input.tier1RewardPercent,
         tier2ReferralsRequired: input.tier2ReferralsRequired,
-        tier2RewardPercent: input.tier2RewardPercent,
         tier3ReferralsRequired: input.tier3ReferralsRequired,
-        tier3RewardPercent: input.tier3RewardPercent,
         rewardCouponExpiryDays: input.rewardCouponExpiryDays,
         codePrefix: input.codePrefix,
         welcomeMessageTemplate: input.welcomeMessageTemplate,
@@ -122,11 +240,8 @@ export async function activateReferralProgram(input: ActivateInput): Promise<voi
         activatedAt: new Date(),
         newCustomerDiscountPercent: input.newCustomerDiscountPercent,
         tier1ReferralsRequired: input.tier1ReferralsRequired,
-        tier1RewardPercent: input.tier1RewardPercent,
         tier2ReferralsRequired: input.tier2ReferralsRequired,
-        tier2RewardPercent: input.tier2RewardPercent,
         tier3ReferralsRequired: input.tier3ReferralsRequired,
-        tier3RewardPercent: input.tier3RewardPercent,
         rewardCouponExpiryDays: input.rewardCouponExpiryDays,
         codePrefix: input.codePrefix,
       },
@@ -146,6 +261,10 @@ export async function activateReferralProgram(input: ActivateInput): Promise<voi
 
     return cfg
   })
+
+  if (tiers.length > 0) {
+    await persistTierRewards(config.id, tiers)
+  }
 
   // Step 2 — resolve the prefix (cheap) and fire the backfill in the background.
   let venuePrefix: string | null | undefined = config.codePrefix
@@ -234,17 +353,91 @@ export async function deactivateReferralProgram(input: DeactivateInput): Promise
 
 export interface UpdateConfigInput {
   venueId: string
-  patch: Partial<ActivateInput>
+  /**
+   * Scalar config fields (thresholds, templates, etc). Optional — a caller
+   * that only wants to edit `tiers` need not send a patch at all.
+   */
+  patch?: Partial<ActivateInput>
+  /**
+   * Per-tier reward configuration (spec §4.2/§4.5). Accepted at the top
+   * level (not nested in `patch`) so a tiers-only call is a plain
+   * `{ venueId, tiers }`. If both `patch.tiers` and this are given, the
+   * top-level `tiers` wins.
+   */
+  tiers?: TierRewardInput[]
+  /**
+   * The authenticated `Staff.id` (authContext.userId), threaded into
+   * ActivityLog.staffId for audit accountability — this endpoint changes
+   * reward economics (thresholds, per-tier rewards) so it must be
+   * attributable, same as `fulfillGrant`'s `staffId`.
+   */
+  staffId?: string
 }
 
 /**
- * Partial update of a `ReferralProgramConfig`. The patch is validated
- * with the same ascending-tier and non-negative rules as activation.
+ * Partial update of a `ReferralProgramConfig`. The scalar patch is
+ * validated with the same ascending-tier and non-negative rules as
+ * activation; `tiers` (if present) go through `validateTierRewards` and
+ * are persisted to `ReferralTierReward` via the versioning rule in
+ * `persistTierRewards` — NEVER written to the legacy flat columns.
+ *
+ * Audit: on any actual change (scalar patch and/or tiers), writes a
+ * `REFERRAL_CONFIG_UPDATED` ActivityLog row AFTER the update(s) succeed —
+ * mirrors `deactivateReferralProgram`'s pattern of separate, non-nested
+ * `update` + `activityLog.create` calls (this function's two branches are
+ * independently optional and already run outside a shared transaction, so
+ * there is no single tx to fold the log into). A no-op call (empty patch,
+ * no tiers) writes nothing, same as the "don't log no-ops" rule elsewhere
+ * in the codebase.
  */
 export async function updateReferralConfig(input: UpdateConfigInput): Promise<void> {
-  validateConfig(input.patch)
-  await prisma.referralProgramConfig.update({
-    where: { venueId: input.venueId },
-    data: input.patch,
-  })
+  const patch = input.patch ?? {}
+  validateConfig(patch)
+
+  const tiers = input.tiers ?? patch.tiers ?? []
+  if (tiers.length > 0) {
+    await validateTierRewards(input.venueId, tiers)
+  }
+
+  // Legacy flat reward-percent fields (deprecated, dead columns) and
+  // `tiers` (handled separately below) are stripped before the scalar
+  // update — the service must never write them (spec §4.5).
+  const { tier1RewardPercent: _t1, tier2RewardPercent: _t2, tier3RewardPercent: _t3, tiers: _tiersInPatch, ...cleanPatch } = patch
+
+  let configId: string | undefined
+  const scalarChanged = Object.keys(cleanPatch).length > 0
+
+  if (scalarChanged) {
+    const updated = await prisma.referralProgramConfig.update({
+      where: { venueId: input.venueId },
+      data: cleanPatch,
+    })
+    configId = updated.id
+  }
+
+  if (tiers.length > 0) {
+    const config = await prisma.referralProgramConfig.findUnique({
+      where: { venueId: input.venueId },
+      select: { id: true },
+    })
+    if (!config) throw new Error('REFERRAL_PROGRAM_NOT_CONFIGURED')
+    configId = config.id
+    await persistTierRewards(config.id, tiers)
+  }
+
+  if (configId && (scalarChanged || tiers.length > 0)) {
+    await prisma.activityLog.create({
+      data: {
+        staffId: input.staffId ?? null,
+        venueId: input.venueId,
+        action: 'REFERRAL_CONFIG_UPDATED',
+        entity: 'ReferralProgramConfig',
+        entityId: configId,
+        data: {
+          changedFields: Object.keys(cleanPatch),
+          tiersChanged: tiers.map(t => t.tierLevel),
+        },
+      },
+    })
+  }
 }

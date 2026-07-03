@@ -98,7 +98,7 @@ export interface CaptureInput {
  *   2. Else if it matches a Staff.id with a StaffVenue at this venue → map it.
  *   3. Else → null (capture still succeeds; the audit link is simply absent).
  */
-async function resolveStaffVenueId(venueId: string, candidate: string | null | undefined): Promise<string | null> {
+export async function resolveStaffVenueId(venueId: string, candidate: string | null | undefined): Promise<string | null> {
   if (!candidate) return null
 
   // 1. Already a valid StaffVenue id at this venue?

@@ -15,17 +15,51 @@ export interface ListReferralsInput {
  * Full referral history where one customer is the REFERRER. Powers the
  * dashboard's per-customer ReferralCard (un-paginated: a single referrer's
  * history is small by nature).
+ *
+ * A referral's tier crossing can emit SEVERAL rewards (Task 3/4 configurable
+ * rewards: e.g. a PERCENT_COUPON + a FREE_PRODUCT on the same tier), so this
+ * projects the full `ReferralRewardGrant[]` as `rewards`. `rewardDiscount`
+ * (single, via the legacy `Referral.rewardDiscountId` FK) is kept in the
+ * response — DEPRECATED but still populated by
+ * `referralQualification.service` as "first discount-bearing grant" — per
+ * the cross-repo rule to never remove API response fields. New dashboard
+ * code should read `rewards`, not `rewardDiscount`.
  */
 export async function listCustomerReferrals(venueId: string, customerId: string) {
-  return prisma.referral.findMany({
+  const referrals = await prisma.referral.findMany({
     where: { venueId, referrerCustomerId: customerId },
     include: {
       referrerCustomer: { select: { id: true, firstName: true, lastName: true, referralTier: true } },
       referredCustomer: { select: { id: true, firstName: true, lastName: true } },
+      // DEPRECATED (see doc above) — kept for callers not yet migrated to `rewards[]`.
       rewardDiscount: { select: { id: true, value: true, active: true } },
+      referralGrants: {
+        select: {
+          id: true,
+          rewardType: true,
+          rewardPercent: true,
+          rewardProductId: true,
+          rewardQuantity: true,
+          status: true,
+          discount: { select: { couponCodes: { select: { code: true }, take: 1 } } },
+        },
+      },
     },
     orderBy: { createdAt: 'desc' },
   })
+
+  return referrals.map(({ referralGrants, ...referral }) => ({
+    ...referral,
+    rewards: referralGrants.map(grant => ({
+      id: grant.id,
+      rewardType: grant.rewardType,
+      rewardPercent: grant.rewardPercent,
+      rewardProductId: grant.rewardProductId,
+      rewardQuantity: grant.rewardQuantity,
+      status: grant.status,
+      couponCode: grant.discount?.couponCodes?.[0]?.code ?? null,
+    })),
+  }))
 }
 
 export async function listReferrals(input: ListReferralsInput) {

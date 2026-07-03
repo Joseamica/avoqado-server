@@ -1,21 +1,26 @@
 /**
- * referralQualification.service tests — Phase B3, Task 12
+ * referralQualification.service tests — Phase B3, Task 12 → evolved Task 4
  *
  * Closes the "happy path" loop: when an Order linked to a PENDING
  * Referral is paid, the referrer's count is incremented and — if a
- * tier threshold is crossed — a 3-record reward bundle is created
- * atomically (Discount + CustomerDiscount + CouponCode).
+ * tier threshold is crossed — every ACTIVE `ReferralTierReward` for
+ * that tier is emitted as a `ReferralRewardGrant` (Task 4), replacing
+ * the old single-coupon `emitTierReward`.
  *
  * Schema notes:
- *   - No `Coupon` model. The reward is modeled as Discount (parent)
+ *   - No `Coupon` model. PERCENT_COUPON is modeled as Discount (parent)
  *     plus CustomerDiscount (referrer's entitlement) plus CouponCode
  *     (shareable code).
  *   - DiscountType enum value is `PERCENTAGE` (not `PERCENT`).
  *   - ActivityLog's JSON payload column is `data` (inner), wrapped by
  *     Prisma's `data:` create argument (outer).
+ *   - `ReferralRewardGrant` idempotency is `@@unique([customerId, tierLevel,
+ *     tierRewardId])`, claimed via `createMany({ skipDuplicates: true })` +
+ *     `count` — NEVER a try/catch around a P2002 (a constraint violation
+ *     aborts the whole Postgres transaction).
  */
 
-import { computeTier, emitTierReward, onOrderPaid } from '@/services/referrals/referralQualification.service'
+import { computeTier, emitTierRewards, tierToLevel } from '@/services/referrals/referralQualification.service'
 import prisma from '@/utils/prismaClient'
 
 jest.mock('@/utils/prismaClient', () => ({
@@ -23,8 +28,11 @@ jest.mock('@/utils/prismaClient', () => ({
   default: {
     $transaction: jest.fn(),
     referral: { findFirst: jest.fn(), update: jest.fn() },
-    customer: { update: jest.fn() },
+    customer: { update: jest.fn(), findUnique: jest.fn() },
     referralProgramConfig: { findUnique: jest.fn() },
+    referralTierReward: { findMany: jest.fn() },
+    referralRewardGrant: { createMany: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
+    venue: { findUnique: jest.fn() },
     discount: { create: jest.fn() },
     customerDiscount: { create: jest.fn() },
     couponCode: { create: jest.fn() },
@@ -64,34 +72,58 @@ describe('computeTier', () => {
   })
 })
 
-describe('emitTierReward', () => {
+describe('tierToLevel', () => {
+  it('maps ReferralTier enum values to their plain Int level', () => {
+    expect(tierToLevel('TIER_1')).toBe(1)
+    expect(tierToLevel('TIER_2')).toBe(2)
+    expect(tierToLevel('TIER_3')).toBe(3)
+  })
+})
+
+describe('emitTierRewards', () => {
+  const config = {
+    id: 'config_1',
+    rewardCouponExpiryDays: 90,
+    codePrefix: 'MINDFORM',
+  } as any
+  const customer = { id: 'cust_abc123', firstName: 'Jose', lastName: 'P' }
+  const baseInput = { venueId: 'venue_1', customer, tierLevel: 1, config, referralId: 'ref_1' }
+
   beforeEach(() => {
     jest.clearAllMocks()
-    mockedPrisma.$transaction.mockImplementation(async (fn: any) => fn(mockedPrisma))
   })
 
-  it('creates Discount + CustomerDiscount + CouponCode atomically for TIER_1', async () => {
+  // ---- NEW FEATURE TESTS (Task 4) ----
+
+  it('PERCENT_COUPON emits Discount+CustomerDiscount+CouponCode and an ISSUED grant', async () => {
+    mockedPrisma.referralTierReward.findMany.mockResolvedValue([
+      { id: 'tr_1', rewardType: 'PERCENT_COUPON', rewardPercent: 15, rewardProductId: null, rewardQuantity: 1 },
+    ])
+    mockedPrisma.referralRewardGrant.createMany.mockResolvedValue({ count: 1 })
+    mockedPrisma.referralRewardGrant.findFirst.mockResolvedValue({ id: 'grant_1', tierRewardId: 'tr_1' })
     mockedPrisma.discount.create.mockResolvedValue({ id: 'disc_1', value: 15 })
     mockedPrisma.customerDiscount.create.mockResolvedValue({ id: 'cd_1' })
-    mockedPrisma.couponCode.create.mockResolvedValue({ id: 'cc_1', code: 'MINDFORM-TIER1-XYZ' })
-    const config = {
-      tier1RewardPercent: 15,
-      tier2RewardPercent: 20,
-      tier3RewardPercent: 25,
-      rewardCouponExpiryDays: 90,
-      codePrefix: 'MINDFORM',
-    } as any
-    const result = await emitTierReward({
-      venueId: 'venue_1',
-      referrer: { id: 'cust_abc123', firstName: 'Jose', lastName: 'P' },
-      tier: 'TIER_1',
-      config,
+    mockedPrisma.couponCode.create.mockResolvedValue({ id: 'cc_1', code: 'MINDFORM-TIER1-C123' })
+    mockedPrisma.referralRewardGrant.update.mockResolvedValue({
+      id: 'grant_1',
+      status: 'ISSUED',
+      discountId: 'disc_1',
+      couponCodeId: 'cc_1',
     })
+
+    const result = await emitTierRewards(mockedPrisma, baseInput)
+
+    expect(mockedPrisma.referralRewardGrant.createMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: [expect.objectContaining({ customerId: 'cust_abc123', tierLevel: 1, tierRewardId: 'tr_1', status: 'ISSUED' })],
+        skipDuplicates: true,
+      }),
+    )
     expect(mockedPrisma.discount.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           venueId: 'venue_1',
-          value: 15,
+          value: expect.anything(),
           scope: 'ORDER',
           maxUsesPerCustomer: 1,
           maxTotalUses: 1,
@@ -102,123 +134,137 @@ describe('emitTierReward', () => {
     )
     expect(mockedPrisma.customerDiscount.create).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({
-          customerId: 'cust_abc123',
-          discountId: 'disc_1',
-          active: true,
-        }),
+        data: expect.objectContaining({ customerId: 'cust_abc123', discountId: 'disc_1', active: true }),
       }),
     )
     expect(mockedPrisma.couponCode.create).toHaveBeenCalledWith(
       expect.objectContaining({
+        data: expect.objectContaining({ discountId: 'disc_1', code: expect.stringMatching(/^MINDFORM-TIER1-/), active: true }),
+      }),
+    )
+    expect(mockedPrisma.referralRewardGrant.update).toHaveBeenCalledWith({
+      where: { id: 'grant_1' },
+      data: { discountId: 'disc_1', couponCodeId: 'cc_1' },
+    })
+    expect(result).toHaveLength(1)
+    expect(result[0].grant.status).toBe('ISSUED')
+    expect(result[0].couponCode?.code).toMatch(/^MINDFORM-TIER1-/)
+  })
+
+  it('PERMANENT_DISCOUNT emits an isAutomatic Discount with no validUntil/usage caps', async () => {
+    mockedPrisma.referralTierReward.findMany.mockResolvedValue([
+      { id: 'tr_2', rewardType: 'PERMANENT_DISCOUNT', rewardPercent: 5, rewardProductId: null, rewardQuantity: 1 },
+    ])
+    mockedPrisma.referralRewardGrant.createMany.mockResolvedValue({ count: 1 })
+    mockedPrisma.referralRewardGrant.findFirst.mockResolvedValue({ id: 'grant_2', tierRewardId: 'tr_2' })
+    mockedPrisma.discount.create.mockResolvedValue({ id: 'disc_2', value: 5, isAutomatic: true })
+    mockedPrisma.customerDiscount.create.mockResolvedValue({ id: 'cd_2' })
+    mockedPrisma.referralRewardGrant.update.mockResolvedValue({ id: 'grant_2', status: 'ISSUED', discountId: 'disc_2' })
+
+    const result = await emitTierRewards(mockedPrisma, baseInput)
+
+    expect(mockedPrisma.discount.create).toHaveBeenCalledWith(
+      expect.objectContaining({
         data: expect.objectContaining({
-          discountId: 'disc_1',
-          code: expect.stringMatching(/^MINDFORM-TIER1-/),
-          active: true,
+          isAutomatic: true,
+          validUntil: null,
+          maxUsesPerCustomer: null,
+          maxTotalUses: null,
+          source: 'REFERRAL_TIER',
         }),
       }),
     )
-    expect(result.discount.id).toBe('disc_1')
-    expect(result.couponCode.code).toMatch(/^MINDFORM-TIER1-/)
-  })
-})
-
-describe('onOrderPaid', () => {
-  beforeEach(() => {
-    jest.clearAllMocks()
-    mockedPrisma.$transaction.mockImplementation(async (fn: any) => fn(mockedPrisma))
-  })
-
-  it('does nothing when no PENDING Referral for this order', async () => {
-    mockedPrisma.referral.findFirst.mockResolvedValue(null)
-    await onOrderPaid({ orderId: 'o1', venueId: 'venue_1' })
-    expect(mockedPrisma.referral.update).not.toHaveBeenCalled()
+    expect(mockedPrisma.couponCode.create).not.toHaveBeenCalled()
+    expect(mockedPrisma.customerDiscount.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ validUntil: null, maxUses: null }) }),
+    )
+    expect(mockedPrisma.referralRewardGrant.update).toHaveBeenCalledWith({
+      where: { id: 'grant_2' },
+      data: { discountId: 'disc_2' },
+    })
+    expect(result[0].discount?.id).toBe('disc_2')
+    expect(result[0].couponCode).toBeUndefined()
   })
 
-  it('marks Referral as QUALIFIED and increments referrer count', async () => {
-    mockedPrisma.referral.findFirst.mockResolvedValue({
-      id: 'ref_1',
-      status: 'PENDING',
-      referrerCustomerId: 'cust_ref',
-    })
-    mockedPrisma.customer.update.mockResolvedValue({
-      id: 'cust_ref',
-      firstName: 'Jose',
-      lastName: 'P',
-      referralCount: 3,
-      referralTier: null,
-    })
-    mockedPrisma.referralProgramConfig.findUnique.mockResolvedValue({
-      tier1ReferralsRequired: 7,
-      tier2ReferralsRequired: 12,
-      tier3ReferralsRequired: 20,
-    })
-    await onOrderPaid({ orderId: 'o1', venueId: 'venue_1' })
-    expect(mockedPrisma.referral.update).toHaveBeenCalledWith(
+  it('FREE_PRODUCT emits NO discount, only a MANUAL_PENDING grant', async () => {
+    mockedPrisma.referralTierReward.findMany.mockResolvedValue([
+      { id: 'tr_3', rewardType: 'FREE_PRODUCT', rewardPercent: null, rewardProductId: 'prod_1', rewardQuantity: 2 },
+    ])
+    mockedPrisma.referralRewardGrant.createMany.mockResolvedValue({ count: 1 })
+    mockedPrisma.referralRewardGrant.findFirst.mockResolvedValue({ id: 'grant_3', tierRewardId: 'tr_3', status: 'MANUAL_PENDING' })
+
+    const result = await emitTierRewards(mockedPrisma, baseInput)
+
+    expect(mockedPrisma.discount.create).not.toHaveBeenCalled()
+    expect(mockedPrisma.couponCode.create).not.toHaveBeenCalled()
+    expect(mockedPrisma.referralRewardGrant.createMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: 'ref_1' },
-        data: expect.objectContaining({ status: 'QUALIFIED' }),
+        data: [
+          expect.objectContaining({
+            rewardProductId: 'prod_1',
+            rewardQuantity: 2,
+            status: 'MANUAL_PENDING',
+          }),
+        ],
       }),
     )
-    expect(mockedPrisma.customer.update).toHaveBeenCalledWith({
-      where: { id: 'cust_ref' },
-      data: { referralCount: { increment: 1 } },
-    })
+    // No artifact to attach — the grant is used as-is, `update` is never called.
+    expect(mockedPrisma.referralRewardGrant.update).not.toHaveBeenCalled()
+    expect(result).toHaveLength(1)
+    expect(result[0].grant.status).toBe('MANUAL_PENDING')
+    expect(result[0].discount).toBeUndefined()
   })
 
-  it('emits tier reward + writes ActivityLog when crossing threshold', async () => {
-    mockedPrisma.referral.findFirst.mockResolvedValue({
-      id: 'ref_1',
-      status: 'PENDING',
-      referrerCustomerId: 'cust_ref',
-    })
-    mockedPrisma.customer.update
-      .mockResolvedValueOnce({ id: 'cust_ref', firstName: 'Jose', lastName: 'P', referralCount: 7, referralTier: null }) // increment call
-      .mockResolvedValueOnce({ id: 'cust_ref', referralTier: 'TIER_1' }) // set tier call
-    mockedPrisma.referralProgramConfig.findUnique.mockResolvedValue({
-      tier1ReferralsRequired: 7,
-      tier2ReferralsRequired: 12,
-      tier3ReferralsRequired: 20,
-      tier1RewardPercent: 15,
-      tier2RewardPercent: 20,
-      tier3RewardPercent: 25,
-      rewardCouponExpiryDays: 90,
-      codePrefix: 'MINDFORM',
-    })
+  it('skips emission when the grant already exists (createMany count 0)', async () => {
+    mockedPrisma.referralTierReward.findMany.mockResolvedValue([
+      { id: 'tr_1', rewardType: 'PERCENT_COUPON', rewardPercent: 15, rewardProductId: null, rewardQuantity: 1 },
+    ])
+    mockedPrisma.referralRewardGrant.createMany.mockResolvedValueOnce({ count: 0 }) // already existed
+
+    const result = await emitTierRewards(mockedPrisma, baseInput)
+
+    expect(mockedPrisma.discount.create).not.toHaveBeenCalled() // no double-mint
+    expect(mockedPrisma.referralRewardGrant.findFirst).not.toHaveBeenCalled()
+    expect(mockedPrisma.referralRewardGrant.update).not.toHaveBeenCalled()
+    expect(result).toHaveLength(0)
+  })
+
+  it('emits one grant per ACTIVE tierReward when several are configured for the same tier', async () => {
+    mockedPrisma.referralTierReward.findMany.mockResolvedValue([
+      { id: 'tr_1', rewardType: 'PERCENT_COUPON', rewardPercent: 15, rewardProductId: null, rewardQuantity: 1 },
+      { id: 'tr_4', rewardType: 'FREE_PRODUCT', rewardPercent: null, rewardProductId: 'prod_1', rewardQuantity: 1 },
+    ])
+    mockedPrisma.referralRewardGrant.createMany.mockResolvedValue({ count: 1 })
+    mockedPrisma.referralRewardGrant.findFirst
+      .mockResolvedValueOnce({ id: 'grant_1', tierRewardId: 'tr_1' })
+      .mockResolvedValueOnce({ id: 'grant_4', tierRewardId: 'tr_4', status: 'MANUAL_PENDING' })
     mockedPrisma.discount.create.mockResolvedValue({ id: 'disc_1' })
     mockedPrisma.customerDiscount.create.mockResolvedValue({ id: 'cd_1' })
-    mockedPrisma.couponCode.create.mockResolvedValue({ id: 'cc_1' })
-    await onOrderPaid({ orderId: 'o1', venueId: 'venue_1' })
-    expect(mockedPrisma.discount.create).toHaveBeenCalled()
-    expect(mockedPrisma.activityLog.create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          action: 'REFERRAL_TIER_UNLOCKED',
-          data: expect.objectContaining({ tier: 'TIER_1' }),
-        }),
-      }),
-    )
+    mockedPrisma.couponCode.create.mockResolvedValue({ id: 'cc_1', code: 'MINDFORM-TIER1-C123' })
+    mockedPrisma.referralRewardGrant.update.mockResolvedValue({ id: 'grant_1', discountId: 'disc_1', couponCodeId: 'cc_1' })
+
+    const result = await emitTierRewards(mockedPrisma, baseInput)
+
+    expect(mockedPrisma.referralTierReward.findMany).toHaveBeenCalledWith({
+      where: { configId: 'config_1', tierLevel: 1, active: true },
+      orderBy: { createdAt: 'asc' },
+    })
+    expect(result).toHaveLength(2)
   })
 
-  it('does NOT emit reward when below threshold', async () => {
-    mockedPrisma.referral.findFirst.mockResolvedValue({
-      id: 'ref_1',
-      status: 'PENDING',
-      referrerCustomerId: 'cust_ref',
+  // ---- REGRESSION: findMany scoping ----
+
+  it('scopes the tierReward lookup by configId + tierLevel + active only', async () => {
+    mockedPrisma.referralTierReward.findMany.mockResolvedValue([])
+    await emitTierRewards(mockedPrisma, { ...baseInput, tierLevel: 2 })
+    expect(mockedPrisma.referralTierReward.findMany).toHaveBeenCalledWith({
+      where: { configId: 'config_1', tierLevel: 2, active: true },
+      orderBy: { createdAt: 'asc' },
     })
-    mockedPrisma.customer.update.mockResolvedValue({
-      id: 'cust_ref',
-      firstName: 'X',
-      lastName: 'Y',
-      referralCount: 6,
-      referralTier: null,
-    })
-    mockedPrisma.referralProgramConfig.findUnique.mockResolvedValue({
-      tier1ReferralsRequired: 7,
-      tier2ReferralsRequired: 12,
-      tier3ReferralsRequired: 20,
-    })
-    await onOrderPaid({ orderId: 'o1', venueId: 'venue_1' })
-    expect(mockedPrisma.discount.create).not.toHaveBeenCalled()
   })
 })
+
+// `onOrderPaid` tests moved to tests/unit/services/referrals/onOrderPaid.test.ts
+// (Task 5) — the CAS-claim + unlock-guard rewrite needed the shared
+// `prismaMock` registry (referral.updateMany, referralTierUnlock.createMany)
+// rather than this file's local minimal mock.

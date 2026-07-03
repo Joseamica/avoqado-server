@@ -1,11 +1,26 @@
 /**
- * referralRefund.service tests — Phase B3, Task 13
+ * referralRefund.service tests — Phase B3, Task 13 (single-discount era) →
+ * Task 6 (rewritten around ReferralRewardGrant, spec §6).
  *
  * Closes the "void path" loop: when an Order linked to a QUALIFIED
  * Referral is refunded, the Referral is voided, the referrer's count
- * is decremented, and any unredeemed tier reward is revoked. Rewards
- * that the referrer has already redeemed are preserved — we don't claw
- * back something the customer already cashed in.
+ * is decremented, and — if the tier drops — every ReferralRewardGrant
+ * that referral's tier-crossing emitted is revoked per its own
+ * `rewardType` + `status` (spec §6 table):
+ *
+ *   - PERCENT_COUPON: ISSUED + unredeemed → revoke (Discount + CouponCode
+ *     deactivated, grant → REVOKED). REDEEMED (or a CouponRedemption
+ *     already exists) → left alone; a stale ISSUED grant gets corrected
+ *     to REDEEMED so the state stays truthful.
+ *   - PERMANENT_DISCOUNT: usage is decided via `OrderDiscount` (NOT
+ *     CouponRedemption). Never applied → deactivate + REVOKED. Already
+ *     applied → STILL deactivate going forward (no retroactive clawback)
+ *     AND grant → REVOKED with a reason mentioning "permanente" — it must
+ *     never stay ISSUED.
+ *   - FREE_PRODUCT: MANUAL_PENDING → REVOKED. MANUAL_FULFILLED → left alone.
+ *
+ * `ReferralTierUnlock` is NEVER deleted on refund (D11: a tier is earned
+ * once per lifetime; refund revokes grants but never the unlock).
  *
  * Schema notes:
  *   - The 3-record reward bundle (Discount + CouponCode + CustomerDiscount)
@@ -27,10 +42,13 @@ jest.mock('@/utils/prismaClient', () => ({
     referral: { findFirst: jest.fn(), update: jest.fn() },
     customer: { update: jest.fn() },
     referralProgramConfig: { findUnique: jest.fn() },
+    referralRewardGrant: { findMany: jest.fn(), update: jest.fn() },
+    referralTierUnlock: { delete: jest.fn() },
     discount: { update: jest.fn() },
     customerDiscount: { updateMany: jest.fn() },
     couponCode: { updateMany: jest.fn() },
     couponRedemption: { findFirst: jest.fn() },
+    orderDiscount: { findFirst: jest.fn() },
     activityLog: { create: jest.fn() },
   },
 }))
@@ -79,9 +97,21 @@ describe('revokeTierReward', () => {
 })
 
 describe('onOrderRefunded', () => {
+  const baseReferral = {
+    id: 'ref_1',
+    status: 'QUALIFIED',
+    referrerCustomerId: 'cust_ref',
+  }
+  const baseConfig = {
+    tier1ReferralsRequired: 7,
+    tier2ReferralsRequired: 12,
+    tier3ReferralsRequired: 20,
+  }
+
   beforeEach(() => {
     jest.clearAllMocks()
     mockedPrisma.$transaction.mockImplementation(async (fn: any) => fn(mockedPrisma))
+    mockedPrisma.referralRewardGrant.findMany.mockResolvedValue([])
   })
 
   it('does nothing when no QUALIFIED Referral exists for this order', async () => {
@@ -91,22 +121,13 @@ describe('onOrderRefunded', () => {
   })
 
   it('voids Referral and decrements referrer count', async () => {
-    mockedPrisma.referral.findFirst.mockResolvedValue({
-      id: 'ref_1',
-      status: 'QUALIFIED',
-      referrerCustomerId: 'cust_ref',
-      rewardDiscountId: null,
-    })
+    mockedPrisma.referral.findFirst.mockResolvedValue(baseReferral)
     mockedPrisma.customer.update.mockResolvedValue({
       id: 'cust_ref',
       referralCount: 6,
       referralTier: 'TIER_1',
     })
-    mockedPrisma.referralProgramConfig.findUnique.mockResolvedValue({
-      tier1ReferralsRequired: 7,
-      tier2ReferralsRequired: 12,
-      tier3ReferralsRequired: 20,
-    })
+    mockedPrisma.referralProgramConfig.findUnique.mockResolvedValue(baseConfig)
     await onOrderRefunded({ orderId: 'o1', venueId: 'v1' })
     expect(mockedPrisma.referral.update).toHaveBeenCalledWith({
       where: { id: 'ref_1' },
@@ -117,55 +138,292 @@ describe('onOrderRefunded', () => {
     })
   })
 
-  it('revokes unredeemed reward when tier drops', async () => {
-    mockedPrisma.referral.findFirst.mockResolvedValue({
-      id: 'ref_1',
-      status: 'QUALIFIED',
-      referrerCustomerId: 'cust_ref',
-      rewardDiscountId: 'disc_1',
-    })
+  it('does not touch grants or ActivityLog when the tier does not drop', async () => {
+    mockedPrisma.referral.findFirst.mockResolvedValue(baseReferral)
     mockedPrisma.customer.update.mockResolvedValue({
       id: 'cust_ref',
-      referralCount: 6,
-      referralTier: 'TIER_1',
+      referralCount: 8,
+      referralTier: 'TIER_1', // stays TIER_1 even after decrement
     })
-    mockedPrisma.referralProgramConfig.findUnique.mockResolvedValue({
-      tier1ReferralsRequired: 7,
-      tier2ReferralsRequired: 12,
-      tier3ReferralsRequired: 20,
-    })
-    mockedPrisma.couponRedemption.findFirst.mockResolvedValue(null) // not redeemed
-    mockedPrisma.discount.update.mockResolvedValue({ id: 'disc_1' })
-    mockedPrisma.couponCode.updateMany.mockResolvedValue({ count: 1 })
-    mockedPrisma.customerDiscount.updateMany.mockResolvedValue({ count: 1 })
+    mockedPrisma.referralProgramConfig.findUnique.mockResolvedValue(baseConfig)
     await onOrderRefunded({ orderId: 'o1', venueId: 'v1' })
-    expect(mockedPrisma.discount.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: { id: 'disc_1' },
-        data: expect.objectContaining({ active: false }),
-      }),
-    )
+    expect(mockedPrisma.referralRewardGrant.findMany).not.toHaveBeenCalled()
+    expect(mockedPrisma.activityLog.create).not.toHaveBeenCalled()
   })
 
-  it('preserves redeemed reward (no revoke) even if tier drops', async () => {
-    mockedPrisma.referral.findFirst.mockResolvedValue({
-      id: 'ref_1',
-      status: 'QUALIFIED',
-      referrerCustomerId: 'cust_ref',
-      rewardDiscountId: 'disc_1',
+  describe('when the tier drops', () => {
+    beforeEach(() => {
+      mockedPrisma.referral.findFirst.mockResolvedValue(baseReferral)
+      mockedPrisma.customer.update.mockResolvedValue({
+        id: 'cust_ref',
+        referralCount: 6,
+        referralTier: 'TIER_1',
+      })
+      mockedPrisma.referralProgramConfig.findUnique.mockResolvedValue(baseConfig)
     })
-    mockedPrisma.customer.update.mockResolvedValue({
-      id: 'cust_ref',
-      referralCount: 6,
-      referralTier: 'TIER_1',
+
+    it('revokes an unredeemed PERCENT_COUPON grant', async () => {
+      mockedPrisma.referralRewardGrant.findMany.mockResolvedValue([
+        {
+          id: 'grant_1',
+          rewardType: 'PERCENT_COUPON',
+          status: 'ISSUED',
+          discountId: 'disc_1',
+          couponCodeId: 'coupon_1',
+        },
+      ])
+      mockedPrisma.couponRedemption.findFirst.mockResolvedValue(null) // not redeemed
+      mockedPrisma.discount.update.mockResolvedValue({ id: 'disc_1' })
+      mockedPrisma.couponCode.updateMany.mockResolvedValue({ count: 1 })
+      mockedPrisma.customerDiscount.updateMany.mockResolvedValue({ count: 1 })
+
+      await onOrderRefunded({ orderId: 'o1', venueId: 'v1' })
+
+      // Grants must be scoped by customer + tier level — NOT by referralId
+      // (a grant's referralId only records the ONE referral that triggered
+      // the original unlock; the refunded order is usually a different one).
+      expect(mockedPrisma.referralRewardGrant.findMany).toHaveBeenCalledWith({
+        where: {
+          customerId: 'cust_ref',
+          tierLevel: { gt: 0 },
+          status: { in: ['ISSUED', 'MANUAL_PENDING'] },
+        },
+      })
+      expect(mockedPrisma.discount.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'disc_1' },
+          data: expect.objectContaining({ active: false }),
+        }),
+      )
+      expect(mockedPrisma.couponCode.updateMany).toHaveBeenCalledWith({
+        where: { discountId: 'disc_1' },
+        data: { active: false },
+      })
+      expect(mockedPrisma.referralRewardGrant.update).toHaveBeenCalledWith({
+        where: { id: 'grant_1' },
+        data: expect.objectContaining({ status: 'REVOKED', revokedAt: expect.any(Date) }),
+      })
     })
-    mockedPrisma.referralProgramConfig.findUnique.mockResolvedValue({
-      tier1ReferralsRequired: 7,
-      tier2ReferralsRequired: 12,
-      tier3ReferralsRequired: 20,
+
+    it('scopes the grant lookup by customerId + tierLevel, NOT by referralId, when the refunded order belongs to a DIFFERENT referral than the one that triggered the tier unlock (the common case)', async () => {
+      // The referral being refunded (`ref_1`, referrerCustomerId 'cust_ref')
+      // is NOT the referral that originally triggered the TIER_1 grant —
+      // the grant below carries a completely different `referralId`
+      // ('ref_TRIGGER', not 'ref_1'). A `where: { referralId: referral.id }`
+      // lookup would return `[]` here and silently leave the reward alive.
+      mockedPrisma.referralRewardGrant.findMany.mockResolvedValue([
+        {
+          id: 'grant_other_trigger',
+          rewardType: 'PERCENT_COUPON',
+          status: 'ISSUED',
+          discountId: 'disc_other',
+          couponCodeId: 'coupon_other',
+          referralId: 'ref_TRIGGER',
+        },
+      ])
+      mockedPrisma.couponRedemption.findFirst.mockResolvedValue(null)
+      mockedPrisma.discount.update.mockResolvedValue({ id: 'disc_other' })
+      mockedPrisma.couponCode.updateMany.mockResolvedValue({ count: 1 })
+      mockedPrisma.customerDiscount.updateMany.mockResolvedValue({ count: 1 })
+
+      await onOrderRefunded({ orderId: 'o1', venueId: 'v1' })
+
+      // Assert the WHERE clause itself — the fix must query by customer +
+      // tier level, never by referralId.
+      expect(mockedPrisma.referralRewardGrant.findMany).toHaveBeenCalledWith({
+        where: {
+          customerId: 'cust_ref',
+          tierLevel: { gt: 0 },
+          status: { in: ['ISSUED', 'MANUAL_PENDING'] },
+        },
+      })
+      const callArgs = mockedPrisma.referralRewardGrant.findMany.mock.calls[0][0]
+      expect(callArgs.where).not.toHaveProperty('referralId')
+
+      // And the grant — despite belonging to a different referralId — must
+      // still get revoked, because it belongs to the same customer and its
+      // tier level is no longer supported by the (lowered) referralCount.
+      expect(mockedPrisma.discount.update).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'disc_other' }, data: expect.objectContaining({ active: false }) }),
+      )
+      expect(mockedPrisma.referralRewardGrant.update).toHaveBeenCalledWith({
+        where: { id: 'grant_other_trigger' },
+        data: expect.objectContaining({ status: 'REVOKED', revokedAt: expect.any(Date) }),
+      })
     })
-    mockedPrisma.couponRedemption.findFirst.mockResolvedValue({ id: 'red_1' }) // ALREADY redeemed
-    await onOrderRefunded({ orderId: 'o1', venueId: 'v1' })
-    expect(mockedPrisma.discount.update).not.toHaveBeenCalled()
+
+    it('does NOT revoke a REDEEMED coupon grant', async () => {
+      mockedPrisma.referralRewardGrant.findMany.mockResolvedValue([
+        {
+          id: 'grant_1',
+          rewardType: 'PERCENT_COUPON',
+          status: 'REDEEMED',
+          discountId: 'disc_1',
+          couponCodeId: 'coupon_1',
+        },
+      ])
+      await onOrderRefunded({ orderId: 'o1', venueId: 'v1' })
+      expect(mockedPrisma.discount.update).not.toHaveBeenCalled()
+      expect(mockedPrisma.referralRewardGrant.update).not.toHaveBeenCalled()
+    })
+
+    it('self-heals a stale ISSUED coupon grant to REDEEMED when a CouponRedemption already exists', async () => {
+      mockedPrisma.referralRewardGrant.findMany.mockResolvedValue([
+        {
+          id: 'grant_1',
+          rewardType: 'PERCENT_COUPON',
+          status: 'ISSUED',
+          discountId: 'disc_1',
+          couponCodeId: 'coupon_1',
+        },
+      ])
+      mockedPrisma.couponRedemption.findFirst.mockResolvedValue({ id: 'red_1' }) // already redeemed
+      await onOrderRefunded({ orderId: 'o1', venueId: 'v1' })
+      expect(mockedPrisma.discount.update).not.toHaveBeenCalled()
+      expect(mockedPrisma.referralRewardGrant.update).toHaveBeenCalledWith({
+        where: { id: 'grant_1' },
+        data: { status: 'REDEEMED' },
+      })
+    })
+
+    it('revokes a never-applied PERMANENT_DISCOUNT grant', async () => {
+      mockedPrisma.referralRewardGrant.findMany.mockResolvedValue([
+        {
+          id: 'grant_2',
+          rewardType: 'PERMANENT_DISCOUNT',
+          status: 'ISSUED',
+          discountId: 'disc_2',
+          couponCodeId: null,
+        },
+      ])
+      mockedPrisma.orderDiscount.findFirst.mockResolvedValue(null) // never applied
+      mockedPrisma.discount.update.mockResolvedValue({ id: 'disc_2' })
+      mockedPrisma.couponCode.updateMany.mockResolvedValue({ count: 0 })
+      mockedPrisma.customerDiscount.updateMany.mockResolvedValue({ count: 1 })
+
+      await onOrderRefunded({ orderId: 'o1', venueId: 'v1' })
+
+      expect(mockedPrisma.referralRewardGrant.findMany).toHaveBeenCalledWith({
+        where: {
+          customerId: 'cust_ref',
+          tierLevel: { gt: 0 },
+          status: { in: ['ISSUED', 'MANUAL_PENDING'] },
+        },
+      })
+      expect(mockedPrisma.orderDiscount.findFirst).toHaveBeenCalledWith({ where: { discountId: 'disc_2' } })
+      expect(mockedPrisma.discount.update).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'disc_2' }, data: expect.objectContaining({ active: false }) }),
+      )
+      expect(mockedPrisma.customerDiscount.updateMany).toHaveBeenCalledWith({
+        where: { discountId: 'disc_2' },
+        data: { active: false },
+      })
+      expect(mockedPrisma.referralRewardGrant.update).toHaveBeenCalledWith({
+        where: { id: 'grant_2' },
+        data: expect.objectContaining({ status: 'REVOKED' }),
+      })
+    })
+
+    it('marks an already-applied PERMANENT_DISCOUNT grant REVOKED (no clawback)', async () => {
+      mockedPrisma.referralRewardGrant.findMany.mockResolvedValue([
+        {
+          id: 'grant_2',
+          rewardType: 'PERMANENT_DISCOUNT',
+          status: 'ISSUED',
+          discountId: 'disc_2',
+          couponCodeId: null,
+        },
+      ])
+      mockedPrisma.orderDiscount.findFirst.mockResolvedValue({ id: 'od1' } as any) // ya aplicado
+      mockedPrisma.discount.update.mockResolvedValue({ id: 'disc_2' })
+      mockedPrisma.couponCode.updateMany.mockResolvedValue({ count: 0 })
+      mockedPrisma.customerDiscount.updateMany.mockResolvedValue({ count: 1 })
+
+      await onOrderRefunded({ orderId: 'o1', venueId: 'v1' })
+
+      // No retroactive clawback: the historical OrderDiscount is never touched.
+      expect(mockedPrisma.orderDiscount.findFirst).toHaveBeenCalled()
+      // But the Discount IS deactivated going forward...
+      expect(mockedPrisma.discount.update).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'disc_2' }, data: expect.objectContaining({ active: false }) }),
+      )
+      // ...and the grant must NEVER be left ISSUED — always REVOKED, state must not lie.
+      expect(mockedPrisma.referralRewardGrant.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'grant_2' },
+          data: expect.objectContaining({ status: 'REVOKED', revokeReason: expect.stringContaining('permanente') }),
+        }),
+      )
+    })
+
+    it('revokes a MANUAL_PENDING FREE_PRODUCT grant', async () => {
+      mockedPrisma.referralRewardGrant.findMany.mockResolvedValue([
+        {
+          id: 'grant_3',
+          rewardType: 'FREE_PRODUCT',
+          status: 'MANUAL_PENDING',
+          discountId: null,
+          couponCodeId: null,
+        },
+      ])
+      await onOrderRefunded({ orderId: 'o1', venueId: 'v1' })
+      expect(mockedPrisma.referralRewardGrant.update).toHaveBeenCalledWith({
+        where: { id: 'grant_3' },
+        data: expect.objectContaining({ status: 'REVOKED' }),
+      })
+    })
+
+    it('does NOT revoke a MANUAL_FULFILLED FREE_PRODUCT grant', async () => {
+      mockedPrisma.referralRewardGrant.findMany.mockResolvedValue([
+        {
+          id: 'grant_3',
+          rewardType: 'FREE_PRODUCT',
+          status: 'MANUAL_FULFILLED',
+          discountId: null,
+          couponCodeId: null,
+        },
+      ])
+      await onOrderRefunded({ orderId: 'o1', venueId: 'v1' })
+      expect(mockedPrisma.referralRewardGrant.update).not.toHaveBeenCalled()
+    })
+
+    it('does not delete the ReferralTierUnlock on refund', async () => {
+      mockedPrisma.referralRewardGrant.findMany.mockResolvedValue([])
+      await onOrderRefunded({ orderId: 'o1', venueId: 'v1' })
+      expect(mockedPrisma.referralTierUnlock.delete).not.toHaveBeenCalled()
+    })
+
+    it('handles multiple grants of different types in the same tier crossing', async () => {
+      mockedPrisma.referralRewardGrant.findMany.mockResolvedValue([
+        { id: 'grant_1', rewardType: 'PERCENT_COUPON', status: 'ISSUED', discountId: 'disc_1', couponCodeId: 'coupon_1' },
+        { id: 'grant_2', rewardType: 'PERMANENT_DISCOUNT', status: 'ISSUED', discountId: 'disc_2', couponCodeId: null },
+        { id: 'grant_3', rewardType: 'FREE_PRODUCT', status: 'MANUAL_PENDING', discountId: null, couponCodeId: null },
+      ])
+      mockedPrisma.couponRedemption.findFirst.mockResolvedValue(null)
+      mockedPrisma.orderDiscount.findFirst.mockResolvedValue(null)
+      mockedPrisma.discount.update.mockResolvedValue({ id: 'disc_x' })
+      mockedPrisma.couponCode.updateMany.mockResolvedValue({ count: 1 })
+      mockedPrisma.customerDiscount.updateMany.mockResolvedValue({ count: 1 })
+
+      await onOrderRefunded({ orderId: 'o1', venueId: 'v1' })
+
+      expect(mockedPrisma.referralRewardGrant.findMany).toHaveBeenCalledWith({
+        where: {
+          customerId: 'cust_ref',
+          tierLevel: { gt: 0 },
+          status: { in: ['ISSUED', 'MANUAL_PENDING'] },
+        },
+      })
+      expect(mockedPrisma.referralRewardGrant.update).toHaveBeenCalledTimes(3)
+      expect(mockedPrisma.activityLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            data: expect.objectContaining({
+              revokedGrantIds: expect.arrayContaining(['grant_1', 'grant_2', 'grant_3']),
+            }),
+          }),
+        }),
+      )
+    })
   })
 })

@@ -454,6 +454,8 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'referral:override-existing-customer': ['referral:read', 'referral:override-existing-customer'],
   'referral:void-manual': ['referral:read', 'referral:void-manual'],
   'referral:export-csv': ['referral:read', 'referral:export-csv', 'customers:read'],
+  // FREE_PRODUCT manual fulfillment (Task 8) — needs customer data too (grant is tied to the referrer).
+  'referral:fulfill-courtesy': ['referral:read', 'referral:fulfill-courtesy'],
 
   // ===========================
   // FACTURACIÓN CFDI 4.0 (Pro-tier paid feature — §15/§18)
@@ -702,6 +704,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'creditPacks:*', // Credit pack/bundle management
     'referral:read', // Referral Program: read-only access
     'referral:override-existing-customer', // Referral Program: can override existing-customer guard
+    'referral:fulfill-courtesy', // Referral Program: can mark a FREE_PRODUCT courtesy as delivered
     'commissions:read', // Can view commission configs and staff earnings
     'commissions:view_own', // Can view own commission earnings
     // Cash Out (PlayTelecom back-office — view balances + generate Finanzas report; module-gated)
@@ -786,6 +789,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'referral:override-existing-customer',
     'referral:void-manual',
     'referral:export-csv',
+    'referral:fulfill-courtesy',
     'serialized-inventory:*', // Serialized Inventory (SIMs, jewelry, etc.)
     'sale-verifications:review', // Can approve/reject SIM-sale documentation from dashboard
     'inventory:org-manage', // Manage org-level item categories & serialized items
@@ -895,6 +899,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'referral:override-existing-customer',
     'referral:void-manual',
     'referral:export-csv',
+    'referral:fulfill-courtesy',
     'features:*',
     'notifications:*', // Can send push notifications
     'venues:*', // Can manage venue settings, billing, payment methods
@@ -1387,6 +1392,17 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   // Credit packs / bundles — venue-level credit packages (e.g. class packs, prepaid plans).
   // Routes live in dashboard/creditPack.routes.ts.
   creditPacks: ['creditPacks:read', 'creditPacks:create', 'creditPacks:update', 'creditPacks:delete'],
+  // Referral Program (was missing from the catalog entirely — pre-existing
+  // CATALOG_GAP for the 5 perms below; adding this key fixes all of them
+  // as a side effect of registering the new `referral:fulfill-courtesy`).
+  referral: [
+    'referral:read',
+    'referral:configure',
+    'referral:override-existing-customer',
+    'referral:void-manual',
+    'referral:export-csv',
+    'referral:fulfill-courtesy',
+  ],
   // Shareable payment links (Stripe Connect + Blumon E-commerce).
   // Routes live in dashboard/paymentLink.routes.ts under the parent `payment-link:read` gate.
   'payment-link': ['payment-link:read', 'payment-link:create', 'payment-link:update'],
