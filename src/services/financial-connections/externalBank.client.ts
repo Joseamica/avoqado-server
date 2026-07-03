@@ -308,7 +308,11 @@ export const externalBankClient: FinancialProviderClient = {
       }
     } catch (e) {
       if (axios.isAxiosError(e)) {
-        return { ok: false, movementId: null, message: pick<string>(e.response?.data, 'message') || `traspaso falló (status ${e.response?.status})` }
+        return {
+          ok: false,
+          movementId: null,
+          message: pick<string>(e.response?.data, 'message') || `traspaso falló (status ${e.response?.status})`,
+        }
       }
       throw e
     }
