@@ -272,7 +272,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'staff_ranking',
-    'Who sells the most — staff ranked by revenue in a venue you can access, over a date range (default last 7 days). Each entry: name, revenue, orders, tips, average ticket. Answers "¿quién vende más / mejor vendedor?". Pass venueId; optionally fromDate/toDate (YYYY-MM-DD) and a limit.',
+    'Who sells the most — staff ranked by revenue in a venue you can access, over a date range (default last 7 days). Each entry: name, revenue, orders, tips, average ticket. Answers "¿quién vende más / mejor vendedor?". Revenue here is attributed to the order CREATOR and is total sales — it is NOT a commission base. ⚠️ To answer anything about COMMISSIONS ("¿cuánto de comisión le toca a X?") do NOT multiply this revenue by a rate — use the staff_commission tool (commission is paid to the SERVER, only over commissionable categories, at the tiered rate). Pass venueId; optionally fromDate/toDate (YYYY-MM-DD) and a limit.',
     {
       venueId: z.string().describe('Venue to analyze (must be in your scope)'),
       fromDate: z.string().optional().describe('Start date YYYY-MM-DD (default: 7 days ago)'),

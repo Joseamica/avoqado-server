@@ -3,6 +3,7 @@ import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
 import { hasPermission } from '@/services/access/access.service'
 import { venuesWithCommissionsAccess } from '@/services/access/basePlan.service'
+import { getCalendarMonth, venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
@@ -72,6 +73,136 @@ export function formatScheme(config: SchemeRow, categoryName: Map<string, string
   }
 }
 
+/**
+ * A single row from the real commission engine (CommissionCalculation), shaped
+ * for aggregation. Amounts are Prisma Decimals in PESOS (1:1, major units).
+ */
+interface CommissionCalcRow {
+  staffId: string
+  staff: { firstName: string; lastName: string | null }
+  configId: string
+  config: { name: string; calcType: string }
+  baseAmount: { toString(): string }
+  grossCommission: { toString(): string }
+  netCommission: { toString(): string }
+  effectiveRate: { toString(): string }
+  tier: number | null
+  tierName: string | null
+  status: string
+}
+
+/**
+ * Aggregate raw engine rows into per-staff EARNED commission, broken down by
+ * scheme and by the rate/tier that actually applied. This is the source of
+ * truth for what each seller earned (attributed to the SERVER via the engine,
+ * only over commissionable categories) — it must NEVER be re-derived by
+ * multiplying a sales figure by a scheme rate. Pure + deterministic (sorted by
+ * total commission desc) so it is unit-testable in isolation. Money stays in
+ * pesos 1:1 (no cents conversion — these are Decimal(x,2) peso fields).
+ */
+export function aggregateStaffCommission(rows: CommissionCalcRow[]) {
+  interface RateBucket {
+    rate: number
+    tier: number | null
+    tierName: string | null
+    count: number
+    base: number
+    commission: number
+  }
+  interface SchemeBucket {
+    config: string
+    calcType: string
+    count: number
+    base: number
+    commission: number
+    rates: Map<string, RateBucket>
+  }
+  interface StaffBucket {
+    staffId: string
+    name: string
+    count: number
+    totalBase: number
+    totalCommission: number
+    byStatus: Record<string, number>
+    schemes: Map<string, SchemeBucket>
+  }
+
+  const byStaff = new Map<string, StaffBucket>()
+
+  for (const r of rows) {
+    const base = Number(r.baseAmount)
+    const commission = Number(r.netCommission)
+    const rate = Number(r.effectiveRate)
+
+    let staff = byStaff.get(r.staffId)
+    if (!staff) {
+      staff = {
+        staffId: r.staffId,
+        name: `${r.staff.firstName} ${r.staff.lastName ?? ''}`.trim(),
+        count: 0,
+        totalBase: 0,
+        totalCommission: 0,
+        byStatus: {},
+        schemes: new Map(),
+      }
+      byStaff.set(r.staffId, staff)
+    }
+    staff.count += 1
+    staff.totalBase += base
+    staff.totalCommission += commission
+    staff.byStatus[r.status] = (staff.byStatus[r.status] ?? 0) + 1
+
+    let scheme = staff.schemes.get(r.configId)
+    if (!scheme) {
+      scheme = { config: r.config.name, calcType: r.config.calcType, count: 0, base: 0, commission: 0, rates: new Map() }
+      staff.schemes.set(r.configId, scheme)
+    }
+    scheme.count += 1
+    scheme.base += base
+    scheme.commission += commission
+
+    const rateKey = `${r.effectiveRate}|${r.tier ?? ''}`
+    let rateBucket = scheme.rates.get(rateKey)
+    if (!rateBucket) {
+      rateBucket = { rate, tier: r.tier, tierName: r.tierName, count: 0, base: 0, commission: 0 }
+      scheme.rates.set(rateKey, rateBucket)
+    }
+    rateBucket.count += 1
+    rateBucket.base += base
+    rateBucket.commission += commission
+  }
+
+  return Array.from(byStaff.values())
+    .map(s => ({
+      staffId: s.staffId,
+      name: s.name,
+      count: s.count,
+      totalBase: round2(s.totalBase),
+      totalCommission: round2(s.totalCommission),
+      byStatus: s.byStatus,
+      byScheme: Array.from(s.schemes.values())
+        .map(sc => ({
+          config: sc.config,
+          calcType: sc.calcType,
+          count: sc.count,
+          base: round2(sc.base),
+          commission: round2(sc.commission),
+          byRate: Array.from(sc.rates.values())
+            .map(rb => ({
+              rate: rb.rate,
+              tier: rb.tier,
+              tierName: rb.tierName,
+              count: rb.count,
+              base: round2(rb.base),
+              commission: round2(rb.commission),
+            }))
+            .sort((a, b) => a.rate - b.rate),
+        }))
+        .sort((a, b) => b.commission - a.commission),
+    }))
+    .sort((a, b) => b.totalCommission - a.totalCommission)
+}
+
 export function registerCommissionTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
 
@@ -94,7 +225,7 @@ export function registerCommissionTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'list_commission_schemes',
-    'List active staff commission schemes for your venues. Each scheme shows how commission is calculated (flat %, tiered, or fixed amount), which product categories it applies to (multiple schemes can run per venue, each on its own categories), and its tiers. A tier boundary can be a fixed amount or "EMPLOYEE_GOAL" — the staff member\'s own sales goal. Requires commissions:read.',
+    'List active staff commission schemes for your venues — the CONFIG only (rates, tiers, categories), NOT what anyone earned. Each scheme shows how commission is calculated (flat %, tiered, or fixed amount), which product categories it applies to (multiple schemes can run per venue, each on its own categories), and its tiers. A tier boundary can be a fixed amount or "EMPLOYEE_GOAL" — the staff member\'s own sales goal. ⚠️ Do NOT use these rates to hand-compute a person\'s commission by multiplying their sales — that is wrong (only some categories carry a scheme, commission is attributed to the SERVER not the order creator, and tiers are monthly-cumulative). To answer "¿cuánto de comisión ganó X?" use the staff_commission tool, which reads the real engine. Requires commissions:read.',
     { venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues') },
     async ({ venueId }) => {
       const venueIds = await readableVenues(venueId)
@@ -234,6 +365,62 @@ export function registerCommissionTools(server: McpServer, scope: McpScope) {
           createdAt: p.createdAt.toISOString(),
           notes: p.notes,
         })),
+      })
+    },
+  )
+
+  server.tool(
+    'staff_commission',
+    'How much commission each staff member EARNED in a venue you can access, over a date range (default: the current calendar month, venue-local). This is the SOURCE OF TRUTH — it reads what the commission engine actually calculated (CommissionCalculation), attributed to the seller and applied ONLY to commissionable categories at the correct tier/rate. Per staff it returns totalCommission, totalBase, a per-scheme breakdown, and within each scheme a per-rate/tier breakdown (which rate hit which base). Answers "¿cuánto de comisión le toca a X? / ¿cuánto llevo de comisiones este mes?". ⚠️ NEVER estimate commission yourself by multiplying a sales figure (e.g. from staff_ranking) by a scheme rate — that is wrong (sales tools attribute by order CREATOR, commissions pay the SERVER; most categories may carry no scheme; tiers are monthly-cumulative). Always use THIS tool. Requires commissions:read. Pass venueId; optionally staffId, fromDate/toDate (YYYY-MM-DD).',
+    {
+      venueId: z.string().describe('Venue to analyze (must be in your scope)'),
+      staffId: z.string().optional().describe('Focus one employee; omit for all staff'),
+      fromDate: z.string().optional().describe('Start date YYYY-MM-DD venue-local (default: first day of current month)'),
+      toDate: z.string().optional().describe('End date YYYY-MM-DD venue-local, INCLUSIVE of the whole day (default: today / end of month)'),
+    },
+    async ({ venueId, staffId, fromDate, toDate }) => {
+      const venueIds = await readableVenues(venueId) // gating: scope + commissions:read + plan/module entitlement
+      if (venueIds.length === 0)
+        return text({
+          venuesInScope: 0,
+          staff: [],
+          note: 'Ningún venue en tu alcance tiene commissions:read Y el plan/módulo de comisiones (requiere Premium o el módulo COMMISSIONS).',
+        })
+
+      const tz = (await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }))?.timezone || 'America/Mexico_City'
+      const month = getCalendarMonth(tz)
+      const from = fromDate ? venueStartOfDay(tz, new Date(`${fromDate}T12:00:00`)) : month.from
+      const to = toDate ? venueEndOfDay(tz, new Date(`${toDate}T12:00:00`)) : month.to
+
+      const rows = (await prisma.commissionCalculation.findMany({
+        where: {
+          venueId: { in: venueIds },
+          ...(staffId ? { staffId } : {}),
+          voidedAt: null, // exclude reversed calcs (e.g. from refunds)
+          calculatedAt: { gte: from, lte: to },
+        },
+        select: {
+          staffId: true,
+          staff: { select: { firstName: true, lastName: true } },
+          configId: true,
+          config: { select: { name: true, calcType: true } },
+          baseAmount: true,
+          grossCommission: true,
+          netCommission: true,
+          effectiveRate: true,
+          tier: true,
+          tierName: true,
+          status: true,
+        },
+      })) as unknown as CommissionCalcRow[]
+
+      const staff = aggregateStaffCommission(rows)
+      return text({
+        venueId,
+        window: { from: from.toISOString(), to: to.toISOString(), timezone: tz },
+        count: staff.length,
+        staff,
+        note: 'Comisión GANADA leída del motor real (CommissionCalculation): atribuida al vendedor (servedById) y solo sobre categorías con esquema, al tier/tasa correctos. Excluye calcs anulados (reembolsos). NO estimes multiplicando ventas × tasa.',
       })
     },
   )
