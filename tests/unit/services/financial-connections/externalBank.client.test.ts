@@ -44,7 +44,10 @@ it('resolveMgAlt: número interno → idCuentaAlt (string del proveedor → ente
 
 it('internalTransfer: POST add-transferenciaMG con el body probado; success:true → ok, success:false → no ok', async () => {
   nock(BASE)
-    .post('/api/transferencia/add-transferenciaMG', b => b.idCuentaAltSalida === 10 && b.idCuentaAltRecibe === 20 && b.idTipo === 1 && b.monto === 1 && b.concepto === 'Prueba')
+    .post(
+      '/api/transferencia/add-transferenciaMG',
+      b => b.idCuentaAltSalida === 10 && b.idCuentaAltRecibe === 20 && b.idTipo === 1 && b.monto === 1 && b.concepto === 'Prueba',
+    )
     .reply(200, { success: true, idMovimiento: 'mov-1', message: 'OK' })
   let client = await loadClient()
   const ok = await client.internalTransfer({ accessToken: 't' }, { sourceAltId: 10, destAltId: 20, amount: 1, concept: 'Prueba' })
@@ -217,7 +220,7 @@ it('listMovements: pagina con notación punteada y normaliza el movimiento', asy
   // Ruta = idNegocio; idCuenta como query param (acota a la cuenta real, no al pool global).
   nock(BASE)
     .get('/api/clients/movimientos/neg-1')
-    .query({ 'Pagination.Page': '0', 'Pagination.Size': '10', idCuenta: 'cta-1', FechaInicio: '2026-07-01T00:00:00.000Z' })
+    .query({ 'Pagination.Page': '0', 'Pagination.Size': '10', idCuenta: 'cta-1', SortByFecha: 'desc', FechaInicio: '2026-07-01T00:00:00.000Z' })
     .reply(200, {
       total: 1,
       data: [
@@ -242,25 +245,22 @@ it('listMovements: pagina con notación punteada y normaliza el movimiento', asy
 })
 
 it('getMovementStats: parsea los montos-string a número y preserva null en no-parseables', async () => {
-  nock(BASE)
-    .get('/api/clients/movimientos/Estadisticas/cta-1')
-    .query(true)
-    .reply(200, {
-      nombre: 'AV-X',
-      cuentaClabe: '7381',
-      montoTransaccionadoSpeiIn: '1500.75',
-      numeroOperacionesSpeiIn: '3',
-      comisionCobradaSpeiIn: '12.5',
-      montoTransaccionadoSpeiOut: 'garbage',
-      numeroOperacionesSpeiOut: '1',
-      comisionCobradaSpeiOut: '0',
-      montoTransaccionadoTransferenciaInterna: '0',
-      numeroOperacionesTransferenciaInterna: '0',
-      comisionCobradaTransferenciaInterna: '0',
-      montoTransaccionadoDispersion: '200',
-      numeroOperacionesDispersion: '2',
-      comisionCobradaDispersion: '1',
-    })
+  nock(BASE).get('/api/clients/movimientos/Estadisticas/cta-1').query(true).reply(200, {
+    nombre: 'AV-X',
+    cuentaClabe: '7381',
+    montoTransaccionadoSpeiIn: '1500.75',
+    numeroOperacionesSpeiIn: '3',
+    comisionCobradaSpeiIn: '12.5',
+    montoTransaccionadoSpeiOut: 'garbage',
+    numeroOperacionesSpeiOut: '1',
+    comisionCobradaSpeiOut: '0',
+    montoTransaccionadoTransferenciaInterna: '0',
+    numeroOperacionesTransferenciaInterna: '0',
+    comisionCobradaTransferenciaInterna: '0',
+    montoTransaccionadoDispersion: '200',
+    numeroOperacionesDispersion: '2',
+    comisionCobradaDispersion: '1',
+  })
   const client = await loadClient()
   const s = await client.getMovementStats({ accessToken: 't' }, 'cta-1', { from: '2026-07-01T00:00:00.000Z' })
   expect(s.speiIn).toEqual({ amount: 1500.75, count: 3, fee: 12.5 })
