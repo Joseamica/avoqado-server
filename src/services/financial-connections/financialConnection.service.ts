@@ -260,7 +260,15 @@ export async function validateDevice(connectionId: string, code: string, staffId
       entityId: connectionId,
       data: { provider: conn.provider.code },
     })
-    return await finishConnected(connectionId, conn.deviceIdentifier!, r.grant, r.accounts, r.accessToken, r.externalClientId, r.externalDeviceId)
+    return await finishConnected(
+      connectionId,
+      conn.deviceIdentifier!,
+      r.grant,
+      r.accounts,
+      r.accessToken,
+      r.externalClientId,
+      r.externalDeviceId,
+    )
   } catch (e) {
     await logAction({
       staffId: staffId ?? null,
@@ -289,7 +297,11 @@ export async function validateTwoFactorAuth(connectionId: string, code: string, 
     const r = await client.validateTwoFactorCode({
       email: ch.email,
       deviceIdentifier: conn.deviceIdentifier!,
-      challenge: { accessToken: ch.accessToken, externalClientId: ch.externalClientId ?? null, externalDeviceId: ch.externalDeviceId ?? null },
+      challenge: {
+        accessToken: ch.accessToken,
+        externalClientId: ch.externalClientId ?? null,
+        externalDeviceId: ch.externalDeviceId ?? null,
+      },
       code,
       accountKind: conn.accountKind,
     })
@@ -304,7 +316,15 @@ export async function validateTwoFactorAuth(connectionId: string, code: string, 
       entityId: connectionId,
       data: { provider: conn.provider.code },
     })
-    return await finishConnected(connectionId, conn.deviceIdentifier!, r.grant, r.accounts, r.accessToken, r.externalClientId, r.externalDeviceId)
+    return await finishConnected(
+      connectionId,
+      conn.deviceIdentifier!,
+      r.grant,
+      r.accounts,
+      r.accessToken,
+      r.externalClientId,
+      r.externalDeviceId,
+    )
   } catch (e) {
     await logAction({
       staffId: staffId ?? null,
@@ -635,15 +655,12 @@ export async function sendInternalTransfer(
   if (!dest) throw new BadRequestError(`No se encontró la cuenta destino ${destAccount}.`)
   if (dest.altId === source.altId) throw new BadRequestError('El origen y el destino son la misma cuenta.')
 
-  const result = await client.internalTransfer(
-    ctx,
-    {
-      sourceAltId: source.altId,
-      destAltId: dest.altId,
-      amount: input.amount,
-      concept: input.concept,
-    },
-  )
+  const result = await client.internalTransfer(ctx, {
+    sourceAltId: source.altId,
+    destAltId: dest.altId,
+    amount: input.amount,
+    concept: input.concept,
+  })
 
   // Auditoría obligatoria de movimiento de dinero: quién, cuánto, a dónde, resultado.
   // destAccount va normalizado (trim) — es también la clave de la dedup de arriba.

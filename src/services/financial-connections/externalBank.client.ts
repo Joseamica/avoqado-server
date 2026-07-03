@@ -121,7 +121,7 @@ function decryptClientEnvelope(data: unknown, idDispositivo: string | null): unk
   const payload = pick<string>(data, 'payload')
   if (typeof payload !== 'string' || !payload.includes('|')) return null // no cifrado → passthrough
   if (!idDispositivo || idDispositivo.length < 16) throw new BadRequestError('Falta idDispositivo para descifrar la respuesta del cliente.')
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
+
   const crypto = require('node:crypto') as typeof import('node:crypto')
   const [ivB64, ctB64] = payload.split('|')
   const key = Buffer.from(idDispositivo.slice(0, 16), 'utf8') // 16 bytes → AES-128 (idDispositivo es UUID ASCII)
@@ -158,7 +158,8 @@ async function accountsForKind(
     const idDisp = idDispositivoOf(data)
     const accounts = await getClientAccounts(accessToken, idMg, idDisp)
     // 0 cuentas → error honesto AHORA, no una conexión CONNECTED vacía (zombie) que confunde (C4).
-    if (!accounts.length) throw new BadRequestError('El proveedor no devolvió cuentas para este usuario; verifica el tipo de cuenta elegido.')
+    if (!accounts.length)
+      throw new BadRequestError('El proveedor no devolvió cuentas para este usuario; verifica el tipo de cuenta elegido.')
     return { accounts, externalClientId: idMg, externalDeviceId: idDisp ?? undefined }
   }
   return { accounts: normalizeAccounts(await fetchMe(accessToken)) }
@@ -187,7 +188,7 @@ async function signIn(email: string, password: string, deviceIdentifier: string,
 // ─── TEMP-DEBUG-PROBE (BORRAR antes de commit) ────────────────────────────────
 // Task 1.5 en vivo: captura SHAPES redactados de las respuestas del proveedor para
 // el flujo CLIENT en /tmp/avoqado-fc-probe.log. Tokens/passwords: solo longitud.
-/* eslint-disable @typescript-eslint/no-explicit-any */
+
 function probeRedact(v: unknown, key = '', depth = 0): unknown {
   if (depth > 6) return '<deep>'
   if (v === null || v === undefined) return v
@@ -205,7 +206,7 @@ function probeRedact(v: unknown, key = '', depth = 0): unknown {
 function probeLog(label: string, data: unknown): void {
   try {
     // require dinámico para no tocar los imports del archivo (se borra completo).
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+
     const fs = require('node:fs') as typeof import('node:fs')
     fs.appendFileSync('/tmp/avoqado-fc-probe.log', JSON.stringify({ ts: new Date().toISOString(), label, shape: probeRedact(data) }) + '\n')
   } catch {
@@ -216,7 +217,6 @@ function probeLog(label: string, data: unknown): void {
 // Va a un archivo aparte; se borra junto con el probe antes de commit.
 function probeLogRaw(label: string, data: unknown): void {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const fs = require('node:fs') as typeof import('node:fs')
     fs.appendFileSync('/tmp/avoqado-fc-raw.log', JSON.stringify({ ts: new Date().toISOString(), label, data }) + '\n')
   } catch {

@@ -51,12 +51,18 @@ it('internalTransfer: POST add-transferenciaMG con el body probado; success:true
     )
     .reply(200, { success: true, idMovimiento: 'mov-1', message: 'OK' })
   let client = await loadClient()
-  const ok = await client.internalTransfer({ accessToken: 't', kind: 'MERCHANT' }, { sourceAltId: 10, destAltId: 20, amount: 1, concept: 'Prueba' })
+  const ok = await client.internalTransfer(
+    { accessToken: 't', kind: 'MERCHANT' },
+    { sourceAltId: 10, destAltId: 20, amount: 1, concept: 'Prueba' },
+  )
   expect(ok).toEqual({ ok: true, movementId: 'mov-1', message: 'OK' })
 
   nock(BASE).post('/api/transferencia/add-transferenciaMG').reply(200, { success: false, message: 'Saldo insuficiente' })
   client = await loadClient()
-  const bad = await client.internalTransfer({ accessToken: 't', kind: 'MERCHANT' }, { sourceAltId: 10, destAltId: 20, amount: 1, concept: '' })
+  const bad = await client.internalTransfer(
+    { accessToken: 't', kind: 'MERCHANT' },
+    { sourceAltId: 10, destAltId: 20, amount: 1, concept: '' },
+  )
   expect(bad.ok).toBe(false)
   expect(bad.message).toBe('Saldo insuficiente')
 })
@@ -194,14 +200,16 @@ it('validateDevice(CLIENT): re-login con needTwoFactorAuth y token:null reusa el
   nock(BASE).post('/api/identity/validate-otp-code/web').reply(200, { isValid: true })
   // Shape REAL del provider para PWA: re-login tras device validation NO trae token temporal
   // nuevo y anida el id en user.idMoneyGiver (no userData).
-  nock(BASE).post('/api/auth/sign-in').reply(200, {
-    isLoggedIn: true,
-    token: null,
-    refreshToken: null,
-    needTwoFactorAuth: true,
-    needDeviceValidation: false,
-    user: { idMoneyGiver: 'mg-real' },
-  })
+  nock(BASE)
+    .post('/api/auth/sign-in')
+    .reply(200, {
+      isLoggedIn: true,
+      token: null,
+      refreshToken: null,
+      needTwoFactorAuth: true,
+      needDeviceValidation: false,
+      user: { idMoneyGiver: 'mg-real' },
+    })
   const client = await loadClient()
   const r = await client.validateDevice({
     email: 'a@b.co',
@@ -219,13 +227,15 @@ it('validateDevice(CLIENT): re-login con needTwoFactorAuth y token:null reusa el
 })
 
 it('idMoneyGiverOf vía connect(CLIENT): user.idMoneyGiver (shape PWA real) se acepta igual que userData', async () => {
-  nock(BASE).post('/api/auth/sign-in').reply(200, {
-    signedIn: true,
-    token: 'acc-c2',
-    refreshToken: 'ref-c2',
-    expiresIn: new Date(Date.now() + 3600e3).toISOString(),
-    user: { idMoneyGiver: 'mg-user-path' },
-  })
+  nock(BASE)
+    .post('/api/auth/sign-in')
+    .reply(200, {
+      signedIn: true,
+      token: 'acc-c2',
+      refreshToken: 'ref-c2',
+      expiresIn: new Date(Date.now() + 3600e3).toISOString(),
+      user: { idMoneyGiver: 'mg-user-path' },
+    })
   nock(BASE)
     .get('/api/clients/get-wallet-clientAccounts/v3r2.1')
     .query({ idMoneyGiver: 'mg-user-path' })
@@ -329,7 +339,11 @@ it('listMovements: pagina con notación punteada y normaliza el movimiento', asy
       ],
     })
   const client = await loadClient()
-  const r = await client.listMovements({ accessToken: 't', kind: 'MERCHANT' }, 'neg-1', 'cta-1', { page: 0, size: 10, from: '2026-07-01T00:00:00.000Z' })
+  const r = await client.listMovements({ accessToken: 't', kind: 'MERCHANT' }, 'neg-1', 'cta-1', {
+    page: 0,
+    size: 10,
+    from: '2026-07-01T00:00:00.000Z',
+  })
   expect(r.total).toBe(1)
   expect(r.movements[0]).toMatchObject({ id: 'op1', type: 'SPEI IN', amount: 150.5, originator: 'ACME', beneficiary: null })
 })
@@ -348,7 +362,6 @@ it('listMovements(CLIENT): idCuenta en la RUTA **y** como query param (scoping �
 })
 
 it('listMovements(CLIENT): descifra el envelope cifrado si el endpoint enveló la respuesta', async () => {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const crypto = require('node:crypto') as typeof import('node:crypto')
   const idDispositivo = 'a1b2c3d4-e5f6-47a8-9012-abcdef123456'
   const plain = { data: [{ idOperacion: 'op-enc', monto: '42.00', fechaCreacion: '2026-07-01' }], total: 1 }
@@ -361,12 +374,7 @@ it('listMovements(CLIENT): descifra el envelope cifrado si el endpoint enveló l
     .query(() => true)
     .reply(200, { payload: `${iv.toString('base64')}|${ct.toString('base64')}`, timestamp: '1' })
   const client = await loadClient()
-  const page = await client.listMovements(
-    { accessToken: 't', kind: 'CLIENT', idDispositivo },
-    'IGNORED',
-    'cta-9',
-    { page: 0, size: 10 },
-  )
+  const page = await client.listMovements({ accessToken: 't', kind: 'CLIENT', idDispositivo }, 'IGNORED', 'cta-9', { page: 0, size: 10 })
   expect(page.total).toBe(1)
   expect(page.movements[0]).toMatchObject({ id: 'op-enc', amount: 42 })
 })
@@ -377,29 +385,39 @@ it('listAccounts(CLIENT) sin externalClientId → BadRequestError', async () => 
 })
 
 it('getBalance(CLIENT): resuelve vía get-wallet-clientAccounts y devuelve saldo/active/label de la cuenta pedida', async () => {
-  nock(BASE).get('/api/clients/get-wallet-clientAccounts/v3r2.1').query({ idMoneyGiver: 'mg-1' }).reply(200, {
-    cuentas: [
-      { idCuenta: 'cta-1', nombre: 'Mi cuenta', cuentaClabe: '646...', saldo: 1234.5, activo: true, idCuentaAlt: 77 },
-      { idCuenta: 'cta-2', nombre: 'Otra', cuentaClabe: '646...', saldo: 0, activo: false, idCuentaAlt: 78 },
-    ],
-  })
+  nock(BASE)
+    .get('/api/clients/get-wallet-clientAccounts/v3r2.1')
+    .query({ idMoneyGiver: 'mg-1' })
+    .reply(200, {
+      cuentas: [
+        { idCuenta: 'cta-1', nombre: 'Mi cuenta', cuentaClabe: '646...', saldo: 1234.5, activo: true, idCuentaAlt: 77 },
+        { idCuenta: 'cta-2', nombre: 'Otra', cuentaClabe: '646...', saldo: 0, activo: false, idCuentaAlt: 78 },
+      ],
+    })
   const client = await loadClient()
   const b = await client.getBalance({ accessToken: 't', kind: 'CLIENT', externalClientId: 'mg-1' }, 'cta-1')
   expect(b).toMatchObject({ amount: 1234.5, currency: 'MXN', active: true, providerAccountLabel: 'Mi cuenta' })
 })
 
 it('connect(CLIENT) sin 2FA: normaliza get-wallet-clientAccounts a ProviderAccount[]', async () => {
-  nock(BASE).post('/api/auth/sign-in').reply(200, {
-    signedIn: true, token: 'acc-c', refreshToken: 'ref-c',
-    expiresIn: new Date(Date.now() + 3600e3).toISOString(),
-    userData: { idMoneyGiver: 'mg-1' },
-  })
-  nock(BASE).get('/api/clients/get-wallet-clientAccounts/v3r2.1').query({ idMoneyGiver: 'mg-1' }).reply(200, {
-    cuentas: [
-      { idCuenta: 'cta-1', nombre: 'Mi cuenta', cuentaClabe: '646...', saldo: 1234.5, activo: true, idCuentaAlt: 77 },
-      { idCuenta: 'cta-2', nombre: 'Otra', cuentaClabe: '646...', saldo: 0, activo: false, idCuentaAlt: 78 },
-    ],
-  })
+  nock(BASE)
+    .post('/api/auth/sign-in')
+    .reply(200, {
+      signedIn: true,
+      token: 'acc-c',
+      refreshToken: 'ref-c',
+      expiresIn: new Date(Date.now() + 3600e3).toISOString(),
+      userData: { idMoneyGiver: 'mg-1' },
+    })
+  nock(BASE)
+    .get('/api/clients/get-wallet-clientAccounts/v3r2.1')
+    .query({ idMoneyGiver: 'mg-1' })
+    .reply(200, {
+      cuentas: [
+        { idCuenta: 'cta-1', nombre: 'Mi cuenta', cuentaClabe: '646...', saldo: 1234.5, activo: true, idCuentaAlt: 77 },
+        { idCuenta: 'cta-2', nombre: 'Otra', cuentaClabe: '646...', saldo: 0, activo: false, idCuentaAlt: 78 },
+      ],
+    })
   const client = await loadClient()
   const r = await client.connect({ email: 'a@b.co', password: 'p', deviceIdentifier: DEVICE, accountKind: 'CLIENT' })
   expect(r.kind).toBe('connected')
@@ -411,13 +429,10 @@ it('connect(CLIENT) sin 2FA: normaliza get-wallet-clientAccounts a ProviderAccou
 })
 
 it('connect(CLIENT): descifra el envelope cifrado (AES-128-CBC, key=idDispositivo[0:16]) y expone externalDeviceId', async () => {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
   const crypto = require('node:crypto') as typeof import('node:crypto')
   const idDispositivo = 'a1b2c3d4-e5f6-47a8-9012-abcdef123456' // UUID real-shaped, como lo devuelve el proveedor
   const plainAccounts = {
-    cuentas: [
-      { idCuenta: 'cta-enc-1', nombre: 'Cuenta cifrada', cuentaClabe: '646...', saldo: 999.25, activo: true, idCuentaAlt: 55 },
-    ],
+    cuentas: [{ idCuenta: 'cta-enc-1', nombre: 'Cuenta cifrada', cuentaClabe: '646...', saldo: 999.25, activo: true, idCuentaAlt: 55 }],
   }
   const key = Buffer.from(idDispositivo.slice(0, 16), 'utf8')
   const iv = crypto.randomBytes(16)
@@ -425,14 +440,16 @@ it('connect(CLIENT): descifra el envelope cifrado (AES-128-CBC, key=idDispositiv
   const ciphertext = Buffer.concat([cipher.update(JSON.stringify(plainAccounts), 'utf8'), cipher.final()])
   const payload = `${iv.toString('base64')}|${ciphertext.toString('base64')}`
 
-  nock(BASE).post('/api/auth/sign-in').reply(200, {
-    signedIn: true,
-    token: 'acc-enc',
-    refreshToken: 'ref-enc',
-    expiresIn: new Date(Date.now() + 3600e3).toISOString(),
-    userData: { idMoneyGiver: 'mg-enc' },
-    idDispositivo,
-  })
+  nock(BASE)
+    .post('/api/auth/sign-in')
+    .reply(200, {
+      signedIn: true,
+      token: 'acc-enc',
+      refreshToken: 'ref-enc',
+      expiresIn: new Date(Date.now() + 3600e3).toISOString(),
+      userData: { idMoneyGiver: 'mg-enc' },
+      idDispositivo,
+    })
   nock(BASE)
     .get('/api/clients/get-wallet-clientAccounts/v3r2.1')
     .query({ idMoneyGiver: 'mg-enc' })
@@ -458,21 +475,34 @@ it('connect(CLIENT): descifra el envelope cifrado (AES-128-CBC, key=idDispositiv
 
 it('validateTwoFactorCode(CLIENT): respuesta 2FA SIN idMoneyGiver usa el fallback del challenge', async () => {
   let seenPlatform: string | undefined
-  nock(BASE).post('/api/auth/validate-two-factor-code').reply(function () {
-    seenPlatform = this.req.headers['mgplatform']
-    return [200, {
-      success: true, token: 'acc-2fa', refreshToken: 'ref-2fa',
-      expiresIn: new Date(Date.now() + 3600e3).toISOString(),
-      // deliberadamente SIN userData/idMoneyGiver — el fallback debe cubrirlo
-    }]
-  })
-  nock(BASE).get('/api/clients/get-wallet-clientAccounts/v3r2.1').query({ idMoneyGiver: 'mg-1' }).reply(200, {
-    cuentas: [{ idCuenta: 'cta-1', nombre: 'Mi cuenta', cuentaClabe: '646...', saldo: 50, activo: true, idCuentaAlt: 9 }],
-  })
+  nock(BASE)
+    .post('/api/auth/validate-two-factor-code')
+    .reply(function () {
+      seenPlatform = this.req.headers['mgplatform']
+      return [
+        200,
+        {
+          success: true,
+          token: 'acc-2fa',
+          refreshToken: 'ref-2fa',
+          expiresIn: new Date(Date.now() + 3600e3).toISOString(),
+          // deliberadamente SIN userData/idMoneyGiver — el fallback debe cubrirlo
+        },
+      ]
+    })
+  nock(BASE)
+    .get('/api/clients/get-wallet-clientAccounts/v3r2.1')
+    .query({ idMoneyGiver: 'mg-1' })
+    .reply(200, {
+      cuentas: [{ idCuenta: 'cta-1', nombre: 'Mi cuenta', cuentaClabe: '646...', saldo: 50, activo: true, idCuentaAlt: 9 }],
+    })
   const client = await loadClient()
   const r = await client.validateTwoFactorCode({
-    email: 'a@b.co', deviceIdentifier: DEVICE, code: '123456',
-    accountKind: 'CLIENT', challenge: { accessToken: 'tmp-2fa', externalClientId: 'mg-1' },
+    email: 'a@b.co',
+    deviceIdentifier: DEVICE,
+    code: '123456',
+    accountKind: 'CLIENT',
+    challenge: { accessToken: 'tmp-2fa', externalClientId: 'mg-1' },
   })
   expect(seenPlatform).toBe('PWA')
   expect(r.kind).toBe('connected')
@@ -480,17 +510,24 @@ it('validateTwoFactorCode(CLIENT): respuesta 2FA SIN idMoneyGiver usa el fallbac
 })
 
 it('normalizeClientAccounts (vía connect CLIENT): filtra cuentas sin idCuenta; payload sin cuentas[] → []', async () => {
-  nock(BASE).post('/api/auth/sign-in').reply(200, {
-    signedIn: true, token: 'acc-c2', refreshToken: 'ref-c2',
-    expiresIn: new Date(Date.now() + 3600e3).toISOString(),
-    userData: { idMoneyGiver: 'mg-2' },
-  })
-  nock(BASE).get('/api/clients/get-wallet-clientAccounts/v3r2.1').query({ idMoneyGiver: 'mg-2' }).reply(200, {
-    cuentas: [
-      { nombre: 'Sin idCuenta', saldo: 5, activo: true }, // filtrada: sin idCuenta
-      { idCuenta: 'cta-9', nombre: 'Válida', saldo: 5, activo: true, idCuentaAlt: 1 },
-    ],
-  })
+  nock(BASE)
+    .post('/api/auth/sign-in')
+    .reply(200, {
+      signedIn: true,
+      token: 'acc-c2',
+      refreshToken: 'ref-c2',
+      expiresIn: new Date(Date.now() + 3600e3).toISOString(),
+      userData: { idMoneyGiver: 'mg-2' },
+    })
+  nock(BASE)
+    .get('/api/clients/get-wallet-clientAccounts/v3r2.1')
+    .query({ idMoneyGiver: 'mg-2' })
+    .reply(200, {
+      cuentas: [
+        { nombre: 'Sin idCuenta', saldo: 5, activo: true }, // filtrada: sin idCuenta
+        { idCuenta: 'cta-9', nombre: 'Válida', saldo: 5, activo: true, idCuentaAlt: 1 },
+      ],
+    })
   const client = await loadClient()
   const r = await client.connect({ email: 'a@b.co', password: 'p', deviceIdentifier: DEVICE, accountKind: 'CLIENT' })
   expect(r.kind).toBe('connected')
@@ -498,28 +535,36 @@ it('normalizeClientAccounts (vía connect CLIENT): filtra cuentas sin idCuenta; 
 })
 
 it('connect(CLIENT) sin idMoneyGiver y sin fallback → BadRequest "no devolvió idMoneyGiver"', async () => {
-  nock(BASE).post('/api/auth/sign-in').reply(200, {
-    signedIn: true, token: 'acc-c3', refreshToken: 'ref-c3',
-    expiresIn: new Date(Date.now() + 3600e3).toISOString(),
-    // sin userData/idMoneyGiver
-  })
+  nock(BASE)
+    .post('/api/auth/sign-in')
+    .reply(200, {
+      signedIn: true,
+      token: 'acc-c3',
+      refreshToken: 'ref-c3',
+      expiresIn: new Date(Date.now() + 3600e3).toISOString(),
+      // sin userData/idMoneyGiver
+    })
   const client = await loadClient()
-  await expect(
-    client.connect({ email: 'a@b.co', password: 'p', deviceIdentifier: DEVICE, accountKind: 'CLIENT' }),
-  ).rejects.toThrow(/no devolvió idMoneyGiver/)
+  await expect(client.connect({ email: 'a@b.co', password: 'p', deviceIdentifier: DEVICE, accountKind: 'CLIENT' })).rejects.toThrow(
+    /no devolvió idMoneyGiver/,
+  )
 })
 
 it('connect(CLIENT) con cuentas:[] → BadRequest "no devolvió cuentas" (guard C4), no connected', async () => {
-  nock(BASE).post('/api/auth/sign-in').reply(200, {
-    signedIn: true, token: 'acc-c4', refreshToken: 'ref-c4',
-    expiresIn: new Date(Date.now() + 3600e3).toISOString(),
-    userData: { idMoneyGiver: 'mg-4' },
-  })
+  nock(BASE)
+    .post('/api/auth/sign-in')
+    .reply(200, {
+      signedIn: true,
+      token: 'acc-c4',
+      refreshToken: 'ref-c4',
+      expiresIn: new Date(Date.now() + 3600e3).toISOString(),
+      userData: { idMoneyGiver: 'mg-4' },
+    })
   nock(BASE).get('/api/clients/get-wallet-clientAccounts/v3r2.1').query({ idMoneyGiver: 'mg-4' }).reply(200, { cuentas: [] })
   const client = await loadClient()
-  await expect(
-    client.connect({ email: 'a@b.co', password: 'p', deviceIdentifier: DEVICE, accountKind: 'CLIENT' }),
-  ).rejects.toThrow(/no devolvió cuentas/)
+  await expect(client.connect({ email: 'a@b.co', password: 'p', deviceIdentifier: DEVICE, accountKind: 'CLIENT' })).rejects.toThrow(
+    /no devolvió cuentas/,
+  )
 })
 
 it('getMovementStats: parsea los montos-string a número y preserva null en no-parseables', async () => {
