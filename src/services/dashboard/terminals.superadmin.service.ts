@@ -7,6 +7,7 @@ import { tpvCommandQueueService } from '../tpv/command-queue.service'
 import { updateTpvSettings, type TpvSettings } from './tpv.dashboard.service'
 import { assertMerchantsTerminalCompatible, isProviderCompatibleWithBrand } from '../../lib/providerDeviceCompatibility'
 import { logAction } from './activity-log.service'
+import { normalizeTerminalSerialNumber } from '../../utils/terminalSerial'
 
 /**
  * Audit actor — who triggered a terminal mutation. Threaded from the controller
@@ -257,18 +258,20 @@ export async function createTerminal(data: {
     throw new BadRequestError('Venue not found')
   }
 
-  // Check if serial number is unique
+  // Check if serial number is unique (compare the normalized form so
+  // "N860W173232" and "AVQD-N860W173232" are recognized as the same device)
+  const normalizedSerialNumber = normalizeTerminalSerialNumber(data.serialNumber, data.type)
   const existingTerminal = await prisma.terminal.findFirst({
     where: {
       serialNumber: {
-        equals: data.serialNumber,
+        equals: normalizedSerialNumber,
         mode: 'insensitive',
       },
     },
   })
 
   if (existingTerminal) {
-    throw new BadRequestError(`Terminal with serial number ${data.serialNumber} already exists`)
+    throw new BadRequestError(`Terminal with serial number ${normalizedSerialNumber} already exists`)
   }
 
   // Validate merchant accounts exist (if assigned)
@@ -304,7 +307,7 @@ export async function createTerminal(data: {
   const terminal = await prisma.terminal.create({
     data: {
       venueId: data.venueId,
-      serialNumber: data.serialNumber,
+      serialNumber: normalizedSerialNumber,
       name: data.name,
       type: data.type as any,
       brand: data.brand,

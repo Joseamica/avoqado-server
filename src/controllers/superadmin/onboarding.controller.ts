@@ -20,6 +20,7 @@ import emailService from '@/services/email.service'
 import logger from '@/config/logger'
 import { BadRequestError, IncompatibleDeviceError } from '@/errors/AppError'
 import { isProviderCompatibleWithBrand } from '@/lib/providerDeviceCompatibility'
+import { normalizeTerminalSerialNumber } from '@/utils/terminalSerial'
 import { addDays } from 'date-fns'
 import crypto from 'crypto'
 
@@ -365,7 +366,7 @@ export async function createVenueWizard(req: Request, res: Response, next: NextF
         const terminal = await prisma.terminal.create({
           data: {
             venueId,
-            serialNumber: payload.terminal.serialNumber,
+            serialNumber: normalizeTerminalSerialNumber(payload.terminal.serialNumber, 'TPV_ANDROID'),
             brand: prospectiveBrand,
             model: payload.terminal.model || '',
             name: payload.terminal.name || `Terminal ${payload.terminal.serialNumber}`,

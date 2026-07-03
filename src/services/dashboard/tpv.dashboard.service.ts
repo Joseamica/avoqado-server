@@ -3,6 +3,7 @@ import { Prisma, Terminal, TerminalStatus, TerminalType } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { CreateTpvBody, PaginatedTerminalsResponse, UpdateTpvBody } from '../../schemas/dashboard/tpv.schema'
 import { venueStartOfDay } from '../../utils/datetime'
+import { normalizeTerminalSerialNumber } from '../../utils/terminalSerial'
 import prisma from '../../utils/prismaClient'
 import emailService from '../email.service'
 import { logAction } from './activity-log.service'
@@ -273,11 +274,14 @@ export async function createTpv(venueId: string, payload: CreateTpvBody): Promis
     throw new NotFoundError('Nombre es requerido')
   }
 
+  const terminalType = (payload.type as TerminalType) || TerminalType.TPV_ANDROID
+  const normalizedSerialNumber = serialNumber ? normalizeTerminalSerialNumber(serialNumber, terminalType) : null
+
   // If serial number is provided, ensure it's unique
-  if (serialNumber) {
-    const existing = await prisma.terminal.findUnique({ where: { serialNumber } })
+  if (normalizedSerialNumber) {
+    const existing = await prisma.terminal.findUnique({ where: { serialNumber: normalizedSerialNumber } })
     if (existing) {
-      throw new NotFoundError(`Ya existe un terminal con número de serie ${serialNumber}`)
+      throw new NotFoundError(`Ya existe un terminal con número de serie ${normalizedSerialNumber}`)
     }
   }
 
@@ -285,8 +289,8 @@ export async function createTpv(venueId: string, payload: CreateTpvBody): Promis
     data: {
       venueId,
       name,
-      serialNumber: serialNumber || null,
-      type: (payload.type as any) || TerminalType.TPV_ANDROID,
+      serialNumber: normalizedSerialNumber,
+      type: terminalType,
       status: (status as any) || TerminalStatus.INACTIVE,
       config: payload.config as any,
     },
@@ -750,19 +754,20 @@ export async function activateTerminal(venueId: string, tpvId: string, serialNum
   }
 
   // 4. Check if serial number already exists (must be unique globally)
+  const normalizedSerialNumber = normalizeTerminalSerialNumber(serialNumber, terminal.type)
   const existingTerminal = await prisma.terminal.findUnique({
-    where: { serialNumber },
+    where: { serialNumber: normalizedSerialNumber },
   })
 
   if (existingTerminal) {
-    throw new BadRequestError(`Serial number ${serialNumber} is already registered to another terminal`)
+    throw new BadRequestError(`Serial number ${normalizedSerialNumber} is already registered to another terminal`)
   }
 
   // 5. Update terminal with serial number and set status to ACTIVE
   const updatedTerminal = await prisma.terminal.update({
     where: { id: tpvId },
     data: {
-      serialNumber,
+      serialNumber: normalizedSerialNumber,
       status: 'ACTIVE',
       updatedAt: new Date(),
     },
@@ -773,10 +778,10 @@ export async function activateTerminal(venueId: string, tpvId: string, serialNum
     action: 'TPV_ACTIVATED',
     entity: 'Terminal',
     entityId: tpvId,
-    data: { name: updatedTerminal.name, serialNumber },
+    data: { name: updatedTerminal.name, serialNumber: normalizedSerialNumber },
   })
 
-  logger.info(`Terminal ${tpvId} activated with serial number ${serialNumber}`)
+  logger.info(`Terminal ${tpvId} activated with serial number ${normalizedSerialNumber}`)
 
   return updatedTerminal
 }

@@ -4,6 +4,15 @@ import { BadRequestError, NotFoundError, UnauthorizedError } from '../../errors/
 import crypto from 'crypto'
 
 /**
+ * Toggle the "AVQD-" prefix the Android TPV client always sends (see
+ * src/utils/terminalSerial.ts). Used as a fallback lookup so a terminal
+ * registered with/without the prefix by mistake still resolves.
+ */
+function toggleAvqdPrefix(serialNumber: string): string {
+  return serialNumber.toUpperCase().startsWith('AVQD-') ? serialNumber.slice(5) : `AVQD-${serialNumber}`
+}
+
+/**
  * Generate Activation Code for Terminal
  *
  * Similar to Square POS device activation flow.
@@ -90,19 +99,30 @@ export async function activateTerminal(serialNumber: string, activationCode: str
 
   // Find terminal by serial number (case-insensitive)
   // ✅ CASE-INSENSITIVE: Android may send lowercase, DB stores uppercase
-  const terminal = await prisma.terminal.findFirst({
+  const terminalInclude = { venue: { select: { id: true, name: true, slug: true } } } as const
+  let terminal = await prisma.terminal.findFirst({
     where: {
       serialNumber: {
         equals: serialNumber,
         mode: 'insensitive', // Case-insensitive matching
       },
     },
-    include: {
-      venue: {
-        select: { id: true, name: true, slug: true },
-      },
-    },
+    include: terminalInclude,
   })
+
+  // Fallback: tolerate a stored serial that's missing/has the "AVQD-" prefix
+  // the device always sends (e.g. registered by hand from the printed serial)
+  if (!terminal) {
+    terminal = await prisma.terminal.findFirst({
+      where: {
+        serialNumber: {
+          equals: toggleAvqdPrefix(serialNumber),
+          mode: 'insensitive',
+        },
+      },
+      include: terminalInclude,
+    })
+  }
 
   if (!terminal) {
     throw new NotFoundError('Terminal not registered. Contact your administrator.')
@@ -216,28 +236,43 @@ export async function checkTerminalActivationStatus(serialNumber: string) {
   logger.info(`Checking activation status for terminal: ${serialNumber}`)
 
   // Find terminal by serial number (case-insensitive)
-  const terminal = await prisma.terminal.findFirst({
+  const terminalSelect = {
+    id: true,
+    serialNumber: true,
+    status: true,
+    activatedAt: true,
+    venueId: true,
+    venue: {
+      select: {
+        id: true,
+        name: true,
+        slug: true,
+      },
+    },
+  } as const
+  let terminal = await prisma.terminal.findFirst({
     where: {
       serialNumber: {
         equals: serialNumber,
         mode: 'insensitive', // Case-insensitive matching
       },
     },
-    select: {
-      id: true,
-      serialNumber: true,
-      status: true,
-      activatedAt: true,
-      venueId: true,
-      venue: {
-        select: {
-          id: true,
-          name: true,
-          slug: true,
+    select: terminalSelect,
+  })
+
+  // Fallback: tolerate a stored serial that's missing/has the "AVQD-" prefix
+  // the device always sends (e.g. registered by hand from the printed serial)
+  if (!terminal) {
+    terminal = await prisma.terminal.findFirst({
+      where: {
+        serialNumber: {
+          equals: toggleAvqdPrefix(serialNumber),
+          mode: 'insensitive',
         },
       },
-    },
-  })
+      select: terminalSelect,
+    })
+  }
 
   if (!terminal) {
     logger.warn(`Terminal not found for serial: ${serialNumber}`)
