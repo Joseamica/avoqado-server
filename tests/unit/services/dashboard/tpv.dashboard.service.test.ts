@@ -1,5 +1,5 @@
 import { prismaMock } from '@tests/__helpers__/setup'
-import { getVenueTpvSettings, computeOverrides } from '@/services/dashboard/tpv.dashboard.service'
+import { getVenueTpvSettings, updateVenueTpvSettings, computeOverrides } from '@/services/dashboard/tpv.dashboard.service'
 
 const venueId = 'venue-123'
 const orgId = 'org-456'
@@ -288,6 +288,66 @@ describe('getVenueTpvSettings — inheritance tests', () => {
 
   it('should throw NotFoundError when venueId is empty', async () => {
     await expect(getVenueTpvSettings('')).rejects.toThrow('El ID del Venue es requerido.')
+  })
+})
+
+describe('trackPromoterLocation ("cambaceo") — venue-level flag', () => {
+  // ─── NEW FEATURE: read ───────────────────────────────────────────────
+
+  it('getVenueTpvSettings returns the VenueSettings value when set', async () => {
+    prismaMock.terminal.findFirst.mockResolvedValue(null)
+    prismaMock.venueSettings.findFirst.mockResolvedValue({
+      expectedCheckInTime: null,
+      latenessThresholdMinutes: null,
+      geofenceRadiusMeters: null,
+      trackPromoterLocation: true,
+    } as any)
+    prismaMock.venue.findUnique.mockResolvedValue({ organizationId: orgId } as any)
+    prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue(null)
+
+    const result = await getVenueTpvSettings(venueId)
+
+    expect(result.trackPromoterLocation).toBe(true)
+  })
+
+  it('getVenueTpvSettings defaults trackPromoterLocation to false (REGRESSION: additive, terminal branch too)', async () => {
+    prismaMock.terminal.findFirst.mockResolvedValue({
+      config: { settings: { enableCashPayments: false } },
+    } as any)
+    prismaMock.venueSettings.findFirst.mockResolvedValue(null)
+    prismaMock.venue.findUnique.mockResolvedValue({ organizationId: orgId } as any)
+    prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue(null)
+
+    const result = await getVenueTpvSettings(venueId)
+
+    expect(result.trackPromoterLocation).toBe(false)
+    // Existing fields unaffected
+    expect(result.enableCashPayments).toBe(false)
+  })
+
+  // ─── NEW FEATURE: write ──────────────────────────────────────────────
+
+  it('updateVenueTpvSettings writes the flag to VenueSettings (upsert) and NOT into terminal configs', async () => {
+    prismaMock.terminal.findMany.mockResolvedValue([{ id: 't1', config: {}, configOverrides: {} }] as any)
+    prismaMock.venueSettings.upsert.mockResolvedValue({} as any)
+    // return-path read (getVenueTpvSettings)
+    prismaMock.terminal.findFirst.mockResolvedValue(null)
+    prismaMock.venueSettings.findFirst.mockResolvedValue({ trackPromoterLocation: true } as any)
+    prismaMock.venue.findUnique.mockResolvedValue({ organizationId: orgId } as any)
+    prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue(null)
+
+    const result = await updateVenueTpvSettings(venueId, { trackPromoterLocation: true })
+
+    expect(prismaMock.venueSettings.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { venueId },
+        update: expect.objectContaining({ trackPromoterLocation: true }),
+        create: expect.objectContaining({ venueId, trackPromoterLocation: true }),
+      }),
+    )
+    // Flag-only update must NOT cascade into Terminal.config
+    expect(prismaMock.terminal.update).not.toHaveBeenCalled()
+    expect(result.trackPromoterLocation).toBe(true)
   })
 })
 

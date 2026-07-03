@@ -25,6 +25,7 @@ export const UpdateTpvSettingsSchema = z.object({
     enableBarcodeScanner: z.boolean().optional(),
     requireDepositPhoto: z.boolean().optional(),
     requireFacadePhoto: z.boolean().optional(),
+    trackPromoterLocation: z.boolean().optional(), // "Cambaceo": captura horaria de ubicación del promotor
   }),
 })
 

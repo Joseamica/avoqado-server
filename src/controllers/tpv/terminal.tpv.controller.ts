@@ -35,6 +35,9 @@ interface TpvSettings {
   requireVerificationBarcode: boolean
   // Venue-level settings (from VenueSettings)
   enableShifts: boolean
+  // Venue-level "cambaceo" flag (from VenueSettings): TPV emits hourly promoter
+  // location pings 11:00–18:00 venue-local when true. Additive, default false.
+  trackPromoterLocation: boolean
   // Clock-in/out photo verification (anti-fraud, per-terminal settings from Terminal.config)
   requireClockInPhoto: boolean
   requireClockOutPhoto: boolean
@@ -81,6 +84,8 @@ const DEFAULT_TPV_SETTINGS: TpvSettings = {
   requireVerificationBarcode: false,
   // Shift system enabled by default (can be disabled per-venue)
   enableShifts: true,
+  // Cambaceo promoter tracking off by default (venue must opt in)
+  trackPromoterLocation: false,
   // Clock-in/out photo disabled by default (anti-fraud feature, per-terminal)
   requireClockInPhoto: false,
   requireClockOutPhoto: false,
@@ -384,6 +389,7 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
         where: { venueId: terminal.venueId },
         select: {
           enableShifts: true,
+          trackPromoterLocation: true,
         },
       }),
       getVenuePlanInfo(terminal.venueId).catch((error): VenuePlanInfo | undefined => {
@@ -401,6 +407,8 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
     const tpvSettings: TpvSettings = {
       ...terminalTpvSettings,
       enableShifts: venueSettings?.enableShifts ?? DEFAULT_TPV_SETTINGS.enableShifts,
+      // Cambaceo: venue-level opt-in for hourly promoter location pings
+      trackPromoterLocation: venueSettings?.trackPromoterLocation ?? DEFAULT_TPV_SETTINGS.trackPromoterLocation,
       // Card payment server-decoupling kill-switch: PER-TERMINAL (Terminal.config.settings),
       // default true (legacy). getTpvSettingsFromConfig already merges saved settings over
       // DEFAULT_TPV_SETTINGS, so this is the terminal's configured value when present, else true.

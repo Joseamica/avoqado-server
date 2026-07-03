@@ -848,6 +848,9 @@ export async function getTerminalMerchants(tpvId: string, includeInactive = fals
  */
 export interface VenueTpvSettings {
   attendanceTracking: boolean
+  // "Cambaceo" (stored in VenueSettings, not TpvConfig): hourly promoter
+  // location pings 11:00–18:00 venue-local. Venue-level opt-in, default false.
+  trackPromoterLocation: boolean
   enableCashPayments: boolean
   enableCardPayments: boolean
   enableBarcodeScanner: boolean
@@ -862,6 +865,7 @@ export interface VenueTpvSettings {
 
 const DEFAULT_VENUE_TPV_SETTINGS: VenueTpvSettings = {
   attendanceTracking: false,
+  trackPromoterLocation: false,
   enableCashPayments: true,
   enableCardPayments: true,
   enableBarcodeScanner: true,
@@ -893,7 +897,7 @@ export async function getVenueTpvSettings(venueId: string): Promise<VenueTpvSett
     }),
     prisma.venueSettings.findFirst({
       where: { venueId },
-      select: { expectedCheckInTime: true, latenessThresholdMinutes: true, geofenceRadiusMeters: true },
+      select: { expectedCheckInTime: true, latenessThresholdMinutes: true, geofenceRadiusMeters: true, trackPromoterLocation: true },
     }),
     prisma.venue.findUnique({
       where: { id: venueId },
@@ -913,6 +917,8 @@ export async function getVenueTpvSettings(venueId: string): Promise<VenueTpvSett
   const defaults: VenueTpvSettings = {
     attendanceTracking:
       (orgSettings.attendanceTracking as boolean) ?? orgConfig?.attendanceTracking ?? DEFAULT_VENUE_TPV_SETTINGS.attendanceTracking,
+    // Cambaceo is venue-level only (VenueSettings) — no org/terminal fallback
+    trackPromoterLocation: venueSettings?.trackPromoterLocation ?? DEFAULT_VENUE_TPV_SETTINGS.trackPromoterLocation,
     enableCashPayments:
       (orgSettings.enableCashPayments as boolean) ?? orgConfig?.enableCashPayments ?? DEFAULT_VENUE_TPV_SETTINGS.enableCashPayments,
     enableCardPayments:
@@ -953,6 +959,7 @@ export async function getVenueTpvSettings(venueId: string): Promise<VenueTpvSett
 
   return {
     attendanceTracking,
+    trackPromoterLocation: defaults.trackPromoterLocation,
     enableCashPayments: savedSettings.enableCashPayments ?? defaults.enableCashPayments,
     enableCardPayments: savedSettings.enableCardPayments ?? defaults.enableCardPayments,
     enableBarcodeScanner: savedSettings.enableBarcodeScanner ?? defaults.enableBarcodeScanner,
@@ -985,7 +992,7 @@ export async function updateVenueTpvSettings(venueId: string, settingsUpdate: Pa
   }
 
   // 2. Separate venue-level VenueSettings fields from TpvConfig fields
-  const { expectedCheckInTime, latenessThresholdMinutes, geofenceRadiusMeters, ...tpvFields } = settingsUpdate
+  const { expectedCheckInTime, latenessThresholdMinutes, geofenceRadiusMeters, trackPromoterLocation, ...tpvFields } = settingsUpdate
   const settingsToMerge: Partial<TpvSettings> = { ...tpvFields }
 
   // When attendanceTracking changes, set clock-in photo + login requirement
@@ -1001,6 +1008,7 @@ export async function updateVenueTpvSettings(venueId: string, settingsUpdate: Pa
   if (expectedCheckInTime !== undefined) venueSettingsData.expectedCheckInTime = expectedCheckInTime
   if (latenessThresholdMinutes !== undefined) venueSettingsData.latenessThresholdMinutes = latenessThresholdMinutes
   if (geofenceRadiusMeters !== undefined) venueSettingsData.geofenceRadiusMeters = geofenceRadiusMeters
+  if (trackPromoterLocation !== undefined) venueSettingsData.trackPromoterLocation = trackPromoterLocation
 
   if (Object.keys(venueSettingsData).length > 0) {
     await prisma.venueSettings.upsert({

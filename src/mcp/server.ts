@@ -36,6 +36,7 @@ import { registerReferralTools } from './tools/referrals'
 import { registerSeatTools } from './tools/seats'
 import { registerPlanAdminTools } from './tools/planAdmin'
 import { registerSaleVerificationTools } from './tools/saleVerifications'
+import { registerPromoterLocationTools } from './tools/promoterLocation'
 import { registerAccountingTools } from './tools/accounting'
 import { registerActivityLogTools } from './tools/activity-log'
 import { registerCashOutTools } from './tools/cash-out'
@@ -93,6 +94,7 @@ async function buildServerForIdentity(staffId: string, activeOrg: string): Promi
   registerReferralTools(server, scope)
   registerPlanAdminTools(server, scope)
   registerSaleVerificationTools(server, scope)
+  registerPromoterLocationTools(server, scope)
   registerAccountingTools(server, scope)
   registerActivityLogTools(server, scope)
   registerCashOutTools(server, scope)
