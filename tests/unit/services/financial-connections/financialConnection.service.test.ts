@@ -461,8 +461,18 @@ it('sendInternalTransfer: destino/monto DISTINTO a lo reciente NO se deduplica (
 
 it('resolveTransferDestination: devuelve nombre del beneficiario y NO expone el altId (PK interno)', async () => {
   db.financialAccount.findUniqueOrThrow.mockResolvedValue({
-    id: 'fa-rd', externalId: 'neg-1',
-    connection: { id: 'cm-rd', mode: 'SELF_CONNECT', grantEnc: encFixture(), tokenVersion: 0, deviceIdentifier: 'dev', status: 'CONNECTED', venueId: 'v1', provider: { code: 'EXTERNAL_BANK' } },
+    id: 'fa-rd',
+    externalId: 'neg-1',
+    connection: {
+      id: 'cm-rd',
+      mode: 'SELF_CONNECT',
+      grantEnc: encFixture(),
+      tokenVersion: 0,
+      deviceIdentifier: 'dev',
+      status: 'CONNECTED',
+      venueId: 'v1',
+      provider: { code: 'EXTERNAL_BANK' },
+    },
   })
   db.financialConnection.findUniqueOrThrow.mockResolvedValue({ id: 'cm-rd', grantEnc: encFixture(), tokenVersion: 0, status: 'CONNECTED' })
   clientMock.refresh.mockResolvedValue({ grant: { refreshToken: 'r2' }, ctx: { accessToken: 'acc' } })
@@ -474,8 +484,18 @@ it('resolveTransferDestination: devuelve nombre del beneficiario y NO expone el 
 
 it('resolveTransferDestination: cuenta inexistente → null (el controller lo traduce a 404)', async () => {
   db.financialAccount.findUniqueOrThrow.mockResolvedValue({
-    id: 'fa-rd2', externalId: 'neg-1',
-    connection: { id: 'cm-rd2', mode: 'SELF_CONNECT', grantEnc: encFixture(), tokenVersion: 0, deviceIdentifier: 'dev', status: 'CONNECTED', venueId: 'v1', provider: { code: 'EXTERNAL_BANK' } },
+    id: 'fa-rd2',
+    externalId: 'neg-1',
+    connection: {
+      id: 'cm-rd2',
+      mode: 'SELF_CONNECT',
+      grantEnc: encFixture(),
+      tokenVersion: 0,
+      deviceIdentifier: 'dev',
+      status: 'CONNECTED',
+      venueId: 'v1',
+      provider: { code: 'EXTERNAL_BANK' },
+    },
   })
   db.financialConnection.findUniqueOrThrow.mockResolvedValue({ id: 'cm-rd2', grantEnc: encFixture(), tokenVersion: 0, status: 'CONNECTED' })
   clientMock.refresh.mockResolvedValue({ grant: { refreshToken: 'r2' }, ctx: { accessToken: 'acc' } })

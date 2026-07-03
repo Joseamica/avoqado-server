@@ -220,7 +220,13 @@ it('listMovements: pagina con notación punteada y normaliza el movimiento', asy
   // Ruta = idNegocio; idCuenta como query param (acota a la cuenta real, no al pool global).
   nock(BASE)
     .get('/api/clients/movimientos/neg-1')
-    .query({ 'Pagination.Page': '0', 'Pagination.Size': '10', idCuenta: 'cta-1', SortByFecha: 'desc', FechaInicio: '2026-07-01T00:00:00.000Z' })
+    .query({
+      'Pagination.Page': '0',
+      'Pagination.Size': '10',
+      idCuenta: 'cta-1',
+      SortByFecha: 'desc',
+      FechaInicio: '2026-07-01T00:00:00.000Z',
+    })
     .reply(200, {
       total: 1,
       data: [
