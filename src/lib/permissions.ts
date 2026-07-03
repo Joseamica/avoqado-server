@@ -612,6 +612,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'payments:create',
     'payments:refund',
     'shifts:read',
+    'tables:read',
     'reviews:read',
     'customers:read', // Phase 1: Customer System
     'loyalty:read', // Phase 1b: Loyalty System
@@ -675,6 +676,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'shifts:update',
     'shifts:delete',
     'shifts:close',
+    'tables:read',
     'tpv:read',
     'tpv:create',
     'tpv:update',
