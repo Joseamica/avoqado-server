@@ -24,7 +24,10 @@ jest.mock('@/services/dashboard/coupon.dashboard.service', () => ({
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: (...a: unknown[]) => mockAudit(...(a as [])) }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
-  default: { discount: { findMany: (...a: unknown[]) => mockDiscountFind(...(a as [])) } },
+  default: {
+    discount: { findMany: (...a: unknown[]) => mockDiscountFind(...(a as [])) },
+    venue: { findUnique: jest.fn().mockResolvedValue({ timezone: 'America/Mexico_City' }) },
+  },
 }))
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
@@ -57,13 +60,55 @@ describe('create_coupon (write)', () => {
     expect(mockCreateCoupon).not.toHaveBeenCalled()
   })
 
-  it('uppercases the code, resolves the discount, creates + audits', async () => {
+  it('without confirm → previews the coupon, does NOT create (M3)', async () => {
+    mockDiscountFind.mockResolvedValueOnce([{ id: 'd1', name: 'Verano' }])
+    const out = parse(await call({ venueId: 'v1', discountName: 'Verano', code: 'verano20', maxUses: 100 }))
+    expect(out.requiresConfirmation).toBe(true)
+    expect(out.preview).toMatchObject({ code: 'VERANO20', discount: 'Verano', maxUses: 100 })
+    expect(mockCreateCoupon).not.toHaveBeenCalled()
+  })
+
+  it('confirm:true → uppercases the code, resolves the discount, creates + audits', async () => {
     mockDiscountFind.mockResolvedValueOnce([{ id: 'd1', name: 'Verano' }])
     mockCreateCoupon.mockResolvedValueOnce({ id: 'cc1', code: 'VERANO20' })
-    const out = parse(await call({ venueId: 'v1', discountName: 'Verano', code: 'verano20', maxUses: 100 }))
+    const out = parse(await call({ venueId: 'v1', discountName: 'Verano', code: 'verano20', maxUses: 100, confirm: true }))
 
     expect(mockCreateCoupon).toHaveBeenCalledWith('v1', expect.objectContaining({ discountId: 'd1', code: 'VERANO20', maxUses: 100 }))
     expect(out).toMatchObject({ ok: true, coupon: { code: 'VERANO20', discount: 'Verano' } })
     expect(mockAudit.mock.calls[0][1]).toMatchObject({ action: 'COUPON_CREATED', entityId: 'cc1' })
+  })
+
+  it('🔒 M4: a bare YYYY-MM-DD validity window is parsed VENUE-LOCAL, not host-tz (no day shift)', async () => {
+    mockDiscountFind.mockResolvedValueOnce([{ id: 'd1', name: 'Verano' }])
+    mockCreateCoupon.mockResolvedValueOnce({ id: 'cc1', code: 'VERANO20' })
+    await call({
+      venueId: 'v1',
+      discountName: 'Verano',
+      code: 'verano20',
+      validFrom: '2026-07-01',
+      validUntil: '2026-07-31',
+      confirm: true,
+    })
+    const arg = mockCreateCoupon.mock.calls[0][1]
+    // America/Mexico_City is UTC-6, so venue-local 2026-07-01 00:00 = 2026-07-01T06:00:00Z (NOT 07-01T00Z / 06-30 local).
+    expect((arg.validFrom as Date).toISOString()).toBe('2026-07-01T06:00:00.000Z')
+    expect((arg.validUntil as Date).toISOString()).toBe('2026-08-01T05:59:59.999Z') // end-of-day venue-local
+  })
+
+  it('🔒 M4: rejects an inverted validity window (validFrom >= validUntil) without creating', async () => {
+    mockDiscountFind.mockResolvedValueOnce([{ id: 'd1', name: 'Verano' }])
+    const out = parse(
+      await call({
+        venueId: 'v1',
+        discountName: 'Verano',
+        code: 'verano20',
+        validFrom: '2026-07-31',
+        validUntil: '2026-07-01',
+        confirm: true,
+      }),
+    )
+    expect(out.ok).toBe(false)
+    expect(out.error).toMatch(/rango de validez/)
+    expect(mockCreateCoupon).not.toHaveBeenCalled()
   })
 })

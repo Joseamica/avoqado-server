@@ -6,12 +6,19 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { venuesWithFeatureAccess } from '@/services/access/basePlan.service'
+import { hasPermission } from '@/services/access/access.service'
 
 const num = (d: { toString(): string } | null): number => (d == null ? 0 : Number(d))
 const round2 = (n: number): number => Math.round(n * 100) / 100
 
 export function registerTrendTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
+  // Read gate for cross-venue revenue reports: only venues where the caller holds analytics:read
+  // (per-venue role) participate — so a low-role staffer can't read revenue the dashboard would 403.
+  const canRead = (venueId: string): boolean => {
+    const access = scope.perVenueAccess.get(venueId)
+    return !!access && hasPermission(access, 'analytics:read')
+  }
 
   server.tool(
     'sales_comparison',
@@ -28,8 +35,12 @@ export function registerTrendTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, days }) => {
       const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
-      // ADVANCED_REPORTS (PRO tier) — restrict to entitled venues (cfdi_status pattern).
-      const entitledIds = [...(await venuesWithFeatureAccess(venueId ? [venueId] : scope.allowedVenueIds, 'ADVANCED_REPORTS'))]
+      if (venueId) guard.requirePermission('analytics:read', venueId) // single-venue focus: hard-deny if the role lacks it
+      // ADVANCED_REPORTS (PRO tier) — restrict to entitled venues (cfdi_status pattern), then to the
+      // venues where the caller actually holds analytics:read (mirror the dashboard read gate).
+      const entitledIds = [...(await venuesWithFeatureAccess(venueId ? [venueId] : scope.allowedVenueIds, 'ADVANCED_REPORTS'))].filter(
+        canRead,
+      )
       if (entitledIds.length === 0) {
         return text({
           ok: false,
@@ -82,8 +93,9 @@ export function registerTrendTools(server: McpServer, scope: McpScope) {
     },
     async ({ days }) => {
       guard.venueFilter() // scope sanity (no specific venue)
-      // ADVANCED_REPORTS (PRO tier) — only entitled venues participate in the comparison.
-      const entitledIds = [...(await venuesWithFeatureAccess(scope.allowedVenueIds, 'ADVANCED_REPORTS'))]
+      // ADVANCED_REPORTS (PRO tier) — only entitled venues participate, further restricted to the
+      // venues where the caller holds analytics:read (mirror the dashboard read gate).
+      const entitledIds = [...(await venuesWithFeatureAccess(scope.allowedVenueIds, 'ADVANCED_REPORTS'))].filter(canRead)
       if (entitledIds.length === 0) {
         return text({
           ok: false,

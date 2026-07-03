@@ -4,6 +4,7 @@ import type { McpScope } from '../../../src/mcp/scope'
 const mockAgg = jest.fn()
 
 jest.mock('@/services/access/basePlan.service', () => ({ venuesWithFeatureAccess: jest.fn(async (ids: string[]) => ids) }))
+jest.mock('@/services/access/access.service', () => ({ hasPermission: () => true })) // caller holds analytics:read at every venue
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({
     venueFilter: (v?: string) => {
@@ -19,7 +20,16 @@ jest.mock('@/utils/prismaClient', () => ({
 }))
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
-const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1', 'v2'], perVenueAccess: new Map() } as McpScope
+const scope = {
+  staffId: 's1',
+  activeOrg: 'o1',
+  allowedVenueIds: ['v1', 'v2'],
+  // Populated so canRead's `access &&` passes; hasPermission is mocked true (caller holds analytics:read).
+  perVenueAccess: new Map([
+    ['v1', {} as never],
+    ['v2', {} as never],
+  ]),
+} as McpScope
 const call = (args: Record<string, unknown>) => handlers.get('sales_comparison')!(args, {})
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
 

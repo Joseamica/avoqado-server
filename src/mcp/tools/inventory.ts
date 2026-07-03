@@ -8,6 +8,8 @@ import { serializedInventoryService } from '@/services/serialized-inventory/seri
 import { auditMcpWrite } from '../audit'
 import { adjustInventoryStock } from '@/services/dashboard/productInventory.service'
 import { createRawMaterial } from '@/services/dashboard/rawMaterial.service'
+import { ROLE_HIERARCHY } from '@/lib/permissions'
+import { StaffRole } from '@prisma/client'
 import { getReorderSuggestions, getAutoReorderConfig, setAutoReorderConfig } from '@/services/dashboard/autoReorder.service'
 import { planGateMessage } from '../planGate'
 import { venuesWithFeatureAccess } from '@/services/access/basePlan.service'
@@ -586,6 +588,14 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
       if (!(await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY))) {
         return text({ ok: false, moduleRequired: true, error: SERIALIZED_OFF_MSG })
       }
+      // M2 role gate: the custody chain (forensic "who lost/holds this SIM") is management-level
+      // visibility. Mirror the dashboard timeline controller, which requires OWNER/ADMIN/MANAGER/
+      // SUPERADMIN (simCustody.dashboard.controller listEvents) — so a low-role staffer in scope
+      // can't read the org-wide custody history the dashboard would 403.
+      const callerRole = scope.perVenueAccess.get(venueId)?.role
+      if (!callerRole || ROLE_HIERARCHY[callerRole] < ROLE_HIERARCHY[StaffRole.MANAGER]) {
+        return text({ ok: false, error: 'Solo OWNER, ADMIN o MANAGER pueden ver la cadena de custodia de un serial.' })
+      }
       const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { organizationId: true } })
       const orgId = venue?.organizationId
       // Case-insensitive serial lookup (legacy lowercase rows exist — serial bug class).
@@ -618,7 +628,9 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
         ? await prisma.staff.findMany({ where: { id: { in: staffIds } }, select: { id: true, firstName: true, lastName: true } })
         : []
       const nameOf = new Map(staff.map(s => [s.id, `${s.firstName} ${s.lastName}`.trim()]))
-      const who = (id: string | null) => (id ? (nameOf.get(id) ?? id) : null)
+      // Resolve to a name; NEVER fall back to the raw staff id (M2 — don't leak internal identifiers
+      // for staff deleted since the event). A deleted actor still shows in the chain, just anonymized.
+      const who = (id: string | null) => (id ? (nameOf.get(id) ?? '(empleado eliminado)') : null)
       const fullName = (p: { firstName: string | null; lastName: string | null } | null) =>
         p ? `${p.firstName ?? ''} ${p.lastName ?? ''}`.trim() || null : null
 

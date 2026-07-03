@@ -125,6 +125,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, status, method, fromDate, toDate, limit }) => {
       const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('payments:read', venueId) // read gate — mirror the dashboard's checkPermission
       const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
       const tz = venue?.timezone || 'America/Mexico_City'
       const start = venueStartOfDay(tz, fromDate ? new Date(`${fromDate}T12:00:00`) : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000))
@@ -203,6 +204,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, fromDate, toDate, limit }) => {
       const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('payments:read', venueId) // read gate — mirror the dashboard's checkPermission
       const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
       const tz = venue?.timezone || 'America/Mexico_City'
       const start = venueStartOfDay(tz, fromDate ? new Date(`${fromDate}T12:00:00`) : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000))

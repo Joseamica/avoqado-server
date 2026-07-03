@@ -231,8 +231,9 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
       venueId: z.string().describe('Venue that owns the reservation (must be in your scope)'),
       confirmationCode: z.string().min(1).describe('Reservation confirmation code, e.g. RES-PK6JHD'),
       reason: z.string().optional().describe('Optional cancellation reason'),
+      confirm: z.boolean().optional().describe('Required to actually cancel; without it you get a preview of what will be cancelled'),
     },
-    async ({ venueId, confirmationCode, reason }) => {
+    async ({ venueId, confirmationCode, reason, confirm }) => {
       const where = guard.venueFilter(venueId) // throws if out of scope
       guard.requirePermission('reservations:cancel', venueId) // write gate (per-venue role)
       const gate = await planGateMessage(venueId, ...RESERVATIONS_GATE) // PRO tier
@@ -246,6 +247,16 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
       }
       if (reservation.status === 'CANCELLED') {
         return text({ ok: false, error: 'Esa reservación ya está cancelada.' })
+      }
+      // Confirm-gate (M3): cancelling notifies the customer immediately and can release/forfeit their
+      // deposit — hard to reverse once the notification goes out. Preview first.
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview: { confirmationCode, currentStatus: reservation.status, reason: reason ?? null },
+          message: `Vas a CANCELAR la reservación ${confirmationCode} (estado actual: ${reservation.status}). Esto notifica al cliente al instante y puede liberar o penalizar su depósito. Confirma con confirm:true.`,
+        })
       }
       try {
         const updated = await cancelReservation(reservation.venueId, reservation.id, 'SYSTEM', reason)

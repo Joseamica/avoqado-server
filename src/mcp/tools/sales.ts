@@ -18,6 +18,7 @@ import {
   type SalesSummaryExportSection,
 } from '@/services/dashboard/sales-summary.dashboard.service'
 import { getAvailableBalance, getBalanceByCardType } from '@/services/dashboard/availableBalance.dashboard.service'
+import { hasPermission } from '@/services/access/access.service'
 
 export interface SalesInput {
   amount: number | { toString(): string }
@@ -221,6 +222,16 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, date }) => {
       const where = guard.venueFilter(venueId) // throws if venueId is out of scope
+      if (venueId) guard.requirePermission('analytics:read', venueId) // single-venue focus: hard-deny if the role lacks it
+      // All-venues path: restrict to venues where the caller holds analytics:read (mirror the dashboard read gate),
+      // so a low-role staffer can't read revenue across the org that the dashboard would 403.
+      const readable = venueId
+        ? [venueId]
+        : scope.allowedVenueIds.filter(v => {
+            const access = scope.perVenueAccess.get(v)
+            return !!access && hasPermission(access, 'analytics:read')
+          })
+      where.venueId = { in: readable }
       const ref = date ? new Date(`${date}T12:00:00`) : undefined
       const start = venueStartOfDay('America/Mexico_City', ref)
       const end = venueEndOfDay('America/Mexico_City', ref)
@@ -231,7 +242,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
       const summary = summarizeSales(payments as SalesInput[])
       return text({
         window: { start: start.toISOString(), end: end.toISOString() },
-        venuesInScope: venueId ? 1 : scope.allowedVenueIds.length,
+        venuesInScope: readable.length,
         ...summary,
       })
     },
@@ -248,6 +259,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, fromDate, toDate, limit }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('analytics:read', venueId) // read gate — mirror the dashboard's advanced-reports permission
       const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Los reportes avanzados') // PRO tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
       const data = (await getVenueChartData(venueId, 'best-selling-products', { fromDate, toDate })) as {
@@ -269,6 +281,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, fromDate, toDate, limit }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('analytics:read', venueId) // read gate — mirror the dashboard's advanced-reports permission
       const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Los reportes avanzados') // PRO tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
       const ranking = (await getVenueChartData(venueId, 'staff-ranking', { fromDate, toDate })) as StaffRankingRow[]
@@ -288,6 +301,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, fromDate, toDate, limit }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('analytics:read', venueId) // read gate — mirror the dashboard's advanced-reports permission
       const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Los reportes avanzados') // PRO tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
       const rows = (await getVenueChartData(venueId, 'category-mix', { fromDate, toDate })) as CategoryMixRow[]
@@ -306,6 +320,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, fromDate, toDate }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('analytics:read', venueId) // read gate — mirror the dashboard's advanced-reports permission
       const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Los reportes avanzados') // PRO tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
 
@@ -345,6 +360,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, fromDate, toDate, limit }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('analytics:read', venueId) // read gate — mirror the dashboard's advanced-reports permission
       const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Los reportes avanzados') // PRO tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
       const rows = (await getVenueChartData(venueId, 'channel-mix', { fromDate, toDate })) as ChannelMixRow[]
@@ -363,6 +379,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, fromDate, toDate }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('analytics:read', venueId) // read gate — mirror the dashboard's advanced-reports permission
       const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Los reportes avanzados') // PRO tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
       const rows = (await getVenueChartData(venueId, 'peak-hours', { fromDate, toDate })) as PeakHourRow[]
@@ -381,6 +398,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, fromDate, toDate }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('analytics:read', venueId) // read gate — mirror the dashboard's advanced-reports permission
       const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
       const tz = venue?.timezone || 'America/Mexico_City'
       const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Los reportes avanzados') // PRO tier
@@ -401,6 +419,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, fromDate, toDate }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('analytics:read', venueId) // read gate — mirror the dashboard's advanced-reports permission
       const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'El calendario de liquidación') // PRO tier (same code as the dashboard reconciliation block)
       if (gate) return text({ ok: false, planRequired: true, error: gate })
       const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
@@ -489,6 +508,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, mode, fromDate, toDate, sections, paymentMethod, cardType, merchantAccountId }) => {
       guard.venueFilter(venueId) // throws ScopeError if out of scope
+      guard.requirePermission('analytics:read', venueId) // read gate — mirror the dashboard's advanced-reports permission
       const reportGate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'La exportación de ventas')
       if (reportGate) return text({ ok: false, planRequired: true, error: reportGate })
 
@@ -509,7 +529,16 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
         }
         const filters = { ...range, paymentMethod, cardType, merchantAccountId }
         const total = await countSalesSummaryDetailRows(venueId, filters)
-        const rows = await fetchSalesSummaryDetailRows(venueId, filters, 200) // cap MCP payload
+        const rawRows = await fetchSalesSummaryDetailRows(venueId, filters, 200) // cap MCP payload
+        // SECURITY (H2): never hand raw card / processor data to the LLM vendor. guard.redact strips
+        // maskedPan (a SENSITIVE_PAYMENT_FIELD); processorData is a nested processor blob it does NOT
+        // cover (auth/reference numbers, operation ids), so drop it explicitly. Same redaction policy
+        // the platform applies everywhere card data could leave the building.
+        const rows = guard.redact(rawRows).map(r => {
+          const copy = { ...(r as Record<string, unknown>) }
+          delete copy.processorData
+          return copy
+        })
         return text({ venueId, mode: 'detailed', window: range, timezone: tz, total, returned: rows.length, rows })
       }
 

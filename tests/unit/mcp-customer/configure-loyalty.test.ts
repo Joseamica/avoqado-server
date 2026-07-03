@@ -2,7 +2,7 @@ import { registerLoyaltyTools } from '../../../src/mcp/tools/loyalty'
 import type { McpScope } from '../../../src/mcp/scope'
 
 const mockUpdate = jest.fn()
-const mockGetConfig = jest.fn()
+const mockFindFirst = jest.fn()
 const mockAudit = jest.fn()
 
 jest.mock('@/mcp/planGate', () => ({ planGateMessage: jest.fn().mockResolvedValue(null) }))
@@ -21,11 +21,10 @@ jest.mock('@/mcp/audit', () => ({ auditMcpWrite: (...a: unknown[]) => mockAudit(
 jest.mock('@/services/dashboard/loyalty.dashboard.service', () => ({
   adjustPoints: jest.fn(),
   updateLoyaltyConfig: (...a: unknown[]) => mockUpdate(...(a as [])),
-  getLoyaltyConfig: (...a: unknown[]) => mockGetConfig(...(a as [])),
 }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
-  default: { loyaltyConfig: { findFirst: jest.fn() }, customer: { findMany: jest.fn() } },
+  default: { loyaltyConfig: { findFirst: (...a: unknown[]) => mockFindFirst(...(a as [])) }, customer: { findMany: jest.fn() } },
 }))
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
@@ -48,7 +47,7 @@ describe('configure_loyalty (config write)', () => {
   })
 
   it('without confirm → previews current → new (money economics), does NOT write', async () => {
-    mockGetConfig.mockResolvedValueOnce({ pointsPerDollar: 1, redemptionRate: 0.01, minPointsRedeem: 100 })
+    mockFindFirst.mockResolvedValueOnce({ pointsPerDollar: 1, redemptionRate: 0.01, minPointsRedeem: 100 })
     const out = parse(await call({ venueId: 'v1', redemptionRate: 100, pointsPerDollar: 50 }))
     expect(out.requiresConfirmation).toBe(true)
     expect(out.changes).toEqual(
@@ -58,6 +57,15 @@ describe('configure_loyalty (config write)', () => {
       ]),
     )
     expect(mockUpdate).not.toHaveBeenCalled()
+  })
+
+  it('🔒 H3: preview reads via findFirst (never get-or-CREATE) so it NEVER activates a program', async () => {
+    mockFindFirst.mockResolvedValueOnce(null) // venue has no loyalty config yet
+    const out = parse(await call({ venueId: 'v1', pointsPerDollar: 3, active: true }))
+    expect(out.requiresConfirmation).toBe(true)
+    expect(mockFindFirst).toHaveBeenCalledTimes(1) // read-only path, no getOrCreate
+    expect(out.changes).toEqual(expect.arrayContaining([{ label: 'Puntos por $1', from: null, to: 3 }]))
+    expect(mockUpdate).not.toHaveBeenCalled() // and definitely no write/activate on a preview
   })
 
   it('confirm:true passes only supplied fields (mapping minPointsToRedeem) and audits', async () => {

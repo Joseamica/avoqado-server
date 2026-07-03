@@ -8,6 +8,27 @@
 
 **Tech Stack:** Node + Express + Prisma + TypeScript · axios · Jest + nock (backend). Vite + React + TanStack Query + i18next · Vitest (frontend).
 
+```
+wizard (toggle) ──► POST /financial-connections {accountKind}
+                        │
+                startConnection ── persiste accountKind en la fila (Task 5)
+                        │
+                client.connect({...accountKind})
+                        │
+          ┌─── MERCHANT ─┴─── CLIENT ───┐
+          │                             │
+   /sign-in/merchant             /sign-in  (mgPlatform: PWA)
+          │                             │
+     ¿2FA/device? ── challenge cifrado {accessToken, externalClientId?} + PENDING_*
+          │                             │
+   fetchMe→negocios[]      idMoneyGiver→get-wallet-clientAccounts→cuentas[]
+          │                             │        (0 cuentas → BadRequest honesto)
+          └────── finishConnected (+externalClientId) ──────┘
+                        │
+        lecturas: ctxFor(conn) = {accessToken, kind, externalClientId}
+        transfers: SOLO MERCHANT (guard backend + UI oculta botón)
+```
+
 ## Global Constraints
 
 - Repos: `avoqado-server` (backend) y `avoqado-web-dashboard` (frontend). Ambos en branch `develop`.
@@ -19,7 +40,12 @@
 - Dinero honesto: `null` → `—`, jamás `$0`. `toNum` devuelve null para basura.
 - Regla de tests: N sitios cambiados → exactamente N tests nuevos; no agrupar cobertura ajena.
 - Copy UI: "Cuenta de negocio" / "Cuenta personal" (i18n; paridad es/en/fr).
-- Retrocompatibilidad: conexiones existentes son MERCHANT (default del schema). El endpoint de crear conexión trata `accountKind` ausente como `MERCHANT`.
+- Retrocompatibilidad: conexiones existentes son MERCHANT (default del schema). El endpoint de crear conexión trata `accountKind` ausente como `MERCHANT`; cualquier otro valor distinto de `MERCHANT`/`CLIENT` → 400 (nunca coerción silenciosa).
+- **Tier (decidido en eng review D19):** hereda el gating actual de Financial Connections (`financialConnections:manage`, OWNER). Sin FeatureGate nuevo.
+- **Transferencias: SOLO conexiones MERCHANT.** El backend rechaza transfer/resolve-destination sobre conexiones CLIENT y la UI oculta el botón (Tasks 5 y 7). El "fuera de alcance" del spec se hace cumplir con código, no con esperanza.
+- **Comentarios load-bearing:** al editar `listMovements`/`types.ts` se CONSERVAN y actualizan los comentarios existentes (pool global ~5.1M, SortByFecha, scoping por ruta). Los snippets de este plan ya los incluyen — no borrarlos al copiar.
+- **🔴 ORDEN DE DEPLOY (del review final 2026-07-03):** server primero — deploy de Task 1 (migración aditiva, segura en cualquier momento) + Tasks 2-5 a develop/prod; SOLO DESPUÉS pushear los cambios del dashboard. Pushear el dashboard a `develop` antes auto-deploya demo+staging donde la opción "Cuenta personal" fallaría con un error opaco del proveedor (el backend viejo ignora `accountKind` y intenta login merchant). Si el dashboard tuviera que mergear primero: deshabilitar el botón CLIENT con badge "Muy pronto" y quitarlo cuando Tasks 2-5 estén desplegadas.
+- **Typecheck del dashboard (lección del review final):** `npx tsc --noEmit` de raíz NO chequea nada (tsconfig raíz con `files: []` + project references). Usar `npx tsc -p tsconfig.app.json --noEmit` (o `tsc -b`). Los pasos de verificación FE de este plan deben leerse así.
 
 ## Interfaces compartidas (definidas aquí, usadas por varias tareas)
 
@@ -31,17 +57,23 @@ export interface ConnectInput {
   email: string
   password: string
   deviceIdentifier: string
-  accountKind: AccountKind        // NUEVO
+  accountKind?: AccountKind       // NUEVO — OPCIONAL (default 'MERCHANT'): boundary retrocompatible
+                                  // y las tareas compilan/commitean solas (C3, commit-safe)
 }
 
 export interface ConnectionContext {
   accessToken: string
-  kind?: AccountKind              // NUEVO (default MERCHANT en headers)
+  kind: AccountKind               // NUEVO — REQUERIDO: un call site interno sin kind NO compila.
+                                  // Así el compilador impide fugas silenciosas a MERCHANT (C2/C3).
   externalClientId?: string | null // NUEVO (idMoneyGiver del cliente; null en merchant)
 }
 
-// ConnectResult 'connected' gana externalClientId opcional:
+// ConnectResult: el miembro 'connected' gana externalClientId opcional, y los CHALLENGES ganan
+// externalClientId como FALLBACK (el sign-in inicial del cliente SÍ trae idMoneyGiver; la
+// respuesta del 2FA quizá no — decisión 1A):
 // | { kind: 'connected'; grant: Grant; accounts: ProviderAccount[]; accessToken?: string; externalClientId?: string }
+// | { kind: 'need_two_factor_auth'; challenge: { accessToken: string; externalClientId?: string | null } }
+// | { kind: 'need_device_validation'; challenge: { accessToken: string; processId: string; externalClientId?: string | null } }
 ```
 
 Enum Prisma: `FinancialConnectionAccountKind { MERCHANT CLIENT }`. El service mapea el enum Prisma ↔ la union string `AccountKind` (mismos literales).
@@ -89,9 +121,23 @@ Expected: 0 errores. El tipo `FinancialConnectionAccountKind` existe en `@prisma
 
 ```bash
 cd avoqado-server
-git add prisma/schema.prisma prisma/migrations
+# Path EXPLÍCITO de la migración creada — jamás el directorio completo (el tree tiene WIP ajeno).
+git add prisma/schema.prisma "prisma/migrations/$(ls -t prisma/migrations | head -1)"
 git commit -m "feat(financial-connections): schema accountKind + externalClientId"
 ```
+
+---
+
+### Task 1.5: Probe en vivo — resolver los unknowns ANTES de implementar (decisión C6)
+
+**Files:**
+- Create (temporal): `avoqado-server/scripts/temp-probe-client-account.ts` — **DELETE antes de commit** (regla de temp files).
+
+Requiere a Jose presente (~15 min): él teclea las credenciales de `devgerruiz` y el TOTP; el implementer solo lee las respuestas. Sin esto, los normalizers de Tasks 3-4 se escriben contra supuestos.
+
+- [ ] **Step 1: Script de sondeo** — contra `prod.moneygiver.xyz` (read-only): (a) `POST /api/auth/sign-in` con `mgPlatform: PWA` → capturar el shape completo de la respuesta (¿`userData.idMoneyGiver`? ¿viene también cuando `needTwoFactorAuth: true`?); (b) completar 2FA → capturar shape post-2FA (¿repite `idMoneyGiver`?); (c) `GET /api/clients/get-wallet-clientAccounts/v3r2.1?idMoneyGiver=` → shape real de `Cuenta` (nombres exactos: `idCuenta`, `cuentaClabe`, `saldo`, `nombre`, `activo`, `idCuentaAlt`); (d) `GET /api/clients/movimientos/{idCuenta}` → confirmar que devuelve SOLO esa cuenta (no pool global); (e) `POST /api/auth/refresh-token` con el refreshToken obtenido y `mgPlatform: PWA` → confirmar 200 (el refresh silencioso del cliente, quisquilloso en merchant).
+- [ ] **Step 2: Registrar hallazgos en este plan** — si algún shape difiere, corregir los snippets de Tasks 3-4 AHORA (líneas de plan, no código ya escrito).
+- [ ] **Step 3: Borrar el script** — `rm scripts/temp-probe-client-account.ts`. Nada que commitear en esta tarea.
 
 ---
 
@@ -117,17 +163,17 @@ En `src/config/env.ts`, junto a `EXTERNAL_BANK_MG_PLATFORM` (línea 90) agregar:
 
 - [ ] **Step 2: Tipos en types.ts**
 
-Agregar `export type AccountKind = 'MERCHANT' | 'CLIENT'`. Agregar `accountKind: AccountKind` a `ConnectInput`. Cambiar `ConnectionContext` a:
+Agregar `export type AccountKind = 'MERCHANT' | 'CLIENT'`. Agregar `accountKind?: AccountKind` (OPCIONAL) a `ConnectInput`. Cambiar `ConnectionContext` a (ver "Interfaces compartidas" — `kind` REQUERIDO):
 
 ```ts
 export interface ConnectionContext {
   accessToken: string
-  kind?: AccountKind
+  kind: AccountKind                // REQUERIDO — el compilador obliga a threadear en cada call site
   externalClientId?: string | null
 }
 ```
 
-En el miembro `'connected'` de `ConnectResult` agregar `externalClientId?: string`.
+En el miembro `'connected'` de `ConnectResult` agregar `externalClientId?: string`, y a los challenges de `'need_two_factor_auth'`/`'need_device_validation'` agregar `externalClientId?: string | null`. Los call sites existentes del service que construyen `{ accessToken }` NO compilarán hasta Task 5 — está bien: Tasks 2-4 solo corren `npx jest externalBank.client` (el archivo de test construye sus ctx con `kind` explícito); el `tsc --noEmit` global se corre en Task 5 Step 7, cuando el threading ya está completo. Si se prefiere verde total por task, el ctxFor de Task 5 puede adelantarse aquí — pero NO cambiar `kind` a opcional para "arreglar" la compilación: ese opcional es exactamente el bug silencioso que C3 elimina.
 
 - [ ] **Step 3: Test que falla — login cliente usa /sign-in + mgPlatform PWA**
 
@@ -172,12 +218,17 @@ const headers = (token?: string, kind: AccountKind = 'MERCHANT') => ({
 
 async function signIn(email: string, password: string, deviceIdentifier: string, kind: AccountKind): Promise<unknown> {
   const path = kind === 'CLIENT' ? '/api/auth/sign-in' : '/api/auth/sign-in/merchant'
+  // El body merchant queda IDÉNTICO byte a byte al verificado en vivo (decisión 4A) — `user`
+  // solo va en el login del cliente (no sabemos cuál de los dos campos lee ese endpoint).
+  const body =
+    kind === 'CLIENT'
+      ? { email, user: email, password, dispositivo: dispositivo(deviceIdentifier) }
+      : { email, password, dispositivo: dispositivo(deviceIdentifier) }
   try {
-    const { data } = await axios.post(
-      `${base()}${path}`,
-      { email, user: email, password, dispositivo: dispositivo(deviceIdentifier) },
-      { headers: { ...headers(undefined, kind), twoFactorEnabled: 'true' }, timeout: 20_000 },
-    )
+    const { data } = await axios.post(`${base()}${path}`, body, {
+      headers: { ...headers(undefined, kind), twoFactorEnabled: 'true' },
+      timeout: 20_000,
+    })
     return data
   } catch (e) {
     if (axios.isAxiosError(e))
@@ -187,7 +238,7 @@ async function signIn(email: string, password: string, deviceIdentifier: string,
 }
 ```
 
-Importar `AccountKind` desde `./types`. En `connect`, pasar el kind: `const data = await signIn(email, password, deviceIdentifier, accountKind)` (destructurar `accountKind` del `ConnectInput`). En `validateDevice`, el re-login interno también recibe el kind — ver Task 3 (por ahora, para que compile, agregar `accountKind` al destructuring de `connect` y default `'MERCHANT'` en validateDevice/validateTwoFactorCode hasta Task 3).
+Importar `AccountKind` desde `./types`. En `connect`, destructurar con default (`{ email, password, deviceIdentifier, accountKind = 'MERCHANT' }`) y pasar el kind: `const data = await signIn(email, password, deviceIdentifier, accountKind)`. En `validateDevice`/`validateTwoFactorCode`, el kind llega como input en Task 3; por ahora, para que este archivo compile, pasar `'MERCHANT'` literal en sus llamadas internas a `signIn` (se reemplaza en Task 3).
 
 - [ ] **Step 6: Run — pasa**
 
@@ -285,16 +336,25 @@ async function getClientAccounts(accessToken: string, idMoneyGiver: string): Pro
 }
 ```
 
-- [ ] **Step 4: Branch en connect/validateTwoFactorCode/validateDevice**
+- [ ] **Step 4: Branch en connect/validateTwoFactorCode/validateDevice (con fallback 1A + guard C4 + headers C2)**
 
 Extraer un helper para el "post-auth" que ramifica por kind. Reemplazar el bloque final `const accounts = normalizeAccounts(await fetchMe(at))` en los 3 métodos por una llamada a:
 
 ```ts
-async function accountsForKind(accessToken: string, kind: AccountKind, data: unknown): Promise<{ accounts: ProviderAccount[]; externalClientId?: string }> {
+async function accountsForKind(
+  accessToken: string,
+  kind: AccountKind,
+  data: unknown,
+  fallbackClientId?: string | null, // externalClientId capturado del sign-in inicial (viaja en el challenge)
+): Promise<{ accounts: ProviderAccount[]; externalClientId?: string }> {
   if (kind === 'CLIENT') {
-    const idMg = idMoneyGiverOf(data)
+    // La respuesta del 2FA quizá no repite idMoneyGiver — el fallback viene del sign-in inicial (1A).
+    const idMg = idMoneyGiverOf(data) ?? fallbackClientId ?? null
     if (!idMg) throw new BadRequestError('El proveedor no devolvió idMoneyGiver del cliente.')
-    return { accounts: await getClientAccounts(accessToken, idMg), externalClientId: idMg }
+    const accounts = await getClientAccounts(accessToken, idMg)
+    // 0 cuentas → error honesto AHORA, no una conexión CONNECTED vacía (zombie) que confunde (C4).
+    if (!accounts.length) throw new BadRequestError('El proveedor no devolvió cuentas para este usuario; verifica el tipo de cuenta elegido.')
+    return { accounts, externalClientId: idMg }
   }
   return { accounts: normalizeAccounts(await fetchMe(accessToken)) }
 }
@@ -307,9 +367,37 @@ const grant = toGrant(data)
 const { accounts, externalClientId } = await accountsForKind(at, accountKind, data)
 return { kind: 'connected', grant, accounts, accessToken: at, externalClientId }
 ```
-`accountKind` viene del `ConnectInput` destructurado. Para 2FA/device, propagar `accountKind` al challenge/re-login: guardar el kind en el challenge cifrado (Task 5 lo persiste) y pasarlo. Para `validateTwoFactorCode` y `validateDevice`, agregar `accountKind` a su input (ver types del interface `FinancialProviderClient` — agregar `accountKind: AccountKind` a los inputs de `validateDevice`/`validateTwoFactorCode`) y usar `accountsForKind(at, accountKind, data|v)`.
+`accountKind` viene del `ConnectInput` destructurado (default `'MERCHANT'`). En los retornos de challenge de `connect`, incluir el fallback: `challenge: { accessToken, externalClientId: idMoneyGiverOf(data) }` (2FA) y `challenge: { accessToken, processId, externalClientId: idMoneyGiverOf(data) }` (device). **El `accountKind` NO va en el challenge** — la fuente de verdad es `conn.accountKind` en la fila, que Task 5 lee y pasa como input (decisión 3A).
 
-Actualizar el interface `FinancialProviderClient` en `types.ts`: `validateDevice` y `validateTwoFactorCode` reciben `accountKind: AccountKind` en su objeto input. `signIn` interno también recibe kind (ya en Task 2).
+**Headers de identity con kind (C2):** en el branch `need_device_validation` de `connect`, la llamada a `/api/identity/start/web` usa `headers(accessToken, accountKind)`; en `validateDevice`, la llamada a `/api/identity/validate-otp-code/web` usa `headers(challenge.accessToken, accountKind)`. Sin esto, esas 2 llamadas saldrían como MERCHANT dentro de una sesión PWA.
+
+Para `validateTwoFactorCode` y `validateDevice`: agregar `accountKind: AccountKind` a su objeto input en el interface `FinancialProviderClient` (`types.ts`), sus challenges ganan `externalClientId?: string | null`, y usar `accountsForKind(at, accountKind, data|v, challenge.externalClientId)`. El re-login interno de `validateDevice` pasa `accountKind` a `signIn` (reemplaza el `'MERCHANT'` literal de Task 2).
+
+- [ ] **Step 4b: Test — validateTwoFactorCode(CLIENT) completo con fallback (decisión 6A; el flujo real más común)**
+
+```ts
+it('validateTwoFactorCode(CLIENT): respuesta 2FA SIN idMoneyGiver usa el fallback del challenge', async () => {
+  nock(BASE).post('/api/auth/validate-two-factor-code').reply(200, {
+    success: true, token: 'acc-2fa', refreshToken: 'ref-2fa',
+    expiresIn: new Date(Date.now() + 3600e3).toISOString(),
+    // deliberadamente SIN userData/idMoneyGiver — el fallback debe cubrirlo
+  })
+  nock(BASE).get('/api/clients/get-wallet-clientAccounts/v3r2.1').query({ idMoneyGiver: 'mg-1' }).reply(200, {
+    cuentas: [{ idCuenta: 'cta-1', nombre: 'Mi cuenta', cuentaClabe: '646...', saldo: 50, activo: true, idCuentaAlt: 9 }],
+  })
+  const client = await loadClient()
+  const r = await client.validateTwoFactorCode({
+    email: 'a@b.co', deviceIdentifier: DEVICE, code: '123456',
+    accountKind: 'CLIENT', challenge: { accessToken: 'tmp-2fa', externalClientId: 'mg-1' },
+  })
+  expect(r.kind).toBe('connected')
+  if (r.kind === 'connected') expect(r.externalClientId).toBe('mg-1')
+})
+```
+
+- [ ] **Step 4c: Tests — edges de normalización y guard (decisión 7A)**
+
+Tres tests chicos junto a los anteriores: (1) `normalizeClientAccounts` filtra cuentas sin `idCuenta` y devuelve `[]` con payload sin `cuentas[]`; (2) `connect(CLIENT)` cuya respuesta de login NO trae `idMoneyGiver` (y sin fallback) → rechaza con `BadRequestError` 'no devolvió idMoneyGiver'; (3) `connect(CLIENT)` con `cuentas: []` → rechaza con 'no devolvió cuentas' (guard C4), y NO devuelve `kind: 'connected'`.
 
 - [ ] **Step 5: Run — pasa**
 
@@ -360,11 +448,24 @@ Expected: FAIL (hoy siempre usa idNegocio en la ruta + idCuenta query).
 
 En `listMovements`, al inicio construir params y elegir URL por `ctx.kind`:
 
+Los comentarios existentes del método documentan quirks verificados en vivo que costaron descubrimiento real — **se CONSERVAN, no se borran al copiar este snippet** (decisión 5A):
+
 ```ts
 async listMovements(ctx, idNegocio, cuentaId, query) {
   const isClient = ctx.kind === 'CLIENT'
-  const params: Record<string, unknown> = { 'Pagination.Page': query.page, 'Pagination.Size': query.size, SortByFecha: 'desc' }
-  if (!isClient) params.idCuenta = cuentaId // merchant: idNegocio en ruta + idCuenta query (evita pool global)
+  const params: Record<string, unknown> = { 'Pagination.Page': query.page, 'Pagination.Size': query.size }
+  // MERCHANT — ruta = idNegocio, `idCuenta` como query param → acota a la cuenta real del negocio.
+  // (Confirmado en vivo: con cuentaId en la ruta el proveedor ignora el filtro y devuelve
+  //  un pool global de ~5.1M movimientos ajenos; con idNegocio+query idCuenta da los reales.)
+  // CLIENT — ruta = idCuenta directo, SIN idCuenta query (scoping confirmado en Task 1.5).
+  if (!isClient) params.idCuenta = cuentaId
+  // Estado de cuenta = más reciente primero. Sin esto QPay devuelve su orden interno (NO por
+  // fechaCreacion), lo que con paginación deja la página 1 barajada en vez de los 10 más nuevos.
+  // El orden debe pedirse server-side: ordenar en el cliente solo reordenaría los 10 de la página
+  // actual, no el conjunto. El valor de SortByFecha no está documentado; en el API .NET un valor
+  // de query no reconocido se ignora (no truena), así que 'desc' es fix en el mejor caso y no-op
+  // en el peor — a validar contra el estado de cuenta real.
+  params.SortByFecha = 'desc'
   if (query.from) params.FechaInicio = query.from
   if (query.to) params.FechaFinal = query.to
   const path = isClient ? `/api/clients/movimientos/${cuentaId}` : `/api/clients/movimientos/${idNegocio}`
@@ -373,6 +474,8 @@ async listMovements(ctx, idNegocio, cuentaId, query) {
   return { movements: Array.isArray(raw) ? raw.map(normalizeMovement) : [], total: toNum(pick(data, 'total')) ?? 0 }
 }
 ```
+
+Además, actualizar el comentario del interface en `types.ts` (líneas ~127-129, arriba de `listMovements`) para que describa AMBAS rutas: merchant = idNegocio en ruta + idCuenta query; cliente = idCuenta en la ruta. Un comentario stale ahí es peor que ninguno.
 
 **⚠ Verificación en vivo requerida (Task 9):** confirmar que `/api/clients/movimientos/{idCuenta}` para cliente devuelve SOLO esa cuenta (no pool global como la cuenta de dispersión del merchant). Si devuelve pool, replicar el patrón de filtro.
 
@@ -399,6 +502,10 @@ async getBalance(ctx, externalId) {
 
 Actualizar todas las llamadas `headers(ctx.accessToken)` dentro de métodos con `ctx` para pasar `ctx.kind`: `headers(ctx.accessToken, ctx.kind)` en `getMovementStats`, `resolveMgAlt`, `internalTransfer`, `revoke`. (En `refresh`, usar `headers(undefined, ctx.kind)` no aplica porque refresh no tiene ctx todavía — ver Task 5.)
 
+- [ ] **Step 4b: Tests — listAccounts/getBalance del cliente (decisión 7A)**
+
+Dos tests junto al de listMovements: (1) `listAccounts({ accessToken: 't', kind: 'CLIENT', externalClientId: null })` → rechaza con `BadRequestError` 'Falta externalClientId' (guard verificable, no un crash críptico); (2) `getBalance({ accessToken: 't', kind: 'CLIENT', externalClientId: 'mg-1' }, 'cta-1')` con nock de `get-wallet-clientAccounts` → devuelve `{ amount: <saldo de cta-1>, active, providerAccountLabel }` correctos.
+
 - [ ] **Step 5: Run — pasa**
 
 Run: `cd avoqado-server && npx jest externalBank.client`
@@ -419,7 +526,10 @@ git commit -m "feat(financial-connections): movimientos/saldo del cliente por id
 **Files:**
 - Modify: `avoqado-server/src/services/financial-connections/financialConnection.service.ts`
 - Modify: `avoqado-server/src/controllers/dashboard/financialConnection.controller.ts:23-26`
+- Modify: `avoqado-server/src/services/financial-connections/types.ts` (firma de `refresh` — Step 4)
+- Modify: `avoqado-server/src/services/financial-connections/externalBank.client.ts` (impl de `refresh` — Step 4)
 - Test: `avoqado-server/tests/unit/services/financial-connections/financialConnection.service.test.ts`
+- Test: `avoqado-server/tests/unit/services/financial-connections/externalBank.client.test.ts` (test de refresh — Step 4)
 
 **Interfaces:**
 - Consumes: client con branch por kind (Tasks 2-4), schema `accountKind`/`externalClientId` (Task 1).
@@ -427,7 +537,7 @@ git commit -m "feat(financial-connections): movimientos/saldo del cliente por id
 
 - [ ] **Step 1: startConnection persiste accountKind y lo pasa al client**
 
-`startConnection` input gana `accountKind?: AccountKind` (default 'MERCHANT'). Al crear la fila `financialConnection.create`, setear `accountKind: input.accountKind ?? 'MERCHANT'`. Pasar `accountKind` a `client.connect({ ..., accountKind })`. En el challenge cifrado (2FA y device) incluir `accountKind` para propagarlo a los siguientes pasos: `encryptGrant({ ..., accountKind })`. En `validateDevice`/`validateTwoFactorAuth`, leer `accountKind` del challenge descifrado (o de `conn.accountKind`) y pasarlo al client.
+`startConnection` input gana `accountKind?: AccountKind` (default 'MERCHANT'). Al crear la fila `financialConnection.create`, setear `accountKind: input.accountKind ?? 'MERCHANT'`. Pasar `accountKind` a `client.connect({ ..., accountKind })`. En el challenge cifrado (2FA y device) incluir SOLO `externalClientId` (el fallback de 1A que devuelve el client en `r.challenge.externalClientId`): `encryptGrant({ ..., externalClientId: r.challenge.externalClientId ?? null })`. **El `accountKind` NO se duplica en el challenge** (decisión 3A): en `validateDevice`/`validateTwoFactorAuth` se lee SIEMPRE de `conn.accountKind` (la fila ya existe antes de cualquier reto y ambos métodos ya cargan `conn` con `findUniqueOrThrow`) y se pasa al client junto con `challenge: { ..., externalClientId: ch.externalClientId ?? null }`.
 
 - [ ] **Step 2: finishConnected persiste externalClientId**
 
@@ -447,7 +557,9 @@ Aplicar en: `resolveCuentaId` (retorna también el kind/clientId via conn), `get
 
 - [ ] **Step 4: refresh recibe kind**
 
-`accessTokenFor` llama `client.refresh(grant, deviceIdentifier)`. Cambiar la firma del interface `refresh(grant, deviceIdentifier, kind?: AccountKind)` y en el client usar `headers(undefined, kind)` en la llamada a `/api/auth/refresh-token`. `accessTokenFor` pasa `conn.accountKind`.
+`accessTokenFor` llama `client.refresh(grant, deviceIdentifier)`. Cambiar la firma del interface `refresh(grant, deviceIdentifier, kind: AccountKind)` (requerido, consistente con C3) y en el client usar `headers(undefined, kind)` en la llamada a `/api/auth/refresh-token`; el `ctx` que devuelve `refresh` también incluye `kind`. `accessTokenFor` pasa `conn.accountKind`.
+
+Test (decisión 7A, va en `externalBank.client.test.ts`): `refresh(grant, DEVICE, 'CLIENT')` con nock que captura headers → assert `mgplatform === 'PWA'` y que devuelve el grant rotado; los tests de refresh merchant existentes siguen en verde.
 
 - [ ] **Step 5: Controller acepta accountKind**
 
@@ -456,9 +568,32 @@ En `financialConnection.controller.ts:23`:
 ```ts
 const { providerId, email, password, accountKind } = req.body ?? {}
 if (!providerId || !email || !password) throw new BadRequestError('providerId, email y password son requeridos.')
-const kind = accountKind === 'CLIENT' ? 'CLIENT' : 'MERCHANT'
+// Validación en el boundary (C5): ausente → MERCHANT (retrocompatible); basura → 400 visible
+// donde ocurrió, jamás una conexión del tipo equivocado que falla críptica 3 pasos después.
+if (accountKind != null && accountKind !== 'MERCHANT' && accountKind !== 'CLIENT') {
+  throw new BadRequestError('accountKind debe ser MERCHANT o CLIENT.')
+}
+const kind = accountKind ?? 'MERCHANT'
 const r = await svc.startConnection({ venueId: req.params.venueId, providerId, email, password, staffId, accountKind: kind })
 ```
+
+- [ ] **Step 5b: accountKind en el listado + guard de transferencias (decisión C1)**
+
+Dos cambios en el service:
+
+1. `listConnectionsForVenue`: agregar `accountKind: true` al `select` — sin esto la UI no puede etiquetar conexiones personales ni ocultar el botón de transferir.
+2. Guard de dinero: al inicio de `sendInternalTransfer` y `resolveTransferDestination` (después del `findUniqueOrThrow` de `fa`):
+
+```ts
+// Transferencias solo para cuentas de NEGOCIO. El flujo de transfer con sesión CLIENT (PWA)
+// jamás se ha probado contra el proveedor — el spec lo declara fuera de alcance y este guard
+// lo hace cumplir (el botón de la UI también se oculta, pero el backend es la fuente de verdad).
+if (fa.connection.accountKind === 'CLIENT') {
+  throw new BadRequestError('Las transferencias no están disponibles para cuentas personales.')
+}
+```
+
+Test (misma regla N sitios → N tests): `sendInternalTransfer` sobre una conexión CLIENT → rechaza con ese mensaje ANTES de tocar el provider (mock del client sin llamadas).
 
 - [ ] **Step 6: Test del service — startConnection guarda accountKind y externalClientId**
 
@@ -473,7 +608,7 @@ Expected: PASS + 0 errores.
 
 ```bash
 cd avoqado-server
-git add src/services/financial-connections/financialConnection.service.ts src/controllers/dashboard/financialConnection.controller.ts tests/unit/services/financial-connections/financialConnection.service.test.ts
+git add src/services/financial-connections/financialConnection.service.ts src/controllers/dashboard/financialConnection.controller.ts src/services/financial-connections/types.ts src/services/financial-connections/externalBank.client.ts tests/unit/services/financial-connections/financialConnection.service.test.ts tests/unit/services/financial-connections/externalBank.client.test.ts
 git commit -m "feat(financial-connections): service+controller persisten y threadean accountKind"
 ```
 
@@ -515,6 +650,10 @@ async createConnection(
 },
 ```
 
+- [ ] **Step 3b: El tipo del listado de conexiones gana `accountKind`**
+
+En el mismo `financialConnection.service.ts` del dashboard, el tipo de la conexión que devuelve `listConnections` (el shape que consume `BankAccountsSection`) gana `accountKind: 'MERCHANT' | 'CLIENT'` — el backend ya lo expone desde Task 5 Step 5b. Lo consume Task 7 (badge + ocultar transferir).
+
 - [ ] **Step 4: Run — pasa**
 
 Run: `cd avoqado-web-dashboard && npx vitest run financialConnection.service`
@@ -530,13 +669,15 @@ git commit -m "feat(financial-connections): createConnection acepta accountKind"
 
 ---
 
-### Task 7: Frontend — toggle Negocio/Personal en el wizard
+### Task 7: Frontend — toggle Negocio/Personal en el wizard + badge/gate en la card
 
 **Files:**
 - Modify: `avoqado-web-dashboard/src/pages/Venue/components/BankConnectWizard.tsx` (estado + paso `credentials` ~línea 159, mutación `connect` ~línea 74)
+- Modify: `avoqado-web-dashboard/src/pages/Venue/Edit/components/BankAccountsSection.tsx` (badge Personal + ocultar transferir — decisión C1)
+- Test: `avoqado-web-dashboard/src/pages/Venue/components/BankConnectWizard.test.tsx` (decisión 8A)
 
 **Interfaces:**
-- Consumes: `createConnection(..., { accountKind })` (Task 6).
+- Consumes: `createConnection(..., { accountKind })` (Task 6), `accountKind` en el listado (Task 6 Step 3b).
 
 - [ ] **Step 1: Estado del tipo**
 
@@ -570,17 +711,25 @@ Dentro del `<form>` del paso `credentials`, antes del campo email, insertar un c
 
 Importar `cn` de `@/lib/utils` si no está. La descripción del paso (`wizard.step2.description`) puede quedar; opcionalmente mostrar ayuda por tipo (Task 8 provee la key `wizard.step2.kind.hint`).
 
-- [ ] **Step 4: Verificar que compila y renderiza**
+- [ ] **Step 3b: Badge "Personal" + ocultar transferir en la card (decisión C1)**
 
-Run: `cd avoqado-web-dashboard && npx tsc --noEmit`
-Expected: 0 errores. (Verificación visual en Task 9 con el preview.)
+En `BankAccountsSection.tsx`: (a) si `connection.accountKind === 'CLIENT'`, mostrar un `<Badge variant="outline">` con `t('wizard.step2.kind.badge')` junto al nombre del proveedor; (b) el `canTransfer` de `AccountRow` (~línea 153) pasa a `connection.status === 'CONNECTED' && connection.accountKind !== 'CLIENT'` — el backend ya rechaza (Task 5 Step 5b), esto solo evita mostrar un botón que va a fallar.
+
+- [ ] **Step 3c: Test de componente — el toggle protege el contrato (decisión 8A)**
+
+`BankConnectWizard.test.tsx` (patrón `.test.tsx` existente en el repo, ver `src/pages/Reports/MoneyLocationStrip.test.tsx`): mockear `financialConnectionAPI`, render del wizard en el paso credentials. Dos asserts: (1) submit SIN tocar el toggle → `createConnection` recibe `accountKind: 'MERCHANT'` (el default retrocompatible es el invariante más fácil de romper sin querer); (2) click en "Cuenta personal" + submit → recibe `accountKind: 'CLIENT'`.
+
+- [ ] **Step 4: Verificar que compila, renderiza y el test pasa**
+
+Run: `cd avoqado-web-dashboard && npx tsc --noEmit && npx vitest run BankConnectWizard`
+Expected: 0 errores, test PASS. (Verificación visual en Task 9 con el preview.)
 
 - [ ] **Step 5: Commit**
 
 ```bash
 cd avoqado-web-dashboard
-git add src/pages/Venue/components/BankConnectWizard.tsx
-git commit -m "feat(financial-connections): toggle Negocio/Personal en el wizard"
+git add src/pages/Venue/components/BankConnectWizard.tsx src/pages/Venue/components/BankConnectWizard.test.tsx src/pages/Venue/Edit/components/BankAccountsSection.tsx
+git commit -m "feat(financial-connections): toggle Negocio/Personal en el wizard + badge/gate Personal"
 ```
 
 ---
@@ -601,16 +750,18 @@ Dentro del objeto `wizard.step2` de cada locale, agregar un objeto `kind`:
 
 es:
 ```json
-"kind": { "business": "Cuenta de negocio", "personal": "Cuenta personal", "hint": "Personal: la cuenta con la que entras a la app de tu banco. Negocio: tu panel de comercio." }
+"kind": { "business": "Cuenta de negocio", "personal": "Cuenta personal", "badge": "Personal", "hint": "Personal: la cuenta con la que entras a la app de tu banco. Negocio: tu panel de comercio." }
 ```
 en:
 ```json
-"kind": { "business": "Business account", "personal": "Personal account", "hint": "Personal: the account you use to sign in to your bank app. Business: your merchant panel." }
+"kind": { "business": "Business account", "personal": "Personal account", "badge": "Personal", "hint": "Personal: the account you use to sign in to your bank app. Business: your merchant panel." }
 ```
 fr:
 ```json
-"kind": { "business": "Compte entreprise", "personal": "Compte personnel", "hint": "Personnel : le compte avec lequel vous vous connectez à l'app de votre banque. Entreprise : votre panneau marchand." }
+"kind": { "business": "Compte entreprise", "personal": "Compte personnel", "badge": "Personnel", "hint": "Personnel : le compte avec lequel vous vous connectez à l'app de votre banque. Entreprise : votre panneau marchand." }
 ```
+
+(`badge` la consume la card de conexión — Task 7 Step 3b. Vive dentro de `kind` para que el check de paridad del Step 2 la cubra sin script nuevo.)
 
 - [ ] **Step 2: Verificar paridad de keys**
 
@@ -641,13 +792,17 @@ Expected: 0 errores, tests PASS.
 
 Con el backend dev corriendo, en el wizard elegir **Cuenta personal**, conectar con las credenciales de `devgerruiz` (Jose las teclea; el implementer NO usa credenciales ajenas), completar 2FA, y verificar en la UI: aparece la lista de cuentas del cliente, el saldo, y el detalle de movimientos.
 
-- [ ] **Step 3: Resolver los 3 unknowns del spec (verificación en vivo)**
+- [ ] **Step 3: Confirmar consistencia con el probe de Task 1.5**
 
-Confirmar contra la respuesta viva: (a) `/api/clients/movimientos/{idCuenta}` del cliente devuelve solo esa cuenta (no pool global) — si no, ajustar `listMovements` branch; (b) campo `idMoneyGiver` correcto en el login del cliente; (c) nombres de campo de `Cuenta`. Registrar hallazgos; si algo difiere, corregir el código de la tarea correspondiente + su test.
+Los unknowns del spec ya se resolvieron en vivo en Task 1.5 (shapes, scoping de movimientos, refresh PWA). Aquí solo confirmar que el comportamiento integrado (por la UI) coincide con lo observado en el probe. Si algo difiere, corregir el código de la tarea correspondiente + su test.
 
-- [ ] **Step 4: Verificar que el merchant sigue intacto**
+- [ ] **Step 3b: Forzar el refresh silencioso del cliente (decisión 2A)**
 
-Conectar una **Cuenta de negocio** (flujo actual) y verificar saldo/movimientos — no debe haber regresión.
+El token del login vive ~55 min en el cache en memoria, así que el smoke normal JAMÁS ejercita `/api/auth/refresh-token` con `mgPlatform: PWA` — y ese endpoint ya demostró ser quisquilloso en merchant. Reiniciar el proceso dev del backend (vacía `tokenCache`) y volver a leer el saldo de la cuenta personal conectada: debe responder el saldo (no `NEEDS_REAUTH`). Esto valida el refresh integrado end-to-end además del probe de Task 1.5(e).
+
+- [ ] **Step 4: Verificar que el merchant sigue intacto + gating de transfer**
+
+Conectar una **Cuenta de negocio** (flujo actual) y verificar saldo/movimientos — no debe haber regresión. Verificar además que la card de la cuenta **personal** muestra el badge "Personal" y NO muestra el botón de transferir, y que la cuenta de negocio sí lo conserva.
 
 - [ ] **Step 5: Review final de rama**
 
@@ -660,4 +815,22 @@ Dispatch al code-reviewer (superpowers:requesting-code-review) sobre el diff com
 - **Cobertura del spec:** ✅ 4 branch points → Tasks 2 (mgPlatform+login), 3 (listado cuentas), 4 (movimientos/saldo). accountKind persistido → Task 1+5. FE toggle → Tasks 6-8. Verificación en vivo (3 unknowns) → Task 9.
 - **Placeholders:** los "⚠ verificación en vivo" son unknowns nombrados explícitamente con qué confirmar y qué hacer si difiere — no son TODO abiertos.
 - **Consistencia de tipos:** `AccountKind` ('MERCHANT'|'CLIENT') consistente en types/client/service; `ConnectionContext` gana `kind`+`externalClientId` (Task 2) usados en Tasks 4-5; `ConnectResult.externalClientId` (Task 2) producido en Task 3, consumido en Task 5; `platformForKind`/`headers(token,kind)` (Task 2) usados en 3-4.
-- **YAGNI:** no auto-detección, no transferencias-desde-cliente, no modelo colaborador, no rollout prod (pendiente separado).
+- **YAGNI:** no auto-detección, no transferencias-desde-cliente (ahora ENFORCED con guard backend + UI — Task 5 Step 5b / Task 7 Step 3b), no modelo colaborador, no rollout prod (pendiente separado).
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
+| Codex Review | `/codex review` | Independent 2nd opinion | 1 | ISSUES ABSORBED | 8 tensiones sustantivas: 7 aceptadas (C1-C7), 1 rechazada (C8) |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | CLEAR (PLAN) | 8 issues (2 arq, 3 calidad, 3 tests), 0 critical gaps, todos folded al plan |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | — |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | — |
+
+**CODEX:** halló 4 hoyos reales que el review principal no vio — transfers desde CLIENT sin gate (C1), headers de identity sin kind (C2), secuencia no commit-safe (C3 parcial), zombie 0-cuentas (C4) — más higiene de plan (C7). Su ataque a la regla "N sitios → N tests" (C8) se rechazó.
+
+**CROSS-MODEL:** ambos modelos coincidieron en el riesgo del flujo CLIENT+2FA (fallback idMoneyGiver) y en verificar-en-vivo-antes (probe Task 1.5). Divergencia única: la regla de cobertura del plan (C8) — se mantiene la convención del autor.
+
+**VERDICT:** ENG CLEARED — ready to implement. Decisiones D2-D22 aplicadas al plan (tier: hereda gating actual; transfers solo MERCHANT; probe en vivo primero; 3 TODOs registrados en TODOS.md).
+
+NO UNRESOLVED DECISIONS

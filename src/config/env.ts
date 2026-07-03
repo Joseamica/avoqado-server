@@ -88,6 +88,7 @@ const envSchema = z.object({
   // across all Avoqado sucursales; each sucursal is its own `negocio`.
   EXTERNAL_BANK_API_BASE: z.string().url().optional().default('https://api.qpaydev.xyz'),
   EXTERNAL_BANK_MG_PLATFORM: z.string().optional().default('MERCHANT'),
+  EXTERNAL_BANK_MG_PLATFORM_CLIENT: z.string().optional().default('PWA'),
   EXTERNAL_BANK_EMAIL: z.string().optional(),
   EXTERNAL_BANK_PASSWORD: z.string().optional(),
 

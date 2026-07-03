@@ -1120,12 +1120,24 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         .optional()
         .describe('Periodo YYYY-MM (opcional; default mes actual)'),
       periodicidad: z.enum(['SEMANAL', 'QUINCENAL', 'MENSUAL']).optional().describe('Periodicidad (default MENSUAL)'),
+      confirm: z.boolean().optional().describe('Requerido para correr la nómina; sin él obtienes un preview de lo que hará'),
     },
-    async ({ venueId, fechaPago, period, periodicidad }) => {
+    async ({ venueId, fechaPago, period, periodicidad, confirm }) => {
       guard.venueFilter(venueId)
       guard.requirePermission('accounting:manage', venueId)
       const gate = await planGateMessage(venueId, 'CFDI', 'La nómina')
       if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+      // Confirm-gate (M3): a payroll run computes withholdings for every active employee and POSTS an
+      // accounting journal entry. Idempotent by period, but the first run is a real financial write.
+      if (!confirm) {
+        const per = period || currentPeriod()
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview: { periodo: per, fechaPago, periodicidad: periodicidad ?? 'MENSUAL' },
+          message: `Vas a correr la NÓMINA de ${per} (pago ${fechaPago}, ${periodicidad ?? 'MENSUAL'}): calcula percepción/ISR/IMSS/neto de cada empleado activo y postea su póliza contable. Es idempotente (no duplica). Confirma con confirm:true.`,
+        })
+      }
       const r = await runPayroll(
         venueId,
         period || currentPeriod(),
@@ -1156,12 +1168,23 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
     {
       venueId: z.string().describe('Local (debe estar en tu alcance)'),
       payrollRunId: z.string().describe('Id de la corrida de nómina (PayrollRun) ya posteada'),
+      confirm: z.boolean().optional().describe('Requerido para timbrar; sin él obtienes un preview (el timbrado consume timbres del PAC)'),
     },
-    async ({ venueId, payrollRunId }) => {
+    async ({ venueId, payrollRunId, confirm }) => {
       guard.venueFilter(venueId)
       guard.requirePermission('accounting:manage', venueId)
       const gate = await planGateMessage(venueId, 'CFDI', 'El timbrado de recibos de nómina')
       if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+      // Confirm-gate (M3): stamping generates LEGAL fiscal receipts (CFDI) and CONSUMES PAC stamps —
+      // not reversible and it costs money. Idempotent (skips already-stamped), but gate the first run.
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview: { payrollRunId },
+          message: `Vas a TIMBRAR los recibos de nómina (CFDI) de la corrida ${payrollRunId}: genera comprobantes fiscales legales y CONSUME timbres del PAC (no reversible). Idempotente (salta los ya timbrados). Confirma con confirm:true.`,
+        })
+      }
       const r = await stampPayrollReceipts(venueId, payrollRunId, { staffId: scope.staffId })
       if (r.needsFiscalSetup) return text({ ok: true, needsFiscalSetup: true })
       if (r.needsCsd)

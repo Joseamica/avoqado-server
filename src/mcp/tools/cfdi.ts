@@ -5,6 +5,7 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { venuesWithFeatureAccess } from '@/services/access/basePlan.service'
+import { hasPermission } from '@/services/access/access.service'
 
 export function registerCfdiTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
@@ -17,6 +18,9 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, limit }) => {
       guard.venueFilter(venueId) // scope check (throws if a given venueId is out of scope)
+      // Read gate — mirror the dashboard's checkPermission('cfdi:view'). Single-venue focus throws
+      // if the caller lacks it; the all-venues path filters to venues where the caller holds it below.
+      if (venueId) guard.requirePermission('cfdi:view', venueId)
       // CFDI is a PAID feature — the dashboard gates its routes with checkFeatureAccess('CFDI').
       // Mirror that so the MCP isn't a billing bypass: only surface venues entitled to CFDI.
       const entitled = await venuesWithFeatureAccess(scope.allowedVenueIds, 'CFDI')
@@ -28,7 +32,14 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
           error: 'CFDI (facturación) no está activo en este local. Requiere la feature CFDI o un plan Avoqado activo.',
         })
       }
-      const cfdiVenueIds = venueId ? [venueId] : [...entitled]
+      // All-venues path: only venues where the caller actually holds cfdi:view (per-venue role),
+      // so a low-role staffer can't read fiscal data org-wide that the dashboard would 403.
+      const cfdiVenueIds = venueId
+        ? [venueId]
+        : [...entitled].filter(v => {
+            const access = scope.perVenueAccess.get(v)
+            return access && hasPermission(access, 'cfdi:view')
+          })
       if (cfdiVenueIds.length === 0) {
         return text({ ok: false, planRequired: true, feature: 'CFDI', error: 'Ninguno de tus locales tiene CFDI (facturación) activo.' })
       }

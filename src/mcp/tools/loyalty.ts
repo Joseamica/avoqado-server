@@ -5,7 +5,7 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
-import { adjustPoints, updateLoyaltyConfig, getLoyaltyConfig } from '@/services/dashboard/loyalty.dashboard.service'
+import { adjustPoints, updateLoyaltyConfig } from '@/services/dashboard/loyalty.dashboard.service'
 import { planGateMessage } from '../planGate'
 
 export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
@@ -139,7 +139,7 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
       confirm: z.boolean().optional().describe('Must be true to actually apply; without it you get a preview (current → new)'),
     },
     async ({ venueId, active, pointsPerDollar, pointsPerVisit, redemptionRate, minPointsToRedeem, pointsExpireDays, confirm }) => {
-      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('loyalty:update', venueId) // write gate (per-venue role)
       const planGate = await planGateMessage(venueId, 'LOYALTY_PROGRAM', 'El programa de lealtad') // PRO tier
       if (planGate) return text({ ok: false, planRequired: true, error: planGate })
@@ -155,7 +155,19 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
 
       if (!confirm) {
         // Money economics change → preview current → new so a typo (e.g. redemptionRate 0.05 → 100) is caught.
-        const cur = (await getLoyaltyConfig(venueId)) as Record<string, unknown> | null
+        // Read DIRECTLY (not getLoyaltyConfig, which get-or-CREATEs an active program) so a PREVIEW
+        // never writes/activates a live loyalty program on a venue that has none. Mirrors loyalty_status.
+        const cur = (await prisma.loyaltyConfig.findFirst({
+          where,
+          select: {
+            active: true,
+            pointsPerDollar: true,
+            pointsPerVisit: true,
+            redemptionRate: true,
+            minPointsRedeem: true,
+            pointsExpireDays: true,
+          },
+        })) as Record<string, unknown> | null
         const LBL: Record<string, string> = {
           active: 'Programa activo',
           pointsPerDollar: 'Puntos por $1',

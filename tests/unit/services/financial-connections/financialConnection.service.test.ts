@@ -71,6 +71,31 @@ it('startConnection: single negocio → auto-selects, CONNECTED', async () => {
   expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'FINANCIAL_CONNECTION_STARTED', entityId: 'c1' }))
 })
 
+it('startConnection: accountKind CLIENT se persiste en la fila y externalClientId/externalDeviceId del provider llegan al update de conectado', async () => {
+  db.financialConnection.create.mockResolvedValue({ id: 'c-cl', deviceIdentifier: 'dev-c-cl' })
+  clientMock.connect.mockResolvedValue({
+    kind: 'connected',
+    grant: { refreshToken: 'r1' },
+    accounts: [],
+    accessToken: 't',
+    externalClientId: 'mg-1',
+    externalDeviceId: 'disp-1',
+  })
+  const r = await svc.startConnection({ venueId: 'v1', providerId: 'prov-1', email: 'a@b.co', password: 'p', accountKind: 'CLIENT' })
+  expect(r.status).toBe('CONNECTED')
+  // La fila nace con el kind elegido — única fuente de verdad (decisión 3A).
+  expect(db.financialConnection.create).toHaveBeenCalledWith(
+    expect.objectContaining({ data: expect.objectContaining({ accountKind: 'CLIENT' }) }),
+  )
+  // El client recibe el kind para branchear sign-in/cuentas.
+  expect(clientMock.connect).toHaveBeenCalledWith(expect.objectContaining({ accountKind: 'CLIENT' }))
+  // finishConnected persiste el idMoneyGiver Y el idDispositivo devueltos por el provider —
+  // el segundo es la llave para descifrar el envelope del cliente en lecturas post-connect.
+  const upd = db.financialConnection.update.mock.calls.at(-1)[0].data
+  expect(upd.externalClientId).toBe('mg-1')
+  expect(upd.externalDeviceId).toBe('disp-1')
+})
+
 it('startConnection: connect() throws → marks the row ERROR with lastError instead of orphaning it, still rejects', async () => {
   db.financialConnection.create.mockResolvedValue({ id: 'c-bad', deviceIdentifier: 'dev-c-bad' })
   clientMock.connect.mockRejectedValue(new Error('Este usuario no tiene una cuenta.'))
@@ -114,7 +139,9 @@ it('startConnection: needTwoFactorAuth → stores challenge WITHOUT the password
   const { decryptGrant } = require('@/services/financial-connections/crypto')
   const upd = db.financialConnection.update.mock.calls.at(-1)[0].data
   const blob = decryptGrant(upd.challengeEnc)
-  expect(blob).toEqual({ accessToken: 'tmp-2fa', email: 'a@b.co' }) // sin password: validate-2fa no lo necesita
+  // sin password: validate-2fa no lo necesita. externalClientId/externalDeviceId viajan null en MERCHANT (cosmético).
+  expect(blob).toEqual({ accessToken: 'tmp-2fa', email: 'a@b.co', externalClientId: null, externalDeviceId: null })
+  expect(blob.password).toBeUndefined()
 })
 
 it('validateDevice/2FA: expired challenge is wiped from the row, not left encrypted forever', async () => {
@@ -457,6 +484,59 @@ it('sendInternalTransfer: destino/monto DISTINTO a lo reciente NO se deduplica (
   const r = await svc.sendInternalTransfer('fa-nd', { destAccountNumber: '155525', amount: 2, concept: '' })
   expect(clientMock.internalTransfer).toHaveBeenCalled()
   expect(r.movementId).toBe('mov-new')
+})
+
+it('sendInternalTransfer: conexión CLIENT (cuenta personal) → rechaza ANTES de tocar al proveedor', async () => {
+  db.financialAccount.findUniqueOrThrow.mockResolvedValue({
+    id: 'fa-cl-tr',
+    externalId: 'cta-1',
+    connection: {
+      id: 'cm-cl-tr',
+      mode: 'SELF_CONNECT',
+      grantEnc: encFixture(),
+      tokenVersion: 0,
+      deviceIdentifier: 'dev',
+      status: 'CONNECTED',
+      venueId: 'v1',
+      accountKind: 'CLIENT',
+      externalClientId: 'mg-1',
+      provider: { code: 'EXTERNAL_BANK' },
+    },
+  })
+  await expect(svc.sendInternalTransfer('fa-cl-tr', { destAccountNumber: '155525', amount: 1, concept: '' })).rejects.toThrow(
+    'Las transferencias no están disponibles para cuentas personales.',
+  )
+  // El backend es la fuente de verdad: jamás llegó a resolver origen/destino ni a mover dinero.
+  expect(clientMock.refresh).not.toHaveBeenCalled()
+  expect(clientMock.listAccounts).not.toHaveBeenCalled()
+  expect(clientMock.resolveMgAlt).not.toHaveBeenCalled()
+  expect(clientMock.internalTransfer).not.toHaveBeenCalled()
+})
+
+it('resolveTransferDestination: conexión CLIENT (cuenta personal) → rechaza ANTES de tocar al proveedor', async () => {
+  db.financialAccount.findUniqueOrThrow.mockResolvedValue({
+    id: 'fa-cl-rd',
+    externalId: 'cta-1',
+    connection: {
+      id: 'cm-cl-rd',
+      mode: 'SELF_CONNECT',
+      grantEnc: encFixture(),
+      tokenVersion: 0,
+      deviceIdentifier: 'dev',
+      status: 'CONNECTED',
+      venueId: 'v1',
+      accountKind: 'CLIENT',
+      externalClientId: 'mg-1',
+      provider: { code: 'EXTERNAL_BANK' },
+    },
+  })
+  await expect(svc.resolveTransferDestination('fa-cl-rd', '155525')).rejects.toThrow(
+    'Las transferencias no están disponibles para cuentas personales.',
+  )
+  expect(clientMock.refresh).not.toHaveBeenCalled()
+  expect(clientMock.resolveMgAlt).not.toHaveBeenCalled()
+  // El guard corre ANTES del try de lectura: no degrada la conexión a NEEDS_REAUTH.
+  expect(db.financialConnection.updateMany).not.toHaveBeenCalled()
 })
 
 it('resolveTransferDestination: devuelve nombre del beneficiario y NO expone el altId (PK interno)', async () => {

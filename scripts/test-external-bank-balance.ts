@@ -41,6 +41,7 @@ async function main() {
       deviceIdentifier: 'avoqado-server-moneygiver-balance-lookup',
       challenge: r.challenge,
       code: twoFactorCode,
+      accountKind: 'MERCHANT',
     })
   }
   if (r.kind === 'need_device_validation') {
@@ -56,7 +57,7 @@ async function main() {
   }
 
   if (idNegocio) {
-    const ctx = await externalBankClient.refresh(r.grant, 'avoqado-server-moneygiver-balance-lookup')
+    const ctx = await externalBankClient.refresh(r.grant, 'avoqado-server-moneygiver-balance-lookup', 'MERCHANT')
     const balance = await externalBankClient.getBalance(ctx.ctx, idNegocio)
     console.log(`\nBalance puntual para idNegocio=${idNegocio}:`, balance)
   }

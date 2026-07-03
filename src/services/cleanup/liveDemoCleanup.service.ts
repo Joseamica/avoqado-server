@@ -72,8 +72,10 @@ export async function cleanupExpiredLiveDemos(): Promise<number> {
           where: { id: session.staff.id },
         })
 
-        // Finally delete the session
-        await prisma.liveDemoSession.delete({
+        // Finally delete the session. deleteMany (not delete): the venueId FK has
+        // onDelete: Cascade, so deleting the venue above already removed this row —
+        // an exact delete would throw P2025 on every cleanup.
+        await prisma.liveDemoSession.deleteMany({
           where: { id: session.id },
         })
 
@@ -132,7 +134,8 @@ export async function cleanupAllLiveDemos(): Promise<number> {
           where: { id: session.staff.id },
         })
 
-        await prisma.liveDemoSession.delete({
+        // deleteMany: row is already gone via the venue onDelete: Cascade (see above)
+        await prisma.liveDemoSession.deleteMany({
           where: { id: session.id },
         })
 

@@ -22,7 +22,10 @@ jest.mock('@/services/dashboard/sales-summary.dashboard.service', () => ({
   fetchSalesSummaryDetailRows: jest.fn(),
 }))
 jest.mock('@/mcp/guard', () => ({
-  createGuard: () => ({ venueFilter: (v?: string) => (v ? { venueId: { in: [v] } } : { venueId: { in: ['v1'] } }) }),
+  createGuard: () => ({
+    venueFilter: (v?: string) => (v ? { venueId: { in: [v] } } : { venueId: { in: ['v1'] } }),
+    requirePermission: jest.fn(),
+  }),
 }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,

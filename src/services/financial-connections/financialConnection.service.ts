@@ -1,10 +1,19 @@
 import prisma from '@/utils/prismaClient'
-import type { FinancialConnectionStatus } from '@prisma/client'
+import type { FinancialConnectionStatus, FinancialConnectionAccountKind } from '@prisma/client'
 import { BadRequestError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { getFinancialProviderClient } from './registry'
 import { encryptGrant, decryptGrant } from './crypto'
-import type { Grant, ProviderAccount, MovementPage, MovementQuery, MovementStats, InternalTransferResult } from './types'
+import type {
+  Grant,
+  ProviderAccount,
+  MovementPage,
+  MovementQuery,
+  MovementStats,
+  InternalTransferResult,
+  AccountKind,
+  ConnectionContext,
+} from './types'
 
 /**
  * Forma única de retorno para connect/validateDevice/select. Deliberadamente UN
@@ -33,6 +42,16 @@ function clientFor(code: string) {
   if (!c) throw new BadRequestError(`Proveedor ${code} sin implementación.`)
   return c
 }
+/**
+ * Contexto de sesión para el client a partir de la fila de conexión: el kind (MERCHANT/CLIENT)
+ * y el externalClientId (idMoneyGiver) viven en la fila — única fuente de verdad (decisión 3A).
+ */
+function ctxFor(
+  conn: { accountKind: FinancialConnectionAccountKind; externalClientId: string | null; externalDeviceId: string | null },
+  accessToken: string,
+): ConnectionContext {
+  return { accessToken, kind: conn.accountKind, externalClientId: conn.externalClientId, idDispositivo: conn.externalDeviceId }
+}
 async function persistAccounts(connectionId: string, accounts: ProviderAccount[]) {
   if (!accounts.length) return
   await prisma.financialAccount.createMany({
@@ -57,8 +76,10 @@ export async function startConnection(input: {
   email: string
   password: string
   staffId?: string
+  accountKind?: AccountKind
 }): Promise<ConnectionStepResult> {
   const provider = await prisma.financialProvider.findUniqueOrThrow({ where: { id: input.providerId } })
+  const accountKind: AccountKind = input.accountKind ?? 'MERCHANT'
   const conn = await prisma.financialConnection.create({
     data: {
       venueId: input.venueId,
@@ -66,6 +87,9 @@ export async function startConnection(input: {
       mode: 'SELF_CONNECT',
       status: 'PENDING_DEVICE_VALIDATION',
       createdByStaffId: input.staffId ?? null,
+      // El kind se persiste al NACER la fila (antes de cualquier reto): validateDevice/2FA
+      // lo leen de aquí, jamás del challenge cifrado — única fuente de verdad (decisión 3A).
+      accountKind,
     },
   })
   const deviceIdentifier = stableDeviceId(conn.id)
@@ -75,7 +99,7 @@ export async function startConnection(input: {
   // cruzar el límite del try/catch — la separación causó un bug real de
   // narrowing en la Tarea 11 (ver scripts/test-external-bank-balance.ts).
   try {
-    const r = await client.connect({ email: input.email, password: input.password, deviceIdentifier })
+    const r = await client.connect({ email: input.email, password: input.password, deviceIdentifier, accountKind })
 
     await logAction({
       staffId: input.staffId ?? null,
@@ -95,7 +119,17 @@ export async function startConnection(input: {
           // re-loguea con credenciales — el password no se necesita y por eso
           // NO se guarda (retención mínima; el reto de device sí lo requiere
           // porque el provider obliga a re-login tras el OTP).
-          challengeEnc: encryptGrant({ accessToken: r.challenge.accessToken, email: input.email }),
+          // externalClientId (idMoneyGiver, solo CLIENT): la respuesta del 2FA puede no
+          // repetirlo, así que el del sign-in inicial viaja en el challenge cifrado.
+          // externalDeviceId (idDispositivo, solo CLIENT): idéntica razón — necesario para
+          // descifrar el envelope del cliente una vez conectado.
+          // El accountKind NO se duplica aquí — se lee de conn.accountKind (3A).
+          challengeEnc: encryptGrant({
+            accessToken: r.challenge.accessToken,
+            email: input.email,
+            externalClientId: r.challenge.externalClientId ?? null,
+            externalDeviceId: r.challenge.externalDeviceId ?? null,
+          }),
           challengeExpiresAt: new Date(Date.now() + CHALLENGE_TTL_MS),
           status: 'PENDING_TWO_FACTOR_AUTH',
         },
@@ -107,14 +141,20 @@ export async function startConnection(input: {
         where: { id: conn.id },
         data: {
           deviceIdentifier,
-          challengeEnc: encryptGrant({ ...r.challenge, email: input.email, password: input.password }),
+          challengeEnc: encryptGrant({
+            ...r.challenge,
+            email: input.email,
+            password: input.password,
+            externalClientId: r.challenge.externalClientId ?? null,
+            externalDeviceId: r.challenge.externalDeviceId ?? null,
+          }),
           challengeExpiresAt: new Date(Date.now() + CHALLENGE_TTL_MS),
           status: 'PENDING_DEVICE_VALIDATION',
         },
       })
       return { connectionId: conn.id, status: 'PENDING_DEVICE_VALIDATION' as const }
     }
-    return await finishConnected(conn.id, deviceIdentifier, r.grant, r.accounts, r.accessToken)
+    return await finishConnected(conn.id, deviceIdentifier, r.grant, r.accounts, r.accessToken, r.externalClientId, r.externalDeviceId)
   } catch (e) {
     // Sin esto, un connect() fallido (credenciales incorrectas, red) deja la fila
     // recién creada huérfana en PENDING_DEVICE_VALIDATION para siempre, sin pista
@@ -159,14 +199,28 @@ export async function validateDevice(connectionId: string, code: string, staffId
       if (conn.challengeEnc) await clearExpiredChallenge(connectionId)
       throw new BadRequestError('El reto de validación expiró; vuelve a iniciar la conexión.')
     }
-    const ch = decryptGrant<{ accessToken: string; processId: string; email: string; password: string }>(conn.challengeEnc)
+    const ch = decryptGrant<{
+      accessToken: string
+      processId: string
+      email: string
+      password: string
+      externalClientId?: string | null
+      externalDeviceId?: string | null
+    }>(conn.challengeEnc)
     const client = clientFor(conn.provider.code)
+    // El kind se lee SIEMPRE de la fila (conn.accountKind), no del challenge (decisión 3A).
     const r = await client.validateDevice({
       email: ch.email,
       password: ch.password,
       deviceIdentifier: conn.deviceIdentifier!,
-      challenge: { accessToken: ch.accessToken, processId: ch.processId },
+      challenge: {
+        accessToken: ch.accessToken,
+        processId: ch.processId,
+        externalClientId: ch.externalClientId ?? null,
+        externalDeviceId: ch.externalDeviceId ?? null,
+      },
       code,
+      accountKind: conn.accountKind,
     })
     if (r.kind === 'need_two_factor_auth') {
       // El dispositivo quedó validado, pero la cuenta ADEMÁS tiene 2FA: el proveedor
@@ -175,7 +229,12 @@ export async function validateDevice(connectionId: string, code: string, staffId
       await prisma.financialConnection.update({
         where: { id: connectionId },
         data: {
-          challengeEnc: encryptGrant({ accessToken: r.challenge.accessToken, email: ch.email }),
+          challengeEnc: encryptGrant({
+            accessToken: r.challenge.accessToken,
+            email: ch.email,
+            externalClientId: r.challenge.externalClientId ?? null,
+            externalDeviceId: r.challenge.externalDeviceId ?? null,
+          }),
           challengeExpiresAt: new Date(Date.now() + CHALLENGE_TTL_MS),
           status: 'PENDING_TWO_FACTOR_AUTH',
         },
@@ -201,7 +260,7 @@ export async function validateDevice(connectionId: string, code: string, staffId
       entityId: connectionId,
       data: { provider: conn.provider.code },
     })
-    return await finishConnected(connectionId, conn.deviceIdentifier!, r.grant, r.accounts, r.accessToken)
+    return await finishConnected(connectionId, conn.deviceIdentifier!, r.grant, r.accounts, r.accessToken, r.externalClientId, r.externalDeviceId)
   } catch (e) {
     await logAction({
       staffId: staffId ?? null,
@@ -222,13 +281,17 @@ export async function validateTwoFactorAuth(connectionId: string, code: string, 
       if (conn.challengeEnc) await clearExpiredChallenge(connectionId)
       throw new BadRequestError('El reto de 2FA expiró; vuelve a iniciar la conexión.')
     }
-    const ch = decryptGrant<{ accessToken: string; email: string }>(conn.challengeEnc)
+    const ch = decryptGrant<{ accessToken: string; email: string; externalClientId?: string | null; externalDeviceId?: string | null }>(
+      conn.challengeEnc,
+    )
     const client = clientFor(conn.provider.code)
+    // El kind se lee SIEMPRE de la fila (conn.accountKind), no del challenge (decisión 3A).
     const r = await client.validateTwoFactorCode({
       email: ch.email,
       deviceIdentifier: conn.deviceIdentifier!,
-      challenge: { accessToken: ch.accessToken },
+      challenge: { accessToken: ch.accessToken, externalClientId: ch.externalClientId ?? null, externalDeviceId: ch.externalDeviceId ?? null },
       code,
+      accountKind: conn.accountKind,
     })
     if (r.kind !== 'connected') throw new BadRequestError('El proveedor pidió otro paso adicional no soportado todavía.')
     // El reto ya se consumió: limpiarlo de inmediato (no dejarlo vivo tras el handshake).
@@ -241,7 +304,7 @@ export async function validateTwoFactorAuth(connectionId: string, code: string, 
       entityId: connectionId,
       data: { provider: conn.provider.code },
     })
-    return await finishConnected(connectionId, conn.deviceIdentifier!, r.grant, r.accounts, r.accessToken)
+    return await finishConnected(connectionId, conn.deviceIdentifier!, r.grant, r.accounts, r.accessToken, r.externalClientId, r.externalDeviceId)
   } catch (e) {
     await logAction({
       staffId: staffId ?? null,
@@ -261,6 +324,8 @@ async function finishConnected(
   grant: Grant,
   accounts: ProviderAccount[],
   accessToken?: string,
+  externalClientId?: string,
+  externalDeviceId?: string,
 ): Promise<ConnectionStepResult> {
   await persistAccounts(connectionId, accounts)
   const many = accounts.length > 1
@@ -272,6 +337,12 @@ async function finishConnected(
       expiresAt: grant.expiresAt ? new Date(grant.expiresAt) : null,
       connectedAt: new Date(),
       status: many ? 'PENDING_ACCOUNT_SELECTION' : 'CONNECTED',
+      // idMoneyGiver del cliente (solo CLIENT) — el client de kind CLIENT lo necesita
+      // para listar cuentas. undefined = no tocar la columna (MERCHANT no lo trae).
+      externalClientId: externalClientId ?? undefined,
+      // idDispositivo (solo CLIENT) — llave para descifrar el envelope cifrado del
+      // cliente en lecturas post-connect (balance refresh, movimientos, listAccounts).
+      externalDeviceId: externalDeviceId ?? undefined,
     },
   })
   // Cachea el access token recién obtenido: la primera lectura de saldo lo usa
@@ -329,6 +400,9 @@ async function accessTokenFor(conn: {
   mode: string
   grantEnc: string | null
   deviceIdentifier: string | null
+  accountKind: FinancialConnectionAccountKind
+  externalClientId: string | null
+  externalDeviceId: string | null
   provider: { code: string }
 }): Promise<string> {
   const cached = tokenCache.get(conn.id)
@@ -353,7 +427,7 @@ async function accessTokenFor(conn: {
       const recheck = tokenCache.get(conn.id)
       if (recheck && recheck.exp - 60_000 > Date.now()) return recheck.accessToken
       const grant = decryptGrant<Grant>(fresh.grantEnc)
-      const { grant: rotated, ctx } = await client.refresh(grant, conn.deviceIdentifier ?? stableDeviceId(conn.id))
+      const { grant: rotated, ctx } = await client.refresh(grant, conn.deviceIdentifier ?? stableDeviceId(conn.id), conn.accountKind)
       // CAS: solo persiste si tokenVersion no cambió desde la lectura — evita pisar
       // un refresh concurrente si, por lo que sea, dos procesos llegaron a refrescar.
       // disconnect() también incrementa tokenVersion, así que un revoke que aterrice
@@ -366,8 +440,15 @@ async function accessTokenFor(conn: {
           expiresAt: rotated.expiresAt ? new Date(rotated.expiresAt) : null,
           status: 'CONNECTED',
           lastError: null,
+          // Backfill de la llave de descifrado si el refresh la trae y no estaba (auto-sana
+          // conexiones creadas antes de que se persistiera externalDeviceId). Solo escribe si viene.
+          ...(ctx.idDispositivo ? { externalDeviceId: ctx.idDispositivo } : {}),
         },
       })
+      // Refleja el backfill en el objeto en memoria para que el ctxFor de ESTA misma petición
+      // (que se construye con la misma referencia `conn`) ya use la llave — sin esto haría falta
+      // un segundo request para que la lectura descifre.
+      if (ctx.idDispositivo) conn.externalDeviceId = ctx.idDispositivo
       const exp = rotated.expiresAt ? new Date(rotated.expiresAt).getTime() : Date.now() + 55 * 60_000
       tokenCache.set(conn.id, { accessToken: ctx.accessToken, exp })
       return ctx.accessToken
@@ -408,7 +489,7 @@ async function resolveCuentaId(
   if (fa.externalCuentaId) return { cuentaId: fa.externalCuentaId, accessToken }
   // Fila creada antes de la columna: pedir las cuentas al provider y backfillear.
   const client = clientFor(conn.provider.code)
-  const accounts = await client.listAccounts({ accessToken })
+  const accounts = await client.listAccounts(ctxFor(conn, accessToken))
   const match = accounts.find(a => a.externalId === fa.externalId)
   if (!match?.cuentaId) throw new BadRequestError('El proveedor no reporta cuenta de movimientos para este negocio.')
   await prisma.financialAccount.update({ where: { id: fa.id }, data: { externalCuentaId: match.cuentaId } })
@@ -423,7 +504,7 @@ export async function getMovementsForAccount(financialAccountId: string, q: Move
   try {
     const { cuentaId, accessToken } = await resolveCuentaId(fa, fa.connection)
     // idNegocio (fa.externalId) en la ruta + cuentaId como query (ver client.listMovements).
-    return await clientFor(fa.connection.provider.code).listMovements({ accessToken }, fa.externalId, cuentaId, q)
+    return await clientFor(fa.connection.provider.code).listMovements(ctxFor(fa.connection, accessToken), fa.externalId, cuentaId, q)
   } catch (e) {
     // A diferencia del saldo (que muestra el último valor cacheado), movimientos es
     // siempre una lectura en vivo: si el token murió y el refresh silencioso falla,
@@ -444,7 +525,7 @@ export async function getMovementStatsForAccount(
   })
   try {
     const { cuentaId, accessToken } = await resolveCuentaId(fa, fa.connection)
-    return await clientFor(fa.connection.provider.code).getMovementStats({ accessToken }, cuentaId, range)
+    return await clientFor(fa.connection.provider.code).getMovementStats(ctxFor(fa.connection, accessToken), cuentaId, range)
   } catch (e) {
     await markConnectionNeedsReauth(fa.connection.id, e as Error)
     throw e instanceof BadRequestError ? e : new BadRequestError('No se pudieron obtener las estadísticas; vuelve a conectar la cuenta.')
@@ -466,9 +547,15 @@ export async function resolveTransferDestination(
     where: { id: financialAccountId },
     include: { connection: { include: { provider: true } } },
   })
+  // Transferencias solo para cuentas de NEGOCIO. El flujo de transfer con sesión CLIENT (PWA)
+  // jamás se ha probado contra el proveedor — el spec lo declara fuera de alcance y este guard
+  // lo hace cumplir (el botón de la UI también se oculta, pero el backend es la fuente de verdad).
+  if (fa.connection.accountKind === 'CLIENT') {
+    throw new BadRequestError('Las transferencias no están disponibles para cuentas personales.')
+  }
   try {
     const accessToken = await accessTokenFor(fa.connection)
-    const dest = await clientFor(fa.connection.provider.code).resolveMgAlt({ accessToken }, accountNumber.trim())
+    const dest = await clientFor(fa.connection.provider.code).resolveMgAlt(ctxFor(fa.connection, accessToken), accountNumber.trim())
     if (!dest) return null
     return { name: dest.name, accountType: dest.accountType }
   } catch (e) {
@@ -498,6 +585,13 @@ export async function sendInternalTransfer(
     where: { id: financialAccountId },
     include: { connection: { include: { provider: true } } },
   })
+
+  // Transferencias solo para cuentas de NEGOCIO. El flujo de transfer con sesión CLIENT (PWA)
+  // jamás se ha probado contra el proveedor — el spec lo declara fuera de alcance y este guard
+  // lo hace cumplir (el botón de la UI también se oculta, pero el backend es la fuente de verdad).
+  if (fa.connection.accountKind === 'CLIENT') {
+    throw new BadRequestError('Las transferencias no están disponibles para cuentas personales.')
+  }
 
   // Dedup por contenido ANTES de mover dinero. Como el proveedor no acepta clave de idempotencia,
   // si un traspaso idéntico (misma cuenta destino + mismo monto) desde esta cuenta se registró en
@@ -530,18 +624,19 @@ export async function sendInternalTransfer(
 
   const accessToken = await accessTokenFor(fa.connection)
   const client = clientFor(fa.connection.provider.code)
+  const ctx = ctxFor(fa.connection, accessToken)
 
   // Origen: el idCuentaAlt de la cuenta conectada, tal como lo reporta el proveedor.
-  const source = (await client.listAccounts({ accessToken })).find(a => a.externalId === fa.externalId)
+  const source = (await client.listAccounts(ctx)).find(a => a.externalId === fa.externalId)
   if (source?.altId == null) throw new BadRequestError('La cuenta origen no tiene id de traspaso disponible.')
 
   // Destino: resolver el número interno (4-6 dígitos) a su idCuentaAlt real.
-  const dest = await client.resolveMgAlt({ accessToken }, destAccount)
+  const dest = await client.resolveMgAlt(ctx, destAccount)
   if (!dest) throw new BadRequestError(`No se encontró la cuenta destino ${destAccount}.`)
   if (dest.altId === source.altId) throw new BadRequestError('El origen y el destino son la misma cuenta.')
 
   const result = await client.internalTransfer(
-    { accessToken },
+    ctx,
     {
       sourceAltId: source.altId,
       destAltId: dest.altId,
@@ -578,7 +673,7 @@ export async function getBalanceForConnectionAccount(financialAccountId: string)
   const client = clientFor(fa.connection.provider.code)
   try {
     const token = await accessTokenFor(fa.connection)
-    const snap = await client.getBalance({ accessToken: token }, fa.externalId)
+    const snap = await client.getBalance(ctxFor(fa.connection, token), fa.externalId)
     // Contrato de saldo honesto: un saldo null/no-numérico del proveedor NUNCA es OK.
     const state = snap.amount != null ? 'OK' : 'ERROR'
     const now = new Date()
@@ -626,6 +721,8 @@ export async function listConnectionsForVenue(venueId: string) {
       status: true,
       mode: true,
       lastError: true,
+      // La UI etiqueta conexiones personales (CLIENT) y les oculta el botón de transferir (C1).
+      accountKind: true,
       provider: { select: { code: true, name: true } },
       accounts: {
         select: {
@@ -639,6 +736,9 @@ export async function listConnectionsForVenue(venueId: string) {
           balanceState: true,
           merchantAccounts: { select: { id: true } },
         },
+        // Orden ESTABLE: sin esto Prisma devuelve las cuentas en orden no determinístico y la UI
+        // las "baraja" en cada refetch de saldo. createdAt asc = orden de alta, consistente.
+        orderBy: { createdAt: 'asc' },
       },
     },
     orderBy: { createdAt: 'desc' },
@@ -651,7 +751,7 @@ export async function disconnect(connectionId: string, staffId?: string) {
     try {
       const client = clientFor(conn.provider.code)
       const token = tokenCache.get(conn.id)?.accessToken ?? (await accessTokenFor(conn))
-      await client.revoke({ accessToken: token })
+      await client.revoke(ctxFor(conn, token))
     } catch {
       /* best-effort: el revoke en el proveedor nunca bloquea el disconnect local */
     }

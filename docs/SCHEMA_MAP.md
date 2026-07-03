@@ -1,6 +1,6 @@
 # Schema Domain Map — avoqado-server
 
-`prisma/schema.prisma` is **249 models / 235 enums / ~11,700 lines**. Nobody reads it top to bottom. This file is the **index**: 20 domains,
+`prisma/schema.prisma` is **249 models / 236 enums / ~11,700 lines**. Nobody reads it top to bottom. This file is the **index**: 20 domains,
 what each is for, and where it lives. Find your domain → jump to the `schema.prisma:LINE` → for field-level detail read
 `docs/DATABASE_SCHEMA.md`.
 
@@ -48,16 +48,16 @@ primary domain.
 
 Every model A–Z with its location in `prisma/schema.prisma`.
 
-- `AccountingPeriodLock` → `schema.prisma:L11154`
-- `AccountMapping` → `schema.prisma:L11054`
+- `AccountingPeriodLock` → `schema.prisma:L11161`
+- `AccountMapping` → `schema.prisma:L11061`
 - `ActivityLog` → `schema.prisma:L4906`
 - `Aggregator` → `schema.prisma:L10381`
 - `AngelPayUserAccount` → `schema.prisma:L3715`
 - `AppUpdate` → `schema.prisma:L8667`
 - `Area` → `schema.prisma:L2091`
-- `BankStatement` → `schema.prisma:L10928`
-- `BankStatementLine` → `schema.prisma:L10949`
-- `BillingTaxProfile` → `schema.prisma:L11643`
+- `BankStatement` → `schema.prisma:L10935`
+- `BankStatementLine` → `schema.prisma:L10956`
+- `BillingTaxProfile` → `schema.prisma:L11650`
 - `BulkCommandOperation` → `schema.prisma:L7027`
 - `CalendarSyncOutbox` → `schema.prisma:L9784`
 - `CampaignDelivery` → `schema.prisma:L8825`
@@ -65,10 +65,10 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `CashDeposit` → `schema.prisma:L8476`
 - `CashDrawerEvent` → `schema.prisma:L10227`
 - `CashDrawerSession` → `schema.prisma:L10203`
-- `CashOutCommissionRate` → `schema.prisma:L11472`
-- `CashOutScheduleDay` → `schema.prisma:L11495`
-- `CashOutWithdrawal` → `schema.prisma:L11557`
-- `Cfdi` → `schema.prisma:L10831`
+- `CashOutCommissionRate` → `schema.prisma:L11479`
+- `CashOutScheduleDay` → `schema.prisma:L11502`
+- `CashOutWithdrawal` → `schema.prisma:L11564`
+- `Cfdi` → `schema.prisma:L10838`
 - `ChatbotTokenBudget` → `schema.prisma:L6675`
 - `ChatConversation` → `schema.prisma:L6530`
 - `ChatFeedback` → `schema.prisma:L6616`
@@ -99,24 +99,24 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `Customer` → `schema.prisma:L4932`
 - `CustomerDiscount` → `schema.prisma:L5506`
 - `CustomerGroup` → `schema.prisma:L5086`
-- `CustomerTaxProfile` → `schema.prisma:L10900`
+- `CustomerTaxProfile` → `schema.prisma:L10907`
 - `DeviceToken` → `schema.prisma:L5701`
 - `DigitalReceipt` → `schema.prisma:L2895`
 - `Discount` → `schema.prisma:L5355`
 - `EcommerceMerchant` → `schema.prisma:L3807`
 - `EmailTemplate` → `schema.prisma:L8764`
-- `Employee` → `schema.prisma:L11320`
+- `Employee` → `schema.prisma:L11327`
 - `Estimate` → `schema.prisma:L10288`
 - `EstimateItem` → `schema.prisma:L10316`
-- `Expense` → `schema.prisma:L11197`
+- `Expense` → `schema.prisma:L11204`
 - `ExternalBusyBlock` → `schema.prisma:L9677`
 - `Feature` → `schema.prisma:L3024`
 - `FeeSchedule` → `schema.prisma:L3102`
 - `FeeTier` → `schema.prisma:L3113`
-- `FinancialAccount` → `schema.prisma:L10470`
-- `FinancialConnection` → `schema.prisma:L10442`
-- `FinancialProvider` → `schema.prisma:L10428`
-- `FiscalEmisor` → `schema.prisma:L10773`
+- `FinancialAccount` → `schema.prisma:L10477`
+- `FinancialConnection` → `schema.prisma:L10447`
+- `FinancialProvider` → `schema.prisma:L10433`
+- `FiscalEmisor` → `schema.prisma:L10780`
 - `FloorElement` → `schema.prisma:L2167`
 - `GeofenceRule` → `schema.prisma:L7112`
 - `GoogleCalendarChannel` → `schema.prisma:L9654`
@@ -132,27 +132,27 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `Invoice` → `schema.prisma:L3125`
 - `InvoiceItem` → `schema.prisma:L3151`
 - `ItemCategory` → `schema.prisma:L7620`
-- `JournalEntry` → `schema.prisma:L11108`
-- `JournalLine` → `schema.prisma:L11136`
-- `KdsOrder` → `schema.prisma:L10518`
-- `KdsOrderItem` → `schema.prisma:L10535`
+- `JournalEntry` → `schema.prisma:L11115`
+- `JournalLine` → `schema.prisma:L11143`
+- `KdsOrder` → `schema.prisma:L10525`
+- `KdsOrderItem` → `schema.prisma:L10542`
 - `LearnedPatterns` → `schema.prisma:L6597`
-- `LedgerAccount` → `schema.prisma:L11004`
+- `LedgerAccount` → `schema.prisma:L11011`
 - `LiveDemoSession` → `schema.prisma:L651`
 - `LowStockAlert` → `schema.prisma:L1962`
 - `LoyaltyConfig` → `schema.prisma:L5116`
 - `LoyaltyTransaction` → `schema.prisma:L5139`
 - `MarketingCampaign` → `schema.prisma:L8782`
-- `McpAuthCode` → `schema.prisma:L10680`
-- `McpOAuthClient` → `schema.prisma:L10664`
-- `McpRefreshToken` → `schema.prisma:L10698`
+- `McpAuthCode` → `schema.prisma:L10687`
+- `McpOAuthClient` → `schema.prisma:L10671`
+- `McpRefreshToken` → `schema.prisma:L10705`
 - `MeasurementUnit` → `schema.prisma:L10366`
 - `Menu` → `schema.prisma:L1304`
 - `MenuCategory` → `schema.prisma:L1246`
 - `MenuCategoryAssignment` → `schema.prisma:L1339`
-- `MercadoPagoWebhookEvent` → `schema.prisma:L10594`
+- `MercadoPagoWebhookEvent` → `schema.prisma:L10601`
 - `MerchantAccount` → `schema.prisma:L3585`
-- `MerchantFiscalConfig` → `schema.prisma:L10809`
+- `MerchantFiscalConfig` → `schema.prisma:L10816`
 - `MerchantRevenueShare` → `schema.prisma:L4410`
 - `MilestoneAchievement` → `schema.prisma:L8216`
 - `Modifier` → `schema.prisma:L2642`
@@ -188,12 +188,12 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `PaymentLinkItem` → `schema.prisma:L10124`
 - `PaymentLinkItemModifier` → `schema.prisma:L10151`
 - `PaymentProvider` → `schema.prisma:L3544`
-- `PayrollLine` → `schema.prisma:L11391`
-- `PayrollRun` → `schema.prisma:L11360`
+- `PayrollLine` → `schema.prisma:L11398`
+- `PayrollRun` → `schema.prisma:L11367`
 - `PerformanceGoal` → `schema.prisma:L8525`
 - `PermissionSet` → `schema.prisma:L1074`
-- `PlatformCfdi` → `schema.prisma:L11672`
-- `PlatformEmisor` → `schema.prisma:L11616`
+- `PlatformCfdi` → `schema.prisma:L11679`
+- `PlatformEmisor` → `schema.prisma:L11623`
 - `PlatformSettings` → `schema.prisma:L3926`
 - `PosCommand` → `schema.prisma:L5731`
 - `PosConnectionStatus` → `schema.prisma:L731`
@@ -204,8 +204,8 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `ProductModifierGroup` → `schema.prisma:L2679`
 - `ProductOption` → `schema.prisma:L10343`
 - `ProductOptionValue` → `schema.prisma:L10354`
-- `PromoterBankAccount` → `schema.prisma:L11511`
-- `PromoterCommissionEntry` → `schema.prisma:L11530`
+- `PromoterBankAccount` → `schema.prisma:L11518`
+- `PromoterCommissionEntry` → `schema.prisma:L11537`
 - `PromoterLocationPing` → `schema.prisma:L2357`
 - `ProviderCostStructure` → `schema.prisma:L4335`
 - `ProviderEventLog` → `schema.prisma:L4228`
@@ -242,7 +242,7 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `SimRegistrationRequestItem` → `schema.prisma:L7886`
 - `SlotHold` → `schema.prisma:L9360`
 - `Staff` → `schema.prisma:L751`
-- `StaffOnboardingState` → `schema.prisma:L10564`
+- `StaffOnboardingState` → `schema.prisma:L10571`
 - `StaffOrganization` → `schema.prisma:L988`
 - `StaffPasskey` → `schema.prisma:L1015`
 - `StaffVenue` → `schema.prisma:L924`
@@ -279,7 +279,7 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `Venue` → `schema.prisma:L113`
 - `VenueChatMessage` → `schema.prisma:L627`
 - `VenueChatSession` → `schema.prisma:L582`
-- `VenueCommission` → `schema.prisma:L10496`
+- `VenueCommission` → `schema.prisma:L10503`
 - `VenueCreditAssessment` → `schema.prisma:L7408`
 - `VenueCryptoConfig` → `schema.prisma:L8724`
 - `VenueFeature` → `schema.prisma:L3042`

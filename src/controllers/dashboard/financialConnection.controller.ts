@@ -20,10 +20,16 @@ export async function listConnections(req: Request, res: Response, next: NextFun
 }
 export async function createConnection(req: Request, res: Response, next: NextFunction) {
   try {
-    const { providerId, email, password } = req.body ?? {}
+    const { providerId, email, password, accountKind } = req.body ?? {}
     if (!providerId || !email || !password) throw new BadRequestError('providerId, email y password son requeridos.')
+    // Validación en el boundary (C5): ausente → MERCHANT (retrocompatible); basura → 400 visible
+    // donde ocurrió, jamás una conexión del tipo equivocado que falla críptica 3 pasos después.
+    if (accountKind != null && accountKind !== 'MERCHANT' && accountKind !== 'CLIENT') {
+      throw new BadRequestError('accountKind debe ser MERCHANT o CLIENT.')
+    }
+    const kind = accountKind ?? 'MERCHANT'
     const staffId = (req as any).authContext?.userId
-    const r = await svc.startConnection({ venueId: req.params.venueId, providerId, email, password, staffId })
+    const r = await svc.startConnection({ venueId: req.params.venueId, providerId, email, password, staffId, accountKind: kind })
     res.status(201).json({ success: true, data: r })
   } catch (e) {
     next(e)

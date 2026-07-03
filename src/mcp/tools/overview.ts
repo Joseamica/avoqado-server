@@ -21,6 +21,7 @@ export function registerOverviewTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId }) => {
       const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('analytics:read', venueId) // read gate — mirror the dashboard's advanced-reports permission
       const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true, name: true } })
       const tz = venue?.timezone || 'America/Mexico_City'
       const dayStart = venueStartOfDay(tz)

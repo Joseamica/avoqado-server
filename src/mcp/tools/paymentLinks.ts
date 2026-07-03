@@ -28,6 +28,7 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, status, limit }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('payment-link:read', venueId) // read gate — mirror the dashboard's checkPermission
       const statusFilter = !status ? { status: PaymentLinkStatus.ACTIVE } : status === 'all' ? {} : { status: STATUS_MAP[status] }
       const links = await prisma.paymentLink.findMany({
         where: { ...where, ...statusFilter },

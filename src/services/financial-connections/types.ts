@@ -85,24 +85,41 @@ export interface MovementQuery {
   to?: string
 }
 
+/** Tipo de cuenta MoneyGiver: MERCHANT (negocio, flujo actual) o CLIENT (personal, PWA). */
+export type AccountKind = 'MERCHANT' | 'CLIENT'
+
 /** Resultado de connect/validateDevice/validateTwoFactorCode. */
 export type ConnectResult =
   // `accessToken`: el token de sesión ya válido con el que se acaba de autenticar.
   // Se cachea para que la primera lectura de saldo use ESTE token en vez de disparar
   // un refresh silencioso (que el proveedor rechaza en sesiones validadas con 2FA).
-  | { kind: 'connected'; grant: Grant; accounts: ProviderAccount[]; accessToken?: string }
-  | { kind: 'need_device_validation'; challenge: { accessToken: string; processId: string } }
-  | { kind: 'need_two_factor_auth'; challenge: { accessToken: string } }
+  | {
+      kind: 'connected'
+      grant: Grant
+      accounts: ProviderAccount[]
+      accessToken?: string
+      externalClientId?: string
+      externalDeviceId?: string
+    }
+  | {
+      kind: 'need_device_validation'
+      challenge: { accessToken: string; processId: string; externalClientId?: string | null; externalDeviceId?: string | null }
+    }
+  | { kind: 'need_two_factor_auth'; challenge: { accessToken: string; externalClientId?: string | null; externalDeviceId?: string | null } }
 
 /** Lo que el cliente necesita para operar ya autenticado. */
 export interface ConnectionContext {
   accessToken: string
+  kind: AccountKind // REQUERIDO — el compilador obliga a threadear en cada call site
+  externalClientId?: string | null
+  idDispositivo?: string | null // llave para descifrar el envelope del cliente (AES-128-CBC, key=idDispositivo[0:16])
 }
 
 export interface ConnectInput {
   email: string
   password: string
   deviceIdentifier: string
+  accountKind?: AccountKind
 }
 
 export interface FinancialProviderClient {
@@ -111,22 +128,26 @@ export interface FinancialProviderClient {
     email: string
     password: string
     deviceIdentifier: string
-    challenge: { accessToken: string; processId: string }
+    challenge: { accessToken: string; processId: string; externalClientId?: string | null; externalDeviceId?: string | null }
     code: string
+    accountKind: AccountKind
   }): Promise<ConnectResult>
   validateTwoFactorCode(input: {
     email: string
     deviceIdentifier: string
-    challenge: { accessToken: string }
+    challenge: { accessToken: string; externalClientId?: string | null; externalDeviceId?: string | null }
     code: string
+    accountKind: AccountKind
   }): Promise<ConnectResult>
-  refresh(grant: Grant, deviceIdentifier: string): Promise<{ grant: Grant; ctx: ConnectionContext }>
+  refresh(grant: Grant, deviceIdentifier: string, kind: AccountKind): Promise<{ grant: Grant; ctx: ConnectionContext }>
   revoke(ctx: ConnectionContext): Promise<void>
   listAccounts(ctx: ConnectionContext): Promise<ProviderAccount[]>
   getBalance(ctx: ConnectionContext, externalId: string): Promise<BalanceSnapshot>
-  // La LISTA de movimientos scopea por idNegocio en la ruta + idCuenta como query param
-  // (con solo idCuenta en la ruta el proveedor devuelve un pool global de ~5M movimientos
-  // ajenos). Las ESTADÍSTICAS sí van por idCuenta en la ruta (ahí sí acota a la cuenta).
+  // La LISTA de movimientos branchea por ctx.kind: MERCHANT scopea por idNegocio en la ruta +
+  // idCuenta como query param (con solo idCuenta en la ruta el proveedor devuelve un pool
+  // global de ~5M movimientos ajenos); CLIENT scopea por idCuenta directo EN LA RUTA, sin
+  // idCuenta como query (scoping confirmado en vivo — Task 1.5). Las ESTADÍSTICAS sí van por
+  // idCuenta en la ruta para ambos kinds (ahí sí acota a la cuenta).
   listMovements(ctx: ConnectionContext, idNegocio: string, cuentaId: string, query: MovementQuery): Promise<MovementPage>
   getMovementStats(ctx: ConnectionContext, cuentaId: string, range: { from?: string; to?: string }): Promise<MovementStats>
   /** Resuelve una cuenta MG por su número interno (4-6 dígitos) → su idCuentaAlt + nombre. Null si no existe. */

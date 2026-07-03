@@ -10417,6 +10417,11 @@ enum FinancialConnectionStatus {
   ERROR
 }
 
+enum FinancialConnectionAccountKind {
+  MERCHANT
+  CLIENT
+}
+
 enum FinancialBalanceState {
   OK
   ERROR
@@ -10446,6 +10451,9 @@ model FinancialConnection {
   providerId         String
   provider           FinancialProvider         @relation(fields: [providerId], references: [id])
   mode               FinancialConnectionMode   @default(SELF_CONNECT)
+  accountKind        FinancialConnectionAccountKind @default(MERCHANT)
+  externalClientId   String? // idMoneyGiver del cliente (accountKind CLIENT). null en MERCHANT.
+  externalDeviceId   String? // idDispositivo — llave para descifrar el envelope del cliente (AES-128)
   status             FinancialConnectionStatus @default(PENDING_DEVICE_VALIDATION)
   grantEnc           String? // refreshToken cifrado (AES-256-GCM). null en SHARED_BROKER
   tokenVersion       Int                       @default(0)

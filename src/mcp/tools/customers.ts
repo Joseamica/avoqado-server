@@ -34,6 +34,7 @@ export function registerCustomerTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, search, limit }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('customers:read', venueId) // read gate — mirror the dashboard's checkPermission
       const customers = await prisma.customer.findMany({
         where: {
           ...where,
@@ -89,6 +90,7 @@ export function registerCustomerTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, search, limit }) => {
       const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('customers:read', venueId) // read gate — mirror the dashboard's checkPermission
       const matches = await prisma.customer.findMany({
         where: {
           ...base,

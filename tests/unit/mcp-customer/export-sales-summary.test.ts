@@ -20,7 +20,19 @@ jest.mock('@/services/dashboard/sales-summary.dashboard.service', () => ({
   fetchSalesSummaryDetailRows: (...a: unknown[]) => mockFetch(...(a as [])),
 }))
 jest.mock('@/mcp/guard', () => ({
-  createGuard: () => ({ venueFilter: (v?: string) => (v ? { venueId: { in: [v] } } : { venueId: { in: ['v1'] } }) }),
+  createGuard: () => ({
+    venueFilter: (v?: string) => (v ? { venueId: { in: [v] } } : { venueId: { in: ['v1'] } }),
+    requirePermission: jest.fn(),
+    // Faithful to the real guard.redact: strips the top-level SENSITIVE_PAYMENT_FIELDS.
+    redact: <T>(rows: T[]) =>
+      rows.map(r => {
+        const c = { ...(r as Record<string, unknown>) }
+        delete c.maskedPan
+        delete c.referenceNumber
+        delete c.authorizationNumber
+        return c as T
+      }),
+  }),
 }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -59,6 +71,28 @@ describe('export_sales_summary — plan gating', () => {
     expect(out.error).toMatch(/QR_LEGACY/)
     expect(mockCount).not.toHaveBeenCalled()
     expect(mockFetch).not.toHaveBeenCalled()
+  })
+
+  it('🔒 H2: detailed rows NEVER expose maskedPan or processorData to the LLM', async () => {
+    mockPlanGate.mockResolvedValue(null) // entitled (ADVANCED_REPORTS + TRANSACTION_EXPORT)
+    mockCount.mockResolvedValue(1)
+    mockFetch.mockResolvedValue([
+      {
+        id: 'p1',
+        amount: 100,
+        method: 'CREDIT_CARD',
+        cardBrand: 'VISA',
+        maskedPan: '************2026',
+        processorData: { authorizationNumber: 'AUTH123', referenceNumber: 'REF9', raw: 'blob' },
+        createdAt: new Date('2026-06-01T10:00:00Z'),
+      },
+    ])
+    const out = parse(await call('export_sales_summary', { venueId: 'v1', mode: 'detailed' }))
+    expect(out.mode).toBe('detailed')
+    expect(out.rows).toHaveLength(1)
+    expect(out.rows[0]).not.toHaveProperty('maskedPan') // redacted
+    expect(out.rows[0]).not.toHaveProperty('processorData') // dropped (nested card/processor blob)
+    expect(out.rows[0]).toMatchObject({ id: 'p1', amount: 100, cardBrand: 'VISA' }) // safe fields survive
   })
 
   it('summary mode returns flattened rows for an entitled venue', async () => {

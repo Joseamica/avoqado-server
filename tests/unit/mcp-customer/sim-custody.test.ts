@@ -54,7 +54,14 @@ jest.mock('@/utils/prismaClient', () => ({
 }))
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
-const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map() } as McpScope
+const scope = {
+  staffId: 's1',
+  activeOrg: 'o1',
+  allowedVenueIds: ['v1'],
+  // Custody chain is MANAGER+ (mirror the dashboard listEvents role gate). Default MANAGER so the
+  // happy-path tests pass; a per-test override exercises the low-role deny.
+  perVenueAccess: new Map([['v1', { role: 'MANAGER' } as never]]),
+} as McpScope
 const call = (args: Record<string, unknown>) => handlers.get('sim_custody')!(args, {})
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
 
@@ -63,6 +70,7 @@ beforeAll(() => {
 })
 beforeEach(() => {
   jest.clearAllMocks()
+  scope.perVenueAccess.set('v1', { role: 'MANAGER' } as never) // reset the caller role between tests
   mockIsEnabled.mockResolvedValue(true)
   mockVenueFind.mockResolvedValue({ organizationId: 'org-1' })
   mockItemFind.mockResolvedValue({
@@ -137,6 +145,27 @@ describe('sim_custody — current state + timeline', () => {
     const where = mockItemFind.mock.calls[0][0].where
     expect(where.serialNumber).toEqual({ equals: 'SIM-ABC', mode: 'insensitive' })
     expect(where.OR).toEqual(expect.arrayContaining([{ venueId: 'v1' }, { organizationId: 'org-1' }]))
+  })
+})
+
+describe('sim_custody — M2 access control', () => {
+  it('🔒 DENIES a low-role caller (below MANAGER) and queries NOTHING', async () => {
+    scope.perVenueAccess.set('v1', { role: 'CASHIER' } as never)
+    const out = parse(await call({ venueId: 'v1', serialNumber: 'sim-abc' }))
+    expect(out.ok).toBe(false)
+    expect(out.error).toMatch(/OWNER, ADMIN o MANAGER/)
+    expect(mockItemFind).not.toHaveBeenCalled()
+  })
+
+  it('🔒 NEVER leaks a raw staff id for an actor deleted since the event', async () => {
+    mockStaffFind.mockResolvedValue([
+      // 'st-admin' is gone (deleted staff) — must NOT appear as a raw id in the timeline.
+      { id: 'st-sup', firstName: 'Sup', lastName: 'Uno' },
+      { id: 'st-promo', firstName: 'Promo', lastName: 'Dos' },
+    ])
+    const out = parse(await call({ venueId: 'v1', serialNumber: 'sim-abc' }))
+    expect(out.timeline[0].actor).toBe('(empleado eliminado)')
+    expect(JSON.stringify(out)).not.toContain('st-admin')
   })
 })
 
