@@ -454,6 +454,9 @@ router.post('/auth/request-reset', authMobileController.requestReset)
  *                       items:
  *                         type: string
  *                       description: Selected modifier IDs
+ *                     discountId:
+ *                       type: string
+ *                       description: Optional item/category-scoped Discount id to apply to this line (must belong to the venue and be active)
  *               staffId:
  *                 type: string
  *                 description: Staff member ID (defaults to authenticated user)

@@ -173,6 +173,121 @@ describe('order.mobile.service', () => {
     )
   })
 
+  // ── Per-item discountId (mirrors TPV's itemDiscountId — order.tpv.service.ts) ──
+
+  it('applies a PERCENTAGE item discount: reduces the line + rolls into order subtotal/discountAmount/total', async () => {
+    prismaMock.staff.findUnique.mockResolvedValue({ id: 'staff-1', venueId: 'venue-1' })
+    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: 'venue-1', active: true })
+    prismaMock.product.findMany.mockResolvedValue([{ id: 'prod-1', name: 'Hamburguesa', price: new Decimal(100), category: { name: 'Comida' } }])
+    prismaMock.modifier.findMany.mockResolvedValue([])
+    prismaMock.discount.findMany.mockResolvedValue([
+      { id: 'disc-pct', venueId: 'venue-1', name: '20% off', type: 'PERCENTAGE', value: new Decimal(20), active: true },
+    ])
+    prismaMock.order.create.mockResolvedValue({
+      id: 'order-1',
+      orderNumber: 'ORD-1',
+      status: 'CONFIRMED',
+      paymentStatus: 'PENDING',
+      subtotal: new Decimal(100),
+      discountAmount: new Decimal(20),
+      taxAmount: new Decimal(0),
+      total: new Decimal(80),
+      createdAt: new Date('2026-06-30T10:00:00.000Z'),
+      items: [],
+    })
+
+    const result = await createOrderWithItems('venue-1', {
+      staffId: 'staff-1',
+      items: [{ productId: 'prod-1', quantity: 1, discountId: 'disc-pct' }],
+      source: 'AVOQADO_IOS',
+    })
+
+    // product price $100, 20% discount -> line discount $20, subtotal $100, total $80
+    expect(prismaMock.order.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          subtotal: new Decimal(100),
+          discountAmount: new Decimal(20),
+          total: new Decimal(80),
+          items: {
+            create: [
+              expect.objectContaining({
+                discountAmount: new Decimal(20),
+                appliedDiscountId: 'disc-pct',
+                total: new Decimal(100),
+              }),
+            ],
+          },
+        }),
+      }),
+    )
+    expect(result.discountAmount).toBe(20)
+    expect(result.total).toBe(80)
+    expect(prismaMock.discount.updateMany).toHaveBeenCalledWith({
+      where: { id: { in: ['disc-pct'] } },
+      data: { currentUses: { increment: 1 } },
+    })
+  })
+
+  it('applies a FIXED_AMOUNT item discount', async () => {
+    prismaMock.staff.findUnique.mockResolvedValue({ id: 'staff-1', venueId: 'venue-1' })
+    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: 'venue-1', active: true })
+    prismaMock.product.findMany.mockResolvedValue([{ id: 'prod-1', name: 'Hamburguesa', price: new Decimal(100), category: { name: 'Comida' } }])
+    prismaMock.modifier.findMany.mockResolvedValue([])
+    prismaMock.discount.findMany.mockResolvedValue([
+      { id: 'disc-fixed', venueId: 'venue-1', name: '$15 off', type: 'FIXED_AMOUNT', value: new Decimal(15), active: true },
+    ])
+    prismaMock.order.create.mockResolvedValue({
+      id: 'order-1',
+      orderNumber: 'ORD-1',
+      status: 'CONFIRMED',
+      paymentStatus: 'PENDING',
+      subtotal: new Decimal(100),
+      discountAmount: new Decimal(15),
+      taxAmount: new Decimal(0),
+      total: new Decimal(85),
+      createdAt: new Date('2026-06-30T10:00:00.000Z'),
+      items: [],
+    })
+
+    const result = await createOrderWithItems('venue-1', {
+      staffId: 'staff-1',
+      items: [{ productId: 'prod-1', quantity: 1, discountId: 'disc-fixed' }],
+      source: 'AVOQADO_IOS',
+    })
+
+    // product price $100, fixed $15 off -> line discount $15, total $85
+    expect(prismaMock.order.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          subtotal: new Decimal(100),
+          discountAmount: new Decimal(15),
+          total: new Decimal(85),
+        }),
+      }),
+    )
+    expect(result.discountAmount).toBe(15)
+    expect(result.total).toBe(85)
+  })
+
+  it('rejects the whole order when discountId is invalid/foreign (mirrors TPV: reject, not silently ignore)', async () => {
+    prismaMock.staff.findUnique.mockResolvedValue({ id: 'staff-1', venueId: 'venue-1' })
+    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: 'venue-1', active: true })
+    prismaMock.product.findMany.mockResolvedValue([{ id: 'prod-1', name: 'Hamburguesa', price: new Decimal(100), category: { name: 'Comida' } }])
+    prismaMock.modifier.findMany.mockResolvedValue([])
+    prismaMock.discount.findMany.mockResolvedValue([]) // not found / not in this venue
+
+    await expect(
+      createOrderWithItems('venue-1', {
+        staffId: 'staff-1',
+        items: [{ productId: 'prod-1', quantity: 1, discountId: 'disc-does-not-exist' }],
+        source: 'AVOQADO_IOS',
+      }),
+    ).rejects.toThrow('Descuento no encontrado o no pertenece a este local: disc-does-not-exist')
+
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
   it('marks discounted cash order as paid when customer pays the discounted total', async () => {
     prismaMock.order.findUnique.mockResolvedValue({
       id: 'order-1',

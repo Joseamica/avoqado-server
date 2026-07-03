@@ -102,9 +102,19 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
           status: true,
           paymentStatus: true,
           total: true,
+          discountAmount: true,
           createdAt: true,
           venue: { select: { name: true } },
-          items: { select: { productName: true, quantity: true, unitPrice: true, total: true } },
+          items: {
+            select: {
+              productName: true,
+              quantity: true,
+              unitPrice: true,
+              total: true,
+              discountAmount: true,
+              appliedDiscountId: true,
+            },
+          },
           payments: { select: { amount: true, method: true, status: true, createdAt: true } },
         },
       })

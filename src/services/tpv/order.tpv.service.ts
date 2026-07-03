@@ -10,6 +10,7 @@ import { moduleService, MODULE_CODES } from '../modules/module.service'
 import { deductInventoryForProduct, getProductInventoryMethod } from '../dashboard/productInventoryIntegration.service'
 import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service'
 import { logAction } from '../dashboard/activity-log.service'
+import { calculateDiscountPesos, validateDiscountActive } from '../shared/discount.service'
 
 /**
  * Helper function to flatten OrderItemModifier structure for Android compatibility
@@ -578,47 +579,6 @@ function decimalFromPesos(value: number): Prisma.Decimal {
 function assertClosePesos(label: string, actual: number, expected: number): void {
   if (Math.abs(actual - expected) > PESOS_TOLERANCE) {
     throw new BadRequestError(`${label} mismatch. Expected ${expected.toFixed(2)} pesos, got ${actual.toFixed(2)} pesos`)
-  }
-}
-
-function calculateDiscountPesos(discount: any, basePesos: number): number {
-  if (basePesos <= 0) return 0
-
-  if (discount.minPurchaseAmount && basePesos < Number(discount.minPurchaseAmount)) {
-    throw new BadRequestError(`Discount "${discount.name}" requires a minimum purchase amount`)
-  }
-
-  let amountPesos: number
-  if (discount.type === 'PERCENTAGE') {
-    amountPesos = roundPesos((basePesos * Number(discount.value)) / 100)
-  } else if (discount.type === 'FIXED_AMOUNT') {
-    amountPesos = roundPesos(Number(discount.value))
-  } else if (discount.type === 'COMP') {
-    amountPesos = basePesos
-  } else {
-    throw new BadRequestError(`Unsupported discount type: ${discount.type}`)
-  }
-
-  if (discount.maxDiscountAmount) {
-    amountPesos = Math.min(amountPesos, Number(discount.maxDiscountAmount))
-  }
-
-  return roundPesos(Math.min(amountPesos, basePesos))
-}
-
-function validateDiscountActive(discount: any): void {
-  const now = new Date()
-  if (!discount.active) {
-    throw new BadRequestError(`Discount "${discount.name}" is inactive`)
-  }
-  if (discount.validFrom && discount.validFrom > now) {
-    throw new BadRequestError(`Discount "${discount.name}" is not active yet`)
-  }
-  if (discount.validUntil && discount.validUntil < now) {
-    throw new BadRequestError(`Discount "${discount.name}" has expired`)
-  }
-  if (discount.maxTotalUses != null && discount.currentUses >= discount.maxTotalUses) {
-    throw new BadRequestError(`Discount "${discount.name}" has reached its usage limit`)
   }
 }
 

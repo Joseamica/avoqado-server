@@ -15,6 +15,7 @@ import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { validateStaffVenue } from '../../utils/staff-venue.util'
 import { generateAndStoreReceipt } from '../dashboard/receipt.dashboard.service'
+import { calculateDiscountPesos, validateDiscountActive } from '../shared/discount.service'
 
 // MARK: - Types
 
@@ -26,6 +27,10 @@ export interface CreateOrderItemInput {
   quantity: number
   notes?: string | null
   modifierIds?: string[]
+  /** Item/category-scoped Discount row id, mirroring TPV's `itemDiscountId`
+   *  (order.tpv.service.ts). Validated the same way: must exist, belong to
+   *  this venue, and be currently active/within its validity window. */
+  discountId?: string | null
 }
 
 export interface CreateOrderInput {
@@ -67,6 +72,8 @@ export interface CreatedOrderResponse {
     quantity: number
     unitPrice: number
     total: number
+    discountAmount: number
+    appliedDiscountId: string | null
     modifiers: Array<{
       id: string
       name: string
@@ -301,6 +308,8 @@ function toCreatedOrderResponse(order: any): CreatedOrderResponse {
       quantity: item.quantity,
       unitPrice: Number(item.unitPrice),
       total: Number(item.total),
+      discountAmount: Number(item.discountAmount || 0),
+      appliedDiscountId: item.appliedDiscountId || null,
       modifiers: item.modifiers || [],
     })),
     createdAt: flattenedOrder.createdAt,
@@ -403,13 +412,38 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
 
   logger.info(`📱 [ORDER.MOBILE] Validated ${products.length} products, ${modifiers.length} modifiers, ${customInputs.length} custom items`)
 
+  // Fetch + validate per-item discounts (mirrors order.tpv.service.ts createOrderWithItems:
+  // discount must exist, belong to this venue, and be active/within its validity window +
+  // usage cap — see src/services/shared/discount.service.ts). TPV rejects the whole order
+  // on any invalid/foreign discountId rather than silently ignoring it; mobile mirrors that.
+  const discountIds = [...new Set(input.items.map(item => item.discountId).filter((id): id is string => !!id))]
+  const discounts = discountIds.length
+    ? await prisma.discount.findMany({
+        where: {
+          id: { in: discountIds },
+          venueId,
+        },
+      })
+    : []
+
+  if (discounts.length !== discountIds.length) {
+    const foundIds = discounts.map(discount => discount.id)
+    const missingIds = discountIds.filter(id => !foundIds.includes(id))
+    throw new BadRequestError(`Descuento no encontrado o no pertenece a este local: ${missingIds.join(', ')}`)
+  }
+
+  discounts.forEach(validateDiscountActive)
+
   // Generate order number
   const orderNumber = `ORD-${Date.now()}`
 
   // Calculate totals and prepare items data.
   // NOTE: Prices are treated as tax-inclusive (Mexico: IVA is already in price).
   // taxAmount is stored as 0 on items and order. Tax is not added on top of the price.
+  // Item/order totals stay gross; discount reductions live in `discountAmount`
+  // (same convention as TPV's Cobrar V1 flow — see order.tpv.service.ts).
   let subtotal = 0
+  let itemDiscountTotal = 0
   const productItemsData = productInputs.map(item => {
     const product = products.find(p => p.id === item.productId)!
     const itemModifierIds = item.modifierIds || []
@@ -425,6 +459,10 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
     const itemTotal = unitPrice * item.quantity
     subtotal += itemTotal
 
+    const appliedDiscount = item.discountId ? discounts.find(discount => discount.id === item.discountId)! : null
+    const lineDiscount = appliedDiscount ? calculateDiscountPesos(appliedDiscount, itemTotal) : 0
+    itemDiscountTotal += lineDiscount
+
     return {
       productId: item.productId,
       productName: product.name,
@@ -432,7 +470,8 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
       categoryName: product.category?.name || null,
       quantity: item.quantity,
       unitPrice: new Prisma.Decimal(Number(product.price)),
-      discountAmount: new Prisma.Decimal(0),
+      discountAmount: new Prisma.Decimal(lineDiscount),
+      appliedDiscountId: appliedDiscount?.id || null,
       taxAmount: new Prisma.Decimal(0),
       total: new Prisma.Decimal(itemTotal),
       notes: item.notes || null,
@@ -455,6 +494,11 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
     const unitPrice = (item.unitPrice ?? 0) / 100 // cents -> decimal
     const itemTotal = unitPrice * item.quantity
     subtotal += itemTotal
+
+    const appliedDiscount = item.discountId ? discounts.find(discount => discount.id === item.discountId)! : null
+    const lineDiscount = appliedDiscount ? calculateDiscountPesos(appliedDiscount, itemTotal) : 0
+    itemDiscountTotal += lineDiscount
+
     return {
       productId: null,
       productName: item.name || 'Otro importe',
@@ -462,7 +506,8 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
       categoryName: null,
       quantity: item.quantity,
       unitPrice: new Prisma.Decimal(unitPrice),
-      discountAmount: new Prisma.Decimal(0),
+      discountAmount: new Prisma.Decimal(lineDiscount),
+      appliedDiscountId: appliedDiscount?.id || null,
       taxAmount: new Prisma.Decimal(0),
       total: new Prisma.Decimal(itemTotal),
       notes: item.notes || null,
@@ -471,7 +516,14 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
 
   const itemsData = [...productItemsData, ...customItemsData]
 
-  const discountDecimal = Math.min(subtotal, Math.max(0, (input.discount || 0) / 100))
+  // Order-level flat discount (input.discount, cents) composes additively with the
+  // per-item Discount reductions above — same shape as TPV's `discountAmount =
+  // itemDiscountPesos + orderDiscountPesos` (order.tpv.service.ts createOrderWithItems).
+  // It's clamped against what's left of the subtotal *after* item discounts so the
+  // order can never go negative.
+  const remainingAfterItemDiscounts = Math.max(0, subtotal - itemDiscountTotal)
+  const orderLevelDiscountDecimal = Math.min(remainingAfterItemDiscounts, Math.max(0, (input.discount || 0) / 100))
+  const discountDecimal = itemDiscountTotal + orderLevelDiscountDecimal
   // Tip (cents -> decimal). In Mexico, tip is added on top of the tax-inclusive subtotal.
   const tipDecimal = (input.tip || 0) / 100
   const total = subtotal - discountDecimal + tipDecimal
@@ -591,6 +643,25 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
   logger.info(
     `✅ [ORDER.MOBILE] Order created | id=${order.id} | number=${order.orderNumber} | subtotal=${subtotal} | discount=${discountDecimal} | tip=${tipDecimal} | total=${total}`,
   )
+
+  // Bump usage counters for any Discount rows applied via item.discountId (mirrors
+  // order.tpv.service.ts). Best-effort: the order already committed above, so a
+  // failure here must not fail the request — it would only leave a discount's
+  // maxTotalUses counter stale, not corrupt the order/payment.
+  if (discounts.length > 0) {
+    try {
+      await prisma.discount.updateMany({
+        where: { id: { in: discounts.map(discount => discount.id) } },
+        data: { currentUses: { increment: 1 } },
+      })
+    } catch (error) {
+      logger.error('❌ [ORDER.MOBILE] Failed to increment discount currentUses', {
+        orderId: order.id,
+        discountIds: discounts.map(discount => discount.id),
+        error: (error as Error).message,
+      })
+    }
+  }
 
   // Emit Socket.IO event for real-time order creation
   const broadcastingService = socketManager.getBroadcastingService()

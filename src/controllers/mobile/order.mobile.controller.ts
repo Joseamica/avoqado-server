@@ -96,6 +96,12 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
           message: 'Cada item requiere productId o (name + unitPrice)',
         })
       }
+      if (item.discountId != null && typeof item.discountId !== 'string') {
+        return res.status(400).json({
+          success: false,
+          message: 'discountId debe ser un string',
+        })
+      }
     }
 
     // Use authenticated user's ID if staffId not provided
