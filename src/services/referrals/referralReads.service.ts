@@ -41,6 +41,7 @@ export async function listCustomerReferrals(venueId: string, customerId: string)
           rewardProductId: true,
           rewardQuantity: true,
           status: true,
+          fulfilledAt: true,
           discount: { select: { couponCodes: { select: { code: true }, take: 1 } } },
         },
       },
@@ -57,6 +58,7 @@ export async function listCustomerReferrals(venueId: string, customerId: string)
       rewardProductId: grant.rewardProductId,
       rewardQuantity: grant.rewardQuantity,
       status: grant.status,
+      fulfilledAt: grant.fulfilledAt,
       couponCode: grant.discount?.couponCodes?.[0]?.code ?? null,
     })),
   }))
@@ -75,13 +77,26 @@ export async function listReferrals(input: ListReferralsInput) {
   if (input.tier) {
     where.referrerCustomer = { referralTier: input.tier }
   }
-  const [items, total] = await Promise.all([
+  const [rawItems, total] = await Promise.all([
     prisma.referral.findMany({
       where,
       include: {
         referrerCustomer: { select: { id: true, firstName: true, lastName: true, referralTier: true } },
         referredCustomer: { select: { id: true, firstName: true, lastName: true } },
+        // DEPRECATED (see listCustomerReferrals doc above) — kept for callers not yet migrated to `rewards[]`.
         rewardDiscount: { select: { id: true, value: true, active: true } },
+        referralGrants: {
+          select: {
+            id: true,
+            rewardType: true,
+            rewardPercent: true,
+            rewardProductId: true,
+            rewardQuantity: true,
+            status: true,
+            fulfilledAt: true,
+            discount: { select: { couponCodes: { select: { code: true }, take: 1 } } },
+          },
+        },
       },
       orderBy: { createdAt: 'desc' },
       skip: (page - 1) * pageSize,
@@ -89,6 +104,21 @@ export async function listReferrals(input: ListReferralsInput) {
     }),
     prisma.referral.count({ where }),
   ])
+
+  const items = rawItems.map(({ referralGrants, ...referral }) => ({
+    ...referral,
+    rewards: referralGrants.map(grant => ({
+      id: grant.id,
+      rewardType: grant.rewardType,
+      rewardPercent: grant.rewardPercent,
+      rewardProductId: grant.rewardProductId,
+      rewardQuantity: grant.rewardQuantity,
+      status: grant.status,
+      fulfilledAt: grant.fulfilledAt,
+      couponCode: grant.discount?.couponCodes?.[0]?.code ?? null,
+    })),
+  }))
+
   return { items, total, page, pageSize }
 }
 

@@ -29,6 +29,7 @@ describe('referralReads.service', () => {
               rewardProductId: null,
               rewardQuantity: 1,
               status: 'ISSUED',
+              fulfilledAt: null,
               discount: { couponCodes: [{ code: 'SAVE15' }] },
             },
             {
@@ -37,7 +38,8 @@ describe('referralReads.service', () => {
               rewardPercent: null,
               rewardProductId: 'p1',
               rewardQuantity: 1,
-              status: 'MANUAL_PENDING',
+              status: 'MANUAL_FULFILLED',
+              fulfilledAt: new Date('2026-06-01T00:00:00.000Z'),
               discount: null,
             },
           ],
@@ -47,8 +49,13 @@ describe('referralReads.service', () => {
       const res = await listCustomerReferrals('v1', 'c1')
 
       expect(res[0].rewards).toHaveLength(2)
-      expect(res[0].rewards[0]).toMatchObject({ id: 'g1', rewardType: 'PERCENT_COUPON', couponCode: 'SAVE15' })
-      expect(res[0].rewards[1]).toMatchObject({ id: 'g2', rewardType: 'FREE_PRODUCT', couponCode: null })
+      expect(res[0].rewards[0]).toMatchObject({ id: 'g1', rewardType: 'PERCENT_COUPON', couponCode: 'SAVE15', fulfilledAt: null })
+      expect(res[0].rewards[1]).toMatchObject({
+        id: 'g2',
+        rewardType: 'FREE_PRODUCT',
+        couponCode: null,
+        fulfilledAt: new Date('2026-06-01T00:00:00.000Z'),
+      })
       // Backward-compat: deprecated single `rewardDiscount` still present.
       expect(res[0].rewardDiscount).toMatchObject({ id: 'd1' })
       // The raw `referralGrants` relation payload isn't leaked verbatim.
@@ -66,13 +73,63 @@ describe('referralReads.service', () => {
 
   describe('listReferrals', () => {
     it('returns paginated list with default page/pageSize', async () => {
-      mockedPrisma.referral.findMany.mockResolvedValue([{ id: 'r1' }, { id: 'r2' }])
+      mockedPrisma.referral.findMany.mockResolvedValue([
+        { id: 'r1', referralGrants: [] },
+        { id: 'r2', referralGrants: [] },
+      ])
       mockedPrisma.referral.count.mockResolvedValue(2)
       const result = await listReferrals({ venueId: 'v1' })
       expect(result.items.length).toBe(2)
       expect(result.total).toBe(2)
       expect(result.page).toBe(1)
       expect(result.pageSize).toBe(25)
+    })
+
+    it('projects a rewards[] array (with fulfilledAt) per row, mirroring listCustomerReferrals', async () => {
+      mockedPrisma.referral.findMany.mockResolvedValue([
+        {
+          id: 'r1',
+          rewardDiscount: { id: 'd1', value: '15', active: true },
+          referralGrants: [
+            {
+              id: 'g1',
+              rewardType: 'PERCENT_COUPON',
+              rewardPercent: '15',
+              rewardProductId: null,
+              rewardQuantity: 1,
+              status: 'ISSUED',
+              fulfilledAt: null,
+              discount: { couponCodes: [{ code: 'SAVE15' }] },
+            },
+            {
+              id: 'g2',
+              rewardType: 'FREE_PRODUCT',
+              rewardPercent: null,
+              rewardProductId: 'p1',
+              rewardQuantity: 1,
+              status: 'MANUAL_FULFILLED',
+              fulfilledAt: new Date('2026-06-01T00:00:00.000Z'),
+              discount: null,
+            },
+          ],
+        },
+      ])
+      mockedPrisma.referral.count.mockResolvedValue(1)
+
+      const result = await listReferrals({ venueId: 'v1' })
+
+      expect(result.items[0].rewards).toHaveLength(2)
+      expect(result.items[0].rewards[0]).toMatchObject({ id: 'g1', rewardType: 'PERCENT_COUPON', couponCode: 'SAVE15', fulfilledAt: null })
+      expect(result.items[0].rewards[1]).toMatchObject({
+        id: 'g2',
+        rewardType: 'FREE_PRODUCT',
+        couponCode: null,
+        fulfilledAt: new Date('2026-06-01T00:00:00.000Z'),
+      })
+      // Backward-compat: deprecated single `rewardDiscount` still present, never removed.
+      expect(result.items[0].rewardDiscount).toMatchObject({ id: 'd1' })
+      // The raw `referralGrants` relation payload isn't leaked verbatim.
+      expect(result.items[0]).not.toHaveProperty('referralGrants')
     })
 
     it('filters by status', async () => {

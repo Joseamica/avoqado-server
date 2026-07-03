@@ -28,11 +28,40 @@ export async function getConfig(req: Request, res: Response, next: NextFunction)
   }
 }
 
+/**
+ * Maps `activateReferralProgram`/`updateReferralConfig`'s validation-type
+ * thrown errors (see `referralProgram.service.ts`: `validateConfig`,
+ * `validateTierRewards`) to a 400/404 with `{ error: <message> }` — mirrors
+ * how `manualVoid`/`fulfillGrantHandler` above map their own known errors.
+ * Returns true if the error was handled (response already sent); false if
+ * the caller should still `next(e)` (unknown error, bubbles as a 500).
+ */
+function mapConfigValidationError(e: any, res: Response): boolean {
+  if (e && typeof e.message === 'string') {
+    if (
+      e.message === 'PRODUCTO_NO_PERTENECE_AL_VENUE' ||
+      e.message === 'PORCENTAJE_INVALIDO' ||
+      e.message === 'Tier requirements must be ascending: tier2 > tier1' ||
+      e.message === 'Tier requirements must be ascending: tier3 > tier2' ||
+      /^Field .+ must be non-negative$/.test(e.message)
+    ) {
+      res.status(400).json({ error: e.message })
+      return true
+    }
+    if (e.message === 'REFERRAL_PROGRAM_NOT_CONFIGURED') {
+      res.status(404).json({ error: e.message })
+      return true
+    }
+  }
+  return false
+}
+
 export async function activate(req: Request, res: Response, next: NextFunction) {
   try {
     await program.activateReferralProgram({ venueId: req.params.venueId, ...req.body })
     res.status(201).json({ ok: true })
-  } catch (e) {
+  } catch (e: any) {
+    if (mapConfigValidationError(e, res)) return
     next(e)
   }
 }
@@ -42,7 +71,8 @@ export async function updateConfig(req: Request, res: Response, next: NextFuncti
     const authContext = (req as any).authContext
     await program.updateReferralConfig({ venueId: req.params.venueId, patch: req.body, staffId: authContext?.userId })
     res.json({ ok: true })
-  } catch (e) {
+  } catch (e: any) {
+    if (mapConfigValidationError(e, res)) return
     next(e)
   }
 }
