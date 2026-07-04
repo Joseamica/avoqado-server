@@ -32,16 +32,34 @@ beforeAll(async () => {
     default: (_req: any, _res: any, next: any) => next(),
   }))
 
-  // Mock customer controller to avoid database dependencies
-  jest.mock('@/controllers/dashboard/customer.dashboard.controller', () => ({
-    __esModule: true,
-    getCustomers: (_req: any, res: any) => res.status(200).json({ data: [], meta: { totalCount: 0 } }),
-    getCustomerStats: (_req: any, res: any) => res.status(200).json({ totalCustomers: 100, vipCustomers: 10 }),
-    getCustomerById: (_req: any, res: any) => res.status(200).json({ id: CUSTOMER_ID, email: 'test@example.com' }),
-    createCustomer: (_req: any, res: any) => res.status(201).json({ id: CUSTOMER_ID, email: 'new@example.com' }),
-    updateCustomer: (_req: any, res: any) => res.status(200).json({ id: CUSTOMER_ID, email: 'updated@example.com' }),
-    deleteCustomer: (_req: any, res: any) => res.status(204).send(),
-  }))
+  // Mock customer controller to avoid database dependencies.
+  // DRIFT-PROOF: wrapped in a Proxy so ANY controller export not explicitly stubbed
+  // resolves to a generic 200 handler instead of `undefined`. Express throws at app
+  // boot when a route references an undefined handler (Route.post() requires a
+  // callback), which bricked this entire suite when new controller exports were added
+  // (commits 56c7f6cf, e1ed171b, 2720258c). Explicit stubs below are preserved exactly
+  // because tests assert their specific status codes (200/201/204).
+  // NOTE: jest.mock factories are hoisted, so the Proxy is defined INSIDE the factory.
+  jest.mock('@/controllers/dashboard/customer.dashboard.controller', () => {
+    const explicitStubs: Record<string | symbol, any> = {
+      __esModule: true,
+      getCustomers: (_req: any, res: any) => res.status(200).json({ data: [], meta: { totalCount: 0 } }),
+      getCustomerStats: (_req: any, res: any) => res.status(200).json({ totalCustomers: 100, vipCustomers: 10 }),
+      getCustomerById: (_req: any, res: any) => res.status(200).json({ id: CUSTOMER_ID, email: 'test@example.com' }),
+      createCustomer: (_req: any, res: any) => res.status(201).json({ id: CUSTOMER_ID, email: 'new@example.com' }),
+      updateCustomer: (_req: any, res: any) => res.status(200).json({ id: CUSTOMER_ID, email: 'updated@example.com' }),
+      deleteCustomer: (_req: any, res: any) => res.status(204).send(),
+    }
+    const genericHandler = (_req: any, res: any) => res.status(200).json({ mocked: true })
+    return new Proxy(explicitStubs, {
+      get: (target, prop) => {
+        if (prop in target) return target[prop]
+        // Don't fabricate symbol props or `then` (a callable `then` makes the module thenable)
+        if (typeof prop !== 'string' || prop === 'then') return undefined
+        return genericHandler
+      },
+    })
+  })
 
   // Import app after mocks
   const mod = await import('@/app')

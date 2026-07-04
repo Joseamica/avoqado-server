@@ -95,6 +95,19 @@ else
 fi
 echo ""
 
+# 6b. Run API middleware tests (mock-based — no real DB required; setup.ts
+# forces a dummy DATABASE_URL). This suite guards route mounting + auth +
+# checkPermission + Zod on every endpoint; it rotted for 7 months when it
+# wasn't wired into any gate (2025-11 → 2026-07, 76 stale failures).
+echo "🌐 Step 6b/10: Running API middleware tests..."
+if npm run test:api; then
+  echo -e "${GREEN}✅ API tests passed!${NC}"
+else
+  echo -e "${RED}❌ API tests failed!${NC}"
+  exit 1
+fi
+echo ""
+
 # 7. Run integration tests (optional, requires DATABASE_URL or TEST_DATABASE_URL)
 echo "🏪 Step 7/10: Running integration tests..."
 # Use TEST_DATABASE_URL if DATABASE_URL is not set

@@ -100,17 +100,34 @@ describe('POST /api/v1/dashboard/venues/:venueId/payments/manual', () => {
     // Service uses prisma.$transaction(cb => cb(prismaMock)) from setup.ts, so
     // the inner tx === prismaMock. Wire up order lookup, payment.create, and
     // order.update on the shared mock.
+    //
+    // Fixture shape matches everything the CURRENT service dereferences (since
+    // f3c54446 the service recomputes Order.total = subtotal + tax - discount +
+    // cumulative tips, so it reads subtotal/taxAmount/discountAmount, guards on
+    // status, and iterates orderCustomers for metrics/loyalty resolution).
     prismaMock.order.findFirst.mockResolvedValue({
       id: ORDER_ID,
       venueId: VENUE_ID,
-      total: '100.00', // Decimal constructor accepts string
+      status: 'PENDING', // not CANCELLED/DELETED — passes the terminated-order guard
+      subtotal: '100.00', // Decimal constructor accepts string
+      taxAmount: '0',
+      discountAmount: '0',
+      tipAmount: '0',
+      total: '100.00',
+      customerId: null, // no legacy customer → no loyalty side-effects
       payments: [], // nothing paid yet
+      orderCustomers: [], // no attached customers → no metrics side-effects
     })
+    // No open shift for this cashier → the service skips shift totals update.
+    prismaMock.shift.findFirst.mockResolvedValue(null)
     prismaMock.payment.create.mockImplementation(async (args: any) => ({
       id: PAYMENT_ID,
       ...args.data,
     }))
     prismaMock.order.update.mockResolvedValue({ id: ORDER_ID, paymentStatus: 'PAID' })
+    // Referral qualification hook (fires after full settlement): no PENDING
+    // referral claims this order → clean no-op instead of a caught mock error.
+    prismaMock.referral.updateMany.mockResolvedValue({ count: 0 })
 
     const token = makeToken('ADMIN')
     const res = await request(app).post(`${BASE}/manual`).set('Authorization', `Bearer ${token}`).send(validBody)
@@ -129,12 +146,37 @@ describe('POST /api/v1/dashboard/venues/:venueId/payments/manual', () => {
     expect(paymentCreateArgs.data.orderId).toBe(ORDER_ID)
     expect(paymentCreateArgs.data.source).toBe('OTHER')
     expect(paymentCreateArgs.data.status).toBe('COMPLETED')
+    // netAmount = amount + tip (gross the venue collected; fees are 0 on manual)
+    expect(Number(paymentCreateArgs.data.netAmount)).toBe(100)
+    expect(Number(paymentCreateArgs.data.feeAmount)).toBe(0)
+
+    // Since f3c54446 the service mirrors TPV side effects: a VenueTransaction
+    // (settlement reports) and a PaymentAllocation (payment ↔ order join).
+    expect(prismaMock.venueTransaction.create).toHaveBeenCalledTimes(1)
+    const venueTxArgs = prismaMock.venueTransaction.create.mock.calls[0][0]
+    expect(venueTxArgs.data.venueId).toBe(VENUE_ID)
+    expect(venueTxArgs.data.paymentId).toBe(PAYMENT_ID)
+    expect(venueTxArgs.data.type).toBe('PAYMENT')
+    expect(Number(venueTxArgs.data.grossAmount)).toBe(100)
+
+    expect(prismaMock.paymentAllocation.create).toHaveBeenCalledTimes(1)
+    const allocationArgs = prismaMock.paymentAllocation.create.mock.calls[0][0]
+    expect(allocationArgs.data.paymentId).toBe(PAYMENT_ID)
+    expect(allocationArgs.data.orderId).toBe(ORDER_ID)
+    expect(Number(allocationArgs.data.amount)).toBe(100)
 
     expect(prismaMock.order.update).toHaveBeenCalledTimes(1)
     const orderUpdateArgs = prismaMock.order.update.mock.calls[0][0]
     expect(orderUpdateArgs.where).toEqual({ id: ORDER_ID })
     expect(orderUpdateArgs.data.paymentStatus).toBe('PAID')
     expect(orderUpdateArgs.data).toHaveProperty('completedAt')
+    // f3c54446: full settlement also flips status to COMPLETED and recomputes
+    // paidAmount/remainingBalance/tipAmount/total (TPV alignment).
+    expect(orderUpdateArgs.data.status).toBe('COMPLETED')
+    expect(Number(orderUpdateArgs.data.paidAmount)).toBe(100)
+    expect(Number(orderUpdateArgs.data.remainingBalance)).toBe(0)
+    expect(Number(orderUpdateArgs.data.tipAmount)).toBe(0)
+    expect(Number(orderUpdateArgs.data.total)).toBe(100)
   })
 
   it('403: CASHIER cannot create a manual payment (lacks payment:create-manual)', async () => {

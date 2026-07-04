@@ -9,6 +9,7 @@
 import request from 'supertest'
 import jwt from 'jsonwebtoken'
 import type { Express } from 'express'
+import { prismaMock } from '@tests/__helpers__/setup'
 
 let app: Express
 const TEST_SECRET = 'test-secret'
@@ -63,6 +64,33 @@ beforeAll(async () => {
   // Import app after mocks
   const mod = await import('@/app')
   app = mod.default
+})
+
+/**
+ * Plan-tier gate (added in commit 1c0b562c): ALL loyalty routes now sit behind a
+ * router-level checkFeatureAccess('LOYALTY_PROGRAM') that runs BEFORE checkPermission
+ * (src/routes/dashboard.routes.ts). Satisfy it via the EXPLICIT-GRANT path: an active
+ * VenueFeature row from prisma.venueFeature.findFirst. Set in beforeEach so every test
+ * gets the grant (the global setup's beforeEach runs jest.clearAllMocks() first).
+ *
+ * NOTE deliberately NOT mocked:
+ * - venue.findUnique → undefined: venueIsExemptFromPlanGating treats a missing venue as
+ *   non-exempt (falls through to the grant check). Defaulting it could also change the
+ *   403 semantics of checkPermission, which reads venue.findUnique for org fallback.
+ * - staffVenue.findFirst → undefined: !!undefined = false → no SUPERADMIN bypass, so the
+ *   token role drives every permission decision (what these tests assert).
+ */
+const LOYALTY_FEATURE_GRANT = {
+  id: 'vf1',
+  active: true,
+  endDate: null,
+  suspendedAt: null,
+  stripeSubscriptionId: null,
+  feature: { code: 'LOYALTY_PROGRAM', name: 'Loyalty' },
+}
+
+beforeEach(() => {
+  prismaMock.venueFeature.findFirst.mockResolvedValue(LOYALTY_FEATURE_GRANT as any)
 })
 
 /**
@@ -403,6 +431,28 @@ describe('Loyalty API - Authentication & Authorization', () => {
       // Verify incorrect path returns 404
       const invalidRes = await request(app).get('/api/v1/wrong/path/loyalty/config').set('Authorization', `Bearer ${token}`)
       expect(invalidRes.status).toBe(404)
+    })
+  })
+
+  describe('Plan gate: LOYALTY_PROGRAM feature (checkFeatureAccess)', () => {
+    it('should return 403 with subscriptionRequired when the venue lacks the LOYALTY_PROGRAM feature', async () => {
+      // Override the beforeEach grant: no explicit VenueFeature row for this venue…
+      prismaMock.venueFeature.findFirst.mockResolvedValue(null)
+      // …and no base-plan tier rows either (getVenueBaseTier reads venueFeature.findMany),
+      // so the tier blanket grant can't kick in → the gate denies BEFORE checkPermission,
+      // even for a fully-permissioned ADMIN.
+      prismaMock.venueFeature.findMany.mockResolvedValue([])
+
+      const token = makeToken('ADMIN', ['loyalty:read'])
+      const res = await request(app).get(`/api/v1/dashboard/venues/${VENUE_ID}/loyalty/config`).set('Authorization', `Bearer ${token}`)
+
+      // Denial shape from src/middlewares/checkFeatureAccess.middleware.ts ("Feature not active" branch)
+      expect(res.status).toBe(403)
+      expect(res.body).toMatchObject({
+        error: 'Feature not available',
+        featureCode: 'LOYALTY_PROGRAM',
+        subscriptionRequired: true,
+      })
     })
   })
 })

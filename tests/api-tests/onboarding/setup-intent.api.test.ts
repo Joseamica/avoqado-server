@@ -42,7 +42,9 @@ jest.mock('../../../src/services/stripe.service', () => ({
   },
 }))
 
-// Mock logger
+// Mock logger — MUST include `log`: the request-logging middleware calls
+// logger.log(level, ...) on every response finish (src/middlewares/requestLogger.ts),
+// so omitting it makes EVERY request throw a TypeError after the handler runs.
 jest.mock('../../../src/config/logger', () => ({
   __esModule: true,
   default: {
@@ -50,6 +52,7 @@ jest.mock('../../../src/config/logger', () => ({
     error: jest.fn(),
     warn: jest.fn(),
     debug: jest.fn(),
+    log: jest.fn(),
   },
 }))
 

@@ -269,6 +269,13 @@ prismaMock.externalBusyBlock.findFirst.mockResolvedValue(null)
 // Tests that don't exercise migration badges shouldn't have to mock it — default to
 // no in-flight migrations so the result is iterable and the "Migrando…" badge is off.
 prismaMock.tpvCommandQueue.findMany.mockResolvedValue([])
+// Plan-tier gating (checkFeatureAccess middleware → getVenueBaseTier in
+// src/services/access/basePlan.service.ts) iterates the rows returned by
+// prisma.venueFeature.findMany. A bare jest.fn() resolves undefined and the
+// `for (const r of rows)` throws, surfacing as a handled 500 in ANY route behind
+// a feature gate. Default to [] (= no base-plan rows → FREE tier); tests that
+// exercise tiers override with their own mockResolvedValue per test.
+prismaMock.venueFeature.findMany.mockResolvedValue([])
 
 // Mock Prisma Client globally
 jest.mock('@/utils/prismaClient', () => ({

@@ -30,24 +30,42 @@ beforeAll(async () => {
     default: (_req: any, _res: any, next: any) => next(),
   }))
 
-  // Mock the superadmin controller to avoid DB/service dependencies
-  jest.mock('@/controllers/dashboard/superadmin.controller', () => ({
-    __esModule: true,
-    getDashboardData: (_req: any, res: any) => res.status(200).json({ ok: true, route: 'dashboard' }),
-    getAllVenues: (_req: any, res: any) => res.status(200).json({ ok: true, route: 'venues' }),
-    getVenuesListSimple: (_req: any, res: any) => res.status(200).json({ ok: true, route: 'venues-list' }),
-    getVenueDetails: (_req: any, res: any) => res.status(200).json({ ok: true, route: 'venue-details' }),
-    approveVenue: (_req: any, res: any) => res.status(200).json({ ok: true, action: 'approve' }),
-    suspendVenue: (_req: any, res: any) => res.status(200).json({ ok: true, action: 'suspend' }),
-    getAllFeatures: (_req: any, res: any) => res.status(200).json({ ok: true, route: 'features' }),
-    createFeature: (_req: any, res: any) => res.status(201).json({ ok: true, action: 'create-feature' }),
-    enableFeatureForVenue: (_req: any, res: any) => res.status(200).json({ ok: true, action: 'enable-feature' }),
-    disableFeatureForVenue: (_req: any, res: any) => res.status(204).send(),
-    getRevenueMetrics: (_req: any, res: any) => res.status(200).json({ ok: true, route: 'revenue-metrics' }),
-    getRevenueBreakdown: (_req: any, res: any) => res.status(200).json({ ok: true, route: 'revenue-breakdown' }),
-    getProvidersList: (_req: any, res: any) => res.status(200).json({ ok: true, route: 'providers' }),
-    getMerchantAccountsList: (_req: any, res: any) => res.status(200).json({ ok: true, route: 'merchant-accounts' }),
-  }))
+  // Mock the superadmin controller to avoid DB/service dependencies.
+  // DRIFT-PROOF: wrapped in a Proxy so ANY controller export not explicitly stubbed
+  // resolves to a generic 200 handler instead of `undefined`. Express throws at app
+  // boot when a route references an undefined handler (Route.post() requires a
+  // callback), which bricked this entire suite when new controller exports were added
+  // (commits 56c7f6cf, e1ed171b, 2720258c). Explicit stubs below are preserved exactly
+  // because tests assert their specific status codes (200/201/204).
+  // NOTE: jest.mock factories are hoisted, so the Proxy is defined INSIDE the factory.
+  jest.mock('@/controllers/dashboard/superadmin.controller', () => {
+    const explicitStubs: Record<string | symbol, any> = {
+      __esModule: true,
+      getDashboardData: (_req: any, res: any) => res.status(200).json({ ok: true, route: 'dashboard' }),
+      getAllVenues: (_req: any, res: any) => res.status(200).json({ ok: true, route: 'venues' }),
+      getVenuesListSimple: (_req: any, res: any) => res.status(200).json({ ok: true, route: 'venues-list' }),
+      getVenueDetails: (_req: any, res: any) => res.status(200).json({ ok: true, route: 'venue-details' }),
+      approveVenue: (_req: any, res: any) => res.status(200).json({ ok: true, action: 'approve' }),
+      suspendVenue: (_req: any, res: any) => res.status(200).json({ ok: true, action: 'suspend' }),
+      getAllFeatures: (_req: any, res: any) => res.status(200).json({ ok: true, route: 'features' }),
+      createFeature: (_req: any, res: any) => res.status(201).json({ ok: true, action: 'create-feature' }),
+      enableFeatureForVenue: (_req: any, res: any) => res.status(200).json({ ok: true, action: 'enable-feature' }),
+      disableFeatureForVenue: (_req: any, res: any) => res.status(204).send(),
+      getRevenueMetrics: (_req: any, res: any) => res.status(200).json({ ok: true, route: 'revenue-metrics' }),
+      getRevenueBreakdown: (_req: any, res: any) => res.status(200).json({ ok: true, route: 'revenue-breakdown' }),
+      getProvidersList: (_req: any, res: any) => res.status(200).json({ ok: true, route: 'providers' }),
+      getMerchantAccountsList: (_req: any, res: any) => res.status(200).json({ ok: true, route: 'merchant-accounts' }),
+    }
+    const genericHandler = (_req: any, res: any) => res.status(200).json({ mocked: true })
+    return new Proxy(explicitStubs, {
+      get: (target, prop) => {
+        if (prop in target) return target[prop]
+        // Don't fabricate symbol props or `then` (a callable `then` makes the module thenable)
+        if (typeof prop !== 'string' || prop === 'then') return undefined
+        return genericHandler
+      },
+    })
+  })
 
   // Dynamically import the app after setting env and mocks
   const mod = await import('@/app')

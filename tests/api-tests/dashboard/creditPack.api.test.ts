@@ -8,9 +8,13 @@
   - Cookie-based auth
   - Role-based access (OWNER, ADMIN, MANAGER, CASHIER, WAITER, KITCHEN, VIEWER)
 
-  NOTE: creditPacks permissions are NOT in any default role. They must be injected
-  via mocked VenueRolePermission (custom permissions). The prismaMock from setup.ts
-  is used to simulate this.
+  NOTE: since commit 328ad01e, MANAGER/ADMIN/OWNER hold 'creditPacks:*' in
+  DEFAULT_PERMISSIONS (src/lib/permissions.ts), so those roles pass every
+  creditPacks gate WITHOUT any custom grant. CASHIER/WAITER/KITCHEN/VIEWER/HOST
+  genuinely lack creditPacks:* — those roles are used to exercise the 403 path
+  and the "granted via mocked VenueRolePermission custom permissions" path
+  (merge mode: custom perms ADD to role defaults for non-SUPERADMIN roles).
+  The prismaMock from setup.ts simulates the VenueRolePermission override.
 */
 
 import request from 'supertest'
@@ -167,9 +171,13 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       expect(Array.isArray(res.body)).toBe(true)
     })
 
-    it('should return 200 when MANAGER role has creditPacks:read via custom permissions', async () => {
+    // CASHIER (not MANAGER) exercises the custom-grant path: MANAGER holds
+    // creditPacks:* by default since 328ad01e, so a custom grant on MANAGER
+    // would prove nothing. CASHIER lacks it — the mocked VenueRolePermission
+    // is what grants access here (merge mode).
+    it('should return 200 when CASHIER role has creditPacks:read via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:read'])
-      const token = makeToken('MANAGER')
+      const token = makeToken('CASHIER')
       const res = await request(app).get(BASE).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
       expect(Array.isArray(res.body)).toBe(true)
@@ -249,9 +257,22 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       expect(res.body).toHaveProperty('id', 'pack-new')
     })
 
-    it('should return 403 when MANAGER role does not have creditPacks:create', async () => {
-      mockCustomPermissions(['creditPacks:read'])
+    it('should return 201 when MANAGER role creates via default permissions (creditPacks:* granted in 328ad01e)', async () => {
+      // MANAGER holds creditPacks:* in DEFAULT_PERMISSIONS since 328ad01e, so
+      // no custom grant is needed (and a read-only custom grant cannot remove
+      // it — non-wildcard roles evaluate in merge mode, defaults + custom).
+      clearCustomPermissions()
       const token = makeToken('MANAGER')
+      const res = await request(app).post(BASE).set('Authorization', `Bearer ${token}`).send(validBody)
+      expect(res.status).toBe(201)
+      expect(res.body).toHaveProperty('id', 'pack-new')
+    })
+
+    it('should return 403 when CASHIER role only has creditPacks:read via custom permissions (not create)', async () => {
+      // CASHIER genuinely lacks creditPacks:* in defaults; a custom grant of
+      // only creditPacks:read (merge mode) must NOT allow create.
+      mockCustomPermissions(['creditPacks:read'])
+      const token = makeToken('CASHIER')
       const res = await request(app).post(BASE).set('Authorization', `Bearer ${token}`).send(validBody)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
@@ -402,9 +423,11 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       expect(res.body).toHaveProperty('id', 'pack-1')
     })
 
-    it('should return 200 when MANAGER role has creditPacks:read via custom permissions', async () => {
+    // CASHIER exercises the custom-grant path (MANAGER holds creditPacks:* by
+    // default since 328ad01e — see note on the GET list test).
+    it('should return 200 when CASHIER role has creditPacks:read via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:read'])
-      const token = makeToken('MANAGER')
+      const token = makeToken('CASHIER')
       const res = await request(app).get(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('id', 'pack-1')
@@ -479,9 +502,21 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       expect(res.body).toHaveProperty('id', 'pack-1')
     })
 
-    it('should return 403 when MANAGER role only has creditPacks:read (not update)', async () => {
-      mockCustomPermissions(['creditPacks:read'])
+    it('should return 200 when MANAGER role updates via default permissions (creditPacks:* granted in 328ad01e)', async () => {
+      // MANAGER holds creditPacks:* by default since 328ad01e — merge mode
+      // means a custom grant can only add, never remove, so updates succeed.
+      clearCustomPermissions()
       const token = makeToken('MANAGER')
+      const res = await request(app).patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send(validUpdateBody)
+      expect(res.status).toBe(200)
+      expect(res.body).toHaveProperty('id', 'pack-1')
+    })
+
+    it('should return 403 when CASHIER role only has creditPacks:read via custom permissions (not update)', async () => {
+      // CASHIER lacks creditPacks:* in defaults; custom read-only grant must
+      // NOT allow update.
+      mockCustomPermissions(['creditPacks:read'])
+      const token = makeToken('CASHIER')
       const res = await request(app).patch(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`).send(validUpdateBody)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
@@ -583,9 +618,19 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       expect(res.status).toBe(204)
     })
 
-    it('should return 403 when MANAGER role only has creditPacks:read (not delete)', async () => {
-      mockCustomPermissions(['creditPacks:read'])
+    it('should return 204 when MANAGER role deletes via default permissions (creditPacks:* granted in 328ad01e)', async () => {
+      // MANAGER holds creditPacks:* by default since 328ad01e.
+      clearCustomPermissions()
       const token = makeToken('MANAGER')
+      const res = await request(app).delete(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
+      expect(res.status).toBe(204)
+    })
+
+    it('should return 403 when CASHIER role only has creditPacks:read via custom permissions (not delete)', async () => {
+      // CASHIER lacks creditPacks:* in defaults; custom read-only grant must
+      // NOT allow delete.
+      mockCustomPermissions(['creditPacks:read'])
+      const token = makeToken('CASHIER')
       const res = await request(app).delete(`${BASE}/${PACK_ID}`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
@@ -659,9 +704,11 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       expect(res.body).toHaveProperty('purchases')
     })
 
-    it('should return 200 when MANAGER role has creditPacks:read via custom permissions', async () => {
+    // CASHIER exercises the custom-grant path (MANAGER holds creditPacks:* by
+    // default since 328ad01e — see note on the GET list test).
+    it('should return 200 when CASHIER role has creditPacks:read via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:read'])
-      const token = makeToken('MANAGER')
+      const token = makeToken('CASHIER')
       const res = await request(app).get(`${BASE}/purchases`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('purchases')
@@ -735,9 +782,11 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       expect(res.body).toHaveProperty('purchases')
     })
 
-    it('should return 200 when MANAGER role has creditPacks:read via custom permissions', async () => {
+    // CASHIER exercises the custom-grant path (MANAGER holds creditPacks:* by
+    // default since 328ad01e — see note on the GET list test).
+    it('should return 200 when CASHIER role has creditPacks:read via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:read'])
-      const token = makeToken('MANAGER')
+      const token = makeToken('CASHIER')
       const res = await request(app).get(`${BASE}/purchases/${CUSTOMER_ID}`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('purchases')
@@ -811,9 +860,11 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       expect(res.body).toHaveProperty('transactions')
     })
 
-    it('should return 200 when MANAGER role has creditPacks:read via custom permissions', async () => {
+    // CASHIER exercises the custom-grant path (MANAGER holds creditPacks:* by
+    // default since 328ad01e — see note on the GET list test).
+    it('should return 200 when CASHIER role has creditPacks:read via custom permissions', async () => {
       mockCustomPermissions(['creditPacks:read'])
-      const token = makeToken('MANAGER')
+      const token = makeToken('CASHIER')
       const res = await request(app).get(`${BASE}/transactions`).set('Authorization', `Bearer ${token}`)
       expect(res.status).toBe(200)
       expect(res.body).toHaveProperty('transactions')
@@ -888,9 +939,20 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       expect(res.body).toHaveProperty('type', 'REDEEM')
     })
 
-    it('should return 403 when MANAGER role only has creditPacks:read (not update)', async () => {
-      mockCustomPermissions(['creditPacks:read'])
+    it('should return 200 when MANAGER role redeems via default permissions (creditPacks:* granted in 328ad01e)', async () => {
+      // MANAGER holds creditPacks:* by default since 328ad01e.
+      clearCustomPermissions()
       const token = makeToken('MANAGER')
+      const res = await request(app).post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send(redeemBody)
+      expect(res.status).toBe(200)
+      expect(res.body).toHaveProperty('type', 'REDEEM')
+    })
+
+    it('should return 403 when CASHIER role only has creditPacks:read via custom permissions (not update)', async () => {
+      // CASHIER lacks creditPacks:* in defaults; custom read-only grant must
+      // NOT allow redeem (requires creditPacks:update).
+      mockCustomPermissions(['creditPacks:read'])
+      const token = makeToken('CASHIER')
       const res = await request(app).post(`${BASE}/balances/${BALANCE_ID}/redeem`).set('Authorization', `Bearer ${token}`).send(redeemBody)
       expect(res.status).toBe(403)
       expect(res.body).toHaveProperty('error', 'Forbidden')
@@ -992,9 +1054,23 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       expect(res.body).toHaveProperty('type', 'ADJUST')
     })
 
-    it('should return 403 when MANAGER role only has creditPacks:read (not update)', async () => {
-      mockCustomPermissions(['creditPacks:read'])
+    it('should return 200 when MANAGER role adjusts via default permissions (creditPacks:* granted in 328ad01e)', async () => {
+      // MANAGER holds creditPacks:* by default since 328ad01e.
+      clearCustomPermissions()
       const token = makeToken('MANAGER')
+      const res = await request(app)
+        .post(`${BASE}/balances/${BALANCE_ID}/adjust`)
+        .set('Authorization', `Bearer ${token}`)
+        .send(validAdjustBody)
+      expect(res.status).toBe(200)
+      expect(res.body).toHaveProperty('type', 'ADJUST')
+    })
+
+    it('should return 403 when CASHIER role only has creditPacks:read via custom permissions (not update)', async () => {
+      // CASHIER lacks creditPacks:* in defaults; custom read-only grant must
+      // NOT allow adjust (requires creditPacks:update).
+      mockCustomPermissions(['creditPacks:read'])
+      const token = makeToken('CASHIER')
       const res = await request(app)
         .post(`${BASE}/balances/${BALANCE_ID}/adjust`)
         .set('Authorization', `Bearer ${token}`)
@@ -1146,9 +1222,23 @@ describe('Credit Pack API - Authentication, Authorization & Validation', () => {
       expect(res.body).toHaveProperty('refunded', true)
     })
 
-    it('should return 403 when MANAGER role only has creditPacks:read (not delete)', async () => {
-      mockCustomPermissions(['creditPacks:read'])
+    it('should return 200 when MANAGER role refunds via default permissions (creditPacks:* granted in 328ad01e)', async () => {
+      // MANAGER holds creditPacks:* by default since 328ad01e.
+      clearCustomPermissions()
       const token = makeToken('MANAGER')
+      const res = await request(app)
+        .post(`${BASE}/purchases/${PURCHASE_ID}/refund`)
+        .set('Authorization', `Bearer ${token}`)
+        .send(validRefundBody)
+      expect(res.status).toBe(200)
+      expect(res.body).toHaveProperty('refunded', true)
+    })
+
+    it('should return 403 when CASHIER role only has creditPacks:read via custom permissions (not delete)', async () => {
+      // CASHIER lacks creditPacks:* in defaults; custom read-only grant must
+      // NOT allow refund (requires creditPacks:delete).
+      mockCustomPermissions(['creditPacks:read'])
+      const token = makeToken('CASHIER')
       const res = await request(app)
         .post(`${BASE}/purchases/${PURCHASE_ID}/refund`)
         .set('Authorization', `Bearer ${token}`)

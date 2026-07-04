@@ -160,6 +160,46 @@ jobs:
           END=$(date +%s)
           echo "Unit test shard ${{ matrix.shard }}/4 duration: $((END - START)) seconds" >> "$GITHUB_STEP_SUMMARY"
 
+  # 🌐 API middleware tests: route mounting + auth + checkPermission + Zod on
+  # every endpoint. Mock-based (setup.ts forces a dummy DATABASE_URL) — needs
+  # no DB service. This suite rotted for 7 months while wired into no gate
+  # (2025-11 → 2026-07, 76 stale failures); keep it visible in CI.
+  # OBSERVATIONAL for now (continue-on-error, not in any deploy `needs`):
+  # freshly revived suite — it must prove itself flake-free for a few weeks
+  # before being promoted to a required deploy gate. The blocking gate today
+  # is local: scripts/pre-deploy-check.sh step 6b.
+  api-tests:
+    name: 🌐 API Middleware Tests (informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 🗄️ Generate Prisma Client
+        run: npx prisma generate
+
+      - name: 💾 Restore Jest cache
+        uses: actions/cache@v4
+        with:
+          path: node_modules/.cache/jest
+          key: jest-${{ runner.os }}-node20-${{ hashFiles('package-lock.json', 'jest.config.js', 'tsconfig.json', 'tsconfig.build.json') }}
+          restore-keys: |
+            jest-${{ runner.os }}-node20-
+
+      - name: 🌐 Run API middleware tests
+        run: npm run test:api
+
   # NOTE: Staging deploy disabled — Render staging service is suspended.
   # Demo environment (Fly.io) is still active via fly-deploy.yml.
   # Uncomment this job if/when Render staging is re-enabled.
