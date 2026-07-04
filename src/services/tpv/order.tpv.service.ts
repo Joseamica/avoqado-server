@@ -10,7 +10,7 @@ import { moduleService, MODULE_CODES } from '../modules/module.service'
 import { deductInventoryForProduct, getProductInventoryMethod } from '../dashboard/productInventoryIntegration.service'
 import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service'
 import { logAction } from '../dashboard/activity-log.service'
-import { buildItemDiscountRow, calculateDiscountPesos, validateDiscountActive } from '../shared/discount.service'
+import { buildItemDiscountRow, calculateDiscountPesos, validateDiscountActive, validateDiscountScopeForItem } from '../shared/discount.service'
 
 /**
  * Helper function to flatten OrderItemModifier structure for Android compatibility
@@ -843,6 +843,9 @@ export async function createOrderWithItems(
     const unitPricePesos = product ? Number(product.price) : Number(item.unitPrice || 0)
     const lineGrossPesos = roundPesos((unitPricePesos + modifierGrossPesos) * item.quantity)
     const appliedDiscount = item.itemDiscountId ? discounts.find(discount => discount.id === item.itemDiscountId)! : null
+    if (appliedDiscount) {
+      validateDiscountScopeForItem(appliedDiscount, { productId: product?.id ?? null, categoryId: product?.categoryId ?? null })
+    }
     const lineDiscountPesos = item.isCortesia
       ? lineGrossPesos
       : appliedDiscount

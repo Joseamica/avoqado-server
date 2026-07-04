@@ -72,6 +72,45 @@ export function validateDiscountActive(discount: any): void {
   }
 }
 
+/**
+ * Enforce that an ITEM/CATEGORY-scoped `Discount` actually targets the line
+ * item it's being applied to, and that an ORDER-scoped discount is never
+ * smuggled in through a per-item `discountId`/`itemDiscountId` field.
+ *
+ * Without this, a tampered client could send an ITEM discount scoped to
+ * product A against product B's line item, or send an ORDER-scoped discount
+ * (meant only for the order-level discount field) as a per-item discount.
+ *
+ * @param item The line item's `productId`/`categoryId` (both `null` for a
+ *   custom "Otro importe" line — which then can never match an ITEM/CATEGORY
+ *   discount, since there's no real product to check against).
+ * @throws BadRequestError — same class + rejection style as the existing
+ *   "Descuento no encontrado o no pertenece a este local" check in this same
+ *   code path: reject the WHOLE order, Spanish message naming the mismatch.
+ */
+export function validateDiscountScopeForItem(discount: any, item: { productId: string | null; categoryId: string | null }): void {
+  if (discount.scope === 'ORDER') {
+    throw new BadRequestError(`Descuento "${discount.name}" es de alcance de orden y no puede aplicarse a un artículo individual`)
+  }
+
+  if (discount.scope === 'ITEM') {
+    if (!item.productId || !discount.targetItemIds?.includes(item.productId)) {
+      throw new BadRequestError(`Descuento "${discount.name}" no aplica a este producto`)
+    }
+    return
+  }
+
+  if (discount.scope === 'CATEGORY') {
+    if (!item.categoryId || !discount.targetCategoryIds?.includes(item.categoryId)) {
+      throw new BadRequestError(`Descuento "${discount.name}" no aplica a la categoría de este producto`)
+    }
+    return
+  }
+
+  // Other scopes (e.g. CUSTOMER_GROUP) aren't reachable via the per-item
+  // discountId/itemDiscountId input today — nothing to enforce here.
+}
+
 export type ItemDiscountRowInput = {
   orderId: string
   itemId: string

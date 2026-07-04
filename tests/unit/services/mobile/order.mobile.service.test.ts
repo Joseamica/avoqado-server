@@ -361,6 +361,142 @@ describe('order.mobile.service', () => {
     expect(prismaMock.orderDiscount.create).not.toHaveBeenCalled()
   })
 
+  // ── Fix 2: ITEM/CATEGORY discount scope enforcement (shared discount.service) ──
+
+  it('rejects an ITEM discount applied to a non-targeted product', async () => {
+    prismaMock.staff.findUnique.mockResolvedValue({ id: 'staff-1', venueId: 'venue-1' })
+    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: 'venue-1', active: true })
+    prismaMock.product.findMany.mockResolvedValue([
+      { id: 'prod-2', name: 'Refresco', price: new Decimal(30), category: { name: 'Bebidas' }, categoryId: 'cat-bebidas' },
+    ])
+    prismaMock.modifier.findMany.mockResolvedValue([])
+    prismaMock.discount.findMany.mockResolvedValue([
+      {
+        id: 'disc-item',
+        venueId: 'venue-1',
+        name: 'Solo hamburguesas',
+        type: 'PERCENTAGE',
+        value: new Decimal(20),
+        active: true,
+        scope: 'ITEM',
+        targetItemIds: ['prod-1'], // does NOT include prod-2
+      },
+    ])
+
+    await expect(
+      createOrderWithItems('venue-1', {
+        staffId: 'staff-1',
+        items: [{ productId: 'prod-2', quantity: 1, discountId: 'disc-item' }],
+        source: 'AVOQADO_IOS',
+      }),
+    ).rejects.toThrow('Descuento "Solo hamburguesas" no aplica a este producto')
+
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  it('applies a CATEGORY discount when the product category matches', async () => {
+    prismaMock.staff.findUnique.mockResolvedValue({ id: 'staff-1', venueId: 'venue-1' })
+    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: 'venue-1', active: true })
+    prismaMock.product.findMany.mockResolvedValue([
+      { id: 'prod-1', name: 'Hamburguesa', price: new Decimal(100), category: { name: 'Comida' }, categoryId: 'cat-comida' },
+    ])
+    prismaMock.modifier.findMany.mockResolvedValue([])
+    prismaMock.discount.findMany.mockResolvedValue([
+      {
+        id: 'disc-cat',
+        venueId: 'venue-1',
+        name: '10% Comida',
+        type: 'PERCENTAGE',
+        value: new Decimal(10),
+        active: true,
+        scope: 'CATEGORY',
+        targetCategoryIds: ['cat-comida'],
+      },
+    ])
+    prismaMock.order.create.mockResolvedValue({
+      id: 'order-1',
+      orderNumber: 'ORD-1',
+      status: 'CONFIRMED',
+      paymentStatus: 'PENDING',
+      subtotal: new Decimal(100),
+      discountAmount: new Decimal(10),
+      taxAmount: new Decimal(0),
+      total: new Decimal(90),
+      createdAt: new Date('2026-07-03T10:00:00.000Z'),
+      items: [],
+    })
+
+    const result = await createOrderWithItems('venue-1', {
+      staffId: 'staff-1',
+      items: [{ productId: 'prod-1', quantity: 1, discountId: 'disc-cat' }],
+      source: 'AVOQADO_IOS',
+    })
+
+    expect(result.discountAmount).toBe(10)
+    expect(result.total).toBe(90)
+  })
+
+  it('rejects a CATEGORY discount when the product category does not match', async () => {
+    prismaMock.staff.findUnique.mockResolvedValue({ id: 'staff-1', venueId: 'venue-1' })
+    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: 'venue-1', active: true })
+    prismaMock.product.findMany.mockResolvedValue([
+      { id: 'prod-2', name: 'Refresco', price: new Decimal(30), category: { name: 'Bebidas' }, categoryId: 'cat-bebidas' },
+    ])
+    prismaMock.modifier.findMany.mockResolvedValue([])
+    prismaMock.discount.findMany.mockResolvedValue([
+      {
+        id: 'disc-cat',
+        venueId: 'venue-1',
+        name: '10% Comida',
+        type: 'PERCENTAGE',
+        value: new Decimal(10),
+        active: true,
+        scope: 'CATEGORY',
+        targetCategoryIds: ['cat-comida'], // does NOT include cat-bebidas
+      },
+    ])
+
+    await expect(
+      createOrderWithItems('venue-1', {
+        staffId: 'staff-1',
+        items: [{ productId: 'prod-2', quantity: 1, discountId: 'disc-cat' }],
+        source: 'AVOQADO_IOS',
+      }),
+    ).rejects.toThrow('Descuento "10% Comida" no aplica a la categoría de este producto')
+
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  it('rejects an ORDER-scoped discount sent as a per-item discountId', async () => {
+    prismaMock.staff.findUnique.mockResolvedValue({ id: 'staff-1', venueId: 'venue-1' })
+    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: 'venue-1', active: true })
+    prismaMock.product.findMany.mockResolvedValue([
+      { id: 'prod-1', name: 'Hamburguesa', price: new Decimal(100), category: { name: 'Comida' }, categoryId: 'cat-comida' },
+    ])
+    prismaMock.modifier.findMany.mockResolvedValue([])
+    prismaMock.discount.findMany.mockResolvedValue([
+      {
+        id: 'disc-order',
+        venueId: 'venue-1',
+        name: 'Descuento de orden',
+        type: 'FIXED_AMOUNT',
+        value: new Decimal(15),
+        active: true,
+        scope: 'ORDER',
+      },
+    ])
+
+    await expect(
+      createOrderWithItems('venue-1', {
+        staffId: 'staff-1',
+        items: [{ productId: 'prod-1', quantity: 1, discountId: 'disc-order' }],
+        source: 'AVOQADO_IOS',
+      }),
+    ).rejects.toThrow('Descuento "Descuento de orden" es de alcance de orden y no puede aplicarse a un artículo individual')
+
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
   it('marks discounted cash order as paid when customer pays the discounted total', async () => {
     prismaMock.order.findUnique.mockResolvedValue({
       id: 'order-1',
