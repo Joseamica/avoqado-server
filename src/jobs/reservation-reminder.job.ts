@@ -22,7 +22,11 @@ type ReminderChannel = 'EMAIL' | 'SMS' | 'WHATSAPP'
  */
 export class ReservationReminderJob {
   private job: CronJob | null = null
-  private readonly CRON_PATTERN = '*/5 * * * *'
+  // Offset 20s off the minute mark — several other */5 jobs (marketing, auto no-show,
+  // POS monitor, stale-pending alert) share this cadence; firing on the exact same
+  // tick can exhaust the connection pool (P2024 incident 2026-07-03).
+  // See .claude/rules/cron-jobs.md checklist item 4.
+  private readonly CRON_PATTERN = '20 */5 * * * *'
   // 5-minute tolerance window covers this tick's slack — we accept offsets that
   // come due any time from (offset - 5) min ago up to (offset + 2) min from now.
   private readonly DUE_WINDOW_BEFORE_MIN = 5

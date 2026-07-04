@@ -25,9 +25,12 @@ export class MarketingCampaignJob {
   private isRunning: boolean = false
 
   constructor() {
-    // Run every 5 minutes
+    // Run every 5 minutes, offset 5s off the minute mark — several other */5 jobs
+    // (reservation reminders, auto no-show, POS monitor, stale-pending alert) share
+    // this cadence; firing on the exact same tick can exhaust the connection pool
+    // (P2024 incident 2026-07-03). See .claude/rules/cron-jobs.md checklist item 4.
     this.job = new CronJob(
-      '*/5 * * * *', // Every 5 minutes
+      '5 */5 * * * *', // :00:05, :05:05, :10:05...
       async () => {
         // CronJob expects void | Promise<void>, so we wrap and ignore return value
         await this.processQueue()
@@ -112,7 +115,7 @@ export class MarketingCampaignJob {
     return {
       isRunning: !!this.job,
       isProcessing: this.isRunning,
-      cronPattern: '*/5 * * * *',
+      cronPattern: '5 */5 * * * *',
       description: 'Processes marketing campaign email queue every 5 minutes',
       batchSize: marketingService.BATCH_SIZE,
       batchDelayMs: marketingService.BATCH_DELAY_MS,

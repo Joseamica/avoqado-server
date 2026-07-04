@@ -103,7 +103,14 @@ const round2 = (n: number): number => Math.round(n * 100) / 100
  */
 export function venueWeekBounds(anchorDateKey: string | undefined, venueTimezone: string): { weekStart: Date; weekEnd: Date } {
   const anchor = anchorDateKey ?? formatInTimeZone(new Date(), venueTimezone, 'yyyy-MM-dd')
-  const [y, m, d] = anchor.split('-').map(Number)
+  let [y, m, d] = anchor.split('-').map(Number)
+  // weekStart is a user-controlled query param — a malformed/out-of-range value
+  // must NOT produce an Invalid Date (which would crash the downstream Prisma
+  // query with a 500). Fall back to the current venue week instead.
+  const valid = Number.isFinite(y) && Number.isFinite(m) && Number.isFinite(d) && m >= 1 && m <= 12 && d >= 1 && d <= 31 && y >= 2000 && y <= 2100
+  if (!valid) {
+    ;[y, m, d] = formatInTimeZone(new Date(), venueTimezone, 'yyyy-MM-dd').split('-').map(Number)
+  }
   const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay() // 0=Sun … 6=Sat (calendar dow of a date-only value)
   const sinceMonday = (dow + 6) % 7
   const key = (dt: Date) => `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`

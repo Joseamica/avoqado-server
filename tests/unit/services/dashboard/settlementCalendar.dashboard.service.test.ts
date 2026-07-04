@@ -121,4 +121,20 @@ describe('venueWeekBounds', () => {
     expect(weekEnd.getTime() - weekStart.getTime()).toBeGreaterThan(6.9 * 24 * 60 * 60 * 1000)
     expect(weekEnd.getTime() - weekStart.getTime()).toBeLessThan(7 * 24 * 60 * 60 * 1000)
   })
+
+  // Regression: `weekStart` is a user-controlled query param. Malformed/out-of-range
+  // values must NOT produce an Invalid Date (which would crash the downstream Prisma
+  // query with a 500) — they fall back to a valid current week instead.
+  it.each(['garbage', '', '99999-01-01', '2026-13-40', 'DROP TABLE', '2026/07/08'])(
+    'never yields an Invalid Date for malformed weekStart=%p (falls back to a valid week)',
+    bad => {
+      const { weekStart, weekEnd } = venueWeekBounds(bad, TZ)
+      expect(Number.isNaN(weekStart.getTime())).toBe(false)
+      expect(Number.isNaN(weekEnd.getTime())).toBe(false)
+      expect(weekEnd.getTime() - weekStart.getTime()).toBeGreaterThan(6.9 * 24 * 60 * 60 * 1000)
+      expect(weekEnd.getTime() - weekStart.getTime()).toBeLessThan(7 * 24 * 60 * 60 * 1000)
+      // The fallback week must start on a Monday.
+      expect(new Date(dateKey(weekStart) + 'T12:00:00Z').getUTCDay()).toBe(1)
+    },
+  )
 })

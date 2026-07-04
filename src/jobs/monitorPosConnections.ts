@@ -66,9 +66,13 @@ async function checkPosConnections() {
 
 /**
  * Inicia el cron job para monitorear las conexiones del POS.
- * Se ejecuta cada 5 minutos.
+ * Se ejecuta cada 5 minutos, desfasado 2 min del arranque de la ventana —
+ * varios otros jobs cron "cada 5 min" (marketing, reservation reminders/no-show,
+ * stale-pending alert) comparten esta cadencia; disparar todos en el mismo tick
+ * puede agotar el pool de conexiones (incidente P2024 2026-07-03).
+ * Ver .claude/rules/cron-jobs.md checklist punto 4.
  */
 export function startPosConnectionMonitor() {
   logger.info(`[Monitor Job] ⏰ Monitor de conexiones POS iniciado. Se ejecutará cada 5 minutos.`)
-  cron.schedule('*/5 * * * *', checkPosConnections)
+  cron.schedule('1-59/5 * * * *', checkPosConnections)
 }

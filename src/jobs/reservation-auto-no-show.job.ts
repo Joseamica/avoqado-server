@@ -20,7 +20,11 @@ import { retry, shouldRetryDbConnectionError } from '../utils/retry'
  */
 export class ReservationAutoNoShowJob {
   private job: CronJob | null = null
-  private readonly CRON_PATTERN = '*/5 * * * *'
+  // Offset 35s off the minute mark — several other */5 jobs (marketing, reservation
+  // reminders, POS monitor, stale-pending alert) share this cadence; firing on the
+  // exact same tick can exhaust the connection pool (P2024 incident 2026-07-03).
+  // See .claude/rules/cron-jobs.md checklist item 4.
+  private readonly CRON_PATTERN = '35 */5 * * * *'
 
   constructor() {
     this.job = new CronJob(this.CRON_PATTERN, this.run.bind(this), null, false, 'America/Mexico_City')
