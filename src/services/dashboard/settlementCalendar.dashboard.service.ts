@@ -12,7 +12,7 @@
  */
 
 import { PaymentMethod, SettlementDayType, TransactionCardType } from '@prisma/client'
-import { formatInTimeZone } from 'date-fns-tz'
+import { formatInTimeZone, fromZonedTime } from 'date-fns-tz'
 
 import { calculateSettlementDate } from '@/services/payments/settlementCalculation.service'
 import prisma from '@/utils/prismaClient'
@@ -95,6 +95,25 @@ export function projectPaymentSettlement(
 // ── Weekly settlement view (Task 2) ─────────────────────────────────────────
 
 const round2 = (n: number): number => Math.round(n * 100) / 100
+
+/**
+ * Monday–Sunday week bounds (as UTC instants) for the venue-local week that
+ * contains `anchorDateKey` (yyyy-MM-dd). Omit `anchorDateKey` to use today in the
+ * venue tz. Bounds: Monday 00:00 → Sunday 23:59:59.999 venue-local, as UTC.
+ */
+export function venueWeekBounds(anchorDateKey: string | undefined, venueTimezone: string): { weekStart: Date; weekEnd: Date } {
+  const anchor = anchorDateKey ?? formatInTimeZone(new Date(), venueTimezone, 'yyyy-MM-dd')
+  const [y, m, d] = anchor.split('-').map(Number)
+  const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay() // 0=Sun … 6=Sat (calendar dow of a date-only value)
+  const sinceMonday = (dow + 6) % 7
+  const key = (dt: Date) => `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`
+  const mondayKey = key(new Date(Date.UTC(y, m - 1, d - sinceMonday)))
+  const sundayKey = key(new Date(Date.UTC(y, m - 1, d - sinceMonday + 6)))
+  return {
+    weekStart: fromZonedTime(`${mondayKey}T00:00:00.000`, venueTimezone),
+    weekEnd: fromZonedTime(`${sundayKey}T23:59:59.999`, venueTimezone),
+  }
+}
 // Lookback ≥ max settlement days + weekend/holiday slack: a payment sold this
 // far before the week can still settle inside it.
 const LOOKBACK_DAYS = 21

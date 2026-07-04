@@ -1,6 +1,7 @@
 import { NextFunction, Request, Response } from 'express'
 import prisma from '../../utils/prismaClient'
 import * as availableBalanceService from '../../services/dashboard/availableBalance.dashboard.service'
+import { getSettlementsLandingInWeek, venueWeekBounds } from '../../services/dashboard/settlementCalendar.dashboard.service'
 import { DEFAULT_TIMEZONE, venueStartOfDay } from '../../utils/datetime'
 import logger from '../../config/logger'
 import { AuthenticationError } from '../../errors/AppError'
@@ -202,6 +203,32 @@ export async function getSettlementCalendar(
     res.status(200).json({ success: true, data: calendar })
   } catch (error) {
     logger.error('Error fetching settlement calendar', { error })
+    next(error)
+  }
+}
+
+/**
+ * GET /dashboard/venues/:venueId/available-balance/settlement-week
+ * Weekly settlement calendar — how much card money lands in the bank on each day
+ * of a Monday–Sunday week (by settlement date, recomputed live). `weekStart`
+ * (yyyy-MM-dd) selects the week; omit it for the current week. Shared by Saldo
+ * Disponible and the Sales Summary statement.
+ */
+export async function getSettlementWeek(
+  req: Request<{ venueId: string }, {}, {}, { weekStart?: string }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { venueId } = req.params
+    const { weekStart } = req.query
+    const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+    const venueTimezone = venue?.timezone || DEFAULT_TIMEZONE
+    const bounds = venueWeekBounds(weekStart, venueTimezone)
+    const week = await getSettlementsLandingInWeek(venueId, bounds.weekStart, bounds.weekEnd, venueTimezone)
+    res.status(200).json({ success: true, data: week })
+  } catch (error) {
+    logger.error('Error fetching settlement week', { error })
     next(error)
   }
 }

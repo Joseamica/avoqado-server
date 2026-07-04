@@ -1,5 +1,6 @@
-import { getSettlementsLandingInWeek, projectPaymentSettlement } from '@/services/dashboard/settlementCalendar.dashboard.service'
+import { getSettlementsLandingInWeek, projectPaymentSettlement, venueWeekBounds } from '@/services/dashboard/settlementCalendar.dashboard.service'
 import { prismaMock } from '@tests/__helpers__/setup'
+import { formatInTimeZone } from 'date-fns-tz'
 
 const TZ = 'America/Mexico_City'
 
@@ -96,5 +97,28 @@ describe('getSettlementsLandingInWeek', () => {
     const r = await getSettlementsLandingInWeek('v1', weekStart, weekEnd, TZ)
     expect(r.days).toEqual([])
     expect(r.weekTotal).toEqual({ gross: 0, commission: 0, net: 0, count: 0 })
+  })
+})
+
+describe('venueWeekBounds', () => {
+  const dateKey = (d: Date) => formatInTimeZone(d, TZ, 'yyyy-MM-dd')
+
+  it('returns the Monday–Sunday venue-local week containing a mid-week date', () => {
+    const { weekStart, weekEnd } = venueWeekBounds('2026-07-08', TZ) // Wed
+    expect(dateKey(weekStart)).toBe('2026-07-06') // Mon
+    expect(dateKey(weekEnd)).toBe('2026-07-12') // Sun
+  })
+
+  it('anchors correctly at the week edges (Monday and Sunday map to the same week)', () => {
+    expect(dateKey(venueWeekBounds('2026-07-06', TZ).weekStart)).toBe('2026-07-06') // Monday itself
+    expect(dateKey(venueWeekBounds('2026-07-12', TZ).weekStart)).toBe('2026-07-06') // Sunday → same Monday
+    expect(dateKey(venueWeekBounds('2026-07-13', TZ).weekStart)).toBe('2026-07-13') // next Monday
+  })
+
+  it('week spans exactly 7 venue-local days', () => {
+    const { weekStart, weekEnd } = venueWeekBounds('2026-07-08', TZ)
+    // Sunday 23:59:59.999 minus Monday 00:00 ≈ 7 days
+    expect(weekEnd.getTime() - weekStart.getTime()).toBeGreaterThan(6.9 * 24 * 60 * 60 * 1000)
+    expect(weekEnd.getTime() - weekStart.getTime()).toBeLessThan(7 * 24 * 60 * 60 * 1000)
   })
 })

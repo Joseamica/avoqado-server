@@ -3556,6 +3556,16 @@ router.get(
   availableBalanceController.getSettlementCalendar,
 )
 
+// Weekly settlement calendar (Monday–Sunday, by settlement date). Shared by
+// Saldo Disponible and the Sales Summary statement. `weekStart=yyyy-MM-dd` optional.
+router.get(
+  '/venues/:venueId/available-balance/settlement-week',
+  authenticateTokenMiddleware,
+  checkPermission('settlements:read'),
+  checkFeatureAccess('ADVANCED_REPORTS'),
+  availableBalanceController.getSettlementWeek,
+)
+
 /**
  * @openapi
  * /api/v1/dashboard/venues/{venueId}/available-balance/simulate:
