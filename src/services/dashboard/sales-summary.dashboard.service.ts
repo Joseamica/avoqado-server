@@ -586,18 +586,7 @@ export async function computeSettlementProjection(
     const projection = projectPaymentSettlement({ ...p, merchantAccountId: merchantId }, configs, venueTimezone)
     if (!projection) continue // no cost or no matching rule → can't project honestly; leave it out of the calendar
 
-    const { settlementDateKey: dateKey, commission: fee, net } = projection
-
-    // Recover the matched config only to track settlementDays per merchant below
-    // (projectPaymentSettlement already validated a match exists).
-    const tc = p.transactionCost!
-    const config = configs.find(
-      c =>
-        c.merchantAccountId === merchantId &&
-        c.cardType === tc.transactionType &&
-        c.effectiveFrom <= p.createdAt &&
-        (c.effectiveTo === null || c.effectiveTo >= p.createdAt),
-    )!
+    const { settlementDateKey: dateKey, commission: fee, net, settlementDays } = projection
 
     if (!days.has(dateKey)) days.set(dateKey, new Map())
     const merchantsForDay = days.get(dateKey)!
@@ -617,13 +606,13 @@ export async function computeSettlementProjection(
 
     const md = datesByMerchant.get(merchantId)
     if (!md) {
-      datesByMerchant.set(merchantId, { dates: new Set([dateKey]), settlementDays: config.settlementDays })
+      datesByMerchant.set(merchantId, { dates: new Set([dateKey]), settlementDays })
     } else {
       md.dates.add(dateKey)
       // Only report a rule when it is unambiguous: a merchant whose card types
       // settle differently (e.g. debit 1 day, Amex 3) gets null instead of a
       // last-write-wins value that depends on payment iteration order.
-      if (md.settlementDays !== config.settlementDays) md.settlementDays = null
+      if (md.settlementDays !== settlementDays) md.settlementDays = null
     }
   }
 

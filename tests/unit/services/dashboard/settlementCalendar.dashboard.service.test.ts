@@ -22,7 +22,13 @@ describe('projectPaymentSettlement', () => {
       merchantAccountId: 'm1',
       transactionCost: { transactionType: 'CREDIT' as const, venueChargeAmount: 30, venueFixedFee: 5 },
     }
-    expect(projectPaymentSettlement(p, [cfg], TZ)).toEqual({ settlementDateKey: '2026-07-06', gross: 1050, commission: 35, net: 1015 })
+    expect(projectPaymentSettlement(p, [cfg], TZ)).toEqual({
+      settlementDateKey: '2026-07-06',
+      gross: 1050,
+      commission: 35,
+      net: 1015,
+      settlementDays: 1,
+    })
   })
 
   it('returns null with no cost', () => {

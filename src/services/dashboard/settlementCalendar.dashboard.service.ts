@@ -44,6 +44,7 @@ export interface ProjectedSettlement {
   gross: number
   commission: number
   net: number
+  settlementDays: number
 }
 
 /**
@@ -86,5 +87,6 @@ export function projectPaymentSettlement(
     gross,
     commission,
     net: gross - commission,
+    settlementDays: config.settlementDays,
   }
 }
