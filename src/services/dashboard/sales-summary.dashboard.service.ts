@@ -30,7 +30,7 @@ import { formatInTimeZone } from 'date-fns-tz'
 
 import logger from '@/config/logger'
 import { BadRequestError } from '@/errors/AppError'
-import { calculateSettlementDate } from '@/services/payments/settlementCalculation.service'
+import { projectPaymentSettlement } from '@/services/dashboard/settlementCalendar.dashboard.service'
 import {
   MINDFORM_NEW_VENUE_ID,
   getLegacyPayments,
@@ -578,31 +578,26 @@ export async function computeSettlementProjection(
   const datesByMerchant = new Map<string, { dates: Set<string>; settlementDays: number | null }>()
 
   for (const p of payments) {
-    const tc = p.transactionCost
     const merchantId = p.merchantAccountId
-    if (!tc || !merchantId) continue
+    if (!merchantId) continue
 
-    // configs is ordered effectiveFrom desc, so the first match is the most recent
-    // config whose window contains the payment date.
+    // configs is ordered effectiveFrom desc, so projectPaymentSettlement's `find`
+    // picks the most recent config whose window contains the payment date.
+    const projection = projectPaymentSettlement({ ...p, merchantAccountId: merchantId }, configs, venueTimezone)
+    if (!projection) continue // no cost or no matching rule → can't project honestly; leave it out of the calendar
+
+    const { settlementDateKey: dateKey, commission: fee, net } = projection
+
+    // Recover the matched config only to track settlementDays per merchant below
+    // (projectPaymentSettlement already validated a match exists).
+    const tc = p.transactionCost!
     const config = configs.find(
       c =>
         c.merchantAccountId === merchantId &&
         c.cardType === tc.transactionType &&
         c.effectiveFrom <= p.createdAt &&
         (c.effectiveTo === null || c.effectiveTo >= p.createdAt),
-    )
-    if (!config) continue // no rule → can't project honestly; leave it out of the calendar
-
-    const settlementDate = calculateSettlementDate(p.createdAt, {
-      settlementDays: config.settlementDays,
-      settlementDayType: config.settlementDayType,
-      cutoffTime: config.cutoffTime,
-      cutoffTimezone: config.cutoffTimezone,
-    })
-    const dateKey = formatInTimeZone(settlementDate, venueTimezone, 'yyyy-MM-dd')
-
-    const fee = Number(tc.venueChargeAmount) + Number(tc.venueFixedFee)
-    const net = Number(p.amount) + Number(p.tipAmount ?? 0) - fee
+    )!
 
     if (!days.has(dateKey)) days.set(dateKey, new Map())
     const merchantsForDay = days.get(dateKey)!
