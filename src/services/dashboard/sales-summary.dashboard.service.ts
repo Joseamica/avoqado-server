@@ -25,7 +25,7 @@
  * - netProfit: netSales - platformFees - staffCommissions (true venue profit)
  */
 
-import { Prisma } from '@prisma/client'
+import { Prisma, TransactionCardType } from '@prisma/client'
 import { formatInTimeZone } from 'date-fns-tz'
 
 import logger from '@/config/logger'
@@ -120,6 +120,11 @@ export interface MerchantAccountBreakdown {
     nextDate: string | null
     settlementDays: number | null
   }
+  // Active settlement rules per card type (from SettlementConfiguration where
+  // effectiveTo IS NULL). Lets the UI say "Visa/MC: 1 día hábil · Amex: 3 días
+  // hábiles" per merchant. Present only when includeMerchantBreakdown=true and
+  // the account has active rules; omitted otherwise.
+  settlementRules?: Array<{ cardType: TransactionCardType; settlementDays: number }>
 }
 
 // Entrega 2 — settlement projection ("¿cuándo cae el dinero?").
@@ -444,8 +449,9 @@ export async function computeMerchantAccountBreakdown(
 
   if (rows.length === 0) return []
 
+  const merchantAccountIds = rows.map(r => r.merchantAccountId)
   const accounts = await prisma.merchantAccount.findMany({
-    where: { id: { in: rows.map(r => r.merchantAccountId) } },
+    where: { id: { in: merchantAccountIds } },
     select: {
       id: true,
       displayName: true,
@@ -457,11 +463,27 @@ export async function computeMerchantAccountBreakdown(
   })
   const byId = new Map(accounts.map(a => [a.id, a]))
 
+  // Active settlement rules per (merchant, card type) — same pattern the Saldo
+  // Disponible breakdown uses (effectiveTo IS NULL = currently in force). Lets the
+  // UI show "Visa/MC: 1 día hábil · Amex: 3 días hábiles" per merchant.
+  const activeConfigs =
+    (await prisma.settlementConfiguration.findMany({
+      where: { merchantAccountId: { in: merchantAccountIds }, effectiveTo: null },
+      select: { merchantAccountId: true, cardType: true, settlementDays: true },
+    })) ?? []
+  const rulesByMerchant = new Map<string, Array<{ cardType: TransactionCardType; settlementDays: number }>>()
+  for (const cfg of activeConfigs) {
+    const list = rulesByMerchant.get(cfg.merchantAccountId) ?? []
+    list.push({ cardType: cfg.cardType, settlementDays: cfg.settlementDays })
+    rulesByMerchant.set(cfg.merchantAccountId, list)
+  }
+
   return rows
     .map(r => {
       const a = byId.get(r.merchantAccountId)
       const collected = round2(Number(r.collected))
       const fee = round2(Number(r.fee))
+      const rules = rulesByMerchant.get(r.merchantAccountId)
       return {
         merchantAccountId: r.merchantAccountId,
         displayName: a?.displayName || a?.alias || 'Comercio',
@@ -471,6 +493,7 @@ export async function computeMerchantAccountBreakdown(
         platformFee: fee,
         netToReceive: round2(collected - fee),
         transactionCount: Number(r.txns),
+        ...(rules?.length ? { settlementRules: rules } : {}),
       }
     })
     .sort((x, y) => y.collectedOnCard - x.collectedOnCard)
@@ -866,7 +889,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   const platformFeesSqlClause = buildPaymentSqlClause(paymentMethod, cardType, 'p')
   const platformFeesMerchantClause = merchantAccountId ? ' AND p."merchantAccountId" = $4' : ''
   const platformFeesQuery = `
-    SELECT COALESCE(SUM(tc."venueChargeAmount"), 0)::float AS sum_fee
+    SELECT COALESCE(SUM(COALESCE(tc."venueChargeAmount", 0) + COALESCE(tc."venueFixedFee", 0)), 0)::float AS sum_fee
     FROM "TransactionCost" tc
     JOIN "Payment" p ON p.id = tc."paymentId"
     WHERE p."venueId" = $1
@@ -1098,7 +1121,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
         select: { id: true, method: true, cardBrand: true, processorData: true, amount: true, tipAmount: true },
       }),
       prisma.$queryRaw<Array<{ payment_id: string; fee: number }>>`
-        SELECT tc."paymentId" AS payment_id, tc."venueChargeAmount"::float AS fee
+        SELECT tc."paymentId" AS payment_id, (tc."venueChargeAmount" + COALESCE(tc."venueFixedFee", 0))::float AS fee
         FROM "TransactionCost" tc
         JOIN "Payment" p ON p.id = tc."paymentId"
         WHERE p."venueId" = ${venueId}

@@ -36,6 +36,12 @@ export interface AvailableBalanceSummary {
     date: Date | null
     amount: number
   }
+  // Card money we counted but could NOT cost (no TransactionCost — e.g. a merchant
+  // account with no VenuePricingStructure). Surfaced so the UI can explain why the
+  // per-card-type breakdown (which excludes these) doesn't sum to the summary:
+  //   Σ byCardType.netAmount + uncostedAmount ≈ availableNow + pendingSettlement.
+  uncostedCount: number
+  uncostedAmount: number
 }
 
 export interface CardTypeBreakdown {
@@ -96,6 +102,7 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
       transactionCost: {
         select: {
           venueChargeAmount: true,
+          venueFixedFee: true,
         },
       },
     },
@@ -126,14 +133,29 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
   let totalFees = 0
   let availableNow = 0
   let pendingSettlement = 0
+  // Card money we could NOT cost (no TransactionCost — e.g. a merchant account
+  // without a VenuePricingStructure). Counted into the balance at fee 0, but
+  // surfaced so the UI can explain the gap vs the per-card-type breakdown.
+  let uncostedCount = 0
+  let uncostedAmount = 0
   const upcomingSettlements: { date: Date; amount: number }[] = []
 
   // Process card payments
   for (const payment of cardPayments) {
     // Include the tip: customer charged amount + tip; commission is on amount+tip.
     const amount = Number(payment.amount) + Number(payment.tipAmount ?? 0)
-    const fees = payment.transactionCost ? Number(payment.transactionCost.venueChargeAmount) : 0
+    // Venue fee = percentage charge + per-transaction fixed fee. Dropping the
+    // fixed fee overstated the net the venue receives (it is netted out by the
+    // settlement engine, so the stored netSettlementAmount already includes it).
+    const fees = payment.transactionCost
+      ? Number(payment.transactionCost.venueChargeAmount) + Number(payment.transactionCost.venueFixedFee)
+      : 0
     const netAmount = amount - fees
+
+    if (!payment.transactionCost) {
+      uncostedCount += 1
+      uncostedAmount += amount
+    }
 
     totalSales += amount
     totalFees += fees
@@ -200,6 +222,8 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
     availableNow,
     pendingSettlement,
     cashTotal,
+    uncostedCount,
+    uncostedAmount,
   })
 
   return {
@@ -208,6 +232,8 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
     availableNow,
     pendingSettlement,
     estimatedNextSettlement,
+    uncostedCount,
+    uncostedAmount,
   }
 }
 
@@ -246,6 +272,7 @@ export async function getBalanceByCardType(venueId: string, dateRange?: { from: 
         select: {
           transactionType: true,
           venueChargeAmount: true,
+          venueFixedFee: true,
           merchantAccountId: true,
         },
       },
@@ -316,7 +343,9 @@ export async function getBalanceByCardType(venueId: string, dateRange?: { from: 
     const baseAmount = Number(payment.amount)
     const tip = Number(payment.tipAmount ?? 0)
     const amount = baseAmount + tip
-    const fees = Number(payment.transactionCost.venueChargeAmount)
+    // Venue fee = percentage charge + per-transaction fixed fee (matches the
+    // settlement engine's net and the Sales Summary breakdown).
+    const fees = Number(payment.transactionCost.venueChargeAmount) + Number(payment.transactionCost.venueFixedFee)
     const netAmount = amount - fees
 
     // Get or initialize card type entry
@@ -429,6 +458,7 @@ export async function getSettlementTimeline(venueId: string, dateRange: { from: 
       transactionCost: {
         select: {
           venueChargeAmount: true,
+          venueFixedFee: true,
           transactionType: true,
         },
       },
@@ -448,7 +478,10 @@ export async function getSettlementTimeline(venueId: string, dateRange: { from: 
     const groupKey = `${dateKey}::${cardType}`
     // Include the tip: customer charged amount + tip; commission is on amount+tip.
     const amount = Number(payment.amount) + Number(payment.tipAmount ?? 0)
-    const fees = payment.transactionCost ? Number(payment.transactionCost.venueChargeAmount) : 0
+    // Venue fee = percentage charge + per-transaction fixed fee.
+    const fees = payment.transactionCost
+      ? Number(payment.transactionCost.venueChargeAmount) + Number(payment.transactionCost.venueFixedFee)
+      : 0
     const netAmount = amount - fees
 
     if (!timelineMap.has(groupKey)) {

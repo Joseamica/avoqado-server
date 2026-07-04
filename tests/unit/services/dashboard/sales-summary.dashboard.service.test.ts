@@ -546,6 +546,47 @@ describe('computeMerchantAccountBreakdown', () => {
     const result = await computeMerchantAccountBreakdown(VENUE, START, END)
     expect(result[0].displayName).toBe('Cuenta vieja')
   })
+
+  it('attaches active settlementRules per merchant, and omits the field when none exist', async () => {
+    ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([
+      { merchantAccountId: 'ma-ruled', collected: 1000, fee: 40, txns: 3 },
+      { merchantAccountId: 'ma-bare', collected: 500, fee: 20, txns: 2 },
+    ])
+    ;(prismaMock.merchantAccount.findMany as jest.Mock).mockResolvedValue([
+      {
+        id: 'ma-ruled',
+        displayName: 'Con reglas',
+        alias: null,
+        angelpayAffiliation: null,
+        displayOrder: 0,
+        provider: { name: 'Blumon PAX' },
+      },
+      {
+        id: 'ma-bare',
+        displayName: 'Sin reglas',
+        alias: null,
+        angelpayAffiliation: null,
+        displayOrder: 1,
+        provider: { name: 'Blumon PAX' },
+      },
+    ])
+    // Only ma-ruled has active (effectiveTo NULL) settlement configs.
+    ;(prismaMock.settlementConfiguration.findMany as jest.Mock).mockResolvedValue([
+      { merchantAccountId: 'ma-ruled', cardType: 'CREDIT', settlementDays: 1 },
+      { merchantAccountId: 'ma-ruled', cardType: 'AMEX', settlementDays: 3 },
+    ])
+
+    const result = await computeMerchantAccountBreakdown(VENUE, START, END)
+    const ruled = result.find(r => r.merchantAccountId === 'ma-ruled')!
+    const bare = result.find(r => r.merchantAccountId === 'ma-bare')!
+
+    expect(ruled.settlementRules).toEqual([
+      { cardType: 'CREDIT', settlementDays: 1 },
+      { cardType: 'AMEX', settlementDays: 3 },
+    ])
+    // No active config → the field is omitted entirely (guarded by `?.length` in the UI).
+    expect(bare.settlementRules).toBeUndefined()
+  })
 })
 
 // ---------------------------------------------------------------------------

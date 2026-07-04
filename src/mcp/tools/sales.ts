@@ -626,6 +626,10 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
         },
         totalSales: summary.totalSales,
         totalFees: summary.totalFees,
+        // Card money counted but not cost (no TransactionCost). byCardType excludes
+        // these, so this is the reconciling term: Σ byCardType.netAmount + uncosted ≈ balance.
+        uncostedCount: summary.uncostedCount,
+        uncostedAmount: summary.uncostedAmount,
         byCardType: byCard.map(c => ({
           cardType: c.cardType,
           totalSales: c.totalSales,
