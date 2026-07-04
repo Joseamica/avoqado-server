@@ -52,7 +52,48 @@ const MEXICAN_FIXED_HOLIDAYS = [
 ]
 
 /**
- * Check if a date is a Mexican national holiday
+ * Easter Sunday for a given year (Gregorian), Meeus/Jones/Butcher algorithm.
+ * Used to derive the movable Semana Santa bank holidays (Jueves + Viernes Santo).
+ * @returns { month (1–12), day }
+ */
+export function easterSunday(year: number): { month: number; day: number } {
+  const a = year % 19
+  const b = Math.floor(year / 100)
+  const c = year % 100
+  const d = Math.floor(b / 4)
+  const e = b % 4
+  const f = Math.floor((b + 8) / 25)
+  const g = Math.floor((b - f + 1) / 3)
+  const h = (19 * a + b - d - g + 15) % 30
+  const i = Math.floor(c / 4)
+  const k = c % 4
+  const l = (32 + 2 * e + 2 * i - h - k) % 7
+  const m = Math.floor((a + 11 * h + 22 * l) / 451)
+  const month = Math.floor((h + l - 7 * m + 114) / 31) // 3 = March, 4 = April
+  const day = ((h + l - 7 * m + 114) % 31) + 1
+  return { month, day }
+}
+
+/**
+ * True if the date is Holy Thursday or Good Friday (Semana Santa). Mexican banks
+ * do not settle on these two days, and they move every year with Easter.
+ */
+export function isSemanaSanta(date: Date): boolean {
+  const easter = easterSunday(date.getFullYear())
+  // Holy Thursday = Easter − 3 days, Good Friday = Easter − 2 days.
+  const easterDate = new Date(date.getFullYear(), easter.month - 1, easter.day)
+  const holyThursday = new Date(easterDate)
+  holyThursday.setDate(easterDate.getDate() - 3)
+  const goodFriday = new Date(easterDate)
+  goodFriday.setDate(easterDate.getDate() - 2)
+  return (
+    (date.getMonth() === holyThursday.getMonth() && date.getDate() === holyThursday.getDate()) ||
+    (date.getMonth() === goodFriday.getMonth() && date.getDate() === goodFriday.getDate())
+  )
+}
+
+/**
+ * Check if a date is a Mexican bank holiday (settlement does not occur).
  *
  * @param date - Date to check
  * @returns True if the date is a holiday
@@ -75,6 +116,9 @@ export function isMexicanHoliday(date: Date): boolean {
 
   // Third Monday of November (Revolution Day)
   if (month === 11 && dayOfWeek === 1 && day >= 15 && day <= 21) return true
+
+  // Semana Santa — Holy Thursday & Good Friday (movable; banks do not settle)
+  if (isSemanaSanta(date)) return true
 
   return false
 }

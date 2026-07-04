@@ -10,6 +10,7 @@
 import {
   calculateNetSettlementAmount,
   calculateSettlementDate,
+  easterSunday,
   isBusinessDay,
   addBusinessDays,
   isMexicanHoliday,
@@ -292,6 +293,30 @@ describe('Settlement Calculation Service', () => {
       const wed = new Date('2026-07-01T18:00:00Z') // Wed 12:00 MX
       const settle = calculateSettlementDate(wed, { ...cfg, settlementDays: 3, settlementDayType: SettlementDayType.CALENDAR_DAYS })
       expect(asVenueDate(settle)).toBe('2026-07-04') // Wed + 3 calendar days = Sat
+    })
+
+    it('skips Semana Santa (Holy Thursday + Good Friday) for BUSINESS_DAYS', () => {
+      // Easter 2026 = Sun Apr 5 → Holy Thu = Apr 2, Good Fri = Apr 3.
+      // A payment on Wed Apr 1 (12:00 MX) + 1 business day must skip Thu(holy),
+      // Fri(holy), Sat, Sun → land on Mon Apr 6.
+      const wedSanta = new Date('2026-04-01T18:00:00Z') // Wed 12:00 MX
+      const settle = calculateSettlementDate(wedSanta, cfg)
+      expect(asVenueDate(settle)).toBe('2026-04-06')
+      expect(asVenueDow(settle)).toBe('Mon')
+    })
+  })
+
+  describe('Semana Santa (Easter-derived bank holidays)', () => {
+    it('computes Easter Sunday correctly (Meeus/Jones/Butcher)', () => {
+      expect(easterSunday(2026)).toEqual({ month: 4, day: 5 }) // Sun Apr 5, 2026
+      expect(easterSunday(2027)).toEqual({ month: 3, day: 28 }) // Sun Mar 28, 2027
+    })
+
+    it('flags Holy Thursday and Good Friday as Mexican bank holidays', () => {
+      expect(isMexicanHoliday(new Date(2026, 3, 2))).toBe(true) // Holy Thursday 2026
+      expect(isMexicanHoliday(new Date(2026, 3, 3))).toBe(true) // Good Friday 2026
+      // Wednesday before (Miércoles Santo) is a normal business day.
+      expect(isMexicanHoliday(new Date(2026, 3, 1))).toBe(false)
     })
   })
 })
