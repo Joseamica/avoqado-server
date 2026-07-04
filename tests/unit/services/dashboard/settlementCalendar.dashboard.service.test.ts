@@ -1,4 +1,8 @@
-import { getSettlementsLandingInWeek, projectPaymentSettlement, venueWeekBounds } from '@/services/dashboard/settlementCalendar.dashboard.service'
+import {
+  getSettlementsLandingInWeek,
+  projectPaymentSettlement,
+  venueWeekBounds,
+} from '@/services/dashboard/settlementCalendar.dashboard.service'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { formatInTimeZone } from 'date-fns-tz'
 
@@ -65,16 +69,53 @@ describe('getSettlementsLandingInWeek', () => {
   it('buckets net by SETTLEMENT day: cross-week sales land in-week; no-rule & out-of-week excluded', async () => {
     ;(prismaMock.payment.findMany as jest.Mock).mockResolvedValue([
       // Sold Fri 2026-07-03 20:00 MX → 1 biz day → lands Mon 07-06 (in week)
-      { amount: 1000, tipAmount: 0, createdAt: new Date('2026-07-04T02:00:00Z'), merchantAccountId: 'm1', transactionCost: { transactionType: 'CREDIT', venueChargeAmount: 30, venueFixedFee: 5 }, merchantAccount: merchant },
+      {
+        amount: 1000,
+        tipAmount: 0,
+        createdAt: new Date('2026-07-04T02:00:00Z'),
+        merchantAccountId: 'm1',
+        transactionCost: { transactionType: 'CREDIT', venueChargeAmount: 30, venueFixedFee: 5 },
+        merchantAccount: merchant,
+      },
       // Sold Mon 2026-07-06 12:00 MX → 1 biz day → lands Tue 07-07 (in week)
-      { amount: 500, tipAmount: 50, createdAt: new Date('2026-07-06T18:00:00Z'), merchantAccountId: 'm1', transactionCost: { transactionType: 'CREDIT', venueChargeAmount: 16.5, venueFixedFee: 5 }, merchantAccount: merchant },
+      {
+        amount: 500,
+        tipAmount: 50,
+        createdAt: new Date('2026-07-06T18:00:00Z'),
+        merchantAccountId: 'm1',
+        transactionCost: { transactionType: 'CREDIT', venueChargeAmount: 16.5, venueFixedFee: 5 },
+        merchantAccount: merchant,
+      },
       // No active config (merchant m2) → cannot be placed on any landing day → excluded
-      { amount: 700, tipAmount: 0, createdAt: new Date('2026-07-05T18:00:00Z'), merchantAccountId: 'm2', transactionCost: { transactionType: 'CREDIT', venueChargeAmount: 25, venueFixedFee: 0 }, merchantAccount: { displayName: 'Sin regla', alias: null, provider: { name: 'Blumon' } } },
+      {
+        amount: 700,
+        tipAmount: 0,
+        createdAt: new Date('2026-07-05T18:00:00Z'),
+        merchantAccountId: 'm2',
+        transactionCost: { transactionType: 'CREDIT', venueChargeAmount: 25, venueFixedFee: 0 },
+        merchantAccount: { displayName: 'Sin regla', alias: null, provider: { name: 'Blumon' } },
+      },
       // Sold Sat 2026-07-11 20:00 MX → 1 biz day → lands Mon 07-13 (NEXT week) → excluded
-      { amount: 200, tipAmount: 0, createdAt: new Date('2026-07-12T02:00:00Z'), merchantAccountId: 'm1', transactionCost: { transactionType: 'CREDIT', venueChargeAmount: 6, venueFixedFee: 0 }, merchantAccount: merchant },
+      {
+        amount: 200,
+        tipAmount: 0,
+        createdAt: new Date('2026-07-12T02:00:00Z'),
+        merchantAccountId: 'm1',
+        transactionCost: { transactionType: 'CREDIT', venueChargeAmount: 6, venueFixedFee: 0 },
+        merchantAccount: merchant,
+      },
     ])
     ;(prismaMock.settlementConfiguration.findMany as jest.Mock).mockResolvedValue([
-      { merchantAccountId: 'm1', cardType: 'CREDIT', settlementDays: 1, settlementDayType: 'BUSINESS_DAYS', cutoffTime: '23:00', cutoffTimezone: TZ, effectiveFrom: new Date('2026-01-01'), effectiveTo: null },
+      {
+        merchantAccountId: 'm1',
+        cardType: 'CREDIT',
+        settlementDays: 1,
+        settlementDayType: 'BUSINESS_DAYS',
+        cutoffTime: '23:00',
+        cutoffTimezone: TZ,
+        effectiveFrom: new Date('2026-01-01'),
+        effectiveTo: null,
+      },
     ])
 
     const r = await getSettlementsLandingInWeek('v1', weekStart, weekEnd, TZ)
@@ -84,7 +125,9 @@ describe('getSettlementsLandingInWeek', () => {
     expect(r.days.map(d => d.date)).toEqual(['2026-07-06', '2026-07-07']) // sorted; P3 no-rule + P4 next-week gone
     const [mon, tue] = r.days
     expect(mon).toMatchObject({ date: '2026-07-06', gross: 1000, commission: 35, net: 965, count: 1 })
-    expect(mon.byMerchant).toEqual([{ merchantAccountId: 'm1', displayName: 'Amaena - B', provider: 'AngelPay (Nexgo)', gross: 1000, commission: 35, net: 965, count: 1 }])
+    expect(mon.byMerchant).toEqual([
+      { merchantAccountId: 'm1', displayName: 'Amaena - B', provider: 'AngelPay (Nexgo)', gross: 1000, commission: 35, net: 965, count: 1 },
+    ])
     expect(mon.byCardType).toEqual([{ cardType: 'CREDIT', gross: 1000, commission: 35, net: 965, count: 1 }])
     expect(tue).toMatchObject({ date: '2026-07-07', gross: 550, commission: 21.5, net: 528.5, count: 1 })
     expect(r.weekTotal).toEqual({ gross: 1550, commission: 56.5, net: 1493.5, count: 2 })
@@ -122,19 +165,42 @@ describe('venueWeekBounds', () => {
     expect(weekEnd.getTime() - weekStart.getTime()).toBeLessThan(7 * 24 * 60 * 60 * 1000)
   })
 
-  // Regression: `weekStart` is a user-controlled query param. Malformed/out-of-range
-  // values must NOT produce an Invalid Date (which would crash the downstream Prisma
-  // query with a 500) — they fall back to a valid current week instead.
-  it.each(['garbage', '', '99999-01-01', '2026-13-40', 'DROP TABLE', '2026/07/08'])(
-    'never yields an Invalid Date for malformed weekStart=%p (falls back to a valid week)',
+  const isMonday = (d: Date) => new Date(dateKey(d) + 'T12:00:00Z').getUTCDay() === 1
+
+  // Regression (from /full-testing): `weekStart` is a user-controlled query param.
+  // These parse to NaN → pre-fix they produced an Invalid Date that crashed the
+  // downstream Prisma query (500). Must fall back to a valid Monday-anchored week.
+  // (Each case here genuinely FAILS without the fix — Invalid Date → getTime() NaN.)
+  it.each(['garbage', '', 'DROP TABLE', '2026/07/08'])(
+    'never yields an Invalid Date for unparseable weekStart=%p (would 500 pre-fix)',
     bad => {
       const { weekStart, weekEnd } = venueWeekBounds(bad, TZ)
       expect(Number.isNaN(weekStart.getTime())).toBe(false)
       expect(Number.isNaN(weekEnd.getTime())).toBe(false)
       expect(weekEnd.getTime() - weekStart.getTime()).toBeGreaterThan(6.9 * 24 * 60 * 60 * 1000)
       expect(weekEnd.getTime() - weekStart.getTime()).toBeLessThan(7 * 24 * 60 * 60 * 1000)
-      // The fallback week must start on a Monday.
-      expect(new Date(dateKey(weekStart) + 'T12:00:00Z').getUTCDay()).toBe(1)
+      expect(isMonday(weekStart)).toBe(true)
     },
   )
+
+  // Out-of-range-but-finite values: pre-fix `Date.UTC` normalizes them and the week
+  // silently DRIFTS (e.g. month 13 → next Jan; year 99999 → Invalid via fromZonedTime).
+  // The range guard makes them fall back to the CURRENT week — asserting equality with
+  // the no-arg (current-week) result discriminates the fix (drifted week ≠ current).
+  it.each(['2026-13-08', '1999-07-08', '2026-07-40', '99999-01-01'])(
+    'out-of-range weekStart=%p falls back to the current venue week (no silent drift)',
+    bad => {
+      expect(dateKey(venueWeekBounds(bad, TZ).weekStart)).toBe(dateKey(venueWeekBounds(undefined, TZ).weekStart))
+    },
+  )
+
+  // The default (no arg) is the most common path (current week) — cover it explicitly.
+  it('with no weekStart returns the current venue week, Monday-anchored, containing today', () => {
+    const { weekStart, weekEnd } = venueWeekBounds(undefined, TZ)
+    expect(Number.isNaN(weekStart.getTime())).toBe(false)
+    expect(isMonday(weekStart)).toBe(true)
+    const now = Date.now()
+    expect(now).toBeGreaterThanOrEqual(weekStart.getTime())
+    expect(now).toBeLessThanOrEqual(weekEnd.getTime())
+  })
 })
