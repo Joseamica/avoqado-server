@@ -288,6 +288,79 @@ describe('order.mobile.service', () => {
     expect(prismaMock.order.create).not.toHaveBeenCalled()
   })
 
+  // ── Fix 1: mobile item discounts write OrderDiscount audit rows (mirrors TPV) ──
+
+  it('writes an OrderDiscount audit row for an applied item discount', async () => {
+    prismaMock.staff.findUnique.mockResolvedValue({ id: 'staff-1', venueId: 'venue-1' })
+    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: 'venue-1', active: true })
+    prismaMock.product.findMany.mockResolvedValue([{ id: 'prod-1', name: 'Hamburguesa', price: new Decimal(100), category: { name: 'Comida' } }])
+    prismaMock.modifier.findMany.mockResolvedValue([])
+    prismaMock.discount.findMany.mockResolvedValue([
+      { id: 'disc-pct', venueId: 'venue-1', name: '20% off', type: 'PERCENTAGE', value: new Decimal(20), active: true },
+    ])
+    prismaMock.order.create.mockResolvedValue({
+      id: 'order-1',
+      orderNumber: 'ORD-1',
+      status: 'CONFIRMED',
+      paymentStatus: 'PENDING',
+      subtotal: new Decimal(100),
+      discountAmount: new Decimal(20),
+      taxAmount: new Decimal(0),
+      total: new Decimal(80),
+      createdAt: new Date('2026-07-03T10:00:00.000Z'),
+      items: [
+        {
+          id: 'oi-1',
+          productId: 'prod-1',
+          productName: 'Hamburguesa',
+          quantity: 1,
+          unitPrice: new Decimal(100),
+          total: new Decimal(100),
+          discountAmount: new Decimal(20),
+          appliedDiscountId: 'disc-pct',
+          product: { id: 'prod-1', name: 'Hamburguesa', price: new Decimal(100) },
+          modifiers: [],
+        },
+      ],
+    })
+    prismaMock.orderDiscount.create.mockResolvedValue({ id: 'od-1' })
+
+    await createOrderWithItems('venue-1', {
+      staffId: 'staff-1',
+      items: [{ productId: 'prod-1', quantity: 1, discountId: 'disc-pct' }],
+      source: 'AVOQADO_IOS',
+    })
+
+    expect(prismaMock.orderDiscount.create).toHaveBeenCalledWith({
+      data: {
+        orderId: 'order-1',
+        discountId: 'disc-pct',
+        type: 'PERCENTAGE',
+        name: '20% off',
+        value: new Decimal(20),
+        amount: new Decimal(20),
+        taxReduction: 0,
+        isComp: false,
+        isManual: true,
+        compReason: null,
+        appliedById: 'sv-1',
+        appliedToItemIds: ['oi-1'],
+      },
+    })
+  })
+
+  it('does not write an OrderDiscount row when no item discount was applied', async () => {
+    mockBaseOrderCreate()
+
+    await createOrderWithItems('venue-1', {
+      staffId: 'staff-1',
+      items: [{ productId: 'prod-class', quantity: 1 }],
+      source: 'AVOQADO_ANDROID',
+    })
+
+    expect(prismaMock.orderDiscount.create).not.toHaveBeenCalled()
+  })
+
   it('marks discounted cash order as paid when customer pays the discounted total', async () => {
     prismaMock.order.findUnique.mockResolvedValue({
       id: 'order-1',

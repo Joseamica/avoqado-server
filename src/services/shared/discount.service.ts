@@ -13,6 +13,7 @@
  * depend on this being identical to what TPV shipped before the extraction).
  */
 
+import { Prisma } from '@prisma/client'
 import { BadRequestError } from '../../errors/AppError'
 
 /**
@@ -68,6 +69,40 @@ export function validateDiscountActive(discount: any): void {
   }
   if (discount.maxTotalUses != null && discount.currentUses >= discount.maxTotalUses) {
     throw new BadRequestError(`Discount "${discount.name}" has reached its usage limit`)
+  }
+}
+
+export type ItemDiscountRowInput = {
+  orderId: string
+  itemId: string
+  discount: any
+  discountAmountPesos: number
+  appliedById: string | null
+}
+
+/**
+ * Build the `OrderDiscount` create-input for a single item-scoped discount
+ * application: one row per discounted item, `appliedToItemIds: [itemId]`.
+ * This is the exact shape TPV writes in `order.tpv.service.ts
+ * createOrderWithItems` (extracted verbatim) — used by both TPV and mobile
+ * so dashboard discount-breakdown reporting (which reads `OrderDiscount`)
+ * reflects item discounts applied through either channel identically.
+ */
+export function buildItemDiscountRow(input: ItemDiscountRowInput): Prisma.OrderDiscountUncheckedCreateInput {
+  const { orderId, itemId, discount, discountAmountPesos, appliedById } = input
+  return {
+    orderId,
+    discountId: discount.id,
+    type: discount.type,
+    name: discount.name,
+    value: discount.value,
+    amount: new Prisma.Decimal(roundPesos(discountAmountPesos)),
+    taxReduction: 0,
+    isComp: discount.type === 'COMP',
+    isManual: true,
+    compReason: discount.type === 'COMP' ? discount.compReason || discount.name : null,
+    appliedById,
+    appliedToItemIds: [itemId],
   }
 }
 

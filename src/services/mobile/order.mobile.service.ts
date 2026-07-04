@@ -15,7 +15,7 @@ import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { validateStaffVenue } from '../../utils/staff-venue.util'
 import { generateAndStoreReceipt } from '../dashboard/receipt.dashboard.service'
-import { calculateDiscountPesos, validateDiscountActive } from '../shared/discount.service'
+import { buildItemDiscountRow, calculateDiscountPesos, validateDiscountActive } from '../shared/discount.service'
 
 // MARK: - Types
 
@@ -574,49 +574,84 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
     }
   }
 
-  // Create order with items in a transaction
+  // Create order with items, and any item-discount `OrderDiscount` audit rows,
+  // in a single transaction (matches TPV's transactional boundary —
+  // order.tpv.service.ts createOrderWithItems writes its OrderDiscount rows
+  // inside the same tx as the order/orderItem creation).
   let order
   try {
-    order = await prisma.order.create({
-      data: {
-        venueId,
-        orderNumber,
-        externalId,
-        reservationId: linkedReservationId,
-        tableId: input.tableId || null,
-        servedById: validatedStaffId || null,
-        createdById: validatedStaffId || null,
-        status: 'CONFIRMED',
-        paymentStatus: 'PENDING',
-        kitchenStatus: 'PENDING',
-        type: input.orderType || 'DINE_IN',
-        source: input.source || 'AVOQADO_IOS',
-        customerId: normalizedCustomerId,
-        subtotal: new Prisma.Decimal(subtotal),
-        discountAmount: new Prisma.Decimal(discountDecimal),
-        taxAmount: new Prisma.Decimal(0),
-        tipAmount: new Prisma.Decimal(tipDecimal),
-        total: new Prisma.Decimal(total),
-        remainingBalance: new Prisma.Decimal(total),
-        customerName: resolvedCustomerName,
-        customerPhone: resolvedCustomerPhone,
-        specialRequests: input.note || input.specialRequests || null,
-        version: 1,
-        orderCustomers: normalizedCustomerId
-          ? {
-              create: [
-                {
-                  customerId: normalizedCustomerId,
-                  isPrimary: true,
-                },
-              ],
-            }
-          : undefined,
-        items: {
-          create: itemsData,
+    order = await prisma.$transaction(async tx => {
+      const createdOrder = await tx.order.create({
+        data: {
+          venueId,
+          orderNumber,
+          externalId,
+          reservationId: linkedReservationId,
+          tableId: input.tableId || null,
+          servedById: validatedStaffId || null,
+          createdById: validatedStaffId || null,
+          status: 'CONFIRMED',
+          paymentStatus: 'PENDING',
+          kitchenStatus: 'PENDING',
+          type: input.orderType || 'DINE_IN',
+          source: input.source || 'AVOQADO_IOS',
+          customerId: normalizedCustomerId,
+          subtotal: new Prisma.Decimal(subtotal),
+          discountAmount: new Prisma.Decimal(discountDecimal),
+          taxAmount: new Prisma.Decimal(0),
+          tipAmount: new Prisma.Decimal(tipDecimal),
+          total: new Prisma.Decimal(total),
+          remainingBalance: new Prisma.Decimal(total),
+          customerName: resolvedCustomerName,
+          customerPhone: resolvedCustomerPhone,
+          specialRequests: input.note || input.specialRequests || null,
+          version: 1,
+          orderCustomers: normalizedCustomerId
+            ? {
+                create: [
+                  {
+                    customerId: normalizedCustomerId,
+                    isPrimary: true,
+                  },
+                ],
+              }
+            : undefined,
+          items: {
+            create: itemsData,
+          },
         },
-      },
-      include: createdOrderInclude,
+        include: createdOrderInclude,
+      })
+
+      // Write OrderDiscount audit rows for item discounts — mirrors TPV
+      // (order.tpv.service.ts) so dashboard discount-breakdown reporting,
+      // which reads OrderDiscount, also reflects mobile-applied item
+      // discounts. One row per discounted item (same shape as TPV).
+      const discountedItems = createdOrder.items.filter((item: any) => item.appliedDiscountId)
+      if (discountedItems.length > 0) {
+        const appliedByStaffVenue = validatedStaffId
+          ? await tx.staffVenue.findFirst({
+              where: { staffId: validatedStaffId, venueId },
+              select: { id: true },
+            })
+          : null
+
+        for (const item of discountedItems) {
+          const discount = discounts.find(d => d.id === item.appliedDiscountId)
+          if (!discount) continue
+          await tx.orderDiscount.create({
+            data: buildItemDiscountRow({
+              orderId: createdOrder.id,
+              itemId: item.id,
+              discount,
+              discountAmountPesos: Number(item.discountAmount),
+              appliedById: appliedByStaffVenue?.id || null,
+            }),
+          })
+        }
+      }
+
+      return createdOrder
     })
   } catch (error) {
     // Concurrent-retry race: two identical offline retries can both pass the

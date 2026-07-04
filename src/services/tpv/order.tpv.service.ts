@@ -10,7 +10,7 @@ import { moduleService, MODULE_CODES } from '../modules/module.service'
 import { deductInventoryForProduct, getProductInventoryMethod } from '../dashboard/productInventoryIntegration.service'
 import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service'
 import { logAction } from '../dashboard/activity-log.service'
-import { calculateDiscountPesos, validateDiscountActive } from '../shared/discount.service'
+import { buildItemDiscountRow, calculateDiscountPesos, validateDiscountActive } from '../shared/discount.service'
 
 /**
  * Helper function to flatten OrderItemModifier structure for Android compatibility
@@ -989,22 +989,14 @@ export async function createOrderWithItems(
     }
 
     for (const item of createdItems.filter(item => item.line.appliedDiscount)) {
-      const discount = item.line.appliedDiscount!
       await tx.orderDiscount.create({
-        data: {
+        data: buildItemDiscountRow({
           orderId: order.id,
-          discountId: discount.id,
-          type: discount.type,
-          name: discount.name,
-          value: discount.value,
-          amount: decimalFromPesos(item.line.lineDiscountPesos),
-          taxReduction: 0,
-          isComp: discount.type === 'COMP',
-          isManual: true,
-          compReason: discount.type === 'COMP' ? discount.compReason || discount.name : null,
+          itemId: item.id,
+          discount: item.line.appliedDiscount!,
+          discountAmountPesos: item.line.lineDiscountPesos,
           appliedById: staffVenue.id,
-          appliedToItemIds: [item.id],
-        },
+        }),
       })
     }
 
