@@ -18,6 +18,7 @@ import {
   type SalesSummaryExportSection,
 } from '@/services/dashboard/sales-summary.dashboard.service'
 import { getAvailableBalance, getBalanceByCardType } from '@/services/dashboard/availableBalance.dashboard.service'
+import { getSettlementsLandingInWeek, venueWeekBounds } from '@/services/dashboard/settlementCalendar.dashboard.service'
 import { hasPermission } from '@/services/access/access.service'
 
 export interface SalesInput {
@@ -587,6 +588,26 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
         calendar,
         nextByMerchant: Array.from(nextByMerchant.entries()).map(([merchantAccountId, v]) => ({ merchantAccountId, ...v })),
       })
+    },
+  )
+
+  server.tool(
+    'settlement_week',
+    'How much card money LANDS in the bank on each day of a Monday–Sunday week ("¿cuánto me cae cada día esta semana?") for a venue you can access. By SETTLEMENT date: a Friday sale that settles Monday shows on Monday, regardless of when it was sold. Recomputed live via the corrected settlement engine (business days + Mexican holidays incl. Semana Santa + cutoff, in the venue timezone). Cash is excluded (immediate). Returns the Monday–Sunday days with gross/commission/net + breakdown by merchant and by card type, plus the week total. Pass venueId; optionally weekStart (YYYY-MM-DD, any day in the target week; default: current week). PRO feature (ADVANCED_REPORTS) — the server enforces plan access.',
+    {
+      venueId: z.string().describe('Venue to analyze (must be in your scope)'),
+      weekStart: z.string().optional().describe('Any date YYYY-MM-DD in the target week (default: current week)'),
+    },
+    async ({ venueId, weekStart }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('analytics:read', venueId) // read gate — mirror the dashboard's advanced-reports permission
+      const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'El calendario semanal de liquidación')
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+      const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+      const tz = venue?.timezone || 'America/Mexico_City'
+      const bounds = venueWeekBounds(weekStart, tz)
+      const week = await getSettlementsLandingInWeek(venueId, bounds.weekStart, bounds.weekEnd, tz)
+      return text({ venueId, timezone: tz, ...week })
     },
   )
 
