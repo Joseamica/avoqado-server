@@ -191,7 +191,6 @@ async function signIn(email: string, password: string, deviceIdentifier: string,
   }
 }
 
-
 /** Números del provider que llegan como string ("1500.75") — u honestamente null. */
 function toNum(v: unknown): number | null {
   if (typeof v === 'number') return Number.isFinite(v) ? v : null

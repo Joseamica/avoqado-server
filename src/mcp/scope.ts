@@ -26,8 +26,11 @@ export interface McpScope {
 export async function resolveScope(staffId: string, activeOrg: string): Promise<McpScope> {
   // Platform SUPERADMIN → global scope. Synthesized wildcard access per venue (hasPermission
   // short-circuits on role SUPERADMIN) instead of 61× getUserAccess — resolveScope runs per request.
+  // WHY active filters: a SUPERADMIN whose StaffVenue row was deactivated (role revoked) or whose
+  // Staff account was disabled must LOSE the global bypass. Without them, a revoked superadmin still
+  // resolves to all-venues/all-orgs access via the MCP. (Mirror of the getUserAccess fix.)
   const superAdminVenue = await prisma.staffVenue.findFirst({
-    where: { staffId, role: StaffRole.SUPERADMIN },
+    where: { staffId, role: StaffRole.SUPERADMIN, active: true, staff: { active: true } },
     select: { id: true },
   })
   if (superAdminVenue) {

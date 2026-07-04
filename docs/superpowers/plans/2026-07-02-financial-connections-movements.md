@@ -1,35 +1,62 @@
 # Financial Connections — Movimientos (estado de cuenta) Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Que al hacer click en una cuenta de banco conectada (sección "Cuentas de banco" de Integraciones) el OWNER vea el desglose de operaciones de esa cuenta: cuánto entró y cuánto salió (SPEI in/out, transferencias internas, dispersiones) más el estado de cuenta paginado con filtro de fechas.
+**Goal:** Que al hacer click en una cuenta de banco conectada (sección "Cuentas de banco" de Integraciones) el OWNER vea el desglose de
+operaciones de esa cuenta: cuánto entró y cuánto salió (SPEI in/out, transferencias internas, dispersiones) más el estado de cuenta paginado
+con filtro de fechas.
 
-**Architecture:** Dos endpoints REST nuevos de solo lectura en avoqado-server (`GET /venues/:venueId/financial-accounts/:id/movements` y `.../movements/stats`) que delegan al provider client vía el token cacheado/refrescado existente; el provider necesita el `idCuenta` de la cuenta de dispersión (distinto del `idNegocio` que ya guardamos), que viene en el mismo payload de `/api/auth` que ya parseamos — se agrega columna `externalCuentaId` con backfill perezoso para conexiones existentes. En el frontend, un Sheet de movimientos que se abre al hacer click en la fila de la cuenta, con 4 tarjetas de totales y tabla paginada.
+**Architecture:** Dos endpoints REST nuevos de solo lectura en avoqado-server (`GET /venues/:venueId/financial-accounts/:id/movements` y
+`.../movements/stats`) que delegan al provider client vía el token cacheado/refrescado existente; el provider necesita el `idCuenta` de la
+cuenta de dispersión (distinto del `idNegocio` que ya guardamos), que viene en el mismo payload de `/api/auth` que ya parseamos — se agrega
+columna `externalCuentaId` con backfill perezoso para conexiones existentes. En el frontend, un Sheet de movimientos que se abre al hacer
+click en la fila de la cuenta, con 4 tarjetas de totales y tabla paginada.
 
-**Tech Stack:** avoqado-server (Node/Express/Prisma/axios/jest+nock) · avoqado-web-dashboard (React 18/TS/TanStack Query/shadcn/react-i18next/vitest).
+**Tech Stack:** avoqado-server (Node/Express/Prisma/axios/jest+nock) · avoqado-web-dashboard (React 18/TS/TanStack
+Query/shadcn/react-i18next/vitest).
 
 ## Global Constraints
 
-- **Repos y cwd por task:** Tasks 1-3 en `/Users/amieva/Documents/Programming/Avoqado/avoqado-server`; Tasks 4-6 en `/Users/amieva/Documents/Programming/Avoqado/avoqado-web-dashboard`; Task 7 ambos. Ambos repos comparten working tree con OTRA sesión activa: `git add` SIEMPRE con rutas explícitas (jamás `-A`/`.`), commitear INMEDIATAMENTE al verificar cada task (WIP retenido = barrido), y `prisma/schema.prisma` exige el protocolo quirúrgico (ver Task 1).
+- **Repos y cwd por task:** Tasks 1-3 en `/Users/amieva/Documents/Programming/Avoqado/avoqado-server`; Tasks 4-6 en
+  `/Users/amieva/Documents/Programming/Avoqado/avoqado-web-dashboard`; Task 7 ambos. Ambos repos comparten working tree con OTRA sesión
+  activa: `git add` SIEMPRE con rutas explícitas (jamás `-A`/`.`), commitear INMEDIATAMENTE al verificar cada task (WIP retenido = barrido),
+  y `prisma/schema.prisma` exige el protocolo quirúrgico (ver Task 1).
 - **Contrato del provider (confirmado contra código en producción del dashboard Q-Pay, mismo API):**
-  - `idCuenta` = `negocio.cuentaDispersion.idCuenta` dentro del response de `GET {base}/api/auth` (el mismo `fetchMe()` que ya usamos; ya leemos `cuentaDispersion.cuentaClabe/saldo/activo` de ahí).
-  - Lista: `GET {base}/api/clients/movimientos/{idCuenta}` — query en notación punteada EXACTA: `Pagination.Page` (int, **0-based**), `Pagination.Size` (int), `FechaInicio`/`FechaFinal` (ISO date-time), opcional `IdEstatus` (int). Headers: los mismos `headers(accessToken)` del client (Bearer + mgPlatform). Response: `{ data: Movimiento[], total: number }`.
-  - Campos de `Movimiento` (todos pueden venir null/ausentes; casing inconsistente → leer TODO con el helper `pick()` existente): `idOperacion, tipoOperacion, tipoMovimiento, concepto, fechaCreacion, monto (number), estatus, idEstatus (number), nombreBeneficiario, nombreOrdenante, referencia`.
-  - Stats: `GET {base}/api/clients/movimientos/Estadisticas/{idCuenta}` — query `FechaInicio`/`FechaFinal`. Response (¡TODOS los numéricos llegan como **string**!): `nombre, cuentaClabe, montoTransaccionadoSpeiOut, comisionCobradaSpeiOut, numeroOperacionesSpeiOut, montoTransaccionadoSpeiIn, comisionCobradaSpeiIn, numeroOperacionesSpeiIn, montoTransaccionadoTransferenciaInterna, comisionCobradaTransferenciaInterna, numeroOperacionesTransferenciaInterna, montoTransaccionadoDispersion, comisionCobradaDispersion, numeroOperacionesDispersion`. Nota: transferencias internas y dispersiones NO vienen partidas en in/out — se presentan como categorías propias, sin inventar dirección.
-- **Montos honestos:** un numérico ausente/no parseable es `null`, JAMÁS `0`. Parsear strings con un helper `toNum` (string→Number si finito, number passthrough, resto null). En UI, `null` → `—`.
-- **Sin nombres de vendors** en código/campos: nuestra API expone nombres neutrales (`speiIn`, `speiOut`, `internalTransfers`, `dispersions`, `movements`).
-- **Seguridad:** ambos endpoints van bajo `checkPermission('financialConnections:manage')` + `assertAccountBelongsToVenue` (404 en mismatch), igual que `/balance`. Solo lectura → sin rate limiter (paridad con balance). Sin auditoría de lecturas (paridad con balance). Validación de query: `size` cap a 50, `page ≥ 0`, fechas ISO válidas o 400.
+  - `idCuenta` = `negocio.cuentaDispersion.idCuenta` dentro del response de `GET {base}/api/auth` (el mismo `fetchMe()` que ya usamos; ya
+    leemos `cuentaDispersion.cuentaClabe/saldo/activo` de ahí).
+  - Lista: `GET {base}/api/clients/movimientos/{idCuenta}` — query en notación punteada EXACTA: `Pagination.Page` (int, **0-based**),
+    `Pagination.Size` (int), `FechaInicio`/`FechaFinal` (ISO date-time), opcional `IdEstatus` (int). Headers: los mismos
+    `headers(accessToken)` del client (Bearer + mgPlatform). Response: `{ data: Movimiento[], total: number }`.
+  - Campos de `Movimiento` (todos pueden venir null/ausentes; casing inconsistente → leer TODO con el helper `pick()` existente):
+    `idOperacion, tipoOperacion, tipoMovimiento, concepto, fechaCreacion, monto (number), estatus, idEstatus (number), nombreBeneficiario, nombreOrdenante, referencia`.
+  - Stats: `GET {base}/api/clients/movimientos/Estadisticas/{idCuenta}` — query `FechaInicio`/`FechaFinal`. Response (¡TODOS los numéricos
+    llegan como **string**!):
+    `nombre, cuentaClabe, montoTransaccionadoSpeiOut, comisionCobradaSpeiOut, numeroOperacionesSpeiOut, montoTransaccionadoSpeiIn, comisionCobradaSpeiIn, numeroOperacionesSpeiIn, montoTransaccionadoTransferenciaInterna, comisionCobradaTransferenciaInterna, numeroOperacionesTransferenciaInterna, montoTransaccionadoDispersion, comisionCobradaDispersion, numeroOperacionesDispersion`.
+    Nota: transferencias internas y dispersiones NO vienen partidas en in/out — se presentan como categorías propias, sin inventar
+    dirección.
+- **Montos honestos:** un numérico ausente/no parseable es `null`, JAMÁS `0`. Parsear strings con un helper `toNum` (string→Number si
+  finito, number passthrough, resto null). En UI, `null` → `—`.
+- **Sin nombres de vendors** en código/campos: nuestra API expone nombres neutrales (`speiIn`, `speiOut`, `internalTransfers`,
+  `dispersions`, `movements`).
+- **Seguridad:** ambos endpoints van bajo `checkPermission('financialConnections:manage')` + `assertAccountBelongsToVenue` (404 en
+  mismatch), igual que `/balance`. Solo lectura → sin rate limiter (paridad con balance). Sin auditoría de lecturas (paridad con balance).
+  Validación de query: `size` cap a 50, `page ≥ 0`, fechas ISO válidas o 400.
 - **Envelope:** `{ success: true, data }` como el resto del dominio.
 - **i18n frontend:** CERO strings hardcodeados; agregar claves al namespace `financialConnections` en es/en/fr con paridad exacta de claves.
 - **Dinero en UI:** `Currency()` de `@/utils/currency` + `tabular-nums`; fechas con `toLocaleString()` como ya hace la sección.
 - **Query keys frontend:** `['financial-account-movements', accountId, filtros]` y `['financial-account-movement-stats', accountId, rango]`.
-- **Verificación por task:** backend `npx jest tests/unit/services/financial-connections/ --silent` + `NODE_OPTIONS='--max-old-space-size=8192' npx tsc --noEmit`; frontend `npx vitest run <archivos>` + `npx tsc --noEmit`. Dev: backend ya corre en `localhost:3000` (tsx watch recarga solo al guardar); frontend `localhost:5173`. Cuenta viva conectada disponible para smoke (venue slug `avoqado-full`, owner@owner.com/owner).
+- **Verificación por task:** backend `npx jest tests/unit/services/financial-connections/ --silent` +
+  `NODE_OPTIONS='--max-old-space-size=8192' npx tsc --noEmit`; frontend `npx vitest run <archivos>` + `npx tsc --noEmit`. Dev: backend ya
+  corre en `localhost:3000` (tsx watch recarga solo al guardar); frontend `localhost:5173`. Cuenta viva conectada disponible para smoke
+  (venue slug `avoqado-full`, owner@owner.com/owner).
 
 ---
 
 ### Task 1 (BE): Columna `externalCuentaId` + extracción del idCuenta
 
 **Files:**
+
 - Modify: `prisma/schema.prisma` (model FinancialAccount, ~línea 10354)
 - Create: `prisma/migrations/<timestamp>_add_financial_account_external_cuenta_id/migration.sql`
 - Modify: `src/services/financial-connections/types.ts` (ProviderAccount)
@@ -38,9 +65,14 @@
 - Test: `tests/unit/services/financial-connections/financialConnection.service.test.ts` (ajustar/agregar)
 
 **Interfaces:**
-- Produces: `FinancialAccount.externalCuentaId: string | null` (DB); `ProviderAccount.cuentaId: string | null`; `persistAccounts` lo guarda. Task 3 depende de `externalCuentaId` para llamar movimientos.
 
-- [ ] **Step 1: PROTOCOLO schema.prisma compartido.** Correr `git status --short prisma/schema.prisma && git diff prisma/schema.prisma`. Si hay diff ajeno sin commitear: respaldar (`cp prisma/schema.prisma /tmp/schema-wip-backup.prisma`), materializar HEAD (`git show HEAD:prisma/schema.prisma > prisma/schema.prisma`), aplicar SOLO el cambio de Step 2, commitear, restaurar el respaldo re-aplicando tu cambio encima. Si el diff está limpio: editar directo.
+- Produces: `FinancialAccount.externalCuentaId: string | null` (DB); `ProviderAccount.cuentaId: string | null`; `persistAccounts` lo guarda.
+  Task 3 depende de `externalCuentaId` para llamar movimientos.
+
+- [ ] **Step 1: PROTOCOLO schema.prisma compartido.** Correr `git status --short prisma/schema.prisma && git diff prisma/schema.prisma`. Si
+      hay diff ajeno sin commitear: respaldar (`cp prisma/schema.prisma /tmp/schema-wip-backup.prisma`), materializar HEAD
+      (`git show HEAD:prisma/schema.prisma > prisma/schema.prisma`), aplicar SOLO el cambio de Step 2, commitear, restaurar el respaldo
+      re-aplicando tu cambio encima. Si el diff está limpio: editar directo.
 
 - [ ] **Step 2: Agregar la columna al modelo** — en `model FinancialAccount`, después de `externalId String`:
 
@@ -52,7 +84,12 @@
   externalCuentaId String?
 ```
 
-- [ ] **Step 3: Migración.** Intentar `npx prisma migrate dev --name add_financial_account_external_cuenta_id --create-only`, revisar el SQL generado (debe ser SOLO `ALTER TABLE "FinancialAccount" ADD COLUMN "externalCuentaId" TEXT;`) y aplicar con `npx prisma migrate dev`. Si truena por drift ajeno: NUNCA `migrate reset`; fallback ya probado en este repo: `npx prisma migrate diff --from-url "$DATABASE_URL" --to-schema-datamodel prisma/schema.prisma --script` → revisar que el script solo tenga NUESTRO cambio → aplicar solo nuestra sentencia vía `psql` → crear el dir de migración a mano con ese SQL → `npx prisma migrate resolve --applied <nombre>`. Luego `npx prisma generate`.
+- [ ] **Step 3: Migración.** Intentar `npx prisma migrate dev --name add_financial_account_external_cuenta_id --create-only`, revisar el SQL
+      generado (debe ser SOLO `ALTER TABLE "FinancialAccount" ADD COLUMN "externalCuentaId" TEXT;`) y aplicar con `npx prisma migrate dev`.
+      Si truena por drift ajeno: NUNCA `migrate reset`; fallback ya probado en este repo:
+      `npx prisma migrate diff --from-url "$DATABASE_URL" --to-schema-datamodel prisma/schema.prisma --script` → revisar que el script solo
+      tenga NUESTRO cambio → aplicar solo nuestra sentencia vía `psql` → crear el dir de migración a mano con ese SQL →
+      `npx prisma migrate resolve --applied <nombre>`. Luego `npx prisma generate`.
 
 - [ ] **Step 4: `ProviderAccount.cuentaId`** en `src/services/financial-connections/types.ts`:
 
@@ -71,14 +108,14 @@ export interface ProviderAccount {
 - [ ] **Step 5: Extraerlo en `normalizeAccounts`** (externalBank.client.ts) — dentro del objeto retornado, junto a `clabe`:
 
 ```ts
-      return {
-        externalId,
-        cuentaId: pick<string>(cuenta, 'idCuenta') ?? null,
-        label: pick<string>(n, 'nombre') ?? null,
-        clabe: pick<string>(cuenta, 'cuentaClabe') ?? null,
-        active: typeof pick(cuenta, 'activo') === 'boolean' ? (pick<boolean>(cuenta, 'activo') as boolean) : null,
-        balance: typeof saldo === 'number' ? (saldo as number) : null,
-      }
+return {
+  externalId,
+  cuentaId: pick<string>(cuenta, 'idCuenta') ?? null,
+  label: pick<string>(n, 'nombre') ?? null,
+  clabe: pick<string>(cuenta, 'cuentaClabe') ?? null,
+  active: typeof pick(cuenta, 'activo') === 'boolean' ? (pick<boolean>(cuenta, 'activo') as boolean) : null,
+  balance: typeof saldo === 'number' ? (saldo as number) : null,
+}
 ```
 
 - [ ] **Step 6: Guardarlo en `persistAccounts`** (financialConnection.service.ts) — agregar al `data` del createMany:
@@ -88,16 +125,20 @@ export interface ProviderAccount {
       externalCuentaId: a.cuentaId ?? null,
 ```
 
-- [ ] **Step 7: Test.** En el test del service, el caso `startConnection: single negocio → auto-selects, CONNECTED` ya mockea `clientMock.connect` con accounts — agregar `cuentaId: 'cta-1'` al account mockeado y asertar que `db.financialAccount.createMany` recibió `externalCuentaId: 'cta-1'`:
+- [ ] **Step 7: Test.** En el test del service, el caso `startConnection: single negocio → auto-selects, CONNECTED` ya mockea
+      `clientMock.connect` con accounts — agregar `cuentaId: 'cta-1'` al account mockeado y asertar que `db.financialAccount.createMany`
+      recibió `externalCuentaId: 'cta-1'`:
 
 ```ts
-  const args = db.financialAccount.createMany.mock.calls.at(-1)[0]
-  expect(args.data[0].externalCuentaId).toBe('cta-1')
+const args = db.financialAccount.createMany.mock.calls.at(-1)[0]
+expect(args.data[0].externalCuentaId).toBe('cta-1')
 ```
 
-(Nota: los demás mocks de accounts sin `cuentaId` seguirán compilando si el test usa objetos literales laxos; si tsc exige el campo, agregar `cuentaId: null` donde falte.)
+(Nota: los demás mocks de accounts sin `cuentaId` seguirán compilando si el test usa objetos literales laxos; si tsc exige el campo, agregar
+`cuentaId: null` donde falte.)
 
-- [ ] **Step 8: Verificar** — `npx jest tests/unit/services/financial-connections/ --silent` → verde; `NODE_OPTIONS='--max-old-space-size=8192' npx tsc --noEmit` → exit 0.
+- [ ] **Step 8: Verificar** — `npx jest tests/unit/services/financial-connections/ --silent` → verde;
+      `NODE_OPTIONS='--max-old-space-size=8192' npx tsc --noEmit` → exit 0.
 
 - [ ] **Step 9: Commit** (rutas explícitas; incluir el dir de migración):
 
@@ -111,11 +152,13 @@ git commit -m "feat(financial-connections): capture provider cuentaId per accoun
 ### Task 2 (BE): Métodos de movimientos en el provider client
 
 **Files:**
+
 - Modify: `src/services/financial-connections/types.ts` (tipos nuevos + interface)
 - Modify: `src/services/financial-connections/externalBank.client.ts` (implementación)
 - Test: `tests/unit/services/financial-connections/externalBank.client.test.ts` (nock, seguir el estilo existente del archivo)
 
 **Interfaces:**
+
 - Consumes: `headers()`, `base()`, `pick()` ya existentes en el client; `ConnectionContext { accessToken }`.
 - Produces (Task 3 los consume con estos nombres EXACTOS):
 
@@ -149,7 +192,8 @@ listMovements(ctx: ConnectionContext, cuentaId: string, query: MovementQuery): P
 getMovementStats(ctx: ConnectionContext, cuentaId: string, range: { from?: string; to?: string }): Promise<MovementStats>
 ```
 
-- [ ] **Step 1: Tests nock que fallan.** En `externalBank.client.test.ts`, siguiendo el patrón de mocks nock del archivo (mismo base URL de test):
+- [ ] **Step 1: Tests nock que fallan.** En `externalBank.client.test.ts`, siguiendo el patrón de mocks nock del archivo (mismo base URL de
+      test):
 
 ```ts
 it('listMovements: pagina con notación punteada y normaliza el movimiento', async () => {
@@ -158,7 +202,20 @@ it('listMovements: pagina con notación punteada y normaliza el movimiento', asy
     .query({ 'Pagination.Page': '0', 'Pagination.Size': '10', FechaInicio: '2026-07-01T00:00:00.000Z' })
     .reply(200, {
       total: 1,
-      data: [{ idOperacion: 'op1', tipoMovimiento: 'SPEI IN', tipoOperacion: 'Abono', concepto: 'Pago', fechaCreacion: '2026-07-01T10:00:00Z', monto: 150.5, estatus: 'Liquidado', idEstatus: 3, nombreOrdenante: 'ACME', referencia: '777' }],
+      data: [
+        {
+          idOperacion: 'op1',
+          tipoMovimiento: 'SPEI IN',
+          tipoOperacion: 'Abono',
+          concepto: 'Pago',
+          fechaCreacion: '2026-07-01T10:00:00Z',
+          monto: 150.5,
+          estatus: 'Liquidado',
+          idEstatus: 3,
+          nombreOrdenante: 'ACME',
+          referencia: '777',
+        },
+      ],
     })
   const r = await externalBankClient.listMovements({ accessToken: 't' }, 'cta-1', { page: 0, size: 10, from: '2026-07-01T00:00:00.000Z' })
   expect(r.total).toBe(1)
@@ -166,16 +223,22 @@ it('listMovements: pagina con notación punteada y normaliza el movimiento', asy
 })
 
 it('getMovementStats: parsea los montos-string a número y preserva null en no-parseables', async () => {
-  nock(BASE)
-    .get('/api/clients/movimientos/Estadisticas/cta-1')
-    .query(true)
-    .reply(200, {
-      nombre: 'AV-X', cuentaClabe: '7381',
-      montoTransaccionadoSpeiIn: '1500.75', numeroOperacionesSpeiIn: '3', comisionCobradaSpeiIn: '12.5',
-      montoTransaccionadoSpeiOut: 'garbage', numeroOperacionesSpeiOut: '1', comisionCobradaSpeiOut: '0',
-      montoTransaccionadoTransferenciaInterna: '0', numeroOperacionesTransferenciaInterna: '0', comisionCobradaTransferenciaInterna: '0',
-      montoTransaccionadoDispersion: '200', numeroOperacionesDispersion: '2', comisionCobradaDispersion: '1',
-    })
+  nock(BASE).get('/api/clients/movimientos/Estadisticas/cta-1').query(true).reply(200, {
+    nombre: 'AV-X',
+    cuentaClabe: '7381',
+    montoTransaccionadoSpeiIn: '1500.75',
+    numeroOperacionesSpeiIn: '3',
+    comisionCobradaSpeiIn: '12.5',
+    montoTransaccionadoSpeiOut: 'garbage',
+    numeroOperacionesSpeiOut: '1',
+    comisionCobradaSpeiOut: '0',
+    montoTransaccionadoTransferenciaInterna: '0',
+    numeroOperacionesTransferenciaInterna: '0',
+    comisionCobradaTransferenciaInterna: '0',
+    montoTransaccionadoDispersion: '200',
+    numeroOperacionesDispersion: '2',
+    comisionCobradaDispersion: '1',
+  })
   const s = await externalBankClient.getMovementStats({ accessToken: 't' }, 'cta-1', { from: '2026-07-01T00:00:00.000Z' })
   expect(s.speiIn).toEqual({ amount: 1500.75, count: 3, fee: 12.5 })
   expect(s.speiOut.amount).toBeNull() // 'garbage' NO se convierte en 0
@@ -183,7 +246,8 @@ it('getMovementStats: parsea los montos-string a número y preserva null en no-p
 })
 ```
 
-- [ ] **Step 2: Correr → FAIL** (`listMovements` no existe): `npx jest tests/unit/services/financial-connections/externalBank.client.test.ts --silent`.
+- [ ] **Step 2: Correr → FAIL** (`listMovements` no existe):
+      `npx jest tests/unit/services/financial-connections/externalBank.client.test.ts --silent`.
 
 - [ ] **Step 3: Tipos + interface** en types.ts (bloque de "Produces" arriba, literal) y **implementación** en externalBank.client.ts:
 
@@ -259,7 +323,8 @@ Y en el objeto `externalBankClient`:
   },
 ```
 
-(Nota: si `pick()` no soporta claves compuestas dinámicas con template string, usar la variante que el helper permita — leerlo antes; en el peor caso, indexar case-insensitive igual que hace pick internamente.)
+(Nota: si `pick()` no soporta claves compuestas dinámicas con template string, usar la variante que el helper permita — leerlo antes; en el
+peor caso, indexar case-insensitive igual que hace pick internamente.)
 
 - [ ] **Step 4: Correr → PASS** ambos tests nuevos + los existentes del archivo.
 
@@ -275,39 +340,70 @@ git commit -m "feat(financial-connections): provider client movements list + in/
 ### Task 3 (BE): Service + endpoints REST de movimientos
 
 **Files:**
+
 - Modify: `src/services/financial-connections/financialConnection.service.ts`
 - Modify: `src/controllers/dashboard/financialConnection.controller.ts`
 - Modify: `src/routes/dashboard/financialConnection.routes.ts`
 - Test: `tests/unit/services/financial-connections/financialConnection.service.test.ts`
 
 **Interfaces:**
-- Consumes: `accessTokenFor(conn)` (interno, ya existe — cache + refresh bajo lock), `getFinancialProviderClient`, tipos de Task 2, `externalCuentaId` de Task 1.
-- Produces: `getMovementsForAccount(financialAccountId, q: MovementQuery): Promise<MovementPage>` y `getMovementStatsForAccount(financialAccountId, range): Promise<MovementStats>`; REST `GET /api/v1/dashboard/venues/:venueId/financial-accounts/:id/movements` (query `page`, `size`, `from`, `to`) y `GET .../movements/stats` (query `from`, `to`) → `{ success: true, data }`.
+
+- Consumes: `accessTokenFor(conn)` (interno, ya existe — cache + refresh bajo lock), `getFinancialProviderClient`, tipos de Task 2,
+  `externalCuentaId` de Task 1.
+- Produces: `getMovementsForAccount(financialAccountId, q: MovementQuery): Promise<MovementPage>` y
+  `getMovementStatsForAccount(financialAccountId, range): Promise<MovementStats>`; REST
+  `GET /api/v1/dashboard/venues/:venueId/financial-accounts/:id/movements` (query `page`, `size`, `from`, `to`) y `GET .../movements/stats`
+  (query `from`, `to`) → `{ success: true, data }`.
 
 - [ ] **Step 1: Tests que fallan** (mock db + clientMock como el resto del archivo):
 
 ```ts
 it('getMovementsForAccount: usa externalCuentaId y delega al client', async () => {
   db.financialAccount.findUniqueOrThrow.mockResolvedValue({
-    id: 'fa1', externalId: 'neg-1', externalCuentaId: 'cta-1',
-    connection: { id: 'c1', mode: 'SELF_CONNECT', grantEnc: encFixture(), tokenVersion: 0, deviceIdentifier: 'dev', status: 'CONNECTED', provider: { code: 'EXTERNAL_BANK' } },
+    id: 'fa1',
+    externalId: 'neg-1',
+    externalCuentaId: 'cta-1',
+    connection: {
+      id: 'c1',
+      mode: 'SELF_CONNECT',
+      grantEnc: encFixture(),
+      tokenVersion: 0,
+      deviceIdentifier: 'dev',
+      status: 'CONNECTED',
+      provider: { code: 'EXTERNAL_BANK' },
+    },
   })
   db.financialConnection.findUniqueOrThrow.mockResolvedValue({ id: 'c1', grantEnc: encFixture(), tokenVersion: 0, status: 'CONNECTED' })
   clientMock.refresh.mockResolvedValue({ grant: { refreshToken: 'r2' }, ctx: { accessToken: 'acc' } })
   clientMock.listMovements.mockResolvedValue({ movements: [], total: 0 })
   const r = await svc.getMovementsForAccount('fa1', { page: 0, size: 10 })
-  expect(clientMock.listMovements).toHaveBeenCalledWith(expect.objectContaining({ accessToken: expect.any(String) }), 'cta-1', { page: 0, size: 10 })
+  expect(clientMock.listMovements).toHaveBeenCalledWith(expect.objectContaining({ accessToken: expect.any(String) }), 'cta-1', {
+    page: 0,
+    size: 10,
+  })
   expect(r.total).toBe(0)
 })
 
 it('getMovementsForAccount: backfillea externalCuentaId perezosamente cuando es null (fila pre-columna)', async () => {
   db.financialAccount.findUniqueOrThrow.mockResolvedValue({
-    id: 'fa2', externalId: 'neg-1', externalCuentaId: null,
-    connection: { id: 'c2', mode: 'SELF_CONNECT', grantEnc: encFixture(), tokenVersion: 0, deviceIdentifier: 'dev', status: 'CONNECTED', provider: { code: 'EXTERNAL_BANK' } },
+    id: 'fa2',
+    externalId: 'neg-1',
+    externalCuentaId: null,
+    connection: {
+      id: 'c2',
+      mode: 'SELF_CONNECT',
+      grantEnc: encFixture(),
+      tokenVersion: 0,
+      deviceIdentifier: 'dev',
+      status: 'CONNECTED',
+      provider: { code: 'EXTERNAL_BANK' },
+    },
   })
   db.financialConnection.findUniqueOrThrow.mockResolvedValue({ id: 'c2', grantEnc: encFixture(), tokenVersion: 0, status: 'CONNECTED' })
   clientMock.refresh.mockResolvedValue({ grant: { refreshToken: 'r2' }, ctx: { accessToken: 'acc' } })
-  clientMock.listAccounts.mockResolvedValue([{ externalId: 'neg-1', cuentaId: 'cta-9', label: null, clabe: null, active: null, balance: null }])
+  clientMock.listAccounts.mockResolvedValue([
+    { externalId: 'neg-1', cuentaId: 'cta-9', label: null, clabe: null, active: null, balance: null },
+  ])
   clientMock.listMovements.mockResolvedValue({ movements: [], total: 0 })
   await svc.getMovementsForAccount('fa2', { page: 0, size: 10 })
   expect(db.financialAccount.update).toHaveBeenCalledWith({ where: { id: 'fa2' }, data: { externalCuentaId: 'cta-9' } })
@@ -316,8 +412,18 @@ it('getMovementsForAccount: backfillea externalCuentaId perezosamente cuando es 
 
 it('getMovementsForAccount: si el provider no reporta cuentaId → BadRequest, no 500', async () => {
   db.financialAccount.findUniqueOrThrow.mockResolvedValue({
-    id: 'fa3', externalId: 'neg-x', externalCuentaId: null,
-    connection: { id: 'c3', mode: 'SELF_CONNECT', grantEnc: encFixture(), tokenVersion: 0, deviceIdentifier: 'dev', status: 'CONNECTED', provider: { code: 'EXTERNAL_BANK' } },
+    id: 'fa3',
+    externalId: 'neg-x',
+    externalCuentaId: null,
+    connection: {
+      id: 'c3',
+      mode: 'SELF_CONNECT',
+      grantEnc: encFixture(),
+      tokenVersion: 0,
+      deviceIdentifier: 'dev',
+      status: 'CONNECTED',
+      provider: { code: 'EXTERNAL_BANK' },
+    },
   })
   db.financialConnection.findUniqueOrThrow.mockResolvedValue({ id: 'c3', grantEnc: encFixture(), tokenVersion: 0, status: 'CONNECTED' })
   clientMock.refresh.mockResolvedValue({ grant: { refreshToken: 'r2' }, ctx: { accessToken: 'acc' } })
@@ -326,7 +432,8 @@ it('getMovementsForAccount: si el provider no reporta cuentaId → BadRequest, n
 })
 ```
 
-(Ojo tokenCache del módulo: usar ids de conexión NUEVOS — c1/c2/c3 pueden chocar con tests previos del archivo; si chocan, usar `cm-1`/`cm-2`/`cm-3`.)
+(Ojo tokenCache del módulo: usar ids de conexión NUEVOS — c1/c2/c3 pueden chocar con tests previos del archivo; si chocan, usar
+`cm-1`/`cm-2`/`cm-3`.)
 
 - [ ] **Step 2: Correr → FAIL.**
 
@@ -373,7 +480,8 @@ export async function getMovementStatsForAccount(
 }
 ```
 
-Verificar que `externalBankClient.listAccounts` exista implementado (la interface lo declara); si falta, implementarlo: `async listAccounts(ctx) { return normalizeAccounts(await fetchMe(ctx.accessToken)) }`.
+Verificar que `externalBankClient.listAccounts` exista implementado (la interface lo declara); si falta, implementarlo:
+`async listAccounts(ctx) { return normalizeAccounts(await fetchMe(ctx.accessToken)) }`.
 
 - [ ] **Step 4: Controller + routes.** En el controller:
 
@@ -412,7 +520,8 @@ export async function getMovementStats(req: Request, res: Response, next: NextFu
 }
 ```
 
-En routes (junto a `/:id/balance`; el orden importa: registrar `/movements/stats` ANTES de `/movements` no es necesario — son paths distintos — pero sí antes de cualquier catch-all):
+En routes (junto a `/:id/balance`; el orden importa: registrar `/movements/stats` ANTES de `/movements` no es necesario — son paths
+distintos — pero sí antes de cualquier catch-all):
 
 ```ts
 venueFinancialAccountRoutes.get('/:id/movements', checkPermission('financialConnections:manage'), ctrl.getMovements)
@@ -421,7 +530,11 @@ venueFinancialAccountRoutes.get('/:id/movements/stats', checkPermission('financi
 
 - [ ] **Step 5: Correr → PASS** todos; tsc exit 0.
 
-- [ ] **Step 6: Smoke curl en vivo** (hay una conexión CONNECTED con token cacheado): login `owner@owner.com`/`owner` con cookie jar, obtener el accountId de `GET /api/v1/dashboard/venues/<venueId>/financial-connections`, luego `GET .../financial-accounts/<id>/movements?page=0&size=5` → 200 con `{movements, total}` reales y `GET .../movements/stats?from=<hace 30 días ISO>` → 200 con montos numéricos. Pegar los dos responses (truncados) en el reporte. Si la conexión degradó a NEEDS_REAUTH (token expirado), documentarlo y validar solo forma del error (400 honesto) — NO pedir códigos 2FA.
+- [ ] **Step 6: Smoke curl en vivo** (hay una conexión CONNECTED con token cacheado): login `owner@owner.com`/`owner` con cookie jar,
+      obtener el accountId de `GET /api/v1/dashboard/venues/<venueId>/financial-connections`, luego
+      `GET .../financial-accounts/<id>/movements?page=0&size=5` → 200 con `{movements, total}` reales y
+      `GET .../movements/stats?from=<hace 30 días ISO>` → 200 con montos numéricos. Pegar los dos responses (truncados) en el reporte. Si la
+      conexión degradó a NEEDS_REAUTH (token expirado), documentarlo y validar solo forma del error (400 honesto) — NO pedir códigos 2FA.
 
 - [ ] **Step 7: Commit:**
 
@@ -435,10 +548,12 @@ git commit -m "feat(financial-connections): venue-scoped movements + stats endpo
 ### Task 4 (FE): Service frontend de movimientos
 
 **Files:**
+
 - Modify: `src/services/financialConnection.service.ts`
 - Test: `src/services/__tests__/financialConnection.service.test.ts`
 
 **Interfaces:**
+
 - Produces (Task 6 los usa con estos nombres):
 
 ```ts
@@ -484,7 +599,17 @@ it('getMovements: GET con query params y desenvuelve data', async () => {
 
 it('getMovementStats: GET stats, amounts null se preservan', async () => {
   mocked.get.mockResolvedValue({
-    data: { success: true, data: { accountName: 'X', clabe: '7381', speiIn: { amount: null, fee: null, count: 0 }, speiOut: { amount: 5, fee: 0, count: 1 }, internalTransfers: { amount: 0, fee: 0, count: 0 }, dispersions: { amount: 0, fee: 0, count: 0 } } },
+    data: {
+      success: true,
+      data: {
+        accountName: 'X',
+        clabe: '7381',
+        speiIn: { amount: null, fee: null, count: 0 },
+        speiOut: { amount: 5, fee: 0, count: 1 },
+        internalTransfers: { amount: 0, fee: 0, count: 0 },
+        dispersions: { amount: 0, fee: 0, count: 0 },
+      },
+    },
   })
   const s = await financialConnectionAPI.getMovementStats('v1', 'fa1', {})
   expect(mocked.get).toHaveBeenCalledWith('/api/v1/dashboard/venues/v1/financial-accounts/fa1/movements/stats', { params: {} })
@@ -532,6 +657,7 @@ git commit -m "feat(financial-connections): movements + stats API client methods
 ### Task 5 (FE): i18n de movimientos (es/en/fr, paridad exacta)
 
 **Files:**
+
 - Modify: `src/locales/es/financialConnections.json`, `src/locales/en/financialConnections.json`, `src/locales/fr/financialConnections.json`
 
 - [ ] **Step 1:** Agregar a los 3 archivos un bloque top-level `"movements"` (mismas claves en los 3). ES:
@@ -630,7 +756,9 @@ FR:
 }
 ```
 
-- [ ] **Step 2: Verificar** paridad + JSON: `node -e "const ks=o=>Object.keys(o).flatMap(k=>typeof o[k]==='object'&&o[k]?ks(o[k]).map(s=>k+'.'+s):[k]); const [a,b,c]=['es','en','fr'].map(l=>ks(require('./src/locales/'+l+'/financialConnections.json'))); if(a.join()!==b.join()||a.join()!==c.join()) throw new Error('key mismatch'); console.log('parity OK', a.length, 'keys')"` → parity OK. `npx tsc --noEmit` → exit 0.
+- [ ] **Step 2: Verificar** paridad + JSON:
+      `node -e "const ks=o=>Object.keys(o).flatMap(k=>typeof o[k]==='object'&&o[k]?ks(o[k]).map(s=>k+'.'+s):[k]); const [a,b,c]=['es','en','fr'].map(l=>ks(require('./src/locales/'+l+'/financialConnections.json'))); if(a.join()!==b.join()||a.join()!==c.join()) throw new Error('key mismatch'); console.log('parity OK', a.length, 'keys')"`
+      → parity OK. `npx tsc --noEmit` → exit 0.
 
 - [ ] **Step 3: Commit:**
 
@@ -644,11 +772,15 @@ git commit -m "feat(financial-connections): i18n for account movements (es/en/fr
 ### Task 6 (FE): Sheet de movimientos + fila clickeable
 
 **Files:**
+
 - Create: `src/pages/Venue/Edit/components/BankAccountMovementsSheet.tsx`
 - Modify: `src/pages/Venue/Edit/components/BankAccountsSection.tsx` (AccountRow clickeable + montar el sheet)
 
 **Interfaces:**
-- Consumes: `financialConnectionAPI.getMovements/getMovementStats` + tipos (Task 4), i18n (Task 5), `Currency`, shadcn `Sheet` (leer las props reales en `src/components/ui/sheet.tsx` y el uso de `AggregatorDetailSheet.tsx` como referencia canónica), `Skeleton`, `Badge`, `Button`, `Select` (o botones de preset si Select no existe — seguir lo que haya en `src/components/ui/`).
+
+- Consumes: `financialConnectionAPI.getMovements/getMovementStats` + tipos (Task 4), i18n (Task 5), `Currency`, shadcn `Sheet` (leer las
+  props reales en `src/components/ui/sheet.tsx` y el uso de `AggregatorDetailSheet.tsx` como referencia canónica), `Skeleton`, `Badge`,
+  `Button`, `Select` (o botones de preset si Select no existe — seguir lo que haya en `src/components/ui/`).
 - Produces: `<BankAccountMovementsSheet open onClose venueId account />` con `account: FinancialAccountSummary`.
 
 - [ ] **Step 1: Componente completo:**
@@ -671,11 +803,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Currency } from '@/utils/currency'
-import {
-  financialConnectionAPI,
-  type FinancialAccountSummary,
-  type MovementCategoryStats,
-} from '@/services/financialConnection.service'
+import { financialConnectionAPI, type FinancialAccountSummary, type MovementCategoryStats } from '@/services/financialConnection.service'
 
 const PAGE_SIZE = 10
 const RANGE_PRESETS = [7, 30, 90] as const
@@ -761,10 +889,26 @@ export function BankAccountMovementsSheet({ open, onClose, venueId, account }: P
             <Skeleton className="h-24 w-full" />
           ) : (
             <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-              <StatCard label={t('movements.stats.speiIn')} icon={<ArrowDownLeft className="h-4 w-4" aria-hidden />} stats={stats.data?.speiIn} />
-              <StatCard label={t('movements.stats.speiOut')} icon={<ArrowUpRight className="h-4 w-4" aria-hidden />} stats={stats.data?.speiOut} />
-              <StatCard label={t('movements.stats.internalTransfers')} icon={<Repeat className="h-4 w-4" aria-hidden />} stats={stats.data?.internalTransfers} />
-              <StatCard label={t('movements.stats.dispersions')} icon={<Send className="h-4 w-4" aria-hidden />} stats={stats.data?.dispersions} />
+              <StatCard
+                label={t('movements.stats.speiIn')}
+                icon={<ArrowDownLeft className="h-4 w-4" aria-hidden />}
+                stats={stats.data?.speiIn}
+              />
+              <StatCard
+                label={t('movements.stats.speiOut')}
+                icon={<ArrowUpRight className="h-4 w-4" aria-hidden />}
+                stats={stats.data?.speiOut}
+              />
+              <StatCard
+                label={t('movements.stats.internalTransfers')}
+                icon={<Repeat className="h-4 w-4" aria-hidden />}
+                stats={stats.data?.internalTransfers}
+              />
+              <StatCard
+                label={t('movements.stats.dispersions')}
+                icon={<Send className="h-4 w-4" aria-hidden />}
+                stats={stats.data?.dispersions}
+              />
             </div>
           )}
 
@@ -799,7 +943,12 @@ export function BankAccountMovementsSheet({ open, onClose, venueId, account }: P
                   {movs.isFetching && <Loader2 className="mr-1 inline h-3 w-3 animate-spin" aria-hidden />}
                   {t('movements.table.pageOf', { page: page + 1, pages: totalPages })}
                 </span>
-                <Button size="sm" variant="outline" disabled={page + 1 >= totalPages || movs.isFetching} onClick={() => setPage(p => p + 1)}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={page + 1 >= totalPages || movs.isFetching}
+                  onClick={() => setPage(p => p + 1)}
+                >
                   {t('movements.table.next')}
                 </Button>
               </div>
@@ -812,24 +961,35 @@ export function BankAccountMovementsSheet({ open, onClose, venueId, account }: P
 }
 ```
 
-(Si las exports reales de `@/components/ui/sheet` difieren, ajustar al uso canónico de `AggregatorDetailSheet.tsx`. Si `keepPreviousData` no existe en la versión de TanStack del repo, usar `placeholderData: (prev) => prev`.)
+(Si las exports reales de `@/components/ui/sheet` difieren, ajustar al uso canónico de `AggregatorDetailSheet.tsx`. Si `keepPreviousData` no
+existe en la versión de TanStack del repo, usar `placeholderData: (prev) => prev`.)
 
-- [ ] **Step 2: Fila clickeable en `BankAccountsSection.tsx`.** En `AccountRow`: agregar prop `onOpen: () => void`; envolver el contenido izquierdo en un `<button type="button" onClick={onOpen} aria-label={t('movements.openAria')} className="flex min-w-0 flex-1 flex-col text-left cursor-pointer">` (el botón de refresh ya es un botón aparte a la derecha — verificar que quede FUERA del nuevo button para no anidar botones, restructurando el JSX si hace falta: contenedor flex con [button-izquierdo | montos+acciones-derecha]). En `ConnectionCard`: estado `const [movementsAccount, setMovementsAccount] = useState<FinancialAccountSummary | null>(null)`, pasar `onOpen={() => setMovementsAccount(a)}` a cada `AccountRow`, y montar al final:
+- [ ] **Step 2: Fila clickeable en `BankAccountsSection.tsx`.** En `AccountRow`: agregar prop `onOpen: () => void`; envolver el contenido
+      izquierdo en un
+      `<button type="button" onClick={onOpen} aria-label={t('movements.openAria')} className="flex min-w-0 flex-1 flex-col text-left cursor-pointer">`
+      (el botón de refresh ya es un botón aparte a la derecha — verificar que quede FUERA del nuevo button para no anidar botones,
+      restructurando el JSX si hace falta: contenedor flex con [button-izquierdo | montos+acciones-derecha]). En `ConnectionCard`: estado
+      `const [movementsAccount, setMovementsAccount] = useState<FinancialAccountSummary | null>(null)`, pasar
+      `onOpen={() => setMovementsAccount(a)}` a cada `AccountRow`, y montar al final:
 
 ```tsx
-{movementsAccount && (
-  <BankAccountMovementsSheet
-    open={!!movementsAccount}
-    onClose={() => setMovementsAccount(null)}
-    venueId={venueId}
-    account={movementsAccount}
-  />
-)}
+{
+  movementsAccount && (
+    <BankAccountMovementsSheet
+      open={!!movementsAccount}
+      onClose={() => setMovementsAccount(null)}
+      venueId={venueId}
+      account={movementsAccount}
+    />
+  )
+}
 ```
 
 Import: `import { BankAccountMovementsSheet } from './BankAccountMovementsSheet'`.
 
-- [ ] **Step 3: Verificar** `npx tsc --noEmit` exit 0; `npx vitest run src/services/__tests__/financialConnection.service.test.ts src/pages/Venue/components/__tests__/bankConnectSteps.test.ts` verde; `npm run build` success.
+- [ ] **Step 3: Verificar** `npx tsc --noEmit` exit 0;
+      `npx vitest run src/services/__tests__/financialConnection.service.test.ts src/pages/Venue/components/__tests__/bankConnectSteps.test.ts`
+      verde; `npm run build` success.
 
 - [ ] **Step 4: Commit:**
 
@@ -844,15 +1004,23 @@ git commit -m "feat(financial-connections): account movements sheet (in/out stat
 
 **Files:** ninguno nuevo (solo correcciones que surjan).
 
-- [ ] **Step 1 (BE):** `npx jest tests/unit/services/financial-connections/ --silent` verde; `NODE_OPTIONS='--max-old-space-size=8192' npx tsc --noEmit` exit 0.
+- [ ] **Step 1 (BE):** `npx jest tests/unit/services/financial-connections/ --silent` verde;
+      `NODE_OPTIONS='--max-old-space-size=8192' npx tsc --noEmit` exit 0.
 - [ ] **Step 2 (FE):** `npx vitest run` toda la suite verde; `npx tsc --noEmit` exit 0; `npm run build` success.
-- [ ] **Step 3 (E2E, con la conexión viva):** en `localhost:5173` como owner → Integraciones → click en la fila de la cuenta conectada → el Sheet abre, las 4 tarjetas muestran montos (o `—` honesto), la tabla lista movimientos reales, paginación avanza/retrocede, cambiar rango 7/30/90 refetchea. Vía Playwright si está disponible; si la conexión degradó a NEEDS_REAUTH, documentar el estado honesto que muestra la UI y marcar el punto como "pendiente de reconexión humana" — NO pedir códigos 2FA.
+- [ ] **Step 3 (E2E, con la conexión viva):** en `localhost:5173` como owner → Integraciones → click en la fila de la cuenta conectada → el
+      Sheet abre, las 4 tarjetas muestran montos (o `—` honesto), la tabla lista movimientos reales, paginación avanza/retrocede, cambiar
+      rango 7/30/90 refetchea. Vía Playwright si está disponible; si la conexión degradó a NEEDS_REAUTH, documentar el estado honesto que
+      muestra la UI y marcar el punto como "pendiente de reconexión humana" — NO pedir códigos 2FA.
 - [ ] **Step 4:** Commit de correcciones si las hubo (rutas explícitas) y reporte final: resultados por paso + capturas.
 
 ---
 
 ## Self-Review (hecho al escribir el plan)
 
-- **Cobertura:** in/out (stats cards, Task 2/6), desglose paginado (Tasks 2/3/6), click en la cuenta (Task 6), mapeo idNegocio→idCuenta con backfill para la conexión ya viva (Tasks 1/3), i18n ×3 (Task 5), guardas de seguridad (Task 3), verificación (Task 7).
-- **Placeholders:** ninguno; los dos puntos de verificación contra el repo real (props de Sheet, firma de pick) señalan su referencia canónica.
-- **Consistencia de tipos:** `MovementPage/MovementStats/MovementQuery/ProviderMovement` definidos en Task 2 y consumidos idénticos en Task 3; espejo frontend (`MovementsPage/AccountMovementStats/AccountMovement`) definido en Task 4 y consumido en Task 6; `externalCuentaId`/`cuentaId` consistentes entre Tasks 1 y 3.
+- **Cobertura:** in/out (stats cards, Task 2/6), desglose paginado (Tasks 2/3/6), click en la cuenta (Task 6), mapeo idNegocio→idCuenta con
+  backfill para la conexión ya viva (Tasks 1/3), i18n ×3 (Task 5), guardas de seguridad (Task 3), verificación (Task 7).
+- **Placeholders:** ninguno; los dos puntos de verificación contra el repo real (props de Sheet, firma de pick) señalan su referencia
+  canónica.
+- **Consistencia de tipos:** `MovementPage/MovementStats/MovementQuery/ProviderMovement` definidos en Task 2 y consumidos idénticos en Task
+  3; espejo frontend (`MovementsPage/AccountMovementStats/AccountMovement`) definido en Task 4 y consumido en Task 6;
+  `externalCuentaId`/`cuentaId` consistentes entre Tasks 1 y 3.

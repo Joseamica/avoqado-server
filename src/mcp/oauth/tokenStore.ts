@@ -35,9 +35,18 @@ export async function createAuthCode(d: AuthCodeData): Promise<{ code: string }>
 
 /** Returns the code's bound data and marks it consumed; null if missing/expired/used. */
 export async function consumeAuthCode(code: string): Promise<AuthCodeData | null> {
-  const row = await prisma.mcpAuthCode.findUnique({ where: { codeHash: sha256(code) } })
-  if (!row || row.consumedAt || row.expiresAt.getTime() < Date.now()) return null
-  await prisma.mcpAuthCode.update({ where: { codeHash: row.codeHash }, data: { consumedAt: new Date() } })
+  const codeHash = sha256(code)
+  // WHY atomic claim (not findUnique→check→update): an OAuth code is single-use. With a read then a
+  // separate write, two concurrent /token exchanges both read consumedAt=null, both pass the check,
+  // and both get the code — a replay that mints two token sets from one code. updateMany flips
+  // consumedAt in ONE statement gated on `consumedAt: null`; its count tells us if WE won the race.
+  const claimed = await prisma.mcpAuthCode.updateMany({
+    where: { codeHash, consumedAt: null, expiresAt: { gt: new Date() } },
+    data: { consumedAt: new Date() },
+  })
+  if (claimed.count !== 1) return null // missing, expired, or already consumed by a concurrent exchange
+  const row = await prisma.mcpAuthCode.findUnique({ where: { codeHash } })
+  if (!row) return null // defensive: we just updated it, so this should never be null
   return {
     clientId: row.clientId,
     staffId: row.staffId,
@@ -81,9 +90,22 @@ export async function createRefreshToken(d: RefreshData): Promise<{ token: strin
   return { token }
 }
 
+/**
+ * Atomically consume (revoke) a refresh token and return its data, or null if missing/expired/used.
+ * WHY revoke here (not a separate call): rotation must be atomic. The old flow read the token, then
+ * the caller revoked it in a second statement — two concurrent refreshes both saw revokedAt=null and
+ * both rotated, replaying one token into two live sessions. Flipping revokedAt in ONE updateMany and
+ * checking count makes exactly one caller win.
+ */
 export async function consumeRefreshToken(token: string): Promise<RefreshData | null> {
-  const row = await prisma.mcpRefreshToken.findUnique({ where: { tokenHash: sha256(token) } })
-  if (!row || row.revokedAt || row.expiresAt.getTime() < Date.now()) return null
+  const tokenHash = sha256(token)
+  const claimed = await prisma.mcpRefreshToken.updateMany({
+    where: { tokenHash, revokedAt: null, expiresAt: { gt: new Date() } },
+    data: { revokedAt: new Date() },
+  })
+  if (claimed.count !== 1) return null // missing, expired, or already consumed by a concurrent refresh
+  const row = await prisma.mcpRefreshToken.findUnique({ where: { tokenHash } })
+  if (!row) return null // defensive
   return { clientId: row.clientId, staffId: row.staffId, activeOrg: row.activeOrg, scopes: row.scopes }
 }
 

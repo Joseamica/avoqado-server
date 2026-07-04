@@ -233,12 +233,17 @@ export async function getUserAccess(
   //
   // IMPERSONATION: when a SUPERADMIN is impersonating, the bypass is disabled so
   // that the access they see matches the target's effective access, not their own.
+  // WHY active filters: a revoked superadmin (StaffVenue.active=false, e.g. role pulled at that venue)
+  // or a disabled account (Staff.active=false) must NOT keep the platform-wide SUPERADMIN bypass.
+  // Without these, deactivating a superadmin leaves them with full access everywhere.
   const superAdminVenue = impersonation
     ? null
     : await prisma.staffVenue.findFirst({
         where: {
           staffId: userId,
           role: StaffRole.SUPERADMIN,
+          active: true,
+          staff: { active: true },
         },
         select: { id: true },
       })

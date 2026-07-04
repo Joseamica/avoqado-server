@@ -326,9 +326,10 @@ Run: `npm run test:unit -- referralQualification.service` Expected: FAIL (`emitT
 - [ ] **Step 3: Implementar `emitTierRewards`**
 
 Reescribir el `emitTierReward` actual (hoy emite un solo cupón, líneas ~52–125) como `emitTierRewards` que itera los `ReferralTierReward`
-activos del nivel. Para cada uno, `createMany({ data: [grant], skipDuplicates: true })` y si `count === 0` → skip idempotente (⚠️ NUNCA capturar P2002 dentro de la tx: el constraint error aborta la tx de Postgres — Codex r5); si `count === 1` → emitir según tipo (tabla §5) y `update` del grant con los ids del artefacto. El `Discount`
-de `PERCENT_COUPON` conserva la forma actual; el `PERMANENT_DISCOUNT` usa `isAutomatic:true`, sin `validUntil`/`maxUses`; `FREE_PRODUCT` no
-emite artefacto (`status:'MANUAL_PENDING'`).
+activos del nivel. Para cada uno, `createMany({ data: [grant], skipDuplicates: true })` y si `count === 0` → skip idempotente (⚠️ NUNCA
+capturar P2002 dentro de la tx: el constraint error aborta la tx de Postgres — Codex r5); si `count === 1` → emitir según tipo (tabla §5) y
+`update` del grant con los ids del artefacto. El `Discount` de `PERCENT_COUPON` conserva la forma actual; el `PERMANENT_DISCOUNT` usa
+`isAutomatic:true`, sin `validUntil`/`maxUses`; `FREE_PRODUCT` no emite artefacto (`status:'MANUAL_PENDING'`).
 
 - [ ] **Step 4: Correr (verde)**
 
@@ -379,8 +380,9 @@ Run: `npm run test:unit -- onOrderPaid` Expected: FAIL.
 
 Reescribir `onOrderPaid` siguiendo los 7 pasos del §5: CAS
 `referral.updateMany({ where: { qualifyingOrderId: orderId, status: 'PENDING' }, data: { status: 'QUALIFIED', qualifiedAt } })` → si
-`count === 0` return; incrementar count; recomputar tier; `referralTierUnlock.createMany({ data: [...], skipDuplicates: true })` y si `count === 0` → return (⚠️ NO capturar P2002: aborta la tx); `emitTierRewards`; actualizar
-`referralTier`; `ActivityLog`. Todo en `prisma.$transaction`. Email tier-up se mantiene fire-and-forget FUERA de la tx.
+`count === 0` return; incrementar count; recomputar tier; `referralTierUnlock.createMany({ data: [...], skipDuplicates: true })` y si
+`count === 0` → return (⚠️ NO capturar P2002: aborta la tx); `emitTierRewards`; actualizar `referralTier`; `ActivityLog`. Todo en
+`prisma.$transaction`. Email tier-up se mantiene fire-and-forget FUERA de la tx.
 
 - [ ] **Step 4: Correr (verde)**
 

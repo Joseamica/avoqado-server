@@ -65,8 +65,8 @@ export const provider: OAuthServerProvider = {
 
     const grantedScopes = scopes && scopes.length ? scopes.filter(s => data.scopes.includes(s)) : data.scopes
     const access_token = issueMcpToken(data.staffId, data.activeOrg, ACCESS_TTL_SECONDS, client.client_id)
-    // Rotate the refresh token (revoke old, issue new) — refresh-token rotation best practice.
-    await revokeRefreshToken(refreshToken)
+    // Rotate: consumeRefreshToken already atomically revoked the presented token (single-use);
+    // just issue the replacement. (No separate revoke call — that would be a redundant no-op now.)
     const { token: refresh_token } = await createRefreshToken({
       clientId: client.client_id,
       staffId: data.staffId,
