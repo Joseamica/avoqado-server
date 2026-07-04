@@ -80,7 +80,7 @@ function ssoAuthorizeHandler() {
  * present-but-foreign Origin (or Referer) blocks the forged cross-site request while never rejecting
  * a legit same-origin submit (which always carries our own Origin).
  */
-export function isTrustedOrigin(req: Pick<Request, 'get'>): boolean {
+export function isTrustedOrigin(req: HeaderGetter): boolean {
   const expected = MCP_ISSUER_URL.origin
   const origin = req.get('origin')
   if (origin) return origin === expected
@@ -286,10 +286,16 @@ function approveHandler() {
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex')
 
 /**
+ * Minimal header reader. A real Express Request satisfies this, and it's trivial to fake in tests —
+ * unlike `Pick<Request,'get'>`, which drags in Express's `get('set-cookie'): string[]` overload.
+ */
+type HeaderGetter = { get(name: string): string | undefined }
+
+/**
  * Extract (client_id, client_secret) the same way the SDK does: HTTP Basic auth header first,
  * then the form body. Returns undefined secret for public/PKCE clients (no secret presented).
  */
-export function readClientCredentials(req: Pick<Request, 'get'> & { body?: unknown }): { clientId?: string; clientSecret?: string } {
+export function readClientCredentials(req: HeaderGetter & { body?: unknown }): { clientId?: string; clientSecret?: string } {
   const authz = req.get('authorization')
   if (authz?.startsWith('Basic ')) {
     const [id, secret] = Buffer.from(authz.slice(6), 'base64').toString('utf8').split(':')
