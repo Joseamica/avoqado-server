@@ -43,6 +43,7 @@ export function registerProcurementTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, search, includeInactive, limit }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('inventory:read', venueId) // WHY: mirror the dashboard's inventory:read gate — supplier PII + PO line prices aren't free-for-all
       const gate = await planGateMessage(venueId, ...INVENTORY_GATE) // PREMIUM tier — mirrors inventory reads
       if (gate) return text({ ok: false, planRequired: true, error: gate })
 
@@ -82,6 +83,7 @@ export function registerProcurementTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, status, limit }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('inventory:read', venueId) // WHY: mirror the dashboard's inventory:read gate — supplier PII + PO line prices aren't free-for-all
       const gate = await planGateMessage(venueId, ...INVENTORY_GATE) // PREMIUM tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
 
@@ -117,6 +119,7 @@ export function registerProcurementTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, purchaseOrderId }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('inventory:read', venueId) // WHY: mirror the dashboard's inventory:read gate — supplier PII + PO line prices aren't free-for-all
       const gate = await planGateMessage(venueId, ...INVENTORY_GATE) // PREMIUM tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
 

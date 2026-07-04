@@ -42,6 +42,10 @@ const round2 = (n: number): number => Math.round(n * 100) / 100
 
 export interface PaymentStatusGroup {
   status: string
+  // WHY: refunds are NOT a distinct status — they are Payment rows with status=COMPLETED
+  // and type=REFUND (negative amounts). Grouping by status alone hides them inside COMPLETED,
+  // so we must also carry `type` to split them out.
+  type: string | null
   _count: { _all: number }
   _sum: {
     amount: { toString(): string } | null
@@ -55,31 +59,52 @@ export interface PaymentsSummary {
   count: number
   byStatus: Record<string, { count: number; amount: number; tips: number }>
   completed: { count: number; gross: number; tips: number; processorFees: number; net: number }
+  // WHY: separate refund line so "¿qué se reembolsó?" is answerable and `completed.gross` is
+  // TRUE sales revenue. `amount`/`tips` stay NEGATIVE (money out), as stored on the refund rows.
+  refunds: { count: number; amount: number; tips: number }
 }
 
 /**
- * Pure: shape a Prisma `groupBy(['status'])` result into a readable payments summary.
- * `completed` isolates real revenue (gross/tips/fees/net) from refunds and failed charges,
- * while `byStatus` keeps the full breakdown so an operator can see money going OUT.
+ * Pure: shape a Prisma `groupBy(['status','type'])` result into a readable payments summary.
+ * `completed` is TRUE sales revenue (type != REFUND); `refunds` is the split-out money-back line;
+ * `byStatus` keeps the full breakdown with a synthetic 'REFUND' bucket carved out of COMPLETED.
+ *
+ * WHY accumulate (not assign): with `type` in the groupBy, one status yields MULTIPLE rows
+ * (e.g. COMPLETED×REGULAR, COMPLETED×FAST, COMPLETED×REFUND), so each bucket must sum its rows.
+ * The old code assumed one row per status and overwrote — that breaks the moment type is added.
  */
 export function buildPaymentsSummary(groups: PaymentStatusGroup[]): PaymentsSummary {
   const out: PaymentsSummary = {
     count: 0,
     byStatus: {},
     completed: { count: 0, gross: 0, tips: 0, processorFees: 0, net: 0 },
+    refunds: { count: 0, amount: 0, tips: 0 },
+  }
+  const bump = (key: string, count: number, amount: number, tips: number) => {
+    const b = out.byStatus[key] ?? { count: 0, amount: 0, tips: 0 }
+    out.byStatus[key] = { count: b.count + count, amount: round2(b.amount + amount), tips: round2(b.tips + tips) }
   }
   for (const g of groups) {
     const amount = round2(num(g._sum.amount))
     const tips = round2(num(g._sum.tipAmount))
     out.count += g._count._all
-    out.byStatus[g.status] = { count: g._count._all, amount, tips }
+    // Modern refunds: status=COMPLETED + type=REFUND, negative amount. Route them to their OWN
+    // line and a synthetic 'REFUND' byStatus bucket — never into `completed` (that was the bug).
+    if (g.type === PaymentType.REFUND || g.status === TransactionStatus.REFUNDED) {
+      out.refunds.count += g._count._all
+      out.refunds.amount = round2(out.refunds.amount + amount)
+      out.refunds.tips = round2(out.refunds.tips + tips)
+      bump('REFUND', g._count._all, amount, tips)
+      continue
+    }
+    bump(g.status, g._count._all, amount, tips)
     if (g.status === 'COMPLETED') {
       out.completed = {
-        count: g._count._all,
-        gross: amount,
-        tips,
-        processorFees: round2(num(g._sum.feeAmount)),
-        net: round2(num(g._sum.netAmount)),
+        count: out.completed.count + g._count._all,
+        gross: round2(out.completed.gross + amount),
+        tips: round2(out.completed.tips + tips),
+        processorFees: round2(out.completed.processorFees + num(g._sum.feeAmount)),
+        net: round2(out.completed.net + num(g._sum.netAmount)),
       }
     }
   }
@@ -92,6 +117,17 @@ const STATUS_MAP: Record<string, TransactionStatus> = {
   failed: TransactionStatus.FAILED,
   pending: TransactionStatus.PENDING,
   processing: TransactionStatus.PROCESSING,
+}
+
+function statusWhere(status?: string) {
+  if (!status || status === 'all') return {}
+  // Two refund representations coexist in production:
+  // - current: status=COMPLETED + type=REFUND
+  // - legacy/mobile: status=REFUNDED + type=REGULAR
+  if (status === 'refunded') return { OR: [{ type: PaymentType.REFUND }, { status: TransactionStatus.REFUNDED }] }
+  // A current refund is technically COMPLETED, but callers asking for completed payments mean sales.
+  if (status === 'completed') return { status: TransactionStatus.COMPLETED, type: { not: PaymentType.REFUND } }
+  return { status: STATUS_MAP[status] }
 }
 const METHOD_MAP: Record<string, PaymentMethod> = {
   cash: PaymentMethod.CASH,
@@ -108,7 +144,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'list_payments',
-    'Individual payments/transactions for a venue you can access, over a date range (default last 7 days): each payment\'s amount, tip, method (cash/card/…), card brand & masked PAN, status (completed/refunded/failed/…), processor fee & net deposited, who processed it, terminal, and order number. Plus a summary broken down BY STATUS — so you can see refunds and failed charges (money going out), not just sales. Answers "¿qué pagos se reembolsaron?", "¿hubo cobros fallidos hoy?", "¿cuánto pagué de comisión al procesador?". Pass venueId; optionally status, method, fromDate/toDate (YYYY-MM-DD).',
+    'Individual payments/transactions for a venue you can access, over a date range (default last 7 days): each payment\'s amount, tip, method (cash/card/…), type (REGULAR/FAST/REFUND/…), card brand, status (completed/refunded/failed/…), processor fee & net deposited, who processed it, terminal, and order number. The summary splits money three ways: `completed` = TRUE sales revenue (refunds excluded), `refunds` = money returned to customers (amount/tips are NEGATIVE), and `byStatus` (with a normalized REFUND bucket). Modern refunds carry status=COMPLETED + type=REFUND; legacy refunds carry status=REFUNDED. For total cash movement before processor fees, sum completed.gross + completed.tips + refunds.amount + refunds.tips. Answers "¿qué pagos se reembolsaron?", "¿hubo cobros fallidos hoy?", "¿cuánto pagué de comisión al procesador?". Pass venueId; optionally status, method, fromDate/toDate (YYYY-MM-DD).',
     {
       venueId: z.string().describe('Venue whose payments to read (must be in your scope)'),
       status: z
@@ -133,13 +169,15 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
       const where = {
         ...base,
         createdAt: { gte: start, lte: end },
-        ...(status && status !== 'all' ? { status: STATUS_MAP[status] } : {}),
+        ...statusWhere(status),
         ...(method ? { method: METHOD_MAP[method] } : {}),
       }
 
       const [groups, payments] = await Promise.all([
         prisma.payment.groupBy({
-          by: ['status'],
+          // WHY by status AND type: refunds are type=REFUND under status=COMPLETED — grouping by
+          // status alone folded them into `completed` invisibly. `type` lets us split them out.
+          by: ['status', 'type'],
           where,
           _count: { _all: true },
           _sum: { amount: true, tipAmount: true, feeAmount: true, netAmount: true },
@@ -149,6 +187,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
           select: {
             id: true,
             status: true,
+            type: true,
             method: true,
             source: true,
             amount: true,
@@ -176,6 +215,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
         payments: payments.map(p => ({
           id: p.id,
           status: p.status, // COMPLETED | REFUNDED | FAILED | PENDING | PROCESSING
+          type: p.type, // REGULAR | FAST | REFUND | ... (modern refunds are COMPLETED+REFUND)
           method: p.method,
           source: p.source,
           amount: num(p.amount),
@@ -195,7 +235,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'list_refunds',
-    'Refunds ISSUED for a venue you can access, over a date range (default last 7 days). Mirrors the dashboard "Reembolsos" report. Each refund: amount given back (sale + tip, as positive magnitudes), payment method, reason (RETURNED_GOODS/ACCIDENTAL_CHARGE/CANCELLED_ORDER/FRAUDULENT_CHARGE/OTHER), free-text note, the original order number, who processed it, and when. Plus totals (count + total refunded) and a breakdown BY REASON. Use this for "¿cuánto devolvimos esta semana?", "¿por qué se hicieron los reembolsos?", "¿quién procesó los reembolsos?". Refunds are Payment rows with type=REFUND — list_payments (filtered by status) does NOT surface these. Pass venueId; optionally fromDate/toDate (YYYY-MM-DD).',
+    'Refunds ISSUED for a venue you can access, over a date range (default last 7 days). Mirrors the dashboard "Reembolsos" report. Each refund: amount given back (sale + tip, as positive magnitudes), payment method, reason (RETURNED_GOODS/ACCIDENTAL_CHARGE/CANCELLED_ORDER/FRAUDULENT_CHARGE/OTHER), free-text note, the original order number, who processed it, and when. Plus totals (count + total refunded) and a breakdown BY REASON. Use this for "¿cuánto devolvimos esta semana?", "¿por qué se hicieron los reembolsos?", "¿quién procesó los reembolsos?". `list_payments` with status=refunded surfaces both modern and legacy refund rows; use this tool when reason/note/original-payment metadata is required. Pass venueId; optionally fromDate/toDate (YYYY-MM-DD).',
     {
       venueId: z.string().describe('Venue whose refunds to read (must be in your scope)'),
       fromDate: z.string().optional().describe('Start date YYYY-MM-DD (default: 7 days ago)'),

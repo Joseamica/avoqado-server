@@ -6,6 +6,7 @@ import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
+import { hasPermission } from '@/services/access/access.service'
 
 const num = (d: { toString(): string } | null): number => (d == null ? 0 : Number(d))
 const ORDER_STATUS_MAP: Record<string, OrderStatus> = {
@@ -27,6 +28,25 @@ const ORDER_TYPE_MAP: Record<string, OrderType> = {
 
 export function registerOrderTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
+
+  // WHY: order tools expose money (totals, line items, per-payment amounts). The dashboard
+  // gates order reads with orders:read; the MCP was only venue-scoped, so any in-scope role
+  // (KITCHEN/HOST/VIEWER) could read revenue the dashboard 403s. Mirror daily_sales:
+  //   - single venue  → hard-deny if the role lacks orders:read (venueFilter still validates scope);
+  //   - all venues     → restrict to the venues where the caller actually holds orders:read,
+  //     so a low-role staffer can't reconstruct org-wide revenue via search_orders/list.
+  const orderReadableVenues = (venueId?: string): string[] => {
+    if (venueId) {
+      guard.venueFilter(venueId) // validates scope first (throws with the precise scope message)
+      guard.requirePermission('orders:read', venueId)
+      return [venueId]
+    }
+    return scope.allowedVenueIds.filter(v => {
+      const access = scope.perVenueAccess.get(v)
+      return !!access && hasPermission(access, 'orders:read')
+    })
+  }
+
   server.tool(
     'recent_orders',
     'Recent orders across your venues (or one venue): order number, type, status, total, venue, time. Most recent first. Pass venueId to focus one venue.',
@@ -35,7 +55,7 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
       limit: z.number().int().min(1).max(50).default(15).describe('Max orders to return'),
     },
     async ({ venueId, limit }) => {
-      const where = guard.venueFilter(venueId) // throws if out of scope
+      const where = { venueId: { in: orderReadableVenues(venueId) } } // scope + orders:read gate (see helper)
       const orders = await prisma.order.findMany({
         where,
         select: {
@@ -66,7 +86,7 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
       serialNumber: z.string().optional().describe('A serial number / barcode / ICCID of an item sold on the order'),
     },
     async ({ orderNumber, orderId, serialNumber }) => {
-      const where = guard.venueFilter() // {venueId:{in:[...]}} — enforces scope
+      const where = { venueId: { in: orderReadableVenues() } } // scope + orders:read gate across all your venues (see helper)
       let id = orderId
       if (!id && orderNumber) {
         // Resolve the human order number → id WITHIN scope (so you can't probe another venue's numbers).
@@ -132,7 +152,7 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, limit }) => {
       const where = {
-        ...guard.venueFilter(venueId), // throws ScopeError if the venue is out of scope
+        venueId: { in: orderReadableVenues(venueId) }, // scope + orders:read gate (see helper)
         paymentStatus: { in: [PaymentStatus.PENDING, PaymentStatus.PARTIAL] },
         status: { notIn: [OrderStatus.CANCELLED, OrderStatus.DELETED] },
       }
@@ -204,7 +224,7 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
       limit: z.number().int().min(1).max(100).default(25).describe('Max orders to list (newest first)'),
     },
     async ({ venueId, status, type, fromDate, toDate, limit }) => {
-      const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const base = { venueId: { in: orderReadableVenues(venueId) } } // scope + orders:read gate (see helper)
       let tz = 'America/Mexico_City'
       if (venueId) {
         const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })

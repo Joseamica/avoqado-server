@@ -19,6 +19,7 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('loyalty:read', venueId) // WHY: mirror the dashboard's loyalty:read gate — loyalty economics (points rate, redemption) aren't free-for-all
       const gate = await planGateMessage(venueId, 'LOYALTY_PROGRAM', 'El programa de lealtad') // PRO tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
       // Read the config directly (NOT the get-or-create service) so this read never writes a default row.
@@ -109,8 +110,15 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
         })
       }
 
+      // WHY: LoyaltyTransaction.createdById FKs to StaffVenue.id (NOT Staff.id). Passing
+      // scope.staffId (a Staff.id) violates the FK → P2003 → the whole $transaction rolls
+      // back, so the confirmed adjustment SILENTLY never persisted. Resolve the caller's
+      // staff-venue row first, exactly like redeem_credit / the dashboard controller.
+      const sv = await prisma.staffVenue.findFirst({ where: { staffId: scope.staffId, venueId }, select: { id: true } })
+      if (!sv) return text({ ok: false, error: 'No pude resolver tu asignación a este local para registrar el ajuste de puntos.' })
+
       try {
-        const result = await adjustPoints(venueId, c.id, points, reason, scope.staffId) // service re-validates + self-audits
+        const result = await adjustPoints(venueId, c.id, points, reason, sv.id) // service re-validates + self-audits
         await auditMcpWrite(scope, {
           action: 'LOYALTY_POINTS_ADJUSTED',
           entity: 'Customer',

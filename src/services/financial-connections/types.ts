@@ -17,8 +17,8 @@ export interface ProviderAccount {
   balance: number | null // saldo si viene en el listado; null si no
 }
 
-/** Cuenta MG resuelta por número (get-MoneyGiverAlt) — usada para el DESTINO de un traspaso. */
-export interface MgAltAccount {
+/** Cuenta interna del proveedor resuelta por número — usada para el DESTINO de un traspaso. */
+export interface ProviderAltAccount {
   altId: number
   name: string | null
   accountType: string | null
@@ -29,6 +29,38 @@ export interface InternalTransferResult {
   ok: boolean
   movementId: string | null
   message: string | null
+}
+
+/** Envío SPEI a un banco externo, tal como lo exige el endpoint External del proveedor. */
+export interface SpeiOutClientInput {
+  /** Identificador de usuario del proveedor dueño de la cuenta origen (el proveedor resuelve la cuenta desde él). */
+  externalUserId: string
+  /** UUID generado por NOSOTROS una vez por envío — idempotencia real del lado del proveedor. */
+  idempotencyKey: string
+  destinationClabe: string
+  beneficiaryName: string
+  amount: number
+  concept: string
+  /** Código del banco destino, del catálogo del proveedor (listSpeiBanks). */
+  idBanco: number
+}
+
+/** Resultado de un SPEI externo. `ok` solo si el proveedor confirmó success. */
+export interface SpeiOutResult {
+  ok: boolean
+  /** Folio de la operación (idOperacion) — el que el usuario puede rastrear. */
+  operationId: string | null
+  /** id (uuid) del envío en el proveedor — sirve para consultar el estatus después. */
+  transferId: string | null
+  message: string | null
+}
+
+/** Banco destino del catálogo del proveedor para SPEI externo. */
+export interface SpeiBank {
+  idBanco: number
+  name: string | null
+  /** Campo `clabe` del catálogo (int) — prefijo institucional de la CLABE según el proveedor. */
+  clabePrefix: number | null
 }
 
 /** Snapshot de saldo de UNA cuenta. */
@@ -85,7 +117,7 @@ export interface MovementQuery {
   to?: string
 }
 
-/** Tipo de cuenta MoneyGiver: MERCHANT (negocio, flujo actual) o CLIENT (personal, PWA). */
+/** Tipo de cuenta del proveedor: MERCHANT (negocio, flujo actual) o CLIENT (personal, PWA). */
 export type AccountKind = 'MERCHANT' | 'CLIENT'
 
 /** Resultado de connect/validateDevice/validateTwoFactorCode. */
@@ -150,11 +182,20 @@ export interface FinancialProviderClient {
   // idCuenta en la ruta para ambos kinds (ahí sí acota a la cuenta).
   listMovements(ctx: ConnectionContext, idNegocio: string, cuentaId: string, query: MovementQuery): Promise<MovementPage>
   getMovementStats(ctx: ConnectionContext, cuentaId: string, range: { from?: string; to?: string }): Promise<MovementStats>
-  /** Resuelve una cuenta MG por su número interno (4-6 dígitos) → su idCuentaAlt + nombre. Null si no existe. */
-  resolveMgAlt(ctx: ConnectionContext, accountNumber: string): Promise<MgAltAccount | null>
-  /** Traspaso interno MG→MG (sin CLABE). `amount` en pesos. NO idempotente en el proveedor — el service deduplica por contenido (ventana corta). */
+  /** Resuelve una cuenta del proveedor por su número interno (4-6 dígitos) → su id alterno + nombre. Null si no existe. */
+  resolveAltAccount(ctx: ConnectionContext, accountNumber: string): Promise<ProviderAltAccount | null>
+  /** Traspaso interno entre cuentas del proveedor (sin CLABE). `amount` en pesos. NO idempotente en el proveedor — el service deduplica por contenido (ventana corta). */
   internalTransfer(
     ctx: ConnectionContext,
     input: { sourceAltId: number; destAltId: number; amount: number; concept: string },
   ): Promise<InternalTransferResult>
+  /**
+   * Identificador de usuario del proveedor para la conexión — el ORIGEN que exige el SPEI externo.
+   * MERCHANT: viene en el nivel superior de GET /api/auth (fetchMe). CLIENT: ya viaja en ctx.
+   */
+  getExternalUserId(ctx: ConnectionContext): Promise<string | null>
+  /** Catálogo de bancos destino para SPEI externo (solo lectura). */
+  listSpeiBanks(ctx: ConnectionContext): Promise<SpeiBank[]>
+  /** SPEI saliente a banco externo. Idempotente EN el proveedor vía idempotencyKey. `amount` en pesos. */
+  sendSpeiOut(ctx: ConnectionContext, input: SpeiOutClientInput): Promise<SpeiOutResult>
 }

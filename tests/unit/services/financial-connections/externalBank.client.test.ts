@@ -28,19 +28,19 @@ const NEGOCIOS = {
   ],
 }
 
-it('resolveMgAlt: número interno → idCuentaAlt (string del proveedor → entero); 404 → null', async () => {
+it('resolveAltAccount: número interno → idCuentaAlt (string del proveedor → entero); 404 → null', async () => {
   nock(BASE).get('/api/transferencia/get-MoneyGiverAlt').query({ idClienteWalletAlt: '155525' }).reply(200, {
     idCuentaAlt: '4521',
     nombre: 'AV Destino',
     tipoCuenta: 'wallet',
   })
   let client = await loadClient()
-  const r = await client.resolveMgAlt({ accessToken: 't', kind: 'MERCHANT' }, '155525')
+  const r = await client.resolveAltAccount({ accessToken: 't', kind: 'MERCHANT' }, '155525')
   expect(r).toEqual({ altId: 4521, name: 'AV Destino', accountType: 'wallet' })
 
   nock(BASE).get('/api/transferencia/get-MoneyGiverAlt').query({ idClienteWalletAlt: '999999' }).reply(404, {})
   client = await loadClient()
-  expect(await client.resolveMgAlt({ accessToken: 't', kind: 'MERCHANT' }, '999999')).toBeNull()
+  expect(await client.resolveAltAccount({ accessToken: 't', kind: 'MERCHANT' }, '999999')).toBeNull()
 })
 
 it('internalTransfer: POST add-transferenciaMG con el body probado; success:true → ok, success:false → no ok', async () => {
@@ -199,7 +199,7 @@ it('validateDevice: valid OTP → re-signs in and returns grant', async () => {
 it('validateDevice(CLIENT): re-login con needTwoFactorAuth y token:null reusa el token del challenge (shape PWA real 2026-07-03)', async () => {
   nock(BASE).post('/api/identity/validate-otp-code/web').reply(200, { isValid: true })
   // Shape REAL del provider para PWA: re-login tras device validation NO trae token temporal
-  // nuevo y anida el id en user.idMoneyGiver (no userData).
+  // nuevo y anida el id en user.* (no userData).
   nock(BASE)
     .post('/api/auth/sign-in')
     .reply(200, {
@@ -222,11 +222,11 @@ it('validateDevice(CLIENT): re-login con needTwoFactorAuth y token:null reusa el
   expect(r.kind).toBe('need_two_factor_auth')
   if (r.kind === 'need_two_factor_auth') {
     expect(r.challenge.accessToken).toBe('tmp-tok-original') // reusado, no null
-    expect(r.challenge.externalClientId).toBe('mg-real') // leído de user.idMoneyGiver
+    expect(r.challenge.externalClientId).toBe('mg-real') // leído del path user.* del proveedor
   }
 })
 
-it('idMoneyGiverOf vía connect(CLIENT): user.idMoneyGiver (shape PWA real) se acepta igual que userData', async () => {
+it('externalUserIdOf vía connect(CLIENT): la ruta user.* (shape PWA real) se acepta igual que userData', async () => {
   nock(BASE)
     .post('/api/auth/sign-in')
     .reply(200, {
@@ -473,7 +473,7 @@ it('connect(CLIENT): descifra el envelope cifrado (AES-128-CBC, key=idDispositiv
   }
 })
 
-it('validateTwoFactorCode(CLIENT): respuesta 2FA SIN idMoneyGiver usa el fallback del challenge', async () => {
+it('validateTwoFactorCode(CLIENT): respuesta 2FA SIN id de usuario usa el fallback del challenge', async () => {
   let seenPlatform: string | undefined
   nock(BASE)
     .post('/api/auth/validate-two-factor-code')
@@ -486,7 +486,7 @@ it('validateTwoFactorCode(CLIENT): respuesta 2FA SIN idMoneyGiver usa el fallbac
           token: 'acc-2fa',
           refreshToken: 'ref-2fa',
           expiresIn: new Date(Date.now() + 3600e3).toISOString(),
-          // deliberadamente SIN userData/idMoneyGiver — el fallback debe cubrirlo
+          // deliberadamente SIN el id de usuario — el fallback debe cubrirlo
         },
       ]
     })
@@ -534,7 +534,7 @@ it('normalizeClientAccounts (vía connect CLIENT): filtra cuentas sin idCuenta; 
   if (r.kind === 'connected') expect(r.accounts.map(a => a.externalId)).toEqual(['cta-9'])
 })
 
-it('connect(CLIENT) sin idMoneyGiver y sin fallback → BadRequest "no devolvió idMoneyGiver"', async () => {
+it('connect(CLIENT) sin id de usuario y sin fallback → BadRequest honesto', async () => {
   nock(BASE)
     .post('/api/auth/sign-in')
     .reply(200, {
@@ -542,11 +542,11 @@ it('connect(CLIENT) sin idMoneyGiver y sin fallback → BadRequest "no devolvió
       token: 'acc-c3',
       refreshToken: 'ref-c3',
       expiresIn: new Date(Date.now() + 3600e3).toISOString(),
-      // sin userData/idMoneyGiver
+      // sin el id de usuario
     })
   const client = await loadClient()
   await expect(client.connect({ email: 'a@b.co', password: 'p', deviceIdentifier: DEVICE, accountKind: 'CLIENT' })).rejects.toThrow(
-    /no devolvió idMoneyGiver/,
+    /no devolvió el identificador del cliente/,
   )
 })
 
@@ -589,4 +589,101 @@ it('getMovementStats: parsea los montos-string a número y preserva null en no-p
   expect(s.speiIn).toEqual({ amount: 1500.75, count: 3, fee: 12.5 })
   expect(s.speiOut.amount).toBeNull() // 'garbage' NO se convierte en 0
   expect(s.dispersions.amount).toBe(200)
+})
+
+it('getExternalUserId: MERCHANT lo lee del nivel superior de fetchMe; CLIENT lo devuelve del ctx sin tocar la red', async () => {
+  nock(BASE)
+    .get('/api/auth')
+    .reply(200, { idMoneyGiver: 'mg-uuid-1', ...NEGOCIOS })
+  let client = await loadClient()
+  expect(await client.getExternalUserId({ accessToken: 't', kind: 'MERCHANT' })).toBe('mg-uuid-1')
+
+  // CLIENT: sin mock de red — si tocara la red, nock (disableNetConnect) lo haría tronar.
+  client = await loadClient()
+  expect(await client.getExternalUserId({ accessToken: 't', kind: 'CLIENT', externalClientId: 'mg-cli-9' })).toBe('mg-cli-9')
+})
+
+it('connect MERCHANT (sin retos): captura externalClientId del fetchMe (origen del SPEI externo)', async () => {
+  nock(BASE).post('/api/auth/sign-in/merchant').reply(200, { token: 'tok-1', refreshToken: 'ref-1', expiresIn: '2026-12-31' })
+  nock(BASE)
+    .get('/api/auth')
+    .reply(200, { idMoneyGiver: 'mg-uuid-7', ...NEGOCIOS })
+  const client = await loadClient()
+  const r = await client.connect({ email: 'a@b.c', password: 'x', deviceIdentifier: DEVICE })
+  expect(r.kind).toBe('connected')
+  if (r.kind === 'connected') {
+    expect(r.externalClientId).toBe('mg-uuid-7')
+    expect(r.accounts).toHaveLength(2)
+  }
+})
+
+it('listSpeiBanks: normaliza el catálogo { data: [{ idBanco, nombre, clabe }] } y descarta filas sin idBanco', async () => {
+  nock(BASE)
+    .get('/api/external/banks')
+    .reply(200, {
+      data: [
+        { idBanco: 40012, nombre: 'BBVA MEXICO', clabe: 12 },
+        { nombre: 'SIN ID' },
+        { idBanco: 40002, nombre: 'BANAMEX', clabe: null },
+      ],
+    })
+  const client = await loadClient()
+  const banks = await client.listSpeiBanks({ accessToken: 't', kind: 'MERCHANT' })
+  expect(banks).toEqual([
+    { idBanco: 40012, name: 'BBVA MEXICO', clabePrefix: 12 },
+    { idBanco: 40002, name: 'BANAMEX', clabePrefix: null },
+  ])
+})
+
+it('sendSpeiOut: POST /api/external/spei/out con el SpeiOutDto del Swagger; success → ok con folio + transferId', async () => {
+  nock(BASE)
+    .post(
+      '/api/external/spei/out',
+      b =>
+        b.idempotencyKey === 'idem-1' &&
+        b.idMoneyGiver === 'mg-uuid-1' &&
+        b.cuentaBeneficiario === '032180000118359719' &&
+        b.monto === 1 &&
+        b.nombreBeneficiario === 'Juan Pérez' &&
+        b.tipoCuentaBeneficiario === '40' &&
+        b.idBanco === 40012 &&
+        b.conceptoPago === 'Prueba',
+    )
+    .reply(200, { success: true, message: 'OK', idOperacion: 'op-777', id: 'uuid-transfer-1' })
+  const client = await loadClient()
+  const r = await client.sendSpeiOut(
+    { accessToken: 't', kind: 'MERCHANT' },
+    {
+      externalUserId: 'mg-uuid-1',
+      idempotencyKey: 'idem-1',
+      destinationClabe: '032180000118359719',
+      beneficiaryName: 'Juan Pérez',
+      amount: 1,
+      concept: 'Prueba',
+      idBanco: 40012,
+    },
+  )
+  expect(r).toEqual({ ok: true, operationId: 'op-777', transferId: 'uuid-transfer-1', message: 'OK' })
+})
+
+it('sendSpeiOut: rechazo del proveedor (200 success:false y 4xx) → ok:false con mensaje honesto, jamás throw', async () => {
+  nock(BASE).post('/api/external/spei/out').reply(200, { success: false, message: 'Saldo insuficiente' })
+  let client = await loadClient()
+  const input = {
+    externalUserId: 'mg-1',
+    idempotencyKey: 'k1',
+    destinationClabe: '032180000118359719',
+    beneficiaryName: 'X',
+    amount: 5,
+    concept: '',
+    idBanco: 1,
+  }
+  let r = await client.sendSpeiOut({ accessToken: 't', kind: 'MERCHANT' }, input)
+  expect(r.ok).toBe(false)
+  expect(r.message).toBe('Saldo insuficiente')
+
+  nock(BASE).post('/api/external/spei/out').reply(400, { message: 'Banco no disponible' })
+  client = await loadClient()
+  r = await client.sendSpeiOut({ accessToken: 't', kind: 'MERCHANT' }, input)
+  expect(r).toEqual({ ok: false, operationId: null, transferId: null, message: 'Banco no disponible' })
 })

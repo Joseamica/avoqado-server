@@ -124,6 +124,10 @@ export function rankCategories(rows: CategoryMixRow[], limit = 20): CategoryMixR
 
 export interface AnalyticsPaymentRow {
   amount: number | { toString(): string }
+  // WHY: the dashboard "Métodos de Pago" panel sums amount+tipAmount, so any tool
+  // claiming to match it must be able to fold tips in. Optional so amount-only
+  // callers (net sales) are unaffected.
+  tipAmount?: number | { toString(): string } | null
   method: string
 }
 
@@ -133,13 +137,18 @@ export interface PaymentMethodTotal {
   count: number
 }
 
-/** Aggregate per-payment analytics rows into per-method totals (desc by total), money rounded to cents. */
-export function summarizeByPaymentMethod(payments: AnalyticsPaymentRow[]): PaymentMethodTotal[] {
+/**
+ * Aggregate per-payment analytics rows into per-method totals (desc by total), money rounded to cents.
+ * WHY includeTips: the dashboard payment-methods panel is tips-INCLUSIVE (sales-summary
+ * .dashboard.service.ts:1041 sums amount+tipAmount). "grossCollected" must pass includeTips=true
+ * to actually reconcile with that panel; "netSales" leaves it false because tips are not sales.
+ */
+export function summarizeByPaymentMethod(payments: AnalyticsPaymentRow[], includeTips = false): PaymentMethodTotal[] {
   const map = new Map<string, { total: number; count: number }>()
   for (const p of payments) {
     const method = p.method || 'UNKNOWN'
     const existing = map.get(method) || { total: 0, count: 0 }
-    existing.total += Number(p.amount)
+    existing.total += Number(p.amount) + (includeTips ? Number(p.tipAmount ?? 0) : 0)
     existing.count += 1
     map.set(method, existing)
   }
@@ -280,10 +289,10 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
   server.tool(
     'daily_sales',
-    'Sales for a day across your venues (or one venue). Returns completed-payment count, gross total, and a breakdown by payment method, type (REGULAR/FAST), and merchant account (card money by merchantAccountId; cash excluded). Defaults to today; pass venueId to focus one venue (must be in your scope).',
+    'Sales for a local calendar day across your venues (or one venue). Each venue is evaluated in its own timezone, so an all-venues total does not shift Cancún/Tijuana edge-of-day payments into the wrong day. Returns completed-payment count, gross total, and a breakdown by payment method, type (REGULAR/FAST), and merchant account (card money by merchantAccountId; cash excluded). Defaults to today; pass venueId to focus one venue (must be in your scope).',
     {
       venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues'),
-      date: z.string().optional().describe('ISO date YYYY-MM-DD; defaults to today (Mexico City)'),
+      date: z.string().optional().describe("ISO date YYYY-MM-DD; defaults to today, evaluated independently in each venue's timezone"),
     },
     async ({ venueId, date }) => {
       const where = guard.venueFilter(venueId) // throws if venueId is out of scope
@@ -297,16 +306,49 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
             return !!access && hasPermission(access, 'analytics:read')
           })
       where.venueId = { in: readable }
-      const ref = date ? new Date(`${date}T12:00:00`) : undefined
-      const start = venueStartOfDay('America/Mexico_City', ref)
-      const end = venueEndOfDay('America/Mexico_City', ref)
+      // A local calendar day is a different UTC range in Cancún, CDMX and Tijuana. A focused
+      // venue needs one range; an all-venues roll-up needs one (venueId + range) OR branch per
+      // venue. A single CDMX range silently shifts edge-of-day sales for other Mexican zones.
+      const venueRows = venueId
+        ? [
+            {
+              id: venueId,
+              timezone:
+                (await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }))?.timezone || 'America/Mexico_City',
+            },
+          ]
+        : await prisma.venue.findMany({ where: { id: { in: readable } }, select: { id: true, timezone: true } })
+      const windows = venueRows.map(v => {
+        const timezone = v.timezone || 'America/Mexico_City'
+        const ref = date ? new Date(`${date}T12:00:00`) : undefined
+        const start = venueStartOfDay(timezone, ref)
+        const end = venueEndOfDay(timezone, ref)
+        return { venueId: v.id, timezone, start, end }
+      })
+      const paymentWhere = venueId
+        ? { ...where, createdAt: { gte: windows[0].start, lte: windows[0].end } }
+        : windows.length
+          ? { ...where, OR: windows.map(w => ({ venueId: w.venueId, createdAt: { gte: w.start, lte: w.end } })) }
+          : { venueId: { in: [] as string[] } }
       const payments = await prisma.payment.findMany({
-        where: { ...where, createdAt: { gte: start, lte: end } },
+        where: paymentWhere,
         select: { amount: true, tipAmount: true, method: true, type: true, status: true, merchantAccountId: true },
       })
       const summary = summarizeSales(payments as SalesInput[])
+      const window = venueId
+        ? { start: windows[0].start.toISOString(), end: windows[0].end.toISOString(), timezone: windows[0].timezone }
+        : {
+            date: date ?? null,
+            timezone: 'PER_VENUE',
+            byVenue: windows.map(w => ({
+              venueId: w.venueId,
+              timezone: w.timezone,
+              start: w.start.toISOString(),
+              end: w.end.toISOString(),
+            })),
+          }
       return text({
-        window: { start: start.toISOString(), end: end.toISOString() },
+        window,
         venuesInScope: readable.length,
         ...summary,
       })
@@ -377,7 +419,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'sales_by_payment_method',
-    'Sales by payment method (cash, card, etc.) in a venue you can access, over a date range (default last 7 days). Returns TWO figures per method so the operator can reconcile with the dashboard: `grossCollected` = everything collected (INCLUDES refunds + cancelled orders) — matches the dashboard "Métodos de Pago" panel; and `netSales` = net of refunds + cancelled orders. Answers "¿cuánto en efectivo vs tarjeta?". Dates are venue-LOCAL and the full toDate day is included. Pass venueId; optionally fromDate/toDate (YYYY-MM-DD).',
+    'Sales by payment method (cash, card, etc.) in a venue you can access, over a date range (default last 7 days). Returns TWO figures per method: `grossCollected` = everything that landed by method INCLUDING tips, net of refunds (refunds are negative Payment rows) and including cancelled orders — this is the figure that reconciles 1:1 with the dashboard "Métodos de Pago" panel. `netSales` = net SALES: sale value minus refunds, EXCLUDING cancelled orders and EXCLUDING tips. The difference is net tips plus the net contribution of cancelled-order payments; do not assume either figure is always greater. Answers "¿cuánto en efectivo vs tarjeta?". Dates are venue-LOCAL and the full toDate day is included. Pass venueId; optionally fromDate/toDate (YYYY-MM-DD).',
     {
       venueId: z.string().describe('Venue to analyze (must be in your scope)'),
       fromDate: z.string().optional().describe('Start date YYYY-MM-DD venue-local (default: 7 days ago)'),
@@ -396,20 +438,28 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
         : venueStartOfDay(tz, new Date(Date.now() - 7 * 24 * 60 * 60 * 1000))
       const to = toDate ? venueEndOfDay(tz, new Date(`${toDate}T12:00:00`)) : venueEndOfDay(tz)
 
-      // Two passes: gross (everything collected, incl. refunds + cancelled = dashboard panel) and net.
+      // Two passes with DIFFERENT filters, one per figure — WHY each flag is set this way:
+      // - grossCollected: includeRefunds=true (subtract refund negatives) + includeCancelled
+      //   (excludeCancelledOrders=false) EXACTLY mirrors the dashboard panel query
+      //   (COMPLETED, no order-status filter), so the two reconcile 1:1.
+      // - netSales: includeRefunds=true too — the OLD code left this false, which meant
+      //   "netSales" never actually subtracted refunds (the bug: a field labeled "net of
+      //   refunds" that ignored them). excludeCancelledOrders=true keeps it a clean sales figure.
       const [grossRows, netRows] = await Promise.all([
         fetchPaymentsForAnalytics(venueId, { fromDate: from, toDate: to, includeRefunds: true, excludeCancelledOrders: false }),
-        fetchPaymentsForAnalytics(venueId, { fromDate: from, toDate: to, includeRefunds: false, excludeCancelledOrders: true }),
+        fetchPaymentsForAnalytics(venueId, { fromDate: from, toDate: to, includeRefunds: true, excludeCancelledOrders: true }),
       ])
-      const grossByMethod = summarizeByPaymentMethod(grossRows as unknown as AnalyticsPaymentRow[])
-      const netByMethod = summarizeByPaymentMethod(netRows as unknown as AnalyticsPaymentRow[])
+      // grossCollected is tips-INCLUSIVE (true) to match the dashboard panel; netSales is
+      // amount-only (false) because tips are not sales revenue.
+      const grossByMethod = summarizeByPaymentMethod(grossRows as unknown as AnalyticsPaymentRow[], true)
+      const netByMethod = summarizeByPaymentMethod(netRows as unknown as AnalyticsPaymentRow[], false)
 
       return text({
         venueId,
         window: { from: from.toISOString(), to: to.toISOString(), timezone: tz },
         grossCollected: { total: round2(grossByMethod.reduce((s, m) => s + m.total, 0)), byMethod: grossByMethod },
         netSales: { total: round2(netByMethod.reduce((s, m) => s + m.total, 0)), byMethod: netByMethod },
-        note: 'grossCollected = todo lo cobrado por método (incluye reembolsos y órdenes canceladas) — coincide con el panel "Métodos de Pago" del dashboard. netSales = ventas netas (excluye reembolsos y canceladas).',
+        note: 'grossCollected = todo lo que entró por método INCLUYENDO propinas, ya neteados los reembolsos (filas negativas) e incluyendo órdenes canceladas — cuadra 1:1 con el panel "Métodos de Pago" del dashboard. netSales = ventas netas: valor de venta menos reembolsos, SIN canceladas y SIN propinas.',
       })
     },
   )

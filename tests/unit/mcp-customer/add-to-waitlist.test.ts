@@ -47,7 +47,11 @@ jest.mock('@/mcp/guard', () => ({
 }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
-  default: { customer: { findMany: (...a: unknown[]) => mockCustomerFind(...(a as [])) } },
+  default: {
+    customer: { findMany: (...a: unknown[]) => mockCustomerFind(...(a as [])) },
+    // add_to_waitlist resolves the venue timezone to interpret naive datetimes venue-locally.
+    venue: { findUnique: async () => ({ timezone: 'America/Mexico_City' }) },
+  },
 }))
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()

@@ -16,41 +16,96 @@ import * as ctrl from '@/controllers/dashboard/financialConnection.controller'
 // demo/grandfathered/superadmin igual que useVenueTier, así que no rompe demos ni legacy.
 // BANKING_HUB no está en PREMIUM_ONLY_CODES → PLAN_PRO lo desbloquea sin registrar el code.
 export const venueFinancialConnectionRoutes = Router({ mergeParams: true })
-venueFinancialConnectionRoutes.get('/', checkPermission('financialConnections:manage'), checkFeatureAccess('BANKING_HUB'), ctrl.listConnections)
+venueFinancialConnectionRoutes.get(
+  '/',
+  checkPermission('financialConnections:manage'),
+  checkFeatureAccess('BANKING_HUB'),
+  ctrl.listConnections,
+)
 venueFinancialConnectionRoutes.post(
   '/',
-  checkPermission('financialConnections:manage'), checkFeatureAccess('BANKING_HUB'),
+  checkPermission('financialConnections:manage'),
+  checkFeatureAccess('BANKING_HUB'),
   financialConnectionRateLimiter,
   ctrl.createConnection,
 )
 venueFinancialConnectionRoutes.post(
   '/:id/validate-device',
-  checkPermission('financialConnections:manage'), checkFeatureAccess('BANKING_HUB'),
+  checkPermission('financialConnections:manage'),
+  checkFeatureAccess('BANKING_HUB'),
   financialConnectionRateLimiter,
   ctrl.validateDevice,
 )
 venueFinancialConnectionRoutes.post(
   '/:id/validate-2fa',
-  checkPermission('financialConnections:manage'), checkFeatureAccess('BANKING_HUB'),
+  checkPermission('financialConnections:manage'),
+  checkFeatureAccess('BANKING_HUB'),
   financialConnectionRateLimiter,
   ctrl.validateTwoFactorAuth,
 )
-venueFinancialConnectionRoutes.post('/:id/select-account', checkPermission('financialConnections:manage'), checkFeatureAccess('BANKING_HUB'), ctrl.selectAccount)
-venueFinancialConnectionRoutes.delete('/:id', checkPermission('financialConnections:manage'), checkFeatureAccess('BANKING_HUB'), ctrl.disconnect)
+venueFinancialConnectionRoutes.post(
+  '/:id/select-account',
+  checkPermission('financialConnections:manage'),
+  checkFeatureAccess('BANKING_HUB'),
+  ctrl.selectAccount,
+)
+venueFinancialConnectionRoutes.delete(
+  '/:id',
+  checkPermission('financialConnections:manage'),
+  checkFeatureAccess('BANKING_HUB'),
+  ctrl.disconnect,
+)
 
 // Cuentas (saldo en vivo) — mismo prefijo de venue, recurso distinto.
 export const venueFinancialAccountRoutes = Router({ mergeParams: true })
-venueFinancialAccountRoutes.get('/:id/balance', checkPermission('financialConnections:manage'), checkFeatureAccess('BANKING_HUB'), ctrl.getBalance)
-venueFinancialAccountRoutes.get('/:id/movements', checkPermission('financialConnections:manage'), checkFeatureAccess('BANKING_HUB'), ctrl.getMovements)
-venueFinancialAccountRoutes.get('/:id/movements/stats', checkPermission('financialConnections:manage'), checkFeatureAccess('BANKING_HUB'), ctrl.getMovementStats)
+venueFinancialAccountRoutes.get(
+  '/:id/balance',
+  checkPermission('financialConnections:manage'),
+  checkFeatureAccess('BANKING_HUB'),
+  ctrl.getBalance,
+)
+venueFinancialAccountRoutes.get(
+  '/:id/movements',
+  checkPermission('financialConnections:manage'),
+  checkFeatureAccess('BANKING_HUB'),
+  ctrl.getMovements,
+)
+venueFinancialAccountRoutes.get(
+  '/:id/movements/stats',
+  checkPermission('financialConnections:manage'),
+  checkFeatureAccess('BANKING_HUB'),
+  ctrl.getMovementStats,
+)
 // Read-only: verifica el nombre del beneficiario de una cuenta destino antes de enviar (confirmar nombre, no solo número).
-venueFinancialAccountRoutes.get('/:id/resolve-destination', checkPermission('financialConnections:manage'), checkFeatureAccess('BANKING_HUB'), ctrl.resolveDestination)
+venueFinancialAccountRoutes.get(
+  '/:id/resolve-destination',
+  checkPermission('financialConnections:manage'),
+  checkFeatureAccess('BANKING_HUB'),
+  ctrl.resolveDestination,
+)
 // MUEVE DINERO: permiso OWNER + rate limit (dedup del proveedor no existe → el límite acota el daño de un doble-envío accidental).
 venueFinancialAccountRoutes.post(
   '/:id/internal-transfer',
-  checkPermission('financialConnections:manage'), checkFeatureAccess('BANKING_HUB'),
+  checkPermission('financialConnections:manage'),
+  checkFeatureAccess('BANKING_HUB'),
   financialConnectionRateLimiter,
   ctrl.internalTransfer,
+)
+// Read-only: catálogo de bancos destino para SPEI externo (sin rate limit, paridad con /balance).
+venueFinancialAccountRoutes.get(
+  '/:id/spei-banks',
+  checkPermission('financialConnections:manage'),
+  checkFeatureAccess('BANKING_HUB'),
+  ctrl.getSpeiBanks,
+)
+// MUEVE DINERO fuera del ecosistema del proveedor: permiso OWNER + rate limit. El service agrega
+// idempotencyKey del proveedor + dedup por contenido + auditoría FINANCIAL_SPEI_OUT.
+venueFinancialAccountRoutes.post(
+  '/:id/spei-out',
+  checkPermission('financialConnections:manage'),
+  checkFeatureAccess('BANKING_HUB'),
+  financialConnectionRateLimiter,
+  ctrl.sendSpeiOut,
 )
 
 // Catálogo — de solo lectura, sin scope de venue, cualquier usuario autenticado.

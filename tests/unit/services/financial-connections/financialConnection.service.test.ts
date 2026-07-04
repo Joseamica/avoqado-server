@@ -8,8 +8,11 @@ const clientMock = {
   getBalance: jest.fn(),
   listMovements: jest.fn(),
   getMovementStats: jest.fn(),
-  resolveMgAlt: jest.fn(),
+  resolveAltAccount: jest.fn(),
   internalTransfer: jest.fn(),
+  getExternalUserId: jest.fn(),
+  listSpeiBanks: jest.fn(),
+  sendSpeiOut: jest.fn(),
 }
 jest.mock('@/services/financial-connections/registry', () => ({
   getFinancialProviderClient: () => clientMock,
@@ -37,7 +40,14 @@ beforeEach(() => {
     findUnique: jest.fn(),
     findMany: jest.fn(),
   }
-  db.financialAccount = { createMany: jest.fn(), findUniqueOrThrow: jest.fn(), findFirst: jest.fn(), update: jest.fn() }
+  // count: usado por el guard de SPEI (conexiones de UNA cuenta) — default 1 (caso normal).
+  db.financialAccount = {
+    createMany: jest.fn(),
+    findUniqueOrThrow: jest.fn(),
+    findFirst: jest.fn(),
+    update: jest.fn(),
+    count: jest.fn().mockResolvedValue(1),
+  }
   // Dedup de traspasos internos lee ActivityLog: por defecto vacío (sin traspaso previo).
   db.activityLog = { findMany: jest.fn().mockResolvedValue([]) }
   db.$transaction = jest.fn(async (fn: any) => fn(db))
@@ -89,7 +99,7 @@ it('startConnection: accountKind CLIENT se persiste en la fila y externalClientI
   )
   // El client recibe el kind para branchear sign-in/cuentas.
   expect(clientMock.connect).toHaveBeenCalledWith(expect.objectContaining({ accountKind: 'CLIENT' }))
-  // finishConnected persiste el idMoneyGiver Y el idDispositivo devueltos por el provider —
+  // finishConnected persiste el id de usuario del proveedor Y el idDispositivo devueltos por el provider —
   // el segundo es la llave para descifrar el envelope del cliente en lecturas post-connect.
   const upd = db.financialConnection.update.mock.calls.at(-1)[0].data
   expect(upd.externalClientId).toBe('mg-1')
@@ -352,7 +362,7 @@ it('getMovementsForAccount: token/provider muere → degrada la conexión a NEED
     tokenVersion: 0,
     status: 'CONNECTED',
   })
-  // El refresh silencioso truena (bug de QPay con 2FA cuando el token cacheado murió).
+  // El refresh silencioso truena (bug del proveedor con 2FA cuando el token cacheado murió).
   clientMock.refresh.mockRejectedValue(new Error('Request failed with status code 400'))
   const { BadRequestError } = require('@/errors/AppError')
   await expect(svc.getMovementsForAccount('fa-mov-err', { page: 0, size: 10 })).rejects.toBeInstanceOf(BadRequestError)
@@ -386,7 +396,7 @@ it('sendInternalTransfer: resuelve origen (altId) + destino y ejecuta el traspas
   clientMock.listAccounts.mockResolvedValue([
     { externalId: 'neg-1', altId: 10, cuentaId: 'c', label: null, clabe: null, active: null, balance: null },
   ])
-  clientMock.resolveMgAlt.mockResolvedValue({ altId: 20, name: 'Destino', accountType: 'wallet' })
+  clientMock.resolveAltAccount.mockResolvedValue({ altId: 20, name: 'Destino', accountType: 'wallet' })
   clientMock.internalTransfer.mockResolvedValue({ ok: true, movementId: 'mov-9', message: 'OK' })
   const r = await svc.sendInternalTransfer('fa-tr', { destAccountNumber: '155525', amount: 1, concept: 'Prueba', staffId: 'staff-1' })
   expect(clientMock.internalTransfer).toHaveBeenCalledWith(expect.anything(), {
@@ -479,7 +489,7 @@ it('sendInternalTransfer: destino/monto DISTINTO a lo reciente NO se deduplica (
   clientMock.listAccounts.mockResolvedValue([
     { externalId: 'neg-1', altId: 10, cuentaId: 'c', label: null, clabe: null, active: null, balance: null },
   ])
-  clientMock.resolveMgAlt.mockResolvedValue({ altId: 20, name: 'Destino', accountType: 'wallet' })
+  clientMock.resolveAltAccount.mockResolvedValue({ altId: 20, name: 'Destino', accountType: 'wallet' })
   clientMock.internalTransfer.mockResolvedValue({ ok: true, movementId: 'mov-new', message: 'OK' })
   const r = await svc.sendInternalTransfer('fa-nd', { destAccountNumber: '155525', amount: 2, concept: '' })
   expect(clientMock.internalTransfer).toHaveBeenCalled()
@@ -509,7 +519,7 @@ it('sendInternalTransfer: conexión CLIENT (cuenta personal) → rechaza ANTES d
   // El backend es la fuente de verdad: jamás llegó a resolver origen/destino ni a mover dinero.
   expect(clientMock.refresh).not.toHaveBeenCalled()
   expect(clientMock.listAccounts).not.toHaveBeenCalled()
-  expect(clientMock.resolveMgAlt).not.toHaveBeenCalled()
+  expect(clientMock.resolveAltAccount).not.toHaveBeenCalled()
   expect(clientMock.internalTransfer).not.toHaveBeenCalled()
 })
 
@@ -534,7 +544,7 @@ it('resolveTransferDestination: conexión CLIENT (cuenta personal) → rechaza A
     'Las transferencias no están disponibles para cuentas personales.',
   )
   expect(clientMock.refresh).not.toHaveBeenCalled()
-  expect(clientMock.resolveMgAlt).not.toHaveBeenCalled()
+  expect(clientMock.resolveAltAccount).not.toHaveBeenCalled()
   // El guard corre ANTES del try de lectura: no degrada la conexión a NEEDS_REAUTH.
   expect(db.financialConnection.updateMany).not.toHaveBeenCalled()
 })
@@ -556,7 +566,7 @@ it('resolveTransferDestination: devuelve nombre del beneficiario y NO expone el 
   })
   db.financialConnection.findUniqueOrThrow.mockResolvedValue({ id: 'cm-rd', grantEnc: encFixture(), tokenVersion: 0, status: 'CONNECTED' })
   clientMock.refresh.mockResolvedValue({ grant: { refreshToken: 'r2' }, ctx: { accessToken: 'acc' } })
-  clientMock.resolveMgAlt.mockResolvedValue({ altId: 999, name: 'Mardonio Calvo', accountType: 'wallet' })
+  clientMock.resolveAltAccount.mockResolvedValue({ altId: 999, name: 'Mardonio Calvo', accountType: 'wallet' })
   const r = await svc.resolveTransferDestination('fa-rd', '155525')
   expect(r).toEqual({ name: 'Mardonio Calvo', accountType: 'wallet' }) // exactamente esto: sin altId
   expect((r as Record<string, unknown>)?.altId).toBeUndefined()
@@ -579,7 +589,7 @@ it('resolveTransferDestination: cuenta inexistente → null (el controller lo tr
   })
   db.financialConnection.findUniqueOrThrow.mockResolvedValue({ id: 'cm-rd2', grantEnc: encFixture(), tokenVersion: 0, status: 'CONNECTED' })
   clientMock.refresh.mockResolvedValue({ grant: { refreshToken: 'r2' }, ctx: { accessToken: 'acc' } })
-  clientMock.resolveMgAlt.mockResolvedValue(null)
+  clientMock.resolveAltAccount.mockResolvedValue(null)
   const r = await svc.resolveTransferDestination('fa-rd2', '999999')
   expect(r).toBeNull()
   expect(clientMock.internalTransfer).not.toHaveBeenCalled() // jamás mueve dinero: es solo lectura
@@ -609,4 +619,186 @@ it('refresh path takes the advisory lock (pg_advisory_xact_lock) inside a tx', a
   await svc.getBalanceForConnectionAccount('fa2')
   expect(db.$transaction).toHaveBeenCalled()
   expect(db.$executeRaw).toHaveBeenCalled() // pg_advisory_xact_lock(...)
+})
+
+// ─── SPEI externo (envío real a cualquier banco) ─────────────────────────────
+
+const speiConn = (over: Record<string, unknown> = {}) => ({
+  id: 'cm-spei',
+  mode: 'SELF_CONNECT',
+  grantEnc: encFixture(),
+  tokenVersion: 0,
+  deviceIdentifier: 'dev',
+  status: 'CONNECTED',
+  venueId: 'v1',
+  accountKind: 'MERCHANT',
+  externalClientId: 'mg-uuid-1',
+  externalDeviceId: null,
+  provider: { code: 'EXTERNAL_BANK' },
+  ...over,
+})
+const VALID_CLABE = '032180000118359719'
+const IDEM_KEY = 'a1b2c3d4-0000-4000-8000-000000000001'
+const speiInput = (over: Record<string, unknown> = {}) => ({
+  destinationClabe: VALID_CLABE,
+  beneficiaryName: 'X',
+  idBanco: 1,
+  amount: 1,
+  concept: '',
+  idempotencyKey: IDEM_KEY,
+  ...over,
+})
+
+it('sendSpeiOut: CLABE con dígito verificador inválido → BadRequest ANTES de tocar al proveedor', async () => {
+  await expect(svc.sendSpeiOut('fa-sp0', speiInput({ destinationClabe: '032180000118359710' }))).rejects.toThrow('CLABE')
+  // Falla en la validación pura — ni siquiera cargó la cuenta de la DB.
+  expect(db.financialAccount.findUniqueOrThrow).not.toHaveBeenCalled()
+  expect(clientMock.sendSpeiOut).not.toHaveBeenCalled()
+})
+
+it('sendSpeiOut: idempotencyKey que no es UUID → BadRequest antes de tocar nada', async () => {
+  await expect(svc.sendSpeiOut('fa-sp0b', speiInput({ idempotencyKey: 'no-un-uuid' }))).rejects.toThrow('UUID')
+  expect(db.financialAccount.findUniqueOrThrow).not.toHaveBeenCalled()
+})
+
+it('sendSpeiOut: conexión CLIENT (cuenta personal) → rechaza ANTES de tocar al proveedor', async () => {
+  db.financialAccount.findUniqueOrThrow.mockResolvedValue({
+    id: 'fa-sp-cl',
+    externalId: 'cta-1',
+    connection: speiConn({ id: 'cm-sp-cl', accountKind: 'CLIENT' }),
+  })
+  await expect(svc.sendSpeiOut('fa-sp-cl', speiInput())).rejects.toThrow('cuentas personales')
+  expect(clientMock.refresh).not.toHaveBeenCalled()
+  expect(clientMock.sendSpeiOut).not.toHaveBeenCalled()
+})
+
+it('sendSpeiOut: conexión con VARIAS cuentas → rechaza (el proveedor debita por usuario, no por la cuenta elegida)', async () => {
+  db.financialAccount.findUniqueOrThrow.mockResolvedValue({ id: 'fa-multi', externalId: 'neg-2', connection: speiConn({ id: 'cm-multi' }) })
+  db.financialAccount.count.mockResolvedValue(2)
+  await expect(svc.sendSpeiOut('fa-multi', speiInput())).rejects.toThrow('una sola cuenta')
+  // Jamás llegó a token/proveedor: el dinero podría salir de la cuenta equivocada.
+  expect(clientMock.refresh).not.toHaveBeenCalled()
+  expect(clientMock.sendSpeiOut).not.toHaveBeenCalled()
+})
+
+it('sendSpeiOut: éxito — usa el id de usuario del proveedor de la fila y la idempotencyKey PROVISTA (no genera una nueva); audita con monto normalizado', async () => {
+  db.financialAccount.findUniqueOrThrow.mockResolvedValue({ id: 'fa-sp1', externalId: 'neg-1', connection: speiConn() })
+  db.financialConnection.findUniqueOrThrow.mockResolvedValue({
+    id: 'cm-spei',
+    grantEnc: encFixture(),
+    tokenVersion: 0,
+    status: 'CONNECTED',
+  })
+  clientMock.refresh.mockResolvedValue({ grant: { refreshToken: 'r2' }, ctx: { accessToken: 'acc' } })
+  clientMock.sendSpeiOut.mockResolvedValue({ ok: true, operationId: 'op-1', transferId: 'uuid-t1', message: 'OK' })
+
+  const r = await svc.sendSpeiOut(
+    'fa-sp1',
+    speiInput({ beneficiaryName: '  Juan Pérez  ', idBanco: 40012, amount: 150.505, concept: 'Prueba', staffId: 'staff-1' }),
+  )
+  expect(r.ok).toBe(true)
+  const sent = clientMock.sendSpeiOut.mock.calls.at(-1)[1]
+  expect(sent.externalUserId).toBe('mg-uuid-1') // de la fila, sin backfill
+  expect(sent.beneficiaryName).toBe('Juan Pérez') // normalizado (trim)
+  expect(sent.idempotencyKey).toBe(IDEM_KEY) // la del frontend, intacta — los retries HTTP reenvían la misma
+  expect(sent.amount).toBe(150.51) // normalizado a centavos UNA vez
+  expect(clientMock.getExternalUserId).not.toHaveBeenCalled()
+  expect(logAction).toHaveBeenCalledWith(
+    expect.objectContaining({
+      action: 'FINANCIAL_SPEI_OUT',
+      entityId: 'fa-sp1',
+      // El monto auditado ES el monto enviado (150.51), no el crudo del request (150.505).
+      data: expect.objectContaining({
+        destClabe: VALID_CLABE,
+        idBanco: 40012,
+        amount: 150.51,
+        idempotencyKey: IDEM_KEY,
+        ok: true,
+        operationId: 'op-1',
+      }),
+    }),
+  )
+})
+
+it('sendSpeiOut: backfill perezoso — externalClientId null → getExternalUserId + update de la conexión', async () => {
+  db.financialAccount.findUniqueOrThrow.mockResolvedValue({
+    id: 'fa-sp2',
+    externalId: 'neg-1',
+    connection: speiConn({ id: 'cm-sp2', externalClientId: null }),
+  })
+  db.financialConnection.findUniqueOrThrow.mockResolvedValue({ id: 'cm-sp2', grantEnc: encFixture(), tokenVersion: 0, status: 'CONNECTED' })
+  clientMock.refresh.mockResolvedValue({ grant: { refreshToken: 'r2' }, ctx: { accessToken: 'acc' } })
+  clientMock.getExternalUserId.mockResolvedValue('mg-backfilled')
+  clientMock.sendSpeiOut.mockResolvedValue({ ok: true, operationId: 'op-2', transferId: null, message: null })
+
+  await svc.sendSpeiOut('fa-sp2', speiInput({ amount: 2 }))
+  expect(db.financialConnection.update).toHaveBeenCalledWith({
+    where: { id: 'cm-sp2' },
+    data: { externalClientId: 'mg-backfilled' },
+  })
+  expect(clientMock.sendSpeiOut.mock.calls.at(-1)[1].externalUserId).toBe('mg-backfilled')
+})
+
+it('sendSpeiOut: dedup — un envío idéntico reciente (misma CLABE + monto) NO se reenvía; misma key → "ya se procesó"', async () => {
+  db.financialAccount.findUniqueOrThrow.mockResolvedValue({ id: 'fa-sp3', externalId: 'neg-1', connection: speiConn({ id: 'cm-sp3' }) })
+  db.activityLog.findMany.mockResolvedValue([
+    { data: { destClabe: VALID_CLABE, amount: 3, ok: true, operationId: 'op-prev', idempotencyKey: IDEM_KEY } },
+  ])
+
+  // Mismo intento re-entregado (retry HTTP): misma key → resultado original, mensaje "ya se procesó".
+  const same = await svc.sendSpeiOut('fa-sp3', speiInput({ amount: 3 }))
+  expect(same.ok).toBe(true)
+  expect(same.operationId).toBe('op-prev')
+  expect(same.message).toContain('ya se procesó')
+
+  // Intento NUEVO (otra key) con mismo contenido: bloqueado con aviso de verificación.
+  const blocked = await svc.sendSpeiOut('fa-sp3', speiInput({ amount: 3, idempotencyKey: 'b2b2c3d4-0000-4000-8000-000000000002' }))
+  expect(blocked.message).toContain('Verifica tus movimientos')
+
+  expect(clientMock.sendSpeiOut).not.toHaveBeenCalled()
+  expect(clientMock.refresh).not.toHaveBeenCalled()
+  expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'FINANCIAL_SPEI_OUT' }))
+})
+
+it('sendSpeiOut: proveedor no reporta el id de usuario en el backfill → BadRequest, no 500 y NO envía', async () => {
+  db.financialAccount.findUniqueOrThrow.mockResolvedValue({
+    id: 'fa-sp4',
+    externalId: 'neg-1',
+    connection: speiConn({ id: 'cm-sp4', externalClientId: null }),
+  })
+  db.financialConnection.findUniqueOrThrow.mockResolvedValue({ id: 'cm-sp4', grantEnc: encFixture(), tokenVersion: 0, status: 'CONNECTED' })
+  clientMock.refresh.mockResolvedValue({ grant: { refreshToken: 'r2' }, ctx: { accessToken: 'acc' } })
+  clientMock.getExternalUserId.mockResolvedValue(null)
+  await expect(svc.sendSpeiOut('fa-sp4', speiInput())).rejects.toThrow('identificador de la cuenta origen')
+  expect(clientMock.sendSpeiOut).not.toHaveBeenCalled()
+})
+
+it('getSpeiBanks: delega al client con el token de la conexión de la cuenta', async () => {
+  db.financialAccount.findUniqueOrThrow.mockResolvedValue({ id: 'fa-bk', externalId: 'neg-1', connection: speiConn({ id: 'cm-bk' }) })
+  db.financialConnection.findUniqueOrThrow.mockResolvedValue({ id: 'cm-bk', grantEnc: encFixture(), tokenVersion: 0, status: 'CONNECTED' })
+  clientMock.refresh.mockResolvedValue({ grant: { refreshToken: 'r2' }, ctx: { accessToken: 'acc' } })
+  clientMock.listSpeiBanks.mockResolvedValue([{ idBanco: 40012, name: 'BBVA', clabePrefix: 12 }])
+  const banks = await svc.getSpeiBanks('fa-bk')
+  expect(banks).toEqual([{ idBanco: 40012, name: 'BBVA', clabePrefix: 12 }])
+})
+
+it('getSpeiBanks: fallo del ENDPOINT del catálogo → 400 honesto SIN degradar la conexión (regresión del incidente 2026-07-03)', async () => {
+  db.financialAccount.findUniqueOrThrow.mockResolvedValue({ id: 'fa-bk2', externalId: 'neg-1', connection: speiConn({ id: 'cm-bk2' }) })
+  db.financialConnection.findUniqueOrThrow.mockResolvedValue({ id: 'cm-bk2', grantEnc: encFixture(), tokenVersion: 0, status: 'CONNECTED' })
+  clientMock.refresh.mockResolvedValue({ grant: { refreshToken: 'r2' }, ctx: { accessToken: 'acc' } })
+  clientMock.listSpeiBanks.mockRejectedValue(new Error('Request failed with status code 401'))
+  await expect(svc.getSpeiBanks('fa-bk2')).rejects.toThrow('catálogo de bancos')
+  // El token sigue sirviendo para saldo/movimientos — un 401 del catálogo NO tumba la conexión.
+  expect(db.financialConnection.updateMany).not.toHaveBeenCalled()
+})
+
+it('getSpeiBanks: refresh de token MUERTO → sí degrada a NEEDS_REAUTH (la mitad legítima del split)', async () => {
+  db.financialAccount.findUniqueOrThrow.mockResolvedValue({ id: 'fa-bk3', externalId: 'neg-1', connection: speiConn({ id: 'cm-bk3' }) })
+  db.financialConnection.findUniqueOrThrow.mockResolvedValue({ id: 'cm-bk3', grantEnc: encFixture(), tokenVersion: 0, status: 'CONNECTED' })
+  clientMock.refresh.mockRejectedValue(new Error('invalid refresh token'))
+  await expect(svc.getSpeiBanks('fa-bk3')).rejects.toThrow()
+  expect(db.financialConnection.updateMany).toHaveBeenCalledWith(
+    expect.objectContaining({ data: expect.objectContaining({ status: 'NEEDS_REAUTH' }) }),
+  )
+  expect(clientMock.listSpeiBanks).not.toHaveBeenCalled()
 })

@@ -10,6 +10,13 @@ jest.mock('@/mcp/guard', () => ({
     requirePermission: jest.fn(),
   }),
 }))
+// find_order now restricts to venues where the caller holds orders:read (the daily_sales pattern);
+// mock hasPermission true so the test exercises the tool logic, not the permission resolver.
+jest.mock('@/services/access/access.service', () => ({
+  hasPermission: () => true,
+  getUserAccess: jest.fn(),
+  createAccessCache: jest.fn(() => ({})),
+}))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
@@ -20,7 +27,12 @@ jest.mock('@/utils/prismaClient', () => ({
 }))
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
-const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map() } as McpScope
+const scope = {
+  staffId: 's1',
+  activeOrg: 'o1',
+  allowedVenueIds: ['v1'],
+  perVenueAccess: new Map([['v1', { role: 'OWNER' }]]),
+} as unknown as McpScope
 const call = (args: Record<string, unknown>) => handlers.get('find_order')!(args, {})
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
 

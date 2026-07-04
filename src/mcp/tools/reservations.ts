@@ -20,6 +20,8 @@ import { getClassSession } from '@/services/dashboard/classSession.dashboard.ser
 import { getWaitlist, addToWaitlist } from '@/services/dashboard/reservationWaitlist.service'
 import { auditMcpWrite } from '../audit'
 import { planGateMessage } from '../planGate'
+import { hasPermission } from '@/services/access/access.service'
+import { fromZonedTime } from 'date-fns-tz'
 import { ClassSessionStatus, WaitlistStatus, type ReservationStatus } from '@prisma/client'
 
 const RESERVATIONS_GATE = ['RESERVATIONS', 'Las reservaciones'] as const
@@ -88,6 +90,20 @@ const displayValue = (v: unknown): unknown =>
     ? (v as { toNumber: () => number }).toNumber()
     : v
 
+/**
+ * Parse an operator-supplied reservation datetime. WHY: an LLM translating "resérvame hoy 7pm"
+ * typically emits a NAIVE datetime ("2026-07-05T19:00:00", no Z). Bare `new Date()` parses that
+ * in the Node HOST tz → in prod (host=UTC) it booked 1:00 PM venue-local, 6h early (invisible in
+ * dev where host=Mexico). Rule: if the string carries an explicit tz (Z or ±HH:MM), respect it as
+ * an absolute instant; otherwise interpret the wall-clock as VENUE-LOCAL via fromZonedTime.
+ * Returns null on an unparseable value.
+ */
+export function parseReservationDateTime(input: string, venueTz: string): Date | null {
+  const hasTz = /(Z|[+-]\d{2}:?\d{2})$/.test(input.trim())
+  const d = hasTz ? new Date(input) : fromZonedTime(input, venueTz)
+  return Number.isNaN(d.getTime()) ? null : d
+}
+
 export function registerReservationTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
 
@@ -110,9 +126,14 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
       guard.requirePermission('reservations:create', venueId) // write gate (per-venue role)
       const gate = await planGateMessage(venueId, ...RESERVATIONS_GATE) // PRO tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
-      const start = new Date(startsAt)
-      if (Number.isNaN(start.getTime())) {
-        return text({ ok: false, error: 'startsAt inválido. Usa ISO 8601, ej. 2026-06-06T19:00:00.000Z' })
+      // Venue-local aware parse: a naive "…T19:00:00" means 7pm AT THE VENUE, not 7pm UTC.
+      const tz = (await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }))?.timezone || 'America/Mexico_City'
+      const start = parseReservationDateTime(startsAt, tz)
+      if (!start) {
+        return text({
+          ok: false,
+          error: 'startsAt inválido. Usa ISO 8601 (ej. 2026-06-06T19:00:00); si no pones zona, se toma hora local del local.',
+        })
       }
       const duration = durationMinutes ?? 90
       const endsAt = new Date(start.getTime() + duration * 60_000)
@@ -154,7 +175,16 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
       limit: z.number().int().min(1).max(50).default(15).describe('Max reservations to return'),
     },
     async ({ venueId, includePast, limit }) => {
-      const where = guard.venueFilter(venueId) // throws if out of scope
+      // WHY: this list is multi-venue (venueId optional) and exposes guest names/phones. Mirror
+      // daily_sales — single venue → hard-deny if the role lacks reservations:read; all-venues →
+      // restrict to the venues where the caller actually holds it (never leak guest PII org-wide).
+      const readable = venueId
+        ? (guard.venueFilter(venueId), guard.requirePermission('reservations:read', venueId), [venueId])
+        : scope.allowedVenueIds.filter(v => {
+            const access = scope.perVenueAccess.get(v)
+            return !!access && hasPermission(access, 'reservations:read')
+          })
+      const where = { venueId: { in: readable } }
       const timeFilter = includePast ? {} : { startsAt: { gte: new Date() } }
       const reservations = await prisma.reservation.findMany({
         where: { ...where, ...timeFilter },
@@ -198,8 +228,10 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
       if (reservation.classSessionId) {
         return text({ ok: false, error: 'Esta es una reserva de clase. Cámbiala desde el dashboard (cambio de sesión).' })
       }
-      const parsed = new Date(newStartsAt)
-      if (Number.isNaN(parsed.getTime())) {
+      // Venue-local aware parse: a naive "…T16:00:00" means 4pm AT THE VENUE, not 4pm UTC.
+      const tz = (await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }))?.timezone || 'America/Mexico_City'
+      const parsed = parseReservationDateTime(newStartsAt, tz)
+      if (!parsed) {
         return text({ ok: false, error: 'newStartsAt inválido. Usa ISO 8601, ej. 2026-06-15T16:00:00.000Z' })
       }
       try {
@@ -337,6 +369,7 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, confirmationCode }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('reservations:read', venueId) // WHY: mirror the dashboard's reservations:read gate — detail exposes guest email/phone + internal notes
       const r = await prisma.reservation.findFirst({
         where: { ...where, confirmationCode },
         select: {
@@ -634,6 +667,7 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, sessionId }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('reservations:read', venueId) // WHY: mirror the dashboard's reservations:read gate — class rosters expose attendee names/phones
       const gate = await planGateMessage(venueId, ...RESERVATIONS_GATE) // PRO tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
       try {
@@ -679,6 +713,7 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, status }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('reservations:read', venueId) // WHY: mirror the dashboard's reservations:read gate — waitlist exposes customer names/phones
       const gate = await planGateMessage(venueId, ...RESERVATIONS_GATE) // PRO tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
       // Service scopes by venueId; default (no status) returns the live WAITING+NOTIFIED queue.
@@ -717,9 +752,10 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
       const gate = await planGateMessage(venueId, ...RESERVATIONS_GATE) // PRO tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
 
-      const start = new Date(desiredStartAt)
-      if (Number.isNaN(start.getTime()))
-        return text({ ok: false, error: 'desiredStartAt inválido. Usa ISO 8601, ej. 2026-06-29T20:00:00.000Z' })
+      // Venue-local aware parse: a naive "…T20:00:00" means 8pm AT THE VENUE, not 8pm UTC.
+      const tz = (await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }))?.timezone || 'America/Mexico_City'
+      const start = parseReservationDateTime(desiredStartAt, tz)
+      if (!start) return text({ ok: false, error: 'desiredStartAt inválido. Usa ISO 8601, ej. 2026-06-29T20:00:00' })
 
       // Either link a known customer (resolve-don't-guess) or take a walk-in guest.
       let customerId: string | undefined

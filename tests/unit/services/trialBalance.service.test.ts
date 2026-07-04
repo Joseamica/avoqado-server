@@ -16,7 +16,7 @@ jest.mock('../../../src/utils/prismaClient', () => ({
 }))
 
 import prisma from '../../../src/utils/prismaClient'
-import { getTrialBalance } from '../../../src/services/fiscal/trialBalance.service'
+import { getTrialBalance, currentPeriod } from '../../../src/services/fiscal/trialBalance.service'
 
 const p = prisma as unknown as {
   venue: { findUnique: jest.Mock }
@@ -33,6 +33,24 @@ beforeEach(() => {
 
 it('periodo inválido → 400', async () => {
   await expect(getTrialBalance('v1', '2026-6')).rejects.toThrow(BadRequestError)
+})
+
+describe('currentPeriod — VENUE-LOCAL month (regression: UTC rollover posted to the wrong month)', () => {
+  afterEach(() => jest.useRealTimers())
+
+  it('at month-end evening in Mexico (already next month in UTC) returns the MEXICO month', () => {
+    // 2026-06-30 23:30 America/Mexico_City == 2026-07-01 05:30 UTC. The old getUTCMonth()
+    // logic returned '2026-07' here; venue-local must return '2026-06'.
+    jest.useFakeTimers().setSystemTime(new Date('2026-07-01T05:30:00.000Z'))
+    expect(currentPeriod()).toBe('2026-06') // default tz = America/Mexico_City
+    expect(currentPeriod('UTC')).toBe('2026-07') // proves it's the tz, not the wall clock, that decides
+  })
+
+  it('is host-timezone independent (same result regardless of the Node process TZ)', () => {
+    // Mid-month, unambiguous — the default must be the Mexico month no matter the host tz.
+    jest.useFakeTimers().setSystemTime(new Date('2026-03-15T12:00:00.000Z'))
+    expect(currentPeriod()).toBe('2026-03')
+  })
 })
 
 it('sin RFC → needsFiscalSetup', async () => {

@@ -29,6 +29,11 @@ export function registerPromoterLocationTools(server: McpServer, scope: McpScope
     },
     async ({ venueId, promoterId, promoterName, date }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      // WHY: a colleague's live GPS route is sensitive staff data. The dashboard gates
+      // promoter tracking behind a role check (verifyAccess PROMOTERS_AUDIT); there is no
+      // dedicated promoters permission, so mirror with teams:read (the staff-data read gate,
+      // MANAGER+), so a low-role staffer can't pull another promoter's location via the MCP.
+      guard.requirePermission('teams:read', venueId)
 
       // Mirror the platform gate: promoter tracking lives inside the white-label
       // dashboard (verifyAccess requireWhiteLabel on /dashboard/.../promoters).

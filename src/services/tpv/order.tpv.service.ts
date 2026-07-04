@@ -10,7 +10,12 @@ import { moduleService, MODULE_CODES } from '../modules/module.service'
 import { deductInventoryForProduct, getProductInventoryMethod } from '../dashboard/productInventoryIntegration.service'
 import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service'
 import { logAction } from '../dashboard/activity-log.service'
-import { buildItemDiscountRow, calculateDiscountPesos, validateDiscountActive, validateDiscountScopeForItem } from '../shared/discount.service'
+import {
+  buildItemDiscountRow,
+  calculateDiscountPesos,
+  validateDiscountActive,
+  validateDiscountScopeForItem,
+} from '../shared/discount.service'
 
 /**
  * Helper function to flatten OrderItemModifier structure for Android compatibility

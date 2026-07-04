@@ -50,6 +50,7 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, limit }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('inventory:read', venueId) // WHY: mirror the dashboard's inventory:read gate — a low role shouldn't read stock/costs the dashboard 403s
       const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'El control de inventario') // PREMIUM tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
       // Only items with a configured minimum (> 0). Prisma can't compare two columns in `where`,
@@ -87,6 +88,7 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId }) => {
       guard.venueFilter(venueId) // throws if out of scope
+      guard.requirePermission('inventory:read', venueId) // WHY: mirror the dashboard's inventory:read gate — reorder suggestions expose purchase costs
       const entitled = [...(await venuesWithFeatureAccess([venueId], 'AUTO_REORDER'))]
       if (entitled.length === 0) {
         return text({ ok: false, planRequired: true, error: 'El re-orden automático requiere el plan PREMIUM (AUTO_REORDER).' })
@@ -326,6 +328,7 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, limit }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('inventory:read', venueId) // WHY: mirror the dashboard's inventory:read gate — inventory valuation/margin is not free-for-all
       const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'El control de inventario') // PREMIUM tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
       // currentStock × cost can't be multiplied in a SQL aggregate; fetch in-stock items and compute in memory.
@@ -451,6 +454,7 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, type, name, fromDate, toDate, limit }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('inventory:read', venueId) // WHY: mirror the dashboard's inventory:read gate — the movement kardex (WHO adjusted stock) is sensitive anti-fraud data
       const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'El control de inventario') // PREMIUM tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
 

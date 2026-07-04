@@ -1,4 +1,5 @@
 import { JournalEntryStatus, LedgerAccountNature, LedgerAccountType } from '@prisma/client'
+import { formatInTimeZone } from 'date-fns-tz'
 
 import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
@@ -50,10 +51,17 @@ export interface TrialBalanceResult {
   balanced: { movements: boolean; balances: boolean }
 }
 
-/** YYYY-MM del mes actual (default cuando no se pasa periodo). */
-export function currentPeriod(): string {
-  const d = new Date()
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`
+/**
+ * YYYY-MM del mes actual, VENUE-LOCAL (default cuando no se pasa periodo).
+ *
+ * WHY tz (no getUTCMonth): el mes fiscal debe ser el mes CALENDARIO local del contribuyente.
+ * Con UTC, en prod (host UTC, venues México -6h) durante las últimas ~6h de cada fin de mes
+ * (18:00–24:00 hora local) el default saltaba al MES SIGUIENTE → balanza/DIOT/ISR vacíos y,
+ * peor, los tools de escritura (generate_journal_entries, payroll_run) posteaban pólizas/nómina
+ * al mes equivocado. Default México (todos los venues son MX hoy); acepta tz para multi-tz futuro.
+ */
+export function currentPeriod(tz = 'America/Mexico_City'): string {
+  return formatInTimeZone(new Date(), tz, 'yyyy-MM')
 }
 
 /**

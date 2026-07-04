@@ -3618,7 +3618,7 @@ model MerchantAccount {
   blumonEnvironment  String? // "SANDBOX" or "PRODUCTION"
   blumonMerchantId   String? // Blumon's merchant identifier
 
-  // Aggregator relationship (e.g., Moneygiver)
+  // Aggregator relationship
   aggregatorId String?
   aggregator   Aggregator? @relation(fields: [aggregatorId], references: [id])
 
@@ -5237,11 +5237,6 @@ model Referral {
   createdAt DateTime @default(now())
 
   referralGrants ReferralRewardGrant[]
-
-  @@index([venueId])
-  @@index([referrerCustomerId])
-  @@index([referredCustomerId])
-  @@index([status])
   // 🔴 MANUALLY-MAINTAINED PARTIAL UNIQUE INDEX — NOT expressible in Prisma's schema DSL.
   // Prisma has no `where:` clause for `@@unique`/`@@index`, so this index is invisible here
   // and lives ONLY as raw SQL in migration `20260702173915_referral_configurable_rewards`:
@@ -5261,6 +5256,11 @@ model Referral {
   // ever proposes `DROP INDEX "Referral_qualifyingOrderId_active_key"`, REMOVE that statement
   // by hand before applying — dropping it would allow duplicate active referral claims on the
   // same order.
+
+  @@index([venueId])
+  @@index([referrerCustomerId])
+  @@index([referredCustomerId])
+  @@index([status])
 }
 
 model ReferralTierReward {
@@ -10445,18 +10445,18 @@ model FinancialProvider {
 
 /// Un login a un proveedor. Dueño = la sucursal (venueId null = broker de plataforma).
 model FinancialConnection {
-  id                 String                    @id @default(cuid())
+  id                 String                         @id @default(cuid())
   venueId            String?
-  venue              Venue?                    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  venue              Venue?                         @relation(fields: [venueId], references: [id], onDelete: Cascade)
   providerId         String
-  provider           FinancialProvider         @relation(fields: [providerId], references: [id])
-  mode               FinancialConnectionMode   @default(SELF_CONNECT)
+  provider           FinancialProvider              @relation(fields: [providerId], references: [id])
+  mode               FinancialConnectionMode        @default(SELF_CONNECT)
   accountKind        FinancialConnectionAccountKind @default(MERCHANT)
-  externalClientId   String? // idMoneyGiver del cliente (accountKind CLIENT). null en MERCHANT.
+  externalClientId   String? // Identificador de usuario del proveedor externo. CLIENT: capturado en connect. MERCHANT: capturado en connect desde 2026-07-03 (origen del SPEI externo); conexiones previas lo backfillean perezosamente al primer envío.
   externalDeviceId   String? // idDispositivo — llave para descifrar el envelope del cliente (AES-128)
-  status             FinancialConnectionStatus @default(PENDING_DEVICE_VALIDATION)
+  status             FinancialConnectionStatus      @default(PENDING_DEVICE_VALIDATION)
   grantEnc           String? // refreshToken cifrado (AES-256-GCM). null en SHARED_BROKER
-  tokenVersion       Int                       @default(0)
+  tokenVersion       Int                            @default(0)
   expiresAt          DateTime?
   challengeEnc       String? // reto OTP cifrado (accessToken temporal + processId)
   challengeExpiresAt DateTime?
@@ -10466,8 +10466,8 @@ model FinancialConnection {
   connectedAt        DateTime?
   revokedAt          DateTime?
   lastError          String?
-  createdAt          DateTime                  @default(now())
-  updatedAt          DateTime                  @updatedAt
+  createdAt          DateTime                       @default(now())
+  updatedAt          DateTime                       @updatedAt
 
   @@index([venueId])
   @@index([providerId])

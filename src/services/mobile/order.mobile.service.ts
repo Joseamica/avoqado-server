@@ -15,7 +15,12 @@ import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { validateStaffVenue } from '../../utils/staff-venue.util'
 import { generateAndStoreReceipt } from '../dashboard/receipt.dashboard.service'
-import { buildItemDiscountRow, calculateDiscountPesos, validateDiscountActive, validateDiscountScopeForItem } from '../shared/discount.service'
+import {
+  buildItemDiscountRow,
+  calculateDiscountPesos,
+  validateDiscountActive,
+  validateDiscountScopeForItem,
+} from '../shared/discount.service'
 
 // MARK: - Types
 

@@ -178,7 +178,9 @@ describe('order.mobile.service', () => {
   it('applies a PERCENTAGE item discount: reduces the line + rolls into order subtotal/discountAmount/total', async () => {
     prismaMock.staff.findUnique.mockResolvedValue({ id: 'staff-1', venueId: 'venue-1' })
     prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: 'venue-1', active: true })
-    prismaMock.product.findMany.mockResolvedValue([{ id: 'prod-1', name: 'Hamburguesa', price: new Decimal(100), category: { name: 'Comida' } }])
+    prismaMock.product.findMany.mockResolvedValue([
+      { id: 'prod-1', name: 'Hamburguesa', price: new Decimal(100), category: { name: 'Comida' } },
+    ])
     prismaMock.modifier.findMany.mockResolvedValue([])
     prismaMock.discount.findMany.mockResolvedValue([
       { id: 'disc-pct', venueId: 'venue-1', name: '20% off', type: 'PERCENTAGE', value: new Decimal(20), active: true },
@@ -232,7 +234,9 @@ describe('order.mobile.service', () => {
   it('applies a FIXED_AMOUNT item discount', async () => {
     prismaMock.staff.findUnique.mockResolvedValue({ id: 'staff-1', venueId: 'venue-1' })
     prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: 'venue-1', active: true })
-    prismaMock.product.findMany.mockResolvedValue([{ id: 'prod-1', name: 'Hamburguesa', price: new Decimal(100), category: { name: 'Comida' } }])
+    prismaMock.product.findMany.mockResolvedValue([
+      { id: 'prod-1', name: 'Hamburguesa', price: new Decimal(100), category: { name: 'Comida' } },
+    ])
     prismaMock.modifier.findMany.mockResolvedValue([])
     prismaMock.discount.findMany.mockResolvedValue([
       { id: 'disc-fixed', venueId: 'venue-1', name: '$15 off', type: 'FIXED_AMOUNT', value: new Decimal(15), active: true },
@@ -273,7 +277,9 @@ describe('order.mobile.service', () => {
   it('rejects the whole order when discountId is invalid/foreign (mirrors TPV: reject, not silently ignore)', async () => {
     prismaMock.staff.findUnique.mockResolvedValue({ id: 'staff-1', venueId: 'venue-1' })
     prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: 'venue-1', active: true })
-    prismaMock.product.findMany.mockResolvedValue([{ id: 'prod-1', name: 'Hamburguesa', price: new Decimal(100), category: { name: 'Comida' } }])
+    prismaMock.product.findMany.mockResolvedValue([
+      { id: 'prod-1', name: 'Hamburguesa', price: new Decimal(100), category: { name: 'Comida' } },
+    ])
     prismaMock.modifier.findMany.mockResolvedValue([])
     prismaMock.discount.findMany.mockResolvedValue([]) // not found / not in this venue
 
@@ -293,7 +299,9 @@ describe('order.mobile.service', () => {
   it('writes an OrderDiscount audit row for an applied item discount', async () => {
     prismaMock.staff.findUnique.mockResolvedValue({ id: 'staff-1', venueId: 'venue-1' })
     prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: 'venue-1', active: true })
-    prismaMock.product.findMany.mockResolvedValue([{ id: 'prod-1', name: 'Hamburguesa', price: new Decimal(100), category: { name: 'Comida' } }])
+    prismaMock.product.findMany.mockResolvedValue([
+      { id: 'prod-1', name: 'Hamburguesa', price: new Decimal(100), category: { name: 'Comida' } },
+    ])
     prismaMock.modifier.findMany.mockResolvedValue([])
     prismaMock.discount.findMany.mockResolvedValue([
       { id: 'disc-pct', venueId: 'venue-1', name: '20% off', type: 'PERCENTAGE', value: new Decimal(20), active: true },

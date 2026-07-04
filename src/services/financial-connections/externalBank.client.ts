@@ -15,8 +15,11 @@ import type {
   MovementCategoryStats,
   MovementStats,
   MovementQuery,
-  MgAltAccount,
+  ProviderAltAccount,
   InternalTransferResult,
+  SpeiOutClientInput,
+  SpeiOutResult,
+  SpeiBank,
   AccountKind,
 } from './types'
 
@@ -73,9 +76,9 @@ async function fetchMe(token: string): Promise<unknown> {
   const { data } = await axios.get(`${base()}/api/auth`, { headers: headers(token), timeout: 20_000 })
   return data
 }
-function idMoneyGiverOf(data: unknown): string | null {
+function externalUserIdOf(data: unknown): string | null {
   // Verificado EN VIVO (2026-07-03, cuenta cliente real): el sign-in del cliente anida el id
-  // en `user.idMoneyGiver` — NO en `userData` como asumía el spec. Se conservan los 3 paths
+  // en `user.*` — NO en `userData` como asumía el spec. Se conservan los 3 paths
   // por si el provider varía entre endpoints (validate-two-factor-code, refresh, etc.).
   return (
     pick<string>(pick(data, 'userData'), 'idMoneyGiver') ??
@@ -113,7 +116,7 @@ function normalizeClientAccounts(payload: unknown): ProviderAccount[] {
 }
 /**
  * El canal del cliente (PWA) CIFRA la respuesta: `{ payload: "base64(iv)|base64(ciphertext)", timestamp }`.
- * Esquema extraído del bundle Flutter de app.moneygiver.xyz (2026-07-03): AES-128-CBC/PKCS7 con
+ * Esquema extraído del bundle Flutter de la PWA del proveedor (2026-07-03): AES-128-CBC/PKCS7 con
  * key = utf8(idDispositivo[0:16]) — el idDispositivo que el proveedor devuelve en el login. El
  * `timestamp` es anti-replay, no entra al cripto. Devuelve el JSON descifrado (o null si no aplica).
  */
@@ -134,13 +137,12 @@ function decryptClientEnvelope(data: unknown, idDispositivo: string | null): unk
 function idDispositivoOf(data: unknown): string | null {
   return pick<string>(data, 'idDispositivo') ?? pick<string>(pick(data, 'user'), 'idDispositivo') ?? null
 }
-async function getClientAccounts(accessToken: string, idMoneyGiver: string, idDispositivo: string | null): Promise<ProviderAccount[]> {
+async function getClientAccounts(accessToken: string, externalUserId: string, idDispositivo: string | null): Promise<ProviderAccount[]> {
   const { data } = await axios.get(`${base()}/api/clients/get-wallet-clientAccounts/v3r2.1`, {
     headers: headers(accessToken, 'CLIENT'),
-    params: { idMoneyGiver },
+    params: { idMoneyGiver: externalUserId },
     timeout: 20_000,
   })
-  probeLogRaw(`getClientAccounts (idMg=${idMoneyGiver}, idDisp=${idDispositivo})`, data) // TEMP-DEBUG-PROBE (ciphertext completo)
   const decrypted = decryptClientEnvelope(data, idDispositivo)
   return normalizeClientAccounts(decrypted ?? data)
 }
@@ -151,9 +153,9 @@ async function accountsForKind(
   fallbackClientId?: string | null, // externalClientId capturado del sign-in inicial (viaja en el challenge)
 ): Promise<{ accounts: ProviderAccount[]; externalClientId?: string; externalDeviceId?: string }> {
   if (kind === 'CLIENT') {
-    // La respuesta del 2FA quizá no repite idMoneyGiver — el fallback viene del sign-in inicial (1A).
-    const idMg = idMoneyGiverOf(data) ?? fallbackClientId ?? null
-    if (!idMg) throw new BadRequestError('El proveedor no devolvió idMoneyGiver del cliente.')
+    // La respuesta del 2FA quizá no repite el id de usuario — el fallback viene del sign-in inicial (1A).
+    const idMg = externalUserIdOf(data) ?? fallbackClientId ?? null
+    if (!idMg) throw new BadRequestError('El proveedor no devolvió el identificador del cliente.')
     // idDispositivo (de la respuesta de auth) = llave para descifrar el envelope del cliente.
     const idDisp = idDispositivoOf(data)
     const accounts = await getClientAccounts(accessToken, idMg, idDisp)
@@ -162,7 +164,11 @@ async function accountsForKind(
       throw new BadRequestError('El proveedor no devolvió cuentas para este usuario; verifica el tipo de cuenta elegido.')
     return { accounts, externalClientId: idMg, externalDeviceId: idDisp ?? undefined }
   }
-  return { accounts: normalizeAccounts(await fetchMe(accessToken)) }
+  // MERCHANT: fetchMe trae el id de usuario en el nivel superior (confirmado contra el Swagger
+  // del proveedor). Capturarlo aquí también — es el ORIGEN que exige el SPEI externo. Conexiones
+  // creadas antes de esto lo backfillean perezosamente al primer envío (ver service).
+  const me = await fetchMe(accessToken)
+  return { accounts: normalizeAccounts(me), externalClientId: externalUserIdOf(me) ?? undefined }
 }
 async function signIn(email: string, password: string, deviceIdentifier: string, kind: AccountKind): Promise<unknown> {
   const path = kind === 'CLIENT' ? '/api/auth/sign-in' : '/api/auth/sign-in/merchant'
@@ -185,45 +191,6 @@ async function signIn(email: string, password: string, deviceIdentifier: string,
   }
 }
 
-// ─── TEMP-DEBUG-PROBE (BORRAR antes de commit) ────────────────────────────────
-// Task 1.5 en vivo: captura SHAPES redactados de las respuestas del proveedor para
-// el flujo CLIENT en /tmp/avoqado-fc-probe.log. Tokens/passwords: solo longitud.
-
-function probeRedact(v: unknown, key = '', depth = 0): unknown {
-  if (depth > 6) return '<deep>'
-  if (v === null || v === undefined) return v
-  if (typeof v === 'string') {
-    if (/token|password|contrasena|jwt|secret/i.test(key)) return `<string len ${v.length}>`
-    if (/clabe|nombre|apellido|email|correo|telefono|phone/i.test(key)) return v.length <= 4 ? '****' : `…${v.slice(-4)}`
-    return v.length > 60 ? `<string len ${v.length}: ${v.slice(0, 12)}…>` : v
-  }
-  if (typeof v !== 'object') return v
-  if (Array.isArray(v)) return { '<len>': v.length, '<item0>': v.length ? probeRedact(v[0], key, depth + 1) : undefined }
-  const out: Record<string, unknown> = {}
-  for (const [k, val] of Object.entries(v as Record<string, unknown>)) out[k] = probeRedact(val, k, depth + 1)
-  return out
-}
-function probeLog(label: string, data: unknown): void {
-  try {
-    // require dinámico para no tocar los imports del archivo (se borra completo).
-
-    const fs = require('node:fs') as typeof import('node:fs')
-    fs.appendFileSync('/tmp/avoqado-fc-probe.log', JSON.stringify({ ts: new Date().toISOString(), label, shape: probeRedact(data) }) + '\n')
-  } catch {
-    /* jamás romper el flujo por el probe */
-  }
-}
-// Captura SIN redactar (red de seguridad para reversar el cripto si el descifrado falla).
-// Va a un archivo aparte; se borra junto con el probe antes de commit.
-function probeLogRaw(label: string, data: unknown): void {
-  try {
-    const fs = require('node:fs') as typeof import('node:fs')
-    fs.appendFileSync('/tmp/avoqado-fc-raw.log', JSON.stringify({ ts: new Date().toISOString(), label, data }) + '\n')
-  } catch {
-    /* nunca romper el flujo */
-  }
-}
-// ─── fin TEMP-DEBUG-PROBE ─────────────────────────────────────────────────────
 
 /** Números del provider que llegan como string ("1500.75") — u honestamente null. */
 function toNum(v: unknown): number | null {
@@ -254,12 +221,11 @@ function normalizeMovement(m: unknown): ProviderMovement {
 export const externalBankClient: FinancialProviderClient = {
   async connect({ email, password, deviceIdentifier, accountKind = 'MERCHANT' }: ConnectInput): Promise<ConnectResult> {
     const data = await signIn(email, password, deviceIdentifier, accountKind)
-    if (accountKind === 'CLIENT') probeLog('connect:signIn(CLIENT)', data) // TEMP-DEBUG-PROBE
     if (pick<boolean>(data, 'needTwoFactorAuth')) {
       const accessToken = accessTokenOf(data)
       return {
         kind: 'need_two_factor_auth',
-        challenge: { accessToken, externalClientId: idMoneyGiverOf(data), externalDeviceId: idDispositivoOf(data) },
+        challenge: { accessToken, externalClientId: externalUserIdOf(data), externalDeviceId: idDispositivoOf(data) },
       }
     }
     if (pick<boolean>(data, 'needDeviceValidation')) {
@@ -269,12 +235,11 @@ export const externalBankClient: FinancialProviderClient = {
         { identificadorDispositivo: deviceIdentifier },
         { headers: headers(accessToken, accountKind), timeout: 20_000 },
       )
-      if (accountKind === 'CLIENT') probeLog('connect:identity/start(CLIENT)', started) // TEMP-DEBUG-PROBE
       const processId = pick<string>(started, 'proccessId')
       if (!processId) throw new BadRequestError('identity/start no devolvió proccessId.')
       return {
         kind: 'need_device_validation',
-        challenge: { accessToken, processId, externalClientId: idMoneyGiverOf(data), externalDeviceId: idDispositivoOf(data) },
+        challenge: { accessToken, processId, externalClientId: externalUserIdOf(data), externalDeviceId: idDispositivoOf(data) },
       }
     }
     const at = accessTokenOf(data)
@@ -289,13 +254,11 @@ export const externalBankClient: FinancialProviderClient = {
       { proccessId: challenge.processId, code },
       { headers: headers(challenge.accessToken, accountKind), timeout: 20_000 },
     )
-    if (accountKind === 'CLIENT') probeLog('validateDevice:validate-otp(CLIENT)', v) // TEMP-DEBUG-PROBE
     if (!pick<boolean>(v, 'isValid')) throw new BadRequestError('Código OTP inválido o expirado.')
     // Dispositivo ya confiable → re-login. Pero si la cuenta ADEMÁS tiene 2FA, el
     // re-login tras validar el dispositivo NO devuelve refreshToken todavía: pide el
     // segundo factor. Encadenar al paso 2FA (idéntico a lo que hace connect()).
     const data = await signIn(email, password, deviceIdentifier, accountKind)
-    if (accountKind === 'CLIENT') probeLog('validateDevice:relogin(CLIENT)', data) // TEMP-DEBUG-PROBE
     if (pick<boolean>(data, 'needTwoFactorAuth')) {
       // Verificado EN VIVO (2026-07-03, PWA): el re-login tras validar dispositivo devuelve
       // needTwoFactorAuth:true con token:null — a diferencia de merchant, NO emite token
@@ -306,7 +269,7 @@ export const externalBankClient: FinancialProviderClient = {
         kind: 'need_two_factor_auth',
         challenge: {
           accessToken,
-          externalClientId: idMoneyGiverOf(data) ?? challenge.externalClientId,
+          externalClientId: externalUserIdOf(data) ?? challenge.externalClientId,
           externalDeviceId: idDispositivoOf(data) ?? challenge.externalDeviceId,
         },
       }
@@ -329,7 +292,6 @@ export const externalBankClient: FinancialProviderClient = {
       if (axios.isAxiosError(e)) throw new BadRequestError(pick<string>(e.response?.data, 'message') || 'Código 2FA inválido o expirado.')
       throw e
     }
-    if (accountKind === 'CLIENT') probeLog('validate2FA:response(CLIENT)', v) // TEMP-DEBUG-PROBE
     if (!pick<boolean>(v, 'success') && !pick<boolean>(v, 'isLoggedIn')) {
       throw new BadRequestError(pick<string>(v, 'message') || 'Código 2FA inválido o expirado.')
     }
@@ -352,7 +314,6 @@ export const externalBankClient: FinancialProviderClient = {
       { token: '', refreshToken: grant.refreshToken, expiresIn: grant.expiresAt ?? new Date().toISOString() },
       { headers: headers(undefined, kind), timeout: 20_000 },
     )
-    if (kind === 'CLIENT') probeLog('refresh:response(CLIENT)', data) // TEMP-DEBUG-PROBE
     // Si el refresh trae idDispositivo, se propaga → el service puede backfillear conexiones que
     // no lo tenían (auto-sanado de conexiones previas a la persistencia de la llave).
     return { grant: toGrant(data), ctx: { accessToken: accessTokenOf(data), kind, idDispositivo: idDispositivoOf(data) } }
@@ -388,15 +349,15 @@ export const externalBankClient: FinancialProviderClient = {
     // `idCuenta` SIEMPRE como query param → es lo que ACOTA la respuesta a la cuenta real. Sin él el
     // proveedor devuelve un pool global de ~5.16M movimientos ajenos (verificado en vivo 2026-07-03,
     // ambos kinds). Lo que cambia entre kinds es SOLO la ruta: MERCHANT usa idNegocio, CLIENT usa
-    // idCuenta (que además va repetido en el query, tal cual lo hace la PWA de app.moneygiver.xyz).
+    // idCuenta (que además va repetido en el query, tal cual lo hace la PWA del proveedor).
     const params: Record<string, unknown> = {
       'Pagination.Page': query.page,
       'Pagination.Size': query.size,
       idCuenta: cuentaId,
     }
-    // Estado de cuenta = más reciente primero. Sin esto QPay devuelve su orden interno (NO por
+    // Estado de cuenta = más reciente primero. Sin esto el proveedor devuelve su orden interno (NO por
     // fechaCreacion), lo que con paginación deja la página 1 barajada en vez de los 10 más nuevos.
-    // La PWA manda 'DESC' (mayúsculas); el .NET ignora un valor no reconocido, así que es fix en el
+    // La PWA del proveedor manda 'DESC' (mayúsculas); el .NET ignora un valor no reconocido, así que es fix en el
     // mejor caso y no-op en el peor.
     params.SortByFecha = 'DESC'
     if (query.from) params.FechaInicio = query.from
@@ -440,7 +401,7 @@ export const externalBankClient: FinancialProviderClient = {
     }
   },
 
-  async resolveMgAlt(ctx: ConnectionContext, accountNumber: string): Promise<MgAltAccount | null> {
+  async resolveAltAccount(ctx: ConnectionContext, accountNumber: string): Promise<ProviderAltAccount | null> {
     try {
       const { data } = await axios.get(`${base()}/api/transferencia/get-MoneyGiverAlt`, {
         headers: headers(ctx.accessToken, ctx.kind),
@@ -462,7 +423,7 @@ export const externalBankClient: FinancialProviderClient = {
     ctx: ConnectionContext,
     input: { sourceAltId: number; destAltId: number; amount: number; concept: string },
   ): Promise<InternalTransferResult> {
-    // Espejo de la petición probada del dashboard de producción de Q-Pay (features/spei/api.ts):
+    // Espejo de la petición probada del dashboard de producción del proveedor (features/spei/api.ts):
     // idTipo:1 = TRANSFERENCIA. Se omite idCatTipoAutenticacion cuando no se usa 2FA (traspaso simple).
     // El proveedor NO acepta clave de idempotencia; la dedup por contenido (mismo destino + monto,
     // ventana corta) vive en el service (sendInternalTransfer) para atajar el doble-cobro por reintento.
@@ -492,6 +453,78 @@ export const externalBankClient: FinancialProviderClient = {
           ok: false,
           movementId: null,
           message: pick<string>(e.response?.data, 'message') || `traspaso falló (status ${e.response?.status})`,
+        }
+      }
+      throw e
+    }
+  },
+
+  async getExternalUserId(ctx: ConnectionContext): Promise<string | null> {
+    // CLIENT: el id ya se capturó en connect-time y viaja en el ctx (externalClientId).
+    // MERCHANT: fetchMe (GET /api/auth) lo trae en el nivel superior — confirmado contra el
+    // Swagger de producción del proveedor (2026-07-03).
+    if (ctx.kind === 'CLIENT') return ctx.externalClientId ?? null
+    return externalUserIdOf(await fetchMe(ctx.accessToken))
+  },
+
+  async listSpeiBanks(ctx: ConnectionContext): Promise<SpeiBank[]> {
+    // GET /api/external/banks → { data: [{ idBanco, nombre, clabe }] } (BankResponseDto del Swagger).
+    const { data } = await axios.get(`${base()}/api/external/banks`, {
+      headers: headers(ctx.accessToken, ctx.kind),
+      timeout: 20_000,
+    })
+    const raw = pick<unknown[]>(data, 'data')
+    if (!Array.isArray(raw)) return []
+    return raw
+      .map((b): SpeiBank | null => {
+        const idBanco = toNum(pick(b, 'idBanco'))
+        if (idBanco == null) return null
+        return {
+          idBanco,
+          name: pick<string>(b, 'nombre') ?? null,
+          clabePrefix: toNum(pick(b, 'clabe')),
+        }
+      })
+      .filter((b): b is SpeiBank => b !== null)
+  },
+
+  async sendSpeiOut(ctx: ConnectionContext, input: SpeiOutClientInput): Promise<SpeiOutResult> {
+    // Contrato confirmado contra el Swagger de producción del proveedor (2026-07-03):
+    // POST /api/external/spei/out (SpeiOutDto → SpeiOutReponseDto) — endpoint del grupo "External"
+    // (diseñado para integradores), y el ÚNICO de dinero saliente que acepta idempotencyKey real
+    // (a diferencia de add-transferenciaMG, que exige dedup por contenido en el service).
+    // tipoCuentaBeneficiario se pinna a '40' = cuenta CLABE (catálogo estándar SPEI/Banxico;
+    // el DTO interno CreateSpeiOutDto lo tipa como int, el External como string) porque este
+    // flujo solo acepta CLABEs de 18 dígitos ya validadas con dígito verificador.
+    try {
+      const { data } = await axios.post(
+        `${base()}/api/external/spei/out`,
+        {
+          idempotencyKey: input.idempotencyKey,
+          idMoneyGiver: input.externalUserId,
+          conceptoPago: input.concept.trim() || 'Sin concepto',
+          cuentaBeneficiario: input.destinationClabe,
+          monto: Math.round(input.amount * 100) / 100,
+          nombreBeneficiario: input.beneficiaryName.trim(),
+          tipoCuentaBeneficiario: '40',
+          idBanco: input.idBanco,
+        },
+        { headers: headers(ctx.accessToken, ctx.kind), timeout: 30_000 },
+      )
+      const ok = pick<boolean>(data, 'success') === true
+      return {
+        ok,
+        operationId: pick<string>(data, 'idOperacion') ?? null,
+        transferId: pick<string>(data, 'id') ?? null,
+        message: pick<string>(data, 'message') ?? null,
+      }
+    } catch (e) {
+      if (axios.isAxiosError(e)) {
+        return {
+          ok: false,
+          operationId: null,
+          transferId: null,
+          message: pick<string>(e.response?.data, 'message') || `SPEI falló (status ${e.response?.status})`,
         }
       }
       throw e

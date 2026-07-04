@@ -1,9 +1,13 @@
 /**
- * sales_by_payment_method (2026-06-15 fix): returns BOTH grossCollected (incl
- * refunds + cancelled orders = dashboard panel) and netSales (excl), over a
- * venue-LOCAL window whose toDate day is fully included. Two fetchPaymentsForAnalytics
- * passes with the right flags. Regression: the bare-date path used to drop the
- * last day + shift ~6h (Mindform: 17/$6,487.60 instead of 21/$6,634.60).
+ * sales_by_payment_method: returns BOTH grossCollected (tips-INCLUSIVE, net of
+ * refunds, incl cancelled = the dashboard "Métodos de Pago" panel 1:1) and
+ * netSales (sale value net of refunds, EXCL cancelled + EXCL tips), over a
+ * venue-LOCAL window whose toDate day is fully included.
+ *
+ * 2026-07-03 fix (this file): the OLD net pass used includeRefunds:false, so a
+ * field labeled "net of refunds" never subtracted them; and gross summed amount
+ * only, so it did NOT match the tips-inclusive dashboard panel. Both corrected.
+ * Regression preserved: the bare-date path used to drop the last day + shift ~6h.
  */
 import { registerSalesTools } from '../../../src/mcp/tools/sales'
 import type { McpScope } from '../../../src/mcp/scope'
@@ -53,33 +57,35 @@ describe('sales_by_payment_method — gross vs net, venue-local window', () => {
     expect(mockFetch).not.toHaveBeenCalled()
   })
 
-  it('runs TWO analytics passes (gross incl refunds/cancelled, net excl) and labels both', async () => {
-    // gross pass: a sale + a refund (refunds are negative) → 2 rows, total 90; net pass: sale only
-    mockFetch
-      .mockResolvedValueOnce([
-        { method: 'CASH', amount: 100, type: 'REGULAR', status: 'COMPLETED' },
-        { method: 'CASH', amount: -10, type: 'REFUND', status: 'COMPLETED' },
-      ])
-      .mockResolvedValueOnce([{ method: 'CASH', amount: 100, type: 'REGULAR', status: 'COMPLETED' }])
+  it('runs TWO analytics passes and correctly labels gross (tips-incl, net of refunds) vs net sales', async () => {
+    // Same sale+refund rows on BOTH passes (the mock controls each return). A sale of
+    // $100 + $15 tip, and a partial refund of -$10 + -$2 tip (refunds are negative rows).
+    const rows = [
+      { method: 'CASH', amount: 100, tipAmount: 15, type: 'REGULAR', status: 'COMPLETED' },
+      { method: 'CASH', amount: -10, tipAmount: -2, type: 'REFUND', status: 'COMPLETED' },
+    ]
+    mockFetch.mockResolvedValueOnce(rows).mockResolvedValueOnce(rows)
 
     const out = parse(await call('sales_by_payment_method', { venueId: 'v1', fromDate: '2026-06-02', toDate: '2026-06-15' }))
 
     expect(mockFetch).toHaveBeenCalledTimes(2)
-    // gross = everything collected (matches the dashboard "Métodos de Pago" panel)
+    // gross pass mirrors the dashboard panel: refunds subtracted (includeRefunds) + cancelled kept.
     expect(mockFetch.mock.calls[0][1]).toMatchObject({ includeRefunds: true, excludeCancelledOrders: false })
-    // net = excludes refunds + cancelled orders
-    expect(mockFetch.mock.calls[1][1]).toMatchObject({ includeRefunds: false, excludeCancelledOrders: true })
+    // net pass MUST also include refunds so "net of refunds" actually subtracts them (the bug was false here).
+    expect(mockFetch.mock.calls[1][1]).toMatchObject({ includeRefunds: true, excludeCancelledOrders: true })
     // both passes get real Date boundaries (not the buggy bare-date path)
     expect(mockFetch.mock.calls[0][1].fromDate).toBeInstanceOf(Date)
-    expect(mockFetch.mock.calls[0][1].toDate).toBeInstanceOf(Date)
-    // the toDate boundary is AFTER fromDate and lands at an end-of-day (…59.999) — the whole last day is in
     const to = mockFetch.mock.calls[0][1].toDate as Date
     expect(to.getTime()).toBeGreaterThan((mockFetch.mock.calls[0][1].fromDate as Date).getTime())
-    expect(to.toISOString()).toMatch(/59:59\.999Z$/)
+    expect(to.toISOString()).toMatch(/59:59\.999Z$/) // whole last day included
 
-    expect(out.grossCollected.byMethod[0]).toMatchObject({ method: 'CASH', total: 90, count: 2 }) // 100 + (-10)
-    expect(out.netSales.byMethod[0]).toMatchObject({ method: 'CASH', total: 100, count: 1 })
+    // gross is tips-INCLUSIVE and nets the refund: (100+15) + (-10-2) = 103
+    expect(out.grossCollected.byMethod[0]).toMatchObject({ method: 'CASH', total: 103, count: 2 })
+    // net is amount-only (tips excluded) and nets the refund: 100 + (-10) = 90
+    expect(out.netSales.byMethod[0]).toMatchObject({ method: 'CASH', total: 90, count: 2 })
+    // the whole point: gross > net by exactly the net tips (13), and net actually subtracted the refund
+    expect(out.grossCollected.total - out.netSales.total).toBeCloseTo(13, 2)
     expect(out.window).toMatchObject({ timezone: 'America/Mexico_City' })
-    expect(out.note).toMatch(/grossCollected/)
+    expect(out.note).toMatch(/propinas/)
   })
 })

@@ -23,6 +23,7 @@ export function registerShiftTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, status, limit }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('shifts:read', venueId) // WHY: mirror the dashboard's shifts:read gate — shift rows expose drawer cash (starting/ending/difference)
       const statusFilter =
         status === 'closed'
           ? { status: ShiftStatus.CLOSED }

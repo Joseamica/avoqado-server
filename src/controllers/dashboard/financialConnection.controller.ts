@@ -185,6 +185,50 @@ export async function internalTransfer(req: Request, res: Response, next: NextFu
     next(e)
   }
 }
+// Read-only: catálogo de bancos destino para SPEI externo (poblar el selector antes de enviar).
+export async function getSpeiBanks(req: Request, res: Response, next: NextFunction) {
+  try {
+    await assertAccountBelongsToVenue(req.params.id, req.params.venueId)
+    res.json({ success: true, data: await svc.getSpeiBanks(req.params.id) })
+  } catch (e) {
+    next(e)
+  }
+}
+
+// MUEVE DINERO fuera del ecosistema del proveedor. checkPermission + assertAccountBelongsToVenue
+// + rate limit (en las rutas) + dedup/auditoría (en el service). La idempotencyKey la genera el
+// FRONTEND (una por intento de envío): así el retry automático de POST del cliente HTTP reenvía
+// la MISMA key y la idempotencia del proveedor absorbe el duplicado — con una key por request,
+// un retry de red sería un segundo cobro.
+export async function sendSpeiOut(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { destinationClabe, beneficiaryName, idBanco, amount, concept, idempotencyKey } = req.body ?? {}
+    if (!destinationClabe || typeof destinationClabe !== 'string') throw new BadRequestError('destinationClabe es requerida.')
+    if (!beneficiaryName || typeof beneficiaryName !== 'string') throw new BadRequestError('beneficiaryName es requerido.')
+    if (!idempotencyKey || typeof idempotencyKey !== 'string') throw new BadRequestError('idempotencyKey es requerida.')
+    if (typeof idBanco !== 'number' || !Number.isInteger(idBanco) || idBanco <= 0) {
+      throw new BadRequestError('idBanco debe ser un entero positivo del catálogo de bancos.')
+    }
+    const monto = Number(amount)
+    if (!Number.isFinite(monto) || monto <= 0) throw new BadRequestError('amount debe ser un número mayor a 0.')
+    await assertAccountBelongsToVenue(req.params.id, req.params.venueId)
+    const staffId = (req as any).authContext?.userId
+    const data = await svc.sendSpeiOut(req.params.id, {
+      destinationClabe: String(destinationClabe),
+      beneficiaryName: String(beneficiaryName),
+      idBanco,
+      amount: monto,
+      concept: typeof concept === 'string' ? concept : '',
+      idempotencyKey: String(idempotencyKey),
+      staffId,
+    })
+    // El proveedor puede responder 200 con success:false (envío rechazado) — lo reflejamos honesto.
+    res.status(data.ok ? 200 : 422).json({ success: data.ok, data })
+  } catch (e) {
+    next(e)
+  }
+}
+
 export async function disconnect(req: Request, res: Response, next: NextFunction) {
   try {
     await assertConnectionBelongsToVenue(req.params.id, req.params.venueId)

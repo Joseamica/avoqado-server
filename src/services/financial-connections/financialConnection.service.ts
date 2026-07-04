@@ -2,6 +2,7 @@ import prisma from '@/utils/prismaClient'
 import type { FinancialConnectionStatus, FinancialConnectionAccountKind } from '@prisma/client'
 import { BadRequestError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { isValidClabe } from '@/utils/clabe'
 import { getFinancialProviderClient } from './registry'
 import { encryptGrant, decryptGrant } from './crypto'
 import type {
@@ -11,6 +12,8 @@ import type {
   MovementQuery,
   MovementStats,
   InternalTransferResult,
+  SpeiOutResult,
+  SpeiBank,
   AccountKind,
   ConnectionContext,
 } from './types'
@@ -31,6 +34,12 @@ const CHALLENGE_TTL_MS = 5 * 60_000
 // Ventana de dedup por contenido para traspasos internos (mismo destino + mismo monto). Corta a
 // propósito: cubre el reintento tras un timeout sin bloquear por mucho un 2º traspaso legítimo.
 const INTERNAL_TRANSFER_DEDUP_WINDOW_MS = 5 * 60_000
+// Misma ventana para SPEI externo. Es defensa en profundidad: el proveedor SÍ es idempotente
+// (idempotencyKey del FRONTEND, una por intento — los retries HTTP reenvían la misma), pero un
+// intento NUEVO del usuario (F5 / segunda pestaña) llega con key distinta — esta dedup lo ataja.
+const SPEI_OUT_DEDUP_WINDOW_MS = 5 * 60_000
+// UUID (cualquier versión) — formato exigido para la idempotencyKey que manda el frontend.
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 // Cache en memoria del access token por conexión (fast-path; evita re-login por lectura).
 const tokenCache = new Map<string, { accessToken: string; exp: number }>()
 
@@ -44,7 +53,7 @@ function clientFor(code: string) {
 }
 /**
  * Contexto de sesión para el client a partir de la fila de conexión: el kind (MERCHANT/CLIENT)
- * y el externalClientId (idMoneyGiver) viven en la fila — única fuente de verdad (decisión 3A).
+ * y el externalClientId (id de usuario del proveedor) viven en la fila — única fuente de verdad (decisión 3A).
  */
 function ctxFor(
   conn: { accountKind: FinancialConnectionAccountKind; externalClientId: string | null; externalDeviceId: string | null },
@@ -119,7 +128,7 @@ export async function startConnection(input: {
           // re-loguea con credenciales — el password no se necesita y por eso
           // NO se guarda (retención mínima; el reto de device sí lo requiere
           // porque el provider obliga a re-login tras el OTP).
-          // externalClientId (idMoneyGiver, solo CLIENT): la respuesta del 2FA puede no
+          // externalClientId (id de usuario del proveedor, solo CLIENT): la respuesta del 2FA puede no
           // repetirlo, así que el del sign-in inicial viaja en el challenge cifrado.
           // externalDeviceId (idDispositivo, solo CLIENT): idéntica razón — necesario para
           // descifrar el envelope del cliente una vez conectado.
@@ -357,7 +366,7 @@ async function finishConnected(
       expiresAt: grant.expiresAt ? new Date(grant.expiresAt) : null,
       connectedAt: new Date(),
       status: many ? 'PENDING_ACCOUNT_SELECTION' : 'CONNECTED',
-      // idMoneyGiver del cliente (solo CLIENT) — el client de kind CLIENT lo necesita
+      // id de usuario del proveedor (solo CLIENT) — el client de kind CLIENT lo necesita
       // para listar cuentas. undefined = no tocar la columna (MERCHANT no lo trae).
       externalClientId: externalClientId ?? undefined,
       // idDispositivo (solo CLIENT) — llave para descifrar el envelope cifrado del
@@ -575,7 +584,7 @@ export async function resolveTransferDestination(
   }
   try {
     const accessToken = await accessTokenFor(fa.connection)
-    const dest = await clientFor(fa.connection.provider.code).resolveMgAlt(ctxFor(fa.connection, accessToken), accountNumber.trim())
+    const dest = await clientFor(fa.connection.provider.code).resolveAltAccount(ctxFor(fa.connection, accessToken), accountNumber.trim())
     if (!dest) return null
     return { name: dest.name, accountType: dest.accountType }
   } catch (e) {
@@ -587,7 +596,7 @@ export async function resolveTransferDestination(
 }
 
 /**
- * Traspaso interno MG→MG desde la cuenta conectada `financialAccountId` a la cuenta destino
+ * Traspaso interno entre cuentas del proveedor desde la cuenta conectada `financialAccountId` a la cuenta destino
  * (número interno). MUEVE DINERO — siempre se audita en ActivityLog (a diferencia de las lecturas).
  * Origen = idCuentaAlt de la cuenta conectada (del payload del proveedor); destino se resuelve
  * por su número. El proveedor NO es idempotente, así que ANTES de enviar se hace una dedup por
@@ -651,7 +660,7 @@ export async function sendInternalTransfer(
   if (source?.altId == null) throw new BadRequestError('La cuenta origen no tiene id de traspaso disponible.')
 
   // Destino: resolver el número interno (4-6 dígitos) a su idCuentaAlt real.
-  const dest = await client.resolveMgAlt(ctx, destAccount)
+  const dest = await client.resolveAltAccount(ctx, destAccount)
   if (!dest) throw new BadRequestError(`No se encontró la cuenta destino ${destAccount}.`)
   if (dest.altId === source.altId) throw new BadRequestError('El origen y el destino son la misma cuenta.')
 
@@ -676,6 +685,180 @@ export async function sendInternalTransfer(
       amount: input.amount,
       ok: result.ok,
       movementId: result.movementId,
+      message: result.message,
+    },
+  })
+  return result
+}
+
+/**
+ * Catálogo de bancos destino para SPEI externo. Solo lectura (paridad con /balance: sin
+ * rate limit, sin auditoría). Reusa el token cacheado de la conexión de esta cuenta.
+ */
+export async function getSpeiBanks(financialAccountId: string): Promise<SpeiBank[]> {
+  const fa = await prisma.financialAccount.findUniqueOrThrow({
+    where: { id: financialAccountId },
+    include: { connection: { include: { provider: true } } },
+  })
+  // Solo un refresh muerto degrada la conexión. Un error del ENDPOINT del catálogo (p.ej. 401
+  // por autorización específica de /api/external/* para este tipo de token) NO toca el estado:
+  // el mismo token sigue sirviendo para saldo/movimientos — degradar aquí tumbaría una conexión
+  // sana por una lectura auxiliar (nos pasó en vivo 2026-07-03 con el token CLIENT).
+  let accessToken: string
+  try {
+    accessToken = await accessTokenFor(fa.connection)
+  } catch (e) {
+    await markConnectionNeedsReauth(fa.connection.id, e as Error)
+    throw e instanceof BadRequestError ? e : new BadRequestError('No se pudo autenticar con el banco; vuelve a conectar la cuenta.')
+  }
+  try {
+    return await clientFor(fa.connection.provider.code).listSpeiBanks(ctxFor(fa.connection, accessToken))
+  } catch {
+    throw new BadRequestError('No se pudo cargar el catálogo de bancos. Intenta de nuevo en un momento.')
+  }
+}
+
+/**
+ * SPEI saliente a CUALQUIER banco (vía CLABE). MUEVE DINERO fuera del ecosistema del proveedor —
+ * el candado es doble: idempotencyKey del proveedor (generada por el FRONTEND, una por intento de
+ * envío, y pasada aquí — así el retry automático de POST del cliente HTTP reenvía la MISMA key y
+ * la idempotencia real del proveedor lo absorbe) + dedup por contenido en ActivityLog (misma
+ * CLABE + mismo monto en ventana corta) que ataja el reintento manual del usuario tras un timeout.
+ * Residual declarado (mismo que sendInternalTransfer, aceptado): dos INTENTOS DISTINTOS
+ * concurrentes (p.ej. dos pestañas) con misma CLABE+monto pueden pasar ambos el dedup antes de
+ * que el primero escriba su log — cada uno lleva key propia y el proveedor los trata como envíos
+ * separados. Lo acotan el disabled de la UI, el rate limit y la ventana de milisegundos.
+ * Siempre se audita (éxito o falla). La UI además confirma en dos pasos.
+ */
+export async function sendSpeiOut(
+  financialAccountId: string,
+  input: {
+    destinationClabe: string
+    beneficiaryName: string
+    idBanco: number
+    amount: number
+    concept: string
+    idempotencyKey: string
+    staffId?: string
+  },
+): Promise<SpeiOutResult> {
+  // Normalizar el monto a centavos UNA sola vez: el número que se valida, envía, deduplica y
+  // audita es EL MISMO. Sin esto, 150.505 se auditaría como 150.505 pero viajaría como 150.5 —
+  // en dinero saliente el registro debe decir exactamente lo que se envió.
+  const amount = Math.round(input.amount * 100) / 100
+  if (!(amount > 0)) throw new BadRequestError('El monto debe ser mayor a 0.')
+  const destinationClabe = input.destinationClabe.trim()
+  // Validar el dígito verificador ANTES de tocar al proveedor: una CLABE con un dígito trocado
+  // es dinero depositado a un desconocido — se rechaza aquí, no se "intenta a ver si pasa".
+  if (!isValidClabe(destinationClabe)) throw new BadRequestError('La CLABE destino no es válida. Revisa los 18 dígitos.')
+  const beneficiaryName = input.beneficiaryName.trim()
+  if (!beneficiaryName) throw new BadRequestError('El nombre del beneficiario es obligatorio.')
+  if (!Number.isInteger(input.idBanco) || input.idBanco <= 0) throw new BadRequestError('Selecciona el banco destino.')
+  const idempotencyKey = input.idempotencyKey.trim()
+  if (!UUID_PATTERN.test(idempotencyKey)) throw new BadRequestError('idempotencyKey debe ser un UUID.')
+
+  const fa = await prisma.financialAccount.findUniqueOrThrow({
+    where: { id: financialAccountId },
+    include: { connection: { include: { provider: true } } },
+  })
+
+  // SPEI saliente solo para cuentas de NEGOCIO — mismo guard que traspasos internos: el flujo de
+  // dinero saliente con sesión CLIENT (PWA) jamás se ha probado contra el proveedor.
+  if (fa.connection.accountKind === 'CLIENT') {
+    throw new BadRequestError('El envío SPEI no está disponible para cuentas personales.')
+  }
+
+  // El endpoint External del proveedor debita por la identidad del USUARIO, no por la
+  // cuenta seleccionada — con varias cuentas (negocios) en una misma conexión, el dinero podría
+  // salir de una cuenta DISTINTA a la que el usuario eligió y la auditoría mentiría. Hasta
+  // confirmar con el proveedor de cuál cuenta debita en ese caso, solo se permite el envío en
+  // conexiones de UNA cuenta (el caso normal de Avoqado: una sucursal = un negocio).
+  const accountsInConnection = await prisma.financialAccount.count({ where: { connectionId: fa.connection.id } })
+  if (accountsInConnection > 1) {
+    throw new BadRequestError('Por ahora el envío SPEI solo está disponible para conexiones con una sola cuenta.')
+  }
+
+  // Dedup por contenido ANTES de mover dinero (ver comentario de SPEI_OUT_DEDUP_WINDOW_MS).
+  // Los intentos previos con ok:false TAMBIÉN bloquean: un "fallo" con forma de timeout pudo
+  // haberse enviado de verdad — reintentarlo a ciegas en la ventana corta es el caso peligroso.
+  const recent = await prisma.activityLog.findMany({
+    where: {
+      action: 'FINANCIAL_SPEI_OUT',
+      entityId: fa.id,
+      createdAt: { gte: new Date(Date.now() - SPEI_OUT_DEDUP_WINDOW_MS) },
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 25,
+    select: { data: true },
+  })
+  const prior = recent
+    .map(r => r.data as { destClabe?: unknown; amount?: unknown; ok?: unknown; operationId?: unknown; idempotencyKey?: unknown } | null)
+    .find(d => d != null && d.destClabe === destinationClabe && d.amount === amount)
+  if (prior) {
+    // Mismo intento (misma key) → devolver el resultado original tal cual; intento distinto con
+    // mismo contenido → bloquear con el aviso de verificación.
+    return {
+      ok: prior.ok === true,
+      operationId: (prior.operationId as string | null) ?? null,
+      transferId: null,
+      message:
+        prior.idempotencyKey === idempotencyKey
+          ? 'Este envío ya se procesó.'
+          : 'Se detectó un envío idéntico muy reciente; no se reenvió. Verifica tus movimientos.',
+    }
+  }
+
+  // Token muerto → misma política honesta que el resto del módulo: NEEDS_REAUTH + 400, no 500.
+  let accessToken: string
+  try {
+    accessToken = await accessTokenFor(fa.connection)
+  } catch (e) {
+    await markConnectionNeedsReauth(fa.connection.id, e as Error)
+    throw e instanceof BadRequestError ? e : new BadRequestError('No se pudo autenticar con el banco; vuelve a conectar la cuenta.')
+  }
+  const client = clientFor(fa.connection.provider.code)
+  const ctx = ctxFor(fa.connection, accessToken)
+
+  // Origen: identificador de usuario del proveedor (externalClientId). Capturado en connect-time
+  // desde 2026-07-03; conexiones previas se backfillean aquí (mismo patrón que externalCuentaId).
+  let externalUserId = fa.connection.externalClientId
+  if (!externalUserId) {
+    try {
+      externalUserId = await client.getExternalUserId(ctx)
+    } catch {
+      throw new BadRequestError('No se pudo obtener el identificador de la cuenta origen. Intenta de nuevo en un momento.')
+    }
+    if (!externalUserId) throw new BadRequestError('El proveedor no reporta el identificador de la cuenta origen.')
+    await prisma.financialConnection.update({ where: { id: fa.connection.id }, data: { externalClientId: externalUserId } })
+  }
+
+  const result = await client.sendSpeiOut(ctx, {
+    externalUserId,
+    idempotencyKey,
+    destinationClabe,
+    beneficiaryName,
+    amount,
+    concept: input.concept,
+    idBanco: input.idBanco,
+  })
+
+  // Auditoría obligatoria de dinero saliente: quién, cuánto, a qué CLABE/banco, resultado.
+  // destClabe normalizada (trim) y amount redondeado — son también la clave de la dedup de arriba.
+  await logAction({
+    staffId: input.staffId ?? null,
+    venueId: fa.connection.venueId,
+    action: 'FINANCIAL_SPEI_OUT',
+    entity: 'FinancialAccount',
+    entityId: fa.id,
+    data: {
+      destClabe: destinationClabe,
+      destName: beneficiaryName,
+      idBanco: input.idBanco,
+      amount,
+      idempotencyKey,
+      ok: result.ok,
+      operationId: result.operationId,
+      transferId: result.transferId,
       message: result.message,
     },
   })

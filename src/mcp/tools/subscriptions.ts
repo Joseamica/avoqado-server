@@ -4,6 +4,7 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { getVenueSubscription, type SuperadminVenueSubscription, type SubscriptionState } from '@/services/superadmin/subscription.service'
+import { hasPermission } from '@/services/access/access.service'
 
 /** Empty per-state tally — also the shape returned when no venue rows are in scope. */
 const zeroCounts = (): Record<SubscriptionState, number> & { total: number } => ({
@@ -85,9 +86,16 @@ export function registerSubscriptionTools(server: McpServer, scope: McpScope) {
       venueId: z.string().optional().describe('Focus one venue (must be in your scope); omit for all your venues'),
     },
     async ({ venueId }) => {
-      // Resolve target venue IDs through the guard: throws ScopeError if venueId is out of scope.
-      const where = guard.venueFilter(venueId)
-      const venueIds = where.venueId.in
+      // WHY: this returns MRR, stripeSubscriptionId and owner PII — the dashboard gates GET /plan
+      // with billing:subscriptions:read (ADMIN/OWNER). The MCP was venue-scoped only, so a CASHIER
+      // could read billing across the org. Mirror daily_sales: single venue → hard-deny; all-venues
+      // → restrict to the venues where the caller actually holds billing:subscriptions:read.
+      const venueIds = venueId
+        ? (guard.venueFilter(venueId), guard.requirePermission('billing:subscriptions:read', venueId), [venueId])
+        : scope.allowedVenueIds.filter(v => {
+            const access = scope.perVenueAccess.get(v)
+            return !!access && hasPermission(access, 'billing:subscriptions:read')
+          })
 
       const loaded = await Promise.all(venueIds.map(id => getVenueSubscription(id)))
       const rows = loaded.filter((r): r is SuperadminVenueSubscription => r !== null)

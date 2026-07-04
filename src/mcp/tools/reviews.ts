@@ -22,6 +22,7 @@ export function registerReviewTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, minRating, limit }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('reviews:read', venueId) // WHY: mirror the dashboard's reviews:read gate — reviewer names/comments/served-by aren't free-for-all
       const reviewWhere = { ...where, ...(minRating ? { overallRating: { gte: minRating } } : {}) }
       const [agg, recent] = await Promise.all([
         prisma.review.aggregate({

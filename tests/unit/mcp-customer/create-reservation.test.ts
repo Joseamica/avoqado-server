@@ -16,7 +16,14 @@ jest.mock('@/services/dashboard/reservation.dashboard.service', () => ({
   markNoShow: jest.fn(),
 }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: (...a: unknown[]) => mockLogAction(...(a as [])) }))
-jest.mock('@/utils/prismaClient', () => ({ __esModule: true, default: { reservation: { findFirst: jest.fn(), findMany: jest.fn() } } }))
+jest.mock('@/utils/prismaClient', () => ({
+  __esModule: true,
+  default: {
+    reservation: { findFirst: jest.fn(), findMany: jest.fn() },
+    // create_reservation resolves the venue timezone to interpret naive datetimes venue-locally.
+    venue: { findUnique: async () => ({ timezone: 'America/Mexico_City' }) },
+  },
+}))
 jest.mock('@/mcp/planGate', () => ({ planGateMessage: jest.fn().mockResolvedValue(null) }))
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({ venueFilter: (v: string) => ({ venueId: { in: [v] } }), requirePermission: jest.fn() }),
@@ -75,5 +82,20 @@ describe('create_reservation', () => {
     const out = parse(await call({ venueId: 'v1', startsAt: 'not-a-date', partySize: 2 }))
     expect(out.ok).toBe(false)
     expect(mockCreate).not.toHaveBeenCalled()
+  })
+
+  it('interprets a NAIVE datetime as venue-local, not host-UTC (the 6h-shift bug)', async () => {
+    // "7pm" with no zone → 7pm at the venue (America/Mexico_City, -6) → 01:00Z next day.
+    // The old bare-new-Date path would have stored 19:00Z under a UTC host — 6h early.
+    await call({ venueId: 'v1', startsAt: '2026-06-06T19:00:00', partySize: 2 })
+    const [, data] = mockCreate.mock.calls[0] as unknown as [string, Record<string, unknown>, string]
+    expect((data.startsAt as Date).toISOString()).toBe('2026-06-07T01:00:00.000Z')
+    expect((data.endsAt as Date).toISOString()).toBe('2026-06-07T02:30:00.000Z') // +90 min
+  })
+
+  it('still respects an explicit Z (absolute instant) unchanged', async () => {
+    await call({ venueId: 'v1', startsAt: '2026-06-06T19:00:00.000Z', partySize: 2 })
+    const [, data] = mockCreate.mock.calls[0] as unknown as [string, Record<string, unknown>, string]
+    expect((data.startsAt as Date).toISOString()).toBe('2026-06-06T19:00:00.000Z')
   })
 })

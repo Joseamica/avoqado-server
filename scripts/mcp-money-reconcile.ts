@@ -7,7 +7,7 @@
  *   DATABASE_URL="postgresql://..." npx tsx -r dotenv/config scripts/mcp-money-reconcile.ts \
  *     --venue <id> --from 2026-06-02 --to 2026-06-15
  *
- * Defaults to Mindform, last 14 days. Compares each MCP tool's totals to a
+ * Defaults to an entitled venue with native payments (Mobanq), last 14 days. Compares each MCP tool's totals to a
  * hand-written SQL ground truth that uses the SAME venue-local day boundaries the
  * tools use (venueStartOfDay/venueEndOfDay), so a match proves the tool's window +
  * status/refund definition are correct.
@@ -23,7 +23,7 @@ function arg(name: string, fallback?: string): string | undefined {
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback
 }
 
-const VENUE = arg('venue', 'cmisvi38o001fhr2828ygmxi2')! // Mindform
+const VENUE = arg('venue', 'cmpe64yq2001f9k92m0lbhmf4')! // Mobanq (plan-exempt, native payments)
 const FROM = arg('from')
 const TO = arg('to')
 
@@ -40,6 +40,28 @@ function check(label: string, mcp: number, db: number, mcpCount?: number, dbCoun
   console.log(
     `${ok ? '✅' : '❌'}  ${label.padEnd(46)} mcp=${cents(mcp).toFixed(2)}  db=${cents(db).toFixed(2)}${cnt}${moneyOk ? '' : `  ⚠️ DIFF $${cents(mcp - db).toFixed(2)}`}`,
   )
+}
+
+function requireToolResult(name: string, value: Record<string, any>): Record<string, any> {
+  if (!value || value.ok === false || value.planRequired) {
+    throw new Error(`${name} no pudo ejecutarse: ${value?.error ?? 'respuesta vacía o inválida'}`)
+  }
+  return value
+}
+
+function checkMethods(
+  label: string,
+  mcpRows: Array<{ method: string; total: number; count: number }>,
+  dbRows: Array<{ method: string; s: number; c: number }>,
+) {
+  const mcp = new Map(mcpRows.map(r => [r.method, r]))
+  const db = new Map(dbRows.map(r => [r.method, r]))
+  const methods = new Set([...mcp.keys(), ...db.keys()])
+  for (const method of methods) {
+    const m = mcp.get(method) ?? { total: 0, count: 0 }
+    const d = db.get(method) ?? { s: 0, c: 0 }
+    check(`${label} ${method}`, m.total, d.s, m.count, d.c)
+  }
 }
 
 async function main() {
@@ -66,49 +88,70 @@ async function main() {
   } as unknown as McpScope
   registerSalesTools(server, scope)
   registerPaymentTools(server, scope)
-  const callTool = async (n: string, a: Record<string, unknown>) => JSON.parse((await handlers.get(n)!(a, {})).content[0].text)
+  const callTool = async (n: string, a: Record<string, unknown>) => {
+    const handler = handlers.get(n)
+    if (!handler) throw new Error(`Tool ${n} no registrado`)
+    const parsed = JSON.parse((await handler(a, {})).content[0].text) as Record<string, any>
+    return requireToolResult(n, parsed)
+  }
 
   // ---- 1) sales_by_payment_method: gross + net, per method ----
   const sbpm = await callTool('sales_by_payment_method', { venueId: VENUE, fromDate: fromStr, toDate: toStr })
-  // Ground truth GROSS = all COMPLETED by method (incl refunds + cancelled) — the dashboard "Métodos de Pago" panel.
+  // Ground truth GROSS = all COMPLETED by method (incl refunds-as-negatives + cancelled) INCLUDING TIPS —
+  // mirrors the dashboard "Métodos de Pago" panel (sum(amount + tipAmount), no type/order filter).
   const grossDb = await prisma.$queryRawUnsafe<{ method: string; c: number; s: number }[]>(
-    `SELECT method, count(*)::int c, COALESCE(sum(amount),0)::float8 s FROM "Payment" WHERE "venueId"=$1 AND status='COMPLETED' AND "createdAt">=$2 AND "createdAt"<=$3 GROUP BY method`,
+    `SELECT method, count(*)::int c, COALESCE(sum(amount + COALESCE("tipAmount",0)),0)::float8 s FROM "Payment" WHERE "venueId"=$1 AND status='COMPLETED' AND "createdAt">=$2 AND "createdAt"<=$3 GROUP BY method`,
     VENUE,
     start,
     end,
   )
-  // Ground truth NET = excl refunds + cancelled orders.
+  // Ground truth NET = COMPLETED incl refunds-as-negatives (so refunds ARE subtracted), excl cancelled
+  // orders, amount only (no tips). Refund rows keep type=REFUND but are NOT filtered out here — that is
+  // exactly what makes netSales "net of refunds".
   const netDb = await prisma.$queryRawUnsafe<{ method: string; c: number; s: number }[]>(
     `SELECT p.method, count(*)::int c, COALESCE(sum(p.amount),0)::float8 s FROM "Payment" p LEFT JOIN "Order" o ON o.id=p."orderId"
-     WHERE p."venueId"=$1 AND p.status='COMPLETED' AND p.type!='REFUND' AND (o.status IS NULL OR o.status!='CANCELLED') AND p."createdAt">=$2 AND p."createdAt"<=$3 GROUP BY p.method`,
+     WHERE p."venueId"=$1 AND p.status='COMPLETED' AND (o.status IS NULL OR o.status!='CANCELLED') AND p."createdAt">=$2 AND p."createdAt"<=$3 GROUP BY p.method`,
     VENUE,
     start,
     end,
   )
   console.log('── sales_by_payment_method ──')
-  for (const m of grossDb) {
-    const mcpM = sbpm.grossCollected.byMethod.find((x: { method: string }) => x.method === m.method) ?? { total: 0, count: 0 }
-    check(`gross ${m.method}`, mcpM.total, m.s, mcpM.count, m.c)
-  }
-  for (const m of netDb) {
-    const mcpM = sbpm.netSales.byMethod.find((x: { method: string }) => x.method === m.method) ?? { total: 0, count: 0 }
-    check(`net   ${m.method}`, mcpM.total, m.s, mcpM.count, m.c)
-  }
+  check(
+    'gross total',
+    sbpm.grossCollected.total,
+    grossDb.reduce((sum, r) => sum + r.s, 0),
+  )
+  check(
+    'net total',
+    sbpm.netSales.total,
+    netDb.reduce((sum, r) => sum + r.s, 0),
+  )
+  checkMethods('gross', sbpm.grossCollected.byMethod, grossDb)
+  checkMethods('net  ', sbpm.netSales.byMethod, netDb)
 
-  // ---- 2) list_payments: COMPLETED total ----
-  const lp = await callTool('list_payments', { venueId: VENUE, fromDate: fromStr, toDate: toStr, status: 'completed' })
-  const lpDb = (
+  // ---- 2) list_payments: completed (SALES, refunds excluded) + refunds bucket ----
+  // NOTE: since the 2026-07-03 fix, `completed.gross` is COMPLETED minus type=REFUND (true sales),
+  // and refunds live in their own bucket (negative). Ground truth must split the same way.
+  const lp = await callTool('list_payments', { venueId: VENUE, fromDate: fromStr, toDate: toStr, status: 'all' })
+  const lpSalesDb = (
     await prisma.$queryRawUnsafe<{ c: number; s: number }[]>(
-      `SELECT count(*)::int c, COALESCE(sum(amount),0)::float8 s FROM "Payment" WHERE "venueId"=$1 AND status='COMPLETED' AND "createdAt">=$2 AND "createdAt"<=$3`,
+      `SELECT count(*)::int c, COALESCE(sum(amount),0)::float8 s FROM "Payment" WHERE "venueId"=$1 AND status='COMPLETED' AND (type IS NULL OR type!='REFUND') AND "createdAt">=$2 AND "createdAt"<=$3`,
       VENUE,
       start,
       end,
     )
   )[0]
-  const lpTotal = lp.summary?.byStatus?.COMPLETED?.amount ?? lp.summary?.completed?.amount ?? lp.completed?.amount ?? null
+  const lpRefundDb = (
+    await prisma.$queryRawUnsafe<{ c: number; s: number }[]>(
+      `SELECT count(*)::int c, COALESCE(sum(amount),0)::float8 s FROM "Payment" WHERE "venueId"=$1 AND (type='REFUND' OR status='REFUNDED') AND "createdAt">=$2 AND "createdAt"<=$3`,
+      VENUE,
+      start,
+      end,
+    )
+  )[0]
   console.log('── list_payments ──')
-  if (lpTotal != null) check('COMPLETED total', lpTotal, lpDb.s)
-  else console.log('  (shape de list_payments distinto — revisar manualmente)', JSON.stringify(lp.summary ?? lp).slice(0, 160))
+  check('completed gross (sales, no refunds)', lp.summary?.completed?.gross ?? 0, lpSalesDb.s, lp.summary?.completed?.count, lpSalesDb.c)
+  check('refunds (negative, split out)', lp.summary?.refunds?.amount ?? 0, lpRefundDb.s, lp.summary?.refunds?.count, lpRefundDb.c)
 
   // ---- 3) staff_tips: per-staff tips == DB grouped by processedById (corte-de-caja rule) ----
   // Ground truth mirrors fetchPaymentsForAnalytics defaults: COMPLETED, no REFUND, no cancelled orders,
@@ -140,6 +183,7 @@ async function main() {
 
   console.log(`\n  ${pass} ✅ / ${fail} ❌  — todo verde = cada cifra del MCP cuadra al centavo con la DB\n`)
   await prisma.$disconnect()
+  if (fail > 0) process.exitCode = 1
 }
 main().catch(e => {
   console.error('reconcile failed:', e)

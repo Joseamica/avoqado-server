@@ -4,6 +4,7 @@ import type { McpScope } from '../../../src/mcp/scope'
 const mockCustomerFind = jest.fn()
 const mockAdjust = jest.fn()
 const mockAudit = jest.fn()
+const mockStaffVenueFind = jest.fn()
 
 jest.mock('@/mcp/planGate', () => ({ planGateMessage: jest.fn().mockResolvedValue(null) }))
 jest.mock('@/mcp/guard', () => ({
@@ -24,6 +25,7 @@ jest.mock('@/utils/prismaClient', () => ({
   default: {
     loyaltyConfig: { findFirst: jest.fn() },
     customer: { findMany: (...a: unknown[]) => mockCustomerFind(...(a as [])) },
+    staffVenue: { findFirst: (...a: unknown[]) => mockStaffVenueFind(...(a as [])) },
   },
 }))
 
@@ -61,14 +63,28 @@ describe('adjust_loyalty_points (critical write, confirm-gated)', () => {
     expect(mockAdjust).not.toHaveBeenCalled()
   })
 
-  it('with confirm:true: applies via the service and audits as customer-mcp', async () => {
+  it('with confirm:true: passes the resolved StaffVenue.id (NOT scope.staffId) to the service and audits', async () => {
     mockCustomerFind.mockResolvedValueOnce([ana])
+    mockStaffVenueFind.mockResolvedValueOnce({ id: 'sv-1' }) // caller's staff-venue row
     mockAdjust.mockResolvedValueOnce({ newBalance: 180 })
     const out = parse(await call({ venueId: 'v1', search: 'ana', points: 100, reason: 'compensación', confirm: true }))
 
-    expect(mockAdjust).toHaveBeenCalledWith('v1', 'c1', 100, 'compensación', 's1')
+    // REGRESSION: must pass the StaffVenue.id (createdById FKs StaffVenue). Passing 's1'
+    // (a Staff.id) would violate the FK and silently roll the whole adjustment back.
+    expect(mockAdjust).toHaveBeenCalledWith('v1', 'c1', 100, 'compensación', 'sv-1')
+    expect(mockAdjust).not.toHaveBeenCalledWith('v1', 'c1', 100, 'compensación', 's1')
+    expect(mockStaffVenueFind).toHaveBeenCalledWith({ where: { staffId: 's1', venueId: 'v1' }, select: { id: true } })
     expect(out).toMatchObject({ ok: true, customer: 'Ana López', change: 100, newBalance: 180 })
     expect(mockAudit.mock.calls[0][1]).toMatchObject({ action: 'LOYALTY_POINTS_ADJUSTED', entityId: 'c1', venueId: 'v1' })
+  })
+
+  it('with confirm but no StaffVenue row for the caller: friendly error, no write (would-be FK violation)', async () => {
+    mockCustomerFind.mockResolvedValueOnce([ana])
+    mockStaffVenueFind.mockResolvedValueOnce(null) // e.g. org-owner not staffed at this venue
+    const out = parse(await call({ venueId: 'v1', search: 'ana', points: 100, reason: 'x', confirm: true }))
+    expect(out.ok).toBe(false)
+    expect(out.error).toMatch(/asignación/)
+    expect(mockAdjust).not.toHaveBeenCalled()
   })
 
   it('rejects ambiguous matches and points=0 (no write)', async () => {

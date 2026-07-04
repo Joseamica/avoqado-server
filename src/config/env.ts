@@ -84,7 +84,7 @@ const envSchema = z.object({
   BLUMON_MASTER_PASSWORD: z.string().optional(),
   BLUMON_KYC_EMAILS: z.string().optional(), // Comma-separated emails for KYC document delivery
 
-  // External bank balance provider (concrete: QPay) — one shared broker login
+  // External bank balance provider — one shared broker login
   // across all Avoqado sucursales; each sucursal is its own `negocio`.
   EXTERNAL_BANK_API_BASE: z.string().url().optional().default('https://api.qpaydev.xyz'),
   EXTERNAL_BANK_MG_PLATFORM: z.string().optional().default('MERCHANT'),
