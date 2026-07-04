@@ -439,7 +439,7 @@ router.use('/staff', staffRoutes)
 // Training / LMS Management
 router.use('/trainings', trainingRoutes)
 
-// Aggregator Management (Moneygiver, etc.)
+// Aggregator Management
 router.use('/aggregators', aggregatorRoutes)
 router.use('/balance-providers', balanceProviderRoutes)
 

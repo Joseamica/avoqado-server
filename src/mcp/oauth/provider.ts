@@ -48,7 +48,7 @@ export const provider: OAuthServerProvider = {
     if (data.clientId !== client.client_id) throw new InvalidGrantError('code was issued to a different client')
     if (redirectUri !== undefined && redirectUri !== data.redirectUri) throw new InvalidGrantError('redirect_uri mismatch')
 
-    const access_token = issueMcpToken(data.staffId, data.activeOrg, ACCESS_TTL_SECONDS, client.client_id)
+    const access_token = issueMcpToken(data.staffId, data.activeOrg, ACCESS_TTL_SECONDS, client.client_id, data.scopes)
     const { token: refresh_token } = await createRefreshToken({
       clientId: client.client_id,
       staffId: data.staffId,
@@ -64,7 +64,7 @@ export const provider: OAuthServerProvider = {
     if (data.clientId !== client.client_id) throw new InvalidGrantError('refresh token was issued to a different client')
 
     const grantedScopes = scopes && scopes.length ? scopes.filter(s => data.scopes.includes(s)) : data.scopes
-    const access_token = issueMcpToken(data.staffId, data.activeOrg, ACCESS_TTL_SECONDS, client.client_id)
+    const access_token = issueMcpToken(data.staffId, data.activeOrg, ACCESS_TTL_SECONDS, client.client_id, grantedScopes)
     // Rotate: consumeRefreshToken already atomically revoked the presented token (single-use);
     // just issue the replacement. (No separate revoke call — that would be a redundant no-op now.)
     const { token: refresh_token } = await createRefreshToken({
@@ -83,14 +83,17 @@ export const provider: OAuthServerProvider = {
   },
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
-    const { sub, org, cid, exp } = verifyMcpToken(token) // throws on bad/expired/wrong-audience
+    const { sub, org, cid, scp, exp } = verifyMcpToken(token) // throws on bad/expired/wrong-audience
     return {
       token,
       clientId: cid ?? sub, // dev-server tokens have no cid; fall back to the subject
-      scopes: MCP_SCOPES_SUPPORTED,
+      // Report the token's REAL granted scopes (was hardcoded to the full supported set — the bug
+      // that made a mcp:read grant behave like read+write). Legacy/dev tokens without `scp` fall
+      // back to full so they keep working until they refresh into a scoped token.
+      scopes: scp && scp.length ? scp : MCP_SCOPES_SUPPORTED,
       expiresAt: exp, // required by the SDK bearer middleware
       resource: MCP_RESOURCE_URL,
-      extra: { staffId: sub, activeOrg: org },
+      extra: { staffId: sub, activeOrg: org, scopes: scp && scp.length ? scp : undefined },
     }
   },
 

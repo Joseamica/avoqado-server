@@ -2,7 +2,7 @@ import { createHash } from 'crypto'
 
 // Mock prisma BEFORE importing the store (store imports prismaClient at module load).
 const db = {
-  mcpAuthCode: { create: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
+  mcpAuthCode: { create: jest.fn(), findUnique: jest.fn(), updateMany: jest.fn() },
   mcpRefreshToken: { create: jest.fn(), findUnique: jest.fn(), updateMany: jest.fn() },
 }
 jest.mock('@/utils/prismaClient', () => ({ __esModule: true, default: db }))
@@ -12,6 +12,18 @@ import { createAuthCode, consumeAuthCode, createRefreshToken, consumeRefreshToke
 const sha = (s: string) => createHash('sha256').update(s).digest('hex')
 
 beforeEach(() => jest.clearAllMocks())
+
+const authRow = (over: Record<string, unknown> = {}) => ({
+  codeHash: sha('abc'),
+  clientId: 'c1',
+  staffId: 's1',
+  activeOrg: 'o1',
+  codeChallenge: 'cc',
+  redirectUri: 'http://x',
+  scopes: [],
+  resource: null,
+  ...over,
+})
 
 describe('auth codes', () => {
   it('stores the HASH of the code, never the plaintext', async () => {
@@ -30,58 +42,61 @@ describe('auth codes', () => {
     expect(JSON.stringify(arg)).not.toContain(code)
   })
 
-  it('consumes a valid, unexpired, unused code exactly once', async () => {
-    const row = {
-      codeHash: sha('abc'),
-      clientId: 'c1',
-      staffId: 's1',
-      activeOrg: 'o1',
-      codeChallenge: 'cc',
-      redirectUri: 'http://x',
-      scopes: [],
-      resource: null,
-      expiresAt: new Date(Date.now() + 10000),
-      consumedAt: null,
-    }
-    db.mcpAuthCode.findUnique.mockResolvedValue(row)
-    db.mcpAuthCode.update.mockResolvedValue({})
+  it('claims the code ATOMICALLY (updateMany gated on consumedAt:null), then reads it', async () => {
+    db.mcpAuthCode.updateMany.mockResolvedValue({ count: 1 }) // we won the claim
+    db.mcpAuthCode.findUnique.mockResolvedValue(authRow())
     const res = await consumeAuthCode('abc')
     expect(res?.staffId).toBe('s1')
-    expect(db.mcpAuthCode.update).toHaveBeenCalledWith(expect.objectContaining({ where: { codeHash: sha('abc') } }))
+    // the guard MUST require consumedAt:null + not-expired in the SAME statement (no read-then-write race)
+    const where = db.mcpAuthCode.updateMany.mock.calls[0][0].where
+    expect(where.codeHash).toBe(sha('abc'))
+    expect(where.consumedAt).toBeNull()
+    expect(where.expiresAt.gt).toBeInstanceOf(Date)
   })
 
-  it('rejects an expired code', async () => {
-    db.mcpAuthCode.findUnique.mockResolvedValue({ expiresAt: new Date(Date.now() - 1), consumedAt: null })
+  it('returns null WITHOUT reading the row when the claim matches nothing (expired/used/missing)', async () => {
+    db.mcpAuthCode.updateMany.mockResolvedValue({ count: 0 })
     await expect(consumeAuthCode('abc')).resolves.toBeNull()
+    expect(db.mcpAuthCode.findUnique).not.toHaveBeenCalled() // no stale read on a lost claim
   })
 
-  it('rejects an already-consumed code', async () => {
-    db.mcpAuthCode.findUnique.mockResolvedValue({ expiresAt: new Date(Date.now() + 10000), consumedAt: new Date() })
-    await expect(consumeAuthCode('abc')).resolves.toBeNull()
+  it('REPLAY: two concurrent exchanges of the same code — only ONE wins, the other gets null', async () => {
+    // First claim wins (count 1), second finds it already consumed (count 0) — the atomic guard's job.
+    db.mcpAuthCode.updateMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 })
+    db.mcpAuthCode.findUnique.mockResolvedValue(authRow())
+    const [a, b] = await Promise.all([consumeAuthCode('abc'), consumeAuthCode('abc')])
+    const wins = [a, b].filter(Boolean)
+    expect(wins).toHaveLength(1) // exactly one exchange gets the code; the replay is refused
   })
 })
 
 describe('refresh tokens', () => {
-  it('stores the hash and consumes a valid token', async () => {
+  it('stores the hash on create', async () => {
     db.mcpRefreshToken.create.mockResolvedValue({})
     const { token } = await createRefreshToken({ clientId: 'c1', staffId: 's1', activeOrg: 'o1', scopes: [] })
     expect(db.mcpRefreshToken.create.mock.calls[0][0].data.tokenHash).toBe(sha(token))
-
-    db.mcpRefreshToken.findUnique.mockResolvedValue({
-      tokenHash: sha(token),
-      clientId: 'c1',
-      staffId: 's1',
-      activeOrg: 'o1',
-      scopes: [],
-      expiresAt: new Date(Date.now() + 10000),
-      revokedAt: null,
-    })
-    const res = await consumeRefreshToken(token)
-    expect(res?.staffId).toBe('s1')
   })
 
-  it('rejects a revoked token', async () => {
-    db.mcpRefreshToken.findUnique.mockResolvedValue({ expiresAt: new Date(Date.now() + 1000), revokedAt: new Date() })
+  it('consumes ATOMICALLY: updateMany gated on revokedAt:null flips it, then reads the row', async () => {
+    db.mcpRefreshToken.updateMany.mockResolvedValue({ count: 1 })
+    db.mcpRefreshToken.findUnique.mockResolvedValue({ clientId: 'c1', staffId: 's1', activeOrg: 'o1', scopes: [] })
+    const res = await consumeRefreshToken('x')
+    expect(res?.staffId).toBe('s1')
+    const where = db.mcpRefreshToken.updateMany.mock.calls[0][0].where
+    expect(where.revokedAt).toBeNull()
+    expect(where.expiresAt.gt).toBeInstanceOf(Date)
+  })
+
+  it('rejects a revoked/expired token (claim matches nothing) without a stale read', async () => {
+    db.mcpRefreshToken.updateMany.mockResolvedValue({ count: 0 })
     await expect(consumeRefreshToken('x')).resolves.toBeNull()
+    expect(db.mcpRefreshToken.findUnique).not.toHaveBeenCalled()
+  })
+
+  it('REPLAY: two concurrent refreshes of the same token — only ONE wins', async () => {
+    db.mcpRefreshToken.updateMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 })
+    db.mcpRefreshToken.findUnique.mockResolvedValue({ clientId: 'c1', staffId: 's1', activeOrg: 'o1', scopes: [] })
+    const [a, b] = await Promise.all([consumeRefreshToken('x'), consumeRefreshToken('x')])
+    expect([a, b].filter(Boolean)).toHaveLength(1)
   })
 })

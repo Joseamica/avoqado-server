@@ -205,8 +205,8 @@ const RETRY_CONFIG = {
  */
 export interface BlumonWebhookPayload {
   // Merchant identification (ACTUAL fields from Blumon)
-  business?: string // Merchant name registered with Blumon (e.g., "MONEYGIVER")
-  businessRfc?: string // Tax ID (RFC) of the merchant (e.g., "MGI220204FA4")
+  business?: string // Merchant name registered with Blumon (e.g., an aggregator's business name)
+  businessRfc?: string // Tax ID (RFC) of the merchant
 
   // Card information
   bin?: string // Card BIN (first 6 digits)

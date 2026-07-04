@@ -494,8 +494,8 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
 
   // Create negative TransactionCost so settlement / profit reports see the
   // refund. TPV refunds already do this — mirror the pattern here so dashboard-
-  // originated refunds aren't invisible to moneygiver-settlement and other
-  // reports that INNER JOIN Payment with TransactionCost.
+  // originated refunds aren't invisible to settlement and other reports that
+  // INNER JOIN Payment with TransactionCost.
   createRefundTransactionCost(result.refundPaymentId, result.originalPaymentId).catch(err => {
     logger.error('[REFUND.DASHBOARD] Failed to create refund TransactionCost', {
       refundPaymentId: result.refundPaymentId,

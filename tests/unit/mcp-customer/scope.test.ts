@@ -45,6 +45,21 @@ describe('resolveScope', () => {
     expect(m.staffOrganization.findUnique).not.toHaveBeenCalled()
   })
 
+  it('SUPERADMIN detection filters revoked/deactivated (active:true + staff.active in the query)', async () => {
+    // A revoked superadmin (StaffVenue.active=false, or Staff.active=false) must NOT keep the global
+    // bypass. The DB returns no matching row → not superadmin → falls through to normal resolution.
+    m.staffVenue.findFirst.mockResolvedValue(null) // no ACTIVE SUPERADMIN row for this staff
+    m.staffOrganization.findUnique.mockResolvedValue({ role: 'ADMIN', isActive: true })
+    m.staffVenue.findMany.mockResolvedValue([{ venueId: 'A' }])
+
+    const scope = await resolveScope('ex-super', 'org-1')
+
+    expect(scope.isSuperAdmin).toBeFalsy() // no global access for a revoked superadmin
+    // The guard lives in the query itself — assert the active filters are present.
+    const where = m.staffVenue.findFirst.mock.calls[0][0].where
+    expect(where).toMatchObject({ role: 'SUPERADMIN', active: true, staff: { active: true } })
+  })
+
   it('org OWNER -> all venues in the org', async () => {
     m.staffOrganization.findUnique.mockResolvedValue({ role: 'OWNER', isActive: true })
     m.venue.findMany.mockResolvedValue([{ id: 'A' }, { id: 'B' }])

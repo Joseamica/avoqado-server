@@ -4,7 +4,7 @@
  * Context: Before 2026-04-20, the dashboard refund service did NOT call
  * `createRefundTransactionCost` (TPV already did). This meant dashboard-
  * originated refunds were invisible to reports that INNER JOIN Payment with
- * TransactionCost (moneygiver-settlement, availableBalance per-card-type).
+ * TransactionCost (settlement reports, availableBalance per-card-type).
  *
  * This script finds REFUND Payments whose ORIGINAL payment had a
  * TransactionCost but the refund itself does not, and creates the reversal.

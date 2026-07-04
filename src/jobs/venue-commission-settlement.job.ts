@@ -2,7 +2,7 @@
  * Venue Commission Settlement Report (Layer 2)
  *
  * Calculates per-venue commissions on top of Layer 1 (aggregator base fees).
- * Splits the commission between external referrer (Avoqado) and aggregator (Moneygiver).
+ * Splits the commission between external referrer (Avoqado) and the aggregator.
  */
 
 import { Decimal } from '@prisma/client/runtime/library'

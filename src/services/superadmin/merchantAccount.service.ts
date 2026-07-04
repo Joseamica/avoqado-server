@@ -2027,7 +2027,7 @@ interface RefetchBlumonResult {
 /**
  * Refetch OAuth/RSA/DUKPT credentials from Blumon for an EXISTING MerchantAccount.
  *
- * Use case: a serial was reassigned in Blumon's portal (e.g., Kepler → Moneygiver),
+ * Use case: a serial was reassigned to a different aggregator in Blumon's portal,
  * or the local credentials are stale/PENDING_AFFILIATION. Reaching out to Blumon
  * pulls fresh credentials issued for whichever merchant currently owns the serial.
  *

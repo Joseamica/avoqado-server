@@ -31,6 +31,20 @@ export function createGuard(scope: McpScope) {
     },
     /** Gate an action by permission, evaluated for a SPECIFIC venue (roles differ per venue). */
     requirePermission(permission: string, venueId: string): void {
+      // OAuth scope enforcement: a WRITE action requires the mcp:write scope. Read actions
+      // (:read / :view / :list) never do. Only enforced when the token actually carries scopes
+      // (scope.scopes present) — dev/legacy tokens without scopes keep full access until they
+      // refresh into a scoped token, so this rolls out without cutting off live connections.
+      const isRead = /:(read|view|list)$/.test(permission)
+      if (!isRead && scope.scopes && !scope.scopes.includes('mcp:write')) {
+        logger.warn('[MCP] write blocked: token lacks mcp:write scope', {
+          mcp: true,
+          staffId: scope.staffId,
+          activeOrg: scope.activeOrg,
+          permission,
+        })
+        throw new ScopeError(`Esta conexión es de solo lectura (falta el scope mcp:write); "${permission}" es una acción de escritura.`)
+      }
       const access = scope.perVenueAccess.get(venueId)
       if (!access || !hasPermission(access, permission)) {
         // Visible-in-logs (alertable) denial; a spike = an LLM probing for access.

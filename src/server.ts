@@ -39,7 +39,6 @@ import { monthlyOverageBillingJob } from './jobs/monthly-overage-billing.job'
 import { nightlySalesSummaryJob } from './jobs/nightly-sales-summary.job'
 import { nightlyLowStockJob } from './jobs/nightly-low-stock.job'
 import { marketingCampaignJob } from './jobs/marketing-campaign.job'
-import { moneygiverSettlementJob } from './jobs/moneygiver-settlement.job'
 import { venueCommissionSettlementJob } from './jobs/venue-commission-settlement.job'
 import { gcalInboxSweeperJob } from './jobs/gcal-inbox-sweeper.job'
 import { gcalOutboxSweeperJob } from './jobs/gcal-outbox-sweeper.job'
@@ -177,7 +176,6 @@ const gracefulShutdown = async (signal: string) => {
       nightlyLowStockJob.stop()
 
       // Stop settlement jobs
-      moneygiverSettlementJob.stop()
       venueCommissionSettlementJob.stop()
 
       // Stop Google Calendar sync jobs (Phase 1 + Phase 2)

@@ -10,6 +10,12 @@ export interface McpScope {
   perVenueAccess: Map<string, UserAccess>
   /** Platform SUPERADMIN connection (global access — mirrors getUserAccess's bypass). */
   isSuperAdmin?: boolean
+  /**
+   * Granted OAuth scopes for THIS connection (e.g. ['mcp:read','mcp:write']). Undefined for
+   * dev-server/legacy tokens → the guard treats undefined as "full" (no scope enforcement).
+   * When present, the guard requires mcp:write for write actions.
+   */
+  scopes?: string[]
 }
 
 /**

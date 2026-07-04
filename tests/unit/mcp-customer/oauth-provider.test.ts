@@ -43,7 +43,9 @@ it('exchangeAuthorizationCode consumes the code and returns access+refresh', asy
   expect(tokens.refresh_token).toBe('refresh123')
   expect(tokens.token_type).toBe('Bearer')
   const verified = await provider.verifyAccessToken(tokens.access_token)
-  expect(verified.extra).toEqual({ staffId: 's1', activeOrg: 'o1' })
+  // The granted scope now round-trips through the token (was dropped at mint → hardcoded full set).
+  expect(verified.extra).toEqual({ staffId: 's1', activeOrg: 'o1', scopes: ['mcp:read'] })
+  expect(verified.scopes).toEqual(['mcp:read']) // NOT the full supported set — only what was granted
 })
 
 it('exchangeAuthorizationCode rejects a code bound to a different client', async () => {

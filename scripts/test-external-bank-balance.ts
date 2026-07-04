@@ -30,7 +30,7 @@ async function main() {
   if (!email || !password) throw new Error('Faltan EXTERNAL_BANK_EMAIL / EXTERNAL_BANK_PASSWORD en .env')
 
   console.log('External bank provider: authenticating + fetching negocios...\n')
-  let r = await externalBankClient.connect({ email, password, deviceIdentifier: 'avoqado-server-moneygiver-balance-lookup' })
+  let r = await externalBankClient.connect({ email, password, deviceIdentifier: 'avoqado-server-external-bank-balance-lookup' })
 
   if (r.kind === 'need_two_factor_auth') {
     if (!twoFactorCode) {
@@ -38,7 +38,7 @@ async function main() {
     }
     r = await externalBankClient.validateTwoFactorCode({
       email,
-      deviceIdentifier: 'avoqado-server-moneygiver-balance-lookup',
+      deviceIdentifier: 'avoqado-server-external-bank-balance-lookup',
       challenge: r.challenge,
       code: twoFactorCode,
       accountKind: 'MERCHANT',
@@ -57,7 +57,7 @@ async function main() {
   }
 
   if (idNegocio) {
-    const ctx = await externalBankClient.refresh(r.grant, 'avoqado-server-moneygiver-balance-lookup', 'MERCHANT')
+    const ctx = await externalBankClient.refresh(r.grant, 'avoqado-server-external-bank-balance-lookup', 'MERCHANT')
     const balance = await externalBankClient.getBalance(ctx.ctx, idNegocio)
     console.log(`\nBalance puntual para idNegocio=${idNegocio}:`, balance)
   }

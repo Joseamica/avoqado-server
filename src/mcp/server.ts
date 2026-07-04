@@ -58,8 +58,11 @@ When the operator asks about their real numbers:
 4. Money is Mexican pesos in major units (e.g. 150.50, never cents). Dates are venue-local (America/Mexico_City).`
 
 /** Build a per-request MCP server bound to the caller's resolved scope. */
-async function buildServerForIdentity(staffId: string, activeOrg: string): Promise<McpServer> {
+async function buildServerForIdentity(staffId: string, activeOrg: string, scopes?: string[]): Promise<McpServer> {
   const scope = await resolveScope(staffId, activeOrg)
+  // Thread the connection's granted OAuth scopes onto the scope so the guard can enforce mcp:write
+  // on writes. Undefined (dev/legacy token) → the guard leaves access unrestricted.
+  if (scopes && scopes.length) scope.scopes = scopes
 
   const server = new McpServer({ name: 'avoqado-customer-mcp', version: '0.1.0' }, { instructions: AVOQADO_MCP_INSTRUCTIONS })
   instrumentTools(server, { staffId, org: activeOrg }) // log every tool call (must run BEFORE registering tools)
@@ -110,17 +113,21 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
   try {
     let staffId: string
     let activeOrg: string
+    let scopes: string[] | undefined
     const extra = (req as { auth?: { extra?: Record<string, unknown> } }).auth?.extra
     if (extra && typeof extra.staffId === 'string' && typeof extra.activeOrg === 'string') {
       staffId = extra.staffId
       activeOrg = extra.activeOrg
+      // provider.verifyAccessToken threads the token's real granted scopes here (undefined for legacy).
+      if (Array.isArray(extra.scopes)) scopes = extra.scopes.filter((s): s is string => typeof s === 'string')
     } else {
       const token = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')
       const payload = verifyMcpToken(token) // throws on bad / expired / wrong-audience → 401 below
       staffId = payload.sub
       activeOrg = payload.org
+      scopes = payload.scp
     }
-    const server = await buildServerForIdentity(staffId, activeOrg)
+    const server = await buildServerForIdentity(staffId, activeOrg, scopes)
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
     res.on('close', () => {
       void transport.close()

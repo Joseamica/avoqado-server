@@ -45,3 +45,40 @@ describe('guard', () => {
     )
   })
 })
+
+// OAuth scope enforcement: a mcp:read-only connection can read but not write.
+describe('guard — mcp:write scope enforcement', () => {
+  const withScope = (scopes: string[] | undefined, perms: string[]): McpScope => ({
+    staffId: 's',
+    activeOrg: 'o',
+    allowedVenueIds: ['A'],
+    perVenueAccess: new Map([['A', { corePermissions: perms } as any]]),
+    scopes,
+  })
+
+  it('BLOCKS a write action when the token lacks mcp:write (read-only connection)', () => {
+    // role HAS the permission — the block is purely the scope, not the role.
+    const g = createGuard(withScope(['mcp:read'], ['loyalty:adjust']))
+    expect(() => g.requirePermission('loyalty:adjust', 'A')).toThrow(/solo lectura|mcp:write/)
+    expect(logger.warn).toHaveBeenCalledWith(
+      '[MCP] write blocked: token lacks mcp:write scope',
+      expect.objectContaining({ permission: 'loyalty:adjust' }),
+    )
+  })
+
+  it('ALLOWS a write when the token carries mcp:write (and the role permits it)', () => {
+    const g = createGuard(withScope(['mcp:read', 'mcp:write'], ['loyalty:adjust']))
+    expect(() => g.requirePermission('loyalty:adjust', 'A')).not.toThrow()
+  })
+
+  it('ALLOWS reads (:read / :view / :list) even on a read-only connection', () => {
+    const g = createGuard(withScope(['mcp:read'], ['loyalty:read', 'cfdi:view']))
+    expect(() => g.requirePermission('loyalty:read', 'A')).not.toThrow()
+    expect(() => g.requirePermission('cfdi:view', 'A')).not.toThrow() // :view is a read, not a write
+  })
+
+  it('does NOT enforce when scopes are absent (dev/legacy token → full access until it refreshes)', () => {
+    const g = createGuard(withScope(undefined, ['loyalty:adjust']))
+    expect(() => g.requirePermission('loyalty:adjust', 'A')).not.toThrow()
+  })
+})

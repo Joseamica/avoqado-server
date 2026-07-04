@@ -1,5 +1,6 @@
 import express, { type Request, type Response, type Express, type NextFunction } from 'express'
 import cookieParser from 'cookie-parser'
+import { createHash } from 'crypto'
 import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js'
 import { authenticateForMcp, McpLoginError } from './credentials'
 import { resolveActiveOrganizationId } from '@/services/staffOrganization.service'
@@ -70,6 +71,30 @@ function ssoAuthorizeHandler() {
   return router
 }
 
+/**
+ * CSRF guard for the cookie-authenticated approve endpoint. The dashboard `accessToken` cookie is
+ * SameSite=None in prod/staging (needed for legit cross-site dashboard use), so it rides along on a
+ * cross-site POST. Without this, a malicious page could auto-POST `sso=1` (+ an attacker-registered
+ * client/redirect) and mint an auth code bound to the VICTIM's session → account takeover. Browsers
+ * set `Origin` on every fetch/form POST and page JS cannot forge or strip it, so rejecting a
+ * present-but-foreign Origin (or Referer) blocks the forged cross-site request while never rejecting
+ * a legit same-origin submit (which always carries our own Origin).
+ */
+export function isTrustedOrigin(req: Pick<Request, 'get'>): boolean {
+  const expected = MCP_ISSUER_URL.origin
+  const origin = req.get('origin')
+  if (origin) return origin === expected
+  const referer = req.get('referer')
+  if (referer) {
+    try {
+      return new URL(referer).origin === expected
+    } catch {
+      return false
+    }
+  }
+  return true // neither header present — not reachable via a cross-site browser POST (browser always sets Origin)
+}
+
 /** POST /mcp-oauth/approve — consent form target. Mirrors the /authorize params; email/password OR sso. */
 function approveHandler() {
   const router = express.Router()
@@ -138,6 +163,19 @@ function approveHandler() {
                 { error },
               ),
             )
+
+    // CSRF guard (see isTrustedOrigin): block a forged cross-site POST that would ride the
+    // SameSite=None dashboard cookie into an account takeover on the sso path. Applied to ALL
+    // paths — a legit consent submit always comes from our own origin.
+    if (!isTrustedOrigin(req)) {
+      logger.warn('[MCP OAuth] approve rejected: untrusted origin (CSRF guard)', {
+        mcpOAuth: true,
+        origin: req.get('origin') ?? null,
+        referer: req.get('referer') ?? null,
+        clientId: String(client_id ?? ''),
+      })
+      return isFetch ? res.status(403).json({ error: 'Cross-site request blocked' }) : res.status(403).send('Cross-site request blocked')
+    }
 
     if (!client_id || !redirect_uri || !code_challenge) {
       return isFetch ? res.status(400).json({ error: 'Missing OAuth parameters' }) : res.status(400).send('Missing OAuth parameters')
@@ -239,10 +277,63 @@ function approveHandler() {
   return router
 }
 
+const sha256 = (s: string) => createHash('sha256').update(s).digest('hex')
+
+/**
+ * Extract (client_id, client_secret) the same way the SDK does: HTTP Basic auth header first,
+ * then the form body. Returns undefined secret for public/PKCE clients (no secret presented).
+ */
+export function readClientCredentials(req: Pick<Request, 'get'> & { body?: unknown }): { clientId?: string; clientSecret?: string } {
+  const authz = req.get('authorization')
+  if (authz?.startsWith('Basic ')) {
+    const [id, secret] = Buffer.from(authz.slice(6), 'base64').toString('utf8').split(':')
+    if (id) return { clientId: decodeURIComponent(id), clientSecret: secret ? decodeURIComponent(secret) : undefined }
+  }
+  const body = (req.body ?? {}) as { client_id?: unknown; client_secret?: unknown }
+  return {
+    clientId: typeof body.client_id === 'string' ? body.client_id : undefined,
+    clientSecret: typeof body.client_secret === 'string' ? body.client_secret : undefined,
+  }
+}
+
+/**
+ * Confidential-client authentication for /token and /revoke. WHY this exists: the SDK compares
+ * client.client_secret in PLAINTEXT, but our store only keeps a HASH (correct) and never returns the
+ * secret — so the SDK's `if (client.client_secret)` check is skipped and a CONFIDENTIAL client is
+ * accepted with just its client_id (no secret). This middleware closes that: a client that registered
+ * with a secret (clientSecretHash present) MUST present a secret whose hash matches. Public/PKCE
+ * clients (no stored hash) pass straight through, so the normal Claude/ChatGPT connect is untouched.
+ */
+/** True if a client may proceed: public clients (no stored hash) always; confidential ones only with a matching secret. */
+export function confidentialSecretOk(clientSecretHash: string | null | undefined, presentedSecret?: string): boolean {
+  if (!clientSecretHash) return true // public / PKCE client — no secret to verify
+  return !!presentedSecret && sha256(presentedSecret) === clientSecretHash
+}
+
+function confidentialClientAuthGuard() {
+  const router = express.Router()
+  router.use(express.urlencoded({ extended: false })) // parse body to read client_secret (SDK re-parse is a no-op)
+  const check = async (req: Request, res: Response, next: NextFunction) => {
+    const { clientId, clientSecret } = readClientCredentials(req)
+    if (!clientId) return next() // no client_id → let the SDK produce the proper OAuth error
+    const row = await prisma.mcpOAuthClient.findUnique({ where: { clientId }, select: { clientSecretHash: true } })
+    if (!confidentialSecretOk(row?.clientSecretHash, clientSecret)) {
+      logger.warn('[MCP OAuth] confidential client authentication failed', { mcpOAuth: true, clientId })
+      return res.status(401).json({ error: 'invalid_client', error_description: 'Client authentication failed' })
+    }
+    return next()
+  }
+  router.post('/token', check)
+  router.post('/revoke', check)
+  return router
+}
+
 /** Mount the full customer-MCP OAuth surface at the app root. Call ONCE in app.ts. */
 export function mountCustomerMcpAuth(app: Express): void {
   // One-click connect when a dashboard session already exists (MUST run before the SDK's /authorize).
   app.use(ssoAuthorizeHandler())
+  // Verify confidential clients' secrets BEFORE the SDK's /token handler (which can't, since we hash).
+  app.use(confidentialClientAuthGuard())
   // SDK: /authorize (password page via provider.authorize), /token, /register (DCR), /revoke, metadata.
   app.use(
     mcpAuthRouter({
