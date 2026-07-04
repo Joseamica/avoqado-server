@@ -81,6 +81,14 @@ export function validateDiscountActive(discount: any): void {
  * product A against product B's line item, or send an ORDER-scoped discount
  * (meant only for the order-level discount field) as a per-item discount.
  *
+ * Wildcard rule: an ITEM discount with an empty/null `targetItemIds` (same
+ * for CATEGORY + `targetCategoryIds`) applies to ALL products/categories —
+ * it is not "targets nothing". This matches the long-standing client
+ * semantic (iOS's `Discount.appliesToProduct` in CartModels.swift has always
+ * treated an empty target list as "applies to everything"), so a venue's
+ * ITEM/CATEGORY discount created with no explicit targets keeps working
+ * everywhere instead of being newly rejected by this server-side check.
+ *
  * @param item The line item's `productId`/`categoryId` (both `null` for a
  *   custom "Otro importe" line — which then can never match an ITEM/CATEGORY
  *   discount, since there's no real product to check against).
@@ -94,14 +102,18 @@ export function validateDiscountScopeForItem(discount: any, item: { productId: s
   }
 
   if (discount.scope === 'ITEM') {
-    if (!item.productId || !discount.targetItemIds?.includes(item.productId)) {
+    const targetItemIds: string[] = discount.targetItemIds ?? []
+    const isWildcard = targetItemIds.length === 0
+    if (!isWildcard && (!item.productId || !targetItemIds.includes(item.productId))) {
       throw new BadRequestError(`Descuento "${discount.name}" no aplica a este producto`)
     }
     return
   }
 
   if (discount.scope === 'CATEGORY') {
-    if (!item.categoryId || !discount.targetCategoryIds?.includes(item.categoryId)) {
+    const targetCategoryIds: string[] = discount.targetCategoryIds ?? []
+    const isWildcard = targetCategoryIds.length === 0
+    if (!isWildcard && (!item.categoryId || !targetCategoryIds.includes(item.categoryId))) {
       throw new BadRequestError(`Descuento "${discount.name}" no aplica a la categoría de este producto`)
     }
     return
