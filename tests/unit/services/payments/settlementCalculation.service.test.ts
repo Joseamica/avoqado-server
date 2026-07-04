@@ -9,14 +9,16 @@
 
 import {
   calculateNetSettlementAmount,
+  calculateSettlementDate,
   isBusinessDay,
   addBusinessDays,
   isMexicanHoliday,
   isWeekend,
 } from '@/services/payments/settlementCalculation.service'
 import prisma from '@/utils/prismaClient'
-import { Payment } from '@prisma/client'
+import { Payment, SettlementDayType } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
+import { formatInTimeZone } from 'date-fns-tz'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -249,6 +251,47 @@ describe('Settlement Calculation Service', () => {
       const result = addBusinessDays(monday, 5)
       expect(result.getDate()).toBe(13)
       expect(result.getDay()).toBe(1) // Monday
+    })
+  })
+
+  describe('calculateSettlementDate — venue-timezone weekend correctness (BUG FIX)', () => {
+    const TZ = 'America/Mexico_City'
+    const cfg = { settlementDays: 1, settlementDayType: SettlementDayType.BUSINESS_DAYS, cutoffTime: '23:00', cutoffTimezone: TZ }
+    const asVenueDate = (d: Date) => formatInTimeZone(d, TZ, 'yyyy-MM-dd')
+    const asVenueDow = (d: Date) => formatInTimeZone(d, TZ, 'EEE')
+
+    // REGRESSION: business-day math ran on the server's UTC day but the dashboard
+    // renders the date in venue tz (−6h). An EVENING (MX) payment is early-morning
+    // UTC, so a Monday-00:00-UTC settlement showed as Sunday in America/Mexico_City.
+    // TZ-independent: formatInTimeZone + the fix's toZonedTime both pin venue tz.
+    it('Friday 20:00 MX + 1 business day lands on MONDAY (not the weekend)', () => {
+      const friEveningMx = new Date('2026-07-04T02:00:00Z') // Fri 2026-07-03 20:00 MX
+      const settle = calculateSettlementDate(friEveningMx, cfg)
+      expect(asVenueDow(settle)).toBe('Mon')
+      expect(asVenueDate(settle)).toBe('2026-07-06')
+    })
+
+    it('Thursday 21:00 MX + 1 business day lands on FRIDAY (not Sunday)', () => {
+      const thuEveningMx = new Date('2026-07-03T03:00:00Z') // Thu 2026-07-02 21:00 MX
+      const settle = calculateSettlementDate(thuEveningMx, cfg)
+      expect(asVenueDow(settle)).toBe('Fri')
+      expect(asVenueDate(settle)).toBe('2026-07-03')
+    })
+
+    it('never returns a weekend for BUSINESS_DAYS across a full week of evening payments', () => {
+      // Mon–Sun evenings (22:00 MX). Every +1-business-day result must be Mon–Fri.
+      for (let d = 0; d < 7; d++) {
+        const evening = new Date(Date.UTC(2026, 5, 15 + d, 4, 0, 0)) // 04:00 UTC = 22:00 MX previous day
+        const settle = calculateSettlementDate(evening, cfg)
+        const dow = asVenueDow(settle)
+        expect(['Sat', 'Sun']).not.toContain(dow)
+      }
+    })
+
+    it('CALENDAR_DAYS still lands on the exact calendar day (can be a weekend, by design)', () => {
+      const wed = new Date('2026-07-01T18:00:00Z') // Wed 12:00 MX
+      const settle = calculateSettlementDate(wed, { ...cfg, settlementDays: 3, settlementDayType: SettlementDayType.CALENDAR_DAYS })
+      expect(asVenueDate(settle)).toBe('2026-07-04') // Wed + 3 calendar days = Sat
     })
   })
 })

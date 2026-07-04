@@ -213,28 +213,36 @@ export function calculateSettlementDate(
     cutoffTimezone: string
   },
 ): Date {
-  let startDate = new Date(transactionDate)
+  // All weekend/holiday/day-of-week math MUST run in the VENUE's wall-clock and
+  // then convert back to a UTC instant. isWeekend/isBusinessDay/addBusinessDays use
+  // the runtime-local getters (getDay/getDate), and the dashboard renders the date
+  // with formatInTimeZone(..., venueTimezone). If we skipped weekends on the server's
+  // UTC day instead, an evening (MX) payment — which is early-morning UTC — would land
+  // the DISPLAYED settlement date one day earlier in venue tz, i.e. on a weekend
+  // (a Monday-00:00-UTC settlement shows as Sunday in America/Mexico_City). So we
+  // shift into venue-local first (same pattern isAfterCutoff already relies on).
+  const tz = config.cutoffTimezone
+  let startLocal = toZonedTime(transactionDate, tz)
 
   // Check if transaction is after cutoff time
-  if (isAfterCutoff(transactionDate, config.cutoffTime, config.cutoffTimezone)) {
+  if (isAfterCutoff(transactionDate, config.cutoffTime, tz)) {
     // Count as next day
-    startDate = addDays(startDate, 1)
+    startLocal = addDays(startLocal, 1)
     logger.debug('Transaction after cutoff, starting settlement from next day', {
       transactionDate,
       cutoffTime: config.cutoffTime,
-      newStartDate: startDate,
+      newStartDate: startLocal,
     })
   }
 
-  // Calculate settlement date based on day type
-  let settlementDate: Date
+  // Calculate settlement date based on day type (in venue-local wall-clock)
+  const settlementLocal =
+    config.settlementDayType === SettlementDayType.BUSINESS_DAYS
+      ? addBusinessDays(startLocal, config.settlementDays)
+      : addDays(startLocal, config.settlementDays)
 
-  if (config.settlementDayType === SettlementDayType.BUSINESS_DAYS) {
-    settlementDate = addBusinessDays(startDate, config.settlementDays)
-  } else {
-    // CALENDAR_DAYS
-    settlementDate = addDays(startDate, config.settlementDays)
-  }
+  // Back to a real UTC instant for storage/formatting.
+  const settlementDate = fromZonedTime(settlementLocal, tz)
 
   logger.info('Settlement date calculated', {
     transactionDate,

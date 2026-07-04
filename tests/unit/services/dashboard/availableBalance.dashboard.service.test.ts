@@ -7,6 +7,8 @@
  * breakdown (which nets both) and the stored settlement net. These tests pin:
  *   - totalFees / net include venueFixedFee
  *   - card payments with NO TransactionCost are surfaced as uncosted{Count,Amount}
+ *   - money is available AUTOMATICALLY once its settlement date passes (no manual
+ *     "confirmar liquidación" needed)
  */
 
 import { getAvailableBalance } from '@/services/dashboard/availableBalance.dashboard.service'
@@ -29,7 +31,8 @@ describe('getAvailableBalance — venueFixedFee + uncosted', () => {
           amount: 100,
           tipAmount: 0,
           transactionCost: { venueChargeAmount: 3, venueFixedFee: 2 },
-          transaction: { status: 'PENDING', estimatedSettlementDate: new Date('2026-07-10T00:00:00.000Z'), netSettlementAmount: null },
+          // Far-future settlement date → unambiguously still pending, regardless of the clock.
+          transaction: { status: 'PENDING', estimatedSettlementDate: new Date('2099-01-01T00:00:00.000Z'), netSettlementAmount: null },
         },
       ])
       // Cash payments (second call)
@@ -43,6 +46,33 @@ describe('getAvailableBalance — venueFixedFee + uncosted', () => {
     expect(summary.pendingSettlement).toBe(95)
     expect(summary.uncostedCount).toBe(0)
     expect(summary.uncostedAmount).toBe(0)
+  })
+
+  it('auto-settles by date: a PENDING transaction whose settlement date has passed counts as available', async () => {
+    ;(prismaMock.payment.findMany as jest.Mock)
+      .mockResolvedValueOnce([
+        // DB says PENDING, but its settlement date is in the PAST → the money landed.
+        // No manual "confirmar liquidación" needed; it must show as available.
+        {
+          amount: 100,
+          tipAmount: 0,
+          transactionCost: { venueChargeAmount: 4, venueFixedFee: 0 },
+          transaction: { status: 'PENDING', estimatedSettlementDate: new Date('2000-01-05T00:00:00.000Z'), netSettlementAmount: 96 },
+        },
+        // Future settlement date → genuinely still pending.
+        {
+          amount: 100,
+          tipAmount: 0,
+          transactionCost: { venueChargeAmount: 4, venueFixedFee: 0 },
+          transaction: { status: 'PENDING', estimatedSettlementDate: new Date('2099-01-01T00:00:00.000Z'), netSettlementAmount: 96 },
+        },
+      ])
+      .mockResolvedValueOnce([])
+
+    const summary = await getAvailableBalance(VENUE)
+
+    expect(summary.availableNow).toBe(96) // past-dated one landed (no cash here)
+    expect(summary.pendingSettlement).toBe(96) // future-dated one still pending
   })
 
   it('surfaces card money with no TransactionCost as uncosted (fee 0, counted in balance)', async () => {

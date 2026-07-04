@@ -69,6 +69,19 @@ export interface TimelineEntry {
 }
 
 /**
+ * A card payment's money is "available" (settled) once its estimated settlement
+ * date has passed — the funds land on that date — OR it was explicitly confirmed
+ * SETTLED. This is AUTOMATIC and date-driven: it does NOT require the manual
+ * "confirmar liquidación" step, which venues don't use. Without this, money that
+ * already landed would show as perpetually "pending" until someone clicked a
+ * button nobody clicks.
+ */
+function hasSettlementLanded(status: SettlementStatus, estimatedSettlementDate: Date | null, now: Date): boolean {
+  if (status === SettlementStatus.SETTLED) return true
+  return estimatedSettlementDate != null && estimatedSettlementDate.getTime() <= now.getTime()
+}
+
+/**
  * Get available balance summary for a venue
  *
  * @param venueId - Venue ID
@@ -129,6 +142,7 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
   })
 
   // Calculate totals
+  const now = new Date()
   let totalSales = 0
   let totalFees = 0
   let availableNow = 0
@@ -162,23 +176,20 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
 
     if (payment.transaction) {
       const { status, estimatedSettlementDate, netSettlementAmount } = payment.transaction
+      const net = Number(netSettlementAmount || netAmount)
 
-      if (status === SettlementStatus.SETTLED) {
-        // Already settled
-        availableNow += Number(netSettlementAmount || netAmount)
+      if (hasSettlementLanded(status, estimatedSettlementDate, now)) {
+        // Landed automatically (settlement date passed) or explicitly confirmed.
+        availableNow += net
       } else {
-        // Pending settlement
-        pendingSettlement += Number(netSettlementAmount || netAmount)
-
+        // Still pending — its settlement date is in the future.
+        pendingSettlement += net
         if (estimatedSettlementDate) {
-          upcomingSettlements.push({
-            date: estimatedSettlementDate,
-            amount: Number(netSettlementAmount || netAmount),
-          })
+          upcomingSettlements.push({ date: estimatedSettlementDate, amount: net })
         }
       }
     } else {
-      // No transaction record, assume pending
+      // No transaction record → no settlement date to project → treat as pending.
       pendingSettlement += netAmount
     }
   }
@@ -334,6 +345,7 @@ export async function getBalanceByCardType(venueId: string, dateRange?: { from: 
     }
   >()
 
+  const now = new Date()
   for (const payment of cardPayments) {
     if (!payment.transactionCost) continue
 
@@ -369,14 +381,15 @@ export async function getBalanceByCardType(venueId: string, dateRange?: { from: 
     entry.fees += fees
     entry.transactionCount += 1
 
-    // Check settlement status
+    // Settlement status — automatic by date (see hasSettlementLanded); does not
+    // depend on the manual "confirmar liquidación" step.
     if (payment.transaction) {
-      if (payment.transaction.status === SettlementStatus.SETTLED) {
-        entry.settledAmount += Number(payment.transaction.netSettlementAmount || netAmount)
+      const net = Number(payment.transaction.netSettlementAmount || netAmount)
+      if (hasSettlementLanded(payment.transaction.status, payment.transaction.estimatedSettlementDate, now)) {
+        entry.settledAmount += net
       } else {
-        entry.pendingAmount += Number(payment.transaction.netSettlementAmount || netAmount)
+        entry.pendingAmount += net
       }
-
       // settlementDays now comes from the active SettlementConfiguration
       // (set when the entry was created above), not from a calendar-day average
       // of historical estimatedSettlementDate values.
