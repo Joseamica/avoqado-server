@@ -15,7 +15,7 @@ import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { validateStaffVenue } from '../../utils/staff-venue.util'
 import { generateAndStoreReceipt } from '../dashboard/receipt.dashboard.service'
-import { buildItemDiscountRow, calculateDiscountPesos, validateDiscountActive } from '../shared/discount.service'
+import { buildItemDiscountRow, calculateDiscountPesos, validateDiscountActive, validateDiscountScopeForItem } from '../shared/discount.service'
 
 // MARK: - Types
 
@@ -460,6 +460,9 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
     subtotal += itemTotal
 
     const appliedDiscount = item.discountId ? discounts.find(discount => discount.id === item.discountId)! : null
+    if (appliedDiscount) {
+      validateDiscountScopeForItem(appliedDiscount, { productId: product.id, categoryId: product.categoryId })
+    }
     const lineDiscount = appliedDiscount ? calculateDiscountPesos(appliedDiscount, itemTotal) : 0
     itemDiscountTotal += lineDiscount
 
@@ -496,6 +499,9 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
     subtotal += itemTotal
 
     const appliedDiscount = item.discountId ? discounts.find(discount => discount.id === item.discountId)! : null
+    if (appliedDiscount) {
+      validateDiscountScopeForItem(appliedDiscount, { productId: null, categoryId: null })
+    }
     const lineDiscount = appliedDiscount ? calculateDiscountPesos(appliedDiscount, itemTotal) : 0
     itemDiscountTotal += lineDiscount
 
