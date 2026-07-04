@@ -27,6 +27,8 @@ import {
   refundPurchase,
 } from '../../../../src/services/dashboard/creditPack.dashboard.service'
 import { prismaMock } from '../../../__helpers__/setup'
+// Mocked globally in setup.ts — asserting on it verifies the audit dual-write.
+import { logAction } from '../../../../src/services/dashboard/activity-log.service'
 import { BadRequestError, NotFoundError } from '../../../../src/errors/AppError'
 import { CreditPurchaseStatus, CreditTransactionType } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
@@ -1310,6 +1312,48 @@ describe('Credit Pack Dashboard Service', () => {
         where: { id: 'purchase-123' },
         data: { status: CreditPurchaseStatus.REFUNDED },
       })
+    })
+
+    it('should dual-write to ActivityLog (owner audit screen only reads ActivityLog, not CreditTransaction)', async () => {
+      const mockPurchase = createMockPurchase({
+        itemBalances: [
+          createMockBalance({ id: 'balance-1', remainingQuantity: 5 }),
+          createMockBalance({ id: 'balance-2', remainingQuantity: 3, productId: 'product-456' }),
+        ],
+      })
+      prismaMock.creditPackPurchase.findFirst.mockResolvedValue(mockPurchase)
+      prismaMock.creditItemBalance.update.mockResolvedValue({})
+      prismaMock.creditTransaction.create.mockResolvedValue({})
+      prismaMock.creditPackPurchase.update.mockResolvedValue({})
+
+      await refundPurchase('venue-123', 'purchase-123', 'staff-123', 'Solicitud del cliente')
+
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'CREDIT_PACK_PURCHASE_REFUNDED',
+          entity: 'CreditPackPurchase',
+          entityId: 'purchase-123',
+          staffId: 'staff-123',
+          venueId: 'venue-123',
+          data: expect.objectContaining({
+            reason: 'Solicitud del cliente',
+            customerId: 'customer-123',
+            creditsVoided: 8,
+          }),
+        }),
+      )
+    })
+
+    it('should NOT write ActivityLog when the refund is rejected (already refunded)', async () => {
+      const mockPurchase = createMockPurchase({
+        status: CreditPurchaseStatus.REFUNDED,
+        itemBalances: [],
+      })
+      prismaMock.creditPackPurchase.findFirst.mockResolvedValue(mockPurchase)
+
+      await expect(refundPurchase('venue-123', 'purchase-123', 'staff-123', 'reason')).rejects.toThrow(BadRequestError)
+
+      expect(logAction).not.toHaveBeenCalled()
     })
 
     it('should throw NotFoundError for invalid purchase ID', async () => {

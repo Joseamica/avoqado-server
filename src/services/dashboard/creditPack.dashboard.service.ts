@@ -13,6 +13,7 @@ import { Prisma, CreditPurchaseStatus, CreditTransactionType } from '@prisma/cli
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
+import { logAction } from '@/services/dashboard/activity-log.service'
 
 /**
  * Lazy Stripe singleton. We used to do `new Stripe(process.env.STRIPE_SECRET_KEY || '')`
@@ -506,7 +507,9 @@ export async function refundPurchase(venueId: string, purchaseId: string, staffI
     throw new BadRequestError('Esta compra ya fue reembolsada')
   }
 
-  return prisma.$transaction(async tx => {
+  const creditsVoided = purchase.itemBalances.reduce((sum, b) => sum + Math.max(b.remainingQuantity, 0), 0)
+
+  const result = await prisma.$transaction(async tx => {
     // Zero out all balances
     for (const balance of purchase.itemBalances) {
       if (balance.remainingQuantity > 0) {
@@ -538,4 +541,19 @@ export async function refundPurchase(venueId: string, purchaseId: string, staffI
 
     return { refunded: true, purchaseId }
   })
+
+  // Dual-write: CreditTransaction is a siloed table the owner audit screen can't
+  // see — this voids the customer's remaining credits, so it must also land in
+  // ActivityLog. Fire-and-forget, outside the transaction, so an audit failure
+  // can never roll back the refund.
+  void logAction({
+    staffId,
+    venueId,
+    action: 'CREDIT_PACK_PURCHASE_REFUNDED',
+    entity: 'CreditPackPurchase',
+    entityId: purchaseId,
+    data: { reason, customerId: purchase.customerId, creditsVoided },
+  })
+
+  return result
 }
