@@ -11,10 +11,11 @@
  * callers before being passed in here).
  */
 
-import { SettlementDayType, TransactionCardType } from '@prisma/client'
+import { PaymentMethod, SettlementDayType, TransactionCardType } from '@prisma/client'
 import { formatInTimeZone } from 'date-fns-tz'
 
 import { calculateSettlementDate } from '@/services/payments/settlementCalculation.service'
+import prisma from '@/utils/prismaClient'
 
 export interface ProjectablePayment {
   amount: number | { toString(): string }
@@ -89,4 +90,156 @@ export function projectPaymentSettlement(
     net: gross - commission,
     settlementDays: config.settlementDays,
   }
+}
+
+// ── Weekly settlement view (Task 2) ─────────────────────────────────────────
+
+const round2 = (n: number): number => Math.round(n * 100) / 100
+// Lookback ≥ max settlement days + weekend/holiday slack: a payment sold this
+// far before the week can still settle inside it.
+const LOOKBACK_DAYS = 21
+
+interface WeekAgg {
+  gross: number
+  commission: number
+  net: number
+  count: number
+}
+export interface SettlementWeekMerchant extends WeekAgg {
+  merchantAccountId: string
+  displayName: string
+  provider: string
+}
+export interface SettlementWeekCardType extends WeekAgg {
+  cardType: TransactionCardType
+}
+export interface SettlementWeekDay extends WeekAgg {
+  date: string
+  status: 'settled' | 'today' | 'projected'
+  byMerchant: SettlementWeekMerchant[]
+  byCardType: SettlementWeekCardType[]
+}
+export interface SettlementWeek {
+  weekStart: string
+  weekEnd: string
+  days: SettlementWeekDay[]
+  weekTotal: WeekAgg
+}
+
+/**
+ * Card money LANDING in the bank during [weekStart, weekEnd] (venue-local),
+ * regardless of when the sale happened — a Friday sale settling Monday appears
+ * on Monday. Recomputed on read via the corrected settlement engine, so it does
+ * NOT depend on stored (possibly stale) settlement dates. Cash is excluded
+ * (immediate). Payments with no active settlement rule can't be placed on a
+ * landing day and are omitted here (the report-scoped "sin fecha estimada"
+ * surfaces that money instead — it belongs to no single week).
+ */
+export async function getSettlementsLandingInWeek(
+  venueId: string,
+  weekStart: Date,
+  weekEnd: Date,
+  venueTimezone: string,
+): Promise<SettlementWeek> {
+  const from = new Date(weekStart.getTime() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000)
+  const payments = await prisma.payment.findMany({
+    where: {
+      venueId,
+      status: 'COMPLETED',
+      merchantAccountId: { not: null },
+      method: { not: PaymentMethod.CASH },
+      createdAt: { gte: from, lte: weekEnd },
+    },
+    select: {
+      amount: true,
+      tipAmount: true,
+      createdAt: true,
+      merchantAccountId: true,
+      transactionCost: { select: { transactionType: true, venueChargeAmount: true, venueFixedFee: true } },
+      merchantAccount: { select: { displayName: true, alias: true, provider: { select: { name: true } } } },
+    },
+  })
+
+  const merchantIds = Array.from(new Set(payments.map(p => p.merchantAccountId).filter((x): x is string => Boolean(x))))
+  const configs: ActiveConfig[] = merchantIds.length
+    ? await prisma.settlementConfiguration.findMany({
+        where: { merchantAccountId: { in: merchantIds } },
+        select: {
+          merchantAccountId: true,
+          cardType: true,
+          settlementDays: true,
+          settlementDayType: true,
+          cutoffTime: true,
+          cutoffTimezone: true,
+          effectiveFrom: true,
+          effectiveTo: true,
+        },
+        orderBy: { effectiveFrom: 'desc' },
+      })
+    : []
+
+  const startKey = formatInTimeZone(weekStart, venueTimezone, 'yyyy-MM-dd')
+  const endKey = formatInTimeZone(weekEnd, venueTimezone, 'yyyy-MM-dd')
+  const todayKey = formatInTimeZone(new Date(), venueTimezone, 'yyyy-MM-dd')
+
+  const newAgg = (): WeekAgg => ({ gross: 0, commission: 0, net: 0, count: 0 })
+  const bump = (a: WeekAgg, pr: ProjectedSettlement) => {
+    a.gross += pr.gross
+    a.commission += pr.commission
+    a.net += pr.net
+    a.count += 1
+  }
+  const dayMap = new Map<
+    string,
+    { total: WeekAgg; byMerchant: Map<string, WeekAgg & { displayName: string; provider: string }>; byCardType: Map<TransactionCardType, WeekAgg> }
+  >()
+
+  for (const p of payments) {
+    const merchantId = p.merchantAccountId
+    if (!merchantId || !p.transactionCost) continue
+    const projected = projectPaymentSettlement(
+      { amount: p.amount, tipAmount: p.tipAmount, createdAt: p.createdAt, merchantAccountId: merchantId, transactionCost: p.transactionCost },
+      configs,
+      venueTimezone,
+    )
+    if (!projected) continue
+    const key = projected.settlementDateKey
+    if (key < startKey || key > endKey) continue // lands outside this week
+
+    if (!dayMap.has(key)) dayMap.set(key, { total: newAgg(), byMerchant: new Map(), byCardType: new Map() })
+    const day = dayMap.get(key)!
+    bump(day.total, projected)
+    if (!day.byMerchant.has(merchantId)) {
+      day.byMerchant.set(merchantId, {
+        ...newAgg(),
+        displayName: p.merchantAccount?.displayName || p.merchantAccount?.alias || 'Comercio',
+        provider: p.merchantAccount?.provider?.name ?? '',
+      })
+    }
+    bump(day.byMerchant.get(merchantId)!, projected)
+    const ct = p.transactionCost.transactionType
+    if (!day.byCardType.has(ct)) day.byCardType.set(ct, newAgg())
+    bump(day.byCardType.get(ct)!, projected)
+  }
+
+  const roundAgg = (a: WeekAgg): WeekAgg => ({ gross: round2(a.gross), commission: round2(a.commission), net: round2(a.net), count: a.count })
+  const days: SettlementWeekDay[] = Array.from(dayMap.entries())
+    .map(([date, d]) => ({
+      date,
+      status: (date < todayKey ? 'settled' : date === todayKey ? 'today' : 'projected') as SettlementWeekDay['status'],
+      ...roundAgg(d.total),
+      byMerchant: Array.from(d.byMerchant.entries())
+        .map(([merchantAccountId, m]) => ({ merchantAccountId, displayName: m.displayName, provider: m.provider, ...roundAgg(m) }))
+        .sort((a, b) => b.net - a.net),
+      byCardType: Array.from(d.byCardType.entries())
+        .map(([cardType, c]) => ({ cardType, ...roundAgg(c) }))
+        .sort((a, b) => b.net - a.net),
+    }))
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+
+  const weekTotal = roundAgg(
+    days.reduce((acc, d) => ({ gross: acc.gross + d.gross, commission: acc.commission + d.commission, net: acc.net + d.net, count: acc.count + d.count }), newAgg()),
+  )
+
+  return { weekStart: startKey, weekEnd: endKey, days, weekTotal }
 }
