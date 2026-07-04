@@ -107,13 +107,15 @@ export function venueWeekBounds(anchorDateKey: string | undefined, venueTimezone
   // weekStart is a user-controlled query param — a malformed/out-of-range value
   // must NOT produce an Invalid Date (which would crash the downstream Prisma
   // query with a 500). Fall back to the current venue week instead.
-  const valid = Number.isFinite(y) && Number.isFinite(m) && Number.isFinite(d) && m >= 1 && m <= 12 && d >= 1 && d <= 31 && y >= 2000 && y <= 2100
+  const valid =
+    Number.isFinite(y) && Number.isFinite(m) && Number.isFinite(d) && m >= 1 && m <= 12 && d >= 1 && d <= 31 && y >= 2000 && y <= 2100
   if (!valid) {
     ;[y, m, d] = formatInTimeZone(new Date(), venueTimezone, 'yyyy-MM-dd').split('-').map(Number)
   }
   const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay() // 0=Sun … 6=Sat (calendar dow of a date-only value)
   const sinceMonday = (dow + 6) % 7
-  const key = (dt: Date) => `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`
+  const key = (dt: Date) =>
+    `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`
   const mondayKey = key(new Date(Date.UTC(y, m - 1, d - sinceMonday)))
   const sundayKey = key(new Date(Date.UTC(y, m - 1, d - sinceMonday + 6)))
   return {
@@ -217,14 +219,24 @@ export async function getSettlementsLandingInWeek(
   }
   const dayMap = new Map<
     string,
-    { total: WeekAgg; byMerchant: Map<string, WeekAgg & { displayName: string; provider: string }>; byCardType: Map<TransactionCardType, WeekAgg> }
+    {
+      total: WeekAgg
+      byMerchant: Map<string, WeekAgg & { displayName: string; provider: string }>
+      byCardType: Map<TransactionCardType, WeekAgg>
+    }
   >()
 
   for (const p of payments) {
     const merchantId = p.merchantAccountId
     if (!merchantId || !p.transactionCost) continue
     const projected = projectPaymentSettlement(
-      { amount: p.amount, tipAmount: p.tipAmount, createdAt: p.createdAt, merchantAccountId: merchantId, transactionCost: p.transactionCost },
+      {
+        amount: p.amount,
+        tipAmount: p.tipAmount,
+        createdAt: p.createdAt,
+        merchantAccountId: merchantId,
+        transactionCost: p.transactionCost,
+      },
       configs,
       venueTimezone,
     )
@@ -248,7 +260,12 @@ export async function getSettlementsLandingInWeek(
     bump(day.byCardType.get(ct)!, projected)
   }
 
-  const roundAgg = (a: WeekAgg): WeekAgg => ({ gross: round2(a.gross), commission: round2(a.commission), net: round2(a.net), count: a.count })
+  const roundAgg = (a: WeekAgg): WeekAgg => ({
+    gross: round2(a.gross),
+    commission: round2(a.commission),
+    net: round2(a.net),
+    count: a.count,
+  })
   const days: SettlementWeekDay[] = Array.from(dayMap.entries())
     .map(([date, d]) => ({
       date,
@@ -264,7 +281,15 @@ export async function getSettlementsLandingInWeek(
     .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
 
   const weekTotal = roundAgg(
-    days.reduce((acc, d) => ({ gross: acc.gross + d.gross, commission: acc.commission + d.commission, net: acc.net + d.net, count: acc.count + d.count }), newAgg()),
+    days.reduce(
+      (acc, d) => ({
+        gross: acc.gross + d.gross,
+        commission: acc.commission + d.commission,
+        net: acc.net + d.net,
+        count: acc.count + d.count,
+      }),
+      newAgg(),
+    ),
   )
 
   return { weekStart: startKey, weekEnd: endKey, days, weekTotal }
