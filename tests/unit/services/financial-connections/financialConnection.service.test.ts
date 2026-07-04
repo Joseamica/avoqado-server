@@ -138,7 +138,16 @@ it('startConnection: needDeviceValidation → stores challenge, PENDING_DEVICE_V
   expect(r.status).toBe('PENDING_DEVICE_VALIDATION')
   const upd = db.financialConnection.update.mock.calls.at(-1)[0].data
   expect(upd.challengeEnc).toBeTruthy()
-  expect(JSON.stringify(upd)).not.toContain('p9') // el processId va cifrado, no en claro
+  // El processId sólo debe ser recuperable descifrando el challenge (prueba que va
+  // cifrado). El check viejo `not.toContain('p9')` era FLAKY: 'p9' son 2 chars y el
+  // base64 del ciphertext los contiene por azar (p.ej. "...DEp9+W..."). Verificamos:
+  // (1) el processId sí está dentro del blob cifrado, y (2) no aparece en texto plano
+  // en ningún OTRO campo (excluyendo el propio challengeEnc cifrado).
+  const { decryptGrant } = require('@/services/financial-connections/crypto')
+  expect(decryptGrant(upd.challengeEnc)).toMatchObject({ processId: 'p9' })
+  // Drop the (encrypted) challengeEnc before the cleartext-leak check — JSON.stringify
+  // omits undefined properties, so this serializes every field EXCEPT the ciphertext.
+  expect(JSON.stringify({ ...upd, challengeEnc: undefined })).not.toContain('p9')
 })
 
 it('startConnection: needTwoFactorAuth → stores challenge WITHOUT the password, PENDING_TWO_FACTOR_AUTH', async () => {
