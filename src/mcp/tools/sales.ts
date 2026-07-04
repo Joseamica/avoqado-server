@@ -573,7 +573,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, fromDate, toDate }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
-      guard.requirePermission('analytics:read', venueId) // read gate — mirror the dashboard's advanced-reports permission
+      guard.requirePermission('settlements:read', venueId) // settlement data (when/how much money lands) → mirror the dashboard /available-balance/settlement-calendar endpoint gate; more sensitive than general analytics
       const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'El calendario de liquidación') // PRO tier (same code as the dashboard reconciliation block)
       if (gate) return text({ ok: false, planRequired: true, error: gate })
       const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
@@ -600,7 +600,7 @@ export function registerSalesTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, weekStart }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
-      guard.requirePermission('analytics:read', venueId) // read gate — mirror the dashboard's advanced-reports permission
+      guard.requirePermission('settlements:read', venueId) // settlement data (when/how much money lands) → mirror the dashboard /available-balance/settlement-week endpoint gate; same as available_balance + settlement_calendar
       const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'El calendario semanal de liquidación')
       if (gate) return text({ ok: false, planRequired: true, error: gate })
       const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })

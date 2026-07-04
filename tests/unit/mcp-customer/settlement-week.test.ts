@@ -4,13 +4,13 @@
  * its job is the right gates (scope + PRO plan) + faithful passthrough of the
  * weekly landing shape (days by settlement date + week total).
  *
- * ⚠️ LOCKSTEP NOTE: this tool gates on `analytics:read` to mirror its sibling
- * `settlement_calendar` MCP tool. The dashboard settlement-week ENDPOINT, however,
- * gates on `settlements:read` (like available_balance). This mismatch is
- * pre-existing (settlement_calendar has it too) and is flagged for Jose to
- * reconcile — do NOT silently "fix" one side, since MCP operators may hold one
- * permission but not the other. This test pins the CURRENT value so any change is
- * a deliberate, reviewed one.
+ * LOCKSTEP: gates on `settlements:read` — mirroring the dashboard settlement-week
+ * ENDPOINT and its siblings available_balance + settlement_calendar (all settlement/
+ * balance data). Reconciled 2026-07-04 (was analytics:read): settlement data — when
+ * and how much money lands — is more sensitive than general sales analytics and gets
+ * its own gate. `settlements:read` is a superset of `analytics:read` (it expands to
+ * include it), so this is a tightening: nobody legitimately entitled loses access,
+ * it just stops over-exposing settlement data to analytics-only operators.
  */
 import { registerSalesTools } from '../../../src/mcp/tools/sales'
 import type { McpScope } from '../../../src/mcp/scope'
@@ -69,7 +69,9 @@ const WEEK = {
       commission: 35,
       net: 965,
       count: 1,
-      byMerchant: [{ merchantAccountId: 'm1', displayName: 'Amaena - B', provider: 'AngelPay', gross: 1000, commission: 35, net: 965, count: 1 }],
+      byMerchant: [
+        { merchantAccountId: 'm1', displayName: 'Amaena - B', provider: 'AngelPay', gross: 1000, commission: 35, net: 965, count: 1 },
+      ],
       byCardType: [{ cardType: 'CREDIT', gross: 1000, commission: 35, net: 965, count: 1 }],
     },
   ],
@@ -110,9 +112,9 @@ describe('settlement_week — faithful passthrough', () => {
 })
 
 describe('settlement_week — gates', () => {
-  it('requires the read permission for the venue (pinned: analytics:read — see LOCKSTEP NOTE)', async () => {
+  it('requires settlements:read for the venue (mirrors the endpoint + available_balance)', async () => {
     await call('settlement_week', { venueId: 'v1' })
-    expect(mockRequirePermission).toHaveBeenCalledWith('analytics:read', 'v1')
+    expect(mockRequirePermission).toHaveBeenCalledWith('settlements:read', 'v1')
   })
 
   it('is PRO-gated: not entitled (ADVANCED_REPORTS) → planRequired, no week read', async () => {
