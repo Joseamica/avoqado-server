@@ -261,12 +261,18 @@ function approveHandler() {
       resource: resource || undefined,
     })
 
+    // Observability for the mcp:write rollout: record EXACTLY which scopes each client requests, so
+    // we can confirm (from prod logs) that Claude/ChatGPT actually ask for mcp:write before turning
+    // guard enforcement on (MCP_ENFORCE_WRITE_SCOPE). hasWriteScope=false on a real connector = do
+    // NOT enforce yet.
     logger.info(`[MCP OAuth] authorized staff ${staffId} for org ${activeOrg}${sso === '1' ? ' (SSO)' : ''}`, {
       mcpOAuth: true,
       staffId,
       activeOrg,
       clientId: String(client_id),
       sso: sso === '1',
+      grantedScopes: scopes,
+      hasWriteScope: scopes.includes('mcp:write'),
     })
 
     const target = new URL(redirect_uri)

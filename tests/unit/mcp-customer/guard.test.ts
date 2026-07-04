@@ -56,17 +56,34 @@ describe('guard — mcp:write scope enforcement', () => {
     scopes,
   })
 
-  it('BLOCKS a write action when the token lacks mcp:write (read-only connection)', () => {
-    // role HAS the permission — the block is purely the scope, not the role.
+  const OLD_ENV = process.env.MCP_ENFORCE_WRITE_SCOPE
+  afterEach(() => {
+    if (OLD_ENV === undefined) delete process.env.MCP_ENFORCE_WRITE_SCOPE
+    else process.env.MCP_ENFORCE_WRITE_SCOPE = OLD_ENV
+  })
+
+  it('OBSERVE-ONLY by default: a read-only write is NOT blocked, only logged (with granted scopes)', () => {
+    delete process.env.MCP_ENFORCE_WRITE_SCOPE // default = observe-only
+    const g = createGuard(withScope(['mcp:read'], ['loyalty:adjust']))
+    expect(() => g.requirePermission('loyalty:adjust', 'A')).not.toThrow() // does NOT break writes on rollout
+    expect(logger.warn).toHaveBeenCalledWith(
+      '[MCP] write would be blocked (observe-only): token lacks mcp:write scope',
+      expect.objectContaining({ permission: 'loyalty:adjust', grantedScopes: ['mcp:read'], enforced: false }),
+    )
+  })
+
+  it('ENFORCED (MCP_ENFORCE_WRITE_SCOPE=true): a read-only write throws', () => {
+    process.env.MCP_ENFORCE_WRITE_SCOPE = 'true'
     const g = createGuard(withScope(['mcp:read'], ['loyalty:adjust']))
     expect(() => g.requirePermission('loyalty:adjust', 'A')).toThrow(/solo lectura|mcp:write/)
     expect(logger.warn).toHaveBeenCalledWith(
       '[MCP] write blocked: token lacks mcp:write scope',
-      expect.objectContaining({ permission: 'loyalty:adjust' }),
+      expect.objectContaining({ permission: 'loyalty:adjust', enforced: true }),
     )
   })
 
-  it('ALLOWS a write when the token carries mcp:write (and the role permits it)', () => {
+  it('ALLOWS a write when the token carries mcp:write (regardless of the flag)', () => {
+    process.env.MCP_ENFORCE_WRITE_SCOPE = 'true'
     const g = createGuard(withScope(['mcp:read', 'mcp:write'], ['loyalty:adjust']))
     expect(() => g.requirePermission('loyalty:adjust', 'A')).not.toThrow()
   })
