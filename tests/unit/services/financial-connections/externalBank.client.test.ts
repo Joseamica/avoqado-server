@@ -348,6 +348,23 @@ it('listMovements: pagina con notación punteada y normaliza el movimiento', asy
   expect(r.movements[0]).toMatchObject({ id: 'op1', type: 'SPEI IN', amount: 150.5, originator: 'ACME', beneficiary: null })
 })
 
+it('listMovements: manda TipoMovimiento/idEstatus cuando el query trae type/status, y normaliza typeId', async () => {
+  nock(BASE)
+    .get('/api/clients/movimientos/neg-1')
+    .query({
+      'Pagination.Page': '0',
+      'Pagination.Size': '10',
+      idCuenta: 'cta-1',
+      SortByFecha: 'DESC',
+      TipoMovimiento: '2',
+      idEstatus: '3',
+    })
+    .reply(200, { total: 1, data: [{ idOperacion: 'op1', idTipoMovimiento: 2, idEstatus: 3, monto: 10, fechaCreacion: '2026-07-01' }] })
+  const client = await loadClient()
+  const r = await client.listMovements({ accessToken: 't', kind: 'MERCHANT' }, 'neg-1', 'cta-1', { page: 0, size: 10, type: 2, status: 3 })
+  expect(r.movements[0]).toMatchObject({ typeId: 2, statusId: 3 })
+})
+
 it('listMovements(CLIENT): idCuenta en la RUTA **y** como query param (scoping — sin el query devuelve pool global)', async () => {
   // Verificado en vivo 2026-07-03: la PWA manda idCuenta en ambos lados; sin el query param el
   // proveedor devuelve ~5.16M movimientos ajenos. Este test fija que el query param SIEMPRE va.

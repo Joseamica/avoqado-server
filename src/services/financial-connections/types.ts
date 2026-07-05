@@ -75,6 +75,7 @@ export interface BalanceSnapshot {
 export interface ProviderMovement {
   id: string | null
   type: string | null // tipoMovimiento
+  typeId: number | null // idTipoMovimiento — valor a mandar de vuelta como filtro TipoMovimiento
   operationType: string | null // tipoOperacion
   concept: string | null
   date: string | null // fechaCreacion (ISO del provider, passthrough)
@@ -109,12 +110,16 @@ export interface MovementStats {
   dispersions: MovementCategoryStats
 }
 
-/** Query de paginación/rango para listMovements. */
+/** Query de paginación/rango/filtro para listMovements. */
 export interface MovementQuery {
   page: number
   size: number
   from?: string
   to?: string
+  // El proveedor solo acepta UN valor por filtro (no es una lista IN) — de ahí que
+  // la UI use un select de valor único (SingleSelectFilterContent), no checkboxes.
+  type?: number // -> TipoMovimiento (idTipoMovimiento de un movimiento ya visto)
+  status?: number // -> idEstatus
 }
 
 /** Tipo de cuenta del proveedor: MERCHANT (negocio, flujo actual) o CLIENT (personal, PWA). */

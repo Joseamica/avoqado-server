@@ -123,6 +123,13 @@ function parseIsoDateParam(v: unknown, name: string): string | undefined {
   return d.toISOString()
 }
 
+function parseIntParam(v: unknown, name: string): number | undefined {
+  if (v == null || v === '') return undefined
+  const n = Number(v)
+  if (!Number.isInteger(n)) throw new BadRequestError(`${name} debe ser un entero.`)
+  return n
+}
+
 export async function getMovements(req: Request, res: Response, next: NextFunction) {
   try {
     await assertAccountBelongsToVenue(req.params.id, req.params.venueId)
@@ -130,7 +137,9 @@ export async function getMovements(req: Request, res: Response, next: NextFuncti
     const size = Math.min(MAX_MOVEMENTS_PAGE_SIZE, Math.max(1, Number(req.query.size ?? 10) || 10))
     const from = parseIsoDateParam(req.query.from, 'from')
     const to = parseIsoDateParam(req.query.to, 'to')
-    res.json({ success: true, data: await svc.getMovementsForAccount(req.params.id, { page, size, from, to }) })
+    const type = parseIntParam(req.query.type, 'type')
+    const status = parseIntParam(req.query.status, 'status')
+    res.json({ success: true, data: await svc.getMovementsForAccount(req.params.id, { page, size, from, to, type, status }) })
   } catch (e) {
     next(e)
   }

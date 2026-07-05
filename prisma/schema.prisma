@@ -699,6 +699,7 @@ model VenueSettings {
   notifyBadReviews    Boolean  @default(true)
   badReviewThreshold  Int      @default(3)
   badReviewAlertRoles String[] @default(["OWNER", "ADMIN", "MANAGER"])
+  googleReviewLink    String? // Raw: full Google review URL OR bare Place ID (normalized to a writereview URL on read)
 
   // Inventory
   trackInventory    Boolean       @default(false)

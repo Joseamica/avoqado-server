@@ -2,6 +2,8 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { NotFoundError, BadRequestError } from '../../errors/AppError'
 import { shouldNotifyBadReview, getReviewContext, sendBadReviewNotifications } from '../dashboard/badReviewNotification.service'
+import { venueHasFeatureAccess } from '../access/basePlan.service'
+import { normalizeGoogleReviewUrl } from '../../utils/googleReviewLink'
 
 /**
  * Interface for review submission from receipt
@@ -160,6 +162,8 @@ export async function canSubmitReview(accessKey: string): Promise<{
   canSubmit: boolean
   reason?: string
   venue?: { id: string; name: string }
+  reviewsEnabled: boolean
+  googleReviewUrl: string | null
 }> {
   try {
     const receipt = await prisma.digitalReceipt.findUnique({
@@ -167,12 +171,7 @@ export async function canSubmitReview(accessKey: string): Promise<{
       include: {
         payment: {
           include: {
-            venue: {
-              select: {
-                id: true,
-                name: true,
-              },
-            },
+            venue: { select: { id: true, name: true } },
             review: true, // Check if review already exists
           },
         },
@@ -180,30 +179,26 @@ export async function canSubmitReview(accessKey: string): Promise<{
     })
 
     if (!receipt) {
-      return {
-        canSubmit: false,
-        reason: 'Receipt not found',
-      }
+      return { canSubmit: false, reason: 'Receipt not found', reviewsEnabled: false, googleReviewUrl: null }
     }
+
+    const venue = receipt.payment.venue
+
+    // PRO gate (server-side source of truth) + normalized Google URL, computed in parallel.
+    const [reviewsEnabled, settings] = await Promise.all([
+      venueHasFeatureAccess(venue.id, 'GOOGLE_REVIEW_REDIRECT'),
+      prisma.venueSettings.findUnique({ where: { venueId: venue.id }, select: { googleReviewLink: true } }),
+    ])
+    const googleReviewUrl = reviewsEnabled ? normalizeGoogleReviewUrl(settings?.googleReviewLink) : null
 
     if (receipt.payment.review) {
-      return {
-        canSubmit: false,
-        reason: 'Review already submitted',
-        venue: receipt.payment.venue,
-      }
+      return { canSubmit: false, reason: 'Review already submitted', venue, reviewsEnabled, googleReviewUrl }
     }
 
-    return {
-      canSubmit: true,
-      venue: receipt.payment.venue,
-    }
+    return { canSubmit: true, venue, reviewsEnabled, googleReviewUrl }
   } catch (error) {
     logger.error('Error checking review eligibility', { accessKey, error })
-    return {
-      canSubmit: false,
-      reason: 'Error checking eligibility',
-    }
+    return { canSubmit: false, reason: 'Error checking eligibility', reviewsEnabled: false, googleReviewUrl: null }
   }
 }
 

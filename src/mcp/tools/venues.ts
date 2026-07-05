@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
+import { normalizeGoogleReviewUrl } from '@/utils/googleReviewLink'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
@@ -54,7 +55,7 @@ export function registerVenueTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'venue_profile',
-    "The basic profile / setup of a venue you can access: name, type, currency, timezone, language, address, contact (phone/email/website) and whether it is active. Handy to confirm configuration, and to give an assistant the venue's currency & timezone for formatting. Does NOT expose any fiscal, KYC or payment-credential data. Pass venueId.",
+    "The basic profile / setup of a venue you can access: name, type, currency, timezone, language, address, contact (phone/email/website) and whether it is active. Handy to confirm configuration, and to give an assistant the venue's currency & timezone for formatting. Does NOT expose any fiscal, KYC or payment-credential data. Pass venueId. For OWNER connections it also includes reviews.googleReviewUrl (the venue's Google-review redirect link).",
     {
       venueId: z.string().describe('Venue whose profile to read (must be in your scope)'),
     },
@@ -81,6 +82,20 @@ export function registerVenueTools(server: McpServer, scope: McpScope) {
         },
       })
       if (!v) return text({ found: false, error: 'Venue not found.' })
+
+      // OWNER-only: expose the venue's Google-review redirect link. Roles differ
+      // per venue, so read this venue's role from scope (never a global role).
+      const role = scope.perVenueAccess.get(venueId)?.role
+      const isOwnerLevel = role === 'OWNER' || role === 'SUPERADMIN'
+      let googleReviewUrl: string | null = null
+      if (isOwnerLevel) {
+        const settings = await prisma.venueSettings.findUnique({
+          where: { venueId },
+          select: { googleReviewLink: true },
+        })
+        googleReviewUrl = normalizeGoogleReviewUrl(settings?.googleReviewLink)
+      }
+
       return text({
         found: true,
         venueId,
@@ -94,6 +109,7 @@ export function registerVenueTools(server: McpServer, scope: McpScope) {
           active: v.active,
           address: { line: v.address, city: v.city, state: v.state, country: v.country, zip: v.zipCode },
           contact: { phone: v.phone, email: v.email, website: v.website },
+          ...(isOwnerLevel ? { reviews: { googleReviewUrl } } : {}),
         },
       })
     },

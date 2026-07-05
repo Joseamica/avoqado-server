@@ -211,6 +211,7 @@ function normalizeMovement(m: unknown): ProviderMovement {
   return {
     id: pick<string>(m, 'idOperacion') ?? null,
     type: pick<string>(m, 'tipoMovimiento') ?? null,
+    typeId: toNum(pick(m, 'idTipoMovimiento')),
     operationType: pick<string>(m, 'tipoOperacion') ?? null,
     concept: pick<string>(m, 'concepto') ?? null,
     date: pick<string>(m, 'fechaCreacion') ?? null,
@@ -367,6 +368,10 @@ export const externalBankClient: FinancialProviderClient = {
     params.SortByFecha = 'DESC'
     if (query.from) params.FechaInicio = query.from
     if (query.to) params.FechaFinal = query.to
+    // Filtros de un solo valor (no listas IN) — el proveedor solo soporta un TipoMovimiento/idEstatus
+    // por request, de ahí que el filtro en la UI sea de selección única, no checkboxes.
+    if (query.type != null) params.TipoMovimiento = query.type
+    if (query.status != null) params.idEstatus = query.status
     const path = isClient ? `/api/clients/movimientos/${cuentaId}` : `/api/clients/movimientos/${idNegocio}`
     const { data: rawData } = await axios.get(`${base()}${path}`, { headers: headers(ctx.accessToken, ctx.kind), params, timeout: 20_000 })
     // El canal cliente (PWA) cifra respuestas por endpoint. decryptClientEnvelope es no-op si viene

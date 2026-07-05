@@ -1,6 +1,7 @@
 // src/schemas/dashboard/venueSettings.schema.ts
 
 import { z } from 'zod'
+import { validateGoogleReviewLink } from '../../utils/googleReviewLink'
 
 /**
  * Schema for TPV settings update
@@ -63,6 +64,20 @@ export const UpdateVenueSettingsSchema = z.object({
     notifyBadReviews: z.boolean().optional(),
     badReviewThreshold: z.number().int().min(1).max(5).optional(),
     badReviewAlertRoles: z.array(z.enum(['OWNER', 'ADMIN', 'MANAGER', 'CASHIER', 'WAITER', 'KITCHEN', 'HOST', 'VIEWER'])).optional(),
+    googleReviewLink: z
+      .union([
+        z.literal('').transform(() => null),
+        z
+          .string()
+          .trim()
+          .max(300, 'El link es demasiado largo.')
+          .refine(
+            v => validateGoogleReviewLink(v) === null,
+            v => ({ message: validateGoogleReviewLink(v) ?? 'Link de Google inválido.' }),
+          ),
+      ])
+      .nullable()
+      .optional(),
 
     // Inventory
     trackInventory: z.boolean().optional(),
