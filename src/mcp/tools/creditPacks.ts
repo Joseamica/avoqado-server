@@ -294,7 +294,12 @@ export function registerCreditPackTools(server: McpServer, scope: McpScope) {
       })
       if (packs.length === 0) return text({ ok: false, error: `No encontré ningún paquete activo que coincida con "${packSearch}".` })
       if (packs.length > 1) {
-        return text({ ok: false, ambiguous: true, error: `"${packSearch}" coincide con varios paquetes — sé más específico.`, matches: packs.map(p => p.name) })
+        return text({
+          ok: false,
+          ambiguous: true,
+          error: `"${packSearch}" coincide con varios paquetes — sé más específico.`,
+          matches: packs.map(p => p.name),
+        })
       }
       const pack = packs[0]
       const price = amountPaid ?? num(pack.price)
@@ -326,7 +331,10 @@ export function registerCreditPackTools(server: McpServer, scope: McpScope) {
           venueId,
           data: { customer: customerName, pack: pack.name, amountPaid: price },
         })
-        return text({ ok: true, sold: { customer: customerName, pack: pack.name, amountPaid: price, purchaseId: (purchase as { id?: string })?.id ?? null } })
+        return text({
+          ok: true,
+          sold: { customer: customerName, pack: pack.name, amountPaid: price, purchaseId: (purchase as { id?: string })?.id ?? null },
+        })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
       }
