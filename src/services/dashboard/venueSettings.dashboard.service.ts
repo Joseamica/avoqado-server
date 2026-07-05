@@ -157,6 +157,7 @@ export async function updateVenueSettings(venueId: string, updates: Prisma.Venue
     tipSuggestions: DEFAULT_VENUE_SETTINGS.tipSuggestions,
     paymentTiming: DEFAULT_VENUE_SETTINGS.paymentTiming,
     inventoryDeduction: DEFAULT_VENUE_SETTINGS.inventoryDeduction,
+    googleReviewLink: (updates.googleReviewLink as string | null | undefined) ?? null,
     // TPV Settings removed - now stored per-terminal in Terminal.config.settings
   }
 
