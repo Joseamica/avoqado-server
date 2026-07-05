@@ -1,5 +1,5 @@
 import prisma from '@/utils/prismaClient'
-import type { FinancialConnectionStatus, FinancialConnectionAccountKind } from '@prisma/client'
+import type { FinancialConnectionStatus, FinancialConnectionAccountKind, Prisma } from '@prisma/client'
 import { BadRequestError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { isValidClabe } from '@/utils/clabe'
@@ -186,7 +186,12 @@ export async function startConnection(input: {
       action: 'FINANCIAL_CONNECTION_FAILED',
       entity: 'FinancialConnection',
       entityId: conn.id,
-      data: { provider: provider.code, step: 'connect', error: (e as Error).message },
+      data: {
+        provider: provider.code,
+        step: 'connect',
+        error: (e as Error).message,
+        providerResponse: (e as { providerResponse?: unknown }).providerResponse as Prisma.InputJsonValue | undefined,
+      },
     })
     throw e
   }
@@ -285,7 +290,12 @@ export async function validateDevice(connectionId: string, code: string, staffId
       action: 'FINANCIAL_CONNECTION_FAILED',
       entity: 'FinancialConnection',
       entityId: connectionId,
-      data: { provider: conn.provider.code, step: 'validate_device', error: (e as Error).message },
+      data: {
+        provider: conn.provider.code,
+        step: 'validate_device',
+        error: (e as Error).message,
+        providerResponse: (e as { providerResponse?: unknown }).providerResponse as Prisma.InputJsonValue | undefined,
+      },
     })
     throw e
   }
@@ -341,7 +351,12 @@ export async function validateTwoFactorAuth(connectionId: string, code: string, 
       action: 'FINANCIAL_CONNECTION_FAILED',
       entity: 'FinancialConnection',
       entityId: connectionId,
-      data: { provider: conn.provider.code, step: 'validate_2fa', error: (e as Error).message },
+      data: {
+        provider: conn.provider.code,
+        step: 'validate_2fa',
+        error: (e as Error).message,
+        providerResponse: (e as { providerResponse?: unknown }).providerResponse as Prisma.InputJsonValue | undefined,
+      },
     })
     throw e
   }

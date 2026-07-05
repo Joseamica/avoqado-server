@@ -185,8 +185,14 @@ async function signIn(email: string, password: string, deviceIdentifier: string,
     })
     return data
   } catch (e) {
-    if (axios.isAxiosError(e))
-      throw new BadRequestError(pick<string>(e.response?.data, 'message') || `sign-in falló (status ${e.response?.status})`)
+    if (axios.isAxiosError(e)) {
+      const err = new BadRequestError(pick<string>(e.response?.data, 'message') || `sign-in falló (status ${e.response?.status})`)
+      // El mensaje solo (p.ej. "Información inválida.") no siempre alcanza para diagnosticar —
+      // se conserva el body crudo del proveedor para que el caller lo audite completo en
+      // ActivityLog (ver logAction en startConnection/validateDevice/validateTwoFactorAuth).
+      ;(err as BadRequestError & { providerResponse?: unknown }).providerResponse = e.response?.data
+      throw err
+    }
     throw e
   }
 }
