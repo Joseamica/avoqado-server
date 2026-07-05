@@ -5,7 +5,8 @@ import { NotFoundError } from '../../errors/AppError'
 import { getEffectivePaymentConfig } from '@/services/organization-payment-config.service'
 import { calculateSettlementDate, findActiveSettlementConfig } from '../payments/settlementCalculation.service'
 import { addDays } from 'date-fns'
-import { formatInTimeZone } from 'date-fns-tz'
+import { formatInTimeZone, fromZonedTime } from 'date-fns-tz'
+import { projectPaymentSettlement, type ActiveConfig } from './settlementCalendar.dashboard.service'
 import { DEFAULT_TIMEZONE } from '../../utils/datetime'
 import { getLastCloseoutDate } from './cashCloseout.dashboard.service'
 
@@ -481,8 +482,33 @@ export async function getSettlementTimeline(venueId: string, dateRange: { from: 
     },
   })
 
+  // Settlement dates are RECOMPUTED on read via the corrected engine (same shared
+  // helper as the week strip / settlement calendar), NOT taken from the stored
+  // per-payment estimatedSettlementDate: payments created before the 2026-07-04
+  // engine fix carry stale stored dates (e.g. weekend landings) and would
+  // contradict the week strip rendered on the same page. The stored date remains
+  // only as a fallback when a payment can't be projected (no cost / no rule).
+  const merchantIds = Array.from(new Set(payments.map(p => p.merchantAccountId).filter((x): x is string => Boolean(x))))
+  const configs: ActiveConfig[] = merchantIds.length
+    ? await prisma.settlementConfiguration.findMany({
+        where: { merchantAccountId: { in: merchantIds } },
+        select: {
+          merchantAccountId: true,
+          cardType: true,
+          settlementDays: true,
+          settlementDayType: true,
+          cutoffTime: true,
+          cutoffTimezone: true,
+          effectiveFrom: true,
+          effectiveTo: true,
+        },
+        orderBy: { effectiveFrom: 'desc' },
+      })
+    : []
+
   // Group by (transaction date, card type)
   const timelineMap = new Map<string, TimelineEntry>()
+  const recomputedGroups = new Set<string>() // groups whose date came from the live engine (wins over stored)
 
   for (const payment of payments) {
     const dateKey = formatInTimeZone(payment.createdAt, venueTimezone, 'yyyy-MM-dd')
@@ -516,8 +542,26 @@ export async function getSettlementTimeline(venueId: string, dateRange: { from: 
     entry.fees += fees
     entry.netAmount += netAmount
 
-    // Use first estimated settlement date as representative for this card type
-    if (payment.transaction?.estimatedSettlementDate && !entry.estimatedSettlementDate) {
+    // Prefer the live-engine date; fall back to the first stored date otherwise.
+    const projected =
+      payment.method !== PaymentMethod.CASH && payment.merchantAccountId && payment.transactionCost
+        ? projectPaymentSettlement(
+            {
+              amount: payment.amount,
+              tipAmount: payment.tipAmount,
+              createdAt: payment.createdAt,
+              merchantAccountId: payment.merchantAccountId,
+              transactionCost: payment.transactionCost,
+            },
+            configs,
+            venueTimezone,
+          )
+        : null
+    if (projected && !recomputedGroups.has(groupKey)) {
+      // Noon venue-local: formats back to the same calendar day in any client tz handling.
+      entry.estimatedSettlementDate = fromZonedTime(`${projected.settlementDateKey}T12:00:00.000`, venueTimezone)
+      recomputedGroups.add(groupKey)
+    } else if (!recomputedGroups.has(groupKey) && payment.transaction?.estimatedSettlementDate && !entry.estimatedSettlementDate) {
       entry.estimatedSettlementDate = payment.transaction.estimatedSettlementDate
     }
 
