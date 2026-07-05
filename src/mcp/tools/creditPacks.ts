@@ -5,6 +5,7 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { getCreditPacks, getCustomerPurchases, redeemItemManually } from '@/services/dashboard/creditPack.dashboard.service'
+import { sellPackInPerson } from '@/services/mobile/creditPack.mobile.service'
 import { auditMcpWrite } from '../audit'
 import { CreditPurchaseStatus } from '@prisma/client'
 
@@ -239,6 +240,93 @@ export function registerCreditPackTools(server: McpServer, scope: McpScope) {
             transactionId: (tx as { id?: string })?.id ?? null,
           },
         })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'sell_credit_pack',
+    'Sell a prepaid pack to a customer IN PERSON in a venue you can access — grants the credits after they pay at the POS ("véndele el paquete de 10 clases a Juan"). Find the customer by name/email/phone and the pack by name. Because it CREATES a paid purchase (records amountPaid + grants credits), by DEFAULT it only PREVIEWS; call again with confirm:true to apply. amountPaid defaults to the pack list price. This WRITES — requires creditPacks:create.',
+    {
+      venueId: z.string().describe('Venue that owns the customer + pack (must be in your scope)'),
+      customerSearch: z.string().min(1).describe('Customer name, email or phone (partial, case-insensitive)'),
+      packSearch: z.string().min(1).describe('Credit pack name (partial, case-insensitive)'),
+      amountPaid: z.number().optional().describe('Amount paid in pesos (defaults to the pack list price)'),
+      note: z.string().optional().describe('Optional note for the audit trail'),
+      confirm: z.boolean().optional().describe('Must be true to actually sell; without it you get a preview'),
+    },
+    async ({ venueId, customerSearch, packSearch, amountPaid, note, confirm }) => {
+      const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('creditPacks:create', venueId) // write gate (per-venue role)
+
+      const customers = await prisma.customer.findMany({
+        where: {
+          ...base,
+          OR: [
+            { firstName: { contains: customerSearch, mode: 'insensitive' as const } },
+            { lastName: { contains: customerSearch, mode: 'insensitive' as const } },
+            { email: { contains: customerSearch, mode: 'insensitive' as const } },
+            { phone: { contains: customerSearch } },
+          ],
+        },
+        select: { id: true, firstName: true, lastName: true },
+        orderBy: { totalSpent: 'desc' },
+        take: 5,
+      })
+      if (customers.length === 0) return text({ ok: false, error: `No encontré ningún cliente que coincida con "${customerSearch}".` })
+      if (customers.length > 1) {
+        return text({
+          ok: false,
+          ambiguous: true,
+          error: `"${customerSearch}" coincide con varios clientes — sé más específico.`,
+          matches: customers.map(m => `${m.firstName ?? ''} ${m.lastName ?? ''}`.trim() || '(sin nombre)'),
+        })
+      }
+      const c = customers[0]
+      const customerName = `${c.firstName ?? ''} ${c.lastName ?? ''}`.trim() || '(sin nombre)'
+
+      const packs = await prisma.creditPack.findMany({
+        where: { venueId, active: true, name: { contains: packSearch, mode: 'insensitive' as const } },
+        select: { id: true, name: true, price: true, items: { select: { quantity: true, product: { select: { name: true } } } } },
+        take: 5,
+      })
+      if (packs.length === 0) return text({ ok: false, error: `No encontré ningún paquete activo que coincida con "${packSearch}".` })
+      if (packs.length > 1) {
+        return text({ ok: false, ambiguous: true, error: `"${packSearch}" coincide con varios paquetes — sé más específico.`, matches: packs.map(p => p.name) })
+      }
+      const pack = packs[0]
+      const price = amountPaid ?? num(pack.price)
+
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview: {
+            customer: customerName,
+            pack: pack.name,
+            amountPaid: price,
+            includes: pack.items.map(it => ({ product: it.product?.name ?? null, credits: it.quantity })),
+          },
+          message: `Esto VENDERÁ el paquete "${pack.name}" a ${customerName} por $${price} y le otorgará los créditos. Vuelve a llamar con confirm:true para aplicar.`,
+        })
+      }
+
+      // createdById FKs to StaffVenue.id — resolve the caller's staff-venue row (same as redeem_credit).
+      const sv = await prisma.staffVenue.findFirst({ where: { staffId: scope.staffId, venueId }, select: { id: true } })
+      if (!sv) return text({ ok: false, error: 'No pude resolver tu asignación a este local para registrar la venta.' })
+
+      try {
+        const purchase = await sellPackInPerson(venueId, pack.id, c.id, sv.id, { amountPaid, note })
+        await auditMcpWrite(scope, {
+          action: 'CREDIT_PACK_SOLD',
+          entity: 'CreditPackPurchase',
+          entityId: (purchase as { id?: string })?.id ?? '',
+          venueId,
+          data: { customer: customerName, pack: pack.name, amountPaid: price },
+        })
+        return text({ ok: true, sold: { customer: customerName, pack: pack.name, amountPaid: price, purchaseId: (purchase as { id?: string })?.id ?? null } })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
       }

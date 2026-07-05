@@ -35,6 +35,7 @@ import * as productOptionMobileController from '../controllers/mobile/product-op
 import * as measurementUnitMobileController from '../controllers/mobile/measurement-unit.mobile.controller'
 import * as kdsMobileController from '../controllers/mobile/kds.mobile.controller'
 import * as tableMobileController from '../controllers/mobile/table.mobile.controller'
+import * as creditPackMobileController from '../controllers/mobile/creditPack.mobile.controller'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { validateRequest } from '../middlewares/validation'
@@ -1198,6 +1199,36 @@ router.post(
   authenticateTokenMiddleware,
   checkPermission('customers:create'),
   customerController.createCustomer,
+)
+
+// ─── CREDIT PACKS (prepaid packages — sell in person / redeem at the POS) ───
+// List a venue's active packs (optionally ?productId= to only those including it).
+router.get(
+  '/venues/:venueId/credit-packs',
+  authenticateTokenMiddleware,
+  checkPermission('creditPacks:read'),
+  creditPackMobileController.listPacks,
+)
+// A customer's active, non-expired credit balances.
+router.get(
+  '/venues/:venueId/customers/:customerId/credit-balance',
+  authenticateTokenMiddleware,
+  checkPermission('creditPacks:read'),
+  creditPackMobileController.getBalance,
+)
+// Sell a pack to a customer in person (paid through the POS, not Stripe).
+router.post(
+  '/venues/:venueId/credit-packs/:packId/sell',
+  authenticateTokenMiddleware,
+  checkPermission('creditPacks:create'),
+  creditPackMobileController.sellPack,
+)
+// Redeem one credit from a balance.
+router.post(
+  '/venues/:venueId/credit-balances/:balanceId/redeem',
+  authenticateTokenMiddleware,
+  checkPermission('creditPacks:update'),
+  creditPackMobileController.redeemCredit,
 )
 
 /**
