@@ -397,6 +397,7 @@ it('sendInternalTransfer: resuelve origen (altId) + destino y ejecuta el traspas
       deviceIdentifier: 'dev',
       status: 'CONNECTED',
       venueId: 'v1',
+      accountKind: 'CLIENT',
       provider: { code: 'EXTERNAL_BANK' },
     },
   })
@@ -505,25 +506,25 @@ it('sendInternalTransfer: destino/monto DISTINTO a lo reciente NO se deduplica (
   expect(r.movementId).toBe('mov-new')
 })
 
-it('sendInternalTransfer: conexión CLIENT (cuenta personal) → rechaza ANTES de tocar al proveedor', async () => {
+it('sendInternalTransfer: conexión MERCHANT (cuenta de negocio) → rechaza ANTES de tocar al proveedor', async () => {
   db.financialAccount.findUniqueOrThrow.mockResolvedValue({
-    id: 'fa-cl-tr',
+    id: 'fa-mc-tr',
     externalId: 'cta-1',
     connection: {
-      id: 'cm-cl-tr',
+      id: 'cm-mc-tr',
       mode: 'SELF_CONNECT',
       grantEnc: encFixture(),
       tokenVersion: 0,
       deviceIdentifier: 'dev',
       status: 'CONNECTED',
       venueId: 'v1',
-      accountKind: 'CLIENT',
+      accountKind: 'MERCHANT',
       externalClientId: 'mg-1',
       provider: { code: 'EXTERNAL_BANK' },
     },
   })
-  await expect(svc.sendInternalTransfer('fa-cl-tr', { destAccountNumber: '155525', amount: 1, concept: '' })).rejects.toThrow(
-    'Las transferencias no están disponibles para cuentas personales.',
+  await expect(svc.sendInternalTransfer('fa-mc-tr', { destAccountNumber: '155525', amount: 1, concept: '' })).rejects.toThrow(
+    'Las transferencias no están disponibles para cuentas de negocio.',
   )
   // El backend es la fuente de verdad: jamás llegó a resolver origen/destino ni a mover dinero.
   expect(clientMock.refresh).not.toHaveBeenCalled()
@@ -532,25 +533,25 @@ it('sendInternalTransfer: conexión CLIENT (cuenta personal) → rechaza ANTES d
   expect(clientMock.internalTransfer).not.toHaveBeenCalled()
 })
 
-it('resolveTransferDestination: conexión CLIENT (cuenta personal) → rechaza ANTES de tocar al proveedor', async () => {
+it('resolveTransferDestination: conexión MERCHANT (cuenta de negocio) → rechaza ANTES de tocar al proveedor', async () => {
   db.financialAccount.findUniqueOrThrow.mockResolvedValue({
-    id: 'fa-cl-rd',
+    id: 'fa-mc-rd',
     externalId: 'cta-1',
     connection: {
-      id: 'cm-cl-rd',
+      id: 'cm-mc-rd',
       mode: 'SELF_CONNECT',
       grantEnc: encFixture(),
       tokenVersion: 0,
       deviceIdentifier: 'dev',
       status: 'CONNECTED',
       venueId: 'v1',
-      accountKind: 'CLIENT',
+      accountKind: 'MERCHANT',
       externalClientId: 'mg-1',
       provider: { code: 'EXTERNAL_BANK' },
     },
   })
-  await expect(svc.resolveTransferDestination('fa-cl-rd', '155525')).rejects.toThrow(
-    'Las transferencias no están disponibles para cuentas personales.',
+  await expect(svc.resolveTransferDestination('fa-mc-rd', '155525')).rejects.toThrow(
+    'Las transferencias no están disponibles para cuentas de negocio.',
   )
   expect(clientMock.refresh).not.toHaveBeenCalled()
   expect(clientMock.resolveAltAccount).not.toHaveBeenCalled()
@@ -570,6 +571,7 @@ it('resolveTransferDestination: devuelve nombre del beneficiario y NO expone el 
       deviceIdentifier: 'dev',
       status: 'CONNECTED',
       venueId: 'v1',
+      accountKind: 'CLIENT',
       provider: { code: 'EXTERNAL_BANK' },
     },
   })
@@ -640,7 +642,7 @@ const speiConn = (over: Record<string, unknown> = {}) => ({
   deviceIdentifier: 'dev',
   status: 'CONNECTED',
   venueId: 'v1',
-  accountKind: 'MERCHANT',
+  accountKind: 'CLIENT',
   externalClientId: 'mg-uuid-1',
   externalDeviceId: null,
   provider: { code: 'EXTERNAL_BANK' },
@@ -670,13 +672,13 @@ it('sendSpeiOut: idempotencyKey que no es UUID → BadRequest antes de tocar nad
   expect(db.financialAccount.findUniqueOrThrow).not.toHaveBeenCalled()
 })
 
-it('sendSpeiOut: conexión CLIENT (cuenta personal) → rechaza ANTES de tocar al proveedor', async () => {
+it('sendSpeiOut: conexión MERCHANT (cuenta de negocio) → rechaza ANTES de tocar al proveedor', async () => {
   db.financialAccount.findUniqueOrThrow.mockResolvedValue({
-    id: 'fa-sp-cl',
+    id: 'fa-sp-mc',
     externalId: 'cta-1',
-    connection: speiConn({ id: 'cm-sp-cl', accountKind: 'CLIENT' }),
+    connection: speiConn({ id: 'cm-sp-mc', accountKind: 'MERCHANT' }),
   })
-  await expect(svc.sendSpeiOut('fa-sp-cl', speiInput())).rejects.toThrow('cuentas personales')
+  await expect(svc.sendSpeiOut('fa-sp-mc', speiInput())).rejects.toThrow('cuentas de negocio')
   expect(clientMock.refresh).not.toHaveBeenCalled()
   expect(clientMock.sendSpeiOut).not.toHaveBeenCalled()
 })

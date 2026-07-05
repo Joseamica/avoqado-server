@@ -576,11 +576,12 @@ export async function resolveTransferDestination(
     where: { id: financialAccountId },
     include: { connection: { include: { provider: true } } },
   })
-  // Transferencias solo para cuentas de NEGOCIO. El flujo de transfer con sesión CLIENT (PWA)
-  // jamás se ha probado contra el proveedor — el spec lo declara fuera de alcance y este guard
-  // lo hace cumplir (el botón de la UI también se oculta, pero el backend es la fuente de verdad).
-  if (fa.connection.accountKind === 'CLIENT') {
-    throw new BadRequestError('Las transferencias no están disponibles para cuentas personales.')
+  // Transferencias solo para cuentas PERSONALES. El proveedor no soporta este flujo desde
+  // cuentas de NEGOCIO (MERCHANT) — confirmado por el dueño del producto (2026-07-05), corrige
+  // la suposición original que asumía lo contrario. El guard hace cumplir esto (el botón de la
+  // UI también se oculta, pero el backend es la fuente de verdad).
+  if (fa.connection.accountKind === 'MERCHANT') {
+    throw new BadRequestError('Las transferencias no están disponibles para cuentas de negocio.')
   }
   try {
     const accessToken = await accessTokenFor(fa.connection)
@@ -615,11 +616,12 @@ export async function sendInternalTransfer(
     include: { connection: { include: { provider: true } } },
   })
 
-  // Transferencias solo para cuentas de NEGOCIO. El flujo de transfer con sesión CLIENT (PWA)
-  // jamás se ha probado contra el proveedor — el spec lo declara fuera de alcance y este guard
-  // lo hace cumplir (el botón de la UI también se oculta, pero el backend es la fuente de verdad).
-  if (fa.connection.accountKind === 'CLIENT') {
-    throw new BadRequestError('Las transferencias no están disponibles para cuentas personales.')
+  // Transferencias solo para cuentas PERSONALES. El proveedor no soporta este flujo desde
+  // cuentas de NEGOCIO (MERCHANT) — confirmado por el dueño del producto (2026-07-05), corrige
+  // la suposición original que asumía lo contrario. El guard hace cumplir esto (el botón de la
+  // UI también se oculta, pero el backend es la fuente de verdad).
+  if (fa.connection.accountKind === 'MERCHANT') {
+    throw new BadRequestError('Las transferencias no están disponibles para cuentas de negocio.')
   }
 
   // Dedup por contenido ANTES de mover dinero. Como el proveedor no acepta clave de idempotencia,
@@ -762,17 +764,17 @@ export async function sendSpeiOut(
     include: { connection: { include: { provider: true } } },
   })
 
-  // SPEI saliente solo para cuentas de NEGOCIO — mismo guard que traspasos internos: el flujo de
-  // dinero saliente con sesión CLIENT (PWA) jamás se ha probado contra el proveedor.
-  if (fa.connection.accountKind === 'CLIENT') {
-    throw new BadRequestError('El envío SPEI no está disponible para cuentas personales.')
+  // SPEI saliente solo para cuentas PERSONALES — mismo guard que traspasos internos: el
+  // proveedor no soporta dinero saliente desde cuentas de NEGOCIO (MERCHANT).
+  if (fa.connection.accountKind === 'MERCHANT') {
+    throw new BadRequestError('El envío SPEI no está disponible para cuentas de negocio.')
   }
 
   // El endpoint External del proveedor debita por la identidad del USUARIO, no por la
-  // cuenta seleccionada — con varias cuentas (negocios) en una misma conexión, el dinero podría
-  // salir de una cuenta DISTINTA a la que el usuario eligió y la auditoría mentiría. Hasta
-  // confirmar con el proveedor de cuál cuenta debita en ese caso, solo se permite el envío en
-  // conexiones de UNA cuenta (el caso normal de Avoqado: una sucursal = un negocio).
+  // cuenta seleccionada — con varias cuentas en una misma conexión, el dinero podría salir de
+  // una cuenta DISTINTA a la que el usuario eligió y la auditoría mentiría. Hasta confirmar con
+  // el proveedor de cuál cuenta debita en ese caso, solo se permite el envío en conexiones de
+  // UNA cuenta.
   const accountsInConnection = await prisma.financialAccount.count({ where: { connectionId: fa.connection.id } })
   if (accountsInConnection > 1) {
     throw new BadRequestError('Por ahora el envío SPEI solo está disponible para conexiones con una sola cuenta.')
