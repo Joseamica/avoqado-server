@@ -98,8 +98,14 @@ export function computePayrollLine(input: {
   const subsidioCents = round(subsidioMensual * factor)
   const subsidioEntregadoCents = round(subsidioEntregadoMensual * factor)
   const imssObreroCents = round(imssMensual * factor)
-  // Neto = percepciones − ISR retenido − IMSS + subsidio entregado (cuando excede al ISR).
-  const netoCents = totalPercepcionesCents - isrRetenidoCents - imssObreroCents + subsidioEntregadoCents
+  // Otras deducciones (préstamos, pensión alimenticia, fondo de ahorro…): sin captura hoy → siempre 0.
+  // 🔴 El día que se capturen (>0), la póliza se DESCUADRA salvo que se hagan TRES cosas juntas:
+  //   1) restarlas del neto (ya contemplado en la fórmula de abajo),
+  //   2) agregar una línea HABER `OTHER_DEDUCTIONS_PAYABLE` en `buildPayrollJournalLines` (+ su AccountMapping/catálogo),
+  //   3) PERSISTIR `subsidioEntregado` en `PayrollRun` (la recuperación lo deriva del neto asumiendo otras=0).
+  const otrasDeduccionesCents = 0
+  // Neto = percepciones + subsidio entregado (cuando excede al ISR) − ISR retenido − IMSS − otras deducciones.
+  const netoCents = totalPercepcionesCents - isrRetenidoCents - imssObreroCents + subsidioEntregadoCents - otrasDeduccionesCents
 
   return {
     percepcionGravadaCents: totalPercepcionesCents,
@@ -110,7 +116,7 @@ export function computePayrollLine(input: {
     subsidioEntregadoCents,
     isrRetenidoCents,
     imssObreroCents,
-    otrasDeduccionesCents: 0,
+    otrasDeduccionesCents,
     netoCents,
   }
 }

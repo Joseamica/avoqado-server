@@ -424,6 +424,23 @@ export async function loadOrderForCfdiFromDb(orderId: string): Promise<LoadedOrd
 
   const peso = (d: any) => Math.round(Number(d) * 100)
 
+  // Custom-amount / quick sales (e.g. an "Importe personalizado" charge on the POS) carry NO line
+  // items — but the customer still has the right to invoice what they paid. Fall back to a SINGLE
+  // generic concepto for the order total (SAT clave 01010101 "no existe en el catálogo" + unidad
+  // ACT), so the CFDI has at least one line instead of failing with "no tiene conceptos".
+  const items =
+    order.items.length > 0
+      ? order.items
+      : ([
+          {
+            productName: 'Venta',
+            quantity: 1,
+            unitPrice: order.total,
+            discountAmount: 0,
+            product: { satProductKey: '01010101', satUnitKey: 'ACT', objetoImp: '02', taxRate: 0.16, category: null },
+          },
+        ] as unknown as typeof order.items)
+
   // Mexican POS prices are IVA-included (gross): the customer's out-of-pocket already contains the
   // tax, and these orders carry taxAmount=0 (e.g. TPV). A non-zero taxAmount means a separated-tax
   // source (reservations, pos-sync) whose subtotal/taxAmount/total are already the real split.
@@ -438,7 +455,7 @@ export async function loadOrderForCfdiFromDb(orderId: string): Promise<LoadedOrd
     subtotalCents = 0
     taxCents = 0
     totalCents = 0
-    for (const it of order.items) {
+    for (const it of items) {
       const rate = it.product ? Number(it.product.taxRate) : 0.16
       const grossLine = peso(it.unitPrice) * it.quantity - peso(it.discountAmount)
       const split = splitIvaIncluded(grossLine, rate)
@@ -464,7 +481,7 @@ export async function loadOrderForCfdiFromDb(orderId: string): Promise<LoadedOrd
     subtotalCents,
     taxCents,
     totalCents,
-    order: { venueType: order.venue.type, tipAmount: order.tipAmount, items: order.items as any, pricesIncludeIva },
+    order: { venueType: order.venue.type, tipAmount: order.tipAmount, items: items as any, pricesIncludeIva },
   }
 }
 

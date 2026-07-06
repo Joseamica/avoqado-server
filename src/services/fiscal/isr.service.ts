@@ -97,6 +97,14 @@ export interface IsrProvisionalResult {
   zeroActivity: boolean
   computedAt16Percent: boolean
   rfcSpansMultipleOrgs: boolean
+  /**
+   * SIEMPRE `true`: este pago provisional es una ESTIMACIÓN, no la cifra final a declarar. Dos razones:
+   * (1) los pagos provisionales previos del ejercicio se RE-ESTIMAN de la utilidad acumulada actual, no
+   * son los realmente declarados (para ingresos disparejos difiere del cálculo legal); (2) la base usa
+   * IVA plano 16% (`computedAt16Percent`). El consumidor (dashboard/MCP) DEBE mostrar la leyenda de que
+   * es preliminar y confirmar con el contador antes de pagar.
+   */
+  isEstimate: boolean
 }
 
 /** Locales del contribuyente por RFC (de Venue.rfc O FiscalEmisor.rfc), case-insensitive. */
@@ -175,6 +183,7 @@ export async function getIsrProvisional(venueId: string, period: string, regime:
     zeroActivity: true,
     computedAt16Percent: true,
     rfcSpansMultipleOrgs: false,
+    isEstimate: true,
   }
   if (!scope) return base
 

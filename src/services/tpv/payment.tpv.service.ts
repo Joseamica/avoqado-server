@@ -15,6 +15,7 @@ import { parseDateRange } from '@/utils/datetime'
 import { earnPoints } from '../dashboard/loyalty.dashboard.service'
 import { updateCustomerMetrics } from '../dashboard/customer.dashboard.service'
 import { createCommissionForPayment } from '../dashboard/commission/commission-calculation.service'
+import { runAutoReorderForVenue } from '../dashboard/autoReorder.service'
 import { serializedInventoryService } from '../serialized-inventory/serializedInventory.service'
 import { getEffectivePaymentConfig } from '../organization-payment-config.service'
 import { logAction } from '../dashboard/activity-log.service'
@@ -1917,6 +1918,19 @@ export async function recordOrderPayment(
             error: err instanceof Error ? err.message : String(err),
           })
         })
+
+        // Real-time auto-reorder: if this sale left any ingredient at/below its
+        // reorder point, create the PO + email the supplier right away instead of
+        // waiting for the nightly job. Non-blocking (never affects the payment)
+        // and self-gated — the run checks AUTO_REORDER feature + PREMIUM tier +
+        // config.enabled and skips items that already have an open PO.
+        runAutoReorderForVenue(activeOrder.venueId).catch(err => {
+          logger.error('Failed to run real-time auto-reorder after payment', {
+            paymentId: payment.id,
+            venueId: activeOrder.venueId,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        })
       }
     } else if (payment.status === 'PROCESSING') {
       socketManager.broadcastToVenue(activeOrder.venueId, SocketEventType.PAYMENT_PROCESSING, paymentPayload)
@@ -2626,6 +2640,15 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           logger.error('Failed to create commission for fast payment', {
             paymentId: payment.id,
             orderId: fastOrder.id,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        })
+
+        // Real-time auto-reorder (see recordOrderPayment for rationale). Non-blocking + self-gated.
+        runAutoReorderForVenue(venueId).catch(err => {
+          logger.error('Failed to run real-time auto-reorder after fast payment', {
+            paymentId: payment.id,
+            venueId,
             error: err instanceof Error ? err.message : String(err),
           })
         })
