@@ -21,6 +21,22 @@ import { Request, Response } from 'express'
 import * as loyaltyService from '@/services/dashboard/loyalty.dashboard.service'
 
 /**
+ * Resolve the caller's StaffVenue.id from their Staff.id (authContext.userId) + venue.
+ * LoyaltyTransaction.createdById FKs to StaffVenue.id (not Staff.id) — `authContext` has no
+ * `staffVenueId` field (see security.ts's AuthContext), so reading it directly always yields
+ * `undefined`. Mirrors creditPack.dashboard.controller.ts's getStaffVenueId.
+ */
+async function getStaffVenueId(venueId: string, userId: string): Promise<string> {
+  const prisma = (await import('../../utils/prismaClient')).default
+  const sv = await prisma.staffVenue.findUnique({
+    where: { staffId_venueId: { staffId: userId, venueId } },
+    select: { id: true },
+  })
+  if (!sv) throw new Error('Staff no encontrado en este venue')
+  return sv.id
+}
+
+/**
  * GET /api/dashboard/venues/:venueId/loyalty/config
  * Get loyalty configuration for venue
  */
@@ -91,7 +107,7 @@ export async function redeemPoints(req: Request, res: Response) {
   const { venueId, customerId } = req.params
   const { points, orderId } = req.body
   const authContext = (req as any).authContext
-  const staffId = authContext?.staffVenueId
+  const staffId = authContext?.userId ? await getStaffVenueId(venueId, authContext.userId) : undefined
 
   const result = await loyaltyService.redeemPoints(venueId, customerId, points, orderId, staffId)
 
@@ -106,11 +122,12 @@ export async function adjustPoints(req: Request, res: Response) {
   const { venueId, customerId } = req.params
   const { points, reason } = req.body
   const authContext = (req as any).authContext
-  const staffId = authContext?.staffVenueId
 
-  if (!staffId) {
+  if (!authContext?.userId) {
     return res.status(403).json({ error: 'Staff authentication required for point adjustments' })
   }
+
+  const staffId = await getStaffVenueId(venueId, authContext.userId)
 
   const result = await loyaltyService.adjustPoints(venueId, customerId, points, reason, staffId)
 

@@ -117,7 +117,9 @@ export async function captureCode(req: Request, res: Response, next: NextFunctio
 
 export async function forceOverride(req: Request, res: Response, next: NextFunction) {
   try {
-    const managerStaffVenueId = (req as any).authContext?.staffVenueId
+    // `authContext` has no `staffVenueId` field (see security.ts's AuthContext) — resolve it the
+    // same way `fulfillGrantHandler` below does, via authContext.userId (the Staff.id).
+    const managerStaffVenueId = await capture.resolveStaffVenueId(req.params.venueId, (req as any).authContext?.userId)
     const referral = await capture.forceOverrideReferral({
       venueId: req.params.venueId,
       managerStaffVenueId: managerStaffVenueId ?? 'unknown',
@@ -134,7 +136,9 @@ export async function forceOverride(req: Request, res: Response, next: NextFunct
 
 export async function manualVoid(req: Request, res: Response, next: NextFunction) {
   try {
-    const staffVenueId = (req as any).authContext?.staffVenueId
+    // `authContext` has no `staffVenueId` field (see security.ts's AuthContext) — resolve it the
+    // same way `fulfillGrantHandler` below does, via authContext.userId (the Staff.id).
+    const staffVenueId = await capture.resolveStaffVenueId(req.params.venueId, (req as any).authContext?.userId)
     const updated = await capture.manualVoidReferral({
       referralId: req.params.referralId,
       reason: req.body.reason,

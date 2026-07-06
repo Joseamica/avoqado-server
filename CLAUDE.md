@@ -36,6 +36,18 @@ decision is unfinished: it either leaks paid value into a lower tier or hides a 
 - **avoqado-landing** — Astro marketing site
 - **avoqado-windows-service** — bridges an external SoftRestaurant POS in via RabbitMQ
 
+**Namespace ownership — know which clients share an endpoint before touching it:**
+`avoqado-ios` and `avoqado-android` (the staff-facing POS apps) consume the **`/api/v1/mobile/*`**
+namespace (controllers under `src/controllers/mobile/`), NOT `/api/v1/dashboard/*`. The dashboard
+namespace (`src/controllers/dashboard/`) is consumed by `avoqado-web-dashboard` and
+`avoqado-desktop`. Both avoqado-ios and avoqado-android are developed in parallel by other
+LLM-agent sessions against `/mobile` right now — before changing a `/mobile` controller/service/
+schema, re-verify its current contract directly in source (never from memory or an earlier
+session), since those two clients depend on it and their in-flight work isn't visible from here.
+A change confined to `/dashboard` (e.g. its own controllers/services) does not carry that same
+risk unless the underlying service function is also called from a `/mobile` controller — grep for
+other callers of any service function before assuming a fix is dashboard-only.
+
 ## How This Configuration Works
 
 | Layer         | Location         | Loaded                  | Purpose                        |
@@ -215,9 +227,12 @@ The partner sales presentation (`~/Documents/Programming/Avoqado-HQ/operations/m
 Avoqado does" document — third parties sell from it. It must never fall behind the platform.
 
 **Whenever you add, change, or remove a customer-visible capability (feature, module, product, payment method, supported sector, tier
-packaging), you MUST update BOTH deliverables as part of the SAME change — never "later":** the full deck (`avoqado-presentacion.html`) AND
-the one-pager (`avoqado-one-pager.html`), then regenerate both PDFs following that folder's `README.md`. Updating only one of the two is an
-incomplete change. Internal refactors and bugfixes with no customer-visible impact are exempt.
+packaging), you MUST update BOTH deliverables as part of the SAME change — never "later":** the full deck (`avoqado-presentacion-v2.html`)
+AND the one-pager (`avoqado-one-pager-v2.html`) — plus the client one-pager (`avoqado-one-pager-cliente.html`). **Editing the HTML is only
+HALF the change.** You MUST then **regenerate the PDF of each** with the Chrome-headless HTML→PDF command in that folder's `README.md` — the
+PDF is the file partners actually open and send, so an HTML edit WITHOUT a freshly regenerated PDF is an INCOMPLETE change. Updating only one
+deliverable, or editing HTML without regenerating its PDF, is incomplete. Internal refactors and bugfixes with no customer-visible impact
+are exempt.
 
 ---
 

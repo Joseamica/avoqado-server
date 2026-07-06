@@ -20,6 +20,22 @@ import {
   assignDiscountToCustomerBodySchema,
 } from '@/schemas/dashboard/discount.schema'
 
+/**
+ * Resolve the caller's StaffVenue.id from their Staff.id (authContext.userId) + venue.
+ * Discount.createdById/DiscountCustomer.assignedById FK to StaffVenue.id (not Staff.id) —
+ * `authContext` has no `staffVenueId` field (see security.ts's AuthContext), so reading it
+ * directly always yields `undefined`. Mirrors creditPack.dashboard.controller.ts's getStaffVenueId.
+ */
+async function getStaffVenueId(venueId: string, userId: string): Promise<string> {
+  const prisma = (await import('../../utils/prismaClient')).default
+  const sv = await prisma.staffVenue.findUnique({
+    where: { staffId_venueId: { staffId: userId, venueId } },
+    select: { id: true },
+  })
+  if (!sv) throw new Error('Staff no encontrado en este venue')
+  return sv.id
+}
+
 // ==========================================
 // DISCOUNT CRUD
 // ==========================================
@@ -75,8 +91,9 @@ export async function createDiscount(req: Request, res: Response, next: NextFunc
     const { venueId } = req.params
     const body = createDiscountBodySchema.parse(req.body)
     const authContext = (req as any).authContext
+    const staffVenueId = authContext?.userId ? await getStaffVenueId(venueId, authContext.userId) : undefined
 
-    const discount = await discountService.createDiscount(venueId, body, authContext?.staffVenueId)
+    const discount = await discountService.createDiscount(venueId, body, staffVenueId)
 
     res.status(201).json(discount)
   } catch (error) {
@@ -125,8 +142,9 @@ export async function cloneDiscount(req: Request, res: Response, next: NextFunct
   try {
     const { venueId, discountId } = req.params
     const authContext = (req as any).authContext
+    const staffVenueId = authContext?.userId ? await getStaffVenueId(venueId, authContext.userId) : undefined
 
-    const discount = await discountService.cloneDiscount(venueId, discountId, authContext?.staffVenueId)
+    const discount = await discountService.cloneDiscount(venueId, discountId, staffVenueId)
 
     res.status(201).json(discount)
   } catch (error) {
@@ -167,8 +185,9 @@ export async function assignDiscountToCustomer(req: Request, res: Response, next
     const { venueId, discountId } = req.params
     const body = assignDiscountToCustomerBodySchema.parse(req.body)
     const authContext = (req as any).authContext
+    const staffVenueId = authContext?.userId ? await getStaffVenueId(venueId, authContext.userId) : undefined
 
-    const assignment = await discountService.assignDiscountToCustomer(venueId, discountId, body.customerId, authContext?.staffVenueId, {
+    const assignment = await discountService.assignDiscountToCustomer(venueId, discountId, body.customerId, staffVenueId, {
       validFrom: body.validFrom,
       validUntil: body.validUntil,
       maxUses: body.maxUses,
