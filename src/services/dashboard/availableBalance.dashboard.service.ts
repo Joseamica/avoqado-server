@@ -101,6 +101,9 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
     }
   }
 
+  const venueRecord = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+  const venueTimezone = venueRecord?.timezone || DEFAULT_TIMEZONE
+
   // Get all completed card payments with settlement info
   const cardPayments = await prisma.payment.findMany({
     where: {
@@ -117,10 +120,37 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
         select: {
           venueChargeAmount: true,
           venueFixedFee: true,
+          transactionType: true,
         },
       },
     },
   })
+
+  // Settlement dates/nets for still-PENDING money are RECOMPUTED live via the same
+  // shared engine as the week strip / settlement calendar / timeline — NOT read from
+  // the stored transaction.{estimatedSettlementDate,netSettlementAmount}, which can go
+  // stale (pre-engine-fix dates, a rate correction, a payment/tip edit after the first
+  // estimate). Without this, "Próximo depósito" (this function) could disagree by a few
+  // cents or a day with the settlement-week strip on the SAME page, which recomputes
+  // live already. Money already SETTLED is left untouched — that already happened, and
+  // recomputing after the fact would rewrite history for money the bank already moved.
+  const pendingMerchantIds = Array.from(new Set(cardPayments.map(p => p.merchantAccountId).filter((x): x is string => Boolean(x))))
+  const settlementConfigs: ActiveConfig[] = pendingMerchantIds.length
+    ? await prisma.settlementConfiguration.findMany({
+        where: { merchantAccountId: { in: pendingMerchantIds } },
+        select: {
+          merchantAccountId: true,
+          cardType: true,
+          settlementDays: true,
+          settlementDayType: true,
+          cutoffTime: true,
+          cutoffTimezone: true,
+          effectiveFrom: true,
+          effectiveTo: true,
+        },
+        orderBy: { effectiveFrom: 'desc' },
+      })
+    : []
 
   // Get CASH payments separately (instant settlement, 0 fees)
   // Only show cash collected SINCE the last closeout (corte de caja)
@@ -175,18 +205,47 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
     totalSales += amount
     totalFees += fees
 
+    // Recompute the settlement projection LIVE via the shared engine (date + net) —
+    // wins over the stored transaction fields for money not yet settled. Falls back
+    // to the stored values when a payment can't be projected (no cost / no rule).
+    const projected =
+      payment.transactionCost && payment.merchantAccountId
+        ? projectPaymentSettlement(
+            {
+              amount: payment.amount,
+              tipAmount: payment.tipAmount,
+              createdAt: payment.createdAt,
+              merchantAccountId: payment.merchantAccountId,
+              transactionCost: payment.transactionCost,
+            },
+            settlementConfigs,
+            venueTimezone,
+          )
+        : null
+    // Noon venue-local avoids any day-boundary ambiguity when read back as an instant.
+    const projectedDate = projected ? fromZonedTime(`${projected.settlementDateKey}T12:00:00.000`, venueTimezone) : null
+
     if (payment.transaction) {
       const { status, estimatedSettlementDate, netSettlementAmount } = payment.transaction
-      const net = Number(netSettlementAmount || netAmount)
 
-      if (hasSettlementLanded(status, estimatedSettlementDate, now)) {
-        // Landed automatically (settlement date passed) or explicitly confirmed.
-        availableNow += net
+      if (status === SettlementStatus.SETTLED) {
+        // Already landed and confirmed — authoritative; never rewrite money that
+        // already moved, even if a rate correction happened afterward.
+        availableNow += Number(netSettlementAmount || netAmount)
+        continue
+      }
+
+      const effectiveDate = projectedDate ?? estimatedSettlementDate
+      const effectiveNet = projected ? projected.net : Number(netSettlementAmount || netAmount)
+
+      if (hasSettlementLanded(status, effectiveDate, now)) {
+        // Landed automatically — its (recomputed) settlement date has passed.
+        availableNow += effectiveNet
       } else {
         // Still pending — its settlement date is in the future.
-        pendingSettlement += net
-        if (estimatedSettlementDate) {
-          upcomingSettlements.push({ date: estimatedSettlementDate, amount: net })
+        pendingSettlement += effectiveNet
+        if (effectiveDate) {
+          upcomingSettlements.push({ date: effectiveDate, amount: effectiveNet })
         }
       }
     } else {
@@ -211,17 +270,20 @@ export async function getAvailableBalance(venueId: string, dateRange?: { from: D
     // Sort by date ascending
     upcomingSettlements.sort((a, b) => a.date.getTime() - b.date.getTime())
 
-    // Group by date and sum amounts
+    // Group by VENUE-LOCAL calendar day (not UTC) — a settlement instant near a UTC
+    // day boundary (e.g. late-evening local time) formats to a DIFFERENT calendar day
+    // in UTC than in the venue timezone, which would silently move money to the wrong
+    // day here while the week strip (already venue-local) kept it on the right one.
     const settlementsByDate = new Map<string, number>()
     for (const settlement of upcomingSettlements) {
-      const dateKey = settlement.date.toISOString().split('T')[0]
+      const dateKey = formatInTimeZone(settlement.date, venueTimezone, 'yyyy-MM-dd')
       const currentAmount = settlementsByDate.get(dateKey) || 0
       settlementsByDate.set(dateKey, currentAmount + settlement.amount)
     }
 
     // Get first upcoming settlement
     const firstDate = upcomingSettlements[0].date
-    const firstDateKey = firstDate.toISOString().split('T')[0]
+    const firstDateKey = formatInTimeZone(firstDate, venueTimezone, 'yyyy-MM-dd')
     estimatedNextSettlement = {
       date: firstDate,
       amount: settlementsByDate.get(firstDateKey) || 0,

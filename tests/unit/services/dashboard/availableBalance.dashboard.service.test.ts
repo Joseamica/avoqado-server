@@ -109,6 +109,142 @@ describe('getAvailableBalance — venueFixedFee + uncosted', () => {
   })
 })
 
+describe('getAvailableBalance — estimatedNextSettlement recomputes live (matches the week strip)', () => {
+  const TZ = 'America/Mexico_City'
+
+  beforeEach(() => {
+    ;(prismaMock.venue.findUnique as jest.Mock).mockResolvedValue({ timezone: TZ })
+  })
+
+  it('uses the LIVE recomputed net, not a stale stored netSettlementAmount, for the next-deposit amount', async () => {
+    // Stored netSettlementAmount = 1.90 (computed before a later fee adjustment).
+    // Live transactionCost now yields 1.89 (2.00 gross − 0.11 fee). The hero must
+    // show 1.89 — the same number the settlement-week strip computes independently
+    // from the SAME transactionCost row — never the stale stored 1.90.
+    ;(prismaMock.payment.findMany as jest.Mock)
+      .mockResolvedValueOnce([
+        {
+          amount: 2.0,
+          tipAmount: 0,
+          createdAt: new Date('2098-12-30T14:00:00Z'), // far future — always still "pending" regardless of when this test runs
+          merchantAccountId: 'm1',
+          transactionCost: { venueChargeAmount: 0.11, venueFixedFee: 0, transactionType: 'CREDIT' },
+          transaction: { status: 'PENDING', estimatedSettlementDate: new Date('2099-01-01T00:00:00Z'), netSettlementAmount: 1.9 },
+        },
+      ])
+      .mockResolvedValueOnce([])
+    ;(prismaMock.settlementConfiguration.findMany as jest.Mock).mockResolvedValueOnce([
+      {
+        merchantAccountId: 'm1',
+        cardType: 'CREDIT',
+        settlementDays: 1,
+        settlementDayType: 'BUSINESS_DAYS',
+        cutoffTime: '23:00',
+        cutoffTimezone: TZ,
+        effectiveFrom: new Date('2026-01-01'),
+        effectiveTo: null,
+      },
+    ])
+
+    const summary = await getAvailableBalance(VENUE)
+
+    expect(summary.estimatedNextSettlement.amount).toBeCloseTo(1.89, 5) // live, NOT the stale stored 1.90
+    expect(summary.pendingSettlement).toBeCloseTo(1.89, 5)
+  })
+
+  it('never rewrites SETTLED money: uses the stored net even if live recompute would differ', async () => {
+    ;(prismaMock.payment.findMany as jest.Mock)
+      .mockResolvedValueOnce([
+        {
+          amount: 2.0,
+          tipAmount: 0,
+          createdAt: new Date('2026-07-06T14:00:00Z'),
+          merchantAccountId: 'm1',
+          transactionCost: { venueChargeAmount: 0.11, venueFixedFee: 0, transactionType: 'CREDIT' },
+          // Already SETTLED — the bank already moved 1.90; a later rate change must NOT retroactively change it.
+          transaction: { status: 'SETTLED', estimatedSettlementDate: new Date('2026-07-01T00:00:00Z'), netSettlementAmount: 1.9 },
+        },
+      ])
+      .mockResolvedValueOnce([])
+    ;(prismaMock.settlementConfiguration.findMany as jest.Mock).mockResolvedValueOnce([
+      {
+        merchantAccountId: 'm1',
+        cardType: 'CREDIT',
+        settlementDays: 1,
+        settlementDayType: 'BUSINESS_DAYS',
+        cutoffTime: '23:00',
+        cutoffTimezone: TZ,
+        effectiveFrom: new Date('2026-01-01'),
+        effectiveTo: null,
+      },
+    ])
+
+    const summary = await getAvailableBalance(VENUE)
+
+    expect(summary.availableNow).toBeCloseTo(1.9, 5) // stored net kept, not recomputed to 1.89
+  })
+
+  it('buckets the next deposit by VENUE-LOCAL day, not UTC day — two payments landing the SAME local day (different UTC days) must combine into one', async () => {
+    // Both payments have NO settlement config (merchant 'm2') → honest fallback to the
+    // STORED estimatedSettlementDate, isolating this test to the BUCKETING key alone
+    // (not the live-recompute behavior covered by the previous test). Far-future dates
+    // (2099) so "already landed" never triggers regardless of when this test runs.
+    //   Payment A: 2099-01-03T23:00:00Z = 2099-01-03 17:00 MX (venue-local Jan 3, UTC Jan 3)
+    //   Payment B: 2099-01-04T02:00:00Z = 2099-01-03 20:00 MX (venue-local Jan 3, UTC Jan 4!)
+    // A naive UTC bucket (`.toISOString().split('T')[0]`) splits these into "01-03" and
+    // "01-04" — the OLD code's "first upcoming day" would show ONLY payment A's 40,
+    // silently dropping B's 56 that the venue-local week strip counts on the SAME day.
+    // Venue-local bucketing correctly merges both into one "01-03" day totaling 96.
+    ;(prismaMock.payment.findMany as jest.Mock)
+      .mockResolvedValueOnce([
+        {
+          amount: 40,
+          tipAmount: 0,
+          createdAt: new Date('2098-12-30T14:00:00Z'),
+          merchantAccountId: 'm2',
+          transactionCost: { venueChargeAmount: 0, venueFixedFee: 0, transactionType: 'CREDIT' },
+          transaction: { status: 'PENDING', estimatedSettlementDate: new Date('2099-01-03T23:00:00Z'), netSettlementAmount: 40 },
+        },
+        {
+          amount: 56,
+          tipAmount: 0,
+          createdAt: new Date('2098-12-30T15:00:00Z'),
+          merchantAccountId: 'm2',
+          transactionCost: { venueChargeAmount: 0, venueFixedFee: 0, transactionType: 'CREDIT' },
+          transaction: { status: 'PENDING', estimatedSettlementDate: new Date('2099-01-04T02:00:00Z'), netSettlementAmount: 56 },
+        },
+      ])
+      .mockResolvedValueOnce([])
+    ;(prismaMock.settlementConfiguration.findMany as jest.Mock).mockResolvedValueOnce([]) // no config → honest fallback for both
+
+    const summary = await getAvailableBalance(VENUE)
+
+    expect(formatInTimeZone(summary.estimatedNextSettlement.date!, TZ, 'yyyy-MM-dd')).toBe('2099-01-03')
+    expect(summary.estimatedNextSettlement.amount).toBe(96) // 40 + 56, both merged into the correct venue-local day
+  })
+
+  it('falls back to the stored date/net when the payment has no settlement rule (honest fallback)', async () => {
+    ;(prismaMock.payment.findMany as jest.Mock)
+      .mockResolvedValueOnce([
+        {
+          amount: 50,
+          tipAmount: 0,
+          createdAt: new Date('2026-07-04T02:00:00Z'),
+          merchantAccountId: 'm2', // no config for this merchant
+          transactionCost: { venueChargeAmount: 2, venueFixedFee: 0, transactionType: 'CREDIT' },
+          transaction: { status: 'PENDING', estimatedSettlementDate: new Date('2099-01-05T00:00:00Z'), netSettlementAmount: 48 },
+        },
+      ])
+      .mockResolvedValueOnce([])
+    ;(prismaMock.settlementConfiguration.findMany as jest.Mock).mockResolvedValueOnce([])
+
+    const summary = await getAvailableBalance(VENUE)
+
+    expect(summary.estimatedNextSettlement.amount).toBe(48) // stored net kept — honest, not silently zeroed
+    expect(summary.estimatedNextSettlement.date?.toISOString()).toBe('2099-01-05T00:00:00.000Z')
+  })
+})
+
 describe('getSettlementTimeline — recompute-on-read settlement dates', () => {
   const TZ = 'America/Mexico_City'
   const range = { from: new Date('2026-07-01T00:00:00Z'), to: new Date('2026-07-10T00:00:00Z') }
