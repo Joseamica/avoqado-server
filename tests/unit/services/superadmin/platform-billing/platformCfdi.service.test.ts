@@ -7,8 +7,10 @@ jest.mock('@/services/fiscal/fiscalProvider.factory', () => ({
 import { resolveFiscalProvider } from '@/services/fiscal/fiscalProvider.factory'
 import {
   computePlatformCfdiTotals,
+  humanizeStampError,
   issuePlatformCfdi,
   cancelPlatformCfdi,
+  discardFailedPlatformCfdi,
   registerPlatformPayment,
   sendPlatformCfdiEmail,
 } from '@/services/superadmin/platform-billing/platformCfdi.service'
@@ -70,6 +72,35 @@ describe('platformCfdi.service', () => {
         { description: 'Exento', satProductKey: '1', satUnitKey: 'E48', quantity: 1, unitPriceCents: 100000, taxExempt: true },
       ])
       expect(totals).toEqual({ subtotalCents: 100000, discountCents: 0, taxCents: 0, totalCents: 100000 })
+    })
+  })
+
+  describe('humanizeStampError (NEW)', () => {
+    it('translates a decrypt failure (bad/stale emisor key) to an actionable Spanish message', () => {
+      expect(humanizeStampError('Unsupported state or unable to authenticate data')).toMatch(/llave del emisor/i)
+      expect(humanizeStampError('bad decrypt')).toMatch(/llave del emisor/i)
+    })
+
+    it('translates an Unauthorized/401 (Facturapi rejected the key) to an actionable Spanish message', () => {
+      expect(humanizeStampError('Unauthorized')).toMatch(/facturapi rechazó la llave/i)
+      expect(humanizeStampError('Request failed with status code 401')).toMatch(/facturapi rechazó la llave/i)
+    })
+
+    it('translates an invalid SAT unit/product key error to an actionable Spanish message', () => {
+      expect(humanizeStampError('Couldn\'t find unit_key "Uno"')).toMatch(/clave sat o la unidad/i)
+      expect(humanizeStampError('Couldn\'t find product_key "XYZ"')).toMatch(/clave sat o la unidad/i)
+    })
+
+    it('translates a receptor-data-mismatch validation error to an actionable Spanish message', () => {
+      expect(
+        humanizeStampError(
+          'Validación de timbrado: El campo DomicilioFiscalReceptor del receptor, debe pertenecer al nombre asociado al RFC registrado en el campo Rfc del Receptor.',
+        ),
+      ).toMatch(/datos fiscales del receptor no coinciden/i)
+    })
+
+    it('passes through an unrecognized message unchanged (no false-positive rewrite)', () => {
+      expect(humanizeStampError('Algo salió mal en el servidor')).toBe('Algo salió mal en el servidor')
     })
   })
 
@@ -150,6 +181,25 @@ describe('platformCfdi.service', () => {
 
     it('rejects an empty concept list', async () => {
       await expect(issuePlatformCfdi({ ...baseInput, lines: [] })).rejects.toBeInstanceOf(PlatformBillingError)
+    })
+
+    it('on a PAC stamp failure: persists the RAW message in lastError but throws the HUMANIZED one', async () => {
+      prismaMock.platformCfdi.findUnique.mockResolvedValue(null)
+      prismaMock.platformEmisor.findFirst.mockResolvedValue(ACTIVE_EMISOR)
+      prismaMock.billingTaxProfile.findUnique.mockResolvedValue(PROFILE)
+      prismaMock.platformCfdi.create.mockResolvedValue({ id: 'cfdiX', status: 'STAMPING' })
+      prismaMock.platformCfdi.update.mockImplementation((args: any) => Promise.resolve({ id: 'cfdiX', ...args.data }))
+      const createInvoice = jest.fn().mockRejectedValue(new Error('Unauthorized'))
+      mockResolve.mockReturnValue({ createInvoice })
+
+      await expect(issuePlatformCfdi(baseInput)).rejects.toMatchObject({
+        code: 'PROVIDER',
+        message: expect.stringMatching(/facturapi rechazó la llave/i),
+      })
+
+      expect(prismaMock.platformCfdi.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ status: 'STAMP_FAILED', lastError: 'Unauthorized' }) }),
+      )
     })
   })
 
@@ -378,6 +428,39 @@ describe('platformCfdi.service', () => {
     it('rejects sending a CFDI that is not STAMPED', async () => {
       prismaMock.platformCfdi.findUnique.mockResolvedValue({ id: 'c1', status: 'DRAFT', facturapiId: null, platformEmisorId: 'em1' })
       await expect(sendPlatformCfdiEmail('c1', 'x@y.com')).rejects.toMatchObject({ code: 'VALIDATION' })
+    })
+  })
+
+  describe('discardFailedPlatformCfdi (NEW)', () => {
+    it('deletes a STAMP_FAILED row with no child payments and returns it', async () => {
+      const failed = { id: 'f1', status: 'STAMP_FAILED', receptorRfc: 'XAXX010101000', totalCents: 464000, venueId: null }
+      prismaMock.platformCfdi.findUnique.mockResolvedValue(failed)
+      prismaMock.platformCfdi.count.mockResolvedValue(0)
+      prismaMock.platformCfdi.delete.mockResolvedValue(failed)
+
+      const res = await discardFailedPlatformCfdi('f1')
+
+      expect(prismaMock.platformCfdi.delete).toHaveBeenCalledWith({ where: { id: 'f1' } })
+      expect(res).toEqual(failed)
+    })
+
+    it('throws NO_CFDI when the row does not exist', async () => {
+      prismaMock.platformCfdi.findUnique.mockResolvedValue(null)
+      await expect(discardFailedPlatformCfdi('missing')).rejects.toMatchObject({ code: 'NO_CFDI' })
+      expect(prismaMock.platformCfdi.delete).not.toHaveBeenCalled()
+    })
+
+    it('refuses to delete a STAMPED CFDI (must be cancelled, not discarded)', async () => {
+      prismaMock.platformCfdi.findUnique.mockResolvedValue({ id: 's1', status: 'STAMPED', uuid: 'UUID-1' })
+      await expect(discardFailedPlatformCfdi('s1')).rejects.toMatchObject({ code: 'VALIDATION' })
+      expect(prismaMock.platformCfdi.delete).not.toHaveBeenCalled()
+    })
+
+    it('refuses to delete a failed CFDI that has child payment complements', async () => {
+      prismaMock.platformCfdi.findUnique.mockResolvedValue({ id: 'f2', status: 'STAMP_FAILED' })
+      prismaMock.platformCfdi.count.mockResolvedValue(1)
+      await expect(discardFailedPlatformCfdi('f2')).rejects.toMatchObject({ code: 'VALIDATION' })
+      expect(prismaMock.platformCfdi.delete).not.toHaveBeenCalled()
     })
   })
 })

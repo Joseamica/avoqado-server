@@ -191,6 +191,30 @@ export async function sendReceiptWhatsApp(phone: string, data: WhatsAppReceiptDa
 }
 
 /**
+ * Send a stamped CFDI (factura) to a customer via WhatsApp.
+ *
+ * Uses an approved UTILITY template (params: {{1}}=venue, {{2}}=folio,
+ * {{3}}=invoiceUrl) — mirror of `receipt_link`. The template name is
+ * configurable via WHATSAPP_TEMPLATE_INVOICE_LINK so we can point it at whatever
+ * name Meta approves without a code change (default `invoice_link`).
+ *
+ * Suggested template body (submit to Meta as UTILITY, es_MX):
+ *   Hola, tu factura de {{1}} está lista.
+ *   Folio: {{2}}
+ *   Descárgala aquí: {{3}}
+ *   ¡Gracias por tu preferencia!
+ */
+export async function sendCfdiWhatsApp(phone: string, data: { venueName: string; folio: string; invoiceUrl: string }): Promise<boolean> {
+  const template = process.env.WHATSAPP_TEMPLATE_INVOICE_LINK || 'invoice_link'
+  await sendTemplateMessage(phone, template, [
+    { type: 'text', text: data.venueName },
+    { type: 'text', text: data.folio },
+    { type: 'text', text: data.invoiceUrl },
+  ])
+  return true
+}
+
+/**
  * Share a payment link with a customer via WhatsApp.
  *
  * Uses the approved Utility template `payment_link_share` — body copy:

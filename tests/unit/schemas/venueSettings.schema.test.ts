@@ -1,7 +1,6 @@
 import { UpdateVenueSettingsSchema } from '../../../src/schemas/dashboard/venueSettings.schema'
 
-const parseBody = (body: unknown) =>
-  UpdateVenueSettingsSchema.safeParse({ params: { venueId: 'v1' }, body })
+const parseBody = (body: unknown) => UpdateVenueSettingsSchema.safeParse({ params: { venueId: 'v1' }, body })
 
 describe('UpdateVenueSettingsSchema googleReviewLink', () => {
   it('accepts a valid Place ID', () => {

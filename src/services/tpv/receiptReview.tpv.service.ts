@@ -3,7 +3,7 @@ import logger from '../../config/logger'
 import { NotFoundError, BadRequestError } from '../../errors/AppError'
 import { shouldNotifyBadReview, getReviewContext, sendBadReviewNotifications } from '../dashboard/badReviewNotification.service'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
-import { normalizeGoogleReviewUrl } from '../../utils/googleReviewLink'
+import { normalizeGoogleReviewUrl, DEFAULT_GOOGLE_PLACE_ID } from '../../utils/googleReviewLink'
 
 /**
  * Interface for review submission from receipt
@@ -189,7 +189,10 @@ export async function canSubmitReview(accessKey: string): Promise<{
       venueHasFeatureAccess(venue.id, 'GOOGLE_REVIEW_REDIRECT'),
       prisma.venueSettings.findUnique({ where: { venueId: venue.id }, select: { googleReviewLink: true } }),
     ])
-    const googleReviewUrl = reviewsEnabled ? normalizeGoogleReviewUrl(settings?.googleReviewLink) : null
+    // Founder decision (2026-07-06): if the venue is entitled but never configured
+    // its own link, fall back to Avoqado's own Google profile rather than showing
+    // no CTA at all — a happy customer still gets sent somewhere real.
+    const googleReviewUrl = reviewsEnabled ? normalizeGoogleReviewUrl(settings?.googleReviewLink || DEFAULT_GOOGLE_PLACE_ID) : null
 
     if (receipt.payment.review) {
       return { canSubmit: false, reason: 'Review already submitted', venue, reviewsEnabled, googleReviewUrl }

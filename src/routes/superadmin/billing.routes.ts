@@ -34,6 +34,7 @@ import {
  *   POST /api/v1/superadmin/billing/invoices
  *   GET  /api/v1/superadmin/billing/invoices
  *   GET  /api/v1/superadmin/billing/invoices/:id
+ *   DELETE /api/v1/superadmin/billing/invoices/:id  (descartar una factura STAMP_FAILED)
  *   GET  /api/v1/superadmin/billing/invoices/:id/pdf | /xml
  *   POST /api/v1/superadmin/billing/invoices/:id/cancel
  */
@@ -71,6 +72,7 @@ router.post(
 router.post('/invoices', validateRequest(issueInvoiceSchema), checkPermission('platform-billing:issue'), controller.issueInvoice)
 router.get('/invoices', validateRequest(listInvoicesSchema), checkPermission('platform-billing:view'), controller.listInvoices)
 router.get('/invoices/:id', checkPermission('platform-billing:view'), controller.getInvoice)
+router.delete('/invoices/:id', checkPermission('platform-billing:delete'), controller.discardInvoice)
 router.get('/invoices/:id/pdf', checkPermission('platform-billing:view'), controller.downloadPdf)
 router.get('/invoices/:id/xml', checkPermission('platform-billing:view'), controller.downloadXml)
 router.post(

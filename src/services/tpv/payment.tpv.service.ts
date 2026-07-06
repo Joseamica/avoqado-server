@@ -19,6 +19,7 @@ import { serializedInventoryService } from '../serialized-inventory/serializedIn
 import { getEffectivePaymentConfig } from '../organization-payment-config.service'
 import { logAction } from '../dashboard/activity-log.service'
 import { validateStaffVenue as validateStaffVenueShared } from '../../utils/staff-venue.util'
+import { loadOrderForCfdiFromDb } from '../fiscal/cfdi.service'
 
 /**
  * Build the slim digitalReceipt response shape with a constructed `receiptUrl`.
@@ -28,8 +29,14 @@ import { validateStaffVenue as validateStaffVenueShared } from '../../utils/staf
  * return the raw Prisma receipt (which has NO `receiptUrl` field) → the TPV crashed parsing the
  * response and the offline queue never cleared (stuck "pago pendiente" + blank QR). Use this
  * everywhere a digitalReceipt is returned so every response shape is consistent.
+ *
+ * `autofacturaAvailable` is ALWAYS present (defaults to `false`) so the TPV can pick a "…y
+ * factura" QR caption only when the venue+merchant can actually self-invoice this ticket.
  */
-function mapDigitalReceiptResponse<T extends { accessKey: string }>(receipt: T | null | undefined): (T & { receiptUrl: string }) | null {
+function mapDigitalReceiptResponse<T extends { accessKey: string }>(
+  receipt: T | null | undefined,
+  autofacturaAvailable = false,
+): (T & { receiptUrl: string; autofacturaAvailable: boolean }) | null {
   if (!receipt) return null
   // Purely ADDITIVE: keep every field the idempotent branches already returned (id, accessKey,
   // dataSnapshot, status, …) and just ADD the constructed `receiptUrl` the TPV client needs.
@@ -37,6 +44,32 @@ function mapDigitalReceiptResponse<T extends { accessKey: string }>(receipt: T |
   return {
     ...receipt,
     receiptUrl: `${process.env.FRONTEND_URL || 'https://dashboardv2.avoqado.io'}/receipts/public/${receipt.accessKey}`,
+    autofacturaAvailable,
+  }
+}
+
+/**
+ * Resolve whether this order's ticket may self-invoice (autofactura), for the TPV's
+ * "…y factura" QR caption. Mirrors `getAutofacturaStatusController`
+ * (`src/controllers/public/cfdi.public.controller.ts`) — reuses the SAME canonical resolver
+ * (`loadOrderForCfdiFromDb`) so the definition of "available" never drifts between the customer
+ * receipt portal and the TPV printout.
+ *
+ * 🛡️ Hot payment path: this is a read-only fiscal-config lookup layered on top of a successful
+ * charge. It must NEVER break the payment/receipt response — any error (including a rejected
+ * promise) degrades to `false`, same as "not invoiceable".
+ */
+export async function resolveAutofacturaAvailable(orderId: string | null | undefined): Promise<boolean> {
+  if (!orderId) return false
+  try {
+    const bundle = await loadOrderForCfdiFromDb(orderId)
+    return !!bundle && bundle.facturacionEnabled && bundle.autofacturaEnabled
+  } catch (error) {
+    logger.error('[payment.tpv.service] resolveAutofacturaAvailable lookup failed — defaulting to false', {
+      orderId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return false
   }
 }
 
@@ -2061,6 +2094,7 @@ export async function recordOrderPayment(
           id: digitalReceipt.id,
           accessKey: digitalReceipt.accessKey,
           receiptUrl: `${process.env.FRONTEND_URL || 'https://dashboardv2.avoqado.io'}/receipts/public/${digitalReceipt.accessKey}`,
+          autofacturaAvailable: await resolveAutofacturaAvailable(orderId),
         }
       : null,
   }
@@ -2689,6 +2723,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           id: digitalReceipt.id,
           accessKey: digitalReceipt.accessKey,
           receiptUrl: `${process.env.FRONTEND_URL || 'https://dashboardv2.avoqado.io'}/receipts/public/${digitalReceipt.accessKey}`,
+          autofacturaAvailable: await resolveAutofacturaAvailable(fastOrder?.id),
         }
       : null,
   }

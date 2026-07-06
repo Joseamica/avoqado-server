@@ -8,6 +8,7 @@ import { createRefundTransactionCost } from '../payments/transactionCost.service
 import { createRefundCommission } from '../dashboard/commission/commission-calculation.service'
 import { restockOrderItems } from '../dashboard/inventoryRestock.service'
 import { logAction } from '../dashboard/activity-log.service'
+import { resolveAutofacturaAvailable } from './payment.tpv.service'
 
 /**
  * Refund request data from TPV Android app
@@ -69,6 +70,7 @@ interface RefundResponse {
     id: string
     accessKey: string
     receiptUrl: string
+    autofacturaAvailable: boolean
   } | null
 }
 
@@ -500,6 +502,9 @@ export async function recordRefund(
       accessKey: receipt.accessKey,
       // 💸 Add ?refund=true for frontend to detect refund and apply appropriate styling
       receiptUrl: `${process.env.FRONTEND_URL || 'https://dashboardv2.avoqado.io'}/receipts/public/${receipt.accessKey}?refund=true`,
+      // 🧾 Same "can this ticket self-invoice" check as the original payment/order receipt.
+      // Hot payment path: resolveAutofacturaAvailable never throws — any lookup error → false.
+      autofacturaAvailable: await resolveAutofacturaAvailable(originalPayment.orderId),
     }
     logger.info('Refund digital receipt generated', { receiptId: receipt.id })
   } catch (error) {

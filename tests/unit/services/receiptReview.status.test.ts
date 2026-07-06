@@ -50,7 +50,7 @@ describe('canSubmitReview status extension', () => {
     expect(r.googleReviewUrl).toBeNull()
   })
 
-  it('returns null url when the venue has no link even if enabled', async () => {
+  it('falls back to the Avoqado default Google place when the venue has no VenueSettings row', async () => {
     mockedPrisma.digitalReceipt.findUnique.mockResolvedValue({
       paymentId: 'p1',
       payment: { venue: { id: 'v1', name: 'Alberto' }, review: null },
@@ -60,6 +60,44 @@ describe('canSubmitReview status extension', () => {
 
     const r = await canSubmitReview('key-1')
     expect(r.reviewsEnabled).toBe(true)
+    expect(r.googleReviewUrl).toBe('https://search.google.com/local/writereview?placeid=ChIJV-djtwLq44MROF7nu5c5fUY')
+  })
+
+  it('falls back to the Avoqado default Google place when googleReviewLink is null/empty', async () => {
+    mockedPrisma.digitalReceipt.findUnique.mockResolvedValue({
+      paymentId: 'p1',
+      payment: { venue: { id: 'v1', name: 'Alberto' }, review: null },
+    })
+    mockedFeature.mockResolvedValue(true)
+    mockedPrisma.venueSettings.findUnique.mockResolvedValue({ googleReviewLink: null })
+
+    const r = await canSubmitReview('key-1')
+    expect(r.reviewsEnabled).toBe(true)
+    expect(r.googleReviewUrl).toBe('https://search.google.com/local/writereview?placeid=ChIJV-djtwLq44MROF7nu5c5fUY')
+  })
+
+  it('uses the venue own link over the Avoqado fallback when both could apply', async () => {
+    mockedPrisma.digitalReceipt.findUnique.mockResolvedValue({
+      paymentId: 'p1',
+      payment: { venue: { id: 'v1', name: 'Alberto' }, review: null },
+    })
+    mockedFeature.mockResolvedValue(true)
+    mockedPrisma.venueSettings.findUnique.mockResolvedValue({ googleReviewLink: 'ChIJvenuepropio123' })
+
+    const r = await canSubmitReview('key-1')
+    expect(r.googleReviewUrl).toBe('https://search.google.com/local/writereview?placeid=ChIJvenuepropio123')
+  })
+
+  it('never falls back when reviewsEnabled is false (FREE venue), regardless of missing link', async () => {
+    mockedPrisma.digitalReceipt.findUnique.mockResolvedValue({
+      paymentId: 'p1',
+      payment: { venue: { id: 'v1', name: 'Alberto' }, review: null },
+    })
+    mockedFeature.mockResolvedValue(false)
+    mockedPrisma.venueSettings.findUnique.mockResolvedValue(null)
+
+    const r = await canSubmitReview('key-1')
+    expect(r.reviewsEnabled).toBe(false)
     expect(r.googleReviewUrl).toBeNull()
   })
 

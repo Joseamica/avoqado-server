@@ -21,6 +21,7 @@ import {
   listPlatformCfdis,
   getPlatformCfdi,
   cancelPlatformCfdi,
+  discardFailedPlatformCfdi,
   fetchPlatformCfdiArtifact,
   registerPlatformPayment,
   listPlatformCfdiPayments,
@@ -43,7 +44,14 @@ function handleBillingError(error: unknown, res: Response, next: NextFunction): 
 /** GET /api/v1/superadmin/billing/emisor */
 export async function getEmisor(_req: Request, res: Response, next: NextFunction) {
   try {
-    res.json({ success: true, data: await getActivePlatformEmisor() })
+    const emisor = await getActivePlatformEmisor()
+    if (!emisor) {
+      res.json({ success: true, data: null })
+      return
+    }
+    // Never leak the encrypted live key to the browser — expose only a boolean indicator.
+    const { providerKeyEnc, ...safe } = emisor
+    res.json({ success: true, data: { ...safe, keyConfigured: Boolean(providerKeyEnc) } })
   } catch (error) {
     next(error)
   }
@@ -318,6 +326,27 @@ export async function cancelInvoice(req: Request, res: Response, next: NextFunct
       },
     })
     res.json({ success: true, data: cfdi })
+  } catch (error) {
+    handleBillingError(error, res, next)
+  }
+}
+
+/** DELETE /api/v1/superadmin/billing/invoices/:id — descartar una factura que falló al timbrar. */
+export async function discardInvoice(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { userId } = (req as any).authContext
+    const cfdi = await discardFailedPlatformCfdi(req.params.id)
+    await prisma.activityLog.create({
+      data: {
+        staffId: userId,
+        venueId: cfdi.venueId,
+        action: 'PLATFORM_CFDI_DISCARDED',
+        entity: 'PlatformCfdi',
+        entityId: cfdi.id,
+        data: { priorStatus: cfdi.status, receptorRfc: cfdi.receptorRfc, totalCents: cfdi.totalCents },
+      },
+    })
+    res.json({ success: true, data: { id: cfdi.id, discarded: true } })
   } catch (error) {
     handleBillingError(error, res, next)
   }

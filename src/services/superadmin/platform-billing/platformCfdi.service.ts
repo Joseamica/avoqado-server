@@ -25,6 +25,36 @@ import type {
 const DEFAULT_IVA_RATE = 0.16
 const MAX_PAGE_SIZE = 100
 
+/**
+ * Traduce el error crudo del PAC/Facturapi (o de nuestra propia capa de descifrado) a un mensaje
+ * en español accionable para el operador. El mensaje técnico original SIEMPRE se guarda tal cual
+ * en `PlatformCfdi.lastError` (para soporte/debug); esta función solo afecta lo que ve el usuario
+ * en el toast de error. Basado en los patrones reales vistos en producción y en pruebas (llave
+ * inválida, clave SAT/unidad inexistente, datos del receptor que no coinciden con el SAT).
+ */
+export function humanizeStampError(rawMessage: string): string {
+  const msg = rawMessage.toLowerCase()
+
+  // Descifrado de la llave del emisor (AES-GCM) — nunca llega a Facturapi; error de Node crypto.
+  if (msg.includes('unsupported state') || msg.includes('unable to authenticate data') || msg.includes('bad decrypt')) {
+    return 'La llave del emisor no se pudo leer (dañada o corresponde a otra configuración). Ve a "Configurar emisor" y vincula la llave de nuevo.'
+  }
+  // Autenticación contra Facturapi (llave rechazada — vencida, revocada, o de otra organización).
+  if (msg.includes('unauthorized') || msg.includes('invalid api key') || msg.includes('401')) {
+    return 'Facturapi rechazó la llave del emisor (vencida, revocada, o de otra organización). Ve a "Configurar emisor" y vincula una llave live vigente.'
+  }
+  // Clave de producto/servicio o de unidad del SAT inexistente en el catálogo.
+  if (msg.includes('unit_key') || msg.includes('clave de unidad') || msg.includes('product_key') || msg.includes('clave de producto')) {
+    return 'La Clave SAT o la Unidad de un concepto no existe en el catálogo del SAT. Corrígela en la línea del concepto y vuelve a intentar.'
+  }
+  // Validación de datos del receptor contra el registro del SAT (RFC, régimen, domicilio fiscal).
+  if (msg.includes('receptor') && (msg.includes('rfc') || msg.includes('regimen') || msg.includes('domicilio'))) {
+    return 'Los datos fiscales del receptor no coinciden con su registro en el SAT (revisa RFC, régimen fiscal o código postal) y vuelve a intentar.'
+  }
+  // Sin patrón conocido: se muestra el mensaje del proveedor tal cual (suele venir ya en español).
+  return rawMessage
+}
+
 /** Compute CFDI money totals from line items. All integer cents, IVA add-on. */
 export function computePlatformCfdiTotals(lines: PlatformCfdiLineInput[]): PlatformCfdiTotals {
   let subtotalCents = 0
@@ -160,7 +190,7 @@ export async function issuePlatformCfdi(input: IssuePlatformCfdiInput): Promise<
       where: { id: row.id },
       data: { status: 'STAMP_FAILED', lastError: message, attempts: { increment: 1 } },
     })
-    throw new PlatformBillingError(`Error al timbrar el CFDI: ${message}`, 'PROVIDER')
+    throw new PlatformBillingError(`Error al timbrar el CFDI: ${humanizeStampError(message)}`, 'PROVIDER')
   }
 }
 
@@ -185,6 +215,25 @@ export async function listPlatformCfdis(
 
 export async function getPlatformCfdi(id: string): Promise<PlatformCfdi | null> {
   return prisma.platformCfdi.findUnique({ where: { id } })
+}
+
+/**
+ * Discard (hard-delete) a CFDI that FAILED to stamp. Only `STAMP_FAILED` rows with no child
+ * payment complements (REPs) can be removed — a STAMPED CFDI must be CANCELLED at the SAT, never
+ * deleted. Used to clean up failed attempts so they don't pile up in the list. Returns the deleted
+ * row so the controller can write the ActivityLog audit entry.
+ */
+export async function discardFailedPlatformCfdi(id: string): Promise<PlatformCfdi> {
+  const row = await prisma.platformCfdi.findUnique({ where: { id } })
+  if (!row) throw new PlatformBillingError('CFDI no encontrado', 'NO_CFDI')
+  if (row.status !== 'STAMP_FAILED') {
+    throw new PlatformBillingError('Solo se pueden descartar facturas que fallaron al timbrar', 'VALIDATION')
+  }
+  const children = await prisma.platformCfdi.count({ where: { parentPlatformCfdiId: id } })
+  if (children > 0) {
+    throw new PlatformBillingError('No se puede descartar; tiene complementos de pago asociados', 'VALIDATION')
+  }
+  return prisma.platformCfdi.delete({ where: { id } })
 }
 
 /** Cancel a stamped CFDI. Motivo 01 (substitution) requires the substitute UUID. */
@@ -388,7 +437,7 @@ export async function registerPlatformPayment(input: RegisterPaymentInput): Prom
       data: { status: 'STAMP_FAILED', lastError: message, attempts: { increment: 1 } },
     })
     if (err instanceof PlatformBillingError) throw err
-    throw new PlatformBillingError(`Error al timbrar el complemento de pago: ${message}`, 'PROVIDER')
+    throw new PlatformBillingError(`Error al timbrar el complemento de pago: ${humanizeStampError(message)}`, 'PROVIDER')
   }
 }
 

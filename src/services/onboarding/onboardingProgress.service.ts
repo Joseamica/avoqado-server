@@ -637,7 +637,9 @@ export async function getV2SetupDataForCompletion(organizationId: string) {
     state: businessInfo.state || '',
     country: businessInfo.country || 'MX',
     zipCode: businessInfo.zipCode || '',
-    phone: entityInfo.phone || '',
+    // Phone now lives in step2 (BusinessInfoStep); fall back to step4 for
+    // sessions already in progress when this moved (old frontend saved it there).
+    phone: businessInfo.phone || entityInfo.phone || '',
     email: businessInfo.email || '', // Fallback to Staff.email is applied in venueCreation.service
   }
 

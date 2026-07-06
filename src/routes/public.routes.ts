@@ -3,7 +3,7 @@ import { z } from 'zod'
 import cors from 'cors'
 import rateLimit from 'express-rate-limit'
 import { getPublicReceipt } from '../controllers/public/receipt.public.controller'
-import { autofacturaController, getAutofacturaStatusController } from '../controllers/public/cfdi.public.controller'
+import { autofacturaController, getAutofacturaStatusController, sendCfdiWhatsAppController } from '../controllers/public/cfdi.public.controller'
 import { submitReviewFromReceipt, checkReviewStatus, getReviewForReceipt } from '../controllers/public/receiptReview.public.controller'
 import * as reservationPublicController from '../controllers/public/reservation.public.controller'
 import * as creditPackPublicController from '../controllers/public/creditPack.public.controller'
@@ -96,6 +96,8 @@ router.get('/receipt/:accessKey', getPublicReceipt)
 // Both cfdiLimit (per-IP) and cfdiPerKeyLimit (per-accessKey) must pass to reach the controller.
 router.post('/receipt/:accessKey/cfdi', cfdiLimit, cfdiPerKeyLimit, validateRequest(autofacturaSchema), autofacturaController)
 router.get('/receipt/:accessKey/cfdi', readLimit, getAutofacturaStatusController)
+// Send the stamped factura to a WhatsApp number (rate-limited like the stamp itself).
+router.post('/receipt/:accessKey/cfdi/whatsapp', cfdiLimit, cfdiPerKeyLimit, sendCfdiWhatsAppController)
 
 // Receipt Review routes
 router.post('/receipt/:accessKey/review', submitReviewFromReceipt)

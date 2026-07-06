@@ -18,6 +18,15 @@ export const GOOGLE_REVIEW_DOMAINS = [
 const PLACE_ID_RE = /^[A-Za-z0-9_-]{10,256}$/
 
 /**
+ * Fallback Google Place ID used when a venue has PRO/reviews enabled but hasn't
+ * configured its own `googleReviewLink` yet. Founder decision (2026-07-06): a
+ * happy (5★) customer at a venue with no link configured still gets sent
+ * somewhere real — Avoqado's own Google Business profile — instead of seeing no
+ * CTA at all. Verified live: https://www.google.com/maps/place/Avoqado (CDMX).
+ */
+export const DEFAULT_GOOGLE_PLACE_ID = 'ChIJV-djtwLq44MROF7nu5c5fUY'
+
+/**
  * Returns a SPANISH error message if the value is not a valid Google review
  * link or Place ID, or `null` if it is valid. An empty/whitespace value is
  * treated as valid (it means the owner is clearing the field).

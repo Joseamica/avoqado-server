@@ -199,6 +199,7 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'platform-billing:view': ['platform-billing:view'],
   'platform-billing:configure': ['platform-billing:configure', 'platform-billing:view'],
   'platform-billing:issue': ['platform-billing:issue', 'platform-billing:view'],
+  'platform-billing:delete': ['platform-billing:delete', 'platform-billing:view'],
   'billing:subscriptions:read': ['billing:subscriptions:read', 'billing:read', 'venues:read', 'features:read'],
   'billing:subscriptions:manage': [
     'billing:subscriptions:manage',
@@ -1483,7 +1484,7 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   // - view:      read-only access to issued invoices and fiscal config (OWNER/ADMIN/MANAGER)
   cfdi: ['cfdi:configure', 'cfdi:issue', 'cfdi:view'],
   // Platform billing CFDI (Avoqado factura a sus propios clientes) — superadmin-only back-office
-  'platform-billing': ['platform-billing:view', 'platform-billing:configure', 'platform-billing:issue'],
+  'platform-billing': ['platform-billing:view', 'platform-billing:configure', 'platform-billing:issue', 'platform-billing:delete'],
 }
 
 /**

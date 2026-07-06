@@ -101,6 +101,7 @@ const SUPERADMIN_ONLY_ALLOWLIST = new Set<string>([
   'platform-billing:view',
   'platform-billing:configure',
   'platform-billing:issue',
+  'platform-billing:delete',
 ])
 
 // Permissions intentionally absent from INDIVIDUAL_PERMISSIONS_BY_RESOURCE.

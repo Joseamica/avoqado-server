@@ -14,6 +14,7 @@ import { Request, Response } from 'express'
 import { toZonedTime } from 'date-fns-tz'
 import prisma from '../../utils/prismaClient'
 import { issueCfdiForOrder, loadOrderForCfdiFromDb } from '../../services/fiscal/cfdi.service'
+import { sendCfdiWhatsApp } from '../../services/whatsapp.service'
 import { logAction } from '../../services/dashboard/activity-log.service'
 import logger from '../../config/logger'
 import { env } from '../../config/env'
@@ -93,7 +94,11 @@ export async function autofacturaController(req: Request<{ accessKey: string }>,
     }
 
     if (result.status === 'STAMP_FAILED') {
-      res.status(502).json({ error: 'El SAT rechazó el timbrado' })
+      // Surface the PAC/SAT reason so the customer can fix their own data (public
+      // endpoint, but the message is about the receptor's own fiscal info — no
+      // sensitive data). Strip the boilerplate "Validación de timbrado:" prefix.
+      const reason = (result.cfdi?.lastError ?? '').replace(/^Validaci[oó]n de timbrado:\s*/i, '').trim()
+      res.status(502).json({ error: 'El SAT rechazó el timbrado', message: reason || undefined })
       return
     }
 
@@ -204,5 +209,53 @@ export async function getAutofacturaStatusController(req: Request<{ accessKey: s
     const message = err instanceof Error ? err.message : String(err)
     logger.error('[cfdi.public] get status error', { accessKey, error: message })
     res.status(500).json({ error: 'Error interno al consultar el CFDI' })
+  }
+}
+
+// ─── POST /receipt/:accessKey/cfdi/whatsapp ──────────────────────────────────
+// Send the already-stamped CFDI (factura) to a customer-supplied WhatsApp number.
+// Public: ownership is proven by the accessKey → payment → order → stamped CFDI
+// chain (we never send a CFDI that doesn't belong to this receipt).
+
+export async function sendCfdiWhatsAppController(req: Request<{ accessKey: string }, unknown, { phone?: string }>, res: Response): Promise<void> {
+  const { accessKey } = req.params
+  const phone = (req.body?.phone ?? '').trim()
+
+  // E.164 (+ then 8–15 digits). The dashboard PhoneInput already emits this shape.
+  if (!/^\+\d{8,15}$/.test(phone)) {
+    res.status(400).json({ error: 'Número de WhatsApp inválido.' })
+    return
+  }
+
+  try {
+    const receipt = await prisma.digitalReceipt.findUnique({
+      where: { accessKey },
+      select: { payment: { select: { order: { select: { id: true, venue: { select: { name: true } } } } } } },
+    })
+    const order = receipt?.payment?.order
+    if (!order) {
+      res.status(404).json({ error: 'Recibo no encontrado' })
+      return
+    }
+
+    // Only a STAMPED CFDI with a PDF can be sent. Resolve the latest one.
+    const cfdi = await prisma.cfdi.findFirst({
+      where: { orderId: order.id, status: 'STAMPED' },
+      orderBy: { createdAt: 'desc' },
+      select: { serie: true, folio: true, pdfUrl: true },
+    })
+    if (!cfdi || !cfdi.pdfUrl) {
+      res.status(409).json({ error: 'Esta cuenta todavía no tiene factura para enviar.' })
+      return
+    }
+
+    const folio = [cfdi.serie, cfdi.folio].filter(Boolean).join('-') || 's/folio'
+    await sendCfdiWhatsApp(phone, { venueName: order.venue.name, folio, invoiceUrl: cfdi.pdfUrl })
+
+    res.status(200).json({ ok: true })
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    logger.error('[cfdi.public] whatsapp send error', { accessKey, error: message })
+    res.status(502).json({ error: 'No pudimos enviar la factura por WhatsApp. Inténtalo de nuevo.' })
   }
 }
