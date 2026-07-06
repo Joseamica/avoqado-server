@@ -39,6 +39,32 @@ export const PROVIDER_DEVICE_COMPATIBILITY: Record<string, string[]> = {
 }
 
 /**
+ * Canonical `Terminal.brand` values FOR PAYMENT HARDWARE. Not an exhaustive
+ * list of every valid `Terminal.brand` — printers/KDS/tablets legitimately use
+ * other values (e.g. "Epson", "Apple", "Star Micronics") that are irrelevant to
+ * `PROVIDER_DEVICE_COMPATIBILITY`. Do NOT turn this into a strict allowlist on
+ * the create/update route schemas — use `normalizeTerminalBrand` instead, which
+ * only fixes casing on these four and leaves everything else untouched.
+ */
+export const TERMINAL_BRANDS = ['PAX', 'NEXGO', 'INGENICO', 'VERIFONE'] as const
+export type TerminalBrand = (typeof TERMINAL_BRANDS)[number]
+
+/**
+ * Normalizes a `brand` string to its canonical case when it matches one of
+ * `TERMINAL_BRANDS` case-insensitively (e.g. `"Nexgo"` → `"NEXGO"`,
+ * `"verifone"` → `"VERIFONE"`) — this is what the case-mismatch bug needed.
+ * Anything else (printer/tablet brands, typos of non-canonical values) passes
+ * through unchanged (trimmed), since `brand` isn't exclusive to payment
+ * hardware and rejecting unknown values would break legitimate terminal types.
+ */
+export function normalizeTerminalBrand(brand: string | null | undefined): string | null | undefined {
+  if (!brand) return brand
+  const trimmed = brand.trim()
+  const canonical = TERMINAL_BRANDS.find(b => b.toLowerCase() === trimmed.toLowerCase())
+  return canonical ?? trimmed
+}
+
+/**
  * Cheap synchronous predicate — no DB call.
  *
  * Permissive on unknown providers and null brands:

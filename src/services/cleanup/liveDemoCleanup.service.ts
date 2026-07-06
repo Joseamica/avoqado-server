@@ -263,8 +263,22 @@ async function deleteVenueData(venueId: string): Promise<void> {
   await prisma.shift.deleteMany({ where: { venueId } })
   await prisma.staffVenue.deleteMany({ where: { venueId } })
 
-  // 9. Payment config (merchant accounts will cascade delete)
+  // 9. Payment config + the merchant accounts it points to.
+  // MerchantAccount has NO venueId and its FK from VenuePaymentConfig is
+  // onDelete: Restrict (schema.prisma) — it does NOT cascade. The Stripe/Blumon
+  // demo accounts seedDemoVenue created just for this venue would otherwise
+  // orphan forever in the global MerchantAccount table (found accumulating in
+  // prod's superadmin "Cuentas de Comercio" screen, 2026-07-06).
+  const paymentConfig = await prisma.venuePaymentConfig.findUnique({ where: { venueId } })
   await prisma.venuePaymentConfig.deleteMany({ where: { venueId } })
+  if (paymentConfig) {
+    const merchantAccountIds = [paymentConfig.primaryAccountId, paymentConfig.secondaryAccountId, paymentConfig.tertiaryAccountId].filter(
+      (id): id is string => Boolean(id),
+    )
+    if (merchantAccountIds.length > 0) {
+      await prisma.merchantAccount.deleteMany({ where: { id: { in: merchantAccountIds } } })
+    }
+  }
 
   // 10. Features and settings
   await prisma.venueFeature.deleteMany({ where: { venueId } })

@@ -3,6 +3,7 @@ import * as terminalController from '../../controllers/dashboard/terminals.super
 import * as migrationController from '../../controllers/dashboard/terminal-migration.controller'
 import { migratePreflightSchema, migrateExecuteSchema, migrateStatusSchema, migrateCancelSchema } from './terminal-migration.schemas'
 import { validateRequest } from '../../middlewares/validation'
+import { normalizeTerminalBrand } from '../../lib/providerDeviceCompatibility'
 import { z } from 'zod'
 
 const router = Router()
@@ -29,7 +30,11 @@ const createTerminalSchema = z.object({
     serialNumber: z.string().min(1, 'Serial number is required'),
     name: z.string().min(1, 'Terminal name is required'),
     type: z.enum(['TPV_ANDROID', 'TPV_IOS', 'PRINTER_RECEIPT', 'PRINTER_KITCHEN', 'KDS']),
-    brand: z.string().optional(),
+    // Not a strict enum: `brand` is shared with printers/KDS/tablets, which use
+    // values outside the payment-hardware set (Epson, Apple, Star Micronics…).
+    // Normalizing only fixes casing on the 4 payment brands (PAX/NEXGO/
+    // INGENICO/VERIFONE) — see `normalizeTerminalBrand`.
+    brand: z.string().optional().transform(normalizeTerminalBrand),
     model: z.string().optional(),
     assignedMerchantIds: z.array(z.string()).optional(),
     generateActivationCode: z.boolean().optional(),
@@ -48,7 +53,11 @@ const updateTerminalSchema = z.object({
     name: z.string().optional(),
     status: z.enum(['ACTIVE', 'INACTIVE', 'MAINTENANCE', 'RETIRED']).optional(),
     assignedMerchantIds: z.array(z.string()).optional(),
-    brand: z.string().optional(),
+    // Not a strict enum: `brand` is shared with printers/KDS/tablets, which use
+    // values outside the payment-hardware set (Epson, Apple, Star Micronics…).
+    // Normalizing only fixes casing on the 4 payment brands (PAX/NEXGO/
+    // INGENICO/VERIFONE) — see `normalizeTerminalBrand`.
+    brand: z.string().optional().transform(normalizeTerminalBrand),
     model: z.string().optional(),
     // Task 12 / validation point #3: operator confirmation flag for brand-change
     // pruning of incompatible merchants. Default false → service returns a

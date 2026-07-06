@@ -1,12 +1,18 @@
 # Reseñas en el recibo digital + redirección a Google (5★) — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a customer-facing 1-5★ rating widget to the public digital receipt that saves every rating internally and, on a perfect 5★, offers a one-tap CTA to leave a public Google review — gated to the PRO plan.
+**Goal:** Add a customer-facing 1-5★ rating widget to the public digital receipt that saves every rating internally and, on a perfect 5★,
+offers a one-tap CTA to leave a public Google review — gated to the PRO plan.
 
-**Architecture:** Backend (`avoqado-server`) is authoritative: it stores the venue's Google review link, resolves the PRO gate + normalized Google URL server-side, and exposes both on the existing public receipt status endpoint. The dashboard (`avoqado-web-dashboard`) adds the config field (Integrations → Google) and the receipt widget. The customer MCP exposes the link read-only to OWNER connections. Sales collateral (`Avoqado-HQ`) is updated to match.
+**Architecture:** Backend (`avoqado-server`) is authoritative: it stores the venue's Google review link, resolves the PRO gate + normalized
+Google URL server-side, and exposes both on the existing public receipt status endpoint. The dashboard (`avoqado-web-dashboard`) adds the
+config field (Integrations → Google) and the receipt widget. The customer MCP exposes the link read-only to OWNER connections. Sales
+collateral (`Avoqado-HQ`) is updated to match.
 
-**Tech Stack:** Express + TypeScript + Prisma/PostgreSQL (backend), Zod validation, Jest (backend unit), React 18 + Vite + TanStack Query + Tailwind/Radix + i18next (dashboard), axios (public calls).
+**Tech Stack:** Express + TypeScript + Prisma/PostgreSQL (backend), Zod validation, Jest (backend unit), React 18 + Vite + TanStack Query +
+Tailwind/Radix + i18next (dashboard), axios (public calls).
 
 ## Global Constraints
 
@@ -15,14 +21,18 @@
 - **Zod messages:** SPANISH ONLY (validation middleware shows them raw to users).
 - **authContext:** read `(req as any).authContext` — never `req.user`.
 - **Tenant isolation:** every query scoped by `venueId`.
-- **Permissions/features:** mirrored by exact string name across repos; a mismatch fails silently. Feature code: `GOOGLE_REVIEW_REDIRECT` (exact, everywhere).
-- **i18n (dashboard):** all user-facing text via `t()`, with `es` + `en` + `fr` keys (all three namespaces exist for `googleIntegration` and `payment`).
+- **Permissions/features:** mirrored by exact string name across repos; a mismatch fails silently. Feature code: `GOOGLE_REVIEW_REDIRECT`
+  (exact, everywhere).
+- **i18n (dashboard):** all user-facing text via `t()`, with `es` + `en` + `fr` keys (all three namespaces exist for `googleIntegration` and
+  `payment`).
 - **Theme (dashboard):** semantic tokens only (`bg-muted`, `text-foreground`…), no hardcoded grays/hex.
 - **API prefix:** all dashboard API paths include `/api/v1/`.
 - **Public receipt calls:** use `axios` directly with `import.meta.env.VITE_API_URL` (no `withCredentials`; endpoint is `origin:'*'`).
-- **Testing hygiene:** after writing/adding Jest tests, run `npx tsc --noEmit` (ts-jest is transpile-only). Backend full check: `npm run pre-deploy`.
+- **Testing hygiene:** after writing/adding Jest tests, run `npx tsc --noEmit` (ts-jest is transpile-only). Backend full check:
+  `npm run pre-deploy`.
 - **No prod writes.** All dev/testing on local dev DB. Do NOT run seeds/migrations against production.
-- **No git commits/push** until the founder explicitly says "commitea"/"push"/"lanza". The "Commit" steps below stage the work; only run `git commit` if the founder has authorized it for this session. Otherwise leave changes staged/uncommitted and report per slice.
+- **No git commits/push** until the founder explicitly says "commitea"/"push"/"lanza". The "Commit" steps below stage the work; only run
+  `git commit` if the founder has authorized it for this session. Otherwise leave changes staged/uncommitted and report per slice.
 
 ---
 
@@ -35,9 +45,11 @@ Working dir for this phase: `/Users/amieva/Documents/Programming/Avoqado/avoqado
 ### Task A1: Add `googleReviewLink` to `VenueSettings` (schema + migration)
 
 **Files:**
+
 - Modify: `prisma/schema.prisma` (model `VenueSettings`, Reviews section ~line 697-701)
 
 **Interfaces:**
+
 - Produces: `VenueSettings.googleReviewLink: string | null` (Prisma field, nullable, no default).
 
 - [ ] **Step 1: Add the field to the schema**
@@ -55,13 +67,12 @@ In `prisma/schema.prisma`, inside `model VenueSettings`, in the `// Reviews` blo
 
 - [ ] **Step 2: Create the migration (local dev DB only)**
 
-Run: `npx prisma migrate dev --name add_google_review_link_to_venue_settings`
-Expected: migration created under `prisma/migrations/`, applied to local dev DB, Prisma Client regenerated. No prompt about data loss (additive nullable column).
+Run: `npx prisma migrate dev --name add_google_review_link_to_venue_settings` Expected: migration created under `prisma/migrations/`,
+applied to local dev DB, Prisma Client regenerated. No prompt about data loss (additive nullable column).
 
 - [ ] **Step 3: Verify the client type**
 
-Run: `npx tsc --noEmit`
-Expected: PASS (no type errors; `googleReviewLink` now exists on the `VenueSettings` type).
+Run: `npx tsc --noEmit` Expected: PASS (no type errors; `googleReviewLink` now exists on the `VenueSettings` type).
 
 - [ ] **Step 4: Commit** (only if founder authorized — see Global Constraints)
 
@@ -75,13 +86,17 @@ git commit -m "feat(reviews): add googleReviewLink to VenueSettings"
 ### Task A2: Google review link validation + normalization util (TDD — highest-risk logic)
 
 **Files:**
+
 - Create: `src/utils/googleReviewLink.ts`
 - Test: `tests/unit/utils/googleReviewLink.test.ts`
 
 **Interfaces:**
+
 - Produces:
+
   - `GOOGLE_REVIEW_DOMAINS: string[]`
-  - `validateGoogleReviewLink(raw: string): string | null` — returns a Spanish error message when invalid, or `null` when valid (empty/whitespace counts as valid = "clearing").
+  - `validateGoogleReviewLink(raw: string): string | null` — returns a Spanish error message when invalid, or `null` when valid
+    (empty/whitespace counts as valid = "clearing").
   - `normalizeGoogleReviewUrl(raw: string | null | undefined): string | null` — full clickable URL, or `null`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -135,8 +150,7 @@ describe('normalizeGoogleReviewUrl', () => {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `npx jest tests/unit/utils/googleReviewLink.test.ts`
-Expected: FAIL ("Cannot find module '../../../src/utils/googleReviewLink'").
+Run: `npx jest tests/unit/utils/googleReviewLink.test.ts` Expected: FAIL ("Cannot find module '../../../src/utils/googleReviewLink'").
 
 - [ ] **Step 3: Write the implementation**
 
@@ -207,13 +221,11 @@ export function normalizeGoogleReviewUrl(raw: string | null | undefined): string
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `npx jest tests/unit/utils/googleReviewLink.test.ts`
-Expected: PASS (all cases).
+Run: `npx jest tests/unit/utils/googleReviewLink.test.ts` Expected: PASS (all cases).
 
 - [ ] **Step 5: tsc**
 
-Run: `npx tsc --noEmit`
-Expected: PASS.
+Run: `npx tsc --noEmit` Expected: PASS.
 
 - [ ] **Step 6: Commit** (if authorized)
 
@@ -227,12 +239,15 @@ git commit -m "feat(reviews): add google review link validation + normalization 
 ### Task A3: Wire validation into `UpdateVenueSettingsSchema`
 
 **Files:**
+
 - Modify: `src/schemas/dashboard/venueSettings.schema.ts` (Reviews block in `UpdateVenueSettingsSchema.body`, ~line 61-65)
 - Test: `tests/unit/schemas/venueSettings.schema.test.ts`
 
 **Interfaces:**
+
 - Consumes: `validateGoogleReviewLink` from Task A2.
-- Produces: `UpdateVenueSettingsSchema` accepts optional `googleReviewLink: string | null` (empty string coerced to `null`); `getVenueSettings` already returns the whole `VenueSettings` row so the field flows to the dashboard read with no controller change.
+- Produces: `UpdateVenueSettingsSchema` accepts optional `googleReviewLink: string | null` (empty string coerced to `null`);
+  `getVenueSettings` already returns the whole `VenueSettings` row so the field flows to the dashboard read with no controller change.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -241,8 +256,7 @@ Create `tests/unit/schemas/venueSettings.schema.test.ts`:
 ```typescript
 import { UpdateVenueSettingsSchema } from '../../../src/schemas/dashboard/venueSettings.schema'
 
-const parseBody = (body: unknown) =>
-  UpdateVenueSettingsSchema.safeParse({ params: { venueId: 'v1' }, body })
+const parseBody = (body: unknown) => UpdateVenueSettingsSchema.safeParse({ params: { venueId: 'v1' }, body })
 
 describe('UpdateVenueSettingsSchema googleReviewLink', () => {
   it('accepts a valid Place ID', () => {
@@ -271,8 +285,8 @@ describe('UpdateVenueSettingsSchema googleReviewLink', () => {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `npx jest tests/unit/schemas/venueSettings.schema.test.ts`
-Expected: FAIL (googleReviewLink stripped/undefined; `''` not coerced to null).
+Run: `npx jest tests/unit/schemas/venueSettings.schema.test.ts` Expected: FAIL (googleReviewLink stripped/undefined; `''` not coerced to
+null).
 
 - [ ] **Step 3: Implement — add the field to the schema**
 
@@ -307,13 +321,13 @@ import { validateGoogleReviewLink } from '../../utils/googleReviewLink'
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `npx jest tests/unit/schemas/venueSettings.schema.test.ts`
-Expected: PASS.
+Run: `npx jest tests/unit/schemas/venueSettings.schema.test.ts` Expected: PASS.
 
 - [ ] **Step 5: tsc**
 
-Run: `npx tsc --noEmit`
-Expected: PASS. (`updateVenueSettings` passes `req.body` straight to `prisma.venueSettings.upsert({ update })`; `googleReviewLink` now flows through, and `getVenueSettings` already returns the full row. `updateVenueSettings` already writes an `ActivityLog` (`SETTINGS_UPDATED`) — no audit change needed.)
+Run: `npx tsc --noEmit` Expected: PASS. (`updateVenueSettings` passes `req.body` straight to `prisma.venueSettings.upsert({ update })`;
+`googleReviewLink` now flows through, and `getVenueSettings` already returns the full row. `updateVenueSettings` already writes an
+`ActivityLog` (`SETTINGS_UPDATED`) — no audit change needed.)
 
 - [ ] **Step 6: Commit** (if authorized)
 
@@ -327,12 +341,17 @@ git commit -m "feat(reviews): validate googleReviewLink in venue settings schema
 ### Task A4: Expose `reviewsEnabled` + `googleReviewUrl` on the public review-status endpoint (TDD)
 
 **Files:**
+
 - Modify: `src/services/tpv/receiptReview.tpv.service.ts` (`canSubmitReview`, ~line 159-208)
 - Test: `tests/unit/services/receiptReview.status.test.ts`
 
 **Interfaces:**
-- Consumes: `venueHasFeatureAccess(venueId, featureCode)` from `src/services/access/basePlan.service.ts`; `normalizeGoogleReviewUrl` from Task A2.
-- Produces: `canSubmitReview(accessKey)` return type gains `reviewsEnabled: boolean` and `googleReviewUrl: string | null`. Existing fields (`canSubmit`, `reason?`, `venue?`) unchanged (backward-compatible). The public controller `checkReviewStatus` returns `result` verbatim, so no controller change is needed.
+
+- Consumes: `venueHasFeatureAccess(venueId, featureCode)` from `src/services/access/basePlan.service.ts`; `normalizeGoogleReviewUrl` from
+  Task A2.
+- Produces: `canSubmitReview(accessKey)` return type gains `reviewsEnabled: boolean` and `googleReviewUrl: string | null`. Existing fields
+  (`canSubmit`, `reason?`, `venue?`) unchanged (backward-compatible). The public controller `checkReviewStatus` returns `result` verbatim,
+  so no controller change is needed.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -422,8 +441,7 @@ describe('canSubmitReview status extension', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx jest tests/unit/services/receiptReview.status.test.ts`
-Expected: FAIL (`reviewsEnabled`/`googleReviewUrl` undefined).
+Run: `npx jest tests/unit/services/receiptReview.status.test.ts` Expected: FAIL (`reviewsEnabled`/`googleReviewUrl` undefined).
 
 - [ ] **Step 3: Implement — extend `canSubmitReview`**
 
@@ -436,7 +454,8 @@ import { venueHasFeatureAccess } from '../access/basePlan.service'
 import { normalizeGoogleReviewUrl } from '../../utils/googleReviewLink'
 ```
 
-2. Replace the `canSubmitReview` function body's return-shape logic. The function currently returns `{ canSubmit, reason?, venue? }`. Update its signature and the three return sites:
+2. Replace the `canSubmitReview` function body's return-shape logic. The function currently returns `{ canSubmit, reason?, venue? }`. Update
+   its signature and the three return sites:
 
 ```typescript
 export async function canSubmitReview(accessKey: string): Promise<{
@@ -486,18 +505,16 @@ export async function canSubmitReview(accessKey: string): Promise<{
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx jest tests/unit/services/receiptReview.status.test.ts`
-Expected: PASS.
+Run: `npx jest tests/unit/services/receiptReview.status.test.ts` Expected: PASS.
 
 - [ ] **Step 5: Regression — the review submit path is untouched**
 
-Run: `npx jest tests/unit/services/ --testPathPattern receiptReview`
-Expected: PASS (submit flow unaffected; only `canSubmitReview` changed).
+Run: `npx jest tests/unit/services/ --testPathPattern receiptReview` Expected: PASS (submit flow unaffected; only `canSubmitReview`
+changed).
 
 - [ ] **Step 6: tsc**
 
-Run: `npx tsc --noEmit`
-Expected: PASS.
+Run: `npx tsc --noEmit` Expected: PASS.
 
 - [ ] **Step 7: Commit** (if authorized)
 
@@ -511,16 +528,20 @@ git commit -m "feat(reviews): expose reviewsEnabled + googleReviewUrl on review-
 ### Task A5: Seed the `GOOGLE_REVIEW_REDIRECT` Feature (dev)
 
 **Files:**
+
 - Create: `scripts/seed-google-review-feature.ts` (mirrors `scripts/seed-cfdi-feature.ts`)
 
 **Interfaces:**
+
 - Consumes: nothing from earlier tasks.
-- Produces: a `Feature` row `{ code: 'GOOGLE_REVIEW_REDIRECT' }` so the feature is grantable per-venue from the superadmin control and appears in catalogs. NOTE: gating already works WITHOUT this row for PRO/PREMIUM venues (`venueHasFeatureAccess` grants any non-`PREMIUM_ONLY_CODES` code by tier — see `basePlan.service.ts`). This seed only enables explicit per-venue grants and catalog display.
+- Produces: a `Feature` row `{ code: 'GOOGLE_REVIEW_REDIRECT' }` so the feature is grantable per-venue from the superadmin control and
+  appears in catalogs. NOTE: gating already works WITHOUT this row for PRO/PREMIUM venues (`venueHasFeatureAccess` grants any
+  non-`PREMIUM_ONLY_CODES` code by tier — see `basePlan.service.ts`). This seed only enables explicit per-venue grants and catalog display.
 
 - [ ] **Step 1: Read the reference seed to copy its exact shape**
 
-Run: `sed -n '1,80p' scripts/seed-cfdi-feature.ts`
-Expected: shows the `prisma.feature.upsert({ where: { code }, ... })` pattern, including required fields (`name`, `description`, pricing/category columns). Copy those exact column names.
+Run: `sed -n '1,80p' scripts/seed-cfdi-feature.ts` Expected: shows the `prisma.feature.upsert({ where: { code }, ... })` pattern, including
+required fields (`name`, `description`, pricing/category columns). Copy those exact column names.
 
 - [ ] **Step 2: Write the seed script**
 
@@ -535,16 +556,18 @@ Create `scripts/seed-google-review-feature.ts`, mirroring `seed-cfdi-feature.ts`
 //     or the closest existing included-feature seed. Do NOT invent columns not present in the model.
 ```
 
-If `seed-cfdi-feature.ts` sets a standalone price for a paid add-on, prefer copying a bundled/included feature seed instead (e.g. grep `scripts/` for a seed of `LOYALTY_PROGRAM` or `RESERVATIONS`); this feature is PRO-included, not a standalone add-on.
+If `seed-cfdi-feature.ts` sets a standalone price for a paid add-on, prefer copying a bundled/included feature seed instead (e.g. grep
+`scripts/` for a seed of `LOYALTY_PROGRAM` or `RESERVATIONS`); this feature is PRO-included, not a standalone add-on.
 
 - [ ] **Step 3: Run the seed against LOCAL dev DB only**
 
-Run: `npx ts-node -r tsconfig-paths/register scripts/seed-google-review-feature.ts`
-Expected: logs an upsert of the `GOOGLE_REVIEW_REDIRECT` feature; exit 0.
+Run: `npx ts-node -r tsconfig-paths/register scripts/seed-google-review-feature.ts` Expected: logs an upsert of the `GOOGLE_REVIEW_REDIRECT`
+feature; exit 0.
 
 - [ ] **Step 4: Verify**
 
-Run: `npx ts-node -e "import('./src/utils/prismaClient').then(async m => { const f = await m.default.feature.findUnique({ where: { code: 'GOOGLE_REVIEW_REDIRECT' } }); console.log(f); process.exit(0) })" -r tsconfig-paths/register`
+Run:
+`npx ts-node -e "import('./src/utils/prismaClient').then(async m => { const f = await m.default.feature.findUnique({ where: { code: 'GOOGLE_REVIEW_REDIRECT' } }); console.log(f); process.exit(0) })" -r tsconfig-paths/register`
 Expected: prints the feature row (not null).
 
 - [ ] **Step 5: Commit** (if authorized)
@@ -559,12 +582,15 @@ git commit -m "chore(reviews): seed GOOGLE_REVIEW_REDIRECT feature"
 ### Task A6: Expose `googleReviewUrl` in the customer MCP `venue_profile` — OWNER only
 
 **Files:**
+
 - Modify: `src/mcp/tools/venues.ts` (`venue_profile` tool, ~line 55-100)
 - Test: none (thin read tool; covered by manual MCP check). Optional smoke via existing MCP test harness if present.
 
 **Interfaces:**
+
 - Consumes: `normalizeGoogleReviewUrl` from Task A2; `scope.perVenueAccess` (Map → `UserAccess` with `.role`).
-- Produces: `venue_profile` response gains `reviews: { googleReviewUrl: string | null }` ONLY when the connected user's venue role is `OWNER` or `SUPERADMIN`; otherwise the field is omitted entirely.
+- Produces: `venue_profile` response gains `reviews: { googleReviewUrl: string | null }` ONLY when the connected user's venue role is
+  `OWNER` or `SUPERADMIN`; otherwise the field is omitted entirely.
 
 - [ ] **Step 1: Implement the OWNER-gated field**
 
@@ -576,56 +602,58 @@ In `src/mcp/tools/venues.ts`:
 import { normalizeGoogleReviewUrl } from '@/utils/googleReviewLink'
 ```
 
-2. Inside the `venue_profile` handler, after the existing `const v = await prisma.venue.findFirst(...)` block and the `if (!v) return ...` guard, before the final `return text(...)`:
+2. Inside the `venue_profile` handler, after the existing `const v = await prisma.venue.findFirst(...)` block and the `if (!v) return ...`
+   guard, before the final `return text(...)`:
 
 ```typescript
-      // OWNER-only: expose the venue's Google-review redirect link. Roles differ
-      // per venue, so read this venue's role from scope (never a global role).
-      const role = scope.perVenueAccess.get(venueId)?.role
-      const isOwnerLevel = role === 'OWNER' || role === 'SUPERADMIN'
-      let googleReviewUrl: string | null = null
-      if (isOwnerLevel) {
-        const settings = await prisma.venueSettings.findUnique({
-          where: { venueId },
-          select: { googleReviewLink: true },
-        })
-        googleReviewUrl = normalizeGoogleReviewUrl(settings?.googleReviewLink)
-      }
+// OWNER-only: expose the venue's Google-review redirect link. Roles differ
+// per venue, so read this venue's role from scope (never a global role).
+const role = scope.perVenueAccess.get(venueId)?.role
+const isOwnerLevel = role === 'OWNER' || role === 'SUPERADMIN'
+let googleReviewUrl: string | null = null
+if (isOwnerLevel) {
+  const settings = await prisma.venueSettings.findUnique({
+    where: { venueId },
+    select: { googleReviewLink: true },
+  })
+  googleReviewUrl = normalizeGoogleReviewUrl(settings?.googleReviewLink)
+}
 ```
 
 3. Add the field to the returned `profile` object ONLY when owner-level (spread conditionally so non-owners never see the key):
 
 ```typescript
-      return text({
-        found: true,
-        venueId,
-        profile: {
-          name: v.name,
-          slug: v.slug,
-          type: v.type,
-          currency: v.currency,
-          timezone: v.timezone,
-          language: v.language,
-          active: v.active,
-          address: { line: v.address, city: v.city, state: v.state, country: v.country, zip: v.zipCode },
-          contact: { phone: v.phone, email: v.email, website: v.website },
-          ...(isOwnerLevel ? { reviews: { googleReviewUrl } } : {}),
-        },
-      })
+return text({
+  found: true,
+  venueId,
+  profile: {
+    name: v.name,
+    slug: v.slug,
+    type: v.type,
+    currency: v.currency,
+    timezone: v.timezone,
+    language: v.language,
+    active: v.active,
+    address: { line: v.address, city: v.city, state: v.state, country: v.country, zip: v.zipCode },
+    contact: { phone: v.phone, email: v.email, website: v.website },
+    ...(isOwnerLevel ? { reviews: { googleReviewUrl } } : {}),
+  },
+})
 ```
 
 - [ ] **Step 2: Update the tool description**
 
-Change the `venue_profile` description string to note the owner-only field, e.g. append: `" For OWNER connections it also includes reviews.googleReviewUrl (the venue's Google-review redirect link)."`
+Change the `venue_profile` description string to note the owner-only field, e.g. append:
+`" For OWNER connections it also includes reviews.googleReviewUrl (the venue's Google-review redirect link)."`
 
 - [ ] **Step 3: tsc**
 
-Run: `npx tsc --noEmit`
-Expected: PASS.
+Run: `npx tsc --noEmit` Expected: PASS.
 
 - [ ] **Step 4: Manual smoke (optional, local)**
 
-If the MCP dev harness is available, connect as an OWNER and call `venue_profile` → expect `reviews.googleReviewUrl`; connect as a non-owner (e.g. MANAGER) → the `reviews` key is absent.
+If the MCP dev harness is available, connect as an OWNER and call `venue_profile` → expect `reviews.googleReviewUrl`; connect as a non-owner
+(e.g. MANAGER) → the `reviews` key is absent.
 
 - [ ] **Step 5: Commit** (if authorized)
 
@@ -640,8 +668,7 @@ git commit -m "feat(mcp): expose googleReviewUrl in venue_profile (owner only)"
 
 - [ ] **Step 1: Full pre-deploy**
 
-Run: `npm run pre-deploy`
-Expected: build + lint + tests PASS. Report the result. This closes the backend slice.
+Run: `npm run pre-deploy` Expected: build + lint + tests PASS. Report the result. This closes the backend slice.
 
 ---
 
@@ -654,14 +681,18 @@ Working dir for this phase: `/Users/amieva/Documents/Programming/Avoqado/avoqado
 ### Task B1: Add `GOOGLE_REVIEW_REDIRECT` to the PRO tier catalog
 
 **Files:**
+
 - Modify: `src/config/plan-catalog.ts` (PRO block `includes` array, ~line 55-67)
 
 **Interfaces:**
-- Produces: `getTierForFeature('GOOGLE_REVIEW_REDIRECT')` resolves to PRO; `useTierFeatureAccess('GOOGLE_REVIEW_REDIRECT')` / `<FeatureGate feature="GOOGLE_REVIEW_REDIRECT">` unlock for PRO+ venues.
+
+- Produces: `getTierForFeature('GOOGLE_REVIEW_REDIRECT')` resolves to PRO; `useTierFeatureAccess('GOOGLE_REVIEW_REDIRECT')` /
+  `<FeatureGate feature="GOOGLE_REVIEW_REDIRECT">` unlock for PRO+ venues.
 
 - [ ] **Step 1: Add the code to PRO.includes**
 
-In `src/config/plan-catalog.ts`, in the `id: 'PRO'` object's `includes` array, add `'GOOGLE_REVIEW_REDIRECT'` (keep it grouped with the other customer-facing PRO features):
+In `src/config/plan-catalog.ts`, in the `id: 'PRO'` object's `includes` array, add `'GOOGLE_REVIEW_REDIRECT'` (keep it grouped with the
+other customer-facing PRO features):
 
 ```typescript
     includes: [
@@ -682,8 +713,7 @@ In `src/config/plan-catalog.ts`, in the `id: 'PRO'` object's `includes` array, a
 
 - [ ] **Step 2: Typecheck**
 
-Run: `npm run build` (or `npx tsc --noEmit -p tsconfig.json` if faster)
-Expected: PASS.
+Run: `npm run build` (or `npx tsc --noEmit -p tsconfig.json` if faster) Expected: PASS.
 
 - [ ] **Step 3: Commit** (if authorized)
 
@@ -697,21 +727,25 @@ git commit -m "feat(reviews): add GOOGLE_REVIEW_REDIRECT to PRO tier catalog"
 ### Task B2: Frontend mirror of the link validation/normalization util
 
 **Files:**
+
 - Create: `src/lib/googleReviewLink.ts`
 
 **Interfaces:**
+
 - Produces (mirror of the backend util — same names, same rules):
+
   - `validateGoogleReviewLink(raw: string): string | null` (Spanish error or null)
   - `normalizeGoogleReviewUrl(raw: string | null | undefined): string | null`
 
 - [ ] **Step 1: Create the util (identical logic to the backend, so validation/preview match)**
 
-Create `src/lib/googleReviewLink.ts` with the SAME implementation as `avoqado-server/src/utils/googleReviewLink.ts` (copy `GOOGLE_REVIEW_DOMAINS`, `PLACE_ID_RE`, `validateGoogleReviewLink`, `normalizeGoogleReviewUrl` verbatim — it is framework-free TS). This gives the config form instant, matching validation before the PUT.
+Create `src/lib/googleReviewLink.ts` with the SAME implementation as `avoqado-server/src/utils/googleReviewLink.ts` (copy
+`GOOGLE_REVIEW_DOMAINS`, `PLACE_ID_RE`, `validateGoogleReviewLink`, `normalizeGoogleReviewUrl` verbatim — it is framework-free TS). This
+gives the config form instant, matching validation before the PUT.
 
 - [ ] **Step 2: Typecheck**
 
-Run: `npx tsc --noEmit`
-Expected: PASS.
+Run: `npx tsc --noEmit` Expected: PASS.
 
 - [ ] **Step 3: Commit** (if authorized)
 
@@ -725,11 +759,14 @@ git commit -m "feat(reviews): frontend google review link util (mirror of backen
 ### Task B3: Config card in `GoogleIntegration.tsx` (Integrations → Google), PRO-gated
 
 **Files:**
+
 - Modify: `src/pages/Settings/GoogleIntegration.tsx`
 - Modify: `src/locales/es/googleIntegration.json`, `src/locales/en/googleIntegration.json`, `src/locales/fr/googleIntegration.json`
 
 **Interfaces:**
-- Consumes: `validateGoogleReviewLink` from B2; `<FeatureGate feature="GOOGLE_REVIEW_REDIRECT">` from `@/components/billing/FeatureGate`; existing settings endpoints `GET/PUT /api/v1/dashboard/venues/${venueId}/settings`.
+
+- Consumes: `validateGoogleReviewLink` from B2; `<FeatureGate feature="GOOGLE_REVIEW_REDIRECT">` from `@/components/billing/FeatureGate`;
+  existing settings endpoints `GET/PUT /api/v1/dashboard/venues/${venueId}/settings`.
 - Produces: a card where OWNER/ADMIN paste the venue's Google review link or Place ID; saved to `VenueSettings.googleReviewLink`.
 
 - [ ] **Step 1: Add i18n keys (es + en + fr)**
@@ -749,11 +786,14 @@ In each `googleIntegration.json`, add a `reviewRedirect` block. Spanish (`es`):
 }
 ```
 
-English (`en`) and French (`fr`): same keys, translated (French may reuse English wording if no reviewer — but the keys MUST exist in all three files to satisfy the missing-key lint).
+English (`en`) and French (`fr`): same keys, translated (French may reuse English wording if no reviewer — but the keys MUST exist in all
+three files to satisfy the missing-key lint).
 
 - [ ] **Step 2: Add the card component to `GoogleIntegration.tsx`**
 
-Add imports needed (`Input`, `FeatureGate`, `validateGoogleReviewLink`, `useState`, `useMutation`, `useQuery`). Inside the component, add a query for current settings and a mutation to save. Render, near the top of the returned JSX (e.g. right after the header `</div>`), the following card wrapped in `<FeatureGate feature="GOOGLE_REVIEW_REDIRECT">`:
+Add imports needed (`Input`, `FeatureGate`, `validateGoogleReviewLink`, `useState`, `useMutation`, `useQuery`). Inside the component, add a
+query for current settings and a mutation to save. Render, near the top of the returned JSX (e.g. right after the header `</div>`), the
+following card wrapped in `<FeatureGate feature="GOOGLE_REVIEW_REDIRECT">`:
 
 ```tsx
 <FeatureGate feature="GOOGLE_REVIEW_REDIRECT">
@@ -776,10 +816,7 @@ Add imports needed (`Input`, `FeatureGate`, `validateGoogleReviewLink`, `useStat
       />
       {reviewLinkError && <p className="text-sm text-destructive">{reviewLinkError}</p>}
       <p className="text-xs text-muted-foreground">{t('reviewRedirect.clearHint')}</p>
-      <Button
-        onClick={() => saveReviewLinkMutation.mutate(reviewLink)}
-        disabled={!!reviewLinkError || saveReviewLinkMutation.isPending}
-      >
+      <Button onClick={() => saveReviewLinkMutation.mutate(reviewLink)} disabled={!!reviewLinkError || saveReviewLinkMutation.isPending}>
         {saveReviewLinkMutation.isPending ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
         {t('reviewRedirect.save')}
       </Button>
@@ -804,8 +841,7 @@ useEffect(() => {
 }, [venueSettings?.googleReviewLink])
 
 const saveReviewLinkMutation = useMutation({
-  mutationFn: async (link: string) =>
-    (await api.put(`/api/v1/dashboard/venues/${venueId}/settings`, { googleReviewLink: link })).data,
+  mutationFn: async (link: string) => (await api.put(`/api/v1/dashboard/venues/${venueId}/settings`, { googleReviewLink: link })).data,
   onSuccess: () => {
     toast({ title: t('reviewRedirect.saved') })
     queryClient.invalidateQueries({ queryKey: ['venue-settings', venueId] })
@@ -815,16 +851,20 @@ const saveReviewLinkMutation = useMutation({
 })
 ```
 
-(Reuse the existing `Card`, `CardHeader`, `CardTitle`, `CardDescription`, `CardContent`, `Button`, `toast`, `queryClient`, `venueId`, `Loader2` already imported/available in the file. Add `Input`, `Label`, `FeatureGate`, `useEffect`, `useState`, `useMutation` where missing.)
+(Reuse the existing `Card`, `CardHeader`, `CardTitle`, `CardDescription`, `CardContent`, `Button`, `toast`, `queryClient`, `venueId`,
+`Loader2` already imported/available in the file. Add `Input`, `Label`, `FeatureGate`, `useEffect`, `useState`, `useMutation` where
+missing.)
 
 - [ ] **Step 3: Build + lint (catches missing i18n keys and hardcoded colors)**
 
-Run: `npm run build && npm run lint`
-Expected: PASS. (`no-missing-translation-keys` passes because keys exist in es/en/fr; no hardcoded colors — used `text-destructive`/`text-muted-foreground`.)
+Run: `npm run build && npm run lint` Expected: PASS. (`no-missing-translation-keys` passes because keys exist in es/en/fr; no hardcoded
+colors — used `text-destructive`/`text-muted-foreground`.)
 
 - [ ] **Step 4: Manual check (dev server)**
 
-Start `npm run dev`, open a PRO venue → Configuración → Integraciones → Google. Confirm the card renders, pasting a Facebook URL shows the Spanish error and disables Save, pasting a Place ID enables Save, saving shows the success toast. On a FREE venue the card shows the FeatureGate upsell teaser instead.
+Start `npm run dev`, open a PRO venue → Configuración → Integraciones → Google. Confirm the card renders, pasting a Facebook URL shows the
+Spanish error and disables Save, pasting a Place ID enables Save, saving shows the success toast. On a FREE venue the card shows the
+FeatureGate upsell teaser instead.
 
 - [ ] **Step 5: Commit** (if authorized)
 
@@ -838,12 +878,16 @@ git commit -m "feat(reviews): google review link config card in integrations (PR
 ### Task B4: `ReceiptReviewWidget` component
 
 **Files:**
+
 - Create: `src/components/receipts/ReceiptReviewWidget.tsx`
 - Modify: `src/locales/es/payment.json`, `src/locales/en/payment.json`, `src/locales/fr/payment.json`
 
 **Interfaces:**
-- Consumes: public endpoints `GET/POST /api/v1/public/receipt/${accessKey}/review` and `/review/status` (the status now returns `reviewsEnabled`, `googleReviewUrl`, `canSubmit`, `reason`).
-- Produces: `<ReceiptReviewWidget accessKey={string} />` — renders nothing unless `reviewsEnabled`; otherwise a 1-5★ form; on 5★ success with a `googleReviewUrl` shows a primary CTA to Google.
+
+- Consumes: public endpoints `GET/POST /api/v1/public/receipt/${accessKey}/review` and `/review/status` (the status now returns
+  `reviewsEnabled`, `googleReviewUrl`, `canSubmit`, `reason`).
+- Produces: `<ReceiptReviewWidget accessKey={string} />` — renders nothing unless `reviewsEnabled`; otherwise a 1-5★ form; on 5★ success
+  with a `googleReviewUrl` shows a primary CTA to Google.
 
 - [ ] **Step 1: Add i18n keys (es + en + fr) under `receipt.review`**
 
@@ -904,9 +948,8 @@ export function ReceiptReviewWidget({ accessKey }: { accessKey: string }) {
 
   const { data: status } = useQuery({
     queryKey: ['public-review-status', accessKey],
-    queryFn: async () => (await axios.get<{ success: boolean; data: ReviewStatus }>(
-      `${API_BASE}/api/v1/public/receipt/${accessKey}/review/status`,
-    )).data.data,
+    queryFn: async () =>
+      (await axios.get<{ success: boolean; data: ReviewStatus }>(`${API_BASE}/api/v1/public/receipt/${accessKey}/review/status`)).data.data,
     enabled: !!accessKey,
     retry: 1,
   })
@@ -950,11 +993,7 @@ export function ReceiptReviewWidget({ accessKey }: { accessKey: string }) {
           <div className="space-y-3 text-center">
             <h3 className="text-lg font-semibold">{t('receipt.review.googleTitle')}</h3>
             <p className="text-sm text-muted-foreground">{t('receipt.review.googleBody')}</p>
-            <Button
-              size="lg"
-              className="w-full"
-              onClick={() => window.open(status.googleReviewUrl!, '_blank', 'noopener,noreferrer')}
-            >
+            <Button size="lg" className="w-full" onClick={() => window.open(status.googleReviewUrl!, '_blank', 'noopener,noreferrer')}>
               <Star className="w-5 h-5 mr-2" />
               {t('receipt.review.googleCta')}
             </Button>
@@ -976,7 +1015,10 @@ export function ReceiptReviewWidget({ accessKey }: { accessKey: string }) {
                 aria-label={`${v}`}
                 onMouseEnter={() => setHover(v)}
                 onMouseLeave={() => setHover(0)}
-                onClick={() => { setRating(v); setError(null) }}
+                onClick={() => {
+                  setRating(v)
+                  setError(null)
+                }}
                 className="p-1 cursor-pointer"
               >
                 <Star
@@ -1010,8 +1052,7 @@ export function ReceiptReviewWidget({ accessKey }: { accessKey: string }) {
 
 - [ ] **Step 3: Build + lint**
 
-Run: `npm run build && npm run lint`
-Expected: PASS (all `receipt.review.*` keys exist in es/en/fr; semantic tokens only).
+Run: `npm run build && npm run lint` Expected: PASS (all `receipt.review.*` keys exist in es/en/fr; semantic tokens only).
 
 - [ ] **Step 4: Commit** (if authorized)
 
@@ -1025,12 +1066,15 @@ git commit -m "feat(reviews): receipt review widget with 5-star Google redirect 
 ### Task B5: Wire the widget into the public receipt
 
 **Files:**
+
 - Modify: `src/components/receipts/ModernReceiptDesign.tsx` (props interface ~line 39-57; render near `autofacturaSlot` ~line 613)
 - Modify: `src/pages/Payment/ReceiptViewer.tsx` (~line 165-184)
 
 **Interfaces:**
+
 - Consumes: `<ReceiptReviewWidget />` from B4; the existing `autofacturaSlot` render pattern.
-- Produces: `ModernReceiptDesign` gains an optional `reviewSlot?: React.ReactNode`, rendered in the public (`full`) layout; `ReceiptViewer` passes the widget only in public, non-refund view.
+- Produces: `ModernReceiptDesign` gains an optional `reviewSlot?: React.ReactNode`, rendered in the public (`full`) layout; `ReceiptViewer`
+  passes the widget only in public, non-refund view.
 
 - [ ] **Step 1: Add the `reviewSlot` prop**
 
@@ -1048,8 +1092,12 @@ Add `reviewSlot` to the destructured props in the component signature (next to `
 Near where `{autofacturaSlot}` is rendered (~line 613), add the review slot right after it:
 
 ```tsx
-          {autofacturaSlot}
-          {reviewSlot}
+{
+  autofacturaSlot
+}
+{
+  reviewSlot
+}
 ```
 
 - [ ] **Step 3: Pass the widget from `ReceiptViewer`**
@@ -1072,12 +1120,13 @@ Then add the `reviewSlot` prop to the `<ModernReceiptDesign ... />` element, rig
 
 - [ ] **Step 4: Build + lint**
 
-Run: `npm run build && npm run lint`
-Expected: PASS.
+Run: `npm run build && npm run lint` Expected: PASS.
 
 - [ ] **Step 5: Manual end-to-end (dev)**
 
-With a PRO venue that has a `googleReviewLink` set: open a real public receipt URL (`/receipts/public/:accessKey`). Confirm: the widget appears; rating 5★ + submit → success screen with "Califícanos en Google" that opens the link in a new tab; rating ≤4★ + submit → "¡Gracias!" with no Google CTA; reload → "Ya calificaste este ticket". On a FREE venue receipt: the widget does not appear at all.
+With a PRO venue that has a `googleReviewLink` set: open a real public receipt URL (`/receipts/public/:accessKey`). Confirm: the widget
+appears; rating 5★ + submit → success screen with "Califícanos en Google" that opens the link in a new tab; rating ≤4★ + submit →
+"¡Gracias!" with no Google CTA; reload → "Ya calificaste este ticket". On a FREE venue receipt: the widget does not appear at all.
 
 - [ ] **Step 6: Commit** (if authorized)
 
@@ -1092,8 +1141,8 @@ git commit -m "feat(reviews): wire review widget into public receipt"
 
 - [ ] **Step 1: Full checks**
 
-Run: `npm run build && npm run lint && npm run test:e2e`
-Expected: build + lint PASS; e2e PASS (no regressions). Report result. This closes the dashboard slice.
+Run: `npm run build && npm run lint && npm run test:e2e` Expected: build + lint PASS; e2e PASS (no regressions). Report result. This closes
+the dashboard slice.
 
 ---
 
@@ -1106,29 +1155,34 @@ Working dir: `~/Documents/Programming/Avoqado-HQ/operations/marketing/platform-p
 ### Task C1: Update deck + one-pager and regenerate PDFs
 
 **Files:**
-- Modify: the full deck HTML and the one-pager HTML (the canonical current files — confirm exact names from that folder's `README.md`; candidates present include `avoqado-one-pager.html`, `avoqado-one-pager-v2.html`).
+
+- Modify: the full deck HTML and the one-pager HTML (the canonical current files — confirm exact names from that folder's `README.md`;
+  candidates present include `avoqado-one-pager.html`, `avoqado-one-pager-v2.html`).
 - Regenerate: the matching PDFs via the folder's `README.md` pipeline (Chrome-headless HTML→PDF).
 
 **Interfaces:**
+
 - Consumes: nothing (documentation).
 - Produces: both deliverables mention the new capability so third-party sellers don't fall behind the platform.
 
 - [ ] **Step 1: Read the README to learn the exact canonical files + regeneration command**
 
-Run: `sed -n '1,120p' README.md`
-Expected: identifies which HTML is the current deck and which is the current one-pager, and the exact command to regenerate each PDF.
+Run: `sed -n '1,120p' README.md` Expected: identifies which HTML is the current deck and which is the current one-pager, and the exact
+command to regenerate each PDF.
 
 - [ ] **Step 2: Add the capability to BOTH HTML files**
 
 In the features/modules section of each, add a short bullet, e.g.:
-> **Reseñas y reputación** — Calificación con estrellas en el recibo digital; las reseñas de 5★ se canalizan automáticamente a Google, las demás quedan internas para el negocio. (Plan PRO.)
+
+> **Reseñas y reputación** — Calificación con estrellas en el recibo digital; las reseñas de 5★ se canalizan automáticamente a Google, las
+> demás quedan internas para el negocio. (Plan PRO.)
 
 Keep wording consistent with the existing copy style; mark it PRO where tiers are shown.
 
 - [ ] **Step 3: Regenerate both PDFs**
 
-Run the exact command(s) from the README (Chrome-headless HTML→PDF) for the deck and the one-pager.
-Expected: both PDFs updated with the new bullet.
+Run the exact command(s) from the README (Chrome-headless HTML→PDF) for the deck and the one-pager. Expected: both PDFs updated with the new
+bullet.
 
 - [ ] **Step 4: Commit** (if authorized)
 
@@ -1141,14 +1195,19 @@ git commit -m "docs(marketing): add receipt reviews + Google redirect (PRO) to d
 
 ## Self-Review (author checklist — completed during planning)
 
-**Spec coverage:** every spec section maps to a task —
-data model→A1; validation/normalization→A2; schema wiring→A3; status endpoint fields→A4; PRO Feature→A5+B1; MCP owner-only→A6; config UI→B3; widget→B4; wiring→B5; deck→C1. `ActivityLog` requirement: satisfied by the existing `SETTINGS_UPDATED` write in `updateVenueSettings` (noted in A3).
+**Spec coverage:** every spec section maps to a task — data model→A1; validation/normalization→A2; schema wiring→A3; status endpoint
+fields→A4; PRO Feature→A5+B1; MCP owner-only→A6; config UI→B3; widget→B4; wiring→B5; deck→C1. `ActivityLog` requirement: satisfied by the
+existing `SETTINGS_UPDATED` write in `updateVenueSettings` (noted in A3).
 
-**Placeholder scan:** no "TBD/TODO". The only intentionally-open item is A5's exact non-code column names for the Feature seed, which is handled by copying from `seed-cfdi-feature.ts` (a concrete reference file, per the "repeat the code / point at the reference" rule) — the plan tells the implementer exactly which file to copy and which fields to change.
+**Placeholder scan:** no "TBD/TODO". The only intentionally-open item is A5's exact non-code column names for the Feature seed, which is
+handled by copying from `seed-cfdi-feature.ts` (a concrete reference file, per the "repeat the code / point at the reference" rule) — the
+plan tells the implementer exactly which file to copy and which fields to change.
 
-**Type consistency:** `validateGoogleReviewLink` / `normalizeGoogleReviewUrl` names identical across backend (A2) and frontend (B2); `reviewsEnabled` + `googleReviewUrl` names identical across A4 (producer), B4 (consumer), and A6 (`googleReviewUrl`). Feature code `GOOGLE_REVIEW_REDIRECT` identical across A4, A5, A6, B1, B3. `reviewSlot` identical across B4/B5.
+**Type consistency:** `validateGoogleReviewLink` / `normalizeGoogleReviewUrl` names identical across backend (A2) and frontend (B2);
+`reviewsEnabled` + `googleReviewUrl` names identical across A4 (producer), B4 (consumer), and A6 (`googleReviewUrl`). Feature code
+`GOOGLE_REVIEW_REDIRECT` identical across A4, A5, A6, B1, B3. `reviewSlot` identical across B4/B5.
 
 ## Dependency order
 
-A1 → A2 → A3 → A4 → (A5, A6) → A7 → B1 → B2 → B3/B4 → B5 → B6 → C1.
-Backend fully precedes dashboard (dashboard consumes the extended status endpoint + the tier catalog). Deck last.
+A1 → A2 → A3 → A4 → (A5, A6) → A7 → B1 → B2 → B3/B4 → B5 → B6 → C1. Backend fully precedes dashboard (dashboard consumes the extended status
+endpoint + the tier catalog). Deck last.

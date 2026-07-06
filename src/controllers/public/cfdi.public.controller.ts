@@ -238,7 +238,10 @@ export async function getAutofacturaStatusController(req: Request<{ accessKey: s
 // Public: ownership is proven by the accessKey → payment → order → stamped CFDI
 // chain (we never send a CFDI that doesn't belong to this receipt).
 
-export async function sendCfdiWhatsAppController(req: Request<{ accessKey: string }, unknown, { phone?: string }>, res: Response): Promise<void> {
+export async function sendCfdiWhatsAppController(
+  req: Request<{ accessKey: string }, unknown, { phone?: string }>,
+  res: Response,
+): Promise<void> {
   const { accessKey } = req.params
   const phone = (req.body?.phone ?? '').trim()
 

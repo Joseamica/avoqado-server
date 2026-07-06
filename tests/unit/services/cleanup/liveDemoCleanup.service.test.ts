@@ -98,6 +98,43 @@ describe('cleanupExpiredLiveDemos — cascade-tolerant session delete', () => {
   })
 })
 
+describe('cleanupExpiredLiveDemos — merchant account cleanup (no orphaned demo accounts)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  it('deletes the Stripe + Blumon demo MerchantAccounts referenced by the venue payment config', async () => {
+    prismaMock.liveDemoSession.findMany.mockResolvedValue([makeSession(1)])
+    mockCascadeAlreadyDeletedSession()
+    prismaMock.venuePaymentConfig.findUnique.mockResolvedValue({
+      venueId: 'venue-1',
+      primaryAccountId: 'merchant-blumon-1',
+      secondaryAccountId: 'merchant-stripe-1',
+      tertiaryAccountId: null,
+    })
+    prismaMock.merchantAccount.deleteMany.mockResolvedValue({ count: 2 })
+
+    const cleaned = await cleanupExpiredLiveDemos()
+
+    expect(cleaned).toBe(1)
+    expect(prismaMock.venuePaymentConfig.findUnique).toHaveBeenCalledWith({ where: { venueId: 'venue-1' } })
+    expect(prismaMock.merchantAccount.deleteMany).toHaveBeenCalledWith({
+      where: { id: { in: ['merchant-blumon-1', 'merchant-stripe-1'] } },
+    })
+  })
+
+  it('does not call merchantAccount.deleteMany when the venue has no payment config', async () => {
+    prismaMock.liveDemoSession.findMany.mockResolvedValue([makeSession(1)])
+    mockCascadeAlreadyDeletedSession()
+    prismaMock.venuePaymentConfig.findUnique.mockResolvedValue(null)
+
+    const cleaned = await cleanupExpiredLiveDemos()
+
+    expect(cleaned).toBe(1)
+    expect(prismaMock.merchantAccount.deleteMany).not.toHaveBeenCalled()
+  })
+})
+
 describe('cleanupAllLiveDemos — cascade-tolerant session delete', () => {
   beforeEach(() => {
     jest.clearAllMocks()
