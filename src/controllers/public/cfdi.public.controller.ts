@@ -13,11 +13,32 @@
 import { Request, Response } from 'express'
 import { toZonedTime } from 'date-fns-tz'
 import prisma from '../../utils/prismaClient'
+import AdmZip from 'adm-zip'
 import { issueCfdiForOrder, loadOrderForCfdiFromDb } from '../../services/fiscal/cfdi.service'
 import { sendCfdiWhatsApp } from '../../services/whatsapp.service'
 import { logAction } from '../../services/dashboard/activity-log.service'
 import logger from '../../config/logger'
 import { env } from '../../config/env'
+
+/** Public base URL of THIS API — used to build the zip download link we send over
+ *  WhatsApp. Prod: api.avoqado.io; dev: set BASE_URL to the tunnel (ngrok) URL. */
+const API_PUBLIC_BASE = process.env.BASE_URL || 'https://api.avoqado.io'
+
+/** Resolve the latest STAMPED CFDI (with PDF+XML) for a receipt accessKey. */
+async function resolveStampedCfdi(accessKey: string) {
+  const receipt = await prisma.digitalReceipt.findUnique({
+    where: { accessKey },
+    select: { payment: { select: { order: { select: { id: true, venue: { select: { name: true } } } } } } },
+  })
+  const order = receipt?.payment?.order
+  if (!order) return { order: null as null, cfdi: null }
+  const cfdi = await prisma.cfdi.findFirst({
+    where: { orderId: order.id, status: 'STAMPED' },
+    orderBy: { createdAt: 'desc' },
+    select: { serie: true, folio: true, uuid: true, pdfUrl: true, xmlUrl: true },
+  })
+  return { order, cfdi }
+}
 
 const MEXICO_TZ = 'America/Mexico_City'
 
@@ -228,34 +249,69 @@ export async function sendCfdiWhatsAppController(req: Request<{ accessKey: strin
   }
 
   try {
-    const receipt = await prisma.digitalReceipt.findUnique({
-      where: { accessKey },
-      select: { payment: { select: { order: { select: { id: true, venue: { select: { name: true } } } } } } },
-    })
-    const order = receipt?.payment?.order
+    const { order, cfdi } = await resolveStampedCfdi(accessKey)
     if (!order) {
       res.status(404).json({ error: 'Recibo no encontrado' })
       return
     }
-
-    // Only a STAMPED CFDI with a PDF can be sent. Resolve the latest one.
-    const cfdi = await prisma.cfdi.findFirst({
-      where: { orderId: order.id, status: 'STAMPED' },
-      orderBy: { createdAt: 'desc' },
-      select: { serie: true, folio: true, pdfUrl: true },
-    })
     if (!cfdi || !cfdi.pdfUrl) {
       res.status(409).json({ error: 'Esta cuenta todavía no tiene factura para enviar.' })
       return
     }
 
     const folio = [cfdi.serie, cfdi.folio].filter(Boolean).join('-') || 's/folio'
-    await sendCfdiWhatsApp(phone, { venueName: order.venue.name, folio, invoiceUrl: cfdi.pdfUrl })
+    // Link to the zip endpoint → tapping it downloads a single .zip with PDF + XML.
+    const zipUrl = `${API_PUBLIC_BASE}/api/v1/public/receipt/${accessKey}/cfdi/download`
+    await sendCfdiWhatsApp(phone, { venueName: order.venue.name, folio, invoiceUrl: zipUrl })
 
     res.status(200).json({ ok: true })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     logger.error('[cfdi.public] whatsapp send error', { accessKey, error: message })
     res.status(502).json({ error: 'No pudimos enviar la factura por WhatsApp. Inténtalo de nuevo.' })
+  }
+}
+
+// ─── GET /receipt/:accessKey/cfdi/download ───────────────────────────────────
+// Streams a single .zip containing the factura's PDF + XML, so the customer gets
+// BOTH fiscal files in one download (WhatsApp/email link and the on-page button
+// both point here). Public: gated by the accessKey → stamped-CFDI chain.
+
+export async function downloadCfdiZipController(req: Request<{ accessKey: string }>, res: Response): Promise<void> {
+  const { accessKey } = req.params
+
+  try {
+    const { order, cfdi } = await resolveStampedCfdi(accessKey)
+    if (!order || !cfdi || (!cfdi.pdfUrl && !cfdi.xmlUrl)) {
+      res.status(404).json({ error: 'Factura no encontrada.' })
+      return
+    }
+
+    const base = [cfdi.serie, cfdi.folio].filter(Boolean).join('-') || cfdi.uuid || 'factura'
+    const zip = new AdmZip()
+
+    // Fetch the stored PDF/XML (public Firebase URLs) and add each to the zip.
+    await Promise.all(
+      [
+        { url: cfdi.pdfUrl, name: `factura-${base}.pdf` },
+        { url: cfdi.xmlUrl, name: `factura-${base}.xml` },
+      ]
+        .filter(f => !!f.url)
+        .map(async f => {
+          const resp = await fetch(f.url as string)
+          if (!resp.ok) throw new Error(`fetch ${f.name} failed: ${resp.status}`)
+          zip.addFile(f.name, Buffer.from(await resp.arrayBuffer()))
+        }),
+    )
+
+    const buffer = zip.toBuffer()
+    res.setHeader('Content-Type', 'application/zip')
+    res.setHeader('Content-Disposition', `attachment; filename="factura-${base}.zip"`)
+    res.setHeader('Content-Length', String(buffer.length))
+    res.status(200).end(buffer)
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    logger.error('[cfdi.public] zip download error', { accessKey, error: message })
+    res.status(502).json({ error: 'No pudimos preparar la descarga de la factura.' })
   }
 }
