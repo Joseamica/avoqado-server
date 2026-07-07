@@ -81,6 +81,8 @@ const upsertEmisorBodyShape = z.object({
   invoiceCashSales: z.boolean().optional(),
   // Opt-in: que el efectivo cuente en los libros fiscales (IVA/ISR/pólizas). Default false.
   includeCashInAccounting: z.boolean().optional(),
+  // Tasa de ISN (impuesto sobre nómina, estatal), fracción 0-0.10 (0.03 = 3%). Default 0.
+  isnRate: z.number().min(0).max(0.1).optional(),
 })
 
 /**

@@ -11,6 +11,7 @@ jest.mock('../../../src/utils/prismaClient', () => ({
   default: {
     employee: { findMany: jest.fn() },
     venue: { findUnique: jest.fn() },
+    fiscalEmisor: { findFirst: jest.fn() },
     payrollRun: { findUnique: jest.fn(), create: jest.fn(), update: jest.fn() },
     payrollLine: { createMany: jest.fn() },
     $transaction: jest.fn(),
@@ -72,6 +73,7 @@ describe('computePayrollLine', () => {
 const p = prisma as unknown as {
   employee: { findMany: jest.Mock }
   venue: { findUnique: jest.Mock }
+  fiscalEmisor: { findFirst: jest.Mock }
   payrollRun: { findUnique: jest.Mock; create: jest.Mock; update: jest.Mock }
   payrollLine: { createMany: jest.Mock }
   $transaction: jest.Mock
@@ -136,6 +138,7 @@ describe('runPayroll — atomicidad y recuperación', () => {
     mScope.mockResolvedValue({ organizationId: 'org1', rfc: 'EKU9003173C9', venueType: 'AUTO_SERVICE' })
     mMappings.mockResolvedValue(PAYROLL_MAP)
     p.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' })
+    p.fiscalEmisor.findFirst.mockResolvedValue({ isnRate: 0 }) // sin ISN por default
     p.employee.findMany.mockResolvedValue([
       { id: 'e1', nombre: 'Ana', rfcEmpleado: 'XAXX010101000', salarioMensualBrutoCents: 20_000_00, sbcMensualCents: null, activo: true },
     ])
@@ -219,5 +222,41 @@ describe('runPayroll — atomicidad y recuperación', () => {
     mPost.mockRejectedValueOnce(new Error('serialization failure'))
     await expect(runPayroll('v1', '2026-06', 'MENSUAL', '2026-06-28', { staffId: 's' })).rejects.toThrow()
     expect(p.payrollRun.update).not.toHaveBeenCalled() // nunca POSTED sin póliza
+  })
+
+  describe('ISN (impuesto sobre nómina, a cargo del patrón)', () => {
+    it('sin tasa (isnRate=0) → isnCents 0 y la póliza no lleva líneas de ISN', async () => {
+      p.payrollRun.findUnique.mockResolvedValue(null)
+      const r = await runPayroll('v1', '2026-06', 'MENSUAL', '2026-06-28', { staffId: 's' })
+      expect(r.isnCents).toBe(0)
+    })
+
+    it('con tasa 3% → isnCents = percepciones × 0.03 (reportado aunque falte el mapeo)', async () => {
+      p.payrollRun.findUnique.mockResolvedValue(null)
+      p.fiscalEmisor.findFirst.mockResolvedValue({ isnRate: 0.03 })
+      const r = await runPayroll('v1', '2026-06', 'MENSUAL', '2026-06-28', { staffId: 's' })
+      // Ana $20,000/mes MENSUAL → percepciones 20,000 → ISN 3% = $600
+      expect(r.isnCents).toBe(600_00)
+    })
+
+    it('con tasa + mapeos → la póliza incluye 2 líneas balanceadas de ISN (DEBE gasto / HABER por pagar)', async () => {
+      p.payrollRun.findUnique.mockResolvedValue(null)
+      p.fiscalEmisor.findFirst.mockResolvedValue({ isnRate: 0.03 })
+      mMappings.mockResolvedValue({
+        mappings: [
+          ...PAYROLL_MAP.mappings,
+          { movementType: 'ISN_EXPENSE', account: { id: 'acc:ISN_EXPENSE', code: '601.85' } },
+          { movementType: 'ISN_PAYABLE', account: { id: 'acc:ISN_PAYABLE', code: '213.04' } },
+        ],
+      })
+      await runPayroll('v1', '2026-06', 'MENSUAL', '2026-06-28', { staffId: 's' })
+      const lines = mPost.mock.calls[0][1].lines
+      const isnDebe = lines.find((l: any) => l.ledgerAccountId === 'acc:ISN_EXPENSE')
+      const isnHaber = lines.find((l: any) => l.ledgerAccountId === 'acc:ISN_PAYABLE')
+      expect(isnDebe.debitCents).toBe(600_00)
+      expect(isnHaber.creditCents).toBe(600_00)
+      // la póliza sigue cuadrando con las líneas de ISN incluidas
+      expect(lines.reduce((n: number, l: any) => n + l.debitCents, 0)).toBe(lines.reduce((n: number, l: any) => n + l.creditCents, 0))
+    })
   })
 })

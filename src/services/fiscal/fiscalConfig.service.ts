@@ -35,6 +35,8 @@ export interface EmisorInput {
   invoiceCashSales?: boolean
   /** Opt-in: que el efectivo cuente en los libros fiscales (IVA/ISR/pólizas). Default false. */
   includeCashInAccounting?: boolean
+  /** Tasa de ISN (impuesto sobre nómina, estatal), fracción 0-0.10. Default 0. */
+  isnRate?: number
 }
 
 export interface MerchantFiscalConfigInput {
@@ -108,6 +110,7 @@ export async function upsertEmisor(input: EmisorInput, deps: FiscalConfigDeps = 
   // resetea el valor si el cliente no lo mandó (a diferencia de los campos de arriba).
   if (input.invoiceCashSales !== undefined) data.invoiceCashSales = input.invoiceCashSales
   if (input.includeCashInAccounting !== undefined) data.includeCashInAccounting = input.includeCashInAccounting
+  if (input.isnRate !== undefined) data.isnRate = input.isnRate
 
   return deps.upsertEmisorRow(data, input.emisorId)
 }
@@ -253,6 +256,7 @@ const defaultDeps: FiscalConfigDeps = {
         globalPeriodicity: true,
         invoiceCashSales: true,
         includeCashInAccounting: true,
+        isnRate: true,
         createdAt: true,
         updatedAt: true,
         // providerKeyEnc intentionally omitted (sensitive)

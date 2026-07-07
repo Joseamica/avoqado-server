@@ -1214,7 +1214,8 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         isrRetenido: pesos(r.totals.isrCents),
         imssObrero: pesos(r.totals.imssCents),
         neto: pesos(r.totals.netoCents),
-        nota: 'ESTIMACIÓN — falta el cálculo fino de IMSS por SBC y el timbrado del CFDI de nómina. Confírmalo con tu nominista.',
+        isn: pesos(r.isnCents), // Impuesto sobre nómina (patrón) = percepciones × tasa estatal del emisor
+        nota: 'ESTIMACIÓN — el ISN usa la tasa estatal configurada en el emisor (0 si no la pusiste). Falta el cálculo fino de IMSS por SBC y el timbrado del CFDI de nómina. Confírmalo con tu nominista.',
       })
     },
   )

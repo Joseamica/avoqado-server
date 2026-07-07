@@ -297,7 +297,7 @@ export async function getFiscalConfigController(req: Request, res: Response): Pr
  */
 export async function upsertEmisorController(req: Request, res: Response): Promise<void> {
   const { emisorId } = req.params
-  const { rfc, legalName, regimenFiscal, lugarExpedicion, serie, defaultUsoCfdi, globalPeriodicity, invoiceCashSales, includeCashInAccounting } =
+  const { rfc, legalName, regimenFiscal, lugarExpedicion, serie, defaultUsoCfdi, globalPeriodicity, invoiceCashSales, includeCashInAccounting, isnRate } =
     req.body
   // Venue resolved via resolveRequestVenueId (URL → x-venue-id → token), consistent with checkPermission.
   const authContext = (req as any).authContext ?? {}
@@ -320,6 +320,7 @@ export async function upsertEmisorController(req: Request, res: Response): Promi
       globalPeriodicity,
       invoiceCashSales,
       includeCashInAccounting,
+      isnRate,
     })
 
     logAction({
@@ -328,7 +329,7 @@ export async function upsertEmisorController(req: Request, res: Response): Promi
       action: 'FISCAL_EMISOR_UPSERTED',
       entity: 'FiscalEmisor',
       entityId: emisor.id,
-      data: { rfc, legalName, regimenFiscal, lugarExpedicion, invoiceCashSales, includeCashInAccounting, isUpdate: !!emisorId },
+      data: { rfc, legalName, regimenFiscal, lugarExpedicion, invoiceCashSales, includeCashInAccounting, isnRate, isUpdate: !!emisorId },
     })
 
     res.status(200).json({ emisor })

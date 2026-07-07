@@ -77,13 +77,13 @@ describe('getCatalog', () => {
 })
 
 describe('seedBaseChart', () => {
-  it('siembra el catálogo del giro (servicios = 86 cuentas) con isPostable solo en hojas', async () => {
+  it('siembra el catálogo del giro (servicios = 87 cuentas) con isPostable solo en hojas', async () => {
     const { tx, create } = makeTx()
     p.$transaction.mockImplementation(async (cb: any) => cb(tx))
 
     await seedBaseChart('venue-1', { staffId: 'staff-1' })
 
-    expect(create).toHaveBeenCalledTimes(88) // 85 base (incl. 601.84 + 216.07) + 3 extras de 'servicios'
+    expect(create).toHaveBeenCalledTimes(89) // 86 base (incl. 601.85 ISN) + 3 extras de 'servicios'
     const byCode = (code: string) => create.mock.calls.find(c => c[0].data.code === code)?.[0].data
     expect(byCode('101').isPostable).toBe(false) // 101 (Caja) tiene hijos → acumulativa
     expect(byCode('101.01').isPostable).toBe(true) // hoja
@@ -109,7 +109,7 @@ describe('seedBaseChart', () => {
     const createdCodes = create.mock.calls.map(c => c[0].data.code)
     expect(createdCodes).not.toContain('101') // existente → preservado
     expect(createdCodes).not.toContain('101.01')
-    expect(create).toHaveBeenCalledTimes(86) // 88 - 2 existentes
+    expect(create).toHaveBeenCalledTimes(87) // 89 - 2 existentes
   })
 })
 

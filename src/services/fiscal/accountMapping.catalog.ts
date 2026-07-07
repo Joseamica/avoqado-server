@@ -143,6 +143,8 @@ export const MOVEMENT_TYPES: MovementTypeDef[] = [
     side: 'CREDIT',
     group: 'NOMINA',
   },
+  { movementType: 'ISN_EXPENSE', label: 'Impuesto sobre nómina (gasto)', defaultCode: '601.85', side: 'DEBIT', group: 'NOMINA' },
+  { movementType: 'ISN_PAYABLE', label: 'Impuesto sobre nómina por pagar', defaultCode: '213.04', side: 'CREDIT', group: 'NOMINA' },
   // Resultado / patrimonio
   {
     movementType: 'NET_INCOME_PROFIT',

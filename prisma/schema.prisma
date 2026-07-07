@@ -10811,6 +10811,9 @@ model FiscalEmisor {
   // full total; this flag only governs whether cash reaches the fiscal books. Off by default → cash is
   // not declared unless the venue opts in.
   includeCashInAccounting Boolean     @default(false)
+  // Tasa del Impuesto Sobre Nómina (ISN), estatal — la paga el PATRÓN sobre las percepciones. Varía por
+  // estado (~1%–4%); 0 = no configurada (no se calcula). Fracción: 0.03 = 3%. La captura el venue/contador.
+  isnRate                 Decimal     @default(0) @db.Decimal(5, 4)
 
   merchantConfigs MerchantFiscalConfig[]
   cfdis           Cfdi[]

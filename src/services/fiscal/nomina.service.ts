@@ -374,6 +374,8 @@ export interface RunPayrollResult {
   payrollRunId: string | null
   posted: boolean
   totals: PayrollPreview['totals']
+  /** Impuesto sobre nómina (ISN) del periodo, a cargo del patrón (percepciones × isnRate). 0 si no hay tasa. */
+  isnCents: number
 }
 
 const PAYROLL_MOVEMENTS = ['PAYROLL_SALARIES', 'ISR_PAYROLL_WITHHELD', 'IMSS_PAYABLE', 'SALARIES_PAYABLE'] as const
@@ -385,14 +387,24 @@ const PAYROLL_MOVEMENTS = ['PAYROLL_SALARIES', 'ISR_PAYROLL_WITHHELD', 'IMSS_PAY
  */
 function buildPayrollJournalLines(
   acct: Map<string, string>,
-  t: { percepcionesCents: number; subsidioEntregadoCents: number; isrCents: number; imssCents: number; netoCents: number },
+  t: { percepcionesCents: number; subsidioEntregadoCents: number; isrCents: number; imssCents: number; netoCents: number; isnCents?: number },
 ) {
+  const isnExp = acct.get('ISN_EXPENSE')
+  const isnPay = acct.get('ISN_PAYABLE')
   return [
     { ledgerAccountId: acct.get('PAYROLL_SALARIES')!, debitCents: t.percepcionesCents, creditCents: 0 },
     { ledgerAccountId: acct.get('ISR_PAYROLL_WITHHELD')!, debitCents: t.subsidioEntregadoCents, creditCents: 0 },
     { ledgerAccountId: acct.get('ISR_PAYROLL_WITHHELD')!, debitCents: 0, creditCents: t.isrCents },
     { ledgerAccountId: acct.get('IMSS_PAYABLE')!, debitCents: 0, creditCents: t.imssCents },
     { ledgerAccountId: acct.get('SALARIES_PAYABLE')!, debitCents: 0, creditCents: t.netoCents },
+    // ISN (impuesto sobre nómina, a cargo del PATRÓN): 2 líneas balanceadas — DEBE gasto ISN / HABER ISN
+    // por pagar. Best-effort: solo si hay tasa (isnCents>0) y los mapeos existen; no altera el neto.
+    ...(t.isnCents && t.isnCents > 0 && isnExp && isnPay
+      ? [
+          { ledgerAccountId: isnExp, debitCents: t.isnCents, creditCents: 0 },
+          { ledgerAccountId: isnPay, debitCents: 0, creditCents: t.isnCents },
+        ]
+      : []),
   ].filter(l => l.debitCents > 0 || l.creditCents > 0)
 }
 
@@ -462,9 +474,15 @@ export async function runPayroll(
     payrollRunId: null,
     posted: false,
     totals: emptyTotals(),
+    isnCents: 0,
   }
   const scope = await resolveScopeOrNull(venueId)
   if (!scope) return { ...base, needsFiscalSetup: true }
+
+  // Tasa de ISN del contribuyente (estatal, a cargo del patrón). 0 si no está configurada → no se calcula.
+  const emisorScope = await prisma.fiscalEmisor.findFirst({ where: { venueId }, orderBy: { createdAt: 'asc' }, select: { isnRate: true } })
+  const isnRate = Number(emisorScope?.isnRate ?? 0)
+  const isnFor = (percepcionesCents: number) => (isnRate > 0 ? Math.round(percepcionesCents * isnRate) : 0)
 
   // Idempotencia: una corrida por (org, rfc, period, periodicidad).
   const existing = await prisma.payrollRun.findUnique({
@@ -508,6 +526,7 @@ export async function runPayroll(
         isrCents: existing.totalIsrCents,
         imssCents: existing.totalImssObreroCents,
         netoCents: existing.totalNetoCents,
+        isnCents: isnFor(existing.totalPercepcionesCents),
       })
       await postAndMarkPayrollRun({
         venueId: runVenueId,
@@ -520,14 +539,22 @@ export async function runPayroll(
         netoCents: existing.totalNetoCents,
         actorStaffId: actor.staffId ?? null,
       })
-      return { ...base, alreadyExists: true, payrollRunId: existing.id, posted: true, totals: existingTotals }
+      return { ...base, alreadyExists: true, payrollRunId: existing.id, posted: true, totals: existingTotals, isnCents: isnFor(existing.totalPercepcionesCents) }
     }
-    return { ...base, alreadyExists: true, payrollRunId: existing.id, posted: existing.posted, totals: existingTotals }
+    return {
+      ...base,
+      alreadyExists: true,
+      payrollRunId: existing.id,
+      posted: existing.posted,
+      totals: existingTotals,
+      isnCents: isnFor(existing.totalPercepcionesCents),
+    }
   }
 
   const preview = await computePayrollPreview(venueId, period, periodicidad)
   if (preview.lines.length === 0) return base // sin empleados activos
   base.totals = preview.totals
+  base.isnCents = isnFor(preview.totals.percepcionesCents)
 
   // Mapeos requeridos para la póliza.
   const mapResult = await getMappings(venueId)
@@ -585,6 +612,7 @@ export async function runPayroll(
     isrCents: preview.totals.isrCents,
     imssCents: preview.totals.imssCents,
     netoCents: preview.totals.netoCents,
+    isnCents: isnFor(preview.totals.percepcionesCents),
   })
   await postAndMarkPayrollRun({
     venueId,
