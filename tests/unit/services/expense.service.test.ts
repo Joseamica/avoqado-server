@@ -93,6 +93,38 @@ describe('createExpense', () => {
     expect(p.expense.create.mock.calls[0][0].data.paymentStatus).toBe('UNPAID')
   })
 
+  describe('deducibilidad por forma de pago, importe y tipo de gasto (LISR 27-III)', () => {
+    const deduc = () => p.expense.create.mock.calls[0][0].data
+    const BIG = { subtotalCents: 2500_00, ivaCents: 400_00, totalCents: 2900_00 } // > $2,000
+
+    it('efectivo ≤ $2,000 → SÍ deducible (no es un no-deducible plano)', async () => {
+      await createExpense('v1', { ...BASE, formaPago: '01' }, { staffId: 's' }) // total 116
+      expect(deduc().deducible).toBe(true)
+      expect(deduc().ivaAcreditable).toBe(true)
+    })
+
+    it('efectivo > $2,000 → NO deducible', async () => {
+      await createExpense('v1', { ...BASE, ...BIG, formaPago: '01' }, { staffId: 's' })
+      expect(deduc().deducible).toBe(false)
+      expect(deduc().ivaAcreditable).toBe(false)
+    })
+
+    it('combustible en efectivo (cualquier monto) → NO deducible', async () => {
+      await createExpense('v1', { ...BASE, formaPago: '01', categoria: 'COMBUSTIBLE' }, { staffId: 's' }) // total 116
+      expect(deduc().deducible).toBe(false)
+    })
+
+    it('pago electrónico > $2,000 → SÍ deducible', async () => {
+      await createExpense('v1', { ...BASE, ...BIG, formaPago: '03' }, { staffId: 's' }) // transferencia
+      expect(deduc().deducible).toBe(true)
+    })
+
+    it('override explícito gana sobre el default (efectivo > $2,000 marcado deducible)', async () => {
+      await createExpense('v1', { ...BASE, ...BIG, formaPago: '01', deducible: true }, { staffId: 's' })
+      expect(deduc().deducible).toBe(true)
+    })
+  })
+
   it('invariante: el comprobante que no cuadra → BadRequestError', async () => {
     await expect(createExpense('v1', { ...BASE, totalCents: 120_00 }, { staffId: 's' })).rejects.toThrow(/no cuadra/i)
   })

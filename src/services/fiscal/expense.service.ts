@@ -286,6 +286,23 @@ export async function createExpense(venueId: string, input: CreateExpenseInput, 
   const metodoPago: ExpenseMetodoPago = input.metodoPago ?? 'PUE'
   const uuid = input.uuid && input.uuid.trim() ? input.uuid.trim().toUpperCase() : null
 
+  // Deducibilidad por DEFAULT según forma de pago, tipo de gasto e importe (LISR art. 27-III). No es un
+  // "efectivo = no deducible" plano — depende del monto y del tipo de gasto (lo que pidió el contador):
+  //   · Efectivo ≤ $2,000 por operación → SÍ deducible.
+  //   · Efectivo > $2,000 → NO deducible (debe pagarse por medio electrónico).
+  //   · Combustible en efectivo → NO deducible a cualquier monto (siempre requiere pago electrónico).
+  //   · Pago electrónico → deducible.
+  // Siempre se puede forzar con `deducible`/`ivaAcreditable` explícitos. El IVA acreditable sigue a la
+  // deducibilidad (si el gasto no es deducible para ISR, su IVA tampoco es acreditable).
+  const categoria = input.categoria ?? 'GASTO_GENERAL'
+  const paidCash = (input.formaPago ?? null) === '01'
+  const CASH_DEDUCTION_LIMIT_CENTS = 2000_00
+  let defaultDeducible = true
+  if (paidCash) {
+    if (categoria === 'COMBUSTIBLE') defaultDeducible = false
+    else if (totalCents > CASH_DEDUCTION_LIMIT_CENTS) defaultDeducible = false
+  }
+
   // --- Estado de pago (cash-basis) ---
   const paid = input.paid ?? metodoPago === 'PUE'
   let paymentStatus: ExpensePaymentStatus = 'UNPAID'
@@ -319,7 +336,7 @@ export async function createExpense(venueId: string, input: CreateExpenseInput, 
         usoCfdi: input.usoCfdi ?? null,
         metodoPago,
         formaPago: input.formaPago ?? null,
-        categoria: input.categoria ?? 'GASTO_GENERAL',
+        categoria,
         fechaEmision,
         fechaPago,
         subtotalCents,
@@ -334,8 +351,8 @@ export async function createExpense(venueId: string, input: CreateExpenseInput, 
         ivaRetenidoCents,
         totalCents,
         taxBreakdown: input.taxBreakdown ?? Prisma.JsonNull,
-        deducible: input.deducible ?? true,
-        ivaAcreditable: input.ivaAcreditable ?? true,
+        deducible: input.deducible ?? defaultDeducible,
+        ivaAcreditable: input.ivaAcreditable ?? defaultDeducible,
         paymentStatus,
         paidCents,
         paidPeriod,
