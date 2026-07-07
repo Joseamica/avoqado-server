@@ -12,8 +12,9 @@ import { resolveScopeOrNull } from './chartOfAccounts.service'
  *  - **GENERAL** (actividad empresarial): acumulado del ejercicio (ingresos − deducciones autorizadas)
  *    × tarifa art-96 acumulada, menos los pagos provisionales previos y las retenciones.
  *
- * Es una ESTIMACIÓN preliminar (asume tasa de IVA 16% en el ingreso, no resta pérdidas de ejercicios
- * anteriores ni PTU; no captura retenciones de ISR en ventas). El número final lo valida el contador.
+ * Es una ESTIMACIÓN preliminar. La base de ingresos ya es SIN IVA por tasa real (LISR art 113-E excluye
+ * el IVA); no resta pérdidas de ejercicios anteriores ni PTU, ni captura retenciones de ISR en ventas.
+ * El número final lo valida el contador.
  * Importes en centavos enteros. Gated PREMIUM (CFDI).
  */
 
@@ -98,11 +99,12 @@ export interface IsrProvisionalResult {
   computedAt16Percent: boolean
   rfcSpansMultipleOrgs: boolean
   /**
-   * SIEMPRE `true`: este pago provisional es una ESTIMACIÓN, no la cifra final a declarar. Dos razones:
+   * SIEMPRE `true`: este pago provisional es una ESTIMACIÓN, no la cifra final a declarar. Razones:
    * (1) los pagos provisionales previos del ejercicio se RE-ESTIMAN de la utilidad acumulada actual, no
-   * son los realmente declarados (para ingresos disparejos difiere del cálculo legal); (2) la base usa
-   * IVA plano 16% (`computedAt16Percent`). El consumidor (dashboard/MCP) DEBE mostrar la leyenda de que
-   * es preliminar y confirmar con el contador antes de pagar.
+   * son los realmente declarados (para ingresos disparejos difiere del cálculo legal); (2) la base sin IVA
+   * es por tasa real, pero las ventas de importe libre (sin items) y productos sin `taxRate` caen al 16%
+   * por defecto. El consumidor (dashboard/MCP) DEBE mostrar la leyenda de que es preliminar y confirmar
+   * con el contador antes de pagar.
    */
   isEstimate: boolean
 }
@@ -128,11 +130,20 @@ const monthRange = (period: string) => {
   return { from: `${period}-01`, to: `${period}-${String(lastDay).padStart(2, '0')}`, year: y, month: m }
 }
 
-/** Σ ingreso neto cobrado de TODOS los locales del RFC en un rango. */
+/**
+ * Σ ingreso cobrado SIN IVA (base gravable ISR) de TODOS los locales del RFC en un rango.
+ *
+ * La base de ISR EXCLUYE el IVA: RESICO PF (LISR art. 113-E) grava los ingresos "sin incluir el
+ * impuesto al valor agregado"; en régimen general el IVA trasladado tampoco es ingreso acumulable
+ * (es un impuesto que se cobra y se entera). Por eso usamos `taxableBaseCents` (base sin IVA, por tasa
+ * real) — no `netRevenueCents` (IVA-incluido). Además las deducciones se toman del `subtotalCents`
+ * (sin IVA) de los gastos, así que ambos lados quedan consistentes (antes: ingresos con IVA − gastos
+ * sin IVA inflaba la utilidad y el ISR).
+ */
 async function ingresoNetoRfc(venueIds: string[], from: string, to: string): Promise<{ netCents: number; sales: number }> {
   const incomes = await Promise.all(venueIds.map(id => getIncomeStatement(id, { from, to })))
   return {
-    netCents: incomes.reduce((s, r) => s + r.revenue.netRevenueCents, 0),
+    netCents: incomes.reduce((s, r) => s + r.revenue.taxableBaseCents, 0),
     sales: incomes.reduce((s, r) => s + r.metrics.salesCount, 0),
   }
 }
@@ -181,7 +192,7 @@ export async function getIsrProvisional(venueId: string, period: string, regime:
     isrAPagarCents: 0,
     excedeTopeResico: false,
     zeroActivity: true,
-    computedAt16Percent: true,
+    computedAt16Percent: false, // base ISR sin IVA por tasa real; solo importe-libre/sin-taxRate cae al 16%
     rfcSpansMultipleOrgs: false,
     isEstimate: true,
   }

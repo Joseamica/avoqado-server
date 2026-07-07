@@ -6,7 +6,6 @@ import { parseDbDateRange } from '../../utils/datetime'
 import { getIncomeStatement } from '../dashboard/accounting.dashboard.service'
 import { resolveScopeOrNull } from './chartOfAccounts.service'
 import { getAcreditablePagado } from './expense.service'
-import { splitIvaIncluded } from './ivaMath'
 
 /**
  * IVA en flujo de efectivo (Capa B) — read-model HONESTO sobre las pólizas de cobro.
@@ -21,10 +20,11 @@ import { splitIvaIncluded } from './ivaMath'
  *  - **Fuente = Payments** (vía `getIncomeStatement`), NO los CFDIs: `Cfdi.taxBreakdown` está
  *    declarado pero NUNCA se escribe, así que el desglose por tasa no existe; solo
  *    `Cfdi.taxCents` se persiste → se usa como **línea de contraste**, no como base.
- *  - **Split UNA vez a nivel contribuyente** (Σ netRevenueCents → splitIvaIncluded), no por local
- *    (Σ de splits ≠ split de Σ → cuadra al centavo al filer).
- *  - **Tasa 16% asumida** (`getIncomeStatement` hardcodea `DEFAULT_IVA_RATE`, no une `Product.taxRate`)
- *    → flag `computedAt16Percent`; venues con 0%/8%/exento ven el IVA SOBREESTIMADO (caveat en UI).
+ *  - **IVA por tasa REAL** (`getIncomeStatement` desglosa por `Product.taxRate`: 16% central, 8%
+ *    frontera, 0% exento, mixto). Se suman `taxableBaseCents`/`ivaCents` de cada local y el desglose
+ *    `taxByRate` → `ivaTrasladadoPorTasaCents` (la declaración de IVA reporta 16% y 8% por separado).
+ *    Solo las ventas de importe libre (sin items) y productos sin `taxRate` caen al 16% por defecto,
+ *    así que `computedAt16Percent` ya es `false` (dejó de ser una estimación plana).
  *  - **IVA acreditable pagado = DISPONIBLE** (Fase 2 / Buzón de CFDIs): `getAcreditablePagado` suma el
  *    `ivaCents` de los gastos PAGADOS, deducibles y acreditables del periodo (lado proveedores). Ya
  *    resta al IVA a cargo. El IVA que NOSOTROS retuvimos a proveedores (`ivaRetenidoTerceros`) se
@@ -38,7 +38,6 @@ import { splitIvaIncluded } from './ivaMath'
  */
 
 const PERIOD_RE = /^\d{4}-(0[1-9]|1[0-2])$/ // AAAA-MM con mes real 01-12
-const IVA_RATE = 0.16
 
 const DIOT_DISPONIBLE_MOTIVO =
   'La DIOT lista el IVA pagado a tus PROVEEDORES (lado gastos) por proveedor y tasa. Disponible en su propia vista (Buzón de CFDIs / Gastos).'
@@ -54,6 +53,8 @@ export interface IvaCashflowResult {
   baseGravableCents: number
   /** IVA trasladado efectivamente cobrado en el periodo (LIVA art 1-B). */
   ivaTrasladadoCobradoCents: number
+  /** IVA trasladado cobrado DESGLOSADO por tasa (clave = tasa string "0.16"/"0.08"); la declaración lo pide separado. */
+  ivaTrasladadoPorTasaCents: Record<string, number>
   /** Contraste informativo: Σ Cfdi.taxCents timbrados en el periodo (NO es la base). */
   ivaAmparadoPorCfdiCents: number
   cfdiCount: number
@@ -92,6 +93,7 @@ const emptyResult = (period: string, scope: { organizationId: string; rfc: strin
   venueIds: [],
   baseGravableCents: 0,
   ivaTrasladadoCobradoCents: 0,
+  ivaTrasladadoPorTasaCents: {},
   ivaAmparadoPorCfdiCents: 0,
   cfdiCount: 0,
   acreditablePagadoCents: null,
@@ -145,11 +147,18 @@ export async function getIvaCashflow(venueId: string, period: string): Promise<I
   const fromStr = `${period}-01`
   const toStr = `${period}-${String(lastDay).padStart(2, '0')}`
 
-  // IVA trasladado cobrado = split ÚNICO sobre la suma de ingresos netos cobrados de TODOS los locales.
+  // IVA trasladado cobrado = suma del split por tasa REAL de cada local (getIncomeStatement ya desglosa
+  // por Product.taxRate y reconcilia con las pólizas). Base y IVA se suman; el desglose por tasa se mergea.
   const incomes = await Promise.all(venues.map(v => getIncomeStatement(v.id, { from: fromStr, to: toStr })))
-  const totalNetRevenueCents = incomes.reduce((s, r) => s + r.revenue.netRevenueCents, 0)
   const totalSalesCount = incomes.reduce((s, r) => s + r.metrics.salesCount, 0)
-  const { netCents: baseGravableCents, taxCents: ivaTrasladadoCobradoCents } = splitIvaIncluded(totalNetRevenueCents, IVA_RATE)
+  const baseGravableCents = incomes.reduce((s, r) => s + r.revenue.taxableBaseCents, 0)
+  const ivaTrasladadoCobradoCents = incomes.reduce((s, r) => s + r.revenue.ivaCents, 0)
+  const ivaTrasladadoPorTasaCents: Record<string, number> = {}
+  for (const r of incomes) {
+    for (const [rate, cents] of Object.entries(r.revenue.taxByRate)) {
+      ivaTrasladadoPorTasaCents[rate] = (ivaTrasladadoPorTasaCents[rate] ?? 0) + cents
+    }
+  }
 
   // Contraste (NO base): IVA amparado por los CFDIs timbrados del periodo (eje = stampedAt).
   const tz = venues.find(v => v.id === venueId)?.timezone || 'America/Mexico_City'
@@ -177,6 +186,7 @@ export async function getIvaCashflow(venueId: string, period: string): Promise<I
     venueIds,
     baseGravableCents,
     ivaTrasladadoCobradoCents,
+    ivaTrasladadoPorTasaCents,
     ivaAmparadoPorCfdiCents: cfdiAgg._sum.taxCents ?? 0,
     cfdiCount: cfdiAgg._count._all,
     acreditablePagadoCents,
@@ -185,7 +195,8 @@ export async function getIvaCashflow(venueId: string, period: string): Promise<I
     saldoAFavorAplicadoCents,
     ivaAPagarPreliminarCents: Math.max(0, neto),
     saldoAFavorDelPeriodoCents: neto < 0 ? -neto : 0,
-    computedAt16Percent: true,
+    computedAt16Percent: false, // IVA por tasa real; solo importe-libre/sin-taxRate cae al 16% por defecto
+
     acreditableDisponible: true,
     diotDisponible: true,
     incompletoPorFaltaDeGastos: false,

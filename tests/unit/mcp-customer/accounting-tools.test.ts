@@ -450,6 +450,7 @@ describe('accounting_iva_cashflow (read) — gated CFDI + accounting:read', () =
       venueIds: ['v1', 'v2'],
       baseGravableCents: 111638,
       ivaTrasladadoCobradoCents: 17862,
+      ivaTrasladadoPorTasaCents: { '0.16': 17862 },
       ivaAmparadoPorCfdiCents: 0,
       cfdiCount: 0,
       acreditablePagadoCents: 10000,
@@ -458,7 +459,7 @@ describe('accounting_iva_cashflow (read) — gated CFDI + accounting:read', () =
       saldoAFavorAplicadoCents: null,
       ivaAPagarPreliminarCents: 7862,
       saldoAFavorDelPeriodoCents: 0,
-      computedAt16Percent: true,
+      computedAt16Percent: false,
       acreditableDisponible: true,
       diotDisponible: true,
       incompletoPorFaltaDeGastos: false,
@@ -475,7 +476,8 @@ describe('accounting_iva_cashflow (read) — gated CFDI + accounting:read', () =
     expect(out.ivaAcreditablePagado).toBeCloseTo(100) // 10000 centavos
     expect(out.ivaRetenidoAProveedores).toBeCloseTo(5) // obligación aparte
     expect(out.ivaAPagarPreliminar).toBeCloseTo(78.62) // 17862 − 10000
-    expect(out.estimadoAl16Pct).toBe(true)
+    expect(out.ivaTrasladadoPorTasa).toEqual({ '16%': 178.62 }) // desglose por tasa en pesos
+    expect(out.estimadoAl16Pct).toBe(false) // IVA por tasa real
     expect(out.acreditableDisponible).toBe(true)
     expect(out.diotDisponible).toBe(true)
   })

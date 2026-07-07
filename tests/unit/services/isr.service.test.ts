@@ -28,8 +28,16 @@ const p = prisma as unknown as {
 const mScope = resolveScopeOrNull as jest.Mock
 const mIncome = getIncomeStatement as jest.Mock
 
-const income = (netRevenueCents: number, salesCount = 1) => ({
-  revenue: { grossSalesCents: netRevenueCents, refundsCents: 0, netRevenueCents, taxableBaseCents: 0, ivaCents: 0 },
+// La base de ISR es SIN IVA → el monto representa `taxableBaseCents` (lo que ISR usa como ingreso).
+const income = (baseCents: number, salesCount = 1) => ({
+  revenue: {
+    grossSalesCents: baseCents,
+    refundsCents: 0,
+    netRevenueCents: baseCents,
+    taxableBaseCents: baseCents,
+    ivaCents: 0,
+    taxByRate: {},
+  },
   tips: { totalCents: 0 },
   metrics: { salesCount, refundCount: 0, averageTicketCents: 0 },
 })

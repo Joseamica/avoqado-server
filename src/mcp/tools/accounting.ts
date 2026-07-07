@@ -30,6 +30,14 @@ import { text } from '../respond'
 /** Centavos enteros → pesos con 2 decimales (para lectura humana/LLM). */
 const pesos = (cents: number): number => Math.round(cents) / 100
 
+/**
+ * Mapa de IVA por tasa (clave = tasa string "0.16"/"0.08", valor en centavos) → objeto legible
+ * con la tasa como porcentaje y el monto en pesos: `{ "16%": 160, "8%": 80 }`. La declaración de
+ * IVA reporta cada tasa por separado, por eso el MCP lo expone desglosado, no solo el total.
+ */
+const porTasa = (map: Record<string, number>): Record<string, number> =>
+  Object.fromEntries(Object.entries(map).map(([rate, cents]) => [`${Math.round(Number(rate) * 100)}%`, pesos(cents)]))
+
 export function registerAccountingTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
 
@@ -66,6 +74,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           ingresoNeto: pesos(data.revenue.netRevenueCents),
           baseGravable: pesos(data.revenue.taxableBaseCents),
           ivaTrasladado: pesos(data.revenue.ivaCents),
+          ivaPorTasa: porTasa(data.revenue.taxByRate), // IVA real desglosado por tasa (16%/8%/exento)
         },
         propinas: pesos(data.tips.totalCents),
         metricas: {
@@ -107,6 +116,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           ingresoNeto: pesos(d.revenue.netRevenueCents),
           baseGravable: pesos(d.revenue.taxableBaseCents),
           ivaTrasladado: pesos(d.revenue.ivaCents),
+          ivaPorTasa: porTasa(d.revenue.taxByRate), // IVA real desglosado por tasa (16%/8%/exento)
         },
         facturacion: {
           cfdisTimbrados: d.invoicing.stampedCount,
@@ -556,6 +566,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         periodo: r.period,
         localesIncluidos: r.venueIds.length,
         ivaTrasladadoCobrado: pesos(r.ivaTrasladadoCobradoCents),
+        ivaTrasladadoPorTasa: porTasa(r.ivaTrasladadoPorTasaCents), // desglose 16%/8% que pide la declaración
         baseGravable: pesos(r.baseGravableCents),
         ivaAmparadoPorCfdiContraste: pesos(r.ivaAmparadoPorCfdiCents),
         ivaAcreditablePagado: r.acreditablePagadoCents === null ? null : pesos(r.acreditablePagadoCents),
@@ -563,11 +574,11 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         ivaAPagarPreliminar: pesos(r.ivaAPagarPreliminarCents),
         saldoAFavorDelPeriodo: pesos(r.saldoAFavorDelPeriodoCents),
         // Banderas de honestidad fiscal
-        estimadoAl16Pct: r.computedAt16Percent,
+        estimadoAl16Pct: r.computedAt16Percent, // false: IVA por tasa real (solo importe-libre/sin-taxRate cae al 16%)
         acreditableDisponible: r.acreditableDisponible,
         sinVentasRecuerdaDeclararEnCeros: r.zeroActivity,
         diotDisponible: r.diotDisponible,
-        nota: 'Ya descuenta tu IVA acreditable de gastos pagados (Buzón de CFDIs). El IVA retenido a proveedores se entera APARTE (no resta aquí). Sigue siendo flujo de efectivo (cobrado/pagado), no facturado; asume 16% y no incluye IVA que clientes te hayan retenido en ventas. No lo uses como pago final sin tu contador.',
+        nota: 'Ya descuenta tu IVA acreditable de gastos pagados (Buzón de CFDIs). El IVA retenido a proveedores se entera APARTE (no resta aquí). Sigue siendo flujo de efectivo (cobrado/pagado), no facturado; el IVA se calcula por la tasa real de cada producto (16%/8%/exento) y no incluye IVA que clientes te hayan retenido en ventas. No lo uses como pago final sin tu contador.',
       })
     },
   )

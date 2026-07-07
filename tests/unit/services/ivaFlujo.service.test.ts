@@ -1,11 +1,13 @@
 /**
  * Unit tests (mock-first) para IVA en flujo de efectivo (Capa B).
- * Lock fiscal: (1) suma multi-venue por RFC y hace el split de IVA UNA sola vez a nivel
- * contribuyente (Σ(splits) ≠ split(Σ)); (2) IVA acreditable pagado (Fase 2) resta al IVA a cargo y
- * el IVA retenido a proveedores se reporta aparte; la retención de ventas sigue null (NUNCA 0);
- * (3) periodo inválido → 400; (4) zeroActivity recuerda declarar en ceros.
+ * Lock fiscal: (1) suma multi-venue por RFC la base y el IVA que cada income statement ya calculó por
+ * tasa real (el split es por-pago dentro de getIncomeStatement, no un split único del agregado);
+ * (2) IVA acreditable pagado (Fase 2) resta al IVA a cargo y el IVA retenido a proveedores se reporta
+ * aparte; la retención de ventas sigue null (NUNCA 0); (3) periodo inválido → 400; (4) zeroActivity
+ * recuerda declarar en ceros.
  */
 import { BadRequestError } from '../../../src/errors/AppError'
+import { splitIvaIncluded } from '../../../src/services/fiscal/ivaMath'
 
 jest.mock('../../../src/utils/prismaClient', () => ({
   __esModule: true,
@@ -50,11 +52,23 @@ const acreditableResult = (acreditablePagadoCents: number, ivaRetenidoTercerosCe
   expenseCount: acreditablePagadoCents > 0 ? 1 : 0,
 })
 
-const income = (netRevenueCents: number, salesCount = 1) => ({
-  revenue: { grossSalesCents: netRevenueCents, refundsCents: 0, netRevenueCents, taxableBaseCents: 0, ivaCents: 0 },
-  tips: { totalCents: 0 },
-  metrics: { salesCount, refundCount: 0, averageTicketCents: 0 },
-})
+// Mock de un income statement de un local: el monto es GROSS (IVA-incluido) y se desglosa al 16% como
+// lo haría el read-model real (base + IVA por tasa). ivaFlujo SUMA estos campos ya calculados.
+const income = (grossCents: number, salesCount = 1) => {
+  const { netCents, taxCents } = splitIvaIncluded(grossCents, 0.16)
+  return {
+    revenue: {
+      grossSalesCents: grossCents,
+      refundsCents: 0,
+      netRevenueCents: grossCents,
+      taxableBaseCents: netCents,
+      ivaCents: taxCents,
+      taxByRate: taxCents ? { '0.16': taxCents } : {},
+    },
+    tips: { totalCents: 0 },
+    metrics: { salesCount, refundCount: 0, averageTicketCents: 0 },
+  }
+}
 
 beforeEach(() => {
   jest.clearAllMocks()
@@ -74,8 +88,8 @@ it('sin RFC → needsFiscalSetup, no consulta ingresos', async () => {
   expect(mockIncome).not.toHaveBeenCalled()
 })
 
-it('suma multi-venue del MISMO RFC y hace el split de IVA UNA vez a nivel contribuyente', async () => {
-  // 2 locales del mismo RFC, misma org. Números elegidos para que Σ(splits) ≠ split(Σ).
+it('suma multi-venue del MISMO RFC la base y el IVA ya calculados por local (split por-pago, no del agregado)', async () => {
+  // 2 locales del mismo RFC, misma org. Cada income statement ya trae su split al 16%; ivaFlujo SUMA.
   p.venue.findMany.mockResolvedValue([
     { id: 'v1', organizationId: 'org1', timezone: 'America/Mexico_City' },
     { id: 'v2', organizationId: 'org1', timezone: 'America/Mexico_City' },
@@ -84,10 +98,10 @@ it('suma multi-venue del MISMO RFC y hace el split de IVA UNA vez a nivel contri
 
   const r = await getIvaCashflow('v1', '2026-06')
 
-  // split(20001, 0.16): base = round(20001/1.16)=17242, tax = 20001-17242 = 2759
-  // (Σ de splits por local daría 2758 — DISTINTO → prueba que el split es único)
-  expect(r.ivaTrasladadoCobradoCents).toBe(2759)
-  expect(r.baseGravableCents).toBe(17242)
+  // v1 10000 → base 8621, tax 1379 · v2 10001 → base 8622, tax 1379 · Σ tax 2758, Σ base 17243
+  expect(r.ivaTrasladadoCobradoCents).toBe(2758)
+  expect(r.baseGravableCents).toBe(17243)
+  expect(r.ivaTrasladadoPorTasaCents).toEqual({ '0.16': 2758 })
   expect(r.venueIds).toEqual(['v1', 'v2'])
   expect(mockIncome).toHaveBeenCalledTimes(2)
 })
@@ -103,7 +117,7 @@ it('sin gastos acreditables: acreditable=0 disponible, retención de ventas null
   expect(r.incompletoPorFaltaDeGastos).toBe(false)
   expect(r.retencionesCents).toBeNull() // retención AL contribuyente (ventas) aún no capturada
   expect(r.saldoAFavorAplicadoCents).toBeNull()
-  expect(r.computedAt16Percent).toBe(true)
+  expect(r.computedAt16Percent).toBe(false) // IVA por tasa real; ya no es un 16% plano asumido
   // 116000 → split: base 100000, tax 16000; sin acreditable, a pagar == trasladado
   expect(r.ivaTrasladadoCobradoCents).toBe(16000)
   expect(r.ivaAPagarPreliminarCents).toBe(16000)

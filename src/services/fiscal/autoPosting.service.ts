@@ -6,7 +6,7 @@ import { parseDbDateRange } from '../../utils/datetime'
 import { getMappings } from './accountMapping.service'
 import { resolveScopeOrNull } from './chartOfAccounts.service'
 import { postJournalEntry } from './journalEntry.service'
-import { splitIvaIncluded } from './ivaMath'
+import { splitPaymentIvaByOrderRates, grossByRateFromItems } from './ivaMath'
 
 /**
  * Motor de POSTEO AUTOMÁTICO de pólizas (Capa B, slice 2). Genera asientos de doble partida
@@ -61,6 +61,13 @@ export interface GenerateResult {
   skipped: number
 }
 
+interface OrderItemRow {
+  quantity: number
+  unitPrice: Prisma.Decimal
+  discountAmount: Prisma.Decimal
+  product: { taxRate: Prisma.Decimal | null } | null
+}
+
 interface PaymentRow {
   id: string
   amount: Prisma.Decimal
@@ -69,7 +76,25 @@ interface PaymentRow {
   method: PaymentMethod
   type: PaymentType | null
   createdAt: Date
-  order: { status: OrderStatus; orderNumber: string | null } | null
+  order: { status: OrderStatus; orderNumber: string | null; items: OrderItemRow[] } | null
+}
+
+/**
+ * Gross (IVA-included, cents) grouped by the item's REAL tax rate, from the order's line items.
+ * Thin Decimal→number adapter over the shared {@link grossByRateFromItems} — the single source of
+ * truth for reading each product's rate, so auto-posting, the income-statement read-model and the CFDI
+ * all group identically. Empty (custom-amount sale) → [], and callers fall back to flat 16%.
+ */
+function grossByRateForOrder(items: OrderItemRow[] | undefined): { rate: number; grossCents: number }[] {
+  return grossByRateFromItems(
+    (items ?? []).map(it => ({
+      unitPrice: Number(it.unitPrice),
+      quantity: it.quantity,
+      discountAmount: Number(it.discountAmount),
+      taxRate: it.product?.taxRate != null ? Number(it.product.taxRate) : null,
+    })),
+    IVA_RATE,
+  )
 }
 
 /** Construye las líneas BALANCEADAS de una póliza de VENTA. null si es una anomalía no posteable. */
@@ -80,7 +105,9 @@ function buildSaleLines(
   const G = Math.abs(toCents(p.amount))
   const T = Math.abs(toCents(p.tipAmount))
   const F = Math.abs(toCents(p.feeAmount))
-  const { netCents, taxCents } = splitIvaIncluded(G, IVA_RATE)
+  // IVA por la tasa REAL de los productos de la orden (16%/8%/exento/mixto), no un 16% plano.
+  // net + tax === G exacto, así la póliza sigue cuadrando al centavo.
+  const { netCents, taxCents } = splitPaymentIvaByOrderRates(G, grossByRateForOrder(p.order?.items))
   const isCash = p.method === PaymentMethod.CASH
   // Efectivo ignora comisión; tarjeta neta la comisión del depósito.
   const depositCents = isCash ? G + T : G + T - F
@@ -104,7 +131,8 @@ function buildRefundLines(
   const rG = Math.abs(toCents(p.amount))
   const rT = Math.abs(toCents(p.tipAmount))
   const rF = Math.abs(toCents(p.feeAmount)) // normalmente 0: el procesador conserva la comisión
-  const { netCents, taxCents } = splitIvaIncluded(rG, IVA_RATE)
+  // IVA por tasa real de la orden (espejo de la venta) — cuadra al centavo.
+  const { netCents, taxCents } = splitPaymentIvaByOrderRates(rG, grossByRateForOrder(p.order?.items))
   const isCash = p.method === PaymentMethod.CASH
   const refundCents = rG + rT - rF
   if (refundCents < 0) return null
@@ -187,7 +215,14 @@ export async function generatePoliciesForVenue(
       method: true,
       type: true,
       createdAt: true,
-      order: { select: { status: true, orderNumber: true } },
+      order: {
+        select: {
+          status: true,
+          orderNumber: true,
+          // Item-level tax rate → per-rate IVA (8% frontera / mixed / exempt) instead of flat 16%.
+          items: { select: { quantity: true, unitPrice: true, discountAmount: true, product: { select: { taxRate: true } } } },
+        },
+      },
     },
     orderBy: { createdAt: 'asc' },
   })) as PaymentRow[]

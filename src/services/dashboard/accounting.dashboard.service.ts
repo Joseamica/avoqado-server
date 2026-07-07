@@ -3,7 +3,7 @@ import { CfdiStatus, OrderStatus, PaymentMethod, PaymentType, TransactionStatus 
 import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { parseDbDateRange } from '../../utils/datetime'
-import { splitIvaIncluded } from '../fiscal/ivaMath'
+import { splitPaymentIvaByOrderRates, grossByRateFromItems } from '../fiscal/ivaMath'
 
 /**
  * Accounting — Capa A (gerencial, read-model)
@@ -19,9 +19,13 @@ import { splitIvaIncluded } from '../fiscal/ivaMath'
  * restan del ingreso.
  *
  * Limitación conocida (v1): no hay costo de venta capturado para retail (QUANTITY) ni
- * serializado, por eso este read-model reporta INGRESOS, no utilidad bruta. La tasa de IVA
- * se asume 0.16 a nivel venue (`taxRateAssumed`) — el desglose exacto por producto es una
- * iteración posterior.
+ * serializado, por eso este read-model reporta INGRESOS, no utilidad bruta.
+ *
+ * IVA por tasa REAL: el desglose usa la tasa de cada producto de la orden (16% central, 8% frontera,
+ * 0% exento, mixto) vía `splitPaymentIvaByOrderRates` — el mismo split que la póliza de auto-posting,
+ * así el estado de resultados RECONCILIA con el libro diario al centavo. `taxByRate` reporta el IVA
+ * separado por tasa (la declaración de IVA del SAT reporta 16% y 8% por separado). Ventas de importe
+ * libre (sin items) caen al 16% por defecto. `taxRateAssumed` (0.16) queda como nominal informativo.
  */
 
 const DEFAULT_IVA_RATE = 0.16
@@ -39,7 +43,7 @@ export interface IncomeStatement {
   currency: 'MXN'
   timezone: string
   period: { from: string; to: string }
-  /** Tasa de IVA asumida para el desglose a nivel venue (v1: 0.16). */
+  /** Tasa de IVA nominal informativa (0.16). El desglose real es por tasa — ver `revenue.taxByRate`. */
   taxRateAssumed: number
   revenue: {
     /** Ventas brutas (IVA-incluido, sin propina), antes de devoluciones. */
@@ -48,10 +52,12 @@ export interface IncomeStatement {
     refundsCents: number
     /** Ingreso real cobrado = ventas brutas − devoluciones (IVA-incluido). */
     netRevenueCents: number
-    /** Base gravable: ingreso neto sin IVA. */
+    /** Base gravable: ingreso neto sin IVA (suma de las bases por tasa). */
     taxableBaseCents: number
-    /** IVA trasladado embebido en el ingreso neto. */
+    /** IVA trasladado embebido en el ingreso neto (neto de devoluciones). */
     ivaCents: number
+    /** IVA trasladado NETO desglosado por tasa (clave = tasa como string, p.ej. "0.16", "0.08"). */
+    taxByRate: Record<string, number>
   }
   /** Propinas (informativas, NO forman parte del ingreso). */
   tips: { totalCents: number }
@@ -88,7 +94,17 @@ export async function getIncomeStatement(venueId: string, filters: IncomeStateme
       createdAt: { gte: from, lte: to },
       order: { status: { not: OrderStatus.CANCELLED } },
     },
-    select: { amount: true, tipAmount: true, type: true },
+    select: {
+      amount: true,
+      tipAmount: true,
+      type: true,
+      // Items de la orden con la tasa real de cada producto → IVA por tasa (no un 16% plano).
+      order: {
+        select: {
+          items: { select: { quantity: true, unitPrice: true, discountAmount: true, product: { select: { taxRate: true } } } },
+        },
+      },
+    },
   })
 
   let grossSalesCents = 0
@@ -96,27 +112,57 @@ export async function getIncomeStatement(venueId: string, filters: IncomeStateme
   let tipsCents = 0
   let salesCount = 0
   let refundCount = 0
+  // Base + IVA acumulados con el split por tasa REAL de cada pago (mismo split que la póliza →
+  // el estado de resultados reconcilia con el libro diario al centavo).
+  let taxableBaseCents = 0
+  let ivaCents = 0
+  const taxByRate: Record<string, number> = {}
+  const mergeTax = (byRate: Record<string, number>, sign: 1 | -1) => {
+    for (const [rate, cents] of Object.entries(byRate)) {
+      taxByRate[rate] = (taxByRate[rate] ?? 0) + sign * cents
+    }
+  }
 
   for (const r of rows) {
     // Pagos de prueba del superadmin no son ingreso.
     if (r.type === PaymentType.TEST) continue
 
     const amountCents = toCents(r.amount) // con signo: las devoluciones ya vienen negativas
+    const grossByRate = grossByRateFromItems(
+      (r.order?.items ?? []).map(it => ({
+        unitPrice: Number(it.unitPrice),
+        quantity: it.quantity,
+        discountAmount: Number(it.discountAmount),
+        taxRate: it.product?.taxRate != null ? Number(it.product.taxRate) : null,
+      })),
+      DEFAULT_IVA_RATE,
+    )
 
     if (r.type === PaymentType.REFUND) {
-      refundsCents += Math.abs(amountCents)
+      const magnitudeCents = Math.abs(amountCents)
+      const s = splitPaymentIvaByOrderRates(magnitudeCents, grossByRate, DEFAULT_IVA_RATE)
+      refundsCents += magnitudeCents
+      taxableBaseCents -= s.netCents
+      ivaCents -= s.taxCents
+      mergeTax(s.taxByRate, -1)
       refundCount += 1
       continue
     }
 
     // REGULAR / FAST / ADJUSTMENT / null (legacy) → venta real
+    const s = splitPaymentIvaByOrderRates(amountCents, grossByRate, DEFAULT_IVA_RATE)
     grossSalesCents += amountCents
+    taxableBaseCents += s.netCents
+    ivaCents += s.taxCents
+    mergeTax(s.taxByRate, 1)
     tipsCents += toCents(r.tipAmount)
     salesCount += 1
   }
 
-  const netRevenueCents = grossSalesCents - refundsCents
-  const { netCents: taxableBaseCents, taxCents: ivaCents } = splitIvaIncluded(netRevenueCents, DEFAULT_IVA_RATE)
+  // Poda claves de tasa que quedaron en 0 tras netear devoluciones (no aportan a la declaración).
+  for (const rate of Object.keys(taxByRate)) if (taxByRate[rate] === 0) delete taxByRate[rate]
+
+  const netRevenueCents = grossSalesCents - refundsCents // === taxableBaseCents + ivaCents (cada split es exacto)
   const averageTicketCents = salesCount > 0 ? Math.round(grossSalesCents / salesCount) : 0
 
   return {
@@ -126,7 +172,7 @@ export async function getIncomeStatement(venueId: string, filters: IncomeStateme
     timezone,
     period: { from: filters.from, to: filters.to },
     taxRateAssumed: DEFAULT_IVA_RATE,
-    revenue: { grossSalesCents, refundsCents, netRevenueCents, taxableBaseCents, ivaCents },
+    revenue: { grossSalesCents, refundsCents, netRevenueCents, taxableBaseCents, ivaCents, taxByRate },
     tips: { totalCents: tipsCents },
     metrics: { salesCount, refundCount, averageTicketCents },
   }
