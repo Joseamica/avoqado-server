@@ -31,6 +31,8 @@ export interface EmisorInput {
   serie?: string
   defaultUsoCfdi?: string
   globalPeriodicity?: GlobalPeriodicity
+  /** Opt-in: permitir facturar ventas en efectivo (QR + global). Default false. */
+  invoiceCashSales?: boolean
 }
 
 export interface MerchantFiscalConfigInput {
@@ -98,6 +100,9 @@ export async function upsertEmisor(input: EmisorInput, deps: FiscalConfigDeps = 
     defaultUsoCfdi: input.defaultUsoCfdi ?? 'G03',
     globalPeriodicity: input.globalPeriodicity ?? 'MENSUAL',
   }
+  // Solo se escribe cuando viene definido: en create aplica el default false de la DB; en update no
+  // resetea el valor si el cliente no lo mandó (a diferencia de los campos de arriba).
+  if (input.invoiceCashSales !== undefined) data.invoiceCashSales = input.invoiceCashSales
 
   return deps.upsertEmisorRow(data, input.emisorId)
 }
@@ -239,6 +244,7 @@ const defaultDeps: FiscalConfigDeps = {
         serie: true,
         defaultUsoCfdi: true,
         globalPeriodicity: true,
+        invoiceCashSales: true,
         createdAt: true,
         updatedAt: true,
         // providerKeyEnc intentionally omitted (sensitive)

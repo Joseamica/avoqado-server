@@ -10802,6 +10802,10 @@ model FiscalEmisor {
   serie             String?
   defaultUsoCfdi    String            @default("G03")
   globalPeriodicity GlobalPeriodicity @default(MENSUAL)
+  // OPT-IN (default false): whether CASH sales may be invoiced at all (customer self-invoice QR / Flow A
+  // AND the month-end factura global / Flow C). Many venues do NOT declare cash income, so invoicing it
+  // would force declaring sales they never meant to. Off by default; a venue turns it on explicitly.
+  invoiceCashSales  Boolean           @default(false)
 
   merchantConfigs MerchantFiscalConfig[]
   cfdis           Cfdi[]
@@ -10828,7 +10832,10 @@ model MerchantFiscalConfig {
 
   facturacionEnabled Boolean @default(false) // master switch for this merchant
   autofacturaEnabled Boolean @default(false) // customer self-invoice (Flow A) allowed
-  includeInGlobal    Boolean @default(true) // included in month-end global sweep (Flow C)
+  // OPT-IN (default false): only sweep this merchant's Avoqado sales into the month-end factura global
+  // (Flow C, cfdiGlobal.job) when the venue EXPLICITLY turns it on. A default of true would silently
+  // double-invoice venues whose accountant already issues the global for those same sales.
+  includeInGlobal    Boolean @default(false) // included in month-end global sweep (Flow C) — opt-in
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

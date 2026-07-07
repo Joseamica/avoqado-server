@@ -27,6 +27,7 @@ const ACTIVE_EMISOR: GlobalEmisor = {
   csdStatus: 'ACTIVE' as any,
   providerKeyEnc: null,
   provider: 'FACTURAPI' as any,
+  invoiceCashSales: false,
 }
 
 const STAMPED_RESULT = {
@@ -152,6 +153,22 @@ describe('issueGlobalForEmisor', () => {
       const result = await issueGlobalForEmisor({ emisorId: 'e1', now: NOW, sandbox: true }, deps)
       expect(result.period?.meses).toBe('05')
       expect(result.candidateCount).toBe(2)
+    })
+  })
+
+  describe('cash opt-in (invoiceCashSales)', () => {
+    it('forwards invoiceCashSales=false (default) to loadGlobalCandidates so cash orders are excluded', async () => {
+      const deps = makeDeps()
+      await issueGlobalForEmisor({ emisorId: 'e1', now: NOW, sandbox: true }, deps)
+      // 4th arg = emisor.invoiceCashSales — false by default → the candidate query drops cash orders.
+      expect(deps.loadGlobalCandidates).toHaveBeenCalledWith('e1', expect.any(Date), expect.any(Date), false)
+    })
+
+    it('forwards invoiceCashSales=true when the emisor opted in (cash swept into the global)', async () => {
+      const optedIn: GlobalEmisor = { ...ACTIVE_EMISOR, invoiceCashSales: true }
+      const deps = makeDeps({ loadEmisor: jest.fn().mockResolvedValue(optedIn) })
+      await issueGlobalForEmisor({ emisorId: 'e1', now: NOW, sandbox: true }, deps)
+      expect(deps.loadGlobalCandidates).toHaveBeenCalledWith('e1', expect.any(Date), expect.any(Date), true)
     })
   })
 

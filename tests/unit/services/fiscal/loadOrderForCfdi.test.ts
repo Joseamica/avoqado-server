@@ -49,7 +49,15 @@ function aConfig(over: Record<string, any> = {}) {
   return {
     facturacionEnabled: true,
     autofacturaEnabled: false,
-    fiscalEmisor: { id: 'e1', venueId: 'venueB', provider: 'FACTURAPI', providerKeyEnc: null, csdStatus: 'ACTIVE', serie: 'F' },
+    fiscalEmisor: {
+      id: 'e1',
+      venueId: 'venueB',
+      provider: 'FACTURAPI',
+      providerKeyEnc: null,
+      csdStatus: 'ACTIVE',
+      serie: 'F',
+      invoiceCashSales: false,
+    },
     ...over,
   }
 }
@@ -97,6 +105,23 @@ describe('loadOrderForCfdiFromDb', () => {
     orderMock.mockResolvedValue(anOrder({ payments: [] }))
     expect(await loadOrderForCfdiFromDb('o1')).toBeNull()
     expect(cfgMock).not.toHaveBeenCalled()
+  })
+
+  it('CASH sale with a merchant: NOT invoiceable when emisor.invoiceCashSales=false (default)', async () => {
+    // Rare case: a cash payment that carries a merchant FK. The emisor opt-out must still block it,
+    // so a cash ticket cannot self-invoice via the receipt QR when the venue does not declare cash.
+    orderMock.mockResolvedValue(anOrder({ payments: [{ method: 'CASH', merchantAccountId: 'm1', ecommerceMerchantId: null }] }))
+    cfgMock.mockResolvedValue(aConfig())
+    const bundle = await loadOrderForCfdiFromDb('o1')
+    expect(bundle).toBeNull()
+  })
+
+  it('CASH sale with a merchant: invoiceable when emisor.invoiceCashSales=true (opted in)', async () => {
+    orderMock.mockResolvedValue(anOrder({ payments: [{ method: 'CASH', merchantAccountId: 'm1', ecommerceMerchantId: null }] }))
+    cfgMock.mockResolvedValue(aConfig({ fiscalEmisor: { ...aConfig().fiscalEmisor, invoiceCashSales: true } }))
+    const bundle = await loadOrderForCfdiFromDb('o1')
+    expect(bundle).not.toBeNull()
+    expect(bundle!.paymentMethod).toBe('CASH')
   })
 
   it('returns null when the payment has no merchant FK', async () => {

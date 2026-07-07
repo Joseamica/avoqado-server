@@ -77,6 +77,8 @@ const upsertEmisorBodyShape = z.object({
       invalid_type_error: 'La periodicidad global no es válida',
     })
     .optional(),
+  // Opt-in: permitir facturar ventas en efectivo (QR + global). Default false en el servicio.
+  invoiceCashSales: z.boolean().optional(),
 })
 
 /**

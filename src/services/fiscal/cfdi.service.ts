@@ -406,11 +406,17 @@ export async function loadOrderForCfdiFromDb(orderId: string): Promise<LoadedOrd
     select: {
       facturacionEnabled: true,
       autofacturaEnabled: true,
-      fiscalEmisor: { select: { id: true, venueId: true, provider: true, providerKeyEnc: true, csdStatus: true, serie: true } },
+      fiscalEmisor: {
+        select: { id: true, venueId: true, provider: true, providerKeyEnc: true, csdStatus: true, serie: true, invoiceCashSales: true },
+      },
     },
   })
   // No merchant config or emisor not set up → cannot invoice
   if (!cfg || !cfg.fiscalEmisor) return null
+
+  // Cash sales are not invoiceable unless the emisor opted in (most venues don't declare cash, so a
+  // cash-settled ticket must not self-invoice via the receipt QR). Card/electronic tickets are unaffected.
+  if (pay.method === 'CASH' && !cfg.fiscalEmisor.invoiceCashSales) return null
 
   // Tenant isolation: a MerchantAccount can be shared across venues in the same org (via VenuePaymentConfig
   // primary/secondary/tertiary slots). The emisor it maps to MUST belong to THIS order's venue — otherwise

@@ -50,12 +50,14 @@ export interface GlobalEmisor {
   csdStatus: CsdStatus
   providerKeyEnc: string | null
   provider: any // FiscalProviderType
+  /** OPT-IN: only sweep CASH-paid orders into the global when the venue explicitly allows it. */
+  invoiceCashSales: boolean
 }
 
 export interface IssueGlobalDeps {
   loadEmisor: (emisorId: string) => Promise<GlobalEmisor | null>
   findExistingGlobal: (idempotencyKey: string) => Promise<any | null>
-  loadGlobalCandidates: (emisorId: string, periodStart: Date, periodEnd: Date) => Promise<GlobalInvoiceLine[]>
+  loadGlobalCandidates: (emisorId: string, periodStart: Date, periodEnd: Date, invoiceCashSales: boolean) => Promise<GlobalInvoiceLine[]>
   resolveProvider: typeof resolveFiscalProvider
   storeArtifact: (buffer: Buffer, path: string, contentType: string) => Promise<string>
   persistCfdi: (data: Record<string, any>) => Promise<any>
@@ -108,8 +110,10 @@ export async function issueGlobalForEmisor(
     return { status: 'STAMPED', cfdi: existing, period, candidateCount: 0 }
   }
 
-  // 5. Load candidates (PAID orders, not individually stamped, under this emisor in the period)
-  const candidates = await deps.loadGlobalCandidates(emisorId, period.periodStart, period.periodEnd)
+  // 5. Load candidates (PAID orders, not individually stamped, under this emisor in the period).
+  //    Cash-paid orders are swept ONLY if the emisor opted in (invoiceCashSales) — most venues don't
+  //    declare cash, so by default a cash (or cash+card mixed) order is left out of the global.
+  const candidates = await deps.loadGlobalCandidates(emisorId, period.periodStart, period.periodEnd, emisor.invoiceCashSales)
   logger.info(
     `[cfdiGlobal] emisor=${emisorId} period=${period.meses}/${period.anio} candidates=${candidates.length} periodStart=${period.periodStart.toISOString()} periodEnd=${period.periodEnd.toISOString()}`,
   )
@@ -293,6 +297,7 @@ const defaultDeps: IssueGlobalDeps = {
         csdStatus: true,
         providerKeyEnc: true,
         provider: true,
+        invoiceCashSales: true,
       },
     }) as Promise<GlobalEmisor | null>,
 
@@ -300,7 +305,12 @@ const defaultDeps: IssueGlobalDeps = {
 
   reserveCfdi: (data: Record<string, any>) => prisma.cfdi.create({ data: data as any }),
 
-  loadGlobalCandidates: async (emisorId: string, periodStart: Date, periodEnd: Date): Promise<GlobalInvoiceLine[]> => {
+  loadGlobalCandidates: async (
+    emisorId: string,
+    periodStart: Date,
+    periodEnd: Date,
+    invoiceCashSales: boolean,
+  ): Promise<GlobalInvoiceLine[]> => {
     // Candidates = PAID orders settled (payment COMPLETED) via a merchant under this emisor
     // with includeInGlobal && facturacionEnabled, and NO STAMPED individual Cfdi.
     //
@@ -334,6 +344,10 @@ const defaultDeps: IssueGlobalDeps = {
               },
             ],
           },
+          // Cash NOT declared by default: unless the emisor opted in, drop any order that has a
+          // COMPLETED cash payment. This also drops mixed cash+card orders (whose total would
+          // otherwise declare the cash portion) — conservative, matches "don't invoice cash".
+          ...(invoiceCashSales ? {} : { none: { status: 'COMPLETED', method: 'CASH' } }),
         },
         // Exclude orders that already have a STAMPED individual Cfdi
         cfdis: {
