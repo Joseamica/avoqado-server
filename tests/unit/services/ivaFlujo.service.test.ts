@@ -25,6 +25,9 @@ jest.mock('../../../src/services/dashboard/accounting.dashboard.service', () => 
 jest.mock('../../../src/services/fiscal/expense.service', () => ({
   getAcreditablePagado: jest.fn(),
 }))
+jest.mock('../../../src/services/fiscal/salesRetention.service', () => ({
+  getSalesRetentionCents: jest.fn(),
+}))
 jest.mock('../../../src/utils/datetime', () => ({
   parseDbDateRange: () => ({ from: new Date('2026-06-01T06:00:00Z'), to: new Date('2026-07-01T05:59:59Z') }),
 }))
@@ -33,6 +36,7 @@ import prisma from '../../../src/utils/prismaClient'
 import { resolveScopeOrNull } from '../../../src/services/fiscal/chartOfAccounts.service'
 import { getIncomeStatement } from '../../../src/services/dashboard/accounting.dashboard.service'
 import { getAcreditablePagado } from '../../../src/services/fiscal/expense.service'
+import { getSalesRetentionCents } from '../../../src/services/fiscal/salesRetention.service'
 import { getIvaCashflow } from '../../../src/services/fiscal/ivaFlujo.service'
 
 const p = prisma as unknown as {
@@ -42,6 +46,7 @@ const p = prisma as unknown as {
 const mockScope = resolveScopeOrNull as jest.Mock
 const mockIncome = getIncomeStatement as jest.Mock
 const mockAcreditable = getAcreditablePagado as jest.Mock
+const mockSalesRet = getSalesRetentionCents as jest.Mock
 const acreditableResult = (acreditablePagadoCents: number, ivaRetenidoTercerosCents = 0) => ({
   organizationId: 'org1',
   rfc: 'EKU9003173C9',
@@ -56,15 +61,18 @@ const acreditableResult = (acreditablePagadoCents: number, ivaRetenidoTercerosCe
 // lo haría el read-model real (base + IVA por tasa). ivaFlujo SUMA estos campos ya calculados.
 const income = (grossCents: number, salesCount = 1) => {
   const { netCents, taxCents } = splitIvaIncluded(grossCents, 0.16)
+  const rev = {
+    grossSalesCents: grossCents,
+    refundsCents: 0,
+    netRevenueCents: grossCents,
+    taxableBaseCents: netCents,
+    ivaCents: taxCents,
+    taxByRate: taxCents ? { '0.16': taxCents } : {},
+  }
+  // Sin exclusiones de alcance → la vista fiscal espeja la gerencial.
   return {
-    revenue: {
-      grossSalesCents: grossCents,
-      refundsCents: 0,
-      netRevenueCents: grossCents,
-      taxableBaseCents: netCents,
-      ivaCents: taxCents,
-      taxByRate: taxCents ? { '0.16': taxCents } : {},
-    },
+    revenue: rev,
+    fiscalRevenue: rev,
     tips: { totalCents: 0 },
     metrics: { salesCount, refundCount: 0, averageTicketCents: 0 },
   }
@@ -75,6 +83,7 @@ beforeEach(() => {
   mockScope.mockResolvedValue({ organizationId: 'org1', rfc: 'EKU9003173C9', venueType: 'FOOD_SERVICE' })
   p.cfdi.aggregate.mockResolvedValue({ _sum: { taxCents: 0 }, _count: { _all: 0 } })
   mockAcreditable.mockResolvedValue(acreditableResult(0)) // por defecto: sin gastos acreditables
+  mockSalesRet.mockResolvedValue(null) // sin retención de ventas capturada por default
 })
 
 it('periodo inválido (mes 13) → 400', async () => {
@@ -122,6 +131,15 @@ it('sin gastos acreditables: acreditable=0 disponible, retención de ventas null
   expect(r.ivaTrasladadoCobradoCents).toBe(16000)
   expect(r.ivaAPagarPreliminarCents).toBe(16000)
   expect(r.saldoAFavorDelPeriodoCents).toBe(0)
+})
+
+it('resta la retención de IVA en ventas capturada del periodo', async () => {
+  p.venue.findMany.mockResolvedValue([{ id: 'v1', organizationId: 'org1', timezone: 'America/Mexico_City' }])
+  mockIncome.mockResolvedValue(income(116000)) // trasladado 16000
+  mockSalesRet.mockResolvedValue({ isrRetenidoCents: 0, ivaRetenidoCents: 3000 }) // le retuvieron 3000 de IVA
+  const r = await getIvaCashflow('v1', '2026-06')
+  expect(r.retencionesCents).toBe(3000) // ya no es null
+  expect(r.ivaAPagarPreliminarCents).toBe(13000) // 16000 − 0 acreditable − 3000 retención
 })
 
 it('con IVA acreditable pagado: resta al IVA a cargo y reporta el IVA retenido a proveedores aparte', async () => {

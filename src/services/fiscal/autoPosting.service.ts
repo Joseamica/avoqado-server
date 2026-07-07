@@ -7,6 +7,9 @@ import { getMappings } from './accountMapping.service'
 import { resolveScopeOrNull } from './chartOfAccounts.service'
 import { postJournalEntry } from './journalEntry.service'
 import { splitPaymentIvaByOrderRates, grossByRateFromItems } from './ivaMath'
+import { paymentInFiscalScope } from './fiscalScope'
+import { generateCogsPolicyForVenue } from './cogs.service'
+import logger from '../../config/logger'
 
 /**
  * Motor de POSTEO AUTOMÁTICO de pólizas (Capa B, slice 2). Genera asientos de doble partida
@@ -59,6 +62,8 @@ export interface GenerateResult {
   alreadyPosted: number
   /** Pagos omitidos por reglas (cancelados/cero/cripto/ajuste). */
   skipped: number
+  /** Costo de ventas del periodo posteado, en centavos (solo cuando se pasa `period` y hubo consumo). */
+  cogsCents?: number
 }
 
 interface OrderItemRow {
@@ -76,6 +81,8 @@ interface PaymentRow {
   method: PaymentMethod
   type: PaymentType | null
   createdAt: Date
+  merchantAccount: { fiscalConfig: { includeInAccounting: boolean } | null } | null
+  ecommerceMerchant: { fiscalConfig: { includeInAccounting: boolean } | null } | null
   order: { status: OrderStatus; orderNumber: string | null; items: OrderItemRow[] } | null
 }
 
@@ -190,6 +197,15 @@ export async function generatePoliciesForVenue(
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
   const tz = venue?.timezone || DEFAULT_TZ
 
+  // Opt-in del efectivo en los libros fiscales (per contribuyente). Default false → el efectivo no se
+  // postea salvo que el venue lo active; el gerencial lo sigue mostrando.
+  const emisorScope = await prisma.fiscalEmisor.findFirst({
+    where: { venueId },
+    orderBy: { createdAt: 'asc' },
+    select: { includeCashInAccounting: true },
+  })
+  const includeCashInAccounting = emisorScope?.includeCashInAccounting ?? false
+
   // Rango por periodo (tz-safe) si se pidió.
   let createdAt: { gte: Date; lte: Date } | undefined
   if (period) {
@@ -215,6 +231,9 @@ export async function generatePoliciesForVenue(
       method: true,
       type: true,
       createdAt: true,
+      // Toggle por-merchant: excluir un merchant de los libros fiscales (no del gerencial).
+      merchantAccount: { select: { fiscalConfig: { select: { includeInAccounting: true } } } },
+      ecommerceMerchant: { select: { fiscalConfig: { select: { includeInAccounting: true } } } },
       order: {
         select: {
           status: true,
@@ -243,6 +262,13 @@ export async function generatePoliciesForVenue(
   )
 
   for (const p of eligible) {
+    // Alcance fiscal configurable: merchant excluido o efectivo sin opt-in → no se postea a los libros
+    // (el gerencial lo sigue mostrando). Mismo predicado que el read-model de ingresos.
+    const merchantFlag = p.merchantAccount?.fiscalConfig?.includeInAccounting ?? p.ecommerceMerchant?.fiscalConfig?.includeInAccounting
+    if (!paymentInFiscalScope(p.method, merchantFlag, includeCashInAccounting)) {
+      base.skipped++
+      continue
+    }
     // Una devolución es type=REFUND O cualquier pago con monto NEGATIVO (voids/ajustes legacy que el
     // read-model de ingresos también resta). Enrutar por SIGNO evita contar un negativo como venta positiva.
     const isRefund = toCents(p.amount) < 0 || p.type === PaymentType.REFUND
@@ -273,6 +299,18 @@ export async function generatePoliciesForVenue(
       { staffId: opts.actorStaffId ?? null },
     )
     base.posted++
+  }
+
+  // Costo de ventas del periodo (best-effort): traspasa el costo del inventario consumido a la cuenta de
+  // costo de ventas. Solo con `period` (es agregado). No bloquea si falla ni si faltan los mapeos.
+  if (period) {
+    try {
+      const cogs = await generateCogsPolicyForVenue(venueId, period, opts.actorStaffId ?? null)
+      if (cogs.cogsCents > 0) base.cogsCents = cogs.cogsCents
+      if (cogs.posted) base.posted++
+    } catch (err) {
+      logger.warn(`[autoPosting] COGS falló para venue ${venueId} periodo ${period}: ${err instanceof Error ? err.message : String(err)}`)
+    }
   }
 
   return base

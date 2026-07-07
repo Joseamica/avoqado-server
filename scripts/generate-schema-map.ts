@@ -297,6 +297,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   JournalLine: 'Facturación (CFDI)',
   AccountingPeriodLock: 'Facturación (CFDI)',
   Expense: 'Facturación (CFDI)',
+  SalesRetention: 'Facturación (CFDI)',
   Employee: 'Facturación (CFDI)',
   PayrollRun: 'Facturación (CFDI)',
   PayrollLine: 'Facturación (CFDI)',

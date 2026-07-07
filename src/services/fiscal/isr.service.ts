@@ -1,6 +1,7 @@
 import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { getIncomeStatement } from '../dashboard/accounting.dashboard.service'
+import { getSalesRetentionCents } from './salesRetention.service'
 import { resolveScopeOrNull } from './chartOfAccounts.service'
 
 /**
@@ -13,8 +14,8 @@ import { resolveScopeOrNull } from './chartOfAccounts.service'
  *    × tarifa art-96 acumulada, menos los pagos provisionales previos y las retenciones.
  *
  * Es una ESTIMACIÓN preliminar. La base de ingresos ya es SIN IVA por tasa real (LISR art 113-E excluye
- * el IVA); no resta pérdidas de ejercicios anteriores ni PTU, ni captura retenciones de ISR en ventas.
- * El número final lo valida el contador.
+ * el IVA) y resta la retención de ISR en ventas que el contador capturó del periodo; no resta pérdidas de
+ * ejercicios anteriores ni PTU. El número final lo valida el contador.
  * Importes en centavos enteros. Gated PREMIUM (CFDI).
  */
 
@@ -91,6 +92,8 @@ export interface IsrProvisionalResult {
   isrCausadoCents: number
   /** Pagos provisionales previos del ejercicio (GENERAL; estimado = ISR causado al mes anterior). */
   pagosProvisionalesPreviosCents: number
+  /** Retención de ISR en ventas capturada del periodo (clientes morales) — reduce el ISR a pagar. */
+  retencionesIsrCents: number
   /** ISR a pagar (estimado) del periodo. */
   isrAPagarCents: number
   /** Supera el tope de RESICO ($3.5M anuales) → ya no aplica RESICO. */
@@ -143,7 +146,7 @@ const monthRange = (period: string) => {
 async function ingresoNetoRfc(venueIds: string[], from: string, to: string): Promise<{ netCents: number; sales: number }> {
   const incomes = await Promise.all(venueIds.map(id => getIncomeStatement(id, { from, to })))
   return {
-    netCents: incomes.reduce((s, r) => s + r.revenue.taxableBaseCents, 0),
+    netCents: incomes.reduce((s, r) => s + r.fiscalRevenue.taxableBaseCents, 0),
     sales: incomes.reduce((s, r) => s + r.metrics.salesCount, 0),
   }
 }
@@ -189,6 +192,7 @@ export async function getIsrProvisional(venueId: string, period: string, regime:
     tasaResico: null,
     isrCausadoCents: 0,
     pagosProvisionalesPreviosCents: 0,
+    retencionesIsrCents: 0,
     isrAPagarCents: 0,
     excedeTopeResico: false,
     zeroActivity: true,
@@ -215,7 +219,7 @@ export async function getIsrProvisional(venueId: string, period: string, regime:
     const tasa = resicoTasa(mes.netCents)
     base.tasaResico = tasa
     base.isrCausadoCents = round(mes.netCents * tasa)
-    base.isrAPagarCents = base.isrCausadoCents // − retenciones (no capturadas v1)
+    base.isrAPagarCents = base.isrCausadoCents
   } else {
     const ded = await deduccionesAcum(scope.rfc, year, period)
     base.deduccionesAcumCents = ded
@@ -226,6 +230,12 @@ export async function getIsrProvisional(venueId: string, period: string, regime:
       month > 1 ? await isrCausadoGeneralAcum(venueIds, scope.rfc, `${year}-${String(month - 1).padStart(2, '0')}`) : 0
     base.isrAPagarCents = Math.max(0, base.isrCausadoCents - base.pagosProvisionalesPreviosCents)
   }
+
+  // Retención de ISR en ventas capturada del periodo (clientes morales que nos retuvieron) → reduce el
+  // ISR a pagar. Si el contador no la capturó, es 0 (no se resta).
+  const salesRet = await getSalesRetentionCents(scope.organizationId, scope.rfc, period)
+  base.retencionesIsrCents = salesRet?.isrRetenidoCents ?? 0
+  base.isrAPagarCents = Math.max(0, base.isrAPagarCents - base.retencionesIsrCents)
 
   return base
 }

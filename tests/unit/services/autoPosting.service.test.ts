@@ -10,6 +10,7 @@ jest.mock('../../../src/utils/prismaClient', () => ({
   default: {
     venue: { findUnique: jest.fn() },
     payment: { findMany: jest.fn() },
+    fiscalEmisor: { findFirst: jest.fn() },
     journalEntry: { findMany: jest.fn() },
   },
 }))
@@ -24,7 +25,12 @@ import { getMappings } from '../../../src/services/fiscal/accountMapping.service
 import { postJournalEntry } from '../../../src/services/fiscal/journalEntry.service'
 import { generatePoliciesForVenue } from '../../../src/services/fiscal/autoPosting.service'
 
-const p = prisma as unknown as { venue: { findUnique: jest.Mock }; payment: { findMany: jest.Mock }; journalEntry: { findMany: jest.Mock } }
+const p = prisma as unknown as {
+  venue: { findUnique: jest.Mock }
+  payment: { findMany: jest.Mock }
+  fiscalEmisor: { findFirst: jest.Mock }
+  journalEntry: { findMany: jest.Mock }
+}
 const mockScope = resolveScopeOrNull as jest.Mock
 const mockMappings = getMappings as jest.Mock
 const mockPost = postJournalEntry as jest.Mock
@@ -55,6 +61,9 @@ beforeEach(() => {
   mockScope.mockResolvedValue({ organizationId: 'o1', rfc: 'RFC', venueType: 'X' })
   mockMappings.mockResolvedValue(fullMappings())
   p.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' })
+  // Default en tests: venue OPTA por incluir el efectivo en los libros (para que las ventas en efectivo
+  // sí posteen). El default real es false — su exclusión se cubre en un test dedicado abajo.
+  p.fiscalEmisor.findFirst.mockResolvedValue({ includeCashInAccounting: true })
   p.journalEntry.findMany.mockResolvedValue([]) // nada posteado aún
   mockPost.mockResolvedValue({ id: 'je1' })
 })
@@ -153,4 +162,38 @@ it('idempotencia: una clave ya posteada → alreadyPosted, NO re-postea', async 
   expect(r.posted).toBe(1) // solo y
   expect(mockPost).toHaveBeenCalledTimes(1)
   expect(lastEntry().idempotencyKey).toBe('pay:y:v1')
+})
+
+describe('alcance fiscal configurable', () => {
+  it('EFECTIVO no se postea cuando includeCashInAccounting=false (default real)', async () => {
+    p.fiscalEmisor.findFirst.mockResolvedValue({ includeCashInAccounting: false })
+    p.payment.findMany.mockResolvedValue([pay({ amount: 100, method: PaymentMethod.CASH })])
+    const r = await generatePoliciesForVenue('v1')
+    expect(r.posted).toBe(0)
+    expect(r.skipped).toBe(1)
+    expect(mockPost).not.toHaveBeenCalled()
+  })
+
+  it('EFECTIVO sí se postea cuando el venue optó (includeCashInAccounting=true)', async () => {
+    p.fiscalEmisor.findFirst.mockResolvedValue({ includeCashInAccounting: true })
+    p.payment.findMany.mockResolvedValue([pay({ amount: 100, method: PaymentMethod.CASH })])
+    const r = await generatePoliciesForVenue('v1')
+    expect(r.posted).toBe(1)
+  })
+
+  it('un MERCHANT con includeInAccounting=false queda fuera de las pólizas', async () => {
+    p.payment.findMany.mockResolvedValue([
+      pay({ id: 'in', amount: 100, method: PaymentMethod.CREDIT_CARD }),
+      pay({
+        id: 'out',
+        amount: 100,
+        method: PaymentMethod.CREDIT_CARD,
+        merchantAccount: { fiscalConfig: { includeInAccounting: false } },
+      }),
+    ])
+    const r = await generatePoliciesForVenue('v1')
+    expect(r.posted).toBe(1) // solo 'in'
+    expect(r.skipped).toBe(1) // 'out' excluido del libro
+    expect(lastEntry().idempotencyKey).toBe('pay:in:v1')
+  })
 })

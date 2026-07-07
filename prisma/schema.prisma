@@ -10806,6 +10806,11 @@ model FiscalEmisor {
   // AND the month-end factura global / Flow C). Many venues do NOT declare cash income, so invoicing it
   // would force declaring sales they never meant to. Off by default; a venue turns it on explicitly.
   invoiceCashSales  Boolean           @default(false)
+  // OPT-IN (default false): whether CASH-paid sales count in the FISCAL numbers (pólizas / IVA flujo /
+  // ISR / reportes contables). Separate from invoicing: the gerencial "¿cuánto gané?" ALWAYS shows the
+  // full total; this flag only governs whether cash reaches the fiscal books. Off by default → cash is
+  // not declared unless the venue opts in.
+  includeCashInAccounting Boolean     @default(false)
 
   merchantConfigs MerchantFiscalConfig[]
   cfdis           Cfdi[]
@@ -10836,6 +10841,10 @@ model MerchantFiscalConfig {
   // (Flow C, cfdiGlobal.job) when the venue EXPLICITLY turns it on. A default of true would silently
   // double-invoice venues whose accountant already issues the global for those same sales.
   includeInGlobal    Boolean @default(false) // included in month-end global sweep (Flow C) — opt-in
+  // OPT-OUT (default true): whether this merchant's payments count in the FISCAL books (pólizas / IVA /
+  // ISR / reportes). Turn OFF to exclude a merchant from accounting entirely (multi-merchant venues that
+  // don't want a given account in their contabilidad). The gerencial view still shows it.
+  includeInAccounting Boolean @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -11309,6 +11318,24 @@ enum ExpensePaymentStatus {
   UNPAID
   PARTIALLY_PAID
   PAID
+}
+
+// Retención en VENTAS que los clientes (personas morales) le hicieron al contribuyente en un periodo.
+// Captura MANUAL por (org, rfc, periodo): el contador anota cuánto le retuvieron de ISR/IVA para que la
+// declaración de IVA en flujo y el pago provisional de ISR NO queden inflados. Un solo renglón por periodo.
+model SalesRetention {
+  id               String   @id @default(cuid())
+  organizationId   String
+  rfc              String
+  period           String // AAAA-MM
+  isrRetenidoCents Int      @default(0)
+  ivaRetenidoCents Int      @default(0)
+  note             String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([organizationId, rfc, period])
+  @@index([organizationId, rfc])
 }
 
 enum ExpenseSource {

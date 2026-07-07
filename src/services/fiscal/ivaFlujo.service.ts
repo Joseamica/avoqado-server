@@ -6,6 +6,7 @@ import { parseDbDateRange } from '../../utils/datetime'
 import { getIncomeStatement } from '../dashboard/accounting.dashboard.service'
 import { resolveScopeOrNull } from './chartOfAccounts.service'
 import { getAcreditablePagado } from './expense.service'
+import { getSalesRetentionCents } from './salesRetention.service'
 
 /**
  * IVA en flujo de efectivo (Capa B) — read-model HONESTO sobre las pólizas de cobro.
@@ -151,11 +152,11 @@ export async function getIvaCashflow(venueId: string, period: string): Promise<I
   // por Product.taxRate y reconcilia con las pólizas). Base y IVA se suman; el desglose por tasa se mergea.
   const incomes = await Promise.all(venues.map(v => getIncomeStatement(v.id, { from: fromStr, to: toStr })))
   const totalSalesCount = incomes.reduce((s, r) => s + r.metrics.salesCount, 0)
-  const baseGravableCents = incomes.reduce((s, r) => s + r.revenue.taxableBaseCents, 0)
-  const ivaTrasladadoCobradoCents = incomes.reduce((s, r) => s + r.revenue.ivaCents, 0)
+  const baseGravableCents = incomes.reduce((s, r) => s + r.fiscalRevenue.taxableBaseCents, 0)
+  const ivaTrasladadoCobradoCents = incomes.reduce((s, r) => s + r.fiscalRevenue.ivaCents, 0)
   const ivaTrasladadoPorTasaCents: Record<string, number> = {}
   for (const r of incomes) {
-    for (const [rate, cents] of Object.entries(r.revenue.taxByRate)) {
+    for (const [rate, cents] of Object.entries(r.fiscalRevenue.taxByRate)) {
       ivaTrasladadoPorTasaCents[rate] = (ivaTrasladadoPorTasaCents[rate] ?? 0) + cents
     }
   }
@@ -173,8 +174,10 @@ export async function getIvaCashflow(venueId: string, period: string): Promise<I
   const acreditable = await getAcreditablePagado(venueId, period)
   const acreditablePagadoCents = acreditable?.acreditablePagadoCents ?? 0
   const ivaRetenidoTercerosCents = acreditable?.ivaRetenidoTercerosCents ?? 0
-  // Retención AL contribuyente (lado ventas) aún no capturada; saldo a favor aplicado tampoco. NUNCA 0 silencioso.
-  const retencionesCents = null
+  // Retención de IVA AL contribuyente (lado ventas): la que el contador capturó del periodo (clientes
+  // morales que nos retuvieron). null si aún no la captura → NO se resta (no asumir 0 en silencio).
+  const salesRet = await getSalesRetentionCents(scope.organizationId, scope.rfc, period)
+  const retencionesCents = salesRet ? salesRet.ivaRetenidoCents : null
   const saldoAFavorAplicadoCents = null
   const neto = ivaTrasladadoCobradoCents - acreditablePagadoCents - (retencionesCents ?? 0) - (saldoAFavorAplicadoCents ?? 0)
 

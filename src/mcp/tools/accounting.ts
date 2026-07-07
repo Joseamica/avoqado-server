@@ -16,6 +16,7 @@ import { getDiot } from '@/services/fiscal/diot.service'
 import { getAccountsPayableAging } from '@/services/fiscal/accountsPayable.service'
 import { getCatalogoXml, getBalanzaXml, getPolizasXml } from '@/services/fiscal/contabilidadElectronica.service'
 import { getIsrProvisional } from '@/services/fiscal/isr.service'
+import { setSalesRetention } from '@/services/fiscal/salesRetention.service'
 import { computePayrollPreview, createEmployee, listEmployees, runPayroll } from '@/services/fiscal/nomina.service'
 import { stampPayrollReceipts } from '@/services/fiscal/nominaCfdi.service'
 import { getFiscalReadiness } from '@/services/fiscal/fiscalReadiness.service'
@@ -75,6 +76,14 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           baseGravable: pesos(data.revenue.taxableBaseCents),
           ivaTrasladado: pesos(data.revenue.ivaCents),
           ivaPorTasa: porTasa(data.revenue.taxByRate), // IVA real desglosado por tasa (16%/8%/exento)
+        },
+        // Subconjunto que SÍ entra a los libros fiscales (respeta los toggles: efectivo/merchant excluidos).
+        // `ingresos` arriba es el TOTAL gerencial; esto es lo que realmente se declara.
+        ingresoFiscal: {
+          ingresoNeto: pesos(data.fiscalRevenue.netRevenueCents),
+          baseGravable: pesos(data.fiscalRevenue.taxableBaseCents),
+          ivaTrasladado: pesos(data.fiscalRevenue.ivaCents),
+          ivaPorTasa: porTasa(data.fiscalRevenue.taxByRate),
         },
         propinas: pesos(data.tips.totalCents),
         metricas: {
@@ -616,7 +625,9 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         polizasGeneradas: r.posted,
         yaEstaban: r.alreadyPosted,
         omitidos: r.skipped,
-        nota: 'Idempotente: re-correr no duplica. Devoluciones y voids se postean como contracuenta (402.01).',
+        // Costo de ventas del periodo (inventario consumido → cuenta de costo de ventas), si hubo consumo.
+        costoDeVentas: r.cogsCents != null ? pesos(r.cogsCents) : 0,
+        nota: 'Idempotente: re-correr no duplica. Devoluciones y voids se postean como contracuenta (402.01). El costo de ventas se agrega una vez por periodo (conviene generar al cierre del mes).',
       })
     },
   )
@@ -951,9 +962,44 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
               pagosProvisionalesPrevios: pesos(r.pagosProvisionalesPreviosCents),
             }),
         isrCausado: pesos(r.isrCausadoCents),
+        retencionesIsrVentas: pesos(r.retencionesIsrCents), // capturada por el contador (set_sales_retention)
         isrAPagarEstimado: pesos(r.isrAPagarCents),
         sinVentas: r.zeroActivity,
-        nota: 'ESTIMACIÓN — no incluye retenciones de ISR en ventas, pérdidas de ejercicios anteriores ni PTU; asume 16% de IVA en el ingreso. La tarifa art-96 es la 2024/2025 (vigente en 2026 salvo publicación nueva). Confírmalo con tu contador.',
+        nota: 'ESTIMACIÓN — resta la retención de ISR en ventas que hayas capturado del periodo; no resta pérdidas de ejercicios anteriores ni PTU. La tarifa art-96 es la 2024/2025 (vigente en 2026 salvo publicación nueva). Confírmalo con tu contador.',
+      })
+    },
+  )
+
+  server.tool(
+    'set_sales_retention',
+    'Captura la RETENCIÓN EN VENTAS del periodo (Capa B, PREMIUM, escritura): cuánto ISR e IVA te retuvieron tus clientes personas MORALES en el mes (p.ej. RESICO: 1.25% de ISR). Sin capturarlo, tu IVA en flujo y tu pago provisional de ISR quedan INFLADOS. Un solo renglón por (contribuyente, periodo); re-enviar lo actualiza. Montos en PESOS. Responde "captura que me retuvieron $X de ISR este mes". Pasa venueId, period (YYYY-MM) y los montos.',
+    {
+      venueId: z.string().describe('Local del contribuyente (debe estar en tu alcance)'),
+      period: z
+        .string()
+        .regex(/^\d{4}-\d{2}$/)
+        .describe('Periodo YYYY-MM'),
+      isrRetenido: z.number().min(0).describe('ISR que te retuvieron en el periodo, en pesos (0 si ninguno)'),
+      ivaRetenido: z.number().min(0).describe('IVA que te retuvieron en el periodo, en pesos (0 si ninguno)'),
+      nota: z.string().optional().describe('Nota opcional (p.ej. de qué cliente)'),
+    },
+    async ({ venueId, period, isrRetenido, ivaRetenido, nota }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:manage', venueId) // write gate
+      const gate = await planGateMessage(venueId, 'CFDI', 'La retención en ventas')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+      const r = await setSalesRetention(
+        venueId,
+        period,
+        { isrRetenidoCents: Math.round(isrRetenido * 100), ivaRetenidoCents: Math.round(ivaRetenido * 100), note: nota ?? null },
+        scope.staffId,
+      )
+      return text({
+        ok: true,
+        periodo: r.period,
+        isrRetenido: pesos(r.isrRetenidoCents),
+        ivaRetenido: pesos(r.ivaRetenidoCents),
+        nota: 'Guardado. Se restará en tu ISR provisional y en tu IVA en flujo del periodo.',
       })
     },
   )

@@ -33,6 +33,8 @@ export interface EmisorInput {
   globalPeriodicity?: GlobalPeriodicity
   /** Opt-in: permitir facturar ventas en efectivo (QR + global). Default false. */
   invoiceCashSales?: boolean
+  /** Opt-in: que el efectivo cuente en los libros fiscales (IVA/ISR/pólizas). Default false. */
+  includeCashInAccounting?: boolean
 }
 
 export interface MerchantFiscalConfigInput {
@@ -44,6 +46,8 @@ export interface MerchantFiscalConfigInput {
   facturacionEnabled: boolean
   autofacturaEnabled: boolean
   includeInGlobal: boolean
+  /** Opt-out: excluir este merchant de los libros fiscales. Default true. */
+  includeInAccounting?: boolean
 }
 
 // ─── DI interface ─────────────────────────────────────────────────────────────
@@ -103,6 +107,7 @@ export async function upsertEmisor(input: EmisorInput, deps: FiscalConfigDeps = 
   // Solo se escribe cuando viene definido: en create aplica el default false de la DB; en update no
   // resetea el valor si el cliente no lo mandó (a diferencia de los campos de arriba).
   if (input.invoiceCashSales !== undefined) data.invoiceCashSales = input.invoiceCashSales
+  if (input.includeCashInAccounting !== undefined) data.includeCashInAccounting = input.includeCashInAccounting
 
   return deps.upsertEmisorRow(data, input.emisorId)
 }
@@ -143,6 +148,8 @@ export async function upsertMerchantFiscalConfig(input: MerchantFiscalConfigInpu
     facturacionEnabled: input.facturacionEnabled,
     autofacturaEnabled: input.autofacturaEnabled,
     includeInGlobal: input.includeInGlobal,
+    // Solo se escribe si viene definido: en create aplica el default true de la DB; en update no resetea.
+    ...(input.includeInAccounting !== undefined ? { includeInAccounting: input.includeInAccounting } : {}),
   })
 }
 
@@ -245,6 +252,7 @@ const defaultDeps: FiscalConfigDeps = {
         defaultUsoCfdi: true,
         globalPeriodicity: true,
         invoiceCashSales: true,
+        includeCashInAccounting: true,
         createdAt: true,
         updatedAt: true,
         // providerKeyEnc intentionally omitted (sensitive)

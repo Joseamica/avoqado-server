@@ -4,6 +4,7 @@ import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { parseDbDateRange } from '../../utils/datetime'
 import { splitPaymentIvaByOrderRates, grossByRateFromItems } from '../fiscal/ivaMath'
+import { paymentInFiscalScope } from '../fiscal/fiscalScope'
 
 /**
  * Accounting — Capa A (gerencial, read-model)
@@ -59,6 +60,20 @@ export interface IncomeStatement {
     /** IVA trasladado NETO desglosado por tasa (clave = tasa como string, p.ej. "0.16", "0.08"). */
     taxByRate: Record<string, number>
   }
+  /**
+   * Subconjunto de `revenue` que SÍ entra a los libros fiscales (pólizas / IVA / ISR / reportes),
+   * respetando los toggles configurables: merchants con `includeInAccounting=false` y — salvo opt-in
+   * (`FiscalEmisor.includeCashInAccounting`) — las ventas en EFECTIVO quedan FUERA. `revenue` (arriba)
+   * siempre es el total gerencial. Cuando no hay exclusiones, `fiscalRevenue === revenue`.
+   */
+  fiscalRevenue: {
+    grossSalesCents: number
+    refundsCents: number
+    netRevenueCents: number
+    taxableBaseCents: number
+    ivaCents: number
+    taxByRate: Record<string, number>
+  }
   /** Propinas (informativas, NO forman parte del ingreso). */
   tips: { totalCents: number }
   metrics: { salesCount: number; refundCount: number; averageTicketCents: number }
@@ -87,6 +102,15 @@ export async function getIncomeStatement(venueId: string, filters: IncomeStateme
   // del día en zona del local a UTC real (fromZonedTime), NO "fake UTC".
   const { from, to } = parseDbDateRange(filters.from, filters.to, timezone)
 
+  // Opt-in del efectivo en los libros fiscales (per contribuyente). El estado gerencial NO depende de
+  // esto; solo el subconjunto `fiscalRevenue`. Sin emisor → cash fuera de lo fiscal (default false).
+  const emisorScope = await prisma.fiscalEmisor.findFirst({
+    where: { venueId },
+    orderBy: { createdAt: 'asc' },
+    select: { includeCashInAccounting: true },
+  })
+  const includeCashInAccounting = emisorScope?.includeCashInAccounting ?? false
+
   const rows = await prisma.payment.findMany({
     where: {
       venueId,
@@ -98,6 +122,10 @@ export async function getIncomeStatement(venueId: string, filters: IncomeStateme
       amount: true,
       tipAmount: true,
       type: true,
+      method: true,
+      // Toggle por-merchant: excluir un merchant de los libros fiscales (no del gerencial).
+      merchantAccount: { select: { fiscalConfig: { select: { includeInAccounting: true } } } },
+      ecommerceMerchant: { select: { fiscalConfig: { select: { includeInAccounting: true } } } },
       // Items de la orden con la tasa real de cada producto → IVA por tasa (no un 16% plano).
       order: {
         select: {
@@ -107,20 +135,15 @@ export async function getIncomeStatement(venueId: string, filters: IncomeStateme
     },
   })
 
-  let grossSalesCents = 0
-  let refundsCents = 0
+  // Acumuladores GERENCIALES (todo) y FISCALES (subconjunto en alcance). Cada pago suma al gerencial
+  // siempre, y al fiscal solo si `paymentInFiscalScope` lo permite.
+  const ger = { gross: 0, refunds: 0, base: 0, iva: 0, byRate: {} as Record<string, number> }
+  const fis = { gross: 0, refunds: 0, base: 0, iva: 0, byRate: {} as Record<string, number> }
   let tipsCents = 0
   let salesCount = 0
   let refundCount = 0
-  // Base + IVA acumulados con el split por tasa REAL de cada pago (mismo split que la póliza →
-  // el estado de resultados reconcilia con el libro diario al centavo).
-  let taxableBaseCents = 0
-  let ivaCents = 0
-  const taxByRate: Record<string, number> = {}
-  const mergeTax = (byRate: Record<string, number>, sign: 1 | -1) => {
-    for (const [rate, cents] of Object.entries(byRate)) {
-      taxByRate[rate] = (taxByRate[rate] ?? 0) + sign * cents
-    }
+  const mergeTax = (dst: Record<string, number>, byRate: Record<string, number>, sign: 1 | -1) => {
+    for (const [rate, cents] of Object.entries(byRate)) dst[rate] = (dst[rate] ?? 0) + sign * cents
   }
 
   for (const r of rows) {
@@ -137,31 +160,50 @@ export async function getIncomeStatement(venueId: string, filters: IncomeStateme
       })),
       DEFAULT_IVA_RATE,
     )
+    const merchantFlag = r.merchantAccount?.fiscalConfig?.includeInAccounting ?? r.ecommerceMerchant?.fiscalConfig?.includeInAccounting
+    const inFiscal = paymentInFiscalScope(r.method, merchantFlag, includeCashInAccounting)
 
     if (r.type === PaymentType.REFUND) {
       const magnitudeCents = Math.abs(amountCents)
       const s = splitPaymentIvaByOrderRates(magnitudeCents, grossByRate, DEFAULT_IVA_RATE)
-      refundsCents += magnitudeCents
-      taxableBaseCents -= s.netCents
-      ivaCents -= s.taxCents
-      mergeTax(s.taxByRate, -1)
+      ger.refunds += magnitudeCents
+      ger.base -= s.netCents
+      ger.iva -= s.taxCents
+      mergeTax(ger.byRate, s.taxByRate, -1)
+      if (inFiscal) {
+        fis.refunds += magnitudeCents
+        fis.base -= s.netCents
+        fis.iva -= s.taxCents
+        mergeTax(fis.byRate, s.taxByRate, -1)
+      }
       refundCount += 1
       continue
     }
 
     // REGULAR / FAST / ADJUSTMENT / null (legacy) → venta real
     const s = splitPaymentIvaByOrderRates(amountCents, grossByRate, DEFAULT_IVA_RATE)
-    grossSalesCents += amountCents
-    taxableBaseCents += s.netCents
-    ivaCents += s.taxCents
-    mergeTax(s.taxByRate, 1)
+    ger.gross += amountCents
+    ger.base += s.netCents
+    ger.iva += s.taxCents
+    mergeTax(ger.byRate, s.taxByRate, 1)
+    if (inFiscal) {
+      fis.gross += amountCents
+      fis.base += s.netCents
+      fis.iva += s.taxCents
+      mergeTax(fis.byRate, s.taxByRate, 1)
+    }
     tipsCents += toCents(r.tipAmount)
     salesCount += 1
   }
 
-  // Poda claves de tasa que quedaron en 0 tras netear devoluciones (no aportan a la declaración).
-  for (const rate of Object.keys(taxByRate)) if (taxByRate[rate] === 0) delete taxByRate[rate]
+  // Poda claves de tasa en 0 tras netear devoluciones (no aportan a la declaración).
+  for (const b of [ger.byRate, fis.byRate]) for (const rate of Object.keys(b)) if (b[rate] === 0) delete b[rate]
 
+  const grossSalesCents = ger.gross
+  const refundsCents = ger.refunds
+  const taxableBaseCents = ger.base
+  const ivaCents = ger.iva
+  const taxByRate = ger.byRate
   const netRevenueCents = grossSalesCents - refundsCents // === taxableBaseCents + ivaCents (cada split es exacto)
   const averageTicketCents = salesCount > 0 ? Math.round(grossSalesCents / salesCount) : 0
 
@@ -173,6 +215,14 @@ export async function getIncomeStatement(venueId: string, filters: IncomeStateme
     period: { from: filters.from, to: filters.to },
     taxRateAssumed: DEFAULT_IVA_RATE,
     revenue: { grossSalesCents, refundsCents, netRevenueCents, taxableBaseCents, ivaCents, taxByRate },
+    fiscalRevenue: {
+      grossSalesCents: fis.gross,
+      refundsCents: fis.refunds,
+      netRevenueCents: fis.gross - fis.refunds,
+      taxableBaseCents: fis.base,
+      ivaCents: fis.iva,
+      taxByRate: fis.byRate,
+    },
     tips: { totalCents: tipsCents },
     metrics: { salesCount, refundCount, averageTicketCents },
   }

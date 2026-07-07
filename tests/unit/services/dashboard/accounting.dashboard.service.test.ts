@@ -13,6 +13,7 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
   default: {
     venue: { findUnique: jest.fn() },
     payment: { findMany: jest.fn() },
+    fiscalEmisor: { findFirst: jest.fn() },
     cfdi: { aggregate: jest.fn(), groupBy: jest.fn() },
     bankStatement: { count: jest.fn(), aggregate: jest.fn() },
   },
@@ -28,6 +29,7 @@ import {
 const p = prisma as unknown as {
   venue: { findUnique: jest.Mock }
   payment: { findMany: jest.Mock }
+  fiscalEmisor: { findFirst: jest.Mock }
   cfdi: { aggregate: jest.Mock; groupBy: jest.Mock }
   bankStatement: { count: jest.Mock; aggregate: jest.Mock }
 }
@@ -51,6 +53,7 @@ const ROWS = [
 beforeEach(() => {
   jest.clearAllMocks()
   p.venue.findUnique.mockResolvedValue({ name: 'Test', timezone: 'America/Mexico_City' })
+  p.fiscalEmisor.findFirst.mockResolvedValue(null) // sin emisor → includeCashInAccounting=false (default)
   p.payment.findMany.mockResolvedValue(ROWS)
   p.cfdi.aggregate.mockResolvedValue({ _sum: { totalCents: 10000 }, _count: { _all: 1 } })
   p.cfdi.groupBy.mockResolvedValue([{ isGlobal: false, _count: { _all: 1 } }])
@@ -101,6 +104,43 @@ describe('getIncomeStatement (Capa A — estado de resultados)', () => {
     expect(r.revenue.grossSalesCents).toBe(0)
     expect(r.revenue.ivaCents).toBe(0)
     expect(r.metrics.averageTicketCents).toBe(0)
+  })
+
+  // ---------- ALCANCE FISCAL CONFIGURABLE ----------
+  it('fiscalRevenue EXCLUYE el efectivo por default; revenue (gerencial) lo incluye', async () => {
+    p.payment.findMany.mockResolvedValue([
+      { amount: 116, tipAmount: 0, type: 'REGULAR', method: PaymentMethod.CREDIT_CARD },
+      { amount: 200, tipAmount: 0, type: 'REGULAR', method: PaymentMethod.CASH },
+    ])
+    const r = await getIncomeStatement(VENUE, FILTERS)
+    expect(r.revenue.grossSalesCents).toBe(31600) // gerencial: todo
+    expect(r.fiscalRevenue.grossSalesCents).toBe(11600) // fiscal: solo la tarjeta
+  })
+
+  it('fiscalRevenue INCLUYE el efectivo cuando el emisor optó (includeCashInAccounting=true)', async () => {
+    p.fiscalEmisor.findFirst.mockResolvedValue({ includeCashInAccounting: true })
+    p.payment.findMany.mockResolvedValue([
+      { amount: 116, tipAmount: 0, type: 'REGULAR', method: PaymentMethod.CREDIT_CARD },
+      { amount: 200, tipAmount: 0, type: 'REGULAR', method: PaymentMethod.CASH },
+    ])
+    const r = await getIncomeStatement(VENUE, FILTERS)
+    expect(r.fiscalRevenue.grossSalesCents).toBe(31600)
+  })
+
+  it('fiscalRevenue EXCLUYE un merchant con includeInAccounting=false; revenue lo incluye', async () => {
+    p.payment.findMany.mockResolvedValue([
+      { amount: 116, tipAmount: 0, type: 'REGULAR', method: PaymentMethod.CREDIT_CARD },
+      {
+        amount: 232,
+        tipAmount: 0,
+        type: 'REGULAR',
+        method: PaymentMethod.CREDIT_CARD,
+        merchantAccount: { fiscalConfig: { includeInAccounting: false } },
+      },
+    ])
+    const r = await getIncomeStatement(VENUE, FILTERS)
+    expect(r.revenue.grossSalesCents).toBe(34800) // gerencial: ambos
+    expect(r.fiscalRevenue.grossSalesCents).toBe(11600) // fiscal: solo el merchant incluido
   })
 
   // ---------- REGRESSION / INVARIANTS ----------

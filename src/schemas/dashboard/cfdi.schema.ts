@@ -79,6 +79,8 @@ const upsertEmisorBodyShape = z.object({
     .optional(),
   // Opt-in: permitir facturar ventas en efectivo (QR + global). Default false en el servicio.
   invoiceCashSales: z.boolean().optional(),
+  // Opt-in: que el efectivo cuente en los libros fiscales (IVA/ISR/pólizas). Default false.
+  includeCashInAccounting: z.boolean().optional(),
 })
 
 /**
@@ -101,6 +103,8 @@ const upsertMerchantConfigBodyShape = z.object({
   facturacionEnabled: z.boolean({ required_error: 'El campo facturacionEnabled es requerido' }),
   autofacturaEnabled: z.boolean({ required_error: 'El campo autofacturaEnabled es requerido' }),
   includeInGlobal: z.boolean({ required_error: 'El campo includeInGlobal es requerido' }),
+  // Opt-out: excluir este merchant de los libros fiscales. Default true en el servicio.
+  includeInAccounting: z.boolean().optional(),
 })
 
 /**

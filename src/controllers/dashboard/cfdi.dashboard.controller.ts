@@ -297,7 +297,8 @@ export async function getFiscalConfigController(req: Request, res: Response): Pr
  */
 export async function upsertEmisorController(req: Request, res: Response): Promise<void> {
   const { emisorId } = req.params
-  const { rfc, legalName, regimenFiscal, lugarExpedicion, serie, defaultUsoCfdi, globalPeriodicity, invoiceCashSales } = req.body
+  const { rfc, legalName, regimenFiscal, lugarExpedicion, serie, defaultUsoCfdi, globalPeriodicity, invoiceCashSales, includeCashInAccounting } =
+    req.body
   // Venue resolved via resolveRequestVenueId (URL → x-venue-id → token), consistent with checkPermission.
   const authContext = (req as any).authContext ?? {}
   const venueId = resolveRequestVenueId(req, authContext)
@@ -318,6 +319,7 @@ export async function upsertEmisorController(req: Request, res: Response): Promi
       defaultUsoCfdi,
       globalPeriodicity,
       invoiceCashSales,
+      includeCashInAccounting,
     })
 
     logAction({
@@ -326,7 +328,7 @@ export async function upsertEmisorController(req: Request, res: Response): Promi
       action: 'FISCAL_EMISOR_UPSERTED',
       entity: 'FiscalEmisor',
       entityId: emisor.id,
-      data: { rfc, legalName, regimenFiscal, lugarExpedicion, invoiceCashSales, isUpdate: !!emisorId },
+      data: { rfc, legalName, regimenFiscal, lugarExpedicion, invoiceCashSales, includeCashInAccounting, isUpdate: !!emisorId },
     })
 
     res.status(200).json({ emisor })
@@ -351,7 +353,8 @@ export async function upsertEmisorController(req: Request, res: Response): Promi
  * Body validated by validateRequest(upsertMerchantConfigSchema) before this handler runs.
  */
 export async function upsertMerchantFiscalConfigController(req: Request, res: Response): Promise<void> {
-  const { merchantAccountId, ecommerceMerchantId, fiscalEmisorId, facturacionEnabled, autofacturaEnabled, includeInGlobal } = req.body
+  const { merchantAccountId, ecommerceMerchantId, fiscalEmisorId, facturacionEnabled, autofacturaEnabled, includeInGlobal, includeInAccounting } =
+    req.body
   // Venue resolved via resolveRequestVenueId (URL → x-venue-id → token), consistent with checkPermission.
   const authContext = (req as any).authContext ?? {}
   const venueId = resolveRequestVenueId(req, authContext)
@@ -369,6 +372,7 @@ export async function upsertMerchantFiscalConfigController(req: Request, res: Re
       facturacionEnabled,
       autofacturaEnabled,
       includeInGlobal,
+      includeInAccounting,
     })
 
     logAction({
@@ -384,6 +388,7 @@ export async function upsertMerchantFiscalConfigController(req: Request, res: Re
         facturacionEnabled,
         autofacturaEnabled,
         includeInGlobal,
+        includeInAccounting,
       },
     })
 

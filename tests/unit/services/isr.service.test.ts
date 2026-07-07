@@ -15,10 +15,12 @@ jest.mock('../../../src/utils/prismaClient', () => ({
 }))
 jest.mock('../../../src/services/fiscal/chartOfAccounts.service', () => ({ resolveScopeOrNull: jest.fn() }))
 jest.mock('../../../src/services/dashboard/accounting.dashboard.service', () => ({ getIncomeStatement: jest.fn() }))
+jest.mock('../../../src/services/fiscal/salesRetention.service', () => ({ getSalesRetentionCents: jest.fn() }))
 
 import prisma from '../../../src/utils/prismaClient'
 import { resolveScopeOrNull } from '../../../src/services/fiscal/chartOfAccounts.service'
 import { getIncomeStatement } from '../../../src/services/dashboard/accounting.dashboard.service'
+import { getSalesRetentionCents } from '../../../src/services/fiscal/salesRetention.service'
 import { getIsrProvisional } from '../../../src/services/fiscal/isr.service'
 
 const p = prisma as unknown as {
@@ -27,26 +29,33 @@ const p = prisma as unknown as {
 }
 const mScope = resolveScopeOrNull as jest.Mock
 const mIncome = getIncomeStatement as jest.Mock
+const mSalesRet = getSalesRetentionCents as jest.Mock
 
 // La base de ISR es SIN IVA → el monto representa `taxableBaseCents` (lo que ISR usa como ingreso).
-const income = (baseCents: number, salesCount = 1) => ({
-  revenue: {
+const income = (baseCents: number, salesCount = 1) => {
+  const rev = {
     grossSalesCents: baseCents,
     refundsCents: 0,
     netRevenueCents: baseCents,
     taxableBaseCents: baseCents,
     ivaCents: 0,
-    taxByRate: {},
-  },
-  tips: { totalCents: 0 },
-  metrics: { salesCount, refundCount: 0, averageTicketCents: 0 },
-})
+    taxByRate: {} as Record<string, number>,
+  }
+  // Sin exclusiones de alcance → la vista fiscal espeja la gerencial (ISR lee fiscalRevenue).
+  return {
+    revenue: rev,
+    fiscalRevenue: rev,
+    tips: { totalCents: 0 },
+    metrics: { salesCount, refundCount: 0, averageTicketCents: 0 },
+  }
+}
 
 beforeEach(() => {
   jest.clearAllMocks()
   mScope.mockResolvedValue({ organizationId: 'org1', rfc: 'EKU9003173C9', venueType: 'AUTO_SERVICE' })
   p.venue.findMany.mockResolvedValue([{ id: 'v1', organizationId: 'org1' }])
   p.expense.aggregate.mockResolvedValue({ _sum: { subtotalCents: 0, descuentoCents: 0, iepsCents: 0 } })
+  mSalesRet.mockResolvedValue(null) // sin retención capturada por default
 })
 
 describe('getIsrProvisional — RESICO', () => {
@@ -66,6 +75,14 @@ describe('getIsrProvisional — RESICO', () => {
     expect(r.tasaResico).toBe(0.01)
     expect(r.isrCausadoCents).toBe(200_00)
     expect(r.isrAPagarCents).toBe(200_00)
+  })
+
+  it('resta la retención de ISR en ventas capturada del periodo', async () => {
+    mIncome.mockResolvedValue(income(20_000_00)) // ISR causado $200
+    mSalesRet.mockResolvedValue({ isrRetenidoCents: 50_00, ivaRetenidoCents: 0 }) // le retuvieron $50
+    const r = await getIsrProvisional('v1', '2026-06', 'RESICO')
+    expect(r.retencionesIsrCents).toBe(50_00)
+    expect(r.isrAPagarCents).toBe(150_00) // 200 − 50
   })
 
   it('$60,000/mes → tasa 1.5% → ISR $900', async () => {
