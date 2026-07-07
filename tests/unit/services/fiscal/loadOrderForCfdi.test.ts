@@ -124,6 +124,34 @@ describe('loadOrderForCfdiFromDb', () => {
     expect(bundle!.paymentMethod).toBe('CASH')
   })
 
+  it('MIXTA (tarjeta + efectivo): NO facturable si la orden tiene CUALQUIER pago en efectivo e invoiceCashSales=false', async () => {
+    // El emisor se resuelve por el pago con merchant (la tarjeta), pero basta que exista un pago en
+    // efectivo para bloquear el timbrado — si no, se facturaría el total incluyendo el efectivo.
+    orderMock.mockResolvedValue(
+      anOrder({
+        payments: [
+          { method: 'CREDIT_CARD', merchantAccountId: 'm1', ecommerceMerchantId: null },
+          { method: 'CASH', merchantAccountId: null, ecommerceMerchantId: null },
+        ],
+      }),
+    )
+    cfgMock.mockResolvedValue(aConfig()) // invoiceCashSales=false
+    expect(await loadOrderForCfdiFromDb('o1')).toBeNull()
+  })
+
+  it('MIXTA (tarjeta + efectivo): facturable si el emisor optó (invoiceCashSales=true)', async () => {
+    orderMock.mockResolvedValue(
+      anOrder({
+        payments: [
+          { method: 'CREDIT_CARD', merchantAccountId: 'm1', ecommerceMerchantId: null },
+          { method: 'CASH', merchantAccountId: null, ecommerceMerchantId: null },
+        ],
+      }),
+    )
+    cfgMock.mockResolvedValue(aConfig({ fiscalEmisor: { ...aConfig().fiscalEmisor, invoiceCashSales: true } }))
+    expect(await loadOrderForCfdiFromDb('o1')).not.toBeNull()
+  })
+
   it('returns null when the payment has no merchant FK', async () => {
     orderMock.mockResolvedValue(anOrder({ payments: [{ method: 'CASH', merchantAccountId: null, ecommerceMerchantId: null }] }))
     expect(await loadOrderForCfdiFromDb('o1')).toBeNull()

@@ -366,10 +366,9 @@ export async function loadOrderForCfdiFromDb(orderId: string): Promise<LoadedOrd
         },
       },
       payments: {
-        // Only a SETTLED payment identifies the merchant that actually collected the revenue.
-        // Without this, a later REFUND (different/no merchant) could resolve the wrong emisor.
+        // TODOS los pagos liquidados de la orden (no solo el último): en una orden MIXTA (efectivo +
+        // tarjeta) hay que ver si ALGÚN pago fue en efectivo, no solo el más reciente.
         where: { status: 'COMPLETED' },
-        take: 1,
         orderBy: { createdAt: 'desc' },
         select: { method: true, merchantAccountId: true, ecommerceMerchantId: true },
       },
@@ -396,7 +395,10 @@ export async function loadOrderForCfdiFromDb(orderId: string): Promise<LoadedOrd
   })
   if (!order) return null
 
-  const pay = order.payments[0]
+  // Resolver el emisor por el pago que trae merchant (el que cobró por procesador). En una orden mixta
+  // el efectivo no trae merchant, así que se prefiere el pago con tarjeta para resolver el emisor.
+  const pays = order.payments
+  const pay = pays.find(pp => pp.merchantAccountId || pp.ecommerceMerchantId) ?? pays[0]
   // No payment or no merchant on the payment → cannot resolve an emisor
   if (!pay || (!pay.merchantAccountId && !pay.ecommerceMerchantId)) return null
 
@@ -415,8 +417,10 @@ export async function loadOrderForCfdiFromDb(orderId: string): Promise<LoadedOrd
   if (!cfg || !cfg.fiscalEmisor) return null
 
   // Cash sales are not invoiceable unless the emisor opted in (most venues don't declare cash, so a
-  // cash-settled ticket must not self-invoice via the receipt QR). Card/electronic tickets are unaffected.
-  if (pay.method === 'CASH' && !cfg.fiscalEmisor.invoiceCashSales) return null
+  // cash-settled ticket must not self-invoice via the receipt QR). En una orden MIXTA basta que CUALQUIER
+  // pago sea en efectivo para bloquearla — si no, se facturaría el total (incl. la parte de efectivo).
+  const hasCash = pays.some(pp => pp.method === 'CASH')
+  if (hasCash && !cfg.fiscalEmisor.invoiceCashSales) return null
 
   // Tenant isolation: a MerchantAccount can be shared across venues in the same org (via VenuePaymentConfig
   // primary/secondary/tertiary slots). The emisor it maps to MUST belong to THIS order's venue — otherwise
