@@ -20,7 +20,7 @@ import prisma from '@/utils/prismaClient'
 import AppError from '@/errors/AppError'
 import { materializeEntries, getSaldo } from './cash-out.ledger.service'
 import { createWithdrawal, type WithdrawalResult } from './cash-out.withdrawal.service'
-import { assertCashOutEnabled, listActiveDays } from './cash-out.config.service'
+import { assertCashOutEnabled, resolveActiveDaysForVenue } from './cash-out.config.service'
 import { venueBusinessDate, isSchemeActiveOn } from './cash-out.domain'
 
 /** Thrown when a promoter tries to withdraw on a day outside the active-days calendar (403). */
@@ -50,7 +50,7 @@ export async function getPromoterCashOut(venueId: string, staffId: string, now: 
   await assertCashOutEnabled(venueId) // SERIALIZED_INVENTORY gate (403 if off)
   await materializeEntries(venueId) // keep saldo current (idempotent)
   const tz = await venueTimeZone(venueId)
-  const [saldo, activeDays] = await Promise.all([getSaldo(venueId, staffId), listActiveDays(venueId)])
+  const [saldo, activeDays] = await Promise.all([getSaldo(venueId, staffId), resolveActiveDaysForVenue(venueId)])
   const businessDate = venueBusinessDate(now, tz)
   return { saldo: saldo.toString(), activeToday: isSchemeActiveOn(activeDays, businessDate), businessDate }
 }
@@ -60,7 +60,7 @@ export async function withdrawAsPromoter(venueId: string, staffId: string, now: 
   await assertCashOutEnabled(venueId) // SERIALIZED_INVENTORY gate (403 if off)
   const tz = await venueTimeZone(venueId)
   const businessDate = venueBusinessDate(now, tz)
-  const activeDays = await listActiveDays(venueId)
+  const activeDays = await resolveActiveDaysForVenue(venueId)
   if (!isSchemeActiveOn(activeDays, businessDate)) throw new CashOutNotActiveTodayError()
   await materializeEntries(venueId) // make today's COMPLETED sales withdrawable before claiming
   return createWithdrawal(venueId, staffId, { staffId, timeZone: tz })

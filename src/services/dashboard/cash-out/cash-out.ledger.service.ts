@@ -17,8 +17,8 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
-import { assertCashOutEnabled, listActiveDays } from './cash-out.config.service'
-import { buildCommissionEntry, venueBusinessDate, weekStartMonday, type RateTier, type CashOutSaleType } from './cash-out.domain'
+import { assertCashOutEnabled, resolveActiveDaysForVenue, resolveRatesForVenue } from './cash-out.config.service'
+import { buildCommissionEntry, venueBusinessDate, weekStartMonday, type RateTier } from './cash-out.domain'
 
 /** A calendar date ('yyyy-MM-dd') → @db.Date value (fake-UTC midnight, tz-stable). */
 function dbDate(yyyymmdd: string): Date {
@@ -45,16 +45,10 @@ export async function materializeEntries(venueId: string): Promise<{ created: nu
   // while no rate table exists, and (once rates were loaded) would have paid commission on
   // months of past sales. No active days configured → nothing to materialize (fast no-op:
   // also avoids scanning every historical sale on each promoter balance check).
-  const activeDays = new Set(await listActiveDays(venueId))
+  const activeDays = new Set(await resolveActiveDaysForVenue(venueId))
   if (activeDays.size === 0) return { created: 0 }
 
-  const rateRows = await prisma.cashOutCommissionRate.findMany({ where: { venueId, active: true } })
-  const rates: RateTier[] = rateRows.map(r => ({
-    saleType: r.saleType as CashOutSaleType,
-    minCount: r.minCount,
-    maxCount: r.maxCount,
-    amount: Number(r.amount),
-  }))
+  const rates: RateTier[] = await resolveRatesForVenue(venueId)
 
   const existing = await prisma.promoterCommissionEntry.findMany({ where: { venueId }, select: { saleVerificationId: true } })
   const have = new Set(existing.map(e => e.saleVerificationId))

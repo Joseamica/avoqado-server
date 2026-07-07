@@ -25,12 +25,17 @@ jest.mock('@/services/superadmin/venuePricing.service', () => ({
   __esModule: true,
   getActivePricingStructure: jest.fn(),
   updateVenuePricingStructure: jest.fn(),
+  createVenuePricingStructure: jest.fn(),
 }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ __esModule: true, logAction: jest.fn() }))
 
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
-import { getActivePricingStructure } from '@/services/superadmin/venuePricing.service'
+import {
+  getActivePricingStructure,
+  updateVenuePricingStructure,
+  createVenuePricingStructure,
+} from '@/services/superadmin/venuePricing.service'
 import { applyRateCorrection } from '@/services/superadmin/rateCorrection/rateCorrectionApply'
 
 const newVenueRates = {
@@ -110,6 +115,37 @@ describe('applyRateCorrection', () => {
       expect.objectContaining({ data: expect.objectContaining({ status: 'APPLIED' }) }),
     )
     expect(batch).toBeDefined()
+    // Regression guard for the create-vs-update branch below: when an active
+    // structure already exists, this must UPDATE it, never CREATE a second one.
+    expect(updateVenuePricingStructure).toHaveBeenCalledWith('vps_1', expect.objectContaining({ debitRate: 0.02 }))
+    expect(createVenuePricingStructure).not.toHaveBeenCalled()
+  })
+
+  it('creates a new VenuePricingStructure when none exists yet (first-time retroactive correction on an unpriced venue)', async () => {
+    // Alba Outlet de Muebles scenario (2026-07-06): a venue+accountType that never had
+    // pricing configured. previewRateCorrection reads venuePricingStructure.findFirst
+    // directly (not through getActivePricingStructure) to decide venuePricingAvailable —
+    // both must reflect "nothing exists yet" for this to reproduce the real bug path.
+    ;(prisma.venuePricingStructure.findFirst as jest.Mock).mockResolvedValue(null)
+    ;(getActivePricingStructure as jest.Mock).mockResolvedValue(null)
+
+    await applyRateCorrection(
+      { venueId: 'v1', accountType: 'PRIMARY', newVenueRates, missingCostMode: 'FIX_PAYMENT_ONLY' },
+      { staffId: 's1' },
+    )
+
+    expect(createVenuePricingStructure).toHaveBeenCalledWith(
+      expect.objectContaining({
+        venueId: 'v1',
+        accountType: 'PRIMARY',
+        effectiveFrom: expect.any(Date),
+        debitRate: 0.02,
+        creditRate: 0.055,
+        amexRate: 0.04,
+        internationalRate: 0.045,
+      }),
+    )
+    expect(updateVenuePricingStructure).not.toHaveBeenCalled()
   })
 
   it('rejects scopes over 500 payments', async () => {

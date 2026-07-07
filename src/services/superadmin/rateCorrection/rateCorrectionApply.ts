@@ -1,7 +1,11 @@
 import prisma from '@/utils/prismaClient'
 import { BadRequestError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
-import { getActivePricingStructure, updateVenuePricingStructure } from '@/services/superadmin/venuePricing.service'
+import {
+  getActivePricingStructure,
+  updateVenuePricingStructure,
+  createVenuePricingStructure,
+} from '@/services/superadmin/venuePricing.service'
 import { previewRateCorrection, recomputePaymentEconomics, PreviewArgs } from './rateCorrectionPreview'
 import { buildScopeWhere } from './rateCorrectionScope'
 import { RateStructureLike } from './rateRecompute'
@@ -50,17 +54,38 @@ export async function applyRateCorrection(args: ApplyArgs, ctx: ApplyContext) {
   }
 
   // 5. Update the live structures so future payments compute with the new rates.
-  if (args.newVenueRates && activeVenue) {
-    await updateVenuePricingStructure(activeVenue.id, {
-      debitRate: Number(args.newVenueRates.debitRate),
-      creditRate: Number(args.newVenueRates.creditRate),
-      amexRate: Number(args.newVenueRates.amexRate),
-      internationalRate: Number(args.newVenueRates.internationalRate),
-      includesTax: args.newVenueRates.includesTax ?? undefined,
-      taxRate: args.newVenueRates.taxRate != null ? Number(args.newVenueRates.taxRate) : undefined,
-      fixedFeePerTransaction:
-        args.newVenueRates.fixedFeePerTransaction != null ? Number(args.newVenueRates.fixedFeePerTransaction) : undefined,
-    })
+  if (args.newVenueRates) {
+    if (activeVenue) {
+      await updateVenuePricingStructure(activeVenue.id, {
+        debitRate: Number(args.newVenueRates.debitRate),
+        creditRate: Number(args.newVenueRates.creditRate),
+        amexRate: Number(args.newVenueRates.amexRate),
+        internationalRate: Number(args.newVenueRates.internationalRate),
+        includesTax: args.newVenueRates.includesTax ?? undefined,
+        taxRate: args.newVenueRates.taxRate != null ? Number(args.newVenueRates.taxRate) : undefined,
+        fixedFeePerTransaction:
+          args.newVenueRates.fixedFeePerTransaction != null ? Number(args.newVenueRates.fixedFeePerTransaction) : undefined,
+      })
+    } else {
+      // No pre-existing structure for this venue+accountType — e.g. a first-time
+      // retroactive correction on a venue that never had pricing configured (see
+      // Alba Outlet de Muebles, 2026-07-06). Without this branch the historical
+      // payments get corrected below but future payments keep hitting "no active
+      // venue pricing structure found" forever, since nothing ever gets CREATEd.
+      await createVenuePricingStructure({
+        venueId: args.venueId,
+        accountType: args.accountType,
+        effectiveFrom: new Date(),
+        debitRate: Number(args.newVenueRates.debitRate),
+        creditRate: Number(args.newVenueRates.creditRate),
+        amexRate: Number(args.newVenueRates.amexRate),
+        internationalRate: Number(args.newVenueRates.internationalRate),
+        includesTax: args.newVenueRates.includesTax ?? undefined,
+        taxRate: args.newVenueRates.taxRate != null ? Number(args.newVenueRates.taxRate) : undefined,
+        fixedFeePerTransaction:
+          args.newVenueRates.fixedFeePerTransaction != null ? Number(args.newVenueRates.fixedFeePerTransaction) : undefined,
+      })
+    }
   }
 
   if (args.newProviderRates) {

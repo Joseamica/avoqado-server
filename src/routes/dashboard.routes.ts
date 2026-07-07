@@ -279,6 +279,7 @@ import orgItemCategoryRoutes from './dashboard/orgItemCategory.routes'
 import organizationDashboardRoutes from './dashboard/organizationDashboard.routes'
 import organizationConfigRoutes from './dashboard/organizationConfig.routes'
 import organizationStockControlRoutes from './dashboard/organizationStockControl.routes'
+import cashOutOrgRoutes from './dashboard/cash-out.org.routes'
 import simCustodyDashboardRoutes from './dashboard/simCustody.dashboard.routes'
 import simRegistrationDashboardRoutes from './dashboard/simRegistration.dashboard.routes'
 // Org-scoped sale verification routes (PlayTelecom back-office Walmart documentation approval)
@@ -4076,6 +4077,9 @@ router.use('/organizations/:orgId', organizationConfigRoutes)
 
 // Organization Stock Control — white-label SIM inventory dashboard at org level
 router.use('/organizations/:orgId', organizationStockControlRoutes)
+
+// Cash Out (PlayTelecom) org-level config + org-wide withdrawals/report aggregation
+router.use('/organizations/:orgId/cash-out', cashOutOrgRoutes)
 
 // SIM custody chain-of-custody endpoints (plan §1.4)
 router.use('/organizations/:orgId', simCustodyDashboardRoutes)

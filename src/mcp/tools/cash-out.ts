@@ -1,11 +1,14 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
+import { hasPermission } from '@/services/access/access.service'
 import type { McpScope } from '../scope'
-import { createGuard } from '../guard'
+import { createGuard, ScopeError } from '../guard'
 import { text } from '../respond'
 import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 import { getSaldo } from '@/services/dashboard/cash-out/cash-out.ledger.service'
 import { listWithdrawals } from '@/services/dashboard/cash-out/cash-out.withdrawal.service'
+import { listCommissionRatesForOrg, listActiveDaysForOrg } from '@/services/dashboard/cash-out/cash-out.config.service'
+import { listWithdrawalsForOrg } from '@/services/dashboard/cash-out/cash-out.org.service'
 
 // Cash Out is on wherever serialized inventory (SIMs) is — it's not a separate module.
 const CASH_OUT_OFF =
@@ -13,6 +16,17 @@ const CASH_OUT_OFF =
 
 export function registerCashOutTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
+
+  /** Org-level gate: caller must hold `cash-out:read` in SOME venue of the active org. Mirrors org_confirmed_sales_report's requireReviewAccess. */
+  function requireOrgReadAccess(): string {
+    if (!scope.activeOrg) {
+      throw new ScopeError('No hay una organización activa en esta conexión — reconéctate eligiendo una organización.')
+    }
+    for (const access of scope.perVenueAccess.values()) {
+      if (access.organizationId === scope.activeOrg && hasPermission(access, 'cash-out:read')) return scope.activeOrg
+    }
+    throw new ScopeError('Missing permission cash-out:read in this organization')
+  }
 
   server.tool(
     'cash_out_saldo',
@@ -63,6 +77,87 @@ export function registerCashOutTools(server: McpServer, scope: McpScope) {
           withdrawals: items.map(w => ({
             folio: w.folio,
             staffId: w.staffId,
+            status: w.status,
+            grossAmount: w.grossAmount.toString(),
+            netAmount: w.netAmount.toString(),
+            clabe: w.clabe,
+            businessDate: w.businessDate.toISOString().slice(0, 10),
+            requestedAt: w.createdAt,
+            reportedAt: w.reportedAt,
+            paidAt: w.paidAt,
+          })),
+        })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'cash_out_org_commission_rates',
+    'Tabla org-wide de comisiones escalonadas de Cash Out (Línea Nueva / Portabilidad × rangos de acumulado), en PESOS. Es la configuración uniforme que aplica a TODOS los venues de tu organización activa que no tengan su propia tabla (venue-level la sobreescribe). Responde "¿cuánto se paga por cada SIM vendida según el acumulado del mes?" a nivel organización. No requiere venueId — usa la organización activa de esta conexión.',
+    {},
+    async () => {
+      try {
+        const orgId = requireOrgReadAccess()
+        const rates = await listCommissionRatesForOrg(orgId)
+        return text({
+          ok: true,
+          orgId,
+          count: rates.length,
+          rates: rates.map(r => ({
+            saleType: r.saleType,
+            minCount: r.minCount,
+            maxCount: r.maxCount,
+            amount: r.amount.toString(), // pesos
+          })),
+        })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'cash_out_org_active_days',
+    'Días activos de Cash Out (calendario ADMIN) a nivel organización — org-wide, aplican a todos los venues de tu organización activa que no tengan su propio calendario. Responde "¿qué días se puede retirar Cash Out en esta organización?". No requiere venueId — usa la organización activa de esta conexión.',
+    {},
+    async () => {
+      try {
+        const orgId = requireOrgReadAccess()
+        const days = await listActiveDaysForOrg(orgId)
+        return text({ ok: true, orgId, count: days.length, days })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'cash_out_org_withdrawals',
+    'Retiros (withdrawals) de Cash Out agregados org-wide: unión de los retiros de TODOS los venues de tu organización activa, cada uno con el nombre del venue (venueName). Quién solicitó, monto (PESOS), CLABE, folio y status (REQUESTED -> REPORTED -> PAID). Filtra por status (REQUESTED = pendiente de dispersión) o businessDate. No requiere venueId — usa la organización activa de esta conexión.',
+    {
+      status: z.enum(['REQUESTED', 'REPORTED', 'PAID', 'FAILED']).optional().describe('Filter by withdrawal status'),
+      businessDate: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .optional()
+        .describe('Filter by day (YYYY-MM-DD)'),
+    },
+    async ({ status, businessDate }) => {
+      try {
+        const orgId = requireOrgReadAccess()
+        const items = await listWithdrawalsForOrg(orgId, { status, businessDate })
+        return text({
+          ok: true,
+          orgId,
+          count: items.length,
+          withdrawals: items.map(w => ({
+            folio: w.folio,
+            venueId: w.venueId,
+            venueName: w.venueName,
+            staffId: w.staffId,
+            promoterName: w.promoterName,
             status: w.status,
             grossAmount: w.grossAmount.toString(),
             netAmount: w.netAmount.toString(),
