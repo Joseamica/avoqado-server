@@ -19,6 +19,7 @@ import { es as esLocale } from 'date-fns/locale'
 import emailService from '../../services/email.service'
 import { sendReservationConfirmationWhatsApp, formatModifiersForWhatsApp } from '../../services/whatsapp.service'
 import { enqueuePush, resolveClassSessionPushTargets } from '../../services/google-calendar/outbox.service'
+import { phonesMatch, phoneLast10 } from '../../utils/phone'
 
 // ==========================================
 // PUBLIC RESERVATION CONTROLLER (Unauthenticated)
@@ -1881,16 +1882,26 @@ async function createClassReservation(
     // Auto-link to a registered Customer when the guest data matches one. This
     // makes the booking show up in the customer portal "Mis Reservaciones" and
     // anchors loyalty/credits to the same identity.
-    const matchedCustomer =
-      body.guestEmail || body.guestPhone
-        ? await tx.customer.findFirst({
+    // Auto-link matching: exact email OR canonical phone. Phone is matched
+    // format-independently — coarse-prefilter existing customers by the trailing
+    // 10 digits, then canonical-verify with phonesMatch — because guest-typed and
+    // stored phone strings aren't consistently normalized across write paths.
+    const phoneLast10Digits = body.guestPhone ? phoneLast10(body.guestPhone) : null
+    const matchCandidates =
+      body.guestEmail || phoneLast10Digits
+        ? await tx.customer.findMany({
             where: {
               venueId,
-              OR: [...(body.guestEmail ? [{ email: body.guestEmail }] : []), ...(body.guestPhone ? [{ phone: body.guestPhone }] : [])],
+              OR: [
+                ...(body.guestEmail ? [{ email: body.guestEmail }] : []),
+                ...(phoneLast10Digits ? [{ phone: { endsWith: phoneLast10Digits } }] : []),
+              ],
             },
-            select: { id: true },
+            select: { id: true, email: true, phone: true },
           })
-        : null
+        : []
+    const matchedCustomer =
+      matchCandidates.find(c => (body.guestEmail && c.email === body.guestEmail) || phonesMatch(c.phone, body.guestPhone)) ?? null
 
     // Three states for the reservation row:
     // 1. requiresUpfrontCash (policy=required + venue has Stripe): PENDING +
