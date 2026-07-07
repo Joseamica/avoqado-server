@@ -5,6 +5,7 @@ import { generateOtpCode, hashOtpCode, normalizeEmail } from '../../lib/otp'
 import { sendOtpWhatsApp } from '../whatsapp.service'
 import emailService from '../email.service'
 import { generateCustomerToken } from '../../jwt.service'
+import { phonesMatch, phoneLast10 } from '@/utils/phone'
 
 const TTL_MS = 10 * 60 * 1000
 
@@ -69,6 +70,48 @@ export async function verifyOtp(args: { venueId: string; channel: 'whatsapp' | '
   }
 }
 
+// First word → firstName, remaining words → lastName. Mirrors the split used in
+// auth.consumer.service.ts (kept local to avoid a cross-bounded-context import).
+function splitName(name?: string | null): { firstName?: string; lastName?: string } {
+  if (!name) return {}
+  const parts = name.trim().split(/\s+/).filter(Boolean)
+  if (parts.length === 0) return {}
+  return { firstName: parts[0], lastName: parts.slice(1).join(' ') || undefined }
+}
+
+// Look up a name from this identity's most recent past guest reservation, so a
+// returning guest who booked without ever registering doesn't land on a blank
+// "Hola" after their first WhatsApp login. Matching is canonical (phonesMatch)
+// for phone; exact for email. Bounded to the venue + a small recent window.
+async function findGuestNameFromPastReservations(
+  venueId: string,
+  key: { phone?: string; email?: string },
+): Promise<{ firstName?: string; lastName?: string }> {
+  if (key.email) {
+    const r = await prisma.reservation.findFirst({
+      where: { venueId, guestEmail: key.email, guestName: { not: null } },
+      orderBy: { createdAt: 'desc' },
+      select: { guestName: true },
+    })
+    return splitName(r?.guestName)
+  }
+  if (key.phone) {
+    const last10 = phoneLast10(key.phone)
+    if (!last10) return {}
+    // Coarse prefilter by trailing 10 digits (format-agnostic), newest first,
+    // then canonical-verify in JS to drop false positives.
+    const candidates = await prisma.reservation.findMany({
+      where: { venueId, guestName: { not: null }, guestPhone: { endsWith: last10 } },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+      select: { guestName: true, guestPhone: true },
+    })
+    const match = candidates.find(c => phonesMatch(c.guestPhone, key.phone))
+    return splitName(match?.guestName)
+  }
+  return {}
+}
+
 async function resolveIdentity(venueId: string, key: { phone?: string; email?: string }) {
   let consumer
   if (key.phone) {
@@ -84,8 +127,16 @@ async function resolveIdentity(venueId: string, key: { phone?: string; email?: s
   let customer = await prisma.customer.findUnique({ where: where as any })
   if (!customer) customer = await prisma.customer.findFirst({ where: { venueId, consumerId: consumer.id } })
   if (!customer) {
+    const seededName = await findGuestNameFromPastReservations(venueId, key)
     customer = await prisma.customer.create({
-      data: { venueId, consumerId: consumer.id, provider: 'PHONE', ...(key.phone ? { phone: key.phone } : { email: key.email }) },
+      data: {
+        venueId,
+        consumerId: consumer.id,
+        provider: 'PHONE',
+        ...(key.phone ? { phone: key.phone } : { email: key.email }),
+        ...(seededName.firstName ? { firstName: seededName.firstName } : {}),
+        ...(seededName.lastName ? { lastName: seededName.lastName } : {}),
+      },
     })
   } else if (!customer.consumerId) {
     customer = await prisma.customer.update({ where: { id: customer.id }, data: { consumerId: consumer.id } })

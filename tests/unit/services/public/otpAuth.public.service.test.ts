@@ -36,6 +36,11 @@ describe('OTP Auth Public Service', () => {
     ;(sendOtpWhatsApp as jest.Mock).mockResolvedValue(true)
     ;(emailService.sendOtpCodeEmail as jest.Mock).mockResolvedValue(true)
     ;(generateCustomerToken as jest.Mock).mockReturnValue('signed.jwt.token')
+    // Name-backfill lookup (findGuestNameFromPastReservations) runs on every new-customer
+    // path. Default to "no past reservation" so tests that don't care about backfill
+    // don't have to mock it; tests below override per-case.
+    prismaMock.reservation.findMany.mockResolvedValue([])
+    prismaMock.reservation.findFirst.mockResolvedValue(null)
   })
 
   // ==========================================
@@ -236,6 +241,55 @@ describe('OTP Auth Public Service', () => {
       expect(generateCustomerToken).toHaveBeenCalledWith('customer-9', VENUE_ID)
       expect(result.customer.id).toBe('customer-9')
       expect(result.token).toBe('signed.jwt.token')
+    })
+  })
+
+  // ==========================================
+  // verifyOtp — name backfill on new customer
+  // ==========================================
+  describe('verifyOtp — name backfill on new customer', () => {
+    beforeEach(() => {
+      // Valid, unconsumed, matching challenge
+      prismaMock.otpChallenge.findFirst.mockResolvedValue({
+        id: 'ch1',
+        destination: PHONE_NORM,
+        consumedAt: null,
+        expiresAt: new Date(Date.now() + 60_000),
+        attempts: 0,
+        maxAttempts: 5,
+        codeHash: hashOtpCode('123456'),
+      })
+      prismaMock.otpChallenge.update.mockResolvedValue({})
+      // No existing Consumer or Customer → create paths
+      prismaMock.consumer.findMany.mockResolvedValue([])
+      prismaMock.consumer.create.mockResolvedValue({ id: 'cons1' })
+      prismaMock.customer.findUnique.mockResolvedValue(null)
+      prismaMock.customer.findFirst.mockResolvedValue(null)
+    })
+
+    it('seeds firstName/lastName from the most recent past guest reservation', async () => {
+      prismaMock.reservation.findMany.mockResolvedValue([{ guestName: 'Juan Pérez López', guestPhone: '5512345678' }])
+      prismaMock.customer.create.mockImplementation(({ data }: any) =>
+        Promise.resolve({ id: 'cust1', firstName: data.firstName ?? null, lastName: data.lastName ?? null, email: null, phone: data.phone ?? null }),
+      )
+
+      const res = await verifyOtp({ venueId: VENUE_ID, channel: 'whatsapp', destination: PHONE_RAW, code: '123456' })
+
+      expect(prismaMock.customer.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ firstName: 'Juan', lastName: 'Pérez López' }) }),
+      )
+      expect(res.customer.firstName).toBe('Juan')
+    })
+
+    it('creates a nameless customer when no past named reservation exists', async () => {
+      prismaMock.reservation.findMany.mockResolvedValue([])
+      prismaMock.customer.create.mockImplementation(({ data }: any) =>
+        Promise.resolve({ id: 'cust1', firstName: data.firstName ?? null, lastName: data.lastName ?? null, email: null, phone: data.phone ?? null }),
+      )
+
+      const res = await verifyOtp({ venueId: VENUE_ID, channel: 'whatsapp', destination: PHONE_RAW, code: '123456' })
+
+      expect(res.customer.firstName).toBeNull()
     })
   })
 })
