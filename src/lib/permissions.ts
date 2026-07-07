@@ -951,6 +951,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'sale-verifications:review', // Can approve/reject SIM-sale documentation from dashboard
     'sale-verifications:reopen', // Can revert an approved sale back to PENDING for re-review (OWNER only)
     'sale-verifications:edit', // Can edit/correct any sale (amount, forma de pago, tipo, estado) — OWNER only
+    'manual-sales:create', // Can bulk-create SIM sales made outside the TPV (PlayTelecom / Walmart)
     // Org-level management
     'goals:org-manage', // Manage org-level sales goal defaults
     'inventory:org-manage', // Manage org-level item categories & serialized items
@@ -988,6 +989,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     '*:*', // All permissions (covers sale-verifications:reopen and any future perm)
     'sale-verifications:reopen', // Explicit for clarity — reopen approved sales for re-review
     'sale-verifications:edit', // Explicit for clarity — edit/correct sales
+    'manual-sales:create', // Explicit for clarity — bulk-create SIM sales made outside the TPV
   ],
 }
 
@@ -1443,6 +1445,8 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   'serialized-inventory': ['serialized-inventory:sell', 'serialized-inventory:create', 'serialized-inventory:change-category'],
   // Sale Verifications back-office review (PlayTelecom / Walmart documentation flow)
   'sale-verifications': ['sale-verifications:review', 'sale-verifications:reopen', 'sale-verifications:edit'],
+  // Manual Sales (bulk-create SIM sales made outside the TPV — PlayTelecom / Walmart)
+  'manual-sales': ['manual-sales:create'],
   // SIM custody (PlayTelecom chain-of-custody: Admin → Supervisor → Promoter)
   'sim-custody': [
     'sim-custody:assign-to-supervisor',
