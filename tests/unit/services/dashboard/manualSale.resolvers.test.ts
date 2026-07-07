@@ -116,12 +116,47 @@ describe('resolveStaffByCode', () => {
     expect(await resolveStaffByCode('org1', 'ZZZ', 'Nadie Nada', tx as any)).toEqual({ error: 'Vendedor no encontrado' })
   })
 
-  it('found staff without org membership → error', async () => {
-    // Simulates the org-membership check failing: resolver's own query already
-    // scopes by org (via StaffVenue/StaffOrganization), so an out-of-org staff
-    // simply doesn't match → same not-found error.
-    const tx = mockTx({ staff: { findFirst: async () => null, findMany: async () => [] } })
-    expect(await resolveStaffByCode('org1', 'BSCLOXH0405', 'Ana Ruiz', tx as any)).toEqual({ error: 'Vendedor no encontrado' })
+  it('scopes BOTH queries to an ACTIVE org membership (active venue OR active org)', async () => {
+    // The resolver never loads the whole Staff table — every lookup is gated by
+    // an org-membership filter. Capture the `where` actually passed to each
+    // query and assert it requires an ACTIVE membership on BOTH paths, so a
+    // regression in orgMembershipFilter (wrong org, or a dropped isActive/active)
+    // is caught here. A staff row that isn't an active member simply won't match
+    // → 'Vendedor no encontrado'.
+    let codeWhere: any = null
+    let nameWhere: any = null
+    const tx = mockTx({
+      staff: {
+        findFirst: async (args: any) => {
+          codeWhere = args.where
+          return null // no active-member match by code
+        },
+        findMany: async (args: any) => {
+          nameWhere = args.where
+          return [] // no active-member candidates for the name fallback
+        },
+      },
+    })
+
+    const r = await resolveStaffByCode('org1', 'BSCLOXH0405', 'Ana Ruiz', tx as any)
+    expect(r).toEqual({ error: 'Vendedor no encontrado' })
+
+    // The expected org-membership filter: active StaffVenue in the org, OR
+    // active StaffOrganization in the org.
+    const expectedOrgMembership = {
+      OR: [
+        { venues: { some: { venue: { organizationId: 'org1' }, active: true } } },
+        { organizations: { some: { organizationId: 'org1', isActive: true } } },
+      ],
+    }
+
+    // Code query: employeeCode match AND active org membership.
+    expect(codeWhere).toEqual({
+      employeeCode: { equals: 'BSCLOXH0405', mode: 'insensitive' },
+      ...expectedOrgMembership,
+    })
+    // Name-fallback query: purely the active org-membership scope.
+    expect(nameWhere).toEqual(expectedOrgMembership)
   })
 })
 

@@ -78,8 +78,14 @@ export async function resolveStaffByCode(
   tx: Prisma.TransactionClient,
 ): Promise<Resolved<{ staff: { id: string; firstName: string; lastName: string; employeeCode: string | null } }>> {
   const trimmedCode = code?.trim()
+  // Both membership paths must require an ACTIVE membership: a seller offboarded
+  // from the org (StaffOrganization.isActive=false) or deactivated at a venue
+  // (StaffVenue.active=false) must not resolve as a valid seller.
   const orgMembershipFilter = {
-    OR: [{ venues: { some: { venue: { organizationId: orgId }, active: true } } }, { organizations: { some: { organizationId: orgId } } }],
+    OR: [
+      { venues: { some: { venue: { organizationId: orgId }, active: true } } },
+      { organizations: { some: { organizationId: orgId, isActive: true } } },
+    ],
   }
 
   if (trimmedCode) {
