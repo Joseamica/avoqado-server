@@ -1892,18 +1892,23 @@ async function createClassReservation(
     // 10 digits, then canonical-verify with phonesMatch — because guest-typed and
     // stored phone strings aren't consistently normalized across write paths.
     const phoneLast10Digits = body.guestPhone ? phoneLast10(body.guestPhone) : null
+    // Fetch candidate customers: exact email OR normalized-phone last-10 match.
+    // The phone side strips non-digits from the STORED "phone" column in SQL so
+    // formatting differences don't hide a real returning customer (a Prisma
+    // `endsWith` compares raw text and misses "55 1234 5678"). phonesMatch below
+    // is the canonical verify. Column names are compile-time literals here.
+    const emailCond = body.guestEmail ? Prisma.sql`"email" = ${body.guestEmail}` : Prisma.sql`FALSE`
+    const phoneCond = phoneLast10Digits
+      ? Prisma.sql`right(regexp_replace("phone", '[^0-9]', '', 'g'), 10) = ${phoneLast10Digits}`
+      : Prisma.sql`FALSE`
     const matchCandidates =
       body.guestEmail || phoneLast10Digits
-        ? await tx.customer.findMany({
-            where: {
-              venueId,
-              OR: [
-                ...(body.guestEmail ? [{ email: body.guestEmail }] : []),
-                ...(phoneLast10Digits ? [{ phone: { endsWith: phoneLast10Digits } }] : []),
-              ],
-            },
-            select: { id: true, email: true, phone: true },
-          })
+        ? await tx.$queryRaw<{ id: string; email: string | null; phone: string | null }[]>`
+            SELECT "id", "email", "phone"
+            FROM "Customer"
+            WHERE "venueId" = ${venueId}
+              AND (${emailCond} OR ${phoneCond})
+          `
         : []
     const matchedCustomer =
       matchCandidates.find(c => (body.guestEmail && c.email === body.guestEmail) || phonesMatch(c.phone, body.guestPhone)) ?? null
