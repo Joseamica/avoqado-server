@@ -38,8 +38,8 @@ export function registerManualSaleTools(server: McpServer, scope: McpScope) {
     'Record ONE SIM sale made OUTSIDE the TPV (PlayTelecom / Walmart external sale, already documentation-approved offline) — creates a paid order + payment and flips the SIM (by ICCID) to SOLD in a single step. This is the single-sale sibling of the dashboard\'s bulk "Subir ventas fuera de TPV" upload. Identify the SIM by iccid, the seller by promoterCode OR promoterName (at least one), and the store by storeName (must match a venue in your org). saleDate is the venue-local calendar day (YYYY-MM-DD). amount is in PESOS (e.g. 250.00), never cents. By DEFAULT this only PREVIEWS the sale; call again with confirm:true to actually record it. This WRITES — requires manual-sales:create in your organization.',
     {
       iccid: z.string().min(5).describe('ICCID printed/encoded on the SIM being sold'),
-      promoterCode: z.string().optional().describe('Seller\'s employee code. Provide this OR promoterName (at least one)'),
-      promoterName: z.string().optional().describe('Seller\'s full name, used when promoterCode is not known'),
+      promoterCode: z.string().optional().describe("Seller's employee code. Provide this OR promoterName (at least one)"),
+      promoterName: z.string().optional().describe("Seller's full name, used when promoterCode is not known"),
       storeName: z.string().min(1).describe('Store name — must match a venue in your organization (e.g. "BAE Unidad Pavón (898)")'),
       saleDate: z
         .string()
@@ -48,7 +48,7 @@ export function registerManualSaleTools(server: McpServer, scope: McpScope) {
       saleType: z.string().min(1).describe('Sale type, e.g. "Línea nueva" or "Portabilidad"'),
       paymentForm: z.string().min(1).describe('How it was paid, e.g. "Efectivo", "Tarjeta", "No aplica"'),
       amount: z.union([z.number(), z.string()]).describe('Sale amount in PESOS (major units), e.g. 250.00 — never cents'),
-      simType: z.string().optional().describe('SIM type/category label; falls back to the SIM\'s existing category if omitted'),
+      simType: z.string().optional().describe("SIM type/category label; falls back to the SIM's existing category if omitted"),
       confirm: z.boolean().optional().describe('Must be true to actually record the sale; without it you get a preview'),
     },
     async ({ iccid, promoterCode, promoterName, storeName, saleDate, saleType, paymentForm, amount, simType, confirm }) => {
