@@ -41,6 +41,7 @@ describe('OTP Auth Public Service', () => {
     // don't have to mock it; tests below override per-case.
     prismaMock.reservation.findMany.mockResolvedValue([])
     prismaMock.reservation.findFirst.mockResolvedValue(null)
+    prismaMock.$queryRaw.mockResolvedValue([]) // phone-path backfill now uses $queryRaw
   })
 
   // ==========================================
@@ -268,7 +269,7 @@ describe('OTP Auth Public Service', () => {
     })
 
     it('seeds firstName/lastName from the most recent past guest reservation', async () => {
-      prismaMock.reservation.findMany.mockResolvedValue([{ guestName: 'Juan Pérez López', guestPhone: '5512345678' }])
+      prismaMock.$queryRaw.mockResolvedValue([{ guestName: 'Juan Pérez López', guestPhone: '5512345678' }])
       prismaMock.customer.create.mockImplementation(({ data }: any) =>
         Promise.resolve({ id: 'cust1', firstName: data.firstName ?? null, lastName: data.lastName ?? null, email: null, phone: data.phone ?? null }),
       )
@@ -282,7 +283,7 @@ describe('OTP Auth Public Service', () => {
     })
 
     it('creates a nameless customer when no past named reservation exists', async () => {
-      prismaMock.reservation.findMany.mockResolvedValue([])
+      prismaMock.$queryRaw.mockResolvedValue([])
       prismaMock.customer.create.mockImplementation(({ data }: any) =>
         Promise.resolve({ id: 'cust1', firstName: data.firstName ?? null, lastName: data.lastName ?? null, email: null, phone: data.phone ?? null }),
       )

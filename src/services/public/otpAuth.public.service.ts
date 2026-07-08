@@ -98,14 +98,19 @@ async function findGuestNameFromPastReservations(
   if (key.phone) {
     const last10 = phoneLast10(key.phone)
     if (!last10) return {}
-    // Coarse prefilter by trailing 10 digits (format-agnostic), newest first,
-    // then canonical-verify in JS to drop false positives.
-    const candidates = await prisma.reservation.findMany({
-      where: { venueId, guestName: { not: null }, guestPhone: { endsWith: last10 } },
-      orderBy: { createdAt: 'desc' },
-      take: 20,
-      select: { guestName: true, guestPhone: true },
-    })
+    // Coarse prefilter by trailing 10 digits, normalizing the STORED column in
+    // SQL (strip non-digits, take last 10) so guest-typed formatting
+    // ("55 9999 0001") still matches — a Prisma `endsWith` compares the raw
+    // string and would miss it. phonesMatch below is the canonical verify.
+    const candidates = await prisma.$queryRaw<{ guestName: string | null; guestPhone: string | null }[]>`
+      SELECT "guestName", "guestPhone"
+      FROM "Reservation"
+      WHERE "venueId" = ${venueId}
+        AND "guestName" IS NOT NULL
+        AND right(regexp_replace("guestPhone", '[^0-9]', '', 'g'), 10) = ${last10}
+      ORDER BY "createdAt" DESC
+      LIMIT 20
+    `
     const match = candidates.find(c => phonesMatch(c.guestPhone, key.phone))
     return splitName(match?.guestName)
   }
