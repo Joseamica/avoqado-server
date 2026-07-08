@@ -16,6 +16,7 @@ import {
   type UpdateReservationInput,
 } from '@/services/dashboard/reservation.dashboard.service'
 import { getReservationSettings, updateReservationSettings } from '@/services/dashboard/reservationSettings.service'
+import { canVenueChargeOnline } from '@/services/payments/ecommerceCapability'
 import { getClassSession } from '@/services/dashboard/classSession.dashboard.service'
 import { getWaitlist, addToWaitlist } from '@/services/dashboard/reservationWaitlist.service'
 import { auditMcpWrite } from '../audit'
@@ -558,6 +559,22 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
         return text({
           ok: false,
           error: 'No indicaste ningún ajuste a cambiar. Pasa al menos un campo (lee reservation_settings para ver las opciones).',
+        })
+      }
+
+      // Can't enable any cobro (depositMode != 'none' / upfront != 'at_venue')
+      // without a chargeable e-commerce rail. Mirrors the guard in
+      // updateReservationSettings, but surfaced HERE so the operator sees it at
+      // PREVIEW time — not only after confirm:true.
+      const wantsCharging =
+        (typeof update.depositMode === 'string' && update.depositMode !== 'none') ||
+        (typeof update.appointmentUpfrontDefault === 'string' && update.appointmentUpfrontDefault !== 'at_venue') ||
+        (typeof update.classUpfrontDefault === 'string' && update.classUpfrontDefault !== 'at_venue')
+      if (wantsCharging && !(await canVenueChargeOnline(venueId))) {
+        return text({
+          ok: false,
+          error:
+            'Este negocio no puede cobrar en línea todavía. Da de alta un proveedor de e-commerce (Stripe/Mercado Pago) antes de activar depósitos o pago por adelantado en reservaciones.',
         })
       }
 

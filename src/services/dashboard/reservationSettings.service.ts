@@ -1,6 +1,8 @@
 import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { logAction } from './activity-log.service'
+import { BadRequestError } from '../../errors/AppError'
+import { canVenueChargeOnline } from '../payments/ecommerceCapability'
 
 // ==========================================
 // RESERVATION SETTINGS — Typed config from ReservationSettings model
@@ -107,6 +109,14 @@ export interface ReservationConfig {
     classRosterInDescription: boolean
   }
   operatingHours: OperatingHours
+  /**
+   * Computed (read-only) capability flag — NOT stored. Whether the venue can
+   * collect money online for booking surfaces (has a chargeable e-commerce
+   * merchant). Populated by the dashboard settings GET controller so the UI can
+   * disable the deposit/upfront toggles and show the "connect e-commerce" banner.
+   * Optional because getDefaultConfig() and hot-path callers don't compute it.
+   */
+  canChargeOnline?: boolean
 }
 
 type ReservationSettingsUpdateInput = Partial<{
@@ -260,6 +270,25 @@ export async function ensureReservationSettings(venueId: string) {
  */
 export async function updateReservationSettings(venueId: string, data: ReservationSettingsUpdateInput) {
   const normalized = normalizeReservationSettingsUpdate(data)
+
+  // 🔒 Can't turn ON any online-charging setting without a chargeable e-commerce
+  // rail. "Enabling charging" = a deposit mode other than 'none', or an upfront
+  // default other than 'at_venue'. Turning things OFF (or leaving them) is always
+  // allowed — this only blocks activating cobro when the venue can't actually
+  // collect. The public booking runtime keeps its pay-at-venue fallback as a
+  // safety net for venues configured before this gate (or via seed/API).
+  const nextDepositMode = typeof normalized.depositMode === 'string' ? normalized.depositMode : undefined
+  const nextApptUpfront = typeof normalized.appointmentUpfrontDefault === 'string' ? normalized.appointmentUpfrontDefault : undefined
+  const nextClassUpfront = typeof normalized.classUpfrontDefault === 'string' ? normalized.classUpfrontDefault : undefined
+  const enablesCharging =
+    (nextDepositMode !== undefined && nextDepositMode !== 'none') ||
+    (nextApptUpfront !== undefined && nextApptUpfront !== 'at_venue') ||
+    (nextClassUpfront !== undefined && nextClassUpfront !== 'at_venue')
+  if (enablesCharging && !(await canVenueChargeOnline(venueId))) {
+    throw new BadRequestError(
+      'Necesitas dar de alta un proveedor de e-commerce (Stripe/Mercado Pago) para cobrar o pre-cobrar reservaciones.',
+    )
+  }
 
   const settings = await prisma.reservationSettings.upsert({
     where: { venueId },

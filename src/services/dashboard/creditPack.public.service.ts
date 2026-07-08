@@ -10,14 +10,29 @@
  */
 
 import Stripe from 'stripe'
+import { nanoid } from 'nanoid'
 import { Prisma, CreditPurchaseStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { withSerializableRetry } from './reservation.dashboard.service'
+import { logAction } from './activity-log.service'
 import emailService from '@/services/email.service'
+import { resolveChargeableStripeMerchant } from '@/services/payments/ecommerceCapability'
+import { calculateApplicationFeeWithVAT, toStripeAmount } from '@/services/payments/providers/money'
+import { getVatRateBps } from '@/services/superadmin/platformSettings.service'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
+
+// Stripe charge bounds (MXN cents). Kept inline mirroring the other payment
+// services (paymentLink / venueCheckout / reservation) — a pair of env-tunable
+// constants, not worth another shared module. Defaults: $10 min, $50,000 max.
+function getStripeChargeBounds() {
+  return {
+    min: Number(process.env.STRIPE_MIN_CHARGE_CENTS ?? 1000),
+    max: Number(process.env.STRIPE_MAX_CHARGE_CENTS ?? 5_000_000),
+  }
+}
 
 /**
  * Get active credit packs for a venue (public)
@@ -173,6 +188,19 @@ export async function createCheckoutSession(
     throw new NotFoundError('Paquete no encontrado o no disponible')
   }
 
+  // 🔒 Gate + money routing: a pack can only be sold when the venue can collect
+  // online AND the money lands in the VENUE's own account (Stripe Connect), never
+  // the platform's. Mirrors reservation deposits (reservation.public.controller)
+  // and venue checkout (venueCheckout.service). No chargeable merchant → no sale.
+  const merchant = await resolveChargeableStripeMerchant(venueId)
+  if (!merchant) {
+    throw new BadRequestError('Este negocio aún no tiene pagos en línea configurados para vender paquetes.')
+  }
+  const connectAccountId = (merchant.providerCredentials as { connectAccountId?: string } | null)?.connectAccountId
+  if (!connectAccountId) {
+    throw new BadRequestError('La cuenta Stripe Connect del negocio no está configurada.')
+  }
+
   // Check maxPerCustomer if applicable
   if (pack.maxPerCustomer && (email || phone)) {
     const customer = await prisma.customer.findFirst({
@@ -197,62 +225,65 @@ export async function createCheckoutSession(
     }
   }
 
-  // Ensure Stripe product/price exist
-  let stripePriceId = pack.stripePriceId
-
-  if (!stripePriceId) {
-    // Create Stripe product and price
-    const product = await stripe.products.create({
-      name: pack.name,
-      metadata: {
-        type: 'credit_pack',
-        venueId,
-        packId: pack.id,
-      },
-    })
-
-    const price = await stripe.prices.create({
-      product: product.id,
-      unit_amount: Math.round(Number(pack.price) * 100),
-      currency: pack.currency.toLowerCase(),
-      metadata: {
-        type: 'credit_pack',
-        venueId,
-        packId: pack.id,
-      },
-    })
-
-    await prisma.creditPack.update({
-      where: { id: pack.id },
-      data: {
-        stripeProductId: product.id,
-        stripePriceId: price.id,
-      },
-    })
-
-    stripePriceId = price.id
+  // Amount + Avoqado's application_fee (same VAT logic as reservations / payment
+  // links). Both in Stripe minor units (cents); the ledger stays in pesos.
+  const stripeAmount = toStripeAmount(new Prisma.Decimal(pack.price))
+  const bounds = getStripeChargeBounds()
+  if (stripeAmount < bounds.min) {
+    throw new BadRequestError('El precio del paquete es menor al mínimo permitido por Stripe.')
   }
+  if (stripeAmount > bounds.max) {
+    throw new BadRequestError('El precio del paquete excede el máximo permitido por transacción.')
+  }
+  const vatRateBps = await getVatRateBps()
+  const applicationFeeAmount = calculateApplicationFeeWithVAT(stripeAmount, merchant.platformFeeBps, vatRateBps)
 
-  // Create Checkout Session
-  const session = await stripe.checkout.sessions.create({
-    mode: 'payment',
-    line_items: [{ price: stripePriceId, quantity: 1 }],
-    metadata: {
-      type: 'credit_pack_purchase',
-      venueId,
-      packId: pack.id,
-      ...(phone ? { customerPhone: phone } : {}),
-      ...(email && { customerEmail: email }),
+  // Create the Checkout Session ON THE CONNECTED ACCOUNT. Inline `price_data`
+  // (not a pre-created Price) because a platform Price can't be used on a
+  // connected account — this also lets us drop the platform Product/Price
+  // caching entirely. `application_fee_amount` routes Avoqado's cut back to the
+  // platform; the rest settles in the venue's own Stripe balance.
+  const session = await stripe.checkout.sessions.create(
+    {
+      mode: 'payment',
+      line_items: [
+        {
+          price_data: {
+            currency: pack.currency.toLowerCase(),
+            unit_amount: stripeAmount,
+            product_data: {
+              name: pack.name,
+              ...(pack.description ? { description: pack.description } : {}),
+            },
+          },
+          quantity: 1,
+        },
+      ],
+      payment_intent_data: { application_fee_amount: applicationFeeAmount },
+      metadata: {
+        type: 'credit_pack_purchase',
+        venueId,
+        packId: pack.id,
+        ecommerceMerchantId: merchant.id,
+        ...(phone ? { customerPhone: phone } : {}),
+        ...(email ? { customerEmail: email } : {}),
+      },
+      ...(email ? { customer_email: email } : {}),
+      success_url: successUrl,
+      cancel_url: cancelUrl,
     },
-    ...(email && { customer_email: email }),
-    success_url: successUrl,
-    cancel_url: cancelUrl,
-  })
+    {
+      stripeAccount: connectAccountId,
+      idempotencyKey: `creditpack:${pack.id}:${nanoid(10)}`,
+    },
+  )
 
-  logger.info('✅ [CREDIT PACK] Checkout session created', {
+  logger.info('✅ [CREDIT PACK] Checkout session created (connected account)', {
     sessionId: session.id,
     venueId,
     packId: pack.id,
+    connectAccountId,
+    applicationFeeAmount,
     amount: pack.price.toString(),
   })
 
@@ -262,9 +293,16 @@ export async function createCheckoutSession(
 /**
  * Fulfill a credit pack purchase after successful payment (called from webhook)
  */
-export async function fulfillPurchase(checkoutSessionId: string) {
-  // Retrieve session from Stripe
-  const session = await stripe.checkout.sessions.retrieve(checkoutSessionId)
+export async function fulfillPurchase(checkoutSessionId: string, connectAccountId?: string) {
+  // Retrieve session from Stripe. New purchases are created on the venue's
+  // CONNECTED account (Stripe Connect), so the retrieve must be scoped with
+  // `stripeAccount` (passed from the Connect webhook's event.account). Legacy
+  // sessions created on the platform account pass no connectAccountId.
+  const session = await stripe.checkout.sessions.retrieve(
+    checkoutSessionId,
+    undefined,
+    connectAccountId ? { stripeAccount: connectAccountId } : undefined,
+  )
   const metadata = session.metadata!
 
   if (metadata.type !== 'credit_pack_purchase') {
@@ -365,6 +403,25 @@ export async function fulfillPurchase(checkoutSessionId: string) {
     venueId,
     packId: pack.id,
     items: pack.items.length,
+  })
+
+  // Audit: money-in mutation. Fire-and-forget (never blocks/rolls back the
+  // purchase). No staff actor — customer-initiated via webhook (logAction maps
+  // the absent staffId to null). Reconciliation merchant lives on the session
+  // metadata (CreditPackPurchase has no ecommerceMerchantId column).
+  void logAction({
+    venueId,
+    action: 'CREDIT_PACK_PURCHASED',
+    entity: 'CreditPackPurchase',
+    entityId: purchase.id,
+    data: {
+      packId: pack.id,
+      customerId: customer.id,
+      amountPaid: Number(amountPaid),
+      currency: pack.currency || 'MXN',
+      ecommerceMerchantId: metadata.ecommerceMerchantId ?? null,
+      stripeCheckoutSessionId: checkoutSessionId,
+    },
   })
 
   // Send purchase receipt by email best-effort. The on-screen Stripe success

@@ -32,6 +32,10 @@ jest.mock('@/services/dashboard/reservation.dashboard.service', () => ({
 }))
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: (...a: unknown[]) => mockAudit(...(a as [])) }))
 jest.mock('@/mcp/planGate', () => ({ planGateMessage: (...a: unknown[]) => mockPlanGate(...(a as [])) }))
+const mockCanCharge = jest.fn()
+jest.mock('@/services/payments/ecommerceCapability', () => ({
+  canVenueChargeOnline: (...a: unknown[]) => mockCanCharge(...(a as [])),
+}))
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({
     venueFilter: (v?: string) => {
@@ -73,6 +77,7 @@ beforeEach(() => {
   mockGet.mockResolvedValue(fakeConfig)
   mockUpdate.mockResolvedValue({ id: 'rs1' })
   mockSettingsFindUnique.mockResolvedValue({ slotIntervalMin: 30, waitlistEnabled: false, pacingMaxPerSlot: 4 }) // current row for the preview
+  mockCanCharge.mockResolvedValue(true) // venue can charge online by default
 })
 
 describe('reservation_settings (read)', () => {
@@ -141,5 +146,36 @@ describe('configure_reservations (write)', () => {
     const out = parse(await call('configure_reservations', { venueId: 'v1', slotIntervalMin: 15, confirm: true }))
     expect(out.planRequired).toBe(true)
     expect(mockUpdate).not.toHaveBeenCalled()
+  })
+
+  // ── Online-charging gate: can't enable cobro without an e-commerce rail ──
+  it('blocks enabling a deposit mode when the venue cannot charge online — no write, even with confirm', async () => {
+    mockCanCharge.mockResolvedValue(false)
+    const out = parse(await call('configure_reservations', { venueId: 'v1', depositMode: 'deposit', confirm: true }))
+    expect(out.ok).toBe(false)
+    expect(out.error).toMatch(/e-?commerce|Stripe|Mercado Pago/i)
+    expect(mockUpdate).not.toHaveBeenCalled()
+  })
+
+  it('blocks enabling upfront=required when the venue cannot charge — at PREVIEW time (no confirm)', async () => {
+    mockCanCharge.mockResolvedValue(false)
+    const out = parse(await call('configure_reservations', { venueId: 'v1', classUpfrontDefault: 'required' }))
+    expect(out.ok).toBe(false)
+    expect(out.requiresConfirmation).toBeUndefined()
+    expect(mockUpdate).not.toHaveBeenCalled()
+  })
+
+  it('allows enabling cobro when the venue CAN charge (proceeds to the normal preview)', async () => {
+    mockCanCharge.mockResolvedValue(true)
+    const out = parse(await call('configure_reservations', { venueId: 'v1', depositMode: 'deposit' }))
+    expect(out.requiresConfirmation).toBe(true)
+    expect(mockUpdate).not.toHaveBeenCalled() // preview only
+  })
+
+  it('does NOT check charging capability when only non-cobro fields change', async () => {
+    mockCanCharge.mockResolvedValue(false) // even a venue that cannot charge...
+    await call('configure_reservations', { venueId: 'v1', slotIntervalMin: 15, confirm: true }) // ...can still tweak scheduling
+    expect(mockCanCharge).not.toHaveBeenCalled()
+    expect(mockUpdate).toHaveBeenCalledTimes(1)
   })
 })

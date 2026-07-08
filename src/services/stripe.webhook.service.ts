@@ -1250,7 +1250,13 @@ export async function handleStripeWebhookEvent(event: Stripe.Event) {
       case 'checkout.session.completed': {
         const session = event.data.object as Stripe.Checkout.Session
         if (session.metadata?.type === 'credit_pack_purchase') {
-          logger.info('📥 Webhook: Credit pack checkout completed', {
+          // LEGACY FALLBACK ONLY. New credit-pack sessions are created on the
+          // venue's connected account and fulfilled by the Stripe CONNECT
+          // webhook (reservation-deposit-webhook.service). This platform-account
+          // branch remains solely to fulfill any in-flight legacy sessions that
+          // were created on the platform account before the routing fix — hence
+          // no connectAccountId (retrieve happens on the platform account).
+          logger.info('📥 Webhook (platform, LEGACY): Credit pack checkout completed', {
             sessionId: session.id,
             venueId: session.metadata.venueId,
             packId: session.metadata.packId,

@@ -3,6 +3,7 @@ import * as reservationService from '../../services/dashboard/reservation.dashbo
 import * as availabilityService from '../../services/dashboard/reservationAvailability.service'
 import { getReservationSettings, updateReservationSettings } from '../../services/dashboard/reservationSettings.service'
 import * as reservationBrandingService from '../../services/dashboard/reservationBranding.service'
+import { canVenueChargeOnline } from '../../services/payments/ecommerceCapability'
 import prisma from '../../utils/prismaClient'
 import { BadRequestError } from '../../errors/AppError'
 import { fromZonedTime } from 'date-fns-tz'
@@ -272,7 +273,12 @@ export async function getSettings(req: Request, res: Response, next: NextFunctio
   try {
     const venueId = resolveVenueId(req)
     const settings = await getReservationSettings(venueId)
-    res.json(settings)
+    // Computed capability flag so the settings UI can disable the deposit/upfront
+    // toggles + show the "connect an e-commerce provider" banner. Computed here
+    // (low-frequency admin endpoint) instead of in getReservationSettings to keep
+    // the hot booking paths free of an extra merchant lookup.
+    const canChargeOnline = await canVenueChargeOnline(venueId)
+    res.json({ ...settings, canChargeOnline })
   } catch (error) {
     next(error)
   }

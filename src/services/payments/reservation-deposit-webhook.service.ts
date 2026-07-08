@@ -4,6 +4,7 @@ import logger from '@/config/logger'
 import { VerifiedWebhookEvent } from './providers/provider.interface'
 import { finalizePaymentLinkCheckout } from '@/services/dashboard/paymentLink.service'
 import { finalizeVenueCheckout } from '@/services/dashboard/venueCheckout.service'
+import { fulfillPurchase as fulfillCreditPackPurchase } from '@/services/dashboard/creditPack.public.service'
 import emailService from '@/services/email.service'
 import { sendReservationConfirmationWhatsApp, formatModifiersForWhatsApp } from '@/services/whatsapp.service'
 import { formatInTimeZone } from 'date-fns-tz'
@@ -89,6 +90,36 @@ async function processCheckoutCompleted(event: VerifiedWebhookEvent) {
     } catch (error: any) {
       if (error?.code === 'P2002') {
         logger.info('ℹ️ [STRIPE CONNECT] Duplicate payment-link webhook ignored', { eventId: event.id })
+        return
+      }
+      throw error
+    }
+    return
+  }
+
+  // Credit-pack purchases now settle on the venue's connected account (money
+  // routing fix), so their checkout.session.completed lands HERE, not on the
+  // platform webhook. Dispatch to the same fulfillment used before.
+  if (session.metadata?.type === 'credit_pack_purchase') {
+    try {
+      // Claim the event first so duplicate deliveries no-op via the unique
+      // stripeEventId constraint (fulfillPurchase is also idempotent on
+      // stripeCheckoutSessionId — this just avoids a redundant Stripe retrieve).
+      await prisma.processedStripeEvent.create({
+        data: {
+          stripeEventId: event.id,
+          endpoint: 'connect',
+          eventType: event.type,
+          account: event.account,
+          payload: event.data as Prisma.InputJsonValue,
+        },
+      })
+      // Pass event.account so fulfillPurchase retrieves the session with the
+      // correct connected-account (stripeAccount) scope.
+      await fulfillCreditPackPurchase(session.id, event.account)
+    } catch (error: any) {
+      if (error?.code === 'P2002') {
+        logger.info('ℹ️ [STRIPE CONNECT] Duplicate credit-pack webhook ignored', { eventId: event.id })
         return
       }
       throw error

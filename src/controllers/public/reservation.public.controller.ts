@@ -14,6 +14,10 @@ import { Prisma } from '@prisma/client'
 import { calculateApplicationFeeWithVAT, toStripeAmount } from '../../services/payments/providers/money'
 import { getVatRateBps } from '../../services/superadmin/platformSettings.service'
 import { getProvider } from '../../services/payments/provider-registry'
+import {
+  resolveChargeableStripeMerchant as resolveActiveStripeMerchant,
+  canVenueChargeOnline,
+} from '../../services/payments/ecommerceCapability'
 import { formatInTimeZone, toZonedTime } from 'date-fns-tz'
 import { es as esLocale } from 'date-fns/locale'
 import emailService from '../../services/email.service'
@@ -130,18 +134,9 @@ async function resolveVenueBySlug(venueSlug: string) {
   return venue
 }
 
-async function resolveActiveStripeMerchant(venueId: string) {
-  return prisma.ecommerceMerchant.findFirst({
-    where: {
-      venueId,
-      active: true,
-      chargesEnabled: true,
-      provider: { code: 'STRIPE_CONNECT', active: true },
-    },
-    include: { provider: true },
-    orderBy: { createdAt: 'desc' },
-  })
-}
+// `resolveActiveStripeMerchant` (aliased) + `canVenueChargeOnline` are imported from
+// @/services/payments/ecommerceCapability so reservations, credit packs, the public
+// venue-info endpoint and the dashboard all share one "can this venue charge?" rule.
 
 async function previewDepositRequirement(venueId: string, body: any, settings: any) {
   if (!settings.deposits?.enabled || settings.deposits.mode === 'none') {
@@ -320,6 +315,13 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
     // than each re-deriving the rule and risking a silent mismatch.
     const chatMode = whatsappContactMode ?? 'WA_ME_FALLBACK'
     const canMessage = chatMode === 'RELAY' || (chatMode === 'WA_ME_FALLBACK' && !!venueInfoRest.phone)
+
+    // Can this venue actually collect money online? Drives whether the widget
+    // offers reservation pre-payment and shows credit packs at all. When false,
+    // the widget hides those money surfaces (free booking still works) so the
+    // customer never sees a "pay"/"buy" button that would just dead-end at
+    // checkout. Single source of truth: canVenueChargeOnline (Stripe Connect today).
+    const canCharge = await canVenueChargeOnline(venue.id)
     res.json({
       ...venueInfoRest,
       branding: mergeReservationBranding(reservationBranding, venueInfoRest.primaryColor),
@@ -334,6 +336,9 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
       chat: { mode: chatMode, canMessage },
       operatingHours: settings.operatingHours,
       payments: settings.payments,
+      // Whether the venue can collect money online (has a chargeable e-commerce
+      // rail). Widget gate for the pre-pay step + credit-pack storefront.
+      canCharge,
       // Scheduling window — exposed so the date picker caps exactly at the
       // venue's booking horizon instead of a hardcoded default. The server
       // already enforces these (enforceBookingWindow); exposing them keeps the

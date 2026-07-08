@@ -6,6 +6,7 @@ import { getReservationSettings } from '@/services/dashboard/reservationSettings
 import { calculateApplicationFeeWithVAT, toStripeAmount } from '@/services/payments/providers/money'
 import { getVatRateBps } from '@/services/superadmin/platformSettings.service'
 import { getProvider } from '@/services/payments/provider-registry'
+import { resolveChargeableStripeMerchant as resolveActiveStripeMerchant } from '@/services/payments/ecommerceCapability'
 import logger from '@/config/logger'
 
 type ConsumerReservationInput = {
@@ -39,19 +40,6 @@ async function resolveVenue(venueSlug: string) {
   })
   if (!venue) throw new NotFoundError('Negocio no encontrado')
   return venue
-}
-
-async function resolveActiveStripeMerchant(venueId: string) {
-  return prisma.ecommerceMerchant.findFirst({
-    where: {
-      venueId,
-      active: true,
-      chargesEnabled: true,
-      provider: { code: 'STRIPE_CONNECT', active: true },
-    },
-    include: { provider: true },
-    orderBy: { createdAt: 'desc' },
-  })
 }
 
 async function previewDepositRequirement(venueId: string, input: ConsumerReservationInput, settings: any) {

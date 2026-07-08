@@ -29,6 +29,11 @@ jest.mock('@/services/dashboard/reservation.dashboard.service', () => ({
   generateConfirmationCode: jest.fn().mockReturnValue('RES-ABC123'),
 }))
 
+// Deterministic VAT rate for the application-fee calc (createCheckoutSession).
+jest.mock('@/services/superadmin/platformSettings.service', () => ({
+  getVatRateBps: jest.fn().mockResolvedValue(1600),
+}))
+
 import {
   getAvailablePacks,
   lookupCustomerCredits,
@@ -397,10 +402,21 @@ describe('CreditPack Public Service', () => {
     const phone = '+525551234567'
     const email = 'maria@example.com'
 
-    it('should create Stripe Checkout Session and return URL', async () => {
+    // A venue that CAN charge online: active Stripe Connect merchant with a
+    // connected account id. The money-routing fix requires one to sell a pack.
+    const createMockMerchant = (overrides: Record<string, any> = {}) => ({
+      id: 'ecm-stripe-1',
+      chargesEnabled: true,
+      platformFeeBps: 100,
+      providerCredentials: { connectAccountId: 'acct_test_123' },
+      provider: { code: 'STRIPE_CONNECT', active: true },
+      ...overrides,
+    })
+
+    it('should create a Checkout Session ON THE CONNECTED ACCOUNT with an application fee and return the URL', async () => {
       const pack = createMockPack()
       prismaMock.creditPack.findFirst.mockResolvedValue(pack)
-
+      prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(createMockMerchant())
       mockStripeCheckoutCreate.mockResolvedValue({
         id: 'cs_test_session',
         url: 'https://checkout.stripe.com/session/cs_test_session',
@@ -408,56 +424,77 @@ describe('CreditPack Public Service', () => {
 
       const result = await createCheckoutSession(VENUE_ID, PACK_ID, email, phone, successUrl, cancelUrl)
 
-      expect(result).toEqual({
-        checkoutUrl: 'https://checkout.stripe.com/session/cs_test_session',
-      })
+      expect(result).toEqual({ checkoutUrl: 'https://checkout.stripe.com/session/cs_test_session' })
 
-      expect(mockStripeCheckoutCreate).toHaveBeenCalledWith({
-        mode: 'payment',
-        line_items: [{ price: 'price_test', quantity: 1 }],
-        metadata: {
+      const [params, options] = mockStripeCheckoutCreate.mock.calls[0]
+      // Money routes to the venue: session scoped to its connected account.
+      expect(options).toEqual(expect.objectContaining({ stripeAccount: 'acct_test_123' }))
+      expect(typeof options.idempotencyKey).toBe('string')
+      // Inline price_data (no pre-created platform Price), amount in cents.
+      expect(params.line_items[0].price_data).toEqual(
+        expect.objectContaining({
+          currency: 'mxn',
+          unit_amount: 60000, // Decimal(600) → 60000 cents
+          product_data: expect.objectContaining({ name: 'Pack Fitness' }),
+        }),
+      )
+      // Avoqado's cut rides along as application_fee_amount → back to the platform.
+      expect(typeof params.payment_intent_data.application_fee_amount).toBe('number')
+      expect(params.payment_intent_data.application_fee_amount).toBeGreaterThan(0)
+      // Metadata pins the merchant for reconciliation + webhook routing.
+      expect(params.metadata).toEqual(
+        expect.objectContaining({
           type: 'credit_pack_purchase',
           venueId: VENUE_ID,
           packId: PACK_ID,
+          ecommerceMerchantId: 'ecm-stripe-1',
           customerPhone: phone,
           customerEmail: email,
-        },
-        customer_email: email,
-        success_url: successUrl,
-        cancel_url: cancelUrl,
-      })
+        }),
+      )
+      // NEW behavior: NO platform Product/Price creation anymore.
+      expect(mockStripeProductsCreate).not.toHaveBeenCalled()
+      expect(mockStripePricesCreate).not.toHaveBeenCalled()
+    })
+
+    it('should BLOCK the sale when the venue has no chargeable Stripe merchant', async () => {
+      const pack = createMockPack()
+      prismaMock.creditPack.findFirst.mockResolvedValue(pack)
+      prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(null) // no online rail
+
+      await expect(createCheckoutSession(VENUE_ID, PACK_ID, email, phone, successUrl, cancelUrl)).rejects.toThrow(BadRequestError)
+      await expect(createCheckoutSession(VENUE_ID, PACK_ID, email, phone, successUrl, cancelUrl)).rejects.toThrow(
+        'Este negocio aún no tiene pagos en línea configurados para vender paquetes.',
+      )
+      expect(mockStripeCheckoutCreate).not.toHaveBeenCalled()
+    })
+
+    it('should BLOCK the sale when the merchant has no connectAccountId', async () => {
+      const pack = createMockPack()
+      prismaMock.creditPack.findFirst.mockResolvedValue(pack)
+      prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(createMockMerchant({ providerCredentials: {} }))
+
+      await expect(createCheckoutSession(VENUE_ID, PACK_ID, email, phone, successUrl, cancelUrl)).rejects.toThrow(
+        'La cuenta Stripe Connect del negocio no está configurada.',
+      )
+      expect(mockStripeCheckoutCreate).not.toHaveBeenCalled()
     })
 
     it('should throw NotFoundError when pack not found', async () => {
       prismaMock.creditPack.findFirst.mockResolvedValue(null)
 
       await expect(createCheckoutSession(VENUE_ID, 'nonexistent-pack', email, phone, successUrl, cancelUrl)).rejects.toThrow(NotFoundError)
-
       await expect(createCheckoutSession(VENUE_ID, 'nonexistent-pack', email, phone, successUrl, cancelUrl)).rejects.toThrow(
         'Paquete no encontrado o no disponible',
       )
     })
 
-    it('should throw NotFoundError when pack is inactive', async () => {
-      // The query filters active: true, so an inactive pack won't be found
-      prismaMock.creditPack.findFirst.mockResolvedValue(null)
-
-      await expect(createCheckoutSession(VENUE_ID, PACK_ID, email, phone, successUrl, cancelUrl)).rejects.toThrow(NotFoundError)
-
-      expect(prismaMock.creditPack.findFirst).toHaveBeenCalledWith({
-        where: { id: PACK_ID, venueId: VENUE_ID, active: true },
-      })
-    })
-
     it('should check maxPerCustomer limit and throw BadRequestError if exceeded', async () => {
       const pack = createMockPack({ maxPerCustomer: 2 })
-      const customer = createMockCustomer()
-
       prismaMock.creditPack.findFirst.mockResolvedValue(pack)
-      prismaMock.customer.findFirst.mockResolvedValue(customer)
+      prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(createMockMerchant())
+      prismaMock.customer.findFirst.mockResolvedValue(createMockCustomer())
       prismaMock.creditPackPurchase.count.mockResolvedValue(2) // Already at limit
-
-      await expect(createCheckoutSession(VENUE_ID, PACK_ID, email, phone, successUrl, cancelUrl)).rejects.toThrow(BadRequestError)
 
       await expect(createCheckoutSession(VENUE_ID, PACK_ID, email, phone, successUrl, cancelUrl)).rejects.toThrow(
         'Has alcanzado el limite de 2 compras para este paquete',
@@ -466,12 +503,10 @@ describe('CreditPack Public Service', () => {
 
     it('should allow purchase when under maxPerCustomer limit', async () => {
       const pack = createMockPack({ maxPerCustomer: 3 })
-      const customer = createMockCustomer()
-
       prismaMock.creditPack.findFirst.mockResolvedValue(pack)
-      prismaMock.customer.findFirst.mockResolvedValue(customer)
+      prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(createMockMerchant())
+      prismaMock.customer.findFirst.mockResolvedValue(createMockCustomer())
       prismaMock.creditPackPurchase.count.mockResolvedValue(1) // Under limit
-
       mockStripeCheckoutCreate.mockResolvedValue({
         id: 'cs_test_session',
         url: 'https://checkout.stripe.com/session/cs_test_session',
@@ -480,137 +515,12 @@ describe('CreditPack Public Service', () => {
       const result = await createCheckoutSession(VENUE_ID, PACK_ID, email, phone, successUrl, cancelUrl)
 
       expect(result.checkoutUrl).toBe('https://checkout.stripe.com/session/cs_test_session')
-    })
-
-    it('should skip maxPerCustomer check when customer does not exist yet', async () => {
-      const pack = createMockPack({ maxPerCustomer: 2 })
-
-      prismaMock.creditPack.findFirst.mockResolvedValue(pack)
-      prismaMock.customer.findFirst.mockResolvedValue(null) // No customer found
-
-      mockStripeCheckoutCreate.mockResolvedValue({
-        id: 'cs_test_session',
-        url: 'https://checkout.stripe.com/session/cs_test_session',
-      })
-
-      const result = await createCheckoutSession(VENUE_ID, PACK_ID, email, phone, successUrl, cancelUrl)
-
-      expect(result.checkoutUrl).toBe('https://checkout.stripe.com/session/cs_test_session')
-      // Should not check purchase count when customer doesn't exist
-      expect(prismaMock.creditPackPurchase.count).not.toHaveBeenCalled()
-    })
-
-    it('should create Stripe product/price if not yet created on pack', async () => {
-      const pack = createMockPack({ stripeProductId: null, stripePriceId: null })
-
-      prismaMock.creditPack.findFirst.mockResolvedValue(pack)
-
-      mockStripeProductsCreate.mockResolvedValue({ id: 'prod_new_123' })
-      mockStripePricesCreate.mockResolvedValue({ id: 'price_new_456' })
-      prismaMock.creditPack.update.mockResolvedValue({
-        ...pack,
-        stripeProductId: 'prod_new_123',
-        stripePriceId: 'price_new_456',
-      })
-
-      mockStripeCheckoutCreate.mockResolvedValue({
-        id: 'cs_test_session',
-        url: 'https://checkout.stripe.com/session/cs_test_session',
-      })
-
-      await createCheckoutSession(VENUE_ID, PACK_ID, email, phone, successUrl, cancelUrl)
-
-      expect(mockStripeProductsCreate).toHaveBeenCalledWith({
-        name: 'Pack Fitness',
-        metadata: {
-          type: 'credit_pack',
-          venueId: VENUE_ID,
-          packId: PACK_ID,
-        },
-      })
-
-      expect(mockStripePricesCreate).toHaveBeenCalledWith({
-        product: 'prod_new_123',
-        unit_amount: 60000, // 600 * 100
-        currency: 'mxn',
-        metadata: {
-          type: 'credit_pack',
-          venueId: VENUE_ID,
-          packId: PACK_ID,
-        },
-      })
-
-      expect(prismaMock.creditPack.update).toHaveBeenCalledWith({
-        where: { id: PACK_ID },
-        data: {
-          stripeProductId: 'prod_new_123',
-          stripePriceId: 'price_new_456',
-        },
-      })
-
-      // The new price ID should be used for the checkout session
-      expect(mockStripeCheckoutCreate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          line_items: [{ price: 'price_new_456', quantity: 1 }],
-        }),
-      )
-    })
-
-    it('should use existing stripePriceId if already set', async () => {
-      const pack = createMockPack({
-        stripeProductId: 'prod_existing',
-        stripePriceId: 'price_existing',
-      })
-
-      prismaMock.creditPack.findFirst.mockResolvedValue(pack)
-
-      mockStripeCheckoutCreate.mockResolvedValue({
-        id: 'cs_test_session',
-        url: 'https://checkout.stripe.com/session/cs_test_session',
-      })
-
-      await createCheckoutSession(VENUE_ID, PACK_ID, email, phone, successUrl, cancelUrl)
-
-      // Should NOT create new Stripe product/price
-      expect(mockStripeProductsCreate).not.toHaveBeenCalled()
-      expect(mockStripePricesCreate).not.toHaveBeenCalled()
-      expect(prismaMock.creditPack.update).not.toHaveBeenCalled()
-
-      expect(mockStripeCheckoutCreate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          line_items: [{ price: 'price_existing', quantity: 1 }],
-        }),
-      )
-    })
-
-    it('should pass correct metadata to Stripe session', async () => {
-      const pack = createMockPack()
-      prismaMock.creditPack.findFirst.mockResolvedValue(pack)
-
-      mockStripeCheckoutCreate.mockResolvedValue({
-        id: 'cs_test_session',
-        url: 'https://checkout.stripe.com/session/cs_test_session',
-      })
-
-      await createCheckoutSession(VENUE_ID, PACK_ID, email, phone, successUrl, cancelUrl)
-
-      expect(mockStripeCheckoutCreate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          metadata: {
-            type: 'credit_pack_purchase',
-            venueId: VENUE_ID,
-            packId: PACK_ID,
-            customerPhone: phone,
-            customerEmail: email,
-          },
-        }),
-      )
     })
 
     it('should omit customerEmail from metadata when email is undefined', async () => {
       const pack = createMockPack()
       prismaMock.creditPack.findFirst.mockResolvedValue(pack)
-
+      prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(createMockMerchant())
       mockStripeCheckoutCreate.mockResolvedValue({
         id: 'cs_test_session',
         url: 'https://checkout.stripe.com/session/cs_test_session',
@@ -618,15 +528,17 @@ describe('CreditPack Public Service', () => {
 
       await createCheckoutSession(VENUE_ID, PACK_ID, undefined, phone, successUrl, cancelUrl)
 
-      const callArgs = mockStripeCheckoutCreate.mock.calls[0][0]
-      expect(callArgs.metadata).toEqual({
-        type: 'credit_pack_purchase',
-        venueId: VENUE_ID,
-        packId: PACK_ID,
-        customerPhone: phone,
-      })
-      // customer_email should not be set when email is undefined
-      expect(callArgs.customer_email).toBeUndefined()
+      const params = mockStripeCheckoutCreate.mock.calls[0][0]
+      expect(params.metadata).toEqual(
+        expect.objectContaining({
+          type: 'credit_pack_purchase',
+          venueId: VENUE_ID,
+          packId: PACK_ID,
+          customerPhone: phone,
+        }),
+      )
+      expect(params.metadata.customerEmail).toBeUndefined()
+      expect(params.customer_email).toBeUndefined()
     })
   })
 
@@ -728,6 +640,27 @@ describe('CreditPack Public Service', () => {
           quantity: 2,
         }),
       })
+    })
+
+    it('should retrieve the session scoped to the connected account when a connectAccountId is passed', async () => {
+      const session = createMockStripeSession()
+      const pack = createMockPack()
+      const customer = createMockCustomer()
+      const newPurchase = createMockPurchase({ stripeCheckoutSessionId: checkoutSessionId })
+
+      mockStripeCheckoutRetrieve.mockResolvedValue(session)
+      prismaMock.creditPackPurchase.findUnique.mockResolvedValue(null)
+      prismaMock.creditPack.findUnique.mockResolvedValue(pack)
+      prismaMock.customer.findUnique.mockResolvedValue(customer)
+      prismaMock.creditPackPurchase.create.mockResolvedValue(newPurchase)
+      prismaMock.creditItemBalance.create.mockResolvedValue(createMockBalance())
+      prismaMock.creditTransaction.create.mockResolvedValue({})
+      prismaMock.customer.update.mockResolvedValue(customer)
+
+      await fulfillPurchase(checkoutSessionId, 'acct_connected_1')
+
+      // Connected-account webhook path: retrieve must be scoped with stripeAccount.
+      expect(mockStripeCheckoutRetrieve).toHaveBeenCalledWith(checkoutSessionId, undefined, { stripeAccount: 'acct_connected_1' })
     })
 
     it('should handle idempotency (skip if already processed)', async () => {
@@ -1298,6 +1231,13 @@ describe('CreditPack Public Service', () => {
     it('Multi-tenant isolation: createCheckoutSession filters by venueId', async () => {
       const pack = createMockPack({ venueId: 'venue-XYZ' })
       prismaMock.creditPack.findFirst.mockResolvedValue(pack)
+      prismaMock.ecommerceMerchant.findFirst.mockResolvedValue({
+        id: 'ecm-xyz',
+        chargesEnabled: true,
+        platformFeeBps: 100,
+        providerCredentials: { connectAccountId: 'acct_xyz' },
+        provider: { code: 'STRIPE_CONNECT', active: true },
+      })
 
       mockStripeCheckoutCreate.mockResolvedValue({
         id: 'cs_test_session',

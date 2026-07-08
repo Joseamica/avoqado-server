@@ -261,6 +261,12 @@ export function registerCreditPackTools(server: McpServer, scope: McpScope) {
       const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('creditPacks:create', venueId) // write gate (per-venue role)
 
+      // NOTE: intentionally NOT gated on canVenueChargeOnline / an e-commerce
+      // merchant. This is an IN-PERSON sale — the customer pays at the POS
+      // terminal (cash/card), so no online rail is involved. Only the PUBLIC
+      // widget checkout (creditPack.public.service.createCheckoutSession) needs
+      // a chargeable Stripe Connect merchant. Do not "fix" this by adding the gate.
+
       const customers = await prisma.customer.findMany({
         where: {
           ...base,

@@ -15,6 +15,7 @@ import { nanoid } from 'nanoid'
 import { logAction } from './activity-log.service'
 import { deductInventoryForProduct } from '@/services/dashboard/productInventoryIntegration.service'
 import { getProvider } from '@/services/payments/provider-registry'
+import { isEcommerceMerchantChargeable } from '@/services/payments/ecommerceCapability'
 import { calculateApplicationFeeWithVAT, toStripeAmount } from '@/services/payments/providers/money'
 import { getVatRateBps } from '@/services/superadmin/platformSettings.service'
 import emailService from '@/services/email.service'
@@ -351,30 +352,9 @@ export interface ListPaymentLinksFilters {
 // DASHBOARD CRUD
 // ═══════════════════════════════════════════════════════════════════════════
 
-/**
- * Whether a merchant can actually process an online charge right now.
- *
- * Usability is provider-specific, so a single flag is not enough:
- *   - BLUMON: needs an `accessToken` in providerCredentials. Blumon has no
- *     onboarding flow that flips `chargesEnabled`, so that flag stays false even
- *     for working channels — we must look at the credential instead.
- *   - STRIPE_CONNECT / MERCADO_PAGO: expose readiness via `chargesEnabled`
- *     (set by their onboarding/OAuth webhooks).
- *
- * Used by the auto-pick below so we never bind a new link to a dead channel
- * that throws "Configuración de pago incompleta" at checkout.
- */
-function isEcommerceMerchantChargeable(merchant: {
-  chargesEnabled: boolean
-  providerCredentials: unknown
-  provider: { code: string } | null
-}): boolean {
-  if (merchant.provider?.code === 'BLUMON') {
-    const accessToken = (merchant.providerCredentials as { accessToken?: unknown } | null)?.accessToken
-    return typeof accessToken === 'string' && accessToken.length > 0
-  }
-  return merchant.chargesEnabled === true
-}
+// `isEcommerceMerchantChargeable` now lives in @/services/payments/ecommerceCapability
+// (imported above) so every online-money surface — payment links, reservation
+// deposits, credit packs — shares one "can this channel actually charge?" predicate.
 
 /**
  * Creates a new payment link for a venue
