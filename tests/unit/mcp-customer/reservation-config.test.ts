@@ -157,6 +157,25 @@ describe('configure_reservations (write)', () => {
     expect(mockUpdate).not.toHaveBeenCalled()
   })
 
+  // ── Regression: bug found live by /full-testing — guard must compare against
+  // the CURRENT row, not just the incoming payload, or resaving an already-
+  // charging legacy venue gets wrongly blocked. ──
+  it('allows resaving an already-charging legacy venue (no rail) when the operator only changes an unrelated field', async () => {
+    mockCanCharge.mockResolvedValue(false)
+    mockSettingsFindUnique.mockResolvedValue({ slotIntervalMin: 30, depositMode: 'deposit', appointmentUpfrontDefault: 'optional' })
+    const out = parse(await call('configure_reservations', { venueId: 'v1', slotIntervalMin: 15, depositMode: 'deposit', confirm: true }))
+    expect(out.ok).toBe(true)
+    expect(mockUpdate).toHaveBeenCalledTimes(1)
+  })
+
+  it('still blocks activating cobro for the first time on a venue with no prior charging config', async () => {
+    mockCanCharge.mockResolvedValue(false)
+    mockSettingsFindUnique.mockResolvedValue({ slotIntervalMin: 30 }) // no depositMode/upfront saved yet
+    const out = parse(await call('configure_reservations', { venueId: 'v1', depositMode: 'deposit', confirm: true }))
+    expect(out.ok).toBe(false)
+    expect(mockUpdate).not.toHaveBeenCalled()
+  })
+
   it('blocks enabling upfront=required when the venue cannot charge — at PREVIEW time (no confirm)', async () => {
     mockCanCharge.mockResolvedValue(false)
     const out = parse(await call('configure_reservations', { venueId: 'v1', classUpfrontDefault: 'required' }))

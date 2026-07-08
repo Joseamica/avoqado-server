@@ -271,19 +271,45 @@ export async function ensureReservationSettings(venueId: string) {
 export async function updateReservationSettings(venueId: string, data: ReservationSettingsUpdateInput) {
   const normalized = normalizeReservationSettingsUpdate(data)
 
-  // 🔒 Can't turn ON any online-charging setting without a chargeable e-commerce
-  // rail. "Enabling charging" = a deposit mode other than 'none', or an upfront
-  // default other than 'at_venue'. Turning things OFF (or leaving them) is always
-  // allowed — this only blocks activating cobro when the venue can't actually
-  // collect. The public booking runtime keeps its pay-at-venue fallback as a
-  // safety net for venues configured before this gate (or via seed/API).
-  const nextDepositMode = typeof normalized.depositMode === 'string' ? normalized.depositMode : undefined
-  const nextApptUpfront = typeof normalized.appointmentUpfrontDefault === 'string' ? normalized.appointmentUpfrontDefault : undefined
-  const nextClassUpfront = typeof normalized.classUpfrontDefault === 'string' ? normalized.classUpfrontDefault : undefined
-  const enablesCharging =
-    (nextDepositMode !== undefined && nextDepositMode !== 'none') ||
-    (nextApptUpfront !== undefined && nextApptUpfront !== 'at_venue') ||
-    (nextClassUpfront !== undefined && nextClassUpfront !== 'at_venue')
+  // 🔒 Can't TRANSITION any online-charging setting from off → on without a
+  // chargeable e-commerce rail. "Enabling charging" = a deposit mode other than
+  // 'none', or an upfront default other than 'at_venue'. Turning things off (or
+  // leaving them) is always allowed.
+  //
+  // Bug fixed 2026-07-07 (found by /full-testing): comparing only the INCOMING
+  // payload — not the current DB row — meant a venue that already had cobro
+  // configured before this gate existed (legacy data, or the field just isn't
+  // being touched this call) got blocked from saving ANY unrelated setting,
+  // because the dashboard form always resends the full deposits/payments object.
+  // We now only block a genuine off→on TRANSITION; resaving an already-charging
+  // value (even switching between two charging modes) is left alone — that
+  // venue's merchant gap is pre-existing, not something this save created.
+  const wantsDeposit = normalized.depositMode !== undefined
+  const wantsAppt = normalized.appointmentUpfrontDefault !== undefined
+  const wantsClass = normalized.classUpfrontDefault !== undefined
+  let enablesCharging = false
+  if (wantsDeposit || wantsAppt || wantsClass) {
+    const current = await prisma.reservationSettings.findUnique({ where: { venueId } })
+    // Baseline for "was this venue already charging" when a field was never
+    // explicitly saved. NOTE this intentionally does NOT match getDefaultConfig()'s
+    // *display* default for classUpfrontDefault ('required') — that default is a
+    // product choice for brand-new venues, not evidence an operator activated
+    // cobro. For THIS guard (has a human ever explicitly turned it on?), a
+    // missing row/field means "no", so the safe baseline is 'at_venue' for both
+    // upfront fields and 'none' for deposits.
+    const wasChargingDeposit = (current?.depositMode ?? 'none') !== 'none'
+    const wasChargingAppt = (current?.appointmentUpfrontDefault ?? 'at_venue') !== 'at_venue'
+    const wasChargingClass = (current?.classUpfrontDefault ?? 'at_venue') !== 'at_venue'
+
+    const nextDepositMode = typeof normalized.depositMode === 'string' ? normalized.depositMode : undefined
+    const nextApptUpfront = typeof normalized.appointmentUpfrontDefault === 'string' ? normalized.appointmentUpfrontDefault : undefined
+    const nextClassUpfront = typeof normalized.classUpfrontDefault === 'string' ? normalized.classUpfrontDefault : undefined
+
+    enablesCharging =
+      (nextDepositMode !== undefined && nextDepositMode !== 'none' && !wasChargingDeposit) ||
+      (nextApptUpfront !== undefined && nextApptUpfront !== 'at_venue' && !wasChargingAppt) ||
+      (nextClassUpfront !== undefined && nextClassUpfront !== 'at_venue' && !wasChargingClass)
+  }
   if (enablesCharging && !(await canVenueChargeOnline(venueId))) {
     throw new BadRequestError(
       'Necesitas dar de alta un proveedor de e-commerce (Stripe/Mercado Pago) para cobrar o pre-cobrar reservaciones.',

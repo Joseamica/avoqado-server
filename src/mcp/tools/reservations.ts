@@ -562,14 +562,30 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
         })
       }
 
-      // Can't enable any cobro (depositMode != 'none' / upfront != 'at_venue')
-      // without a chargeable e-commerce rail. Mirrors the guard in
-      // updateReservationSettings, but surfaced HERE so the operator sees it at
-      // PREVIEW time — not only after confirm:true.
+      // Fetch the current row once — used both by the charging-transition guard
+      // below and by the preview's CURRENT → NEW display.
+      const current = (await prisma.reservationSettings.findUnique({ where: { venueId } })) as Record<string, unknown> | null
+
+      // Can't TRANSITION any cobro field from off → on (depositMode 'none'→other,
+      // upfront 'at_venue'→other) without a chargeable e-commerce rail. Mirrors the
+      // guard in updateReservationSettings, but surfaced HERE so the operator sees
+      // it at PREVIEW time — not only after confirm:true.
+      //
+      // Bug fixed 2026-07-07 (found by /full-testing): checking only the incoming
+      // `update` — not the current row — blocked resaving an ALREADY-charging
+      // venue (legacy data predating this gate) even when the operator only
+      // touched an unrelated field. Baseline for "was charging" when a field
+      // isn't in `current` at all: 'none'/'at_venue' for all three fields (a
+      // human never explicitly activated it) — NOT getDefaultConfig()'s
+      // classUpfrontDefault='required' display-default, which is a product
+      // choice for brand-new venues, not evidence of activation.
+      const wasChargingDeposit = (current?.depositMode ?? 'none') !== 'none'
+      const wasChargingAppt = (current?.appointmentUpfrontDefault ?? 'at_venue') !== 'at_venue'
+      const wasChargingClass = (current?.classUpfrontDefault ?? 'at_venue') !== 'at_venue'
       const wantsCharging =
-        (typeof update.depositMode === 'string' && update.depositMode !== 'none') ||
-        (typeof update.appointmentUpfrontDefault === 'string' && update.appointmentUpfrontDefault !== 'at_venue') ||
-        (typeof update.classUpfrontDefault === 'string' && update.classUpfrontDefault !== 'at_venue')
+        (typeof update.depositMode === 'string' && update.depositMode !== 'none' && !wasChargingDeposit) ||
+        (typeof update.appointmentUpfrontDefault === 'string' && update.appointmentUpfrontDefault !== 'at_venue' && !wasChargingAppt) ||
+        (typeof update.classUpfrontDefault === 'string' && update.classUpfrontDefault !== 'at_venue' && !wasChargingClass)
       if (wantsCharging && !(await canVenueChargeOnline(venueId))) {
         return text({
           ok: false,
@@ -582,7 +598,6 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
         // Show each change as label + CURRENT → NEW so the operator can catch a
         // misread instruction before anything is written. Read the current row flat
         // (same column names as the update keys); null/absent → '(predeterminado)'.
-        const current = (await prisma.reservationSettings.findUnique({ where: { venueId } })) as Record<string, unknown> | null
         const changes = Object.entries(update).map(([field, to]) => ({
           field,
           label: RESERVATION_FIELD_LABELS[field] ?? field,
