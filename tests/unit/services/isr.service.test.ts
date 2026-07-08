@@ -110,6 +110,31 @@ describe('getIsrProvisional — RESICO', () => {
   })
 })
 
+describe('getIsrProvisional — RESICO tabla de tasas por tramo (fronteras exactas)', () => {
+  // `resicoTasa` usa `<=`: la frontera (tope) pertenece al tramo INFERIOR; un centavo más salta al siguiente.
+  // Tabla 2024/2025: ≤25k→1% · ≤50k→1.1% · ≤83,333.33→1.5% · ≤208,333.33→2% · resto→2.5%.
+  const casos: [string, number, number][] = [
+    ['$1 (piso)', 1_00, 0.01],
+    ['$25,000 exacto → tope del 1%', 25_000_00, 0.01],
+    ['$25,000.01 → salta a 1.1%', 25_000_01, 0.011],
+    ['$40,000 → dentro del 1.1%', 40_000_00, 0.011],
+    ['$50,000 exacto → tope del 1.1%', 50_000_00, 0.011],
+    ['$50,000.01 → salta a 1.5%', 50_000_01, 0.015],
+    ['$83,333.33 exacto → tope del 1.5%', 83_333_33, 0.015],
+    ['$83,333.34 → salta a 2%', 83_333_34, 0.02],
+    ['$208,333.33 exacto → tope del 2%', 208_333_33, 0.02],
+    ['$208,333.34 → salta a 2.5%', 208_333_34, 0.025],
+    ['$300,000 → dentro del 2.5%', 300_000_00, 0.025],
+  ]
+  it.each(casos)('%s', async (_label, ingresoCents, tasaEsperada) => {
+    mIncome.mockResolvedValue(income(ingresoCents))
+    const r = await getIsrProvisional('v1', '2026-06', 'RESICO')
+    expect(r.tasaResico).toBe(tasaEsperada)
+    expect(r.isrCausadoCents).toBe(Math.round(ingresoCents * tasaEsperada))
+    expect(r.excedeTopeResico).toBe(false) // ningún caso rebasa el tope anual $3.5M
+  })
+})
+
 describe('getIsrProvisional — GENERAL (art 96)', () => {
   it('enero: utilidad = ingresos − deducciones; ISR por tarifa art-96 (exacto)', async () => {
     mIncome.mockResolvedValue(income(30_000_00)) // ingresos acum ene = $30,000
