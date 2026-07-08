@@ -7,13 +7,19 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     fixedAsset: { findMany: jest.fn(), update: jest.fn() },
-    fixedAssetDepreciation: { upsert: jest.fn(), aggregate: jest.fn() },
+    fixedAssetDepreciation: { upsert: jest.fn(), aggregate: jest.fn(), updateMany: jest.fn() },
+    journalEntry: { findUnique: jest.fn() },
+    journalLine: { aggregate: jest.fn() },
   },
 }))
 jest.mock('../../../../src/services/fiscal/chartOfAccounts.service', () => ({ resolveScopeOrNull: jest.fn() }))
+jest.mock('../../../../src/services/fiscal/accountMapping.service', () => ({ getMappings: jest.fn() }))
+jest.mock('../../../../src/services/fiscal/journalEntry.service', () => ({ postJournalEntry: jest.fn() }))
 
 import prisma from '../../../../src/utils/prismaClient'
 import { resolveScopeOrNull } from '../../../../src/services/fiscal/chartOfAccounts.service'
+import { getMappings } from '../../../../src/services/fiscal/accountMapping.service'
+import { postJournalEntry } from '../../../../src/services/fiscal/journalEntry.service'
 import {
   computeDepreciation,
   monthsElapsed,
@@ -23,9 +29,13 @@ import {
 
 const p = prisma as unknown as {
   fixedAsset: { findMany: jest.Mock; update: jest.Mock }
-  fixedAssetDepreciation: { upsert: jest.Mock; aggregate: jest.Mock }
+  fixedAssetDepreciation: { upsert: jest.Mock; aggregate: jest.Mock; updateMany: jest.Mock }
+  journalEntry: { findUnique: jest.Mock }
+  journalLine: { aggregate: jest.Mock }
 }
 const mScope = resolveScopeOrNull as jest.Mock
+const mMappings = getMappings as jest.Mock
+const mPost = postJournalEntry as jest.Mock
 
 // Laptop $30,000, cómputo 30% → base 3,000,000¢, mensual = 3,000,000×0.30/12 = 75,000¢ ($750), vida 40 meses.
 const laptop = (over: Record<string, unknown> = {}) => ({
@@ -42,6 +52,17 @@ const laptop = (over: Record<string, unknown> = {}) => ({
 beforeEach(() => {
   jest.clearAllMocks()
   mScope.mockResolvedValue({ organizationId: 'org1', rfc: 'EKU9003173C9' })
+  // Póliza: por default los mapeos existen, no hay póliza previa, y postJournalEntry devuelve el id.
+  mMappings.mockResolvedValue({
+    mappings: [
+      { movementType: 'DEPRECIATION_EXPENSE', account: { id: 'acc-601-86' } },
+      { movementType: 'ACCUMULATED_DEPRECIATION', account: { id: 'acc-171-09' } },
+    ],
+  })
+  p.journalEntry.findUnique.mockResolvedValue(null)
+  p.journalLine.aggregate.mockResolvedValue({ _sum: { debitCents: 0, creditCents: 0 } })
+  p.fixedAssetDepreciation.updateMany.mockResolvedValue({ count: 1 })
+  mPost.mockResolvedValue({ id: 'je1' })
 })
 
 describe('monthsElapsed', () => {
@@ -123,6 +144,50 @@ describe('generateDepreciationForVenue', () => {
       }),
     )
     expect(p.fixedAsset.update).not.toHaveBeenCalled() // aún no se agota
+  })
+
+  it('postea la póliza DEBE gasto / HABER depreciación acumulada por el total del periodo', async () => {
+    p.fixedAsset.findMany.mockResolvedValue([laptop()])
+    const r = await generateDepreciationForVenue('v1', '2026-04', 'staff1')
+    expect(r.posted).toBe(true)
+    expect(mPost).toHaveBeenCalledWith(
+      'v1',
+      expect.objectContaining({
+        source: 'DEPRECIATION',
+        idempotencyKey: 'deprec:2026-04:t75000',
+        lines: [
+          { ledgerAccountId: 'acc-601-86', debitCents: 750_00, creditCents: 0 },
+          { ledgerAccountId: 'acc-171-09', debitCents: 0, creditCents: 750_00 },
+        ],
+      }),
+      { staffId: 'staff1' },
+    )
+    expect(p.fixedAssetDepreciation.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { posted: true, journalEntryId: 'je1' } }),
+    )
+  })
+
+  it('faltan mapeos de depreciación → NO postea, pero el cálculo sí persiste (best-effort)', async () => {
+    mMappings.mockResolvedValue({ mappings: [{ movementType: 'DEPRECIATION_EXPENSE', account: { id: 'acc-601-86' } }] }) // falta el HABER
+    p.fixedAsset.findMany.mockResolvedValue([laptop()])
+    const r = await generateDepreciationForVenue('v1', '2026-04')
+    expect(r.totalPeriodCents).toBe(750_00) // el número sí se calculó
+    expect(r.posted).toBe(false)
+    expect(r.postedReason).toBe('missingMappings')
+    expect(mPost).not.toHaveBeenCalled()
+  })
+
+  it('delta: si ya se posteó parte del periodo, solo postea el incremento (activo nuevo)', async () => {
+    // Ya hay $750 posteados del periodo; total ahora $1,500 (se registró otro activo) → delta $750.
+    p.journalLine.aggregate.mockResolvedValue({ _sum: { debitCents: 750_00, creditCents: 0 } })
+    p.fixedAsset.findMany.mockResolvedValue([laptop(), laptop({ id: 'a2' })]) // 2 laptops → total 1,500
+    const r = await generateDepreciationForVenue('v1', '2026-04')
+    expect(r.totalPeriodCents).toBe(1_500_00)
+    expect(mPost).toHaveBeenCalledWith(
+      'v1',
+      expect.objectContaining({ lines: [expect.objectContaining({ debitCents: 750_00 }), expect.objectContaining({ creditCents: 750_00 })] }),
+      expect.anything(),
+    )
   })
 
   it('salta activos que aún no entran en uso (no crea renglón en 0)', async () => {

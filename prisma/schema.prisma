@@ -11123,6 +11123,10 @@ enum AccountMovementType {
   ISR_PAYROLL_WITHHELD
   IMSS_PAYABLE
   SALARIES_PAYABLE
+  ISN_EXPENSE
+  ISN_PAYABLE
+  DEPRECIATION_EXPENSE
+  ACCUMULATED_DEPRECIATION
 }
 
 // ============================================
@@ -11212,6 +11216,7 @@ enum JournalEntrySource {
   ADJUSTMENT
   OPENING
   EXPENSE
+  DEPRECIATION
 }
 
 enum AccountingPeriodStatus {

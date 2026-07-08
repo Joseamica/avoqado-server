@@ -4,6 +4,8 @@
  *  - seed resuelve cada default a su cuenta del catálogo, es insert-if-absent, exige catálogo
  *  - setMapping valida: movimiento válido, cuenta del contribuyente, cuenta AFECTABLE (hoja)
  */
+import { AccountMovementType } from '@prisma/client'
+
 import { BadRequestError } from '../../../src/errors/AppError'
 import { MOVEMENT_TYPES } from '../../../src/services/fiscal/accountMapping.catalog'
 
@@ -42,6 +44,16 @@ beforeEach(() => {
   p.accountMapping.upsert.mockResolvedValue({})
 })
 
+describe('catálogo ↔ enum Prisma', () => {
+  // Guardián: AccountMapping.movementType es un enum Prisma; un movementType del catálogo que NO exista en
+  // el enum truena seedDefaultMappings contra DB real (los mocks no lo ven). Bit ISN + depreciación.
+  it('todo movementType del catálogo es un valor válido de AccountMovementType', () => {
+    const enumValues = new Set(Object.keys(AccountMovementType))
+    const invalid = MOVEMENT_TYPES.map(m => m.movementType).filter(mt => !enumValues.has(mt))
+    expect(invalid).toEqual([])
+  })
+})
+
 describe('getMappings', () => {
   it('sin RFC → needsFiscalSetup', async () => {
     p.venue.findUnique.mockResolvedValue({ organizationId: 'org1', rfc: null, type: 'AUTO_SERVICE' })
@@ -54,7 +66,7 @@ describe('getMappings', () => {
     const r = await getMappings('v1')
     expect(r.needsFiscalSetup).toBe(false)
     expect(r.catalogSeeded).toBe(true)
-    expect(r.mappings).toHaveLength(30)
+    expect(r.mappings).toHaveLength(32)
     expect(r.mappings.every(m => m.account === null)).toBe(true)
   })
 
@@ -80,9 +92,9 @@ describe('seedDefaultMappings', () => {
     await expect(seedDefaultMappings('v1', { staffId: 's' })).rejects.toThrow(BadRequestError)
   })
 
-  it('crea los 28 mapeos resolviendo cada default a su cuenta', async () => {
+  it('crea los 32 mapeos resolviendo cada default a su cuenta', async () => {
     await seedDefaultMappings('v1', { staffId: 's' })
-    expect(p.accountMapping.create).toHaveBeenCalledTimes(30)
+    expect(p.accountMapping.create).toHaveBeenCalledTimes(32)
     const byType = (mt: string) => p.accountMapping.create.mock.calls.find(c => c[0].data.movementType === mt)?.[0].data
     expect(byType('SALES_REVENUE').ledgerAccountId).toBe('acc-401.01')
     expect(byType('COST_OF_GOODS_SOLD').ledgerAccountId).toBe('acc-501.01')
@@ -94,7 +106,7 @@ describe('seedDefaultMappings', () => {
     await seedDefaultMappings('v1', { staffId: 's' })
     const createdTypes = p.accountMapping.create.mock.calls.map(c => c[0].data.movementType)
     expect(createdTypes).not.toContain('SALES_REVENUE')
-    expect(p.accountMapping.create).toHaveBeenCalledTimes(29)
+    expect(p.accountMapping.create).toHaveBeenCalledTimes(31)
   })
 })
 

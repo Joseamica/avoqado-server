@@ -1135,7 +1135,10 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         activosProcesados: r.assetsProcessed,
         activosDepreciados: r.assetsDepreciated,
         depreciacionDelPeriodo: pesos(r.totalPeriodCents),
-        nota: 'Registrado. Se deduce en tu ISR general (deducción de inversiones acumulada del ejercicio).',
+        posteadoAlLibro: r.posted, // si el asiento contable ya se generó (requiere mapeo de cuentas configurado)
+        nota: r.posted
+          ? 'Registrado y contabilizado. Se deduce en tu ISR general y ya pegó en la balanza.'
+          : 'Registrado. Se deduce en tu ISR general; para que también pegue en la balanza, configura el mapeo de cuentas de depreciación.',
       })
     },
   )

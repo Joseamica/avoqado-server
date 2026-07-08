@@ -13,12 +13,80 @@
 // cuenta de depreciación acumulada es no-hoja en varios giros; postear con la hoja correcta = follow-up).
 // El número SÍ se persiste y alimenta la deducción del ISR general (ver isr.service).
 
+import { JournalEntrySource, JournalEntryType } from '@prisma/client'
+
 import prisma from '../../utils/prismaClient'
 import { BadRequestError } from '../../errors/AppError'
 import { cappedMoiCents } from './assetTypeCatalog'
 import { resolveScopeOrNull } from './chartOfAccounts.service'
+import { getMappings } from './accountMapping.service'
+import { postJournalEntry } from './journalEntry.service'
 
 const PERIOD_RE = /^\d{4}-(0[1-9]|1[0-2])$/
+
+/**
+ * Postea la póliza de depreciación del periodo al libro diario: DEBE 601.86 Depreciación (gasto) / HABER
+ * 171.09 Depreciación acumulada. Best-effort (si faltan mapeos → skip, no bloquea el cálculo). Delta e
+ * idempotente igual que COGS: la clave por total del periodo evita doble-posteo; si el total creció (se
+ * registró un activo nuevo y se re-corre), postea solo el incremento. `source=DEPRECIATION`.
+ */
+async function postDepreciationPolicy(
+  venueId: string,
+  scope: { organizationId: string; rfc: string },
+  period: string,
+  totalPeriodCents: number,
+  actorStaffId: string | null,
+): Promise<{ posted: boolean; reason?: string; journalEntryId: string | null }> {
+  if (totalPeriodCents <= 0) return { posted: false, reason: 'noDepreciation', journalEntryId: null }
+
+  const mapResult = await getMappings(venueId)
+  const byMovement = new Map<string, string>()
+  for (const m of mapResult.mappings) if (m.account) byMovement.set(m.movementType, m.account.id)
+  const expAcct = byMovement.get('DEPRECIATION_EXPENSE')
+  const accAcct = byMovement.get('ACCUMULATED_DEPRECIATION')
+  if (!expAcct || !accAcct) return { posted: false, reason: 'missingMappings', journalEntryId: null }
+
+  const idempotencyKey = `deprec:${period}:t${totalPeriodCents}`
+  const already = await prisma.journalEntry.findUnique({
+    where: { organizationId_rfc_idempotencyKey: { organizationId: scope.organizationId, rfc: scope.rfc, idempotencyKey } },
+    select: { id: true },
+  })
+  if (already) return { posted: false, reason: 'upToDate', journalEntryId: already.id }
+
+  // Depreciación ya posteada del periodo (cargos − abonos en la cuenta de gasto, pólizas DEPRECIATION) →
+  // el delta es lo que falta por reconocer (p.ej. un activo registrado después de la primera corrida).
+  const prior = await prisma.journalLine.aggregate({
+    where: {
+      ledgerAccountId: expAcct,
+      journalEntry: { source: JournalEntrySource.DEPRECIATION, period, organizationId: scope.organizationId, rfc: scope.rfc },
+    },
+    _sum: { debitCents: true, creditCents: true },
+  })
+  const priorCents = (prior._sum.debitCents ?? 0) - (prior._sum.creditCents ?? 0)
+  const deltaCents = totalPeriodCents - priorCents
+  if (deltaCents <= 0) return { posted: false, reason: deltaCents === 0 ? 'upToDate' : 'decreased', journalEntryId: null }
+
+  const [y, m] = period.split('-').map(Number)
+  const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate()
+  const dateStr = `${period}-${String(lastDay).padStart(2, '0')}`
+
+  const entry = await postJournalEntry(
+    venueId,
+    {
+      date: dateStr,
+      type: JournalEntryType.DIARIO,
+      source: JournalEntrySource.DEPRECIATION,
+      idempotencyKey,
+      concept: `Depreciacion de activos fijos ${period}`,
+      lines: [
+        { ledgerAccountId: expAcct, debitCents: deltaCents, creditCents: 0 },
+        { ledgerAccountId: accAcct, debitCents: 0, creditCents: deltaCents },
+      ],
+    },
+    { staffId: actorStaffId },
+  )
+  return { posted: true, journalEntryId: entry.id }
+}
 
 interface DepreciableAsset {
   moiCents: number
@@ -64,6 +132,10 @@ export interface GenerateDepreciationResult {
   assetsProcessed: number
   assetsDepreciated: number
   totalPeriodCents: number
+  /** Si el delta del periodo se llevó a la póliza contable (best-effort; false si faltan mapeos). */
+  posted: boolean
+  /** Motivo cuando NO se posteó: missingMappings | noDepreciation | upToDate | decreased. */
+  postedReason?: string
 }
 
 /**
@@ -73,11 +145,11 @@ export interface GenerateDepreciationResult {
 export async function generateDepreciationForVenue(
   venueId: string,
   period: string,
-  _actorStaffId: string | null = null,
+  actorStaffId: string | null = null,
 ): Promise<GenerateDepreciationResult> {
   if (!PERIOD_RE.test(period)) throw new BadRequestError('El periodo debe tener formato AAAA-MM (mes 01-12).')
   const scope = await resolveScopeOrNull(venueId)
-  if (!scope) return { needsFiscalSetup: true, period, assetsProcessed: 0, assetsDepreciated: 0, totalPeriodCents: 0 }
+  if (!scope) return { needsFiscalSetup: true, period, assetsProcessed: 0, assetsDepreciated: 0, totalPeriodCents: 0, posted: false }
 
   const assets = await prisma.fixedAsset.findMany({
     where: { organizationId: scope.organizationId, rfc: scope.rfc, status: 'ACTIVE' },
@@ -100,7 +172,25 @@ export async function generateDepreciationForVenue(
     }
   }
 
-  return { needsFiscalSetup: false, period, assetsProcessed: assets.length, assetsDepreciated, totalPeriodCents }
+  // Póliza al ledger (best-effort, delta idempotente). Si faltan mapeos, no bloquea: el número ya quedó
+  // persistido y se deduce en el ISR igual; solo no pega en la balanza hasta configurar las cuentas.
+  const poliza = await postDepreciationPolicy(venueId, scope, period, totalPeriodCents, actorStaffId)
+  if (poliza.posted || poliza.reason === 'upToDate') {
+    await prisma.fixedAssetDepreciation.updateMany({
+      where: { period, fixedAsset: { organizationId: scope.organizationId, rfc: scope.rfc } },
+      data: { posted: true, journalEntryId: poliza.journalEntryId },
+    })
+  }
+
+  return {
+    needsFiscalSetup: false,
+    period,
+    assetsProcessed: assets.length,
+    assetsDepreciated,
+    totalPeriodCents,
+    posted: poliza.posted,
+    postedReason: poliza.reason,
+  }
 }
 
 /**

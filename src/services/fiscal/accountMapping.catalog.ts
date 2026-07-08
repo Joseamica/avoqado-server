@@ -145,6 +145,8 @@ export const MOVEMENT_TYPES: MovementTypeDef[] = [
   },
   { movementType: 'ISN_EXPENSE', label: 'Impuesto sobre nómina (gasto)', defaultCode: '601.85', side: 'DEBIT', group: 'NOMINA' },
   { movementType: 'ISN_PAYABLE', label: 'Impuesto sobre nómina por pagar', defaultCode: '213.04', side: 'CREDIT', group: 'NOMINA' },
+  { movementType: 'DEPRECIATION_EXPENSE', label: 'Depreciación del ejercicio (gasto)', defaultCode: '601.86', side: 'DEBIT', group: 'COSTOS_GASTOS' },
+  { movementType: 'ACCUMULATED_DEPRECIATION', label: 'Depreciación acumulada (contra-activo)', defaultCode: '171.09', side: 'CREDIT', group: 'COSTOS_GASTOS' },
   // Resultado / patrimonio
   {
     movementType: 'NET_INCOME_PROFIT',

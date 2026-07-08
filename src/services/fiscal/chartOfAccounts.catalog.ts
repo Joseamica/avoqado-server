@@ -487,6 +487,20 @@ export const BASE_CHART: SeedAccount[] = [
     level: 2,
     parentCode: '601',
   },
+  // Depreciación de inversiones (LISR 34-35): 601.86 = gasto (DEBE); 171/171.09 = depreciación acumulada
+  // (HABER, contra-activo). 171.09 es la hoja SIEMPRE posteable — no la usa ningún giro, así el asiento
+  // de depreciación resuelve una cuenta hoja en todos los locales.
+  { code: '601.86', name: 'Depreciacion del ejercicio', satGroupingCode: '601.86', type: 'GASTO', nature: 'DEUDORA', level: 2, parentCode: '601' },
+  { code: '171', name: 'Depreciacion acumulada de activos fijos', satGroupingCode: '171', type: 'ACTIVO', nature: 'ACREEDORA', level: 1, parentCode: null },
+  {
+    code: '171.09',
+    name: 'Depreciacion acumulada del ejercicio',
+    satGroupingCode: '171',
+    type: 'ACTIVO',
+    nature: 'ACREEDORA',
+    level: 2,
+    parentCode: '171',
+  },
   { code: '602', name: 'Gastos de venta', satGroupingCode: '602', type: 'GASTO', nature: 'DEUDORA', level: 1, parentCode: null },
   {
     code: '602.01',
