@@ -35,6 +35,7 @@ import {
   getPolizasXmlController,
 } from '@/controllers/dashboard/contabilidadElectronica.controller'
 import { getIsrProvisionalController } from '@/controllers/dashboard/isr.controller'
+import { getSalesRetentionController, setSalesRetentionController } from '@/controllers/dashboard/salesRetention.controller'
 import { getFiscalReadinessController } from '@/controllers/dashboard/fiscalReadiness.controller'
 import { getAccountLedgerController } from '@/controllers/dashboard/accountLedger.controller'
 import { getAccountsPayableController } from '@/controllers/dashboard/accountsPayable.controller'
@@ -603,6 +604,41 @@ const isrSchema = z.object({
 
 /** GET /accounting/isr?period=YYYY-MM&regime=RESICO|GENERAL — estimación del pago provisional de ISR. */
 router.get('/isr', checkFeatureAccess('CFDI'), checkPermission('accounting:read'), validateRequest(isrSchema), getIsrProvisionalController)
+
+// Retención en ventas (Capa B) — captura manual por periodo de lo que los clientes morales retuvieron.
+const salesRetentionGetSchema = z.object({
+  params: z.object({ venueId: z.string().cuid({ message: 'El ID del local no es válido.' }) }),
+  query: z.object({
+    period: z
+      .string()
+      .regex(/^\d{4}-\d{2}$/, { message: 'El periodo debe tener formato AAAA-MM.' })
+      .optional(),
+  }),
+})
+const salesRetentionSetSchema = z.object({
+  params: z.object({ venueId: z.string().cuid({ message: 'El ID del local no es válido.' }) }),
+  body: z.object({
+    period: z.string().regex(/^\d{4}-\d{2}$/, { message: 'El periodo debe tener formato AAAA-MM.' }),
+    isrRetenidoCents: cents('ISR retenido').optional(),
+    ivaRetenidoCents: cents('IVA retenido').optional(),
+    note: z.string().max(300).nullable().optional(),
+  }),
+})
+/** GET/PUT /accounting/sales-retention — retención en ventas del periodo (reduce IVA a pagar e ISR). */
+router.get(
+  '/sales-retention',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:read'),
+  validateRequest(salesRetentionGetSchema),
+  getSalesRetentionController,
+)
+router.put(
+  '/sales-retention',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:manage'),
+  validateRequest(salesRetentionSetSchema),
+  setSalesRetentionController,
+)
 
 // ───────────────────────────────────────────────────────────────────────────
 // Nómina (Capa B) — empleados + corrida de nómina. Gated PREMIUM (CFDI).
