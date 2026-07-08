@@ -4,8 +4,12 @@
  * for the PlayTelecom/White-Label dashboard.
  */
 import { Router, Request, Response, NextFunction } from 'express'
+import { z } from 'zod'
 import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken.middleware'
 import { validateRequest } from '../../middlewares/validation'
+import { checkPermission } from '../../middlewares/checkPermission.middleware'
+import * as manualSaleController from '../../controllers/dashboard/manualSale.controller'
+import { bulkManualSalesSchema } from '../../schemas/dashboard/manualSale.schema'
 import { organizationDashboardService } from '../../services/organization-dashboard/organizationDashboard.service'
 import * as orgTerminalsService from '../../services/organization-dashboard/orgTerminals.service'
 import * as orgVenueAccessService from '../../services/organization-dashboard/orgVenueAccess.service'
@@ -203,6 +207,41 @@ async function requireOrgAdmin(req: Request, res: Response, next: NextFunction) 
     next(error)
   }
 }
+
+// ==========================================
+// MANUAL SALES — "Subir ventas fuera de TPV" (org OWNER-only)
+// ==========================================
+//
+// Bulk upload of SIM sales made outside the TPV (PlayTelecom / Walmart). Two
+// endpoints: a dry PREVIEW (classifies rows, writes nothing) and APPLY (creates
+// one already-approved sale per row). Both are org-scoped and OWNER-gated; the
+// controller additionally gates on the SERIALIZED_INVENTORY module for the org.
+//
+// Declared BEFORE any '/:orgId/<literal>/:secondParam' route below so the literal
+// "manual-sales" segment can never be swallowed by a '/:orgId/:something' pattern
+// (there is none today, but this keeps the ordering invariant explicit).
+//
+// `bulkManualSalesSchema` (Task 2) validates the row array directly (it is a bare
+// z.object), so it is wrapped as { body: … } here to match validateRequest's
+// body/query/params contract.
+
+router.post(
+  '/:orgId/manual-sales/preview',
+  authenticateTokenMiddleware,
+  requireOrgOwner,
+  checkPermission('manual-sales:create'),
+  validateRequest(z.object({ body: bulkManualSalesSchema })),
+  manualSaleController.preview,
+)
+
+router.post(
+  '/:orgId/manual-sales',
+  authenticateTokenMiddleware,
+  requireOrgOwner,
+  checkPermission('manual-sales:create'),
+  validateRequest(z.object({ body: bulkManualSalesSchema })),
+  manualSaleController.apply,
+)
 
 /**
  * GET /dashboard/organizations/:orgId/vision-global
