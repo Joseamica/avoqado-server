@@ -4,6 +4,7 @@ import { getIncomeStatement } from '../dashboard/accounting.dashboard.service'
 import { getSalesRetentionCents } from './salesRetention.service'
 import { computePeriodCogsCentsRange } from './cogs.service'
 import { getYearDepreciationCents } from './fixedAssetDepreciation.service'
+import { getPendingLossCents } from './fiscalLoss.service'
 import { resolveScopeOrNull } from './chartOfAccounts.service'
 
 /**
@@ -90,7 +91,9 @@ export interface IsrProvisionalResult {
   costoVentasAcumCents: number
   /** Deducción de inversiones (depreciación de activos fijos) acumulada del ejercicio — GENERAL, 0 en RESICO. */
   deduccionInversionesAcumCents: number
-  /** Utilidad fiscal acumulada (GENERAL) = ingresos − deducciones − costo de ventas − depreciación, sin negativos. */
+  /** Pérdida fiscal de ejercicios anteriores APLICADA en el periodo (topada a la utilidad) — GENERAL, 0 en RESICO. */
+  perdidasFiscalesAplicadaCents: number
+  /** Utilidad fiscal acumulada (GENERAL) = ingresos − deducciones − costo de ventas − depreciación − pérdidas, sin negativos. */
   utilidadFiscalCents: number
   /** Tasa RESICO aplicada (sólo RESICO). */
   tasaResico: number | null
@@ -186,7 +189,9 @@ async function isrCausadoGeneralAcum(venueIds: string[], organizationId: string,
   const ded = await deduccionesAcum(rfc, year, period)
   const cogs = await cogsAcumRfc(venueIds, year, to)
   const deprec = await deducInversionesAcum(organizationId, rfc, period)
-  const utilidad = Math.max(0, netCents - ded - cogs - deprec)
+  const utilAntes = Math.max(0, netCents - ded - cogs - deprec)
+  const perdidas = Math.min(await getPendingLossCents(organizationId, rfc), utilAntes) // topada, no la vuelve negativa
+  const utilidad = utilAntes - perdidas
   // Tarifa acumulada = tarifa mensual con límInf y cuotaFija × número de meses.
   const acumRows = ART96_MONTHLY.map(r => ({ limInfCents: r.limInfCents * month, cuotaFijaCents: r.cuotaFijaCents * month, pct: r.pct }))
   return applyTariff(utilidad, acumRows)
@@ -209,6 +214,7 @@ export async function getIsrProvisional(venueId: string, period: string, regime:
     deduccionesAcumCents: 0,
     costoVentasAcumCents: 0,
     deduccionInversionesAcumCents: 0,
+    perdidasFiscalesAplicadaCents: 0,
     utilidadFiscalCents: 0,
     tasaResico: null,
     isrCausadoCents: 0,
@@ -248,11 +254,15 @@ export async function getIsrProvisional(venueId: string, period: string, regime:
     base.costoVentasAcumCents = cogsAcum
     const deprecAcum = await deducInversionesAcum(scope.organizationId, scope.rfc, period)
     base.deduccionInversionesAcumCents = deprecAcum
-    base.utilidadFiscalCents = Math.max(0, acumIngreso.netCents - ded - cogsAcum - deprecAcum)
+    const utilAntesPerdidas = Math.max(0, acumIngreso.netCents - ded - cogsAcum - deprecAcum)
+    base.perdidasFiscalesAplicadaCents = Math.min(await getPendingLossCents(scope.organizationId, scope.rfc), utilAntesPerdidas)
+    base.utilidadFiscalCents = utilAntesPerdidas - base.perdidasFiscalesAplicadaCents
     base.isrCausadoCents = await isrCausadoGeneralAcum(venueIds, scope.organizationId, scope.rfc, period)
     // Pagos provisionales previos = ISR causado acumulado al mes ANTERIOR (si lo hay).
     base.pagosProvisionalesPreviosCents =
-      month > 1 ? await isrCausadoGeneralAcum(venueIds, scope.organizationId, scope.rfc, `${year}-${String(month - 1).padStart(2, '0')}`) : 0
+      month > 1
+        ? await isrCausadoGeneralAcum(venueIds, scope.organizationId, scope.rfc, `${year}-${String(month - 1).padStart(2, '0')}`)
+        : 0
     base.isrAPagarCents = Math.max(0, base.isrCausadoCents - base.pagosProvisionalesPreviosCents)
   }
 

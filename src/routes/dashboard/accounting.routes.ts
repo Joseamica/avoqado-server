@@ -42,6 +42,7 @@ import {
   listFixedAssetsController,
   registerFixedAssetController,
 } from '@/controllers/dashboard/fixedAsset.controller'
+import { getFiscalLossController, setFiscalLossController } from '@/controllers/dashboard/fiscalLoss.controller'
 import { getFiscalReadinessController } from '@/controllers/dashboard/fiscalReadiness.controller'
 import { getAccountLedgerController } from '@/controllers/dashboard/accountLedger.controller'
 import { getAccountsPayableController } from '@/controllers/dashboard/accountsPayable.controller'
@@ -697,6 +698,31 @@ router.post(
   checkPermission('accounting:manage'),
   validateRequest(fixedAssetDepreciateSchema),
   generateDepreciationController,
+)
+
+// Pérdidas fiscales de ejercicios anteriores (Capa B) — saldo pendiente de amortizar; el ISR general lo resta.
+const fiscalLossGetSchema = z.object({ params: z.object({ venueId: z.string().cuid({ message: 'El ID del local no es válido.' }) }) })
+const fiscalLossSetSchema = z.object({
+  params: z.object({ venueId: z.string().cuid({ message: 'El ID del local no es válido.' }) }),
+  body: z.object({
+    pendingCents: cents('saldo de pérdidas').optional(),
+    note: z.string().max(300).nullable().optional(),
+  }),
+})
+/** GET/PUT /accounting/fiscal-loss — saldo de pérdidas de ejercicios anteriores del contribuyente. */
+router.get(
+  '/fiscal-loss',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:read'),
+  validateRequest(fiscalLossGetSchema),
+  getFiscalLossController,
+)
+router.put(
+  '/fiscal-loss',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:manage'),
+  validateRequest(fiscalLossSetSchema),
+  setFiscalLossController,
 )
 
 // ───────────────────────────────────────────────────────────────────────────

@@ -18,6 +18,7 @@ jest.mock('../../../src/services/dashboard/accounting.dashboard.service', () => 
 jest.mock('../../../src/services/fiscal/salesRetention.service', () => ({ getSalesRetentionCents: jest.fn() }))
 jest.mock('../../../src/services/fiscal/cogs.service', () => ({ computePeriodCogsCentsRange: jest.fn() }))
 jest.mock('../../../src/services/fiscal/fixedAssetDepreciation.service', () => ({ getYearDepreciationCents: jest.fn() }))
+jest.mock('../../../src/services/fiscal/fiscalLoss.service', () => ({ getPendingLossCents: jest.fn() }))
 
 import prisma from '../../../src/utils/prismaClient'
 import { resolveScopeOrNull } from '../../../src/services/fiscal/chartOfAccounts.service'
@@ -25,6 +26,7 @@ import { getIncomeStatement } from '../../../src/services/dashboard/accounting.d
 import { getSalesRetentionCents } from '../../../src/services/fiscal/salesRetention.service'
 import { computePeriodCogsCentsRange } from '../../../src/services/fiscal/cogs.service'
 import { getYearDepreciationCents } from '../../../src/services/fiscal/fixedAssetDepreciation.service'
+import { getPendingLossCents } from '../../../src/services/fiscal/fiscalLoss.service'
 import { getIsrProvisional } from '../../../src/services/fiscal/isr.service'
 
 const p = prisma as unknown as {
@@ -36,6 +38,7 @@ const mIncome = getIncomeStatement as jest.Mock
 const mSalesRet = getSalesRetentionCents as jest.Mock
 const mCogs = computePeriodCogsCentsRange as jest.Mock
 const mDeprec = getYearDepreciationCents as jest.Mock
+const mLoss = getPendingLossCents as jest.Mock
 
 // La base de ISR es SIN IVA → el monto representa `taxableBaseCents` (lo que ISR usa como ingreso).
 const income = (baseCents: number, salesCount = 1) => {
@@ -64,6 +67,7 @@ beforeEach(() => {
   mSalesRet.mockResolvedValue(null) // sin retención capturada por default
   mCogs.mockResolvedValue(0) // sin costo de ventas por default (RESICO lo ignora)
   mDeprec.mockResolvedValue(0) // sin depreciación por default
+  mLoss.mockResolvedValue(0) // sin pérdidas de ejercicios anteriores por default
 })
 
 describe('getIsrProvisional — RESICO', () => {
@@ -178,16 +182,37 @@ describe('getIsrProvisional — GENERAL (art 96)', () => {
     expect(r.deduccionInversionesAcumCents).toBe(3_000_00)
     expect(r.utilidadFiscalCents).toBe(17_000_00) // 30,000 − 10,000 − 0 COGS − 3,000 depreciación
   })
+
+  it('las pérdidas de ejercicios anteriores reducen la utilidad fiscal', async () => {
+    mIncome.mockResolvedValue(income(30_000_00)) // ingresos $30,000
+    p.expense.aggregate.mockResolvedValue({ _sum: { subtotalCents: 10_000_00, descuentoCents: 0, iepsCents: 0 } }) // gastos $10,000
+    mLoss.mockResolvedValue(8_000_00) // pérdidas pendientes $8,000
+    const r = await getIsrProvisional('v1', '2026-01', 'GENERAL')
+    expect(r.perdidasFiscalesAplicadaCents).toBe(8_000_00)
+    expect(r.utilidadFiscalCents).toBe(12_000_00) // 30,000 − 10,000 − 8,000
+  })
+
+  it('las pérdidas se TOPAN a la utilidad (no la vuelven negativa)', async () => {
+    mIncome.mockResolvedValue(income(30_000_00))
+    p.expense.aggregate.mockResolvedValue({ _sum: { subtotalCents: 25_000_00, descuentoCents: 0, iepsCents: 0 } }) // utilidad antes = $5,000
+    mLoss.mockResolvedValue(20_000_00) // pérdidas $20,000 > utilidad
+    const r = await getIsrProvisional('v1', '2026-01', 'GENERAL')
+    expect(r.perdidasFiscalesAplicadaCents).toBe(5_000_00) // solo se aplica lo que cabe
+    expect(r.utilidadFiscalCents).toBe(0)
+    expect(r.isrCausadoCents).toBe(0)
+  })
 })
 
 describe('getIsrProvisional — RESICO ignora deducciones de GENERAL', () => {
   it('RESICO grava ingresos brutos: NI el COGS NI la depreciación reducen el ISR', async () => {
     mIncome.mockResolvedValue(income(20_000_00)) // ISR causado $200 (1%)
     mCogs.mockResolvedValue(5_000_00) // aunque haya costo de ventas...
-    mDeprec.mockResolvedValue(3_000_00) // ...y depreciación...
+    mDeprec.mockResolvedValue(3_000_00) // ...depreciación...
+    mLoss.mockResolvedValue(9_000_00) // ...y pérdidas de años anteriores...
     const r = await getIsrProvisional('v1', '2026-06', 'RESICO')
     expect(r.costoVentasAcumCents).toBe(0) // ...RESICO no los considera
     expect(r.deduccionInversionesAcumCents).toBe(0)
+    expect(r.perdidasFiscalesAplicadaCents).toBe(0)
     expect(r.isrCausadoCents).toBe(200_00)
   })
 })

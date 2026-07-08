@@ -17,6 +17,7 @@ import { getAccountsPayableAging } from '@/services/fiscal/accountsPayable.servi
 import { getCatalogoXml, getBalanzaXml, getPolizasXml } from '@/services/fiscal/contabilidadElectronica.service'
 import { getIsrProvisional } from '@/services/fiscal/isr.service'
 import { setSalesRetention } from '@/services/fiscal/salesRetention.service'
+import { setFiscalLoss } from '@/services/fiscal/fiscalLoss.service'
 import { listAssetTypes, listFixedAssets, registerFixedAsset } from '@/services/fiscal/fixedAsset.service'
 import { generateDepreciationForVenue } from '@/services/fiscal/fixedAssetDepreciation.service'
 import { computePayrollPreview, createEmployee, listEmployees, runPayroll } from '@/services/fiscal/nomina.service'
@@ -964,7 +965,8 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
               deduccionesAcumuladas: pesos(r.deduccionesAcumCents),
               costoDeVentasAcumulado: pesos(r.costoVentasAcumCents), // inventario consumido (FIFO), deducible en GENERAL
               deduccionInversionesAcumulada: pesos(r.deduccionInversionesAcumCents), // depreciación de activos fijos
-              utilidadFiscal: pesos(r.utilidadFiscalCents), // ingresos − deducciones − costo de ventas − depreciación
+              perdidasEjerciciosAnteriores: pesos(r.perdidasFiscalesAplicadaCents), // pérdida fiscal aplicada (topada)
+              utilidadFiscal: pesos(r.utilidadFiscalCents), // ingresos − deducciones − costo de ventas − depreciación − pérdidas
               pagosProvisionalesPrevios: pesos(r.pagosProvisionalesPreviosCents),
             }),
         isrCausado: pesos(r.isrCausadoCents),
@@ -1006,6 +1008,28 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         isrRetenido: pesos(r.isrRetenidoCents),
         ivaRetenido: pesos(r.ivaRetenidoCents),
         nota: 'Guardado. Se restará en tu ISR provisional y en tu IVA en flujo del periodo.',
+      })
+    },
+  )
+
+  server.tool(
+    'set_fiscal_loss',
+    'Captura el SALDO de PÉRDIDAS FISCALES de ejercicios anteriores pendiente de amortizar (Capa B, PREMIUM, escritura). Solo régimen GENERAL: el pago provisional de ISR resta esta pérdida a tu utilidad (topada, no la vuelve negativa). El detalle por ejercicio y la caducidad a 10 años los lleva tu contador; aquí solo el saldo disponible. Monto en PESOS. Responde "tengo $X de pérdidas de años anteriores por aplicar". Pasa venueId y el saldo.',
+    {
+      venueId: z.string().describe('Local del contribuyente (debe estar en tu alcance)'),
+      saldo: z.number().min(0).describe('Saldo de pérdidas pendiente de amortizar, en pesos (0 si ninguno)'),
+      nota: z.string().optional().describe('Nota opcional (p.ej. de qué ejercicios)'),
+    },
+    async ({ venueId, saldo, nota }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:manage', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'Las pérdidas fiscales')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+      const r = await setFiscalLoss(venueId, { pendingCents: Math.round(saldo * 100), note: nota ?? null }, scope.staffId)
+      return text({
+        ok: true,
+        saldoPendiente: pesos(r.pendingCents),
+        nota: 'Guardado. Se aplicará (topado a tu utilidad) en tu ISR provisional de régimen general.',
       })
     },
   )

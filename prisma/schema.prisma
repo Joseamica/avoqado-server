@@ -11346,6 +11346,23 @@ model SalesRetention {
   @@index([organizationId, rfc])
 }
 
+// Pérdida fiscal de ejercicios anteriores PENDIENTE de amortizar (LISR art. 57/109). Captura MANUAL del
+// saldo por (org, rfc): el contador anota cuánto tiene disponible para aplicar; el pago provisional de ISR
+// (régimen general) lo resta a la utilidad, topado (no la vuelve negativa). El detalle por ejercicio, la
+// caducidad a 10 años y la actualización por INPC los mantiene el contador en la anual. Un saldo por RFC.
+model FiscalLossCarryforward {
+  id             String   @id @default(cuid())
+  organizationId String
+  rfc            String
+  pendingCents   Int      @default(0) // saldo pendiente de amortizar
+  note           String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([organizationId, rfc])
+  @@index([organizationId, rfc])
+}
+
 // Activo fijo — inversión que se deprecia "a plazos" (deducción de inversiones, LISR art. 34-35).
 // OPT-IN: nada se deprecia hasta que el usuario CONFIRMA una compra como activo fijo (el sistema solo la
 // SUGIERE por monto). (org, rfc) = contribuyente, igual que Expense/SalesRetention. `annualRate` guarda la
