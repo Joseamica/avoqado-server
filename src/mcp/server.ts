@@ -36,6 +36,7 @@ import { registerReferralTools } from './tools/referrals'
 import { registerSeatTools } from './tools/seats'
 import { registerPlanAdminTools } from './tools/planAdmin'
 import { registerSaleVerificationTools } from './tools/saleVerifications'
+import { registerManualSaleTools } from './tools/manualSale'
 import { registerPromoterLocationTools } from './tools/promoterLocation'
 import { registerAccountingTools } from './tools/accounting'
 import { registerActivityLogTools } from './tools/activity-log'
@@ -97,6 +98,7 @@ async function buildServerForIdentity(staffId: string, activeOrg: string, scopes
   registerReferralTools(server, scope)
   registerPlanAdminTools(server, scope)
   registerSaleVerificationTools(server, scope)
+  registerManualSaleTools(server, scope)
   registerPromoterLocationTools(server, scope)
   registerAccountingTools(server, scope)
   registerActivityLogTools(server, scope)
