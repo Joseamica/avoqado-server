@@ -250,3 +250,140 @@ async function writeCustodyEvent(audit: ManualSaleAuditPayload, actorStaffId: st
     logger.error(`[MANUAL SALE] custody event write failed for serial=${audit.serialNumber}: ${(err as Error).message}`)
   }
 }
+
+/**
+ * Bulk orchestrator for "Subir ventas fuera de TPV" — takes every parsed row
+ * from the operator's sheet and either PREVIEWS (dry, read-only) or APPLIES
+ * (writes, one sale per row) them. This is what the upload endpoint (Task 6)
+ * and the dashboard upload UI call — `createOneManualSale` (above) handles
+ * exactly one row; this function is the many-rows wrapper around it.
+ *
+ * Dedup happens FIRST, before either mode resolves/creates anything: rows are
+ * deduplicated by NORMALIZED ICCID (trim + uppercase — matching how the
+ * resolvers themselves compare, see `resolveIccid`'s `mode: 'insensitive'`
+ * match). The first occurrence of a given ICCID is kept; every later
+ * occurrence is short-circuited straight into `omitir` and never touches a
+ * resolver or `createOneManualSale` — two rows racing for the same physical
+ * SIM in the same upload would otherwise resolve identically and the second
+ * would always fail anyway (once the first sells it), so surfacing it as an
+ * upfront duplicate is a clearer signal to the operator than a generic
+ * "ICCID ya vendido" from the second row.
+ *
+ * PREVIEW (`apply=false`): runs the resolvers directly, WITHOUT writing.
+ * Resolvers are pure reads (`findFirst`/`findMany`), so they're called with
+ * the base `prisma` client as their `tx` argument — no `$transaction` needed
+ * for a dry run. A row's `resolveIccid` failure with `'ICCID ya vendido'`
+ * lands in `omitir` (it's a legitimate reason to skip, not an input error);
+ * any OTHER resolver error (bad ICCID, seller/venue/category not found)
+ * lands in `error`. Every resolver must succeed for a row to land in
+ * `crear`; preview does not create anything.
+ *
+ * APPLY (`apply=true`): calls `createOneManualSale` once per (deduped) row.
+ * Each call opens and commits its OWN `$transaction` internally (Task 4) —
+ * `bulkManualSales` never wraps the loop in a shared outer transaction, so
+ * one row failing (e.g. the SIM got sold by a concurrent upload) can NEVER
+ * roll back the rows that already committed successfully. Classification
+ * mirrors preview: `{ok:true}` → `crear`, `{ok:false, error:'ICCID ya
+ * vendido'}` → `omitir`, any other `{ok:false}` → `error`. `created` counts
+ * the final `crear` length (only set in apply mode, per the brief).
+ */
+export interface RowResult {
+  index: number
+  iccid: string
+  storeName: string
+  motivo?: string
+}
+
+export interface BulkManualSalesResult {
+  crear: RowResult[]
+  omitir: RowResult[]
+  error: RowResult[]
+  created?: number
+}
+
+const ICCID_ALREADY_SOLD_ERROR = 'ICCID ya vendido'
+const DUPLICATE_ICCID_ERROR = 'ICCID duplicado en el archivo'
+
+/** trim + uppercase — matches the `mode: 'insensitive'` comparison `resolveIccid` itself uses. */
+function normalizeIccid(iccid: string): string {
+  return iccid.trim().toUpperCase()
+}
+
+export async function bulkManualSales(
+  orgId: string,
+  actorStaffId: string,
+  rows: ManualSaleRowInput[],
+  apply: boolean,
+): Promise<BulkManualSalesResult> {
+  const crear: RowResult[] = []
+  const omitir: RowResult[] = []
+  const error: RowResult[] = []
+
+  // 1. Dedup by normalized ICCID — keep the first occurrence, short-circuit
+  //    every later one into `omitir` before any resolver/create runs.
+  const seenIccids = new Set<string>()
+  const dedupedRows: Array<{ index: number; row: ManualSaleRowInput }> = []
+
+  rows.forEach((row, index) => {
+    const normalized = normalizeIccid(row.iccid)
+    if (seenIccids.has(normalized)) {
+      omitir.push({ index, iccid: row.iccid, storeName: row.storeName, motivo: DUPLICATE_ICCID_ERROR })
+      return
+    }
+    seenIccids.add(normalized)
+    dedupedRows.push({ index, row })
+  })
+
+  // 2. Classify each deduped row via the requested mode.
+  for (const { index, row } of dedupedRows) {
+    if (apply) {
+      const result = await createOneManualSale(orgId, actorStaffId, row)
+      if (result.ok) {
+        crear.push({ index, iccid: row.iccid, storeName: row.storeName })
+      } else if (result.error === ICCID_ALREADY_SOLD_ERROR) {
+        omitir.push({ index, iccid: row.iccid, storeName: row.storeName, motivo: result.error })
+      } else {
+        error.push({ index, iccid: row.iccid, storeName: row.storeName, motivo: result.error })
+      }
+      continue
+    }
+
+    // Preview: run the resolvers directly, read-only, against the base
+    // `prisma` client (no $transaction — nothing is written in preview).
+    const iccidResult = await resolveIccid(orgId, row.iccid, prisma)
+    if (isError(iccidResult)) {
+      if (iccidResult.error === ICCID_ALREADY_SOLD_ERROR) {
+        omitir.push({ index, iccid: row.iccid, storeName: row.storeName, motivo: iccidResult.error })
+      } else {
+        error.push({ index, iccid: row.iccid, storeName: row.storeName, motivo: iccidResult.error })
+      }
+      continue
+    }
+    const { item } = iccidResult
+
+    const venueResult = await resolveVenue(orgId, row.storeName, row.storeId, prisma)
+    if (isError(venueResult)) {
+      error.push({ index, iccid: row.iccid, storeName: row.storeName, motivo: venueResult.error })
+      continue
+    }
+
+    const staffResult = await resolveStaffByCode(orgId, row.promoterCode, row.promoterName, prisma)
+    if (isError(staffResult)) {
+      error.push({ index, iccid: row.iccid, storeName: row.storeName, motivo: staffResult.error })
+      continue
+    }
+
+    const categoryResult = await resolveCategory(orgId, row.simType, prisma, item.categoryId ?? undefined)
+    if (isError(categoryResult)) {
+      error.push({ index, iccid: row.iccid, storeName: row.storeName, motivo: categoryResult.error })
+      continue
+    }
+
+    crear.push({ index, iccid: row.iccid, storeName: row.storeName })
+  }
+
+  if (apply) {
+    return { crear, omitir, error, created: crear.length }
+  }
+  return { crear, omitir, error }
+}
