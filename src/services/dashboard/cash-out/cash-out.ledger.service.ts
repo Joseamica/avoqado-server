@@ -53,7 +53,19 @@ export async function materializeEntries(venueId: string): Promise<{ created: nu
   const existing = await prisma.promoterCommissionEntry.findMany({ where: { venueId }, select: { saleVerificationId: true } })
   const have = new Set(existing.map(e => e.saleVerificationId))
   const sales = await prisma.saleVerification.findMany({
-    where: { venueId, status: 'COMPLETED' },
+    where: {
+      venueId,
+      status: 'COMPLETED',
+      // 🔴 Founder directive: sales uploaded via "Subir ventas fuera de TPV" (external,
+      // outside-TPV SIM sales — Order.type='MANUAL_ENTRY', source='DASHBOARD_MANUAL')
+      // must reflect ONLY in ventas/KPIs, NEVER in the cash-out promoter-commission
+      // ledger. Order.type='MANUAL_ENTRY' on a SaleVerification-linked sale uniquely
+      // identifies these external sales (the generic manualPayment MANUAL_ENTRY orders
+      // have no SaleVerification; real TPV sales use non-MANUAL_ENTRY order types).
+      // Exclude them here so they're never materialized into a promoterCommissionEntry
+      // in the first place — reconcileClawbacks then never needs to touch them either.
+      NOT: { payment: { order: { type: 'MANUAL_ENTRY' } } },
+    },
     orderBy: { createdAt: 'asc' },
     select: { id: true, staffId: true, isPortabilidad: true, createdAt: true },
   })

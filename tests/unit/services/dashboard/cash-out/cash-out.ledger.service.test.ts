@@ -108,6 +108,37 @@ describe('cash-out ledger — materializeEntries', () => {
     expect(p.promoterCommissionEntry.create).toHaveBeenCalledTimes(1)
     expect(p.promoterCommissionEntry.create.mock.calls[0][0].data).toMatchObject({ saleVerificationId: 's_active' })
   })
+
+  it('excludes external (outside-TPV) MANUAL_ENTRY sales from the commission ledger (founder directive: ventas/KPIs only, never cash-out)', async () => {
+    p.promoterCommissionEntry.findMany.mockResolvedValue([])
+    p.promoterCommissionEntry.count.mockResolvedValue(0)
+
+    // Fixture simulates the real DB join (SaleVerification -> Payment -> Order.type):
+    // the mock only omits the MANUAL_ENTRY-order sale when the query's `where` actually
+    // carries the exclusion clause — same as a real Prisma `where` would filter at the DB.
+    // This makes the test fail against today's unfiltered query (both sales come back)
+    // and pass once materializeEntries adds the NOT-MANUAL_ENTRY filter.
+    const allSales = [
+      { id: 's_external', staffId: 'p1', isPortabilidad: false, createdAt: new Date('2026-06-22T18:00:00Z'), _orderType: 'MANUAL_ENTRY' },
+      { id: 's_normal', staffId: 'p1', isPortabilidad: false, createdAt: new Date('2026-06-22T19:00:00Z'), _orderType: 'DINE_IN' },
+    ]
+    p.saleVerification.findMany.mockImplementation(async ({ where }: any) => {
+      const excludesManualEntry = where?.NOT?.payment?.order?.type === 'MANUAL_ENTRY'
+      return allSales.filter(s => !(excludesManualEntry && s._orderType === 'MANUAL_ENTRY')).map(({ _orderType, ...rest }) => rest)
+    })
+
+    const res = await materializeEntries('v_pt')
+
+    // Only the normal (non-MANUAL_ENTRY) sale is materialized.
+    expect(res.created).toBe(1)
+    expect(p.promoterCommissionEntry.create).toHaveBeenCalledTimes(1)
+    expect(p.promoterCommissionEntry.create.mock.calls[0][0].data).toMatchObject({ saleVerificationId: 's_normal' })
+
+    // The query itself must carry the exclusion (not just "happen" to work via fixture luck).
+    expect(p.saleVerification.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ NOT: { payment: { order: { type: 'MANUAL_ENTRY' } } } }) }),
+    )
+  })
 })
 
 describe('cash-out ledger — getSaldo (Σ AVAILABLE, pesos)', () => {
