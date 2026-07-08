@@ -3,6 +3,7 @@ import prisma from '../../utils/prismaClient'
 import { getIncomeStatement } from '../dashboard/accounting.dashboard.service'
 import { getSalesRetentionCents } from './salesRetention.service'
 import { computePeriodCogsCentsRange } from './cogs.service'
+import { getYearDepreciationCents } from './fixedAssetDepreciation.service'
 import { resolveScopeOrNull } from './chartOfAccounts.service'
 
 /**
@@ -87,7 +88,9 @@ export interface IsrProvisionalResult {
   deduccionesAcumCents: number
   /** Costo de ventas acumulado del ejercicio (inventario consumido, FIFO) — deducción en GENERAL, 0 en RESICO. */
   costoVentasAcumCents: number
-  /** Utilidad fiscal acumulada (GENERAL) = ingresos − deducciones − costo de ventas, sin negativos. */
+  /** Deducción de inversiones (depreciación de activos fijos) acumulada del ejercicio — GENERAL, 0 en RESICO. */
+  deduccionInversionesAcumCents: number
+  /** Utilidad fiscal acumulada (GENERAL) = ingresos − deducciones − costo de ventas − depreciación, sin negativos. */
   utilidadFiscalCents: number
   /** Tasa RESICO aplicada (sólo RESICO). */
   tasaResico: number | null
@@ -171,13 +174,19 @@ async function cogsAcumRfc(venueIds: string[], year: number, to: string): Promis
   return perVenue.reduce((s, c) => s + c, 0)
 }
 
+/** Deducción de inversiones (depreciación) acumulada del ejercicio hasta `period` (AAAA-MM). Solo GENERAL. */
+async function deducInversionesAcum(organizationId: string, rfc: string, period: string): Promise<number> {
+  return getYearDepreciationCents(organizationId, rfc, Number(period.slice(0, 4)), period)
+}
+
 /** ISR causado acumulado del ejercicio (GENERAL) hasta `period` (recursión para los pagos previos). */
-async function isrCausadoGeneralAcum(venueIds: string[], rfc: string, period: string): Promise<number> {
+async function isrCausadoGeneralAcum(venueIds: string[], organizationId: string, rfc: string, period: string): Promise<number> {
   const { year, month, to } = monthRange(period)
   const { netCents } = await ingresoNetoRfc(venueIds, `${year}-01-01`, to)
   const ded = await deduccionesAcum(rfc, year, period)
   const cogs = await cogsAcumRfc(venueIds, year, to)
-  const utilidad = Math.max(0, netCents - ded - cogs)
+  const deprec = await deducInversionesAcum(organizationId, rfc, period)
+  const utilidad = Math.max(0, netCents - ded - cogs - deprec)
   // Tarifa acumulada = tarifa mensual con límInf y cuotaFija × número de meses.
   const acumRows = ART96_MONTHLY.map(r => ({ limInfCents: r.limInfCents * month, cuotaFijaCents: r.cuotaFijaCents * month, pct: r.pct }))
   return applyTariff(utilidad, acumRows)
@@ -199,6 +208,7 @@ export async function getIsrProvisional(venueId: string, period: string, regime:
     ingresosAcumCents: 0,
     deduccionesAcumCents: 0,
     costoVentasAcumCents: 0,
+    deduccionInversionesAcumCents: 0,
     utilidadFiscalCents: 0,
     tasaResico: null,
     isrCausadoCents: 0,
@@ -236,11 +246,13 @@ export async function getIsrProvisional(venueId: string, period: string, regime:
     base.deduccionesAcumCents = ded
     const cogsAcum = await cogsAcumRfc(venueIds, year, to)
     base.costoVentasAcumCents = cogsAcum
-    base.utilidadFiscalCents = Math.max(0, acumIngreso.netCents - ded - cogsAcum)
-    base.isrCausadoCents = await isrCausadoGeneralAcum(venueIds, scope.rfc, period)
+    const deprecAcum = await deducInversionesAcum(scope.organizationId, scope.rfc, period)
+    base.deduccionInversionesAcumCents = deprecAcum
+    base.utilidadFiscalCents = Math.max(0, acumIngreso.netCents - ded - cogsAcum - deprecAcum)
+    base.isrCausadoCents = await isrCausadoGeneralAcum(venueIds, scope.organizationId, scope.rfc, period)
     // Pagos provisionales previos = ISR causado acumulado al mes ANTERIOR (si lo hay).
     base.pagosProvisionalesPreviosCents =
-      month > 1 ? await isrCausadoGeneralAcum(venueIds, scope.rfc, `${year}-${String(month - 1).padStart(2, '0')}`) : 0
+      month > 1 ? await isrCausadoGeneralAcum(venueIds, scope.organizationId, scope.rfc, `${year}-${String(month - 1).padStart(2, '0')}`) : 0
     base.isrAPagarCents = Math.max(0, base.isrCausadoCents - base.pagosProvisionalesPreviosCents)
   }
 

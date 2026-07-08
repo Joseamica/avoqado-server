@@ -17,6 +17,8 @@ import { getAccountsPayableAging } from '@/services/fiscal/accountsPayable.servi
 import { getCatalogoXml, getBalanzaXml, getPolizasXml } from '@/services/fiscal/contabilidadElectronica.service'
 import { getIsrProvisional } from '@/services/fiscal/isr.service'
 import { setSalesRetention } from '@/services/fiscal/salesRetention.service'
+import { listAssetTypes, listFixedAssets, registerFixedAsset } from '@/services/fiscal/fixedAsset.service'
+import { generateDepreciationForVenue } from '@/services/fiscal/fixedAssetDepreciation.service'
 import { computePayrollPreview, createEmployee, listEmployees, runPayroll } from '@/services/fiscal/nomina.service'
 import { stampPayrollReceipts } from '@/services/fiscal/nominaCfdi.service'
 import { getFiscalReadiness } from '@/services/fiscal/fiscalReadiness.service'
@@ -961,7 +963,8 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           : {
               deduccionesAcumuladas: pesos(r.deduccionesAcumCents),
               costoDeVentasAcumulado: pesos(r.costoVentasAcumCents), // inventario consumido (FIFO), deducible en GENERAL
-              utilidadFiscal: pesos(r.utilidadFiscalCents), // ingresos − deducciones − costo de ventas
+              deduccionInversionesAcumulada: pesos(r.deduccionInversionesAcumCents), // depreciación de activos fijos
+              utilidadFiscal: pesos(r.utilidadFiscalCents), // ingresos − deducciones − costo de ventas − depreciación
               pagosProvisionalesPrevios: pesos(r.pagosProvisionalesPreviosCents),
             }),
         isrCausado: pesos(r.isrCausadoCents),
@@ -1003,6 +1006,136 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         isrRetenido: pesos(r.isrRetenidoCents),
         ivaRetenido: pesos(r.ivaRetenidoCents),
         nota: 'Guardado. Se restará en tu ISR provisional y en tu IVA en flujo del periodo.',
+      })
+    },
+  )
+
+  server.tool(
+    'list_asset_types',
+    'Catálogo de TIPOS DE ACTIVO FIJO con su tasa anual de depreciación autorizada por la LISR (art. 34-35), para registrar inversiones (Capa B, PREMIUM). Devuelve cada tipo con su tasa default (editable) y el tope deducible si aplica (autos $175k). Responde "¿qué tipos de activo fijo hay y a qué % se deprecian?". Pasa venueId.',
+    { venueId: z.string().describe('Local del contribuyente (debe estar en tu alcance)') },
+    async ({ venueId }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:read', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'Los activos fijos')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+      return text({
+        ok: true,
+        tipos: listAssetTypes().map(t => ({
+          clave: t.key,
+          nombre: t.label,
+          tasaAnual: t.annualRate,
+          referencia: t.satRef,
+          topeDeducible: t.moiCapCents ? pesos(t.moiCapCents) : null,
+        })),
+        nota: 'La tasa es el máximo autorizado; es editable al registrar. Los autos topan su base deducible a $175,000.',
+      })
+    },
+  )
+
+  server.tool(
+    'register_fixed_asset',
+    'Registra (CONFIRMA) una compra como ACTIVO FIJO para depreciarla "a plazos" (deducción de inversiones, Capa B, PREMIUM, escritura). Opt-in: registrar el activo es la decisión tuya; luego la corrida mensual lo deprecia. La tasa cae al default del catálogo por tipo si no la envías (editable). Montos en PESOS (MOI sin IVA). Responde "registra la laptop de $30,000 como activo fijo de cómputo". Pasa venueId, descripción, tipo (usa list_asset_types), monto y fecha de adquisición.',
+    {
+      venueId: z.string().describe('Local del contribuyente'),
+      descripcion: z.string().describe('Descripción del activo (p.ej. "Laptop Dell")'),
+      tipo: z.string().describe('Clave del tipo (de list_asset_types, p.ej. EQUIPO_COMPUTO)'),
+      monto: z.number().positive().describe('Monto original de la inversión (MOI), SIN IVA, en pesos'),
+      fechaAdquisicion: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .describe('Fecha de compra YYYY-MM-DD'),
+      tasaAnual: z.number().min(0).max(1).optional().describe('Tasa anual (fracción, p.ej. 0.30). Omítela para usar la oficial del tipo'),
+      fechaInicioUso: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .optional()
+        .describe('Inicio de uso YYYY-MM-DD (default = adquisición)'),
+      valorRescate: z.number().min(0).optional().describe('Valor de rescate en pesos (default 0)'),
+    },
+    async ({ venueId, descripcion, tipo, monto, fechaAdquisicion, tasaAnual, fechaInicioUso, valorRescate }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:manage', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'Los activos fijos')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+      const a = await registerFixedAsset(
+        venueId,
+        {
+          description: descripcion,
+          assetType: tipo,
+          moiCents: Math.round(monto * 100),
+          annualRate: tasaAnual,
+          acquisitionDate: fechaAdquisicion,
+          inServiceDate: fechaInicioUso,
+          salvageValueCents: valorRescate != null ? Math.round(valorRescate * 100) : undefined,
+        },
+        scope.staffId,
+      )
+      return text({
+        ok: true,
+        id: a.id,
+        descripcion: a.description,
+        tipo: a.assetTypeLabel,
+        moi: pesos(a.moiCents),
+        baseDepreciable: pesos(a.depreciableBaseCents),
+        tasaAnual: a.annualRate,
+        nota: 'Registrado. Corre la depreciación del periodo con generate_depreciation para llevar la deducción mensual a tu ISR general.',
+      })
+    },
+  )
+
+  server.tool(
+    'list_fixed_assets',
+    'Lista los ACTIVOS FIJOS registrados del contribuyente (Capa B, PREMIUM): tipo, monto, tasa, base depreciable y estado. Responde "¿qué activos fijos tengo registrados?". Pasa venueId.',
+    { venueId: z.string().describe('Local del contribuyente') },
+    async ({ venueId }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:read', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'Los activos fijos')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+      const r = await listFixedAssets(venueId)
+      if (r.needsFiscalSetup) return text({ ok: true, needsFiscalSetup: true })
+      return text({
+        ok: true,
+        activos: r.assets.map(a => ({
+          id: a.id,
+          descripcion: a.description,
+          tipo: a.assetTypeLabel,
+          moi: pesos(a.moiCents),
+          baseDepreciable: pesos(a.depreciableBaseCents),
+          tasaAnual: a.annualRate,
+          adquisicion: a.acquisitionDate,
+          estado: a.status,
+        })),
+      })
+    },
+  )
+
+  server.tool(
+    'generate_depreciation',
+    'Corre la DEPRECIACIÓN del periodo de todos los activos fijos del contribuyente (deducción de inversiones, Capa B, PREMIUM, escritura). Calcula la mensualidad en línea recta y la registra; es idempotente (re-correr el mismo mes lo actualiza). La deducción acumulada del ejercicio se resta sola en tu ISR general. Responde "corre la depreciación de este mes". Pasa venueId y opcionalmente period (YYYY-MM; default mes actual).',
+    {
+      venueId: z.string().describe('Local del contribuyente'),
+      period: z
+        .string()
+        .regex(/^\d{4}-\d{2}$/)
+        .optional()
+        .describe('Periodo YYYY-MM (default mes actual)'),
+    },
+    async ({ venueId, period }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:manage', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'Los activos fijos')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+      const r = await generateDepreciationForVenue(venueId, period || currentPeriod(), scope.staffId)
+      if (r.needsFiscalSetup) return text({ ok: true, needsFiscalSetup: true })
+      return text({
+        ok: true,
+        periodo: r.period,
+        activosProcesados: r.assetsProcessed,
+        activosDepreciados: r.assetsDepreciated,
+        depreciacionDelPeriodo: pesos(r.totalPeriodCents),
+        nota: 'Registrado. Se deduce en tu ISR general (deducción de inversiones acumulada del ejercicio).',
       })
     },
   )

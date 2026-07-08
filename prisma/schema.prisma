@@ -11341,6 +11341,58 @@ model SalesRetention {
   @@index([organizationId, rfc])
 }
 
+// Activo fijo — inversión que se deprecia "a plazos" (deducción de inversiones, LISR art. 34-35).
+// OPT-IN: nada se deprecia hasta que el usuario CONFIRMA una compra como activo fijo (el sistema solo la
+// SUGIERE por monto). (org, rfc) = contribuyente, igual que Expense/SalesRetention. `annualRate` guarda la
+// tasa efectiva (default del catálogo por tipo, editable por el contador). Línea recta; base nominal v1
+// (la actualización por INPC del art. 31 la aplica el contador en la anual).
+model FixedAsset {
+  id                String           @id @default(cuid())
+  organizationId    String
+  rfc               String // contribuyente (UPPERCASE); (org, rfc) = scope
+  venueId           String? // centro de costo / quién lo registró
+  description       String
+  assetType         String // clave de assetTypeCatalog (CONSTRUCCION, EQUIPO_COMPUTO, ...)
+  moiCents          Int // monto original de la inversión (base depreciable, SIN IVA)
+  annualRate        Decimal          @db.Decimal(5, 4) // fracción; default del catálogo, editable
+  acquisitionDate   DateTime // fecha de adquisición
+  inServiceDate     DateTime // inicio de uso (arranca la depreciación); default = acquisitionDate
+  salvageValueCents Int              @default(0) // valor de rescate (no se deprecia por debajo)
+  status            FixedAssetStatus @default(ACTIVE)
+  sourceExpenseId   String? // gasto de compra ligado, si aplica
+  createdById       String?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  depreciations FixedAssetDepreciation[]
+
+  @@index([organizationId, rfc])
+  @@index([sourceExpenseId])
+}
+
+// Renglón de depreciación de un activo por periodo (AAAA-MM). Idempotente por (activo, periodo). Guarda el
+// monto del periodo y el acumulado a la fecha; `posted`/`journalEntryId` = si ya se llevó a la póliza.
+model FixedAssetDepreciation {
+  id                String     @id @default(cuid())
+  fixedAssetId      String
+  fixedAsset        FixedAsset @relation(fields: [fixedAssetId], references: [id], onDelete: Cascade)
+  period            String // AAAA-MM
+  depreciationCents Int // depreciación del periodo
+  accumulatedCents  Int // acumulada a la fecha (incluye este periodo)
+  posted            Boolean    @default(false)
+  journalEntryId    String?
+  createdAt         DateTime   @default(now())
+
+  @@unique([fixedAssetId, period])
+  @@index([fixedAssetId])
+}
+
+enum FixedAssetStatus {
+  ACTIVE
+  FULLY_DEPRECIATED
+  DISPOSED
+}
+
 enum ExpenseSource {
   MANUAL
   XML_UPLOAD

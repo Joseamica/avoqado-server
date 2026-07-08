@@ -36,6 +36,12 @@ import {
 } from '@/controllers/dashboard/contabilidadElectronica.controller'
 import { getIsrProvisionalController } from '@/controllers/dashboard/isr.controller'
 import { getSalesRetentionController, setSalesRetentionController } from '@/controllers/dashboard/salesRetention.controller'
+import {
+  generateDepreciationController,
+  listAssetTypesController,
+  listFixedAssetsController,
+  registerFixedAssetController,
+} from '@/controllers/dashboard/fixedAsset.controller'
 import { getFiscalReadinessController } from '@/controllers/dashboard/fiscalReadiness.controller'
 import { getAccountLedgerController } from '@/controllers/dashboard/accountLedger.controller'
 import { getAccountsPayableController } from '@/controllers/dashboard/accountsPayable.controller'
@@ -638,6 +644,59 @@ router.put(
   checkPermission('accounting:manage'),
   validateRequest(salesRetentionSetSchema),
   setSalesRetentionController,
+)
+
+// Activos fijos (Capa B) — registro opt-in de inversiones + corrida de depreciación (deducción de inversiones).
+const fixedAssetListSchema = z.object({ params: z.object({ venueId: z.string().cuid({ message: 'El ID del local no es válido.' }) }) })
+const fixedAssetRegisterSchema = z.object({
+  params: z.object({ venueId: z.string().cuid({ message: 'El ID del local no es válido.' }) }),
+  body: z.object({
+    description: z.string().min(1, { message: 'La descripción es requerida.' }).max(200),
+    assetType: z.string().min(1, { message: 'El tipo de activo es requerido.' }),
+    moiCents: z.number({ message: 'El monto es requerido.' }).int().positive({ message: 'El monto debe ser mayor a cero.' }),
+    annualRate: z.number().min(0).max(1).optional(),
+    acquisitionDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, { message: 'La fecha de adquisición debe ser AAAA-MM-DD.' }),
+    inServiceDate: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/, { message: 'La fecha de inicio de uso debe ser AAAA-MM-DD.' })
+      .optional(),
+    salvageValueCents: z.number().int().min(0).optional(),
+    sourceExpenseId: z.string().cuid().nullable().optional(),
+  }),
+})
+const fixedAssetDepreciateSchema = z.object({
+  params: z.object({ venueId: z.string().cuid({ message: 'El ID del local no es válido.' }) }),
+  body: z.object({
+    period: z
+      .string()
+      .regex(/^\d{4}-\d{2}$/, { message: 'El periodo debe tener formato AAAA-MM.' })
+      .optional(),
+  }),
+})
+/** Catálogo de tipos de activo fijo con su tasa oficial default. */
+router.get('/asset-types', checkFeatureAccess('CFDI'), checkPermission('accounting:read'), listAssetTypesController)
+/** GET/POST /accounting/fixed-assets — lista / registra activos fijos. */
+router.get(
+  '/fixed-assets',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:read'),
+  validateRequest(fixedAssetListSchema),
+  listFixedAssetsController,
+)
+router.post(
+  '/fixed-assets',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:manage'),
+  validateRequest(fixedAssetRegisterSchema),
+  registerFixedAssetController,
+)
+/** POST /accounting/fixed-assets/depreciate — corre la depreciación del periodo (idempotente). */
+router.post(
+  '/fixed-assets/depreciate',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:manage'),
+  validateRequest(fixedAssetDepreciateSchema),
+  generateDepreciationController,
 )
 
 // ───────────────────────────────────────────────────────────────────────────
