@@ -2,6 +2,7 @@ import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { getIncomeStatement } from '../dashboard/accounting.dashboard.service'
 import { getSalesRetentionCents } from './salesRetention.service'
+import { computePeriodCogsCentsRange } from './cogs.service'
 import { resolveScopeOrNull } from './chartOfAccounts.service'
 
 /**
@@ -84,7 +85,9 @@ export interface IsrProvisionalResult {
   ingresosAcumCents: number
   /** Deducciones autorizadas acumuladas (gastos deducibles pagados, ene→periodo) — sólo GENERAL. */
   deduccionesAcumCents: number
-  /** Utilidad fiscal acumulada (GENERAL) = ingresos − deducciones, sin negativos. */
+  /** Costo de ventas acumulado del ejercicio (inventario consumido, FIFO) — deducción en GENERAL, 0 en RESICO. */
+  costoVentasAcumCents: number
+  /** Utilidad fiscal acumulada (GENERAL) = ingresos − deducciones − costo de ventas, sin negativos. */
   utilidadFiscalCents: number
   /** Tasa RESICO aplicada (sólo RESICO). */
   tasaResico: number | null
@@ -162,12 +165,19 @@ async function deduccionesAcum(rfc: string, year: number, period: string): Promi
   return (agg._sum.subtotalCents ?? 0) - (agg._sum.descuentoCents ?? 0) + (agg._sum.iepsCents ?? 0)
 }
 
+/** Costo de ventas acumulado del ejercicio (todas las venues del RFC) hasta `to`. Deducción en GENERAL. */
+async function cogsAcumRfc(venueIds: string[], year: number, to: string): Promise<number> {
+  const perVenue = await Promise.all(venueIds.map(id => computePeriodCogsCentsRange(id, `${year}-01-01`, to)))
+  return perVenue.reduce((s, c) => s + c, 0)
+}
+
 /** ISR causado acumulado del ejercicio (GENERAL) hasta `period` (recursión para los pagos previos). */
 async function isrCausadoGeneralAcum(venueIds: string[], rfc: string, period: string): Promise<number> {
   const { year, month, to } = monthRange(period)
   const { netCents } = await ingresoNetoRfc(venueIds, `${year}-01-01`, to)
   const ded = await deduccionesAcum(rfc, year, period)
-  const utilidad = Math.max(0, netCents - ded)
+  const cogs = await cogsAcumRfc(venueIds, year, to)
+  const utilidad = Math.max(0, netCents - ded - cogs)
   // Tarifa acumulada = tarifa mensual con límInf y cuotaFija × número de meses.
   const acumRows = ART96_MONTHLY.map(r => ({ limInfCents: r.limInfCents * month, cuotaFijaCents: r.cuotaFijaCents * month, pct: r.pct }))
   return applyTariff(utilidad, acumRows)
@@ -188,6 +198,7 @@ export async function getIsrProvisional(venueId: string, period: string, regime:
     ingresosMesCents: 0,
     ingresosAcumCents: 0,
     deduccionesAcumCents: 0,
+    costoVentasAcumCents: 0,
     utilidadFiscalCents: 0,
     tasaResico: null,
     isrCausadoCents: 0,
@@ -223,7 +234,9 @@ export async function getIsrProvisional(venueId: string, period: string, regime:
   } else {
     const ded = await deduccionesAcum(scope.rfc, year, period)
     base.deduccionesAcumCents = ded
-    base.utilidadFiscalCents = Math.max(0, acumIngreso.netCents - ded)
+    const cogsAcum = await cogsAcumRfc(venueIds, year, to)
+    base.costoVentasAcumCents = cogsAcum
+    base.utilidadFiscalCents = Math.max(0, acumIngreso.netCents - ded - cogsAcum)
     base.isrCausadoCents = await isrCausadoGeneralAcum(venueIds, scope.rfc, period)
     // Pagos provisionales previos = ISR causado acumulado al mes ANTERIOR (si lo hay).
     base.pagosProvisionalesPreviosCents =

@@ -142,6 +142,8 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         },
         comisiones: pesos(d.costs.processingFeesCents),
         ingresoMenosComisiones: pesos(d.result.netAfterFeesCents),
+        costoDeVentas: pesos(d.result.cogsCents), // COGS: costo del inventario consumido (FIFO)
+        utilidadBruta: pesos(d.result.grossProfitCents), // ingreso neto − costo de ventas (NO resta gastos/nómina)
         propinas: pesos(d.tips.totalCents),
         conciliacionBancaria: {
           estadosDeCuenta: d.reconciliation.statements,
@@ -958,7 +960,8 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           ? { tasaResico: r.tasaResico, excedeTopeResico: r.excedeTopeResico }
           : {
               deduccionesAcumuladas: pesos(r.deduccionesAcumCents),
-              utilidadFiscal: pesos(r.utilidadFiscalCents),
+              costoDeVentasAcumulado: pesos(r.costoVentasAcumCents), // inventario consumido (FIFO), deducible en GENERAL
+              utilidadFiscal: pesos(r.utilidadFiscalCents), // ingresos − deducciones − costo de ventas
               pagosProvisionalesPrevios: pesos(r.pagosProvisionalesPreviosCents),
             }),
         isrCausado: pesos(r.isrCausadoCents),

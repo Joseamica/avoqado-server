@@ -18,8 +18,11 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
     bankStatement: { count: jest.fn(), aggregate: jest.fn() },
   },
 }))
+// COGS se prueba en cogs.service.test; aquí lo mockeamos para no pegar a prisma de inventario.
+jest.mock('../../../../src/services/fiscal/cogs.service', () => ({ computePeriodCogsCents: jest.fn() }))
 
 import prisma from '../../../../src/utils/prismaClient'
+import { computePeriodCogsCents } from '../../../../src/services/fiscal/cogs.service'
 import {
   getBankAndCashSummary,
   getBusinessSummary,
@@ -33,6 +36,7 @@ const p = prisma as unknown as {
   cfdi: { aggregate: jest.Mock; groupBy: jest.Mock }
   bankStatement: { count: jest.Mock; aggregate: jest.Mock }
 }
+const mCogs = computePeriodCogsCents as jest.Mock
 
 const VENUE = 'venue_1'
 const FILTERS = { from: '2026-06-01', to: '2026-06-16' }
@@ -59,6 +63,7 @@ beforeEach(() => {
   p.cfdi.groupBy.mockResolvedValue([{ isGlobal: false, _count: { _all: 1 } }])
   p.bankStatement.count.mockResolvedValue(2)
   p.bankStatement.aggregate.mockResolvedValue({ _sum: { lineCount: 10, matchedCount: 4 } })
+  mCogs.mockResolvedValue(0) // sin costo de ventas por default
 })
 
 describe('getIncomeStatement (Capa A — estado de resultados)', () => {
@@ -192,6 +197,13 @@ describe('getBusinessSummary (Resumen del negocio)', () => {
     const r = await getBusinessSummary('venue-1', FILTERS)
     expect(r.costs.processingFeesCents).toBe(450) // 300+150
     expect(r.result.netAfterFeesCents).toBe(31550) // 32000-450
+  })
+
+  it('computes gross profit = net revenue − COGS (utilidad bruta)', async () => {
+    mCogs.mockResolvedValue(12000) // costo de ventas $120.00
+    const r = await getBusinessSummary('venue-1', FILTERS)
+    expect(r.result.cogsCents).toBe(12000)
+    expect(r.result.grossProfitCents).toBe(20000) // 32000 net − 12000 COGS
   })
 
   it('reports invoicing from stamped CFDIs (approx capped at net revenue)', async () => {

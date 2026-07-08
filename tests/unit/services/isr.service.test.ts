@@ -16,11 +16,13 @@ jest.mock('../../../src/utils/prismaClient', () => ({
 jest.mock('../../../src/services/fiscal/chartOfAccounts.service', () => ({ resolveScopeOrNull: jest.fn() }))
 jest.mock('../../../src/services/dashboard/accounting.dashboard.service', () => ({ getIncomeStatement: jest.fn() }))
 jest.mock('../../../src/services/fiscal/salesRetention.service', () => ({ getSalesRetentionCents: jest.fn() }))
+jest.mock('../../../src/services/fiscal/cogs.service', () => ({ computePeriodCogsCentsRange: jest.fn() }))
 
 import prisma from '../../../src/utils/prismaClient'
 import { resolveScopeOrNull } from '../../../src/services/fiscal/chartOfAccounts.service'
 import { getIncomeStatement } from '../../../src/services/dashboard/accounting.dashboard.service'
 import { getSalesRetentionCents } from '../../../src/services/fiscal/salesRetention.service'
+import { computePeriodCogsCentsRange } from '../../../src/services/fiscal/cogs.service'
 import { getIsrProvisional } from '../../../src/services/fiscal/isr.service'
 
 const p = prisma as unknown as {
@@ -30,6 +32,7 @@ const p = prisma as unknown as {
 const mScope = resolveScopeOrNull as jest.Mock
 const mIncome = getIncomeStatement as jest.Mock
 const mSalesRet = getSalesRetentionCents as jest.Mock
+const mCogs = computePeriodCogsCentsRange as jest.Mock
 
 // La base de ISR es SIN IVA → el monto representa `taxableBaseCents` (lo que ISR usa como ingreso).
 const income = (baseCents: number, salesCount = 1) => {
@@ -56,6 +59,7 @@ beforeEach(() => {
   p.venue.findMany.mockResolvedValue([{ id: 'v1', organizationId: 'org1' }])
   p.expense.aggregate.mockResolvedValue({ _sum: { subtotalCents: 0, descuentoCents: 0, iepsCents: 0 } })
   mSalesRet.mockResolvedValue(null) // sin retención capturada por default
+  mCogs.mockResolvedValue(0) // sin costo de ventas por default (RESICO lo ignora)
 })
 
 describe('getIsrProvisional — RESICO', () => {
@@ -126,5 +130,24 @@ describe('getIsrProvisional — GENERAL (art 96)', () => {
     const r = await getIsrProvisional('v1', '2026-01', 'GENERAL')
     expect(r.utilidadFiscalCents).toBe(0)
     expect(r.isrCausadoCents).toBe(0)
+  })
+
+  it('el costo de ventas acumulado reduce la utilidad fiscal (deducible en GENERAL)', async () => {
+    mIncome.mockResolvedValue(income(30_000_00)) // ingresos $30,000
+    p.expense.aggregate.mockResolvedValue({ _sum: { subtotalCents: 10_000_00, descuentoCents: 0, iepsCents: 0 } }) // gastos $10,000
+    mCogs.mockResolvedValue(5_000_00) // costo de ventas $5,000
+    const r = await getIsrProvisional('v1', '2026-01', 'GENERAL')
+    expect(r.costoVentasAcumCents).toBe(5_000_00)
+    expect(r.utilidadFiscalCents).toBe(15_000_00) // 30,000 − 10,000 − 5,000
+  })
+})
+
+describe('getIsrProvisional — RESICO ignora el costo de ventas', () => {
+  it('RESICO grava ingresos brutos: el COGS NO reduce el ISR', async () => {
+    mIncome.mockResolvedValue(income(20_000_00)) // ISR causado $200 (1%)
+    mCogs.mockResolvedValue(5_000_00) // aunque haya costo de ventas...
+    const r = await getIsrProvisional('v1', '2026-06', 'RESICO')
+    expect(r.costoVentasAcumCents).toBe(0) // ...RESICO no lo considera
+    expect(r.isrCausadoCents).toBe(200_00)
   })
 })

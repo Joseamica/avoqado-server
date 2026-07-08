@@ -53,6 +53,20 @@ export async function computePeriodCogsCents(venueId: string, from: Date, to: Da
 }
 
 /**
+ * COGS del periodo para un rango en formato STRING (YYYY-MM-DD), parseado en la zona horaria del local
+ * (tz-safe — evita el trap de `new Date('YYYY-MM-DD')` que resuelve a medianoche del host, no del local).
+ * Envuelve a `computePeriodCogsCents`. Devuelve 0 si el local no existe. Lo usa el ISR general para restar
+ * el costo de ventas acumulado del ejercicio a la utilidad fiscal estimada.
+ */
+export async function computePeriodCogsCentsRange(venueId: string, fromStr: string, toStr: string): Promise<number> {
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+  if (!venue) return 0
+  const tz = venue.timezone || DEFAULT_TZ
+  const { from, to } = parseDbDateRange(fromStr, toStr, tz)
+  return computePeriodCogsCents(venueId, from, to)
+}
+
+/**
  * Genera (idempotente) la póliza de costo de ventas del periodo. Best-effort: si falta el mapeo de
  * `COST_OF_GOODS_SOLD` o `INVENTORY`, o si no hubo consumo, no postea y lo reporta (no bloquea al resto).
  */

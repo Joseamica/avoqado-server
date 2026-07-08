@@ -5,6 +5,7 @@ import prisma from '../../utils/prismaClient'
 import { parseDbDateRange } from '../../utils/datetime'
 import { splitPaymentIvaByOrderRates, grossByRateFromItems } from '../fiscal/ivaMath'
 import { paymentInFiscalScope } from '../fiscal/fiscalScope'
+import { computePeriodCogsCents } from '../fiscal/cogs.service'
 
 /**
  * Accounting — Capa A (gerencial, read-model)
@@ -361,8 +362,12 @@ export interface BusinessSummary {
   /** Cómo cobró: efectivo (caja) vs electrónico (banco). */
   collection: { cashCents: number; electronicCents: number; cashPct: number }
   costs: { processingFeesCents: number }
-  /** Ingreso neto − comisiones de procesamiento. NO es utilidad (no incluye COGS ni gastos). */
-  result: { netAfterFeesCents: number }
+  /**
+   * `netAfterFeesCents` = ingreso neto − comisiones. `cogsCents` = costo del inventario consumido en el
+   * periodo (FIFO). `grossProfitCents` = ingreso neto − costo de ventas (UTILIDAD BRUTA). No es utilidad
+   * NETA (no resta gastos ni nómina).
+   */
+  result: { netAfterFeesCents: number; cogsCents: number; grossProfitCents: number }
   tips: { totalCents: number }
   reconciliation: { statements: number; lineCount: number; matchedCount: number }
   metrics: IncomeStatement['metrics']
@@ -380,7 +385,7 @@ export interface BusinessSummary {
 export async function getBusinessSummary(venueId: string, filters: IncomeStatementFilters): Promise<BusinessSummary> {
   const { venueName, timezone, from, to } = await resolvePeriod(venueId, filters)
 
-  const [income, payAgg, recon, stampedAgg, byScope] = await Promise.all([
+  const [income, payAgg, recon, stampedAgg, byScope, cogsCents] = await Promise.all([
     getIncomeStatement(venueId, filters),
     aggregatePeriodPayments(venueId, from, to),
     reconciliationSummary(venueId),
@@ -394,6 +399,7 @@ export async function getBusinessSummary(venueId: string, filters: IncomeStateme
       where: { venueId, status: CfdiStatus.STAMPED, stampedAt: { gte: from, lte: to } },
       _count: { _all: true },
     }),
+    computePeriodCogsCents(venueId, from, to),
   ])
 
   const stampedCount = stampedAgg._count._all
@@ -422,7 +428,7 @@ export async function getBusinessSummary(venueId: string, filters: IncomeStateme
     invoicing: { stampedCount, stampedTotalCents, nominativeCount, globalCount, invoicedApproxCents, uninvoicedApproxCents, invoicedPct },
     collection: { cashCents, electronicCents, cashPct },
     costs: { processingFeesCents: payAgg.feesCents },
-    result: { netAfterFeesCents: netRevenueCents - payAgg.feesCents },
+    result: { netAfterFeesCents: netRevenueCents - payAgg.feesCents, cogsCents, grossProfitCents: netRevenueCents - cogsCents },
     tips: income.tips,
     reconciliation: recon,
     metrics: income.metrics,
