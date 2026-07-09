@@ -120,7 +120,13 @@ export const passkeyChallenge = async (req: Request, res: Response, next: NextFu
  */
 export const passkeyVerify = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { credential, challengeKey, rememberMe } = req.body
+    const { challengeKey, rememberMe } = req.body
+
+    // Accept BOTH payload shapes:
+    //  - wrapped:   { credential: { id, rawId, type, response }, challengeKey }
+    //  - top-level: { id, rawId, type, response } — what shipped iOS builds
+    //    (≤1.4) send; without this fallback they always got 400 here.
+    const credential = req.body.credential ?? (req.body.id && req.body.response ? req.body : undefined)
 
     if (!credential) {
       return res.status(400).json({
@@ -177,6 +183,107 @@ export const passkeyVerify = async (req: Request, res: Response, next: NextFunct
     })
   } catch (error) {
     logger.error('Error in passkeyVerify controller:', error)
+    next(error)
+  }
+}
+
+/**
+ * Generate passkey registration options
+ * AUTHENTICATED — a passkey is created from a logged-in session.
+ *
+ * @route POST /api/v1/mobile/auth/passkey/register/challenge
+ */
+export const passkeyRegisterChallenge = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const staffId = req.authContext?.userId || ''
+    if (!staffId) {
+      return res.status(401).json({ success: false, message: 'No autenticado' })
+    }
+
+    const result = await authMobileService.generatePasskeyRegistrationOptions(staffId)
+
+    res.status(200).json({
+      success: true,
+      ...result,
+    })
+  } catch (error) {
+    logger.error('Error in passkeyRegisterChallenge controller:', error)
+    next(error)
+  }
+}
+
+/**
+ * Verify passkey registration (attestation) and persist the credential
+ * AUTHENTICATED
+ *
+ * @route POST /api/v1/mobile/auth/passkey/register/verify
+ */
+export const passkeyRegisterVerify = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const staffId = req.authContext?.userId || ''
+    if (!staffId) {
+      return res.status(401).json({ success: false, message: 'No autenticado' })
+    }
+
+    const { challengeKey, deviceName } = req.body
+    // Same dual-shape tolerance as passkeyVerify
+    const credential = req.body.credential ?? (req.body.id && req.body.response ? req.body : undefined)
+
+    if (!credential) {
+      return res.status(400).json({ success: false, message: 'Credential requerido' })
+    }
+
+    const result = await authMobileService.verifyPasskeyRegistration(staffId, credential, challengeKey, deviceName)
+
+    res.status(200).json({
+      success: true,
+      message: 'Passkey registrado',
+      passkey: result,
+    })
+  } catch (error) {
+    logger.error('Error in passkeyRegisterVerify controller:', error)
+    next(error)
+  }
+}
+
+/**
+ * List the authenticated user's registered passkeys
+ * AUTHENTICATED
+ *
+ * @route GET /api/v1/mobile/auth/passkeys
+ */
+export const listPasskeys = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const staffId = req.authContext?.userId || ''
+    if (!staffId) {
+      return res.status(401).json({ success: false, message: 'No autenticado' })
+    }
+
+    const passkeys = await authMobileService.listPasskeys(staffId)
+    res.status(200).json({ success: true, passkeys })
+  } catch (error) {
+    logger.error('Error in listPasskeys controller:', error)
+    next(error)
+  }
+}
+
+/**
+ * Delete one of the authenticated user's passkeys
+ * AUTHENTICATED
+ *
+ * @route DELETE /api/v1/mobile/auth/passkeys/:passkeyId
+ */
+export const deletePasskey = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const staffId = req.authContext?.userId || ''
+    if (!staffId) {
+      return res.status(401).json({ success: false, message: 'No autenticado' })
+    }
+
+    await authMobileService.deletePasskey(staffId, req.params.passkeyId)
+    res.status(200).json({ success: true, message: 'Passkey eliminado' })
+  } catch (error) {
+    logger.error('Error in deletePasskey controller:', error)
     next(error)
   }
 }

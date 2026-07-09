@@ -17,9 +17,12 @@ import { DEFAULT_PERMISSIONS } from '../../lib/permissions'
 import logger from '@/config/logger'
 import {
   generateAuthenticationOptions,
+  generateRegistrationOptions,
   verifyAuthenticationResponse,
+  verifyRegistrationResponse,
   type AuthenticationResponseJSON,
   type AuthenticatorTransportFuture,
+  type RegistrationResponseJSON,
 } from '@simplewebauthn/server'
 
 // ============================================================================
@@ -30,9 +33,13 @@ import {
 // Challenge expires after 5 minutes
 const challengeStore = new Map<string, { challenge: string; expiresAt: number }>()
 
-// Relying Party configuration
-const RP_ID = process.env.PASSKEY_RP_ID || 'avoqado.io'
-const RP_ORIGIN = process.env.PASSKEY_RP_ORIGIN || 'https://avoqado.io'
+// Relying Party configuration.
+// Default MUST match the mobile apps' hardcoded RP (iOS PasskeyManager uses
+// "api.avoqado.io") and the AASA served at api.avoqado.io — a mismatch makes
+// every assertion fail signature verification (rpIdHash is part of what's signed).
+const RP_ID = process.env.PASSKEY_RP_ID || 'api.avoqado.io'
+const RP_ORIGIN = process.env.PASSKEY_RP_ORIGIN || 'https://api.avoqado.io'
+const RP_NAME = 'Avoqado'
 
 /**
  * Generate a passkey authentication challenge
@@ -294,6 +301,182 @@ function cleanupExpiredChallenges() {
       challengeStore.delete(key)
     }
   }
+}
+
+// ============================================================================
+// PASSKEY (WebAuthn) REGISTRATION
+// ============================================================================
+
+/**
+ * Generate passkey registration options for the authenticated staff member.
+ * First step of creating a passkey on a device. The staff must already be
+ * logged in (email/password) — a passkey is an additional credential, not
+ * an account.
+ */
+export async function generatePasskeyRegistrationOptions(staffId: string) {
+  const staff = await prisma.staff.findUnique({
+    where: { id: staffId },
+    select: { id: true, email: true, firstName: true, lastName: true, active: true },
+  })
+  if (!staff || !staff.active) {
+    throw new AuthenticationError('Cuenta no válida')
+  }
+
+  // Exclude already-registered credentials so the authenticator doesn't
+  // offer to create a duplicate on the same device.
+  const existing = await prisma.staffPasskey.findMany({
+    where: { staffId },
+    select: { credentialId: true, deviceType: true },
+  })
+
+  const options = await generateRegistrationOptions({
+    rpName: RP_NAME,
+    rpID: RP_ID,
+    userName: staff.email,
+    userDisplayName: [staff.firstName, staff.lastName].filter(Boolean).join(' ') || staff.email,
+    // Stable user handle so assertions map back to the same account
+    userID: Buffer.from(staff.id, 'utf8'),
+    attestationType: 'none',
+    excludeCredentials: existing.map(c => ({
+      id: c.credentialId,
+      transports: (c.deviceType === 'platform' ? ['internal'] : ['usb', 'ble', 'nfc']) as AuthenticatorTransportFuture[],
+    })),
+    authenticatorSelection: {
+      residentKey: 'required', // discoverable credential — required for the login flow (empty allowCredentials)
+      userVerification: 'preferred',
+    },
+    timeout: 300000,
+  })
+
+  const challengeKey = crypto.randomBytes(16).toString('hex')
+  challengeStore.set(challengeKey, {
+    challenge: options.challenge,
+    expiresAt: Date.now() + 5 * 60 * 1000,
+  })
+  cleanupExpiredChallenges()
+
+  logger.info(`🔐 [PASSKEY] Registration options generated for staff: ${staff.email}`)
+
+  return {
+    challenge: options.challenge,
+    challengeKey,
+    rpId: RP_ID,
+    userId: options.user.id, // base64url user handle the authenticator must store
+    userName: staff.email,
+    timeout: options.timeout,
+  }
+}
+
+/**
+ * Verify a passkey registration (attestation) and persist the credential.
+ * Second step of creating a passkey. Accepts the standard WebAuthn
+ * RegistrationResponseJSON shape.
+ */
+export async function verifyPasskeyRegistration(
+  staffId: string,
+  credential: RegistrationResponseJSON,
+  challengeKey?: string,
+  deviceName?: string,
+) {
+  logger.info(`🔐 [PASSKEY] Verifying registration for staff: ${staffId}`)
+
+  // Resolve the expected challenge (same lifecycle as authentication)
+  let expectedChallenge: string | undefined
+  if (challengeKey) {
+    const stored = challengeStore.get(challengeKey)
+    if (!stored || Date.now() > stored.expiresAt) {
+      challengeStore.delete(challengeKey)
+      throw new AuthenticationError('Challenge expirado o inválido. Por favor intenta de nuevo.')
+    }
+    expectedChallenge = stored.challenge
+    challengeStore.delete(challengeKey)
+  } else {
+    const now = Date.now()
+    for (const [key, value] of challengeStore.entries()) {
+      if (value.expiresAt > now) {
+        expectedChallenge = value.challenge
+        challengeStore.delete(key)
+        break
+      }
+    }
+    if (!expectedChallenge) {
+      throw new AuthenticationError('No se encontró un challenge válido. Por favor intenta de nuevo.')
+    }
+  }
+
+  let verification
+  try {
+    verification = await verifyRegistrationResponse({
+      response: credential,
+      expectedChallenge,
+      expectedOrigin: [RP_ORIGIN, 'https://api.avoqado.io', 'https://dashboard.avoqado.io'],
+      expectedRPID: RP_ID,
+    })
+  } catch (error) {
+    logger.error(`🔐 [PASSKEY] Registration verification error: ${error}`)
+    throw new AuthenticationError('No se pudo verificar el passkey')
+  }
+
+  if (!verification.verified || !verification.registrationInfo) {
+    throw new AuthenticationError('Verificación de registro fallida')
+  }
+
+  const info = verification.registrationInfo
+  const passkey = await prisma.staffPasskey.upsert({
+    where: { credentialId: info.credential.id },
+    create: {
+      staffId,
+      credentialId: info.credential.id,
+      publicKey: Buffer.from(info.credential.publicKey).toString('base64'),
+      counter: info.credential.counter,
+      credentialType: 'public-key',
+      deviceName: deviceName || null,
+      deviceType: info.credentialDeviceType === 'singleDevice' ? 'platform' : 'multiDevice',
+      aaguid: info.aaguid || null,
+    },
+    update: {
+      // Re-registration of the same credential (shouldn't happen with
+      // excludeCredentials, but harmless): refresh key material + counter.
+      publicKey: Buffer.from(info.credential.publicKey).toString('base64'),
+      counter: info.credential.counter,
+      deviceName: deviceName || null,
+    },
+  })
+
+  logger.info(`🔐 [PASSKEY] Registered credential ${passkey.credentialId.substring(0, 12)}… for staff ${staffId}`)
+
+  return {
+    id: passkey.id,
+    credentialId: passkey.credentialId,
+    deviceName: passkey.deviceName,
+    createdAt: passkey.createdAt,
+  }
+}
+
+/**
+ * List the authenticated staff member's registered passkeys (for settings UI).
+ */
+export async function listPasskeys(staffId: string) {
+  const passkeys = await prisma.staffPasskey.findMany({
+    where: { staffId },
+    select: { id: true, deviceName: true, deviceType: true, createdAt: true, lastUsedAt: true },
+    orderBy: { createdAt: 'desc' },
+  })
+  return passkeys
+}
+
+/**
+ * Delete one of the authenticated staff member's passkeys.
+ * Scoped by staffId so a user can only remove their own credentials.
+ */
+export async function deletePasskey(staffId: string, passkeyId: string) {
+  const result = await prisma.staffPasskey.deleteMany({
+    where: { id: passkeyId, staffId },
+  })
+  if (result.count === 0) {
+    throw new AuthenticationError('Passkey no encontrado')
+  }
+  return { deleted: true }
 }
 
 // ============================================================================

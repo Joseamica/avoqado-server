@@ -379,6 +379,35 @@ router.post('/auth/passkey/challenge', authMobileController.passkeyChallenge)
 router.post('/auth/passkey/verify', authMobileController.passkeyVerify)
 
 // ============================================================================
+// PASSKEY REGISTRATION & MANAGEMENT
+// Authenticated — a passkey is created/managed from a logged-in session.
+// ============================================================================
+
+/**
+ * POST /api/v1/mobile/auth/passkey/register/challenge
+ * Generate WebAuthn registration options for the authenticated user.
+ */
+router.post('/auth/passkey/register/challenge', authenticateTokenMiddleware, authMobileController.passkeyRegisterChallenge)
+
+/**
+ * POST /api/v1/mobile/auth/passkey/register/verify
+ * Verify the attestation and persist the new credential.
+ */
+router.post('/auth/passkey/register/verify', authenticateTokenMiddleware, authMobileController.passkeyRegisterVerify)
+
+/**
+ * GET /api/v1/mobile/auth/passkeys
+ * List the authenticated user's registered passkeys.
+ */
+router.get('/auth/passkeys', authenticateTokenMiddleware, authMobileController.listPasskeys)
+
+/**
+ * DELETE /api/v1/mobile/auth/passkeys/:passkeyId
+ * Delete one of the authenticated user's passkeys.
+ */
+router.delete('/auth/passkeys/:passkeyId', authenticateTokenMiddleware, authMobileController.deletePasskey)
+
+// ============================================================================
 // PASSWORD RESET
 // Public endpoint - no authentication required
 // ============================================================================
