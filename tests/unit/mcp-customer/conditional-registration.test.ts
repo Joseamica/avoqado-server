@@ -22,8 +22,12 @@ it('PT connection (serialized ON) sees serialized + sale-verification + cash-out
   expect(names.has('list_serialized_items')).toBe(true)
   expect(names.has('org_confirmed_sales_report')).toBe(true)
   expect(names.has('list_sale_verifications')).toBe(true)
+  expect(names.has('review_sale_verification')).toBe(true) // write tool
+  expect(names.has('reopen_sale_verification')).toBe(true) // write tool (OWNER)
+  expect(names.has('edit_sale_verification')).toBe(true) // write tool (OWNER)
   expect(names.has('cash_out_org_saldos')).toBe(true)
   expect(names.has('promoters_live_locations')).toBe(true)
+  expect(names.has('terminal_location')).toBe(true) // white-label tool
   expect(names.has('low_stock')).toBe(true) // generic always present
 })
 
@@ -33,9 +37,12 @@ it('scalable connection (all modules OFF) sees NO SIM/PT tools, only generic', (
   expect(names.has('list_serialized_items')).toBe(false)
   expect(names.has('org_confirmed_sales_report')).toBe(false)
   expect(names.has('list_sale_verifications')).toBe(false)
+  expect(names.has('review_sale_verification')).toBe(false) // write tool hidden from non-PT
+  expect(names.has('edit_sale_verification')).toBe(false) // write tool hidden from non-PT
   expect(names.has('cash_out_org_saldos')).toBe(false)
   expect(names.has('record_serialized_sale')).toBe(false)
   expect(names.has('promoters_live_locations')).toBe(false)
   expect(names.has('promoter_location')).toBe(false)
+  expect(names.has('terminal_location')).toBe(false) // white-label tool hidden from non-WL
   expect(names.has('low_stock')).toBe(true) // generic tools stay
 })

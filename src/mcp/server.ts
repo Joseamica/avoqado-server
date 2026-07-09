@@ -107,7 +107,6 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerLoyaltyTools(server, scope)
   registerReferralTools(server, scope)
   registerPlanAdminTools(server, scope)
-  registerTerminalLocationTools(server, scope)
   registerAccountingTools(server, scope)
   registerActivityLogTools(server, scope)
 
@@ -120,6 +119,9 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
 
   if (flags.whiteLabelEnabled) {
     registerPromoterLocationTools(server, scope)
+    // terminal_location is white-label-only (gates on isWhiteLabelOrg at call time) — register it
+    // here so non-white-label connections don't see it in their tool catalog either.
+    registerTerminalLocationTools(server, scope)
   }
 }
 
