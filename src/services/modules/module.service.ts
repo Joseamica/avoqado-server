@@ -99,6 +99,51 @@ export class ModuleService {
   }
 
   /**
+   * Bulk version of isModuleEnabled for a set of venues. Replicates its precedence EXACTLY:
+   * an existing VenueModule row is authoritative (its `enabled`, even false, overrides the org);
+   * only venues with NO VenueModule row fall back to the org-level OrganizationModule.
+   */
+  async venuesWithModule(venueIds: string[], moduleCode: ModuleCode): Promise<Set<string>> {
+    const enabled = new Set<string>()
+    if (venueIds.length === 0) return enabled
+
+    const venueModules = await this.db.venueModule.findMany({
+      where: { venueId: { in: venueIds }, module: { code: moduleCode, active: true } },
+      select: { venueId: true, enabled: true },
+    })
+    const explicit = new Map<string, boolean>()
+    for (const vm of venueModules) explicit.set(vm.venueId, vm.enabled)
+    for (const [venueId, isOn] of explicit) if (isOn) enabled.add(venueId)
+
+    const inheritIds = venueIds.filter(id => !explicit.has(id))
+    if (inheritIds.length === 0) return enabled
+
+    const venues = await this.db.venue.findMany({
+      where: { id: { in: inheritIds } },
+      select: { id: true, organizationId: true },
+    })
+    const orgIds = [...new Set(venues.map(v => v.organizationId).filter((o): o is string => !!o))]
+    if (orgIds.length === 0) return enabled
+    const orgModules = await this.db.organizationModule.findMany({
+      where: { organizationId: { in: orgIds }, enabled: true, module: { code: moduleCode, active: true } },
+      select: { organizationId: true },
+    })
+    const orgOn = new Set(orgModules.map(o => o.organizationId))
+    for (const v of venues) {
+      // Guard against a VenueModule row explicitly overriding this venue — only venues
+      // with NO VenueModule row should ever inherit the org-level setting.
+      if (explicit.has(v.id)) continue
+      if (v.organizationId && orgOn.has(v.organizationId)) enabled.add(v.id)
+    }
+    return enabled
+  }
+
+  /** True if ANY of venueIds has the module effectively enabled (same precedence as venuesWithModule). */
+  async anyVenueHasModule(venueIds: string[], moduleCode: ModuleCode): Promise<boolean> {
+    return (await this.venuesWithModule(venueIds, moduleCode)).size > 0
+  }
+
+  /**
    * Gets the merged configuration of a module for a venue.
    * Merges configs in priority order:
    * 1. Module.defaultConfig (base)

@@ -16,6 +16,7 @@ import * as orgVenueAccessService from '../../services/organization-dashboard/or
 import { grantVenueAccessSchema, listCandidatesSchema } from '../superadmin/venue-access.schemas'
 import * as orgMessagesService from '../../services/organization-dashboard/orgMessages.service'
 import * as activityLogService from '../../services/dashboard/activity-log.service'
+import { getOrgTerminalLocations } from '../../services/promoters/terminalLocation.service'
 import {
   GetOrgTerminalSchema,
   CreateOrgTerminalSchema,
@@ -839,6 +840,29 @@ router.get('/:orgId/terminals', authenticateTokenMiddleware, checkOrgAccess, asy
     next(error)
   }
 })
+
+/**
+ * GET /dashboard/organizations/:orgId/terminals-locations
+ * Returns: Latest known position per terminal across ALL venues in the
+ * organization. Org OWNER-only — a fleet-wide location view is sensitive
+ * (physical whereabouts of staff/terminals), so it is gated stricter than the
+ * plain membership check used by the rest of this router.
+ */
+router.get(
+  '/:orgId/terminals-locations',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  requireOrgOwner,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId } = req.params
+      const data = await getOrgTerminalLocations({ orgId })
+      res.json({ success: true, data })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
 
 // ==========================================
 // TERMINAL MANAGEMENT (Org-Level CRUD + Commands)

@@ -2,10 +2,17 @@ import nock from 'nock'
 import { createPayment, getPayment, refundPayment } from '@/services/mercado-pago/payment.service'
 
 // Prevent real network calls leaking from these tests
-beforeAll(() => nock.disableNetConnect())
+beforeAll(() => {
+  // A prior nock suite in this Jest worker may have called nock.restore(); re-arm.
+  if (!nock.isActive()) nock.activate()
+  nock.disableNetConnect()
+})
 afterAll(() => {
   nock.cleanAll()
   nock.enableNetConnect()
+  // Fully unpatch nock's global http interceptor so it can't leak into later
+  // suites in the same Jest worker (flaky 501 / socket hang up in route tests).
+  nock.restore()
 })
 
 const SELLER_TOKEN = 'APP_USR-test-seller-token'

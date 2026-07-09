@@ -2,6 +2,7 @@ import {
   PrismaClient,
   SerializedItem,
   SerializedItemStatus,
+  SerializedItemCustodyState,
   ItemCategory,
   Prisma,
   SimCustodyEnforcementMode,
@@ -667,6 +668,102 @@ export class SerializedInventoryService {
     ])
 
     return { items, total }
+  }
+
+  /**
+   * Org-level pool scope: venue-scoped items (venueId in allowedVenueIds) UNION
+   * org-level items (organizationId=orgId, venueId=null). PlayTelecom registers
+   * its SIM pool at the org level, so venueId=null items must always be INCLUDED
+   * for org-aware reads — never filtered out.
+   */
+  private orgPoolWhere(orgId: string, allowedVenueIds: string[]): Prisma.SerializedItemWhereInput {
+    return { OR: [{ venueId: { in: allowedVenueIds } }, { organizationId: orgId }] }
+  }
+
+  /**
+   * Lists items across an organization's venues PLUS the org-level pool
+   * (venueId=null), with pagination and filters. Org-aware counterpart of
+   * listItems().
+   */
+  async listOrgItems(opts: {
+    orgId: string
+    allowedVenueIds: string[]
+    categoryId?: string
+    status?: SerializedItemStatus
+    custodyState?: SerializedItemCustodyState
+    assignedPromoterId?: string
+    skip?: number
+    take?: number
+  }): Promise<{ items: (SerializedItem & { category: ItemCategory })[]; total: number }> {
+    const where: Prisma.SerializedItemWhereInput = {
+      ...this.orgPoolWhere(opts.orgId, opts.allowedVenueIds),
+      ...(opts.categoryId ? { categoryId: opts.categoryId } : {}),
+      ...(opts.status ? { status: opts.status } : {}),
+      ...(opts.custodyState ? { custodyState: opts.custodyState } : {}),
+      ...(opts.assignedPromoterId ? { assignedPromoterId: opts.assignedPromoterId } : {}),
+    }
+
+    const [items, total] = await Promise.all([
+      this.db.serializedItem.findMany({
+        where,
+        include: { category: true },
+        orderBy: { createdAt: 'desc' },
+        skip: opts.skip,
+        take: opts.take ?? 50,
+      }),
+      this.db.serializedItem.count({ where }),
+    ])
+
+    return { items, total }
+  }
+
+  /**
+   * Gets available stock by category across an organization's venues PLUS the
+   * org-level pool (venueId=null). Org-aware counterpart of getStockByCategory().
+   */
+  async getOrgStockByCategory(
+    orgId: string,
+    allowedVenueIds: string[],
+  ): Promise<Array<{ category: ItemCategory; available: number; sold: number }>> {
+    const categories = await this.db.itemCategory.findMany({
+      where: { active: true, OR: [{ organizationId: orgId }, { venue: { organizationId: orgId } }] },
+      orderBy: { sortOrder: 'asc' },
+    })
+
+    // Deduplicate: venue category overrides org category with same name
+    const seen = new Map<string, (typeof categories)[number]>()
+    for (const cat of categories) {
+      const key = cat.name.toLowerCase()
+      const existing = seen.get(key)
+      if (!existing || cat.venueId) seen.set(key, cat)
+    }
+    const mergedCategories = Array.from(seen.values())
+
+    const categoryIds = mergedCategories.map(c => c.id)
+    if (categoryIds.length === 0) return []
+
+    const countsByStatus = await this.db.serializedItem.groupBy({
+      by: ['categoryId', 'status'],
+      where: {
+        ...this.orgPoolWhere(orgId, allowedVenueIds),
+        categoryId: { in: categoryIds },
+        status: { in: ['AVAILABLE', 'SOLD'] },
+      },
+      _count: true,
+    })
+
+    const statsMap = new Map<string, { available: number; sold: number }>()
+    for (const row of countsByStatus) {
+      const existing = statsMap.get(row.categoryId) || { available: 0, sold: 0 }
+      if (row.status === 'AVAILABLE') existing.available = row._count as unknown as number
+      if (row.status === 'SOLD') existing.sold = row._count as unknown as number
+      statsMap.set(row.categoryId, existing)
+    }
+
+    return mergedCategories.map(category => {
+      const stats = statsMap.get(category.id) || { available: 0, sold: 0 }
+      return { category, available: stats.available, sold: stats.sold }
+    })
   }
 
   /**

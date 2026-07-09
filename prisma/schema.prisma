@@ -2362,6 +2362,12 @@ model PromoterLocationPing {
   staffId String
   staff   Staff  @relation(fields: [staffId], references: [id], onDelete: Cascade)
 
+  // Device attribution: which terminal sent this ping (resolved server-side from
+  // the JWT's terminalSerialNumber). Nullable — historical pings and unresolved
+  // serials stay null. Enables the device-centric "Ubicación de TPVs" views.
+  terminalId String?
+  terminal   Terminal? @relation(fields: [terminalId], references: [id], onDelete: SetNull)
+
   latitude  Decimal @db.Decimal(10, 8)
   longitude Decimal @db.Decimal(11, 8)
   accuracy  Float? // GPS accuracy in meters
@@ -2373,6 +2379,7 @@ model PromoterLocationPing {
 
   @@index([venueId, staffId, capturedAt])
   @@index([capturedAt]) // for retention purge (> 90 days)
+  @@index([terminalId, capturedAt]) // device-centric latest-location lookups
   @@map("promoter_location_pings")
 }
 
@@ -3275,6 +3282,8 @@ model Terminal {
   lastActivationStatusCheckAt DateTime? // stamped when a (possibly just-wiped) device polls activation-status; proof-of-wipe signal for venue migration
 
   reviews Review[] // ✅ LÍNEA AGREGADA
+
+  promoterLocationPings PromoterLocationPing[] // device-centric geolocation pings
 
   // 🆕 Sales Attribution Relations (2026-01-08)
   // Orders and payments processed by this terminal for sales reports

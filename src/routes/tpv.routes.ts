@@ -6550,8 +6550,23 @@ router.post(
   validateRequest(recordPromoterPingSchema),
   async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const { userId, venueId } = (req as any).authContext
+      const { userId, venueId, terminalSerialNumber } = (req as any).authContext
       const { latitude, longitude, accuracy, capturedAt, source } = req.body
+
+      let terminalId: string | null = null
+      if (terminalSerialNumber) {
+        const terminal = await prisma.terminal.findFirst({
+          where: {
+            OR: [
+              { serialNumber: { equals: terminalSerialNumber, mode: 'insensitive' } },
+              { serialNumber: { equals: `AVQD-${terminalSerialNumber}`, mode: 'insensitive' } },
+              { id: terminalSerialNumber },
+            ],
+          },
+          select: { id: true },
+        })
+        terminalId = terminal?.id ?? null
+      }
 
       const ping = await recordPromoterPing({
         venueId,
@@ -6561,6 +6576,7 @@ router.post(
         accuracy: accuracy ?? null,
         capturedAt: capturedAt ? new Date(capturedAt) : new Date(),
         source: source ?? 'PERIODIC',
+        terminalId,
       })
 
       res.status(201).json({ success: true, data: { id: ping.id } })

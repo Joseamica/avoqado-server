@@ -89,14 +89,70 @@ const CATALOG: Cat[] = [
     displayOrder: 1,
     icon: 'activity',
     products: [
-      { name: 'Indoor Cycling', price: 180, sku: 'CLASE-001', durationMinutes: 45, maxParticipants: 20, desc: 'Cardio de alta energía sobre bicicleta fija al ritmo de la música.' },
-      { name: 'Spinning Power', price: 190, sku: 'CLASE-002', durationMinutes: 45, maxParticipants: 20, desc: 'Spinning de resistencia e intervalos de potencia.' },
-      { name: 'HIIT', price: 200, sku: 'CLASE-003', durationMinutes: 45, maxParticipants: 16, desc: 'Entrenamiento por intervalos de alta intensidad.' },
-      { name: 'Yoga Flow', price: 160, sku: 'CLASE-004', durationMinutes: 60, maxParticipants: 15, desc: 'Secuencias fluidas de yoga para fuerza y movilidad.' },
-      { name: 'Pilates Reformer', price: 250, sku: 'CLASE-005', durationMinutes: 50, maxParticipants: 12, desc: 'Pilates en reformer para core y control.' },
-      { name: 'Box Fit', price: 210, sku: 'CLASE-006', durationMinutes: 50, maxParticipants: 16, desc: 'Boxeo funcional para quemar calorías y liberar estrés.' },
-      { name: 'Zumba', price: 150, sku: 'CLASE-007', durationMinutes: 55, maxParticipants: 25, desc: 'Baile fitness lleno de energía y ritmo.' },
-      { name: 'Functional Training', price: 190, sku: 'CLASE-008', durationMinutes: 50, maxParticipants: 18, desc: 'Entrenamiento funcional con peso corporal y kettlebells.' },
+      {
+        name: 'Indoor Cycling',
+        price: 180,
+        sku: 'CLASE-001',
+        durationMinutes: 45,
+        maxParticipants: 20,
+        desc: 'Cardio de alta energía sobre bicicleta fija al ritmo de la música.',
+      },
+      {
+        name: 'Spinning Power',
+        price: 190,
+        sku: 'CLASE-002',
+        durationMinutes: 45,
+        maxParticipants: 20,
+        desc: 'Spinning de resistencia e intervalos de potencia.',
+      },
+      {
+        name: 'HIIT',
+        price: 200,
+        sku: 'CLASE-003',
+        durationMinutes: 45,
+        maxParticipants: 16,
+        desc: 'Entrenamiento por intervalos de alta intensidad.',
+      },
+      {
+        name: 'Yoga Flow',
+        price: 160,
+        sku: 'CLASE-004',
+        durationMinutes: 60,
+        maxParticipants: 15,
+        desc: 'Secuencias fluidas de yoga para fuerza y movilidad.',
+      },
+      {
+        name: 'Pilates Reformer',
+        price: 250,
+        sku: 'CLASE-005',
+        durationMinutes: 50,
+        maxParticipants: 12,
+        desc: 'Pilates en reformer para core y control.',
+      },
+      {
+        name: 'Box Fit',
+        price: 210,
+        sku: 'CLASE-006',
+        durationMinutes: 50,
+        maxParticipants: 16,
+        desc: 'Boxeo funcional para quemar calorías y liberar estrés.',
+      },
+      {
+        name: 'Zumba',
+        price: 150,
+        sku: 'CLASE-007',
+        durationMinutes: 55,
+        maxParticipants: 25,
+        desc: 'Baile fitness lleno de energía y ritmo.',
+      },
+      {
+        name: 'Functional Training',
+        price: 190,
+        sku: 'CLASE-008',
+        durationMinutes: 50,
+        maxParticipants: 18,
+        desc: 'Entrenamiento funcional con peso corporal y kettlebells.',
+      },
     ],
   },
   {
@@ -106,7 +162,13 @@ const CATALOG: Cat[] = [
     displayOrder: 2,
     icon: 'user-check',
     products: [
-      { name: 'Sesión Personal Training', price: 450, sku: 'CITA-001', durationMinutes: 60, desc: 'Sesión individual con entrenador certificado.' },
+      {
+        name: 'Sesión Personal Training',
+        price: 450,
+        sku: 'CITA-001',
+        durationMinutes: 60,
+        desc: 'Sesión individual con entrenador certificado.',
+      },
       { name: 'Valoración InBody', price: 250, sku: 'CITA-002', durationMinutes: 30, desc: 'Análisis de composición corporal.' },
       { name: 'Consulta Nutricional', price: 500, sku: 'CITA-003', durationMinutes: 45, desc: 'Plan de alimentación personalizado.' },
       { name: 'Masaje Deportivo', price: 600, sku: 'CITA-004', durationMinutes: 60, desc: 'Masaje de recuperación muscular.' },
@@ -149,10 +211,7 @@ const rand = (n: number) => randomBytes(n).toString('hex').slice(0, n)
 
 // ─── Config clone helper ─────────────────────────────────────────────────────
 /** Read one config row for the template venue and re-create it for `venueId`. */
-async function cloneSingletonConfig(
-  model: 'venueSettings' | 'reservationSettings' | 'loyaltyConfig',
-  venueId: string,
-): Promise<boolean> {
+async function cloneSingletonConfig(model: 'venueSettings' | 'reservationSettings' | 'loyaltyConfig', venueId: string): Promise<boolean> {
   const anyPrisma = prisma as any
   const src = await anyPrisma[model].findUnique({ where: { venueId: TEMPLATE_VENUE_ID } })
   if (!src) {
@@ -223,7 +282,10 @@ async function seed(force: boolean) {
 
   // 3. Features
   const features = await prisma.feature.findMany({ where: { code: { in: FEATURE_CODES }, active: true }, select: { id: true, code: true } })
-  await saveVenueFeatures(venueId, features.map(f => f.id))
+  await saveVenueFeatures(
+    venueId,
+    features.map(f => f.id),
+  )
   logger.info(`   ✅ Features: ${features.map(f => f.code).join(', ')}`)
 
   // 4. Staff logins + instructors
@@ -272,7 +334,12 @@ async function seed(force: boolean) {
           displayOrder: order++,
           active: true,
           ...(cat.type === ProductType.CLASS
-            ? { durationMinutes: p.durationMinutes, duration: p.durationMinutes, maxParticipants: p.maxParticipants, allowCreditRedemption: true }
+            ? {
+                durationMinutes: p.durationMinutes,
+                duration: p.durationMinutes,
+                maxParticipants: p.maxParticipants,
+                allowCreditRedemption: true,
+              }
             : {}),
           ...(cat.type === ProductType.APPOINTMENTS_SERVICE ? { durationMinutes: p.durationMinutes, duration: p.durationMinutes } : {}),
         },

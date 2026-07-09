@@ -185,7 +185,9 @@ describe('generateDepreciationForVenue', () => {
     expect(r.totalPeriodCents).toBe(1_500_00)
     expect(mPost).toHaveBeenCalledWith(
       'v1',
-      expect.objectContaining({ lines: [expect.objectContaining({ debitCents: 750_00 }), expect.objectContaining({ creditCents: 750_00 })] }),
+      expect.objectContaining({
+        lines: [expect.objectContaining({ debitCents: 750_00 }), expect.objectContaining({ creditCents: 750_00 })],
+      }),
       expect.anything(),
     )
   })
@@ -211,7 +213,10 @@ describe('getYearDepreciationCents', () => {
     expect(c).toBe(2_250_00)
     expect(p.fixedAssetDepreciation.aggregate).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({ period: { gte: '2026-01', lte: '2026-04' }, fixedAsset: { organizationId: 'org1', rfc: 'EKU9003173C9' } }),
+        where: expect.objectContaining({
+          period: { gte: '2026-01', lte: '2026-04' },
+          fixedAsset: { organizationId: 'org1', rfc: 'EKU9003173C9' },
+        }),
       }),
     )
   })

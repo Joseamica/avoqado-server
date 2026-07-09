@@ -4,7 +4,7 @@ import { orgStockControlService } from '../../services/organization-dashboard/or
 import { orgStockControlExportService } from '../../services/organization-dashboard/orgStockControlExport.service'
 import logger from '../../config/logger'
 
-async function isWhiteLabelOrg(orgId: string): Promise<boolean> {
+export async function isWhiteLabelOrg(orgId: string): Promise<boolean> {
   // White label can be enabled at two levels:
   // 1. OrganizationModule (org-level — applies to all venues by inheritance)
   // 2. VenueModule (per-venue override)

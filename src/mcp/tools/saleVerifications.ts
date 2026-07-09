@@ -12,8 +12,11 @@ import {
   getSalesBySupervisor,
   getSalesByPromoter,
   getSalesByPromoterDaily,
+  getSalesByPromoterWeekly,
   getSalesBySaleTypeWeekly,
   getSalesBySimTypeWeekly,
+  getOrgStructure,
+  listOrgSaleVerifications,
   parseRange,
 } from '@/services/dashboard/sale-verification.org.dashboard.service'
 
@@ -34,12 +37,23 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
 
   server.tool(
     'org_confirmed_sales_report',
-    'CONFIRMED sales report for the connected organization (serialized-inventory / PlayTelecom back-office). Only counts sales whose back-office verification is COMPLETED ("venta correcta") — sales "en revisión" or without evidence are EXCLUDED from every figure. groupBy: "summary" (KPIs incl. confirmedRevenue + pending/failed/rejected counters), "month", "city", "store", "supervisor" (the venue MANAGER responsible), "promoter" (the staff who sold, monthly), or "promoterDaily" (CURRENT MONTH only — per promoter per day, plus a `toReview` count of FAILED sales the promoter must fix on the TPV, which are NOT in the total). Answers "¿cuántas ventas confirmadas llevamos por ciudad/tienda/promotor? ¿cuáles tiene que corregir cada promotor?". Optional fromDate/toDate (YYYY-MM-DD) limit the window (ignored for promoterDaily); omit for full history. New: "saleTypeWeekly" and "simTypeWeekly" give week-by-week breakdowns whose totals reconcile with the weekly figures.',
+    'CONFIRMED sales report for the connected organization (serialized-inventory / PlayTelecom back-office). Only counts sales whose back-office verification is COMPLETED ("venta correcta") — sales "en revisión" or without evidence are EXCLUDED from every figure. groupBy: "summary" (KPIs incl. confirmedRevenue + pending/failed/rejected counters), "month", "city", "store", "supervisor" (the venue MANAGER responsible), "promoter" (the staff who sold, monthly), or "promoterDaily" (CURRENT MONTH only — per promoter per day, plus a `toReview` count of FAILED sales the promoter must fix on the TPV, which are NOT in the total). Answers "¿cuántas ventas confirmadas llevamos por ciudad/tienda/promotor? ¿cuáles tiene que corregir cada promotor?". Optional fromDate/toDate (YYYY-MM-DD) limit the window (ignored for promoterDaily); omit for full history. New: "saleTypeWeekly" and "simTypeWeekly" give week-by-week breakdowns whose totals reconcile with the weekly figures. "promoterWeekly" (por promotor × semana, ya atribuido a su tienda y supervisor — úsalo para análisis por supervisor sin cruzar datos).',
     {
       groupBy: z
-        .enum(['summary', 'month', 'city', 'store', 'supervisor', 'promoter', 'promoterDaily', 'saleTypeWeekly', 'simTypeWeekly'])
+        .enum([
+          'summary',
+          'month',
+          'city',
+          'store',
+          'supervisor',
+          'promoter',
+          'promoterDaily',
+          'saleTypeWeekly',
+          'simTypeWeekly',
+          'promoterWeekly',
+        ])
         .describe(
-          'Aggregation: summary KPIs; confirmed sales by month / city / store / supervisor / promoter / promoterDaily; or WEEKLY tables saleTypeWeekly (Líneas Nuevas vs Portabilidades) and simTypeWeekly (SIM de Intercambio / $100 de Promotor / SIM de Evento / e-SIM / Otros SIMs)',
+          'Aggregation: summary KPIs; confirmed sales by month / city / store / supervisor / promoter / promoterDaily; WEEKLY tables saleTypeWeekly (Líneas Nuevas vs Portabilidades) and simTypeWeekly (SIM de Intercambio / $100 de Promotor / SIM de Evento / e-SIM / Otros SIMs); or promoterWeekly (per promoter × week, attributed to store + supervisor)',
         ),
       fromDate: z
         .string()
@@ -76,7 +90,44 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
           return text(await getSalesBySaleTypeWeekly(orgId, range))
         case 'simTypeWeekly':
           return text(await getSalesBySimTypeWeekly(orgId, range))
+        case 'promoterWeekly':
+          return text({ promoters: await getSalesByPromoterWeekly(orgId, range) })
       }
+    },
+  )
+
+  server.tool(
+    'org_structure',
+    'The organization roster: each supervisor (the store MANAGER) → their stores → the promoters (CASHIER/WAITER staff) working there. Includes stores with ZERO sales and stores with no assigned supervisor (unassignedStores). Answers "¿qué tiendas y promotores tiene cada supervisor? ¿qué promotores hay en la tienda X?". Serialized-inventory / PlayTelecom org back-office. No arguments — uses your active organization.',
+    {},
+    async () => {
+      requireReviewAccess()
+      return text(await getOrgStructure(scope.activeOrg))
+    },
+  )
+
+  server.tool(
+    'list_sale_verifications',
+    'List INDIVIDUAL sale verifications (the back-office approval queue) for your organization — the per-sale detail behind the confirmed-sales counters. Each row is one sale with its status (PENDING/COMPLETED/FAILED/REJECTED), the promoter, the store, the SIM(s), and — when not approved — WHY. Filter by status (e.g. FAILED = las que el promotor debe corregir; REJECTED = rechazadas), by promoter (staffId), by portabilidad, or free `search` (ICCID / promoter name). Answers "muéstrame las ventas en revisión / rechazadas y por qué", "¿qué tiene pendiente de corregir el promotor X?". Paginated. Serialized-inventory / PlayTelecom back-office.',
+    {
+      status: z.enum(['PENDING', 'COMPLETED', 'FAILED', 'REJECTED']).optional().describe('Filter by verification status'),
+      staffId: z.string().optional().describe('Only sales by this promoter (staffId)'),
+      isPortabilidad: z.boolean().optional().describe('true = only portabilidades; false = only líneas nuevas'),
+      search: z.string().optional().describe('Free text: ICCID or promoter name'),
+      pageSize: z.number().int().positive().max(100).optional().describe('Rows per page (default 20)'),
+      pageNumber: z.number().int().positive().optional().describe('1-based page (default 1)'),
+    },
+    async ({ status, staffId, isPortabilidad, search, pageSize, pageNumber }) => {
+      requireReviewAccess()
+      const res = await listOrgSaleVerifications(scope.activeOrg, {
+        status: status as never,
+        staffId,
+        isPortabilidad,
+        search,
+        pageSize: pageSize ?? 20,
+        pageNumber: pageNumber ?? 1,
+      })
+      return text(res)
     },
   )
 }

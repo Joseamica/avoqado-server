@@ -29,13 +29,55 @@ export interface AssetTypeDef {
 
 /** Tasas máximas LISR art. 34-35. Editables por el usuario; esto es solo el default por tipo. */
 export const ASSET_TYPE_CATALOG: AssetTypeDef[] = [
-  { key: 'CONSTRUCCION', label: 'Edificios y construcciones', annualRate: 0.05, satRef: 'LISR 34-I', satAccountGroup: '152', moiCapCents: null },
-  { key: 'MAQUINARIA_EQUIPO', label: 'Maquinaria y equipo (general)', annualRate: 0.1, satRef: 'LISR 35-XIV', satAccountGroup: '153', moiCapCents: null },
-  { key: 'EQUIPO_TRANSPORTE', label: 'Equipo de transporte (autos, camionetas)', annualRate: 0.25, satRef: 'LISR 34-VI', satAccountGroup: '154', moiCapCents: 175_000_00 },
-  { key: 'MOBILIARIO_OFICINA', label: 'Mobiliario y equipo de oficina', annualRate: 0.1, satRef: 'LISR 34-III', satAccountGroup: '155', moiCapCents: null },
+  {
+    key: 'CONSTRUCCION',
+    label: 'Edificios y construcciones',
+    annualRate: 0.05,
+    satRef: 'LISR 34-I',
+    satAccountGroup: '152',
+    moiCapCents: null,
+  },
+  {
+    key: 'MAQUINARIA_EQUIPO',
+    label: 'Maquinaria y equipo (general)',
+    annualRate: 0.1,
+    satRef: 'LISR 35-XIV',
+    satAccountGroup: '153',
+    moiCapCents: null,
+  },
+  {
+    key: 'EQUIPO_TRANSPORTE',
+    label: 'Equipo de transporte (autos, camionetas)',
+    annualRate: 0.25,
+    satRef: 'LISR 34-VI',
+    satAccountGroup: '154',
+    moiCapCents: 175_000_00,
+  },
+  {
+    key: 'MOBILIARIO_OFICINA',
+    label: 'Mobiliario y equipo de oficina',
+    annualRate: 0.1,
+    satRef: 'LISR 34-III',
+    satAccountGroup: '155',
+    moiCapCents: null,
+  },
   { key: 'EQUIPO_COMPUTO', label: 'Equipo de cómputo', annualRate: 0.3, satRef: 'LISR 34-VII', satAccountGroup: '156', moiCapCents: null },
-  { key: 'EQUIPO_COMUNICACION', label: 'Equipo de comunicación', annualRate: 0.25, satRef: 'LISR 34-VI', satAccountGroup: '157', moiCapCents: null },
-  { key: 'HERRAMIENTA', label: 'Herramienta, dados, moldes y troqueles', annualRate: 0.35, satRef: 'LISR 34-V', satAccountGroup: '153', moiCapCents: null },
+  {
+    key: 'EQUIPO_COMUNICACION',
+    label: 'Equipo de comunicación',
+    annualRate: 0.25,
+    satRef: 'LISR 34-VI',
+    satAccountGroup: '157',
+    moiCapCents: null,
+  },
+  {
+    key: 'HERRAMIENTA',
+    label: 'Herramienta, dados, moldes y troqueles',
+    annualRate: 0.35,
+    satRef: 'LISR 34-V',
+    satAccountGroup: '153',
+    moiCapCents: null,
+  },
   { key: 'OTROS', label: 'Otros activos fijos', annualRate: 0.1, satRef: 'LISR 35-XIV', satAccountGroup: '155', moiCapCents: null },
 ]
 

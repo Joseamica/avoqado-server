@@ -269,6 +269,8 @@ import serializedInventoryRoutes from './dashboard/serializedInventory.routes'
 import commandCenterRoutes from './dashboard/commandCenter.routes'
 // Promoters Audit routes for PlayTelecom/White-Label dashboard
 import promotersRoutes from './dashboard/promoters.routes'
+// Terminal Location routes (supervisor "where are my terminals" view) for PlayTelecom/White-Label dashboard
+import terminalLocationRoutes from './dashboard/terminalLocation.routes'
 // Stock Dashboard routes for PlayTelecom/White-Label dashboard
 import stockDashboardRoutes from './dashboard/stockDashboard.routes'
 // Item Category routes for serialized inventory management
@@ -4054,6 +4056,10 @@ router.use('/venues/:venueId/command-center', commandCenterRoutes)
 // Promoters Audit routes for PlayTelecom/White-Label dashboard
 // Provides promoter tracking, attendance, sales stats, and deposit management
 router.use('/venues/:venueId/promoters', promotersRoutes)
+
+// Terminal Location routes for PlayTelecom/White-Label dashboard
+// Provides the supervisor "where are my terminals right now" read model
+router.use('/venues/:venueId/supervisor', terminalLocationRoutes)
 
 // Stock Dashboard routes for PlayTelecom/White-Label dashboard
 // Provides stock metrics, charts, alerts, and bulk upload

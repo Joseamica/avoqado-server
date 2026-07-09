@@ -4,7 +4,7 @@
  * org-level fallback) — NOT the Feature/tier resolver. Only module-on venues
  * (e.g. PlayTelecom) may read/write serialized inventory through the MCP.
  */
-import { registerInventoryTools } from '../../../src/mcp/tools/inventory'
+import { registerSerializedTools } from '../../../src/mcp/tools/serialized'
 import type { McpScope } from '../../../src/mcp/scope'
 
 const mockIsEnabled = jest.fn()
@@ -49,7 +49,7 @@ const call = (n: string, args: Record<string, unknown>) => handlers.get(n)!(args
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
 
 beforeAll(() => {
-  registerInventoryTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
+  registerSerializedTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
 })
 beforeEach(() => jest.clearAllMocks())
 

@@ -7,6 +7,7 @@ import { Prisma, CashOutWithdrawalStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { assertCashOutEnabledForOrg } from './cash-out.config.service'
+import { materializeEntries, reconcileClawbacks } from './cash-out.ledger.service'
 import type { DispersionRow } from './cash-out.report.service'
 
 /** Active venue ids belonging to the org (gated). */
@@ -99,4 +100,44 @@ export async function generateOrgDispersionReport(
   }
 
   return { orgId, rows: out.rows, totalNet: out.total.toString(), count: out.rows.length }
+}
+
+/**
+ * Org-wide available Cash Out balance per promoter. Reproduces the real fresh-read path
+ * (getSaldo only SUMS AVAILABLE entries; freshness + business exclusions — ADMIN active days,
+ * MANUAL_ENTRY exclusion — live inside materializeEntries). Per venue: materialize then
+ * reconcile clawbacks (both idempotent, module-gated no-ops when off), then group AVAILABLE by
+ * staff. Perf: runs materialize across all org venues on read; idempotent (skips existing).
+ */
+export async function getSaldosForOrg(
+  orgId: string,
+): Promise<Array<{ venueId: string; staffId: string; promoterName: string; saldo: string }>> {
+  const venueIds = await listVenueIdsForOrg(orgId)
+  if (venueIds.length === 0) return []
+
+  for (const venueId of venueIds) {
+    await materializeEntries(venueId)
+    await reconcileClawbacks(venueId)
+  }
+
+  const grouped = await prisma.promoterCommissionEntry.groupBy({
+    by: ['venueId', 'staffId'],
+    where: { venueId: { in: venueIds }, status: 'AVAILABLE' },
+    _sum: { amount: true },
+  })
+
+  const staffIds = [...new Set(grouped.map(g => g.staffId))]
+  const staff = staffIds.length
+    ? await prisma.staff.findMany({ where: { id: { in: staffIds } }, select: { id: true, firstName: true, lastName: true } })
+    : []
+  const nameOf = new Map(staff.map(s => [s.id, `${s.firstName ?? ''} ${s.lastName ?? ''}`.trim()]))
+
+  return grouped
+    .map(g => ({
+      venueId: g.venueId,
+      staffId: g.staffId,
+      promoterName: nameOf.get(g.staffId) ?? g.staffId,
+      saldo: new Prisma.Decimal(g._sum.amount ?? 0).toString(),
+    }))
+    .sort((a, b) => Number(b.saldo) - Number(a.saldo))
 }

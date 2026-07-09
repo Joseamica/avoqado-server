@@ -271,7 +271,13 @@ describe('OTP Auth Public Service', () => {
     it('seeds firstName/lastName from the most recent past guest reservation', async () => {
       prismaMock.$queryRaw.mockResolvedValue([{ guestName: 'Juan Pérez López', guestPhone: '5512345678' }])
       prismaMock.customer.create.mockImplementation(({ data }: any) =>
-        Promise.resolve({ id: 'cust1', firstName: data.firstName ?? null, lastName: data.lastName ?? null, email: null, phone: data.phone ?? null }),
+        Promise.resolve({
+          id: 'cust1',
+          firstName: data.firstName ?? null,
+          lastName: data.lastName ?? null,
+          email: null,
+          phone: data.phone ?? null,
+        }),
       )
 
       const res = await verifyOtp({ venueId: VENUE_ID, channel: 'whatsapp', destination: PHONE_RAW, code: '123456' })
@@ -285,7 +291,13 @@ describe('OTP Auth Public Service', () => {
     it('creates a nameless customer when no past named reservation exists', async () => {
       prismaMock.$queryRaw.mockResolvedValue([])
       prismaMock.customer.create.mockImplementation(({ data }: any) =>
-        Promise.resolve({ id: 'cust1', firstName: data.firstName ?? null, lastName: data.lastName ?? null, email: null, phone: data.phone ?? null }),
+        Promise.resolve({
+          id: 'cust1',
+          firstName: data.firstName ?? null,
+          lastName: data.lastName ?? null,
+          email: null,
+          phone: data.phone ?? null,
+        }),
       )
 
       const res = await verifyOtp({ venueId: VENUE_ID, channel: 'whatsapp', destination: PHONE_RAW, code: '123456' })

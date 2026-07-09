@@ -33,23 +33,37 @@ describe('OTP name backfill — formatted guestPhone (integration, real DB)', ()
     orgId = org.id
     const venue = await prisma.venue.create({
       data: {
-        name: 'ITEST Backfill Venue', slug: `itest-backfill-${Date.now()}`, organizationId: orgId,
-        address: 'X', city: 'X', state: 'X', country: 'MX', zipCode: '00000', timezone: 'America/Mexico_City',
+        name: 'ITEST Backfill Venue',
+        slug: `itest-backfill-${Date.now()}`,
+        organizationId: orgId,
+        address: 'X',
+        city: 'X',
+        state: 'X',
+        country: 'MX',
+        zipCode: '00000',
+        timezone: 'America/Mexico_City',
       },
     })
     venueId = venue.id
     // Past guest reservation with a FORMATTED phone (spaces inside the last 10 chars).
     await prisma.reservation.create({
       data: {
-        venueId, confirmationCode: RESERVATION_CODE, startsAt: new Date(Date.now() - 86400000),
-        endsAt: new Date(Date.now() - 86400000 + 3600000), duration: 60,
-        guestName: 'Ana TESTNAME', guestPhone: '55 9999 0001', guestEmail: null,
+        venueId,
+        confirmationCode: RESERVATION_CODE,
+        startsAt: new Date(Date.now() - 86400000),
+        endsAt: new Date(Date.now() - 86400000 + 3600000),
+        duration: 60,
+        guestName: 'Ana TESTNAME',
+        guestPhone: '55 9999 0001',
+        guestEmail: null,
       },
     })
     // Plant an unconsumed OTP challenge the verify path will accept.
     await prisma.otpChallenge.create({
       data: {
-        channel: 'whatsapp', destination: PHONE_E164, codeHash: hashOtpCode('123456'),
+        channel: 'whatsapp',
+        destination: PHONE_E164,
+        codeHash: hashOtpCode('123456'),
         expiresAt: new Date(Date.now() + 600000),
       },
     })

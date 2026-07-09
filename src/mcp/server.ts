@@ -2,8 +2,9 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import type { Request, Response } from 'express'
 import { verifyMcpToken } from './mcpToken'
-import { resolveScope } from './scope'
+import { resolveScope, type McpScope } from './scope'
 import logger from '@/config/logger'
+import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 import { instrumentTools } from './instrument'
 import { registerVenueTools } from './tools/venues'
 import { registerSalesTools } from './tools/sales'
@@ -11,6 +12,7 @@ import { registerOrderTools } from './tools/orders'
 import { registerTerminalTools } from './tools/terminals'
 import { registerReservationTools } from './tools/reservations'
 import { registerInventoryTools } from './tools/inventory'
+import { registerSerializedTools } from './tools/serialized'
 import { registerProcurementTools } from './tools/procurement'
 import { registerCfdiTools } from './tools/cfdi'
 import { registerCommissionTools } from './tools/commissions'
@@ -38,6 +40,7 @@ import { registerPlanAdminTools } from './tools/planAdmin'
 import { registerSaleVerificationTools } from './tools/saleVerifications'
 import { registerManualSaleTools } from './tools/manualSale'
 import { registerPromoterLocationTools } from './tools/promoterLocation'
+import { registerTerminalLocationTools } from './tools/terminalLocation'
 import { registerAccountingTools } from './tools/accounting'
 import { registerActivityLogTools } from './tools/activity-log'
 import { registerCashOutTools } from './tools/cash-out'
@@ -58,15 +61,22 @@ When the operator asks about their real numbers:
 3. SCOPE — say this when it matters: Avoqado only records money that flows THROUGH Avoqado (in-person POS terminal + cash, Avoqado payment links, Avoqado-processed card/CFDI). It does NOT see the venue's OTHER systems — their own Stripe webpage, Fitpass, other apps. So a combined/external report is normally LARGER than Avoqado and will NOT reconcile; that is expected, not a data error.
 4. Money is Mexican pesos in major units (e.g. 150.50, never cents). Dates are venue-local (America/Mexico_City).`
 
-/** Build a per-request MCP server bound to the caller's resolved scope. */
-async function buildServerForIdentity(staffId: string, activeOrg: string, scopes?: string[]): Promise<McpServer> {
-  const scope = await resolveScope(staffId, activeOrg)
-  // Thread the connection's granted OAuth scopes onto the scope so the guard can enforce mcp:write
-  // on writes. Undefined (dev/legacy token) → the guard leaves access unrestricted.
-  if (scopes && scopes.length) scope.scopes = scopes
+/** Flags gating PlayTelecom / white-label-only tool groups, computed once per connection. */
+export interface ToolRegistrationFlags {
+  serializedEnabled: boolean
+  whiteLabelEnabled: boolean
+}
 
-  const server = new McpServer({ name: 'avoqado-customer-mcp', version: '0.1.0' }, { instructions: AVOQADO_MCP_INSTRUCTIONS })
-  instrumentTools(server, { staffId, org: activeOrg }) // log every tool call (must run BEFORE registering tools)
+/**
+ * Register every MCP tool group onto `server` for the given scope.
+ *
+ * Generic tools (venues, sales, orders, inventory, …) are ALWAYS registered — they already
+ * gate their own data access per-venue/per-permission at call time. The PlayTelecom / SIM
+ * custody / white-label tool groups are only USEFUL to venues with those modules enabled, and
+ * listing them for every other tenant is confusing catalog noise (data was never leaked — each
+ * tool still gates at call-time — this only controls whether the tool is advertised at all).
+ */
+export function registerAllTools(server: McpServer, scope: McpScope, flags: ToolRegistrationFlags): void {
   registerVenueTools(server, scope)
   registerSalesTools(server, scope)
   registerOrderTools(server, scope)
@@ -97,12 +107,37 @@ async function buildServerForIdentity(staffId: string, activeOrg: string, scopes
   registerLoyaltyTools(server, scope)
   registerReferralTools(server, scope)
   registerPlanAdminTools(server, scope)
-  registerSaleVerificationTools(server, scope)
-  registerManualSaleTools(server, scope)
-  registerPromoterLocationTools(server, scope)
+  registerTerminalLocationTools(server, scope)
   registerAccountingTools(server, scope)
   registerActivityLogTools(server, scope)
-  registerCashOutTools(server, scope)
+
+  if (flags.serializedEnabled) {
+    registerSerializedTools(server, scope)
+    registerSaleVerificationTools(server, scope)
+    registerManualSaleTools(server, scope)
+    registerCashOutTools(server, scope)
+  }
+
+  if (flags.whiteLabelEnabled) {
+    registerPromoterLocationTools(server, scope)
+  }
+}
+
+/** Build a per-request MCP server bound to the caller's resolved scope. */
+async function buildServerForIdentity(staffId: string, activeOrg: string, scopes?: string[]): Promise<McpServer> {
+  const scope = await resolveScope(staffId, activeOrg)
+  // Thread the connection's granted OAuth scopes onto the scope so the guard can enforce mcp:write
+  // on writes. Undefined (dev/legacy token) → the guard leaves access unrestricted.
+  if (scopes && scopes.length) scope.scopes = scopes
+
+  const server = new McpServer({ name: 'avoqado-customer-mcp', version: '0.1.0' }, { instructions: AVOQADO_MCP_INSTRUCTIONS })
+  instrumentTools(server, { staffId, org: activeOrg }) // log every tool call (must run BEFORE registering tools)
+
+  const [serializedEnabled, whiteLabelEnabled] = await Promise.all([
+    moduleService.anyVenueHasModule(scope.allowedVenueIds, MODULE_CODES.SERIALIZED_INVENTORY),
+    moduleService.anyVenueHasModule(scope.allowedVenueIds, MODULE_CODES.WHITE_LABEL_DASHBOARD),
+  ])
+  registerAllTools(server, scope, { serializedEnabled, whiteLabelEnabled })
   return server
 }
 

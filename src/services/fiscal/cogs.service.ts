@@ -70,11 +70,7 @@ export async function computePeriodCogsCentsRange(venueId: string, fromStr: stri
  * Genera (idempotente) la póliza de costo de ventas del periodo. Best-effort: si falta el mapeo de
  * `COST_OF_GOODS_SOLD` o `INVENTORY`, o si no hubo consumo, no postea y lo reporta (no bloquea al resto).
  */
-export async function generateCogsPolicyForVenue(
-  venueId: string,
-  period: string,
-  actorStaffId: string | null = null,
-): Promise<CogsResult> {
+export async function generateCogsPolicyForVenue(venueId: string, period: string, actorStaffId: string | null = null): Promise<CogsResult> {
   if (!PERIOD_RE.test(period)) throw new Error('Periodo inválido (AAAA-MM)')
   const scope = await resolveScopeOrNull(venueId)
   if (!scope) return { posted: false, cogsCents: 0, reason: 'needsFiscalSetup' }

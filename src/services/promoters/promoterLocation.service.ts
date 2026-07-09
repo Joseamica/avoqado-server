@@ -22,6 +22,7 @@ export interface RecordPromoterPingInput {
   accuracy?: number | null
   capturedAt: Date
   source?: PromoterLocationSourceInput
+  terminalId?: string | null
 }
 
 export interface PromoterTrackPoint {
@@ -63,6 +64,7 @@ export async function recordPromoterPing(input: RecordPromoterPingInput): Promis
       accuracy: input.accuracy ?? null,
       capturedAt: input.capturedAt,
       source: input.source ?? 'PERIODIC',
+      terminalId: input.terminalId ?? null,
     },
     select: { id: true },
   })
@@ -117,4 +119,44 @@ export async function getPromoterTrackForVenue(params: {
   const timezone = venue?.timezone ?? DEFAULT_TIMEZONE
   const date = params.date ?? formatInTimeZone(new Date(), timezone, 'yyyy-MM-dd')
   return getPromoterTrack({ venueId: params.venueId, promoterId: params.promoterId, date, timezone })
+}
+
+/**
+ * Latest ping per promoter for a venue on a venue-local day (default: today).
+ * Used for "where is everyone right now" — the multi-promoter counterpart to
+ * getPromoterTrackForVenue (which is scoped to a single promoter).
+ */
+export async function getLatestPromoterLocationsForVenue(
+  venueId: string,
+  date?: string, // YYYY-MM-DD; defaults to venue-local today
+): Promise<Array<{ promoterId: string; name: string; latest: PromoterTrackPoint | null }>> {
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+  const timezone = venue?.timezone ?? DEFAULT_TIMEZONE
+  const day = date ?? formatInTimeZone(new Date(), timezone, 'yyyy-MM-dd')
+  // Noon anchor keeps the calendar day stable under any host timezone.
+  const anchor = new Date(`${day}T12:00:00`)
+  const gte = venueStartOfDay(timezone, anchor)
+  const lte = venueEndOfDay(timezone, anchor)
+
+  const rows = await prisma.promoterLocationPing.findMany({
+    where: { venueId, capturedAt: { gte, lte } },
+    orderBy: { capturedAt: 'desc' },
+  })
+
+  const latestByStaff = new Map<string, (typeof rows)[number]>()
+  for (const row of rows) {
+    if (!latestByStaff.has(row.staffId)) latestByStaff.set(row.staffId, row) // first seen per staffId wins (desc order = latest)
+  }
+
+  const staffIds = [...latestByStaff.keys()]
+  const staff = staffIds.length
+    ? await prisma.staff.findMany({ where: { id: { in: staffIds } }, select: { id: true, firstName: true, lastName: true } })
+    : []
+  const nameOf = new Map(staff.map(s => [s.id, `${s.firstName} ${s.lastName}`.trim()]))
+
+  return staffIds.map(id => ({
+    promoterId: id,
+    name: nameOf.get(id) ?? id,
+    latest: toPoint(latestByStaff.get(id)!),
+  }))
 }

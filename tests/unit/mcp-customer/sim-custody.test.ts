@@ -10,7 +10,7 @@
  * The live test (dev DB) covered the module gate + case-insensitive lookup but had 0
  * custody events; these mocks cover the timeline mapping + staff-name resolution.
  */
-import { registerInventoryTools } from '../../../src/mcp/tools/inventory'
+import { registerSerializedTools } from '../../../src/mcp/tools/serialized'
 import type { McpScope } from '../../../src/mcp/scope'
 
 const mockIsEnabled = jest.fn()
@@ -66,7 +66,7 @@ const call = (args: Record<string, unknown>) => handlers.get('sim_custody')!(arg
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
 
 beforeAll(() => {
-  registerInventoryTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
+  registerSerializedTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
 })
 beforeEach(() => {
   jest.clearAllMocks()

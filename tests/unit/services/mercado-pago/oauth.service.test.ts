@@ -20,6 +20,8 @@ const PINNED_MP_ENV: Record<string, string> = {
 const savedMpEnv: Record<string, string | undefined> = {}
 
 beforeAll(() => {
+  // A prior nock suite in this Jest worker may have called nock.restore(); re-arm.
+  if (!nock.isActive()) nock.activate()
   nock.disableNetConnect()
   for (const [key, value] of Object.entries(PINNED_MP_ENV)) {
     savedMpEnv[key] = process.env[key]
@@ -32,6 +34,10 @@ beforeAll(() => {
 afterAll(() => {
   nock.cleanAll()
   nock.enableNetConnect()
+  // Fully remove nock's global @mswjs/interceptors http patch so it can't leak
+  // into later suites in the same Jest worker (flaky 501 / socket hang up in
+  // supertest route tests). Pair with the nock.activate() guard in beforeAll.
+  nock.restore()
   for (const key of Object.keys(savedMpEnv)) {
     const original = savedMpEnv[key]
     if (original === undefined) {

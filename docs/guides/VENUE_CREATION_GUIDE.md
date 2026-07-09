@@ -296,9 +296,10 @@ NO toca `production`/`sandbox`. Truco de desacople **sin tocar `NetworkModule`**
 `BLUMON_ENV="SAND"` **y sobreescribe** `API_BASE_URL_DEV`/`SOCKET_URL_DEV` (que viven en
 `defaultConfig`) apuntándolos a `api.avoqado.io` → resuelve a PROD solo para este flavor. Además:
 `OVERRIDE_TERMINAL_SERIAL="AVQD-2841548418"` (hook `BuildConfig.DEBUG`-gated en
-`DeviceInfoManager.getSerialNumber()`, `""` en los demás flavors), `applicationIdSuffix=".sandbox"`
-(reusa el id de Firebase — `.demo` no está en `google-services.json`, igual que `nexgo`; coexiste con
-el build de producción → 2 iconos), `resValue app_name="Avoqado Demo"`, reusa `src/sandbox/java`+`res`
+`DeviceInfoManager.getSerialNumber()`, `""` en los demás flavors), `applicationIdSuffix=".demo"`
+(id propio → coexiste con producción Y con el dev `sandbox` = **3 iconos** en un device; hubo que
+agregar un cliente `com.jaac.avoqado_tpv.demo` a `app/google-services.json`, clonado del de sandbox —
+si usas `.sandbox` pisas el dev), `resValue app_name="Demo Prod"`, reusa `src/sandbox/java`+`res`
 vía `sourceSets` + deps `gymDemoImplementation`. Compilar/instalar: `:app:assembleGymDemoDebug`.
 ⚠️ NUNCA firmar/subir este flavor. `production`/`sandbox`/`nexgo*` quedan byte-idénticos (verificado
 por BuildConfig generado).

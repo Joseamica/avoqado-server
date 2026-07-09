@@ -86,7 +86,14 @@ export async function setSalesRetention(
 
   const row = await prisma.salesRetention.upsert({
     where: { organizationId_rfc_period: { organizationId: scope.organizationId, rfc: scope.rfc, period } },
-    create: { organizationId: scope.organizationId, rfc: scope.rfc, period, isrRetenidoCents: isr, ivaRetenidoCents: iva, note: input.note ?? null },
+    create: {
+      organizationId: scope.organizationId,
+      rfc: scope.rfc,
+      period,
+      isrRetenidoCents: isr,
+      ivaRetenidoCents: iva,
+      note: input.note ?? null,
+    },
     update: { isrRetenidoCents: isr, ivaRetenidoCents: iva, note: input.note ?? null },
   })
 

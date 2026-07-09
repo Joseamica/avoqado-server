@@ -6,7 +6,7 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
-import { getPromoterTrackForVenue } from '@/services/promoters/promoterLocation.service'
+import { getPromoterTrackForVenue, getLatestPromoterLocationsForVenue } from '@/services/promoters/promoterLocation.service'
 import { DEFAULT_TIMEZONE } from '@/utils/datetime'
 
 const WHITE_LABEL_OFF_MSG = 'El seguimiento de promotores no está activo en este local (módulo WHITE_LABEL_DASHBOARD apagado).'
@@ -91,6 +91,51 @@ export function registerPromoterLocationTools(server: McpServer, scope: McpScope
         latest: track.latest ? toPoint(track.latest) : null,
         points: track.points.map(toPoint),
         note: track.points.length === 0 ? 'Sin ubicaciones registradas ese día.' : undefined,
+      })
+    },
+  )
+
+  server.tool(
+    'promoters_live_locations',
+    'Latest known location of every field promoter who REPORTED a position at this venue on a given venue-local day: each returns their name and most recent ping (lat/lng, when, source). Promoters who did not send any location that day are NOT listed (this is a "who reported today" view, not the full roster — use org_structure for the roster). White-label venues only. Answers "¿dónde andan los promotores que reportaron hoy?". Pass venueId; date optional (YYYY-MM-DD, defaults to venue-local today).',
+    {
+      venueId: z.string().describe('Venue the promoters report to (must be in your scope)'),
+      date: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .optional()
+        .describe('Venue-local day (YYYY-MM-DD); omit for today'),
+    },
+    async ({ venueId, date }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('teams:read', venueId)
+
+      const whiteLabelActive = await moduleService.isModuleEnabled(venueId, MODULE_CODES.WHITE_LABEL_DASHBOARD)
+      if (!whiteLabelActive) return text({ ok: false, moduleRequired: true, error: WHITE_LABEL_OFF_MSG })
+
+      const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+      const tz = venue?.timezone ?? DEFAULT_TIMEZONE
+      const list = await getLatestPromoterLocationsForVenue(venueId, date)
+
+      const fmt = (d: Date) => formatInTimeZone(d, tz, 'yyyy-MM-dd HH:mm')
+      return text({
+        ok: true,
+        venueId,
+        date: date ?? formatInTimeZone(new Date(), tz, 'yyyy-MM-dd'),
+        count: list.length,
+        promoters: list.map(p => ({
+          promoterId: p.promoterId,
+          name: p.name,
+          latest: p.latest
+            ? {
+                lat: p.latest.lat,
+                lng: p.latest.lng,
+                accuracy: p.latest.accuracy,
+                capturedAt: fmt(p.latest.capturedAt),
+                source: p.latest.source,
+              }
+            : null,
+        })),
       })
     },
   )

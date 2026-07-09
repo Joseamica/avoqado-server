@@ -387,7 +387,14 @@ const PAYROLL_MOVEMENTS = ['PAYROLL_SALARIES', 'ISR_PAYROLL_WITHHELD', 'IMSS_PAY
  */
 function buildPayrollJournalLines(
   acct: Map<string, string>,
-  t: { percepcionesCents: number; subsidioEntregadoCents: number; isrCents: number; imssCents: number; netoCents: number; isnCents?: number },
+  t: {
+    percepcionesCents: number
+    subsidioEntregadoCents: number
+    isrCents: number
+    imssCents: number
+    netoCents: number
+    isnCents?: number
+  },
 ) {
   const isnExp = acct.get('ISN_EXPENSE')
   const isnPay = acct.get('ISN_PAYABLE')
@@ -539,7 +546,14 @@ export async function runPayroll(
         netoCents: existing.totalNetoCents,
         actorStaffId: actor.staffId ?? null,
       })
-      return { ...base, alreadyExists: true, payrollRunId: existing.id, posted: true, totals: existingTotals, isnCents: isnFor(existing.totalPercepcionesCents) }
+      return {
+        ...base,
+        alreadyExists: true,
+        payrollRunId: existing.id,
+        posted: true,
+        totals: existingTotals,
+        isnCents: isnFor(existing.totalPercepcionesCents),
+      }
     }
     return {
       ...base,

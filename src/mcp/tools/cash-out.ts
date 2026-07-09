@@ -8,7 +8,7 @@ import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 import { getSaldo } from '@/services/dashboard/cash-out/cash-out.ledger.service'
 import { listWithdrawals } from '@/services/dashboard/cash-out/cash-out.withdrawal.service'
 import { listCommissionRatesForOrg, listActiveDaysForOrg } from '@/services/dashboard/cash-out/cash-out.config.service'
-import { listWithdrawalsForOrg } from '@/services/dashboard/cash-out/cash-out.org.service'
+import { listWithdrawalsForOrg, getSaldosForOrg } from '@/services/dashboard/cash-out/cash-out.org.service'
 
 // Cash Out is on wherever serialized inventory (SIMs) is — it's not a separate module.
 const CASH_OUT_OFF =
@@ -167,6 +167,27 @@ export function registerCashOutTools(server: McpServer, scope: McpScope) {
             reportedAt: w.reportedAt,
             paidAt: w.paidAt,
           })),
+        })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'cash_out_org_saldos',
+    'Saldo de Cash Out DISPONIBLE por promotor, agregado en TODA tu organización activa (PESOS). Cada fila: venue, promotor y su saldo retirable. Ordenado de mayor a menor. Responde "¿cuánto le debo de comisión a todos los promotores? ¿quién trae más saldo?". Refresca el saldo antes de leer (respeta días activos y excluye ventas MANUAL_ENTRY). No requiere venueId — usa la organización activa de esta conexión.',
+    {},
+    async () => {
+      try {
+        const orgId = requireOrgReadAccess()
+        const saldos = await getSaldosForOrg(orgId)
+        return text({
+          ok: true,
+          orgId,
+          count: saldos.length,
+          totalSaldo: saldos.reduce((a, s) => a + Number(s.saldo), 0).toFixed(2),
+          saldos,
         })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })

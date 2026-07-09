@@ -629,6 +629,86 @@ export async function getSalesByCity(
  * reported as supervisors because attribution took the first ADMIN/MANAGER by
  * staffId). Staff has no direct supervisor FK.
  */
+/** One MANAGER (ADMIN fallback) per venue, deterministic by staffId asc. Shared by supervisor aggregations. */
+export async function resolveSupervisorByVenue(venueIds: string[]): Promise<Map<string, { id: string; name: string }>> {
+  const supervisorByVenue = new Map<string, { id: string; name: string }>()
+  if (venueIds.length === 0) return supervisorByVenue
+  const venueManagers = await prisma.staffVenue.findMany({
+    where: { venueId: { in: venueIds }, role: { in: ['ADMIN', 'MANAGER'] }, active: true },
+    orderBy: { staffId: 'asc' },
+    include: { staff: { select: { id: true, firstName: true, lastName: true } } },
+  })
+  for (const role of ['MANAGER', 'ADMIN'] as const) {
+    for (const sv of venueManagers) {
+      if (sv.role !== role) continue
+      if (!supervisorByVenue.has(sv.venueId)) {
+        supervisorByVenue.set(sv.venueId, { id: sv.staff.id, name: `${sv.staff.firstName} ${sv.staff.lastName}`.trim() })
+      }
+    }
+  }
+  return supervisorByVenue
+}
+
+export interface OrgStructureStore {
+  venueId: string
+  venueName: string
+  promoters: Array<{ staffId: string; name: string }>
+}
+export interface OrgStructure {
+  supervisors: Array<{ supervisorId: string; supervisorName: string; stores: OrgStructureStore[] }>
+  unassignedStores: OrgStructureStore[]
+}
+
+/**
+ * Org roster: supervisor (venue MANAGER, ADMIN fallback) → their stores → promoters
+ * (StaffVenue role CASHIER/WAITER). Includes stores with zero sales. Venues with no
+ * MANAGER/ADMIN land in `unassignedStores`.
+ */
+export async function getOrgStructure(orgId: string): Promise<OrgStructure> {
+  const venues = await prisma.venue.findMany({ where: { organizationId: orgId }, select: { id: true, name: true } })
+  const venueIds = venues.map(v => v.id)
+  const supervisorByVenue = await resolveSupervisorByVenue(venueIds)
+  const promoterRows =
+    venueIds.length === 0
+      ? []
+      : await prisma.staffVenue.findMany({
+          where: { venueId: { in: venueIds }, active: true, role: { in: ['CASHIER', 'WAITER'] } },
+          select: { venueId: true, staff: { select: { id: true, firstName: true, lastName: true } } },
+        })
+  const promotersByVenue = new Map<string, Array<{ staffId: string; name: string }>>()
+  for (const r of promoterRows) {
+    const list = promotersByVenue.get(r.venueId) ?? []
+    list.push({ staffId: r.staff.id, name: `${r.staff.firstName} ${r.staff.lastName}`.trim() })
+    promotersByVenue.set(r.venueId, list)
+  }
+  const storeOf = (v: { id: string; name: string }): OrgStructureStore => ({
+    venueId: v.id,
+    venueName: v.name,
+    promoters: promotersByVenue.get(v.id) ?? [],
+  })
+
+  const bySupervisor = new Map<string, { supervisorName: string; stores: OrgStructureStore[] }>()
+  const unassignedStores: OrgStructureStore[] = []
+  for (const v of venues) {
+    const sup = supervisorByVenue.get(v.id)
+    if (!sup) {
+      unassignedStores.push(storeOf(v))
+      continue
+    }
+    const entry = bySupervisor.get(sup.id) ?? { supervisorName: sup.name, stores: [] }
+    entry.stores.push(storeOf(v))
+    bySupervisor.set(sup.id, entry)
+  }
+  return {
+    supervisors: Array.from(bySupervisor.entries()).map(([supervisorId, e]) => ({
+      supervisorId,
+      supervisorName: e.supervisorName,
+      stores: e.stores,
+    })),
+    unassignedStores,
+  }
+}
+
 export async function getSalesBySupervisor(
   orgId: string,
   range: AggregationRange,
@@ -649,27 +729,7 @@ export async function getSalesBySupervisor(
   // Bulk lookup of one supervisor per venue: MANAGER first, ADMIN as fallback,
   // deterministic by staffId asc within each role.
   const venueIds = Array.from(new Set(verifications.map(v => v.venueId).filter(Boolean) as string[]))
-  const venueManagers = await prisma.staffVenue.findMany({
-    where: {
-      venueId: { in: venueIds },
-      role: { in: ['ADMIN', 'MANAGER'] },
-      active: true,
-    },
-    orderBy: { staffId: 'asc' },
-    include: { staff: { select: { id: true, firstName: true, lastName: true } } },
-  })
-  const supervisorByVenue = new Map<string, { id: string; name: string }>()
-  for (const role of ['MANAGER', 'ADMIN'] as const) {
-    for (const sv of venueManagers) {
-      if (sv.role !== role) continue
-      if (!supervisorByVenue.has(sv.venueId)) {
-        supervisorByVenue.set(sv.venueId, {
-          id: sv.staff.id,
-          name: `${sv.staff.firstName} ${sv.staff.lastName}`.trim(),
-        })
-      }
-    }
-  }
+  const supervisorByVenue = await resolveSupervisorByVenue(venueIds)
 
   const map = new Map<string, { name: string; byWeek: Record<string, number>; byMonth: Record<string, number> }>()
   for (const v of verifications) {
@@ -693,6 +753,64 @@ export async function getSalesBySupervisor(
         byMonth: val.byMonth,
         total,
       }
+    })
+    .sort((a, b) => b.total - a.total)
+}
+
+/**
+ * Confirmed (COMPLETED) sales per promoter × ISO week, attributed to the store and its
+ * supervisor. One row per (promoter, store). Weeks with zero sales are absent keys.
+ */
+export async function getSalesByPromoterWeekly(
+  orgId: string,
+  range: AggregationRange,
+): Promise<
+  Array<{
+    staffId: string
+    promoterName: string
+    venueId: string
+    venueName: string
+    supervisorId: string | null
+    supervisorName: string
+    byWeek: Record<string, number>
+    total: number
+  }>
+> {
+  const verifications = await prisma.saleVerification.findMany({
+    where: baseAggregationWhere(orgId, range),
+    select: {
+      createdAt: true,
+      venueId: true,
+      venue: { select: { id: true, name: true } },
+      staff: { select: { id: true, firstName: true, lastName: true } },
+    },
+  })
+  const venueIds = Array.from(new Set(verifications.map(v => v.venueId).filter((x): x is string => !!x)))
+  const supervisorByVenue = await resolveSupervisorByVenue(venueIds)
+
+  const map = new Map<
+    string,
+    { staffId: string; promoterName: string; venueId: string; venueName: string; byWeek: Record<string, number> }
+  >()
+  for (const v of verifications) {
+    if (!v.staff || !v.venueId) continue
+    const key = `${v.staff.id}|${v.venueId}`
+    const week = toWeekLabel(v.createdAt)
+    const row = map.get(key) ?? {
+      staffId: v.staff.id,
+      promoterName: `${v.staff.firstName} ${v.staff.lastName}`.trim(),
+      venueId: v.venueId,
+      venueName: v.venue?.name ?? 'Sin tienda',
+      byWeek: {},
+    }
+    row.byWeek[week] = (row.byWeek[week] ?? 0) + 1
+    map.set(key, row)
+  }
+  return Array.from(map.values())
+    .map(r => {
+      const sup = supervisorByVenue.get(r.venueId)
+      const total = Object.values(r.byWeek).reduce((a, b) => a + b, 0)
+      return { ...r, supervisorId: sup?.id ?? null, supervisorName: sup?.name ?? 'Sin supervisor', total }
     })
     .sort((a, b) => b.total - a.total)
 }

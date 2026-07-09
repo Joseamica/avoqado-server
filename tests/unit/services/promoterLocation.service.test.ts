@@ -20,9 +20,54 @@ describe('promoterLocation.service', () => {
 
       expect(result).toEqual({ id: 'ping_1' })
       expect(prismaMock.promoterLocationPing.create).toHaveBeenCalledWith({
-        data: { venueId: 'v1', staffId: 's1', latitude: 19.4326, longitude: -99.1332, accuracy: 12, capturedAt, source: 'PERIODIC' },
+        data: {
+          venueId: 'v1',
+          staffId: 's1',
+          latitude: 19.4326,
+          longitude: -99.1332,
+          accuracy: 12,
+          capturedAt,
+          source: 'PERIODIC',
+          terminalId: null,
+        },
         select: { id: true },
       })
+    })
+
+    // Task 2 (Ubicación de TPVs): attribute each ping to the Terminal that sent it.
+    it('persists terminalId when provided', async () => {
+      prismaMock.venueSettings.findUnique.mockResolvedValue({ trackPromoterLocation: true })
+      prismaMock.promoterLocationPing.create.mockResolvedValue({ id: 'ping_3' })
+
+      await recordPromoterPing({
+        venueId: 'v1',
+        staffId: 's1',
+        latitude: 1,
+        longitude: 2,
+        capturedAt: new Date('2026-07-08T18:00:00Z'),
+        terminalId: 't1',
+      })
+
+      expect(prismaMock.promoterLocationPing.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ terminalId: 't1' }) }),
+      )
+    })
+
+    it('defaults terminalId to null when absent', async () => {
+      prismaMock.venueSettings.findUnique.mockResolvedValue({ trackPromoterLocation: true })
+      prismaMock.promoterLocationPing.create.mockResolvedValue({ id: 'ping_4' })
+
+      await recordPromoterPing({
+        venueId: 'v1',
+        staffId: 's1',
+        latitude: 1,
+        longitude: 2,
+        capturedAt: new Date('2026-07-08T18:00:00Z'),
+      })
+
+      expect(prismaMock.promoterLocationPing.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ terminalId: null }) }),
+      )
     })
 
     it('defaults source to PERIODIC and accuracy to null when omitted', async () => {

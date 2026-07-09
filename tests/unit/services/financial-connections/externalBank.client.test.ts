@@ -14,10 +14,17 @@ async function loadClient() {
   return (await import('@/services/financial-connections/externalBank.client')).externalBankClient
 }
 
-beforeAll(() => nock.disableNetConnect())
+beforeAll(() => {
+  // A prior nock suite in this Jest worker may have called nock.restore(); re-arm.
+  if (!nock.isActive()) nock.activate()
+  nock.disableNetConnect()
+})
 afterAll(() => {
   nock.cleanAll()
   nock.enableNetConnect()
+  // Fully unpatch nock's global http interceptor so it can't leak into later
+  // suites in the same Jest worker (flaky 501 / socket hang up in route tests).
+  nock.restore()
 })
 afterEach(() => nock.cleanAll())
 
