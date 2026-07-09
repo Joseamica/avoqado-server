@@ -12,6 +12,7 @@ import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
 import { parseCfdiXml } from './cfdiReceived.parser'
+import { suggestsFixedAsset } from './assetTypeCatalog'
 import { resolveScopeOrNull, type CatalogScope } from './chartOfAccounts.service'
 
 /**
@@ -120,6 +121,8 @@ export interface ExpenseDTO {
   source: ExpenseSource
   status: string
   createdAt: string
+  /** Solo al CREAR: por su importe, el gasto parece una inversión → sugerir registrarlo como activo fijo. */
+  fixedAssetSuggestion?: boolean
 }
 
 async function requireScope(venueId: string): Promise<CatalogScope> {
@@ -377,7 +380,11 @@ export async function createExpense(venueId: string, input: CreateExpenseInput, 
       data: { proveedorRfc, totalCents, metodoPago, paymentStatus, uuid },
     })
 
-    return mapExpense(created)
+    // Sugerencia por monto (decisión del founder: "sugerir por monto, confirmar a mano"): si por su
+    // importe el gasto parece una INVERSIÓN (bien duradero), se sugiere registrarlo como activo fijo.
+    // Solo en categorías donde cabría un bien (general/otro); NUNCA decide solo — el usuario confirma.
+    const fixedAssetSuggestion = (categoria === 'GASTO_GENERAL' || categoria === 'OTRO') && suggestsFixedAsset(subtotalCents)
+    return { ...mapExpense(created), fixedAssetSuggestion }
   } catch (e) {
     if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
       throw new BadRequestError('Este gasto ya fue registrado (folio fiscal o comprobante duplicado).')

@@ -15,6 +15,7 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
 jest.mock('../../../../src/services/fiscal/chartOfAccounts.service', () => ({ resolveScopeOrNull: jest.fn() }))
 jest.mock('../../../../src/services/fiscal/accountMapping.service', () => ({ getMappings: jest.fn() }))
 jest.mock('../../../../src/services/fiscal/journalEntry.service', () => ({ postJournalEntry: jest.fn() }))
+jest.mock('../../../../src/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 
 import prisma from '../../../../src/utils/prismaClient'
 import { resolveScopeOrNull } from '../../../../src/services/fiscal/chartOfAccounts.service'

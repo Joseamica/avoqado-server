@@ -276,3 +276,31 @@ describe('getAcreditablePagado', () => {
     await expect(getAcreditablePagado('v1', '2026')).rejects.toThrow(BadRequestError)
   })
 })
+
+describe('sugerencia de activo fijo por monto (sugerir + confirmar a mano)', () => {
+  // Por su importe, un gasto GENERAL/OTRO ≥ $5,000 (subtotal) SUGIERE registrarse como activo fijo.
+  // Solo sugiere — nada se deprecia sin que el usuario lo confirme en Activos fijos.
+  const ASSETY = { subtotalCents: 6_000_00, ivaCents: 960_00, totalCents: 6_960_00 }
+
+  it('gasto general ≥ $5,000 → sugiere activo fijo', async () => {
+    const e = await createExpense('v1', { ...BASE, ...ASSETY }, { staffId: 's' })
+    expect(e.fixedAssetSuggestion).toBe(true)
+  })
+
+  it('categoría OTRO ≥ $5,000 → también sugiere', async () => {
+    const e = await createExpense('v1', { ...BASE, ...ASSETY, categoria: 'OTRO' }, { staffId: 's' })
+    expect(e.fixedAssetSuggestion).toBe(true)
+  })
+
+  it('combustible / arrendamiento grandes → NO sugiere (no son bienes)', async () => {
+    const c = await createExpense('v1', { ...BASE, ...ASSETY, categoria: 'COMBUSTIBLE' }, { staffId: 's' })
+    expect(c.fixedAssetSuggestion).toBe(false)
+    const r = await createExpense('v1', { ...BASE, ...ASSETY, categoria: 'ARRENDAMIENTO', folio: 'F2' }, { staffId: 's' })
+    expect(r.fixedAssetSuggestion).toBe(false)
+  })
+
+  it('gasto chico → NO sugiere', async () => {
+    const e = await createExpense('v1', BASE, { staffId: 's' })
+    expect(e.fixedAssetSuggestion).toBe(false)
+  })
+})

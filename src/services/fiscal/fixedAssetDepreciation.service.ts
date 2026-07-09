@@ -17,6 +17,7 @@ import { JournalEntrySource, JournalEntryType } from '@prisma/client'
 
 import prisma from '../../utils/prismaClient'
 import { BadRequestError } from '../../errors/AppError'
+import { logAction } from '../dashboard/activity-log.service'
 import { cappedMoiCents } from './assetTypeCatalog'
 import { resolveScopeOrNull } from './chartOfAccounts.service'
 import { getMappings } from './accountMapping.service'
@@ -179,6 +180,17 @@ export async function generateDepreciationForVenue(
     await prisma.fixedAssetDepreciation.updateMany({
       where: { period, fixedAsset: { organizationId: scope.organizationId, rfc: scope.rfc } },
       data: { posted: true, journalEntryId: poliza.journalEntryId },
+    })
+  }
+
+  // Auditoría: la corrida muta renglones de depreciación (y quizá la póliza) — solo cuando hizo algo.
+  if (assetsDepreciated > 0) {
+    void logAction({
+      staffId: actorStaffId,
+      venueId,
+      action: 'DEPRECIATION_RUN',
+      entity: 'FixedAssetDepreciation',
+      data: { period, assetsDepreciated, totalPeriodCents, posted: poliza.posted },
     })
   }
 

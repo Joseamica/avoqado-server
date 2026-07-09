@@ -700,6 +700,12 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           deducible: e.deducible,
           ivaAcreditable: e.ivaAcreditable,
         },
+        ...(e.fixedAssetSuggestion
+          ? {
+              sugerenciaActivoFijo:
+                'Por su importe, este gasto parece una INVERSIÓN (bien duradero). Si es equipo/mobiliario/vehículo, regístralo también con register_fixed_asset para depreciarlo "a plazos" (deducción de inversiones). Tú decides — nada se deprecia solo.',
+            }
+          : {}),
         nota: 'El IVA se vuelve acreditable cuando el gasto está PAGADO (cash-basis). Corre generate_expense_policies para postear su póliza.',
       })
     },
