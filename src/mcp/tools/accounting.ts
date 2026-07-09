@@ -18,7 +18,13 @@ import { getCatalogoXml, getBalanzaXml, getPolizasXml } from '@/services/fiscal/
 import { getIsrProvisional } from '@/services/fiscal/isr.service'
 import { setSalesRetention } from '@/services/fiscal/salesRetention.service'
 import { setFiscalLoss } from '@/services/fiscal/fiscalLoss.service'
-import { disposeFixedAsset, listAssetTypes, listFixedAssets, registerFixedAsset, updateFixedAsset } from '@/services/fiscal/fixedAsset.service'
+import {
+  disposeFixedAsset,
+  listAssetTypes,
+  listFixedAssets,
+  registerFixedAsset,
+  updateFixedAsset,
+} from '@/services/fiscal/fixedAsset.service'
 import { generateDepreciationForVenue } from '@/services/fiscal/fixedAssetDepreciation.service'
 import { computePayrollPreview, createEmployee, listEmployees, runPayroll } from '@/services/fiscal/nomina.service'
 import { stampPayrollReceipts } from '@/services/fiscal/nominaCfdi.service'
@@ -1206,7 +1212,14 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         },
         scope.staffId,
       )
-      return text({ ok: true, id: a.id, descripcion: a.description, tipo: a.assetTypeLabel, moi: pesos(a.moiCents), tasaAnual: a.annualRate })
+      return text({
+        ok: true,
+        id: a.id,
+        descripcion: a.description,
+        tipo: a.assetTypeLabel,
+        moi: pesos(a.moiCents),
+        tasaAnual: a.annualRate,
+      })
     },
   )
 

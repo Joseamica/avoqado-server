@@ -1,10 +1,15 @@
 # PlayTelecom MCP Coverage — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Give PlayTelecom (serialized-inventory / white-label) full read coverage through the Avoqado customer MCP so operators answer inventory, sale-verification, roster, commission-balance and location questions in a single call — and hide every PT tool from non-PT connections.
+**Goal:** Give PlayTelecom (serialized-inventory / white-label) full read coverage through the Avoqado customer MCP so operators answer
+inventory, sale-verification, roster, commission-balance and location questions in a single call — and hide every PT tool from non-PT
+connections.
 
-**Architecture:** Add thin, org-aware backing functions in `avoqado-server` services, expose them as 7 new read MCP tools, split the serialized tools into their own registration module, and register all PT tool groups **conditionally** based on the connection's enabled modules. Every existing call-time module/permission gate stays (defense in depth).
+**Architecture:** Add thin, org-aware backing functions in `avoqado-server` services, expose them as 7 new read MCP tools, split the
+serialized tools into their own registration module, and register all PT tool groups **conditionally** based on the connection's enabled
+modules. Every existing call-time module/permission gate stays (defense in depth).
 
 **Tech Stack:** TypeScript, Node, Express, Prisma/PostgreSQL, `@modelcontextprotocol/sdk`, Jest 29 (`npm run test:unit`).
 
@@ -12,49 +17,63 @@
 
 - **Repo:** single repo `avoqado-server`. Paths below are relative to its root.
 - **Reads only.** No sale-verification writes (approve/reject/reopen/edit). No new mutations.
-- **No new tier.** All new capabilities inherit the existing `SERIALIZED_INVENTORY` module (PREMIUM today) / `WHITE_LABEL_DASHBOARD` gate. Do not add tier logic.
+- **No new tier.** All new capabilities inherit the existing `SERIALIZED_INVENTORY` module (PREMIUM today) / `WHITE_LABEL_DASHBOARD` gate.
+  Do not add tier logic.
 - **Never hardcode a PlayTelecom slug/org/name.** Everything stays module/permission-driven.
 - **Money** = Mexican pesos, major units (e.g. `150.50`), never cents. **Dates** venue-local (`America/Mexico_City`).
-- **Isolation invariant:** every tool keeps `guard.venueFilter` / org-permission gate + module gate. Conditional registration is additive, never a replacement.
-- **Serialized SIM pool is ORG-LEVEL:** `SerializedItem.venueId` is nullable (`null` = org item). New SIM reads MUST include `venueId=null` items (scope by `OR:[{venueId in allowed},{organizationId}]`), never a bare `venueId` equality.
-- **Promoter = `StaffVenue.role ∈ {CASHIER, WAITER}`** (matches `organizationDashboard.service.ts:572`). **Supervisor = venue `MANAGER` (fallback `ADMIN`)** (matches `getSalesBySupervisor`).
-- **Git is READ-ONLY in this workflow.** Do NOT run `git commit`/`checkout`/`switch`/`worktree`. Each task ends by running its tests green and leaving changes in the working tree; a human (Jose) commits later. The "Checkpoint" step is where a commit would go.
-- **Test command:** `npm run test:unit -- <path>` (Jest). Mirror the mock style of `tests/unit/mcp-customer/serialized-gating.test.ts` for tool tests.
+- **Isolation invariant:** every tool keeps `guard.venueFilter` / org-permission gate + module gate. Conditional registration is additive,
+  never a replacement.
+- **Serialized SIM pool is ORG-LEVEL:** `SerializedItem.venueId` is nullable (`null` = org item). New SIM reads MUST include `venueId=null`
+  items (scope by `OR:[{venueId in allowed},{organizationId}]`), never a bare `venueId` equality.
+- **Promoter = `StaffVenue.role ∈ {CASHIER, WAITER}`** (matches `organizationDashboard.service.ts:572`). **Supervisor = venue `MANAGER`
+  (fallback `ADMIN`)** (matches `getSalesBySupervisor`).
+- **Git is READ-ONLY in this workflow.** Do NOT run `git commit`/`checkout`/`switch`/`worktree`. Each task ends by running its tests green
+  and leaving changes in the working tree; a human (Jose) commits later. The "Checkpoint" step is where a commit would go.
+- **Test command:** `npm run test:unit -- <path>` (Jest). Mirror the mock style of `tests/unit/mcp-customer/serialized-gating.test.ts` for
+  tool tests.
 
 ---
 
 ## File structure
 
 **Backend services (add functions, no rewrites):**
+
 - `src/services/modules/module.service.ts` → `anyVenueHasModule`, `venuesWithModule`
 - `src/services/serialized-inventory/serializedInventory.service.ts` → `getOrgStockByCategory`, `listOrgItems`
-- `src/services/dashboard/sale-verification.org.dashboard.service.ts` → `resolveSupervisorByVenue` (extracted), `getSalesByPromoterWeekly`, `getOrgStructure`
+- `src/services/dashboard/sale-verification.org.dashboard.service.ts` → `resolveSupervisorByVenue` (extracted), `getSalesByPromoterWeekly`,
+  `getOrgStructure`
 - `src/services/dashboard/cash-out/cash-out.org.service.ts` → `getSaldosForOrg`
 - `src/services/promoters/promoterLocation.service.ts` → `getLatestPromoterLocationsForVenue`
 
 **MCP tools:**
-- `src/mcp/tools/serialized.ts` → NEW file `registerSerializedTools`: the 4 moved serialized tools + `serialized_stock_by_category` + `list_serialized_items`
+
+- `src/mcp/tools/serialized.ts` → NEW file `registerSerializedTools`: the 4 moved serialized tools + `serialized_stock_by_category` +
+  `list_serialized_items`
 - `src/mcp/tools/inventory.ts` → remove the 4 serialized tools (keep generic inventory tools)
 - `src/mcp/tools/saleVerifications.ts` → `promoterWeekly` groupBy + `list_sale_verifications` + `org_structure`
 - `src/mcp/tools/cash-out.ts` → `cash_out_org_saldos`
 - `src/mcp/tools/promoterLocation.ts` → `promoters_live_locations`
 - `src/mcp/server.ts` → `registerAllTools(server, scope, flags)` + conditional registration
 
-**Tests:** `tests/unit/mcp-customer/` (tools + registration) and `tests/unit/services/` (pure service fns; create dir if absent — mirror an existing service test's location).
+**Tests:** `tests/unit/mcp-customer/` (tools + registration) and `tests/unit/services/` (pure service fns; create dir if absent — mirror an
+existing service test's location).
 
 ---
 
 ### Task 1: Bulk module helpers (`anyVenueHasModule`, `venuesWithModule`)
 
 **Files:**
+
 - Modify: `src/services/modules/module.service.ts` (add two methods to `ModuleService`)
 - Test: `tests/unit/services/module-bulk.test.ts` (create)
 
 **Interfaces:**
+
 - Produces:
   - `moduleService.venuesWithModule(venueIds: string[], code: ModuleCode): Promise<Set<string>>`
   - `moduleService.anyVenueHasModule(venueIds: string[], code: ModuleCode): Promise<boolean>`
-- Semantics MUST equal `isModuleEnabled` per venue: an existing `VenueModule` row is the source of truth (its `enabled`, even `false`, overrides org); only when NO `VenueModule` row exists does the org-level `OrganizationModule` decide.
+- Semantics MUST equal `isModuleEnabled` per venue: an existing `VenueModule` row is the source of truth (its `enabled`, even `false`,
+  overrides org); only when NO `VenueModule` row exists does the org-level `OrganizationModule` decide.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -80,9 +99,7 @@ beforeEach(() => jest.clearAllMocks())
 describe('venuesWithModule — replicates isModuleEnabled precedence', () => {
   it('venue-level override OFF beats org-level ON (venue excluded)', async () => {
     // v1: explicit VenueModule enabled=false → OFF despite org ON. v2: no row → inherits org ON.
-    mockVenueModuleFindMany.mockResolvedValue([
-      { venueId: 'v1', enabled: false },
-    ])
+    mockVenueModuleFindMany.mockResolvedValue([{ venueId: 'v1', enabled: false }])
     mockVenueFindMany.mockResolvedValue([
       { id: 'v1', organizationId: 'o1' },
       { id: 'v2', organizationId: 'o1' },
@@ -114,12 +131,12 @@ describe('venuesWithModule — replicates isModuleEnabled precedence', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npm run test:unit -- tests/unit/services/module-bulk.test.ts`
-Expected: FAIL — `moduleService.venuesWithModule is not a function`.
+Run: `npm run test:unit -- tests/unit/services/module-bulk.test.ts` Expected: FAIL — `moduleService.venuesWithModule is not a function`.
 
 - [ ] **Step 3: Implement the methods**
 
-Add inside `class ModuleService` in `src/services/modules/module.service.ts` (uses `this.db`, the same Prisma client `isModuleEnabled` uses):
+Add inside `class ModuleService` in `src/services/modules/module.service.ts` (uses `this.db`, the same Prisma client `isModuleEnabled`
+uses):
 
 ```ts
 /**
@@ -166,8 +183,7 @@ async anyVenueHasModule(venueIds: string[], moduleCode: ModuleCode): Promise<boo
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npm run test:unit -- tests/unit/services/module-bulk.test.ts`
-Expected: PASS (3 tests).
+Run: `npm run test:unit -- tests/unit/services/module-bulk.test.ts` Expected: PASS (3 tests).
 
 - [ ] **Step 5: Checkpoint** — tests green; leave in working tree (no commit — git read-only).
 
@@ -176,15 +192,19 @@ Expected: PASS (3 tests).
 ### Task 2: Org-aware serialized reads (`getOrgStockByCategory`, `listOrgItems`)
 
 **Files:**
+
 - Modify: `src/services/serialized-inventory/serializedInventory.service.ts` (add two methods to `SerializedInventoryService`)
 - Test: `tests/unit/services/serialized-org-reads.test.ts` (create)
 
 **Interfaces:**
+
 - Produces:
   - `serializedInventoryService.getOrgStockByCategory(orgId, allowedVenueIds): Promise<Array<{ category: ItemCategory; available: number; sold: number }>>`
   - `serializedInventoryService.listOrgItems(opts): Promise<{ items: (SerializedItem & { category: ItemCategory })[]; total: number }>`
-    where `opts = { orgId: string; allowedVenueIds: string[]; categoryId?: string; status?: SerializedItemStatus; custodyState?: SerializedItemCustodyState; assignedPromoterId?: string; skip?: number; take?: number }`
-- Both scope items with `OR: [{ venueId: { in: allowedVenueIds } }, { organizationId: orgId }]` so the org-level pool (`venueId=null`) is INCLUDED.
+    where
+    `opts = { orgId: string; allowedVenueIds: string[]; categoryId?: string; status?: SerializedItemStatus; custodyState?: SerializedItemCustodyState; assignedPromoterId?: string; skip?: number; take?: number }`
+- Both scope items with `OR: [{ venueId: { in: allowedVenueIds } }, { organizationId: orgId }]` so the org-level pool (`venueId=null`) is
+  INCLUDED.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -213,7 +233,9 @@ beforeEach(() => jest.clearAllMocks())
 
 describe('listOrgItems — includes org-level pool (venueId=null)', () => {
   it('scopes by OR[venueId in allowed, organizationId] so venueId=null items are returned', async () => {
-    mockItemFindMany.mockResolvedValue([{ id: 'i1', serialNumber: 'ICC1', venueId: null, status: 'AVAILABLE', category: { name: 'SIM de Evento' } }])
+    mockItemFindMany.mockResolvedValue([
+      { id: 'i1', serialNumber: 'ICC1', venueId: null, status: 'AVAILABLE', category: { name: 'SIM de Evento' } },
+    ])
     mockItemCount.mockResolvedValue(1)
     const res = await serializedInventoryService.listOrgItems({ orgId: 'o1', allowedVenueIds: ['v1'], status: 'AVAILABLE', take: 50 })
     expect(res.total).toBe(1)
@@ -241,12 +263,13 @@ describe('getOrgStockByCategory — org pool per category', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npm run test:unit -- tests/unit/services/serialized-org-reads.test.ts`
-Expected: FAIL — methods not defined.
+Run: `npm run test:unit -- tests/unit/services/serialized-org-reads.test.ts` Expected: FAIL — methods not defined.
 
 - [ ] **Step 3: Implement the methods**
 
-Add to `class SerializedInventoryService` (mirror the existing `getStockByCategory`/`listItems` but org-scoped). Reuse the class's `this.db` and imported `Prisma`, `ItemCategory`, `SerializedItem`, `SerializedItemStatus`, `SerializedItemCustodyState` types (import the two enums from `@prisma/client` at the top if not already present):
+Add to `class SerializedInventoryService` (mirror the existing `getStockByCategory`/`listItems` but org-scoped). Reuse the class's `this.db`
+and imported `Prisma`, `ItemCategory`, `SerializedItem`, `SerializedItemStatus`, `SerializedItemCustodyState` types (import the two enums
+from `@prisma/client` at the top if not already present):
 
 ```ts
 private orgPoolWhere(orgId: string, allowedVenueIds: string[]): Prisma.SerializedItemWhereInput {
@@ -320,8 +343,7 @@ async getOrgStockByCategory(
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npm run test:unit -- tests/unit/services/serialized-org-reads.test.ts`
-Expected: PASS (2 tests).
+Run: `npm run test:unit -- tests/unit/services/serialized-org-reads.test.ts` Expected: PASS (2 tests).
 
 - [ ] **Step 5: Checkpoint** — tests green; leave in working tree.
 
@@ -330,18 +352,28 @@ Expected: PASS (2 tests).
 ### Task 3: Split serialized tools into `serialized.ts` + add the two SIM read tools
 
 **Files:**
+
 - Create: `src/mcp/tools/serialized.ts` (`registerSerializedTools`)
 - Modify: `src/mcp/tools/inventory.ts` (delete the 4 serialized tools + now-unused imports)
-- Modify: `src/mcp/server.ts` (import `registerSerializedTools`; call it where `registerInventoryTools` was — temporary unconditional call, made conditional in Task 9)
+- Modify: `src/mcp/server.ts` (import `registerSerializedTools`; call it where `registerInventoryTools` was — temporary unconditional call,
+  made conditional in Task 9)
 - Test: `tests/unit/mcp-customer/serialized-tools.test.ts` (create) + keep `serialized-gating.test.ts` working by re-pointing its import
 
 **Interfaces:**
+
 - Consumes: `moduleService.isModuleEnabled` (unchanged gates); `serializedInventoryService.getOrgStockByCategory`, `listOrgItems` (Task 2).
-- Produces: `registerSerializedTools(server, scope)` registering `serialized_inventory`, `sim_custody`, `mark_serialized_item`, `change_sim_category` (moved verbatim), plus `serialized_stock_by_category`, `list_serialized_items`.
+- Produces: `registerSerializedTools(server, scope)` registering `serialized_inventory`, `sim_custody`, `mark_serialized_item`,
+  `change_sim_category` (moved verbatim), plus `serialized_stock_by_category`, `list_serialized_items`.
 
 - [ ] **Step 1: Create `serialized.ts` and move the 4 tools verbatim**
 
-Create `src/mcp/tools/serialized.ts`. Move — unchanged — the four `server.tool(...)` blocks `serialized_inventory`, `mark_serialized_item`, `sim_custody`, `change_sim_category` out of `inventory.ts` into a new `export function registerSerializedTools(server: McpServer, scope: McpScope) { const guard = createGuard(scope); … }`. Copy the imports those tools use from `inventory.ts` (`z`, `prisma`, `createGuard`, `text`, `serializedInventoryService`, `simCustodyService`, `auditMcpWrite`, `ROLE_HIERARCHY`, `StaffRole`, `moduleService`, `MODULE_CODES`, `CUSTODY_STATE_ES`, `SERIALIZED_OFF_MSG`). Also move the `CUSTODY_STATE_ES` const and `SERIALIZED_OFF_MSG` const into `serialized.ts` (they are only used by these tools). Delete those four blocks and now-unused imports/consts from `inventory.ts`.
+Create `src/mcp/tools/serialized.ts`. Move — unchanged — the four `server.tool(...)` blocks `serialized_inventory`, `mark_serialized_item`,
+`sim_custody`, `change_sim_category` out of `inventory.ts` into a new
+`export function registerSerializedTools(server: McpServer, scope: McpScope) { const guard = createGuard(scope); … }`. Copy the imports
+those tools use from `inventory.ts` (`z`, `prisma`, `createGuard`, `text`, `serializedInventoryService`, `simCustodyService`,
+`auditMcpWrite`, `ROLE_HIERARCHY`, `StaffRole`, `moduleService`, `MODULE_CODES`, `CUSTODY_STATE_ES`, `SERIALIZED_OFF_MSG`). Also move the
+`CUSTODY_STATE_ES` const and `SERIALIZED_OFF_MSG` const into `serialized.ts` (they are only used by these tools). Delete those four blocks
+and now-unused imports/consts from `inventory.ts`.
 
 - [ ] **Step 2: Add the two new tools inside `registerSerializedTools`**
 
@@ -401,7 +433,8 @@ server.tool(
         select: { id: true, name: true },
       })
       const match = cats.find(c => c.name.trim().toLowerCase() === categoryName.trim().toLowerCase())
-      if (!match) return text({ ok: false, error: `No encontré la categoría "${categoryName}".`, availableCategories: cats.map(c => c.name) })
+      if (!match)
+        return text({ ok: false, error: `No encontré la categoría "${categoryName}".`, availableCategories: cats.map(c => c.name) })
       categoryId = match.id
     }
     const { items, total } = await serializedInventoryService.listOrgItems({
@@ -432,11 +465,14 @@ server.tool(
 
 - [ ] **Step 3: Update `server.ts` import + call (temporary, unconditional)**
 
-In `src/mcp/server.ts` add `import { registerSerializedTools } from './tools/serialized'` and, right after `registerInventoryTools(server, scope)`, add `registerSerializedTools(server, scope)`. (Task 9 makes it conditional.)
+In `src/mcp/server.ts` add `import { registerSerializedTools } from './tools/serialized'` and, right after
+`registerInventoryTools(server, scope)`, add `registerSerializedTools(server, scope)`. (Task 9 makes it conditional.)
 
 - [ ] **Step 4: Re-point the existing gating test import**
 
-The existing `tests/unit/mcp-customer/serialized-gating.test.ts` imports `registerInventoryTools` and calls `serialized_inventory` / `mark_serialized_item`. Change its import to `registerSerializedTools` from `../../../src/mcp/tools/serialized` and its `beforeAll` to register that. The rest of the file is unchanged.
+The existing `tests/unit/mcp-customer/serialized-gating.test.ts` imports `registerInventoryTools` and calls `serialized_inventory` /
+`mark_serialized_item`. Change its import to `registerSerializedTools` from `../../../src/mcp/tools/serialized` and its `beforeAll` to
+register that. The rest of the file is unchanged.
 
 - [ ] **Step 5: Write the new-tools test**
 
@@ -468,13 +504,17 @@ jest.mock('@/mcp/guard', () => ({
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
 const scope = {
-  staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'],
+  staffId: 's1',
+  activeOrg: 'o1',
+  allowedVenueIds: ['v1'],
   perVenueAccess: new Map([['v1', { organizationId: 'o1' }]]),
 } as unknown as McpScope
 const call = (n: string, a: Record<string, unknown>) => handlers.get(n)!(a, {})
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
 
-beforeAll(() => registerSerializedTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope))
+beforeAll(() =>
+  registerSerializedTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope),
+)
 beforeEach(() => jest.clearAllMocks())
 
 describe('serialized_stock_by_category', () => {
@@ -496,7 +536,12 @@ describe('serialized_stock_by_category', () => {
 describe('list_serialized_items', () => {
   it('module ON → passes org pool + filters', async () => {
     mockIsEnabled.mockResolvedValue(true)
-    mockListOrgItems.mockResolvedValue({ items: [{ serialNumber: 'ICC1', status: 'AVAILABLE', custodyState: 'ADMIN_HELD', category: { name: 'SIM de Evento' }, venueId: null }], total: 1 })
+    mockListOrgItems.mockResolvedValue({
+      items: [
+        { serialNumber: 'ICC1', status: 'AVAILABLE', custodyState: 'ADMIN_HELD', category: { name: 'SIM de Evento' }, venueId: null },
+      ],
+      total: 1,
+    })
     const out = parse(await call('list_serialized_items', { venueId: 'v1', status: 'AVAILABLE' }))
     expect(out.total).toBe(1)
     expect(mockListOrgItems).toHaveBeenCalledWith(expect.objectContaining({ orgId: 'o1', allowedVenueIds: ['v1'], status: 'AVAILABLE' }))
@@ -506,8 +551,8 @@ describe('list_serialized_items', () => {
 
 - [ ] **Step 6: Run tests**
 
-Run: `npm run test:unit -- tests/unit/mcp-customer/serialized-tools.test.ts tests/unit/mcp-customer/serialized-gating.test.ts`
-Expected: PASS (both files).
+Run: `npm run test:unit -- tests/unit/mcp-customer/serialized-tools.test.ts tests/unit/mcp-customer/serialized-gating.test.ts` Expected:
+PASS (both files).
 
 - [ ] **Step 7: Type-check the touched files**
 
@@ -520,13 +565,17 @@ Run: `npx tsc -p tsconfig.json --noEmit` (or the repo's build) — expect no err
 ### Task 4: `promoterWeekly` — weekly per-promoter sales with store + supervisor
 
 **Files:**
-- Modify: `src/services/dashboard/sale-verification.org.dashboard.service.ts` (extract `resolveSupervisorByVenue`, add `getSalesByPromoterWeekly`)
+
+- Modify: `src/services/dashboard/sale-verification.org.dashboard.service.ts` (extract `resolveSupervisorByVenue`, add
+  `getSalesByPromoterWeekly`)
 - Modify: `src/mcp/tools/saleVerifications.ts` (import + add `promoterWeekly` to the `groupBy` enum and switch)
 - Test: `tests/unit/services/sales-promoter-weekly.test.ts` (create)
 
 **Interfaces:**
+
 - Consumes: existing `baseAggregationWhere`, `toWeekLabel`.
 - Produces:
+
   - `resolveSupervisorByVenue(venueIds: string[]): Promise<Map<string, { id: string; name: string }>>`
   - `getSalesByPromoterWeekly(orgId, range): Promise<Array<{ staffId: string; promoterName: string; venueId: string; venueName: string; supervisorId: string | null; supervisorName: string; byWeek: Record<string, number>; total: number }>>`
 
@@ -556,28 +605,44 @@ beforeEach(() => jest.clearAllMocks())
 it('buckets a promoter by ISO week and attributes venue + supervisor', async () => {
   // Two COMPLETED sales same promoter same store, weeks W18 and W19.
   mockSVFindMany.mockResolvedValue([
-    { createdAt: new Date('2026-05-01T18:00:00Z'), venueId: 'v1', venue: { id: 'v1', name: 'BAE Uno' }, staff: { id: 'p1', firstName: 'Ana', lastName: 'León' } },
-    { createdAt: new Date('2026-05-08T18:00:00Z'), venueId: 'v1', venue: { id: 'v1', name: 'BAE Uno' }, staff: { id: 'p1', firstName: 'Ana', lastName: 'León' } },
+    {
+      createdAt: new Date('2026-05-01T18:00:00Z'),
+      venueId: 'v1',
+      venue: { id: 'v1', name: 'BAE Uno' },
+      staff: { id: 'p1', firstName: 'Ana', lastName: 'León' },
+    },
+    {
+      createdAt: new Date('2026-05-08T18:00:00Z'),
+      venueId: 'v1',
+      venue: { id: 'v1', name: 'BAE Uno' },
+      staff: { id: 'p1', firstName: 'Ana', lastName: 'León' },
+    },
   ])
   // Supervisor lookup: v1 → MANAGER Hugo.
-  mockStaffVenueFindMany.mockResolvedValue([
-    { venueId: 'v1', role: 'MANAGER', staff: { id: 'sup1', firstName: 'Hugo', lastName: 'G' } },
-  ])
+  mockStaffVenueFindMany.mockResolvedValue([{ venueId: 'v1', role: 'MANAGER', staff: { id: 'sup1', firstName: 'Hugo', lastName: 'G' } }])
   const rows = await getSalesByPromoterWeekly('o1', { from: new Date('2026-04-01'), to: new Date('2026-06-01') } as never)
   expect(rows).toHaveLength(1)
-  expect(rows[0]).toMatchObject({ staffId: 'p1', venueId: 'v1', venueName: 'BAE Uno', supervisorId: 'sup1', supervisorName: 'Hugo G', total: 2 })
+  expect(rows[0]).toMatchObject({
+    staffId: 'p1',
+    venueId: 'v1',
+    venueName: 'BAE Uno',
+    supervisorId: 'sup1',
+    supervisorName: 'Hugo G',
+    total: 2,
+  })
   expect(Object.values(rows[0].byWeek).reduce((a, b) => a + b, 0)).toBe(2)
 })
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npm run test:unit -- tests/unit/services/sales-promoter-weekly.test.ts`
-Expected: FAIL — `getSalesByPromoterWeekly` not exported.
+Run: `npm run test:unit -- tests/unit/services/sales-promoter-weekly.test.ts` Expected: FAIL — `getSalesByPromoterWeekly` not exported.
 
 - [ ] **Step 3: Extract `resolveSupervisorByVenue` + implement `getSalesByPromoterWeekly`**
 
-In `sale-verification.org.dashboard.service.ts`, extract the supervisor-lookup block currently inside `getSalesBySupervisor` (the `venueManagers` findMany + `supervisorByVenue` map build) into an exported helper, and have `getSalesBySupervisor` call it (no behavior change):
+In `sale-verification.org.dashboard.service.ts`, extract the supervisor-lookup block currently inside `getSalesBySupervisor` (the
+`venueManagers` findMany + `supervisorByVenue` map build) into an exported helper, and have `getSalesBySupervisor` call it (no behavior
+change):
 
 ```ts
 /** One MANAGER (ADMIN fallback) per venue, deterministic by staffId asc. Shared by supervisor aggregations. */
@@ -634,14 +699,21 @@ export async function getSalesByPromoterWeekly(
   const supervisorByVenue = await resolveSupervisorByVenue(venueIds)
 
   // key = `${staffId}|${venueId}` → one row per promoter per store.
-  const map = new Map<string, { staffId: string; promoterName: string; venueId: string; venueName: string; byWeek: Record<string, number> }>()
+  const map = new Map<
+    string,
+    { staffId: string; promoterName: string; venueId: string; venueName: string; byWeek: Record<string, number> }
+  >()
   for (const v of verifications) {
     if (!v.staff || !v.venueId) continue
     const key = `${v.staff.id}|${v.venueId}`
     const week = toWeekLabel(v.createdAt)
-    const row =
-      map.get(key) ??
-      { staffId: v.staff.id, promoterName: `${v.staff.firstName} ${v.staff.lastName}`.trim(), venueId: v.venueId, venueName: v.venue?.name ?? 'Sin tienda', byWeek: {} }
+    const row = map.get(key) ?? {
+      staffId: v.staff.id,
+      promoterName: `${v.staff.firstName} ${v.staff.lastName}`.trim(),
+      venueId: v.venueId,
+      venueName: v.venue?.name ?? 'Sin tienda',
+      byWeek: {},
+    }
     row.byWeek[week] = (row.byWeek[week] ?? 0) + 1
     map.set(key, row)
   }
@@ -657,12 +729,15 @@ export async function getSalesByPromoterWeekly(
 
 - [ ] **Step 4: Wire the `promoterWeekly` groupBy into the tool**
 
-In `src/mcp/tools/saleVerifications.ts`: import `getSalesByPromoterWeekly`; add `'promoterWeekly'` to the `groupBy` `z.enum([...])`; add a `case 'promoterWeekly': return text({ promoters: await getSalesByPromoterWeekly(orgId, range) })` to the switch; and extend the tool description with: `"promoterWeekly" (por promotor × semana, ya atribuido a su tienda y supervisor — úsalo para análisis por supervisor sin cruzar datos)`.
+In `src/mcp/tools/saleVerifications.ts`: import `getSalesByPromoterWeekly`; add `'promoterWeekly'` to the `groupBy` `z.enum([...])`; add a
+`case 'promoterWeekly': return text({ promoters: await getSalesByPromoterWeekly(orgId, range) })` to the switch; and extend the tool
+description with:
+`"promoterWeekly" (por promotor × semana, ya atribuido a su tienda y supervisor — úsalo para análisis por supervisor sin cruzar datos)`.
 
 - [ ] **Step 5: Run tests**
 
-Run: `npm run test:unit -- tests/unit/services/sales-promoter-weekly.test.ts`
-Expected: PASS. Also re-run existing org sales tests if present: `npm run test:unit -- tests/unit/services` (no regressions in `getSalesBySupervisor`).
+Run: `npm run test:unit -- tests/unit/services/sales-promoter-weekly.test.ts` Expected: PASS. Also re-run existing org sales tests if
+present: `npm run test:unit -- tests/unit/services` (no regressions in `getSalesBySupervisor`).
 
 - [ ] **Step 6: Checkpoint** — green; leave in working tree.
 
@@ -671,13 +746,17 @@ Expected: PASS. Also re-run existing org sales tests if present: `npm run test:u
 ### Task 5: `org_structure` roster tool
 
 **Files:**
+
 - Modify: `src/services/dashboard/sale-verification.org.dashboard.service.ts` (add `getOrgStructure`)
 - Modify: `src/mcp/tools/saleVerifications.ts` (add `org_structure` tool)
 - Test: `tests/unit/services/org-structure.test.ts` (create)
 
 **Interfaces:**
+
 - Consumes: `resolveSupervisorByVenue` (Task 4).
-- Produces: `getOrgStructure(orgId): Promise<{ supervisors: Array<{ supervisorId: string; supervisorName: string; stores: Store[] }>; unassignedStores: Store[] }>` where `Store = { venueId: string; venueName: string; promoters: Array<{ staffId: string; name: string }> }`.
+- Produces:
+  `getOrgStructure(orgId): Promise<{ supervisors: Array<{ supervisorId: string; supervisorName: string; stores: Store[] }>; unassignedStores: Store[] }>`
+  where `Store = { venueId: string; venueName: string; promoters: Array<{ staffId: string; name: string }> }`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -709,7 +788,8 @@ it('groups promoters (CASHIER/WAITER) under the venue MANAGER; lists unassigned 
   // resolveSupervisorByVenue query (role in ADMIN/MANAGER)
   mockStaffVenueFindMany.mockImplementation((args: any) => {
     const roles = args.where.role.in
-    if (roles.includes('MANAGER')) return Promise.resolve([{ venueId: 'v1', role: 'MANAGER', staff: { id: 'sup1', firstName: 'Hugo', lastName: 'G' } }])
+    if (roles.includes('MANAGER'))
+      return Promise.resolve([{ venueId: 'v1', role: 'MANAGER', staff: { id: 'sup1', firstName: 'Hugo', lastName: 'G' } }])
     // promoters query (role in CASHIER/WAITER)
     return Promise.resolve([{ venueId: 'v1', staff: { id: 'p1', firstName: 'Ana', lastName: 'León' } }])
   })
@@ -723,8 +803,7 @@ it('groups promoters (CASHIER/WAITER) under the venue MANAGER; lists unassigned 
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npm run test:unit -- tests/unit/services/org-structure.test.ts`
-Expected: FAIL — `getOrgStructure` not exported.
+Run: `npm run test:unit -- tests/unit/services/org-structure.test.ts` Expected: FAIL — `getOrgStructure` not exported.
 
 - [ ] **Step 3: Implement `getOrgStructure`**
 
@@ -781,7 +860,11 @@ export async function getOrgStructure(orgId: string): Promise<OrgStructure> {
     bySupervisor.set(sup.id, entry)
   }
   return {
-    supervisors: Array.from(bySupervisor.entries()).map(([supervisorId, e]) => ({ supervisorId, supervisorName: e.supervisorName, stores: e.stores })),
+    supervisors: Array.from(bySupervisor.entries()).map(([supervisorId, e]) => ({
+      supervisorId,
+      supervisorName: e.supervisorName,
+      stores: e.stores,
+    })),
     unassignedStores,
   }
 }
@@ -805,8 +888,7 @@ server.tool(
 
 - [ ] **Step 5: Run test**
 
-Run: `npm run test:unit -- tests/unit/services/org-structure.test.ts`
-Expected: PASS.
+Run: `npm run test:unit -- tests/unit/services/org-structure.test.ts` Expected: PASS.
 
 - [ ] **Step 6: Checkpoint** — green; leave in working tree.
 
@@ -815,10 +897,12 @@ Expected: PASS.
 ### Task 6: `list_sale_verifications` tool (per-sale detail + rejection reason)
 
 **Files:**
+
 - Modify: `src/mcp/tools/saleVerifications.ts` (add tool; import `listOrgSaleVerifications`)
 - Test: `tests/unit/mcp-customer/list-sale-verifications.test.ts` (create)
 
 **Interfaces:**
+
 - Consumes: existing `listOrgSaleVerifications(orgId, filters)` and its `OrgSaleListFilters` / `OrgSaleListResponse`.
 
 - [ ] **Step 1: Write the failing test**
@@ -832,20 +916,34 @@ const mockList = jest.fn()
 jest.mock('@/services/dashboard/sale-verification.org.dashboard.service', () => ({
   __esModule: true,
   listOrgSaleVerifications: (...a: unknown[]) => mockList(...(a as [])),
-  getOrgSalesSummary: jest.fn(), getSalesByMonth: jest.fn(), getSalesByCity: jest.fn(),
-  getSalesByStore: jest.fn(), getSalesBySupervisor: jest.fn(), getSalesByPromoter: jest.fn(),
-  getSalesByPromoterDaily: jest.fn(), getSalesBySaleTypeWeekly: jest.fn(), getSalesBySimTypeWeekly: jest.fn(),
-  getSalesByPromoterWeekly: jest.fn(), getOrgStructure: jest.fn(),
+  getOrgSalesSummary: jest.fn(),
+  getSalesByMonth: jest.fn(),
+  getSalesByCity: jest.fn(),
+  getSalesByStore: jest.fn(),
+  getSalesBySupervisor: jest.fn(),
+  getSalesByPromoter: jest.fn(),
+  getSalesByPromoterDaily: jest.fn(),
+  getSalesBySaleTypeWeekly: jest.fn(),
+  getSalesBySimTypeWeekly: jest.fn(),
+  getSalesByPromoterWeekly: jest.fn(),
+  getOrgStructure: jest.fn(),
   parseRange: (a?: string, b?: string) => ({ from: a, to: b }),
 }))
 jest.mock('@/services/access/access.service', () => ({ hasPermission: () => true }))
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
-const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map([['v1', { organizationId: 'o1' }]]) } as unknown as McpScope
+const scope = {
+  staffId: 's1',
+  activeOrg: 'o1',
+  allowedVenueIds: ['v1'],
+  perVenueAccess: new Map([['v1', { organizationId: 'o1' }]]),
+} as unknown as McpScope
 const call = (n: string, a: Record<string, unknown>) => handlers.get(n)!(a, {})
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
 
-beforeAll(() => registerSaleVerificationTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope))
+beforeAll(() =>
+  registerSaleVerificationTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope),
+)
 beforeEach(() => jest.clearAllMocks())
 
 it('passes filters and returns the rows', async () => {
@@ -858,8 +956,8 @@ it('passes filters and returns the rows', async () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npm run test:unit -- tests/unit/mcp-customer/list-sale-verifications.test.ts`
-Expected: FAIL — handler `list_sale_verifications` undefined.
+Run: `npm run test:unit -- tests/unit/mcp-customer/list-sale-verifications.test.ts` Expected: FAIL — handler `list_sale_verifications`
+undefined.
 
 - [ ] **Step 3: Add the tool**
 
@@ -894,8 +992,7 @@ server.tool(
 
 - [ ] **Step 4: Run test**
 
-Run: `npm run test:unit -- tests/unit/mcp-customer/list-sale-verifications.test.ts`
-Expected: PASS.
+Run: `npm run test:unit -- tests/unit/mcp-customer/list-sale-verifications.test.ts` Expected: PASS.
 
 - [ ] **Step 5: Checkpoint** — green; leave in working tree.
 
@@ -904,12 +1001,15 @@ Expected: PASS.
 ### Task 7: `getSaldosForOrg` + `cash_out_org_saldos` tool
 
 **Files:**
+
 - Modify: `src/services/dashboard/cash-out/cash-out.org.service.ts` (add `getSaldosForOrg`)
 - Modify: `src/mcp/tools/cash-out.ts` (add `cash_out_org_saldos`)
 - Test: `tests/unit/services/cash-out-org-saldos.test.ts` (create)
 
 **Interfaces:**
-- Consumes: `listVenueIdsForOrg` (same file), `materializeEntries`, `reconcileClawbacks` (`cash-out.ledger.service`), `prisma.promoterCommissionEntry.groupBy`, `prisma.staff.findMany`.
+
+- Consumes: `listVenueIdsForOrg` (same file), `materializeEntries`, `reconcileClawbacks` (`cash-out.ledger.service`),
+  `prisma.promoterCommissionEntry.groupBy`, `prisma.staff.findMany`.
 - Produces: `getSaldosForOrg(orgId): Promise<Array<{ venueId: string; staffId: string; promoterName: string; saldo: string }>>`
 
 - [ ] **Step 1: Write the failing test**
@@ -952,12 +1052,13 @@ it('materializes + reconciles per venue, then sums AVAILABLE by staff', async ()
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npm run test:unit -- tests/unit/services/cash-out-org-saldos.test.ts`
-Expected: FAIL — `getSaldosForOrg` not exported.
+Run: `npm run test:unit -- tests/unit/services/cash-out-org-saldos.test.ts` Expected: FAIL — `getSaldosForOrg` not exported.
 
 - [ ] **Step 3: Implement `getSaldosForOrg`**
 
-In `cash-out.org.service.ts` (imports: `listVenueIdsForOrg` is local; add `import { materializeEntries, reconcileClawbacks } from './cash-out.ledger.service'`, `import prisma from '../../../utils/prismaClient'`, `import { Prisma } from '@prisma/client'`):
+In `cash-out.org.service.ts` (imports: `listVenueIdsForOrg` is local; add
+`import { materializeEntries, reconcileClawbacks } from './cash-out.ledger.service'`, `import prisma from '../../../utils/prismaClient'`,
+`import { Prisma } from '@prisma/client'`):
 
 ```ts
 /**
@@ -1026,8 +1127,7 @@ server.tool(
 
 - [ ] **Step 5: Run test**
 
-Run: `npm run test:unit -- tests/unit/services/cash-out-org-saldos.test.ts`
-Expected: PASS.
+Run: `npm run test:unit -- tests/unit/services/cash-out-org-saldos.test.ts` Expected: PASS.
 
 - [ ] **Step 6: Checkpoint** — green; leave in working tree.
 
@@ -1036,12 +1136,15 @@ Expected: PASS.
 ### Task 8: `getLatestPromoterLocationsForVenue` + `promoters_live_locations` tool
 
 **Files:**
+
 - Modify: `src/services/promoters/promoterLocation.service.ts` (add function)
 - Modify: `src/mcp/tools/promoterLocation.ts` (add tool)
 - Test: `tests/unit/services/promoter-latest-locations.test.ts` (create)
 
 **Interfaces:**
-- Produces: `getLatestPromoterLocationsForVenue(venueId, date?): Promise<Array<{ promoterId: string; name: string; latest: PromoterTrackPoint | null }>>`
+
+- Produces:
+  `getLatestPromoterLocationsForVenue(venueId, date?): Promise<Array<{ promoterId: string; name: string; latest: PromoterTrackPoint | null }>>`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1069,7 +1172,10 @@ it('returns the latest ping per promoter', async () => {
     { staffId: 'p1', latitude: 1, longitude: 2, accuracy: 5, capturedAt: new Date('2026-05-01T17:00:00Z'), source: 'PERIODIC' },
     { staffId: 'p2', latitude: 3, longitude: 4, accuracy: 5, capturedAt: new Date('2026-05-01T16:00:00Z'), source: 'PERIODIC' },
   ])
-  mockStaffFindMany.mockResolvedValue([{ id: 'p1', firstName: 'Ana', lastName: 'León' }, { id: 'p2', firstName: 'Beto', lastName: 'Ruiz' }])
+  mockStaffFindMany.mockResolvedValue([
+    { id: 'p1', firstName: 'Ana', lastName: 'León' },
+    { id: 'p2', firstName: 'Beto', lastName: 'Ruiz' },
+  ])
   const res = await getLatestPromoterLocationsForVenue('v1', '2026-05-01')
   expect(res).toHaveLength(2)
   const p1 = res.find(r => r.promoterId === 'p1')!
@@ -1080,12 +1186,12 @@ it('returns the latest ping per promoter', async () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npm run test:unit -- tests/unit/services/promoter-latest-locations.test.ts`
-Expected: FAIL — function not exported.
+Run: `npm run test:unit -- tests/unit/services/promoter-latest-locations.test.ts` Expected: FAIL — function not exported.
 
 - [ ] **Step 3: Implement the function**
 
-Add to `src/services/promoters/promoterLocation.service.ts` (reuse the file's existing `toPoint`, `venueStartOfDay`, `venueEndOfDay`, `DEFAULT_TIMEZONE`, `formatInTimeZone`, `prisma`):
+Add to `src/services/promoters/promoterLocation.service.ts` (reuse the file's existing `toPoint`, `venueStartOfDay`, `venueEndOfDay`,
+`DEFAULT_TIMEZONE`, `formatInTimeZone`, `prisma`):
 
 ```ts
 /** Latest ping per promoter for a venue on a venue-local day (default: today). */
@@ -1114,7 +1220,8 @@ export async function getLatestPromoterLocationsForVenue(
 
 - [ ] **Step 4: Add the `promoters_live_locations` tool**
 
-In `src/mcp/tools/promoterLocation.ts` import `getLatestPromoterLocationsForVenue` and add (same gates as `promoter_location`: WL module + `teams:read`):
+In `src/mcp/tools/promoterLocation.ts` import `getLatestPromoterLocationsForVenue` and add (same gates as `promoter_location`: WL module +
+`teams:read`):
 
 ```ts
 server.tool(
@@ -1122,7 +1229,11 @@ server.tool(
   'Latest known location of ALL field promoters reporting to a venue, for one venue-local day. Each promoter: name + their most recent ping (lat/lng, when, source) or null if none today. White-label venues only. Answers "¿dónde andan todos mis promotores ahora?". Pass venueId; date optional (YYYY-MM-DD, defaults to venue-local today).',
   {
     venueId: z.string().describe('Venue the promoters report to (must be in your scope)'),
-    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Venue-local day (YYYY-MM-DD); omit for today'),
+    date: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .optional()
+      .describe('Venue-local day (YYYY-MM-DD); omit for today'),
   },
   async ({ venueId, date }) => {
     guard.venueFilter(venueId)
@@ -1142,7 +1253,15 @@ server.tool(
       promoters: list.map(p => ({
         promoterId: p.promoterId,
         name: p.name,
-        latest: p.latest ? { lat: p.latest.lat, lng: p.latest.lng, accuracy: p.latest.accuracy, capturedAt: fmt(p.latest.capturedAt), source: p.latest.source } : null,
+        latest: p.latest
+          ? {
+              lat: p.latest.lat,
+              lng: p.latest.lng,
+              accuracy: p.latest.accuracy,
+              capturedAt: fmt(p.latest.capturedAt),
+              source: p.latest.source,
+            }
+          : null,
       })),
     })
   },
@@ -1151,8 +1270,7 @@ server.tool(
 
 - [ ] **Step 5: Run test**
 
-Run: `npm run test:unit -- tests/unit/services/promoter-latest-locations.test.ts`
-Expected: PASS.
+Run: `npm run test:unit -- tests/unit/services/promoter-latest-locations.test.ts` Expected: PASS.
 
 - [ ] **Step 6: Checkpoint** — green; leave in working tree.
 
@@ -1161,10 +1279,12 @@ Expected: PASS.
 ### Task 9: Conditional registration in `server.ts`
 
 **Files:**
+
 - Modify: `src/mcp/server.ts` (extract `registerAllTools`, compute flags, register PT groups conditionally)
 - Test: `tests/unit/mcp-customer/conditional-registration.test.ts` (create)
 
 **Interfaces:**
+
 - Consumes: `moduleService.anyVenueHasModule` (Task 1); all `register*Tools`.
 - Produces: `registerAllTools(server, scope, flags: { serializedEnabled: boolean; whiteLabelEnabled: boolean })`.
 
@@ -1216,12 +1336,12 @@ it('scalable connection (all modules OFF) sees NO SIM/PT tools, only generic', (
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npm run test:unit -- tests/unit/mcp-customer/conditional-registration.test.ts`
-Expected: FAIL — `registerAllTools` not exported.
+Run: `npm run test:unit -- tests/unit/mcp-customer/conditional-registration.test.ts` Expected: FAIL — `registerAllTools` not exported.
 
 - [ ] **Step 3: Refactor `buildServerForIdentity` to use `registerAllTools`**
 
-In `src/mcp/server.ts`, export a new `registerAllTools` that takes the flags and moves the register-calls into it. Generic groups always register; PT groups gate on flags. Then `buildServerForIdentity` computes the flags and calls it:
+In `src/mcp/server.ts`, export a new `registerAllTools` that takes the flags and moves the register-calls into it. Generic groups always
+register; PT groups gate on flags. Then `buildServerForIdentity` computes the flags and calls it:
 
 ```ts
 export function registerAllTools(
@@ -1288,17 +1408,16 @@ const [serializedEnabled, whiteLabelEnabled] = await Promise.all([
 registerAllTools(server, scope, { serializedEnabled, whiteLabelEnabled })
 ```
 
-Add imports at the top of `server.ts`: `import { moduleService, MODULE_CODES } from './services/modules/module.service'` (adjust to the repo's alias, e.g. `@/services/modules/module.service`). Remove the now-duplicated inline `register*` calls.
+Add imports at the top of `server.ts`: `import { moduleService, MODULE_CODES } from './services/modules/module.service'` (adjust to the
+repo's alias, e.g. `@/services/modules/module.service`). Remove the now-duplicated inline `register*` calls.
 
 - [ ] **Step 4: Run the registration test**
 
-Run: `npm run test:unit -- tests/unit/mcp-customer/conditional-registration.test.ts`
-Expected: PASS (2 tests).
+Run: `npm run test:unit -- tests/unit/mcp-customer/conditional-registration.test.ts` Expected: PASS (2 tests).
 
 - [ ] **Step 5: Full MCP unit sweep + typecheck**
 
-Run: `npm run test:unit -- tests/unit/mcp-customer` then `npx tsc -p tsconfig.json --noEmit`.
-Expected: all green, no type errors.
+Run: `npm run test:unit -- tests/unit/mcp-customer` then `npx tsc -p tsconfig.json --noEmit`. Expected: all green, no type errors.
 
 - [ ] **Step 6: Checkpoint** — green; leave in working tree.
 
@@ -1307,25 +1426,27 @@ Expected: all green, no type errors.
 ### Task 10: Closeout — full-testing + doc sync
 
 **Files:**
-- Modify (docs): the MCP tool inventory doc if one exists (`grep -ril "org_confirmed_sales_report" docs` → update the tool list); otherwise none.
+
+- Modify (docs): the MCP tool inventory doc if one exists (`grep -ril "org_confirmed_sales_report" docs` → update the tool list); otherwise
+  none.
 
 - [ ] **Step 1: Run the whole unit suite**
 
-Run: `npm run test:unit`
-Expected: green (no regressions in existing MCP / service tests).
+Run: `npm run test:unit` Expected: green (no regressions in existing MCP / service tests).
 
 - [ ] **Step 2: Typecheck + lint**
 
-Run: `npx tsc -p tsconfig.json --noEmit` and the repo lint (`npm run lint` if present).
-Expected: clean.
+Run: `npx tsc -p tsconfig.json --noEmit` and the repo lint (`npm run lint` if present). Expected: clean.
 
 - [ ] **Step 3: `/full-testing`**
 
-Invoke the `/full-testing` skill against this change (happy-path + destructive: a PT-scoped connection sees + can call the new tools; a non-PT connection does not see them; validate against Postgres; tail the backend log). Git stays read-only.
+Invoke the `/full-testing` skill against this change (happy-path + destructive: a PT-scoped connection sees + can call the new tools; a
+non-PT connection does not see them; validate against Postgres; tail the backend log). Git stays read-only.
 
 - [ ] **Step 4: Note MCP connector restart**
 
-After deploy, the MCP connector must be restarted to advertise the new tools + `promoterWeekly` groupBy. Record this in the PR/handoff notes.
+After deploy, the MCP connector must be restarted to advertise the new tools + `promoterWeekly` groupBy. Record this in the PR/handoff
+notes.
 
 - [ ] **Step 5: Final checkpoint** — everything green; summarize for Jose; await explicit commit permission.
 
@@ -1333,6 +1454,11 @@ After deploy, the MCP connector must be restarted to advertise the new tools + `
 
 ## Self-review notes
 
-- **Spec coverage:** #1 `serialized_stock_by_category` (T2/T3), #2 `list_serialized_items` (T2/T3), #3 `list_sale_verifications` (T6), #7 `promoterWeekly` (T4), #6 `org_structure` (T5), #4 `cash_out_org_saldos` (T7), #5 `promoters_live_locations` (T8), conditional registration (T9), bulk module helper (T1). All 4 audit findings: org-level SIM pool (T2 test), saldo freshness (T7 reuses materialize+reconcile), module override (T1 test), promoter=CASHIER/WAITER (T5). All covered.
+- **Spec coverage:** #1 `serialized_stock_by_category` (T2/T3), #2 `list_serialized_items` (T2/T3), #3 `list_sale_verifications` (T6), #7
+  `promoterWeekly` (T4), #6 `org_structure` (T5), #4 `cash_out_org_saldos` (T7), #5 `promoters_live_locations` (T8), conditional
+  registration (T9), bulk module helper (T1). All 4 audit findings: org-level SIM pool (T2 test), saldo freshness (T7 reuses
+  materialize+reconcile), module override (T1 test), promoter=CASHIER/WAITER (T5). All covered.
 - **No writes** introduced. **No tier logic** added. **No hardcoded PT slug.**
-- **Type consistency:** `resolveSupervisorByVenue` used identically in T4 & T5; `getOrgStockByCategory(orgId, allowedVenueIds)` and `listOrgItems({orgId, allowedVenueIds, …})` signatures match between T2 (def) and T3 (call); `anyVenueHasModule` signature matches between T1 (def) and T9 (call).
+- **Type consistency:** `resolveSupervisorByVenue` used identically in T4 & T5; `getOrgStockByCategory(orgId, allowedVenueIds)` and
+  `listOrgItems({orgId, allowedVenueIds, …})` signatures match between T2 (def) and T3 (call); `anyVenueHasModule` signature matches between
+  T1 (def) and T9 (call).

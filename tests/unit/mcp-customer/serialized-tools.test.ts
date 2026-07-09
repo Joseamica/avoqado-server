@@ -24,13 +24,17 @@ jest.mock('@/mcp/guard', () => ({
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
 const scope = {
-  staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'],
+  staffId: 's1',
+  activeOrg: 'o1',
+  allowedVenueIds: ['v1'],
   perVenueAccess: new Map([['v1', { organizationId: 'o1' }]]),
 } as unknown as McpScope
 const call = (n: string, a: Record<string, unknown>) => handlers.get(n)!(a, {})
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
 
-beforeAll(() => registerSerializedTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope))
+beforeAll(() =>
+  registerSerializedTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope),
+)
 beforeEach(() => jest.clearAllMocks())
 
 describe('serialized_stock_by_category', () => {
@@ -52,7 +56,12 @@ describe('serialized_stock_by_category', () => {
 describe('list_serialized_items', () => {
   it('module ON → passes org pool + filters', async () => {
     mockIsEnabled.mockResolvedValue(true)
-    mockListOrgItems.mockResolvedValue({ items: [{ serialNumber: 'ICC1', status: 'AVAILABLE', custodyState: 'ADMIN_HELD', category: { name: 'SIM de Evento' }, venueId: null }], total: 1 })
+    mockListOrgItems.mockResolvedValue({
+      items: [
+        { serialNumber: 'ICC1', status: 'AVAILABLE', custodyState: 'ADMIN_HELD', category: { name: 'SIM de Evento' }, venueId: null },
+      ],
+      total: 1,
+    })
     const out = parse(await call('list_serialized_items', { venueId: 'v1', status: 'AVAILABLE' }))
     expect(out.total).toBe(1)
     expect(mockListOrgItems).toHaveBeenCalledWith(expect.objectContaining({ orgId: 'o1', allowedVenueIds: ['v1'], status: 'AVAILABLE' }))

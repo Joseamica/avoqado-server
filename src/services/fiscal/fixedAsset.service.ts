@@ -197,7 +197,8 @@ export async function updateFixedAsset(
     data.assetType = input.assetType
   }
   if (input.moiCents !== undefined) {
-    if (!Number.isFinite(input.moiCents) || input.moiCents <= 0) throw new BadRequestError('El monto de la inversión (MOI) debe ser mayor a cero.')
+    if (!Number.isFinite(input.moiCents) || input.moiCents <= 0)
+      throw new BadRequestError('El monto de la inversión (MOI) debe ser mayor a cero.')
     data.moiCents = Math.round(input.moiCents)
   }
   if (input.annualRate !== undefined) {
@@ -206,14 +207,22 @@ export async function updateFixedAsset(
     data.annualRate = new Prisma.Decimal(input.annualRate)
   }
   if (input.salvageValueCents !== undefined) {
-    if (!Number.isFinite(input.salvageValueCents) || input.salvageValueCents < 0) throw new BadRequestError('El valor de rescate no puede ser negativo.')
+    if (!Number.isFinite(input.salvageValueCents) || input.salvageValueCents < 0)
+      throw new BadRequestError('El valor de rescate no puede ser negativo.')
     data.salvageValueCents = Math.round(input.salvageValueCents)
   }
   if (input.acquisitionDate !== undefined) data.acquisitionDate = parseDay(input.acquisitionDate, 'adquisición')
   if (input.inServiceDate !== undefined) data.inServiceDate = parseDay(input.inServiceDate, 'inicio de uso')
 
   const updated = await prisma.fixedAsset.update({ where: { id: assetId }, data })
-  void logAction({ staffId: actorStaffId, venueId, action: 'FIXED_ASSET_UPDATED', entity: 'FixedAsset', entityId: assetId, data: { fields: Object.keys(data) } })
+  void logAction({
+    staffId: actorStaffId,
+    venueId,
+    action: 'FIXED_ASSET_UPDATED',
+    entity: 'FixedAsset',
+    entityId: assetId,
+    data: { fields: Object.keys(data) },
+  })
   return toView(updated)
 }
 
@@ -266,5 +275,11 @@ export async function disposeFixedAsset(
     entityId: assetId,
     data: { proceedsCents: proceeds, bookValueCents: bookValue, gainLossCents: gainLoss },
   })
-  return { asset: toView(updated), accumulatedDepreciationCents: accumulated, bookValueCents: bookValue, proceedsCents: proceeds ?? 0, gainLossCents: gainLoss }
+  return {
+    asset: toView(updated),
+    accumulatedDepreciationCents: accumulated,
+    bookValueCents: bookValue,
+    proceedsCents: proceeds ?? 0,
+    gainLossCents: gainLoss,
+  }
 }

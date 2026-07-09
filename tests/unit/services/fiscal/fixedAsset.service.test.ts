@@ -19,7 +19,12 @@ jest.mock('../../../../src/services/dashboard/activity-log.service', () => ({ lo
 import prisma from '../../../../src/utils/prismaClient'
 import { resolveScopeOrNull } from '../../../../src/services/fiscal/chartOfAccounts.service'
 import { logAction } from '../../../../src/services/dashboard/activity-log.service'
-import { registerFixedAsset, listFixedAssets, updateFixedAsset, disposeFixedAsset } from '../../../../src/services/fiscal/fixedAsset.service'
+import {
+  registerFixedAsset,
+  listFixedAssets,
+  updateFixedAsset,
+  disposeFixedAsset,
+} from '../../../../src/services/fiscal/fixedAsset.service'
 import { cappedMoiCents, getAssetType, suggestsFixedAsset } from '../../../../src/services/fiscal/assetTypeCatalog'
 
 const p = prisma as unknown as {

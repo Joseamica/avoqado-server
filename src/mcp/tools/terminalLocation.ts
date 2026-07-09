@@ -7,7 +7,8 @@ import { text } from '../respond'
 import { getOrgTerminalLocations, type TerminalLocationRow } from '@/services/promoters/terminalLocation.service'
 import { isWhiteLabelOrg } from '@/controllers/dashboard/organizationStockControl.controller'
 
-const WHITE_LABEL_OFF_MSG = 'El seguimiento de terminales no está activo en esta organización (módulo WHITE_LABEL_DASHBOARD apagado en todos sus locales).'
+const WHITE_LABEL_OFF_MSG =
+  'El seguimiento de terminales no está activo en esta organización (módulo WHITE_LABEL_DASHBOARD apagado en todos sus locales).'
 
 function mapsUrl(lat: number, lng: number): string {
   return `https://www.google.com/maps?q=${lat},${lng}`

@@ -23,7 +23,8 @@ it('groups promoters (CASHIER/WAITER) under the venue MANAGER; lists unassigned 
   ])
   mockStaffVenueFindMany.mockImplementation((args: any) => {
     const roles = args.where.role.in
-    if (roles.includes('MANAGER')) return Promise.resolve([{ venueId: 'v1', role: 'MANAGER', staff: { id: 'sup1', firstName: 'Hugo', lastName: 'G' } }])
+    if (roles.includes('MANAGER'))
+      return Promise.resolve([{ venueId: 'v1', role: 'MANAGER', staff: { id: 'sup1', firstName: 'Hugo', lastName: 'G' } }])
     return Promise.resolve([{ venueId: 'v1', staff: { id: 'p1', firstName: 'Ana', lastName: 'León' } }])
   })
   const res = await getOrgStructure('o1')

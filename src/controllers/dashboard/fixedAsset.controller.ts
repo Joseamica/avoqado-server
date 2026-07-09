@@ -87,7 +87,9 @@ export async function disposeFixedAssetController(
   try {
     const authContext = (req as any).authContext ?? {}
     const { disposalDate, proceedsCents } = req.body
-    res.status(200).json(await disposeFixedAsset(req.params.venueId, req.params.assetId, { disposalDate, proceedsCents }, authContext.userId ?? null))
+    res
+      .status(200)
+      .json(await disposeFixedAsset(req.params.venueId, req.params.assetId, { disposalDate, proceedsCents }, authContext.userId ?? null))
   } catch (error) {
     next(error)
   }

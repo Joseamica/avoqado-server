@@ -152,9 +152,7 @@ describe('terminalLocation.service', () => {
       const t9 = res.terminals.find(r => r.terminalId === 't9')!
       expect(t9.venue).toEqual({ id: 'v2', name: 'BAE 2' })
       expect(t9.promoter).toEqual({ staffId: 'promZ', name: 'Zoe W' })
-      expect(prismaMock.venue.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { organizationId: 'org1' } }),
-      )
+      expect(prismaMock.venue.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { organizationId: 'org1' } }))
       expect(prismaMock.promoterLocationPing.findMany).toHaveBeenCalledWith(
         expect.objectContaining({ where: expect.objectContaining({ venueId: { in: ['v1', 'v2'] } }) }),
       )
