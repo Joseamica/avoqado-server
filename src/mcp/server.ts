@@ -44,6 +44,7 @@ import { registerTerminalLocationTools } from './tools/terminalLocation'
 import { registerAccountingTools } from './tools/accounting'
 import { registerActivityLogTools } from './tools/activity-log'
 import { registerCashOutTools } from './tools/cash-out'
+import { registerWhiteLabelOpsTools } from './tools/whiteLabelOps'
 
 /**
  * Server-level guidance the client (Claude/ChatGPT) hands to the model on every connection.
@@ -122,6 +123,8 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
     // terminal_location is white-label-only (gates on isWhiteLabelOrg at call time) — register it
     // here so non-white-label connections don't see it in their tool catalog either.
     registerTerminalLocationTools(server, scope)
+    // White-label dashboard ops (attendance, presence, promoter deposits/detail, org analytics).
+    registerWhiteLabelOpsTools(server, scope)
   }
 }
 

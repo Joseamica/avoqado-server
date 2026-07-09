@@ -28,6 +28,10 @@ it('PT connection (serialized ON) sees serialized + sale-verification + cash-out
   expect(names.has('cash_out_org_saldos')).toBe(true)
   expect(names.has('promoters_live_locations')).toBe(true)
   expect(names.has('terminal_location')).toBe(true) // white-label tool
+  expect(names.has('serialized_low_stock')).toBe(true) // phase-2 stock op (serialized)
+  expect(names.has('sim_pending_approvals')).toBe(true) // phase-2 approval queue (serialized)
+  expect(names.has('staff_attendance')).toBe(true) // phase-2 white-label ops
+  expect(names.has('sales_vs_target')).toBe(true) // phase-2 white-label org analytics
   expect(names.has('low_stock')).toBe(true) // generic always present
 })
 
@@ -44,5 +48,9 @@ it('scalable connection (all modules OFF) sees NO SIM/PT tools, only generic', (
   expect(names.has('promoters_live_locations')).toBe(false)
   expect(names.has('promoter_location')).toBe(false)
   expect(names.has('terminal_location')).toBe(false) // white-label tool hidden from non-WL
+  expect(names.has('serialized_low_stock')).toBe(false) // phase-2 hidden from non-PT
+  expect(names.has('sim_pending_approvals')).toBe(false) // phase-2 hidden from non-PT
+  expect(names.has('staff_attendance')).toBe(false) // phase-2 white-label ops hidden from non-WL
+  expect(names.has('sales_vs_target')).toBe(false) // phase-2 white-label ops hidden from non-WL
   expect(names.has('low_stock')).toBe(true) // generic tools stay
 })

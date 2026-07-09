@@ -48,9 +48,7 @@ const scope = {
 const call = (n: string, a: Record<string, unknown>) => handlers.get(n)!(a, {})
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
 
-beforeAll(() =>
-  registerCashOutTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope),
-)
+beforeAll(() => registerCashOutTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope))
 beforeEach(() => jest.clearAllMocks())
 
 describe('cash_out_org_commission_rates', () => {
