@@ -664,6 +664,7 @@ const fixedAssetRegisterSchema = z.object({
       .regex(/^\d{4}-\d{2}-\d{2}$/, { message: 'La fecha de inicio de uso debe ser AAAA-MM-DD.' })
       .optional(),
     salvageValueCents: z.number().int().min(0).optional(),
+    inpcFactor: z.number().positive({ message: 'El factor INPC debe ser mayor a 0.' }).max(10).nullable().optional(),
     sourceExpenseId: z.string().cuid().nullable().optional(),
   }),
 })
@@ -712,6 +713,7 @@ const fixedAssetUpdateSchema = z.object({
     moiCents: cents('monto de la inversión').optional(),
     annualRate: z.number().min(0).max(1).optional(),
     salvageValueCents: cents('valor de rescate').optional(),
+    inpcFactor: z.number().positive({ message: 'El factor INPC debe ser mayor a 0.' }).max(10).nullable().optional(),
     acquisitionDate: z
       .string()
       .regex(/^\d{4}-\d{2}-\d{2}$/, { message: 'La fecha debe ser AAAA-MM-DD.' })

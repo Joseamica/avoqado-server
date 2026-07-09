@@ -1088,8 +1088,14 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         .optional()
         .describe('Inicio de uso YYYY-MM-DD (default = adquisición)'),
       valorRescate: z.number().min(0).optional().describe('Valor de rescate en pesos (default 0)'),
+      factorInpc: z
+        .number()
+        .positive()
+        .max(10)
+        .optional()
+        .describe('Factor de actualización INPC (art. 31 LISR) que te dé tu contador; multiplica la deducción fiscal. Omite = 1 (histórico)'),
     },
-    async ({ venueId, descripcion, tipo, monto, fechaAdquisicion, tasaAnual, fechaInicioUso, valorRescate }) => {
+    async ({ venueId, descripcion, tipo, monto, fechaAdquisicion, tasaAnual, fechaInicioUso, valorRescate, factorInpc }) => {
       guard.venueFilter(venueId)
       guard.requirePermission('accounting:manage', venueId)
       const gate = await planGateMessage(venueId, 'CFDI', 'Los activos fijos')
@@ -1104,6 +1110,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           acquisitionDate: fechaAdquisicion,
           inServiceDate: fechaInicioUso,
           salvageValueCents: valorRescate != null ? Math.round(valorRescate * 100) : undefined,
+          inpcFactor: factorInpc,
         },
         scope.staffId,
       )
@@ -1115,7 +1122,10 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         moi: pesos(a.moiCents),
         baseDepreciable: pesos(a.depreciableBaseCents),
         tasaAnual: a.annualRate,
-        nota: 'Registrado. Corre la depreciación del periodo con generate_depreciation para llevar la deducción mensual a tu ISR general.',
+        polizaAlta: a.ledgerPosted, // DEBE Activo fijo / HABER Bancos, ya en el libro diario
+        nota: a.ledgerPosted
+          ? 'Registrado y con póliza de alta en el libro. Corre la depreciación del periodo con generate_depreciation.'
+          : 'Registrado. Corre la depreciación del periodo con generate_depreciation. (La póliza de alta se saltó — re-siembra el catálogo de cuentas para habilitarla.)',
       })
     },
   )
@@ -1190,6 +1200,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
       monto: z.number().positive().optional().describe('Nuevo MOI en pesos'),
       tasaAnual: z.number().min(0).max(1).optional().describe('Nueva tasa anual (fracción)'),
       valorRescate: z.number().min(0).optional().describe('Nuevo valor de rescate en pesos'),
+      factorInpc: z.number().positive().max(10).optional().describe('Factor de actualización INPC (art. 31 LISR); multiplica la deducción fiscal'),
       fechaAdquisicion: z
         .string()
         .regex(/^\d{4}-\d{2}-\d{2}$/)
@@ -1199,7 +1210,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         .regex(/^\d{4}-\d{2}-\d{2}$/)
         .optional(),
     },
-    async ({ venueId, assetId, descripcion, tipo, monto, tasaAnual, valorRescate, fechaAdquisicion, fechaInicioUso }) => {
+    async ({ venueId, assetId, descripcion, tipo, monto, tasaAnual, valorRescate, factorInpc, fechaAdquisicion, fechaInicioUso }) => {
       guard.venueFilter(venueId)
       guard.requirePermission('accounting:manage', venueId)
       const gate = await planGateMessage(venueId, 'CFDI', 'Los activos fijos')
@@ -1213,6 +1224,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           moiCents: monto != null ? Math.round(monto * 100) : undefined,
           annualRate: tasaAnual,
           salvageValueCents: valorRescate != null ? Math.round(valorRescate * 100) : undefined,
+          inpcFactor: factorInpc,
           acquisitionDate: fechaAdquisicion,
           inServiceDate: fechaInicioUso,
         },
@@ -1259,6 +1271,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         depreciacionAcumulada: pesos(r.accumulatedDepreciationCents),
         precioVenta: pesos(r.proceedsCents),
         gananciaOPerdida: pesos(r.gainLossCents),
+        polizaBaja: r.ledgerPosted, // cancela activo + deprec. acumulada y registra el resultado en el libro
         nota:
           r.gainLossCents >= 0
             ? 'Baja registrada. Ganancia contable (precio de venta ≥ valor en libros).'

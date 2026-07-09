@@ -7,7 +7,7 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     fixedAsset: { findMany: jest.fn(), update: jest.fn() },
-    fixedAssetDepreciation: { upsert: jest.fn(), aggregate: jest.fn(), updateMany: jest.fn() },
+    fixedAssetDepreciation: { upsert: jest.fn(), aggregate: jest.fn(), updateMany: jest.fn(), findMany: jest.fn() },
     journalEntry: { findUnique: jest.fn() },
     journalLine: { aggregate: jest.fn() },
   },
@@ -30,7 +30,7 @@ import {
 
 const p = prisma as unknown as {
   fixedAsset: { findMany: jest.Mock; update: jest.Mock }
-  fixedAssetDepreciation: { upsert: jest.Mock; aggregate: jest.Mock; updateMany: jest.Mock }
+  fixedAssetDepreciation: { upsert: jest.Mock; aggregate: jest.Mock; updateMany: jest.Mock; findMany: jest.Mock }
   journalEntry: { findUnique: jest.Mock }
   journalLine: { aggregate: jest.Mock }
 }
@@ -207,23 +207,22 @@ describe('generateDepreciationForVenue', () => {
   })
 })
 
-describe('getYearDepreciationCents', () => {
-  it('suma la depreciación del ejercicio hasta el periodo (deducción de inversiones acumulada)', async () => {
-    p.fixedAssetDepreciation.aggregate.mockResolvedValue({ _sum: { depreciationCents: 2_250_00 } })
-    const c = await getYearDepreciationCents('org1', 'EKU9003173C9', 2026, '2026-04')
-    expect(c).toBe(2_250_00)
-    expect(p.fixedAssetDepreciation.aggregate).toHaveBeenCalledWith(
+describe('getYearDepreciationCents (deducción de inversiones, con INPC)', () => {
+  it('suma el ejercicio aplicando el factor INPC por activo (null = 1, costo histórico)', async () => {
+    p.fixedAssetDepreciation.findMany.mockResolvedValue([
+      { depreciationCents: 1_000_00, fixedAsset: { inpcFactor: null } },
+      { depreciationCents: 1_000_00, fixedAsset: { inpcFactor: 1.08 } },
+    ])
+    expect(await getYearDepreciationCents('org1', 'EKU9003173C9', 2026, '2026-04')).toBe(2_080_00)
+    expect(p.fixedAssetDepreciation.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({
-          period: { gte: '2026-01', lte: '2026-04' },
-          fixedAsset: { organizationId: 'org1', rfc: 'EKU9003173C9' },
-        }),
+        where: expect.objectContaining({ period: { gte: '2026-01', lte: '2026-04' }, fixedAsset: { organizationId: 'org1', rfc: 'EKU9003173C9' } }),
       }),
     )
   })
 
   it('sin renglones → 0', async () => {
-    p.fixedAssetDepreciation.aggregate.mockResolvedValue({ _sum: { depreciationCents: null } })
+    p.fixedAssetDepreciation.findMany.mockResolvedValue([])
     expect(await getYearDepreciationCents('org1', 'R', 2026, '2026-12')).toBe(0)
   })
 })

@@ -11,12 +11,16 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
   default: {
     fixedAsset: { create: jest.fn(), findMany: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
     fixedAssetDepreciation: { aggregate: jest.fn() },
+    ledgerAccount: { findFirst: jest.fn() },
+    journalEntry: { findUnique: jest.fn() },
   },
 }))
+jest.mock('../../../../src/services/fiscal/journalEntry.service', () => ({ postJournalEntry: jest.fn() }))
 jest.mock('../../../../src/services/fiscal/chartOfAccounts.service', () => ({ resolveScopeOrNull: jest.fn() }))
 jest.mock('../../../../src/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 
 import prisma from '../../../../src/utils/prismaClient'
+import { postJournalEntry } from '../../../../src/services/fiscal/journalEntry.service'
 import { resolveScopeOrNull } from '../../../../src/services/fiscal/chartOfAccounts.service'
 import { logAction } from '../../../../src/services/dashboard/activity-log.service'
 import {
@@ -30,7 +34,10 @@ import { cappedMoiCents, getAssetType, suggestsFixedAsset } from '../../../../sr
 const p = prisma as unknown as {
   fixedAsset: { create: jest.Mock; findMany: jest.Mock; findFirst: jest.Mock; update: jest.Mock }
   fixedAssetDepreciation: { aggregate: jest.Mock }
+  ledgerAccount: { findFirst: jest.Mock }
+  journalEntry: { findUnique: jest.Mock }
 }
+const mPost = postJournalEntry as jest.Mock
 const mScope = resolveScopeOrNull as jest.Mock
 const mLog = logAction as jest.Mock
 
@@ -48,6 +55,10 @@ beforeEach(() => {
   p.fixedAsset.create.mockImplementation(({ data }: any) =>
     Promise.resolve({ id: 'fa1', ...data, createdAt: new Date('2026-03-15T18:00:00Z'), updatedAt: new Date('2026-03-15T18:00:00Z') }),
   )
+  // Póliza (alta/baja): cuentas del catálogo resueltas por código; sin alta previa; posteo OK.
+  p.ledgerAccount.findFirst.mockImplementation(({ where }: any) => Promise.resolve({ id: 'acc-' + where.code }))
+  p.journalEntry.findUnique.mockResolvedValue(null)
+  mPost.mockResolvedValue({ id: 'je1' })
 })
 
 describe('assetTypeCatalog', () => {
@@ -179,6 +190,7 @@ const assetRow = (over: Record<string, unknown> = {}) => ({
   acquisitionDate: new Date('2026-03-15T18:00:00Z'),
   inServiceDate: new Date('2026-03-15T18:00:00Z'),
   salvageValueCents: 0,
+  inpcFactor: null,
   status: 'ACTIVE',
   sourceExpenseId: null,
   disposalDate: null,
@@ -238,5 +250,102 @@ describe('disposeFixedAsset (dar de baja)', () => {
     const r = await disposeFixedAsset('v1', 'fa1', { disposalDate: '2026-06-01' }) // sin precio
     expect(r.bookValueCents).toBe(18_000_00)
     expect(r.gainLossCents).toBe(-18_000_00) // pérdida total
+  })
+})
+
+describe('póliza de ALTA al libro (registro)', () => {
+  it('postea DEBE Activo({grupo}.09) / HABER Bancos(102.01) por el MOI, idempotente por activo', async () => {
+    const r = await registerFixedAsset('v1', BASE, 'staff1')
+    expect(r.ledgerPosted).toBe(true)
+    expect(mPost).toHaveBeenCalledWith(
+      'v1',
+      expect.objectContaining({
+        source: 'DEPRECIATION',
+        idempotencyKey: 'fa-alta:fa1',
+        lines: [
+          { ledgerAccountId: 'acc-156.09', debitCents: 30_000_00, creditCents: 0 },
+          { ledgerAccountId: 'acc-102.01', debitCents: 0, creditCents: 30_000_00 },
+        ],
+      }),
+      { staffId: 'staff1' },
+    )
+  })
+
+  it('compra ligada a un gasto → NO postea (el gasto ya movió el banco)', async () => {
+    const r = await registerFixedAsset('v1', { ...BASE, sourceExpenseId: 'exp1' }, 'staff1')
+    expect(r.ledgerPosted).toBe(false)
+    expect(r.ledgerReason).toBe('linkedExpense')
+    expect(mPost).not.toHaveBeenCalled()
+  })
+
+  it('faltan cuentas (catálogo sembrado antes) → best-effort: registra sin póliza', async () => {
+    p.ledgerAccount.findFirst.mockResolvedValue(null)
+    const r = await registerFixedAsset('v1', BASE, 'staff1')
+    expect(r.ledgerPosted).toBe(false)
+    expect(r.ledgerReason).toBe('missingAccounts')
+  })
+})
+
+describe('póliza de BAJA al libro', () => {
+  const disposedSetup = () => {
+    p.fixedAsset.findFirst.mockResolvedValue(assetRow())
+    p.fixedAssetDepreciation.aggregate.mockResolvedValue({ _sum: { depreciationCents: 12_000_00 } })
+    p.fixedAsset.update.mockImplementation(({ data }: any) => Promise.resolve(assetRow(data)))
+  }
+
+  it('con ALTA previa y venta con ganancia: cancela activo por MOI, revierte acumulada, ganancia a 403.01', async () => {
+    disposedSetup()
+    p.journalEntry.findUnique.mockResolvedValue({ id: 'je-alta' }) // la alta existe
+    const r = await disposeFixedAsset('v1', 'fa1', { disposalDate: '2026-06-01', proceedsCents: 20_000_00 }, 'staff1')
+    expect(r.ledgerPosted).toBe(true)
+    // plug = 30,000 − 12,000 − 20,000 = −2,000 → ganancia (HABER 403.01)
+    expect(mPost).toHaveBeenCalledWith(
+      'v1',
+      expect.objectContaining({
+        idempotencyKey: 'fa-baja:fa1',
+        lines: [
+          { ledgerAccountId: 'acc-171.09', debitCents: 12_000_00, creditCents: 0 },
+          { ledgerAccountId: 'acc-107.05', debitCents: 20_000_00, creditCents: 0 },
+          { ledgerAccountId: 'acc-156.09', debitCents: 0, creditCents: 30_000_00 },
+          { ledgerAccountId: 'acc-403.01', debitCents: 0, creditCents: 2_000_00 },
+        ],
+      }),
+      { staffId: 'staff1' },
+    )
+  })
+
+  it('pérdida (obsolescencia): el cuadre va a 701.09 y el asiento balancea', async () => {
+    disposedSetup()
+    p.journalEntry.findUnique.mockResolvedValue({ id: 'je-alta' })
+    await disposeFixedAsset('v1', 'fa1', { disposalDate: '2026-06-01' }, 'staff1') // sin venta
+    const input = mPost.mock.calls[0][1]
+    expect(input.lines).toEqual([
+      { ledgerAccountId: 'acc-171.09', debitCents: 12_000_00, creditCents: 0 },
+      { ledgerAccountId: 'acc-701.09', debitCents: 18_000_00, creditCents: 0 },
+      { ledgerAccountId: 'acc-156.09', debitCents: 0, creditCents: 30_000_00 },
+    ])
+  })
+
+  it('sin ALTA en libros → NO postea la baja (abonar el activo desbalancearía la cuenta)', async () => {
+    disposedSetup()
+    const r = await disposeFixedAsset('v1', 'fa1', { disposalDate: '2026-06-01' })
+    expect(r.ledgerPosted).toBe(false)
+    expect(r.ledgerReason).toBe('noAcquisitionEntry')
+    expect(mPost).not.toHaveBeenCalled()
+  })
+})
+
+describe('factor INPC (actualización fiscal, art. 31)', () => {
+  it('register: factor fuera de rango → BadRequestError', async () => {
+    await expect(registerFixedAsset('v1', { ...BASE, inpcFactor: 20 })).rejects.toThrow(BadRequestError)
+  })
+
+  it('update: número persiste como Decimal; null lo borra', async () => {
+    p.fixedAsset.findFirst.mockResolvedValue(assetRow())
+    p.fixedAsset.update.mockImplementation(({ data }: any) => Promise.resolve(assetRow(data)))
+    await updateFixedAsset('v1', 'fa1', { inpcFactor: 1.0832 })
+    expect(Number(p.fixedAsset.update.mock.calls[0][0].data.inpcFactor)).toBeCloseTo(1.0832)
+    await updateFixedAsset('v1', 'fa1', { inpcFactor: null })
+    expect(p.fixedAsset.update.mock.calls[1][0].data.inpcFactor).toBeNull()
   })
 })

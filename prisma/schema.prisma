@@ -11393,6 +11393,7 @@ model FixedAsset {
   acquisitionDate   DateTime // fecha de adquisición
   inServiceDate     DateTime // inicio de uso (arranca la depreciación); default = acquisitionDate
   salvageValueCents Int              @default(0) // valor de rescate (no se deprecia por debajo)
+  inpcFactor        Decimal?         @db.Decimal(6, 4) // factor de actualización INPC (art. 31 LISR), capturado por el contador; null = 1 (costo histórico)
   status            FixedAssetStatus @default(ACTIVE)
   sourceExpenseId   String? // gasto de compra ligado, si aplica
   disposalDate      DateTime? // fecha de baja (venta u obsolescencia); null si sigue en uso

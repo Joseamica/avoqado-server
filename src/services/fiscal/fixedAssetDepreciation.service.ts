@@ -207,16 +207,18 @@ export async function generateDepreciationForVenue(
 
 /**
  * Deducción de inversiones ACUMULADA del ejercicio (ene→`throughPeriod`) del contribuyente — lo que el ISR
- * general resta a la utilidad. Lee los renglones ya persistidos (la corrida mensual los genera). 0 si no hay.
+ * general resta a la utilidad. Lee los renglones ya persistidos (la corrida mensual los genera) y aplica el
+ * factor de actualización INPC por activo si el contador lo capturó (art. 31 LISR; null = 1, costo
+ * histórico). El LIBRO se queda a costo histórico — la actualización es solo para la deducción fiscal.
  */
 export async function getYearDepreciationCents(organizationId: string, rfc: string, year: number, throughPeriod: string): Promise<number> {
   const from = `${year}-01`
-  const agg = await prisma.fixedAssetDepreciation.aggregate({
+  const rows = await prisma.fixedAssetDepreciation.findMany({
     where: {
       period: { gte: from, lte: throughPeriod },
       fixedAsset: { organizationId, rfc },
     },
-    _sum: { depreciationCents: true },
+    select: { depreciationCents: true, fixedAsset: { select: { inpcFactor: true } } },
   })
-  return agg._sum.depreciationCents ?? 0
+  return rows.reduce((s, r) => s + Math.round(r.depreciationCents * Number(r.fixedAsset.inpcFactor ?? 1)), 0)
 }

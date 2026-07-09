@@ -77,13 +77,13 @@ describe('getCatalog', () => {
 })
 
 describe('seedBaseChart', () => {
-  it('siembra el catálogo del giro (servicios = 92 cuentas) con isPostable solo en hojas', async () => {
+  it('siembra el catálogo del giro (servicios = 104 cuentas) con isPostable solo en hojas', async () => {
     const { tx, create } = makeTx()
     p.$transaction.mockImplementation(async (cb: any) => cb(tx))
 
     await seedBaseChart('venue-1', { staffId: 'staff-1' })
 
-    expect(create).toHaveBeenCalledTimes(92) // 89 base (incl. 601.85 ISN + 601.86/171/171.09 depreciación) + 3 extras de 'servicios'
+    expect(create).toHaveBeenCalledTimes(104) // 102 base (incl. activo fijo 152-157 + .09, 701.09) + 3 extras de 'servicios' − 1 (156 ahora vive en el base y el dedupe absorbe la del giro)
     const byCode = (code: string) => create.mock.calls.find(c => c[0].data.code === code)?.[0].data
     expect(byCode('101').isPostable).toBe(false) // 101 (Caja) tiene hijos → acumulativa
     expect(byCode('101.01').isPostable).toBe(true) // hoja
@@ -109,7 +109,7 @@ describe('seedBaseChart', () => {
     const createdCodes = create.mock.calls.map(c => c[0].data.code)
     expect(createdCodes).not.toContain('101') // existente → preservado
     expect(createdCodes).not.toContain('101.01')
-    expect(create).toHaveBeenCalledTimes(90) // 92 - 2 existentes
+    expect(create).toHaveBeenCalledTimes(102) // 104 - 2 existentes
   })
 })
 
