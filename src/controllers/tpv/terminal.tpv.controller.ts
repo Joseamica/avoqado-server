@@ -402,13 +402,22 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
       }),
     ])
 
+    // Cambaceo: per-terminal override (Terminal.configOverrides.trackPromoterLocation) takes
+    // precedence over the venue-level flag — tri-state: absent = inherit venue flag,
+    // true/false = this terminal always/never tracks regardless of the venue setting.
+    const terminalOverrides = (terminal.configOverrides as Record<string, any> | null) || {}
+
     // Merge terminal settings with venue-level settings
     // Note: requireClockInPhoto/requireClockOutPhoto are terminal-level settings (from Terminal.config)
     const tpvSettings: TpvSettings = {
       ...terminalTpvSettings,
       enableShifts: venueSettings?.enableShifts ?? DEFAULT_TPV_SETTINGS.enableShifts,
-      // Cambaceo: venue-level opt-in for hourly promoter location pings
-      trackPromoterLocation: venueSettings?.trackPromoterLocation ?? DEFAULT_TPV_SETTINGS.trackPromoterLocation,
+      // Cambaceo: per-terminal override wins; otherwise venue-level opt-in for hourly promoter
+      // location pings; otherwise the global default.
+      trackPromoterLocation:
+        typeof terminalOverrides.trackPromoterLocation === 'boolean'
+          ? terminalOverrides.trackPromoterLocation
+          : (venueSettings?.trackPromoterLocation ?? DEFAULT_TPV_SETTINGS.trackPromoterLocation),
       // Card payment server-decoupling kill-switch: PER-TERMINAL (Terminal.config.settings),
       // default true (legacy). getTpvSettingsFromConfig already merges saved settings over
       // DEFAULT_TPV_SETTINGS, so this is the terminal's configured value when present, else true.
@@ -616,13 +625,33 @@ export async function updateTpvSettings(req: Request, res: Response, next: NextF
     const orgDefaults = await getOrgDefaultsForTerminal(terminal.venue.organizationId)
     const baseSettings = { ...DEFAULT_TPV_SETTINGS, ...orgDefaults }
 
-    // Step 3: Get current settings and merge with update
+    // Step 3: Get current settings and merge with update.
+    // trackPromoterLocation is a tri-state PER-TERMINAL override that lives ONLY in
+    // Terminal.configOverrides (set from the dashboard) — the DEVICE never controls it.
+    // The TPV only ever receives the resolved value from getTerminalConfig and may echo it
+    // back here; if we let it enter newSettings/computeOverrides, the diff would either
+    // wipe the explicit override or bake a wrong one in. Strip it from the incoming body
+    // AND (defensively) from anything stored in config.settings.
+    const { trackPromoterLocation: _ignoredFromDevice, ...deviceSettingsUpdate } = settingsUpdate
     const existingConfig = (terminal.config as any) || {}
-    const currentSettings = { ...DEFAULT_TPV_SETTINGS, ...(existingConfig.settings || {}) }
-    const newSettings: TpvSettings = { ...currentSettings, ...settingsUpdate }
+    const { trackPromoterLocation: _ignoredFromStored, ...storedSettings } = existingConfig.settings || {}
+    const currentSettings = { ...DEFAULT_TPV_SETTINGS, ...storedSettings }
+    const newSettings: TpvSettings = { ...currentSettings, ...deviceSettingsUpdate }
 
     // Step 4: Compute overrides (diff vs org defaults)
     const overrides = computeOverrides(newSettings, baseSettings)
+
+    // Step 4b: trackPromoterLocation in configOverrides may ONLY ever be the dashboard-set
+    // explicit tri-state value. Drop anything the diff derived for it (DEFAULT_TPV_SETTINGS
+    // reintroduces the key into newSettings, so a mismatching org default could bake a bogus
+    // override in), then preserve the existing explicit override — the write below
+    // FULL-REPLACES configOverrides with the recomputed diff, so without this a device
+    // settings push would silently wipe a dashboard-set override.
+    delete overrides.trackPromoterLocation
+    const prevOverrides = (terminal.configOverrides as Record<string, any>) || {}
+    if (typeof prevOverrides.trackPromoterLocation === 'boolean') {
+      overrides.trackPromoterLocation = prevOverrides.trackPromoterLocation
+    }
 
     // Step 5: Save full merged config.settings (TPV Android compat) + configOverrides (diff only)
     await prisma.terminal.update({

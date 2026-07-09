@@ -569,10 +569,10 @@ const DEFAULT_TPV_SETTINGS: TpvSettings = {
  * Get TPV settings for a specific terminal
  * Returns default settings if none exist
  */
-export async function getTpvSettings(tpvId: string): Promise<TpvSettings> {
+export async function getTpvSettings(tpvId: string): Promise<TpvSettings & { trackPromoterLocationOverride: boolean | null }> {
   const terminal = await prisma.terminal.findUnique({
     where: { id: tpvId },
-    select: { config: true },
+    select: { config: true, configOverrides: true },
   })
 
   if (!terminal) {
@@ -581,10 +581,17 @@ export async function getTpvSettings(tpvId: string): Promise<TpvSettings> {
 
   // If config exists and has settings property, return it merged with defaults
   const savedSettings = (terminal.config as any)?.settings || {}
+  const existingOverrides = (terminal.configOverrides as Record<string, any>) || {}
+  // Tri-state per-terminal override for promoter location tracking (absent = inherit venue flag).
+  // Surfaced separately from TpvSettings so the dashboard editor can render the explicit
+  // on/off/inherit control instead of a plain boolean.
+  const trackPromoterLocationOverride: boolean | null =
+    typeof existingOverrides.trackPromoterLocation === 'boolean' ? existingOverrides.trackPromoterLocation : null
 
   return {
     ...DEFAULT_TPV_SETTINGS,
     ...savedSettings,
+    trackPromoterLocationOverride,
   }
 }
 
@@ -592,8 +599,18 @@ export async function getTpvSettings(tpvId: string): Promise<TpvSettings> {
  * Update TPV settings for a specific terminal.
  * Computes the diff against org defaults and stores only overrides in configOverrides.
  * Full merged settings are saved to config.settings for TPV Android compatibility.
+ *
+ * `trackPromoterLocation` is handled OUTSIDE the diff mechanism: it is a tri-state
+ * per-terminal override (absent = inherit venue flag, true = always track, false = never
+ * track) that lives only in Terminal.configOverrides, never in Terminal.config.settings —
+ * a diff-based override can't express "explicitly false" because a value equal to the org
+ * default would silently vanish and be re-read as "inherit". Mirrors how
+ * `updateVenueTpvSettings` destructures it out of the venue-level settings blob.
  */
-export async function updateTpvSettings(tpvId: string, settingsUpdate: Partial<TpvSettings>): Promise<TpvSettings> {
+export async function updateTpvSettings(
+  tpvId: string,
+  settingsUpdate: Partial<TpvSettings> & { trackPromoterLocation?: boolean | null },
+): Promise<TpvSettings> {
   // 1. Get terminal with venue → org relationship for org defaults lookup
   const terminal = await prisma.terminal.findUnique({
     where: { id: tpvId },
@@ -609,6 +626,9 @@ export async function updateTpvSettings(tpvId: string, settingsUpdate: Partial<T
     throw new NotFoundError(`Terminal con ID ${tpvId} no encontrada.`)
   }
 
+  // Pull trackPromoterLocation out before it ever touches config.settings / the diff.
+  const { trackPromoterLocation, ...restSettingsUpdate } = settingsUpdate
+
   // 2. Get org defaults (if org exists)
   const orgDefaults = await getOrgDefaultsForTerminal(terminal.venue.organizationId)
 
@@ -618,12 +638,26 @@ export async function updateTpvSettings(tpvId: string, settingsUpdate: Partial<T
   const newSettings: TpvSettings = {
     ...DEFAULT_TPV_SETTINGS,
     ...existingSettings,
-    ...settingsUpdate,
+    ...restSettingsUpdate,
   }
 
   // 4. Compute overrides: only fields that differ from org defaults
   const baseSettings = { ...DEFAULT_TPV_SETTINGS, ...orgDefaults }
   const overrides = computeOverrides(newSettings, baseSettings)
+
+  // 4b. Tri-state trackPromoterLocation override (explicit, not diff-based):
+  //   true/false → set the override explicitly
+  //   null       → explicit "clear the override" (back to inherit)
+  //   undefined  → untouched by this call; preserve whatever override already existed so an
+  //                unrelated settings save doesn't silently wipe it
+  const prevOverrides = (terminal.configOverrides as Record<string, any>) || {}
+  if (trackPromoterLocation === true || trackPromoterLocation === false) {
+    overrides.trackPromoterLocation = trackPromoterLocation
+  } else if (trackPromoterLocation === null) {
+    delete overrides.trackPromoterLocation
+  } else if (prevOverrides.trackPromoterLocation !== undefined) {
+    overrides.trackPromoterLocation = prevOverrides.trackPromoterLocation
+  }
 
   // 5. Save full merged config.settings (TPV Android compat) + configOverrides (diff only)
   await prisma.terminal.update({

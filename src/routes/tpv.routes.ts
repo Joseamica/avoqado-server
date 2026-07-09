@@ -6554,6 +6554,7 @@ router.post(
       const { latitude, longitude, accuracy, capturedAt, source } = req.body
 
       let terminalId: string | null = null
+      let terminalTrackOverride: boolean | null = null
       if (terminalSerialNumber) {
         const terminal = await prisma.terminal.findFirst({
           where: {
@@ -6563,9 +6564,14 @@ router.post(
               { id: terminalSerialNumber },
             ],
           },
-          select: { id: true },
+          select: { id: true, configOverrides: true },
         })
         terminalId = terminal?.id ?? null
+        // Tri-state per-terminal override for the promoter-tracking gate below (absent = inherit venue flag).
+        terminalTrackOverride =
+          typeof (terminal?.configOverrides as any)?.trackPromoterLocation === 'boolean'
+            ? (terminal!.configOverrides as any).trackPromoterLocation
+            : null
       }
 
       const ping = await recordPromoterPing({
@@ -6577,6 +6583,7 @@ router.post(
         capturedAt: capturedAt ? new Date(capturedAt) : new Date(),
         source: source ?? 'PERIODIC',
         terminalId,
+        terminalTrackOverride,
       })
 
       res.status(201).json({ success: true, data: { id: ping.id } })

@@ -88,6 +88,57 @@ describe('promoterLocation.service', () => {
 
       expect(prismaMock.promoterLocationPing.create).not.toHaveBeenCalled()
     })
+
+    // Per-terminal override (tri-state): a terminal-level true/false wins over the venue flag.
+    it('creates the ping when terminalTrackOverride=true even though the venue flag is off', async () => {
+      prismaMock.venueSettings.findUnique.mockResolvedValue({ trackPromoterLocation: false })
+      prismaMock.promoterLocationPing.create.mockResolvedValue({ id: 'ping_5' })
+
+      const result = await recordPromoterPing({
+        venueId: 'v1',
+        staffId: 's1',
+        latitude: 1,
+        longitude: 2,
+        capturedAt: new Date('2026-07-01T17:00:00Z'),
+        terminalTrackOverride: true,
+      })
+
+      expect(result).toEqual({ id: 'ping_5' })
+      expect(prismaMock.promoterLocationPing.create).toHaveBeenCalled()
+    })
+
+    it('throws and writes nothing when terminalTrackOverride=false even though the venue flag is on', async () => {
+      prismaMock.venueSettings.findUnique.mockResolvedValue({ trackPromoterLocation: true })
+
+      await expect(
+        recordPromoterPing({
+          venueId: 'v1',
+          staffId: 's1',
+          latitude: 1,
+          longitude: 2,
+          capturedAt: new Date('2026-07-01T17:00:00Z'),
+          terminalTrackOverride: false,
+        }),
+      ).rejects.toThrow()
+
+      expect(prismaMock.promoterLocationPing.create).not.toHaveBeenCalled()
+    })
+
+    it('falls back to the venue flag when there is no per-terminal override (existing behavior)', async () => {
+      prismaMock.venueSettings.findUnique.mockResolvedValue({ trackPromoterLocation: true })
+      prismaMock.promoterLocationPing.create.mockResolvedValue({ id: 'ping_6' })
+
+      const result = await recordPromoterPing({
+        venueId: 'v1',
+        staffId: 's1',
+        latitude: 1,
+        longitude: 2,
+        capturedAt: new Date('2026-07-01T17:00:00Z'),
+      })
+
+      expect(result).toEqual({ id: 'ping_6' })
+      expect(prismaMock.promoterLocationPing.create).toHaveBeenCalled()
+    })
   })
 
   // ── NEW FEATURE: read (live pin + day route) ───────────────────────────

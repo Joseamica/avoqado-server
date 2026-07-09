@@ -23,6 +23,9 @@ export interface RecordPromoterPingInput {
   capturedAt: Date
   source?: PromoterLocationSourceInput
   terminalId?: string | null
+  // Tri-state per-terminal override of Terminal.configOverrides.trackPromoterLocation:
+  // absent/null = inherit the venue flag, true = this terminal always tracks, false = never.
+  terminalTrackOverride?: boolean | null
 }
 
 export interface PromoterTrackPoint {
@@ -41,18 +44,20 @@ export interface PromoterTrack {
 /**
  * Persist a single location ping. Returns the new row id.
  *
- * Backend-authoritative gate: refuses the write unless the venue has
- * `trackPromoterLocation` enabled — so a stale/rogue TPV cannot store pings for
- * a venue that never opted into tracking (the TPV also self-gates, this is
- * defense-in-depth).
+ * Backend-authoritative gate: refuses the write unless tracking is effectively enabled for
+ * this terminal — so a stale/rogue TPV cannot store pings when tracking isn't on (the TPV
+ * also self-gates, this is defense-in-depth). Resolution is tri-state and per-terminal:
+ * `terminalTrackOverride` (Terminal.configOverrides.trackPromoterLocation) wins when set
+ * (true/false), otherwise falls back to the venue-level `trackPromoterLocation` flag.
  */
 export async function recordPromoterPing(input: RecordPromoterPingInput): Promise<{ id: string }> {
   const settings = await prisma.venueSettings.findUnique({
     where: { venueId: input.venueId },
     select: { trackPromoterLocation: true },
   })
-  if (!settings?.trackPromoterLocation) {
-    throw new ForbiddenError('El seguimiento de ubicación no está habilitado para esta sucursal')
+  const effective = input.terminalTrackOverride ?? settings?.trackPromoterLocation ?? false
+  if (!effective) {
+    throw new ForbiddenError('El seguimiento de ubicación no está habilitado para esta terminal')
   }
 
   return prisma.promoterLocationPing.create({
