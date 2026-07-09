@@ -136,6 +136,7 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
       durationMinutes,
       maxParticipants,
       layoutConfig,
+      unit,
     } = req.body
 
     if (!name || !name.trim()) {
@@ -175,6 +176,10 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
         durationMinutes: durationMinutes || null,
         maxParticipants: maxParticipants ?? null,
         layoutConfig: layoutConfig ?? undefined,
+        // Optional measurement unit (Prisma enum Unit). Additive: older
+        // clients that don't send it are unaffected. iOS's create-product
+        // form offered kg/L but silently dropped the choice before this.
+        unit: typeof unit === 'string' && unit.trim() ? unit.trim() : undefined,
       },
       include: productInclude,
     })
