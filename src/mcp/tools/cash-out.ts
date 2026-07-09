@@ -7,7 +7,12 @@ import { text } from '../respond'
 import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 import { getSaldo } from '@/services/dashboard/cash-out/cash-out.ledger.service'
 import { listWithdrawals } from '@/services/dashboard/cash-out/cash-out.withdrawal.service'
-import { listCommissionRatesForOrg, listActiveDaysForOrg } from '@/services/dashboard/cash-out/cash-out.config.service'
+import {
+  listCommissionRatesForOrg,
+  listActiveDaysForOrg,
+  resolveRatesForVenue,
+  resolveActiveDaysForVenue,
+} from '@/services/dashboard/cash-out/cash-out.config.service'
 import { listWithdrawalsForOrg, getSaldosForOrg } from '@/services/dashboard/cash-out/cash-out.org.service'
 
 // Cash Out is on wherever serialized inventory (SIMs) is — it's not a separate module.
@@ -95,14 +100,42 @@ export function registerCashOutTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'cash_out_org_commission_rates',
-    'Tabla org-wide de comisiones escalonadas de Cash Out (Línea Nueva / Portabilidad × rangos de acumulado), en PESOS. Es la configuración uniforme que aplica a TODOS los venues de tu organización activa que no tengan su propia tabla (venue-level la sobreescribe). Responde "¿cuánto se paga por cada SIM vendida según el acumulado del mes?" a nivel organización. No requiere venueId — usa la organización activa de esta conexión.',
-    {},
-    async () => {
+    'Tabla de comisiones escalonadas de Cash Out (Línea Nueva / Portabilidad × rangos de acumulado), en PESOS. Sin venueId: la tabla org-wide — la configuración uniforme que aplica a TODOS los venues de tu organización activa que no tengan su propia tabla (venue-level la sobreescribe). Con venueId: la tabla EFECTIVA para ESE venue (su propia tabla si tiene una, si no la de la organización) — usa esto para responder correctamente cuánto se le paga a un promotor de un venue específico. Responde "¿cuánto se paga por cada SIM vendida según el acumulado del mes?".',
+    {
+      venueId: z
+        .string()
+        .optional()
+        .describe(
+          'Pass a venueId to get the EFFECTIVE table for ONE store (its own override if set, else the org default). Omit for the org-wide table.',
+        ),
+    },
+    async ({ venueId }) => {
       try {
+        if (venueId) {
+          guard.venueFilter(venueId)
+          guard.requirePermission('cash-out:read', venueId)
+          if (!(await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY))) {
+            return text({ ok: false, moduleRequired: true, error: CASH_OUT_OFF })
+          }
+          const rates = await resolveRatesForVenue(venueId)
+          return text({
+            ok: true,
+            scope: 'venue',
+            venueId,
+            count: rates.length,
+            rates: rates.map(r => ({
+              saleType: r.saleType,
+              minCount: r.minCount,
+              maxCount: r.maxCount,
+              amount: r.amount.toString(), // pesos
+            })),
+          })
+        }
         const orgId = requireOrgReadAccess()
         const rates = await listCommissionRatesForOrg(orgId)
         return text({
           ok: true,
+          scope: 'org',
           orgId,
           count: rates.length,
           rates: rates.map(r => ({
@@ -120,13 +153,29 @@ export function registerCashOutTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'cash_out_org_active_days',
-    'Días activos de Cash Out (calendario ADMIN) a nivel organización — org-wide, aplican a todos los venues de tu organización activa que no tengan su propio calendario. Responde "¿qué días se puede retirar Cash Out en esta organización?". No requiere venueId — usa la organización activa de esta conexión.',
-    {},
-    async () => {
+    'Días activos de Cash Out (calendario ADMIN). Sin venueId: el calendario org-wide, aplican a todos los venues de tu organización activa que no tengan su propio calendario. Con venueId: el calendario EFECTIVO para ESE venue (su propio calendario si tiene uno, si no el de la organización) — usa esto para responder correctamente qué días puede retirar un promotor de un venue específico. Responde "¿qué días se puede retirar Cash Out?".',
+    {
+      venueId: z
+        .string()
+        .optional()
+        .describe(
+          'Pass a venueId to get the EFFECTIVE calendar for ONE store (its own override if set, else the org default). Omit for the org-wide calendar.',
+        ),
+    },
+    async ({ venueId }) => {
       try {
+        if (venueId) {
+          guard.venueFilter(venueId)
+          guard.requirePermission('cash-out:read', venueId)
+          if (!(await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY))) {
+            return text({ ok: false, moduleRequired: true, error: CASH_OUT_OFF })
+          }
+          const days = await resolveActiveDaysForVenue(venueId)
+          return text({ ok: true, scope: 'venue', venueId, count: days.length, days })
+        }
         const orgId = requireOrgReadAccess()
         const days = await listActiveDaysForOrg(orgId)
-        return text({ ok: true, orgId, count: days.length, days })
+        return text({ ok: true, scope: 'org', orgId, count: days.length, days })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
       }

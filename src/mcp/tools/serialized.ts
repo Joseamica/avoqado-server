@@ -2,7 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
-import { createGuard } from '../guard'
+import { createGuard, ScopeError } from '../guard'
 import { text } from '../respond'
 import { serializedInventoryService } from '@/services/serialized-inventory/serializedInventory.service'
 import { simCustodyService } from '@/services/serialized-inventory/custody.service'
@@ -10,6 +10,9 @@ import { auditMcpWrite } from '../audit'
 import { ROLE_HIERARCHY } from '@/lib/permissions'
 import { StaffRole } from '@prisma/client'
 import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
+import { stockDashboardService } from '@/services/stock-dashboard/stockDashboard.service'
+import { simRegistrationService } from '@/services/serialized-inventory/simRegistration.service'
+import { hasPermission } from '@/services/access/access.service'
 
 const SERIALIZED_OFF_MSG = 'El inventario serializado no está activo en este local (módulo SERIALIZED_INVENTORY apagado).'
 
@@ -26,6 +29,17 @@ const CUSTODY_STATE_ES: Record<string, string> = {
 
 export function registerSerializedTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
+
+  /** Org-level gate: caller must hold `sim-custody:approve-registration` in SOME venue of the active org. Mirrors cash-out's requireOrgReadAccess. */
+  function requireOrgApprovalAccess(): string {
+    if (!scope.activeOrg) {
+      throw new ScopeError('No hay una organización activa en esta conexión — reconéctate eligiendo una organización.')
+    }
+    for (const access of scope.perVenueAccess.values()) {
+      if (access.organizationId === scope.activeOrg && hasPermission(access, 'sim-custody:approve-registration')) return scope.activeOrg
+    }
+    throw new ScopeError('Missing permission sim-custody:approve-registration in this organization')
+  }
 
   server.tool(
     'serialized_inventory',
@@ -382,6 +396,137 @@ export function registerSerializedTools(server: McpServer, scope: McpScope) {
           venueId: i.venueId,
         })),
       })
+    },
+  )
+
+  server.tool(
+    'serialized_low_stock',
+    'Alerta de SIMs por acabarse por CATEGORÍA/tipo, según el mínimo configurado por tienda (StockAlertConfig). Responde "¿qué tipo de SIM se me está acabando?". Solo venues con SERIALIZED_INVENTORY. Pass venueId. Este es el equivalente, para inventario serializado (SIMs), de low_stock — low_stock NO cubre SIMs.',
+    { venueId: z.string().describe('Venue (must be in your scope)') },
+    async ({ venueId }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('inventory:read', venueId)
+      if (!(await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY))) {
+        return text({ ok: false, moduleRequired: true, error: SERIALIZED_OFF_MSG })
+      }
+      const alerts = await stockDashboardService.getLowStockAlerts(venueId)
+      return text({
+        venueId,
+        count: alerts.length,
+        alerts: alerts.map(a => ({
+          category: a.categoryName,
+          currentStock: a.currentStock,
+          minimumStock: a.minimumStock,
+          alertLevel: a.alertLevel,
+        })),
+      })
+    },
+  )
+
+  server.tool(
+    'serialized_stock_movements',
+    'Feed de movimientos recientes de inventario serializado (SIMs): registros, ventas, devoluciones y daños, con quién los tiene/tuvo (promotor, supervisor o almacén). Responde "¿qué ha pasado con las SIMs últimamente?" / "¿quién registró/vendió tal SIM?". Solo venues con SERIALIZED_INVENTORY. Pass venueId; opcionalmente limit, fromDate/toDate (YYYY-MM-DD) y responsibleStaffId para filtrar.',
+    {
+      venueId: z.string().describe('Venue (must be in your scope)'),
+      limit: z.number().int().positive().max(200).optional().describe('Max movements (default 20)'),
+      fromDate: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .optional()
+        .describe('Filter from this day (YYYY-MM-DD), inclusive'),
+      toDate: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .optional()
+        .describe('Filter up to this day (YYYY-MM-DD), inclusive'),
+      responsibleStaffId: z
+        .string()
+        .optional()
+        .describe('Only movements for this responsible staffId (promoter/supervisor); use "__admin_held__" for warehouse-held items'),
+    },
+    async ({ venueId, limit, fromDate, toDate, responsibleStaffId }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('inventory:read', venueId)
+      if (!(await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY))) {
+        return text({ ok: false, moduleRequired: true, error: SERIALIZED_OFF_MSG })
+      }
+      const movements = await stockDashboardService.getRecentMovements(venueId, limit ?? 20, {
+        ...(fromDate ? { dateFrom: new Date(fromDate) } : {}),
+        ...(toDate ? { dateTo: new Date(toDate) } : {}),
+        ...(responsibleStaffId ? { responsibleStaffId } : {}),
+      })
+      return text({
+        venueId,
+        count: movements.length,
+        movements: movements.map(m => ({
+          serialNumber: m.serialNumber,
+          category: m.categoryName,
+          type: m.type,
+          at: new Date(m.timestamp).toISOString(),
+          venue: m.venueName,
+          registeredBy: m.userName,
+          soldBy: m.soldByName ?? null,
+          soldAtVenue: m.soldAtVenueName ?? null,
+          itemCount: m.itemCount ?? null,
+          responsible: m.responsible,
+        })),
+      })
+    },
+  )
+
+  server.tool(
+    'serialized_stock_trend',
+    'Tendencia diaria de stock disponible vs ventas de inventario serializado (SIMs) en los últimos N días — un punto por día. Responde "¿cómo ha ido bajando/subiendo el stock?" / "¿cuántas SIMs se vendieron por día?". Solo venues con SERIALIZED_INVENTORY. Pass venueId; opcionalmente days (default 14).',
+    {
+      venueId: z.string().describe('Venue (must be in your scope)'),
+      days: z.number().int().positive().max(90).optional().describe('Number of days back (default 14)'),
+    },
+    async ({ venueId, days }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('inventory:read', venueId)
+      if (!(await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY))) {
+        return text({ ok: false, moduleRequired: true, error: SERIALIZED_OFF_MSG })
+      }
+      const trend = await stockDashboardService.getStockVsSales(venueId, days ?? 14)
+      return text({ venueId, days: days ?? 14, trend })
+    },
+  )
+
+  server.tool(
+    'serialized_stock_metrics',
+    'Resumen de métricas de inventario serializado (SIMs) para un venue: piezas totales, valor total estimado, piezas disponibles, vendidas hoy y vendidas esta semana. Responde "¿cuánto stock tengo?" / "¿cuánto llevo vendido hoy/esta semana en SIMs?". Solo venues con SERIALIZED_INVENTORY. Pass venueId.',
+    { venueId: z.string().describe('Venue (must be in your scope)') },
+    async ({ venueId }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('inventory:read', venueId)
+      if (!(await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY))) {
+        return text({ ok: false, moduleRequired: true, error: SERIALIZED_OFF_MSG })
+      }
+      const metrics = await stockDashboardService.getStockMetrics(venueId)
+      return text({ venueId, ...metrics })
+    },
+  )
+
+  server.tool(
+    'sim_pending_approvals',
+    'Cola de aprobaciones de SIMs pendientes en tu organización. queue="registration" = solicitudes de registro de SIMs de promotores (SimRegistrationRequest PENDING); queue="stock" = SIMs ya registrados que requieren visto bueno del OWNER (requiresOwnerApproval). Responde "¿qué SIMs/stock tengo pendiente de aprobar?".',
+    {
+      queue: z.enum(['registration', 'stock']).describe('Which approval queue to read'),
+      limit: z.number().int().positive().max(200).optional().describe('Page size, queue="stock" only (default 50)'),
+      cursor: z.string().optional().describe('Pagination cursor, queue="stock" only (from a previous call\'s nextCursor)'),
+      search: z.string().optional().describe('Filter by serial number substring, queue="stock" only'),
+    },
+    async ({ queue, limit, cursor, search }) => {
+      const orgId = requireOrgApprovalAccess() // throws ScopeError if not permitted in the active org
+      if (queue === 'registration') {
+        const [requests, count] = await Promise.all([simRegistrationService.listPending(orgId), simRegistrationService.countPending(orgId)])
+        return text({ queue, orgId, count, requests })
+      }
+      const [page, count] = await Promise.all([
+        simRegistrationService.listPendingStockApprovals(orgId, { cursor, limit, search }),
+        simRegistrationService.countPendingStockApprovals(orgId),
+      ])
+      return text({ queue, orgId, count, ...page })
     },
   )
 }
