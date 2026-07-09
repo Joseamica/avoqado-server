@@ -74,6 +74,10 @@ const envSchema = z.object({
   RESEND_API_KEY: z.string().optional(),
   EMAIL_FROM: z.string().optional(),
   ORDER_NOTIFICATIONS_EMAIL: z.string().email().optional(),
+  // Recipient for the weekly "new activated/paid venues" report (see
+  // jobs/weekly-new-customers-report.job.ts). Unset = job logs a warning and
+  // skips sending — never silently emails nowhere or to a wrong address.
+  WEEKLY_NEW_CUSTOMERS_REPORT_EMAIL: z.string().email().optional(),
 
   // Blumon Payment SDK
   USE_BLUMON_MOCK: z

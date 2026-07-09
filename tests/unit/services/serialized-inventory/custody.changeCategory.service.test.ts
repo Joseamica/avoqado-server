@@ -204,6 +204,59 @@ describe('SimCustodyService — changeCategory', () => {
     })
   })
 
+  describe('allowSold correction path', () => {
+    it('reclassifies a SOLD SIM when allowSold=true — updates only categoryId, never the sale/status, and audits wasSold', async () => {
+      const item = makeItem({ status: 'SOLD', categoryId: 'cat-original' })
+      const { service, tx } = makeService(item)
+
+      const res = await service.changeCategory({
+        actor: ACTOR,
+        serialNumbers: ['SIM-X'],
+        categoryId: CATEGORY_ID,
+        allowSold: true,
+      })
+
+      expect(res.summary).toEqual({ total: 1, succeeded: 1, failed: 0 })
+      expect(res.results[0]).toMatchObject({ serialNumber: 'SIM-X', status: 'ok' })
+
+      // "Sin afectar la venta": the update touches ONLY categoryId. status stays
+      // SOLD and no Payment/Order/SaleVerification field is written.
+      expect(tx.serializedItem.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ id: item.id, categoryId: 'cat-original' }),
+          data: { categoryId: CATEGORY_ID },
+        }),
+      )
+
+      // Audit records that the corrected SIM was already sold at reclassification.
+      expect(mockedLogAction).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'SERIALIZED_ITEM_CATEGORY_CHANGED',
+          data: expect.objectContaining({
+            fromCategoryId: 'cat-original',
+            toCategoryId: CATEGORY_ID,
+            wasSold: true,
+          }),
+        }),
+      )
+    })
+
+    it('still blocks a SOLD SIM when allowSold is omitted (default-safe)', async () => {
+      const item = makeItem({ status: 'SOLD' })
+      const { service, tx } = makeService(item)
+
+      const res = await service.changeCategory({
+        actor: ACTOR,
+        serialNumbers: ['SIM-X'],
+        categoryId: CATEGORY_ID,
+      })
+
+      expect(res.summary).toEqual({ total: 1, succeeded: 0, failed: 1 })
+      expect(res.results[0].code).toBe('SIM_SOLD')
+      expect(tx.serializedItem.updateMany).not.toHaveBeenCalled()
+    })
+  })
+
   describe('idempotency', () => {
     it('is idempotent when SIM is already in the target category — status ok, no update', async () => {
       // Item already has the target categoryId — no-op

@@ -147,6 +147,8 @@ wait stable, then APK. TPV sends `X-App-Version-Code` for conditional behavior.
 - `payments.md` - Payment/inventory rules (path-conditional: `src/services/tpv/**`, `src/services/dashboard/rawMaterial*`)
 - `cron-jobs.md` - Cron jobs MUST wrap entry DB read with `retry(..., shouldRetryDbConnectionError)` (path-conditional: `src/jobs/**`).
   Prevents top-of-hour P1001 stampede deaths. NO global Prisma retry.
+- `feature-gating.md` - Module vs Feature: two parallel gating systems, don't cross the resolvers
+- `playtelecom-vertical.md` - PlayTelecom white-label vertical: who's who (Bait/Walmart), generic vs bespoke, gotchas
 
 ### On-demand guides (`docs/guides/`)
 

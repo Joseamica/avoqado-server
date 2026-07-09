@@ -5,6 +5,7 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { serializedInventoryService } from '@/services/serialized-inventory/serializedInventory.service'
+import { simCustodyService } from '@/services/serialized-inventory/custody.service'
 import { auditMcpWrite } from '../audit'
 import { adjustInventoryStock } from '@/services/dashboard/productInventory.service'
 import { createRawMaterial } from '@/services/dashboard/rawMaterial.service'
@@ -660,6 +661,110 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
           reason: e.reason ?? null,
         })),
       })
+    },
+  )
+
+  server.tool(
+    'change_sim_category',
+    'OWNER-only: reclassify one or many serialized items (SIM / ICCID) to a different org-level category (e.g. move SIMs from "SIM de Evento" to "SIM de Intercambio"). Use this to CORRECT a wrong SIM type — including SIMs that were ALREADY SOLD: pass allowSold:true and it reclassifies them too. IMPORTANT: this only changes the SIM\'s TYPE as it shows in the reports (weekly/monthly SIM-type breakdowns read the live category); it NEVER touches the sale, the amount, the promoter, or the custody chain. Only for venues with the SERIALIZED_INVENTORY module (telecom / white-label). By DEFAULT it only PREVIEWS; call again with confirm:true to apply. This WRITES.',
+    {
+      venueId: z
+        .string()
+        .describe('A venue in the org that owns the SIMs (must be in your scope) — used for the module gate and to resolve the org'),
+      serialNumbers: z.array(z.string().min(1)).min(1).max(500).describe('ICCIDs / serial numbers to reclassify (max 500)'),
+      categoryName: z
+        .string()
+        .min(1)
+        .describe('Target category name, e.g. "SIM de Intercambio" (resolved to an org-level category, case-insensitive)'),
+      allowSold: z
+        .boolean()
+        .optional()
+        .describe(
+          'Set true to reclassify SOLD SIMs too (correction path — only the SIM type in reports changes, the sale is untouched). Default false: sold SIMs are rejected with SIM_SOLD.',
+        ),
+      confirm: z.boolean().optional().describe('Must be true to actually apply; without it you get a preview'),
+    },
+    async ({ venueId, serialNumbers, categoryName, allowSold, confirm }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      // SERIALIZED_INVENTORY is a MODULE — gate exactly like the platform (isModuleEnabled, incl.
+      // org-level fallback). Only module-on venues (telecom / white-label) may reclassify SIMs.
+      if (!(await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY))) {
+        return text({ ok: false, moduleRequired: true, error: SERIALIZED_OFF_MSG })
+      }
+      // Write-scope (mcp:write) + the platform permission gate, evaluated for THIS venue.
+      guard.requirePermission('serialized-inventory:change-category', venueId)
+      // Extra MCP restriction (founder request): reclassifying SIMs — especially sold ones — is
+      // OWNER-only here, stricter than the dashboard (OWNER/ADMIN). SUPERADMIN is above OWNER.
+      const access = scope.perVenueAccess.get(venueId)
+      const callerRole = access?.role
+      if (!callerRole || ROLE_HIERARCHY[callerRole] < ROLE_HIERARCHY[StaffRole.OWNER]) {
+        return text({ ok: false, error: 'Solo un OWNER puede cambiar la categoría de SIMs desde aquí.' })
+      }
+      const organizationId = access?.organizationId
+      if (!organizationId) {
+        return text({ ok: false, error: 'No pude resolver la organización de este venue.' })
+      }
+
+      // Resolve the target category name → id within the org (matches the service's own
+      // OR: [org-level, venue-in-org] category scope). Case-insensitive.
+      const categories = await prisma.itemCategory.findMany({
+        where: { OR: [{ organizationId }, { venue: { organizationId } }] },
+        select: { id: true, name: true },
+      })
+      const target = categories.find(c => c.name.trim().toLowerCase() === categoryName.trim().toLowerCase())
+      if (!target) {
+        return text({
+          ok: false,
+          error: `No encontré la categoría "${categoryName}" en esta organización.`,
+          availableCategories: categories.map(c => c.name),
+        })
+      }
+
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          change: {
+            serialCount: serialNumbers.length,
+            toCategory: target.name,
+            allowSold: allowSold ?? false,
+          },
+          message:
+            `Esto reclasificará ${serialNumbers.length} SIM(s) a la categoría "${target.name}"` +
+            `${allowSold ? ', INCLUYENDO los que ya estén vendidos (solo cambia su tipo en los reportes; la venta NO se toca)' : ' (los SIMs ya vendidos serán rechazados con SIM_SOLD; usa allowSold:true para incluirlos)'}.` +
+            ' Confirma con el operador; luego vuelve a llamar con confirm:true.',
+        })
+      }
+
+      try {
+        const result = await simCustodyService.changeCategory({
+          actor: { staffId: scope.staffId, organizationId, role: callerRole },
+          serialNumbers,
+          categoryId: target.id,
+          allowSold: allowSold ?? false,
+        })
+        await auditMcpWrite(scope, {
+          action: 'SERIALIZED_ITEM_CATEGORY_CHANGED',
+          entity: 'SerializedItem',
+          entityId: venueId, // bulk op — no single entity; anchor the MCP audit on the venue
+          venueId,
+          data: {
+            toCategoryId: target.id,
+            toCategoryName: target.name,
+            allowSold: allowSold ?? false,
+            summary: result.summary,
+          },
+        })
+        return text({
+          ok: result.summary.failed === 0,
+          toCategory: target.name,
+          allowSold: allowSold ?? false,
+          summary: result.summary,
+          results: result.results,
+        })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
     },
   )
 }

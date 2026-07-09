@@ -89,6 +89,12 @@ export interface ChangeCategoryInput {
   serialNumbers: string[]
   categoryId: string
   idempotencyRequestId?: string | null
+  /**
+   * Correction path: when true, SOLD SIMs are reclassified too (still WITHOUT
+   * touching the sale — only categoryId changes). Off by default so the normal
+   * warehouse flow keeps protecting items that already went out the door.
+   */
+  allowSold?: boolean
 }
 
 // ==========================================
@@ -674,7 +680,9 @@ export class SimCustodyService {
    *
    * Per-SIM:
    *   - NOT_FOUND if the serial cannot be resolved in this org.
-   *   - SIM_SOLD if item.status === 'SOLD'.
+   *   - SIM_SOLD if item.status === 'SOLD' AND input.allowSold !== true. When
+   *     allowSold is true, sold SIMs are reclassified too (correction path) —
+   *     still only categoryId is written, the sale is never touched.
    *   - Idempotent no-op if item.categoryId === categoryId (status: ok).
    *   - Otherwise: updateMany with (id, categoryId) as the optimistic lock;
    *     VERSION_CONFLICT if count !== 1 (concurrent update won the race).
@@ -687,7 +695,7 @@ export class SimCustodyService {
    * Authorization is gated at the route layer (OWNER / SUPERADMIN).
    */
   async changeCategory(input: ChangeCategoryInput): Promise<BulkResult> {
-    const { actor, serialNumbers, categoryId } = input
+    const { actor, serialNumbers, categoryId, allowSold = false } = input
 
     // Load the org's categories once into an id→name map. Serves two purposes:
     //   1. Validate the target category exists & belongs to the actor's org
@@ -721,6 +729,7 @@ export class SimCustodyService {
       serialNumber: string
       fromCategoryId: string
       fromCategoryName: string | null
+      wasSold: boolean
     }
 
     const results: BulkResultRow[] = []
@@ -740,7 +749,9 @@ export class SimCustodyService {
       const row = await this.processOneRow(serialNumber, async tx => {
         const item = await this.findOrgItem(tx, actor.organizationId, serialNumber)
         if (!item) throw new SimCustodyError('NOT_FOUND')
-        if (item.status === 'SOLD') throw new SimCustodyError('SIM_SOLD')
+        // Sold SIMs are blocked in the normal flow; the correction path
+        // (allowSold) reclassifies them too — categoryId only, sale untouched.
+        if (item.status === 'SOLD' && !allowSold) throw new SimCustodyError('SIM_SOLD')
 
         // Idempotent: already in target category — no update, no audit.
         if (item.categoryId === categoryId) {
@@ -760,6 +771,7 @@ export class SimCustodyService {
           serialNumber: item.serialNumber,
           fromCategoryId,
           fromCategoryName: categoryNameById.get(fromCategoryId) ?? null,
+          wasSold: item.status === 'SOLD',
         }
         return { item }
       })
@@ -782,6 +794,7 @@ export class SimCustodyService {
             fromCategoryName: committedAudit.fromCategoryName,
             toCategoryId: categoryId,
             toCategoryName,
+            wasSold: committedAudit.wasSold,
           },
         })
       }

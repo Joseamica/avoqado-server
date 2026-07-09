@@ -59,6 +59,8 @@ export const ReassignPromoterBody = z.object({
 export const ChangeCategoryBody = z.object({
   categoryId: z.string().min(1, 'La categoría destino es requerida'),
   serialNumbers: z.array(z.string().min(1)).min(1, 'Debes incluir al menos un SIM').max(500, 'Máximo 500 SIMs por solicitud'),
+  // Correction path: reclassify SOLD SIMs too (categoryId only — sale untouched).
+  allowSold: z.boolean().optional(),
 })
 
 // ==========================================
@@ -254,7 +256,10 @@ export async function reassignPromoter(req: Request, res: Response, next: NextFu
 }
 
 /**
- * OWNER/ADMIN: Bulk change the category of non-sold SIMs.
+ * OWNER/ADMIN: Bulk change the category of SIMs. By default sold SIMs are
+ * rejected; pass `allowSold: true` for the correction path (reclassify sold
+ * SIMs too — only categoryId changes, the sale is never touched). Every change
+ * is written to ActivityLog (with `wasSold` when it was a sold correction).
  * Requires: serialized-inventory:change-category + SERIALIZED_INVENTORY module.
  */
 export async function changeCategory(req: Request, res: Response, next: NextFunction) {
@@ -273,6 +278,7 @@ export async function changeCategory(req: Request, res: Response, next: NextFunc
       actor: { staffId: userId, organizationId: paramOrgId, role },
       categoryId: parse.data.categoryId,
       serialNumbers: parse.data.serialNumbers,
+      allowSold: parse.data.allowSold ?? false,
       idempotencyRequestId: req.idempotency?.requestId ?? null,
     })
     res.status(200).json(result)
