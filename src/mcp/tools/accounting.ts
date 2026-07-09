@@ -18,7 +18,7 @@ import { getCatalogoXml, getBalanzaXml, getPolizasXml } from '@/services/fiscal/
 import { getIsrProvisional } from '@/services/fiscal/isr.service'
 import { setSalesRetention } from '@/services/fiscal/salesRetention.service'
 import { setFiscalLoss } from '@/services/fiscal/fiscalLoss.service'
-import { listAssetTypes, listFixedAssets, registerFixedAsset } from '@/services/fiscal/fixedAsset.service'
+import { disposeFixedAsset, listAssetTypes, listFixedAssets, registerFixedAsset, updateFixedAsset } from '@/services/fiscal/fixedAsset.service'
 import { generateDepreciationForVenue } from '@/services/fiscal/fixedAssetDepreciation.service'
 import { computePayrollPreview, createEmployee, listEmployees, runPayroll } from '@/services/fiscal/nomina.service'
 import { stampPayrollReceipts } from '@/services/fiscal/nominaCfdi.service'
@@ -1163,6 +1163,87 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         nota: r.posted
           ? 'Registrado y contabilizado. Se deduce en tu ISR general y ya pegó en la balanza.'
           : 'Registrado. Se deduce en tu ISR general; para que también pegue en la balanza, configura el mapeo de cuentas de depreciación.',
+      })
+    },
+  )
+
+  server.tool(
+    'update_fixed_asset',
+    'Edita un ACTIVO FIJO que sigue en uso (descripción, tipo, monto, tasa, valor de rescate, fechas) — Capa B, PREMIUM, escritura. Solo los campos que envíes. No se puede editar un activo dado de baja. Montos en PESOS. Responde "corrige la tasa del activo X a 20%". Pasa venueId, assetId (de list_fixed_assets) y los campos a cambiar.',
+    {
+      venueId: z.string().describe('Local del contribuyente'),
+      assetId: z.string().describe('ID del activo (de list_fixed_assets)'),
+      descripcion: z.string().optional(),
+      tipo: z.string().optional().describe('Clave del tipo (de list_asset_types)'),
+      monto: z.number().positive().optional().describe('Nuevo MOI en pesos'),
+      tasaAnual: z.number().min(0).max(1).optional().describe('Nueva tasa anual (fracción)'),
+      valorRescate: z.number().min(0).optional().describe('Nuevo valor de rescate en pesos'),
+      fechaAdquisicion: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .optional(),
+      fechaInicioUso: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .optional(),
+    },
+    async ({ venueId, assetId, descripcion, tipo, monto, tasaAnual, valorRescate, fechaAdquisicion, fechaInicioUso }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:manage', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'Los activos fijos')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+      const a = await updateFixedAsset(
+        venueId,
+        assetId,
+        {
+          description: descripcion,
+          assetType: tipo,
+          moiCents: monto != null ? Math.round(monto * 100) : undefined,
+          annualRate: tasaAnual,
+          salvageValueCents: valorRescate != null ? Math.round(valorRescate * 100) : undefined,
+          acquisitionDate: fechaAdquisicion,
+          inServiceDate: fechaInicioUso,
+        },
+        scope.staffId,
+      )
+      return text({ ok: true, id: a.id, descripcion: a.description, tipo: a.assetTypeLabel, moi: pesos(a.moiCents), tasaAnual: a.annualRate })
+    },
+  )
+
+  server.tool(
+    'dispose_fixed_asset',
+    'Da de BAJA un activo fijo (venta u obsolescencia) — Capa B, PREMIUM, escritura. Deja de depreciarse y calcula el VALOR EN LIBROS (base − depreciación acumulada) y la GANANCIA/PÉRDIDA contable (precio de venta − valor en libros). Omite el precio si es baja sin venta (obsolescencia). Responde "da de baja el activo X, lo vendí en $Y". Pasa venueId, assetId (de list_fixed_assets) y la fecha de baja.',
+    {
+      venueId: z.string().describe('Local del contribuyente'),
+      assetId: z.string().describe('ID del activo (de list_fixed_assets)'),
+      fechaBaja: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .describe('Fecha de baja YYYY-MM-DD'),
+      precioVenta: z.number().min(0).optional().describe('Precio de venta en pesos (omítelo si es baja sin venta / obsolescencia)'),
+    },
+    async ({ venueId, assetId, fechaBaja, precioVenta }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('accounting:manage', venueId)
+      const gate = await planGateMessage(venueId, 'CFDI', 'Los activos fijos')
+      if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
+      const r = await disposeFixedAsset(
+        venueId,
+        assetId,
+        { disposalDate: fechaBaja, proceedsCents: precioVenta != null ? Math.round(precioVenta * 100) : null },
+        scope.staffId,
+      )
+      return text({
+        ok: true,
+        activo: r.asset.description,
+        valorEnLibros: pesos(r.bookValueCents),
+        depreciacionAcumulada: pesos(r.accumulatedDepreciationCents),
+        precioVenta: pesos(r.proceedsCents),
+        gananciaOPerdida: pesos(r.gainLossCents),
+        nota:
+          r.gainLossCents >= 0
+            ? 'Baja registrada. Ganancia contable (precio de venta ≥ valor en libros).'
+            : 'Baja registrada. Pérdida contable (valor en libros > precio de venta) — deducible; confírmalo con tu contador.',
       })
     },
   )

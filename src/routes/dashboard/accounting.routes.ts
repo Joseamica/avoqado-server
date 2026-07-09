@@ -37,10 +37,12 @@ import {
 import { getIsrProvisionalController } from '@/controllers/dashboard/isr.controller'
 import { getSalesRetentionController, setSalesRetentionController } from '@/controllers/dashboard/salesRetention.controller'
 import {
+  disposeFixedAssetController,
   generateDepreciationController,
   listAssetTypesController,
   listFixedAssetsController,
   registerFixedAssetController,
+  updateFixedAssetController,
 } from '@/controllers/dashboard/fixedAsset.controller'
 import { getFiscalLossController, setFiscalLossController } from '@/controllers/dashboard/fiscalLoss.controller'
 import { getFiscalReadinessController } from '@/controllers/dashboard/fiscalReadiness.controller'
@@ -698,6 +700,52 @@ router.post(
   checkPermission('accounting:manage'),
   validateRequest(fixedAssetDepreciateSchema),
   generateDepreciationController,
+)
+const fixedAssetUpdateSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del local no es válido.' }),
+    assetId: z.string().cuid({ message: 'El ID del activo no es válido.' }),
+  }),
+  body: z.object({
+    description: z.string().min(1).max(200).optional(),
+    assetType: z.string().min(1).optional(),
+    moiCents: cents('monto de la inversión').optional(),
+    annualRate: z.number().min(0).max(1).optional(),
+    salvageValueCents: cents('valor de rescate').optional(),
+    acquisitionDate: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/, { message: 'La fecha debe ser AAAA-MM-DD.' })
+      .optional(),
+    inServiceDate: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/, { message: 'La fecha debe ser AAAA-MM-DD.' })
+      .optional(),
+  }),
+})
+const fixedAssetDisposeSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid({ message: 'El ID del local no es válido.' }),
+    assetId: z.string().cuid({ message: 'El ID del activo no es válido.' }),
+  }),
+  body: z.object({
+    disposalDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, { message: 'La fecha de baja debe ser AAAA-MM-DD.' }),
+    proceedsCents: cents('precio de venta').nullable().optional(),
+  }),
+})
+/** PATCH /accounting/fixed-assets/:assetId — editar · POST .../dispose — dar de baja. */
+router.patch(
+  '/fixed-assets/:assetId',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:manage'),
+  validateRequest(fixedAssetUpdateSchema),
+  updateFixedAssetController,
+)
+router.post(
+  '/fixed-assets/:assetId/dispose',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:manage'),
+  validateRequest(fixedAssetDisposeSchema),
+  disposeFixedAssetController,
 )
 
 // Pérdidas fiscales de ejercicios anteriores (Capa B) — saldo pendiente de amortizar; el ISR general lo resta.

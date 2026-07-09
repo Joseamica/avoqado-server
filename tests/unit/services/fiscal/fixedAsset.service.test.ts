@@ -4,11 +4,14 @@
  */
 import { Prisma } from '@prisma/client'
 
-import { BadRequestError } from '../../../../src/errors/AppError'
+import { BadRequestError, NotFoundError } from '../../../../src/errors/AppError'
 
 jest.mock('../../../../src/utils/prismaClient', () => ({
   __esModule: true,
-  default: { fixedAsset: { create: jest.fn(), findMany: jest.fn() } },
+  default: {
+    fixedAsset: { create: jest.fn(), findMany: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
+    fixedAssetDepreciation: { aggregate: jest.fn() },
+  },
 }))
 jest.mock('../../../../src/services/fiscal/chartOfAccounts.service', () => ({ resolveScopeOrNull: jest.fn() }))
 jest.mock('../../../../src/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
@@ -16,10 +19,13 @@ jest.mock('../../../../src/services/dashboard/activity-log.service', () => ({ lo
 import prisma from '../../../../src/utils/prismaClient'
 import { resolveScopeOrNull } from '../../../../src/services/fiscal/chartOfAccounts.service'
 import { logAction } from '../../../../src/services/dashboard/activity-log.service'
-import { registerFixedAsset, listFixedAssets } from '../../../../src/services/fiscal/fixedAsset.service'
+import { registerFixedAsset, listFixedAssets, updateFixedAsset, disposeFixedAsset } from '../../../../src/services/fiscal/fixedAsset.service'
 import { cappedMoiCents, getAssetType, suggestsFixedAsset } from '../../../../src/services/fiscal/assetTypeCatalog'
 
-const p = prisma as unknown as { fixedAsset: { create: jest.Mock; findMany: jest.Mock } }
+const p = prisma as unknown as {
+  fixedAsset: { create: jest.Mock; findMany: jest.Mock; findFirst: jest.Mock; update: jest.Mock }
+  fixedAssetDepreciation: { aggregate: jest.Mock }
+}
 const mScope = resolveScopeOrNull as jest.Mock
 const mLog = logAction as jest.Mock
 
@@ -152,8 +158,80 @@ describe('listFixedAssets', () => {
     expect(r.needsFiscalSetup).toBe(false)
     expect(r.assets).toHaveLength(1)
     expect(r.assets[0].assetTypeLabel).toBe('Equipo de cómputo')
-    expect(p.fixedAsset.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { organizationId: 'org1', rfc: 'EKU9003173C9' } }),
-    )
+    expect(p.fixedAsset.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { organizationId: 'org1', rfc: 'EKU9003173C9' } }))
+  })
+})
+
+const assetRow = (over: Record<string, unknown> = {}) => ({
+  id: 'fa1',
+  organizationId: 'org1',
+  rfc: 'EKU9003173C9',
+  venueId: 'v1',
+  description: 'Laptop',
+  assetType: 'EQUIPO_COMPUTO',
+  moiCents: 30_000_00,
+  annualRate: new Prisma.Decimal(0.3),
+  acquisitionDate: new Date('2026-03-15T18:00:00Z'),
+  inServiceDate: new Date('2026-03-15T18:00:00Z'),
+  salvageValueCents: 0,
+  status: 'ACTIVE',
+  sourceExpenseId: null,
+  disposalDate: null,
+  disposalProceedsCents: null,
+  createdAt: new Date('2026-03-15T18:00:00Z'),
+  ...over,
+})
+
+describe('updateFixedAsset', () => {
+  it('activo no encontrado → NotFoundError', async () => {
+    p.fixedAsset.findFirst.mockResolvedValue(null)
+    await expect(updateFixedAsset('v1', 'fa1', { description: 'x' })).rejects.toThrow(NotFoundError)
+  })
+
+  it('activo dado de baja → no se puede editar (BadRequestError)', async () => {
+    p.fixedAsset.findFirst.mockResolvedValue(assetRow({ status: 'DISPOSED' }))
+    await expect(updateFixedAsset('v1', 'fa1', { description: 'x' })).rejects.toThrow(BadRequestError)
+  })
+
+  it('tasa inválida → BadRequestError', async () => {
+    p.fixedAsset.findFirst.mockResolvedValue(assetRow())
+    await expect(updateFixedAsset('v1', 'fa1', { annualRate: 2 })).rejects.toThrow(BadRequestError)
+  })
+
+  it('actualiza SOLO los campos enviados y audita', async () => {
+    p.fixedAsset.findFirst.mockResolvedValue(assetRow())
+    p.fixedAsset.update.mockImplementation(({ data }: any) => Promise.resolve(assetRow(data)))
+    const r = await updateFixedAsset('v1', 'fa1', { annualRate: 0.2, description: 'Laptop nueva' }, 'staff1')
+    expect(r.annualRate).toBe(0.2)
+    expect(Object.keys(p.fixedAsset.update.mock.calls[0][0].data).sort()).toEqual(['annualRate', 'description'])
+    expect(mLog).toHaveBeenCalledWith(expect.objectContaining({ action: 'FIXED_ASSET_UPDATED' }))
+  })
+})
+
+describe('disposeFixedAsset (dar de baja)', () => {
+  it('ya dado de baja → BadRequestError', async () => {
+    p.fixedAsset.findFirst.mockResolvedValue(assetRow({ status: 'DISPOSED' }))
+    await expect(disposeFixedAsset('v1', 'fa1', { disposalDate: '2026-06-01' })).rejects.toThrow(BadRequestError)
+  })
+
+  it('venta con GANANCIA: precio de venta > valor en libros', async () => {
+    // base 30,000 − acumulada 12,000 = valor en libros 18,000; precio 20,000 → ganancia 2,000
+    p.fixedAsset.findFirst.mockResolvedValue(assetRow())
+    p.fixedAssetDepreciation.aggregate.mockResolvedValue({ _sum: { depreciationCents: 12_000_00 } })
+    p.fixedAsset.update.mockImplementation(({ data }: any) => Promise.resolve(assetRow(data)))
+    const r = await disposeFixedAsset('v1', 'fa1', { disposalDate: '2026-06-01', proceedsCents: 20_000_00 }, 'staff1')
+    expect(r.bookValueCents).toBe(18_000_00)
+    expect(r.gainLossCents).toBe(2_000_00)
+    expect(r.asset.status).toBe('DISPOSED')
+    expect(mLog).toHaveBeenCalledWith(expect.objectContaining({ action: 'FIXED_ASSET_DISPOSED' }))
+  })
+
+  it('baja sin venta (obsolescencia): PÉRDIDA = valor en libros', async () => {
+    p.fixedAsset.findFirst.mockResolvedValue(assetRow())
+    p.fixedAssetDepreciation.aggregate.mockResolvedValue({ _sum: { depreciationCents: 12_000_00 } })
+    p.fixedAsset.update.mockImplementation(({ data }: any) => Promise.resolve(assetRow(data)))
+    const r = await disposeFixedAsset('v1', 'fa1', { disposalDate: '2026-06-01' }) // sin precio
+    expect(r.bookValueCents).toBe(18_000_00)
+    expect(r.gainLossCents).toBe(-18_000_00) // pérdida total
   })
 })

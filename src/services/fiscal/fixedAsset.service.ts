@@ -9,7 +9,7 @@
 import { Prisma } from '@prisma/client'
 
 import prisma from '../../utils/prismaClient'
-import { BadRequestError } from '../../errors/AppError'
+import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
 import { resolveScopeOrNull } from './chartOfAccounts.service'
 import { ASSET_TYPE_CATALOG, cappedMoiCents, getAssetType, type AssetTypeDef } from './assetTypeCatalog'
@@ -44,6 +44,8 @@ export interface FixedAssetView {
   salvageValueCents: number
   status: string
   sourceExpenseId: string | null
+  disposalDate: string | null
+  disposalProceedsCents: number | null
   createdAt: string
 }
 
@@ -71,6 +73,8 @@ function toView(a: {
   salvageValueCents: number
   status: string
   sourceExpenseId: string | null
+  disposalDate: Date | null
+  disposalProceedsCents: number | null
   createdAt: Date
 }): FixedAssetView {
   const def = getAssetType(a.assetType)
@@ -91,6 +95,8 @@ function toView(a: {
     salvageValueCents: a.salvageValueCents,
     status: a.status,
     sourceExpenseId: a.sourceExpenseId,
+    disposalDate: a.disposalDate ? a.disposalDate.toISOString().slice(0, 10) : null,
+    disposalProceedsCents: a.disposalProceedsCents,
     createdAt: a.createdAt.toISOString(),
   }
 }
@@ -166,4 +172,99 @@ export async function listFixedAssets(venueId: string): Promise<{ needsFiscalSet
     orderBy: { acquisitionDate: 'desc' },
   })
   return { needsFiscalSetup: false, assets: rows.map(toView) }
+}
+
+/** Edita un activo fijo (mientras siga ACTIVO). Solo los campos enviados. Valida igual que registrar. Audita. */
+export async function updateFixedAsset(
+  venueId: string,
+  assetId: string,
+  input: Partial<RegisterFixedAssetInput>,
+  actorStaffId: string | null = null,
+): Promise<FixedAssetView> {
+  const scope = await resolveScopeOrNull(venueId)
+  if (!scope) throw new BadRequestError('El local no tiene RFC/emisor fiscal configurado.')
+  const asset = await prisma.fixedAsset.findFirst({ where: { id: assetId, organizationId: scope.organizationId, rfc: scope.rfc } })
+  if (!asset) throw new NotFoundError('Activo fijo no encontrado.')
+  if (asset.status === 'DISPOSED') throw new BadRequestError('No se puede editar un activo dado de baja.')
+
+  const data: Record<string, unknown> = {}
+  if (input.description !== undefined) {
+    if (!input.description.trim()) throw new BadRequestError('La descripción del activo es requerida.')
+    data.description = input.description.trim()
+  }
+  if (input.assetType !== undefined) {
+    if (!getAssetType(input.assetType)) throw new BadRequestError('Tipo de activo fijo no válido.')
+    data.assetType = input.assetType
+  }
+  if (input.moiCents !== undefined) {
+    if (!Number.isFinite(input.moiCents) || input.moiCents <= 0) throw new BadRequestError('El monto de la inversión (MOI) debe ser mayor a cero.')
+    data.moiCents = Math.round(input.moiCents)
+  }
+  if (input.annualRate !== undefined) {
+    if (!Number.isFinite(input.annualRate) || input.annualRate <= 0 || input.annualRate > 1)
+      throw new BadRequestError('La tasa anual de depreciación debe estar entre 0 y 1 (ej. 0.30 = 30%).')
+    data.annualRate = new Prisma.Decimal(input.annualRate)
+  }
+  if (input.salvageValueCents !== undefined) {
+    if (!Number.isFinite(input.salvageValueCents) || input.salvageValueCents < 0) throw new BadRequestError('El valor de rescate no puede ser negativo.')
+    data.salvageValueCents = Math.round(input.salvageValueCents)
+  }
+  if (input.acquisitionDate !== undefined) data.acquisitionDate = parseDay(input.acquisitionDate, 'adquisición')
+  if (input.inServiceDate !== undefined) data.inServiceDate = parseDay(input.inServiceDate, 'inicio de uso')
+
+  const updated = await prisma.fixedAsset.update({ where: { id: assetId }, data })
+  void logAction({ staffId: actorStaffId, venueId, action: 'FIXED_ASSET_UPDATED', entity: 'FixedAsset', entityId: assetId, data: { fields: Object.keys(data) } })
+  return toView(updated)
+}
+
+export interface DisposeResult {
+  asset: FixedAssetView
+  accumulatedDepreciationCents: number
+  /** Valor en libros = base depreciable − depreciación acumulada. */
+  bookValueCents: number
+  proceedsCents: number
+  /** Ganancia (+) o pérdida (−) contable = precio de venta − valor en libros. */
+  gainLossCents: number
+}
+
+/**
+ * Da de baja un activo (venta u obsolescencia): lo marca DISPOSED (deja de depreciarse) y calcula el valor
+ * en libros + la ganancia/pérdida contable (precio de venta − valor en libros). Audita. LIMITACIÓN v1: no
+ * postea la póliza de baja al ledger (el activo aún no está en una cuenta de activo — ver limitación de la
+ * póliza de depreciación); el número queda para el contador. `proceedsCents` null = baja sin venta.
+ */
+export async function disposeFixedAsset(
+  venueId: string,
+  assetId: string,
+  input: { disposalDate: string; proceedsCents?: number | null },
+  actorStaffId: string | null = null,
+): Promise<DisposeResult> {
+  const scope = await resolveScopeOrNull(venueId)
+  if (!scope) throw new BadRequestError('El local no tiene RFC/emisor fiscal configurado.')
+  const asset = await prisma.fixedAsset.findFirst({ where: { id: assetId, organizationId: scope.organizationId, rfc: scope.rfc } })
+  if (!asset) throw new NotFoundError('Activo fijo no encontrado.')
+  if (asset.status === 'DISPOSED') throw new BadRequestError('El activo ya está dado de baja.')
+  const proceeds = input.proceedsCents != null ? Math.round(input.proceedsCents) : null
+  if (proceeds != null && proceeds < 0) throw new BadRequestError('El precio de venta no puede ser negativo.')
+  const disposalDate = parseDay(input.disposalDate, 'baja')
+
+  const agg = await prisma.fixedAssetDepreciation.aggregate({ where: { fixedAssetId: assetId }, _sum: { depreciationCents: true } })
+  const accumulated = agg._sum.depreciationCents ?? 0
+  const base = Math.max(0, cappedMoiCents(asset.moiCents, asset.assetType) - asset.salvageValueCents)
+  const bookValue = Math.max(0, base - accumulated)
+  const gainLoss = (proceeds ?? 0) - bookValue
+
+  const updated = await prisma.fixedAsset.update({
+    where: { id: assetId },
+    data: { status: 'DISPOSED', disposalDate, disposalProceedsCents: proceeds },
+  })
+  void logAction({
+    staffId: actorStaffId,
+    venueId,
+    action: 'FIXED_ASSET_DISPOSED',
+    entity: 'FixedAsset',
+    entityId: assetId,
+    data: { proceedsCents: proceeds, bookValueCents: bookValue, gainLossCents: gainLoss },
+  })
+  return { asset: toView(updated), accumulatedDepreciationCents: accumulated, bookValueCents: bookValue, proceedsCents: proceeds ?? 0, gainLossCents: gainLoss }
 }

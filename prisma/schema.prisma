@@ -11382,6 +11382,8 @@ model FixedAsset {
   salvageValueCents Int              @default(0) // valor de rescate (no se deprecia por debajo)
   status            FixedAssetStatus @default(ACTIVE)
   sourceExpenseId   String? // gasto de compra ligado, si aplica
+  disposalDate      DateTime? // fecha de baja (venta u obsolescencia); null si sigue en uso
+  disposalProceedsCents Int? // precio de venta al dar de baja (null = baja sin venta / obsolescencia)
   createdById       String?
   createdAt         DateTime         @default(now())
   updatedAt         DateTime         @updatedAt

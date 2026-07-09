@@ -1,6 +1,13 @@
 import { NextFunction, Request, Response } from 'express'
 
-import { listAssetTypes, listFixedAssets, registerFixedAsset, type RegisterFixedAssetInput } from '../../services/fiscal/fixedAsset.service'
+import {
+  disposeFixedAsset,
+  listAssetTypes,
+  listFixedAssets,
+  registerFixedAsset,
+  updateFixedAsset,
+  type RegisterFixedAssetInput,
+} from '../../services/fiscal/fixedAsset.service'
 import { generateDepreciationForVenue } from '../../services/fiscal/fixedAssetDepreciation.service'
 import { currentPeriod } from '../../services/fiscal/trialBalance.service'
 
@@ -52,6 +59,35 @@ export async function generateDepreciationController(
     const authContext = (req as any).authContext ?? {}
     const period = req.body?.period || currentPeriod()
     res.status(200).json(await generateDepreciationForVenue(req.params.venueId, period, authContext.userId ?? null))
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** PATCH /accounting/fixed-assets/:assetId — edita un activo (mientras siga activo). */
+export async function updateFixedAssetController(
+  req: Request<{ venueId: string; assetId: string }, {}, Partial<RegisterFixedAssetInput>>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const authContext = (req as any).authContext ?? {}
+    res.status(200).json(await updateFixedAsset(req.params.venueId, req.params.assetId, req.body, authContext.userId ?? null))
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** POST /accounting/fixed-assets/:assetId/dispose — da de baja un activo (venta u obsolescencia). */
+export async function disposeFixedAssetController(
+  req: Request<{ venueId: string; assetId: string }, {}, { disposalDate: string; proceedsCents?: number | null }>,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const authContext = (req as any).authContext ?? {}
+    const { disposalDate, proceedsCents } = req.body
+    res.status(200).json(await disposeFixedAsset(req.params.venueId, req.params.assetId, { disposalDate, proceedsCents }, authContext.userId ?? null))
   } catch (error) {
     next(error)
   }
