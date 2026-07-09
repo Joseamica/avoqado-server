@@ -8613,6 +8613,10 @@ model OrganizationAttendanceConfig {
   enableCashPayments   Boolean @default(true)
   enableCardPayments   Boolean @default(true)
   enableBarcodeScanner Boolean @default(true)
+  // Promoter geolocation (cambaceo). Unlike the toggles above (fallback-only), saving this
+  // at org level CASCADES to every venue's VenueSettings.trackPromoterLocation, because the
+  // TPV ping gate reads that physical per-venue column with no org fallback.
+  trackPromoterLocation Boolean @default(false)
 
   // Full TPV terminal settings (all 35 fields as JSON)
   // Source of truth for org-level defaults. Individual columns above kept for backward compat.

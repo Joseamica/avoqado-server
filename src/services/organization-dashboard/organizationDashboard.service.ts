@@ -3296,6 +3296,7 @@ class OrganizationDashboardService {
       enableCashPayments?: boolean
       enableCardPayments?: boolean
       enableBarcodeScanner?: boolean
+      trackPromoterLocation?: boolean
     },
   ) {
     // Also sync individual columns → settings JSON for consistency
@@ -3316,6 +3317,7 @@ class OrganizationDashboardService {
     if (data.enableCashPayments !== undefined) settingsSync.enableCashPayments = data.enableCashPayments
     if (data.enableCardPayments !== undefined) settingsSync.enableCardPayments = data.enableCardPayments
     if (data.enableBarcodeScanner !== undefined) settingsSync.enableBarcodeScanner = data.enableBarcodeScanner
+    if (data.trackPromoterLocation !== undefined) settingsSync.trackPromoterLocation = data.trackPromoterLocation
 
     const config = await prisma.organizationAttendanceConfig.upsert({
       where: { organizationId: orgId },
@@ -3329,6 +3331,34 @@ class OrganizationDashboardService {
         settings: settingsSync,
       },
     })
+
+    // Cambaceo is the ONE org default that cascades PHYSICALLY: the promoter-ping gate
+    // (recordPromoterPing) reads VenueSettings.trackPromoterLocation with no org fallback,
+    // so saving it here must propagate to every venue's VenueSettings row.
+    if (data.trackPromoterLocation !== undefined) {
+      const venues = await prisma.venue.findMany({
+        where: { organizationId: orgId },
+        select: { id: true },
+      })
+      const venueIds = venues.map(v => v.id)
+      if (venueIds.length > 0) {
+        await prisma.venueSettings.updateMany({
+          where: { venueId: { in: venueIds } },
+          data: { trackPromoterLocation: data.trackPromoterLocation },
+        })
+        const existingVs = await prisma.venueSettings.findMany({
+          where: { venueId: { in: venueIds } },
+          select: { venueId: true },
+        })
+        const have = new Set(existingVs.map(v => v.venueId))
+        const missing = venueIds.filter(id => !have.has(id))
+        if (missing.length > 0) {
+          await prisma.venueSettings.createMany({
+            data: missing.map(venueId => ({ venueId, trackPromoterLocation: data.trackPromoterLocation! })),
+          })
+        }
+      }
+    }
 
     logAction({
       action: 'ORG_ATTENDANCE_CONFIG_UPDATED',
