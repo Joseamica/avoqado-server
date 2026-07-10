@@ -8,6 +8,7 @@
 
 import { NextFunction, Request, Response } from 'express'
 import prisma from '../../utils/prismaClient'
+import { Unit } from '@prisma/client'
 import logger from '../../config/logger'
 
 // ---------------------------------------------------------------------------
@@ -160,6 +161,10 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
     // Generate SKU if not provided
     const finalSku = sku || `SKU-${Date.now().toString(36).toUpperCase()}`
 
+    // Validate the optional unit against the Prisma enum (string → Unit).
+    const parsedUnit: Unit | undefined =
+      typeof unit === 'string' && (Object.values(Unit) as string[]).includes(unit.trim()) ? (unit.trim() as Unit) : undefined
+
     const product = await prisma.product.create({
       data: {
         name: name.trim(),
@@ -176,10 +181,10 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
         durationMinutes: durationMinutes || null,
         maxParticipants: maxParticipants ?? null,
         layoutConfig: layoutConfig ?? undefined,
-        // Optional measurement unit (Prisma enum Unit). Additive: older
-        // clients that don't send it are unaffected. iOS's create-product
-        // form offered kg/L but silently dropped the choice before this.
-        unit: typeof unit === 'string' && unit.trim() ? unit.trim() : undefined,
+        // Optional measurement unit (validated against the Prisma Unit enum;
+        // invalid values are ignored, not fatal — additive field, older
+        // clients that don't send it are unaffected).
+        unit: parsedUnit,
       },
       include: productInclude,
     })
