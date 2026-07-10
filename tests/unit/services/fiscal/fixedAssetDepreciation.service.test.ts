@@ -216,7 +216,10 @@ describe('getYearDepreciationCents (deducción de inversiones, con INPC)', () =>
     expect(await getYearDepreciationCents('org1', 'EKU9003173C9', 2026, '2026-04')).toBe(2_080_00)
     expect(p.fixedAssetDepreciation.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({ period: { gte: '2026-01', lte: '2026-04' }, fixedAsset: { organizationId: 'org1', rfc: 'EKU9003173C9' } }),
+        where: expect.objectContaining({
+          period: { gte: '2026-01', lte: '2026-04' },
+          fixedAsset: { organizationId: 'org1', rfc: 'EKU9003173C9' },
+        }),
       }),
     )
   })

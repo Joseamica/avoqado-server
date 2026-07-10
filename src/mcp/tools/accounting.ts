@@ -1093,7 +1093,9 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         .positive()
         .max(10)
         .optional()
-        .describe('Factor de actualización INPC (art. 31 LISR) que te dé tu contador; multiplica la deducción fiscal. Omite = 1 (histórico)'),
+        .describe(
+          'Factor de actualización INPC (art. 31 LISR) que te dé tu contador; multiplica la deducción fiscal. Omite = 1 (histórico)',
+        ),
     },
     async ({ venueId, descripcion, tipo, monto, fechaAdquisicion, tasaAnual, fechaInicioUso, valorRescate, factorInpc }) => {
       guard.venueFilter(venueId)
@@ -1200,7 +1202,12 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
       monto: z.number().positive().optional().describe('Nuevo MOI en pesos'),
       tasaAnual: z.number().min(0).max(1).optional().describe('Nueva tasa anual (fracción)'),
       valorRescate: z.number().min(0).optional().describe('Nuevo valor de rescate en pesos'),
-      factorInpc: z.number().positive().max(10).optional().describe('Factor de actualización INPC (art. 31 LISR); multiplica la deducción fiscal'),
+      factorInpc: z
+        .number()
+        .positive()
+        .max(10)
+        .optional()
+        .describe('Factor de actualización INPC (art. 31 LISR); multiplica la deducción fiscal'),
       fechaAdquisicion: z
         .string()
         .regex(/^\d{4}-\d{2}-\d{2}$/)

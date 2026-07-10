@@ -185,7 +185,9 @@ async function postDisposalEntry(
 ): Promise<LedgerPostResult> {
   try {
     const alta = await prisma.journalEntry.findUnique({
-      where: { organizationId_rfc_idempotencyKey: { organizationId: scope.organizationId, rfc: scope.rfc, idempotencyKey: acqKey(asset.id) } },
+      where: {
+        organizationId_rfc_idempotencyKey: { organizationId: scope.organizationId, rfc: scope.rfc, idempotencyKey: acqKey(asset.id) },
+      },
       select: { id: true },
     })
     if (!alta) return { posted: false, reason: 'noAcquisitionEntry' }
