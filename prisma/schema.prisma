@@ -1629,6 +1629,7 @@ model RawMaterial {
   lowStockAlerts     LowStockAlert[]
   batches            StockBatch[] // FIFO batch tracking
   modifiers          Modifier[] // Modifiers linked to this raw material for inventory tracking
+  stockCountItems    StockCountItem[] // Physical count lines (ingredient counting)
 
   // Demo data flag (for cleanup on conversion)
   isDemo Boolean @default(false)
@@ -2025,14 +2026,26 @@ model StockCountItem {
   stockCountId String
   stockCount   StockCount @relation(fields: [stockCountId], references: [id], onDelete: Cascade)
 
-  productId String
-  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  // Exactly ONE of productId / rawMaterialId is set (enforced in service).
+  // Products cover QUANTITY-tracked sellables; raw materials cover the
+  // ingredients behind RECIPE products (Square Recipes parity: physical
+  // counts are done on ingredients, never on prepared items).
+  productId String?
+  product   Product? @relation(fields: [productId], references: [id], onDelete: Cascade)
 
-  expected Decimal @db.Decimal(10, 2) // System stock at count time
-  counted  Decimal @default(0) @db.Decimal(10, 2) // Physically counted
+  rawMaterialId String?
+  rawMaterial   RawMaterial? @relation(fields: [rawMaterialId], references: [id], onDelete: Cascade)
+
+  expected Decimal @db.Decimal(12, 3) // System stock at count time
+  counted  Decimal @default(0) @db.Decimal(12, 3) // Physically counted
+  // Set when the cashier actually records a count for this line. Confirm
+  // applies ONLY lines with countedAt — an untouched line (counted=0 by
+  // default) must never zero out real stock.
+  countedAt DateTime?
 
   @@index([stockCountId])
   @@index([productId])
+  @@index([rawMaterialId])
 }
 
 enum StockCountType {

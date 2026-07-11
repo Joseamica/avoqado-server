@@ -52,9 +52,9 @@ export const createStockCount = async (req: Request, res: Response, next: NextFu
   try {
     const { venueId } = req.params
     const userId = req.authContext?.userId || ''
-    const { type, productIds } = req.body
+    const { type, productIds, includeRawMaterials, rawMaterialIds } = req.body
 
-    const count = await inventoryService.createStockCount(venueId, userId, type, productIds)
+    const count = await inventoryService.createStockCount(venueId, userId, type, productIds, includeRawMaterials === true, rawMaterialIds)
     return res.status(201).json({ success: true, count })
   } catch (error) {
     next(error)

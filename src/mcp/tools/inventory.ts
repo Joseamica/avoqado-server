@@ -473,4 +473,60 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
       })
     },
   )
+
+  server.tool(
+    'stock_counts',
+    'Physical inventory counts (conteos de existencia) of a venue: each count with its status (IN_PROGRESS/COMPLETED), who created it, when, and every line — QUANTITY products AND raw materials/ingredients (RECIPE products are never counted; their stock derives from ingredients) — with expected vs physically-counted quantity and the variance. Answers "¿cuándo fue el último conteo?", "¿qué diferencias salieron?", "¿qué insumos faltaron contra sistema?". Newest first. Pass venueId. PREMIUM (INVENTORY_TRACKING).',
+    {
+      venueId: z.string().describe('Venue whose stock counts to read (must be in your scope)'),
+      status: z.enum(['IN_PROGRESS', 'COMPLETED']).optional().describe('Only counts in this status. Omit for all.'),
+      limit: z.number().int().positive().max(50).optional().describe('Max counts to return (default 10)'),
+    },
+    async ({ venueId, status, limit }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('inventory:read', venueId)
+      const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'El control de inventario')
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+
+      const counts = await prisma.stockCount.findMany({
+        where: { venueId, ...(status ? { status } : {}) },
+        include: {
+          items: {
+            include: {
+              product: { select: { name: true, sku: true } },
+              rawMaterial: { select: { name: true, sku: true, unit: true } },
+            },
+          },
+          createdByUser: { select: { firstName: true, lastName: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: limit ?? 10,
+      })
+
+      return text({
+        ok: true,
+        counts: counts.map(c => ({
+          id: c.id,
+          type: c.type,
+          status: c.status,
+          note: c.note,
+          createdAt: c.createdAt.toISOString(),
+          completedAt: c.completedAt?.toISOString() ?? null,
+          createdBy: c.createdByUser ? `${c.createdByUser.firstName} ${c.createdByUser.lastName}` : null,
+          itemCount: c.items.length,
+          countedLines: c.items.filter(i => i.countedAt !== null).length,
+          items: c.items.map(i => ({
+            kind: i.rawMaterialId ? 'INGREDIENT' : 'PRODUCT',
+            name: i.product?.name ?? i.rawMaterial?.name ?? '',
+            sku: i.product?.sku ?? i.rawMaterial?.sku ?? null,
+            unit: i.rawMaterial?.unit ?? null,
+            expected: Number(i.expected),
+            counted: i.countedAt ? Number(i.counted) : null,
+            variance: i.countedAt ? round2(Number(i.counted) - Number(i.expected)) : null,
+          })),
+        })),
+      })
+    },
+  )
+
 }
