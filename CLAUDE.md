@@ -162,7 +162,7 @@ wait stable, then APK. TPV sends `X-App-Version-Code` for conditional behavior.
 | ----------------------- | ------------------------------------------------- |
 | All docs index          | `docs/README.md`                                  |
 | Architecture            | `docs/ARCHITECTURE_OVERVIEW.md`                   |
-| Schema map (START HERE) | `docs/SCHEMA_MAP.md` — 206 models in 20 domains   |
+| Schema map (START HERE) | `docs/SCHEMA_MAP.md` — all models by domain (auto-gen: `npm run schema:map`) |
 | Database schema (full)  | `docs/DATABASE_SCHEMA.md`                         |
 | Permissions system      | `docs/PERMISSIONS_SYSTEM.md`                      |
 | Blumon TPV              | `docs/blumon-tpv/BLUMON_QUICK_REFERENCE.md`       |

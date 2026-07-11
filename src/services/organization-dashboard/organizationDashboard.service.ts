@@ -9,6 +9,7 @@
 import { Prisma, StaffRole } from '@prisma/client'
 import { eachDayOfInterval, endOfDay, format, startOfDay } from 'date-fns'
 import { fromZonedTime, toZonedTime } from 'date-fns-tz'
+import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { ROLE_HIERARCHY } from '../../lib/permissions'
 import {
   DEFAULT_TIMEZONE,
@@ -3297,8 +3298,30 @@ class OrganizationDashboardService {
       enableCardPayments?: boolean
       enableBarcodeScanner?: boolean
       trackPromoterLocation?: boolean
+      promoterLocationStartHour?: number
+      promoterLocationEndHour?: number
     },
   ) {
+    // Venue-local capture window for promoter geolocation pings. start inclusive,
+    // end exclusive, 0/24 = full 24h. Validate whichever of the pair is provided —
+    // a partial update still needs a sane resulting window, so we validate each
+    // bound independently and the ordering only when both happen to be present.
+    if (data.promoterLocationStartHour !== undefined) {
+      if (!Number.isInteger(data.promoterLocationStartHour) || data.promoterLocationStartHour < 0 || data.promoterLocationStartHour > 23) {
+        throw new BadRequestError('El horario de captura no es válido (inicio 0–23, fin 1–24, inicio < fin)')
+      }
+    }
+    if (data.promoterLocationEndHour !== undefined) {
+      if (!Number.isInteger(data.promoterLocationEndHour) || data.promoterLocationEndHour < 1 || data.promoterLocationEndHour > 24) {
+        throw new BadRequestError('El horario de captura no es válido (inicio 0–23, fin 1–24, inicio < fin)')
+      }
+    }
+    if (data.promoterLocationStartHour !== undefined && data.promoterLocationEndHour !== undefined) {
+      if (data.promoterLocationStartHour >= data.promoterLocationEndHour) {
+        throw new BadRequestError('El horario de captura no es válido (inicio 0–23, fin 1–24, inicio < fin)')
+      }
+    }
+
     // Also sync individual columns → settings JSON for consistency
     const existing = await prisma.organizationAttendanceConfig.findUnique({
       where: { organizationId: orgId },
@@ -3318,6 +3341,8 @@ class OrganizationDashboardService {
     if (data.enableCardPayments !== undefined) settingsSync.enableCardPayments = data.enableCardPayments
     if (data.enableBarcodeScanner !== undefined) settingsSync.enableBarcodeScanner = data.enableBarcodeScanner
     if (data.trackPromoterLocation !== undefined) settingsSync.trackPromoterLocation = data.trackPromoterLocation
+    if (data.promoterLocationStartHour !== undefined) settingsSync.promoterLocationStartHour = data.promoterLocationStartHour
+    if (data.promoterLocationEndHour !== undefined) settingsSync.promoterLocationEndHour = data.promoterLocationEndHour
 
     const config = await prisma.organizationAttendanceConfig.upsert({
       where: { organizationId: orgId },
@@ -3332,10 +3357,17 @@ class OrganizationDashboardService {
       },
     })
 
-    // Cambaceo is the ONE org default that cascades PHYSICALLY: the promoter-ping gate
-    // (recordPromoterPing) reads VenueSettings.trackPromoterLocation with no org fallback,
-    // so saving it here must propagate to every venue's VenueSettings row.
-    if (data.trackPromoterLocation !== undefined) {
+    // Cambaceo is the ONE set of org defaults that cascade PHYSICALLY: the promoter-ping
+    // gate (recordPromoterPing) reads VenueSettings.trackPromoterLocation with no org
+    // fallback, and the TPV self-gates its capture window off VenueSettings.promoterLocation{Start,End}Hour
+    // (via getTerminalConfig) with no org fallback either — so saving any of the 3 fields
+    // here must propagate to every venue's VenueSettings row.
+    const cascadeData: { trackPromoterLocation?: boolean; promoterLocationStartHour?: number; promoterLocationEndHour?: number } = {}
+    if (data.trackPromoterLocation !== undefined) cascadeData.trackPromoterLocation = data.trackPromoterLocation
+    if (data.promoterLocationStartHour !== undefined) cascadeData.promoterLocationStartHour = data.promoterLocationStartHour
+    if (data.promoterLocationEndHour !== undefined) cascadeData.promoterLocationEndHour = data.promoterLocationEndHour
+
+    if (Object.keys(cascadeData).length > 0) {
       const venues = await prisma.venue.findMany({
         where: { organizationId: orgId },
         select: { id: true },
@@ -3344,7 +3376,7 @@ class OrganizationDashboardService {
       if (venueIds.length > 0) {
         await prisma.venueSettings.updateMany({
           where: { venueId: { in: venueIds } },
-          data: { trackPromoterLocation: data.trackPromoterLocation },
+          data: cascadeData,
         })
         const existingVs = await prisma.venueSettings.findMany({
           where: { venueId: { in: venueIds } },
@@ -3354,7 +3386,7 @@ class OrganizationDashboardService {
         const missing = venueIds.filter(id => !have.has(id))
         if (missing.length > 0) {
           await prisma.venueSettings.createMany({
-            data: missing.map(venueId => ({ venueId, trackPromoterLocation: data.trackPromoterLocation! })),
+            data: missing.map(venueId => ({ venueId, ...cascadeData })),
           })
         }
       }
@@ -3368,6 +3400,91 @@ class OrganizationDashboardService {
     })
 
     return config
+  }
+
+  // ==========================================================================
+  // ORG PROMOTER-LOCATION SETTINGS (per-venue capture flag + window, org-scoped)
+  // ==========================================================================
+
+  /**
+   * Per-venue promoter geolocation tracking settings for the org OWNER's
+   * "capture window" screen. LEFT JOIN semantics: a venue with no VenueSettings
+   * row yet reports the schema defaults (false / 11 / 18), never null/undefined.
+   */
+  async getOrgPromoterLocationSettings(orgId: string) {
+    const venues = await prisma.venue.findMany({
+      where: { organizationId: orgId },
+      select: {
+        id: true,
+        name: true,
+        settings: {
+          select: { trackPromoterLocation: true, promoterLocationStartHour: true, promoterLocationEndHour: true },
+        },
+      },
+      orderBy: { name: 'asc' },
+    })
+
+    return {
+      venues: venues.map(v => ({
+        venueId: v.id,
+        name: v.name,
+        trackPromoterLocation: v.settings?.trackPromoterLocation ?? false,
+        promoterLocationStartHour: v.settings?.promoterLocationStartHour ?? 11,
+        promoterLocationEndHour: v.settings?.promoterLocationEndHour ?? 18,
+      })),
+    }
+  }
+
+  /**
+   * Org-scoped per-venue override: lets the org OWNER carve out one venue from
+   * the org default cascade (e.g. a store with different opening hours).
+   * Validates the venue belongs to the org, validates the window the same way
+   * as the org-level default, then upserts only the provided fields.
+   */
+  async updateVenuePromoterLocationSettings(
+    orgId: string,
+    venueId: string,
+    data: { trackPromoterLocation?: boolean; promoterLocationStartHour?: number; promoterLocationEndHour?: number },
+  ) {
+    const venue = await prisma.venue.findFirst({
+      where: { id: venueId, organizationId: orgId },
+      select: { id: true },
+    })
+    if (!venue) {
+      throw new NotFoundError('El venue no pertenece a esta organización')
+    }
+
+    if (data.promoterLocationStartHour !== undefined) {
+      if (!Number.isInteger(data.promoterLocationStartHour) || data.promoterLocationStartHour < 0 || data.promoterLocationStartHour > 23) {
+        throw new BadRequestError('El horario de captura no es válido (inicio 0–23, fin 1–24, inicio < fin)')
+      }
+    }
+    if (data.promoterLocationEndHour !== undefined) {
+      if (!Number.isInteger(data.promoterLocationEndHour) || data.promoterLocationEndHour < 1 || data.promoterLocationEndHour > 24) {
+        throw new BadRequestError('El horario de captura no es válido (inicio 0–23, fin 1–24, inicio < fin)')
+      }
+    }
+    if (data.promoterLocationStartHour !== undefined && data.promoterLocationEndHour !== undefined) {
+      if (data.promoterLocationStartHour >= data.promoterLocationEndHour) {
+        throw new BadRequestError('El horario de captura no es válido (inicio 0–23, fin 1–24, inicio < fin)')
+      }
+    }
+
+    const updated = await prisma.venueSettings.upsert({
+      where: { venueId },
+      create: { venueId, ...data },
+      update: { ...data },
+      select: { venueId: true, trackPromoterLocation: true, promoterLocationStartHour: true, promoterLocationEndHour: true },
+    })
+
+    logAction({
+      action: 'VENUE_PROMOTER_LOCATION_SETTINGS_UPDATED',
+      entity: 'VenueSettings',
+      entityId: venueId,
+      data: { orgId, changes: Object.keys(data) },
+    })
+
+    return updated
   }
 
   async deleteOrgAttendanceConfig(orgId: string) {

@@ -500,6 +500,9 @@ model Venue {
   // Conexiones bancarias/fintech self-connect para ver saldo en vivo (Financial Connections)
   financialConnections FinancialConnection[]
 
+  // Reglas condicionales de visibilidad/auto-selección de merchants en TPV (MERCHANT_ROUTING_RULES)
+  merchantRoutingRules MerchantRoutingRule[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -687,6 +690,10 @@ model VenueSettings {
   // Field-promoter geolocation tracking ("cambaceo"). OFF by default — only venues
   // explicitly enabled emit/accept periodic location pings. Backend-authoritative gate.
   trackPromoterLocation Boolean @default(false)
+  // Capture window (venue-local hours). Start inclusive, end exclusive; 0/24 = 24h.
+  // Consumed by the TPV (v2.6.5+) via terminal config; older APKs keep their hardcoded 11–18.
+  promoterLocationStartHour Int @default(11)
+  promoterLocationEndHour   Int @default(18)
 
   // Auto Clock-Out (HR automation - Square-style)
   autoClockOutEnabled     Boolean @default(false) // Enable automatic clock-out at fixed time
@@ -2767,6 +2774,11 @@ model Payment {
   terminalId String?
   terminal   Terminal? @relation("PaymentTerminal", fields: [terminalId], references: [id], onDelete: SetNull)
 
+  // Snapshot de la evaluación de reglas de merchant (MERCHANT_ROUTING_RULES) al momento del
+  // cobro: { evaluatedAt, eligibleIds, fallbackAll, autoSelectedId, reasons } — auditoría de
+  // "por qué la TPV mostró/eligió este merchant". Null cuando la feature no estaba activa.
+  routingEvaluation Json?
+
   // Amounts
   amount    Decimal @db.Decimal(12, 2)
   tipAmount Decimal @default(0) @db.Decimal(10, 2)
@@ -3687,6 +3699,9 @@ model MerchantAccount {
   // Facturación CFDI 4.0
   fiscalConfig MerchantFiscalConfig?
 
+  // Reglas condicionales de visibilidad en TPV (máx. 1 por venue vía @@unique en MerchantRoutingRule)
+  routingRules MerchantRoutingRule[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -3704,6 +3719,43 @@ model MerchantAccount {
   @@index([active])
   @@index([displayOrder])
   @@index([angelpayUserAccountId])
+}
+
+/// Regla condicional de visibilidad/auto-selección de un MerchantAccount en la TPV.
+/// Feature PREMIUM `MERCHANT_ROUTING_RULES`. Semántica: sin fila ⇒ el merchant siempre se
+/// muestra; con fila activa ⇒ se muestra solo si TODAS las condiciones configuradas se
+/// cumplen (AND). Si ningún merchant del venue queda elegible, la TPV muestra todos con
+/// aviso (una regla nunca bloquea una venta). Montos en PESOS (unidades mayores, 1:1).
+model MerchantRoutingRule {
+  id                String          @id @default(cuid())
+  venueId           String
+  venue             Venue           @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  merchantAccountId String
+  merchantAccount   MerchantAccount @relation(fields: [merchantAccountId], references: [id], onDelete: Cascade)
+
+  active Boolean @default(true)
+
+  /// Condiciones (todas opcionales; presente = se evalúa). Validado con zod
+  /// (`merchantRoutingConditionsSchema` en src/schemas/dashboard/merchantRouting.schema.ts).
+  /// Shape v1:
+  /// { schedule?:       { days: number[], windows: { start: "HH:mm", end: "HH:mm" }[] }  // TZ del venue; soporta cruce de medianoche
+  ///   geofence?:       { lat: number, lng: number, radiusM: number }                    // radio recomendado >= 100 m (GPS indoor)
+  ///   volumeCap?:      { period: "DAY"|"WEEK"|"MONTH", maxAmount?: number, maxTxCount?: number } // maxAmount en PESOS; proyectado: acumulado + ticket > max ⇒ oculto
+  ///   ticketAmount?:   { min?: number, max?: number }                                   // PESOS
+  ///   staff?:          { staffIds?: string[], roles?: string[] }
+  ///   circuitBreaker?: { consecutiveFailures: number, cooldownMinutes: number } }       // enforcement local en la TPV
+  /// v2 reservado (sin migración): businessCategory (giro), cardType, percentSplit.
+  conditions Json
+
+  // Sin @relation a Staff a propósito (evita tocar ese modelo); auditoría completa vive en ActivityLog.
+  createdById String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([venueId, merchantAccountId])
+  @@index([venueId])
+  @@index([merchantAccountId])
 }
 
 // ==========================================
@@ -8617,6 +8669,9 @@ model OrganizationAttendanceConfig {
   // at org level CASCADES to every venue's VenueSettings.trackPromoterLocation, because the
   // TPV ping gate reads that physical per-venue column with no org fallback.
   trackPromoterLocation Boolean @default(false)
+  // Capture-window org defaults — cascade to VenueSettings on save, same as the flag.
+  promoterLocationStartHour Int @default(11)
+  promoterLocationEndHour   Int @default(18)
 
   // Full TPV terminal settings (all 35 fields as JSON)
   // Source of truth for org-level defaults. Individual columns above kept for backward compat.

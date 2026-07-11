@@ -553,7 +553,7 @@ export async function uploadEmisorCsdController(req: Request, res: Response): Pr
  * permission, no new permission required (spec §20.3 add-on #2).
  */
 export async function searchSatCatalogController(req: Request, res: Response): Promise<void> {
-  const { type, q } = req.query as { type: 'product' | 'unit'; q: string }
+  const { type, q } = req.query as { type: 'product' | 'unit'; q?: string }
 
   try {
     const result = await searchSatCatalog({ type, q })

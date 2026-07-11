@@ -38,6 +38,11 @@ interface TpvSettings {
   // Venue-level "cambaceo" flag (from VenueSettings): TPV emits hourly promoter
   // location pings 11:00–18:00 venue-local when true. Additive, default false.
   trackPromoterLocation: boolean
+  // Venue-local capture window for the pings above (start inclusive, end exclusive,
+  // 0/24 = 24h). Configurable from the org dashboard; the TPV self-gates by these
+  // hours using its own clock — the server keeps accepting pings at any hour.
+  promoterLocationStartHour: number
+  promoterLocationEndHour: number
   // Clock-in/out photo verification (anti-fraud, per-terminal settings from Terminal.config)
   requireClockInPhoto: boolean
   requireClockOutPhoto: boolean
@@ -86,6 +91,9 @@ const DEFAULT_TPV_SETTINGS: TpvSettings = {
   enableShifts: true,
   // Cambaceo promoter tracking off by default (venue must opt in)
   trackPromoterLocation: false,
+  // Default capture window (venue-local hours), matches VenueSettings schema defaults
+  promoterLocationStartHour: 11,
+  promoterLocationEndHour: 18,
   // Clock-in/out photo disabled by default (anti-fraud feature, per-terminal)
   requireClockInPhoto: false,
   requireClockOutPhoto: false,
@@ -390,6 +398,8 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
         select: {
           enableShifts: true,
           trackPromoterLocation: true,
+          promoterLocationStartHour: true,
+          promoterLocationEndHour: true,
         },
       }),
       getVenuePlanInfo(terminal.venueId).catch((error): VenuePlanInfo | undefined => {
@@ -418,6 +428,9 @@ export async function getTerminalConfig(req: Request, res: Response, next: NextF
         typeof terminalOverrides.trackPromoterLocation === 'boolean'
           ? terminalOverrides.trackPromoterLocation
           : (venueSettings?.trackPromoterLocation ?? DEFAULT_TPV_SETTINGS.trackPromoterLocation),
+      // Capture window is venue-level only (no per-terminal override today).
+      promoterLocationStartHour: venueSettings?.promoterLocationStartHour ?? 11,
+      promoterLocationEndHour: venueSettings?.promoterLocationEndHour ?? 18,
       // Card payment server-decoupling kill-switch: PER-TERMINAL (Terminal.config.settings),
       // default true (legacy). getTpvSettingsFromConfig already merges saved settings over
       // DEFAULT_TPV_SETTINGS, so this is the terminal's configured value when present, else true.

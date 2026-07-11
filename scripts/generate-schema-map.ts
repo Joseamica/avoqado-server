@@ -3,7 +3,7 @@
  * ================================================
  *
  * `docs/SCHEMA_MAP.md` is the human-friendly index of `prisma/schema.prisma`:
- * every model grouped into 20 named domains. It goes stale because models are
+ * every model grouped into named domains. It goes stale because models are
  * added daily. This script regenerates it from an EXPLICIT model -> domain
  * mapping held below.
  *
@@ -39,7 +39,7 @@ interface Domain {
   description: string
 }
 
-/** The 20 domains, in display order. */
+/** The domains, in display order. */
 const DOMAINS: Domain[] = [
   {
     name: 'Multi-Tenant Core',
@@ -243,6 +243,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   // 9. Payments & Fees
   Payment: 'Payments & Fees',
   PaymentAllocation: 'Payments & Fees',
+  MerchantRoutingRule: 'Payments & Fees',
   VenueTransaction: 'Payments & Fees',
   BankStatement: 'Payments & Fees',
   BankStatementLine: 'Payments & Fees',
@@ -439,7 +440,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
 const INTRO = `# Schema Domain Map — avoqado-server
 
 \`prisma/schema.prisma\` is **{MODEL_COUNT} models / {ENUM_COUNT} enums / ~{LINE_COUNT} lines**. Nobody reads it
-top to bottom. This file is the **index**: 20 domains, what each is for, and where it
+top to bottom. This file is the **index**: {DOMAIN_COUNT} domains, what each is for, and where it
 lives. Find your domain → jump to the \`schema.prisma:LINE\` → for field-level detail
 read \`docs/DATABASE_SCHEMA.md\`.
 
@@ -451,7 +452,7 @@ domain at its line. Every model is listed once, in its primary domain.
 - Money is \`Decimal\`, never float. Money writes go in \`prisma.$transaction()\`.
 - Two parallel gating systems: **Module** (free/internal) vs **Feature** (paid, Stripe). See \`.claude/rules/feature-gating.md\`.
 
-## The 20 domains
+## The {DOMAIN_COUNT} domains
 `
 
 const TABLE_NOTE = `
@@ -515,6 +516,7 @@ function buildDocument(parsed: ParsedSchema): string {
   const intro = INTRO.replace('{MODEL_COUNT}', String(modelCount))
     .replace('{ENUM_COUNT}', String(parsed.enumCount))
     .replace('{LINE_COUNT}', roundedLines.toLocaleString('en-US'))
+    .replace(/\{DOMAIN_COUNT\}/g, String(DOMAINS.length))
 
   // Domain table
   const tableRows: string[] = []
@@ -566,7 +568,7 @@ async function main() {
     console.error('')
     console.error(
       'Add each model to MODEL_TO_DOMAIN in scripts/generate-schema-map.ts ' +
-        '(pick one of the 20 domains), then re-run `npm run schema:map`.',
+        `(pick one of the ${DOMAINS.length} domains), then re-run \`npm run schema:map\`.`,
     )
     process.exit(1)
   }

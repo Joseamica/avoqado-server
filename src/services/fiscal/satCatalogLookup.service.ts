@@ -39,10 +39,10 @@ export interface SatCatalogResult {
 // ─── DI interface ─────────────────────────────────────────────────────────────
 
 export interface SatCatalogDeps {
-  /** Calls GET /catalogs/products?q=<text> and returns raw SDK response. */
-  searchProducts: (q: string) => Promise<any>
-  /** Calls GET /catalogs/units?q=<text> and returns raw SDK response. */
-  searchUnits: (q: string) => Promise<any>
+  /** Calls GET /catalogs/products[?q=<text>] and returns raw SDK response. q omitted → first page. */
+  searchProducts: (q?: string) => Promise<any>
+  /** Calls GET /catalogs/units[?q=<text>] and returns raw SDK response. q omitted → first page. */
+  searchUnits: (q?: string) => Promise<any>
 }
 
 // ─── Default deps (production) ────────────────────────────────────────────────
@@ -51,8 +51,8 @@ export function defaultDeps(): SatCatalogDeps {
   const apiKey = env.FACTURAPI_USER_KEY || env.FACTURAPI_TEST_KEY || ''
   const fa = new Facturapi(apiKey)
   return {
-    searchProducts: (q: string) => fa.catalogs.searchProducts({ q }),
-    searchUnits: (q: string) => fa.catalogs.searchUnits({ q }),
+    searchProducts: (q?: string) => fa.catalogs.searchProducts(q ? { q } : {}),
+    searchUnits: (q?: string) => fa.catalogs.searchUnits(q ? { q } : {}),
   }
 }
 
@@ -74,13 +74,13 @@ function extractItems(raw: any): any[] {
  * Search the SAT catalog for products (ClaveProdServ) or units (ClaveUnidad).
  *
  * @param params.type  - 'product' → ClaveProdServ; 'unit' → ClaveUnidad
- * @param params.q     - Text query (min 1 char, validated upstream by the schema)
+ * @param params.q     - Optional text query; omitted → catalog's first page (picker default state)
  * @param deps         - Injectable for unit tests; production uses defaultDeps()
  *
  * @returns { results: SatCatalogItem[] } — empty array when no matches
  */
 export async function searchSatCatalog(
-  params: { type: SatCatalogType; q: string },
+  params: { type: SatCatalogType; q?: string },
   deps: SatCatalogDeps = defaultDeps(),
 ): Promise<SatCatalogResult> {
   const { type, q } = params

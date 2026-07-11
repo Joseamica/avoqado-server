@@ -136,6 +136,55 @@ describe('searchSatCatalog — type=unit', () => {
   })
 })
 
+// ─── Tests: q optional (picker opened with empty search) ─────────────────────
+// Regression: schema used to require q → dropdown open fired ?type=product with
+// no q → 400 → picker hung at "Buscando...". Empty q must pass through and hit
+// the catalog's default first page.
+
+describe('searchSatCatalog — q omitted (default first page)', () => {
+  it('calls searchProducts with undefined q for type=product', async () => {
+    const deps = makeDeps({
+      searchProducts: jest.fn().mockResolvedValue({ data: [{ key: '01010101', description: 'Genérico' }] }),
+    })
+
+    const result = await searchSatCatalog({ type: 'product' }, deps)
+
+    expect(deps.searchProducts).toHaveBeenCalledWith(undefined)
+    expect(result.results).toEqual([{ key: '01010101', description: 'Genérico' }])
+  })
+
+  it('calls searchUnits with undefined q for type=unit', async () => {
+    const deps = makeDeps({
+      searchUnits: jest.fn().mockResolvedValue({ data: [{ key: 'H87', name: 'Pieza' }] }),
+    })
+
+    const result = await searchSatCatalog({ type: 'unit' }, deps)
+
+    expect(deps.searchUnits).toHaveBeenCalledWith(undefined)
+    expect(result.results).toEqual([{ key: 'H87', description: 'Pieza' }])
+  })
+})
+
+// ─── Tests: schema — q optional, type still required ──────────────────────────
+
+describe('satCatalogSchema — q optional', () => {
+  const { satCatalogSchema } = require('../../../../src/schemas/dashboard/cfdi.schema')
+
+  it('accepts a query with type only (no q) — the picker default-open case', () => {
+    const parsed = satCatalogSchema.safeParse({ query: { type: 'product' } })
+    expect(parsed.success).toBe(true)
+  })
+
+  it('still rejects a missing/invalid type', () => {
+    expect(satCatalogSchema.safeParse({ query: {} }).success).toBe(false)
+    expect(satCatalogSchema.safeParse({ query: { type: 'bogus' } }).success).toBe(false)
+  })
+
+  it('still rejects an explicitly empty q', () => {
+    expect(satCatalogSchema.safeParse({ query: { type: 'unit', q: '' } }).success).toBe(false)
+  })
+})
+
 // ─── Tests: error propagation ─────────────────────────────────────────────────
 
 describe('searchSatCatalog — error handling', () => {

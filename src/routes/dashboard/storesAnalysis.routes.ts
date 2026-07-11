@@ -1379,6 +1379,9 @@ router.put('/org-attendance-config', orgAttendanceAccess, async (req: Request, r
       enableCashPayments,
       enableCardPayments,
       enableBarcodeScanner,
+      trackPromoterLocation,
+      promoterLocationStartHour,
+      promoterLocationEndHour,
     } = req.body
     const config = await organizationDashboardService.upsertOrgAttendanceConfig(orgId, {
       ...(expectedCheckInTime !== undefined && { expectedCheckInTime }),
@@ -1390,6 +1393,9 @@ router.put('/org-attendance-config', orgAttendanceAccess, async (req: Request, r
       ...(enableCashPayments !== undefined && { enableCashPayments: Boolean(enableCashPayments) }),
       ...(enableCardPayments !== undefined && { enableCardPayments: Boolean(enableCardPayments) }),
       ...(enableBarcodeScanner !== undefined && { enableBarcodeScanner: Boolean(enableBarcodeScanner) }),
+      ...(trackPromoterLocation !== undefined && { trackPromoterLocation: Boolean(trackPromoterLocation) }),
+      ...(promoterLocationStartHour !== undefined && { promoterLocationStartHour: Number(promoterLocationStartHour) }),
+      ...(promoterLocationEndHour !== undefined && { promoterLocationEndHour: Number(promoterLocationEndHour) }),
     })
     res.json({ success: true, data: config })
   } catch (error) {

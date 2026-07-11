@@ -235,13 +235,16 @@ export type AutofacturaBody = z.infer<typeof autofacturaSchema.shape.body>
  *
  * Uses `query` envelope — validateRequest() writes the parsed values back to req.query.
  * Spanish error messages per critical-warnings rule.
+ *
+ * `q` is optional: the dashboard picker omits it when the search box is empty
+ * (dropdown just opened) and the catalog returns its first page as defaults.
  */
 export const satCatalogSchema = z.object({
   query: z.object({
     type: z.enum(['product', 'unit'], {
       errorMap: () => ({ message: 'Tipo inválido (product|unit)' }),
     }),
-    q: z.string().min(1, 'La búsqueda es requerida'),
+    q: z.string().trim().min(1, 'La búsqueda no puede estar vacía').optional(),
   }),
 })
 

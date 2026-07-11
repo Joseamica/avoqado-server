@@ -864,6 +864,59 @@ router.get(
   },
 )
 
+/**
+ * GET /dashboard/organizations/:orgId/promoter-location-settings
+ * Returns: per-venue cambaceo tracking flag + capture window (venue-local hours),
+ * for every venue in the org. LEFT JOIN semantics — a venue with no VenueSettings
+ * row reports the schema defaults (false / 11 / 18). Org OWNER-only (same
+ * sensitivity tier as terminals-locations above: this configures physical
+ * location capture of staff).
+ */
+router.get(
+  '/:orgId/promoter-location-settings',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  requireOrgOwner,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId } = req.params
+      const data = await organizationDashboardService.getOrgPromoterLocationSettings(orgId)
+      res.json({ success: true, data })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+/**
+ * PUT /dashboard/organizations/:orgId/venues/:venueId/promoter-location-settings
+ * Org-scoped per-venue override of the cambaceo tracking flag and/or capture
+ * window. Body: { trackPromoterLocation?, promoterLocationStartHour?, promoterLocationEndHour? }.
+ * Org OWNER-only. Validates the venue belongs to the org before writing.
+ */
+router.put(
+  '/:orgId/venues/:venueId/promoter-location-settings',
+  authenticateTokenMiddleware,
+  checkOrgAccess,
+  requireOrgOwner,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId, venueId } = req.params
+      const { trackPromoterLocation, promoterLocationStartHour, promoterLocationEndHour } = req.body
+
+      const data = await organizationDashboardService.updateVenuePromoterLocationSettings(orgId, venueId, {
+        trackPromoterLocation,
+        promoterLocationStartHour,
+        promoterLocationEndHour,
+      })
+
+      res.json({ success: true, data })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
 // ==========================================
 // TERMINAL MANAGEMENT (Org-Level CRUD + Commands)
 // ==========================================

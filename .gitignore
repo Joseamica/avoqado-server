@@ -37,3 +37,6 @@ src/controllers/dashboard/text-to-sql-assistant.controller.ts
 docs/superpowers/specs/2026-04-20-chatbubble-paywall-design.md
 CHANGELOG.md
 .gstack/
+
+# graphify knowledge graph output
+graphify-out/
