@@ -52,19 +52,28 @@ export const attendeeParamsSchema = z.object({
   reservationId: z.string().cuid('Reservation ID inválido'),
 })
 
-export const addAttendeeSchema = z.object({
-  guestName: z.string().min(1, 'El nombre es requerido').max(255),
-  guestPhone: z.string().min(6, 'Teléfono inválido').optional().nullable(),
-  guestEmail: z.string().email('Email inválido').optional().nullable(),
-  partySize: z.number().int().min(1).default(1),
-  specialRequests: z.string().max(2000).optional().nullable(),
-  customerId: z.string().cuid().optional().nullable(),
-  // When true, the attendee is created in CHECKED_IN state and an Order is
-  // auto-built in the same TX so the cashier can charge immediately (walk-in
-  // flow). Default false keeps existing callers on the old CONFIRMED-only
-  // behavior — no Android client change is required to keep working.
-  checkInImmediately: z.boolean().default(false),
-})
+export const addAttendeeSchema = z
+  .object({
+    // Optional when customerId is provided — the service derives the name from
+    // the Customer record (mobile clients send only customerId for existing
+    // customers). Additive relaxation: every payload that validated before
+    // still validates.
+    guestName: z.string().min(1, 'El nombre es requerido').max(255).optional().nullable(),
+    guestPhone: z.string().min(6, 'Teléfono inválido').optional().nullable(),
+    guestEmail: z.string().email('Email inválido').optional().nullable(),
+    partySize: z.number().int().min(1).default(1),
+    specialRequests: z.string().max(2000).optional().nullable(),
+    customerId: z.string().cuid().optional().nullable(),
+    // When true, the attendee is created in CHECKED_IN state and an Order is
+    // auto-built in the same TX so the cashier can charge immediately (walk-in
+    // flow). Default false keeps existing callers on the old CONFIRMED-only
+    // behavior — no Android client change is required to keep working.
+    checkInImmediately: z.boolean().default(false),
+  })
+  .refine(d => (d.guestName && d.guestName.trim().length > 0) || d.customerId, {
+    message: 'Se requiere guestName o customerId',
+    path: ['guestName'],
+  })
 
 // ---- Bulk (recurring) creation ----
 //

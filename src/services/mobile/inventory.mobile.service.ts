@@ -153,8 +153,12 @@ export async function createStockCount(venueId: string, userId: string, type: 'C
   let productsToCount: { id: string; currentStock: number }[] = []
 
   if (type === 'FULL') {
+    // RECIPE products are excluded: their stock derives from ingredient
+    // consumption, so physically counting the finished product is meaningless.
+    // Counts cover QUANTITY-tracked products (raw-material counting needs a
+    // StockCountItem.rawMaterialId — future increment).
     const products = await prisma.product.findMany({
-      where: { venueId, trackInventory: true, active: true, deletedAt: null },
+      where: { venueId, trackInventory: true, active: true, deletedAt: null, inventoryMethod: { not: 'RECIPE' } },
       include: { inventory: true },
     })
     productsToCount = products.map(p => ({
@@ -163,7 +167,7 @@ export async function createStockCount(venueId: string, userId: string, type: 'C
     }))
   } else if (productIds && productIds.length > 0) {
     const products = await prisma.product.findMany({
-      where: { id: { in: productIds }, venueId, active: true, deletedAt: null },
+      where: { id: { in: productIds }, venueId, active: true, deletedAt: null, inventoryMethod: { not: 'RECIPE' } },
       include: { inventory: true },
     })
     productsToCount = products.map(p => ({

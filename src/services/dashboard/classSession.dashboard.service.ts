@@ -499,14 +499,18 @@ export async function cancelClassSession(venueId: string, sessionId: string) {
 export async function addAttendee(venueId: string, sessionId: string, data: AddAttendeeDto, staffId: string) {
   const partySize = data.partySize ?? 1
 
-  // Validate customerId belongs to this venue
+  // Validate customerId belongs to this venue; also derive guestName from the
+  // Customer when the client sent only customerId (mobile "cliente existente").
+  let guestName = data.guestName?.trim() || null
   if (data.customerId) {
     const customer = await prisma.customer.findFirst({
       where: { id: data.customerId, venueId },
-      select: { id: true },
+      select: { id: true, firstName: true, lastName: true },
     })
     if (!customer) throw new BadRequestError('El cliente no pertenece a este negocio')
+    if (!guestName) guestName = `${customer.firstName ?? ''} ${customer.lastName ?? ''}`.trim() || null
   }
+  if (!guestName) throw new BadRequestError('Se requiere guestName o customerId')
 
   // Use serializable transaction to prevent race conditions on capacity
   return withSerializableRetry(async tx => {
@@ -562,7 +566,7 @@ export async function addAttendee(venueId: string, sessionId: string, data: AddA
         duration: session.duration,
         status: targetStatus,
         channel: 'DASHBOARD',
-        guestName: data.guestName,
+        guestName,
         guestPhone: data.guestPhone ?? null,
         guestEmail: data.guestEmail ?? null,
         partySize,
