@@ -1,4 +1,4 @@
-import { createGuard, ScopeError } from '../../../src/mcp/guard'
+import { createGuard, ScopeError, enforceWriteScope } from '../../../src/mcp/guard'
 import type { McpScope } from '../../../src/mcp/scope'
 import logger from '@/config/logger' // globally mocked in tests/__helpers__/setup.ts
 
@@ -97,5 +97,24 @@ describe('guard — mcp:write scope enforcement', () => {
   it('does NOT enforce when scopes are absent (dev/legacy token → full access until it refreshes)', () => {
     const g = createGuard(withScope(undefined, ['loyalty:adjust']))
     expect(() => g.requirePermission('loyalty:adjust', 'A')).not.toThrow()
+  })
+
+  // Regression (2026-07-11 audit I1): ORG-level write gates (saleVerifications'
+  // requireOrgPermission, manualSale's requireManualSaleAccess) have no venueId to hand to
+  // requirePermission, so they call enforceWriteScope directly. Without it, flipping
+  // MCP_ENFORCE_WRITE_SCOPE would block venue writes but let org writes (approve/reopen/edit
+  // a sale, record a manual sale) through — the highest-risk actions escaping the kill-switch.
+  it('enforceWriteScope (org-level gates): ENFORCED + read-only token → write permission throws', () => {
+    process.env.MCP_ENFORCE_WRITE_SCOPE = 'true'
+    expect(() => enforceWriteScope(withScope(['mcp:read'], []), 'sale-verifications:review')).toThrow(/solo lectura|mcp:write/)
+    expect(() => enforceWriteScope(withScope(['mcp:read'], []), 'manual-sales:create')).toThrow(/solo lectura|mcp:write/)
+  })
+
+  it('enforceWriteScope: observe-only default logs but does not throw; reads and mcp:write tokens always pass', () => {
+    delete process.env.MCP_ENFORCE_WRITE_SCOPE
+    expect(() => enforceWriteScope(withScope(['mcp:read'], []), 'sale-verifications:review')).not.toThrow()
+    process.env.MCP_ENFORCE_WRITE_SCOPE = 'true'
+    expect(() => enforceWriteScope(withScope(['mcp:read'], []), 'sale-verifications:read')).not.toThrow() // read never gated
+    expect(() => enforceWriteScope(withScope(['mcp:read', 'mcp:write'], []), 'sale-verifications:review')).not.toThrow()
   })
 })

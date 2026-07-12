@@ -55,8 +55,13 @@ jest.mock('@/lib/permissions', () => ({
   ROLE_HIERARCHY: { VIEWER: 1, HOST: 2, KITCHEN: 3, WAITER: 4, CASHIER: 5, MANAGER: 6, ADMIN: 7, OWNER: 8, SUPERADMIN: 9 },
 }))
 
+const mockVenueFilter = jest.fn()
+const mockRequirePermission = jest.fn()
 jest.mock('@/mcp/guard', () => ({
-  createGuard: () => ({ venueFilter: jest.fn(), requirePermission: jest.fn() }),
+  createGuard: () => ({
+    venueFilter: (...a: unknown[]) => mockVenueFilter(...(a as [])),
+    requirePermission: (...a: unknown[]) => mockRequirePermission(...(a as [])),
+  }),
   ScopeError: class ScopeError extends Error {},
 }))
 
@@ -152,6 +157,32 @@ describe('staff_attendance', () => {
     allowTeamsRead = false
     await expect(call('staff_attendance', {})).rejects.toThrow()
     expect(mockGetStaffAttendance).not.toHaveBeenCalled()
+  })
+
+  // Regression (2026-07-11 audit C1): the service uses a caller-supplied venueId verbatim, so the
+  // tool MUST scope-gate it — otherwise any WL caller could read ANOTHER org's attendance PII.
+  it('with venueId → scope-gates it via guard.venueFilter + teams:read on that venue', async () => {
+    allowTeamsRead = true
+    mockGetStaffAttendance.mockResolvedValue({ staff: [] })
+    await call('staff_attendance', { venueId: 'v1' })
+    expect(mockVenueFilter).toHaveBeenCalledWith('v1')
+    expect(mockRequirePermission).toHaveBeenCalledWith('teams:read', 'v1')
+  })
+
+  it('with an OUT-OF-SCOPE venueId → guard throws, backing NOT called', async () => {
+    allowTeamsRead = true
+    mockVenueFilter.mockImplementationOnce(() => {
+      throw new Error('Venue foreign-venue is not in your scope')
+    })
+    await expect(call('staff_attendance', { venueId: 'foreign-venue' })).rejects.toThrow('not in your scope')
+    expect(mockGetStaffAttendance).not.toHaveBeenCalled()
+  })
+
+  it('without venueId → org-wide read, no venue gate needed', async () => {
+    allowTeamsRead = true
+    mockGetStaffAttendance.mockResolvedValue({ staff: [] })
+    await call('staff_attendance', {})
+    expect(mockVenueFilter).not.toHaveBeenCalled()
   })
 })
 

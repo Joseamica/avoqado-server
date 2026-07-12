@@ -33,6 +33,7 @@ export const PREMIUM_ONLY_CODES = [
   'SERIALIZED_INVENTORY',
   'AUTO_REORDER',
   'TRANSACTION_EXPORT',
+  'MERCHANT_ROUTING_RULES', // Reglas condicionales de visibilidad/auto-selección de merchants en TPV (2026-07-10)
 ] as const
 
 /**

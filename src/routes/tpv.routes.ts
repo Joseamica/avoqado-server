@@ -15,6 +15,8 @@ import * as floorElementController from '../controllers/tpv/floor-element.tpv.co
 import * as heartbeatController from '../controllers/tpv/heartbeat.tpv.controller'
 import * as orderController from '../controllers/tpv/order.tpv.controller'
 import * as paymentController from '../controllers/tpv/payment.tpv.controller'
+import * as merchantRoutingController from '../controllers/tpv/merchantRouting.tpv.controller'
+import { merchantEligibilityRequestSchema } from '../schemas/dashboard/merchantRouting.schema'
 import * as refundController from '../controllers/tpv/refund.tpv.controller'
 import * as reportsController from '../controllers/tpv/reports.tpv.controller'
 import * as saleVerificationController from '../controllers/tpv/sale-verification.tpv.controller'
@@ -1021,6 +1023,28 @@ router.get(
   checkPermission('payments:read'),
   validateRequest(venueIdParamSchema),
   paymentController.getMerchantAccounts,
+)
+
+/**
+ * @openapi
+ * /tpv/venues/{venueId}/merchant-eligibility:
+ *   post:
+ *     tags:
+ *       - TPV - Payments
+ *     summary: Evaluate conditional merchant visibility for the charge in progress
+ *     description: >
+ *       Evaluates MERCHANT_ROUTING_RULES (PREMIUM feature) with the current charge context
+ *       (amount in PESOS, optional staff/location) and returns which merchant accounts the
+ *       TPV should offer, an autoSelectMerchantAccountId when exactly one is eligible, and
+ *       fallbackAll=true when none matched (the TPV shows all with a warning — a rule never
+ *       blocks a sale). Venues without the feature get all merchants eligible (legacy behavior).
+ */
+router.post(
+  '/venues/:venueId/merchant-eligibility',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  validateRequest(merchantEligibilityRequestSchema),
+  merchantRoutingController.getMerchantEligibility,
 )
 
 /**

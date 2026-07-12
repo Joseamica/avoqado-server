@@ -1175,6 +1175,10 @@ interface PaymentCreationData {
   staffId: string
   paidProductsId: string[]
 
+  // Snapshot de MERCHANT_ROUTING_RULES evaluado por la TPV para este cobro
+  // (auditoría). Opcional — APKs viejos no lo envían.
+  routingEvaluation?: Prisma.InputJsonValue
+
   // Card payment fields
   cardBrand?: string
   last4?: string
@@ -1634,6 +1638,8 @@ export async function recordOrderPayment(
           splitType: paymentData.splitType as SplitType, // Cast to SplitType enum
           source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
           processor: 'TBD',
+          // Snapshot de MERCHANT_ROUTING_RULES (por qué la TPV mostró/eligió este merchant)
+          routingEvaluation: paymentData.routingEvaluation ?? undefined,
           processorId: paymentData.mentaOperationId,
           processorData: {
             cardBrand: paymentData.cardBrand,
@@ -2376,6 +2382,8 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
           processor: 'TBD',
           type: 'FAST',
+          // Snapshot de MERCHANT_ROUTING_RULES (por qué la TPV mostró/eligió este merchant)
+          routingEvaluation: paymentData.routingEvaluation ?? undefined,
           processorId: paymentData.mentaOperationId,
           processorData: {
             cardBrand: paymentData.cardBrand,

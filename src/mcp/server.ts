@@ -43,6 +43,7 @@ import { registerPromoterLocationTools } from './tools/promoterLocation'
 import { registerTerminalLocationTools } from './tools/terminalLocation'
 import { registerAccountingTools } from './tools/accounting'
 import { registerActivityLogTools } from './tools/activity-log'
+import { registerMerchantRoutingTools } from './tools/merchantRouting'
 import { registerCashOutTools } from './tools/cash-out'
 import { registerWhiteLabelOpsTools } from './tools/whiteLabelOps'
 
@@ -110,6 +111,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerPlanAdminTools(server, scope)
   registerAccountingTools(server, scope)
   registerActivityLogTools(server, scope)
+  registerMerchantRoutingTools(server, scope)
 
   if (flags.serializedEnabled) {
     registerSerializedTools(server, scope)

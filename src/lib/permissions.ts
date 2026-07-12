@@ -252,6 +252,12 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'settlements:simulate': ['settlements:read', 'settlements:simulate'],
 
   // ===========================
+  // MERCHANT ROUTING (MERCHANT_ROUTING_RULES — reglas condicionales de merchants en TPV)
+  // ===========================
+  'payments:routing-read': ['payments:routing-read', 'payments:read'],
+  'payments:routing-manage': ['payments:routing-manage', 'payments:routing-read', 'payments:read'],
+
+  // ===========================
   // ACCOUNTING - Capa A (estado de resultados, incluido para todos los venues)
   // ===========================
   'accounting:read': ['accounting:read', 'payments:read', 'orders:read'],
@@ -652,6 +658,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'settlements:read',
     'settlements:simulate',
     'accounting:read', // Capa A — estado de resultados (¿cuánto gané?), incluido
+    'payments:routing-read', // MERCHANT_ROUTING_RULES: ver reglas de enrutamiento de merchants (editar = ADMIN+ vía payments:*)
     'menu:read',
     'menu:create',
     'menu:update',
@@ -1362,7 +1369,7 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   reports: ['reports:read', 'reports:export'],
   menu: ['menu:read', 'menu:create', 'menu:update', 'menu:delete', 'menu:import'],
   orders: ['orders:read', 'orders:create', 'orders:update', 'orders:cancel', 'orders:comp', 'orders:void'],
-  payments: ['payments:read', 'payments:create', 'payments:refund'],
+  payments: ['payments:read', 'payments:create', 'payments:refund', 'payments:routing-read', 'payments:routing-manage'],
   // Singular `payment` namespace for admin-only, one-off payment actions.
   payment: ['payment:create-manual'],
   shifts: ['shifts:read', 'shifts:create', 'shifts:update', 'shifts:delete', 'shifts:close'],

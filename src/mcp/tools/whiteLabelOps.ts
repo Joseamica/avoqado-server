@@ -99,6 +99,12 @@ export function registerWhiteLabelOpsTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, date, statusFilter, fromDate, toDate }) => {
       const orgId = requireOrgTeamsRead()
+      if (venueId) {
+        // The service uses a caller-supplied venueId verbatim (no org re-check), so an
+        // unvalidated id would read ANOTHER tenant's attendance PII. Scope-gate it here.
+        guard.venueFilter(venueId)
+        guard.requirePermission('teams:read', venueId)
+      }
       const result = await organizationDashboardService.getStaffAttendance(orgId, date, venueId, statusFilter, fromDate, toDate)
       return text({ ok: true, ...result })
     },

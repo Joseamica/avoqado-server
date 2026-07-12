@@ -103,6 +103,8 @@ const PERMISSION_TO_FEATURE_MAP: Record<string, string> = {
   'payments:read': 'AVOQADO_PAYMENTS',
   'payments:write': 'AVOQADO_PAYMENTS',
   'payments:refund': 'AVOQADO_PAYMENTS',
+  'payments:routing-read': 'AVOQADO_PAYMENTS', // MERCHANT_ROUTING_RULES: ver reglas de enrutamiento
+  'payments:routing-manage': 'AVOQADO_PAYMENTS', // MERCHANT_ROUTING_RULES: editar reglas de enrutamiento
 
   // Inventory
   'inventory:read': 'AVOQADO_INVENTORY',

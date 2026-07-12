@@ -2102,7 +2102,10 @@ class OrganizationDashboardService {
       select: { id: true, name: true },
     })
 
-    const venueIds = venueId ? [venueId] : venues.map(v => v.id)
+    // A caller-supplied venueId must belong to THIS org — using it verbatim would let a
+    // caller read another tenant's attendance (staff PII, GPS, photos, sales) by id.
+    const orgVenueIds = venues.map(v => v.id)
+    const venueIds = venueId ? orgVenueIds.filter(id => id === venueId) : orgVenueIds
 
     // Get all staff in these venues
     const staffVenues = await prisma.staffVenue.findMany({

@@ -11,6 +11,12 @@ import { tokenBudgetMiddleware } from '../middlewares/token-budget.middleware'
 import { passwordResetRateLimiter } from '../middlewares/password-reset-rate-limit.middleware'
 import { requireJsonBodyMiddleware } from '../middlewares/requireJsonBody.middleware'
 import { validateRequest } from '../middlewares/validation' // Verifica esta ruta
+import * as merchantRoutingDashboardController from '../controllers/dashboard/merchantRouting.dashboard.controller'
+import {
+  deleteMerchantRoutingRuleSchema,
+  merchantEligibilityRequestSchema,
+  upsertMerchantRoutingRuleSchema,
+} from '../schemas/dashboard/merchantRouting.schema'
 import { StaffRole } from '../security'
 
 // Importa StaffRole desde @prisma/client si ahí es donde está definido tu enum de Prisma
@@ -3235,6 +3241,41 @@ router.post(
   checkPermission('orders:update'), // Same permission as updating orders
   validateRequest(SettleOrderSchema),
   orderController.settleOrder,
+)
+
+// ---- MERCHANT_ROUTING_RULES (PREMIUM): reglas condicionales de merchants en TPV ----
+// Middleware order per permissions-policy: validate body BEFORE feature/perm checks.
+router.get(
+  '/venues/:venueId/merchant-routing-rules',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('MERCHANT_ROUTING_RULES'),
+  checkPermission('payments:routing-read'),
+  merchantRoutingDashboardController.listRules,
+)
+router.put(
+  '/venues/:venueId/merchant-routing-rules',
+  authenticateTokenMiddleware,
+  validateRequest(upsertMerchantRoutingRuleSchema),
+  checkFeatureAccess('MERCHANT_ROUTING_RULES'),
+  checkPermission('payments:routing-manage'),
+  merchantRoutingDashboardController.upsertRule,
+)
+// Preview ANTES de la ruta con :merchantAccountId para que /preview no matchee como id.
+router.post(
+  '/venues/:venueId/merchant-routing-rules/preview',
+  authenticateTokenMiddleware,
+  validateRequest(merchantEligibilityRequestSchema),
+  checkFeatureAccess('MERCHANT_ROUTING_RULES'),
+  checkPermission('payments:routing-read'),
+  merchantRoutingDashboardController.previewEligibility,
+)
+router.delete(
+  '/venues/:venueId/merchant-routing-rules/:merchantAccountId',
+  authenticateTokenMiddleware,
+  validateRequest(deleteMerchantRoutingRuleSchema),
+  checkFeatureAccess('MERCHANT_ROUTING_RULES'),
+  checkPermission('payments:routing-manage'),
+  merchantRoutingDashboardController.deleteRule,
 )
 
 // ---- Facturación CFDI 4.0 — Flow B: staff issues a CFDI for a closed bill ----

@@ -2,7 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { hasPermission } from '@/services/access/access.service'
 import type { McpScope } from '../scope'
-import { ScopeError } from '../guard'
+import { ScopeError, enforceWriteScope } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { createOneManualSale } from '@/services/dashboard/manualSale.service'
@@ -27,6 +27,8 @@ import type { ManualSaleRowInput } from '@/schemas/dashboard/manualSale.schema'
 export function registerManualSaleTools(server: McpServer, scope: McpScope) {
   /** Same shape as saleVerifications.ts's requireReviewAccess: gate on the ACTIVE org, any venue. */
   function requireManualSaleAccess(): void {
+    // Org-level WRITE — must participate in the same mcp:write kill-switch as venue writes.
+    enforceWriteScope(scope, 'manual-sales:create')
     for (const access of scope.perVenueAccess.values()) {
       if (access.organizationId === scope.activeOrg && hasPermission(access, 'manual-sales:create')) return
     }

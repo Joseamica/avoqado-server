@@ -6,6 +6,46 @@ const SENSITIVE_PAYMENT_FIELDS = ['maskedPan', 'referenceNumber', 'authorization
 
 export class ScopeError extends Error {}
 
+/**
+ * OAuth scope enforcement: a WRITE action requires the mcp:write scope. Read actions
+ * (:read / :view / :list) never do. Only relevant when the token actually carries scopes
+ * (scope.scopes present) — dev/legacy tokens without scopes keep full access.
+ *
+ * OBSERVE-ONLY BY DEFAULT: to de-risk rollout we only LOG what WOULD be blocked (with the
+ * granted scopes) unless MCP_ENFORCE_WRITE_SCOPE=true. Deploy → watch logs to confirm real
+ * Claude/ChatGPT clients actually request mcp:write (no legit writes appear in the "would be
+ * blocked" line) → THEN flip the flag on. This way a client that unexpectedly requests
+ * read-only can't silently break writes for everyone the moment we ship.
+ *
+ * Exported (not just embedded in requirePermission) so ORG-level write gates — which have no
+ * single venueId to hand to requirePermission (saleVerifications' requireOrgPermission,
+ * manualSale's requireManualSaleAccess) — participate in the same kill-switch. Without this,
+ * flipping MCP_ENFORCE_WRITE_SCOPE would block venue writes but let the highest-risk org
+ * writes (approve/reopen/edit a sale) through.
+ */
+export function enforceWriteScope(scope: McpScope, permission: string): void {
+  const isRead = /:(read|view|list)$/.test(permission)
+  if (!isRead && scope.scopes && !scope.scopes.includes('mcp:write')) {
+    const enforce = process.env.MCP_ENFORCE_WRITE_SCOPE === 'true'
+    logger.warn(
+      enforce
+        ? '[MCP] write blocked: token lacks mcp:write scope'
+        : '[MCP] write would be blocked (observe-only): token lacks mcp:write scope',
+      {
+        mcp: true,
+        staffId: scope.staffId,
+        activeOrg: scope.activeOrg,
+        permission,
+        grantedScopes: scope.scopes,
+        enforced: enforce,
+      },
+    )
+    if (enforce) {
+      throw new ScopeError(`Esta conexión es de solo lectura (falta el scope mcp:write); "${permission}" es una acción de escritura.`)
+    }
+  }
+}
+
 export function createGuard(scope: McpScope) {
   return {
     /** The venue filter EVERY query must spread into its `where`. Throws on out-of-scope. */
@@ -31,35 +71,7 @@ export function createGuard(scope: McpScope) {
     },
     /** Gate an action by permission, evaluated for a SPECIFIC venue (roles differ per venue). */
     requirePermission(permission: string, venueId: string): void {
-      // OAuth scope enforcement: a WRITE action requires the mcp:write scope. Read actions
-      // (:read / :view / :list) never do. Only relevant when the token actually carries scopes
-      // (scope.scopes present) — dev/legacy tokens without scopes keep full access.
-      //
-      // OBSERVE-ONLY BY DEFAULT: to de-risk rollout we only LOG what WOULD be blocked (with the
-      // granted scopes) unless MCP_ENFORCE_WRITE_SCOPE=true. Deploy → watch logs to confirm real
-      // Claude/ChatGPT clients actually request mcp:write (no legit writes appear in the "would be
-      // blocked" line) → THEN flip the flag on. This way a client that unexpectedly requests
-      // read-only can't silently break writes for everyone the moment we ship.
-      const isRead = /:(read|view|list)$/.test(permission)
-      if (!isRead && scope.scopes && !scope.scopes.includes('mcp:write')) {
-        const enforce = process.env.MCP_ENFORCE_WRITE_SCOPE === 'true'
-        logger.warn(
-          enforce
-            ? '[MCP] write blocked: token lacks mcp:write scope'
-            : '[MCP] write would be blocked (observe-only): token lacks mcp:write scope',
-          {
-            mcp: true,
-            staffId: scope.staffId,
-            activeOrg: scope.activeOrg,
-            permission,
-            grantedScopes: scope.scopes,
-            enforced: enforce,
-          },
-        )
-        if (enforce) {
-          throw new ScopeError(`Esta conexión es de solo lectura (falta el scope mcp:write); "${permission}" es una acción de escritura.`)
-        }
-      }
+      enforceWriteScope(scope, permission)
       const access = scope.perVenueAccess.get(venueId)
       if (!access || !hasPermission(access, permission)) {
         // Visible-in-logs (alertable) denial; a spike = an LLM probing for access.

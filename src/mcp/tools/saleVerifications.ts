@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { hasPermission } from '@/services/access/access.service'
 import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
-import { ScopeError } from '../guard'
+import { ScopeError, enforceWriteScope } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import {
@@ -138,6 +138,9 @@ export function registerSaleVerificationTools(server: McpServer, scope: McpScope
 
   // generic org-permission gate (requireReviewAccess already does this for sale-verifications:review)
   function requireOrgPermission(permission: string): void {
+    // Same mcp:write kill-switch venue writes get via guard.requirePermission — org-level
+    // writes (approve/reopen/edit a sale) must not escape it when enforcement is enabled.
+    enforceWriteScope(scope, permission)
     for (const access of scope.perVenueAccess.values()) {
       if (access.organizationId === scope.activeOrg && hasPermission(access, permission)) return
     }

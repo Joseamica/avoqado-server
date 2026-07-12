@@ -186,6 +186,19 @@ export const recordPaymentBodySchema = z.object({
         .regex(/^[A-Za-z0-9]{10,11}$/, { message: 'El serial Blumon debe ser alfanumérico de 10-11 caracteres' })
         .optional(),
 
+      // Snapshot de MERCHANT_ROUTING_RULES evaluado por la TPV para este cobro
+      // (auditoría "por qué se mostró/eligió este merchant"). Opcional — APKs viejos no lo envían.
+      routingEvaluation: z
+        .object({
+          evaluatedAt: z.string({ message: 'evaluatedAt inválido' }),
+          fallbackAll: z.boolean().optional(),
+          autoSelected: z.boolean().optional(),
+          eligibleIds: z.array(z.string()).max(20).optional(),
+          reasons: z.record(z.string(), z.array(z.string()).max(10)).optional(),
+        })
+        .passthrough()
+        .optional(),
+
       // Split payment specific fields
       equalPartsPartySize: z.number().int().positive().optional(),
       equalPartsPayedFor: z.number().int().positive().optional(),
