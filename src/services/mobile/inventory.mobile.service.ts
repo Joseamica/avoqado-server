@@ -170,6 +170,26 @@ function mapCountItem(item: {
 }
 
 /**
+ * List active raw materials (ingredients) — for the cycle-count "add items"
+ * picker and barcode matching in the counting flow.
+ */
+export async function getRawMaterials(venueId: string) {
+  const rawMaterials = await prisma.rawMaterial.findMany({
+    where: { venueId, active: true, deletedAt: null },
+    select: { id: true, name: true, sku: true, gtin: true, unit: true, currentStock: true },
+    orderBy: { name: 'asc' },
+  })
+  return rawMaterials.map(rm => ({
+    id: rm.id,
+    name: rm.name,
+    sku: rm.sku,
+    gtin: rm.gtin,
+    unit: rm.unit,
+    onHand: Number(rm.currentStock),
+  }))
+}
+
+/**
  * Create a new stock count.
  */
 export async function createStockCount(

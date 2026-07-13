@@ -48,6 +48,16 @@ export const getStockCounts = async (req: Request, res: Response, next: NextFunc
  * Create stock count
  * @route POST /api/v1/mobile/venues/:venueId/inventory/stock-counts
  */
+export const getRawMaterials = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId } = req.params
+    const rawMaterials = await inventoryService.getRawMaterials(venueId)
+    return res.json({ success: true, rawMaterials })
+  } catch (error) {
+    next(error)
+  }
+}
+
 export const createStockCount = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId } = req.params
