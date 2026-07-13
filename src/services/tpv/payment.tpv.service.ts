@@ -21,6 +21,7 @@ import { getEffectivePaymentConfig } from '../organization-payment-config.servic
 import { logAction } from '../dashboard/activity-log.service'
 import { validateStaffVenue as validateStaffVenueShared } from '../../utils/staff-venue.util'
 import { loadOrderForCfdiFromDb } from '../fiscal/cfdi.service'
+import { terminalPaymentService } from '../terminal-payment.service'
 
 /**
  * Build the slim digitalReceipt response shape with a constructed `receiptUrl`.
@@ -1239,6 +1240,10 @@ interface PaymentCreationData {
   // Backwards compatible: optional. TPV versions < v1.10.10 do not send it,
   // and those requests fall back to the legacy referenceNumber-based check.
   idempotencyKey?: string
+  // POS→TPV arbitration link (the POS-generated requestId). When present, this
+  // Payment's creation closes the TerminalPaymentRequest row + frees the
+  // terminal slot atomically. Optional/additive; old TPVs omit it.
+  terminalPaymentRequestId?: string
 }
 
 /**
@@ -1705,6 +1710,12 @@ export async function recordOrderPayment(
           status: 'PENDING', // Will be updated to SETTLED by settlement process
         },
       })
+
+      // Close the POS→TPV arbitration row (frees the terminal slot) atomically
+      // with the Payment — the robust recovery path (survives socket loss/restart).
+      if (paymentData.terminalPaymentRequestId) {
+        await terminalPaymentService.closeRowFromPaymentTx(tx, paymentData.terminalPaymentRequestId, newPayment.id)
+      }
 
       // Update Order.splitType if this is the first payment
       if (!activeOrder.splitType) {
@@ -2502,6 +2513,12 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           photosCount: paymentData.verificationPhotos?.length || 0,
           barcodesCount: paymentData.verificationBarcodes?.length || 0,
         })
+      }
+
+      // Close the POS→TPV arbitration row (frees the terminal slot) atomically
+      // with the Payment — the robust recovery path (survives socket loss/restart).
+      if (paymentData.terminalPaymentRequestId) {
+        await terminalPaymentService.closeRowFromPaymentTx(tx, paymentData.terminalPaymentRequestId, newPayment.id)
       }
 
       return { payment: newPayment, fastOrder: order }

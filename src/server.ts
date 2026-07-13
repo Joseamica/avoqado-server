@@ -29,6 +29,7 @@ import { abandonedOrdersCleanupJob } from './jobs/abandoned-orders-cleanup.job'
 import { batchExpirationJob } from './jobs/batch-expiration.job'
 import { tpvOrderExpiryJob } from './jobs/tpv-order-expiry.job'
 import { blumonWebhookReconciliationJob } from './jobs/blumon-webhook-reconciliation.job'
+import { terminalPaymentWatchdogJob } from './jobs/terminal-payment-watchdog.job'
 import { reservationDepositReconciliationJob } from './jobs/reservation-deposit-reconciliation.job'
 import { reservationReminderJob } from './jobs/reservation-reminder.job'
 import { reservationAutoNoShowJob } from './jobs/reservation-auto-no-show.job'
@@ -116,6 +117,9 @@ const gracefulShutdown = async (signal: string) => {
       // Stop TPV health monitor
       logger.info('Stopping TPV health monitor...')
       tpvHealthMonitorJob.stop()
+
+      // Stop terminal-payment watchdog
+      terminalPaymentWatchdogJob.stop()
 
       // Stop subscription cancellation job
       logger.info('Stopping subscription cancellation job...')
@@ -372,6 +376,9 @@ const startApplication = async (retries = 3) => {
 
       // Start TPV health monitor
       tpvHealthMonitorJob.start()
+
+      // Start terminal-payment arbitration watchdog (reconciles stale charge rows)
+      terminalPaymentWatchdogJob.start()
 
       // Start subscription cancellation job
       subscriptionCancellationJob.start()

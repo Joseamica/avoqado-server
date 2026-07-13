@@ -1290,6 +1290,23 @@ export async function getReservation(req: Request, res: Response, next: NextFunc
       orderBy: { createdAt: 'asc' },
     })
 
+    // Resolve the FULL ordered service list. Multi-service appointments keep it
+    // in productIds[] (a scalar array, not a relation), so `product` alone only
+    // ever showed the lead service — its extra services vanished from the
+    // manage/cancel page. Resolve here so the widget lists every service.
+    const serviceIds = reservation.productIds?.length ? reservation.productIds : reservation.productId ? [reservation.productId] : []
+    const serviceRows = serviceIds.length
+      ? await prisma.product.findMany({
+          where: { id: { in: serviceIds } },
+          select: { id: true, name: true, price: true, duration: true },
+        })
+      : []
+    const serviceById = new Map(serviceRows.map(p => [p.id, p]))
+    const services = serviceIds
+      .map(id => serviceById.get(id))
+      .filter((p): p is NonNullable<typeof p> => Boolean(p))
+      .map(p => ({ id: p.id, name: p.name, price: p.price != null ? Number(p.price) : null, duration: p.duration ?? null }))
+
     res.json({
       confirmationCode: reservation.confirmationCode,
       status: reservation.status,
@@ -1306,6 +1323,7 @@ export async function getReservation(req: Request, res: Response, next: NextFunc
           }
         : null,
       product: reservation.product,
+      services, // full ordered list for multi-service appointments (lead kept in `product`)
       assignedStaff: reservation.assignedStaff
         ? {
             firstName: reservation.assignedStaff.firstName,

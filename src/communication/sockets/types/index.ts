@@ -122,6 +122,10 @@ export enum SocketEventType {
   CARD_READER_STATUS = 'card_reader_status',
   PERIPHERAL_ERROR = 'peripheral_error',
 
+  // Business Events - Print stations (PRINT_STATIONS)
+  PRINT_JOB_SYNCED = 'print_job_synced', // gateway synced its outbox replica to the server
+  PRINT_JOB_FAILED = 'print_job_failed', // one or more comandas failed to print → alert ADMIN/MANAGER
+
   // Business Events - Crypto Payments (B4Bit)
   CRYPTO_PAYMENT_CONFIRMED = 'crypto:payment_confirmed',
   CRYPTO_PAYMENT_FAILED = 'crypto:payment_failed',

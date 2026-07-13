@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "avoqado-server",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 3000
+    },
+    {
+      "name": "avoqado-web-dashboard",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "/Users/amieva/Documents/Programming/Avoqado/avoqado-web-dashboard", "run", "dev"],
+      "port": 5173
+    },
+    {
+      "name": "avoqado-checkout",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "/Users/amieva/Documents/Programming/Avoqado/avoqado-checkout", "run", "dev"],
+      "port": 5174
+    }
+  ]
+}

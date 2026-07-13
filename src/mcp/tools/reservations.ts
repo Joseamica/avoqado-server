@@ -363,7 +363,7 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'reservation_detail',
-    'Full detail of ONE reservation in a venue you can access, by its confirmation code: status, when (start/end), party size, guest (name/phone/email), the table or the service booked, deposit (amount, status, paid-at), check-in / no-show timestamps, special requests and internal notes. The drill-down after the reservations list. Answers "dame los detalles de la reserva ABC123". Does NOT expose payment-processor references. Pass venueId + confirmationCode.',
+    'Full detail of ONE reservation in a venue you can access, by its confirmation code: status, when (start/end), party size, guest (name/phone/email), the table or the ALL services booked (multi-service appointments return the full `services` list with per-service duration + price, not just the lead one) plus any picked add-on `modifiers`, deposit (amount, status, paid-at), check-in / no-show timestamps, special requests and internal notes. The drill-down after the reservations list. Answers "dame los detalles de la reserva ABC123". Does NOT expose payment-processor references. Pass venueId + confirmationCode.',
     {
       venueId: z.string().describe('Venue that owns the reservation (must be in your scope)'),
       confirmationCode: z.string().min(1).describe('The reservation confirmation code'),
@@ -391,10 +391,31 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
           noShowAt: true,
           createdAt: true,
           table: { select: { number: true } },
-          product: { select: { name: true } },
+          productId: true,
+          productIds: true,
+          product: { select: { id: true, name: true } },
+          modifiers: {
+            select: { productId: true, name: true, quantity: true, price: true },
+            orderBy: { createdAt: 'asc' },
+          },
         },
       })
       if (!r) return text({ found: false, error: `No encontré una reserva con código "${confirmationCode}" en este local.` })
+      // Multi-service appointments store the full ordered list in productIds
+      // (scalar text[] — not a relation), so resolve the names here. Without
+      // this only the lead `product` showed and extra services vanished.
+      const serviceIds = r.productIds?.length ? r.productIds : r.productId ? [r.productId] : []
+      const serviceProducts = serviceIds.length
+        ? await prisma.product.findMany({
+            where: { id: { in: serviceIds } },
+            select: { id: true, name: true, price: true, duration: true },
+          })
+        : []
+      const svcById = new Map(serviceProducts.map(p => [p.id, p]))
+      const services = serviceIds
+        .map(id => svcById.get(id))
+        .filter((p): p is NonNullable<typeof p> => Boolean(p))
+        .map(p => ({ name: p.name, price: p.price != null ? Number(p.price) : null, durationMin: p.duration ?? null }))
       return text({
         found: true,
         reservation: {
@@ -405,7 +426,9 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
           partySize: r.partySize,
           guest: { name: r.guestName, phone: r.guestPhone, email: r.guestEmail },
           table: r.table?.number ?? null,
-          service: r.product?.name ?? null, // booked service (appointment venues)
+          service: r.product?.name ?? null, // booked lead service (kept for back-compat)
+          services, // full ordered list for multi-service appointments
+          modifiers: (r.modifiers ?? []).map(m => ({ name: m.name, productId: m.productId, quantity: m.quantity, price: Number(m.price) })),
           deposit:
             r.depositAmount != null
               ? { amount: Number(r.depositAmount), status: r.depositStatus, paidAt: r.depositPaidAt?.toISOString() ?? null }

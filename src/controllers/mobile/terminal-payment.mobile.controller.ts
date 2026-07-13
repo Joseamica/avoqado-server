@@ -9,7 +9,7 @@ import { Request, Response } from 'express'
 import { terminalPaymentService } from '../../services/terminal-payment.service'
 import { terminalRegistry } from '../../communication/sockets/terminal-registry'
 import logger from '../../config/logger'
-import { BadRequestError } from '../../errors/AppError'
+import { BadRequestError, TerminalBusyError } from '../../errors/AppError'
 import { validateStaffVenue } from '../../utils/staff-venue.util'
 
 /**
@@ -85,6 +85,21 @@ export async function sendTerminalPayment(req: Request, res: Response) {
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Error desconocido'
+
+    // Terminal already processing another charge → 409 busy.
+    // Body carries status:'failed' so OLD iOS/Desktop clients (which parse the
+    // body `status` field, not the HTTP code) degrade safely; NEW clients read
+    // `code`/`blockingRequest` to offer "pick another terminal".
+    if (error instanceof TerminalBusyError) {
+      return res.status(409).json({
+        success: false,
+        status: 'failed',
+        code: 'TERMINAL_BUSY',
+        errorMessage: message,
+        message,
+        blockingRequest: error.details.blockingRequest,
+      })
+    }
 
     // Terminal not online → 404
     if (message.includes('no está conectada')) {
@@ -230,6 +245,49 @@ export async function cancelTerminalPayment(req: Request, res: Response) {
 }
 
 /**
+ * GET /api/v1/mobile/venues/:venueId/terminal-payment/:requestId
+ *
+ * Status of a terminal payment request (recovery after a dropped long-poll /
+ * timeout / network error). Trichotomy the POS relies on:
+ *  - 200 + terminal status (COMPLETED/FAILED/CANCELLED/TIMED_OUT/UNKNOWN) → the
+ *    real outcome; the client stops and acts on it (never blind-retries).
+ *  - 200 + IN_PROGRESS → still running; client keeps polling.
+ *  - 404 NOT_FOUND → never persisted → safe to retry with the SAME requestId.
+ * Golden rule for clients: on timeout/NetworkError, GET status BEFORE retrying.
+ */
+export async function getTerminalPaymentStatus(req: Request, res: Response) {
+  try {
+    const { venueId, requestId } = req.params
+
+    const status = await terminalPaymentService.getPaymentStatus(requestId, venueId)
+    if (!status) {
+      return res.status(404).json({
+        success: false,
+        status: 'NOT_FOUND',
+        message: 'No existe una solicitud de cobro con ese identificador',
+      })
+    }
+
+    const inProgress = ['PENDING', 'SENT', 'CANCEL_REQUESTED'].includes(status.status)
+    return res.status(200).json({
+      success: true,
+      inProgress,
+      ...status,
+    })
+  } catch (error) {
+    logger.error('Error in getTerminalPaymentStatus', {
+      error: error instanceof Error ? error.message : 'Error desconocido',
+      venueId: req.params.venueId,
+      requestId: req.params.requestId,
+    })
+    return res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor',
+    })
+  }
+}
+
+/**
  * GET /api/v1/mobile/venues/:venueId/terminals/online
  *
  * Returns terminals currently connected via Socket.IO.
@@ -238,7 +296,11 @@ export async function getOnlineTerminals(req: Request, res: Response) {
   try {
     const { venueId } = req.params
 
-    const terminals = terminalRegistry.getOnlineTerminals(venueId)
+    // Only payment-capable terminals (have a live socket). A terminal known
+    // only via HTTP heartbeat (socketId null) can't be charged, so hiding it
+    // here prevents the POS from picking one that would 422.
+    const terminals = terminalRegistry.getPaymentReadyTerminals(venueId)
+    const busySet = await terminalPaymentService.getBusyTerminalIds(venueId)
 
     logger.info(`📡 [API] getOnlineTerminals for venue ${venueId}: found ${terminals.length}`, {
       venueId,
@@ -252,6 +314,7 @@ export async function getOnlineTerminals(req: Request, res: Response) {
         name: t.name || `Terminal ${t.terminalId}`,
         isOnline: true,
         hasSocket: t.socketId !== null,
+        busy: busySet.has(t.terminalId),
         lastHeartbeat: t.lastHeartbeat.toISOString(),
         registeredAt: t.registeredAt.toISOString(),
       })),

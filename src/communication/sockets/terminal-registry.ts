@@ -22,8 +22,10 @@ interface TerminalEntry {
 /**
  * Normalize terminalId: strip AVQD- prefix and lowercase.
  * Single normalization point — all lookups and registrations go through this.
+ * Exported so the terminal-payment lock keys its per-terminal slot by the
+ * exact same normalized id the registry uses (AVQD-ABC and abc = one slot).
  */
-function normalizeTerminalId(terminalId: string): string {
+export function normalizeTerminalId(terminalId: string): string {
   return terminalId.replace(/^AVQD-/i, '').toLowerCase()
 }
 

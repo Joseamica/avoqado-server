@@ -108,4 +108,31 @@ export class TerminalBrandChangeBlocked extends AppError {
   }
 }
 
+/**
+ * Thrown when a charge is sent to a PAX terminal that is already processing
+ * another payment (terminal payment arbitration, Slice 0). A physical terminal
+ * runs ONE EMV transaction at a time, so a concurrent second request must be
+ * rejected fast — never silently emitted (which would double-charge).
+ *
+ * The mobile controller maps this to HTTP 409 with body
+ * `{ status: 'failed', code: 'TERMINAL_BUSY', errorMessage, blockingRequest }`.
+ * `status: 'failed'` is deliberate: old iOS/Desktop clients parse the body
+ * `status` field and already degrade `failed` safely; new clients branch on
+ * `code`/`blockingRequest` to offer "pick another terminal".
+ */
+export interface TerminalBusyBlockingRequest {
+  requestId: string
+  amountCents?: number
+  senderDevice?: string
+  ageSeconds: number
+}
+
+export class TerminalBusyError extends AppError {
+  public details: { blockingRequest: TerminalBusyBlockingRequest }
+  constructor(message: string, blockingRequest: TerminalBusyBlockingRequest) {
+    super(message, 409, true, 'TERMINAL_BUSY')
+    this.details = { blockingRequest }
+  }
+}
+
 export default AppError // Keep default export for the base class if used elsewhere

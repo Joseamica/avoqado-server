@@ -506,6 +506,56 @@ describe('Reservation Dashboard Service', () => {
 
       await expect(getReservationById(VENUE_ID, 'nonexistent')).rejects.toThrow(NotFoundError)
     })
+
+    // Regression — multi-service appointments store the lead service in
+    // productId and the full ordered list in productIds[] (scalar text[], not a
+    // relation). Before `attachServices`, only the lead `product` was returned
+    // so the 2nd service silently disappeared from the dashboard detail.
+    it('resolves the full ordered service list from productIds (multi-service)', async () => {
+      const mockRes = createMockReservation({
+        productId: 'p-baby',
+        productIds: ['p-baby', 'p-manipedi'],
+        product: { id: 'p-baby', name: 'Baby Boomer', price: new Prisma.Decimal(150) },
+      })
+      prismaMock.reservation.findFirst.mockResolvedValue(mockRes)
+      // findMany returns unordered — attachServices must re-order to productIds
+      prismaMock.product.findMany.mockResolvedValue([
+        { id: 'p-manipedi', name: 'Manicure + Pedicure + Spa', price: new Prisma.Decimal(800), duration: 70 },
+        { id: 'p-baby', name: 'Baby Boomer', price: new Prisma.Decimal(150), duration: 25 },
+      ] as any)
+
+      const result = await getReservationById(VENUE_ID, 'res-1')
+
+      expect(result.services.map(s => s.name)).toEqual(['Baby Boomer', 'Manicure + Pedicure + Spa'])
+      expect(result.services.map(s => s.duration)).toEqual([25, 70])
+      expect(prismaMock.product.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: { in: ['p-baby', 'p-manipedi'] } } }))
+    })
+
+    it('falls back to the single productId when productIds is empty (legacy single-service)', async () => {
+      const mockRes = createMockReservation({
+        productId: 'p-legacy',
+        product: { id: 'p-legacy', name: 'Corte', price: new Prisma.Decimal(200) },
+      })
+      prismaMock.reservation.findFirst.mockResolvedValue(mockRes)
+      prismaMock.product.findMany.mockResolvedValue([
+        { id: 'p-legacy', name: 'Corte', price: new Prisma.Decimal(200), duration: 30 },
+      ] as any)
+
+      const result = await getReservationById(VENUE_ID, 'res-1')
+
+      expect(result.services.map(s => s.name)).toEqual(['Corte'])
+      expect(prismaMock.product.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: { in: ['p-legacy'] } } }))
+    })
+
+    it('returns an empty service list for table-only reservations (no product lookup)', async () => {
+      const mockRes = createMockReservation() // productId null, no productIds
+      prismaMock.reservation.findFirst.mockResolvedValue(mockRes)
+
+      const result = await getReservationById(VENUE_ID, 'res-1')
+
+      expect(result.services).toEqual([])
+      expect(prismaMock.product.findMany).not.toHaveBeenCalled()
+    })
   })
 
   describe('getReservationByCancelSecret', () => {
@@ -1110,6 +1160,28 @@ describe('Reservation Dashboard Service', () => {
 
       expect(result.grouped!['staff-1']).toHaveLength(1)
       expect(result.grouped!['unassigned']).toHaveLength(1)
+    })
+
+    // Regression — the calendar must resolve the FULL service list per booking
+    // (multi-service appointments) in ONE batched product query, order preserved.
+    it('attaches per-reservation services with a single batched product query', async () => {
+      prismaMock.reservation.findMany.mockResolvedValue([
+        createMockReservation({ id: 'res-multi', productId: 'p-baby', productIds: ['p-baby', 'p-manipedi'] }),
+        createMockReservation({ id: 'res-single', productId: 'p-corte', productIds: [] }),
+      ])
+      prismaMock.product.findMany.mockResolvedValue([
+        { id: 'p-corte', name: 'Corte', price: new Prisma.Decimal(200), duration: 30 },
+        { id: 'p-manipedi', name: 'Manicure + Pedicure + Spa', price: new Prisma.Decimal(800), duration: 70 },
+        { id: 'p-baby', name: 'Baby Boomer', price: new Prisma.Decimal(150), duration: 25 },
+      ] as any)
+
+      const result = await getReservationsCalendar(VENUE_ID, new Date('2026-03-01'), new Date('2026-03-02'))
+
+      // ONE query for the whole page, not one per reservation
+      expect(prismaMock.product.findMany).toHaveBeenCalledTimes(1)
+      const [multi, single] = result.reservations as any[]
+      expect(multi.services.map((s: any) => s.name)).toEqual(['Baby Boomer', 'Manicure + Pedicure + Spa'])
+      expect(single.services.map((s: any) => s.name)).toEqual(['Corte'])
     })
   })
 

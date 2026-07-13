@@ -267,6 +267,7 @@ import * as bankReconciliationController from '../controllers/dashboard/bankReco
 import commissionRoutes from './dashboard/commission.routes'
 import cashOutRoutes from './dashboard/cash-out.routes'
 import reservationRoutes from './dashboard/reservation.routes'
+import printStationRoutes from './dashboard/printStation.routes'
 import classSessionRoutes from './dashboard/classSession.routes'
 import googleCalendarStatusRoutes from './dashboard/googleCalendarStatus.routes'
 // @temporary - Serialized inventory demo routes (delete after final implementation)
@@ -4075,6 +4076,8 @@ router.use('/venues/:venueId/referrals', authenticateTokenMiddleware, checkFeatu
 // Reservation / Booking System (permission-gated + plan-tier gated)
 // Plan-tier gate: Pro feature RESERVATIONS (grandfathered/demo venues bypass inside the middleware)
 router.use('/venues/:venueId/reservations', authenticateTokenMiddleware, checkFeatureAccess('RESERVATIONS'), reservationRoutes)
+// PRINT_STATIONS — feature gratis/core (sin checkFeatureAccess); permission-gated dentro del sub-router.
+router.use('/venues/:venueId/print-stations', authenticateTokenMiddleware, printStationRoutes)
 
 // Class Sessions (group classes / workshops) — part of the reservations/appointments product
 // (uses reservations:* permissions; attendees ARE reservations), so it shares the RESERVATIONS gate.

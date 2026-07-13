@@ -242,6 +242,11 @@ export const recordPaymentBodySchema = z.object({
       // Accepted as any string up to 64 chars to allow clients to use alternative
       // collision-resistant schemes (ULID, nanoid) if needed.
       idempotencyKey: z.string().min(8).max(64).optional(),
+      // Links this Payment to the POS→TPV arbitration request (the POS-generated
+      // requestId). When present, recording the Payment closes the arbitration
+      // row + frees the terminal slot in the SAME transaction. Optional/additive:
+      // TPV versions that don't send it fall back to the socket-result close.
+      terminalPaymentRequestId: z.string().min(8).max(64).optional(),
     })
     .refine(
       data => {

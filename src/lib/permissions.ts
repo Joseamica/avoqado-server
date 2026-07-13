@@ -256,6 +256,9 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // ===========================
   'payments:routing-read': ['payments:routing-read', 'payments:read'],
   'payments:routing-manage': ['payments:routing-manage', 'payments:routing-read', 'payments:read'],
+  // PRINT_STATIONS (impresoras, estaciones y ruteo de comandas — feature gratis/core)
+  'printers:read': ['printers:read'],
+  'printers:manage': ['printers:manage', 'printers:read'],
 
   // ===========================
   // ACCOUNTING - Capa A (estado de resultados, incluido para todos los venues)
@@ -659,6 +662,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'settlements:simulate',
     'accounting:read', // Capa A — estado de resultados (¿cuánto gané?), incluido
     'payments:routing-read', // MERCHANT_ROUTING_RULES: ver reglas de enrutamiento de merchants (editar = ADMIN+ vía payments:*)
+    'printers:read', // PRINT_STATIONS: ver impresoras, estaciones y ruteo de comandas
+    'printers:manage', // PRINT_STATIONS: configurar impresoras, estaciones y ruteo (operativo — MANAGER+)
     'menu:read',
     'menu:create',
     'menu:update',
@@ -781,6 +786,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'accounting:manage', // Capa B fiscal — catálogo de cuentas (editar/seed) — PREMIUM (bundle CFDI)
     'menu:*',
     'orders:*',
+    'printers:*', // PRINT_STATIONS: impresoras, estaciones y ruteo de comandas (feature gratis/core)
     'payments:*',
     'payment:create-manual', // Record payments received outside Avoqado (cash, external terminal, transfer)
     'payment-link:*', // Create / manage shareable payment links (Stripe Connect + Blumon)
@@ -887,6 +893,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'accounting:reconcile', // Conciliación bancaria (confirmar matches) — PRO
     'accounting:manage', // Capa B fiscal — catálogo de cuentas (editar/seed) — PREMIUM (bundle CFDI)
     'financialConnections:*', // Conectar/leer/desconectar cuentas bancarias del venue (self-connect)
+    'printers:*', // PRINT_STATIONS: impresoras, estaciones y ruteo de comandas (feature gratis/core)
     'commissions:*', // Commission system (full control including payout)
     'cash-out:*', // Cash Out (PlayTelecom same-day promoter commission) — full control
     'menu:*',
@@ -1370,6 +1377,7 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   menu: ['menu:read', 'menu:create', 'menu:update', 'menu:delete', 'menu:import'],
   orders: ['orders:read', 'orders:create', 'orders:update', 'orders:cancel', 'orders:comp', 'orders:void'],
   payments: ['payments:read', 'payments:create', 'payments:refund', 'payments:routing-read', 'payments:routing-manage'],
+  printers: ['printers:read', 'printers:manage'],
   // Singular `payment` namespace for admin-only, one-off payment actions.
   payment: ['payment:create-manual'],
   shifts: ['shifts:read', 'shifts:create', 'shifts:update', 'shifts:delete', 'shifts:close'],

@@ -517,6 +517,65 @@ const RESERVATION_INCLUDE = {
   },
 } as const
 
+interface ReservationService {
+  id: string
+  name: string
+  price: Prisma.Decimal | null
+  duration: number | null
+}
+
+type ServiceResolvable = { productId: string | null; productIds: string[] }
+
+/**
+ * The ORDERED product ids a reservation booked. Multi-service appointments
+ * (Square pattern) store the lead service in `productId` and the full ordered
+ * list in the `productIds` text[]; single-service/legacy rows only have
+ * `productId`. Returns [] for table-only reservations.
+ */
+function reservationServiceIds(r: ServiceResolvable): string[] {
+  return r.productIds?.length ? r.productIds : r.productId ? [r.productId] : []
+}
+
+/**
+ * Resolve the full ORDERED list of booked services for a reservation.
+ *
+ * `productIds` is a scalar text[], NOT a relation, so Prisma cannot `include`
+ * it. Without this the reservation views only ever surfaced the lead `product`,
+ * so a booking like "Baby Boomer + Manicure/Pedicure/Spa" looked like a single
+ * service and its 2nd service silently disappeared from the UI. We fetch the
+ * products here and attach them as `services`, preserving booking order.
+ */
+async function attachServices<T extends ServiceResolvable>(reservation: T) {
+  const [withServices] = await attachServicesMany([reservation])
+  return withServices
+}
+
+/**
+ * Batched `attachServices` for lists (calendar, etc.) — ONE product query for
+ * the whole page instead of one per reservation. Order is preserved per row.
+ */
+async function attachServicesMany<T extends ServiceResolvable>(reservations: T[]): Promise<(T & { services: ReservationService[] })[]> {
+  const allIds = new Set<string>()
+  for (const r of reservations) for (const id of reservationServiceIds(r)) allIds.add(id)
+
+  const products = allIds.size
+    ? await prisma.product.findMany({
+        where: { id: { in: [...allIds] } },
+        select: { id: true, name: true, price: true, duration: true },
+      })
+    : []
+  const byId = new Map(products.map(p => [p.id, p]))
+
+  return reservations.map(r => ({
+    ...r,
+    // Map back over the id list (not `products`) to keep booking order intact.
+    services: reservationServiceIds(r)
+      .map(id => byId.get(id))
+      .filter((p): p is NonNullable<typeof p> => Boolean(p))
+      .map(p => ({ id: p.id, name: p.name, price: p.price, duration: p.duration })),
+  }))
+}
+
 export async function getReservations(venueId: string, filters: ReservationFilters, page = 1, pageSize = 50) {
   const where: Prisma.ReservationWhereInput = { venueId }
 
@@ -570,7 +629,7 @@ export async function getReservationById(venueId: string, reservationId: string)
     include: RESERVATION_INCLUDE,
   })
   if (!reservation) throw new NotFoundError('Reservacion no encontrada')
-  return reservation
+  return attachServices(reservation)
 }
 
 export async function getReservationByCancelSecret(venueId: string, cancelSecret: string) {
@@ -1707,7 +1766,7 @@ export async function rescheduleClassReservation(args: {
 // ---- Calendar View ----
 
 export async function getReservationsCalendar(venueId: string, dateFrom: Date, dateTo: Date, groupBy?: 'table' | 'staff') {
-  const reservations = await prisma.reservation.findMany({
+  const rows = await prisma.reservation.findMany({
     where: {
       venueId,
       startsAt: { gte: dateFrom, lte: dateTo },
@@ -1716,6 +1775,9 @@ export async function getReservationsCalendar(venueId: string, dateFrom: Date, d
     include: RESERVATION_INCLUDE,
     orderBy: { startsAt: 'asc' },
   })
+  // Resolve the FULL service list per booking (multi-service appointments) in a
+  // single batched query so the calendar block can list every service.
+  const reservations = await attachServicesMany(rows)
 
   if (!groupBy) return { reservations }
 
