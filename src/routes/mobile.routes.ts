@@ -36,10 +36,12 @@ import * as measurementUnitMobileController from '../controllers/mobile/measurem
 import * as kdsMobileController from '../controllers/mobile/kds.mobile.controller'
 import * as tableMobileController from '../controllers/mobile/table.mobile.controller'
 import * as creditPackMobileController from '../controllers/mobile/creditPack.mobile.controller'
+import * as printMobileController from '../controllers/mobile/print.mobile.controller'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { recordFastPaymentParamsSchema, recordPaymentBodySchema } from '../schemas/tpv.schema'
+import { gatewayHeartbeatSchema, printConfigParamSchema, syncPrintJobsSchema } from '../schemas/mobile/print.mobile.schema'
 
 const router = Router()
 
@@ -1391,6 +1393,19 @@ router.post(
 )
 
 /**
+ * GET /api/v1/mobile/venues/:venueId/terminal-payment/:requestId
+ * Status of a terminal payment request — recovery after a dropped long-poll /
+ * timeout. Trichotomy: terminal status / IN_PROGRESS / 404 NOT_FOUND. Clients
+ * MUST call this before retrying a timed-out charge (never blind-retry money).
+ */
+router.get(
+  '/venues/:venueId/terminal-payment/:requestId',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  terminalPaymentMobileController.getTerminalPaymentStatus,
+)
+
+/**
  * GET /api/v1/mobile/venues/:venueId/terminals/online
  * List terminals currently connected via Socket.IO.
  */
@@ -2100,5 +2115,32 @@ router.put('/venues/:venueId/kds/orders/:id/status', authenticateTokenMiddleware
  * Mark KDS order as COMPLETED instantly.
  */
 router.post('/venues/:venueId/kds/orders/:id/bump', authenticateTokenMiddleware, kdsMobileController.bumpKdsOrder)
+
+// ============================================================================
+// PRINT STATIONS (PRINT_STATIONS) — routing config + gateway outbox replica
+// Feature gratis/core. print-config lo lee cualquiera que toma/rutea órdenes
+// (orders:read); la réplica del outbox la escribe el gateway (orders:update).
+// ============================================================================
+router.get(
+  '/venues/:venueId/print-config',
+  authenticateTokenMiddleware,
+  checkPermission('orders:read'),
+  validateRequest(printConfigParamSchema),
+  printMobileController.getPrintConfig,
+)
+router.post(
+  '/venues/:venueId/print-jobs/sync',
+  authenticateTokenMiddleware,
+  checkPermission('orders:update'),
+  validateRequest(syncPrintJobsSchema),
+  printMobileController.syncPrintJobs,
+)
+router.post(
+  '/venues/:venueId/print-gateway/heartbeat',
+  authenticateTokenMiddleware,
+  checkPermission('orders:read'),
+  validateRequest(gatewayHeartbeatSchema),
+  printMobileController.gatewayHeartbeat,
+)
 
 export default router

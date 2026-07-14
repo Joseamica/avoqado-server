@@ -17,6 +17,7 @@ interface EmailOptions {
   html?: string
   text?: string
   attachments?: EmailAttachment[]
+  headers?: Record<string, string>
 }
 
 interface InvitationEmailData {
@@ -317,6 +318,7 @@ class EmailService {
         subject: options.subject,
         html: options.html || undefined,
         text: options.text || 'Please view this email in an HTML-compatible email client.',
+        ...(options.headers && { headers: options.headers }),
         ...(options.attachments?.length && {
           attachments: options.attachments.map(a => ({
             filename: a.filename,
@@ -3138,6 +3140,10 @@ Servicios Tecnologicos Avo S.A. de C.V.
       }>
       dashboardUrl: string
       preferencesUrl: string
+      // Login-free one-click unsubscribe URL (token-based). Optional so callers
+      // that haven't wired it yet still compile; when present it powers the
+      // footer link + the List-Unsubscribe headers.
+      unsubscribeUrl?: string
     },
   ): Promise<boolean> {
     const now = new Date()
@@ -3248,7 +3254,11 @@ Servicios Tecnologicos Avo S.A. de C.V.
         Servicios Tecnologicos Avo S.A. de C.V.
       </p>
       <p style="margin: 0; font-size: 12px; color: #999;">
-        <a href="${data.preferencesUrl}" style="color: #666; text-decoration: underline;">Administra tus preferencias de notificaciones</a>
+        ${
+          data.unsubscribeUrl
+            ? `<a href="${data.unsubscribeUrl}" style="color: #666; text-decoration: underline;">Dejar de recibir estas alertas por correo</a> · `
+            : ''
+        }<a href="${data.preferencesUrl}" style="color: #666; text-decoration: underline;">Administra tus preferencias de notificaciones</a>
       </p>
     </div>
 
@@ -3264,7 +3274,7 @@ ${data.items.length} ingrediente(s) requieren tu atencion.
 ${data.items.map(i => `- ${i.name}: ${i.currentStock} ${i.unit} (minimo: ${i.reorderPoint} ${i.unit}) - ${i.isOutOfStock ? 'SIN STOCK' : 'STOCK BAJO'}`).join('\n')}
 
 Administrar inventario: ${data.dashboardUrl}
-
+${data.unsubscribeUrl ? `\nDejar de recibir estas alertas por correo: ${data.unsubscribeUrl}\n` : ''}
 ---
 Servicios Tecnologicos Avo S.A. de C.V.`
 
@@ -3273,6 +3283,14 @@ Servicios Tecnologicos Avo S.A. de C.V.`
       subject,
       html,
       text,
+      // RFC 8058 one-click unsubscribe (required by Gmail/Yahoo for bulk mail).
+      // Providers POST to the URL directly; the token authorizes it.
+      ...(data.unsubscribeUrl && {
+        headers: {
+          'List-Unsubscribe': `<${data.unsubscribeUrl}>`,
+          'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+        },
+      }),
     })
   }
 

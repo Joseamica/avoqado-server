@@ -19,6 +19,7 @@ import * as venueCheckoutController from '../controllers/public/venueCheckout.pu
 import { submitContact, submitLabsBrief } from '../controllers/public/landing.public.controller'
 import * as venueChatController from '../controllers/public/venueChat.public.controller'
 import * as tpvOrderPublicController from '../controllers/public/tpvOrder.public.controller'
+import { getUnsubscribePage, postUnsubscribe } from '../controllers/public/unsubscribe.public.controller'
 import { assignSerialsPublicSchema, rejectSpeiSchema } from '../schemas/public/tpvOrder.public.schema'
 import { validateRequest } from '../middlewares/validation'
 import { authenticateCustomer } from '../middlewares/customerAuth.middleware'
@@ -431,5 +432,14 @@ router.post(
   validateRequest(assignSerialsPublicSchema),
   tpvOrderPublicController.assignSerialsPublicHandler,
 )
+
+// ---- Public one-click email unsubscribe (token-based, no auth) ----
+// The signed token in `?token=…` (purpose 'unsub') proves authorization and is
+// verified inside the controller. GET renders a confirm page (never mutates —
+// email clients prefetch links); POST performs the unsubscribe and doubles as
+// the RFC 8058 List-Unsubscribe-Post one-click target for Gmail/Yahoo.
+const unsubscribePostLimit = rateLimit({ windowMs: 60_000, max: 20, standardHeaders: true, legacyHeaders: false })
+router.get('/unsubscribe', readLimit, getUnsubscribePage)
+router.post('/unsubscribe', unsubscribePostLimit, postUnsubscribe)
 
 export default router

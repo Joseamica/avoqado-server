@@ -14,7 +14,8 @@ import prisma from '../utils/prismaClient'
 import emailService from '../services/email.service'
 import socketManager from '../communication/sockets'
 import { NotificationChannel, NotificationPriority, NotificationType, Prisma, StaffRole, VenueStatus } from '@prisma/client'
-import { FRONTEND_URL } from '../config/env'
+import { FRONTEND_URL, BASE_URL } from '../config/env'
+import { signUnsubscribeToken } from '../utils/unsubscribeToken'
 import { runAutoReorderForVenue, parseAutoReorderConfig } from '../services/dashboard/autoReorder.service'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
@@ -259,14 +260,22 @@ export class NightlyLowStockJob {
 
           const dashboardUrl = `${FRONTEND_URL}/venues/${venue.slug}/inventory/raw-materials`
 
+          // Backend base URL for the login-free unsubscribe link (falls back to
+          // local dev). Prod sets BASE_URL to the api host.
+          const apiBaseUrl = BASE_URL || 'http://localhost:3000'
+
           // Send email to each recipient (with 500ms delay to respect Resend's 2/sec rate limit)
           for (const recipient of emailRecipients) {
             try {
+              // Per-recipient signed token → one-click unsubscribe tied to THIS
+              // staff+venue, regardless of which dashboard account they're in.
+              const unsubToken = signUnsubscribeToken({ staffId: recipient.id, venueId: venue.id, category: 'INVENTORY' })
               const sent = await emailService.sendLowStockDigestEmail(recipient.email, {
                 venueName: venue.name,
                 items: emailItems,
                 dashboardUrl,
                 preferencesUrl: `${FRONTEND_URL}/venues/${venue.slug}/notifications/preferences`,
+                unsubscribeUrl: `${apiBaseUrl}/api/v1/public/unsubscribe?token=${unsubToken}`,
               })
 
               if (sent) {
