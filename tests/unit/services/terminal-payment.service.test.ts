@@ -205,6 +205,38 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
     )
   })
 
+  it('cancelPayment scopes the row write by venueId (a requestId alone cannot touch another venue)', async () => {
+    const p1 = terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-SCOPE', requestId: 'REQ-S1' }))
+    await flush()
+
+    await terminalPaymentService.cancelPayment('T-SCOPE', 'REQ-S1', 'user cancel', 'venue-1')
+
+    expect(tpr().updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ requestId: 'REQ-S1', venueId: 'venue-1' }),
+        data: expect.objectContaining({ status: 'CANCEL_REQUESTED' }),
+      }),
+    )
+    await p1
+  })
+
+  it('cancelPayment still cancels the row when the terminal is OFFLINE (intent is not lost)', async () => {
+    // Returning early on an unreachable terminal used to leave the row holding the
+    // slot until expiresAt (5 min) while the POS had already cancelled and moved on.
+    const p1 = terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-OFF', requestId: 'REQ-OFF' }))
+    await flush()
+    mockedGetTerminal.mockReturnValue(null) // terminal dropped off after dispatch
+
+    const emitted = await terminalPaymentService.cancelPayment('T-OFF', 'REQ-OFF', 'user cancel', 'venue-1')
+
+    expect(emitted).toBe(false) // could not notify the terminal…
+    expect(tpr().updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'CANCEL_REQUESTED' }) }),
+    ) // …but the row IS cancelled
+    const result = await p1
+    expect(result.status).toBe('cancelled') // and the POS long-poll unblocks
+  })
+
   it('getPaymentStatus returns a pesos projection and enforces tenant isolation', async () => {
     tpr().findUnique.mockResolvedValueOnce({
       requestId: 'REQ-A',

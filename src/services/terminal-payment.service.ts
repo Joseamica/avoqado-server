@@ -679,32 +679,21 @@ class TerminalPaymentService {
    * already authorized, a later result wins → COMPLETED; the watchdog frees the
    * slot (→ CANCELLED) only after a short grace with no Payment.
    */
-  async cancelPayment(terminalId: string, requestId?: string, reason?: string): Promise<boolean> {
+  async cancelPayment(terminalId: string, requestId?: string, reason?: string, venueId?: string): Promise<boolean> {
     const terminalEntry = terminalRegistry.getTerminal(terminalId)
-    if (!terminalEntry?.socketId) {
-      logger.warn(`⚠️ [TerminalPayment] Cannot cancel - terminal not online`, { terminalId })
-      return false
-    }
 
-    const io = socketManager.getServer()
-    if (!io) {
-      return false
-    }
-
-    logger.info(`🚫 [TerminalPayment] Sending cancel to terminal`, { terminalId, requestId, reason })
-
-    io.to(terminalEntry.socketId).emit('terminal:payment_cancel', {
-      terminalId,
-      requestId, // TPV checks: if currentRequestId !== requestId, ignore cancel
-      reason: reason || 'Cancelado por el usuario',
-      timestamp: new Date().toISOString(),
-    })
+    // The cancel INTENT must be recorded even when the terminal is unreachable:
+    // returning early used to leave the row PENDING/SENT holding the slot until
+    // expiresAt (5 min) while the POS had already moved on. The row CAS + long-poll
+    // resolve run regardless; only the socket emit needs a live terminal. `venueId`
+    // scopes the write so a requestId alone can never touch another venue's row.
+    const emitted = await this.emitCancelToTerminal(terminalEntry?.socketId, terminalId, requestId, reason)
 
     if (requestId) {
       // Mark the durable row as cancel-requested (CAS, still holds the slot).
       try {
         await prisma.terminalPaymentRequest.updateMany({
-          where: { requestId, status: { in: IN_FLIGHT } },
+          where: { requestId, status: { in: IN_FLIGHT }, ...(venueId ? { venueId } : {}) },
           data: { status: TerminalPaymentRequestStatus.CANCEL_REQUESTED },
         })
       } catch (err) {
@@ -727,6 +716,30 @@ class TerminalPaymentService {
       }
     }
 
+    return emitted
+  }
+
+  /** Emit the cancel to the terminal. Returns false when it couldn't be delivered. */
+  private async emitCancelToTerminal(
+    socketId: string | null | undefined,
+    terminalId: string,
+    requestId?: string,
+    reason?: string,
+  ): Promise<boolean> {
+    if (!socketId) {
+      logger.warn(`⚠️ [TerminalPayment] Cannot notify terminal of cancel - not online (row still cancelled)`, { terminalId })
+      return false
+    }
+    const io = socketManager.getServer()
+    if (!io) return false
+
+    logger.info(`🚫 [TerminalPayment] Sending cancel to terminal`, { terminalId, requestId, reason })
+    io.to(socketId).emit('terminal:payment_cancel', {
+      terminalId,
+      requestId, // TPV checks: if currentRequestId !== requestId, ignore cancel
+      reason: reason || 'Cancelado por el usuario',
+      timestamp: new Date().toISOString(),
+    })
     return true
   }
 

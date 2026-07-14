@@ -211,6 +211,7 @@ export async function printReceiptOnTerminal(req: Request, res: Response) {
  */
 export async function cancelTerminalPayment(req: Request, res: Response) {
   try {
+    const { venueId } = req.params
     const { terminalId, requestId, reason } = req.body
 
     if (!terminalId) {
@@ -220,13 +221,26 @@ export async function cancelTerminalPayment(req: Request, res: Response) {
       })
     }
 
+    // Validate terminal belongs to this venue (registry normalizes AVQD- prefix).
+    // Mirrors sendTerminalPayment: without it, any authenticated user could cancel
+    // (and emit terminal:payment_cancel to) another venue's in-flight charge knowing
+    // only a device serial.
+    const terminal = terminalRegistry.getTerminal(terminalId)
+    if (terminal && terminal.venueId !== venueId) {
+      return res.status(403).json({
+        success: false,
+        message: 'La terminal no pertenece a este establecimiento',
+      })
+    }
+
     logger.info(`🚫 [API] Cancel terminal payment request`, {
+      venueId,
       terminalId,
       requestId,
       reason,
     })
 
-    const cancelled = await terminalPaymentService.cancelPayment(terminalId, requestId, reason)
+    const cancelled = await terminalPaymentService.cancelPayment(terminalId, requestId, reason, venueId)
 
     return res.json({
       success: cancelled,
