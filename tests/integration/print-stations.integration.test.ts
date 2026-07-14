@@ -94,7 +94,9 @@ describe('PRINT_STATIONS — DB invariants (real Postgres)', () => {
 
   // ── buildPrintConfig round-trips the venue's real config ──
   it('buildPrintConfig returns the venue printers, stations, routing + a stable non-empty version', async () => {
-    const printer = await prisma.printer.create({ data: { venueId: venue1, name: 'Impresora Cocina', connectionType: 'NETWORK', address: '192.168.1.50:9100' } })
+    const printer = await prisma.printer.create({
+      data: { venueId: venue1, name: 'Impresora Cocina', connectionType: 'NETWORK', address: '192.168.1.50:9100' },
+    })
     const station = await createStation(venue1, { name: 'Cocina', printerId: printer.id, isDefault: true } as any)
     await assignRouting(venue1, { categories: [{ id: categoryId, printStationId: station.id }] } as any)
 
@@ -118,7 +120,10 @@ describe('PRINT_STATIONS — DB invariants (real Postgres)', () => {
   // ── FK SetNull cascades ──
   it('deleting a station NULLs the category/product routing that pointed to it (FK SetNull)', async () => {
     const station = await createStation(venue1, { name: 'Barra' } as any)
-    await assignRouting(venue1, { categories: [{ id: categoryId, printStationId: station.id }], products: [{ id: productId, printStationId: station.id }] } as any)
+    await assignRouting(venue1, {
+      categories: [{ id: categoryId, printStationId: station.id }],
+      products: [{ id: productId, printStationId: station.id }],
+    } as any)
     expect((await prisma.menuCategory.findUnique({ where: { id: categoryId } }))?.printStationId).toBe(station.id)
 
     await deleteStation(venue1, station.id)

@@ -120,6 +120,20 @@ describe('printRouting.engine', () => {
       expect(plans[0].lines).toHaveLength(3)
     })
 
+    it('empty-string productId is name-keyed (parity with Kotlin), so two blank-id products do NOT merge', () => {
+      // Anti-drift edge case: '' must behave like absent (name-keyed), NOT collapse to a single 'id:' bucket.
+      const plans = buildTicketPlans(
+        [
+          item({ orderItemId: 'a', productId: '', productName: 'A', categoryStationId: COCINA }),
+          item({ orderItemId: 'b', productId: '', productName: 'B', categoryStationId: COCINA }),
+        ],
+        cfg(),
+      )
+      expect(plans).toHaveLength(1)
+      expect(plans[0].lines).toHaveLength(2) // A and B stay separate, not merged under one key
+      expect(plans[0].lines.map(l => l.productName)).toEqual(['A', 'B'])
+    })
+
     it('treats modifier order as insignificant (same set consolidates) and sorts them deterministically', () => {
       const plans = buildTicketPlans(
         [

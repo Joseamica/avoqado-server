@@ -17,6 +17,9 @@ export const printConfigParamSchema = z.object({
 export const syncPrintJobsSchema = z.object({
   body: z
     .object({
+      // Identidad del gateway que replica: el server solo acepta el escritor DESIGNADO del venue
+      // (simetría con el heartbeat) — un token con orders:update NO basta.
+      terminalId: z.string().min(1, 'El dispositivo (gateway) es requerido').max(120, 'Máximo 120 caracteres'),
       jobs: z
         .array(
           z

@@ -16,12 +16,31 @@ import { SocketEventType } from '../../communication/sockets/types'
 import { buildPrintConfig } from '../printing/printConfig.service'
 import type { GatewayHeartbeatInput, SyncPrintJobsInput } from '../../schemas/mobile/print.mobile.schema'
 
+// Rank de PrintJob.status por avance del ciclo de vida. La réplica SOLO avanza: un re-sync
+// fuera de orden del outbox (el gateway bufferea) nunca regresa un estado terminal (DONE→QUEUED),
+// así la vista de auditoría/alertas es fiable sin importar el orden de entrega.
+const STATUS_RANK: Record<string, number> = {
+  QUEUED: 0,
+  SENT: 1,
+  UNCERTAIN: 1,
+  FAILED: 2,
+  DONE: 3,
+  OPERATOR_CONFIRMED: 4,
+}
+
 export async function getPrintConfig(venueId: string) {
   // Venue sin estaciones ⇒ stations:[] ⇒ el POS se comporta idéntico a hoy.
   return buildPrintConfig(venueId)
 }
 
 export async function syncPrintJobs(venueId: string, input: SyncPrintJobsInput) {
+  // Solo el gateway DESIGNADO del venue puede replicar su outbox (simetría con gatewayHeartbeat):
+  // orders:update NO basta. Evita que un WAITER/KITCHEN/CASHIER contamine la réplica de auditoría o
+  // dispare alertas PRINT_JOB_FAILED falsas desde un dispositivo que no es el gateway.
+  const gateway = await prisma.printGateway.findUnique({ where: { venueId }, select: { terminalId: true } })
+  const registered = !!gateway && gateway.terminalId === input.terminalId
+  if (!registered) return { upserted: 0, errors: 0, newlyFailed: 0, registered: false }
+
   // Solo aceptar station/printer que pertenezcan a este venue (defensa multi-tenant;
   // el job SIEMPRE queda scoped al venueId autenticado, los ids ajenos se anulan).
   const [stations, printers] = await Promise.all([
@@ -41,21 +60,24 @@ export async function syncPrintJobs(venueId: string, input: SyncPrintJobsInput) 
       // Resolve SIEMPRE scoped por venueId (nunca toca el job de otro venue aunque el eventId colisione).
       const existing = await prisma.printJob.findFirst({
         where: { venueId, eventId: job.eventId, reason: job.reason, seq: job.seq },
-        select: { id: true, status: true },
+        select: { id: true, status: true, attempts: true },
       })
       if (existing) {
+        // La réplica SOLO avanza: ignora un status más viejo que el persistido (re-sync fuera de orden
+        // del outbox no debe regresar DONE→QUEUED). attempts es monótono no-decreciente.
+        const advancing = (STATUS_RANK[job.status] ?? 0) >= (STATUS_RANK[existing.status] ?? 0)
         await prisma.printJob.update({
           where: { id: existing.id },
           data: {
-            status: job.status,
-            attempts: job.attempts ?? undefined,
-            // null explícito limpia un error viejo al recuperarse; undefined lo deja intacto.
-            error: job.error === undefined ? undefined : job.error,
+            status: advancing ? job.status : undefined,
+            attempts: Math.max(existing.attempts ?? 0, job.attempts ?? 0),
+            // Solo al avanzar: null explícito limpia un error viejo al recuperarse; undefined lo deja intacto.
+            error: advancing ? (job.error === undefined ? undefined : job.error) : undefined,
             stationId,
             printerId,
           },
         })
-        if (job.status === 'FAILED' && existing.status !== 'FAILED') newlyFailed++
+        if (advancing && job.status === 'FAILED' && existing.status !== 'FAILED') newlyFailed++
       } else {
         await prisma.printJob.create({
           data: {
@@ -88,7 +110,7 @@ export async function syncPrintJobs(venueId: string, input: SyncPrintJobsInput) 
   }
 
   if (newlyFailed > 0) alertPrintJobsFailed(venueId, newlyFailed)
-  return { upserted, errors, newlyFailed }
+  return { upserted, errors, newlyFailed, registered: true }
 }
 
 export async function gatewayHeartbeat(venueId: string, input: GatewayHeartbeatInput) {

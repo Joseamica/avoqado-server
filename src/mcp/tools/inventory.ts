@@ -528,5 +528,4 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
       })
     },
   )
-
 }

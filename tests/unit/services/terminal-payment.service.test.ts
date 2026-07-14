@@ -64,7 +64,13 @@ beforeEach(() => {
 
   mockedGetTerminal.mockImplementation((id: string) => {
     const normalized = id.replace(/^AVQD-/i, '').toLowerCase()
-    return { socketId: `sock-${normalized}`, venueId: 'venue-1', terminalId: normalized, registeredAt: new Date(), lastHeartbeat: new Date() }
+    return {
+      socketId: `sock-${normalized}`,
+      venueId: 'venue-1',
+      terminalId: normalized,
+      registeredAt: new Date(),
+      lastHeartbeat: new Date(),
+    }
   })
 
   // Durable-row mock defaults: INSERT succeeds, nothing pre-existing, CAS updates 1 row.
@@ -123,7 +129,13 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
 
   it('same requestId still in flight → busy (no double emit)', async () => {
     tpr().create.mockRejectedValueOnce(P2002)
-    tpr().findUnique.mockResolvedValueOnce({ requestId: 'REQ-A', status: 'PENDING', amountCents: 10000, senderDevice: null, createdAt: new Date() })
+    tpr().findUnique.mockResolvedValueOnce({
+      requestId: 'REQ-A',
+      status: 'PENDING',
+      amountCents: 10000,
+      senderDevice: null,
+      createdAt: new Date(),
+    })
 
     await expect(
       terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-DUP', requestId: 'REQ-A' })),
@@ -144,7 +156,9 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
 
     await flush() // let the fire-and-forget closeRow run
     expect(tpr().updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ requestId: 'REQ-1', status: { in: expect.arrayContaining(['PENDING']) } }) }),
+      expect.objectContaining({
+        where: expect.objectContaining({ requestId: 'REQ-1', status: { in: expect.arrayContaining(['PENDING']) } }),
+      }),
     )
   })
 
@@ -152,7 +166,13 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
     process.env.TERMINAL_PAYMENT_LOCK_ENABLED = 'false'
     tpr().create.mockRejectedValueOnce(P2002)
     tpr().findUnique.mockResolvedValueOnce(null)
-    tpr().findFirst.mockResolvedValueOnce({ requestId: 'REQ-A', amountCents: 10000, senderDevice: null, createdAt: new Date(), status: 'PENDING' })
+    tpr().findFirst.mockResolvedValueOnce({
+      requestId: 'REQ-A',
+      amountCents: 10000,
+      senderDevice: null,
+      createdAt: new Date(),
+      status: 'PENDING',
+    })
 
     const p1 = terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-FLAG', requestId: 'REQ-B' }))
     await flush()
@@ -206,7 +226,14 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
     expect(status?.status).toBe('COMPLETED')
 
     // Wrong venue → null (tenant isolation)
-    tpr().findUnique.mockResolvedValueOnce({ requestId: 'REQ-A', venueId: 'venue-1', amountCents: 1, tipCents: 0, createdAt: new Date(), updatedAt: new Date() })
+    tpr().findUnique.mockResolvedValueOnce({
+      requestId: 'REQ-A',
+      venueId: 'venue-1',
+      amountCents: 1,
+      tipCents: 0,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    })
     expect(await terminalPaymentService.getPaymentStatus('REQ-A', 'venue-OTHER')).toBeNull()
   })
 })
@@ -216,7 +243,15 @@ describe('TerminalPaymentService — watchdog reconcile (Slice 1)', () => {
 
   it('a stale row whose order now has a Payment → COMPLETED (late)', async () => {
     tpr().findMany.mockResolvedValueOnce([
-      { id: 'row-1', requestId: 'REQ-A', venueId: 'venue-1', terminalId: 'abc', orderId: 'o1', status: 'PENDING', createdAt: new Date(now.getTime() - 400_000) },
+      {
+        id: 'row-1',
+        requestId: 'REQ-A',
+        venueId: 'venue-1',
+        terminalId: 'abc',
+        orderId: 'o1',
+        status: 'PENDING',
+        createdAt: new Date(now.getTime() - 400_000),
+      },
     ])
     prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-1' })
 
@@ -231,7 +266,15 @@ describe('TerminalPaymentService — watchdog reconcile (Slice 1)', () => {
     const logger = require('@/config/logger').default
     const errSpy = jest.spyOn(logger, 'error')
     tpr().findMany.mockResolvedValueOnce([
-      { id: 'row-2', requestId: 'REQ-B', venueId: 'venue-1', terminalId: 'abc', orderId: null, status: 'PENDING', createdAt: new Date(now.getTime() - 400_000) },
+      {
+        id: 'row-2',
+        requestId: 'REQ-B',
+        venueId: 'venue-1',
+        terminalId: 'abc',
+        orderId: null,
+        status: 'PENDING',
+        createdAt: new Date(now.getTime() - 400_000),
+      },
     ])
     prismaMock.payment.findFirst.mockResolvedValue(null)
 
@@ -259,9 +302,9 @@ describe('TerminalPaymentService — regression (existing behavior intact)', () 
 
   it('still throws when the terminal is not connected, and never writes a row', async () => {
     mockedGetTerminal.mockReturnValueOnce(null)
-    await expect(
-      terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-GONE', requestId: 'REQ-X' })),
-    ).rejects.toThrow('no está conectada')
+    await expect(terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-GONE', requestId: 'REQ-X' }))).rejects.toThrow(
+      'no está conectada',
+    )
     expect(tpr().create).not.toHaveBeenCalled()
   })
 })
