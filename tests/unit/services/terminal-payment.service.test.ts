@@ -353,3 +353,50 @@ describe('TerminalPaymentService — regression (existing behavior intact)', () 
     expect(tpr().create).not.toHaveBeenCalled()
   })
 })
+
+describe('TerminalPaymentService — closeRowFromPaymentTx (money moved beats a prior close)', () => {
+  const txWith = (status: string) =>
+    ({
+      terminalPaymentRequest: {
+        findUnique: jest.fn().mockResolvedValue({ status }),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
+    }) as any
+
+  it('reconciles an already-CANCELLED row to COMPLETED (a recorded Payment is money-moved ground truth) and alerts 🚨', async () => {
+    const logger = require('@/config/logger').default
+    const errSpy = jest.spyOn(logger, 'error')
+    const tx = txWith('CANCELLED')
+
+    await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-Z', 'pay-late')
+
+    expect(tx.terminalPaymentRequest.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { requestId: 'REQ-Z', status: { not: 'COMPLETED' } },
+        data: expect.objectContaining({ status: 'COMPLETED', paymentId: 'pay-late', lateResult: true }),
+      }),
+    )
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('🚨 [Terminal-payment]'), expect.any(Object))
+    errSpy.mockRestore()
+  })
+
+  it('normal in-flight close (PENDING → COMPLETED) sets lateResult=false and does NOT alert', async () => {
+    const logger = require('@/config/logger').default
+    const errSpy = jest.spyOn(logger, 'error')
+    const tx = txWith('PENDING')
+
+    await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-P', 'pay-1')
+
+    expect(tx.terminalPaymentRequest.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'COMPLETED', lateResult: false }) }),
+    )
+    expect(errSpy).not.toHaveBeenCalledWith(expect.stringContaining('🚨 [Terminal-payment]'), expect.any(Object))
+    errSpy.mockRestore()
+  })
+
+  it('is a no-op on an already-COMPLETED row (idempotent — never clobbers the stored paymentId)', async () => {
+    const tx = txWith('COMPLETED')
+    await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-DONE', 'pay-2')
+    expect(tx.terminalPaymentRequest.updateMany).not.toHaveBeenCalled()
+  })
+})

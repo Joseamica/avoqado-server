@@ -226,6 +226,14 @@ class TerminalPaymentService {
       throw new Error(`La terminal ${terminalId} está registrada pero no tiene conexión de socket. Reinicia la app de la terminal.`)
     }
 
+    // NOTE: a registry socketId can be STALE (terminal dropped ungracefully; the HTTP
+    // heartbeat preserves the old id — terminal-registry.ts). The emit below is
+    // fire-and-forget, so a dead socket silently no-ops → the POS hangs the full 5 min →
+    // watchdog parks the row UNKNOWN → the terminal is stuck-busy until manual reconcile.
+    // The real fix is emit-with-ack + timeout (covers BOTH a fully-gone socket and a
+    // half-open zombie), version-gated per the arbitration spec — deliberately NOT a
+    // pre-INSERT liveness probe, which misses the half-open case we actually observe.
+
     // Use client-provided requestId if available, otherwise generate one
     const requestId = request.requestId || uuidv4()
     const lockKey = terminalEntry.terminalId // registry stores the normalized id
@@ -432,10 +440,40 @@ class TerminalPaymentService {
    */
   async closeRowFromPaymentTx(tx: Prisma.TransactionClient, requestId: string, paymentId: string): Promise<void> {
     try {
-      await tx.terminalPaymentRequest.updateMany({
-        where: { requestId, status: { in: [...IN_FLIGHT, TerminalPaymentRequestStatus.TIMED_OUT, TerminalPaymentRequestStatus.UNKNOWN] } },
-        data: { status: TerminalPaymentRequestStatus.COMPLETED, paymentId, lateResult: false },
+      // A recorded Payment is GROUND TRUTH that money moved — it beats any prior
+      // cancel/fail/timeout close. Reconcile ANY non-COMPLETED row to COMPLETED so the
+      // status endpoint can NEVER report cancelled/failed for a charge that actually
+      // landed (which would invite a cashier re-charge → double charge). This closes the
+      // window where a POS-cancelled row is moved to CANCELLED by the watchdog (30s grace)
+      // BEFORE the TPV records the Payment (AngelPay records "minutes later").
+      // Idempotent: an already-COMPLETED row is left untouched (never clobber its paymentId).
+      const before = await tx.terminalPaymentRequest.findUnique({
+        where: { requestId },
+        select: { status: true },
       })
+      if (!before || before.status === TerminalPaymentRequestStatus.COMPLETED) return
+
+      // `lateResult` = this row had already been closed/timed-out when the money truth
+      // arrived (reopened), vs a normal in-flight close.
+      const reopened = !IN_FLIGHT.includes(before.status)
+      await tx.terminalPaymentRequest.updateMany({
+        where: { requestId, status: { not: TerminalPaymentRequestStatus.COMPLETED } },
+        data: { status: TerminalPaymentRequestStatus.COMPLETED, paymentId, lateResult: reopened },
+      })
+
+      // If we had already CLOSED this row as cancelled/failed, the charge went through
+      // DESPITE that close — reconciled to COMPLETED here, but a human must know a
+      // "cancelled/failed" attempt actually took money. 🚨 = the stable Better Stack token.
+      if (before.status === TerminalPaymentRequestStatus.CANCELLED || before.status === TerminalPaymentRequestStatus.FAILED) {
+        logger.error(
+          `🚨 [Terminal-payment] Payment recorded for an already-${before.status} request — reconciled to COMPLETED (money moved despite close)`,
+          {
+            requestId,
+            paymentId,
+            priorStatus: before.status,
+          },
+        )
+      }
     } catch (err) {
       logger.error(`❌ [TerminalPayment] closeRowFromPaymentTx failed (non-fatal)`, {
         requestId,
