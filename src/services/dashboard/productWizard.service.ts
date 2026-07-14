@@ -29,6 +29,8 @@ export interface WizardStep1Data {
   // Class-specific (CLASS)
   maxParticipants?: number
   layoutConfig?: Record<string, unknown> | null
+  // Estación de impresión (ruteo de comandas)
+  printStationId?: string | null
 }
 
 export interface WizardStep2Data {
@@ -91,6 +93,7 @@ export async function createProductStep1(venueId: string, data: WizardStep1Data)
       data: {
         venueId,
         categoryId: data.categoryId,
+        printStationId: data.printStationId ?? null,
         name: data.name,
         sku: providedSku && providedSku.length > 0 ? providedSku : `SKU-${Date.now()}`,
         gtin: providedGtin && providedGtin.length > 0 ? providedGtin : undefined,

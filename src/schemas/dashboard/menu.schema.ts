@@ -224,6 +224,9 @@ const ProductBodyBase = z.object({
     .optional()
     .nullable(),
   objetoImp: z.enum(['01', '02', '03', '04'], { invalid_type_error: 'ObjetoImp inválido' }).optional(),
+
+  // Estación de impresión (ruteo de comandas)
+  printStationId: z.string().min(1, 'La estación es requerida').nullable().optional(),
 })
 
 const nonInventoriableRefine = <T extends { type?: string; trackInventory?: boolean }>(data: T) => {

@@ -448,6 +448,68 @@ export async function updateNotificationPreferences(
   }
 }
 
+export interface NotificationPreferenceUpdate {
+  type: NotificationType
+  enabled?: boolean
+  channels?: NotificationChannel[]
+  priority?: NotificationPriority
+  quietStart?: string
+  quietEnd?: string
+}
+
+/**
+ * Atomically update MANY notification preferences for a user in a single
+ * transaction (all-or-nothing).
+ *
+ * The dashboard "master channel" toggle (turn Email/Web on or off for every
+ * notification type at once) used to fire one independent PUT per type via
+ * Promise.all. Any single transient failure left that type without a persisted
+ * row, so its channel was re-derived from the hardcoded default (which for ~10
+ * types includes EMAIL) and the master toggle bounced back ON with a lower
+ * count — the "had to disable it 3 times" bug. Applying every change in ONE
+ * transaction removes the partial-failure window: either all rows persist or
+ * none do, and the derived toggle flips in a single step.
+ */
+export async function updateManyNotificationPreferences(
+  staffId: string,
+  venueId: string | null,
+  updates: NotificationPreferenceUpdate[],
+): Promise<NotificationPreference[]> {
+  if (updates.length === 0) return []
+
+  return await prisma.$transaction(
+    async tx => {
+      const results: NotificationPreference[] = []
+      for (const { type, ...data } of updates) {
+        const existing = await tx.notificationPreference.findFirst({
+          where: { staffId, venueId, type },
+        })
+
+        if (existing) {
+          results.push(
+            await tx.notificationPreference.update({
+              where: { id: existing.id },
+              data,
+            }),
+          )
+        } else {
+          results.push(
+            await tx.notificationPreference.create({
+              data: { staffId, venueId, type, ...data },
+            }),
+          )
+        }
+      }
+      return results
+    },
+    // The loop does up to ~2 round-trips per type (schema caps the batch at 100).
+    // Give it a generous ceiling so a slow DB can't trip Prisma's default 5s
+    // interactive-transaction timeout — a rollback here would persist NOTHING and
+    // re-create the exact "toggle bounces back" symptom this fix removes.
+    { timeout: 20000, maxWait: 10000 },
+  )
+}
+
 /**
  * Get all preferences for a user
  */

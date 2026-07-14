@@ -492,14 +492,28 @@ class TerminalPaymentService {
     let cancelled = 0
 
     for (const row of stale) {
-      // Try to reconcile against a recorded Payment for the same order.
-      const payment = row.orderId
-        ? await prisma.payment.findFirst({
-            where: { orderId: row.orderId, venueId: row.venueId },
+      // Reconcile ONLY against a Payment that plausibly belongs to THIS request; otherwise fall
+      // through to UNKNOWN and HOLD the slot (never free blind → the double-charge safeguard).
+      // Two guards, because an order legitimately carries several Payments (split/partial tender):
+      //   1) createdAt >= row.createdAt — a payment for THIS request cannot predate the request row,
+      //      so an unrelated PRIOR cash/split payment on the same order is never matched.
+      //   2) not already claimed by another TerminalPaymentRequest.paymentId (soft ref, no FK) —
+      //      so one payment can't reconcile (and free) multiple stale requests.
+      let payment: { id: string } | null = null
+      if (row.orderId) {
+        const candidate = await prisma.payment.findFirst({
+          where: { orderId: row.orderId, venueId: row.venueId, createdAt: { gte: row.createdAt } },
+          select: { id: true },
+          orderBy: { createdAt: 'desc' },
+        })
+        if (candidate) {
+          const claimedByAnother = await prisma.terminalPaymentRequest.findFirst({
+            where: { paymentId: candidate.id, id: { not: row.id } },
             select: { id: true },
-            orderBy: { createdAt: 'desc' },
           })
-        : null
+          if (!claimedByAnother) payment = candidate
+        }
+      }
 
       if (payment) {
         const r = await prisma.terminalPaymentRequest.updateMany({

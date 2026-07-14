@@ -50,7 +50,7 @@ const getNotificationsSchema = z.object({
   endDate: z.coerce.date().optional(),
 })
 
-const updatePreferencesSchema = z.object({
+const preferenceUpdateSchema = z.object({
   type: z.nativeEnum(NotificationType),
   enabled: z.boolean().optional(),
   channels: z.array(z.nativeEnum(NotificationChannel)).optional(),
@@ -63,6 +63,14 @@ const updatePreferencesSchema = z.object({
     .string()
     .regex(/^([01]?[0-9]|2[0-3]):[0-5][0-9]$/)
     .optional(),
+})
+
+const updatePreferencesSchema = preferenceUpdateSchema
+
+// Bulk update: apply many per-type preference changes atomically in one request.
+// Backs the dashboard "master channel" toggle (Email/Web on/off for every type).
+const updatePreferencesBulkSchema = z.object({
+  preferences: z.array(preferenceUpdateSchema).min(1).max(100),
 })
 
 const bulkNotificationSchema = z.object({
@@ -227,6 +235,29 @@ export const updatePreferences = asyncHandler(async (req: AuthenticatedRequest, 
   const preference = await notificationService.updateNotificationPreferences(userId, venueId || null, validatedData.type, validatedData)
 
   return res.json(formatApiResponse(preference, 'Notification preferences updated successfully'))
+})
+
+/**
+ * Atomically update MANY notification preferences at once
+ * PUT /api/v1/dashboard/notifications/preferences/bulk
+ *
+ * Applies all changes in a single transaction (all-or-nothing) so the dashboard
+ * master channel toggle can flip Email/Web for every type without the partial-
+ * failure window that made it "stick" on after a refresh.
+ */
+export const updatePreferencesBulk = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+  const userId = req.authContext?.userId
+  const venueId = req.headers['x-venue-id'] as string
+
+  if (!userId) {
+    throw new BadRequestError('User ID is required')
+  }
+
+  const { preferences } = updatePreferencesBulkSchema.parse(req.body)
+
+  const updated = await notificationService.updateManyNotificationPreferences(userId, venueId || null, preferences)
+
+  return res.json(formatApiResponse(updated, 'Notification preferences updated successfully'))
 })
 
 /**

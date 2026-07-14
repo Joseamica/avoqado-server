@@ -80,6 +80,13 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
   }
   // If data.parentId is null or undefined, it's omitted, Prisma won't try to set it to null.
 
+  // Estación de impresión (ruteo de comandas) — relation field, not a raw scalar
+  // (MenuCategoryCreateInput is the "checked" Prisma input, so the FK must be set
+  // via the relation object, same as `parent` above).
+  if (data.printStationId) {
+    createData.printStation = { connect: { id: data.printStationId } }
+  }
+
   // Handle availableDays specifically for null case
   if (data.availableDays === null) {
     createData.availableDays = undefined // Treat null as 'not set' for create
@@ -248,6 +255,17 @@ export async function updateMenuCategory(venueId: string, categoryId: string, da
   // Campos fiscales SAT (CFDI 4.0) — defaults para productos de la categoría
   if ('defaultSatProductKey' in data) updateData.defaultSatProductKey = data.defaultSatProductKey ?? null
   if ('defaultSatUnitKey' in data) updateData.defaultSatUnitKey = data.defaultSatUnitKey ?? null
+
+  // Estación de impresión (ruteo de comandas) — relation field, not a raw scalar
+  // (MenuCategoryUpdateInput is the "checked" Prisma input, so the FK must be set
+  // via the relation object, same as `parent` below).
+  if ('printStationId' in data) {
+    if (data.printStationId === null) {
+      updateData.printStation = { disconnect: true }
+    } else if (typeof data.printStationId === 'string') {
+      updateData.printStation = { connect: { id: data.printStationId } }
+    }
+  }
 
   // Handle parentId explicitly
   if ('parentId' in data) {

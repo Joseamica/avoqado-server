@@ -70,6 +70,9 @@ export const CreateMenuCategorySchema = z.object({
       .max(20, 'La clave de unidad SAT no puede exceder 20 caracteres')
       .optional()
       .nullable(),
+
+    // Estación de impresión (ruteo de comandas)
+    printStationId: z.string().min(1, 'La estación es requerida').nullable().optional(),
   }),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),

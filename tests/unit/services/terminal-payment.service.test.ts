@@ -284,6 +284,51 @@ describe('TerminalPaymentService — watchdog reconcile (Slice 1)', () => {
     expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('🚨 [Terminal-payment watchdog]'), expect.any(Object))
     errSpy.mockRestore()
   })
+
+  it('only reconciles a Payment that does NOT predate the request row (createdAt >= row.createdAt)', async () => {
+    // A payment for THIS request cannot exist before the request row was created; the query
+    // must carry that temporal filter so an unrelated PRIOR cash/split payment is excluded.
+    const rowCreatedAt = new Date(now.getTime() - 200_000)
+    tpr().findMany.mockResolvedValueOnce([
+      { id: 'row-1', requestId: 'REQ-A', venueId: 'venue-1', terminalId: 'abc', orderId: 'o1', status: 'PENDING', createdAt: rowCreatedAt },
+    ])
+    prismaMock.payment.findFirst.mockResolvedValueOnce(null) // DB filter leaves no qualifying payment
+
+    const summary = await terminalPaymentService.reconcileStaleRequests(now)
+    expect(prismaMock.payment.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ orderId: 'o1', venueId: 'venue-1', createdAt: { gte: rowCreatedAt } }) }),
+    )
+    expect(summary.completed).toBe(0)
+    expect(summary.unknown).toBe(1) // no qualifying payment → HELD, never falsely completed
+  })
+
+  it('does NOT complete against a Payment already claimed by ANOTHER request → UNKNOWN (never free blind)', async () => {
+    // Split/multi-card orders record several payments; a payment already linked to a different
+    // terminal request is not ours. Stealing it would free the slot on a mis-linked payment.
+    const rowCreatedAt = new Date(now.getTime() - 400_000)
+    tpr().findMany.mockResolvedValueOnce([
+      {
+        id: 'row-stale',
+        requestId: 'REQ-STALE',
+        venueId: 'venue-1',
+        terminalId: 'abc',
+        orderId: 'o1',
+        status: 'PENDING',
+        createdAt: rowCreatedAt,
+      },
+    ])
+    prismaMock.payment.findFirst.mockResolvedValueOnce({ id: 'pay-other' }) // a payment exists on the order…
+    tpr().findFirst.mockResolvedValueOnce({ id: 'row-owner' }) // …but it belongs to a DIFFERENT request
+
+    const summary = await terminalPaymentService.reconcileStaleRequests(now)
+    expect(prismaMock.terminalPaymentRequest.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ paymentId: 'pay-other', id: { not: 'row-stale' } }) }),
+    )
+    expect(summary.completed).toBe(0)
+    expect(tpr().updateMany).not.toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'COMPLETED' }) }))
+    expect(summary.unknown).toBe(1)
+    expect(tpr().updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: 'UNKNOWN' }) }))
+  })
 })
 
 describe('TerminalPaymentService — regression (existing behavior intact)', () => {

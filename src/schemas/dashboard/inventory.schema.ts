@@ -714,6 +714,8 @@ export const ProductWizardStep1Schema = z.object({
     // GTIN optional — Global Trade Item Number (UPC/EAN barcode).
     sku: z.string().max(64).optional(),
     gtin: z.string().max(32).optional(),
+    // Estación de impresión (ruteo de comandas)
+    printStationId: z.string().min(1, 'La estación es requerida').nullable().optional(),
   }),
 })
 
@@ -807,6 +809,8 @@ export const CreateProductWithInventorySchema = z.object({
         .optional(),
       duration: z.number().int().min(1).max(1440).optional(),
       maxParticipants: z.number().int().min(1).optional(),
+      // Estación de impresión (ruteo de comandas)
+      printStationId: z.string().min(1, 'La estación es requerida').nullable().optional(),
       layoutConfig: z
         .object({
           iconType: z.enum(['circle', 'bike', 'mat', 'reformer', 'bed', 'chair', 'generic']),

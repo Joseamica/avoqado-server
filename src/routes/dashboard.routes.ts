@@ -7720,6 +7720,39 @@ router.put('/notifications/preferences', authenticateTokenMiddleware, notificati
 
 /**
  * @openapi
+ * /api/v1/dashboard/notifications/preferences/bulk:
+ *   put:
+ *     tags: [Notifications]
+ *     summary: Atomically update many notification preferences at once
+ *     description: Applies all per-type preference changes in a single transaction (all-or-nothing). Backs the dashboard master channel toggle.
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               preferences:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     type: { type: string }
+ *                     enabled: { type: boolean }
+ *                     channels: { type: array, items: { type: string } }
+ *                     priority: { type: string }
+ *                     quietStart: { type: string }
+ *                     quietEnd: { type: string }
+ *     responses:
+ *       200:
+ *         description: Preferences updated successfully
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ */
+router.put('/notifications/preferences/bulk', authenticateTokenMiddleware, notificationController.updatePreferencesBulk)
+
+/**
+ * @openapi
  * /api/v1/dashboard/notifications/types:
  *   get:
  *     tags: [Notifications]

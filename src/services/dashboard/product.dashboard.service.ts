@@ -54,6 +54,9 @@ export interface CreateProductDto {
   satProductKey?: string | null
   satUnitKey?: string | null
   objetoImp?: '01' | '02' | '03' | '04'
+
+  // Estación de impresión (ruteo de comandas)
+  printStationId?: string | null
 }
 
 export interface UpdateProductDto {
@@ -107,6 +110,9 @@ export interface UpdateProductDto {
   satProductKey?: string | null
   satUnitKey?: string | null
   objetoImp?: '01' | '02' | '03' | '04'
+
+  // Estación de impresión (ruteo de comandas)
+  printStationId?: string | null
 }
 
 export interface ReorderProductsDto {
@@ -472,6 +478,7 @@ export async function createProduct(venueId: string, productData: CreateProductD
             sku: productFields.sku,
             gtin: productFields.gtin,
             categoryId: productFields.categoryId,
+            printStationId: productFields.printStationId ?? null,
             venueId,
             displayOrder,
             active: true,

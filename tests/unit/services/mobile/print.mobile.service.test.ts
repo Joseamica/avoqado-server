@@ -90,7 +90,10 @@ describe('print.mobile.service', () => {
 
     it('a single bad job does NOT abort the whole batch (per-job try/catch)', async () => {
       mockPrisma.printJob.create.mockRejectedValueOnce(new Error('PK collision')).mockResolvedValue({})
-      const res = await svc.syncPrintJobs(VENUE, sync([job({ id: 'bad', eventId: 'ev_bad' }), job({ id: 'good', eventId: 'ev_good' })]) as any)
+      const res = await svc.syncPrintJobs(
+        VENUE,
+        sync([job({ id: 'bad', eventId: 'ev_bad' }), job({ id: 'good', eventId: 'ev_good' })]) as any,
+      )
       expect(res.errors).toBe(1)
       expect(res.upserted).toBe(1)
     })
