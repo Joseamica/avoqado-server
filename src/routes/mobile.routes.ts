@@ -409,6 +409,14 @@ router.get('/auth/passkeys', authenticateTokenMiddleware, authMobileController.l
  */
 router.delete('/auth/passkeys/:passkeyId', authenticateTokenMiddleware, authMobileController.deletePasskey)
 
+/**
+ * DELETE /api/v1/mobile/account
+ * Delete the requesting staff member's own account (App Store 5.1.1(v)).
+ * Soft delete: anonymizes PII + revokes all access; retains financial/audit
+ * records (payments company, regulated).
+ */
+router.delete('/account', authenticateTokenMiddleware, authMobileController.deleteAccount)
+
 // ============================================================================
 // PASSWORD RESET
 // Public endpoint - no authentication required

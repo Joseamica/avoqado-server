@@ -717,3 +717,50 @@ export async function refreshAccessToken(refreshToken: string) {
     refreshToken: newRefreshToken,
   }
 }
+
+/**
+ * Delete the requesting staff member's own account (App Store 5.1.1(v)).
+ *
+ * Avoqado is a regulated payments company: transaction records (Order,
+ * Payment, ActivityLog…) reference the staff and MUST be retained. So this is
+ * a soft delete — it anonymizes the person's PII and revokes ALL access, while
+ * leaving the immutable financial/audit rows intact but pointing at a
+ * scrubbed, deactivated account.
+ *
+ * After this the person can no longer sign in anywhere (memberships, passkeys
+ * and device tokens are removed; the account is deactivated and its email is
+ * scrubbed so it can't be used to authenticate).
+ */
+export async function deleteOwnAccount(staffId: string): Promise<void> {
+  const staff = await prisma.staff.findUnique({ where: { id: staffId }, select: { id: true, active: true } })
+  if (!staff) throw new AuthenticationError('Cuenta no encontrada')
+
+  await prisma.$transaction(async tx => {
+    // Revoke every way in: venue/org memberships, passkeys, push tokens.
+    await tx.staffVenue.deleteMany({ where: { staffId } })
+    await tx.staffOrganization.deleteMany({ where: { staffId } })
+    await tx.staffPasskey.deleteMany({ where: { staffId } })
+    await tx.deviceToken.deleteMany({ where: { staffId } })
+
+    // Scrub PII and deactivate. Email is globally unique, so replace it with a
+    // stable non-routable sentinel to free the real address and block re-login.
+    await tx.staff.update({
+      where: { id: staffId },
+      data: {
+        active: false,
+        email: `deleted-${staffId}@deleted.avoqado.io`,
+        firstName: 'Cuenta',
+        lastName: 'eliminada',
+        phone: null,
+        photoUrl: null,
+        password: null,
+        googleId: null,
+        emailVerified: false,
+        emailVerificationCode: null,
+        emailVerificationExpires: null,
+      },
+    })
+  })
+
+  logger.info('[mobile] account deleted (self-service)', { staffId })
+}

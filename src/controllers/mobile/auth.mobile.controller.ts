@@ -326,3 +326,16 @@ export const requestReset = async (req: Request, res: Response, _next: NextFunct
     })
   }
 }
+
+export const deleteAccount = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const staffId = req.authContext?.userId || ''
+    if (!staffId) {
+      return res.status(401).json({ success: false, message: 'No autenticado' })
+    }
+    await authMobileService.deleteOwnAccount(staffId)
+    return res.status(200).json({ success: true, message: 'Tu cuenta fue eliminada.' })
+  } catch (error) {
+    next(error)
+  }
+}
