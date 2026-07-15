@@ -154,24 +154,34 @@ export async function migratePreflight(terminalId: string, toVenueId: string, mi
     originVenue?.organizationId ?? null,
   )
 
+  // I5 (bug fix): `origin.merchantIds` are ids referenced by config/assignment, NOT
+  // necessarily still chargeable — `MerchantAccount.active` is a real enable/disable flag
+  // (fraud/compliance), and a deactivated account's id can still linger in a
+  // VenuePaymentConfig or a terminal's assignedMerchantIds. Filter to `active: true` HERE,
+  // before deciding ORIGIN_HAS_NO_MERCHANT, so a merchant closed for fraud/compliance can't
+  // silently pass as "the origin has something to carry" — same shape as the precedent in
+  // merchantRouting.service.ts:107-108. Kept local to migratePreflight (not pushed into
+  // resolveOriginPayment) — that helper is deliberately lightweight/ids-only (see its
+  // docstring) and this is a genuinely new DB round-trip, not something it already owns.
+  const activeOriginMerchants = origin.merchantIds.length
+    ? await prisma.merchantAccount.findMany({
+        where: { id: { in: origin.merchantIds }, active: true },
+        select: { id: true, displayName: true },
+      })
+    : []
+
   let merchantMigration: MerchantMigrationInfo
   if (!sameOrg) {
     // I2: cross-org = ventas del venue B liquidando en la cuenta bancaria de la org A.
     merchantMigration = { available: false, reason: 'CROSS_ORG', merchants: [] }
-  } else if (origin.merchantIds.length === 0) {
+  } else if (activeOriginMerchants.length === 0) {
     merchantMigration = { available: false, reason: 'ORIGIN_HAS_NO_MERCHANT', merchants: [] }
   } else if (paymentConfig) {
     // I1: el destino ya cobra con lo suyo; imponerle el merchant del origen
     // repuntaría su dinero. No se ofrece.
     merchantMigration = { available: false, reason: 'DESTINATION_ALREADY_CONFIGURED', merchants: [] }
   } else {
-    merchantMigration = {
-      available: true,
-      merchants: await prisma.merchantAccount.findMany({
-        where: { id: { in: origin.merchantIds } },
-        select: { id: true, displayName: true },
-      }),
-    }
+    merchantMigration = { available: true, merchants: activeOriginMerchants }
   }
 
   if (!paymentConfig && !migrateMerchant) {
@@ -189,7 +199,7 @@ export async function migratePreflight(terminalId: string, toVenueId: string, mi
     })
   }
   // I4: nunca dejar "migró pero no cobra".
-  if (migrateMerchant && origin.merchantIds.length === 0) {
+  if (migrateMerchant && activeOriginMerchants.length === 0) {
     blockers.push({
       code: 'ORIGIN_HAS_NO_MERCHANT',
       message: 'La terminal de origen no tiene un comercio (merchant) que migrar.',
