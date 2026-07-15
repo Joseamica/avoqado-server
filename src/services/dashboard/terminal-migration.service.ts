@@ -91,7 +91,14 @@ export async function resolveOriginPayment(
 }
 
 export interface MigrationBlocker {
-  code: 'TERMINAL_RETIRED' | 'SAME_VENUE' | 'NO_PAYMENT_CONFIG' | 'NO_STAFF_PIN' | 'MIGRATION_IN_PROGRESS'
+  code:
+    | 'TERMINAL_RETIRED'
+    | 'SAME_VENUE'
+    | 'NO_PAYMENT_CONFIG'
+    | 'NO_STAFF_PIN'
+    | 'MIGRATION_IN_PROGRESS'
+    | 'CROSS_ORG_MERCHANT'
+    | 'ORIGIN_HAS_NO_MERCHANT'
   message: string
 }
 
@@ -101,15 +108,22 @@ export interface MigrationWarning {
   message: string
 }
 
+export interface MerchantMigrationInfo {
+  available: boolean
+  reason?: 'CROSS_ORG' | 'ORIGIN_HAS_NO_MERCHANT' | 'DESTINATION_ALREADY_CONFIGURED'
+  merchants: { id: string; displayName: string | null }[]
+}
+
 export interface PreflightResult {
   canProceed: boolean
   fromVenueId: string
   toVenueId: string
   blockers: MigrationBlocker[]
   warnings: MigrationWarning[]
+  merchantMigration: MerchantMigrationInfo
 }
 
-export async function migratePreflight(terminalId: string, toVenueId: string): Promise<PreflightResult> {
+export async function migratePreflight(terminalId: string, toVenueId: string, migrateMerchant = false): Promise<PreflightResult> {
   const terminal = await prisma.terminal.findUnique({ where: { id: terminalId } })
   if (!terminal) throw new NotFoundError('Terminal not found')
 
@@ -126,16 +140,59 @@ export async function migratePreflight(terminalId: string, toVenueId: string): P
   const targetVenue = await prisma.venue.findUnique({ where: { id: toVenueId } })
   if (!targetVenue) throw new NotFoundError('Target venue not found')
 
-  // Hard blocker: destination must be able to take card payments.
-  // VenuePaymentConfig has no active/enabled flag (it always implies a configured
-  // merchant via the required primaryAccountId), so existence by venueId is the check.
+  // Config de pagos del destino. Con `migrateMerchant` la TPV trae su propio
+  // merchant, así que la ausencia de config deja de ser bloqueante.
   const paymentConfig = await prisma.venuePaymentConfig.findFirst({
     where: { venueId: toVenueId },
   })
-  if (!paymentConfig) {
+
+  // Snapshot del origen: qué merchant viajaría y si es legal que viaje.
+  const originVenue = await prisma.venue.findUnique({ where: { id: terminal.venueId } })
+  const sameOrg = !!originVenue && originVenue.organizationId === targetVenue.organizationId
+  const origin = await resolveOriginPayment(
+    { venueId: terminal.venueId, assignedMerchantIds: terminal.assignedMerchantIds ?? [] },
+    originVenue?.organizationId ?? null,
+  )
+
+  let merchantMigration: MerchantMigrationInfo
+  if (!sameOrg) {
+    // I2: cross-org = ventas del venue B liquidando en la cuenta bancaria de la org A.
+    merchantMigration = { available: false, reason: 'CROSS_ORG', merchants: [] }
+  } else if (origin.merchantIds.length === 0) {
+    merchantMigration = { available: false, reason: 'ORIGIN_HAS_NO_MERCHANT', merchants: [] }
+  } else if (paymentConfig) {
+    // I1: el destino ya cobra con lo suyo; imponerle el merchant del origen
+    // repuntaría su dinero. No se ofrece.
+    merchantMigration = { available: false, reason: 'DESTINATION_ALREADY_CONFIGURED', merchants: [] }
+  } else {
+    merchantMigration = {
+      available: true,
+      merchants: await prisma.merchantAccount.findMany({
+        where: { id: { in: origin.merchantIds } },
+        select: { id: true, displayName: true },
+      }),
+    }
+  }
+
+  if (!paymentConfig && !migrateMerchant) {
     blockers.push({
       code: 'NO_PAYMENT_CONFIG',
       message: 'El venue destino no tiene configuración de pagos (merchant). La TPV no podría cobrar.',
+    })
+  }
+  // I3: el guard vive en el backend, no en la visibilidad del checkbox.
+  if (migrateMerchant && !sameOrg) {
+    blockers.push({
+      code: 'CROSS_ORG_MERCHANT',
+      message:
+        'No se puede migrar el comercio a otra organización: las ventas del venue destino se depositarían en la cuenta bancaria de la organización de origen.',
+    })
+  }
+  // I4: nunca dejar "migró pero no cobra".
+  if (migrateMerchant && origin.merchantIds.length === 0) {
+    blockers.push({
+      code: 'ORIGIN_HAS_NO_MERCHANT',
+      message: 'La terminal de origen no tiene un comercio (merchant) que migrar.',
     })
   }
 
@@ -185,6 +242,7 @@ export async function migratePreflight(terminalId: string, toVenueId: string): P
     toVenueId,
     blockers,
     warnings,
+    merchantMigration,
   }
 }
 

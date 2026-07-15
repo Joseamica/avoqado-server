@@ -5,12 +5,19 @@ import * as terminalsService from '@/services/dashboard/terminals.superadmin.ser
 // Mock the Prisma layer so the REAL migratePreflight (called inside migrateExecute) runs.
 // Do NOT self-mock the migration module — Jest can't intercept intra-module calls, so
 // migrateExecute's internal migratePreflight() would still hit the real one regardless.
+// venuePaymentConfig.findUnique / organizationPaymentConfig.findUnique / merchantAccount.findMany
+// are queried by resolveOriginPayment + migratePreflight's merchantMigration computation (Task 3) —
+// unconditionally, even though migrateExecute always calls migratePreflight with migrateMerchant
+// defaulted to false. None of these tests assert on `merchantMigration`, so no resolved-value setup
+// is needed beyond making the calls not throw "not a function".
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     terminal: { findUnique: jest.fn() },
     venue: { findUnique: jest.fn() },
-    venuePaymentConfig: { findFirst: jest.fn() },
+    venuePaymentConfig: { findFirst: jest.fn(), findUnique: jest.fn() },
+    organizationPaymentConfig: { findUnique: jest.fn() },
+    merchantAccount: { findMany: jest.fn() },
     staffVenue: { findFirst: jest.fn() },
     tpvCommandQueue: { findFirst: jest.fn(), update: jest.fn() },
   },
@@ -24,7 +31,9 @@ jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.
 const m = prisma as unknown as {
   terminal: { findUnique: jest.Mock }
   venue: { findUnique: jest.Mock }
-  venuePaymentConfig: { findFirst: jest.Mock }
+  venuePaymentConfig: { findFirst: jest.Mock; findUnique: jest.Mock }
+  organizationPaymentConfig: { findUnique: jest.Mock }
+  merchantAccount: { findMany: jest.Mock }
   staffVenue: { findFirst: jest.Mock }
   tpvCommandQueue: { findFirst: jest.Mock; update: jest.Mock }
 }

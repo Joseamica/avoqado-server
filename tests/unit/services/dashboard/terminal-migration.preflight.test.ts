@@ -6,7 +6,9 @@ jest.mock('@/utils/prismaClient', () => ({
   default: {
     terminal: { findUnique: jest.fn() },
     venue: { findUnique: jest.fn() },
-    venuePaymentConfig: { findFirst: jest.fn() },
+    venuePaymentConfig: { findFirst: jest.fn(), findUnique: jest.fn() },
+    organizationPaymentConfig: { findUnique: jest.fn() },
+    merchantAccount: { findMany: jest.fn() },
     staffVenue: { findFirst: jest.fn() },
     tpvCommandQueue: { findFirst: jest.fn() },
   },
@@ -15,15 +17,39 @@ jest.mock('@/utils/prismaClient', () => ({
 const m = prisma as unknown as {
   terminal: { findUnique: jest.Mock }
   venue: { findUnique: jest.Mock }
-  venuePaymentConfig: { findFirst: jest.Mock }
+  venuePaymentConfig: { findFirst: jest.Mock; findUnique: jest.Mock }
+  organizationPaymentConfig: { findUnique: jest.Mock }
+  merchantAccount: { findMany: jest.Mock }
   staffVenue: { findFirst: jest.Mock }
   tpvCommandQueue: { findFirst: jest.Mock }
 }
 
 const healthy = () => {
-  m.terminal.findUnique.mockResolvedValue({ id: 'term-1', venueId: 'venue-old', status: 'ACTIVE', brand: 'PAX' })
-  m.venue.findUnique.mockResolvedValue({ id: 'venue-new', name: 'New' })
+  m.terminal.findUnique.mockResolvedValue({
+    id: 'term-1',
+    venueId: 'venue-old',
+    status: 'ACTIVE',
+    brand: 'PAX',
+    assignedMerchantIds: ['merch-p'],
+  })
+  // Dos venues distintos, misma org por defecto.
+  m.venue.findUnique.mockImplementation(({ where }: { where: { id: string } }) =>
+    Promise.resolve(
+      where.id === 'venue-old'
+        ? { id: 'venue-old', name: 'Old', organizationId: 'org-1' }
+        : { id: 'venue-new', name: 'New', organizationId: 'org-1' },
+    ),
+  )
   m.venuePaymentConfig.findFirst.mockResolvedValue({ id: 'vpc-1' })
+  m.venuePaymentConfig.findUnique.mockResolvedValue({
+    primaryAccountId: 'merch-p',
+    secondaryAccountId: null,
+    tertiaryAccountId: null,
+    preferredProcessor: 'AUTO',
+    routingRules: null,
+  })
+  m.organizationPaymentConfig.findUnique.mockResolvedValue(null)
+  m.merchantAccount.findMany.mockResolvedValue([{ id: 'merch-p', displayName: 'playtelecom-p' }])
   m.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1' })
   m.tpvCommandQueue.findFirst.mockResolvedValue(null)
 }
@@ -121,5 +147,73 @@ describe('migratePreflight', () => {
     m.terminal.findUnique.mockResolvedValue({ id: 'term-1', venueId: 'venue-new', status: 'ACTIVE', brand: 'PAX' })
     const r = await migratePreflight('term-1', 'venue-new')
     expect(r.blockers).toContainEqual(expect.objectContaining({ code: 'SAME_VENUE' }))
+  })
+})
+
+describe('migratePreflight — migrateMerchant', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  it('con migrateMerchant, un destino sin merchant deja de estar bloqueado', async () => {
+    healthy()
+    m.venuePaymentConfig.findFirst.mockResolvedValue(null) // destino sin config
+    const r = await migratePreflight('term-1', 'venue-new', true)
+    expect(r.canProceed).toBe(true)
+    expect(r.blockers.map(b => b.code)).not.toContain('NO_PAYMENT_CONFIG')
+  })
+
+  it('REGRESIÓN: sin migrateMerchant, un destino sin merchant sigue bloqueado', async () => {
+    healthy()
+    m.venuePaymentConfig.findFirst.mockResolvedValue(null)
+    const r = await migratePreflight('term-1', 'venue-new')
+    expect(r.canProceed).toBe(false)
+    expect(r.blockers.map(b => b.code)).toContain('NO_PAYMENT_CONFIG')
+  })
+
+  it('bloquea cross-org: el dinero caería en la cuenta de otra entidad legal', async () => {
+    healthy()
+    m.venuePaymentConfig.findFirst.mockResolvedValue(null)
+    m.venue.findUnique.mockImplementation(({ where }: { where: { id: string } }) =>
+      Promise.resolve(
+        where.id === 'venue-old'
+          ? { id: 'venue-old', name: 'Old', organizationId: 'org-1' }
+          : { id: 'venue-new', name: 'New', organizationId: 'org-OTRA' },
+      ),
+    )
+    const r = await migratePreflight('term-1', 'venue-new', true)
+    expect(r.canProceed).toBe(false)
+    expect(r.blockers.map(b => b.code)).toContain('CROSS_ORG_MERCHANT')
+    expect(r.merchantMigration.available).toBe(false)
+    expect(r.merchantMigration.reason).toBe('CROSS_ORG')
+  })
+
+  it('bloquea si el origen no tiene merchant que llevar', async () => {
+    healthy()
+    m.venuePaymentConfig.findFirst.mockResolvedValue(null)
+    m.venuePaymentConfig.findUnique.mockResolvedValue(null)
+    m.terminal.findUnique.mockResolvedValue({
+      id: 'term-1',
+      venueId: 'venue-old',
+      status: 'ACTIVE',
+      brand: 'PAX',
+      assignedMerchantIds: [],
+    })
+    const r = await migratePreflight('term-1', 'venue-new', true)
+    expect(r.canProceed).toBe(false)
+    expect(r.blockers.map(b => b.code)).toContain('ORIGIN_HAS_NO_MERCHANT')
+  })
+
+  it('expone los merchants para etiquetar el checkbox', async () => {
+    healthy()
+    m.venuePaymentConfig.findFirst.mockResolvedValue(null)
+    const r = await migratePreflight('term-1', 'venue-new', true)
+    expect(r.merchantMigration.available).toBe(true)
+    expect(r.merchantMigration.merchants).toEqual([{ id: 'merch-p', displayName: 'playtelecom-p' }])
+  })
+
+  it('el checkbox no se ofrece si el destino ya tiene su propia config', async () => {
+    healthy() // findFirst devuelve vpc-1 → destino ya configurado
+    const r = await migratePreflight('term-1', 'venue-new')
+    expect(r.merchantMigration.available).toBe(false)
+    expect(r.merchantMigration.reason).toBe('DESTINATION_ALREADY_CONFIGURED')
   })
 })
