@@ -51,21 +51,22 @@ export async function resolveOriginPayment(
   // 2) Los merchants ya asignados a la terminal ganan: son lo que la TPV usa hoy
   //    (el heartbeat resuelve assignedMerchantIds ANTES que la config del venue).
   const fromCfg = cfg ? [cfg.primaryAccountId, cfg.secondaryAccountId, cfg.tertiaryAccountId].filter((x): x is string => !!x) : []
-  const merchantIds = terminal.assignedMerchantIds?.length ? terminal.assignedMerchantIds : fromCfg
+  const merchantIds = terminal.assignedMerchantIds.length ? terminal.assignedMerchantIds : fromCfg
 
-  // 3) Qué copiar al destino. Sin config pero con merchants en la terminal,
-  //    fabricamos la mínima viable (ver tabla del spec).
-  const copyable =
-    cfg ??
-    (merchantIds[0]
-      ? {
-          primaryAccountId: merchantIds[0],
-          secondaryAccountId: null,
-          tertiaryAccountId: null,
-          preferredProcessor: 'AUTO' as PaymentProcessor,
-          routingRules: null,
-        }
-      : null)
+  // 3) Qué copiar al destino. La IDENTIDAD del merchant sale de `merchantIds`
+  //    (que ya respeta "la terminal gana"); la POLÍTICA del venue
+  //    (preferredProcessor, routingRules) sale de `cfg`. No cruzarlas: usar `cfg`
+  //    como copyable dejaría al destino apuntando a un merchant que esta TPV no
+  //    cobra — pasa en 18 de 78 terminales de prod.
+  const copyable = merchantIds[0]
+    ? {
+        primaryAccountId: merchantIds[0],
+        secondaryAccountId: merchantIds[1] ?? null,
+        tertiaryAccountId: merchantIds[2] ?? null,
+        preferredProcessor: cfg?.preferredProcessor ?? ('AUTO' as PaymentProcessor),
+        routingRules: cfg?.routingRules ?? null,
+      }
+    : null
 
   return { merchantIds, copyable }
 }

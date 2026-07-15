@@ -70,4 +70,32 @@ describe('resolveOriginPayment', () => {
     await resolveOriginPayment({ venueId: 'v-old', assignedMerchantIds: [] }, null)
     expect(m.organizationPaymentConfig.findUnique).not.toHaveBeenCalled()
   })
+
+  // El caso de los 18 de 78: la terminal cobra con un merchant distinto al default
+  // de su sucursal. copyable DEBE seguir a la terminal, no al default viejo.
+  // ('MENTA' en vez de 'BLUMON': el enum PaymentProcessor real es
+  //  LEGACY | MENTA | CLIP | BANK_DIRECT | AUTO. Lo que importa es que sea != AUTO.)
+  it('copyable sigue a la terminal cuando difiere del default del venue', async () => {
+    m.venuePaymentConfig.findUnique.mockResolvedValue({ ...VENUE_CFG, preferredProcessor: 'MENTA', routingRules: { r: 1 } })
+    const r = await resolveOriginPayment({ venueId: 'v-old', assignedMerchantIds: ['merch-term'] }, 'org-1')
+    expect(r.copyable).toEqual({
+      primaryAccountId: 'merch-term', // NO 'merch-p'
+      secondaryAccountId: null,
+      tertiaryAccountId: null,
+      preferredProcessor: 'MENTA', // la política sí se hereda del venue origen
+      routingRules: { r: 1 },
+    })
+  })
+
+  it('sin override de la terminal, copyable equivale a copiar la fila del venue', async () => {
+    m.venuePaymentConfig.findUnique.mockResolvedValue(VENUE_CFG)
+    const r = await resolveOriginPayment({ venueId: 'v-old', assignedMerchantIds: [] }, 'org-1')
+    expect(r.copyable).toEqual({
+      primaryAccountId: 'merch-p',
+      secondaryAccountId: 'merch-s',
+      tertiaryAccountId: null,
+      preferredProcessor: 'AUTO',
+      routingRules: null,
+    })
+  })
 })
