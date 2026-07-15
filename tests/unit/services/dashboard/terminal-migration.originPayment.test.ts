@@ -83,7 +83,7 @@ describe('resolveOriginPayment', () => {
       secondaryAccountId: null,
       tertiaryAccountId: null,
       preferredProcessor: 'MENTA', // la política sí se hereda del venue origen
-      routingRules: { r: 1 },
+      routingRules: null, // se anula: nombra slots de una jerarquía que acabamos de redefinir
     })
   })
 
@@ -97,5 +97,40 @@ describe('resolveOriginPayment', () => {
       preferredProcessor: 'AUTO',
       routingRules: null,
     })
+  })
+
+  // Sin override copiamos la fila VERBATIM: los slots primary/secondary/tertiary son
+  // una jerarquía, y `routingRules` los nombra por nombre ({"factura":"secondary"}).
+  // Compactar el hueco ascendería el tertiary al slot secondary y la regla pasaría a
+  // apuntar a otro merchant.
+  it('sin override, un cfg con hueco conserva los slots exactos (no se compacta)', async () => {
+    m.venuePaymentConfig.findUnique.mockResolvedValue({
+      primaryAccountId: 'a',
+      secondaryAccountId: null,
+      tertiaryAccountId: 'c',
+      preferredProcessor: 'AUTO',
+      routingRules: { factura: 'tertiary' },
+    })
+    const r = await resolveOriginPayment({ venueId: 'v-old', assignedMerchantIds: [] }, 'org-1')
+    expect(r.copyable).toEqual({
+      primaryAccountId: 'a',
+      secondaryAccountId: null, // NO 'c' — el hueco se preserva
+      tertiaryAccountId: 'c',
+      preferredProcessor: 'AUTO',
+      routingRules: { factura: 'tertiary' },
+    })
+  })
+
+  it('con override, las routingRules del venue se anulan (no sobreviven a la nueva jerarquía)', async () => {
+    m.venuePaymentConfig.findUnique.mockResolvedValue({
+      ...VENUE_CFG,
+      preferredProcessor: 'CLIP',
+      routingRules: { factura: 'secondary', amount_over: 1000 },
+    })
+    const r = await resolveOriginPayment({ venueId: 'v-old', assignedMerchantIds: ['merch-term', 'merch-term-2'] }, 'org-1')
+    expect(r.copyable?.routingRules).toBeNull()
+    expect(r.copyable?.primaryAccountId).toBe('merch-term')
+    expect(r.copyable?.secondaryAccountId).toBe('merch-term-2')
+    expect(r.copyable?.preferredProcessor).toBe('CLIP') // la política sí sobrevive: no nombra slots
   })
 })

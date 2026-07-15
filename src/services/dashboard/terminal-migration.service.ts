@@ -53,20 +53,30 @@ export async function resolveOriginPayment(
   const fromCfg = cfg ? [cfg.primaryAccountId, cfg.secondaryAccountId, cfg.tertiaryAccountId].filter((x): x is string => !!x) : []
   const merchantIds = terminal.assignedMerchantIds.length ? terminal.assignedMerchantIds : fromCfg
 
-  // 3) Qué copiar al destino. La IDENTIDAD del merchant sale de `merchantIds`
-  //    (que ya respeta "la terminal gana"); la POLÍTICA del venue
-  //    (preferredProcessor, routingRules) sale de `cfg`. No cruzarlas: usar `cfg`
-  //    como copyable dejaría al destino apuntando a un merchant que esta TPV no
-  //    cobra — pasa en 18 de 78 terminales de prod.
-  const copyable = merchantIds[0]
-    ? {
-        primaryAccountId: merchantIds[0],
-        secondaryAccountId: merchantIds[1] ?? null,
-        tertiaryAccountId: merchantIds[2] ?? null,
-        preferredProcessor: cfg?.preferredProcessor ?? ('AUTO' as PaymentProcessor),
-        routingRules: cfg?.routingRules ?? null,
-      }
-    : null
+  // 3) Qué copiar al destino.
+  //    - SIN override: copiar `cfg` VERBATIM. Preserva huecos (secondary null +
+  //      tertiary no-null) y deja `routingRules` válidas: nombran slots por
+  //      nombre ({"factura":"secondary"}), así que sólo significan algo contra
+  //      la asignación de slots para la que se escribieron.
+  //    - CON override: la terminal define la identidad (decisión del founder:
+  //      18 de 78 terminales cobran con un merchant != al default de su venue).
+  //      `assignedMerchantIds` es un CONJUNTO sin orden (se llena con `push`; el
+  //      TPV lo lee sin orderBy), así que la jerarquía que derivamos de él es
+  //      arbitraria — por eso `routingRules` se anula: sus referencias a slots
+  //      no sobreviven a una jerarquía redefinida. Sin reglas, el orden es cosmético.
+  //    `preferredProcessor` viene de `cfg` en ambos casos: no nombra ningún slot.
+  const hasOverride = terminal.assignedMerchantIds.length > 0
+  const copyable = !merchantIds[0]
+    ? null
+    : hasOverride
+      ? {
+          primaryAccountId: merchantIds[0],
+          secondaryAccountId: merchantIds[1] ?? null,
+          tertiaryAccountId: merchantIds[2] ?? null,
+          preferredProcessor: cfg?.preferredProcessor ?? ('AUTO' as PaymentProcessor),
+          routingRules: null,
+        }
+      : cfg
 
   return { merchantIds, copyable }
 }
