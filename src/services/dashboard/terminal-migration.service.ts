@@ -1,9 +1,74 @@
+import { Prisma, PaymentProcessor } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import { updateTerminal, type TerminalActor } from '@/services/dashboard/terminals.superadmin.service'
 import { tpvCommandQueueService } from '@/services/tpv/command-queue.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
+
+/**
+ * Snapshot del pago del venue ORIGEN, usado sólo por el flujo "migrar el merchant
+ * con la terminal". Replica la herencia venue → org de getEffectivePaymentConfig
+ * pero sin sus includes pesados: aquí sólo hacen falta ids.
+ */
+export interface OriginPaymentSnapshot {
+  /** Merchants que la terminal debe conservar tras el re-parent. */
+  merchantIds: string[]
+  /** Config a copiar al destino, o null si no hay nada que copiar. */
+  copyable: {
+    primaryAccountId: string
+    secondaryAccountId: string | null
+    tertiaryAccountId: string | null
+    preferredProcessor: PaymentProcessor
+    routingRules: Prisma.JsonValue | null
+  } | null
+}
+
+const PAYMENT_CONFIG_SELECT = {
+  primaryAccountId: true,
+  secondaryAccountId: true,
+  tertiaryAccountId: true,
+  preferredProcessor: true,
+  routingRules: true,
+} as const
+
+export async function resolveOriginPayment(
+  terminal: { venueId: string; assignedMerchantIds: string[] },
+  originOrgId: string | null,
+): Promise<OriginPaymentSnapshot> {
+  // 1) Config propia del venue origen; si no, la heredada de su org.
+  let cfg = await prisma.venuePaymentConfig.findUnique({
+    where: { venueId: terminal.venueId },
+    select: PAYMENT_CONFIG_SELECT,
+  })
+  if (!cfg && originOrgId) {
+    cfg = await prisma.organizationPaymentConfig.findUnique({
+      where: { organizationId: originOrgId },
+      select: PAYMENT_CONFIG_SELECT,
+    })
+  }
+
+  // 2) Los merchants ya asignados a la terminal ganan: son lo que la TPV usa hoy
+  //    (el heartbeat resuelve assignedMerchantIds ANTES que la config del venue).
+  const fromCfg = cfg ? [cfg.primaryAccountId, cfg.secondaryAccountId, cfg.tertiaryAccountId].filter((x): x is string => !!x) : []
+  const merchantIds = terminal.assignedMerchantIds?.length ? terminal.assignedMerchantIds : fromCfg
+
+  // 3) Qué copiar al destino. Sin config pero con merchants en la terminal,
+  //    fabricamos la mínima viable (ver tabla del spec).
+  const copyable =
+    cfg ??
+    (merchantIds[0]
+      ? {
+          primaryAccountId: merchantIds[0],
+          secondaryAccountId: null,
+          tertiaryAccountId: null,
+          preferredProcessor: 'AUTO' as PaymentProcessor,
+          routingRules: null,
+        }
+      : null)
+
+  return { merchantIds, copyable }
+}
 
 export interface MigrationBlocker {
   code: 'TERMINAL_RETIRED' | 'SAME_VENUE' | 'NO_PAYMENT_CONFIG' | 'NO_STAFF_PIN' | 'MIGRATION_IN_PROGRESS'
