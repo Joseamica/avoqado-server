@@ -18,7 +18,12 @@ import { z } from 'zod'
 
 export const migratePreflightSchema = z.object({
   params: z.object({ terminalId: z.string().min(1, 'ID de terminal inválido') }),
-  body: z.object({ toVenueId: z.string().min(1, 'Debes seleccionar un venue destino válido') }),
+  body: z.object({
+    toVenueId: z.string().min(1, 'Debes seleccionar un venue destino válido'),
+    // Si es true, la terminal se lleva su merchant actual al venue destino y el
+    // blocker NO_PAYMENT_CONFIG deja de aplicar (la TPV trae con qué cobrar).
+    migrateMerchant: z.boolean({ invalid_type_error: 'La opción de migrar el comercio debe ser verdadero o falso' }).optional(),
+  }),
 })
 
 export const migrateExecuteSchema = z.object({
@@ -29,6 +34,8 @@ export const migrateExecuteSchema = z.object({
     // after the re-parent, before the device's post-wipe config fetch). If omitted,
     // the terminal falls back to the destination venue's default VenuePaymentConfig.
     assignedMerchantIds: z.array(z.string()).optional(),
+    // Ver migratePreflightSchema.
+    migrateMerchant: z.boolean({ invalid_type_error: 'La opción de migrar el comercio debe ser verdadero o falso' }).optional(),
   }),
 })
 
