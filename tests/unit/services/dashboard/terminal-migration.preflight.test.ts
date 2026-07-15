@@ -210,6 +210,44 @@ describe('migratePreflight — migrateMerchant', () => {
     expect(r.merchantMigration.merchants).toEqual([{ id: 'merch-p', displayName: 'playtelecom-p' }])
   })
 
+  // Bug fix (post-review): MerchantAccount.active is a real enable/disable flag (fraud/
+  // compliance) — a deactivated merchant's id can still linger in VenuePaymentConfig or
+  // assignedMerchantIds. `merch-p` referenced by the origin exists but is INACTIVE, so the
+  // DB query (`where: { id: { in: [...] }, active: true }`) returns nothing for it — the
+  // origin must be treated as having NO usable merchant, same as if merchantIds were empty.
+  it('el único merchant del origen está inactivo → ORIGIN_HAS_NO_MERCHANT (existir el id no basta)', async () => {
+    healthy()
+    m.venuePaymentConfig.findFirst.mockResolvedValue(null) // destino sin config
+    m.merchantAccount.findMany.mockResolvedValue([]) // merch-p existe pero active:false → excluido por la query
+    const r = await migratePreflight('term-1', 'venue-new', true)
+    expect(r.canProceed).toBe(false)
+    expect(r.blockers.map(b => b.code)).toContain('ORIGIN_HAS_NO_MERCHANT')
+    expect(r.merchantMigration.available).toBe(false)
+    expect(r.merchantMigration.reason).toBe('ORIGIN_HAS_NO_MERCHANT')
+  })
+
+  it('origen con un merchant activo y uno inactivo → merchantMigration.merchants sólo incluye el activo', async () => {
+    healthy()
+    m.venuePaymentConfig.findFirst.mockResolvedValue(null) // destino sin config
+    m.terminal.findUnique.mockResolvedValue({
+      id: 'term-1',
+      venueId: 'venue-old',
+      status: 'ACTIVE',
+      brand: 'PAX',
+      assignedMerchantIds: ['merch-p', 'merch-inactive'],
+    })
+    // La query real filtraría active:true — el mock simula que sólo merch-p sobrevive ese filtro.
+    m.merchantAccount.findMany.mockResolvedValue([{ id: 'merch-p', displayName: 'playtelecom-p' }])
+    const r = await migratePreflight('term-1', 'venue-new', true)
+    expect(r.merchantMigration.available).toBe(true)
+    expect(r.merchantMigration.merchants).toEqual([{ id: 'merch-p', displayName: 'playtelecom-p' }])
+    expect(m.merchantAccount.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: { in: ['merch-p', 'merch-inactive'] }, active: true }),
+      }),
+    )
+  })
+
   it('el checkbox no se ofrece si el destino ya tiene su propia config', async () => {
     healthy() // findFirst devuelve vpc-1 → destino ya configurado
     const r = await migratePreflight('term-1', 'venue-new')
