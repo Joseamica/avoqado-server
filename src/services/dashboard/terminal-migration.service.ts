@@ -63,7 +63,16 @@ export async function resolveOriginPayment(
   //      `assignedMerchantIds` es un CONJUNTO sin orden (se llena con `push`; el
   //      TPV lo lee sin orderBy), así que la jerarquía que derivamos de él es
   //      arbitraria — por eso `routingRules` se anula: sus referencias a slots
-  //      no sobreviven a una jerarquía redefinida. Sin reglas, el orden es cosmético.
+  //      no sobreviven a una jerarquía redefinida. El orden que SÍ asignamos
+  //      (merchantIds[0] → primary) no es cosmético: el slot `primary` está
+  //      privilegiado por consumidores que nunca leen `routingRules`
+  //      (transactionCost.service.ts:265 atribuye costos vía `primaryAccount`;
+  //      onboarding.controller.ts:398 trata `primaryAccountId` como EL merchant).
+  //      Se sostiene así: sin reglas no hay política previa que contradecir;
+  //      `merchantIds[0]` es la identidad que decidió el founder; y para una
+  //      terminal que sobrescribe a su venue, la jerarquía del venue no es un
+  //      ranking autoritativo — no existe mejor llave. Además, 66 de 78
+  //      terminales traen un solo merchant, así que no hay orden que equivocar.
   //    `preferredProcessor` viene de `cfg` en ambos casos: no nombra ningún slot.
   const hasOverride = terminal.assignedMerchantIds.length > 0
   const copyable = !merchantIds[0]
