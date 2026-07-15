@@ -113,15 +113,15 @@ npx prisma migrate dev --name {description}
 
 ## Schema Map — MANDATORY on EVERY `prisma/schema.prisma` edit
 
-**ANY edit to `prisma/schema.prisma` — fields, enums, indexes, not just new models — MUST end with `npm run schema:map`, and the
-regenerated `docs/SCHEMA_MAP.md` goes in the SAME commit as the schema change.** The map embeds `schema.prisma:LINE` anchors, so even a
-one-field edit shifts every anchor below it. CI (`.github/workflows/schema-map.yml`) regenerates on push as a safety net, but work here
-often sits in local unpushed commits for days — never leave it to CI to fix it "later".
+**ANY edit to `prisma/schema.prisma` — fields, enums, indexes, not just new models — MUST end with `npm run schema:map`, and the regenerated
+`docs/SCHEMA_MAP.md` goes in the SAME commit as the schema change.** The map embeds `schema.prisma:LINE` anchors, so even a one-field edit
+shifts every anchor below it. CI (`.github/workflows/schema-map.yml`) regenerates on push as a safety net, but work here often sits in local
+unpushed commits for days — never leave it to CI to fix it "later".
 
 **Additionally, when you ADD or RENAME a `model Foo {}`:**
 
-1. Open `scripts/generate-schema-map.ts` and add (or re-key) the model name in the `MODEL_TO_DOMAIN` map — pick one of the existing
-   domains, grouping it with siblings.
+1. Open `scripts/generate-schema-map.ts` and add (or re-key) the model name in the `MODEL_TO_DOMAIN` map — pick one of the existing domains,
+   grouping it with siblings.
 2. Run `npm run schema:map` to regenerate `docs/SCHEMA_MAP.md`.
 3. Stage BOTH `scripts/generate-schema-map.ts` AND `docs/SCHEMA_MAP.md` along with the schema change in the SAME commit.
 

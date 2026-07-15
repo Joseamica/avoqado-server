@@ -11,7 +11,7 @@ import { Prisma } from '@prisma/client'
 import socketManager from '../../communication/sockets'
 import { SocketEventType } from '../../communication/sockets/types'
 import logger from '../../config/logger'
-import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { validateStaffVenue } from '../../utils/staff-venue.util'
 import { generateAndStoreReceipt } from '../dashboard/receipt.dashboard.service'
@@ -1227,7 +1227,7 @@ export async function attachCustomerToOrder(venueId: string, orderId: string, cu
  * @param orderId Order ID
  * @param reason Cancellation reason
  */
-export async function cancelOrder(venueId: string, orderId: string, reason?: string): Promise<void> {
+export async function cancelOrder(venueId: string, orderId: string, reason?: string, performedBy?: string): Promise<void> {
   logger.info(`📱 [ORDER.MOBILE] Cancelling order ${orderId} | venue=${venueId} | reason=${reason || 'none'}`)
 
   const order = await prisma.order.findUnique({
@@ -1243,6 +1243,17 @@ export async function cancelOrder(venueId: string, orderId: string, reason?: str
     throw new BadRequestError('Cannot cancel a paid order')
   }
 
+  // A live/unknown terminal charge means money can still move: cancelling the order
+  // now would let that charge land on a CANCELLED order (recorded & settled, but
+  // excluded from reports). The POS must cancel or resolve the charge first.
+  // CANCEL_REQUESTED does NOT block (see hasChargeBlockingOrderCancel).
+  const { terminalPaymentService } = await import('../terminal-payment.service')
+  if (await terminalPaymentService.hasChargeBlockingOrderCancel(venueId, orderId)) {
+    throw new ConflictError(
+      'Hay un cobro en curso en la terminal para esta orden. Cancela o espera el resultado del cobro antes de cancelar la orden.',
+    )
+  }
+
   await prisma.order.update({
     where: { id: orderId },
     data: {
@@ -1252,6 +1263,16 @@ export async function cancelOrder(venueId: string, orderId: string, reason?: str
   })
 
   logger.info(`✅ [ORDER.MOBILE] Order ${orderId} cancelled`)
+
+  const { logAction } = await import('../dashboard/activity-log.service')
+  void logAction({
+    action: 'ORDER_CANCELLED',
+    entity: 'Order',
+    entityId: orderId,
+    staffId: performedBy,
+    venueId,
+    data: { reason: reason ?? null },
+  })
 
   // Emit Socket.IO event
   const broadcastingService = socketManager.getBroadcastingService()

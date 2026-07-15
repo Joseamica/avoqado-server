@@ -215,8 +215,9 @@ export const cancelOrder = async (req: Request, res: Response, next: NextFunctio
   try {
     const { venueId, orderId } = req.params
     const { reason } = req.body
+    const performedBy = (req as any).authContext?.userId as string | undefined
 
-    await orderMobileService.cancelOrder(venueId, orderId, reason)
+    await orderMobileService.cancelOrder(venueId, orderId, reason, performedBy)
 
     res.status(200).json({
       success: true,

@@ -1,6 +1,6 @@
 import { Decimal } from '@prisma/client/runtime/library'
 import { Prisma } from '@prisma/client'
-import { createOrderWithItems, payCashOrder } from '@/services/mobile/order.mobile.service'
+import { cancelOrder, createOrderWithItems, payCashOrder } from '@/services/mobile/order.mobile.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
 jest.mock('@/communication/sockets', () => ({
@@ -778,5 +778,45 @@ describe('createOrderWithItems idempotency (externalId)', () => {
         externalId: 'retry-key-4',
       }),
     ).rejects.toThrow('db down')
+  })
+})
+
+describe('cancelOrder — guard against live terminal charges', () => {
+  // The activity-log service is mocked globally in tests/__helpers__/setup.ts —
+  // assert against the mocked logAction, not prisma.activityLog.
+  const { logAction } = require('@/services/dashboard/activity-log.service')
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    prismaMock.order.findUnique.mockResolvedValue({ id: 'order-1', paymentStatus: 'PENDING', status: 'CONFIRMED' })
+    prismaMock.order.update.mockResolvedValue({ id: 'order-1', status: 'CANCELLED' })
+  })
+
+  it('409s when the order has a LIVE terminal charge (PENDING/SENT/UNKNOWN) — the order must stay open', async () => {
+    prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue({ requestId: 'REQ-LIVE' })
+
+    await expect(cancelOrder('venue-1', 'order-1', 'cliente se fue', 'staff-1')).rejects.toMatchObject({ statusCode: 409 })
+    expect(prismaMock.order.update).not.toHaveBeenCalled()
+  })
+
+  it('cancels normally when no live charge exists (a CANCEL_REQUESTED row does not match the guard query) and audits ORDER_CANCELLED', async () => {
+    prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue(null)
+
+    await cancelOrder('venue-1', 'order-1', 'cliente se fue', 'staff-1')
+
+    expect(prismaMock.order.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'CANCELLED' }) }),
+    )
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'ORDER_CANCELLED', entity: 'Order', entityId: 'order-1', staffId: 'staff-1', venueId: 'venue-1' }),
+    )
+  })
+
+  it('regression: still rejects cancelling a PAID order before ever consulting the terminal guard', async () => {
+    prismaMock.order.findUnique.mockResolvedValue({ id: 'order-1', paymentStatus: 'PAID', status: 'CONFIRMED' })
+
+    await expect(cancelOrder('venue-1', 'order-1')).rejects.toMatchObject({ statusCode: 400 })
+    expect(prismaMock.terminalPaymentRequest.findFirst).not.toHaveBeenCalled()
+    expect(prismaMock.order.update).not.toHaveBeenCalled()
   })
 })

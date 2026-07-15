@@ -6,11 +6,32 @@
  */
 import { z } from 'zod'
 
-// v1: el service solo acepta NETWORK como impresora ruteable (spec v3 — "rechazar
-// rutas no servibles"). El enum completo queda para post-v1 (BT/USB/interna).
+// v1.1: el service acepta NETWORK y BLUETOOTH — ambas ruteables por el gateway de
+// impresión del POS Android (su PrinterService ya implementa el transporte BT/SPP).
+// USB_SPOOLER (exclusivo del POS de escritorio/Windows) y TERMINAL_INTERNAL (impresora
+// interna del PAX) siguen rechazadas: el gateway Android no puede servir esas rutas
+// ("rechazar rutas no servibles", spec v3).
 const CONNECTION_TYPES = ['NETWORK', 'BLUETOOTH', 'USB_SPOOLER', 'TERMINAL_INTERNAL'] as const
 
 const paperWidth = z.union([z.literal(58), z.literal(80)], { message: 'Ancho de papel inválido (58 o 80 mm)' })
+
+// Host o host:puerto (IPv4/hostname; puerto opcional, 1-5 dígitos).
+const NETWORK_ADDRESS_REGEX =
+  /^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*(:[0-9]{1,5})?$/
+// MAC address: 6 octetos hex, separador ':' o '-', case-insensitive.
+const MAC_ADDRESS_REGEX = /^([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$/
+
+export function isValidNetworkAddress(address: string): boolean {
+  if (MAC_ADDRESS_REGEX.test(address)) return false // una MAC nunca es una dirección de red válida
+  return NETWORK_ADDRESS_REGEX.test(address)
+}
+
+export function isValidBluetoothAddress(address: string): boolean {
+  return MAC_ADDRESS_REGEX.test(address)
+}
+
+export const NETWORK_ADDRESS_MESSAGE = 'La dirección de red debe ser un host o host:puerto válido (ej. 192.168.1.50 o impresora.local:9100)'
+export const BLUETOOTH_ADDRESS_MESSAGE = 'La dirección Bluetooth debe ser una MAC válida (ej. AA:BB:CC:DD:EE:FF)'
 
 // ── Printers ────────────────────────────────────────────────────────
 export const createPrinterSchema = z.object({
@@ -23,7 +44,19 @@ export const createPrinterSchema = z.object({
       paperWidthMm: paperWidth.optional(),
       charset: z.string().min(1).max(20, 'Máximo 20 caracteres').optional(),
     })
-    .strict(),
+    .strict()
+    // connectionType y address llegan juntos en el mismo body → Zod puede validar la
+    // forma de la dirección según el tipo de conexión aquí mismo (default NETWORK).
+    .superRefine((data, ctx) => {
+      if (!data.address) return
+      const connectionType = data.connectionType ?? 'NETWORK'
+      if (connectionType === 'NETWORK' && !isValidNetworkAddress(data.address)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['address'], message: NETWORK_ADDRESS_MESSAGE })
+      }
+      if (connectionType === 'BLUETOOTH' && !isValidBluetoothAddress(data.address)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['address'], message: BLUETOOTH_ADDRESS_MESSAGE })
+      }
+    }),
   params: z.object({ venueId: z.string().min(1, 'El venue es requerido') }).passthrough(),
   query: z.object({}).passthrough().optional(),
 })

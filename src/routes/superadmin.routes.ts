@@ -28,6 +28,7 @@ import balanceProviderRoutes from './superadmin/balanceProvider.routes'
 import holidaysRoutes from './superadmin/holidays.routes'
 import venueCommissionRoutes from './superadmin/venueCommission.routes'
 import settlementConfigRoutes from './superadmin/settlementConfiguration.routes'
+import settlementCalendarRoutes from './superadmin/settlementCalendar.routes'
 import merchantRevenueShareRoutes from './superadmin/merchantRevenueShare.routes'
 import stripeConnectOffboardingRoutes from './superadmin/stripeConnectOffboarding.routes'
 import angelpayUserAccountRoutes from './superadmin/angelpayUserAccount.routes'
@@ -76,6 +77,7 @@ router.use('/reports', reportsRoutes)
 // Aditivo (2026-05): mismos controllers que ya viven en /api/v1/dashboard/superadmin/*,
 // expuestos también aquí para que el frontend superadmin use un solo namespace.
 router.use('/settlement-configurations', settlementConfigRoutes)
+router.use('/settlement-calendar', settlementCalendarRoutes)
 router.use('/merchant-revenue-shares', merchantRevenueShareRoutes)
 router.use('/stripe-connect', stripeConnectOffboardingRoutes)
 // AngelPay user accounts — mounted at root because endpoints span

@@ -37,8 +37,15 @@ beforeEach(() => {
 describe('printStation.dashboard.service', () => {
   // ── NEW FEATURE: printer creation ──────────────────────────────────
   describe('createPrinter', () => {
-    it('rejects a non-NETWORK printer in v1 (BadRequest, Spanish)', async () => {
-      await expect(svc.createPrinter(VENUE, { name: 'BT', connectionType: 'BLUETOOTH' } as any)).rejects.toThrow(/red \(NETWORK\)/)
+    it('rejects USB_SPOOLER (BadRequest, Spanish — gateway Android no puede servir USB)', async () => {
+      await expect(svc.createPrinter(VENUE, { name: 'USB', connectionType: 'USB_SPOOLER' } as any)).rejects.toThrow(
+        /POS de escritorio \(Windows\)/,
+      )
+      expect(mockPrisma.printer.create).not.toHaveBeenCalled()
+    })
+
+    it('rejects TERMINAL_INTERNAL (BadRequest, Spanish — exclusiva del PAX)', async () => {
+      await expect(svc.createPrinter(VENUE, { name: 'PAX', connectionType: 'TERMINAL_INTERNAL' } as any)).rejects.toThrow(/app del PAX/)
       expect(mockPrisma.printer.create).not.toHaveBeenCalled()
     })
 
@@ -47,6 +54,32 @@ describe('printStation.dashboard.service', () => {
       await svc.createPrinter(VENUE, { name: 'Cocina', address: '192.168.1.50:9100' } as any, 'staff_1')
       const arg = mockPrisma.printer.create.mock.calls[0][0].data
       expect(arg).toMatchObject({ venueId: VENUE, connectionType: 'NETWORK', paperWidthMm: 80, charset: 'CP858' })
+    })
+
+    it('creates a BLUETOOTH printer with a valid MAC address', async () => {
+      mockPrisma.printer.create.mockResolvedValue({
+        id: 'pr_2',
+        name: 'Impresora BT',
+        connectionType: 'BLUETOOTH',
+        address: 'AA:BB:CC:DD:EE:FF',
+      })
+      await svc.createPrinter(VENUE, { name: 'Impresora BT', connectionType: 'BLUETOOTH', address: 'AA:BB:CC:DD:EE:FF' } as any, 'staff_1')
+      const arg = mockPrisma.printer.create.mock.calls[0][0].data
+      expect(arg).toMatchObject({ venueId: VENUE, connectionType: 'BLUETOOTH', address: 'AA:BB:CC:DD:EE:FF' })
+    })
+
+    it('rejects a NETWORK printer whose address looks like a MAC', async () => {
+      await expect(
+        svc.createPrinter(VENUE, { name: 'Cocina', connectionType: 'NETWORK', address: 'AA:BB:CC:DD:EE:FF' } as any),
+      ).rejects.toThrow(/dirección de red/)
+      expect(mockPrisma.printer.create).not.toHaveBeenCalled()
+    })
+
+    it('rejects a BLUETOOTH printer whose address looks like an IP', async () => {
+      await expect(
+        svc.createPrinter(VENUE, { name: 'Impresora BT', connectionType: 'BLUETOOTH', address: '192.168.1.50:9100' } as any),
+      ).rejects.toThrow(/dirección Bluetooth/)
+      expect(mockPrisma.printer.create).not.toHaveBeenCalled()
     })
 
     it('throws NotFound when the venue does not exist', async () => {

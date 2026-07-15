@@ -866,7 +866,13 @@ export async function checkInReservation(venueId: string, reservationId: string,
     // manually like before.
     logger.error(`[CHECK_IN] Order auto-create failed for reservation ${reservationId}: ${(err as Error).message}`)
   }
-  return Object.assign(transitioned, { orderId })
+  // Surface the full booked services[] (Square-pattern multi-service bookings
+  // store the lead service in `product` but the ordered list in `productIds`)
+  // so the POS can print one kitchen/service comanda per booked service.
+  // Reuses the same helper getReservationById/getReservationsCalendar use —
+  // purely additive, `orderId` and every other field are preserved.
+  const withServices = await attachServices(transitioned)
+  return Object.assign(withServices, { orderId })
 }
 
 export async function completeReservation(venueId: string, reservationId: string) {

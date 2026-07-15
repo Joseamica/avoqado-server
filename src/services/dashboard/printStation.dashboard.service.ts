@@ -6,15 +6,25 @@
  * - Toda mutación escribe ActivityLog (fire-and-forget, con `previous` para reversibilidad).
  * - I9: máximo UN default por venue (índice único parcial en DB) — al marcar un default
  *   se limpia el anterior en la MISMA transacción para no violar el índice.
- * - v1: solo impresoras NETWORK son ruteables ("rechazar rutas no servibles", spec v3).
+ * - v1.1: impresoras NETWORK y BLUETOOTH son ruteables por el gateway de impresión del
+ *   POS Android (su PrinterService ya implementa el transporte BT/SPP). USB_SPOOLER
+ *   (POS de escritorio/Windows) y TERMINAL_INTERNAL (impresora interna del PAX) siguen
+ *   rechazadas — el gateway Android no puede servir esas rutas ("rechazar rutas no
+ *   servibles", spec v3).
  * - El preview delega en el MISMO motor puro que consumirá la app (simulador honesto).
  */
-import { Prisma } from '@prisma/client'
+import { Prisma, PrinterConnectionType } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { logAction } from './activity-log.service'
 import { buildPrintConfig, routingConfigFrom } from '../printing/printConfig.service'
 import { buildTicketPlans, RoutingItemInput } from '../printing/printRouting.engine'
+import {
+  BLUETOOTH_ADDRESS_MESSAGE,
+  isValidBluetoothAddress,
+  isValidNetworkAddress,
+  NETWORK_ADDRESS_MESSAGE,
+} from '../../schemas/dashboard/printStation.schema'
 import type {
   AssignRoutingInput,
   CreatePrinterInput,
@@ -30,6 +40,30 @@ async function assertVenue(venueId: string): Promise<void> {
   if (!venue) throw new NotFoundError('Venue no encontrado')
 }
 
+// Motivo por el que el gateway de impresión del POS (Android) no puede servir estos tipos
+// de conexión — cada uno pertenece a un cliente distinto que no es el gateway Android.
+const UNSERVICEABLE_CONNECTION_MESSAGES: Partial<Record<PrinterConnectionType, string>> = {
+  USB_SPOOLER:
+    'El gateway de impresión del POS (Android) no puede imprimir por USB — ese tipo de conexión es exclusivo del POS de escritorio (Windows).',
+  TERMINAL_INTERNAL:
+    'El gateway de impresión del POS (Android) no puede usar la impresora interna del terminal — TERMINAL_INTERNAL es exclusiva de la app del PAX.',
+}
+
+function assertServiceableConnectionType(connectionType: PrinterConnectionType): void {
+  const message = UNSERVICEABLE_CONNECTION_MESSAGES[connectionType]
+  if (message) throw new BadRequestError(message)
+}
+
+function assertValidAddressShape(connectionType: PrinterConnectionType, address: string | null | undefined): void {
+  if (!address) return
+  if (connectionType === 'NETWORK' && !isValidNetworkAddress(address)) {
+    throw new BadRequestError(NETWORK_ADDRESS_MESSAGE)
+  }
+  if (connectionType === 'BLUETOOTH' && !isValidBluetoothAddress(address)) {
+    throw new BadRequestError(BLUETOOTH_ADDRESS_MESSAGE)
+  }
+}
+
 // ── Printers ────────────────────────────────────────────────────────
 export async function listPrinters(venueId: string) {
   await assertVenue(venueId)
@@ -38,11 +72,12 @@ export async function listPrinters(venueId: string) {
 
 export async function createPrinter(venueId: string, input: CreatePrinterInput, performedBy?: string) {
   await assertVenue(venueId)
-  const connectionType = input.connectionType ?? 'NETWORK'
-  // v1: solo NETWORK es ruteable a través del gateway.
-  if (connectionType !== 'NETWORK') {
-    throw new BadRequestError('Por ahora solo se admiten impresoras de red (NETWORK). Bluetooth/USB llegan en una fase posterior.')
-  }
+  const connectionType = (input.connectionType ?? 'NETWORK') as PrinterConnectionType
+  // Solo NETWORK y BLUETOOTH son ruteables por el gateway de impresión del POS Android.
+  assertServiceableConnectionType(connectionType)
+  // Shape ya validada en Zod (createPrinterSchema.superRefine) cuando ambos campos
+  // llegan en el mismo body — se revalida aquí también por si el caller es interno/script.
+  assertValidAddressShape(connectionType, input.address ?? null)
   const printer = await prisma.printer.create({
     data: {
       venueId,
@@ -68,9 +103,12 @@ export async function createPrinter(venueId: string, input: CreatePrinterInput, 
 export async function updatePrinter(venueId: string, printerId: string, input: UpdatePrinterInput, performedBy?: string) {
   const previous = await prisma.printer.findFirst({ where: { id: printerId, venueId } })
   if (!previous) throw new NotFoundError('Impresora no encontrada')
-  if (input.connectionType && input.connectionType !== 'NETWORK') {
-    throw new BadRequestError('Por ahora solo se admiten impresoras de red (NETWORK).')
-  }
+  // El tipo efectivo puede venir del input o (si no se envía) del registro existente —
+  // Zod no ve `previous`, así que la validación de forma de dirección vive aquí.
+  const effectiveConnectionType = (input.connectionType ?? previous.connectionType) as PrinterConnectionType
+  assertServiceableConnectionType(effectiveConnectionType)
+  const effectiveAddress = input.address === undefined ? previous.address : input.address
+  assertValidAddressShape(effectiveConnectionType, effectiveAddress)
   const printer = await prisma.printer.update({
     where: { id: printerId },
     data: {

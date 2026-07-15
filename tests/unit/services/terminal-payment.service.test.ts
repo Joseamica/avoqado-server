@@ -431,4 +431,41 @@ describe('TerminalPaymentService — closeRowFromPaymentTx (money moved beats a 
     await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-DONE', 'pay-2')
     expect(tx.terminalPaymentRequest.updateMany).not.toHaveBeenCalled()
   })
+
+  it('money landing on a CANCEL_REQUESTED row reconciles to COMPLETED AND alerts 🚨 (cancel lost the race — a human must know)', async () => {
+    const logger = require('@/config/logger').default
+    const errSpy = jest.spyOn(logger, 'error')
+    const tx = txWith('CANCEL_REQUESTED')
+
+    await terminalPaymentService.closeRowFromPaymentTx(tx, 'REQ-CR', 'pay-race')
+
+    // CANCEL_REQUESTED is still in-flight → a normal close (lateResult=false), not a reopen
+    expect(tx.terminalPaymentRequest.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'COMPLETED', paymentId: 'pay-race', lateResult: false }) }),
+    )
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining('🚨 [Terminal-payment]'),
+      expect.objectContaining({ priorStatus: 'CANCEL_REQUESTED' }),
+    )
+    errSpy.mockRestore()
+  })
+})
+
+describe('TerminalPaymentService — hasChargeBlockingOrderCancel (guard for cancelOrder)', () => {
+  it('blocks on PENDING/SENT/UNKNOWN but deliberately EXCLUDES CANCEL_REQUESTED (normal POS cancel flow must not 409)', async () => {
+    tpr().findFirst.mockResolvedValueOnce({ requestId: 'REQ-LIVE' })
+
+    const blocked = await terminalPaymentService.hasChargeBlockingOrderCancel('venue-1', 'order-1')
+
+    expect(blocked).toBe(true)
+    const where = (tpr().findFirst as jest.Mock).mock.calls[0][0].where
+    expect(where).toMatchObject({ venueId: 'venue-1', orderId: 'order-1' })
+    expect(where.status.in).toEqual(expect.arrayContaining(['PENDING', 'SENT', 'UNKNOWN']))
+    expect(where.status.in).not.toContain('CANCEL_REQUESTED')
+  })
+
+  it('returns false when the order has no live/unknown terminal charge', async () => {
+    tpr().findFirst.mockResolvedValueOnce(null)
+    expect(await terminalPaymentService.hasChargeBlockingOrderCancel('venue-1', 'order-2')).toBe(false)
+  })
 })

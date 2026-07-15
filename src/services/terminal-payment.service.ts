@@ -461,12 +461,17 @@ class TerminalPaymentService {
         data: { status: TerminalPaymentRequestStatus.COMPLETED, paymentId, lateResult: reopened },
       })
 
-      // If we had already CLOSED this row as cancelled/failed, the charge went through
-      // DESPITE that close — reconciled to COMPLETED here, but a human must know a
-      // "cancelled/failed" attempt actually took money. 🚨 = the stable Better Stack token.
-      if (before.status === TerminalPaymentRequestStatus.CANCELLED || before.status === TerminalPaymentRequestStatus.FAILED) {
+      // If the POS had asked to cancel (CANCEL_REQUESTED) or we had already CLOSED this
+      // row as cancelled/failed, the charge went through DESPITE that — reconciled to
+      // COMPLETED here, but a human must know a cancelled attempt actually took money.
+      // 🚨 = the stable Better Stack token.
+      if (
+        before.status === TerminalPaymentRequestStatus.CANCELLED ||
+        before.status === TerminalPaymentRequestStatus.FAILED ||
+        before.status === TerminalPaymentRequestStatus.CANCEL_REQUESTED
+      ) {
         logger.error(
-          `🚨 [Terminal-payment] Payment recorded for an already-${before.status} request — reconciled to COMPLETED (money moved despite close)`,
+          `🚨 [Terminal-payment] Payment recorded for an already-${before.status} request — reconciled to COMPLETED (money moved despite cancel/close)`,
           {
             requestId,
             paymentId,
@@ -481,6 +486,32 @@ class TerminalPaymentService {
         error: err instanceof Error ? err.message : String(err),
       })
     }
+  }
+
+  /**
+   * True when the order has a terminal charge that could still move money and
+   * NOBODY has asked to cancel: PENDING/SENT (charge live) or UNKNOWN (outcome
+   * undetermined — money may already have moved). Used to block cancelOrder:
+   * cancelling the order under one of these lets the charge land on a
+   * CANCELLED order (recorded & settled, but excluded from reports).
+   *
+   * CANCEL_REQUESTED is deliberately EXCLUDED: the POS cancel flow cancels the
+   * charge first and cancels the order immediately after — blocking on it
+   * would 409 every normal cancel. The residual race (money lands despite the
+   * cancel request) is reconciled by closeRowFromPaymentTx + the 🚨 alert.
+   */
+  async hasChargeBlockingOrderCancel(venueId: string, orderId: string): Promise<boolean> {
+    const row = await prisma.terminalPaymentRequest.findFirst({
+      where: {
+        venueId,
+        orderId,
+        status: {
+          in: [TerminalPaymentRequestStatus.PENDING, TerminalPaymentRequestStatus.SENT, TerminalPaymentRequestStatus.UNKNOWN],
+        },
+      },
+      select: { requestId: true },
+    })
+    return row !== null
   }
 
   /** Read a request's current status (mobile status endpoint + MCP tool). */
