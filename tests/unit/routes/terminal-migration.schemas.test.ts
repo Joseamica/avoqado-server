@@ -40,6 +40,40 @@ describe('terminal-migration route validation schemas', () => {
     })
   })
 
+  describe('migrateMerchant flag', () => {
+    it('acepta migrateMerchant en preflight', () => {
+      const r = migratePreflightSchema.safeParse({
+        params: { terminalId: 'term-1' },
+        body: { toVenueId: 'venue-new', migrateMerchant: true },
+      })
+      expect(r.success).toBe(true)
+    })
+
+    it('acepta migrateMerchant en execute', () => {
+      const r = migrateExecuteSchema.safeParse({
+        params: { terminalId: 'term-1' },
+        body: { toVenueId: 'venue-new', migrateMerchant: true },
+      })
+      expect(r.success).toBe(true)
+    })
+
+    it('migrateMerchant es opcional (regresión: el body de hoy sigue pasando)', () => {
+      const r = migrateExecuteSchema.safeParse({
+        params: { terminalId: 'term-1' },
+        body: { toVenueId: 'venue-new' },
+      })
+      expect(r.success).toBe(true)
+    })
+
+    it('rechaza migrateMerchant no-booleano', () => {
+      const r = migrateExecuteSchema.safeParse({
+        params: { terminalId: 'term-1' },
+        body: { toVenueId: 'venue-new', migrateMerchant: 'sí' },
+      })
+      expect(r.success).toBe(false)
+    })
+  })
+
   describe('migrateStatusSchema', () => {
     it('accepts a UUID terminalId + commandId in query', () => {
       const r = migrateStatusSchema.safeParse({ params: { terminalId: UUID }, query: { commandId: CUID } })
