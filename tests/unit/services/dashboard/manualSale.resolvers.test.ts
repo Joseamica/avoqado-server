@@ -231,6 +231,16 @@ describe('mapPaymentForm', () => {
     expect(mapPaymentForm('No aplica')).toEqual({ method: 'OTHER', amountApplies: false })
   })
 
+  // Regression: a blank "Forma de Pago" cell (common in the sheet for free SIM swaps)
+  // must be treated as "No aplica", NOT rejected — otherwise one blank cell 400s the
+  // whole 342-row upload (the prod bug where "Cargar" did nothing).
+  it('blank / whitespace / undefined / null → OTHER, amountApplies false', () => {
+    expect(mapPaymentForm('')).toEqual({ method: 'OTHER', amountApplies: false })
+    expect(mapPaymentForm('   ')).toEqual({ method: 'OTHER', amountApplies: false })
+    expect(mapPaymentForm(undefined)).toEqual({ method: 'OTHER', amountApplies: false })
+    expect(mapPaymentForm(null)).toEqual({ method: 'OTHER', amountApplies: false })
+  })
+
   it('is case-insensitive', () => {
     expect(mapPaymentForm('efectivo')).toEqual({ method: 'CASH', amountApplies: true })
     expect(mapPaymentForm('NO APLICA')).toEqual({ method: 'OTHER', amountApplies: false })

@@ -224,8 +224,8 @@ export async function resolveCategory(
  * reasoning — flagged for founder confirmation if debit/credit ever need to
  * be told apart downstream (commissions, reconciliation).
  */
-export function mapPaymentForm(raw: string): { method: PaymentMethod; amountApplies: boolean } {
-  const normalized = raw.trim().toLowerCase()
+export function mapPaymentForm(raw: string | undefined | null): { method: PaymentMethod; amountApplies: boolean } {
+  const normalized = (raw ?? '').trim().toLowerCase()
 
   if (normalized === 'efectivo') {
     return { method: PaymentMethod.CASH, amountApplies: true }
@@ -241,7 +241,10 @@ export function mapPaymentForm(raw: string): { method: PaymentMethod; amountAppl
     return { method: PaymentMethod.CREDIT_CARD, amountApplies: true }
   }
 
-  if (normalized === 'no aplica') {
+  // Blank / missing "Forma de Pago" is treated as "No aplica" (no money changed hands):
+  // the sheet routinely leaves it empty for free SIM swaps, so a blank cell must never
+  // reject the whole upload.
+  if (normalized === '' || normalized === 'no aplica') {
     return { method: PaymentMethod.OTHER, amountApplies: false }
   }
 

@@ -25,8 +25,13 @@ export const manualSaleRowSchema = z.object({
   saleDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Fecha inválida (usa AAAA-MM-DD)'),
   /** "Tipo de Venta" — e.g. "Línea nueva" | "Portabilidad". */
   saleType: z.string().min(1, 'El tipo de venta es requerido'),
-  /** "Forma de Pago" — e.g. "Efectivo" | "Tarjeta" | "No aplica". */
-  paymentForm: z.string().min(1, 'La forma de pago es requerida'),
+  /**
+   * "Forma de Pago" — e.g. "Efectivo" | "Tarjeta" | "No aplica". Optional: the sheet
+   * routinely leaves this blank for free SIM swaps, and a single blank cell must not
+   * fail the whole upload. A blank/missing value is treated as "No aplica" (no money
+   * changed hands) by `mapPaymentForm`.
+   */
+  paymentForm: z.string().optional(),
   /** "Monto de Venta" — a number, a numeric string, or the literal "No aplica". */
   amount: z.union([z.number(), z.string()]),
   /** "Tipo de SIM" / "Categoría" — optional; falls back to the item's existing category. */
