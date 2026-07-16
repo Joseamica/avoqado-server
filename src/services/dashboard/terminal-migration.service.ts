@@ -508,13 +508,17 @@ export async function migrateCancel(terminalId: string, actor: TerminalActor): P
 
   // 2) Read the revert target from the command payload. Older commands queued
   //    before the blindar payload existed can't be auto-reverted.
-  const migration = (command.payload as { migration?: { fromVenueId?: string; previousMerchantIds?: string[] } } | null)?.migration
+  const migration = (
+    command.payload as {
+      migration?: { fromVenueId?: string; previousMerchantIds?: string[]; createdVenuePaymentConfigId?: string }
+    } | null
+  )?.migration
   if (!migration || !migration.fromVenueId) {
     throw new BadRequestError(
       'Esta migración no se puede revertir automáticamente: el comando de borrado no tiene la información del venue de origen.',
     )
   }
-  const { fromVenueId, previousMerchantIds } = migration
+  const { fromVenueId, previousMerchantIds, createdVenuePaymentConfigId } = migration
 
   // 3) Cancel the queued wipe so it never reaches the device.
   await tpvCommandQueueService.cancelCommand(command.id, actor.staffId ?? 'system', 'Migración cancelada por el operador')
@@ -526,6 +530,24 @@ export async function migrateCancel(terminalId: string, actor: TerminalActor): P
     where: { id: terminalId },
     data: { venueId: fromVenueId, assignedMerchantIds: previousMerchantIds ?? [] },
   })
+
+  // 4b) I5: deshacer la VenuePaymentConfig que ESTA migración creó. Sin esto, una
+  //     migración cancelada dejaría al venue destino cobrando para siempre.
+  //     deleteMany (no delete) para ser idempotente si ya no existe. Sólo tocamos
+  //     la fila cuyo id grabamos nosotros — nunca una preexistente (I1).
+  if (createdVenuePaymentConfigId) {
+    await prisma.venuePaymentConfig.deleteMany({ where: { id: createdVenuePaymentConfigId } })
+    await logAction({
+      staffId: actor.staffId ?? null,
+      venueId: fromVenueId,
+      action: 'VENUE_PAYMENT_CONFIG_DELETED',
+      entity: 'VenuePaymentConfig',
+      entityId: createdVenuePaymentConfigId,
+      data: { reason: 'Migración de terminal cancelada', commandId: command.id, terminalId },
+      ipAddress: actor.ipAddress,
+      userAgent: actor.userAgent,
+    })
+  }
 
   // 5) Best-effort audit trail (never throws).
   await logAction({

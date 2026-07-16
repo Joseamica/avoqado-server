@@ -10,6 +10,7 @@ jest.mock('@/utils/prismaClient', () => ({
   default: {
     tpvCommandQueue: { findFirst: jest.fn() },
     terminal: { update: jest.fn() },
+    venuePaymentConfig: { deleteMany: jest.fn() },
   },
 }))
 jest.mock('@/services/tpv/command-queue.service', () => ({
@@ -21,6 +22,7 @@ jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.
 const m = prisma as unknown as {
   tpvCommandQueue: { findFirst: jest.Mock }
   terminal: { update: jest.Mock }
+  venuePaymentConfig: { deleteMany: jest.Mock }
 }
 const mockedCancelCommand = tpvCommandQueueService.cancelCommand as jest.Mock
 
@@ -106,5 +108,52 @@ describe('migrateCancel', () => {
     // nothing mutated when we can't determine the revert target
     expect(mockedCancelCommand).not.toHaveBeenCalled()
     expect(m.terminal.update).not.toHaveBeenCalled()
+  })
+})
+
+describe('migrateCancel — config de pagos creada por la migración', () => {
+  const actor = { staffId: 'admin-1' }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    m.terminal.update.mockResolvedValue({ id: 'term-1', venueId: 'venue-old' })
+    mockedCancelCommand.mockResolvedValue(undefined)
+  })
+
+  it('I5: borra la VenuePaymentConfig que creó la migración', async () => {
+    m.tpvCommandQueue.findFirst.mockResolvedValue({
+      id: 'cmd-1',
+      payload: {
+        migration: {
+          fromVenueId: 'venue-old',
+          previousMerchantIds: ['merch-p'],
+          createdVenuePaymentConfigId: 'vpc-nueva',
+        },
+      },
+    })
+    await migrateCancel('term-1', actor)
+    expect(m.venuePaymentConfig.deleteMany).toHaveBeenCalledWith({ where: { id: 'vpc-nueva' } })
+  })
+
+  it('I1+I5: NO borra nada si la migración no creó config', async () => {
+    m.tpvCommandQueue.findFirst.mockResolvedValue({
+      id: 'cmd-1',
+      payload: { migration: { fromVenueId: 'venue-old', previousMerchantIds: ['merch-p'] } },
+    })
+    await migrateCancel('term-1', actor)
+    expect(m.venuePaymentConfig.deleteMany).not.toHaveBeenCalled()
+  })
+
+  it('REGRESIÓN: sigue revirtiendo venue y merchants del origen', async () => {
+    m.tpvCommandQueue.findFirst.mockResolvedValue({
+      id: 'cmd-1',
+      payload: { migration: { fromVenueId: 'venue-old', previousMerchantIds: ['merch-p'] } },
+    })
+    const r = await migrateCancel('term-1', actor)
+    expect(r).toEqual({ cancelled: true, restoredVenueId: 'venue-old' })
+    expect(m.terminal.update).toHaveBeenCalledWith({
+      where: { id: 'term-1' },
+      data: { venueId: 'venue-old', assignedMerchantIds: ['merch-p'] },
+    })
   })
 })
