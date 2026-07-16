@@ -275,17 +275,37 @@ export interface MigrateExecuteResult {
  * delegates the re-parent + wipe to `updateTerminal` and must NOT queue the
  * wipe again (that would double-wipe). It recovers the queued command id by
  * re-querying the latest FACTORY_RESET for the terminal.
+ *
+ * With `migrateMerchant`, the terminal keeps carrying its origin merchant(s) instead
+ * of resolving the destination's default, and — only if the destination has no
+ * `VenuePaymentConfig` of its own (I1) — one gets created, copied from the origin.
+ * That write's id is stamped onto the FACTORY_RESET payload
+ * (`migration.createdVenuePaymentConfigId`) so `migrateCancel` (Task 5) can undo it.
  */
 export async function migrateExecute(
   terminalId: string,
   toVenueId: string,
   actor: TerminalActor & { staffName?: string },
   assignedMerchantIds?: string[],
+  migrateMerchant = false,
 ): Promise<MigrateExecuteResult> {
   // Re-validate at execute time — state may have changed since preflight.
-  const pre = await migratePreflight(terminalId, toVenueId)
+  const pre = await migratePreflight(terminalId, toVenueId, migrateMerchant)
   if (!pre.canProceed) {
     throw new BadRequestError(`Migration blocked: ${pre.blockers.map(b => b.code).join(', ')}`)
+  }
+
+  // 0) Snapshot del origen ANTES del re-parent: updateTerminal borra
+  //    assignedMerchantIds y el venue cambia, así que después ya no se puede leer.
+  let origin: OriginPaymentSnapshot | null = null
+  if (migrateMerchant) {
+    const terminalBefore = await prisma.terminal.findUnique({ where: { id: terminalId } })
+    if (!terminalBefore) throw new NotFoundError('Terminal not found')
+    const originVenue = await prisma.venue.findUnique({ where: { id: terminalBefore.venueId } })
+    origin = await resolveOriginPayment(
+      { venueId: terminalBefore.venueId, assignedMerchantIds: terminalBefore.assignedMerchantIds ?? [] },
+      originVenue?.organizationId ?? null,
+    )
   }
 
   // 1) Re-parent + auto-queue the wipe in ONE call. updateTerminal validates the
@@ -311,6 +331,11 @@ export async function migrateExecute(
   //    assignedMerchantIds — online but unable to process payments ("migró pero no
   //    cobra"). The "recommended default" must therefore resolve to a real merchant.
   let merchantsToAssign = assignedMerchantIds
+  // Con migrateMerchant, la terminal se lleva lo del origen en vez de resolver el
+  // default del destino (que puede no existir — ése es justo el caso a desbloquear).
+  if ((!merchantsToAssign || merchantsToAssign.length === 0) && migrateMerchant && origin) {
+    merchantsToAssign = origin.merchantIds
+  }
   if (!merchantsToAssign || merchantsToAssign.length === 0) {
     const paymentConfig = await prisma.venuePaymentConfig.findFirst({
       where: { venueId: toVenueId },
@@ -322,6 +347,70 @@ export async function migrateExecute(
   }
   if (merchantsToAssign && merchantsToAssign.length > 0) {
     await updateTerminal(terminalId, { assignedMerchantIds: merchantsToAssign }, actor)
+  }
+
+  // 2b) Dejar el venue destino cobrando de forma permanente.
+  //     I1: si ya tiene config propia NO se toca — sobrescribirla repuntaría el
+  //     dinero de un venue que ya cobra.
+  let createdVenuePaymentConfigId: string | null = null
+  if (migrateMerchant && origin?.copyable) {
+    const copyable = origin.copyable
+    const existing = await prisma.venuePaymentConfig.findUnique({ where: { venueId: toVenueId } })
+    if (!existing) {
+      // Money-safety (review finding, not in the original brief): `copyable` comes
+      // straight from `resolveOriginPayment`, which is deliberately NOT filtered by
+      // `MerchantAccount.active` (see its docstring — it's a lightweight ids-only
+      // helper). `pre` above already confirmed SOME active merchant exists among the
+      // origin's merchants (ORIGIN_HAS_NO_MERCHANT), but not specifically that
+      // `primaryAccountId` — the one non-nullable field this INSERT hinges on — is
+      // the active one (e.g. secondary active, primary deactivated for fraud/
+      // compliance). Writing an inactive primaryAccountId into a brand-new
+      // VenuePaymentConfig would silently leave the destination "migrated but can't
+      // charge" — the exact failure this feature exists to prevent. Scoped
+      // deliberately narrow to primaryAccountId only: no re-ranking/promoting
+      // secondary → primary — that's real complexity for a currently
+      // zero-instance-in-prod edge case (verified in prod: 2026-07-15).
+      const referencedIds = [copyable.primaryAccountId, copyable.secondaryAccountId, copyable.tertiaryAccountId].filter(
+        (id): id is string => !!id,
+      )
+      const activeReferenced = await prisma.merchantAccount.findMany({
+        where: { id: { in: referencedIds }, active: true },
+        select: { id: true },
+      })
+      const primaryIsActive = activeReferenced.some(m => m.id === copyable.primaryAccountId)
+
+      if (!primaryIsActive) {
+        logger.warn(
+          `Terminal migration ${terminalId}: skipping VenuePaymentConfig creation for venue ${toVenueId} — origin's primaryAccountId (${copyable.primaryAccountId}) is not an active MerchantAccount.`,
+        )
+      } else {
+        // Cast needed: `copyable.routingRules` is typed `Prisma.JsonValue | null` (a read
+        // shape, from resolveOriginPayment's SELECT), but Prisma's generated create input
+        // for a nullable Json column wants its `NullableJsonNullValueInput` sentinel instead
+        // of a bare `null` — a well-known Prisma JSON-null typing quirk. Runtime value is
+        // unaffected (still plain `null`, exactly what a copied "no routing rules" origin
+        // config should write).
+        const created = await prisma.venuePaymentConfig.create({
+          data: { venueId: toVenueId, ...copyable } as Prisma.VenuePaymentConfigUncheckedCreateInput,
+        })
+        createdVenuePaymentConfigId = created.id
+        // I6: es ruteo de dinero → va auditado.
+        await logAction({
+          staffId: actor.staffId ?? null,
+          venueId: toVenueId,
+          action: 'VENUE_PAYMENT_CONFIG_CREATED',
+          entity: 'VenuePaymentConfig',
+          entityId: created.id,
+          data: {
+            copiedFromVenueId: pre.fromVenueId,
+            primaryAccountId: copyable.primaryAccountId,
+            viaTerminalMigration: terminalId,
+          },
+          ipAddress: actor.ipAddress,
+          userAgent: actor.userAgent,
+        })
+      }
+    }
   }
 
   // 3) Recover the queued wipe's commandId. updateTerminal does not return it
@@ -342,6 +431,17 @@ export async function migrateExecute(
     throw new ConflictError(
       'La terminal se reasignó correctamente al venue destino, pero no se pudo encolar el borrado (factory reset). La terminal NO se ha borrado todavía — reenvía el factory reset desde el panel de comandos de la TPV.',
     )
+  }
+
+  // I5: el cancel necesita saber qué config creamos para poder deshacerla. El
+  //     payload lo escribe updateTerminal ("blindar"), así que lo parchamos aquí.
+  if (createdVenuePaymentConfigId) {
+    const payload = (cmd.payload as Record<string, unknown> | null) ?? {}
+    const migration = (payload.migration as Record<string, unknown> | undefined) ?? {}
+    await prisma.tpvCommandQueue.update({
+      where: { id: cmd.id },
+      data: { payload: { ...payload, migration: { ...migration, createdVenuePaymentConfigId } } },
+    })
   }
 
   return { commandId: cmd.id, fromVenueId: pre.fromVenueId, toVenueId, startedAt: new Date() }
