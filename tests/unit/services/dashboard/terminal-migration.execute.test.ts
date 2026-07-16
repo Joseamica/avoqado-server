@@ -1,6 +1,7 @@
 import { migrateExecute } from '@/services/dashboard/terminal-migration.service'
 import prisma from '@/utils/prismaClient'
 import * as terminalsService from '@/services/dashboard/terminals.superadmin.service'
+import logger from '@/config/logger'
 
 // Mock the Prisma layer so the REAL migratePreflight (called inside migrateExecute) runs.
 // Do NOT self-mock the migration module — Jest can't intercept intra-module calls, so
@@ -15,7 +16,7 @@ jest.mock('@/utils/prismaClient', () => ({
   default: {
     terminal: { findUnique: jest.fn() },
     venue: { findUnique: jest.fn() },
-    venuePaymentConfig: { findFirst: jest.fn(), findUnique: jest.fn() },
+    venuePaymentConfig: { findFirst: jest.fn(), findUnique: jest.fn(), create: jest.fn() },
     organizationPaymentConfig: { findUnique: jest.fn() },
     merchantAccount: { findMany: jest.fn() },
     staffVenue: { findFirst: jest.fn() },
@@ -31,7 +32,7 @@ jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.
 const m = prisma as unknown as {
   terminal: { findUnique: jest.Mock }
   venue: { findUnique: jest.Mock }
-  venuePaymentConfig: { findFirst: jest.Mock; findUnique: jest.Mock }
+  venuePaymentConfig: { findFirst: jest.Mock; findUnique: jest.Mock; create: jest.Mock }
   organizationPaymentConfig: { findUnique: jest.Mock }
   merchantAccount: { findMany: jest.Mock }
   staffVenue: { findFirst: jest.Mock }
@@ -143,5 +144,142 @@ describe('migrateExecute', () => {
 
     // the re-parent WAS performed even though the function ultimately threw
     expect(mockedUpdate).toHaveBeenCalledWith('term-1', { venueId: 'venue-new' }, expect.objectContaining({ staffId: 'admin-1' }))
+  })
+})
+
+// Config del venue ORIGEN (VenuePaymentConfig), tal como la devolvería
+// `venuePaymentConfig.findUnique` para 'venue-old'. Sirve de fixture compartida
+// para todo `describe('migrateExecute — migrateMerchant', ...)`.
+const ORIGIN_CFG = {
+  primaryAccountId: 'merch-p',
+  secondaryAccountId: null,
+  tertiaryAccountId: null,
+  preferredProcessor: 'AUTO',
+  routingRules: null,
+}
+
+describe('migrateExecute — migrateMerchant', () => {
+  const actor = { staffId: 'admin-1' }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    // Origen: terminal con un merchant asignado (merch-p) y su propia VenuePaymentConfig.
+    // Destino: sin VenuePaymentConfig propia — el caso que este flujo existe para desbloquear.
+    m.terminal.findUnique.mockResolvedValue({
+      id: 'term-1',
+      venueId: 'venue-old',
+      status: 'ACTIVE',
+      brand: 'PAX',
+      assignedMerchantIds: ['merch-p'],
+    })
+    m.venue.findUnique.mockImplementation(({ where }: { where: { id: string } }) =>
+      Promise.resolve(
+        where.id === 'venue-old'
+          ? { id: 'venue-old', name: 'Old', organizationId: 'org-1' }
+          : { id: 'venue-new', name: 'New', organizationId: 'org-1' },
+      ),
+    )
+    m.venuePaymentConfig.findFirst.mockResolvedValue(null) // destino sin config propia (preflight)
+    m.venuePaymentConfig.findUnique.mockImplementation(({ where }: { where: { venueId: string } }) =>
+      Promise.resolve(where.venueId === 'venue-new' ? null : ORIGIN_CFG),
+    )
+    m.organizationPaymentConfig.findUnique.mockResolvedValue(null)
+    m.merchantAccount.findMany.mockResolvedValue([{ id: 'merch-p', displayName: 'playtelecom-p' }])
+    m.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1' })
+    // Preflight's in-flight check (1st call) → sin migración en curso; la recuperación del
+    // wipe (2nd call, en migrateExecute) → el FACTORY_RESET recién encolado.
+    m.tpvCommandQueue.findFirst.mockResolvedValueOnce(null).mockResolvedValue({ id: 'cmd-1', commandType: 'FACTORY_RESET', payload: null })
+    m.tpvCommandQueue.update.mockResolvedValue({})
+    m.venuePaymentConfig.create.mockResolvedValue({ id: 'vpc-nueva' })
+    mockedUpdate.mockResolvedValue({ id: 'term-1', venueId: 'venue-new', name: 'T1' })
+  })
+
+  it('la terminal conserva los merchants del origen', async () => {
+    await migrateExecute('term-1', 'venue-new', actor, undefined, true)
+    expect(mockedUpdate).toHaveBeenCalledWith('term-1', { assignedMerchantIds: ['merch-p'] }, actor)
+  })
+
+  it('crea la VenuePaymentConfig del destino copiada del origen', async () => {
+    await migrateExecute('term-1', 'venue-new', actor, undefined, true)
+    expect(m.venuePaymentConfig.create).toHaveBeenCalledWith({
+      data: {
+        venueId: 'venue-new',
+        primaryAccountId: 'merch-p',
+        secondaryAccountId: null,
+        tertiaryAccountId: null,
+        preferredProcessor: 'AUTO',
+        routingRules: null,
+      },
+    })
+  })
+
+  it('I1: NO sobrescribe una config preexistente del destino', async () => {
+    m.venuePaymentConfig.findUnique.mockImplementation(({ where }: { where: { venueId: string } }) =>
+      Promise.resolve(where.venueId === 'venue-new' ? { id: 'vpc-destino-ya-existe' } : ORIGIN_CFG),
+    )
+    await migrateExecute('term-1', 'venue-new', actor, undefined, true)
+    expect(m.venuePaymentConfig.create).not.toHaveBeenCalled()
+  })
+
+  it('graba createdVenuePaymentConfigId en el payload del wipe (para el cancel)', async () => {
+    m.venuePaymentConfig.create.mockResolvedValue({ id: 'vpc-nueva' })
+    await migrateExecute('term-1', 'venue-new', actor, undefined, true)
+    expect(m.tpvCommandQueue.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          payload: expect.objectContaining({
+            migration: expect.objectContaining({ createdVenuePaymentConfigId: 'vpc-nueva' }),
+          }),
+        }),
+      }),
+    )
+  })
+
+  it('REGRESIÓN: sin migrateMerchant no crea config ni toca el payload', async () => {
+    // Sin migrateMerchant, NO_PAYMENT_CONFIG exige que el destino YA tenga su propia
+    // config (Task 3) — a diferencia del resto de este describe, que prueba el caso
+    // "destino sin config" que migrateMerchant existe para desbloquear.
+    m.venuePaymentConfig.findFirst.mockResolvedValue({ id: 'vpc-existente', primaryAccountId: 'merch-existente' })
+    await migrateExecute('term-1', 'venue-new', actor)
+    expect(m.venuePaymentConfig.create).not.toHaveBeenCalled()
+    expect(m.tpvCommandQueue.update).not.toHaveBeenCalled()
+  })
+
+  it('REGRESIÓN: se encola exactamente UN factory reset (anti doble-wipe)', async () => {
+    await migrateExecute('term-1', 'venue-new', actor, undefined, true)
+    const venueChanges = (mockedUpdate as jest.Mock).mock.calls.filter(c => 'venueId' in c[1])
+    expect(venueChanges).toHaveLength(1)
+  })
+
+  it('assignedMerchantIds explícitos ganan sobre el acarreo automático', async () => {
+    await migrateExecute('term-1', 'venue-new', actor, ['merch-elegido'], true)
+    expect(mockedUpdate).toHaveBeenCalledWith('term-1', { assignedMerchantIds: ['merch-elegido'] }, actor)
+  })
+
+  // Required addition (money-safety, review finding): `resolveOriginPayment`'s `copyable`
+  // is NOT filtered by MerchantAccount.active. Here the terminal carries TWO merchants —
+  // 'merch-inactivo' becomes copyable.primaryAccountId (it's merchantIds[0]) but is
+  // deactivated (fraud/compliance); 'merch-activo' is merchantIds[1] and IS active. Preflight
+  // only requires SOME origin merchant to be active (satisfied by merch-activo) so it does
+  // NOT block — but writing 'merch-inactivo' as the destination's new primaryAccountId would
+  // leave it "migrated but can't charge". Must skip the create (not throw), warn, and still
+  // let the terminal carry both merchant ids (that write is separately guarded: the TPV
+  // filters assignedMerchantIds to active:true at read time).
+  it('origen: primaryAccountId inactivo (secondary activo) → NO crea VenuePaymentConfig, loguea warning, sí asigna merchants a la terminal', async () => {
+    m.terminal.findUnique.mockResolvedValue({
+      id: 'term-1',
+      venueId: 'venue-old',
+      status: 'ACTIVE',
+      brand: 'PAX',
+      assignedMerchantIds: ['merch-inactivo', 'merch-activo'],
+    })
+    m.merchantAccount.findMany.mockResolvedValue([{ id: 'merch-activo', displayName: 'Activo' }])
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => logger)
+
+    await migrateExecute('term-1', 'venue-new', actor, undefined, true)
+
+    expect(m.venuePaymentConfig.create).not.toHaveBeenCalled()
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('merch-inactivo'))
+    expect(mockedUpdate).toHaveBeenCalledWith('term-1', { assignedMerchantIds: ['merch-inactivo', 'merch-activo'] }, actor)
   })
 })
