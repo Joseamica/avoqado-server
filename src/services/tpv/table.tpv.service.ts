@@ -22,6 +22,8 @@ interface TableStatusResponse {
     covers: number | null
     total: number
     itemCount: number
+    /** Order.version for optimistic concurrency on add-round (additive). */
+    version: number
     items: Array<{
       id: string
       productName: string
@@ -88,6 +90,7 @@ export async function getTablesWithStatus(venueId: string): Promise<TableStatusR
           covers: table.currentOrder.covers,
           total: Number(table.currentOrder.total),
           itemCount: table.currentOrder.items.length,
+          version: table.currentOrder.version,
           items: table.currentOrder.items.map(item => ({
             id: item.id,
             productName: item.product?.name || item.productName || 'Unknown',
@@ -562,6 +565,7 @@ export async function updateTable(
           covers: updatedTable.currentOrder.covers,
           total: Number(updatedTable.currentOrder.total),
           itemCount: updatedTable.currentOrder.items.length,
+          version: updatedTable.currentOrder.version,
           items: updatedTable.currentOrder.items.map(item => ({
             id: item.id,
             productName: item.product?.name || item.productName || 'Unknown',
