@@ -9,6 +9,7 @@
 import { NextFunction, Request, Response } from 'express'
 import logger from '../../config/logger'
 import * as orderMobileService from '../../services/mobile/order.mobile.service'
+import * as orderTpvService from '../../services/tpv/order.tpv.service'
 
 /**
  * List orders for a venue (paginated)
@@ -225,6 +226,38 @@ export const cancelOrder = async (req: Request, res: Response, next: NextFunctio
     })
   } catch (error) {
     logger.error('Error in cancelOrder controller:', error)
+    next(error)
+  }
+}
+
+/**
+ * POST /mobile/venues/:venueId/orders/:orderId/items
+ * TABLE_SERVICE (PRO) — add a round of items to an OPEN order (table service).
+ * Delegates to the same upsert-with-optimistic-concurrency service the TPV
+ * uses: body carries { items: AddOrderItemInput[], version: number } and a
+ * stale `version` answers 409 so the client refetches before retrying.
+ */
+export const addItemsToOrder = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, orderId } = req.params
+    const { items, version } = req.body ?? {}
+
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ success: false, message: 'items es requerido y no puede estar vacío' })
+    }
+    if (typeof version !== 'number') {
+      return res.status(400).json({ success: false, message: 'version (número) es requerida para concurrencia optimista' })
+    }
+
+    const updatedOrder = await orderTpvService.addItemsToOrder(venueId, orderId, items, version)
+
+    return res.status(200).json({
+      success: true,
+      data: updatedOrder,
+      message: `Added ${items.length} item(s) to order`,
+    })
+  } catch (error) {
+    logger.error('Error in addItemsToOrder controller:', error)
     next(error)
   }
 }

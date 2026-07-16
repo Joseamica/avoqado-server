@@ -39,3 +39,55 @@ export async function getTables(req: Request, res: Response): Promise<void> {
     })
   }
 }
+
+/**
+ * POST /mobile/venues/:venueId/tables/:tableId/open
+ * TABLE_SERVICE (PRO) — open a table: reuses the table's active order if one
+ * exists, otherwise creates an empty DINE_IN order and marks the table
+ * OCCUPIED (same service the TPV terminal uses, so Socket.IO
+ * TABLE_STATUS_CHANGE broadcasts stay consistent across clients).
+ * Body: { covers?: number }
+ */
+export async function openTable(req: Request, res: Response): Promise<void> {
+  try {
+    const { venueId, tableId } = req.params
+    const staffId = (req as any).authContext?.userId
+    if (!staffId) {
+      res.status(401).json({ success: false, message: 'No autenticado' })
+      return
+    }
+    const covers = Number(req.body?.covers) > 0 ? Number(req.body.covers) : 1
+
+    const result = await tableService.assignTable(venueId, tableId, staffId, covers, null)
+
+    res.status(200).json({ success: true, data: result })
+  } catch (error: any) {
+    logger.error(`[TABLE MOBILE CONTROLLER] Error opening table: ${error.message}`)
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || 'Internal server error',
+    })
+  }
+}
+
+/**
+ * POST /mobile/venues/:venueId/tables/:tableId/clear
+ * TABLE_SERVICE (PRO) — release a table after its order is PAID (the service
+ * rejects clearing a table with an unpaid order). Marks it AVAILABLE and
+ * broadcasts the change.
+ */
+export async function clearTable(req: Request, res: Response): Promise<void> {
+  try {
+    const { venueId, tableId } = req.params
+
+    await tableService.clearTable(venueId, tableId)
+
+    res.status(200).json({ success: true, message: 'Mesa liberada' })
+  } catch (error: any) {
+    logger.error(`[TABLE MOBILE CONTROLLER] Error clearing table: ${error.message}`)
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || 'Internal server error',
+    })
+  }
+}

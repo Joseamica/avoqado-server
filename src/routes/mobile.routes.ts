@@ -38,6 +38,7 @@ import * as tableMobileController from '../controllers/mobile/table.mobile.contr
 import * as creditPackMobileController from '../controllers/mobile/creditPack.mobile.controller'
 import * as printMobileController from '../controllers/mobile/print.mobile.controller'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
+import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { recordFastPaymentParamsSchema, recordPaymentBodySchema } from '../schemas/tpv.schema'
@@ -1575,6 +1576,50 @@ router.get('/venues/:venueId/suppliers', authenticateTokenMiddleware, supplierMo
  *         description: List of tables with their current status and orders
  */
 router.get('/venues/:venueId/tables', authenticateTokenMiddleware, checkPermission('tables:read'), tableMobileController.getTables)
+
+// ─── TABLE_SERVICE (PRO) — restaurant table service from the mobile POS ─────
+// Open/clear tables and add rounds to an open order. Gated by the
+// TABLE_SERVICE feature code (paid-tier blanket grant → PRO+; FREE gets 403),
+// mirrored by exact name in the iOS/Android plan gates. Delegates to the same
+// TPV services, so Socket.IO TABLE_STATUS_CHANGE stays consistent everywhere.
+
+/**
+ * POST /api/v1/mobile/venues/{venueId}/tables/{tableId}/open
+ * Open a table: reuses its active order or creates an empty DINE_IN order and
+ * marks the table OCCUPIED. Body: { covers?: number }
+ */
+router.post(
+  '/venues/:venueId/tables/:tableId/open',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('TABLE_SERVICE'),
+  checkPermission('orders:create'),
+  tableMobileController.openTable,
+)
+
+/**
+ * POST /api/v1/mobile/venues/{venueId}/tables/{tableId}/clear
+ * Release a table after its order is PAID (rejects unpaid orders).
+ */
+router.post(
+  '/venues/:venueId/tables/:tableId/clear',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('TABLE_SERVICE'),
+  checkPermission('orders:create'),
+  tableMobileController.clearTable,
+)
+
+/**
+ * POST /api/v1/mobile/venues/{venueId}/orders/{orderId}/items
+ * Add a round of items to an OPEN order (optimistic concurrency via body
+ * `version`; stale version → 409).
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/items',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('TABLE_SERVICE'),
+  checkPermission('orders:create'),
+  orderMobileController.addItemsToOrder,
+)
 
 // ============================================================================
 // INVENTORY
