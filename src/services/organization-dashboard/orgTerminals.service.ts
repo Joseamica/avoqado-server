@@ -556,11 +556,16 @@ export async function getOrgMerchantAccounts(orgId: string) {
 /**
  * Preflight a terminal migration scoped to an org.
  * Guards: source terminal ∈ org, destination venue ∈ org.
+ *
+ * Nota: aquí el cross-org es imposible por construcción (ambos venues se validan
+ * contra `orgId`), así que el blocker CROSS_ORG_MERCHANT del servicio compartido
+ * nunca se dispara por esta vía. Existe para el namespace superadmin, que sí
+ * permite mover entre organizaciones.
  */
-export async function migratePreflightForOrg(orgId: string, terminalId: string, toVenueId: string) {
+export async function migratePreflightForOrg(orgId: string, terminalId: string, toVenueId: string, migrateMerchant?: boolean) {
   await validateTerminalInOrg(terminalId, orgId)
   await validateVenueInOrg(toVenueId, orgId)
-  return migratePreflight(terminalId, toVenueId)
+  return migratePreflight(terminalId, toVenueId, migrateMerchant)
 }
 
 /**
@@ -573,13 +578,14 @@ export async function migrateExecuteForOrg(
   toVenueId: string,
   actor: TerminalActor & { staffName?: string },
   assignedMerchantIds?: string[],
+  migrateMerchant?: boolean,
 ) {
   await validateTerminalInOrg(terminalId, orgId)
   await validateVenueInOrg(toVenueId, orgId)
   if (assignedMerchantIds && assignedMerchantIds.length > 0) {
     await validateMerchantsInOrg(orgId, assignedMerchantIds)
   }
-  return migrateExecute(terminalId, toVenueId, actor, assignedMerchantIds)
+  return migrateExecute(terminalId, toVenueId, actor, assignedMerchantIds, migrateMerchant)
 }
 
 /**

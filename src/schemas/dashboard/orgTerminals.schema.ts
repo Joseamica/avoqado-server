@@ -181,6 +181,9 @@ export const GetOrgMerchantAccountsSchema = z.object({
 export const orgMigratePreflightSchema = z.object({
   body: z.object({
     toVenueId: z.string().min(1, 'ID de sucursal destino requerido'),
+    // Si es true, la terminal se lleva su merchant actual al venue destino y el
+    // blocker NO_PAYMENT_CONFIG deja de aplicar (la TPV trae con qué cobrar).
+    migrateMerchant: z.boolean({ invalid_type_error: 'La opción de migrar el comercio debe ser verdadero o falso' }).optional(),
   }),
   params: OrgTerminalParams,
 })
@@ -188,12 +191,14 @@ export type OrgMigratePreflightDto = z.infer<typeof orgMigratePreflightSchema>['
 
 /**
  * POST /:orgId/terminals/:terminalId/migrate-execute
- * Body: { toVenueId, assignedMerchantIds? }
+ * Body: { toVenueId, assignedMerchantIds?, migrateMerchant? }
  */
 export const orgMigrateExecuteSchema = z.object({
   body: z.object({
     toVenueId: z.string().min(1, 'ID de sucursal destino requerido'),
     assignedMerchantIds: z.array(z.string().min(1, 'ID de comercio vacío')).optional(),
+    // Ver orgMigratePreflightSchema.
+    migrateMerchant: z.boolean({ invalid_type_error: 'La opción de migrar el comercio debe ser verdadero o falso' }).optional(),
   }),
   params: OrgTerminalParams,
 })

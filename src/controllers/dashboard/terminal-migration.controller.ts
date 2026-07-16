@@ -14,8 +14,8 @@ import { migratePreflight, migrateExecute, migrateStatus, migrateCancel } from '
 export const preflight = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { terminalId } = req.params
-    const { toVenueId } = req.body
-    const data = await migratePreflight(terminalId, toVenueId)
+    const { toVenueId, migrateMerchant } = req.body
+    const data = await migratePreflight(terminalId, toVenueId, migrateMerchant)
     return res.status(200).json({ data, message: 'Preflight complete' })
   } catch (error) {
     next(error)
@@ -36,7 +36,7 @@ export const preflight = async (req: Request, res: Response, next: NextFunction)
 export const execute = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { terminalId } = req.params
-    const { toVenueId, assignedMerchantIds } = req.body
+    const { toVenueId, assignedMerchantIds, migrateMerchant } = req.body
     const authContext = (req as any).authContext
     const data = await migrateExecute(
       terminalId,
@@ -47,6 +47,7 @@ export const execute = async (req: Request, res: Response, next: NextFunction) =
         userAgent: req.get('user-agent'),
       },
       assignedMerchantIds,
+      migrateMerchant,
     )
     return res.status(200).json({ data, message: 'Migration started' })
   } catch (error) {

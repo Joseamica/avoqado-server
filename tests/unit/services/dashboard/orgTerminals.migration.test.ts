@@ -101,7 +101,8 @@ describe('orgTerminals migration wrappers — ownership guards', () => {
       const migrateOrder = migratePreflightMock.mock.invocationCallOrder[0]
       expect(terminalOrder).toBeLessThan(migrateOrder)
       expect(venueOrder).toBeLessThan(migrateOrder)
-      expect(migratePreflightMock).toHaveBeenCalledWith(TERMINAL_ID, TO_VENUE_ID)
+      // trailing `undefined` = migrateMerchant, now threaded through positionally (Task 6)
+      expect(migratePreflightMock).toHaveBeenCalledWith(TERMINAL_ID, TO_VENUE_ID, undefined)
     })
 
     it('throws ForbiddenError and does NOT call migratePreflight when the terminal is in another org', async () => {
@@ -138,7 +139,8 @@ describe('orgTerminals migration wrappers — ownership guards', () => {
       const migrateOrder = migrateExecuteMock.mock.invocationCallOrder[0]
       expect(terminalOrder).toBeLessThan(migrateOrder)
       expect(venueOrder).toBeLessThan(migrateOrder)
-      expect(migrateExecuteMock).toHaveBeenCalledWith(TERMINAL_ID, TO_VENUE_ID, actor, undefined)
+      // trailing `undefined` = migrateMerchant, now threaded through positionally (Task 6)
+      expect(migrateExecuteMock).toHaveBeenCalledWith(TERMINAL_ID, TO_VENUE_ID, actor, undefined, undefined)
     })
 
     it('validates assigned merchants ∈ org BEFORE calling migrateExecute', async () => {
@@ -154,7 +156,8 @@ describe('orgTerminals migration wrappers — ownership guards', () => {
       const merchantOrder = prismaMock.merchantAccount.findMany.mock.invocationCallOrder[0]
       const migrateOrder = migrateExecuteMock.mock.invocationCallOrder[0]
       expect(merchantOrder).toBeLessThan(migrateOrder)
-      expect(migrateExecuteMock).toHaveBeenCalledWith(TERMINAL_ID, TO_VENUE_ID, actor, ['merch-1'])
+      // trailing `undefined` = migrateMerchant, now threaded through positionally (Task 6)
+      expect(migrateExecuteMock).toHaveBeenCalledWith(TERMINAL_ID, TO_VENUE_ID, actor, ['merch-1'], undefined)
     })
 
     it('throws ForbiddenError and does NOT call migrateExecute when a merchant is outside the org', async () => {
@@ -178,6 +181,41 @@ describe('orgTerminals migration wrappers — ownership guards', () => {
 
       expect(prismaMock.venue.findFirst).not.toHaveBeenCalled()
       expect(migrateExecuteMock).not.toHaveBeenCalled()
+    })
+  })
+
+  // ---------------------------------------------------------- migrateMerchant
+  describe('wrappers de org — migrateMerchant', () => {
+    const actor = { staffId: 'staff-1', ipAddress: '1.2.3.4', userAgent: 'jest' }
+
+    beforeEach(() => {
+      prismaMock.terminal.findUnique.mockResolvedValue(terminalInOrg())
+      prismaMock.venue.findFirst.mockResolvedValue({ id: TO_VENUE_ID, name: 'Destino' })
+    })
+
+    it('pasa el flag al servicio compartido en preflight', async () => {
+      await orgTerminals.migratePreflightForOrg(ORG_ID, TERMINAL_ID, TO_VENUE_ID, true)
+      expect(migratePreflightMock).toHaveBeenCalledWith(TERMINAL_ID, TO_VENUE_ID, true)
+    })
+
+    it('pasa el flag al servicio compartido en execute', async () => {
+      await orgTerminals.migrateExecuteForOrg(ORG_ID, TERMINAL_ID, TO_VENUE_ID, actor, undefined, true)
+      expect(migrateExecuteMock).toHaveBeenCalledWith(TERMINAL_ID, TO_VENUE_ID, actor, undefined, true)
+    })
+
+    it('I3: rechaza merchants explícitos fuera de la org', async () => {
+      prismaMock.venue.findMany.mockResolvedValue([{ id: 'venue-src-1' }])
+      prismaMock.merchantAccount.findMany.mockResolvedValue([]) // ninguno pertenece
+
+      await expect(
+        orgTerminals.migrateExecuteForOrg(ORG_ID, TERMINAL_ID, TO_VENUE_ID, actor, ['merch-ajeno'], true),
+      ).rejects.toBeInstanceOf(ForbiddenError)
+      expect(migrateExecuteMock).not.toHaveBeenCalled()
+    })
+
+    it('REGRESIÓN: sin flag, el servicio se llama como hoy', async () => {
+      await orgTerminals.migrateExecuteForOrg(ORG_ID, TERMINAL_ID, TO_VENUE_ID, actor)
+      expect(migrateExecuteMock).toHaveBeenCalledWith(TERMINAL_ID, TO_VENUE_ID, actor, undefined, undefined)
     })
   })
 

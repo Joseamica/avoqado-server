@@ -1233,9 +1233,9 @@ router.post(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { orgId, terminalId } = req.params
-      const { toVenueId } = req.body
+      const { toVenueId, migrateMerchant } = req.body
 
-      const data = await orgTerminalsService.migratePreflightForOrg(orgId, terminalId, toVenueId)
+      const data = await orgTerminalsService.migratePreflightForOrg(orgId, terminalId, toVenueId, migrateMerchant)
 
       res.json({
         success: true,
@@ -1262,7 +1262,7 @@ router.post(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { orgId, terminalId } = req.params
-      const { toVenueId, assignedMerchantIds } = req.body
+      const { toVenueId, assignedMerchantIds, migrateMerchant } = req.body
       const authContext = (req as any).authContext
 
       const actor = {
@@ -1271,7 +1271,7 @@ router.post(
         userAgent: req.get('user-agent') ?? undefined,
       }
 
-      const data = await orgTerminalsService.migrateExecuteForOrg(orgId, terminalId, toVenueId, actor, assignedMerchantIds)
+      const data = await orgTerminalsService.migrateExecuteForOrg(orgId, terminalId, toVenueId, actor, assignedMerchantIds, migrateMerchant)
 
       res.json({
         success: true,
