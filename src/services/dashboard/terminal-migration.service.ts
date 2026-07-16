@@ -384,31 +384,53 @@ export async function migrateExecute(
           `Terminal migration ${terminalId}: skipping VenuePaymentConfig creation for venue ${toVenueId} — origin's primaryAccountId (${copyable.primaryAccountId}) is not an active MerchantAccount.`,
         )
       } else {
-        // Cast needed: `copyable.routingRules` is typed `Prisma.JsonValue | null` (a read
-        // shape, from resolveOriginPayment's SELECT), but Prisma's generated create input
-        // for a nullable Json column wants its `NullableJsonNullValueInput` sentinel instead
-        // of a bare `null` — a well-known Prisma JSON-null typing quirk. Runtime value is
-        // unaffected (still plain `null`, exactly what a copied "no routing rules" origin
-        // config should write).
-        const created = await prisma.venuePaymentConfig.create({
-          data: { venueId: toVenueId, ...copyable } as Prisma.VenuePaymentConfigUncheckedCreateInput,
-        })
-        createdVenuePaymentConfigId = created.id
-        // I6: es ruteo de dinero → va auditado.
-        await logAction({
-          staffId: actor.staffId ?? null,
-          venueId: toVenueId,
-          action: 'VENUE_PAYMENT_CONFIG_CREATED',
-          entity: 'VenuePaymentConfig',
-          entityId: created.id,
-          data: {
-            copiedFromVenueId: pre.fromVenueId,
-            primaryAccountId: copyable.primaryAccountId,
-            viaTerminalMigration: terminalId,
-          },
-          ipAddress: actor.ipAddress,
-          userAgent: actor.userAgent,
-        })
+        // Race guard: `existing` above is a check-then-act read, not a lock. VenuePaymentConfig
+        // .venueId is @unique — if two DIFFERENT terminals migrate to the SAME destination venue
+        // with migrateMerchant at nearly the same time, both can see `existing === null` before
+        // either creates, and the second `create()` throws P2002. The unique constraint is what
+        // actually protects I1 here (nobody's config gets silently overwritten); we just must not
+        // let that throw become an uncaught 500 AFTER this terminal's own re-parent (Step 1) and
+        // merchant assignment (Step 2) already committed. Mirrors the isPrismaUniqueViolation
+        // pattern in terminal-payment.service.ts:129-133. This is an expected race outcome, not a
+        // bug — log info (not warn/error) and continue WITHOUT createdVenuePaymentConfigId: this
+        // execution didn't create the config, the OTHER terminal's migration owns it, so this
+        // terminal's cancel flow must not try to delete a config it doesn't own. Any other error
+        // is a real failure and must still propagate.
+        try {
+          // Cast needed: `copyable.routingRules` is typed `Prisma.JsonValue | null` (a read
+          // shape, from resolveOriginPayment's SELECT), but Prisma's generated create input
+          // for a nullable Json column wants its `NullableJsonNullValueInput` sentinel instead
+          // of a bare `null` — a well-known Prisma JSON-null typing quirk. Runtime value is
+          // unaffected (still plain `null`, exactly what a copied "no routing rules" origin
+          // config should write).
+          const created = await prisma.venuePaymentConfig.create({
+            data: { venueId: toVenueId, ...copyable } as Prisma.VenuePaymentConfigUncheckedCreateInput,
+          })
+          createdVenuePaymentConfigId = created.id
+          // I6: es ruteo de dinero → va auditado.
+          await logAction({
+            staffId: actor.staffId ?? null,
+            venueId: toVenueId,
+            action: 'VENUE_PAYMENT_CONFIG_CREATED',
+            entity: 'VenuePaymentConfig',
+            entityId: created.id,
+            data: {
+              copiedFromVenueId: pre.fromVenueId,
+              primaryAccountId: copyable.primaryAccountId,
+              viaTerminalMigration: terminalId,
+            },
+            ipAddress: actor.ipAddress,
+            userAgent: actor.userAgent,
+          })
+        } catch (err) {
+          const isUniqueViolation =
+            (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') ||
+            (typeof err === 'object' && err !== null && (err as { code?: string }).code === 'P2002')
+          if (!isUniqueViolation) throw err
+          logger.info(
+            `Terminal migration ${terminalId}: lost the race to create VenuePaymentConfig for venue ${toVenueId} — another migration already created one.`,
+          )
+        }
       }
     }
   }
