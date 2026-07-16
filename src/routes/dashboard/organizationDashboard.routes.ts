@@ -1221,7 +1221,7 @@ router.put(
 
 /**
  * POST /dashboard/organizations/:orgId/terminals/:terminalId/migrate-preflight
- * Body: { toVenueId }
+ * Body: { toVenueId, migrateMerchant? }
  * Returns: PreflightResult (blockers/warnings, canProceed)
  */
 router.post(
@@ -1250,7 +1250,7 @@ router.post(
 
 /**
  * POST /dashboard/organizations/:orgId/terminals/:terminalId/migrate-execute
- * Body: { toVenueId, assignedMerchantIds? }
+ * Body: { toVenueId, assignedMerchantIds?, migrateMerchant? }
  * Re-parents the terminal to the destination venue and queues the factory reset.
  */
 router.post(

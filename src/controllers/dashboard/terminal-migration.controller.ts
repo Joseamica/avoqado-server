@@ -8,7 +8,7 @@ import { migratePreflight, migrateExecute, migrateStatus, migrateCancel } from '
  * anything. The dashboard calls this before showing the confirm dialog.
  *
  * @route POST /api/v1/dashboard/superadmin/terminals/:terminalId/migrate-preflight
- * @param req Request with terminalId in params and toVenueId in body
+ * @param req Request with terminalId in params and toVenueId + optional migrateMerchant in body
  * @param res Response with the PreflightResult
  */
 export const preflight = async (req: Request, res: Response, next: NextFunction) => {
@@ -30,7 +30,7 @@ export const preflight = async (req: Request, res: Response, next: NextFunction)
  * ONLY { userId, orgId, venueId, role } — there is no `name`.
  *
  * @route POST /api/v1/dashboard/superadmin/terminals/:terminalId/migrate-execute
- * @param req Request with terminalId in params and toVenueId in body
+ * @param req Request with terminalId in params and toVenueId + optional assignedMerchantIds/migrateMerchant in body
  * @param res Response with the MigrateExecuteResult
  */
 export const execute = async (req: Request, res: Response, next: NextFunction) => {
