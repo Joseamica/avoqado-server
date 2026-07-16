@@ -235,6 +235,39 @@ describe('migrateExecute — migrateMerchant', () => {
     )
   })
 
+  // Review finding (race guard): VenuePaymentConfig.venueId is @unique, and the
+  // `existing = findUnique(...)` check above is check-then-act, not a lock. Two
+  // DIFFERENT terminals migrating to the SAME destination venue with migrateMerchant at
+  // nearly the same time can both observe `existing === null` before either creates —
+  // the second `create()` throws a P2002 unique-constraint violation. That must NOT
+  // surface as an uncaught 500 (the re-parent + merchant assignment already committed by
+  // then) — it must be swallowed as "lost the race, someone else's migration owns the
+  // config", logged at info (not warn/error, this isn't a bug), and must NOT set
+  // createdVenuePaymentConfigId (this execution didn't create it, so it must not try to
+  // delete a config it doesn't own on cancel).
+  it('P2002 en la creación (carrera con otra migración al mismo destino) → no truena, no toca el payload', async () => {
+    m.venuePaymentConfig.create.mockRejectedValue({ code: 'P2002' })
+    const infoSpy = jest.spyOn(logger, 'info').mockImplementation(() => logger)
+
+    const result = await migrateExecute('term-1', 'venue-new', actor, undefined, true)
+
+    expect(result).toEqual(expect.objectContaining({ commandId: 'cmd-1', fromVenueId: 'venue-old', toVenueId: 'venue-new' }))
+    expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('lost the race'))
+    // No createdVenuePaymentConfigId was produced by THIS execution, so the payload must
+    // not be patched with one — that patch call must not fire at all.
+    expect(m.tpvCommandQueue.update).not.toHaveBeenCalled()
+    // The terminal's own re-parent + merchant assignment still went through — the race
+    // only affects the optional config-copy, nothing else.
+    expect(mockedUpdate).toHaveBeenCalledWith('term-1', { assignedMerchantIds: ['merch-p'] }, actor)
+  })
+
+  // Any OTHER database error during the create must still propagate — only P2002
+  // (the specific "someone else already created it" race) is swallowed.
+  it('un error que NO es P2002 en la creación SÍ se propaga', async () => {
+    m.venuePaymentConfig.create.mockRejectedValue(new Error('connection reset'))
+    await expect(migrateExecute('term-1', 'venue-new', actor, undefined, true)).rejects.toThrow('connection reset')
+  })
+
   it('REGRESIÓN: sin migrateMerchant no crea config ni toca el payload', async () => {
     // Sin migrateMerchant, NO_PAYMENT_CONFIG exige que el destino YA tenga su propia
     // config (Task 3) — a diferencia del resto de este describe, que prueba el caso
