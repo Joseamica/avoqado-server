@@ -99,6 +99,7 @@ export interface MigrationBlocker {
     | 'MIGRATION_IN_PROGRESS'
     | 'CROSS_ORG_MERCHANT'
     | 'ORIGIN_HAS_NO_MERCHANT'
+    | 'DESTINATION_ALREADY_CONFIGURED_MERCHANT'
   message: string
 }
 
@@ -190,6 +191,21 @@ export async function migratePreflight(terminalId: string, toVenueId: string, mi
       message: 'El venue destino no tiene configuración de pagos (merchant). La TPV no podría cobrar.',
     })
   }
+  // Finding 2 (final whole-branch review, defense-in-depth): the wizard already hides the
+  // checkbox when the destination has its own config (merchantMigration.reason ===
+  // 'DESTINATION_ALREADY_CONFIGURED', computed above) — but per critical-warnings.md the
+  // backend must enforce this itself, never trust the client to hide a control. Without this
+  // hard blocker, a caller bypassing the UI could send migrateMerchant: true here and
+  // migrateExecute's Step 2 auto-carry would silently override the destination venue's OWN
+  // configured default merchant with the origin's — corrupting a venue that already charges
+  // correctly. Only fires when migrateMerchant is explicitly requested; a destination with its
+  // own config and migrateMerchant unset/false is unaffected (today's behavior, unchanged).
+  if (migrateMerchant && paymentConfig) {
+    blockers.push({
+      code: 'DESTINATION_ALREADY_CONFIGURED_MERCHANT',
+      message: 'El venue destino ya tiene su propio comercio configurado. No se puede forzar el comercio del origen.',
+    })
+  }
   // I3: el guard vive en el backend, no en la visibilidad del checkbox.
   if (migrateMerchant && !sameOrg) {
     blockers.push({
@@ -278,9 +294,13 @@ export interface MigrateExecuteResult {
  *
  * With `migrateMerchant`, the terminal keeps carrying its origin merchant(s) instead
  * of resolving the destination's default, and — only if the destination has no
- * `VenuePaymentConfig` of its own (I1) — one gets created, copied from the origin.
- * That write's id is stamped onto the FACTORY_RESET payload
- * (`migration.createdVenuePaymentConfigId`) so `migrateCancel` (Task 5) can undo it.
+ * `VenuePaymentConfig` of its own (I1) — one gets created. Normally copied from the
+ * origin, but if the operator explicitly picked a merchant (`assignedMerchantIds`
+ * non-empty), the created config reflects THAT choice instead — the terminal and the
+ * venue's new permanent default must agree on which merchant is "the" merchant
+ * (Finding 1, final whole-branch review). That write's id is stamped onto the
+ * FACTORY_RESET payload (`migration.createdVenuePaymentConfigId`) so `migrateCancel`
+ * (Task 5) can undo it.
  */
 export async function migrateExecute(
   terminalId: string,
@@ -294,6 +314,14 @@ export async function migrateExecute(
   if (!pre.canProceed) {
     throw new BadRequestError(`Migration blocked: ${pre.blockers.map(b => b.code).join(', ')}`)
   }
+
+  // Finding 1 (final whole-branch review, founder-confirmed 2026-07-15): captured from the
+  // ORIGINAL parameter, BEFORE it gets reassigned into the local `merchantsToAssign` variable
+  // below (Step 2) — that reassignment folds in the auto-carry fallback, which would make this
+  // check meaningless if read afterward. Used only to decide the destination
+  // VenuePaymentConfig's identity (Step 2b) — see the comment there for why this must NOT be
+  // used to derive identity from `merchantsToAssign` in the no-selection case.
+  const hasExplicitSelection = !!(assignedMerchantIds && assignedMerchantIds.length > 0)
 
   // 0) Snapshot del origen ANTES del re-parent: updateTerminal borra
   //    assignedMerchantIds y el venue cambia, así que después ya no se puede leer.
@@ -354,13 +382,38 @@ export async function migrateExecute(
   //     dinero de un venue que ya cobra.
   let createdVenuePaymentConfigId: string | null = null
   if (migrateMerchant && origin?.copyable) {
-    const copyable = origin.copyable
+    // Finding 1 (final whole-branch review, founder-confirmed 2026-07-15): si el operador
+    // eligió un merchant específico junto con el checkbox, la config creada debe
+    // reflejar ESE merchant — no el del origen. Sin esto, la terminal cobra con el
+    // elegido pero el "default permanente" de la sucursal queda grabado con el
+    // merchant del origen: contamina atribución de costos (transactionCost.service.ts:265
+    // lee paymentConfig.primaryAccount), "el merchant del venue" en onboarding
+    // (onboarding.controller.ts:398), el matcher de webhooks de Blumon, y cualquier
+    // migración FUTURA a este mismo venue sin el checkbox (cuyo fallback en Step 2 lee este
+    // mismo primaryAccountId como default permanente del venue).
+    //
+    // Ojo: esto SÓLO aplica con selección explícita. Sin ella (acarreo automático),
+    // `origin.copyable` se usa VERBATIM — NO derivar de `merchantsToAssign` (un array
+    // compactado sin huecos, ver Step 2 arriba) en ese caso, o se reintroduce el bug de
+    // "hueco compactado, tertiary promovido a secondary" que una revisión anterior ya
+    // corrigió dentro de `resolveOriginPayment`.
+    const copyable = hasExplicitSelection
+      ? {
+          primaryAccountId: assignedMerchantIds![0],
+          secondaryAccountId: assignedMerchantIds![1] ?? null,
+          tertiaryAccountId: assignedMerchantIds![2] ?? null,
+          // La política del venue (no es identidad de merchant) sigue viniendo del origen.
+          preferredProcessor: origin.copyable.preferredProcessor,
+          routingRules: origin.copyable.routingRules,
+        }
+      : origin.copyable
     const existing = await prisma.venuePaymentConfig.findUnique({ where: { venueId: toVenueId } })
     if (!existing) {
-      // Money-safety (review finding, not in the original brief): `copyable` comes
-      // straight from `resolveOriginPayment`, which is deliberately NOT filtered by
-      // `MerchantAccount.active` (see its docstring — it's a lightweight ids-only
-      // helper). `pre` above already confirmed SOME active merchant exists among the
+      // Money-safety (review finding, not in the original brief): `copyable` comes from
+      // `resolveOriginPayment`'s origin snapshot (or, with an explicit selection above, the
+      // operator's own pick) — neither path is filtered by `MerchantAccount.active` (see
+      // resolveOriginPayment's docstring — it's a lightweight ids-only helper). `pre` above
+      // already confirmed SOME active merchant exists among the
       // origin's merchants (ORIGIN_HAS_NO_MERCHANT), but not specifically that
       // `primaryAccountId` — the one non-nullable field this INSERT hinges on — is
       // the active one (e.g. secondary active, primary deactivated for fraud/

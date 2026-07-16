@@ -315,4 +315,79 @@ describe('migrateExecute — migrateMerchant', () => {
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('merch-inactivo'))
     expect(mockedUpdate).toHaveBeenCalledWith('term-1', { assignedMerchantIds: ['merch-inactivo', 'merch-activo'] }, actor)
   })
+
+  // Finding 1 (final whole-branch review, founder-confirmed): when the operator picks a
+  // SPECIFIC merchant via the wizard's "Comercio específico" mode (assignedMerchantIds
+  // non-empty) AND checks migrateMerchant, the destination's brand-new VenuePaymentConfig
+  // must reflect THAT explicit choice — not the origin's raw merchant. Without this, the
+  // terminal would charge with the operator's pick but the venue's permanent default would
+  // silently record the origin's merchant instead (corrupts cost attribution, future
+  // migrations into this venue, and the Blumon webhook→venue matcher).
+  it('con selección explícita + migrateMerchant, la VenuePaymentConfig creada usa el merchant elegido (no el del origen)', async () => {
+    // Both the origin's carried merchant ('merch-p', via ORIGIN_HAS_NO_MERCHANT's
+    // activeOriginMerchants check in preflight) and the operator's explicit pick
+    // ('merch-elegido', via the Step 2b active-primary guard) must resolve as active.
+    m.merchantAccount.findMany.mockResolvedValue([
+      { id: 'merch-p', displayName: 'playtelecom-p' },
+      { id: 'merch-elegido', displayName: 'Elegido' },
+    ])
+
+    await migrateExecute('term-1', 'venue-new', actor, ['merch-elegido'], true)
+
+    expect(m.venuePaymentConfig.create).toHaveBeenCalledWith({
+      data: {
+        venueId: 'venue-new',
+        primaryAccountId: 'merch-elegido',
+        secondaryAccountId: null,
+        tertiaryAccountId: null,
+        // La política del venue (no es identidad de merchant) sigue viniendo del origen.
+        preferredProcessor: 'AUTO',
+        routingRules: null,
+      },
+    })
+  })
+
+  // Regresión (la subtileza que importa): SIN selección explícita (acarreo automático), la
+  // config creada debe seguir copiando `origin.copyable` VERBATIM — incluyendo un HUECO
+  // (secondary null + tertiary no-null). Derivar la identidad de `merchantsToAssign` en este
+  // caso reintroduciría el defecto ya corregido en `resolveOriginPayment`: un array
+  // compactado promovería tertiary → secondary, perdiendo el hueco real de la config origen.
+  it('REGRESIÓN: sin selección explícita, el hueco de la config origen se preserva (no se compacta)', async () => {
+    // Origen SIN merchants ya asignados a la terminal (fuerza el camino "sin override" de
+    // resolveOriginPayment, que copia `cfg` verbatim en vez de reconstruir un objeto nuevo).
+    m.terminal.findUnique.mockResolvedValue({
+      id: 'term-1',
+      venueId: 'venue-old',
+      status: 'ACTIVE',
+      brand: 'PAX',
+      assignedMerchantIds: [],
+    })
+    const GAPPED_ORIGIN_CFG = {
+      primaryAccountId: 'merch-a',
+      secondaryAccountId: null,
+      tertiaryAccountId: 'merch-c',
+      preferredProcessor: 'AUTO',
+      routingRules: null,
+    }
+    m.venuePaymentConfig.findUnique.mockImplementation(({ where }: { where: { venueId: string } }) =>
+      Promise.resolve(where.venueId === 'venue-new' ? null : GAPPED_ORIGIN_CFG),
+    )
+    m.merchantAccount.findMany.mockResolvedValue([
+      { id: 'merch-a', displayName: 'A' },
+      { id: 'merch-c', displayName: 'C' },
+    ])
+
+    await migrateExecute('term-1', 'venue-new', actor, undefined, true)
+
+    expect(m.venuePaymentConfig.create).toHaveBeenCalledWith({
+      data: {
+        venueId: 'venue-new',
+        primaryAccountId: 'merch-a',
+        secondaryAccountId: null,
+        tertiaryAccountId: 'merch-c',
+        preferredProcessor: 'AUTO',
+        routingRules: null,
+      },
+    })
+  })
 })

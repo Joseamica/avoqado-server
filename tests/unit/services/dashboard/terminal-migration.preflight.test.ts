@@ -254,4 +254,29 @@ describe('migratePreflight — migrateMerchant', () => {
     expect(r.merchantMigration.available).toBe(false)
     expect(r.merchantMigration.reason).toBe('DESTINATION_ALREADY_CONFIGURED')
   })
+
+  // Finding 2 (final whole-branch review, defense-in-depth): the UI already hides the
+  // checkbox when the destination has its own config (merchantMigration.reason ===
+  // 'DESTINATION_ALREADY_CONFIGURED'), but per critical-warnings.md the backend must not
+  // trust the client to hide a control — a caller bypassing the UI could still send
+  // migrateMerchant: true here. Without a hard blocker, migrateExecute's Step 2 auto-carry
+  // would silently override the destination's OWN configured default merchant with the
+  // origin's, corrupting a venue that already charges correctly.
+  it('bloquea forzar el comercio del origen si el destino ya tiene su propia config (DESTINATION_ALREADY_CONFIGURED_MERCHANT)', async () => {
+    healthy() // findFirst devuelve vpc-1 → destino ya configurado
+    const r = await migratePreflight('term-1', 'venue-new', true)
+    expect(r.canProceed).toBe(false)
+    expect(r.blockers).toContainEqual(expect.objectContaining({ code: 'DESTINATION_ALREADY_CONFIGURED_MERCHANT' }))
+  })
+
+  // Regresión: el mismo escenario (destino con su propia config) SIN migrateMerchant debe
+  // quedar exactamente como hoy — canProceed=true, sin el nuevo blocker. El nuevo blocker
+  // sólo debe activarse cuando el operador realmente pide forzar el comercio del origen.
+  it('REGRESIÓN: destino con su propia config + migrateMerchant ausente no bloquea (comportamiento sin cambios)', async () => {
+    healthy() // findFirst devuelve vpc-1 → destino ya configurado
+    const r = await migratePreflight('term-1', 'venue-new')
+    expect(r.canProceed).toBe(true)
+    expect(r.blockers).toHaveLength(0)
+    expect(r.blockers.map(b => b.code)).not.toContain('DESTINATION_ALREADY_CONFIGURED_MERCHANT')
+  })
 })
