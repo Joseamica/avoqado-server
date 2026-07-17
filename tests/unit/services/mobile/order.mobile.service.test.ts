@@ -18,6 +18,8 @@ describe('order.mobile.service', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock))
+    // payCashOrder sums prior COMPLETED payments (split-the-bill); default: none.
+    prismaMock.payment.findMany.mockResolvedValue([])
   })
 
   it('persists discountAmount and computes total as subtotal - discount + tip when creating an order', async () => {
@@ -627,6 +629,63 @@ describe('order.mobile.service', () => {
           status: 'COMPLETED',
           remainingBalance: 0,
           total: new Decimal(90),
+        }),
+      }),
+    )
+  })
+
+  // Split-the-bill: payments accumulate across calls — the FIRST half marks the
+  // order PARTIAL, the SECOND half (with a prior COMPLETED payment on file)
+  // converges to PAID. Regression for the bug where each payment was compared
+  // to the full total in isolation and a split check never reached PAID.
+  it('marks order PARTIAL on a half payment and PAID once cumulative payments cover the total', async () => {
+    const orderRow = {
+      id: 'order-1',
+      orderNumber: 'ORD-1',
+      paymentStatus: 'PENDING',
+      subtotal: new Decimal(100),
+      discountAmount: new Decimal(0),
+      total: new Decimal(100),
+      remainingBalance: new Decimal(100),
+      venueId: 'venue-1',
+    }
+    prismaMock.order.findUnique.mockResolvedValue(orderRow)
+    prismaMock.staff.findUnique.mockResolvedValue({ id: 'staff-1' })
+    prismaMock.staffVenue.findFirst.mockResolvedValue({
+      id: 'sv-1',
+      staffId: 'staff-1',
+      venueId: 'venue-1',
+      active: true,
+    })
+    prismaMock.shift.findFirst.mockResolvedValue(null)
+    prismaMock.payment.create.mockResolvedValue({ id: 'payment-1' })
+    prismaMock.venueTransaction.create.mockResolvedValue({ id: 'vtx-1' })
+    prismaMock.paymentAllocation.create.mockResolvedValue({ id: 'alloc-1' })
+    prismaMock.order.update.mockResolvedValue({ id: 'order-1' })
+
+    // First half: no prior payments → PARTIAL with $50 remaining.
+    prismaMock.payment.findMany.mockResolvedValue([])
+    await payCashOrder('venue-1', 'order-1', { amount: 5000, tip: 0, staffId: 'staff-1' })
+    expect(prismaMock.order.update).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          paymentStatus: 'PARTIAL',
+          status: 'PENDING',
+          remainingBalance: 50,
+        }),
+      }),
+    )
+
+    // Second half: one COMPLETED $50 payment on file → cumulative $100 → PAID.
+    prismaMock.order.findUnique.mockResolvedValue({ ...orderRow, paymentStatus: 'PARTIAL' })
+    prismaMock.payment.findMany.mockResolvedValue([{ amount: new Decimal(50), tipAmount: new Decimal(0) }])
+    await payCashOrder('venue-1', 'order-1', { amount: 5000, tip: 0, staffId: 'staff-1' })
+    expect(prismaMock.order.update).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          paymentStatus: 'PAID',
+          status: 'COMPLETED',
+          remainingBalance: 0,
         }),
       }),
     )

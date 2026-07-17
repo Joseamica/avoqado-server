@@ -952,19 +952,32 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     // Update order payment status.
     // Convention: order.total = subtotal - discountAmount + tipAmount (Mexico: tax is inclusive in subtotal).
     // Recompute total defensively in case the order was created before tip was known.
+    // CUMULATIVE across payments (split-the-bill): sum every prior COMPLETED
+    // payment on this order so N partial payments converge to PAID — mirrors
+    // updateOrderTotalsForStandalonePayment in payment.tpv.service.ts. With a
+    // single full payment previousPayments is 0 and behavior is unchanged.
+    const previousPayments = await tx.payment.findMany({
+      where: { orderId, status: 'COMPLETED', id: { not: newPayment.id } },
+      select: { amount: true, tipAmount: true },
+    })
+    const previousPaid = previousPayments.reduce((sum, p) => sum + Number(p.amount) + Number(p.tipAmount), 0)
+    const previousTips = previousPayments.reduce((sum, p) => sum + Number(p.tipAmount), 0)
+
     const orderSubtotal = Number(order.subtotal)
     const orderDiscount = Number(order.discountAmount || 0)
-    const newTotal = orderSubtotal - orderDiscount + tipDecimal
-    const amountPaidIncludingTip = amountDecimal + tipDecimal
-    const remainingAfterPayment = newTotal - amountPaidIncludingTip
+    const totalTip = previousTips + tipDecimal
+    const newTotal = orderSubtotal - orderDiscount + totalTip
+    const totalPaidIncludingTip = previousPaid + amountDecimal + tipDecimal
+    const remainingAfterPayment = newTotal - totalPaidIncludingTip
+    const isFullyPaid = remainingAfterPayment <= 0.01 // float tolerance, same as TPV path
 
     await tx.order.update({
       where: { id: orderId },
       data: {
-        paymentStatus: remainingAfterPayment <= 0 ? 'PAID' : 'PARTIAL',
-        status: remainingAfterPayment <= 0 ? 'COMPLETED' : 'PENDING',
+        paymentStatus: isFullyPaid ? 'PAID' : 'PARTIAL',
+        status: isFullyPaid ? 'COMPLETED' : 'PENDING',
         remainingBalance: Math.max(0, remainingAfterPayment),
-        tipAmount: tipDecimal,
+        tipAmount: totalTip,
         total: new Prisma.Decimal(newTotal),
         splitType: 'FULLPAYMENT',
       },
