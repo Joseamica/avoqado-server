@@ -1283,6 +1283,19 @@ export async function addItemsToOrder(
             notes: normalizeNotes(item.notes),
             course: item.course ?? null,
           },
+          include: {
+            product: {
+              select: {
+                id: true,
+                name: true,
+              },
+            },
+            modifiers: {
+              include: {
+                modifier: true,
+              },
+            },
+          },
         })
         logger.info(`✅ [ADD ITEMS] CREATED custom line: ${customItem.productName} | $${customTotal}`)
         return customItem
