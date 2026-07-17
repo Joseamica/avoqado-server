@@ -280,6 +280,102 @@ function calculateAvailablePortions(recipe: any): number {
 }
 
 /**
+ * Recipe shortage detail (identifies WHICH raw material limits a recipe).
+ *
+ * `calculateAvailablePortions` only returns the number of portions; this
+ * surfaces the bottleneck ingredient + the ones that can't make even one
+ * portion, so the TPV can tell the cashier exactly what to restock instead of
+ * a generic "SIN INSUMOS". Mirrors the same math (incl. unit conversion).
+ */
+type IngredientShortage = {
+  rawMaterialId: string
+  name: string
+  required: number
+  available: number
+  unit: string
+  maxPortions: number
+}
+
+function computeRecipeShortage(recipe: any): {
+  limitingIngredient: IngredientShortage | null
+  insufficientIngredients: IngredientShortage[]
+} {
+  if (!recipe?.lines || recipe.lines.length === 0) {
+    return { limitingIngredient: null, insufficientIngredients: [] }
+  }
+
+  const yields: IngredientShortage[] = recipe.lines
+    .map((line: any): IngredientShortage | null => {
+      const rm = line.rawMaterial
+      const rawNeeded = Number(line.quantity ?? 0)
+      if (rawNeeded === 0) return null // Optional ingredient (skip, same as calculateAvailablePortions)
+
+      const stock = Number(rm?.currentStock ?? 0)
+      const lineUnit = line.unit
+      const rmUnit = rm?.unit ?? lineUnit
+      let needed = rawNeeded
+      if (lineUnit !== rmUnit && areUnitsCompatible(lineUnit, rmUnit)) {
+        needed = convertUnit(rawNeeded, lineUnit, rmUnit).toNumber()
+      }
+      return {
+        rawMaterialId: rm?.id ?? '',
+        name: rm?.name ?? 'Insumo',
+        required: needed,
+        available: stock,
+        unit: rmUnit,
+        maxPortions: Math.floor(stock / needed),
+      }
+    })
+    .filter((y: IngredientShortage | null): y is IngredientShortage => y !== null)
+    .sort((a: IngredientShortage, b: IngredientShortage) => a.maxPortions - b.maxPortions)
+
+  if (yields.length === 0) {
+    return { limitingIngredient: null, insufficientIngredients: [] }
+  }
+
+  return {
+    limitingIngredient: yields[0], // bottleneck
+    insufficientIngredients: yields.filter(y => y.maxPortions <= 0), // can't make even 1
+  }
+}
+
+/**
+ * Unified availability for a product (Toast POS pattern) — the single source of
+ * truth used by getProducts / getProduct / getProductByBarcode so all three
+ * return the same shape.
+ *
+ * - QUANTITY: availableQuantity = current stock; no ingredient detail.
+ * - RECIPE: availableQuantity = min portions; plus limitingIngredient +
+ *   insufficientIngredients so clients can explain WHAT ran out.
+ * - not tracked: everything null (unlimited).
+ */
+function computeInventoryAvailability(product: any): {
+  availableQuantity: number | null
+  limitingIngredient: IngredientShortage | null
+  insufficientIngredients: IngredientShortage[] | null
+} {
+  if (!product.trackInventory) {
+    return { availableQuantity: null, limitingIngredient: null, insufficientIngredients: null }
+  }
+  if (product.inventoryMethod === 'QUANTITY') {
+    return {
+      availableQuantity: Math.floor(Number(product.inventory?.currentStock ?? 0)),
+      limitingIngredient: null,
+      insufficientIngredients: null,
+    }
+  }
+  if (product.inventoryMethod === 'RECIPE' && product.recipe) {
+    const shortage = computeRecipeShortage(product.recipe)
+    return {
+      availableQuantity: calculateAvailablePortions(product.recipe),
+      limitingIngredient: shortage.limitingIngredient,
+      insufficientIngredients: shortage.insufficientIngredients,
+    }
+  }
+  return { availableQuantity: null, limitingIngredient: null, insufficientIngredients: null }
+}
+
+/**
  * Get all products for a venue (excluding soft-deleted)
  *
  * ✅ WORLD-CLASS: Calculates availableQuantity for both QUANTITY and RECIPE tracking
@@ -342,25 +438,11 @@ export async function getProducts(
     orderBy: options?.orderBy === 'name' ? { name: 'asc' } : { displayOrder: 'asc' },
   })
 
-  // ✅ Calculate availableQuantity for each product (Toast POS pattern)
-  return products.map(product => {
-    let availableQuantity = null
-
-    if (product.trackInventory) {
-      if (product.inventoryMethod === 'QUANTITY') {
-        // ✅ Simple count (wine bottles, beer cans)
-        availableQuantity = Math.floor(Number(product.inventory?.currentStock ?? 0))
-      } else if (product.inventoryMethod === 'RECIPE' && product.recipe) {
-        // ✅ Calculate from recipe ingredients (burgers, pizzas)
-        availableQuantity = calculateAvailablePortions(product.recipe)
-      }
-    }
-
-    return {
-      ...product,
-      availableQuantity, // ✅ Unified field for frontend (both QUANTITY and RECIPE)
-    }
-  })
+  // ✅ Calculate availableQuantity + ingredient shortage for each product (Toast POS pattern)
+  return products.map(product => ({
+    ...product,
+    ...computeInventoryAvailability(product), // availableQuantity + limitingIngredient + insufficientIngredients
+  }))
 }
 
 /**
@@ -417,22 +499,10 @@ export async function getProduct(venueId: string, productId: string): Promise<an
     return null
   }
 
-  // ✅ Calculate availableQuantity (Toast POS pattern)
-  let availableQuantity = null
-
-  if (product.trackInventory) {
-    if (product.inventoryMethod === 'QUANTITY') {
-      // ✅ Simple count (wine bottles, beer cans)
-      availableQuantity = Math.floor(Number(product.inventory?.currentStock ?? 0))
-    } else if (product.inventoryMethod === 'RECIPE' && product.recipe) {
-      // ✅ Calculate from recipe ingredients (burgers, pizzas)
-      availableQuantity = calculateAvailablePortions(product.recipe)
-    }
-  }
-
+  // ✅ Calculate availableQuantity + ingredient shortage (Toast POS pattern)
   return {
     ...product,
-    availableQuantity, // ✅ Unified field for frontend (both QUANTITY and RECIPE)
+    ...computeInventoryAvailability(product), // availableQuantity + limitingIngredient + insufficientIngredients
   }
 }
 
@@ -1007,20 +1077,10 @@ export async function getProductByBarcode(venueId: string, barcode: string): Pro
     return null
   }
 
-  // ✅ Calculate availableQuantity (Toast POS pattern)
-  let availableQuantity = null
-
-  if (product.trackInventory) {
-    if (product.inventoryMethod === 'QUANTITY') {
-      availableQuantity = Math.floor(Number(product.inventory?.currentStock ?? 0))
-    } else if (product.inventoryMethod === 'RECIPE' && product.recipe) {
-      availableQuantity = calculateAvailablePortions(product.recipe)
-    }
-  }
-
+  // ✅ Calculate availableQuantity + ingredient shortage (Toast POS pattern)
   return {
     ...product,
-    availableQuantity,
+    ...computeInventoryAvailability(product), // availableQuantity + limitingIngredient + insufficientIngredients
   }
 }
 

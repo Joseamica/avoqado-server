@@ -4,7 +4,7 @@ import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
-import { updateProduct, createProduct } from '@/services/dashboard/product.dashboard.service'
+import { updateProduct, createProduct, getProduct } from '@/services/dashboard/product.dashboard.service'
 import { createMenuCategory, createModifierGroup } from '@/services/dashboard/menu.dashboard.service'
 import { auditMcpWrite } from '../audit'
 import { ProductType } from '@prisma/client'
@@ -219,6 +219,30 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
       })
       if (!p) return text({ found: false, error: 'Item not found, or it is outside your venues' })
 
+      // Live availability + WHICH raw material is short (RECIPE) — reuses the same
+      // computation the POS/TPV uses, so answers "¿por qué está agotada la X?".
+      const avail = await getProduct(venueId, matches[0].id)
+      const availability = p.trackInventory
+        ? {
+            availableQuantity: avail?.availableQuantity ?? null, // QUANTITY: stock; RECIPE: est. portions
+            isAvailable: (avail?.availableQuantity ?? 1) > 0,
+            limitingIngredient: avail?.limitingIngredient
+              ? {
+                  name: avail.limitingIngredient.name,
+                  available: avail.limitingIngredient.available,
+                  required: avail.limitingIngredient.required,
+                  unit: avail.limitingIngredient.unit,
+                }
+              : null,
+            insufficientIngredients: (avail?.insufficientIngredients ?? []).map((i: { name: string; available: number; required: number; unit: string }) => ({
+              name: i.name,
+              available: i.available,
+              required: i.required,
+              unit: i.unit,
+            })),
+          }
+        : null
+
       const price = Number(p.price)
       const cost = p.cost == null ? null : Number(p.cost)
       return text({
@@ -237,6 +261,7 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
           calories: p.calories,
           hasImage: !!p.imageUrl,
           inventoryTracking: p.trackInventory ? p.inventoryMethod : null,
+          availability, // live stock + limiting/insufficient raw materials (RECIPE), null if not tracked
           modifierGroups: p.modifierGroups.map(mg => ({
             name: mg.group.name,
             required: mg.group.required,

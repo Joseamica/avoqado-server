@@ -13,7 +13,7 @@ jest.mock('@/mcp/guard', () => ({
     requirePermission: jest.fn(),
   }),
 }))
-jest.mock('@/services/dashboard/product.dashboard.service', () => ({ updateProduct: jest.fn() }))
+jest.mock('@/services/dashboard/product.dashboard.service', () => ({ updateProduct: jest.fn(), getProduct: jest.fn() }))
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: jest.fn() }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
