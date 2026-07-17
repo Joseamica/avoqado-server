@@ -1277,6 +1277,22 @@ export async function cancelOrder(venueId: string, orderId: string, reason?: str
 
   logger.info(`✅ [ORDER.MOBILE] Order ${orderId} cancelled`)
 
+  // TABLE_SERVICE — "Anular cuenta" on an open table: a cancelled check must
+  // release its table (clearTable would refuse: the order is unpaid, not PAID).
+  // No-op for orders not bound to a table. Mirrors Square: voiding the check
+  // closes it and frees the table immediately.
+  const boundTable = await prisma.table.findFirst({
+    where: { venueId, currentOrderId: orderId },
+    select: { id: true, number: true },
+  })
+  if (boundTable) {
+    await prisma.table.update({
+      where: { id: boundTable.id },
+      data: { status: 'AVAILABLE', currentOrderId: null },
+    })
+    logger.info(`✅ [ORDER.MOBILE] Table ${boundTable.number} released after order cancellation`)
+  }
+
   const { logAction } = await import('../dashboard/activity-log.service')
   void logAction({
     action: 'ORDER_CANCELLED',
@@ -1294,5 +1310,14 @@ export async function cancelOrder(venueId: string, orderId: string, reason?: str
       orderId,
       status: 'CANCELLED',
     })
+    if (boundTable) {
+      broadcastingService.broadcastToVenue(venueId, SocketEventType.TABLE_STATUS_CHANGE, {
+        tableId: boundTable.id,
+        tableNumber: boundTable.number,
+        status: 'AVAILABLE',
+        orderId: null,
+        orderNumber: null,
+      })
+    }
   }
 }
