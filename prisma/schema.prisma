@@ -2609,6 +2609,13 @@ model OrderItem {
 
   notes String?
 
+  // TABLE_SERVICE courses (Square's "Organización por platos"): the course/
+  // tiempo this item belongs to ("Aperitivos", "Principales", ...). NULL =
+  // "Preparar de inmediato" (also every non-restaurant flow — additive, no
+  // other client is required to send or read it). Restaurant-mode POS groups
+  // kitchen comandas and the check display by this label.
+  course String?
+
   modifiers          OrderItemModifier[]
   paymentAllocations PaymentAllocation[] // ✅ LÍNEA AGREGADA
 

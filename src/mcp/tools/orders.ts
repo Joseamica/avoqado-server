@@ -133,6 +133,7 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
               total: true,
               discountAmount: true,
               appliedDiscountId: true,
+              course: true, // TABLE_SERVICE course/tiempo (null = inmediato)
             },
           },
           payments: { select: { amount: true, method: true, status: true, createdAt: true } },

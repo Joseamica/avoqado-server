@@ -473,6 +473,8 @@ interface AddOrderItemInput {
   notes?: string | null
   modifierIds?: string[] // Array of modifier IDs to add to the order item
   externalId?: string | null
+  /** TABLE_SERVICE course/tiempo ("Aperitivos"...). Null = prepare immediately. */
+  course?: string | null
 }
 
 interface NormalizedAddOrderItemInput extends AddOrderItemInput {
@@ -509,7 +511,8 @@ function normalizeAddItems(items: AddOrderItemInput[]): NormalizedAddOrderItemIn
     const normalizedNotes = normalizeNotes(item.notes)
     const normalizedModifiers = normalizeModifierIds(item.modifierIds)
     const normalizedExternalId = normalizeExternalId(item.externalId)
-    const key = buildAddItemKey(item.productId, normalizedModifiers, normalizedNotes, normalizedExternalId)
+    const normalizedCourse = item.course?.trim() || null
+    const key = buildAddItemKey(item.productId, normalizedModifiers, normalizedNotes, normalizedExternalId) + `|c:${normalizedCourse ?? ''}`
 
     const existing = map.get(key)
     if (existing) {
@@ -522,6 +525,7 @@ function normalizeAddItems(items: AddOrderItemInput[]): NormalizedAddOrderItemIn
         notes: normalizedNotes,
         modifierIds: normalizedModifiers,
         externalId: normalizedExternalId,
+        course: normalizedCourse,
         _count: 1,
       })
     }
@@ -1389,6 +1393,7 @@ export async function addItemsToOrder(
             taxAmount: 0,
             total: itemTotal,
             notes: normalizedNotes,
+            course: item.course ?? null,
             externalId: normalizedExternalId,
             modifiers: {
               create: itemModifiers.map(modifierId => {
@@ -1439,7 +1444,9 @@ export async function addItemsToOrder(
       const existingItemWithModifiers = existingItemsWithModifiers.find(existing => {
         const existingModifierIds = existing.modifiers.map(m => m.modifierId).sort()
         const notesMatch = normalizeNotes(existing.notes) === normalizedNotes
-        return notesMatch && JSON.stringify(existingModifierIds) === JSON.stringify(sortedNewModifiers)
+        // TABLE_SERVICE: lines in different courses never merge.
+        const courseMatch = (existing.course ?? null) === (item.course ?? null)
+        return notesMatch && courseMatch && JSON.stringify(existingModifierIds) === JSON.stringify(sortedNewModifiers)
       })
 
       if (existingItemWithModifiers) {
@@ -1494,6 +1501,7 @@ export async function addItemsToOrder(
           taxAmount: 0,
           total: itemTotal,
           notes: normalizedNotes,
+          course: item.course ?? null,
           modifiers: {
             create: itemModifiers.map(modifierId => {
               const modifier = modifiers.find(m => m.id === modifierId)!
