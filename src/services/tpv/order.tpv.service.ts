@@ -468,13 +468,17 @@ export async function createOrder(venueId: string, input: CreateOrderInput): Pro
 }
 
 interface AddOrderItemInput {
-  productId: string
+  /** Catalog product — omit for a custom-amount line (customName + customUnitPriceCents). */
+  productId?: string | null
   quantity: number
   notes?: string | null
   modifierIds?: string[] // Array of modifier IDs to add to the order item
   externalId?: string | null
   /** TABLE_SERVICE course/tiempo ("Aperitivos"...). Null = prepare immediately. */
   course?: string | null
+  /** Custom-amount line (no catalog product): label + unit price in cents. */
+  customName?: string | null
+  customUnitPriceCents?: number | null
 }
 
 interface NormalizedAddOrderItemInput extends AddOrderItemInput {
@@ -512,7 +516,11 @@ function normalizeAddItems(items: AddOrderItemInput[]): NormalizedAddOrderItemIn
     const normalizedModifiers = normalizeModifierIds(item.modifierIds)
     const normalizedExternalId = normalizeExternalId(item.externalId)
     const normalizedCourse = item.course?.trim() || null
-    const key = buildAddItemKey(item.productId, normalizedModifiers, normalizedNotes, normalizedExternalId) + `|c:${normalizedCourse ?? ''}`
+    // Custom-amount lines never merge with catalog lines (distinct key space).
+    const keyBase = item.productId
+      ? buildAddItemKey(item.productId, normalizedModifiers, normalizedNotes, normalizedExternalId)
+      : `custom:${item.customName ?? ''}:${item.customUnitPriceCents ?? 0}:${normalizedNotes ?? ''}`
+    const key = keyBase + `|c:${normalizedCourse ?? ''}`
 
     const existing = map.get(key)
     if (existing) {
@@ -526,6 +534,8 @@ function normalizeAddItems(items: AddOrderItemInput[]): NormalizedAddOrderItemIn
         modifierIds: normalizedModifiers,
         externalId: normalizedExternalId,
         course: normalizedCourse,
+        customName: item.customName ?? null,
+        customUnitPriceCents: item.customUnitPriceCents ?? null,
         _count: 1,
       })
     }
@@ -1204,7 +1214,13 @@ export async function addItemsToOrder(
 
   // Fetch products and validate
   // ✅ FIX: Use Set to deduplicate productIds (same product can be added multiple times)
-  const uniqueProductIds = [...new Set(items.map(item => item.productId))]
+  const uniqueProductIds = [...new Set(items.map(item => item.productId).filter((id): id is string => !!id))]
+  // Custom-amount lines need a label and a non-negative price.
+  for (const item of items) {
+    if (!item.productId && (!item.customName?.trim() || item.customUnitPriceCents == null || item.customUnitPriceCents < 0)) {
+      throw new BadRequestError('Custom line requires customName and customUnitPriceCents >= 0')
+    }
+  }
   const products = await prisma.product.findMany({
     where: {
       id: { in: uniqueProductIds },
@@ -1250,6 +1266,28 @@ export async function addItemsToOrder(
   // which always created NEW items. Now we check for existing items first.
   const newOrderItems = await Promise.all(
     normalizedItems.map(async item => {
+      // Custom-amount line: create directly (no catalog product, no modifiers).
+      if (!item.productId) {
+        const unitPrice = new Prisma.Decimal((item.customUnitPriceCents ?? 0) / 100)
+        const customTotal = unitPrice.mul(item.quantity)
+        const customItem = await prisma.orderItem.create({
+          data: {
+            orderId: order.id,
+            productId: null,
+            productName: item.customName!.trim(),
+            quantity: item.quantity,
+            unitPrice,
+            discountAmount: 0,
+            taxAmount: 0,
+            total: customTotal,
+            notes: normalizeNotes(item.notes),
+            course: item.course ?? null,
+          },
+        })
+        logger.info(`✅ [ADD ITEMS] CREATED custom line: ${customItem.productName} | $${customTotal}`)
+        return customItem
+      }
+
       const product = products.find(p => p.id === item.productId)!
       const normalizedNotes = normalizeNotes(item.notes)
 
