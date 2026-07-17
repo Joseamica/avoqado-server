@@ -142,7 +142,15 @@ export async function createOneManualSale(
 
       // 6. Flip the SIM to SOLD (org-level → sets sellingVenueId = store venue).
       //    Pass the STORE venueId as where-it-was-sold + the seller as staffId.
-      await serializedInventoryService.markAsSold(venue.id, item.serialNumber, orderItem.id, tx, { staffId: sellerStaffId })
+      //    `skipCustodyCheck`: a manual back-office sale bypasses the TPV custody precheck.
+      //    These SIMs were sold outside the TPV (promoter without a terminal), so they're
+      //    still SUPERVISOR_HELD/ADMIN_HELD and never PROMOTER_HELD — under ENFORCE mode the
+      //    precheck would throw SIM_NOT_ACCEPTED and roll back the whole row. resolveIccid's
+      //    AVAILABLE gate above still blocks re-selling an already-sold SIM.
+      await serializedInventoryService.markAsSold(venue.id, item.serialNumber, orderItem.id, tx, {
+        staffId: sellerStaffId,
+        skipCustodyCheck: true,
+      })
 
       // 7. Payment (COMPLETED, pesos 1:1, no processor fees, net == amount).
       //    NOTE: `PaymentSource` has no DASHBOARD_MANUAL value (that lives on

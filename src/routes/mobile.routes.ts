@@ -1828,6 +1828,17 @@ router.get(
 )
 
 /**
+ * GET /api/v1/mobile/venues/:venueId/cash-drawer/tender-breakdown?from=&to=
+ * Payments grouped by method for the corte de caja Z-report (card + cash + other).
+ */
+router.get(
+  '/venues/:venueId/cash-drawer/tender-breakdown',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  cashDrawerMobileController.getTenderBreakdown,
+)
+
+/**
  * POST /api/v1/mobile/venues/:venueId/cash-drawer/sync
  * Bulk sync events from mobile (offline-first support).
  * Body: { events: Array<{ type, amount, note?, staffId, staffName, orderId?, createdAt? }> }

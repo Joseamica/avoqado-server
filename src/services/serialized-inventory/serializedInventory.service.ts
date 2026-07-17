@@ -305,7 +305,7 @@ export class SerializedInventoryService {
     serialNumber: string,
     orderItemId: string,
     tx?: Prisma.TransactionClient,
-    opts?: { staffId?: string; appVersionCode?: number; minimumVersionWithMisSims?: number },
+    opts?: { staffId?: string; appVersionCode?: number; minimumVersionWithMisSims?: number; skipCustodyCheck?: boolean },
   ): Promise<{ item: SerializedItem; deprecationWarning: string | null }> {
     serialNumber = normalizeSerial(serialNumber)
     const client = tx || this.db
@@ -325,8 +325,14 @@ export class SerializedInventoryService {
       return { item: updated, deprecationWarning: null }
     }
 
-    // 2. Custody precheck (plan §1.5 rollout-controlled)
-    const deprecationWarning = await this.applyCustodyPrecheck(item, opts)
+    // 2. Custody precheck (plan §1.5 rollout-controlled).
+    //    `skipCustodyCheck` is for manual back-office sales ("Subir ventas fuera de TPV"):
+    //    those SIMs were sold by promoters who never accepted them on a TPV, so they
+    //    legitimately sit in SUPERVISOR_HELD/ADMIN_HELD (never PROMOTER_HELD) and the
+    //    precheck — which requires PROMOTER_HELD assigned to the seller — would wrongly
+    //    reject every one under ENFORCE mode. The AVAILABLE status gate in resolveIccid
+    //    still prevents double-selling an already-sold SIM.
+    const deprecationWarning = opts?.skipCustodyCheck ? null : await this.applyCustodyPrecheck(item, opts)
 
     // 3. Update — include sellingVenueId for org-level items
     const isOrgLevel = !item.venueId

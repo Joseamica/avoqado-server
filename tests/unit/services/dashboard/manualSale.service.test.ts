@@ -146,7 +146,9 @@ describe('manualSale.service — createOneManualSale', () => {
     expect(serialArg).toBe('8952140064323812041F')
     expect(orderItemIdArg).toBe('orderitem-1')
     expect(txArg).toBe(tx)
-    expect(optsArg).toEqual({ staffId: SELLER_STAFF_ID })
+    // Manual sales bypass the TPV custody precheck — these SIMs are sold outside the TPV
+    // and sit in SUPERVISOR_HELD, which the precheck (PROMOTER_HELD-only) would reject.
+    expect(optsArg).toEqual({ staffId: SELLER_STAFF_ID, skipCustodyCheck: true })
 
     // Payment COMPLETED, pesos, zero fees, net == amount.
     expect(tx.payment.create).toHaveBeenCalledTimes(1)

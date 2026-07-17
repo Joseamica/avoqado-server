@@ -204,3 +204,58 @@ describe('owner-approval gate (applyCustodyPrecheck via ensureSellable)', () => 
     })
   })
 })
+
+// Regression: manual back-office sales ("Subir ventas fuera de TPV") must sell a SIM
+// that is still SUPERVISOR_HELD (sold outside the TPV → never PROMOTER_HELD). Under
+// ENFORCE mode the precheck rejects that, so markAsSold takes a `skipCustodyCheck` flag.
+// (Prod 2026-07-16: 331/342 rows rolled back with SIM_NOT_ACCEPTED because the manual
+// flow ran the TPV custody gate.)
+describe('markAsSold — manual-sale custody bypass (skipCustodyCheck)', () => {
+  const VENUE_ID = 'store-venue-1'
+  const SERIAL = 'SIM001'
+  const ORDER_ITEM_ID = 'orderitem-1'
+  const SELLER = 'staff-seller'
+
+  function makeSoldMockDb(item: SerializedItem) {
+    const update = jest.fn().mockResolvedValue({ ...item, status: 'SOLD', custodyState: 'SOLD' })
+    const orgFindUnique = jest.fn().mockResolvedValue({ simCustodyEnforcementMode: 'ENFORCE' as SimCustodyEnforcementMode })
+    const db = {
+      serializedItem: {
+        findUnique: jest.fn().mockResolvedValue(item),
+        findFirst: jest.fn().mockResolvedValue(item),
+        update,
+      },
+      organization: { findUnique: orgFindUnique },
+      itemCategory: { findUnique: jest.fn().mockResolvedValue(null) },
+      venue: { findUnique: jest.fn().mockResolvedValue(null) },
+    }
+    return { db, update, orgFindUnique }
+  }
+
+  it('marks a SUPERVISOR_HELD SIM SOLD under ENFORCE, skipping the precheck', async () => {
+    const item = makeItem({ custodyState: 'SUPERVISOR_HELD', assignedPromoterId: null })
+    const { db, update, orgFindUnique } = makeSoldMockDb(item)
+    const service = new SerializedInventoryService(db as any)
+
+    const result = await service.markAsSold(VENUE_ID, SERIAL, ORDER_ITEM_ID, undefined, {
+      staffId: SELLER,
+      skipCustodyCheck: true,
+    })
+
+    expect(update).toHaveBeenCalledTimes(1)
+    expect((update.mock.calls[0][0] as { data: Record<string, unknown> }).data).toMatchObject({ status: 'SOLD', custodyState: 'SOLD' })
+    expect(result.deprecationWarning).toBeNull()
+    // Precheck skipped → the org enforcement mode is never even consulted.
+    expect(orgFindUnique).not.toHaveBeenCalled()
+  })
+
+  it('WITHOUT the bypass, the same SUPERVISOR_HELD SIM throws SIM_NOT_ACCEPTED under ENFORCE', async () => {
+    const item = makeItem({ custodyState: 'SUPERVISOR_HELD', assignedPromoterId: null })
+    const { db } = makeSoldMockDb(item)
+    const service = new SerializedInventoryService(db as any)
+
+    await expect(
+      service.markAsSold(VENUE_ID, SERIAL, ORDER_ITEM_ID, undefined, { staffId: SELLER }),
+    ).rejects.toThrow(SimCustodyError)
+  })
+})

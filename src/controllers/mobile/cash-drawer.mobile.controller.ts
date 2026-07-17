@@ -156,6 +156,30 @@ export const getHistory = async (req: Request, res: Response, next: NextFunction
 }
 
 /**
+ * Tender breakdown (payments by method) for the corte de caja Z-report.
+ * Query: ?from=<iso>&to=<iso> (the drawer session's window). Defaults to
+ * [today 00:00, now] if omitted.
+ * @route GET /api/v1/mobile/venues/:venueId/cash-drawer/tender-breakdown
+ */
+export const getTenderBreakdown = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId } = req.params
+    const now = new Date()
+    const from = req.query.from ? new Date(req.query.from as string) : new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    const to = req.query.to ? new Date(req.query.to as string) : now
+
+    if (isNaN(from.getTime()) || isNaN(to.getTime())) {
+      return res.status(400).json({ success: false, message: 'from/to deben ser fechas ISO válidas' })
+    }
+
+    const result = await cashDrawerService.getTenderBreakdown(venueId, from, to)
+    return res.json({ success: true, data: result })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
  * Bulk sync events from mobile (offline-first)
  * @route POST /api/v1/mobile/venues/:venueId/cash-drawer/sync
  */

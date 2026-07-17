@@ -318,6 +318,44 @@ export async function getHistory(venueId: string, page: number = 1, pageSize: nu
 }
 
 // ============================================================================
+// TENDER BREAKDOWN (payments by method for the corte / Z-report)
+// ============================================================================
+
+/**
+ * Payments grouped by tender for a time window — the authoritative source for
+ * the corte de caja's "Desglose por método de pago" (the drawer only tracks
+ * CASH physically, so card/other totals must come from the payment records).
+ * Sums amount + tip per COMPLETED payment (refunds ride as negative COMPLETED
+ * payments, so the signed sum auto-nets them). Window = the drawer session's
+ * [openedAt, closedAt || now].
+ */
+export async function getTenderBreakdown(venueId: string, from: Date, to: Date) {
+  const payments = await prisma.payment.findMany({
+    where: {
+      venueId,
+      status: 'COMPLETED',
+      createdAt: { gte: from, lte: to },
+    },
+    select: { method: true, amount: true, tipAmount: true },
+  })
+
+  const byMethod = new Map<string, number>()
+  for (const p of payments) {
+    const method = p.method || 'OTHER'
+    const total = Number(p.amount) + Number(p.tipAmount ?? 0)
+    byMethod.set(method, (byMethod.get(method) || 0) + total)
+  }
+
+  // Emit every method with activity, dollars major units (matches this API).
+  const tenderBreakdown = Array.from(byMethod.entries())
+    .map(([method, total]) => ({ method, total: Number(total.toFixed(2)) }))
+    .filter(t => t.total !== 0)
+    .sort((a, b) => b.total - a.total)
+
+  return { tenderBreakdown, from: from.toISOString(), to: to.toISOString() }
+}
+
+// ============================================================================
 // SYNC (Offline-first bulk event sync)
 // ============================================================================
 
