@@ -199,3 +199,19 @@ export const syncEvents = async (req: Request, res: Response, next: NextFunction
     next(error)
   }
 }
+
+/**
+ * End-of-day summary ("Cierre del día"): the day's sales by tender + the
+ * blockers a manager must clear (open checks, open drawers, clocked-in staff).
+ * @route GET /api/v1/mobile/venues/:venueId/end-of-day
+ */
+export const getEndOfDay = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId } = req.params
+    const { getEndOfDaySummary } = await import('../../services/mobile/end-of-day.mobile.service')
+    const summary = await getEndOfDaySummary(venueId)
+    return res.json({ success: true, data: summary })
+  } catch (error) {
+    next(error)
+  }
+}

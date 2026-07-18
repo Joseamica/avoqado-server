@@ -1828,6 +1828,18 @@ router.get(
 )
 
 /**
+ * GET /api/v1/mobile/venues/:venueId/end-of-day
+ * "Cierre del día": the day's sales by tender + blockers (open checks, open
+ * cash drawers, clocked-in staff). Read-only aggregator.
+ */
+router.get(
+  '/venues/:venueId/end-of-day',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  cashDrawerMobileController.getEndOfDay,
+)
+
+/**
  * GET /api/v1/mobile/venues/:venueId/cash-drawer/tender-breakdown?from=&to=
  * Payments grouped by method for the corte de caja Z-report (card + cash + other).
  */
