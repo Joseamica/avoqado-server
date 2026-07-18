@@ -869,14 +869,17 @@ export async function updateOrderDetails(venueId: string, orderId: string, input
     throw new BadRequestError('La cuenta ya está cerrada')
   }
 
+  // Partial-update semantics tolerant to clients that serialize defaults
+  // (Android's kotlinx encodeDefaults=true sends null for untouched fields):
+  // null/undefined = no change; EMPTY STRING clears name/notes/customer.
   const data: Record<string, unknown> = {}
-  if (input.name !== undefined) data.customerName = input.name?.trim() || null
-  if (input.notes !== undefined) data.specialRequests = input.notes?.trim() || null
+  if (input.name !== undefined && input.name !== null) data.customerName = input.name.trim() || null
+  if (input.notes !== undefined && input.notes !== null) data.specialRequests = input.notes.trim() || null
   if (input.covers !== undefined && input.covers !== null) {
     if (input.covers < 1 || input.covers > 200) throw new BadRequestError('covers inválido')
     data.covers = input.covers
   }
-  if (input.customerId !== undefined) {
+  if (input.customerId !== undefined && input.customerId !== null) {
     if (input.customerId) {
       const customer = await prisma.customer.findFirst({
         where: { id: input.customerId, venueId },
@@ -889,6 +892,7 @@ export async function updateOrderDetails(venueId: string, orderId: string, input
         data.customerName = `${customer.firstName || ''} ${customer.lastName || ''}`.trim() || null
       }
     } else {
+      // Empty string detaches the customer.
       data.customerId = null
     }
   }
