@@ -1828,6 +1828,19 @@ router.get(
 )
 
 /**
+ * POST /api/v1/mobile/venues/:venueId/orders/:orderId/items/:itemId/comp
+ * "Dar de cortesía": the line stays on the check but stops costing money.
+ * Body: { reason } (required). Rejected once the order is PAID/PARTIAL.
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/items/:itemId/comp',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('TABLE_SERVICE'),
+  checkPermission('orders:update'),
+  orderMobileController.compOrderItem,
+)
+
+/**
  * GET /api/v1/mobile/venues/:venueId/end-of-day
  * "Cierre del día": the day's sales by tender + blockers (open checks, open
  * cash drawers, clocked-in staff). Read-only aggregator.

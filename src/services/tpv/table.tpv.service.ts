@@ -31,6 +31,8 @@ interface TableStatusResponse {
       unitPrice: number
       total: number
       course: string | null
+      isCortesia: boolean
+      cortesiaReason: string | null
     }>
     waiter: {
       id: string
@@ -99,6 +101,8 @@ export async function getTablesWithStatus(venueId: string): Promise<TableStatusR
             unitPrice: Number(item.unitPrice),
             total: Number(item.total),
             course: item.course ?? null,
+            isCortesia: item.isCortesia,
+            cortesiaReason: item.cortesiaReason,
           })),
           waiter: table.currentOrder.servedBy
             ? {
@@ -575,6 +579,8 @@ export async function updateTable(
             unitPrice: Number(item.unitPrice),
             total: Number(item.total),
             course: item.course ?? null,
+            isCortesia: item.isCortesia,
+            cortesiaReason: item.cortesiaReason,
           })),
           waiter: updatedTable.currentOrder.servedBy
             ? {

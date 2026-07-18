@@ -261,3 +261,22 @@ export const addItemsToOrder = async (req: Request, res: Response, next: NextFun
     next(error)
   }
 }
+
+/**
+ * Comp an order item ("Dar de cortesía") with a mandatory reason.
+ * @route POST /api/v1/mobile/venues/:venueId/orders/:orderId/items/:itemId/comp
+ */
+export const compOrderItem = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, orderId, itemId } = req.params
+    const { reason } = req.body
+    const staffId = (req as any).authContext?.userId as string | undefined
+
+    const { compOrderItem: compItem } = await import('../../services/mobile/comp-item.mobile.service')
+    const result = await compItem({ venueId, orderId, itemId, reason, staffId })
+
+    return res.json({ success: true, data: result })
+  } catch (error) {
+    next(error)
+  }
+}
