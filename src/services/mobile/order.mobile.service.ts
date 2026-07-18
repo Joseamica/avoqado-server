@@ -1252,7 +1252,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
           include: { items: { include: { modifiers: { include: { modifier: true } } } } },
         })
         if (paidOrder) {
-          await deductTrackedInventoryForFreeCart(paidOrder, effectiveStaffId || input.staffId)
+          await deductTrackedInventoryForFreeCart(paidOrder, effectiveStaffId || input.staffId || '')
         }
         // Real-time auto-reorder, mirroring recordOrderPayment: if this sale
         // left an ingredient at/below its reorder point, create the PO now.
