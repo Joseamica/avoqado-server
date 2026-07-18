@@ -862,7 +862,7 @@ export interface OrderDetailsInput {
 export async function updateOrderDetails(venueId: string, orderId: string, input: OrderDetailsInput) {
   const order = await prisma.order.findFirst({
     where: { id: orderId, venueId },
-    select: { id: true, status: true },
+    select: { id: true, status: true, customerName: true },
   })
   if (!order) throw new NotFoundError('Order not found')
   if (['COMPLETED', 'CANCELLED', 'DELETED'].includes(order.status)) {
@@ -887,8 +887,11 @@ export async function updateOrderDetails(venueId: string, orderId: string, input
       })
       if (!customer) throw new BadRequestError('Cliente no encontrado en este venue')
       data.customerId = customer.id
-      // Keep the check label in sync unless the caller set an explicit name.
-      if (input.name === undefined) {
+      // Follow the customer's name on the check label ONLY when the check has
+      // no explicit name yet (never clobber a name the waiter typed). Checked
+      // against the STORED name because clients that serialize defaults send
+      // name:null on every call.
+      if (!order.customerName && data.customerName === undefined) {
         data.customerName = `${customer.firstName || ''} ${customer.lastName || ''}`.trim() || null
       }
     } else {
