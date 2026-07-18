@@ -487,6 +487,8 @@ interface AddOrderItemInput {
    *  the product detail before sending). total=0, discountAmount=list price. */
   isCortesia?: boolean | null
   cortesiaReason?: string | null
+  /** TABLE_SERVICE: asiento/comensal de la línea (Square's seats). */
+  seat?: number | null
 }
 
 interface NormalizedAddOrderItemInput extends AddOrderItemInput {
@@ -536,6 +538,8 @@ export function normalizeAddItems(items: AddOrderItemInput[]): NormalizedAddOrde
     // Cortesía: comped lines never merge (a merge would swallow the $0 line
     // into a paid one — money bug), so they also get a per-index key.
     if (item.isCortesia === true) key += `|comp#${index}`
+    // Asientos: lines for different seats never merge.
+    key += `|s:${item.seat ?? ''}`
 
     const existing = map.get(key)
     if (existing) {
@@ -554,6 +558,7 @@ export function normalizeAddItems(items: AddOrderItemInput[]): NormalizedAddOrde
         weightQuantity: item.weightQuantity ?? null,
         isCortesia: item.isCortesia ?? null,
         cortesiaReason: item.cortesiaReason ?? null,
+        seat: item.seat ?? null,
         _count: 1,
       })
     }
@@ -1314,6 +1319,7 @@ export async function addItemsToOrder(
             cortesiaReason: customComped ? item.cortesiaReason?.trim() || null : null,
             notes: normalizeNotes(item.notes),
             course: item.course ?? null,
+            seat: item.seat ?? null,
           },
           include: {
             product: {
@@ -1505,6 +1511,7 @@ export async function addItemsToOrder(
             cortesiaReason: lineComped ? item.cortesiaReason?.trim() || null : null,
             notes: normalizedNotes,
             course: item.course ?? null,
+            seat: item.seat ?? null,
             externalId: normalizedExternalId,
             modifiers: {
               create: itemModifiers.map(modifierId => {
@@ -1626,6 +1633,7 @@ export async function addItemsToOrder(
           cortesiaReason: plainComped ? item.cortesiaReason?.trim() || null : null,
           notes: normalizedNotes,
           course: item.course ?? null,
+          seat: item.seat ?? null,
           modifiers: {
             create: itemModifiers.map(modifierId => {
               const modifier = modifiers.find(m => m.id === modifierId)!

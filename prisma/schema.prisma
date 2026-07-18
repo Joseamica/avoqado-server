@@ -346,6 +346,7 @@ model Venue {
   creditAssessment        VenueCreditAssessment?
   creditOffers            CreditOffer[]
   ecommerceMerchants      EcommerceMerchant[]      @relation("VenueEcommerceMerchants") // ⭐ E-commerce sales channels for this venue
+  deliveryChannelLinks    DeliveryChannelLink[]
   cryptoConfig            VenueCryptoConfig? // Per-venue B4Bit crypto payment device config
 
   // ✅ NEW: Inventory Management
@@ -1486,6 +1487,12 @@ model Product {
   inventoryMethod InventoryMethod? // ✅ WORLD-CLASS: How to track (QUANTITY | RECIPE)
   unit            Unit? // Measurement unit for inventory
 
+  // Venta por peso (charcutería/granel). When true, `price` is the price PER
+  // KILOGRAM (unit=KILOGRAM) and the POS must send OrderItem.weightQuantity —
+  // the server computes total = round(price × weightKg, 2). Spec:
+  // Avoqado-HQ/specs/2026-07-18-venta-por-peso-bascula.md
+  soldByWeight Boolean @default(false)
+
   // Status
   active         Boolean   @default(true)
   availableFrom  DateTime?
@@ -2587,6 +2594,13 @@ model OrderItem {
   taxAmount      Decimal @db.Decimal(10, 2)
   total          Decimal @db.Decimal(10, 2)
 
+  // Venta por peso: kilos pesados para líneas de productos soldByWeight
+  // (quantity stays 1; total = round(unitPrice × weightQuantity, 2), computed
+  // server-side). Null for every non-weighted line. Weighted lines NEVER merge
+  // with each other (each weighing is its own line — D9 in the spec).
+  weightQuantity Decimal? @db.Decimal(12, 3)
+  weightUnit     Unit?
+
   // Structured discount/cortesía metadata for the NEW TPV "Cobrar" flow.
   //
   // IMPORTANT SCOPE RULE:
@@ -2615,6 +2629,10 @@ model OrderItem {
   // other client is required to send or read it). Restaurant-mode POS groups
   // kitchen comandas and the check display by this label.
   course String?
+
+  // TABLE_SERVICE — asiento/comensal de la línea (Square's seats). Additive:
+  // null = sin asiento; solo el POS restaurante lo escribe/lee.
+  seat Int?
 
   modifiers          OrderItemModifier[]
   paymentAllocations PaymentAllocation[] // ✅ LÍNEA AGREGADA
@@ -4426,6 +4444,69 @@ model ProviderEventLog {
   @@index([type, createdAt]) // dashboard queries by event type
 }
 
+// NOTE: DELIVERY CHANNELS
+model DeliveryChannelLink {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  provider           DeliveryProvider
+  /// locationId del proveedor (Deliverect location / store id del canal directo)
+  externalLocationId String
+  /// accountId de Deliverect (null para proveedores directos)
+  externalAccountId  String?
+
+  /// Secret HMAC por vínculo para verificar webhooks entrantes
+  webhookSecret String
+
+  orderAcceptanceMode OrderAcceptanceMode   @default(AUTO)
+  status              DeliveryChannelStatus @default(PENDING)
+
+  autoSyncMenu   Boolean   @default(true)
+  lastMenuSyncAt DateTime?
+
+  /// Config extra por proveedor (p.ej. mapa channelId→OrderSource de Deliverect)
+  config Json?
+
+  events DeliveryOrderEvent[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([provider, externalLocationId])
+  @@index([venueId])
+  @@index([status])
+}
+
+/// Log de eventos de webhook de delivery — patrón ProviderEventLog/Blumon:
+/// persistir ANTES de ACK; idempotencia por unique(provider, externalEventId, eventType).
+model DeliveryOrderEvent {
+  id String @id @default(cuid())
+
+  provider        DeliveryProvider
+  /// ID del pedido/evento en el proveedor (p.ej. channelOrderId de Deliverect)
+  externalEventId String
+  eventType       String // 'order' | 'cancel' | 'status'
+
+  channelLinkId String?
+  channelLink   DeliveryChannelLink? @relation(fields: [channelLinkId], references: [id], onDelete: SetNull)
+  venueId       String?
+
+  payload Json
+  status  DeliveryOrderEventStatus @default(RECEIVED)
+  error   String?                  @db.Text
+
+  /// Order creada al procesar (null si FAILED/DUPLICATE)
+  orderId String?
+
+  receivedAt  DateTime  @default(now())
+  processedAt DateTime?
+
+  @@unique([provider, externalEventId, eventType])
+  @@index([status, receivedAt])
+  @@index([venueId])
+}
+
 // Stripe webhook event tracking for idempotency
 // Prevents duplicate processing of webhook events
 model StripeWebhookEvent {
@@ -5912,6 +5993,7 @@ enum PaymentSource {
   POS // Direct from POS
   SDK // External merchant using Avoqado SDK
   OTHER
+  DELIVERY_PLATFORM // Pagado en la plataforma de delivery (Uber/Rappi/DiDi) — sin dinero por Avoqado
 }
 
 /// Business type enum - expanded to support multiple business verticals
@@ -6184,6 +6266,36 @@ enum OrderSource {
   /// Admin entered the payment directly from the dashboard — the underlying
   /// transaction happened outside Avoqado.
   DASHBOARD_MANUAL
+  UBER_EATS // Pedido de delivery originado en Uber Eats (vía agregador o directo)
+  RAPPI // Pedido de delivery originado en Rappi
+  DIDI_FOOD // Pedido de delivery originado en DiDi Food
+  DELIVERY_PLATFORM // Canal de delivery no identificado (fallback)
+}
+
+enum DeliveryProvider {
+  DELIVERECT
+  UBER_EATS // integración directa (futuro)
+  RAPPI // integración directa (futuro)
+  DIDI_FOOD // integración directa (futuro)
+}
+
+enum OrderAcceptanceMode {
+  AUTO // pedido entra confirmado y se reporta accepted al canal (default industria)
+  MANUAL // staff acepta/rechaza en POS — requiere UI Android+iOS (v2, aún no implementado)
+}
+
+enum DeliveryChannelStatus {
+  PENDING // creado, sin verificar contra el proveedor
+  ACTIVE
+  PAUSED // pausado por el venue o por billing (feature suspendido)
+  DISABLED
+}
+
+enum DeliveryOrderEventStatus {
+  RECEIVED
+  PROCESSED
+  FAILED
+  DUPLICATE
 }
 
 enum TableShape {
@@ -6411,6 +6523,7 @@ enum ReceiptStatus {
 enum OriginSystem {
   AVOQADO // Creado en nuestro sistema (la fuente de verdad por defecto)
   POS_SOFTRESTAURANT // Sincronizado desde el POS SoftRestaurant
+  DELIVERY_PLATFORM // Orden inyectada por un canal de delivery (Deliverect o directo)
 }
 
 enum CommandType {

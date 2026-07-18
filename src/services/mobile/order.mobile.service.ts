@@ -194,6 +194,8 @@ export interface OrderDetailResponse {
      *  items by course and labels each group "Enviado a la cocina a las HH:MM"
      *  (createdAt == fire time in the table flow). */
     course: string | null
+    /** TABLE_SERVICE: asiento/comensal de la línea. */
+    seat: number | null
     createdAt: Date
     isCortesia: boolean
     cortesiaReason: string | null
@@ -875,6 +877,7 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
       // In the table flow items are created exactly when the round is fired,
       // so createdAt IS the send time — no extra column needed.
       course: item.course ?? null,
+      seat: item.seat ?? null,
       createdAt: item.createdAt,
       isCortesia: item.isCortesia ?? false,
       cortesiaReason: item.cortesiaReason ?? null,
