@@ -6,6 +6,7 @@ import { createGuard } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { TableStatus } from '@prisma/client'
+import { moveOrderToTable, assignOrderWaiter } from '@/services/tpv/table.tpv.service'
 
 const STATUS_MAP: Record<string, TableStatus> = {
   available: TableStatus.AVAILABLE,
@@ -130,6 +131,107 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
           data: { number: updated.number, from: table.status, to: updated.status },
         })
         return text({ ok: true, table: { number: updated.number, status: updated.status } })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'move_table_check',
+    'TABLE_SERVICE: move the OPEN check (cuenta) from one table to another in a venue you can access — Square\'s "Mover". The order keeps its items/courses; the source table is released and the target becomes occupied. Fails if the target is occupied/reserved or the order is already paid. This WRITES; requires orders:update. Pass venueId + source table number + target table number.',
+    {
+      venueId: z.string().describe('Venue that owns both tables (must be in your scope)'),
+      fromNumber: z.string().min(1).describe('Table number the check is on now, e.g. "8"'),
+      toNumber: z.string().min(1).describe('Destination table number, e.g. "12"'),
+    },
+    async ({ venueId, fromNumber, toNumber }) => {
+      const where = guard.venueFilter(venueId)
+      guard.requirePermission('orders:update', venueId)
+      const source = await prisma.table.findFirst({
+        where: { ...where, number: fromNumber, active: true },
+        select: { id: true, number: true, currentOrderId: true },
+      })
+      if (!source) return text({ ok: false, error: `No encontré la mesa "${fromNumber}" activa en este local.` })
+      if (!source.currentOrderId) return text({ ok: false, error: `La mesa ${fromNumber} no tiene cuenta abierta.` })
+      const target = await prisma.table.findFirst({
+        where: { ...where, number: toNumber, active: true },
+        select: { id: true },
+      })
+      if (!target) return text({ ok: false, error: `No encontré la mesa "${toNumber}" activa en este local.` })
+
+      try {
+        await moveOrderToTable(venueId, source.currentOrderId, target.id)
+        await auditMcpWrite(scope, {
+          action: 'TABLE_CHECK_MOVED',
+          entity: 'Order',
+          entityId: source.currentOrderId,
+          venueId,
+          data: { from: fromNumber, to: toNumber },
+        })
+        return text({ ok: true, moved: { orderId: source.currentOrderId, from: fromNumber, to: toNumber } })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'assign_table_check',
+    'TABLE_SERVICE: reassign the OPEN check (cuenta) of a table to another waiter/staff member — Square\'s "Asignar". Sales attribution (tips, corte) follows the new waiter. This WRITES; requires orders:update. Pass venueId + table number + the staff member (id, or a name to search).',
+    {
+      venueId: z.string().describe('Venue that owns the table (must be in your scope)'),
+      number: z.string().min(1).describe('Table number whose check to reassign, e.g. "8"'),
+      staff: z.string().min(1).describe('Staff id, or a name fragment to search among the venue staff'),
+    },
+    async ({ venueId, number, staff }) => {
+      const where = guard.venueFilter(venueId)
+      guard.requirePermission('orders:update', venueId)
+      const table = await prisma.table.findFirst({
+        where: { ...where, number, active: true },
+        select: { id: true, currentOrderId: true },
+      })
+      if (!table) return text({ ok: false, error: `No encontré la mesa "${number}" activa en este local.` })
+      if (!table.currentOrderId) return text({ ok: false, error: `La mesa ${number} no tiene cuenta abierta.` })
+
+      // Resolve staff: exact id first, then name search within the venue.
+      let staffId = staff
+      const byId = await prisma.staffVenue.findFirst({ where: { venueId, staffId: staff }, select: { staffId: true } })
+      if (!byId) {
+        const matches = await prisma.staffVenue.findMany({
+          where: {
+            venueId,
+            staff: {
+              OR: [
+                { firstName: { contains: staff, mode: 'insensitive' } },
+                { lastName: { contains: staff, mode: 'insensitive' } },
+              ],
+            },
+          },
+          select: { staffId: true, staff: { select: { firstName: true, lastName: true } } },
+          take: 5,
+        })
+        if (matches.length === 0) return text({ ok: false, error: `No encontré personal "${staff}" en este local.` })
+        if (matches.length > 1) {
+          return text({
+            ok: false,
+            error: 'Hay varias coincidencias — especifica mejor.',
+            matches: matches.map(m => ({ id: m.staffId, name: `${m.staff.firstName} ${m.staff.lastName}` })),
+          })
+        }
+        staffId = matches[0].staffId
+      }
+
+      try {
+        const result = await assignOrderWaiter(venueId, table.currentOrderId, staffId)
+        await auditMcpWrite(scope, {
+          action: 'TABLE_CHECK_ASSIGNED',
+          entity: 'Order',
+          entityId: table.currentOrderId,
+          venueId,
+          data: { table: number, staffId, staffName: result.staffName },
+        })
+        return text({ ok: true, assigned: { table: number, waiter: result.staffName } })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
       }

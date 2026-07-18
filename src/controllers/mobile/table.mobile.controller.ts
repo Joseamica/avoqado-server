@@ -91,3 +91,59 @@ export async function clearTable(req: Request, res: Response): Promise<void> {
     })
   }
 }
+
+/**
+ * POST /mobile/venues/:venueId/orders/:orderId/move
+ * TABLE_SERVICE (PRO) — move an OPEN check to another table (Square's
+ * "Mover"). Body: { targetTableId: string }
+ */
+export async function moveOrder(req: Request, res: Response): Promise<void> {
+  try {
+    const { venueId, orderId } = req.params
+    const { targetTableId } = req.body || {}
+
+    if (!targetTableId || typeof targetTableId !== 'string') {
+      res.status(400).json({ success: false, message: 'targetTableId is required' })
+      return
+    }
+
+    logger.info(`[TABLE MOBILE CONTROLLER] POST /mobile/venues/${venueId}/orders/${orderId}/move -> ${targetTableId}`)
+    await tableService.moveOrderToTable(venueId, orderId, targetTableId)
+
+    res.status(200).json({ success: true })
+  } catch (error: any) {
+    logger.error(`[TABLE MOBILE CONTROLLER] Error moving order: ${error.message}`)
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || 'Internal server error',
+    })
+  }
+}
+
+/**
+ * POST /mobile/venues/:venueId/orders/:orderId/assign
+ * TABLE_SERVICE (PRO) — reassign an OPEN check to another waiter (Square's
+ * "Asignar"). Body: { staffId: string }
+ */
+export async function assignOrder(req: Request, res: Response): Promise<void> {
+  try {
+    const { venueId, orderId } = req.params
+    const { staffId } = req.body || {}
+
+    if (!staffId || typeof staffId !== 'string') {
+      res.status(400).json({ success: false, message: 'staffId is required' })
+      return
+    }
+
+    logger.info(`[TABLE MOBILE CONTROLLER] POST /mobile/venues/${venueId}/orders/${orderId}/assign -> ${staffId}`)
+    const result = await tableService.assignOrderWaiter(venueId, orderId, staffId)
+
+    res.status(200).json({ success: true, data: result })
+  } catch (error: any) {
+    logger.error(`[TABLE MOBILE CONTROLLER] Error assigning order: ${error.message}`)
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || 'Internal server error',
+    })
+  }
+}

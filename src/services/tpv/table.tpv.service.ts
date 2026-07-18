@@ -301,6 +301,156 @@ export async function clearTable(venueId: string, tableId: string): Promise<void
 }
 
 /**
+ * TABLE_SERVICE — move an OPEN check to another table (Square's "Mover").
+ * The order keeps everything (items, courses, payments in flight are blocked
+ * anyway); only the table binding changes. Source table is released, target
+ * becomes OCCUPIED. Both sides broadcast TABLE_STATUS_CHANGE.
+ */
+export async function moveOrderToTable(venueId: string, orderId: string, targetTableId: string): Promise<void> {
+  logger.info(`🔀 [TABLE SERVICE] Moving order ${orderId} to table ${targetTableId}`)
+
+  const order = await prisma.order.findFirst({
+    where: { id: orderId, venueId },
+    select: {
+      id: true,
+      orderNumber: true,
+      tableId: true,
+      status: true,
+      paymentStatus: true,
+      covers: true,
+      servedBy: { select: { id: true, firstName: true, lastName: true } },
+    },
+  })
+  if (!order) {
+    throw new NotFoundError('Order not found or does not belong to this venue')
+  }
+  if (['COMPLETED', 'CANCELLED', 'DELETED'].includes(order.status)) {
+    throw new BadRequestError('La cuenta ya está cerrada — no se puede mover')
+  }
+  if (order.paymentStatus === PaymentStatus.PAID) {
+    throw new BadRequestError('La cuenta ya está pagada — no se puede mover')
+  }
+  if (order.tableId === targetTableId) {
+    throw new BadRequestError('La cuenta ya está en esa mesa')
+  }
+
+  const target = await prisma.table.findFirst({
+    where: { id: targetTableId, venueId },
+    select: { id: true, number: true, status: true, currentOrderId: true },
+  })
+  if (!target) {
+    throw new NotFoundError('Target table not found or does not belong to this venue')
+  }
+  if (target.currentOrderId || target.status === 'OCCUPIED') {
+    throw new BadRequestError(`La mesa ${target.number} ya tiene una cuenta abierta`)
+  }
+  if (target.status === TableStatus.RESERVED) {
+    throw new BadRequestError(`La mesa ${target.number} está reservada`)
+  }
+
+  const sourceTableId = order.tableId
+  // Order matters: currentOrderId is UNIQUE, so the source must release the
+  // order BEFORE the target can hold it. Release is conditional (updateMany)
+  // in case another check landed there between reads.
+  await prisma.$transaction([
+    ...(sourceTableId
+      ? [prisma.table.updateMany({
+          where: { id: sourceTableId, venueId, currentOrderId: order.id },
+          data: { status: 'AVAILABLE', currentOrderId: null },
+        })]
+      : []),
+    prisma.order.update({ where: { id: order.id }, data: { tableId: target.id } }),
+    prisma.table.update({
+      where: { id: target.id },
+      data: { status: 'OCCUPIED', currentOrderId: order.id },
+    }),
+  ])
+
+  logger.info(`✅ [TABLE SERVICE] Order ${order.orderNumber} moved to table ${target.number}`)
+
+  const broadcastingService = socketManager.getBroadcastingService()
+  if (broadcastingService) {
+    const waiter = order.servedBy
+      ? { id: order.servedBy.id, name: `${order.servedBy.firstName} ${order.servedBy.lastName}` }
+      : null
+    if (sourceTableId) {
+      const source = await prisma.table.findUnique({ where: { id: sourceTableId }, select: { id: true, number: true, status: true } })
+      if (source) {
+        broadcastingService.broadcastToVenue(venueId, SocketEventType.TABLE_STATUS_CHANGE, {
+          tableId: source.id,
+          tableNumber: source.number,
+          status: source.status,
+          orderId: null,
+          orderNumber: null,
+          covers: null,
+          waiter: null,
+        })
+      }
+    }
+    broadcastingService.broadcastToVenue(venueId, SocketEventType.TABLE_STATUS_CHANGE, {
+      tableId: target.id,
+      tableNumber: target.number,
+      status: 'OCCUPIED',
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      covers: order.covers,
+      waiter,
+    })
+  }
+}
+
+/**
+ * TABLE_SERVICE — reassign an OPEN check to another waiter (Square's
+ * "Asignar"). Sales attribution (tips, corte) follows servedById.
+ */
+export async function assignOrderWaiter(venueId: string, orderId: string, staffId: string): Promise<{ staffName: string }> {
+  logger.info(`👤 [TABLE SERVICE] Assigning order ${orderId} to staff ${staffId}`)
+
+  const order = await prisma.order.findFirst({
+    where: { id: orderId, venueId },
+    select: { id: true, orderNumber: true, status: true, paymentStatus: true, tableId: true, covers: true },
+  })
+  if (!order) {
+    throw new NotFoundError('Order not found or does not belong to this venue')
+  }
+  if (['COMPLETED', 'CANCELLED', 'DELETED'].includes(order.status)) {
+    throw new BadRequestError('La cuenta ya está cerrada — no se puede reasignar')
+  }
+
+  const staffVenue = await prisma.staffVenue.findFirst({
+    where: { staffId, venueId },
+    include: { staff: { select: { id: true, firstName: true, lastName: true } } },
+  })
+  if (!staffVenue) {
+    throw new BadRequestError('Staff member not found or not assigned to this venue')
+  }
+
+  await prisma.order.update({ where: { id: order.id }, data: { servedById: staffId } })
+
+  const staffName = `${staffVenue.staff.firstName} ${staffVenue.staff.lastName}`.trim()
+  logger.info(`✅ [TABLE SERVICE] Order ${order.orderNumber} assigned to ${staffName}`)
+
+  // Floor payloads poll the waiter, but broadcast so open floor plans refresh.
+  const broadcastingService = socketManager.getBroadcastingService()
+  if (broadcastingService && order.tableId) {
+    const table = await prisma.table.findUnique({ where: { id: order.tableId }, select: { id: true, number: true } })
+    if (table) {
+      broadcastingService.broadcastToVenue(venueId, SocketEventType.TABLE_STATUS_CHANGE, {
+        tableId: table.id,
+        tableNumber: table.number,
+        status: 'OCCUPIED',
+        orderId: order.id,
+        orderNumber: order.orderNumber,
+        covers: order.covers,
+        waiter: { id: staffVenue.staff.id, name: staffName },
+      })
+    }
+  }
+
+  return { staffName }
+}
+
+/**
  * Create a new table
  */
 export async function createTable(

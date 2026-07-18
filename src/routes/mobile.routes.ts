@@ -1609,6 +1609,32 @@ router.post(
 )
 
 /**
+ * POST /api/v1/mobile/venues/{venueId}/orders/{orderId}/move
+ * Move an OPEN check to another table (Square's "Mover").
+ * Body: { targetTableId: string }
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/move',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('TABLE_SERVICE'),
+  checkPermission('orders:update'),
+  tableMobileController.moveOrder,
+)
+
+/**
+ * POST /api/v1/mobile/venues/{venueId}/orders/{orderId}/assign
+ * Reassign an OPEN check to another waiter (Square's "Asignar").
+ * Body: { staffId: string }
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/assign',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('TABLE_SERVICE'),
+  checkPermission('orders:update'),
+  tableMobileController.assignOrder,
+)
+
+/**
  * POST /api/v1/mobile/venues/{venueId}/orders/{orderId}/items
  * Add a round of items to an OPEN order (optimistic concurrency via body
  * `version`; stale version → 409).
