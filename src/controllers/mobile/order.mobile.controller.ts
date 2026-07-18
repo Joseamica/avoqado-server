@@ -353,3 +353,20 @@ export const removeOrderDiscount = async (req: Request, res: Response, next: Nex
     next(error)
   }
 }
+
+/**
+ * POST /mobile/venues/:venueId/orders/:orderId/split
+ * TABLE_SERVICE — separates selected items into a NEW check on the same
+ * table (Square's separate checks). Body: { itemIds: string[] }
+ */
+export const splitOrder = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, orderId } = req.params
+    const { itemIds } = req.body || {}
+    const staffId = (req as any).authContext?.userId as string | undefined
+    const result = await orderMobileService.splitOrderItems(venueId, orderId, itemIds, staffId)
+    return res.json({ success: true, data: result })
+  } catch (error) {
+    next(error)
+  }
+}

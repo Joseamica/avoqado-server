@@ -8,7 +8,7 @@ import { auditMcpWrite } from '../audit'
 import { TableStatus } from '@prisma/client'
 import { moveOrderToTable, assignOrderWaiter } from '@/services/tpv/table.tpv.service'
 import { compWholeOrder } from '@/services/mobile/comp-item.mobile.service'
-import { updateOrderDetails } from '@/services/mobile/order.mobile.service'
+import { updateOrderDetails, splitOrderItems } from '@/services/mobile/order.mobile.service'
 
 const STATUS_MAP: Record<string, TableStatus> = {
   available: TableStatus.AVAILABLE,
@@ -303,6 +303,39 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
           data: { table: number, ...result },
         })
         return text({ ok: true, details: result })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'split_table_check',
+    "TABLE_SERVICE: split the open check of a table into a SECOND check on the SAME table (Square's separate checks) by moving specific items. Pass venueId + table number + the item ids to move (list them first via tables_status/find_order). At least one item must stay. This WRITES; requires orders:update.",
+    {
+      venueId: z.string().describe('Venue that owns the table (must be in your scope)'),
+      number: z.string().min(1).describe('Table number whose check to split, e.g. "8"'),
+      itemIds: z.array(z.string()).min(1).describe('OrderItem ids to move to the new check'),
+    },
+    async ({ venueId, number, itemIds }) => {
+      const where = guard.venueFilter(venueId)
+      guard.requirePermission('orders:update', venueId)
+      const table = await prisma.table.findFirst({
+        where: { ...where, number, active: true },
+        select: { id: true, currentOrderId: true },
+      })
+      if (!table) return text({ ok: false, error: `No encontré la mesa "${number}" activa en este local.` })
+      if (!table.currentOrderId) return text({ ok: false, error: `La mesa ${number} no tiene cuenta abierta.` })
+      try {
+        const result = await splitOrderItems(venueId, table.currentOrderId, itemIds)
+        await auditMcpWrite(scope, {
+          action: 'TABLE_CHECK_SPLIT',
+          entity: 'Order',
+          entityId: table.currentOrderId,
+          venueId,
+          data: { table: number, newOrder: result.created.orderNumber, items: itemIds.length },
+        })
+        return text({ ok: true, split: result })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
       }

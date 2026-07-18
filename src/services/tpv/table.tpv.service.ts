@@ -40,6 +40,19 @@ interface TableStatusResponse {
     } | null
     createdAt: Date
   } | null
+  /** Multi-cheque: TODAS las cuentas abiertas de la mesa (resumen ligero).
+   *  Opcional: create/updateTable devuelven la mesa sin este campo. */
+  openOrders?: Array<{
+    id: string
+    orderNumber: string
+    covers: number | null
+    total: number
+    itemCount: number
+    version: number
+    name: string | null
+    waiterName: string | null
+    createdAt: Date
+  }>
 }
 
 /**
@@ -48,6 +61,35 @@ interface TableStatusResponse {
  */
 export async function getTablesWithStatus(venueId: string): Promise<TableStatusResponse[]> {
   logger.info(`📋 [TABLE SERVICE] Getting tables with status for venue ${venueId}`)
+
+  // Multi-cheque (Square's separate checks): every OPEN order per table, not
+  // just the denormalized currentOrder pointer. Lightweight summaries only.
+  const openOrders = await prisma.order.findMany({
+    where: {
+      venueId,
+      tableId: { not: null },
+      status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
+    },
+    select: {
+      id: true,
+      tableId: true,
+      orderNumber: true,
+      covers: true,
+      total: true,
+      version: true,
+      customerName: true,
+      createdAt: true,
+      _count: { select: { items: true } },
+      servedBy: { select: { firstName: true, lastName: true } },
+    },
+    orderBy: { createdAt: 'asc' },
+  })
+  const openByTable = new Map<string, typeof openOrders>()
+  for (const o of openOrders) {
+    const list = openByTable.get(o.tableId!) ?? []
+    list.push(o)
+    openByTable.set(o.tableId!, list)
+  }
 
   const tables = await prisma.table.findMany({
     // Only active tables — soft-deleted ones (active: false) must not resurface
@@ -113,6 +155,19 @@ export async function getTablesWithStatus(venueId: string): Promise<TableStatusR
           createdAt: table.currentOrder.createdAt,
         }
       : null,
+    // Multi-cheque: TODAS las cuentas abiertas de la mesa (resumen ligero).
+    // Additive — clients that only read currentOrder are untouched.
+    openOrders: (openByTable.get(table.id) ?? []).map(o => ({
+      id: o.id,
+      orderNumber: o.orderNumber,
+      covers: o.covers,
+      total: Number(o.total),
+      itemCount: o._count.items,
+      version: o.version,
+      name: o.customerName ?? null,
+      waiterName: o.servedBy ? `${o.servedBy.firstName} ${o.servedBy.lastName}`.trim() : null,
+      createdAt: o.createdAt,
+    })),
   }))
 
   logger.info(`✅ [TABLE SERVICE] Retrieved ${response.length} tables (${response.filter(t => t.status === 'OCCUPIED').length} occupied)`)
@@ -180,6 +235,20 @@ export async function assignTable(
       isNewOrder: false,
     }
   }
+
+  // Multi-cheque invariant: "open orders bound to this tableId" must mean
+  // "checks of the CURRENT seating". Opening a table from AVAILABLE detaches
+  // any zombie open orders left bound to it by older flows/abandoned data,
+  // otherwise they would block clearTable and hijack the sibling repoint.
+  // The orders themselves survive (reports); they just leave the table.
+  await prisma.order.updateMany({
+    where: {
+      venueId,
+      tableId: table.id,
+      status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
+    },
+    data: { tableId: null },
+  })
 
   // Create new order
   const orderNumber = `ORD-${Date.now()}`
@@ -262,16 +331,15 @@ export async function clearTable(venueId: string, tableId: string): Promise<void
     throw new NotFoundError(`Table not found or does not belong to this venue`)
   }
 
-  // Verify the current order is paid
-  if (table.currentOrderId) {
-    const order = await prisma.order.findUnique({
-      where: { id: table.currentOrderId },
-      select: { paymentStatus: true, orderNumber: true },
-    })
-
-    if (order && order.paymentStatus !== PaymentStatus.PAID) {
-      throw new BadRequestError(`Cannot clear table with unpaid order ${order.orderNumber}`)
-    }
+  // Multi-cheque: the table frees only when EVERY open check on it is PAID
+  // (not just the denormalized currentOrder).
+  const openOnTable = await prisma.order.findMany({
+    where: { venueId, tableId, status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] } },
+    select: { id: true, orderNumber: true, paymentStatus: true },
+  })
+  const unpaid = openOnTable.filter(o => o.paymentStatus !== PaymentStatus.PAID)
+  if (unpaid.length > 0) {
+    throw new BadRequestError(`Cannot clear table with unpaid order ${unpaid[0].orderNumber}`)
   }
 
   // Clear table
@@ -365,6 +433,23 @@ export async function moveOrderToTable(venueId: string, orderId: string, targetT
       data: { status: 'OCCUPIED', currentOrderId: order.id },
     }),
   ])
+
+  // Multi-cheque: si la mesa origen aún tiene otra cuenta abierta, re-apuntar
+  // currentOrderId al hermano y mantenerla OCUPADA (el release de arriba solo
+  // aplicó si apuntaba a la cuenta movida).
+  if (sourceTableId) {
+    const sibling = await prisma.order.findFirst({
+      where: { venueId, tableId: sourceTableId, status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] } },
+      select: { id: true },
+      orderBy: { createdAt: 'asc' },
+    })
+    if (sibling) {
+      await prisma.table.update({
+        where: { id: sourceTableId },
+        data: { status: 'OCCUPIED', currentOrderId: sibling.id },
+      })
+    }
+  }
 
   logger.info(`✅ [TABLE SERVICE] Order ${order.orderNumber} moved to table ${target.number}`)
 

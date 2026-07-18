@@ -1062,6 +1062,93 @@ export async function removeOrderDiscount(venueId: string, orderId: string, orde
   return totals
 }
 
+// MARK: - Separate checks (Square: dividir en cuentas separadas)
+
+/**
+ * TABLE_SERVICE — splits the selected SENT items of an open check into a NEW
+ * check on the SAME table (Square's separate checks). The source keeps the
+ * rest; both orders' money is recomputed from their items. The table stays
+ * OCCUPIED; currentOrderId keeps pointing at the source.
+ */
+export async function splitOrderItems(venueId: string, orderId: string, itemIds: string[], staffId?: string) {
+  if (!Array.isArray(itemIds) || itemIds.length === 0) {
+    throw new BadRequestError('itemIds es requerido')
+  }
+
+  const source = await prisma.order.findFirst({
+    where: { id: orderId, venueId },
+    select: {
+      id: true,
+      orderNumber: true,
+      status: true,
+      paymentStatus: true,
+      tableId: true,
+      covers: true,
+      servedById: true,
+      type: true,
+      paidAmount: true,
+      items: { select: { id: true } },
+    },
+  })
+  if (!source) throw new NotFoundError('Order not found')
+  if (['COMPLETED', 'CANCELLED', 'DELETED'].includes(source.status)) {
+    throw new BadRequestError('La cuenta ya está cerrada')
+  }
+  if (source.paymentStatus === 'PAID' || source.paymentStatus === 'PARTIAL') {
+    throw new BadRequestError('No se puede separar una cuenta ya pagada')
+  }
+
+  const sourceItemIds = new Set(source.items.map(i => i.id))
+  const toMove = itemIds.filter(id => sourceItemIds.has(id))
+  if (toMove.length === 0) throw new BadRequestError('Los artículos no pertenecen a esta cuenta')
+  if (toMove.length >= sourceItemIds.size) {
+    throw new BadRequestError('Debe quedar al menos un artículo en la cuenta original')
+  }
+
+  const newOrder = await prisma.order.create({
+    data: {
+      venueId,
+      tableId: source.tableId,
+      covers: source.covers,
+      orderNumber: `ORD-${Date.now()}`,
+      servedById: source.servedById,
+      type: source.type,
+      status: 'PENDING',
+      paymentStatus: 'PENDING',
+      kitchenStatus: 'PENDING',
+      subtotal: 0,
+      discountAmount: 0,
+      taxAmount: 0,
+      total: 0,
+      version: 1,
+    },
+    select: { id: true, orderNumber: true, version: true },
+  })
+
+  await prisma.orderItem.updateMany({
+    where: { id: { in: toMove }, orderId: source.id },
+    data: { orderId: newOrder.id },
+  })
+
+  const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
+  const sourceTotals = await recalculateOrderTotals(source.id, 0, Number(source.paidAmount || 0))
+  const newTotals = await recalculateOrderTotals(newOrder.id, 0, 0)
+
+  void (await import('../dashboard/activity-log.service')).logAction({
+    action: 'ORDER_SPLIT',
+    entity: 'Order',
+    entityId: source.id,
+    staffId,
+    venueId,
+    data: { newOrderId: newOrder.id, newOrderNumber: newOrder.orderNumber, items: toMove.length },
+  })
+
+  return {
+    source: { id: source.id, orderNumber: source.orderNumber, total: sourceTotals.total, version: sourceTotals.version },
+    created: { id: newOrder.id, orderNumber: newOrder.orderNumber, total: newTotals.total, version: newTotals.version },
+  }
+}
+
 // MARK: - Cash Payment Types
 
 export interface CashPaymentInput {
@@ -1557,11 +1644,22 @@ export async function cancelOrder(venueId: string, orderId: string, reason?: str
     select: { id: true, number: true },
   })
   if (boundTable) {
+    // Multi-cheque: si quedan otras cuentas abiertas en la mesa, re-apuntar
+    // en vez de liberar.
+    const sibling = await prisma.order.findFirst({
+      where: { venueId, tableId: boundTable.id, id: { not: orderId }, status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] } },
+      select: { id: true },
+      orderBy: { createdAt: 'asc' },
+    })
     await prisma.table.update({
       where: { id: boundTable.id },
-      data: { status: 'AVAILABLE', currentOrderId: null },
+      data: sibling ? { status: 'OCCUPIED', currentOrderId: sibling.id } : { status: 'AVAILABLE', currentOrderId: null },
     })
-    logger.info(`✅ [ORDER.MOBILE] Table ${boundTable.number} released after order cancellation`)
+    logger.info(
+      sibling
+        ? `✅ [ORDER.MOBILE] Table ${boundTable.number} repointed to sibling check after cancellation`
+        : `✅ [ORDER.MOBILE] Table ${boundTable.number} released after order cancellation`,
+    )
   }
 
   const { logAction } = await import('../dashboard/activity-log.service')

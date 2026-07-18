@@ -1859,6 +1859,14 @@ router.get(
  * Body: { reason } (required). Rejected once the order is PAID/PARTIAL.
  */
 router.post(
+  '/venues/:venueId/orders/:orderId/split',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('TABLE_SERVICE'),
+  checkPermission('orders:update'),
+  orderMobileController.splitOrder,
+)
+
+router.post(
   '/venues/:venueId/orders/:orderId/discounts',
   authenticateTokenMiddleware,
   checkFeatureAccess('TABLE_SERVICE'),
