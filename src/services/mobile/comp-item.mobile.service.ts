@@ -139,7 +139,7 @@ export async function compWholeOrder(params: { venueId: string; orderId: string;
  * 0) and re-derives percentage discounts, mirroring addItemsToOrder's recalc so
  * both paths agree on the order's money.
  */
-async function recalculateOrderTotals(orderId: string, fallbackDiscount: number, paidAmount: number) {
+export async function recalculateOrderTotals(orderId: string, fallbackDiscount: number, paidAmount: number) {
   const items = await prisma.orderItem.findMany({ where: { orderId }, select: { total: true } })
   const newSubtotal = items.reduce((sum, i) => sum + Number(i.total), 0)
 

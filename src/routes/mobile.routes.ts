@@ -1859,6 +1859,26 @@ router.get(
  * Body: { reason } (required). Rejected once the order is PAID/PARTIAL.
  */
 router.post(
+  '/venues/:venueId/orders/:orderId/discounts',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('TABLE_SERVICE'),
+  checkPermission('orders:update'),
+  orderMobileController.applyOrderDiscount,
+)
+
+/**
+ * DELETE /api/v1/mobile/venues/:venueId/orders/:orderId/discounts/:orderDiscountId
+ * Removes one applied order discount from the open check.
+ */
+router.delete(
+  '/venues/:venueId/orders/:orderId/discounts/:orderDiscountId',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('TABLE_SERVICE'),
+  checkPermission('orders:update'),
+  orderMobileController.removeOrderDiscount,
+)
+
+router.post(
   '/venues/:venueId/orders/:orderId/comp',
   authenticateTokenMiddleware,
   checkFeatureAccess('TABLE_SERVICE'),

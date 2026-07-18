@@ -479,6 +479,14 @@ interface AddOrderItemInput {
   /** Custom-amount line (no catalog product): label + unit price in cents. */
   customName?: string | null
   customUnitPriceCents?: number | null
+  /** Venta por peso: kilos pesados (0.001–99.999). REQUIRED when the product is
+   *  soldByWeight (quantity must be 1), REJECTED otherwise. Server computes the
+   *  total; weighted lines NEVER merge (D9 in the spec). */
+  weightQuantity?: number | null
+  /** TABLE_SERVICE: the line lands ALREADY comped (Square's cortesía picked in
+   *  the product detail before sending). total=0, discountAmount=list price. */
+  isCortesia?: boolean | null
+  cortesiaReason?: string | null
 }
 
 interface NormalizedAddOrderItemInput extends AddOrderItemInput {
@@ -508,10 +516,11 @@ function buildAddItemKey(productId: string, modifierIds: string[], notes: string
   return `${productId}|${notesKey}|${modifiersKey}|${externalKey}`
 }
 
-function normalizeAddItems(items: AddOrderItemInput[]): NormalizedAddOrderItemInput[] {
+// Exported for unit tests (D9: weighted lines must never merge).
+export function normalizeAddItems(items: AddOrderItemInput[]): NormalizedAddOrderItemInput[] {
   const map = new Map<string, NormalizedAddOrderItemInput>()
 
-  for (const item of items) {
+  for (const [index, item] of items.entries()) {
     const normalizedNotes = normalizeNotes(item.notes)
     const normalizedModifiers = normalizeModifierIds(item.modifierIds)
     const normalizedExternalId = normalizeExternalId(item.externalId)
@@ -520,7 +529,13 @@ function normalizeAddItems(items: AddOrderItemInput[]): NormalizedAddOrderItemIn
     const keyBase = item.productId
       ? buildAddItemKey(item.productId, normalizedModifiers, normalizedNotes, normalizedExternalId)
       : `custom:${item.customName ?? ''}:${item.customUnitPriceCents ?? 0}:${normalizedNotes ?? ''}`
-    const key = keyBase + `|c:${normalizedCourse ?? ''}`
+    let key = keyBase + `|c:${normalizedCourse ?? ''}`
+    // D9 (venta por peso): each weighing is its own line — weighted lines get a
+    // per-index key so two weighings of the same product NEVER merge here.
+    if (item.weightQuantity != null) key += `|w#${index}`
+    // Cortesía: comped lines never merge (a merge would swallow the $0 line
+    // into a paid one — money bug), so they also get a per-index key.
+    if (item.isCortesia === true) key += `|comp#${index}`
 
     const existing = map.get(key)
     if (existing) {
@@ -536,6 +551,9 @@ function normalizeAddItems(items: AddOrderItemInput[]): NormalizedAddOrderItemIn
         course: normalizedCourse,
         customName: item.customName ?? null,
         customUnitPriceCents: item.customUnitPriceCents ?? null,
+        weightQuantity: item.weightQuantity ?? null,
+        isCortesia: item.isCortesia ?? null,
+        cortesiaReason: item.cortesiaReason ?? null,
         _count: 1,
       })
     }
@@ -678,7 +696,10 @@ async function fetchOrderForTpvResponse(orderId: string) {
  * as COMPLETED + PAID. This is preferable to silent drift OR to a
  * customer-visible error after the cart already closed.
  */
-async function deductTrackedInventoryForFreeCart(order: any, staffId: string): Promise<void> {
+// Exported: also reused by the mobile cash path (payCashOrder in
+// order.mobile.service.ts), which historically never deducted inventory at all —
+// same never-throws contract there (payment success is never at risk).
+export async function deductTrackedInventoryForFreeCart(order: any, staffId: string): Promise<void> {
   const deductionErrors: Array<{ productId: string; productName: string; error: string }> = []
 
   for (const item of order.items || []) {
@@ -721,7 +742,9 @@ async function deductTrackedInventoryForFreeCart(order: any, staffId: string): P
             },
           })) || []
 
-      await deductInventoryForProduct(order.venueId, item.productId, item.quantity, order.id, staffId, orderModifiers)
+      // Weighted lines deduct the weighed kilos, not the (always-1) quantity.
+      const effectiveQuantity = item.weightQuantity != null ? Number(item.weightQuantity) : item.quantity
+      await deductInventoryForProduct(order.venueId, item.productId, effectiveQuantity, order.id, staffId, orderModifiers)
     } catch (error: any) {
       logger.error('❌ [WITH ITEMS] Failed to deduct inventory for free cart item', {
         orderId: order.id,
@@ -852,6 +875,12 @@ export async function createOrderWithItems(
     }
 
     const product = item.productId ? products.find(p => p.id === item.productId)! : null
+    // Venta por peso: this PAX/TPV checkout flow has no weight capture yet
+    // (the client asserts its own totals via assertClosePesos), so weighted
+    // products are rejected loudly instead of silently charging price × 1.
+    if (product?.soldByWeight) {
+      throw new BadRequestError(`El producto "${product.name}" se vende por peso; véndelo desde un punto de venta con captura de peso.`)
+    }
     const itemModifiers = item.modifierIds || []
     const modifierRows = itemModifiers.map(modifierId => modifiers.find(m => m.id === modifierId)!)
     const modifierGrossPesos = itemModifiers.reduce((sum, modifierId) => {
@@ -1270,6 +1299,7 @@ export async function addItemsToOrder(
       if (!item.productId) {
         const unitPrice = new Prisma.Decimal((item.customUnitPriceCents ?? 0) / 100)
         const customTotal = unitPrice.mul(item.quantity)
+        const customComped = item.isCortesia === true
         const customItem = await prisma.orderItem.create({
           data: {
             orderId: order.id,
@@ -1277,9 +1307,11 @@ export async function addItemsToOrder(
             productName: item.customName!.trim(),
             quantity: item.quantity,
             unitPrice,
-            discountAmount: 0,
+            discountAmount: customComped ? customTotal : 0,
             taxAmount: 0,
-            total: customTotal,
+            total: customComped ? 0 : customTotal,
+            isCortesia: customComped,
+            cortesiaReason: customComped ? item.cortesiaReason?.trim() || null : null,
             notes: normalizeNotes(item.notes),
             course: item.course ?? null,
           },
@@ -1315,6 +1347,29 @@ export async function addItemsToOrder(
         `💰 [ADD ITEMS] Product: ${product.name} | Base: $${product.price} | Modifiers: $${modifierTotal} | Total per unit: $${Number(product.price) + modifierTotal}`,
       )
 
+      // ─── Venta por peso (soldByWeight) — spec 2026-07-18-venta-por-peso ────
+      // Weighted lines carry weightQuantity (kg) and quantity=1; the SERVER
+      // computes base = round(price/kg × weightKg, 2). Weight on a non-weighted
+      // product, or a weighted product without weight, is an explicit 400.
+      const weightKg = item.weightQuantity != null ? Number(item.weightQuantity) : null
+      if (product.soldByWeight) {
+        if (weightKg == null || !Number.isFinite(weightKg) || weightKg <= 0) {
+          throw new BadRequestError(`El producto "${product.name}" se vende por peso; envía weightQuantity en kilogramos.`)
+        }
+        if (weightKg < 0.001 || weightKg > 99.999) {
+          throw new BadRequestError(`El peso para "${product.name}" está fuera de rango (0.001–99.999 kg).`)
+        }
+        if (item.quantity !== 1) {
+          throw new BadRequestError(`Las líneas por peso llevan cantidad 1 — cada pesada es una línea (producto "${product.name}").`)
+        }
+      } else if (weightKg != null) {
+        throw new BadRequestError(`El producto "${product.name}" no se vende por peso; no envíes weightQuantity.`)
+      }
+      const weightedBase = weightKg != null ? Math.round(Number(product.price) * weightKg * 100) / 100 : null
+      /** Line total for qty units — weight-aware (weighted lines: qty is 1). */
+      const lineTotalFor = (qty: number) =>
+        new Prisma.Decimal(weightedBase != null ? weightedBase + modifierTotal * qty : (Number(product.price) + modifierTotal) * qty)
+
       // ⭐ Idempotency: prefer externalId when provided
       const normalizedExternalId = normalizeExternalId(item.externalId)
 
@@ -1341,7 +1396,7 @@ export async function addItemsToOrder(
 
         if (existingByExternal) {
           const updatedQuantity = item.quantity
-          const updatedTotal = new Prisma.Decimal((Number(product.price) + modifierTotal) * updatedQuantity)
+          const updatedTotal = lineTotalFor(updatedQuantity)
 
           logger.info(
             `🔄 [ADD ITEMS] UPDATING by externalId: ${product.name} | old qty=${existingByExternal.quantity} → new qty=${updatedQuantity} | externalId=${normalizedExternalId}`,
@@ -1396,7 +1451,7 @@ export async function addItemsToOrder(
 
         if (existingById) {
           const updatedQuantity = item.quantity
-          const updatedTotal = new Prisma.Decimal((Number(product.price) + modifierTotal) * updatedQuantity)
+          const updatedTotal = lineTotalFor(updatedQuantity)
 
           logger.info(
             `🔄 [ADD ITEMS] UPDATING by id fallback: ${product.name} | old qty=${existingById.quantity} → new qty=${updatedQuantity} | externalId=${normalizedExternalId}`,
@@ -1430,7 +1485,8 @@ export async function addItemsToOrder(
         }
 
         // If externalId provided and no match, create new line (no merge)
-        const itemTotal = new Prisma.Decimal((Number(product.price) + modifierTotal) * item.quantity)
+        const itemTotal = lineTotalFor(item.quantity)
+        const lineComped = item.isCortesia === true
         const createdItem = await prisma.orderItem.create({
           data: {
             orderId: order.id,
@@ -1440,9 +1496,13 @@ export async function addItemsToOrder(
             categoryName: product.category?.name || null,
             quantity: item.quantity,
             unitPrice: product.price,
-            discountAmount: 0,
+            weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
+            weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
+            discountAmount: lineComped ? itemTotal : 0,
             taxAmount: 0,
-            total: itemTotal,
+            total: lineComped ? 0 : itemTotal,
+            isCortesia: lineComped,
+            cortesiaReason: lineComped ? item.cortesiaReason?.trim() || null : null,
             notes: normalizedNotes,
             course: item.course ?? null,
             externalId: normalizedExternalId,
@@ -1492,18 +1552,26 @@ export async function addItemsToOrder(
         },
       })
 
-      const existingItemWithModifiers = existingItemsWithModifiers.find(existing => {
-        const existingModifierIds = existing.modifiers.map(m => m.modifierId).sort()
-        const notesMatch = normalizeNotes(existing.notes) === normalizedNotes
-        // TABLE_SERVICE: lines in different courses never merge.
-        const courseMatch = (existing.course ?? null) === (item.course ?? null)
-        return notesMatch && courseMatch && JSON.stringify(existingModifierIds) === JSON.stringify(sortedNewModifiers)
-      })
+      // D9 (venta por peso): weighted lines NEVER merge into an existing line —
+      // every weighing is its own line, so the lookup is skipped entirely.
+      // Cortesía: comped lines never merge either (in EITHER direction) — a
+      // merge would silently swallow the $0 line into a paid one (money bug).
+      const existingItemWithModifiers =
+        weightKg != null || item.isCortesia === true
+          ? undefined
+          : existingItemsWithModifiers.find(existing => {
+              if (existing.isCortesia) return false
+              const existingModifierIds = existing.modifiers.map(m => m.modifierId).sort()
+              const notesMatch = normalizeNotes(existing.notes) === normalizedNotes
+              // TABLE_SERVICE: lines in different courses never merge.
+              const courseMatch = (existing.course ?? null) === (item.course ?? null)
+              return notesMatch && courseMatch && JSON.stringify(existingModifierIds) === JSON.stringify(sortedNewModifiers)
+            })
 
       if (existingItemWithModifiers) {
         // ⭐ UPDATE existing item instead of creating new one
         const updatedQuantity = item._count > 1 ? existingItemWithModifiers.quantity + item.quantity : item.quantity
-        const updatedTotal = new Prisma.Decimal((Number(product.price) + modifierTotal) * updatedQuantity)
+        const updatedTotal = lineTotalFor(updatedQuantity)
 
         logger.info(
           `🔄 [ADD ITEMS] UPDATING existing item: ${product.name} | old qty=${existingItemWithModifiers.quantity} → new qty=${updatedQuantity} | merged=${item._count > 1}`,
@@ -1537,7 +1605,8 @@ export async function addItemsToOrder(
 
       // Create NEW order item with modifiers (original behavior)
       // ✅ Toast/Square pattern: Denormalize product data for order history preservation
-      const itemTotal = new Prisma.Decimal((Number(product.price) + modifierTotal) * item.quantity)
+      const itemTotal = lineTotalFor(item.quantity)
+      const plainComped = item.isCortesia === true
       const createdItem = await prisma.orderItem.create({
         data: {
           orderId: order.id,
@@ -1548,9 +1617,13 @@ export async function addItemsToOrder(
           categoryName: product.category?.name || null,
           quantity: item.quantity,
           unitPrice: product.price,
-          discountAmount: 0,
+          weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
+          weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
+          discountAmount: plainComped ? itemTotal : 0,
           taxAmount: 0,
-          total: itemTotal,
+          total: plainComped ? 0 : itemTotal,
+          isCortesia: plainComped,
+          cortesiaReason: plainComped ? item.cortesiaReason?.trim() || null : null,
           notes: normalizedNotes,
           course: item.course ?? null,
           modifiers: {

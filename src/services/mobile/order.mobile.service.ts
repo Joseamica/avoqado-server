@@ -36,6 +36,11 @@ export interface CreateOrderItemInput {
    *  (order.tpv.service.ts). Validated the same way: must exist, belong to
    *  this venue, and be currently active/within its validity window. */
   discountId?: string | null
+  /** Venta por peso: kilos pesados (0.001–99.999) — REQUIRED when the product
+   *  has soldByWeight=true (quantity must be 1), REJECTED otherwise. The server
+   *  computes total = round(product.price × weightQuantity, 2); the client
+   *  never dictates the price. Spec: 2026-07-18-venta-por-peso-bascula.md */
+  weightQuantity?: number | null
 }
 
 export interface CreateOrderInput {
@@ -165,6 +170,10 @@ export interface OrderDetailResponse {
   specialRequests: string | null
   /** TABLE_SERVICE: comensales — editable from the check panel. */
   covers: number | null
+  /** Cumplimiento: DINE_IN | TAKEOUT | DELIVERY | PICKUP. */
+  orderType: string
+  /** Applied ORDER-level discounts (check panel Descuentos). */
+  discounts: Array<{ id: string; name: string; amount: number }>
   createdAt: Date
   items: Array<{
     id: string
@@ -173,6 +182,8 @@ export interface OrderDetailResponse {
     quantity: number
     unitPrice: number
     total: number
+    /** Venta por peso: kilos pesados (unitPrice = precio por kg). Null on normal lines. */
+    weightQuantity: number | null
     notes: string | null
     modifiers: Array<{
       id: string
@@ -468,9 +479,32 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
       return sum + (modifier ? Number(modifier.price) : 0)
     }, 0)
 
-    // Calculate item total: (product price + modifiers) * quantity
-    const unitPrice = Number(product.price) + modifierTotal
-    const itemTotal = unitPrice * item.quantity
+    // ─── Venta por peso (soldByWeight) ───────────────────────────────────────
+    // Weighted lines carry weightQuantity (kg); the SERVER computes the money:
+    // base = round(price/kg × weightKg, 2). quantity must be 1. Weight on a
+    // non-weighted product (or missing weight on a weighted one) is a 400 —
+    // explicit over silent (spec D4, pregunta 2).
+    const weightKg = item.weightQuantity != null ? Number(item.weightQuantity) : null
+    if (product.soldByWeight) {
+      if (weightKg == null || !Number.isFinite(weightKg) || weightKg <= 0) {
+        throw new BadRequestError(`El producto "${product.name}" se vende por peso; envía weightQuantity en kilogramos.`)
+      }
+      if (weightKg < 0.001 || weightKg > 99.999) {
+        throw new BadRequestError(`El peso para "${product.name}" está fuera de rango (0.001–99.999 kg).`)
+      }
+      if (item.quantity !== 1) {
+        throw new BadRequestError(`Las líneas por peso llevan cantidad 1 — cada pesada es una línea (producto "${product.name}").`)
+      }
+    } else if (weightKg != null) {
+      throw new BadRequestError(`El producto "${product.name}" no se vende por peso; no envíes weightQuantity.`)
+    }
+
+    // Calculate item total: (product price + modifiers) * quantity.
+    // Weighted: base = round(price × weightKg, 2) + modifiers (quantity is 1).
+    const lineBase = product.soldByWeight
+      ? Math.round(Number(product.price) * weightKg! * 100) / 100
+      : Number(product.price) * item.quantity
+    const itemTotal = lineBase + modifierTotal * item.quantity
     subtotal += itemTotal
 
     const appliedDiscount = item.discountId ? discounts.find(discount => discount.id === item.discountId)! : null
@@ -487,6 +521,8 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
       categoryName: product.category?.name || null,
       quantity: item.quantity,
       unitPrice: new Prisma.Decimal(Number(product.price)),
+      weightQuantity: product.soldByWeight ? new Prisma.Decimal(weightKg!) : null,
+      weightUnit: product.soldByWeight ? ('KILOGRAM' as const) : null,
       discountAmount: new Prisma.Decimal(lineDiscount),
       appliedDiscountId: appliedDiscount?.id || null,
       taxAmount: new Prisma.Decimal(0),
@@ -785,6 +821,9 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
           },
         },
       },
+      orderDiscounts: {
+        select: { id: true, name: true, amount: true },
+      },
     },
   })
 
@@ -811,6 +850,13 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
     customerName: flattenedOrder.customerName,
     specialRequests: flattenedOrder.specialRequests,
     covers: flattenedOrder.covers ?? null,
+    orderType: flattenedOrder.type,
+    // Applied ORDER-level discounts, for the check panel's Descuentos list.
+    discounts: (flattenedOrder.orderDiscounts || []).map((d: any) => ({
+      id: d.id,
+      name: d.name,
+      amount: Number(d.amount),
+    })),
     createdAt: flattenedOrder.createdAt,
     items: flattenedOrder.items.map((item: any) => ({
       id: item.id,
@@ -819,6 +865,9 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
       quantity: item.quantity,
       unitPrice: Number(item.unitPrice),
       total: Number(item.total),
+      // Venta por peso: kilos pesados (unitPrice = precio por kg) — the POS
+      // check panel / reprint shows "0.435 kg × $420.00/kg". Null on normal lines.
+      weightQuantity: item.weightQuantity != null ? Number(item.weightQuantity) : null,
       notes: item.notes || null,
       modifiers: item.modifiers || [],
       // TABLE_SERVICE check panel (Square-style): the POS groups sent items by
@@ -853,6 +902,8 @@ export interface OrderDetailsInput {
   covers?: number | null
   /** Attach a venue customer (Square's Cliente tab). Empty string detaches. */
   customerId?: string | null
+  /** Cumplimiento (Square): DINE_IN | TAKEOUT | DELIVERY | PICKUP. */
+  orderType?: string | null
 }
 
 /**
@@ -879,6 +930,11 @@ export async function updateOrderDetails(venueId: string, orderId: string, input
     if (input.covers < 1 || input.covers > 200) throw new BadRequestError('covers inválido')
     data.covers = input.covers
   }
+  if (input.orderType !== undefined && input.orderType !== null && input.orderType !== '') {
+    const valid = ['DINE_IN', 'TAKEOUT', 'DELIVERY', 'PICKUP']
+    if (!valid.includes(input.orderType)) throw new BadRequestError('orderType inválido')
+    data.type = input.orderType
+  }
   if (input.customerId !== undefined && input.customerId !== null) {
     if (input.customerId) {
       const customer = await prisma.customer.findFirst({
@@ -904,14 +960,103 @@ export async function updateOrderDetails(venueId: string, orderId: string, input
   const updated = await prisma.order.update({
     where: { id: order.id },
     data,
-    select: { customerName: true, specialRequests: true, covers: true, customerId: true },
+    select: { customerName: true, specialRequests: true, covers: true, customerId: true, type: true },
   })
   return {
     name: updated.customerName,
     notes: updated.specialRequests,
     covers: updated.covers,
     customerId: updated.customerId,
+    orderType: updated.type,
   }
+}
+
+// MARK: - Table order discounts (check panel "Descuentos")
+
+/**
+ * TABLE_SERVICE — applies a catalog ORDER-scope discount to the open check
+ * and recomputes totals (same recalc the comp path uses, so % discounts
+ * re-derive consistently).
+ */
+export async function applyOrderDiscount(venueId: string, orderId: string, discountId: string, staffId?: string) {
+  const order = await prisma.order.findFirst({
+    where: { id: orderId, venueId },
+    select: { id: true, paymentStatus: true, discountAmount: true, paidAmount: true, subtotal: true },
+  })
+  if (!order) throw new NotFoundError('Order not found')
+  if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
+    throw new BadRequestError('No se puede descontar una orden ya pagada')
+  }
+
+  const discount = await prisma.discount.findFirst({ where: { id: discountId, venueId } })
+  if (!discount) throw new NotFoundError('Descuento no encontrado')
+  validateDiscountActive(discount)
+  if (discount.scope !== 'ORDER') {
+    throw new BadRequestError('Solo descuentos de orden aplican a la cuenta completa')
+  }
+
+  const dup = await prisma.orderDiscount.findFirst({ where: { orderId, discountId } })
+  if (dup) throw new BadRequestError('Ese descuento ya está aplicado a la cuenta')
+
+  const subtotal = Number(order.subtotal)
+  const value = Number(discount.value)
+  const amount = discount.type === 'PERCENTAGE' ? Math.round(((subtotal * value) / 100) * 100) / 100 : Math.min(value, subtotal)
+
+  const row = await prisma.orderDiscount.create({
+    data: {
+      orderId,
+      discountId,
+      type: discount.type,
+      name: discount.name,
+      value: discount.value,
+      amount,
+    },
+    select: { id: true, name: true, amount: true },
+  })
+
+  const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
+  const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0))
+
+  void (await import('../dashboard/activity-log.service')).logAction({
+    action: 'ORDER_DISCOUNT_APPLIED',
+    entity: 'Order',
+    entityId: orderId,
+    staffId,
+    venueId,
+    data: { discountId, name: row.name, amount: Number(row.amount) },
+  })
+
+  return { orderDiscountId: row.id, name: row.name, amount: Number(row.amount), ...totals }
+}
+
+/** Removes one applied order discount and recomputes totals. */
+export async function removeOrderDiscount(venueId: string, orderId: string, orderDiscountId: string, staffId?: string) {
+  const order = await prisma.order.findFirst({
+    where: { id: orderId, venueId },
+    select: { id: true, paymentStatus: true, paidAmount: true },
+  })
+  if (!order) throw new NotFoundError('Order not found')
+  if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
+    throw new BadRequestError('No se puede modificar una orden ya pagada')
+  }
+
+  const row = await prisma.orderDiscount.findFirst({ where: { id: orderDiscountId, orderId } })
+  if (!row) throw new NotFoundError('Descuento no aplicado a esta orden')
+  await prisma.orderDiscount.delete({ where: { id: row.id } })
+
+  const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
+  const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0))
+
+  void (await import('../dashboard/activity-log.service')).logAction({
+    action: 'ORDER_DISCOUNT_REMOVED',
+    entity: 'Order',
+    entityId: orderId,
+    staffId,
+    venueId,
+    data: { orderDiscountId, name: row.name },
+  })
+
+  return totals
 }
 
 // MARK: - Cash Payment Types
@@ -994,7 +1139,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   const tipDecimal = tip / 100
 
   // Create payment and update order in transaction
-  const payment = await prisma.$transaction(async tx => {
+  const paymentResult = await prisma.$transaction(async tx => {
     // Create payment record
     const newPayment = await tx.payment.create({
       data: {
@@ -1085,10 +1230,43 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       })
     }
 
-    return newPayment
+    return { newPayment, isFullyPaid }
   })
+  const { newPayment: payment, isFullyPaid: orderFullyPaid } = paymentResult
 
   logger.info(`✅ [ORDER.MOBILE] Cash payment recorded | paymentId=${payment.id} | order=${order.orderNumber}`)
+
+  // Inventory deduction on full payment (platform rule: stock deducts ONLY when
+  // fully paid). This path historically skipped deduction entirely — cash sales
+  // from desktop/tablets never lowered stock. Reuses the never-throws helper
+  // from the TPV free-cart path: payment success is NEVER at risk (errors are
+  // logged, not thrown), and it only fires on the PENDING/PARTIAL → PAID
+  // transition (re-calls are blocked above by the "already paid" guard).
+  // Weighted lines (weightQuantity) deduct kilos; see spec venta-por-peso.
+  if (orderFullyPaid) {
+    void (async () => {
+      try {
+        const { deductTrackedInventoryForFreeCart } = await import('@/services/tpv/order.tpv.service')
+        const paidOrder = await prisma.order.findUnique({
+          where: { id: orderId },
+          include: { items: { include: { modifiers: { include: { modifier: true } } } } },
+        })
+        if (paidOrder) {
+          await deductTrackedInventoryForFreeCart(paidOrder, effectiveStaffId || input.staffId)
+        }
+        // Real-time auto-reorder, mirroring recordOrderPayment: if this sale
+        // left an ingredient at/below its reorder point, create the PO now.
+        // Self-gated (feature + PREMIUM tier + config.enabled) and non-blocking.
+        const { runAutoReorderForVenue } = await import('@/services/dashboard/autoReorder.service')
+        await runAutoReorderForVenue(venueId)
+      } catch (err) {
+        logger.error('[ORDER.MOBILE] Post-payment inventory deduction/auto-reorder failed (payment unaffected)', {
+          orderId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    })()
+  }
 
   // Auto-generate digital receipt so the dashboard drawer and "Enviar recibo"
   // button have an accessKey immediately (mirrors TPV payment flow behavior).

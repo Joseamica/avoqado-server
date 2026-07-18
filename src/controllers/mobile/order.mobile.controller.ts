@@ -309,10 +309,45 @@ export const compWholeOrder = async (req: Request, res: Response, next: NextFunc
 export const updateOrderDetails = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId, orderId } = req.params
-    const { name, notes, covers, customerId } = req.body || {}
+    const { name, notes, covers, customerId, orderType } = req.body || {}
 
-    const result = await orderMobileService.updateOrderDetails(venueId, orderId, { name, notes, covers, customerId })
+    const result = await orderMobileService.updateOrderDetails(venueId, orderId, { name, notes, covers, customerId, orderType })
 
+    return res.json({ success: true, data: result })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * POST /mobile/venues/:venueId/orders/:orderId/discounts
+ * TABLE_SERVICE — applies an ORDER-scope catalog discount to the open check.
+ * Body: { discountId: string }
+ */
+export const applyOrderDiscount = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, orderId } = req.params
+    const { discountId } = req.body || {}
+    const staffId = (req as any).authContext?.userId as string | undefined
+    if (!discountId || typeof discountId !== 'string') {
+      return res.status(400).json({ success: false, message: 'discountId is required' })
+    }
+    const result = await orderMobileService.applyOrderDiscount(venueId, orderId, discountId, staffId)
+    return res.json({ success: true, data: result })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * DELETE /mobile/venues/:venueId/orders/:orderId/discounts/:orderDiscountId
+ * TABLE_SERVICE — removes one applied order discount.
+ */
+export const removeOrderDiscount = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, orderId, orderDiscountId } = req.params
+    const staffId = (req as any).authContext?.userId as string | undefined
+    const result = await orderMobileService.removeOrderDiscount(venueId, orderId, orderDiscountId, staffId)
     return res.json({ success: true, data: result })
   } catch (error) {
     next(error)
