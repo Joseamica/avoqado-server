@@ -177,6 +177,13 @@ export interface OrderDetailResponse {
       name: string
       price: number
     }>
+    /** TABLE_SERVICE: course/tiempo and send time — the check panel groups sent
+     *  items by course and labels each group "Enviado a la cocina a las HH:MM"
+     *  (createdAt == fire time in the table flow). */
+    course: string | null
+    createdAt: Date
+    isCortesia: boolean
+    cortesiaReason: string | null
   }>
   payments: Array<{
     id: string
@@ -811,6 +818,14 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
       total: Number(item.total),
       notes: item.notes || null,
       modifiers: item.modifiers || [],
+      // TABLE_SERVICE check panel (Square-style): the POS groups sent items by
+      // course and labels each group "Enviado a la cocina a las HH:MM".
+      // In the table flow items are created exactly when the round is fired,
+      // so createdAt IS the send time — no extra column needed.
+      course: item.course ?? null,
+      createdAt: item.createdAt,
+      isCortesia: item.isCortesia ?? false,
+      cortesiaReason: item.cortesiaReason ?? null,
     })),
     payments: (flattenedOrder.payments || []).map((p: any) => ({
       id: p.id,
