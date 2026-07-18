@@ -7,6 +7,8 @@ import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { TableStatus } from '@prisma/client'
 import { moveOrderToTable, assignOrderWaiter } from '@/services/tpv/table.tpv.service'
+import { compWholeOrder } from '@/services/mobile/comp-item.mobile.service'
+import { updateOrderDetails } from '@/services/mobile/order.mobile.service'
 
 const STATUS_MAP: Record<string, TableStatus> = {
   available: TableStatus.AVAILABLE,
@@ -232,6 +234,75 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
           data: { table: number, staffId, staffName: result.staffName },
         })
         return text({ ok: true, assigned: { table: number, waiter: result.staffName } })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'comp_table_check',
+    'TABLE_SERVICE: comp the ENTIRE open check of a table ("Cortesía en la cuenta") — every line stays visible but stops costing money; totals recompute. Blocked once the order is paid/partially paid. This WRITES money; requires orders:update. Pass venueId + table number + reason.',
+    {
+      venueId: z.string().describe('Venue that owns the table (must be in your scope)'),
+      number: z.string().min(1).describe('Table number whose check to comp, e.g. "8"'),
+      reason: z.string().min(1).describe('Reason for the comp (e.g. "Reclamo del cliente")'),
+    },
+    async ({ venueId, number, reason }) => {
+      const where = guard.venueFilter(venueId)
+      guard.requirePermission('orders:update', venueId)
+      const table = await prisma.table.findFirst({
+        where: { ...where, number, active: true },
+        select: { id: true, currentOrderId: true },
+      })
+      if (!table) return text({ ok: false, error: `No encontré la mesa "${number}" activa en este local.` })
+      if (!table.currentOrderId) return text({ ok: false, error: `La mesa ${number} no tiene cuenta abierta.` })
+      try {
+        const result = await compWholeOrder({ venueId, orderId: table.currentOrderId, reason })
+        await auditMcpWrite(scope, {
+          action: 'TABLE_CHECK_COMPED',
+          entity: 'Order',
+          entityId: table.currentOrderId,
+          venueId,
+          data: { table: number, reason, items: result.itemsComped, amount: result.compedAmount },
+        })
+        return text({ ok: true, comped: { table: number, items: result.itemsComped, amount: result.compedAmount } })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'set_table_check_details',
+    "TABLE_SERVICE: update the open check's metadata on a table — display name (nombre), notes (notas), covers (comensales) and/or attached customer. Never touches money. This WRITES; requires orders:update. Pass venueId + table number + any of the fields.",
+    {
+      venueId: z.string().describe('Venue that owns the table (must be in your scope)'),
+      number: z.string().min(1).describe('Table number whose check to update, e.g. "8"'),
+      name: z.string().optional().describe('Check display name; empty string clears it'),
+      notes: z.string().optional().describe('Check notes (alergias, ocasión...); empty string clears'),
+      covers: z.number().int().min(1).max(200).optional().describe('Comensales'),
+      customerId: z.string().optional().describe('Customer id to attach; empty string detaches'),
+    },
+    async ({ venueId, number, name, notes, covers, customerId }) => {
+      const where = guard.venueFilter(venueId)
+      guard.requirePermission('orders:update', venueId)
+      const table = await prisma.table.findFirst({
+        where: { ...where, number, active: true },
+        select: { id: true, currentOrderId: true },
+      })
+      if (!table) return text({ ok: false, error: `No encontré la mesa "${number}" activa en este local.` })
+      if (!table.currentOrderId) return text({ ok: false, error: `La mesa ${number} no tiene cuenta abierta.` })
+      try {
+        const result = await updateOrderDetails(venueId, table.currentOrderId, { name, notes, covers, customerId })
+        await auditMcpWrite(scope, {
+          action: 'TABLE_CHECK_DETAILS_SET',
+          entity: 'Order',
+          entityId: table.currentOrderId,
+          venueId,
+          data: { table: number, ...result },
+        })
+        return text({ ok: true, details: result })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
       }

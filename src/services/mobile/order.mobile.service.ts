@@ -163,6 +163,8 @@ export interface OrderDetailResponse {
   staffName: string | null
   customerName: string | null
   specialRequests: string | null
+  /** TABLE_SERVICE: comensales — editable from the check panel. */
+  covers: number | null
   createdAt: Date
   items: Array<{
     id: string
@@ -808,6 +810,7 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
     staffName: flattenedOrder.servedBy ? `${flattenedOrder.servedBy.firstName} ${flattenedOrder.servedBy.lastName}`.trim() : null,
     customerName: flattenedOrder.customerName,
     specialRequests: flattenedOrder.specialRequests,
+    covers: flattenedOrder.covers ?? null,
     createdAt: flattenedOrder.createdAt,
     items: flattenedOrder.items.map((item: any) => ({
       id: item.id,
@@ -836,6 +839,71 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
       createdAt: p.createdAt,
       processedBy: p.processedBy ? `${p.processedBy.firstName} ${p.processedBy.lastName}`.trim() : null,
     })),
+  }
+}
+
+// MARK: - Order details (check panel: nombre/notas/comensales/cliente)
+
+export interface OrderDetailsInput {
+  /** Check display name (Square "Nombre") → Order.customerName. */
+  name?: string | null
+  /** Check notes (Square "Notas") → Order.specialRequests. */
+  notes?: string | null
+  /** Covers/comensales (Square "Conteo de clientes"). */
+  covers?: number | null
+  /** Attach a venue customer (Square's Cliente tab). Empty string detaches. */
+  customerId?: string | null
+}
+
+/**
+ * TABLE_SERVICE — partial update of the check's details. Only provided keys
+ * change; everything is additive metadata (never money).
+ */
+export async function updateOrderDetails(venueId: string, orderId: string, input: OrderDetailsInput) {
+  const order = await prisma.order.findFirst({
+    where: { id: orderId, venueId },
+    select: { id: true, status: true },
+  })
+  if (!order) throw new NotFoundError('Order not found')
+  if (['COMPLETED', 'CANCELLED', 'DELETED'].includes(order.status)) {
+    throw new BadRequestError('La cuenta ya está cerrada')
+  }
+
+  const data: Record<string, unknown> = {}
+  if (input.name !== undefined) data.customerName = input.name?.trim() || null
+  if (input.notes !== undefined) data.specialRequests = input.notes?.trim() || null
+  if (input.covers !== undefined && input.covers !== null) {
+    if (input.covers < 1 || input.covers > 200) throw new BadRequestError('covers inválido')
+    data.covers = input.covers
+  }
+  if (input.customerId !== undefined) {
+    if (input.customerId) {
+      const customer = await prisma.customer.findFirst({
+        where: { id: input.customerId, venueId },
+        select: { id: true, firstName: true, lastName: true },
+      })
+      if (!customer) throw new BadRequestError('Cliente no encontrado en este venue')
+      data.customerId = customer.id
+      // Keep the check label in sync unless the caller set an explicit name.
+      if (input.name === undefined) {
+        data.customerName = `${customer.firstName || ''} ${customer.lastName || ''}`.trim() || null
+      }
+    } else {
+      data.customerId = null
+    }
+  }
+  if (Object.keys(data).length === 0) throw new BadRequestError('Nada que actualizar')
+
+  const updated = await prisma.order.update({
+    where: { id: order.id },
+    data,
+    select: { customerName: true, specialRequests: true, covers: true, customerId: true },
+  })
+  return {
+    name: updated.customerName,
+    notes: updated.specialRequests,
+    covers: updated.covers,
+    customerId: updated.customerId,
   }
 }
 

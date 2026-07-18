@@ -280,3 +280,41 @@ export const compOrderItem = async (req: Request, res: Response, next: NextFunct
     next(error)
   }
 }
+
+/**
+ * POST /mobile/venues/:venueId/orders/:orderId/comp
+ * TABLE_SERVICE — "Cortesía en la cuenta": comps EVERY line of the open
+ * order with one reason. Body: { reason: string }
+ */
+export const compWholeOrder = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, orderId } = req.params
+    const { reason } = req.body
+    const staffId = (req as any).authContext?.userId as string | undefined
+
+    const { compWholeOrder: compAll } = await import('../../services/mobile/comp-item.mobile.service')
+    const result = await compAll({ venueId, orderId, reason, staffId })
+
+    return res.json({ success: true, data: result })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * POST /mobile/venues/:venueId/orders/:orderId/details
+ * TABLE_SERVICE — partial update of the check's metadata (never money):
+ * Body: { name?, notes?, covers?, customerId? }
+ */
+export const updateOrderDetails = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, orderId } = req.params
+    const { name, notes, covers, customerId } = req.body || {}
+
+    const result = await orderMobileService.updateOrderDetails(venueId, orderId, { name, notes, covers, customerId })
+
+    return res.json({ success: true, data: result })
+  } catch (error) {
+    next(error)
+  }
+}

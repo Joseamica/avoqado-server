@@ -84,6 +84,57 @@ export async function compOrderItem(params: {
 }
 
 /**
+ * Square's "Cortesía en la cuenta": comps EVERY not-yet-comped line of the
+ * open order with one reason, then recomputes totals once. Same money guards
+ * as the per-item comp.
+ */
+export async function compWholeOrder(params: { venueId: string; orderId: string; reason: string; staffId?: string }) {
+  const { venueId, orderId, reason, staffId } = params
+
+  if (!reason?.trim()) {
+    throw new BadRequestError('reason es requerido para dar de cortesía')
+  }
+
+  const order = await prisma.order.findUnique({
+    where: { id: orderId, venueId },
+    select: { id: true, paymentStatus: true, discountAmount: true, paidAmount: true, orderNumber: true },
+  })
+  if (!order) throw new NotFoundError('Orden no encontrada')
+  if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
+    throw new BadRequestError('No se puede dar cortesía en una orden ya pagada')
+  }
+
+  const items = await prisma.orderItem.findMany({
+    where: { orderId, isCortesia: false },
+    select: { id: true, total: true },
+  })
+  if (items.length === 0) throw new BadRequestError('La cuenta no tiene artículos por dar de cortesía')
+
+  const compedAmount = items.reduce((sum, i) => sum + Number(i.total), 0)
+  await prisma.$transaction(
+    items.map(i =>
+      prisma.orderItem.update({
+        where: { id: i.id },
+        data: { isCortesia: true, cortesiaReason: reason.trim(), total: 0, discountAmount: i.total },
+      }),
+    ),
+  )
+
+  const totals = await recalculateOrderTotals(orderId, Number(order.discountAmount || 0), Number(order.paidAmount || 0))
+
+  void logAction({
+    action: 'ORDER_COMPED',
+    entity: 'Order',
+    entityId: orderId,
+    staffId,
+    venueId,
+    data: { reason: reason.trim(), items: items.length, amount: compedAmount, orderNumber: order.orderNumber },
+  })
+
+  return { itemsComped: items.length, compedAmount, reason: reason.trim(), ...totals }
+}
+
+/**
  * Recomputes subtotal/total from the CURRENT item rows (comped lines contribute
  * 0) and re-derives percentage discounts, mirroring addItemsToOrder's recalc so
  * both paths agree on the order's money.

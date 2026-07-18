@@ -1859,6 +1859,26 @@ router.get(
  * Body: { reason } (required). Rejected once the order is PAID/PARTIAL.
  */
 router.post(
+  '/venues/:venueId/orders/:orderId/comp',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('TABLE_SERVICE'),
+  checkPermission('orders:update'),
+  orderMobileController.compWholeOrder,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/orders/:orderId/details
+ * Partial update of the check's metadata: { name?, notes?, covers?, customerId? }
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/details',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('TABLE_SERVICE'),
+  checkPermission('orders:update'),
+  orderMobileController.updateOrderDetails,
+)
+
+router.post(
   '/venues/:venueId/orders/:orderId/items/:itemId/comp',
   authenticateTokenMiddleware,
   checkFeatureAccess('TABLE_SERVICE'),
