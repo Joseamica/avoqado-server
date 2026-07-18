@@ -1572,7 +1572,9 @@ export async function addItemsToOrder(
               const notesMatch = normalizeNotes(existing.notes) === normalizedNotes
               // TABLE_SERVICE: lines in different courses never merge.
               const courseMatch = (existing.course ?? null) === (item.course ?? null)
-              return notesMatch && courseMatch && JSON.stringify(existingModifierIds) === JSON.stringify(sortedNewModifiers)
+              // TABLE_SERVICE: lines for different seats never merge either.
+              const seatMatch = (existing.seat ?? null) === (item.seat ?? null)
+              return notesMatch && courseMatch && seatMatch && JSON.stringify(existingModifierIds) === JSON.stringify(sortedNewModifiers)
             })
 
       if (existingItemWithModifiers) {
