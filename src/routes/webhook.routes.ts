@@ -15,6 +15,7 @@ import { handleAngelPayWebhook, angelpayWebhookHealthCheck } from '../controller
 import { handleB4BitWebhook, b4bitWebhookHealthCheck } from '../controllers/tpv/b4bit-webhook.tpv.controller'
 import { handleResendWebhook, resendWebhookHealthCheck } from '../controllers/webhooks/resend.webhook.controller'
 import { blumonIPWhitelist } from '../middlewares/blumon-ip-whitelist.middleware'
+import { handleDeliverectOrderWebhook, deliverectWebhookHealthCheck } from '../controllers/delivery-channels/deliverect.webhook.controller'
 
 const router = Router()
 
@@ -398,5 +399,57 @@ router.get('/resend/health', resendWebhookHealthCheck)
 // GET = Meta verification handshake; POST = inbound dispatcher (HMAC middleware + dispatcher wired in later tasks).
 router.get('/whatsapp', handleWhatsappVerify)
 router.post('/whatsapp', verifyWhatsappSignature, handleWhatsappInbound)
+
+/**
+ * @openapi
+ * /api/v1/webhooks/delivery/deliverect/{channelLinkId}/orders:
+ *   post:
+ *     tags: [Webhooks]
+ *     summary: Deliverect order webhook (delivery channels aggregator)
+ *     description: |
+ *       Receives incoming orders from delivery channels (Uber Eats, Rappi, DiDi Food)
+ *       via the Deliverect aggregator. Verifies HMAC over the raw body
+ *       (`x-deliverect-hmac-sha256`) using the per-link `webhookSecret`.
+ *
+ *       **ACK contract (persist-first, Blumon pattern):**
+ *       - 401 invalid HMAC
+ *       - 404 unknown or DISABLED channelLinkId
+ *       - 400 payload the mapper could not normalize
+ *       - 200 ONLY after the DeliveryOrderEvent row is durably persisted
+ *         (DUPLICATE / PROCESSED / FAILED_WILL_RETRY — ingestion failure after
+ *         persistence is still 200; reconciliation retries it, not the provider)
+ *       - 503 when the event itself could not be persisted (provider should retry)
+ *     parameters:
+ *       - in: path
+ *         name: channelLinkId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Internal DeliveryChannelLink ID (CUID)
+ *     responses:
+ *       200:
+ *         description: Event persisted (DUPLICATE, PROCESSED, or FAILED_WILL_RETRY)
+ *       400:
+ *         description: Invalid payload
+ *       401:
+ *         description: Invalid HMAC signature
+ *       404:
+ *         description: channelLinkId not found or DISABLED
+ *       503:
+ *         description: Event could not be persisted — provider should retry
+ */
+router.post('/delivery/deliverect/:channelLinkId/orders', handleDeliverectOrderWebhook)
+
+/**
+ * @openapi
+ * /api/v1/webhooks/delivery/deliverect/health:
+ *   get:
+ *     tags: [Webhooks]
+ *     summary: Deliverect webhook health check
+ *     responses:
+ *       200:
+ *         description: OK
+ */
+router.get('/delivery/deliverect/health', deliverectWebhookHealthCheck)
 
 export default router
