@@ -17,6 +17,7 @@ import * as terminalPaymentMobileController from '../controllers/mobile/terminal
 import * as inventoryMobileController from '../controllers/mobile/inventory.mobile.controller'
 import * as loyaltyMobileController from '../controllers/mobile/loyalty.mobile.controller'
 import * as serviceChargeMobileController from '../controllers/mobile/service-charge.mobile.controller'
+import * as menuMobileController from '../controllers/mobile/menu.mobile.controller'
 import * as receiptMobileController from '../controllers/mobile/receipt.mobile.controller'
 import * as reportsMobileController from '../controllers/mobile/reports.mobile.controller'
 import * as customerController from '../controllers/dashboard/customer.dashboard.controller'
@@ -1894,6 +1895,18 @@ router.post(
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   orderMobileController.compWholeOrder,
+)
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/menus
+ * Menús del venue con su horario y cuál aplica AHORA (zona horaria del venue).
+ * El POS filtra su cuadrícula por las categorías del menú seleccionado.
+ */
+router.get(
+  '/venues/:venueId/menus',
+  authenticateTokenMiddleware,
+  checkPermission('menu:read'),
+  menuMobileController.listMenus,
 )
 
 /**
