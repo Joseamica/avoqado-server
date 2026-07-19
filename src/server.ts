@@ -29,6 +29,7 @@ import { abandonedOrdersCleanupJob } from './jobs/abandoned-orders-cleanup.job'
 import { batchExpirationJob } from './jobs/batch-expiration.job'
 import { tpvOrderExpiryJob } from './jobs/tpv-order-expiry.job'
 import { blumonWebhookReconciliationJob } from './jobs/blumon-webhook-reconciliation.job'
+import { deliveryWebhookReconciliationJob } from './jobs/delivery-webhook-reconciliation.job'
 import { terminalPaymentWatchdogJob } from './jobs/terminal-payment-watchdog.job'
 import { reservationDepositReconciliationJob } from './jobs/reservation-deposit-reconciliation.job'
 import { reservationReminderJob } from './jobs/reservation-reminder.job'
@@ -150,6 +151,10 @@ const gracefulShutdown = async (signal: string) => {
       // Stop Blumon webhook reconciliation job
       logger.info('Stopping Blumon webhook reconciliation job...')
       blumonWebhookReconciliationJob.stop()
+
+
+      logger.info('Stopping delivery webhook reconciliation job...')
+      deliveryWebhookReconciliationJob.stop()
 
       logger.info('Stopping reservation deposit reconciliation job...')
       reservationDepositReconciliationJob.stop()
@@ -429,6 +434,11 @@ const startApplication = async (retries = 3) => {
       // Start Blumon webhook reconciliation job (every 30s — picks up PENDING
       // ProviderEventLog rows when TPV records the Payment after the webhook arrived)
       blumonWebhookReconciliationJob.start()
+
+
+      // Start delivery webhook reconciliation job (every 2min at :45s — retries
+      // FAILED/stuck-RECEIVED DeliveryOrderEvent rows; sweeps >24h to ORPHANED)
+      deliveryWebhookReconciliationJob.start()
 
       // Start Google Calendar sync jobs (Phase 1 + Phase 2)
       // Inbox sweeper: drives pulls for inbox rows the RMQ consumer missed (every 30s)
