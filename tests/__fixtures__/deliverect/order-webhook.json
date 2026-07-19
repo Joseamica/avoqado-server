@@ -1,0 +1,31 @@
+{
+  "_id": "64f0deliverectid",
+  "channelOrderId": "UE-12345-A",
+  "channelOrderDisplayId": "A1B2C3",
+  "channelLink": "chl-001",
+  "location": "loc-001",
+  "channel": 7,
+  "orderType": 2,
+  "orderIsAlreadyPaid": true,
+  "decimalDigits": 2,
+  "pickupTime": null,
+  "note": "Sin cebolla por favor",
+  "customer": { "name": "Juan Pérez", "phoneNumber": "+52155****90" },
+  "items": [
+    {
+      "plu": "TACO-PASTOR",
+      "name": "Taco al Pastor",
+      "price": 4500,
+      "quantity": 2,
+      "subItems": [{ "plu": "EXTRA-QUESO", "name": "Extra queso", "price": 1000, "quantity": 1 }]
+    },
+    { "plu": "AGUA-JAMAICA", "name": "Agua de Jamaica", "price": 3000, "quantity": 1 }
+  ],
+  "payment": { "amount": 14000, "type": 2 },
+  "taxTotal": 1931,
+  "discountTotal": 0,
+  "tip": 1000,
+  "serviceCharge": 0,
+  "deliveryCost": 0,
+  "createdAt": "2026-07-18T18:30:00.000Z"
+}
