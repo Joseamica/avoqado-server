@@ -46,9 +46,14 @@ jest.mock('@/middlewares/checkPermission.middleware', () => ({
   },
 }))
 
-// 3. Feature gate: no es lo que se prueba en este archivo — passthrough.
+// 3. Feature gate: passthrough, pero registra CUÁNDO se ejecuta para poder afirmar el orden
+//    permiso-antes-de-feature (Fix §10.4 — que un no-miembro no sondee el plan por 403s).
+const mockCheckFeature = jest.fn()
 jest.mock('@/middlewares/checkFeatureAccess.middleware', () => ({
-  checkFeatureAccess: () => (_req: any, _res: any, next: any) => next(),
+  checkFeatureAccess: () => (_req: any, _res: any, next: any) => {
+    mockCheckFeature()
+    next()
+  },
 }))
 
 // 4. Controllers: no es lo que se prueba — cada handler responde 200 con un marcador.
@@ -217,6 +222,30 @@ describe('delivery-channels.routes — Fix A1 (confused-deputy: create/link = SU
         .set({ ...authHeader(adminCtx), 'x-test-allow-permission': 'delivery-channels:read' })
 
       expect(res.status).toBe(200)
+    })
+  })
+
+  // ── Fix §10.4: permiso/membresía ANTES que feature (no fuga de estado de plan) ──
+  describe('Fix §10.4: permiso antes que feature (no fuga de plan a no-miembros)', () => {
+    it('permiso DENEGADO → 403 y checkFeatureAccess NUNCA corre (no revela el plan del venue)', async () => {
+      const res = await request(app)
+        .get(`/delivery-channels/venues/${VENUE_ID}/channels`)
+        .set({ ...authHeader(adminCtx), 'x-test-allow-permission': 'ninguno' }) // no coincide → 403
+
+      expect(res.status).toBe(403)
+      expect(mockCheckPermission).toHaveBeenCalledWith('delivery-channels:read')
+      expect(mockCheckFeature).not.toHaveBeenCalled() // el feature-gate nunca corrió → sin fuga de estado de plan
+    })
+
+    it('permiso PERMITIDO → el feature-gate corre DESPUÉS del permiso, no antes', async () => {
+      const res = await request(app)
+        .get(`/delivery-channels/venues/${VENUE_ID}/channels`)
+        .set({ ...authHeader(adminCtx), 'x-test-allow-permission': 'delivery-channels:read' })
+
+      expect(res.status).toBe(200)
+      expect(mockCheckPermission).toHaveBeenCalled()
+      expect(mockCheckFeature).toHaveBeenCalled()
+      expect(mockCheckPermission.mock.invocationCallOrder[0]).toBeLessThan(mockCheckFeature.mock.invocationCallOrder[0])
     })
   })
 })

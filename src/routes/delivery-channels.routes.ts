@@ -7,9 +7,19 @@
  * y `DELIVERY_CHANNELS` (Feature code, PREMIUM) ya están registrados — permissions.ts /
  * basePlan.service.ts (commit 8374c949 + Task 3 de este plan).
  *
- * Middleware order (precedente real del repo: MERCHANT_ROUTING_RULES,
- * dashboard.routes.ts ~3247, comentario "validate body BEFORE feature/perm
- * checks" — permissions-policy.md): validar el body ANTES de feature/permiso.
+ * Middleware order: validar el body ANTES de feature/permiso (precedente real del
+ * repo: MERCHANT_ROUTING_RULES, dashboard.routes.ts ~3247, "validate body BEFORE
+ * feature/perm checks" — permissions-policy.md).
+ *
+ * Fix §10.4 (auditoría — fuga de estado de plan): permiso/membresía ANTES que feature.
+ * A DIFERENCIA de la convención feature-primero del resto del repo, aquí `checkPermission`
+ * corre antes que `checkFeatureAccess`: si corriera primero el feature, un autenticado que
+ * NO es miembro del `:venueId` podría sondear el plan/trial/suspensión de un venue ajeno por
+ * los 403 distintos (fuga de información) antes de que el permiso lo niegue. Con permiso
+ * primero, un no-miembro recibe 403 sin revelar el estado del plan; un miembro legítimo sin
+ * PREMIUM sigue viendo el 403 de feature (upsell) igual que antes. NO reordenar "para que
+ * coincida con las otras rutas" — es intencional. (El fix del patrón en TODA la plataforma es
+ * una decisión transversal aparte; esto solo endurece delivery.)
  *
  * Fix A1 (auditoría, spec §10.4 — confused-deputy): crear un canal, o cambiar
  * `externalLocationId`/`externalAccountId` de uno existente, bindea un recurso EXTERNO de
@@ -61,11 +71,13 @@ function checkChannelUpdatePermission(req: Request, res: Response, next: NextFun
   return checkPermission('delivery-channels:manage')(req, res, next)
 }
 
+// Orden: auth → (validateRequest) → PERMISO/membresía → feature. Ver el bloque §10.4
+// arriba: permiso antes que feature evita la fuga de estado de plan a no-miembros.
 router.get(
   '/venues/:venueId/channels',
   authenticateTokenMiddleware,
-  checkFeatureAccess('DELIVERY_CHANNELS'),
   checkPermission('delivery-channels:read'),
+  checkFeatureAccess('DELIVERY_CHANNELS'),
   ctrl.listChannels,
 )
 
@@ -73,8 +85,8 @@ router.post(
   '/venues/:venueId/channels',
   authenticateTokenMiddleware,
   validateRequest(createChannelSchema),
-  checkFeatureAccess('DELIVERY_CHANNELS'),
   checkPermission('delivery-channels:connect'),
+  checkFeatureAccess('DELIVERY_CHANNELS'),
   ctrl.createChannel,
 )
 
@@ -82,8 +94,8 @@ router.patch(
   '/venues/:venueId/channels/:linkId',
   authenticateTokenMiddleware,
   validateRequest(updateChannelSchema),
-  checkFeatureAccess('DELIVERY_CHANNELS'),
   checkChannelUpdatePermission,
+  checkFeatureAccess('DELIVERY_CHANNELS'),
   ctrl.updateChannel,
 )
 
@@ -91,8 +103,8 @@ router.post(
   '/venues/:venueId/channels/:linkId/pause',
   authenticateTokenMiddleware,
   validateRequest(pauseChannelSchema),
-  checkFeatureAccess('DELIVERY_CHANNELS'),
   checkPermission('delivery-channels:manage'),
+  checkFeatureAccess('DELIVERY_CHANNELS'),
   ctrl.pauseChannel,
 )
 
@@ -100,24 +112,24 @@ router.post(
   '/venues/:venueId/activation-request',
   authenticateTokenMiddleware,
   validateRequest(createActivationRequestSchema),
-  checkFeatureAccess('DELIVERY_CHANNELS'),
   checkPermission('delivery-channels:request'),
+  checkFeatureAccess('DELIVERY_CHANNELS'),
   ctrl.requestActivation,
 )
 
 router.get(
   '/venues/:venueId/activation-request',
   authenticateTokenMiddleware,
-  checkFeatureAccess('DELIVERY_CHANNELS'),
   checkPermission('delivery-channels:read'),
+  checkFeatureAccess('DELIVERY_CHANNELS'),
   ctrl.getActivation,
 )
 
 router.get(
   '/venues/:venueId/delivery/summary',
   authenticateTokenMiddleware,
-  checkFeatureAccess('DELIVERY_CHANNELS'),
   checkPermission('delivery-channels:read'),
+  checkFeatureAccess('DELIVERY_CHANNELS'),
   ctrl.getSummary,
 )
 
