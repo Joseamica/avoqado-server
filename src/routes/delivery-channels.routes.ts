@@ -1,11 +1,10 @@
 /**
- * Gestión de canales de delivery (DeliveryChannelLink CRUD + pause, Task 10).
+ * Gestión de canales de delivery (DeliveryChannelLink CRUD + pause, Task 10) + solicitud de
+ * activación del dueño (DeliveryActivationRequest, Task 3 del plan delivery-activation-backend).
  *
- * `delivery-channels:read` / `delivery-channels:manage` (permisos) y `DELIVERY_CHANNELS`
- * (Feature code) todavía NO existen en el catálogo — Task 11 los registra
- * (permissions.ts / basePlan.service.ts). Referenciarlos aquí por string es
- * correcto y esperado; hasta que Task 11 aterrice, estos endpoints son
- * inalcanzables para cualquier rol (fail-closed, nunca fail-open).
+ * `delivery-channels:read` / `delivery-channels:manage` / `delivery-channels:request` (permisos)
+ * y `DELIVERY_CHANNELS` (Feature code, PREMIUM) ya están registrados — permissions.ts /
+ * basePlan.service.ts (commit 8374c949 + Task 3 de este plan).
  *
  * Middleware order (precedente real del repo: MERCHANT_ROUTING_RULES,
  * dashboard.routes.ts ~3247, comentario "validate body BEFORE feature/perm
@@ -17,7 +16,12 @@ import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
 import { validateRequest } from '../middlewares/validation'
 import * as ctrl from '../controllers/delivery-channels/deliveryChannels.controller'
-import { createChannelSchema, updateChannelSchema, pauseChannelSchema } from '../schemas/delivery-channels.schema'
+import {
+  createChannelSchema,
+  updateChannelSchema,
+  pauseChannelSchema,
+  createActivationRequestSchema,
+} from '../schemas/delivery-channels.schema'
 
 const router = Router({ mergeParams: true })
 
@@ -54,6 +58,23 @@ router.post(
   checkFeatureAccess('DELIVERY_CHANNELS'),
   checkPermission('delivery-channels:manage'),
   ctrl.pauseChannel,
+)
+
+router.post(
+  '/venues/:venueId/activation-request',
+  authenticateTokenMiddleware,
+  validateRequest(createActivationRequestSchema),
+  checkFeatureAccess('DELIVERY_CHANNELS'),
+  checkPermission('delivery-channels:request'),
+  ctrl.requestActivation,
+)
+
+router.get(
+  '/venues/:venueId/activation-request',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('DELIVERY_CHANNELS'),
+  checkPermission('delivery-channels:read'),
+  ctrl.getActivation,
 )
 
 export default router

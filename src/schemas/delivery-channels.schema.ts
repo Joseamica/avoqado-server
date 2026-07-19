@@ -67,3 +67,17 @@ export const pauseChannelSchema = z.object({
 })
 
 export type PauseChannelLinkBody = z.infer<typeof pauseChannelSchema>['body']
+
+/** POST /venues/:venueId/activation-request — el dueño solicita activar delivery (self-serve). */
+export const createActivationRequestSchema = z.object({
+  body: z
+    .object({
+      requestedChannels: z
+        .array(z.enum(['UBER_EATS', 'RAPPI', 'DIDI_FOOD'], { message: 'Canal inválido' }))
+        .min(1, 'Selecciona al menos un canal'),
+      note: z.string().max(1000, 'La nota es demasiado larga').optional(),
+    })
+    .strict(),
+})
+
+export type CreateActivationRequestBody = z.infer<typeof createActivationRequestSchema>['body']

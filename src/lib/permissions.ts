@@ -883,6 +883,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // Delivery Channels (Uber Eats, Rappi, DiDi vía Deliverect — Premium tier) — full management
     'delivery-channels:read',
     'delivery-channels:manage',
+    'delivery-channels:request', // Solicitar activación — decisión de negocio (OWNER/ADMIN, NO MANAGER)
   ],
 
   /**
@@ -1002,6 +1003,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // Delivery Channels (Uber Eats, Rappi, DiDi vía Deliverect — Premium tier) — full management
     'delivery-channels:read',
     'delivery-channels:manage',
+    'delivery-channels:request', // Solicitar activación — decisión de negocio (OWNER/ADMIN, NO MANAGER)
   ],
 
   /**
@@ -1513,7 +1515,7 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   // Platform billing CFDI (Avoqado factura a sus propios clientes) — superadmin-only back-office
   'platform-billing': ['platform-billing:view', 'platform-billing:configure', 'platform-billing:issue', 'platform-billing:delete'],
   // Delivery Channels (Uber Eats, Rappi, DiDi vía Deliverect — Premium tier, Task 10/11)
-  'delivery-channels': ['delivery-channels:read', 'delivery-channels:manage'],
+  'delivery-channels': ['delivery-channels:read', 'delivery-channels:manage', 'delivery-channels:request'],
 }
 
 /**
