@@ -45,8 +45,11 @@ export function registerDeliveryActivationTools(server: McpServer, scope: McpSco
         guard.requirePermission('delivery-channels:read', venueId) // mirror the dashboard's delivery-channels:read gate (MANAGER+)
         const gate = await planGateMessage(venueId, 'DELIVERY_CHANNELS', 'Las solicitudes de activación de delivery') // PREMIUM tier
         if (gate) return text({ ok: false, planRequired: true, feature: 'DELIVERY_CHANNELS', error: gate })
-        const rows = await listActivationRequests(filter)
-        scoped = rows.filter(r => r.venueId === venueId)
+        // Fix 5 (audit, API-CONTRACT): scope the query itself by venueId (server-side) instead
+        // of fetching the FULL cross-tenant ops queue (every venue, every org, platform-wide)
+        // just to keep one venue's rows via an in-memory filter.
+        const rows = await listActivationRequests({ ...filter, venueId })
+        scoped = rows.filter(r => r.venueId === venueId) // defense-in-depth, kept even though the query is now scoped
       } else {
         // Cross-venue call: NEVER throw — a broad "show me all my venues" ask should just return
         // whatever the caller is entitled to see. Fetch the ops queue FIRST (1 query, low volume),
@@ -56,7 +59,12 @@ export function registerDeliveryActivationTools(server: McpServer, scope: McpSco
         // resolutions (≥1 query each) against a ~18-conn pool → P2024/pool-exhaustion (the repo has
         // hit this before — see memory pool 9→18 + analyticsLimiter). Filtering to venues-with-rows
         // keeps the fan-out tiny (the ops queue is small), so it stays safe for large orgs.
-        const rows = await listActivationRequests(filter)
+        //
+        // Fix 5 (audit): also bound this ONE fetch to scope.allowedVenueIds — defense-in-depth,
+        // zero extra cost (still exactly one query; allowedVenueIds is already resolved). The
+        // finer-grained permission-bit + feature-gate filtering below is UNCHANGED and still runs
+        // — this only means the DB itself can never hand back another tenant's row to begin with.
+        const rows = await listActivationRequests({ ...filter, venueIds: scope.allowedVenueIds })
         // Scope + permission are pure in-memory checks (no queries) — apply them first to shrink
         // the set BEFORE the only DB fan-out (the feature check) runs.
         const permitted = [...new Set(rows.map(r => r.venueId))].filter(v => {

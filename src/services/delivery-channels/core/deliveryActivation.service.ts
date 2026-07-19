@@ -20,6 +20,7 @@
 import prisma from '../../../utils/prismaClient'
 import { DeliveryActivationRequest, DeliveryActivationStatus, Prisma } from '@prisma/client'
 import { logAction } from '../../dashboard/activity-log.service'
+import { NotFoundError } from '../../../errors/AppError'
 
 const LIVE_STATUSES: DeliveryActivationStatus[] = [DeliveryActivationStatus.PENDING, DeliveryActivationStatus.CONTACTED]
 
@@ -89,7 +90,18 @@ export async function updateActivationStatus(
   if (status === DeliveryActivationStatus.CONTACTED) data.contactedAt = new Date()
   if (status === DeliveryActivationStatus.CONNECTED) data.connectedAt = new Date()
 
-  const updated = await prisma.deliveryActivationRequest.update({ where: { id }, data })
+  let updated: DeliveryActivationRequest
+  try {
+    updated = await prisma.deliveryActivationRequest.update({ where: { id }, data })
+  } catch (error: any) {
+    // Fix 2 (audit, API-CONTRACT): update() by unique id throws P2025 for a missing row —
+    // translate to the same NotFoundError contract updateChannelLink/pauseChannelLink use
+    // (they go through updateMany+count===0 instead, but the caller-facing contract must match).
+    if (error?.code === 'P2025') {
+      throw new NotFoundError('Solicitud de activación de delivery no encontrada')
+    }
+    throw error
+  }
 
   void logAction({
     action: STATUS_ACTION[status],
@@ -109,17 +121,36 @@ export type ActivationRequestWithVenue = Prisma.DeliveryActivationRequestGetPayl
 
 export interface ListActivationRequestsFilter {
   status?: DeliveryActivationStatus
+  /**
+   * Fix 5 (audit, API-CONTRACT): scope the query itself to one venue — used by the MCP
+   * single-venue path so it never has to fetch the full cross-tenant ops queue just to
+   * keep one row's worth via an in-memory filter.
+   */
+  venueId?: string
+  /**
+   * Fix 5 (audit): scope the query to a set of venues — defense-in-depth for the MCP
+   * all-venues path (bounds the fetch to the caller's allowed scope BEFORE the finer-grained
+   * in-memory permission/feature filtering runs; that filtering still runs unchanged).
+   */
+  venueIds?: string[]
 }
 
 /**
  * Cola de ops (superadmin, Task 4): TODAS las solicitudes de activación (cross-venue, sin
  * scoping por venueId — a propósito, es un endpoint de ops), más recientes primero, con
  * `venue.name`/`venue.slug` para mostrar en la UI sin un round-trip extra. `status` es un
- * filtro opcional; sin filtro trae cualquier status.
+ * filtro opcional; sin filtro trae cualquier status. `venueId`/`venueIds` (Fix 5, audit) son
+ * opcionales: el REST superadmin los omite (ops ve todo, sin cambios); el MCP customer-facing
+ * (`src/mcp/tools/deliveryActivation.ts`) SIEMPRE pasa uno de los dos para que la query quede
+ * scopeada en el servidor en vez de traer la cola completa y filtrar en memoria.
  */
 export async function listActivationRequests(filter?: ListActivationRequestsFilter): Promise<ActivationRequestWithVenue[]> {
   return prisma.deliveryActivationRequest.findMany({
-    where: filter?.status ? { status: filter.status } : {},
+    where: {
+      ...(filter?.status ? { status: filter.status } : {}),
+      ...(filter?.venueId ? { venueId: filter.venueId } : {}),
+      ...(filter?.venueIds ? { venueId: { in: filter.venueIds } } : {}),
+    },
     orderBy: { createdAt: 'desc' },
     include: { venue: { select: { name: true, slug: true } } },
   })

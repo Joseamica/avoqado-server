@@ -122,7 +122,38 @@ describe('delivery_activation_requests', () => {
     mockHasFeatureAccess.mockResolvedValueOnce(true)
     mockListActivationRequests.mockResolvedValueOnce([])
     await call({ venueId: 'v1', status: 'CONTACTED' })
-    expect(mockListActivationRequests).toHaveBeenCalledWith({ status: 'CONTACTED' })
+    // Fix 5 (audit): venueId now travels WITH the filter so the query itself is scoped —
+    // see the dedicated single-venue scoping tests below.
+    expect(mockListActivationRequests).toHaveBeenCalledWith({ status: 'CONTACTED', venueId: 'v1' })
+  })
+
+  // ============================================================
+  // Fix 5 (audit, API-CONTRACT): before, the single-venue path fetched the ENTIRE
+  // cross-tenant ops queue (every venue, every org, on the whole platform) just to keep
+  // one row's worth via an in-memory filter. Now the query itself is scoped by venueId.
+  // ============================================================
+  it('Fix 5: single-venue call scopes the query itself — passes venueId to the service (no full cross-tenant scan)', async () => {
+    mockHasFeatureAccess.mockResolvedValueOnce(true)
+    mockListActivationRequests.mockResolvedValueOnce([])
+
+    await call({ venueId: 'v1' })
+
+    expect(mockListActivationRequests).toHaveBeenCalledWith(expect.objectContaining({ venueId: 'v1' }))
+  })
+
+  it('Fix 5: single-venue result still narrows to that venue in-memory too (defense-in-depth, kept even though the query is now scoped)', async () => {
+    mockHasFeatureAccess.mockResolvedValueOnce(true)
+    // Even if the (mocked) service returned a foreign row despite the venueId scoping, the
+    // tool must never leak it.
+    mockListActivationRequests.mockResolvedValueOnce([
+      row(),
+      row({ id: 'req-foreign', venueId: 'other-venue', venue: { name: 'Otro Venue', slug: 'otro-venue' } }),
+    ])
+
+    const out = parse(await call({ venueId: 'v1' }))
+
+    expect(out.count).toBe(1)
+    expect(out.requests[0].id).toBe('req-1')
   })
 
   it('serializes contactedAt/connectedAt when present', async () => {
@@ -238,7 +269,18 @@ describe('delivery_activation_requests', () => {
     it('applies the status filter across the all-venues call too', async () => {
       mockListActivationRequests.mockResolvedValueOnce([]) // empty → no feature check reached
       await call({ status: 'DISMISSED' })
-      expect(mockListActivationRequests).toHaveBeenCalledWith({ status: 'DISMISSED' })
+      // Fix 5 (audit): venueIds now travels WITH the filter too — see the dedicated
+      // defense-in-depth scoping test below.
+      expect(mockListActivationRequests).toHaveBeenCalledWith({ status: 'DISMISSED', venueIds: scope.allowedVenueIds })
+    })
+
+    it('Fix 5 (audit): also bounds the all-venues fetch itself to scope.allowedVenueIds — defense-in-depth, still exactly ONE query (no extra round-trip)', async () => {
+      mockListActivationRequests.mockResolvedValueOnce([])
+
+      await call({})
+
+      expect(mockListActivationRequests).toHaveBeenCalledTimes(1)
+      expect(mockListActivationRequests).toHaveBeenCalledWith(expect.objectContaining({ venueIds: ['v1', 'v2'] }))
     })
   })
 

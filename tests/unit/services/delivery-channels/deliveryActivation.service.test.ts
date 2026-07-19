@@ -9,6 +9,7 @@
 import { DeliveryActivationStatus } from '@prisma/client'
 import prisma from '../../../../src/utils/prismaClient'
 import { logAction } from '../../../../src/services/dashboard/activity-log.service'
+import { NotFoundError } from '../../../../src/errors/AppError'
 import {
   getActivationRequest,
   createActivationRequest,
@@ -233,6 +234,27 @@ describe('deliveryActivation.service', () => {
         }),
       )
     })
+
+    // ============================================================
+    // Fix 2 (audit, API-CONTRACT): id inexistente → P2025 crudo hoy (500 genérico).
+    // Los hermanos (updateChannelLink/pauseChannelLink) usan updateMany+count===0 →
+    // NotFoundError; update() por id único debe traducir P2025 al mismo contrato.
+    // ============================================================
+    it('REGRESIÓN Fix 2: id inexistente (P2025 de Prisma) → NotFoundError, no el error crudo', async () => {
+      const p2025 = Object.assign(new Error('Record to update not found.'), { code: 'P2025' })
+      ;(prisma.deliveryActivationRequest.update as jest.Mock).mockRejectedValue(p2025)
+
+      await expect(updateActivationStatus('nonexistent', DeliveryActivationStatus.CONTACTED, 'staff-ops1')).rejects.toThrow(NotFoundError)
+      expect(logAction).not.toHaveBeenCalled()
+    })
+
+    it('un error de Prisma que NO es P2025 se propaga tal cual (no se enmascara como NotFoundError)', async () => {
+      const dbDown = Object.assign(new Error('connection lost'), { code: 'P1001' })
+      ;(prisma.deliveryActivationRequest.update as jest.Mock).mockRejectedValue(dbDown)
+
+      await expect(updateActivationStatus('req1', DeliveryActivationStatus.CONTACTED, 'staff-ops1')).rejects.toThrow('connection lost')
+      expect(logAction).not.toHaveBeenCalled()
+    })
   })
 
   // ============================================================
@@ -279,6 +301,49 @@ describe('deliveryActivation.service', () => {
       await listActivationRequests(undefined)
 
       expect(prisma.deliveryActivationRequest.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: {} }))
+    })
+
+    // ============================================================
+    // Fix 5 (audit, API-CONTRACT): venueId/venueIds — antes el filtro solo aceptaba
+    // `status`, así que el MCP single-venue tenía que traer la cola COMPLETA cross-tenant
+    // y filtrar en memoria. Ahora la query queda scopeada en el servidor.
+    // ============================================================
+    it('Fix 5: con venueId filtra where { venueId } (query scopeada, no scan cross-tenant)', async () => {
+      ;(prisma.deliveryActivationRequest.findMany as jest.Mock).mockResolvedValue([])
+
+      await listActivationRequests({ venueId: 'venue1' })
+
+      expect(prisma.deliveryActivationRequest.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { venueId: 'venue1' } }))
+    })
+
+    it('Fix 5: con venueIds filtra where { venueId: { in: venueIds } } (defense-in-depth multi-venue)', async () => {
+      ;(prisma.deliveryActivationRequest.findMany as jest.Mock).mockResolvedValue([])
+
+      await listActivationRequests({ venueIds: ['v1', 'v2'] })
+
+      expect(prisma.deliveryActivationRequest.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { venueId: { in: ['v1', 'v2'] } } }),
+      )
+    })
+
+    it('Fix 5: venueId + status combinados aplican ambos al where', async () => {
+      ;(prisma.deliveryActivationRequest.findMany as jest.Mock).mockResolvedValue([])
+
+      await listActivationRequests({ venueId: 'venue1', status: DeliveryActivationStatus.PENDING })
+
+      expect(prisma.deliveryActivationRequest.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { venueId: 'venue1', status: DeliveryActivationStatus.PENDING } }),
+      )
+    })
+
+    it('REGRESIÓN Fix 5: el REST superadmin (sin venueId/venueIds) sigue trayendo TODO — where {} cuando solo hay status', async () => {
+      ;(prisma.deliveryActivationRequest.findMany as jest.Mock).mockResolvedValue([])
+
+      await listActivationRequests({ status: DeliveryActivationStatus.CONTACTED })
+
+      expect(prisma.deliveryActivationRequest.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { status: DeliveryActivationStatus.CONTACTED } }),
+      )
     })
   })
 })
