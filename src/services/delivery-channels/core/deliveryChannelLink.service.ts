@@ -20,7 +20,7 @@ import crypto from 'crypto'
 import { DeliveryChannelLink, DeliveryChannelStatus, DeliveryProvider, OrderAcceptanceMode, Prisma } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
 import logger from '../../../config/logger'
-import { NotFoundError } from '../../../errors/AppError'
+import { ConflictError, NotFoundError } from '../../../errors/AppError'
 import { logAction } from '../../dashboard/activity-log.service'
 import { getAdapter } from './statusDispatcher.service'
 
@@ -72,20 +72,34 @@ export async function createChannelLink(
 ): Promise<DeliveryChannelLinkSafe> {
   const webhookSecret = crypto.randomBytes(32).toString('hex')
 
-  const link = await prisma.deliveryChannelLink.create({
-    data: {
-      venueId,
-      provider: data.provider,
-      externalLocationId: data.externalLocationId,
-      externalAccountId: data.externalAccountId ?? null,
-      webhookSecret,
-      orderAcceptanceMode: data.orderAcceptanceMode ?? OrderAcceptanceMode.AUTO,
-      status: DeliveryChannelStatus.PENDING,
-      autoSyncMenu: data.autoSyncMenu ?? true,
-      config: data.config ?? undefined,
-    },
-    select: SAFE_SELECT,
-  })
+  let link: DeliveryChannelLinkSafe
+  try {
+    link = (await prisma.deliveryChannelLink.create({
+      data: {
+        venueId,
+        provider: data.provider,
+        externalLocationId: data.externalLocationId,
+        externalAccountId: data.externalAccountId ?? null,
+        webhookSecret,
+        orderAcceptanceMode: data.orderAcceptanceMode ?? OrderAcceptanceMode.AUTO,
+        status: DeliveryChannelStatus.PENDING,
+        autoSyncMenu: data.autoSyncMenu ?? true,
+        config: data.config ?? undefined,
+      },
+      select: SAFE_SELECT,
+    })) as unknown as DeliveryChannelLinkSafe
+  } catch (error: any) {
+    // Fix 3 (audit, API-CONTRACT): @@unique([provider, externalLocationId]) → P2002 on a
+    // duplicate link. Canonical repo pattern: productWizard.service.ts (catch P2002 →
+    // ConflictError 409) — this same domain's deliveryWebhookEvent.service.ts already
+    // catches P2002 for its own unique index.
+    if (error?.code === 'P2002') {
+      throw new ConflictError(
+        `Ya existe un canal de delivery para el proveedor ${data.provider} con externalLocationId "${data.externalLocationId}"`,
+      )
+    }
+    throw error
+  }
 
   void logAction({
     staffId: performedBy,
@@ -96,7 +110,7 @@ export async function createChannelLink(
     data: { provider: data.provider, externalLocationId: data.externalLocationId },
   })
 
-  return link as unknown as DeliveryChannelLinkSafe
+  return link
 }
 
 export interface UpdateChannelLinkInput {

@@ -8,7 +8,7 @@
 import prisma from '../../../../src/utils/prismaClient'
 import { logAction } from '../../../../src/services/dashboard/activity-log.service'
 import { getAdapter } from '../../../../src/services/delivery-channels/core/statusDispatcher.service'
-import { NotFoundError } from '../../../../src/errors/AppError'
+import { ConflictError, NotFoundError } from '../../../../src/errors/AppError'
 import { DeliveryChannelStatus, DeliveryProvider, OrderAcceptanceMode } from '@prisma/client'
 import {
   listChannelLinks,
@@ -133,6 +133,33 @@ describe('deliveryChannelLink.service', () => {
       const callArg = (prisma.deliveryChannelLink.create as jest.Mock).mock.calls[0][0]
       expect(callArg.data.orderAcceptanceMode).toBe(OrderAcceptanceMode.AUTO)
       expect(callArg.data.autoSyncMenu).toBe(true)
+    })
+
+    // ============================================================
+    // Fix 3 (audit, API-CONTRACT): @@unique([provider, externalLocationId]) sin catch →
+    // P2002 crudo (500 genérico). Patrón canónico del repo: productWizard.service.ts
+    // (catch P2002 → ConflictError 409). persistDeliveryEvent ya cachea P2002 en este dominio.
+    // ============================================================
+    it('REGRESIÓN Fix 3: (provider, externalLocationId) duplicado (P2002 de Prisma) → ConflictError, no el error crudo', async () => {
+      const p2002 = Object.assign(new Error('Unique constraint failed on the fields: (`provider`,`externalLocationId`)'), {
+        code: 'P2002',
+      })
+      ;(prisma.deliveryChannelLink.create as jest.Mock).mockRejectedValue(p2002)
+
+      await expect(
+        createChannelLink('venue1', { provider: DeliveryProvider.DELIVERECT, externalLocationId: 'loc1' }, 'staff1'),
+      ).rejects.toThrow(ConflictError)
+      expect(logAction).not.toHaveBeenCalled()
+    })
+
+    it('un error de Prisma que NO es P2002 se propaga tal cual (no se enmascara como ConflictError)', async () => {
+      const dbDown = Object.assign(new Error('connection lost'), { code: 'P1001' })
+      ;(prisma.deliveryChannelLink.create as jest.Mock).mockRejectedValue(dbDown)
+
+      await expect(createChannelLink('venue1', { provider: DeliveryProvider.DELIVERECT, externalLocationId: 'loc1' })).rejects.toThrow(
+        'connection lost',
+      )
+      expect(logAction).not.toHaveBeenCalled()
     })
   })
 
