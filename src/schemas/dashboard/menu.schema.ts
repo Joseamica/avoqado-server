@@ -156,6 +156,10 @@ const ProductBodyBase = z.object({
   kitchenName: z.string().max(50, 'Kitchen name must be 50 characters o menos').optional().nullable(),
   abbreviation: z.string().max(24, 'Abbreviation must be 24 characters o menos').optional().nullable(),
   duration: z.number().int().min(1).max(1440).optional().nullable(),
+  // Venta por peso (charcutería/granel): cuando es true, `price` es el precio POR
+  // KILOGRAMO y el POS captura el peso al cobrar; el server fuerza unit=KILOGRAM.
+  // Sin esta línea, Zod haría strip del campo y el flag nunca llegaría al service.
+  soldByWeight: z.boolean().optional(),
 
   // Class fields (for CLASS type)
   maxParticipants: z.number().int().min(1).optional().nullable(),

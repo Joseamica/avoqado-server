@@ -7,7 +7,11 @@ import { SocketEventType } from '../../communication/sockets/types'
 import { serializedInventoryService } from '../serialized-inventory/serializedInventory.service'
 import { simRegistrationService } from '../serialized-inventory/simRegistration.service'
 import { moduleService, MODULE_CODES } from '../modules/module.service'
-import { deductInventoryForProduct, getProductInventoryMethod, getProductInventoryStatus } from '../dashboard/productInventoryIntegration.service'
+import {
+  deductInventoryForProduct,
+  getProductInventoryMethod,
+  getProductInventoryStatus,
+} from '../dashboard/productInventoryIntegration.service'
 import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service'
 import { logAction } from '../dashboard/activity-log.service'
 import {
@@ -1391,20 +1395,26 @@ export async function addItemsToOrder(
       // Weighted lines carry weightQuantity (kg) and quantity=1; the SERVER
       // computes base = round(price/kg × weightKg, 2). Weight on a non-weighted
       // product, or a weighted product without weight, is an explicit 400.
-      const weightKg = item.weightQuantity != null ? Number(item.weightQuantity) : null
+      const rawWeightKg = item.weightQuantity != null ? Number(item.weightQuantity) : null
       if (product.soldByWeight) {
-        if (weightKg == null || !Number.isFinite(weightKg) || weightKg <= 0) {
+        if (rawWeightKg == null || !Number.isFinite(rawWeightKg) || rawWeightKg <= 0) {
           throw new BadRequestError(`El producto "${product.name}" se vende por peso; envía weightQuantity en kilogramos.`)
         }
-        if (weightKg < 0.001 || weightKg > 99.999) {
+        if (rawWeightKg < 0.001 || rawWeightKg > 99.999) {
           throw new BadRequestError(`El peso para "${product.name}" está fuera de rango (0.001–99.999 kg).`)
         }
         if (item.quantity !== 1) {
           throw new BadRequestError(`Las líneas por peso llevan cantidad 1 — cada pesada es una línea (producto "${product.name}").`)
         }
-      } else if (weightKg != null) {
+      } else if (rawWeightKg != null) {
         throw new BadRequestError(`El producto "${product.name}" no se vende por peso; no envíes weightQuantity.`)
       }
+      // Quantize to the PERSISTED precision (OrderItem.weightQuantity is Decimal(12,3))
+      // BEFORE any money math, so Order.total is always derivable from the stored
+      // weightQuantity — a reprint or a >3-decimal scale reading can't diverge by a
+      // cent (review 2026-07-19, fix #3). All downstream (total, persist, deduction)
+      // uses this quantized value.
+      const weightKg = rawWeightKg != null ? Math.round(rawWeightKg * 1000) / 1000 : null
       const weightedBase = weightKg != null ? Math.round(Number(product.price) * weightKg * 100) / 100 : null
       /** Line total for qty units — weight-aware (weighted lines: qty is 1). */
       const lineTotalFor = (qty: number) =>
@@ -1447,6 +1457,11 @@ export async function addItemsToOrder(
             data: {
               quantity: updatedQuantity,
               total: updatedTotal,
+              // Persist the re-weighed value: total is weight-aware (lineTotalFor),
+              // so weightQuantity/weightUnit must move with it or the receipt +
+              // inventory deduction go stale (review 2026-07-19, fix #1).
+              weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
+              weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
               notes: normalizedNotes ?? existingByExternal.notes,
               externalId: existingByExternal.externalId ?? normalizedExternalId,
             },
@@ -1502,6 +1517,8 @@ export async function addItemsToOrder(
             data: {
               quantity: updatedQuantity,
               total: updatedTotal,
+              weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
+              weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
               notes: normalizedNotes ?? existingById.notes,
               externalId: existingById.externalId ?? normalizedExternalId,
             },
@@ -1625,6 +1642,10 @@ export async function addItemsToOrder(
           data: {
             quantity: updatedQuantity,
             total: updatedTotal,
+            // Clears a stale weight if a now-normal product merges into a line that
+            // was weighed before soldByWeight was toggled off (review 2026-07-19).
+            weightQuantity: weightKg != null ? new Prisma.Decimal(weightKg) : null,
+            weightUnit: weightKg != null ? ('KILOGRAM' as const) : null,
             notes: normalizedNotes ?? existingItemWithModifiers.notes,
           },
           include: {

@@ -10,7 +10,7 @@
  */
 
 import { Request, Response, NextFunction } from 'express'
-import { Prisma, VenueStatus, AccountType, StaffRole, OrgRole, InvitationStatus } from '@prisma/client'
+import { Prisma, AccountType, StaffRole, OrgRole, InvitationStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { generateSlug, validateSlug } from '@/utils/slugify'
 import { bulkCreateSettlementConfigurations } from '@/services/superadmin/settlementConfiguration.service'
@@ -21,6 +21,8 @@ import logger from '@/config/logger'
 import { BadRequestError, IncompatibleDeviceError } from '@/errors/AppError'
 import { isProviderCompatibleWithBrand } from '@/lib/providerDeviceCompatibility'
 import { normalizeTerminalSerialNumber } from '@/utils/terminalSerial'
+import { resolveInitialVenueState } from '@/utils/venueOnboarding'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import { addDays } from 'date-fns'
 import crypto from 'crypto'
 
@@ -111,6 +113,11 @@ interface WizardPayload {
   }
   features?: string[] // Feature codes
   modules?: Array<{ code: string; config?: Record<string, unknown>; preset?: string }>
+
+  // Admin override: create the venue directly in ACTIVE (skips the KYC review queue).
+  // Handled in-band here — NOT via a 2nd call to /venues/:id/approve, which requires
+  // PENDING_ACTIVATION and therefore always failed for a wizard-created ONBOARDING venue.
+  activateImmediately?: boolean
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────
@@ -189,6 +196,9 @@ export async function createVenueWizard(req: Request, res: Response, next: NextF
         // If it collides, the unique constraint will catch it
         const slug = await generateUniqueSlug(baseSlug)
 
+        // ONBOARDING by default; ACTIVE when the operator pre-approves KYC (activateImmediately).
+        const initialState = resolveInitialVenueState(payload.activateImmediately, userId)
+
         const venue = await tx.venue.create({
           data: {
             organizationId: orgId,
@@ -211,9 +221,10 @@ export async function createVenueWizard(req: Request, res: Response, next: NextF
             rfc: payload.venue.rfc,
             legalName: payload.venue.legalName,
             zoneId: payload.venue.zoneId || null,
-            status: VenueStatus.ONBOARDING,
+            status: initialState.status,
             statusChangedAt: new Date(),
-            active: false,
+            statusChangedBy: initialState.statusChangedBy,
+            active: initialState.active,
           },
         })
 
@@ -242,6 +253,33 @@ export async function createVenueWizard(req: Request, res: Response, next: NextF
         status: 'success',
         data: { venueId, venueSlug },
       })
+
+      // Audit trail — creating a venue is a value-mutating action, so it must land in ActivityLog
+      // (logAction is best-effort and never throws). When the operator pre-approved KYC we also
+      // record the approval, mirroring approveVenue's 'VENUE_APPROVED'.
+      await logAction({
+        staffId: userId,
+        venueId,
+        action: 'VENUE_CREATED',
+        entity: 'Venue',
+        entityId: venueId,
+        data: {
+          organizationId,
+          venueSlug,
+          isNewOrg: payload.organization.mode === 'new',
+          activatedImmediately: payload.activateImmediately === true,
+        },
+      })
+      if (payload.activateImmediately === true) {
+        await logAction({
+          staffId: userId,
+          venueId,
+          action: 'VENUE_APPROVED',
+          entity: 'Venue',
+          entityId: venueId,
+          data: { via: 'onboarding_wizard' },
+        })
+      }
     } catch (error: any) {
       logger.error('Onboarding wizard: org+venue creation failed', { error: error.message })
       throw error // Can't continue without org+venue

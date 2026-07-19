@@ -68,10 +68,7 @@ export function registerServiceChargeTools(server: McpServer, scope: McpScope) {
 
       if (!confirm) {
         const base = Math.max(0, Number(order.subtotal) - Number(order.discountAmount))
-        const amount =
-          charge.type === 'PERCENTAGE'
-            ? Math.round(((base * Number(charge.value)) / 100) * 100) / 100
-            : Number(charge.value)
+        const amount = charge.type === 'PERCENTAGE' ? Math.round(((base * Number(charge.value)) / 100) * 100) / 100 : Number(charge.value)
         return text({
           ok: false,
           requiresConfirmation: true,

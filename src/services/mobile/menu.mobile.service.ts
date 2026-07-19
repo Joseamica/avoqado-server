@@ -34,7 +34,13 @@ function toMinutes(hhmm?: string | null): number | null {
  * aplica siempre — así el "Menú Principal" de toda la vida sigue funcionando.
  */
 function appliesNow(
-  menu: { availableFrom: string | null; availableUntil: string | null; availableDays: string[]; startDate: Date | null; endDate: Date | null },
+  menu: {
+    availableFrom: string | null
+    availableUntil: string | null
+    availableDays: string[]
+    startDate: Date | null
+    endDate: Date | null
+  },
   nowUtc: Date,
   timezone: string,
 ): boolean {

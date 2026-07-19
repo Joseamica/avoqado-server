@@ -69,8 +69,7 @@ export async function getCustomerLoyalty(venueId: string, customerId: string, or
   const balanceValue = money(balance * redemptionRate)
   const maxRedeemableValue = orderTotal === null ? balanceValue : money(Math.min(balanceValue, orderTotal))
   // Points that produce that value — never more than the customer owns.
-  const maxRedeemablePoints =
-    redemptionRate > 0 ? Math.min(balance, Math.floor(maxRedeemableValue / redemptionRate)) : 0
+  const maxRedeemablePoints = redemptionRate > 0 ? Math.min(balance, Math.floor(maxRedeemableValue / redemptionRate)) : 0
 
   return {
     customerId: customer.id,
@@ -92,13 +91,7 @@ export async function getCustomerLoyalty(venueId: string, customerId: string, or
  * discount atomically, then recalculates the order the same way cortesía and
  * catalog discounts do.
  */
-export async function redeemPointsToOrder(
-  venueId: string,
-  orderId: string,
-  customerId: string,
-  points: number,
-  staffId?: string,
-) {
+export async function redeemPointsToOrder(venueId: string, orderId: string, customerId: string, points: number, staffId?: string) {
   if (!Number.isInteger(points) || points <= 0) {
     throw new BadRequestError('points debe ser un entero positivo')
   }
@@ -138,8 +131,7 @@ export async function redeemPointsToOrder(
     throw new BadRequestError('El canje no genera descuento sobre esta cuenta')
   }
   // If the value was capped, only burn the points actually used.
-  const pointsToBurn =
-    discountAmount < rawValue && redemptionRate > 0 ? Math.ceil(discountAmount / redemptionRate) : points
+  const pointsToBurn = discountAmount < rawValue && redemptionRate > 0 ? Math.ceil(discountAmount / redemptionRate) : points
 
   const staffVenueId = await resolveStaffVenueId(venueId, staffId)
 

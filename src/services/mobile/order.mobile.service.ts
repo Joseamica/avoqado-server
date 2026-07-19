@@ -493,20 +493,25 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
     // base = round(price/kg × weightKg, 2). quantity must be 1. Weight on a
     // non-weighted product (or missing weight on a weighted one) is a 400 —
     // explicit over silent (spec D4, pregunta 2).
-    const weightKg = item.weightQuantity != null ? Number(item.weightQuantity) : null
+    const rawWeightKg = item.weightQuantity != null ? Number(item.weightQuantity) : null
     if (product.soldByWeight) {
-      if (weightKg == null || !Number.isFinite(weightKg) || weightKg <= 0) {
+      if (rawWeightKg == null || !Number.isFinite(rawWeightKg) || rawWeightKg <= 0) {
         throw new BadRequestError(`El producto "${product.name}" se vende por peso; envía weightQuantity en kilogramos.`)
       }
-      if (weightKg < 0.001 || weightKg > 99.999) {
+      if (rawWeightKg < 0.001 || rawWeightKg > 99.999) {
         throw new BadRequestError(`El peso para "${product.name}" está fuera de rango (0.001–99.999 kg).`)
       }
       if (item.quantity !== 1) {
         throw new BadRequestError(`Las líneas por peso llevan cantidad 1 — cada pesada es una línea (producto "${product.name}").`)
       }
-    } else if (weightKg != null) {
+    } else if (rawWeightKg != null) {
       throw new BadRequestError(`El producto "${product.name}" no se vende por peso; no envíes weightQuantity.`)
     }
+    // Quantize to the PERSISTED precision (weightQuantity is Decimal(12,3)) BEFORE
+    // the money math, so total == round(price × stored weight) always holds — a
+    // reprint or a >3-decimal scale reading can't diverge by a cent (review
+    // 2026-07-19, fix #3). Mirrors order.tpv.service.ts.
+    const weightKg = rawWeightKg != null ? Math.round(rawWeightKg * 1000) / 1000 : null
 
     // Calculate item total: (product price + modifiers) * quantity.
     // Weighted: base = round(price × weightKg, 2) + modifiers (quantity is 1).

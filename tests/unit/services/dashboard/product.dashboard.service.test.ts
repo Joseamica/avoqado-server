@@ -187,3 +187,96 @@ describe('Product printStationId (print-station routing)', () => {
     })
   })
 })
+
+// ════════════════════════════════════════════════════════════════════════════
+// Venta por peso (soldByWeight) — spec 2026-07-18-venta-por-peso-bascula.md
+// price becomes precio POR KG and unit is pinned to KILOGRAM when enabled.
+// ════════════════════════════════════════════════════════════════════════════
+describe('Product soldByWeight (venta por peso)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  describe('createProduct — soldByWeight', () => {
+    it('persists soldByWeight=true and forces unit=KILOGRAM', async () => {
+      const created = makeMockProduct({ soldByWeight: true, unit: 'KILOGRAM' } as any)
+      prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
+      prismaMock.product.findFirst.mockResolvedValue({ displayOrder: 0 })
+      prismaMock.product.create.mockResolvedValue(created)
+
+      await productService.createProduct('venue-xyz', {
+        name: 'Jamón serrano',
+        sku: 'CHA-001',
+        price: 420,
+        type: 'REGULAR' as any,
+        categoryId: 'cat-001',
+        soldByWeight: true,
+      })
+
+      const createCall = prismaMock.product.create.mock.calls[0][0]
+      expect(createCall.data.soldByWeight).toBe(true)
+      expect(createCall.data.unit).toBe('KILOGRAM')
+    })
+
+    it('defaults soldByWeight=false and does NOT force a unit', async () => {
+      const created = makeMockProduct()
+      prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
+      prismaMock.product.findFirst.mockResolvedValue({ displayOrder: 0 })
+      prismaMock.product.create.mockResolvedValue(created)
+
+      await productService.createProduct('venue-xyz', {
+        name: 'Refresco',
+        sku: 'BEB-001',
+        price: 40,
+        type: 'REGULAR' as any,
+        categoryId: 'cat-001',
+      })
+
+      const createCall = prismaMock.product.create.mock.calls[0][0]
+      expect(createCall.data.soldByWeight).toBe(false)
+      expect(createCall.data.unit).toBeUndefined()
+    })
+  })
+
+  describe('updateProduct — soldByWeight', () => {
+    it('forces unit=KILOGRAM when enabling soldByWeight', async () => {
+      const existing = makeMockProduct()
+      const updated = makeMockProduct({ soldByWeight: true, unit: 'KILOGRAM' } as any)
+      prismaMock.product.findFirst.mockResolvedValue(existing)
+      prismaMock.product.update.mockResolvedValue(updated)
+
+      await productService.updateProduct('venue-xyz', 'product-abc', { soldByWeight: true } as any)
+
+      const updateCall = prismaMock.product.update.mock.calls[0][0]
+      expect(updateCall.data.soldByWeight).toBe(true)
+      expect(updateCall.data.unit).toBe('KILOGRAM')
+    })
+
+    it('REGRESSION — updating without soldByWeight does not inject soldByWeight/unit', async () => {
+      const existing = makeMockProduct({ soldByWeight: true, unit: 'KILOGRAM' } as any)
+      const updated = makeMockProduct({ name: 'Nombre Actualizado' })
+      prismaMock.product.findFirst.mockResolvedValue(existing)
+      prismaMock.product.update.mockResolvedValue(updated)
+
+      await productService.updateProduct('venue-xyz', 'product-abc', { name: 'Nombre Actualizado' })
+
+      const updateCall = prismaMock.product.update.mock.calls[0][0]
+      expect(updateCall.data).not.toHaveProperty('soldByWeight')
+      expect(updateCall.data).not.toHaveProperty('unit')
+    })
+
+    it('does NOT force unit when disabling soldByWeight (no reversion logic)', async () => {
+      const existing = makeMockProduct({ soldByWeight: true, unit: 'KILOGRAM' } as any)
+      const updated = makeMockProduct({ soldByWeight: false } as any)
+      prismaMock.product.findFirst.mockResolvedValue(existing)
+      prismaMock.product.update.mockResolvedValue(updated)
+
+      await productService.updateProduct('venue-xyz', 'product-abc', { soldByWeight: false } as any)
+
+      const updateCall = prismaMock.product.update.mock.calls[0][0]
+      expect(updateCall.data.soldByWeight).toBe(false)
+      // unit is left as-is (not forced) when turning weight off
+      expect(updateCall.data).not.toHaveProperty('unit')
+    })
+  })
+})

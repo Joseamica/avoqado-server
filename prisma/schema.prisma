@@ -1565,10 +1565,13 @@ model Inventory {
   product       Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
   venueId       String
   venue         Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
-  currentStock  Decimal  @db.Decimal(10, 2)
-  reservedStock Decimal  @default(0) @db.Decimal(10, 2)
-  minimumStock  Decimal  @default(0) @db.Decimal(10, 2)
-  maximumStock  Decimal? @db.Decimal(10, 2)
+  // (12,3): stock in KILOGRAMS for sold-by-weight products needs 3 decimals
+  // (0.435 kg) — at (10,2) each weighted sale silently dropped the 3rd decimal
+  // (~0.005/venta drift vs the movement ledger). Aligns with RawMaterial (12,3).
+  currentStock  Decimal  @db.Decimal(12, 3)
+  reservedStock Decimal  @default(0) @db.Decimal(12, 3)
+  minimumStock  Decimal  @default(0) @db.Decimal(12, 3)
+  maximumStock  Decimal? @db.Decimal(12, 3)
 
   lastRestockedAt DateTime?
   lastCountedAt   DateTime?
@@ -1589,9 +1592,12 @@ model InventoryMovement {
   inventory   Inventory @relation(fields: [inventoryId], references: [id], onDelete: Cascade)
 
   type          MovementType
-  quantity      Decimal      @db.Decimal(10, 2) // Positive or negative
-  previousStock Decimal      @db.Decimal(10, 2)
-  newStock      Decimal      @db.Decimal(10, 2)
+  // (12,3): the ledger must match Inventory's precision or weighted sales
+  // (kg, 3 decimals) stop reconciling against currentStock to the milésima.
+  // unitCost stays (10,2) — it's MONEY (pesos), not a quantity.
+  quantity      Decimal      @db.Decimal(12, 3) // Positive or negative
+  previousStock Decimal      @db.Decimal(12, 3)
+  newStock      Decimal      @db.Decimal(12, 3)
 
   reason    String?
   reference String? // Order ID, adjustment ID, etc.

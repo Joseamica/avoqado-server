@@ -175,10 +175,7 @@ export async function recalculateOrderTotals(
   const serviceCharges = await db.orderServiceCharge.findMany({ where: { orderId } })
   let newServiceChargeAmount = 0
   for (const sc of serviceCharges) {
-    const amount =
-      sc.type === 'PERCENTAGE'
-        ? Math.round(((base * Number(sc.value)) / 100) * 100) / 100
-        : Number(sc.amount)
+    const amount = sc.type === 'PERCENTAGE' ? Math.round(((base * Number(sc.value)) / 100) * 100) / 100 : Number(sc.amount)
     // Un % se re-calcula cuando cambia la cuenta; un monto fijo se respeta.
     if (sc.type === 'PERCENTAGE' && amount !== Number(sc.amount)) {
       await db.orderServiceCharge.update({ where: { id: sc.id }, data: { amount } })

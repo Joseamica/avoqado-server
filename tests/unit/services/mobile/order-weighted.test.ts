@@ -134,6 +134,24 @@ describe('venta por peso — createOrderWithItems (mobile)', () => {
     expect(Number(line.total)).toBe(140.7) // 140.69665 → 140.70
   })
 
+  it('quantizes a >3-decimal weight to 3dp BEFORE the money math (review fix #3): 0.1235 → 0.124, total stays derivable', async () => {
+    // A scale reporting more than 3 decimals must not let Order.total diverge from
+    // the stored (Decimal 12,3) weight. 0.1235 kg → 0.124 kg; total = round(100 × 0.124) = 12.40.
+    prismaMock.product.findMany.mockResolvedValue([{ ...WEIGHTED_PRODUCT, price: new Decimal(100) }])
+
+    await createOrderWithItems('venue-1', {
+      staffId: 'staff-1',
+      items: [{ productId: 'prod-jamon', quantity: 1, weightQuantity: 0.1235 }],
+      source: 'POS',
+    })
+
+    const line = prismaMock.order.create.mock.calls[0][0].data.items.create[0]
+    expect(Number(line.weightQuantity)).toBe(0.124) // quantized to 3dp
+    expect(Number(line.total)).toBe(12.4) // round(100 × 0.124) — derivable from the STORED weight
+    // Invariant: total == round(price × storedWeight, 2) — no reprint/preview drift.
+    expect(Number(line.total)).toBe(Math.round(100 * Number(line.weightQuantity) * 100) / 100)
+  })
+
   it('rejects a weighted product without weightQuantity (400, Spanish)', async () => {
     prismaMock.product.findMany.mockResolvedValue([WEIGHTED_PRODUCT])
 

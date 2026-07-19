@@ -82,6 +82,8 @@ export interface UpdateProductDto {
   kitchenName?: string | null
   abbreviation?: string | null
   duration?: number | null
+  soldByWeight?: boolean // Venta por peso: al activarlo, price = precio POR KG y unit se fuerza a KILOGRAM
+  unit?: string | null // Unidad de medida (forzada a KILOGRAM cuando soldByWeight pasa a true)
 
   // Event fields
   eventDate?: string | Date | null
@@ -728,6 +730,14 @@ export async function updateProduct(venueId: string, productId: string, productD
   // ✅ WORLD-CLASS: If trackInventory is set to false, clear inventoryMethod
   if (productData.trackInventory === false) {
     updateData.inventoryMethod = null
+  }
+
+  // Venta por peso: al ACTIVAR soldByWeight, price pasa a ser precio/kg → forzar
+  // unit=KILOGRAM (espejo del create y del mobile). Guardado por `=== true` para
+  // no tocar `unit` en updates parciales ni al desactivar (no revertimos la unidad,
+  // igual que el mobile — sin lógica de reversión salvo que el founder la pida).
+  if (productData.soldByWeight === true) {
+    updateData.unit = 'KILOGRAM'
   }
 
   // ✅ Handle event date conversion

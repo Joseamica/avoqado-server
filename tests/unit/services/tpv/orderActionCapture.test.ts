@@ -37,6 +37,10 @@ jest.mock('@/utils/prismaClient', () => ({
     orderDiscount: {
       findMany: jest.fn(),
     },
+    orderServiceCharge: {
+      findMany: jest.fn(),
+      update: jest.fn(),
+    },
     orderCustomer: {
       deleteMany: jest.fn(),
     },
@@ -156,6 +160,7 @@ describe('ActivityLog dual-write in order.tpv.service', () => {
     // orderAction.create is fire-and-forget in each function; resolve silently
     mockPrisma.orderAction.create.mockResolvedValue({})
     mockPrisma.orderDiscount.findMany.mockResolvedValue([])
+    mockPrisma.orderServiceCharge.findMany.mockResolvedValue([])
     mockPrisma.orderCustomer.deleteMany.mockResolvedValue({ count: 0 })
     mockPrisma.staff.findUnique.mockResolvedValue({ id: STAFF_ID })
   })

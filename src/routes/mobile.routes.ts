@@ -1926,12 +1926,7 @@ router.post(
  * Menús del venue con su horario y cuál aplica AHORA (zona horaria del venue).
  * El POS filtra su cuadrícula por las categorías del menú seleccionado.
  */
-router.get(
-  '/venues/:venueId/menus',
-  authenticateTokenMiddleware,
-  checkPermission('menu:read'),
-  menuMobileController.listMenus,
-)
+router.get('/venues/:venueId/menus', authenticateTokenMiddleware, checkPermission('menu:read'), menuMobileController.listMenus)
 
 /**
  * GET /api/v1/mobile/venues/:venueId/service-charges
