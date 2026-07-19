@@ -167,6 +167,8 @@ export interface OrderDetailResponse {
   total: number
   staffName: string | null
   customerName: string | null
+  /** Attached customer (Cliente tab) — needed to read their loyalty balance. */
+  customerId: string | null
   specialRequests: string | null
   /** TABLE_SERVICE: comensales — editable from the check panel. */
   covers: number | null
@@ -850,6 +852,9 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
     total: Number(flattenedOrder.total),
     staffName: flattenedOrder.servedBy ? `${flattenedOrder.servedBy.firstName} ${flattenedOrder.servedBy.lastName}`.trim() : null,
     customerName: flattenedOrder.customerName,
+    // The ATTACHED customer (Cliente tab). Additive: the POS needs it to read
+    // that customer's loyalty balance for "Recompensas".
+    customerId: flattenedOrder.customerId ?? null,
     specialRequests: flattenedOrder.specialRequests,
     covers: flattenedOrder.covers ?? null,
     orderType: flattenedOrder.type,
