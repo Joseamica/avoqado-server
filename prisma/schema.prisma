@@ -4557,6 +4557,8 @@ model DeliveryOrderEvent {
   @@index([status, receivedAt])
   @@index([status, nextAttemptAt])
   @@index([venueId])
+  /// statusDispatcher busca el evento 'order' por orderId para rutear por el link originador.
+  @@index([orderId])
 }
 
 // Stripe webhook event tracking for idempotency
