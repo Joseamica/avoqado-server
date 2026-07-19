@@ -62,4 +62,86 @@ describe('parseDeliverectOrder', () => {
   it('body inválido lanza error legible', () => {
     expect(() => parseDeliverectOrder(Buffer.from('not-json'), link)).toThrow(/payload/i)
   })
+
+  // ============================================================
+  // Fix 1 (audit, SECURITY): bounds validation de dinero/cantidad — un payload
+  // malformado (aunque HMAC-autenticado) con total/unitPrice negativo crearía una
+  // Order/Payment "PAID" con forma de reembolso, saltándose el flujo de refund
+  // (permisos/confirm/audit). Solo total/unitPrice/quantity — NUNCA
+  // discountAmount/taxAmount/serviceCharge (semántica de signo aparte).
+  // ============================================================
+  describe('bounds validation (Fix 1, audit)', () => {
+    function payloadWith(mutate: (p: any) => void): Buffer {
+      const p = JSON.parse(fixture.toString())
+      mutate(p)
+      return Buffer.from(JSON.stringify(p))
+    }
+
+    it('total negativo (payment.amount < 0) → throw', () => {
+      const body = payloadWith(p => {
+        p.payment.amount = -14000
+      })
+      expect(() => parseDeliverectOrder(body, link)).toThrow(/Deliverect: payload/)
+    })
+
+    it('total no finito (payment.amount = "abc") → throw', () => {
+      const body = payloadWith(p => {
+        p.payment.amount = 'abc'
+      })
+      expect(() => parseDeliverectOrder(body, link)).toThrow(/Deliverect: payload/)
+    })
+
+    it('unitPrice de item no finito (price no numérico) → throw', () => {
+      const body = payloadWith(p => {
+        p.items[0].price = 'not-a-number'
+      })
+      expect(() => parseDeliverectOrder(body, link)).toThrow(/Deliverect: payload/)
+    })
+
+    it('unitPrice de item negativo (price < 0) → throw', () => {
+      const body = payloadWith(p => {
+        p.items[0].price = -4500
+      })
+      expect(() => parseDeliverectOrder(body, link)).toThrow(/Deliverect: payload/)
+    })
+
+    it('quantity de item = 0 → throw', () => {
+      const body = payloadWith(p => {
+        p.items[0].quantity = 0
+      })
+      expect(() => parseDeliverectOrder(body, link)).toThrow(/Deliverect: payload/)
+    })
+
+    it('quantity de item negativa → throw', () => {
+      const body = payloadWith(p => {
+        p.items[0].quantity = -1
+      })
+      expect(() => parseDeliverectOrder(body, link)).toThrow(/Deliverect: payload/)
+    })
+
+    it('unitPrice de modifier negativo → throw', () => {
+      const body = payloadWith(p => {
+        p.items[0].subItems[0].price = -1000
+      })
+      expect(() => parseDeliverectOrder(body, link)).toThrow(/Deliverect: payload/)
+    })
+
+    it('unitPrice de modifier no finito → throw', () => {
+      const body = payloadWith(p => {
+        p.items[0].subItems[0].price = 'not-a-number'
+      })
+      expect(() => parseDeliverectOrder(body, link)).toThrow(/Deliverect: payload/)
+    })
+
+    it('discountTotal negativo NO se valida (semántica de signo aparte) — payload sigue siendo válido', () => {
+      const body = payloadWith(p => {
+        p.discountTotal = -500
+      })
+      expect(() => parseDeliverectOrder(body, link)).not.toThrow()
+    })
+
+    it('payload válido (fixture original) → NO throw', () => {
+      expect(() => parseDeliverectOrder(fixture, link)).not.toThrow()
+    })
+  })
 })

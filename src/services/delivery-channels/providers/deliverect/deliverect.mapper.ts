@@ -53,10 +53,35 @@ export function parseDeliverectOrder(rawBody: Buffer, link: DeliveryChannelLink)
     notes: it.remark ? String(it.remark) : undefined,
   }))
 
+  // Fix (audit, SECURITY): bounds-validate money/quantity BEFORE they can flow into an
+  // Order/Payment. `total`/`unitPrice`/`quantity` are coerced with Number()/toPesos with no
+  // bounds — a negative `total` from a malformed (even HMAC-authenticated) payload would create
+  // a "PAID" Order/Payment shaped like a refund, skipping the whole refund flow (permisos/
+  // confirm/audit). Deliberately NOT validating discountAmount/taxAmount/serviceCharge here —
+  // those can carry legit sign semantics, revalidate in staging.
+  for (const it of items) {
+    if (!Number.isFinite(it.unitPrice) || it.unitPrice < 0) {
+      throw new Error('Deliverect: payload con unitPrice de item inválido')
+    }
+    if (!Number.isFinite(it.quantity) || it.quantity <= 0) {
+      throw new Error('Deliverect: payload con quantity de item inválida')
+    }
+    for (const modifier of it.modifiers) {
+      if (!Number.isFinite(modifier.unitPrice) || modifier.unitPrice < 0) {
+        throw new Error('Deliverect: payload con unitPrice de modifier inválido')
+      }
+    }
+  }
+
   const subtotal = items.reduce(
     (sum, it) => sum + it.unitPrice * it.quantity + it.modifiers.reduce((m, s) => m + s.unitPrice * s.quantity, 0),
     0,
   )
+
+  const total = toPesos(p.payment?.amount, dd)
+  if (!Number.isFinite(total) || total < 0) {
+    throw new Error('Deliverect: payload con total inválido')
+  }
 
   return {
     externalId: String(p.channelOrderId),
@@ -69,7 +94,7 @@ export function parseDeliverectOrder(rawBody: Buffer, link: DeliveryChannelLink)
     tipAmount: toPesos(p.tip, dd),
     serviceChargeAmount: toPesos(p.serviceCharge, dd),
     deliveryFeeAmount: toPesos(p.deliveryCost, dd),
-    total: toPesos(p.payment?.amount, dd),
+    total,
     customer: p.customer || p.note ? { name: p.customer?.name, phone: p.customer?.phoneNumber, note: p.note } : undefined,
     raw: p,
     placedAt: p.createdAt ? new Date(p.createdAt) : new Date(),
