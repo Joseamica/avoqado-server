@@ -243,6 +243,8 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   CashDrawerSession: 'Orders, KDS & Cash',
   CashDrawerEvent: 'Orders, KDS & Cash',
   MoneyAnomaly: 'Orders, KDS & Cash',
+  DeliveryChannelLink: 'Orders, KDS & Cash',
+  DeliveryOrderEvent: 'Orders, KDS & Cash',
 
   // 9. Payments & Fees
   Payment: 'Payments & Fees',

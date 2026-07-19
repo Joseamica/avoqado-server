@@ -58,6 +58,12 @@ process.env.MERCADO_PAGO_TOKEN_KEY =
 process.env.MP_API_BASE_URL = process.env.MP_API_BASE_URL || 'https://api.mercadopago.com'
 process.env.MP_AUTH_BASE_URL = process.env.MP_AUTH_BASE_URL || 'https://auth.mercadopago.com.mx'
 
+// Deliverect (delivery channels) — deliverect.client.ts builds its axios instance
+// and reads client-credentials at module-load time, before any test import.
+process.env.DELIVERECT_API_URL = process.env.DELIVERECT_API_URL || 'https://api.staging.deliverect.com'
+process.env.DELIVERECT_CLIENT_ID = process.env.DELIVERECT_CLIENT_ID || 'test-deliverect-client-id'
+process.env.DELIVERECT_CLIENT_SECRET = process.env.DELIVERECT_CLIENT_SECRET || 'test-deliverect-client-secret'
+
 // Comprehensive Prisma Mock Setup
 const createMockModel = () => ({
   findUnique: jest.fn(),
@@ -93,6 +99,8 @@ const prismaMock: any = {
   area: createMockModel(),
   order: createMockModel(),
   orderItem: createMockModel(),
+  deliveryChannelLink: createMockModel(),
+  deliveryOrderEvent: createMockModel(),
   payment: createMockModel(),
   terminalPaymentRequest: createMockModel(),
   paymentAllocation: createMockModel(),
