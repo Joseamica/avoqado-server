@@ -62,12 +62,36 @@ describe('requestActivation (POST /venues/:venueId/activation-request)', () => {
 
   it('usa authContext.userId como requestedById — JAMÁS req.user ni otro campo del body', async () => {
     ;(activationService.createActivationRequest as jest.Mock).mockResolvedValue({ id: 'req1' })
-    const req = mkReq({ authContext: { venueId: 'venue9', userId: 'staff9' }, body: { requestedChannels: ['RAPPI'] } })
+    // params.venueId === authContext.venueId aquí — este test aísla el origen del userId, no del venueId.
+    const req = mkReq({
+      params: { venueId: 'venue9' },
+      authContext: { venueId: 'venue9', userId: 'staff9' },
+      body: { requestedChannels: ['RAPPI'] },
+    })
     const res = mkRes()
 
     await requestActivation(req, res)
 
     expect(activationService.createActivationRequest).toHaveBeenCalledWith('venue9', 'staff9', expect.anything())
+  })
+
+  it('tenant scoping: escribe en req.params.venueId (el venue que autorizó el middleware), NO authContext.venueId — cierra el hueco cross-tenant si el token queda stale tras switchVenue', async () => {
+    ;(activationService.createActivationRequest as jest.Mock).mockResolvedValue({ id: 'req1' })
+    // checkFeatureAccess/checkPermission autorizan el venue de la URL vía resolveRequestVenueId
+    // (params > header > token). El JWT (authContext.venueId) puede quedar stale tras switchVenue,
+    // así que el handler DEBE escribir en el venue autorizado (params), nunca en el del token.
+    const req = mkReq({
+      params: { venueId: 'venue-URL-autorizado' },
+      authContext: { venueId: 'venue-TOKEN-stale', userId: 'staff1' },
+      body: { requestedChannels: ['UBER_EATS'] },
+    })
+    const res = mkRes()
+
+    await requestActivation(req, res)
+
+    expect(activationService.createActivationRequest).toHaveBeenCalledWith('venue-URL-autorizado', 'staff1', expect.anything())
+    // Jamás debe filtrarse el venue del token en la llamada.
+    expect(activationService.createActivationRequest).not.toHaveBeenCalledWith('venue-TOKEN-stale', expect.anything(), expect.anything())
   })
 
   it('propaga errores del service (sin try/catch propio — depende de express-async-errors)', async () => {
@@ -102,6 +126,17 @@ describe('getActivation (GET /venues/:venueId/activation-request)', () => {
     await getActivation(req, res)
 
     expect(res.json).toHaveBeenCalledWith({ success: true, data: null })
+  })
+
+  it('tenant scoping: lee req.params.venueId (el autorizado), NO authContext.venueId — mismo hueco cross-tenant que el POST', async () => {
+    ;(activationService.getActivationRequest as jest.Mock).mockResolvedValue(null)
+    const req = mkReq({ params: { venueId: 'venue-URL-autorizado' }, authContext: { venueId: 'venue-TOKEN-stale', userId: 'staff1' } })
+    const res = mkRes()
+
+    await getActivation(req, res)
+
+    expect(activationService.getActivationRequest).toHaveBeenCalledWith('venue-URL-autorizado')
+    expect(activationService.getActivationRequest).not.toHaveBeenCalledWith('venue-TOKEN-stale')
   })
 
   it('propaga errores del service (sin try/catch propio)', async () => {

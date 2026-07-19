@@ -78,6 +78,7 @@ export const createActivationRequestSchema = z.object({
       note: z.string().max(1000, 'La nota es demasiado larga').optional(),
     })
     .strict(),
+  params: z.object({ venueId: z.string().min(1, 'El venue es requerido') }).passthrough(),
 })
 
 export type CreateActivationRequestBody = z.infer<typeof createActivationRequestSchema>['body']
