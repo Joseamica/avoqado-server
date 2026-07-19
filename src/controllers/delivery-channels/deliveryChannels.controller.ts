@@ -5,6 +5,7 @@
 import { NextFunction, Request, Response } from 'express'
 import * as deliveryChannelLinkService from '../../services/delivery-channels/core/deliveryChannelLink.service'
 import * as activationService from '../../services/delivery-channels/core/deliveryActivation.service'
+import * as deliverySummaryService from '../../services/delivery-channels/core/deliverySummary.service'
 
 /** GET /venues/:venueId/channels */
 export async function listChannels(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -81,4 +82,17 @@ export const getActivation = async (req: Request, res: Response): Promise<void> 
   const { venueId } = req.params
   const request = await activationService.getActivationRequest(venueId)
   res.json({ success: true, data: request })
+}
+
+/**
+ * GET /venues/:venueId/delivery/summary — pedidos e ingreso de HOY (venue-local) por canal de
+ * delivery (Task 5 del plan delivery-activation-backend). Mismo servicio compartido que usa el
+ * MCP tool `delivery_channels` (`todayByChannel`) — DRY, ver deliverySummary.service.ts.
+ * `venueId` de `req.params` (el autorizado por el middleware), NO de authContext — ver
+ * requestActivation arriba.
+ */
+export const getSummary = async (req: Request, res: Response): Promise<void> => {
+  const { venueId } = req.params
+  const summary = await deliverySummaryService.getDeliveryDailySummary(venueId)
+  res.json({ success: true, data: summary })
 }

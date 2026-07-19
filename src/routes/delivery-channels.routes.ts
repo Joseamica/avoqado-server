@@ -1,6 +1,7 @@
 /**
  * Gestión de canales de delivery (DeliveryChannelLink CRUD + pause, Task 10) + solicitud de
- * activación del dueño (DeliveryActivationRequest, Task 3 del plan delivery-activation-backend).
+ * activación del dueño (DeliveryActivationRequest, Task 3) + resumen diario por canal
+ * (GET .../delivery/summary, Task 5) del plan delivery-activation-backend.
  *
  * `delivery-channels:read` / `delivery-channels:manage` / `delivery-channels:request` (permisos)
  * y `DELIVERY_CHANNELS` (Feature code, PREMIUM) ya están registrados — permissions.ts /
@@ -75,6 +76,14 @@ router.get(
   checkFeatureAccess('DELIVERY_CHANNELS'),
   checkPermission('delivery-channels:read'),
   ctrl.getActivation,
+)
+
+router.get(
+  '/venues/:venueId/delivery/summary',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('DELIVERY_CHANNELS'),
+  checkPermission('delivery-channels:read'),
+  ctrl.getSummary,
 )
 
 export default router

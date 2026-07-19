@@ -1,7 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
-import { venueStartOfDay } from '@/utils/datetime'
+import { getDeliveryDailySummary } from '@/services/delivery-channels/core/deliverySummary.service'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
@@ -31,19 +31,13 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
           externalLocationId: true,
         },
       })
-      const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
-      const tz = venue?.timezone || 'America/Mexico_City'
-      const startOfToday = venueStartOfDay(tz) // "hoy" en la tz del VENUE, nunca la del host (regla venue-local)
-      const todayOrders = await prisma.order.groupBy({
-        by: ['source'],
-        where: { venueId, originSystem: 'DELIVERY_PLATFORM', createdAt: { gte: startOfToday } },
-        _count: { id: true },
-        _sum: { total: true },
-      })
+      // Task 5: fuente compartida con el REST GET .../delivery/summary (DRY) — misma lógica
+      // venue-local (venueStartOfDay) que antes vivía inline aquí, ahora en deliverySummary.service.
+      const { channels: todayByChannel } = await getDeliveryDailySummary(venueId)
       return text({
         venueId,
         channels: links.map(l => ({ ...l, lastMenuSyncAt: l.lastMenuSyncAt?.toISOString() ?? null })),
-        todayByChannel: todayOrders.map(g => ({ channel: g.source, orders: g._count.id, totalPesos: Number(g._sum.total ?? 0) })),
+        todayByChannel,
       })
     },
   )
