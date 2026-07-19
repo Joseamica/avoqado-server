@@ -25,10 +25,11 @@ describe('parseDeliverectOrder', () => {
     const o = parseDeliverectOrder(fixture, link)
     expect(o.total).toBe(140.0)
   })
-  it('subtotal = suma de items+modifiers en pesos', () => {
+  it('subtotal = suma de items+modifiers en pesos, modifier × cantidad del padre (Fix C4, spec §10.1.4)', () => {
     const o = parseDeliverectOrder(fixture, link)
-    // 2×45 + 1×10 (modifier) + 30 = 130
-    expect(o.subtotal).toBe(130.0)
+    // 2×45 + (1×10 modifier × 2 cantidad del taco) + 30 = 140 — el modifier de "extra
+    // queso" aplica a CADA taco (Deliverect: cantidad_modificador × cantidad_producto).
+    expect(o.subtotal).toBe(140.0)
   })
   it('externalId y displayId vienen del canal', () => {
     const o = parseDeliverectOrder(fixture, link)
@@ -142,6 +143,59 @@ describe('parseDeliverectOrder', () => {
 
     it('payload válido (fixture original) → NO throw', () => {
       expect(() => parseDeliverectOrder(fixture, link)).not.toThrow()
+    })
+  })
+
+  // ============================================================
+  // Fix C4 (audit, MONEY, spec §10.1.3/10.1.4): dos correcciones de dinero en el
+  // mapper — signo del descuento y multiplicación de modifiers por la cantidad del
+  // item padre. (orderIsAlreadyPaid y la persistencia de serviceCharge/deliveryFee
+  // se prueban en deliveryOrderIngestion.test.ts — viven en el ingestion service.)
+  // ============================================================
+  describe('Fix C4 — contrato de dinero (audit)', () => {
+    function payloadWith(mutate: (p: any) => void): Buffer {
+      const p = JSON.parse(fixture.toString())
+      mutate(p)
+      return Buffer.from(JSON.stringify(p))
+    }
+
+    it('discountTotal negativo (como lo manda Deliverect) → discountAmount se guarda en magnitud POSITIVA', () => {
+      const body = payloadWith(p => {
+        p.discountTotal = -500 // -5.00 pesos
+      })
+      const o = parseDeliverectOrder(body, link)
+      expect(o.discountAmount).toBe(5.0)
+    })
+
+    it('discountTotal positivo (defensivo, no debería ocurrir) → Math.abs es no-op, sigue positivo', () => {
+      const body = payloadWith(p => {
+        p.discountTotal = 500
+      })
+      const o = parseDeliverectOrder(body, link)
+      expect(o.discountAmount).toBe(5.0)
+    })
+
+    it('discountTotal ausente/0 → discountAmount 0 (regresión)', () => {
+      const o = parseDeliverectOrder(fixture, link)
+      expect(o.discountAmount).toBe(0)
+    })
+
+    it('modifier × cantidad del padre: item con quantity=3, modifier quantity=2 price=$5 → contribución = 5×2×3 = 30, NO 10', () => {
+      const body = payloadWith(p => {
+        p.items = [
+          {
+            plu: 'PROD-X',
+            name: 'Producto X',
+            price: 10000, // $100
+            quantity: 3,
+            subItems: [{ plu: 'MOD-Y', name: 'Modificador Y', price: 500, quantity: 2 }], // $5 c/u, 2 por producto
+          },
+        ]
+        p.payment.amount = 33000 // total irrelevante para este assert, solo debe pasar bounds (>=0)
+      })
+      const o = parseDeliverectOrder(body, link)
+      // subtotal = 3×100 (producto) + (5×2×3) modifier = 300 + 30 = 330
+      expect(o.subtotal).toBe(330.0)
     })
   })
 })

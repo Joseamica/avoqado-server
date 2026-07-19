@@ -3,13 +3,19 @@ import { NormalizedDeliveryOrder, NormalizedDeliveryItem, DeliveryOrderStatus } 
 
 /**
  * Mapa status interno → código numérico de Deliverect.
- * Fuente: developers.deliverect.com/order-status — REVALIDAR EN STAGING.
+ * Fix C2 (auditoría G-Stack + Codex, 2026-07-19, spec §10.1.6): el scaffold asumió
+ * PREPARING/READY/PICKED_UP = 30/40/50 — la doc real de "update-order-status" confirma
+ * preparación/listo/final = 50/70/90 (corregidos abajo).
+ * Doc: https://developers.deliverect.com/reference/update-order-status-1
+ * REVALIDAR EN STAGING: ACCEPTED/CANCELLED/FAILED NO están confirmados contra la doc en
+ * esta pasada (el hallazgo de la auditoría solo cubrió preparación/listo/final) — se dejan
+ * sin tocar hasta verificarlos con el catálogo completo de códigos.
  */
 export const DELIVERECT_STATUS_MAP: Record<DeliveryOrderStatus, number> = {
   ACCEPTED: 20,
-  PREPARING: 30,
-  READY: 40,
-  PICKED_UP: 50,
+  PREPARING: 50,
+  READY: 70,
+  PICKED_UP: 90,
   CANCELLED: 110,
   FAILED: 120,
 }
@@ -73,8 +79,12 @@ export function parseDeliverectOrder(rawBody: Buffer, link: DeliveryChannelLink)
     }
   }
 
+  // Fix C4 (audit, MONEY, spec §10.1.4): Deliverect define el monto de un modifier
+  // como cantidad_modificador × cantidad_PRODUCTO (el padre) — 2 productos con un
+  // modifier de $15 registran $30, no $15. Doc:
+  // https://developers.deliverect.com/docs/how-to-interpret-modifiers-and-the-quantity-ordered
   const subtotal = items.reduce(
-    (sum, it) => sum + it.unitPrice * it.quantity + it.modifiers.reduce((m, s) => m + s.unitPrice * s.quantity, 0),
+    (sum, it) => sum + it.unitPrice * it.quantity + it.modifiers.reduce((m, s) => m + s.unitPrice * s.quantity * it.quantity, 0),
     0,
   )
 
@@ -90,7 +100,11 @@ export function parseDeliverectOrder(rawBody: Buffer, link: DeliveryChannelLink)
     items,
     subtotal: Math.round(subtotal * 100) / 100,
     taxAmount: toPesos(p.taxTotal, dd),
-    discountAmount: toPesos(p.discountTotal, dd),
+    // Fix C4 (audit, MONEY, spec §10.1.3): Deliverect manda discountTotal en NEGATIVO;
+    // el resto del sistema espera la MAGNITUD positiva en discountAmount (y la resta
+    // donde corresponda) — sin Math.abs, un descuento de -10 SUMABA 10 al neto. Doc:
+    // https://developers.deliverect.com/docs/how-are-discounts-sent
+    discountAmount: Math.abs(toPesos(p.discountTotal, dd)),
     tipAmount: toPesos(p.tip, dd),
     serviceChargeAmount: toPesos(p.serviceCharge, dd),
     deliveryFeeAmount: toPesos(p.deliveryCost, dd),
