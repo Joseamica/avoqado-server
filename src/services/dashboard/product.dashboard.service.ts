@@ -350,7 +350,9 @@ function computeRecipeShortage(recipe: any): {
  *   insufficientIngredients so clients can explain WHAT ran out.
  * - not tracked: everything null (unlimited).
  */
-function computeInventoryAvailability(product: any): {
+// Exported: el POS móvil (product.mobile.controller) reutiliza EXACTAMENTE este
+// cálculo para que iOS/Android expliquen QUÉ falta igual que el TPV/dashboard.
+export function computeInventoryAvailability(product: any): {
   availableQuantity: number | null
   limitingIngredient: IngredientShortage | null
   insufficientIngredients: IngredientShortage[] | null

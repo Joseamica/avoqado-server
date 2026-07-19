@@ -8,6 +8,7 @@
 
 import { NextFunction, Request, Response } from 'express'
 import prisma from '../../utils/prismaClient'
+import { computeInventoryAvailability } from '../../services/dashboard/product.dashboard.service'
 import { Unit } from '@prisma/client'
 import logger from '../../config/logger'
 
@@ -55,7 +56,8 @@ const productInclude = {
       lines: {
         include: {
           rawMaterial: {
-            select: { id: true, currentStock: true },
+            // name/unit: el modal de "agotado" del POS explica QUÉ insumo falta.
+            select: { id: true, name: true, currentStock: true, unit: true },
           },
         },
       },
@@ -64,20 +66,13 @@ const productInclude = {
 }
 
 /**
- * Attach computed `availableQuantity` to a product.
+ * Attach computed availability to a product — the SAME shape the TPV/dashboard
+ * clients get (availableQuantity + limitingIngredient + insufficientIngredients),
+ * so the POS "agotado" modal can explain exactly WHAT ran out. Additive fields:
+ * old clients keep reading availableQuantity and ignore the rest.
  */
 function withAvailableQuantity(product: any) {
-  let availableQuantity = null
-
-  if (product.trackInventory) {
-    if (product.inventoryMethod === 'QUANTITY') {
-      availableQuantity = Math.floor(Number(product.inventory?.currentStock ?? 0))
-    } else if (product.inventoryMethod === 'RECIPE' && product.recipe) {
-      availableQuantity = calculateAvailablePortions(product.recipe)
-    }
-  }
-
-  return { ...product, availableQuantity }
+  return { ...product, ...computeInventoryAvailability(product) }
 }
 
 // ---------------------------------------------------------------------------
