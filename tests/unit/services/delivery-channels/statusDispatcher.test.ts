@@ -147,9 +147,10 @@ describe('dispatchOrderStatus', () => {
   })
 
   it.each([
-    ['PREPARING', 30],
-    ['READY', 40],
-    ['PICKED_UP', 50],
+    // Fix C2 (audit, spec §10.1.6): documented prep/ready/final = 50/70/90 (was 30/40/50).
+    ['PREPARING', 50],
+    ['READY', 70],
+    ['PICKED_UP', 90],
     ['CANCELLED', 110],
     ['FAILED', 120],
   ])('%s se mapea a %i', async (status, code) => {
