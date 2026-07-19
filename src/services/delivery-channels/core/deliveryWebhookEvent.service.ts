@@ -5,9 +5,14 @@ import { DeliveryOrderEvent, DeliveryOrderEventStatus, DeliveryProvider, Prisma 
  * Persiste un evento de webhook de delivery ANTES de cualquier ACK (patrón
  * Blumon/ProviderEventLog): si la ingesta falla después, ya tenemos un registro
  * durable que la reconciliación puede reintentar. Idempotencia por
- * @@unique([provider, externalEventId, eventType]) — un P2002 significa que el
- * proveedor reenvió el mismo evento (retry), así que devolvemos el row existente
- * marcado `duplicate: true` en vez de fallar.
+ * @@unique([provider, channelLinkId, externalEventId, eventType]) — un P2002
+ * significa que el proveedor reenvió el mismo evento (retry) POR EL MISMO CANAL,
+ * así que devolvemos el row existente marcado `duplicate: true` en vez de fallar.
+ *
+ * Fix B1 (audit §10.2): la llave incluye `channelLinkId` porque `externalEventId`
+ * (channelOrderId) nace en el marketplace y NO es único global — sin el link, dos
+ * canales/venues distintos con el mismo channelOrderId colisionaban y el 2do
+ * tenant recibía DUPLICATE sin ingerir nunca su pedido.
  */
 export async function persistDeliveryEvent(params: {
   provider: DeliveryProvider
@@ -33,8 +38,9 @@ export async function persistDeliveryEvent(params: {
     if (e?.code === 'P2002') {
       const existing = await prisma.deliveryOrderEvent.findUnique({
         where: {
-          provider_externalEventId_eventType: {
+          provider_channelLinkId_externalEventId_eventType: {
             provider: params.provider,
+            channelLinkId: params.channelLinkId,
             externalEventId: params.externalEventId,
             eventType: params.eventType,
           },
