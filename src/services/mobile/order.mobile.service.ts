@@ -1292,6 +1292,143 @@ export async function splitOrderBySeat(venueId: string, orderId: string, staffId
   }
 }
 
+/**
+ * "Fusionar cuentas" (Square's merge): vuelca TODOS los artículos de una cuenta
+ * en otra y cierra la de origen. Es lo que se necesita cuando dos mesas se
+ * juntan, y es el INVERSO de dividir — sin esto, una división por error solo se
+ * deshace anulando cheques y recapturando todo.
+ *
+ * 🔴 MONEY — por qué se RECHAZA en vez de "resolver" solo:
+ * Si el origen trae descuentos de orden, cobros por servicio manuales o un canje
+ * de puntos, esos montos se calcularon sobre SU base. Al fusionar, la base cambia:
+ * un 10% sobre $200 no es el mismo dinero que un 10% sobre $500. Arrastrarlos
+ * cambiaría el cobro en silencio, y descartarlos regalaría (o cobraría de más).
+ * Se pide quitarlos primero, con el motivo explícito. Los cobros AUTOMÁTICOS por
+ * comensales se re-aplican solos en el destino, así que esos no estorban.
+ */
+export async function mergeOrders(venueId: string, targetOrderId: string, sourceOrderId: string, staffId?: string) {
+  if (targetOrderId === sourceOrderId) {
+    throw new BadRequestError('No se puede fusionar una cuenta consigo misma')
+  }
+
+  const [target, source] = await Promise.all([
+    prisma.order.findFirst({
+      where: { id: targetOrderId, venueId },
+      select: { id: true, orderNumber: true, status: true, paymentStatus: true, paidAmount: true, tableId: true },
+    }),
+    prisma.order.findFirst({
+      where: { id: sourceOrderId, venueId },
+      select: {
+        id: true,
+        orderNumber: true,
+        status: true,
+        paymentStatus: true,
+        tableId: true,
+        customerName: true,
+        items: { select: { id: true } },
+        orderDiscounts: { select: { id: true } },
+        serviceCharges: { select: { id: true, isAutomatic: true } },
+      },
+    }),
+  ])
+  if (!target) throw new NotFoundError('Cuenta destino no encontrada')
+  if (!source) throw new NotFoundError('Cuenta origen no encontrada')
+
+  for (const [order, label] of [
+    [target, 'destino'],
+    [source, 'origen'],
+  ] as const) {
+    if (['COMPLETED', 'CANCELLED', 'DELETED'].includes(order.status)) {
+      throw new BadRequestError(`La cuenta ${label} ya está cerrada`)
+    }
+    if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
+      throw new BadRequestError(`La cuenta ${label} ya tiene pagos; no se puede fusionar`)
+    }
+  }
+
+  if (source.items.length === 0) {
+    throw new BadRequestError('La cuenta origen no tiene artículos')
+  }
+  if (source.orderDiscounts.length > 0) {
+    throw new BadRequestError(
+      'Quita los descuentos (o la recompensa) de la cuenta origen antes de fusionarla: su monto se calculó sobre esa cuenta.',
+    )
+  }
+  const manualCharges = source.serviceCharges.filter(sc => !sc.isAutomatic)
+  if (manualCharges.length > 0) {
+    throw new BadRequestError('Quita los cobros por servicio de la cuenta origen antes de fusionarla.')
+  }
+
+  await prisma.$transaction(async tx => {
+    await tx.orderItem.updateMany({
+      where: { orderId: source.id },
+      data: { orderId: target.id },
+    })
+    // Los cobros automáticos del origen se van con él: el destino re-evalúa
+    // los suyos por comensales en el recálculo.
+    await tx.orderServiceCharge.deleteMany({ where: { orderId: source.id } })
+    await tx.order.update({
+      where: { id: source.id },
+      data: {
+        status: 'CANCELLED',
+        specialRequests: `Fusionada en ${target.orderNumber}`,
+        subtotal: 0,
+        discountAmount: 0,
+        serviceChargeAmount: 0,
+        total: 0,
+      },
+    })
+  })
+
+  // La mesa del origen: re-apuntar a otra cuenta abierta, o liberarla.
+  const boundTable = await prisma.table.findFirst({
+    where: { venueId, currentOrderId: source.id },
+    select: { id: true, number: true },
+  })
+  if (boundTable) {
+    const sibling = await prisma.order.findFirst({
+      where: {
+        venueId,
+        tableId: boundTable.id,
+        id: { not: source.id },
+        status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
+      },
+      select: { id: true },
+      orderBy: { createdAt: 'asc' },
+    })
+    await prisma.table.update({
+      where: { id: boundTable.id },
+      data: sibling ? { status: 'OCCUPIED', currentOrderId: sibling.id } : { status: 'AVAILABLE', currentOrderId: null },
+    })
+  }
+
+  const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
+  const totals = await recalculateOrderTotals(target.id, 0, Number(target.paidAmount || 0))
+  // El destino puede haber cruzado el mínimo de comensales al crecer.
+  const { syncAutomaticServiceCharges } = await import('./service-charge.mobile.service')
+  const afterAuto = await syncAutomaticServiceCharges(venueId, target.id)
+
+  void (await import('../dashboard/activity-log.service')).logAction({
+    action: 'ORDERS_MERGED',
+    entity: 'Order',
+    entityId: target.id,
+    staffId,
+    venueId,
+    data: { sourceOrderId: source.id, sourceOrderNumber: source.orderNumber, items: source.items.length },
+  })
+
+  return {
+    target: {
+      id: target.id,
+      orderNumber: target.orderNumber,
+      total: (afterAuto ?? totals).total,
+      version: (afterAuto ?? totals).version,
+    },
+    merged: { id: source.id, orderNumber: source.orderNumber, items: source.items.length },
+    tableFreed: Boolean(boundTable),
+  }
+}
+
 // MARK: - Cash Payment Types
 
 export interface CashPaymentInput {

@@ -1870,6 +1870,18 @@ router.post(
 )
 
 /**
+ * POST /api/v1/mobile/venues/:venueId/orders/:orderId/merge
+ * "Fusionar cuentas" (Square's merge): el inverso de dividir.
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/merge',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('TABLE_SERVICE'),
+  checkPermission('orders:update'),
+  orderMobileController.mergeOrders,
+)
+
+/**
  * POST /api/v1/mobile/venues/:venueId/orders/:orderId/split-by-seat
  * "Dividir por puesto" (Square): un cheque por asiento, atómico.
  */

@@ -340,6 +340,25 @@ export const applyOrderDiscount = async (req: Request, res: Response, next: Next
 }
 
 /**
+ * POST /mobile/venues/:venueId/orders/:orderId/merge
+ * "Fusionar cuentas": vuelca los artículos de sourceOrderId en esta cuenta.
+ */
+export const mergeOrders = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, orderId } = req.params
+    const { sourceOrderId } = req.body || {}
+    const staffId = (req as any).authContext?.userId as string | undefined
+    if (!sourceOrderId || typeof sourceOrderId !== 'string') {
+      return res.status(400).json({ success: false, message: 'sourceOrderId is required' })
+    }
+    const result = await orderMobileService.mergeOrders(venueId, orderId, sourceOrderId, staffId)
+    return res.json({ success: true, data: result })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
  * POST /mobile/venues/:venueId/orders/:orderId/split-by-seat
  * "Dividir por puesto": un cheque por asiento, en una sola transacción.
  */
