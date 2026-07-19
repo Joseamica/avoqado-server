@@ -894,13 +894,15 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
       weightQuantity: item.weightQuantity != null ? Number(item.weightQuantity) : null,
       notes: item.notes || null,
       modifiers: item.modifiers || [],
-      // TABLE_SERVICE check panel (Square-style): the POS groups sent items by
-      // course and labels each group "Enviado a la cocina a las HH:MM".
-      // In the table flow items are created exactly when the round is fired,
-      // so createdAt IS the send time — no extra column needed.
+      // TABLE_SERVICE check panel (modelo Square): el POS agrupa los enviados
+      // por RONDA — (course, sentToKitchenAt) — con encabezado repetible
+      // "tiempo · Enviado a la cocina a las HH:MM". sentToKitchenAt lo estampa
+      // addItemsToOrder en modo ronda; filas viejas (pre-cambio) lo traen null
+      // y el cliente cae a createdAt.
       course: item.course ?? null,
       seat: item.seat ?? null,
       createdAt: item.createdAt,
+      sentToKitchenAt: item.sentToKitchenAt ?? null,
       isCortesia: item.isCortesia ?? false,
       cortesiaReason: item.cortesiaReason ?? null,
     })),
@@ -1140,7 +1142,9 @@ export async function splitOrderItems(venueId: string, orderId: string, itemIds:
   // 🔴 MONEY (auditoría): mismos guards que fusionar — un descuento/canje/cargo
   // se calculó sobre la cuenta COMPLETA; partirla cambiaría la base en silencio.
   if (source.orderDiscounts.length > 0) {
-    throw new BadRequestError('Quita los descuentos (o la recompensa) antes de separar la cuenta: su monto se calculó sobre la cuenta completa.')
+    throw new BadRequestError(
+      'Quita los descuentos (o la recompensa) antes de separar la cuenta: su monto se calculó sobre la cuenta completa.',
+    )
   }
   if (source.serviceCharges.some(sc => !sc.isAutomatic)) {
     throw new BadRequestError('Quita los cobros por servicio antes de separar la cuenta.')
@@ -1445,9 +1449,7 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
       await tx.order.update({
         where: { id: target.id },
         data: {
-          specialRequests: [freshTarget.specialRequests, freshSource.specialRequests]
-            .filter(Boolean)
-            .join(' · '),
+          specialRequests: [freshTarget.specialRequests, freshSource.specialRequests].filter(Boolean).join(' · '),
         },
       })
     }

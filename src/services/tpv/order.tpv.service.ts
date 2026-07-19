@@ -1204,18 +1204,26 @@ export async function addItemsToOrder(
   items: AddOrderItemInput[],
   expectedVersion: number,
   /**
-   * 🔴 MONEY — semántica del merge cuando la línea ya existe en la orden:
-   * - false (TPV register): el cliente re-manda el CARRITO COMPLETO, así que la
-   *   cantidad entrante es el estado ABSOLUTO y se reemplaza (comportamiento
-   *   histórico intacto).
-   * - true (mesas /mobile): el cliente manda SOLO la ronda nueva (DELTA) — la
-   *   cantidad se SUMA. Sin esto, pedir una segunda Clásica se interpretaba
+   * 🔴 MONEY — semántica cuando la línea ya existe en la orden:
+   * - false (TPV register): el cliente re-manda el CARRITO COMPLETO, así que
+   *   una línea igual se FUSIONA reemplazando la cantidad (estado absoluto —
+   *   comportamiento histórico intacto).
+   * - true (mesas /mobile): el request es UNA RONDA nueva (delta). Modelo
+   *   Square verificado contra el POS real: cada Enviar crea SUS PROPIAS
+   *   filas — nunca se fusiona con lo ya enviado — y todas comparten un
+   *   sentToKitchenAt para que el panel las agrupe como "tiempo + hora de
+   *   envío" repetible. Sin esto, pedir una segunda Clásica se interpretaba
    *   como "que quede 1": la cocina la preparaba y la cuenta no la cobraba
    *   (cazado en smoke de hardware 2026-07-19).
    */
-  accumulateQuantities: boolean = false,
+  asNewRound: boolean = false,
 ): Promise<Order & { tableName: string | null }> {
   logger.info(`📝 [ORDER SERVICE] Adding ${items.length} items to order ${orderId} (expected version: ${expectedVersion})`)
+
+  // Una ronda = un timestamp de envío compartido por todas sus filas (los
+  // create corren en loop y sus createdAt difieren por ms — agrupar por
+  // createdAt partiría la ronda).
+  const roundSentAt = asNewRound ? new Date() : null
 
   const normalizedItems = normalizeAddItems(items)
   if (normalizedItems.length !== items.length) {
@@ -1575,7 +1583,7 @@ export async function addItemsToOrder(
       // Cortesía: comped lines never merge either (in EITHER direction) — a
       // merge would silently swallow the $0 line into a paid one (money bug).
       const existingItemWithModifiers =
-        weightKg != null || item.isCortesia === true
+        asNewRound || weightKg != null || item.isCortesia === true
           ? undefined
           : existingItemsWithModifiers.find(existing => {
               if (existing.isCortesia) return false
@@ -1590,8 +1598,7 @@ export async function addItemsToOrder(
 
       if (existingItemWithModifiers) {
         // ⭐ UPDATE existing item instead of creating new one
-        const updatedQuantity =
-          accumulateQuantities || item._count > 1 ? existingItemWithModifiers.quantity + item.quantity : item.quantity
+        const updatedQuantity = item._count > 1 ? existingItemWithModifiers.quantity + item.quantity : item.quantity
         const updatedTotal = lineTotalFor(updatedQuantity)
 
         logger.info(
@@ -1648,6 +1655,7 @@ export async function addItemsToOrder(
           notes: normalizedNotes,
           course: item.course ?? null,
           seat: item.seat ?? null,
+          sentToKitchenAt: roundSentAt,
           modifiers: {
             create: itemModifiers.map(modifierId => {
               const modifier = modifiers.find(m => m.id === modifierId)!
@@ -1737,10 +1745,7 @@ export async function addItemsToOrder(
   const orderServiceCharges = await prisma.orderServiceCharge.findMany({ where: { orderId } })
   let newServiceChargeAmount = 0
   for (const sc of orderServiceCharges) {
-    const scAmount =
-      sc.type === 'PERCENTAGE'
-        ? Math.round(((baseForCharges * Number(sc.value)) / 100) * 100) / 100
-        : Number(sc.amount)
+    const scAmount = sc.type === 'PERCENTAGE' ? Math.round(((baseForCharges * Number(sc.value)) / 100) * 100) / 100 : Number(sc.amount)
     if (sc.type === 'PERCENTAGE' && scAmount !== Number(sc.amount)) {
       await prisma.orderServiceCharge.update({ where: { id: sc.id }, data: { amount: scAmount } })
     }
@@ -2087,10 +2092,7 @@ export async function removeOrderItem(
   const orderServiceCharges = await prisma.orderServiceCharge.findMany({ where: { orderId } })
   let newServiceChargeAmount = 0
   for (const sc of orderServiceCharges) {
-    const scAmount =
-      sc.type === 'PERCENTAGE'
-        ? Math.round(((baseForCharges * Number(sc.value)) / 100) * 100) / 100
-        : Number(sc.amount)
+    const scAmount = sc.type === 'PERCENTAGE' ? Math.round(((baseForCharges * Number(sc.value)) / 100) * 100) / 100 : Number(sc.amount)
     if (sc.type === 'PERCENTAGE' && scAmount !== Number(sc.amount)) {
       await prisma.orderServiceCharge.update({ where: { id: sc.id }, data: { amount: scAmount } })
     }

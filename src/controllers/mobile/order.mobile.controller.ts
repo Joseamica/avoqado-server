@@ -249,7 +249,7 @@ export const addItemsToOrder = async (req: Request, res: Response, next: NextFun
       return res.status(400).json({ success: false, message: 'version (número) es requerida para concurrencia optimista' })
     }
 
-    // Mesas mandan DELTAS (solo la ronda nueva): las cantidades se ACUMULAN.
+    // Mesas mandan RONDAS (deltas): cada Enviar crea sus propias filas (modelo Square).
     const updatedOrder = await orderTpvService.addItemsToOrder(venueId, orderId, items, version, true)
 
     // Cobros automáticos por comensales: al crecer el subtotal la regla puede
