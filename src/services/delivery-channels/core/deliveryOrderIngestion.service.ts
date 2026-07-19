@@ -86,6 +86,24 @@ export async function ingestDeliveryOrder(
   const venue = await prisma.venue.findUnique({ where: { id: link.venueId } })
   if (!venue) throw new Error(`Venue ${link.venueId} del channel link no existe`)
 
+  // Fix C4 (audit, MONEY, spec §10.1.2): Deliverect manda `payment.amount` (mapeado a
+  // normalized.total) para pedidos PAGADOS Y NO pagados — `orderIsAlreadyPaid` es lo
+  // único que distingue. Antes: SIEMPRE se creaba un Payment COMPLETED → un pedido
+  // no-pagado se volvía ingreso liquidado ficticio. Doc:
+  // https://developers.deliverect.com/page/glossary-pos-orders
+  //
+  // Se lee directo de `normalized.raw` (el payload completo del proveedor) en vez de un
+  // campo tipado nuevo en NormalizedDeliveryOrder/core/types.ts — ese archivo está fuera
+  // del scope de este fix (dueño único: deliverect.hmac/client/mapper.ts,
+  // deliveryOrderIngestion.service.ts, deliverect.webhook.controller.ts).
+  //
+  // Conservador: SOLO `=== true` cuenta como pagado — ausente/false/cualquier otro valor
+  // NUNCA crea un Payment (nunca ingreso fantasma por default).
+  // REVALIDAR EN STAGING: representación exacta del pedido no-pagado (status/amountDue) —
+  // hoy solo se deja paymentStatus PENDING sin Payment/PaymentAllocation; paidAmount y
+  // remainingBalance quedan en su default de schema (0/0).
+  const orderIsAlreadyPaid = (normalized.raw as any)?.orderIsAlreadyPaid === true
+
   const existing = await prisma.order.findUnique({
     where: { venueId_externalId: { venueId: venue.id, externalId: normalized.externalId } },
   })
@@ -101,13 +119,18 @@ export async function ingestDeliveryOrder(
         source: normalized.source,
         originSystem: OriginSystem.DELIVERY_PLATFORM,
         type: OrderType.DELIVERY,
-        status: 'CONFIRMED', // AUTO-accept: entra confirmada directo a cocina
+        status: 'CONFIRMED', // AUTO-accept: entra confirmada directo a cocina (independiente del dinero)
         kitchenStatus: 'PENDING',
-        paymentStatus: 'PAID',
+        paymentStatus: orderIsAlreadyPaid ? 'PAID' : 'PENDING',
         subtotal: new Prisma.Decimal(normalized.subtotal),
         taxAmount: new Prisma.Decimal(normalized.taxAmount),
         discountAmount: new Prisma.Decimal(normalized.discountAmount),
         tipAmount: new Prisma.Decimal(normalized.tipAmount),
+        // Fix C4 (audit, spec §10.1.5): se normalizaban en el mapper pero nunca se
+        // persistían — el `total` los incluye pero los campos quedaban en 0 (pedido
+        // internamente inconsistente + reporte/fiscal mal).
+        serviceChargeAmount: new Prisma.Decimal(normalized.serviceChargeAmount),
+        deliveryFeeAmount: new Prisma.Decimal(normalized.deliveryFeeAmount),
         total: new Prisma.Decimal(normalized.total),
         posRawData: normalized.raw as Prisma.InputJsonValue,
         createdAt: normalized.placedAt,
@@ -131,8 +154,12 @@ export async function ingestDeliveryOrder(
         const productId = await resolveProductId(tx, venue.id, sku, item.name, item.unitPrice)
         // Modifiers: monto en total + nombres en notes (v1). Resolución a OrderItemModifier rows con PLUs MOD-* = fase staging.
         // El total de línea DEBE incluir sus modifiers para que sum(OrderItem.total) == Order.subtotal (conciliación al centavo).
+        // Fix C4 (audit, MONEY, spec §10.1.4): el modifier se multiplica por la cantidad
+        // del item PADRE — Deliverect define cantidad_modificador × cantidad_producto (2
+        // tacos con 1 "extra queso" c/u = 2× el monto del modifier, no 1×). Doc:
+        // https://developers.deliverect.com/docs/how-to-interpret-modifiers-and-the-quantity-ordered
         const lineTotal = item.modifiers.reduce(
-          (acc, m) => acc.add(new Prisma.Decimal(m.unitPrice).mul(m.quantity)),
+          (acc, m) => acc.add(new Prisma.Decimal(m.unitPrice).mul(m.quantity).mul(item.quantity)),
           new Prisma.Decimal(item.unitPrice).mul(item.quantity),
         )
         const modifierNotes = item.modifiers.map(m => `+ ${m.quantity}x ${m.name}`)
@@ -153,33 +180,39 @@ export async function ingestDeliveryOrder(
         })
       }
 
-      const existingPayments = await tx.payment.count({ where: { orderId: order.id } })
-      if (existingPayments === 0) {
-        const payment = await tx.payment.create({
-          data: {
-            amount: new Prisma.Decimal(normalized.total),
-            tipAmount: new Prisma.Decimal(normalized.tipAmount),
-            method: PaymentMethod.OTHER,
-            source: PaymentSource.DELIVERY_PLATFORM,
-            externalSource: normalized.source, // 'UBER_EATS' | 'RAPPI' | ...
-            status: TransactionStatus.COMPLETED,
-            splitType: SplitType.FULLPAYMENT,
-            processor: link.provider.toLowerCase(),
-            // Avoqado NO procesó este dinero: fee 0, neto = monto. La comisión de la
-            // plataforma es entre restaurante y plataforma (fuera de Avoqado).
-            feePercentage: new Prisma.Decimal(0),
-            feeAmount: new Prisma.Decimal(0),
-            netAmount: new Prisma.Decimal(normalized.total),
-            originSystem: OriginSystem.DELIVERY_PLATFORM,
-            externalId: `${normalized.externalId}-platform`,
-            posRawData: normalized.raw as Prisma.InputJsonValue,
-            venue: { connect: { id: venue.id } },
-            order: { connect: { id: order.id } },
-          },
-        })
-        await tx.paymentAllocation.create({
-          data: { amount: payment.amount, payment: { connect: { id: payment.id } }, order: { connect: { id: order.id } } },
-        })
+      // Fix C4 (audit, spec §10.1.2): SOLO crear el Payment externo si el proveedor
+      // confirmó que el pedido YA está pagado — ver `orderIsAlreadyPaid` arriba. Un
+      // pedido no-pagado queda con items + Order PENDING pero SIN Payment/PaymentAllocation
+      // (nunca ingreso liquidado ficticio).
+      if (orderIsAlreadyPaid) {
+        const existingPayments = await tx.payment.count({ where: { orderId: order.id } })
+        if (existingPayments === 0) {
+          const payment = await tx.payment.create({
+            data: {
+              amount: new Prisma.Decimal(normalized.total),
+              tipAmount: new Prisma.Decimal(normalized.tipAmount),
+              method: PaymentMethod.OTHER,
+              source: PaymentSource.DELIVERY_PLATFORM,
+              externalSource: normalized.source, // 'UBER_EATS' | 'RAPPI' | ...
+              status: TransactionStatus.COMPLETED,
+              splitType: SplitType.FULLPAYMENT,
+              processor: link.provider.toLowerCase(),
+              // Avoqado NO procesó este dinero: fee 0, neto = monto. La comisión de la
+              // plataforma es entre restaurante y plataforma (fuera de Avoqado).
+              feePercentage: new Prisma.Decimal(0),
+              feeAmount: new Prisma.Decimal(0),
+              netAmount: new Prisma.Decimal(normalized.total),
+              originSystem: OriginSystem.DELIVERY_PLATFORM,
+              externalId: `${normalized.externalId}-platform`,
+              posRawData: normalized.raw as Prisma.InputJsonValue,
+              venue: { connect: { id: venue.id } },
+              order: { connect: { id: order.id } },
+            },
+          })
+          await tx.paymentAllocation.create({
+            data: { amount: payment.amount, payment: { connect: { id: payment.id } }, order: { connect: { id: order.id } } },
+          })
+        }
       }
     }
     return order
@@ -201,12 +234,13 @@ export async function ingestDeliveryOrder(
     logger.error('[❌ DeliveryIngest] Socket emit falló (no fatal)', { orderId: order.id, error })
   }
 
-  // Modo AUTO: el pedido ya entró CONFIRMED (línea ~102) — le avisamos al canal que lo
-  // aceptamos. Solo en la primera ingesta (isNew): una actualización de un pedido ya
-  // aceptado jamás debe re-disparar el accept. Doble defensa: dispatchOrderStatus YA traga
-  // sus propios errores (statusDispatcher.service.ts), pero este try/catch + .catch()
-  // asegura que NADA de esta llamada (ni siquiera un throw síncrono al invocarla) tumbe la
-  // ingesta — el pedido ya está persistido y pagado, eso jamás se revierte por un fallo aquí.
+  // Modo AUTO: el pedido ya entró CONFIRMED (arriba, status del create) — le avisamos al
+  // canal que lo aceptamos. Solo en la primera ingesta (isNew): una actualización de un
+  // pedido ya aceptado jamás debe re-disparar el accept. Doble defensa: dispatchOrderStatus
+  // YA traga sus propios errores (statusDispatcher.service.ts), pero este try/catch +
+  // .catch() asegura que NADA de esta llamada (ni siquiera un throw síncrono al invocarla)
+  // tumbe la ingesta — el pedido ya está persistido (Fix C4: pagado SOLO si
+  // orderIsAlreadyPaid), eso jamás se revierte por un fallo aquí.
   if (isNew && link.orderAcceptanceMode === OrderAcceptanceMode.AUTO) {
     try {
       void dispatchOrderStatus(order, 'ACCEPTED').catch(error => {
