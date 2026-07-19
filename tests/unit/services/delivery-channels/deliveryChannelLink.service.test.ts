@@ -8,7 +8,7 @@
 import prisma from '../../../../src/utils/prismaClient'
 import { logAction } from '../../../../src/services/dashboard/activity-log.service'
 import { getAdapter } from '../../../../src/services/delivery-channels/core/statusDispatcher.service'
-import { ConflictError, NotFoundError } from '../../../../src/errors/AppError'
+import { ConflictError, NotFoundError, ValidationError } from '../../../../src/errors/AppError'
 import { DeliveryChannelStatus, DeliveryProvider, OrderAcceptanceMode } from '@prisma/client'
 import {
   listChannelLinks,
@@ -240,7 +240,7 @@ describe('deliveryChannelLink.service', () => {
       })
     })
 
-    it('paused=false actualiza status a ACTIVE', async () => {
+    it('paused=false actualiza status a ACTIVE — Fix B4: el where del updateMany ahora exige status:PAUSED (gate atómico, no check-then-update)', async () => {
       ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
       ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue(baseLink)
       ;(getAdapter as jest.Mock).mockReturnValue({ setChannelPaused: jest.fn().mockResolvedValue(undefined) })
@@ -248,9 +248,52 @@ describe('deliveryChannelLink.service', () => {
       await pauseChannelLink('venue1', 'link1', false)
 
       expect(prisma.deliveryChannelLink.updateMany).toHaveBeenCalledWith({
-        where: { id: 'link1', venueId: 'venue1' },
+        where: { id: 'link1', venueId: 'venue1', status: DeliveryChannelStatus.PAUSED },
         data: { status: DeliveryChannelStatus.ACTIVE },
       })
+    })
+
+    // ============================================================
+    // Fix B4 (spec §10.2): un-pausar solo permitido desde PAUSED — un link
+    // PENDING (nunca confirmado por el proveedor) o DISABLED saltando directo
+    // a ACTIVE se brinca el lifecycle de confirmación del proveedor.
+    // ============================================================
+    it('Fix B4: un-pausar (false) un canal PENDING lanza ValidationError, NO lo activa', async () => {
+      ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({ ...baseLink, status: DeliveryChannelStatus.PENDING })
+
+      await expect(pauseChannelLink('venue1', 'link1', false)).rejects.toThrow(ValidationError)
+
+      expect(prisma.deliveryChannelLink.findFirst).toHaveBeenCalledWith({
+        where: { id: 'link1', venueId: 'venue1' },
+        select: { status: true },
+      })
+      expect(getAdapter).not.toHaveBeenCalled()
+      expect(logAction).not.toHaveBeenCalled()
+    })
+
+    it('Fix B4: un-pausar (false) un canal DISABLED lanza ValidationError, NO lo activa', async () => {
+      ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({ ...baseLink, status: DeliveryChannelStatus.DISABLED })
+
+      await expect(pauseChannelLink('venue1', 'link1', false)).rejects.toThrow(ValidationError)
+
+      expect(getAdapter).not.toHaveBeenCalled()
+      expect(logAction).not.toHaveBeenCalled()
+    })
+
+    it('REGRESIÓN Fix B4: pausar (paused:true) sigue SIN gate — permitido desde CUALQUIER estado (PENDING incluido), where sin filtro de status', async () => {
+      ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+      ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue({ ...baseLink, status: DeliveryChannelStatus.PAUSED })
+      ;(getAdapter as jest.Mock).mockReturnValue({ setChannelPaused: jest.fn().mockResolvedValue(undefined) })
+
+      await pauseChannelLink('venue1', 'link1', true)
+
+      expect(prisma.deliveryChannelLink.updateMany).toHaveBeenCalledWith({
+        where: { id: 'link1', venueId: 'venue1' },
+        data: { status: DeliveryChannelStatus.PAUSED },
+      })
+      expect(prisma.deliveryChannelLink.findFirst).not.toHaveBeenCalled()
     })
 
     it('REGRESIÓN tenant isolation: link de OTRO venue → NotFoundError (no pausa, no llama adapter)', async () => {
@@ -258,6 +301,20 @@ describe('deliveryChannelLink.service', () => {
 
       await expect(pauseChannelLink('venue-otro', 'link1', true)).rejects.toThrow(NotFoundError)
 
+      expect(getAdapter).not.toHaveBeenCalled()
+      expect(logAction).not.toHaveBeenCalled()
+    })
+
+    it('REGRESIÓN tenant isolation (Fix B4, un-pause): link de OTRO venue → NotFoundError, nunca ValidationError (el fallback findFirst también filtra por venueId)', async () => {
+      ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue(null) // otro venue → no matchea
+
+      await expect(pauseChannelLink('venue-otro', 'link1', false)).rejects.toThrow(NotFoundError)
+
+      expect(prisma.deliveryChannelLink.findFirst).toHaveBeenCalledWith({
+        where: { id: 'link1', venueId: 'venue-otro' },
+        select: { status: true },
+      })
       expect(getAdapter).not.toHaveBeenCalled()
       expect(logAction).not.toHaveBeenCalled()
     })

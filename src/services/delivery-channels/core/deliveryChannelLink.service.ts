@@ -20,7 +20,7 @@ import crypto from 'crypto'
 import { DeliveryChannelLink, DeliveryChannelStatus, DeliveryProvider, OrderAcceptanceMode, Prisma } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
 import logger from '../../../config/logger'
-import { ConflictError, NotFoundError } from '../../../errors/AppError'
+import { ConflictError, NotFoundError, ValidationError } from '../../../errors/AppError'
 import { logAction } from '../../dashboard/activity-log.service'
 import { getAdapter } from './statusDispatcher.service'
 
@@ -166,6 +166,16 @@ export async function updateChannelLink(
  * Tenant isolation igual que update. Tras confirmar la mutación, notifica al proveedor
  * (`getAdapter(provider).setChannelPaused`) best-effort — un fallo de red/proveedor
  * NUNCA revierte ni bloquea el cambio de status interno, solo se loguea.
+ *
+ * Fix B4 (audit §10.2): un-pausar (paused:false → ACTIVE) SOLO se permite desde un
+ * link ya conectado-pero-pausado (PAUSED) — un link PENDING (nunca confirmado por el
+ * proveedor) o DISABLED saltando directo a ACTIVE se brincaría el lifecycle de
+ * confirmación del proveedor; este endpoint no es el paso de "confirmar conexión".
+ * Pausar (→PAUSED) NO tiene esta restricción — cualquier estado puede pausarse, sin
+ * cambio de comportamiento. El gate vive en el WHERE del updateMany (filtro atómico,
+ * evita una carrera entre leer el status y mutar); si el count sale 0 por el gate (no
+ * por tenant), un segundo lookup da el mensaje de validación correcto en vez de un
+ * 404 genérico.
  */
 export async function pauseChannelLink(
   venueId: string,
@@ -176,11 +186,23 @@ export async function pauseChannelLink(
   const newStatus = paused ? DeliveryChannelStatus.PAUSED : DeliveryChannelStatus.ACTIVE
 
   const result = await prisma.deliveryChannelLink.updateMany({
-    where: { id: linkId, venueId },
+    where: {
+      id: linkId,
+      venueId,
+      ...(paused ? {} : { status: DeliveryChannelStatus.PAUSED }),
+    },
     data: { status: newStatus },
   })
 
   if (result.count === 0) {
+    if (!paused) {
+      const current = await prisma.deliveryChannelLink.findFirst({ where: { id: linkId, venueId }, select: { status: true } })
+      if (current) {
+        throw new ValidationError(
+          `No se puede reactivar un canal en estado ${current.status}. Solo un canal en estado PAUSED puede reactivarse.`,
+        )
+      }
+    }
     throw new NotFoundError('Canal de delivery no encontrado')
   }
 
