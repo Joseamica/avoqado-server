@@ -105,7 +105,7 @@ export async function redeemPointsToOrder(
 
   const order = await prisma.order.findFirst({
     where: { id: orderId, venueId },
-    select: { id: true, total: true, paymentStatus: true, paidAmount: true },
+    select: { id: true, total: true, subtotal: true, discountAmount: true, paymentStatus: true, paidAmount: true },
   })
   if (!order) throw new NotFoundError('Orden no encontrada')
   if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
@@ -129,9 +129,11 @@ export async function redeemPointsToOrder(
 
   const redemptionRate = Number(config.redemptionRate)
   const rawValue = money(points * redemptionRate)
-  // Never discount more than the check is worth — the surplus stays as points.
-  const orderTotal = Number(order.total)
-  const discountAmount = money(Math.min(rawValue, orderTotal))
+  // 🔴 Tope contra la BASE (subtotal − descuentos), NO contra total: el total
+  // incluye cobros por servicio que el descuento no puede compensar — topar
+  // contra total quemaría puntos sin bajar la cuenta (auditoría 2026-07-18).
+  const redeemableBase = Math.max(0, Number(order.subtotal) - Number(order.discountAmount || 0))
+  const discountAmount = money(Math.min(rawValue, redeemableBase))
   if (discountAmount <= 0) {
     throw new BadRequestError('El canje no genera descuento sobre esta cuenta')
   }
@@ -153,10 +155,16 @@ export async function redeemPointsToOrder(
       },
     })
 
-    await tx.customer.update({
-      where: { id: customerId },
+    // 🔴 Carrera de doble canje: el guard de saldo corre antes de la tx, así
+    // que el decremento debe ser CONDICIONAL — dos canjes concurrentes no
+    // pueden quemar los mismos puntos (auditoría 2026-07-18).
+    const burned = await tx.customer.updateMany({
+      where: { id: customerId, loyaltyPoints: { gte: pointsToBurn } },
       data: { loyaltyPoints: { decrement: pointsToBurn } },
     })
+    if (burned.count === 0) {
+      throw new BadRequestError('Puntos insuficientes (otro canje se procesó al mismo tiempo)')
+    }
 
     await tx.orderDiscount.create({
       data: {

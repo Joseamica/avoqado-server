@@ -1687,11 +1687,14 @@ export async function addItemsToOrder(
 
   let newDiscountAmount = 0
   for (const orderDiscount of orderDiscounts) {
-    // Check if this is a percentage discount (from discount relation or type field)
-    const discountType = orderDiscount.discount?.type || orderDiscount.type
-    const discountValue = Number(orderDiscount.discount?.value || orderDiscount.value || 0)
+    // 🔴 MONEY (auditoría 2026-07-18): filas con appliedToItemIds son descuentos
+    // POR ARTÍCULO — su % NO se re-deriva sobre el subtotal completo. Y el valor
+    // es el DENORMALIZADO de la fila, no el del catálogo vivo.
+    const isItemScoped = ((orderDiscount as any).appliedToItemIds?.length ?? 0) > 0
+    const discountType = orderDiscount.type
+    const discountValue = Number(orderDiscount.value || 0)
 
-    if (discountType === 'PERCENTAGE' && discountValue > 0) {
+    if (!isItemScoped && discountType === 'PERCENTAGE' && discountValue > 0) {
       // Recalculate percentage based on NEW subtotal
       const recalculatedAmount = (newSubtotal * discountValue) / 100
       const roundedAmount = Math.round(recalculatedAmount * 100) / 100
@@ -1716,7 +1719,24 @@ export async function addItemsToOrder(
     newDiscountAmount = Number(order.discountAmount)
   }
 
-  const newTotal = newSubtotal - newDiscountAmount
+  // Cobros por servicio (auditoría 2026-07-18): agregar una ronda NO debe tirar
+  // el cargo del total. Base = subtotal − descuentos; los % se re-calculan.
+  const baseForCharges = Math.max(0, newSubtotal - newDiscountAmount)
+  const orderServiceCharges = await prisma.orderServiceCharge.findMany({ where: { orderId } })
+  let newServiceChargeAmount = 0
+  for (const sc of orderServiceCharges) {
+    const scAmount =
+      sc.type === 'PERCENTAGE'
+        ? Math.round(((baseForCharges * Number(sc.value)) / 100) * 100) / 100
+        : Number(sc.amount)
+    if (sc.type === 'PERCENTAGE' && scAmount !== Number(sc.amount)) {
+      await prisma.orderServiceCharge.update({ where: { id: sc.id }, data: { amount: scAmount } })
+    }
+    newServiceChargeAmount += scAmount
+  }
+  newServiceChargeAmount = Math.round(newServiceChargeAmount * 100) / 100
+
+  const newTotal = Math.round((baseForCharges + newServiceChargeAmount) * 100) / 100
 
   // Calculate remaining balance (for partial payment tracking)
   const currentPaidAmount = Number(order.paidAmount || 0)
@@ -1730,6 +1750,7 @@ export async function addItemsToOrder(
     data: {
       subtotal: newSubtotal,
       discountAmount: newDiscountAmount,
+      serviceChargeAmount: newServiceChargeAmount,
       total: newTotal,
       remainingBalance: newRemainingBalance,
       version: {
@@ -2016,11 +2037,14 @@ export async function removeOrderItem(
 
   let newDiscountAmount = 0
   for (const orderDiscount of orderDiscounts) {
-    // Check if this is a percentage discount (from discount relation or type field)
-    const discountType = orderDiscount.discount?.type || orderDiscount.type
-    const discountValue = Number(orderDiscount.discount?.value || orderDiscount.value || 0)
+    // 🔴 MONEY (auditoría 2026-07-18): filas con appliedToItemIds son descuentos
+    // POR ARTÍCULO — su % NO se re-deriva sobre el subtotal completo. Y el valor
+    // es el DENORMALIZADO de la fila, no el del catálogo vivo.
+    const isItemScoped = ((orderDiscount as any).appliedToItemIds?.length ?? 0) > 0
+    const discountType = orderDiscount.type
+    const discountValue = Number(orderDiscount.value || 0)
 
-    if (discountType === 'PERCENTAGE' && discountValue > 0) {
+    if (!isItemScoped && discountType === 'PERCENTAGE' && discountValue > 0) {
       // Recalculate percentage based on NEW subtotal
       const recalculatedAmount = (newSubtotal * discountValue) / 100
       const roundedAmount = Math.round(recalculatedAmount * 100) / 100
@@ -2045,7 +2069,24 @@ export async function removeOrderItem(
     newDiscountAmount = Number(order.discountAmount)
   }
 
-  const newTotal = newSubtotal - newDiscountAmount
+  // Cobros por servicio (auditoría 2026-07-18): agregar una ronda NO debe tirar
+  // el cargo del total. Base = subtotal − descuentos; los % se re-calculan.
+  const baseForCharges = Math.max(0, newSubtotal - newDiscountAmount)
+  const orderServiceCharges = await prisma.orderServiceCharge.findMany({ where: { orderId } })
+  let newServiceChargeAmount = 0
+  for (const sc of orderServiceCharges) {
+    const scAmount =
+      sc.type === 'PERCENTAGE'
+        ? Math.round(((baseForCharges * Number(sc.value)) / 100) * 100) / 100
+        : Number(sc.amount)
+    if (sc.type === 'PERCENTAGE' && scAmount !== Number(sc.amount)) {
+      await prisma.orderServiceCharge.update({ where: { id: sc.id }, data: { amount: scAmount } })
+    }
+    newServiceChargeAmount += scAmount
+  }
+  newServiceChargeAmount = Math.round(newServiceChargeAmount * 100) / 100
+
+  const newTotal = Math.round((baseForCharges + newServiceChargeAmount) * 100) / 100
 
   // Calculate remaining balance (for partial payment tracking)
   const currentPaidAmount = Number(order.paidAmount || 0)

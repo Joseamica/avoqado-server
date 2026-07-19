@@ -13,6 +13,7 @@
  * comping after payment would silently change what was already charged.
  */
 
+import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
@@ -133,22 +134,32 @@ export async function compWholeOrder(params: { venueId: string; orderId: string;
  * 0) and re-derives percentage discounts, mirroring addItemsToOrder's recalc so
  * both paths agree on the order's money.
  */
-export async function recalculateOrderTotals(orderId: string, fallbackDiscount: number, paidAmount: number) {
-  const items = await prisma.orderItem.findMany({ where: { orderId }, select: { total: true } })
+export async function recalculateOrderTotals(
+  orderId: string,
+  fallbackDiscount: number,
+  paidAmount: number,
+  // Los mutadores atómicos (split/merge/quitar descuento) pasan su tx para que
+  // la mutación y el recálculo caigan o persistan JUNTOS (auditoría 2026-07-18).
+  db: Prisma.TransactionClient | typeof prisma = prisma,
+) {
+  const items = await db.orderItem.findMany({ where: { orderId }, select: { total: true } })
   const newSubtotal = items.reduce((sum, i) => sum + Number(i.total), 0)
 
-  const orderDiscounts = await prisma.orderDiscount.findMany({
-    where: { orderId },
-    include: { discount: true },
-  })
+  const orderDiscounts = await db.orderDiscount.findMany({ where: { orderId } })
 
   let newDiscountAmount = 0
   for (const od of orderDiscounts) {
-    const type = od.discount?.type || od.type
-    const value = Number(od.discount?.value || od.value || 0)
-    if (type === 'PERCENTAGE' && value > 0) {
+    // 🔴 MONEY (auditoría): las filas con appliedToItemIds son descuentos POR
+    // ARTÍCULO — re-derivar su % sobre el subtotal COMPLETO multiplica el
+    // descuento (50% de un item de $100 en una cuenta de $1000 = $500). Su
+    // amount ya está calculado sobre sus items: se respeta tal cual.
+    // Y siempre el valor DENORMALIZADO de la fila: editar el catálogo no debe
+    // cambiar retroactivamente montos ya aplicados.
+    const isItemScoped = (od.appliedToItemIds?.length ?? 0) > 0
+    const value = Number(od.value || 0)
+    if (!isItemScoped && od.type === 'PERCENTAGE' && value > 0) {
       const amount = Math.round(((newSubtotal * value) / 100) * 100) / 100
-      await prisma.orderDiscount.update({ where: { id: od.id }, data: { amount } })
+      await db.orderDiscount.update({ where: { id: od.id }, data: { amount } })
       newDiscountAmount += amount
     } else {
       newDiscountAmount += Number(od.amount)
@@ -161,7 +172,7 @@ export async function recalculateOrderTotals(orderId: string, fallbackDiscount: 
   // Cobros por servicio: se calculan sobre la base YA descontada (lo que Square
   // hace) y SUMAN al total — es ingreso gravable del negocio, no propina.
   const base = Math.max(0, newSubtotal - newDiscountAmount)
-  const serviceCharges = await prisma.orderServiceCharge.findMany({ where: { orderId } })
+  const serviceCharges = await db.orderServiceCharge.findMany({ where: { orderId } })
   let newServiceChargeAmount = 0
   for (const sc of serviceCharges) {
     const amount =
@@ -170,7 +181,7 @@ export async function recalculateOrderTotals(orderId: string, fallbackDiscount: 
         : Number(sc.amount)
     // Un % se re-calcula cuando cambia la cuenta; un monto fijo se respeta.
     if (sc.type === 'PERCENTAGE' && amount !== Number(sc.amount)) {
-      await prisma.orderServiceCharge.update({ where: { id: sc.id }, data: { amount } })
+      await db.orderServiceCharge.update({ where: { id: sc.id }, data: { amount } })
     }
     newServiceChargeAmount += amount
   }
@@ -180,7 +191,7 @@ export async function recalculateOrderTotals(orderId: string, fallbackDiscount: 
   // than the subtotal (catalog discount or loyalty redemption on a shrinking
   // check) would otherwise store a negative total and corrupt the corte.
   const newTotal = Math.round((base + newServiceChargeAmount) * 100) / 100
-  const updated = await prisma.order.update({
+  const updated = await db.order.update({
     where: { id: orderId },
     data: {
       subtotal: newSubtotal,

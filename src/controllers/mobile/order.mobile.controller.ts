@@ -251,6 +251,15 @@ export const addItemsToOrder = async (req: Request, res: Response, next: NextFun
 
     const updatedOrder = await orderTpvService.addItemsToOrder(venueId, orderId, items, version)
 
+    // Cobros automáticos por comensales: al crecer el subtotal la regla puede
+    // empezar a aplicar (el recompute del TPV ya refresca los % existentes).
+    try {
+      const { syncAutomaticServiceCharges } = await import('../../services/mobile/service-charge.mobile.service')
+      await syncAutomaticServiceCharges(venueId, orderId)
+    } catch {
+      // no-fatal: el cargo se aplicará en el siguiente recálculo
+    }
+
     return res.status(200).json({
       success: true,
       data: updatedOrder,

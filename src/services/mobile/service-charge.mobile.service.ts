@@ -93,19 +93,27 @@ export async function applyServiceCharge(venueId: string, orderId: string, servi
   const base = Math.max(0, Number(order.subtotal) - Number(order.discountAmount))
   const amount = computeAmount(charge.type, Number(charge.value), base)
 
-  await prisma.orderServiceCharge.create({
-    data: {
-      orderId,
-      serviceChargeId: charge.id,
-      name: charge.name,
-      type: charge.type,
-      value: charge.value,
-      amount: new Prisma.Decimal(amount),
-      taxable: charge.taxable,
-      isAutomatic: false,
-      appliedById: await resolveStaffVenueId(venueId, staffId),
-    },
-  })
+  try {
+    await prisma.orderServiceCharge.create({
+      data: {
+        orderId,
+        serviceChargeId: charge.id,
+        name: charge.name,
+        type: charge.type,
+        value: charge.value,
+        amount: new Prisma.Decimal(amount),
+        taxable: charge.taxable,
+        isAutomatic: false,
+        appliedById: await resolveStaffVenueId(venueId, staffId),
+      },
+    })
+  } catch (err) {
+    // Unique (orderId, serviceChargeId): dos requests concurrentes no duplican.
+    if ((err as { code?: string }).code === 'P2002') {
+      throw new BadRequestError('Ese cobro ya está aplicado a la cuenta')
+    }
+    throw err
+  }
 
   const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
   const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0))
@@ -176,19 +184,24 @@ export async function syncAutomaticServiceCharges(venueId: string, orderId: stri
     const qualifies = covers >= min
 
     if (qualifies && !existing) {
-      await prisma.orderServiceCharge.create({
-        data: {
-          orderId,
-          serviceChargeId: rule.id,
-          name: rule.name,
-          type: rule.type,
-          value: rule.value,
-          amount: new Prisma.Decimal(computeAmount(rule.type, Number(rule.value), base)),
-          taxable: rule.taxable,
-          isAutomatic: true,
-        },
-      })
-      changed = true
+      try {
+        await prisma.orderServiceCharge.create({
+          data: {
+            orderId,
+            serviceChargeId: rule.id,
+            name: rule.name,
+            type: rule.type,
+            value: rule.value,
+            amount: new Prisma.Decimal(computeAmount(rule.type, Number(rule.value), base)),
+            taxable: rule.taxable,
+            isAutomatic: true,
+          },
+        })
+        changed = true
+      } catch (err) {
+        // Unique (orderId, serviceChargeId): un sync concurrente ya lo aplicó.
+        if ((err as { code?: string }).code !== 'P2002') throw err
+      }
     } else if (!qualifies && existing?.isAutomatic) {
       // Bajaron los comensales: el cargo automático deja de corresponder.
       await prisma.orderServiceCharge.delete({ where: { id: existing.id } })

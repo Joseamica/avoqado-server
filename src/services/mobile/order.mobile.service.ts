@@ -178,7 +178,9 @@ export interface OrderDetailResponse {
   discounts: Array<{ id: string; name: string; amount: number }>
   /** Cobros por servicio aplicados — SUMAN al total (ingreso gravable). */
   serviceChargeAmount: number
-  serviceCharges: Array<{ id: string; name: string; amount: number; isAutomatic: boolean }>
+  serviceCharges: Array<{ id: string; serviceChargeId: string | null; name: string; amount: number; isAutomatic: boolean }>
+  /** Optimistic concurrency del add-round: el POS refresca su sesión con esto. */
+  version: number
   createdAt: Date
   items: Array<{
     id: string
@@ -871,10 +873,14 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
     serviceChargeAmount: Number(flattenedOrder.serviceChargeAmount ?? 0),
     serviceCharges: (flattenedOrder.serviceCharges || []).map((sc: any) => ({
       id: sc.id,
+      serviceChargeId: sc.serviceChargeId ?? null,
       name: sc.name,
       amount: Number(sc.amount),
       isAutomatic: sc.isAutomatic,
     })),
+    // Cada mutación del panel incrementa Order.version: exponerla deja al POS
+    // refrescar su sesión y evita el 409 fantasma al Enviar (auditoría).
+    version: flattenedOrder.version,
     createdAt: flattenedOrder.createdAt,
     items: flattenedOrder.items.map((item: any) => ({
       id: item.id,
@@ -1074,14 +1080,13 @@ export async function removeOrderDiscount(venueId: string, orderId: string, orde
   // points BACK when it is removed — otherwise the customer paid with points
   // for a discount that no longer exists. Both moves share one transaction.
   const { refundLoyaltyForOrderDiscount } = await import('./loyalty.mobile.service')
-  const refund = await prisma.$transaction(async tx => {
+  const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
+  const { refund, totals } = await prisma.$transaction(async tx => {
     const refunded = await refundLoyaltyForOrderDiscount(tx, venueId, row, staffId)
     await tx.orderDiscount.delete({ where: { id: row.id } })
-    return refunded
+    const t = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
+    return { refund: refunded, totals: t }
   })
-
-  const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
-  const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0))
 
   void (await import('../dashboard/activity-log.service')).logAction({
     action: 'ORDER_DISCOUNT_REMOVED',
@@ -1121,6 +1126,8 @@ export async function splitOrderItems(venueId: string, orderId: string, itemIds:
       type: true,
       paidAmount: true,
       items: { select: { id: true } },
+      orderDiscounts: { select: { id: true } },
+      serviceCharges: { select: { id: true, isAutomatic: true } },
     },
   })
   if (!source) throw new NotFoundError('Order not found')
@@ -1130,6 +1137,14 @@ export async function splitOrderItems(venueId: string, orderId: string, itemIds:
   if (source.paymentStatus === 'PAID' || source.paymentStatus === 'PARTIAL') {
     throw new BadRequestError('No se puede separar una cuenta ya pagada')
   }
+  // 🔴 MONEY (auditoría): mismos guards que fusionar — un descuento/canje/cargo
+  // se calculó sobre la cuenta COMPLETA; partirla cambiaría la base en silencio.
+  if (source.orderDiscounts.length > 0) {
+    throw new BadRequestError('Quita los descuentos (o la recompensa) antes de separar la cuenta: su monto se calculó sobre la cuenta completa.')
+  }
+  if (source.serviceCharges.some(sc => !sc.isAutomatic)) {
+    throw new BadRequestError('Quita los cobros por servicio antes de separar la cuenta.')
+  }
 
   const sourceItemIds = new Set(source.items.map(i => i.id))
   const toMove = itemIds.filter(id => sourceItemIds.has(id))
@@ -1138,34 +1153,39 @@ export async function splitOrderItems(venueId: string, orderId: string, itemIds:
     throw new BadRequestError('Debe quedar al menos un artículo en la cuenta original')
   }
 
-  const newOrder = await prisma.order.create({
-    data: {
-      venueId,
-      tableId: source.tableId,
-      covers: source.covers,
-      orderNumber: `ORD-${Date.now()}`,
-      servedById: source.servedById,
-      type: source.type,
-      status: 'PENDING',
-      paymentStatus: 'PENDING',
-      kitchenStatus: 'PENDING',
-      subtotal: 0,
-      discountAmount: 0,
-      taxAmount: 0,
-      total: 0,
-      version: 1,
-    },
-    select: { id: true, orderNumber: true, version: true },
-  })
-
-  await prisma.orderItem.updateMany({
-    where: { id: { in: toMove }, orderId: source.id },
-    data: { orderId: newOrder.id },
-  })
-
+  // 🔴 Atómico (auditoría): crear + mover + AMBOS recálculos en UNA transacción.
+  // Un crash a medias dejaría el origen sobre-cobrando los items ya movidos.
   const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
-  const sourceTotals = await recalculateOrderTotals(source.id, 0, Number(source.paidAmount || 0))
-  const newTotals = await recalculateOrderTotals(newOrder.id, 0, 0)
+  const { newOrder, sourceTotals, newTotals } = await prisma.$transaction(async tx => {
+    const created = await tx.order.create({
+      data: {
+        venueId,
+        tableId: source.tableId,
+        covers: source.covers,
+        orderNumber: `ORD-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+        servedById: source.servedById,
+        type: source.type,
+        status: 'PENDING',
+        paymentStatus: 'PENDING',
+        kitchenStatus: 'PENDING',
+        subtotal: 0,
+        discountAmount: 0,
+        taxAmount: 0,
+        total: 0,
+        version: 1,
+      },
+      select: { id: true, orderNumber: true, version: true },
+    })
+
+    await tx.orderItem.updateMany({
+      where: { id: { in: toMove }, orderId: source.id },
+      data: { orderId: created.id },
+    })
+
+    const src = await recalculateOrderTotals(source.id, 0, Number(source.paidAmount || 0), tx)
+    const dst = await recalculateOrderTotals(created.id, 0, 0, tx)
+    return { newOrder: created, sourceTotals: src, newTotals: dst }
+  })
 
   void (await import('../dashboard/activity-log.service')).logAction({
     action: 'ORDER_SPLIT',
@@ -1209,6 +1229,8 @@ export async function splitOrderBySeat(venueId: string, orderId: string, staffId
       type: true,
       paidAmount: true,
       items: { select: { id: true, seat: true } },
+      orderDiscounts: { select: { id: true } },
+      serviceCharges: { select: { id: true, isAutomatic: true } },
     },
   })
   if (!source) throw new NotFoundError('Order not found')
@@ -1217,6 +1239,14 @@ export async function splitOrderBySeat(venueId: string, orderId: string, staffId
   }
   if (source.paymentStatus === 'PAID' || source.paymentStatus === 'PARTIAL') {
     throw new BadRequestError('No se puede dividir una cuenta ya pagada')
+  }
+  // 🔴 MONEY (auditoría): mismos guards que fusionar — descuentos/canjes/cargos
+  // se calcularon sobre la cuenta completa; dividirla cambiaría la base.
+  if (source.orderDiscounts.length > 0) {
+    throw new BadRequestError('Quita los descuentos (o la recompensa) antes de dividir por puesto.')
+  }
+  if (source.serviceCharges.some(sc => !sc.isAutomatic)) {
+    throw new BadRequestError('Quita los cobros por servicio antes de dividir por puesto.')
   }
 
   // Agrupar por asiento; las líneas sin asiento no se mueven.
@@ -1236,6 +1266,7 @@ export async function splitOrderBySeat(venueId: string, orderId: string, staffId
   // El asiento más bajo se queda en la cuenta original.
   const seatsToMove = seats.slice(1)
 
+  const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
   const created = await prisma.$transaction(async tx => {
     const results: Array<{ id: string; orderNumber: string; seat: number }> = []
     for (const seat of seatsToMove) {
@@ -1244,8 +1275,10 @@ export async function splitOrderBySeat(venueId: string, orderId: string, staffId
         data: {
           venueId,
           tableId: source.tableId,
-          covers: source.covers,
-          orderNumber: `ORD-${Date.now()}-S${seat}`,
+          // Un cheque POR ASIENTO es de UNA persona: heredar los covers de la
+          // mesa inflaría el conteo y dispararía cargos automáticos por grupo.
+          covers: 1,
+          orderNumber: `ORD-${Date.now()}-${Math.random().toString(36).slice(2, 4).toUpperCase()}-S${seat}`,
           customerName: `Asiento ${seat}`,
           servedById: source.servedById,
           type: source.type,
@@ -1266,16 +1299,20 @@ export async function splitOrderBySeat(venueId: string, orderId: string, staffId
       })
       results.push({ id: newOrder.id, orderNumber: newOrder.orderNumber, seat })
     }
-    return results
+
+    // 🔴 Recalcular DENTRO de la tx (auditoría): un crash después del commit y
+    // antes del recálculo dejaría el origen sobre-cobrando los asientos movidos.
+    const src = await recalculateOrderTotals(source.id, 0, Number(source.paidAmount || 0), tx)
+    const totalsPerSeat = []
+    for (const r of results) {
+      const t = await recalculateOrderTotals(r.id, 0, 0, tx)
+      totalsPerSeat.push({ id: r.id, orderNumber: r.orderNumber, seat: r.seat, total: t.total })
+    }
+    return { results: totalsPerSeat, sourceTotals: src }
   })
 
-  const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
-  const sourceTotals = await recalculateOrderTotals(source.id, 0, Number(source.paidAmount || 0))
-  const createdTotals = []
-  for (const c of created) {
-    const t = await recalculateOrderTotals(c.id, 0, 0)
-    createdTotals.push({ id: c.id, orderNumber: c.orderNumber, seat: c.seat, total: t.total })
-  }
+  const createdTotals = created.results
+  const sourceTotals = created.sourceTotals
 
   void (await import('../dashboard/activity-log.service')).logAction({
     action: 'ORDER_SPLIT_BY_SEAT',
@@ -1283,7 +1320,7 @@ export async function splitOrderBySeat(venueId: string, orderId: string, staffId
     entityId: source.id,
     staffId,
     venueId,
-    data: { seats: seatsToMove, created: created.length },
+    data: { seats: seatsToMove, created: created.results.length },
   })
 
   return {
@@ -1359,7 +1396,42 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
     throw new BadRequestError('Quita los cobros por servicio de la cuenta origen antes de fusionarla.')
   }
 
-  await prisma.$transaction(async tx => {
+  const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
+  const mergedTotals = await prisma.$transaction(async tx => {
+    // 🔴 Revalidar DENTRO de la tx (auditoría): entre el guard y la tx pudo
+    // entrar un pago, un descuento, o una fusión cruzada A→B / B→A. Sin esto,
+    // dos merges concurrentes pueden cancelar AMBAS cuentas con los items
+    // varados en una cuenta cancelada.
+    const freshSource = await tx.order.findFirst({
+      where: {
+        id: source.id,
+        venueId,
+        status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
+        paymentStatus: { notIn: ['PAID', 'PARTIAL'] },
+      },
+      select: {
+        id: true,
+        specialRequests: true,
+        orderDiscounts: { select: { id: true } },
+        serviceCharges: { select: { id: true, isAutomatic: true } },
+      },
+    })
+    const freshTarget = await tx.order.findFirst({
+      where: {
+        id: target.id,
+        venueId,
+        status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
+        paymentStatus: { notIn: ['PAID', 'PARTIAL'] },
+      },
+      select: { id: true, specialRequests: true },
+    })
+    if (!freshSource || !freshTarget) {
+      throw new BadRequestError('La cuenta cambió mientras se fusionaba — vuelve a intentar')
+    }
+    if (freshSource.orderDiscounts.length > 0 || freshSource.serviceCharges.some(sc => !sc.isAutomatic)) {
+      throw new BadRequestError('La cuenta origen recibió descuentos o cobros durante la fusión — vuelve a intentar')
+    }
+
     await tx.orderItem.updateMany({
       where: { orderId: source.id },
       data: { orderId: target.id },
@@ -1367,6 +1439,19 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
     // Los cobros automáticos del origen se van con él: el destino re-evalúa
     // los suyos por comensales en el recálculo.
     await tx.orderServiceCharge.deleteMany({ where: { orderId: source.id } })
+
+    // Las notas de cocina del origen NO se pierden: se anexan al destino.
+    if (freshSource.specialRequests?.trim()) {
+      await tx.order.update({
+        where: { id: target.id },
+        data: {
+          specialRequests: [freshTarget.specialRequests, freshSource.specialRequests]
+            .filter(Boolean)
+            .join(' · '),
+        },
+      })
+    }
+
     await tx.order.update({
       where: { id: source.id },
       data: {
@@ -1378,6 +1463,8 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
         total: 0,
       },
     })
+
+    return recalculateOrderTotals(target.id, 0, Number(target.paidAmount || 0), tx)
   })
 
   // La mesa del origen: re-apuntar a otra cuenta abierta, o liberarla.
@@ -1402,8 +1489,7 @@ export async function mergeOrders(venueId: string, targetOrderId: string, source
     })
   }
 
-  const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
-  const totals = await recalculateOrderTotals(target.id, 0, Number(target.paidAmount || 0))
+  const totals = mergedTotals
   // El destino puede haber cruzado el mínimo de comensales al crecer.
   const { syncAutomaticServiceCharges } = await import('./service-charge.mobile.service')
   const afterAuto = await syncAutomaticServiceCharges(venueId, target.id)
@@ -1474,6 +1560,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       paymentStatus: true,
       subtotal: true,
       discountAmount: true,
+      serviceChargeAmount: true,
       total: true,
       remainingBalance: true,
       venueId: true,
@@ -1570,8 +1657,11 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
 
     const orderSubtotal = Number(order.subtotal)
     const orderDiscount = Number(order.discountAmount || 0)
+    // 🔴 MONEY (auditoría): sin esto, cualquier pago parcial en efectivo BORRA
+    // el cobro por servicio del total y el restante deja de cobrarlo.
+    const orderServiceCharge = Number(order.serviceChargeAmount || 0)
     const totalTip = previousTips + tipDecimal
-    const newTotal = orderSubtotal - orderDiscount + totalTip
+    const newTotal = orderSubtotal - orderDiscount + orderServiceCharge + totalTip
     const totalPaidIncludingTip = previousPaid + amountDecimal + tipDecimal
     const remainingAfterPayment = newTotal - totalPaidIncludingTip
     const isFullyPaid = remainingAfterPayment <= 0.01 // float tolerance, same as TPV path

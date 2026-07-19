@@ -60,6 +60,19 @@ export async function openTable(req: Request, res: Response): Promise<void> {
 
     const result = await tableService.assignTable(venueId, tableId, staffId, covers, null)
 
+    // Cobros por servicio automáticos (auditoría): la regla "desde N comensales"
+    // debe evaluar AL ABRIR, no solo al editar el conteo — si no, el caso
+    // estrella (grupo de 8 abierto con 8) nunca cobra el servicio.
+    try {
+      const orderId = (result as { order?: { id?: string } })?.order?.id
+      if (orderId) {
+        const { syncAutomaticServiceCharges } = await import('../../services/mobile/service-charge.mobile.service')
+        await syncAutomaticServiceCharges(venueId, orderId)
+      }
+    } catch (syncError: any) {
+      logger.warn(`[TABLE MOBILE] auto service-charge sync failed (non-fatal): ${syncError.message}`)
+    }
+
     res.status(200).json({ success: true, data: result })
   } catch (error: any) {
     logger.error(`[TABLE MOBILE CONTROLLER] Error opening table: ${error.message}`)

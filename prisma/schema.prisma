@@ -5913,6 +5913,9 @@ model OrderServiceCharge {
 
   createdAt DateTime @default(now())
 
+  // Dos requests concurrentes (doble tap / sync + apply) no pueden duplicar el
+  // mismo cargo en la misma cuenta (auditoría 2026-07-18).
+  @@unique([orderId, serviceChargeId])
   @@index([orderId])
   @@index([serviceChargeId])
 }
