@@ -17,6 +17,7 @@ import meRoutes from './me.routes'
 import consumerRoutes from './consumer.routes'
 import googleCalendarRoutes from './google-calendar.routes'
 import mercadoPagoRoutes from './mercado-pago.routes'
+import deliveryChannelsRoutes from './delivery-channels.routes'
 import { tpvVersionGate } from '../middlewares/tpv-version-gate.middleware'
 
 const router = express.Router({ mergeParams: true })
@@ -38,5 +39,6 @@ router.use('/consumer', consumerRoutes) // Public consumer app routes under /api
 router.use('/me', meRoutes) // Current user routes under /api/v1/me
 router.use('/google-calendar', googleCalendarRoutes) // Google Calendar Sync (Phase 1)
 router.use('/integrations/mercadopago', mercadoPagoRoutes) // MP marketplace OAuth (Phase 7 of MP plan v3)
+router.use('/delivery-channels', deliveryChannelsRoutes) // Gestión de canales de delivery (Task 10)
 
 export default router
