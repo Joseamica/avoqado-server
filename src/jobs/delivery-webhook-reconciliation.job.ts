@@ -60,6 +60,22 @@ export class DeliveryWebhookReconciliationJob {
   /** Sentinel written to `error` by the ORPHANED sweep — used to exclude already-orphaned rows from every future pass. */
   private static readonly ORPHANED_MARKER = 'ORPHANED'
 
+  /**
+   * Fix B2 (audit §10.2): without an attempt cap, a handful of permanently-broken
+   * ("poison") events — malformed payload, deleted dependency, whatever keeps
+   * throwing — would occupy a BATCH_SIZE slot on EVERY pass (~720 times/24h),
+   * starving younger events out of the batch. Once a row's attemptCount reaches
+   * this, the scan query excludes it forever: it stays FAILED, gets logged once
+   * (the pass that pushed it over the cap), and is never selected again.
+   * attemptCount/nextAttemptAt track ONLY this job's own retry attempts — the
+   * original webhook ingestion failure that first set status=FAILED does not
+   * count towards it.
+   */
+  private readonly MAX_ATTEMPTS = 10
+
+  /** Backoff cap in minutes for `nextAttemptAt` scheduling (exponential: 2^attemptCount, capped here). */
+  private readonly BACKOFF_CAP_MINUTES = 60
+
   start(): void {
     if (this.job) return
     this.job = new CronJob(this.CRON_PATTERN, () => void this.runOnce(), null, false, 'America/Mexico_City')
@@ -124,6 +140,13 @@ export class DeliveryWebhookReconciliationJob {
                   { status: DeliveryOrderEventStatus.RECEIVED, receivedAt: { gte: orphanCutoff, lt: receivedCutoff } },
                 ],
               },
+              // Fix B2: never re-select a poison event (maxed out its retry budget) —
+              // it stays FAILED forever, excluded here rather than re-touched every pass.
+              { attemptCount: { lt: this.MAX_ATTEMPTS } },
+              // Fix B2: respect the backoff window — a row that just failed schedules
+              // nextAttemptAt in the future and must not be re-picked before then.
+              // Null-tolerant (never-yet-retried rows have nextAttemptAt=null by default).
+              { OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: new Date(now) } }] },
             ],
           },
           orderBy: { receivedAt: 'asc' },
@@ -164,17 +187,60 @@ export class DeliveryWebhookReconciliationJob {
         await markEventResult(event.id, DeliveryOrderEventStatus.PROCESSED, order.id)
         reprocessed++
       } catch (err) {
-        // Leave the row exactly as it was (FAILED or RECEIVED) — the next
-        // pass retries it, until the >24h sweep below marks it ORPHANED.
-        logger.error('❌ [Delivery recon] Failed to reprocess event (stays for next pass, unless >24h old)', {
-          eventId: event.id,
-          status: event.status,
-          error: err instanceof Error ? err.message : err,
-        })
+        // Fix B2: track this job's own retry attempts + schedule exponential
+        // backoff so a poison event doesn't occupy every 2-minute pass forever.
+        // The row itself is left FAILED/RECEIVED either way — only the
+        // attemptCount/nextAttemptAt bookkeeping changes here.
+        const attemptCount = (event.attemptCount ?? 0) + 1
+        const isPoison = attemptCount >= this.MAX_ATTEMPTS
+        const nextAttemptAt = isPoison ? null : new Date(now + this.backoffMs(attemptCount))
+
+        try {
+          await prisma.deliveryOrderEvent.update({
+            where: { id: event.id },
+            data: { attemptCount, nextAttemptAt },
+          })
+        } catch (bookErr) {
+          // Best-effort — same per-event isolation guarantee as the rest of this
+          // loop: a failed bookkeeping write must NEVER abort the batch. Worst
+          // case the row keeps its old attemptCount/nextAttemptAt and gets
+          // reselected next pass with no backoff applied yet (never worse than
+          // pre-fix behavior).
+          logger.error('❌ [Delivery recon] Failed to persist attemptCount/nextAttemptAt backoff bookkeeping (event stays for next pass)', {
+            eventId: event.id,
+            error: bookErr instanceof Error ? bookErr.message : bookErr,
+          })
+        }
+
+        if (isPoison) {
+          // Logged exactly ONCE: the pass that pushes attemptCount to MAX_ATTEMPTS
+          // is the last one that will ever select this row again (excluded by the
+          // scan's attemptCount filter from here on) — no repeat alerts.
+          logger.error('🚨 [Delivery recon] POISON delivery event — reached MAX_ATTEMPTS, giving up (stays FAILED, never retried again)', {
+            eventId: event.id,
+            provider: event.provider,
+            externalEventId: event.externalEventId,
+            venueId: event.venueId,
+            attemptCount,
+          })
+        } else {
+          logger.error('❌ [Delivery recon] Failed to reprocess event (stays for next pass, unless >24h old)', {
+            eventId: event.id,
+            status: event.status,
+            attemptCount,
+            nextAttemptAt,
+            error: err instanceof Error ? err.message : err,
+          })
+        }
       }
     }
 
     return { reprocessed, orphanedImmediate }
+  }
+
+  /** Fix B2: exponential backoff in ms — `2^attemptCount` minutes, capped at `BACKOFF_CAP_MINUTES`. */
+  private backoffMs(attemptCount: number): number {
+    return Math.min(2 ** attemptCount, this.BACKOFF_CAP_MINUTES) * 60_000
   }
 
   /**

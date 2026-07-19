@@ -33,6 +33,7 @@ import { DeliveryWebhookReconciliationJob } from '@/jobs/delivery-webhook-reconc
 
 const mockedFindMany = (prisma as any).deliveryOrderEvent.findMany as jest.Mock
 const mockedUpdateMany = (prisma as any).deliveryOrderEvent.updateMany as jest.Mock
+const mockedUpdate = (prisma as any).deliveryOrderEvent.update as jest.Mock
 const mockedRetry = retry as jest.Mock
 const mockedParse = parseDeliverectOrder as jest.Mock
 const mockedIngest = ingestDeliveryOrder as jest.Mock
@@ -58,6 +59,8 @@ function makeEvent(overrides: Partial<any> = {}) {
     orderId: null,
     receivedAt: new Date(NOW - 3600_000), // 1h ago — within both FAILED and RECEIVED windows
     processedAt: null,
+    attemptCount: 0,
+    nextAttemptAt: null,
     ...overrides,
   }
 }
@@ -65,9 +68,12 @@ function makeEvent(overrides: Partial<any> = {}) {
 describe('DeliveryWebhookReconciliationJob', () => {
   beforeEach(() => {
     jest.spyOn(Date, 'now').mockReturnValue(NOW)
-    ;[mockedFindMany, mockedUpdateMany, mockedRetry, mockedParse, mockedIngest, mockedMarkEventResult].forEach(m => m.mockReset())
+    ;[mockedFindMany, mockedUpdateMany, mockedUpdate, mockedRetry, mockedParse, mockedIngest, mockedMarkEventResult].forEach(m =>
+      m.mockReset(),
+    )
     mockedRetry.mockImplementation((fn: () => Promise<any>) => fn())
     mockedUpdateMany.mockResolvedValue({ count: 0 })
+    mockedUpdate.mockResolvedValue({})
   })
 
   afterEach(() => {
@@ -171,7 +177,7 @@ describe('DeliveryWebhookReconciliationJob', () => {
     expect(result).toEqual({ reprocessed: 0, orphaned: 1 })
   })
 
-  it('an event that fails again during reprocessing is left untouched (no markEventResult write), so the next pass retries it', async () => {
+  it('an event that fails again during reprocessing is left FAILED (no markEventResult write) but its attemptCount/backoff bookkeeping IS updated, so the next pass retries it later', async () => {
     const event = makeEvent({ id: 'evt_throws' })
     mockedFindMany.mockResolvedValueOnce([event]).mockResolvedValueOnce([])
     mockedParse.mockReturnValue({ externalId: 'ext_1', raw: event.payload })
@@ -180,7 +186,77 @@ describe('DeliveryWebhookReconciliationJob', () => {
     const result = await new DeliveryWebhookReconciliationJob().runOnce()
 
     expect(mockedMarkEventResult).not.toHaveBeenCalled()
+    expect(mockedUpdate).toHaveBeenCalledWith({
+      where: { id: 'evt_throws' },
+      data: { attemptCount: 1, nextAttemptAt: expect.any(Date) },
+    })
     expect(result).toEqual({ reprocessed: 0, orphaned: 0 })
+  })
+
+  // ── Fix B2 (audit §10.2): backoff + skip-poison ─────────────────────────
+
+  it('Fix B2: agenda un nextAttemptAt FUTURO al fallar — el evento no vuelve a ser seleccionable de inmediato (backoff exponencial)', async () => {
+    const event = makeEvent({ id: 'evt_backoff', attemptCount: 2 })
+    mockedFindMany.mockResolvedValueOnce([event]).mockResolvedValueOnce([])
+    mockedParse.mockReturnValue({ externalId: 'ext_1', raw: event.payload })
+    mockedIngest.mockRejectedValue(new Error('boom'))
+
+    await new DeliveryWebhookReconciliationJob().runOnce()
+
+    const call = mockedUpdate.mock.calls[0][0]
+    expect(call.where).toEqual({ id: 'evt_backoff' })
+    expect(call.data.attemptCount).toBe(3)
+    expect(call.data.nextAttemptAt).toBeInstanceOf(Date)
+    expect(call.data.nextAttemptAt.getTime()).toBeGreaterThan(NOW)
+  })
+
+  it('Fix B2: un evento con attemptCount >= MAX_ATTEMPTS (10) NO se selecciona — poison events nunca vuelven a intentarse', async () => {
+    mockedFindMany.mockResolvedValueOnce([]).mockResolvedValueOnce([])
+
+    await new DeliveryWebhookReconciliationJob().runOnce()
+
+    const scanWhere = mockedFindMany.mock.calls[0][0].where
+    expect(scanWhere.AND).toContainEqual({ attemptCount: { lt: 10 } })
+  })
+
+  it('Fix B2: el query de selección respeta la ventana de backoff — solo nextAttemptAt <= now O null', async () => {
+    mockedFindMany.mockResolvedValueOnce([]).mockResolvedValueOnce([])
+
+    await new DeliveryWebhookReconciliationJob().runOnce()
+
+    const scanWhere = mockedFindMany.mock.calls[0][0].where
+    expect(scanWhere.AND).toContainEqual({ OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: new Date(NOW) } }] })
+  })
+
+  it('Fix B2: un evento que llega a MAX_ATTEMPTS (10) al fallar se vuelve poison — queda FAILED, nextAttemptAt null, se loguea UNA vez con el patrón 🚨 POISON', async () => {
+    const event = makeEvent({ id: 'evt_poison', attemptCount: 9 }) // this failure is the 10th attempt
+    mockedFindMany.mockResolvedValueOnce([event]).mockResolvedValueOnce([])
+    mockedParse.mockReturnValue({ externalId: 'ext_1', raw: event.payload })
+    mockedIngest.mockRejectedValue(new Error('permanently broken payload'))
+    ;(logger.error as jest.Mock).mockClear()
+
+    const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+    expect(mockedUpdate).toHaveBeenCalledWith({ where: { id: 'evt_poison' }, data: { attemptCount: 10, nextAttemptAt: null } })
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('🚨 [Delivery recon] POISON'),
+      expect.objectContaining({ eventId: 'evt_poison', attemptCount: 10 }),
+    )
+    expect(result).toEqual({ reprocessed: 0, orphaned: 0 })
+  })
+
+  it('Fix B2: si el bookkeeping de attemptCount/nextAttemptAt falla, NO tumba el resto del batch (misma garantía de aislamiento por-evento)', async () => {
+    const bad = makeEvent({ id: 'evt_bad_bookkeeping' })
+    const good = makeEvent({ id: 'evt_good' })
+    mockedFindMany.mockResolvedValueOnce([bad, good]).mockResolvedValueOnce([])
+    mockedParse.mockReturnValue({ externalId: 'ext_1', raw: {} })
+    mockedIngest.mockRejectedValueOnce(new Error('boom')).mockResolvedValueOnce({ order: { id: 'order_good' }, created: false })
+    mockedUpdate.mockRejectedValueOnce(new Error('DB write failed'))
+
+    const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+    expect(mockedMarkEventResult).toHaveBeenCalledWith('evt_good', DeliveryOrderEventStatus.PROCESSED, 'order_good')
+    expect(result.reprocessed).toBe(1)
   })
 
   it('one event failing does not break the rest of the batch (per-event catch)', async () => {
