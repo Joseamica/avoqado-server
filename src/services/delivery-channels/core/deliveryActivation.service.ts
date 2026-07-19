@@ -102,3 +102,25 @@ export async function updateActivationStatus(
 
   return updated
 }
+
+export type ActivationRequestWithVenue = Prisma.DeliveryActivationRequestGetPayload<{
+  include: { venue: { select: { name: true; slug: true } } }
+}>
+
+export interface ListActivationRequestsFilter {
+  status?: DeliveryActivationStatus
+}
+
+/**
+ * Cola de ops (superadmin, Task 4): TODAS las solicitudes de activación (cross-venue, sin
+ * scoping por venueId — a propósito, es un endpoint de ops), más recientes primero, con
+ * `venue.name`/`venue.slug` para mostrar en la UI sin un round-trip extra. `status` es un
+ * filtro opcional; sin filtro trae cualquier status.
+ */
+export async function listActivationRequests(filter?: ListActivationRequestsFilter): Promise<ActivationRequestWithVenue[]> {
+  return prisma.deliveryActivationRequest.findMany({
+    where: filter?.status ? { status: filter.status } : {},
+    orderBy: { createdAt: 'desc' },
+    include: { venue: { select: { name: true, slug: true } } },
+  })
+}

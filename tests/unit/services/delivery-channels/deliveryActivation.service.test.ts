@@ -1,9 +1,10 @@
 /**
- * Unit tests (mock-first) — Servicio de solicitud de activación de delivery (Task 2 del plan
+ * Unit tests (mock-first) — Servicio de solicitud de activación de delivery (Tasks 2 y 4 del plan
  * delivery-activation). Casos obligatorios (brief): getActivationRequest filtra por venueId +
  * status en [PENDING, CONTACTED]; createActivationRequest es idempotente (si ya hay una viva la
  * devuelve, no crea ni re-loguea); updateActivationStatus sella contactedAt/connectedAt según el
- * status destino y siempre escribe ActivityLog.
+ * status destino y siempre escribe ActivityLog; listActivationRequests (Task 4, cola de ops) trae
+ * todas ordenadas por createdAt desc con venue { name, slug }, filtrables por status.
  */
 import { DeliveryActivationStatus } from '@prisma/client'
 import prisma from '../../../../src/utils/prismaClient'
@@ -12,6 +13,7 @@ import {
   getActivationRequest,
   createActivationRequest,
   updateActivationStatus,
+  listActivationRequests,
 } from '../../../../src/services/delivery-channels/core/deliveryActivation.service'
 
 jest.mock('../../../../src/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
@@ -230,6 +232,53 @@ describe('deliveryActivation.service', () => {
           data: expect.objectContaining({ status: DeliveryActivationStatus.DISMISSED }),
         }),
       )
+    })
+  })
+
+  // ============================================================
+  // listActivationRequests (Task 4) — cola de ops: todas, más recientes primero, con venue
+  // ============================================================
+  describe('listActivationRequests', () => {
+    it('sin filtro: findMany con where {} + orderBy createdAt desc + include venue { name, slug }', async () => {
+      ;(prisma.deliveryActivationRequest.findMany as jest.Mock).mockResolvedValue([])
+
+      await listActivationRequests()
+
+      expect(prisma.deliveryActivationRequest.findMany).toHaveBeenCalledWith({
+        where: {},
+        orderBy: { createdAt: 'desc' },
+        include: { venue: { select: { name: true, slug: true } } },
+      })
+    })
+
+    it('con status: filtra where { status }', async () => {
+      ;(prisma.deliveryActivationRequest.findMany as jest.Mock).mockResolvedValue([])
+
+      await listActivationRequests({ status: DeliveryActivationStatus.CONTACTED })
+
+      expect(prisma.deliveryActivationRequest.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { status: DeliveryActivationStatus.CONTACTED } }),
+      )
+    })
+
+    it('devuelve las filas del prisma tal cual (incluyendo venue.name/venue.slug)', async () => {
+      const rows = [
+        { id: 'req1', venueId: 'v1', status: DeliveryActivationStatus.PENDING, venue: { name: 'Venue Uno', slug: 'venue-uno' } },
+        { id: 'req2', venueId: 'v2', status: DeliveryActivationStatus.CONTACTED, venue: { name: 'Venue Dos', slug: 'venue-dos' } },
+      ]
+      ;(prisma.deliveryActivationRequest.findMany as jest.Mock).mockResolvedValue(rows)
+
+      const result = await listActivationRequests()
+
+      expect(result).toEqual(rows)
+    })
+
+    it('sin argumento (undefined) se comporta igual que sin filtro (no revienta, where {})', async () => {
+      ;(prisma.deliveryActivationRequest.findMany as jest.Mock).mockResolvedValue([])
+
+      await listActivationRequests(undefined)
+
+      expect(prisma.deliveryActivationRequest.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: {} }))
     })
   })
 })
