@@ -1051,7 +1051,7 @@ export async function removeOrderDiscount(venueId: string, orderId: string, orde
   // for a discount that no longer exists. Both moves share one transaction.
   const { refundLoyaltyForOrderDiscount } = await import('./loyalty.mobile.service')
   const refund = await prisma.$transaction(async tx => {
-    const refunded = await refundLoyaltyForOrderDiscount(tx, row, staffId)
+    const refunded = await refundLoyaltyForOrderDiscount(tx, venueId, row, staffId)
     await tx.orderDiscount.delete({ where: { id: row.id } })
     return refunded
   })

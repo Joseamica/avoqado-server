@@ -6,6 +6,7 @@ import { createGuard } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { adjustPoints, updateLoyaltyConfig } from '@/services/dashboard/loyalty.dashboard.service'
+import { getCustomerLoyalty, redeemPointsToOrder } from '@/services/mobile/loyalty.mobile.service'
 import { planGateMessage } from '../planGate'
 
 export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
@@ -127,6 +128,97 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
           data: { points, reason, newBalance: result.newBalance },
         })
         return text({ ok: true, customer: name, change: points, newBalance: result.newBalance })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'redeem_loyalty_on_check',
+    '🔴 CRITICAL (moves customer value AND money on an open check). Redeem a customer\'s loyalty points as a discount on an OPEN check of a venue you can access — the POS "Recompensas" action. Find the customer by name/email/phone and pass the orderId of the open check. Points are burned and the matching discount is applied to the check in ONE transaction; if the points are worth more than the check, only the points actually needed are burned and the rest stay in the balance. Removing that discount later refunds the points automatically. By DEFAULT this only PREVIEWS (points → discount → new balance); call again with confirm:true to apply. This WRITES — requires orders:update.',
+    {
+      venueId: z.string().describe('Venue that owns the check and the customer (must be in your scope)'),
+      orderId: z.string().describe('The OPEN order/check to discount'),
+      search: z.string().min(1).describe('Customer name, email or phone (partial, case-insensitive)'),
+      points: z.number().int().positive().describe('Points to redeem (positive integer)'),
+      confirm: z.boolean().optional().describe('Must be true to actually apply; without it you get a preview'),
+    },
+    async ({ venueId, orderId, search, points, confirm }) => {
+      const base = guard.venueFilter(venueId)
+      guard.requirePermission('orders:update', venueId)
+      const gate = await planGateMessage(venueId, 'LOYALTY_PROGRAM', 'El programa de lealtad')
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+
+      const matches = await prisma.customer.findMany({
+        where: {
+          ...base,
+          OR: [
+            { firstName: { contains: search, mode: 'insensitive' as const } },
+            { lastName: { contains: search, mode: 'insensitive' as const } },
+            { email: { contains: search, mode: 'insensitive' as const } },
+            { phone: { contains: search } },
+          ],
+        },
+        select: { id: true, firstName: true, lastName: true, loyaltyPoints: true },
+        orderBy: { totalSpent: 'desc' },
+        take: 5,
+      })
+      if (matches.length === 0) {
+        return text({ ok: false, error: `No encontré ningún cliente que coincida con "${search}" en este local.` })
+      }
+      if (matches.length > 1) {
+        return text({
+          ok: false,
+          ambiguous: true,
+          error: `"${search}" coincide con varios clientes — sé más específico.`,
+          matches: matches.map(m => `${m.firstName ?? ''} ${m.lastName ?? ''}`.trim() || '(sin nombre)'),
+        })
+      }
+
+      const c = matches[0]
+      const name = `${c.firstName ?? ''} ${c.lastName ?? ''}`.trim() || '(sin nombre)'
+
+      if (!confirm) {
+        try {
+          const status = await getCustomerLoyalty(venueId, c.id, orderId)
+          const rate = status.redemptionRate
+          const wouldBurn = Math.min(points, status.maxRedeemablePoints)
+          return text({
+            ok: false,
+            requiresConfirmation: true,
+            preview: {
+              customer: name,
+              currentPoints: status.balance,
+              pointsToRedeem: wouldBurn,
+              discount: Math.round(wouldBurn * rate * 100) / 100,
+              newBalance: status.balance - wouldBurn,
+              minPointsRedeem: status.minPointsRedeem,
+            },
+            message: `Esto canjeará ${wouldBurn} puntos de ${name} por $${(Math.round(wouldBurn * rate * 100) / 100).toFixed(2)} de descuento en la cuenta (quedaría con ${status.balance - wouldBurn}). Vuelve a llamar con confirm:true para aplicar.`,
+          })
+        } catch (err) {
+          return text({ ok: false, error: (err as Error).message })
+        }
+      }
+
+      try {
+        const result = await redeemPointsToOrder(venueId, orderId, c.id, points, scope.staffId)
+        await auditMcpWrite(scope, {
+          action: 'LOYALTY_POINTS_REDEEMED',
+          entity: 'Order',
+          entityId: orderId,
+          venueId,
+          data: { customerId: c.id, points: result.pointsRedeemed, discountAmount: result.discountAmount },
+        })
+        return text({
+          ok: true,
+          customer: name,
+          pointsRedeemed: result.pointsRedeemed,
+          discountAmount: result.discountAmount,
+          newBalance: result.newBalance,
+          orderTotal: result.order.total,
+        })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
       }

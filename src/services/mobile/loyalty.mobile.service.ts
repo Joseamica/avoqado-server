@@ -25,6 +25,23 @@ function money(value: number): number {
 }
 
 /**
+ * 🔴 `LoyaltyTransaction.createdById` and `OrderDiscount.appliedById` FK to
+ * StaffVenue.id, but the mobile auth context carries a Staff.id. Writing the
+ * Staff.id straight through raises P2003 and rolls the WHOLE redemption back —
+ * points and discount silently never persist. Resolve the row first; if the
+ * caller has no assignment to this venue we store null rather than fail: the
+ * audit attribution is nice to have, the money movement is not optional.
+ */
+async function resolveStaffVenueId(venueId: string, staffId?: string): Promise<string | undefined> {
+  if (!staffId) return undefined
+  const sv = await prisma.staffVenue.findUnique({
+    where: { staffId_venueId: { staffId, venueId } },
+    select: { id: true },
+  })
+  return sv?.id
+}
+
+/**
  * Balance + program rules for the customer attached to a check, plus how much
  * the POS may redeem RIGHT NOW against this order (capped at its total).
  */
@@ -122,6 +139,8 @@ export async function redeemPointsToOrder(
   const pointsToBurn =
     discountAmount < rawValue && redemptionRate > 0 ? Math.ceil(discountAmount / redemptionRate) : points
 
+  const staffVenueId = await resolveStaffVenueId(venueId, staffId)
+
   await prisma.$transaction(async tx => {
     const transaction = await tx.loyaltyTransaction.create({
       data: {
@@ -130,7 +149,7 @@ export async function redeemPointsToOrder(
         points: -pointsToBurn,
         orderId,
         reason: `Canje de ${pointsToBurn} puntos por $${discountAmount.toFixed(2)} de descuento`,
-        createdById: staffId,
+        createdById: staffVenueId,
       },
     })
 
@@ -147,7 +166,7 @@ export async function redeemPointsToOrder(
         value: new Prisma.Decimal(discountAmount),
         amount: new Prisma.Decimal(discountAmount),
         isManual: true,
-        appliedById: staffId,
+        appliedById: staffVenueId,
         loyaltyTransactionId: transaction.id,
       },
     })
@@ -185,10 +204,19 @@ export async function redeemPointsToOrder(
  */
 export async function refundLoyaltyForOrderDiscount(
   tx: Prisma.TransactionClient,
+  venueId: string,
   row: { id: string; loyaltyTransactionId: string | null },
   staffId?: string,
 ): Promise<{ pointsRefunded: number; customerId: string } | null> {
   if (!row.loyaltyTransactionId) return null
+
+  // Same FK caveat as the redeem path (see resolveStaffVenueId).
+  const sv = staffId
+    ? await tx.staffVenue.findUnique({
+        where: { staffId_venueId: { staffId, venueId } },
+        select: { id: true },
+      })
+    : null
 
   const original = await tx.loyaltyTransaction.findUnique({
     where: { id: row.loyaltyTransactionId },
@@ -205,7 +233,7 @@ export async function refundLoyaltyForOrderDiscount(
       points: pointsRefunded,
       orderId: original.orderId,
       reason: `Devolución de ${pointsRefunded} puntos (se quitó la recompensa de la cuenta)`,
-      createdById: staffId,
+      createdById: sv?.id,
     },
   })
 
