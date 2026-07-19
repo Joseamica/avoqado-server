@@ -5,11 +5,16 @@
  * devuelve, no crea ni re-loguea); updateActivationStatus sella contactedAt/connectedAt según el
  * status destino y siempre escribe ActivityLog; listActivationRequests (Task 4, cola de ops) trae
  * todas ordenadas por createdAt desc con venue { name, slug }, filtrables por status.
+ *
+ * Fix A2 (audit, spec §10.2): createActivationRequest ahora aísla el find+create DENTRO de
+ * `prisma.$transaction` (cierra el TOCTOU del check-then-create — dos POSTs "concurrentes" ya no
+ * pueden ambos ver "sin viva" y duplicar); updateActivationStatus ahora valida la transición
+ * ANTES de escribir (CONNECTED/DISMISSED son terminales — no admiten transición de salida).
  */
 import { DeliveryActivationStatus } from '@prisma/client'
 import prisma from '../../../../src/utils/prismaClient'
 import { logAction } from '../../../../src/services/dashboard/activity-log.service'
-import { NotFoundError } from '../../../../src/errors/AppError'
+import { NotFoundError, ValidationError } from '../../../../src/errors/AppError'
 import {
   getActivationRequest,
   createActivationRequest,
@@ -148,6 +153,50 @@ describe('deliveryActivation.service', () => {
         expect.objectContaining({ where: expect.objectContaining({ venueId: 'venue2' }) }),
       )
     })
+
+    // ============================================================
+    // Fix A2 (audit, spec §10.2): check-then-create SIN transacción — dos POSTs concurrentes
+    // podían leer "sin viva" antes de que cualquiera insertara la suya y ambos crear una fila
+    // (duplicado). El find+create ahora vive DENTRO de la MISMA prisma.$transaction.
+    // ============================================================
+    it('Fix A2: aísla el find+create DENTRO de prisma.$transaction (no fuera de ella)', async () => {
+      ;(prisma.deliveryActivationRequest.findFirst as jest.Mock).mockResolvedValue(null)
+      ;(prisma.deliveryActivationRequest.create as jest.Mock).mockResolvedValue({ id: 'newreq1', venueId: 'venue1' })
+
+      await createActivationRequest('venue1', 'staff1', { requestedChannels: ['RAPPI'] })
+
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1)
+      expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function))
+      // El find+create solo puede haber corrido como efecto de invocar $transaction (el mock de
+      // setup.ts ejecuta el callback sincrónicamente) — probamos el ORDEN de invocación para
+      // confirmar que no se llaman ANTES/fuera del $transaction.
+      const txOrder = (prisma.$transaction as jest.Mock).mock.invocationCallOrder[0]
+      const findOrder = (prisma.deliveryActivationRequest.findFirst as jest.Mock).mock.invocationCallOrder[0]
+      const createOrder = (prisma.deliveryActivationRequest.create as jest.Mock).mock.invocationCallOrder[0]
+      expect(txOrder).toBeLessThan(findOrder)
+      expect(txOrder).toBeLessThan(createOrder)
+    })
+
+    it('Fix A2 (concurrencia simulada vía re-chequeo en tx): dos llamadas "concurrentes" → una sola fila viva, NO duplica', async () => {
+      const winnerRow = { id: 'req-winner', venueId: 'venue1', status: DeliveryActivationStatus.PENDING, requestedChannels: ['RAPPI'] }
+
+      // Llamada 1: su re-chequeo DENTRO de su propia tx no ve nada vivo todavía → crea.
+      ;(prisma.deliveryActivationRequest.findFirst as jest.Mock).mockResolvedValueOnce(null)
+      ;(prisma.deliveryActivationRequest.create as jest.Mock).mockResolvedValueOnce(winnerRow)
+
+      const result1 = await createActivationRequest('venue1', 'staff1', { requestedChannels: ['RAPPI'] })
+
+      // Llamada 2 "concurrente": su re-chequeo DENTRO de SU tx ya ve la fila que la tx de la
+      // llamada 1 confirmó — por eso NO crea otra, devuelve la misma (idempotente).
+      ;(prisma.deliveryActivationRequest.findFirst as jest.Mock).mockResolvedValueOnce(winnerRow)
+
+      const result2 = await createActivationRequest('venue1', 'staff2', { requestedChannels: ['RAPPI'] })
+
+      expect(prisma.deliveryActivationRequest.create).toHaveBeenCalledTimes(1) // nunca una segunda fila
+      expect(result1.id).toBe('req-winner')
+      expect(result2.id).toBe('req-winner') // la 2da devuelve la MISMA fila, no crea otra
+      expect(logAction).toHaveBeenCalledTimes(1) // solo la creación real audita
+    })
   })
 
   // ============================================================
@@ -155,6 +204,8 @@ describe('deliveryActivation.service', () => {
   // ============================================================
   describe('updateActivationStatus', () => {
     it('CONTACTED: set status + contactedAt (sin connectedAt) + ActivityLog DELIVERY_ACTIVATION_CONTACTED', async () => {
+      // Fix A2: la guarda de transición lee el status ACTUAL antes de escribir — PENDING→CONTACTED es válida.
+      ;(prisma.deliveryActivationRequest.findUnique as jest.Mock).mockResolvedValue({ status: DeliveryActivationStatus.PENDING })
       ;(prisma.deliveryActivationRequest.update as jest.Mock).mockResolvedValue({
         id: 'req1',
         venueId: 'venue1',
@@ -182,7 +233,9 @@ describe('deliveryActivation.service', () => {
       )
     })
 
-    it('CONNECTED: set status + connectedAt (sin contactedAt) + ActivityLog DELIVERY_ACTIVATION_CONNECTED', async () => {
+    it('CONTACTED→CONNECTED: transición permitida (caso requerido por la auditoría, Fix A2) — set status + connectedAt (sin contactedAt) + ActivityLog DELIVERY_ACTIVATION_CONNECTED', async () => {
+      // Fix A2: current status = CONTACTED (no terminal) → CONNECTED está permitido.
+      ;(prisma.deliveryActivationRequest.findUnique as jest.Mock).mockResolvedValue({ status: DeliveryActivationStatus.CONTACTED })
       ;(prisma.deliveryActivationRequest.update as jest.Mock).mockResolvedValue({
         id: 'req1',
         venueId: 'venue1',
@@ -210,6 +263,8 @@ describe('deliveryActivation.service', () => {
     })
 
     it('DISMISSED: set status (sin sellar timestamps) + ActivityLog DELIVERY_ACTIVATION_DISMISSED', async () => {
+      // Fix A2: PENDING→DISMISSED es válida (DISMISSED es terminal como DESTINO, no como origen).
+      ;(prisma.deliveryActivationRequest.findUnique as jest.Mock).mockResolvedValue({ status: DeliveryActivationStatus.PENDING })
       ;(prisma.deliveryActivationRequest.update as jest.Mock).mockResolvedValue({
         id: 'req1',
         venueId: 'venue1',
@@ -239,21 +294,65 @@ describe('deliveryActivation.service', () => {
     // Fix 2 (audit, API-CONTRACT): id inexistente → P2025 crudo hoy (500 genérico).
     // Los hermanos (updateChannelLink/pauseChannelLink) usan updateMany+count===0 →
     // NotFoundError; update() por id único debe traducir P2025 al mismo contrato.
+    //
+    // Fix A2 añadió un pre-chequeo (findUnique) ANTES del update para validar la transición —
+    // ahora "id inexistente" se detecta AHÍ (findUnique → null) en vez de esperar al P2025 del
+    // update(); el catch de P2025 en update() queda como defensa TOCTOU (fila borrada entre el
+    // findUnique y el update). El contrato observable (NotFoundError, sin ActivityLog) no cambia.
     // ============================================================
-    it('REGRESIÓN Fix 2: id inexistente (P2025 de Prisma) → NotFoundError, no el error crudo', async () => {
+    it('REGRESIÓN Fix 2: id inexistente → NotFoundError, no el error crudo (ahora detectado por el pre-chequeo de Fix A2)', async () => {
+      ;(prisma.deliveryActivationRequest.findUnique as jest.Mock).mockResolvedValue(null)
       const p2025 = Object.assign(new Error('Record to update not found.'), { code: 'P2025' })
       ;(prisma.deliveryActivationRequest.update as jest.Mock).mockRejectedValue(p2025)
 
       await expect(updateActivationStatus('nonexistent', DeliveryActivationStatus.CONTACTED, 'staff-ops1')).rejects.toThrow(NotFoundError)
+      expect(prisma.deliveryActivationRequest.update).not.toHaveBeenCalled()
       expect(logAction).not.toHaveBeenCalled()
     })
 
     it('un error de Prisma que NO es P2025 se propaga tal cual (no se enmascara como NotFoundError)', async () => {
+      // Fix A2: transición válida (PENDING→CONTACTED) para que el flujo LLEGUE al update() bajo prueba.
+      ;(prisma.deliveryActivationRequest.findUnique as jest.Mock).mockResolvedValue({ status: DeliveryActivationStatus.PENDING })
       const dbDown = Object.assign(new Error('connection lost'), { code: 'P1001' })
       ;(prisma.deliveryActivationRequest.update as jest.Mock).mockRejectedValue(dbDown)
 
       await expect(updateActivationStatus('req1', DeliveryActivationStatus.CONTACTED, 'staff-ops1')).rejects.toThrow('connection lost')
       expect(logAction).not.toHaveBeenCalled()
+    })
+
+    // ============================================================
+    // Fix A2 (audit, spec §10.2): CONNECTED/DISMISSED son terminales — antes de la auditoría se
+    // podía "revertir" una solicitud ya conectada/descartada de vuelta a PENDING/CONTACTED.
+    // ============================================================
+    it('Fix A2: CONNECTED → PENDING es inválida (estado terminal) → ValidationError, no actualiza, no loguea', async () => {
+      ;(prisma.deliveryActivationRequest.findUnique as jest.Mock).mockResolvedValue({ status: DeliveryActivationStatus.CONNECTED })
+
+      await expect(updateActivationStatus('req1', DeliveryActivationStatus.PENDING, 'staff-ops1')).rejects.toThrow(ValidationError)
+
+      expect(prisma.deliveryActivationRequest.update).not.toHaveBeenCalled()
+      expect(logAction).not.toHaveBeenCalled()
+    })
+
+    it('Fix A2: DISMISSED → CONTACTED es inválida (estado terminal) → ValidationError, no actualiza, no loguea', async () => {
+      ;(prisma.deliveryActivationRequest.findUnique as jest.Mock).mockResolvedValue({ status: DeliveryActivationStatus.DISMISSED })
+
+      await expect(updateActivationStatus('req1', DeliveryActivationStatus.CONTACTED, 'staff-ops1')).rejects.toThrow(ValidationError)
+
+      expect(prisma.deliveryActivationRequest.update).not.toHaveBeenCalled()
+      expect(logAction).not.toHaveBeenCalled()
+    })
+
+    it('Fix A2: el mensaje del ValidationError está en español y menciona el estado terminal', async () => {
+      ;(prisma.deliveryActivationRequest.findUnique as jest.Mock).mockResolvedValue({ status: DeliveryActivationStatus.CONNECTED })
+
+      await expect(updateActivationStatus('req1', DeliveryActivationStatus.PENDING, 'staff-ops1')).rejects.toThrow(/transición inválida/i)
+    })
+
+    it('Fix A2: id inexistente (findUnique → null) → NotFoundError ANTES de intentar validar la transición', async () => {
+      ;(prisma.deliveryActivationRequest.findUnique as jest.Mock).mockResolvedValue(null)
+
+      await expect(updateActivationStatus('nonexistent', DeliveryActivationStatus.CONNECTED, 'staff-ops1')).rejects.toThrow(NotFoundError)
+      expect(prisma.deliveryActivationRequest.update).not.toHaveBeenCalled()
     })
   })
 
