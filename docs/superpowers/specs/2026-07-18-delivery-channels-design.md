@@ -260,10 +260,12 @@ confirmar contra la cuenta real (los `REVALIDAR EN STAGING` que quedaron en el c
   `orderAcceptanceMode`/`autoSyncMenu`/`config` → sigue `delivery-channels:manage` (OWNER/ADMIN retienen pause + toggle de modo). Alinea con
   la decisión de producto "ops conecta el canal" (§2). **Follow-up cross-repo:** reflejar `delivery-channels:connect` donde ops conecte (UI
   superadmin), por exact-name (regla de permisos del repo).
-- **⚠️ ABIERTO (decisión de plataforma) — Orden feature-antes-de-permiso** (`delivery-channels.routes.ts`): el feature gate corre antes del
-  check de permiso/membresía, así que un autenticado NO-miembro del `:venueId` puede sondear el plan/trial/suspensión de otro venue por los
-  403 distintos antes de que `checkPermission` lo niegue. Es un **patrón transversal del repo** (no solo delivery) → conviene decidirlo a
-  nivel plataforma (permiso/membresía primero, feature después), no colarlo en delivery. Sin bloquear el go-live de delivery.
+- **✅ RESUELTO en delivery — Orden feature-antes-de-permiso** (`delivery-channels.routes.ts`): las 7 rutas de delivery ahora corren
+  `checkPermission` ANTES de `checkFeatureAccess`, así un NO-miembro del `:venueId` recibe 403 sin que el feature-gate revele el
+  plan/trial/suspensión (test: feature-gate nunca corre si el permiso niega). A diferencia de la convención feature-primero del resto del
+  repo — comentado explícito para que no lo reviertan. **QUEDA ABIERTO (decisión de plataforma):** el MISMO patrón feature-antes-de-permiso
+  vive en decenas de otras rutas de paga del repo (misma fuga latente). Corregirlo en TODAS es un cambio transversal grande que merece su
+  propia revisión — no bloquea delivery, pero conviene agendarlo a nivel plataforma.
 
 ### 10.5 Mecánica que genuinamente espera staging (sin riesgo de dinero)
 
