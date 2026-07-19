@@ -2489,6 +2489,10 @@ model Order {
   // 🔴 A DIFERENCIA de la propina, esto es INGRESO GRAVABLE del negocio: SUMA al
   // total y entra al corte y al CFDI. La propina pasa al mesero y no.
   serviceChargeAmount Decimal @default(0) @db.Decimal(10, 2)
+  /// Cuota de envío del pedido (delivery). Informativo: para pedidos de agregador
+  /// (Deliverect/Uber/Rappi/DiDi) el proveedor la cobra al cliente y viaja dentro
+  /// del `total`; se persiste desglosada para reporte y conciliación. 0 para no-delivery.
+  deliveryFeeAmount Decimal @default(0) @db.Decimal(10, 2)
   taxAmount      Decimal @db.Decimal(10, 2)
   tipAmount      Decimal @default(0) @db.Decimal(10, 2)
   total          Decimal @db.Decimal(12, 2)
@@ -4540,8 +4544,18 @@ model DeliveryOrderEvent {
   receivedAt  DateTime  @default(now())
   processedAt DateTime?
 
-  @@unique([provider, externalEventId, eventType])
+  /// Reconciliación con backoff: nº de intentos y próximo intento programado.
+  /// El cron salta eventos con attemptCount alto (poison) para no matar de hambre a
+  /// los jóvenes; nextAttemptAt implementa el backoff exponencial entre reintentos.
+  attemptCount  Int       @default(0)
+  nextAttemptAt DateTime?
+
+  /// Dedup con `channelLinkId`: `externalEventId` (channelOrderId) nace en el
+  /// marketplace, NO es globalmente único → dos canales/venues pueden colisionar.
+  /// Acotar por el link evita que el webhook del 2º tenant reciba DUPLICATE.
+  @@unique([provider, channelLinkId, externalEventId, eventType])
   @@index([status, receivedAt])
+  @@index([status, nextAttemptAt])
   @@index([venueId])
 }
 
