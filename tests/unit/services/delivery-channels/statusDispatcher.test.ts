@@ -38,6 +38,15 @@ const activeLink: any = {
   webhookSecret: 'secret',
 }
 
+// Fix B3 (audit §10.2): el vínculo Order↔link vive en el DeliveryOrderEvent que
+// originó el pedido (eventType 'order') — NO en "cualquier link ACTIVE del venue".
+const originEvent: any = {
+  id: 'evt1',
+  orderId: 'order1',
+  eventType: 'order',
+  channelLinkId: 'link1',
+}
+
 function makeOrder(overrides: any = {}) {
   return {
     id: 'order1',
@@ -51,7 +60,8 @@ function makeOrder(overrides: any = {}) {
 describe('dispatchOrderStatus', () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue(activeLink)
+    ;(prisma.deliveryOrderEvent.findFirst as jest.Mock).mockResolvedValue(originEvent)
+    ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue(activeLink)
     ;(deliverectClient.postOrderStatus as jest.Mock).mockResolvedValue(undefined)
   })
 
@@ -61,7 +71,8 @@ describe('dispatchOrderStatus', () => {
   it('REGRESIÓN: no-op si order.originSystem !== DELIVERY_PLATFORM (TPV/QR jamás dispara Deliverect)', async () => {
     await dispatchOrderStatus(makeOrder({ originSystem: OriginSystem.AVOQADO }), 'ACCEPTED')
 
-    expect(prisma.deliveryChannelLink.findFirst).not.toHaveBeenCalled()
+    expect(prisma.deliveryOrderEvent.findFirst).not.toHaveBeenCalled()
+    expect(prisma.deliveryChannelLink.findUnique).not.toHaveBeenCalled()
     expect(deliverectClient.postOrderStatus).not.toHaveBeenCalled()
   })
 
@@ -72,28 +83,57 @@ describe('dispatchOrderStatus', () => {
   })
 
   // ============================================================
-  // 2. Resolución de link ACTIVE del venue
+  // 2. Fix B3: rutea por el link ORIGINADOR del pedido, no por "cualquier link ACTIVE"
   // ============================================================
-  it('busca el DeliveryChannelLink ACTIVE del venue de la orden', async () => {
+  it('Fix B3: busca el DeliveryOrderEvent originador (eventType "order", orderId de la orden) y despacha por SU channelLinkId', async () => {
     await dispatchOrderStatus(makeOrder(), 'ACCEPTED')
 
-    expect(prisma.deliveryChannelLink.findFirst).toHaveBeenCalledWith({
-      where: { venueId: 'venue1', status: DeliveryChannelStatus.ACTIVE },
-    })
+    expect(prisma.deliveryOrderEvent.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { orderId: 'order1', eventType: 'order' } }),
+    )
+    expect(prisma.deliveryChannelLink.findUnique).toHaveBeenCalledWith({ where: { id: 'link1' } })
   })
 
-  it('no-op si no existe ningún link ACTIVE para el venue (PAUSED/DISABLED quedan fuera del filtro)', async () => {
-    ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue(null)
+  it('Fix B3: venue con 2 canales ACTIVE — un pedido originado por el canal B usa el link B, NUNCA el A ni "cualquier activo"', async () => {
+    const linkA = { ...activeLink, id: 'linkA', externalLocationId: 'locA' }
+    const linkB = { ...activeLink, id: 'linkB', externalLocationId: 'locB' }
+    ;(prisma.deliveryOrderEvent.findFirst as jest.Mock).mockResolvedValue({ ...originEvent, channelLinkId: 'linkB' })
+    ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockImplementation(({ where: { id } }: any) =>
+      Promise.resolve(id === 'linkB' ? linkB : linkA),
+    )
+
+    await dispatchOrderStatus(makeOrder(), 'ACCEPTED')
+
+    expect(prisma.deliveryChannelLink.findUnique).toHaveBeenCalledWith({ where: { id: 'linkB' } })
+    expect(prisma.deliveryChannelLink.findUnique).not.toHaveBeenCalledWith({ where: { id: 'linkA' } })
+    expect(deliverectClient.postOrderStatus).toHaveBeenCalledWith('DELIV-1', 20)
+    // Nunca debe existir una llamada "cualquier link activo del venue" (findFirst sobre deliveryChannelLink)
+    expect(prisma.deliveryChannelLink.findFirst).not.toHaveBeenCalled()
+  })
+
+  it('Fix B3: sin DeliveryOrderEvent originador → no-op con log, NUNCA adivina otro link', async () => {
+    ;(prisma.deliveryOrderEvent.findFirst as jest.Mock).mockResolvedValue(null)
+
+    await dispatchOrderStatus(makeOrder(), 'ACCEPTED')
+
+    expect(prisma.deliveryChannelLink.findUnique).not.toHaveBeenCalled()
+    expect(prisma.deliveryChannelLink.findFirst).not.toHaveBeenCalled()
+    expect(deliverectClient.postOrderStatus).not.toHaveBeenCalled()
+  })
+
+  it('el link originador existe pero no está ACTIVE (PAUSED/DISABLED) → no-op, nunca cae a otro link del venue', async () => {
+    ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue({ ...activeLink, status: DeliveryChannelStatus.PAUSED })
 
     await dispatchOrderStatus(makeOrder(), 'ACCEPTED')
 
     expect(deliverectClient.postOrderStatus).not.toHaveBeenCalled()
+    expect(prisma.deliveryChannelLink.findFirst).not.toHaveBeenCalled()
   })
 
   it('no-op si la orden no tiene externalId (no hay id remoto que notificar)', async () => {
     await dispatchOrderStatus(makeOrder({ externalId: null }), 'ACCEPTED')
 
-    expect(prisma.deliveryChannelLink.findFirst).not.toHaveBeenCalled()
+    expect(prisma.deliveryOrderEvent.findFirst).not.toHaveBeenCalled()
     expect(deliverectClient.postOrderStatus).not.toHaveBeenCalled()
   })
 
@@ -137,7 +177,7 @@ describe('dispatchOrderStatus', () => {
   // 5. Provider sin adapter implementado → log + no-op
   // ============================================================
   it('provider sin adapter implementado (registry getAdapter) → no lanza, no-op', async () => {
-    ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({ ...activeLink, provider: DeliveryProvider.UBER_EATS })
+    ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue({ ...activeLink, provider: DeliveryProvider.UBER_EATS })
 
     await expect(dispatchOrderStatus(makeOrder(), 'ACCEPTED')).resolves.toBeUndefined()
     expect(deliverectClient.postOrderStatus).not.toHaveBeenCalled()

@@ -40,12 +40,28 @@ export async function dispatchOrderStatus(order: Order, status: DeliveryOrderSta
     return
   }
 
-  // PAUSED/DISABLED/inexistente quedan todos fuera del filtro status:ACTIVE → no-op uniforme.
-  const link = await prisma.deliveryChannelLink.findFirst({
-    where: { venueId: order.venueId, status: DeliveryChannelStatus.ACTIVE },
+  // Fix B3 (audit §10.2): rutear por el link que ORIGINÓ el pedido, no por "el
+  // primer link ACTIVE del venue" — con >1 canal activo eso mandaba el status
+  // update al proveedor equivocado con un external order id ajeno. El vínculo
+  // Order↔link vive en el DeliveryOrderEvent que creó la orden (eventType 'order').
+  // Si no se encuentra, degrada con log — NUNCA adivina otro link del venue.
+  const originEvent = await prisma.deliveryOrderEvent.findFirst({
+    where: { orderId: order.id, eventType: 'order' },
+    orderBy: { receivedAt: 'asc' },
   })
-  if (!link) {
-    logger.debug(`[🛵 DeliveryDispatch] Venue ${order.venueId} sin DeliveryChannelLink ACTIVE — no-op (order ${order.id})`)
+  if (!originEvent?.channelLinkId) {
+    logger.warn(`[🛵 DeliveryDispatch] Order ${order.id} sin DeliveryOrderEvent originador — no se puede determinar el canal, no-op`, {
+      orderId: order.id,
+    })
+    return
+  }
+
+  // El link originador puede haberse pausado/deshabilitado desde que se creó el
+  // pedido — mismo no-op uniforme que antes, pero ahora sobre EL link correcto,
+  // nunca sobre "cualquier otro activo" del venue.
+  const link = await prisma.deliveryChannelLink.findUnique({ where: { id: originEvent.channelLinkId } })
+  if (!link || link.status !== DeliveryChannelStatus.ACTIVE) {
+    logger.debug(`[🛵 DeliveryDispatch] Link originador ${originEvent.channelLinkId} no ACTIVE/inexistente — no-op (order ${order.id})`)
     return
   }
 
