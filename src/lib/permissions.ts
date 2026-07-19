@@ -771,6 +771,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // Facturación CFDI 4.0 (Pro-tier) — MANAGER can issue and view invoices
     'cfdi:issue',
     'cfdi:view',
+    // Delivery Channels (Uber Eats, Rappi, DiDi vía Deliverect — Premium tier) — read-only
+    'delivery-channels:read',
   ],
 
   /**
@@ -878,6 +880,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'cfdi:configure',
     'cfdi:issue',
     'cfdi:view',
+    // Delivery Channels (Uber Eats, Rappi, DiDi vía Deliverect — Premium tier) — full management
+    'delivery-channels:read',
+    'delivery-channels:manage',
   ],
 
   /**
@@ -994,6 +999,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'cfdi:configure',
     'cfdi:issue',
     'cfdi:view',
+    // Delivery Channels (Uber Eats, Rappi, DiDi vía Deliverect — Premium tier) — full management
+    'delivery-channels:read',
+    'delivery-channels:manage',
   ],
 
   /**
@@ -1504,6 +1512,8 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   cfdi: ['cfdi:configure', 'cfdi:issue', 'cfdi:view'],
   // Platform billing CFDI (Avoqado factura a sus propios clientes) — superadmin-only back-office
   'platform-billing': ['platform-billing:view', 'platform-billing:configure', 'platform-billing:issue', 'platform-billing:delete'],
+  // Delivery Channels (Uber Eats, Rappi, DiDi vía Deliverect — Premium tier, Task 10/11)
+  'delivery-channels': ['delivery-channels:read', 'delivery-channels:manage'],
 }
 
 /**

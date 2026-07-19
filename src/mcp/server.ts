@@ -29,6 +29,7 @@ import { registerPaymentTools } from './tools/payments'
 import { registerOverviewTools } from './tools/overview'
 import { registerTableTools } from './tools/tables'
 import { registerFeatureTools } from './tools/features'
+import { registerDeliveryChannelTools } from './tools/deliveryChannels'
 import { registerProductTools } from './tools/products'
 import { registerTrendTools } from './tools/trends'
 import { registerOrganizationTools } from './tools/organizations'
@@ -102,6 +103,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerOverviewTools(server, scope)
   registerTableTools(server, scope)
   registerFeatureTools(server, scope)
+  registerDeliveryChannelTools(server, scope)
   registerProductTools(server, scope)
   registerTrendTools(server, scope)
   registerOrganizationTools(server, scope)

@@ -34,6 +34,7 @@ export const PREMIUM_ONLY_CODES = [
   'AUTO_REORDER',
   'TRANSACTION_EXPORT',
   'MERCHANT_ROUTING_RULES', // Reglas condicionales de visibilidad/auto-selección de merchants en TPV (2026-07-10)
+  'DELIVERY_CHANNELS', // Delivery apps vía agregador (2026-07-18)
 ] as const
 
 /**
