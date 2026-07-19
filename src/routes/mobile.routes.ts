@@ -1869,6 +1869,18 @@ router.post(
   orderMobileController.splitOrder,
 )
 
+/**
+ * POST /api/v1/mobile/venues/:venueId/orders/:orderId/split-by-seat
+ * "Dividir por puesto" (Square): un cheque por asiento, atómico.
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/split-by-seat',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('TABLE_SERVICE'),
+  checkPermission('orders:update'),
+  orderMobileController.splitOrderBySeat,
+)
+
 router.post(
   '/venues/:venueId/orders/:orderId/discounts',
   authenticateTokenMiddleware,

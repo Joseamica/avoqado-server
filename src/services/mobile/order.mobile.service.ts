@@ -1182,6 +1182,116 @@ export async function splitOrderItems(venueId: string, orderId: string, itemIds:
   }
 }
 
+/**
+ * "Dividir por puesto" (Square): arma un cheque por ASIENTO en UNA transacción.
+ *
+ * 🔴 Por qué una sola transacción y no N llamadas al split normal: si la mesa
+ * tiene 8 asientos y la llamada 5 falla, la cuenta queda partida a medias y el
+ * mesero no sabe qué cobró. O se parte completa, o no se parte.
+ *
+ * Reglas:
+ * - Las líneas SIN asiento se quedan en la cuenta original (no se inventa dueño).
+ * - El asiento más bajo también se queda en la original, para que nunca quede
+ *   vacía y para conservar su historial (es "la cuenta de la mesa").
+ * - Requiere al menos 2 asientos distintos; si no, no hay nada que dividir.
+ */
+export async function splitOrderBySeat(venueId: string, orderId: string, staffId?: string) {
+  const source = await prisma.order.findFirst({
+    where: { id: orderId, venueId },
+    select: {
+      id: true,
+      orderNumber: true,
+      status: true,
+      paymentStatus: true,
+      tableId: true,
+      covers: true,
+      servedById: true,
+      type: true,
+      paidAmount: true,
+      items: { select: { id: true, seat: true } },
+    },
+  })
+  if (!source) throw new NotFoundError('Order not found')
+  if (['COMPLETED', 'CANCELLED', 'DELETED'].includes(source.status)) {
+    throw new BadRequestError('La cuenta ya está cerrada')
+  }
+  if (source.paymentStatus === 'PAID' || source.paymentStatus === 'PARTIAL') {
+    throw new BadRequestError('No se puede dividir una cuenta ya pagada')
+  }
+
+  // Agrupar por asiento; las líneas sin asiento no se mueven.
+  const bySeat = new Map<number, string[]>()
+  for (const item of source.items) {
+    if (item.seat == null) continue
+    const list = bySeat.get(item.seat) ?? []
+    list.push(item.id)
+    bySeat.set(item.seat, list)
+  }
+
+  const seats = [...bySeat.keys()].sort((a, b) => a - b)
+  if (seats.length < 2) {
+    throw new BadRequestError('Se necesitan al menos dos asientos con artículos para dividir por puesto')
+  }
+
+  // El asiento más bajo se queda en la cuenta original.
+  const seatsToMove = seats.slice(1)
+
+  const created = await prisma.$transaction(async tx => {
+    const results: Array<{ id: string; orderNumber: string; seat: number }> = []
+    for (const seat of seatsToMove) {
+      const itemIds = bySeat.get(seat) as string[]
+      const newOrder = await tx.order.create({
+        data: {
+          venueId,
+          tableId: source.tableId,
+          covers: source.covers,
+          orderNumber: `ORD-${Date.now()}-S${seat}`,
+          customerName: `Asiento ${seat}`,
+          servedById: source.servedById,
+          type: source.type,
+          status: 'PENDING',
+          paymentStatus: 'PENDING',
+          kitchenStatus: 'PENDING',
+          subtotal: 0,
+          discountAmount: 0,
+          taxAmount: 0,
+          total: 0,
+          version: 1,
+        },
+        select: { id: true, orderNumber: true },
+      })
+      await tx.orderItem.updateMany({
+        where: { id: { in: itemIds }, orderId: source.id },
+        data: { orderId: newOrder.id },
+      })
+      results.push({ id: newOrder.id, orderNumber: newOrder.orderNumber, seat })
+    }
+    return results
+  })
+
+  const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
+  const sourceTotals = await recalculateOrderTotals(source.id, 0, Number(source.paidAmount || 0))
+  const createdTotals = []
+  for (const c of created) {
+    const t = await recalculateOrderTotals(c.id, 0, 0)
+    createdTotals.push({ id: c.id, orderNumber: c.orderNumber, seat: c.seat, total: t.total })
+  }
+
+  void (await import('../dashboard/activity-log.service')).logAction({
+    action: 'ORDER_SPLIT_BY_SEAT',
+    entity: 'Order',
+    entityId: source.id,
+    staffId,
+    venueId,
+    data: { seats: seatsToMove, created: created.length },
+  })
+
+  return {
+    source: { id: source.id, orderNumber: source.orderNumber, total: sourceTotals.total, seat: seats[0] },
+    created: createdTotals,
+  }
+}
+
 // MARK: - Cash Payment Types
 
 export interface CashPaymentInput {

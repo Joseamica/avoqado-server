@@ -340,6 +340,21 @@ export const applyOrderDiscount = async (req: Request, res: Response, next: Next
 }
 
 /**
+ * POST /mobile/venues/:venueId/orders/:orderId/split-by-seat
+ * "Dividir por puesto": un cheque por asiento, en una sola transacción.
+ */
+export const splitOrderBySeat = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, orderId } = req.params
+    const staffId = (req as any).authContext?.userId as string | undefined
+    const result = await orderMobileService.splitOrderBySeat(venueId, orderId, staffId)
+    return res.json({ success: true, data: result })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
  * DELETE /mobile/venues/:venueId/orders/:orderId/discounts/:orderDiscountId
  * TABLE_SERVICE — removes one applied order discount.
  */
