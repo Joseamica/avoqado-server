@@ -146,18 +146,17 @@ describe('delivery_activation_requests', () => {
   // ============================================================
   describe('all-venues call (no venueId)', () => {
     it('never throws for a broad call — filters instead', async () => {
-      mockHasFeatureAccess.mockResolvedValueOnce(true)
-      mockListActivationRequests.mockResolvedValueOnce([])
+      mockListActivationRequests.mockResolvedValueOnce([]) // empty ops queue → no feature check reached
       await expect(call({})).resolves.toBeDefined()
     })
 
     it('includes ONLY venues where the caller has delivery-channels:read AND the feature is entitled', async () => {
-      mockHasFeatureAccess.mockResolvedValueOnce(true) // v1 entitled
       mockListActivationRequests.mockResolvedValueOnce([
         row({ id: 'req-v1', venueId: 'v1' }),
         row({ id: 'req-v2', venueId: 'v2', venue: { name: 'Venue Dos', slug: 'venue-dos' } }),
         row({ id: 'req-foreign', venueId: 'foreign-org-venue', venue: { name: 'Ajeno', slug: 'ajeno' } }),
       ])
+      mockHasFeatureAccess.mockResolvedValueOnce(true) // v1 entitled
 
       const out = parse(await call({}))
 
@@ -166,43 +165,78 @@ describe('delivery_activation_requests', () => {
       // (mocked as a cross-tenant ops query) returning both.
       expect(out.count).toBe(1)
       expect(out.requests.map((r: { id: string }) => r.id)).toEqual(['req-v1'])
-      // Only the permitted venue (v1) is checked for feature entitlement — v2 never reaches it.
+      // Only the permitted venue that HAS a row (v1) is checked for feature entitlement.
       expect(mockHasFeatureAccess).toHaveBeenCalledTimes(1)
       expect(mockHasFeatureAccess).toHaveBeenCalledWith('v1', 'DELIVERY_CHANNELS')
     })
 
     it('excludes a permitted venue that lacks the DELIVERY_CHANNELS feature entitlement', async () => {
+      mockListActivationRequests.mockResolvedValueOnce([row({ id: 'req-v1', venueId: 'v1' })])
       mockHasFeatureAccess.mockResolvedValueOnce(false) // v1 has the permission but not the plan
+
       const out = parse(await call({}))
 
       expect(out.count).toBe(0)
       expect(out.requests).toEqual([])
-      expect(mockListActivationRequests).not.toHaveBeenCalled()
+      expect(mockHasFeatureAccess).toHaveBeenCalledWith('v1', 'DELIVERY_CHANNELS')
     })
 
-    it('short-circuits with an empty result and NO DB read when zero venues qualify', async () => {
-      const scopedEmpty = {
+    // Pool-safety (coordinator's Important): the feature-access fan-out must be bounded to venues
+    // that ACTUALLY have rows, NEVER the whole scope. For a SUPERADMIN, scope.allowedVenueIds is the
+    // entire platform (hundreds) — resolving venueHasFeatureAccess for each would be hundreds of
+    // concurrent resolutions (≥1 query each) against a ~18-conn pool → P2024/pool-exhaustion.
+    it('bounds the feature-access fan-out to venues WITH rows, never the whole scope (SUPERADMIN/large-org pool safety)', async () => {
+      const manyVenueIds = Array.from({ length: 50 }, (_, i) => `venue-${i}`)
+      const bigScope = {
         staffId: 's1',
         activeOrg: 'o1',
-        allowedVenueIds: ['v2'],
-        perVenueAccess: new Map([['v2', { canRead: false }]]),
+        allowedVenueIds: manyVenueIds,
+        perVenueAccess: new Map(manyVenueIds.map(v => [v, { canRead: true }])),
       } as unknown as McpScope
       const localHandlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
       registerDeliveryActivationTools(
         { tool: (...a: unknown[]) => localHandlers.set(a[0] as string, a[a.length - 1] as never) } as never,
-        scopedEmpty,
+        bigScope,
       )
+      const bigCall = (args: Record<string, unknown>) => localHandlers.get('delivery_activation_requests')!(args, {})
 
-      const out = parse(await localHandlers.get('delivery_activation_requests')!({}, {}))
+      // Only 2 of the 50 in-scope venues actually have an activation request in the ops queue.
+      mockListActivationRequests.mockResolvedValueOnce([row({ id: 'r-3', venueId: 'venue-3' }), row({ id: 'r-7', venueId: 'venue-7' })])
+      mockHasFeatureAccess.mockResolvedValueOnce(true).mockResolvedValueOnce(true) // both entitled
+
+      const out = parse(await bigCall({}))
+
+      // The whole point: feature access resolved ONLY for the 2 venues-with-rows, not all 50.
+      expect(mockHasFeatureAccess).toHaveBeenCalledTimes(2)
+      expect(mockHasFeatureAccess).toHaveBeenCalledWith('venue-3', 'DELIVERY_CHANNELS')
+      expect(mockHasFeatureAccess).toHaveBeenCalledWith('venue-7', 'DELIVERY_CHANNELS')
+      expect(out.count).toBe(2)
+    })
+
+    it('does not resolve feature access when no in-scope permitted venue has rows', async () => {
+      // Rows exist only for v2 (in scope but no read) and a foreign venue → nothing permitted.
+      // The ops queue IS read (1 query, unavoidable now), but ZERO feature resolutions run —
+      // the pool-safety property still holds even when the queue is non-empty.
+      mockListActivationRequests.mockResolvedValueOnce([
+        row({ id: 'req-v2', venueId: 'v2', venue: { name: 'Venue Dos', slug: 'venue-dos' } }),
+        row({ id: 'req-foreign', venueId: 'foreign-org-venue', venue: { name: 'Ajeno', slug: 'ajeno' } }),
+      ])
+
+      const out = parse(await call({}))
 
       expect(out).toEqual({ count: 0, requests: [] })
       expect(mockHasFeatureAccess).not.toHaveBeenCalled()
-      expect(mockListActivationRequests).not.toHaveBeenCalled()
+    })
+
+    it('returns an empty result without a feature check when the ops queue is empty', async () => {
+      mockListActivationRequests.mockResolvedValueOnce([])
+      const out = parse(await call({}))
+      expect(out).toEqual({ count: 0, requests: [] })
+      expect(mockHasFeatureAccess).not.toHaveBeenCalled()
     })
 
     it('applies the status filter across the all-venues call too', async () => {
-      mockHasFeatureAccess.mockResolvedValueOnce(true)
-      mockListActivationRequests.mockResolvedValueOnce([])
+      mockListActivationRequests.mockResolvedValueOnce([]) // empty → no feature check reached
       await call({ status: 'DISMISSED' })
       expect(mockListActivationRequests).toHaveBeenCalledWith({ status: 'DISMISSED' })
     })

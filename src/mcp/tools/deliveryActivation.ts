@@ -1,7 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { DeliveryActivationStatus } from '@prisma/client'
-import { listActivationRequests } from '@/services/delivery-channels/core/deliveryActivation.service'
+import { listActivationRequests, type ActivationRequestWithVenue } from '@/services/delivery-channels/core/deliveryActivation.service'
 import { hasPermission } from '@/services/access/access.service'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 import type { McpScope } from '../scope'
@@ -37,32 +37,38 @@ export function registerDeliveryActivationTools(server: McpServer, scope: McpSco
       status: z.enum(STATUS_VALUES).optional().describe('Filtra por status: PENDING, CONTACTED, CONNECTED o DISMISSED'),
     },
     async ({ venueId, status }) => {
-      let venueIds: string[]
+      const filter = status ? { status } : undefined
+      let scoped: ActivationRequestWithVenue[]
+
       if (venueId) {
         guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
         guard.requirePermission('delivery-channels:read', venueId) // mirror the dashboard's delivery-channels:read gate (MANAGER+)
         const gate = await planGateMessage(venueId, 'DELIVERY_CHANNELS', 'Las solicitudes de activación de delivery') // PREMIUM tier
         if (gate) return text({ ok: false, planRequired: true, feature: 'DELIVERY_CHANNELS', error: gate })
-        venueIds = [venueId]
+        const rows = await listActivationRequests(filter)
+        scoped = rows.filter(r => r.venueId === venueId)
       } else {
         // Cross-venue call: NEVER throw — a broad "show me all my venues" ask should just return
-        // whatever the caller is entitled to see, filtering out venues that fail either gate
-        // (same two checks as the single-venue branch above, applied per-venue instead of thrown).
-        const permitted = scope.allowedVenueIds.filter(v => {
+        // whatever the caller is entitled to see. Fetch the ops queue FIRST (1 query, low volume),
+        // THEN bound the per-venue feature fan-out to venues that ACTUALLY have rows — never the
+        // whole scope. For a SUPERADMIN, scope.allowedVenueIds is the entire platform (hundreds);
+        // resolving venueHasFeatureAccess for every one of them would be hundreds of concurrent
+        // resolutions (≥1 query each) against a ~18-conn pool → P2024/pool-exhaustion (the repo has
+        // hit this before — see memory pool 9→18 + analyticsLimiter). Filtering to venues-with-rows
+        // keeps the fan-out tiny (the ops queue is small), so it stays safe for large orgs.
+        const rows = await listActivationRequests(filter)
+        // Scope + permission are pure in-memory checks (no queries) — apply them first to shrink
+        // the set BEFORE the only DB fan-out (the feature check) runs.
+        const permitted = [...new Set(rows.map(r => r.venueId))].filter(v => {
           const access = scope.perVenueAccess.get(v)
-          return !!access && hasPermission(access, 'delivery-channels:read')
+          return scope.allowedVenueIds.includes(v) && !!access && hasPermission(access, 'delivery-channels:read')
         })
         const entitled = await Promise.all(permitted.map(v => venueHasFeatureAccess(v, 'DELIVERY_CHANNELS')))
-        venueIds = permitted.filter((_, i) => entitled[i])
-        if (venueIds.length === 0) return text({ count: 0, requests: [] })
+        // listActivationRequests is cross-tenant by design (ops queue) — this allow-set is what keeps
+        // the customer MCP tenant-isolated. Never remove it / never trust the service's rows directly.
+        const allowed = new Set(permitted.filter((_, i) => entitled[i]))
+        scoped = rows.filter(r => allowed.has(r.venueId))
       }
-
-      const allowed = new Set(venueIds)
-      const rows = await listActivationRequests(status ? { status } : undefined)
-      // listActivationRequests is cross-tenant by design (ops queue) — this filter is what keeps
-      // the customer MCP tenant-isolated. Never remove it / never pass venueIds into a query the
-      // service doesn't support instead of this post-filter.
-      const scoped = rows.filter(r => allowed.has(r.venueId))
 
       return text({
         count: scoped.length,
