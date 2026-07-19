@@ -230,6 +230,8 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   OrderItemModifier: 'Orders, KDS & Cash',
   OrderAction: 'Orders, KDS & Cash',
   OrderDiscount: 'Orders, KDS & Cash',
+  ServiceCharge: 'Orders, KDS & Cash',
+  OrderServiceCharge: 'Orders, KDS & Cash',
   OrderCustomer: 'Orders, KDS & Cash',
   Shift: 'Orders, KDS & Cash',
   KdsOrder: 'Orders, KDS & Cash',

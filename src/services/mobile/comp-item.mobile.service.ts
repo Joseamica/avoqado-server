@@ -158,25 +158,45 @@ export async function recalculateOrderTotals(orderId: string, fallbackDiscount: 
     newDiscountAmount = fallbackDiscount
   }
 
+  // Cobros por servicio: se calculan sobre la base YA descontada (lo que Square
+  // hace) y SUMAN al total — es ingreso gravable del negocio, no propina.
+  const base = Math.max(0, newSubtotal - newDiscountAmount)
+  const serviceCharges = await prisma.orderServiceCharge.findMany({ where: { orderId } })
+  let newServiceChargeAmount = 0
+  for (const sc of serviceCharges) {
+    const amount =
+      sc.type === 'PERCENTAGE'
+        ? Math.round(((base * Number(sc.value)) / 100) * 100) / 100
+        : Number(sc.amount)
+    // Un % se re-calcula cuando cambia la cuenta; un monto fijo se respeta.
+    if (sc.type === 'PERCENTAGE' && amount !== Number(sc.amount)) {
+      await prisma.orderServiceCharge.update({ where: { id: sc.id }, data: { amount } })
+    }
+    newServiceChargeAmount += amount
+  }
+  newServiceChargeAmount = Math.round(newServiceChargeAmount * 100) / 100
+
   // A check can never owe a negative amount: a FIXED_AMOUNT discount bigger
   // than the subtotal (catalog discount or loyalty redemption on a shrinking
   // check) would otherwise store a negative total and corrupt the corte.
-  const newTotal = Math.max(0, newSubtotal - newDiscountAmount)
+  const newTotal = Math.round((base + newServiceChargeAmount) * 100) / 100
   const updated = await prisma.order.update({
     where: { id: orderId },
     data: {
       subtotal: newSubtotal,
       discountAmount: newDiscountAmount,
+      serviceChargeAmount: newServiceChargeAmount,
       total: newTotal,
       remainingBalance: Math.max(0, newTotal - paidAmount),
       version: { increment: 1 },
     },
-    select: { subtotal: true, discountAmount: true, total: true, version: true },
+    select: { subtotal: true, discountAmount: true, serviceChargeAmount: true, total: true, version: true },
   })
 
   return {
     subtotal: Number(updated.subtotal),
     discountAmount: Number(updated.discountAmount),
+    serviceChargeAmount: Number(updated.serviceChargeAmount),
     total: Number(updated.total),
     version: updated.version,
   }

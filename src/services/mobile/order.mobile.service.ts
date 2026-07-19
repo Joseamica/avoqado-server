@@ -176,6 +176,9 @@ export interface OrderDetailResponse {
   orderType: string
   /** Applied ORDER-level discounts (check panel Descuentos). */
   discounts: Array<{ id: string; name: string; amount: number }>
+  /** Cobros por servicio aplicados — SUMAN al total (ingreso gravable). */
+  serviceChargeAmount: number
+  serviceCharges: Array<{ id: string; name: string; amount: number; isAutomatic: boolean }>
   createdAt: Date
   items: Array<{
     id: string
@@ -793,6 +796,7 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
       servedBy: {
         select: { firstName: true, lastName: true },
       },
+      serviceCharges: true,
       items: {
         include: {
           product: {
@@ -863,6 +867,13 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
       id: d.id,
       name: d.name,
       amount: Number(d.amount),
+    })),
+    serviceChargeAmount: Number(flattenedOrder.serviceChargeAmount ?? 0),
+    serviceCharges: (flattenedOrder.serviceCharges || []).map((sc: any) => ({
+      id: sc.id,
+      name: sc.name,
+      amount: Number(sc.amount),
+      isAutomatic: sc.isAutomatic,
     })),
     createdAt: flattenedOrder.createdAt,
     items: flattenedOrder.items.map((item: any) => ({
@@ -970,6 +981,14 @@ export async function updateOrderDetails(venueId: string, orderId: string, input
     data,
     select: { customerName: true, specialRequests: true, covers: true, customerId: true, type: true },
   })
+
+  // Cambiar el conteo de comensales puede disparar (o retirar) la propina
+  // automática por grupo — el cargo debe seguir al conteo, no quedarse pegado.
+  if (input.covers != null) {
+    const { syncAutomaticServiceCharges } = await import('./service-charge.mobile.service')
+    await syncAutomaticServiceCharges(venueId, orderId)
+  }
+
   return {
     name: updated.customerName,
     notes: updated.specialRequests,

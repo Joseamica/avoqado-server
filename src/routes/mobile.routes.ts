@@ -16,6 +16,7 @@ import * as paymentMobileController from '../controllers/mobile/payment.mobile.c
 import * as terminalPaymentMobileController from '../controllers/mobile/terminal-payment.mobile.controller'
 import * as inventoryMobileController from '../controllers/mobile/inventory.mobile.controller'
 import * as loyaltyMobileController from '../controllers/mobile/loyalty.mobile.controller'
+import * as serviceChargeMobileController from '../controllers/mobile/service-charge.mobile.controller'
 import * as receiptMobileController from '../controllers/mobile/receipt.mobile.controller'
 import * as reportsMobileController from '../controllers/mobile/reports.mobile.controller'
 import * as customerController from '../controllers/dashboard/customer.dashboard.controller'
@@ -1893,6 +1894,42 @@ router.post(
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   orderMobileController.compWholeOrder,
+)
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/service-charges
+ * Catálogo de cobros por servicio (propina automática por grupo, descorche…).
+ */
+router.get(
+  '/venues/:venueId/service-charges',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('TABLE_SERVICE'),
+  checkPermission('orders:read'),
+  serviceChargeMobileController.listServiceCharges,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/orders/:orderId/service-charges
+ * Aplica un cobro por servicio a la cuenta abierta — SUMA al total (ingreso
+ * gravable del negocio, a diferencia de la propina).
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/service-charges',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('TABLE_SERVICE'),
+  checkPermission('orders:update'),
+  serviceChargeMobileController.applyServiceCharge,
+)
+
+/**
+ * DELETE /api/v1/mobile/venues/:venueId/orders/:orderId/service-charges/:orderServiceChargeId
+ */
+router.delete(
+  '/venues/:venueId/orders/:orderId/service-charges/:orderServiceChargeId',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('TABLE_SERVICE'),
+  checkPermission('orders:update'),
+  serviceChargeMobileController.removeServiceCharge,
 )
 
 /**

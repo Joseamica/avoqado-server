@@ -25,6 +25,7 @@ import { registerCustomerGroupTools } from './tools/customerGroups'
 import { registerCreditPackTools } from './tools/creditPacks'
 import { registerShiftTools } from './tools/shifts'
 import { registerDiscountTools } from './tools/discounts'
+import { registerServiceChargeTools } from './tools/service-charges'
 import { registerPaymentTools } from './tools/payments'
 import { registerOverviewTools } from './tools/overview'
 import { registerTableTools } from './tools/tables'
@@ -99,6 +100,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerCreditPackTools(server, scope)
   registerShiftTools(server, scope)
   registerDiscountTools(server, scope)
+  registerServiceChargeTools(server, scope)
   registerPaymentTools(server, scope)
   registerOverviewTools(server, scope)
   registerTableTools(server, scope)
