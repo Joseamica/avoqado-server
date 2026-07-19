@@ -7,14 +7,15 @@ import {
 describe('verifyDeliverectHmac', () => {
   const secret = 'test-secret'
   const body = Buffer.from(JSON.stringify({ channelOrderId: 'abc123' }))
-  const validSig = crypto.createHmac('sha256', secret).update(body).digest('base64')
+  // Doc: https://developers.deliverect.com/reference/hmac-authentication — hex, NOT base64.
+  const validSig = crypto.createHmac('sha256', secret).update(body).digest('hex')
 
-  it('acepta firma válida', () => {
+  it('acepta firma válida (hex, spec §10.1.1)', () => {
     expect(verifyDeliverectHmac(body, validSig, secret)).toBe(true)
   })
 
   it('rechaza firma inválida', () => {
-    expect(verifyDeliverectHmac(body, 'AAAA' + validSig.slice(4), secret)).toBe(false)
+    expect(verifyDeliverectHmac(body, 'aaaa' + validSig.slice(4), secret)).toBe(false)
   })
 
   it('rechaza header ausente', () => {
@@ -29,7 +30,25 @@ describe('verifyDeliverectHmac', () => {
     expect(verifyDeliverectHmac(body, 'corta', secret)).toBe(false)
   })
 
-  it('exporta el nombre del header', () => {
-    expect(DELIVERECT_HMAC_HEADER).toBe('x-deliverect-hmac-sha256')
+  it('exporta el nombre del header documentado (spec §10.1.1: x-server-authorization-hmac-sha256)', () => {
+    expect(DELIVERECT_HMAC_HEADER).toBe('x-server-authorization-hmac-sha256')
+  })
+
+  // ============================================================
+  // FIX C1 (audit, spec §10.1.1): el código asumía header
+  // `x-deliverect-hmac-sha256` + base64 — la doc real usa
+  // `x-server-authorization-hmac-sha256` + hex. Con el valor viejo, TODO
+  // webhook auténtico se rechazaba (401). timingSafeEqual no salva comparar
+  // la representación equivocada.
+  // ============================================================
+  describe('encoding documentado (Fix C1)', () => {
+    it('rechaza la firma correcta codificada en base64 (encoding viejo, ya no es el esperado)', () => {
+      const base64Sig = crypto.createHmac('sha256', secret).update(body).digest('base64')
+      expect(verifyDeliverectHmac(body, base64Sig, secret)).toBe(false)
+    })
+
+    it('el header exportado YA NO es el nombre viejo asumido por el scaffold', () => {
+      expect(DELIVERECT_HMAC_HEADER).not.toBe('x-deliverect-hmac-sha256')
+    })
   })
 })
