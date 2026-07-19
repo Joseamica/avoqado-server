@@ -191,11 +191,15 @@ export class DeliveryWebhookReconciliationJob {
       OR: [{ error: null }, { error: { not: DeliveryWebhookReconciliationJob.ORPHANED_MARKER } }],
     } satisfies Prisma.DeliveryOrderEventWhereInput
 
-    // Fetch rows BEFORE flipping them so we can emit a per-event alert with
-    // enough detail for manual reconciliation (pattern: blumon recon job).
+    // Fetch rows BEFORE flipping them so we can emit a per-event alert with enough detail
+    // for manual reconciliation (pattern: blumon recon job). Capped at BATCH_SIZE — same cap
+    // as the rest of the job — so a large orphan backlog can't be loaded into memory (and
+    // logged, one line per row) in a single unbounded pass; it finishes across subsequent
+    // 2-minute passes instead.
     const toOrphan = await prisma.deliveryOrderEvent.findMany({
       where: orphanWhere,
       select: { id: true, provider: true, externalEventId: true, status: true, venueId: true, receivedAt: true },
+      take: this.BATCH_SIZE,
     })
 
     if (toOrphan.length === 0) return 0
@@ -211,8 +215,13 @@ export class DeliveryWebhookReconciliationJob {
       })
     }
 
+    // Scope the bulk flip to EXACTLY the rows just fetched/logged above — `updateMany` has no
+    // `take`, so re-using the broader `orphanWhere` here would flip every matching row
+    // regardless of the fetch cap, silently marking rows ORPHANED (and excluding them from all
+    // future passes) WITHOUT ever emitting their per-event alert. Scoping by id keeps the
+    // alert and the state change in lockstep and keeps this pass genuinely bounded.
     const result = await prisma.deliveryOrderEvent.updateMany({
-      where: orphanWhere,
+      where: { id: { in: toOrphan.map(row => row.id) } },
       data: {
         status: DeliveryOrderEventStatus.FAILED,
         error: DeliveryWebhookReconciliationJob.ORPHANED_MARKER,

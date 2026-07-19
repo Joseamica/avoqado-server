@@ -212,11 +212,44 @@ describe('DeliveryWebhookReconciliationJob', () => {
     const result = await new DeliveryWebhookReconciliationJob().runOnce()
 
     expect(mockedParse).not.toHaveBeenCalled()
-    const orphanWhere = mockedUpdateMany.mock.calls[0][0].where
-    expect(orphanWhere.OR).toEqual([{ error: null }, { error: { not: 'ORPHANED' } }])
-    expect(orphanWhere.receivedAt.lt).toEqual(new Date(NOW - 24 * 3600_000))
+    // Fix 4 (audit): the cutoff/exclusion + take-cap now live on the FETCH (markOrphaned's
+    // own findMany, the 2nd findMany call in the pass) — the bulk update is scoped to
+    // exactly the fetched batch's ids (see below), not this broader where.
+    const orphanFetchWhere = mockedFindMany.mock.calls[1][0].where
+    expect(orphanFetchWhere.OR).toEqual([{ error: null }, { error: { not: 'ORPHANED' } }])
+    expect(orphanFetchWhere.receivedAt.lt).toEqual(new Date(NOW - 24 * 3600_000))
+    expect(mockedFindMany.mock.calls[1][0].take).toBe(50)
+    // The bulk flip is scoped to EXACTLY the fetched (and logged) batch — never the broader
+    // orphanWhere — so a row is never marked ORPHANED without first getting its per-event alert.
+    const orphanUpdateWhere = mockedUpdateMany.mock.calls[0][0].where
+    expect(orphanUpdateWhere).toEqual({ id: { in: ['evt_stale'] } })
     expect(mockedUpdateMany.mock.calls[0][0].data).toMatchObject({ status: DeliveryOrderEventStatus.FAILED, error: 'ORPHANED' })
     expect(result.orphaned).toBe(1)
+  })
+
+  it('Fix 4 (audit): caps the orphan sweep fetch at BATCH_SIZE, and scopes the bulk update to exactly that fetched batch (never the wider backlog)', async () => {
+    const batch = Array.from({ length: 50 }, (_, i) => ({
+      id: `evt_stale_${i}`,
+      provider: 'DELIVERECT',
+      externalEventId: `ext_stale_${i}`,
+      status: DeliveryOrderEventStatus.FAILED,
+      venueId: 'venue_1',
+      receivedAt: new Date(NOW - 25 * 3600_000),
+    }))
+    mockedFindMany.mockResolvedValueOnce([]).mockResolvedValueOnce(batch)
+    mockedUpdateMany.mockResolvedValue({ count: 50 })
+
+    const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+    // The fetch that feeds the sweep is capped at BATCH_SIZE, same as the rest of the job —
+    // an unbounded findMany here would load the ENTIRE expired backlog into memory in one
+    // pass (possible memory burst) and emit one logger.error per row in one shot.
+    expect(mockedFindMany.mock.calls[1][0].take).toBe(50)
+    // The bulk flip never targets more than what was actually fetched/logged this pass —
+    // a backlog bigger than BATCH_SIZE finishes across subsequent 2-minute passes instead
+    // of being swept unbounded in one shot.
+    expect(mockedUpdateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: { in: batch.map(row => row.id) } } }))
+    expect(result.orphaned).toBe(50)
   })
 
   it('never re-touches a row already marked ORPHANED — both the scan and the sweep exclude error:"ORPHANED" (no infinite loop)', async () => {
