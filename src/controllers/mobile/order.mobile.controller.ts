@@ -249,7 +249,8 @@ export const addItemsToOrder = async (req: Request, res: Response, next: NextFun
       return res.status(400).json({ success: false, message: 'version (número) es requerida para concurrencia optimista' })
     }
 
-    const updatedOrder = await orderTpvService.addItemsToOrder(venueId, orderId, items, version)
+    // Mesas mandan DELTAS (solo la ronda nueva): las cantidades se ACUMULAN.
+    const updatedOrder = await orderTpvService.addItemsToOrder(venueId, orderId, items, version, true)
 
     // Cobros automáticos por comensales: al crecer el subtotal la regla puede
     // empezar a aplicar (el recompute del TPV ya refresca los % existentes).

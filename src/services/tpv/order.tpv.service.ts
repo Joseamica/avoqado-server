@@ -1203,6 +1203,17 @@ export async function addItemsToOrder(
   orderId: string,
   items: AddOrderItemInput[],
   expectedVersion: number,
+  /**
+   * 🔴 MONEY — semántica del merge cuando la línea ya existe en la orden:
+   * - false (TPV register): el cliente re-manda el CARRITO COMPLETO, así que la
+   *   cantidad entrante es el estado ABSOLUTO y se reemplaza (comportamiento
+   *   histórico intacto).
+   * - true (mesas /mobile): el cliente manda SOLO la ronda nueva (DELTA) — la
+   *   cantidad se SUMA. Sin esto, pedir una segunda Clásica se interpretaba
+   *   como "que quede 1": la cocina la preparaba y la cuenta no la cobraba
+   *   (cazado en smoke de hardware 2026-07-19).
+   */
+  accumulateQuantities: boolean = false,
 ): Promise<Order & { tableName: string | null }> {
   logger.info(`📝 [ORDER SERVICE] Adding ${items.length} items to order ${orderId} (expected version: ${expectedVersion})`)
 
@@ -1579,7 +1590,8 @@ export async function addItemsToOrder(
 
       if (existingItemWithModifiers) {
         // ⭐ UPDATE existing item instead of creating new one
-        const updatedQuantity = item._count > 1 ? existingItemWithModifiers.quantity + item.quantity : item.quantity
+        const updatedQuantity =
+          accumulateQuantities || item._count > 1 ? existingItemWithModifiers.quantity + item.quantity : item.quantity
         const updatedTotal = lineTotalFor(updatedQuantity)
 
         logger.info(
