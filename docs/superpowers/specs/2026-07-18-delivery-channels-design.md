@@ -197,104 +197,80 @@ Restock de inventario sigue el flujo existente de cancelación. El reembolso al 
 
 ## 10. Abierto (se resuelve con credenciales de staging)
 
-> **Punch-list de revalidación de staging (auditoría G-Stack + Codex GPT-5, 2026-07-19).** El scaffold se construyó contra doc pública
-> ANTES de tener credenciales; la auditoría cruzó el código contra la doc actual de Deliverect y encontró que **varios contratos asumidos
-> difieren de lo documentado**. NO asumir la superficie: cada punto de §10.1 trae el valor **documentado** a validar el día 1 de staging
-> (con URL). §10.2 es endurecimiento de concurrencia diferido. §10.3 es lo que la auditoría YA endureció (baseline). §10.4 son decisiones de
-> seguridad que requieren al founder. **Ningún tenant tiene canales ACTIVE todavía**, así que nada de esto afecta prod hoy — pero TODO debe
-> cerrarse antes de ingerir un pedido real.
+> **Estado tras la auditoría + pasada de endurecimiento (G-Stack + Codex GPT-5, 2026-07-19).** El scaffold se construyó contra doc pública
+> ANTES de tener credenciales; la auditoría lo cruzó contra la doc actual de Deliverect y encontró que varios contratos asumidos diferían.
+> **Esta pasada ya ALINEÓ el código al contrato documentado y endureció todo lo independiente del contrato** (16 commits, ~1.5k tests verde).
+> Lo que queda NO es reimplementar — es **confirmar los valores alineados contra la cuenta real** (§10.1), unas pocas mecánicas solo
+> observables con pedidos reales (§10.2/§10.5), y **1 decisión de plataforma** (§10.4). **Ningún tenant tiene canales ACTIVE todavía** → cero
+> impacto en prod hoy. Para "encender con un flip" solo falta: credenciales de staging + confirmar los valores marcados `REVALIDAR EN STAGING`.
 
-### 10.1 Contrato Deliverect real — money/correctness (validar contra doc, día 1 staging)
+### 10.1 Ya alineado al contrato documentado — staging solo CONFIRMA el valor (no reimplementa)
 
-Cada uno cambia dinero o el ciclo de vida del pedido. El código actual (scaffold) asumió distinto; el valor **documentado** es la referencia:
+Cada uno estaba mal según la doc y **ya se corrigió** al valor documentado (con test que sirve de checklist). Lo único que queda por punto es
+confirmar contra la cuenta real (los `REVALIDAR EN STAGING` que quedaron en el código son valores que la doc no fija al 100%):
 
-1. **HMAC — header y encoding difieren.** Código: header `x-deliverect-hmac-sha256`, Base64, secreto random por-link. Documentado: header
-   **`x-server-authorization-hmac-sha256`**, **hex**, y el secreto es el **identificador de location/integración** (no un random nuestro).
-   Con lo actual, TODO webhook auténtico se rechaza. `timingSafeEqual` no salva comparar la representación equivocada.
-   `deliverect.hmac.ts` + `deliveryChannelLink.service.ts` (generación del secreto). Doc:
-   <https://developers.deliverect.com/reference/hmac-authentication>.
-2. **`orderIsAlreadyPaid` / `payment.due` ignorados → ingresos fantasma.** Deliverect manda un monto de pago para pedidos **pagados Y no
-   pagados**; hay que leer `orderIsAlreadyPaid` para decidir si crear un Payment `COMPLETED`. Código: SIEMPRE marca confirmado+pagado y crea
-   Payment completo → un pedido de efectivo/no-pagado se vuelve ingreso liquidado ficticio. `deliverect.mapper.ts` +
-   `deliveryOrderIngestion.service.ts`. Doc: <https://developers.deliverect.com/page/glossary-pos-orders>.
-3. **Descuento con signo NEGATIVO.** Deliverect manda `discountTotal` negativo; el código lo guarda directo en el campo positivo
-   `discountAmount` y los cálculos lo RESTAN → un descuento de `-10` sube el neto 10. Validar el signo real y normalizar a magnitud positiva
-   (o restar el negativo, según cómo el resto del sistema use `discountAmount`). Doc:
-   <https://developers.deliverect.com/docs/how-are-discounts-sent>. (Nota: la validación de bounds de §10.3 excluye a propósito
-   `discountAmount` justo para no romper este signo — resolver los dos juntos.)
-4. **Modificadores no multiplicados por la cantidad del item padre.** Dos productos con un modificador de $15 registran $15, no $30.
-   Deliverect define `cantidad_modificador × cantidad_producto`. `deliverect.mapper.ts` + `deliveryOrderIngestion.service.ts`. Doc:
-   <https://developers.deliverect.com/docs/how-to-interpret-modifiers-and-the-quantity-ordered>.
-5. **`serviceChargeAmount` / `deliveryFeeAmount` se normalizan pero NUNCA se persisten.** El `total` los incluye pero los campos quedan en 0 →
-   pedidos internamente inconsistentes + reporte/fiscal mal. Persistirlos al ingerir (Order ya tiene `serviceChargeAmount` de otra sesión;
-   `deliveryFeeAmount` necesita columna o mapeo). `deliveryOrderIngestion.service.ts`.
-6. **Endpoint de status POS→canal.** Código: `POST /orders/{channelOrderId}/status` con solo `{status}`. Documentado:
-   **`/orderStatus/{Deliverect _id}`** con campos de body adicionales. Además los códigos: código mapea PREPARING/READY/PICKED_UP a
-   **30/40/50**; documentado preparación/listo/final = **50/70/90**. `deliverect.client.ts` + `deliverect.mapper.ts`. Doc:
-   <https://developers.deliverect.com/reference/update-order-status-1>.
-7. **Modo ocupado (busy/snooze).** Código: `POST /locations/{id}/busy` con `{paused}`. Documentado: **`/updateStoreStatus/{locationId}`** con
-   **`isActive`** (inverso de `paused`). Y `pauseChannelLink` se traga el fallo tras cambiar el estado local → la API reporta éxito mientras
-   el marketplace sigue abierto. `deliverect.client.ts` + `deliveryChannelLink.service.ts`. Doc:
-   <https://developers.deliverect.com/reference/update-store-status>.
-8. **Cancelaciones entrantes = mismo `channelOrderId` con status 100.** El dedup actual las clasifica como DUPLICATE y ACKea; el pedido local
-   queda CONFIRMED/PAID. El handler de cancel se implementa aquí, junto con la corrección del dedup de §10.2. Doc:
-   <https://developers.deliverect.com/reference/create-channel-order>.
-9. **Mecánica del product sync** (pull de Deliverect vs push nuestro) y del snooze API; menu snapshot traversal simplificado (lee
-   MenuCategory directo, ignora la cadena Menu→MenuCategoryAssignment y su scheduling; `autoSyncMenu` es dead-code hasta el trigger
-   debounced). Cerrar con la mecánica real de product sync.
-10. **Formato de montos por campo** — confirmar centavos vs mayor en TODOS los endpoints (el mapper convierte a pesos en el borde; validar
-    caso por caso).
+| Corregido (commit) | Ahora | Staging confirma |
+|---|---|---|
+| HMAC header + encoding (`b1c197e0`) | header `x-server-authorization-hmac-sha256` + hex | el **secreto real** (Deliverect lo entrega en el onboarding = id de location/integración; hoy es un random marcado) |
+| Endpoint + códigos de status (`2597fa13`/`12d2f0be`) | `/orderStatus/{externalId}`, prep/ready/final = **50/70/90** | campos de body adicionales del endpoint + taxonomía de códigos ACCEPTED/CANCELLED/FAILED (solo prep/ready/final estaban en la doc) |
+| Modo ocupado (`2597fa13`) | `/updateStoreStatus/{locationId}` con `isActive = !paused`; el fallo del provider ahora **propaga** (no éxito falso) | — |
+| Signo del descuento (`12d2f0be`) | `Math.abs` → magnitud positiva en `discountAmount` | — |
+| Modifier × cantidad del padre (`12d2f0be`/`9d3348c2`) | subtotal e `OrderItem.total` multiplican por la qty del padre | — |
+| serviceCharge + deliveryFee persistidos (`9d3348c2`; columna `deliveryFeeAmount` en `f03f55f1`) | ambos se escriben al ingerir | — |
+| `orderIsAlreadyPaid` gate (`9d3348c2`) | Payment `COMPLETED` **solo si** el pedido viene pagado; si no, Order sin payment completado | representación exacta del no-pagado (paidAmount/remainingBalance) |
+| Clasificar eventType (`1e3a6441`) | 'order' / 'cancel' / 'status' desde el status del payload (100 = cancel) — la cancelación **ya no se traga como duplicado** | catálogo completo de status→eventType más allá de `100=cancel` |
 
-### 10.2 Endurecimiento de concurrencia/lifecycle (diferido — necesita migración o contrato real)
+### 10.2 Endurecimiento de concurrencia/lifecycle — HECHO vs lo que queda
 
-- **Clave de dedup incompleta** (`deliveryWebhookEvent.service.ts`): omite `venueId`/`channelLinkId`, usa solo provider+`channelOrderId`+tipo.
-  `channelOrderId` es del marketplace, NO el `_id` globalmente único de Deliverect → colisión cross-canal/cross-tenant hace que el segundo
-  tenant reciba 200 DUPLICATE y nunca ingiera; el `eventId` devuelto puede ser de otro venue. Fix staging: dedup por el `_id` de Deliverect,
-  o añadir `channelLinkId`+`venueId` al índice único (migración).
-- **Reconciliación sin backoff/attempt-counter/`nextAttemptAt`** (`delivery-webhook-reconciliation.job.ts`): 50 eventos veneno ocupan cada
-  batch por 24h (~720 reintentos c/u) y matan de hambre a los pedidos jóvenes. Fix: campo `attemptCount` + `nextAttemptAt` (migración) +
-  backoff exponencial. (El take-limit del orphan sweep YA se puso — §10.3.)
-- **Reconciliación sin lock distribuido / claim atómico**: múltiples réplicas y pasadas solapadas seleccionan las mismas filas. El upsert de
-  Order reduce duplicación pero sockets/status-calls/bookkeeping no son exactamente-una-vez. Fix: `SELECT … FOR UPDATE SKIP LOCKED` o flip
-  atómico de status a PROCESSING.
-- **Activación: check-then-create sin unique index** (`deliveryActivation.service.ts`): "una solicitud viva por venue" es una carrera; POSTs
-  concurrentes crean duplicados. Además permite transiciones de status arbitrarias (revertir CONNECTED/DISMISSED a vivas). Fix: índice único
-  parcial (una viva por venue) + máquina de transiciones validada.
-- **statusDispatcher elige el primer link activo arbitrario** (`statusDispatcher.service.ts`), no el link/proveedor que originó el pedido →
-  con múltiples canales activos, manda updates por el proveedor equivocado con un external order ID ajeno. Fix: guardar el `channelLinkId`
-  originador en la Order y despachar por él.
-- **`pauseChannelLink(paused:false)` mueve cualquier link (PENDING/DISABLED) directo a ACTIVE**, saltándose el lifecycle de confirmación del
-  proveedor. Fix: gate de transición.
+**Ya hecho esta pasada:**
 
-### 10.3 Ya endurecido en la auditoría (baseline al entrar a staging — 2026-07-19, 4 commits)
+- **Dedup con `channelLinkId`** (`f4685eca` + `@@unique` en `f03f55f1`): el `channelOrderId` del marketplace ya no colisiona cross-tenant.
+- **Reconciliación con backoff + skip-poison** (`5ccca618` + `attemptCount`/`nextAttemptAt` en `f03f55f1`): 50 eventos veneno ya no matan de
+  hambre a los jóvenes (backoff exponencial, `MAX_ATTEMPTS=10`).
+- **statusDispatcher por el link ORIGINADOR** (`4156393d` + índice `orderId` en `20260719150000`): rutea por el canal que originó el pedido,
+  no el "primer activo".
+- **Gate de lifecycle en pause** (`7dc58dbc`): un-pausar solo desde PAUSED; un link PENDING/DISABLED ya no salta a ACTIVE.
+- **Activación race-safe** (`f920585f`): `createActivationRequest` en `$transaction` con re-chequeo; `updateActivationStatus` valida
+  transiciones (CONNECTED/DISMISSED terminales).
 
-- **Bounds de dinero en el webhook** (`deliverect.mapper.ts`): `total`/`unitPrice`/`quantity` deben ser finitos y ≥0 (o >0 qty) → si no, 400.
-  Un `total` negativo de un payload malformado ya NO puede crear una Order/Payment "PAID" con forma de reembolso. (Excluye `discountAmount` a
-  propósito — ver §10.1.3.)
-- **P2025 → 404** en `updateActivationStatus` (antes 500 crudo en id inexistente).
-- **P2002 → 409** en `createChannelLink` (antes 500 en `(provider, externalLocationId)` duplicado).
-- **Orphan sweep con `take` acotado + `updateMany` scopeado a los ids del batch** (antes cargaba todos los expirados sin límite).
-- **`listActivationRequests` con filtro `venueId`/`venueIds`** + el MCP tool single-venue ya NO hace scan cross-tenant (preserva el fix de
-  pool `2c9f1a86`).
+**Queda (follow-up / staging — necesita el payload real o una migración limpia post-merge):**
 
-### 10.4 Decisiones de seguridad para el founder (NO decididas — requieren tu llamada)
+- **Dedup por el `_id` GLOBAL de Deliverect** en vez de `channelOrderId`: el `_id` requiere ver el shape real del webhook. Hoy la llave
+  `channelLinkId+channelOrderId+eventType` ya cierra la colisión cross-tenant; el `_id` es el endurecimiento fino.
+- **Índice único parcial "una viva por venue" a nivel DB** (`WHERE status IN (PENDING,CONTACTED)`): hoy la carrera está cerrada en el servicio
+  con transacción; el índice parcial es SQL crudo que Prisma no modela → se hace en una migración limpia post-merge (no meter drift ahora).
+- **Lock distribuido / claim atómico en la reconciliación** (multi-réplica exactamente-una-vez): `SELECT … FOR UPDATE SKIP LOCKED` o flip
+  atómico a PROCESSING.
+- **Handler COMPLETO de cancelación** (revertir Order/Payment): hoy el evento 'cancel' se persiste distinto, se ACKea y se marca PROCESSED
+  (no se re-ingiere); la reversión real de la orden/pago se implementa con la semántica de staging.
 
-- **Confused-deputy en el link de canal (Codex lo marcó como el hallazgo más explotable).** Hoy `POST /venues/:venueId/channels` vive en el
-  namespace del dashboard, gated por permiso OWNER/ADMIN — un manager de un tenant puede bindear IDs de location/cuenta arbitrarios y luego
-  dispararlos (pause / menu sync) con las credenciales OAuth **platform-wide** de Deliverect; el scoping local por `venueId` solo prueba que
-  es dueño del *link* de Avoqado, no del recurso externo. **Esto coincide con tu decisión de producto "ops/superadmin conecta el canal"**
-  (spec §2): la recomendación natural es **mover la creación/link de canal al namespace superadmin (ops-only)** y dejar solo
-  pausar/modo-accept para OWNER/ADMIN. Alternativa si algún día se quiere self-serve: verificar ownership del recurso Deliverect (claim
-  OAuth del merchant) antes de bindear. Decisión tuya: ¿ops-only ya, o self-serve con verificación después?
-- **Orden feature-antes-de-permiso** (`delivery-channels.routes.ts`): el feature gate corre antes del check de permiso/membresía, así que un
-  autenticado que NO es miembro del `:venueId` puede sondear el plan/trial/suspensión de otro venue por los 403 distintos antes de que
-  `checkPermission` lo niegue. Es un patrón transversal del repo (no solo delivery). Recomendación: permiso/membresía primero, feature
-  después — pero es un cambio cross-cutting que conviene decidir a nivel plataforma, no colar en delivery.
+### 10.3 Baseline de correctness ya endurecido (auditoría previa, 2026-07-19)
 
-### 10.5 Otros abiertos (contrato/mecánica, sin riesgo de dinero)
+- **Bounds de dinero en el webhook** (`deliverect.mapper.ts`): `total`/`unitPrice`/`quantity` finitos y ≥0 → si no, 400. Un total negativo ya
+  NO puede crear una Order/Payment "PAID" con forma de reembolso.
+- **P2025 → 404** en `updateActivationStatus`; **P2002 → 409** en `createChannelLink`.
+- **Orphan sweep con `take` acotado + `updateMany` scopeado a los ids del batch.**
+- **`listActivationRequests` con filtro `venueId`/`venueIds`** + MCP single-venue sin scan cross-tenant.
 
-- Contrato exacto de los webhooks que Deliverect llama al POS (paths/métodos/campos de registro de location) — validar superficie completa.
-- Transiciones de status POS→canal (PREPARING/READY/PICKED_UP): el dispatcher las soporta pero solo el AUTO-accept está cableado; propagar
-  cambios del KDS/TPV requiere tocar controllers compartidos.
-- Hook billing→canal: feature suspendido debería pausar el canal en el proveedor (§7); sin canales reales aún — junto al onboarding que
+### 10.4 Decisiones de seguridad
+
+- **✅ RESUELTO — Confused-deputy del link de canal** (`c28a328f`): crear/linkear un canal (o cambiar su `externalLocationId`/`externalAccountId`)
+  ahora exige el permiso **`delivery-channels:connect`, SUPERADMIN-only** (ausente de `DEFAULT_PERMISSIONS` de todo rol; en el
+  `SUPERADMIN_ONLY_ALLOWLIST` del audit). El PATCH es field-conditional: tocar la identidad externa → `connect` (SUPERADMIN); solo
+  `orderAcceptanceMode`/`autoSyncMenu`/`config` → sigue `delivery-channels:manage` (OWNER/ADMIN retienen pause + toggle de modo). Alinea con
+  la decisión de producto "ops conecta el canal" (§2). **Follow-up cross-repo:** reflejar `delivery-channels:connect` donde ops conecte (UI
+  superadmin), por exact-name (regla de permisos del repo).
+- **⚠️ ABIERTO (decisión de plataforma) — Orden feature-antes-de-permiso** (`delivery-channels.routes.ts`): el feature gate corre antes del
+  check de permiso/membresía, así que un autenticado NO-miembro del `:venueId` puede sondear el plan/trial/suspensión de otro venue por los
+  403 distintos antes de que `checkPermission` lo niegue. Es un **patrón transversal del repo** (no solo delivery) → conviene decidirlo a
+  nivel plataforma (permiso/membresía primero, feature después), no colarlo en delivery. Sin bloquear el go-live de delivery.
+
+### 10.5 Mecánica que genuinamente espera staging (sin riesgo de dinero)
+
+- **Product sync** pull/push + menu snapshot traversal (hoy lee MenuCategory directo, ignora Menu→MenuCategoryAssignment y su scheduling;
+  `autoSyncMenu` es dead-code hasta el trigger debounced) + snooze API.
+- **Propagación de status POS→canal** desde el KDS/TPV (el dispatcher la soporta, pero solo el AUTO-accept está cableado en la ingesta;
+  propagar cambios de estado requiere tocar controllers compartidos).
+- **Hook billing→canal**: feature suspendido debería pausar el canal en el proveedor (§7); sin canales reales aún — junto al onboarding que
   entregue el secreto a Deliverect.
+- **Superficie completa de los webhooks** que Deliverect llama al POS (paths/métodos/campos de registro de location).
