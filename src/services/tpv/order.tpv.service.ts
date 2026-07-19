@@ -7,7 +7,7 @@ import { SocketEventType } from '../../communication/sockets/types'
 import { serializedInventoryService } from '../serialized-inventory/serializedInventory.service'
 import { simRegistrationService } from '../serialized-inventory/simRegistration.service'
 import { moduleService, MODULE_CODES } from '../modules/module.service'
-import { deductInventoryForProduct, getProductInventoryMethod } from '../dashboard/productInventoryIntegration.service'
+import { deductInventoryForProduct, getProductInventoryMethod, getProductInventoryStatus } from '../dashboard/productInventoryIntegration.service'
 import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service'
 import { logAction } from '../dashboard/activity-log.service'
 import {
@@ -1290,6 +1290,21 @@ export async function addItemsToOrder(
     const foundIds = products.map(p => p.id)
     const missingIds = uniqueProductIds.filter(id => !foundIds.includes(id))
     throw new BadRequestError(`Products not found or do not belong to this venue: ${missingIds.join(', ')}`)
+  }
+
+  // 🔴 Backstop de inventario para RONDAS: los tiles del cliente ya bloquean
+  // agotados, pero una app vieja (o un request directo) puede mandarlos igual.
+  // Solo productos RASTREADOS sin stock/porciones se rechazan — sin seguimiento
+  // nunca se bloquea (el inventario es opcional por producto). Corre ANTES de
+  // crear cualquier fila para no dejar rondas parciales, y falla ABIERTO si el
+  // status no se puede calcular (un error de inventario no debe tirar servicio).
+  if (asNewRound) {
+    for (const product of products) {
+      const status = await getProductInventoryStatus(venueId, product.id).catch(() => null)
+      if (status?.inventoryMethod && !status.available) {
+        throw new BadRequestError(`"${product.name}" está agotado`)
+      }
+    }
   }
 
   // Fetch all modifiers if any items have modifiers
