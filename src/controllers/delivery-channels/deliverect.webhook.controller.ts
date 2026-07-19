@@ -8,8 +8,13 @@
  * 2. 404 — channelLinkId inexistente o DISABLED
  * 3. 400 — payload inválido (mapper no pudo normalizar, `deliverect.mapper.ts`, Task 3)
  * 4. 200 SOLO después de persistir el DeliveryOrderEvent (`deliveryWebhookEvent.service.ts`)
- *    - DUPLICATE (evento re-enviado, @@unique dedup) → 200 sin re-procesar
- *    - PROCESSED (ingesta OK) → 200
+ *    con el `eventType` clasificado (Fix C5, spec §10.1.8 — ver `classifyDeliverectEventType`
+ *    abajo: 'order' | 'cancel' | 'status', NUNCA hardcoded 'order'):
+ *    - DUPLICATE (mismo evento re-enviado, @@unique dedup POR eventType) → 200 sin re-procesar
+ *    - eventType !== 'order' ('cancel'/'status') → 200 CANCEL_RECEIVED/STATUS_RECEIVED — el
+ *      evento queda persistido DISTINTO del 'order' original (no lo pisa el dedup) pero el
+ *      pipeline de ingesta normal NO corre sobre él (ver REVALIDAR EN STAGING abajo).
+ *    - PROCESSED (ingesta OK, solo eventType 'order') → 200
  *    - FAILED_WILL_RETRY (ingesta falló DESPUÉS de persistir) → 200, el evento
  *      queda marcado FAILED para que la reconciliación lo reintente — el
  *      proveedor NO debe re-postear, ya tenemos el evento guardado.
@@ -31,6 +36,31 @@ import { parseDeliverectOrder } from '../../services/delivery-channels/providers
 import { ingestDeliveryOrder } from '../../services/delivery-channels/core/deliveryOrderIngestion.service'
 import { persistDeliveryEvent, markEventResult } from '../../services/delivery-channels/core/deliveryWebhookEvent.service'
 import { NormalizedDeliveryOrder } from '../../services/delivery-channels/core/types'
+
+/**
+ * Fix C5 (auditoría G-Stack + Codex, 2026-07-19, spec §10.1.8): Deliverect manda
+ * cancelaciones sobre el MISMO webhook de orders, con el MISMO channelOrderId,
+ * distinguidas SOLO por `status === 100`. Doc:
+ * https://developers.deliverect.com/reference/create-channel-order
+ *
+ * Antes: TODO se persistía hardcoded `eventType: 'order'` → el dedup
+ * (`@@unique([provider, externalEventId, eventType])`) clasificaba la cancelación
+ * como DUPLICATE del pedido original y la ACKeaba sin re-procesar — el pedido
+ * local quedaba CONFIRMED/PAID para siempre.
+ *
+ * REVALIDAR EN STAGING: la doc revisada solo confirma `status === 100` = cancelación
+ * sobre ESTE payload — no enumera qué otros valores de `status` representan una
+ * actualización de estado (vs. una orden nueva) en el mismo shape. Tratamos
+ * ausente/0 como 'order' (pedido nuevo, coincide con el fixture real sin `status`) y
+ * cualquier OTRO numérico distinto de 100 como 'status' — más seguro que asumir que
+ * es una orden nueva y volver a correr la ingesta sobre un pedido ya conocido.
+ */
+function classifyDeliverectEventType(payload: unknown): 'order' | 'cancel' | 'status' {
+  const status = (payload as any)?.status
+  if (status === 100) return 'cancel'
+  if (typeof status === 'number' && status !== 0) return 'status'
+  return 'order'
+}
 
 /**
  * POST /api/v1/webhooks/delivery/deliverect/:channelLinkId/orders
@@ -73,17 +103,53 @@ export async function handleDeliverectOrderWebhook(req: Request, res: Response):
       return
     }
 
+    // Fix C5 (spec §10.1.8): eventType clasificado por status del payload, no
+    // hardcoded — así una cancelación (status 100) usa una key de dedup DISTINTA
+    // del 'order' original y no se traga como DUPLICATE.
+    const eventType = classifyDeliverectEventType(normalized.raw)
+
     // Contrato ACK (patrón Blumon): persistir ANTES de responder 200.
     const { event, duplicate } = await persistDeliveryEvent({
       provider: DeliveryProvider.DELIVERECT,
       externalEventId: normalized.externalId,
-      eventType: 'order',
+      eventType,
       channelLinkId: link.id,
       venueId: link.venueId,
       payload: normalized.raw,
     })
     if (duplicate) {
       res.status(200).json({ success: true, status: 'DUPLICATE', eventId: event.id })
+      return
+    }
+
+    if (eventType !== 'order') {
+      // REVALIDAR EN STAGING: handler de cancelación (revertir order/payment). El
+      // PROCESAMIENTO completo de un 'cancel'/'status' (revertir Order→CANCELLED,
+      // Payment, restock de inventario) es delicado y depende de semántica que solo
+      // se puede confirmar con staging real — por ahora el evento queda persistido
+      // DISTINTO (eventType != 'order', dedup key propia), visible y trazable, pero
+      // el pipeline de ingesta normal (`ingestDeliveryOrder`, que crea/confirma la
+      // Order como pedido nuevo) NUNCA corre sobre él — correrlo aquí dejaría el
+      // pedido local CONFIRMED/PAID exactamente como el bug que este fix corrige.
+      logger.warn(`[🛵 DeliverectWebhook] Evento '${eventType}' recibido — procesamiento completo pendiente (REVALIDAR EN STAGING)`, {
+        eventId: event.id,
+        externalId: normalized.externalId,
+        channelLinkId: link.id,
+      })
+      try {
+        // Marcado PROCESSED (terminal, sin orderId — ninguna Order se mutó) para
+        // sacarlo del sweep de delivery-webhook-reconciliation.job: ese job recoge
+        // CUALQUIER evento RECEIVED/FAILED sin distinguir eventType y le corre
+        // `ingestDeliveryOrder` — si este evento quedara RECEIVED, 10 min después el
+        // job lo re-procesaría como pedido nuevo, deshaciendo esta misma protección.
+        await markEventResult(event.id, DeliveryOrderEventStatus.PROCESSED)
+      } catch (bookErr: any) {
+        logger.error(`[🛵 DeliverectWebhook] Bookkeeping de evento '${eventType}' falló — queda RECEIVED`, {
+          eventId: event.id,
+          error: bookErr?.message,
+        })
+      }
+      res.status(200).json({ success: true, status: eventType === 'cancel' ? 'CANCEL_RECEIVED' : 'STATUS_RECEIVED', eventId: event.id })
       return
     }
 

@@ -279,4 +279,96 @@ describe('Task 5 — Deliverect webhook ACK contract (persist-first)', () => {
     expect(res.__status).toBe(200)
     expect((res.__body as any).status).toBe('healthy')
   })
+
+  // ============================================================
+  // Fix C5 (audit, spec §10.1.8): Deliverect manda cancelaciones con el MISMO
+  // channelOrderId y status 100, sobre el MISMO webhook de orders (doc:
+  // create-channel-order). Antes: TODO se persistía hardcoded eventType 'order' →
+  // el dedup (@@unique([provider, externalEventId, eventType])) clasificaba la
+  // cancelación como DUPLICATE del pedido original y la ACKeaba sin re-procesar —
+  // el pedido local quedaba CONFIRMED/PAID para siempre.
+  // ============================================================
+  describe('Fix C5 — clasificación de eventType (order/cancel/status)', () => {
+    it('payload con status 100 → persiste eventType "cancel" (NO "order"), no se traga como duplicado del pedido original', async () => {
+      mockedFindUnique.mockResolvedValue(activeLink)
+      mockedVerifyHmac.mockReturnValue(true)
+      mockedParse.mockReturnValue({ ...normalizedOrder, raw: { channelOrderId: 'ext_order_1', items: [], status: 100 } })
+      mockedPersist.mockResolvedValue({ event: { id: 'evt_cancel' }, duplicate: false })
+      const res = mkRes()
+
+      await handleDeliverectOrderWebhook(mkReq({ headers: { [DELIVERECT_HMAC_HEADER]: 'ok-sig' } }), res)
+
+      expect(mockedPersist).toHaveBeenCalledWith(
+        expect.objectContaining({ eventType: 'cancel', externalEventId: normalizedOrder.externalId }),
+      )
+      // El cancel NO pasa por el pipeline de ingesta normal (crearía/actualizaría la
+      // orden como si fuera un pedido nuevo/confirmado — el revert real queda para
+      // staging, ver REVALIDAR EN STAGING en el controller).
+      expect(mockedIngest).not.toHaveBeenCalled()
+      // El evento se marca PROCESSED (terminal) de inmediato — si quedara RECIBIDO,
+      // delivery-webhook-reconciliation.job (que barre RECEIVED/FAILED sin distinguir
+      // eventType) lo recogería 10 min después y correría ingestDeliveryOrder sobre él
+      // como si fuera un pedido nuevo, deshaciendo esta misma protección.
+      expect(mockedMarkResult).toHaveBeenCalledWith('evt_cancel', 'PROCESSED')
+      expect(res.__status).toBe(200)
+    })
+
+    it('evento "cancel": si markEventResult(PROCESSED) falla, igual responde 200 CANCEL_RECEIVED (bookkeeping no cambia el ACK)', async () => {
+      mockedFindUnique.mockResolvedValue(activeLink)
+      mockedVerifyHmac.mockReturnValue(true)
+      mockedParse.mockReturnValue({ ...normalizedOrder, raw: { channelOrderId: 'ext_order_1', items: [], status: 100 } })
+      mockedPersist.mockResolvedValue({ event: { id: 'evt_cancel_2' }, duplicate: false })
+      mockedMarkResult.mockRejectedValue(new Error('db hiccup'))
+      const res = mkRes()
+
+      await handleDeliverectOrderWebhook(mkReq({ headers: { [DELIVERECT_HMAC_HEADER]: 'ok-sig' } }), res)
+
+      expect(res.__status).toBe(200)
+      expect((res.__body as any).status).toBe('CANCEL_RECEIVED')
+    })
+
+    it('DUPLICATE de un evento "cancel" ya persistido → 200 DUPLICATE igual que "order" (el dedup solo cambia de key, no de contrato)', async () => {
+      mockedFindUnique.mockResolvedValue(activeLink)
+      mockedVerifyHmac.mockReturnValue(true)
+      mockedParse.mockReturnValue({ ...normalizedOrder, raw: { channelOrderId: 'ext_order_1', items: [], status: 100 } })
+      mockedPersist.mockResolvedValue({ event: { id: 'evt_cancel_dup' }, duplicate: true })
+      const res = mkRes()
+
+      await handleDeliverectOrderWebhook(mkReq({ headers: { [DELIVERECT_HMAC_HEADER]: 'ok-sig' } }), res)
+
+      expect(res.__status).toBe(200)
+      expect((res.__body as any).status).toBe('DUPLICATE')
+      expect(mockedIngest).not.toHaveBeenCalled()
+    })
+
+    it('REGRESIÓN: payload SIN status (pedido normal) → eventType sigue siendo "order", la ingesta corre igual que antes', async () => {
+      mockedFindUnique.mockResolvedValue(activeLink)
+      mockedVerifyHmac.mockReturnValue(true)
+      mockedParse.mockReturnValue(normalizedOrder) // raw sin campo status
+      mockedPersist.mockResolvedValue({ event: { id: 'evt_normal' }, duplicate: false })
+      mockedIngest.mockResolvedValue({ order: { id: 'order_1' }, created: true })
+      const res = mkRes()
+
+      await handleDeliverectOrderWebhook(mkReq({ headers: { [DELIVERECT_HMAC_HEADER]: 'ok-sig' } }), res)
+
+      expect(mockedPersist).toHaveBeenCalledWith(expect.objectContaining({ eventType: 'order' }))
+      expect(mockedIngest).toHaveBeenCalledWith(normalizedOrder, activeLink)
+      expect(res.__status).toBe(200)
+      expect((res.__body as any).status).toBe('PROCESSED')
+    })
+
+    it('REGRESIÓN: payload con status 0 (pedido nuevo sin confirmar) → sigue siendo "order", NUNCA "cancel"', async () => {
+      mockedFindUnique.mockResolvedValue(activeLink)
+      mockedVerifyHmac.mockReturnValue(true)
+      mockedParse.mockReturnValue({ ...normalizedOrder, raw: { channelOrderId: 'ext_order_1', items: [], status: 0 } })
+      mockedPersist.mockResolvedValue({ event: { id: 'evt_new' }, duplicate: false })
+      mockedIngest.mockResolvedValue({ order: { id: 'order_1' }, created: true })
+      const res = mkRes()
+
+      await handleDeliverectOrderWebhook(mkReq({ headers: { [DELIVERECT_HMAC_HEADER]: 'ok-sig' } }), res)
+
+      expect(mockedPersist).toHaveBeenCalledWith(expect.objectContaining({ eventType: 'order' }))
+      expect(mockedIngest).toHaveBeenCalled()
+    })
+  })
 })
