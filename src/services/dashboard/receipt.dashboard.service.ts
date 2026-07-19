@@ -189,6 +189,8 @@ export async function generateAndStoreReceipt(arg1: string, arg2?: string, arg3?
           quantity: item.quantity,
           price: unitPrice,
           totalPrice,
+          // Venta por peso: kilos pesados (price = precio por kg); null en líneas normales.
+          weightKg: item.weightQuantity != null ? parseFloat(item.weightQuantity.toString()) : null,
           modifiers: item.modifiers.map(mod => ({
             name: mod.name || mod.modifier?.name || 'Modificador',
             price: parseFloat(mod.price?.toString() || mod.modifier?.price?.toString() || '0'),

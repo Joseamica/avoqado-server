@@ -6,6 +6,7 @@ jest.mock('@/utils/prismaClient', () => ({
   default: {
     payment: {
       findFirst: jest.fn(),
+      findMany: jest.fn(),
       update: jest.fn(),
     },
     providerEventLog: {
@@ -15,6 +16,10 @@ jest.mock('@/utils/prismaClient', () => ({
 }))
 
 const mockedPaymentFindFirst = prisma.payment.findFirst as jest.Mock
+// Matching resolves candidates per tier via findMany (deterministic tiered
+// matching, 2026-07-18) — the payload below is identified by operationNumber,
+// which is the strong tier, so a genuine amount discrepancy is still surfaced.
+const mockedPaymentFindMany = prisma.payment.findMany as jest.Mock
 const mockedPaymentUpdate = prisma.payment.update as jest.Mock
 const mockedProviderEventLogUpdate = prisma.providerEventLog.update as jest.Mock
 
@@ -28,7 +33,7 @@ const mockedProviderEventLogUpdate = prisma.providerEventLog.update as jest.Mock
  */
 describe('reconcileBlumonEvent — tip is part of the charged amount', () => {
   beforeEach(() => {
-    ;[mockedPaymentFindFirst, mockedPaymentUpdate, mockedProviderEventLogUpdate].forEach(m => m.mockReset())
+    ;[mockedPaymentFindFirst, mockedPaymentFindMany, mockedPaymentUpdate, mockedProviderEventLogUpdate].forEach(m => m.mockReset())
     mockedPaymentUpdate.mockResolvedValue({})
     mockedProviderEventLogUpdate.mockResolvedValue({})
   })
@@ -44,13 +49,15 @@ describe('reconcileBlumonEvent — tip is part of the charged amount', () => {
   } as any
 
   it('MATCHES when webhook amount == base + tip (regression: tip was excluded)', async () => {
-    mockedPaymentFindFirst.mockResolvedValue({
-      id: 'pay_tip',
-      amount: 70,
-      tipAmount: 7,
-      processorData: null,
-      order: null,
-    })
+    mockedPaymentFindMany.mockResolvedValue([
+      {
+        id: 'pay_tip',
+        amount: 70,
+        tipAmount: 7,
+        processorData: null,
+        order: null,
+      },
+    ])
 
     const result = await reconcileBlumonEvent('evt_tip', tippedPayload, { scopeVenueIds: ['venue_1'] })
 
@@ -65,13 +72,15 @@ describe('reconcileBlumonEvent — tip is part of the charged amount', () => {
   })
 
   it('still flags a GENUINE discrepancy (webhook != base + tip)', async () => {
-    mockedPaymentFindFirst.mockResolvedValue({
-      id: 'pay_bad',
-      amount: 70,
-      tipAmount: 7, // base + tip = 77, but Blumon says 100 → real $23 mismatch
-      processorData: null,
-      order: null,
-    })
+    mockedPaymentFindMany.mockResolvedValue([
+      {
+        id: 'pay_bad',
+        amount: 70,
+        tipAmount: 7, // base + tip = 77, but Blumon says 100 → real $23 mismatch
+        processorData: null,
+        order: null,
+      },
+    ])
 
     const result = await reconcileBlumonEvent('evt_bad', { ...tippedPayload, amount: '100.00' }, { scopeVenueIds: ['venue_1'] })
 
@@ -85,13 +94,15 @@ describe('reconcileBlumonEvent — tip is part of the charged amount', () => {
   })
 
   it('MATCHES a tipless payment unchanged (tipAmount = 0)', async () => {
-    mockedPaymentFindFirst.mockResolvedValue({
-      id: 'pay_notip',
-      amount: 77,
-      tipAmount: 0,
-      processorData: null,
-      order: null,
-    })
+    mockedPaymentFindMany.mockResolvedValue([
+      {
+        id: 'pay_notip',
+        amount: 77,
+        tipAmount: 0,
+        processorData: null,
+        order: null,
+      },
+    ])
 
     const result = await reconcileBlumonEvent('evt_notip', tippedPayload, { scopeVenueIds: ['venue_1'] })
 

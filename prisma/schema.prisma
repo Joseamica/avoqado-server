@@ -5385,6 +5385,9 @@ model LoyaltyTransaction {
   createdById String?
   createdBy   StaffVenue? @relation("LoyaltyTransactionCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
 
+  /// Set when this REDEEM produced a discount on a check (see OrderDiscount).
+  orderDiscount OrderDiscount?
+
   createdAt DateTime @default(now())
 
   @@index([customerId, createdAt])
@@ -5796,6 +5799,13 @@ model OrderDiscount {
 
   // Comp-specific
   compReason String? @db.Text
+
+  // Loyalty redemption: when a check discount came from redeeming points, this
+  // ties it to its REDEEM transaction so removing the discount ALWAYS refunds
+  // the points in the same transaction (otherwise the points burn with no
+  // discount left on the check — a silent money loss for the customer).
+  loyaltyTransactionId String?             @unique
+  loyaltyTransaction   LoyaltyTransaction? @relation(fields: [loyaltyTransactionId], references: [id], onDelete: SetNull)
 
   // Audit
   appliedById    String?

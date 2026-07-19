@@ -49,6 +49,8 @@ interface ReceiptData {
     quantity: number
     unitPrice: number
     total: number
+    /** Venta por peso: kilos pesados (unitPrice = precio por kg). Null/absent for normal lines. */
+    weightKg?: number | null
     modifiers?: Array<{
       name: string
       quantity: number
@@ -800,11 +802,11 @@ export function generateReceiptHTML(data: ReceiptData): string {
                             <div class="item-header">
                                 <div>
                                     <div class="item-name">${item.productName}</div>
-                                    <span class="item-quantity">Cantidad: ${item.quantity}</span>
+                                    <span class="item-quantity">${item.weightKg != null ? `Peso: ${item.weightKg} kg` : `Cantidad: ${item.quantity}`}</span>
                                 </div>
                                 <div style="text-align: right;">
                                     <div class="item-price">${formatCurrency(item.total, currency)}</div>
-                                    <div class="item-unit-price">${item.quantity} × ${formatCurrency(item.unitPrice, currency)}</div>
+                                    <div class="item-unit-price">${item.weightKg != null ? `${item.weightKg} kg × ${formatCurrency(item.unitPrice, currency)}/kg` : `${item.quantity} × ${formatCurrency(item.unitPrice, currency)}`}</div>
                                 </div>
                             </div>
                             ${

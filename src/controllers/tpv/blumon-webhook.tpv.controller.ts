@@ -129,8 +129,25 @@ export async function handleBlumonTPVWebhook(req: Request, res: Response, _next:
       reference: payload.reference,
     })
 
-    // Always return 200 to Blumon to acknowledge receipt
-    // Even if there's a discrepancy, we've logged it for investigation
+    // ACK contract: 200 ONLY when the event row is durably persisted
+    // (eventLogId present). A discrepancy is still a 200 — it IS stored. But
+    // acknowledging something we never wrote loses the charge forever, with a
+    // receipt. Retries are idempotent via @@unique([provider, eventId]).
+    if (!result.eventLogId) {
+      logger.error('🚨 Blumon webhook: result without eventLogId — asking Blumon to retry', {
+        correlationId,
+        action: result.action,
+        reference: payload.reference,
+      })
+
+      res.status(503).json({
+        success: false,
+        action: result.action,
+        message: 'Event not persisted — please retry',
+      })
+      return
+    }
+
     res.status(200).json({
       success: result.success,
       action: result.action,
@@ -147,12 +164,13 @@ export async function handleBlumonTPVWebhook(req: Request, res: Response, _next:
       stack: error instanceof Error ? error.stack : undefined,
     })
 
-    // Still return 200 to prevent Blumon from retrying
-    // Log the error for manual investigation
-    res.status(200).json({
+    // 503, not 200: the exception may have fired BEFORE the event was
+    // persisted, and a 200 would tell Blumon the charge is safely recorded
+    // when it is not. Blumon's retry is safe — duplicates dedup on eventId.
+    res.status(503).json({
       success: false,
       action: 'ERROR',
-      message: 'Webhook received but processing encountered an error',
+      message: 'Temporary processing failure — please retry',
       reference: payload.reference,
     })
   }

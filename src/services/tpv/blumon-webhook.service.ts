@@ -31,6 +31,13 @@ const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 // Kept as string literals so we can add cases without DB migrations. The set is
 // intentionally small and stable so dashboards can query by it.
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+/**
+ * Blumon `operationType` values that move money BACK to the cardholder. They
+ * are recorded but never run the sale-matching path, and never orphan-alert.
+ * Single source of truth shared with the reconciliation job.
+ */
+export const REVERSAL_OPERATION_TYPES = ['DEVOLUCION', 'CANCELACION'] as const
+
 export const BLUMON_WEBHOOK_ERROR_REASONS = {
   /** Blumon's `serialNumber` is not registered as a Terminal in our DB */
   UNKNOWN_TERMINAL: 'UNKNOWN_TERMINAL',
@@ -44,6 +51,12 @@ export const BLUMON_WEBHOOK_ERROR_REASONS = {
   NOT_APPROVED: 'NOT_APPROVED',
   /** Internal exception while processing; check logs for stack */
   PROCESSING_ERROR: 'PROCESSING_ERROR',
+  /** 2+ Payments matched the webhook keys — requires human attribution */
+  AMBIGUOUS_MATCH: 'AMBIGUOUS_MATCH',
+  /** Only a weak key (partial reference) matched — never auto-linked */
+  WEAK_MATCH_ONLY: 'WEAK_MATCH_ONLY',
+  /** Reversal event recorded but not yet tied to a refund (ledger plan) */
+  REVERSAL_UNMATCHED: 'REVERSAL_UNMATCHED',
 } as const
 
 /**
@@ -109,7 +122,24 @@ export async function resolveTerminalFromBlumonSerial(
  *          to do with that).
  */
 export async function resolveScopeVenueIdsFromBlumonSerial(rawSerial: string | undefined | null): Promise<string[]> {
-  if (!rawSerial) return []
+  return (await resolveBlumonScope(rawSerial)).venueIds
+}
+
+/**
+ * Same resolution as {@link resolveScopeVenueIdsFromBlumonSerial}, but also
+ * returns the `MerchantAccount.id` behind the serial so matching can be scoped
+ * to the EXACT merchant — not just the venue. A venue can hold more than one
+ * Blumon merchant, and venue-only scoping lets a weak key select a Payment
+ * that was charged through a different merchant.
+ *
+ * Resolved here (rather than importing `payment.tpv.service.ts`) because that
+ * module imports THIS one — the reverse import would create a cycle. The
+ * merchant is already queried below, so this costs nothing extra.
+ */
+export async function resolveBlumonScope(
+  rawSerial: string | undefined | null,
+): Promise<{ venueIds: string[]; merchantAccountId: string | null }> {
+  if (!rawSerial) return { venueIds: [], merchantAccountId: null }
   const canonical = canonicalizeBlumonSerial(rawSerial)
   const rawTrimmed = rawSerial.trim().replace(/^AVQD-/, '')
 
@@ -141,7 +171,7 @@ export async function resolveScopeVenueIdsFromBlumonSerial(rawSerial: string | u
     for (const cfg of configs) venueIds.add(cfg.venueId)
   }
 
-  return Array.from(venueIds)
+  return { venueIds: Array.from(venueIds), merchantAccountId: merchantAccount?.id ?? null }
 }
 
 /**
@@ -159,9 +189,21 @@ export async function resolveScopeVenueIdsFromBlumonSerial(rawSerial: string | u
 export function buildBlumonEventId(payload: BlumonWebhookPayload): string | null {
   const op = payload.operationNumber
   const ref = payload.reference
-  if (op != null && ref) return `blumon-tpv-${op}-${ref}`
-  if (op != null) return `blumon-tpv-${op}`
-  if (ref) return `blumon-tpv-${ref}`
+  const opType = payload.operationType
+
+  // A reversal carries the SAME (operationNumber, reference) as the sale it
+  // reverses, so without a namespace the unique index treats it as a duplicate
+  // of its own sale. VENTA (and any legacy/absent operationType) MUST keep the
+  // exact historical shape — changing it would break dedup against every row
+  // already stored.
+  // `find` (not `includes`) so the result is narrowed to the literal union —
+  // `operationType` is optional, so it may be undefined here.
+  const reversalType = REVERSAL_OPERATION_TYPES.find(t => t === opType)
+  const prefix = reversalType ? `blumon-tpv-reversal-${reversalType.toLowerCase()}` : 'blumon-tpv'
+
+  if (op != null && ref) return `${prefix}-${op}-${ref}`
+  if (op != null) return `${prefix}-${op}`
+  if (ref) return `${prefix}-${ref}`
   return null
 }
 
@@ -270,9 +312,18 @@ export interface WebhookProcessingResult {
     | 'DUPLICATE' // Webhook already received before (Blumon re-delivered) — idempotent no-op
     | 'NOT_APPROVED' // codeResponse != "00" — informational
     | 'UNKNOWN_TERMINAL' // serialNumber not registered in our DB
+    | 'REVERSAL_RECEIVED' // DEVOLUCION/CANCELACION — recorded, excluded from sale matching
+    | 'AMBIGUOUS' // 2+ Payment candidates matched — quarantined, NEVER auto-linked
+    | 'NO_AUTO_MATCH' // only weak-key candidates (partial reference) — human attribution required
     | 'ERROR' // Internal exception
   /** ProviderEventLog row that was created/found for this webhook (always set when persisted). */
   eventLogId?: string
+  /**
+   * Canonical reason to persist on the event log. Lets a caller distinguish
+   * kinds of ERROR (e.g. an unmatchable payload vs an internal exception)
+   * without overloading `message`, which is human-facing.
+   */
+  errorReason?: string
   paymentId?: string
   message: string
   details?: {
@@ -340,10 +391,12 @@ export async function processBlumonPaymentWebhook(payload: BlumonWebhookPayload)
     // MerchantAccount — necessary when a single merchant fans out to N venues
     // (one webhook → one of N possible Payments). See
     // `resolveScopeVenueIdsFromBlumonSerial` for the why.
-    const [terminal, scopeVenueIds] = await Promise.all([
+    const [terminal, blumonScope] = await Promise.all([
       resolveTerminalFromBlumonSerial(payload.serialNumber),
-      resolveScopeVenueIdsFromBlumonSerial(payload.serialNumber),
+      resolveBlumonScope(payload.serialNumber),
     ])
+    const scopeVenueIds = blumonScope.venueIds
+    const merchantAccountId = blumonScope.merchantAccountId
     const scopeVenueId = terminal?.venueId ?? null
 
     if (payload.serialNumber && !terminal) {
@@ -450,7 +503,7 @@ export async function processBlumonPaymentWebhook(payload: BlumonWebhookPayload)
     }
 
     // ───────────── 5. Inline reconciliation (5s retry, scoped to merchant's venues) ─────────────
-    const matchResult = await attemptPaymentMatch(payload, { scopeVenueIds, correlationId })
+    const matchResult = await attemptPaymentMatch(payload, { scopeVenueIds, merchantAccountId, correlationId })
 
     // ───────────── 6. Persist final state into the event row ─────────────
     await updateEventLogFromMatchResult(event.id, matchResult)
@@ -492,9 +545,12 @@ export async function reconcileBlumonEvent(
   ctx: { scopeVenueIds?: string[] } = {},
 ): Promise<WebhookProcessingResult> {
   const correlationId = `blumon-recon-${eventLogId.slice(-8)}`
-  const scopeVenueIds = ctx.scopeVenueIds ?? (await resolveScopeVenueIdsFromBlumonSerial(payload.serialNumber))
+  const resolvedScope = ctx.scopeVenueIds ? null : await resolveBlumonScope(payload.serialNumber)
+  const scopeVenueIds = ctx.scopeVenueIds ?? resolvedScope!.venueIds
+  const merchantAccountId = resolvedScope?.merchantAccountId ?? null
   const result = await attemptPaymentMatch(payload, {
     scopeVenueIds,
+    merchantAccountId,
     correlationId,
     skipRetries: true, // Cron is already on a 30s cadence, no need for inline retry
   })
@@ -597,9 +653,31 @@ async function updateEventLogFromMatchResult(eventLogId: string, result: Webhook
       // Stay PENDING — the cron worker will retry up to 24h.
       data.status = EventStatus.PENDING
       break
+    case 'REVERSAL_RECEIVED':
+      // Terminal (never retried) but explicitly NOT claimed as reconciled —
+      // the errorReason keeps it queryable as "received, not tied to a refund".
+      data.status = EventStatus.PROCESSED
+      data.errorReason = BLUMON_WEBHOOK_ERROR_REASONS.REVERSAL_UNMATCHED
+      data.processedAt = new Date()
+      break
+    case 'AMBIGUOUS':
+      // Quarantine: 2+ candidates matched. Deliberately NOT linked to any
+      // Payment — attributing to the wrong one is worse than not attributing.
+      data.status = EventStatus.ERROR
+      data.errorReason = BLUMON_WEBHOOK_ERROR_REASONS.AMBIGUOUS_MATCH
+      data.processedAt = new Date()
+      break
+    case 'NO_AUTO_MATCH':
+      // Only a weak key (partial reference) matched — human attribution only.
+      data.status = EventStatus.ERROR
+      data.errorReason = BLUMON_WEBHOOK_ERROR_REASONS.WEAK_MATCH_ONLY
+      data.processedAt = new Date()
+      break
     case 'ERROR':
       data.status = EventStatus.ERROR
-      data.errorReason = BLUMON_WEBHOOK_ERROR_REASONS.PROCESSING_ERROR
+      // Prefer the caller's canonical reason (e.g. NO_MATCH_FIELDS); fall back
+      // to PROCESSING_ERROR for genuine internal exceptions.
+      data.errorReason = result.errorReason ?? BLUMON_WEBHOOK_ERROR_REASONS.PROCESSING_ERROR
       data.processedAt = new Date()
       break
     default:
@@ -631,75 +709,186 @@ async function updateEventLogFromMatchResult(eventLogId: string, result: Webhook
  */
 async function attemptPaymentMatch(
   payload: BlumonWebhookPayload,
-  ctx: { scopeVenueIds: string[]; correlationId: string; skipRetries?: boolean } = {
+  ctx: { scopeVenueIds: string[]; merchantAccountId?: string | null; correlationId: string; skipRetries?: boolean } = {
     scopeVenueIds: [],
     correlationId: `blumon-wh-${Date.now()}`,
   },
 ): Promise<WebhookProcessingResult> {
-  const { scopeVenueIds, correlationId, skipRetries } = ctx
+  const { scopeVenueIds, merchantAccountId, correlationId, skipRetries } = ctx
   try {
     const blumonAmount = parseFloat(payload.amount)
 
-    // Build matching conditions based on available fields
-    const matchConditions: Prisma.PaymentWhereInput[] = []
-
-    if (payload.reference) {
-      matchConditions.push({ referenceNumber: payload.reference })
-      // Try partial match on last 10 chars
-      if (payload.reference.length >= 10) {
-        matchConditions.push({ referenceNumber: { contains: payload.reference.slice(-10) } })
+    // ── Deterministic tiered matching (audit 2026-07-18) ────────────────────
+    // WHY tiers instead of one big OR: the weak keys are NOT unique in
+    // production. `referenceNumber` is a timestamp to the second
+    // (yyMMddHHmmss, e.g. 260717220609) and 6-digit issuer auth codes recycle
+    // — both already collide in prod with DIFFERENT amounts. And the amount is
+    // only compared AFTER a candidate is chosen, where BOTH the MATCHED and
+    // DISCREPANCY branches write to that Payment — so a wrong pick is never
+    // caught by it. Therefore the amount is part of the KEY in the weak tiers,
+    // and a partial reference NEVER auto-links.
+    //
+    // Reversal/cancellation events must NEVER run the sale-matching logic:
+    // they would confirm the wrong row, and their non-match would fire the
+    // "charge without record" alert for money that is LEAVING. Recorded as
+    // informational; fine-grained reversal↔refund matching ships with the
+    // ledger plan.
+    if (REVERSAL_OPERATION_TYPES.includes(payload.operationType as (typeof REVERSAL_OPERATION_TYPES)[number])) {
+      logger.info('↩️ Blumon webhook: reversal-type event — recorded, excluded from sale matching', {
+        correlationId,
+        operationType: payload.operationType,
+        reference: payload.reference,
+        operationNumber: payload.operationNumber,
+      })
+      return {
+        success: true,
+        action: 'REVERSAL_RECEIVED',
+        message: `Reversal event (${payload.operationType}) recorded`,
+        details: { blumonAmount },
       }
     }
 
-    if (payload.authorizationCode) {
-      matchConditions.push({ authorizationNumber: payload.authorizationCode })
-    }
-
-    if (payload.operationNumber) {
-      matchConditions.push({ processorId: payload.operationNumber.toString() })
-    }
-
-    // If we have lastFour, add a combined condition with amount + lastFour + date
-    // This is a fallback for when reference/auth might not match exactly
-    if (payload.lastFour && payload.dateTransaction) {
-      // Parse dateTransaction format: "DD/MM/YYYY HH:mm:ss" or similar
-      // For now, just log it - we'll add this matching later if needed
-      logger.debug('🔍 Additional matching fields available', {
+    // Venue scope is MANDATORY: an unscoped global search can attribute money
+    // to another venue's Payment.
+    if (scopeVenueIds.length === 0) {
+      logger.warn('⚠️ [Blumon webhook] No venue scope resolved for serial — matching deferred', {
         correlationId,
-        lastFour: payload.lastFour,
-        dateTransaction: payload.dateTransaction,
-        amount: blumonAmount,
+        serialNumber: payload.serialNumber,
+        reference: payload.reference,
+      })
+      return {
+        success: false,
+        action: 'PENDING',
+        message: 'No venue scope resolved for serial — matching deferred',
+        details: { blumonAmount },
+      }
+    }
+
+    const scopeWhere: Prisma.PaymentWhereInput = {
+      status: { in: ['COMPLETED', 'PENDING'] },
+      // Refunds share `referenceNumber` with the sale they reverse, so a VENTA
+      // webhook could select a REFUND row and write Blumon operation data onto
+      // it. Same guard as payment.tpv.service.ts:1413.
+      type: { not: 'REFUND' },
+      // Exact merchant, not just the venue: one venue can hold more than one
+      // Blumon merchant, and venue-only scoping lets a weak key select a
+      // Payment charged through a different merchant.
+      ...(merchantAccountId ? { merchantAccountId } : {}),
+      order: { venueId: { in: scopeVenueIds } },
+    }
+
+    type MatchTier = {
+      name: 'OP_NUMBER' | 'REFERENCE_EXACT' | 'AUTH_CODE' | 'REFERENCE_PARTIAL'
+      where: Prisma.PaymentWhereInput
+      /** false ⇒ candidates are reported for human attribution, NEVER auto-linked */
+      autoLink: boolean
+      /** true ⇒ the amount is part of the selection key, not a post-hoc check */
+      requireAmount: boolean
+    }
+
+    const tiers: MatchTier[] = []
+
+    if (payload.operationNumber != null) {
+      tiers.push({
+        name: 'OP_NUMBER',
+        where: {
+          ...scopeWhere,
+          OR: [
+            { processorId: payload.operationNumber.toString() },
+            // The REAL home of the Blumon operation number is the JSON the TPV
+            // records. `processorId` is legacy-Menta and is read by other
+            // domains — match the JSON, don't repurpose the column.
+            { processorData: { path: ['blumonOperationNumber'], equals: payload.operationNumber } },
+          ],
+        },
+        autoLink: true,
+        requireAmount: false,
       })
     }
 
-    if (matchConditions.length === 0) {
-      logger.error('❌ Blumon webhook: No matching fields available', {
+    if (payload.reference) {
+      tiers.push({
+        name: 'REFERENCE_EXACT',
+        where: { ...scopeWhere, referenceNumber: payload.reference },
+        autoLink: true,
+        requireAmount: true,
+      })
+    }
+
+    if (payload.authorizationCode) {
+      tiers.push({
+        name: 'AUTH_CODE',
+        where: { ...scopeWhere, authorizationNumber: payload.authorizationCode },
+        autoLink: true,
+        requireAmount: true,
+      })
+    }
+
+    if (payload.reference && payload.reference.length >= 10) {
+      tiers.push({
+        name: 'REFERENCE_PARTIAL',
+        where: { ...scopeWhere, referenceNumber: { contains: payload.reference.slice(-10) } },
+        autoLink: false,
+        requireAmount: true,
+      })
+    }
+
+    if (tiers.length === 0) {
+      logger.error('🚨 [Blumon webhook] Payload with NO matchable key — manual review required', {
         correlationId,
-        payload: {
-          reference: payload.reference,
-          authorizationCode: payload.authorizationCode,
-          operationNumber: payload.operationNumber,
-        },
+        amount: blumonAmount,
+        operationType: payload.operationType,
+        serialNumber: payload.serialNumber,
       })
 
       return {
         success: false,
         action: 'ERROR',
+        // Terminal, not retryable: without a key this can never match, so
+        // leaving it PENDING would make the cron retry it forever.
+        errorReason: BLUMON_WEBHOOK_ERROR_REASONS.NO_MATCH_FIELDS,
         message: 'No fields available for payment matching',
         details: { blumonAmount },
       }
     }
 
-    // Build the where clause once. When `scopeVenueIds` is non-empty we
-    // restrict the search to Payments inside those venues — eliminates false
-    // positives from references that collide across merchants. The list is
-    // resolved from the webhook's `serialNumber` and covers (a) the physical
-    // terminal's venue + (b) every venue using the same Blumon MerchantAccount
-    // (a single merchant can fan out to N venues).
-    const baseWhere: Prisma.PaymentWhereInput = {
-      OR: matchConditions,
-      status: { in: ['COMPLETED', 'PENDING'] },
-      ...(scopeVenueIds.length > 0 ? { order: { venueId: { in: scopeVenueIds } } } : {}),
+    // Tip-aware comparison — Blumon charges base+tip (prod fix 2026-06-24:
+    // 67/67 historical "discrepancies" were exactly the tip).
+    const amountMatches = (p: { amount: unknown; tipAmount: unknown }): boolean =>
+      Math.abs(blumonAmount - (parseFloat(String(p.amount)) + parseFloat(String(p.tipAmount ?? 0)))) < 0.01
+
+    const paymentInclude = {
+      order: {
+        select: {
+          id: true,
+          orderNumber: true,
+          venueId: true,
+          venue: { select: { id: true, name: true, status: true } },
+        },
+      },
+    }
+
+    type TierOutcome =
+      | { kind: 'match'; payment: any; tier: string }
+      | { kind: 'ambiguous'; tier: string; ids: string[] }
+      | { kind: 'weak'; tier: string; ids: string[] }
+      | { kind: 'none' }
+
+    const resolveTiers = async (): Promise<TierOutcome> => {
+      for (const tier of tiers) {
+        const found = await prisma.payment.findMany({
+          where: tier.where,
+          take: 5,
+          orderBy: { createdAt: 'desc' },
+          include: paymentInclude,
+        })
+        const viable = tier.requireAmount ? found.filter(amountMatches) : found
+        if (viable.length === 0) continue
+        if (viable.length >= 2) return { kind: 'ambiguous', tier: tier.name, ids: viable.map(v => v.id) }
+        if (!tier.autoLink) return { kind: 'weak', tier: tier.name, ids: viable.map(v => v.id) }
+        return { kind: 'match', payment: viable[0], tier: tier.name }
+      }
+      return { kind: 'none' }
     }
 
     // Retry loop only when called inline from the webhook controller. The cron
@@ -717,25 +906,40 @@ async function attemptPaymentMatch(
         await delay(RETRY_CONFIG.delays[attempt])
       }
 
-      payment = await prisma.payment.findFirst({
-        where: baseWhere,
-        include: {
-          order: {
-            select: {
-              id: true,
-              orderNumber: true,
-              venueId: true,
-              venue: {
-                select: {
-                  id: true,
-                  name: true,
-                  status: true,
-                },
-              },
-            },
-          },
-        },
-      })
+      const outcome = await resolveTiers()
+
+      if (outcome.kind === 'ambiguous') {
+        logger.error('🚨 Blumon webhook: AMBIGUOUS match — quarantining, never auto-linking', {
+          correlationId,
+          tier: outcome.tier,
+          reference: payload.reference,
+          operationNumber: payload.operationNumber,
+          candidateIds: outcome.ids,
+        })
+        return {
+          success: false,
+          action: 'AMBIGUOUS',
+          message: `Multiple Payment candidates in tier ${outcome.tier} — requires human attribution`,
+          details: { blumonAmount },
+        }
+      }
+
+      if (outcome.kind === 'weak') {
+        logger.error('🚨 Blumon webhook: only a WEAK key matched — not auto-linking', {
+          correlationId,
+          tier: outcome.tier,
+          reference: payload.reference,
+          candidateIds: outcome.ids,
+        })
+        return {
+          success: false,
+          action: 'NO_AUTO_MATCH',
+          message: `Only weak-key candidates (${outcome.tier}) — requires human attribution`,
+          details: { blumonAmount },
+        }
+      }
+
+      payment = outcome.kind === 'match' ? outcome.payment : null
 
       if (payment) {
         if (attempt > 0) {
@@ -923,7 +1127,9 @@ export function validateBlumonWebhookPayload(payload: unknown): payload is Blumo
   }
 
   // At least one card/transaction identifier for matching
-  const hasCardIdentifier = 'lastFour' in p || 'authorizationCode' in p || 'reference' in p
+  // `operationNumber` is Blumon's strongest per-transaction key — it was
+  // missing here, so a webhook identified only by it was rejected outright.
+  const hasCardIdentifier = 'lastFour' in p || 'authorizationCode' in p || 'reference' in p || 'operationNumber' in p
   if (!hasCardIdentifier) {
     return false
   }

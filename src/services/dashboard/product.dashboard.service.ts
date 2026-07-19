@@ -25,6 +25,7 @@ export interface CreateProductDto {
   kitchenName?: string // Short name for kitchen display (max 50)
   abbreviation?: string // Ultra-short text for POS (max 24)
   duration?: number // Minutes (for SERVICE, APPOINTMENTS_SERVICE)
+  soldByWeight?: boolean // Venta por peso: price = precio POR KG; forces unit KILOGRAM
 
   // Event fields
   eventDate?: string | Date
@@ -560,6 +561,10 @@ export async function createProduct(venueId: string, productData: CreateProductD
             kitchenName: productFields.kitchenName,
             abbreviation: productFields.abbreviation,
             duration: productFields.duration,
+
+            // Venta por peso: price is the price PER KG; unit pinned to KILOGRAM.
+            soldByWeight: productFields.soldByWeight ?? false,
+            ...(productFields.soldByWeight ? { unit: 'KILOGRAM' as const } : {}),
 
             // Event fields
             eventDate: productFields.eventDate ? new Date(productFields.eventDate) : undefined,

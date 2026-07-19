@@ -637,16 +637,20 @@ async function updateOrderTotalsForStandalonePayment(
               },
             })) || []
 
+        // Venta por peso: weighted lines deduct the weighed kilos (quantity is
+        // always 1 on them); the same effective quantity feeds the compensation
+        // restock below so a rollback returns exactly what was deducted.
+        const effectiveQuantity = item.weightQuantity != null ? Number(item.weightQuantity) : item.quantity
         await deductInventoryForProduct(
           updatedOrder.venueId,
           item.productId,
-          item.quantity,
+          effectiveQuantity,
           orderId,
           staffId, // staffId for tracking who processed the order
           orderModifiers,
         )
 
-        deductedItems.push({ productId: item.productId, quantity: item.quantity })
+        deductedItems.push({ productId: item.productId, quantity: effectiveQuantity })
 
         logger.info('✅ Stock deducted successfully for product', {
           orderId,

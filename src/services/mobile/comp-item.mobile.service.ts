@@ -27,13 +27,7 @@ export const COMP_REASONS = [
   'Especial del administrador',
 ] as const
 
-export async function compOrderItem(params: {
-  venueId: string
-  orderId: string
-  itemId: string
-  reason: string
-  staffId?: string
-}) {
+export async function compOrderItem(params: { venueId: string; orderId: string; itemId: string; reason: string; staffId?: string }) {
   const { venueId, orderId, itemId, reason, staffId } = params
 
   if (!reason?.trim()) {
@@ -164,7 +158,10 @@ export async function recalculateOrderTotals(orderId: string, fallbackDiscount: 
     newDiscountAmount = fallbackDiscount
   }
 
-  const newTotal = newSubtotal - newDiscountAmount
+  // A check can never owe a negative amount: a FIXED_AMOUNT discount bigger
+  // than the subtotal (catalog discount or loyalty redemption on a shrinking
+  // check) would otherwise store a negative total and corrupt the corte.
+  const newTotal = Math.max(0, newSubtotal - newDiscountAmount)
   const updated = await prisma.order.update({
     where: { id: orderId },
     data: {

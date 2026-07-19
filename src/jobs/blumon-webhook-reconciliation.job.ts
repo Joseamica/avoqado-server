@@ -1,13 +1,14 @@
 // jobs/blumon-webhook-reconciliation.job.ts
 
 import { CronJob } from 'cron'
-import { EventStatus, ProviderType } from '@prisma/client'
+import { EventStatus, Prisma, ProviderType } from '@prisma/client'
 import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
 import {
   BLUMON_WEBHOOK_ERROR_REASONS,
   BLUMON_WEBHOOK_PENDING_TTL_MS,
   BlumonWebhookPayload,
+  REVERSAL_OPERATION_TYPES,
   reconcileBlumonEvent,
 } from '../services/tpv/blumon-webhook.service'
 
@@ -100,6 +101,11 @@ export class BlumonWebhookReconciliationJob {
         // Only Blumon TPV events have eventId starting with 'blumon-tpv-'.
         // Use a startsWith to leave room for other providers in the same table.
         eventId: { startsWith: 'blumon-tpv-' },
+        // Reversals are informational — they must never enter the sale
+        // reconciliation path. Written as an explicit exclusion (rather than
+        // `type: 'VENTA'`) so rows typed 'UNKNOWN' or null — which ARE sales —
+        // keep being reconciled.
+        OR: [{ type: null }, { type: { notIn: [...REVERSAL_OPERATION_TYPES] } }],
       },
       take: this.BATCH_SIZE,
       orderBy: { createdAt: 'asc' },
@@ -140,7 +146,11 @@ export class BlumonWebhookReconciliationJob {
       status: EventStatus.PENDING,
       createdAt: { lt: cutoff },
       eventId: { startsWith: 'blumon-tpv-' },
-    } as const
+      // Never orphan-alert a reversal: it is money LEAVING, so "charge with no
+      // Avoqado payment" would be a false alarm. Same NULL-tolerant exclusion
+      // as the pending sweep above.
+      OR: [{ type: null }, { type: { notIn: [...REVERSAL_OPERATION_TYPES] } }],
+    } satisfies Prisma.ProviderEventLogWhereInput
 
     // Fetch the rows BEFORE flipping them so we can emit a per-event alert with
     // enough detail for manual reconciliation. An ORPHANED event means Blumon

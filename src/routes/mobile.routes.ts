@@ -15,6 +15,7 @@ import * as transactionMobileController from '../controllers/mobile/transaction.
 import * as paymentMobileController from '../controllers/mobile/payment.mobile.controller'
 import * as terminalPaymentMobileController from '../controllers/mobile/terminal-payment.mobile.controller'
 import * as inventoryMobileController from '../controllers/mobile/inventory.mobile.controller'
+import * as loyaltyMobileController from '../controllers/mobile/loyalty.mobile.controller'
 import * as receiptMobileController from '../controllers/mobile/receipt.mobile.controller'
 import * as reportsMobileController from '../controllers/mobile/reports.mobile.controller'
 import * as customerController from '../controllers/dashboard/customer.dashboard.controller'
@@ -1892,6 +1893,32 @@ router.post(
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   orderMobileController.compWholeOrder,
+)
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/customers/:customerId/loyalty
+ * "Recompensas": balance + program rules for the customer on the check.
+ * Optional ?orderId= caps the redeemable amount at that check's total.
+ */
+router.get(
+  '/venues/:venueId/customers/:customerId/loyalty',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('LOYALTY_PROGRAM'),
+  checkPermission('loyalty:read'),
+  loyaltyMobileController.getCustomerLoyalty,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/orders/:orderId/loyalty/redeem
+ * Burns points and applies the matching discount to the OPEN check in ONE
+ * transaction (see loyalty.mobile.service — the dashboard path never did).
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/loyalty/redeem',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('LOYALTY_PROGRAM'),
+  checkPermission('orders:update'),
+  loyaltyMobileController.redeemPoints,
 )
 
 /**

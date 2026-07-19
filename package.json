@@ -53,7 +53,7 @@
     "check:all": "npm run check:unused && npm run check:dead-code",
     "update:unused-ignore": "node scripts/update-unused-ignore.js",
     "schema:map": "ts-node scripts/generate-schema-map.ts",
-    "assistant:audit": "npx ts-node -r tsconfig-paths/register scripts/audit-assistant-coverage.ts",
+    "assistant:audit": "NODE_OPTIONS='--max-old-space-size=8192' npx ts-node -r tsconfig-paths/register scripts/audit-assistant-coverage.ts",
     "assistant:regression": "jest tests/unit/services/dashboard/chatbot-conversation/conversation-planner.service.test.ts tests/unit/services/dashboard/chatbot-conversation/conversation-orchestrator.service.test.ts tests/unit/services/dashboard/text-to-sql-assistant.test.ts tests/unit/controllers/dashboard/text-to-sql-assistant.controller.security.test.ts --runInBand --runTestsByPath",
     "assistant:consistency": "jest --selectProjects=integration --runTestsByPath tests/integration/dashboard/dashboard-chatbot-consistency.test.ts",
     "pre-deploy": "bash scripts/pre-deploy-check.sh",

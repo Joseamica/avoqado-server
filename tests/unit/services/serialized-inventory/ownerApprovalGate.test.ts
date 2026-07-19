@@ -254,8 +254,6 @@ describe('markAsSold — manual-sale custody bypass (skipCustodyCheck)', () => {
     const { db } = makeSoldMockDb(item)
     const service = new SerializedInventoryService(db as any)
 
-    await expect(
-      service.markAsSold(VENUE_ID, SERIAL, ORDER_ITEM_ID, undefined, { staffId: SELLER }),
-    ).rejects.toThrow(SimCustodyError)
+    await expect(service.markAsSold(VENUE_ID, SERIAL, ORDER_ITEM_ID, undefined, { staffId: SELLER })).rejects.toThrow(SimCustodyError)
   })
 })

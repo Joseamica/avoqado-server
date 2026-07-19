@@ -1045,7 +1045,16 @@ export async function removeOrderDiscount(venueId: string, orderId: string, orde
 
   const row = await prisma.orderDiscount.findFirst({ where: { id: orderDiscountId, orderId } })
   if (!row) throw new NotFoundError('Descuento no aplicado a esta orden')
-  await prisma.orderDiscount.delete({ where: { id: row.id } })
+
+  // 🔴 MONEY: a discount that came from redeeming loyalty points must give the
+  // points BACK when it is removed — otherwise the customer paid with points
+  // for a discount that no longer exists. Both moves share one transaction.
+  const { refundLoyaltyForOrderDiscount } = await import('./loyalty.mobile.service')
+  const refund = await prisma.$transaction(async tx => {
+    const refunded = await refundLoyaltyForOrderDiscount(tx, row, staffId)
+    await tx.orderDiscount.delete({ where: { id: row.id } })
+    return refunded
+  })
 
   const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
   const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0))
@@ -1056,7 +1065,7 @@ export async function removeOrderDiscount(venueId: string, orderId: string, orde
     entityId: orderId,
     staffId,
     venueId,
-    data: { orderDiscountId, name: row.name },
+    data: { orderDiscountId, name: row.name, pointsRefunded: refund?.pointsRefunded ?? 0 },
   })
 
   return totals

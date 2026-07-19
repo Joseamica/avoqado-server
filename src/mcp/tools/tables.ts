@@ -204,10 +204,7 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
           where: {
             venueId,
             staff: {
-              OR: [
-                { firstName: { contains: staff, mode: 'insensitive' } },
-                { lastName: { contains: staff, mode: 'insensitive' } },
-              ],
+              OR: [{ firstName: { contains: staff, mode: 'insensitive' } }, { lastName: { contains: staff, mode: 'insensitive' } }],
             },
           },
           select: { staffId: true, staff: { select: { firstName: true, lastName: true } } },

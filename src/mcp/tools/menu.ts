@@ -50,7 +50,7 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
           ...(search ? { name: { contains: search, mode: 'insensitive' as const } } : {}),
           ...(activeOnly ? { active: true } : {}),
         },
-        select: { name: true, price: true, active: true, type: true, category: { select: { name: true } } },
+        select: { name: true, price: true, active: true, type: true, soldByWeight: true, unit: true, category: { select: { name: true } } },
         orderBy: [{ active: 'desc' }, { name: 'asc' }],
         take: limit ?? 100,
       })
@@ -63,6 +63,8 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
           active: p.active,
           type: p.type,
           category: p.category?.name ?? null,
+          // Venta por peso: price is per KILOGRAM for these items.
+          ...(p.soldByWeight ? { soldByWeight: true, unit: p.unit } : {}),
         })),
       })
     },
@@ -199,6 +201,8 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
           imageUrl: true,
           trackInventory: true,
           inventoryMethod: true,
+          soldByWeight: true,
+          unit: true,
           category: { select: { name: true } },
           modifierGroups: {
             select: {
@@ -234,12 +238,14 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
                   unit: avail.limitingIngredient.unit,
                 }
               : null,
-            insufficientIngredients: (avail?.insufficientIngredients ?? []).map((i: { name: string; available: number; required: number; unit: string }) => ({
-              name: i.name,
-              available: i.available,
-              required: i.required,
-              unit: i.unit,
-            })),
+            insufficientIngredients: (avail?.insufficientIngredients ?? []).map(
+              (i: { name: string; available: number; required: number; unit: string }) => ({
+                name: i.name,
+                available: i.available,
+                required: i.required,
+                unit: i.unit,
+              }),
+            ),
           }
         : null
 
@@ -261,6 +267,10 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
           calories: p.calories,
           hasImage: !!p.imageUrl,
           inventoryTracking: p.trackInventory ? p.inventoryMethod : null,
+          // Venta por peso: when true, `price` is the price PER KILOGRAM and the
+          // POS captures the weight (kg) at sale time.
+          soldByWeight: p.soldByWeight,
+          ...(p.soldByWeight ? { unit: p.unit } : {}),
           availability, // live stock + limiting/insufficient raw materials (RECIPE), null if not tracked
           modifierGroups: p.modifierGroups.map(mg => ({
             name: mg.group.name,
@@ -310,8 +320,12 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
       sku: z.string().optional().describe('Stock code (auto-generated from the name if omitted)'),
       durationMinutes: z.number().int().positive().optional().describe('Duration in minutes (services / classes / appointments)'),
       isAlcoholic: z.boolean().optional().describe('Only for food_or_beverage'),
+      soldByWeight: z
+        .boolean()
+        .optional()
+        .describe('Venta por peso (charcutería/granel): price becomes the price PER KILOGRAM and the POS captures the weight at sale time'),
     },
-    async ({ venueId, name, price, type, category, description, sku, durationMinutes, isAlcoholic }) => {
+    async ({ venueId, name, price, type, category, description, sku, durationMinutes, isAlcoholic, soldByWeight }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('products:create', venueId) // write gate (per-venue role)
 
@@ -345,17 +359,25 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
           ...(description ? { description } : {}),
           ...(durationMinutes ? { duration: durationMinutes } : {}),
           ...(isAlcoholic !== undefined ? { isAlcoholic } : {}),
+          ...(soldByWeight !== undefined ? { soldByWeight } : {}),
         })
         await auditMcpWrite(scope, {
           action: 'PRODUCT_CREATED',
           entity: 'Product',
           entityId: product.id,
           venueId,
-          data: { name, type: PRODUCT_TYPE_MAP[type], price, category },
+          data: { name, type: PRODUCT_TYPE_MAP[type], price, category, ...(soldByWeight ? { soldByWeight } : {}) },
         })
         return text({
           ok: true,
-          product: { id: product.id, name: product.name, sku: product.sku, type: product.type, price: Number(product.price) },
+          product: {
+            id: product.id,
+            name: product.name,
+            sku: product.sku,
+            type: product.type,
+            price: Number(product.price),
+            soldByWeight: (product as { soldByWeight?: boolean }).soldByWeight ?? false,
+          },
         })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })

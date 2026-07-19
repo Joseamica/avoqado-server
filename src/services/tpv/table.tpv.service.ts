@@ -422,10 +422,12 @@ export async function moveOrderToTable(venueId: string, orderId: string, targetT
   // in case another check landed there between reads.
   await prisma.$transaction([
     ...(sourceTableId
-      ? [prisma.table.updateMany({
-          where: { id: sourceTableId, venueId, currentOrderId: order.id },
-          data: { status: 'AVAILABLE', currentOrderId: null },
-        })]
+      ? [
+          prisma.table.updateMany({
+            where: { id: sourceTableId, venueId, currentOrderId: order.id },
+            data: { status: 'AVAILABLE', currentOrderId: null },
+          }),
+        ]
       : []),
     prisma.order.update({ where: { id: order.id }, data: { tableId: target.id } }),
     prisma.table.update({
@@ -455,9 +457,7 @@ export async function moveOrderToTable(venueId: string, orderId: string, targetT
 
   const broadcastingService = socketManager.getBroadcastingService()
   if (broadcastingService) {
-    const waiter = order.servedBy
-      ? { id: order.servedBy.id, name: `${order.servedBy.firstName} ${order.servedBy.lastName}` }
-      : null
+    const waiter = order.servedBy ? { id: order.servedBy.id, name: `${order.servedBy.firstName} ${order.servedBy.lastName}` } : null
     if (sourceTableId) {
       const source = await prisma.table.findUnique({ where: { id: sourceTableId }, select: { id: true, number: true, status: true } })
       if (source) {

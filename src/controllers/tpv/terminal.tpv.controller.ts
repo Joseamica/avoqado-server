@@ -66,6 +66,8 @@ interface TpvSettings {
   cellularFailoverBadReadingsThreshold: number
   cellularFailoverCooldownSeconds: number
   cellularFailoverMinCellHoldSeconds: number
+  // La libreta (write-ahead payment ledger) — OFF by default, canary per venue
+  paymentLedgerMode: 'OFF' | 'SHADOW' | 'ACTIVE'
   // Card payment server-decoupling kill-switch.
   // true (default) = require api.avoqado.io reachable before allowing a card charge (legacy behavior).
   // false = allow the (always-online-to-Momentum) charge even when our backend heartbeat is down;
@@ -117,6 +119,8 @@ const DEFAULT_TPV_SETTINGS: TpvSettings = {
   cellularFailoverBadReadingsThreshold: 3,
   cellularFailoverCooldownSeconds: 60,
   cellularFailoverMinCellHoldSeconds: 120,
+  // La libreta (write-ahead payment ledger) — OFF by default, canary per venue
+  paymentLedgerMode: 'OFF',
   // Card auth requires our backend by default (legacy behavior — no change until flipped per-venue).
   requireAvoqadoServerForCardPayment: true,
 }

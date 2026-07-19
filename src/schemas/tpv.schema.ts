@@ -322,6 +322,14 @@ export const addOrderItemsSchema = z.object({
         z.object({
           productId: z.string().cuid({ message: 'El ID del producto debe ser un CUID válido.' }),
           quantity: z.number().int().positive({ message: 'La cantidad debe ser un entero positivo.' }),
+          // Venta por peso: kilos pesados. Obligatorio si el producto es
+          // soldByWeight (el servicio valida la combinación y calcula el total).
+          weightQuantity: z
+            .number()
+            .positive({ message: 'El peso debe ser mayor a 0.' })
+            .max(99.999, { message: 'El peso máximo es 99.999 kg.' })
+            .optional()
+            .nullable(),
           notes: z.string().optional().nullable(),
           modifierIds: z.array(z.string().cuid()).optional(), // ✅ FIX: Allow modifier IDs to be sent from Android
         }),

@@ -138,6 +138,7 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
       maxParticipants,
       layoutConfig,
       unit,
+      soldByWeight,
     } = req.body
 
     if (!name || !name.trim()) {
@@ -185,6 +186,10 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
         // invalid values are ignored, not fatal — additive field, older
         // clients that don't send it are unaffected).
         unit: parsedUnit,
+        // Venta por peso: price becomes precio POR KG; the POS captures the
+        // weight at sale time. Forces KILOGRAM as unit when enabled.
+        soldByWeight: soldByWeight === true,
+        ...(soldByWeight === true ? { unit: 'KILOGRAM' as Unit } : {}),
       },
       include: productInclude,
     })
@@ -251,6 +256,7 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
       'durationMinutes',
       'inventoryMethod',
       'unit',
+      'soldByWeight',
       'suggestedAmounts',
       'allowCustomAmount',
     ] as const

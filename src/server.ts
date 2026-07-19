@@ -29,6 +29,7 @@ import { abandonedOrdersCleanupJob } from './jobs/abandoned-orders-cleanup.job'
 import { batchExpirationJob } from './jobs/batch-expiration.job'
 import { tpvOrderExpiryJob } from './jobs/tpv-order-expiry.job'
 import { blumonWebhookReconciliationJob } from './jobs/blumon-webhook-reconciliation.job'
+import { blumonPaymentAuditJob } from './jobs/blumon-payment-audit.job'
 import { deliveryWebhookReconciliationJob } from './jobs/delivery-webhook-reconciliation.job'
 import { terminalPaymentWatchdogJob } from './jobs/terminal-payment-watchdog.job'
 import { reservationDepositReconciliationJob } from './jobs/reservation-deposit-reconciliation.job'
@@ -152,6 +153,8 @@ const gracefulShutdown = async (signal: string) => {
       logger.info('Stopping Blumon webhook reconciliation job...')
       blumonWebhookReconciliationJob.stop()
 
+      logger.info('Stopping Blumon payment audit job...')
+      blumonPaymentAuditJob.stop()
 
       logger.info('Stopping delivery webhook reconciliation job...')
       deliveryWebhookReconciliationJob.stop()
@@ -435,6 +438,9 @@ const startApplication = async (retries = 3) => {
       // ProviderEventLog rows when TPV records the Payment after the webhook arrived)
       blumonWebhookReconciliationJob.start()
 
+      // Start Blumon payment audit job (every 10min — the INVERSE sweep: card
+      // Payments whose Blumon webhook never arrived, the Mindform $1,400 class)
+      blumonPaymentAuditJob.start()
 
       // Start delivery webhook reconciliation job (every 2min at :45s — retries
       // FAILED/stuck-RECEIVED DeliveryOrderEvent rows; sweeps >24h to ORPHANED)

@@ -523,6 +523,8 @@ export interface TpvSettings {
   cellularFailoverBadReadingsThreshold: number // consecutive bad readings to trigger switch (>=1)
   cellularFailoverCooldownSeconds: number // min seconds between switches (>=0)
   cellularFailoverMinCellHoldSeconds: number // min time to hold cellular after switching (>=0)
+  // La libreta (write-ahead payment ledger) — OFF by default, canary per venue
+  paymentLedgerMode: 'OFF' | 'SHADOW' | 'ACTIVE'
 }
 
 /**
@@ -563,6 +565,8 @@ const DEFAULT_TPV_SETTINGS: TpvSettings = {
   cellularFailoverBadReadingsThreshold: 3,
   cellularFailoverCooldownSeconds: 60,
   cellularFailoverMinCellHoldSeconds: 120,
+  // La libreta (write-ahead payment ledger) — OFF by default, canary per venue
+  paymentLedgerMode: 'OFF',
 }
 
 /**

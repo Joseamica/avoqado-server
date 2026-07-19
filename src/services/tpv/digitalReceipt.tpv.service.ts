@@ -55,6 +55,8 @@ interface ReceiptDataSnapshot {
     quantity: number
     unitPrice: number
     total: number
+    /** Venta por peso: kilos pesados (unitPrice = precio por kg). Null/absent for normal lines. */
+    weightKg?: number | null
     modifiers?: Array<{
       name: string
       quantity: number
@@ -195,6 +197,7 @@ export async function generateDigitalReceipt(paymentId: string): Promise<Digital
         quantity: item.quantity,
         unitPrice: Number(item.unitPrice),
         total: Number(item.total),
+        weightKg: item.weightQuantity != null ? Number(item.weightQuantity) : null,
         modifiers: item.modifiers.map(modifier => ({
           name: modifier.modifier?.name || modifier.name || 'Modifier',
           quantity: modifier.quantity,
