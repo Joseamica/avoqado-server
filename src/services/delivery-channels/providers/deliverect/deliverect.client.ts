@@ -94,12 +94,16 @@ async function authHeaders(): Promise<{ Authorization: string }> {
 
 /**
  * Notifica el status de un pedido al canal.
- * REVALIDAR EN STAGING: path exacto 'POST /orders/{id}/status' y shape del body ({ status }).
+ * Fix C2 (auditoría G-Stack + Codex, 2026-07-19, spec §10.1.6): el scaffold asumió
+ * `POST /orders/{id}/status` — la doc real es `POST /orderStatus/{externalId}`.
+ * Doc: https://developers.deliverect.com/reference/update-order-status-1
+ * REVALIDAR EN STAGING: la doc menciona campos de body adicionales sobre este endpoint
+ * que no están 100% enumerados en lo revisado — hoy solo mandamos `{ status }`.
  */
 async function postOrderStatus(channelOrderId: string, statusCode: number): Promise<void> {
   try {
     const headers = await authHeaders()
-    await http.post(`/orders/${channelOrderId}/status`, { status: statusCode }, { headers })
+    await http.post(`/orderStatus/${channelOrderId}`, { status: statusCode }, { headers })
   } catch (error) {
     if (error instanceof DeliverectApiError) throw error
     throw toApiError(`Deliverect: fallo notificando status del pedido ${channelOrderId}`, error)
@@ -122,12 +126,22 @@ async function pushProducts(accountId: string, locationId: string, payload: unkn
 
 /**
  * Pausa/reanuda el canal (busy mode) para un location.
- * REVALIDAR EN STAGING: path exacto — asumido 'POST /locations/{locationId}/busy'.
+ * Fix C3 (auditoría G-Stack + Codex, 2026-07-19, spec §10.1.7): el scaffold asumió
+ * `POST /locations/{id}/busy` con `{ paused }` — la doc real es
+ * `POST /updateStoreStatus/{locationId}` con `{ isActive }`, el INVERSO de `paused`
+ * (`isActive: false` == pausado/cerrado al marketplace). Doc:
+ * https://developers.deliverect.com/reference/update-store-status
+ *
+ * Este método SIEMPRE propaga el error (nunca lo traga) — es la capa de arriba
+ * (`deliveryChannelLink.service.ts::pauseChannelLink`, fuera del scope de este fix)
+ * la que decide si un fallo del proveedor debe o no revertir/reportar el cambio de
+ * status local. Tragarlo AQUÍ reportaría éxito falso mientras el marketplace sigue
+ * abierto — ver spec §10.1.7.
  */
 async function setBusyMode(locationId: string, paused: boolean): Promise<void> {
   try {
     const headers = await authHeaders()
-    await http.post(`/locations/${locationId}/busy`, { paused }, { headers })
+    await http.post(`/updateStoreStatus/${locationId}`, { isActive: !paused }, { headers })
   } catch (error) {
     if (error instanceof DeliverectApiError) throw error
     throw toApiError(`Deliverect: fallo cambiando busy mode del location ${locationId}`, error)
