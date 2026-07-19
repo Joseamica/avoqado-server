@@ -245,6 +245,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   MoneyAnomaly: 'Orders, KDS & Cash',
   DeliveryChannelLink: 'Orders, KDS & Cash',
   DeliveryOrderEvent: 'Orders, KDS & Cash',
+  DeliveryActivationRequest: 'Orders, KDS & Cash',
 
   // 9. Payments & Fees
   Payment: 'Payments & Fees',

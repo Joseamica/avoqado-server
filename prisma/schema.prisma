@@ -334,20 +334,21 @@ model Venue {
   chatbotTokenBudget ChatbotTokenBudget?
 
   // Payment Provider Integration
-  paymentConfig           VenuePaymentConfig?
-  webhookSubscriptions    WebhookSubscription[]
-  providerEvents          ProviderEventLog[]
-  pricingStructures       VenuePricingStructure[]
-  monthlyProfits          MonthlyVenueProfit[]
-  settlementSimulations   SettlementSimulation[]
-  settlementIncidents     SettlementIncident[]
-  settlementConfirmations SettlementConfirmation[]
-  cashCloseouts           CashCloseout[]
-  creditAssessment        VenueCreditAssessment?
-  creditOffers            CreditOffer[]
-  ecommerceMerchants      EcommerceMerchant[]      @relation("VenueEcommerceMerchants") // ⭐ E-commerce sales channels for this venue
-  deliveryChannelLinks    DeliveryChannelLink[]
-  cryptoConfig            VenueCryptoConfig? // Per-venue B4Bit crypto payment device config
+  paymentConfig              VenuePaymentConfig?
+  webhookSubscriptions       WebhookSubscription[]
+  providerEvents             ProviderEventLog[]
+  pricingStructures          VenuePricingStructure[]
+  monthlyProfits             MonthlyVenueProfit[]
+  settlementSimulations      SettlementSimulation[]
+  settlementIncidents        SettlementIncident[]
+  settlementConfirmations    SettlementConfirmation[]
+  cashCloseouts              CashCloseout[]
+  creditAssessment           VenueCreditAssessment?
+  creditOffers               CreditOffer[]
+  ecommerceMerchants         EcommerceMerchant[]         @relation("VenueEcommerceMerchants") // ⭐ E-commerce sales channels for this venue
+  deliveryChannelLinks       DeliveryChannelLink[]
+  deliveryActivationRequests DeliveryActivationRequest[]
+  cryptoConfig               VenueCryptoConfig? // Per-venue B4Bit crypto payment device config
 
   // ✅ NEW: Inventory Management
   rawMaterials         RawMaterial[]
@@ -933,6 +934,9 @@ model Staff {
   // Rate correction batches applied/reversed by this staff member
   rateCorrectionsApplied  RateCorrectionBatch[] @relation("RateCorrectionAppliedBy")
   rateCorrectionsReversed RateCorrectionBatch[] @relation("RateCorrectionReversedBy")
+
+  // Delivery activation requests (self-serve intent) made by this staff member
+  deliveryActivationRequests DeliveryActivationRequest[] @relation("DeliveryActivationRequestedBy")
 
   // Email is now @unique on the field itself (globally unique)
   @@index([email])
@@ -4478,6 +4482,31 @@ model DeliveryChannelLink {
   @@index([status])
 }
 
+/// Solicitud de un venue para activar delivery. El dueño la crea (self-serve,
+/// expresa intención); ops la avanza al conectar el canal real con Deliverect.
+/// Distinta de DeliveryChannelLink (la conexión técnica real).
+model DeliveryActivationRequest {
+  id            String  @id @default(cuid())
+  venueId       String
+  venue         Venue   @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  requestedById String?
+  requestedBy   Staff?  @relation("DeliveryActivationRequestedBy", fields: [requestedById], references: [id], onDelete: SetNull)
+
+  status            DeliveryActivationStatus @default(PENDING)
+  /// Canales que el dueño declara tener/querer (informativo para ops)
+  requestedChannels String[]
+  note              String?                  @db.Text
+
+  contactedAt DateTime?
+  connectedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId])
+  @@index([status])
+}
+
 /// Log de eventos de webhook de delivery — patrón ProviderEventLog/Blumon:
 /// persistir ANTES de ACK; idempotencia por unique(provider, externalEventId, eventType).
 model DeliveryOrderEvent {
@@ -6299,6 +6328,13 @@ enum DeliveryChannelStatus {
   ACTIVE
   PAUSED // pausado por el venue o por billing (feature suspendido)
   DISABLED
+}
+
+enum DeliveryActivationStatus {
+  PENDING // el dueño solicitó; en cola de ops
+  CONTACTED // ops en contacto / configurando con Deliverect
+  CONNECTED // ya tiene canal ACTIVE (ops lo marcó al conectar)
+  DISMISSED // descartada (ya no aplica)
 }
 
 enum DeliveryOrderEventStatus {
