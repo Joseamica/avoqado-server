@@ -96,6 +96,16 @@ const SUPERADMIN_ONLY_ALLOWLIST = new Set<string>([
   'tpv-commands:bulk',
   'tpv-commands:schedule',
   'tpv-commands:geofence',
+  // Fix A1 (audit, spec §10.4 — confused-deputy): creating/linking a delivery channel binds an
+  // EXTERNAL Deliverect resource to this venue; the local venueId scoping doesn't prove ownership
+  // of that resource. Gated in delivery-channels.routes.ts (POST create + PATCH update when the
+  // body touches externalLocationId/externalAccountId) — intentionally NOT in DEFAULT_PERMISSIONS
+  // for any role (only SUPERADMIN passes via *:*). Deliberately absent from
+  // INDIVIDUAL_PERMISSIONS_BY_RESOURCE too (unlike platform-billing:*) — this route has no parent
+  // authorizeRole([SUPERADMIN]) gate, so keeping it out of the catalog is defense-in-depth against
+  // the role-editor's privilege-escalation guard (rolePermission.service.ts only blocks granting
+  // '*:*'/'system:*', not other SUPERADMIN-only perms).
+  'delivery-channels:connect',
   // Platform billing CFDI (Avoqado factura a sus propios clientes) — founder-only back-office,
   // mounted under /api/v1/superadmin/* (authorizeRole([SUPERADMIN])). Intentionally SUPERADMIN-only.
   'platform-billing:view',

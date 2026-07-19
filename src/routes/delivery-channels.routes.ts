@@ -10,8 +10,24 @@
  * Middleware order (precedente real del repo: MERCHANT_ROUTING_RULES,
  * dashboard.routes.ts ~3247, comentario "validate body BEFORE feature/perm
  * checks" — permissions-policy.md): validar el body ANTES de feature/permiso.
+ *
+ * Fix A1 (auditoría, spec §10.4 — confused-deputy): crear un canal, o cambiar
+ * `externalLocationId`/`externalAccountId` de uno existente, bindea un recurso EXTERNO de
+ * Deliverect a este venue — luego ese recurso se dispara (pause/menu-sync) con las credenciales
+ * OAuth PLATFORM-WIDE de Deliverect. El scoping por `venueId` solo prueba dueño del link LOCAL
+ * de Avoqado, no del recurso externo, así que un manager de un tenant podía bindear un
+ * `externalLocationId` arbitrario. Decisión de producto (spec §2): "ops/superadmin conecta el
+ * canal; el dueño solo solicita y opera". Por eso create + el update que toca esos dos campos
+ * exigen `delivery-channels:connect` — un permiso que NINGÚN rol no-SUPERADMIN tiene en
+ * DEFAULT_PERMISSIONS (solo pasa vía el atajo `*:*` de SUPERADMIN en checkPermission; ver
+ * SUPERADMIN_ONLY_ALLOWLIST en scripts/audit-permissions.ts, y el comentario "NO: delivery-
+ * channels:connect" en los bloques OWNER/ADMIN de src/lib/permissions.ts). `pause` y el toggle
+ * `orderAcceptanceMode` (controles operativos sobre un canal YA conectado) se quedan en
+ * OWNER/ADMIN vía `delivery-channels:manage` — mismo patrón "endpoints con sub-acciones" que
+ * documenta permissions-policy.md (el permiso depende del contenido del body, no un único
+ * checkPermission genérico para toda la ruta).
  */
-import { Router } from 'express'
+import { NextFunction, Request, Response, Router } from 'express'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
@@ -26,6 +42,25 @@ import {
 
 const router = Router({ mergeParams: true })
 
+/** Campos que identifican el recurso EXTERNO de Deliverect — ver Fix A1 arriba. */
+const CHANNEL_IDENTITY_FIELDS = ['externalLocationId', 'externalAccountId'] as const
+
+/**
+ * PATCH .../channels/:linkId puede tocar tanto la identidad del recurso externo
+ * (externalLocationId/externalAccountId — SUPERADMIN-only) como campos operativos
+ * (orderAcceptanceMode/autoSyncMenu/config — OWNER/ADMIN). El permiso exigido depende del
+ * BODY, así que no se gatea con un único `checkPermission` genérico (permissions-policy.md,
+ * "Endpoints con sub-acciones").
+ */
+function checkChannelUpdatePermission(req: Request, res: Response, next: NextFunction) {
+  const body = (req.body ?? {}) as Record<string, unknown>
+  const touchesIdentityField = CHANNEL_IDENTITY_FIELDS.some(field => field in body)
+  if (touchesIdentityField) {
+    return checkPermission('delivery-channels:connect')(req, res, next)
+  }
+  return checkPermission('delivery-channels:manage')(req, res, next)
+}
+
 router.get(
   '/venues/:venueId/channels',
   authenticateTokenMiddleware,
@@ -39,7 +74,7 @@ router.post(
   authenticateTokenMiddleware,
   validateRequest(createChannelSchema),
   checkFeatureAccess('DELIVERY_CHANNELS'),
-  checkPermission('delivery-channels:manage'),
+  checkPermission('delivery-channels:connect'),
   ctrl.createChannel,
 )
 
@@ -48,7 +83,7 @@ router.patch(
   authenticateTokenMiddleware,
   validateRequest(updateChannelSchema),
   checkFeatureAccess('DELIVERY_CHANNELS'),
-  checkPermission('delivery-channels:manage'),
+  checkChannelUpdatePermission,
   ctrl.updateChannel,
 )
 

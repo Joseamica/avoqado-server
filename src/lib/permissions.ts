@@ -884,6 +884,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'delivery-channels:read',
     'delivery-channels:manage',
     'delivery-channels:request', // Solicitar activación — decisión de negocio (OWNER/ADMIN, NO MANAGER)
+    // NO: delivery-channels:connect (SUPERADMIN only — crear/linkear canal o cambiar su
+    // externalLocationId/externalAccountId; confused-deputy, spec §10.4, Fix A1 de la auditoría)
   ],
 
   /**
@@ -1004,6 +1006,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'delivery-channels:read',
     'delivery-channels:manage',
     'delivery-channels:request', // Solicitar activación — decisión de negocio (OWNER/ADMIN, NO MANAGER)
+    // NO: delivery-channels:connect (SUPERADMIN only — crear/linkear canal o cambiar su
+    // externalLocationId/externalAccountId; confused-deputy, spec §10.4, Fix A1 de la auditoría)
   ],
 
   /**
