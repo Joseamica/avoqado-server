@@ -16,6 +16,11 @@
  * Window: 30 min old (give the webhook time to arrive) … 48 h old (bounded
  * scan). All time math is done in SQL/UTC — never in the process's local zone.
  * BetterStack alerts on the '🚨 [Blumon audit]' log line.
+ *
+ * Scoped to webhook-enabled merchants (see the EXISTS clause below): merchants
+ * whose Blumon affiliation never delivers webhooks to us ("Externo"/aggregator
+ * accounts) are excluded, because "no webhook" is their normal state — alerting
+ * on them is noise that would bury a genuine orphan at a real merchant.
  */
 
 import { CronJob } from 'cron'
@@ -84,6 +89,21 @@ export class BlumonPaymentAuditJob {
               AND (p."processorData"->>'blumonWebhookReceived') IS NULL
               AND (p."processorData"->>'blumonDiscrepancy') IS NULL
               AND (p."processorData"->>'webhookAuditAlertedAt') IS NULL
+              -- Scope to WEBHOOK-ENABLED merchants only. A missing webhook is
+              -- an anomaly ONLY for a merchant that normally produces them.
+              -- "Externo"/aggregator merchants (21 of 40 Blumon merchants, e.g.
+              -- Doña Simona serial 2840744168) structurally never deliver a
+              -- webhook to Avoqado (their affiliation isn't wired to our
+              -- endpoint), so flagging every one of their payments is pure noise
+              -- that buries a real orphan. Self-correcting: the moment a
+              -- merchant's webhook config is (re)registered and webhooks start
+              -- arriving, it re-enters this audit automatically.
+              AND EXISTS (
+                SELECT 1 FROM "ProviderEventLog" e
+                WHERE e."eventId" LIKE 'blumon-tpv-%'
+                  AND e.payload->>'serialNumber' = ma."blumonSerialNumber"
+                  AND e."createdAt" > now() - interval '30 days'
+              )
             LIMIT ${this.BATCH_SIZE}
           `,
         { shouldRetry: shouldRetryDbConnectionError, context: 'blumonPaymentAudit.scan' },
