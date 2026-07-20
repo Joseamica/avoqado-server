@@ -36,25 +36,56 @@ interface AuditRow {
   venueName: string | null
 }
 
+interface WebhookGapRow {
+  merchant: string | null
+  serial: string
+  posId: string | null
+  payments: number
+  totalAmount: string
+  lastPayment: Date
+}
+
 export class BlumonPaymentAuditJob {
   private job: CronJob | null = null
+  private gapJob: CronJob | null = null
 
   /** Every 10 minutes — the window is 30min–48h, so cadence need not be tight. */
   private readonly CRON_PATTERN = '0 */10 * * * *'
 
+  /**
+   * Daily at 08:00 Mexico City. The per-payment scan above stays quiet for
+   * merchants that never deliver webhooks (see its EXISTS clause) so the 🚨
+   * alert doesn't fatigue — but the FACT that a production merchant has card
+   * volume with zero webhook reconciliation is exactly what ops needs to see.
+   * This report surfaces that gap once a day, as one line, so it's actionable
+   * (register the affiliation's webhook with Blumon) without per-payment spam.
+   */
+  private readonly GAP_CRON_PATTERN = '0 0 8 * * *'
+
   private readonly BATCH_SIZE = 50
 
   start(): void {
-    if (this.job) return
-    this.job = new CronJob(this.CRON_PATTERN, () => void this.runOnce(), null, false, 'America/Mexico_City')
-    this.job.start()
-    logger.info('🪝 Blumon payment audit job started — every 10min, window 30min–48h')
+    if (!this.job) {
+      this.job = new CronJob(this.CRON_PATTERN, () => void this.runOnce(), null, false, 'America/Mexico_City')
+      this.job.start()
+      logger.info('🪝 Blumon payment audit job started — every 10min, window 30min–48h')
+    }
+    if (!this.gapJob) {
+      this.gapJob = new CronJob(this.GAP_CRON_PATTERN, () => void this.reportWebhookGaps(), null, false, 'America/Mexico_City')
+      this.gapJob.start()
+      logger.info('🪝 Blumon webhook-gap report started — daily 08:00 America/Mexico_City')
+    }
   }
 
   stop(): void {
-    if (!this.job) return
-    this.job.stop()
-    this.job = null
+    if (this.job) {
+      this.job.stop()
+      this.job = null
+    }
+    if (this.gapJob) {
+      this.gapJob.stop()
+      this.gapJob = null
+    }
     logger.info('🛑 Blumon payment audit job stopped')
   }
 
@@ -158,6 +189,80 @@ export class BlumonPaymentAuditJob {
     }
 
     return alerted
+  }
+
+  /**
+   * Merchant-level reconciliation-gap report. Lists PRODUCTION Blumon merchants
+   * that took card payments in the last 30 days but received ZERO webhooks — a
+   * standing "no independent reconciliation" gap that ops should close by
+   * (re)registering the merchant/affiliation webhook in the Blumon portal.
+   *
+   * Excludes SANDBOX merchants (`blumonEnvironment <> 'PRODUCTION'`) so the
+   * money-safe demo venue (a SANDBOX merchant deliberately living in prod)
+   * never shows up as a false gap. Returns the number of gap merchants.
+   */
+  async reportWebhookGaps(): Promise<number> {
+    let rows: WebhookGapRow[]
+
+    try {
+      rows = await retry(
+        () =>
+          prisma.$queryRaw<WebhookGapRow[]>`
+            SELECT coalesce(v.name, ma."displayName") AS merchant,
+                   ma."blumonSerialNumber" AS serial,
+                   ma."blumonPosId" AS "posId",
+                   count(*)::int AS payments,
+                   sum(p.amount)::text AS "totalAmount",
+                   max(p."createdAt") AS "lastPayment"
+            FROM "Payment" p
+            JOIN "MerchantAccount" ma ON ma.id = p."merchantAccountId"
+            LEFT JOIN "Order" o ON o.id = p."orderId"
+            LEFT JOIN "Venue" v ON v.id = o."venueId"
+            WHERE p.method IN ('CREDIT_CARD','DEBIT_CARD')
+              AND p.status = 'COMPLETED'
+              AND p.source = 'TPV'
+              AND p.type <> 'REFUND'
+              AND ma."blumonSerialNumber" IS NOT NULL
+              AND ma."blumonEnvironment" = 'PRODUCTION'
+              AND p."createdAt" > now() - interval '30 days'
+              AND NOT EXISTS (
+                SELECT 1 FROM "ProviderEventLog" e
+                WHERE e."eventId" LIKE 'blumon-tpv-%'
+                  AND e.payload->>'serialNumber' = ma."blumonSerialNumber"
+                  AND e."createdAt" > now() - interval '30 days'
+              )
+            GROUP BY 1, ma."blumonSerialNumber", ma."blumonPosId"
+            ORDER BY count(*) DESC
+          `,
+        { shouldRetry: shouldRetryDbConnectionError, context: 'blumonPaymentAudit.gapReport' },
+      )
+    } catch (error) {
+      logger.error('❌ Blumon webhook-gap report failed after retries', {
+        error: error instanceof Error ? error.message : error,
+      })
+      return 0
+    }
+
+    if (rows.length === 0) {
+      logger.info('📋 [Blumon gap] All production merchants with card volume are receiving webhooks (30d) — no reconciliation gap')
+      return 0
+    }
+
+    logger.warn(
+      '📋 [Blumon gap] Production merchants with card payments but NO Blumon webhooks (30d) — reconciliation gap; register/repair the affiliation webhook in the Blumon portal',
+      {
+        merchantCount: rows.length,
+        merchants: rows.map(r => ({
+          merchant: r.merchant,
+          serial: r.serial,
+          posId: r.posId,
+          payments: r.payments,
+          totalAmount: r.totalAmount,
+          lastPayment: r.lastPayment,
+        })),
+      },
+    )
+    return rows.length
   }
 }
 

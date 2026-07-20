@@ -1,5 +1,6 @@
 import { BlumonPaymentAuditJob } from '@/jobs/blumon-payment-audit.job'
 import prisma from '@/utils/prismaClient'
+import logger from '@/config/logger'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -61,5 +62,31 @@ describe('BlumonPaymentAuditJob', () => {
 
   it('stop() is safe to call before start()', () => {
     expect(() => new BlumonPaymentAuditJob().stop()).not.toThrow()
+  })
+
+  describe('reportWebhookGaps (daily merchant-level gap report)', () => {
+    it('warns with the gap merchants when production merchants have card volume but no webhooks', async () => {
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => logger)
+      mockedRaw.mockResolvedValue([
+        { merchant: 'Doña Simona', serial: '2840744168', posId: '7012', payments: 124, totalAmount: '76385.50', lastPayment: new Date() },
+        { merchant: 'Berthe', serial: '28407441672', posId: '9494', payments: 2, totalAmount: '6532.50', lastPayment: new Date() },
+      ])
+
+      const gaps = await new BlumonPaymentAuditJob().reportWebhookGaps()
+
+      expect(gaps).toBe(2)
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[Blumon gap]'), expect.objectContaining({ merchantCount: 2 }))
+      warnSpy.mockRestore()
+    })
+
+    it('reports 0 (no gap) when every production merchant is receiving webhooks', async () => {
+      mockedRaw.mockResolvedValue([])
+      expect(await new BlumonPaymentAuditJob().reportWebhookGaps()).toBe(0)
+    })
+
+    it('a transient DB failure reports 0 without crashing the daily report', async () => {
+      mockedRaw.mockRejectedValue(new Error('connection lost'))
+      await expect(new BlumonPaymentAuditJob().reportWebhookGaps()).resolves.toBe(0)
+    })
   })
 })
