@@ -119,6 +119,12 @@ export async function getAvailableSlots(
     return [] // Venue closed on this day
   }
 
+  // Un slot que ya no se puede reservar (pasado o dentro del aviso mínimo) no
+  // debe OFRECERSE: antes solo createReservation lo validaba (422) y los
+  // pickers mostraban horas imposibles que morían al confirmar.
+  const minNoticeMin = moduleConfig?.scheduling?.minNoticeMin ?? 0
+  const earliestBookable = new Date(Date.now() + minNoticeMin * 60000)
+
   // For each time range, generate slot start times (converted to UTC)
   const slotStarts: Date[] = []
   for (const range of daySchedule.ranges) {
@@ -127,7 +133,9 @@ export async function getAvailableSlots(
 
     const cursor = new Date(rangeStart)
     while (cursor.getTime() + defaultDuration * 60000 <= rangeEnd.getTime()) {
-      slotStarts.push(new Date(cursor))
+      if (cursor.getTime() >= earliestBookable.getTime()) {
+        slotStarts.push(new Date(cursor))
+      }
       cursor.setTime(cursor.getTime() + slotInterval * 60000)
     }
   }
