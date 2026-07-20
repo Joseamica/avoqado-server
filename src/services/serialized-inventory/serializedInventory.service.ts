@@ -305,7 +305,14 @@ export class SerializedInventoryService {
     serialNumber: string,
     orderItemId: string,
     tx?: Prisma.TransactionClient,
-    opts?: { staffId?: string; appVersionCode?: number; minimumVersionWithMisSims?: number; skipCustodyCheck?: boolean },
+    opts?: {
+      staffId?: string
+      appVersionCode?: number
+      minimumVersionWithMisSims?: number
+      skipCustodyCheck?: boolean
+      /** Override the sold timestamp (manual back-office sales backdate to the real sale day). */
+      soldAt?: Date
+    },
   ): Promise<{ item: SerializedItem; deprecationWarning: string | null }> {
     serialNumber = normalizeSerial(serialNumber)
     const client = tx || this.db
@@ -320,7 +327,7 @@ export class SerializedInventoryService {
       // Preserve legacy error surface: attempt update to trigger Prisma's not-found.
       const updated = await client.serializedItem.update({
         where: { venueId_serialNumber: { venueId, serialNumber } },
-        data: { status: 'SOLD', custodyState: 'SOLD', soldAt: new Date(), orderItemId },
+        data: { status: 'SOLD', custodyState: 'SOLD', soldAt: opts?.soldAt ?? new Date(), orderItemId },
       })
       return { item: updated, deprecationWarning: null }
     }
@@ -341,7 +348,7 @@ export class SerializedInventoryService {
       data: {
         status: 'SOLD',
         custodyState: 'SOLD', // anti-drift mirror
-        soldAt: new Date(),
+        soldAt: opts?.soldAt ?? new Date(),
         orderItemId,
         ...(isOrgLevel ? { sellingVenueId: venueId } : {}),
       },

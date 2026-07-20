@@ -5,6 +5,16 @@ import { prismaMock } from '@tests/__helpers__/setup'
 
 const VENUE_ID = 'venue-123'
 
+// getAvailableSlots now filters out slots before `now` (commit eed319e6), so a
+// hardcoded calendar date silently rots into the past and zeroes out every slot
+// (see memory: test-hardcoded-dates-timebomb). Anchor the suite to a future day
+// computed at run time, and keep every mock reservation/block on that same day.
+const TEST_DAY = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
+const TEST_DATE = TEST_DAY.toISOString().slice(0, 10) // YYYY-MM-DD (UTC)
+
+/** A UTC Date at HH:MM on TEST_DATE — keeps mock reservations/blocks on the test day. */
+const at = (hour: number, minute = 0) => new Date(`${TEST_DATE}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00Z`)
+
 const createMockTable = (overrides: Record<string, any> = {}) => ({
   id: 'table-1',
   number: '1',
@@ -21,8 +31,8 @@ const createMockStaff = (overrides: Record<string, any> = {}) => ({
 
 const createMockReservation = (overrides: Record<string, any> = {}) => ({
   id: 'res-existing',
-  startsAt: new Date('2026-03-03T12:00:00Z'),
-  endsAt: new Date('2026-03-03T13:00:00Z'),
+  startsAt: at(12),
+  endsAt: at(13),
   tableId: 'table-1',
   assignedStaffId: null,
   productId: null,
@@ -48,8 +58,6 @@ const defaultModuleConfig = {
     sunday: { enabled: true, ranges: [{ open: '08:00', close: '22:00' }] },
   },
 }
-
-const TEST_DATE = '2026-03-03'
 
 const getSlots = (options: any = {}, config: any = defaultModuleConfig) => getAvailableSlots(VENUE_ID, TEST_DATE, options, config, 'UTC')
 
@@ -172,8 +180,8 @@ describe('Reservation Availability Service', () => {
       // Staff-1 has a reservation at 14:00
       const existingRes = [
         createMockReservation({
-          startsAt: new Date('2026-03-03T14:00:00Z'),
-          endsAt: new Date('2026-03-03T15:00:00Z'),
+          startsAt: at(14),
+          endsAt: at(15),
           assignedStaffId: 'staff-1',
           tableId: null,
         }),
@@ -353,8 +361,8 @@ describe('Reservation Availability Service', () => {
         prismaMock.staff.findMany.mockResolvedValue([createMockStaff()])
         prismaMock.externalBusyBlock.findMany.mockResolvedValue([
           {
-            startsAt: new Date('2026-03-03T12:00:00Z'),
-            endsAt: new Date('2026-03-03T13:00:00Z'),
+            startsAt: at(12),
+            endsAt: at(13),
             staffId: null,
             venueId: VENUE_ID,
           },
@@ -378,8 +386,8 @@ describe('Reservation Availability Service', () => {
         prismaMock.staff.findMany.mockResolvedValue([createMockStaff({ id: 'staff-1' })])
         prismaMock.externalBusyBlock.findMany.mockResolvedValue([
           {
-            startsAt: new Date('2026-03-03T14:00:00Z'),
-            endsAt: new Date('2026-03-03T15:00:00Z'),
+            startsAt: at(14),
+            endsAt: at(15),
             staffId: 'staff-1',
             venueId: null,
           },

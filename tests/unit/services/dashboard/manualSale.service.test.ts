@@ -147,8 +147,9 @@ describe('manualSale.service — createOneManualSale', () => {
     expect(orderItemIdArg).toBe('orderitem-1')
     expect(txArg).toBe(tx)
     // Manual sales bypass the TPV custody precheck — these SIMs are sold outside the TPV
-    // and sit in SUPERVISOR_HELD, which the precheck (PROMOTER_HELD-only) would reject.
-    expect(optsArg).toEqual({ staffId: SELLER_STAFF_ID, skipCustodyCheck: true })
+    // and sit in SUPERVISOR_HELD, which the precheck (PROMOTER_HELD-only) would reject —
+    // and backdate the SIM's soldAt to the real sale day (not the upload day).
+    expect(optsArg).toEqual({ staffId: SELLER_STAFF_ID, skipCustodyCheck: true, soldAt: expect.any(Date) })
 
     // Payment COMPLETED, pesos, zero fees, net == amount.
     expect(tx.payment.create).toHaveBeenCalledTimes(1)
@@ -157,6 +158,9 @@ describe('manualSale.service — createOneManualSale', () => {
     expect(new Prisma.Decimal(payData.amount).toString()).toBe('150')
     expect(new Prisma.Decimal(payData.netAmount).toString()).toBe('150')
     expect(new Prisma.Decimal(payData.feeAmount).toString()).toBe('0')
+    // Payment backdated to the real sale day (matches the backdated Order.createdAt at line ~126).
+    expect(payData.createdAt).toBeInstanceOf(Date)
+    expect(payData.createdAt).toEqual(orderData.createdAt)
 
     // SaleVerification created COMPLETED with reviewer = actor.
     expect(tx.saleVerification.create).toHaveBeenCalledTimes(1)
@@ -170,6 +174,10 @@ describe('manualSale.service — createOneManualSale', () => {
     })
     expect(svData.serialNumbers).toContain('8952140064323812041F')
     expect(svData.reviewedAt).toBeInstanceOf(Date)
+    // Regression (Isaac 2026-07-20): SaleVerification.createdAt MUST be the real sale day,
+    // not now() — the org reports group by it, so a May sale was filing under July.
+    expect(svData.createdAt).toBeInstanceOf(Date)
+    expect(svData.createdAt).toEqual(svData.reviewedAt)
   })
 
   it('classifies a portabilidad sale via isPortabilidad', async () => {

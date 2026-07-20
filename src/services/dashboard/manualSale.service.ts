@@ -150,6 +150,8 @@ export async function createOneManualSale(
       await serializedInventoryService.markAsSold(venue.id, item.serialNumber, orderItem.id, tx, {
         staffId: sellerStaffId,
         skipCustodyCheck: true,
+        // Backdate the SIM's soldAt to the real sale day (not the upload day).
+        soldAt,
       })
 
       // 7. Payment (COMPLETED, pesos 1:1, no processor fees, net == amount).
@@ -171,6 +173,8 @@ export async function createOneManualSale(
           feeAmount: zero,
           netAmount: amount,
           processorData: { manualSerializedSale: true },
+          // Backdate to the real sale day so payment-dated reports agree with the sale.
+          createdAt: soldAt,
         },
       })
 
@@ -188,6 +192,10 @@ export async function createOneManualSale(
           inventoryDeducted: false,
           isPortabilidad: /portabilidad/i.test(row.saleType),
           serialNumbers: [normalizedIccid],
+          // Backdate to the real sale day (row.saleDate). The org sales list + weekly/monthly
+          // reports GROUP BY SaleVerification.createdAt, so leaving it at now() files a May
+          // sale under July — the bug Isaac reported. Mirrors Order.createdAt above.
+          createdAt: soldAt,
           reviewedById: actorStaffId,
           reviewedAt: soldAt,
         },
