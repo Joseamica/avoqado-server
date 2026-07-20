@@ -263,7 +263,12 @@ export async function createReservation(venueId: string, data: CreateReservation
 
   // Booking window enforcement (admin-configured policy from ReservationSettings).
   // Skipped when settings are not supplied (back-compat with callers that don't pass moduleConfig).
-  enforceBookingWindow(data.startsAt, moduleConfig?.scheduling)
+  // WALK_IN está EXENTO: la persona ya está parada en el mostrador — exigirle
+  // "N minutos de anticipación" (o rechazar que empezó hace unos minutos)
+  // hacía imposible registrar walk-ins con aviso mínimo configurado.
+  if (data.channel !== 'WALK_IN') {
+    enforceBookingWindow(data.startsAt, moduleConfig?.scheduling)
+  }
 
   const confirmationCode = generateConfirmationCode()
   const autoConfirm = moduleConfig?.scheduling?.autoConfirm ?? true
