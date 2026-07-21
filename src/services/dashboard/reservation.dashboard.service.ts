@@ -623,7 +623,11 @@ export async function getReservations(venueId: string, filters: ReservationFilte
   ])
 
   return {
-    data,
+    // Same treatment the detail and calendar views get: a multi-service
+    // appointment must list EVERY service here too. Without this the list only
+    // ever showed the lead service, so staff could not tell what was actually
+    // booked without opening each row.
+    data: await attachServicesMany(data),
     meta: { total, page, pageSize, totalPages: Math.ceil(total / pageSize) },
   }
 }

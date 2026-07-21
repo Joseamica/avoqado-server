@@ -11,6 +11,13 @@ import { ProductType } from '@prisma/client'
 
 const round2 = (n: number): number => Math.round(n * 100) / 100
 
+/**
+ * Item types the booking calendar schedules. These MUST carry a duration —
+ * `Reservation.duration` is summed from them, and a NULL silently contributes
+ * zero minutes to the appointment window.
+ */
+const BOOKABLE_TYPES = new Set(['service', 'class'])
+
 const PRODUCT_TYPE_MAP: Record<string, ProductType> = {
   product: ProductType.REGULAR,
   food_or_beverage: ProductType.FOOD_AND_BEV,
@@ -318,7 +325,13 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
       category: z.string().min(1).describe('Existing category name it belongs to (see menu_categories)'),
       description: z.string().optional().describe('Description'),
       sku: z.string().optional().describe('Stock code (auto-generated from the name if omitted)'),
-      durationMinutes: z.number().int().positive().optional().describe('Duration in minutes (services / classes / appointments)'),
+      durationMinutes: z
+        .number()
+        .int()
+        .positive()
+        .max(1440)
+        .optional()
+        .describe('Duration in minutes. REQUIRED for service / class — the booking calendar sizes the appointment from it'),
       isAlcoholic: z.boolean().optional().describe('Only for food_or_beverage'),
       soldByWeight: z
         .boolean()
@@ -328,6 +341,21 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
     async ({ venueId, name, price, type, category, description, sku, durationMinutes, isAlcoholic, soldByWeight }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('products:create', venueId) // write gate (per-venue role)
+
+      // A bookable item with no duration is silently destructive: the booking
+      // flow sums service durations to size the appointment, so a NULL one adds
+      // ZERO minutes. The calendar then blocks less time than the service really
+      // takes and staff double-book the slot behind it. Resolve-don't-guess: ask
+      // for it instead of inventing a number the venue never agreed to.
+      if (BOOKABLE_TYPES.has(type) && durationMinutes === undefined) {
+        return text({
+          ok: false,
+          error:
+            `"${name}" es un ${type === 'class' ? 'clase' : 'servicio'} agendable, así que necesito su duración en minutos ` +
+            `(durationMinutes) para poder crearlo. Sin ella la agenda aparta menos tiempo del que realmente toma y se ` +
+            `empalman las citas siguientes. ¿Cuánto dura "${name}"?`,
+        })
+      }
 
       const cat = await prisma.menuCategory.findFirst({
         where: { ...where, name: { equals: category, mode: 'insensitive' } },
@@ -366,7 +394,14 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
           entity: 'Product',
           entityId: product.id,
           venueId,
-          data: { name, type: PRODUCT_TYPE_MAP[type], price, category, ...(soldByWeight ? { soldByWeight } : {}) },
+          data: {
+            name,
+            type: PRODUCT_TYPE_MAP[type],
+            price,
+            category,
+            ...(durationMinutes !== undefined ? { durationMinutes } : {}),
+            ...(soldByWeight ? { soldByWeight } : {}),
+          },
         })
         return text({
           ok: true,
@@ -376,6 +411,7 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
             sku: product.sku,
             type: product.type,
             price: Number(product.price),
+            ...(durationMinutes !== undefined ? { durationMinutes } : {}),
             soldByWeight: (product as { soldByWeight?: boolean }).soldByWeight ?? false,
           },
         })

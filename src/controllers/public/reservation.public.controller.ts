@@ -138,6 +138,39 @@ async function resolveVenueBySlug(venueSlug: string) {
 // @/services/payments/ecommerceCapability so reservations, credit packs, the public
 // venue-info endpoint and the dashboard all share one "can this venue charge?" rule.
 
+/** Venue default used when a service carries no duration of its own. */
+export const FALLBACK_SERVICE_DURATION_MIN = 60
+
+type DurationBearingService = { id: string; duration: number | null; durationMinutes: number | null }
+
+/**
+ * Total minutes a multi-service appointment needs, and which services had no
+ * duration configured.
+ *
+ * A service with NO duration must NEVER contribute zero minutes. It used to:
+ * a 4-service booking whose priciest service had `duration = NULL` was blocked
+ * on the calendar as 2h when it really took 3h, so the venue booked the next
+ * client on top of it (Amaena, RES-PY45XU, 2026-07-20). Each duration-less
+ * service is padded to the venue default so the window is always plausible,
+ * and its id is reported so the venue can set a real duration.
+ */
+export function sumServiceDurations(
+  services: DurationBearingService[],
+  venueDefaultMin: number | null | undefined,
+): { totalMinutes: number; missingDuration: string[] } {
+  const fallback = venueDefaultMin ?? FALLBACK_SERVICE_DURATION_MIN
+  const missingDuration: string[] = []
+  const totalMinutes = services.reduce((acc, s) => {
+    const own = s.duration ?? s.durationMinutes ?? null
+    if (own === null) {
+      missingDuration.push(s.id)
+      return acc + fallback
+    }
+    return acc + own
+  }, 0)
+  return { totalMinutes, missingDuration }
+}
+
 async function previewDepositRequirement(venueId: string, body: any, settings: any) {
   if (!settings.deposits?.enabled || settings.deposits.mode === 'none') {
     return { required: false, amount: null as any }
@@ -665,7 +698,13 @@ export async function createReservation(req: Request, res: Response, next: NextF
       }
       // Lead service = first picked. Sum durations for the appointment window.
       req.body.productId = req.body.productId ?? incomingProductIds[0]
-      const summed = products.reduce((acc, p) => acc + (p.duration ?? p.durationMinutes ?? 0), 0)
+      const { totalMinutes: summed, missingDuration } = sumServiceDurations(products, settings.scheduling?.defaultDurationMin)
+      if (missingDuration.length > 0) {
+        logger.warn(
+          `[reservations] Venue ${venue.id} booked ${missingDuration.length} service(s) with no duration; ` +
+            `each padded to the venue default. Set a real duration: ${missingDuration.join(', ')}`,
+        )
+      }
       if (summed > 0) {
         req.body.duration = summed
       } else if (req.body.startsAt && req.body.endsAt) {

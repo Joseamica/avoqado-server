@@ -44,7 +44,10 @@ beforeAll(() => {
 beforeEach(() => jest.clearAllMocks())
 
 describe('create_product (write)', () => {
-  const base = { venueId: 'v1', name: 'Corte de cabello', price: 250, type: 'service', category: 'Servicios' }
+  // `durationMinutes` is mandatory for bookable types — a service with no
+  // duration is rejected up front (see create-product-duration.test.ts). These
+  // tests target the other concerns, so they supply a valid one.
+  const base = { venueId: 'v1', name: 'Corte de cabello', price: 250, type: 'service', category: 'Servicios', durationMinutes: 45 }
 
   it('rejects a venue outside the caller scope', async () => {
     await expect(call({ ...base, venueId: 'foreign' })).rejects.toThrow('out of scope')
