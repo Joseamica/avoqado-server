@@ -5,36 +5,58 @@ import { z } from 'zod'
 // ==========================================
 
 // Time format HH:MM (00:00 - 23:59)
-export const timeStringSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Formato de hora invalido (HH:MM)')
+export const timeStringSchema = z
+  .string({ required_error: 'La hora es requerida', invalid_type_error: 'La hora debe ser texto' })
+  .regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Formato de hora invalido (HH:MM)')
 
 const timeRangeSchema = z
-  .object({
-    open: timeStringSchema,
-    close: timeStringSchema,
-  })
+  .object(
+    {
+      open: timeStringSchema,
+      close: timeStringSchema,
+    },
+    { required_error: 'El rango horario es requerido', invalid_type_error: 'El rango horario debe ser un objeto' },
+  )
   .refine(data => data.close > data.open, {
     message: 'La hora de cierre debe ser posterior a la hora de apertura',
   })
 
-export const dayScheduleSchema = z.object({
-  enabled: z.boolean(),
-  ranges: z.array(timeRangeSchema).max(3, 'Maximo 3 rangos por dia'),
-})
+export const dayScheduleSchema = z.object(
+  {
+    enabled: z.boolean({
+      required_error: 'El estado del dia es requerido',
+      invalid_type_error: 'El estado del dia debe ser booleano',
+    }),
+    ranges: z
+      .array(timeRangeSchema, {
+        required_error: 'Los rangos del dia son requeridos',
+        invalid_type_error: 'Los rangos del dia deben ser una lista',
+      })
+      .max(3, 'Maximo 3 rangos por dia'),
+  },
+  {
+    required_error: 'La configuracion del dia es requerida',
+    invalid_type_error: 'La configuracion del dia debe ser un objeto',
+  },
+)
 
-export const weeklyScheduleSchema = z.object({
-  monday: dayScheduleSchema,
-  tuesday: dayScheduleSchema,
-  wednesday: dayScheduleSchema,
-  thursday: dayScheduleSchema,
-  friday: dayScheduleSchema,
-  saturday: dayScheduleSchema,
-  sunday: dayScheduleSchema,
-})
+export const weeklyScheduleSchema = z.object(
+  {
+    monday: dayScheduleSchema,
+    tuesday: dayScheduleSchema,
+    wednesday: dayScheduleSchema,
+    thursday: dayScheduleSchema,
+    friday: dayScheduleSchema,
+    saturday: dayScheduleSchema,
+    sunday: dayScheduleSchema,
+  },
+  { required_error: 'El horario semanal es requerido', invalid_type_error: 'El horario semanal debe ser un objeto' },
+)
 
 export const operatingHoursSchema = weeklyScheduleSchema.optional()
 
 export const localDateStringSchema = z
-  .string()
+  .string({ required_error: 'La fecha local es requerida', invalid_type_error: 'La fecha local debe ser texto' })
   .regex(/^\d{4}-\d{2}-\d{2}$/, 'Formato de fecha invalido (YYYY-MM-DD)')
   .refine(value => {
     const [year, month, day] = value.split('-').map(Number)
@@ -43,14 +65,24 @@ export const localDateStringSchema = z
   }, 'Fecha invalida')
 
 export const staffScheduleExceptionSchema = z
-  .object({
-    startDate: localDateStringSchema,
-    endDate: localDateStringSchema,
-    kind: z.enum(['OFF', 'HOURS']),
-    startTime: timeStringSchema.optional(),
-    endTime: timeStringSchema.optional(),
-    note: z.string().optional(),
-  })
+  .object(
+    {
+      startDate: localDateStringSchema,
+      endDate: localDateStringSchema,
+      kind: z.enum(['OFF', 'HOURS'], {
+        errorMap: issue => ({
+          message:
+            issue.code === z.ZodIssueCode.invalid_type && issue.received === 'undefined'
+              ? 'El tipo de excepcion es requerido'
+              : 'El tipo de excepcion debe ser OFF u HOURS',
+        }),
+      }),
+      startTime: timeStringSchema.optional(),
+      endTime: timeStringSchema.optional(),
+      note: z.string({ invalid_type_error: 'La nota debe ser texto' }).optional(),
+    },
+    { required_error: 'La excepcion es requerida', invalid_type_error: 'La excepcion debe ser un objeto' },
+  )
   .superRefine((value, ctx) => {
     if (value.endDate < value.startDate) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['endDate'], message: 'La fecha final debe ser igual o posterior a la inicial' })
@@ -70,14 +102,40 @@ export const staffScheduleExceptionSchema = z
     }
   })
 
-export const replaceStaffScheduleBodySchema = z.object({
-  weekly: weeklyScheduleSchema.nullable(),
-  exceptions: z.array(staffScheduleExceptionSchema).max(30, 'Maximo 30 excepciones'),
-})
+export const replaceStaffScheduleBodySchema = z.object(
+  {
+    weekly: weeklyScheduleSchema.nullable(),
+    exceptions: z
+      .array(staffScheduleExceptionSchema, {
+        required_error: 'Las excepciones son requeridas',
+        invalid_type_error: 'Las excepciones deben ser una lista',
+      })
+      .max(30, 'Maximo 30 excepciones'),
+  },
+  {
+    required_error: 'La configuracion del horario es requerida',
+    invalid_type_error: 'La configuracion del horario debe ser un objeto',
+  },
+)
 
-export const replaceProductStaffBodySchema = z.object({
-  staffVenueIds: z.array(z.string().min(1)).max(100, 'Maximo 100 profesionistas'),
-})
+const staffVenueIdSchema = z
+  .string({ required_error: 'El ID del profesionista es requerido', invalid_type_error: 'El ID del profesionista debe ser texto' })
+  .min(1, 'El ID del profesionista es requerido')
+
+export const replaceProductStaffBodySchema = z.object(
+  {
+    staffVenueIds: z
+      .array(staffVenueIdSchema, {
+        required_error: 'Los profesionistas son requeridos',
+        invalid_type_error: 'Los profesionistas deben ser una lista',
+      })
+      .max(100, 'Maximo 100 profesionistas'),
+  },
+  {
+    required_error: 'La configuracion de profesionistas es requerida',
+    invalid_type_error: 'La configuracion de profesionistas debe ser un objeto',
+  },
+)
 
 // Shared enums
 export const ReservationStatusSchema = z.enum(['PENDING', 'CONFIRMED', 'CHECKED_IN', 'COMPLETED', 'CANCELLED', 'NO_SHOW'])
@@ -475,15 +533,35 @@ export const venueParamsSchema = z.object({
   venueId: z.string().min(1),
 })
 
-export const staffScheduleParamsSchema = z.object({
-  venueId: z.string().min(1),
-  staffVenueId: z.string().min(1),
-})
+const staffConfigVenueIdSchema = z
+  .string({ required_error: 'El ID del establecimiento es requerido', invalid_type_error: 'El ID del establecimiento debe ser texto' })
+  .min(1, 'El ID del establecimiento es requerido')
 
-export const productStaffParamsSchema = z.object({
-  venueId: z.string().min(1),
-  productId: z.string().min(1),
-})
+const staffConfigProductIdSchema = z
+  .string({ required_error: 'El ID del producto es requerido', invalid_type_error: 'El ID del producto debe ser texto' })
+  .min(1, 'El ID del producto es requerido')
+
+export const staffScheduleParamsSchema = z.object(
+  {
+    venueId: staffConfigVenueIdSchema,
+    staffVenueId: staffVenueIdSchema,
+  },
+  {
+    required_error: 'Los parametros del horario son requeridos',
+    invalid_type_error: 'Los parametros del horario deben ser un objeto',
+  },
+)
+
+export const productStaffParamsSchema = z.object(
+  {
+    venueId: staffConfigVenueIdSchema,
+    productId: staffConfigProductIdSchema,
+  },
+  {
+    required_error: 'Los parametros del servicio son requeridos',
+    invalid_type_error: 'Los parametros del servicio deben ser un objeto',
+  },
+)
 
 export const reservationParamsSchema = z.object({
   venueId: z.string().min(1),
