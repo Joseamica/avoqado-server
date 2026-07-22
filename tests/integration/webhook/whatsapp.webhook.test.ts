@@ -5,6 +5,13 @@ import request from 'supertest'
 import app from '@/app'
 import prisma from '@/utils/prismaClient'
 
+jest.mock('@/services/whatsapp.service', () => ({
+  sendServiceMessage: jest.fn().mockResolvedValue({ messageId: 'wamid.TEST_REPLY' }),
+  WhatsappCloudApiError: class WhatsappCloudApiError extends Error {
+    cloudApiErrorCode = 'TEST'
+  },
+}))
+
 const APP_SECRET = 'test-app-secret'
 
 function postWebhook(payload: unknown) {

@@ -1,5 +1,5 @@
 import { getAvailableSlots, checkConflicts } from '@/services/dashboard/reservationAvailability.service'
-import { prismaMock } from '@tests/__helpers__/setup'
+import { prismaMock, primeReservationStaffMocks } from '@tests/__helpers__/setup'
 
 // ---- Helpers ----
 
@@ -64,6 +64,7 @@ const getSlots = (options: any = {}, config: any = defaultModuleConfig) => getAv
 describe('Reservation Availability Service', () => {
   beforeEach(() => {
     jest.resetAllMocks()
+    primeReservationStaffMocks()
     // Default: no external busy blocks. Tests opt in by overriding.
     prismaMock.externalBusyBlock.findMany.mockResolvedValue([])
   })

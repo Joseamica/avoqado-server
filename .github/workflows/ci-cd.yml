@@ -53,6 +53,20 @@ jobs:
   test-and-build:
     name: 🧪 Test, Lint & Build
     runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/avoqado_test
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/avoqado_test
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: avoqado_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d avoqado_test" --health-interval 10s --health-timeout 5s --health-retries 5
     outputs:
       version: ${{ steps.package-version.outputs.version }}
       build-time: ${{ steps.build-info.outputs.build-time }}
@@ -83,19 +97,18 @@ jobs:
         run: npm run build
 
       - name: 🏪 Run integration tests
-        continue-on-error: true
         run: |
-          if [ -z "$DATABASE_URL" ]; then
-            echo "⚠️ Integration tests skipped - TEST_DATABASE_URL not configured"
-            echo "📖 See docs/CI_CD_SETUP.md for setup instructions"
-            exit 0
-          fi
+          npx prisma migrate deploy
           npm run test:integration
         env:
-          DATABASE_URL: ${{ secrets.TEST_DATABASE_URL }}
           ACCESS_TOKEN_SECRET: test-access-token-secret
+          REFRESH_TOKEN_SECRET: test-refresh-token-secret
           SESSION_SECRET: test-session-secret
           COOKIE_SECRET: test-cookie-secret
+          OTP_PEPPER: test-otp-pepper-secret
+          RABBITMQ_URL: amqp://localhost:5672
+          OPENAI_API_KEY: test-openai-api-key
+          STRIPE_SECRET_KEY: sk_test_ci_placeholder
           NODE_ENV: test
 
       - name: 📋 Get package version

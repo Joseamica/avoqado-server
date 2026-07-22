@@ -5,6 +5,9 @@
 
 set -e  # Exit on any error
 
+DATABASE_URL_WAS_SET="${DATABASE_URL-}"
+TEST_DATABASE_URL_WAS_SET="${TEST_DATABASE_URL-}"
+
 # Load environment variables from .env file if it exists
 if [ -f .env ]; then
   echo "📦 Loading environment variables from .env..."
@@ -20,6 +23,9 @@ if [ -f .env ]; then
   echo "✅ Environment variables loaded"
   echo ""
 fi
+
+if [ -n "$DATABASE_URL_WAS_SET" ]; then export DATABASE_URL="$DATABASE_URL_WAS_SET"; fi
+if [ -n "$TEST_DATABASE_URL_WAS_SET" ]; then export TEST_DATABASE_URL="$TEST_DATABASE_URL_WAS_SET"; fi
 
 echo "🚀 ============================================="
 echo "🚀 PRE-DEPLOY VERIFICATION (CI/CD Simulation)"
@@ -119,7 +125,7 @@ if [ -z "$DATABASE_URL" ]; then
   echo -e "${YELLOW}⚠️ Integration tests skipped - DATABASE_URL not set${NC}"
   echo -e "${YELLOW}💡 Set DATABASE_URL or TEST_DATABASE_URL in .env to run integration tests${NC}"
 else
-  echo -e "Using database: ${DATABASE_URL%%@*}@***" # Hide credentials in output
+  echo "test DB configurada"
   if npm run test:integration; then
     echo -e "${GREEN}✅ Integration tests passed!${NC}"
   else
