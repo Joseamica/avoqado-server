@@ -19,6 +19,10 @@ import {
   promoteWaitlistBodySchema,
   venueParamsSchema,
   waitlistEntryParamsSchema,
+  staffScheduleParamsSchema,
+  productStaffParamsSchema,
+  replaceStaffScheduleBodySchema,
+  replaceProductStaffBodySchema,
 } from '../../schemas/dashboard/reservation.schema'
 import { updateReservationBrandingSchema } from '../../schemas/dashboard/reservationBranding.schema'
 
@@ -144,6 +148,33 @@ router.post(
   checkPermission('reservations:create'),
   validateRequest(z.object({ body: createReservationBodySchema })),
   controller.createReservation,
+)
+
+// ---- Staff schedules and service mappings (MUST be before /:id) ----
+
+router.get(
+  '/staff/:staffVenueId/schedule',
+  checkPermission('teams:read'),
+  validateRequest(z.object({ params: staffScheduleParamsSchema })),
+  controller.getStaffSchedule,
+)
+router.put(
+  '/staff/:staffVenueId/schedule',
+  checkPermission('teams:update'),
+  validateRequest(z.object({ params: staffScheduleParamsSchema, body: replaceStaffScheduleBodySchema })),
+  controller.replaceStaffSchedule,
+)
+router.get(
+  '/products/:productId/staff',
+  checkPermission('menu:read'),
+  validateRequest(z.object({ params: productStaffParamsSchema })),
+  controller.getProductStaff,
+)
+router.put(
+  '/products/:productId/staff',
+  checkPermission('menu:update'),
+  validateRequest(z.object({ params: productStaffParamsSchema, body: replaceProductStaffBodySchema })),
+  controller.replaceProductStaff,
 )
 
 router.get('/:id', checkPermission('reservations:read'), controller.getReservation)

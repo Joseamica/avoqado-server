@@ -5,7 +5,7 @@ import { z } from 'zod'
 // ==========================================
 
 // Time format HH:MM (00:00 - 23:59)
-const timeStringSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Formato de hora invalido (HH:MM)')
+export const timeStringSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Formato de hora invalido (HH:MM)')
 
 const timeRangeSchema = z
   .object({
@@ -16,22 +16,68 @@ const timeRangeSchema = z
     message: 'La hora de cierre debe ser posterior a la hora de apertura',
   })
 
-const dayScheduleSchema = z.object({
+export const dayScheduleSchema = z.object({
   enabled: z.boolean(),
   ranges: z.array(timeRangeSchema).max(3, 'Maximo 3 rangos por dia'),
 })
 
-export const operatingHoursSchema = z
+export const weeklyScheduleSchema = z.object({
+  monday: dayScheduleSchema,
+  tuesday: dayScheduleSchema,
+  wednesday: dayScheduleSchema,
+  thursday: dayScheduleSchema,
+  friday: dayScheduleSchema,
+  saturday: dayScheduleSchema,
+  sunday: dayScheduleSchema,
+})
+
+export const operatingHoursSchema = weeklyScheduleSchema.optional()
+
+export const localDateStringSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'Formato de fecha invalido (YYYY-MM-DD)')
+  .refine(value => {
+    const [year, month, day] = value.split('-').map(Number)
+    const parsed = new Date(Date.UTC(year, month - 1, day))
+    return parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day
+  }, 'Fecha invalida')
+
+export const staffScheduleExceptionSchema = z
   .object({
-    monday: dayScheduleSchema,
-    tuesday: dayScheduleSchema,
-    wednesday: dayScheduleSchema,
-    thursday: dayScheduleSchema,
-    friday: dayScheduleSchema,
-    saturday: dayScheduleSchema,
-    sunday: dayScheduleSchema,
+    startDate: localDateStringSchema,
+    endDate: localDateStringSchema,
+    kind: z.enum(['OFF', 'HOURS']),
+    startTime: timeStringSchema.optional(),
+    endTime: timeStringSchema.optional(),
+    note: z.string().optional(),
   })
-  .optional()
+  .superRefine((value, ctx) => {
+    if (value.endDate < value.startDate) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['endDate'], message: 'La fecha final debe ser igual o posterior a la inicial' })
+    }
+    if (value.kind === 'HOURS') {
+      if (!value.startTime) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['startTime'], message: 'La hora inicial es requerida' })
+      }
+      if (!value.endTime) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['endTime'], message: 'La hora final es requerida' })
+      }
+      if (value.startTime && value.endTime && value.endTime <= value.startTime) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['endTime'], message: 'La hora final debe ser posterior a la inicial' })
+      }
+    } else if (value.startTime !== undefined || value.endTime !== undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['startTime'], message: 'Una excepcion OFF no acepta horas' })
+    }
+  })
+
+export const replaceStaffScheduleBodySchema = z.object({
+  weekly: weeklyScheduleSchema.nullable(),
+  exceptions: z.array(staffScheduleExceptionSchema).max(30, 'Maximo 30 excepciones'),
+})
+
+export const replaceProductStaffBodySchema = z.object({
+  staffVenueIds: z.array(z.string().min(1)).max(100, 'Maximo 100 profesionistas'),
+})
 
 // Shared enums
 export const ReservationStatusSchema = z.enum(['PENDING', 'CONFIRMED', 'CHECKED_IN', 'COMPLETED', 'CANCELLED', 'NO_SHOW'])
@@ -427,6 +473,16 @@ export const publicCreateReservationBodySchema = z
 
 export const venueParamsSchema = z.object({
   venueId: z.string().min(1),
+})
+
+export const staffScheduleParamsSchema = z.object({
+  venueId: z.string().min(1),
+  staffVenueId: z.string().min(1),
+})
+
+export const productStaffParamsSchema = z.object({
+  venueId: z.string().min(1),
+  productId: z.string().min(1),
 })
 
 export const reservationParamsSchema = z.object({

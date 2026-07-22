@@ -3,6 +3,8 @@ import * as reservationService from '../../services/dashboard/reservation.dashbo
 import * as availabilityService from '../../services/dashboard/reservationAvailability.service'
 import { getReservationSettings, updateReservationSettings } from '../../services/dashboard/reservationSettings.service'
 import * as reservationBrandingService from '../../services/dashboard/reservationBranding.service'
+import * as staffScheduleService from '../../services/dashboard/staffSchedule.service'
+import * as productStaffService from '../../services/dashboard/productStaff.service'
 import { canVenueChargeOnline } from '../../services/payments/ecommerceCapability'
 import prisma from '../../utils/prismaClient'
 import { BadRequestError } from '../../errors/AppError'
@@ -320,6 +322,52 @@ export async function updateReservationBranding(req: Request, res: Response, nex
     const { userId } = (req as any).authContext
     const branding = await reservationBrandingService.updateReservationBranding(venueId, req.body, userId)
     res.json(branding)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** GET /venues/:venueId/reservations/staff/:staffVenueId/schedule */
+export async function getStaffSchedule(req: Request, res: Response, next: NextFunction) {
+  try {
+    const venueId = resolveVenueId(req)
+    const result = await staffScheduleService.getStaffSchedule(venueId, req.params.staffVenueId)
+    res.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** PUT /venues/:venueId/reservations/staff/:staffVenueId/schedule */
+export async function replaceStaffSchedule(req: Request, res: Response, next: NextFunction) {
+  try {
+    const venueId = resolveVenueId(req)
+    const { userId } = (req as any).authContext
+    const result = await staffScheduleService.replaceStaffSchedule(venueId, req.params.staffVenueId, req.body, userId)
+    res.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** GET /venues/:venueId/reservations/products/:productId/staff */
+export async function getProductStaff(req: Request, res: Response, next: NextFunction) {
+  try {
+    const venueId = resolveVenueId(req)
+    const result = await productStaffService.getProductStaff(venueId, req.params.productId)
+    res.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** PUT /venues/:venueId/reservations/products/:productId/staff */
+export async function replaceProductStaff(req: Request, res: Response, next: NextFunction) {
+  try {
+    const venueId = resolveVenueId(req)
+    const { userId } = (req as any).authContext
+    const result = await productStaffService.replaceProductStaff(venueId, req.params.productId, req.body.staffVenueIds, userId)
+    res.status(200).json(result)
   } catch (error) {
     next(error)
   }
