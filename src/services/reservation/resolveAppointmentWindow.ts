@@ -69,6 +69,13 @@ function appointmentWindowChanged(expectedBaseDurationMin: number, startsAt?: Da
   })
 }
 
+function inconsistentPersistedProducts(): ConflictError {
+  return new ConflictError(
+    'Los servicios guardados en la reservación ya no son consistentes. Selecciona el horario nuevamente.',
+    'APPOINTMENT_WINDOW_CHANGED',
+  )
+}
+
 export function normalizeBookedProductIds(input: BookedProductInput): NormalizedBookedProducts {
   const productIdsWasProvided = input.productIds !== undefined
   const selected = productIdsWasProvided ? input.productIds : input.productId ? [input.productId] : []
@@ -93,13 +100,12 @@ export function reservationBookedProductIds(reservation: { productId: string | n
   if (reservation.productIds.length === 0) {
     return reservation.productId ? [reservation.productId] : []
   }
-  if (reservation.productId !== reservation.productIds[0]) {
-    throw new ConflictError(
-      'Los servicios guardados en la reservación ya no son consistentes. Selecciona el horario nuevamente.',
-      'APPOINTMENT_WINDOW_CHANGED',
-    )
+
+  const productIds = stableDedupe(splitProductIds(reservation.productIds))
+  if (productIds.length === 0 || productIds.length > MAX_BOOKED_PRODUCTS || reservation.productId !== productIds[0]) {
+    throw inconsistentPersistedProducts()
   }
-  return [...reservation.productIds]
+  return productIds
 }
 
 export async function resolveCanonicalAppointmentDuration(

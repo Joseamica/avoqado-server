@@ -79,8 +79,17 @@ describe('reservationBookedProductIds', () => {
     expect(reservationBookedProductIds({ productId: 'a', productIds: ['a', 'b'] })).toEqual(['a', 'b'])
   })
 
-  it('fails closed when the persisted lead product diverges', () => {
-    expect(() => reservationBookedProductIds({ productId: 'b', productIds: ['a'] })).toThrow(
+  it('canonicalizes a nonempty persisted list without changing its stable lead order', () => {
+    expect(reservationBookedProductIds({ productId: 'a', productIds: [' a ', '', 'a', ' b,a '] })).toEqual(['a', 'b'])
+  })
+
+  it.each([
+    { productId: 'b', productIds: ['a'] },
+    { productId: 'a', productIds: ['', '  ', ','] },
+    { productId: null, productIds: ['', '  '] },
+    { productId: 'p0', productIds: Array.from({ length: 21 }, (_, index) => `p${index}`) },
+  ])('fails closed for malformed persisted products %#', reservation => {
+    expect(() => reservationBookedProductIds(reservation)).toThrow(
       expect.objectContaining({ statusCode: 409, code: 'APPOINTMENT_WINDOW_CHANGED' }),
     )
   })
