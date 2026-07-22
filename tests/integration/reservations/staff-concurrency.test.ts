@@ -113,8 +113,8 @@ async function waitUntilBlockedBy(holderPid: number, expected: number, label: st
 }
 
 function appointmentWindow(dayOffset: number): Window {
-  const startsAt = new Date(Date.now() + dayOffset * 24 * 60 * 60_000)
-  startsAt.setUTCSeconds(0, 0)
+  const today = new Date()
+  const startsAt = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() + dayOffset, 12, 0, 0))
   return { startsAt, endsAt: new Date(startsAt.getTime() + 60 * 60_000) }
 }
 
@@ -538,6 +538,44 @@ describe('production appointment create serialization on PostgreSQL', () => {
 
     expect(created?.assignedStaffId).toBe(staffId)
     expect(await prisma.reservation.count({ where: { assignedStaffId: staffId, startsAt: window.startsAt } })).toBe(2)
+  })
+
+  it('exhausts the real venue lock retries as one bounded domain 409 without leaking a database error', async () => {
+    await prisma.reservationSettings.update({
+      where: { venueId: sameOrgVenueA },
+      data: { capacityMode: 'per_staff', showStaffPicker: false, pacingMaxPerSlot: 1, minNoticeMin: 0 },
+    })
+    const window = appointmentWindow(14)
+    const holder = startAppointmentVenueLockHolder(sameOrgVenueA)
+    const startedAt = Date.now()
+    let failure: unknown
+    try {
+      await waitForSignalOrFailure(holder.gate.ready, holder.promise, 'exhausted-retry venue lock holder')
+      try {
+        await createProductionAppointment({
+          venueId: sameOrgVenueA,
+          productId: appointmentProductA,
+          window,
+          writeOrigin: 'PUBLIC',
+        })
+      } catch (error) {
+        failure = error
+      }
+    } finally {
+      holder.gate.release()
+      await holder.promise
+    }
+
+    const elapsedMs = Date.now() - startedAt
+    expect(elapsedMs).toBeLessThan(20_000)
+    expect(failure).toBeInstanceOf(ConflictError)
+    expect(failure).toMatchObject({
+      statusCode: 409,
+      code: undefined,
+      message: 'Conflicto de concurrencia persistente, por favor intente de nuevo',
+    })
+    expect(`${(failure as any)?.code ?? ''} ${(failure as Error)?.message ?? ''}`).not.toMatch(/P2028|P2010|55P03|40001/)
+    expect(await prisma.reservation.count({ where: { venueId: sameOrgVenueA, startsAt: window.startsAt } })).toBe(0)
   })
 })
 

@@ -109,7 +109,8 @@ describe('reservation availability controller boundaries', () => {
   })
 
   it('dashboard create maps base semantics and over-capacity consent only into trusted context', async () => {
-    const createSpy = jest.spyOn(reservationService, 'createReservation').mockResolvedValue({ id: 'reservation-created' } as any)
+    const created = { id: 'reservation-created', overCapacity: true } as any
+    const createSpy = jest.spyOn(reservationService, 'createReservation').mockResolvedValue(created)
     const body = {
       startsAt,
       endsAt,
@@ -120,11 +121,14 @@ describe('reservation availability controller boundaries', () => {
       allowOverCapacity: true,
     }
     const req: any = { params: { venueId: 'venue-1' }, body, authContext: { userId: 'staff-1' } }
+    const res = responseMock()
     const next = jest.fn()
 
-    await dashboardController.createReservation(req, responseMock(), next)
+    await dashboardController.createReservation(req, res, next)
 
     expect(next).not.toHaveBeenCalled()
+    expect(res.status).toHaveBeenCalledWith(201)
+    expect(res.json).toHaveBeenCalledWith(created)
     expect(createSpy).toHaveBeenCalledWith(
       'venue-1',
       expect.not.objectContaining({ windowSemantics: expect.anything(), allowOverCapacity: expect.anything() }),
@@ -327,6 +331,52 @@ describe('reservation availability controller boundaries', () => {
       expect.objectContaining({ statusCode: 401, message: 'Este negocio requiere iniciar sesion para reservar.' }),
     )
     expect(occupancy).not.toHaveBeenCalled()
+    expect(createSpy).not.toHaveBeenCalled()
+  })
+
+  it.each(['missing', 'expired', 'foreign'])(
+    'rejects an unavailable (%s) public hold through the scoped live lookup before core create',
+    async label => {
+      const holdId = `hold-${label}`
+      prismaMock.slotHold.findFirst.mockResolvedValue(null)
+      const createSpy = jest.spyOn(reservationService, 'createReservation')
+      const req: any = {
+        params: { venueSlug: 'venue' },
+        headers: {},
+        body: { startsAt, endsAt, duration: 60, partySize: 1, holdId },
+      }
+      const next = jest.fn()
+
+      await publicController.createReservation(req, responseMock(), next)
+
+      expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 409 }))
+      expect(prismaMock.slotHold.findFirst).toHaveBeenCalledWith({
+        where: { id: holdId, venueId: 'venue-1', expiresAt: { gt: expect.any(Date) } },
+        select: { id: true, startsAt: true, endsAt: true },
+      })
+      expect(createSpy).not.toHaveBeenCalled()
+    },
+  )
+
+  it('rejects a public hold with a mismatched window before core create', async () => {
+    prismaMock.slotHold.findFirst.mockResolvedValue({
+      id: 'hold-mismatch',
+      startsAt: new Date(startsAt.getTime() + 60_000),
+      endsAt,
+    } as any)
+    const createSpy = jest.spyOn(reservationService, 'createReservation')
+    const req: any = {
+      params: { venueSlug: 'venue' },
+      headers: {},
+      body: { startsAt, endsAt, duration: 60, partySize: 1, holdId: 'hold-mismatch' },
+    }
+    const next = jest.fn()
+
+    await publicController.createReservation(req, responseMock(), next)
+
+    expect(next).toHaveBeenCalledWith(
+      expect.objectContaining({ statusCode: 400, message: 'La reserva temporal no corresponde al horario seleccionado' }),
+    )
     expect(createSpy).not.toHaveBeenCalled()
   })
 

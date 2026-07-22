@@ -784,31 +784,34 @@ describe('Reservation Dashboard Service', () => {
       expect(result).not.toHaveProperty('overCapacity')
     })
 
-    it('floors legacy self-service null pacing to one and returns a hard non-confirmable 409', async () => {
-      jest
-        .spyOn(reservationSettingsService, 'getReservationSettings')
-        .mockResolvedValue(makeReservationSettings({ capacityMode: 'pacing', pacingMaxPerSlot: null }))
-      prismaMock.product.findFirst.mockResolvedValue({
-        id: 'prod-1',
-        price: new Prisma.Decimal(100),
-        eventCapacity: null,
-        type: 'APPOINTMENTS_SERVICE',
-      } as any)
-      prismaMock.reservation.findUnique.mockResolvedValue(null)
-      prismaMock.reservation.create.mockImplementation(async ({ data }: any) => createMockReservation(data))
-      const occupancy = jest
-        .spyOn(reservationAvailabilityService, 'countAppointmentOccupancy')
-        .mockResolvedValue({ reservations: 1, holds: 0 })
+    it.each(['PUBLIC', 'CONSUMER', 'MCP'] as const)(
+      'floors legacy null pacing to one and runs a hard non-confirmable occupancy gate for %s',
+      async writeOrigin => {
+        jest
+          .spyOn(reservationSettingsService, 'getReservationSettings')
+          .mockResolvedValue(makeReservationSettings({ capacityMode: 'pacing', pacingMaxPerSlot: null }))
+        prismaMock.product.findFirst.mockResolvedValue({
+          id: 'prod-1',
+          price: new Prisma.Decimal(100),
+          eventCapacity: null,
+          type: 'APPOINTMENTS_SERVICE',
+        } as any)
+        prismaMock.reservation.findUnique.mockResolvedValue(null)
+        prismaMock.reservation.create.mockImplementation(async ({ data }: any) => createMockReservation(data))
+        const occupancy = jest
+          .spyOn(reservationAvailabilityService, 'countAppointmentOccupancy')
+          .mockResolvedValue({ reservations: 1, holds: 0 })
 
-      const error = await createReservation(VENUE_ID, { ...appointmentInput, productIds: undefined }, { writeOrigin: 'PUBLIC' }).catch(
-        reason => reason,
-      )
+        const error = await createReservation(VENUE_ID, { ...appointmentInput, productIds: undefined }, { writeOrigin }).catch(
+          reason => reason,
+        )
 
-      expect(error).toMatchObject({ statusCode: 409, code: undefined, details: undefined })
-      expect(error.message).toMatch(/horario/i)
-      expect(occupancy).toHaveBeenCalled()
-      expect(prismaMock.reservation.create).not.toHaveBeenCalled()
-    })
+        expect(error).toMatchObject({ statusCode: 409, code: undefined, details: undefined })
+        expect(error.message).toMatch(/horario/i)
+        expect(occupancy).toHaveBeenCalled()
+        expect(prismaMock.reservation.create).not.toHaveBeenCalled()
+      },
+    )
 
     it('treats staff-aware null pacing as unlimited without combining it with the resource gate', async () => {
       const { occupancy } = await arrangeStaffAwareAppointment({ pacingMaxPerSlot: null, resolvedStaffId: 'staff-b' })
@@ -890,17 +893,20 @@ describe('Reservation Dashboard Service', () => {
       expect(result).toMatchObject({ assignedStaffId: 'staff-resolved', overCapacity: true })
     })
 
-    it.each(['PUBLIC', 'CONSUMER'] as const)('returns a hard non-confirmable staff-aware 409 for full %s creates', async writeOrigin => {
-      await arrangeStaffAwareAppointment({ pacingMaxPerSlot: 1, occupancy: { reservations: 1, holds: 0 } })
+    it.each(['PUBLIC', 'CONSUMER', 'MCP'] as const)(
+      'returns a hard non-confirmable staff-aware 409 for full %s creates',
+      async writeOrigin => {
+        await arrangeStaffAwareAppointment({ pacingMaxPerSlot: 1, occupancy: { reservations: 1, holds: 0 } })
 
-      const error = await createReservation(VENUE_ID, appointmentInput, {
-        writeOrigin,
-        windowSemantics: 'base',
-      }).catch(reason => reason)
+        const error = await createReservation(VENUE_ID, appointmentInput, {
+          writeOrigin,
+          windowSemantics: 'base',
+        }).catch(reason => reason)
 
-      expect(error).toMatchObject({ statusCode: 409, code: undefined, details: undefined })
-      expect(prismaMock.reservation.create).not.toHaveBeenCalled()
-    })
+        expect(error).toMatchObject({ statusCode: 409, code: undefined, details: undefined })
+        expect(prismaMock.reservation.create).not.toHaveBeenCalled()
+      },
+    )
 
     it('keeps WALK_IN subject to staff and global capacity despite its notice exemption', async () => {
       await arrangeStaffAwareAppointment({ pacingMaxPerSlot: 1, occupancy: { reservations: 1, holds: 0 } })

@@ -32,8 +32,8 @@ function nextWindow(durationMin: number) {
 }
 
 function staffWindow(dayOffset = 0, durationMin = 60) {
-  const startsAt = new Date(Date.now() + (10 + dayOffset) * 24 * 60 * 60_000)
-  startsAt.setUTCSeconds(0, 0)
+  const today = new Date()
+  const startsAt = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() + 10 + dayOffset, 12, 0, 0))
   return { startsAt, endsAt: new Date(startsAt.getTime() + durationMin * 60_000) }
 }
 
@@ -298,6 +298,47 @@ describe('createReservation PostgreSQL contract', () => {
     expect(created.assignedStaffId).toBe(staffA)
     expect(await inspector.reservation.count({ where: { venueId, startsAt: window.startsAt, endsAt: window.endsAt } })).toBe(1)
     expect(await inspector.slotHold.count({ where: { id: hold.id } })).toBe(1)
+  })
+
+  it('still blocks on another live hold when the trusted own hold is excluded', async () => {
+    await prisma.reservationSettings.update({
+      where: { venueId },
+      data: { capacityMode: 'per_staff', showStaffPicker: true, pacingMaxPerSlot: 1 },
+    })
+    const window = staffWindow(2)
+    const [ownHold, competingHold] = await Promise.all(
+      [staffA, staffB].map(staffId =>
+        prisma.slotHold.create({
+          data: {
+            venueId,
+            ...window,
+            productIds: [productA],
+            staffId,
+            partySize: 1,
+            expiresAt: new Date(Date.now() + 10 * 60_000),
+          },
+        }),
+      ),
+    )
+
+    const failure = await createReservation(
+      venueId,
+      {
+        ...window,
+        duration: 60,
+        productId: productA,
+        productIds: [productA],
+        assignedStaffId: staffA,
+        modifierSelections: [{ productId: productA, modifierId }],
+      },
+      { writeOrigin: 'PUBLIC', windowSemantics: 'base', validatedHoldId: ownHold.id },
+    ).catch(error => error)
+
+    expect(failure).toMatchObject({ statusCode: 409, code: undefined, details: undefined })
+    expect(await inspector.reservation.count({ where: { venueId, startsAt: window.startsAt, endsAt: window.endsAt } })).toBe(0)
+    expect(await inspector.reservationModifier.count({ where: { reservation: { venueId } } })).toBe(0)
+    expect(await inspector.calendarSyncOutbox.count({ where: { venueId } })).toBe(0)
+    expect(await inspector.slotHold.count({ where: { id: { in: [ownHold.id, competingHold.id] } } })).toBe(2)
   })
 
   it('keeps resource and pacing independent by assigning B when A is busy and pacing is two', async () => {
