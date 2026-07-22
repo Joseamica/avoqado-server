@@ -225,7 +225,9 @@ const prismaMock: any = {
   commissionTier: createMockModel(),
   commissionOverride: createMockModel(),
   commissionCalculation: createMockModel(),
+  commissionPayout: createMockModel(),
   commissionSummary: createMockModel(),
+  milestoneAchievement: createMockModel(),
   // Credit Pack models
   creditPack: createMockModel(),
   creditPackItem: createMockModel(),
