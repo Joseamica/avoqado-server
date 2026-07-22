@@ -23,10 +23,13 @@ jest.mock('stripe', () => {
 
 import { prismaMock } from '../../../__helpers__/setup'
 
-// Mock reservation service (withSerializableRetry)
+// Mock reservation service helpers used by credit-pack fulfillment.
 jest.mock('@/services/dashboard/reservation.dashboard.service', () => ({
-  withSerializableRetry: jest.fn((fn: any) => fn(prismaMock)),
   generateConfirmationCode: jest.fn().mockReturnValue('RES-ABC123'),
+}))
+
+jest.mock('@/utils/serializableRetry', () => ({
+  withSerializableRetry: jest.fn((fn: any) => fn(prismaMock)),
 }))
 
 // Deterministic VAT rate for the application-fee calc (createCheckoutSession).
@@ -1305,7 +1308,7 @@ describe('CreditPack Public Service', () => {
     })
 
     it('Concurrency safety: redeemForReservation uses serializable retry', async () => {
-      const { withSerializableRetry } = require('@/services/dashboard/reservation.dashboard.service')
+      const { withSerializableRetry } = require('@/utils/serializableRetry')
 
       const balanceRow = {
         id: BALANCE_ID,

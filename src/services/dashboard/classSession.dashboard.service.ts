@@ -11,7 +11,7 @@ import type {
   CreateClassSessionBulkDto,
 } from '../../schemas/dashboard/classSession.schema'
 import { ReservationStatus } from '@prisma/client'
-import { withSerializableRetry } from './reservation.dashboard.service'
+import { withSerializableRetry } from '@/utils/serializableRetry'
 import { createOrderFromReservation } from '../reservation/createOrderFromReservation'
 import { logAction } from './activity-log.service'
 import { buildSyncKey, collapseSupersededOps, enqueuePush, resolveClassSessionPushTargets } from '@/services/google-calendar/outbox.service'

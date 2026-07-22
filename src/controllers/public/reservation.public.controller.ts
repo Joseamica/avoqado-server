@@ -24,6 +24,7 @@ import emailService from '../../services/email.service'
 import { sendReservationConfirmationWhatsApp, formatModifiersForWhatsApp } from '../../services/whatsapp.service'
 import { enqueuePush, resolveClassSessionPushTargets } from '../../services/google-calendar/outbox.service'
 import { phonesMatch, phoneLast10 } from '../../utils/phone'
+import { withSerializableRetry } from '@/utils/serializableRetry'
 
 // ==========================================
 // PUBLIC RESERVATION CONTROLLER (Unauthenticated)
@@ -1765,7 +1766,7 @@ async function createClassReservation(
   const autoConfirm = moduleConfig?.scheduling?.autoConfirm ?? true
   const initialStatus: ReservationStatus = autoConfirm ? 'CONFIRMED' : 'PENDING'
 
-  return reservationService.withSerializableRetry(async tx => {
+  return withSerializableRetry(async tx => {
     // Lock the ClassSession row and verify it exists + belongs to venue
     const sessions = await tx.$queryRaw<
       { id: string; productId: string; startsAt: Date; endsAt: Date; duration: number; capacity: number; status: string }[]

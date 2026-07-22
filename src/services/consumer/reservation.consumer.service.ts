@@ -8,6 +8,7 @@ import { getVatRateBps } from '@/services/superadmin/platformSettings.service'
 import { getProvider } from '@/services/payments/provider-registry'
 import { resolveChargeableStripeMerchant as resolveActiveStripeMerchant } from '@/services/payments/ecommerceCapability'
 import logger from '@/config/logger'
+import { withSerializableRetry } from '@/utils/serializableRetry'
 
 type ConsumerReservationInput = {
   startsAt?: Date
@@ -525,7 +526,7 @@ async function createClassReservationForConsumer(
   const autoConfirm = moduleConfig?.scheduling?.autoConfirm ?? true
   const initialStatus: ReservationStatus = autoConfirm ? 'CONFIRMED' : 'PENDING'
 
-  return reservationService.withSerializableRetry(async tx => {
+  return withSerializableRetry(async tx => {
     const sessions = await tx.$queryRaw<
       { id: string; productId: string; startsAt: Date; endsAt: Date; duration: number; capacity: number; status: string }[]
     >`

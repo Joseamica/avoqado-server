@@ -20,8 +20,8 @@ import {
   resolveReservationPushTargets,
 } from '@/services/google-calendar/outbox.service'
 import { publishPushNotification } from '@/communication/rabbitmq/gcal-push-consumer'
-// creditPack.public.service is imported lazily inside cancelReservation/markNoShow to avoid
-// the circular import — creditPack imports `withSerializableRetry` from this module.
+import { withSerializableRetry } from '@/utils/serializableRetry'
+// creditPack.public.service is imported lazily inside cancelReservation/markNoShow.
 
 // ==========================================
 // RESERVATION SERVICE — Core CRUD + State Machine
@@ -90,32 +90,6 @@ function appendStatusLog(
       ...(reason ? { reason } : {}),
     },
   ]
-}
-
-// ---- P2034 Retry ----
-
-const MAX_RETRIES = 5
-
-export async function withSerializableRetry<T>(fn: (tx: Prisma.TransactionClient) => Promise<T>, timeoutMs = 10000): Promise<T> {
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      return await prisma.$transaction(fn, {
-        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-        timeout: timeoutMs,
-      })
-    } catch (error: any) {
-      if (error.code === 'P2034' && attempt < MAX_RETRIES) {
-        logger.warn(`⚠️ [RESERVATION] Serialization conflict, retrying... (attempt ${attempt}/${MAX_RETRIES})`)
-        await new Promise(r => setTimeout(r, 50 * Math.pow(2, attempt - 1)))
-        continue
-      }
-      if (error.code === 'P2034') {
-        throw new ConflictError('Conflicto de concurrencia persistente, por favor intente de nuevo')
-      }
-      throw error
-    }
-  }
-  throw new ConflictError('Conflicto de concurrencia persistente')
 }
 
 // ---- Deposit Calculation ----
