@@ -142,6 +142,7 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
         const reservation = await createReservation(
           venueId,
           { startsAt: start, endsAt, duration, partySize, guestName, guestPhone, guestEmail, productId, specialRequests },
+          { writeOrigin: 'MCP' },
           scope.staffId,
         )
         await auditMcpWrite(scope, {
@@ -242,6 +243,7 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
           newStartsAt: parsed,
           // Ops/MCP path: no hold → the service re-checks pacing inline (excl. self).
           rescheduledBy: 'SYSTEM', // normalized to null staffId by ACTOR_SENTINELS
+          writeOrigin: 'MCP',
         })
         await auditMcpWrite(scope, {
           action: 'RESERVATION_RESCHEDULED',
@@ -474,7 +476,7 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
       if (Object.keys(data).length === 0) return text({ ok: false, error: 'No pasaste ningún campo para actualizar.' })
 
       try {
-        const updated = await updateReservation(reservation.venueId, reservation.id, data, scope.staffId)
+        const updated = await updateReservation(reservation.venueId, reservation.id, data, { writeOrigin: 'MCP' }, scope.staffId)
         await auditMcpWrite(scope, {
           action: 'RESERVATION_UPDATED',
           entity: 'Reservation',

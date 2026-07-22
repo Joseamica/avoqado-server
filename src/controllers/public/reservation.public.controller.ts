@@ -620,7 +620,7 @@ export async function createReservation(req: Request, res: Response, next: NextF
     const { venueSlug } = req.params
     const venue = await resolveVenueBySlug(venueSlug)
 
-    let settings = await getReservationSettings(venue.id)
+    const settings = await getReservationSettings(venue.id)
 
     // Check public booking is enabled
     if (!settings.publicBooking.enabled) {
@@ -942,6 +942,8 @@ export async function createReservation(req: Request, res: Response, next: NextF
     //     widget shows "Debes $X al llegar" and ops can reconcile.
     let appointmentOwesAtVenue = false
     let appointmentOwesAmount = 0
+    let effectiveDeposits = settings.deposits
+    let paymentPolicyOverride: reservationService.ReservationWriteContext['paymentPolicyOverride']
     if (req.body.productId && !req.body.classSessionId) {
       const upfrontProduct = await prisma.product.findFirst({
         where: { id: req.body.productId, venueId: venue.id },
@@ -969,18 +971,16 @@ export async function createReservation(req: Request, res: Response, next: NextF
             // the full price and reservationService.createReservation stamps
             // depositAmount + status=PENDING. The Stripe checkout block below
             // then mints the session unchanged.
-            settings = {
-              ...settings,
-              deposits: {
-                ...(settings.deposits ?? {}),
-                enabled: true,
-                mode: 'prepaid',
-                fixedAmount: total,
-                percentageOfTotal: null,
-                requiredForPartySizeGte: null,
-                paymentWindowHrs: settings.deposits?.paymentWindowHrs ?? 24,
-              },
+            effectiveDeposits = {
+              ...(settings.deposits ?? {}),
+              enabled: true,
+              mode: 'prepaid',
+              fixedAmount: total,
+              percentageOfTotal: null,
+              requiredForPartySizeGte: null,
+              paymentWindowHrs: settings.deposits?.paymentWindowHrs ?? 24,
             }
+            paymentPolicyOverride = { deposits: effectiveDeposits }
           } else {
             appointmentOwesAtVenue = true
             appointmentOwesAmount = total
@@ -992,7 +992,7 @@ export async function createReservation(req: Request, res: Response, next: NextF
       }
     }
 
-    const depositPreview = await previewDepositRequirement(venue.id, req.body, settings)
+    const depositPreview = await previewDepositRequirement(venue.id, req.body, { ...settings, deposits: effectiveDeposits })
     const stripeMerchant = depositPreview.required ? await resolveActiveStripeMerchant(venue.id) : null
 
     if (depositPreview.required && !stripeMerchant) {
@@ -1004,10 +1004,8 @@ export async function createReservation(req: Request, res: Response, next: NextF
       // that gate (or via API/seed).
       appointmentOwesAtVenue = true
       appointmentOwesAmount = depositPreview.amount ?? appointmentOwesAmount
-      settings = {
-        ...settings,
-        deposits: { ...(settings.deposits ?? {}), enabled: false, mode: 'none' },
-      }
+      effectiveDeposits = { ...(effectiveDeposits ?? {}), enabled: false, mode: 'none' }
+      paymentPolicyOverride = { deposits: effectiveDeposits }
       logger.warn(
         `⚠️ [BOOKING] deposit required but venue ${venue.id} has no Stripe merchant — falling back to pay-at-venue (owes ${appointmentOwesAmount})`,
       )
@@ -1031,8 +1029,10 @@ export async function createReservation(req: Request, res: Response, next: NextF
         ...req.body,
         channel: 'WEB' as const,
       },
-      undefined, // no createdById for public bookings
-      settings,
+      {
+        writeOrigin: 'PUBLIC',
+        ...(paymentPolicyOverride ? { paymentPolicyOverride } : {}),
+      },
     )
 
     // Owes-at-venue fallback (policy=required + no Stripe merchant): the
@@ -1663,6 +1663,7 @@ export async function rescheduleReservation(req: Request, res: Response, next: N
       newStartsAt,
       holdId,
       rescheduledBy: 'CUSTOMER',
+      writeOrigin: 'PUBLIC',
     })
     return res.json(updated)
   } catch (error) {

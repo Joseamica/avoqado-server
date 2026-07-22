@@ -529,17 +529,21 @@ export async function simulateReservation(sessionId: string): Promise<SimReserva
   const startsAt = new Date(Math.ceil((Date.now() + 60 * 60_000) / (30 * 60_000)) * 30 * 60_000)
   const endsAt = new Date(startsAt.getTime() + DURATION_MIN * 60_000)
 
-  const reservation = await createDashboardReservation(session.venueId, {
-    startsAt,
-    endsAt,
-    duration: DURATION_MIN,
-    channel: 'WEB', // customer self-service — same as the real booking widget
-    guestName: 'Sofía Ramírez',
-    guestPhone: '5512345678',
-    partySize: 1,
-    specialRequests: 'Corte de cabello — reserva creada desde el demo interactivo de avoqado.io',
-    internalNotes: `${SIM_RESERVATION_NOTE_PREFIX}-${uuidv4()}`,
-  })
+  const reservation = await createDashboardReservation(
+    session.venueId,
+    {
+      startsAt,
+      endsAt,
+      duration: DURATION_MIN,
+      channel: 'WEB', // customer self-service — same as the real booking widget
+      guestName: 'Sofía Ramírez',
+      guestPhone: '5512345678',
+      partySize: 1,
+      specialRequests: 'Corte de cabello — reserva creada desde el demo interactivo de avoqado.io',
+      internalNotes: `${SIM_RESERVATION_NOTE_PREFIX}-${uuidv4()}`,
+    },
+    { writeOrigin: 'PUBLIC' },
+  )
 
   await updateLiveDemoActivity(sessionId)
 

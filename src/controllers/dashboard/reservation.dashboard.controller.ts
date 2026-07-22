@@ -56,9 +56,8 @@ export async function createReservation(req: Request, res: Response, next: NextF
   try {
     const venueId = resolveVenueId(req)
     const { userId } = (req as any).authContext
-    const settings = await getReservationSettings(venueId)
 
-    const reservation = await reservationService.createReservation(venueId, req.body, userId, settings)
+    const reservation = await reservationService.createReservation(venueId, req.body, { writeOrigin: 'DASHBOARD' }, userId)
     res.status(201).json(reservation)
   } catch (error) {
     next(error)
@@ -160,9 +159,8 @@ export async function updateReservation(req: Request, res: Response, next: NextF
     const venueId = resolveVenueId(req)
     const { userId } = (req as any).authContext
     const { id } = req.params
-    const settings = await getReservationSettings(venueId)
 
-    const reservation = await reservationService.updateReservation(venueId, id, req.body, userId, settings)
+    const reservation = await reservationService.updateReservation(venueId, id, req.body, { writeOrigin: 'DASHBOARD' }, userId)
     res.json(reservation)
   } catch (error) {
     next(error)
@@ -256,16 +254,18 @@ export async function rescheduleReservation(req: Request, res: Response, next: N
     const { userId } = (req as any).authContext
     const { id } = req.params
     const { startsAt, endsAt, notificationChannel, customMessage } = req.body
-    const settings = await getReservationSettings(venueId)
 
     const reservation = await reservationService.rescheduleReservation(
       venueId,
       id,
-      new Date(startsAt),
-      new Date(endsAt),
+      {
+        startsAt: new Date(startsAt),
+        endsAt: new Date(endsAt),
+        notificationChannel,
+        customMessage,
+      },
+      { writeOrigin: 'DASHBOARD' },
       userId,
-      settings,
-      { notificationChannel, customMessage },
     )
     res.json(reservation)
   } catch (error) {

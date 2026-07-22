@@ -105,8 +105,9 @@ describe('simulateReservation — live demo sim reservation service', () => {
     const result = await simulateReservation(SESSION_ID)
 
     expect(mockedCreateReservation).toHaveBeenCalledTimes(1)
-    const [venueId, input] = mockedCreateReservation.mock.calls[0]
+    const [venueId, input, context] = mockedCreateReservation.mock.calls[0]
     expect(venueId).toBe(VENUE_ID)
+    expect(context).toEqual({ writeOrigin: 'PUBLIC' })
     expect(input.channel).toBe('WEB')
     expect(input.guestName).toBe('Sofía Ramírez')
     expect(input.partySize).toBe(1)

@@ -436,8 +436,8 @@ describe('WORKFLOW [Task 28]: connect → backfill → reservation rejected at b
           assignedStaffId: STAFF_ID,
           guestName: 'Test',
         },
+        { writeOrigin: 'DASHBOARD' },
         STAFF_ID,
-        { scheduling: { maxAdvanceDays: 60 } },
       ),
     ).rejects.toThrow(/calendario externo/i)
 
@@ -469,8 +469,8 @@ describe('WORKFLOW [Task 28]: connect → backfill → reservation rejected at b
         assignedStaffId: STAFF_ID,
         guestName: 'Test',
       },
+      { writeOrigin: 'DASHBOARD' },
       STAFF_ID,
-      { scheduling: { maxAdvanceDays: 60 } },
     )
     expect(created.id).toBe('res-1')
   })
@@ -656,8 +656,8 @@ describe('WORKFLOW [Task 30]: multi-venue staff personal block bleeds across ven
           assignedStaffId: STAFF_ID,
           guestName: 'Test',
         },
+        { writeOrigin: 'DASHBOARD' },
         STAFF_ID,
-        { scheduling: { maxAdvanceDays: 60 } },
       ),
     ).rejects.toThrow(/calendario externo/i)
 
@@ -687,8 +687,8 @@ describe('WORKFLOW [Task 30]: multi-venue staff personal block bleeds across ven
           assignedStaffId: STAFF_ID,
           guestName: 'Test',
         },
+        { writeOrigin: 'DASHBOARD' },
         STAFF_ID,
-        { scheduling: { maxAdvanceDays: 60 } },
       ),
     ).rejects.toThrow(/calendario externo/i)
 
@@ -720,8 +720,8 @@ describe('WORKFLOW [Task 30]: multi-venue staff personal block bleeds across ven
         assignedStaffId: STAFF_ID,
         guestName: 'Test',
       },
+      { writeOrigin: 'DASHBOARD' },
       STAFF_ID,
-      { scheduling: { maxAdvanceDays: 60 } },
     )
     expect(juanFree.id).toBe('res-free-juan')
 
@@ -754,8 +754,8 @@ describe('WORKFLOW [Task 30]: multi-venue staff personal block bleeds across ven
         assignedStaffId: OTHER_STAFF_ID,
         guestName: 'Test',
       },
+      { writeOrigin: 'DASHBOARD' },
       OTHER_STAFF_ID,
-      { scheduling: { maxAdvanceDays: 60 } },
     )
     expect(mariaBusy.id).toBe('res-busy-maria')
 
@@ -796,8 +796,8 @@ describe('REGRESSION — Phase 1 invariants exercised by the workflows', () => {
         assignedStaffId: STAFF_ID,
         guestName: 'Test',
       },
+      { writeOrigin: 'DASHBOARD' },
       STAFF_ID,
-      { scheduling: { maxAdvanceDays: 60 } },
     )
 
     const where = (prismaMock.externalBusyBlock.findFirst as jest.Mock).mock.calls[0][0].where

@@ -68,7 +68,9 @@ describe('createReservation with modifiers', () => {
   }
 
   beforeEach(() => {
+    jest.restoreAllMocks()
     jest.clearAllMocks()
+    jest.spyOn(Date, 'now').mockReturnValue(new Date('2026-05-01T00:00:00.000Z').getTime())
     prismaMock.$transaction.mockImplementation(async (fn: any) => {
       if (typeof fn === 'function') return fn(prismaMock)
       return fn
@@ -89,16 +91,20 @@ describe('createReservation with modifiers', () => {
   })
 
   it('persists ReservationModifier rows when selections are provided', async () => {
-    await createReservation(venueId, {
-      startsAt: new Date('2026-06-01T10:00:00Z'),
-      endsAt: new Date('2026-06-01T11:00:00Z'),
-      duration: 60,
-      productId,
-      productIds: [productId],
-      guestName: 'Test',
-      guestPhone: '5555555555',
-      modifierSelections: [{ productId, modifierId: 'cmod1', quantity: 1 }],
-    } as any)
+    await createReservation(
+      venueId,
+      {
+        startsAt: new Date('2026-06-01T10:00:00Z'),
+        endsAt: new Date('2026-06-01T11:00:00Z'),
+        duration: 60,
+        productId,
+        productIds: [productId],
+        guestName: 'Test',
+        guestPhone: '5555555555',
+        modifierSelections: [{ productId, modifierId: 'cmod1', quantity: 1 }],
+      } as any,
+      { writeOrigin: 'DASHBOARD' },
+    )
 
     expect(resolveModifierSelections).toHaveBeenCalledWith(
       expect.anything(),
@@ -116,14 +122,18 @@ describe('createReservation with modifiers', () => {
       totalDelta: new Prisma.Decimal('0'),
     })
 
-    await createReservation(venueId, {
-      startsAt: new Date('2026-06-01T10:00:00Z'),
-      endsAt: new Date('2026-06-01T11:00:00Z'),
-      duration: 60,
-      productId,
-      guestName: 'Test',
-      guestPhone: '5555555555',
-    } as any)
+    await createReservation(
+      venueId,
+      {
+        startsAt: new Date('2026-06-01T10:00:00Z'),
+        endsAt: new Date('2026-06-01T11:00:00Z'),
+        duration: 60,
+        productId,
+        guestName: 'Test',
+        guestPhone: '5555555555',
+      } as any,
+      { writeOrigin: 'DASHBOARD' },
+    )
 
     expect(prismaMock.reservationModifier.createMany).not.toHaveBeenCalled()
   })

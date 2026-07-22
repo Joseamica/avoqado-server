@@ -74,7 +74,7 @@ describe('update_reservation (safe T1 write)', () => {
 
     const out = parse(await call({ venueId: 'v1', confirmationCode: 'ABC', partySize: 6, specialRequests: 'Cumpleaños' }))
 
-    expect(mockUpdate).toHaveBeenCalledWith('v1', 'r1', { partySize: 6, specialRequests: 'Cumpleaños' }, 's1')
+    expect(mockUpdate).toHaveBeenCalledWith('v1', 'r1', { partySize: 6, specialRequests: 'Cumpleaños' }, { writeOrigin: 'MCP' }, 's1')
     expect(out.ok).toBe(true)
     expect(mockAudit.mock.calls[0][1]).toMatchObject({
       action: 'RESERVATION_UPDATED',

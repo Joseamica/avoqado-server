@@ -4,7 +4,7 @@ import { BadRequestError, ConflictError, NotFoundError, ValidationError } from '
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { logAction } from './activity-log.service'
-import { getReservationSettings } from './reservationSettings.service'
+import { getReservationSettings, type ReservationConfig } from './reservationSettings.service'
 import { countAppointmentOccupancy, effectiveAppointmentPacing } from './reservationAvailability.service'
 import { sendReservationRescheduleWhatsApp } from '../whatsapp.service'
 import emailService from '../email.service'
@@ -197,6 +197,22 @@ export interface CreateReservationInput {
   modifierSelections?: { productId: string; modifierId: string; quantity?: number }[]
 }
 
+export type WriteOrigin = 'PUBLIC' | 'CONSUMER' | 'DASHBOARD' | 'MCP'
+
+export interface ReservationWriteContext {
+  writeOrigin: WriteOrigin
+  allowOverCapacity?: boolean
+  windowSemantics?: 'base'
+  /**
+   * Trusted server-derived bridge for the public payment preflight. It may
+   * replace deposits only; scheduling and every other policy remain bound to
+   * the settings row read in the current transaction attempt.
+   */
+  paymentPolicyOverride?: {
+    deposits: ReservationConfig['deposits']
+  }
+}
+
 /**
  * Enforce booking-window settings (`maxAdvanceDays`, `minNoticeMin`) from
  * ReservationSettings. Throws ValidationError (422) when the requested start
@@ -229,27 +245,36 @@ export function enforceBookingWindow(startsAt: Date, scheduling?: { maxAdvanceDa
   }
 }
 
-export async function createReservation(venueId: string, data: CreateReservationInput, createdById?: string, moduleConfig?: any) {
+export async function createReservation(
+  venueId: string,
+  data: CreateReservationInput,
+  context: ReservationWriteContext,
+  createdById?: string,
+) {
   // Defense-in-depth: validate time invariants at service level
   if (data.endsAt <= data.startsAt) {
     throw new BadRequestError('La fecha de fin debe ser posterior a la fecha de inicio')
   }
 
-  // Booking window enforcement (admin-configured policy from ReservationSettings).
-  // Skipped when settings are not supplied (back-compat with callers that don't pass moduleConfig).
-  // WALK_IN está EXENTO: la persona ya está parada en el mostrador — exigirle
-  // "N minutos de anticipación" (o rechazar que empezó hace unos minutos)
-  // hacía imposible registrar walk-ins con aviso mínimo configurado.
-  if (data.channel !== 'WALK_IN') {
-    enforceBookingWindow(data.startsAt, moduleConfig?.scheduling)
-  }
-
   const confirmationCode = generateConfirmationCode()
-  const autoConfirm = moduleConfig?.scheduling?.autoConfirm ?? true
   const requestedPartySize = data.partySize ?? 1
   const depositIdempotencyKey = `reservation:${crypto.randomUUID()}:deposit:v1`
 
   const reservation = await withSerializableRetry(async tx => {
+    const persistedSettings = await getReservationSettings(venueId, tx)
+    const settings: ReservationConfig =
+      context.writeOrigin === 'PUBLIC' && context.paymentPolicyOverride
+        ? { ...persistedSettings, deposits: context.paymentPolicyOverride.deposits }
+        : persistedSettings
+
+    // WALK_IN está EXENTO: la persona ya está parada en el mostrador — exigirle
+    // "N minutos de anticipación" (o rechazar que empezó hace unos minutos)
+    // hacía imposible registrar walk-ins con aviso mínimo configurado.
+    if (data.channel !== 'WALK_IN') {
+      enforceBookingWindow(data.startsAt, settings.scheduling)
+    }
+
+    const autoConfirm = settings.scheduling.autoConfirm
     const { product } = await validateResourceOwnership(tx, venueId, {
       tableId: data.tableId,
       productId: data.productId,
@@ -273,16 +298,16 @@ export async function createReservation(venueId: string, data: CreateReservation
     let depositAmount: Prisma.Decimal | null = null
     let depositStatus: string | null = null
     let depositExpiresAt: Date | null = null
-    if (moduleConfig?.deposits) {
+    if (settings.deposits) {
       const deposit = calculateDepositAmount(
-        moduleConfig.deposits,
+        settings.deposits,
         requestedPartySize,
         product?.price ? Number(new Prisma.Decimal(product.price).add(modifierDelta)) : null,
       )
       if (deposit.required && deposit.amount) {
         depositAmount = deposit.amount
         depositStatus = 'PENDING'
-        const requestedWindowMin = moduleConfig.deposits.paymentWindowHrs ?? 30
+        const requestedWindowMin = settings.deposits.paymentWindowHrs ?? 30
         const effectiveWindowMin = Math.min(Math.max(requestedWindowMin, 30), 1440)
         depositExpiresAt = new Date(Date.now() + effectiveWindowMin * 60_000)
       }
@@ -337,7 +362,7 @@ export async function createReservation(venueId: string, data: CreateReservation
 
     // Layer 3: Product capacity gate
     if (data.productId && product?.eventCapacity) {
-      const onlinePercent = moduleConfig?.scheduling?.onlineCapacityPercent ?? 100
+      const onlinePercent = settings.scheduling.onlineCapacityPercent
       const effectiveCapacity = Math.floor((product.eventCapacity * onlinePercent) / 100)
 
       const overlappingProductReservations = await tx.$queryRaw<{ partySize: number }[]>`
@@ -418,10 +443,6 @@ export async function createReservation(venueId: string, data: CreateReservation
       })
     }
 
-    logger.info(
-      `✅ [RESERVATION] Created ${finalCode} | venue=${venueId} status=${initialStatus} table=${data.tableId ?? 'none'} staff=${data.assignedStaffId ?? 'none'}`,
-    )
-
     // ---- Google Calendar push outbox (Phase 2) ----
     // Co-commit one outbox row per target connection so the push is atomic
     // with the reservation INSERT. Class reservations don't flow through this
@@ -443,6 +464,10 @@ export async function createReservation(venueId: string, data: CreateReservation
 
     return { reservation, pushRowIds }
   })
+
+  logger.info(
+    `✅ [RESERVATION] Created ${reservation.reservation.confirmationCode} | venue=${venueId} status=${reservation.reservation.status} table=${data.tableId ?? 'none'} staff=${data.assignedStaffId ?? 'none'}`,
+  )
 
   // Fire-and-forget RMQ publish AFTER the transaction commits. Sweeper is the
   // retry path if RMQ is down; we never block the request on this.
@@ -1127,10 +1152,11 @@ export async function updateReservation(
   venueId: string,
   reservationId: string,
   data: UpdateReservationInput,
+  context: ReservationWriteContext,
   updatedById: string,
-  moduleConfig?: any,
 ) {
   const updated = await withSerializableRetry(async tx => {
+    const settings = await getReservationSettings(venueId, tx)
     const reservation = await tx.reservation.findFirst({
       where: { id: reservationId, venueId },
     })
@@ -1218,7 +1244,7 @@ export async function updateReservation(
     }
 
     if (newProductId && product?.eventCapacity) {
-      const onlinePercent = moduleConfig?.scheduling?.onlineCapacityPercent ?? 100
+      const onlinePercent = settings.scheduling.onlineCapacityPercent
       const effectiveCapacity = Math.floor((product.eventCapacity * onlinePercent) / 100)
 
       const overlappingProductReservations = await tx.$queryRaw<{ partySize: number }[]>`
@@ -1259,8 +1285,6 @@ export async function updateReservation(
       include: RESERVATION_INCLUDE,
     })
 
-    logger.info(`✅ [RESERVATION] Updated ${reservation.confirmationCode} by=${updatedById}`)
-
     // ---- Google Calendar push outbox (Phase 2) ----
     // Re-resolve targets against the NEW state. If `assignedStaffId` changed,
     // the new staff's calendar receives the UPDATE (which the worker promotes
@@ -1288,6 +1312,8 @@ export async function updateReservation(
 
     return { updated, pushRowIds }
   })
+
+  logger.info(`✅ [RESERVATION] Updated ${updated.updated.confirmationCode} by=${updatedById} origin=${context.writeOrigin}`)
 
   if (updated.pushRowIds.length > 0) {
     publishPushNotification(updated.pushRowIds).catch(err =>
@@ -1318,15 +1344,19 @@ export type RescheduleNotification = {
   customMessage?: string
 }
 
+export interface RescheduleReservationInput extends RescheduleNotification {
+  startsAt: Date
+  endsAt: Date
+}
+
 export async function rescheduleReservation(
   venueId: string,
   reservationId: string,
-  newStartsAt: Date,
-  newEndsAt: Date,
+  data: RescheduleReservationInput,
+  context: ReservationWriteContext,
   rescheduledBy: string,
-  moduleConfig?: any,
-  notification?: RescheduleNotification,
 ) {
+  const { startsAt: newStartsAt, endsAt: newEndsAt } = data
   const duration = Math.round((newEndsAt.getTime() - newStartsAt.getTime()) / 60000)
 
   // Capture pre-update snapshot so we can show "old → new" in notifications and
@@ -1346,11 +1376,11 @@ export async function rescheduleReservation(
     venueId,
     reservationId,
     { startsAt: newStartsAt, endsAt: newEndsAt, duration },
+    context,
     rescheduledBy,
-    moduleConfig,
   )
 
-  const channel = notification?.notificationChannel
+  const channel = data.notificationChannel
   if (channel && channel !== 'none' && channel !== 'push') {
     const customerName =
       [original.customer?.firstName, original.customer?.lastName].filter(Boolean).join(' ').trim() || rescheduled.guestName || 'cliente'
@@ -1372,7 +1402,7 @@ export async function rescheduleReservation(
             venueName,
             date: formatDate(newStartsAt),
             time: formatTime(newStartsAt),
-            message: notification?.customMessage,
+            message: data.customMessage,
           })
           logger.info(`✅ [RESERVATION] WhatsApp reschedule sent for ${rescheduled.confirmationCode} → ${phone}`)
         } catch (err) {
@@ -1391,7 +1421,7 @@ export async function rescheduleReservation(
             oldDateTime: `${formatDate(originalStartsAt)}, ${formatTime(originalStartsAt)}`,
             newDateTime: `${formatDate(newStartsAt)}, ${formatTime(newStartsAt)}`,
             confirmationCode: rescheduled.confirmationCode,
-            customMessage: notification?.customMessage,
+            customMessage: data.customMessage,
           })
           logger.info(`✅ [RESERVATION] Email reschedule sent for ${rescheduled.confirmationCode} → ${email}`)
         } catch (err) {
@@ -1416,7 +1446,7 @@ export async function rescheduleReservation(
       endsAt: newEndsAt,
       confirmationCode: rescheduled.confirmationCode,
       notificationChannel: channel ?? null,
-      customMessage: notification?.customMessage ?? null,
+      customMessage: data.customMessage ?? null,
     },
   })
 
@@ -1448,8 +1478,10 @@ export async function rescheduleAppointmentReservation(args: {
   newStartsAt: Date
   holdId?: string
   rescheduledBy: string // 'CUSTOMER' or actor id — normalized by logAction sentinels
+  writeOrigin: WriteOrigin
+  allowOverCapacity?: boolean
 }) {
-  const { venueId, reservationId, newStartsAt, holdId, rescheduledBy } = args
+  const { venueId, reservationId, newStartsAt, holdId, rescheduledBy, writeOrigin, allowOverCapacity } = args
 
   const reservation = await prisma.reservation.findFirst({
     where: { id: reservationId, venueId },
@@ -1480,7 +1512,8 @@ export async function rescheduleAppointmentReservation(args: {
       throw new BadRequestError('El horario reservado no coincide con la solicitud.')
     }
   } else {
-    // Ops/MCP path: no hold reserved the slot, so re-check pacing (excl. self).
+    // Transitional until Task 6C: the no-hold Ops/MCP pacing preflight remains
+    // outside the authoritative update transaction and excludes the reservation itself.
     const settings = await getReservationSettings(venueId)
     const pacingMax = effectiveAppointmentPacing(settings.scheduling?.pacingMaxPerSlot)
     const { reservations, holds } = await countAppointmentOccupancy(prisma, {
@@ -1502,6 +1535,7 @@ export async function rescheduleAppointmentReservation(args: {
     venueId,
     reservationId,
     { startsAt: newStartsAt, endsAt: newEndsAt, duration: reservation.duration },
+    { writeOrigin, allowOverCapacity },
     rescheduledBy,
   )
 

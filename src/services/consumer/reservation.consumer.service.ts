@@ -309,8 +309,7 @@ export async function createReservationForConsumer(consumerId: string, venueSlug
       productId: input.productId,
       specialRequests: input.specialRequests,
     },
-    undefined,
-    settings,
+    { writeOrigin: 'CONSUMER' },
   )
 
   let checkoutUrl: string | null = null

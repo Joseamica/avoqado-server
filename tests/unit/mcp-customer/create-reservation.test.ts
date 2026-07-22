@@ -44,8 +44,14 @@ describe('create_reservation', () => {
     const res = await call({ venueId: 'v1', startsAt: '2026-06-06T19:00:00.000Z', partySize: 4, guestName: 'Ana' })
 
     expect(mockCreate).toHaveBeenCalledTimes(1)
-    const [venueId, data, createdById] = mockCreate.mock.calls[0] as unknown as [string, Record<string, unknown>, string]
+    const [venueId, data, context, createdById] = mockCreate.mock.calls[0] as unknown as [
+      string,
+      Record<string, unknown>,
+      Record<string, unknown>,
+      string,
+    ]
     expect(venueId).toBe('v1')
+    expect(context).toEqual({ writeOrigin: 'MCP' })
     expect(createdById).toBe('staff-1')
     expect(data.duration).toBe(90)
     expect((data.startsAt as Date).toISOString()).toBe('2026-06-06T19:00:00.000Z')
