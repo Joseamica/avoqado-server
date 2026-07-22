@@ -26,13 +26,22 @@ if [ -f .env ]; then
   echo ""
 fi
 
-if [ "$DATABASE_URL_WAS_PRESENT" = "x" ]; then export DATABASE_URL="$DATABASE_URL_WAS_SET"; fi
-if [ "$TEST_DATABASE_URL_WAS_PRESENT" = "x" ]; then export TEST_DATABASE_URL="$TEST_DATABASE_URL_WAS_SET"; fi
-
-# An explicitly supplied test database must win over a DATABASE_URL loaded from
-# dotenv when the caller did not supply DATABASE_URL itself. Apply this before
-# any Prisma or migration command can connect to a database.
-if [ "$DATABASE_URL_WAS_PRESENT" != "x" ] && [ "$TEST_DATABASE_URL_WAS_PRESENT" = "x" ]; then
+# Caller-supplied database variables form an isolated override. In particular,
+# never let TEST_DATABASE_URL loaded from dotenv outrank an explicit
+# DATABASE_URL in integration setup. Apply this before any Prisma or migration
+# command can connect to a database.
+if [ "$DATABASE_URL_WAS_PRESENT" = "x" ]; then
+  export DATABASE_URL="$DATABASE_URL_WAS_SET"
+  if [ "$TEST_DATABASE_URL_WAS_PRESENT" = "x" ]; then
+    export TEST_DATABASE_URL="$TEST_DATABASE_URL_WAS_SET"
+    if [ -z "$DATABASE_URL" ] && [ -n "$TEST_DATABASE_URL" ]; then
+      export DATABASE_URL="$TEST_DATABASE_URL"
+    fi
+  else
+    unset TEST_DATABASE_URL
+  fi
+elif [ "$TEST_DATABASE_URL_WAS_PRESENT" = "x" ]; then
+  export TEST_DATABASE_URL="$TEST_DATABASE_URL_WAS_SET"
   export DATABASE_URL="$TEST_DATABASE_URL"
 fi
 
