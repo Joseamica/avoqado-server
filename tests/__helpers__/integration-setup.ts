@@ -6,32 +6,22 @@
 // Load .env file for integration tests
 import * as dotenv from 'dotenv'
 
-const databaseUrlWasPresent = Object.prototype.hasOwnProperty.call(process.env, 'DATABASE_URL')
-const databaseUrlFromCaller = process.env.DATABASE_URL
 const testDatabaseUrlWasPresent = Object.prototype.hasOwnProperty.call(process.env, 'TEST_DATABASE_URL')
 const testDatabaseUrlFromCaller = process.env.TEST_DATABASE_URL
 
 dotenv.config()
 
-// A caller-supplied database override is an isolated pair. dotenv may fill a
-// missing companion variable, so restore both sides after loading it. This is
-// especially important when pre-deploy launches Jest with only DATABASE_URL:
-// a TEST_DATABASE_URL from .env must never silently redirect integration tests.
-if (databaseUrlWasPresent || testDatabaseUrlWasPresent) {
-  if (databaseUrlWasPresent) {
-    process.env.DATABASE_URL = databaseUrlFromCaller
-  } else {
-    delete process.env.DATABASE_URL
-  }
-
-  if (testDatabaseUrlWasPresent) {
-    process.env.TEST_DATABASE_URL = testDatabaseUrlFromCaller
-  } else if (databaseUrlFromCaller) {
-    process.env.TEST_DATABASE_URL = databaseUrlFromCaller
-  } else {
-    delete process.env.TEST_DATABASE_URL
-  }
+// Integration teardown performs broad fixture cleanup. Only a TEST_DATABASE_URL
+// explicitly supplied by the caller before dotenv loading is allowed to select
+// that database; DATABASE_URL and dotenv values are never accepted as fallbacks.
+if (!testDatabaseUrlWasPresent || !testDatabaseUrlFromCaller?.trim()) {
+  delete process.env.DATABASE_URL
+  delete process.env.TEST_DATABASE_URL
+  throw new Error('Export a non-empty TEST_DATABASE_URL before running integration tests.')
 }
+
+process.env.TEST_DATABASE_URL = testDatabaseUrlFromCaller
+process.env.DATABASE_URL = testDatabaseUrlFromCaller
 
 // Set longer timeout for integration tests (real database operations)
 jest.setTimeout(60000)
@@ -42,23 +32,7 @@ process.env.ACCESS_TOKEN_SECRET = 'test-access-token-secret'
 process.env.SESSION_SECRET = 'test-session-secret'
 process.env.COOKIE_SECRET = 'test-cookie-secret'
 
-// IMPORTANT: Integration tests use REAL database connection
-// Prefer TEST_DATABASE_URL if available, fallback to DATABASE_URL
-const testDbUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL
-
-if (!testDbUrl) {
-  throw new Error(
-    '❌ TEST_DATABASE_URL or DATABASE_URL is required for integration tests.\n' +
-      '   Please set one of them in your .env file or environment variables.\n' +
-      '   Recommended: TEST_DATABASE_URL=postgresql://user:password@host:port/database\n' +
-      '   This keeps your dev database separate from test data.',
-  )
-}
-
-// Use the test database URL
-process.env.DATABASE_URL = testDbUrl
-
-console.log(`ℹ️  Using ${process.env.TEST_DATABASE_URL ? 'TEST_DATABASE_URL' : 'DATABASE_URL'} for integration tests`)
+console.log('ℹ️  Using caller-supplied TEST_DATABASE_URL for integration tests')
 
 // Mock logger to prevent console noise during tests
 jest.mock('@/config/logger', () => ({

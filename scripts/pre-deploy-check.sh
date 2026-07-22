@@ -26,25 +26,19 @@ if [ -f .env ]; then
   echo ""
 fi
 
-# Caller-supplied database variables form an isolated override. In particular,
-# never let TEST_DATABASE_URL loaded from dotenv outrank an explicit
-# DATABASE_URL in integration setup. Apply this before any Prisma or migration
-# command can connect to a database.
-if [ "$DATABASE_URL_WAS_PRESENT" = "x" ]; then
-  export DATABASE_URL="$DATABASE_URL_WAS_SET"
-  if [ "$TEST_DATABASE_URL_WAS_PRESENT" = "x" ]; then
-    export TEST_DATABASE_URL="$TEST_DATABASE_URL_WAS_SET"
-    if [ -z "$DATABASE_URL" ] && [ -n "$TEST_DATABASE_URL" ]; then
-      export DATABASE_URL="$TEST_DATABASE_URL"
-    fi
-  else
-    # Keep child processes safe even if they load dotenv again (Jest's
-    # integration setup does): the explicit database remains authoritative.
-    export TEST_DATABASE_URL="$DATABASE_URL"
-  fi
-elif [ "$TEST_DATABASE_URL_WAS_PRESENT" = "x" ]; then
+# Integration projects are destructive test boundaries. Only a non-empty
+# TEST_DATABASE_URL exported by the caller before dotenv loading may enable
+# them. dotenv remains available for non-database test secrets.
+EXPLICIT_TEST_DATABASE_READY=0
+if [ "$TEST_DATABASE_URL_WAS_PRESENT" = "x" ] && [ -n "$TEST_DATABASE_URL_WAS_SET" ]; then
   export TEST_DATABASE_URL="$TEST_DATABASE_URL_WAS_SET"
-  export DATABASE_URL="$TEST_DATABASE_URL"
+  export DATABASE_URL="$TEST_DATABASE_URL_WAS_SET"
+  EXPLICIT_TEST_DATABASE_READY=1
+else
+  unset TEST_DATABASE_URL
+  if [ "$DATABASE_URL_WAS_PRESENT" = "x" ]; then
+    export DATABASE_URL="$DATABASE_URL_WAS_SET"
+  fi
 fi
 
 echo "🚀 ============================================="
@@ -134,17 +128,13 @@ else
 fi
 echo ""
 
-# 7. Run integration tests (optional, requires DATABASE_URL or TEST_DATABASE_URL)
+# 7. Run integration tests (optional, requires an explicitly exported TEST_DATABASE_URL)
 echo "🏪 Step 7/10: Running integration tests..."
-# Use TEST_DATABASE_URL if DATABASE_URL is not set
-if [ -z "$DATABASE_URL" ] && [ -n "$TEST_DATABASE_URL" ]; then
-  export DATABASE_URL="$TEST_DATABASE_URL"
-fi
-
-if [ -z "$DATABASE_URL" ]; then
-  echo -e "${YELLOW}⚠️ Integration tests skipped - DATABASE_URL not set${NC}"
-  echo -e "${YELLOW}💡 Set DATABASE_URL or TEST_DATABASE_URL in .env to run integration tests${NC}"
+if [ "$EXPLICIT_TEST_DATABASE_READY" -ne 1 ]; then
+  echo -e "${YELLOW}⚠️ Integration tests skipped - exported TEST_DATABASE_URL is required${NC}"
 else
+  export TEST_DATABASE_URL="$TEST_DATABASE_URL_WAS_SET"
+  export DATABASE_URL="$TEST_DATABASE_URL_WAS_SET"
   echo "test DB configurada"
   if npm run test:integration; then
     echo -e "${GREEN}✅ Integration tests passed!${NC}"
@@ -171,9 +161,11 @@ else
   exit 1
 fi
 
-if [ -z "$DATABASE_URL" ]; then
-  echo -e "${YELLOW}⚠️ Assistant consistency skipped - DATABASE_URL not set${NC}"
+if [ "$EXPLICIT_TEST_DATABASE_READY" -ne 1 ]; then
+  echo -e "${YELLOW}⚠️ Assistant consistency skipped - exported TEST_DATABASE_URL is required${NC}"
 else
+  export TEST_DATABASE_URL="$TEST_DATABASE_URL_WAS_SET"
+  export DATABASE_URL="$TEST_DATABASE_URL_WAS_SET"
   if npm run assistant:consistency; then
     echo -e "${GREEN}✅ Assistant DB consistency tests passed!${NC}"
   else

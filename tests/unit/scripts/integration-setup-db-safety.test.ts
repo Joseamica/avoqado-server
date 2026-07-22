@@ -14,10 +14,10 @@ type SetupResult = {
   error: string | null
 }
 
-const DOTENV_DATABASE_URL = 'postgresql://dotenv-db:fake@production.invalid:5432/dotenv_db'
-const DOTENV_TEST_DATABASE_URL = 'postgresql://dotenv-test:fake@production.invalid:5432/dotenv_test'
-const CALLER_DATABASE_URL = 'postgresql://caller-db:fake@127.0.0.1:55432/caller_db'
-const CALLER_TEST_DATABASE_URL = 'postgresql://caller-test:fake@127.0.0.1:55432/caller_test'
+const DOTENV_DATABASE_URL = 'dotenv-production-database-sentinel'
+const DOTENV_TEST_DATABASE_URL = 'dotenv-production-test-sentinel'
+const CALLER_DATABASE_URL = 'caller-database-sentinel'
+const CALLER_TEST_DATABASE_URL = 'caller-test-database-sentinel'
 
 function runIntegrationSetup(overrides: DatabaseOverride): SetupResult {
   const repoRoot = process.cwd()
@@ -45,7 +45,7 @@ function runIntegrationSetup(overrides: DatabaseOverride): SetupResult {
       ].join('\n'),
     )
 
-    const childEnv = {
+    const childEnv: NodeJS.ProcessEnv = {
       ...process.env,
       TS_NODE_PROJECT: path.join(repoRoot, 'tsconfig.json'),
       TS_NODE_TRANSPILE_ONLY: 'true',
@@ -76,12 +76,15 @@ function runIntegrationSetup(overrides: DatabaseOverride): SetupResult {
 }
 
 describe('integration setup database isolation', () => {
-  it('keeps a caller DATABASE_URL isolated when dotenv defines TEST_DATABASE_URL', () => {
-    expect(runIntegrationSetup({ databaseUrl: CALLER_DATABASE_URL })).toEqual({
-      databaseUrl: CALLER_DATABASE_URL,
-      testDatabaseUrl: CALLER_DATABASE_URL,
-      error: null,
-    })
+  it('rejects DATABASE_URL-only callers and removes dotenv database values', () => {
+    const result = runIntegrationSetup({ databaseUrl: CALLER_DATABASE_URL })
+
+    expect(result.databaseUrl).toBeNull()
+    expect(result.testDatabaseUrl).toBeNull()
+    expect(result.error).toContain('Export a non-empty TEST_DATABASE_URL before running integration tests')
+    expect(result.error).not.toContain(CALLER_DATABASE_URL)
+    expect(result.error).not.toContain(DOTENV_DATABASE_URL)
+    expect(result.error).not.toContain(DOTENV_TEST_DATABASE_URL)
   })
 
   it('uses a caller TEST_DATABASE_URL for both effective database variables', () => {
@@ -100,19 +103,37 @@ describe('integration setup database isolation', () => {
     })
   })
 
-  it('retains legacy dotenv selection when neither variable is caller-supplied', () => {
-    expect(runIntegrationSetup({})).toEqual({
-      databaseUrl: DOTENV_TEST_DATABASE_URL,
-      testDatabaseUrl: DOTENV_TEST_DATABASE_URL,
-      error: null,
-    })
+  it('rejects dotenv-only database values and removes them from the process', () => {
+    const result = runIntegrationSetup({})
+
+    expect(result.databaseUrl).toBeNull()
+    expect(result.testDatabaseUrl).toBeNull()
+    expect(result.error).toContain('Export a non-empty TEST_DATABASE_URL before running integration tests')
+    expect(result.error).not.toContain(DOTENV_DATABASE_URL)
+    expect(result.error).not.toContain(DOTENV_TEST_DATABASE_URL)
   })
 
-  it('never lets dotenv replace an explicitly empty database override', () => {
+  it('rejects an explicitly empty TEST_DATABASE_URL even when DATABASE_URL is set', () => {
+    const result = runIntegrationSetup({ databaseUrl: CALLER_DATABASE_URL, testDatabaseUrl: '' })
+
+    expect(result.databaseUrl).toBeNull()
+    expect(result.testDatabaseUrl).toBeNull()
+    expect(result.error).toContain('Export a non-empty TEST_DATABASE_URL before running integration tests')
+  })
+
+  it('rejects an explicitly empty DATABASE_URL when TEST_DATABASE_URL is absent', () => {
     const result = runIntegrationSetup({ databaseUrl: '' })
 
-    expect(result.databaseUrl).toBe('')
+    expect(result.databaseUrl).toBeNull()
     expect(result.testDatabaseUrl).toBeNull()
-    expect(result.error).toContain('TEST_DATABASE_URL or DATABASE_URL is required')
+    expect(result.error).toContain('Export a non-empty TEST_DATABASE_URL before running integration tests')
+  })
+
+  it('runs the complete integration project serially', () => {
+    const packageJson = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'package.json'), 'utf8')) as {
+      scripts: Record<string, string>
+    }
+
+    expect(packageJson.scripts['test:integration']).toContain('--runInBand')
   })
 })

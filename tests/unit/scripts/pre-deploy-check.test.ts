@@ -21,17 +21,14 @@ describe('pre-deploy database safety contract', () => {
     const fakeBin = path.join(fixtureDir, 'bin')
     const captureFile = path.join(fixtureDir, 'child-env.log')
     const scriptPath = path.join(fixtureDir, 'pre-deploy-check.sh')
-    const databaseUrl = 'postgresql://sentinel-user:sentinel-password@localhost:55432/sentinel_db'
-    const testDatabaseUrl = 'postgresql://sentinel-test:sentinel-password@localhost:55432/sentinel_test_db'
+    const databaseUrl = 'caller-database-sensitive-sentinel'
+    const testDatabaseUrl = 'caller-test-database-sensitive-sentinel'
 
     try {
       fs.mkdirSync(fakeBin)
       fs.writeFileSync(
         path.join(fixtureDir, '.env'),
-        [
-          'DATABASE_URL=postgresql://dotenv-user:dotenv-password@localhost:5432/dotenv_db',
-          'TEST_DATABASE_URL=postgresql://dotenv-test:dotenv-password@localhost:5432/dotenv_test_db',
-        ].join('\n'),
+        ['DATABASE_URL=dotenv-database-sensitive-sentinel', 'TEST_DATABASE_URL=dotenv-test-database-sensitive-sentinel'].join('\n'),
       )
       fs.writeFileSync(scriptPath, source, { mode: 0o755 })
 
@@ -57,10 +54,12 @@ describe('pre-deploy database safety contract', () => {
 
       expect(result.status).toBe(0)
       const childCalls = fs.readFileSync(captureFile, 'utf8').split('\n')
-      expect(childCalls).toContain(`run test:integration|${databaseUrl}|${testDatabaseUrl}`)
+      expect(childCalls).toContain(`run test:integration|${testDatabaseUrl}|${testDatabaseUrl}`)
+      expect(childCalls).toContain(`run assistant:consistency|${testDatabaseUrl}|${testDatabaseUrl}`)
       expect(result.stdout).toContain('test DB configurada')
-      expect(result.stdout).not.toContain('sentinel-user:sentinel-password')
-      expect(result.stdout).not.toContain('dotenv-user:dotenv-password')
+      expect(result.stdout).not.toContain(databaseUrl)
+      expect(result.stdout).not.toContain(testDatabaseUrl)
+      expect(result.stdout).not.toContain('dotenv-database-sensitive-sentinel')
     } finally {
       fs.rmSync(fixtureDir, { recursive: true, force: true })
     }
@@ -71,8 +70,8 @@ describe('pre-deploy database safety contract', () => {
     const fakeBin = path.join(fixtureDir, 'bin')
     const captureFile = path.join(fixtureDir, 'child-env.log')
     const scriptPath = path.join(fixtureDir, 'pre-deploy-check.sh')
-    const dotenvDatabaseUrl = 'postgresql://production-user:production-password@production.example.com:5432/production_db'
-    const testDatabaseUrl = 'postgresql://explicit-test:sentinel-password@localhost:55432/explicit_test_db'
+    const dotenvDatabaseUrl = 'dotenv-production-database-sensitive-sentinel'
+    const testDatabaseUrl = 'explicit-test-database-sensitive-sentinel'
 
     try {
       fs.mkdirSync(fakeBin)
@@ -87,7 +86,7 @@ describe('pre-deploy database safety contract', () => {
       }
       fs.writeFileSync(path.join(fakeBin, 'git'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
 
-      const childEnv = {
+      const childEnv: NodeJS.ProcessEnv = {
         ...process.env,
         PATH: `${fakeBin}:${process.env.PATH}`,
         CAPTURE_FILE: captureFile,
@@ -111,20 +110,20 @@ describe('pre-deploy database safety contract', () => {
         expect(childCalls).toContain(`${dbCommand}|${testDatabaseUrl}|${testDatabaseUrl}`)
       }
       expect(childCalls).not.toContain(dotenvDatabaseUrl)
-      expect(result.stdout).not.toContain('production-user:production-password')
-      expect(result.stdout).not.toContain('explicit-test:sentinel-password')
+      expect(result.stdout).not.toContain(dotenvDatabaseUrl)
+      expect(result.stdout).not.toContain(testDatabaseUrl)
     } finally {
       fs.rmSync(fixtureDir, { recursive: true, force: true })
     }
   })
 
-  it('isolates a caller DATABASE_URL from TEST_DATABASE_URL loaded by dotenv', () => {
+  it('never invokes integration projects for a DATABASE_URL-only caller', () => {
     const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avoqado-predeploy-db-only-'))
     const fakeBin = path.join(fixtureDir, 'bin')
     const captureFile = path.join(fixtureDir, 'child-env.log')
     const scriptPath = path.join(fixtureDir, 'pre-deploy-check.sh')
-    const databaseUrl = 'postgresql://caller-user:caller-password@localhost:55432/caller_db'
-    const dotenvTestDatabaseUrl = 'postgresql://production-test:production-password@production.example.com:5432/production_test_db'
+    const databaseUrl = 'caller-database-sensitive-sentinel'
+    const dotenvTestDatabaseUrl = 'dotenv-production-test-sensitive-sentinel'
 
     try {
       fs.mkdirSync(fakeBin)
@@ -139,7 +138,7 @@ describe('pre-deploy database safety contract', () => {
       }
       fs.writeFileSync(path.join(fakeBin, 'git'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
 
-      const childEnv = {
+      const childEnv: NodeJS.ProcessEnv = {
         ...process.env,
         PATH: `${fakeBin}:${process.env.PATH}`,
         CAPTURE_FILE: captureFile,
@@ -155,16 +154,13 @@ describe('pre-deploy database safety contract', () => {
 
       expect(result.status).toBe(0)
       const childCalls = fs.readFileSync(captureFile, 'utf8')
-      for (const dbCommand of [
-        'ts-node -r tsconfig-paths/register scripts/pre-migration-check.ts',
-        'run test:integration',
-        'run assistant:consistency',
-      ]) {
-        expect(childCalls).toContain(`${dbCommand}|${databaseUrl}|${databaseUrl}`)
-      }
+      expect(childCalls).toContain(`ts-node -r tsconfig-paths/register scripts/pre-migration-check.ts|${databaseUrl}|`)
+      expect(childCalls).not.toContain('run test:integration|')
+      expect(childCalls).not.toContain('run assistant:consistency|')
       expect(childCalls).not.toContain(dotenvTestDatabaseUrl)
-      expect(result.stdout).not.toContain('caller-user:caller-password')
-      expect(result.stdout).not.toContain('production-test:production-password')
+      expect(result.stdout).toContain('exported TEST_DATABASE_URL is required')
+      expect(result.stdout).not.toContain(databaseUrl)
+      expect(result.stdout).not.toContain(dotenvTestDatabaseUrl)
     } finally {
       fs.rmSync(fixtureDir, { recursive: true, force: true })
     }
@@ -175,7 +171,7 @@ describe('pre-deploy database safety contract', () => {
     const fakeBin = path.join(fixtureDir, 'bin')
     const captureFile = path.join(fixtureDir, 'child-env.log')
     const scriptPath = path.join(fixtureDir, 'pre-deploy-check.sh')
-    const dotenvTestDatabaseUrl = 'postgresql://production-test:production-password@production.example.com:5432/production_test_db'
+    const dotenvTestDatabaseUrl = 'dotenv-production-test-sensitive-sentinel'
 
     try {
       fs.mkdirSync(fakeBin)
@@ -190,7 +186,7 @@ describe('pre-deploy database safety contract', () => {
       }
       fs.writeFileSync(path.join(fakeBin, 'git'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
 
-      const childEnv = {
+      const childEnv: NodeJS.ProcessEnv = {
         ...process.env,
         PATH: `${fakeBin}:${process.env.PATH}`,
         CAPTURE_FILE: captureFile,
@@ -210,9 +206,8 @@ describe('pre-deploy database safety contract', () => {
       expect(childCalls).toContain('ts-node -r tsconfig-paths/register scripts/pre-migration-check.ts||')
       expect(childCalls).not.toContain('run test:integration|')
       expect(childCalls).not.toContain('run assistant:consistency|')
-      expect(result.stdout).toContain('Integration tests skipped - DATABASE_URL not set')
-      expect(result.stdout).toContain('Assistant consistency skipped - DATABASE_URL not set')
-      expect(result.stdout).not.toContain('production-test:production-password')
+      expect(result.stdout).toContain('exported TEST_DATABASE_URL is required')
+      expect(result.stdout).not.toContain(dotenvTestDatabaseUrl)
     } finally {
       fs.rmSync(fixtureDir, { recursive: true, force: true })
     }
@@ -223,14 +218,11 @@ describe('pre-deploy database safety contract', () => {
     const fakeBin = path.join(fixtureDir, 'bin')
     const captureFile = path.join(fixtureDir, 'child-env.log')
     const scriptPath = path.join(fixtureDir, 'pre-deploy-check.sh')
-    const testDatabaseUrl = 'postgresql://explicit-test:sentinel-password@localhost:55432/explicit_test_db'
+    const testDatabaseUrl = 'explicit-test-database-sensitive-sentinel'
 
     try {
       fs.mkdirSync(fakeBin)
-      fs.writeFileSync(
-        path.join(fixtureDir, '.env'),
-        'DATABASE_URL=postgresql://dotenv-user:dotenv-password@production.example.com:5432/dotenv_db\n',
-      )
+      fs.writeFileSync(path.join(fixtureDir, '.env'), 'DATABASE_URL=dotenv-production-database-sensitive-sentinel\n')
       fs.writeFileSync(scriptPath, source, { mode: 0o755 })
 
       for (const command of ['npm', 'npx']) {
@@ -262,9 +254,96 @@ describe('pre-deploy database safety contract', () => {
       ]) {
         expect(childCalls).toContain(`${dbCommand}|${testDatabaseUrl}|${testDatabaseUrl}`)
       }
-      expect(childCalls).not.toContain('dotenv-user:dotenv-password')
-      expect(result.stdout).not.toContain('explicit-test:sentinel-password')
-      expect(result.stdout).not.toContain('dotenv-user:dotenv-password')
+      expect(childCalls).not.toContain('dotenv-production-database-sensitive-sentinel')
+      expect(result.stdout).not.toContain(testDatabaseUrl)
+      expect(result.stdout).not.toContain('dotenv-production-database-sensitive-sentinel')
+    } finally {
+      fs.rmSync(fixtureDir, { recursive: true, force: true })
+    }
+  })
+
+  it('never invokes integration projects from dotenv-only database values', () => {
+    const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avoqado-predeploy-dotenv-only-'))
+    const fakeBin = path.join(fixtureDir, 'bin')
+    const captureFile = path.join(fixtureDir, 'child-env.log')
+    const scriptPath = path.join(fixtureDir, 'pre-deploy-check.sh')
+    const dotenvDatabaseUrl = 'dotenv-production-database-sentinel'
+    const dotenvTestDatabaseUrl = 'dotenv-production-test-sentinel'
+
+    try {
+      fs.mkdirSync(fakeBin)
+      fs.writeFileSync(
+        path.join(fixtureDir, '.env'),
+        [`DATABASE_URL=${dotenvDatabaseUrl}`, `TEST_DATABASE_URL=${dotenvTestDatabaseUrl}`].join('\n'),
+      )
+      fs.writeFileSync(scriptPath, source, { mode: 0o755 })
+
+      for (const command of ['npm', 'npx']) {
+        fs.writeFileSync(
+          path.join(fakeBin, command),
+          '#!/bin/sh\nprintf \'%s|%s|%s\\n\' "$*" "$DATABASE_URL" "$TEST_DATABASE_URL" >> "$CAPTURE_FILE"\n',
+          { mode: 0o755 },
+        )
+      }
+      fs.writeFileSync(path.join(fakeBin, 'git'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+
+      const childEnv: NodeJS.ProcessEnv = {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+        CAPTURE_FILE: captureFile,
+      }
+      delete childEnv.DATABASE_URL
+      delete childEnv.TEST_DATABASE_URL
+
+      const result = spawnSync('bash', [scriptPath], { cwd: fixtureDir, encoding: 'utf8', env: childEnv })
+
+      expect(result.status).toBe(0)
+      const childCalls = fs.readFileSync(captureFile, 'utf8')
+      expect(childCalls).not.toContain('run test:integration|')
+      expect(childCalls).not.toContain('run assistant:consistency|')
+      expect(result.stdout).toContain('exported TEST_DATABASE_URL is required')
+      expect(result.stdout).not.toContain(dotenvDatabaseUrl)
+      expect(result.stdout).not.toContain(dotenvTestDatabaseUrl)
+    } finally {
+      fs.rmSync(fixtureDir, { recursive: true, force: true })
+    }
+  })
+
+  it('never invokes integration projects when caller TEST_DATABASE_URL is explicitly empty', () => {
+    const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'avoqado-predeploy-empty-test-'))
+    const fakeBin = path.join(fixtureDir, 'bin')
+    const captureFile = path.join(fixtureDir, 'child-env.log')
+    const scriptPath = path.join(fixtureDir, 'pre-deploy-check.sh')
+
+    try {
+      fs.mkdirSync(fakeBin)
+      fs.writeFileSync(path.join(fixtureDir, '.env'), 'TEST_DATABASE_URL=dotenv-production-test-sentinel\n')
+      fs.writeFileSync(scriptPath, source, { mode: 0o755 })
+      for (const command of ['npm', 'npx']) {
+        fs.writeFileSync(
+          path.join(fakeBin, command),
+          '#!/bin/sh\nprintf \'%s|%s|%s\\n\' "$*" "$DATABASE_URL" "$TEST_DATABASE_URL" >> "$CAPTURE_FILE"\n',
+          { mode: 0o755 },
+        )
+      }
+      fs.writeFileSync(path.join(fakeBin, 'git'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+
+      const childEnv: NodeJS.ProcessEnv = {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+        CAPTURE_FILE: captureFile,
+        TEST_DATABASE_URL: '',
+      }
+      delete childEnv.DATABASE_URL
+
+      const result = spawnSync('bash', [scriptPath], { cwd: fixtureDir, encoding: 'utf8', env: childEnv })
+
+      expect(result.status).toBe(0)
+      const childCalls = fs.readFileSync(captureFile, 'utf8')
+      expect(childCalls).not.toContain('run test:integration|')
+      expect(childCalls).not.toContain('run assistant:consistency|')
+      expect(result.stdout).toContain('exported TEST_DATABASE_URL is required')
+      expect(result.stdout).not.toContain('dotenv-production-test-sentinel')
     } finally {
       fs.rmSync(fixtureDir, { recursive: true, force: true })
     }
