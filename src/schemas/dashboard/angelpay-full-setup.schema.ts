@@ -27,6 +27,15 @@ export const fullSetupAngelPaySchema = z
     // Optional payment aggregator (e.g. "Externo") the merchant routes through.
     // Only applied when creating a new merchant.
     aggregatorId: z.string().optional(),
+    // Optional AngelPay integrations-api apiKey — when provided, full-setup
+    // auto-registers the AngelPay webhook (POST /auth/token → POST
+    // /api/v1/webhooks/endpoints) after the transaction commits, and persists
+    // the returned secret on the created/reused MerchantAccount. `environment`
+    // picks which AngelPay base (QA/PROD) to call; defaults to the new login's
+    // environment when `login.mode === 'new'`, otherwise PROD. Failure here is
+    // soft — see `fullSetupAngelPayMerchant` in angelpayFullSetup.service.ts.
+    apiKey: z.string().min(1).optional(),
+    environment: z.enum(['QA', 'PROD']).optional(),
     login: z.discriminatedUnion('mode', [
       z.object({
         mode: z.literal('existing'),

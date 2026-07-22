@@ -19,9 +19,19 @@
 import prisma from '../../utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError, ValidationError } from '../../errors/AppError'
 import logger from '../../config/logger'
+import { BASE_URL } from '../../config/env'
 import { isNumericMerchantId } from '../../lib/angelpayValidators'
 import { encryptCredentials } from './merchantAccount.service'
+import { angelPayIntegrationsApiClient, type AngelPayEnvironment } from '../integrations/angelpay-integrations-api.client'
 import type { FullSetupAngelPayInput } from '../../schemas/dashboard/angelpay-full-setup.schema'
+
+// BASE_URL is `.optional()` in env.ts (unset in local dev). Same fallback
+// pattern as `cfdi.public.controller.ts` — never build the AngelPay webhook
+// URL against a literal "undefined/api/v1/...".
+const PUBLIC_BASE_URL = BASE_URL || 'https://api.avoqado.io'
+
+// Registered on every AngelPay webhook — see angelpay-integrations-api.client.ts header.
+const ANGELPAY_WEBHOOK_EVENTS = ['send_transaction', 'offline_event', 'canceled_transaction']
 
 const SLOT_COLUMN = {
   PRIMARY: 'primaryAccountId',
@@ -40,6 +50,10 @@ export interface FullSetupAngelPayResult {
   costStructureId?: string
   pricingStructureId?: string
   settlementIds: string[]
+  /** True only when `input.apiKey` was provided AND the webhook was registered
+   * AND the returned secret was persisted. False (never throws) on any
+   * failure in that chain — see the soft-fail block below. */
+  webhookRegistered: boolean
 }
 
 export async function fullSetupAngelPayMerchant(input: FullSetupAngelPayInput, createdBy?: string): Promise<FullSetupAngelPayResult> {
@@ -312,10 +326,41 @@ export async function fullSetupAngelPayMerchant(input: FullSetupAngelPayInput, c
           costStructureId,
           pricingStructureId,
           settlementIds,
+          webhookRegistered: false,
         }
       },
       { timeout: 10_000 },
     )
+
+    // ---- Post-transaction: AngelPay webhook auto-registration (soft-fail) ----
+    // Deliberately OUTSIDE prisma.$transaction — this file's header comment
+    // promises no network calls happen inside the tx. A failure here must
+    // NEVER roll back or delete the merchant just created/reused above: the
+    // webhook RECEIVER (angelpay-webhook.tpv.controller.ts) already returns
+    // 503 for any merchant with no `angelpayWebhookSecret`, so an unregistered
+    // webhook is a safe, retryable degraded state — not a setup failure.
+    if (input.apiKey) {
+      try {
+        const env: AngelPayEnvironment = input.environment ?? (input.login.mode === 'new' ? input.login.environment : 'PROD')
+        const { accessToken } = await angelPayIntegrationsApiClient.auth(input.apiKey, env)
+        const url = `${PUBLIC_BASE_URL}/api/v1/webhooks/angelpay/${result.merchantAccountId}`
+        const { endpointId, secret } = await angelPayIntegrationsApiClient.registerWebhook(accessToken, env, {
+          url,
+          events: ANGELPAY_WEBHOOK_EVENTS,
+          description: 'Avoqado ' + (input.merchant.mode === 'create' ? input.merchant.displayName : ''),
+        })
+        await prisma.merchantAccount.update({
+          where: { id: result.merchantAccountId },
+          data: { angelpayWebhookSecret: secret, angelpayWebhookEndpointId: endpointId },
+        })
+        result.webhookRegistered = true
+      } catch (err: unknown) {
+        logger.warn('AngelPay webhook registration failed — merchant created OK; receiver returns 503 until provisioned', {
+          merchantAccountId: result.merchantAccountId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
 
     logger.info('AngelPay full setup completed', {
       event: 'angelpay.full_setup',
@@ -323,6 +368,7 @@ export async function fullSetupAngelPayMerchant(input: FullSetupAngelPayInput, c
       merchantAccountId: result.merchantAccountId,
       slot: input.slot.accountType,
       slotMode: input.slot.mode,
+      webhookRegistered: result.webhookRegistered,
     })
     return result
   } catch (err: unknown) {

@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express'
+import { z } from 'zod'
 import * as merchantAccountService from '../../services/superadmin/merchantAccount.service'
 import * as settlementConfigService from '../../services/superadmin/settlementConfiguration.service'
 import logger from '../../config/logger'
@@ -12,6 +13,7 @@ import { assertMerchantTerminalCompatible } from '@/lib/providerDeviceCompatibil
 import { IncompatibleDeviceError } from '@/errors/AppError'
 import { fullSetupAngelPaySchema } from '../../schemas/dashboard/angelpay-full-setup.schema'
 import { fullSetupAngelPayMerchant as fullSetupAngelPayMerchantService } from '../../services/superadmin/angelpayFullSetup.service'
+import { angelPayIntegrationsApiClient, AngelPayIntegrationsApiError } from '../../services/integrations/angelpay-integrations-api.client'
 
 /**
  * MerchantAccount Controller
@@ -2312,6 +2314,52 @@ export async function fullSetupAngelPayMerchant(req: Request, res: Response, nex
       message: 'Cuenta AngelPay configurada exitosamente',
     })
   } catch (error) {
+    next(error)
+  }
+}
+
+const verifyAngelPayApiKeySchema = z.object({
+  apiKey: z.string().min(1),
+  environment: z.enum(['QA', 'PROD']),
+})
+
+/**
+ * POST /api/v1/superadmin/merchant-accounts/verify-apikey
+ * Validates an AngelPay apiKey against AngelPay's integrations-api
+ * (POST /auth/token) and returns the merchant_id it resolves to. Powers the
+ * "Verificar" button in superadmin when setting up an AngelPay merchant via
+ * apiKey — called BEFORE the merchant is created, so there's no
+ * MerchantAccount row yet to look anything up against.
+ *
+ * Response shapes are intentionally flat (no {success,data} envelope):
+ *   200 { merchantId }
+ *   401 { error: 'apiKey inválida o de otro ambiente' }   (AngelPay 401/422)
+ *   502 { error: 'No se pudo verificar la apiKey con AngelPay' }  (network/timeout/unexpected upstream status)
+ */
+export async function verifyAngelPayApiKey(req: Request, res: Response, next: NextFunction) {
+  try {
+    const parsed = verifyAngelPayApiKeySchema.safeParse(req.body)
+    if (!parsed.success) {
+      const first = parsed.error.issues[0]
+      throw new BadRequestError(first?.message || 'Datos inválidos')
+    }
+
+    const { apiKey, environment } = parsed.data
+    const { merchantId } = await angelPayIntegrationsApiClient.auth(apiKey, environment)
+
+    res.status(200).json({ merchantId })
+  } catch (error) {
+    if (error instanceof AngelPayIntegrationsApiError) {
+      if (error.status === 401 || error.status === 422) {
+        res.status(401).json({ error: 'apiKey inválida o de otro ambiente' })
+        return
+      }
+      // Network/timeout (status undefined) or an unexpected upstream status —
+      // never leak `error.body`/`error.message` (may echo request details).
+      logger.warn('[AngelPay] verify-apikey upstream error', { status: error.status })
+      res.status(502).json({ error: 'No se pudo verificar la apiKey con AngelPay' })
+      return
+    }
     next(error)
   }
 }

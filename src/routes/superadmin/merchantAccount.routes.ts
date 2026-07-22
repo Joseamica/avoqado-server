@@ -79,6 +79,14 @@ router.post('/blumon/full-setup', merchantAccountController.fullSetupBlumonMerch
 // + settlement, all in one DB transaction (all-or-nothing).
 router.post('/full-setup-angelpay', merchantAccountController.fullSetupAngelPayMerchant)
 
+// POST /api/v1/superadmin/merchant-accounts/verify-apikey
+// Validates an AngelPay apiKey against AngelPay's integrations-api (POST
+// /auth/token) and returns the merchant_id it resolves to. Powers the
+// "Verificar" button in superadmin when connecting an AngelPay merchant via
+// apiKey. IMPORTANT: Must stay BEFORE any /:id route below so Express
+// doesn't capture "verify-apikey" as an :id.
+router.post('/verify-apikey', merchantAccountController.verifyAngelPayApiKey)
+
 // POST /api/v1/superadmin/merchant-accounts/:id/blumon/refetch
 // Rotate OAuth/RSA/DUKPT credentials from Blumon for an EXISTING MerchantAccount.
 // Preserves account id + all linked Payment/Settlement history. If Blumon API

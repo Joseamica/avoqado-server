@@ -15,14 +15,26 @@
 
 import type { NextFunction, Request, Response } from 'express'
 
-import { createMerchantAccount } from '@/controllers/superadmin/merchantAccount.controller'
+import { createMerchantAccount, verifyAngelPayApiKey } from '@/controllers/superadmin/merchantAccount.controller'
 import * as merchantAccountService from '@/services/superadmin/merchantAccount.service'
+import { angelPayIntegrationsApiClient, AngelPayIntegrationsApiError } from '@/services/integrations/angelpay-integrations-api.client'
 
 jest.mock('@/services/superadmin/merchantAccount.service', () => ({
   createMerchantAccount: jest.fn(),
 }))
 
+// Keep the REAL AngelPayIntegrationsApiError class (the controller does
+// `instanceof` checks on it) — only the client functions are mocked.
+jest.mock('@/services/integrations/angelpay-integrations-api.client', () => ({
+  ...jest.requireActual('@/services/integrations/angelpay-integrations-api.client'),
+  angelPayIntegrationsApiClient: {
+    auth: jest.fn(),
+    registerWebhook: jest.fn(),
+  },
+}))
+
 const mockedCreate = merchantAccountService.createMerchantAccount as jest.Mock
+const mockedAuth = angelPayIntegrationsApiClient.auth as jest.Mock
 
 interface FakeRes extends Response {
   __status: number
@@ -107,5 +119,99 @@ describe('POST /superadmin/merchant-accounts — venueId forwarding (Task 17)', 
       blumonSerialNumber: '2841548417',
     })
     expect(next).not.toHaveBeenCalled()
+  })
+})
+
+describe('POST /superadmin/merchant-accounts/verify-apikey', () => {
+  it('200s with the flat {merchantId} shape on a valid apiKey', async () => {
+    mockedAuth.mockResolvedValue({ accessToken: 'jwt-token', merchantId: '990' })
+    const req = makeReq({ apiKey: 'valid-key', environment: 'QA' })
+    const res = makeRes()
+    const next = jest.fn() as unknown as NextFunction
+
+    await verifyAngelPayApiKey(req, res, next)
+
+    expect(mockedAuth).toHaveBeenCalledWith('valid-key', 'QA')
+    expect(res.__status).toBe(200)
+    expect(res.__json).toEqual({ merchantId: '990' })
+    expect(next).not.toHaveBeenCalled()
+  })
+
+  it('401s with a generic message when AngelPay rejects the apiKey (status 401)', async () => {
+    mockedAuth.mockRejectedValue(
+      new AngelPayIntegrationsApiError('AngelPay: fallo autenticando apiKey: invalid', 401, { message: 'invalid' }),
+    )
+    const req = makeReq({ apiKey: 'bad-key', environment: 'QA' })
+    const res = makeRes()
+    const next = jest.fn() as unknown as NextFunction
+
+    await verifyAngelPayApiKey(req, res, next)
+
+    expect(res.__status).toBe(401)
+    expect(res.__json).toEqual({ error: 'apiKey inválida o de otro ambiente' })
+    expect(next).not.toHaveBeenCalled()
+  })
+
+  it('401s on status 422 too (AngelPay validation rejection)', async () => {
+    mockedAuth.mockRejectedValue(new AngelPayIntegrationsApiError('AngelPay: fallo autenticando apiKey: unprocessable', 422, {}))
+    const req = makeReq({ apiKey: 'bad-key', environment: 'PROD' })
+    const res = makeRes()
+    const next = jest.fn() as unknown as NextFunction
+
+    await verifyAngelPayApiKey(req, res, next)
+
+    expect(res.__status).toBe(401)
+    expect(res.__json).toEqual({ error: 'apiKey inválida o de otro ambiente' })
+  })
+
+  it('502s on a network/timeout failure (status undefined) without leaking internals', async () => {
+    mockedAuth.mockRejectedValue(
+      new AngelPayIntegrationsApiError('AngelPay: fallo autenticando apiKey: timeout of 15000ms exceeded', undefined, undefined),
+    )
+    const req = makeReq({ apiKey: 'any-key', environment: 'PROD' })
+    const res = makeRes()
+    const next = jest.fn() as unknown as NextFunction
+
+    await verifyAngelPayApiKey(req, res, next)
+
+    expect(res.__status).toBe(502)
+    expect(res.__json).toEqual({ error: 'No se pudo verificar la apiKey con AngelPay' })
+    expect(next).not.toHaveBeenCalled()
+  })
+
+  it('502s on an unexpected upstream status (e.g. 500) without leaking internals', async () => {
+    mockedAuth.mockRejectedValue(
+      new AngelPayIntegrationsApiError('AngelPay: fallo autenticando apiKey: server error', 500, { stack: 'leak-me-not' }),
+    )
+    const req = makeReq({ apiKey: 'any-key', environment: 'PROD' })
+    const res = makeRes()
+    const next = jest.fn() as unknown as NextFunction
+
+    await verifyAngelPayApiKey(req, res, next)
+
+    expect(res.__status).toBe(502)
+    expect(res.__json).toEqual({ error: 'No se pudo verificar la apiKey con AngelPay' })
+  })
+
+  it('forwards zod validation failures (missing apiKey) to next() instead of calling AngelPay', async () => {
+    const req = makeReq({ environment: 'QA' })
+    const res = makeRes()
+    const next = jest.fn() as unknown as NextFunction
+
+    await verifyAngelPayApiKey(req, res, next)
+
+    expect(next).toHaveBeenCalledTimes(1)
+    expect(mockedAuth).not.toHaveBeenCalled()
+  })
+
+  it('forwards zod validation failures (bad environment enum) to next() instead of calling AngelPay', async () => {
+    const req = makeReq({ apiKey: 'x', environment: 'STAGING' })
+    const res = makeRes()
+    const next = jest.fn() as unknown as NextFunction
+
+    await verifyAngelPayApiKey(req, res, next)
+
+    expect(next).toHaveBeenCalledTimes(1)
+    expect(mockedAuth).not.toHaveBeenCalled()
   })
 })
