@@ -65,7 +65,12 @@ const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Pro
 const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map() } as McpScope
 const call = (n: string, args: Record<string, unknown>) => handlers.get(n)!(args, {})
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
-const fakeConfig = { scheduling: { slotIntervalMin: 30 }, deposits: { mode: 'none' }, waitlist: { enabled: true } }
+const fakeConfig = {
+  scheduling: { slotIntervalMin: 30, capacityMode: 'per_staff' },
+  deposits: { mode: 'none' },
+  waitlist: { enabled: true },
+  publicBooking: { showStaffPicker: true },
+}
 
 beforeAll(() => {
   registerReservationTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
@@ -100,6 +105,35 @@ describe('reservation_settings (read)', () => {
 })
 
 describe('configure_reservations (write)', () => {
+  it('previews the staff-aware fields with human-readable labels', async () => {
+    mockSettingsFindUnique.mockResolvedValue({ capacityMode: 'pacing', showStaffPicker: false })
+
+    const out = parse(
+      await call('configure_reservations', {
+        venueId: 'v1',
+        capacityMode: 'per_staff',
+        showStaffPicker: true,
+      }),
+    )
+
+    expect(out.changes).toEqual([
+      { field: 'capacityMode', label: 'Modo de capacidad', from: 'pacing', to: 'per_staff' },
+      { field: 'showStaffPicker', label: 'Mostrar selector de profesionista', from: false, to: true },
+    ])
+    expect(mockUpdate).not.toHaveBeenCalled()
+  })
+
+  it('forwards both staff-aware fields through the transactional settings service on confirm', async () => {
+    await call('configure_reservations', {
+      venueId: 'v1',
+      capacityMode: 'per_staff',
+      showStaffPicker: true,
+      confirm: true,
+    })
+
+    expect(mockUpdate).toHaveBeenCalledWith('v1', { capacityMode: 'per_staff', showStaffPicker: true })
+  })
+
   it('without confirm → human-readable preview (label + current→new), the service is NOT called', async () => {
     const out = parse(await call('configure_reservations', { venueId: 'v1', slotIntervalMin: 15 }))
     expect(out.requiresConfirmation).toBe(true)

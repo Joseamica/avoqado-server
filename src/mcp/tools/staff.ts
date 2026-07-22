@@ -26,7 +26,7 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'list_staff',
-    'List the team (roster) of a venue you can access: each member\'s name, role and whether their account is active. Optionally filter by name or only active members. Pass venueId. Answers "who works here / who is on my team?". For sales performance use staff_ranking instead.',
+    'List the team (roster) of a venue you can access: each member\'s StaffVenue.id, Staff.id, name, role and whether their account is active. The IDs can be passed to reservation staff/schedule tools. Optionally filter by name or only active members. Pass venueId. Answers "who works here / who is on my team?". For sales performance use staff_ranking instead.',
     {
       venueId: z.string().describe('Venue whose team to list (must be in your scope)'),
       search: z.string().optional().describe('Filter by name (partial, case-insensitive)'),
@@ -55,14 +55,20 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
               }
             : {}),
         },
-        select: { role: true, staff: { select: { firstName: true, lastName: true, active: true } } },
+        select: { id: true, staffId: true, role: true, staff: { select: { firstName: true, lastName: true, active: true } } },
         orderBy: [{ role: 'asc' }, { staff: { firstName: 'asc' } }],
         take: limit ?? 200,
       })
       return text({
         venueId,
         count: rows.length,
-        staff: rows.map(r => ({ name: `${r.staff.firstName} ${r.staff.lastName}`.trim(), role: r.role, active: r.staff.active })),
+        staff: rows.map(r => ({
+          staffVenueId: r.id,
+          staffId: r.staffId,
+          name: `${r.staff.firstName} ${r.staff.lastName}`.trim(),
+          role: r.role,
+          active: r.staff.active,
+        })),
       })
     },
   )
