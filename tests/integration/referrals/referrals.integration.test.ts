@@ -25,6 +25,7 @@ import { onOrderRefunded } from '@/services/referrals/referralRefund.service'
 // The referrer's tier reward is a plain CouponCode, so it must redeem through
 // Avoqado's EXISTING coupon engine — no referral-specific redemption code.
 import { validateCouponCode, recordCouponRedemption } from '@/services/dashboard/coupon.dashboard.service'
+import { cleanupReferralFixtureData, ReferralFixtureIds, teardownReferralFixture } from '../../__helpers__/referral-fixture-cleanup'
 
 jest.setTimeout(60000)
 
@@ -34,36 +35,15 @@ describe('Referral Program — end-to-end integration', () => {
   let waiterStaffVenueId: string
   let managerStaffVenueId: string
   const fixtureStaffIds: string[] = []
+  const fixtureIds: ReferralFixtureIds = {
+    venueId: undefined,
+    organizationId: undefined,
+    staffIds: fixtureStaffIds,
+  }
   const fixtureKey = `${process.pid}-${Date.now()}`
 
   async function cleanup() {
-    // Order matters: child tables first. Scope EVERYTHING by venueId +
-    // `source: REFERRAL_TIER` so we cannot touch unrelated discounts.
-    await prisma.couponRedemption.deleteMany({
-      where: { couponCode: { discount: { venueId, source: 'REFERRAL_TIER' } } },
-    })
-    await prisma.couponCode.deleteMany({
-      where: { discount: { venueId, source: 'REFERRAL_TIER' } },
-    })
-    await prisma.customerDiscount.deleteMany({
-      where: { discount: { venueId, source: 'REFERRAL_TIER' } },
-    })
-    await prisma.discount.deleteMany({ where: { venueId, source: 'REFERRAL_TIER' } })
-    await prisma.referral.deleteMany({ where: { venueId } })
-    await prisma.activityLog.deleteMany({
-      where: { venueId, action: { startsWith: 'REFERRAL_' } },
-    })
-    await prisma.order.deleteMany({
-      where: { venueId, orderNumber: { startsWith: 'TEST-REF-' } },
-    })
-    // Test customers only — identified by referralCode prefix OR phone prefix.
-    await prisma.customer.deleteMany({
-      where: { venueId, referralCode: { startsWith: 'TESTSMOKE-' } },
-    })
-    await prisma.customer.deleteMany({
-      where: { venueId, phone: { startsWith: '5599999' } },
-    })
-    await prisma.referralProgramConfig.deleteMany({ where: { venueId } })
+    await cleanupReferralFixtureData(prisma, fixtureIds.venueId)
   }
 
   beforeAll(async () => {
@@ -85,6 +65,7 @@ describe('Referral Program — end-to-end integration', () => {
       },
     })
     organizationId = organization.id
+    fixtureIds.organizationId = organization.id
 
     const venue = await prisma.venue.create({
       data: {
@@ -94,6 +75,7 @@ describe('Referral Program — end-to-end integration', () => {
       },
     })
     venueId = venue.id
+    fixtureIds.venueId = venue.id
 
     for (const [index, role] of ['WAITER', 'MANAGER'].entries()) {
       const staff = await prisma.staff.create({
@@ -123,11 +105,7 @@ describe('Referral Program — end-to-end integration', () => {
   })
 
   afterAll(async () => {
-    await cleanup()
-    await prisma.venue.delete({ where: { id: venueId } })
-    await prisma.staff.deleteMany({ where: { id: { in: fixtureStaffIds } } })
-    await prisma.organization.delete({ where: { id: organizationId } })
-    await prisma.$disconnect()
+    await teardownReferralFixture(prisma, fixtureIds)
   })
 
   it('happy path: activate → capture → pay → TIER_1 unlock → reward emitted', async () => {

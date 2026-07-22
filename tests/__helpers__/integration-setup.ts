@@ -5,7 +5,33 @@
 
 // Load .env file for integration tests
 import * as dotenv from 'dotenv'
+
+const databaseUrlWasPresent = Object.prototype.hasOwnProperty.call(process.env, 'DATABASE_URL')
+const databaseUrlFromCaller = process.env.DATABASE_URL
+const testDatabaseUrlWasPresent = Object.prototype.hasOwnProperty.call(process.env, 'TEST_DATABASE_URL')
+const testDatabaseUrlFromCaller = process.env.TEST_DATABASE_URL
+
 dotenv.config()
+
+// A caller-supplied database override is an isolated pair. dotenv may fill a
+// missing companion variable, so restore both sides after loading it. This is
+// especially important when pre-deploy launches Jest with only DATABASE_URL:
+// a TEST_DATABASE_URL from .env must never silently redirect integration tests.
+if (databaseUrlWasPresent || testDatabaseUrlWasPresent) {
+  if (databaseUrlWasPresent) {
+    process.env.DATABASE_URL = databaseUrlFromCaller
+  } else {
+    delete process.env.DATABASE_URL
+  }
+
+  if (testDatabaseUrlWasPresent) {
+    process.env.TEST_DATABASE_URL = testDatabaseUrlFromCaller
+  } else if (databaseUrlFromCaller) {
+    process.env.TEST_DATABASE_URL = databaseUrlFromCaller
+  } else {
+    delete process.env.TEST_DATABASE_URL
+  }
+}
 
 // Set longer timeout for integration tests (real database operations)
 jest.setTimeout(60000)

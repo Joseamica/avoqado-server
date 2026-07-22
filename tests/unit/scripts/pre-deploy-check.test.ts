@@ -160,7 +160,7 @@ describe('pre-deploy database safety contract', () => {
         'run test:integration',
         'run assistant:consistency',
       ]) {
-        expect(childCalls).toContain(`${dbCommand}|${databaseUrl}|`)
+        expect(childCalls).toContain(`${dbCommand}|${databaseUrl}|${databaseUrl}`)
       }
       expect(childCalls).not.toContain(dotenvTestDatabaseUrl)
       expect(result.stdout).not.toContain('caller-user:caller-password')

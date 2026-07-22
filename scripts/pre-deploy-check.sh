@@ -38,7 +38,9 @@ if [ "$DATABASE_URL_WAS_PRESENT" = "x" ]; then
       export DATABASE_URL="$TEST_DATABASE_URL"
     fi
   else
-    unset TEST_DATABASE_URL
+    # Keep child processes safe even if they load dotenv again (Jest's
+    # integration setup does): the explicit database remains authoritative.
+    export TEST_DATABASE_URL="$DATABASE_URL"
   fi
 elif [ "$TEST_DATABASE_URL_WAS_PRESENT" = "x" ]; then
   export TEST_DATABASE_URL="$TEST_DATABASE_URL_WAS_SET"
