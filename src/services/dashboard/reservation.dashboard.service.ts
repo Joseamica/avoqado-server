@@ -1355,7 +1355,6 @@ export async function updateReservation(
     const { product } = await validateResourceOwnership(tx, venueId, {
       tableId: newTableId,
       productId: newProductId,
-      assignedStaffId: newStaffId,
     })
 
     // Layer 0: External calendar busy-block check against the NEW (target)
