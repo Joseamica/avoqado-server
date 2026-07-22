@@ -1,8 +1,10 @@
 import { Prisma, ReservationStatus } from '@prisma/client'
 import { fromZonedTime, toZonedTime } from 'date-fns-tz'
 import prisma from '../../utils/prismaClient'
-import { getDefaultOperatingHours, type OperatingHours } from './reservationSettings.service'
+import { getDefaultOperatingHours, isStaffAware, type OperatingHours, type ReservationConfig } from './reservationSettings.service'
 import { BadRequestError } from '../../errors/AppError'
+import { findEligibleStaffForDayWindows, isLiveSlotHold } from './appointmentStaffAssignment.service'
+import { resolveCanonicalAppointmentDuration } from '../reservation/resolveAppointmentWindow'
 
 // ==========================================
 // AVAILABILITY ENGINE — Slot calculation + conflict detection
@@ -38,15 +40,23 @@ export function effectiveAppointmentPacing(pacingMaxFromSettings: number | null 
  */
 export async function countAppointmentOccupancy(
   client: Prisma.TransactionClient | typeof prisma,
-  args: { venueId: string; startsAt: Date; endsAt: Date; excludeHoldId?: string; excludeReservationId?: string },
+  args: {
+    venueId: string
+    startsAt: Date
+    endsAt: Date
+    excludeHoldId?: string
+    excludeReservationId?: string
+    checkedAt?: Date
+  },
 ): Promise<{ reservations: number; holds: number }> {
-  const now = new Date()
-  const [reservations, holds] = await Promise.all([
+  const checkedAt = args.checkedAt ?? new Date()
+  const [reservations, holdRows] = await Promise.all([
     client.reservation.count({
       where: {
         venueId: args.venueId,
         status: { in: ACTIVE_RESERVATION_STATUSES },
         classSessionId: null,
+        product: { is: { type: 'APPOINTMENTS_SERVICE' } },
         startsAt: { lt: args.endsAt },
         endsAt: { gt: args.startsAt },
         // Reschedule: don't count the reservation being moved against its own
@@ -54,18 +64,23 @@ export async function countAppointmentOccupancy(
         ...(args.excludeReservationId ? { id: { not: args.excludeReservationId } } : {}),
       },
     }),
-    client.slotHold.count({
+    client.slotHold.findMany({
       where: {
         venueId: args.venueId,
         classSessionId: null,
-        expiresAt: { gt: now },
+        expiresAt: { gt: checkedAt },
         startsAt: { lt: args.endsAt },
         endsAt: { gt: args.startsAt },
         ...(args.excludeHoldId ? { id: { not: args.excludeHoldId } } : {}),
       },
+      select: {
+        expiresAt: true,
+        heldForReservationId: true,
+        heldForReservation: { select: { status: true } },
+      },
     }),
   ])
-  return { reservations, holds }
+  return { reservations, holds: holdRows.filter(hold => isLiveSlotHold(hold, checkedAt)).length }
 }
 
 export interface SlotOptions {
@@ -74,6 +89,11 @@ export interface SlotOptions {
   tableId?: string
   staffId?: string
   productId?: string
+  productIds?: string[]
+  includeFull?: boolean
+  windowSemantics?: 'base'
+  /** Server-owned reschedule duration. Never populate this from a public query. */
+  fixedDurationMin?: number
   /**
    * Reschedule: exclude this reservation from per-slot occupancy so the customer
    * can move to an adjacent/overlapping slot without colliding with their own
@@ -87,6 +107,8 @@ export interface AvailableSlot {
   endsAt: Date
   availableTables: { id: string; number: string; capacity: number }[]
   availableStaff: { id: string; firstName: string; lastName: string }[]
+  available?: false
+  reason?: 'FULL'
 }
 
 export interface ConflictResult {
@@ -105,8 +127,45 @@ export async function getAvailableSlots(
   moduleConfig: any,
   venueTimezone: string = 'America/Mexico_City',
 ): Promise<AvailableSlot[]> {
+  const checkedAt = new Date()
   const slotInterval = moduleConfig?.scheduling?.slotIntervalMin ?? 15
-  const defaultDuration = options.duration ?? moduleConfig?.scheduling?.defaultDurationMin ?? 60
+  const normalizedSettings = {
+    ...moduleConfig,
+    scheduling: { capacityMode: 'pacing', ...moduleConfig?.scheduling },
+    publicBooking: { showStaffPicker: false, ...moduleConfig?.publicBooking },
+  } as ReservationConfig
+  const staffAware = isStaffAware(normalizedSettings)
+  const requestedProductIds = [
+    ...new Set((options.productIds ?? (options.productId ? [options.productId] : [])).map(id => id.trim()).filter(Boolean)),
+  ]
+  let canonicalProductIds = requestedProductIds
+  let defaultDuration: number
+
+  if (options.fixedDurationMin !== undefined) {
+    if (!Number.isInteger(options.fixedDurationMin) || options.fixedDurationMin < 1 || options.fixedDurationMin > 1440) {
+      throw new BadRequestError('La duración fija debe estar entre 1 y 1440 minutos')
+    }
+    defaultDuration = options.fixedDurationMin
+  } else if (staffAware || options.windowSemantics === 'base') {
+    const canonical = await resolveCanonicalAppointmentDuration(prisma, {
+      venueId,
+      productIds: requestedProductIds,
+      settings: normalizedSettings,
+    })
+    canonicalProductIds = canonical.productIds
+    const advisoryDuration = options.duration ?? canonical.canonicalBaseDurationMin
+    if (
+      !Number.isInteger(advisoryDuration) ||
+      advisoryDuration < 1 ||
+      advisoryDuration > 1440 ||
+      canonical.canonicalBaseDurationMin > 1440
+    ) {
+      throw new BadRequestError('La duración de la cita debe estar entre 1 y 1440 minutos')
+    }
+    defaultDuration = Math.max(canonical.canonicalBaseDurationMin, advisoryDuration)
+  } else {
+    defaultDuration = options.duration ?? moduleConfig?.scheduling?.defaultDurationMin ?? 60
+  }
   const onlineCapacityPercent = moduleConfig?.scheduling?.onlineCapacityPercent ?? 100
   const pacingMax = moduleConfig?.scheduling?.pacingMaxPerSlot ?? null
 
@@ -123,7 +182,7 @@ export async function getAvailableSlots(
   // debe OFRECERSE: antes solo createReservation lo validaba (422) y los
   // pickers mostraban horas imposibles que morían al confirmar.
   const minNoticeMin = moduleConfig?.scheduling?.minNoticeMin ?? 0
-  const earliestBookable = new Date(Date.now() + minNoticeMin * 60000)
+  const earliestBookable = new Date(checkedAt.getTime() + minNoticeMin * 60000)
 
   // For each time range, generate slot start times (converted to UTC)
   const slotStarts: Date[] = []
@@ -166,6 +225,7 @@ export async function getAvailableSlots(
       tableId: true,
       assignedStaffId: true,
       productId: true,
+      product: { select: { type: true } },
       partySize: true,
       status: true,
     },
@@ -178,20 +238,23 @@ export async function getAvailableSlots(
       select: { id: true, number: true, capacity: true },
       orderBy: { number: 'asc' },
     }),
-    prisma.staff.findMany({
-      where: {
-        venues: { some: { venueId, active: true } },
-      },
-      select: { id: true, firstName: true, lastName: true },
-    }),
+    staffAware
+      ? Promise.resolve([])
+      : prisma.staff.findMany({
+          where: {
+            venues: { some: { venueId, active: true } },
+          },
+          select: { id: true, firstName: true, lastName: true },
+        }),
   ])
 
   // Get product capacity if productId specified
   let productCapacity: number | null = null
   let productType: string | null = null
-  if (options.productId) {
+  const leadProductId = options.productId ?? canonicalProductIds[0]
+  if (leadProductId) {
     const product = await prisma.product.findFirst({
-      where: { id: options.productId, venueId },
+      where: { id: leadProductId, venueId },
       select: { eventCapacity: true, type: true },
     })
     productType = product?.type ?? null
@@ -207,32 +270,57 @@ export async function getAvailableSlots(
   // filter classSessionId:null in case a future feature adds class-side
   // holds — those should not bleed into appointment availability).
   const isAppointment = productType === 'APPOINTMENTS_SERVICE'
-  const activeHolds = isAppointment
-    ? await prisma.slotHold.findMany({
-        where: {
-          venueId,
-          classSessionId: null,
-          expiresAt: { gt: new Date() },
-          startsAt: { lt: dayEnd },
-          endsAt: { gt: dayStart },
-        },
-        select: { startsAt: true, endsAt: true },
-      })
-    : []
+  const activeHolds =
+    isAppointment || staffAware
+      ? await prisma.slotHold.findMany({
+          where: {
+            venueId,
+            classSessionId: null,
+            expiresAt: { gt: checkedAt },
+            startsAt: { lt: dayEnd },
+            endsAt: { gt: dayStart },
+          },
+          select: {
+            startsAt: true,
+            endsAt: true,
+            expiresAt: true,
+            heldForReservationId: true,
+            heldForReservation: { select: { status: true } },
+          },
+        })
+      : []
 
   // External calendar busy blocks (Google Calendar et al.) — merged into the
   // same busy-intervals data structure the per-slot logic uses below.
   // Venue-master blocks always apply; staff-personal blocks only apply when
   // the caller asked for availability scoped to a specific staff member.
-  const externalBlocks = await prisma.externalBusyBlock.findMany({
-    where: {
-      OR: [
-        { venueId, startsAt: { lt: dayEnd }, endsAt: { gt: dayStart } },
-        ...(options.staffId ? [{ staffId: options.staffId, startsAt: { lt: dayEnd }, endsAt: { gt: dayStart } }] : []),
-      ],
-    },
-    select: { startsAt: true, endsAt: true, staffId: true, venueId: true },
-  })
+  const externalBlocks = staffAware
+    ? []
+    : await prisma.externalBusyBlock.findMany({
+        where: {
+          OR: [
+            { venueId, startsAt: { lt: dayEnd }, endsAt: { gt: dayStart } },
+            ...(options.staffId ? [{ staffId: options.staffId, startsAt: { lt: dayEnd }, endsAt: { gt: dayStart } }] : []),
+          ],
+        },
+        select: { startsAt: true, endsAt: true, staffId: true, venueId: true },
+      })
+
+  const windows = slotStarts.map(startsAt => ({
+    startsAt,
+    endsAt: new Date(startsAt.getTime() + defaultDuration * 60000),
+  }))
+  const eligibleStaffByWindow = staffAware
+    ? await findEligibleStaffForDayWindows(prisma, {
+        venueId,
+        canonicalProductIds,
+        windows,
+        checkedAt,
+        settings: normalizedSettings,
+        requestedStaffId: options.staffId,
+        excludeReservationId: options.excludeReservationId,
+      })
+    : null
 
   // Tableless studios (Mindform pattern) have NO resource model gating
   // concurrent appointments — the table-collision logic below is a no-op
@@ -242,17 +330,24 @@ export async function getAvailableSlots(
   // Restaurants with tables keep null = unlimited; table assignment is
   // their gate. Venues can opt back to overbooking by setting an explicit
   // pacingMaxPerSlot (e.g. 3 for a studio with 3 cabins).
-  const effectivePacing = isAppointment ? effectiveAppointmentPacing(pacingMax) : pacingMax
+  const effectivePacing = staffAware
+    ? (pacingMax ?? Number.POSITIVE_INFINITY)
+    : isAppointment
+      ? effectiveAppointmentPacing(pacingMax)
+      : pacingMax
 
   // Evaluate each slot
   const availableSlots: AvailableSlot[] = []
 
-  for (const slotStart of slotStarts) {
+  for (const [slotIndex, slotStart] of slotStarts.entries()) {
     const slotEnd = new Date(slotStart.getTime() + defaultDuration * 60000)
 
     // Find reservations overlapping this slot
     const overlapping = existingReservations.filter(r => r.startsAt < slotEnd && r.endsAt > slotStart)
-    const overlappingHolds = activeHolds.filter(h => h.startsAt < slotEnd && h.endsAt > slotStart)
+    const overlappingHolds = activeHolds.filter(
+      hold => isLiveSlotHold(hold, checkedAt) && hold.startsAt < slotEnd && hold.endsAt > slotStart,
+    )
+    const overlappingAppointments = overlapping.filter(reservation => reservation.product?.type === 'APPOINTMENTS_SERVICE')
 
     // External calendar busy-block check — a single overlap fully blocks the
     // slot regardless of pacing/capacity (the venue or the requested staff
@@ -265,13 +360,15 @@ export async function getAvailableSlots(
     }
 
     // Pacing check: total bookings + active holds in this slot
-    if (effectivePacing !== null && overlapping.length + overlappingHolds.length >= effectivePacing) {
+    const pacingOccupancy = isAppointment || staffAware ? overlappingAppointments.length + overlappingHolds.length : overlapping.length
+    const pacingFull = effectivePacing !== null && pacingOccupancy >= effectivePacing
+    if (!staffAware && pacingFull) {
       continue
     }
 
     // Product capacity check (sum partySize, not count reservations)
-    if (options.productId && productCapacity !== null) {
-      const productOverlap = overlapping.filter(r => r.productId === options.productId)
+    if (leadProductId && productCapacity !== null) {
+      const productOverlap = overlapping.filter(r => r.productId === leadProductId)
       const occupiedSlots = productOverlap.reduce((sum, r) => sum + r.partySize, 0)
       if (occupiedSlots + (options.partySize ?? 1) > productCapacity) {
         continue
@@ -284,7 +381,10 @@ export async function getAvailableSlots(
       // Check specific table
       const tableConflict = overlapping.some(r => r.tableId === options.tableId)
       if (tableConflict) continue
-      slotAvailableTables = tables.filter(t => t.id === options.tableId)
+      slotAvailableTables = tables.filter(
+        table => table.id === options.tableId && (!staffAware || options.partySize === undefined || table.capacity >= options.partySize),
+      )
+      if (staffAware && slotAvailableTables.length === 0) continue
     } else if (options.partySize) {
       // Find tables with sufficient capacity that aren't booked
       const bookedTableIds = new Set(overlapping.map(r => r.tableId).filter(Boolean))
@@ -298,14 +398,31 @@ export async function getAvailableSlots(
     }
 
     // Staff availability
-    let slotAvailableStaff = staff
-    if (options.staffId) {
+    let slotAvailableStaff
+    if (staffAware) {
+      slotAvailableStaff = eligibleStaffByWindow?.[slotIndex] ?? []
+      if (slotAvailableStaff.length === 0) continue
+    } else if (options.staffId) {
       const staffConflict = overlapping.some(r => r.assignedStaffId === options.staffId)
       if (staffConflict) continue
       slotAvailableStaff = staff.filter(s => s.id === options.staffId)
     } else {
       const busyStaffIds = new Set(overlapping.map(r => r.assignedStaffId).filter(Boolean))
       slotAvailableStaff = staff.filter(s => !busyStaffIds.has(s.id))
+    }
+
+    if (staffAware && pacingFull) {
+      if (options.includeFull === true) {
+        availableSlots.push({
+          startsAt: slotStart,
+          endsAt: slotEnd,
+          availableTables: slotAvailableTables,
+          availableStaff: slotAvailableStaff,
+          available: false,
+          reason: 'FULL',
+        })
+      }
+      continue
     }
 
     availableSlots.push({

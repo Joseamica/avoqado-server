@@ -59,6 +59,28 @@ export interface ResolveStaffAssignmentArgs {
   excludeHoldId?: string
 }
 
+export interface StaffDayWindow {
+  startsAt: Date
+  endsAt: Date
+}
+
+export interface EligibleStaffSummary {
+  id: string
+  firstName: string
+  lastName: string
+}
+
+export interface FindEligibleStaffForDayWindowsArgs {
+  venueId: string
+  canonicalProductIds: string[]
+  windows: StaffDayWindow[]
+  checkedAt: Date
+  settings: ReservationConfig
+  requestedStaffId?: string
+  excludeReservationId?: string
+  excludeHoldId?: string
+}
+
 interface TimeInterval {
   startsAt: Date
   endsAt: Date
@@ -69,6 +91,10 @@ interface AllocationCandidate {
   staffId: string
   startDate: Date
   venue: { organizationId: string; timezone: string }
+}
+
+interface DayAllocationCandidate extends AllocationCandidate {
+  staff: EligibleStaffSummary
 }
 
 function validDate(value: Date): boolean {
@@ -365,6 +391,227 @@ function nextLocalDate(localDate: string): string {
   return new Date(Date.UTC(year, month - 1, day + 1)).toISOString().slice(0, 10)
 }
 
+function candidateSupportsProducts(mappingsByMember: Map<string, Set<string>>, candidateId: string, productCount: number): boolean {
+  return (mappingsByMember.get(candidateId)?.size ?? 0) === productCount
+}
+
+function sortAllocationCandidates<T extends AllocationCandidate>(candidates: T[], counts: Map<string, number>): T[] {
+  return [...candidates].sort((left, right) => {
+    const countDifference = (counts.get(left.staffId) ?? 0) - (counts.get(right.staffId) ?? 0)
+    if (countDifference !== 0) return countDifference
+    const startDifference = left.startDate.getTime() - right.startDate.getTime()
+    if (startDifference !== 0) return startDifference
+    return left.id.localeCompare(right.id)
+  })
+}
+
+function intervalsOverlap(left: TimeInterval, right: TimeInterval): boolean {
+  return left.startsAt.getTime() < right.endsAt.getTime() && left.endsAt.getTime() > right.startsAt.getTime()
+}
+
+/**
+ * Batched read-side eligibility for a generated availability day. Unlike the
+ * mutation allocator this returns an aligned list per window and never turns a
+ * busy/absent requested staff member into a 409 or a silent reassignment.
+ */
+export async function findEligibleStaffForDayWindows(
+  db: Prisma.TransactionClient,
+  args: FindEligibleStaffForDayWindowsArgs,
+): Promise<EligibleStaffSummary[][]> {
+  if (!validDate(args.checkedAt)) throw new BadRequestError('La ventana de la cita es inválida')
+  for (const window of args.windows) assertValidWindow(window.startsAt, window.endsAt, args.checkedAt)
+  if (args.windows.length === 0) return []
+
+  const canonicalProductIds = [...new Set(args.canonicalProductIds.map(id => id.trim()).filter(Boolean))]
+  if (canonicalProductIds.length === 0 || canonicalProductIds.length > 20) {
+    throw new BadRequestError('Selecciona entre 1 y 20 servicios de cita válidos')
+  }
+
+  const envelope = {
+    startsAt: new Date(Math.min(...args.windows.map(window => window.startsAt.getTime()))),
+    endsAt: new Date(Math.max(...args.windows.map(window => window.endsAt.getTime()))),
+  }
+  const loadedCandidates = (await db.staffVenue.findMany({
+    where: {
+      venueId: args.venueId,
+      active: true,
+      staff: { active: true },
+      ...(args.requestedStaffId ? { staffId: args.requestedStaffId } : {}),
+    },
+    select: {
+      id: true,
+      staffId: true,
+      startDate: true,
+      venue: { select: { organizationId: true, timezone: true } },
+      staff: { select: { id: true, firstName: true, lastName: true } },
+    },
+  })) as DayAllocationCandidate[]
+  // Defend the requested-staff contract even for non-Prisma clients/test
+  // doubles that do not apply the where clause themselves.
+  const candidates = args.requestedStaffId
+    ? loadedCandidates.filter(candidate => candidate.staffId === args.requestedStaffId)
+    : loadedCandidates
+  if (candidates.length === 0) return args.windows.map(() => [])
+
+  const timezone = candidates[0].venue.timezone
+  const organizationId = candidates[0].venue.organizationId
+  const localDates = args.windows.map(window => localDateInTimezone(window.startsAt, timezone))
+  if (localDates.some(localDate => localDate === null)) return args.windows.map(() => [])
+  const sortedLocalDates = (localDates as string[]).sort()
+  const firstLocalDate = sortedLocalDates[0]
+  const lastLocalDate = sortedLocalDates[sortedLocalDates.length - 1]
+  const staffIds = candidates.map(candidate => candidate.staffId)
+  const staffVenueIds = candidates.map(candidate => candidate.id)
+
+  const [mappings, schedules, exceptions, organizationMemberships, externalBlocks] = await Promise.all([
+    db.productStaff.findMany({
+      where: { venueId: args.venueId, staffVenueId: { in: staffVenueIds }, productId: { in: canonicalProductIds } },
+      select: { productId: true, staffVenueId: true },
+    }),
+    db.staffSchedule.findMany({
+      where: { venueId: args.venueId, staffVenueId: { in: staffVenueIds } },
+      select: { staffVenueId: true, weekly: true },
+    }),
+    db.staffScheduleException.findMany({
+      where: {
+        venueId: args.venueId,
+        staffVenueId: { in: staffVenueIds },
+        startDate: { lte: lastLocalDate },
+        endDate: { gte: firstLocalDate },
+      },
+      select: { staffVenueId: true, startDate: true, endDate: true, kind: true, startTime: true, endTime: true },
+    }),
+    db.staffVenue.findMany({
+      where: { staffId: { in: staffIds }, venue: { organizationId } },
+      select: { staffId: true, venueId: true },
+    }),
+    db.externalBusyBlock.findMany({
+      where: {
+        OR: [
+          { venueId: args.venueId, staffId: null, startsAt: { lt: envelope.endsAt }, endsAt: { gt: envelope.startsAt } },
+          { staffId: { in: staffIds }, startsAt: { lt: envelope.endsAt }, endsAt: { gt: envelope.startsAt } },
+        ],
+      },
+      select: { startsAt: true, endsAt: true, staffId: true, venueId: true },
+    }),
+  ])
+
+  const venuesByStaff = new Map<string, string[]>()
+  for (const membership of organizationMemberships) {
+    const venueIds = venuesByStaff.get(membership.staffId) ?? []
+    if (!venueIds.includes(membership.venueId)) venueIds.push(membership.venueId)
+    venuesByStaff.set(membership.staffId, venueIds)
+  }
+  const envelopeOverlap = { startsAt: { lt: envelope.endsAt }, endsAt: { gt: envelope.startsAt } }
+  const [reservations, classes, holds, dailyCounts] = await Promise.all([
+    db.reservation.findMany({
+      where: {
+        OR: candidateConflictOr(candidates, venuesByStaff, 'assignedStaffId'),
+        status: { in: ACTIVE_RESERVATION_STATUSES },
+        ...envelopeOverlap,
+        ...(args.excludeReservationId && { id: { not: args.excludeReservationId } }),
+      },
+      select: { assignedStaffId: true, startsAt: true, endsAt: true },
+    }),
+    db.classSession.findMany({
+      where: {
+        OR: candidateConflictOr(candidates, venuesByStaff, 'assignedStaffId'),
+        status: 'SCHEDULED',
+        ...envelopeOverlap,
+      },
+      select: { assignedStaffId: true, startsAt: true, endsAt: true },
+    }),
+    db.slotHold.findMany({
+      where: {
+        OR: candidateConflictOr(candidates, venuesByStaff, 'staffId'),
+        ...envelopeOverlap,
+        expiresAt: { gt: args.checkedAt },
+        ...(args.excludeHoldId && { id: { not: args.excludeHoldId } }),
+      },
+      select: {
+        staffId: true,
+        startsAt: true,
+        endsAt: true,
+        expiresAt: true,
+        heldForReservationId: true,
+        heldForReservation: { select: { status: true } },
+      },
+    }),
+    db.reservation.groupBy({
+      by: ['assignedStaffId'],
+      where: {
+        venueId: args.venueId,
+        assignedStaffId: { in: staffIds },
+        status: { in: ACTIVE_RESERVATION_STATUSES },
+        startsAt: {
+          gte: fromZonedTime(`${firstLocalDate}T00:00:00`, timezone),
+          lt: fromZonedTime(`${nextLocalDate(firstLocalDate)}T00:00:00`, timezone),
+        },
+        ...(args.excludeReservationId && { id: { not: args.excludeReservationId } }),
+      },
+      _count: { _all: true },
+    }),
+  ])
+
+  const mappingsByMember = new Map<string, Set<string>>()
+  for (const mapping of mappings) {
+    const productIds = mappingsByMember.get(mapping.staffVenueId) ?? new Set<string>()
+    productIds.add(mapping.productId)
+    mappingsByMember.set(mapping.staffVenueId, productIds)
+  }
+  const scheduleByMember = new Map(schedules.map(schedule => [schedule.staffVenueId, schedule.weekly]))
+  const exceptionsByMember = new Map<string, StaffScheduleExceptionWindow[]>()
+  for (const exception of exceptions) {
+    const memberExceptions = exceptionsByMember.get(exception.staffVenueId) ?? []
+    memberExceptions.push(exception)
+    exceptionsByMember.set(exception.staffVenueId, memberExceptions)
+  }
+  const counts = new Map<string, number>()
+  for (const row of dailyCounts) {
+    if (row.assignedStaffId) counts.set(row.assignedStaffId, row._count._all)
+  }
+  const orderedCandidates = sortAllocationCandidates(candidates, counts)
+
+  return args.windows.map(window => {
+    const interval = { startsAt: window.startsAt, endsAt: window.endsAt }
+    const venueBlocked = externalBlocks.some(
+      block => block.staffId === null && block.venueId === args.venueId && intervalsOverlap(block, interval),
+    )
+    if (venueBlocked) return []
+
+    return orderedCandidates
+      .filter(candidate => {
+        if (!candidateSupportsProducts(mappingsByMember, candidate.id, canonicalProductIds.length)) return false
+        if (
+          !staffScheduleAllowsWindow({
+            startsAt: window.startsAt,
+            endsAt: window.endsAt,
+            timezone: candidate.venue.timezone,
+            weekly: (scheduleByMember.get(candidate.id) as unknown as OperatingHours | undefined) ?? null,
+            exceptions: exceptionsByMember.get(candidate.id) ?? [],
+            venueOperatingHours: args.settings.operatingHours,
+          })
+        ) {
+          return false
+        }
+        if (
+          reservations.some(row => row.assignedStaffId === candidate.staffId && intervalsOverlap(row, interval)) ||
+          classes.some(row => row.assignedStaffId === candidate.staffId && intervalsOverlap(row, interval)) ||
+          holds.some(row => row.staffId === candidate.staffId && isLiveSlotHold(row, args.checkedAt) && intervalsOverlap(row, interval)) ||
+          externalBlocks.some(block => block.staffId === candidate.staffId && intervalsOverlap(block, interval))
+        ) {
+          return false
+        }
+        return true
+      })
+      .map(candidate => ({
+        id: candidate.staffId,
+        firstName: candidate.staff.firstName,
+        lastName: candidate.staff.lastName,
+      }))
+  })
+}
+
 export async function resolveStaffAssignment(tx: Prisma.TransactionClient, args: ResolveStaffAssignmentArgs): Promise<string> {
   assertValidWindow(args.startsAt, args.endsAt, args.checkedAt)
 
@@ -515,7 +762,7 @@ export async function resolveStaffAssignment(tx: Prisma.TransactionClient, args:
   }
 
   const eligible = candidates.filter(candidate => {
-    if ((mappingsByMember.get(candidate.id)?.size ?? 0) !== canonical.productIds.length) return false
+    if (!candidateSupportsProducts(mappingsByMember, candidate.id, canonical.productIds.length)) return false
     if (busyStaff.has(candidate.staffId)) return false
     return staffScheduleAllowsWindow({
       startsAt: args.startsAt,
@@ -526,14 +773,8 @@ export async function resolveStaffAssignment(tx: Prisma.TransactionClient, args:
       venueOperatingHours: args.settings.operatingHours,
     })
   })
-  eligible.sort((left, right) => {
-    const countDifference = (counts.get(left.staffId) ?? 0) - (counts.get(right.staffId) ?? 0)
-    if (countDifference !== 0) return countDifference
-    const startDifference = left.startDate.getTime() - right.startDate.getTime()
-    if (startDifference !== 0) return startDifference
-    return left.id.localeCompare(right.id)
-  })
+  const orderedEligible = sortAllocationCandidates(eligible, counts)
 
-  if (!eligible[0]) throw noAvailableStaff()
-  return eligible[0].staffId
+  if (!orderedEligible[0]) throw noAvailableStaff()
+  return orderedEligible[0].staffId
 }

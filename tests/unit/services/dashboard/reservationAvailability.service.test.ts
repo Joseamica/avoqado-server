@@ -61,6 +61,60 @@ const defaultModuleConfig = {
 
 const getSlots = (options: any = {}, config: any = defaultModuleConfig) => getAvailableSlots(VENUE_ID, TEST_DATE, options, config, 'UTC')
 
+const staffAwareConfig = (pacingMaxPerSlot: number | null = null) => ({
+  ...defaultModuleConfig,
+  scheduling: {
+    ...defaultModuleConfig.scheduling,
+    capacityMode: 'per_staff' as const,
+    pacingMaxPerSlot,
+  },
+  publicBooking: { showStaffPicker: false },
+})
+
+function primeStaffAwareAvailability(
+  overrides: {
+    products?: Array<{ id: string; duration: number | null; durationMinutes: number | null }>
+    existingReservations?: any[]
+    staffConflicts?: any[]
+    classConflicts?: any[]
+    activeHolds?: any[]
+    staffHolds?: any[]
+    externalBlocks?: any[]
+    candidates?: any[]
+    mappings?: any[]
+  } = {},
+) {
+  const products = overrides.products ?? [{ id: 'product-1', duration: 60, durationMinutes: null }]
+  const candidates = overrides.candidates ?? [
+    {
+      id: 'sv-a',
+      staffId: 'staff-a',
+      startDate: new Date('2024-01-01T00:00:00.000Z'),
+      venue: { organizationId: 'org-1', timezone: 'UTC' },
+      staff: { id: 'staff-a', firstName: 'Ana', lastName: 'Alfa' },
+    },
+  ]
+  const memberships = candidates.map(candidate => ({ staffId: candidate.staffId, venueId: VENUE_ID }))
+  const mappings =
+    overrides.mappings ?? candidates.flatMap(candidate => products.map(product => ({ productId: product.id, staffVenueId: candidate.id })))
+
+  prismaMock.product.findMany.mockResolvedValue(products)
+  prismaMock.product.findFirst.mockResolvedValue({ eventCapacity: null, type: 'APPOINTMENTS_SERVICE' })
+  prismaMock.reservation.findMany
+    .mockResolvedValueOnce(overrides.existingReservations ?? [])
+    .mockResolvedValueOnce(overrides.staffConflicts ?? [])
+  prismaMock.table.findMany.mockResolvedValue([])
+  prismaMock.staff.findMany.mockResolvedValue(candidates.map(candidate => candidate.staff))
+  prismaMock.staffVenue.findMany.mockResolvedValueOnce(candidates).mockResolvedValueOnce(memberships)
+  prismaMock.productStaff.findMany.mockResolvedValue(mappings)
+  prismaMock.staffSchedule.findMany.mockResolvedValue([])
+  prismaMock.staffScheduleException.findMany.mockResolvedValue([])
+  prismaMock.classSession.findMany.mockResolvedValue(overrides.classConflicts ?? [])
+  prismaMock.slotHold.findMany.mockResolvedValueOnce(overrides.activeHolds ?? []).mockResolvedValueOnce(overrides.staffHolds ?? [])
+  prismaMock.externalBusyBlock.findMany.mockResolvedValue(overrides.externalBlocks ?? [])
+  prismaMock.reservation.groupBy.mockResolvedValue([])
+}
+
 describe('Reservation Availability Service', () => {
   beforeEach(() => {
     jest.resetAllMocks()
@@ -91,6 +145,7 @@ describe('Reservation Availability Service', () => {
       // Last slot starts at 21:00, ends at 22:00
       expect(result[result.length - 1].startsAt.getUTCHours()).toBe(21)
       expect(result[result.length - 1].endsAt.getUTCHours()).toBe(22)
+      expect(result.every(slot => !('available' in slot) && !('reason' in slot))).toBe(true)
     })
 
     it('should exclude slots where all tables are booked', async () => {
@@ -438,6 +493,222 @@ describe('Reservation Availability Service', () => {
         const result = await getSlots()
 
         expect(result.length).toBe(14) // unchanged from the baseline
+      })
+    })
+
+    describe('staff-aware availability', () => {
+      it.each([undefined, 'base' as const])(
+        'floors an advisory five-minute duration to a canonical sixty-minute service (windowSemantics=%s)',
+        async windowSemantics => {
+          primeStaffAwareAvailability()
+
+          const result = await getSlots(
+            { duration: 5, productId: 'product-1', productIds: ['product-1'], windowSemantics },
+            staffAwareConfig(),
+          )
+
+          expect(result).toHaveLength(14)
+          expect(result[0].endsAt.getTime() - result[0].startsAt.getTime()).toBe(60 * 60_000)
+        },
+      )
+
+      it('sums canonical multi-service duration before applying the advisory floor', async () => {
+        primeStaffAwareAvailability({
+          products: [
+            { id: 'product-1', duration: 30, durationMinutes: null },
+            { id: 'product-2', duration: 45, durationMinutes: null },
+          ],
+        })
+
+        const result = await getSlots({ duration: 5, productId: 'product-1', productIds: ['product-1', 'product-2'] }, staffAwareConfig())
+
+        expect(result[0].endsAt.getTime() - result[0].startsAt.getTime()).toBe(75 * 60_000)
+      })
+
+      it('rejects a canonical duration above 1440 minutes', async () => {
+        primeStaffAwareAvailability({ products: [{ id: 'product-1', duration: 1441, durationMinutes: null }] })
+
+        await expect(getSlots({ productId: 'product-1', productIds: ['product-1'] }, staffAwareConfig())).rejects.toMatchObject({
+          statusCode: 400,
+        })
+      })
+
+      it.each([30, 120])(
+        'uses fixedDurationMin=%i without catalog recanonicalization when the stored duration differs in either direction',
+        async fixedDurationMin => {
+          primeStaffAwareAvailability()
+          const result = await getSlots({ productId: 'product-1', productIds: ['product-1'], fixedDurationMin }, staffAwareConfig())
+          expect(result[0].endsAt.getTime() - result[0].startsAt.getTime()).toBe(fixedDurationMin * 60_000)
+          expect(prismaMock.product.findMany).not.toHaveBeenCalled()
+        },
+      )
+
+      it('validates the internal fixedDurationMin 1..1440 range', async () => {
+        primeStaffAwareAvailability()
+        await expect(
+          getSlots({ productId: 'product-1', productIds: ['product-1'], fixedDurationMin: 1441 }, staffAwareConfig()),
+        ).rejects.toMatchObject({ statusCode: 400 })
+      })
+
+      it('returns FULL only when pacing is the sole failed gate and includeFull is opted in', async () => {
+        const appointment = createMockReservation({
+          assignedStaffId: null,
+          productId: 'product-1',
+          product: { type: 'APPOINTMENTS_SERVICE' },
+          tableId: null,
+        })
+        primeStaffAwareAvailability({ existingReservations: [appointment] })
+
+        const result = await getSlots({ productId: 'product-1', productIds: ['product-1'], includeFull: true }, staffAwareConfig(1))
+
+        expect(result.find(slot => slot.startsAt.getUTCHours() === 12)).toMatchObject({ available: false, reason: 'FULL' })
+        expect(result.find(slot => slot.startsAt.getUTCHours() === 11)).not.toHaveProperty('available')
+      })
+
+      it('omits a pacing-full slot without includeFull', async () => {
+        const appointment = createMockReservation({
+          assignedStaffId: null,
+          productId: 'product-1',
+          product: { type: 'APPOINTMENTS_SERVICE' },
+          tableId: null,
+        })
+        primeStaffAwareAvailability({ existingReservations: [appointment] })
+
+        const result = await getSlots({ productId: 'product-1', productIds: ['product-1'] }, staffAwareConfig(1))
+
+        expect(result.find(slot => slot.startsAt.getUTCHours() === 12)).toBeUndefined()
+      })
+
+      it('omits rather than mislabels FULL when the requested staff also has a hard conflict', async () => {
+        const conflict = {
+          assignedStaffId: 'staff-a',
+          startsAt: at(12),
+          endsAt: at(13),
+        }
+        primeStaffAwareAvailability({
+          existingReservations: [
+            createMockReservation({
+              assignedStaffId: 'staff-a',
+              productId: 'product-1',
+              product: { type: 'APPOINTMENTS_SERVICE' },
+              tableId: null,
+            }),
+          ],
+          staffConflicts: [conflict],
+        })
+
+        const result = await getSlots(
+          { productId: 'product-1', productIds: ['product-1'], staffId: 'staff-a', includeFull: true },
+          staffAwareConfig(1),
+        )
+
+        expect(result.find(slot => slot.startsAt.getUTCHours() === 12)).toBeUndefined()
+      })
+
+      it('omits rather than mislabels FULL when a requested table does not exist', async () => {
+        primeStaffAwareAvailability({
+          existingReservations: [
+            createMockReservation({
+              assignedStaffId: null,
+              productId: 'product-1',
+              product: { type: 'APPOINTMENTS_SERVICE' },
+              tableId: null,
+            }),
+          ],
+        })
+
+        const result = await getSlots(
+          { productId: 'product-1', productIds: ['product-1'], tableId: 'missing-table', includeFull: true },
+          staffAwareConfig(1),
+        )
+
+        expect(result.find(slot => slot.startsAt.getUTCHours() === 12)).toBeUndefined()
+      })
+
+      it('treats null staff-aware pacing as unlimited', async () => {
+        primeStaffAwareAvailability({
+          existingReservations: [
+            createMockReservation({
+              assignedStaffId: null,
+              productId: 'product-1',
+              product: { type: 'APPOINTMENTS_SERVICE' },
+              tableId: null,
+            }),
+          ],
+        })
+
+        const result = await getSlots({ productId: 'product-1', productIds: ['product-1'] }, staffAwareConfig(null))
+
+        expect(result.find(slot => slot.startsAt.getUTCHours() === 12)).toBeDefined()
+      })
+
+      it('does not let table or event reservations consume appointment pacing', async () => {
+        primeStaffAwareAvailability({
+          existingReservations: [
+            createMockReservation({ productId: null, product: null, tableId: 'table-1' }),
+            createMockReservation({ id: 'event', productId: 'event-1', product: { type: 'EVENT' }, tableId: null }),
+          ],
+        })
+
+        const result = await getSlots({ productId: 'product-1', productIds: ['product-1'] }, staffAwareConfig(1))
+
+        expect(result.find(slot => slot.startsAt.getUTCHours() === 12)).toBeDefined()
+      })
+
+      it('counts staggered appointment overlaps conservatively rather than using peak concurrency', async () => {
+        primeStaffAwareAvailability({
+          existingReservations: [
+            createMockReservation({
+              id: 'early',
+              startsAt: at(11, 30),
+              endsAt: at(12, 15),
+              productId: 'product-1',
+              product: { type: 'APPOINTMENTS_SERVICE' },
+              tableId: null,
+            }),
+            createMockReservation({
+              id: 'late',
+              startsAt: at(12, 45),
+              endsAt: at(13, 30),
+              productId: 'product-1',
+              product: { type: 'APPOINTMENTS_SERVICE' },
+              tableId: null,
+            }),
+          ],
+        })
+
+        const result = await getSlots({ productId: 'product-1', productIds: ['product-1'], includeFull: true }, staffAwareConfig(2))
+
+        expect(result.find(slot => slot.startsAt.getUTCHours() === 12)).toMatchObject({ available: false, reason: 'FULL' })
+      })
+
+      it('keeps an automatic slot when another eligible candidate remains free', async () => {
+        const candidates = [
+          {
+            id: 'sv-a',
+            staffId: 'staff-a',
+            startDate: new Date('2024-01-01T00:00:00.000Z'),
+            venue: { organizationId: 'org-1', timezone: 'UTC' },
+            staff: { id: 'staff-a', firstName: 'Ana', lastName: 'Alfa' },
+          },
+          {
+            id: 'sv-b',
+            staffId: 'staff-b',
+            startDate: new Date('2024-01-01T00:00:00.000Z'),
+            venue: { organizationId: 'org-1', timezone: 'UTC' },
+            staff: { id: 'staff-b', firstName: 'Beto', lastName: 'Bravo' },
+          },
+        ]
+        primeStaffAwareAvailability({
+          candidates,
+          staffConflicts: [{ assignedStaffId: 'staff-a', startsAt: at(12), endsAt: at(13) }],
+        })
+
+        const result = await getSlots({ productId: 'product-1', productIds: ['product-1'] }, staffAwareConfig())
+
+        expect(result.find(slot => slot.startsAt.getUTCHours() === 12)?.availableStaff).toEqual([
+          { id: 'staff-b', firstName: 'Beto', lastName: 'Bravo' },
+        ])
       })
     })
   })

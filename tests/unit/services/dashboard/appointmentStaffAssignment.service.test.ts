@@ -2,6 +2,7 @@ import type { ReservationConfig } from '@/services/dashboard/reservationSettings
 import {
   assertOrganizationStaffAvailability,
   assertStaffEligible,
+  findEligibleStaffForDayWindows,
   isLiveSlotHold,
   lockAppointmentVenue,
   resolveStaffAssignment,
@@ -712,5 +713,251 @@ describe('resolveStaffAssignment', () => {
   it('uses StaffVenue.startDate before StaffVenue.id when daily counts tie', async () => {
     const tx = allocatorTx()
     await expect(resolveStaffAssignment(tx, args)).resolves.toBe('staff-old')
+  })
+})
+
+describe('findEligibleStaffForDayWindows', () => {
+  const checkedAt = new Date('2026-07-21T14:00:00.000Z')
+  const windows = [
+    { startsAt: new Date('2026-07-21T15:00:00.000Z'), endsAt: new Date('2026-07-21T16:00:00.000Z') },
+    { startsAt: new Date('2026-07-21T16:00:00.000Z'), endsAt: new Date('2026-07-21T17:00:00.000Z') },
+  ]
+
+  function dayReadTx() {
+    const tx = txMock()
+    tx.staffVenue.findMany
+      .mockResolvedValueOnce([
+        {
+          id: 'sv-b',
+          staffId: 'staff-b',
+          startDate: new Date('2024-01-01T00:00:00.000Z'),
+          venue: { organizationId: 'org-1', timezone: 'UTC' },
+          staff: { id: 'staff-b', firstName: 'Beto', lastName: 'Bravo' },
+        },
+        {
+          id: 'sv-a',
+          staffId: 'staff-a',
+          startDate: new Date('2024-01-01T00:00:00.000Z'),
+          venue: { organizationId: 'org-1', timezone: 'UTC' },
+          staff: { id: 'staff-a', firstName: 'Ana', lastName: 'Alfa' },
+        },
+      ])
+      .mockResolvedValueOnce([
+        { staffId: 'staff-a', venueId: 'venue-1' },
+        { staffId: 'staff-b', venueId: 'venue-1' },
+        { staffId: 'staff-b', venueId: 'venue-b-only' },
+      ])
+    tx.productStaff.findMany.mockResolvedValue([
+      { productId: 'product-1', staffVenueId: 'sv-a' },
+      { productId: 'product-1', staffVenueId: 'sv-b' },
+    ])
+    tx.staffSchedule.findMany.mockResolvedValue([])
+    tx.staffScheduleException.findMany.mockResolvedValue([])
+    tx.reservation.findMany.mockResolvedValue([])
+    tx.classSession.findMany.mockResolvedValue([])
+    tx.slotHold.findMany.mockResolvedValue([])
+    tx.externalBusyBlock.findMany.mockResolvedValue([])
+    tx.reservation.groupBy.mockResolvedValue([])
+    return tx
+  }
+
+  const args = {
+    venueId: 'venue-1',
+    canonicalProductIds: ['product-1'],
+    windows,
+    checkedAt,
+    settings: settings({ capacityMode: 'per_staff' }),
+  }
+
+  it('returns aligned Staff.id summaries in allocator order and requires active membership plus active Staff', async () => {
+    const tx = dayReadTx()
+    await expect(findEligibleStaffForDayWindows(tx, args)).resolves.toEqual([
+      [
+        { id: 'staff-a', firstName: 'Ana', lastName: 'Alfa' },
+        { id: 'staff-b', firstName: 'Beto', lastName: 'Bravo' },
+      ],
+      [
+        { id: 'staff-a', firstName: 'Ana', lastName: 'Alfa' },
+        { id: 'staff-b', firstName: 'Beto', lastName: 'Bravo' },
+      ],
+    ])
+    expect(tx.staffVenue.findMany.mock.calls[0][0].where).toEqual({
+      venueId: 'venue-1',
+      active: true,
+      staff: { active: true },
+    })
+  })
+
+  it('requires the complete multi-product mapping and uses venue hours when no staff weekly row exists', async () => {
+    const tx = dayReadTx()
+    tx.productStaff.findMany.mockResolvedValue([
+      { productId: 'product-1', staffVenueId: 'sv-a' },
+      { productId: 'product-2', staffVenueId: 'sv-a' },
+      { productId: 'product-1', staffVenueId: 'sv-b' },
+    ])
+
+    const result = await findEligibleStaffForDayWindows(tx, { ...args, canonicalProductIds: ['product-1', 'product-2'] })
+
+    expect(result).toEqual([
+      [{ id: 'staff-a', firstName: 'Ana', lastName: 'Alfa' }],
+      [{ id: 'staff-a', firstName: 'Ana', lastName: 'Alfa' }],
+    ])
+  })
+
+  it('applies an OFF exception per window without marking the candidate unavailable for the whole day', async () => {
+    const tx = dayReadTx()
+    tx.staffScheduleException.findMany.mockResolvedValue([
+      { staffVenueId: 'sv-a', startDate: '2026-07-21', endDate: '2026-07-21', kind: 'OFF', startTime: null, endTime: null },
+    ])
+
+    const result = await findEligibleStaffForDayWindows(tx, { ...args, requestedStaffId: 'staff-a' })
+
+    expect(result).toEqual([[], []])
+  })
+
+  it.each([
+    [
+      'Reservation',
+      (tx: any) =>
+        tx.reservation.findMany.mockResolvedValue([
+          { assignedStaffId: 'staff-a', venueId: 'venue-1', startsAt: windows[0].startsAt, endsAt: windows[0].endsAt },
+        ]),
+    ],
+    [
+      'live hold',
+      (tx: any) =>
+        tx.slotHold.findMany.mockResolvedValue([
+          {
+            staffId: 'staff-a',
+            venueId: 'venue-1',
+            startsAt: windows[0].startsAt,
+            endsAt: windows[0].endsAt,
+            expiresAt: new Date('2026-07-21T14:10:00.000Z'),
+            heldForReservationId: null,
+            heldForReservation: null,
+          },
+        ]),
+    ],
+    [
+      'ClassSession',
+      (tx: any) =>
+        tx.classSession.findMany.mockResolvedValue([
+          { assignedStaffId: 'staff-a', venueId: 'venue-1', startsAt: windows[0].startsAt, endsAt: windows[0].endsAt },
+        ]),
+    ],
+    [
+      'personal ExternalBusyBlock',
+      (tx: any) =>
+        tx.externalBusyBlock.findMany.mockResolvedValue([
+          { staffId: 'staff-a', venueId: null, startsAt: windows[0].startsAt, endsAt: windows[0].endsAt },
+        ]),
+    ],
+  ])('applies a %s conflict only to overlapping windows', async (_label, addConflict) => {
+    const tx = dayReadTx()
+    addConflict(tx)
+
+    const result = await findEligibleStaffForDayWindows(tx, { ...args, requestedStaffId: 'staff-a' })
+
+    expect(result).toEqual([[], [{ id: 'staff-a', firstName: 'Ana', lastName: 'Alfa' }]])
+  })
+
+  it('applies venue-master blocks per window before returning candidates', async () => {
+    const tx = dayReadTx()
+    tx.externalBusyBlock.findMany.mockResolvedValue([
+      { staffId: null, venueId: 'venue-1', startsAt: windows[0].startsAt, endsAt: windows[0].endsAt },
+    ])
+
+    const result = await findEligibleStaffForDayWindows(tx, args)
+
+    expect(result[0]).toEqual([])
+    expect(result[1]).toHaveLength(2)
+  })
+
+  it('ignores expired and cancelled-parent holds while live normal/PENDING/CONFIRMED holds block', async () => {
+    const makeTx = (hold: Record<string, unknown>) => {
+      const tx = dayReadTx()
+      tx.slotHold.findMany.mockResolvedValue([
+        { staffId: 'staff-a', venueId: 'venue-1', startsAt: windows[0].startsAt, endsAt: windows[0].endsAt, ...hold },
+      ])
+      return tx
+    }
+    const base = { expiresAt: new Date('2026-07-21T14:10:00.000Z') }
+
+    for (const hold of [
+      { ...base, heldForReservationId: null, heldForReservation: null },
+      { ...base, heldForReservationId: 'pending', heldForReservation: { status: 'PENDING' } },
+      { ...base, heldForReservationId: 'confirmed', heldForReservation: { status: 'CONFIRMED' } },
+    ]) {
+      const result = await findEligibleStaffForDayWindows(makeTx(hold), { ...args, requestedStaffId: 'staff-a' })
+      expect(result[0]).toEqual([])
+    }
+
+    for (const hold of [
+      { expiresAt: checkedAt, heldForReservationId: null, heldForReservation: null },
+      { ...base, heldForReservationId: 'cancelled', heldForReservation: { status: 'CANCELLED' } },
+    ]) {
+      const result = await findEligibleStaffForDayWindows(makeTx(hold), { ...args, requestedStaffId: 'staff-a' })
+      expect(result[0]).toEqual([{ id: 'staff-a', firstName: 'Ana', lastName: 'Alfa' }])
+    }
+  })
+
+  it('keeps candidate venue scopes correlated and isolates other-organization conflicts behaviorally', async () => {
+    const tx = dayReadTx()
+    const storedRows = [
+      { assignedStaffId: 'staff-a', venueId: 'venue-b-only', startsAt: windows[0].startsAt, endsAt: windows[0].endsAt },
+      { assignedStaffId: 'staff-a', venueId: 'other-org', startsAt: windows[0].startsAt, endsAt: windows[0].endsAt },
+      { assignedStaffId: 'staff-b', venueId: 'venue-b-only', startsAt: windows[0].startsAt, endsAt: windows[0].endsAt },
+    ]
+    tx.reservation.findMany.mockImplementation(({ where }: any) =>
+      Promise.resolve(
+        storedRows.filter(row =>
+          where.OR.some((branch: any) => branch.assignedStaffId === row.assignedStaffId && branch.venueId.in.includes(row.venueId)),
+        ),
+      ),
+    )
+
+    const result = await findEligibleStaffForDayWindows(tx, args)
+
+    expect(result[0]).toEqual([{ id: 'staff-a', firstName: 'Ana', lastName: 'Alfa' }])
+    expect(tx.reservation.findMany.mock.calls[0][0].where.OR).toEqual([
+      { assignedStaffId: 'staff-b', venueId: { in: ['venue-1', 'venue-b-only'] } },
+      { assignedStaffId: 'staff-a', venueId: { in: ['venue-1'] } },
+    ])
+  })
+
+  it('returns aligned empty lists instead of throwing when requested staff is absent', async () => {
+    const tx = dayReadTx()
+    await expect(findEligibleStaffForDayWindows(tx, { ...args, requestedStaffId: 'missing' })).resolves.toEqual([[], []])
+  })
+
+  it('uses bounded delegate calls for 27 windows', async () => {
+    const tx = dayReadTx()
+    const manyWindows = Array.from({ length: 27 }, (_, index) => ({
+      startsAt: new Date(Date.UTC(2026, 6, 21, 8, index * 30)),
+      endsAt: new Date(Date.UTC(2026, 6, 21, 9, index * 30)),
+    }))
+    const openAllDay = settings({ capacityMode: 'per_staff' })
+    openAllDay.operatingHours = hours('00:00', '23:59')
+
+    const result = await findEligibleStaffForDayWindows(tx, { ...args, windows: manyWindows, settings: openAllDay })
+
+    expect(result).toHaveLength(27)
+    expect(tx.staffVenue.findMany).toHaveBeenCalledTimes(2)
+    expect(tx.productStaff.findMany).toHaveBeenCalledTimes(1)
+    expect(tx.staffSchedule.findMany).toHaveBeenCalledTimes(1)
+    expect(tx.staffScheduleException.findMany).toHaveBeenCalledTimes(1)
+    expect(tx.reservation.findMany).toHaveBeenCalledTimes(1)
+    expect(tx.classSession.findMany).toHaveBeenCalledTimes(1)
+    expect(tx.slotHold.findMany).toHaveBeenCalledTimes(1)
+    expect(tx.externalBusyBlock.findMany).toHaveBeenCalledTimes(1)
+    expect(tx.reservation.groupBy).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects invalid windows as Spanish 400 before querying candidates', async () => {
+    const tx = dayReadTx()
+    await expect(
+      findEligibleStaffForDayWindows(tx, { ...args, windows: [{ startsAt: windows[0].startsAt, endsAt: windows[0].startsAt }] }),
+    ).rejects.toMatchObject({ statusCode: 400 })
+    expect(tx.staffVenue.findMany).not.toHaveBeenCalled()
   })
 })

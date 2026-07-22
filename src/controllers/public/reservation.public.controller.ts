@@ -25,6 +25,7 @@ import { sendReservationConfirmationWhatsApp, formatModifiersForWhatsApp } from 
 import { enqueuePush, resolveClassSessionPushTargets } from '../../services/google-calendar/outbox.service'
 import { phonesMatch, phoneLast10 } from '../../utils/phone'
 import { withSerializableRetry } from '@/utils/serializableRetry'
+import { normalizeBookedProductIds, reservationBookedProductIds } from '@/services/reservation/resolveAppointmentWindow'
 
 // ==========================================
 // PUBLIC RESERVATION CONTROLLER (Unauthenticated)
@@ -377,7 +378,8 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
   try {
     const { venueSlug } = req.params
     const venue = await resolveVenueBySlug(venueSlug)
-    const { date, dateFrom, dateTo, duration, partySize, productId, type } = req.query as Record<string, string | undefined>
+    const { date, dateFrom, dateTo, duration, partySize, staffId, productId, productIds, includeFull, windowSemantics, type } =
+      req.query as any
 
     const settings = await getReservationSettings(venue.id)
     // Hard gate: when the venue admin has flipped public booking off in
@@ -580,10 +582,19 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
     }
 
     // Branch 3 (default): operating-hours availability for appointments / services.
+    const canonicalProducts = normalizeBookedProductIds({ productId, productIds })
     const slots = await availabilityService.getAvailableSlots(
       venue.id,
       date!,
-      { duration: duration ? Number(duration) : undefined, partySize: partySize ? Number(partySize) : undefined, productId },
+      {
+        duration: duration !== undefined ? Number(duration) : undefined,
+        partySize: partySize !== undefined ? Number(partySize) : undefined,
+        staffId,
+        productId: canonicalProducts.leadProductId,
+        productIds: canonicalProducts.productIds,
+        includeFull,
+        windowSemantics,
+      },
       settings,
       tz,
     )
@@ -593,7 +604,7 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
       slots: slots.map(s => ({
         startsAt: s.startsAt,
         endsAt: s.endsAt,
-        available: true,
+        ...(s.available === false ? { available: false as const, reason: s.reason } : { available: true as const }),
       })),
     })
   } catch (error) {
@@ -1515,10 +1526,17 @@ export async function getRescheduleAvailability(req: Request, res: Response, nex
     }
 
     const tz = reservation.venue?.timezone || 'America/Mexico_City'
+    const productIds = reservationBookedProductIds(reservation)
     const slots = await availabilityService.getAvailableSlots(
       reservation.venueId,
       date,
-      { duration: reservation.duration, productId: reservation.productId ?? undefined, excludeReservationId: reservation.id },
+      {
+        productId: productIds[0],
+        productIds,
+        staffId: reservation.assignedStaffId ?? undefined,
+        excludeReservationId: reservation.id,
+        fixedDurationMin: reservation.duration,
+      },
       settings,
       tz,
     )

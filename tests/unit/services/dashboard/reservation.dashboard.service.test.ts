@@ -1469,11 +1469,11 @@ describe('rescheduleAppointmentReservation', () => {
 describe('countAppointmentOccupancy — reschedule self-exclusion', () => {
   beforeEach(() => {
     jest.resetAllMocks()
+    prismaMock.reservation.count.mockResolvedValue(0)
+    prismaMock.slotHold.findMany.mockResolvedValue([])
   })
 
   it('excludes the moving reservation from the active-reservation count', async () => {
-    prismaMock.reservation.count.mockResolvedValue(0)
-    prismaMock.slotHold.count.mockResolvedValue(0)
     await countAppointmentOccupancy(prismaMock, {
       venueId: 'v1',
       startsAt: new Date(),
@@ -1486,8 +1486,6 @@ describe('countAppointmentOccupancy — reschedule self-exclusion', () => {
   })
 
   it('adds no id filter when no exclusion is passed (booking path unchanged)', async () => {
-    prismaMock.reservation.count.mockResolvedValue(0)
-    prismaMock.slotHold.count.mockResolvedValue(0)
     await countAppointmentOccupancy(prismaMock, {
       venueId: 'v1',
       startsAt: new Date(),
@@ -1495,5 +1493,102 @@ describe('countAppointmentOccupancy — reschedule self-exclusion', () => {
     })
     const where = prismaMock.reservation.count.mock.calls[0][0].where
     expect(where.id).toBeUndefined()
+  })
+
+  it('counts only active appointment-service reservations with conservative overlap predicates', async () => {
+    prismaMock.reservation.count.mockResolvedValue(2)
+    const startsAt = new Date('2026-07-21T15:00:00.000Z')
+    const endsAt = new Date('2026-07-21T16:00:00.000Z')
+
+    await expect(countAppointmentOccupancy(prismaMock, { venueId: 'v1', startsAt, endsAt })).resolves.toEqual({
+      reservations: 2,
+      holds: 0,
+    })
+
+    expect(prismaMock.reservation.count).toHaveBeenCalledWith({
+      where: {
+        venueId: 'v1',
+        status: { in: ['PENDING', 'CONFIRMED', 'CHECKED_IN'] },
+        classSessionId: null,
+        product: { is: { type: 'APPOINTMENTS_SERVICE' } },
+        startsAt: { lt: endsAt },
+        endsAt: { gt: startsAt },
+      },
+    })
+  })
+
+  it('classifies normal and reschedule holds with one captured checkedAt', async () => {
+    const checkedAt = new Date('2026-07-21T14:00:00.000Z')
+    prismaMock.slotHold.findMany.mockResolvedValue([
+      {
+        id: 'normal-live',
+        expiresAt: new Date('2026-07-21T14:10:00.000Z'),
+        heldForReservationId: null,
+        heldForReservation: null,
+      },
+      {
+        id: 'pending-live',
+        expiresAt: new Date('2026-07-21T14:10:00.000Z'),
+        heldForReservationId: 'pending',
+        heldForReservation: { status: 'PENDING' },
+      },
+      {
+        id: 'confirmed-live',
+        expiresAt: new Date('2026-07-21T14:10:00.000Z'),
+        heldForReservationId: 'confirmed',
+        heldForReservation: { status: 'CONFIRMED' },
+      },
+      {
+        id: 'cancelled-parent',
+        expiresAt: new Date('2026-07-21T14:10:00.000Z'),
+        heldForReservationId: 'cancelled',
+        heldForReservation: { status: 'CANCELLED' },
+      },
+      {
+        id: 'expired',
+        expiresAt: checkedAt,
+        heldForReservationId: null,
+        heldForReservation: null,
+      },
+    ])
+
+    await expect(
+      countAppointmentOccupancy(prismaMock, {
+        venueId: 'v1',
+        startsAt: new Date('2026-07-21T15:00:00.000Z'),
+        endsAt: new Date('2026-07-21T16:00:00.000Z'),
+        checkedAt,
+      }),
+    ).resolves.toEqual({ reservations: 0, holds: 3 })
+  })
+
+  it('retains hold exclusion and requests only the parent fields needed for liveness', async () => {
+    const startsAt = new Date('2026-07-21T15:00:00.000Z')
+    const endsAt = new Date('2026-07-21T16:00:00.000Z')
+    const checkedAt = new Date('2026-07-21T14:00:00.000Z')
+
+    await countAppointmentOccupancy(prismaMock, {
+      venueId: 'v1',
+      startsAt,
+      endsAt,
+      checkedAt,
+      excludeHoldId: 'hold-self',
+    })
+
+    expect(prismaMock.slotHold.findMany).toHaveBeenCalledWith({
+      where: {
+        venueId: 'v1',
+        classSessionId: null,
+        expiresAt: { gt: checkedAt },
+        startsAt: { lt: endsAt },
+        endsAt: { gt: startsAt },
+        id: { not: 'hold-self' },
+      },
+      select: {
+        expiresAt: true,
+        heldForReservationId: true,
+        heldForReservation: { select: { status: true } },
+      },
+    })
   })
 })

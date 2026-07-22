@@ -9,6 +9,7 @@ import { canVenueChargeOnline } from '../../services/payments/ecommerceCapabilit
 import prisma from '../../utils/prismaClient'
 import { BadRequestError } from '../../errors/AppError'
 import { fromZonedTime } from 'date-fns-tz'
+import { normalizeBookedProductIds } from '../../services/reservation/resolveAppointmentWindow'
 
 // ==========================================
 // RESERVATION DASHBOARD CONTROLLER
@@ -110,7 +111,8 @@ export async function getCalendar(req: Request, res: Response, next: NextFunctio
 export async function getAvailability(req: Request, res: Response, next: NextFunction) {
   try {
     const venueId = resolveVenueId(req)
-    const { date, duration, partySize, tableId, staffId, productId } = req.query as any
+    const { date, duration, partySize, tableId, staffId, productId, productIds, includeFull, windowSemantics } = req.query as any
+    const canonicalProducts = normalizeBookedProductIds({ productId, productIds })
     const settings = await getReservationSettings(venueId)
 
     const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
@@ -122,7 +124,10 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
         partySize: partySize ? Number(partySize) : undefined,
         tableId,
         staffId,
-        productId,
+        productId: canonicalProducts.leadProductId,
+        productIds: canonicalProducts.productIds,
+        includeFull,
+        windowSemantics,
       },
       settings,
       venue?.timezone || 'America/Mexico_City',

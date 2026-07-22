@@ -174,6 +174,37 @@ export const getReservationsQuerySchema = z.object({
   search: z.string().optional(),
 })
 
+const availabilityProductIdsSchema = z
+  .unknown()
+  .superRefine((value, ctx) => {
+    if (typeof value === 'string') return
+    if (Array.isArray(value)) {
+      if (value.every(item => typeof item === 'string')) return
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Cada ID de producto debe ser texto' })
+      return
+    }
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Los IDs de productos deben ser texto o una lista de textos' })
+  })
+  .transform(value => value as string | string[])
+
+const availabilityBooleanSchema = z
+  .unknown()
+  .superRefine((value, ctx) => {
+    if (value !== 'true' && value !== 'false') {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'includeFull debe ser true o false' })
+    }
+  })
+  .transform(value => value === 'true')
+
+const availabilityWindowSemanticsSchema = z
+  .unknown()
+  .superRefine((value, ctx) => {
+    if (value !== 'base') {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'windowSemantics debe ser base' })
+    }
+  })
+  .transform(() => 'base' as const)
+
 export const getAvailabilityQuerySchema = z
   .object({
     // Single-day mode: date is required.
@@ -190,12 +221,24 @@ export const getAvailabilityQuerySchema = z
       .string()
       .regex(/^\d{4}-\d{2}-\d{2}$/, 'Formato dateTo invalido (YYYY-MM-DD)')
       .optional(),
-    duration: z.coerce.number().int().min(5).max(480).optional(),
+    duration: z.coerce.number().int().min(5).max(1440, 'La duracion maxima es 1440 minutos').optional(),
     partySize: z.coerce.number().int().min(1).max(100).optional(),
     tableId: z.string().optional(),
     staffId: z.string().optional(),
     productId: z.string().optional(),
+    productIds: availabilityProductIdsSchema.optional(),
+    includeFull: availabilityBooleanSchema.optional(),
+    windowSemantics: availabilityWindowSemanticsSchema.optional(),
     type: z.enum(['class', 'appointment']).optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.duration !== undefined && data.windowSemantics !== 'base' && data.duration > 480) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'La duracion maxima sin windowSemantics=base es 480 minutos',
+        path: ['duration'],
+      })
+    }
   })
   .refine(data => Boolean(data.date) || Boolean(data.dateFrom), {
     message: 'La fecha es requerida (envía date o dateFrom)',
