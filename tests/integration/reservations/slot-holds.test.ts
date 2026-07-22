@@ -419,42 +419,41 @@ describe('reschedule SlotHold PostgreSQL contract', () => {
     })
   })
 
-  it('accepts the exact single-service Release A null-tag shape and emits its metric once', async () => {
+  it('Release B rejects the exact single-service legacy null-tag shape with zero writes', async () => {
     const reservation = await createAppointmentReservation({ productIds: [] })
     const target = futureWindow(30)
     const hold = await createLegacyRescheduleHold({ reservation, window: target, productIds: [productA] })
 
-    await consume(reservation.id, hold.id, target.startsAt)
+    await expect(consume(reservation.id, hold.id, target.startsAt)).rejects.toMatchObject({ statusCode: 409 })
 
     const metricCalls = (logger.warn as jest.Mock).mock.calls.filter(
       ([message]) => message === '[slot-hold] Release A legacy reschedule hold consumed',
     )
-    expect(metricCalls).toEqual([
-      [
-        '[slot-hold] Release A legacy reschedule hold consumed',
-        {
-          metric: 'reservation_reschedule_hold_release_a_grace',
-          venueId,
-          reservationId: reservation.id,
-          holdId: hold.id,
-        },
-      ],
-    ])
-    expect(await inspector.slotHold.count({ where: { id: hold.id } })).toBe(0)
+    expect(metricCalls).toEqual([])
+    expect(await inspector.slotHold.count({ where: { id: hold.id } })).toBe(1)
+    expect(await inspector.reservation.findUniqueOrThrow({ where: { id: reservation.id } })).toMatchObject({
+      startsAt: reservation.startsAt,
+      endsAt: reservation.endsAt,
+    })
   })
 
-  it('accepts multi-service R[A,B]+legacy[A] but rejects a null-tag canonical [A,B]', async () => {
-    const acceptedReservation = await createAppointmentReservation({
+  it('Release B rejects both lead-only and canonical multi-service null-tag shapes', async () => {
+    const leadOnlyReservation = await createAppointmentReservation({
       duration: 90,
       productIds: [productA, productB],
     })
-    const acceptedTarget = futureWindow(31, 90)
-    const acceptedHold = await createLegacyRescheduleHold({
-      reservation: acceptedReservation,
-      window: acceptedTarget,
+    const leadOnlyTarget = futureWindow(31, 90)
+    const leadOnlyHold = await createLegacyRescheduleHold({
+      reservation: leadOnlyReservation,
+      window: leadOnlyTarget,
       productIds: [productA],
     })
-    await expect(consume(acceptedReservation.id, acceptedHold.id, acceptedTarget.startsAt)).resolves.toBeDefined()
+    await expect(consume(leadOnlyReservation.id, leadOnlyHold.id, leadOnlyTarget.startsAt)).rejects.toMatchObject({ statusCode: 409 })
+    expect(await inspector.slotHold.count({ where: { id: leadOnlyHold.id } })).toBe(1)
+    expect(await inspector.reservation.findUniqueOrThrow({ where: { id: leadOnlyReservation.id } })).toMatchObject({
+      startsAt: leadOnlyReservation.startsAt,
+      endsAt: leadOnlyReservation.endsAt,
+    })
 
     const rejectedReservation = await createAppointmentReservation({
       window: futureWindow(12, 90),
