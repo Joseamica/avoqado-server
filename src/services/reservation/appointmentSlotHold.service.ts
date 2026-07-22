@@ -494,6 +494,7 @@ export async function lockAndValidateRescheduleAppointmentHold(
   endsAt: Date
   productIds: string[]
   staffId: string | null
+  releaseAGrace: boolean
 }> {
   const rows = await tx.$queryRaw<LockedRescheduleAppointmentHold[]>`
     SELECT id, "venueId", "startsAt", "endsAt", "productIds", "classSessionId",
@@ -528,11 +529,13 @@ export async function lockAndValidateRescheduleAppointmentHold(
     throw invalidHold()
   }
 
+  const legacyShape = args.reservation.productId ? [args.reservation.productId] : []
+  const releaseAGrace = hold.heldForReservationId === null && sameOrderedStrings(hold.productIds, legacyShape)
   const taggedIdentity =
     hold.heldForReservationId === args.reservation.id &&
     sameOrderedStrings(hold.productIds, productIds) &&
     hold.staffId === args.reservation.assignedStaffId
-  if (!taggedIdentity) throw invalidHold()
+  if (!releaseAGrace && !taggedIdentity) throw invalidHold()
 
   return {
     id: hold.id,
@@ -540,5 +543,6 @@ export async function lockAndValidateRescheduleAppointmentHold(
     endsAt,
     productIds,
     staffId: args.reservation.assignedStaffId,
+    releaseAGrace,
   }
 }
