@@ -4,6 +4,7 @@ import {
   publicCreateHoldBodySchema,
   publicCreateReservationBodySchema,
   rescheduleHoldBodySchema,
+  updateReservationBodySchema,
 } from '@/schemas/dashboard/reservation.schema'
 import { consumerCreateReservationSchema } from '@/schemas/consumer.schema'
 import { normalizeBookedProductIds } from '@/services/reservation/resolveAppointmentWindow'
@@ -71,6 +72,16 @@ describe('getAvailabilityQuerySchema — staff-aware query contract', () => {
     expect(messages({ date, includeFull: 'quizas' })).toContain('includeFull debe ser true o false')
     expect(messages({ date, windowSemantics: 1 })).toContain('windowSemantics debe ser base')
     expect(messages({ date, windowSemantics: 'final' })).toContain('windowSemantics debe ser base')
+  })
+})
+
+describe('updateReservationBodySchema — rollback duration bridge', () => {
+  it('accepts every whole-minute duration from 1 through 1440 and rejects values outside that wire range', () => {
+    expect(updateReservationBodySchema.safeParse({ duration: 1 }).success).toBe(true)
+    expect(updateReservationBodySchema.safeParse({ duration: 1_440 }).success).toBe(true)
+    expect(updateReservationBodySchema.safeParse({ duration: 0 }).success).toBe(false)
+    expect(updateReservationBodySchema.safeParse({ duration: 1_441 }).success).toBe(false)
+    expect(updateReservationBodySchema.safeParse({ duration: 1.5 }).success).toBe(false)
   })
 })
 

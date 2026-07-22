@@ -63,6 +63,7 @@ function buildReservation(overrides: Record<string, any> = {}) {
     partySize: 2,
     tableId: null,
     productId: null,
+    productIds: [],
     assignedStaffId: STAFF_ID,
     classSessionId: null,
     spotIds: [],

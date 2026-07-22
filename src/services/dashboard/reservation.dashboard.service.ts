@@ -1344,13 +1344,11 @@ type ReservationHoldIdentity = {
   endsAt: number
   duration: number
   productId: string | null
+  productIds: string[]
   assignedStaffId: string | null
 }
 
 function updateHasHoldIdentityCandidate(data: UpdateReservationInput): boolean {
-  // productIds deliberately joins this boundary in Task 7D, together with its
-  // ordered-list/lead invariant. Exposing a partially validated list here would
-  // permit an inconsistent Reservation identity.
   return (
     data.startsAt !== undefined ||
     data.endsAt !== undefined ||
@@ -1365,6 +1363,7 @@ function reservationHoldIdentity(input: {
   endsAt: Date
   duration: number
   productId: string | null
+  productIds: string[]
   assignedStaffId: string | null
 }): ReservationHoldIdentity {
   return {
@@ -1372,8 +1371,13 @@ function reservationHoldIdentity(input: {
     endsAt: input.endsAt.getTime(),
     duration: input.duration,
     productId: input.productId,
+    productIds: [...input.productIds],
     assignedStaffId: input.assignedStaffId,
   }
+}
+
+function sameOrderedProductIds(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index])
 }
 
 function sameReservationHoldIdentity(left: ReservationHoldIdentity, right: ReservationHoldIdentity): boolean {
@@ -1382,8 +1386,31 @@ function sameReservationHoldIdentity(left: ReservationHoldIdentity, right: Reser
     left.endsAt === right.endsAt &&
     left.duration === right.duration &&
     left.productId === right.productId &&
+    sameOrderedProductIds(left.productIds, right.productIds) &&
     left.assignedStaffId === right.assignedStaffId
   )
+}
+
+function synchronizeUpdatedProductIdentity(
+  reservation: { productId: string | null; productIds: string[] },
+  requestedProductId: string | null | undefined,
+): { productId: string | null; productIds: string[]; changed: boolean } {
+  if (requestedProductId === undefined || requestedProductId === reservation.productId) {
+    return { productId: reservation.productId, productIds: [...reservation.productIds], changed: false }
+  }
+  if (reservation.productIds.length > 1) {
+    throw new BadRequestError(
+      'No se puede cambiar el servicio principal de una reservación con varios servicios. Cancela y crea una nueva.',
+    )
+  }
+  if (requestedProductId === null) {
+    return { productId: null, productIds: [], changed: true }
+  }
+  return {
+    productId: requestedProductId,
+    productIds: reservation.productIds.length === 1 ? [requestedProductId] : [],
+    changed: true,
+  }
 }
 
 export async function updateReservation(
@@ -1398,12 +1425,8 @@ export async function updateReservation(
     const hasHoldIdentityCandidate = updateHasHoldIdentityCandidate(data)
     if (hasHoldIdentityCandidate) {
       await lockAppointmentVenue(tx, venueId)
-      await lockReservationForReschedule(tx, { venueId, reservationId })
     }
-    const reservation = await tx.reservation.findFirst({
-      where: { id: reservationId, venueId },
-    })
-    if (!reservation) throw new NotFoundError('Reservacion no encontrada')
+    const reservation = await lockReservationForReschedule(tx, { venueId, reservationId })
 
     // Only allow updates on PENDING or CONFIRMED reservations
     if (!['PENDING', 'CONFIRMED'].includes(reservation.status)) {
@@ -1414,47 +1437,75 @@ export async function updateReservation(
     const newEndsAt = data.endsAt ?? reservation.endsAt
     const newTableId = data.tableId !== undefined ? data.tableId : reservation.tableId
     const newStaffId = data.assignedStaffId !== undefined ? data.assignedStaffId : reservation.assignedStaffId
-    const newProductId = data.productId !== undefined ? data.productId : reservation.productId
+    const productIdentity = synchronizeUpdatedProductIdentity(reservation, data.productId)
+    const newProductId = productIdentity.productId
+    const newProductIds = productIdentity.productIds
     const newPartySize = data.partySize ?? reservation.partySize
 
-    if (newEndsAt <= newStartsAt) {
+    if (!Number.isFinite(newStartsAt.getTime()) || !Number.isFinite(newEndsAt.getTime()) || newEndsAt <= newStartsAt) {
       throw new BadRequestError('La fecha de fin debe ser posterior a la fecha de inicio')
     }
 
-    const calculatedDuration = Math.round((newEndsAt.getTime() - newStartsAt.getTime()) / 60000)
-    if (data.duration !== undefined && Math.abs(calculatedDuration - data.duration) > 1) {
-      throw new BadRequestError('La duracion no coincide con el rango de fechas')
-    }
+    const effectiveIntervalMs = newEndsAt.getTime() - newStartsAt.getTime()
+    const calculatedDuration = Math.round(effectiveIntervalMs / 60_000)
     const finalDuration =
       data.duration !== undefined
         ? data.duration
         : data.startsAt !== undefined || data.endsAt !== undefined
           ? calculatedDuration
           : reservation.duration
+    if (!Number.isInteger(finalDuration) || finalDuration < 1 || finalDuration > 1_440) {
+      throw new BadRequestError('La duracion debe estar entre 1 y 1440 minutos')
+    }
+    if (effectiveIntervalMs > 1_440 * 60_000) {
+      throw new BadRequestError('El rango de fechas no puede exceder 1440 minutos')
+    }
+    if (Math.abs(effectiveIntervalMs - finalDuration * 60_000) > 60_000) {
+      throw new BadRequestError('La duracion no coincide con el rango de fechas')
+    }
 
-    if (
-      hasHoldIdentityCandidate &&
-      !sameReservationHoldIdentity(
-        reservationHoldIdentity(reservation),
-        reservationHoldIdentity({
-          startsAt: newStartsAt,
-          endsAt: newEndsAt,
-          duration: finalDuration,
-          productId: newProductId,
-          assignedStaffId: newStaffId,
-        }),
-      )
-    ) {
+    const identityChanged = !sameReservationHoldIdentity(
+      reservationHoldIdentity(reservation),
+      reservationHoldIdentity({
+        startsAt: newStartsAt,
+        endsAt: newEndsAt,
+        duration: finalDuration,
+        productId: newProductId,
+        productIds: newProductIds,
+        assignedStaffId: newStaffId,
+      }),
+    )
+
+    if (identityChanged) {
       await lockTaggedRescheduleSiblings(tx, { venueId, reservationId: reservation.id })
-      await tx.slotHold.deleteMany({
-        where: { venueId, heldForReservationId: reservation.id },
-      })
     }
 
     const { product } = await validateResourceOwnership(tx, venueId, {
       tableId: newTableId,
       productId: newProductId,
     })
+    let oldProductType: string | undefined
+    if (reservation.productId === newProductId) {
+      oldProductType = product?.type
+    } else if (reservation.productId) {
+      const oldProduct = await tx.product.findFirst({
+        where: { id: reservation.productId, venueId },
+        select: { type: true },
+      })
+      oldProductType = oldProduct?.type
+    }
+    const oldIsAppointment = reservation.classSessionId === null && oldProductType === 'APPOINTMENTS_SERVICE'
+    const newIsAppointment = reservation.classSessionId === null && product?.type === 'APPOINTMENTS_SERVICE'
+    const isAppointmentReservation = oldIsAppointment || newIsAppointment
+
+    if (productIdentity.changed && isAppointmentReservation && isStaffAware(settings)) {
+      throw new BadRequestError('No se pueden cambiar los servicios de una cita con profesionistas activos. Cancela y crea una nueva.')
+    }
+
+    const maxAllowed = isAppointmentReservation && isStaffAware(settings) ? 1_440 : Math.max(480, reservation.duration)
+    if (finalDuration > maxAllowed) {
+      throw new BadRequestError(`La duracion no puede exceder ${maxAllowed} minutos`)
+    }
 
     // Layer 0: External calendar busy-block check against the NEW (target)
     // values. We always check, even when time/staff are unchanged — an
@@ -1526,6 +1577,12 @@ export async function updateReservation(
       }
     }
 
+    if (identityChanged) {
+      await tx.slotHold.deleteMany({
+        where: { venueId, heldForReservationId: reservation.id },
+      })
+    }
+
     const updated = await tx.reservation.update({
       where: { id: reservationId },
       data: {
@@ -1537,7 +1594,7 @@ export async function updateReservation(
         ...(data.guestEmail !== undefined && { guestEmail: data.guestEmail }),
         ...(data.partySize !== undefined && { partySize: data.partySize }),
         ...(data.tableId !== undefined && { tableId: data.tableId }),
-        ...(data.productId !== undefined && { productId: data.productId }),
+        ...(data.productId !== undefined && { productId: newProductId, productIds: newProductIds }),
         ...(data.assignedStaffId !== undefined && { assignedStaffId: data.assignedStaffId }),
         ...(data.specialRequests !== undefined && { specialRequests: data.specialRequests }),
         ...(data.internalNotes !== undefined && { internalNotes: data.internalNotes }),

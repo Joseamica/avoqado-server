@@ -577,34 +577,42 @@ describe('reschedule SlotHold PostgreSQL contract', () => {
 
   it('rolls back tagged-hold invalidation when the later identity update fails', async () => {
     const reservation = await createAppointmentReservation()
-    const target = futureWindow(37)
+    const heldTarget = futureWindow(37)
     const hold = await mintRescheduleAppointmentHold({
       venueId,
       reservationId: reservation.id,
-      requestedStartsAt: target.startsAt,
+      requestedStartsAt: heldTarget.startsAt,
     })
+    const administrativeTarget = futureWindow(38)
 
     await expect(
       updateReservation(
         venueId,
         reservation.id,
-        { productId: `${fixtureKey}-missing-product` },
+        {
+          ...administrativeTarget,
+          duration: 60,
+          // PostgreSQL rejects NUL in text only when the Reservation UPDATE
+          // executes, after the tagged hold was deleted inside the tx.
+          guestEmail: 'rollback\u0000@example.test',
+        },
         { writeOrigin: 'DASHBOARD' },
         'integration-actor',
       ),
-    ).rejects.toMatchObject({ statusCode: 400 })
+    ).rejects.toBeDefined()
 
     expect(await inspector.slotHold.count({ where: { id: hold.id } })).toBe(1)
     expect(await inspector.reservation.findUniqueOrThrow({ where: { id: reservation.id } })).toMatchObject({
-      productId: productA,
-      productIds: [],
+      startsAt: reservation.startsAt,
+      endsAt: reservation.endsAt,
+      guestEmail: null,
     })
   })
 
   it('treats a cancelled parent hold as non-live and refuses to consume it', async () => {
     const reservation = await createAppointmentReservation()
     const otherReservation = await createAppointmentReservation({ window: futureWindow(14) })
-    const target = futureWindow(38)
+    const target = futureWindow(39)
     const hold = await mintRescheduleAppointmentHold({
       venueId,
       reservationId: reservation.id,

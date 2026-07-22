@@ -339,7 +339,7 @@ export const updateReservationBodySchema = z
   .object({
     startsAt: z.coerce.date().optional(),
     endsAt: z.coerce.date().optional(),
-    duration: z.number().int().min(5).max(480).optional(),
+    duration: z.number().int().min(1, 'La duracion minima es 1 minuto').max(1440, 'La duracion maxima es 1440 minutos').optional(),
     guestName: z.string().max(200).optional(),
     guestPhone: z.string().max(20).optional(),
     guestEmail: z.string().email('Email invalido').max(200).optional().nullable(),
