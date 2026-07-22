@@ -7,6 +7,7 @@ import * as appointmentStaffAssignmentService from '@/services/dashboard/appoint
 import * as appointmentWindowService from '@/services/reservation/resolveAppointmentWindow'
 import * as appointmentSlotHoldService from '@/services/reservation/appointmentSlotHold.service'
 import * as ecommerceCapability from '@/services/payments/ecommerceCapability'
+import * as basePlanService from '@/services/access/basePlan.service'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { Prisma } from '@prisma/client'
 
@@ -1377,5 +1378,43 @@ describe('reservation availability controller boundaries', () => {
       'UTC',
     )
     expect(res.json).toHaveBeenCalledWith({ date, slots: [{ startsAt, endsAt, available: true }] })
+  })
+
+  it('public venue info omits paid staff capabilities after a non-exempt RESERVATIONS downgrade', async () => {
+    jest.spyOn(basePlanService, 'venueHasFeatureAccess').mockResolvedValue(false)
+    jest.spyOn(ecommerceCapability, 'canVenueChargeOnline').mockResolvedValue(false)
+    prismaMock.venue.findFirst.mockResolvedValue({
+      id: 'venue-1',
+      name: 'Venue',
+      slug: 'venue',
+      logo: null,
+      type: 'SERVICES',
+      timezone: 'UTC',
+    } as any)
+    prismaMock.venue.findUnique.mockResolvedValue({
+      name: 'Venue',
+      slug: 'venue',
+      logo: null,
+      logoFull: null,
+      heroImageUrl: null,
+      primaryColor: null,
+      reservationBranding: null,
+      type: 'SERVICES',
+      address: null,
+      phone: null,
+      whatsappContactMode: 'DISABLED',
+      products: [],
+    } as any)
+    const res = responseMock()
+    const next = jest.fn()
+
+    await publicController.getVenueInfo({ params: { venueSlug: 'venue' } } as any, res, next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(basePlanService.venueHasFeatureAccess).toHaveBeenCalledTimes(1)
+    expect(basePlanService.venueHasFeatureAccess).toHaveBeenCalledWith('venue-1', 'RESERVATIONS')
+    const payload = res.json.mock.calls[0][0]
+    expect(payload).not.toHaveProperty('appointmentWindowSemantics')
+    expect(payload).not.toHaveProperty('staffSelection')
   })
 })

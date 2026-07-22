@@ -369,7 +369,7 @@ export async function updateReservationSettings(venueId: string, data: Reservati
 
     return tx.reservationSettings.upsert({
       where: { venueId },
-      create: { venueId, ...(normalized as Prisma.ReservationSettingsCreateInput) },
+      create: { venueId, ...(normalized as Omit<Prisma.ReservationSettingsUncheckedCreateInput, 'venueId'>) },
       update: normalized,
     })
   })

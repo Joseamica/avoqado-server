@@ -582,6 +582,11 @@ export const publicCreateReservationBodySchema = z
     // after commit. Atomic consumption arrives with the Release A protocol.
     holdId: z.string().optional(),
     modifierSelections: reservationModifierSelectionsSchema.optional(),
+    // Syntax and hostname policy are enforced by the checkout controller.
+    // Keep malformed candidates parseable so they can be ignored in favor of
+    // the server default instead of failing an otherwise valid reservation.
+    successUrl: z.string().max(2048).optional(),
+    cancelUrl: z.string().max(2048).optional(),
   })
   .superRefine((data, ctx) => {
     if (data.duration !== undefined && data.windowSemantics !== 'base' && data.duration < 5) {

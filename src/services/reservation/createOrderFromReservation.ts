@@ -53,6 +53,7 @@ export async function createOrderFromReservation(
       guestPhone: true,
       guestEmail: true,
       specialRequests: true,
+      assignedStaffId: true,
       modifiers: {
         select: { productId: true, modifierId: true, name: true, quantity: true, price: true },
         orderBy: { createdAt: 'asc' },
@@ -175,6 +176,7 @@ export async function createOrderFromReservation(
       customerEmail: reservation.guestEmail ?? undefined,
       specialRequests: reservation.specialRequests ?? undefined,
       createdById: input.createdByStaffId ?? undefined,
+      ...(reservation.assignedStaffId !== null && { servedById: reservation.assignedStaffId }),
       subtotal,
       taxAmount: totalTax,
       total,

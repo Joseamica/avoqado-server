@@ -2,6 +2,8 @@ import { Prisma, ProductType, VenueStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { NotFoundError } from '@/errors/AppError'
 import { getReservationSettings } from '@/services/dashboard/reservationSettings.service'
+import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
+import { buildReservationBookingCapabilities } from '@/services/reservation/publicReservationCapabilities'
 
 const bookableProductTypes = [ProductType.APPOINTMENTS_SERVICE, ProductType.EVENT, ProductType.CLASS]
 
@@ -134,6 +136,16 @@ export async function getVenueDetail(venueSlug: string) {
             },
             orderBy: { displayOrder: 'asc' },
           },
+          productStaff: {
+            where: {
+              staffVenue: { venue: { slug: venueSlug }, active: true, staff: { active: true } },
+            },
+            select: {
+              staffVenue: {
+                select: { staff: { select: { id: true, firstName: true, lastName: true, photoUrl: true } } },
+              },
+            },
+          },
         },
         orderBy: { name: 'asc' },
       },
@@ -143,6 +155,12 @@ export async function getVenueDetail(venueSlug: string) {
   if (!venue) throw new NotFoundError('Negocio no encontrado')
 
   const settings = await getReservationSettings(venue.id)
+  const reservationsEntitled = await venueHasFeatureAccess(venue.id, 'RESERVATIONS')
+  const bookingCapabilities = buildReservationBookingCapabilities({
+    settings,
+    reservationsEntitled,
+    products: venue.products,
+  })
 
   return {
     ...venue,
@@ -180,5 +198,6 @@ export async function getVenueDetail(venueSlug: string) {
     })),
     publicBooking: settings.publicBooking,
     operatingHours: settings.operatingHours,
+    ...bookingCapabilities,
   }
 }

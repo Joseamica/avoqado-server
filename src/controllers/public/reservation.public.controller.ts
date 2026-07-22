@@ -32,6 +32,9 @@ import {
   mintRescheduleAppointmentHold,
   SLOT_HOLD_TTL_MS,
 } from '@/services/reservation/appointmentSlotHold.service'
+import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
+import { buildReservationBookingCapabilities } from '@/services/reservation/publicReservationCapabilities'
+import { buildReservationCheckoutReturnUrls } from '@/services/reservation/reservationReturnUrl'
 
 // ==========================================
 // PUBLIC RESERVATION CONTROLLER (Unauthenticated)
@@ -136,6 +139,7 @@ async function resolveVenueBySlug(venueSlug: string) {
       logo: true,
       type: true,
       timezone: true,
+      website: true,
     },
   })
   if (!venue) throw new NotFoundError('Negocio no encontrado')
@@ -271,6 +275,17 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
               },
               orderBy: { displayOrder: 'asc' },
             },
+            productStaff: {
+              where: {
+                venueId: venue.id,
+                staffVenue: { venueId: venue.id, active: true, staff: { active: true } },
+              },
+              select: {
+                staffVenue: {
+                  select: { staff: { select: { id: true, firstName: true, lastName: true, photoUrl: true } } },
+                },
+              },
+            },
           },
           orderBy: { name: 'asc' },
         },
@@ -279,35 +294,38 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
 
     // Resolve upfrontPolicy per product server-side so the widget gets a
     // ready-to-use string and doesn't reimplement the precedence rules.
-    const products = (venueInfo?.products ?? []).map(p => ({
-      ...p,
-      upfrontPolicy: resolveUpfrontPolicy(
-        { type: p.type, upfrontPolicy: p.upfrontPolicy },
-        {
-          appointmentUpfrontDefault: settings.payments.appointmentUpfrontDefault,
-          classUpfrontDefault: settings.payments.classUpfrontDefault,
-        },
-      ),
-      modifierGroups: p.modifierGroups
-        .filter(pg => pg.group.active)
-        .map(pg => ({
-          id: pg.group.id,
-          name: pg.group.name,
-          description: pg.group.description,
-          required: pg.group.required,
-          allowMultiple: pg.group.allowMultiple,
-          minSelections: pg.group.minSelections,
-          maxSelections: pg.group.maxSelections,
-          displayOrder: pg.displayOrder,
-          modifiers: pg.group.modifiers.map(m => ({
-            id: m.id,
-            name: m.name,
-            price: Number(m.price),
-            durationMin: m.durationMin,
-            active: m.active,
+    const products = (venueInfo?.products ?? []).map(p => {
+      const { productStaff: _productStaff, ...publicProduct } = p
+      return {
+        ...publicProduct,
+        upfrontPolicy: resolveUpfrontPolicy(
+          { type: p.type, upfrontPolicy: p.upfrontPolicy },
+          {
+            appointmentUpfrontDefault: settings.payments.appointmentUpfrontDefault,
+            classUpfrontDefault: settings.payments.classUpfrontDefault,
+          },
+        ),
+        modifierGroups: p.modifierGroups
+          .filter(pg => pg.group.active)
+          .map(pg => ({
+            id: pg.group.id,
+            name: pg.group.name,
+            description: pg.group.description,
+            required: pg.group.required,
+            allowMultiple: pg.group.allowMultiple,
+            minSelections: pg.group.minSelections,
+            maxSelections: pg.group.maxSelections,
+            displayOrder: pg.displayOrder,
+            modifiers: pg.group.modifiers.map(m => ({
+              id: m.id,
+              name: m.name,
+              price: Number(m.price),
+              durationMin: m.durationMin,
+              active: m.active,
+            })),
           })),
-        })),
-    }))
+      }
+    })
 
     // Strip the raw reservationBranding out of the spread and expose the merged
     // `branding` (accentColor resolved from primaryColor) the widget consumes.
@@ -329,7 +347,15 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
     // the widget hides those money surfaces (free booking still works) so the
     // customer never sees a "pay"/"buy" button that would just dead-end at
     // checkout. Single source of truth: canVenueChargeOnline (Stripe Connect today).
-    const canCharge = await canVenueChargeOnline(venue.id)
+    const [canCharge, reservationsEntitled] = await Promise.all([
+      canVenueChargeOnline(venue.id),
+      venueHasFeatureAccess(venue.id, 'RESERVATIONS'),
+    ])
+    const bookingCapabilities = buildReservationBookingCapabilities({
+      settings,
+      reservationsEntitled,
+      products: venueInfo?.products ?? [],
+    })
     res.json({
       ...venueInfoRest,
       branding: mergeReservationBranding(reservationBranding, venueInfoRest.primaryColor),
@@ -356,6 +382,7 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
         minNoticeMin: settings.scheduling.minNoticeMin,
         autoConfirm: settings.scheduling.autoConfirm,
       },
+      ...bookingCapabilities,
     })
   } catch (error) {
     next(error)
@@ -826,14 +853,14 @@ export async function createReservation(req: Request, res: Response, next: NextF
         // a legacy /book/{slug} route — landing the customer there after a Stripe
         // cancel surfaces an unfamiliar UI and was the source of reported confusion.
         const bookingPublicUrl = process.env.BOOKING_PUBLIC_URL || 'http://localhost:5174'
-        // Widget can override return URLs (book.avoqado.io vs embed iframe vs dashboard).
-        const reqSuccess = (req.body as any).successUrl as string | undefined
-        const reqCancel = (req.body as any).cancelUrl as string | undefined
-        const baseSuccess = reqSuccess || `${bookingPublicUrl}/${venueSlug}`
-        const baseCancel = reqCancel || baseSuccess
-        const sep = (u: string) => (u.includes('?') ? '&' : '?')
-        const successUrl = `${baseSuccess}${sep(baseSuccess)}payment=success&reservationId=${reservation.id}&session_id={CHECKOUT_SESSION_ID}`
-        const cancelUrl = `${baseCancel}${sep(baseCancel)}payment=cancelled&reservationId=${reservation.id}`
+        const { successUrl, cancelUrl } = buildReservationCheckoutReturnUrls({
+          bookingPublicUrl,
+          venueSlug,
+          venueWebsite: venue.website,
+          requestedSuccessUrl: req.body.successUrl,
+          requestedCancelUrl: req.body.cancelUrl,
+          reservationId: reservation.id,
+        })
 
         const session = await provider.createCheckoutSession(stripeMerchant, {
           amount: stripeAmount,
@@ -1099,15 +1126,16 @@ export async function createReservation(req: Request, res: Response, next: NextF
       // Default return target: the public booking site (book.avoqado.io/{slug}).
       // FRONTEND_URL points at the dashboard which has only a legacy /book/{slug}
       // route — landing the customer there after a Stripe cancel surfaces an
-      // unfamiliar UI. Widget can still override via req.body.{success,cancel}Url.
+      // unfamiliar UI. Widget can still request an allowlisted return origin.
       const bookingPublicUrl = process.env.BOOKING_PUBLIC_URL || 'http://localhost:5174'
-      const reqSuccess = (req.body as any).successUrl as string | undefined
-      const reqCancel = (req.body as any).cancelUrl as string | undefined
-      const baseSuccess = reqSuccess || `${bookingPublicUrl}/${venueSlug}`
-      const baseCancel = reqCancel || baseSuccess
-      const sep = (u: string) => (u.includes('?') ? '&' : '?')
-      const successUrl = `${baseSuccess}${sep(baseSuccess)}payment=success&reservationId=${reservation.id}&session_id={CHECKOUT_SESSION_ID}`
-      const cancelUrl = `${baseCancel}${sep(baseCancel)}payment=cancelled&reservationId=${reservation.id}`
+      const { successUrl, cancelUrl } = buildReservationCheckoutReturnUrls({
+        bookingPublicUrl,
+        venueSlug,
+        venueWebsite: venue.website,
+        requestedSuccessUrl: req.body.successUrl,
+        requestedCancelUrl: req.body.cancelUrl,
+        reservationId: reservation.id,
+      })
       const session = await provider.createCheckoutSession(stripeMerchant, {
         amount: stripeAmount,
         currency: 'mxn',
