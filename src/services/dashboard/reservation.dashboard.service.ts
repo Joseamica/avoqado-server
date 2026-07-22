@@ -1995,17 +1995,8 @@ async function rescheduleAppointmentWithHold(args: {
       },
     })
 
-    return { reservation, original, updated, pushRowIds, releaseAGrace: lockedHold.releaseAGrace }
+    return { reservation, original, updated, pushRowIds }
   })
-
-  if (result.releaseAGrace) {
-    logger.warn('[slot-hold] Release A legacy reschedule hold consumed', {
-      metric: 'reservation_reschedule_hold_release_a_grace',
-      venueId,
-      reservationId,
-      holdId,
-    })
-  }
 
   if (result.pushRowIds.length > 0) {
     publishPushNotification(result.pushRowIds).catch(err =>
