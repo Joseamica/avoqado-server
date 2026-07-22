@@ -937,9 +937,12 @@ describe('Reservation Dashboard Service', () => {
       expect(prismaMock.reservation.create).not.toHaveBeenCalled()
     })
 
-    it.each(['DASHBOARD', 'MCP'] as const)(
+    it.each([
+      ['DASHBOARD', 0],
+      ['MCP', 1],
+    ] as const)(
       'keeps legacy %s staff selection but applies the organization-wide personal gate',
-      async writeOrigin => {
+      async (writeOrigin, expectedOccupancyCalls) => {
         jest
           .spyOn(reservationSettingsService, 'getReservationSettings')
           .mockResolvedValue(makeReservationSettings({ capacityMode: 'pacing', showStaffPicker: false }))
@@ -958,7 +961,9 @@ describe('Reservation Dashboard Service', () => {
         prismaMock.reservation.create.mockImplementation(async ({ data }: any) => createMockReservation(data))
         const organizationGate = jest.spyOn(appointmentStaffAssignmentService, 'assertOrganizationStaffAvailability').mockResolvedValue()
         const assignment = jest.spyOn(appointmentStaffAssignmentService, 'resolveStaffAssignment')
-        jest.spyOn(reservationAvailabilityService, 'countAppointmentOccupancy').mockResolvedValue({ reservations: 0, holds: 0 })
+        const occupancy = jest
+          .spyOn(reservationAvailabilityService, 'countAppointmentOccupancy')
+          .mockResolvedValue({ reservations: 0, holds: 0 })
 
         await createReservation(
           VENUE_ID,
@@ -970,6 +975,7 @@ describe('Reservation Dashboard Service', () => {
           prismaMock,
           expect.objectContaining({ organizationId: 'org-1', staffId: 'staff-operated' }),
         )
+        expect(occupancy).toHaveBeenCalledTimes(expectedOccupancyCalls)
         expect(assignment).not.toHaveBeenCalled()
         expect(prismaMock.productStaff.findMany).not.toHaveBeenCalled()
         expect(prismaMock.staffSchedule.findFirst).not.toHaveBeenCalled()
