@@ -139,6 +139,15 @@ function isValidLocalDate(value: string): boolean {
   return parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day
 }
 
+function localDateInTimezone(value: Date, timezone: string): string | null {
+  try {
+    const localDate = formatInTimeZone(value, timezone, 'yyyy-MM-dd')
+    return isValidLocalDate(localDate) ? localDate : null
+  } catch {
+    return null
+  }
+}
+
 function isValidPersistedException(exception: StaffScheduleExceptionWindow): boolean {
   if (!isValidLocalDate(exception.startDate) || !isValidLocalDate(exception.endDate) || exception.endDate < exception.startDate)
     return false
@@ -291,7 +300,8 @@ export async function assertStaffEligible(tx: Prisma.TransactionClient, args: St
   })
   if (new Set(mappings.map(mapping => mapping.productId)).size !== canonical.productIds.length) throw genericBusy()
 
-  const localDate = formatInTimeZone(args.startsAt, member.venue.timezone, 'yyyy-MM-dd')
+  const localDate = localDateInTimezone(args.startsAt, member.venue.timezone)
+  if (!localDate) throw genericBusy()
   const [schedule, exceptions] = await Promise.all([
     tx.staffSchedule.findFirst({
       where: { staffVenueId: member.id, venueId: args.venueId },
@@ -381,7 +391,8 @@ export async function resolveStaffAssignment(tx: Prisma.TransactionClient, args:
 
   const timezone = candidates[0].venue.timezone
   const organizationId = candidates[0].venue.organizationId
-  const localDate = formatInTimeZone(args.startsAt, timezone, 'yyyy-MM-dd')
+  const localDate = localDateInTimezone(args.startsAt, timezone)
+  if (!localDate) throw noAvailableStaff()
   const staffIds = candidates.map(candidate => candidate.staffId)
   const staffVenueIds = candidates.map(candidate => candidate.id)
 

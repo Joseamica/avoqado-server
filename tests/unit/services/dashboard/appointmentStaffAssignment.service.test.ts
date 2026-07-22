@@ -170,6 +170,21 @@ describe('staffScheduleAllowsWindow', () => {
     expect(staffScheduleAllowsWindow(args)).toBe(true)
   })
 
+  it('does not bridge a real gap between separated HOURS ranges', () => {
+    const args = window(10, 180)
+    args.exceptions = [
+      { startDate: '2026-07-21', endDate: '2026-07-21', kind: 'HOURS', startTime: '09:00', endTime: '11:00' },
+      { startDate: '2026-07-21', endDate: '2026-07-21', kind: 'HOURS', startTime: '12:00', endTime: '14:00' },
+    ]
+    expect(staffScheduleAllowsWindow(args)).toBe(false)
+  })
+
+  it('applies exception date ranges inclusively on their final local date', () => {
+    const args = window(7)
+    args.exceptions = [{ startDate: '2026-07-20', endDate: '2026-07-21', kind: 'HOURS', startTime: '07:00', endTime: '08:30' }]
+    expect(staffScheduleAllowsWindow(args)).toBe(true)
+  })
+
   it('applies HOURS exceptions even without a weekly row, otherwise falling back to venue hours', () => {
     const args = window(7)
     args.weekly = null
@@ -183,6 +198,7 @@ describe('staffScheduleAllowsWindow', () => {
 
   it.each([
     ['reversed window', { startsAt: new Date('2026-07-21T12:00:00Z'), endsAt: new Date('2026-07-21T11:00:00Z') }],
+    ['zero-length window', { startsAt: new Date('2026-07-21T12:00:00Z'), endsAt: new Date('2026-07-21T12:00:00Z') }],
     ['invalid timezone', { timezone: 'Mars/Olympus' }],
     ['malformed range', { weekly: { ...hours(), tuesday: { enabled: true, ranges: [{ open: 'bad', close: '17:00' }] } } }],
     [
@@ -412,6 +428,36 @@ describe('assertStaffEligible', () => {
     })
   })
 
+  it('maps an invalid persisted venue timezone to a generic Spanish 409', async () => {
+    const tx = eligibleTx()
+    tx.staffVenue.findFirst.mockResolvedValue({
+      id: 'sv-1',
+      staffId: 'staff-1',
+      startDate: new Date('2024-01-01T00:00:00Z'),
+      venue: { organizationId: 'org-1', timezone: 'Mars/Olympus' },
+    })
+    await expect(assertStaffEligible(tx, args)).rejects.toMatchObject({
+      statusCode: 409,
+      message: 'El profesionista no está disponible en ese horario',
+      details: undefined,
+    })
+    expect(tx.staffSchedule.findFirst).not.toHaveBeenCalled()
+  })
+
+  it('fails generically on a current venue-master block before organization commitment reads', async () => {
+    const tx = eligibleTx()
+    tx.externalBusyBlock.findFirst.mockResolvedValue({ id: 'opaque-master-block' })
+    await expect(assertStaffEligible(tx, args)).rejects.toMatchObject({
+      statusCode: 409,
+      message: 'El profesionista no está disponible en ese horario',
+      details: undefined,
+    })
+    expect(tx.staffVenue.findMany).not.toHaveBeenCalled()
+    expect(tx.reservation.findFirst).not.toHaveBeenCalled()
+    expect(tx.classSession.findFirst).not.toHaveBeenCalled()
+    expect(tx.slotHold.findFirst).not.toHaveBeenCalled()
+  })
+
   it('rejects a malformed core window as 400 before any membership or schedule query', async () => {
     const tx = eligibleTx()
     await expect(assertStaffEligible(tx, { ...args, endsAt: args.startsAt })).rejects.toMatchObject({ statusCode: 400 })
@@ -551,12 +597,41 @@ describe('resolveStaffAssignment', () => {
 
   it('does not cross-product candidate venue scopes when only B conflicts in a B-only venue', async () => {
     const tx = allocatorTx()
+    tx.productStaff.findMany.mockResolvedValue([
+      { productId: 'product-1', staffVenueId: 'sv-a' },
+      { productId: 'product-1', staffVenueId: 'sv-b' },
+    ])
     tx.reservation.findMany.mockResolvedValue([{ assignedStaffId: 'staff-b', venueId: 'venue-b-only' }])
-    await expect(resolveStaffAssignment(tx, args)).resolves.toBe('staff-old')
+    await expect(resolveStaffAssignment(tx, args)).resolves.toBe('staff-a')
     const predicate = tx.reservation.findMany.mock.calls[0][0].where.OR
     expect(predicate).toContainEqual({ assignedStaffId: 'staff-a', venueId: { in: ['venue-1', 'venue-inactive'] } })
     expect(predicate).toContainEqual({ assignedStaffId: 'staff-b', venueId: { in: ['venue-1', 'venue-b-only'] } })
     expect(predicate.find((branch: any) => branch.assignedStaffId === 'staff-a').venueId.in).not.toContain('venue-b-only')
+  })
+
+  it('maps an invalid candidate venue timezone to generic allocator exhaustion', async () => {
+    const tx = allocatorTx('Mars/Olympus')
+    await expect(resolveStaffAssignment(tx, args)).rejects.toMatchObject({
+      statusCode: 409,
+      message: 'No hay profesionistas disponibles para este horario',
+      details: undefined,
+    })
+    expect(tx.productStaff.findMany).not.toHaveBeenCalled()
+  })
+
+  it('fails generically on one venue-master block before second-stage conflict reads', async () => {
+    const tx = allocatorTx()
+    tx.externalBusyBlock.findFirst.mockResolvedValue({ id: 'opaque-master-block' })
+    await expect(resolveStaffAssignment(tx, args)).rejects.toMatchObject({
+      statusCode: 409,
+      message: 'No hay profesionistas disponibles para este horario',
+      details: undefined,
+    })
+    expect(tx.reservation.findMany).not.toHaveBeenCalled()
+    expect(tx.classSession.findMany).not.toHaveBeenCalled()
+    expect(tx.slotHold.findMany).not.toHaveBeenCalled()
+    expect(tx.externalBusyBlock.findMany).not.toHaveBeenCalled()
+    expect(tx.reservation.groupBy).not.toHaveBeenCalled()
   })
 
   it('combines missing mappings, closed schedules, and busy candidates without N+1', async () => {
