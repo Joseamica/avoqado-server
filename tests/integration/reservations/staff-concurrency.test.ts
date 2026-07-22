@@ -410,28 +410,53 @@ describe('staff commitment serialization on PostgreSQL', () => {
         partySize: 1,
       },
     })
+    await prisma.reservationSettings.update({
+      where: { venueId: sameOrgVenueA },
+      data: { googleCalendarPushEnabled: true },
+    })
+    const connection = await prisma.googleCalendarConnection.create({
+      data: {
+        scope: 'VENUE',
+        venueId: sameOrgVenueA,
+        googleAccountEmail: `${fixtureKey}-calendar@example.test`,
+        googleAccountSub: `${fixtureKey}-calendar`,
+        selectedCalendarId: `${fixtureKey}-calendar`,
+        selectedCalendarSummary: 'Concurrency fixture',
+        selectedCalendarTimeZone: 'UTC',
+        refreshTokenCiphertext: Buffer.from('fixture-token'),
+      },
+    })
 
-    await expect(
-      createClassSessionsBulk(
-        sameOrgVenueA,
-        {
-          productId: classProductA,
-          startDate: first.startsAt.toISOString().slice(0, 10),
-          startTime: '10:00',
-          endTime: '11:00',
-          weekdays: [first.startsAt.getUTCDay()],
-          occurrences: 2,
-          capacity: 10,
-          assignedStaffId: staffId,
-          internalNotes: null,
-        },
-        staffId,
-        'UTC',
-      ),
-    ).rejects.toMatchObject({ statusCode: 409 })
+    try {
+      await expect(
+        createClassSessionsBulk(
+          sameOrgVenueA,
+          {
+            productId: classProductA,
+            startDate: first.startsAt.toISOString().slice(0, 10),
+            startTime: '10:00',
+            endTime: '11:00',
+            weekdays: [first.startsAt.getUTCDay()],
+            occurrences: 2,
+            capacity: 10,
+            assignedStaffId: staffId,
+            internalNotes: null,
+          },
+          staffId,
+          'UTC',
+        ),
+      ).rejects.toMatchObject({ statusCode: 409 })
 
-    expect(await prisma.classSession.count({ where: { venueId: sameOrgVenueA, productId: classProductA } })).toBe(0)
-    expect(await prisma.calendarSyncOutbox.count({ where: { venueId: sameOrgVenueA, classSessionId: { not: null } } })).toBe(0)
+      expect(connection.status).toBe('CONNECTED')
+      expect(await prisma.classSession.count({ where: { venueId: sameOrgVenueA, productId: classProductA } })).toBe(0)
+      expect(await prisma.calendarSyncOutbox.count({ where: { venueId: sameOrgVenueA, targetConnectionId: connection.id } })).toBe(0)
+    } finally {
+      await prisma.googleCalendarConnection.delete({ where: { id: connection.id } })
+      await prisma.reservationSettings.update({
+        where: { venueId: sameOrgVenueA },
+        data: { googleCalendarPushEnabled: false },
+      })
+    }
   })
 })
 
@@ -624,35 +649,43 @@ describe('hardDeleteTeamMember serialization on PostgreSQL', () => {
     expect(await prisma.staffVenue.count({ where: { id: membership.id } })).toBe(0)
   })
 
-  it('serializes hard-delete against a paused ClassSession-like writer without leaving an orphan', async () => {
-    const window = testWindow(44)
-    const gate = createGate()
-    const competitor = startMinimalCommitmentWriter({
-      kind: 'class',
-      venueId: sameOrgVenueA,
-      productId: classProductA,
-      window,
-      gate,
-    })
-    await waitForSignalOrFailure(gate.ready, competitor.promise, 'ClassSession-like writer before hard-delete')
-    const membership = await prisma.staffVenue.findUniqueOrThrow({ where: { staffId_venueId: { staffId, venueId: sameOrgVenueA } } })
+  it.each(['reservation', 'class', 'hold'] as const)(
+    'serializes hard-delete against a paused %s writer without leaving an orphan',
+    async kind => {
+      const window = testWindow(kind === 'reservation' ? 44 : kind === 'class' ? 45 : 46)
+      const gate = createGate()
+      const competitor = startMinimalCommitmentWriter({
+        kind,
+        venueId: sameOrgVenueA,
+        productId: kind === 'class' ? classProductA : undefined,
+        window,
+        gate,
+      })
+      await waitForSignalOrFailure(gate.ready, competitor.promise, `${kind} writer before hard-delete`)
+      const membership = await prisma.staffVenue.findUniqueOrThrow({ where: { staffId_venueId: { staffId, venueId: sameOrgVenueA } } })
 
-    let deleted: Awaited<ReturnType<typeof hardDeleteTeamMember>> | undefined
-    let deleteFailure: unknown
-    try {
-      deleted = await hardDeleteTeamMember(sameOrgVenueA, membership.id, true)
-    } catch (error) {
-      deleteFailure = error
-    } finally {
-      gate.release()
-    }
-    const competitorError = await competitor.promise.catch(error => error)
-    if (deleteFailure) throw deleteFailure
+      let deleted: Awaited<ReturnType<typeof hardDeleteTeamMember>> | undefined
+      let deleteFailure: unknown
+      try {
+        deleted = await hardDeleteTeamMember(sameOrgVenueA, membership.id, true)
+      } catch (error) {
+        deleteFailure = error
+      } finally {
+        gate.release()
+      }
+      const competitorError = await competitor.promise.catch(error => error)
+      if (deleteFailure) throw deleteFailure
 
-    expect(deleted?.deletedRecords.staffVenue).toBe(1)
-    expect(competitorError).toBeInstanceOf(ConflictError)
-    expect(competitor.getAttempts()).toBeGreaterThanOrEqual(2)
-    expect(await prisma.staffVenue.count({ where: { id: membership.id } })).toBe(0)
-    expect(await prisma.classSession.count({ where: { venueId: sameOrgVenueA, assignedStaffId: staffId } })).toBe(0)
-  })
+      expect(deleted?.deletedRecords.staffVenue).toBe(1)
+      expect(competitorError).toBeInstanceOf(ConflictError)
+      expect(competitor.getAttempts()).toBeGreaterThanOrEqual(2)
+      expect(await prisma.staffVenue.count({ where: { id: membership.id } })).toBe(0)
+      const remainingCommitments = await Promise.all([
+        prisma.reservation.count({ where: { venueId: sameOrgVenueA, assignedStaffId: staffId } }),
+        prisma.classSession.count({ where: { venueId: sameOrgVenueA, assignedStaffId: staffId } }),
+        prisma.slotHold.count({ where: { venueId: sameOrgVenueA, staffId } }),
+      ])
+      expect(remainingCommitments).toEqual([0, 0, 0])
+    },
+  )
 })
