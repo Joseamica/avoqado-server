@@ -165,9 +165,7 @@ describe('create_reservation', () => {
   it('preserves operational metadata from appointment canonicalization failures', async () => {
     mockGetSettings.mockRejectedValueOnce(new ConflictError('Configuración cambió.', 'APPOINTMENT_WINDOW_CHANGED', { retry: true }))
 
-    const out = parse(
-      await call({ venueId: 'v1', startsAt: '2026-06-06T19:00:00.000Z', partySize: 1, productId: 'product-1' }),
-    )
+    const out = parse(await call({ venueId: 'v1', startsAt: '2026-06-06T19:00:00.000Z', partySize: 1, productId: 'product-1' }))
 
     expect(out).toEqual({
       ok: false,

@@ -301,17 +301,18 @@ export async function getAvailableSlots(
   // same busy-intervals data structure the per-slot logic uses below.
   // Venue-master blocks always apply; staff-personal blocks only apply when
   // the caller asked for availability scoped to a specific staff member.
-  const externalBlocks = staffAware || legacyRescheduleStaffId !== undefined
-    ? []
-    : await prisma.externalBusyBlock.findMany({
-        where: {
-          OR: [
-            { venueId, startsAt: { lt: dayEnd }, endsAt: { gt: dayStart } },
-            ...(options.staffId ? [{ staffId: options.staffId, startsAt: { lt: dayEnd }, endsAt: { gt: dayStart } }] : []),
-          ],
-        },
-        select: { startsAt: true, endsAt: true, staffId: true, venueId: true },
-      })
+  const externalBlocks =
+    staffAware || legacyRescheduleStaffId !== undefined
+      ? []
+      : await prisma.externalBusyBlock.findMany({
+          where: {
+            OR: [
+              { venueId, startsAt: { lt: dayEnd }, endsAt: { gt: dayStart } },
+              ...(options.staffId ? [{ staffId: options.staffId, startsAt: { lt: dayEnd }, endsAt: { gt: dayStart } }] : []),
+            ],
+          },
+          select: { startsAt: true, endsAt: true, staffId: true, venueId: true },
+        })
 
   const windows = slotStarts.map(startsAt => ({
     startsAt,

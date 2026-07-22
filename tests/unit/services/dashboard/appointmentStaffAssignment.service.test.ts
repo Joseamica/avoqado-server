@@ -788,16 +788,9 @@ describe('findLegacyStaffAvailabilityForDayWindows', () => {
       startDate: new Date('2024-01-01T00:00:00.000Z'),
       venue: { organizationId: 'org-1', timezone: 'UTC' },
     })
-    tx.staffVenue.findMany.mockResolvedValue([
-      { venueId: 'venue-1' },
-      { venueId: 'venue-other' },
-    ])
-    tx.reservation.findMany.mockResolvedValue([
-      { startsAt: windows[0].startsAt, endsAt: windows[0].endsAt },
-    ])
-    tx.classSession.findMany.mockResolvedValue([
-      { startsAt: windows[1].startsAt, endsAt: windows[1].endsAt },
-    ])
+    tx.staffVenue.findMany.mockResolvedValue([{ venueId: 'venue-1' }, { venueId: 'venue-other' }])
+    tx.reservation.findMany.mockResolvedValue([{ startsAt: windows[0].startsAt, endsAt: windows[0].endsAt }])
+    tx.classSession.findMany.mockResolvedValue([{ startsAt: windows[1].startsAt, endsAt: windows[1].endsAt }])
     tx.slotHold.findMany.mockResolvedValue([
       {
         startsAt: windows[2].startsAt,
