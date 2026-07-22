@@ -136,6 +136,7 @@ describe('Phase 2 push hooks integration', () => {
       if (typeof arg === 'function') return arg(prismaMock)
       return arg
     })
+    ;(prismaMock as any).$executeRaw = jest.fn().mockResolvedValue(0)
     prismaMock.$queryRaw.mockResolvedValue([])
     prismaMock.product.findFirst.mockResolvedValue(null)
     prismaMock.table.findFirst.mockResolvedValue(null)
@@ -320,6 +321,7 @@ describe('Phase 2 push hooks integration', () => {
       mockConnectionLookup({ staff: STAFF_CONN_ID, venue: null })
 
       const existing = buildReservation({ status: 'CONFIRMED' })
+      prismaMock.$queryRaw.mockResolvedValueOnce([existing]).mockResolvedValueOnce([])
       prismaMock.reservation.findFirst.mockResolvedValue(existing)
       prismaMock.reservation.update.mockResolvedValue({
         ...existing,

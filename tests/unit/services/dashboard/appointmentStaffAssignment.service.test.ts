@@ -2,6 +2,7 @@ import type { ReservationConfig } from '@/services/dashboard/reservationSettings
 import {
   assertOrganizationStaffAvailability,
   assertStaffEligible,
+  assertStaffEligibleForPersistedProducts,
   findEligibleStaffForDayWindows,
   isLiveSlotHold,
   lockAppointmentVenue,
@@ -370,6 +371,29 @@ describe('assertStaffEligible', () => {
       staffVenueId: 'sv-1',
       productId: { in: ['product-1', 'product-2'] },
     })
+  })
+
+  it('validates already-persisted ordered products without consulting current Product duration or catalog rows', async () => {
+    const tx = eligibleTx()
+    tx.product.findMany.mockRejectedValue(new Error('current Product catalog must not participate in fixed reschedule duration'))
+    tx.productStaff.findMany.mockResolvedValue([{ productId: 'product-1' }, { productId: 'product-2' }])
+
+    await assertStaffEligibleForPersistedProducts(tx, {
+      ...args,
+      productIds: ['product-1', 'product-2'],
+      excludeReservationId: 'reservation-self',
+    })
+
+    expect(tx.product.findMany).not.toHaveBeenCalled()
+    expect(tx.productStaff.findMany).toHaveBeenCalledWith({
+      where: {
+        venueId: 'venue-1',
+        staffVenueId: 'sv-1',
+        productId: { in: ['product-1', 'product-2'] },
+      },
+      select: { productId: true },
+    })
+    expect(tx.reservation.findFirst.mock.calls[0][0].where.id).toEqual({ not: 'reservation-self' })
   })
 
   it('treats an explicit empty mapping as ineligible instead of falling back', async () => {

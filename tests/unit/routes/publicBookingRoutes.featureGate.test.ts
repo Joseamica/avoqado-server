@@ -179,7 +179,8 @@ describe('public booking surface — plan-tier gate (RESERVATIONS, Free venue �
     ['GET', `${P}/availability`],
     ['POST', `${P}/reservations`],
     ['POST', `${P}/reservations/hold`],
-    ['DELETE', `${P}/reservations/hold/hold_1`],
+    ['GET', `${P}/reservations/secret123/reschedule/availability`],
+    ['POST', `${P}/reservations/secret123/reschedule/hold`],
     ['POST', `${P}/credit-packs/pack_1/checkout`],
   ])('%s %s → 403 PLAN_REQUIRED with customer-facing Spanish message', async (method, url) => {
     const res = await (request(createApp()) as any)[method.toLowerCase()](url)
@@ -200,9 +201,8 @@ describe('GOLDEN RULE — manage-existing flows are NOT gated on the same Free v
     ['GET', `${P}/info`, 'venue info'],
     ['GET', `${P}/reservations/secret123`, 'magic-link view (:cancelSecret)'],
     ['POST', `${P}/reservations/secret123/cancel`, 'magic-link cancel'],
-    ['GET', `${P}/reservations/secret123/reschedule/availability`, 'reschedule availability'],
-    ['POST', `${P}/reservations/secret123/reschedule/hold`, 'reschedule hold'],
     ['POST', `${P}/reservations/secret123/reschedule`, 'reschedule'],
+    ['DELETE', `${P}/reservations/hold/hold_1`, 'idempotent hold release'],
     ['GET', `${P}/credit-packs`, 'credit-pack list'],
     ['GET', `${P}/credit-packs/balance`, 'credit balance read'],
     ['POST', `${P}/customer/register`, 'customer register'],
@@ -324,17 +324,28 @@ describe('wiring — the gates are actually present in the route files (source r
     [/'\/venues\/:venueSlug\/availability',\s*readLimit,\s*requireReservationsPlan,/, 'availability GET'],
     [/'\/venues\/:venueSlug\/reservations',\s*writeLimit,\s*requireReservationsPlan,/, 'create POST'],
     [/'\/venues\/:venueSlug\/reservations\/hold',\s*writeLimit,\s*requireReservationsPlan,/, 'hold POST'],
-    [/'\/venues\/:venueSlug\/reservations\/hold\/:holdId',\s*cancelLimit,\s*requireReservationsPlan,/, 'hold DELETE'],
+    [
+      /'\/venues\/:venueSlug\/reservations\/:cancelSecret\/reschedule\/availability',\s*readLimit,\s*requireReservationsPlan,/,
+      'reschedule availability GET',
+    ],
+    [
+      /'\/venues\/:venueSlug\/reservations\/:cancelSecret\/reschedule\/hold',\s*writeLimit,\s*requireReservationsPlan,/,
+      'reschedule hold POST',
+    ],
     [/'\/venues\/:venueSlug\/credit-packs\/:packId\/checkout',\s*writeLimit,\s*requireReservationsPlan,/, 'pack checkout POST'],
   ])('public.routes.ts gates the create surface: %s (%s)', fragment => {
     expect(publicRoutesSrc).toMatch(fragment)
   })
 
-  it('public.routes.ts wires the gate on EXACTLY the 5 create-surface routes (no creep onto manage-existing)', () => {
-    expect((publicRoutesSrc.match(/^\s*requireReservationsPlan,$/gm) || []).length).toBe(5)
+  it('public.routes.ts wires the gate on exactly the six paid booking surfaces without blocking release/manage', () => {
+    expect((publicRoutesSrc.match(/^\s*requireReservationsPlan,$/gm) || []).length).toBe(6)
     // Manage-existing routes keep their original ungated chains.
     expect(publicRoutesSrc).toMatch(/'\/venues\/:venueSlug\/reservations\/:cancelSecret\/cancel',\s*cancelLimit,\s*validateRequest/)
     expect(publicRoutesSrc).toMatch(/'\/venues\/:venueSlug\/reservations\/:cancelSecret',\s*readLimit,\s*validateRequest/)
+    expect(publicRoutesSrc).toMatch(/'\/venues\/:venueSlug\/reservations\/hold\/:holdId',\s*cancelLimit,\s*validateRequest/)
+    expect(publicRoutesSrc).toMatch(
+      /'\/venues\/:venueSlug\/reservations\/:cancelSecret\/reschedule',\s*cancelLimit,[^\n]*\n\s*validateRequest/,
+    )
     expect(publicRoutesSrc).toMatch(/'\/venues\/:venueSlug\/credit-packs\/balance',\s*readLimit,\s*validateRequest/)
     expect(publicRoutesSrc).toMatch(/'\/venues\/:venueSlug\/info',\s*readLimit,\s*validateRequest/)
   })

@@ -1,6 +1,6 @@
 import crypto from 'crypto'
 import { Prisma, ReservationStatus, ReservationChannel } from '@prisma/client'
-import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { logAction } from './activity-log.service'
@@ -29,12 +29,19 @@ import {
 import {
   assertOrganizationStaffAvailability,
   assertStaffEligible,
+  assertStaffEligibleForPersistedProducts,
   lockAppointmentVenue,
   resolveStaffAssignment,
   shouldAutoAssign,
 } from './appointmentStaffAssignment.service'
 import { enforceBookingWindow } from '@/services/reservation/bookingWindow.service'
-import { lockAndValidateNormalAppointmentHold } from '@/services/reservation/appointmentSlotHold.service'
+import {
+  lockAndValidateNormalAppointmentHold,
+  lockAndValidateRescheduleAppointmentHold,
+  lockReservationForReschedule,
+  lockTaggedRescheduleSiblings,
+} from '@/services/reservation/appointmentSlotHold.service'
+import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 
 export { enforceBookingWindow } from '@/services/reservation/bookingWindow.service'
 // creditPack.public.service is imported lazily inside cancelReservation/markNoShow.
@@ -1332,6 +1339,53 @@ export interface UpdateReservationInput {
   tags?: string[]
 }
 
+type ReservationHoldIdentity = {
+  startsAt: number
+  endsAt: number
+  duration: number
+  productId: string | null
+  assignedStaffId: string | null
+}
+
+function updateHasHoldIdentityCandidate(data: UpdateReservationInput): boolean {
+  // productIds deliberately joins this boundary in Task 7D, together with its
+  // ordered-list/lead invariant. Exposing a partially validated list here would
+  // permit an inconsistent Reservation identity.
+  return (
+    data.startsAt !== undefined ||
+    data.endsAt !== undefined ||
+    data.duration !== undefined ||
+    data.productId !== undefined ||
+    data.assignedStaffId !== undefined
+  )
+}
+
+function reservationHoldIdentity(input: {
+  startsAt: Date
+  endsAt: Date
+  duration: number
+  productId: string | null
+  assignedStaffId: string | null
+}): ReservationHoldIdentity {
+  return {
+    startsAt: input.startsAt.getTime(),
+    endsAt: input.endsAt.getTime(),
+    duration: input.duration,
+    productId: input.productId,
+    assignedStaffId: input.assignedStaffId,
+  }
+}
+
+function sameReservationHoldIdentity(left: ReservationHoldIdentity, right: ReservationHoldIdentity): boolean {
+  return (
+    left.startsAt === right.startsAt &&
+    left.endsAt === right.endsAt &&
+    left.duration === right.duration &&
+    left.productId === right.productId &&
+    left.assignedStaffId === right.assignedStaffId
+  )
+}
+
 export async function updateReservation(
   venueId: string,
   reservationId: string,
@@ -1341,6 +1395,11 @@ export async function updateReservation(
 ) {
   const updated = await withSerializableRetry(async tx => {
     const settings = await getReservationSettings(venueId, tx)
+    const hasHoldIdentityCandidate = updateHasHoldIdentityCandidate(data)
+    if (hasHoldIdentityCandidate) {
+      await lockAppointmentVenue(tx, venueId)
+      await lockReservationForReschedule(tx, { venueId, reservationId })
+    }
     const reservation = await tx.reservation.findFirst({
       where: { id: reservationId, venueId },
     })
@@ -1372,6 +1431,25 @@ export async function updateReservation(
         : data.startsAt !== undefined || data.endsAt !== undefined
           ? calculatedDuration
           : reservation.duration
+
+    if (
+      hasHoldIdentityCandidate &&
+      !sameReservationHoldIdentity(
+        reservationHoldIdentity(reservation),
+        reservationHoldIdentity({
+          startsAt: newStartsAt,
+          endsAt: newEndsAt,
+          duration: finalDuration,
+          productId: newProductId,
+          assignedStaffId: newStaffId,
+        }),
+      )
+    ) {
+      await lockTaggedRescheduleSiblings(tx, { venueId, reservationId: reservation.id })
+      await tx.slotHold.deleteMany({
+        where: { venueId, heldForReservationId: reservation.id },
+      })
+    }
 
     const { product } = await validateResourceOwnership(tx, venueId, {
       tableId: newTableId,
@@ -1651,10 +1729,205 @@ export async function rescheduleReservation(
  *
  *        old slot                         new slot
  *   ┌──────────────┐                 ┌──────────────┐
- *   │ reservation  │   move (same    │ reservation  │   updateReservation does the
- *   │ (productId)  │ ─ duration) ──▶ │ (productId)  │   serializable overlap check
- *   └──────────────┘                 └──────────────┘   (excludes self) + GCal outbox
+ *   │ reservation  │   move (same    │ reservation  │   one transaction locks and
+ *   │ (productId)  │ ─ duration) ──▶ │ (productId)  │   consumes the hold, updates R,
+ *   └──────────────┘                 └──────────────┘   and writes the GCal outbox
  */
+async function rescheduleAppointmentWithHold(args: {
+  venueId: string
+  reservationId: string
+  newStartsAt: Date
+  holdId: string
+  rescheduledBy: string
+  writeOrigin: WriteOrigin
+}) {
+  const { venueId, reservationId, newStartsAt, holdId, rescheduledBy, writeOrigin } = args
+  if (!(await venueHasFeatureAccess(venueId, 'RESERVATIONS'))) {
+    throw new ForbiddenError('Este negocio no tiene reservaciones en línea disponibles por el momento.', 'PLAN_REQUIRED')
+  }
+
+  const result = await withSerializableRetry(async tx => {
+    const settings = await getReservationSettings(venueId, tx)
+    await lockAppointmentVenue(tx, venueId)
+    const reservation = await lockReservationForReschedule(tx, { venueId, reservationId })
+    const original = await tx.reservation.findUnique({
+      where: { id: reservation.id },
+      include: {
+        customer: { select: { firstName: true, lastName: true, phone: true, email: true } },
+        product: { select: { name: true } },
+        venue: { select: { name: true, timezone: true } },
+      },
+    })
+    if (!original || original.venueId !== venueId) throw new NotFoundError('Reservacion no encontrada')
+
+    const lockedHold = await lockAndValidateRescheduleAppointmentHold(tx, {
+      venueId,
+      holdId,
+      reservation,
+      requestedStartsAt: newStartsAt,
+      settings,
+    })
+
+    if (isStaffAware(settings) || lockedHold.staffId !== null) {
+      if (!lockedHold.staffId) {
+        throw new ConflictError('Tu reserva temporal ya no es válida. Selecciona el horario de nuevo.')
+      }
+      await assertStaffEligibleForPersistedProducts(tx, {
+        venueId,
+        staffId: lockedHold.staffId,
+        productIds: lockedHold.productIds,
+        startsAt: newStartsAt,
+        endsAt: lockedHold.endsAt,
+        checkedAt: lockedHold.checkedAt,
+        settings,
+        excludeReservationId: reservation.id,
+        excludeHoldId: lockedHold.id,
+      })
+    } else {
+      const externalBlock = await checkExternalBusyBlock(tx, {
+        venueId,
+        staffId: null,
+        startsAt: newStartsAt,
+        endsAt: lockedHold.endsAt,
+      })
+      if (externalBlock) {
+        throw new ConflictError('Este horario fue bloqueado por un evento de calendario externo')
+      }
+    }
+
+    if (reservation.tableId) {
+      const tableConflicts = await tx.$queryRaw<{ id: string; confirmationCode: string }[]>`
+        SELECT id, "confirmationCode"
+        FROM "Reservation"
+        WHERE "venueId" = ${venueId}
+          AND "tableId" = ${reservation.tableId}
+          AND id <> ${reservation.id}
+          AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
+          AND "startsAt" < ${lockedHold.endsAt}
+          AND "endsAt" > ${newStartsAt}
+        FOR UPDATE NOWAIT
+      `
+      if (tableConflicts.length > 0) {
+        throw new ConflictError(`Mesa tiene conflicto con reservacion ${tableConflicts[0].confirmationCode}`)
+      }
+    }
+
+    const updated = await tx.reservation.update({
+      where: { id: reservation.id },
+      data: {
+        startsAt: newStartsAt,
+        endsAt: lockedHold.endsAt,
+        duration: reservation.duration,
+      },
+      include: RESERVATION_INCLUDE,
+    })
+
+    let pushRowIds: string[] = []
+    const targets = await resolveReservationPushTargets(tx, {
+      venueId,
+      assignedStaffId: updated.assignedStaffId ?? null,
+    })
+    if (targets.length > 0) {
+      pushRowIds = await enqueuePush(tx, {
+        source: { kind: 'reservation', reservationId: updated.id },
+        venueId,
+        operation: 'UPDATE',
+        targetConnectionIds: targets.map(target => target.id),
+      })
+    }
+
+    await tx.slotHold.deleteMany({
+      where: {
+        venueId,
+        OR: [{ id: lockedHold.id }, { heldForReservationId: reservation.id }],
+      },
+    })
+
+    return { reservation, original, updated, pushRowIds, releaseAGrace: lockedHold.releaseAGrace }
+  })
+
+  if (result.releaseAGrace) {
+    logger.warn('[slot-hold] Release A legacy reschedule hold consumed', {
+      metric: 'reservation_reschedule_hold_release_a_grace',
+      venueId,
+      reservationId,
+      holdId,
+    })
+  }
+
+  if (result.pushRowIds.length > 0) {
+    publishPushNotification(result.pushRowIds).catch(err =>
+      logger.warn('gcal push publish failed after rescheduleAppointmentReservation (sweeper will retry)', {
+        err,
+        rowIds: result.pushRowIds,
+        reservationId: result.updated.id,
+      }),
+    )
+  }
+
+  const customerName =
+    [result.original.customer?.firstName, result.original.customer?.lastName].filter(Boolean).join(' ').trim() ||
+    result.updated.guestName ||
+    'cliente'
+  const phone = result.original.customer?.phone || result.updated.guestPhone
+  const email = result.original.customer?.email || result.updated.guestEmail
+  const venueName = result.original.venue?.name || 'Avoqado'
+  const timezone = result.original.venue?.timezone || 'America/Mexico_City'
+  const formatDate = (value: Date) =>
+    new Intl.DateTimeFormat('es-MX', { day: 'numeric', month: 'long', year: 'numeric', timeZone: timezone }).format(value)
+  const formatTime = (value: Date) =>
+    new Intl.DateTimeFormat('es-MX', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: timezone }).format(value)
+
+  if (phone) {
+    try {
+      await sendReservationRescheduleWhatsApp(phone, {
+        customerName,
+        venueName,
+        date: formatDate(newStartsAt),
+        time: formatTime(newStartsAt),
+      })
+    } catch (err) {
+      logger.warn(`[RESERVATION] WhatsApp reschedule failed for ${result.updated.confirmationCode}: ${(err as Error).message}`)
+    }
+  }
+  if (email) {
+    try {
+      await emailService.sendReservationRescheduledEmail(email, {
+        customerName,
+        venueName,
+        serviceName: result.original.product?.name,
+        oldDateTime: `${formatDate(result.reservation.startsAt)}, ${formatTime(result.reservation.startsAt)}`,
+        newDateTime: `${formatDate(newStartsAt)}, ${formatTime(newStartsAt)}`,
+        confirmationCode: result.updated.confirmationCode,
+      })
+    } catch (err) {
+      logger.warn(`[RESERVATION] Email reschedule failed for ${result.updated.confirmationCode}: ${(err as Error).message}`)
+    }
+  }
+
+  logAction({
+    staffId: rescheduledBy,
+    venueId,
+    action: 'RESERVATION_RESCHEDULED',
+    entity: 'Reservation',
+    entityId: result.updated.id,
+    data: {
+      startsAt: newStartsAt,
+      endsAt: result.updated.endsAt,
+      confirmationCode: result.updated.confirmationCode,
+      by: rescheduledBy,
+      origin: writeOrigin,
+    },
+  })
+
+  return {
+    confirmationCode: result.updated.confirmationCode,
+    status: result.updated.status,
+    startsAt: result.updated.startsAt,
+    endsAt: result.updated.endsAt,
+  }
+}
+
 export async function rescheduleAppointmentReservation(args: {
   venueId: string
   reservationId: string
@@ -1665,6 +1938,10 @@ export async function rescheduleAppointmentReservation(args: {
   allowOverCapacity?: boolean
 }) {
   const { venueId, reservationId, newStartsAt, holdId, rescheduledBy, writeOrigin, allowOverCapacity } = args
+
+  if (holdId) {
+    return rescheduleAppointmentWithHold({ venueId, reservationId, newStartsAt, holdId, rescheduledBy, writeOrigin })
+  }
 
   const reservation = await prisma.reservation.findFirst({
     where: { id: reservationId, venueId },
@@ -1685,29 +1962,18 @@ export async function rescheduleAppointmentReservation(args: {
   // Same service + same extras → duration is fixed. Derive the new end.
   const newEndsAt = new Date(newStartsAt.getTime() + reservation.duration * 60_000)
 
-  if (holdId) {
-    // Customer path: the hold reserved the slot. Validate it matches the move.
-    const hold = await prisma.slotHold.findFirst({ where: { id: holdId, venueId } })
-    if (!hold || hold.expiresAt.getTime() <= Date.now()) {
-      throw new ConflictError('Ese horario ya no está disponible, elige otro.')
-    }
-    if (hold.startsAt.getTime() !== newStartsAt.getTime() || hold.endsAt.getTime() !== newEndsAt.getTime()) {
-      throw new BadRequestError('El horario reservado no coincide con la solicitud.')
-    }
-  } else {
-    // Transitional until Task 6C: the no-hold Ops/MCP pacing preflight remains
-    // outside the authoritative update transaction and excludes the reservation itself.
-    const settings = await getReservationSettings(venueId)
-    const pacingMax = effectiveAppointmentPacing(settings.scheduling?.pacingMaxPerSlot)
-    const { reservations, holds } = await countAppointmentOccupancy(prisma, {
-      venueId,
-      startsAt: newStartsAt,
-      endsAt: newEndsAt,
-      excludeReservationId: reservationId,
-    })
-    if (reservations + holds >= pacingMax) {
-      throw new ConflictError('Ese horario ya no está disponible, elige otro.')
-    }
+  // Transitional until Task 7D: the no-hold Ops/MCP pacing preflight remains
+  // outside the authoritative update transaction and excludes the reservation itself.
+  const settings = await getReservationSettings(venueId)
+  const pacingMax = effectiveAppointmentPacing(settings.scheduling?.pacingMaxPerSlot)
+  const { reservations, holds } = await countAppointmentOccupancy(prisma, {
+    venueId,
+    startsAt: newStartsAt,
+    endsAt: newEndsAt,
+    excludeReservationId: reservationId,
+  })
+  if (reservations + holds >= pacingMax) {
+    throw new ConflictError('Ese horario ya no está disponible, elige otro.')
   }
 
   const originalStartsAt = reservation.startsAt
@@ -1721,11 +1987,6 @@ export async function rescheduleAppointmentReservation(args: {
     { writeOrigin, allowOverCapacity },
     rescheduledBy,
   )
-
-  // Consume the hold now that the move committed (best-effort).
-  if (holdId) {
-    prisma.slotHold.deleteMany({ where: { id: holdId, venueId } }).catch(() => {})
-  }
 
   // Notify the customer of the new time — WhatsApp + email, both best-effort.
   const customerName =

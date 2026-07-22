@@ -316,15 +316,43 @@ export async function assertStaffEligible(tx: Prisma.TransactionClient, args: St
     productIds: args.productIds,
     settings: args.settings,
   })
+  await assertLoadedStaffEligible(tx, args, member, canonical.productIds)
+}
+
+/**
+ * Revalidate an existing reservation's exact persisted service identity.
+ * Reschedules keep their historical duration, so this path deliberately does
+ * not read Product duration/type or otherwise canonicalize against today's
+ * catalog. ProductStaff mappings, schedules and personal conflicts remain
+ * authoritative at the target instant.
+ */
+export async function assertStaffEligibleForPersistedProducts(tx: Prisma.TransactionClient, args: StaffEligibilityArgs): Promise<void> {
+  assertValidWindow(args.startsAt, args.endsAt, args.checkedAt)
+  const member = await loadExplicitMembership(tx, args.venueId, args.staffId)
+  if (!member) throw genericBusy()
+
+  const productIds = args.productIds.map(id => id.trim()).filter(Boolean)
+  if (productIds.length === 0 || productIds.length > 20 || new Set(productIds).size !== productIds.length) {
+    throw new BadRequestError('Los servicios guardados de la cita son inválidos')
+  }
+  await assertLoadedStaffEligible(tx, args, member, productIds)
+}
+
+async function assertLoadedStaffEligible(
+  tx: Prisma.TransactionClient,
+  args: StaffEligibilityArgs,
+  member: NonNullable<Awaited<ReturnType<typeof loadExplicitMembership>>>,
+  productIds: string[],
+): Promise<void> {
   const mappings = await tx.productStaff.findMany({
     where: {
       venueId: args.venueId,
       staffVenueId: member.id,
-      productId: { in: canonical.productIds },
+      productId: { in: productIds },
     },
     select: { productId: true },
   })
-  if (new Set(mappings.map(mapping => mapping.productId)).size !== canonical.productIds.length) throw genericBusy()
+  if (new Set(mappings.map(mapping => mapping.productId)).size !== productIds.length) throw genericBusy()
 
   const localDate = localDateInTimezone(args.startsAt, member.venue.timezone)
   if (!localDate) throw genericBusy()

@@ -26,7 +26,12 @@ import { enqueuePush, resolveClassSessionPushTargets } from '../../services/goog
 import { phonesMatch, phoneLast10 } from '../../utils/phone'
 import { withSerializableRetry } from '@/utils/serializableRetry'
 import { normalizeBookedProductIds, reservationBookedProductIds } from '@/services/reservation/resolveAppointmentWindow'
-import { fastFailLiveHold, mintNormalAppointmentHold, SLOT_HOLD_TTL_MS } from '@/services/reservation/appointmentSlotHold.service'
+import {
+  fastFailLiveHold,
+  mintNormalAppointmentHold,
+  mintRescheduleAppointmentHold,
+  SLOT_HOLD_TTL_MS,
+} from '@/services/reservation/appointmentSlotHold.service'
 
 // ==========================================
 // PUBLIC RESERVATION CONTROLLER (Unauthenticated)
@@ -1491,50 +1496,6 @@ function assertCanReschedule(
 }
 
 /**
- * Assert the requested appointment slot is genuinely offerable (not just "not in
- * the past"). Single source of truth = the booking availability engine, plus
- * explicit window checks `getAvailableSlots` does NOT do (minNotice / maxAdvance /
- * past). `excludeReservationId` keeps the moving reservation from blocking its
- * own target slot. Throws 409/400 on any failure.
- */
-async function assertSlotOfferable(args: {
-  venueId: string
-  productId: string | null
-  startsAt: Date
-  endsAt: Date
-  settings: Awaited<ReturnType<typeof getReservationSettings>>
-  timezone: string
-  excludeReservationId: string
-}): Promise<void> {
-  const now = Date.now()
-  if (args.startsAt.getTime() < now) {
-    throw new ConflictError('Ese horario ya pasó, elige otro.')
-  }
-  const minNoticeMin = args.settings.scheduling?.minNoticeMin ?? 0
-  if (minNoticeMin > 0 && args.startsAt.getTime() < now + minNoticeMin * 60_000) {
-    throw new BadRequestError(`Debes reservar con al menos ${minNoticeMin} minutos de anticipación.`)
-  }
-  const maxAdvanceDays = args.settings.scheduling?.maxAdvanceDays ?? 0
-  if (maxAdvanceDays > 0 && args.startsAt.getTime() > now + maxAdvanceDays * 24 * 60 * 60_000) {
-    throw new BadRequestError(`No puedes reservar con más de ${maxAdvanceDays} días de anticipación.`)
-  }
-  // Operating hours + grid alignment + pacing + capacity + staff/table + external
-  // blocks — all enforced by membership in the offered set (excluding self).
-  const durationMin = Math.round((args.endsAt.getTime() - args.startsAt.getTime()) / 60_000)
-  const slots = await availabilityService.getAvailableSlots(
-    args.venueId,
-    args.startsAt,
-    { duration: durationMin, productId: args.productId ?? undefined, excludeReservationId: args.excludeReservationId },
-    args.settings,
-    args.timezone,
-  )
-  const offered = slots.some(s => new Date(s.startsAt).getTime() === args.startsAt.getTime())
-  if (!offered) {
-    throw new ConflictError('Ese horario ya no está disponible, elige otro.')
-  }
-}
-
-/**
  * GET /public/venues/:venueSlug/reservations/:cancelSecret/reschedule/availability?date=YYYY-MM-DD
  *
  * Appointment reschedule: offered slots of the SAME service for the given date,
@@ -1577,8 +1538,9 @@ export async function getRescheduleAvailability(req: Request, res: Response, nex
 /**
  * POST /public/venues/:venueSlug/reservations/:cancelSecret/reschedule/hold
  *
- * Body: { startsAt, endsAt } — reserve the target slot for ~10 min before the
- * customer confirms. Re-validates the slot (§5.8) excluding self, then holds it.
+ * Body: { startsAt, endsAt? } — reserve the target slot for ~10 min before the
+ * customer confirms. `endsAt` is optional legacy compatibility input; the server
+ * derives the authoritative window from the reservation's persisted duration.
  */
 export async function createRescheduleHold(req: Request, res: Response, next: NextFunction) {
   try {
@@ -1590,46 +1552,30 @@ export async function createRescheduleHold(req: Request, res: Response, next: Ne
       throw new BadRequestError('Las clases se reagendan eligiendo otra sesión; no requieren reservar el horario.')
     }
 
-    const body = req.body as { startsAt: string; endsAt: string }
+    const body = req.body as { startsAt: string; endsAt?: string }
     const startsAt = new Date(body.startsAt)
-    const endsAt = new Date(body.endsAt)
-    if (Number.isNaN(startsAt.getTime()) || Number.isNaN(endsAt.getTime())) {
+    const endsAt = body.endsAt === undefined ? undefined : new Date(body.endsAt)
+    if (Number.isNaN(startsAt.getTime()) || (endsAt && Number.isNaN(endsAt.getTime()))) {
       throw new BadRequestError('Fechas inválidas')
     }
-    if (endsAt <= startsAt) {
+    if (endsAt && endsAt <= startsAt) {
       throw new BadRequestError('endsAt debe ser posterior a startsAt')
     }
-    // Duration is fixed (same service + same extras) — reject a tampered window.
-    const reqDuration = Math.round((endsAt.getTime() - startsAt.getTime()) / 60_000)
-    if (Math.abs(reqDuration - reservation.duration) > 1) {
-      throw new BadRequestError('La duración del horario no coincide con el servicio.')
-    }
-
-    const tz = reservation.venue?.timezone || 'America/Mexico_City'
-    await assertSlotOfferable({
-      venueId: reservation.venueId,
-      productId: reservation.productId,
-      startsAt,
-      endsAt,
-      settings,
-      timezone: tz,
-      excludeReservationId: reservation.id,
-    })
 
     void pruneExpiredHolds()
-    const pacingMax = effectiveAppointmentPacing(settings.scheduling?.pacingMaxPerSlot)
-    const hold = await holdAppointmentSlot({
+    const hold = await mintRescheduleAppointmentHold({
       venueId: reservation.venueId,
-      startsAt,
-      endsAt,
-      productIds: reservation.productId ? [reservation.productId] : [],
-      partySize: reservation.partySize,
-      fingerprint: null,
-      pacingMax,
-      excludeReservationId: reservation.id,
+      reservationId: reservation.id,
+      requestedStartsAt: startsAt,
+      requestedEndsAt: endsAt,
     })
 
-    res.status(201).json({ holdId: hold.id, expiresAt: hold.expiresAt, ttlSeconds: Math.floor(SLOT_HOLD_TTL_MS / 1000) })
+    res.status(201).json({
+      holdId: hold.id,
+      expiresAt: hold.expiresAt,
+      ttlSeconds: Math.floor(SLOT_HOLD_TTL_MS / 1000),
+      ...(hold.staffId ? { staffId: hold.staffId } : {}),
+    })
   } catch (error) {
     next(error)
   }
@@ -2186,65 +2132,6 @@ async function pruneExpiredHolds(): Promise<void> {
   } catch (error) {
     logger.warn(`[slot-hold] cleanup failed (non-fatal): ${(error as Error).message}`)
   }
-}
-
-/**
- * Transitional pre-Task-7C reschedule hold helper. Normal booking holds use the
- * neutral atomic protocol in appointmentSlotHold.service.ts; reschedule keeps
- * this legacy shape until its tagged dual-write lands in the following commit.
- * `excludeReservationId` lets reschedule skip counting the reservation being
- * moved against its own target slot.
- */
-async function holdAppointmentSlot(args: {
-  venueId: string
-  startsAt: Date
-  endsAt: Date
-  productIds: string[]
-  partySize: number
-  fingerprint: string | null
-  pacingMax: number
-  excludeReservationId?: string
-}): Promise<{ id: string; expiresAt: Date }> {
-  const expiresAt = new Date(Date.now() + SLOT_HOLD_TTL_MS)
-  return prisma.$transaction(async tx => {
-    const lockKey = `apt-hold:${args.venueId}`
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey})::bigint)`
-
-    // External calendar busy-block check — reject so the customer never sees a
-    // countdown for a slot the venue already blocked via Google Calendar.
-    const externalBlock = await checkExternalBusyBlock(tx, {
-      venueId: args.venueId,
-      staffId: null,
-      startsAt: args.startsAt,
-      endsAt: args.endsAt,
-    })
-    if (externalBlock) {
-      throw new ConflictError('Este horario fue bloqueado por un evento de calendario externo')
-    }
-
-    const { reservations, holds } = await countAppointmentOccupancy(tx, {
-      venueId: args.venueId,
-      startsAt: args.startsAt,
-      endsAt: args.endsAt,
-      excludeReservationId: args.excludeReservationId,
-    })
-    if (reservations + holds >= args.pacingMax) {
-      throw new ConflictError('Este horario ya no está disponible. Por favor elige otro horario.')
-    }
-    return tx.slotHold.create({
-      data: {
-        venueId: args.venueId,
-        startsAt: args.startsAt,
-        endsAt: args.endsAt,
-        productIds: args.productIds,
-        classSessionId: null,
-        partySize: Math.max(1, args.partySize),
-        expiresAt,
-        fingerprint: args.fingerprint,
-      },
-      select: { id: true, expiresAt: true },
-    })
-  })
 }
 
 /**

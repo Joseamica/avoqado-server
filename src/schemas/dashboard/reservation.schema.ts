@@ -409,7 +409,7 @@ export const rescheduleAvailabilityQuerySchema = z.object({
 // Reschedule hold (appointments): reserve the target slot for ~10 min before confirm.
 export const rescheduleHoldBodySchema = z.object({
   startsAt: z.string().min(1, 'startsAt es requerido'),
-  endsAt: z.string().min(1, 'endsAt es requerido'),
+  endsAt: z.string().min(1, 'endsAt es requerido').optional(),
   windowSemantics: z
     .unknown()
     .superRefine((_value, ctx) => {

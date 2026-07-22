@@ -5,6 +5,7 @@ import * as reservationService from '@/services/dashboard/reservation.dashboard.
 import * as settingsService from '@/services/dashboard/reservationSettings.service'
 import * as appointmentStaffAssignmentService from '@/services/dashboard/appointmentStaffAssignment.service'
 import * as appointmentWindowService from '@/services/reservation/resolveAppointmentWindow'
+import * as appointmentSlotHoldService from '@/services/reservation/appointmentSlotHold.service'
 import * as ecommerceCapability from '@/services/payments/ecommerceCapability'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { Prisma } from '@prisma/client'
@@ -172,6 +173,87 @@ describe('reservation availability controller boundaries', () => {
       rescheduledBy: 'CUSTOMER',
       writeOrigin: 'PUBLIC',
     })
+  })
+
+  it('delegates startsAt-only reschedule holds to the neutral transaction without an availability scan', async () => {
+    const reservation = {
+      id: 'reservation-1',
+      venueId: 'venue-1',
+      status: 'CONFIRMED',
+      startsAt: new Date(Date.now() + 48 * 60 * 60_000),
+      duration: 75,
+      productId: 'product-1',
+      productIds: ['product-1', 'product-2'],
+      assignedStaffId: 'staff-1',
+      partySize: 2,
+      classSessionId: null,
+    } as any
+    jest.spyOn(reservationService, 'getReservationByCancelSecret').mockResolvedValue(reservation)
+    const mint = jest.spyOn(appointmentSlotHoldService, 'mintRescheduleAppointmentHold').mockResolvedValue({
+      id: 'hold-reschedule',
+      expiresAt: new Date('2026-08-21T15:10:00.000Z'),
+      staffId: 'staff-1',
+    })
+    const availability = jest.spyOn(availabilityService, 'getAvailableSlots')
+    const req: any = {
+      params: { venueSlug: 'venue', cancelSecret: 'secret' },
+      body: { startsAt: startsAt.toISOString() },
+    }
+    const res = responseMock()
+    const next = jest.fn()
+
+    await publicController.createRescheduleHold(req, res, next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(availability).not.toHaveBeenCalled()
+    expect(mint).toHaveBeenCalledWith({
+      venueId: 'venue-1',
+      reservationId: 'reservation-1',
+      requestedStartsAt: startsAt,
+      requestedEndsAt: undefined,
+    })
+    expect(res.status).toHaveBeenCalledWith(201)
+    expect(res.json).toHaveBeenCalledWith({
+      holdId: 'hold-reschedule',
+      expiresAt: new Date('2026-08-21T15:10:00.000Z'),
+      ttlSeconds: 600,
+      staffId: 'staff-1',
+    })
+  })
+
+  it('forwards optional legacy reschedule endsAt but performs no authoritative pre-transaction slot scan', async () => {
+    const reservation = {
+      id: 'reservation-1',
+      venueId: 'venue-1',
+      status: 'CONFIRMED',
+      startsAt: new Date(Date.now() + 48 * 60 * 60_000),
+      classSessionId: null,
+    } as any
+    jest.spyOn(reservationService, 'getReservationByCancelSecret').mockResolvedValue(reservation)
+    const mint = jest.spyOn(appointmentSlotHoldService, 'mintRescheduleAppointmentHold').mockResolvedValue({
+      id: 'hold-reschedule',
+      expiresAt: new Date('2026-08-21T15:10:00.000Z'),
+      staffId: null,
+    })
+    const availability = jest.spyOn(availabilityService, 'getAvailableSlots')
+    const req: any = {
+      params: { venueSlug: 'venue', cancelSecret: 'secret' },
+      body: { startsAt: startsAt.toISOString(), endsAt: endsAt.toISOString() },
+    }
+    const res = responseMock()
+    const next = jest.fn()
+
+    await publicController.createRescheduleHold(req, res, next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(availability).not.toHaveBeenCalled()
+    expect(mint).toHaveBeenCalledWith({
+      venueId: 'venue-1',
+      reservationId: 'reservation-1',
+      requestedStartsAt: startsAt,
+      requestedEndsAt: endsAt,
+    })
+    expect(res.json).toHaveBeenCalledWith(expect.not.objectContaining({ staffId: expect.anything() }))
   })
 
   it('public ordinary no-deposit preflight passes the exact persisted deposits snapshot', async () => {

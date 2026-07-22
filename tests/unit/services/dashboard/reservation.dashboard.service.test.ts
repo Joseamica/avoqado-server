@@ -21,6 +21,12 @@ import * as appointmentStaffAssignmentService from '@/services/dashboard/appoint
 import * as calendarOutboxService from '@/services/google-calendar/outbox.service'
 import * as reservationSettingsService from '@/services/dashboard/reservationSettings.service'
 import * as appointmentWindowService from '@/services/reservation/resolveAppointmentWindow'
+import * as appointmentSlotHoldService from '@/services/reservation/appointmentSlotHold.service'
+import * as basePlanService from '@/services/access/basePlan.service'
+import * as rabbitCalendarPublisher from '@/communication/rabbitmq/gcal-push-consumer'
+import * as activityLogService from '@/services/dashboard/activity-log.service'
+import * as whatsappService from '@/services/whatsapp.service'
+import emailService from '@/services/email.service'
 import { getDefaultOperatingHours, type ReservationConfig } from '@/services/dashboard/reservationSettings.service'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
@@ -114,6 +120,7 @@ const createMockReservation = (overrides: Record<string, any> = {}) => ({
   partySize: 2,
   tableId: 'table-1',
   productId: null,
+  productIds: [],
   assignedStaffId: null,
   depositAmount: null,
   depositStatus: null,
@@ -2039,6 +2046,102 @@ describe('Reservation Dashboard Service', () => {
   // ==========================================
 
   describe('updateReservation', () => {
+    beforeEach(() => {
+      jest.spyOn(appointmentSlotHoldService, 'lockReservationForReschedule').mockResolvedValue({
+        id: 'res-1',
+        venueId: VENUE_ID,
+        startsAt: new Date('2026-03-01T14:00:00Z'),
+        endsAt: new Date('2026-03-01T15:00:00Z'),
+        duration: 60,
+        productId: null,
+        productIds: [],
+        tableId: null,
+        assignedStaffId: null,
+        partySize: 2,
+        classSessionId: null,
+        status: 'CONFIRMED',
+      })
+      jest.spyOn(calendarOutboxService, 'resolveReservationPushTargets').mockResolvedValue([])
+    })
+
+    it.each([
+      ['startsAt', { startsAt: new Date('2026-03-01T13:30:00Z') }],
+      ['endsAt', { endsAt: new Date('2026-03-01T15:30:00Z') }],
+      ['duration', { duration: 61 }],
+      ['productId', { productId: 'prod-1' }],
+      ['assignedStaffId', { assignedStaffId: 'staff-2' }],
+    ])('invalidates tagged reschedule holds atomically when effective %s changes', async (_field, input) => {
+      const existing = createMockReservation()
+      prismaMock.reservation.findFirst.mockResolvedValue(existing)
+      prismaMock.reservation.update.mockResolvedValue({ ...existing, ...input } as any)
+
+      await updateReservation(VENUE_ID, 'res-1', input, DASHBOARD_WRITE, STAFF_ID)
+
+      const venueLock = appointmentStaffAssignmentService.lockAppointmentVenue as jest.Mock
+      const reservationLock = appointmentSlotHoldService.lockReservationForReschedule as jest.Mock
+      const siblingCallIndex = prismaMock.$queryRaw.mock.calls.findIndex((call: unknown[]) =>
+        (call[0] as TemplateStringsArray).join('?').match(/FROM "SlotHold"[\s\S]*heldForReservationId[\s\S]*ORDER BY id[\s\S]*FOR UPDATE/i),
+      )
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+      expect(siblingCallIndex).toBeGreaterThanOrEqual(0)
+      expect(prismaMock.$queryRaw.mock.calls[siblingCallIndex].slice(1)).toEqual([VENUE_ID, 'res-1'])
+      expect(prismaMock.slotHold.deleteMany).toHaveBeenCalledWith({
+        where: { venueId: VENUE_ID, heldForReservationId: 'res-1' },
+      })
+      expect(venueLock.mock.invocationCallOrder[0]).toBeLessThan(reservationLock.mock.invocationCallOrder[0])
+      expect(reservationLock.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.$queryRaw.mock.invocationCallOrder[siblingCallIndex])
+      expect(prismaMock.$queryRaw.mock.invocationCallOrder[siblingCallIndex]).toBeLessThan(
+        prismaMock.slotHold.deleteMany.mock.invocationCallOrder[0],
+      )
+      expect(prismaMock.slotHold.deleteMany.mock.invocationCallOrder[0]).toBeLessThan(
+        prismaMock.reservation.update.mock.invocationCallOrder[0],
+      )
+    })
+
+    it('keeps tagged holds when supplied identity fields have the same effective values', async () => {
+      const existing = createMockReservation()
+      prismaMock.reservation.findFirst.mockResolvedValue(existing)
+      prismaMock.reservation.update.mockResolvedValue(existing)
+
+      await updateReservation(
+        VENUE_ID,
+        'res-1',
+        {
+          startsAt: existing.startsAt,
+          endsAt: existing.endsAt,
+          duration: existing.duration,
+          productId: existing.productId,
+          assignedStaffId: existing.assignedStaffId,
+        },
+        DASHBOARD_WRITE,
+        STAFF_ID,
+      )
+
+      expect(appointmentStaffAssignmentService.lockAppointmentVenue).toHaveBeenCalledTimes(1)
+      expect(appointmentSlotHoldService.lockReservationForReschedule).toHaveBeenCalledTimes(1)
+      expect(
+        prismaMock.$queryRaw.mock.calls.some((call: unknown[]) =>
+          (call[0] as TemplateStringsArray).join('?').match(/FROM "SlotHold"[\s\S]*heldForReservationId/i),
+        ),
+      ).toBe(false)
+      expect(prismaMock.slotHold.deleteMany).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['metadata', { guestName: 'Nombre actualizado' }],
+      ['party size', { partySize: 3 }],
+    ])('preserves tagged holds for a %s-only update', async (_label, input) => {
+      const existing = createMockReservation()
+      prismaMock.reservation.findFirst.mockResolvedValue(existing)
+      prismaMock.reservation.update.mockResolvedValue({ ...existing, ...input } as any)
+
+      await updateReservation(VENUE_ID, 'res-1', input, DASHBOARD_WRITE, STAFF_ID)
+
+      expect(appointmentStaffAssignmentService.lockAppointmentVenue).not.toHaveBeenCalled()
+      expect(appointmentSlotHoldService.lockReservationForReschedule).not.toHaveBeenCalled()
+      expect(prismaMock.slotHold.deleteMany).not.toHaveBeenCalled()
+    })
+
     it('re-reads settings after a retry before applying the successful event-capacity policy', async () => {
       const settingsSpy = jest
         .spyOn(reservationSettingsService, 'getReservationSettings')
@@ -2219,6 +2322,20 @@ describe('Reservation Dashboard Service', () => {
         startsAt: new Date('2026-03-02T16:00:00Z'),
         endsAt: new Date('2026-03-02T17:30:00Z'),
         duration: 90,
+      })
+      jest.spyOn(appointmentSlotHoldService, 'lockReservationForReschedule').mockResolvedValue({
+        id: existing.id,
+        venueId: existing.venueId,
+        startsAt: existing.startsAt,
+        endsAt: existing.endsAt,
+        duration: existing.duration,
+        productId: existing.productId,
+        productIds: existing.productIds,
+        tableId: existing.tableId,
+        assignedStaffId: existing.assignedStaffId,
+        partySize: existing.partySize,
+        classSessionId: null,
+        status: existing.status,
       })
 
       prismaMock.reservation.findFirst
@@ -2604,11 +2721,10 @@ describe('handleNoShowDepositForfeit (Escenario A — no-show keeps the deposit)
 
 describe('rescheduleAppointmentReservation', () => {
   const VENUE = 'venue-123'
-  const future = Date.now() + 24 * 3_600_000 // tomorrow — outside any cancel window
-  const oldStart = new Date(future)
-  const oldEnd = new Date(future + 60 * 60_000)
-  const newStart = new Date(future + 3 * 3_600_000)
-  const newEnd = new Date(newStart.getTime() + 60 * 60_000) // duration stays 60
+  const oldStart = new Date('2026-09-01T15:00:00.000Z')
+  const oldEnd = new Date('2026-09-01T16:00:00.000Z')
+  const newStart = new Date('2026-09-02T15:00:00.000Z')
+  const newEnd = new Date('2026-09-02T16:00:00.000Z')
 
   function makeAppt(overrides: Record<string, any> = {}) {
     return {
@@ -2617,123 +2733,79 @@ describe('rescheduleAppointmentReservation', () => {
       confirmationCode: 'RES-APPT1',
       status: 'CONFIRMED',
       classSessionId: null,
-      productId: null,
+      productId: 'product-1',
+      productIds: ['product-1', 'product-2'],
       tableId: null,
-      assignedStaffId: null,
+      assignedStaffId: 'staff-1',
       duration: 60,
-      partySize: 1,
+      partySize: 2,
       startsAt: oldStart,
       endsAt: oldEnd,
       guestName: 'Ana',
-      guestPhone: null, // null phone + email → notifications skipped (keeps the test pure)
+      guestPhone: null,
       guestEmail: null,
-      customer: null,
-      product: null,
+      customer: { firstName: 'Ana', lastName: 'Paz', phone: null, email: null },
+      product: { name: 'Servicio' },
       venue: { name: 'Amaena', timezone: 'America/Mexico_City' },
       ...overrides,
+    }
+  }
+
+  function lockedIdentity(overrides: Record<string, any> = {}) {
+    const reservation = makeAppt(overrides)
+    return {
+      id: reservation.id,
+      venueId: reservation.venueId,
+      startsAt: reservation.startsAt,
+      endsAt: reservation.endsAt,
+      duration: reservation.duration,
+      productId: reservation.productId,
+      productIds: reservation.productIds,
+      tableId: reservation.tableId,
+      assignedStaffId: reservation.assignedStaffId,
+      partySize: reservation.partySize,
+      classSessionId: reservation.classSessionId,
+      status: reservation.status,
     }
   }
 
   beforeEach(() => {
     jest.restoreAllMocks()
     jest.resetAllMocks()
-    // Mirror the working updateReservation env from the main suite's beforeEach.
     prismaMock.$transaction.mockImplementation(async (arg: any) => (typeof arg === 'function' ? arg(prismaMock) : arg))
-    prismaMock.$queryRaw.mockResolvedValue([])
-    prismaMock.table.findFirst.mockResolvedValue({ id: 'table-1' })
-    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1' })
-    prismaMock.product.findFirst.mockResolvedValue({ id: 'prod-1', price: new Prisma.Decimal(100), eventCapacity: 20 })
-    prismaMock.reservation.updateMany.mockResolvedValue({ count: 1 } as any)
-    prismaMock.productModifierGroup.findMany.mockResolvedValue([])
-    prismaMock.externalBusyBlock.findMany.mockResolvedValue([])
-  })
-
-  it('rejects a class reservation (must use the class flow)', async () => {
-    prismaMock.reservation.findFirst.mockResolvedValue(makeAppt({ classSessionId: 'sess-1' }))
-    await expect(
-      rescheduleAppointmentReservation({
-        venueId: VENUE,
-        reservationId: 'res-appt-1',
-        newStartsAt: newStart,
-        holdId: 'h1',
-        rescheduledBy: 'CUSTOMER',
-        writeOrigin: 'PUBLIC',
-      }),
-    ).rejects.toThrow(/solo para citas/i)
-  })
-
-  it('rejects a non-reschedulable status', async () => {
-    prismaMock.reservation.findFirst.mockResolvedValue(makeAppt({ status: 'COMPLETED' }))
-    await expect(
-      rescheduleAppointmentReservation({
-        venueId: VENUE,
-        reservationId: 'res-appt-1',
-        newStartsAt: newStart,
-        holdId: 'h1',
-        rescheduledBy: 'CUSTOMER',
-        writeOrigin: 'PUBLIC',
-      }),
-    ).rejects.toThrow(/COMPLETED/)
-  })
-
-  it('409s when the hold is expired', async () => {
-    prismaMock.reservation.findFirst.mockResolvedValue(makeAppt())
-    prismaMock.slotHold.findFirst.mockResolvedValue({
+    jest.spyOn(basePlanService, 'venueHasFeatureAccess').mockResolvedValue(true)
+    jest
+      .spyOn(reservationSettingsService, 'getReservationSettings')
+      .mockResolvedValue(makeReservationSettings({ capacityMode: 'per_staff', showStaffPicker: true }))
+    jest.spyOn(appointmentStaffAssignmentService, 'lockAppointmentVenue').mockResolvedValue()
+    jest.spyOn(appointmentStaffAssignmentService, 'assertStaffEligibleForPersistedProducts').mockResolvedValue()
+    jest.spyOn(appointmentSlotHoldService, 'lockReservationForReschedule').mockResolvedValue(lockedIdentity())
+    jest.spyOn(appointmentSlotHoldService, 'lockAndValidateRescheduleAppointmentHold').mockResolvedValue({
       id: 'h1',
-      venueId: VENUE,
-      startsAt: newStart,
+      checkedAt: new Date('2026-08-01T10:00:00.000Z'),
       endsAt: newEnd,
-      expiresAt: new Date(Date.now() - 1000),
+      productIds: ['product-1', 'product-2'],
+      staffId: 'staff-1',
+      releaseAGrace: false,
     })
-    await expect(
-      rescheduleAppointmentReservation({
-        venueId: VENUE,
-        reservationId: 'res-appt-1',
-        newStartsAt: newStart,
-        holdId: 'h1',
-        rescheduledBy: 'CUSTOMER',
-        writeOrigin: 'PUBLIC',
-      }),
-    ).rejects.toThrow(/ya no está disponible/i)
-  })
-
-  it('400s when the hold window does not match the requested move', async () => {
-    prismaMock.reservation.findFirst.mockResolvedValue(makeAppt())
-    prismaMock.slotHold.findFirst.mockResolvedValue({
-      id: 'h1',
-      venueId: VENUE,
-      startsAt: newStart,
-      endsAt: new Date(newEnd.getTime() + 30 * 60_000), // wrong end
-      expiresAt: new Date(Date.now() + 60_000),
-    })
-    await expect(
-      rescheduleAppointmentReservation({
-        venueId: VENUE,
-        reservationId: 'res-appt-1',
-        newStartsAt: newStart,
-        holdId: 'h1',
-        rescheduledBy: 'CUSTOMER',
-        writeOrigin: 'PUBLIC',
-      }),
-    ).rejects.toThrow(/no coincide/i)
-  })
-
-  it('moves the appointment, keeps duration, and consumes the hold (customer path)', async () => {
-    const existing = makeAppt()
-    const updated = makeAppt({ startsAt: newStart, endsAt: newEnd })
-    prismaMock.reservation.findFirst.mockResolvedValue(existing) // load + updateReservation internal load
-    prismaMock.slotHold.findFirst.mockResolvedValue({
-      id: 'h1',
-      venueId: VENUE,
-      startsAt: newStart,
-      endsAt: newEnd,
-      expiresAt: new Date(Date.now() + 60_000),
-    })
-    prismaMock.reservation.update.mockResolvedValue(updated)
-    prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(updated)
+    prismaMock.reservation.findUnique.mockResolvedValue(makeAppt() as any)
+    prismaMock.reservation.update.mockResolvedValue(makeAppt({ startsAt: newStart, endsAt: newEnd }) as any)
     prismaMock.slotHold.deleteMany.mockResolvedValue({ count: 1 } as any)
+    jest.spyOn(calendarOutboxService, 'resolveReservationPushTargets').mockResolvedValue([{ id: 'connection-1' }] as any)
+    jest.spyOn(calendarOutboxService, 'enqueuePush').mockResolvedValue(['outbox-1'])
+    jest.spyOn(rabbitCalendarPublisher, 'publishPushNotification').mockResolvedValue(undefined as never)
+    jest.spyOn(whatsappService, 'sendReservationRescheduleWhatsApp').mockResolvedValue(undefined as never)
+    jest.spyOn(emailService, 'sendReservationRescheduledEmail').mockResolvedValue(undefined as never)
+  })
 
-    const infoSpy = jest.spyOn(logger, 'info').mockImplementation(() => logger)
+  it('checks Feature before one transaction and consumes R+H atomically in venue→R→hold order without pacing', async () => {
+    const settingsSpy = jest.spyOn(reservationSettingsService, 'getReservationSettings')
+    const venueLock = jest.spyOn(appointmentStaffAssignmentService, 'lockAppointmentVenue')
+    const reservationLock = jest.spyOn(appointmentSlotHoldService, 'lockReservationForReschedule')
+    const holdLock = jest.spyOn(appointmentSlotHoldService, 'lockAndValidateRescheduleAppointmentHold')
+    const staffGate = jest.spyOn(appointmentStaffAssignmentService, 'assertStaffEligibleForPersistedProducts')
+    const capacity = jest.spyOn(reservationAvailabilityService, 'countAppointmentOccupancy')
+
     const result = await rescheduleAppointmentReservation({
       venueId: VENUE,
       reservationId: 'res-appt-1',
@@ -2743,12 +2815,229 @@ describe('rescheduleAppointmentReservation', () => {
       writeOrigin: 'PUBLIC',
     })
 
+    expect(basePlanService.venueHasFeatureAccess).toHaveBeenCalledWith(VENUE, 'RESERVATIONS')
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    expect(settingsSpy.mock.invocationCallOrder[0]).toBeLessThan(venueLock.mock.invocationCallOrder[0])
+    expect(venueLock.mock.invocationCallOrder[0]).toBeLessThan(reservationLock.mock.invocationCallOrder[0])
+    expect(reservationLock.mock.invocationCallOrder[0]).toBeLessThan(holdLock.mock.invocationCallOrder[0])
+    expect(holdLock).toHaveBeenCalledWith(prismaMock, {
+      venueId: VENUE,
+      holdId: 'h1',
+      reservation: lockedIdentity(),
+      requestedStartsAt: newStart,
+      settings: makeReservationSettings({ capacityMode: 'per_staff', showStaffPicker: true }),
+    })
+    expect(staffGate).toHaveBeenCalledWith(
+      prismaMock,
+      expect.objectContaining({
+        venueId: VENUE,
+        staffId: 'staff-1',
+        productIds: ['product-1', 'product-2'],
+        startsAt: newStart,
+        endsAt: newEnd,
+        excludeReservationId: 'res-appt-1',
+        excludeHoldId: 'h1',
+      }),
+    )
+    expect(capacity).not.toHaveBeenCalled()
+    expect(prismaMock.reservation.findFirst).not.toHaveBeenCalled()
+    expect(prismaMock.slotHold.findFirst).not.toHaveBeenCalled()
     expect(prismaMock.reservation.update).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ startsAt: newStart, endsAt: newEnd, duration: 60 }) }),
     )
-    expect(prismaMock.slotHold.deleteMany).toHaveBeenCalledWith({ where: { id: 'h1', venueId: VENUE } })
-    expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('origin=PUBLIC'))
+    expect(calendarOutboxService.enqueuePush).toHaveBeenCalled()
+    expect(prismaMock.slotHold.deleteMany).toHaveBeenCalledWith({
+      where: {
+        venueId: VENUE,
+        OR: [{ id: 'h1' }, { heldForReservationId: 'res-appt-1' }],
+      },
+    })
     expect(result.confirmationCode).toBe('RES-APPT1')
+  })
+
+  it.each([
+    ['class reservation', { classSessionId: 'class-1' }],
+    ['non-reschedulable status', { status: 'CANCELLED' }],
+  ])('keeps the locked %s rejection inside the transaction and preserves H', async (_label, reservationOverride) => {
+    jest.spyOn(appointmentSlotHoldService, 'lockReservationForReschedule').mockResolvedValue(lockedIdentity(reservationOverride))
+    jest
+      .spyOn(appointmentSlotHoldService, 'lockAndValidateRescheduleAppointmentHold')
+      .mockRejectedValue(new ConflictError('Tu reserva temporal ya no es válida. Selecciona el horario de nuevo.'))
+
+    await expect(
+      rescheduleAppointmentReservation({
+        venueId: VENUE,
+        reservationId: 'res-appt-1',
+        newStartsAt: newStart,
+        holdId: 'h1',
+        rescheduledBy: 'CUSTOMER',
+        writeOrigin: 'PUBLIC',
+      }),
+    ).rejects.toMatchObject({ statusCode: 409 })
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    expect(prismaMock.reservation.update).not.toHaveBeenCalled()
+    expect(prismaMock.slotHold.deleteMany).not.toHaveBeenCalled()
+  })
+
+  it('rejects Feature downgrade before the transaction and leaves R/H untouched for later reactivation', async () => {
+    jest.spyOn(basePlanService, 'venueHasFeatureAccess').mockResolvedValue(false)
+
+    await expect(
+      rescheduleAppointmentReservation({
+        venueId: VENUE,
+        reservationId: 'res-appt-1',
+        newStartsAt: newStart,
+        holdId: 'h1',
+        rescheduledBy: 'CUSTOMER',
+        writeOrigin: 'PUBLIC',
+      }),
+    ).rejects.toMatchObject({ statusCode: 403, code: 'PLAN_REQUIRED', message: expect.stringMatching(/reservaciones/i) })
+
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(prismaMock.reservation.update).not.toHaveBeenCalled()
+    expect(prismaMock.slotHold.deleteMany).not.toHaveBeenCalled()
+  })
+
+  it('preserves the candidate on locked mismatch with zero move/outbox writes', async () => {
+    jest
+      .spyOn(appointmentSlotHoldService, 'lockAndValidateRescheduleAppointmentHold')
+      .mockRejectedValue(new ConflictError('Tu reserva temporal ya no es válida. Selecciona el horario de nuevo.'))
+
+    await expect(
+      rescheduleAppointmentReservation({
+        venueId: VENUE,
+        reservationId: 'res-appt-1',
+        newStartsAt: newStart,
+        holdId: 'h1',
+        rescheduledBy: 'CUSTOMER',
+        writeOrigin: 'PUBLIC',
+      }),
+    ).rejects.toMatchObject({ statusCode: 409 })
+
+    expect(prismaMock.reservation.update).not.toHaveBeenCalled()
+    expect(calendarOutboxService.enqueuePush).not.toHaveBeenCalled()
+    expect(prismaMock.slotHold.deleteMany).not.toHaveBeenCalled()
+  })
+
+  it('rechecks venue-wide external busy blocks when a legacy hold has no staff, without recounting pacing', async () => {
+    jest
+      .spyOn(reservationSettingsService, 'getReservationSettings')
+      .mockResolvedValue(makeReservationSettings({ capacityMode: 'pacing', showStaffPicker: false }))
+    jest.spyOn(appointmentSlotHoldService, 'lockAndValidateRescheduleAppointmentHold').mockResolvedValue({
+      id: 'legacy-null-staff',
+      checkedAt: new Date('2026-08-01T10:00:00.000Z'),
+      endsAt: newEnd,
+      productIds: ['product-1', 'product-2'],
+      staffId: null,
+      releaseAGrace: true,
+    })
+    prismaMock.externalBusyBlock.findFirst.mockResolvedValue({ id: 'venue-master-block' } as any)
+    const capacity = jest.spyOn(reservationAvailabilityService, 'countAppointmentOccupancy')
+
+    await expect(
+      rescheduleAppointmentReservation({
+        venueId: VENUE,
+        reservationId: 'res-appt-1',
+        newStartsAt: newStart,
+        holdId: 'legacy-null-staff',
+        rescheduledBy: 'CUSTOMER',
+        writeOrigin: 'PUBLIC',
+      }),
+    ).rejects.toMatchObject({
+      statusCode: 409,
+      message: 'Este horario fue bloqueado por un evento de calendario externo',
+    })
+
+    expect(prismaMock.externalBusyBlock.findFirst).toHaveBeenCalledWith({
+      where: {
+        OR: [{ venueId: VENUE }],
+        startsAt: { lt: newEnd },
+        endsAt: { gt: newStart },
+      },
+    })
+    expect(appointmentStaffAssignmentService.assertStaffEligibleForPersistedProducts).not.toHaveBeenCalled()
+    expect(capacity).not.toHaveBeenCalled()
+    expect(prismaMock.reservation.update).not.toHaveBeenCalled()
+    expect(prismaMock.slotHold.deleteMany).not.toHaveBeenCalled()
+  })
+
+  it('revalidates the exact table of a hybrid appointment inside the locked consume transaction', async () => {
+    jest.spyOn(appointmentSlotHoldService, 'lockReservationForReschedule').mockResolvedValue(lockedIdentity({ tableId: 'table-1' }))
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 'other-reservation', confirmationCode: 'RES-OTHER' }])
+
+    await expect(
+      rescheduleAppointmentReservation({
+        venueId: VENUE,
+        reservationId: 'res-appt-1',
+        newStartsAt: newStart,
+        holdId: 'h1',
+        rescheduledBy: 'CUSTOMER',
+        writeOrigin: 'PUBLIC',
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, message: 'Mesa tiene conflicto con reservacion RES-OTHER' })
+
+    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1)
+    expect((prismaMock.$queryRaw.mock.calls[0][0] as TemplateStringsArray).join('?')).toMatch(
+      /FROM "Reservation"[\s\S]*"venueId" = \?[\s\S]*"tableId" = \?[\s\S]*id <> \?[\s\S]*"startsAt" < \?[\s\S]*"endsAt" > \?[\s\S]*FOR UPDATE NOWAIT/i,
+    )
+    expect(prismaMock.$queryRaw.mock.calls[0].slice(1)).toEqual([VENUE, 'table-1', 'res-appt-1', newEnd, newStart])
+    expect(prismaMock.reservation.update).not.toHaveBeenCalled()
+    expect(prismaMock.slotHold.deleteMany).not.toHaveBeenCalled()
+  })
+
+  it('emits the exact Release A grace metric and all external side effects once after a serialization retry', async () => {
+    jest.spyOn(appointmentSlotHoldService, 'lockAndValidateRescheduleAppointmentHold').mockResolvedValue({
+      id: 'legacy-hold',
+      checkedAt: new Date('2026-08-01T10:00:00.000Z'),
+      endsAt: newEnd,
+      productIds: ['product-1', 'product-2'],
+      staffId: 'staff-1',
+      releaseAGrace: true,
+    })
+    prismaMock.reservation.findUnique.mockResolvedValue(
+      makeAppt({ customer: { firstName: 'Ana', lastName: 'Paz', phone: '+5215512345678', email: 'ana@example.com' } }) as any,
+    )
+    prismaMock.reservation.update.mockRejectedValueOnce(Object.assign(new Error('serialization'), { code: 'P2034' })).mockResolvedValueOnce(
+      makeAppt({
+        startsAt: newStart,
+        endsAt: newEnd,
+        customer: { firstName: 'Ana', lastName: 'Paz', phone: '+5215512345678', email: 'ana@example.com' },
+      }) as any,
+    )
+
+    await rescheduleAppointmentReservation({
+      venueId: VENUE,
+      reservationId: 'res-appt-1',
+      newStartsAt: newStart,
+      holdId: 'legacy-hold',
+      rescheduledBy: 'CUSTOMER',
+      writeOrigin: 'PUBLIC',
+    })
+
+    expect(reservationSettingsService.getReservationSettings).toHaveBeenCalledTimes(2)
+    expect(appointmentStaffAssignmentService.lockAppointmentVenue).toHaveBeenCalledTimes(2)
+    expect(appointmentSlotHoldService.lockReservationForReschedule).toHaveBeenCalledTimes(2)
+    expect(appointmentSlotHoldService.lockAndValidateRescheduleAppointmentHold).toHaveBeenCalledTimes(2)
+    expect(prismaMock.reservation.update).toHaveBeenCalledTimes(2)
+    const metricCalls = (logger.warn as jest.Mock).mock.calls.filter(
+      ([message]) => message === '[slot-hold] Release A legacy reschedule hold consumed',
+    )
+    expect(metricCalls).toEqual([
+      [
+        '[slot-hold] Release A legacy reschedule hold consumed',
+        {
+          metric: 'reservation_reschedule_hold_release_a_grace',
+          venueId: VENUE,
+          reservationId: 'res-appt-1',
+          holdId: 'legacy-hold',
+        },
+      ],
+    ])
+    expect(rabbitCalendarPublisher.publishPushNotification).toHaveBeenCalledTimes(1)
+    expect(whatsappService.sendReservationRescheduleWhatsApp).toHaveBeenCalledTimes(1)
+    expect(emailService.sendReservationRescheduledEmail).toHaveBeenCalledTimes(1)
+    expect(activityLogService.logAction).toHaveBeenCalledTimes(1)
   })
 })
 

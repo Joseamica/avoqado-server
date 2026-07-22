@@ -164,6 +164,10 @@ describe('reschedule hold wire compatibility', () => {
     expect(rescheduleHoldBodySchema.parse({ ...legacyBody, unrelated: 'legacy-value' })).toEqual(legacyBody)
   })
 
+  it('accepts startsAt without legacy endsAt for new clients', () => {
+    expect(rescheduleHoldBodySchema.parse({ startsAt: legacyBody.startsAt })).toEqual({ startsAt: legacyBody.startsAt })
+  })
+
   it('rejects a supplied windowSemantics marker with a localized error', () => {
     expect(rescheduleHoldBodySchema.safeParse({ ...legacyBody, windowSemantics: 'base' })).toMatchObject({
       success: false,

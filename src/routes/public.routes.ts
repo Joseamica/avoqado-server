@@ -148,11 +148,9 @@ router.post(
   reservationPublicController.createReservation,
 )
 
-// Slot hold (Square "Cita reservada durante 9:56" countdown). The widget
-// creates a hold when the customer reaches the payment step and consumes it
-// (deletion) on successful reservation. The cancel route lets the widget
-// release a hold if the customer navigates back. Both hold routes are part of
-// the CREATE flow, so the pair is gated consistently with the create POST.
+// Slot hold (Square "Cita reservada durante 9:56" countdown). Minting belongs
+// to the paid create flow; releasing is deliberately ungated so a downgraded
+// venue cannot strand capacity until TTL.
 router.post(
   '/venues/:venueSlug/reservations/hold',
   writeLimit,
@@ -163,7 +161,6 @@ router.post(
 router.delete(
   '/venues/:venueSlug/reservations/hold/:holdId',
   cancelLimit,
-  requireReservationsPlan,
   validateRequest(z.object({ params: publicHoldParamsSchema })),
   reservationPublicController.cancelHold,
 )
@@ -188,12 +185,14 @@ router.post(
 router.get(
   '/venues/:venueSlug/reservations/:cancelSecret/reschedule/availability',
   readLimit,
+  requireReservationsPlan,
   validateRequest(z.object({ params: publicReservationParamsSchema, query: rescheduleAvailabilityQuerySchema })),
   reservationPublicController.getRescheduleAvailability,
 )
 router.post(
   '/venues/:venueSlug/reservations/:cancelSecret/reschedule/hold',
   writeLimit,
+  requireReservationsPlan,
   validateRequest(z.object({ params: publicReservationParamsSchema, body: rescheduleHoldBodySchema })),
   reservationPublicController.createRescheduleHold,
 )
