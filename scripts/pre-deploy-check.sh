@@ -5,7 +5,9 @@
 
 set -e  # Exit on any error
 
+DATABASE_URL_WAS_PRESENT="${DATABASE_URL+x}"
 DATABASE_URL_WAS_SET="${DATABASE_URL-}"
+TEST_DATABASE_URL_WAS_PRESENT="${TEST_DATABASE_URL+x}"
 TEST_DATABASE_URL_WAS_SET="${TEST_DATABASE_URL-}"
 
 # Load environment variables from .env file if it exists
@@ -24,8 +26,15 @@ if [ -f .env ]; then
   echo ""
 fi
 
-if [ -n "$DATABASE_URL_WAS_SET" ]; then export DATABASE_URL="$DATABASE_URL_WAS_SET"; fi
-if [ -n "$TEST_DATABASE_URL_WAS_SET" ]; then export TEST_DATABASE_URL="$TEST_DATABASE_URL_WAS_SET"; fi
+if [ "$DATABASE_URL_WAS_PRESENT" = "x" ]; then export DATABASE_URL="$DATABASE_URL_WAS_SET"; fi
+if [ "$TEST_DATABASE_URL_WAS_PRESENT" = "x" ]; then export TEST_DATABASE_URL="$TEST_DATABASE_URL_WAS_SET"; fi
+
+# An explicitly supplied test database must win over a DATABASE_URL loaded from
+# dotenv when the caller did not supply DATABASE_URL itself. Apply this before
+# any Prisma or migration command can connect to a database.
+if [ "$DATABASE_URL_WAS_PRESENT" != "x" ] && [ "$TEST_DATABASE_URL_WAS_PRESENT" = "x" ]; then
+  export DATABASE_URL="$TEST_DATABASE_URL"
+fi
 
 echo "🚀 ============================================="
 echo "🚀 PRE-DEPLOY VERIFICATION (CI/CD Simulation)"
