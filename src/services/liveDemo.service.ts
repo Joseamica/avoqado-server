@@ -494,9 +494,10 @@ export interface SimReservationResult {
  * - HARD venue check: refuses non-LIVE_DEMO venues.
  * - Cap: MAX_SIM_RESERVATIONS_PER_SESSION, counted via the internalNotes marker.
  *
- * Reuses the dashboard createReservation service (no moduleConfig → permissive
- * booking window + autoConfirm CONFIRMED), channel WEB — exactly what a booking
- * made from the venue's page looks like.
+ * Reuses the dashboard createReservation service with origin PUBLIC and channel
+ * WEB. This path performs no public rail/payment preflight and supplies no
+ * deposits override, so persisted transactional booking-window, auto-confirm,
+ * and deposits settings remain authoritative.
  */
 export async function simulateReservation(sessionId: string): Promise<SimReservationResult> {
   const session = await prisma.liveDemoSession.findUnique({

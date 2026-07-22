@@ -943,7 +943,12 @@ export async function createReservation(req: Request, res: Response, next: NextF
     let appointmentOwesAtVenue = false
     let appointmentOwesAmount = 0
     let effectiveDeposits = settings.deposits
-    let paymentPolicyOverride: reservationService.ReservationWriteContext['paymentPolicyOverride']
+    // Bind the deposits decision evaluated against the public payment/rail
+    // preflight to this write. Core still re-reads scheduling, auto-confirm,
+    // capacity, and every non-payment setting inside its transaction.
+    let paymentPolicyOverride: NonNullable<reservationService.ReservationWriteContext['paymentPolicyOverride']> = {
+      deposits: effectiveDeposits,
+    }
     if (req.body.productId && !req.body.classSessionId) {
       const upfrontProduct = await prisma.product.findFirst({
         where: { id: req.body.productId, venueId: venue.id },
@@ -1031,7 +1036,7 @@ export async function createReservation(req: Request, res: Response, next: NextF
       },
       {
         writeOrigin: 'PUBLIC',
-        ...(paymentPolicyOverride ? { paymentPolicyOverride } : {}),
+        paymentPolicyOverride,
       },
     )
 

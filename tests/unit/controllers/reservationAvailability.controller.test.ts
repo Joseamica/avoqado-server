@@ -143,6 +143,122 @@ describe('reservation availability controller boundaries', () => {
     })
   })
 
+  it('public ordinary no-deposit preflight passes the exact persisted deposits snapshot', async () => {
+    const deposits = {
+      enabled: false,
+      mode: 'none',
+      fixedAmount: null,
+      percentageOfTotal: null,
+      requiredForPartySizeGte: null,
+      paymentWindowHrs: 24,
+    } as const
+    jest.spyOn(settingsService, 'getReservationSettings').mockResolvedValue({
+      ...settings,
+      deposits,
+      payments: { appointmentUpfrontDefault: 'at_venue', classUpfrontDefault: 'required' },
+    } as any)
+    const createSpy = jest.spyOn(reservationService, 'createReservation').mockResolvedValue({
+      id: 'reservation-1',
+      confirmationCode: 'RES-1',
+      cancelSecret: 'secret',
+      startsAt,
+      endsAt,
+      status: 'CONFIRMED',
+      depositAmount: null,
+      guestEmail: null,
+      guestPhone: null,
+      productId: null,
+    } as any)
+    const req: any = {
+      params: { venueSlug: 'venue' },
+      headers: {},
+      body: { startsAt, endsAt, duration: 60, partySize: 1 },
+    }
+    const res = responseMock()
+    const next = jest.fn()
+
+    await publicController.createReservation(req, res, next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(createSpy).toHaveBeenCalledWith('venue-1', expect.objectContaining({ channel: 'WEB' }), {
+      writeOrigin: 'PUBLIC',
+      paymentPolicyOverride: { deposits },
+    })
+  })
+
+  it('keeps a public booking confirmed when transactional deposits become required after a no-deposit rail preflight', async () => {
+    const evaluatedDeposits = {
+      enabled: false,
+      mode: 'none',
+      fixedAmount: null,
+      percentageOfTotal: null,
+      requiredForPartySizeGte: null,
+      paymentWindowHrs: 24,
+    } as const
+    const transactionalDeposits = {
+      enabled: true,
+      mode: 'deposit',
+      fixedAmount: 90,
+      percentageOfTotal: null,
+      requiredForPartySizeGte: null,
+      paymentWindowHrs: 24,
+    } as const
+    const settingsSpy = jest
+      .spyOn(settingsService, 'getReservationSettings')
+      .mockResolvedValueOnce({
+        ...settings,
+        deposits: evaluatedDeposits,
+        payments: { appointmentUpfrontDefault: 'at_venue', classUpfrontDefault: 'required' },
+      } as any)
+      .mockResolvedValueOnce({
+        ...settings,
+        deposits: transactionalDeposits,
+        payments: { appointmentUpfrontDefault: 'at_venue', classUpfrontDefault: 'required' },
+      } as any)
+    const stripeSpy = jest.spyOn(ecommerceCapability, 'resolveChargeableStripeMerchant').mockResolvedValue(null)
+    prismaMock.$transaction.mockImplementation(async (fn: any) => fn(prismaMock))
+    prismaMock.reservation.findUnique.mockResolvedValue(null)
+    prismaMock.reservationSettings.findUnique.mockResolvedValue(null)
+    prismaMock.reservation.create.mockImplementation(async ({ data }: any) => ({
+      ...data,
+      id: 'reservation-1',
+      confirmationCode: data.confirmationCode,
+      cancelSecret: 'secret',
+      classSessionId: null,
+      productIds: [],
+      spotIds: [],
+      creditRedeemed: false,
+      creditsUsed: 0,
+      customer: null,
+      table: null,
+      product: null,
+      assignedStaff: null,
+    }))
+    const req: any = {
+      params: { venueSlug: 'venue' },
+      headers: {},
+      body: { startsAt, endsAt, duration: 60, partySize: 1 },
+    }
+    const res = responseMock()
+    const next = jest.fn()
+
+    await publicController.createReservation(req, res, next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(settingsSpy).toHaveBeenNthCalledWith(1, 'venue-1')
+    expect(settingsSpy).toHaveBeenNthCalledWith(2, 'venue-1', prismaMock)
+    expect(stripeSpy).not.toHaveBeenCalled()
+    expect(prismaMock.reservation.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'CONFIRMED', depositAmount: null, depositStatus: null }),
+      }),
+    )
+    expect(res.status).toHaveBeenCalledWith(201)
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'CONFIRMED', depositRequired: false, depositAmount: null, checkoutUrl: null }),
+    )
+  })
+
   it('public no-Stripe fallback passes only a deposits suppression override and preserves pay-at-venue stamping', async () => {
     const configured = {
       ...settings,
