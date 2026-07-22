@@ -75,7 +75,9 @@ describe('createReservation with modifiers', () => {
       if (typeof fn === 'function') return fn(prismaMock)
       return fn
     })
+    ;(prismaMock as any).$executeRaw = jest.fn().mockResolvedValue(0)
     prismaMock.$queryRaw.mockResolvedValue([])
+    prismaMock.reservationSettings.findUnique.mockResolvedValue(null)
     prismaMock.product.findFirst.mockResolvedValue(baseProduct)
     prismaMock.product.findMany.mockResolvedValue([baseProduct] as any)
     prismaMock.staffVenue.findFirst.mockResolvedValue(null)
@@ -158,7 +160,17 @@ describe('createReservation with modifiers', () => {
       },
     ] as any)
     prismaMock.table.findFirst.mockResolvedValue({ id: 'table-1' } as any)
-    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'staff-venue-1' } as any)
+    prismaMock.staffVenue.findFirst.mockResolvedValue({
+      id: 'staff-venue-1',
+      staffId: 'staff-1',
+      startDate: new Date('2026-01-01T00:00:00.000Z'),
+      venue: { organizationId: 'organization-1', timezone: 'UTC' },
+    } as any)
+    prismaMock.staffVenue.findMany.mockResolvedValue([{ venueId }] as any)
+    prismaMock.productStaff.findMany.mockResolvedValue([{ productId }] as any)
+    prismaMock.staffSchedule.findFirst.mockResolvedValue(null)
+    prismaMock.staffScheduleException.findMany.mockResolvedValue([])
+    prismaMock.reservationSettings.findUnique.mockResolvedValue({ showStaffPicker: true } as any)
     prismaMock.reservation.create.mockImplementation(async ({ data }: any) => ({ ...mockReservation, ...data }) as any)
 
     await createReservation(
