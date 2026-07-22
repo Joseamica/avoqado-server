@@ -913,19 +913,21 @@ describe('reservation availability controller boundaries', () => {
     })
   })
 
-  it('keeps the legacy class-hold path and its empty product list unchanged', async () => {
+  it('keeps the legacy class hold when classSessionId accompanies a scalar class productId', async () => {
+    prismaMock.product.findMany.mockResolvedValue([{ id: 'class-product', type: 'CLASS' }] as any)
     prismaMock.classSession.findFirst.mockResolvedValue({ id: 'class-session-1' } as any)
     prismaMock.slotHold.create.mockResolvedValue({ id: 'class-hold', expiresAt: new Date('2026-08-21T15:10:00.000Z') } as any)
     prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock))
     const req: any = {
       params: { venueSlug: 'venue' },
-      body: { startsAt, endsAt, classSessionId: 'class-session-1', partySize: 3 },
+      body: { startsAt, endsAt, productId: 'class-product', classSessionId: 'class-session-1', partySize: 3 },
     }
     const next = jest.fn()
 
     await publicController.createHold(req, responseMock(), next)
 
     expect(next).not.toHaveBeenCalled()
+    expect(prismaMock.product.findMany).not.toHaveBeenCalled()
     expect(prismaMock.classSession.findFirst).toHaveBeenCalledWith({
       where: { id: 'class-session-1', venueId: 'venue-1' },
       select: { id: true },
@@ -936,10 +938,10 @@ describe('reservation availability controller boundaries', () => {
     })
   })
 
-  it('leaves the product-scoped CLASS branch unchanged', async () => {
+  it('uses the canonical trimmed scalar throughout product-scoped CLASS availability', async () => {
     prismaMock.product.findFirst.mockResolvedValue({ type: 'CLASS' })
     const appointmentAvailability = jest.spyOn(availabilityService, 'getAvailableSlots')
-    jest.spyOn(availabilityService, 'getClassSessionSlots').mockResolvedValue([
+    const classAvailability = jest.spyOn(availabilityService, 'getClassSessionSlots').mockResolvedValue([
       {
         classSessionId: 'class-1',
         startsAt,
@@ -953,13 +955,18 @@ describe('reservation availability controller boundaries', () => {
         instructor: { firstName: 'Ana', lastName: 'Alfa' },
       },
     ])
-    const req: any = { params: { venueSlug: 'venue' }, query: { date, productId: 'class-product' } }
+    const req: any = { params: { venueSlug: 'venue' }, query: { date, productId: ' class-product ' } }
     const res = responseMock()
     const next = jest.fn()
 
     await publicController.getAvailability(req, res, next)
 
     expect(next).not.toHaveBeenCalled()
+    expect(prismaMock.product.findFirst).toHaveBeenCalledWith({
+      where: { id: 'class-product', venueId: 'venue-1', active: true },
+      select: { type: true },
+    })
+    expect(classAvailability).toHaveBeenCalledWith('venue-1', 'class-product', date, 100, 'UTC')
     expect(appointmentAvailability).not.toHaveBeenCalled()
     expect(res.json).toHaveBeenCalledWith({
       date,

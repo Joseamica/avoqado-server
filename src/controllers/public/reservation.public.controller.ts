@@ -525,20 +525,20 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
 
     // ── Single-day mode (legacy + per-product flow) ────────────────────────
     // Validate product identity before any single-day catalog or availability
-    // read. Class routing still keys off the legacy scalar below;
-    // multi-product selection remains appointment-only.
+    // read, then use the same canonical lead throughout every branch.
     const canonicalProducts = normalizeBookedProductIds({ productId, productIds })
+    const leadProductId = canonicalProducts.leadProductId
 
     // Branch 1: product-scoped CLASS availability (existing behavior preserved).
-    if (productId) {
+    if (leadProductId) {
       const product = await prisma.product.findFirst({
-        where: { id: productId, venueId: venue.id, active: true },
+        where: { id: leadProductId, venueId: venue.id, active: true },
         select: { type: true },
       })
 
       if (product?.type === 'CLASS') {
         const onlinePercent = settings.scheduling?.onlineCapacityPercent ?? 100
-        const classSlots = await availabilityService.getClassSessionSlots(venue.id, productId, date!, onlinePercent, tz)
+        const classSlots = await availabilityService.getClassSessionSlots(venue.id, leadProductId, date!, onlinePercent, tz)
         return res.json({
           date,
           slots: classSlots.map(s => ({
@@ -558,7 +558,7 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
 
     // Branch 2: type=class without productId — aggregate sessions across all
     // CLASS products of the venue for a SINGLE date.
-    if (flowType === 'class' && !productId) {
+    if (flowType === 'class' && !leadProductId) {
       const onlinePercent = settings.scheduling?.onlineCapacityPercent ?? 100
       const classProducts = await prisma.product.findMany({
         where: { venueId: venue.id, active: true, type: 'CLASS' },
@@ -2247,8 +2247,10 @@ async function holdAppointmentSlot(args: {
  * Body: { startsAt, endsAt, productId?, productIds?, classSessionId?, partySize? }
  *
  * Creates a SlotHold row with TTL=10min and returns its id+expiresAt so the
- * widget can plumb both into its createReservation call. The hold is consumed
- * (deleted) atomically when the reservation succeeds; otherwise it expires.
+ * widget can pass both into createReservation. The current transitional create
+ * path validates the hold before the write and deletes it best-effort after the
+ * reservation commits; unconsumed holds expire. Atomic consumption arrives in
+ * the Release A protocol.
  *
  * Validations:
  *   - venue exists + has public booking enabled
@@ -2291,7 +2293,11 @@ export async function createHold(req: Request, res: Response, next: NextFunction
       throw new BadRequestError('No se puede reservar un horario en el pasado')
     }
 
-    const { productIds } = normalizeBookedProductIds({ productId: body.productId, productIds: body.productIds })
+    // Before productId was accepted by this schema, class holds could carry a
+    // shared-client scalar that validation stripped. Preserve that behavior:
+    // only an explicit productIds field opts a class hold into list validation.
+    const scalarProductId = body.classSessionId && body.productIds === undefined ? undefined : body.productId
+    const { productIds } = normalizeBookedProductIds({ productId: scalarProductId, productIds: body.productIds })
     if (productIds.length > 0) {
       const products = await prisma.product.findMany({
         where: { id: { in: productIds }, venueId: venue.id },
@@ -2404,10 +2410,11 @@ export async function cancelHold(req: Request, res: Response, next: NextFunction
 }
 
 /**
- * Validate + consume a hold passed on createReservation. Returns the hold row
- * if it is valid and matches the booking, otherwise throws. The caller must
- * delete the hold once the reservation has actually been written (so a failed
- * create doesn't strand the customer with no fallback).
+ * Validate a hold passed on createReservation. Returns the hold row if it is
+ * valid and matches the booking, otherwise throws. The current caller deletes
+ * it best-effort after the reservation has been written (so a failed create
+ * doesn't strand the customer with no fallback); validation and deletion are
+ * not atomic until the Release A protocol.
  *
  * Returns null when no holdId was passed — bookings without holds keep
  * working exactly as they did pre-hold-mechanism.
