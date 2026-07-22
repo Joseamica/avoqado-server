@@ -51,9 +51,15 @@ describe('getAvailabilityQuerySchema — staff-aware query contract', () => {
     expect(getAvailabilityQuerySchema.safeParse({ date, duration: '1441', windowSemantics: 'base' }).success).toBe(false)
   })
 
-  it('keeps the public minimum at five minutes even for base semantics', () => {
-    expect(getAvailabilityQuerySchema.safeParse({ date, duration: '5', windowSemantics: 'base' }).success).toBe(true)
-    expect(getAvailabilityQuerySchema.safeParse({ date, duration: '4', windowSemantics: 'base' }).success).toBe(false)
+  it('permits one-minute base windows while keeping the five-minute legacy minimum', () => {
+    expect(getAvailabilityQuerySchema.safeParse({ date, duration: '1', windowSemantics: 'base' }).success).toBe(true)
+    expect(getAvailabilityQuerySchema.safeParse({ date, duration: '4', windowSemantics: 'base' }).success).toBe(true)
+    expect(getAvailabilityQuerySchema.safeParse({ date, duration: '4' }).success).toBe(false)
+    expect(getAvailabilityQuerySchema.safeParse({ date, duration: '5' }).success).toBe(true)
+  })
+
+  it('localizes the absolute one-minute floor in Spanish', () => {
+    expect(messages({ date, duration: '0', windowSemantics: 'base' })).toContain('La duracion minima es 1 minuto')
   })
 
   it('localizes every new wrong-type and enum failure in Spanish', () => {
@@ -78,6 +84,41 @@ describe('reservation create window-semantics schemas', () => {
     expect(parse({ startsAt, endsAt: new Date(startsAt.getTime() + 481 * 60_000), duration: 481 }).success).toBe(false)
     expect(parse({ startsAt, endsAt, duration: 1440, windowSemantics: 'base' }).success).toBe(true)
     expect(parse({ startsAt, endsAt, duration: 1440, windowSemantics: 'final' }).success).toBe(false)
+  })
+
+  it.each([
+    ['dashboard', (body: unknown) => createReservationBodySchema.safeParse(body)],
+    ['public', (body: unknown) => publicCreateReservationBodySchema.safeParse({ guestName: 'Ana', ...(body as object) })],
+    ['consumer', (body: unknown) => consumerCreateReservationSchema.safeParse({ params: { venueSlug: 'venue' }, body })],
+  ])('%s permits one-minute base windows while keeping the five-minute legacy minimum', (_name, parse) => {
+    const oneMinuteEndsAt = new Date(startsAt.getTime() + 60_000)
+    const fourMinuteEndsAt = new Date(startsAt.getTime() + 4 * 60_000)
+    const fiveMinuteEndsAt = new Date(startsAt.getTime() + 5 * 60_000)
+
+    expect(parse({ startsAt, endsAt: oneMinuteEndsAt, duration: 1, windowSemantics: 'base' }).success).toBe(true)
+    expect(parse({ startsAt, endsAt: fourMinuteEndsAt, duration: 4, windowSemantics: 'base' }).success).toBe(true)
+    expect(parse({ startsAt, endsAt: fourMinuteEndsAt, duration: 4 }).success).toBe(false)
+    expect(parse({ startsAt, endsAt: fiveMinuteEndsAt, duration: 5 }).success).toBe(true)
+  })
+
+  it.each([
+    ['dashboard', (body: unknown) => createReservationBodySchema.safeParse(body)],
+    ['public', (body: unknown) => publicCreateReservationBodySchema.safeParse({ guestName: 'Ana', ...(body as object) })],
+    ['consumer', (body: unknown) => consumerCreateReservationSchema.safeParse({ params: { venueSlug: 'venue' }, body })],
+  ])('%s localizes the absolute one-minute floor in Spanish', (_name, parse) => {
+    expect(parse({ startsAt, endsAt: new Date(startsAt.getTime() + 60_000), duration: 0, windowSemantics: 'base' })).toMatchObject({
+      success: false,
+      error: { issues: expect.arrayContaining([expect.objectContaining({ message: 'La duracion minima es 1 minuto' })]) },
+    })
+  })
+
+  it('consumer rejects mismatched legacy intervals but keeps duration advisory for base semantics', () => {
+    const parse = (body: unknown) => consumerCreateReservationSchema.safeParse({ params: { venueSlug: 'venue' }, body })
+    const fiveMinuteEndsAt = new Date(startsAt.getTime() + 5 * 60_000)
+
+    expect(parse({ startsAt, endsAt: fiveMinuteEndsAt, duration: 60 }).success).toBe(false)
+    expect(parse({ startsAt, endsAt: fiveMinuteEndsAt, duration: 60, windowSemantics: 'base' }).success).toBe(true)
+    expect(parse({ startsAt, endsAt: new Date(startsAt.getTime() + 60 * 60_000), duration: 60 }).success).toBe(true)
   })
 
   it('dashboard and public accept bounded product lists and modifier selections', () => {

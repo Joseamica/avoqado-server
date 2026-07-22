@@ -342,10 +342,11 @@ export async function createReservation(
         products.length === bookedProductIds.length &&
         products.every(selected => selected.type === 'APPOINTMENTS_SERVICE')
       if (isAppointment && isStaffAware(settings)) {
+        const rawIntervalDurationMin = (data.endsAt.getTime() - data.startsAt.getTime()) / 60_000
         await assertLegacyAppointmentDurationFloor(tx, {
           venueId,
           productIds: bookedProductIds,
-          rawDurationMin: data.duration,
+          rawDurationMin: Math.min(data.duration, rawIntervalDurationMin),
           settings,
         })
       }

@@ -212,7 +212,7 @@ describe('createReservation PostgreSQL contract', () => {
     const window = nextWindow(5)
 
     await expect(
-      createReservation(venueId, { ...window, duration: 5, productId: productA }, { writeOrigin: 'DASHBOARD' }),
+      createReservation(venueId, { ...window, duration: 60, productId: productA }, { writeOrigin: 'DASHBOARD' }),
     ).rejects.toMatchObject({ statusCode: 409, code: 'APPOINTMENT_WINDOW_CHANGED' })
 
     expect(await inspector.reservation.count({ where: { venueId } })).toBe(0)
@@ -227,22 +227,22 @@ describe('createReservation PostgreSQL contract', () => {
     const triggerName = `${sqlName}_trigger`
     const escapedVenueId = venueId.replace(/'/g, "''")
 
-    await inspector.$executeRawUnsafe(`CREATE SEQUENCE "${sequenceName}" START 1`)
-    await inspector.$executeRawUnsafe(`
-      CREATE FUNCTION "${functionName}"() RETURNS trigger AS $$
-      BEGIN
-        IF NEW."venueId" = '${escapedVenueId}' AND nextval('"${sequenceName}"') = 1 THEN
-          RAISE EXCEPTION 'fixture serialization retry' USING ERRCODE = '40001';
-        END IF;
-        RETURN NEW;
-      END;
-      $$ LANGUAGE plpgsql
-    `)
-    await inspector.$executeRawUnsafe(
-      `CREATE TRIGGER "${triggerName}" BEFORE INSERT ON "Reservation" FOR EACH ROW EXECUTE FUNCTION "${functionName}"()`,
-    )
-
     try {
+      await inspector.$executeRawUnsafe(`CREATE SEQUENCE "${sequenceName}" START 1`)
+      await inspector.$executeRawUnsafe(`
+        CREATE FUNCTION "${functionName}"() RETURNS trigger AS $$
+        BEGIN
+          IF NEW."venueId" = '${escapedVenueId}' AND nextval('"${sequenceName}"') = 1 THEN
+            RAISE EXCEPTION 'fixture serialization retry' USING ERRCODE = '40001';
+          END IF;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+      `)
+      await inspector.$executeRawUnsafe(
+        `CREATE TRIGGER "${triggerName}" BEFORE INSERT ON "Reservation" FOR EACH ROW EXECUTE FUNCTION "${functionName}"()`,
+      )
+
       const window = nextWindow(60)
       const created = await createReservation(
         venueId,

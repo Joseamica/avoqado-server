@@ -221,7 +221,7 @@ export const getAvailabilityQuerySchema = z
       .string()
       .regex(/^\d{4}-\d{2}-\d{2}$/, 'Formato dateTo invalido (YYYY-MM-DD)')
       .optional(),
-    duration: z.coerce.number().int().min(5).max(1440, 'La duracion maxima es 1440 minutos').optional(),
+    duration: z.coerce.number().int().min(1, 'La duracion minima es 1 minuto').max(1440, 'La duracion maxima es 1440 minutos').optional(),
     partySize: z.coerce.number().int().min(1).max(100).optional(),
     tableId: z.string().optional(),
     staffId: z.string().optional(),
@@ -232,6 +232,13 @@ export const getAvailabilityQuerySchema = z
     type: z.enum(['class', 'appointment']).optional(),
   })
   .superRefine((data, ctx) => {
+    if (data.duration !== undefined && data.windowSemantics !== 'base' && data.duration < 5) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'La duracion minima sin windowSemantics=base es 5 minutos',
+        path: ['duration'],
+      })
+    }
     if (data.duration !== undefined && data.windowSemantics !== 'base' && data.duration > 480) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -276,7 +283,7 @@ export const createReservationBodySchema = z
   .object({
     startsAt: z.coerce.date({ required_error: 'La fecha de inicio es requerida' }),
     endsAt: z.coerce.date({ required_error: 'La fecha de fin es requerida' }),
-    duration: z.number().int().min(5, 'La duracion minima es 5 minutos').max(1440, 'La duracion maxima es 1440 minutos'),
+    duration: z.number().int().min(1, 'La duracion minima es 1 minuto').max(1440, 'La duracion maxima es 1440 minutos'),
     channel: ReservationChannelSchema.optional(),
     customerId: z.string().optional(),
     guestName: z.string().min(1, 'El nombre del cliente es requerido').max(200).optional(),
@@ -294,6 +301,13 @@ export const createReservationBodySchema = z
     tags: z.array(z.string().max(50)).max(20).optional(),
   })
   .superRefine((data, ctx) => {
+    if (data.windowSemantics !== 'base' && data.duration < 5) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'La duracion minima sin windowSemantics=base es 5 minutos',
+        path: ['duration'],
+      })
+    }
     if (data.windowSemantics !== 'base' && data.duration > 480) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -525,7 +539,7 @@ export const publicCreateReservationBodySchema = z
   .object({
     startsAt: z.coerce.date({ required_error: 'La fecha de inicio es requerida' }).optional(),
     endsAt: z.coerce.date({ required_error: 'La fecha de fin es requerida' }).optional(),
-    duration: z.number().int().min(5).max(1440).optional(),
+    duration: z.number().int().min(1, 'La duracion minima es 1 minuto').max(1440).optional(),
     guestName: z.string().min(1, 'El nombre es requerido').max(200),
     guestPhone: z.string().min(1, 'El telefono es requerido').max(20).optional(),
     guestEmail: z.string().email('Email invalido').max(200).optional(),
@@ -550,6 +564,13 @@ export const publicCreateReservationBodySchema = z
     modifierSelections: reservationModifierSelectionsSchema.optional(),
   })
   .superRefine((data, ctx) => {
+    if (data.duration !== undefined && data.windowSemantics !== 'base' && data.duration < 5) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'La duracion minima sin windowSemantics=base es 5 minutos',
+        path: ['duration'],
+      })
+    }
     if (data.duration !== undefined && data.windowSemantics !== 'base' && data.duration > 480) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

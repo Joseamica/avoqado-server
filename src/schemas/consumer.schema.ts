@@ -33,7 +33,7 @@ export const consumerCreateReservationSchema = z.object({
     .object({
       startsAt: z.coerce.date().optional(),
       endsAt: z.coerce.date().optional(),
-      duration: z.number().int().min(5).max(1440).optional(),
+      duration: z.number().int().min(1, 'La duracion minima es 1 minuto').max(1440).optional(),
       guestName: z.string().min(1).max(200).optional(),
       guestPhone: z.string().min(1).max(20).optional(),
       guestEmail: z.string().email().max(200).optional(),
@@ -46,6 +46,13 @@ export const consumerCreateReservationSchema = z.object({
       creditItemBalanceId: z.string().optional(),
     })
     .superRefine((data, ctx) => {
+      if (data.duration !== undefined && data.windowSemantics !== 'base' && data.duration < 5) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'La duracion minima sin windowSemantics=base es 5 minutos',
+          path: ['duration'],
+        })
+      }
       if (data.duration !== undefined && data.windowSemantics !== 'base' && data.duration > 480) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -73,6 +80,18 @@ export const consumerCreateReservationSchema = z.object({
       {
         message: 'La fecha de fin debe ser posterior a la fecha de inicio',
         path: ['endsAt'],
+      },
+    )
+    .refine(
+      data => {
+        if (data.classSessionId || data.windowSemantics === 'base') return true
+        if (!data.startsAt || !data.endsAt || data.duration == null) return true
+        const diffMin = Math.round((data.endsAt.getTime() - data.startsAt.getTime()) / 60_000)
+        return Math.abs(diffMin - data.duration) <= 1
+      },
+      {
+        message: 'La duracion no coincide con el rango de fechas',
+        path: ['duration'],
       },
     ),
 })
