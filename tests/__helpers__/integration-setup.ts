@@ -29,8 +29,17 @@ jest.setTimeout(60000)
 // Set required environment variables for tests
 process.env.NODE_ENV = 'test'
 process.env.ACCESS_TOKEN_SECRET = 'test-access-token-secret'
+process.env.REFRESH_TOKEN_SECRET = 'test-refresh-token-secret'
 process.env.SESSION_SECRET = 'test-session-secret'
 process.env.COOKIE_SECRET = 'test-cookie-secret'
+process.env.OTP_PEPPER = 'test-otp-pepper-secret'
+// Some app-level integration suites import module-load singletons. A dummy key
+// lets those deterministic paths initialize without authorizing a real request.
+process.env.OPENAI_API_KEY = 'sk-test-dummy-for-jest'
+process.env.STRIPE_SECRET_KEY = 'sk_test_dummy_for_jest'
+// Never inherit a developer or release broker from dotenv in integration tests.
+// Port 1 is deliberately inert; suites that exercise messaging mock the client.
+process.env.RABBITMQ_URL = 'amqp://127.0.0.1:1'
 
 console.log('ℹ️  Using caller-supplied TEST_DATABASE_URL for integration tests')
 
