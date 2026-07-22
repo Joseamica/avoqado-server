@@ -3300,7 +3300,6 @@ describe('rescheduleAppointmentReservation', () => {
       endsAt: newEnd,
       productIds: ['product-1', 'product-2'],
       staffId: 'staff-1',
-      releaseAGrace: false,
     })
     prismaMock.reservation.findUnique.mockResolvedValue(makeAppt() as any)
     prismaMock.reservation.update.mockResolvedValue(makeAppt({ startsAt: newStart, endsAt: newEnd }) as any)
@@ -3543,8 +3542,8 @@ describe('rescheduleAppointmentReservation', () => {
       endsAt: newEnd,
       productIds: ['product-1', 'product-2'],
       staffId: null,
-      releaseAGrace: true,
     })
+    jest.spyOn(appointmentSlotHoldService, 'lockReservationForReschedule').mockResolvedValue(lockedIdentity({ assignedStaffId: null }))
     prismaMock.externalBusyBlock.findFirst.mockResolvedValue({ id: 'venue-master-block' } as any)
     const capacity = jest.spyOn(reservationAvailabilityService, 'countAppointmentOccupancy')
 
@@ -3599,14 +3598,13 @@ describe('rescheduleAppointmentReservation', () => {
     expect(prismaMock.slotHold.deleteMany).not.toHaveBeenCalled()
   })
 
-  it('emits the exact Release A grace metric and all external side effects once after a serialization retry', async () => {
+  it('emits external side effects once after a serialization retry and no Release A grace metric', async () => {
     jest.spyOn(appointmentSlotHoldService, 'lockAndValidateRescheduleAppointmentHold').mockResolvedValue({
       id: 'legacy-hold',
       checkedAt: new Date('2026-08-01T10:00:00.000Z'),
       endsAt: newEnd,
       productIds: ['product-1', 'product-2'],
       staffId: 'staff-1',
-      releaseAGrace: true,
     })
     prismaMock.reservation.findUnique.mockResolvedValue(
       makeAppt({ customer: { firstName: 'Ana', lastName: 'Paz', phone: '+5215512345678', email: 'ana@example.com' } }) as any,
@@ -3636,17 +3634,7 @@ describe('rescheduleAppointmentReservation', () => {
     const metricCalls = (logger.warn as jest.Mock).mock.calls.filter(
       ([message]) => message === '[slot-hold] Release A legacy reschedule hold consumed',
     )
-    expect(metricCalls).toEqual([
-      [
-        '[slot-hold] Release A legacy reschedule hold consumed',
-        {
-          metric: 'reservation_reschedule_hold_release_a_grace',
-          venueId: VENUE,
-          reservationId: 'res-appt-1',
-          holdId: 'legacy-hold',
-        },
-      ],
-    ])
+    expect(metricCalls).toEqual([])
     expect(rabbitCalendarPublisher.publishPushNotification).toHaveBeenCalledTimes(1)
     expect(whatsappService.sendReservationRescheduleWhatsApp).toHaveBeenCalledTimes(1)
     expect(emailService.sendReservationRescheduledEmail).toHaveBeenCalledTimes(1)

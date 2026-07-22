@@ -5369,8 +5369,13 @@ async function main() {
     } else {
       // Assigned staff: pick from Grupo Avoqado org staff
       const orgStaff = await prisma.staffOrganization.findMany({
-        where: { organizationId: venue.organizationId, isActive: true },
+        where: {
+          organizationId: venue.organizationId,
+          isActive: true,
+          staff: { active: true, venues: { some: { venueId: venue.id, active: true } } },
+        },
         include: { staff: true },
+        orderBy: { staffId: 'asc' },
         take: 3,
       })
       const enabledBy = orgStaff[0]?.staffId
@@ -5523,6 +5528,28 @@ async function main() {
 
       const services = products.filter(p => p.type === ProductType.APPOINTMENTS_SERVICE)
       const classes = products.filter(p => p.type === ProductType.CLASS)
+
+      // ProductStaff references StaffVenue.id (the venue membership), never Staff.id.
+      // Map every demo appointment service to the same deterministic three-person team.
+      const wellnessStaffVenues = await Promise.all(
+        orgStaff.map(async member => {
+          const staffVenue = await prisma.staffVenue.findUnique({
+            where: { staffId_venueId: { staffId: member.staffId, venueId: venue.id } },
+            select: { id: true },
+          })
+          if (!staffVenue) throw new Error(`Wellness staff membership missing for staff ${member.staffId}`)
+          return staffVenue
+        }),
+      )
+      for (const service of services) {
+        for (const staffVenue of wellnessStaffVenues) {
+          await prisma.productStaff.upsert({
+            where: { productId_staffVenueId: { productId: service.id, staffVenueId: staffVenue.id } },
+            update: { venueId: venue.id },
+            create: { productId: service.id, staffVenueId: staffVenue.id, venueId: venue.id },
+          })
+        }
+      }
 
       // Modifier group "Add-ons (extiende duración)" for services
       const addonGroup = await prisma.modifierGroup.create({

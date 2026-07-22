@@ -582,15 +582,14 @@ describe('reschedule policy and locked hold identity', () => {
       endsAt: taggedHold.endsAt,
       productIds: [productId, 'product-2'],
       staffId: 'staff-1',
-      releaseAGrace: false,
     })
   })
 
   it.each([
-    ['single legacy', { productIds: [], productId }, [productId], true],
-    ['multi reservation with old lead-only token', { productIds: [productId, 'product-2'], productId }, [productId], true],
-    ['canonical multi null token', { productIds: [productId, 'product-2'], productId }, [productId, 'product-2'], false],
-  ])('%s follows the exact Release A null-token shape', async (_label, reservationProducts, holdProducts, accepted) => {
+    ['single legacy', { productIds: [], productId }, [productId]],
+    ['multi reservation with old lead-only token', { productIds: [productId, 'product-2'], productId }, [productId]],
+    ['canonical multi null token', { productIds: [productId, 'product-2'], productId }, [productId, 'product-2']],
+  ])('Release B rejects %s null-token shape', async (_label, reservationProducts, holdProducts) => {
     prismaMock.$queryRaw.mockResolvedValue([{ ...taggedHold, heldForReservationId: null, staffId: null, productIds: holdProducts }] as any)
     const operation = lockAndValidateRescheduleAppointmentHold(prismaMock, {
       venueId,
@@ -601,11 +600,8 @@ describe('reschedule policy and locked hold identity', () => {
       clock: () => checkedAt,
     })
 
-    if (accepted) {
-      await expect(operation).resolves.toMatchObject({ releaseAGrace: true, staffId: reservation.assignedStaffId })
-    } else {
-      await expect(operation).rejects.toMatchObject({ statusCode: 409 })
-    }
+    await expect(operation).rejects.toMatchObject({ statusCode: 409 })
+    expect(prismaMock.slotHold.deleteMany).not.toHaveBeenCalled()
   })
 
   it.each([
