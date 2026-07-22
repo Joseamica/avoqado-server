@@ -220,9 +220,10 @@ describe('createReservation with modifiers', () => {
         endsAt: { gt: new Date('2026-06-01T10:00:00Z') },
       },
     })
-    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(3)
+    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(2)
     for (const call of prismaMock.$queryRaw.mock.calls) {
       expect(call).toContainEqual(new Date('2026-06-01T11:15:00Z'))
+      expect((call[0] as unknown as string[]).join('')).not.toContain('"partySize"')
     }
   })
 

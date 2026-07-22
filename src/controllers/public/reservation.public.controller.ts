@@ -26,6 +26,7 @@ import { enqueuePush, resolveClassSessionPushTargets } from '../../services/goog
 import { phonesMatch, phoneLast10 } from '../../utils/phone'
 import { withSerializableRetry } from '@/utils/serializableRetry'
 import { normalizeBookedProductIds, reservationBookedProductIds } from '@/services/reservation/resolveAppointmentWindow'
+import { fastFailLiveHold, mintNormalAppointmentHold, SLOT_HOLD_TTL_MS } from '@/services/reservation/appointmentSlotHold.service'
 
 // ==========================================
 // PUBLIC RESERVATION CONTROLLER (Unauthenticated)
@@ -660,7 +661,10 @@ export async function createReservation(req: Request, res: Response, next: NextF
       throw new BadRequestError('El email es requerido')
     }
 
-    if (!req.body.classSessionId && req.body.staffId && settings.publicBooking.showStaffPicker !== true) {
+    const incomingHoldId: string | undefined =
+      typeof req.body.holdId === 'string' && req.body.holdId.length > 0 ? req.body.holdId : undefined
+
+    if (!req.body.classSessionId && req.body.staffId && settings.publicBooking.showStaffPicker !== true && !incomingHoldId) {
       throw new BadRequestError('La selección de profesionista no está habilitada para este negocio')
     }
 
@@ -707,38 +711,41 @@ export async function createReservation(req: Request, res: Response, next: NextF
     // booked window. We do NOT delete the hold here — that happens AFTER the
     // reservation row is written so a failed create doesn't strand the
     // customer with no recovery path.
-    const incomingHoldId: string | undefined =
-      typeof req.body.holdId === 'string' && req.body.holdId.length > 0 ? req.body.holdId : undefined
-    const validatedHold = incomingHoldId
-      ? await validateHoldForReservation({
-          venueId: venue.id,
-          holdId: incomingHoldId,
-          startsAt: new Date(req.body.startsAt),
-          endsAt: new Date(req.body.endsAt),
-        })
-      : null
-
-    // If productId points to a CLASS product, classSessionId is mandatory
+    let leadProductType: string | null = null
     if (req.body.productId && !req.body.classSessionId) {
       const product = await prisma.product.findFirst({
         where: { id: req.body.productId, venueId: venue.id },
         select: { type: true },
       })
-      if (product?.type === 'CLASS') {
+      leadProductType = product?.type ?? null
+      if (leadProductType === 'CLASS') {
         throw new BadRequestError('classSessionId es requerido para reservar una clase')
       }
     }
+    const normalAppointmentHold =
+      incomingHoldId && leadProductType === 'APPOINTMENTS_SERVICE'
+        ? await fastFailLiveHold({ venueId: venue.id, holdId: incomingHoldId })
+        : null
+    const legacyHold =
+      incomingHoldId && !normalAppointmentHold
+        ? await validateHoldForReservation({
+            venueId: venue.id,
+            holdId: incomingHoldId,
+            startsAt: new Date(req.body.startsAt),
+            endsAt: new Date(req.body.endsAt),
+          })
+        : null
 
     // After-create cleanup burns the hold best-effort. The canonical product
     // list is already co-committed by createReservation.
     async function finalizeReservationSideEffects() {
-      if (validatedHold) {
+      if (legacyHold) {
         try {
           await prisma.slotHold.deleteMany({
-            where: { id: validatedHold.id, venueId: venue.id },
+            where: { id: legacyHold.id, venueId: venue.id },
           })
         } catch (error) {
-          logger.warn(`[slot-hold] failed to delete hold ${validatedHold.id} (non-fatal): ${(error as Error).message}`)
+          logger.warn(`[slot-hold] failed to delete hold ${legacyHold.id} (non-fatal): ${(error as Error).message}`)
         }
       }
     }
@@ -755,7 +762,7 @@ export async function createReservation(req: Request, res: Response, next: NextF
     //
     // Classes don't pass through here (handled by the classSessionId branch
     // below) and their per-session capacity guard already prevents overlap.
-    if (!validatedHold && !req.body.classSessionId && req.body.productId) {
+    if (!normalAppointmentHold && !legacyHold && !req.body.classSessionId && req.body.productId) {
       const product = await prisma.product.findFirst({
         where: { id: req.body.productId, venueId: venue.id },
         select: { type: true },
@@ -1052,7 +1059,7 @@ export async function createReservation(req: Request, res: Response, next: NextF
         writeOrigin: 'PUBLIC',
         paymentPolicyOverride,
         ...(req.body.windowSemantics === 'base' ? { windowSemantics: req.body.windowSemantics } : {}),
-        ...(validatedHold ? { validatedHoldId: validatedHold.id } : {}),
+        ...(normalAppointmentHold ? { appointmentHoldId: normalAppointmentHold.id } : {}),
       },
     )
 
@@ -2162,8 +2169,6 @@ async function createClassReservation(
  *  customer has enough time to fill the form without holding inventory hostage
  *  if they abandon. The widget reads expiresAt from the response and renders
  *  "Cita reservada durante 9:56" against it. */
-const SLOT_HOLD_TTL_MS = 10 * 60 * 1000
-
 /** Lazy cleanup threshold — sweep holds older than this past their expiry.
  *  Cheap, runs from the same path as availability so we don't need a cron. */
 const SLOT_HOLD_GC_BUFFER_MS = 60 * 60 * 1000
@@ -2184,10 +2189,11 @@ async function pruneExpiredHolds(): Promise<void> {
 }
 
 /**
- * Create an APPOINTMENTS_SERVICE SlotHold under the per-venue advisory lock with
- * a pacing + external-calendar guard. Shared by createHold (booking) and
- * createRescheduleHold (reschedule). `excludeReservationId` lets reschedule skip
- * counting the reservation being moved against its own target slot.
+ * Transitional pre-Task-7C reschedule hold helper. Normal booking holds use the
+ * neutral atomic protocol in appointmentSlotHold.service.ts; reschedule keeps
+ * this legacy shape until its tagged dual-write lands in the following commit.
+ * `excludeReservationId` lets reschedule skip counting the reservation being
+ * moved against its own target slot.
  */
 async function holdAppointmentSlot(args: {
   venueId: string
@@ -2247,10 +2253,9 @@ async function holdAppointmentSlot(args: {
  * Body: { startsAt, endsAt, productId?, productIds?, classSessionId?, partySize? }
  *
  * Creates a SlotHold row with TTL=10min and returns its id+expiresAt so the
- * widget can pass both into createReservation. The current transitional create
- * path validates the hold before the write and deletes it best-effort after the
- * reservation commits; unconsumed holds expire. Atomic consumption arrives in
- * the Release A protocol.
+ * widget can pass both into createReservation. Normal appointment holds use the
+ * atomic Release A mint/consume protocol; legacy class and generic holds retain
+ * their existing validation and post-commit cleanup until client coordination.
  *
  * Validations:
  *   - venue exists + has public booking enabled
@@ -2276,6 +2281,9 @@ export async function createHold(req: Request, res: Response, next: NextFunction
       classSessionId?: string
       partySize?: number
       fingerprint?: string
+      staffId?: string
+      modifierSelections?: { productId: string; modifierId: string; quantity?: number }[]
+      windowSemantics?: 'base'
     }
 
     const startsAt = new Date(body.startsAt)
@@ -2298,7 +2306,8 @@ export async function createHold(req: Request, res: Response, next: NextFunction
     // only an explicit productIds field opts a class hold into list validation.
     const scalarProductId = body.classSessionId && body.productIds === undefined ? undefined : body.productId
     const { productIds } = normalizeBookedProductIds({ productId: scalarProductId, productIds: body.productIds })
-    if (productIds.length > 0) {
+    const isAppointmentHold = !body.classSessionId && productIds.length > 0
+    if (!isAppointmentHold && productIds.length > 0) {
       const products = await prisma.product.findMany({
         where: { id: { in: productIds }, venueId: venue.id },
         select: { id: true, type: true },
@@ -2324,9 +2333,6 @@ export async function createHold(req: Request, res: Response, next: NextFunction
     // Lazy GC — cheap, runs once per hold creation.
     void pruneExpiredHolds()
 
-    const isAppointmentHold = !body.classSessionId && productIds.length > 0
-    const expiresAt = new Date(Date.now() + SLOT_HOLD_TTL_MS)
-
     // For APPOINTMENTS_SERVICE holds we MUST serialize concurrent creates
     // for the same venue — otherwise two tabs both pass an unguarded count
     // and both succeed, leaving two phantom holds that block every later
@@ -2336,22 +2342,24 @@ export async function createHold(req: Request, res: Response, next: NextFunction
     // because Mindform-scale concurrency is low and per-slot keys complicate
     // overlap reasoning (two distinct slots can still overlap). Bumping
     // contention later is a one-line change.
-    let hold: { id: string; expiresAt: Date }
+    let hold: { id: string; expiresAt: Date; staffId?: string | null }
     if (isAppointmentHold) {
-      const pacingMax = effectiveAppointmentPacing(settings.scheduling?.pacingMaxPerSlot)
-      hold = await holdAppointmentSlot({
+      hold = await mintNormalAppointmentHold({
         venueId: venue.id,
         startsAt,
         endsAt,
         productIds,
         partySize: body.partySize ?? 1,
         fingerprint: body.fingerprint ?? null,
-        pacingMax,
+        staffId: body.staffId,
+        modifierSelections: body.modifierSelections,
+        windowSemantics: body.windowSemantics,
       })
     } else {
       // Non-appointment holds (classes, generic) — wrap in a transaction so the
       // external busy-block check runs against the same snapshot the create
       // commits with.
+      const expiresAt = new Date(Date.now() + SLOT_HOLD_TTL_MS)
       hold = await prisma.$transaction(async tx => {
         const externalBlock = await checkExternalBusyBlock(tx, {
           venueId: venue.id,
@@ -2382,6 +2390,7 @@ export async function createHold(req: Request, res: Response, next: NextFunction
       holdId: hold.id,
       expiresAt: hold.expiresAt,
       ttlSeconds: Math.floor(SLOT_HOLD_TTL_MS / 1000),
+      ...('staffId' in hold && hold.staffId ? { staffId: hold.staffId } : {}),
     })
   } catch (error) {
     next(error)

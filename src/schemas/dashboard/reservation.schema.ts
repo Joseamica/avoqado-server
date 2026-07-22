@@ -271,7 +271,7 @@ export const getCalendarQuerySchema = z.object({
 
 // ---- Body Schemas ----
 
-const reservationModifierSelectionsSchema = z
+export const reservationModifierSelectionsSchema = z
   .array(
     z.object({
       productId: z.string().min(1, 'productId del modificador es requerido'),
@@ -690,9 +690,32 @@ export const publicCreateHoldBodySchema = z
     endsAt: z.coerce.date({ required_error: 'La fecha de fin es requerida' }),
     productId: bookedProductIdWireSchema.optional(),
     productIds: bookedProductIdsWireSchema.optional(),
+    staffId: z.string({ invalid_type_error: 'staffId debe ser texto' }).min(1, 'staffId es requerido').optional(),
+    modifierSelections: reservationModifierSelectionsSchema.optional(),
+    windowSemantics: z.literal('base', { invalid_type_error: 'windowSemantics debe ser base' }).optional(),
     classSessionId: z.string().optional(),
     partySize: z.number().int().min(1).max(100).optional(),
     fingerprint: z.string().max(200).optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.classSessionId) return
+    const productParts = [
+      ...(typeof data.productId === 'string' ? [data.productId] : []),
+      ...(typeof data.productIds === 'string' ? [data.productIds] : Array.isArray(data.productIds) ? data.productIds : []),
+    ]
+    const appointmentShaped = productParts.some(part => part.split(',').some(id => id.trim().length > 0))
+    if (!appointmentShaped) return
+
+    const durationMin = (data.endsAt.getTime() - data.startsAt.getTime()) / 60_000
+    const min = data.windowSemantics === 'base' ? 1 : 5
+    const max = data.windowSemantics === 'base' ? 1_440 : 480
+    if (durationMin < min || durationMin > max) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `La duración de la reserva temporal debe estar entre ${min} y ${max} minutos`,
+        path: ['endsAt'],
+      })
+    }
   })
   .refine(data => data.endsAt > data.startsAt, {
     message: 'endsAt debe ser posterior a startsAt',

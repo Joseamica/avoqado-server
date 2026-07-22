@@ -8,9 +8,11 @@ jest.mock('@/communication/rabbitmq/gcal-push-consumer', () => ({
 import prisma from '@/utils/prismaClient'
 import { BadRequestError } from '@/errors/AppError'
 import { createReservation } from '@/services/dashboard/reservation.dashboard.service'
+import { mintNormalAppointmentHold } from '@/services/reservation/appointmentSlotHold.service'
 
 const fixtureKey = `reservation-create-contract-${process.pid}-${Date.now()}`
 const inspector = new PrismaClient()
+const lockHolder = new PrismaClient()
 const venueIds: string[] = []
 const staffIds: string[] = []
 let organizationId: string
@@ -166,7 +168,7 @@ beforeEach(async () => {
   await prisma.reservation.deleteMany({ where: { venueId } })
   await prisma.reservationSettings.update({
     where: { venueId },
-    data: { capacityMode: 'pacing', showStaffPicker: false, pacingMaxPerSlot: null },
+    data: { capacityMode: 'pacing', showStaffPicker: false, pacingMaxPerSlot: null, publicBookingEnabled: true },
   })
 })
 
@@ -175,6 +177,7 @@ afterAll(async () => {
     await cleanupFixtures()
   } finally {
     await inspector.$disconnect()
+    await lockHolder.$disconnect()
   }
 })
 
@@ -265,7 +268,274 @@ describe('createReservation PostgreSQL contract', () => {
     expect(await inspector.calendarSyncOutbox.count({ where: { venueId } })).toBe(0)
   })
 
-  it('excludes only its trusted own hold from staff and pacing checks at pacing one', async () => {
+  it('mints a base modifier hold with the final interval and keeps legacy raw compatibility', async () => {
+    const baseWindow = nextWindow(60)
+    const base = await mintNormalAppointmentHold({
+      venueId,
+      ...baseWindow,
+      productIds: [productA],
+      modifierSelections: [{ productId: productA, modifierId }],
+      windowSemantics: 'base',
+    })
+    const legacyWindow = nextWindow(60)
+    const legacy = await mintNormalAppointmentHold({
+      venueId,
+      ...legacyWindow,
+      productIds: [productA],
+      modifierSelections: [{ productId: productA, modifierId }],
+    })
+
+    const [baseRow, legacyRow] = await Promise.all([
+      inspector.slotHold.findUniqueOrThrow({ where: { id: base.id } }),
+      inspector.slotHold.findUniqueOrThrow({ where: { id: legacy.id } }),
+    ])
+    expect(baseRow).toMatchObject({
+      startsAt: baseWindow.startsAt,
+      endsAt: new Date(baseWindow.endsAt.getTime() + 15 * 60_000),
+      productIds: [productA],
+      staffId: null,
+      heldForReservationId: null,
+      windowSemantics: 'base',
+    })
+    expect(legacyRow).toMatchObject({
+      startsAt: legacyWindow.startsAt,
+      endsAt: legacyWindow.endsAt,
+      productIds: [productA],
+      staffId: null,
+      heldForReservationId: null,
+      windowSemantics: null,
+    })
+  })
+
+  it('allows only one winner when two pacing-one holds mint concurrently', async () => {
+    const window = staffWindow(4)
+    const mint = () => mintNormalAppointmentHold({ venueId, ...window, productIds: [productA], windowSemantics: 'base' })
+
+    const results = await Promise.allSettled([mint(), mint()])
+
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1)
+    const rejected = results.find(result => result.status === 'rejected') as PromiseRejectedResult
+    expect(rejected.reason).toMatchObject({ statusCode: 409 })
+    expect(await inspector.slotHold.count({ where: { venueId } })).toBe(1)
+  })
+
+  it('allows exactly one consumer for a normal hold and leaves one reservation', async () => {
+    const window = staffWindow(5)
+    const hold = await mintNormalAppointmentHold({ venueId, ...window, productIds: [productA], windowSemantics: 'base' })
+    const consume = () =>
+      createReservation(
+        venueId,
+        { ...window, duration: 60, productId: productA, productIds: [productA] },
+        { writeOrigin: 'PUBLIC', windowSemantics: 'base', appointmentHoldId: hold.id },
+      )
+
+    const results = await Promise.allSettled([consume(), consume()])
+
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1)
+    const rejected = results.find(result => result.status === 'rejected') as PromiseRejectedResult
+    expect(rejected.reason).toMatchObject({ statusCode: 409 })
+    expect(await inspector.reservation.count({ where: { venueId, startsAt: window.startsAt } })).toBe(1)
+    expect(await inspector.slotHold.count({ where: { id: hold.id } })).toBe(0)
+  })
+
+  it('consumes after an operator overfills the global slot because the hold owns that capacity', async () => {
+    const window = staffWindow(6)
+    const hold = await mintNormalAppointmentHold({ venueId, ...window, productIds: [productA], windowSemantics: 'base' })
+    await prisma.reservation.create({
+      data: {
+        venueId,
+        confirmationCode: `OPERATOR-OVERFILL-${process.pid}`,
+        status: 'CONFIRMED',
+        channel: 'DASHBOARD',
+        ...window,
+        duration: 60,
+        productId: productA,
+        productIds: [productA],
+        partySize: 1,
+      },
+    })
+
+    const created = await createReservation(
+      venueId,
+      { ...window, duration: 60, productId: productA, productIds: [productA] },
+      { writeOrigin: 'PUBLIC', windowSemantics: 'base', appointmentHoldId: hold.id },
+    )
+
+    expect(created.id).toBeTruthy()
+    expect(await inspector.reservation.count({ where: { venueId, startsAt: window.startsAt } })).toBe(2)
+    expect(await inspector.slotHold.count({ where: { id: hold.id } })).toBe(0)
+  })
+
+  it('returns APPOINTMENT_WINDOW_CHANGED after a catalog duration change and preserves the hold', async () => {
+    const window = staffWindow(7)
+    const hold = await mintNormalAppointmentHold({ venueId, ...window, productIds: [productA], windowSemantics: 'base' })
+    await prisma.product.update({ where: { id: productA }, data: { duration: 75 } })
+    try {
+      await expect(
+        createReservation(
+          venueId,
+          { ...window, duration: 60, productId: productA, productIds: [productA] },
+          { writeOrigin: 'PUBLIC', windowSemantics: 'base', appointmentHoldId: hold.id },
+        ),
+      ).rejects.toMatchObject({ statusCode: 409, code: 'APPOINTMENT_WINDOW_CHANGED' })
+      expect(await inspector.reservation.count({ where: { venueId, startsAt: window.startsAt } })).toBe(0)
+      expect(await inspector.slotHold.count({ where: { id: hold.id } })).toBe(1)
+    } finally {
+      await prisma.product.update({ where: { id: productA }, data: { duration: 60 } })
+    }
+  })
+
+  it('returns APPOINTMENT_WINDOW_CHANGED after a modifier duration change and preserves the hold', async () => {
+    const window = staffWindow(8)
+    const hold = await mintNormalAppointmentHold({
+      venueId,
+      ...window,
+      productIds: [productA],
+      modifierSelections: [{ productId: productA, modifierId }],
+      windowSemantics: 'base',
+    })
+    await prisma.modifier.update({ where: { id: modifierId }, data: { durationMin: 30 } })
+    try {
+      await expect(
+        createReservation(
+          venueId,
+          {
+            ...window,
+            duration: 60,
+            productId: productA,
+            productIds: [productA],
+            modifierSelections: [{ productId: productA, modifierId }],
+          },
+          { writeOrigin: 'PUBLIC', windowSemantics: 'base', appointmentHoldId: hold.id },
+        ),
+      ).rejects.toMatchObject({ statusCode: 409, code: 'APPOINTMENT_WINDOW_CHANGED' })
+      expect(await inspector.reservation.count({ where: { venueId, startsAt: window.startsAt } })).toBe(0)
+      expect(await inspector.slotHold.count({ where: { id: hold.id } })).toBe(1)
+    } finally {
+      await prisma.modifier.update({ where: { id: modifierId }, data: { durationMin: 15 } })
+    }
+  })
+
+  it('rejects a post-mint staff mapping change without reassignment and preserves the hold', async () => {
+    await prisma.reservationSettings.update({
+      where: { venueId },
+      data: { capacityMode: 'per_staff', showStaffPicker: true, pacingMaxPerSlot: 1 },
+    })
+    const membership = await prisma.staffVenue.findUniqueOrThrow({ where: { staffId_venueId: { staffId: staffA, venueId } } })
+    const window = staffWindow(9)
+    const hold = await mintNormalAppointmentHold({
+      venueId,
+      ...window,
+      productIds: [productA],
+      staffId: staffA,
+      windowSemantics: 'base',
+    })
+    await prisma.productStaff.delete({ where: { productId_staffVenueId: { productId: productA, staffVenueId: membership.id } } })
+    try {
+      await expect(
+        createReservation(
+          venueId,
+          { ...window, duration: 60, productId: productA, productIds: [productA] },
+          { writeOrigin: 'PUBLIC', windowSemantics: 'base', appointmentHoldId: hold.id },
+        ),
+      ).rejects.toMatchObject({ statusCode: 409 })
+      expect(await inspector.reservation.count({ where: { venueId, startsAt: window.startsAt } })).toBe(0)
+      expect(await inspector.slotHold.count({ where: { id: hold.id } })).toBe(1)
+    } finally {
+      await prisma.productStaff.create({ data: { venueId, productId: productA, staffVenueId: membership.id } })
+    }
+  })
+
+  it('rejects a post-mint personal staff conflict without reassignment and preserves the hold', async () => {
+    await prisma.reservationSettings.update({
+      where: { venueId },
+      data: { capacityMode: 'per_staff', showStaffPicker: true, pacingMaxPerSlot: null },
+    })
+    const window = staffWindow(10)
+    const hold = await mintNormalAppointmentHold({
+      venueId,
+      ...window,
+      productIds: [productA],
+      staffId: staffA,
+      windowSemantics: 'base',
+    })
+    await prisma.reservation.create({
+      data: {
+        venueId,
+        confirmationCode: `STAFF-CONFLICT-${process.pid}`,
+        status: 'CONFIRMED',
+        channel: 'DASHBOARD',
+        ...window,
+        duration: 60,
+        productId: productA,
+        productIds: [productA],
+        assignedStaffId: staffA,
+        partySize: 1,
+      },
+    })
+
+    await expect(
+      createReservation(
+        venueId,
+        { ...window, duration: 60, productId: productA, productIds: [productA] },
+        { writeOrigin: 'PUBLIC', windowSemantics: 'base', appointmentHoldId: hold.id },
+      ),
+    ).rejects.toMatchObject({ statusCode: 409 })
+    expect(await inspector.reservation.count({ where: { venueId, startsAt: window.startsAt } })).toBe(1)
+    expect(await inspector.slotHold.count({ where: { id: hold.id } })).toBe(1)
+  })
+
+  it('checks expiry after waiting for the venue lock and preserves the expired hold', async () => {
+    const window = staffWindow(11)
+    const hold = await prisma.slotHold.create({
+      data: {
+        venueId,
+        ...window,
+        productIds: [productA],
+        staffId: null,
+        heldForReservationId: null,
+        windowSemantics: 'base',
+        partySize: 1,
+        expiresAt: new Date(Date.now() + 250),
+      },
+    })
+    let release!: () => void
+    let ready!: () => void
+    const releaseGate = new Promise<void>(resolve => {
+      release = resolve
+    })
+    const readyGate = new Promise<void>(resolve => {
+      ready = resolve
+    })
+    const holder = lockHolder.$transaction(
+      async tx => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'apt-hold:' + venueId}))`
+        ready()
+        await releaseGate
+      },
+      { timeout: 5_000 },
+    )
+    await readyGate
+    const consuming = createReservation(
+      venueId,
+      { ...window, duration: 60, productId: productA, productIds: [productA] },
+      { writeOrigin: 'PUBLIC', windowSemantics: 'base', appointmentHoldId: hold.id },
+    ).then(
+      value => ({ status: 'fulfilled' as const, value }),
+      reason => ({ status: 'rejected' as const, reason }),
+    )
+    await new Promise(resolve => setTimeout(resolve, 350))
+    release()
+    await holder
+
+    const result = await consuming
+    expect(result.status).toBe('rejected')
+    if (result.status === 'rejected') expect(result.reason).toMatchObject({ statusCode: 409 })
+    expect(await inspector.reservation.count({ where: { venueId, startsAt: window.startsAt } })).toBe(0)
+    expect(await inspector.slotHold.count({ where: { id: hold.id } })).toBe(1)
+  })
+
+  it('atomically consumes its locked hold without rechecking pacing at pacing one', async () => {
     await prisma.reservationSettings.update({
       where: { venueId },
       data: { capacityMode: 'per_staff', showStaffPicker: true, pacingMaxPerSlot: 1 },
@@ -278,6 +548,8 @@ describe('createReservation PostgreSQL contract', () => {
         endsAt: window.endsAt,
         productIds: [productA],
         staffId: staffA,
+        heldForReservationId: null,
+        windowSemantics: 'base',
         partySize: 1,
         expiresAt: new Date(Date.now() + 10 * 60_000),
       },
@@ -292,36 +564,45 @@ describe('createReservation PostgreSQL contract', () => {
         productIds: [productA],
         assignedStaffId: staffA,
       },
-      { writeOrigin: 'PUBLIC', windowSemantics: 'base', validatedHoldId: hold.id },
+      { writeOrigin: 'PUBLIC', windowSemantics: 'base', appointmentHoldId: hold.id },
     )
 
     expect(created.assignedStaffId).toBe(staffA)
     expect(await inspector.reservation.count({ where: { venueId, startsAt: window.startsAt, endsAt: window.endsAt } })).toBe(1)
-    expect(await inspector.slotHold.count({ where: { id: hold.id } })).toBe(1)
+    expect(await inspector.slotHold.count({ where: { id: hold.id } })).toBe(0)
   })
 
-  it('still blocks on another live hold when the trusted own hold is excluded', async () => {
+  it('keeps the held global-capacity guarantee when another hold appears before checkout', async () => {
     await prisma.reservationSettings.update({
       where: { venueId },
       data: { capacityMode: 'per_staff', showStaffPicker: true, pacingMaxPerSlot: 1 },
     })
     const window = staffWindow(2)
-    const [ownHold, competingHold] = await Promise.all(
-      [staffA, staffB].map(staffId =>
-        prisma.slotHold.create({
-          data: {
-            venueId,
-            ...window,
-            productIds: [productA],
-            staffId,
-            partySize: 1,
-            expiresAt: new Date(Date.now() + 10 * 60_000),
-          },
-        }),
-      ),
-    )
+    const ownHold = await prisma.slotHold.create({
+      data: {
+        venueId,
+        startsAt: window.startsAt,
+        endsAt: new Date(window.endsAt.getTime() + 15 * 60_000),
+        productIds: [productA],
+        staffId: staffA,
+        heldForReservationId: null,
+        windowSemantics: 'base',
+        partySize: 1,
+        expiresAt: new Date(Date.now() + 10 * 60_000),
+      },
+    })
+    const competingHold = await prisma.slotHold.create({
+      data: {
+        venueId,
+        ...window,
+        productIds: [productA],
+        staffId: staffB,
+        partySize: 1,
+        expiresAt: new Date(Date.now() + 10 * 60_000),
+      },
+    })
 
-    const failure = await createReservation(
+    const created = await createReservation(
       venueId,
       {
         ...window,
@@ -331,14 +612,14 @@ describe('createReservation PostgreSQL contract', () => {
         assignedStaffId: staffA,
         modifierSelections: [{ productId: productA, modifierId }],
       },
-      { writeOrigin: 'PUBLIC', windowSemantics: 'base', validatedHoldId: ownHold.id },
-    ).catch(error => error)
+      { writeOrigin: 'PUBLIC', windowSemantics: 'base', appointmentHoldId: ownHold.id },
+    )
 
-    expect(failure).toMatchObject({ statusCode: 409, code: undefined, details: undefined })
-    expect(await inspector.reservation.count({ where: { venueId, startsAt: window.startsAt, endsAt: window.endsAt } })).toBe(0)
-    expect(await inspector.reservationModifier.count({ where: { reservation: { venueId } } })).toBe(0)
-    expect(await inspector.calendarSyncOutbox.count({ where: { venueId } })).toBe(0)
-    expect(await inspector.slotHold.count({ where: { id: { in: [ownHold.id, competingHold.id] } } })).toBe(2)
+    expect(created).toMatchObject({ assignedStaffId: staffA, duration: 75 })
+    expect(await inspector.reservation.count({ where: { venueId, startsAt: window.startsAt } })).toBe(1)
+    expect(await inspector.reservationModifier.count({ where: { reservation: { venueId } } })).toBe(1)
+    expect(await inspector.slotHold.count({ where: { id: ownHold.id } })).toBe(0)
+    expect(await inspector.slotHold.count({ where: { id: competingHold.id } })).toBe(1)
   })
 
   it('keeps resource and pacing independent by assigning B when A is busy and pacing is two', async () => {

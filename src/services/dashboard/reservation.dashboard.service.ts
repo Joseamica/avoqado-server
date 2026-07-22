@@ -1,6 +1,6 @@
 import crypto from 'crypto'
 import { Prisma, ReservationStatus, ReservationChannel } from '@prisma/client'
-import { BadRequestError, ConflictError, NotFoundError, ValidationError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { logAction } from './activity-log.service'
@@ -28,10 +28,15 @@ import {
 } from '@/services/reservation/resolveAppointmentWindow'
 import {
   assertOrganizationStaffAvailability,
+  assertStaffEligible,
   lockAppointmentVenue,
   resolveStaffAssignment,
   shouldAutoAssign,
 } from './appointmentStaffAssignment.service'
+import { enforceBookingWindow } from '@/services/reservation/bookingWindow.service'
+import { lockAndValidateNormalAppointmentHold } from '@/services/reservation/appointmentSlotHold.service'
+
+export { enforceBookingWindow } from '@/services/reservation/bookingWindow.service'
 // creditPack.public.service is imported lazily inside cancelReservation/markNoShow.
 
 // ==========================================
@@ -239,8 +244,8 @@ export interface ReservationWriteContext {
   writeOrigin: WriteOrigin
   allowOverCapacity?: boolean
   windowSemantics?: 'base'
-  /** Trusted server-derived hold identity; never populate from request bodies. */
-  validatedHoldId?: string
+  /** Tenant/live-preflighted candidate token; all identity and authorization is repeated under row lock. */
+  appointmentHoldId?: string
   /**
    * Trusted server-derived bridge for the public payment preflight. It may
    * replace deposits only; scheduling and every other policy remain bound to
@@ -261,28 +266,6 @@ export interface ReservationWriteContext {
  * "X days from now" / "X minutes from now" are absolute offsets, so we don't
  * need the venue timezone here — only date-of-day comparisons would.
  */
-export function enforceBookingWindow(startsAt: Date, scheduling?: { maxAdvanceDays?: number | null; minNoticeMin?: number | null }): void {
-  if (!scheduling) return
-  const now = Date.now()
-  const startMs = startsAt.getTime()
-
-  const maxAdvanceDays = scheduling.maxAdvanceDays
-  if (maxAdvanceDays !== null && maxAdvanceDays !== undefined && maxAdvanceDays > 0) {
-    const latestAllowed = now + maxAdvanceDays * 24 * 60 * 60 * 1000
-    if (startMs > latestAllowed) {
-      throw new ValidationError(`No puedes reservar con tanta anticipación. Máximo ${maxAdvanceDays} días.`)
-    }
-  }
-
-  const minNoticeMin = scheduling.minNoticeMin
-  if (minNoticeMin !== null && minNoticeMin !== undefined && minNoticeMin > 0) {
-    const earliestAllowed = now + minNoticeMin * 60 * 1000
-    if (startMs < earliestAllowed) {
-      throw new ValidationError(`Esta reservación requiere al menos ${minNoticeMin} minutos de anticipación.`)
-    }
-  }
-}
-
 export async function createReservation(
   venueId: string,
   data: CreateReservationInput,
@@ -332,6 +315,9 @@ export async function createReservation(
       bookedProductIds.length > 0 &&
       products.length === bookedProductIds.length &&
       products.every(selected => selected.type === 'APPOINTMENTS_SERVICE')
+    if (context.appointmentHoldId && !isAppointment) {
+      throw new ConflictError('Tu reserva temporal ya no es válida. Selecciona el horario de nuevo.')
+    }
 
     let modifierRows: ResolvedModifierRow[]
     let modifierDelta: Prisma.Decimal
@@ -376,20 +362,53 @@ export async function createReservation(
     let effectiveAssignedStaffId = data.assignedStaffId ?? null
     let overCapacity = false
     const selfServiceStaffSelection = context.writeOrigin === 'PUBLIC' || context.writeOrigin === 'CONSUMER'
+    let consumedAppointmentHoldId: string | null = null
 
     if (isAppointment) {
       // The final appointment window is read-only-resolved above. From this
       // point onward every authorizing conflict/count/write is serialized by
       // the same venue-scoped advisory lock and post-lock clock.
       await lockAppointmentVenue(tx, venueId)
-      const checkedAt = new Date()
       const staffAware = isStaffAware(settings)
+      const requestedStaffWasProvided = data.assignedStaffId !== undefined
+      const lockedHold = context.appointmentHoldId
+        ? await lockAndValidateNormalAppointmentHold(tx, {
+            venueId,
+            holdId: context.appointmentHoldId,
+            startsAt: data.startsAt,
+            rawEndsAt: data.endsAt,
+            finalEndsAt,
+            productIds: bookedProductIds,
+            requestedStaffId: data.assignedStaffId,
+            requestedStaffWasProvided,
+            windowSemantics: context.windowSemantics,
+          })
+        : null
+      const checkedAt = lockedHold?.checkedAt ?? new Date()
+      if (lockedHold) {
+        consumedAppointmentHoldId = lockedHold.id
+        effectiveAssignedStaffId = requestedStaffWasProvided ? (data.assignedStaffId ?? null) : lockedHold.staffId
+      }
 
-      if (selfServiceStaffSelection && effectiveAssignedStaffId && settings.publicBooking.showStaffPicker !== true) {
+      if (selfServiceStaffSelection && effectiveAssignedStaffId && settings.publicBooking.showStaffPicker !== true && !lockedHold) {
         throw new BadRequestError('La selección de profesionista no está habilitada para este negocio')
       }
 
-      if (staffAware && (effectiveAssignedStaffId || shouldAutoAssign(true, settings))) {
+      if (lockedHold && (staffAware || lockedHold.staffId !== null)) {
+        if (!effectiveAssignedStaffId) {
+          throw new ConflictError('Tu reserva temporal ya no es válida. Selecciona el horario de nuevo.')
+        }
+        await assertStaffEligible(tx, {
+          venueId,
+          staffId: effectiveAssignedStaffId,
+          productIds: bookedProductIds,
+          startsAt: data.startsAt,
+          endsAt: finalEndsAt,
+          checkedAt,
+          settings,
+          excludeHoldId: lockedHold.id,
+        })
+      } else if (!lockedHold && staffAware && (effectiveAssignedStaffId || shouldAutoAssign(true, settings))) {
         effectiveAssignedStaffId = await resolveStaffAssignment(tx, {
           venueId,
           productIds: bookedProductIds,
@@ -398,9 +417,9 @@ export async function createReservation(
           checkedAt,
           settings,
           requestedStaffId: effectiveAssignedStaffId ?? undefined,
-          excludeHoldId: context.validatedHoldId,
+          excludeHoldId: undefined,
         })
-      } else if (effectiveAssignedStaffId) {
+      } else if (!lockedHold && effectiveAssignedStaffId) {
         const membership = await validateLegacyStaffMembership(tx, venueId, effectiveAssignedStaffId)
         await assertOrganizationStaffAvailability(tx, {
           organizationId: membership.organizationId,
@@ -408,7 +427,7 @@ export async function createReservation(
           startsAt: data.startsAt,
           endsAt: finalEndsAt,
           checkedAt,
-          excludeHoldId: context.validatedHoldId,
+          excludeHoldId: undefined,
         })
       }
 
@@ -418,13 +437,12 @@ export async function createReservation(
           ? null
           : effectiveAppointmentPacing(settings.scheduling.pacingMaxPerSlot)
 
-      if (globalLimit !== null) {
+      if (!lockedHold && globalLimit !== null) {
         const { reservations, holds } = await countAppointmentOccupancy(tx, {
           venueId,
           startsAt: data.startsAt,
           endsAt: finalEndsAt,
           checkedAt,
-          excludeHoldId: context.validatedHoldId,
         })
         const occupancy = reservations + holds
         if (occupancy >= globalLimit) {
@@ -452,7 +470,6 @@ export async function createReservation(
         startsAt: data.startsAt,
         endsAt: finalEndsAt,
         checkedAt,
-        excludeHoldId: context.validatedHoldId,
       })
     }
 
@@ -523,7 +540,7 @@ export async function createReservation(
     }
 
     // Layer 3: Product capacity gate
-    if (leadProductId && product?.eventCapacity) {
+    if (!isAppointment && leadProductId && product?.eventCapacity) {
       const onlinePercent = settings.scheduling.onlineCapacityPercent
       const effectiveCapacity = Math.floor((product.eventCapacity * onlinePercent) / 100)
 
@@ -624,6 +641,10 @@ export async function createReservation(
             targetConnectionIds: targets.map(t => t.id),
           })
         : []
+
+    if (consumedAppointmentHoldId) {
+      await tx.slotHold.deleteMany({ where: { id: consumedAppointmentHoldId, venueId } })
+    }
 
     return { reservation, pushRowIds, overCapacity }
   })

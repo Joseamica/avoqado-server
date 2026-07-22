@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { reservationModifierSelectionsSchema } from '@/schemas/dashboard/reservation.schema'
 
 export const consumerOAuthSchema = z.object({
   body: z.object({
@@ -39,6 +40,9 @@ export const consumerCreateReservationSchema = z.object({
       guestEmail: z.string().email().max(200).optional(),
       partySize: z.number().int().min(1).max(100).optional(),
       productId: z.string().optional(),
+      productIds: z.array(z.string().trim().min(1)).max(1, 'La app de consumidor admite un solo servicio').optional(),
+      modifierSelections: reservationModifierSelectionsSchema.optional(),
+      holdId: z.string().min(1).optional(),
       staffId: z.string({ invalid_type_error: 'staffId debe ser texto' }).min(1, 'staffId es requerido').optional(),
       windowSemantics: z.literal('base', { invalid_type_error: 'windowSemantics debe ser base' }).optional(),
       classSessionId: z.string().optional(),
@@ -47,6 +51,20 @@ export const consumerCreateReservationSchema = z.object({
       creditItemBalanceId: z.string().optional(),
     })
     .superRefine((data, ctx) => {
+      if (data.holdId && data.classSessionId) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'holdId solo es válido para reservaciones de cita',
+          path: ['holdId'],
+        })
+      }
+      if (data.holdId && !data.productId?.trim() && (data.productIds?.length ?? 0) === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'holdId requiere un servicio de cita',
+          path: ['holdId'],
+        })
+      }
       if (data.duration !== undefined && data.windowSemantics !== 'base' && data.duration < 5) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,

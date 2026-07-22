@@ -9,6 +9,8 @@ import { getProvider } from '@/services/payments/provider-registry'
 import { resolveChargeableStripeMerchant as resolveActiveStripeMerchant } from '@/services/payments/ecommerceCapability'
 import logger from '@/config/logger'
 import { withSerializableRetry } from '@/utils/serializableRetry'
+import { fastFailLiveHold } from '@/services/reservation/appointmentSlotHold.service'
+import { normalizeBookedProductIds } from '@/services/reservation/resolveAppointmentWindow'
 
 type ConsumerReservationInput = {
   startsAt?: Date
@@ -19,6 +21,9 @@ type ConsumerReservationInput = {
   guestEmail?: string
   partySize?: number
   productId?: string
+  productIds?: string[]
+  modifierSelections?: { productId: string; modifierId: string; quantity?: number }[]
+  holdId?: string
   staffId?: string
   windowSemantics?: 'base'
   classSessionId?: string
@@ -232,7 +237,16 @@ export async function createReservationForConsumer(consumerId: string, venueSlug
     throw new BadRequestError('Las reservaciones en linea no estan habilitadas')
   }
 
-  if (!input.classSessionId && input.staffId && settings.publicBooking.showStaffPicker !== true) {
+  const normalizedProducts = normalizeBookedProductIds({ productId: input.productId, productIds: input.productIds })
+  if (normalizedProducts.productIds.length > 1) {
+    throw new BadRequestError('La app de consumidor admite un solo servicio por reservación')
+  }
+  const appointmentHold = input.holdId ? await fastFailLiveHold({ venueId: venue.id, holdId: input.holdId }) : null
+  if (appointmentHold && (input.classSessionId || normalizedProducts.productIds.length !== 1)) {
+    throw new BadRequestError('holdId solo es válido para reservaciones de cita con un servicio')
+  }
+
+  if (!input.classSessionId && input.staffId && settings.publicBooking.showStaffPicker !== true && !appointmentHold) {
     throw new BadRequestError('La selección de profesionista no está habilitada para este negocio')
   }
 
@@ -282,7 +296,7 @@ export async function createReservationForConsumer(consumerId: string, venueSlug
     throw new BadRequestError('startsAt, endsAt y duration son requeridos')
   }
 
-  const depositPreview = await previewDepositRequirement(venue.id, input, settings)
+  const depositPreview = await previewDepositRequirement(venue.id, { ...input, productId: normalizedProducts.leadProductId }, settings)
   const stripeMerchant = depositPreview.required ? await resolveActiveStripeMerchant(venue.id) : null
 
   if (depositPreview.required && !stripeMerchant) {
@@ -312,11 +326,17 @@ export async function createReservationForConsumer(consumerId: string, venueSlug
       guestPhone,
       guestEmail,
       partySize: input.partySize,
-      productId: input.productId,
+      productId: normalizedProducts.leadProductId,
+      productIds: normalizedProducts.productIdsWasProvided ? normalizedProducts.productIds : undefined,
+      modifierSelections: input.modifierSelections,
       assignedStaffId: input.staffId,
       specialRequests: input.specialRequests,
     },
-    { writeOrigin: 'CONSUMER', ...(input.windowSemantics === 'base' ? { windowSemantics: input.windowSemantics } : {}) },
+    {
+      writeOrigin: 'CONSUMER',
+      ...(input.windowSemantics === 'base' ? { windowSemantics: input.windowSemantics } : {}),
+      ...(appointmentHold ? { appointmentHoldId: appointmentHold.id } : {}),
+    },
   )
 
   let checkoutUrl: string | null = null

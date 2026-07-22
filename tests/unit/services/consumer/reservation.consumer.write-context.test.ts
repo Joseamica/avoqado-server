@@ -2,7 +2,8 @@ import { createReservationForConsumer } from '@/services/consumer/reservation.co
 import * as reservationService from '@/services/dashboard/reservation.dashboard.service'
 import * as settingsService from '@/services/dashboard/reservationSettings.service'
 import * as ecommerceCapability from '@/services/payments/ecommerceCapability'
-import { BadRequestError } from '@/errors/AppError'
+import * as appointmentSlotHoldService from '@/services/reservation/appointmentSlotHold.service'
+import { BadRequestError, ConflictError } from '@/errors/AppError'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { Prisma } from '@prisma/client'
 
@@ -141,6 +142,138 @@ describe('consumer reservation write context', () => {
       statusCode: 400,
       message: 'La selección de profesionista no está habilitada para este negocio',
     })
+
+    expect(prismaMock.consumer.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.customer.findFirst).not.toHaveBeenCalled()
+    expect(prismaMock.customer.create).not.toHaveBeenCalled()
+    expect(createSpy).not.toHaveBeenCalled()
+  })
+
+  it('fast-fails a normal token, then forwards canonical products/modifiers and only its server-derived id', async () => {
+    jest.spyOn(settingsService, 'getReservationSettings').mockResolvedValue({
+      ...makeSettings(),
+      publicBooking: { ...makeSettings().publicBooking, showStaffPicker: false },
+    })
+    const fastFail = jest.spyOn(appointmentSlotHoldService, 'fastFailLiveHold').mockResolvedValue({ id: 'hold-server' })
+    const createSpy = jest.spyOn(reservationService, 'createReservation').mockResolvedValue({
+      id: 'reservation-1',
+      confirmationCode: 'RES-1',
+      cancelSecret: 'secret',
+      startsAt,
+      endsAt,
+      status: 'CONFIRMED',
+      depositAmount: null,
+    } as any)
+    const modifierSelections = [{ productId: 'product-1', modifierId: 'modifier-1', quantity: 2 }]
+
+    await createReservationForConsumer('consumer-1', 'venue', {
+      startsAt,
+      endsAt,
+      duration: 60,
+      productId: 'product-1',
+      productIds: ['product-1'],
+      staffId: 'staff-held',
+      modifierSelections,
+      holdId: 'hold-from-wire',
+      windowSemantics: 'base',
+      appointmentHoldId: 'forged',
+    } as any)
+
+    expect(fastFail).toHaveBeenCalledWith({ venueId: 'venue-1', holdId: 'hold-from-wire' })
+    expect(createSpy).toHaveBeenCalledWith(
+      'venue-1',
+      expect.objectContaining({
+        productId: 'product-1',
+        productIds: ['product-1'],
+        modifierSelections,
+        assignedStaffId: 'staff-held',
+      }),
+      { writeOrigin: 'CONSUMER', windowSemantics: 'base', appointmentHoldId: 'hold-server' },
+    )
+  })
+
+  it('uses the canonical productIds-only lead for percentage-deposit preflight', async () => {
+    const percentageSettings = {
+      ...makeSettings(true),
+      deposits: {
+        ...makeSettings(true).deposits,
+        fixedAmount: null,
+        percentageOfTotal: 50,
+      },
+    }
+    jest.spyOn(settingsService, 'getReservationSettings').mockResolvedValue(percentageSettings)
+    prismaMock.product.findFirst.mockResolvedValue({ price: new Prisma.Decimal(200) } as any)
+    jest.spyOn(ecommerceCapability, 'resolveChargeableStripeMerchant').mockResolvedValue(null)
+    const createSpy = jest.spyOn(reservationService, 'createReservation')
+
+    await expect(
+      createReservationForConsumer('consumer-1', 'venue', {
+        startsAt,
+        endsAt,
+        duration: 60,
+        partySize: 1,
+        productIds: ['product-1'],
+      }),
+    ).rejects.toThrow(BadRequestError)
+
+    expect(prismaMock.product.findFirst).toHaveBeenCalledWith({
+      where: { id: 'product-1', venueId: 'venue-1', active: true },
+      select: { price: true },
+    })
+    expect(createSpy).not.toHaveBeenCalled()
+  })
+
+  it('rejects a valid candidate token on a class create before customer-link writes', async () => {
+    jest.spyOn(settingsService, 'getReservationSettings').mockResolvedValue(makeSettings())
+    jest.spyOn(appointmentSlotHoldService, 'fastFailLiveHold').mockResolvedValue({ id: 'hold-server' })
+    const createSpy = jest.spyOn(reservationService, 'createReservation')
+
+    await expect(
+      createReservationForConsumer('consumer-1', 'venue', {
+        classSessionId: 'class-1',
+        holdId: 'hold-from-wire',
+      } as any),
+    ).rejects.toMatchObject({ statusCode: 400 })
+
+    expect(prismaMock.consumer.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.customer.findFirst).not.toHaveBeenCalled()
+    expect(prismaMock.customer.create).not.toHaveBeenCalled()
+    expect(createSpy).not.toHaveBeenCalled()
+  })
+
+  it('rejects multi-service consumer input before customer-link or core writes', async () => {
+    jest.spyOn(settingsService, 'getReservationSettings').mockResolvedValue(makeSettings())
+    const createSpy = jest.spyOn(reservationService, 'createReservation')
+
+    await expect(
+      createReservationForConsumer('consumer-1', 'venue', {
+        startsAt,
+        endsAt,
+        duration: 60,
+        productId: 'product-1',
+        productIds: ['product-1', 'product-2'],
+      }),
+    ).rejects.toMatchObject({ statusCode: 400 })
+
+    expect(prismaMock.consumer.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.customer.findFirst).not.toHaveBeenCalled()
+    expect(createSpy).not.toHaveBeenCalled()
+  })
+
+  it('rejects an invalid token before any consumer lookup or customer-link write', async () => {
+    jest.spyOn(settingsService, 'getReservationSettings').mockResolvedValue(makeSettings())
+    jest.spyOn(appointmentSlotHoldService, 'fastFailLiveHold').mockRejectedValue(new ConflictError('Tu reserva temporal ya no es válida'))
+    const createSpy = jest.spyOn(reservationService, 'createReservation')
+
+    await expect(
+      createReservationForConsumer('consumer-1', 'venue', {
+        startsAt,
+        endsAt,
+        duration: 60,
+        productId: 'product-1',
+        holdId: 'hold-invalid',
+      } as any),
+    ).rejects.toMatchObject({ statusCode: 409 })
 
     expect(prismaMock.consumer.findUnique).not.toHaveBeenCalled()
     expect(prismaMock.customer.findFirst).not.toHaveBeenCalled()
