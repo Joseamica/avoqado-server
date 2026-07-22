@@ -1,5 +1,6 @@
 import { registerReservationTools } from '../../../src/mcp/tools/reservations'
 import type { McpScope } from '../../../src/mcp/scope'
+import { ConflictError } from '@/errors/AppError'
 
 // Verify create_reservation wiring (date parse, duration → endsAt, service args, audit) without
 // touching the DB. The createReservation service itself is tested in the dashboard suite.
@@ -140,6 +141,41 @@ describe('create_reservation', () => {
     expect(data.duration).toBe(5)
     expect((data.endsAt as Date).toISOString()).toBe('2026-06-06T19:05:00.000Z')
     expect(context).toEqual({ writeOrigin: 'MCP', windowSemantics: 'base' })
+  })
+
+  it('preserves operational code and details when core reports a changed canonical window', async () => {
+    const details = {
+      canonicalStartsAt: '2026-06-06T19:00:00.000Z',
+      canonicalEndsAt: '2026-06-06T20:00:00.000Z',
+    }
+    mockCreate.mockRejectedValueOnce(
+      new ConflictError('La duración del servicio cambió; vuelve a consultar disponibilidad.', 'APPOINTMENT_WINDOW_CHANGED', details),
+    )
+
+    const out = parse(await call({ venueId: 'v1', startsAt: '2026-06-06T19:00:00.000Z', partySize: 1 }))
+
+    expect(out).toEqual({
+      ok: false,
+      error: 'La duración del servicio cambió; vuelve a consultar disponibilidad.',
+      code: 'APPOINTMENT_WINDOW_CHANGED',
+      details,
+    })
+  })
+
+  it('preserves operational metadata from appointment canonicalization failures', async () => {
+    mockGetSettings.mockRejectedValueOnce(new ConflictError('Configuración cambió.', 'APPOINTMENT_WINDOW_CHANGED', { retry: true }))
+
+    const out = parse(
+      await call({ venueId: 'v1', startsAt: '2026-06-06T19:00:00.000Z', partySize: 1, productId: 'product-1' }),
+    )
+
+    expect(out).toEqual({
+      ok: false,
+      error: 'Configuración cambió.',
+      code: 'APPOINTMENT_WINDOW_CHANGED',
+      details: { retry: true },
+    })
+    expect(mockCreate).not.toHaveBeenCalled()
   })
 
   it('resolves one tenant-scoped staffName to Staff.id', async () => {

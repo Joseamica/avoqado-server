@@ -254,6 +254,7 @@ describe('mintRescheduleAppointmentHold', () => {
     prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock))
     jest.spyOn(settingsService, 'getReservationSettings').mockResolvedValue(settings({ staffAware: true, pacing: 1 }))
     jest.spyOn(assignmentService, 'lockAppointmentVenue').mockResolvedValue()
+    jest.spyOn(assignmentService, 'assertLegacyStaffEligible').mockResolvedValue()
     jest.spyOn(assignmentService, 'assertStaffEligibleForPersistedProducts').mockResolvedValue()
     jest.spyOn(availabilityService, 'countAppointmentOccupancy').mockResolvedValue({ reservations: 0, holds: 0 })
     jest
@@ -269,6 +270,28 @@ describe('mintRescheduleAppointmentHold', () => {
       expiresAt: data.expiresAt,
       staffId: data.staffId,
     }))
+  })
+
+  it('keeps an assigned legacy reschedule on membership and conflict rules without requiring ProductStaff or schedules', async () => {
+    prismaMock.$queryRaw.mockResolvedValueOnce([reservation()] as any).mockResolvedValueOnce([sibling] as any)
+    jest.spyOn(settingsService, 'getReservationSettings').mockResolvedValue(settings({ staffAware: false, picker: false, pacing: 1 }))
+
+    await mintRescheduleAppointmentHold({
+      venueId,
+      reservationId: 'reservation-1',
+      requestedStartsAt,
+      clock: () => new Date('2026-08-01T10:00:00.000Z'),
+    })
+
+    expect(assignmentService.assertLegacyStaffEligible).toHaveBeenCalledWith(prismaMock, {
+      venueId,
+      staffId: 'staff-1',
+      startsAt: requestedStartsAt,
+      endsAt: new Date(requestedStartsAt.getTime() + 60 * 60_000),
+      checkedAt: new Date('2026-08-01T10:00:00.000Z'),
+      excludeReservationId: 'reservation-1',
+    })
+    expect(assignmentService.assertStaffEligibleForPersistedProducts).not.toHaveBeenCalled()
   })
 
   it.each([

@@ -2221,6 +2221,9 @@ export async function createHold(req: Request, res: Response, next: NextFunction
     // only an explicit productIds field opts a class hold into list validation.
     const scalarProductId = body.classSessionId && body.productIds === undefined ? undefined : body.productId
     const { productIds } = normalizeBookedProductIds({ productId: scalarProductId, productIds: body.productIds })
+    if (!body.classSessionId && productIds.length === 0) {
+      throw new BadRequestError('Selecciona un producto de cita o una sesión de clase')
+    }
     const isAppointmentHold = !body.classSessionId && productIds.length > 0
     if (!isAppointmentHold && productIds.length > 0) {
       const products = await prisma.product.findMany({
@@ -2271,7 +2274,7 @@ export async function createHold(req: Request, res: Response, next: NextFunction
         windowSemantics: body.windowSemantics,
       })
     } else {
-      // Non-appointment holds (classes, generic) — wrap in a transaction so the
+      // Class holds — wrap in a transaction so the
       // external busy-block check runs against the same snapshot the create
       // commits with.
       const expiresAt = new Date(Date.now() + SLOT_HOLD_TTL_MS)

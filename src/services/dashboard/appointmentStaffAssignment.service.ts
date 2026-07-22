@@ -47,6 +47,16 @@ export interface StaffEligibilityArgs {
   excludeHoldId?: string
 }
 
+export interface LegacyStaffEligibilityArgs {
+  venueId: string
+  staffId: string
+  startsAt: Date
+  endsAt: Date
+  checkedAt: Date
+  excludeReservationId?: string
+  excludeHoldId?: string
+}
+
 export interface ResolveStaffAssignmentArgs {
   venueId: string
   productIds: string[]
@@ -77,6 +87,15 @@ export interface FindEligibleStaffForDayWindowsArgs {
   checkedAt: Date
   settings: ReservationConfig
   requestedStaffId?: string
+  excludeReservationId?: string
+  excludeHoldId?: string
+}
+
+export interface FindLegacyStaffAvailabilityForDayWindowsArgs {
+  venueId: string
+  staffId: string
+  windows: StaffDayWindow[]
+  checkedAt: Date
   excludeReservationId?: string
   excludeHoldId?: string
 }
@@ -306,6 +325,35 @@ async function loadExplicitMembership(tx: Prisma.TransactionClient, venueId: str
   })
 }
 
+/**
+ * Preserve the pre-staff-aware contract for already assigned reservations:
+ * active venue membership plus authoritative busy checks, without requiring
+ * ProductStaff mappings or a StaffSchedule that legacy venues never needed.
+ */
+export async function assertLegacyStaffEligible(tx: Prisma.TransactionClient, args: LegacyStaffEligibilityArgs): Promise<void> {
+  assertValidWindow(args.startsAt, args.endsAt, args.checkedAt)
+  const member = await loadExplicitMembership(tx, args.venueId, args.staffId)
+  if (!member) throw genericBusy()
+
+  const venueMasterBlock = await checkExternalBusyBlock(tx, {
+    venueId: args.venueId,
+    staffId: null,
+    startsAt: args.startsAt,
+    endsAt: args.endsAt,
+  })
+  if (venueMasterBlock) throw genericBusy()
+
+  await assertOrganizationStaffAvailability(tx, {
+    organizationId: member.venue.organizationId,
+    staffId: member.staffId,
+    startsAt: args.startsAt,
+    endsAt: args.endsAt,
+    checkedAt: args.checkedAt,
+    excludeReservationId: args.excludeReservationId,
+    excludeHoldId: args.excludeHoldId,
+  })
+}
+
 export async function assertStaffEligible(tx: Prisma.TransactionClient, args: StaffEligibilityArgs): Promise<void> {
   assertValidWindow(args.startsAt, args.endsAt, args.checkedAt)
   const member = await loadExplicitMembership(tx, args.venueId, args.staffId)
@@ -435,6 +483,91 @@ function sortAllocationCandidates<T extends AllocationCandidate>(candidates: T[]
 
 function intervalsOverlap(left: TimeInterval, right: TimeInterval): boolean {
   return left.startsAt.getTime() < right.endsAt.getTime() && left.endsAt.getTime() > right.startsAt.getTime()
+}
+
+/**
+ * Read-side counterpart of assertLegacyStaffEligible. It intentionally skips
+ * ProductStaff and StaffSchedule, but still filters every generated window by
+ * active membership, venue-master blocks, and organization-wide commitments.
+ */
+export async function findLegacyStaffAvailabilityForDayWindows(
+  db: Prisma.TransactionClient,
+  args: FindLegacyStaffAvailabilityForDayWindowsArgs,
+): Promise<boolean[]> {
+  if (!validDate(args.checkedAt)) throw new BadRequestError('La ventana de la cita es inválida')
+  for (const window of args.windows) assertValidWindow(window.startsAt, window.endsAt, args.checkedAt)
+  if (args.windows.length === 0) return []
+
+  const member = await loadExplicitMembership(db, args.venueId, args.staffId)
+  if (!member) return args.windows.map(() => false)
+
+  const envelope = {
+    startsAt: new Date(Math.min(...args.windows.map(window => window.startsAt.getTime()))),
+    endsAt: new Date(Math.max(...args.windows.map(window => window.endsAt.getTime()))),
+  }
+  const memberships = await db.staffVenue.findMany({
+    where: { staffId: args.staffId, venue: { organizationId: member.venue.organizationId } },
+    select: { venueId: true },
+  })
+  const venueIds = [...new Set(memberships.map(membership => membership.venueId))]
+  const overlap = { startsAt: { lt: envelope.endsAt }, endsAt: { gt: envelope.startsAt } }
+
+  const [reservations, classes, holds, externalBlocks] = await Promise.all([
+    db.reservation.findMany({
+      where: {
+        venueId: { in: venueIds },
+        assignedStaffId: args.staffId,
+        status: { in: ACTIVE_RESERVATION_STATUSES },
+        ...overlap,
+        ...(args.excludeReservationId && { id: { not: args.excludeReservationId } }),
+      },
+      select: { startsAt: true, endsAt: true },
+    }),
+    db.classSession.findMany({
+      where: {
+        venueId: { in: venueIds },
+        assignedStaffId: args.staffId,
+        status: 'SCHEDULED',
+        ...overlap,
+      },
+      select: { startsAt: true, endsAt: true },
+    }),
+    db.slotHold.findMany({
+      where: {
+        venueId: { in: venueIds },
+        staffId: args.staffId,
+        ...overlap,
+        expiresAt: { gt: args.checkedAt },
+        ...(args.excludeHoldId && { id: { not: args.excludeHoldId } }),
+      },
+      select: {
+        startsAt: true,
+        endsAt: true,
+        expiresAt: true,
+        heldForReservationId: true,
+        heldForReservation: { select: { status: true } },
+      },
+    }),
+    db.externalBusyBlock.findMany({
+      where: {
+        OR: [
+          { venueId: args.venueId, staffId: null, ...overlap },
+          { staffId: args.staffId, ...overlap },
+        ],
+      },
+      select: { startsAt: true, endsAt: true, staffId: true, venueId: true },
+    }),
+  ])
+
+  return args.windows.map(window => {
+    const interval = { startsAt: window.startsAt, endsAt: window.endsAt }
+    return !(
+      reservations.some(row => intervalsOverlap(row, interval)) ||
+      classes.some(row => intervalsOverlap(row, interval)) ||
+      holds.some(row => isLiveSlotHold(row, args.checkedAt) && intervalsOverlap(row, interval)) ||
+      externalBlocks.some(row => intervalsOverlap(row, interval))
+    )
+  })
 }
 
 /**

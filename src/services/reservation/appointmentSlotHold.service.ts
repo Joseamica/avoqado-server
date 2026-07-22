@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client'
 import { formatInTimeZone, fromZonedTime } from 'date-fns-tz'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import {
+  assertLegacyStaffEligible,
   assertStaffEligibleForPersistedProducts,
   lockAppointmentVenue,
   resolveStaffAssignment,
@@ -351,16 +352,27 @@ export async function mintRescheduleAppointmentHold(input: MintRescheduleAppoint
       throw new ConflictError('El profesionista de esta cita ya no está disponible. Contacta al negocio.')
     }
     if (reservation.assignedStaffId) {
-      await assertStaffEligibleForPersistedProducts(tx, {
-        venueId: input.venueId,
-        staffId: reservation.assignedStaffId,
-        productIds,
-        startsAt: input.requestedStartsAt,
-        endsAt: derivedEndsAt,
-        checkedAt,
-        settings,
-        excludeReservationId: reservation.id,
-      })
+      if (isStaffAware(settings)) {
+        await assertStaffEligibleForPersistedProducts(tx, {
+          venueId: input.venueId,
+          staffId: reservation.assignedStaffId,
+          productIds,
+          startsAt: input.requestedStartsAt,
+          endsAt: derivedEndsAt,
+          checkedAt,
+          settings,
+          excludeReservationId: reservation.id,
+        })
+      } else {
+        await assertLegacyStaffEligible(tx, {
+          venueId: input.venueId,
+          staffId: reservation.assignedStaffId,
+          startsAt: input.requestedStartsAt,
+          endsAt: derivedEndsAt,
+          checkedAt,
+          excludeReservationId: reservation.id,
+        })
+      }
     } else {
       const venueBlock = await checkExternalBusyBlock(tx, {
         venueId: input.venueId,

@@ -28,6 +28,7 @@ import {
   resolveAppointmentWindow,
 } from '@/services/reservation/resolveAppointmentWindow'
 import {
+  assertLegacyStaffEligible,
   assertOrganizationStaffAvailability,
   assertStaffEligible,
   assertStaffEligibleForPersistedProducts,
@@ -215,7 +216,7 @@ async function validateLegacyStaffMembership(
   staffId: string,
 ): Promise<{ organizationId: string }> {
   const staffVenue = await tx.staffVenue.findFirst({
-    where: { staffId, venueId, active: true },
+    where: { staffId, venueId, active: true, staff: { active: true } },
     select: { venue: { select: { organizationId: true } } },
   })
   if (!staffVenue) {
@@ -1550,6 +1551,16 @@ export async function updateReservation(
         settings,
         excludeReservationId: reservation.id,
       })
+    } else if (newStaffId && (windowChanged || staffChanged)) {
+      const membership = await validateLegacyStaffMembership(tx, venueId, newStaffId)
+      await assertOrganizationStaffAvailability(tx, {
+        organizationId: membership.organizationId,
+        staffId: newStaffId,
+        startsAt: newStartsAt,
+        endsAt: newEndsAt,
+        checkedAt,
+        excludeReservationId: reservation.id,
+      })
     }
 
     const pacingLimit = staffAware
@@ -1899,7 +1910,7 @@ async function rescheduleAppointmentWithHold(args: {
       settings,
     })
 
-    if (isStaffAware(settings) || lockedHold.staffId !== null) {
+    if (isStaffAware(settings)) {
       if (!lockedHold.staffId) {
         throw new ConflictError('Tu reserva temporal ya no es válida. Selecciona el horario de nuevo.')
       }
@@ -1911,6 +1922,16 @@ async function rescheduleAppointmentWithHold(args: {
         endsAt: lockedHold.endsAt,
         checkedAt: lockedHold.checkedAt,
         settings,
+        excludeReservationId: reservation.id,
+        excludeHoldId: lockedHold.id,
+      })
+    } else if (lockedHold.staffId) {
+      await assertLegacyStaffEligible(tx, {
+        venueId,
+        staffId: lockedHold.staffId,
+        startsAt: newStartsAt,
+        endsAt: lockedHold.endsAt,
+        checkedAt: lockedHold.checkedAt,
         excludeReservationId: reservation.id,
         excludeHoldId: lockedHold.id,
       })

@@ -29,6 +29,7 @@ import { resolveCanonicalAppointmentDuration } from '@/services/reservation/reso
 import { getStaffSchedule, replaceStaffSchedule } from '@/services/dashboard/staffSchedule.service'
 import { getProductStaff, replaceProductStaff } from '@/services/dashboard/productStaff.service'
 import { staffScheduleExceptionSchema, weeklyScheduleSchema } from '@/schemas/dashboard/reservation.schema'
+import AppError from '@/errors/AppError'
 
 const RESERVATIONS_GATE = ['RESERVATIONS', 'Las reservaciones'] as const
 
@@ -48,6 +49,17 @@ const WAITLIST_STATUS_MAP: Record<string, WaitlistStatus> = {
   promoted: WaitlistStatus.PROMOTED,
   expired: WaitlistStatus.EXPIRED,
   cancelled: WaitlistStatus.CANCELLED,
+}
+
+function reservationToolError(error: unknown): { ok: false; error: string; code?: string; details?: unknown } {
+  const message = error instanceof Error ? error.message : 'No se pudo completar la reservación.'
+  if (!(error instanceof AppError) || !error.isOperational) return { ok: false, error: message }
+  return {
+    ok: false,
+    error: message,
+    ...(error.code ? { code: error.code } : {}),
+    ...(error.details !== undefined ? { details: error.details } : {}),
+  }
 }
 
 // Human labels for the configure_reservations preview, so the operator can verify
@@ -235,7 +247,7 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
             staffAwareAppointment = isStaffAware(settings)
           }
         } catch (err) {
-          return text({ ok: false, error: (err as Error).message })
+          return text(reservationToolError(err))
         }
       }
       const endsAt = new Date(start.getTime() + duration * 60_000)
@@ -283,7 +295,7 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
           },
         })
       } catch (err) {
-        return text({ ok: false, error: (err as Error).message })
+        return text(reservationToolError(err))
       }
     },
   )

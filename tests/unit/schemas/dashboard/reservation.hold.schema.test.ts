@@ -45,7 +45,7 @@ describe('publicCreateHoldBodySchema normal appointment protocol', () => {
     expect(publicCreateHoldBodySchema.safeParse(appointmentHold(durationMin, { windowSemantics: 'base' })).success).toBe(false)
   })
 
-  it('keeps legacy class and generic hold shapes compatible', () => {
+  it('keeps legacy class holds but rejects productless generic holds', () => {
     expect(
       publicCreateHoldBodySchema.safeParse({
         startsAt,
@@ -60,7 +60,7 @@ describe('publicCreateHoldBodySchema normal appointment protocol', () => {
         endsAt: new Date(startsAt.getTime() + 12 * 60 * 60_000),
         productIds: [],
       }).success,
-    ).toBe(true)
+    ).toBe(false)
   })
 })
 

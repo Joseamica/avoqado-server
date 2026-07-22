@@ -1,4 +1,5 @@
 import { getAvailableSlots, checkConflicts } from '@/services/dashboard/reservationAvailability.service'
+import * as assignmentService from '@/services/dashboard/appointmentStaffAssignment.service'
 import { prismaMock, primeReservationStaffMocks } from '@tests/__helpers__/setup'
 
 // ---- Helpers ----
@@ -407,6 +408,32 @@ describe('Reservation Availability Service', () => {
     })
 
     describe('legacy reschedule staff eligibility', () => {
+      it('filters aligned slots through organization-wide legacy conflicts', async () => {
+        prismaMock.reservation.findMany.mockResolvedValue([])
+        prismaMock.table.findMany.mockResolvedValue([])
+        prismaMock.staff.findMany.mockResolvedValue([createMockStaff({ id: 'staff-1' })])
+        const organizationWindows = jest
+          .spyOn(assignmentService, 'findLegacyStaffAvailabilityForDayWindows')
+          .mockImplementation(async (_db, args) => args.windows.map(window => window.startsAt.getUTCHours() !== 12))
+
+        const result = await getSlots({
+          staffId: 'staff-1',
+          fixedDurationMin: 60,
+          excludeReservationId: 'reservation-self',
+        })
+
+        expect(result.find(slot => slot.startsAt.getUTCHours() === 12)).toBeUndefined()
+        expect(result.find(slot => slot.startsAt.getUTCHours() === 11)).toBeDefined()
+        expect(organizationWindows).toHaveBeenCalledWith(
+          prismaMock,
+          expect.objectContaining({
+            venueId: VENUE_ID,
+            staffId: 'staff-1',
+            excludeReservationId: 'reservation-self',
+          }),
+        )
+      })
+
       it('returns no slots when the current staff venue membership is inactive', async () => {
         prismaMock.reservation.findMany.mockResolvedValue([])
         prismaMock.table.findMany.mockResolvedValue([])

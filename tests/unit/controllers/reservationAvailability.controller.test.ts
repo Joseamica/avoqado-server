@@ -1253,20 +1253,16 @@ describe('reservation availability controller boundaries', () => {
     expect(prismaMock.slotHold.create).not.toHaveBeenCalled()
   })
 
-  it('keeps an explicitly empty generic hold valid and persists an empty product list', async () => {
-    prismaMock.slotHold.create.mockResolvedValue({ id: 'generic-hold', expiresAt: new Date('2026-08-21T15:10:00.000Z') } as any)
-    prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock))
+  it('rejects an explicitly empty generic hold before any database write', async () => {
     const req: any = { params: { venueSlug: 'venue' }, body: { startsAt, endsAt, productIds: [] } }
     const next = jest.fn()
 
     await publicController.createHold(req, responseMock(), next)
 
-    expect(next).not.toHaveBeenCalled()
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 400, message: expect.stringMatching(/producto|clase/i) }))
     expect(prismaMock.product.findMany).not.toHaveBeenCalled()
-    expect(prismaMock.slotHold.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({ venueId: 'venue-1', productIds: [], classSessionId: null }),
-      select: { id: true, expiresAt: true },
-    })
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(prismaMock.slotHold.create).not.toHaveBeenCalled()
   })
 
   it('keeps the legacy class hold when classSessionId accompanies a scalar class productId', async () => {

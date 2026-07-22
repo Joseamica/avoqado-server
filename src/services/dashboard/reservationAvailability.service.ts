@@ -3,7 +3,11 @@ import { fromZonedTime, toZonedTime } from 'date-fns-tz'
 import prisma from '../../utils/prismaClient'
 import { getDefaultOperatingHours, isStaffAware, type OperatingHours, type ReservationConfig } from './reservationSettings.service'
 import { BadRequestError } from '../../errors/AppError'
-import { findEligibleStaffForDayWindows, isLiveSlotHold } from './appointmentStaffAssignment.service'
+import {
+  findEligibleStaffForDayWindows,
+  findLegacyStaffAvailabilityForDayWindows,
+  isLiveSlotHold,
+} from './appointmentStaffAssignment.service'
 import { resolveCanonicalAppointmentDuration } from '../reservation/resolveAppointmentWindow'
 
 // ==========================================
@@ -297,7 +301,7 @@ export async function getAvailableSlots(
   // same busy-intervals data structure the per-slot logic uses below.
   // Venue-master blocks always apply; staff-personal blocks only apply when
   // the caller asked for availability scoped to a specific staff member.
-  const externalBlocks = staffAware
+  const externalBlocks = staffAware || legacyRescheduleStaffId !== undefined
     ? []
     : await prisma.externalBusyBlock.findMany({
         where: {
@@ -324,6 +328,16 @@ export async function getAvailableSlots(
         excludeReservationId: options.excludeReservationId,
       })
     : null
+  const legacyStaffAvailabilityByWindow =
+    legacyRescheduleStaffId !== undefined
+      ? await findLegacyStaffAvailabilityForDayWindows(prisma, {
+          venueId,
+          staffId: legacyRescheduleStaffId,
+          windows,
+          checkedAt,
+          excludeReservationId: options.excludeReservationId,
+        })
+      : null
 
   // Tableless studios (Mindform pattern) have NO resource model gating
   // concurrent appointments — the table-collision logic below is a no-op
@@ -344,6 +358,8 @@ export async function getAvailableSlots(
 
   for (const [slotIndex, slotStart] of slotStarts.entries()) {
     const slotEnd = new Date(slotStart.getTime() + defaultDuration * 60000)
+
+    if (legacyStaffAvailabilityByWindow && !legacyStaffAvailabilityByWindow[slotIndex]) continue
 
     // Find reservations overlapping this slot
     const overlapping = existingReservations.filter(r => r.startsAt < slotEnd && r.endsAt > slotStart)

@@ -716,7 +716,14 @@ export const publicCreateHoldBodySchema = z
       ...(typeof data.productIds === 'string' ? [data.productIds] : Array.isArray(data.productIds) ? data.productIds : []),
     ]
     const appointmentShaped = productParts.some(part => part.split(',').some(id => id.trim().length > 0))
-    if (!appointmentShaped) return
+    if (!appointmentShaped) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Selecciona un producto de cita o una sesión de clase',
+        path: ['productIds'],
+      })
+      return
+    }
 
     const durationMin = (data.endsAt.getTime() - data.startsAt.getTime()) / 60_000
     const min = data.windowSemantics === 'base' ? 1 : 5

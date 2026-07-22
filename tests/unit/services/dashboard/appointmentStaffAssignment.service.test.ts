@@ -4,6 +4,7 @@ import {
   assertStaffEligible,
   assertStaffEligibleForPersistedProducts,
   findEligibleStaffForDayWindows,
+  findLegacyStaffAvailabilityForDayWindows,
   isLiveSlotHold,
   lockAppointmentVenue,
   resolveStaffAssignment,
@@ -769,6 +770,85 @@ describe('resolveStaffAssignment', () => {
   it('uses StaffVenue.startDate before StaffVenue.id when daily counts tie', async () => {
     const tx = allocatorTx()
     await expect(resolveStaffAssignment(tx, args)).resolves.toBe('staff-old')
+  })
+})
+
+describe('findLegacyStaffAvailabilityForDayWindows', () => {
+  const checkedAt = new Date('2026-07-21T14:00:00.000Z')
+  const windows = Array.from({ length: 5 }, (_value, index) => ({
+    startsAt: new Date(`2026-07-21T${String(15 + index).padStart(2, '0')}:00:00.000Z`),
+    endsAt: new Date(`2026-07-21T${String(16 + index).padStart(2, '0')}:00:00.000Z`),
+  }))
+
+  it('batches organization-wide reservation, class, live-hold and personal conflicts into aligned windows', async () => {
+    const tx = txMock()
+    tx.staffVenue.findFirst.mockResolvedValue({
+      id: 'sv-1',
+      staffId: 'staff-1',
+      startDate: new Date('2024-01-01T00:00:00.000Z'),
+      venue: { organizationId: 'org-1', timezone: 'UTC' },
+    })
+    tx.staffVenue.findMany.mockResolvedValue([
+      { venueId: 'venue-1' },
+      { venueId: 'venue-other' },
+    ])
+    tx.reservation.findMany.mockResolvedValue([
+      { startsAt: windows[0].startsAt, endsAt: windows[0].endsAt },
+    ])
+    tx.classSession.findMany.mockResolvedValue([
+      { startsAt: windows[1].startsAt, endsAt: windows[1].endsAt },
+    ])
+    tx.slotHold.findMany.mockResolvedValue([
+      {
+        startsAt: windows[2].startsAt,
+        endsAt: windows[2].endsAt,
+        expiresAt: new Date('2026-07-21T21:00:00.000Z'),
+        heldForReservationId: null,
+        heldForReservation: null,
+      },
+    ])
+    tx.externalBusyBlock.findMany.mockResolvedValue([
+      { startsAt: windows[3].startsAt, endsAt: windows[3].endsAt, staffId: 'staff-1', venueId: null },
+    ])
+
+    await expect(
+      findLegacyStaffAvailabilityForDayWindows(tx, {
+        venueId: 'venue-1',
+        staffId: 'staff-1',
+        windows,
+        checkedAt,
+        excludeReservationId: 'reservation-self',
+        excludeHoldId: 'hold-self',
+      }),
+    ).resolves.toEqual([false, false, false, false, true])
+
+    expect(tx.reservation.findMany.mock.calls[0][0].where).toEqual(
+      expect.objectContaining({
+        venueId: { in: ['venue-1', 'venue-other'] },
+        assignedStaffId: 'staff-1',
+        id: { not: 'reservation-self' },
+      }),
+    )
+    expect(tx.slotHold.findMany.mock.calls[0][0].where.id).toEqual({ not: 'hold-self' })
+    expect(tx.reservation.findMany).toHaveBeenCalledTimes(1)
+    expect(tx.classSession.findMany).toHaveBeenCalledTimes(1)
+    expect(tx.slotHold.findMany).toHaveBeenCalledTimes(1)
+    expect(tx.externalBusyBlock.findMany).toHaveBeenCalledTimes(1)
+  })
+
+  it('fails closed for missing or inactive legacy membership without conflict reads', async () => {
+    const tx = txMock()
+    tx.staffVenue.findFirst.mockResolvedValue(null)
+
+    await expect(
+      findLegacyStaffAvailabilityForDayWindows(tx, {
+        venueId: 'venue-1',
+        staffId: 'staff-1',
+        windows,
+        checkedAt,
+      }),
+    ).resolves.toEqual([false, false, false, false, false])
+    expect(tx.reservation.findMany).not.toHaveBeenCalled()
   })
 })
 

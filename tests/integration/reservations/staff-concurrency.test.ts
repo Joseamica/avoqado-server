@@ -9,7 +9,7 @@ import prisma from '@/utils/prismaClient'
 import { ConflictError } from '@/errors/AppError'
 import { withSerializableRetry } from '@/utils/serializableRetry'
 import { assertOrganizationStaffAvailability } from '@/services/dashboard/appointmentStaffAssignment.service'
-import { createReservation } from '@/services/dashboard/reservation.dashboard.service'
+import { createReservation, updateReservation } from '@/services/dashboard/reservation.dashboard.service'
 import { updateReservationSettings } from '@/services/dashboard/reservationSettings.service'
 import { mintNormalAppointmentHold } from '@/services/reservation/appointmentSlotHold.service'
 import { createClassSession, createClassSessionsBulk, updateClassSession } from '@/services/dashboard/classSession.dashboard.service'
@@ -578,6 +578,65 @@ describe('production appointment create serialization on PostgreSQL', () => {
     })
     expect(`${(failure as any)?.code ?? ''} ${(failure as Error)?.message ?? ''}`).not.toMatch(/P2028|P2010|55P03|40001/)
     expect(await prisma.reservation.count({ where: { venueId: sameOrgVenueA, startsAt: window.startsAt } })).toBe(0)
+  })
+})
+
+describe('production reservation update staff authority on PostgreSQL', () => {
+  async function createAssignedTableReservation(venueId: string, assignedStaffId: string, window: Window) {
+    return prisma.reservation.create({
+      data: {
+        venueId,
+        confirmationCode: nextConfirmationCode('UPDATE'),
+        status: 'CONFIRMED',
+        channel: 'DASHBOARD',
+        startsAt: window.startsAt,
+        endsAt: window.endsAt,
+        duration: Math.round((window.endsAt.getTime() - window.startsAt.getTime()) / 60_000),
+        assignedStaffId,
+        partySize: 1,
+      },
+    })
+  }
+
+  it('rejects a foreign Staff.id on a legacy/non-appointment update and preserves the row', async () => {
+    const window = appointmentWindow(16)
+    const reservation = await createAssignedTableReservation(sameOrgVenueB, staffId, window)
+
+    await expect(
+      updateReservation(
+        sameOrgVenueB,
+        reservation.id,
+        { assignedStaffId: secondStaffId },
+        { writeOrigin: 'DASHBOARD' },
+        staffId,
+      ),
+    ).rejects.toMatchObject({ statusCode: 409 })
+
+    await expect(prisma.reservation.findUniqueOrThrow({ where: { id: reservation.id } })).resolves.toMatchObject({
+      assignedStaffId: staffId,
+    })
+  })
+
+  it('rejects a moved legacy/non-appointment update against a same-organization cross-venue commitment', async () => {
+    const originalWindow = appointmentWindow(17)
+    const targetWindow = appointmentWindow(18)
+    const reservation = await createAssignedTableReservation(sameOrgVenueB, staffId, originalWindow)
+    await createAssignedTableReservation(sameOrgVenueA, staffId, targetWindow)
+
+    await expect(
+      updateReservation(
+        sameOrgVenueB,
+        reservation.id,
+        { startsAt: targetWindow.startsAt, endsAt: targetWindow.endsAt, duration: 60 },
+        { writeOrigin: 'DASHBOARD' },
+        staffId,
+      ),
+    ).rejects.toMatchObject({ statusCode: 409 })
+
+    await expect(prisma.reservation.findUniqueOrThrow({ where: { id: reservation.id } })).resolves.toMatchObject({
+      startsAt: originalWindow.startsAt,
+      endsAt: originalWindow.endsAt,
+    })
   })
 })
 
