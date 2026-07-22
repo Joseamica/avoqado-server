@@ -24,6 +24,12 @@ import { planGateMessage } from '../planGate'
 import { hasPermission } from '@/services/access/access.service'
 import { fromZonedTime } from 'date-fns-tz'
 import { ClassSessionStatus, WaitlistStatus, type ReservationStatus } from '@prisma/client'
+import { isStaffAware } from '@/services/reservation/reservationStaffMode'
+import { resolveCanonicalAppointmentDuration } from '@/services/reservation/resolveAppointmentWindow'
+import { getStaffSchedule, replaceStaffSchedule } from '@/services/dashboard/staffSchedule.service'
+import { getProductStaff, replaceProductStaff } from '@/services/dashboard/productStaff.service'
+import { staffScheduleExceptionSchema, weeklyScheduleSchema } from '@/schemas/dashboard/reservation.schema'
+import AppError from '@/errors/AppError'
 
 const RESERVATIONS_GATE = ['RESERVATIONS', 'Las reservaciones'] as const
 
@@ -45,6 +51,17 @@ const WAITLIST_STATUS_MAP: Record<string, WaitlistStatus> = {
   cancelled: WaitlistStatus.CANCELLED,
 }
 
+function reservationToolError(error: unknown): { ok: false; error: string; code?: string; details?: unknown } {
+  const message = error instanceof Error ? error.message : 'No se pudo completar la reservación.'
+  if (!(error instanceof AppError) || !error.isOperational) return { ok: false, error: message }
+  return {
+    ok: false,
+    error: message,
+    ...(error.code ? { code: error.code } : {}),
+    ...(error.details !== undefined ? { details: error.details } : {}),
+  }
+}
+
 // Human labels for the configure_reservations preview, so the operator can verify
 // each change (current → new) in plain Spanish BEFORE confirming — and catch a
 // misread command at the gate instead of after the write.
@@ -57,6 +74,7 @@ const RESERVATION_FIELD_LABELS: Record<string, string> = {
   noShowGraceMin: 'Gracia para no-show (min)',
   pacingMaxPerSlot: 'Máximo por slot',
   onlineCapacityPercent: 'Capacidad online (%)',
+  capacityMode: 'Modo de capacidad',
   depositMode: 'Modo de depósito',
   depositFixedAmount: 'Depósito fijo ($)',
   depositPercentage: 'Depósito (% del total)',
@@ -81,6 +99,7 @@ const RESERVATION_FIELD_LABELS: Record<string, string> = {
   requirePhone: 'Requerir teléfono',
   requireEmail: 'Requerir email',
   requireAccount: 'Requerir cuenta',
+  showStaffPicker: 'Mostrar selector de profesionista',
   remindersEnabled: 'Enviar recordatorios',
   reminderChannels: 'Canales de recordatorio',
   reminderMinBefore: 'Minutos antes de recordar',
@@ -120,13 +139,84 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
       guestPhone: z.string().optional().describe('Guest phone'),
       guestEmail: z.string().optional().describe('Guest email'),
       productId: z.string().optional().describe('Service/product to book (appointment venues; omit for a table reservation)'),
+      staffId: z.string().trim().min(1).optional().describe('Exact Staff.id of the professional to assign (must be active in this venue)'),
+      staffName: z
+        .string()
+        .trim()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe('Professional name to resolve within this venue; ambiguous matches return candidates'),
       specialRequests: z.string().optional().describe('Special requests / notes'),
     },
-    async ({ venueId, startsAt, partySize, durationMinutes, guestName, guestPhone, guestEmail, productId, specialRequests }) => {
+    async ({
+      venueId,
+      startsAt,
+      partySize,
+      durationMinutes,
+      guestName,
+      guestPhone,
+      guestEmail,
+      productId,
+      staffId,
+      staffName,
+      specialRequests,
+    }) => {
       guard.venueFilter(venueId) // throws ScopeError if out of scope
       guard.requirePermission('reservations:create', venueId) // write gate (per-venue role)
       const gate = await planGateMessage(venueId, ...RESERVATIONS_GATE) // PRO tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
+      if (staffId && staffName) {
+        return text({ ok: false, error: 'Usa staffId o staffName, no ambos.' })
+      }
+
+      let assignedStaffId: string | undefined
+      if (staffId) {
+        const member = await prisma.staffVenue.findFirst({
+          where: { venueId, staffId, active: true, staff: { active: true } },
+          select: { staffId: true, staff: { select: { firstName: true, lastName: true } } },
+        })
+        if (!member) {
+          return text({ ok: false, error: 'Ese profesionista no es un miembro activo de este local.' })
+        }
+        assignedStaffId = member.staffId
+      } else if (staffName) {
+        const nameParts = staffName.trim().split(/\s+/).filter(Boolean)
+        const matches = await prisma.staffVenue.findMany({
+          where: {
+            venueId,
+            active: true,
+            staff: {
+              active: true,
+              AND: nameParts.map(part => ({
+                OR: [
+                  { firstName: { contains: part, mode: 'insensitive' as const } },
+                  { lastName: { contains: part, mode: 'insensitive' as const } },
+                ],
+              })),
+            },
+          },
+          select: { staffId: true, staff: { select: { firstName: true, lastName: true } } },
+          take: 6,
+        })
+        const candidates = matches.map(match => ({
+          staffId: match.staffId,
+          name: `${match.staff.firstName} ${match.staff.lastName}`.trim(),
+        }))
+        if (candidates.length === 0) {
+          return text({ ok: false, error: `No encontré un profesionista activo que coincida con "${staffName}" en este local.` })
+        }
+        if (candidates.length > 1) {
+          return text({
+            ok: false,
+            ambiguous: true,
+            error: `"${staffName}" coincide con varios profesionistas; usa un nombre más específico o staffId.`,
+            candidates,
+          })
+        }
+        assignedStaffId = candidates[0].staffId
+      }
+
       // Venue-local aware parse: a naive "…T19:00:00" means 7pm AT THE VENUE, not 7pm UTC.
       const tz = (await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }))?.timezone || 'America/Mexico_City'
       const start = parseReservationDateTime(startsAt, tz)
@@ -136,20 +226,62 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
           error: 'startsAt inválido. Usa ISO 8601 (ej. 2026-06-06T19:00:00); si no pones zona, se toma hora local del local.',
         })
       }
-      const duration = durationMinutes ?? 90
+      let duration = durationMinutes ?? 90
+      let staffAwareAppointment = false
+      if (productId) {
+        try {
+          const [settings, product] = await Promise.all([
+            getReservationSettings(venueId),
+            prisma.product.findFirst({
+              where: { id: productId, venueId, active: true },
+              select: { type: true },
+            }),
+          ])
+          if (product?.type === 'APPOINTMENTS_SERVICE') {
+            const canonical = await resolveCanonicalAppointmentDuration(prisma, {
+              venueId,
+              productIds: [productId],
+              settings,
+            })
+            duration = durationMinutes ?? canonical.canonicalBaseDurationMin
+            staffAwareAppointment = isStaffAware(settings)
+          }
+        } catch (err) {
+          return text(reservationToolError(err))
+        }
+      }
       const endsAt = new Date(start.getTime() + duration * 60_000)
       try {
         const reservation = await createReservation(
           venueId,
-          { startsAt: start, endsAt, duration, partySize, guestName, guestPhone, guestEmail, productId, specialRequests },
+          {
+            startsAt: start,
+            endsAt,
+            duration,
+            partySize,
+            guestName,
+            guestPhone,
+            guestEmail,
+            productId,
+            assignedStaffId,
+            specialRequests,
+          },
+          { writeOrigin: 'MCP', ...(staffAwareAppointment && { windowSemantics: 'base' as const }) },
           scope.staffId,
         )
+        const actualStaffId = reservation.assignedStaffId ?? assignedStaffId
         await auditMcpWrite(scope, {
           action: 'RESERVATION_CREATED',
           entity: 'Reservation',
           entityId: reservation.id,
           venueId,
-          data: { confirmationCode: reservation.confirmationCode, startsAt: start.toISOString(), partySize, guestName },
+          data: {
+            confirmationCode: reservation.confirmationCode,
+            startsAt: start.toISOString(),
+            partySize,
+            guestName,
+            assignedStaffId: actualStaffId,
+          },
         })
         return text({
           ok: true,
@@ -159,10 +291,11 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
             status: reservation.status,
             startsAt: start.toISOString(),
             partySize,
+            ...(actualStaffId && { staffId: actualStaffId }),
           },
         })
       } catch (err) {
-        return text({ ok: false, error: (err as Error).message })
+        return text(reservationToolError(err))
       }
     },
   )
@@ -242,6 +375,7 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
           newStartsAt: parsed,
           // Ops/MCP path: no hold → the service re-checks pacing inline (excl. self).
           rescheduledBy: 'SYSTEM', // normalized to null staffId by ACTOR_SENTINELS
+          writeOrigin: 'MCP',
         })
         await auditMcpWrite(scope, {
           action: 'RESERVATION_RESCHEDULED',
@@ -474,7 +608,7 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
       if (Object.keys(data).length === 0) return text({ ok: false, error: 'No pasaste ningún campo para actualizar.' })
 
       try {
-        const updated = await updateReservation(reservation.venueId, reservation.id, data, scope.staffId)
+        const updated = await updateReservation(reservation.venueId, reservation.id, data, { writeOrigin: 'MCP' }, scope.staffId)
         await auditMcpWrite(scope, {
           action: 'RESERVATION_UPDATED',
           entity: 'Reservation',
@@ -519,6 +653,10 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
       noShowGraceMin: z.number().int().min(0).optional().describe('Grace minutes before a booking counts as a no-show'),
       pacingMaxPerSlot: z.number().int().positive().nullable().optional().describe('Max bookings per slot; null = no limit'),
       onlineCapacityPercent: z.number().int().min(0).max(100).optional().describe('% of capacity exposed to online booking (e.g. 100, 50)'),
+      capacityMode: z
+        .enum(['pacing', 'per_staff'])
+        .optional()
+        .describe('Capacity policy: venue pacing or one concurrent booking per staff'),
       // Deposits
       depositMode: z
         .enum(['none', 'card_hold', 'deposit', 'prepaid'])
@@ -561,6 +699,7 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
       requirePhone: z.boolean().optional().describe('Require phone for online booking'),
       requireEmail: z.boolean().optional().describe('Require email for online booking'),
       requireAccount: z.boolean().optional().describe('Require an account for online booking'),
+      showStaffPicker: z.boolean().optional().describe('Let self-service guests choose an eligible professional'),
       // Reminders
       remindersEnabled: z.boolean().optional().describe('Send booking reminders'),
       reminderChannels: z
@@ -648,6 +787,145 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
         })
         const settings = await getReservationSettings(venueId) // return the fresh, full config
         return text({ ok: true, changed: Object.keys(update), settings })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'staff_schedule',
+    'Read the weekly schedule and date exceptions for one professional membership (StaffVenue) in a venue. Use list_staff to find the team member first. Requires teams:read and the RESERVATIONS feature.',
+    {
+      venueId: z.string().describe('Venue that owns the professional membership (must be in your scope)'),
+      staffVenueId: z.string().min(1).describe('StaffVenue.id of the professional in this venue'),
+    },
+    async ({ venueId, staffVenueId }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('teams:read', venueId)
+      const gate = await planGateMessage(venueId, ...RESERVATIONS_GATE)
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+
+      try {
+        const schedule = await getStaffSchedule(venueId, staffVenueId)
+        return text({ venueId, schedule })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'set_staff_schedule',
+    'Replace one professional’s weekly schedule and date exceptions. By default returns a current→proposed preview; call again with confirm:true to write. Requires teams:update and the RESERVATIONS feature.',
+    {
+      venueId: z.string().describe('Venue that owns the professional membership (must be in your scope)'),
+      staffVenueId: z.string().min(1).describe('StaffVenue.id of the professional in this venue'),
+      weekly: weeklyScheduleSchema.nullable().describe('Complete weekly schedule; null inherits venue operating hours'),
+      exceptions: z.array(staffScheduleExceptionSchema).max(30).describe('Complete replacement list of OFF/HOURS date exceptions'),
+      confirm: z.boolean().optional().describe('Must be true to write; otherwise returns a preview'),
+    },
+    async ({ venueId, staffVenueId, weekly, exceptions, confirm }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('teams:update', venueId)
+      const gate = await planGateMessage(venueId, ...RESERVATIONS_GATE)
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+
+      const proposed = { staffVenueId, weekly, exceptions }
+      if (!confirm) {
+        try {
+          const current = await getStaffSchedule(venueId, staffVenueId)
+          return text({
+            ok: false,
+            requiresConfirmation: true,
+            current,
+            proposed,
+            message: 'Vas a reemplazar el horario completo de este profesionista. Verifica current→proposed y confirma con confirm:true.',
+          })
+        } catch (err) {
+          return text({ ok: false, error: (err as Error).message })
+        }
+      }
+
+      try {
+        const schedule = await replaceStaffSchedule(venueId, staffVenueId, { weekly, exceptions }, scope.staffId)
+        await auditMcpWrite(scope, {
+          action: 'STAFF_SCHEDULE_UPDATED',
+          entity: 'StaffVenue',
+          entityId: staffVenueId,
+          venueId,
+          data: { weeklyConfigured: weekly !== null, exceptionCount: exceptions.length },
+        })
+        return text({ ok: true, schedule })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'service_staff',
+    'Read the explicit professionals assigned to an appointment service. In staff-aware mode an empty mapping means nobody is eligible; in legacy mode it retains the historical all-staff behavior. Requires menu:read and the RESERVATIONS feature.',
+    {
+      venueId: z.string().describe('Venue that owns the service (must be in your scope)'),
+      productId: z.string().min(1).describe('Appointment Product.id'),
+    },
+    async ({ venueId, productId }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('menu:read', venueId)
+      const gate = await planGateMessage(venueId, ...RESERVATIONS_GATE)
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+
+      try {
+        const serviceStaff = await getProductStaff(venueId, productId)
+        return text({ venueId, serviceStaff })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'set_service_staff',
+    'Replace the explicit professional roster for one appointment service. By default returns a current→proposed preview; call again with confirm:true to write. Requires menu:update and the RESERVATIONS feature.',
+    {
+      venueId: z.string().describe('Venue that owns the service (must be in your scope)'),
+      productId: z.string().min(1).describe('Appointment Product.id'),
+      staffVenueIds: z.array(z.string().min(1)).max(100).describe('Complete replacement list of active StaffVenue.id values'),
+      confirm: z.boolean().optional().describe('Must be true to write; otherwise returns a preview'),
+    },
+    async ({ venueId, productId, staffVenueIds, confirm }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('menu:update', venueId)
+      const gate = await planGateMessage(venueId, ...RESERVATIONS_GATE)
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+
+      const proposed = { productId, staffVenueIds: [...new Set(staffVenueIds)] }
+      if (!confirm) {
+        try {
+          const current = await getProductStaff(venueId, productId)
+          return text({
+            ok: false,
+            requiresConfirmation: true,
+            current,
+            proposed,
+            message: 'Vas a reemplazar todos los profesionistas de este servicio. Verifica current→proposed y confirma con confirm:true.',
+          })
+        } catch (err) {
+          return text({ ok: false, error: (err as Error).message })
+        }
+      }
+
+      try {
+        const serviceStaff = await replaceProductStaff(venueId, productId, proposed.staffVenueIds, scope.staffId)
+        await auditMcpWrite(scope, {
+          action: 'SERVICE_STAFF_UPDATED',
+          entity: 'Product',
+          entityId: productId,
+          venueId,
+          data: { staffVenueIds: proposed.staffVenueIds },
+        })
+        return text({ ok: true, serviceStaff })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
       }

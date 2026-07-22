@@ -20,6 +20,8 @@
  */
 import { prismaMock } from '@tests/__helpers__/setup'
 
+const mockLogAction = jest.fn()
+
 // Mock the RabbitMQ publish helper BEFORE importing services. The push consumer
 // module also boots a connection lazily; we only want the spy on publishPushNotification.
 jest.mock('@/communication/rabbitmq/gcal-push-consumer', () => ({
@@ -28,8 +30,10 @@ jest.mock('@/communication/rabbitmq/gcal-push-consumer', () => ({
   publishPushNotification: jest.fn().mockResolvedValue(undefined),
   startGcalPushConsumer: jest.fn().mockResolvedValue(undefined),
 }))
+jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: (...args: unknown[]) => mockLogAction(...args) }))
 
 import * as reservationService from '@/services/dashboard/reservation.dashboard.service'
+import * as reservationSettingsService from '@/services/dashboard/reservationSettings.service'
 import * as classSessionService from '@/services/dashboard/classSession.dashboard.service'
 import { publishPushNotification } from '@/communication/rabbitmq/gcal-push-consumer'
 
@@ -59,6 +63,7 @@ function buildReservation(overrides: Record<string, any> = {}) {
     partySize: 2,
     tableId: null,
     productId: null,
+    productIds: [],
     assignedStaffId: STAFF_ID,
     classSessionId: null,
     spotIds: [],
@@ -125,18 +130,24 @@ function mockConnectionLookup({ staff, venue }: { staff?: string | null; venue?:
 
 describe('Phase 2 push hooks integration', () => {
   beforeEach(() => {
+    jest.restoreAllMocks()
     jest.clearAllMocks()
     // Pass-through transaction by default (callback form).
     prismaMock.$transaction.mockImplementation(async (arg: any) => {
       if (typeof arg === 'function') return arg(prismaMock)
       return arg
     })
+    ;(prismaMock as any).$executeRaw = jest.fn().mockResolvedValue(0)
     prismaMock.$queryRaw.mockResolvedValue([])
     prismaMock.product.findFirst.mockResolvedValue(null)
     prismaMock.table.findFirst.mockResolvedValue(null)
-    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1' })
+    prismaMock.staffVenue.findFirst.mockReset().mockResolvedValue({ id: 'sv-1', venue: { organizationId: 'org-1' } })
+    prismaMock.staffVenue.findMany.mockReset().mockResolvedValue([{ venueId: VENUE_ID }])
     prismaMock.productModifierGroup.findMany.mockResolvedValue([])
-    prismaMock.externalBusyBlock.findFirst.mockResolvedValue(null)
+    prismaMock.reservation.findFirst.mockReset().mockResolvedValue(null)
+    prismaMock.classSession.findFirst.mockReset().mockResolvedValue(null)
+    prismaMock.slotHold.findFirst.mockReset().mockResolvedValue(null)
+    prismaMock.externalBusyBlock.findFirst.mockReset().mockResolvedValue(null)
     prismaMock.reservation.findUnique.mockResolvedValue(null)
     prismaMock.reservation.updateMany.mockResolvedValue({ count: 1 } as any)
     prismaMock.calendarSyncOutbox.create.mockImplementation((args: any) => ({
@@ -162,8 +173,8 @@ describe('Phase 2 push hooks integration', () => {
           partySize: 2,
           assignedStaffId: STAFF_ID,
         },
+        { writeOrigin: 'DASHBOARD' },
         STAFF_ID,
-        { scheduling: { autoConfirm: true } },
       )
 
       // Outbox row: kind=reservation, op=CREATE, target=staff connection, correct syncKey.
@@ -201,8 +212,8 @@ describe('Phase 2 push hooks integration', () => {
           guestName: 'Juan',
           assignedStaffId: STAFF_ID,
         },
+        { writeOrigin: 'DASHBOARD' },
         STAFF_ID,
-        { scheduling: { autoConfirm: true } },
       )
 
       expect(result).toBeDefined()
@@ -229,8 +240,8 @@ describe('Phase 2 push hooks integration', () => {
           guestName: 'Juan',
           assignedStaffId: STAFF_ID,
         },
+        { writeOrigin: 'DASHBOARD' },
         STAFF_ID,
-        { scheduling: { autoConfirm: true } },
       )
 
       expect(prismaMock.calendarSyncOutbox.create).not.toHaveBeenCalled()
@@ -252,14 +263,56 @@ describe('Phase 2 push hooks integration', () => {
           guestName: 'Juan',
           assignedStaffId: STAFF_ID,
         },
+        { writeOrigin: 'DASHBOARD' },
         STAFF_ID,
-        { scheduling: { autoConfirm: true } },
       )
 
       expect(prismaMock.calendarSyncOutbox.create).toHaveBeenCalledTimes(2)
       // Publish gets BOTH row ids in a single call.
       expect(publishMock).toHaveBeenCalledTimes(1)
       expect(publishMock).toHaveBeenCalledWith([`outbox-CREATE-${STAFF_CONN_ID}`, `outbox-CREATE-${VENUE_CONN_ID}`])
+    })
+
+    it('publishes and records activity once after a completed attempt is retried with fresh settings', async () => {
+      const settingsSpy = jest
+        .spyOn(reservationSettingsService, 'getReservationSettings')
+        .mockResolvedValueOnce({
+          scheduling: { autoConfirm: true, maxAdvanceDays: 365, minNoticeMin: 0, onlineCapacityPercent: 100 },
+          deposits: { enabled: false, mode: 'none' },
+        } as any)
+        .mockResolvedValueOnce({
+          scheduling: { autoConfirm: false, maxAdvanceDays: 365, minNoticeMin: 0, onlineCapacityPercent: 100 },
+          deposits: { enabled: false, mode: 'none' },
+        } as any)
+      const serializationError = Object.assign(new Error('serialization conflict'), { code: 'P2034' })
+      let attempts = 0
+      prismaMock.$transaction.mockImplementation(async (fn: any) => {
+        const result = await fn(prismaMock)
+        attempts += 1
+        if (attempts === 1) throw serializationError
+        return result
+      })
+      mockPushEnabled()
+      mockConnectionLookup({ staff: STAFF_CONN_ID, venue: null })
+      prismaMock.googleCalendarConnection.findFirst.mockResolvedValueOnce({ id: STAFF_CONN_ID }).mockResolvedValueOnce(null)
+      prismaMock.reservation.create.mockImplementation(async ({ data }: any) => buildReservation(data))
+
+      const result = await reservationService.createReservation(
+        VENUE_ID,
+        {
+          startsAt: new Date('2026-06-01T14:00:00Z'),
+          endsAt: new Date('2026-06-01T15:00:00Z'),
+          duration: 60,
+          assignedStaffId: STAFF_ID,
+        },
+        { writeOrigin: 'DASHBOARD' },
+        STAFF_ID,
+      )
+
+      expect(settingsSpy).toHaveBeenCalledTimes(2)
+      expect(result.status).toBe('PENDING')
+      expect(publishMock).toHaveBeenCalledTimes(1)
+      expect(mockLogAction).toHaveBeenCalledTimes(1)
     })
   })
 
@@ -269,6 +322,7 @@ describe('Phase 2 push hooks integration', () => {
       mockConnectionLookup({ staff: STAFF_CONN_ID, venue: null })
 
       const existing = buildReservation({ status: 'CONFIRMED' })
+      prismaMock.$queryRaw.mockResolvedValueOnce([existing]).mockResolvedValueOnce([])
       prismaMock.reservation.findFirst.mockResolvedValue(existing)
       prismaMock.reservation.update.mockResolvedValue({
         ...existing,
@@ -283,6 +337,7 @@ describe('Phase 2 push hooks integration', () => {
           startsAt: new Date('2026-06-01T16:00:00Z'),
           endsAt: new Date('2026-06-01T17:00:00Z'),
         },
+        { writeOrigin: 'DASHBOARD' },
         STAFF_ID,
       )
 

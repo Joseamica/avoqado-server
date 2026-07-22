@@ -2,32 +2,14 @@
  * Referral Program — end-to-end integration tests.
  *
  * Codifies the Phase B Part 3 smoke flow as a Jest integration suite.
- * Runs against the LIVE local DB `av-db-25` (which carries the latest
- * Prisma schema including `Discount.source` and `Venue.reservationBranding`).
- *
- * The shared `tests/__helpers__/integration-setup.ts` prefers
- * `TEST_DATABASE_URL` over `DATABASE_URL`, so to run THIS suite against
- * `av-db-25` you must either:
- *
- *   1. Override at the CLI:
- *        TEST_DATABASE_URL="postgresql://postgres:exitosoy777@localhost:5432/av-db-25" \
- *        npx jest tests/integration/referrals/ --testTimeout=30000
- *
- *   2. Or temporarily point `TEST_DATABASE_URL` in your local `.env`
- *      at `av-db-25` (do not commit).
- *
- * The test asserts schema presence in `beforeAll` so an out-of-date
- * `av-db-25-test` DB fails fast with a clear message instead of confusing
- * column-missing errors deep in `cleanup`.
- *
- * Uses the seeded `avoqado-wellness` venue + its existing StaffVenues.
+ * The suite creates and removes its own organization, venue, and staff
+ * fixtures so it also runs on a clean `prisma migrate deploy` database.
  *
  * Test customers are tagged via two safe identifiers:
  *   - referralCode prefix `TESTSMOKE-` (so cleanup never touches real data)
  *   - phone prefix `5599999`             (catch unreferred test customers too)
  *
- * Order cleanup is per-test (each test deletes the order it created) so
- * we never accidentally delete production orders during teardown.
+ * Order cleanup is scoped to the fixture venue and the `TEST-REF-` prefix.
  */
 
 import prisma from '@/utils/prismaClient'
@@ -43,39 +25,25 @@ import { onOrderRefunded } from '@/services/referrals/referralRefund.service'
 // The referrer's tier reward is a plain CouponCode, so it must redeem through
 // Avoqado's EXISTING coupon engine — no referral-specific redemption code.
 import { validateCouponCode, recordCouponRedemption } from '@/services/dashboard/coupon.dashboard.service'
+import { cleanupReferralFixtureData, ReferralFixtureIds, teardownReferralFixture } from '../../__helpers__/referral-fixture-cleanup'
 
 jest.setTimeout(60000)
 
 describe('Referral Program — end-to-end integration', () => {
   let venueId: string
+  let organizationId: string
   let waiterStaffVenueId: string
   let managerStaffVenueId: string
+  const fixtureStaffIds: string[] = []
+  const fixtureIds: ReferralFixtureIds = {
+    venueId: undefined,
+    organizationId: undefined,
+    staffIds: fixtureStaffIds,
+  }
+  const fixtureKey = `${process.pid}-${Date.now()}`
 
   async function cleanup() {
-    // Order matters: child tables first. Scope EVERYTHING by venueId +
-    // `source: REFERRAL_TIER` so we cannot touch unrelated discounts.
-    await prisma.couponRedemption.deleteMany({
-      where: { couponCode: { discount: { venueId, source: 'REFERRAL_TIER' } } },
-    })
-    await prisma.couponCode.deleteMany({
-      where: { discount: { venueId, source: 'REFERRAL_TIER' } },
-    })
-    await prisma.customerDiscount.deleteMany({
-      where: { discount: { venueId, source: 'REFERRAL_TIER' } },
-    })
-    await prisma.discount.deleteMany({ where: { venueId, source: 'REFERRAL_TIER' } })
-    await prisma.referral.deleteMany({ where: { venueId } })
-    await prisma.activityLog.deleteMany({
-      where: { venueId, action: { startsWith: 'REFERRAL_' } },
-    })
-    // Test customers only — identified by referralCode prefix OR phone prefix.
-    await prisma.customer.deleteMany({
-      where: { venueId, referralCode: { startsWith: 'TESTSMOKE-' } },
-    })
-    await prisma.customer.deleteMany({
-      where: { venueId, phone: { startsWith: '5599999' } },
-    })
-    await prisma.referralProgramConfig.deleteMany({ where: { venueId } })
+    await cleanupReferralFixtureData(prisma, fixtureIds.venueId)
   }
 
   beforeAll(async () => {
@@ -85,21 +53,51 @@ describe('Referral Program — end-to-end integration', () => {
        WHERE table_name = 'Discount' AND column_name = 'source'
     `
     if (cols.length === 0) {
-      throw new Error('Connected DB is missing Discount.source. Override TEST_DATABASE_URL to point at av-db-25 (see file header).')
+      throw new Error('Connected test DB is missing Discount.source. Run prisma migrate deploy before integration tests.')
     }
 
-    const venue = await prisma.venue.findFirst({ where: { slug: 'avoqado-wellness' } })
-    if (!venue) {
-      throw new Error('Test venue avoqado-wellness not found in av-db-25')
-    }
+    const organization = await prisma.organization.create({
+      data: {
+        name: `Referral Integration ${fixtureKey}`,
+        slug: `referral-integration-${fixtureKey}`,
+        email: `referrals-${fixtureKey}@example.test`,
+        phone: '5500000000',
+      },
+    })
+    organizationId = organization.id
+    fixtureIds.organizationId = organization.id
+
+    const venue = await prisma.venue.create({
+      data: {
+        organizationId,
+        name: `Referral Integration ${fixtureKey}`,
+        slug: `referral-integration-${fixtureKey}`,
+      },
+    })
     venueId = venue.id
+    fixtureIds.venueId = venue.id
 
-    const staffVenues = await prisma.staffVenue.findMany({ where: { venueId }, take: 5 })
-    if (staffVenues.length < 2) {
-      throw new Error('Need at least 2 StaffVenues in avoqado-wellness for integration tests')
+    for (const [index, role] of ['WAITER', 'MANAGER'].entries()) {
+      const staff = await prisma.staff.create({
+        data: {
+          email: `task1-referrals-${fixtureKey}-${index}@example.test`,
+          firstName: index === 0 ? 'Waiter' : 'Manager',
+          lastName: 'Integration',
+        },
+      })
+      fixtureStaffIds.push(staff.id)
+      await prisma.staffOrganization.create({
+        data: { staffId: staff.id, organizationId },
+      })
+      const staffVenue = await prisma.staffVenue.create({
+        data: { staffId: staff.id, venueId, role: role as 'WAITER' | 'MANAGER' },
+      })
+      if (index === 0) {
+        waiterStaffVenueId = staffVenue.id
+      } else {
+        managerStaffVenueId = staffVenue.id
+      }
     }
-    waiterStaffVenueId = staffVenues[0].id
-    managerStaffVenueId = staffVenues[1]?.id ?? staffVenues[0].id
   })
 
   beforeEach(async () => {
@@ -107,8 +105,7 @@ describe('Referral Program — end-to-end integration', () => {
   })
 
   afterAll(async () => {
-    await cleanup()
-    await prisma.$disconnect()
+    await teardownReferralFixture(prisma, fixtureIds)
   })
 
   it('happy path: activate → capture → pay → TIER_1 unlock → reward emitted', async () => {

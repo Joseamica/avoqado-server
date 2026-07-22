@@ -331,7 +331,7 @@ if (NODE_ENV === 'development') {
 
 // --- Global Error Handling Middleware ---
 // This must be the last middleware added to the app.
-app.use((err: Error, req: ExpressRequest, res: ExpressResponse, _next: NextFunction) => {
+export function globalErrorHandler(err: Error, req: ExpressRequest, res: ExpressResponse, _next: NextFunction) {
   // If a response has already started, don't write a second time. The express-async-errors
   // patch (imported above) now auto-forwards LATE rejections to this handler — including the
   // rare "respond-then-reject" shape where a handler already sent a response and its trailing
@@ -382,6 +382,7 @@ app.use((err: Error, req: ExpressRequest, res: ExpressResponse, _next: NextFunct
     return res.status(err.statusCode).json({
       message: err.message,
       ...(err.code && { code: err.code }), // Include error code if present (Stripe/GitHub pattern)
+      ...(err.details !== undefined && { details: err.details }),
       ...(NODE_ENV === 'development' && { errorName: err.name }),
     })
   }
@@ -411,6 +412,8 @@ app.use((err: Error, req: ExpressRequest, res: ExpressResponse, _next: NextFunct
   return res.status(500).json({
     message: 'Ocurrió un error inesperado en el servidor.',
   })
-})
+}
+
+app.use(globalErrorHandler)
 
 export default app

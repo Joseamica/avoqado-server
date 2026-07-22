@@ -1,14 +1,14 @@
 # Assistant Endpoint Inventory
 
-Generated: 2026-07-18T23:30:54.926Z
+Generated: 2026-07-22T10:34:36.945Z
 
 ## Summary
 
-- Total endpoints: 1716
+- Total endpoints: 1733
 - Assistant tools registered: 80
-- Coverage: missing 688, blocked 519, partial 504, covered 5
-- Classifications: read 540, adminOnly 446, action 371, mutation 144, dangerousMutation 142, public 73
-- Scopes: venue 873, superadmin 402, unknown 194, organization 137, public 110
+- Coverage: missing 691, blocked 521, partial 516, covered 5
+- Classifications: read 547, adminOnly 448, action 376, mutation 146, dangerousMutation 143, public 73
+- Scopes: venue 888, superadmin 404, unknown 194, organization 137, public 110
 
 ## Top Missing Domains
 
@@ -1132,8 +1132,12 @@ Generated: 2026-07-18T23:30:54.926Z
 | GET | `/api/v1/dashboard/venues/:venueId/reservations/branding/config` | read | venue | partial | reservations:read | - | controller.getReservationBranding |
 | PUT | `/api/v1/dashboard/venues/:venueId/reservations/branding/config` | mutation | venue | partial | reservations:update | updateReservationBrandingSchema | controller.updateReservationBranding |
 | GET | `/api/v1/dashboard/venues/:venueId/reservations/calendar` | read | venue | partial | reservations:read | z.object | controller.getCalendar |
+| GET | `/api/v1/dashboard/venues/:venueId/reservations/products/:productId/staff` | read | venue | partial | menu:read | z.object | controller.getProductStaff |
+| PUT | `/api/v1/dashboard/venues/:venueId/reservations/products/:productId/staff` | mutation | venue | partial | menu:update | z.object | controller.replaceProductStaff |
 | GET | `/api/v1/dashboard/venues/:venueId/reservations/settings` | read | venue | partial | reservations:read | - | controller.getSettings |
 | PUT | `/api/v1/dashboard/venues/:venueId/reservations/settings` | mutation | venue | partial | reservations:update | z.object | controller.updateSettings |
+| GET | `/api/v1/dashboard/venues/:venueId/reservations/staff/:staffVenueId/schedule` | read | venue | partial | teams:read | z.object | controller.getStaffSchedule |
+| PUT | `/api/v1/dashboard/venues/:venueId/reservations/staff/:staffVenueId/schedule` | mutation | venue | partial | teams:update | z.object | controller.replaceStaffSchedule |
 | GET | `/api/v1/dashboard/venues/:venueId/reservations/stats` | read | venue | partial | reservations:read | z.object | controller.getStats |
 | GET | `/api/v1/dashboard/venues/:venueId/reservations/waitlist` | read | venue | partial | reservations:read | z.object | (inline handler) |
 | POST | `/api/v1/dashboard/venues/:venueId/reservations/waitlist` | action | venue | partial | reservations:create | z.object | (inline handler) |
@@ -1268,10 +1272,13 @@ Generated: 2026-07-18T23:30:54.926Z
 | POST | `/api/v1/dashboard/venues/:venueId/upload-document` | action | venue | missing | venues:manage | - | venueController.uploadVenueDocument |
 | POST | `/api/v1/dashboard/venues/enhanced` | action | unknown | missing | venues:manage | enhancedCreateVenueSchema | venueController.createEnhancedVenue |
 | GET | `/api/v1/dashboard/venues/slug/:slug` | read | unknown | missing | venues:read | - | venueController.getVenueBySlug |
+| GET | `/api/v1/delivery-channels/venues/:venueId/activation-request` | read | venue | missing | delivery-channels:read | - | ctrl.getActivation |
+| POST | `/api/v1/delivery-channels/venues/:venueId/activation-request` | action | venue | missing | delivery-channels:request | createActivationRequestSchema | ctrl.requestActivation |
 | GET | `/api/v1/delivery-channels/venues/:venueId/channels` | read | venue | missing | delivery-channels:read | - | ctrl.listChannels |
-| POST | `/api/v1/delivery-channels/venues/:venueId/channels` | action | venue | missing | delivery-channels:manage | createChannelSchema | ctrl.createChannel |
-| PATCH | `/api/v1/delivery-channels/venues/:venueId/channels/:linkId` | mutation | venue | missing | delivery-channels:manage | updateChannelSchema | ctrl.updateChannel |
+| POST | `/api/v1/delivery-channels/venues/:venueId/channels` | action | venue | missing | delivery-channels:connect | createChannelSchema | ctrl.createChannel |
+| PATCH | `/api/v1/delivery-channels/venues/:venueId/channels/:linkId` | mutation | venue | missing | - | updateChannelSchema | ctrl.updateChannel |
 | POST | `/api/v1/delivery-channels/venues/:venueId/channels/:linkId/pause` | action | venue | missing | delivery-channels:manage | pauseChannelSchema | ctrl.pauseChannel |
+| GET | `/api/v1/delivery-channels/venues/:venueId/delivery/summary` | read | venue | partial | delivery-channels:read | - | ctrl.getSummary |
 | GET | `/api/v1/demo/generate` | read | unknown | missing | - | - | (inline handler) |
 | GET | `/api/v1/google-calendar/connections` | read | unknown | missing | - | - | listConnections |
 | POST | `/api/v1/google-calendar/connections` | action | unknown | missing | - | - | postConnection |
@@ -1336,6 +1343,7 @@ Generated: 2026-07-18T23:30:54.926Z
 | GET | `/api/v1/mobile/venues/:venueId/customers` | read | venue | partial | customers:read | - | customerController.getCustomers |
 | POST | `/api/v1/mobile/venues/:venueId/customers` | action | venue | partial | customers:create | - | customerController.createCustomer |
 | GET | `/api/v1/mobile/venues/:venueId/customers/:customerId/credit-balance` | read | venue | partial | creditPacks:read | - | creditPackMobileController.getBalance |
+| GET | `/api/v1/mobile/venues/:venueId/customers/:customerId/loyalty` | read | venue | partial | loyalty:read | - | loyaltyMobileController.getCustomerLoyalty |
 | GET | `/api/v1/mobile/venues/:venueId/discounts` | read | venue | missing | - | - | discountMobileController.listDiscounts |
 | POST | `/api/v1/mobile/venues/:venueId/discounts` | action | venue | missing | - | - | discountMobileController.createDiscount |
 | DELETE | `/api/v1/mobile/venues/:venueId/discounts/:discountId` | dangerousMutation | venue | missing | - | - | discountMobileController.deleteDiscount |
@@ -1360,6 +1368,7 @@ Generated: 2026-07-18T23:30:54.926Z
 | GET | `/api/v1/mobile/venues/:venueId/measurement-units` | read | venue | missing | menu:read | - | measurementUnitMobileController.listMeasurementUnits |
 | POST | `/api/v1/mobile/venues/:venueId/measurement-units` | action | venue | missing | menu:create | - | measurementUnitMobileController.createMeasurementUnit |
 | DELETE | `/api/v1/mobile/venues/:venueId/measurement-units/:id` | dangerousMutation | venue | missing | menu:create | - | measurementUnitMobileController.deleteMeasurementUnit |
+| GET | `/api/v1/mobile/venues/:venueId/menus` | read | venue | partial | menu:read | - | menuMobileController.listMenus |
 | GET | `/api/v1/mobile/venues/:venueId/orders` | read | venue | partial | orders:read | - | orderMobileController.listOrders |
 | POST | `/api/v1/mobile/venues/:venueId/orders` | action | venue | partial | orders:create | - | orderMobileController.createOrder |
 | DELETE | `/api/v1/mobile/venues/:venueId/orders/:orderId` | dangerousMutation | venue | partial | orders:cancel | - | orderMobileController.cancelOrder |
@@ -1371,9 +1380,14 @@ Generated: 2026-07-18T23:30:54.926Z
 | DELETE | `/api/v1/mobile/venues/:venueId/orders/:orderId/discounts/:orderDiscountId` | dangerousMutation | venue | partial | orders:update | - | orderMobileController.removeOrderDiscount |
 | POST | `/api/v1/mobile/venues/:venueId/orders/:orderId/items` | action | venue | partial | orders:create | - | orderMobileController.addItemsToOrder |
 | POST | `/api/v1/mobile/venues/:venueId/orders/:orderId/items/:itemId/comp` | action | venue | partial | orders:update | - | orderMobileController.compOrderItem |
+| POST | `/api/v1/mobile/venues/:venueId/orders/:orderId/loyalty/redeem` | action | venue | partial | orders:update | - | loyaltyMobileController.redeemPoints |
+| POST | `/api/v1/mobile/venues/:venueId/orders/:orderId/merge` | action | venue | partial | orders:update | - | orderMobileController.mergeOrders |
 | POST | `/api/v1/mobile/venues/:venueId/orders/:orderId/move` | action | venue | partial | orders:update | - | tableMobileController.moveOrder |
 | POST | `/api/v1/mobile/venues/:venueId/orders/:orderId/pay` | action | venue | partial | payments:create | - | orderMobileController.payCash |
+| POST | `/api/v1/mobile/venues/:venueId/orders/:orderId/service-charges` | action | venue | partial | orders:update | - | serviceChargeMobileController.applyServiceCharge |
+| DELETE | `/api/v1/mobile/venues/:venueId/orders/:orderId/service-charges/:orderServiceChargeId` | dangerousMutation | venue | partial | orders:update | - | serviceChargeMobileController.removeServiceCharge |
 | POST | `/api/v1/mobile/venues/:venueId/orders/:orderId/split` | action | venue | partial | orders:update | - | orderMobileController.splitOrder |
+| POST | `/api/v1/mobile/venues/:venueId/orders/:orderId/split-by-seat` | action | venue | partial | orders:update | - | orderMobileController.splitOrderBySeat |
 | POST | `/api/v1/mobile/venues/:venueId/payments/:paymentId/customer` | action | venue | partial | payments:create | - | paymentMobileController.attachCustomerToPayment |
 | POST | `/api/v1/mobile/venues/:venueId/payments/:paymentId/refund` | dangerousMutation | venue | partial | payments:refund | - | refundMobileController.issueAssociatedRefund |
 | POST | `/api/v1/mobile/venues/:venueId/payments/customer` | action | venue | partial | payments:create | - | paymentMobileController.attachCustomerToLatestPayment |
@@ -1398,6 +1412,7 @@ Generated: 2026-07-18T23:30:54.926Z
 | POST | `/api/v1/mobile/venues/:venueId/refunds` | dangerousMutation | venue | missing | payments:create | - | refundMobileController.createRefund |
 | GET | `/api/v1/mobile/venues/:venueId/reports/sales-by-item` | read | venue | partial | reports:read | - | reportsMobileController.salesByItem |
 | GET | `/api/v1/mobile/venues/:venueId/reports/sales-summary` | read | venue | partial | reports:read | - | reportsMobileController.salesSummary |
+| GET | `/api/v1/mobile/venues/:venueId/service-charges` | read | venue | missing | orders:read | - | serviceChargeMobileController.listServiceCharges |
 | GET | `/api/v1/mobile/venues/:venueId/settings` | read | venue | missing | - | - | tpvSettingsMobileController.getVenueTpvSettings |
 | GET | `/api/v1/mobile/venues/:venueId/staff` | read | venue | missing | teams:read | - | staffMobileController.getActiveStaff |
 | GET | `/api/v1/mobile/venues/:venueId/suppliers` | read | venue | partial | - | - | supplierMobileController.listSuppliers |
@@ -1586,6 +1601,8 @@ Generated: 2026-07-18T23:30:54.926Z
 | POST | `/api/v1/superadmin/credit/venues/:venueId/offers` | adminOnly | superadmin | blocked | - | creditAssessmentSchema.CreateOfferSchema | asyncHandler(creditAssessmentController.createOffer) |
 | POST | `/api/v1/superadmin/credit/venues/:venueId/refresh` | adminOnly | superadmin | blocked | - | creditAssessmentSchema.VenueIdSchema | asyncHandler(creditAssessmentController.refreshVenueAssessment) |
 | GET | `/api/v1/superadmin/dashboard/summary` | adminOnly | superadmin | blocked | - | - | (inline handler) |
+| GET | `/api/v1/superadmin/delivery-activation` | adminOnly | superadmin | blocked | - | listRequestsSchema | ctrl.listRequests |
+| PATCH | `/api/v1/superadmin/delivery-activation/:id` | adminOnly | superadmin | blocked | - | updateRequestSchema | ctrl.updateRequest |
 | GET | `/api/v1/superadmin/earnings/summary` | adminOnly | superadmin | blocked | - | - | earningsController.getEarningsSummary |
 | GET | `/api/v1/superadmin/earnings/time-series` | adminOnly | superadmin | blocked | - | - | earningsController.getEarningsTimeSeries |
 | GET | `/api/v1/superadmin/holidays` | adminOnly | superadmin | blocked | - | - | holidaysController.getHolidays |

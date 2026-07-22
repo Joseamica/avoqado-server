@@ -1,12 +1,14 @@
 import prisma from '../../utils/prismaClient'
-import { StaffRole, InvitationType, InvitationStatus, OrgRole } from '@prisma/client'
-import { BadRequestError, ForbiddenError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
+import { Prisma, StaffRole, InvitationType, InvitationStatus, OrgRole } from '@prisma/client'
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import emailService from '../email.service'
 import { getRoleDisplayName } from './venueRoleConfig.dashboard.service'
 import { logAction } from './activity-log.service'
 import { ROLE_HIERARCHY, canAssignRole, ungrantablePermissions } from '../../lib/permissions'
 import { assertCanAddSeat } from '../access/seatCap.service'
+import { withSerializableRetry } from '@/utils/serializableRetry'
+import { isLiveSlotHold } from './appointmentStaffAssignment.service'
 
 interface TeamMember {
   id: string
@@ -38,6 +40,8 @@ interface PaginatedTeamResponse {
     hasPrevPage: boolean
   }
 }
+
+const HARD_DELETE_COMMITMENT_MESSAGE = 'El miembro del equipo tiene compromisos futuros activos y no puede eliminarse'
 
 type InviteType = 'email' | 'tpv-only'
 
@@ -1033,28 +1037,66 @@ export async function hardDeleteTeamMember(
     throw new BadRequestError('Deletion must be explicitly confirmed')
   }
 
-  // Get the StaffVenue record
-  const staffVenue = await prisma.staffVenue.findFirst({
-    where: {
-      id: teamMemberId,
-      venueId,
-    },
-    include: {
-      staff: true,
-    },
-  })
+  const { staffId, deletedRecords } = await withSerializableRetry(async tx => {
+    const memberships = await tx.$queryRaw<Array<{ id: string; staffId: string }>>(Prisma.sql`
+      SELECT id, "staffId"
+      FROM "StaffVenue"
+      WHERE id = ${teamMemberId}
+        AND "venueId" = ${venueId}
+      FOR UPDATE
+    `)
+    const checkedAt = new Date()
+    if (memberships.length === 0) {
+      throw new NotFoundError('Team member not found')
+    }
 
-  if (!staffVenue) {
-    throw new NotFoundError('Team member not found')
-  }
+    const staffId = memberships[0].staffId
+    const futureReservation = await tx.reservation.findFirst({
+      where: {
+        venueId,
+        assignedStaffId: staffId,
+        status: { in: ['PENDING', 'CONFIRMED', 'CHECKED_IN'] },
+        endsAt: { gt: checkedAt },
+      },
+      select: { id: true },
+    })
+    if (futureReservation) {
+      throw new ConflictError(HARD_DELETE_COMMITMENT_MESSAGE)
+    }
 
-  const staffId = staffVenue.staffId
+    const futureClassSession = await tx.classSession.findFirst({
+      where: {
+        venueId,
+        assignedStaffId: staffId,
+        status: 'SCHEDULED',
+        endsAt: { gt: checkedAt },
+      },
+      select: { id: true },
+    })
+    if (futureClassSession) {
+      throw new ConflictError(HARD_DELETE_COMMITMENT_MESSAGE)
+    }
 
-  // Track deleted records for audit
-  const deletedRecords: Record<string, number> = {}
+    const candidateHolds = await tx.slotHold.findMany({
+      where: {
+        venueId,
+        staffId,
+        endsAt: { gt: checkedAt },
+        expiresAt: { gt: checkedAt },
+      },
+      select: {
+        expiresAt: true,
+        heldForReservationId: true,
+        heldForReservation: { select: { status: true } },
+      },
+    })
+    if (candidateHolds.some(hold => isLiveSlotHold(hold, checkedAt))) {
+      throw new ConflictError(HARD_DELETE_COMMITMENT_MESSAGE)
+    }
 
-  // Use transaction to ensure atomicity
-  await prisma.$transaction(async tx => {
+    // Track deleted records per attempt so rolled-back counts cannot leak.
+    const deletedRecords: Record<string, number> = {}
+
     // 1. Delete Commission Payouts for this staff in this venue
     const deletedPayouts = await tx.commissionPayout.deleteMany({
       where: {
@@ -1103,6 +1145,7 @@ export async function hardDeleteTeamMember(
     // The Staff record has many foreign key references (Invitations, Orders, Shifts, etc.)
     // that would cause cascade failures. The user is effectively removed from this venue
     // by deleting StaffVenue and all their commission/milestone data.
+    return { staffId, deletedRecords }
   })
 
   logger.info('Team member hard deleted (SUPERADMIN)', {

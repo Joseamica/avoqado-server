@@ -211,6 +211,9 @@ const prismaMock: any = {
   // Reservation / Booking models
   reservation: createMockModel(),
   classSession: createMockModel(),
+  staffSchedule: createMockModel(),
+  staffScheduleException: createMockModel(),
+  productStaff: createMockModel(),
   reservationWaitlistEntry: createMockModel(),
   table: createMockModel(),
   // Permission Set models
@@ -222,7 +225,9 @@ const prismaMock: any = {
   commissionTier: createMockModel(),
   commissionOverride: createMockModel(),
   commissionCalculation: createMockModel(),
+  commissionPayout: createMockModel(),
   commissionSummary: createMockModel(),
+  milestoneAchievement: createMockModel(),
   // Credit Pack models
   creditPack: createMockModel(),
   creditPackItem: createMockModel(),
@@ -287,6 +292,14 @@ prismaMock.tpvCommandQueue.findMany.mockResolvedValue([])
 // exercise tiers override with their own mockResolvedValue per test.
 prismaMock.venueFeature.findMany.mockResolvedValue([])
 
+function primeReservationStaffMocks() {
+  prismaMock.staffSchedule.findUnique.mockResolvedValue(null)
+  prismaMock.staffScheduleException.findMany.mockResolvedValue([])
+  prismaMock.productStaff.findMany.mockResolvedValue([])
+}
+
+primeReservationStaffMocks()
+
 // Mock Prisma Client globally
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -315,6 +328,7 @@ console.log('Jest global setup file loaded.')
 // Clear all mocks before each test to ensure test isolation
 beforeEach(() => {
   jest.clearAllMocks()
+  primeReservationStaffMocks()
 })
 
-export { prismaMock }
+export { prismaMock, primeReservationStaffMocks }

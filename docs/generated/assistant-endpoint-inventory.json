@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-07-18T23:30:54.914Z",
+  "generatedAt": "2026-07-22T10:34:36.934Z",
   "assistantTools": [
     "activeShifts",
     "adHocAnalytics",
@@ -26655,8 +26655,7 @@
       "controller": "controller.createReservation",
       "controllerFile": "src/controllers/dashboard/reservation.dashboard.controller.ts",
       "services": [
-        "src/services/dashboard/reservation.dashboard.service.ts",
-        "src/services/dashboard/reservationSettings.service.ts"
+        "src/services/dashboard/reservation.dashboard.service.ts"
       ],
       "permissions": [
         "reservations:create"
@@ -26751,8 +26750,7 @@
       "controller": "controller.updateReservation",
       "controllerFile": "src/controllers/dashboard/reservation.dashboard.controller.ts",
       "services": [
-        "src/services/dashboard/reservation.dashboard.service.ts",
-        "src/services/dashboard/reservationSettings.service.ts"
+        "src/services/dashboard/reservation.dashboard.service.ts"
       ],
       "permissions": [
         "reservations:update"
@@ -26909,8 +26907,7 @@
       "controller": "controller.rescheduleReservation",
       "controllerFile": "src/controllers/dashboard/reservation.dashboard.controller.ts",
       "services": [
-        "src/services/dashboard/reservation.dashboard.service.ts",
-        "src/services/dashboard/reservationSettings.service.ts"
+        "src/services/dashboard/reservation.dashboard.service.ts"
       ],
       "permissions": [
         "reservations:update"
@@ -26944,7 +26941,8 @@
       "controllerFile": "src/controllers/dashboard/reservation.dashboard.controller.ts",
       "services": [
         "src/services/dashboard/reservationAvailability.service.ts",
-        "src/services/dashboard/reservationSettings.service.ts"
+        "src/services/dashboard/reservationSettings.service.ts",
+        "src/services/reservation/resolveAppointmentWindow.ts"
       ],
       "permissions": [
         "reservations:read"
@@ -27067,6 +27065,68 @@
     },
     {
       "method": "GET",
+      "fullPath": "/api/v1/dashboard/venues/:venueId/reservations/products/:productId/staff",
+      "localPath": "/products/:productId/staff",
+      "mountPrefix": "/api/v1/dashboard/venues/:venueId/reservations",
+      "routeFile": "src/routes/dashboard/reservation.routes.ts",
+      "controller": "controller.getProductStaff",
+      "controllerFile": "src/controllers/dashboard/reservation.dashboard.controller.ts",
+      "services": [
+        "src/services/dashboard/productStaff.service.ts"
+      ],
+      "permissions": [
+        "menu:read"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [
+        "z.object"
+      ],
+      "classification": "read",
+      "scope": "venue",
+      "assistantCoverage": "partial",
+      "assistantTools": [
+        "topProducts"
+      ],
+      "notes": [
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
+      ]
+    },
+    {
+      "method": "PUT",
+      "fullPath": "/api/v1/dashboard/venues/:venueId/reservations/products/:productId/staff",
+      "localPath": "/products/:productId/staff",
+      "mountPrefix": "/api/v1/dashboard/venues/:venueId/reservations",
+      "routeFile": "src/routes/dashboard/reservation.routes.ts",
+      "controller": "controller.replaceProductStaff",
+      "controllerFile": "src/controllers/dashboard/reservation.dashboard.controller.ts",
+      "services": [
+        "src/services/dashboard/productStaff.service.ts"
+      ],
+      "permissions": [
+        "menu:update"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [
+        "z.object"
+      ],
+      "classification": "mutation",
+      "scope": "venue",
+      "assistantCoverage": "partial",
+      "assistantTools": [
+        "topProducts"
+      ],
+      "notes": [
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
+      ]
+    },
+    {
+      "method": "GET",
       "fullPath": "/api/v1/dashboard/venues/:venueId/reservations/settings",
       "localPath": "/settings",
       "mountPrefix": "/api/v1/dashboard/venues/:venueId/reservations",
@@ -27110,6 +27170,72 @@
       ],
       "permissions": [
         "reservations:update"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [
+        "z.object"
+      ],
+      "classification": "mutation",
+      "scope": "venue",
+      "assistantCoverage": "partial",
+      "assistantTools": [
+        "reservations.summary",
+        "reservations.list",
+        "reservations.create"
+      ],
+      "notes": [
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
+      ]
+    },
+    {
+      "method": "GET",
+      "fullPath": "/api/v1/dashboard/venues/:venueId/reservations/staff/:staffVenueId/schedule",
+      "localPath": "/staff/:staffVenueId/schedule",
+      "mountPrefix": "/api/v1/dashboard/venues/:venueId/reservations",
+      "routeFile": "src/routes/dashboard/reservation.routes.ts",
+      "controller": "controller.getStaffSchedule",
+      "controllerFile": "src/controllers/dashboard/reservation.dashboard.controller.ts",
+      "services": [
+        "src/services/dashboard/staffSchedule.service.ts"
+      ],
+      "permissions": [
+        "teams:read"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [
+        "z.object"
+      ],
+      "classification": "read",
+      "scope": "venue",
+      "assistantCoverage": "partial",
+      "assistantTools": [
+        "reservations.summary",
+        "reservations.list",
+        "reservations.create"
+      ],
+      "notes": [
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
+      ]
+    },
+    {
+      "method": "PUT",
+      "fullPath": "/api/v1/dashboard/venues/:venueId/reservations/staff/:staffVenueId/schedule",
+      "localPath": "/staff/:staffVenueId/schedule",
+      "mountPrefix": "/api/v1/dashboard/venues/:venueId/reservations",
+      "routeFile": "src/routes/dashboard/reservation.routes.ts",
+      "controller": "controller.replaceStaffSchedule",
+      "controllerFile": "src/controllers/dashboard/reservation.dashboard.controller.ts",
+      "services": [
+        "src/services/dashboard/staffSchedule.service.ts"
+      ],
+      "permissions": [
+        "teams:update"
       ],
       "inheritedPermissions": [],
       "auth": [
@@ -30689,6 +30815,66 @@
     },
     {
       "method": "GET",
+      "fullPath": "/api/v1/delivery-channels/venues/:venueId/activation-request",
+      "localPath": "/venues/:venueId/activation-request",
+      "mountPrefix": "/api/v1/delivery-channels",
+      "routeFile": "src/routes/delivery-channels.routes.ts",
+      "controller": "ctrl.getActivation",
+      "controllerFile": "src/controllers/delivery-channels/deliveryChannels.controller.ts",
+      "services": [
+        "src/services/delivery-channels/core/deliveryActivation.service.ts",
+        "src/services/delivery-channels/core/deliveryChannelLink.service.ts",
+        "src/services/delivery-channels/core/deliverySummary.service.ts"
+      ],
+      "permissions": [
+        "delivery-channels:read"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [],
+      "classification": "read",
+      "scope": "venue",
+      "assistantCoverage": "missing",
+      "assistantTools": [],
+      "notes": [
+        "No assistant capability mapped yet."
+      ]
+    },
+    {
+      "method": "POST",
+      "fullPath": "/api/v1/delivery-channels/venues/:venueId/activation-request",
+      "localPath": "/venues/:venueId/activation-request",
+      "mountPrefix": "/api/v1/delivery-channels",
+      "routeFile": "src/routes/delivery-channels.routes.ts",
+      "controller": "ctrl.requestActivation",
+      "controllerFile": "src/controllers/delivery-channels/deliveryChannels.controller.ts",
+      "services": [
+        "src/services/delivery-channels/core/deliveryActivation.service.ts",
+        "src/services/delivery-channels/core/deliveryChannelLink.service.ts",
+        "src/services/delivery-channels/core/deliverySummary.service.ts"
+      ],
+      "permissions": [
+        "delivery-channels:request"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [
+        "createActivationRequestSchema"
+      ],
+      "classification": "action",
+      "scope": "venue",
+      "assistantCoverage": "missing",
+      "assistantTools": [],
+      "notes": [
+        "No assistant capability mapped yet."
+      ]
+    },
+    {
+      "method": "GET",
       "fullPath": "/api/v1/delivery-channels/venues/:venueId/channels",
       "localPath": "/venues/:venueId/channels",
       "mountPrefix": "/api/v1/delivery-channels",
@@ -30696,7 +30882,9 @@
       "controller": "ctrl.listChannels",
       "controllerFile": "src/controllers/delivery-channels/deliveryChannels.controller.ts",
       "services": [
-        "src/services/delivery-channels/core/deliveryChannelLink.service.ts"
+        "src/services/delivery-channels/core/deliveryActivation.service.ts",
+        "src/services/delivery-channels/core/deliveryChannelLink.service.ts",
+        "src/services/delivery-channels/core/deliverySummary.service.ts"
       ],
       "permissions": [
         "delivery-channels:read"
@@ -30723,10 +30911,12 @@
       "controller": "ctrl.createChannel",
       "controllerFile": "src/controllers/delivery-channels/deliveryChannels.controller.ts",
       "services": [
-        "src/services/delivery-channels/core/deliveryChannelLink.service.ts"
+        "src/services/delivery-channels/core/deliveryActivation.service.ts",
+        "src/services/delivery-channels/core/deliveryChannelLink.service.ts",
+        "src/services/delivery-channels/core/deliverySummary.service.ts"
       ],
       "permissions": [
-        "delivery-channels:manage"
+        "delivery-channels:connect"
       ],
       "inheritedPermissions": [],
       "auth": [
@@ -30752,11 +30942,11 @@
       "controller": "ctrl.updateChannel",
       "controllerFile": "src/controllers/delivery-channels/deliveryChannels.controller.ts",
       "services": [
-        "src/services/delivery-channels/core/deliveryChannelLink.service.ts"
+        "src/services/delivery-channels/core/deliveryActivation.service.ts",
+        "src/services/delivery-channels/core/deliveryChannelLink.service.ts",
+        "src/services/delivery-channels/core/deliverySummary.service.ts"
       ],
-      "permissions": [
-        "delivery-channels:manage"
-      ],
+      "permissions": [],
       "inheritedPermissions": [],
       "auth": [
         "authenticateTokenMiddleware"
@@ -30781,7 +30971,9 @@
       "controller": "ctrl.pauseChannel",
       "controllerFile": "src/controllers/delivery-channels/deliveryChannels.controller.ts",
       "services": [
-        "src/services/delivery-channels/core/deliveryChannelLink.service.ts"
+        "src/services/delivery-channels/core/deliveryActivation.service.ts",
+        "src/services/delivery-channels/core/deliveryChannelLink.service.ts",
+        "src/services/delivery-channels/core/deliverySummary.service.ts"
       ],
       "permissions": [
         "delivery-channels:manage"
@@ -30799,6 +30991,38 @@
       "assistantTools": [],
       "notes": [
         "No assistant capability mapped yet."
+      ]
+    },
+    {
+      "method": "GET",
+      "fullPath": "/api/v1/delivery-channels/venues/:venueId/delivery/summary",
+      "localPath": "/venues/:venueId/delivery/summary",
+      "mountPrefix": "/api/v1/delivery-channels",
+      "routeFile": "src/routes/delivery-channels.routes.ts",
+      "controller": "ctrl.getSummary",
+      "controllerFile": "src/controllers/delivery-channels/deliveryChannels.controller.ts",
+      "services": [
+        "src/services/delivery-channels/core/deliveryActivation.service.ts",
+        "src/services/delivery-channels/core/deliveryChannelLink.service.ts",
+        "src/services/delivery-channels/core/deliverySummary.service.ts"
+      ],
+      "permissions": [
+        "delivery-channels:read"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [],
+      "classification": "read",
+      "scope": "venue",
+      "assistantCoverage": "partial",
+      "assistantTools": [
+        "sales",
+        "businessOverview"
+      ],
+      "notes": [
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
       ]
     },
     {
@@ -32422,6 +32646,37 @@
     },
     {
       "method": "GET",
+      "fullPath": "/api/v1/mobile/venues/:venueId/customers/:customerId/loyalty",
+      "localPath": "/venues/:venueId/customers/:customerId/loyalty",
+      "mountPrefix": "/api/v1/mobile",
+      "routeFile": "src/routes/mobile.routes.ts",
+      "controller": "loyaltyMobileController.getCustomerLoyalty",
+      "controllerFile": "src/controllers/mobile/loyalty.mobile.controller.ts",
+      "services": [
+        "src/services/mobile/loyalty.mobile.service.ts"
+      ],
+      "permissions": [
+        "loyalty:read"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [],
+      "classification": "read",
+      "scope": "venue",
+      "assistantCoverage": "partial",
+      "assistantTools": [
+        "customers.summary",
+        "customers.detail",
+        "creditPacks.balance"
+      ],
+      "notes": [
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
+      ]
+    },
+    {
+      "method": "GET",
       "fullPath": "/api/v1/mobile/venues/:venueId/discounts",
       "localPath": "/venues/:venueId/discounts",
       "mountPrefix": "/api/v1/mobile",
@@ -33084,6 +33339,35 @@
     },
     {
       "method": "GET",
+      "fullPath": "/api/v1/mobile/venues/:venueId/menus",
+      "localPath": "/venues/:venueId/menus",
+      "mountPrefix": "/api/v1/mobile",
+      "routeFile": "src/routes/mobile.routes.ts",
+      "controller": "menuMobileController.listMenus",
+      "controllerFile": "src/controllers/mobile/menu.mobile.controller.ts",
+      "services": [
+        "src/services/mobile/menu.mobile.service.ts"
+      ],
+      "permissions": [
+        "menu:read"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [],
+      "classification": "read",
+      "scope": "venue",
+      "assistantCoverage": "partial",
+      "assistantTools": [
+        "topProducts"
+      ],
+      "notes": [
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
+      ]
+    },
+    {
+      "method": "GET",
       "fullPath": "/api/v1/mobile/venues/:venueId/orders",
       "localPath": "/venues/:venueId/orders",
       "mountPrefix": "/api/v1/mobile",
@@ -33399,6 +33683,64 @@
     },
     {
       "method": "POST",
+      "fullPath": "/api/v1/mobile/venues/:venueId/orders/:orderId/loyalty/redeem",
+      "localPath": "/venues/:venueId/orders/:orderId/loyalty/redeem",
+      "mountPrefix": "/api/v1/mobile",
+      "routeFile": "src/routes/mobile.routes.ts",
+      "controller": "loyaltyMobileController.redeemPoints",
+      "controllerFile": "src/controllers/mobile/loyalty.mobile.controller.ts",
+      "services": [
+        "src/services/mobile/loyalty.mobile.service.ts"
+      ],
+      "permissions": [
+        "orders:update"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [],
+      "classification": "action",
+      "scope": "venue",
+      "assistantCoverage": "partial",
+      "assistantTools": [
+        "pendingOrders"
+      ],
+      "notes": [
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
+      ]
+    },
+    {
+      "method": "POST",
+      "fullPath": "/api/v1/mobile/venues/:venueId/orders/:orderId/merge",
+      "localPath": "/venues/:venueId/orders/:orderId/merge",
+      "mountPrefix": "/api/v1/mobile",
+      "routeFile": "src/routes/mobile.routes.ts",
+      "controller": "orderMobileController.mergeOrders",
+      "controllerFile": "src/controllers/mobile/order.mobile.controller.ts",
+      "services": [
+        "src/services/mobile/order.mobile.service.ts"
+      ],
+      "permissions": [
+        "orders:update"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [],
+      "classification": "action",
+      "scope": "venue",
+      "assistantCoverage": "partial",
+      "assistantTools": [
+        "pendingOrders"
+      ],
+      "notes": [
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
+      ]
+    },
+    {
+      "method": "POST",
       "fullPath": "/api/v1/mobile/venues/:venueId/orders/:orderId/move",
       "localPath": "/venues/:venueId/orders/:orderId/move",
       "mountPrefix": "/api/v1/mobile",
@@ -33458,11 +33800,98 @@
     },
     {
       "method": "POST",
+      "fullPath": "/api/v1/mobile/venues/:venueId/orders/:orderId/service-charges",
+      "localPath": "/venues/:venueId/orders/:orderId/service-charges",
+      "mountPrefix": "/api/v1/mobile",
+      "routeFile": "src/routes/mobile.routes.ts",
+      "controller": "serviceChargeMobileController.applyServiceCharge",
+      "controllerFile": "src/controllers/mobile/service-charge.mobile.controller.ts",
+      "services": [
+        "src/services/mobile/service-charge.mobile.service.ts"
+      ],
+      "permissions": [
+        "orders:update"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [],
+      "classification": "action",
+      "scope": "venue",
+      "assistantCoverage": "partial",
+      "assistantTools": [
+        "pendingOrders"
+      ],
+      "notes": [
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
+      ]
+    },
+    {
+      "method": "DELETE",
+      "fullPath": "/api/v1/mobile/venues/:venueId/orders/:orderId/service-charges/:orderServiceChargeId",
+      "localPath": "/venues/:venueId/orders/:orderId/service-charges/:orderServiceChargeId",
+      "mountPrefix": "/api/v1/mobile",
+      "routeFile": "src/routes/mobile.routes.ts",
+      "controller": "serviceChargeMobileController.removeServiceCharge",
+      "controllerFile": "src/controllers/mobile/service-charge.mobile.controller.ts",
+      "services": [
+        "src/services/mobile/service-charge.mobile.service.ts"
+      ],
+      "permissions": [
+        "orders:update"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [],
+      "classification": "dangerousMutation",
+      "scope": "venue",
+      "assistantCoverage": "partial",
+      "assistantTools": [
+        "pendingOrders"
+      ],
+      "notes": [
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
+      ]
+    },
+    {
+      "method": "POST",
       "fullPath": "/api/v1/mobile/venues/:venueId/orders/:orderId/split",
       "localPath": "/venues/:venueId/orders/:orderId/split",
       "mountPrefix": "/api/v1/mobile",
       "routeFile": "src/routes/mobile.routes.ts",
       "controller": "orderMobileController.splitOrder",
+      "controllerFile": "src/controllers/mobile/order.mobile.controller.ts",
+      "services": [
+        "src/services/mobile/order.mobile.service.ts"
+      ],
+      "permissions": [
+        "orders:update"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [],
+      "classification": "action",
+      "scope": "venue",
+      "assistantCoverage": "partial",
+      "assistantTools": [
+        "pendingOrders"
+      ],
+      "notes": [
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
+      ]
+    },
+    {
+      "method": "POST",
+      "fullPath": "/api/v1/mobile/venues/:venueId/orders/:orderId/split-by-seat",
+      "localPath": "/venues/:venueId/orders/:orderId/split-by-seat",
+      "mountPrefix": "/api/v1/mobile",
+      "routeFile": "src/routes/mobile.routes.ts",
+      "controller": "orderMobileController.splitOrderBySeat",
       "controllerFile": "src/controllers/mobile/order.mobile.controller.ts",
       "services": [
         "src/services/mobile/order.mobile.service.ts"
@@ -33821,7 +34250,9 @@
       "routeFile": "src/routes/mobile.routes.ts",
       "controller": "productMobileController.createProduct",
       "controllerFile": "src/controllers/mobile/product.mobile.controller.ts",
-      "services": [],
+      "services": [
+        "src/services/dashboard/product.dashboard.service.ts"
+      ],
       "permissions": [
         "menu:create"
       ],
@@ -34195,6 +34626,33 @@
       ],
       "notes": [
         "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
+      ]
+    },
+    {
+      "method": "GET",
+      "fullPath": "/api/v1/mobile/venues/:venueId/service-charges",
+      "localPath": "/venues/:venueId/service-charges",
+      "mountPrefix": "/api/v1/mobile",
+      "routeFile": "src/routes/mobile.routes.ts",
+      "controller": "serviceChargeMobileController.listServiceCharges",
+      "controllerFile": "src/controllers/mobile/service-charge.mobile.controller.ts",
+      "services": [
+        "src/services/mobile/service-charge.mobile.service.ts"
+      ],
+      "permissions": [
+        "orders:read"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [],
+      "classification": "read",
+      "scope": "venue",
+      "assistantCoverage": "missing",
+      "assistantTools": [],
+      "notes": [
+        "No assistant capability mapped yet."
       ]
     },
     {
@@ -36740,7 +37198,8 @@
       "controllerFile": "src/controllers/public/reservation.public.controller.ts",
       "services": [
         "src/services/dashboard/reservationAvailability.service.ts",
-        "src/services/dashboard/reservationSettings.service.ts"
+        "src/services/dashboard/reservationSettings.service.ts",
+        "src/services/reservation/resolveAppointmentWindow.ts"
       ],
       "permissions": [],
       "inheritedPermissions": [],
@@ -37098,7 +37557,9 @@
         "src/services/payments/ecommerceCapability.ts",
         "src/services/payments/provider-registry.ts",
         "src/services/payments/providers/money.ts",
+        "src/services/reservation/appointmentSlotHold.service.ts",
         "src/services/reservation/external-busy-block.service.ts",
+        "src/services/reservation/resolveAppointmentWindow.ts",
         "src/services/superadmin/platformSettings.service.ts",
         "src/services/whatsapp.service.ts"
       ],
@@ -37208,7 +37669,8 @@
       "services": [
         "src/services/dashboard/reservation.dashboard.service.ts",
         "src/services/dashboard/reservationAvailability.service.ts",
-        "src/services/dashboard/reservationSettings.service.ts"
+        "src/services/dashboard/reservationSettings.service.ts",
+        "src/services/reservation/resolveAppointmentWindow.ts"
       ],
       "permissions": [],
       "inheritedPermissions": [],
@@ -37235,7 +37697,8 @@
       "services": [
         "src/services/dashboard/reservation.dashboard.service.ts",
         "src/services/dashboard/reservationAvailability.service.ts",
-        "src/services/dashboard/reservationSettings.service.ts"
+        "src/services/dashboard/reservationSettings.service.ts",
+        "src/services/reservation/appointmentSlotHold.service.ts"
       ],
       "permissions": [],
       "inheritedPermissions": [],
@@ -37260,9 +37723,10 @@
       "controller": "reservationPublicController.createHold",
       "controllerFile": "src/controllers/public/reservation.public.controller.ts",
       "services": [
-        "src/services/dashboard/reservationAvailability.service.ts",
         "src/services/dashboard/reservationSettings.service.ts",
-        "src/services/reservation/external-busy-block.service.ts"
+        "src/services/reservation/appointmentSlotHold.service.ts",
+        "src/services/reservation/external-busy-block.service.ts",
+        "src/services/reservation/resolveAppointmentWindow.ts"
       ],
       "permissions": [],
       "inheritedPermissions": [],
@@ -39042,6 +39506,56 @@
     },
     {
       "method": "GET",
+      "fullPath": "/api/v1/superadmin/delivery-activation",
+      "localPath": "/",
+      "mountPrefix": "/api/v1/superadmin/delivery-activation",
+      "routeFile": "src/routes/superadmin/deliveryActivation.routes.ts",
+      "controller": "ctrl.listRequests",
+      "controllerFile": "src/controllers/superadmin/deliveryActivation.superadmin.controller.ts",
+      "services": [
+        "src/services/delivery-channels/core/deliveryActivation.service.ts"
+      ],
+      "permissions": [],
+      "inheritedPermissions": [],
+      "auth": [],
+      "schemas": [
+        "listRequestsSchema"
+      ],
+      "classification": "adminOnly",
+      "scope": "superadmin",
+      "assistantCoverage": "blocked",
+      "assistantTools": [],
+      "notes": [
+        "adminOnly endpoint should not be exposed to venue assistant by default."
+      ]
+    },
+    {
+      "method": "PATCH",
+      "fullPath": "/api/v1/superadmin/delivery-activation/:id",
+      "localPath": "/:id",
+      "mountPrefix": "/api/v1/superadmin/delivery-activation",
+      "routeFile": "src/routes/superadmin/deliveryActivation.routes.ts",
+      "controller": "ctrl.updateRequest",
+      "controllerFile": "src/controllers/superadmin/deliveryActivation.superadmin.controller.ts",
+      "services": [
+        "src/services/delivery-channels/core/deliveryActivation.service.ts"
+      ],
+      "permissions": [],
+      "inheritedPermissions": [],
+      "auth": [],
+      "schemas": [
+        "updateRequestSchema"
+      ],
+      "classification": "adminOnly",
+      "scope": "superadmin",
+      "assistantCoverage": "blocked",
+      "assistantTools": [],
+      "notes": [
+        "adminOnly endpoint should not be exposed to venue assistant by default."
+      ]
+    },
+    {
+      "method": "GET",
       "fullPath": "/api/v1/superadmin/earnings/summary",
       "localPath": "/summary",
       "mountPrefix": "/api/v1/superadmin/earnings",
@@ -40258,6 +40772,7 @@
       "controller": "onboardingController.createVenueWizard",
       "controllerFile": "src/controllers/superadmin/onboarding.controller.ts",
       "services": [
+        "src/services/dashboard/activity-log.service.ts",
         "src/services/email.service.ts",
         "src/services/modules/module.service.ts",
         "src/services/organization-payment-config.service.ts",

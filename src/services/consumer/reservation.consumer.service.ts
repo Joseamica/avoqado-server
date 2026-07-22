@@ -8,6 +8,9 @@ import { getVatRateBps } from '@/services/superadmin/platformSettings.service'
 import { getProvider } from '@/services/payments/provider-registry'
 import { resolveChargeableStripeMerchant as resolveActiveStripeMerchant } from '@/services/payments/ecommerceCapability'
 import logger from '@/config/logger'
+import { withSerializableRetry } from '@/utils/serializableRetry'
+import { fastFailLiveHold } from '@/services/reservation/appointmentSlotHold.service'
+import { normalizeBookedProductIds } from '@/services/reservation/resolveAppointmentWindow'
 
 type ConsumerReservationInput = {
   startsAt?: Date
@@ -18,6 +21,11 @@ type ConsumerReservationInput = {
   guestEmail?: string
   partySize?: number
   productId?: string
+  productIds?: string[]
+  modifierSelections?: { productId: string; modifierId: string; quantity?: number }[]
+  holdId?: string
+  staffId?: string
+  windowSemantics?: 'base'
   classSessionId?: string
   spotIds?: string[]
   specialRequests?: string
@@ -229,6 +237,19 @@ export async function createReservationForConsumer(consumerId: string, venueSlug
     throw new BadRequestError('Las reservaciones en linea no estan habilitadas')
   }
 
+  const normalizedProducts = normalizeBookedProductIds({ productId: input.productId, productIds: input.productIds })
+  if (normalizedProducts.productIds.length > 1) {
+    throw new BadRequestError('La app de consumidor admite un solo servicio por reservación')
+  }
+  const appointmentHold = input.holdId ? await fastFailLiveHold({ venueId: venue.id, holdId: input.holdId }) : null
+  if (appointmentHold && (input.classSessionId || normalizedProducts.productIds.length !== 1)) {
+    throw new BadRequestError('holdId solo es válido para reservaciones de cita con un servicio')
+  }
+
+  if (!input.classSessionId && input.staffId && settings.publicBooking.showStaffPicker !== true && !appointmentHold) {
+    throw new BadRequestError('La selección de profesionista no está habilitada para este negocio')
+  }
+
   const { consumer, customer } = await ensureVenueCustomer(venue.id, consumerId)
   const guestName = input.guestName ?? displayName(consumer)
   const guestEmail = input.guestEmail ?? consumer.email ?? undefined
@@ -275,7 +296,7 @@ export async function createReservationForConsumer(consumerId: string, venueSlug
     throw new BadRequestError('startsAt, endsAt y duration son requeridos')
   }
 
-  const depositPreview = await previewDepositRequirement(venue.id, input, settings)
+  const depositPreview = await previewDepositRequirement(venue.id, { ...input, productId: normalizedProducts.leadProductId }, settings)
   const stripeMerchant = depositPreview.required ? await resolveActiveStripeMerchant(venue.id) : null
 
   if (depositPreview.required && !stripeMerchant) {
@@ -305,11 +326,17 @@ export async function createReservationForConsumer(consumerId: string, venueSlug
       guestPhone,
       guestEmail,
       partySize: input.partySize,
-      productId: input.productId,
+      productId: normalizedProducts.leadProductId,
+      productIds: normalizedProducts.productIdsWasProvided ? normalizedProducts.productIds : undefined,
+      modifierSelections: input.modifierSelections,
+      assignedStaffId: input.staffId,
       specialRequests: input.specialRequests,
     },
-    undefined,
-    settings,
+    {
+      writeOrigin: 'CONSUMER',
+      ...(input.windowSemantics === 'base' ? { windowSemantics: input.windowSemantics } : {}),
+      ...(appointmentHold ? { appointmentHoldId: appointmentHold.id } : {}),
+    },
   )
 
   let checkoutUrl: string | null = null
@@ -525,7 +552,7 @@ async function createClassReservationForConsumer(
   const autoConfirm = moduleConfig?.scheduling?.autoConfirm ?? true
   const initialStatus: ReservationStatus = autoConfirm ? 'CONFIRMED' : 'PENDING'
 
-  return reservationService.withSerializableRetry(async tx => {
+  return withSerializableRetry(async tx => {
     const sessions = await tx.$queryRaw<
       { id: string; productId: string; startsAt: Date; endsAt: Date; duration: number; capacity: number; status: string }[]
     >`

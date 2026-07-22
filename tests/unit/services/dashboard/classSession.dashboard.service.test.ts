@@ -1,13 +1,29 @@
 import { prismaMock } from '@tests/__helpers__/setup'
+
+jest.mock('@/communication/rabbitmq/gcal-push-consumer', () => ({
+  __esModule: true,
+  publishPushNotification: jest.fn().mockResolvedValue(undefined),
+}))
+
+jest.mock('@/services/dashboard/appointmentStaffAssignment.service', () => ({
+  ...jest.requireActual('@/services/dashboard/appointmentStaffAssignment.service'),
+  assertOrganizationStaffAvailability: jest.fn(),
+  lockAppointmentVenue: jest.fn(),
+}))
+
 import {
   getClassSession,
   createClassSession,
+  createClassSessionsBulk,
   updateClassSession,
   cancelClassSession,
   addAttendee,
   removeAttendee,
 } from '@/services/dashboard/classSession.dashboard.service'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
+import { publishPushNotification } from '@/communication/rabbitmq/gcal-push-consumer'
+import { assertOrganizationStaffAvailability, lockAppointmentVenue } from '@/services/dashboard/appointmentStaffAssignment.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
 
 // ---- Constants ----
 
@@ -16,6 +32,12 @@ const SESSION_ID = 'sess-001'
 const PRODUCT_ID = 'prod-001'
 const STAFF_ID = 'staff-001'
 const RESERVATION_ID = 'res-001'
+const ORGANIZATION_ID = 'org-001'
+
+const availabilityMock = assertOrganizationStaffAvailability as jest.MockedFunction<typeof assertOrganizationStaffAvailability>
+const lockAppointmentVenueMock = lockAppointmentVenue as jest.MockedFunction<typeof lockAppointmentVenue>
+const publishMock = publishPushNotification as jest.MockedFunction<typeof publishPushNotification>
+const logActionMock = logAction as jest.MockedFunction<typeof logAction>
 
 // ---- Helpers ----
 
@@ -78,11 +100,48 @@ const makeSession = (overrides: Record<string, any> = {}) => ({
   ...overrides,
 })
 
+const makeLockedSession = (overrides: Record<string, any> = {}) => ({
+  id: SESSION_ID,
+  startsAt: new Date('2026-03-01T10:00:00Z'),
+  endsAt: new Date('2026-03-01T11:00:00Z'),
+  duration: 60,
+  capacity: 10,
+  status: 'SCHEDULED',
+  assignedStaffId: null,
+  internalNotes: null,
+  ...overrides,
+})
+
 // ============================================================
 // getClassSession
 // ============================================================
 
 describe('ClassSession Dashboard Service', () => {
+  beforeEach(() => {
+    prismaMock.product.findFirst.mockReset()
+    prismaMock.staffVenue.findFirst.mockReset()
+    prismaMock.classSession.findFirst.mockReset()
+    prismaMock.classSession.findMany.mockReset()
+    prismaMock.classSession.create.mockReset()
+    prismaMock.classSession.update.mockReset()
+    prismaMock.reservation.aggregate.mockReset()
+    prismaMock.$queryRaw.mockReset()
+    prismaMock.reservationSettings.findUnique.mockReset()
+    prismaMock.googleCalendarConnection.findFirst.mockReset()
+    prismaMock.calendarSyncOutbox.create.mockReset()
+    availabilityMock.mockReset().mockResolvedValue(undefined)
+    lockAppointmentVenueMock.mockReset().mockResolvedValue(undefined)
+    publishMock.mockReset().mockResolvedValue(undefined)
+    logActionMock.mockReset()
+    prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock))
+    prismaMock.reservationSettings.findUnique.mockResolvedValue({
+      googleCalendarPushEnabled: false,
+      googleCalendarDualWrite: false,
+    })
+    prismaMock.googleCalendarConnection.findFirst.mockResolvedValue(null)
+    prismaMock.calendarSyncOutbox.create.mockResolvedValue({ id: 'outbox-default' })
+  })
+
   describe('getClassSession', () => {
     it('should return session with enrolled and available computed fields', async () => {
       const session = makeSession()
@@ -190,6 +249,296 @@ describe('ClassSession Dashboard Service', () => {
       await expect(createClassSession(VENUE_ID, createDto as any, STAFF_ID)).rejects.toThrow('El producto debe ser de tipo Clase')
       expect(prismaMock.classSession.create).not.toHaveBeenCalled()
     })
+
+    it('retries atomically, re-reads active staff context, and emits post-commit effects once', async () => {
+      const assignedDto = { ...createDto, assignedStaffId: STAFF_ID }
+      const firstSession = makeSession({ id: 'session-attempt-1', assignedStaffId: STAFF_ID })
+      const committedSession = makeSession({ id: 'session-attempt-2', assignedStaffId: STAFF_ID })
+
+      prismaMock.product.findFirst.mockResolvedValue({ id: PRODUCT_ID, type: 'CLASS', maxParticipants: 20 })
+      prismaMock.staffVenue.findFirst
+        .mockResolvedValueOnce({ id: 'sv-1', venue: { organizationId: 'org-attempt-1' } })
+        .mockResolvedValueOnce({ id: 'sv-2', venue: { organizationId: 'org-attempt-2' } })
+      prismaMock.classSession.create.mockResolvedValueOnce(firstSession).mockResolvedValueOnce(committedSession)
+      prismaMock.reservationSettings.findUnique.mockResolvedValue({
+        googleCalendarPushEnabled: true,
+        googleCalendarDualWrite: false,
+      })
+      prismaMock.googleCalendarConnection.findFirst.mockImplementation(({ where }: any) =>
+        Promise.resolve(where.scope === 'STAFF_PERSONAL' ? { id: 'conn-staff' } : null),
+      )
+      prismaMock.calendarSyncOutbox.create.mockImplementation(({ data }: any) => Promise.resolve({ id: `outbox-${data.classSessionId}` }))
+
+      let attempt = 0
+      prismaMock.$transaction.mockImplementation(async (callback: any) => {
+        attempt += 1
+        const result = await callback(prismaMock)
+        if (attempt === 1) throw { code: 'P2034' }
+        return result
+      })
+
+      const result = await createClassSession(VENUE_ID, assignedDto as any, STAFF_ID)
+
+      expect(result).toEqual(committedSession)
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(2)
+      expect(prismaMock.$transaction).toHaveBeenNthCalledWith(1, expect.any(Function), {
+        isolationLevel: 'Serializable',
+        timeout: 10_000,
+      })
+      expect(prismaMock.product.findFirst).toHaveBeenCalledTimes(2)
+      expect(prismaMock.staffVenue.findFirst).toHaveBeenCalledTimes(2)
+      expect(prismaMock.staffVenue.findFirst).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          where: { venueId: VENUE_ID, staffId: STAFF_ID, active: true, staff: { active: true } },
+          select: expect.objectContaining({ venue: { select: { organizationId: true } } }),
+        }),
+      )
+      expect(availabilityMock.mock.calls.map(([, args]) => args.organizationId)).toEqual(['org-attempt-1', 'org-attempt-2'])
+      expect(prismaMock.calendarSyncOutbox.create).toHaveBeenCalledTimes(2)
+      expect(publishMock).toHaveBeenCalledTimes(1)
+      expect(publishMock).toHaveBeenCalledWith(['outbox-session-attempt-2'])
+      expect(logActionMock).toHaveBeenCalledTimes(1)
+      expect(lockAppointmentVenueMock).not.toHaveBeenCalled()
+      expect(prismaMock.productStaff.findMany).not.toHaveBeenCalled()
+      expect(prismaMock.staffSchedule.findFirst).not.toHaveBeenCalled()
+      expect(prismaMock.staffScheduleException.findMany).not.toHaveBeenCalled()
+    })
+
+    it('rejects inactive local staff before availability or insertion', async () => {
+      prismaMock.product.findFirst.mockResolvedValue({ id: PRODUCT_ID, type: 'CLASS', maxParticipants: 20 })
+      prismaMock.staffVenue.findFirst.mockImplementation(({ where }: any) =>
+        Promise.resolve(where.active === true && where.staff?.active === true ? null : { id: 'inactive-membership' }),
+      )
+      prismaMock.classSession.create.mockResolvedValue(makeSession())
+
+      await expect(createClassSession(VENUE_ID, { ...createDto, assignedStaffId: STAFF_ID } as any, STAFF_ID)).rejects.toThrow(
+        'El staff asignado no pertenece a este negocio',
+      )
+
+      expect(prismaMock.staffVenue.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { venueId: VENUE_ID, staffId: STAFF_ID, active: true, staff: { active: true } },
+        }),
+      )
+      expect(availabilityMock).not.toHaveBeenCalled()
+      expect(prismaMock.classSession.create).not.toHaveBeenCalled()
+    })
+
+    it('defensively rejects a non-positive interval before insertion', async () => {
+      prismaMock.product.findFirst.mockResolvedValue({ id: PRODUCT_ID, type: 'CLASS', maxParticipants: 20 })
+      prismaMock.classSession.create.mockResolvedValue(makeSession())
+
+      await expect(createClassSession(VENUE_ID, { ...createDto, endsAt: `${futureDay}T09:00:00Z` } as any, STAFF_ID)).rejects.toThrow(
+        'La hora de inicio debe ser anterior a la hora de fin',
+      )
+
+      expect(prismaMock.classSession.create).not.toHaveBeenCalled()
+    })
+  })
+
+  // ============================================================
+  // createClassSessionsBulk
+  // ============================================================
+
+  describe('createClassSessionsBulk', () => {
+    const recurrenceDay = new Date(Date.now() + 60 * 86_400_000)
+    const startDate = recurrenceDay.toISOString().slice(0, 10)
+    const firstStartsAt = new Date(`${startDate}T10:00:00Z`)
+    const secondStartsAt = new Date(firstStartsAt.getTime() + 7 * 86_400_000)
+    const bulkDto = {
+      productId: PRODUCT_ID,
+      startDate,
+      startTime: '10:00',
+      endTime: '11:00',
+      weekdays: [firstStartsAt.getUTCDay()],
+      occurrences: 2,
+      capacity: 10,
+      assignedStaffId: STAFF_ID,
+      internalNotes: null,
+    }
+
+    it('retries the whole batch, re-reads the skip set, and returns only committed rows', async () => {
+      prismaMock.product.findFirst.mockResolvedValue({ id: PRODUCT_ID, type: 'CLASS' })
+      prismaMock.staffVenue.findFirst
+        .mockResolvedValueOnce({ id: 'sv-1', venue: { organizationId: 'org-attempt-1' } })
+        .mockResolvedValueOnce({ id: 'sv-2', venue: { organizationId: 'org-attempt-2' } })
+      prismaMock.classSession.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([{ startsAt: firstStartsAt }])
+
+      let attempt = 0
+      prismaMock.classSession.create.mockImplementation(({ data }: any) =>
+        Promise.resolve({
+          id: `attempt-${attempt}-${data.startsAt.toISOString()}`,
+          startsAt: data.startsAt,
+          endsAt: data.endsAt,
+        }),
+      )
+      prismaMock.$transaction.mockImplementation(async (callback: any) => {
+        attempt += 1
+        const result = await callback(prismaMock)
+        if (attempt === 1) throw { code: 'P2034' }
+        return result
+      })
+
+      const result = await createClassSessionsBulk(VENUE_ID, bulkDto as any, STAFF_ID, 'UTC')
+
+      expect(result).toEqual({
+        created: [
+          {
+            id: `attempt-2-${secondStartsAt.toISOString()}`,
+            startsAt: secondStartsAt,
+            endsAt: new Date(secondStartsAt.getTime() + 60 * 60_000),
+          },
+        ],
+        count: 1,
+        skipped: 1,
+      })
+      expect(prismaMock.$transaction).toHaveBeenCalledTimes(2)
+      expect(prismaMock.$transaction).toHaveBeenNthCalledWith(1, expect.any(Function), {
+        isolationLevel: 'Serializable',
+        timeout: 10_000,
+      })
+      expect(prismaMock.product.findFirst).toHaveBeenCalledTimes(2)
+      expect(prismaMock.staffVenue.findFirst).toHaveBeenCalledTimes(2)
+      expect(prismaMock.staffVenue.findFirst).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          where: { venueId: VENUE_ID, staffId: STAFF_ID, active: true, staff: { active: true } },
+        }),
+      )
+      expect(prismaMock.classSession.findMany).toHaveBeenCalledTimes(2)
+      expect(availabilityMock.mock.calls.map(([, args]) => args.organizationId)).toEqual([
+        'org-attempt-1',
+        'org-attempt-1',
+        'org-attempt-2',
+      ])
+      expect(availabilityMock).toHaveBeenLastCalledWith(
+        prismaMock,
+        expect.objectContaining({
+          staffId: STAFF_ID,
+          startsAt: secondStartsAt,
+          endsAt: new Date(secondStartsAt.getTime() + 60 * 60_000),
+          checkedAt: expect.any(Date),
+        }),
+      )
+      expect(logActionMock).toHaveBeenCalledTimes(1)
+      expect(logActionMock).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ created: 1, skipped: 1 }) }))
+      expect(lockAppointmentVenueMock).not.toHaveBeenCalled()
+      expect(prismaMock.productStaff.findMany).not.toHaveBeenCalled()
+      expect(prismaMock.staffSchedule.findFirst).not.toHaveBeenCalled()
+      expect(prismaMock.staffScheduleException.findMany).not.toHaveBeenCalled()
+    })
+
+    it('validates every assigned interval before any insert or outbox work', async () => {
+      prismaMock.product.findFirst.mockResolvedValue({ id: PRODUCT_ID, type: 'CLASS' })
+      prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', venue: { organizationId: ORGANIZATION_ID } })
+      prismaMock.classSession.findMany.mockResolvedValue([])
+      availabilityMock.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new ConflictError('staff busy'))
+      prismaMock.reservationSettings.findUnique.mockResolvedValue({
+        googleCalendarPushEnabled: true,
+        googleCalendarDualWrite: false,
+      })
+      prismaMock.googleCalendarConnection.findFirst.mockResolvedValue({ id: 'conn-staff' })
+      prismaMock.classSession.create.mockImplementation(({ data }: any) =>
+        Promise.resolve({ id: 'should-not-exist', startsAt: data.startsAt, endsAt: data.endsAt }),
+      )
+
+      await expect(createClassSessionsBulk(VENUE_ID, bulkDto as any, STAFF_ID, 'UTC')).rejects.toThrow('staff busy')
+
+      expect(availabilityMock).toHaveBeenCalledTimes(2)
+      expect(prismaMock.classSession.create).not.toHaveBeenCalled()
+      expect(prismaMock.calendarSyncOutbox.create).not.toHaveBeenCalled()
+      expect(publishMock).not.toHaveBeenCalled()
+      expect(logActionMock).not.toHaveBeenCalled()
+    })
+
+    it('preserves missing-product error precedence over malformed recurrence input', async () => {
+      prismaMock.product.findFirst.mockResolvedValue(null)
+
+      await expect(createClassSessionsBulk(VENUE_ID, { ...bulkDto, startDate: 'not-a-date' } as any, STAFF_ID, 'UTC')).rejects.toThrow(
+        'Producto no encontrado',
+      )
+
+      expect(prismaMock.product.findFirst).toHaveBeenCalledTimes(1)
+      expect(prismaMock.classSession.findMany).not.toHaveBeenCalled()
+    })
+
+    it('preserves inactive-membership error precedence over malformed recurrence input', async () => {
+      prismaMock.product.findFirst.mockResolvedValue({ id: PRODUCT_ID, type: 'CLASS' })
+      prismaMock.staffVenue.findFirst.mockResolvedValue(null)
+
+      await expect(createClassSessionsBulk(VENUE_ID, { ...bulkDto, startDate: 'not-a-date' } as any, STAFF_ID, 'UTC')).rejects.toThrow(
+        'El staff asignado no pertenece a este negocio',
+      )
+
+      expect(prismaMock.staffVenue.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { venueId: VENUE_ID, staffId: STAFF_ID, active: true, staff: { active: true } },
+        }),
+      )
+      expect(prismaMock.classSession.findMany).not.toHaveBeenCalled()
+    })
+
+    it('re-filters past candidates and reapplies the occurrence cap on retry', async () => {
+      jest.useFakeTimers()
+      const firstDate = '2030-01-07'
+      const secondDate = '2030-01-08'
+      const firstStart = new Date(`${firstDate}T10:00:00Z`)
+      const secondStart = new Date(`${secondDate}T10:00:00Z`)
+      jest.setSystemTime(new Date(`${firstDate}T09:59:30Z`))
+
+      try {
+        prismaMock.product.findFirst.mockResolvedValue({ id: PRODUCT_ID, type: 'CLASS' })
+        prismaMock.classSession.findMany.mockResolvedValue([])
+        let attempt = 0
+        prismaMock.classSession.create.mockImplementation(({ data }: any) =>
+          Promise.resolve({ id: `attempt-${attempt}`, startsAt: data.startsAt, endsAt: data.endsAt }),
+        )
+        prismaMock.$transaction.mockImplementation(async (callback: any) => {
+          attempt += 1
+          const result = await callback(prismaMock)
+          if (attempt === 1) {
+            jest.setSystemTime(new Date(`${firstDate}T10:01:30Z`))
+            throw { code: 'P2034' }
+          }
+          return result
+        })
+
+        const promise = createClassSessionsBulk(
+          VENUE_ID,
+          {
+            ...bulkDto,
+            startDate: firstDate,
+            weekdays: [firstStart.getUTCDay(), secondStart.getUTCDay()],
+            occurrences: 1,
+            assignedStaffId: null,
+          } as any,
+          STAFF_ID,
+          'UTC',
+        )
+        const [result] = await Promise.all([promise, jest.runAllTimersAsync()])
+        expect(result).toMatchObject({
+          count: 1,
+          skipped: 0,
+          created: [{ id: 'attempt-2', startsAt: secondStart }],
+        })
+
+        expect(prismaMock.product.findFirst).toHaveBeenCalledTimes(2)
+        expect(prismaMock.classSession.findMany).toHaveBeenCalledTimes(2)
+        expect(prismaMock.classSession.findMany).toHaveBeenNthCalledWith(
+          1,
+          expect.objectContaining({ where: expect.objectContaining({ startsAt: { gte: firstStart, lte: firstStart } }) }),
+        )
+        expect(prismaMock.classSession.findMany).toHaveBeenNthCalledWith(
+          2,
+          expect.objectContaining({ where: expect.objectContaining({ startsAt: { gte: secondStart, lte: secondStart } }) }),
+        )
+        expect(prismaMock.classSession.create).toHaveBeenNthCalledWith(
+          2,
+          expect.objectContaining({ data: expect.objectContaining({ startsAt: secondStart }) }),
+        )
+      } finally {
+        jest.useRealTimers()
+      }
+    })
   })
 
   // ============================================================
@@ -197,11 +546,13 @@ describe('ClassSession Dashboard Service', () => {
   // ============================================================
 
   describe('updateClassSession', () => {
+    beforeEach(() => {
+      prismaMock.$queryRaw.mockResolvedValue([makeLockedSession()])
+    })
+
     it('should update session fields successfully', async () => {
-      const existingSession = makeSession()
       const updatedSession = makeSession({ capacity: 15 })
 
-      prismaMock.classSession.findFirst.mockResolvedValue(existingSession)
       prismaMock.reservation.aggregate.mockResolvedValue({ _sum: { partySize: 5 } })
       prismaMock.classSession.update.mockResolvedValue(updatedSession)
 
@@ -217,8 +568,6 @@ describe('ClassSession Dashboard Service', () => {
     })
 
     it('should update startsAt, endsAt and recalculate duration', async () => {
-      const existingSession = makeSession()
-      prismaMock.classSession.findFirst.mockResolvedValue(existingSession)
       prismaMock.classSession.update.mockResolvedValue(makeSession())
 
       await updateClassSession(VENUE_ID, SESSION_ID, {
@@ -238,14 +587,14 @@ describe('ClassSession Dashboard Service', () => {
     })
 
     it('should throw NotFoundError when session not found', async () => {
-      prismaMock.classSession.findFirst.mockResolvedValue(null)
+      prismaMock.$queryRaw.mockResolvedValue([])
 
       await expect(updateClassSession(VENUE_ID, SESSION_ID, { capacity: 15 } as any)).rejects.toThrow(NotFoundError)
       await expect(updateClassSession(VENUE_ID, SESSION_ID, { capacity: 15 } as any)).rejects.toThrow('Sesión no encontrada')
     })
 
     it('should throw BadRequestError when session is CANCELLED', async () => {
-      prismaMock.classSession.findFirst.mockResolvedValue(makeSession({ status: 'CANCELLED' }))
+      prismaMock.$queryRaw.mockResolvedValue([makeLockedSession({ status: 'CANCELLED' })])
 
       await expect(updateClassSession(VENUE_ID, SESSION_ID, { capacity: 15 } as any)).rejects.toThrow(BadRequestError)
       await expect(updateClassSession(VENUE_ID, SESSION_ID, { capacity: 15 } as any)).rejects.toThrow(
@@ -255,7 +604,6 @@ describe('ClassSession Dashboard Service', () => {
     })
 
     it('should throw BadRequestError when reducing capacity below current enrollment', async () => {
-      prismaMock.classSession.findFirst.mockResolvedValue(makeSession({ capacity: 10 }))
       // 8 people currently enrolled
       prismaMock.reservation.aggregate.mockResolvedValue({ _sum: { partySize: 8 } })
 
@@ -265,7 +613,6 @@ describe('ClassSession Dashboard Service', () => {
     })
 
     it('should allow reducing capacity down to exact enrollment count', async () => {
-      prismaMock.classSession.findFirst.mockResolvedValue(makeSession({ capacity: 10 }))
       // 5 people enrolled
       prismaMock.reservation.aggregate.mockResolvedValue({ _sum: { partySize: 5 } })
       prismaMock.classSession.update.mockResolvedValue(makeSession({ capacity: 5 }))
@@ -274,6 +621,270 @@ describe('ClassSession Dashboard Service', () => {
       const result = await updateClassSession(VENUE_ID, SESSION_ID, { capacity: 5 } as any)
       expect(result).toBeDefined()
       expect(prismaMock.classSession.update).toHaveBeenCalled()
+    })
+
+    it('tenant-locks first and validates time-only changes for the existing active staff', async () => {
+      const events: string[] = []
+      const locked = makeLockedSession({ assignedStaffId: STAFF_ID })
+      const updated = makeSession({
+        startsAt: new Date('2026-03-01T10:30:00Z'),
+        endsAt: locked.endsAt,
+        duration: 30,
+        assignedStaffId: STAFF_ID,
+      })
+      prismaMock.$queryRaw.mockImplementation(async () => {
+        events.push('lock')
+        return [locked]
+      })
+      prismaMock.staffVenue.findFirst.mockImplementation(async () => {
+        events.push('membership')
+        return { id: 'sv-1', venue: { organizationId: ORGANIZATION_ID } }
+      })
+      availabilityMock.mockImplementation(async () => {
+        events.push('availability')
+      })
+      prismaMock.classSession.update.mockImplementation(async () => {
+        events.push('update')
+        return updated
+      })
+
+      await updateClassSession(VENUE_ID, SESSION_ID, { startsAt: '2026-03-01T10:30:00Z' } as any)
+
+      expect(events.slice(0, 4)).toEqual(['lock', 'membership', 'availability', 'update'])
+      const lockQuery = prismaMock.$queryRaw.mock.calls[0][0] as any
+      expect(lockQuery.sql).toContain('FROM "ClassSession"')
+      expect(lockQuery.sql).toContain('AND "venueId" = ?')
+      expect(lockQuery.sql).toContain('FOR UPDATE')
+      expect(lockQuery.values).toEqual([SESSION_ID, VENUE_ID])
+      expect(prismaMock.staffVenue.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { venueId: VENUE_ID, staffId: STAFF_ID, active: true, staff: { active: true } },
+        }),
+      )
+      expect(availabilityMock).toHaveBeenCalledWith(
+        prismaMock,
+        expect.objectContaining({
+          organizationId: ORGANIZATION_ID,
+          staffId: STAFF_ID,
+          startsAt: new Date('2026-03-01T10:30:00Z'),
+          endsAt: locked.endsAt,
+          checkedAt: expect.any(Date),
+          excludeClassSessionId: SESSION_ID,
+        }),
+      )
+      expect(prismaMock.classSession.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ startsAt: new Date('2026-03-01T10:30:00Z'), duration: 30 }) }),
+      )
+      expect(lockAppointmentVenueMock).not.toHaveBeenCalled()
+      expect(prismaMock.productStaff.findMany).not.toHaveBeenCalled()
+      expect(prismaMock.staffSchedule.findFirst).not.toHaveBeenCalled()
+      expect(prismaMock.staffScheduleException.findMany).not.toHaveBeenCalled()
+    })
+
+    it('derives an end-only duration from the freshly locked start', async () => {
+      prismaMock.$queryRaw.mockResolvedValue([makeLockedSession({ startsAt: new Date('2026-03-01T09:30:00Z') })])
+      prismaMock.classSession.update.mockResolvedValue(makeSession())
+
+      await updateClassSession(VENUE_ID, SESSION_ID, { endsAt: '2026-03-01T12:00:00Z' } as any)
+
+      expect(prismaMock.classSession.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ endsAt: new Date('2026-03-01T12:00:00Z'), duration: 150 }),
+        }),
+      )
+    })
+
+    it('re-reads the opposite endpoint after retry and emits outbox effects once', async () => {
+      const lockedRows = [
+        makeLockedSession({ endsAt: new Date('2026-03-01T12:00:00Z'), assignedStaffId: STAFF_ID }),
+        makeLockedSession({ endsAt: new Date('2026-03-01T13:00:00Z'), assignedStaffId: STAFF_ID }),
+      ]
+      let attempt = 0
+      prismaMock.$queryRaw.mockImplementation(async () => [lockedRows[attempt - 1]])
+      prismaMock.staffVenue.findFirst
+        .mockResolvedValueOnce({ id: 'sv-1', venue: { organizationId: 'org-attempt-1' } })
+        .mockResolvedValueOnce({ id: 'sv-2', venue: { organizationId: 'org-attempt-2' } })
+      prismaMock.classSession.update.mockImplementation(({ data }: any) =>
+        Promise.resolve(
+          makeSession({
+            id: `updated-attempt-${attempt}`,
+            startsAt: data.startsAt,
+            endsAt: lockedRows[attempt - 1].endsAt,
+            duration: data.duration,
+            assignedStaffId: STAFF_ID,
+          }),
+        ),
+      )
+      prismaMock.reservationSettings.findUnique.mockResolvedValue({
+        googleCalendarPushEnabled: true,
+        googleCalendarDualWrite: false,
+      })
+      prismaMock.googleCalendarConnection.findFirst.mockImplementation(({ where }: any) =>
+        Promise.resolve(where.scope === 'STAFF_PERSONAL' ? { id: 'conn-staff' } : null),
+      )
+      prismaMock.calendarSyncOutbox.create.mockImplementation(({ data }: any) => Promise.resolve({ id: `outbox-${data.classSessionId}` }))
+      prismaMock.$transaction.mockImplementation(async (callback: any) => {
+        attempt += 1
+        const result = await callback(prismaMock)
+        if (attempt === 1) throw { code: 'P2034' }
+        return result
+      })
+
+      const result = await updateClassSession(VENUE_ID, SESSION_ID, { startsAt: '2026-03-01T11:30:00Z' } as any)
+
+      expect(result.id).toBe('updated-attempt-2')
+      expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(2)
+      expect(prismaMock.classSession.update).toHaveBeenCalledTimes(2)
+      expect(prismaMock.classSession.update).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({ data: expect.objectContaining({ duration: 30 }) }),
+      )
+      expect(prismaMock.classSession.update).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ data: expect.objectContaining({ duration: 90 }) }),
+      )
+      expect(availabilityMock.mock.calls.map(([, args]) => args.organizationId)).toEqual(['org-attempt-1', 'org-attempt-2'])
+      expect(prismaMock.calendarSyncOutbox.create).toHaveBeenCalledTimes(2)
+      expect(publishMock).toHaveBeenCalledTimes(1)
+      expect(publishMock).toHaveBeenCalledWith(['outbox-updated-attempt-2'])
+      expect(logActionMock).toHaveBeenCalledTimes(1)
+    })
+
+    it('rejects an interval inverted by a concurrent partial-end update after retry', async () => {
+      const lockedRows = [
+        makeLockedSession({ endsAt: new Date('2026-03-01T13:00:00Z') }),
+        makeLockedSession({ endsAt: new Date('2026-03-01T11:00:00Z') }),
+      ]
+      let attempt = 0
+      prismaMock.$queryRaw.mockImplementation(async () => [lockedRows[attempt - 1]])
+      prismaMock.classSession.update.mockResolvedValue(makeSession())
+      prismaMock.$transaction.mockImplementation(async (callback: any) => {
+        attempt += 1
+        const result = await callback(prismaMock)
+        if (attempt === 1) throw { code: 'P2034' }
+        return result
+      })
+
+      await expect(updateClassSession(VENUE_ID, SESSION_ID, { startsAt: '2026-03-01T12:00:00Z' } as any)).rejects.toThrow(
+        'La hora de inicio debe ser anterior a la hora de fin',
+      )
+
+      expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(2)
+      expect(prismaMock.classSession.update).toHaveBeenCalledTimes(1)
+      expect(publishMock).not.toHaveBeenCalled()
+      expect(logActionMock).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['not-found', null, 'Sesión no encontrada'],
+      ['cancelled', makeLockedSession({ status: 'CANCELLED' }), 'No se puede modificar una sesión cancelada'],
+    ])('re-runs %s validation against the second locked state', async (_label, secondState, expectedMessage) => {
+      let attempt = 0
+      prismaMock.$queryRaw.mockImplementation(async () => (attempt === 1 ? [makeLockedSession()] : secondState ? [secondState] : []))
+      prismaMock.classSession.update.mockResolvedValue(makeSession({ internalNotes: 'first attempt' }))
+      prismaMock.$transaction.mockImplementation(async (callback: any) => {
+        attempt += 1
+        const result = await callback(prismaMock)
+        if (attempt === 1) throw { code: 'P2034' }
+        return result
+      })
+
+      await expect(updateClassSession(VENUE_ID, SESSION_ID, { internalNotes: 'retry me' } as any)).rejects.toThrow(expectedMessage)
+
+      expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(2)
+      expect(prismaMock.classSession.update).toHaveBeenCalledTimes(1)
+      expect(logActionMock).not.toHaveBeenCalled()
+    })
+
+    it('re-counts enrollment on retry before reducing capacity', async () => {
+      let attempt = 0
+      prismaMock.$queryRaw.mockResolvedValue([makeLockedSession()])
+      prismaMock.reservation.aggregate.mockResolvedValueOnce({ _sum: { partySize: 5 } }).mockResolvedValueOnce({ _sum: { partySize: 8 } })
+      prismaMock.classSession.update.mockResolvedValue(makeSession({ capacity: 6 }))
+      prismaMock.$transaction.mockImplementation(async (callback: any) => {
+        attempt += 1
+        const result = await callback(prismaMock)
+        if (attempt === 1) throw { code: 'P2034' }
+        return result
+      })
+
+      await expect(updateClassSession(VENUE_ID, SESSION_ID, { capacity: 6 } as any)).rejects.toThrow('No se puede reducir la capacidad a 6')
+
+      expect(prismaMock.reservation.aggregate).toHaveBeenCalledTimes(2)
+      expect(prismaMock.classSession.update).toHaveBeenCalledTimes(1)
+      expect(logActionMock).not.toHaveBeenCalled()
+    })
+
+    it('re-validates existing-staff membership on a time-change retry', async () => {
+      let attempt = 0
+      prismaMock.$queryRaw.mockResolvedValue([makeLockedSession({ assignedStaffId: STAFF_ID })])
+      prismaMock.staffVenue.findFirst
+        .mockResolvedValueOnce({ id: 'sv-1', venue: { organizationId: ORGANIZATION_ID } })
+        .mockResolvedValueOnce(null)
+      prismaMock.classSession.update.mockResolvedValue(makeSession({ assignedStaffId: STAFF_ID }))
+      prismaMock.$transaction.mockImplementation(async (callback: any) => {
+        attempt += 1
+        const result = await callback(prismaMock)
+        if (attempt === 1) throw { code: 'P2034' }
+        return result
+      })
+
+      await expect(updateClassSession(VENUE_ID, SESSION_ID, { endsAt: '2026-03-01T12:00:00Z' } as any)).rejects.toThrow(
+        'El staff asignado no pertenece a este negocio',
+      )
+
+      expect(prismaMock.staffVenue.findFirst).toHaveBeenCalledTimes(2)
+      expect(availabilityMock).toHaveBeenCalledTimes(1)
+      expect(prismaMock.classSession.update).toHaveBeenCalledTimes(1)
+    })
+
+    it('validates a newly assigned staff member and excludes the session from conflicts', async () => {
+      prismaMock.$queryRaw.mockResolvedValue([makeLockedSession({ assignedStaffId: null })])
+      prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', venue: { organizationId: ORGANIZATION_ID } })
+      prismaMock.classSession.update.mockResolvedValue(makeSession({ assignedStaffId: STAFF_ID }))
+
+      await updateClassSession(VENUE_ID, SESSION_ID, { assignedStaffId: STAFF_ID } as any)
+
+      expect(availabilityMock).toHaveBeenCalledWith(
+        prismaMock,
+        expect.objectContaining({
+          organizationId: ORGANIZATION_ID,
+          staffId: STAFF_ID,
+          startsAt: new Date('2026-03-01T10:00:00Z'),
+          endsAt: new Date('2026-03-01T11:00:00Z'),
+          excludeClassSessionId: SESSION_ID,
+        }),
+      )
+      expect(prismaMock.classSession.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ assignedStaffId: STAFF_ID }) }),
+      )
+    })
+
+    it('skips personal conflict validation for metadata-only updates', async () => {
+      prismaMock.$queryRaw.mockResolvedValue([makeLockedSession({ assignedStaffId: STAFF_ID })])
+      availabilityMock.mockRejectedValue(new ConflictError('legacy conflict'))
+      prismaMock.classSession.update.mockResolvedValue(makeSession({ assignedStaffId: STAFF_ID, internalNotes: 'updated' }))
+
+      const result = await updateClassSession(VENUE_ID, SESSION_ID, { internalNotes: 'updated' } as any)
+
+      expect(result.internalNotes).toBe('updated')
+      expect(prismaMock.staffVenue.findFirst).not.toHaveBeenCalled()
+      expect(availabilityMock).not.toHaveBeenCalled()
+    })
+
+    it('clears staff without running membership or personal conflict validation', async () => {
+      prismaMock.$queryRaw.mockResolvedValue([makeLockedSession({ assignedStaffId: STAFF_ID })])
+      availabilityMock.mockRejectedValue(new ConflictError('legacy conflict'))
+      prismaMock.classSession.update.mockResolvedValue(makeSession({ assignedStaffId: null }))
+
+      const result = await updateClassSession(VENUE_ID, SESSION_ID, { assignedStaffId: null } as any)
+
+      expect(result.assignedStaffId).toBeNull()
+      expect(prismaMock.staffVenue.findFirst).not.toHaveBeenCalled()
+      expect(availabilityMock).not.toHaveBeenCalled()
+      expect(prismaMock.classSession.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ assignedStaffId: null }) }),
+      )
     })
   })
 

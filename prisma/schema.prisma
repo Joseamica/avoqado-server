@@ -874,6 +874,7 @@ model Staff {
   reservationsCreated   Reservation[]  @relation("ReservationCreatedBy")
   classSessionsAssigned ClassSession[] @relation("ClassSessionStaff")
   classSessionsCreated  ClassSession[] @relation("ClassSessionCreatedBy")
+  slotHolds             SlotHold[]
 
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -991,6 +992,11 @@ model StaffVenue {
 
   // Credit Packs
   creditTransactionsCreated CreditTransaction[] @relation("CreditTransactionCreatedBy")
+
+  // Reservation staff configuration
+  schedule           StaffSchedule?
+  scheduleExceptions StaffScheduleException[]
+  productStaff       ProductStaff[]
 
   // Referral Program
   referralsCaptured Referral[] @relation("ReferralsCaptured")
@@ -1535,6 +1541,7 @@ model Product {
   // Reservations (product-based appointments/classes)
   reservations  Reservation[]
   classSessions ClassSession[]
+  productStaff  ProductStaff[]
 
   // Credit Packs
   creditPackItems    CreditPackItem[]
@@ -9686,6 +9693,7 @@ model Reservation {
   modifiers ReservationModifier[]
   // Orders auto-created from this reservation on check-in.
   orders    Order[]               @relation("OrderFromReservation")
+  rescheduleSlotHolds SlotHold[]   @relation("ReservationRescheduleHolds")
 
   // Google Calendar Sync (Phase 2 — push)
   calendarSyncOutbox  CalendarSyncOutbox[]
@@ -9702,6 +9710,7 @@ model Reservation {
   @@index([venueId, productId, startsAt])
   @@index([venueId, classSessionId])
   @@index([venueId, assignedStaffId, startsAt])
+  @@index([assignedStaffId, startsAt, endsAt])
   @@index([customerId])
   @@index([cancelSecret])
   @@index([depositStatus, depositExpiresAt])
@@ -9753,6 +9762,49 @@ model ReservationModifier {
   @@index([modifierId])
 }
 
+model StaffSchedule {
+  id           String     @id @default(cuid())
+  staffVenueId String     @unique
+  staffVenue   StaffVenue @relation(fields: [staffVenueId], references: [id], onDelete: Cascade)
+  venueId      String
+  weekly       Json
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@index([venueId])
+}
+
+model StaffScheduleException {
+  id           String     @id @default(cuid())
+  staffVenueId String
+  staffVenue   StaffVenue @relation(fields: [staffVenueId], references: [id], onDelete: Cascade)
+  venueId      String
+  startDate    String
+  endDate      String
+  kind         String
+  startTime    String?
+  endTime      String?
+  note         String?
+  createdAt    DateTime   @default(now())
+
+  @@index([staffVenueId, startDate, endDate])
+  @@index([venueId, startDate])
+}
+
+model ProductStaff {
+  id           String     @id @default(cuid())
+  productId    String
+  product      Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
+  staffVenueId String
+  staffVenue   StaffVenue @relation(fields: [staffVenueId], references: [id], onDelete: Cascade)
+  venueId      String
+  createdAt    DateTime   @default(now())
+
+  @@unique([productId, staffVenueId])
+  @@index([venueId, productId])
+  @@index([staffVenueId])
+}
+
 // Slot hold: temporarily reserves a time window while the customer fills out
 // the public booking form. Square's "Cita reservada durante 9:56" pattern.
 //
@@ -9790,6 +9842,12 @@ model SlotHold {
   classSessionId String?
   classSession   ClassSession? @relation(fields: [classSessionId], references: [id], onDelete: Cascade)
 
+  staffId              String?
+  staff                Staff?       @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  heldForReservationId String?
+  heldForReservation   Reservation? @relation("ReservationRescheduleHolds", fields: [heldForReservationId], references: [id], onDelete: Cascade)
+  windowSemantics      String?
+
   partySize Int @default(1)
 
   // TTL — past expiresAt the hold is dead and availability ignores it.
@@ -9807,6 +9865,9 @@ model SlotHold {
   @@index([venueId, expiresAt])
   @@index([expiresAt]) // for the lazy cleanup sweep
   @@index([venueId, classSessionId])
+  @@index([venueId, staffId, startsAt])
+  @@index([staffId, startsAt, endsAt])
+  @@index([heldForReservationId, expiresAt])
 }
 
 enum ClassSessionStatus {
@@ -9857,6 +9918,7 @@ model ClassSession {
   @@index([venueId, startsAt])
   @@index([venueId, productId, startsAt])
   @@index([venueId, status, startsAt])
+  @@index([assignedStaffId, startsAt, endsAt])
 }
 
 model ReservationWaitlistEntry {
@@ -9907,6 +9969,7 @@ model ReservationSettings {
   // Pacing
   pacingMaxPerSlot      Int? // null = no pacing limit
   onlineCapacityPercent Int  @default(100)
+  capacityMode          String @default("pacing")
 
   // Deposits (legacy venue-wide control — kept for backwards compatibility)
   depositMode          String   @default("none") // none | card_hold | deposit | prepaid
@@ -9934,6 +9997,7 @@ model ReservationSettings {
 
   // Public booking
   publicBookingEnabled Boolean @default(false)
+  showStaffPicker      Boolean @default(false)
   requirePhone         Boolean @default(true)
   requireEmail         Boolean @default(false)
   requireAccount       Boolean @default(false) // when true, customer must log in or register before booking

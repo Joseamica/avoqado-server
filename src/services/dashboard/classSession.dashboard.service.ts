@@ -10,13 +10,14 @@ import type {
   ListClassSessionsQuery,
   CreateClassSessionBulkDto,
 } from '../../schemas/dashboard/classSession.schema'
-import { ReservationStatus } from '@prisma/client'
-import { withSerializableRetry } from './reservation.dashboard.service'
+import { Prisma, ReservationStatus } from '@prisma/client'
+import { withSerializableRetry } from '@/utils/serializableRetry'
 import { createOrderFromReservation } from '../reservation/createOrderFromReservation'
 import { logAction } from './activity-log.service'
 import { buildSyncKey, collapseSupersededOps, enqueuePush, resolveClassSessionPushTargets } from '@/services/google-calendar/outbox.service'
 import { publishPushNotification } from '@/communication/rabbitmq/gcal-push-consumer'
 import logger from '../../config/logger'
+import { assertOrganizationStaffAvailability } from './appointmentStaffAssignment.service'
 
 // ==========================================
 // CLASS SESSION SERVICE
@@ -94,35 +95,50 @@ export async function getClassSession(venueId: string, sessionId: string) {
 
 // ---- Create ----
 
-export async function createClassSession(venueId: string, data: CreateClassSessionDto, createdById: string) {
-  const product = await prisma.product.findFirst({
-    where: { id: data.productId, venueId },
-    select: { id: true, type: true, maxParticipants: true },
+async function loadActiveClassStaffMembership(tx: Prisma.TransactionClient, venueId: string, staffId: string) {
+  return tx.staffVenue.findFirst({
+    where: { venueId, staffId, active: true, staff: { active: true } },
+    select: {
+      id: true,
+      venue: { select: { organizationId: true } },
+    },
   })
-  if (!product) throw new NotFoundError('Producto no encontrado')
-  if (product.type !== 'CLASS') throw new BadRequestError('El producto debe ser de tipo Clase')
+}
 
-  // Validate assignedStaffId belongs to this venue
-  if (data.assignedStaffId) {
-    const staffVenue = await prisma.staffVenue.findFirst({
-      where: { staffId: data.assignedStaffId, venueId },
-      select: { id: true },
+export async function createClassSession(venueId: string, data: CreateClassSessionDto, createdById: string) {
+  const { session, pushRowIds } = await withSerializableRetry(async tx => {
+    const product = await tx.product.findFirst({
+      where: { id: data.productId, venueId },
+      select: { id: true, type: true, maxParticipants: true },
     })
-    if (!staffVenue) throw new BadRequestError('El staff asignado no pertenece a este negocio')
-  }
+    if (!product) throw new NotFoundError('Producto no encontrado')
+    if (product.type !== 'CLASS') throw new BadRequestError('El producto debe ser de tipo Clase')
 
-  const startsAt = new Date(data.startsAt)
-  const endsAt = new Date(data.endsAt)
-  const duration = Math.round((endsAt.getTime() - startsAt.getTime()) / 60000)
+    const startsAt = new Date(data.startsAt)
+    const endsAt = new Date(data.endsAt)
+    if (!Number.isFinite(startsAt.getTime()) || !Number.isFinite(endsAt.getTime()) || endsAt.getTime() <= startsAt.getTime()) {
+      throw new BadRequestError('La hora de inicio debe ser anterior a la hora de fin')
+    }
+    const duration = Math.round((endsAt.getTime() - startsAt.getTime()) / 60000)
+    const checkedAt = new Date()
 
-  // Reject scheduling in the past (small grace window for clock skew)
-  if (startsAt.getTime() < Date.now() - 60_000) {
-    throw new BadRequestError('No se puede agendar una clase en el pasado')
-  }
+    // Reject scheduling in the past (small grace window for clock skew)
+    if (startsAt.getTime() < checkedAt.getTime() - 60_000) {
+      throw new BadRequestError('No se puede agendar una clase en el pasado')
+    }
 
-  // Wrap insert + outbox enqueue in a single transaction so the gcal push row
-  // commits atomically with the ClassSession row (spec §14.1).
-  const { session, pushRowIds } = await prisma.$transaction(async tx => {
+    if (data.assignedStaffId) {
+      const staffVenue = await loadActiveClassStaffMembership(tx, venueId, data.assignedStaffId)
+      if (!staffVenue) throw new BadRequestError('El staff asignado no pertenece a este negocio')
+      await assertOrganizationStaffAvailability(tx, {
+        organizationId: staffVenue.venue.organizationId,
+        staffId: data.assignedStaffId,
+        startsAt,
+        endsAt,
+        checkedAt,
+      })
+    }
+
     const session = await tx.classSession.create({
       data: {
         venueId,
@@ -180,31 +196,18 @@ export async function createClassSession(venueId: string, data: CreateClassSessi
 
 const MAX_BULK_OCCURRENCES = 104 // ~2 years of weekly classes
 
-export async function createClassSessionsBulk(
-  venueId: string,
+interface BulkClassSessionInstance {
+  startsAt: Date
+  endsAt: Date
+  duration: number
+  localDate: string
+}
+
+function expandBulkClassSessionInstances(
   data: CreateClassSessionBulkDto,
-  createdById: string,
   venueTimezone: string,
-) {
-  const product = await prisma.product.findFirst({
-    where: { id: data.productId, venueId },
-    select: { id: true, type: true },
-  })
-  if (!product) throw new NotFoundError('Producto no encontrado')
-  if (product.type !== 'CLASS') throw new BadRequestError('El producto debe ser de tipo Clase')
-
-  if (data.assignedStaffId) {
-    const staffVenue = await prisma.staffVenue.findFirst({
-      where: { staffId: data.assignedStaffId, venueId },
-      select: { id: true },
-    })
-    if (!staffVenue) throw new BadRequestError('El staff asignado no pertenece a este negocio')
-  }
-
-  // Expand recurrence rule into concrete (date, startsAt, endsAt) instances.
-  // ALL date arithmetic happens in the venue's local timezone via Luxon — using JS
-  // Date.getDay() would return weekdays in the Node process timezone, off-by-one
-  // when Node runs in UTC and the venue is UTC-N.
+  checkedAt: Date,
+): BulkClassSessionInstance[] {
   const weekdaySet = new Set(data.weekdays)
   const startCursor = DateTime.fromISO(data.startDate, { zone: venueTimezone })
   if (!startCursor.isValid) throw new BadRequestError('startDate inválida')
@@ -214,25 +217,24 @@ export async function createClassSessionsBulk(
   // Luxon weekday: 1=Mon..7=Sun. Our schema uses JS convention 0=Sun..6=Sat — translate.
   const luxonWeekday = (jsDay: number) => (jsDay === 0 ? 7 : jsDay)
   const wantedLuxonWeekdays = new Set(Array.from(weekdaySet).map(luxonWeekday))
-
-  const instances: { startsAt: Date; endsAt: Date; duration: number; localDate: string }[] = []
+  const instances: BulkClassSessionInstance[] = []
   let cursor = startCursor
   let occurrencesCreated = 0
   const cap = data.occurrences ?? MAX_BULK_OCCURRENCES
   const hardLimit = endCursor ? Math.ceil(endCursor.diff(startCursor, 'days').days) + 7 : MAX_BULK_OCCURRENCES * 7
 
-  for (let i = 0; i < hardLimit && occurrencesCreated < cap; i++) {
+  for (let index = 0; index < hardLimit && occurrencesCreated < cap; index += 1) {
     if (endCursor && cursor > endCursor) break
     if (wantedLuxonWeekdays.has(cursor.weekday)) {
-      const localDate = cursor.toISODate()! // YYYY-MM-DD in venue tz
+      const localDate = cursor.toISODate()!
       const startsAt = fromZonedTime(`${localDate}T${data.startTime}:00`, venueTimezone)
       const endsAt = fromZonedTime(`${localDate}T${data.endTime}:00`, venueTimezone)
       const duration = Math.round((endsAt.getTime() - startsAt.getTime()) / 60000)
       // Skip past instances silently — useful when startDate is today and weekdays
       // include today but we already passed the time.
-      if (startsAt.getTime() >= Date.now() - 60_000) {
+      if (startsAt.getTime() >= checkedAt.getTime() - 60_000) {
         instances.push({ startsAt, endsAt, duration, localDate })
-        occurrencesCreated++
+        occurrencesCreated += 1
       }
     }
     cursor = cursor.plus({ days: 1 })
@@ -241,27 +243,86 @@ export async function createClassSessionsBulk(
   if (instances.length === 0) {
     throw new BadRequestError('La regla de recurrencia no genera ninguna sesión válida')
   }
+  return instances
+}
 
-  // Find existing sessions on those dates so we can skip conflicts.
-  const allStarts = instances.map(i => i.startsAt)
-  const earliest = new Date(Math.min(...allStarts.map(d => d.getTime())))
-  const latest = new Date(Math.max(...allStarts.map(d => d.getTime())))
-  const existing = await prisma.classSession.findMany({
-    where: {
-      venueId,
-      productId: data.productId,
-      startsAt: { gte: earliest, lte: latest },
-    },
-    select: { startsAt: true },
-  })
-  const existingTimestamps = new Set(existing.map(e => e.startsAt.getTime()))
+function assertNoInternalClassSessionOverlaps(instances: BulkClassSessionInstance[]): void {
+  const ordered = [...instances].sort((left, right) => left.startsAt.getTime() - right.startsAt.getTime())
+  let maxEndSoFar = ordered[0]?.endsAt.getTime() ?? Number.NEGATIVE_INFINITY
 
-  const toCreate = instances.filter(i => !existingTimestamps.has(i.startsAt.getTime()))
-  const skipped = instances.length - toCreate.length
+  for (let index = 1; index < ordered.length; index += 1) {
+    if (ordered[index].startsAt.getTime() < maxEndSoFar) {
+      throw new BadRequestError('La regla de recurrencia genera sesiones traslapadas')
+    }
+    maxEndSoFar = Math.max(maxEndSoFar, ordered[index].endsAt.getTime())
+  }
+}
 
-  // Single transaction so partial failures roll back. Convert to a callback
-  // form so we can co-commit gcal push outbox rows for each new session.
-  const { created, pushRowIds } = await prisma.$transaction(async tx => {
+export async function createClassSessionsBulk(
+  venueId: string,
+  data: CreateClassSessionBulkDto,
+  createdById: string,
+  venueTimezone: string,
+) {
+  const { created, pushRowIds, skipped } = await withSerializableRetry(async tx => {
+    const product = await tx.product.findFirst({
+      where: { id: data.productId, venueId },
+      select: { id: true, type: true },
+    })
+    if (!product) throw new NotFoundError('Producto no encontrado')
+    if (product.type !== 'CLASS') throw new BadRequestError('El producto debe ser de tipo Clase')
+
+    let organizationId: string | null = null
+    if (data.assignedStaffId) {
+      const staffVenue = await loadActiveClassStaffMembership(tx, venueId, data.assignedStaffId)
+      if (!staffVenue) throw new BadRequestError('El staff asignado no pertenece a este negocio')
+      organizationId = staffVenue.venue.organizationId
+    }
+    const checkedAt = new Date()
+
+    // Expand recurrence within every retry so the time filter, occurrence cap,
+    // and derived query envelope all reflect the attempt's current clock.
+    // Date arithmetic stays in the venue's local timezone via Luxon.
+    const instances = expandBulkClassSessionInstances(data, venueTimezone, checkedAt)
+    const allStarts = instances.map(instance => instance.startsAt)
+    const earliest = new Date(Math.min(...allStarts.map(value => value.getTime())))
+    const latest = new Date(Math.max(...allStarts.map(value => value.getTime())))
+
+    const existing = await tx.classSession.findMany({
+      where: {
+        venueId,
+        productId: data.productId,
+        startsAt: { gte: earliest, lte: latest },
+      },
+      select: { startsAt: true },
+    })
+    const existingTimestamps = new Set(existing.map(row => row.startsAt.getTime()))
+    const toCreate = instances.filter(instance => !existingTimestamps.has(instance.startsAt.getTime()))
+    const skipped = instances.length - toCreate.length
+
+    for (const instance of toCreate) {
+      if (
+        !Number.isFinite(instance.startsAt.getTime()) ||
+        !Number.isFinite(instance.endsAt.getTime()) ||
+        instance.endsAt.getTime() <= instance.startsAt.getTime()
+      ) {
+        throw new BadRequestError('La hora de inicio debe ser anterior a la hora de fin')
+      }
+    }
+    assertNoInternalClassSessionOverlaps(toCreate)
+
+    if (data.assignedStaffId && organizationId) {
+      for (const instance of toCreate) {
+        await assertOrganizationStaffAvailability(tx, {
+          organizationId,
+          staffId: data.assignedStaffId,
+          startsAt: instance.startsAt,
+          endsAt: instance.endsAt,
+          checkedAt,
+        })
+      }
+    }
+
     const created: { id: string; startsAt: Date; endsAt: Date }[] = []
     for (const i of toCreate) {
       const row = await tx.classSession.create({
@@ -299,7 +360,7 @@ export async function createClassSessionsBulk(
       }
     }
 
-    return { created, pushRowIds }
+    return { created, pushRowIds, skipped }
   })
 
   if (pushRowIds.length > 0) {
@@ -326,53 +387,87 @@ export async function createClassSessionsBulk(
 
 // ---- Update ----
 
+interface LockedClassSessionRow {
+  id: string
+  startsAt: Date
+  endsAt: Date
+  status: string
+  assignedStaffId: string | null
+}
+
 export async function updateClassSession(venueId: string, sessionId: string, data: UpdateClassSessionDto) {
-  const session = await prisma.classSession.findFirst({ where: { id: sessionId, venueId } })
-  if (!session) throw new NotFoundError('Sesión no encontrada')
-  if (session.status === 'CANCELLED') throw new BadRequestError('No se puede modificar una sesión cancelada')
+  const { updated, pushRowIds } = await withSerializableRetry(async tx => {
+    const sessions = await tx.$queryRaw<LockedClassSessionRow[]>(Prisma.sql`
+      SELECT id, "startsAt", "endsAt", status, "assignedStaffId"
+      FROM "ClassSession"
+      WHERE id = ${sessionId}
+        AND "venueId" = ${venueId}
+      FOR UPDATE
+    `)
+    const checkedAt = new Date()
+    if (sessions.length === 0) throw new NotFoundError('Sesión no encontrada')
+    const session = sessions[0]
+    if (session.status === 'CANCELLED') throw new BadRequestError('No se puede modificar una sesión cancelada')
 
-  // If reducing capacity, ensure it doesn't go below current enrollment
-  if (data.capacity !== undefined) {
-    const enrolled = await prisma.reservation.aggregate({
-      where: { classSessionId: sessionId, status: { in: ['PENDING', 'CONFIRMED', 'CHECKED_IN'] } },
-      _sum: { partySize: true },
-    })
-    const currentEnrolled = enrolled._sum.partySize ?? 0
-    if (data.capacity < currentEnrolled) {
-      throw new BadRequestError(`No se puede reducir la capacidad a ${data.capacity} — hay ${currentEnrolled} asistentes inscritos`)
+    // If reducing capacity, ensure it doesn't go below current enrollment.
+    if (data.capacity !== undefined) {
+      const enrolled = await tx.reservation.aggregate({
+        where: { classSessionId: sessionId, status: { in: ['PENDING', 'CONFIRMED', 'CHECKED_IN'] } },
+        _sum: { partySize: true },
+      })
+      const currentEnrolled = enrolled._sum.partySize ?? 0
+      if (data.capacity < currentEnrolled) {
+        throw new BadRequestError(`No se puede reducir la capacidad a ${data.capacity} — hay ${currentEnrolled} asistentes inscritos`)
+      }
     }
-  }
 
-  // Validate assignedStaffId belongs to this venue
-  if (data.assignedStaffId) {
-    const staffVenue = await prisma.staffVenue.findFirst({
-      where: { staffId: data.assignedStaffId, venueId },
-      select: { id: true },
-    })
-    if (!staffVenue) throw new BadRequestError('El staff asignado no pertenece a este negocio')
-  }
-
-  const updateData: any = {}
-  const newStartsAt = data.startsAt ? new Date(data.startsAt) : null
-  const newEndsAt = data.endsAt ? new Date(data.endsAt) : null
-  if (newStartsAt) updateData.startsAt = newStartsAt
-  if (newEndsAt) updateData.endsAt = newEndsAt
-  // Recalculate duration whenever either time field changes
-  if (newStartsAt || newEndsAt) {
-    const effectiveStart = newStartsAt || session.startsAt
-    const effectiveEnd = newEndsAt || session.endsAt
-    if (effectiveEnd <= effectiveStart) {
+    const effectiveStartsAt = data.startsAt !== undefined ? new Date(data.startsAt) : session.startsAt
+    const effectiveEndsAt = data.endsAt !== undefined ? new Date(data.endsAt) : session.endsAt
+    if (
+      !Number.isFinite(effectiveStartsAt.getTime()) ||
+      !Number.isFinite(effectiveEndsAt.getTime()) ||
+      effectiveEndsAt.getTime() <= effectiveStartsAt.getTime()
+    ) {
       throw new BadRequestError('La hora de inicio debe ser anterior a la hora de fin')
     }
-    updateData.duration = Math.round((effectiveEnd.getTime() - effectiveStart.getTime()) / 60000)
-  }
-  if (data.capacity !== undefined) updateData.capacity = data.capacity
-  if ('assignedStaffId' in data) updateData.assignedStaffId = data.assignedStaffId ?? null
-  if ('internalNotes' in data) updateData.internalNotes = data.internalNotes ?? null
 
-  // Wrap update + outbox enqueue in a single transaction so the gcal push row
-  // commits atomically with the ClassSession mutation.
-  const { updated, pushRowIds } = await prisma.$transaction(async tx => {
+    const hasStaffUpdate = 'assignedStaffId' in data
+    const effectiveStaffId = hasStaffUpdate ? (data.assignedStaffId ?? null) : session.assignedStaffId
+    const commitmentChanged =
+      effectiveStartsAt.getTime() !== session.startsAt.getTime() ||
+      effectiveEndsAt.getTime() !== session.endsAt.getTime() ||
+      effectiveStaffId !== session.assignedStaffId
+
+    if (commitmentChanged && effectiveStaffId) {
+      const staffVenue = await loadActiveClassStaffMembership(tx, venueId, effectiveStaffId)
+      if (!staffVenue) throw new BadRequestError('El staff asignado no pertenece a este negocio')
+      await assertOrganizationStaffAvailability(tx, {
+        organizationId: staffVenue.venue.organizationId,
+        staffId: effectiveStaffId,
+        startsAt: effectiveStartsAt,
+        endsAt: effectiveEndsAt,
+        checkedAt,
+        excludeClassSessionId: sessionId,
+      })
+    }
+
+    const updateData: {
+      startsAt?: Date
+      endsAt?: Date
+      duration?: number
+      capacity?: number
+      assignedStaffId?: string | null
+      internalNotes?: string | null
+    } = {}
+    if (data.startsAt !== undefined) updateData.startsAt = effectiveStartsAt
+    if (data.endsAt !== undefined) updateData.endsAt = effectiveEndsAt
+    if (data.startsAt !== undefined || data.endsAt !== undefined) {
+      updateData.duration = Math.round((effectiveEndsAt.getTime() - effectiveStartsAt.getTime()) / 60000)
+    }
+    if (data.capacity !== undefined) updateData.capacity = data.capacity
+    if (hasStaffUpdate) updateData.assignedStaffId = effectiveStaffId
+    if ('internalNotes' in data) updateData.internalNotes = data.internalNotes ?? null
+
     const updated = await tx.classSession.update({
       where: { id: sessionId },
       data: updateData,

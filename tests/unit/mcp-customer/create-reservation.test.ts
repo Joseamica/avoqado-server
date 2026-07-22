@@ -1,10 +1,22 @@
 import { registerReservationTools } from '../../../src/mcp/tools/reservations'
 import type { McpScope } from '../../../src/mcp/scope'
+import { ConflictError } from '@/errors/AppError'
 
 // Verify create_reservation wiring (date parse, duration → endsAt, service args, audit) without
 // touching the DB. The createReservation service itself is tested in the dashboard suite.
-const mockCreate = jest.fn(async () => ({ id: 'r-new', confirmationCode: 'RES-NEW1', status: 'CONFIRMED' }))
+const mockCreate = jest.fn(
+  async (): Promise<{ id: string; confirmationCode: string; status: string; assignedStaffId?: string | null }> => ({
+    id: 'r-new',
+    confirmationCode: 'RES-NEW1',
+    status: 'CONFIRMED',
+  }),
+)
 const mockLogAction = jest.fn()
+const mockGetSettings = jest.fn()
+const mockProductFindFirst = jest.fn()
+const mockProductFindMany = jest.fn()
+const mockStaffVenueFindFirst = jest.fn()
+const mockStaffVenueFindMany = jest.fn()
 
 jest.mock('@/services/dashboard/reservation.dashboard.service', () => ({
   createReservation: (...a: unknown[]) => mockCreate(...(a as [])),
@@ -16,12 +28,24 @@ jest.mock('@/services/dashboard/reservation.dashboard.service', () => ({
   markNoShow: jest.fn(),
 }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: (...a: unknown[]) => mockLogAction(...(a as [])) }))
+jest.mock('@/services/dashboard/reservationSettings.service', () => ({
+  getReservationSettings: (...a: unknown[]) => mockGetSettings(...(a as [])),
+  updateReservationSettings: jest.fn(),
+}))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     reservation: { findFirst: jest.fn(), findMany: jest.fn() },
     // create_reservation resolves the venue timezone to interpret naive datetimes venue-locally.
     venue: { findUnique: async () => ({ timezone: 'America/Mexico_City' }) },
+    product: {
+      findFirst: (...a: unknown[]) => mockProductFindFirst(...(a as [])),
+      findMany: (...a: unknown[]) => mockProductFindMany(...(a as [])),
+    },
+    staffVenue: {
+      findFirst: (...a: unknown[]) => mockStaffVenueFindFirst(...(a as [])),
+      findMany: (...a: unknown[]) => mockStaffVenueFindMany(...(a as [])),
+    },
   },
 }))
 jest.mock('@/mcp/planGate', () => ({ planGateMessage: jest.fn().mockResolvedValue(null) }))
@@ -37,15 +61,31 @@ const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[
 beforeAll(() => {
   registerReservationTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
 })
-beforeEach(() => jest.clearAllMocks())
+beforeEach(() => {
+  jest.clearAllMocks()
+  mockGetSettings.mockResolvedValue({
+    scheduling: { capacityMode: 'pacing', defaultDurationMin: 60 },
+    publicBooking: { showStaffPicker: false },
+  })
+  mockProductFindFirst.mockResolvedValue(null)
+  mockProductFindMany.mockResolvedValue([])
+  mockStaffVenueFindFirst.mockResolvedValue(null)
+  mockStaffVenueFindMany.mockResolvedValue([])
+})
 
 describe('create_reservation', () => {
   it('creates it: default 90-min duration → endsAt, attributed to the staff, returns the code', async () => {
     const res = await call({ venueId: 'v1', startsAt: '2026-06-06T19:00:00.000Z', partySize: 4, guestName: 'Ana' })
 
     expect(mockCreate).toHaveBeenCalledTimes(1)
-    const [venueId, data, createdById] = mockCreate.mock.calls[0] as unknown as [string, Record<string, unknown>, string]
+    const [venueId, data, context, createdById] = mockCreate.mock.calls[0] as unknown as [
+      string,
+      Record<string, unknown>,
+      Record<string, unknown>,
+      string,
+    ]
     expect(venueId).toBe('v1')
+    expect(context).toEqual({ writeOrigin: 'MCP' })
     expect(createdById).toBe('staff-1')
     expect(data.duration).toBe(90)
     expect((data.startsAt as Date).toISOString()).toBe('2026-06-06T19:00:00.000Z')
@@ -63,6 +103,159 @@ describe('create_reservation', () => {
     const [, data] = mockCreate.mock.calls[0] as unknown as [string, Record<string, unknown>, string]
     expect(data.duration).toBe(120)
     expect((data.endsAt as Date).toISOString()).toBe('2026-06-06T21:00:00.000Z')
+  })
+
+  it('uses the canonical appointment duration and base semantics in staff-aware mode', async () => {
+    mockGetSettings.mockResolvedValue({
+      scheduling: { capacityMode: 'per_staff', defaultDurationMin: 90 },
+      publicBooking: { showStaffPicker: false },
+    })
+    mockProductFindFirst.mockResolvedValue({ type: 'APPOINTMENTS_SERVICE' })
+    mockProductFindMany.mockResolvedValue([{ id: 'product-1', duration: 60, durationMinutes: null }])
+
+    await call({ venueId: 'v1', startsAt: '2026-06-06T19:00:00.000Z', partySize: 1, productId: 'product-1' })
+
+    const [, data, context] = mockCreate.mock.calls[0] as unknown as [string, Record<string, unknown>, Record<string, unknown>]
+    expect(data.duration).toBe(60)
+    expect((data.endsAt as Date).toISOString()).toBe('2026-06-06T20:00:00.000Z')
+    expect(context).toEqual({ writeOrigin: 'MCP', windowSemantics: 'base' })
+  })
+
+  it('keeps an explicit appointment duration as the base claim for the core to revalidate', async () => {
+    mockGetSettings.mockResolvedValue({
+      scheduling: { capacityMode: 'per_staff', defaultDurationMin: 90 },
+      publicBooking: { showStaffPicker: true },
+    })
+    mockProductFindFirst.mockResolvedValue({ type: 'APPOINTMENTS_SERVICE' })
+    mockProductFindMany.mockResolvedValue([{ id: 'product-1', duration: 60, durationMinutes: null }])
+
+    await call({
+      venueId: 'v1',
+      startsAt: '2026-06-06T19:00:00.000Z',
+      partySize: 1,
+      productId: 'product-1',
+      durationMinutes: 5,
+    })
+
+    const [, data, context] = mockCreate.mock.calls[0] as unknown as [string, Record<string, unknown>, Record<string, unknown>]
+    expect(data.duration).toBe(5)
+    expect((data.endsAt as Date).toISOString()).toBe('2026-06-06T19:05:00.000Z')
+    expect(context).toEqual({ writeOrigin: 'MCP', windowSemantics: 'base' })
+  })
+
+  it('preserves operational code and details when core reports a changed canonical window', async () => {
+    const details = {
+      canonicalStartsAt: '2026-06-06T19:00:00.000Z',
+      canonicalEndsAt: '2026-06-06T20:00:00.000Z',
+    }
+    mockCreate.mockRejectedValueOnce(
+      new ConflictError('La duración del servicio cambió; vuelve a consultar disponibilidad.', 'APPOINTMENT_WINDOW_CHANGED', details),
+    )
+
+    const out = parse(await call({ venueId: 'v1', startsAt: '2026-06-06T19:00:00.000Z', partySize: 1 }))
+
+    expect(out).toEqual({
+      ok: false,
+      error: 'La duración del servicio cambió; vuelve a consultar disponibilidad.',
+      code: 'APPOINTMENT_WINDOW_CHANGED',
+      details,
+    })
+  })
+
+  it('preserves operational metadata from appointment canonicalization failures', async () => {
+    mockGetSettings.mockRejectedValueOnce(new ConflictError('Configuración cambió.', 'APPOINTMENT_WINDOW_CHANGED', { retry: true }))
+
+    const out = parse(await call({ venueId: 'v1', startsAt: '2026-06-06T19:00:00.000Z', partySize: 1, productId: 'product-1' }))
+
+    expect(out).toEqual({
+      ok: false,
+      error: 'Configuración cambió.',
+      code: 'APPOINTMENT_WINDOW_CHANGED',
+      details: { retry: true },
+    })
+    expect(mockCreate).not.toHaveBeenCalled()
+  })
+
+  it('resolves one tenant-scoped staffName to Staff.id', async () => {
+    mockStaffVenueFindMany.mockResolvedValue([{ staffId: 'staff-professional', staff: { firstName: 'Ana', lastName: 'Alfa' } }])
+
+    await call({
+      venueId: 'v1',
+      startsAt: '2026-06-06T19:00:00.000Z',
+      partySize: 1,
+      staffName: 'Ana Alfa',
+    })
+
+    const [, data] = mockCreate.mock.calls[0] as unknown as [string, Record<string, unknown>]
+    expect(data.assignedStaffId).toBe('staff-professional')
+    expect(mockStaffVenueFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          venueId: 'v1',
+          active: true,
+          staff: expect.objectContaining({
+            AND: [
+              { OR: [{ firstName: { contains: 'Ana', mode: 'insensitive' } }, { lastName: { contains: 'Ana', mode: 'insensitive' } }] },
+              { OR: [{ firstName: { contains: 'Alfa', mode: 'insensitive' } }, { lastName: { contains: 'Alfa', mode: 'insensitive' } }] },
+            ],
+          }),
+        }),
+      }),
+    )
+  })
+
+  it('returns candidates instead of guessing when staffName is ambiguous', async () => {
+    mockStaffVenueFindMany.mockResolvedValue([
+      { staffId: 'staff-1', staff: { firstName: 'Ana', lastName: 'Alfa' } },
+      { staffId: 'staff-2', staff: { firstName: 'Ana', lastName: 'Beta' } },
+    ])
+
+    const out = parse(await call({ venueId: 'v1', startsAt: '2026-06-06T19:00:00.000Z', partySize: 1, staffName: 'Ana' }))
+
+    expect(out).toEqual(
+      expect.objectContaining({
+        ok: false,
+        ambiguous: true,
+        candidates: [
+          { staffId: 'staff-1', name: 'Ana Alfa' },
+          { staffId: 'staff-2', name: 'Ana Beta' },
+        ],
+      }),
+    )
+    expect(mockCreate).not.toHaveBeenCalled()
+  })
+
+  it('accepts an exact tenant-scoped Staff.id', async () => {
+    mockStaffVenueFindFirst.mockResolvedValue({
+      staffId: 'staff-professional',
+      staff: { firstName: 'Ana', lastName: 'Alfa' },
+    })
+
+    await call({
+      venueId: 'v1',
+      startsAt: '2026-06-06T19:00:00.000Z',
+      partySize: 1,
+      staffId: 'staff-professional',
+    })
+
+    const [, data] = mockCreate.mock.calls[0] as unknown as [string, Record<string, unknown>]
+    expect(data.assignedStaffId).toBe('staff-professional')
+    expect(mockStaffVenueFindFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { venueId: 'v1', staffId: 'staff-professional', active: true, staff: { active: true } } }),
+    )
+  })
+
+  it('returns the actual Staff.id selected by core auto-assignment', async () => {
+    mockCreate.mockResolvedValueOnce({
+      id: 'r-new',
+      confirmationCode: 'RES-NEW1',
+      status: 'CONFIRMED',
+      assignedStaffId: 'staff-auto',
+    })
+
+    const out = parse(await call({ venueId: 'v1', startsAt: '2026-06-06T19:00:00.000Z', partySize: 1 }))
+
+    expect(out.reservation.staffId).toBe('staff-auto')
   })
 
   it('audits RESERVATION_CREATED tagged source=customer-mcp', async () => {

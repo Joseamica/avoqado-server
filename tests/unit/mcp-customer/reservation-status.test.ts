@@ -8,11 +8,12 @@ const mockConfirm = jest.fn(async () => ({ id: 'r1', status: 'CONFIRMED' }))
 const mockCheckIn = jest.fn(async () => ({ id: 'r1', status: 'CHECKED_IN' }))
 const mockComplete = jest.fn(async () => ({ id: 'r1', status: 'COMPLETED' }))
 const mockNoShow = jest.fn(async () => ({ id: 'r1', status: 'NO_SHOW' }))
+const mockReschedule = jest.fn(async () => ({ id: 'r1', status: 'CONFIRMED' }))
 const mockFindFirst = jest.fn(async () => ({ id: 'r1', venueId: 'v1', status: 'PENDING' }))
 const mockLogAction = jest.fn()
 
 jest.mock('@/services/dashboard/reservation.dashboard.service', () => ({
-  rescheduleAppointmentReservation: jest.fn(),
+  rescheduleAppointmentReservation: (...a: unknown[]) => mockReschedule(...(a as [])),
   cancelReservation: jest.fn(),
   confirmReservation: (...a: unknown[]) => mockConfirm(...(a as [])),
   checkInReservation: (...a: unknown[]) => mockCheckIn(...(a as [])),
@@ -21,7 +22,10 @@ jest.mock('@/services/dashboard/reservation.dashboard.service', () => ({
 }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
-  default: { reservation: { findFirst: (...a: unknown[]) => mockFindFirst(...(a as [])) } },
+  default: {
+    reservation: { findFirst: (...a: unknown[]) => mockFindFirst(...(a as [])) },
+    venue: { findUnique: jest.fn(async () => ({ timezone: 'UTC' })) },
+  },
 }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: (...a: unknown[]) => mockLogAction(...(a as [])) }))
 jest.mock('@/mcp/guard', () => ({
@@ -32,6 +36,8 @@ jest.mock('@/mcp/planGate', () => ({ planGateMessage: jest.fn().mockResolvedValu
 const handlers = new Map<string, (args: Record<string, unknown>, extra: unknown) => Promise<{ content: Array<{ text: string }> }>>()
 const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map() } as McpScope
 const call = (status: string) => handlers.get('set_reservation_status')!({ venueId: 'v1', confirmationCode: 'RES-1', status }, {})
+const reschedule = () =>
+  handlers.get('reschedule_reservation')!({ venueId: 'v1', confirmationCode: 'RES-1', newStartsAt: '2026-08-21T15:00:00.000Z' }, {})
 
 beforeAll(() => {
   const srv = { tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) }
@@ -40,6 +46,16 @@ beforeAll(() => {
 beforeEach(() => jest.clearAllMocks())
 
 describe('set_reservation_status dispatch', () => {
+  it('reschedule_reservation declares MCP origin', async () => {
+    await reschedule()
+    expect(mockReschedule).toHaveBeenCalledWith({
+      venueId: 'v1',
+      reservationId: 'r1',
+      newStartsAt: new Date('2026-08-21T15:00:00.000Z'),
+      rescheduledBy: 'SYSTEM',
+      writeOrigin: 'MCP',
+    })
+  })
   it("'confirmed' → confirmReservation(venueId, id, 'SYSTEM')", async () => {
     await call('confirmed')
     expect(mockConfirm).toHaveBeenCalledWith('v1', 'r1', 'SYSTEM')

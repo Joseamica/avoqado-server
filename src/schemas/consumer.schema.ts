@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { reservationModifierSelectionsSchema } from '@/schemas/dashboard/reservation.schema'
 
 export const consumerOAuthSchema = z.object({
   body: z.object({
@@ -33,16 +34,51 @@ export const consumerCreateReservationSchema = z.object({
     .object({
       startsAt: z.coerce.date().optional(),
       endsAt: z.coerce.date().optional(),
-      duration: z.number().int().min(5).max(480).optional(),
+      duration: z.number().int().min(1, 'La duracion minima es 1 minuto').max(1440).optional(),
       guestName: z.string().min(1).max(200).optional(),
       guestPhone: z.string().min(1).max(20).optional(),
       guestEmail: z.string().email().max(200).optional(),
       partySize: z.number().int().min(1).max(100).optional(),
       productId: z.string().optional(),
+      productIds: z.array(z.string().trim().min(1)).max(1, 'La app de consumidor admite un solo servicio').optional(),
+      modifierSelections: reservationModifierSelectionsSchema.optional(),
+      holdId: z.string().min(1).optional(),
+      staffId: z.string({ invalid_type_error: 'staffId debe ser texto' }).min(1, 'staffId es requerido').optional(),
+      windowSemantics: z.literal('base', { invalid_type_error: 'windowSemantics debe ser base' }).optional(),
       classSessionId: z.string().optional(),
       spotIds: z.array(z.string().min(1)).max(100).optional(),
       specialRequests: z.string().max(2000).optional(),
       creditItemBalanceId: z.string().optional(),
+    })
+    .superRefine((data, ctx) => {
+      if (data.holdId && data.classSessionId) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'holdId solo es válido para reservaciones de cita',
+          path: ['holdId'],
+        })
+      }
+      if (data.holdId && !data.productId?.trim() && (data.productIds?.length ?? 0) === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'holdId requiere un servicio de cita',
+          path: ['holdId'],
+        })
+      }
+      if (data.duration !== undefined && data.windowSemantics !== 'base' && data.duration < 5) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'La duracion minima sin windowSemantics=base es 5 minutos',
+          path: ['duration'],
+        })
+      }
+      if (data.duration !== undefined && data.windowSemantics !== 'base' && data.duration > 480) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'La duracion maxima sin windowSemantics=base es 480 minutos',
+          path: ['duration'],
+        })
+      }
     })
     .refine(
       data => {
@@ -63,6 +99,18 @@ export const consumerCreateReservationSchema = z.object({
       {
         message: 'La fecha de fin debe ser posterior a la fecha de inicio',
         path: ['endsAt'],
+      },
+    )
+    .refine(
+      data => {
+        if (data.classSessionId || data.windowSemantics === 'base') return true
+        if (!data.startsAt || !data.endsAt || data.duration == null) return true
+        const diffMin = Math.round((data.endsAt.getTime() - data.startsAt.getTime()) / 60_000)
+        return Math.abs(diffMin - data.duration) <= 1
+      },
+      {
+        message: 'La duracion no coincide con el rango de fechas',
+        path: ['duration'],
       },
     ),
 })

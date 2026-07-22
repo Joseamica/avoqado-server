@@ -1,12 +1,15 @@
 import { Request, Response, NextFunction } from 'express'
 import * as reservationService from '../../services/dashboard/reservation.dashboard.service'
 import * as availabilityService from '../../services/dashboard/reservationAvailability.service'
-import { getReservationSettings, updateReservationSettings } from '../../services/dashboard/reservationSettings.service'
+import { getReservationSettings, isStaffAware, updateReservationSettings } from '../../services/dashboard/reservationSettings.service'
 import * as reservationBrandingService from '../../services/dashboard/reservationBranding.service'
+import * as staffScheduleService from '../../services/dashboard/staffSchedule.service'
+import * as productStaffService from '../../services/dashboard/productStaff.service'
 import { canVenueChargeOnline } from '../../services/payments/ecommerceCapability'
 import prisma from '../../utils/prismaClient'
-import { BadRequestError } from '../../errors/AppError'
+import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { fromZonedTime } from 'date-fns-tz'
+import { normalizeBookedProductIds, reservationBookedProductIds } from '../../services/reservation/resolveAppointmentWindow'
 
 // ==========================================
 // RESERVATION DASHBOARD CONTROLLER
@@ -53,9 +56,18 @@ export async function createReservation(req: Request, res: Response, next: NextF
   try {
     const venueId = resolveVenueId(req)
     const { userId } = (req as any).authContext
-    const settings = await getReservationSettings(venueId)
+    const { windowSemantics, allowOverCapacity, ...reservationInput } = req.body
 
-    const reservation = await reservationService.createReservation(venueId, req.body, userId, settings)
+    const reservation = await reservationService.createReservation(
+      venueId,
+      reservationInput,
+      {
+        writeOrigin: 'DASHBOARD',
+        ...(windowSemantics === 'base' ? { windowSemantics } : {}),
+        ...(allowOverCapacity === true ? { allowOverCapacity: true } : {}),
+      },
+      userId,
+    )
     res.status(201).json(reservation)
   } catch (error) {
     next(error)
@@ -108,20 +120,52 @@ export async function getCalendar(req: Request, res: Response, next: NextFunctio
 export async function getAvailability(req: Request, res: Response, next: NextFunction) {
   try {
     const venueId = resolveVenueId(req)
-    const { date, duration, partySize, tableId, staffId, productId } = req.query as any
+    const { date, duration, partySize, tableId, staffId, reservationId, productId, productIds, includeFull, windowSemantics } =
+      req.query as any
     const settings = await getReservationSettings(venueId)
+
+    let slotOptions: availabilityService.SlotOptions
+    if (reservationId) {
+      const reservation = await prisma.reservation.findFirst({
+        where: { id: reservationId, venueId },
+        select: { id: true, duration: true, assignedStaffId: true, productId: true, productIds: true },
+      })
+      if (!reservation) throw new NotFoundError('Reservacion no encontrada')
+      if (isStaffAware(settings) && reservation.assignedStaffId === null) {
+        res.json({ date, slots: [] })
+        return
+      }
+      const storedProductIds = reservationBookedProductIds(reservation)
+      slotOptions = {
+        fixedDurationMin: reservation.duration,
+        partySize: partySize ? Number(partySize) : undefined,
+        tableId,
+        staffId: reservation.assignedStaffId ?? undefined,
+        productId: storedProductIds[0],
+        productIds: storedProductIds,
+        excludeReservationId: reservation.id,
+        includeFull,
+        windowSemantics,
+      }
+    } else {
+      const canonicalProducts = normalizeBookedProductIds({ productId, productIds })
+      slotOptions = {
+        duration: duration ? Number(duration) : undefined,
+        partySize: partySize ? Number(partySize) : undefined,
+        tableId,
+        staffId,
+        productId: canonicalProducts.leadProductId,
+        productIds: canonicalProducts.productIds,
+        includeFull,
+        windowSemantics,
+      }
+    }
 
     const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
     const slots = await availabilityService.getAvailableSlots(
       venueId,
       date,
-      {
-        duration: duration ? Number(duration) : undefined,
-        partySize: partySize ? Number(partySize) : undefined,
-        tableId,
-        staffId,
-        productId,
-      },
+      slotOptions,
       settings,
       venue?.timezone || 'America/Mexico_City',
     )
@@ -153,9 +197,15 @@ export async function updateReservation(req: Request, res: Response, next: NextF
     const venueId = resolveVenueId(req)
     const { userId } = (req as any).authContext
     const { id } = req.params
-    const settings = await getReservationSettings(venueId)
+    const { allowOverCapacity, ...data } = req.body
 
-    const reservation = await reservationService.updateReservation(venueId, id, req.body, userId, settings)
+    const reservation = await reservationService.updateReservation(
+      venueId,
+      id,
+      data,
+      { writeOrigin: 'DASHBOARD', allowOverCapacity },
+      userId,
+    )
     res.json(reservation)
   } catch (error) {
     next(error)
@@ -248,17 +298,19 @@ export async function rescheduleReservation(req: Request, res: Response, next: N
     const venueId = resolveVenueId(req)
     const { userId } = (req as any).authContext
     const { id } = req.params
-    const { startsAt, endsAt, notificationChannel, customMessage } = req.body
-    const settings = await getReservationSettings(venueId)
+    const { startsAt, endsAt, notificationChannel, customMessage, allowOverCapacity } = req.body
 
     const reservation = await reservationService.rescheduleReservation(
       venueId,
       id,
-      new Date(startsAt),
-      new Date(endsAt),
+      {
+        startsAt: new Date(startsAt),
+        endsAt: new Date(endsAt),
+        notificationChannel,
+        customMessage,
+      },
+      { writeOrigin: 'DASHBOARD', allowOverCapacity },
       userId,
-      settings,
-      { notificationChannel, customMessage },
     )
     res.json(reservation)
   } catch (error) {
@@ -320,6 +372,52 @@ export async function updateReservationBranding(req: Request, res: Response, nex
     const { userId } = (req as any).authContext
     const branding = await reservationBrandingService.updateReservationBranding(venueId, req.body, userId)
     res.json(branding)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** GET /venues/:venueId/reservations/staff/:staffVenueId/schedule */
+export async function getStaffSchedule(req: Request, res: Response, next: NextFunction) {
+  try {
+    const venueId = resolveVenueId(req)
+    const result = await staffScheduleService.getStaffSchedule(venueId, req.params.staffVenueId)
+    res.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** PUT /venues/:venueId/reservations/staff/:staffVenueId/schedule */
+export async function replaceStaffSchedule(req: Request, res: Response, next: NextFunction) {
+  try {
+    const venueId = resolveVenueId(req)
+    const { userId } = (req as any).authContext
+    const result = await staffScheduleService.replaceStaffSchedule(venueId, req.params.staffVenueId, req.body, userId)
+    res.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** GET /venues/:venueId/reservations/products/:productId/staff */
+export async function getProductStaff(req: Request, res: Response, next: NextFunction) {
+  try {
+    const venueId = resolveVenueId(req)
+    const result = await productStaffService.getProductStaff(venueId, req.params.productId)
+    res.status(200).json(result)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** PUT /venues/:venueId/reservations/products/:productId/staff */
+export async function replaceProductStaff(req: Request, res: Response, next: NextFunction) {
+  try {
+    const venueId = resolveVenueId(req)
+    const { userId } = (req as any).authContext
+    const result = await productStaffService.replaceProductStaff(venueId, req.params.productId, req.body.staffVenueIds, userId)
+    res.status(200).json(result)
   } catch (error) {
     next(error)
   }

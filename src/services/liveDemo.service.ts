@@ -494,9 +494,10 @@ export interface SimReservationResult {
  * - HARD venue check: refuses non-LIVE_DEMO venues.
  * - Cap: MAX_SIM_RESERVATIONS_PER_SESSION, counted via the internalNotes marker.
  *
- * Reuses the dashboard createReservation service (no moduleConfig → permissive
- * booking window + autoConfirm CONFIRMED), channel WEB — exactly what a booking
- * made from the venue's page looks like.
+ * Reuses the dashboard createReservation service with origin PUBLIC and channel
+ * WEB. This path performs no public rail/payment preflight and supplies no
+ * deposits override, so persisted transactional booking-window, auto-confirm,
+ * and deposits settings remain authoritative.
  */
 export async function simulateReservation(sessionId: string): Promise<SimReservationResult> {
   const session = await prisma.liveDemoSession.findUnique({
@@ -529,17 +530,21 @@ export async function simulateReservation(sessionId: string): Promise<SimReserva
   const startsAt = new Date(Math.ceil((Date.now() + 60 * 60_000) / (30 * 60_000)) * 30 * 60_000)
   const endsAt = new Date(startsAt.getTime() + DURATION_MIN * 60_000)
 
-  const reservation = await createDashboardReservation(session.venueId, {
-    startsAt,
-    endsAt,
-    duration: DURATION_MIN,
-    channel: 'WEB', // customer self-service — same as the real booking widget
-    guestName: 'Sofía Ramírez',
-    guestPhone: '5512345678',
-    partySize: 1,
-    specialRequests: 'Corte de cabello — reserva creada desde el demo interactivo de avoqado.io',
-    internalNotes: `${SIM_RESERVATION_NOTE_PREFIX}-${uuidv4()}`,
-  })
+  const reservation = await createDashboardReservation(
+    session.venueId,
+    {
+      startsAt,
+      endsAt,
+      duration: DURATION_MIN,
+      channel: 'WEB', // customer self-service — same as the real booking widget
+      guestName: 'Sofía Ramírez',
+      guestPhone: '5512345678',
+      partySize: 1,
+      specialRequests: 'Corte de cabello — reserva creada desde el demo interactivo de avoqado.io',
+      internalNotes: `${SIM_RESERVATION_NOTE_PREFIX}-${uuidv4()}`,
+    },
+    { writeOrigin: 'PUBLIC' },
+  )
 
   await updateLiveDemoActivity(sessionId)
 

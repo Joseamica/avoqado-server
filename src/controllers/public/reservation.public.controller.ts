@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express'
 import * as reservationService from '../../services/dashboard/reservation.dashboard.service'
 import * as availabilityService from '../../services/dashboard/reservationAvailability.service'
 import { countAppointmentOccupancy, effectiveAppointmentPacing } from '../../services/dashboard/reservationAvailability.service'
-import { getReservationSettings, type OperatingHours } from '../../services/dashboard/reservationSettings.service'
+import { getReservationSettings, isStaffAware, type OperatingHours } from '../../services/dashboard/reservationSettings.service'
 import { mergeReservationBranding } from '../../services/dashboard/reservationBranding.service'
 import { checkExternalBusyBlock } from '../../services/reservation/external-busy-block.service'
 import { BadRequestError, ConflictError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
@@ -24,6 +24,17 @@ import emailService from '../../services/email.service'
 import { sendReservationConfirmationWhatsApp, formatModifiersForWhatsApp } from '../../services/whatsapp.service'
 import { enqueuePush, resolveClassSessionPushTargets } from '../../services/google-calendar/outbox.service'
 import { phonesMatch, phoneLast10 } from '../../utils/phone'
+import { withSerializableRetry } from '@/utils/serializableRetry'
+import { normalizeBookedProductIds, reservationBookedProductIds } from '@/services/reservation/resolveAppointmentWindow'
+import {
+  fastFailLiveHold,
+  mintNormalAppointmentHold,
+  mintRescheduleAppointmentHold,
+  SLOT_HOLD_TTL_MS,
+} from '@/services/reservation/appointmentSlotHold.service'
+import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
+import { buildReservationBookingCapabilities } from '@/services/reservation/publicReservationCapabilities'
+import { buildReservationCheckoutReturnUrls } from '@/services/reservation/reservationReturnUrl'
 
 // ==========================================
 // PUBLIC RESERVATION CONTROLLER (Unauthenticated)
@@ -128,6 +139,7 @@ async function resolveVenueBySlug(venueSlug: string) {
       logo: true,
       type: true,
       timezone: true,
+      website: true,
     },
   })
   if (!venue) throw new NotFoundError('Negocio no encontrado')
@@ -296,6 +308,17 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
               },
               orderBy: { displayOrder: 'asc' },
             },
+            productStaff: {
+              where: {
+                venueId: venue.id,
+                staffVenue: { venueId: venue.id, active: true, staff: { active: true } },
+              },
+              select: {
+                staffVenue: {
+                  select: { staff: { select: { id: true, firstName: true, lastName: true, photoUrl: true } } },
+                },
+              },
+            },
           },
           orderBy: { name: 'asc' },
         },
@@ -304,35 +327,38 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
 
     // Resolve upfrontPolicy per product server-side so the widget gets a
     // ready-to-use string and doesn't reimplement the precedence rules.
-    const products = (venueInfo?.products ?? []).map(p => ({
-      ...p,
-      upfrontPolicy: resolveUpfrontPolicy(
-        { type: p.type, upfrontPolicy: p.upfrontPolicy },
-        {
-          appointmentUpfrontDefault: settings.payments.appointmentUpfrontDefault,
-          classUpfrontDefault: settings.payments.classUpfrontDefault,
-        },
-      ),
-      modifierGroups: p.modifierGroups
-        .filter(pg => pg.group.active)
-        .map(pg => ({
-          id: pg.group.id,
-          name: pg.group.name,
-          description: pg.group.description,
-          required: pg.group.required,
-          allowMultiple: pg.group.allowMultiple,
-          minSelections: pg.group.minSelections,
-          maxSelections: pg.group.maxSelections,
-          displayOrder: pg.displayOrder,
-          modifiers: pg.group.modifiers.map(m => ({
-            id: m.id,
-            name: m.name,
-            price: Number(m.price),
-            durationMin: m.durationMin,
-            active: m.active,
+    const products = (venueInfo?.products ?? []).map(p => {
+      const { productStaff: _productStaff, ...publicProduct } = p
+      return {
+        ...publicProduct,
+        upfrontPolicy: resolveUpfrontPolicy(
+          { type: p.type, upfrontPolicy: p.upfrontPolicy },
+          {
+            appointmentUpfrontDefault: settings.payments.appointmentUpfrontDefault,
+            classUpfrontDefault: settings.payments.classUpfrontDefault,
+          },
+        ),
+        modifierGroups: p.modifierGroups
+          .filter(pg => pg.group.active)
+          .map(pg => ({
+            id: pg.group.id,
+            name: pg.group.name,
+            description: pg.group.description,
+            required: pg.group.required,
+            allowMultiple: pg.group.allowMultiple,
+            minSelections: pg.group.minSelections,
+            maxSelections: pg.group.maxSelections,
+            displayOrder: pg.displayOrder,
+            modifiers: pg.group.modifiers.map(m => ({
+              id: m.id,
+              name: m.name,
+              price: Number(m.price),
+              durationMin: m.durationMin,
+              active: m.active,
+            })),
           })),
-        })),
-    }))
+      }
+    })
 
     // Strip the raw reservationBranding out of the spread and expose the merged
     // `branding` (accentColor resolved from primaryColor) the widget consumes.
@@ -354,7 +380,15 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
     // the widget hides those money surfaces (free booking still works) so the
     // customer never sees a "pay"/"buy" button that would just dead-end at
     // checkout. Single source of truth: canVenueChargeOnline (Stripe Connect today).
-    const canCharge = await canVenueChargeOnline(venue.id)
+    const [canCharge, reservationsEntitled] = await Promise.all([
+      canVenueChargeOnline(venue.id),
+      venueHasFeatureAccess(venue.id, 'RESERVATIONS'),
+    ])
+    const bookingCapabilities = buildReservationBookingCapabilities({
+      settings,
+      reservationsEntitled,
+      products: venueInfo?.products ?? [],
+    })
     res.json({
       ...venueInfoRest,
       branding: mergeReservationBranding(reservationBranding, venueInfoRest.primaryColor),
@@ -381,6 +415,7 @@ export async function getVenueInfo(req: Request, res: Response, next: NextFuncti
         minNoticeMin: settings.scheduling.minNoticeMin,
         autoConfirm: settings.scheduling.autoConfirm,
       },
+      ...bookingCapabilities,
     })
   } catch (error) {
     next(error)
@@ -409,7 +444,8 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
   try {
     const { venueSlug } = req.params
     const venue = await resolveVenueBySlug(venueSlug)
-    const { date, dateFrom, dateTo, duration, partySize, productId, type } = req.query as Record<string, string | undefined>
+    const { date, dateFrom, dateTo, duration, partySize, staffId, productId, productIds, includeFull, windowSemantics, type } =
+      req.query as any
 
     const settings = await getReservationSettings(venue.id)
     // Hard gate: when the venue admin has flipped public booking off in
@@ -554,16 +590,21 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
     }
 
     // ── Single-day mode (legacy + per-product flow) ────────────────────────
+    // Validate product identity before any single-day catalog or availability
+    // read, then use the same canonical lead throughout every branch.
+    const canonicalProducts = normalizeBookedProductIds({ productId, productIds })
+    const leadProductId = canonicalProducts.leadProductId
+
     // Branch 1: product-scoped CLASS availability (existing behavior preserved).
-    if (productId) {
+    if (leadProductId) {
       const product = await prisma.product.findFirst({
-        where: { id: productId, venueId: venue.id, active: true },
+        where: { id: leadProductId, venueId: venue.id, active: true },
         select: { type: true },
       })
 
       if (product?.type === 'CLASS') {
         const onlinePercent = settings.scheduling?.onlineCapacityPercent ?? 100
-        const classSlots = await availabilityService.getClassSessionSlots(venue.id, productId, date!, onlinePercent, tz)
+        const classSlots = await availabilityService.getClassSessionSlots(venue.id, leadProductId, date!, onlinePercent, tz)
         return res.json({
           date,
           slots: classSlots.map(s => ({
@@ -583,7 +624,7 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
 
     // Branch 2: type=class without productId — aggregate sessions across all
     // CLASS products of the venue for a SINGLE date.
-    if (flowType === 'class' && !productId) {
+    if (flowType === 'class' && !leadProductId) {
       const onlinePercent = settings.scheduling?.onlineCapacityPercent ?? 100
       const classProducts = await prisma.product.findMany({
         where: { venueId: venue.id, active: true, type: 'CLASS' },
@@ -615,7 +656,15 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
     const slots = await availabilityService.getAvailableSlots(
       venue.id,
       date!,
-      { duration: duration ? Number(duration) : undefined, partySize: partySize ? Number(partySize) : undefined, productId },
+      {
+        duration: duration !== undefined ? Number(duration) : undefined,
+        partySize: partySize !== undefined ? Number(partySize) : undefined,
+        staffId,
+        productId: canonicalProducts.leadProductId,
+        productIds: canonicalProducts.productIds,
+        includeFull,
+        windowSemantics,
+      },
       settings,
       tz,
     )
@@ -625,7 +674,7 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
       slots: slots.map(s => ({
         startsAt: s.startsAt,
         endsAt: s.endsAt,
-        available: true,
+        ...(s.available === false ? { available: false as const, reason: s.reason } : { available: true as const }),
       })),
     })
   } catch (error) {
@@ -641,7 +690,7 @@ export async function createReservation(req: Request, res: Response, next: NextF
     const { venueSlug } = req.params
     const venue = await resolveVenueBySlug(venueSlug)
 
-    let settings = await getReservationSettings(venue.id)
+    const settings = await getReservationSettings(venue.id)
 
     // Check public booking is enabled
     if (!settings.publicBooking.enabled) {
@@ -677,14 +726,24 @@ export async function createReservation(req: Request, res: Response, next: NextF
       throw new BadRequestError('El email es requerido')
     }
 
+    const incomingHoldId: string | undefined =
+      typeof req.body.holdId === 'string' && req.body.holdId.length > 0 ? req.body.holdId : undefined
+
+    if (!req.body.classSessionId && req.body.staffId && settings.publicBooking.showStaffPicker !== true && !incomingHoldId) {
+      throw new BadRequestError('La selección de profesionista no está habilitada para este negocio')
+    }
+
     // ---- Multi-service appointments (Square pattern) -----------------------
-    // When the widget sends productIds, normalize to the legacy single-product
-    // fields (productId + duration) so the rest of this function and the
-    // downstream service don't need to know about arrays. The full ordered
-    // list is restored on the row right before we respond.
-    const incomingProductIds: string[] = Array.isArray(req.body.productIds)
-      ? req.body.productIds.filter((id: unknown): id is string => typeof id === 'string' && id.length > 0)
-      : []
+    // Normalize the validated wire representation for controller preflights.
+    // createReservation repeats this defense-in-depth check and remains the
+    // sole authority for the product identity persisted in its transaction.
+    const normalizedProducts = normalizeBookedProductIds({
+      productId: req.body.productId,
+      productIds: req.body.productIds,
+    })
+    const incomingProductIds = normalizedProducts.productIdsWasProvided ? normalizedProducts.productIds : []
+    req.body.productId = normalizedProducts.leadProductId
+    if (normalizedProducts.productIdsWasProvided) req.body.productIds = incomingProductIds
     if (incomingProductIds.length > 0) {
       const products = await prisma.product.findMany({
         where: { id: { in: incomingProductIds }, venueId: venue.id },
@@ -724,49 +783,41 @@ export async function createReservation(req: Request, res: Response, next: NextF
     // booked window. We do NOT delete the hold here — that happens AFTER the
     // reservation row is written so a failed create doesn't strand the
     // customer with no recovery path.
-    const incomingHoldId: string | undefined =
-      typeof req.body.holdId === 'string' && req.body.holdId.length > 0 ? req.body.holdId : undefined
-    if (incomingHoldId) {
-      await validateHoldForReservation({
-        venueId: venue.id,
-        holdId: incomingHoldId,
-        startsAt: new Date(req.body.startsAt),
-        endsAt: new Date(req.body.endsAt),
-      })
-    }
-
-    // If productId points to a CLASS product, classSessionId is mandatory
+    let leadProductType: string | null = null
     if (req.body.productId && !req.body.classSessionId) {
       const product = await prisma.product.findFirst({
         where: { id: req.body.productId, venueId: venue.id },
         select: { type: true },
       })
-      if (product?.type === 'CLASS') {
+      leadProductType = product?.type ?? null
+      if (leadProductType === 'CLASS') {
         throw new BadRequestError('classSessionId es requerido para reservar una clase')
       }
     }
-
-    // After-create cleanup: stamps productIds[] on the reservation row and
-    // burns the hold (best-effort — failures are logged but don't poison the
-    // success response since the booking did go through).
-    async function finalizeReservationSideEffects(reservationId: string) {
-      if (incomingProductIds.length > 0) {
-        try {
-          await prisma.reservation.update({
-            where: { id: reservationId },
-            data: { productIds: incomingProductIds },
+    const normalAppointmentHold =
+      incomingHoldId && leadProductType === 'APPOINTMENTS_SERVICE'
+        ? await fastFailLiveHold({ venueId: venue.id, holdId: incomingHoldId })
+        : null
+    const legacyHold =
+      incomingHoldId && !normalAppointmentHold
+        ? await validateHoldForReservation({
+            venueId: venue.id,
+            holdId: incomingHoldId,
+            startsAt: new Date(req.body.startsAt),
+            endsAt: new Date(req.body.endsAt),
           })
-        } catch (error) {
-          logger.warn(`[reservation] failed to stamp productIds (non-fatal): ${(error as Error).message}`)
-        }
-      }
-      if (incomingHoldId) {
+        : null
+
+    // After-create cleanup burns the hold best-effort. The canonical product
+    // list is already co-committed by createReservation.
+    async function finalizeReservationSideEffects() {
+      if (legacyHold) {
         try {
           await prisma.slotHold.deleteMany({
-            where: { id: incomingHoldId, venueId: venue.id },
+            where: { id: legacyHold.id, venueId: venue.id },
           })
         } catch (error) {
-          logger.warn(`[slot-hold] failed to delete hold ${incomingHoldId} (non-fatal): ${(error as Error).message}`)
+          logger.warn(`[slot-hold] failed to delete hold ${legacyHold.id} (non-fatal): ${(error as Error).message}`)
         }
       }
     }
@@ -783,21 +834,24 @@ export async function createReservation(req: Request, res: Response, next: NextF
     //
     // Classes don't pass through here (handled by the classSessionId branch
     // below) and their per-session capacity guard already prevents overlap.
-    if (!req.body.classSessionId && req.body.productId) {
+    if (!normalAppointmentHold && !legacyHold && !req.body.classSessionId && req.body.productId) {
       const product = await prisma.product.findFirst({
         where: { id: req.body.productId, venueId: venue.id },
         select: { type: true },
       })
       if (product?.type === 'APPOINTMENTS_SERVICE') {
-        const pacingMax = effectiveAppointmentPacing(settings.scheduling?.pacingMaxPerSlot)
-        const { reservations, holds } = await countAppointmentOccupancy(prisma, {
-          venueId: venue.id,
-          startsAt: new Date(req.body.startsAt),
-          endsAt: new Date(req.body.endsAt),
-          excludeHoldId: incomingHoldId,
-        })
-        if (reservations + holds >= pacingMax) {
-          throw new ConflictError('Este horario ya no está disponible. Por favor elige otro horario.')
+        const pacingMax = isStaffAware(settings)
+          ? (settings.scheduling?.pacingMaxPerSlot ?? null)
+          : effectiveAppointmentPacing(settings.scheduling?.pacingMaxPerSlot)
+        if (pacingMax !== null) {
+          const { reservations, holds } = await countAppointmentOccupancy(prisma, {
+            venueId: venue.id,
+            startsAt: new Date(req.body.startsAt),
+            endsAt: new Date(req.body.endsAt),
+          })
+          if (reservations + holds >= pacingMax) {
+            throw new ConflictError('Este horario ya no está disponible. Por favor elige otro horario.')
+          }
         }
       }
     }
@@ -839,14 +893,14 @@ export async function createReservation(req: Request, res: Response, next: NextF
         // a legacy /book/{slug} route — landing the customer there after a Stripe
         // cancel surfaces an unfamiliar UI and was the source of reported confusion.
         const bookingPublicUrl = process.env.BOOKING_PUBLIC_URL || 'http://localhost:5174'
-        // Widget can override return URLs (book.avoqado.io vs embed iframe vs dashboard).
-        const reqSuccess = (req.body as any).successUrl as string | undefined
-        const reqCancel = (req.body as any).cancelUrl as string | undefined
-        const baseSuccess = reqSuccess || `${bookingPublicUrl}/${venueSlug}`
-        const baseCancel = reqCancel || baseSuccess
-        const sep = (u: string) => (u.includes('?') ? '&' : '?')
-        const successUrl = `${baseSuccess}${sep(baseSuccess)}payment=success&reservationId=${reservation.id}&session_id={CHECKOUT_SESSION_ID}`
-        const cancelUrl = `${baseCancel}${sep(baseCancel)}payment=cancelled&reservationId=${reservation.id}`
+        const { successUrl, cancelUrl } = buildReservationCheckoutReturnUrls({
+          bookingPublicUrl,
+          venueSlug,
+          venueWebsite: venue.website,
+          requestedSuccessUrl: req.body.successUrl,
+          requestedCancelUrl: req.body.cancelUrl,
+          reservationId: reservation.id,
+        })
 
         const session = await provider.createCheckoutSession(stripeMerchant, {
           amount: stripeAmount,
@@ -877,9 +931,9 @@ export async function createReservation(req: Request, res: Response, next: NextF
         checkoutUrl = session.url
       }
 
-      // Burn the slot hold and stamp productIds[] now that the class
-      // reservation exists. Best-effort (see helper).
-      await finalizeReservationSideEffects(reservation.id)
+      // Burn the slot hold now that the class reservation exists.
+      // Best-effort (see helper).
+      await finalizeReservationSideEffects()
 
       // Confirmation (email + WhatsApp) for non-paid classes — free / credit /
       // pay-at-venue, which land CONFIRMED here. Paid classes are PENDING with a
@@ -969,6 +1023,13 @@ export async function createReservation(req: Request, res: Response, next: NextF
     //     widget shows "Debes $X al llegar" and ops can reconcile.
     let appointmentOwesAtVenue = false
     let appointmentOwesAmount = 0
+    let effectiveDeposits = settings.deposits
+    // Bind the deposits decision evaluated against the public payment/rail
+    // preflight to this write. Core still re-reads scheduling, auto-confirm,
+    // capacity, and every non-payment setting inside its transaction.
+    let paymentPolicyOverride: NonNullable<reservationService.ReservationWriteContext['paymentPolicyOverride']> = {
+      deposits: effectiveDeposits,
+    }
     if (req.body.productId && !req.body.classSessionId) {
       const upfrontProduct = await prisma.product.findFirst({
         where: { id: req.body.productId, venueId: venue.id },
@@ -996,18 +1057,16 @@ export async function createReservation(req: Request, res: Response, next: NextF
             // the full price and reservationService.createReservation stamps
             // depositAmount + status=PENDING. The Stripe checkout block below
             // then mints the session unchanged.
-            settings = {
-              ...settings,
-              deposits: {
-                ...(settings.deposits ?? {}),
-                enabled: true,
-                mode: 'prepaid',
-                fixedAmount: total,
-                percentageOfTotal: null,
-                requiredForPartySizeGte: null,
-                paymentWindowHrs: settings.deposits?.paymentWindowHrs ?? 24,
-              },
+            effectiveDeposits = {
+              ...(settings.deposits ?? {}),
+              enabled: true,
+              mode: 'prepaid',
+              fixedAmount: total,
+              percentageOfTotal: null,
+              requiredForPartySizeGte: null,
+              paymentWindowHrs: settings.deposits?.paymentWindowHrs ?? 24,
             }
+            paymentPolicyOverride = { deposits: effectiveDeposits }
           } else {
             appointmentOwesAtVenue = true
             appointmentOwesAmount = total
@@ -1019,7 +1078,7 @@ export async function createReservation(req: Request, res: Response, next: NextF
       }
     }
 
-    const depositPreview = await previewDepositRequirement(venue.id, req.body, settings)
+    const depositPreview = await previewDepositRequirement(venue.id, req.body, { ...settings, deposits: effectiveDeposits })
     const stripeMerchant = depositPreview.required ? await resolveActiveStripeMerchant(venue.id) : null
 
     if (depositPreview.required && !stripeMerchant) {
@@ -1031,10 +1090,8 @@ export async function createReservation(req: Request, res: Response, next: NextF
       // that gate (or via API/seed).
       appointmentOwesAtVenue = true
       appointmentOwesAmount = depositPreview.amount ?? appointmentOwesAmount
-      settings = {
-        ...settings,
-        deposits: { ...(settings.deposits ?? {}), enabled: false, mode: 'none' },
-      }
+      effectiveDeposits = { ...(effectiveDeposits ?? {}), enabled: false, mode: 'none' }
+      paymentPolicyOverride = { deposits: effectiveDeposits }
       logger.warn(
         `⚠️ [BOOKING] deposit required but venue ${venue.id} has no Stripe merchant — falling back to pay-at-venue (owes ${appointmentOwesAmount})`,
       )
@@ -1055,11 +1112,27 @@ export async function createReservation(req: Request, res: Response, next: NextF
     let reservation = await reservationService.createReservation(
       venue.id,
       {
-        ...req.body,
+        startsAt: req.body.startsAt,
+        endsAt: req.body.endsAt,
+        duration: req.body.duration,
         channel: 'WEB' as const,
+        customerId: req.body.customerId,
+        guestName: req.body.guestName,
+        guestPhone: req.body.guestPhone,
+        guestEmail: req.body.guestEmail,
+        partySize: req.body.partySize,
+        productId: normalizedProducts.leadProductId,
+        productIds: normalizedProducts.productIdsWasProvided ? incomingProductIds : undefined,
+        assignedStaffId: req.body.staffId,
+        specialRequests: req.body.specialRequests,
+        modifierSelections: req.body.modifierSelections,
       },
-      undefined, // no createdById for public bookings
-      settings,
+      {
+        writeOrigin: 'PUBLIC',
+        paymentPolicyOverride,
+        ...(req.body.windowSemantics === 'base' ? { windowSemantics: req.body.windowSemantics } : {}),
+        ...(normalAppointmentHold ? { appointmentHoldId: normalAppointmentHold.id } : {}),
+      },
     )
 
     // Owes-at-venue fallback (policy=required + no Stripe merchant): the
@@ -1093,15 +1166,16 @@ export async function createReservation(req: Request, res: Response, next: NextF
       // Default return target: the public booking site (book.avoqado.io/{slug}).
       // FRONTEND_URL points at the dashboard which has only a legacy /book/{slug}
       // route — landing the customer there after a Stripe cancel surfaces an
-      // unfamiliar UI. Widget can still override via req.body.{success,cancel}Url.
+      // unfamiliar UI. Widget can still request an allowlisted return origin.
       const bookingPublicUrl = process.env.BOOKING_PUBLIC_URL || 'http://localhost:5174'
-      const reqSuccess = (req.body as any).successUrl as string | undefined
-      const reqCancel = (req.body as any).cancelUrl as string | undefined
-      const baseSuccess = reqSuccess || `${bookingPublicUrl}/${venueSlug}`
-      const baseCancel = reqCancel || baseSuccess
-      const sep = (u: string) => (u.includes('?') ? '&' : '?')
-      const successUrl = `${baseSuccess}${sep(baseSuccess)}payment=success&reservationId=${reservation.id}&session_id={CHECKOUT_SESSION_ID}`
-      const cancelUrl = `${baseCancel}${sep(baseCancel)}payment=cancelled&reservationId=${reservation.id}`
+      const { successUrl, cancelUrl } = buildReservationCheckoutReturnUrls({
+        bookingPublicUrl,
+        venueSlug,
+        venueWebsite: venue.website,
+        requestedSuccessUrl: req.body.successUrl,
+        requestedCancelUrl: req.body.cancelUrl,
+        reservationId: reservation.id,
+      })
       const session = await provider.createCheckoutSession(stripeMerchant, {
         amount: stripeAmount,
         currency: 'mxn',
@@ -1137,9 +1211,9 @@ export async function createReservation(req: Request, res: Response, next: NextF
       checkoutUrl = session.url
     }
 
-    // Burn the slot hold and stamp productIds[] now that the reservation
-    // exists. Best-effort — failures logged but don't poison the response.
-    await finalizeReservationSideEffects(reservation.id)
+    // Burn the slot hold now that the reservation exists. Best-effort —
+    // failures are logged but do not poison the committed booking response.
+    await finalizeReservationSideEffects()
 
     // Credit redemption for non-class appointments. Lives outside the
     // reservation transaction (reservationService.createReservation owns its
@@ -1490,50 +1564,6 @@ function assertCanReschedule(
 }
 
 /**
- * Assert the requested appointment slot is genuinely offerable (not just "not in
- * the past"). Single source of truth = the booking availability engine, plus
- * explicit window checks `getAvailableSlots` does NOT do (minNotice / maxAdvance /
- * past). `excludeReservationId` keeps the moving reservation from blocking its
- * own target slot. Throws 409/400 on any failure.
- */
-async function assertSlotOfferable(args: {
-  venueId: string
-  productId: string | null
-  startsAt: Date
-  endsAt: Date
-  settings: Awaited<ReturnType<typeof getReservationSettings>>
-  timezone: string
-  excludeReservationId: string
-}): Promise<void> {
-  const now = Date.now()
-  if (args.startsAt.getTime() < now) {
-    throw new ConflictError('Ese horario ya pasó, elige otro.')
-  }
-  const minNoticeMin = args.settings.scheduling?.minNoticeMin ?? 0
-  if (minNoticeMin > 0 && args.startsAt.getTime() < now + minNoticeMin * 60_000) {
-    throw new BadRequestError(`Debes reservar con al menos ${minNoticeMin} minutos de anticipación.`)
-  }
-  const maxAdvanceDays = args.settings.scheduling?.maxAdvanceDays ?? 0
-  if (maxAdvanceDays > 0 && args.startsAt.getTime() > now + maxAdvanceDays * 24 * 60 * 60_000) {
-    throw new BadRequestError(`No puedes reservar con más de ${maxAdvanceDays} días de anticipación.`)
-  }
-  // Operating hours + grid alignment + pacing + capacity + staff/table + external
-  // blocks — all enforced by membership in the offered set (excluding self).
-  const durationMin = Math.round((args.endsAt.getTime() - args.startsAt.getTime()) / 60_000)
-  const slots = await availabilityService.getAvailableSlots(
-    args.venueId,
-    args.startsAt,
-    { duration: durationMin, productId: args.productId ?? undefined, excludeReservationId: args.excludeReservationId },
-    args.settings,
-    args.timezone,
-  )
-  const offered = slots.some(s => new Date(s.startsAt).getTime() === args.startsAt.getTime())
-  if (!offered) {
-    throw new ConflictError('Ese horario ya no está disponible, elige otro.')
-  }
-}
-
-/**
  * GET /public/venues/:venueSlug/reservations/:cancelSecret/reschedule/availability?date=YYYY-MM-DD
  *
  * Appointment reschedule: offered slots of the SAME service for the given date,
@@ -1553,10 +1583,17 @@ export async function getRescheduleAvailability(req: Request, res: Response, nex
     }
 
     const tz = reservation.venue?.timezone || 'America/Mexico_City'
+    const productIds = reservationBookedProductIds(reservation)
     const slots = await availabilityService.getAvailableSlots(
       reservation.venueId,
       date,
-      { duration: reservation.duration, productId: reservation.productId ?? undefined, excludeReservationId: reservation.id },
+      {
+        productId: productIds[0],
+        productIds,
+        staffId: reservation.assignedStaffId ?? undefined,
+        excludeReservationId: reservation.id,
+        fixedDurationMin: reservation.duration,
+      },
       settings,
       tz,
     )
@@ -1569,8 +1606,9 @@ export async function getRescheduleAvailability(req: Request, res: Response, nex
 /**
  * POST /public/venues/:venueSlug/reservations/:cancelSecret/reschedule/hold
  *
- * Body: { startsAt, endsAt } — reserve the target slot for ~10 min before the
- * customer confirms. Re-validates the slot (§5.8) excluding self, then holds it.
+ * Body: { startsAt, endsAt? } — reserve the target slot for ~10 min before the
+ * customer confirms. `endsAt` is optional legacy compatibility input; the server
+ * derives the authoritative window from the reservation's persisted duration.
  */
 export async function createRescheduleHold(req: Request, res: Response, next: NextFunction) {
   try {
@@ -1582,46 +1620,30 @@ export async function createRescheduleHold(req: Request, res: Response, next: Ne
       throw new BadRequestError('Las clases se reagendan eligiendo otra sesión; no requieren reservar el horario.')
     }
 
-    const body = req.body as { startsAt: string; endsAt: string }
+    const body = req.body as { startsAt: string; endsAt?: string }
     const startsAt = new Date(body.startsAt)
-    const endsAt = new Date(body.endsAt)
-    if (Number.isNaN(startsAt.getTime()) || Number.isNaN(endsAt.getTime())) {
+    const endsAt = body.endsAt === undefined ? undefined : new Date(body.endsAt)
+    if (Number.isNaN(startsAt.getTime()) || (endsAt && Number.isNaN(endsAt.getTime()))) {
       throw new BadRequestError('Fechas inválidas')
     }
-    if (endsAt <= startsAt) {
+    if (endsAt && endsAt <= startsAt) {
       throw new BadRequestError('endsAt debe ser posterior a startsAt')
     }
-    // Duration is fixed (same service + same extras) — reject a tampered window.
-    const reqDuration = Math.round((endsAt.getTime() - startsAt.getTime()) / 60_000)
-    if (Math.abs(reqDuration - reservation.duration) > 1) {
-      throw new BadRequestError('La duración del horario no coincide con el servicio.')
-    }
-
-    const tz = reservation.venue?.timezone || 'America/Mexico_City'
-    await assertSlotOfferable({
-      venueId: reservation.venueId,
-      productId: reservation.productId,
-      startsAt,
-      endsAt,
-      settings,
-      timezone: tz,
-      excludeReservationId: reservation.id,
-    })
 
     void pruneExpiredHolds()
-    const pacingMax = effectiveAppointmentPacing(settings.scheduling?.pacingMaxPerSlot)
-    const hold = await holdAppointmentSlot({
+    const hold = await mintRescheduleAppointmentHold({
       venueId: reservation.venueId,
-      startsAt,
-      endsAt,
-      productIds: reservation.productId ? [reservation.productId] : [],
-      partySize: reservation.partySize,
-      fingerprint: null,
-      pacingMax,
-      excludeReservationId: reservation.id,
+      reservationId: reservation.id,
+      requestedStartsAt: startsAt,
+      requestedEndsAt: endsAt,
     })
 
-    res.status(201).json({ holdId: hold.id, expiresAt: hold.expiresAt, ttlSeconds: Math.floor(SLOT_HOLD_TTL_MS / 1000) })
+    res.status(201).json({
+      holdId: hold.id,
+      expiresAt: hold.expiresAt,
+      ttlSeconds: Math.floor(SLOT_HOLD_TTL_MS / 1000),
+      ...(hold.staffId ? { staffId: hold.staffId } : {}),
+    })
   } catch (error) {
     next(error)
   }
@@ -1683,6 +1705,7 @@ export async function rescheduleReservation(req: Request, res: Response, next: N
       newStartsAt,
       holdId,
       rescheduledBy: 'CUSTOMER',
+      writeOrigin: 'PUBLIC',
     })
     return res.json(updated)
   } catch (error) {
@@ -1804,7 +1827,7 @@ async function createClassReservation(
   const autoConfirm = moduleConfig?.scheduling?.autoConfirm ?? true
   const initialStatus: ReservationStatus = autoConfirm ? 'CONFIRMED' : 'PENDING'
 
-  return reservationService.withSerializableRetry(async tx => {
+  return withSerializableRetry(async tx => {
     // Lock the ClassSession row and verify it exists + belongs to venue
     const sessions = await tx.$queryRaw<
       { id: string; productId: string; startsAt: Date; endsAt: Date; duration: number; capacity: number; status: string }[]
@@ -2160,8 +2183,6 @@ async function createClassReservation(
  *  customer has enough time to fill the form without holding inventory hostage
  *  if they abandon. The widget reads expiresAt from the response and renders
  *  "Cita reservada durante 9:56" against it. */
-const SLOT_HOLD_TTL_MS = 10 * 60 * 1000
-
 /** Lazy cleanup threshold — sweep holds older than this past their expiry.
  *  Cheap, runs from the same path as availability so we don't need a cron. */
 const SLOT_HOLD_GC_BUFFER_MS = 60 * 60 * 1000
@@ -2182,71 +2203,14 @@ async function pruneExpiredHolds(): Promise<void> {
 }
 
 /**
- * Create an APPOINTMENTS_SERVICE SlotHold under the per-venue advisory lock with
- * a pacing + external-calendar guard. Shared by createHold (booking) and
- * createRescheduleHold (reschedule). `excludeReservationId` lets reschedule skip
- * counting the reservation being moved against its own target slot.
- */
-async function holdAppointmentSlot(args: {
-  venueId: string
-  startsAt: Date
-  endsAt: Date
-  productIds: string[]
-  partySize: number
-  fingerprint: string | null
-  pacingMax: number
-  excludeReservationId?: string
-}): Promise<{ id: string; expiresAt: Date }> {
-  const expiresAt = new Date(Date.now() + SLOT_HOLD_TTL_MS)
-  return prisma.$transaction(async tx => {
-    const lockKey = `apt-hold:${args.venueId}`
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey})::bigint)`
-
-    // External calendar busy-block check — reject so the customer never sees a
-    // countdown for a slot the venue already blocked via Google Calendar.
-    const externalBlock = await checkExternalBusyBlock(tx, {
-      venueId: args.venueId,
-      staffId: null,
-      startsAt: args.startsAt,
-      endsAt: args.endsAt,
-    })
-    if (externalBlock) {
-      throw new ConflictError('Este horario fue bloqueado por un evento de calendario externo')
-    }
-
-    const { reservations, holds } = await countAppointmentOccupancy(tx, {
-      venueId: args.venueId,
-      startsAt: args.startsAt,
-      endsAt: args.endsAt,
-      excludeReservationId: args.excludeReservationId,
-    })
-    if (reservations + holds >= args.pacingMax) {
-      throw new ConflictError('Este horario ya no está disponible. Por favor elige otro horario.')
-    }
-    return tx.slotHold.create({
-      data: {
-        venueId: args.venueId,
-        startsAt: args.startsAt,
-        endsAt: args.endsAt,
-        productIds: args.productIds,
-        classSessionId: null,
-        partySize: Math.max(1, args.partySize),
-        expiresAt,
-        fingerprint: args.fingerprint,
-      },
-      select: { id: true, expiresAt: true },
-    })
-  })
-}
-
-/**
  * POST /public/venues/:venueSlug/reservations/hold
  *
- * Body: { startsAt, endsAt, productIds?, classSessionId?, partySize? }
+ * Body: { startsAt, endsAt, productId?, productIds?, classSessionId?, partySize? }
  *
  * Creates a SlotHold row with TTL=10min and returns its id+expiresAt so the
- * widget can plumb both into its createReservation call. The hold is consumed
- * (deleted) atomically when the reservation succeeds; otherwise it expires.
+ * widget can pass both into createReservation. Normal appointment holds use the
+ * atomic Release A mint/consume protocol; legacy class and generic holds retain
+ * their existing validation and post-commit cleanup until client coordination.
  *
  * Validations:
  *   - venue exists + has public booking enabled
@@ -2267,10 +2231,14 @@ export async function createHold(req: Request, res: Response, next: NextFunction
     const body = req.body as {
       startsAt: string
       endsAt: string
-      productIds?: string[]
+      productId?: string
+      productIds?: string | string[]
       classSessionId?: string
       partySize?: number
       fingerprint?: string
+      staffId?: string
+      modifierSelections?: { productId: string; modifierId: string; quantity?: number }[]
+      windowSemantics?: 'base'
     }
 
     const startsAt = new Date(body.startsAt)
@@ -2288,8 +2256,16 @@ export async function createHold(req: Request, res: Response, next: NextFunction
       throw new BadRequestError('No se puede reservar un horario en el pasado')
     }
 
-    const productIds = Array.isArray(body.productIds) ? body.productIds.filter(Boolean) : []
-    if (productIds.length > 0) {
+    // Before productId was accepted by this schema, class holds could carry a
+    // shared-client scalar that validation stripped. Preserve that behavior:
+    // only an explicit productIds field opts a class hold into list validation.
+    const scalarProductId = body.classSessionId && body.productIds === undefined ? undefined : body.productId
+    const { productIds } = normalizeBookedProductIds({ productId: scalarProductId, productIds: body.productIds })
+    if (!body.classSessionId && productIds.length === 0) {
+      throw new BadRequestError('Selecciona un producto de cita o una sesión de clase')
+    }
+    const isAppointmentHold = !body.classSessionId && productIds.length > 0
+    if (!isAppointmentHold && productIds.length > 0) {
       const products = await prisma.product.findMany({
         where: { id: { in: productIds }, venueId: venue.id },
         select: { id: true, type: true },
@@ -2315,9 +2291,6 @@ export async function createHold(req: Request, res: Response, next: NextFunction
     // Lazy GC — cheap, runs once per hold creation.
     void pruneExpiredHolds()
 
-    const isAppointmentHold = !body.classSessionId && productIds.length > 0
-    const expiresAt = new Date(Date.now() + SLOT_HOLD_TTL_MS)
-
     // For APPOINTMENTS_SERVICE holds we MUST serialize concurrent creates
     // for the same venue — otherwise two tabs both pass an unguarded count
     // and both succeed, leaving two phantom holds that block every later
@@ -2327,22 +2300,24 @@ export async function createHold(req: Request, res: Response, next: NextFunction
     // because Mindform-scale concurrency is low and per-slot keys complicate
     // overlap reasoning (two distinct slots can still overlap). Bumping
     // contention later is a one-line change.
-    let hold: { id: string; expiresAt: Date }
+    let hold: { id: string; expiresAt: Date; staffId?: string | null }
     if (isAppointmentHold) {
-      const pacingMax = effectiveAppointmentPacing(settings.scheduling?.pacingMaxPerSlot)
-      hold = await holdAppointmentSlot({
+      hold = await mintNormalAppointmentHold({
         venueId: venue.id,
         startsAt,
         endsAt,
         productIds,
         partySize: body.partySize ?? 1,
         fingerprint: body.fingerprint ?? null,
-        pacingMax,
+        staffId: body.staffId,
+        modifierSelections: body.modifierSelections,
+        windowSemantics: body.windowSemantics,
       })
     } else {
-      // Non-appointment holds (classes, generic) — wrap in a transaction so the
+      // Class holds — wrap in a transaction so the
       // external busy-block check runs against the same snapshot the create
       // commits with.
+      const expiresAt = new Date(Date.now() + SLOT_HOLD_TTL_MS)
       hold = await prisma.$transaction(async tx => {
         const externalBlock = await checkExternalBusyBlock(tx, {
           venueId: venue.id,
@@ -2373,6 +2348,7 @@ export async function createHold(req: Request, res: Response, next: NextFunction
       holdId: hold.id,
       expiresAt: hold.expiresAt,
       ttlSeconds: Math.floor(SLOT_HOLD_TTL_MS / 1000),
+      ...('staffId' in hold && hold.staffId ? { staffId: hold.staffId } : {}),
     })
   } catch (error) {
     next(error)
@@ -2401,10 +2377,11 @@ export async function cancelHold(req: Request, res: Response, next: NextFunction
 }
 
 /**
- * Validate + consume a hold passed on createReservation. Returns the hold row
- * if it is valid and matches the booking, otherwise throws. The caller must
- * delete the hold once the reservation has actually been written (so a failed
- * create doesn't strand the customer with no fallback).
+ * Validate a hold passed on createReservation. Returns the hold row if it is
+ * valid and matches the booking, otherwise throws. The current caller deletes
+ * it best-effort after the reservation has been written (so a failed create
+ * doesn't strand the customer with no fallback); validation and deletion are
+ * not atomic until the Release A protocol.
  *
  * Returns null when no holdId was passed — bookings without holds keep
  * working exactly as they did pre-hold-mechanism.
