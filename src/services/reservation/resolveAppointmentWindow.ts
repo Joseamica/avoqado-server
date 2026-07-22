@@ -1,6 +1,7 @@
 import type { Prisma, PrismaClient } from '@prisma/client'
 import { BadRequestError, ConflictError } from '@/errors/AppError'
-import { isStaffAware, type ReservationConfig } from '@/services/dashboard/reservationSettings.service'
+import type { ReservationConfig } from '@/services/dashboard/reservationSettings.service'
+import { isStaffAware } from '@/services/reservation/reservationStaffMode'
 import {
   resolveModifierSelections,
   type ModifierSelectionInput,

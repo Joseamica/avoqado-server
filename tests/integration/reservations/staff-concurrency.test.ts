@@ -10,6 +10,8 @@ import { ConflictError } from '@/errors/AppError'
 import { withSerializableRetry } from '@/utils/serializableRetry'
 import { assertOrganizationStaffAvailability } from '@/services/dashboard/appointmentStaffAssignment.service'
 import { createReservation } from '@/services/dashboard/reservation.dashboard.service'
+import { updateReservationSettings } from '@/services/dashboard/reservationSettings.service'
+import { mintNormalAppointmentHold } from '@/services/reservation/appointmentSlotHold.service'
 import { createClassSession, createClassSessionsBulk, updateClassSession } from '@/services/dashboard/classSession.dashboard.service'
 import { hardDeleteTeamMember } from '@/services/dashboard/team.dashboard.service'
 
@@ -576,6 +578,119 @@ describe('production appointment create serialization on PostgreSQL', () => {
     })
     expect(`${(failure as any)?.code ?? ''} ${(failure as Error)?.message ?? ''}`).not.toMatch(/P2028|P2010|55P03|40001/)
     expect(await prisma.reservation.count({ where: { venueId: sameOrgVenueA, startsAt: window.startsAt } })).toBe(0)
+  })
+})
+
+describe('staff-aware settings activation serialization on PostgreSQL', () => {
+  it('serializes activation against a legacy create and leaves no active null-staff appointment', async () => {
+    await prisma.reservationSettings.update({
+      where: { venueId: sameOrgVenueA },
+      data: {
+        capacityMode: 'pacing',
+        showStaffPicker: false,
+        pacingMaxPerSlot: 2,
+        minNoticeMin: 0,
+        publicBookingEnabled: true,
+      },
+    })
+    const window = appointmentWindow(20)
+    const holder = startAppointmentVenueLockHolder(sameOrgVenueA)
+    await waitForSignalOrFailure(holder.gate.ready, holder.promise, 'activation-vs-create venue lock holder')
+    const activation = updateReservationSettings(sameOrgVenueA, { capacityMode: 'per_staff' })
+    const creation = createProductionAppointment({
+      venueId: sameOrgVenueA,
+      productId: appointmentProductA,
+      window,
+      writeOrigin: 'PUBLIC',
+    })
+    let observationError: unknown
+    try {
+      await waitUntilBlockedBy(holder.getPid(), 2, 'activation and legacy appointment create')
+    } catch (error) {
+      observationError = error
+    } finally {
+      holder.gate.release()
+      await holder.promise
+    }
+    const [activationOutcome, creationOutcome] = await Promise.allSettled([activation, creation])
+    if (observationError) throw observationError
+
+    expect(creationOutcome.status).toBe('fulfilled')
+    const storedSettings = await prisma.reservationSettings.findUniqueOrThrow({ where: { venueId: sameOrgVenueA } })
+    const storedReservation = await prisma.reservation.findFirstOrThrow({
+      where: { venueId: sameOrgVenueA, startsAt: window.startsAt },
+    })
+    if (activationOutcome.status === 'fulfilled') {
+      expect(storedSettings.capacityMode).toBe('per_staff')
+      expect(storedReservation.assignedStaffId).not.toBeNull()
+    } else {
+      expect(activationOutcome.reason).toMatchObject({ statusCode: 409 })
+      expect(storedSettings.capacityMode).toBe('pacing')
+      expect(storedReservation.assignedStaffId).toBeNull()
+    }
+    expect(
+      await prisma.reservation.count({
+        where: {
+          venueId: sameOrgVenueA,
+          status: { in: ['PENDING', 'CONFIRMED', 'CHECKED_IN'] },
+          product: { type: 'APPOINTMENTS_SERVICE' },
+          assignedStaffId: null,
+          endsAt: { gt: new Date() },
+        },
+      }),
+    ).toBe(storedSettings.capacityMode === 'per_staff' ? 0 : 1)
+  })
+
+  it('serializes activation against a legacy hold and leaves no live null-staff hold when active', async () => {
+    await prisma.reservationSettings.update({
+      where: { venueId: sameOrgVenueA },
+      data: {
+        capacityMode: 'pacing',
+        showStaffPicker: false,
+        pacingMaxPerSlot: 2,
+        minNoticeMin: 0,
+        publicBookingEnabled: true,
+      },
+    })
+    const window = appointmentWindow(21)
+    const holder = startAppointmentVenueLockHolder(sameOrgVenueA)
+    await waitForSignalOrFailure(holder.gate.ready, holder.promise, 'activation-vs-hold venue lock holder')
+    const activation = updateReservationSettings(sameOrgVenueA, { showStaffPicker: true })
+    const hold = mintNormalAppointmentHold({
+      venueId: sameOrgVenueA,
+      startsAt: window.startsAt,
+      endsAt: window.endsAt,
+      productIds: [appointmentProductA],
+      windowSemantics: 'base',
+    })
+    let observationError: unknown
+    try {
+      await waitUntilBlockedBy(holder.getPid(), 2, 'activation and legacy appointment hold')
+    } catch (error) {
+      observationError = error
+    } finally {
+      holder.gate.release()
+      await holder.promise
+    }
+    const [activationOutcome, holdOutcome] = await Promise.allSettled([activation, hold])
+    if (observationError) throw observationError
+
+    expect(holdOutcome.status).toBe('fulfilled')
+    const storedSettings = await prisma.reservationSettings.findUniqueOrThrow({ where: { venueId: sameOrgVenueA } })
+    const storedHold = await prisma.slotHold.findFirstOrThrow({ where: { venueId: sameOrgVenueA, startsAt: window.startsAt } })
+    if (activationOutcome.status === 'fulfilled') {
+      expect(storedSettings.showStaffPicker).toBe(true)
+      expect(storedHold.staffId).not.toBeNull()
+    } else {
+      expect(activationOutcome.reason).toMatchObject({ statusCode: 409 })
+      expect(storedSettings.showStaffPicker).toBe(false)
+      expect(storedHold.staffId).toBeNull()
+    }
+    expect(
+      await prisma.slotHold.count({
+        where: { venueId: sameOrgVenueA, classSessionId: null, staffId: null, expiresAt: { gt: new Date() } },
+      }),
+    ).toBe(storedSettings.showStaffPicker ? 0 : 1)
   })
 })
 

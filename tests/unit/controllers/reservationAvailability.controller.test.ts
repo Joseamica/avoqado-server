@@ -140,6 +140,56 @@ describe('reservation availability controller boundaries', () => {
     )
   })
 
+  it('dashboard update and generic reschedule strip over-capacity consent from data and map it into trusted context', async () => {
+    const updateSpy = jest.spyOn(reservationService, 'updateReservation').mockResolvedValue({ id: 'updated' } as any)
+    const rescheduleSpy = jest.spyOn(reservationService, 'rescheduleReservation').mockResolvedValue({ id: 'rescheduled' } as any)
+    const next = jest.fn()
+
+    await dashboardController.updateReservation(
+      {
+        params: { venueId: 'venue-1', id: 'reservation-1' },
+        body: { guestName: 'Bea', allowOverCapacity: true },
+        authContext: { userId: 'staff-1' },
+      } as any,
+      responseMock(),
+      next,
+    )
+    await dashboardController.rescheduleReservation(
+      {
+        params: { venueId: 'venue-1', id: 'reservation-1' },
+        body: {
+          startsAt: '2026-08-22T15:00:00.000Z',
+          endsAt: '2026-08-22T16:00:00.000Z',
+          allowOverCapacity: true,
+        },
+        authContext: { userId: 'staff-1' },
+      } as any,
+      responseMock(),
+      next,
+    )
+
+    expect(next).not.toHaveBeenCalled()
+    expect(updateSpy).toHaveBeenCalledWith(
+      'venue-1',
+      'reservation-1',
+      { guestName: 'Bea' },
+      { writeOrigin: 'DASHBOARD', allowOverCapacity: true },
+      'staff-1',
+    )
+    expect(rescheduleSpy).toHaveBeenCalledWith(
+      'venue-1',
+      'reservation-1',
+      {
+        startsAt: new Date('2026-08-22T15:00:00.000Z'),
+        endsAt: new Date('2026-08-22T16:00:00.000Z'),
+        notificationChannel: undefined,
+        customMessage: undefined,
+      },
+      { writeOrigin: 'DASHBOARD', allowOverCapacity: true },
+      'staff-1',
+    )
+  })
+
   it('public appointment reschedule declares PUBLIC origin', async () => {
     const reservation = {
       id: 'reservation-1',
@@ -892,6 +942,79 @@ describe('reservation availability controller boundaries', () => {
       settings,
       'UTC',
     )
+  })
+
+  it('dashboard reservationId replaces attacker-controlled duration, staff and products with tenant-scoped stored authority', async () => {
+    prismaMock.reservation.findFirst.mockResolvedValue({
+      id: 'reservation-1',
+      duration: 75,
+      assignedStaffId: 'staff-stored',
+      productId: 'product-stored',
+      productIds: ['product-stored', 'product-second'],
+    } as any)
+    const availability = jest.spyOn(availabilityService, 'getAvailableSlots').mockResolvedValue([ordinarySlot])
+    const req: any = {
+      params: { venueId: 'venue-1' },
+      query: {
+        date,
+        reservationId: 'reservation-1',
+        duration: 5,
+        staffId: 'staff-attacker',
+        productId: 'product-attacker',
+        productIds: ['product-attacker'],
+        includeFull: true,
+      },
+    }
+    const res = responseMock()
+    const next = jest.fn()
+
+    await dashboardController.getAvailability(req, res, next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(prismaMock.reservation.findFirst).toHaveBeenCalledWith({
+      where: { id: 'reservation-1', venueId: 'venue-1' },
+      select: { id: true, duration: true, assignedStaffId: true, productId: true, productIds: true },
+    })
+    expect(availability).toHaveBeenCalledWith(
+      'venue-1',
+      date,
+      {
+        fixedDurationMin: 75,
+        partySize: undefined,
+        tableId: undefined,
+        staffId: 'staff-stored',
+        productId: 'product-stored',
+        productIds: ['product-stored', 'product-second'],
+        excludeReservationId: 'reservation-1',
+        includeFull: true,
+        windowSemantics: undefined,
+      },
+      settings,
+      'UTC',
+    )
+  })
+
+  it('returns zero dashboard reschedule slots for a staff-aware historical appointment with null staff', async () => {
+    prismaMock.reservation.findFirst.mockResolvedValue({
+      id: 'reservation-null-staff',
+      duration: 60,
+      assignedStaffId: null,
+      productId: 'product-1',
+      productIds: [],
+    } as any)
+    const availability = jest.spyOn(availabilityService, 'getAvailableSlots')
+    const res = responseMock()
+    const next = jest.fn()
+
+    await dashboardController.getAvailability(
+      { params: { venueId: 'venue-1' }, query: { date, reservationId: 'reservation-null-staff' } } as any,
+      res,
+      next,
+    )
+
+    expect(next).not.toHaveBeenCalled()
+    expect(availability).not.toHaveBeenCalled()
+    expect(res.json).toHaveBeenCalledWith({ date, slots: [] })
   })
 
   it('public appointment availability forwards canonical staff-aware options and serializes FULL explicitly', async () => {

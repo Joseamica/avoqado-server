@@ -227,6 +227,7 @@ export const getAvailabilityQuerySchema = z
     partySize: z.coerce.number().int().min(1).max(100).optional(),
     tableId: z.string().optional(),
     staffId: z.string().optional(),
+    reservationId: z.string().min(1, 'reservationId no puede estar vacío').optional(),
     productId: bookedProductIdWireSchema.optional(),
     productIds: bookedProductIdsWireSchema.optional(),
     includeFull: availabilityBooleanSchema.optional(),
@@ -347,6 +348,7 @@ export const updateReservationBodySchema = z
     tableId: z.string().optional().nullable(),
     productId: z.string().optional().nullable(),
     assignedStaffId: z.string().optional().nullable(),
+    allowOverCapacity: z.boolean({ invalid_type_error: 'allowOverCapacity debe ser true o false' }).optional(),
     specialRequests: z.string().max(2000).optional().nullable(),
     internalNotes: z.string().max(2000).optional().nullable(),
     tags: z.array(z.string().max(50)).max(20).optional(),
@@ -375,6 +377,7 @@ export const rescheduleBodySchema = z
     endsAt: z.coerce.date({ required_error: 'La nueva fecha de fin es requerida' }),
     notificationChannel: rescheduleNotificationChannelSchema.optional(),
     customMessage: z.string().max(500).optional(),
+    allowOverCapacity: z.boolean({ invalid_type_error: 'allowOverCapacity debe ser true o false' }).optional(),
   })
   .refine(data => data.endsAt > data.startsAt, {
     message: 'La fecha de fin debe ser posterior a la fecha de inicio',
@@ -451,6 +454,7 @@ export const updateReservationSettingsBodySchema = z
     noShowGraceMin: z.number().int().min(0).max(240).optional(),
     pacingMaxPerSlot: z.number().int().min(1).max(1000).nullable().optional(),
     onlineCapacityPercent: z.number().int().min(1).max(100).optional(),
+    capacityMode: z.enum(['pacing', 'per_staff']).optional(),
     depositMode: depositModeSchema.optional(),
     depositFixedAmount: z.number().min(0).nullable().optional(),
     depositPercentage: z.number().int().min(0).max(100).nullable().optional(),
@@ -461,6 +465,7 @@ export const updateReservationSettingsBodySchema = z
     waitlistPriorityMode: waitlistPriorityModeSchema.optional(),
     waitlistNotifyWindow: z.number().int().min(1).max(1440).optional(),
     publicBookingEnabled: z.boolean().optional(),
+    showStaffPicker: z.boolean().optional(),
     requirePhone: z.boolean().optional(),
     requireEmail: z.boolean().optional(),
     requireAccount: z.boolean().optional(),
@@ -487,6 +492,7 @@ export const updateReservationSettingsBodySchema = z
         noShowGraceMin: z.number().int().min(0).max(240).optional(),
         pacingMaxPerSlot: z.number().int().min(1).max(1000).nullable().optional(),
         onlineCapacityPercent: z.number().int().min(1).max(100).optional(),
+        capacityMode: z.enum(['pacing', 'per_staff']).optional(),
       })
       .optional(),
     deposits: z
@@ -532,6 +538,7 @@ export const updateReservationSettingsBodySchema = z
         requirePhone: z.boolean().optional(),
         requireEmail: z.boolean().optional(),
         requireAccount: z.boolean().optional(),
+        showStaffPicker: z.boolean().optional(),
       })
       .optional(),
     payments: z

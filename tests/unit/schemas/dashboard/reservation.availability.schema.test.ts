@@ -3,6 +3,7 @@ import {
   getAvailabilityQuerySchema,
   publicCreateHoldBodySchema,
   publicCreateReservationBodySchema,
+  rescheduleBodySchema,
   rescheduleHoldBodySchema,
   updateReservationBodySchema,
 } from '@/schemas/dashboard/reservation.schema'
@@ -47,6 +48,11 @@ describe('getAvailabilityQuerySchema — staff-aware query contract', () => {
     expect(getAvailabilityQuerySchema.safeParse({ date, includeFull: 'yes' }).success).toBe(false)
   })
 
+  it('accepts a non-empty server-resolved reservationId for dashboard reschedule availability', () => {
+    expect(getAvailabilityQuerySchema.parse({ date, reservationId: 'reservation-1' }).reservationId).toBe('reservation-1')
+    expect(getAvailabilityQuerySchema.safeParse({ date, reservationId: '' }).success).toBe(false)
+  })
+
   it('keeps the legacy 480-minute cap and permits up to 1440 only with base semantics', () => {
     expect(getAvailabilityQuerySchema.safeParse({ date, duration: '480' }).success).toBe(true)
     expect(getAvailabilityQuerySchema.safeParse({ date, duration: '481' }).success).toBe(false)
@@ -82,6 +88,28 @@ describe('updateReservationBodySchema — rollback duration bridge', () => {
     expect(updateReservationBodySchema.safeParse({ duration: 0 }).success).toBe(false)
     expect(updateReservationBodySchema.safeParse({ duration: 1_441 }).success).toBe(false)
     expect(updateReservationBodySchema.safeParse({ duration: 1.5 }).success).toBe(false)
+  })
+
+  it('accepts dashboard over-capacity consent on update and generic reschedule only as a boolean', () => {
+    expect(updateReservationBodySchema.parse({ guestName: 'Ana', allowOverCapacity: true })).toMatchObject({
+      allowOverCapacity: true,
+    })
+    expect(
+      rescheduleBodySchema.parse({
+        startsAt: '2026-08-21T15:00:00.000Z',
+        endsAt: '2026-08-21T16:00:00.000Z',
+        allowOverCapacity: true,
+      }),
+    ).toMatchObject({ allowOverCapacity: true })
+
+    expect(updateReservationBodySchema.safeParse({ allowOverCapacity: 'true' }).success).toBe(false)
+    expect(
+      rescheduleBodySchema.safeParse({
+        startsAt: '2026-08-21T15:00:00.000Z',
+        endsAt: '2026-08-21T16:00:00.000Z',
+        allowOverCapacity: 'true',
+      }).success,
+    ).toBe(false)
   })
 })
 

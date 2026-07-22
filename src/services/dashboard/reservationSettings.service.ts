@@ -1,8 +1,12 @@
 import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { logAction } from './activity-log.service'
-import { BadRequestError } from '../../errors/AppError'
+import { BadRequestError, ConflictError } from '../../errors/AppError'
 import { canVenueChargeOnline } from '../payments/ecommerceCapability'
+import { isLiveSlotHold, lockAppointmentVenue } from './appointmentStaffAssignment.service'
+import { withSerializableRetry } from '@/utils/serializableRetry'
+
+export { isStaffAware } from '@/services/reservation/reservationStaffMode'
 
 // ==========================================
 // RESERVATION SETTINGS — Typed config from ReservationSettings model
@@ -280,55 +284,94 @@ export async function ensureReservationSettings(venueId: string) {
 export async function updateReservationSettings(venueId: string, data: ReservationSettingsUpdateInput) {
   const normalized = normalizeReservationSettingsUpdate(data)
 
-  // 🔒 Can't TRANSITION any online-charging setting from off → on without a
-  // chargeable e-commerce rail. "Enabling charging" = a deposit mode other than
-  // 'none', or an upfront default other than 'at_venue'. Turning things off (or
-  // leaving them) is always allowed.
-  //
-  // Bug fixed 2026-07-07 (found by /full-testing): comparing only the INCOMING
-  // payload — not the current DB row — meant a venue that already had cobro
-  // configured before this gate existed (legacy data, or the field just isn't
-  // being touched this call) got blocked from saving ANY unrelated setting,
-  // because the dashboard form always resends the full deposits/payments object.
-  // We now only block a genuine off→on TRANSITION; resaving an already-charging
-  // value (even switching between two charging modes) is left alone — that
-  // venue's merchant gap is pre-existing, not something this save created.
-  const wantsDeposit = normalized.depositMode !== undefined
-  const wantsAppt = normalized.appointmentUpfrontDefault !== undefined
-  const wantsClass = normalized.classUpfrontDefault !== undefined
-  let enablesCharging = false
-  if (wantsDeposit || wantsAppt || wantsClass) {
-    const current = await prisma.reservationSettings.findUnique({ where: { venueId } })
-    // Baseline for "was this venue already charging" when a field was never
-    // explicitly saved. NOTE this intentionally does NOT match getDefaultConfig()'s
-    // *display* default for classUpfrontDefault ('required') — that default is a
-    // product choice for brand-new venues, not evidence an operator activated
-    // cobro. For THIS guard (has a human ever explicitly turned it on?), a
-    // missing row/field means "no", so the safe baseline is 'at_venue' for both
-    // upfront fields and 'none' for deposits.
-    const wasChargingDeposit = (current?.depositMode ?? 'none') !== 'none'
-    const wasChargingAppt = (current?.appointmentUpfrontDefault ?? 'at_venue') !== 'at_venue'
-    const wasChargingClass = (current?.classUpfrontDefault ?? 'at_venue') !== 'at_venue'
+  const settings = await withSerializableRetry(async tx => {
+    const current = await tx.reservationSettings.findUnique({ where: { venueId } })
 
+    // Only a genuine off→on transition needs the merchant rail. A legacy venue
+    // may safely resave an already-charging value even when its rail is missing.
     const nextDepositMode = typeof normalized.depositMode === 'string' ? normalized.depositMode : undefined
     const nextApptUpfront = typeof normalized.appointmentUpfrontDefault === 'string' ? normalized.appointmentUpfrontDefault : undefined
     const nextClassUpfront = typeof normalized.classUpfrontDefault === 'string' ? normalized.classUpfrontDefault : undefined
+    const enablesCharging =
+      (nextDepositMode !== undefined && nextDepositMode !== 'none' && (current?.depositMode ?? 'none') === 'none') ||
+      (nextApptUpfront !== undefined &&
+        nextApptUpfront !== 'at_venue' &&
+        (current?.appointmentUpfrontDefault ?? 'at_venue') === 'at_venue') ||
+      (nextClassUpfront !== undefined && nextClassUpfront !== 'at_venue' && (current?.classUpfrontDefault ?? 'at_venue') === 'at_venue')
 
-    enablesCharging =
-      (nextDepositMode !== undefined && nextDepositMode !== 'none' && !wasChargingDeposit) ||
-      (nextApptUpfront !== undefined && nextApptUpfront !== 'at_venue' && !wasChargingAppt) ||
-      (nextClassUpfront !== undefined && nextClassUpfront !== 'at_venue' && !wasChargingClass)
-  }
-  if (enablesCharging && !(await canVenueChargeOnline(venueId))) {
-    throw new BadRequestError(
-      'Necesitas dar de alta un proveedor de e-commerce (Stripe/Mercado Pago) para cobrar o pre-cobrar reservaciones.',
-    )
-  }
+    if (enablesCharging && !(await canVenueChargeOnline(venueId))) {
+      throw new BadRequestError(
+        'Necesitas dar de alta un proveedor de e-commerce (Stripe/Mercado Pago) para cobrar o pre-cobrar reservaciones.',
+      )
+    }
 
-  const settings = await prisma.reservationSettings.upsert({
-    where: { venueId },
-    create: { venueId, ...(normalized as any) },
-    update: normalized,
+    const wasStaffAware = current?.capacityMode === 'per_staff' || current?.showStaffPicker === true
+    const nextCapacityMode = typeof normalized.capacityMode === 'string' ? normalized.capacityMode : (current?.capacityMode ?? 'pacing')
+    const nextShowStaffPicker =
+      typeof normalized.showStaffPicker === 'boolean' ? normalized.showStaffPicker : (current?.showStaffPicker ?? false)
+    const activatesStaffAware = !wasStaffAware && (nextCapacityMode === 'per_staff' || nextShowStaffPicker)
+
+    if (activatesStaffAware) {
+      const unmappedServices = await tx.product.findMany({
+        where: {
+          venueId,
+          type: 'APPOINTMENTS_SERVICE',
+          active: true,
+          deletedAt: null,
+          productStaff: { none: { venueId } },
+        },
+        select: { id: true },
+        orderBy: { id: 'asc' },
+      })
+      if (unmappedServices.length > 0) {
+        const serviceIds = unmappedServices.map(service => service.id).sort()
+        throw new BadRequestError(`Los siguientes servicios de cita no tienen profesionistas asignados: ${serviceIds.join(', ')}`)
+      }
+
+      await lockAppointmentVenue(tx, venueId)
+      const checkedAt = new Date()
+      const unstaffedReservations = await tx.reservation.findMany({
+        where: {
+          venueId,
+          assignedStaffId: null,
+          classSessionId: null,
+          status: { in: ['PENDING', 'CONFIRMED', 'CHECKED_IN'] },
+          endsAt: { gt: checkedAt },
+          product: { type: 'APPOINTMENTS_SERVICE' },
+        },
+        select: { confirmationCode: true },
+        orderBy: { confirmationCode: 'asc' },
+      })
+      if (unstaffedReservations.length > 0) {
+        throw new ConflictError('Hay citas futuras sin profesionista asignado.', undefined, {
+          confirmationCodes: unstaffedReservations.map(reservation => reservation.confirmationCode).sort(),
+        })
+      }
+
+      const nullStaffHolds = await tx.slotHold.findMany({
+        where: {
+          venueId,
+          classSessionId: null,
+          staffId: null,
+          productIds: { isEmpty: false },
+          expiresAt: { gt: checkedAt },
+        },
+        select: {
+          expiresAt: true,
+          heldForReservationId: true,
+          heldForReservation: { select: { status: true } },
+        },
+      })
+      if (nullStaffHolds.some(hold => isLiveSlotHold(hold, checkedAt))) {
+        throw new ConflictError('Hay clientes reservando en este momento; intenta de nuevo en unos minutos.')
+      }
+    }
+
+    return tx.reservationSettings.upsert({
+      where: { venueId },
+      create: { venueId, ...(normalized as Prisma.ReservationSettingsCreateInput) },
+      update: normalized,
+    })
   })
 
   logAction({
@@ -533,8 +576,4 @@ function getDefaultConfig(): ReservationConfig {
     },
     operatingHours: getDefaultOperatingHours(),
   }
-}
-
-export function isStaffAware(settings: ReservationConfig): boolean {
-  return settings.scheduling.capacityMode === 'per_staff' || settings.publicBooking.showStaffPicker === true
 }

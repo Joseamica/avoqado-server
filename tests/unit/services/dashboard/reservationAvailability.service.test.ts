@@ -699,6 +699,15 @@ describe('Reservation Availability Service', () => {
         expect(result.find(slot => slot.startsAt.getUTCHours() === 12)).toBeDefined()
       })
 
+      it('ignores Product.eventCapacity for appointment availability', async () => {
+        primeStaffAwareAvailability()
+        prismaMock.product.findFirst.mockResolvedValue({ eventCapacity: 1, type: 'APPOINTMENTS_SERVICE' })
+
+        const result = await getSlots({ productId: 'product-1', productIds: ['product-1'], partySize: 2 }, staffAwareConfig())
+
+        expect(result.length).toBeGreaterThan(0)
+      })
+
       it('counts staggered appointment overlaps conservatively rather than using peak concurrency', async () => {
         primeStaffAwareAvailability({
           existingReservations: [

@@ -261,7 +261,7 @@ export async function getAvailableSlots(
       select: { eventCapacity: true, type: true },
     })
     productType = product?.type ?? null
-    if (product?.eventCapacity) {
+    if (product?.eventCapacity && productType !== 'APPOINTMENTS_SERVICE') {
       productCapacity = Math.floor((product.eventCapacity * onlineCapacityPercent) / 100)
     }
   }

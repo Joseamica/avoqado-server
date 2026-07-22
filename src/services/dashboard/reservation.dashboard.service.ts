@@ -24,6 +24,7 @@ import { withSerializableRetry } from '@/utils/serializableRetry'
 import {
   assertLegacyAppointmentDurationFloor,
   normalizeBookedProductIds,
+  reservationBookedProductIds,
   resolveAppointmentWindow,
 } from '@/services/reservation/resolveAppointmentWindow'
 import {
@@ -1339,6 +1340,12 @@ export interface UpdateReservationInput {
   tags?: string[]
 }
 
+interface UpdateReservationOptions {
+  fixedDuration?: 'staff-aware-appointments' | 'always'
+  requireAppointment?: boolean
+  enforceLegacyAppointmentPacing?: boolean
+}
+
 type ReservationHoldIdentity = {
   startsAt: number
   endsAt: number
@@ -1419,6 +1426,7 @@ export async function updateReservation(
   data: UpdateReservationInput,
   context: ReservationWriteContext,
   updatedById: string,
+  options: UpdateReservationOptions = {},
 ) {
   const updated = await withSerializableRetry(async tx => {
     const settings = await getReservationSettings(venueId, tx)
@@ -1434,7 +1442,6 @@ export async function updateReservation(
     }
 
     const newStartsAt = data.startsAt ?? reservation.startsAt
-    const newEndsAt = data.endsAt ?? reservation.endsAt
     const newTableId = data.tableId !== undefined ? data.tableId : reservation.tableId
     const newStaffId = data.assignedStaffId !== undefined ? data.assignedStaffId : reservation.assignedStaffId
     const productIdentity = synchronizeUpdatedProductIdentity(reservation, data.productId)
@@ -1442,18 +1449,50 @@ export async function updateReservation(
     const newProductIds = productIdentity.productIds
     const newPartySize = data.partySize ?? reservation.partySize
 
+    const { product } = await validateResourceOwnership(tx, venueId, {
+      tableId: newTableId,
+      productId: newProductId,
+    })
+    let oldProductType: string | undefined
+    if (reservation.productId === newProductId) {
+      oldProductType = product?.type
+    } else if (reservation.productId) {
+      const oldProduct = await tx.product.findFirst({
+        where: { id: reservation.productId, venueId },
+        select: { type: true },
+      })
+      oldProductType = oldProduct?.type
+    }
+    const oldIsAppointment = reservation.classSessionId === null && oldProductType === 'APPOINTMENTS_SERVICE'
+    const newIsAppointment = reservation.classSessionId === null && product?.type === 'APPOINTMENTS_SERVICE'
+    const isAppointmentReservation = oldIsAppointment || newIsAppointment
+    const staffAware = isStaffAware(settings)
+
+    if (options.requireAppointment && !newIsAppointment) {
+      throw new BadRequestError('Esta función es solo para citas. Las clases se reagendan por sesión.')
+    }
+
+    const useLockedDuration =
+      options.fixedDuration === 'always' || (options.fixedDuration === 'staff-aware-appointments' && isAppointmentReservation && staffAware)
+    let newEndsAt = data.endsAt ?? reservation.endsAt
+    let finalDuration: number
+    if (useLockedDuration) {
+      finalDuration = reservation.duration
+      newEndsAt = new Date(newStartsAt.getTime() + finalDuration * 60_000)
+    } else {
+      const calculatedDuration = Math.round((newEndsAt.getTime() - newStartsAt.getTime()) / 60_000)
+      finalDuration =
+        data.duration !== undefined
+          ? data.duration
+          : data.startsAt !== undefined || data.endsAt !== undefined
+            ? calculatedDuration
+            : reservation.duration
+    }
+
     if (!Number.isFinite(newStartsAt.getTime()) || !Number.isFinite(newEndsAt.getTime()) || newEndsAt <= newStartsAt) {
       throw new BadRequestError('La fecha de fin debe ser posterior a la fecha de inicio')
     }
-
     const effectiveIntervalMs = newEndsAt.getTime() - newStartsAt.getTime()
-    const calculatedDuration = Math.round(effectiveIntervalMs / 60_000)
-    const finalDuration =
-      data.duration !== undefined
-        ? data.duration
-        : data.startsAt !== undefined || data.endsAt !== undefined
-          ? calculatedDuration
-          : reservation.duration
     if (!Number.isInteger(finalDuration) || finalDuration < 1 || finalDuration > 1_440) {
       throw new BadRequestError('La duracion debe estar entre 1 y 1440 minutos')
     }
@@ -1480,31 +1519,65 @@ export async function updateReservation(
       await lockTaggedRescheduleSiblings(tx, { venueId, reservationId: reservation.id })
     }
 
-    const { product } = await validateResourceOwnership(tx, venueId, {
-      tableId: newTableId,
-      productId: newProductId,
-    })
-    let oldProductType: string | undefined
-    if (reservation.productId === newProductId) {
-      oldProductType = product?.type
-    } else if (reservation.productId) {
-      const oldProduct = await tx.product.findFirst({
-        where: { id: reservation.productId, venueId },
-        select: { type: true },
-      })
-      oldProductType = oldProduct?.type
-    }
-    const oldIsAppointment = reservation.classSessionId === null && oldProductType === 'APPOINTMENTS_SERVICE'
-    const newIsAppointment = reservation.classSessionId === null && product?.type === 'APPOINTMENTS_SERVICE'
-    const isAppointmentReservation = oldIsAppointment || newIsAppointment
-
-    if (productIdentity.changed && isAppointmentReservation && isStaffAware(settings)) {
+    if (productIdentity.changed && isAppointmentReservation && staffAware) {
       throw new BadRequestError('No se pueden cambiar los servicios de una cita con profesionistas activos. Cancela y crea una nueva.')
     }
 
-    const maxAllowed = isAppointmentReservation && isStaffAware(settings) ? 1_440 : Math.max(480, reservation.duration)
+    const maxAllowed = isAppointmentReservation && staffAware ? 1_440 : Math.max(480, reservation.duration)
     if (finalDuration > maxAllowed) {
       throw new BadRequestError(`La duracion no puede exceder ${maxAllowed} minutos`)
+    }
+
+    const windowChanged =
+      reservation.startsAt.getTime() !== newStartsAt.getTime() ||
+      reservation.endsAt.getTime() !== newEndsAt.getTime() ||
+      reservation.duration !== finalDuration
+    const staffChanged = reservation.assignedStaffId !== newStaffId
+    const checkedAt = new Date()
+    let overCapacity = false
+
+    if (isAppointmentReservation && staffAware && (windowChanged || staffChanged)) {
+      if (!newStaffId) {
+        throw new ConflictError('La cita necesita un profesionista disponible para ese horario')
+      }
+      await assertStaffEligibleForPersistedProducts(tx, {
+        venueId,
+        staffId: newStaffId,
+        productIds: reservationBookedProductIds({ productId: newProductId, productIds: newProductIds }),
+        startsAt: newStartsAt,
+        endsAt: newEndsAt,
+        checkedAt,
+        settings,
+        excludeReservationId: reservation.id,
+      })
+    }
+
+    const pacingLimit = staffAware
+      ? settings.scheduling.pacingMaxPerSlot
+      : options.enforceLegacyAppointmentPacing
+        ? effectiveAppointmentPacing(settings.scheduling.pacingMaxPerSlot)
+        : null
+    if (isAppointmentReservation && windowChanged && pacingLimit !== null) {
+      const limit = pacingLimit
+      const occupancyResult = await countAppointmentOccupancy(tx, {
+        venueId,
+        startsAt: newStartsAt,
+        endsAt: newEndsAt,
+        checkedAt,
+        excludeReservationId: reservation.id,
+      })
+      const occupancy = occupancyResult.reservations + occupancyResult.holds
+      if (occupancy >= limit) {
+        if (!staffAware || context.writeOrigin !== 'DASHBOARD') {
+          throw new ConflictError('Este horario ya no está disponible. Por favor elige otro horario.')
+        }
+        if (!context.allowOverCapacity) {
+          throw new ConflictError('El horario está lleno. Confirma si deseas sobre-agendar.', 'OVER_CAPACITY_CONFIRMATION_REQUIRED', {
+            preview: { startsAt: newStartsAt, endsAt: newEndsAt, occupancy, limit },
+          })
+        }
+        overCapacity = true
+      }
     }
 
     // Layer 0: External calendar busy-block check against the NEW (target)
@@ -1555,7 +1628,7 @@ export async function updateReservation(
       }
     }
 
-    if (newProductId && product?.eventCapacity) {
+    if (!isAppointmentReservation && newProductId && product?.eventCapacity) {
       const onlinePercent = settings.scheduling.onlineCapacityPercent
       const effectiveCapacity = Math.floor((product.eventCapacity * onlinePercent) / 100)
 
@@ -1586,8 +1659,8 @@ export async function updateReservation(
     const updated = await tx.reservation.update({
       where: { id: reservationId },
       data: {
-        ...(data.startsAt !== undefined && { startsAt: data.startsAt }),
-        ...(data.endsAt !== undefined && { endsAt: data.endsAt }),
+        ...(data.startsAt !== undefined && { startsAt: newStartsAt }),
+        ...((data.endsAt !== undefined || useLockedDuration) && { endsAt: newEndsAt }),
         duration: finalDuration,
         ...(data.guestName !== undefined && { guestName: data.guestName }),
         ...(data.guestPhone !== undefined && { guestPhone: data.guestPhone }),
@@ -1628,7 +1701,7 @@ export async function updateReservation(
       }
     }
 
-    return { updated, pushRowIds }
+    return { updated, pushRowIds, overCapacity }
   })
 
   logger.info(`✅ [RESERVATION] Updated ${updated.updated.confirmationCode} by=${updatedById} origin=${context.writeOrigin}`)
@@ -1652,7 +1725,7 @@ export async function updateReservation(
     data: { confirmationCode: updated.updated.confirmationCode },
   })
 
-  return updated.updated
+  return updated.overCapacity ? { ...updated.updated, overCapacity: true as const } : updated.updated
 }
 
 // ---- Reschedule ----
@@ -1696,6 +1769,7 @@ export async function rescheduleReservation(
     { startsAt: newStartsAt, endsAt: newEndsAt, duration },
     context,
     rescheduledBy,
+    { fixedDuration: 'staff-aware-appointments' },
   )
 
   const channel = data.notificationChannel
@@ -2009,40 +2083,18 @@ export async function rescheduleAppointmentReservation(args: {
     },
   })
   if (!reservation) throw new NotFoundError('Reservacion no encontrada')
-  if (reservation.classSessionId) {
-    throw new BadRequestError('Esta función es solo para citas. Las clases se reagendan por sesión.')
-  }
-  if (reservation.status !== 'CONFIRMED' && reservation.status !== 'PENDING') {
-    throw new BadRequestError(`No puedes cambiar el horario de una reserva ${reservation.status}`)
-  }
-
-  // Same service + same extras → duration is fixed. Derive the new end.
-  const newEndsAt = new Date(newStartsAt.getTime() + reservation.duration * 60_000)
-
-  // Transitional until Task 7D: the no-hold Ops/MCP pacing preflight remains
-  // outside the authoritative update transaction and excludes the reservation itself.
-  const settings = await getReservationSettings(venueId)
-  const pacingMax = effectiveAppointmentPacing(settings.scheduling?.pacingMaxPerSlot)
-  const { reservations, holds } = await countAppointmentOccupancy(prisma, {
-    venueId,
-    startsAt: newStartsAt,
-    endsAt: newEndsAt,
-    excludeReservationId: reservationId,
-  })
-  if (reservations + holds >= pacingMax) {
-    throw new ConflictError('Ese horario ya no está disponible, elige otro.')
-  }
 
   const originalStartsAt = reservation.startsAt
 
-  // The actual move: serializable table/staff/capacity overlap check that
-  // excludes self (id <> reservationId) + Google Calendar UPDATE outbox op.
+  // The pre-read above is presentation-only. Status, appointment type,
+  // historical duration and capacity are all authoritative from the locked row.
   const updated = await updateReservation(
     venueId,
     reservationId,
-    { startsAt: newStartsAt, endsAt: newEndsAt, duration: reservation.duration },
+    { startsAt: newStartsAt },
     { writeOrigin, allowOverCapacity },
     rescheduledBy,
+    { fixedDuration: 'always', requireAppointment: true, enforceLegacyAppointmentPacing: true },
   )
 
   // Notify the customer of the new time — WhatsApp + email, both best-effort.
@@ -2089,7 +2141,7 @@ export async function rescheduleAppointmentReservation(args: {
     action: 'RESERVATION_RESCHEDULED',
     entity: 'Reservation',
     entityId: updated.id,
-    data: { startsAt: newStartsAt, endsAt: newEndsAt, confirmationCode: updated.confirmationCode, by: rescheduledBy },
+    data: { startsAt: updated.startsAt, endsAt: updated.endsAt, confirmationCode: updated.confirmationCode, by: rescheduledBy },
   })
 
   return {
