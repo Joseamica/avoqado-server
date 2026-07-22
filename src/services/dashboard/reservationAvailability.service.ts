@@ -135,6 +135,8 @@ export async function getAvailableSlots(
     publicBooking: { showStaffPicker: false, ...moduleConfig?.publicBooking },
   } as ReservationConfig
   const staffAware = isStaffAware(normalizedSettings)
+  const legacyRescheduleStaffId =
+    !staffAware && options.fixedDurationMin !== undefined && options.staffId !== undefined ? options.staffId : undefined
   const requestedProductIds = [
     ...new Set((options.productIds ?? (options.productId ? [options.productId] : [])).map(id => id.trim()).filter(Boolean)),
   ]
@@ -242,6 +244,7 @@ export async function getAvailableSlots(
       ? Promise.resolve([])
       : prisma.staff.findMany({
           where: {
+            ...(legacyRescheduleStaffId !== undefined ? { id: legacyRescheduleStaffId, active: true } : {}),
             venues: { some: { venueId, active: true } },
           },
           select: { id: true, firstName: true, lastName: true },
@@ -410,6 +413,7 @@ export async function getAvailableSlots(
       const busyStaffIds = new Set(overlapping.map(r => r.assignedStaffId).filter(Boolean))
       slotAvailableStaff = staff.filter(s => !busyStaffIds.has(s.id))
     }
+    if (legacyRescheduleStaffId !== undefined && slotAvailableStaff.length === 0) continue
 
     if (staffAware && pacingFull) {
       if (options.includeFull === true) {

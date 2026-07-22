@@ -406,6 +406,50 @@ describe('Reservation Availability Service', () => {
       expect(result.length).toBe(27)
     })
 
+    describe('legacy reschedule staff eligibility', () => {
+      it('returns no slots when the current staff venue membership is inactive', async () => {
+        prismaMock.reservation.findMany.mockResolvedValue([])
+        prismaMock.table.findMany.mockResolvedValue([])
+        // Prisma excludes this staff member because the existing relation filter
+        // requires an active StaffVenue membership.
+        prismaMock.staff.findMany.mockResolvedValue([])
+
+        const result = await getSlots({ staffId: 'staff-1', fixedDurationMin: 60 })
+
+        expect(result).toEqual([])
+        expect(prismaMock.staff.findMany).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: expect.objectContaining({
+              venues: { some: { venueId: VENUE_ID, active: true } },
+            }),
+          }),
+        )
+      })
+
+      it('returns no slots when the current staff account is inactive', async () => {
+        prismaMock.reservation.findMany.mockResolvedValue([])
+        prismaMock.table.findMany.mockResolvedValue([])
+        // Simulate Prisma query semantics: without Staff.active=true the legacy
+        // query returns the inactive account; with the guard it returns none.
+        prismaMock.staff.findMany.mockImplementation(({ where }: any) =>
+          Promise.resolve(where?.active === true ? [] : [createMockStaff({ id: 'staff-1' })]),
+        )
+
+        const result = await getSlots({ staffId: 'staff-1', fixedDurationMin: 60 })
+
+        expect(result).toEqual([])
+        expect(prismaMock.staff.findMany).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: expect.objectContaining({
+              id: 'staff-1',
+              active: true,
+              venues: { some: { venueId: VENUE_ID, active: true } },
+            }),
+          }),
+        )
+      })
+    })
+
     // ============================================================
     // ExternalBusyBlock integration (Phase 1 — Task 27)
     // ============================================================
