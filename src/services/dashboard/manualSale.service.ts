@@ -63,13 +63,61 @@ type TxResult =
   | { ok: true; orderId: string; verificationId: string; venueId: string; audit: ManualSaleAuditPayload }
   | { ok: false; error: string }
 
+const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
+
+/**
+ * A transient DB error is one where a retry can succeed unchanged — a dropped
+ * connection or a database that is briefly restarting/in-recovery (Render's small
+ * Postgres instances OOM-restart and take a few seconds to come back). NOT retried:
+ * resolver failures (bad ICCID, unknown seller) which are returned, never thrown.
+ */
+function isTransientDbError(err: unknown): boolean {
+  const message = (err as Error)?.message ?? ''
+  const code = (err as { code?: string })?.code
+  return (
+    /closed the connection|recovery mode|not yet accepting connections|Connection terminated|Can't reach database server|the database system is starting up|ECONNREFUSED|ECONNRESET/i.test(
+      message,
+    ) || ['P1001', 'P1002', 'P1008', 'P1017'].includes(code ?? '')
+  )
+}
+
+/**
+ * Runs `fn` (the sale transaction), retrying up to `attempts` times ONLY on a
+ * transient DB error, with exponential backoff (300ms/600ms/1200ms). The tx rolls
+ * back fully on throw and `resolveIccid` re-checks AVAILABLE, so a retry is safe and
+ * can't double-sell. This stops a ~5s DB blip mid-upload from dropping sales (prod
+ * 2026-07-21: the DB OOM-restarted and 9 rows were lost — infra, not logic).
+ */
+async function runTxWithRetry<T>(fn: () => Promise<T>, iccid: string, attempts = 3): Promise<T> {
+  let lastErr: unknown
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await fn()
+    } catch (err) {
+      lastErr = err
+      if (attempt < attempts && isTransientDbError(err)) {
+        const backoffMs = 300 * 2 ** (attempt - 1)
+        logger.warn(
+          `[MANUAL SALE] transient DB error on iccid=${iccid} (attempt ${attempt}/${attempts}), retrying in ${backoffMs}ms: ${(err as Error).message}`,
+        )
+        await sleep(backoffMs)
+        continue
+      }
+      throw err
+    }
+  }
+  throw lastErr
+}
+
 export async function createOneManualSale(
   orgId: string,
   actorStaffId: string,
   row: ManualSaleRowInput,
 ): Promise<CreateOneManualSaleResult> {
   try {
-    const result: TxResult = await prisma.$transaction(async (tx): Promise<TxResult> => {
+    const result: TxResult = await runTxWithRetry<TxResult>(
+      () =>
+        prisma.$transaction(async (tx): Promise<TxResult> => {
       // 1. Resolve the SIM (org-level; markAsSold sets sellingVenueId later).
       const iccidResult = await resolveIccid(orgId, row.iccid, tx)
       if (isError(iccidResult)) return { ok: false as const, error: iccidResult.error }
@@ -214,7 +262,9 @@ export async function createOneManualSale(
       }
 
       return { ok: true, orderId: order.id, verificationId: verification.id, venueId: venue.id, audit }
-    })
+        }),
+      row.iccid,
+    )
 
     if (!result.ok) return { ok: false, error: result.error }
 

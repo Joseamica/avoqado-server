@@ -249,4 +249,30 @@ describe('manualSale.service — createOneManualSale', () => {
     expect(tx.order.create).not.toHaveBeenCalled()
     expect(markAsSoldMock).not.toHaveBeenCalled()
   })
+
+  // ── TRANSIENT-DB RETRY (prod 2026-07-21: DB OOM-restarted mid-upload, 9 rows lost) ──
+  it('retries the transaction on a transient DB error and then succeeds', async () => {
+    stubResolversHappy()
+    const tx = makeTxClient()
+    // 1st attempt: DB dropped the connection (transient) → must retry.
+    // 2nd attempt: runs the tx normally against the happy tx client.
+    ;(prismaMock.$transaction as jest.Mock)
+      .mockRejectedValueOnce(new Error('Server has closed the connection.'))
+      .mockImplementationOnce(async (cb: any) => cb(tx))
+
+    const result = await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, baseRow)
+
+    expect(result.ok).toBe(true)
+    expect(prismaMock.$transaction as jest.Mock).toHaveBeenCalledTimes(2)
+  })
+
+  it('does NOT retry a non-transient error (fails after a single attempt)', async () => {
+    stubResolversHappy()
+    ;(prismaMock.$transaction as jest.Mock).mockRejectedValue(new Error('some unexpected bug in the code'))
+
+    const result = await createOneManualSale(ORG_ID, ACTOR_STAFF_ID, baseRow)
+
+    expect(result).toEqual({ ok: false, error: 'No se pudo registrar la venta' })
+    expect(prismaMock.$transaction as jest.Mock).toHaveBeenCalledTimes(1)
+  })
 })
