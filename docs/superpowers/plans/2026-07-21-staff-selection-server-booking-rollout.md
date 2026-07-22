@@ -92,7 +92,7 @@ Assert a 60-minute appointment plus 15-minute modifier persists final 75 under `
 
 - [ ] **Step 4: Implement canonical create branching**
 
-Normalize once at the HTTP boundary and pass both canonical IDs and `productIdsWasProvided`. In the core:
+Controllers explicitly map the validated wire fields, but `createReservation` is the sole mutation authority: it calls `normalizeBookedProductIds` once and retains the returned canonical IDs plus `productIdsWasProvided`. In the core:
 
 ```typescript
 const bookedProductIds = normalizeBookedProductIds(data).productIds
@@ -128,7 +128,7 @@ if (data.windowSemantics === 'base') {
 }
 ```
 
-Persist `productId = bookedProductIds[0]` and `productIds = data.productIdsWasProvided ? bookedProductIds : []` in the original `reservation.create`; delete any post-commit stamping path. Use resolved final interval for all conflicts, deposits, persistence, and calendar outbox.
+Persist `productId = leadProductId ?? null` and `productIds = productIdsWasProvided ? bookedProductIds : []` in the original `reservation.create`; delete any post-commit stamping path. Use the resolved final interval for all conflicts, deposits, persistence, and calendar outbox.
 
 - [ ] **Step 5: Write RED tests for two independent capacity gates**
 
