@@ -596,18 +596,50 @@ describe('resolveStaffAssignment', () => {
     ])
   })
 
-  it('does not cross-product candidate venue scopes when only B conflicts in a B-only venue', async () => {
+  it('keeps A free while B is busy in a venue owned only by B', async () => {
     const tx = allocatorTx()
+    tx.staffVenue.findMany.mockReset()
+    tx.staffVenue.findMany
+      .mockResolvedValueOnce([
+        {
+          id: 'sv-b',
+          staffId: 'staff-b',
+          startDate: new Date('2024-01-01T00:00:00Z'),
+          venue: { organizationId: 'org-1', timezone: 'America/Mexico_City' },
+        },
+        {
+          id: 'sv-a',
+          staffId: 'staff-a',
+          startDate: new Date('2024-01-01T00:00:00Z'),
+          venue: { organizationId: 'org-1', timezone: 'America/Mexico_City' },
+        },
+      ])
+      .mockResolvedValueOnce([
+        { staffId: 'staff-a', venueId: 'venue-1' },
+        { staffId: 'staff-b', venueId: 'venue-1' },
+        { staffId: 'staff-b', venueId: 'venue-b-only' },
+      ])
     tx.productStaff.findMany.mockResolvedValue([
       { productId: 'product-1', staffVenueId: 'sv-a' },
       { productId: 'product-1', staffVenueId: 'sv-b' },
     ])
-    tx.reservation.findMany.mockResolvedValue([{ assignedStaffId: 'staff-b', venueId: 'venue-b-only' }])
+    const storedReservations = [
+      { assignedStaffId: 'staff-a', venueId: 'venue-b-only' },
+      { assignedStaffId: 'staff-b', venueId: 'venue-b-only' },
+    ]
+    let selectedReservations: Array<{ assignedStaffId: string }> = []
+    tx.reservation.findMany.mockImplementation(({ where }: any) => {
+      if (!Array.isArray(where.OR)) throw new Error('Allocator reservation query must keep candidate scopes correlated')
+      selectedReservations = storedReservations
+        .filter(row =>
+          where.OR.some((branch: any) => branch.assignedStaffId === row.assignedStaffId && branch.venueId.in.includes(row.venueId)),
+        )
+        .map(row => ({ assignedStaffId: row.assignedStaffId }))
+      return selectedReservations
+    })
+
     await expect(resolveStaffAssignment(tx, args)).resolves.toBe('staff-a')
-    const predicate = tx.reservation.findMany.mock.calls[0][0].where.OR
-    expect(predicate).toContainEqual({ assignedStaffId: 'staff-a', venueId: { in: ['venue-1', 'venue-inactive'] } })
-    expect(predicate).toContainEqual({ assignedStaffId: 'staff-b', venueId: { in: ['venue-1', 'venue-b-only'] } })
-    expect(predicate.find((branch: any) => branch.assignedStaffId === 'staff-a').venueId.in).not.toContain('venue-b-only')
+    expect(selectedReservations).toEqual([{ assignedStaffId: 'staff-b' }])
   })
 
   it('maps an invalid candidate venue timezone to generic allocator exhaustion', async () => {
