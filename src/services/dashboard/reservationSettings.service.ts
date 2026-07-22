@@ -48,6 +48,7 @@ export interface ReservationConfig {
     noShowGraceMin: number
     pacingMaxPerSlot: number | null
     onlineCapacityPercent: number
+    capacityMode: 'pacing' | 'per_staff'
   }
   deposits: {
     enabled: boolean
@@ -94,6 +95,7 @@ export interface ReservationConfig {
     requirePhone: boolean
     requireEmail: boolean
     requireAccount: boolean
+    showStaffPicker: boolean
   }
   /**
    * Google Calendar Sync (Phase 2) — controls per-venue behavior when staff or
@@ -128,6 +130,7 @@ type ReservationSettingsUpdateInput = Partial<{
   noShowGraceMin: number
   pacingMaxPerSlot: number | null
   onlineCapacityPercent: number
+  capacityMode: 'pacing' | 'per_staff'
   depositMode: string
   depositFixedAmount: number | null
   depositPercentage: number | null
@@ -141,6 +144,7 @@ type ReservationSettingsUpdateInput = Partial<{
   requirePhone: boolean
   requireEmail: boolean
   requireAccount: boolean
+  showStaffPicker: boolean
   allowCustomerCancel: boolean
   minHoursBeforeCancel: number | null
   minHoursBeforeStart: number | null
@@ -177,8 +181,11 @@ type ReservationSettingsUpdateInput = Partial<{
  * Get reservation settings for a venue, creating defaults if not found.
  * Returns a config object compatible with the previous moduleConfig shape.
  */
-export async function getReservationSettings(venueId: string): Promise<ReservationConfig> {
-  const settings = await prisma.reservationSettings.findUnique({
+export async function getReservationSettings(
+  venueId: string,
+  client: Prisma.TransactionClient | typeof prisma = prisma,
+): Promise<ReservationConfig> {
+  const settings = await client.reservationSettings.findUnique({
     where: { venueId },
   })
 
@@ -197,6 +204,7 @@ export async function getReservationSettings(venueId: string): Promise<Reservati
       noShowGraceMin: settings.noShowGraceMin,
       pacingMaxPerSlot: settings.pacingMaxPerSlot,
       onlineCapacityPercent: settings.onlineCapacityPercent,
+      capacityMode: settings.capacityMode === 'per_staff' ? 'per_staff' : 'pacing',
     },
     deposits: {
       enabled: settings.depositMode !== 'none',
@@ -238,6 +246,7 @@ export async function getReservationSettings(venueId: string): Promise<Reservati
       requirePhone: settings.requirePhone,
       requireEmail: settings.requireEmail,
       requireAccount: settings.requireAccount ?? false,
+      showStaffPicker: settings.showStaffPicker ?? false,
     },
     googleCalendar: {
       pushEnabled: settings.googleCalendarPushEnabled,
@@ -345,6 +354,7 @@ function normalizeReservationSettingsUpdate(data: ReservationSettingsUpdateInput
   if (data.noShowGraceMin !== undefined) normalized.noShowGraceMin = data.noShowGraceMin
   if (data.pacingMaxPerSlot !== undefined) normalized.pacingMaxPerSlot = data.pacingMaxPerSlot
   if (data.onlineCapacityPercent !== undefined) normalized.onlineCapacityPercent = data.onlineCapacityPercent
+  if (data.capacityMode !== undefined) normalized.capacityMode = data.capacityMode
   if (data.depositMode !== undefined) normalized.depositMode = data.depositMode
   if (data.depositFixedAmount !== undefined) normalized.depositFixedAmount = data.depositFixedAmount
   if (data.depositPercentage !== undefined) normalized.depositPercentage = data.depositPercentage
@@ -358,6 +368,7 @@ function normalizeReservationSettingsUpdate(data: ReservationSettingsUpdateInput
   if (data.requirePhone !== undefined) normalized.requirePhone = data.requirePhone
   if (data.requireEmail !== undefined) normalized.requireEmail = data.requireEmail
   if (data.requireAccount !== undefined) normalized.requireAccount = data.requireAccount
+  if (data.showStaffPicker !== undefined) normalized.showStaffPicker = data.showStaffPicker
   if (data.allowCustomerCancel !== undefined) normalized.allowCustomerCancel = data.allowCustomerCancel
   if (data.minHoursBeforeCancel !== undefined) normalized.minHoursBeforeCancel = data.minHoursBeforeCancel
   if (data.minHoursBeforeStart !== undefined) normalized.minHoursBeforeCancel = data.minHoursBeforeStart
@@ -385,6 +396,7 @@ function normalizeReservationSettingsUpdate(data: ReservationSettingsUpdateInput
     if (data.scheduling.noShowGraceMin !== undefined) normalized.noShowGraceMin = data.scheduling.noShowGraceMin
     if (data.scheduling.pacingMaxPerSlot !== undefined) normalized.pacingMaxPerSlot = data.scheduling.pacingMaxPerSlot
     if (data.scheduling.onlineCapacityPercent !== undefined) normalized.onlineCapacityPercent = data.scheduling.onlineCapacityPercent
+    if (data.scheduling.capacityMode !== undefined) normalized.capacityMode = data.scheduling.capacityMode
   }
 
   if (data.deposits) {
@@ -400,6 +412,7 @@ function normalizeReservationSettingsUpdate(data: ReservationSettingsUpdateInput
     if (data.publicBooking.requirePhone !== undefined) normalized.requirePhone = data.publicBooking.requirePhone
     if (data.publicBooking.requireEmail !== undefined) normalized.requireEmail = data.publicBooking.requireEmail
     if (data.publicBooking.requireAccount !== undefined) normalized.requireAccount = data.publicBooking.requireAccount
+    if (data.publicBooking.showStaffPicker !== undefined) normalized.showStaffPicker = data.publicBooking.showStaffPicker
   }
 
   if (data.cancellation) {
@@ -468,6 +481,7 @@ function getDefaultConfig(): ReservationConfig {
       noShowGraceMin: 15,
       pacingMaxPerSlot: null,
       onlineCapacityPercent: 100,
+      capacityMode: 'pacing',
     },
     deposits: {
       enabled: false,
@@ -508,6 +522,7 @@ function getDefaultConfig(): ReservationConfig {
       requirePhone: true,
       requireEmail: false,
       requireAccount: false,
+      showStaffPicker: false,
     },
     googleCalendar: {
       pushEnabled: true,
@@ -518,4 +533,8 @@ function getDefaultConfig(): ReservationConfig {
     },
     operatingHours: getDefaultOperatingHours(),
   }
+}
+
+export function isStaffAware(settings: ReservationConfig): boolean {
+  return settings.scheduling.capacityMode === 'per_staff' || settings.publicBooking.showStaffPicker === true
 }

@@ -4,12 +4,14 @@ class AppError extends Error {
   public isOperational: boolean
   public status: string // 'fail' or 'error'
   public code?: string // Error code for frontend detection (Stripe/GitHub pattern)
+  public details?: unknown
 
-  constructor(message: string, statusCode: number, isOperational: boolean = true, code?: string) {
+  constructor(message: string, statusCode: number, isOperational: boolean = true, code?: string, details?: unknown) {
     super(message)
     this.statusCode = statusCode
     this.isOperational = isOperational
     this.code = code
+    this.details = details
     // Adjusted status logic: 4xx is 'fail', 5xx is 'error'
     this.status = statusCode >= 400 && statusCode < 500 ? 'fail' : statusCode >= 500 && statusCode < 600 ? 'error' : 'error'
 
@@ -36,8 +38,8 @@ export class NotFoundError extends AppError {
 }
 
 export class ConflictError extends AppError {
-  constructor(message: string = 'Conflicto de recurso') {
-    super(message, 409)
+  constructor(message: string = 'Conflicto de recurso', code?: string, details?: unknown) {
+    super(message, 409, true, code, details)
   }
 }
 
@@ -92,8 +94,6 @@ export class IncompatibleDeviceError extends AppError {
  * to confirm. On confirm, it re-issues the PATCH with `forceUnassign: true`,
  * which prunes the incompatible merchants atomically with the brand change.
  *
- * Carrying structured detail on an AppError is intentional — the global error
- * handler serializes `details` into the JSON response.
  */
 export class TerminalBrandChangeBlocked extends AppError {
   public details: { incompatibleMerchants: Array<{ id: string; name: string; code: string }> }

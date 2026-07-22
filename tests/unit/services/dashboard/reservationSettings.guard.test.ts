@@ -15,7 +15,11 @@
  * charging modes) is allowed; only a genuine off→on transition is blocked.
  */
 import { prismaMock } from '../../../__helpers__/setup'
-import { updateReservationSettings } from '../../../../src/services/dashboard/reservationSettings.service'
+import {
+  getReservationSettings,
+  isStaffAware,
+  updateReservationSettings,
+} from '../../../../src/services/dashboard/reservationSettings.service'
 import { BadRequestError } from '../../../../src/errors/AppError'
 
 const VENUE = 'v-guard-1'
@@ -124,5 +128,112 @@ describe('updateReservationSettings — online-charging guard', () => {
       await updateReservationSettings(VENUE, { classUpfrontDefault: 'required' })
       expect(prismaMock.reservationSettings.upsert).toHaveBeenCalledTimes(1)
     })
+  })
+})
+
+describe('reservation staff-aware settings', () => {
+  beforeEach(() => {
+    prismaMock.reservationSettings.upsert.mockResolvedValue({ id: 'rs-staff-aware' } as never)
+  })
+
+  it('keeps legacy-safe defaults and accepts a transaction client', async () => {
+    const client = {
+      reservationSettings: { findUnique: jest.fn().mockResolvedValue(null) },
+    }
+
+    const result = await getReservationSettings(VENUE, client as never)
+
+    expect(result.scheduling.capacityMode).toBe('pacing')
+    expect(result.publicBooking.showStaffPicker).toBe(false)
+    expect(isStaffAware(result)).toBe(false)
+    expect(client.reservationSettings.findUnique).toHaveBeenCalledWith({ where: { venueId: VENUE } })
+  })
+
+  it('maps only the supported per_staff value and exposes either opt-in as staff-aware', async () => {
+    const storedSettings = {
+      slotIntervalMin: 15,
+      defaultDurationMin: 60,
+      autoConfirm: true,
+      maxAdvanceDays: 60,
+      minNoticeMin: 60,
+      noShowGraceMin: 15,
+      pacingMaxPerSlot: null,
+      onlineCapacityPercent: 100,
+      capacityMode: 'per_staff',
+      depositMode: 'none',
+      depositPercentage: null,
+      depositFixedAmount: null,
+      depositPartySizeGte: null,
+      depositPaymentWindow: null,
+      appointmentUpfrontDefault: 'at_venue',
+      classUpfrontDefault: 'required',
+      allowCustomerCancel: true,
+      minHoursBeforeCancel: 2,
+      forfeitDeposit: false,
+      noShowFeePercent: null,
+      creditRefundMode: 'TIME_BASED',
+      creditFreeRefundHoursBefore: 12,
+      creditLateRefundPercent: 0,
+      creditNoShowRefund: false,
+      allowCustomerReschedule: true,
+      waitlistEnabled: true,
+      waitlistMaxSize: 50,
+      waitlistPriorityMode: 'fifo',
+      waitlistNotifyWindow: 30,
+      remindersEnabled: true,
+      reminderChannels: ['EMAIL'],
+      reminderMinBefore: [120],
+      publicBookingEnabled: true,
+      requirePhone: true,
+      requireEmail: false,
+      requireAccount: false,
+      showStaffPicker: false,
+      googleCalendarPushEnabled: true,
+      googleCalendarDualWrite: false,
+      googleCalendarEventDetailLevel: 'FULL',
+      googleCalendarRemoveCancelled: false,
+      googleCalendarClassRosterInDescription: true,
+      operatingHours: null,
+    }
+    prismaMock.reservationSettings.findUnique.mockResolvedValue(storedSettings as never)
+
+    const result = await getReservationSettings(VENUE)
+    expect(result.scheduling.capacityMode).toBe('per_staff')
+    expect(isStaffAware(result)).toBe(true)
+
+    prismaMock.reservationSettings.findUnique.mockResolvedValue({
+      ...storedSettings,
+      capacityMode: 'future_mode',
+      showStaffPicker: true,
+    } as never)
+    const unknownMode = await getReservationSettings(VENUE)
+    expect(unknownMode.scheduling.capacityMode).toBe('pacing')
+    expect(isStaffAware(unknownMode)).toBe(true)
+  })
+
+  it('persists flat opt-ins, including false, using explicit undefined checks', async () => {
+    await updateReservationSettings(VENUE, {
+      capacityMode: 'per_staff',
+      showStaffPicker: false,
+    })
+
+    expect(prismaMock.reservationSettings.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({ capacityMode: 'per_staff', showStaffPicker: false }),
+      }),
+    )
+  })
+
+  it('persists nested opt-ins, including false, using explicit undefined checks', async () => {
+    await updateReservationSettings(VENUE, {
+      scheduling: { capacityMode: 'pacing' },
+      publicBooking: { showStaffPicker: false },
+    })
+
+    expect(prismaMock.reservationSettings.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({ capacityMode: 'pacing', showStaffPicker: false }),
+      }),
+    )
   })
 })
