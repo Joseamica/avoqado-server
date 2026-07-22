@@ -262,11 +262,21 @@ export const getCalendarQuerySchema = z.object({
 
 // ---- Body Schemas ----
 
+const reservationModifierSelectionsSchema = z
+  .array(
+    z.object({
+      productId: z.string().min(1, 'productId del modificador es requerido'),
+      modifierId: z.string().min(1, 'modifierId es requerido'),
+      quantity: z.number().int().min(1).max(99).optional(),
+    }),
+  )
+  .max(100)
+
 export const createReservationBodySchema = z
   .object({
     startsAt: z.coerce.date({ required_error: 'La fecha de inicio es requerida' }),
     endsAt: z.coerce.date({ required_error: 'La fecha de fin es requerida' }),
-    duration: z.number().int().min(5, 'La duracion minima es 5 minutos').max(480, 'La duracion maxima es 8 horas'),
+    duration: z.number().int().min(5, 'La duracion minima es 5 minutos').max(1440, 'La duracion maxima es 1440 minutos'),
     channel: ReservationChannelSchema.optional(),
     customerId: z.string().optional(),
     guestName: z.string().min(1, 'El nombre del cliente es requerido').max(200).optional(),
@@ -275,10 +285,22 @@ export const createReservationBodySchema = z
     partySize: z.number().int().min(1, 'Minimo 1 persona').max(100, 'Maximo 100 personas').optional(),
     tableId: z.string().optional(),
     productId: z.string().optional(),
+    productIds: z.array(z.string().min(1)).max(20).optional(),
+    modifierSelections: reservationModifierSelectionsSchema.optional(),
+    windowSemantics: z.literal('base', { invalid_type_error: 'windowSemantics debe ser base' }).optional(),
     assignedStaffId: z.string().optional(),
     specialRequests: z.string().max(2000).optional(),
     internalNotes: z.string().max(2000).optional(),
     tags: z.array(z.string().max(50)).max(20).optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.windowSemantics !== 'base' && data.duration > 480) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'La duracion maxima sin windowSemantics=base es 480 minutos',
+        path: ['duration'],
+      })
+    }
   })
   .refine(data => data.endsAt > data.startsAt, {
     message: 'La fecha de fin debe ser posterior a la fecha de inicio',
@@ -286,6 +308,7 @@ export const createReservationBodySchema = z
   })
   .refine(
     data => {
+      if (data.windowSemantics === 'base') return true
       const diffMin = Math.round((data.endsAt.getTime() - data.startsAt.getTime()) / 60000)
       return Math.abs(diffMin - data.duration) <= 1 // 1-min rounding tolerance
     },
@@ -502,7 +525,7 @@ export const publicCreateReservationBodySchema = z
   .object({
     startsAt: z.coerce.date({ required_error: 'La fecha de inicio es requerida' }).optional(),
     endsAt: z.coerce.date({ required_error: 'La fecha de fin es requerida' }).optional(),
-    duration: z.number().int().min(5).max(480).optional(),
+    duration: z.number().int().min(5).max(1440).optional(),
     guestName: z.string().min(1, 'El nombre es requerido').max(200),
     guestPhone: z.string().min(1, 'El telefono es requerido').max(20).optional(),
     guestEmail: z.string().email('Email invalido').max(200).optional(),
@@ -511,6 +534,7 @@ export const publicCreateReservationBodySchema = z
     // Multi-service appointments (Square pattern). When present, the controller
     // sums durations + sets productId = productIds[0] for back-compat.
     productIds: z.array(z.string().min(1)).max(20).optional(),
+    windowSemantics: z.literal('base', { invalid_type_error: 'windowSemantics debe ser base' }).optional(),
     classSessionId: z.string().optional(),
     spotIds: z.array(z.string().min(1)).max(100).optional(),
     specialRequests: z.string().max(2000).optional(),
@@ -523,16 +547,16 @@ export const publicCreateReservationBodySchema = z
     // transactionally on success. Missing/expired holds throw 409 so the
     // widget falls back to the time-slot picker.
     holdId: z.string().optional(),
-    modifierSelections: z
-      .array(
-        z.object({
-          productId: z.string().min(1, 'productId del modificador es requerido'),
-          modifierId: z.string().min(1, 'modifierId es requerido'),
-          quantity: z.number().int().min(1).max(99).optional(),
-        }),
-      )
-      .max(100)
-      .optional(),
+    modifierSelections: reservationModifierSelectionsSchema.optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.duration !== undefined && data.windowSemantics !== 'base' && data.duration > 480) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'La duracion maxima sin windowSemantics=base es 480 minutos',
+        path: ['duration'],
+      })
+    }
   })
   .refine(
     data => {
@@ -559,7 +583,7 @@ export const publicCreateReservationBodySchema = z
   .refine(
     data => {
       // Skip duration check for CLASS bookings — duration comes from the session
-      if (data.classSessionId) return true
+      if (data.classSessionId || data.windowSemantics === 'base') return true
       if (!data.startsAt || !data.endsAt || data.duration == null) return true // validated above
       const diffMin = Math.round((data.endsAt.getTime() - data.startsAt.getTime()) / 60000)
       return Math.abs(diffMin - data.duration) <= 1

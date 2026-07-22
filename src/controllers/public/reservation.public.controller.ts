@@ -657,13 +657,16 @@ export async function createReservation(req: Request, res: Response, next: NextF
     }
 
     // ---- Multi-service appointments (Square pattern) -----------------------
-    // When the widget sends productIds, normalize to the legacy single-product
-    // fields (productId + duration) so the rest of this function and the
-    // downstream service don't need to know about arrays. The full ordered
-    // list is restored on the row right before we respond.
-    const incomingProductIds: string[] = Array.isArray(req.body.productIds)
-      ? req.body.productIds.filter((id: unknown): id is string => typeof id === 'string' && id.length > 0)
-      : []
+    // Normalize the validated wire representation for controller preflights.
+    // createReservation repeats this defense-in-depth check and remains the
+    // sole authority for the product identity persisted in its transaction.
+    const normalizedProducts = normalizeBookedProductIds({
+      productId: req.body.productId,
+      productIds: req.body.productIds,
+    })
+    const incomingProductIds = normalizedProducts.productIdsWasProvided ? normalizedProducts.productIds : []
+    req.body.productId = normalizedProducts.leadProductId
+    if (normalizedProducts.productIdsWasProvided) req.body.productIds = incomingProductIds
     if (incomingProductIds.length > 0) {
       const products = await prisma.product.findMany({
         where: { id: { in: incomingProductIds }, venueId: venue.id },
@@ -676,7 +679,6 @@ export async function createReservation(req: Request, res: Response, next: NextF
         throw new BadRequestError('Los productos de tipo clase usan classSessionId, no productIds')
       }
       // Lead service = first picked. Sum durations for the appointment window.
-      req.body.productId = req.body.productId ?? incomingProductIds[0]
       const summed = products.reduce((acc, p) => acc + (p.duration ?? p.durationMinutes ?? 0), 0)
       if (summed > 0) {
         req.body.duration = summed
@@ -719,20 +721,9 @@ export async function createReservation(req: Request, res: Response, next: NextF
       }
     }
 
-    // After-create cleanup: stamps productIds[] on the reservation row and
-    // burns the hold (best-effort — failures are logged but don't poison the
-    // success response since the booking did go through).
-    async function finalizeReservationSideEffects(reservationId: string) {
-      if (incomingProductIds.length > 0) {
-        try {
-          await prisma.reservation.update({
-            where: { id: reservationId },
-            data: { productIds: incomingProductIds },
-          })
-        } catch (error) {
-          logger.warn(`[reservation] failed to stamp productIds (non-fatal): ${(error as Error).message}`)
-        }
-      }
+    // After-create cleanup burns the hold best-effort. The canonical product
+    // list is already co-committed by createReservation.
+    async function finalizeReservationSideEffects() {
       if (incomingHoldId) {
         try {
           await prisma.slotHold.deleteMany({
@@ -850,9 +841,9 @@ export async function createReservation(req: Request, res: Response, next: NextF
         checkoutUrl = session.url
       }
 
-      // Burn the slot hold and stamp productIds[] now that the class
-      // reservation exists. Best-effort (see helper).
-      await finalizeReservationSideEffects(reservation.id)
+      // Burn the slot hold now that the class reservation exists.
+      // Best-effort (see helper).
+      await finalizeReservationSideEffects()
 
       // Confirmation (email + WhatsApp) for non-paid classes — free / credit /
       // pay-at-venue, which land CONFIRMED here. Paid classes are PENDING with a
@@ -1031,12 +1022,24 @@ export async function createReservation(req: Request, res: Response, next: NextF
     let reservation = await reservationService.createReservation(
       venue.id,
       {
-        ...req.body,
+        startsAt: req.body.startsAt,
+        endsAt: req.body.endsAt,
+        duration: req.body.duration,
         channel: 'WEB' as const,
+        customerId: req.body.customerId,
+        guestName: req.body.guestName,
+        guestPhone: req.body.guestPhone,
+        guestEmail: req.body.guestEmail,
+        partySize: req.body.partySize,
+        productId: normalizedProducts.leadProductId,
+        productIds: normalizedProducts.productIdsWasProvided ? incomingProductIds : undefined,
+        specialRequests: req.body.specialRequests,
+        modifierSelections: req.body.modifierSelections,
       },
       {
         writeOrigin: 'PUBLIC',
         paymentPolicyOverride,
+        ...(req.body.windowSemantics === 'base' ? { windowSemantics: req.body.windowSemantics } : {}),
       },
     )
 
@@ -1115,9 +1118,9 @@ export async function createReservation(req: Request, res: Response, next: NextF
       checkoutUrl = session.url
     }
 
-    // Burn the slot hold and stamp productIds[] now that the reservation
-    // exists. Best-effort — failures logged but don't poison the response.
-    await finalizeReservationSideEffects(reservation.id)
+    // Burn the slot hold now that the reservation exists. Best-effort —
+    // failures are logged but do not poison the committed booking response.
+    await finalizeReservationSideEffects()
 
     // Credit redemption for non-class appointments. Lives outside the
     // reservation transaction (reservationService.createReservation owns its

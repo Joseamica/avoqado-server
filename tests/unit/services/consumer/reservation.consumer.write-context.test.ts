@@ -58,6 +58,33 @@ describe('consumer reservation write context', () => {
     })
   })
 
+  it('maps base window semantics into trusted context while remaining single-product', async () => {
+    jest.spyOn(settingsService, 'getReservationSettings').mockResolvedValue(makeSettings())
+    const createSpy = jest.spyOn(reservationService, 'createReservation').mockResolvedValue({
+      id: 'reservation-1',
+      confirmationCode: 'RES-1',
+      cancelSecret: 'secret',
+      startsAt,
+      endsAt,
+      status: 'CONFIRMED',
+      depositAmount: null,
+    } as any)
+
+    await createReservationForConsumer('consumer-1', 'venue', {
+      startsAt,
+      endsAt,
+      duration: 60,
+      partySize: 1,
+      productId: 'product-1',
+      windowSemantics: 'base',
+    } as any)
+
+    expect(createSpy).toHaveBeenCalledWith('venue-1', expect.objectContaining({ productId: 'product-1' }), {
+      writeOrigin: 'CONSUMER',
+      windowSemantics: 'base',
+    })
+  })
+
   it('retains the hard rejection when a required deposit has no chargeable Stripe rail', async () => {
     jest.spyOn(settingsService, 'getReservationSettings').mockResolvedValue(makeSettings(true))
     jest.spyOn(reservationService, 'calculateDepositAmount').mockReturnValue({ required: true, amount: new Prisma.Decimal(80) })

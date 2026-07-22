@@ -1,4 +1,9 @@
-import { getAvailabilityQuerySchema } from '@/schemas/dashboard/reservation.schema'
+import {
+  createReservationBodySchema,
+  getAvailabilityQuerySchema,
+  publicCreateReservationBodySchema,
+} from '@/schemas/dashboard/reservation.schema'
+import { consumerCreateReservationSchema } from '@/schemas/consumer.schema'
 import { normalizeBookedProductIds } from '@/services/reservation/resolveAppointmentWindow'
 
 function messages(input: unknown): string[] {
@@ -58,5 +63,46 @@ describe('getAvailabilityQuerySchema — staff-aware query contract', () => {
     expect(messages({ date, includeFull: 'quizas' })).toContain('includeFull debe ser true o false')
     expect(messages({ date, windowSemantics: 1 })).toContain('windowSemantics debe ser base')
     expect(messages({ date, windowSemantics: 'final' })).toContain('windowSemantics debe ser base')
+  })
+})
+
+describe('reservation create window-semantics schemas', () => {
+  const startsAt = new Date('2026-08-21T00:00:00.000Z')
+  const endsAt = new Date('2026-08-22T00:00:00.000Z')
+
+  it.each([
+    ['dashboard', (body: unknown) => createReservationBodySchema.safeParse(body)],
+    ['public', (body: unknown) => publicCreateReservationBodySchema.safeParse({ guestName: 'Ana', ...(body as object) })],
+    ['consumer', (body: unknown) => consumerCreateReservationSchema.safeParse({ params: { venueSlug: 'venue' }, body })],
+  ])('%s keeps legacy at 480 and accepts advisory duration through 1440 only for base', (_name, parse) => {
+    expect(parse({ startsAt, endsAt: new Date(startsAt.getTime() + 481 * 60_000), duration: 481 }).success).toBe(false)
+    expect(parse({ startsAt, endsAt, duration: 1440, windowSemantics: 'base' }).success).toBe(true)
+    expect(parse({ startsAt, endsAt, duration: 1440, windowSemantics: 'final' }).success).toBe(false)
+  })
+
+  it('dashboard and public accept bounded product lists and modifier selections', () => {
+    const body = {
+      startsAt,
+      endsAt: new Date(startsAt.getTime() + 60 * 60_000),
+      duration: 60,
+      productId: 'a',
+      productIds: ['a', 'b'],
+      modifierSelections: [{ productId: 'a', modifierId: 'm1', quantity: 2 }],
+      windowSemantics: 'base' as const,
+    }
+    expect(createReservationBodySchema.safeParse(body).success).toBe(true)
+    expect(publicCreateReservationBodySchema.safeParse({ guestName: 'Ana', ...body }).success).toBe(true)
+  })
+
+  it('treats duration as advisory under base semantics', () => {
+    const body = {
+      startsAt,
+      endsAt: new Date(startsAt.getTime() + 60 * 60_000),
+      duration: 5,
+      productId: 'a',
+      windowSemantics: 'base' as const,
+    }
+    expect(createReservationBodySchema.safeParse(body).success).toBe(true)
+    expect(publicCreateReservationBodySchema.safeParse({ guestName: 'Ana', ...body }).success).toBe(true)
   })
 })

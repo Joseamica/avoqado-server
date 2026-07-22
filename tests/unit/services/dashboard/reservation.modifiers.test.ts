@@ -77,6 +77,7 @@ describe('createReservation with modifiers', () => {
     })
     prismaMock.$queryRaw.mockResolvedValue([])
     prismaMock.product.findFirst.mockResolvedValue(baseProduct)
+    prismaMock.product.findMany.mockResolvedValue([baseProduct] as any)
     prismaMock.staffVenue.findFirst.mockResolvedValue(null)
     prismaMock.table.findFirst.mockResolvedValue(null)
     prismaMock.reservation.findUnique.mockResolvedValue(null)
@@ -87,6 +88,7 @@ describe('createReservation with modifiers', () => {
     ;(resolveModifierSelections as jest.Mock).mockResolvedValue({
       persistRows: [{ productId, modifierId: 'cmod1', name: 'Esmalte', quantity: 1, price: new Prisma.Decimal('150') }],
       totalDelta: new Prisma.Decimal('150'),
+      totalDurationDelta: 0,
     })
   })
 
@@ -120,6 +122,7 @@ describe('createReservation with modifiers', () => {
     ;(resolveModifierSelections as jest.Mock).mockResolvedValue({
       persistRows: [],
       totalDelta: new Prisma.Decimal('0'),
+      totalDurationDelta: 0,
     })
 
     await createReservation(
@@ -136,5 +139,143 @@ describe('createReservation with modifiers', () => {
     )
 
     expect(prismaMock.reservationModifier.createMany).not.toHaveBeenCalled()
+  })
+
+  it('uses the canonical base window and modifier resolution exactly once', async () => {
+    ;(resolveModifierSelections as jest.Mock).mockResolvedValue({
+      persistRows: [{ productId, modifierId: 'cmod1', name: 'Esmalte', quantity: 1, price: new Prisma.Decimal('150') }],
+      totalDelta: new Prisma.Decimal('150'),
+      totalDurationDelta: 15,
+    })
+    prismaMock.product.findMany.mockResolvedValue([
+      {
+        id: productId,
+        duration: 60,
+        durationMinutes: null,
+        type: 'APPOINTMENTS_SERVICE',
+        price: new Prisma.Decimal('500'),
+        eventCapacity: 20,
+      },
+    ] as any)
+    prismaMock.table.findFirst.mockResolvedValue({ id: 'table-1' } as any)
+    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'staff-venue-1' } as any)
+    prismaMock.reservation.create.mockImplementation(async ({ data }: any) => ({ ...mockReservation, ...data }) as any)
+
+    await createReservation(
+      venueId,
+      {
+        startsAt: new Date('2026-06-01T10:00:00Z'),
+        endsAt: new Date('2026-06-01T11:00:00Z'),
+        duration: 5,
+        productId,
+        productIds: [productId],
+        tableId: 'table-1',
+        assignedStaffId: 'staff-1',
+        modifierSelections: [{ productId, modifierId: 'cmod1', quantity: 1 }],
+      },
+      {
+        writeOrigin: 'PUBLIC',
+        windowSemantics: 'base',
+        paymentPolicyOverride: {
+          deposits: {
+            enabled: true,
+            mode: 'deposit',
+            percentageOfTotal: 10,
+            fixedAmount: null,
+            requiredForPartySizeGte: null,
+            paymentWindowHrs: 24,
+          },
+        },
+      },
+    )
+
+    expect(resolveModifierSelections).toHaveBeenCalledTimes(1)
+    expect(prismaMock.reservation.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          productId,
+          productIds: [productId],
+          endsAt: new Date('2026-06-01T11:15:00Z'),
+          duration: 75,
+          depositAmount: new Prisma.Decimal('65'),
+        }),
+      }),
+    )
+    expect(prismaMock.externalBusyBlock.findFirst).toHaveBeenCalledWith({
+      where: {
+        OR: [{ venueId }, { staffId: 'staff-1' }],
+        startsAt: { lt: new Date('2026-06-01T11:15:00Z') },
+        endsAt: { gt: new Date('2026-06-01T10:00:00Z') },
+      },
+    })
+    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(3)
+    for (const call of prismaMock.$queryRaw.mock.calls) {
+      expect(call).toContainEqual(new Date('2026-06-01T11:15:00Z'))
+    }
+  })
+
+  it('allows legacy modifiers to reach 1440 minutes but rejects 1441 before writing', async () => {
+    ;(resolveModifierSelections as jest.Mock).mockResolvedValue({
+      persistRows: [],
+      totalDelta: new Prisma.Decimal('0'),
+      totalDurationDelta: 960,
+    })
+
+    await createReservation(
+      venueId,
+      {
+        startsAt: new Date('2026-06-01T00:00:00Z'),
+        endsAt: new Date('2026-06-01T08:00:00Z'),
+        duration: 480,
+        productId,
+      },
+      { writeOrigin: 'DASHBOARD' },
+    )
+    expect(prismaMock.reservation.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ duration: 1440, endsAt: new Date('2026-06-02T00:00:00Z') }),
+      }),
+    )
+
+    jest.clearAllMocks()
+    ;(resolveModifierSelections as jest.Mock).mockResolvedValue({
+      persistRows: [],
+      totalDelta: new Prisma.Decimal('0'),
+      totalDurationDelta: 961,
+    })
+    await expect(
+      createReservation(
+        venueId,
+        {
+          startsAt: new Date('2026-06-01T00:00:00Z'),
+          endsAt: new Date('2026-06-01T08:00:00Z'),
+          duration: 480,
+          productId,
+        },
+        { writeOrigin: 'DASHBOARD' },
+      ),
+    ).rejects.toThrow(/1440/)
+    expect(prismaMock.reservation.create).not.toHaveBeenCalled()
+  })
+
+  it('does not write a reservation when modifier validation fails', async () => {
+    ;(resolveModifierSelections as jest.Mock).mockRejectedValue(new Error('invalid modifier'))
+
+    await expect(
+      createReservation(
+        venueId,
+        {
+          startsAt: new Date('2026-06-01T10:00:00Z'),
+          endsAt: new Date('2026-06-01T11:00:00Z'),
+          duration: 60,
+          productId,
+          modifierSelections: [{ productId, modifierId: 'invalid' }],
+        },
+        { writeOrigin: 'DASHBOARD' },
+      ),
+    ).rejects.toThrow('invalid modifier')
+    expect(prismaMock.reservation.create).not.toHaveBeenCalled()
+    expect(prismaMock.reservationModifier.createMany).not.toHaveBeenCalled()
+    expect(prismaMock.calendarSyncOutbox.create).not.toHaveBeenCalled()
   })
 })

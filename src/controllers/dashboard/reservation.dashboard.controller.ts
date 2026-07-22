@@ -56,8 +56,14 @@ export async function createReservation(req: Request, res: Response, next: NextF
   try {
     const venueId = resolveVenueId(req)
     const { userId } = (req as any).authContext
+    const { windowSemantics, ...reservationInput } = req.body
 
-    const reservation = await reservationService.createReservation(venueId, req.body, { writeOrigin: 'DASHBOARD' }, userId)
+    const reservation = await reservationService.createReservation(
+      venueId,
+      reservationInput,
+      { writeOrigin: 'DASHBOARD', ...(windowSemantics === 'base' ? { windowSemantics } : {}) },
+      userId,
+    )
     res.status(201).json(reservation)
   } catch (error) {
     next(error)

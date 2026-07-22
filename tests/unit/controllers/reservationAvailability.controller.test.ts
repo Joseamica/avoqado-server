@@ -108,6 +108,30 @@ describe('reservation availability controller boundaries', () => {
     )
   })
 
+  it('dashboard create maps base semantics only into trusted context', async () => {
+    const createSpy = jest.spyOn(reservationService, 'createReservation').mockResolvedValue({ id: 'reservation-created' } as any)
+    const body = {
+      startsAt,
+      endsAt,
+      duration: 60,
+      productId: 'product-1',
+      productIds: ['product-1'],
+      windowSemantics: 'base',
+    }
+    const req: any = { params: { venueId: 'venue-1' }, body, authContext: { userId: 'staff-1' } }
+    const next = jest.fn()
+
+    await dashboardController.createReservation(req, responseMock(), next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(createSpy).toHaveBeenCalledWith(
+      'venue-1',
+      expect.not.objectContaining({ windowSemantics: expect.anything() }),
+      { writeOrigin: 'DASHBOARD', windowSemantics: 'base' },
+      'staff-1',
+    )
+  })
+
   it('public appointment reschedule declares PUBLIC origin', async () => {
     const reservation = {
       id: 'reservation-1',
@@ -184,6 +208,73 @@ describe('reservation availability controller boundaries', () => {
       writeOrigin: 'PUBLIC',
       paymentPolicyOverride: { deposits },
     })
+  })
+
+  it('public create maps canonical products/base context, avoids a post-commit product stamp, and releases the hold after success', async () => {
+    const deposits = {
+      enabled: false,
+      mode: 'none',
+      fixedAmount: null,
+      percentageOfTotal: null,
+      requiredForPartySizeGte: null,
+      paymentWindowHrs: 24,
+    } as const
+    jest.spyOn(settingsService, 'getReservationSettings').mockResolvedValue({
+      ...settings,
+      deposits,
+      payments: { appointmentUpfrontDefault: 'at_venue', classUpfrontDefault: 'required' },
+    } as any)
+    prismaMock.product.findMany.mockResolvedValue([
+      { id: 'product-2', type: 'APPOINTMENTS_SERVICE', duration: 30, durationMinutes: null },
+      { id: 'product-1', type: 'APPOINTMENTS_SERVICE', duration: 30, durationMinutes: null },
+    ] as any)
+    prismaMock.product.findFirst.mockResolvedValue({ type: 'SERVICE', price: new Prisma.Decimal(0), upfrontPolicy: 'at_venue' } as any)
+    prismaMock.slotHold.findFirst.mockResolvedValue({ id: 'hold-1', startsAt, endsAt } as any)
+    prismaMock.slotHold.deleteMany.mockResolvedValue({ count: 1 } as any)
+    const createSpy = jest.spyOn(reservationService, 'createReservation').mockResolvedValue({
+      id: 'reservation-1',
+      confirmationCode: 'RES-1',
+      cancelSecret: 'secret',
+      startsAt,
+      endsAt,
+      status: 'CONFIRMED',
+      depositAmount: null,
+      guestEmail: null,
+      guestPhone: null,
+      productId: 'product-1',
+    } as any)
+    const req: any = {
+      params: { venueSlug: 'venue' },
+      headers: {},
+      body: {
+        startsAt,
+        endsAt,
+        duration: 60,
+        partySize: 1,
+        productId: 'product-1',
+        productIds: [' product-1 ', 'product-2', 'product-1'],
+        windowSemantics: 'base',
+        holdId: 'hold-1',
+      },
+    }
+    const res = responseMock()
+    const next = jest.fn()
+
+    await publicController.createReservation(req, res, next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(createSpy).toHaveBeenCalledWith(
+      'venue-1',
+      expect.objectContaining({
+        channel: 'WEB',
+        productId: 'product-1',
+        productIds: ['product-1', 'product-2'],
+      }),
+      { writeOrigin: 'PUBLIC', paymentPolicyOverride: { deposits }, windowSemantics: 'base' },
+    )
+    expect(prismaMock.reservation.update).not.toHaveBeenCalled()
+    expect(prismaMock.slotHold.deleteMany).toHaveBeenCalledWith({ where: { id: 'hold-1', venueId: 'venue-1' } })
+    expect(createSpy.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.slotHold.deleteMany.mock.invocationCallOrder[0])
   })
 
   it('keeps a public booking confirmed when transactional deposits become required after a no-deposit rail preflight', async () => {

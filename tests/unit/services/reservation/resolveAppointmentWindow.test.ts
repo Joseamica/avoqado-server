@@ -155,7 +155,13 @@ describe('resolveAppointmentWindow', () => {
 
   it('accepts one minute of base-window tolerance and adds modifier duration exactly once', async () => {
     const db = productDb([{ id: 'a', duration: 60, durationMinutes: null }])
-    modifiers(15)
+    const modifierRows = [{ productId: 'a', modifierId: 'm1', name: 'Extra', quantity: 1, price: '25' }] as never
+    const modifierPriceDelta = { toString: () => '25' } as never
+    resolveModifiersMock.mockResolvedValue({
+      persistRows: modifierRows,
+      totalDelta: modifierPriceDelta,
+      totalDurationDelta: 15,
+    })
 
     await expect(
       resolveAppointmentWindow(db, {
@@ -171,6 +177,8 @@ describe('resolveAppointmentWindow', () => {
       modifierDurationDelta: 15,
       finalDurationMin: 75,
       finalEndsAt: new Date('2026-07-21T18:15:00.000Z'),
+      modifierRows,
+      modifierPriceDelta,
     })
     expect(resolveModifiersMock).toHaveBeenCalledTimes(1)
   })

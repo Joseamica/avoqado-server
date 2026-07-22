@@ -1,7 +1,11 @@
 import type { Prisma, PrismaClient } from '@prisma/client'
 import { BadRequestError, ConflictError } from '@/errors/AppError'
 import { isStaffAware, type ReservationConfig } from '@/services/dashboard/reservationSettings.service'
-import { resolveModifierSelections, type ModifierSelectionInput } from '@/services/reservation/resolveModifierSelections'
+import {
+  resolveModifierSelections,
+  type ModifierSelectionInput,
+  type ResolvedModifierRow,
+} from '@/services/reservation/resolveModifierSelections'
 
 const MAX_BOOKED_PRODUCTS = 20
 const MAX_FINAL_DURATION_MIN = 1_440
@@ -25,6 +29,8 @@ export interface ResolvedAppointmentWindow {
   modifierDurationDelta: number
   finalDurationMin: number
   productIds: string[]
+  modifierRows: ResolvedModifierRow[]
+  modifierPriceDelta: Prisma.Decimal
 }
 
 export interface BookedProductInput {
@@ -178,6 +184,8 @@ export async function resolveAppointmentWindow(
     modifierDurationDelta: modifiers.totalDurationDelta,
     finalDurationMin,
     productIds: canonical.productIds,
+    modifierRows: modifiers.persistRows,
+    modifierPriceDelta: modifiers.totalDelta,
   }
 }
 

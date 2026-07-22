@@ -33,16 +33,26 @@ export const consumerCreateReservationSchema = z.object({
     .object({
       startsAt: z.coerce.date().optional(),
       endsAt: z.coerce.date().optional(),
-      duration: z.number().int().min(5).max(480).optional(),
+      duration: z.number().int().min(5).max(1440).optional(),
       guestName: z.string().min(1).max(200).optional(),
       guestPhone: z.string().min(1).max(20).optional(),
       guestEmail: z.string().email().max(200).optional(),
       partySize: z.number().int().min(1).max(100).optional(),
       productId: z.string().optional(),
+      windowSemantics: z.literal('base', { invalid_type_error: 'windowSemantics debe ser base' }).optional(),
       classSessionId: z.string().optional(),
       spotIds: z.array(z.string().min(1)).max(100).optional(),
       specialRequests: z.string().max(2000).optional(),
       creditItemBalanceId: z.string().optional(),
+    })
+    .superRefine((data, ctx) => {
+      if (data.duration !== undefined && data.windowSemantics !== 'base' && data.duration > 480) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'La duracion maxima sin windowSemantics=base es 480 minutos',
+          path: ['duration'],
+        })
+      }
     })
     .refine(
       data => {

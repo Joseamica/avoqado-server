@@ -4,13 +4,13 @@ import { BadRequestError, ConflictError, NotFoundError, ValidationError } from '
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { logAction } from './activity-log.service'
-import { getReservationSettings, type ReservationConfig } from './reservationSettings.service'
+import { getReservationSettings, isStaffAware, type ReservationConfig } from './reservationSettings.service'
 import { countAppointmentOccupancy, effectiveAppointmentPacing } from './reservationAvailability.service'
 import { sendReservationRescheduleWhatsApp } from '../whatsapp.service'
 import emailService from '../email.service'
 import { getProvider } from '../payments/provider-registry'
 import { checkExternalBusyBlock } from '../reservation/external-busy-block.service'
-import { resolveModifierSelections } from '@/services/reservation/resolveModifierSelections'
+import { resolveModifierSelections, type ResolvedModifierRow } from '@/services/reservation/resolveModifierSelections'
 import { createOrderFromReservation } from '@/services/reservation/createOrderFromReservation'
 import {
   buildSyncKey,
@@ -21,6 +21,11 @@ import {
 } from '@/services/google-calendar/outbox.service'
 import { publishPushNotification } from '@/communication/rabbitmq/gcal-push-consumer'
 import { withSerializableRetry } from '@/utils/serializableRetry'
+import {
+  assertLegacyAppointmentDurationFloor,
+  normalizeBookedProductIds,
+  resolveAppointmentWindow,
+} from '@/services/reservation/resolveAppointmentWindow'
 // creditPack.public.service is imported lazily inside cancelReservation/markNoShow.
 
 // ==========================================
@@ -129,7 +134,8 @@ export function calculateDepositAmount(
 }
 
 interface ValidatedResources {
-  product: { id: string; price: Prisma.Decimal | null; eventCapacity: number | null } | null
+  product: { id: string; price: Prisma.Decimal | null; eventCapacity: number | null; type?: string } | null
+  products: { id: string; price: Prisma.Decimal | null; eventCapacity: number | null; type?: string }[]
 }
 
 async function validateResourceOwnership(
@@ -138,6 +144,9 @@ async function validateResourceOwnership(
   resources: {
     tableId?: string | null
     productId?: string | null
+    bookedProductIds?: string[]
+    leadProductId?: string
+    productIdsWasProvided?: boolean
     assignedStaffId?: string | null
   },
 ): Promise<ValidatedResources> {
@@ -151,15 +160,32 @@ async function validateResourceOwnership(
     }
   }
 
+  let products: ValidatedResources['products'] = []
   let product: ValidatedResources['product'] = null
-  if (resources.productId) {
+  const bookedProductIds = resources.bookedProductIds ?? []
+  const leadProductId = resources.leadProductId ?? resources.productId ?? undefined
+  if (resources.productIdsWasProvided && bookedProductIds.length > 0) {
+    products = await tx.product.findMany({
+      where: { id: { in: bookedProductIds }, venueId },
+      select: { id: true, price: true, eventCapacity: true, type: true },
+    })
+    if (products.length !== bookedProductIds.length) {
+      throw new BadRequestError('Uno o más servicios seleccionados no pertenecen a este negocio')
+    }
+    if (products.some(selected => selected.type === 'CLASS')) {
+      throw new BadRequestError('Los productos de tipo clase usan classSessionId, no productIds')
+    }
+    const byId = new Map(products.map(selected => [selected.id, selected]))
+    product = leadProductId ? (byId.get(leadProductId) ?? null) : null
+  } else if (leadProductId) {
     product = await tx.product.findFirst({
-      where: { id: resources.productId, venueId },
-      select: { id: true, price: true, eventCapacity: true },
+      where: { id: leadProductId, venueId },
+      select: { id: true, price: true, eventCapacity: true, type: true },
     })
     if (!product) {
       throw new BadRequestError('El servicio seleccionado no pertenece a este negocio')
     }
+    products = [product]
   }
 
   if (resources.assignedStaffId) {
@@ -172,7 +198,7 @@ async function validateResourceOwnership(
     }
   }
 
-  return { product }
+  return { product, products }
 }
 
 // ---- Core Service Methods ----
@@ -189,7 +215,7 @@ export interface CreateReservationInput {
   partySize?: number
   tableId?: string
   productId?: string
-  productIds?: string[]
+  productIds?: string | string[]
   assignedStaffId?: string
   specialRequests?: string
   internalNotes?: string
@@ -251,9 +277,18 @@ export async function createReservation(
   context: ReservationWriteContext,
   createdById?: string,
 ) {
+  const {
+    productIds: bookedProductIds,
+    leadProductId,
+    productIdsWasProvided,
+  } = normalizeBookedProductIds({ productId: data.productId, productIds: data.productIds })
+
   // Defense-in-depth: validate time invariants at service level
   if (data.endsAt <= data.startsAt) {
     throw new BadRequestError('La fecha de fin debe ser posterior a la fecha de inicio')
+  }
+  if (context.windowSemantics !== 'base' && (!Number.isInteger(data.duration) || data.duration < 1 || data.duration > 480)) {
+    throw new BadRequestError('La duración debe estar entre 1 y 480 minutos')
   }
 
   const confirmationCode = generateConfirmationCode()
@@ -275,24 +310,56 @@ export async function createReservation(
     }
 
     const autoConfirm = settings.scheduling.autoConfirm
-    const { product } = await validateResourceOwnership(tx, venueId, {
+    const { product, products } = await validateResourceOwnership(tx, venueId, {
       tableId: data.tableId,
-      productId: data.productId,
+      bookedProductIds,
+      leadProductId,
+      productIdsWasProvided,
       assignedStaffId: data.assignedStaffId,
     })
 
-    const bookedProductIds = data.productIds && data.productIds.length > 0 ? data.productIds : data.productId ? [data.productId] : []
-    const {
-      persistRows: modifierRows,
-      totalDelta: modifierDelta,
-      totalDurationDelta: modifierDurationDelta,
-    } = await resolveModifierSelections(tx, bookedProductIds, data.modifierSelections ?? [])
+    let modifierRows: ResolvedModifierRow[]
+    let modifierDelta: Prisma.Decimal
+    let finalEndsAt: Date
+    let finalDuration: number
 
-    // Modifier duration extends the booking. Recompute endsAt + duration so
-    // overlap checks, capacity gates and the persisted record all reflect the
-    // real time the customer will occupy the table/staff. Zero delta = identity.
-    const finalEndsAt = modifierDurationDelta > 0 ? new Date(data.endsAt.getTime() + modifierDurationDelta * 60_000) : data.endsAt
-    const finalDuration = data.duration + modifierDurationDelta
+    if (context.windowSemantics === 'base') {
+      const resolvedWindow = await resolveAppointmentWindow(tx, {
+        venueId,
+        productIds: bookedProductIds,
+        startsAt: data.startsAt,
+        baseEndsAt: data.endsAt,
+        modifierSelections: data.modifierSelections ?? [],
+        settings,
+      })
+      modifierRows = resolvedWindow.modifierRows
+      modifierDelta = resolvedWindow.modifierPriceDelta
+      finalEndsAt = resolvedWindow.finalEndsAt
+      finalDuration = resolvedWindow.finalDurationMin
+    } else {
+      const isAppointment =
+        bookedProductIds.length > 0 &&
+        products.length === bookedProductIds.length &&
+        products.every(selected => selected.type === 'APPOINTMENTS_SERVICE')
+      if (isAppointment && isStaffAware(settings)) {
+        await assertLegacyAppointmentDurationFloor(tx, {
+          venueId,
+          productIds: bookedProductIds,
+          rawDurationMin: data.duration,
+          settings,
+        })
+      }
+
+      const modifiers = await resolveModifierSelections(tx, bookedProductIds, data.modifierSelections ?? [])
+      modifierRows = modifiers.persistRows
+      modifierDelta = modifiers.totalDelta
+      finalDuration = data.duration + modifiers.totalDurationDelta
+      if (!Number.isInteger(finalDuration) || finalDuration < 1 || finalDuration > 1_440) {
+        throw new BadRequestError('La duración final debe estar entre 1 y 1440 minutos')
+      }
+      finalEndsAt =
+        modifiers.totalDurationDelta === 0 ? data.endsAt : new Date(data.endsAt.getTime() + modifiers.totalDurationDelta * 60_000)
+    }
 
     // Calculate deposit with validated product price (if configured as percentage)
     let depositAmount: Prisma.Decimal | null = null
@@ -361,7 +428,7 @@ export async function createReservation(
     }
 
     // Layer 3: Product capacity gate
-    if (data.productId && product?.eventCapacity) {
+    if (leadProductId && product?.eventCapacity) {
       const onlinePercent = settings.scheduling.onlineCapacityPercent
       const effectiveCapacity = Math.floor((product.eventCapacity * onlinePercent) / 100)
 
@@ -369,7 +436,7 @@ export async function createReservation(
           SELECT "partySize"
           FROM "Reservation"
           WHERE "venueId" = ${venueId}
-            AND "productId" = ${data.productId}
+            AND "productId" = ${leadProductId}
             AND "startsAt" < ${finalEndsAt}
             AND "endsAt" > ${data.startsAt}
             AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
@@ -409,7 +476,8 @@ export async function createReservation(
         guestEmail: data.guestEmail,
         partySize: requestedPartySize,
         tableId: data.tableId,
-        productId: data.productId,
+        productId: leadProductId,
+        productIds: productIdsWasProvided ? bookedProductIds : [],
         assignedStaffId: data.assignedStaffId,
         depositAmount,
         depositStatus: depositStatus as any,

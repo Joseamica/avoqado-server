@@ -19,6 +19,7 @@ type ConsumerReservationInput = {
   guestEmail?: string
   partySize?: number
   productId?: string
+  windowSemantics?: 'base'
   classSessionId?: string
   spotIds?: string[]
   specialRequests?: string
@@ -309,7 +310,7 @@ export async function createReservationForConsumer(consumerId: string, venueSlug
       productId: input.productId,
       specialRequests: input.specialRequests,
     },
-    { writeOrigin: 'CONSUMER' },
+    { writeOrigin: 'CONSUMER', ...(input.windowSemantics === 'base' ? { windowSemantics: input.windowSemantics } : {}) },
   )
 
   let checkoutUrl: string | null = null
