@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process'
 type DatabaseOverride = {
   databaseUrl?: string
   testDatabaseUrl?: string
+  inheritNonDatabaseSentinels?: boolean
 }
 
 type SetupResult = {
@@ -23,6 +24,20 @@ const DOTENV_DATABASE_URL = 'dotenv-production-database-sentinel'
 const DOTENV_TEST_DATABASE_URL = 'dotenv-production-test-sentinel'
 const CALLER_DATABASE_URL = 'caller-database-sentinel'
 const CALLER_TEST_DATABASE_URL = 'caller-test-database-sentinel'
+const DOTENV_NON_DATABASE_SENTINELS = {
+  REFRESH_TOKEN_SECRET: 'dotenv-refresh-token-sentinel',
+  OTP_PEPPER: 'dotenv-otp-pepper-sentinel',
+  OPENAI_API_KEY: 'dotenv-openai-sentinel',
+  RABBITMQ_URL: 'amqp://dotenv-broker-sentinel.invalid',
+  STRIPE_SECRET_KEY: 'sk_test_dotenv_stripe_sentinel',
+}
+const CALLER_NON_DATABASE_SENTINELS = {
+  REFRESH_TOKEN_SECRET: 'caller-refresh-token-sentinel',
+  OTP_PEPPER: 'caller-otp-pepper-sentinel',
+  OPENAI_API_KEY: 'caller-openai-sentinel',
+  RABBITMQ_URL: 'amqp://caller-broker-sentinel.invalid',
+  STRIPE_SECRET_KEY: 'sk_test_caller_stripe_sentinel',
+}
 const REQUIRED_TEST_ENV = {
   refreshTokenSecret: 'test-refresh-token-secret',
   otpPepper: 'test-otp-pepper-secret',
@@ -41,7 +56,11 @@ function runIntegrationSetup(overrides: DatabaseOverride): SetupResult {
   try {
     fs.writeFileSync(
       path.join(fixtureDir, '.env'),
-      [`DATABASE_URL=${DOTENV_DATABASE_URL}`, `TEST_DATABASE_URL=${DOTENV_TEST_DATABASE_URL}`].join('\n'),
+      [
+        `DATABASE_URL=${DOTENV_DATABASE_URL}`,
+        `TEST_DATABASE_URL=${DOTENV_TEST_DATABASE_URL}`,
+        ...Object.entries(DOTENV_NON_DATABASE_SENTINELS).map(([key, value]) => `${key}=${value}`),
+      ].join('\n'),
     )
     fs.writeFileSync(
       runnerPath,
@@ -74,6 +93,9 @@ function runIntegrationSetup(overrides: DatabaseOverride): SetupResult {
     delete childEnv.OPENAI_API_KEY
     delete childEnv.RABBITMQ_URL
     delete childEnv.STRIPE_SECRET_KEY
+    if (overrides.inheritNonDatabaseSentinels) {
+      Object.assign(childEnv, CALLER_NON_DATABASE_SENTINELS)
+    }
     if (Object.prototype.hasOwnProperty.call(overrides, 'databaseUrl')) {
       childEnv.DATABASE_URL = overrides.databaseUrl
     }
@@ -153,13 +175,18 @@ describe('integration setup database isolation', () => {
     expect(result.error).toContain('Export a non-empty TEST_DATABASE_URL before running integration tests')
   })
 
-  it('provides every required non-database value without relying on dotenv', () => {
-    const result = runIntegrationSetup({ testDatabaseUrl: CALLER_TEST_DATABASE_URL })
+  it('overrides inherited non-database values as well as dotenv sentinels', () => {
+    const result = runIntegrationSetup({
+      testDatabaseUrl: CALLER_TEST_DATABASE_URL,
+      inheritNonDatabaseSentinels: true,
+    })
 
     expect(result).toMatchObject({
       ...REQUIRED_TEST_ENV,
       error: null,
     })
+    expect(Object.values(result)).not.toEqual(expect.arrayContaining(Object.values(CALLER_NON_DATABASE_SENTINELS)))
+    expect(Object.values(result)).not.toEqual(expect.arrayContaining(Object.values(DOTENV_NON_DATABASE_SENTINELS)))
   })
 
   it('runs the complete integration project serially', () => {
