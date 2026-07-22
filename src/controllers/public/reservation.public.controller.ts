@@ -524,6 +524,11 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
     }
 
     // ── Single-day mode (legacy + per-product flow) ────────────────────────
+    // Validate product identity before any single-day catalog or availability
+    // read. Class routing still keys off the legacy scalar below;
+    // multi-product selection remains appointment-only.
+    const canonicalProducts = normalizeBookedProductIds({ productId, productIds })
+
     // Branch 1: product-scoped CLASS availability (existing behavior preserved).
     if (productId) {
       const product = await prisma.product.findFirst({
@@ -582,7 +587,6 @@ export async function getAvailability(req: Request, res: Response, next: NextFun
     }
 
     // Branch 3 (default): operating-hours availability for appointments / services.
-    const canonicalProducts = normalizeBookedProductIds({ productId, productIds })
     const slots = await availabilityService.getAvailableSlots(
       venue.id,
       date!,
@@ -2240,7 +2244,7 @@ async function holdAppointmentSlot(args: {
 /**
  * POST /public/venues/:venueSlug/reservations/hold
  *
- * Body: { startsAt, endsAt, productIds?, classSessionId?, partySize? }
+ * Body: { startsAt, endsAt, productId?, productIds?, classSessionId?, partySize? }
  *
  * Creates a SlotHold row with TTL=10min and returns its id+expiresAt so the
  * widget can plumb both into its createReservation call. The hold is consumed
@@ -2265,7 +2269,8 @@ export async function createHold(req: Request, res: Response, next: NextFunction
     const body = req.body as {
       startsAt: string
       endsAt: string
-      productIds?: string[]
+      productId?: string
+      productIds?: string | string[]
       classSessionId?: string
       partySize?: number
       fingerprint?: string
@@ -2286,7 +2291,7 @@ export async function createHold(req: Request, res: Response, next: NextFunction
       throw new BadRequestError('No se puede reservar un horario en el pasado')
     }
 
-    const productIds = Array.isArray(body.productIds) ? body.productIds.filter(Boolean) : []
+    const { productIds } = normalizeBookedProductIds({ productId: body.productId, productIds: body.productIds })
     if (productIds.length > 0) {
       const products = await prisma.product.findMany({
         where: { id: { in: productIds }, venueId: venue.id },

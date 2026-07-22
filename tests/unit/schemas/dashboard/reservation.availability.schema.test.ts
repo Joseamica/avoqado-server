@@ -1,7 +1,9 @@
 import {
   createReservationBodySchema,
   getAvailabilityQuerySchema,
+  publicCreateHoldBodySchema,
   publicCreateReservationBodySchema,
+  rescheduleHoldBodySchema,
 } from '@/schemas/dashboard/reservation.schema'
 import { consumerCreateReservationSchema } from '@/schemas/consumer.schema'
 import { normalizeBookedProductIds } from '@/services/reservation/resolveAppointmentWindow'
@@ -69,6 +71,108 @@ describe('getAvailabilityQuerySchema — staff-aware query contract', () => {
     expect(messages({ date, includeFull: 'quizas' })).toContain('includeFull debe ser true o false')
     expect(messages({ date, windowSemantics: 1 })).toContain('windowSemantics debe ser base')
     expect(messages({ date, windowSemantics: 'final' })).toContain('windowSemantics debe ser base')
+  })
+})
+
+describe.each([
+  {
+    name: 'availability',
+    safeParse: (products: Record<string, unknown>) => getAvailabilityQuerySchema.safeParse({ date: '2026-08-21', ...products }),
+  },
+  {
+    name: 'public create',
+    safeParse: (products: Record<string, unknown>) =>
+      publicCreateReservationBodySchema.safeParse({
+        guestName: 'Ana',
+        startsAt: new Date('2026-08-21T15:00:00.000Z'),
+        endsAt: new Date('2026-08-21T16:00:00.000Z'),
+        duration: 60,
+        ...products,
+      }),
+  },
+  {
+    name: 'public hold',
+    safeParse: (products: Record<string, unknown>) =>
+      publicCreateHoldBodySchema.safeParse({
+        startsAt: new Date('2026-08-21T15:00:00.000Z'),
+        endsAt: new Date('2026-08-21T16:00:00.000Z'),
+        ...products,
+      }),
+  },
+])('$name product wire contract', ({ safeParse }) => {
+  function canonical(products: Record<string, unknown>) {
+    const parsed = safeParse(products)
+    expect(parsed.success).toBe(true)
+    if (!parsed.success) throw parsed.error
+    return normalizeBookedProductIds(parsed.data)
+  }
+
+  it('accepts scalar, matching pair, CSV, repeated-array CSV, and stable trim/empty/dedupe order', () => {
+    expect(canonical({ productId: ' product-a ' })).toMatchObject({
+      productIds: ['product-a'],
+      leadProductId: 'product-a',
+      productIdsWasProvided: false,
+    })
+    expect(canonical({ productId: 'product-a', productIds: 'product-a,product-b' }).productIds).toEqual(['product-a', 'product-b'])
+    expect(canonical({ productIds: ' product-b, product-a, product-b ' }).productIds).toEqual(['product-b', 'product-a'])
+    expect(canonical({ productIds: [' product-b, product-a ', '', 'product-c', 'product-a'] }).productIds).toEqual([
+      'product-b',
+      'product-a',
+      'product-c',
+    ])
+  })
+
+  it('defers canonical mismatch and limits to the shared normalizer', () => {
+    const twenty = Array.from({ length: 20 }, (_, index) => `product-${index}`)
+    expect(canonical({ productIds: twenty }).productIds).toEqual(twenty)
+
+    for (const products of [
+      { productId: 'product-b', productIds: 'product-a,product-b' },
+      { productId: 'product-a', productIds: [] },
+      { productId: 'product-a', productIds: ' , ' },
+    ]) {
+      expect(() => canonical(products)).toThrow(/coincidir/i)
+    }
+
+    const twentyOne = Array.from({ length: 21 }, (_, index) => `product-${index}`)
+    expect(() => canonical({ productIds: twentyOne })).toThrow(/20/)
+    expect(canonical({ productIds: Array.from({ length: 21 }, () => 'product-a') }).productIds).toEqual(['product-a'])
+  })
+
+  it('rejects non-string product wire values with Spanish messages', () => {
+    const wrongContainer = safeParse({ productIds: 7 })
+    const wrongMember = safeParse({ productIds: ['product-a', 7] })
+
+    expect(wrongContainer).toMatchObject({
+      success: false,
+      error: { issues: expect.arrayContaining([expect.objectContaining({ message: expect.stringMatching(/debe(n)? ser texto/i) })]) },
+    })
+    expect(wrongMember).toMatchObject({
+      success: false,
+      error: { issues: expect.arrayContaining([expect.objectContaining({ message: 'Cada ID de producto debe ser texto' })]) },
+    })
+  })
+})
+
+describe('reschedule hold wire compatibility', () => {
+  const legacyBody = {
+    startsAt: '2026-08-21T15:00:00.000Z',
+    endsAt: '2026-08-21T16:00:00.000Z',
+  }
+
+  it('accepts the legacy body and keeps stripping unrelated unknown keys', () => {
+    expect(rescheduleHoldBodySchema.parse({ ...legacyBody, unrelated: 'legacy-value' })).toEqual(legacyBody)
+  })
+
+  it('rejects a supplied windowSemantics marker with a localized error', () => {
+    expect(rescheduleHoldBodySchema.safeParse({ ...legacyBody, windowSemantics: 'base' })).toMatchObject({
+      success: false,
+      error: {
+        issues: expect.arrayContaining([
+          expect.objectContaining({ message: 'windowSemantics no está permitido al reservar un horario de reprogramación' }),
+        ]),
+      },
+    })
   })
 })
 
@@ -159,6 +263,7 @@ describe('reservation create window-semantics schemas', () => {
       ...common,
       guestName: 'Ana',
       staffId: 'staff-public',
+      assignedStaffId: 'forged-staff',
       allowOverCapacity: true,
       validatedHoldId: 'forged',
     })
@@ -169,6 +274,7 @@ describe('reservation create window-semantics schemas', () => {
 
     expect(dashboard).toMatchObject({ allowOverCapacity: true })
     expect(publicBody).toMatchObject({ staffId: 'staff-public' })
+    expect(publicBody).not.toHaveProperty('assignedStaffId')
     expect(publicBody).not.toHaveProperty('allowOverCapacity')
     expect(publicBody).not.toHaveProperty('validatedHoldId')
     expect(consumer.body).toMatchObject({ staffId: 'staff-consumer' })

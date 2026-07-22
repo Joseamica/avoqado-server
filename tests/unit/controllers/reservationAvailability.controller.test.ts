@@ -259,7 +259,11 @@ describe('reservation availability controller boundaries', () => {
 
     expect(next).not.toHaveBeenCalled()
     expect(occupancy).not.toHaveBeenCalled()
-    expect(createSpy).toHaveBeenCalled()
+    expect(createSpy).toHaveBeenCalledWith(
+      'venue-1',
+      expect.objectContaining({ channel: 'WEB', productId: 'product-1', productIds: undefined }),
+      expect.any(Object),
+    )
   })
 
   it('rejects public staff selection with Spanish 400 before the legacy occupancy fast-fail when the picker is off', async () => {
@@ -380,6 +384,27 @@ describe('reservation availability controller boundaries', () => {
     expect(createSpy).not.toHaveBeenCalled()
   })
 
+  it.each([
+    ['conflicting scalar/list', { productId: 'product-b', productIds: 'product-a,product-b' }],
+    ['explicit empty list plus scalar', { productId: 'product-a', productIds: [] }],
+    ['explicit empty CSV plus scalar', { productId: 'product-a', productIds: ' , ' }],
+    ['more than twenty canonical products', { productIds: Array.from({ length: 21 }, (_, index) => `product-${index}`) }],
+  ])('rejects public create product identity (%s) before catalog or core work', async (_label, products) => {
+    const createSpy = jest.spyOn(reservationService, 'createReservation')
+    const req: any = {
+      params: { venueSlug: 'venue' },
+      headers: {},
+      body: { startsAt, endsAt, duration: 60, partySize: 1, ...products },
+    }
+    const next = jest.fn()
+
+    await publicController.createReservation(req, responseMock(), next)
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 400, message: expect.stringMatching(/coincidir|20/i) }))
+    expect(prismaMock.product.findMany).not.toHaveBeenCalled()
+    expect(createSpy).not.toHaveBeenCalled()
+  })
+
   it('public create maps canonical products/base context, avoids a post-commit product stamp, and releases the hold after success', async () => {
     const deposits = {
       enabled: false,
@@ -427,7 +452,7 @@ describe('reservation availability controller boundaries', () => {
         duration: 60,
         partySize: 1,
         productId: 'product-1',
-        productIds: [' product-1 ', 'product-2', 'product-1'],
+        productIds: [' product-1, product-2 ', '', 'product-1'],
         windowSemantics: 'base',
         holdId: 'hold-untrusted',
         staffId: 'staff-public',
@@ -726,7 +751,7 @@ describe('reservation availability controller boundaries', () => {
         partySize: 1,
         staffId: 'staff-1',
         productId: 'product-1',
-        productIds: 'product-1,product-2',
+        productIds: [' product-1,product-2 ', '', 'product-1'],
         includeFull: true,
         windowSemantics: 'base',
       },
@@ -758,6 +783,156 @@ describe('reservation availability controller boundaries', () => {
         { startsAt, endsAt, available: true },
         { startsAt, endsAt, available: false, reason: 'FULL' },
       ],
+    })
+  })
+
+  it.each([
+    ['scalar only', { productId: 'product-1' }, ['product-1']],
+    [
+      'twenty canonical products',
+      { productIds: Array.from({ length: 20 }, (_, index) => `product-${index}`) },
+      Array.from({ length: 20 }, (_, index) => `product-${index}`),
+    ],
+    ['twenty-one duplicate raw products', { productIds: Array.from({ length: 21 }, () => 'product-1') }, ['product-1']],
+  ])('public availability forwards canonical products for %s', async (_label, products, expectedProductIds) => {
+    prismaMock.product.findFirst.mockResolvedValue({ type: 'APPOINTMENTS_SERVICE' })
+    const availability = jest.spyOn(availabilityService, 'getAvailableSlots').mockResolvedValue([ordinarySlot])
+    const req: any = { params: { venueSlug: 'venue' }, query: { date, ...products } }
+    const next = jest.fn()
+
+    await publicController.getAvailability(req, responseMock(), next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(availability).toHaveBeenCalledWith(
+      'venue-1',
+      date,
+      expect.objectContaining({ productId: expectedProductIds[0], productIds: expectedProductIds }),
+      settings,
+      'UTC',
+    )
+  })
+
+  it.each([
+    ['conflicting scalar/list', { productId: 'product-b', productIds: 'product-a,product-b' }],
+    ['explicit empty list plus scalar', { productId: 'product-a', productIds: [] }],
+    ['explicit empty CSV plus scalar', { productId: 'product-a', productIds: ' , ' }],
+    ['more than twenty canonical products', { productIds: Array.from({ length: 21 }, (_, index) => `product-${index}`) }],
+  ])('rejects public availability product identity (%s) before catalog or availability work', async (_label, products) => {
+    const availability = jest.spyOn(availabilityService, 'getAvailableSlots')
+    const req: any = { params: { venueSlug: 'venue' }, query: { date, ...products } }
+    const next = jest.fn()
+
+    await publicController.getAvailability(req, responseMock(), next)
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 400, message: expect.stringMatching(/coincidir|20/i) }))
+    expect(prismaMock.product.findFirst).not.toHaveBeenCalled()
+    expect(availability).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['scalar only', { productId: 'product-a' }, ['product-a']],
+    ['matching scalar/list', { productId: 'product-a', productIds: 'product-a,product-b' }, ['product-a', 'product-b']],
+    ['CSV', { productIds: 'product-b,product-a,product-b' }, ['product-b', 'product-a']],
+    [
+      'repeated-array CSV with whitespace and empties',
+      { productIds: [' product-b, product-a ', '', 'product-c', 'product-a'] },
+      ['product-b', 'product-a', 'product-c'],
+    ],
+    [
+      'twenty canonical products',
+      { productIds: Array.from({ length: 20 }, (_, index) => `product-${index}`) },
+      Array.from({ length: 20 }, (_, index) => `product-${index}`),
+    ],
+    ['twenty-one duplicate raw products', { productIds: Array.from({ length: 21 }, () => 'product-a') }, ['product-a']],
+  ])('public appointment hold persists exact canonical products for %s', async (_label, products, expectedProductIds) => {
+    prismaMock.product.findMany.mockResolvedValue(expectedProductIds.map(id => ({ id, type: 'APPOINTMENTS_SERVICE' })) as any)
+    prismaMock.slotHold.create.mockResolvedValue({ id: 'hold-1', expiresAt: new Date('2026-08-21T15:10:00.000Z') } as any)
+    prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock))
+    ;(prismaMock as any).$executeRaw = jest.fn().mockResolvedValue(1)
+    jest.spyOn(availabilityService, 'countAppointmentOccupancy').mockResolvedValue({ reservations: 0, holds: 0 })
+    const req: any = {
+      params: { venueSlug: 'venue' },
+      body: { startsAt, endsAt, partySize: 2, fingerprint: 'browser-1', ...products },
+    }
+    const res = responseMock()
+    const next = jest.fn()
+
+    await publicController.createHold(req, res, next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(prismaMock.product.findMany).toHaveBeenCalledWith({
+      where: { id: { in: expectedProductIds }, venueId: 'venue-1' },
+      select: { id: true, type: true },
+    })
+    expect(prismaMock.slotHold.create).toHaveBeenCalledWith({
+      data: {
+        venueId: 'venue-1',
+        startsAt,
+        endsAt,
+        productIds: expectedProductIds,
+        classSessionId: null,
+        partySize: 2,
+        expiresAt: expect.any(Date),
+        fingerprint: 'browser-1',
+      },
+      select: { id: true, expiresAt: true },
+    })
+    expect(res.status).toHaveBeenCalledWith(201)
+  })
+
+  it.each([
+    ['conflicting scalar/list', { productId: 'product-b', productIds: 'product-a,product-b' }],
+    ['explicit empty list plus scalar', { productId: 'product-a', productIds: [] }],
+    ['explicit empty CSV plus scalar', { productId: 'product-a', productIds: ' , ' }],
+    ['more than twenty canonical products', { productIds: Array.from({ length: 21 }, (_, index) => `product-${index}`) }],
+  ])('rejects public hold product identity (%s) before catalog or hold writes', async (_label, products) => {
+    const req: any = { params: { venueSlug: 'venue' }, body: { startsAt, endsAt, ...products } }
+    const next = jest.fn()
+
+    await publicController.createHold(req, responseMock(), next)
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 400, message: expect.stringMatching(/coincidir|20/i) }))
+    expect(prismaMock.product.findMany).not.toHaveBeenCalled()
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(prismaMock.slotHold.create).not.toHaveBeenCalled()
+  })
+
+  it('keeps an explicitly empty generic hold valid and persists an empty product list', async () => {
+    prismaMock.slotHold.create.mockResolvedValue({ id: 'generic-hold', expiresAt: new Date('2026-08-21T15:10:00.000Z') } as any)
+    prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock))
+    const req: any = { params: { venueSlug: 'venue' }, body: { startsAt, endsAt, productIds: [] } }
+    const next = jest.fn()
+
+    await publicController.createHold(req, responseMock(), next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(prismaMock.product.findMany).not.toHaveBeenCalled()
+    expect(prismaMock.slotHold.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ venueId: 'venue-1', productIds: [], classSessionId: null }),
+      select: { id: true, expiresAt: true },
+    })
+  })
+
+  it('keeps the legacy class-hold path and its empty product list unchanged', async () => {
+    prismaMock.classSession.findFirst.mockResolvedValue({ id: 'class-session-1' } as any)
+    prismaMock.slotHold.create.mockResolvedValue({ id: 'class-hold', expiresAt: new Date('2026-08-21T15:10:00.000Z') } as any)
+    prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock))
+    const req: any = {
+      params: { venueSlug: 'venue' },
+      body: { startsAt, endsAt, classSessionId: 'class-session-1', partySize: 3 },
+    }
+    const next = jest.fn()
+
+    await publicController.createHold(req, responseMock(), next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(prismaMock.classSession.findFirst).toHaveBeenCalledWith({
+      where: { id: 'class-session-1', venueId: 'venue-1' },
+      select: { id: true },
+    })
+    expect(prismaMock.slotHold.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ productIds: [], classSessionId: 'class-session-1', partySize: 3 }),
+      select: { id: true, expiresAt: true },
     })
   })
 

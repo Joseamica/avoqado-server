@@ -174,7 +174,9 @@ export const getReservationsQuerySchema = z.object({
   search: z.string().optional(),
 })
 
-const availabilityProductIdsSchema = z
+const bookedProductIdWireSchema = z.string({ invalid_type_error: 'productId debe ser texto' })
+
+const bookedProductIdsWireSchema = z
   .unknown()
   .superRefine((value, ctx) => {
     if (typeof value === 'string') return
@@ -225,8 +227,8 @@ export const getAvailabilityQuerySchema = z
     partySize: z.coerce.number().int().min(1).max(100).optional(),
     tableId: z.string().optional(),
     staffId: z.string().optional(),
-    productId: z.string().optional(),
-    productIds: availabilityProductIdsSchema.optional(),
+    productId: bookedProductIdWireSchema.optional(),
+    productIds: bookedProductIdsWireSchema.optional(),
     includeFull: availabilityBooleanSchema.optional(),
     windowSemantics: availabilityWindowSemanticsSchema.optional(),
     type: z.enum(['class', 'appointment']).optional(),
@@ -408,6 +410,15 @@ export const rescheduleAvailabilityQuerySchema = z.object({
 export const rescheduleHoldBodySchema = z.object({
   startsAt: z.string().min(1, 'startsAt es requerido'),
   endsAt: z.string().min(1, 'endsAt es requerido'),
+  windowSemantics: z
+    .unknown()
+    .superRefine((_value, ctx) => {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'windowSemantics no está permitido al reservar un horario de reprogramación',
+      })
+    })
+    .optional(),
 })
 
 export const addToWaitlistBodySchema = z
@@ -545,10 +556,10 @@ export const publicCreateReservationBodySchema = z
     guestPhone: z.string().min(1, 'El telefono es requerido').max(20).optional(),
     guestEmail: z.string().email('Email invalido').max(200).optional(),
     partySize: z.number().int().min(1).max(100).optional(),
-    productId: z.string().optional(),
+    productId: bookedProductIdWireSchema.optional(),
     // Multi-service appointments (Square pattern). When present, the controller
     // sums durations + sets productId = productIds[0] for back-compat.
-    productIds: z.array(z.string().min(1)).max(20).optional(),
+    productIds: bookedProductIdsWireSchema.optional(),
     staffId: z.string({ invalid_type_error: 'staffId debe ser texto' }).min(1, 'staffId es requerido').optional(),
     windowSemantics: z.literal('base', { invalid_type_error: 'windowSemantics debe ser base' }).optional(),
     classSessionId: z.string().optional(),
@@ -677,7 +688,8 @@ export const publicCreateHoldBodySchema = z
   .object({
     startsAt: z.coerce.date({ required_error: 'La fecha de inicio es requerida' }),
     endsAt: z.coerce.date({ required_error: 'La fecha de fin es requerida' }),
-    productIds: z.array(z.string().min(1)).max(20).optional(),
+    productId: bookedProductIdWireSchema.optional(),
+    productIds: bookedProductIdsWireSchema.optional(),
     classSessionId: z.string().optional(),
     partySize: z.number().int().min(1).max(100).optional(),
     fingerprint: z.string().max(200).optional(),
