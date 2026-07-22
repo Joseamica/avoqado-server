@@ -4,8 +4,9 @@ Este rollout es forward-only y usa dos releases. No activa módulos nuevos: el e
 
 ## Artefactos
 
-- Release A (protocolo dual + gracia acotada para holds viejos): `8b4087e0dd2ac81b5cc9c4b2d41cb6b34652072a`.
-- Release B (match estricto de reschedule): `a7d47d8156b86db4a12acf68a96af16099e235d9`.
+- Release A (protocolo dual + gracia acotada para holds viejos): `a7c30dce0a7e57d3518290036e3d1d9d5c0dc84b`.
+- Release B (match estricto de reschedule): `6796dd87b02cb3f448e57cc33ff8bf36a4bf9a0d`.
+- Los artefactos anteriores `8b4087e0…` / `a7d47d81…` están superseded y no deben desplegarse: no contienen los cierres del review técnico final.
 - Preflight read-only: `scripts/preflight-reservation-staff-rollout.ts` del artefacto B.
 - TTL del servidor: `SLOT_HOLD_TTL_MS = 600000` ms. La espera A→B es 11 minutos (`TTL + 60 s`).
 
