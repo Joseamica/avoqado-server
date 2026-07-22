@@ -19,6 +19,7 @@ type ConsumerReservationInput = {
   guestEmail?: string
   partySize?: number
   productId?: string
+  staffId?: string
   windowSemantics?: 'base'
   classSessionId?: string
   spotIds?: string[]
@@ -231,6 +232,10 @@ export async function createReservationForConsumer(consumerId: string, venueSlug
     throw new BadRequestError('Las reservaciones en linea no estan habilitadas')
   }
 
+  if (!input.classSessionId && input.staffId && settings.publicBooking.showStaffPicker !== true) {
+    throw new BadRequestError('La selección de profesionista no está habilitada para este negocio')
+  }
+
   const { consumer, customer } = await ensureVenueCustomer(venue.id, consumerId)
   const guestName = input.guestName ?? displayName(consumer)
   const guestEmail = input.guestEmail ?? consumer.email ?? undefined
@@ -308,6 +313,7 @@ export async function createReservationForConsumer(consumerId: string, venueSlug
       guestEmail,
       partySize: input.partySize,
       productId: input.productId,
+      assignedStaffId: input.staffId,
       specialRequests: input.specialRequests,
     },
     { writeOrigin: 'CONSUMER', ...(input.windowSemantics === 'base' ? { windowSemantics: input.windowSemantics } : {}) },

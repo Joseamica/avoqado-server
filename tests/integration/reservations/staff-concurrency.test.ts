@@ -9,6 +9,7 @@ import prisma from '@/utils/prismaClient'
 import { ConflictError } from '@/errors/AppError'
 import { withSerializableRetry } from '@/utils/serializableRetry'
 import { assertOrganizationStaffAvailability } from '@/services/dashboard/appointmentStaffAssignment.service'
+import { createReservation } from '@/services/dashboard/reservation.dashboard.service'
 import { createClassSession, createClassSessionsBulk, updateClassSession } from '@/services/dashboard/classSession.dashboard.service'
 import { hardDeleteTeamMember } from '@/services/dashboard/team.dashboard.service'
 
@@ -19,12 +20,16 @@ const lockHolder = new PrismaClient()
 const organizationIds: string[] = []
 const venueIds: string[] = []
 let staffId: string
+let secondStaffId: string
 let sameOrgVenueA: string
 let sameOrgVenueB: string
 let otherOrgVenue: string
 let classProductA: string
 let classProductB: string
 let classProductOther: string
+let appointmentProductA: string
+let appointmentProductB: string
+let appointmentProductOther: string
 let sequence = 0
 
 interface Window {
@@ -107,6 +112,48 @@ async function waitUntilBlockedBy(holderPid: number, expected: number, label: st
   throw new Error(`Timed out waiting for ${expected} blocked transactions: ${label}`)
 }
 
+function appointmentWindow(dayOffset: number): Window {
+  const startsAt = new Date(Date.now() + dayOffset * 24 * 60 * 60_000)
+  startsAt.setUTCSeconds(0, 0)
+  return { startsAt, endsAt: new Date(startsAt.getTime() + 60 * 60_000) }
+}
+
+function startAppointmentVenueLockHolder(venueId: string) {
+  const gate = createGate()
+  let holderPid = 0
+  const promise = lockHolder.$transaction(
+    async tx => {
+      const [backend] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
+      holderPid = backend.pid
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'apt-hold:' + venueId}))`
+      gate.signalReady()
+      await gate.permit
+    },
+    { timeout: 20_000 },
+  )
+  return { gate, promise, getPid: () => holderPid }
+}
+
+function createProductionAppointment(args: {
+  venueId: string
+  productId: string
+  window: Window
+  writeOrigin: 'PUBLIC' | 'DASHBOARD'
+  requestedStaffId?: string
+}) {
+  return createReservation(
+    args.venueId,
+    {
+      ...args.window,
+      duration: 60,
+      productId: args.productId,
+      productIds: [args.productId],
+      assignedStaffId: args.requestedStaffId,
+    },
+    { writeOrigin: args.writeOrigin, windowSemantics: 'base' },
+  )
+}
+
 async function createVenueFixture(organizationId: string, suffix: string) {
   const venue = await prisma.venue.create({
     data: {
@@ -146,6 +193,50 @@ async function ensureMembership(venueId: string): Promise<void> {
   })
 }
 
+async function createAppointmentProduct(venueId: string, suffix: string): Promise<string> {
+  const category = await prisma.menuCategory.findFirstOrThrow({ where: { venueId }, select: { id: true } })
+  const product = await prisma.product.create({
+    data: {
+      venueId,
+      categoryId: category.id,
+      sku: `${fixtureKey}-${suffix}-appointment`,
+      name: `${suffix} appointment`,
+      type: 'APPOINTMENTS_SERVICE',
+      price: new Prisma.Decimal(100),
+      duration: 60,
+      tags: [],
+      allergens: [],
+    },
+  })
+  return product.id
+}
+
+async function configureAppointmentStaff(venueId: string, productId: string, candidateStaffIds: string[]): Promise<void> {
+  const allDay = Object.fromEntries(
+    ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'].map(day => [
+      day,
+      { enabled: true, ranges: [{ open: '00:00', close: '23:59' }] },
+    ]),
+  )
+  for (const candidateStaffId of candidateStaffIds) {
+    const membership = await prisma.staffVenue.upsert({
+      where: { staffId_venueId: { staffId: candidateStaffId, venueId } },
+      create: { staffId: candidateStaffId, venueId, role: 'MANAGER', active: true },
+      update: { active: true, endDate: null },
+    })
+    await prisma.productStaff.upsert({
+      where: { productId_staffVenueId: { productId, staffVenueId: membership.id } },
+      create: { venueId, productId, staffVenueId: membership.id },
+      update: { venueId },
+    })
+    await prisma.staffSchedule.upsert({
+      where: { staffVenueId: membership.id },
+      create: { venueId, staffVenueId: membership.id, weekly: allDay },
+      update: { venueId, weekly: allDay },
+    })
+  }
+}
+
 async function cleanupCommitments(): Promise<void> {
   const venueFilter = { in: venueIds }
   await prisma.slotHold.deleteMany({ where: { venueId: venueFilter } })
@@ -156,7 +247,7 @@ async function cleanupCommitments(): Promise<void> {
 
 async function cleanupFixtures(): Promise<void> {
   if (venueIds.length > 0) await prisma.venue.deleteMany({ where: { id: { in: venueIds } } })
-  if (staffId) await prisma.staff.deleteMany({ where: { id: staffId } })
+  if (staffId || secondStaffId) await prisma.staff.deleteMany({ where: { id: { in: [staffId, secondStaffId].filter(Boolean) } } })
   if (organizationIds.length > 0) await prisma.organization.deleteMany({ where: { id: { in: organizationIds } } })
 }
 
@@ -293,7 +384,26 @@ beforeAll(async () => {
       },
     })
     staffId = staff.id
+    const secondStaff = await prisma.staff.create({
+      data: {
+        email: `${fixtureKey}-second@example.test`,
+        firstName: 'Second',
+        lastName: 'Professional',
+        active: true,
+      },
+    })
+    secondStaffId = secondStaff.id
     await Promise.all(venueIds.map(ensureMembership))
+    ;[appointmentProductA, appointmentProductB, appointmentProductOther] = await Promise.all([
+      createAppointmentProduct(sameOrgVenueA, 'a'),
+      createAppointmentProduct(sameOrgVenueB, 'b'),
+      createAppointmentProduct(otherOrgVenue, 'other'),
+    ])
+    await Promise.all([
+      configureAppointmentStaff(sameOrgVenueA, appointmentProductA, [staffId, secondStaffId]),
+      configureAppointmentStaff(sameOrgVenueB, appointmentProductB, [staffId]),
+      configureAppointmentStaff(otherOrgVenue, appointmentProductOther, [staffId]),
+    ])
   } catch (error) {
     await cleanupFixtures()
     throw error
@@ -311,6 +421,124 @@ afterAll(async () => {
   } finally {
     await Promise.allSettled([inspector.$disconnect(), lockHolder.$disconnect()])
   }
+})
+
+describe('production appointment create serialization on PostgreSQL', () => {
+  it('commits exactly one simultaneous self-service create at pacing one', async () => {
+    await prisma.reservationSettings.update({
+      where: { venueId: sameOrgVenueA },
+      data: { capacityMode: 'per_staff', showStaffPicker: false, pacingMaxPerSlot: 1, minNoticeMin: 0 },
+    })
+    const window = appointmentWindow(10)
+    const holder = startAppointmentVenueLockHolder(sameOrgVenueA)
+    await waitForSignalOrFailure(holder.gate.ready, holder.promise, 'pacing-one venue lock holder')
+    const creates = [
+      createProductionAppointment({ venueId: sameOrgVenueA, productId: appointmentProductA, window, writeOrigin: 'PUBLIC' }),
+      createProductionAppointment({ venueId: sameOrgVenueA, productId: appointmentProductA, window, writeOrigin: 'PUBLIC' }),
+    ]
+    let observationError: unknown
+    try {
+      await waitUntilBlockedBy(holder.getPid(), 2, 'pacing-one appointment creates')
+    } catch (error) {
+      observationError = error
+    } finally {
+      holder.gate.release()
+      await holder.promise
+    }
+    const outcomes = await Promise.allSettled(creates)
+    if (observationError) throw observationError
+
+    expect(outcomes.filter(outcome => outcome.status === 'fulfilled')).toHaveLength(1)
+    const rejected = outcomes.filter(outcome => outcome.status === 'rejected') as PromiseRejectedResult[]
+    expect(rejected).toHaveLength(1)
+    expect(rejected[0].reason).toMatchObject({ statusCode: 409, code: undefined })
+    expect(await prisma.reservation.count({ where: { venueId: sameOrgVenueA, startsAt: window.startsAt } })).toBe(1)
+  })
+
+  it('commits two simultaneous creates with distinct Staff.id assignments at pacing two', async () => {
+    await prisma.reservationSettings.update({
+      where: { venueId: sameOrgVenueA },
+      data: { capacityMode: 'per_staff', showStaffPicker: false, pacingMaxPerSlot: 2, minNoticeMin: 0 },
+    })
+    const window = appointmentWindow(11)
+    const holder = startAppointmentVenueLockHolder(sameOrgVenueA)
+    await waitForSignalOrFailure(holder.gate.ready, holder.promise, 'pacing-two venue lock holder')
+    const creates = [
+      createProductionAppointment({ venueId: sameOrgVenueA, productId: appointmentProductA, window, writeOrigin: 'PUBLIC' }),
+      createProductionAppointment({ venueId: sameOrgVenueA, productId: appointmentProductA, window, writeOrigin: 'PUBLIC' }),
+    ]
+    let observationError: unknown
+    try {
+      await waitUntilBlockedBy(holder.getPid(), 2, 'pacing-two appointment creates')
+    } catch (error) {
+      observationError = error
+    } finally {
+      holder.gate.release()
+      await holder.promise
+    }
+    const created = await Promise.all(creates)
+    if (observationError) throw observationError
+
+    expect(new Set(created.map(row => row.assignedStaffId))).toEqual(new Set([staffId, secondStaffId]))
+    expect(await prisma.reservation.count({ where: { venueId: sameOrgVenueA, startsAt: window.startsAt } })).toBe(2)
+  })
+
+  it('serializes a requested professional against a same-organization cross-venue writer', async () => {
+    await prisma.reservationSettings.update({
+      where: { venueId: sameOrgVenueB },
+      data: { capacityMode: 'per_staff', showStaffPicker: true, pacingMaxPerSlot: null, minNoticeMin: 0 },
+    })
+    const window = appointmentWindow(12)
+    const gate = createGate()
+    const competitor = startMinimalCommitmentWriter({ kind: 'reservation', venueId: sameOrgVenueA, window, gate })
+    await waitForSignalOrFailure(gate.ready, competitor.promise, 'cross-venue Reservation writer')
+
+    let created: Awaited<ReturnType<typeof createProductionAppointment>> | undefined
+    try {
+      created = await createProductionAppointment({
+        venueId: sameOrgVenueB,
+        productId: appointmentProductB,
+        window,
+        writeOrigin: 'DASHBOARD',
+        requestedStaffId: staffId,
+      })
+    } finally {
+      gate.release()
+    }
+    const competitorError = await competitor.promise.catch(error => error)
+
+    expect(created?.assignedStaffId).toBe(staffId)
+    expect(competitorError).toMatchObject({ statusCode: 409 })
+    expect(await prisma.reservation.count({ where: { assignedStaffId: staffId, startsAt: window.startsAt } })).toBe(1)
+  })
+
+  it('isolates the same apparent Staff.id across organizations', async () => {
+    await prisma.reservationSettings.update({
+      where: { venueId: otherOrgVenue },
+      data: { capacityMode: 'per_staff', showStaffPicker: true, pacingMaxPerSlot: null, minNoticeMin: 0 },
+    })
+    const window = appointmentWindow(13)
+    const gate = createGate()
+    const competitor = startMinimalCommitmentWriter({ kind: 'reservation', venueId: sameOrgVenueA, window, gate })
+    await waitForSignalOrFailure(gate.ready, competitor.promise, 'other-organization Reservation writer')
+
+    let created: Awaited<ReturnType<typeof createProductionAppointment>> | undefined
+    try {
+      created = await createProductionAppointment({
+        venueId: otherOrgVenue,
+        productId: appointmentProductOther,
+        window,
+        writeOrigin: 'DASHBOARD',
+        requestedStaffId: staffId,
+      })
+    } finally {
+      gate.release()
+    }
+    await expect(competitor.promise).resolves.toMatchObject({ assignedStaffId: staffId })
+
+    expect(created?.assignedStaffId).toBe(staffId)
+    expect(await prisma.reservation.count({ where: { assignedStaffId: staffId, startsAt: window.startsAt } })).toBe(2)
+  })
 })
 
 describe('staff commitment serialization on PostgreSQL', () => {

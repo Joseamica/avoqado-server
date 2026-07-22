@@ -146,4 +146,69 @@ describe('reservation create window-semantics schemas', () => {
     expect(createReservationBodySchema.safeParse(body).success).toBe(true)
     expect(publicCreateReservationBodySchema.safeParse({ guestName: 'Ana', ...body }).success).toBe(true)
   })
+
+  it('accepts only the origin-appropriate staff and dashboard consent wire fields', () => {
+    const common = {
+      startsAt,
+      endsAt: new Date(startsAt.getTime() + 60 * 60_000),
+      duration: 60,
+      productId: 'a',
+    }
+    const dashboard = createReservationBodySchema.parse({ ...common, allowOverCapacity: true })
+    const publicBody = publicCreateReservationBodySchema.parse({
+      ...common,
+      guestName: 'Ana',
+      staffId: 'staff-public',
+      allowOverCapacity: true,
+      validatedHoldId: 'forged',
+    })
+    const consumer = consumerCreateReservationSchema.parse({
+      params: { venueSlug: 'venue' },
+      body: { ...common, staffId: 'staff-consumer', allowOverCapacity: true, validatedHoldId: 'forged' },
+    })
+
+    expect(dashboard).toMatchObject({ allowOverCapacity: true })
+    expect(publicBody).toMatchObject({ staffId: 'staff-public' })
+    expect(publicBody).not.toHaveProperty('allowOverCapacity')
+    expect(publicBody).not.toHaveProperty('validatedHoldId')
+    expect(consumer.body).toMatchObject({ staffId: 'staff-consumer' })
+    expect(consumer.body).not.toHaveProperty('allowOverCapacity')
+    expect(consumer.body).not.toHaveProperty('validatedHoldId')
+  })
+
+  it('localizes every newly exposed create field in Spanish', () => {
+    const common = {
+      startsAt,
+      endsAt: new Date(startsAt.getTime() + 60 * 60_000),
+      duration: 60,
+    }
+    const dashboard = createReservationBodySchema.safeParse({ ...common, allowOverCapacity: 'true' })
+    const publicWrongType = publicCreateReservationBodySchema.safeParse({ ...common, guestName: 'Ana', staffId: 7 })
+    const publicEmpty = publicCreateReservationBodySchema.safeParse({ ...common, guestName: 'Ana', staffId: '' })
+    const consumerWrongType = consumerCreateReservationSchema.safeParse({
+      params: { venueSlug: 'venue' },
+      body: { ...common, staffId: 7 },
+    })
+    const consumerEmpty = consumerCreateReservationSchema.safeParse({
+      params: { venueSlug: 'venue' },
+      body: { ...common, staffId: '' },
+    })
+
+    expect(dashboard).toMatchObject({
+      success: false,
+      error: { issues: expect.arrayContaining([expect.objectContaining({ message: 'allowOverCapacity debe ser true o false' })]) },
+    })
+    for (const parsed of [publicWrongType, consumerWrongType]) {
+      expect(parsed).toMatchObject({
+        success: false,
+        error: { issues: expect.arrayContaining([expect.objectContaining({ message: 'staffId debe ser texto' })]) },
+      })
+    }
+    for (const parsed of [publicEmpty, consumerEmpty]) {
+      expect(parsed).toMatchObject({
+        success: false,
+        error: { issues: expect.arrayContaining([expect.objectContaining({ message: 'staffId es requerido' })]) },
+      })
+    }
+  })
 })

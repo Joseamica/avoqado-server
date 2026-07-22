@@ -56,12 +56,16 @@ export async function createReservation(req: Request, res: Response, next: NextF
   try {
     const venueId = resolveVenueId(req)
     const { userId } = (req as any).authContext
-    const { windowSemantics, ...reservationInput } = req.body
+    const { windowSemantics, allowOverCapacity, ...reservationInput } = req.body
 
     const reservation = await reservationService.createReservation(
       venueId,
       reservationInput,
-      { writeOrigin: 'DASHBOARD', ...(windowSemantics === 'base' ? { windowSemantics } : {}) },
+      {
+        writeOrigin: 'DASHBOARD',
+        ...(windowSemantics === 'base' ? { windowSemantics } : {}),
+        ...(allowOverCapacity === true ? { allowOverCapacity: true } : {}),
+      },
       userId,
     )
     res.status(201).json(reservation)

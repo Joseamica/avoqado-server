@@ -108,7 +108,7 @@ describe('reservation availability controller boundaries', () => {
     )
   })
 
-  it('dashboard create maps base semantics only into trusted context', async () => {
+  it('dashboard create maps base semantics and over-capacity consent only into trusted context', async () => {
     const createSpy = jest.spyOn(reservationService, 'createReservation').mockResolvedValue({ id: 'reservation-created' } as any)
     const body = {
       startsAt,
@@ -117,6 +117,7 @@ describe('reservation availability controller boundaries', () => {
       productId: 'product-1',
       productIds: ['product-1'],
       windowSemantics: 'base',
+      allowOverCapacity: true,
     }
     const req: any = { params: { venueId: 'venue-1' }, body, authContext: { userId: 'staff-1' } }
     const next = jest.fn()
@@ -126,8 +127,8 @@ describe('reservation availability controller boundaries', () => {
     expect(next).not.toHaveBeenCalled()
     expect(createSpy).toHaveBeenCalledWith(
       'venue-1',
-      expect.not.objectContaining({ windowSemantics: expect.anything() }),
-      { writeOrigin: 'DASHBOARD', windowSemantics: 'base' },
+      expect.not.objectContaining({ windowSemantics: expect.anything(), allowOverCapacity: expect.anything() }),
+      { writeOrigin: 'DASHBOARD', windowSemantics: 'base', allowOverCapacity: true },
       'staff-1',
     )
   })
@@ -210,6 +211,125 @@ describe('reservation availability controller boundaries', () => {
     })
   })
 
+  it('does not collapse staff-aware null pacing to one in the public no-hold fast guard', async () => {
+    const deposits = {
+      enabled: false,
+      mode: 'none',
+      fixedAmount: null,
+      percentageOfTotal: null,
+      requiredForPartySizeGte: null,
+      paymentWindowHrs: 24,
+    } as const
+    jest.spyOn(settingsService, 'getReservationSettings').mockResolvedValue({
+      ...settings,
+      scheduling: { ...settings.scheduling, capacityMode: 'per_staff', pacingMaxPerSlot: null },
+      deposits,
+      payments: { appointmentUpfrontDefault: 'at_venue', classUpfrontDefault: 'required' },
+    } as any)
+    prismaMock.product.findFirst.mockResolvedValue({
+      type: 'APPOINTMENTS_SERVICE',
+      price: new Prisma.Decimal(0),
+      upfrontPolicy: 'at_venue',
+    } as any)
+    const occupancy = jest.spyOn(availabilityService, 'countAppointmentOccupancy').mockResolvedValue({ reservations: 10, holds: 10 })
+    const createSpy = jest.spyOn(reservationService, 'createReservation').mockResolvedValue({
+      id: 'reservation-1',
+      confirmationCode: 'RES-1',
+      cancelSecret: 'secret',
+      startsAt,
+      endsAt,
+      status: 'CONFIRMED',
+      depositAmount: null,
+      guestEmail: null,
+      guestPhone: null,
+      productId: 'product-1',
+    } as any)
+    const req: any = {
+      params: { venueSlug: 'venue' },
+      headers: {},
+      body: { startsAt, endsAt, duration: 60, partySize: 1, productId: 'product-1' },
+    }
+    const next = jest.fn()
+
+    await publicController.createReservation(req, responseMock(), next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(occupancy).not.toHaveBeenCalled()
+    expect(createSpy).toHaveBeenCalled()
+  })
+
+  it('rejects public staff selection with Spanish 400 before the legacy occupancy fast-fail when the picker is off', async () => {
+    jest.spyOn(settingsService, 'getReservationSettings').mockResolvedValue({
+      ...settings,
+      scheduling: { ...settings.scheduling, capacityMode: 'pacing', pacingMaxPerSlot: 1 },
+      publicBooking: { ...settings.publicBooking, showStaffPicker: false },
+    } as any)
+    const occupancy = jest.spyOn(availabilityService, 'countAppointmentOccupancy').mockResolvedValue({ reservations: 1, holds: 0 })
+    const createSpy = jest.spyOn(reservationService, 'createReservation').mockResolvedValue({
+      id: 'reservation-should-not-exist',
+      confirmationCode: 'RES-NO',
+      cancelSecret: 'secret',
+      startsAt,
+      endsAt,
+      status: 'CONFIRMED',
+      depositAmount: null,
+      guestEmail: null,
+      guestPhone: null,
+      productId: 'product-1',
+    } as any)
+    const req: any = {
+      params: { venueSlug: 'venue' },
+      headers: {},
+      body: {
+        startsAt,
+        endsAt,
+        duration: 60,
+        partySize: 1,
+        productId: 'product-1',
+        staffId: 'staff-forbidden',
+      },
+    }
+    const next = jest.fn()
+
+    await publicController.createReservation(req, responseMock(), next)
+
+    expect(next).toHaveBeenCalledWith(
+      expect.objectContaining({ statusCode: 400, message: 'La selección de profesionista no está habilitada para este negocio' }),
+    )
+    expect(occupancy).not.toHaveBeenCalled()
+    expect(createSpy).not.toHaveBeenCalled()
+  })
+
+  it('preserves the legacy require-account 401 before the picker-off staff rejection', async () => {
+    jest.spyOn(settingsService, 'getReservationSettings').mockResolvedValue({
+      ...settings,
+      publicBooking: { ...settings.publicBooking, requireAccount: true, showStaffPicker: false },
+    } as any)
+    const occupancy = jest.spyOn(availabilityService, 'countAppointmentOccupancy')
+    const createSpy = jest.spyOn(reservationService, 'createReservation')
+    const req: any = {
+      params: { venueSlug: 'venue' },
+      headers: {},
+      body: {
+        startsAt,
+        endsAt,
+        duration: 60,
+        partySize: 1,
+        productId: 'product-1',
+        staffId: 'staff-forbidden',
+      },
+    }
+    const next = jest.fn()
+
+    await publicController.createReservation(req, responseMock(), next)
+
+    expect(next).toHaveBeenCalledWith(
+      expect.objectContaining({ statusCode: 401, message: 'Este negocio requiere iniciar sesion para reservar.' }),
+    )
+    expect(occupancy).not.toHaveBeenCalled()
+    expect(createSpy).not.toHaveBeenCalled()
+  })
+
   it('public create maps canonical products/base context, avoids a post-commit product stamp, and releases the hold after success', async () => {
     const deposits = {
       enabled: false,
@@ -228,9 +348,14 @@ describe('reservation availability controller boundaries', () => {
       { id: 'product-2', type: 'APPOINTMENTS_SERVICE', duration: 30, durationMinutes: null },
       { id: 'product-1', type: 'APPOINTMENTS_SERVICE', duration: 30, durationMinutes: null },
     ] as any)
-    prismaMock.product.findFirst.mockResolvedValue({ type: 'SERVICE', price: new Prisma.Decimal(0), upfrontPolicy: 'at_venue' } as any)
-    prismaMock.slotHold.findFirst.mockResolvedValue({ id: 'hold-1', startsAt, endsAt } as any)
+    prismaMock.product.findFirst.mockResolvedValue({
+      type: 'APPOINTMENTS_SERVICE',
+      price: new Prisma.Decimal(0),
+      upfrontPolicy: 'at_venue',
+    } as any)
+    prismaMock.slotHold.findFirst.mockResolvedValue({ id: 'hold-validated', startsAt, endsAt } as any)
     prismaMock.slotHold.deleteMany.mockResolvedValue({ count: 1 } as any)
+    const occupancySpy = jest.spyOn(availabilityService, 'countAppointmentOccupancy').mockResolvedValue({ reservations: 99, holds: 99 })
     const createSpy = jest.spyOn(reservationService, 'createReservation').mockResolvedValue({
       id: 'reservation-1',
       confirmationCode: 'RES-1',
@@ -254,7 +379,9 @@ describe('reservation availability controller boundaries', () => {
         productId: 'product-1',
         productIds: [' product-1 ', 'product-2', 'product-1'],
         windowSemantics: 'base',
-        holdId: 'hold-1',
+        holdId: 'hold-untrusted',
+        staffId: 'staff-public',
+        validatedHoldId: 'forged-context-id',
       },
     }
     const res = responseMock()
@@ -269,11 +396,18 @@ describe('reservation availability controller boundaries', () => {
         channel: 'WEB',
         productId: 'product-1',
         productIds: ['product-1', 'product-2'],
+        assignedStaffId: 'staff-public',
       }),
-      { writeOrigin: 'PUBLIC', paymentPolicyOverride: { deposits }, windowSemantics: 'base' },
+      {
+        writeOrigin: 'PUBLIC',
+        paymentPolicyOverride: { deposits },
+        windowSemantics: 'base',
+        validatedHoldId: 'hold-validated',
+      },
     )
+    expect(occupancySpy).not.toHaveBeenCalled()
     expect(prismaMock.reservation.update).not.toHaveBeenCalled()
-    expect(prismaMock.slotHold.deleteMany).toHaveBeenCalledWith({ where: { id: 'hold-1', venueId: 'venue-1' } })
+    expect(prismaMock.slotHold.deleteMany).toHaveBeenCalledWith({ where: { id: 'hold-validated', venueId: 'venue-1' } })
     expect(createSpy.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.slotHold.deleteMany.mock.invocationCallOrder[0])
   })
 

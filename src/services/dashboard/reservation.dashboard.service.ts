@@ -26,6 +26,12 @@ import {
   normalizeBookedProductIds,
   resolveAppointmentWindow,
 } from '@/services/reservation/resolveAppointmentWindow'
+import {
+  assertOrganizationStaffAvailability,
+  lockAppointmentVenue,
+  resolveStaffAssignment,
+  shouldAutoAssign,
+} from './appointmentStaffAssignment.service'
 // creditPack.public.service is imported lazily inside cancelReservation/markNoShow.
 
 // ==========================================
@@ -147,7 +153,6 @@ async function validateResourceOwnership(
     bookedProductIds?: string[]
     leadProductId?: string
     productIdsWasProvided?: boolean
-    assignedStaffId?: string | null
   },
 ): Promise<ValidatedResources> {
   if (resources.tableId) {
@@ -188,17 +193,22 @@ async function validateResourceOwnership(
     products = [product]
   }
 
-  if (resources.assignedStaffId) {
-    const staffVenue = await tx.staffVenue.findFirst({
-      where: { staffId: resources.assignedStaffId, venueId, active: true },
-      select: { id: true },
-    })
-    if (!staffVenue) {
-      throw new BadRequestError('El miembro del equipo seleccionado no pertenece a este negocio')
-    }
-  }
-
   return { product, products }
+}
+
+async function validateLegacyStaffMembership(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  staffId: string,
+): Promise<{ organizationId: string }> {
+  const staffVenue = await tx.staffVenue.findFirst({
+    where: { staffId, venueId, active: true },
+    select: { venue: { select: { organizationId: true } } },
+  })
+  if (!staffVenue) {
+    throw new BadRequestError('El miembro del equipo seleccionado no pertenece a este negocio')
+  }
+  return { organizationId: staffVenue.venue.organizationId }
 }
 
 // ---- Core Service Methods ----
@@ -229,6 +239,8 @@ export interface ReservationWriteContext {
   writeOrigin: WriteOrigin
   allowOverCapacity?: boolean
   windowSemantics?: 'base'
+  /** Trusted server-derived hold identity; never populate from request bodies. */
+  validatedHoldId?: string
   /**
    * Trusted server-derived bridge for the public payment preflight. It may
    * replace deposits only; scheduling and every other policy remain bound to
@@ -315,8 +327,11 @@ export async function createReservation(
       bookedProductIds,
       leadProductId,
       productIdsWasProvided,
-      assignedStaffId: data.assignedStaffId,
     })
+    const isAppointment =
+      bookedProductIds.length > 0 &&
+      products.length === bookedProductIds.length &&
+      products.every(selected => selected.type === 'APPOINTMENTS_SERVICE')
 
     let modifierRows: ResolvedModifierRow[]
     let modifierDelta: Prisma.Decimal
@@ -337,10 +352,6 @@ export async function createReservation(
       finalEndsAt = resolvedWindow.finalEndsAt
       finalDuration = resolvedWindow.finalDurationMin
     } else {
-      const isAppointment =
-        bookedProductIds.length > 0 &&
-        products.length === bookedProductIds.length &&
-        products.every(selected => selected.type === 'APPOINTMENTS_SERVICE')
       if (isAppointment && isStaffAware(settings)) {
         const rawIntervalDurationMin = (data.endsAt.getTime() - data.startsAt.getTime()) / 60_000
         await assertLegacyAppointmentDurationFloor(tx, {
@@ -360,6 +371,89 @@ export async function createReservation(
       }
       finalEndsAt =
         modifiers.totalDurationDelta === 0 ? data.endsAt : new Date(data.endsAt.getTime() + modifiers.totalDurationDelta * 60_000)
+    }
+
+    let effectiveAssignedStaffId = data.assignedStaffId ?? null
+    let overCapacity = false
+    const selfServiceStaffSelection = context.writeOrigin === 'PUBLIC' || context.writeOrigin === 'CONSUMER'
+
+    if (isAppointment) {
+      // The final appointment window is read-only-resolved above. From this
+      // point onward every authorizing conflict/count/write is serialized by
+      // the same venue-scoped advisory lock and post-lock clock.
+      await lockAppointmentVenue(tx, venueId)
+      const checkedAt = new Date()
+      const staffAware = isStaffAware(settings)
+
+      if (selfServiceStaffSelection && effectiveAssignedStaffId && settings.publicBooking.showStaffPicker !== true) {
+        throw new BadRequestError('La selección de profesionista no está habilitada para este negocio')
+      }
+
+      if (staffAware && (effectiveAssignedStaffId || shouldAutoAssign(true, settings))) {
+        effectiveAssignedStaffId = await resolveStaffAssignment(tx, {
+          venueId,
+          productIds: bookedProductIds,
+          startsAt: data.startsAt,
+          endsAt: finalEndsAt,
+          checkedAt,
+          settings,
+          requestedStaffId: effectiveAssignedStaffId ?? undefined,
+          excludeHoldId: context.validatedHoldId,
+        })
+      } else if (effectiveAssignedStaffId) {
+        const membership = await validateLegacyStaffMembership(tx, venueId, effectiveAssignedStaffId)
+        await assertOrganizationStaffAvailability(tx, {
+          organizationId: membership.organizationId,
+          staffId: effectiveAssignedStaffId,
+          startsAt: data.startsAt,
+          endsAt: finalEndsAt,
+          checkedAt,
+          excludeHoldId: context.validatedHoldId,
+        })
+      }
+
+      const globalLimit = staffAware
+        ? (settings.scheduling.pacingMaxPerSlot ?? null)
+        : context.writeOrigin === 'DASHBOARD'
+          ? null
+          : effectiveAppointmentPacing(settings.scheduling.pacingMaxPerSlot)
+
+      if (globalLimit !== null) {
+        const { reservations, holds } = await countAppointmentOccupancy(tx, {
+          venueId,
+          startsAt: data.startsAt,
+          endsAt: finalEndsAt,
+          checkedAt,
+          excludeHoldId: context.validatedHoldId,
+        })
+        const occupancy = reservations + holds
+        if (occupancy >= globalLimit) {
+          if (staffAware && context.writeOrigin === 'DASHBOARD') {
+            if (!context.allowOverCapacity) {
+              throw new ConflictError('El horario está lleno. Confirma si deseas sobre-agendar.', 'OVER_CAPACITY_CONFIRMATION_REQUIRED', {
+                preview: { startsAt: data.startsAt, endsAt: finalEndsAt, occupancy, limit: globalLimit },
+              })
+            }
+            overCapacity = true
+          } else {
+            throw new ConflictError('Este horario ya no está disponible. Por favor elige otro horario.')
+          }
+        }
+      }
+    } else if (effectiveAssignedStaffId) {
+      if (selfServiceStaffSelection && settings.publicBooking.showStaffPicker !== true) {
+        throw new BadRequestError('La selección de profesionista no está habilitada para este negocio')
+      }
+      const checkedAt = new Date()
+      const membership = await validateLegacyStaffMembership(tx, venueId, effectiveAssignedStaffId)
+      await assertOrganizationStaffAvailability(tx, {
+        organizationId: membership.organizationId,
+        staffId: effectiveAssignedStaffId,
+        startsAt: data.startsAt,
+        endsAt: finalEndsAt,
+        checkedAt,
+        excludeHoldId: context.validatedHoldId,
+      })
     }
 
     // Calculate deposit with validated product price (if configured as percentage)
@@ -388,7 +482,7 @@ export async function createReservation(
     // error instead of the generic "horario ya reservado" message.
     const externalBlock = await checkExternalBusyBlock(tx, {
       venueId,
-      staffId: data.assignedStaffId ?? null,
+      staffId: effectiveAssignedStaffId,
       startsAt: data.startsAt,
       endsAt: finalEndsAt,
     })
@@ -413,14 +507,14 @@ export async function createReservation(
     }
 
     // Layer 1b: Check staff overlap
-    if (data.assignedStaffId) {
+    if (effectiveAssignedStaffId) {
       const staffConflicts = await tx.$queryRaw<{ id: string }[]>`
         SELECT id FROM "Reservation"
         WHERE "venueId" = ${venueId}
         AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
         AND "startsAt" < ${finalEndsAt}
         AND "endsAt" > ${data.startsAt}
-        AND "assignedStaffId" = ${data.assignedStaffId}
+        AND "assignedStaffId" = ${effectiveAssignedStaffId}
         FOR UPDATE NOWAIT
       `
       if (staffConflicts.length > 0) {
@@ -479,7 +573,7 @@ export async function createReservation(
         tableId: data.tableId,
         productId: leadProductId,
         productIds: productIdsWasProvided ? bookedProductIds : [],
-        assignedStaffId: data.assignedStaffId,
+        assignedStaffId: effectiveAssignedStaffId,
         depositAmount,
         depositStatus: depositStatus as any,
         depositExpiresAt,
@@ -531,11 +625,11 @@ export async function createReservation(
           })
         : []
 
-    return { reservation, pushRowIds }
+    return { reservation, pushRowIds, overCapacity }
   })
 
   logger.info(
-    `✅ [RESERVATION] Created ${reservation.reservation.confirmationCode} | venue=${venueId} status=${reservation.reservation.status} table=${data.tableId ?? 'none'} staff=${data.assignedStaffId ?? 'none'}`,
+    `✅ [RESERVATION] Created ${reservation.reservation.confirmationCode} | venue=${venueId} status=${reservation.reservation.status} table=${data.tableId ?? 'none'} staff=${reservation.reservation.assignedStaffId ?? 'none'}`,
   )
 
   // Fire-and-forget RMQ publish AFTER the transaction commits. Sweeper is the
@@ -559,7 +653,7 @@ export async function createReservation(
     data: { status: reservation.reservation.status, confirmationCode: reservation.reservation.confirmationCode },
   })
 
-  return reservation.reservation
+  return reservation.overCapacity ? { ...reservation.reservation, overCapacity: true as const } : reservation.reservation
 }
 
 // ---- List / Get ----

@@ -296,6 +296,7 @@ export const createReservationBodySchema = z
     modifierSelections: reservationModifierSelectionsSchema.optional(),
     windowSemantics: z.literal('base', { invalid_type_error: 'windowSemantics debe ser base' }).optional(),
     assignedStaffId: z.string().optional(),
+    allowOverCapacity: z.boolean({ invalid_type_error: 'allowOverCapacity debe ser true o false' }).optional(),
     specialRequests: z.string().max(2000).optional(),
     internalNotes: z.string().max(2000).optional(),
     tags: z.array(z.string().max(50)).max(20).optional(),
@@ -548,6 +549,7 @@ export const publicCreateReservationBodySchema = z
     // Multi-service appointments (Square pattern). When present, the controller
     // sums durations + sets productId = productIds[0] for back-compat.
     productIds: z.array(z.string().min(1)).max(20).optional(),
+    staffId: z.string({ invalid_type_error: 'staffId debe ser texto' }).min(1, 'staffId es requerido').optional(),
     windowSemantics: z.literal('base', { invalid_type_error: 'windowSemantics debe ser base' }).optional(),
     classSessionId: z.string().optional(),
     spotIds: z.array(z.string().min(1)).max(100).optional(),
@@ -557,9 +559,9 @@ export const publicCreateReservationBodySchema = z
     // iterates and redeems creditsPerBalance from each. When both fields are
     // present, the array wins.
     creditItemBalanceIds: z.array(z.string().min(1)).max(20).optional(),
-    // Slot hold consumption — when present and valid, the hold gets deleted
-    // transactionally on success. Missing/expired holds throw 409 so the
-    // widget falls back to the time-slot picker.
+    // Transitional hold bridge — when present and valid, create excludes this
+    // trusted row from its authoritative checks and deletes it best-effort
+    // after commit. Atomic consumption arrives with the Release A protocol.
     holdId: z.string().optional(),
     modifierSelections: reservationModifierSelectionsSchema.optional(),
   })

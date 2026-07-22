@@ -12,6 +12,7 @@ import { createReservation } from '@/services/dashboard/reservation.dashboard.se
 const fixtureKey = `reservation-create-contract-${process.pid}-${Date.now()}`
 const inspector = new PrismaClient()
 const venueIds: string[] = []
+const staffIds: string[] = []
 let organizationId: string
 let venueId: string
 let foreignVenueId: string
@@ -19,11 +20,19 @@ let productA: string
 let productB: string
 let foreignProduct: string
 let modifierId: string
+let staffA: string
+let staffB: string
 let sequence = 0
 
 function nextWindow(durationMin: number) {
   sequence += 1
   const startsAt = new Date(Date.now() + (48 * 60 + sequence * 180) * 60_000)
+  startsAt.setUTCSeconds(0, 0)
+  return { startsAt, endsAt: new Date(startsAt.getTime() + durationMin * 60_000) }
+}
+
+function staffWindow(dayOffset = 0, durationMin = 60) {
+  const startsAt = new Date(Date.now() + (10 + dayOffset) * 24 * 60 * 60_000)
   startsAt.setUTCSeconds(0, 0)
   return { startsAt, endsAt: new Date(startsAt.getTime() + durationMin * 60_000) }
 }
@@ -76,6 +85,7 @@ async function createAppointment(args: { venueId: string; categoryId: string; su
 
 async function cleanupFixtures() {
   if (venueIds.length > 0) await prisma.venue.deleteMany({ where: { id: { in: venueIds } } })
+  if (staffIds.length > 0) await prisma.staff.deleteMany({ where: { id: { in: staffIds } } })
   if (organizationId) await prisma.organization.deleteMany({ where: { id: organizationId } })
 }
 
@@ -113,6 +123,37 @@ beforeAll(async () => {
     })
     modifierId = modifier.id
     await prisma.productModifierGroup.create({ data: { productId: productA, groupId: group.id } })
+
+    const createdStaff = await Promise.all(
+      ['a', 'b'].map(suffix =>
+        prisma.staff.create({
+          data: {
+            email: `${fixtureKey}-staff-${suffix}@example.test`,
+            firstName: `Staff ${suffix.toUpperCase()}`,
+            lastName: fixtureKey,
+            active: true,
+          },
+        }),
+      ),
+    )
+    staffA = createdStaff[0].id
+    staffB = createdStaff[1].id
+    staffIds.push(staffA, staffB)
+    const memberships = await Promise.all(
+      createdStaff.map(staff => prisma.staffVenue.create({ data: { venueId, staffId: staff.id, role: 'MANAGER', active: true } })),
+    )
+    const allDay = Object.fromEntries(
+      ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'].map(day => [
+        day,
+        { enabled: true, ranges: [{ open: '00:00', close: '23:59' }] },
+      ]),
+    )
+    await prisma.productStaff.createMany({
+      data: memberships.flatMap(membership => [productA, productB].map(productId => ({ venueId, productId, staffVenueId: membership.id }))),
+    })
+    await Promise.all(
+      memberships.map(membership => prisma.staffSchedule.create({ data: { venueId, staffVenueId: membership.id, weekly: allDay } })),
+    )
   } catch (error) {
     await cleanupFixtures()
     throw error
@@ -121,8 +162,12 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   sequence = 0
+  await prisma.slotHold.deleteMany({ where: { venueId } })
   await prisma.reservation.deleteMany({ where: { venueId } })
-  await prisma.reservationSettings.update({ where: { venueId }, data: { capacityMode: 'pacing', showStaffPicker: false } })
+  await prisma.reservationSettings.update({
+    where: { venueId },
+    data: { capacityMode: 'pacing', showStaffPicker: false, pacingMaxPerSlot: null },
+  })
 })
 
 afterAll(async () => {
@@ -218,6 +263,117 @@ describe('createReservation PostgreSQL contract', () => {
     expect(await inspector.reservation.count({ where: { venueId } })).toBe(0)
     expect(await inspector.reservationModifier.count({ where: { reservation: { venueId } } })).toBe(0)
     expect(await inspector.calendarSyncOutbox.count({ where: { venueId } })).toBe(0)
+  })
+
+  it('excludes only its trusted own hold from staff and pacing checks at pacing one', async () => {
+    await prisma.reservationSettings.update({
+      where: { venueId },
+      data: { capacityMode: 'per_staff', showStaffPicker: true, pacingMaxPerSlot: 1 },
+    })
+    const window = staffWindow(1)
+    const hold = await prisma.slotHold.create({
+      data: {
+        venueId,
+        startsAt: window.startsAt,
+        endsAt: window.endsAt,
+        productIds: [productA],
+        staffId: staffA,
+        partySize: 1,
+        expiresAt: new Date(Date.now() + 10 * 60_000),
+      },
+    })
+
+    const created = await createReservation(
+      venueId,
+      {
+        ...window,
+        duration: 60,
+        productId: productA,
+        productIds: [productA],
+        assignedStaffId: staffA,
+      },
+      { writeOrigin: 'PUBLIC', windowSemantics: 'base', validatedHoldId: hold.id },
+    )
+
+    expect(created.assignedStaffId).toBe(staffA)
+    expect(await inspector.reservation.count({ where: { venueId, startsAt: window.startsAt, endsAt: window.endsAt } })).toBe(1)
+    expect(await inspector.slotHold.count({ where: { id: hold.id } })).toBe(1)
+  })
+
+  it('keeps resource and pacing independent by assigning B when A is busy and pacing is two', async () => {
+    await prisma.reservationSettings.update({
+      where: { venueId },
+      data: { capacityMode: 'per_staff', showStaffPicker: true, pacingMaxPerSlot: 2 },
+    })
+    const window = staffWindow(2)
+    await prisma.reservation.create({
+      data: {
+        venueId,
+        confirmationCode: `CREATE-CONTRACT-A-${process.pid}`,
+        status: 'CONFIRMED',
+        channel: 'DASHBOARD',
+        ...window,
+        duration: 60,
+        productId: productA,
+        productIds: [productA],
+        assignedStaffId: staffA,
+        partySize: 1,
+      },
+    })
+
+    const created = await createReservation(
+      venueId,
+      { ...window, duration: 60, productId: productA, productIds: [productA] },
+      { writeOrigin: 'PUBLIC', windowSemantics: 'base' },
+    )
+
+    expect(created.assignedStaffId).toBe(staffB)
+    expect(await inspector.reservation.count({ where: { venueId, startsAt: window.startsAt, endsAt: window.endsAt } })).toBe(2)
+  })
+
+  it('writes nothing on the recoverable dashboard conflict and returns overCapacity only after consent', async () => {
+    await prisma.reservationSettings.update({
+      where: { venueId },
+      data: { capacityMode: 'per_staff', showStaffPicker: true, pacingMaxPerSlot: 1 },
+    })
+    const window = staffWindow(3)
+    await prisma.reservation.create({
+      data: {
+        venueId,
+        confirmationCode: `CREATE-CONTRACT-FULL-${process.pid}`,
+        status: 'CONFIRMED',
+        channel: 'DASHBOARD',
+        ...window,
+        duration: 60,
+        productId: productA,
+        productIds: [productA],
+        assignedStaffId: staffA,
+        partySize: 1,
+      },
+    })
+    const attempted = {
+      ...window,
+      duration: 60,
+      productId: productA,
+      productIds: [productA],
+      modifierSelections: [{ productId: productA, modifierId }],
+    }
+
+    await expect(createReservation(venueId, attempted, { writeOrigin: 'DASHBOARD', windowSemantics: 'base' })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'OVER_CAPACITY_CONFIRMATION_REQUIRED',
+      details: { preview: { occupancy: 1, limit: 1 } },
+    })
+    expect(await inspector.reservation.count({ where: { venueId, startsAt: window.startsAt } })).toBe(1)
+    expect(await inspector.reservationModifier.count({ where: { reservation: { venueId } } })).toBe(0)
+    expect(await inspector.calendarSyncOutbox.count({ where: { venueId } })).toBe(0)
+
+    const consented = await createReservation(venueId, attempted, {
+      writeOrigin: 'DASHBOARD',
+      windowSemantics: 'base',
+      allowOverCapacity: true,
+    })
+    expect(consented).toMatchObject({ assignedStaffId: staffB, overCapacity: true })
   })
 
   it('retries a real SQLSTATE 40001 and leaves exactly one reservation plus one modifier', async () => {

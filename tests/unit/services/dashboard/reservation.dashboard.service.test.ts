@@ -16,6 +16,9 @@ import {
   handleNoShowDepositForfeit,
 } from '@/services/dashboard/reservation.dashboard.service'
 import { countAppointmentOccupancy } from '@/services/dashboard/reservationAvailability.service'
+import * as reservationAvailabilityService from '@/services/dashboard/reservationAvailability.service'
+import * as appointmentStaffAssignmentService from '@/services/dashboard/appointmentStaffAssignment.service'
+import * as calendarOutboxService from '@/services/google-calendar/outbox.service'
 import * as reservationSettingsService from '@/services/dashboard/reservationSettings.service'
 import { getDefaultOperatingHours, type ReservationConfig } from '@/services/dashboard/reservationSettings.service'
 import { prismaMock } from '@tests/__helpers__/setup'
@@ -35,6 +38,7 @@ function makeReservationSettings(
     minNoticeMin?: number
     onlineCapacityPercent?: number
     capacityMode?: 'pacing' | 'per_staff'
+    pacingMaxPerSlot?: number | null
     showStaffPicker?: boolean
     deposits?: Partial<ReservationConfig['deposits']>
   } = {},
@@ -47,7 +51,7 @@ function makeReservationSettings(
       maxAdvanceDays: 365,
       minNoticeMin: overrides.minNoticeMin ?? 0,
       noShowGraceMin: 15,
-      pacingMaxPerSlot: null,
+      pacingMaxPerSlot: overrides.pacingMaxPerSlot ?? null,
       onlineCapacityPercent: overrides.onlineCapacityPercent ?? 100,
       capacityMode: overrides.capacityMode ?? 'pacing',
     },
@@ -147,7 +151,11 @@ describe('Reservation Dashboard Service', () => {
     })
     prismaMock.$queryRaw.mockResolvedValue([])
     prismaMock.table.findFirst.mockResolvedValue({ id: 'table-1' })
-    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1' })
+    prismaMock.staffVenue.findFirst.mockResolvedValue({
+      id: 'sv-1',
+      staffId: STAFF_ID,
+      venue: { organizationId: 'org-1' },
+    } as any)
     prismaMock.product.findFirst.mockResolvedValue({
       id: 'prod-1',
       price: new Prisma.Decimal(100),
@@ -161,6 +169,9 @@ describe('Reservation Dashboard Service', () => {
     // Task 4: resolveModifierSelections calls productModifierGroup.findMany in all reservation creations.
     // Default to empty array to maintain backward compatibility with existing tests that don't mock this.
     prismaMock.productModifierGroup.findMany.mockResolvedValue([])
+    jest.spyOn(appointmentStaffAssignmentService, 'lockAppointmentVenue').mockResolvedValue()
+    jest.spyOn(appointmentStaffAssignmentService, 'resolveStaffAssignment').mockResolvedValue(STAFF_ID)
+    jest.spyOn(appointmentStaffAssignmentService, 'assertOrganizationStaffAvailability').mockResolvedValue()
   })
 
   // ==========================================
@@ -628,6 +639,379 @@ describe('Reservation Dashboard Service', () => {
 
       expect(settingsSpy).toHaveBeenCalledWith(VENUE_ID, prismaMock)
     })
+
+    async function arrangeStaffAwareAppointment(
+      overrides: {
+        pacingMaxPerSlot?: number | null
+        showStaffPicker?: boolean
+        resolvedStaffId?: string
+        occupancy?: { reservations: number; holds: number }
+      } = {},
+    ) {
+      jest.spyOn(reservationSettingsService, 'getReservationSettings').mockResolvedValue(
+        makeReservationSettings({
+          capacityMode: 'per_staff',
+          pacingMaxPerSlot: overrides.pacingMaxPerSlot,
+          showStaffPicker: overrides.showStaffPicker,
+        }),
+      )
+      prismaMock.product.findFirst.mockResolvedValue({
+        id: 'prod-1',
+        duration: 60,
+        durationMinutes: null,
+        price: new Prisma.Decimal(100),
+        eventCapacity: null,
+        type: 'APPOINTMENTS_SERVICE',
+      } as any)
+      prismaMock.product.findMany.mockResolvedValue([
+        {
+          id: 'prod-1',
+          duration: 60,
+          durationMinutes: null,
+          price: new Prisma.Decimal(100),
+          eventCapacity: null,
+          type: 'APPOINTMENTS_SERVICE',
+        },
+      ] as any)
+      prismaMock.reservation.findUnique.mockResolvedValue(null)
+      prismaMock.reservation.create.mockImplementation(async ({ data }: any) => createMockReservation(data))
+      const lock = jest.spyOn(appointmentStaffAssignmentService, 'lockAppointmentVenue').mockResolvedValue()
+      const resolveStaff = jest
+        .spyOn(appointmentStaffAssignmentService, 'resolveStaffAssignment')
+        .mockResolvedValue(overrides.resolvedStaffId ?? 'staff-resolved')
+      const occupancy = jest
+        .spyOn(reservationAvailabilityService, 'countAppointmentOccupancy')
+        .mockResolvedValue(overrides.occupancy ?? { reservations: 0, holds: 0 })
+      return { lock, resolveStaff, occupancy }
+    }
+
+    const appointmentInput = {
+      startsAt: new Date('2026-03-01T14:00:00Z'),
+      endsAt: new Date('2026-03-01T15:00:00Z'),
+      duration: 60,
+      productId: 'prod-1',
+      productIds: ['prod-1'],
+    }
+
+    it('locks the appointment venue before resource authority, pacing, and writes and captures checkedAt after the lock', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2026-02-01T10:00:00Z'))
+      try {
+        const { lock, resolveStaff, occupancy } = await arrangeStaffAwareAppointment({ pacingMaxPerSlot: 2, showStaffPicker: true })
+        lock.mockImplementation(async () => {
+          jest.setSystemTime(new Date('2026-02-01T10:00:01Z'))
+        })
+
+        await createReservation(VENUE_ID, { ...appointmentInput, assignedStaffId: 'staff-requested' }, {
+          writeOrigin: 'PUBLIC',
+          windowSemantics: 'base',
+          validatedHoldId: 'hold-validated',
+        } as any)
+
+        expect(lock).toHaveBeenCalledTimes(1)
+        expect(resolveStaff).toHaveBeenCalledWith(
+          prismaMock,
+          expect.objectContaining({
+            requestedStaffId: 'staff-requested',
+            checkedAt: new Date('2026-02-01T10:00:01Z'),
+            excludeHoldId: 'hold-validated',
+          }),
+        )
+        expect(occupancy).toHaveBeenCalledWith(
+          prismaMock,
+          expect.objectContaining({ checkedAt: new Date('2026-02-01T10:00:01Z'), excludeHoldId: 'hold-validated' }),
+        )
+        expect(lock.mock.invocationCallOrder[0]).toBeLessThan(resolveStaff.mock.invocationCallOrder[0])
+        expect(resolveStaff.mock.invocationCallOrder[0]).toBeLessThan(occupancy.mock.invocationCallOrder[0])
+        expect(occupancy.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.reservation.create.mock.invocationCallOrder[0])
+      } finally {
+        jest.useRealTimers()
+      }
+    })
+
+    it.each(['P2034', '55P03'])('repeats settings, lock, clock, and assignment after a %s retry', async code => {
+      const settingsSpy = jest.spyOn(reservationSettingsService, 'getReservationSettings')
+      const { lock, resolveStaff } = await arrangeStaffAwareAppointment({ pacingMaxPerSlot: 2 })
+      const retryable = Object.assign(new Error('retryable create'), { code })
+      prismaMock.reservation.create
+        .mockRejectedValueOnce(retryable)
+        .mockImplementationOnce(async ({ data }: any) => createMockReservation(data))
+
+      await createReservation(VENUE_ID, appointmentInput, { writeOrigin: 'MCP', windowSemantics: 'base' })
+
+      expect(settingsSpy).toHaveBeenCalledTimes(2)
+      expect(lock).toHaveBeenCalledTimes(2)
+      expect(resolveStaff).toHaveBeenCalledTimes(2)
+      expect(resolveStaff.mock.calls[0][1].checkedAt).not.toBe(resolveStaff.mock.calls[1][1].checkedAt)
+    })
+
+    it('uses the resolved Staff.id for persistence, calendar targets, response, and the post-commit log', async () => {
+      const { resolveStaff } = await arrangeStaffAwareAppointment({ resolvedStaffId: 'staff-effective', pacingMaxPerSlot: 2 })
+      const targets = jest.spyOn(calendarOutboxService, 'resolveReservationPushTargets').mockResolvedValue([])
+      const info = jest.spyOn(logger, 'info').mockImplementation(() => logger)
+
+      const created = await createReservation(VENUE_ID, appointmentInput, { writeOrigin: 'MCP', windowSemantics: 'base' })
+
+      expect(resolveStaff).toHaveBeenCalled()
+      expect(prismaMock.reservation.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ assignedStaffId: 'staff-effective' }) }),
+      )
+      expect(targets).toHaveBeenCalledWith(prismaMock, { venueId: VENUE_ID, assignedStaffId: 'staff-effective' })
+      expect(created.assignedStaffId).toBe('staff-effective')
+      expect(info).toHaveBeenCalledWith(expect.stringContaining('staff=staff-effective'))
+    })
+
+    it('keeps legacy dashboard appointment creates ungated and ignores consent', async () => {
+      jest
+        .spyOn(reservationSettingsService, 'getReservationSettings')
+        .mockResolvedValue(makeReservationSettings({ capacityMode: 'pacing', pacingMaxPerSlot: 1 }))
+      prismaMock.product.findFirst.mockResolvedValue({
+        id: 'prod-1',
+        price: new Prisma.Decimal(100),
+        eventCapacity: null,
+        type: 'APPOINTMENTS_SERVICE',
+      } as any)
+      prismaMock.reservation.findUnique.mockResolvedValue(null)
+      prismaMock.reservation.create.mockImplementation(async ({ data }: any) => createMockReservation(data))
+      const occupancy = jest.spyOn(reservationAvailabilityService, 'countAppointmentOccupancy')
+
+      const result = await createReservation(
+        VENUE_ID,
+        { ...appointmentInput, productIds: undefined },
+        { writeOrigin: 'DASHBOARD', allowOverCapacity: true },
+      )
+
+      expect(occupancy).not.toHaveBeenCalled()
+      expect(result).not.toHaveProperty('overCapacity')
+    })
+
+    it('floors legacy self-service null pacing to one and returns a hard non-confirmable 409', async () => {
+      jest
+        .spyOn(reservationSettingsService, 'getReservationSettings')
+        .mockResolvedValue(makeReservationSettings({ capacityMode: 'pacing', pacingMaxPerSlot: null }))
+      prismaMock.product.findFirst.mockResolvedValue({
+        id: 'prod-1',
+        price: new Prisma.Decimal(100),
+        eventCapacity: null,
+        type: 'APPOINTMENTS_SERVICE',
+      } as any)
+      prismaMock.reservation.findUnique.mockResolvedValue(null)
+      prismaMock.reservation.create.mockImplementation(async ({ data }: any) => createMockReservation(data))
+      const occupancy = jest
+        .spyOn(reservationAvailabilityService, 'countAppointmentOccupancy')
+        .mockResolvedValue({ reservations: 1, holds: 0 })
+
+      const error = await createReservation(VENUE_ID, { ...appointmentInput, productIds: undefined }, { writeOrigin: 'PUBLIC' }).catch(
+        reason => reason,
+      )
+
+      expect(error).toMatchObject({ statusCode: 409, code: undefined, details: undefined })
+      expect(error.message).toMatch(/horario/i)
+      expect(occupancy).toHaveBeenCalled()
+      expect(prismaMock.reservation.create).not.toHaveBeenCalled()
+    })
+
+    it('treats staff-aware null pacing as unlimited without combining it with the resource gate', async () => {
+      const { occupancy } = await arrangeStaffAwareAppointment({ pacingMaxPerSlot: null, resolvedStaffId: 'staff-b' })
+
+      const result = await createReservation(VENUE_ID, appointmentInput, { writeOrigin: 'PUBLIC', windowSemantics: 'base' })
+
+      expect(result.assignedStaffId).toBe('staff-b')
+      expect(occupancy).not.toHaveBeenCalled()
+      expect(result).not.toHaveProperty('overCapacity')
+    })
+
+    it('allows A-busy/B-free assignment at pacing two and keeps resource and global capacity independent', async () => {
+      const { occupancy } = await arrangeStaffAwareAppointment({
+        pacingMaxPerSlot: 2,
+        resolvedStaffId: 'staff-b',
+        occupancy: { reservations: 1, holds: 0 },
+      })
+
+      const result = await createReservation(VENUE_ID, appointmentInput, { writeOrigin: 'PUBLIC', windowSemantics: 'base' })
+
+      expect(occupancy).toHaveBeenCalled()
+      expect(result.assignedStaffId).toBe('staff-b')
+    })
+
+    it('rejects busy requested staff before the confirmable global gate even with dashboard consent', async () => {
+      const { resolveStaff, occupancy } = await arrangeStaffAwareAppointment({
+        pacingMaxPerSlot: 1,
+        occupancy: { reservations: 1, holds: 0 },
+      })
+      resolveStaff.mockRejectedValue(new ConflictError('El profesionista no está disponible en ese horario'))
+
+      await expect(
+        createReservation(
+          VENUE_ID,
+          { ...appointmentInput, assignedStaffId: 'staff-busy' },
+          { writeOrigin: 'DASHBOARD', windowSemantics: 'base', allowOverCapacity: true },
+        ),
+      ).rejects.toThrow(/profesionista/i)
+
+      expect(occupancy).not.toHaveBeenCalled()
+      expect(prismaMock.reservation.create).not.toHaveBeenCalled()
+    })
+
+    it('returns the exact dashboard confirmation conflict before writes when staff-aware global pacing is full', async () => {
+      await arrangeStaffAwareAppointment({ pacingMaxPerSlot: 2, occupancy: { reservations: 1, holds: 1 } })
+
+      const error = await createReservation(VENUE_ID, appointmentInput, {
+        writeOrigin: 'DASHBOARD',
+        windowSemantics: 'base',
+      }).catch(reason => reason)
+
+      expect(error).toMatchObject({
+        statusCode: 409,
+        message: 'El horario está lleno. Confirma si deseas sobre-agendar.',
+        code: 'OVER_CAPACITY_CONFIRMATION_REQUIRED',
+        details: {
+          preview: {
+            startsAt: appointmentInput.startsAt,
+            endsAt: appointmentInput.endsAt,
+            occupancy: 2,
+            limit: 2,
+          },
+        },
+      })
+      expect(prismaMock.reservation.create).not.toHaveBeenCalled()
+      expect(prismaMock.reservationModifier.createMany).not.toHaveBeenCalled()
+      expect(prismaMock.calendarSyncOutbox.create).not.toHaveBeenCalled()
+    })
+
+    it('returns overCapacity only when a staff-aware dashboard explicitly consents to an actually full global slot', async () => {
+      await arrangeStaffAwareAppointment({ pacingMaxPerSlot: 1, occupancy: { reservations: 1, holds: 0 } })
+
+      const result = await createReservation(VENUE_ID, appointmentInput, {
+        writeOrigin: 'DASHBOARD',
+        windowSemantics: 'base',
+        allowOverCapacity: true,
+      })
+
+      expect(result).toMatchObject({ assignedStaffId: 'staff-resolved', overCapacity: true })
+    })
+
+    it.each(['PUBLIC', 'CONSUMER'] as const)('returns a hard non-confirmable staff-aware 409 for full %s creates', async writeOrigin => {
+      await arrangeStaffAwareAppointment({ pacingMaxPerSlot: 1, occupancy: { reservations: 1, holds: 0 } })
+
+      const error = await createReservation(VENUE_ID, appointmentInput, {
+        writeOrigin,
+        windowSemantics: 'base',
+      }).catch(reason => reason)
+
+      expect(error).toMatchObject({ statusCode: 409, code: undefined, details: undefined })
+      expect(prismaMock.reservation.create).not.toHaveBeenCalled()
+    })
+
+    it('keeps WALK_IN subject to staff and global capacity despite its notice exemption', async () => {
+      await arrangeStaffAwareAppointment({ pacingMaxPerSlot: 1, occupancy: { reservations: 1, holds: 0 } })
+
+      await expect(
+        createReservation(VENUE_ID, { ...appointmentInput, channel: 'WALK_IN' }, { writeOrigin: 'DASHBOARD', windowSemantics: 'base' }),
+      ).rejects.toMatchObject({ code: 'OVER_CAPACITY_CONFIRMATION_REQUIRED' })
+      expect(prismaMock.reservation.create).not.toHaveBeenCalled()
+    })
+
+    it.each(['PUBLIC', 'CONSUMER'] as const)('rejects %s staff selection when the authoritative picker is off', async writeOrigin => {
+      jest
+        .spyOn(reservationSettingsService, 'getReservationSettings')
+        .mockResolvedValue(makeReservationSettings({ capacityMode: 'per_staff', showStaffPicker: false }))
+      prismaMock.product.findFirst.mockResolvedValue({
+        id: 'prod-1',
+        price: new Prisma.Decimal(100),
+        eventCapacity: null,
+        type: 'APPOINTMENTS_SERVICE',
+      } as any)
+      prismaMock.product.findMany.mockResolvedValue([{ id: 'prod-1', duration: 60, durationMinutes: null }] as any)
+      prismaMock.reservation.findUnique.mockResolvedValue(null)
+      prismaMock.reservation.create.mockImplementation(async ({ data }: any) => createMockReservation(data))
+
+      await expect(
+        createReservation(VENUE_ID, { ...appointmentInput, productIds: undefined, assignedStaffId: 'staff-requested' }, { writeOrigin }),
+      ).rejects.toMatchObject({ statusCode: 400 })
+      expect(prismaMock.reservation.create).not.toHaveBeenCalled()
+    })
+
+    it.each(['DASHBOARD', 'MCP'] as const)(
+      'keeps legacy %s staff selection but applies the organization-wide personal gate',
+      async writeOrigin => {
+        jest
+          .spyOn(reservationSettingsService, 'getReservationSettings')
+          .mockResolvedValue(makeReservationSettings({ capacityMode: 'pacing', showStaffPicker: false }))
+        prismaMock.product.findFirst.mockResolvedValue({
+          id: 'prod-1',
+          price: new Prisma.Decimal(100),
+          eventCapacity: null,
+          type: 'APPOINTMENTS_SERVICE',
+        } as any)
+        prismaMock.staffVenue.findFirst.mockResolvedValue({
+          id: 'sv-1',
+          staffId: 'staff-operated',
+          venue: { organizationId: 'org-1' },
+        } as any)
+        prismaMock.reservation.findUnique.mockResolvedValue(null)
+        prismaMock.reservation.create.mockImplementation(async ({ data }: any) => createMockReservation(data))
+        const organizationGate = jest.spyOn(appointmentStaffAssignmentService, 'assertOrganizationStaffAvailability').mockResolvedValue()
+        const assignment = jest.spyOn(appointmentStaffAssignmentService, 'resolveStaffAssignment')
+        jest.spyOn(reservationAvailabilityService, 'countAppointmentOccupancy').mockResolvedValue({ reservations: 0, holds: 0 })
+
+        await createReservation(
+          VENUE_ID,
+          { ...appointmentInput, productIds: undefined, assignedStaffId: 'staff-operated' },
+          { writeOrigin },
+        )
+
+        expect(organizationGate).toHaveBeenCalledWith(
+          prismaMock,
+          expect.objectContaining({ organizationId: 'org-1', staffId: 'staff-operated' }),
+        )
+        expect(assignment).not.toHaveBeenCalled()
+        expect(prismaMock.productStaff.findMany).not.toHaveBeenCalled()
+        expect(prismaMock.staffSchedule.findFirst).not.toHaveBeenCalled()
+      },
+    )
+
+    it('gives assigned non-appointments only the legacy membership and organization-wide personal gate', async () => {
+      jest
+        .spyOn(reservationSettingsService, 'getReservationSettings')
+        .mockResolvedValue(makeReservationSettings({ capacityMode: 'per_staff', pacingMaxPerSlot: 1 }))
+      prismaMock.staffVenue.findFirst.mockResolvedValue({
+        id: 'sv-1',
+        staffId: 'staff-table',
+        venue: { organizationId: 'org-1' },
+      } as any)
+      prismaMock.reservation.findUnique.mockResolvedValue(null)
+      prismaMock.reservation.create.mockImplementation(async ({ data }: any) => createMockReservation(data))
+      const organizationGate = jest.spyOn(appointmentStaffAssignmentService, 'assertOrganizationStaffAvailability').mockResolvedValue()
+      const lock = jest.spyOn(appointmentStaffAssignmentService, 'lockAppointmentVenue')
+      const assignment = jest.spyOn(appointmentStaffAssignmentService, 'resolveStaffAssignment')
+      const occupancy = jest.spyOn(reservationAvailabilityService, 'countAppointmentOccupancy')
+
+      await createReservation(
+        VENUE_ID,
+        {
+          startsAt: appointmentInput.startsAt,
+          endsAt: appointmentInput.endsAt,
+          duration: 60,
+          tableId: 'table-1',
+          assignedStaffId: 'staff-table',
+        },
+        DASHBOARD_WRITE,
+      )
+
+      expect(organizationGate).toHaveBeenCalledWith(
+        prismaMock,
+        expect.objectContaining({
+          organizationId: 'org-1',
+          staffId: 'staff-table',
+          startsAt: appointmentInput.startsAt,
+          endsAt: appointmentInput.endsAt,
+        }),
+      )
+      expect(lock).not.toHaveBeenCalled()
+      expect(assignment).not.toHaveBeenCalled()
+      expect(occupancy).not.toHaveBeenCalled()
+    })
+
     it('should create a reservation with auto-confirm (default)', async () => {
       const mockCreated = createMockReservation()
 

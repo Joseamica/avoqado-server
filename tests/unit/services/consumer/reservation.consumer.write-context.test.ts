@@ -59,7 +59,10 @@ describe('consumer reservation write context', () => {
   })
 
   it('maps base window semantics into trusted context while remaining single-product', async () => {
-    jest.spyOn(settingsService, 'getReservationSettings').mockResolvedValue(makeSettings())
+    jest.spyOn(settingsService, 'getReservationSettings').mockResolvedValue({
+      ...makeSettings(),
+      publicBooking: { ...makeSettings().publicBooking, showStaffPicker: true },
+    })
     const createSpy = jest.spyOn(reservationService, 'createReservation').mockResolvedValue({
       id: 'reservation-1',
       confirmationCode: 'RES-1',
@@ -76,25 +79,72 @@ describe('consumer reservation write context', () => {
       duration: 60,
       partySize: 1,
       productId: 'product-1',
+      staffId: 'staff-public',
       windowSemantics: 'base',
     } as any)
 
-    expect(createSpy).toHaveBeenCalledWith('venue-1', expect.objectContaining({ productId: 'product-1' }), {
-      writeOrigin: 'CONSUMER',
-      windowSemantics: 'base',
-    })
+    expect(createSpy).toHaveBeenCalledWith(
+      'venue-1',
+      expect.objectContaining({ productId: 'product-1', assignedStaffId: 'staff-public' }),
+      {
+        writeOrigin: 'CONSUMER',
+        windowSemantics: 'base',
+      },
+    )
   })
 
   it('retains the hard rejection when a required deposit has no chargeable Stripe rail', async () => {
     jest.spyOn(settingsService, 'getReservationSettings').mockResolvedValue(makeSettings(true))
     jest.spyOn(reservationService, 'calculateDepositAmount').mockReturnValue({ required: true, amount: new Prisma.Decimal(80) })
     jest.spyOn(ecommerceCapability, 'resolveChargeableStripeMerchant').mockResolvedValue(null)
-    const createSpy = jest.spyOn(reservationService, 'createReservation')
+    const createSpy = jest.spyOn(reservationService, 'createReservation').mockResolvedValue({
+      id: 'reservation-should-not-exist',
+      confirmationCode: 'RES-NO',
+      cancelSecret: 'secret',
+      startsAt,
+      endsAt,
+      status: 'CONFIRMED',
+      depositAmount: null,
+    } as any)
 
     await expect(createReservationForConsumer('consumer-1', 'venue', { startsAt, endsAt, duration: 60, partySize: 1 })).rejects.toThrow(
       BadRequestError,
     )
 
+    expect(createSpy).not.toHaveBeenCalled()
+  })
+
+  it('rejects appointment staff selection before customer lookup/link writes when the picker is off', async () => {
+    jest.spyOn(settingsService, 'getReservationSettings').mockResolvedValue({
+      ...makeSettings(),
+      publicBooking: { ...makeSettings().publicBooking, showStaffPicker: false },
+    })
+    const createSpy = jest.spyOn(reservationService, 'createReservation').mockResolvedValue({
+      id: 'reservation-should-not-exist',
+      confirmationCode: 'RES-NO',
+      cancelSecret: 'secret',
+      startsAt,
+      endsAt,
+      status: 'CONFIRMED',
+      depositAmount: null,
+    } as any)
+
+    await expect(
+      createReservationForConsumer('consumer-1', 'venue', {
+        startsAt,
+        endsAt,
+        duration: 60,
+        productId: 'product-1',
+        staffId: 'staff-forbidden',
+      } as any),
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: 'La selección de profesionista no está habilitada para este negocio',
+    })
+
+    expect(prismaMock.consumer.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.customer.findFirst).not.toHaveBeenCalled()
+    expect(prismaMock.customer.create).not.toHaveBeenCalled()
     expect(createSpy).not.toHaveBeenCalled()
   })
 })

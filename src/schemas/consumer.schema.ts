@@ -39,6 +39,7 @@ export const consumerCreateReservationSchema = z.object({
       guestEmail: z.string().email().max(200).optional(),
       partySize: z.number().int().min(1).max(100).optional(),
       productId: z.string().optional(),
+      staffId: z.string({ invalid_type_error: 'staffId debe ser texto' }).min(1, 'staffId es requerido').optional(),
       windowSemantics: z.literal('base', { invalid_type_error: 'windowSemantics debe ser base' }).optional(),
       classSessionId: z.string().optional(),
       spotIds: z.array(z.string().min(1)).max(100).optional(),

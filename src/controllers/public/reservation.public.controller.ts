@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express'
 import * as reservationService from '../../services/dashboard/reservation.dashboard.service'
 import * as availabilityService from '../../services/dashboard/reservationAvailability.service'
 import { countAppointmentOccupancy, effectiveAppointmentPacing } from '../../services/dashboard/reservationAvailability.service'
-import { getReservationSettings, type OperatingHours } from '../../services/dashboard/reservationSettings.service'
+import { getReservationSettings, isStaffAware, type OperatingHours } from '../../services/dashboard/reservationSettings.service'
 import { mergeReservationBranding } from '../../services/dashboard/reservationBranding.service'
 import { checkExternalBusyBlock } from '../../services/reservation/external-busy-block.service'
 import { BadRequestError, ConflictError, NotFoundError, UnauthorizedError } from '../../errors/AppError'
@@ -656,6 +656,10 @@ export async function createReservation(req: Request, res: Response, next: NextF
       throw new BadRequestError('El email es requerido')
     }
 
+    if (!req.body.classSessionId && req.body.staffId && settings.publicBooking.showStaffPicker !== true) {
+      throw new BadRequestError('La selección de profesionista no está habilitada para este negocio')
+    }
+
     // ---- Multi-service appointments (Square pattern) -----------------------
     // Normalize the validated wire representation for controller preflights.
     // createReservation repeats this defense-in-depth check and remains the
@@ -701,14 +705,14 @@ export async function createReservation(req: Request, res: Response, next: NextF
     // customer with no recovery path.
     const incomingHoldId: string | undefined =
       typeof req.body.holdId === 'string' && req.body.holdId.length > 0 ? req.body.holdId : undefined
-    if (incomingHoldId) {
-      await validateHoldForReservation({
-        venueId: venue.id,
-        holdId: incomingHoldId,
-        startsAt: new Date(req.body.startsAt),
-        endsAt: new Date(req.body.endsAt),
-      })
-    }
+    const validatedHold = incomingHoldId
+      ? await validateHoldForReservation({
+          venueId: venue.id,
+          holdId: incomingHoldId,
+          startsAt: new Date(req.body.startsAt),
+          endsAt: new Date(req.body.endsAt),
+        })
+      : null
 
     // If productId points to a CLASS product, classSessionId is mandatory
     if (req.body.productId && !req.body.classSessionId) {
@@ -724,13 +728,13 @@ export async function createReservation(req: Request, res: Response, next: NextF
     // After-create cleanup burns the hold best-effort. The canonical product
     // list is already co-committed by createReservation.
     async function finalizeReservationSideEffects() {
-      if (incomingHoldId) {
+      if (validatedHold) {
         try {
           await prisma.slotHold.deleteMany({
-            where: { id: incomingHoldId, venueId: venue.id },
+            where: { id: validatedHold.id, venueId: venue.id },
           })
         } catch (error) {
-          logger.warn(`[slot-hold] failed to delete hold ${incomingHoldId} (non-fatal): ${(error as Error).message}`)
+          logger.warn(`[slot-hold] failed to delete hold ${validatedHold.id} (non-fatal): ${(error as Error).message}`)
         }
       }
     }
@@ -747,21 +751,24 @@ export async function createReservation(req: Request, res: Response, next: NextF
     //
     // Classes don't pass through here (handled by the classSessionId branch
     // below) and their per-session capacity guard already prevents overlap.
-    if (!req.body.classSessionId && req.body.productId) {
+    if (!validatedHold && !req.body.classSessionId && req.body.productId) {
       const product = await prisma.product.findFirst({
         where: { id: req.body.productId, venueId: venue.id },
         select: { type: true },
       })
       if (product?.type === 'APPOINTMENTS_SERVICE') {
-        const pacingMax = effectiveAppointmentPacing(settings.scheduling?.pacingMaxPerSlot)
-        const { reservations, holds } = await countAppointmentOccupancy(prisma, {
-          venueId: venue.id,
-          startsAt: new Date(req.body.startsAt),
-          endsAt: new Date(req.body.endsAt),
-          excludeHoldId: incomingHoldId,
-        })
-        if (reservations + holds >= pacingMax) {
-          throw new ConflictError('Este horario ya no está disponible. Por favor elige otro horario.')
+        const pacingMax = isStaffAware(settings)
+          ? (settings.scheduling?.pacingMaxPerSlot ?? null)
+          : effectiveAppointmentPacing(settings.scheduling?.pacingMaxPerSlot)
+        if (pacingMax !== null) {
+          const { reservations, holds } = await countAppointmentOccupancy(prisma, {
+            venueId: venue.id,
+            startsAt: new Date(req.body.startsAt),
+            endsAt: new Date(req.body.endsAt),
+          })
+          if (reservations + holds >= pacingMax) {
+            throw new ConflictError('Este horario ya no está disponible. Por favor elige otro horario.')
+          }
         }
       }
     }
@@ -1033,6 +1040,7 @@ export async function createReservation(req: Request, res: Response, next: NextF
         partySize: req.body.partySize,
         productId: normalizedProducts.leadProductId,
         productIds: normalizedProducts.productIdsWasProvided ? incomingProductIds : undefined,
+        assignedStaffId: req.body.staffId,
         specialRequests: req.body.specialRequests,
         modifierSelections: req.body.modifierSelections,
       },
@@ -1040,6 +1048,7 @@ export async function createReservation(req: Request, res: Response, next: NextF
         writeOrigin: 'PUBLIC',
         paymentPolicyOverride,
         ...(req.body.windowSemantics === 'base' ? { windowSemantics: req.body.windowSemantics } : {}),
+        ...(validatedHold ? { validatedHoldId: validatedHold.id } : {}),
       },
     )
 
