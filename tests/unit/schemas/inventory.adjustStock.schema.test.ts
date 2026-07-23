@@ -40,6 +40,28 @@ describe('AdjustStockSchema — quantity', () => {
     const result = AdjustStockSchema.safeParse({ ...base, body: { ...base.body, type } })
     expect(result.success).toBe(false)
   })
+
+  // Bug (render-error-monitor 2026-07-23, firma #27): un typo (100,000,000 en vez
+  // de 100,000) pasaba el schema y reventaba abajo con overflow de Decimal(10,4).
+  // El cap de forma acota `quantity` al rango de Decimal(12,3) — la columna real.
+  it('rechaza cantidades que exceden el rango de Decimal(12,3) con mensaje en español', () => {
+    const result = AdjustStockSchema.safeParse({ ...base, body: { ...base.body, quantity: 100_000_000_000 } })
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      const msg = result.error.issues.map(i => i.message).join(' ')
+      expect(msg).toMatch(/máximo permitido/i)
+    }
+  })
+
+  it('rechaza cantidades negativas fuera del rango de Decimal(12,3)', () => {
+    const result = AdjustStockSchema.safeParse({ ...base, body: { ...base.body, quantity: -100_000_000_000 } })
+    expect(result.success).toBe(false)
+  })
+
+  it('acepta el límite superior exacto de Decimal(12,3)', () => {
+    const result = AdjustStockSchema.safeParse({ ...base, body: { ...base.body, quantity: 999_999_999.999 } })
+    expect(result.success).toBe(true)
+  })
 })
 
 describe('AdjustProductInventoryStockSchema — quantity', () => {

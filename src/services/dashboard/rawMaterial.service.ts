@@ -165,37 +165,71 @@ export async function createRawMaterial(venueId: string, data: CreateRawMaterial
   const unit = unitFromDto as Unit
   const unitType = getUnitType(unit)
 
-  const rawMaterial = await prisma.rawMaterial.create({
-    data: {
-      ...restData,
-      venueId,
-      unit,
-      unitType,
-      avgCostPerUnit: data.avgCostPerUnit || data.costPerUnit,
-    },
-  })
-
-  // Create initial StockBatch + movement when there is initial stock
-  if (data.currentStock > 0) {
-    const batch = await createStockBatch(venueId, rawMaterial.id, {
-      quantity: data.currentStock,
-      unit,
-      costPerUnit: data.costPerUnit || 0,
-      receivedDate: new Date(),
-      expirationDate: data.perishable && data.shelfLifeDays ? new Date(Date.now() + data.shelfLifeDays * 24 * 60 * 60 * 1000) : undefined,
+  // Create the raw material and (when there is initial stock) its backing batch +
+  // movement atomically. Previously the RM was created, then createStockBatch ran
+  // OUTSIDE any transaction, then the movement in a third step — so a failure in
+  // the batch/movement left the RM claiming currentStock with no batch to back it
+  // (the same atomicity flaw that orphaned a batch in adjustStock, firma #27).
+  const { rawMaterial, batch } = await prisma.$transaction(async tx => {
+    const createdRm = await tx.rawMaterial.create({
+      data: {
+        ...restData,
+        venueId,
+        unit,
+        unitType,
+        avgCostPerUnit: data.avgCostPerUnit || data.costPerUnit,
+      },
     })
 
-    await prisma.rawMaterialMovement.create({
-      data: {
-        rawMaterialId: rawMaterial.id,
+    let createdBatch: Awaited<ReturnType<typeof createStockBatch>> | null = null
+    if (data.currentStock > 0) {
+      createdBatch = await createStockBatch(
         venueId,
-        batchId: batch.id,
-        type: RawMaterialMovementType.ADJUSTMENT,
+        createdRm.id,
+        {
+          quantity: data.currentStock,
+          unit,
+          costPerUnit: data.costPerUnit || 0,
+          receivedDate: new Date(),
+          expirationDate:
+            data.perishable && data.shelfLifeDays ? new Date(Date.now() + data.shelfLifeDays * 24 * 60 * 60 * 1000) : undefined,
+        },
+        undefined, // createRawMaterial has no staffId in its signature
+        tx,
+        { skipAudit: true },
+      )
+
+      await tx.rawMaterialMovement.create({
+        data: {
+          rawMaterialId: createdRm.id,
+          venueId,
+          batchId: createdBatch.id,
+          type: RawMaterialMovementType.ADJUSTMENT,
+          quantity: data.currentStock,
+          unit,
+          previousStock: 0,
+          newStock: data.currentStock,
+          reason: 'Initial stock',
+        },
+      })
+    }
+
+    return { rawMaterial: createdRm, batch: createdBatch }
+  })
+
+  // Audit AFTER commit (fire-and-forget) — createStockBatch skipped its internal
+  // log so a rolled-back batch leaves no phantom STOCK_BATCH_CREATED entry.
+  if (batch) {
+    void logAction({
+      venueId,
+      action: 'STOCK_BATCH_CREATED',
+      entity: 'StockBatch',
+      entityId: batch.id,
+      data: {
+        batchNumber: batch.batchNumber,
+        rawMaterialId: rawMaterial.id,
         quantity: data.currentStock,
-        unit,
-        previousStock: 0,
-        newStock: data.currentStock,
-        reason: 'Initial stock',
+        costPerUnit: data.costPerUnit || 0,
       },
     })
   }
@@ -549,51 +583,83 @@ export async function adjustStock(venueId: string, rawMaterialId: string, data: 
   }
   // Handle stock additions by creating a new batch
   else if (data.quantity > 0) {
-    // Create a new batch for manual additions
-    const batch = await createStockBatch(
-      venueId,
-      rawMaterialId,
-      {
-        quantity: data.quantity,
-        unit: rawMaterial.unit,
-        costPerUnit: rawMaterial.costPerUnit.toNumber(), // Use current cost
-        receivedDate: new Date(),
-        expirationDate:
-          rawMaterial.perishable && rawMaterial.shelfLifeDays
-            ? new Date(Date.now() + rawMaterial.shelfLifeDays * 24 * 60 * 60 * 1000)
-            : undefined,
-      },
-      staffId,
-    )
+    // Guard: RawMaterialMovement.costImpact is Decimal(10,4) — it caps at < 1e6.
+    // A user typo (extra zeros) produces a costImpact that overflows and throws a
+    // cryptic Postgres 22003 AFTER the batch is written. Validate BEFORE any write
+    // so we fail cleanly with a 400 instead of leaving an orphan batch behind.
+    // (Same unit here → createStockBatch does not re-normalize the cost, so this
+    // projection matches the movement's costImpact exactly.)
+    const projectedCostImpact = rawMaterial.costPerUnit.mul(data.quantity).abs()
+    if (projectedCostImpact.greaterThanOrEqualTo(1_000_000)) {
+      throw new AppError(
+        `La cantidad ingresada (${data.quantity}) genera un impacto de costo de ${projectedCostImpact.toFixed(
+          2,
+        )} que excede el máximo permitido. Verifica la cantidad — es posible que tenga ceros de más.`,
+        400,
+      )
+    }
 
-    // Update raw material stock
-    const operations = [
-      prisma.rawMaterial.update({
+    // Create the batch, update currentStock and record the movement atomically.
+    // Previously createStockBatch ran OUTSIDE this transaction, so any later
+    // failure (this overflow, a timeout, etc.) left an orphan batch in FIFO.
+    const { batch, updated } = await prisma.$transaction(async tx => {
+      const created = await createStockBatch(
+        venueId,
+        rawMaterialId,
+        {
+          quantity: data.quantity,
+          unit: rawMaterial.unit,
+          costPerUnit: rawMaterial.costPerUnit.toNumber(), // Use current cost
+          receivedDate: new Date(),
+          expirationDate:
+            rawMaterial.perishable && rawMaterial.shelfLifeDays
+              ? new Date(Date.now() + rawMaterial.shelfLifeDays * 24 * 60 * 60 * 1000)
+              : undefined,
+        },
+        staffId,
+        tx,
+        { skipAudit: true },
+      )
+
+      const updatedRm = await tx.rawMaterial.update({
         where: { id: rawMaterialId },
         data: {
           currentStock: newStock,
           lastCountAt: data.type === RawMaterialMovementType.COUNT ? new Date() : rawMaterial.lastCountAt,
         },
-      }),
-      prisma.rawMaterialMovement.create({
+      })
+
+      await tx.rawMaterialMovement.create({
         data: {
           rawMaterialId,
           venueId,
-          batchId: batch.id,
+          batchId: created.id,
           type: data.type,
           quantity: data.quantity,
           unit: rawMaterial.unit,
           previousStock,
           newStock,
-          costImpact: batch.costPerUnit.mul(data.quantity),
-          reason: data.reason || `Manual addition (Batch: ${batch.batchNumber})`,
+          costImpact: created.costPerUnit.mul(data.quantity),
+          reason: data.reason || `Manual addition (Batch: ${created.batchNumber})`,
           reference: data.reference,
           createdBy: staffId,
         },
-      }),
-    ]
+      })
 
-    const [updated] = await prisma.$transaction(operations)
+      return { batch: created, updated: updatedRm }
+    })
+
+    // Audit AFTER commit (fire-and-forget, outside the tx) so a rolled-back batch
+    // never leaves a phantom STOCK_BATCH_CREATED log — createStockBatch skipped it.
+    void logAction({
+      staffId,
+      venueId,
+      action: 'STOCK_BATCH_CREATED',
+      entity: 'StockBatch',
+      entityId: batch.id,
+      data: { batchNumber: batch.batchNumber, rawMaterialId, quantity: data.quantity, costPerUnit: rawMaterial.costPerUnit.toNumber() },
+    })
+
     updatedRawMaterial = updated as RawMaterial
   }
   // Zero quantity adjustment (e.g., COUNT with no change)

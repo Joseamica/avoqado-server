@@ -9,11 +9,11 @@ import { areUnitsCompatible, convertUnit } from '../../utils/unitConversion'
  * Generate unique batch number for a raw material
  * Format: BATCH-YYYYMMDD-XXX
  */
-async function generateBatchNumber(venueId: string, rawMaterialId: string): Promise<string> {
+async function generateBatchNumber(venueId: string, rawMaterialId: string, client: Prisma.TransactionClient = prisma): Promise<string> {
   const today = new Date()
   const datePrefix = `BATCH-${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`
 
-  const lastBatch = await prisma.stockBatch.findFirst({
+  const lastBatch = await client.stockBatch.findFirst({
     where: {
       venueId,
       rawMaterialId,
@@ -51,9 +51,18 @@ export async function createStockBatch(
     expirationDate?: Date
   },
   staffId?: string,
+  // Optional transaction client so callers can create the batch atomically with
+  // the currentStock update + movement (see rawMaterial.service adjustStock).
+  // Defaults to the module prisma client, so existing non-transactional callers
+  // (createRawMaterial, purchaseOrder receiving) are unaffected.
+  client: Prisma.TransactionClient = prisma,
+  // When running inside an external transaction, skip the internal fire-and-forget
+  // audit so a rolled-back batch never leaves a phantom STOCK_BATCH_CREATED log;
+  // the caller logs it after commit instead.
+  opts?: { skipAudit?: boolean },
 ): Promise<any> {
   // Verify raw material exists
-  const rawMaterial = await prisma.rawMaterial.findFirst({
+  const rawMaterial = await client.rawMaterial.findFirst({
     where: {
       id: rawMaterialId,
       venueId,
@@ -86,10 +95,10 @@ export async function createStockBatch(
       : new Decimal(data.costPerUnit).mul(new Decimal(data.quantity)).div(normalizedQuantity)
 
   // Generate unique batch number
-  const batchNumber = await generateBatchNumber(venueId, rawMaterialId)
+  const batchNumber = await generateBatchNumber(venueId, rawMaterialId, client)
 
   // Create batch
-  const batch = await prisma.stockBatch.create({
+  const batch = await client.stockBatch.create({
     data: {
       venueId,
       rawMaterialId,
@@ -125,14 +134,16 @@ export async function createStockBatch(
     },
   })
 
-  void logAction({
-    staffId,
-    venueId,
-    action: 'STOCK_BATCH_CREATED',
-    entity: 'StockBatch',
-    entityId: batch.id,
-    data: { batchNumber, rawMaterialId, quantity: data.quantity, costPerUnit: data.costPerUnit },
-  })
+  if (!opts?.skipAudit) {
+    void logAction({
+      staffId,
+      venueId,
+      action: 'STOCK_BATCH_CREATED',
+      entity: 'StockBatch',
+      entityId: batch.id,
+      data: { batchNumber, rawMaterialId, quantity: data.quantity, costPerUnit: data.costPerUnit },
+    })
+  }
 
   return batch
 }
