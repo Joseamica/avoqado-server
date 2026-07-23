@@ -225,6 +225,11 @@ export async function createVenueWizard(req: Request, res: Response, next: NextF
             statusChangedAt: new Date(),
             statusChangedBy: initialState.statusChangedBy,
             active: initialState.active,
+            // Pre-aprobar KYC: mirror approveKyc's fields so the venue doesn't land ACTIVE
+            // but still NOT_SUBMITTED (which forced a second manual KYC approval).
+            kycStatus: initialState.kycStatus,
+            kycCompletedAt: initialState.kycCompletedAt,
+            kycVerifiedBy: initialState.kycVerifiedBy,
           },
         })
 
@@ -275,6 +280,16 @@ export async function createVenueWizard(req: Request, res: Response, next: NextF
           staffId: userId,
           venueId,
           action: 'VENUE_APPROVED',
+          entity: 'Venue',
+          entityId: venueId,
+          data: { via: 'onboarding_wizard' },
+        })
+        // The pre-approval also marks KYC as VERIFIED — mirror approveKyc's audit event so the
+        // KYC trail is complete (who approved it and through which path).
+        await logAction({
+          staffId: userId,
+          venueId,
+          action: 'KYC_APPROVED',
           entity: 'Venue',
           entityId: venueId,
           data: { via: 'onboarding_wizard' },
