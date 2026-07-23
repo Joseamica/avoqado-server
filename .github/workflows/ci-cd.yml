@@ -159,7 +159,7 @@ jobs:
         run: npx prisma generate
 
       - name: 💾 Restore Jest cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: node_modules/.cache/jest
           key: jest-${{ runner.os }}-node20-${{ hashFiles('package-lock.json', 'jest.config.js', 'tsconfig.json', 'tsconfig.build.json') }}
@@ -203,7 +203,7 @@ jobs:
         run: npx prisma generate
 
       - name: 💾 Restore Jest cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: node_modules/.cache/jest
           key: jest-${{ runner.os }}-node20-${{ hashFiles('package-lock.json', 'jest.config.js', 'tsconfig.json', 'tsconfig.build.json') }}
