@@ -9,19 +9,27 @@ import logger from '../../config/logger'
 export const getProductsHandler = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const { venueId } = req.params
-    const { includeRecipe, includePricingPolicy, categoryId, orderBy } = req.query
+    const { includeRecipe, includeModifiers, includePricingPolicy, categoryId, orderBy } = req.query
     const correlationId = (req as any).correlationId
+
+    // The modifier + recipe trees default ON (backward-compatible — this list always loaded them).
+    // Callers that only need id/name/price opt OUT with ?includeRecipe=false / ?includeModifiers=false
+    // to skip the deep includes (big speed win on large catalogs). Only an explicit 'false' turns it off.
+    const wantRecipe = includeRecipe !== 'false'
+    const wantModifiers = includeModifiers !== 'false'
 
     logger.info(`Fetching products for venue ${venueId}`, {
       correlationId,
-      includeRecipe: includeRecipe === 'true',
+      includeRecipe: wantRecipe,
+      includeModifiers: wantModifiers,
       includePricingPolicy: includePricingPolicy === 'true',
       categoryId: categoryId || undefined,
       orderBy: orderBy || 'displayOrder',
     })
 
     const products = await productService.getProducts(venueId, {
-      includeRecipe: includeRecipe === 'true',
+      includeRecipe: wantRecipe,
+      includeModifiers: wantModifiers,
       includePricingPolicy: includePricingPolicy === 'true',
       categoryId: categoryId as string | undefined,
       orderBy: (orderBy === 'name' ? 'name' : 'displayOrder') as 'name' | 'displayOrder',

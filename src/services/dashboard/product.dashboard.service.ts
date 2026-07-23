@@ -390,11 +390,20 @@ export async function getProducts(
   venueId: string,
   options?: {
     includeRecipe?: boolean
+    includeModifiers?: boolean
     includePricingPolicy?: boolean
     categoryId?: string
     orderBy?: 'displayOrder' | 'name'
   },
 ): Promise<any[]> {
+  // Heavy relations default ON (backward-compatible — this endpoint always loaded them). But this
+  // one list query is fanned out to ~10 dashboard pages, and most only need id/name/price for a
+  // dropdown (home, reservations, promotions, referrals). Loading EVERY product's modifier tree
+  // AND recipe tree for those made GET /products slow on large catalogs (270-product venues →
+  // "Request Closed Prematurely") and fragile under DB stress. Light callers now pass
+  // includeRecipe:false / includeModifiers:false to skip the deep trees they don't use.
+  const includeRecipe = options?.includeRecipe ?? true
+  const includeModifiers = options?.includeModifiers ?? true
   const products = await prisma.product.findMany({
     where: {
       venueId,
@@ -404,37 +413,40 @@ export async function getProducts(
     include: {
       category: true,
       inventory: true, // ✅ For QUANTITY tracking
-      modifierGroups: {
-        include: {
-          group: {
-            include: {
-              modifiers: { where: { active: true } },
+      ...(includeModifiers && {
+        modifierGroups: {
+          include: {
+            group: {
+              include: {
+                modifiers: { where: { active: true } },
+              },
             },
           },
+          orderBy: { displayOrder: 'asc' as const },
         },
-        orderBy: { displayOrder: 'asc' },
-      },
-      // ✅ ALWAYS include recipe for availableQuantity calculation
-      recipe: {
-        include: {
-          lines: {
-            include: {
-              rawMaterial: {
-                select: {
-                  id: true,
-                  name: true,
-                  sku: true,
-                  unit: true,
-                  currentStock: true,
-                  minimumStock: true,
-                  avgCostPerUnit: true,
-                  active: true,
+      }),
+      ...(includeRecipe && {
+        recipe: {
+          include: {
+            lines: {
+              include: {
+                rawMaterial: {
+                  select: {
+                    id: true,
+                    name: true,
+                    sku: true,
+                    unit: true,
+                    currentStock: true,
+                    minimumStock: true,
+                    avgCostPerUnit: true,
+                    active: true,
+                  },
                 },
               },
             },
           },
         },
-      },
+      }),
       // ✅ Include pricing policy for pricing analysis page
       ...(options?.includePricingPolicy && {
         pricingPolicy: true,
@@ -443,11 +455,9 @@ export async function getProducts(
     orderBy: options?.orderBy === 'name' ? { name: 'asc' } : { displayOrder: 'asc' },
   })
 
-  // ✅ Calculate availableQuantity + ingredient shortage for each product (Toast POS pattern)
-  return products.map(product => ({
-    ...product,
-    ...computeInventoryAvailability(product), // availableQuantity + limitingIngredient + insufficientIngredients
-  }))
+  // availableQuantity needs the recipe tree — only compute it when recipe was loaded. Light callers
+  // (includeRecipe:false) don't use availableQuantity, so we skip the per-product availability work.
+  return includeRecipe ? products.map(product => ({ ...product, ...computeInventoryAvailability(product) })) : products
 }
 
 /**

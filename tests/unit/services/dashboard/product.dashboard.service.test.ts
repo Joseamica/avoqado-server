@@ -85,6 +85,46 @@ jest.mock('../../../../src/communication/sockets', () => ({
   default: { getBroadcastingService: jest.fn().mockReturnValue(null) },
 }))
 
+describe('getProducts — recipe/modifier trees are opt-out (perf: fan-out to ~10 pages)', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  it('DEFAULT (no options) loads BOTH the modifier tree and the recipe tree (backward-compatible)', async () => {
+    prismaMock.product.findMany.mockResolvedValue([] as any)
+    await productService.getProducts('venue-xyz')
+    const arg = (prismaMock.product.findMany as jest.Mock).mock.calls[0][0]
+    expect(arg.include.modifierGroups).toBeDefined()
+    expect(arg.include.recipe).toBeDefined()
+  })
+
+  it('🔒 includeRecipe:false + includeModifiers:false SKIP both deep trees (light path for dropdowns)', async () => {
+    prismaMock.product.findMany.mockResolvedValue([] as any)
+    await productService.getProducts('venue-xyz', { includeRecipe: false, includeModifiers: false })
+    const arg = (prismaMock.product.findMany as jest.Mock).mock.calls[0][0]
+    expect(arg.include.modifierGroups).toBeUndefined()
+    expect(arg.include.recipe).toBeUndefined()
+    expect(arg.include.category).toBe(true) // light fields still loaded
+    expect(arg.include.inventory).toBe(true)
+  })
+
+  it('honors includeRecipe INDEPENDENTLY (regression: the flag used to be ignored — recipe always loaded)', async () => {
+    prismaMock.product.findMany.mockResolvedValue([] as any)
+    await productService.getProducts('venue-xyz', { includeRecipe: false }) // modifiers default ON
+    const arg = (prismaMock.product.findMany as jest.Mock).mock.calls[0][0]
+    expect(arg.include.recipe).toBeUndefined() // recipe skipped
+    expect(arg.include.modifierGroups).toBeDefined() // modifiers still loaded (default ON)
+  })
+
+  it('light path does NOT compute availableQuantity; the default path does', async () => {
+    prismaMock.product.findMany.mockResolvedValue([makeMockProduct()] as any)
+    const light = await productService.getProducts('venue-xyz', { includeRecipe: false })
+    expect(light[0]).not.toHaveProperty('availableQuantity')
+
+    prismaMock.product.findMany.mockResolvedValue([makeMockProduct()] as any)
+    const heavy = await productService.getProducts('venue-xyz')
+    expect(heavy[0]).toHaveProperty('availableQuantity') // computeInventoryAvailability ran
+  })
+})
+
 describe('Product printStationId (print-station routing)', () => {
   beforeEach(() => {
     jest.clearAllMocks()
