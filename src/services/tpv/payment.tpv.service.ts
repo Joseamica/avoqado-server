@@ -22,6 +22,7 @@ import { logAction } from '../dashboard/activity-log.service'
 import { validateStaffVenue as validateStaffVenueShared } from '../../utils/staff-venue.util'
 import { loadOrderForCfdiFromDb } from '../fiscal/cfdi.service'
 import { terminalPaymentService } from '../terminal-payment.service'
+import { assertVenueSalesEnabled } from '../venueSalesGuard'
 
 /**
  * Build the slim digitalReceipt response shape with a constructed `receiptUrl`.
@@ -35,7 +36,7 @@ import { terminalPaymentService } from '../terminal-payment.service'
  * `autofacturaAvailable` is ALWAYS present (defaults to `false`) so the TPV can pick a "…y
  * factura" QR caption only when the venue+merchant can actually self-invoice this ticket.
  */
-function mapDigitalReceiptResponse<T extends { accessKey: string }>(
+export function mapDigitalReceiptResponse<T extends { accessKey: string }>(
   receipt: T | null | undefined,
   autofacturaAvailable = false,
 ): (T & { receiptUrl: string; autofacturaAvailable: boolean }) | null {
@@ -1501,6 +1502,8 @@ export async function recordOrderPayment(
     }
   }
 
+  await assertVenueSalesEnabled(venueId)
+
   // Convert amounts from cents to decimal (Prisma expects Decimal)
   const totalAmount = paymentData.amount / 100
   const tipAmount = paymentData.tip / 100
@@ -2216,6 +2219,8 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       }
     }
   }
+
+  await assertVenueSalesEnabled(venueId)
 
   // Convert amounts from cents to decimal (Prisma expects Decimal)
   const totalAmount = paymentData.amount / 100

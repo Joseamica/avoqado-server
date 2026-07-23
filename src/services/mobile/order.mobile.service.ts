@@ -15,12 +15,17 @@ import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppE
 import prisma from '../../utils/prismaClient'
 import { validateStaffVenue } from '../../utils/staff-venue.util'
 import { generateAndStoreReceipt } from '../dashboard/receipt.dashboard.service'
+// Reuse the SAME helpers the TPV order/fast endpoints use so the mobile cash
+// response carries an identical `digitalReceipt` shape — mobile and TPV never
+// drift on how the receipt QR (accessKey + receiptUrl + autofactura) is built.
+import { mapDigitalReceiptResponse, resolveAutofacturaAvailable } from '../tpv/payment.tpv.service'
 import {
   buildItemDiscountRow,
   calculateDiscountPesos,
   validateDiscountActive,
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
+import { assertVenueSalesEnabled } from '../venueSalesGuard'
 
 // MARK: - Types
 
@@ -393,6 +398,8 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
       return toCreatedOrderResponse(existingOrder)
     }
   }
+
+  await assertVenueSalesEnabled(venueId)
 
   const validatedStaffId = await validateStaffVenue(input.staffId, venueId)
 
@@ -1539,6 +1546,11 @@ export interface CashPaymentResponse {
   method: 'CASH'
   status: 'COMPLETED'
   changeAmount?: number // For display purposes (calculated on iOS)
+  // Digital receipt for the mobile client's receipt QR (customer display +
+  // printed receipt). Same shape the TPV order/fast endpoints return. Null only
+  // if receipt generation failed (never blocks the payment). ADDITIVE — old app
+  // versions ignore it; card payments already get their key from the terminal.
+  digitalReceipt?: { accessKey: string; receiptUrl: string; autofacturaAvailable: boolean } | null
 }
 
 /**
@@ -1735,15 +1747,24 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     })()
   }
 
-  // Auto-generate digital receipt so the dashboard drawer and "Enviar recibo"
-  // button have an accessKey immediately (mirrors TPV payment flow behavior).
-  // Fire-and-forget — receipt failures must not break the payment response.
-  generateAndStoreReceipt(venueId, payment.id).catch(err => {
+  // Auto-generate the digital receipt so the dashboard drawer, "Enviar recibo",
+  // AND the mobile client's receipt QR (customer display + printed receipt) all
+  // have an accessKey. AWAITED (was fire-and-forget) so the accessKey rides back
+  // in THIS response — the mobile cash path had no other way to learn it, so
+  // efectivo showed no QR while tarjeta (terminal) did. Mirrors the TPV order/
+  // fast endpoints, which return `digitalReceipt` synchronously. Wrapped so a
+  // receipt failure NEVER breaks the payment (degrades to digitalReceipt: null).
+  let digitalReceipt: { accessKey: string; receiptUrl: string; autofacturaAvailable: boolean } | null = null
+  try {
+    const receipt = await generateAndStoreReceipt(venueId, payment.id)
+    const autofacturaAvailable = await resolveAutofacturaAvailable(orderId)
+    digitalReceipt = mapDigitalReceiptResponse(receipt, autofacturaAvailable)
+  } catch (err) {
     logger.error('[ORDER.MOBILE] Failed to auto-generate digital receipt', {
       paymentId: payment.id,
       error: err instanceof Error ? err.message : String(err),
     })
-  })
+  }
 
   // REFERRAL HOOK: trigger referral qualification if this order has a pending referral
   // (idempotent: no-ops if no PENDING Referral matches this orderId)
@@ -1782,6 +1803,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     tipAmount: tip,
     method: 'CASH',
     status: 'COMPLETED',
+    digitalReceipt,
   }
 }
 
