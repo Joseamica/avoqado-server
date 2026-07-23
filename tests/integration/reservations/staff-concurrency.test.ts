@@ -604,7 +604,7 @@ describe('production reservation update staff authority on PostgreSQL', () => {
 
     await expect(
       updateReservation(sameOrgVenueB, reservation.id, { assignedStaffId: secondStaffId }, { writeOrigin: 'DASHBOARD' }, staffId),
-    ).rejects.toMatchObject({ statusCode: 409 })
+    ).rejects.toMatchObject({ statusCode: 400, message: expect.stringMatching(/no pertenece/i) })
 
     await expect(prisma.reservation.findUniqueOrThrow({ where: { id: reservation.id } })).resolves.toMatchObject({
       assignedStaffId: staffId,

@@ -323,7 +323,6 @@ describe('Phase 2 push hooks integration', () => {
 
       const existing = buildReservation({ status: 'CONFIRMED' })
       prismaMock.$queryRaw.mockResolvedValueOnce([existing]).mockResolvedValueOnce([])
-      prismaMock.reservation.findFirst.mockResolvedValue(existing)
       prismaMock.reservation.update.mockResolvedValue({
         ...existing,
         startsAt: new Date('2026-06-01T16:00:00Z'),
