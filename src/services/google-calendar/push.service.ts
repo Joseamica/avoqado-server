@@ -48,6 +48,7 @@ import {
   type EventDetailLevel,
   type ReservationWithRelations,
 } from './event-body.service'
+import { resolveServices } from '@/services/reservation/reservation-services.resolver'
 
 const MAX_ATTEMPTS = 7
 const TX_TIMEOUT_MS = 60_000
@@ -73,6 +74,7 @@ type OutboxRowWithRelations = Prisma.CalendarSyncOutboxGetPayload<{
       include: {
         customer: true
         product: true
+        modifiers: true
         venue: { include: { reservationSettings: true } }
       }
     }
@@ -105,6 +107,7 @@ export async function processOutboxRow(outboxRowId: string): Promise<void> {
             include: {
               customer: true,
               product: true,
+              modifiers: true,
               venue: { include: { reservationSettings: true } },
             },
           },
@@ -217,7 +220,7 @@ async function handleCreate(tx: Tx, row: OutboxRowWithRelations, calendar: calen
   }
 
   // 3. Build the body
-  const body = buildBodyForRow(row)
+  const body = await buildBodyForRow(tx, row)
 
   // 4. Insert
   const inserted = await calendar.events.insert({
@@ -251,7 +254,7 @@ async function handleUpdate(tx: Tx, row: OutboxRowWithRelations, calendar: calen
   }
 
   // 3. Patch with a fresh body
-  const body = buildBodyForRow(row)
+  const body = await buildBodyForRow(tx, row)
   await calendar.events.patch({
     calendarId: row.targetConnection.selectedCalendarId,
     eventId: mapping.googleEventId,
@@ -368,14 +371,19 @@ async function handleUpdateRoster(tx: Tx, row: OutboxRowWithRelations, calendar:
 // Helpers — body building + mapping + state transitions
 // ============================================================
 
-function buildBodyForRow(row: OutboxRowWithRelations): calendar_v3.Schema$Event {
+async function buildBodyForRow(tx: Tx, row: OutboxRowWithRelations): Promise<calendar_v3.Schema$Event> {
   if (row.reservationId) {
     if (!row.reservation) {
       throw new Error('outbox row references reservation but include returned null')
     }
     const settings = (row.reservation.venue as any).reservationSettings as { googleCalendarEventDetailLevel?: string } | null | undefined
+    // `productIds` es un String[] escalar — Prisma no puede incluirlo, así que
+    // se resuelve aquí. Va con `tx`, NO con el prisma global: estamos dentro de
+    // la transacción del push y leer por fuera rompería el aislamiento.
+    const services = await resolveServices(row.reservation, tx)
     return buildEventBodyForReservation({
       reservation: row.reservation as ReservationWithRelations,
+      services,
       detailLevel: normalizeDetailLevel(settings?.googleCalendarEventDetailLevel),
       dashboardUrl: DASHBOARD_URL,
     })

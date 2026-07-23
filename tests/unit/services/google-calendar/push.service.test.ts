@@ -78,6 +78,7 @@ function makeReservation(overrides: any = {}): any {
     internalNotes: null,
     customer: { firstName: 'Juan', lastName: 'Pérez', email: null, phone: null },
     product: { id: 'p-1', name: 'Corte' },
+    modifiers: [],
     venue: {
       id: 'venue-1',
       slug: 'amaena',
@@ -310,6 +311,98 @@ describe('processOutboxRow — CREATE', () => {
         }),
       }),
     )
+  })
+})
+
+// ============================================================
+// CREATE — multi-service resolution (regression lock)
+//
+// `makeReservation()` never set `productId`/`productIds`, so
+// `resolveServicesMany` short-circuited BEFORE calling `product.findMany`
+// (see `reservationServiceIds` + the `allIds.size ? … : []` guard in
+// `reservation-services.resolver.ts`) in every test above — the
+// multi-service path this whole initiative exists for never ran end-to-end.
+// That's exactly the bug a salon hit: their calendar showed only the FIRST
+// service of a multi-service appointment and got double-booked.
+// ============================================================
+
+describe('processOutboxRow — CREATE multi-service (regression lock)', () => {
+  it('resolves every productIds entry via tx.product.findMany and lists ALL services, in reservation order, in the pushed event', async () => {
+    const reservation = makeReservation({
+      productId: 'p-1',
+      productIds: ['p-1', 'p-2', 'p-3'],
+    })
+    const row = makeOutboxRow({ reservation })
+    ;(prisma.calendarSyncOutbox.findUnique as jest.Mock).mockResolvedValue(row)
+    eventsListMock.mockResolvedValue({ data: { items: [] } })
+    eventsInsertMock.mockResolvedValue({ data: { id: 'gcal-multi' } })
+
+    // Isolation guard: `push.service.ts` MUST resolve services via
+    // `resolveServices(row.reservation, tx)` — the `tx` handed into
+    // `processOutboxRow`'s transaction callback, NOT a fresh/global Prisma
+    // client. `setupTransaction()` (top of this file) makes `tx === prisma`
+    // by construction (`prisma.$transaction` → `arg(prisma)`), so mocking
+    // `prisma.product.findMany` here IS mocking the tx the resolver receives.
+    // If nobody ever calls `product.findMany` on this mock, this assertion
+    // fails loudly instead of the resolver silently short-circuiting again.
+    const txProductFindMany = prisma.product.findMany as jest.Mock
+    // Response order intentionally shuffled — `resolveServicesMany` must
+    // re-order by `productIds` (reservation order), NOT by whatever order
+    // the DB/mock happens to return rows in.
+    txProductFindMany.mockResolvedValue([
+      { id: 'p-3', name: 'Tinte', price: new Prisma.Decimal(500), duration: 60 },
+      { id: 'p-1', name: 'Corte', price: new Prisma.Decimal(150), duration: 30 },
+      { id: 'p-2', name: 'Manicure', price: new Prisma.Decimal(200), duration: 45 },
+    ])
+
+    await processOutboxRow('outbox-1')
+
+    expect(txProductFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: { in: ['p-1', 'p-2', 'p-3'] } },
+        select: { id: true, name: true, price: true, duration: true },
+      }),
+    )
+
+    const insertCall = eventsInsertMock.mock.calls[0][0]
+    const description: string = insertCall.requestBody.description
+
+    // Regression lock: the shipped bug showed only the FIRST service. All
+    // three must be present now — not just "Corte".
+    expect(description).toContain('Corte')
+    expect(description).toContain('Manicure')
+    expect(description).toContain('Tinte')
+
+    // ...and in RESERVATION order (productIds order), not findMany response order.
+    const idxCorte = description.indexOf('Corte')
+    const idxManicure = description.indexOf('Manicure')
+    const idxTinte = description.indexOf('Tinte')
+    expect(idxCorte).toBeGreaterThan(-1)
+    expect(idxCorte).toBeLessThan(idxManicure)
+    expect(idxManicure).toBeLessThan(idxTinte)
+
+    // Title too (D3 spec decision: ALL services in the summary, not just the leader).
+    expect(insertCall.requestBody.summary).toBe('Reserva: Corte + Manicure + Tinte — Juan Pérez')
+  })
+
+  it('includes an "Extras:" line for every non-empty modifier (privacy level FULL renders services + extras)', async () => {
+    // Fixture default `googleCalendarEventDetailLevel: 'FULL'` already renders
+    // both services and extras (MINIMAL would collapse the description to
+    // just the dashboard URL — see `buildReservationDescription`).
+    const reservation = makeReservation({
+      modifiers: [{ name: 'Tratamiento capilar', quantity: 1, price: new Prisma.Decimal(80) }],
+    })
+    const row = makeOutboxRow({ reservation })
+    ;(prisma.calendarSyncOutbox.findUnique as jest.Mock).mockResolvedValue(row)
+    eventsListMock.mockResolvedValue({ data: { items: [] } })
+    eventsInsertMock.mockResolvedValue({ data: { id: 'gcal-extras' } })
+
+    await processOutboxRow('outbox-1')
+
+    const insertCall = eventsInsertMock.mock.calls[0][0]
+    const description: string = insertCall.requestBody.description
+    expect(description).toContain('Extras:')
+    expect(description).toContain('Tratamiento capilar ×1  +$80.00')
   })
 })
 
