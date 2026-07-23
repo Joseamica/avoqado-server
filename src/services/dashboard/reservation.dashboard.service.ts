@@ -44,6 +44,7 @@ import {
   lockTaggedRescheduleSiblings,
 } from '@/services/reservation/appointmentSlotHold.service'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
+import { resolveServicesMany, type ServiceResolvable } from '@/services/reservation/reservation-services.resolver'
 
 export { enforceBookingWindow } from '@/services/reservation/bookingWindow.service'
 // creditPack.public.service is imported lazily inside cancelReservation/markNoShow.
@@ -721,18 +722,6 @@ interface ReservationService {
   duration: number | null
 }
 
-type ServiceResolvable = { productId: string | null; productIds: string[] }
-
-/**
- * The ORDERED product ids a reservation booked. Multi-service appointments
- * (Square pattern) store the lead service in `productId` and the full ordered
- * list in the `productIds` text[]; single-service/legacy rows only have
- * `productId`. Returns [] for table-only reservations.
- */
-function reservationServiceIds(r: ServiceResolvable): string[] {
-  return r.productIds?.length ? r.productIds : r.productId ? [r.productId] : []
-}
-
 /**
  * Resolve the full ORDERED list of booked services for a reservation.
  *
@@ -748,29 +737,13 @@ async function attachServices<T extends ServiceResolvable>(reservation: T) {
 }
 
 /**
- * Batched `attachServices` for lists (calendar, etc.) — ONE product query for
- * the whole page instead of one per reservation. Order is preserved per row.
+ * Batched `attachServices` for lists (calendar, etc.) — ONE product query per
+ * page. The resolution itself lives in the shared resolver so the dashboard
+ * and Google Calendar don't have divergent definitions of "the services of a
+ * reservation".
  */
 async function attachServicesMany<T extends ServiceResolvable>(reservations: T[]): Promise<(T & { services: ReservationService[] })[]> {
-  const allIds = new Set<string>()
-  for (const r of reservations) for (const id of reservationServiceIds(r)) allIds.add(id)
-
-  const products = allIds.size
-    ? await prisma.product.findMany({
-        where: { id: { in: [...allIds] } },
-        select: { id: true, name: true, price: true, duration: true },
-      })
-    : []
-  const byId = new Map(products.map(p => [p.id, p]))
-
-  return reservations.map(r => ({
-    ...r,
-    // Map back over the id list (not `products`) to keep booking order intact.
-    services: reservationServiceIds(r)
-      .map(id => byId.get(id))
-      .filter((p): p is NonNullable<typeof p> => Boolean(p))
-      .map(p => ({ id: p.id, name: p.name, price: p.price, duration: p.duration })),
-  }))
+  return resolveServicesMany(reservations)
 }
 
 export async function getReservations(venueId: string, filters: ReservationFilters, page = 1, pageSize = 50) {
