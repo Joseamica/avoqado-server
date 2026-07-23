@@ -168,7 +168,11 @@ export const AdjustStockSchema = z.object({
     rawMaterialId: cuidLikeId(),
   }),
   body: z.object({
-    quantity: z.number().finite('La cantidad debe ser un número finito'),
+    quantity: z
+      .number()
+      .finite('La cantidad debe ser un número finito')
+      .max(999_999_999.999, 'La cantidad excede el máximo permitido')
+      .min(-999_999_999.999, 'La cantidad es menor al mínimo permitido'),
     type: z
       .nativeEnum(RawMaterialMovementType)
       .refine(
