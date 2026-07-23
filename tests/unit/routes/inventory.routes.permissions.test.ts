@@ -71,6 +71,14 @@ describe('inventory.routes — permisos por endpoint', () => {
     ['delete', '/purchase-orders/:purchaseOrderId', 'inventory:delete'],
     ['post', '/purchase-orders/:purchaseOrderId/approve', 'inventory:update'],
     ['post', '/purchase-orders/:purchaseOrderId/cancel', 'inventory:update'],
+    ['get', '/inter-venue-transfers', 'inventory-transfers:read'],
+    ['post', '/inter-venue-transfers', 'inventory-transfers:request'],
+    ['post', '/inter-venue-transfers/:transferId/approve', 'inventory-transfers:approve'],
+    ['post', '/inter-venue-transfers/:transferId/reject', 'inventory-transfers:approve'],
+    ['post', '/inter-venue-transfers/:transferId/cancel', 'inventory-transfers:approve|inventory-transfers:request'],
+    ['post', '/inter-venue-transfers/:transferId/dispatch', 'inventory-transfers:dispatch'],
+    ['post', '/inter-venue-transfers/:transferId/receive', 'inventory-transfers:receive'],
+    ['post', '/inter-venue-transfers/:transferId/resolve-variance', 'inventory-transfers:receive'],
   ])('%s %s exige %s', (method, path, expectedPermission) => {
     const route = audited.find(r => r.method === method && r.path === path)
     expect(route).toBeDefined()

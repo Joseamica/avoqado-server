@@ -10,6 +10,7 @@ import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
 import prisma from '../../utils/prismaClient'
 import { Decimal } from '@prisma/client/runtime/library'
+import { assertVenueSalesEnabled } from '../venueSalesGuard'
 
 // ============================================================================
 // TYPES
@@ -319,6 +320,8 @@ export async function convertToOrder(estimateId: string, venueId: string, staffI
   if (estimate.convertedOrderId) {
     throw new BadRequestError('Este presupuesto ya fue convertido a orden')
   }
+
+  await assertVenueSalesEnabled(venueId)
 
   // Create order from estimate
   const orderNumber = `ORD-${Date.now()}`

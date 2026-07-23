@@ -141,6 +141,11 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'inventory:update': ['inventory:read', 'inventory:update', 'products:read'],
   'inventory:adjust': ['inventory:read', 'inventory:adjust', 'products:read'],
   'inventory:delete': ['inventory:read', 'inventory:delete', 'products:read'],
+  'inventory-transfers:read': ['inventory-transfers:read', 'inventory:read'],
+  'inventory-transfers:request': ['inventory-transfers:read', 'inventory-transfers:request', 'inventory:read'],
+  'inventory-transfers:approve': ['inventory-transfers:read', 'inventory-transfers:approve', 'inventory:read'],
+  'inventory-transfers:dispatch': ['inventory-transfers:read', 'inventory-transfers:dispatch', 'inventory:read'],
+  'inventory-transfers:receive': ['inventory-transfers:read', 'inventory-transfers:receive', 'inventory:read'],
 
   // ===========================
   // TEAMS - Staff Management
@@ -704,6 +709,11 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'inventory:update',
     'inventory:delete',
     'inventory:adjust',
+    'inventory-transfers:read',
+    'inventory-transfers:request',
+    'inventory-transfers:approve',
+    'inventory-transfers:dispatch',
+    'inventory-transfers:receive',
     'reviews:read',
     'reviews:respond',
     'teams:read',
@@ -835,6 +845,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tables:*',
     'reservations:*',
     'inventory:*',
+    'inventory-transfers:*',
     'products:*',
     'settings:manage', // Can manage role permissions
     'role-config:*', // Can customize role display names
@@ -938,6 +949,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tables:*',
     'reservations:*',
     'inventory:*',
+    'inventory-transfers:*',
     'products:*',
     'settings:manage', // Can manage role permissions
     'role-config:*', // Can customize role display names
@@ -1412,6 +1424,13 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
     'tpv:command:geofence',
   ],
   inventory: ['inventory:read', 'inventory:create', 'inventory:update', 'inventory:delete', 'inventory:adjust', 'inventory:org-manage'],
+  'inventory-transfers': [
+    'inventory-transfers:read',
+    'inventory-transfers:request',
+    'inventory-transfers:approve',
+    'inventory-transfers:dispatch',
+    'inventory-transfers:receive',
+  ],
   reviews: ['reviews:read', 'reviews:respond'],
   teams: ['teams:read', 'teams:create', 'teams:update', 'teams:delete', 'teams:invite'],
   tables: ['tables:read', 'tables:update'],

@@ -27,7 +27,7 @@
 import prisma from '../../utils/prismaClient'
 import { CreateVenueDto } from '../../schemas/dashboard/venue.schema'
 import { EnhancedCreateVenueBody } from '../../schemas/dashboard/cost-management.schema'
-import { Venue, AccountType, EntityType, VerificationStatus, VenueStatus } from '@prisma/client'
+import { Venue, AccountType, EntityType, VerificationStatus, VenueStatus, VenueOperationalRole, VenueType } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { generateSlug, validateSlug } from '../../utils/slugify'
 import logger from '../../config/logger'
@@ -80,6 +80,8 @@ export async function createVenueForOrganization(orgId: string, venueData: Creat
   const newVenue = await prisma.venue.create({
     data: {
       ...venueData, // Los datos ya validados del DTO
+      type: venueData.operationalRole === VenueOperationalRole.CEDIS ? VenueType.OTHER : venueData.type,
+      salesEnabled: venueData.operationalRole === VenueOperationalRole.CEDIS ? false : venueData.salesEnabled,
       slug: slugToUse, // El slug final
       organizationId: orgId, // Asociar con la organización
       // Asegúrate de que los campos del DTO coincidan con los del modelo Prisma Venue
@@ -189,6 +191,11 @@ export async function updateVenue(orgId: string, venueId: string, updateData: an
 
   // Exclude organizationId from updates (prevent accidental modification)
   const { organizationId: _, ...safeUpdateData } = updateData
+  const resultingOperationalRole = safeUpdateData.operationalRole ?? existingVenue.operationalRole
+  if (resultingOperationalRole === VenueOperationalRole.CEDIS) {
+    safeUpdateData.type = VenueType.OTHER
+    safeUpdateData.salesEnabled = false
+  }
 
   // 🗑️ AUTO-CLEANUP: Delete old logo from Firebase Storage if it's being changed/removed
   if (safeUpdateData.logo !== undefined) {

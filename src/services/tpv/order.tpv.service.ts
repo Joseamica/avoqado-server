@@ -20,6 +20,7 @@ import {
   validateDiscountActive,
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
+import { assertVenueSalesEnabled } from '../venueSalesGuard'
 
 /**
  * Helper function to flatten OrderItemModifier structure for Android compatibility
@@ -373,6 +374,8 @@ export async function createOrder(venueId: string, input: CreateOrderInput): Pro
       }
     }
   }
+
+  await assertVenueSalesEnabled(venueId)
 
   // Validate staff if provided
   if (input.waiterId) {
@@ -792,6 +795,8 @@ export async function createOrderWithItems(
   input: TpvCreateOrderWithItemsInput,
 ): Promise<Order & { tableName: string | null }> {
   logger.info(`🧾 [WITH ITEMS] Creating TPV order with ${input.items.length} item(s) | venue=${venueId}`)
+
+  await assertVenueSalesEnabled(venueId)
 
   if (Math.abs(input.taxAmount) > PESOS_TOLERANCE) {
     throw new BadRequestError('taxAmount must be 0 in V1 of the new TPV Cobrar flow')
@@ -3382,6 +3387,7 @@ export async function sellSerializedItem(
   staffId: string,
 ): Promise<Order & { tableName: string | null }> {
   logger.info(`💵 [ORDER SERVICE] Quick sell serialized item ${input.serialNumber}`)
+  await assertVenueSalesEnabled(venueId)
 
   // Verify module is enabled for this venue
   const isEnabled = await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY)

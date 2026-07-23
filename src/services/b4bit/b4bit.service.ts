@@ -21,6 +21,7 @@ import logger from '../../config/logger'
 import { BadRequestError, InternalServerError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { generateDigitalReceipt, generateReceiptUrl } from '../tpv/digitalReceipt.tpv.service'
+import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import type {
   B4BitConfig,
   B4BitCreateOrderRequest,
@@ -239,6 +240,7 @@ async function createPaymentOrder(request: B4BitCreateOrderRequest & { venueId: 
  */
 export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams): Promise<InitiateCryptoPaymentResult> {
   const { venueId, amount, tip = 0, staffId, shiftId, orderId, orderNumber, deviceSerialNumber, rating } = params
+  await assertVenueSalesEnabled(venueId)
 
   // Convert centavos to decimal (5500 centavos = $55.00 MXN)
   const totalAmount = amount + tip

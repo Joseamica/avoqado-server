@@ -169,7 +169,12 @@ export const AdjustStockSchema = z.object({
   }),
   body: z.object({
     quantity: z.number().finite('La cantidad debe ser un número finito'),
-    type: z.nativeEnum(RawMaterialMovementType),
+    type: z
+      .nativeEnum(RawMaterialMovementType)
+      .refine(
+        value => value !== RawMaterialMovementType.TRANSFER_OUT && value !== RawMaterialMovementType.TRANSFER_IN,
+        'Los movimientos de traslado solo pueden generarse desde el flujo de traslados entre sucursales',
+      ),
     reason: z.string().optional(),
     reference: z.string().optional(),
   }),

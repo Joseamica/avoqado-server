@@ -622,6 +622,24 @@ WHERE v.id = 'venue_123' AND f.code = 'INVENTORY_MANAGEMENT';
 
 ---
 
+## Inter-venue raw-material transfers
+
+The Phase 2 transfer engine is deliberately separate from the legacy `InventoryTransfer` audit model and from serialized inventory custody.
+Its API namespace is `/inventory/inter-venue-transfers`.
+
+- `InterVenueTransfer` owns the folio, source/destination, mode, state, actors, and idempotent dispatch claim.
+- `InterVenueTransferItem` maps one active source raw material to one active destination raw material with the same base `Unit`.
+- `InterVenueTransferAllocation` freezes every FIFO source-batch slice, including unit cost and expiration date.
+- `InterVenueTransferReceipt` and its lines support multiple idempotent partial receipts and link each receipt back to frozen allocations.
+- `InterVenueTransferVarianceResolution` closes shortages explicitly. `NOT_DISPATCHED` has no value impact; in-transit loss/damage uses the remaining FIFO value.
+
+Dispatch, receipt, and variance resolution run in serializable transactions with row locks. Only the transfer service may create
+`TRANSFER_OUT` and `TRANSFER_IN` movements; manual adjustment endpoints reject both values. Entitlement is checked for source and destination,
+and consolidated inventory includes only venues the actor can access that also have `INVENTORY_TRACKING`.
+
+`Venue.operationalRole` (`STORE`, `CEDIS`, `HYBRID`) is independent from `Venue.type`. A pure CEDIS is normalized to `type=OTHER` and
+`salesEnabled=false`; order/payment initiation services enforce the sales switch on the backend.
+
 ## 📋 Unit Types & Categories
 
 ### Supported Unit Types

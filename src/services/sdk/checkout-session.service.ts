@@ -12,6 +12,7 @@ import { CheckoutStatus, Prisma } from '@prisma/client'
 import { BadRequestError, NotFoundError, UnauthorizedError } from '@/errors/AppError'
 import crypto from 'crypto'
 import logger from '@/config/logger'
+import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
 
 /**
  * Generates a unique checkout session ID
@@ -64,6 +65,8 @@ export async function createCheckoutSession(
   if (!merchant.active) {
     throw new UnauthorizedError('Merchant account is inactive')
   }
+
+  await assertVenueSalesEnabled(merchant.venueId)
 
   if (!merchant.provider) {
     throw new BadRequestError('Provider configuration is missing')

@@ -1,4 +1,5 @@
 import { Prisma, OrderType, OrderSource } from '@prisma/client'
+import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
 
 interface CreateOrderFromReservationInput {
   reservationId: string
@@ -38,6 +39,8 @@ export async function createOrderFromReservation(
     select: { id: true },
   })
   if (existing) return { orderId: existing.id, created: false }
+
+  await assertVenueSalesEnabled(venueId, tx)
 
   // 2. Load reservation + modifiers + the products it references
   const reservation = await tx.reservation.findFirst({

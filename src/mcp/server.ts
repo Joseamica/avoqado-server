@@ -50,6 +50,7 @@ import { registerMerchantRoutingTools } from './tools/merchantRouting'
 import { registerPrinterTools } from './tools/printers'
 import { registerCashOutTools } from './tools/cash-out'
 import { registerWhiteLabelOpsTools } from './tools/whiteLabelOps'
+import { registerInterVenueTransferTools } from './tools/interVenueTransfers'
 
 /**
  * Server-level guidance the client (Claude/ChatGPT) hands to the model on every connection.
@@ -89,6 +90,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerTerminalTools(server, scope)
   registerReservationTools(server, scope)
   registerInventoryTools(server, scope)
+  registerInterVenueTransferTools(server, scope)
   registerProcurementTools(server, scope)
   registerCfdiTools(server, scope)
   registerCommissionTools(server, scope)

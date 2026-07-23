@@ -126,6 +126,8 @@ model Venue {
   name     String
   slug     String    @unique
   type     VenueType @default(RESTAURANT)
+  operationalRole VenueOperationalRole @default(STORE)
+  salesEnabled   Boolean @default(true)
   timezone String    @default("America/Mexico_City")
   currency String    @default("MXN")
 

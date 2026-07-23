@@ -1,14 +1,14 @@
 # Assistant Endpoint Inventory
 
-Generated: 2026-07-22T10:34:36.945Z
+Generated: 2026-07-23T01:08:54.445Z
 
 ## Summary
 
-- Total endpoints: 1733
+- Total endpoints: 1745
 - Assistant tools registered: 80
-- Coverage: missing 691, blocked 521, partial 516, covered 5
-- Classifications: read 547, adminOnly 448, action 376, mutation 146, dangerousMutation 143, public 73
-- Scopes: venue 888, superadmin 404, unknown 194, organization 137, public 110
+- Coverage: missing 691, partial 526, blocked 523, covered 5
+- Classifications: read 550, adminOnly 450, action 381, mutation 146, dangerousMutation 145, public 73
+- Scopes: venue 898, superadmin 406, unknown 194, organization 137, public 110
 
 ## Top Missing Domains
 
@@ -143,6 +143,7 @@ Generated: 2026-07-22T10:34:36.945Z
 - GET `/api/v1/dashboard/superadmin/merchant-accounts/list` — adminOnly; permissions: none; controller: superadminController.getMerchantAccountsList
 - GET `/api/v1/dashboard/superadmin/merchant-accounts/mcc-lookup` — adminOnly; permissions: none; controller: merchantAccountController.getMccRateSuggestion
 - GET `/api/v1/dashboard/superadmin/merchant-accounts/payment-setup/summary` — adminOnly; permissions: none; controller: merchantAccountController.getPaymentSetupSummary
+- POST `/api/v1/dashboard/superadmin/merchant-accounts/verify-apikey` — adminOnly; permissions: none; controller: merchantAccountController.verifyAngelPayApiKey
 - POST `/api/v1/dashboard/superadmin/merchant-accounts/with-cost-structure` — adminOnly; permissions: none; controller: merchantAccountController.createMerchantAccountWithCostStructure
 - GET `/api/v1/dashboard/superadmin/merchant-revenue-shares` — adminOnly; permissions: none; controller: controller.getMerchantRevenueShares
 - POST `/api/v1/dashboard/superadmin/merchant-revenue-shares` — adminOnly; permissions: none; controller: controller.createMerchantRevenueShare
@@ -154,7 +155,6 @@ Generated: 2026-07-22T10:34:36.945Z
 - GET `/api/v1/dashboard/superadmin/modules` — adminOnly; permissions: none; controller: moduleController.getAllModules
 - POST `/api/v1/dashboard/superadmin/modules` — adminOnly; permissions: none; controller: moduleController.createModule
 - GET `/api/v1/dashboard/superadmin/modules/:moduleCode/venues` — adminOnly; permissions: none; controller: moduleController.getVenuesForModule
-- DELETE `/api/v1/dashboard/superadmin/modules/:moduleId` — adminOnly; permissions: none; controller: moduleController.deleteModule
 
 ## Endpoint Inventory
 
@@ -483,6 +483,7 @@ Generated: 2026-07-22T10:34:36.945Z
 | GET | `/api/v1/dashboard/superadmin/merchant-accounts/list` | adminOnly | superadmin | blocked | - | merchantAccountsQuerySchema | superadminController.getMerchantAccountsList |
 | GET | `/api/v1/dashboard/superadmin/merchant-accounts/mcc-lookup` | adminOnly | superadmin | blocked | - | - | merchantAccountController.getMccRateSuggestion |
 | GET | `/api/v1/dashboard/superadmin/merchant-accounts/payment-setup/summary` | adminOnly | superadmin | blocked | - | - | merchantAccountController.getPaymentSetupSummary |
+| POST | `/api/v1/dashboard/superadmin/merchant-accounts/verify-apikey` | adminOnly | superadmin | blocked | - | - | merchantAccountController.verifyAngelPayApiKey |
 | POST | `/api/v1/dashboard/superadmin/merchant-accounts/with-cost-structure` | adminOnly | superadmin | blocked | - | - | merchantAccountController.createMerchantAccountWithCostStructure |
 | GET | `/api/v1/dashboard/superadmin/merchant-revenue-shares` | adminOnly | superadmin | blocked | - | - | controller.getMerchantRevenueShares |
 | POST | `/api/v1/dashboard/superadmin/merchant-revenue-shares` | adminOnly | superadmin | blocked | - | - | controller.createMerchantRevenueShare |
@@ -855,6 +856,16 @@ Generated: 2026-07-22T10:34:36.945Z
 | GET | `/api/v1/dashboard/venues/:venueId/inventory/auto-reorder` | read | venue | partial | inventory:read | - | autoReorderController.getSettings |
 | PUT | `/api/v1/dashboard/venues/:venueId/inventory/auto-reorder` | mutation | venue | partial | inventory:update | autoReorderController.updateAutoReorderSchema | autoReorderController.updateSettings |
 | POST | `/api/v1/dashboard/venues/:venueId/inventory/auto-reorder/run-now` | action | venue | partial | inventory:update | - | autoReorderController.runNow |
+| GET | `/api/v1/dashboard/venues/:venueId/inventory/inter-venue-transfers` | read | venue | partial | inventory-transfers:read | ListInterVenueTransfersSchema | interVenueTransferController.listTransfers |
+| POST | `/api/v1/dashboard/venues/:venueId/inventory/inter-venue-transfers` | action | venue | partial | inventory-transfers:request | CreateInterVenueTransferSchema | interVenueTransferController.createTransfer |
+| GET | `/api/v1/dashboard/venues/:venueId/inventory/inter-venue-transfers/:transferId` | read | venue | partial | inventory-transfers:read | GetInterVenueTransferSchema | interVenueTransferController.getTransfer |
+| POST | `/api/v1/dashboard/venues/:venueId/inventory/inter-venue-transfers/:transferId/approve` | dangerousMutation | venue | partial | inventory-transfers:approve | TransferActionSchema | interVenueTransferController.approveTransfer |
+| POST | `/api/v1/dashboard/venues/:venueId/inventory/inter-venue-transfers/:transferId/cancel` | dangerousMutation | venue | partial | - | TransferDecisionSchema | interVenueTransferController.cancelTransfer |
+| POST | `/api/v1/dashboard/venues/:venueId/inventory/inter-venue-transfers/:transferId/dispatch` | action | venue | partial | inventory-transfers:dispatch | DispatchInterVenueTransferSchema | interVenueTransferController.dispatchTransfer |
+| POST | `/api/v1/dashboard/venues/:venueId/inventory/inter-venue-transfers/:transferId/receive` | action | venue | partial | inventory-transfers:receive | ReceiveInterVenueTransferSchema | interVenueTransferController.receiveTransfer |
+| POST | `/api/v1/dashboard/venues/:venueId/inventory/inter-venue-transfers/:transferId/reject` | action | venue | partial | inventory-transfers:approve | TransferDecisionSchema | interVenueTransferController.rejectTransfer |
+| POST | `/api/v1/dashboard/venues/:venueId/inventory/inter-venue-transfers/:transferId/resolve-variance` | action | venue | partial | inventory-transfers:receive | ResolveInterVenueTransferVarianceSchema | interVenueTransferController.resolveVariance |
+| GET | `/api/v1/dashboard/venues/:venueId/inventory/inter-venue-transfers/consolidated` | read | venue | partial | inventory-transfers:read | ConsolidatedInterVenueInventorySchema | interVenueTransferController.consolidatedInventory |
 | POST | `/api/v1/dashboard/venues/:venueId/inventory/market-benchmark/bulk` | dangerousMutation | venue | partial | inventory:read | - | pricingController.getBulkMarketBenchmark |
 | GET | `/api/v1/dashboard/venues/:venueId/inventory/movements` | read | venue | partial | inventory:read | GetGlobalMovementsQuerySchema | productInventoryController.getGlobalMovementsHandler |
 | GET | `/api/v1/dashboard/venues/:venueId/inventory/pricing-analysis` | read | venue | partial | inventory:read | - | pricingController.getPricingAnalysis |
@@ -1634,6 +1645,7 @@ Generated: 2026-07-22T10:34:36.945Z
 | POST | `/api/v1/superadmin/merchant-accounts/full-setup-angelpay` | adminOnly | superadmin | blocked | - | - | merchantAccountController.fullSetupAngelPayMerchant |
 | GET | `/api/v1/superadmin/merchant-accounts/mcc-lookup` | adminOnly | superadmin | blocked | - | - | merchantAccountController.getMccRateSuggestion |
 | GET | `/api/v1/superadmin/merchant-accounts/payment-setup/summary` | adminOnly | superadmin | blocked | - | - | merchantAccountController.getPaymentSetupSummary |
+| POST | `/api/v1/superadmin/merchant-accounts/verify-apikey` | adminOnly | superadmin | blocked | - | - | merchantAccountController.verifyAngelPayApiKey |
 | POST | `/api/v1/superadmin/merchant-accounts/with-cost-structure` | adminOnly | superadmin | blocked | - | - | merchantAccountController.createMerchantAccountWithCostStructure |
 | GET | `/api/v1/superadmin/merchant-revenue-shares` | adminOnly | superadmin | blocked | - | - | controller.getMerchantRevenueShares |
 | POST | `/api/v1/superadmin/merchant-revenue-shares` | adminOnly | superadmin | blocked | - | - | controller.createMerchantRevenueShare |

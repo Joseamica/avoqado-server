@@ -114,6 +114,11 @@ const PERMISSION_TO_FEATURE_MAP: Record<string, string> = {
   'inventory:adjust': 'AVOQADO_INVENTORY',
   'inventory:delete': 'AVOQADO_INVENTORY',
   'inventory:org-manage': 'SERIALIZED_INVENTORY',
+  'inventory-transfers:read': 'AVOQADO_INVENTORY',
+  'inventory-transfers:request': 'AVOQADO_INVENTORY',
+  'inventory-transfers:approve': 'AVOQADO_INVENTORY',
+  'inventory-transfers:dispatch': 'AVOQADO_INVENTORY',
+  'inventory-transfers:receive': 'AVOQADO_INVENTORY',
   'attendance:org-manage': 'STORES_ANALYSIS',
 
   // Customers

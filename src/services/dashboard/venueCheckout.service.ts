@@ -32,6 +32,7 @@ import {
   mapStripeCardBrandToEnum,
   finalizeMercadoPagoCheckout,
 } from '@/services/dashboard/paymentLink.service'
+import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
 
 // Same Stripe charge bounds as the payment-link flow (MXN cents). Defaults:
 // $10 min, $50,000 max per transaction.
@@ -144,6 +145,7 @@ function requireAmount(amount: number | undefined): number {
  */
 export async function createStripePaymentIntentForVenue(venueSlug: string, input: { amount?: number; customerEmail?: string }) {
   const { venue, merchant } = await resolveVenueAndMerchant(venueSlug)
+  await assertVenueSalesEnabled(venue.id)
   if (!merchant || merchant.provider?.code !== 'STRIPE_CONNECT') {
     throw new BadRequestError('Este venue no tiene Stripe Connect activo para cobrar en línea')
   }
@@ -251,6 +253,7 @@ export async function createMercadoPagoPaymentIntentForVenue(venueSlug: string, 
   const { loadCredentials } = await import('@/services/mercado-pago/connection.service')
 
   const { venue, merchant } = await resolveVenueAndMerchant(venueSlug)
+  await assertVenueSalesEnabled(venue.id)
   if (!merchant || merchant.provider?.code !== 'MERCADO_PAGO') {
     throw new BadRequestError('Este venue no tiene Mercado Pago activo para cobrar en línea')
   }
@@ -340,6 +343,7 @@ export async function executeMercadoPagoPaymentForVenue(
 
   const venue = await prisma.venue.findUnique({ where: { slug: venueSlug }, select: { id: true } })
   if (!venue) throw new NotFoundError('Venue no encontrado')
+  await assertVenueSalesEnabled(venue.id)
 
   const session = await prisma.checkoutSession.findUnique({
     where: { sessionId },

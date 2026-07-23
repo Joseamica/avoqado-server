@@ -23,6 +23,7 @@ import { formatInTimeZone } from 'date-fns-tz'
 import { es as esLocale } from 'date-fns/locale'
 import { createCommissionForPayment, createSplitCommissionForPayment } from '@/services/dashboard/commission/commission-calculation.service'
 import { sendReceiptWhatsApp, sendPaymentLinkShareWhatsApp } from '@/services/whatsapp.service'
+import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
 
 // Stripe charge bounds (MXN cents). Kept inline to avoid yet-another shared
 // module for what is functionally a pair of env-tunable constants. Defaults
@@ -360,6 +361,7 @@ export interface ListPaymentLinksFilters {
  * Creates a new payment link for a venue
  */
 export async function createPaymentLink(venueId: string, data: CreatePaymentLinkData, staffId: string) {
+  await assertVenueSalesEnabled(venueId)
   // 1. Resolve the ecommerce merchant (channel) to attach the link to.
   //
   // Two paths:
@@ -991,6 +993,7 @@ export async function createStripePaymentIntentForPaymentLink(
   })
 
   if (!paymentLink) throw new NotFoundError('Liga de pago no encontrada')
+  await assertVenueSalesEnabled(paymentLink.venueId)
   if (paymentLink.status !== 'ACTIVE') throw new BadRequestError('Esta liga de pago no está disponible')
   if (paymentLink.expiresAt && new Date() > paymentLink.expiresAt) {
     await prisma.paymentLink.update({ where: { id: paymentLink.id }, data: { status: 'EXPIRED' } })
@@ -1753,6 +1756,7 @@ export async function createStripeCheckoutForPaymentLink(
   })
 
   if (!paymentLink) throw new NotFoundError('Liga de pago no encontrada')
+  await assertVenueSalesEnabled(paymentLink.venueId)
   if (paymentLink.status !== 'ACTIVE') throw new BadRequestError('Esta liga de pago no está disponible')
   if (paymentLink.expiresAt && new Date() > paymentLink.expiresAt) {
     await prisma.paymentLink.update({ where: { id: paymentLink.id }, data: { status: 'EXPIRED' } })
@@ -1954,6 +1958,7 @@ export async function createCheckoutSession(
   if (!paymentLink) {
     throw new NotFoundError('Liga de pago no encontrada')
   }
+  await assertVenueSalesEnabled(paymentLink.venueId)
 
   if (paymentLink.status !== 'ACTIVE') {
     throw new BadRequestError('Esta liga de pago no está disponible')
@@ -2127,6 +2132,7 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
   if (session.paymentLink?.shortCode !== shortCode) {
     throw new BadRequestError('Sesión no pertenece a esta liga de pago')
   }
+  await assertVenueSalesEnabled(session.paymentLink.venueId)
 
   if (session.status !== 'PROCESSING') {
     throw new BadRequestError(
@@ -2764,6 +2770,7 @@ export async function createMercadoPagoPaymentIntentForPaymentLink(
   })
 
   if (!paymentLink) throw new NotFoundError('Liga de pago no encontrada')
+  await assertVenueSalesEnabled(paymentLink.venueId)
   if (paymentLink.status !== 'ACTIVE') throw new BadRequestError('Esta liga de pago no está disponible')
   if (paymentLink.expiresAt && new Date() > paymentLink.expiresAt) {
     await prisma.paymentLink.update({ where: { id: paymentLink.id }, data: { status: 'EXPIRED' } })
@@ -2934,6 +2941,7 @@ export async function executeMercadoPagoPaymentForPaymentLink(
   if (session.paymentLink?.shortCode !== shortCode) {
     throw new BadRequestError('La sesión no pertenece a esta liga de pago')
   }
+  await assertVenueSalesEnabled(session.paymentLink.venueId)
   if (session.ecommerceMerchant.provider?.code !== 'MERCADO_PAGO') {
     throw new BadRequestError('Esta sesión no usa Mercado Pago')
   }

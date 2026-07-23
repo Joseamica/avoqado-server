@@ -7,6 +7,14 @@
  * persisted weightQuantity/weightUnit, and the payCashOrder full-payment
  * inventory-deduction hook. Plus regression: normal orders unchanged.
  */
+// El guard de ventas por sucursal (venueSalesGuard) NO es el objeto de esta suite:
+// se prueba en tests/unit/services/venueSalesGuard.test.ts. Sin este mock, cada
+// servicio de venta consulta venue.salesEnabled contra un prismaMock que no lo define.
+jest.mock('@/services/venueSalesGuard', () => ({
+  __esModule: true,
+  assertVenueSalesEnabled: jest.fn(),
+}))
+
 import { Decimal } from '@prisma/client/runtime/library'
 import { createOrderWithItems, payCashOrder } from '@/services/mobile/order.mobile.service'
 import { prismaMock } from '../../../__helpers__/setup'

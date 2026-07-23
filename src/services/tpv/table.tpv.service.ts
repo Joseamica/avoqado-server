@@ -4,6 +4,7 @@ import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import socketManager from '../../communication/sockets'
 import { SocketEventType } from '../../communication/sockets/types'
+import { assertVenueSalesEnabled } from '../venueSalesGuard'
 
 interface TableStatusResponse {
   id: string
@@ -235,6 +236,8 @@ export async function assignTable(
       isNewOrder: false,
     }
   }
+
+  await assertVenueSalesEnabled(venueId)
 
   // Multi-cheque invariant: "open orders bound to this tableId" must mean
   // "checks of the CURRENT seating". Opening a table from AVAILABLE detaches

@@ -1138,6 +1138,8 @@ async function main() {
           name: venueName,
           slug: venueSlug,
           type: 'venueType' in venueConfig ? (venueConfig.venueType as VenueType) : VenueType.RESTAURANT,
+          operationalRole: 'STORE',
+          salesEnabled: true,
           entityType: index === 0 ? EntityType.PERSONA_MORAL : EntityType.PERSONA_FISICA,
           address: faker.location.streetAddress(),
           city: faker.location.city(),

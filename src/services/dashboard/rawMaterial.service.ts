@@ -510,6 +510,10 @@ export async function reactivateRawMaterial(venueId: string, rawMaterialId: stri
  * Uses FIFO batch tracking for deductions
  */
 export async function adjustStock(venueId: string, rawMaterialId: string, data: AdjustStockDto, staffId?: string): Promise<RawMaterial> {
+  const movementType = data.type as RawMaterialMovementType
+  if (movementType === RawMaterialMovementType.TRANSFER_OUT || movementType === RawMaterialMovementType.TRANSFER_IN) {
+    throw new AppError('Los movimientos de traslado solo pueden generarse desde el flujo de traslados entre sucursales', 400)
+  }
   const rawMaterial = await prisma.rawMaterial.findFirst({
     where: { id: rawMaterialId, venueId },
   })

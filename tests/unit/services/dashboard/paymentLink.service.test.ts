@@ -1,3 +1,11 @@
+// El guard de ventas por sucursal (venueSalesGuard) NO es el objeto de esta suite:
+// se prueba en tests/unit/services/venueSalesGuard.test.ts. Sin este mock, cada
+// servicio de venta consulta venue.salesEnabled contra un prismaMock que no lo define.
+jest.mock('@/services/venueSalesGuard', () => ({
+  __esModule: true,
+  assertVenueSalesEnabled: jest.fn(),
+}))
+
 // Mock nanoid before imports
 jest.mock('nanoid', () => ({
   nanoid: jest.fn(() => 'abc12345'),

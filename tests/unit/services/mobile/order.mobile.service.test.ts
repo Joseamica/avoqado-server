@@ -1,3 +1,11 @@
+// El guard de ventas por sucursal (venueSalesGuard) NO es el objeto de esta suite:
+// se prueba en tests/unit/services/venueSalesGuard.test.ts. Sin este mock, cada
+// servicio de venta consulta venue.salesEnabled contra un prismaMock que no lo define.
+jest.mock('@/services/venueSalesGuard', () => ({
+  __esModule: true,
+  assertVenueSalesEnabled: jest.fn(),
+}))
+
 import { Decimal } from '@prisma/client/runtime/library'
 import { Prisma } from '@prisma/client'
 import { cancelOrder, createOrderWithItems, payCashOrder } from '@/services/mobile/order.mobile.service'

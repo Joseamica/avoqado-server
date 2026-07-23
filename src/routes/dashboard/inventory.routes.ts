@@ -2,6 +2,8 @@ import { Router } from 'express'
 import { validateRequest } from '../../middlewares/validation'
 import { checkPermission } from '../../middlewares/checkPermission.middleware'
 import { checkFeatureAccess } from '../../middlewares/checkFeatureAccess.middleware'
+import { simCustodyIdempotency } from '../../middlewares/simCustodyIdempotency.middleware'
+import { checkInterVenueTransferCancelPermission } from '../../middlewares/interVenueTransferCancelPermission.middleware'
 import * as autoReorderController from '../../controllers/dashboard/auto-reorder.controller'
 
 // Import controllers
@@ -17,6 +19,18 @@ import * as productInventoryController from '../../controllers/dashboard/product
 import * as productLabelController from '../../controllers/dashboard/inventory/productLabel.controller'
 import * as stockCountController from '../../controllers/dashboard/inventory/stockCount.controller'
 import * as inventoryTransferController from '../../controllers/dashboard/inventory/inventoryTransfer.controller'
+import * as interVenueTransferController from '../../controllers/dashboard/inventory/interVenueTransfer.controller'
+import {
+  ConsolidatedInterVenueInventorySchema,
+  CreateInterVenueTransferSchema,
+  DispatchInterVenueTransferSchema,
+  GetInterVenueTransferSchema,
+  ListInterVenueTransfersSchema,
+  ReceiveInterVenueTransferSchema,
+  ResolveInterVenueTransferVarianceSchema,
+  TransferActionSchema,
+  TransferDecisionSchema,
+} from '../../schemas/dashboard/interVenueTransfer.schema'
 
 // Import schemas
 import {
@@ -1304,6 +1318,76 @@ router.get('/stock-counts', checkPermission('inventory:read'), stockCountControl
  *     summary: Get a single stock count with its items (read-only audit)
  */
 router.get('/stock-counts/:countId', checkPermission('inventory:read'), stockCountController.getStockCount)
+
+// ===========================================
+// INTER-VENUE RAW-MATERIAL TRANSFERS
+// ===========================================
+// Deliberately separate from legacy /transfers (mobile audit) and
+// /stock/transfers (serialized inventory custody).
+
+router.get(
+  '/inter-venue-transfers/consolidated',
+  checkPermission('inventory-transfers:read'),
+  validateRequest(ConsolidatedInterVenueInventorySchema),
+  interVenueTransferController.consolidatedInventory,
+)
+router.get(
+  '/inter-venue-transfers',
+  checkPermission('inventory-transfers:read'),
+  validateRequest(ListInterVenueTransfersSchema),
+  interVenueTransferController.listTransfers,
+)
+router.get(
+  '/inter-venue-transfers/:transferId',
+  checkPermission('inventory-transfers:read'),
+  validateRequest(GetInterVenueTransferSchema),
+  interVenueTransferController.getTransfer,
+)
+router.post(
+  '/inter-venue-transfers',
+  checkPermission('inventory-transfers:request'),
+  validateRequest(CreateInterVenueTransferSchema),
+  interVenueTransferController.createTransfer,
+)
+router.post(
+  '/inter-venue-transfers/:transferId/approve',
+  checkPermission('inventory-transfers:approve'),
+  validateRequest(TransferActionSchema),
+  interVenueTransferController.approveTransfer,
+)
+router.post(
+  '/inter-venue-transfers/:transferId/reject',
+  checkPermission('inventory-transfers:approve'),
+  validateRequest(TransferDecisionSchema),
+  interVenueTransferController.rejectTransfer,
+)
+router.post(
+  '/inter-venue-transfers/:transferId/cancel',
+  checkInterVenueTransferCancelPermission,
+  validateRequest(TransferDecisionSchema),
+  interVenueTransferController.cancelTransfer,
+)
+router.post(
+  '/inter-venue-transfers/:transferId/dispatch',
+  checkPermission('inventory-transfers:dispatch'),
+  simCustodyIdempotency({ required: true }),
+  validateRequest(DispatchInterVenueTransferSchema),
+  interVenueTransferController.dispatchTransfer,
+)
+router.post(
+  '/inter-venue-transfers/:transferId/receive',
+  checkPermission('inventory-transfers:receive'),
+  simCustodyIdempotency({ required: true }),
+  validateRequest(ReceiveInterVenueTransferSchema),
+  interVenueTransferController.receiveTransfer,
+)
+router.post(
+  '/inter-venue-transfers/:transferId/resolve-variance',
+  checkPermission('inventory-transfers:receive'),
+  simCustodyIdempotency({ required: true }),
+  validateRequest(ResolveInterVenueTransferVarianceSchema),
+  interVenueTransferController.resolveVariance,
+)
 
 // ===========================================
 // INVENTORY TRANSFERS (READ-ONLY AUDIT VIEW)

@@ -35,6 +35,11 @@ describe('AdjustStockSchema — quantity', () => {
     const result = AdjustStockSchema.safeParse({ ...base, body: { ...base.body, quantity: -Infinity } })
     expect(result.success).toBe(false)
   })
+
+  it.each(['TRANSFER_OUT', 'TRANSFER_IN'])('rechaza %s en el endpoint de ajuste manual', type => {
+    const result = AdjustStockSchema.safeParse({ ...base, body: { ...base.body, type } })
+    expect(result.success).toBe(false)
+  })
 })
 
 describe('AdjustProductInventoryStockSchema — quantity', () => {

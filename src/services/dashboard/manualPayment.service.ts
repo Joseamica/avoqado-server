@@ -8,6 +8,7 @@ import { earnPoints } from '@/services/dashboard/loyalty.dashboard.service'
 import { updateCustomerMetrics } from '@/services/dashboard/customer.dashboard.service'
 
 import type { CreateManualPaymentInput } from '@/schemas/dashboard/manualPayment.schema'
+import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
 
 /**
  * Record a manual payment (admin-only). Two modes:
@@ -26,6 +27,7 @@ import type { CreateManualPaymentInput } from '@/schemas/dashboard/manualPayment
  *   - Receipt email
  */
 export async function createManualPayment(venueId: string, staffId: string, input: CreateManualPaymentInput) {
+  if (!input.orderId) await assertVenueSalesEnabled(venueId)
   const amount = new Prisma.Decimal(input.amount)
   const tipAmount = new Prisma.Decimal(input.tipAmount ?? '0')
   const taxAmount = new Prisma.Decimal(input.taxAmount ?? '0')

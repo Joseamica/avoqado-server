@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-07-22T10:34:36.934Z",
+  "generatedAt": "2026-07-23T01:08:54.430Z",
   "assistantTools": [
     "activeShifts",
     "adHocAnalytics",
@@ -8245,6 +8245,7 @@
       "services": [
         "src/services/blumon/blumonApi.service.ts",
         "src/services/dashboard/activity-log.service.ts",
+        "src/services/integrations/angelpay-integrations-api.client.ts",
         "src/services/superadmin/angelpayFullSetup.service.ts",
         "src/services/superadmin/merchantAccount.service.ts",
         "src/services/superadmin/settlementConfiguration.service.ts",
@@ -8298,6 +8299,7 @@
       "services": [
         "src/services/blumon/blumonApi.service.ts",
         "src/services/dashboard/activity-log.service.ts",
+        "src/services/integrations/angelpay-integrations-api.client.ts",
         "src/services/superadmin/angelpayFullSetup.service.ts",
         "src/services/superadmin/merchantAccount.service.ts",
         "src/services/superadmin/settlementConfiguration.service.ts",
@@ -8421,6 +8423,29 @@
       "controller": "merchantAccountController.getPaymentSetupSummary",
       "controllerFile": "src/controllers/superadmin/merchantAccount.controller.ts",
       "services": [],
+      "permissions": [],
+      "inheritedPermissions": [],
+      "auth": [],
+      "schemas": [],
+      "classification": "adminOnly",
+      "scope": "superadmin",
+      "assistantCoverage": "blocked",
+      "assistantTools": [],
+      "notes": [
+        "adminOnly endpoint should not be exposed to venue assistant by default."
+      ]
+    },
+    {
+      "method": "POST",
+      "fullPath": "/api/v1/dashboard/superadmin/merchant-accounts/verify-apikey",
+      "localPath": "/verify-apikey",
+      "mountPrefix": "/api/v1/dashboard/superadmin/merchant-accounts",
+      "routeFile": "src/routes/superadmin/merchantAccount.routes.ts",
+      "controller": "merchantAccountController.verifyAngelPayApiKey",
+      "controllerFile": "src/controllers/superadmin/merchantAccount.controller.ts",
+      "services": [
+        "src/services/integrations/angelpay-integrations-api.client.ts"
+      ],
       "permissions": [],
       "inheritedPermissions": [],
       "auth": [],
@@ -18530,6 +18555,344 @@
       ],
       "schemas": [],
       "classification": "action",
+      "scope": "venue",
+      "assistantCoverage": "partial",
+      "assistantTools": [
+        "inventoryAlerts",
+        "recipeCount",
+        "recipeList",
+        "recipeUsage"
+      ],
+      "notes": [
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
+      ]
+    },
+    {
+      "method": "GET",
+      "fullPath": "/api/v1/dashboard/venues/:venueId/inventory/inter-venue-transfers",
+      "localPath": "/inter-venue-transfers",
+      "mountPrefix": "/api/v1/dashboard/venues/:venueId/inventory",
+      "routeFile": "src/routes/dashboard/inventory.routes.ts",
+      "controller": "interVenueTransferController.listTransfers",
+      "controllerFile": "src/controllers/dashboard/inventory/interVenueTransfer.controller.ts",
+      "services": [
+        "src/services/dashboard/interVenueTransfer.service.ts"
+      ],
+      "permissions": [
+        "inventory-transfers:read"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [
+        "ListInterVenueTransfersSchema"
+      ],
+      "classification": "read",
+      "scope": "venue",
+      "assistantCoverage": "partial",
+      "assistantTools": [
+        "inventoryAlerts",
+        "recipeCount",
+        "recipeList",
+        "recipeUsage"
+      ],
+      "notes": [
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
+      ]
+    },
+    {
+      "method": "POST",
+      "fullPath": "/api/v1/dashboard/venues/:venueId/inventory/inter-venue-transfers",
+      "localPath": "/inter-venue-transfers",
+      "mountPrefix": "/api/v1/dashboard/venues/:venueId/inventory",
+      "routeFile": "src/routes/dashboard/inventory.routes.ts",
+      "controller": "interVenueTransferController.createTransfer",
+      "controllerFile": "src/controllers/dashboard/inventory/interVenueTransfer.controller.ts",
+      "services": [
+        "src/services/dashboard/interVenueTransfer.service.ts"
+      ],
+      "permissions": [
+        "inventory-transfers:request"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [
+        "CreateInterVenueTransferSchema"
+      ],
+      "classification": "action",
+      "scope": "venue",
+      "assistantCoverage": "partial",
+      "assistantTools": [
+        "inventoryAlerts",
+        "recipeCount",
+        "recipeList",
+        "recipeUsage"
+      ],
+      "notes": [
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
+      ]
+    },
+    {
+      "method": "GET",
+      "fullPath": "/api/v1/dashboard/venues/:venueId/inventory/inter-venue-transfers/:transferId",
+      "localPath": "/inter-venue-transfers/:transferId",
+      "mountPrefix": "/api/v1/dashboard/venues/:venueId/inventory",
+      "routeFile": "src/routes/dashboard/inventory.routes.ts",
+      "controller": "interVenueTransferController.getTransfer",
+      "controllerFile": "src/controllers/dashboard/inventory/interVenueTransfer.controller.ts",
+      "services": [
+        "src/services/dashboard/interVenueTransfer.service.ts"
+      ],
+      "permissions": [
+        "inventory-transfers:read"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [
+        "GetInterVenueTransferSchema"
+      ],
+      "classification": "read",
+      "scope": "venue",
+      "assistantCoverage": "partial",
+      "assistantTools": [
+        "inventoryAlerts",
+        "recipeCount",
+        "recipeList",
+        "recipeUsage"
+      ],
+      "notes": [
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
+      ]
+    },
+    {
+      "method": "POST",
+      "fullPath": "/api/v1/dashboard/venues/:venueId/inventory/inter-venue-transfers/:transferId/approve",
+      "localPath": "/inter-venue-transfers/:transferId/approve",
+      "mountPrefix": "/api/v1/dashboard/venues/:venueId/inventory",
+      "routeFile": "src/routes/dashboard/inventory.routes.ts",
+      "controller": "interVenueTransferController.approveTransfer",
+      "controllerFile": "src/controllers/dashboard/inventory/interVenueTransfer.controller.ts",
+      "services": [
+        "src/services/dashboard/interVenueTransfer.service.ts"
+      ],
+      "permissions": [
+        "inventory-transfers:approve"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [
+        "TransferActionSchema"
+      ],
+      "classification": "dangerousMutation",
+      "scope": "venue",
+      "assistantCoverage": "partial",
+      "assistantTools": [
+        "inventoryAlerts",
+        "recipeCount",
+        "recipeList",
+        "recipeUsage"
+      ],
+      "notes": [
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
+      ]
+    },
+    {
+      "method": "POST",
+      "fullPath": "/api/v1/dashboard/venues/:venueId/inventory/inter-venue-transfers/:transferId/cancel",
+      "localPath": "/inter-venue-transfers/:transferId/cancel",
+      "mountPrefix": "/api/v1/dashboard/venues/:venueId/inventory",
+      "routeFile": "src/routes/dashboard/inventory.routes.ts",
+      "controller": "interVenueTransferController.cancelTransfer",
+      "controllerFile": "src/controllers/dashboard/inventory/interVenueTransfer.controller.ts",
+      "services": [
+        "src/services/dashboard/interVenueTransfer.service.ts"
+      ],
+      "permissions": [],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [
+        "TransferDecisionSchema"
+      ],
+      "classification": "dangerousMutation",
+      "scope": "venue",
+      "assistantCoverage": "partial",
+      "assistantTools": [
+        "inventoryAlerts",
+        "recipeCount",
+        "recipeList",
+        "recipeUsage"
+      ],
+      "notes": [
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
+      ]
+    },
+    {
+      "method": "POST",
+      "fullPath": "/api/v1/dashboard/venues/:venueId/inventory/inter-venue-transfers/:transferId/dispatch",
+      "localPath": "/inter-venue-transfers/:transferId/dispatch",
+      "mountPrefix": "/api/v1/dashboard/venues/:venueId/inventory",
+      "routeFile": "src/routes/dashboard/inventory.routes.ts",
+      "controller": "interVenueTransferController.dispatchTransfer",
+      "controllerFile": "src/controllers/dashboard/inventory/interVenueTransfer.controller.ts",
+      "services": [
+        "src/services/dashboard/interVenueTransfer.service.ts"
+      ],
+      "permissions": [
+        "inventory-transfers:dispatch"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [
+        "DispatchInterVenueTransferSchema"
+      ],
+      "classification": "action",
+      "scope": "venue",
+      "assistantCoverage": "partial",
+      "assistantTools": [
+        "inventoryAlerts",
+        "recipeCount",
+        "recipeList",
+        "recipeUsage"
+      ],
+      "notes": [
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
+      ]
+    },
+    {
+      "method": "POST",
+      "fullPath": "/api/v1/dashboard/venues/:venueId/inventory/inter-venue-transfers/:transferId/receive",
+      "localPath": "/inter-venue-transfers/:transferId/receive",
+      "mountPrefix": "/api/v1/dashboard/venues/:venueId/inventory",
+      "routeFile": "src/routes/dashboard/inventory.routes.ts",
+      "controller": "interVenueTransferController.receiveTransfer",
+      "controllerFile": "src/controllers/dashboard/inventory/interVenueTransfer.controller.ts",
+      "services": [
+        "src/services/dashboard/interVenueTransfer.service.ts"
+      ],
+      "permissions": [
+        "inventory-transfers:receive"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [
+        "ReceiveInterVenueTransferSchema"
+      ],
+      "classification": "action",
+      "scope": "venue",
+      "assistantCoverage": "partial",
+      "assistantTools": [
+        "inventoryAlerts",
+        "recipeCount",
+        "recipeList",
+        "recipeUsage"
+      ],
+      "notes": [
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
+      ]
+    },
+    {
+      "method": "POST",
+      "fullPath": "/api/v1/dashboard/venues/:venueId/inventory/inter-venue-transfers/:transferId/reject",
+      "localPath": "/inter-venue-transfers/:transferId/reject",
+      "mountPrefix": "/api/v1/dashboard/venues/:venueId/inventory",
+      "routeFile": "src/routes/dashboard/inventory.routes.ts",
+      "controller": "interVenueTransferController.rejectTransfer",
+      "controllerFile": "src/controllers/dashboard/inventory/interVenueTransfer.controller.ts",
+      "services": [
+        "src/services/dashboard/interVenueTransfer.service.ts"
+      ],
+      "permissions": [
+        "inventory-transfers:approve"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [
+        "TransferDecisionSchema"
+      ],
+      "classification": "action",
+      "scope": "venue",
+      "assistantCoverage": "partial",
+      "assistantTools": [
+        "inventoryAlerts",
+        "recipeCount",
+        "recipeList",
+        "recipeUsage"
+      ],
+      "notes": [
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
+      ]
+    },
+    {
+      "method": "POST",
+      "fullPath": "/api/v1/dashboard/venues/:venueId/inventory/inter-venue-transfers/:transferId/resolve-variance",
+      "localPath": "/inter-venue-transfers/:transferId/resolve-variance",
+      "mountPrefix": "/api/v1/dashboard/venues/:venueId/inventory",
+      "routeFile": "src/routes/dashboard/inventory.routes.ts",
+      "controller": "interVenueTransferController.resolveVariance",
+      "controllerFile": "src/controllers/dashboard/inventory/interVenueTransfer.controller.ts",
+      "services": [
+        "src/services/dashboard/interVenueTransfer.service.ts"
+      ],
+      "permissions": [
+        "inventory-transfers:receive"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [
+        "ResolveInterVenueTransferVarianceSchema"
+      ],
+      "classification": "action",
+      "scope": "venue",
+      "assistantCoverage": "partial",
+      "assistantTools": [
+        "inventoryAlerts",
+        "recipeCount",
+        "recipeList",
+        "recipeUsage"
+      ],
+      "notes": [
+        "Mapped by registered capability heuristic; verify exact contract before enabling broader routing."
+      ]
+    },
+    {
+      "method": "GET",
+      "fullPath": "/api/v1/dashboard/venues/:venueId/inventory/inter-venue-transfers/consolidated",
+      "localPath": "/inter-venue-transfers/consolidated",
+      "mountPrefix": "/api/v1/dashboard/venues/:venueId/inventory",
+      "routeFile": "src/routes/dashboard/inventory.routes.ts",
+      "controller": "interVenueTransferController.consolidatedInventory",
+      "controllerFile": "src/controllers/dashboard/inventory/interVenueTransfer.controller.ts",
+      "services": [
+        "src/services/dashboard/interVenueTransfer.service.ts"
+      ],
+      "permissions": [
+        "inventory-transfers:read"
+      ],
+      "inheritedPermissions": [],
+      "auth": [
+        "authenticateTokenMiddleware"
+      ],
+      "schemas": [
+        "ConsolidatedInterVenueInventorySchema"
+      ],
+      "classification": "read",
       "scope": "venue",
       "assistantCoverage": "partial",
       "assistantTools": [
@@ -37548,6 +37911,7 @@
       "controllerFile": "src/controllers/public/reservation.public.controller.ts",
       "services": [
         "src/jwt.service.ts",
+        "src/services/access/basePlan.service.ts",
         "src/services/dashboard/reservation.dashboard.service.ts",
         "src/services/dashboard/reservationAvailability.service.ts",
         "src/services/dashboard/reservationBranding.service.ts",
@@ -37559,6 +37923,8 @@
         "src/services/payments/providers/money.ts",
         "src/services/reservation/appointmentSlotHold.service.ts",
         "src/services/reservation/external-busy-block.service.ts",
+        "src/services/reservation/publicReservationCapabilities.ts",
+        "src/services/reservation/reservationReturnUrl.ts",
         "src/services/reservation/resolveAppointmentWindow.ts",
         "src/services/superadmin/platformSettings.service.ts",
         "src/services/whatsapp.service.ts"
@@ -37696,7 +38062,6 @@
       "controllerFile": "src/controllers/public/reservation.public.controller.ts",
       "services": [
         "src/services/dashboard/reservation.dashboard.service.ts",
-        "src/services/dashboard/reservationAvailability.service.ts",
         "src/services/dashboard/reservationSettings.service.ts",
         "src/services/reservation/appointmentSlotHold.service.ts"
       ],
@@ -40112,6 +40477,7 @@
       "services": [
         "src/services/blumon/blumonApi.service.ts",
         "src/services/dashboard/activity-log.service.ts",
+        "src/services/integrations/angelpay-integrations-api.client.ts",
         "src/services/superadmin/angelpayFullSetup.service.ts",
         "src/services/superadmin/merchantAccount.service.ts",
         "src/services/superadmin/settlementConfiguration.service.ts",
@@ -40165,6 +40531,7 @@
       "services": [
         "src/services/blumon/blumonApi.service.ts",
         "src/services/dashboard/activity-log.service.ts",
+        "src/services/integrations/angelpay-integrations-api.client.ts",
         "src/services/superadmin/angelpayFullSetup.service.ts",
         "src/services/superadmin/merchantAccount.service.ts",
         "src/services/superadmin/settlementConfiguration.service.ts",
@@ -40263,6 +40630,29 @@
       "controller": "merchantAccountController.getPaymentSetupSummary",
       "controllerFile": "src/controllers/superadmin/merchantAccount.controller.ts",
       "services": [],
+      "permissions": [],
+      "inheritedPermissions": [],
+      "auth": [],
+      "schemas": [],
+      "classification": "adminOnly",
+      "scope": "superadmin",
+      "assistantCoverage": "blocked",
+      "assistantTools": [],
+      "notes": [
+        "adminOnly endpoint should not be exposed to venue assistant by default."
+      ]
+    },
+    {
+      "method": "POST",
+      "fullPath": "/api/v1/superadmin/merchant-accounts/verify-apikey",
+      "localPath": "/verify-apikey",
+      "mountPrefix": "/api/v1/superadmin/merchant-accounts",
+      "routeFile": "src/routes/superadmin/merchantAccount.routes.ts",
+      "controller": "merchantAccountController.verifyAngelPayApiKey",
+      "controllerFile": "src/controllers/superadmin/merchantAccount.controller.ts",
+      "services": [
+        "src/services/integrations/angelpay-integrations-api.client.ts"
+      ],
       "permissions": [],
       "inheritedPermissions": [],
       "auth": [],

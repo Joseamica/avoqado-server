@@ -1,4 +1,4 @@
-import { EntityType, VenueType } from '@prisma/client' // Importa enums directamente de Prisma
+import { EntityType, VenueOperationalRole, VenueType } from '@prisma/client' // Importa enums directamente de Prisma
 import { z } from 'zod'
 import { zTimezone } from '@/utils/sanitizeTimezone'
 
@@ -21,6 +21,12 @@ export const createVenueSchema = z.object({
       .optional(),
 
     type: z.nativeEnum(VenueType, { errorMap: () => ({ message: 'Tipo de venue inválido.' }) }).default(VenueType.RESTAURANT),
+
+    operationalRole: z
+      .nativeEnum(VenueOperationalRole, { errorMap: () => ({ message: 'Rol operativo de sucursal inválido.' }) })
+      .optional()
+      .default(VenueOperationalRole.STORE),
+    salesEnabled: z.boolean({ invalid_type_error: 'salesEnabled debe ser booleano.' }).optional().default(true),
 
     timezone: zTimezone,
     currency: z.string().min(3).max(3).optional().default('MXN'),
