@@ -30,6 +30,16 @@ jest.mock('@/services/dashboard/receipt.dashboard.service', () => ({
   generateAndStoreReceipt: jest.fn().mockResolvedValue({ id: 'receipt-1' }),
 }))
 
+// El recibo digital/autofactura tampoco es objeto de esta suite. payCashOrder ahora
+// resuelve digitalReceipt vía resolveAutofacturaAvailable → loadOrderForCfdiFromDb →
+// prisma.order.findUnique (commit 980db8e0): sin este mock, esa consulta extra se roba
+// el segundo mockResolvedValueOnce destinado al hook de deducción de inventario.
+jest.mock('@/services/tpv/payment.tpv.service', () => ({
+  __esModule: true,
+  mapDigitalReceiptResponse: jest.fn(() => null),
+  resolveAutofacturaAvailable: jest.fn().mockResolvedValue(false),
+}))
+
 // payCashOrder pulls these lazily (dynamic import) for the post-payment
 // deduction hook — jest's module registry intercepts dynamic imports too.
 const deductMock = jest.fn().mockResolvedValue(undefined)
