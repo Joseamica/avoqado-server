@@ -108,7 +108,9 @@ const DEFAULT_TPV_SETTINGS: TpvSettings = {
   kioskDefaultMerchantId: null,
   // Home screen buttons enabled by default
   showQuickPayment: true,
-  showOrderManagement: true,
+  // "Órdenes" hidden by default — order management is restaurant-oriented and off
+  // for the retail/appointment-services ICP; a venue that needs it opts in explicitly.
+  showOrderManagement: false,
   showMessages: true,
   showTrainings: true,
   showCheckout: true,
@@ -119,8 +121,11 @@ const DEFAULT_TPV_SETTINGS: TpvSettings = {
   cellularFailoverBadReadingsThreshold: 3,
   cellularFailoverCooldownSeconds: 60,
   cellularFailoverMinCellHoldSeconds: 120,
-  // La libreta (write-ahead payment ledger) — OFF by default, canary per venue
-  paymentLedgerMode: 'OFF',
+  // La libreta (write-ahead payment ledger) — SHADOW por default. Observacional
+  // (runCatching — no altera el flujo del cobro), validada en device 2.7.1 (máquina de
+  // estados + migración + crash-en-ventana-Mindform), y REVERSIBLE al instante (flip a OFF).
+  // Terminales pre-2.7.1 ignoran el campo y la activan al actualizar; OFF explícito por venue la apaga.
+  paymentLedgerMode: 'SHADOW',
   // Card auth requires our backend by default (legacy behavior — no change until flipped per-venue).
   requireAvoqadoServerForCardPayment: true,
 }
