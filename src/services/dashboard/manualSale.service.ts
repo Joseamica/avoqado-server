@@ -6,6 +6,7 @@ import { serializedInventoryService } from '../serialized-inventory/serializedIn
 import { logAction } from './activity-log.service'
 import { resolveIccid, resolveVenue, resolveStaffByCode, resolveCategory, mapPaymentForm, parseAmount } from './manualSale.resolvers'
 import type { ManualSaleRowInput } from '../../schemas/dashboard/manualSale.schema'
+import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
 
 /**
  * Creates ONE complete, already-approved external SIM sale in a single atomic
@@ -118,150 +119,151 @@ export async function createOneManualSale(
     const result: TxResult = await runTxWithRetry<TxResult>(
       () =>
         prisma.$transaction(async (tx): Promise<TxResult> => {
-      // 1. Resolve the SIM (org-level; markAsSold sets sellingVenueId later).
-      const iccidResult = await resolveIccid(orgId, row.iccid, tx)
-      if (isError(iccidResult)) return { ok: false as const, error: iccidResult.error }
-      const { item } = iccidResult
+          // 1. Resolve the SIM (org-level; markAsSold sets sellingVenueId later).
+          const iccidResult = await resolveIccid(orgId, row.iccid, tx)
+          if (isError(iccidResult)) return { ok: false as const, error: iccidResult.error }
+          const { item } = iccidResult
 
-      // 2. Resolve the rest. On any error → return (tx rolls back; nothing created).
-      const venueResult = await resolveVenue(orgId, row.storeName, row.storeId, tx)
-      if (isError(venueResult)) return { ok: false as const, error: venueResult.error }
-      const { venue } = venueResult
+          // 2. Resolve the rest. On any error → return (tx rolls back; nothing created).
+          const venueResult = await resolveVenue(orgId, row.storeName, row.storeId, tx)
+          if (isError(venueResult)) return { ok: false as const, error: venueResult.error }
+          const { venue } = venueResult
+          await assertVenueSalesEnabled(venue.id, tx)
 
-      const staffResult = await resolveStaffByCode(orgId, row.promoterCode, row.promoterName, tx)
-      if (isError(staffResult)) return { ok: false as const, error: staffResult.error }
-      const sellerStaffId = staffResult.staff.id
+          const staffResult = await resolveStaffByCode(orgId, row.promoterCode, row.promoterName, tx)
+          if (isError(staffResult)) return { ok: false as const, error: staffResult.error }
+          const sellerStaffId = staffResult.staff.id
 
-      // resolveCategory falls back to the SIM's own categoryId when the sheet's
-      // "Tipo de SIM" column is empty (the controller-approved 4th arg).
-      const categoryResult = await resolveCategory(orgId, row.simType, tx, item.categoryId ?? undefined)
-      if (isError(categoryResult)) return { ok: false as const, error: categoryResult.error }
+          // resolveCategory falls back to the SIM's own categoryId when the sheet's
+          // "Tipo de SIM" column is empty (the controller-approved 4th arg).
+          const categoryResult = await resolveCategory(orgId, row.simType, tx, item.categoryId ?? undefined)
+          if (isError(categoryResult)) return { ok: false as const, error: categoryResult.error }
 
-      const { method, amountApplies } = mapPaymentForm(row.paymentForm)
-      const amount = parseAmount(row.amount, amountApplies)
+          const { method, amountApplies } = mapPaymentForm(row.paymentForm)
+          const amount = parseAmount(row.amount, amountApplies)
 
-      // 3. Venue-local calendar day → UTC. STRING + noon anchor (host-tz-safe).
-      const venueTz = (venue as { timezone?: string | null }).timezone ?? VENUE_TIMEZONE_DEFAULT
-      const soldAt = fromZonedTime(`${row.saleDate}T12:00:00`, venueTz)
+          // 3. Venue-local calendar day → UTC. STRING + noon anchor (host-tz-safe).
+          const venueTz = (venue as { timezone?: string | null }).timezone ?? VENUE_TIMEZONE_DEFAULT
+          const soldAt = fromZonedTime(`${row.saleDate}T12:00:00`, venueTz)
 
-      const zero = new Prisma.Decimal(0)
-      const orderNumber = `ORD-EXT-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`
+          const zero = new Prisma.Decimal(0)
+          const orderNumber = `ORD-EXT-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`
 
-      // 4. Order (shadow MANUAL_ENTRY). taxAmount is required on the model.
-      const order = await tx.order.create({
-        data: {
-          venueId: venue.id,
-          orderNumber,
-          type: 'MANUAL_ENTRY',
-          source: 'DASHBOARD_MANUAL',
-          status: 'COMPLETED',
-          paymentStatus: 'PAID',
-          subtotal: amount,
-          taxAmount: zero,
-          total: amount,
-          paidAmount: amount,
-          remainingBalance: zero,
-          createdAt: soldAt,
-          completedAt: soldAt,
-          createdById: actorStaffId,
-          servedById: sellerStaffId,
-          posRawData: {
-            manualSerializedSale: true,
-            recordedByStaffId: actorStaffId,
-            iccid: item.serialNumber,
+          // 4. Order (shadow MANUAL_ENTRY). taxAmount is required on the model.
+          const order = await tx.order.create({
+            data: {
+              venueId: venue.id,
+              orderNumber,
+              type: 'MANUAL_ENTRY',
+              source: 'DASHBOARD_MANUAL',
+              status: 'COMPLETED',
+              paymentStatus: 'PAID',
+              subtotal: amount,
+              taxAmount: zero,
+              total: amount,
+              paidAmount: amount,
+              remainingBalance: zero,
+              createdAt: soldAt,
+              completedAt: soldAt,
+              createdById: actorStaffId,
+              servedById: sellerStaffId,
+              posRawData: {
+                manualSerializedSale: true,
+                recordedByStaffId: actorStaffId,
+                iccid: item.serialNumber,
+                storeName: row.storeName,
+              },
+            },
+          })
+
+          // 5. OrderItem for the SIM. productName from category label; productSku
+          //    carries the serial (matches the TPV serialized sell path).
+          const orderItem = await tx.orderItem.create({
+            data: {
+              orderId: order.id,
+              productName: row.simType?.trim() || 'SIM',
+              quantity: 1,
+              unitPrice: amount,
+              taxAmount: zero,
+              total: amount,
+              productSku: item.serialNumber,
+            },
+          })
+
+          // 6. Flip the SIM to SOLD (org-level → sets sellingVenueId = store venue).
+          //    Pass the STORE venueId as where-it-was-sold + the seller as staffId.
+          //    `skipCustodyCheck`: a manual back-office sale bypasses the TPV custody precheck.
+          //    These SIMs were sold outside the TPV (promoter without a terminal), so they're
+          //    still SUPERVISOR_HELD/ADMIN_HELD and never PROMOTER_HELD — under ENFORCE mode the
+          //    precheck would throw SIM_NOT_ACCEPTED and roll back the whole row. resolveIccid's
+          //    AVAILABLE gate above still blocks re-selling an already-sold SIM.
+          await serializedInventoryService.markAsSold(venue.id, item.serialNumber, orderItem.id, tx, {
+            staffId: sellerStaffId,
+            skipCustodyCheck: true,
+            // Backdate the SIM's soldAt to the real sale day (not the upload day).
+            soldAt,
+          })
+
+          // 7. Payment (COMPLETED, pesos 1:1, no processor fees, net == amount).
+          //    NOTE: `PaymentSource` has no DASHBOARD_MANUAL value (that lives on
+          //    OrderSource, set on the Order above). Mirroring manualPayment.service,
+          //    a dashboard-entered payment uses `OTHER` with the provenance carried
+          //    in `externalSource` + `processorData.manualSerializedSale`.
+          const payment = await tx.payment.create({
+            data: {
+              venueId: venue.id,
+              orderId: order.id,
+              amount,
+              method,
+              source: 'OTHER',
+              externalSource: 'DASHBOARD_MANUAL',
+              status: 'COMPLETED',
+              processedById: actorStaffId,
+              feePercentage: zero,
+              feeAmount: zero,
+              netAmount: amount,
+              processorData: { manualSerializedSale: true },
+              // Backdate to the real sale day so payment-dated reports agree with the sale.
+              createdAt: soldAt,
+            },
+          })
+
+          // 8. SaleVerification created directly COMPLETED (NOT createPendingSaleVerification,
+          //    which hardcodes PENDING). Reviewer = the uploading actor, at soldAt.
+          const normalizedIccid = item.serialNumber
+          const verification = await tx.saleVerification.create({
+            data: {
+              venueId: venue.id,
+              paymentId: payment.id,
+              staffId: sellerStaffId,
+              photos: [],
+              scannedProducts: [],
+              status: 'COMPLETED',
+              inventoryDeducted: false,
+              isPortabilidad: /portabilidad/i.test(row.saleType),
+              serialNumbers: [normalizedIccid],
+              // Backdate to the real sale day (row.saleDate). The org sales list + weekly/monthly
+              // reports GROUP BY SaleVerification.createdAt, so leaving it at now() files a May
+              // sale under July — the bug Isaac reported. Mirrors Order.createdAt above.
+              createdAt: soldAt,
+              reviewedById: actorStaffId,
+              reviewedAt: soldAt,
+            },
+          })
+
+          // 9. Return success + the audit payload. Audit itself runs OUTSIDE the tx
+          //    (below) so an audit failure can't roll back the sale.
+          const audit: ManualSaleAuditPayload = {
+            serializedItemId: item.id,
+            serialNumber: item.serialNumber,
+            fromCustodyState: (item as { custodyState?: string | null }).custodyState ?? null,
+            fromStaffId: (item as { assignedSupervisorId?: string | null }).assignedSupervisorId ?? null,
+            sellerStaffId,
             storeName: row.storeName,
-          },
-        },
-      })
+            amount: amount.toString(),
+          }
 
-      // 5. OrderItem for the SIM. productName from category label; productSku
-      //    carries the serial (matches the TPV serialized sell path).
-      const orderItem = await tx.orderItem.create({
-        data: {
-          orderId: order.id,
-          productName: row.simType?.trim() || 'SIM',
-          quantity: 1,
-          unitPrice: amount,
-          taxAmount: zero,
-          total: amount,
-          productSku: item.serialNumber,
-        },
-      })
-
-      // 6. Flip the SIM to SOLD (org-level → sets sellingVenueId = store venue).
-      //    Pass the STORE venueId as where-it-was-sold + the seller as staffId.
-      //    `skipCustodyCheck`: a manual back-office sale bypasses the TPV custody precheck.
-      //    These SIMs were sold outside the TPV (promoter without a terminal), so they're
-      //    still SUPERVISOR_HELD/ADMIN_HELD and never PROMOTER_HELD — under ENFORCE mode the
-      //    precheck would throw SIM_NOT_ACCEPTED and roll back the whole row. resolveIccid's
-      //    AVAILABLE gate above still blocks re-selling an already-sold SIM.
-      await serializedInventoryService.markAsSold(venue.id, item.serialNumber, orderItem.id, tx, {
-        staffId: sellerStaffId,
-        skipCustodyCheck: true,
-        // Backdate the SIM's soldAt to the real sale day (not the upload day).
-        soldAt,
-      })
-
-      // 7. Payment (COMPLETED, pesos 1:1, no processor fees, net == amount).
-      //    NOTE: `PaymentSource` has no DASHBOARD_MANUAL value (that lives on
-      //    OrderSource, set on the Order above). Mirroring manualPayment.service,
-      //    a dashboard-entered payment uses `OTHER` with the provenance carried
-      //    in `externalSource` + `processorData.manualSerializedSale`.
-      const payment = await tx.payment.create({
-        data: {
-          venueId: venue.id,
-          orderId: order.id,
-          amount,
-          method,
-          source: 'OTHER',
-          externalSource: 'DASHBOARD_MANUAL',
-          status: 'COMPLETED',
-          processedById: actorStaffId,
-          feePercentage: zero,
-          feeAmount: zero,
-          netAmount: amount,
-          processorData: { manualSerializedSale: true },
-          // Backdate to the real sale day so payment-dated reports agree with the sale.
-          createdAt: soldAt,
-        },
-      })
-
-      // 8. SaleVerification created directly COMPLETED (NOT createPendingSaleVerification,
-      //    which hardcodes PENDING). Reviewer = the uploading actor, at soldAt.
-      const normalizedIccid = item.serialNumber
-      const verification = await tx.saleVerification.create({
-        data: {
-          venueId: venue.id,
-          paymentId: payment.id,
-          staffId: sellerStaffId,
-          photos: [],
-          scannedProducts: [],
-          status: 'COMPLETED',
-          inventoryDeducted: false,
-          isPortabilidad: /portabilidad/i.test(row.saleType),
-          serialNumbers: [normalizedIccid],
-          // Backdate to the real sale day (row.saleDate). The org sales list + weekly/monthly
-          // reports GROUP BY SaleVerification.createdAt, so leaving it at now() files a May
-          // sale under July — the bug Isaac reported. Mirrors Order.createdAt above.
-          createdAt: soldAt,
-          reviewedById: actorStaffId,
-          reviewedAt: soldAt,
-        },
-      })
-
-      // 9. Return success + the audit payload. Audit itself runs OUTSIDE the tx
-      //    (below) so an audit failure can't roll back the sale.
-      const audit: ManualSaleAuditPayload = {
-        serializedItemId: item.id,
-        serialNumber: item.serialNumber,
-        fromCustodyState: (item as { custodyState?: string | null }).custodyState ?? null,
-        fromStaffId: (item as { assignedSupervisorId?: string | null }).assignedSupervisorId ?? null,
-        sellerStaffId,
-        storeName: row.storeName,
-        amount: amount.toString(),
-      }
-
-      return { ok: true, orderId: order.id, verificationId: verification.id, venueId: venue.id, audit }
+          return { ok: true, orderId: order.id, verificationId: verification.id, venueId: venue.id, audit }
         }),
       row.iccid,
     )
