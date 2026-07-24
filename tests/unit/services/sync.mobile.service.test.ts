@@ -23,9 +23,21 @@ jest.mock('@/utils/prismaClient', () => ({
   },
 }))
 
-jest.mock('@/services/tpv/table.tpv.service', () => ({ assignTable: jest.fn() }))
+jest.mock('@/services/tpv/table.tpv.service', () => ({
+  assignTable: jest.fn(),
+  moveOrderToTable: jest.fn(),
+  assignOrderWaiter: jest.fn(),
+  clearTable: jest.fn(),
+}))
 jest.mock('@/services/tpv/order.tpv.service', () => ({ addItemsToOrder: jest.fn() }))
-jest.mock('@/services/mobile/order.mobile.service', () => ({ payCashOrder: jest.fn() }))
+jest.mock('@/services/mobile/order.mobile.service', () => ({
+  payCashOrder: jest.fn(),
+  applyOrderDiscount: jest.fn(),
+  updateOrderDetails: jest.fn(),
+  cancelOrder: jest.fn(),
+}))
+jest.mock('@/services/mobile/comp-item.mobile.service', () => ({ compWholeOrder: jest.fn() }))
+jest.mock('@/services/mobile/service-charge.mobile.service', () => ({ applyServiceCharge: jest.fn() }))
 jest.mock('@/middlewares/checkFeatureAccess.middleware', () => ({ hasFeatureAccess: jest.fn() }))
 jest.mock('@/middlewares/checkTableOwnership.middleware', () => ({
   isTableOwnershipEnforced: jest.fn(),
@@ -164,6 +176,49 @@ describe('sync.mobile.service processIntents', () => {
       baseParams([{ id: 'i10', type: 'PAY_CASH', payload: { orderId: 'order-6', amountCents: 100 } }]),
     )
     expect(acks[0]).toMatchObject({ status: 'REJECTED', message: 'La orden ya está pagada' })
+  })
+
+  it('APPLY_DISCOUNT delega con orderId resuelto y devuelve versión fresca', async () => {
+    ;(prisma.posSyncIntent.findFirst as jest.Mock).mockResolvedValue({ resultJson: { orderId: 'order-10' } })
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 4 })
+    const acks = await processIntents(
+      baseParams([{ id: 'i12', type: 'APPLY_DISCOUNT', payload: { localOrderId: 'local-D', discountId: 'disc-1' } }]),
+    )
+    expect(orderMobileService.applyOrderDiscount).toHaveBeenCalledWith(VENUE, 'order-10', 'disc-1', STAFF)
+    expect(acks[0]).toMatchObject({ status: 'ACKED', result: { orderId: 'order-10', version: 4 } })
+  })
+
+  it('MOVE_ORDER a mesa que se ocupó mientras tanto → REJECTED de negocio, no crash', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 1, tableId: 't1', servedById: STAFF })
+    const tableService = jest.requireMock('@/services/tpv/table.tpv.service')
+    ;(tableService.moveOrderToTable as jest.Mock).mockRejectedValue(new Error('La mesa destino está ocupada'))
+    const acks = await processIntents(
+      baseParams([{ id: 'i13', type: 'MOVE_ORDER', payload: { orderId: 'order-11', targetTableId: 't9' } }]),
+    )
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', message: 'La mesa destino está ocupada' })
+  })
+
+  it('CLEAR_TABLE de mesa ajena con propiedad encendida → TABLE_OWNED_BY_OTHER', async () => {
+    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({
+      servedById: 'staff-otro',
+      servedBy: { firstName: 'Juan', lastName: 'Pérez' },
+    })
+    const acks = await processIntents(baseParams([{ id: 'i14', type: 'CLEAR_TABLE', payload: { tableId: 't1' } }]))
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'TABLE_OWNED_BY_OTHER' })
+  })
+
+  it('UPDATE_DETAILS y CANCEL_ORDER delegan en el mismo servicio que online', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 2, tableId: 't1', servedById: STAFF })
+    const acks = await processIntents(
+      baseParams([
+        { id: 'i15', seq: 1, type: 'UPDATE_DETAILS', payload: { orderId: 'order-12', name: 'Cumpleaños', covers: 6 } },
+        { id: 'i16', seq: 2, type: 'CANCEL_ORDER', payload: { orderId: 'order-12', reason: 'Cliente se fue' } },
+      ]),
+    )
+    expect(orderMobileService.updateOrderDetails).toHaveBeenCalled()
+    expect(orderMobileService.cancelOrder).toHaveBeenCalledWith(VENUE, 'order-12', 'Cliente se fue', STAFF)
+    expect(acks.map(a => a.status)).toEqual(['ACKED', 'ACKED'])
   })
 
   it('carrera P2002 al persistir → devuelve el ack del ganador', async () => {

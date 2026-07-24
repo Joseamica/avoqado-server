@@ -35,7 +35,18 @@ import * as orderMobileService from './order.mobile.service'
 
 // ─── Contrato (espejo EXACTO por nombre en iOS/Android) ─────────────────────
 
-export type SyncIntentType = 'OPEN_TABLE' | 'ADD_ITEMS' | 'PAY_CASH'
+export type SyncIntentType =
+  | 'OPEN_TABLE'
+  | 'ADD_ITEMS'
+  | 'PAY_CASH'
+  | 'APPLY_DISCOUNT'
+  | 'APPLY_SERVICE_CHARGE'
+  | 'COMP_ORDER'
+  | 'UPDATE_DETAILS'
+  | 'CANCEL_ORDER'
+  | 'MOVE_ORDER'
+  | 'ASSIGN_ORDER'
+  | 'CLEAR_TABLE'
 
 export interface SyncIntentInput {
   /** UUID del intent generado en el dispositivo (= idempotencyKey). */
@@ -60,7 +71,19 @@ export interface SyncIntentAck {
   result?: Record<string, unknown>
 }
 
-const KNOWN_TYPES: SyncIntentType[] = ['OPEN_TABLE', 'ADD_ITEMS', 'PAY_CASH']
+const KNOWN_TYPES: SyncIntentType[] = [
+  'OPEN_TABLE',
+  'ADD_ITEMS',
+  'PAY_CASH',
+  'APPLY_DISCOUNT',
+  'APPLY_SERVICE_CHARGE',
+  'COMP_ORDER',
+  'UPDATE_DETAILS',
+  'CANCEL_ORDER',
+  'MOVE_ORDER',
+  'ASSIGN_ORDER',
+  'CLEAR_TABLE',
+]
 
 // ─── Entrada principal ───────────────────────────────────────────────────────
 
@@ -169,6 +192,16 @@ async function applyIntent(ctx: {
         return await applyAddItems(venueId, staffId, intent, localRefMap)
       case 'PAY_CASH':
         return await applyPayCash(venueId, staffId, intent, localRefMap)
+      case 'APPLY_DISCOUNT':
+      case 'APPLY_SERVICE_CHARGE':
+      case 'COMP_ORDER':
+      case 'UPDATE_DETAILS':
+      case 'CANCEL_ORDER':
+      case 'MOVE_ORDER':
+      case 'ASSIGN_ORDER':
+        return await applyOrderMutation(venueId, staffId, intent, localRefMap)
+      case 'CLEAR_TABLE':
+        return await applyClearTable(venueId, staffId, intent)
     }
   } catch (error: any) {
     // Error de negocio del servicio delegado → REJECTED estructurado (jamás
@@ -352,6 +385,108 @@ async function applyPayCash(
       digitalReceipt: payment.digitalReceipt ?? null,
     },
   }
+}
+
+/**
+ * Mutaciones de UNA orden (descuentos, cargos por servicio, cortesía de
+ * cuenta, detalles, cancelar, mover, asignar) — todas comparten el patrón:
+ * TABLE_SERVICE gating + resolver orderId (local o real) + regla de propiedad
+ * + delegar en el MISMO servicio que la ruta online. Riesgo aceptado y
+ * acotado: p.ej. MOVE_ORDER a una mesa que se ocupó mientras tanto → el
+ * servicio lo rechaza → REJECTED en cuarentena visible (jamás pisa al otro).
+ */
+async function applyOrderMutation(
+  venueId: string,
+  staffId: string,
+  intent: SyncIntentInput,
+  localRefMap: Map<string, string>,
+): Promise<SyncIntentAck> {
+  await assertTableService(venueId)
+  const orderId = await resolveOrderId(venueId, intent.payload, localRefMap)
+  if (!orderId) {
+    return { id: intent.id, status: 'REJECTED', errorCode: 'INVALID_PAYLOAD', message: `${intent.type} requiere orderId/localOrderId` }
+  }
+  await assertOwnership(venueId, staffId, orderId)
+  const p = intent.payload
+
+  switch (intent.type) {
+    case 'APPLY_DISCOUNT': {
+      const discountId = typeof p.discountId === 'string' ? p.discountId : null
+      if (!discountId) return invalid(intent, 'APPLY_DISCOUNT requiere discountId')
+      await orderMobileService.applyOrderDiscount(venueId, orderId, discountId, staffId)
+      break
+    }
+    case 'APPLY_SERVICE_CHARGE': {
+      const serviceChargeId = typeof p.serviceChargeId === 'string' ? p.serviceChargeId : null
+      if (!serviceChargeId) return invalid(intent, 'APPLY_SERVICE_CHARGE requiere serviceChargeId')
+      const { applyServiceCharge } = await import('./service-charge.mobile.service')
+      await applyServiceCharge(venueId, orderId, serviceChargeId, staffId)
+      break
+    }
+    case 'COMP_ORDER': {
+      const reason = typeof p.reason === 'string' && p.reason.trim().length > 0 ? p.reason : null
+      if (!reason) return invalid(intent, 'COMP_ORDER requiere reason')
+      const { compWholeOrder } = await import('./comp-item.mobile.service')
+      await compWholeOrder({ venueId, orderId, reason, staffId })
+      break
+    }
+    case 'UPDATE_DETAILS': {
+      await orderMobileService.updateOrderDetails(venueId, orderId, {
+        name: typeof p.name === 'string' ? p.name : undefined,
+        notes: typeof p.notes === 'string' ? p.notes : undefined,
+        covers: typeof p.covers === 'number' ? p.covers : undefined,
+        customerId: typeof p.customerId === 'string' ? p.customerId : undefined,
+        orderType: typeof p.orderType === 'string' ? p.orderType : undefined,
+      } as any)
+      break
+    }
+    case 'CANCEL_ORDER': {
+      await orderMobileService.cancelOrder(venueId, orderId, typeof p.reason === 'string' ? p.reason : undefined, staffId)
+      break
+    }
+    case 'MOVE_ORDER': {
+      const targetTableId = typeof p.targetTableId === 'string' ? p.targetTableId : null
+      if (!targetTableId) return invalid(intent, 'MOVE_ORDER requiere targetTableId')
+      await tableService.moveOrderToTable(venueId, orderId, targetTableId)
+      break
+    }
+    case 'ASSIGN_ORDER': {
+      const newStaffId = typeof p.staffId === 'string' ? p.staffId : null
+      if (!newStaffId) return invalid(intent, 'ASSIGN_ORDER requiere staffId')
+      await tableService.assignOrderWaiter(venueId, orderId, newStaffId)
+      break
+    }
+  }
+
+  const current = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { version: true } })
+  return { id: intent.id, status: 'ACKED', result: { orderId, version: current?.version ?? undefined } }
+}
+
+/** CLEAR_TABLE — liberar mesa; el server rechaza si tiene cuenta sin pagar. */
+async function applyClearTable(venueId: string, staffId: string, intent: SyncIntentInput): Promise<SyncIntentAck> {
+  await assertTableService(venueId)
+  const tableId = typeof intent.payload.tableId === 'string' ? intent.payload.tableId : null
+  if (!tableId) return invalid(intent, 'CLEAR_TABLE requiere tableId')
+
+  // Propiedad de mesa: liberar la mesa de otro requiere override (misma regla
+  // que el middleware con source='table').
+  if (await isTableOwnershipEnforced(venueId)) {
+    const foreign = await prisma.order.findFirst({
+      where: { venueId, tableId, status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] }, servedById: { not: staffId } },
+      select: { servedBy: { select: { firstName: true, lastName: true } } },
+    })
+    if (foreign && !(await staffCanManageAllTables(staffId, venueId))) {
+      const ownerName = foreign.servedBy ? `${foreign.servedBy.firstName} ${foreign.servedBy.lastName}`.trim() : 'otro mesero'
+      return { id: intent.id, status: 'REJECTED', errorCode: 'TABLE_OWNED_BY_OTHER', message: `Solo ${ownerName} puede modificar esta mesa` }
+    }
+  }
+
+  await tableService.clearTable(venueId, tableId)
+  return { id: intent.id, status: 'ACKED', result: { tableId } }
+}
+
+function invalid(intent: SyncIntentInput, message: string): SyncIntentAck {
+  return { id: intent.id, status: 'REJECTED', errorCode: 'INVALID_PAYLOAD', message }
 }
 
 // ─── Estado de sync (dashboard/MCP) ─────────────────────────────────────────
