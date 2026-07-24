@@ -171,6 +171,9 @@ export interface OrderDetailResponse {
   tipAmount: number
   total: number
   staffName: string | null
+  /** Additive: dueño del cheque (servedById) — el POS lo compara contra su
+   *  staffId para pintar read-only cuando enforceTableOwnership está encendido. */
+  waiter: { id: string; name: string } | null
   customerName: string | null
   /** Attached customer (Cliente tab) — needed to read their loyalty balance. */
   customerId: string | null
@@ -869,6 +872,13 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
     tipAmount: Number(flattenedOrder.tipAmount),
     total: Number(flattenedOrder.total),
     staffName: flattenedOrder.servedBy ? `${flattenedOrder.servedBy.firstName} ${flattenedOrder.servedBy.lastName}`.trim() : null,
+    // Additive: dueño del cheque con id — para la UI read-only de propiedad de mesa.
+    waiter: flattenedOrder.servedById
+      ? {
+          id: flattenedOrder.servedById,
+          name: flattenedOrder.servedBy ? `${flattenedOrder.servedBy.firstName} ${flattenedOrder.servedBy.lastName}`.trim() : '',
+        }
+      : null,
     customerName: flattenedOrder.customerName,
     // The ATTACHED customer (Cliente tab). Additive: the POS needs it to read
     // that customer's loyalty balance for "Recompensas".
