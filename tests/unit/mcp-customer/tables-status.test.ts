@@ -14,7 +14,11 @@ jest.mock('@/mcp/guard', () => ({
 }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
-  default: { table: { findMany: (...a: unknown[]) => mockTableFind(...(a as [])) } },
+  default: {
+    table: { findMany: (...a: unknown[]) => mockTableFind(...(a as [])) },
+    // Propiedad de mesa: tables_status ahora expone enforceTableOwnership.
+    venueSettings: { findUnique: jest.fn().mockResolvedValue({ enforceTableOwnership: false }) },
+  },
 }))
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
