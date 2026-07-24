@@ -48,6 +48,7 @@ export type SyncIntentType =
   | 'ASSIGN_ORDER'
   | 'CLEAR_TABLE'
   | 'SPLIT_ORDER'
+  | 'SPLIT_BY_SEAT'
   | 'MERGE_ORDERS'
 
 export interface SyncIntentInput {
@@ -96,6 +97,7 @@ const KNOWN_TYPES: SyncIntentType[] = [
   'ASSIGN_ORDER',
   'CLEAR_TABLE',
   'SPLIT_ORDER',
+  'SPLIT_BY_SEAT',
   'MERGE_ORDERS',
 ]
 
@@ -233,6 +235,8 @@ async function applyIntent(ctx: {
         return await applyClearTable(venueId, staffId, intent)
       case 'SPLIT_ORDER':
         return await applySplitOrder(venueId, staffId, intent, localRefMap)
+      case 'SPLIT_BY_SEAT':
+        return await applySplitBySeat(venueId, staffId, intent, localRefMap)
       case 'MERGE_ORDERS':
         return await applyMergeOrders(venueId, staffId, intent, localRefMap)
     }
@@ -636,6 +640,57 @@ async function applySplitOrder(
       createdVersion: result.created.version,
       ...(newLocalOrderId ? { newLocalOrderId } : {}),
     },
+  }
+}
+
+/**
+ * SPLIT_BY_SEAT — payload: {
+ *   orderId | localOrderId,
+ *   seatLocalOrderIds?: { "<asiento>": "<uuid local>" }   // asiento → id local
+ * }
+ *
+ * Divide en un cheque POR ASIENTO, atómico (o se parte completa, o no se parte).
+ * El asiento más bajo se queda en la cuenta original.
+ *
+ * 🔑 Por qué el mapa asiento→id local: esto crea N cheques de golpe, y cada uno
+ * puede recibir un cobro después. Con un solo id local no alcanzaría para saber
+ * a cuál aterriza cada pago. El dispositivo genera un uuid por asiento ANTES de
+ * enviar; aquí mapeamos cada cheque creado al uuid de SU asiento. Los uuids de
+ * asientos que el server no llegó a crear (p.ej. el más bajo, que se queda)
+ * simplemente no se mapean — sobrar es inofensivo, faltar no.
+ */
+async function applySplitBySeat(
+  venueId: string,
+  staffId: string,
+  intent: SyncIntentInput,
+  localRefMap: Map<string, string>,
+): Promise<SyncIntentAck> {
+  await assertTableService(venueId)
+  const orderId = await resolveOrderId(venueId, intent.payload, localRefMap)
+  if (!orderId) return invalid(intent, 'SPLIT_BY_SEAT requiere orderId/localOrderId')
+  await assertOwnership(venueId, staffId, orderId)
+
+  const seatMapRaw = intent.payload.seatLocalOrderIds
+  const seatMap: Record<string, string> =
+    seatMapRaw && typeof seatMapRaw === 'object' && !Array.isArray(seatMapRaw) ? (seatMapRaw as Record<string, string>) : {}
+
+  const result = await orderMobileService.splitOrderBySeat(venueId, orderId, staffId)
+
+  const mapped: Array<{ seat: number; orderId: string; localOrderId?: string }> = []
+  for (const created of result.created) {
+    const localOrderId = seatMap[String(created.seat)]
+    if (typeof localOrderId === 'string' && localOrderId.length > 0) {
+      localRefMap.set(localOrderId, created.id)
+      mapped.push({ seat: created.seat, orderId: created.id, localOrderId })
+    } else {
+      mapped.push({ seat: created.seat, orderId: created.id })
+    }
+  }
+
+  return {
+    id: intent.id,
+    status: 'ACKED',
+    result: { orderId, sourceSeat: result.source.seat, created: mapped },
   }
 }
 

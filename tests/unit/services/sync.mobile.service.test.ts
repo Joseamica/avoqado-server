@@ -37,6 +37,7 @@ jest.mock('@/services/mobile/order.mobile.service', () => ({
   updateOrderDetails: jest.fn(),
   cancelOrder: jest.fn(),
   splitOrderItems: jest.fn(),
+  splitOrderBySeat: jest.fn(),
   mergeOrders: jest.fn(),
 }))
 jest.mock('@/services/mobile/comp-item.mobile.service', () => ({ compWholeOrder: jest.fn() }))
@@ -410,6 +411,80 @@ describe('sync.mobile.service processIntents', () => {
 
     expect(acks[0].status).toBe('REJECTED')
     expect(acks[0].message).toContain('Quita los descuentos')
+  })
+
+  it('SPLIT_BY_SEAT mapea CADA cheque creado al id local de SU asiento', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 2, tableId: 't1', servedById: STAFF })
+    ;(orderMobileService.splitOrderBySeat as jest.Mock).mockResolvedValue({
+      source: { id: 'order-70', orderNumber: 'A-1', total: 50, seat: 1 },
+      created: [
+        { id: 'order-71', orderNumber: 'A-1-S2', seat: 2, total: 30 },
+        { id: 'order-72', orderNumber: 'A-1-S3', seat: 3, total: 20 },
+      ],
+    })
+
+    const acks = await processIntents(
+      baseParams([
+        {
+          id: 'i50',
+          seq: 1,
+          type: 'SPLIT_BY_SEAT',
+          payload: {
+            orderId: 'order-70',
+            // El asiento 1 se queda en la cuenta original: su uuid sobra y no
+            // se mapea. Sobrar es inofensivo; faltar no.
+            seatLocalOrderIds: { '1': 'local-s1', '2': 'local-s2', '3': 'local-s3' },
+          },
+        },
+        // Cada asiento se cobra por separado, cada uno por SU id local.
+        { id: 'i51', seq: 2, type: 'PAY_CASH', payload: { localOrderId: 'local-s2', amountCents: 3000 } },
+        { id: 'i52', seq: 3, type: 'PAY_CASH', payload: { localOrderId: 'local-s3', amountCents: 2000 } },
+      ]),
+    )
+
+    expect(acks.map(a => a.status)).toEqual(['ACKED', 'ACKED', 'ACKED'])
+    // Cada cobro aterrizó en el cheque de SU asiento — no se cruzaron.
+    expect(orderMobileService.payCashOrder).toHaveBeenNthCalledWith(1, VENUE, 'order-71', expect.objectContaining({ amount: 3000 }))
+    expect(orderMobileService.payCashOrder).toHaveBeenNthCalledWith(2, VENUE, 'order-72', expect.objectContaining({ amount: 2000 }))
+  })
+
+  it('mesa abierta OFFLINE: abrir → ronda → separar por externalId, todo por ids locales', async () => {
+    ;(tableService.assignTable as jest.Mock).mockResolvedValue({
+      order: { id: 'order-80', orderNumber: 'A-20', version: 1 },
+      isNewOrder: true,
+    })
+    ;(orderTpvService.addItemsToOrder as jest.Mock).mockResolvedValue({ id: 'order-80', version: 2 })
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 2, tableId: 't9', servedById: STAFF })
+    // El reducer inyectó `sync:i61:0` y `sync:i61:1` al aplicar el ADD_ITEMS;
+    // el dispositivo los conoce porque son deterministas.
+    ;(prisma.orderItem.findMany as jest.Mock).mockResolvedValue([{ id: 'item-real-A' }])
+    ;(orderMobileService.splitOrderItems as jest.Mock).mockResolvedValue({
+      source: { id: 'order-80', orderNumber: 'A-20', total: 60, version: 3 },
+      created: { id: 'order-81', orderNumber: 'A-21', total: 40, version: 1 },
+    })
+
+    const acks = await processIntents(
+      baseParams([
+        { id: 'i60', seq: 1, type: 'OPEN_TABLE', payload: { tableId: 't9', localOrderId: 'local-Z' } },
+        { id: 'i61', seq: 2, type: 'ADD_ITEMS', payload: { localOrderId: 'local-Z', items: [{ productId: 'p1', quantity: 1 }] } },
+        {
+          id: 'i62',
+          seq: 3,
+          type: 'SPLIT_ORDER',
+          payload: { localOrderId: 'local-Z', itemRefs: [{ externalId: 'sync:i61:0' }], newLocalOrderId: 'local-Z-split' },
+        },
+      ]),
+    )
+
+    expect(acks.map(a => a.status)).toEqual(['ACKED', 'ACKED', 'ACKED'])
+    // El split resolvió el cheque por su id LOCAL (nunca existió un id de server
+    // en el dispositivo) y los items por su externalId.
+    expect(orderMobileService.splitOrderItems).toHaveBeenCalledWith(VENUE, 'order-80', ['item-real-A'], STAFF)
+    expect(prisma.orderItem.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ orderId: 'order-80', OR: [{ externalId: { in: ['sync:i61:0'] } }] }),
+      }),
+    )
   })
 
   it('carrera P2002 al persistir → devuelve el ack del ganador', async () => {

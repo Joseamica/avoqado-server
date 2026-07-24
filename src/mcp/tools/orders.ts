@@ -281,7 +281,7 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'pos_sync_status',
-    'Offline-first: últimos intents que los POS del venue reprodujeron al reconectar (replay del outbox offline) — tipo (OPEN_TABLE/ADD_ITEMS/PAY_CASH, mutaciones de cuenta como APPLY_DISCOUNT/MOVE_ORDER/CANCEL_ORDER, y SPLIT_ORDER/MERGE_ORDERS para separar o fusionar cheques), dispositivo, ACKED / REJECTED con su errorCode / RETRY (transitorio, se reintenta solo). Answers "¿qué se sincronizó cuando volvió el internet? ¿algún cobro/comanda offline fue rechazado?". Pass venueId.',
+    'Offline-first: últimos intents que los POS del venue reprodujeron al reconectar (replay del outbox offline) — tipo (OPEN_TABLE/ADD_ITEMS/PAY_CASH, mutaciones de cuenta como APPLY_DISCOUNT/MOVE_ORDER/CANCEL_ORDER, y SPLIT_ORDER/SPLIT_BY_SEAT/MERGE_ORDERS para separar, dividir por asiento o fusionar cheques), dispositivo, ACKED / REJECTED con su errorCode / RETRY (transitorio, se reintenta solo). Answers "¿qué se sincronizó cuando volvió el internet? ¿algún cobro/comanda offline fue rechazado?". Pass venueId.',
     {
       venueId: z.string().describe('Venue cuyos replays offline leer (must be in your scope)'),
       limit: z.number().int().min(1).max(200).optional().describe('Máximo de intents (default 50)'),
