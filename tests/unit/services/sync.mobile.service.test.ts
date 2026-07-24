@@ -125,8 +125,51 @@ describe('sync.mobile.service processIntents', () => {
         { id: 'i6', seq: 2, type: 'ADD_ITEMS', payload: { localOrderId: 'local-B', items: [{ productId: 'p1', quantity: 2 }] } },
       ]),
     )
-    expect(orderTpvService.addItemsToOrder).toHaveBeenCalledWith(VENUE, 'order-2', [{ productId: 'p1', quantity: 2 }], 7, true)
+    // externalId determinista inyectado por el reducer para idempotencia de ronda.
+    expect(orderTpvService.addItemsToOrder).toHaveBeenCalledWith(
+      VENUE,
+      'order-2',
+      [{ productId: 'p1', quantity: 2, externalId: 'sync:i6:0' }],
+      7,
+      true,
+    )
     expect(acks[1]).toMatchObject({ status: 'ACKED', result: { orderId: 'order-2', version: 8 } })
+  })
+
+  it('VERSION_CONFLICT en ADD_ITEMS → RETRY (no se pierde), corta el batch, no persiste', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 5, status: 'PENDING' })
+    const conflict: any = new Error('La orden cambió en otro dispositivo')
+    conflict.code = 'VERSION_CONFLICT'
+    ;(orderTpvService.addItemsToOrder as jest.Mock).mockRejectedValue(conflict)
+
+    const acks = await processIntents(
+      baseParams([
+        { id: 'iA', seq: 1, type: 'ADD_ITEMS', payload: { orderId: 'order-1', items: [{ productId: 'p1', quantity: 1 }] } },
+        { id: 'iB', seq: 2, type: 'ADD_ITEMS', payload: { orderId: 'order-1', items: [{ productId: 'p2', quantity: 1 }] } },
+      ]),
+    )
+    // El primero es RETRY; el batch se corta ANTES del segundo (FIFO).
+    expect(acks).toHaveLength(1)
+    expect(acks[0]).toMatchObject({ id: 'iA', status: 'RETRY', errorCode: 'VERSION_CONFLICT' })
+    // RETRY NO se persiste — un próximo replay lo re-drive.
+    expect(prisma.posSyncIntent.create).not.toHaveBeenCalled()
+  })
+
+  it('el batch se ordena por seq (defensivo): OPEN_TABLE antes que su ADD_ITEMS aunque lleguen invertidos', async () => {
+    ;(tableService.assignTable as jest.Mock).mockResolvedValue({ order: { id: 'order-9', version: 1 }, isNewOrder: true })
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 1, status: 'PENDING' })
+    ;(orderTpvService.addItemsToOrder as jest.Mock).mockResolvedValue({ version: 2, total: 50 })
+    // Llegan INVERTIDOS: ADD_ITEMS (seq 2) primero, OPEN_TABLE (seq 1) después.
+    const acks = await processIntents(
+      baseParams([
+        { id: 'iItems', seq: 2, type: 'ADD_ITEMS', payload: { localOrderId: 'local-Z', items: [{ productId: 'p1', quantity: 1 }] } },
+        { id: 'iOpen', seq: 1, type: 'OPEN_TABLE', payload: { tableId: 't1', localOrderId: 'local-Z' } },
+      ]),
+    )
+    // El OPEN_TABLE se aplicó PRIMERO (por seq), así el ADD_ITEMS resolvió su orderId.
+    expect(acks.find(a => a.id === 'iOpen')?.status).toBe('ACKED')
+    expect(acks.find(a => a.id === 'iItems')?.status).toBe('ACKED')
+    expect(orderTpvService.addItemsToOrder).toHaveBeenCalled()
   })
 
   it('ADD_ITEMS en request separado resuelve localOrderId desde PosSyncIntent', async () => {
@@ -166,7 +209,12 @@ describe('sync.mobile.service processIntents', () => {
     const acks = await processIntents(
       baseParams([{ id: 'i9', type: 'PAY_CASH', payload: { orderId: 'order-5', amountCents: 25000, tipCents: 2500 } }]),
     )
-    expect(orderMobileService.payCashOrder).toHaveBeenCalledWith(VENUE, 'order-5', { amount: 25000, tip: 2500, staffId: STAFF })
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledWith(VENUE, 'order-5', {
+      amount: 25000,
+      tip: 2500,
+      staffId: STAFF,
+      idempotencyKey: 'i9',
+    })
     expect(acks[0]).toMatchObject({ status: 'ACKED', result: { paymentId: 'pay-1' } })
   })
 

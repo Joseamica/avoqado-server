@@ -177,7 +177,7 @@ export const getOrder = async (req: Request, res: Response, next: NextFunction) 
 export const payCash = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId, orderId } = req.params
-    const { amount, tip, staffId } = req.body
+    const { amount, tip, staffId, idempotencyKey } = req.body
 
     // Validate required fields
     if (!amount || typeof amount !== 'number' || amount <= 0) {
@@ -194,6 +194,9 @@ export const payCash = async (req: Request, res: Response, next: NextFunction) =
       amount,
       tip: tip || 0,
       staffId: effectiveStaffId,
+      // 🛡️ Antes se descartaba: los clientes SIEMPRE la mandan y su cola offline
+      // espera un 409-duplicado para marcar el pago como sincronizado.
+      idempotencyKey: typeof idempotencyKey === 'string' ? idempotencyKey : undefined,
     })
 
     res.status(200).json({

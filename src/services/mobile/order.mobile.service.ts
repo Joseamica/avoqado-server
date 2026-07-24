@@ -1545,6 +1545,11 @@ export interface CashPaymentInput {
   amount: number // cents
   tip?: number // cents
   staffId?: string
+  // 🛡️ Idempotencia (patrón Stripe/Square/Toast): UUID generado UNA vez por
+  // intento de cobro en el cliente y reenviado en CADA reintento. Sin esto, un
+  // pago PARCIAL/dividido re-encolado offline crea un SEGUNDO Payment (doble
+  // ingreso). El fast path (payment.tpv.service.ts) ya usa este patrón.
+  idempotencyKey?: string
 }
 
 export interface CashPaymentResponse {
@@ -1600,6 +1605,33 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     throw new NotFoundError('Order not found')
   }
 
+  // 🛡️ IDEMPOTENCIA — defensa PRINCIPAL contra doble-cobro en reintentos del
+  // outbox/cola offline. El guard `paymentStatus === 'PAID'` de abajo SOLO
+  // protege pagos COMPLETOS; un pago PARCIAL re-encolado dejaría la orden en
+  // PARTIAL y crearía un segundo Payment. La llave dedup atrapa AMBOS casos.
+  // Mismo patrón que recordFastPayment (payment.tpv.service.ts:1390).
+  if (input.idempotencyKey) {
+    const existingByKey = await prisma.payment.findUnique({
+      where: { venueId_idempotencyKey: { venueId, idempotencyKey: input.idempotencyKey } },
+      include: { receipts: true },
+    })
+    if (existingByKey) {
+      logger.info(`🔄 [ORDER.MOBILE] Reintento idempotente detectado (key=${input.idempotencyKey}) — devuelvo el pago existente ${existingByKey.id}`)
+      return {
+        paymentId: existingByKey.id,
+        orderId,
+        orderNumber: order.orderNumber,
+        amount: Number(existingByKey.amount) * 100,
+        tipAmount: Number(existingByKey.tipAmount) * 100,
+        method: 'CASH',
+        status: 'COMPLETED',
+        digitalReceipt: existingByKey.receipts?.[0]
+          ? mapDigitalReceiptResponse(existingByKey.receipts[0], await resolveAutofacturaAvailable(orderId))
+          : null,
+      }
+    }
+  }
+
   if (order.paymentStatus === 'PAID') {
     throw new BadRequestError('Order is already paid')
   }
@@ -1624,8 +1656,14 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   const amountDecimal = amount / 100
   const tipDecimal = tip / 100
 
-  // Create payment and update order in transaction
-  const paymentResult = await prisma.$transaction(async tx => {
+  // Create payment and update order in transaction.
+  // 🛡️ Carrera concurrente: si dos requests con la MISMA idempotencyKey pasan
+  // el findUnique de arriba (ninguna había commiteado aún), la segunda choca
+  // en el índice único (P2002); la atrapamos y devolvemos el pago ganador —
+  // nunca creamos un segundo Payment.
+  let paymentResult
+  try {
+    paymentResult = await prisma.$transaction(async tx => {
     // Create payment record
     const newPayment = await tx.payment.create({
       data: {
@@ -1640,6 +1678,10 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         source: 'APP',
         processedById: effectiveStaffId,
         shiftId: currentShift?.id,
+        // 🛡️ Llave de idempotencia: el índice único [venueId, idempotencyKey]
+        // hace que un reintento del cliente choque (P2002) o se atrape arriba,
+        // nunca cree un segundo pago.
+        idempotencyKey: input.idempotencyKey ?? null,
         // Cash payments have no card data or merchant account
         merchantAccountId: null,
         feePercentage: 0,
@@ -1720,7 +1762,31 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     }
 
     return { newPayment, isFullyPaid }
-  })
+    })
+  } catch (err: any) {
+    if (err?.code === 'P2002' && input.idempotencyKey) {
+      const winner = await prisma.payment.findUnique({
+        where: { venueId_idempotencyKey: { venueId, idempotencyKey: input.idempotencyKey } },
+        include: { receipts: true },
+      })
+      if (winner) {
+        logger.info(`🔄 [ORDER.MOBILE] Carrera idempotente (P2002) — devuelvo el pago ganador ${winner.id}`)
+        return {
+          paymentId: winner.id,
+          orderId,
+          orderNumber: order.orderNumber,
+          amount: Number(winner.amount) * 100,
+          tipAmount: Number(winner.tipAmount) * 100,
+          method: 'CASH',
+          status: 'COMPLETED',
+          digitalReceipt: winner.receipts?.[0]
+            ? mapDigitalReceiptResponse(winner.receipts[0], await resolveAutofacturaAvailable(orderId))
+            : null,
+        }
+      }
+    }
+    throw err
+  }
   const { newPayment: payment, isFullyPaid: orderFullyPaid } = paymentResult
 
   logger.info(`✅ [ORDER.MOBILE] Cash payment recorded | paymentId=${payment.id} | order=${order.orderNumber}`)

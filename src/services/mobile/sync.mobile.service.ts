@@ -62,14 +62,24 @@ export interface SyncIntentInput {
 
 export interface SyncIntentAck {
   id: string
-  status: 'ACKED' | 'REJECTED'
-  /** Código estructurado cuando REJECTED (p.ej. TABLE_OWNED_BY_OTHER). */
+  /**
+   * ACKED = aplicado (terminal). REJECTED = rechazo de NEGOCIO permanente
+   * (terminal — el cliente lo manda a cuarentena). RETRY = condición
+   * TRANSITORIA (conflicto de versión, feature-access momentáneo, error de
+   * infraestructura): el cliente DEJA el intent en PENDING y reintenta — NO se
+   * pierde. Esto arregla el P1 "rechazo transitorio = pérdida permanente".
+   */
+  status: 'ACKED' | 'REJECTED' | 'RETRY'
+  /** Código estructurado cuando REJECTED/RETRY (p.ej. TABLE_OWNED_BY_OTHER, VERSION_CONFLICT). */
   errorCode?: string
   /** Mensaje humano en español para mostrar tal cual. */
   message?: string
   /** Resultado del efecto (ids de server, versión) cuando ACKED. */
   result?: Record<string, unknown>
 }
+
+/** Códigos que son TRANSITORIOS → el intent se reintenta, nunca se pierde. */
+const RETRYABLE_ERROR_CODES = new Set(['VERSION_CONFLICT'])
 
 const KNOWN_TYPES: SyncIntentType[] = [
   'OPEN_TABLE',
@@ -93,10 +103,15 @@ export async function processIntents(params: {
   deviceId: string
   intents: SyncIntentInput[]
 }): Promise<SyncIntentAck[]> {
-  const { venueId, staffId, deviceId, intents } = params
+  const { venueId, staffId, deviceId } = params
   const acks: SyncIntentAck[] = []
   /** localRef (UUID del dispositivo) → orderId de server, dentro del batch. */
   const localRefMap = new Map<string, string>()
+
+  // 🛡️ Orden FIFO defensivo por seq: el cliente ya manda en orden, pero el
+  // server NO debe confiar 100% en eso (cliente viejo/buggy, request a mano).
+  // Sin esto, un ADD_ITEMS que llegara antes que su OPEN_TABLE se rechazaría.
+  const intents = [...params.intents].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
 
   logger.info(`🔁 [POS SYNC] Replay de ${intents.length} intents | venue=${venueId} device=${deviceId} staff=${staffId}`)
 
@@ -121,6 +136,16 @@ export async function processIntents(params: {
 
     // 2. Aplicar — cada intent se resuelve solo; un rechazo NO tumba el batch.
     const ack = await applyIntent({ venueId, staffId, deviceId, intent, localRefMap })
+
+    // RETRY (transitorio): NO se persiste (para que un próximo replay lo
+    // re-drive) y se DETIENE el batch — los intents posteriores dependen de
+    // este por FIFO, así que se dejan sin procesar (el cliente los mantiene
+    // PENDING). Nunca se pierde nada.
+    if (ack.status === 'RETRY') {
+      acks.push(ack)
+      logger.info(`🔁 [POS SYNC] Intent ${intent.id} en RETRY — corto el batch para preservar FIFO`)
+      break
+    }
 
     // 3. Persistir el ack (carrera-segura: si otro request ganó la unique,
     //    releemos y devolvemos lo que quedó grabado).
@@ -147,7 +172,7 @@ export async function processIntents(params: {
         if (winner) {
           acks.push({
             id: intent.id,
-            status: winner.status as 'ACKED' | 'REJECTED',
+            status: winner.status as 'ACKED' | 'REJECTED' | 'RETRY',
             errorCode: winner.errorCode ?? undefined,
             result: (winner.resultJson as Record<string, unknown> | null) ?? undefined,
           })
@@ -204,15 +229,19 @@ async function applyIntent(ctx: {
         return await applyClearTable(venueId, staffId, intent)
     }
   } catch (error: any) {
-    // Error de negocio del servicio delegado → REJECTED estructurado (jamás
-    // "no sé"). Los 5xx del server NO llegan aquí como rechazo permanente: el
-    // controller convierte errores de infraestructura en 500 y el cliente
-    // reintenta el batch completo (idempotente).
+    const errorCode = error?.errorCode ?? error?.code ?? 'BUSINESS_RULE'
+    // TRANSITORIO (conflicto de versión, etc.) → RETRY: el cliente lo deja
+    // PENDING y reintenta; NUNCA se pierde. PERMANENTE (regla de negocio) →
+    // REJECTED terminal → cuarentena visible.
+    if (RETRYABLE_ERROR_CODES.has(errorCode)) {
+      logger.info(`🔁 [POS SYNC] Intent ${intent.type} ${intent.id} transitorio (${errorCode}) — reintentar`)
+      return { id: intent.id, status: 'RETRY', errorCode, message: error?.message ?? 'Condición transitoria — reintentar' }
+    }
     logger.warn(`⚠️ [POS SYNC] Intent ${intent.type} ${intent.id} rechazado: ${error?.message}`)
     return {
       id: intent.id,
       status: 'REJECTED',
-      errorCode: error?.errorCode ?? error?.code ?? 'BUSINESS_RULE',
+      errorCode,
       message: error?.message ?? 'Regla de negocio rechazó el intent',
     }
   }
@@ -342,7 +371,16 @@ async function applyAddItems(
     return { id: intent.id, status: 'REJECTED', errorCode: 'ORDER_NOT_FOUND', message: 'La orden ya no existe' }
   }
 
-  const updated = await orderTpvService.addItemsToOrder(venueId, orderId, items, current.version, true)
+  // 🛡️ Idempotencia de la RONDA: un externalId determinista por item
+  // (intent.id + índice) hace que un replay de este ADD_ITEMS actualice las
+  // MISMAS filas en vez de crear duplicados (addItemsToOrder ya deduplica por
+  // externalId: findFirst → UPDATE quantity=item.quantity, que es reemplazo).
+  // Sin esto, un reintento tras "efecto aplicado pero ack no persistido"
+  // duplicaba la ronda en cocina y en la cuenta. Solo se inyecta si el cliente
+  // no mandó uno propio.
+  const itemsWithKey = items.map((it, idx) => (it.externalId ? it : { ...it, externalId: `sync:${intent.id}:${idx}` }))
+
+  const updated = await orderTpvService.addItemsToOrder(venueId, orderId, itemsWithKey, current.version, true)
   return {
     id: intent.id,
     status: 'ACKED',
@@ -374,6 +412,10 @@ async function applyPayCash(
     amount: amountCents,
     tip: tipCents,
     staffId,
+    // 🛡️ El id del intent ES la llave de idempotencia: si este PAY_CASH se
+    // reproduce (incluso concurrentemente antes de que se escriba el registro
+    // PosSyncIntent), payCashOrder deduplica y jamás crea un segundo pago.
+    idempotencyKey: intent.id,
   })
   return {
     id: intent.id,

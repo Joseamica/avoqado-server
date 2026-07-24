@@ -1802,19 +1802,32 @@ export async function addItemsToOrder(
 
   logger.info(`  📊 New totals: subtotal=$${newSubtotal}, discount=$${newDiscountAmount}, total=$${newTotal}`)
 
-  // Update order with new totals and increment version
-  const updatedOrder = await prisma.order.update({
-    where: { id: orderId },
+  // 🛡️ CAS (compare-and-swap): subimos totales + versión SOLO si la versión
+  // sigue siendo la que leímos (order.version). Si una ronda concurrente la
+  // movió entre el read y el write, count=0 → lanzamos VERSION_CONFLICT para
+  // que el llamador (reducer sync → reject transitorio, u online 409) reintente
+  // recomputando sobre el set COMPLETO de items — así el total nunca se
+  // sobrescribe con un cálculo que ignoró la otra ronda. Antes era un
+  // increment ciego (WHERE id) que permitía doble aplicación de totales.
+  const casBump = await prisma.order.updateMany({
+    where: { id: orderId, version: order.version },
     data: {
       subtotal: newSubtotal,
       discountAmount: newDiscountAmount,
       serviceChargeAmount: newServiceChargeAmount,
       total: newTotal,
       remainingBalance: newRemainingBalance,
-      version: {
-        increment: 1,
-      },
+      version: { increment: 1 },
     },
+  })
+  if (casBump.count === 0) {
+    const err: any = new Error('La orden cambió en otro dispositivo — vuelve a intentar')
+    err.code = 'VERSION_CONFLICT'
+    err.statusCode = 409
+    throw err
+  }
+  const updatedOrder = await prisma.order.findUniqueOrThrow({
+    where: { id: orderId },
     include: {
       items: {
         include: {
