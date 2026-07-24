@@ -12,6 +12,7 @@
 
 import { Request, Response } from 'express'
 import * as tableService from '../../services/tpv/table.tpv.service'
+import { isTableOwnershipEnforced, staffCanManageAllTables } from '../../middlewares/checkTableOwnership.middleware'
 import logger from '../../config/logger'
 
 /**
@@ -27,9 +28,25 @@ export async function getTables(req: Request, res: Response): Promise<void> {
 
     const tables = await tableService.getTablesWithStatus(venueId)
 
+    // Propiedad de mesa (additive siblings — `data` no cambia de forma):
+    // el POS necesita saber si el switch está encendido y si el staff actual
+    // puede saltárselo, para pintar mesas ajenas en read-only SIN esperar el
+    // 403 del server. Clientes viejos ignoran estos campos.
+    const authContext = (req as any).authContext
+    const enforceTableOwnership = await isTableOwnershipEnforced(venueId)
+    const canManageAllTables =
+      enforceTableOwnership && authContext?.userId
+        ? await staffCanManageAllTables(authContext.userId, venueId, authContext.venueId, authContext.role)
+        : true
+
     res.status(200).json({
       success: true,
       data: tables,
+      settings: { enforceTableOwnership },
+      viewer: {
+        staffId: authContext?.userId ?? null,
+        canManageAllTables,
+      },
     })
   } catch (error: any) {
     logger.error(`[TABLE MOBILE CONTROLLER] Error getting tables: ${error.message}`)

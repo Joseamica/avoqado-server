@@ -302,6 +302,10 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
     'orders:read', // Tables show active orders
   ],
   'tables:update': ['tables:read', 'tables:update'],
+  // Override de propiedad de mesa: con VenueSettings.enforceTableOwnership
+  // encendido, este permiso deja modificar/cerrar mesas de OTROS meseros
+  // (checkTableOwnership middleware). MANAGER+ lo tiene por default.
+  'tables:manage-all': ['tables:manage-all', 'tables:read', 'tables:update'],
 
   // ===========================
   // RESERVATIONS
@@ -695,6 +699,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'shifts:delete',
     'shifts:close',
     'tables:read',
+    'tables:update',
+    'tables:manage-all', // Propiedad de mesa: puede modificar/cerrar mesas de otros meseros
     'tpv:read',
     'tpv:create',
     'tpv:update',
@@ -1433,7 +1439,7 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   ],
   reviews: ['reviews:read', 'reviews:respond'],
   teams: ['teams:read', 'teams:create', 'teams:update', 'teams:delete', 'teams:invite'],
-  tables: ['tables:read', 'tables:update'],
+  tables: ['tables:read', 'tables:update', 'tables:manage-all'],
   reservations: ['reservations:read', 'reservations:create', 'reservations:update', 'reservations:cancel'],
   settings: ['settings:read', 'settings:manage'],
   venues: ['venues:read', 'venues:update'],

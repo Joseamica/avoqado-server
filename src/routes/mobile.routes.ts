@@ -43,6 +43,7 @@ import * as printMobileController from '../controllers/mobile/print.mobile.contr
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
+import { checkTableOwnership } from '../middlewares/checkTableOwnership.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { recordFastPaymentParamsSchema, recordPaymentBodySchema } from '../schemas/tpv.schema'
 import { gatewayHeartbeatSchema, printConfigParamSchema, syncPrintJobsSchema } from '../schemas/mobile/print.mobile.schema'
@@ -724,6 +725,7 @@ router.post(
   '/venues/:venueId/orders/:orderId/pay',
   authenticateTokenMiddleware,
   checkPermission('payments:create'),
+  checkTableOwnership('order'),
   orderMobileController.payCash,
 )
 
@@ -768,6 +770,7 @@ router.delete(
   '/venues/:venueId/orders/:orderId',
   authenticateTokenMiddleware,
   checkPermission('orders:cancel'),
+  checkTableOwnership('order'),
   orderMobileController.cancelOrder,
 )
 
@@ -1596,6 +1599,9 @@ router.post(
   authenticateTokenMiddleware,
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:create'),
+  // Propiedad de mesa: abrir una mesa OCUPADA por otro mesero reutilizaría su
+  // orden activa → 403 TABLE_OWNED_BY_OTHER (el cliente muestra read-only).
+  checkTableOwnership('table'),
   tableMobileController.openTable,
 )
 
@@ -1608,6 +1614,7 @@ router.post(
   authenticateTokenMiddleware,
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:create'),
+  checkTableOwnership('table'),
   tableMobileController.clearTable,
 )
 
@@ -1621,6 +1628,7 @@ router.post(
   authenticateTokenMiddleware,
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
+  checkTableOwnership('order'),
   tableMobileController.moveOrder,
 )
 
@@ -1634,6 +1642,7 @@ router.post(
   authenticateTokenMiddleware,
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
+  checkTableOwnership('order'),
   tableMobileController.assignOrder,
 )
 
@@ -1647,6 +1656,7 @@ router.post(
   authenticateTokenMiddleware,
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:create'),
+  checkTableOwnership('order'),
   orderMobileController.addItemsToOrder,
 )
 
@@ -1866,6 +1876,7 @@ router.post(
   authenticateTokenMiddleware,
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
+  checkTableOwnership('order'),
   orderMobileController.splitOrder,
 )
 
@@ -1878,6 +1889,7 @@ router.post(
   authenticateTokenMiddleware,
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
+  checkTableOwnership('order'),
   orderMobileController.mergeOrders,
 )
 
@@ -1890,6 +1902,7 @@ router.post(
   authenticateTokenMiddleware,
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
+  checkTableOwnership('order'),
   orderMobileController.splitOrderBySeat,
 )
 
@@ -1898,6 +1911,7 @@ router.post(
   authenticateTokenMiddleware,
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
+  checkTableOwnership('order'),
   orderMobileController.applyOrderDiscount,
 )
 
@@ -1910,6 +1924,7 @@ router.delete(
   authenticateTokenMiddleware,
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
+  checkTableOwnership('order'),
   orderMobileController.removeOrderDiscount,
 )
 
@@ -1918,6 +1933,7 @@ router.post(
   authenticateTokenMiddleware,
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
+  checkTableOwnership('order'),
   orderMobileController.compWholeOrder,
 )
 
@@ -1950,6 +1966,7 @@ router.post(
   authenticateTokenMiddleware,
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
+  checkTableOwnership('order'),
   serviceChargeMobileController.applyServiceCharge,
 )
 
@@ -1961,6 +1978,7 @@ router.delete(
   authenticateTokenMiddleware,
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
+  checkTableOwnership('order'),
   serviceChargeMobileController.removeServiceCharge,
 )
 
@@ -1987,6 +2005,7 @@ router.post(
   authenticateTokenMiddleware,
   checkFeatureAccess('LOYALTY_PROGRAM'),
   checkPermission('orders:update'),
+  checkTableOwnership('order'),
   loyaltyMobileController.redeemPoints,
 )
 
@@ -1999,6 +2018,7 @@ router.post(
   authenticateTokenMiddleware,
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
+  checkTableOwnership('order'),
   orderMobileController.updateOrderDetails,
 )
 
@@ -2007,6 +2027,7 @@ router.post(
   authenticateTokenMiddleware,
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
+  checkTableOwnership('order'),
   orderMobileController.compOrderItem,
 )
 

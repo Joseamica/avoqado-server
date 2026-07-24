@@ -28,6 +28,9 @@ export const DEFAULT_VENUE_SETTINGS = {
   shiftDuration: 8,
   enableShifts: true, // Enable/disable shift system for venue
   requirePinLogin: true,
+  // Propiedad de mesa (PRO) — apagado por default: cualquier staff con permiso
+  // puede tocar cualquier mesa (conducta histórica).
+  enforceTableOwnership: false,
 
   // Attendance — lateness detection
   // null = no venue-level override → attendance logic falls back to

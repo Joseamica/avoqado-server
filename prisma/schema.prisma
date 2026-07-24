@@ -700,6 +700,13 @@ model VenueSettings {
   requirePinLogin     Boolean @default(true)
   terminalPermissions Json? // Permissions for terminal session when requirePinLogin=false
 
+  // Table service (PRO) — "Solo el propietario puede modificar sus mesas".
+  // Encendido: solo el mesero dueño (Order.servedById) agrega/edita/descuenta/
+  // cobra/cierra su mesa; los demás la ven read-only. Override: permiso
+  // 'tables:manage-all' (MANAGER+ por default), espejado por nombre exacto en
+  // iOS/Android. Enforcement: checkTableOwnership middleware (mobile routes).
+  enforceTableOwnership Boolean @default(false)
+
   // Attendance verification
   requireClockInPhoto Boolean @default(false) // Require photo when clocking in (anti-fraud)
 

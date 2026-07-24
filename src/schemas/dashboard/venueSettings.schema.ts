@@ -45,6 +45,9 @@ export const UpdateVenueSettingsSchema = z.object({
     shiftDuration: z.number().int().min(1).max(24).optional(),
     enableShifts: z.boolean().optional(),
     requirePinLogin: z.boolean().optional(),
+    // Propiedad de mesa (PRO): solo el mesero dueño modifica/cierra sus mesas;
+    // override = permiso 'tables:manage-all'. Enforcement en mobile routes.
+    enforceTableOwnership: z.boolean().optional(),
     requireClockInPhoto: z.boolean().optional(), // Anti-fraud: require photo on clock-in
     trackPromoterLocation: z.boolean().optional(), // "Cambaceo": emit/accept periodic promoter location pings
 

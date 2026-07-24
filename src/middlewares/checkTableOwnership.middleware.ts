@@ -1,0 +1,148 @@
+import { Request, Response, NextFunction } from 'express'
+import { StaffRole } from '@prisma/client'
+import { evaluatePermissionList, hasPermission } from '@/lib/permissions'
+import logger from '@/config/logger'
+import prisma from '@/utils/prismaClient'
+import { resolveUserRoleForVenue } from './checkPermission.middleware'
+
+/**
+ * Propiedad de mesa — "Solo el propietario puede modificar sus mesas".
+ *
+ * Con `VenueSettings.enforceTableOwnership` encendido (switch PRO del venue),
+ * solo el mesero dueño de la orden (`Order.servedById`) puede mutarla:
+ * agregar items, descuentos, cortesías, cargos por servicio, mover, dividir,
+ * fusionar, cobrar, cancelar y liberar la mesa. Los demás la ven read-only.
+ *
+ * Override: permiso `tables:manage-all` (MANAGER+ por default; OWNER/ADMIN via
+ * `tables:*`; SUPERADMIN bypass). Espejado por nombre EXACTO en iOS/Android.
+ *
+ * Solo aplica a órdenes de mesa (`tableId != null`) — ventas de mostrador y
+ * cobros rápidos no tienen dueño de mesa. Con el switch apagado (default) el
+ * middleware es un no-op de una sola query.
+ *
+ * Rechazo: 403 con `code: 'TABLE_OWNED_BY_OTHER'` + nombre del dueño, para que
+ * los clientes muestren "Mesa de {mesero} — solo lectura" en vez de un error
+ * genérico. Corre DESPUÉS de authenticate/checkFeatureAccess/checkPermission.
+ */
+
+/** ¿El staff puede saltarse la regla de propiedad en este venue? */
+export async function staffCanManageAllTables(userId: string, venueId: string, tokenVenueId?: string, tokenRole?: string): Promise<boolean> {
+  // SUPERADMIN bypass (mismo criterio que checkPermission)
+  const superAdminVenue = await prisma.staffVenue.findFirst({
+    where: { staffId: userId, role: StaffRole.SUPERADMIN },
+    select: { id: true },
+  })
+  if (superAdminVenue) return true
+
+  const { role: userRole, permissionSet } = await resolveUserRoleForVenue({
+    userId,
+    targetVenueId: venueId,
+    tokenVenueId,
+    tokenRole,
+  })
+  if (!userRole) return false
+
+  if (permissionSet) {
+    return evaluatePermissionList(permissionSet.permissions, 'tables:manage-all')
+  }
+
+  const venueRolePermission = await prisma.venueRolePermission.findUnique({
+    where: { venueId_role: { venueId, role: userRole } },
+    select: { permissions: true },
+  })
+  const customPermissions = venueRolePermission ? (venueRolePermission.permissions as string[]) : null
+  return hasPermission(userRole, customPermissions, 'tables:manage-all')
+}
+
+/** ¿El venue tiene encendida la regla de propiedad de mesa? */
+export async function isTableOwnershipEnforced(venueId: string): Promise<boolean> {
+  const settings = await prisma.venueSettings.findUnique({
+    where: { venueId },
+    select: { enforceTableOwnership: true },
+  })
+  return settings?.enforceTableOwnership === true
+}
+
+type OwnershipSource = 'order' | 'table'
+
+/**
+ * @param source 'order' = la ruta trae `:orderId`; 'table' = trae `:tableId`
+ *               (open/clear) y la regla evalúa la(s) orden(es) abierta(s) de esa mesa.
+ */
+export const checkTableOwnership = (source: OwnershipSource = 'order') => {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const authContext = (req as any).authContext
+      if (!authContext?.userId) {
+        return res.status(401).json({ error: 'Unauthorized', message: 'Authentication required' })
+      }
+
+      const venueId = req.params?.venueId
+      if (!venueId) {
+        return res.status(400).json({ error: 'Bad Request', message: 'Venue ID required' })
+      }
+
+      // Switch apagado (default) → no-op.
+      if (!(await isTableOwnershipEnforced(venueId))) return next()
+
+      // Dueño(s) de la(s) orden(es) afectada(s).
+      let owners: { servedById: string | null; servedBy: { firstName: string; lastName: string } | null }[] = []
+      if (source === 'order') {
+        const orderId = req.params?.orderId
+        if (!orderId) return next() // ruta mal cableada — que el controller responda
+        const order = await prisma.order.findFirst({
+          where: { id: orderId, venueId },
+          select: {
+            tableId: true,
+            servedById: true,
+            servedBy: { select: { firstName: true, lastName: true } },
+          },
+        })
+        // Orden inexistente → 404 del controller. Sin mesa → venta de mostrador,
+        // la regla de propiedad no aplica.
+        if (!order || !order.tableId) return next()
+        owners = [order]
+      } else {
+        const tableId = req.params?.tableId
+        if (!tableId) return next()
+        owners = await prisma.order.findMany({
+          where: {
+            venueId,
+            tableId,
+            status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
+          },
+          select: {
+            servedById: true,
+            servedBy: { select: { firstName: true, lastName: true } },
+          },
+        })
+        // Mesa libre (sin órdenes abiertas) → abrirla es de quien llegue primero.
+        if (owners.length === 0) return next()
+      }
+
+      // Sin dueño registrado (servedById null) → no hay a quién proteger.
+      const foreign = owners.find(o => o.servedById && o.servedById !== authContext.userId)
+      if (!foreign) return next()
+
+      if (await staffCanManageAllTables(authContext.userId, venueId, authContext.venueId, authContext.role)) {
+        logger.debug(`checkTableOwnership: override tables:manage-all para ${authContext.userId} en venue ${venueId}`)
+        return next()
+      }
+
+      const ownerName = foreign.servedBy ? `${foreign.servedBy.firstName} ${foreign.servedBy.lastName}`.trim() : 'otro mesero'
+      logger.info(
+        `checkTableOwnership: ${authContext.userId} bloqueado — mesa propiedad de ${foreign.servedById} (${ownerName}) en venue ${venueId}`,
+      )
+      return res.status(403).json({
+        error: 'Forbidden',
+        code: 'TABLE_OWNED_BY_OTHER',
+        message: `Solo ${ownerName} puede modificar esta mesa`,
+        ownerId: foreign.servedById,
+        ownerName,
+      })
+    } catch (error) {
+      logger.error('checkTableOwnership: error evaluando propiedad de mesa', error)
+      return res.status(500).json({ error: 'Internal Server Error', message: 'Failed to verify table ownership' })
+    }
+  }
+}

@@ -51,6 +51,9 @@ interface TableStatusResponse {
     itemCount: number
     version: number
     name: string | null
+    /** Additive: dueño de la cuenta — los POS lo comparan contra su staffId
+     *  para pintar read-only cuando enforceTableOwnership está encendido. */
+    waiterId: string | null
     waiterName: string | null
     createdAt: Date
   }>
@@ -81,6 +84,7 @@ export async function getTablesWithStatus(venueId: string): Promise<TableStatusR
       customerName: true,
       createdAt: true,
       _count: { select: { items: true } },
+      servedById: true,
       servedBy: { select: { firstName: true, lastName: true } },
     },
     orderBy: { createdAt: 'asc' },
@@ -166,6 +170,9 @@ export async function getTablesWithStatus(venueId: string): Promise<TableStatusR
       itemCount: o._count.items,
       version: o.version,
       name: o.customerName ?? null,
+      // waiterId additive: los POS lo comparan contra su staffId para pintar
+      // read-only cuando enforceTableOwnership está encendido.
+      waiterId: o.servedById ?? null,
       waiterName: o.servedBy ? `${o.servedBy.firstName} ${o.servedBy.lastName}`.trim() : null,
       createdAt: o.createdAt,
     })),

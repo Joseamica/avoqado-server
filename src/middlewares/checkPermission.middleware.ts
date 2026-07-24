@@ -44,7 +44,7 @@ export function resolveRequestVenueId(req: Request, authContext: { venueId?: str
   return authContext.venueId
 }
 
-async function resolveUserRoleForVenue(params: {
+export async function resolveUserRoleForVenue(params: {
   userId: string
   targetVenueId: string
   tokenVenueId?: string

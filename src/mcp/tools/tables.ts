@@ -51,9 +51,17 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
       const byStatus: Record<string, number> = {}
       for (const t of tables) byStatus[t.status] = (byStatus[t.status] ?? 0) + 1
 
+      // Propiedad de mesa (PRO): con el switch encendido, solo el mesero dueño
+      // modifica/cierra sus mesas desde el POS (override: 'tables:manage-all').
+      const settings = await prisma.venueSettings.findUnique({
+        where: { venueId },
+        select: { enforceTableOwnership: true },
+      })
+
       return text({
         venueId,
         total: tables.length,
+        enforceTableOwnership: settings?.enforceTableOwnership === true,
         byStatus, // { AVAILABLE: n, OCCUPIED: n, RESERVED: n, CLEANING: n }
         tables: tables.map(t => ({
           number: t.number,
