@@ -5,6 +5,7 @@ import prisma from '@/utils/prismaClient'
 import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
+import { getRecentIntents } from '@/services/mobile/sync.mobile.service'
 import { text } from '../respond'
 import { hasPermission } from '@/services/access/access.service'
 
@@ -273,6 +274,33 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
           paymentStatus: o.paymentStatus,
           total: num(o.total),
           at: o.createdAt.toISOString(),
+        })),
+      })
+    },
+  )
+
+  server.tool(
+    'pos_sync_status',
+    'Offline-first: últimos intents que los POS del venue reprodujeron al reconectar (replay del outbox offline) — tipo (OPEN_TABLE/ADD_ITEMS/PAY_CASH), dispositivo, ACKED o REJECTED con su errorCode. Answers "¿qué se sincronizó cuando volvió el internet? ¿algún cobro/comanda offline fue rechazado?". Pass venueId.',
+    {
+      venueId: z.string().describe('Venue cuyos replays offline leer (must be in your scope)'),
+      limit: z.number().int().min(1).max(200).optional().describe('Máximo de intents (default 50)'),
+    },
+    async ({ venueId, limit }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      const intents = await getRecentIntents(venueId, limit ?? 50)
+      const rejected = intents.filter(i => i.status === 'REJECTED').length
+      return text({
+        venueId,
+        total: intents.length,
+        rejected,
+        intents: intents.map(i => ({
+          type: i.type,
+          status: i.status,
+          errorCode: i.errorCode ?? null,
+          deviceId: i.deviceId,
+          seq: i.seq ?? null,
+          at: i.createdAt.toISOString(),
         })),
       })
     },

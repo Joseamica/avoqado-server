@@ -38,6 +38,7 @@ import * as productOptionMobileController from '../controllers/mobile/product-op
 import * as measurementUnitMobileController from '../controllers/mobile/measurement-unit.mobile.controller'
 import * as kdsMobileController from '../controllers/mobile/kds.mobile.controller'
 import * as tableMobileController from '../controllers/mobile/table.mobile.controller'
+import * as syncMobileController from '../controllers/mobile/sync.mobile.controller'
 import * as creditPackMobileController from '../controllers/mobile/creditPack.mobile.controller'
 import * as printMobileController from '../controllers/mobile/print.mobile.controller'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
@@ -1658,6 +1659,22 @@ router.post(
   checkPermission('orders:create'),
   checkTableOwnership('order'),
   orderMobileController.addItemsToOrder,
+)
+
+// ─── OFFLINE-FIRST SYNC (Fase 1, Corte D) ────────────────────────────────────
+
+/**
+ * POST /api/v1/mobile/venues/{venueId}/sync/intents
+ * Replay del outbox offline de los POS: batch FIFO por dispositivo, un ack por
+ * intent (idempotente vía [venueId, idempotencyKey]). El gating de features
+ * (TABLE_SERVICE) y la propiedad de mesa se evalúan POR INTENT en el reducer —
+ * sincronizar no es puerta trasera. Body: { deviceId, intents: [...] }
+ */
+router.post(
+  '/venues/:venueId/sync/intents',
+  authenticateTokenMiddleware,
+  checkPermission('orders:create'),
+  syncMobileController.syncIntents,
 )
 
 // ============================================================================

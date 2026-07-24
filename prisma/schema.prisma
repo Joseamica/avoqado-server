@@ -12716,3 +12716,32 @@ model PlatformCfdi {
   @@index([parentPlatformCfdiId])
   @@index([createdAt])
 }
+
+/// Offline-first (Fase 1, Corte D — spec Avoqado/docs/plans/offline-first-pos-fase1.md):
+/// registro + dedup de los intents que los POS encolan offline y reproducen al
+/// reconectar (FIFO por dispositivo, viejo→nuevo). Un renglón por intent
+/// procesado: la unique [venueId, idempotencyKey] hace el replay seguro — un
+/// reintento devuelve el MISMO resultado guardado sin re-aplicar efectos.
+/// `localRef` guarda el UUID local (p.ej. de OPEN_TABLE) para que intents
+/// posteriores del mismo dispositivo resuelvan su orderId de servidor.
+model PosSyncIntent {
+  id       String  @id @default(cuid())
+  venueId  String
+  deviceId String  @db.VarChar(64)
+  staffId  String?
+  /// Secuencia monotónica por dispositivo (orden de replay); informativa.
+  seq      Int?
+  type     String  @db.VarChar(40) // OPEN_TABLE | ADD_ITEMS | PAY_CASH | ...
+  idempotencyKey String @db.VarChar(64)
+  /// UUID local generado en el dispositivo (identidad offline) — resoluble a ids de server.
+  localRef String? @db.VarChar(64)
+  status    String  @db.VarChar(12) // ACKED | REJECTED
+  errorCode String? @db.VarChar(40) // p.ej. TABLE_OWNED_BY_OTHER, FEATURE_LOCKED
+  /// Ack devuelto al cliente (ids de server, versión, folio) — se re-devuelve tal cual en reintentos.
+  resultJson Json?
+  createdAt DateTime @default(now())
+
+  @@unique([venueId, idempotencyKey])
+  @@index([venueId, localRef])
+  @@index([venueId, deviceId, createdAt])
+}
