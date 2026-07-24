@@ -35,6 +35,11 @@ export const PREMIUM_ONLY_CODES = [
   'TRANSACTION_EXPORT',
   'MERCHANT_ROUTING_RULES', // Reglas condicionales de visibilidad/auto-selección de merchants en TPV (2026-07-10)
   'DELIVERY_CHANNELS', // Delivery apps vía agregador (2026-07-18)
+  // Hub LAN offline (Fase 3, 2026-07-24): sin internet los POS se coordinan
+  // ENTRE SÍ por la red local (árbitro electo + leases de mesa con TTL y época)
+  // para PREVENIR el doble-abre en vez de detectarlo al reconectar. Solo tiene
+  // sentido con varios dispositivos — el perfil que ya paga Premium.
+  'OFFLINE_LAN_HUB',
 ] as const
 
 /**
