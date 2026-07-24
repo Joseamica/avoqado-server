@@ -20,6 +20,7 @@ jest.mock('@/utils/prismaClient', () => ({
   default: {
     posSyncIntent: { findUnique: jest.fn(), findFirst: jest.fn(), create: jest.fn() },
     order: { findFirst: jest.fn() },
+    orderItem: { findMany: jest.fn() },
   },
 }))
 
@@ -35,6 +36,8 @@ jest.mock('@/services/mobile/order.mobile.service', () => ({
   applyOrderDiscount: jest.fn(),
   updateOrderDetails: jest.fn(),
   cancelOrder: jest.fn(),
+  splitOrderItems: jest.fn(),
+  mergeOrders: jest.fn(),
 }))
 jest.mock('@/services/mobile/comp-item.mobile.service', () => ({ compWholeOrder: jest.fn() }))
 jest.mock('@/services/mobile/service-charge.mobile.service', () => ({ applyServiceCharge: jest.fn() }))
@@ -267,6 +270,146 @@ describe('sync.mobile.service processIntents', () => {
     expect(orderMobileService.updateOrderDetails).toHaveBeenCalled()
     expect(orderMobileService.cancelOrder).toHaveBeenCalledWith(VENUE, 'order-12', 'Cliente se fue', STAFF)
     expect(acks.map(a => a.status)).toEqual(['ACKED', 'ACKED'])
+  })
+
+  // ─── SPLIT_ORDER / MERGE_ORDERS (Fase 3, split offline) ───────────────────
+
+  it('SPLIT_ORDER resuelve items por externalId (offline) y mapea el cheque nuevo a newLocalOrderId', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 3, tableId: 't1', servedById: STAFF })
+    ;(prisma.orderItem.findMany as jest.Mock).mockResolvedValue([{ id: 'item-real-1' }, { id: 'item-real-2' }])
+    ;(orderMobileService.splitOrderItems as jest.Mock).mockResolvedValue({
+      source: { id: 'order-20', orderNumber: 'A-1', total: 100, version: 4 },
+      created: { id: 'order-21', orderNumber: 'A-2', total: 60, version: 1 },
+    })
+
+    const acks = await processIntents(
+      baseParams([
+        {
+          id: 'i20',
+          seq: 1,
+          type: 'SPLIT_ORDER',
+          payload: {
+            orderId: 'order-20',
+            // El dispositivo NO conoce los ids de server: manda los externalId
+            // deterministas que ADD_ITEMS inyectó cuando no había red.
+            itemRefs: [{ externalId: 'sync:i19:0' }, { externalId: 'sync:i19:1' }],
+            newLocalOrderId: 'local-split-B',
+          },
+        },
+      ]),
+    )
+
+    expect(orderMobileService.splitOrderItems).toHaveBeenCalledWith(VENUE, 'order-20', ['item-real-1', 'item-real-2'], STAFF)
+    expect(acks[0]).toMatchObject({
+      status: 'ACKED',
+      result: { createdOrderId: 'order-21', createdOrderNumber: 'A-2', newLocalOrderId: 'local-split-B' },
+    })
+  })
+
+  it('🔴 SPLIT_ORDER es TODO-O-NADA: si una referencia no resuelve, NO separa a medias', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 3, tableId: 't1', servedById: STAFF })
+    // Pidió separar 3 items pero solo 2 existen (uno se borró mientras estaba offline).
+    ;(prisma.orderItem.findMany as jest.Mock).mockResolvedValue([{ id: 'item-real-1' }, { id: 'item-real-2' }])
+
+    const acks = await processIntents(
+      baseParams([
+        {
+          id: 'i21',
+          type: 'SPLIT_ORDER',
+          payload: {
+            orderId: 'order-22',
+            itemRefs: [{ externalId: 'sync:x:0' }, { externalId: 'sync:x:1' }, { externalId: 'sync:x:2' }],
+          },
+        },
+      ]),
+    )
+
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'ITEMS_NOT_RESOLVED' })
+    // Lo que importa: jamás se partió el cheque con el subconjunto que sí resolvió.
+    expect(orderMobileService.splitOrderItems).not.toHaveBeenCalled()
+  })
+
+  it('cadena offline completa: abrir mesa → separar cheque → cobrar el cheque SEPARADO por su id local', async () => {
+    ;(tableService.assignTable as jest.Mock).mockResolvedValue({
+      order: { id: 'order-30', orderNumber: 'A-9', version: 1 },
+      isNewOrder: true,
+    })
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 2, tableId: 't1', servedById: STAFF })
+    ;(prisma.orderItem.findMany as jest.Mock).mockResolvedValue([{ id: 'item-1' }])
+    ;(orderMobileService.splitOrderItems as jest.Mock).mockResolvedValue({
+      source: { id: 'order-30', orderNumber: 'A-9', total: 80, version: 3 },
+      created: { id: 'order-31', orderNumber: 'A-10', total: 40, version: 1 },
+    })
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({ payment: { id: 'pay-1' } })
+
+    const acks = await processIntents(
+      baseParams([
+        { id: 'i30', seq: 1, type: 'OPEN_TABLE', payload: { tableId: 't1', localOrderId: 'local-M' } },
+        {
+          id: 'i31',
+          seq: 2,
+          type: 'SPLIT_ORDER',
+          payload: { localOrderId: 'local-M', itemRefs: [{ externalId: 'sync:i30b:0' }], newLocalOrderId: 'local-M-split' },
+        },
+        // El dispositivo cobra el cheque separado sin haber visto NUNCA su id real.
+        { id: 'i32', seq: 3, type: 'PAY_CASH', payload: { localOrderId: 'local-M-split', amountCents: 4000 } },
+      ]),
+    )
+
+    expect(acks.map(a => a.status)).toEqual(['ACKED', 'ACKED', 'ACKED'])
+    // La prueba de fuego: el cobro aterrizó en el cheque NUEVO (order-31), no en el original.
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledWith(
+      VENUE,
+      'order-31',
+      expect.objectContaining({ amount: 4000, idempotencyKey: 'i32', staffId: STAFF }),
+    )
+  })
+
+  it('MERGE_ORDERS resuelve destino y origen (ambos pueden ser ids locales)', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 5, tableId: 't1', servedById: STAFF })
+    ;(prisma.posSyncIntent.findFirst as jest.Mock)
+      .mockResolvedValueOnce({ resultJson: { orderId: 'order-40' } }) // destino
+      .mockResolvedValueOnce({ resultJson: { orderId: 'order-41' } }) // origen
+
+    const acks = await processIntents(
+      baseParams([
+        { id: 'i40', type: 'MERGE_ORDERS', payload: { localOrderId: 'local-T', sourceLocalOrderId: 'local-S' } },
+      ]),
+    )
+
+    expect(orderMobileService.mergeOrders).toHaveBeenCalledWith(VENUE, 'order-40', 'order-41', STAFF)
+    expect(acks[0]).toMatchObject({ status: 'ACKED', result: { orderId: 'order-40', mergedFromOrderId: 'order-41' } })
+  })
+
+  it('SPLIT_ORDER sobre mesa de otro mesero → TABLE_OWNED_BY_OTHER (sync no es puerta trasera)', async () => {
+    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({
+      tableId: 't1',
+      servedById: 'staff-maria',
+      servedBy: { firstName: 'María', lastName: 'González' },
+    })
+
+    const acks = await processIntents(
+      baseParams([{ id: 'i41', type: 'SPLIT_ORDER', payload: { orderId: 'order-50', itemRefs: [{ id: 'item-9' }] } }]),
+    )
+
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'TABLE_OWNED_BY_OTHER' })
+    expect(orderMobileService.splitOrderItems).not.toHaveBeenCalled()
+  })
+
+  it('rechazo de negocio de split (cuenta con descuento) → REJECTED visible, no crash del batch', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 1, tableId: 't1', servedById: STAFF })
+    ;(prisma.orderItem.findMany as jest.Mock).mockResolvedValue([{ id: 'item-1' }])
+    ;(orderMobileService.splitOrderItems as jest.Mock).mockRejectedValue(
+      new Error('Quita los descuentos (o la recompensa) antes de separar la cuenta: su monto se calculó sobre la cuenta completa.'),
+    )
+
+    const acks = await processIntents(
+      baseParams([{ id: 'i42', type: 'SPLIT_ORDER', payload: { orderId: 'order-60', itemRefs: [{ id: 'item-1' }] } }]),
+    )
+
+    expect(acks[0].status).toBe('REJECTED')
+    expect(acks[0].message).toContain('Quita los descuentos')
   })
 
   it('carrera P2002 al persistir → devuelve el ack del ganador', async () => {

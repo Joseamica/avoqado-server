@@ -47,6 +47,8 @@ export type SyncIntentType =
   | 'MOVE_ORDER'
   | 'ASSIGN_ORDER'
   | 'CLEAR_TABLE'
+  | 'SPLIT_ORDER'
+  | 'MERGE_ORDERS'
 
 export interface SyncIntentInput {
   /** UUID del intent generado en el dispositivo (= idempotencyKey). */
@@ -93,6 +95,8 @@ const KNOWN_TYPES: SyncIntentType[] = [
   'MOVE_ORDER',
   'ASSIGN_ORDER',
   'CLEAR_TABLE',
+  'SPLIT_ORDER',
+  'MERGE_ORDERS',
 ]
 
 // ─── Entrada principal ───────────────────────────────────────────────────────
@@ -227,6 +231,10 @@ async function applyIntent(ctx: {
         return await applyOrderMutation(venueId, staffId, intent, localRefMap)
       case 'CLEAR_TABLE':
         return await applyClearTable(venueId, staffId, intent)
+      case 'SPLIT_ORDER':
+        return await applySplitOrder(venueId, staffId, intent, localRefMap)
+      case 'MERGE_ORDERS':
+        return await applyMergeOrders(venueId, staffId, intent, localRefMap)
     }
   } catch (error: any) {
     const errorCode = error?.errorCode ?? error?.code ?? 'BUSINESS_RULE'
@@ -525,6 +533,145 @@ async function applyClearTable(venueId: string, staffId: string, intent: SyncInt
 
   await tableService.clearTable(venueId, tableId)
   return { id: intent.id, status: 'ACKED', result: { tableId } }
+}
+
+/**
+ * Resuelve items del cheque cuando el cliente estaba offline.
+ *
+ * 🔑 Por qué no bastan los itemIds: una ronda enviada sin red entra por
+ * ADD_ITEMS, que inyecta el externalId determinista `sync:<intentId>:<idx>`
+ * (el ÚNICO identificador que el dispositivo conoce antes de sincronizar —
+ * el id de server todavía no existe). El FIFO por dispositivo garantiza que
+ * ese ADD_ITEMS ya corrió cuando llega el SPLIT, así que aquí aceptamos ambas
+ * formas y las traducimos a ids reales.
+ *
+ * 🔴 MONEY: resolución TODO-O-NADA. Si una sola referencia no resuelve,
+ * rechazamos en vez de separar el subconjunto que sí resolvió — un cheque
+ * partido a medias cobra de menos a un cliente y de más al otro, y el mesero
+ * no tiene forma de notarlo. Mejor un rechazo visible en cuarentena.
+ */
+async function resolveItemIds(
+  orderId: string,
+  refs: unknown,
+): Promise<{ ids: string[]; missing: number } | null> {
+  if (!Array.isArray(refs) || refs.length === 0) return null
+
+  const directIds: string[] = []
+  const externalIds: string[] = []
+  for (const raw of refs) {
+    if (typeof raw === 'string') {
+      directIds.push(raw) // forma corta: itemRefs: ["id1", "id2"]
+      continue
+    }
+    if (raw && typeof raw === 'object') {
+      const r = raw as Record<string, unknown>
+      if (typeof r.id === 'string' && r.id.length > 0) directIds.push(r.id)
+      else if (typeof r.externalId === 'string' && r.externalId.length > 0) externalIds.push(r.externalId)
+    }
+  }
+  if (directIds.length === 0 && externalIds.length === 0) return null
+
+  const rows = await prisma.orderItem.findMany({
+    where: {
+      orderId,
+      OR: [...(directIds.length ? [{ id: { in: directIds } }] : []), ...(externalIds.length ? [{ externalId: { in: externalIds } }] : [])],
+    },
+    select: { id: true },
+  })
+  const ids = [...new Set(rows.map(r => r.id))]
+  return { ids, missing: directIds.length + externalIds.length - ids.length }
+}
+
+/**
+ * SPLIT_ORDER — payload: {
+ *   orderId | localOrderId,                              // cheque origen
+ *   itemRefs: [{ id? } | { externalId? } | "itemId"],    // qué se separa
+ *   newLocalOrderId?                                     // id local del cheque nuevo
+ * }
+ *
+ * Delega en el MISMO splitOrderItems que la ruta online, así que hereda sus
+ * guards de dinero (no separar cuentas pagadas, ni con descuento/cargo manual
+ * aplicado sobre el total completo). Esos rechazos son permanentes → cuarentena.
+ *
+ * El id del cheque NUEVO se mapea a newLocalOrderId: así un PAY_CASH posterior
+ * sobre el cheque separado resuelve sin que el dispositivo haya visto jamás el
+ * id real (mismo mecanismo que OPEN_TABLE).
+ */
+async function applySplitOrder(
+  venueId: string,
+  staffId: string,
+  intent: SyncIntentInput,
+  localRefMap: Map<string, string>,
+): Promise<SyncIntentAck> {
+  await assertTableService(venueId)
+  const orderId = await resolveOrderId(venueId, intent.payload, localRefMap)
+  if (!orderId) return invalid(intent, 'SPLIT_ORDER requiere orderId/localOrderId')
+  await assertOwnership(venueId, staffId, orderId)
+
+  const resolved = await resolveItemIds(orderId, intent.payload.itemRefs)
+  if (!resolved) return invalid(intent, 'SPLIT_ORDER requiere itemRefs')
+  if (resolved.missing > 0 || resolved.ids.length === 0) {
+    return {
+      id: intent.id,
+      status: 'REJECTED',
+      errorCode: 'ITEMS_NOT_RESOLVED',
+      message:
+        'No se pudieron identificar todos los artículos a separar (pudieron eliminarse o moverse). ' +
+        'Revisa la cuenta y vuelve a separarla manualmente.',
+    }
+  }
+
+  const newLocalOrderId = typeof intent.payload.newLocalOrderId === 'string' ? intent.payload.newLocalOrderId : null
+  const result = await orderMobileService.splitOrderItems(venueId, orderId, resolved.ids, staffId)
+  if (newLocalOrderId) localRefMap.set(newLocalOrderId, result.created.id)
+
+  return {
+    id: intent.id,
+    status: 'ACKED',
+    result: {
+      orderId,
+      sourceVersion: result.source.version,
+      createdOrderId: result.created.id,
+      createdOrderNumber: result.created.orderNumber,
+      createdVersion: result.created.version,
+      ...(newLocalOrderId ? { newLocalOrderId } : {}),
+    },
+  }
+}
+
+/**
+ * MERGE_ORDERS — payload: {
+ *   orderId | localOrderId,                    // cheque DESTINO (sobrevive)
+ *   sourceOrderId | sourceLocalOrderId,        // cheque ORIGEN (se absorbe)
+ * }
+ *
+ * Ambos lados aceptan id local porque offline se pueden fusionar dos cheques
+ * que nacieron sin red (p.ej. abrir mesa + separar, y luego juntarlos otra vez).
+ * Propiedad de mesa se valida en AMBOS: absorber el cheque de otro mesero es
+ * modificar el suyo.
+ */
+async function applyMergeOrders(
+  venueId: string,
+  staffId: string,
+  intent: SyncIntentInput,
+  localRefMap: Map<string, string>,
+): Promise<SyncIntentAck> {
+  await assertTableService(venueId)
+  const targetOrderId = await resolveOrderId(venueId, intent.payload, localRefMap)
+  const sourceOrderId = await resolveOrderId(
+    venueId,
+    { orderId: intent.payload.sourceOrderId, localOrderId: intent.payload.sourceLocalOrderId },
+    localRefMap,
+  )
+  if (!targetOrderId || !sourceOrderId) {
+    return invalid(intent, 'MERGE_ORDERS requiere el cheque destino y el origen (orderId/localOrderId)')
+  }
+  await assertOwnership(venueId, staffId, targetOrderId)
+  await assertOwnership(venueId, staffId, sourceOrderId)
+
+  await orderMobileService.mergeOrders(venueId, targetOrderId, sourceOrderId, staffId)
+  const current = await prisma.order.findFirst({ where: { id: targetOrderId, venueId }, select: { version: true } })
+  return { id: intent.id, status: 'ACKED', result: { orderId: targetOrderId, mergedFromOrderId: sourceOrderId, version: current?.version ?? undefined } }
 }
 
 function invalid(intent: SyncIntentInput, message: string): SyncIntentAck {
