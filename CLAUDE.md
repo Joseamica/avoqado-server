@@ -250,3 +250,18 @@ When given an Asana task URL, you **can** see its screenshots and attachments �
      are attachments too, so this returns all of them — not just the ones embedded in the text.
 - If slide/screenshot text is unreadable after Read downscales a large image, crop it into regions with PIL and upscale (LANCZOS) before
   re-reading.
+
+## 🔴 Offline-first (reducer de intents) — LEE `.claude/rules/offline-first-y-hub-lan.md`
+
+Este repo es la FUENTE DE VERDAD del contrato: `SyncIntentType` en
+`src/services/mobile/sync.mobile.service.ts` (14 tipos hoy). Agregar o cambiar uno
+obliga a tocar Android, iOS y el MCP `pos_sync_status` en el MISMO cambio — un
+nombre desalineado falla en silencio.
+
+Tres cosas que no se negocian:
+- El reducer reutiliza los MISMOS servicios que la ruta online: el feature gating
+  y la propiedad de mesa se evalúan por intent. Sincronizar NO es puerta trasera.
+- `RETRY` (transitorio) ≠ `REJECTED` (permanente). Convertir uno en otro pierde
+  el intent para siempre.
+- Dinero: `PAY_CASH` deduplica por `[venueId, idempotencyKey]` y `ADD_ITEMS` usa
+  CAS real sobre `version`. Sin eso, un reintento cobra dos veces.
