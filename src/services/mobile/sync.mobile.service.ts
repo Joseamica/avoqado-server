@@ -311,7 +311,12 @@ async function applyOpenTable(
     })
     if (foreign && !(await staffCanManageAllTables(staffId, venueId))) {
       const ownerName = foreign.servedBy ? `${foreign.servedBy.firstName} ${foreign.servedBy.lastName}`.trim() : 'otro mesero'
-      return { id: intent.id, status: 'REJECTED', errorCode: 'TABLE_OWNED_BY_OTHER', message: `Solo ${ownerName} puede modificar esta mesa` }
+      return {
+        id: intent.id,
+        status: 'REJECTED',
+        errorCode: 'TABLE_OWNED_BY_OTHER',
+        message: `Solo ${ownerName} puede modificar esta mesa`,
+      }
     }
   }
 
@@ -331,11 +336,7 @@ async function applyOpenTable(
 }
 
 /** Resuelve el orderId real: id de server directo, o localOrderId vía mapa/BD. */
-async function resolveOrderId(
-  venueId: string,
-  payload: Record<string, unknown>,
-  localRefMap: Map<string, string>,
-): Promise<string | null> {
+async function resolveOrderId(venueId: string, payload: Record<string, unknown>, localRefMap: Map<string, string>): Promise<string | null> {
   const direct = typeof payload.orderId === 'string' && payload.orderId.length > 0 ? payload.orderId : null
   const localRef = typeof payload.localOrderId === 'string' && payload.localOrderId.length > 0 ? payload.localOrderId : null
   if (direct && !localRef) return direct
@@ -353,9 +354,58 @@ async function resolveOrderId(
       localRefMap.set(localRef, orderId)
       return orderId
     }
+
+    // 🔴 Cheques NACIDOS de un split (bug encontrado en pruebas E2E 2026-07-25).
+    // `PosSyncIntent.localRef` guarda SOLO el localOrderId del payload — o sea la
+    // orden ORIGEN. El id local del cheque NUEVO vive dentro del resultJson, así
+    // que un cobro que llegue en OTRA petición no lo encontraba y se rechazaba
+    // con INVALID_PAYLOAD: efectivo cobrado sin dónde registrarlo.
+    // Se busca por contención de JSON, que cubre las dos formas:
+    //   SPLIT_ORDER   → { newLocalOrderId, createdOrderId }
+    //   SPLIT_BY_SEAT → { created: [{ seat, orderId, localOrderId }] }
+    const fromSplit = await resolveFromSplitResult(venueId, localRef)
+    if (fromSplit) {
+      localRefMap.set(localRef, fromSplit)
+      return fromSplit
+    }
+
     return direct // último recurso: el id directo si venía
   }
   return null
+}
+
+/**
+ * Busca un cheque creado por un split cuyo id LOCAL sea [localRef].
+ *
+ * Va por SQL crudo a propósito: el filtro de JSON de Prisma no sabe mirar dentro
+ * de objetos anidados en un array (el caso de SPLIT_BY_SEAT), y el operador de
+ * contención `@>` de Postgres sí, con la misma consulta para ambas formas.
+ */
+async function resolveFromSplitResult(venueId: string, localRef: string): Promise<string | null> {
+  const rows = await prisma.$queryRaw<Array<{ resultJson: unknown }>>`
+    SELECT "resultJson"
+    FROM "PosSyncIntent"
+    WHERE "venueId" = ${venueId}
+      AND status = 'ACKED'
+      AND type IN ('SPLIT_ORDER', 'SPLIT_BY_SEAT')
+      AND (
+        "resultJson" ->> 'newLocalOrderId' = ${localRef}
+        OR "resultJson" -> 'created' @> ${JSON.stringify([{ localOrderId: localRef }])}::jsonb
+      )
+    ORDER BY "createdAt" DESC
+    LIMIT 1
+  `
+  const result = rows[0]?.resultJson as Record<string, unknown> | undefined
+  if (!result) return null
+
+  // SPLIT_ORDER: un solo cheque nuevo.
+  if (result.newLocalOrderId === localRef && typeof result.createdOrderId === 'string') {
+    return result.createdOrderId
+  }
+  // SPLIT_BY_SEAT: hay que sacar el del asiento que corresponde.
+  const created = Array.isArray(result.created) ? (result.created as Array<Record<string, unknown>>) : []
+  const match = created.find(c => c.localOrderId === localRef)
+  return typeof match?.orderId === 'string' ? match.orderId : null
 }
 
 /**
@@ -416,7 +466,12 @@ async function applyPayCash(
   const amountCents = Number(intent.payload.amountCents ?? NaN)
   const tipCents = Number(intent.payload.tipCents ?? 0)
   if (!orderId || !Number.isFinite(amountCents) || amountCents <= 0) {
-    return { id: intent.id, status: 'REJECTED', errorCode: 'INVALID_PAYLOAD', message: 'PAY_CASH requiere orderId/localOrderId y amountCents > 0' }
+    return {
+      id: intent.id,
+      status: 'REJECTED',
+      errorCode: 'INVALID_PAYLOAD',
+      message: 'PAY_CASH requiere orderId/localOrderId y amountCents > 0',
+    }
   }
   await assertOwnership(venueId, staffId, orderId)
 
@@ -531,7 +586,12 @@ async function applyClearTable(venueId: string, staffId: string, intent: SyncInt
     })
     if (foreign && !(await staffCanManageAllTables(staffId, venueId))) {
       const ownerName = foreign.servedBy ? `${foreign.servedBy.firstName} ${foreign.servedBy.lastName}`.trim() : 'otro mesero'
-      return { id: intent.id, status: 'REJECTED', errorCode: 'TABLE_OWNED_BY_OTHER', message: `Solo ${ownerName} puede modificar esta mesa` }
+      return {
+        id: intent.id,
+        status: 'REJECTED',
+        errorCode: 'TABLE_OWNED_BY_OTHER',
+        message: `Solo ${ownerName} puede modificar esta mesa`,
+      }
     }
   }
 
@@ -554,10 +614,7 @@ async function applyClearTable(venueId: string, staffId: string, intent: SyncInt
  * partido a medias cobra de menos a un cliente y de más al otro, y el mesero
  * no tiene forma de notarlo. Mejor un rechazo visible en cuarentena.
  */
-async function resolveItemIds(
-  orderId: string,
-  refs: unknown,
-): Promise<{ ids: string[]; missing: number } | null> {
+async function resolveItemIds(orderId: string, refs: unknown): Promise<{ ids: string[]; missing: number } | null> {
   if (!Array.isArray(refs) || refs.length === 0) return null
 
   const directIds: string[] = []
@@ -726,7 +783,11 @@ async function applyMergeOrders(
 
   await orderMobileService.mergeOrders(venueId, targetOrderId, sourceOrderId, staffId)
   const current = await prisma.order.findFirst({ where: { id: targetOrderId, venueId }, select: { version: true } })
-  return { id: intent.id, status: 'ACKED', result: { orderId: targetOrderId, mergedFromOrderId: sourceOrderId, version: current?.version ?? undefined } }
+  return {
+    id: intent.id,
+    status: 'ACKED',
+    result: { orderId: targetOrderId, mergedFromOrderId: sourceOrderId, version: current?.version ?? undefined },
+  }
 }
 
 function invalid(intent: SyncIntentInput, message: string): SyncIntentAck {
