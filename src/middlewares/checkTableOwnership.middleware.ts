@@ -26,7 +26,12 @@ import { resolveUserRoleForVenue } from './checkPermission.middleware'
  */
 
 /** ¿El staff puede saltarse la regla de propiedad en este venue? */
-export async function staffCanManageAllTables(userId: string, venueId: string, tokenVenueId?: string, tokenRole?: string): Promise<boolean> {
+export async function staffCanManageAllTables(
+  userId: string,
+  venueId: string,
+  tokenVenueId?: string,
+  tokenRole?: string,
+): Promise<boolean> {
   // SUPERADMIN bypass (mismo criterio que checkPermission)
   const superAdminVenue = await prisma.staffVenue.findFirst({
     where: { staffId: userId, role: StaffRole.SUPERADMIN },

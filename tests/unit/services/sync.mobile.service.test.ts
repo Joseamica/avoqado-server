@@ -197,9 +197,7 @@ describe('sync.mobile.service processIntents', () => {
       servedById: 'staff-otro',
       servedBy: { firstName: 'Juan', lastName: 'Pérez' },
     })
-    const acks = await processIntents(
-      baseParams([{ id: 'i8', type: 'PAY_CASH', payload: { orderId: 'order-4', amountCents: 10000 } }]),
-    )
+    const acks = await processIntents(baseParams([{ id: 'i8', type: 'PAY_CASH', payload: { orderId: 'order-4', amountCents: 10000 } }]))
     expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'TABLE_OWNED_BY_OTHER' })
     expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
   })
@@ -224,9 +222,7 @@ describe('sync.mobile.service processIntents', () => {
 
   it('rechazo de negocio del delegado → REJECTED, nunca excepción del batch', async () => {
     ;(orderMobileService.payCashOrder as jest.Mock).mockRejectedValue(new Error('La orden ya está pagada'))
-    const acks = await processIntents(
-      baseParams([{ id: 'i10', type: 'PAY_CASH', payload: { orderId: 'order-6', amountCents: 100 } }]),
-    )
+    const acks = await processIntents(baseParams([{ id: 'i10', type: 'PAY_CASH', payload: { orderId: 'order-6', amountCents: 100 } }]))
     expect(acks[0]).toMatchObject({ status: 'REJECTED', message: 'La orden ya está pagada' })
   })
 
@@ -373,9 +369,7 @@ describe('sync.mobile.service processIntents', () => {
       .mockResolvedValueOnce({ resultJson: { orderId: 'order-41' } }) // origen
 
     const acks = await processIntents(
-      baseParams([
-        { id: 'i40', type: 'MERGE_ORDERS', payload: { localOrderId: 'local-T', sourceLocalOrderId: 'local-S' } },
-      ]),
+      baseParams([{ id: 'i40', type: 'MERGE_ORDERS', payload: { localOrderId: 'local-T', sourceLocalOrderId: 'local-S' } }]),
     )
 
     expect(orderMobileService.mergeOrders).toHaveBeenCalledWith(VENUE, 'order-40', 'order-41', STAFF)

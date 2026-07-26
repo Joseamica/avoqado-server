@@ -49,7 +49,9 @@ describe('checkTableOwnership Middleware', () => {
   let statusMock: jest.Mock
 
   const setEnforced = (on: boolean) =>
-    (prisma.venueSettings.findUnique as jest.Mock).mockResolvedValue(on ? { enforceTableOwnership: true } : { enforceTableOwnership: false })
+    (prisma.venueSettings.findUnique as jest.Mock).mockResolvedValue(
+      on ? { enforceTableOwnership: true } : { enforceTableOwnership: false },
+    )
 
   /** La orden de mesa 1 es de Juan. */
   const setOrderOwnedByJuan = () =>
@@ -148,9 +150,7 @@ describe('checkTableOwnership Middleware', () => {
   it("source='table': mesa ocupada por otro sin override → 403", async () => {
     setEnforced(true)
     mockReq.params = { venueId: VENUE, tableId: 'table-1' }
-    ;(prisma.order.findMany as jest.Mock).mockResolvedValue([
-      { servedById: JUAN, servedBy: { firstName: 'Juan', lastName: 'Pérez' } },
-    ])
+    ;(prisma.order.findMany as jest.Mock).mockResolvedValue([{ servedById: JUAN, servedBy: { firstName: 'Juan', lastName: 'Pérez' } }])
     setCallerRoleWaiter(false)
     await checkTableOwnership('table')(mockReq as Request, mockRes as Response, mockNext)
     expect(statusMock).toHaveBeenCalledWith(403)

@@ -1616,7 +1616,9 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       include: { receipts: true },
     })
     if (existingByKey) {
-      logger.info(`🔄 [ORDER.MOBILE] Reintento idempotente detectado (key=${input.idempotencyKey}) — devuelvo el pago existente ${existingByKey.id}`)
+      logger.info(
+        `🔄 [ORDER.MOBILE] Reintento idempotente detectado (key=${input.idempotencyKey}) — devuelvo el pago existente ${existingByKey.id}`,
+      )
       return {
         paymentId: existingByKey.id,
         orderId,
@@ -1664,104 +1666,104 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   let paymentResult
   try {
     paymentResult = await prisma.$transaction(async tx => {
-    // Create payment record
-    const newPayment = await tx.payment.create({
-      data: {
-        venueId,
-        orderId,
-        amount: amountDecimal,
-        tipAmount: tipDecimal,
-        method: 'CASH',
-        status: 'COMPLETED',
-        type: 'REGULAR',
-        splitType: 'FULLPAYMENT',
-        source: 'APP',
-        processedById: effectiveStaffId,
-        shiftId: currentShift?.id,
-        // 🛡️ Llave de idempotencia: el índice único [venueId, idempotencyKey]
-        // hace que un reintento del cliente choque (P2002) o se atrape arriba,
-        // nunca cree un segundo pago.
-        idempotencyKey: input.idempotencyKey ?? null,
-        // Cash payments have no card data or merchant account
-        merchantAccountId: null,
-        feePercentage: 0,
-        feeAmount: 0,
-        netAmount: amountDecimal + tipDecimal,
-      },
-    })
-
-    // Create VenueTransaction for financial tracking
-    await tx.venueTransaction.create({
-      data: {
-        venueId,
-        paymentId: newPayment.id,
-        type: 'PAYMENT',
-        grossAmount: amountDecimal + tipDecimal,
-        feeAmount: 0,
-        netAmount: amountDecimal + tipDecimal,
-        status: 'SETTLED', // Cash is immediately settled
-      },
-    })
-
-    // Create payment allocation
-    await tx.paymentAllocation.create({
-      data: {
-        paymentId: newPayment.id,
-        orderId,
-        amount: amountDecimal,
-      },
-    })
-
-    // Update order payment status.
-    // Convention: order.total = subtotal - discountAmount + tipAmount (Mexico: tax is inclusive in subtotal).
-    // Recompute total defensively in case the order was created before tip was known.
-    // CUMULATIVE across payments (split-the-bill): sum every prior COMPLETED
-    // payment on this order so N partial payments converge to PAID — mirrors
-    // updateOrderTotalsForStandalonePayment in payment.tpv.service.ts. With a
-    // single full payment previousPayments is 0 and behavior is unchanged.
-    const previousPayments = await tx.payment.findMany({
-      where: { orderId, status: 'COMPLETED', id: { not: newPayment.id } },
-      select: { amount: true, tipAmount: true },
-    })
-    const previousPaid = previousPayments.reduce((sum, p) => sum + Number(p.amount) + Number(p.tipAmount), 0)
-    const previousTips = previousPayments.reduce((sum, p) => sum + Number(p.tipAmount), 0)
-
-    const orderSubtotal = Number(order.subtotal)
-    const orderDiscount = Number(order.discountAmount || 0)
-    // 🔴 MONEY (auditoría): sin esto, cualquier pago parcial en efectivo BORRA
-    // el cobro por servicio del total y el restante deja de cobrarlo.
-    const orderServiceCharge = Number(order.serviceChargeAmount || 0)
-    const totalTip = previousTips + tipDecimal
-    const newTotal = orderSubtotal - orderDiscount + orderServiceCharge + totalTip
-    const totalPaidIncludingTip = previousPaid + amountDecimal + tipDecimal
-    const remainingAfterPayment = newTotal - totalPaidIncludingTip
-    const isFullyPaid = remainingAfterPayment <= 0.01 // float tolerance, same as TPV path
-
-    await tx.order.update({
-      where: { id: orderId },
-      data: {
-        paymentStatus: isFullyPaid ? 'PAID' : 'PARTIAL',
-        status: isFullyPaid ? 'COMPLETED' : 'PENDING',
-        remainingBalance: Math.max(0, remainingAfterPayment),
-        tipAmount: totalTip,
-        total: new Prisma.Decimal(newTotal),
-        splitType: 'FULLPAYMENT',
-      },
-    })
-
-    // Update shift totals if there's an active shift
-    if (currentShift) {
-      await tx.shift.update({
-        where: { id: currentShift.id },
+      // Create payment record
+      const newPayment = await tx.payment.create({
         data: {
-          totalSales: { increment: amountDecimal },
-          totalTips: { increment: tipDecimal },
-          totalOrders: { increment: 1 },
+          venueId,
+          orderId,
+          amount: amountDecimal,
+          tipAmount: tipDecimal,
+          method: 'CASH',
+          status: 'COMPLETED',
+          type: 'REGULAR',
+          splitType: 'FULLPAYMENT',
+          source: 'APP',
+          processedById: effectiveStaffId,
+          shiftId: currentShift?.id,
+          // 🛡️ Llave de idempotencia: el índice único [venueId, idempotencyKey]
+          // hace que un reintento del cliente choque (P2002) o se atrape arriba,
+          // nunca cree un segundo pago.
+          idempotencyKey: input.idempotencyKey ?? null,
+          // Cash payments have no card data or merchant account
+          merchantAccountId: null,
+          feePercentage: 0,
+          feeAmount: 0,
+          netAmount: amountDecimal + tipDecimal,
         },
       })
-    }
 
-    return { newPayment, isFullyPaid }
+      // Create VenueTransaction for financial tracking
+      await tx.venueTransaction.create({
+        data: {
+          venueId,
+          paymentId: newPayment.id,
+          type: 'PAYMENT',
+          grossAmount: amountDecimal + tipDecimal,
+          feeAmount: 0,
+          netAmount: amountDecimal + tipDecimal,
+          status: 'SETTLED', // Cash is immediately settled
+        },
+      })
+
+      // Create payment allocation
+      await tx.paymentAllocation.create({
+        data: {
+          paymentId: newPayment.id,
+          orderId,
+          amount: amountDecimal,
+        },
+      })
+
+      // Update order payment status.
+      // Convention: order.total = subtotal - discountAmount + tipAmount (Mexico: tax is inclusive in subtotal).
+      // Recompute total defensively in case the order was created before tip was known.
+      // CUMULATIVE across payments (split-the-bill): sum every prior COMPLETED
+      // payment on this order so N partial payments converge to PAID — mirrors
+      // updateOrderTotalsForStandalonePayment in payment.tpv.service.ts. With a
+      // single full payment previousPayments is 0 and behavior is unchanged.
+      const previousPayments = await tx.payment.findMany({
+        where: { orderId, status: 'COMPLETED', id: { not: newPayment.id } },
+        select: { amount: true, tipAmount: true },
+      })
+      const previousPaid = previousPayments.reduce((sum, p) => sum + Number(p.amount) + Number(p.tipAmount), 0)
+      const previousTips = previousPayments.reduce((sum, p) => sum + Number(p.tipAmount), 0)
+
+      const orderSubtotal = Number(order.subtotal)
+      const orderDiscount = Number(order.discountAmount || 0)
+      // 🔴 MONEY (auditoría): sin esto, cualquier pago parcial en efectivo BORRA
+      // el cobro por servicio del total y el restante deja de cobrarlo.
+      const orderServiceCharge = Number(order.serviceChargeAmount || 0)
+      const totalTip = previousTips + tipDecimal
+      const newTotal = orderSubtotal - orderDiscount + orderServiceCharge + totalTip
+      const totalPaidIncludingTip = previousPaid + amountDecimal + tipDecimal
+      const remainingAfterPayment = newTotal - totalPaidIncludingTip
+      const isFullyPaid = remainingAfterPayment <= 0.01 // float tolerance, same as TPV path
+
+      await tx.order.update({
+        where: { id: orderId },
+        data: {
+          paymentStatus: isFullyPaid ? 'PAID' : 'PARTIAL',
+          status: isFullyPaid ? 'COMPLETED' : 'PENDING',
+          remainingBalance: Math.max(0, remainingAfterPayment),
+          tipAmount: totalTip,
+          total: new Prisma.Decimal(newTotal),
+          splitType: 'FULLPAYMENT',
+        },
+      })
+
+      // Update shift totals if there's an active shift
+      if (currentShift) {
+        await tx.shift.update({
+          where: { id: currentShift.id },
+          data: {
+            totalSales: { increment: amountDecimal },
+            totalTips: { increment: tipDecimal },
+            totalOrders: { increment: 1 },
+          },
+        })
+      }
+
+      return { newPayment, isFullyPaid }
     })
   } catch (err: any) {
     if (err?.code === 'P2002' && input.idempotencyKey) {
