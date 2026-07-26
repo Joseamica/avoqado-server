@@ -399,6 +399,98 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
 }
 
 /**
+ * Re-applies the wizard's business info onto a PROVISIONAL venue — the one
+ * `ensureVenueForOnboarding` creates mid-wizard so Steps 8/9 have a real venueId.
+ *
+ * Why this exists: the provisional venue is built from whatever the wizard had at
+ * that moment, which for a user sitting on Step 2 is nothing. Everything typed
+ * AFTERWARDS was silently dropped, because completion only flipped `status`. Venues
+ * shipped named "Mi Negocio" with empty address/city/phone and type=RESTAURANT while
+ * the real values sat untouched in `v2SetupData`.
+ *
+ * Only non-empty wizard values overwrite. The slug is regenerated ONLY when the name
+ * actually changes — it is user-visible in dashboard URLs and is the Firebase Storage
+ * path prefix (`buildStoragePath` uses `venue.slug`), so we never churn it needlessly.
+ *
+ * @param venueId - Venue to rehydrate
+ * @param businessInfo - Business info assembled from v2SetupData
+ * @param performedBy - Staff id for the audit trail
+ * @returns The updated venue, or the untouched one when nothing changed
+ */
+export async function applyBusinessInfoToVenue(venueId: string, businessInfo: CreateVenueInput['businessInfo'], performedBy?: string) {
+  const venue = await prisma.venue.findUnique({
+    where: { id: venueId },
+    select: {
+      id: true,
+      name: true,
+      slug: true,
+      address: true,
+      city: true,
+      state: true,
+      zipCode: true,
+      phone: true,
+      email: true,
+      type: true,
+    },
+  })
+  if (!venue) return null
+
+  const data: Record<string, any> = {}
+  const nextName = businessInfo.name?.trim()
+
+  if (nextName && nextName !== venue.name) {
+    data.name = nextName
+    // Slug follows the name. If the derived slug is reserved/invalid we keep the
+    // existing one — a wrong-but-working slug beats blocking the completion.
+    const baseSlug = slugify(nextName)
+    if (validateSlug(baseSlug).isValid) {
+      data.slug = await generateUniqueSlug(baseSlug)
+    } else {
+      logger.warn(`applyBusinessInfoToVenue: slug "${baseSlug}" invalid for venue ${venueId}, keeping "${venue.slug}"`)
+    }
+  }
+
+  // Location + contact: the wizard is the source of truth, but never blank out a
+  // value the venue already has with an empty wizard field.
+  if (businessInfo.address?.trim()) data.address = businessInfo.address
+  if (businessInfo.city?.trim()) data.city = businessInfo.city
+  if (businessInfo.state?.trim()) data.state = businessInfo.state
+  if (businessInfo.zipCode?.trim()) data.zipCode = businessInfo.zipCode
+  if (businessInfo.country?.trim()) data.country = businessInfo.country
+  if (businessInfo.phone?.trim()) data.phone = businessInfo.phone
+  if (businessInfo.email?.trim()) data.email = businessInfo.email
+
+  // Step 3 (business type) also lands after the provisional venue exists, so a
+  // retail store would otherwise stay stuck on the RESTAURANT default.
+  if (
+    businessInfo.venueType &&
+    Object.values(VenueType).includes(businessInfo.venueType as VenueType) &&
+    businessInfo.venueType !== venue.type
+  ) {
+    data.type = businessInfo.venueType
+  }
+
+  if (businessInfo.entityType && Object.values(EntityType).includes(businessInfo.entityType as EntityType)) {
+    data.entityType = businessInfo.entityType
+  }
+
+  if (Object.keys(data).length === 0) return venue
+
+  const updated = await prisma.venue.update({ where: { id: venueId }, data })
+
+  logAction({
+    staffId: performedBy,
+    venueId,
+    action: 'VENUE_ONBOARDING_DATA_APPLIED',
+    entity: 'Venue',
+    entityId: venueId,
+    data: { fields: Object.keys(data), previousName: venue.name, previousSlug: venue.slug, newName: updated.name, newSlug: updated.slug },
+  })
+
+  return updated
+}
+
+/**
  * Generates a unique slug for a venue
  *
  * @param baseSlug - Base slug to start from

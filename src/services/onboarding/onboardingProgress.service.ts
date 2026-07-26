@@ -627,7 +627,13 @@ export async function getV2SetupDataForCompletion(organizationId: string) {
   // Validate it's a valid Prisma EntityType enum value, fallback to undefined
   const validEntityTypes = ['PERSONA_FISICA', 'PERSONA_MORAL']
   const venueBusinessInfo = {
-    name: businessInfo.businessName || 'Mi Negocio',
+    // NO placeholder fallback here on purpose. `ensureVenueForOnboarding` guards on
+    // an empty name to avoid creating a provisional venue before Step 2 exists — a
+    // `|| 'Mi Negocio'` here made that guard unreachable, so EVERY org got a venue
+    // literally named "Mi Negocio" (created on the first GET progress, i.e. on wizard
+    // mount) that completion never renamed. Callers that actually create a venue own
+    // their own last-resort fallback.
+    name: businessInfo.businessName || '',
     type: businessType.businessType || '',
     venueType: businessType.businessType || '',
     entityType: validEntityTypes.includes(resolvedEntityType) ? resolvedEntityType : undefined,

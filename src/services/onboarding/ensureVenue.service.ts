@@ -91,6 +91,13 @@ export async function ensureVenueForOnboarding(organizationId: string, userId?: 
     // User reached this endpoint before completing Step 2 (businessInfo).
     // Don't pollute the DB with placeholder venues; the next call (after they
     // actually fill in the business name) will create it for real.
+    //
+    // 🔴 LOAD-BEARING: this guard is the ONLY thing standing between a bare wizard
+    // mount and a permanently mis-named venue. It was dead for months because
+    // getV2SetupDataForCompletion defaulted the name to 'Mi Negocio' — the GET
+    // progress call that fires on wizard mount created the venue immediately, and
+    // completion only flipped its status, so the real name never landed. Never
+    // reintroduce a name fallback upstream of this check.
     return null
   }
 

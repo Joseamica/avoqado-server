@@ -998,12 +998,16 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
 
     logger.info(`🔒 Acquired V2 onboarding lock for organization ${organizationId}`)
 
-    // Prepare venue creation input (V2 is always REAL, no demo mode)
+    // Prepare venue creation input (V2 is always REAL, no demo mode).
+    // `businessInfo.name` is no longer defaulted upstream (that default made the
+    // provisional-venue guard unreachable — see getV2SetupDataForCompletion). A
+    // completion with no business name means a broken wizard state; fall back to a
+    // placeholder here rather than stranding the user on an unslugifiable name.
     const venueInput: venueCreationService.CreateVenueInput = {
       organizationId,
       userId: authContext.userId,
       onboardingType: 'REAL',
-      businessInfo,
+      businessInfo: { ...businessInfo, name: businessInfo.name?.trim() || 'Mi Negocio' },
       paymentInfo: bankInfo?.clabe
         ? {
             clabe: bankInfo.clabe,
@@ -1027,6 +1031,15 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
 
     if (existingVenue) {
       logger.info(`V2 completion: reusing provisional venue ${existingVenue.id} (was ${existingVenue.status})`)
+      // The provisional venue was created from whatever the wizard had at that
+      // moment — typically nothing. Re-apply the full business info BEFORE flipping
+      // status, otherwise everything the user typed after Step 2 is lost (this is
+      // why venues shipped named "Mi Negocio" with an empty address).
+      await venueCreationService.applyBusinessInfoToVenue(existingVenue.id, venueInput.businessInfo, authContext.userId).catch(err => {
+        // Never block completion on the rehydration — the venue already exists.
+        logger.error(`V2 completion: failed to apply business info to venue ${existingVenue.id}`, err)
+      })
+
       // Transition out of ONBOARDING. ACTIVE if no KYC requirement was uploaded
       // mid-flow; otherwise PENDING_ACTIVATION (matches createVenueFromOnboarding
       // logic). For V2 today we leave it ONBOARDING-ish via ACTIVE since KYC is
