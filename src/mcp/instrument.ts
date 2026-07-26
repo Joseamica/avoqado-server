@@ -1,5 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import logger from '@/config/logger'
+import prisma from '@/utils/prismaClient'
 
 /** Identity behind an MCP request — for attributing tool calls in the logs. */
 interface ToolCallContext {
@@ -27,6 +28,30 @@ function resultOutcome(result: unknown): { ok: boolean; detail?: string } {
     }
   }
   return { ok: true }
+}
+
+/**
+ * Persist ONE tool call to `McpToolCall` for the 12h audit cron. Fire-and-forget:
+ * this is best-effort observability and must NEVER affect (block, delay past its
+ * own await, or throw into) the actual tool call. METADATA ONLY — no arguments or
+ * results (they carry venue/PII data), same privacy stance as the BetterStack logs.
+ */
+async function recordMcpCall(row: {
+  toolName: string
+  staffId: string | null
+  orgId: string | null
+  venueId: string | null
+  outcome: 'ok' | 'error' | 'threw'
+  detail: string | null
+  durationMs: number
+}): Promise<void> {
+  try {
+    await prisma.mcpToolCall.create({
+      data: { ...row, detail: row.detail ? row.detail.slice(0, 500) : null },
+    })
+  } catch (err) {
+    logger.warn('mcp.audit persist failed', { mcp: true, tool: row.toolName, error: (err as Error).message })
+  }
 }
 
 /**
@@ -60,17 +85,22 @@ export function instrumentTools(server: McpServer, ctx: ToolCallContext): void {
       const start = Date.now()
       // The handler is called (params, extra); pull venueId from params when present.
       const params = cbArgs[0] as { venueId?: unknown } | undefined
-      const meta = typeof params?.venueId === 'string' ? { ...base, venueId: params.venueId } : base
+      const venueId = typeof params?.venueId === 'string' ? params.venueId : null
+      const meta = venueId ? { ...base, venueId } : base
+      const audit = { toolName: name, staffId: ctx.staffId, orgId: ctx.org, venueId }
       try {
         const result = await cb(...cbArgs)
         const ms = Date.now() - start
         const { ok, detail } = resultOutcome(result)
         if (ok) logger.info(`mcp.tool ${name} ok`, { ...meta, ms })
         else logger.warn(`mcp.tool ${name} returned error`, { ...meta, ms, detail })
+        void recordMcpCall({ ...audit, outcome: ok ? 'ok' : 'error', detail: ok ? null : (detail ?? null), durationMs: ms })
         return result
       } catch (err) {
         const ms = Date.now() - start
-        logger.error(`mcp.tool ${name} threw`, { ...meta, ms, error: (err as Error).message })
+        const message = (err as Error).message
+        logger.error(`mcp.tool ${name} threw`, { ...meta, ms, error: message })
+        void recordMcpCall({ ...audit, outcome: 'threw', detail: message ?? null, durationMs: ms })
         throw err
       }
     }

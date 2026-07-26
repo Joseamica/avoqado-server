@@ -164,6 +164,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   McpOAuthClient: 'Staff, Auth, Permissions & Time',
   McpAuthCode: 'Staff, Auth, Permissions & Time',
   McpRefreshToken: 'Staff, Auth, Permissions & Time',
+  McpToolCall: 'Staff, Auth, Permissions & Time',
   StaffPasskey: 'Staff, Auth, Permissions & Time',
   user_sessions: 'Staff, Auth, Permissions & Time',
   PermissionSet: 'Staff, Auth, Permissions & Time',

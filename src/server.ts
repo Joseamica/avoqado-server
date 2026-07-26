@@ -41,6 +41,7 @@ import { autoClockOutJob } from './jobs/auto-clockout.job'
 import { monthlyOverageBillingJob } from './jobs/monthly-overage-billing.job'
 import { nightlySalesSummaryJob } from './jobs/nightly-sales-summary.job'
 import { nightlyLowStockJob } from './jobs/nightly-low-stock.job'
+import { mcpConversationAuditJob } from './jobs/mcp-conversation-audit.job'
 import { marketingCampaignJob } from './jobs/marketing-campaign.job'
 import { venueCommissionSettlementJob } from './jobs/venue-commission-settlement.job'
 import { gcalInboxSweeperJob } from './jobs/gcal-inbox-sweeper.job'
@@ -186,6 +187,9 @@ const gracefulShutdown = async (signal: string) => {
       // Stop nightly low stock digest job
       logger.info('Stopping nightly low stock digest job...')
       nightlyLowStockJob.stop()
+
+      // Stop MCP bad-experience audit job
+      mcpConversationAuditJob.stop()
 
       // Stop settlement jobs
       venueCommissionSettlementJob.stop()
@@ -468,6 +472,9 @@ const startApplication = async (retries = 3) => {
 
       // CFDI Reconcile — every 5 min; recovers/resets rows stuck in STAMPING (crash-after-stamp guard)
       cfdiReconcileJob.start()
+
+      // MCP bad-experience audit — every 12h; flags MCP tool calls that failed / denied / retried (all envs, log-only)
+      mcpConversationAuditJob.start()
 
       // Start nightly email jobs only in production (avoid sending emails from dev/staging)
       if (NODE_ENV === 'production') {

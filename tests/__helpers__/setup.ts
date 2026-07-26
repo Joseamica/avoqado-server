@@ -261,6 +261,8 @@ const prismaMock: any = {
   venueChatMessage: createMockModel(),
   // Audit trail
   activityLog: createMockModel(),
+  // MCP tool-call audit (12h bad-experience audit cron)
+  mcpToolCall: createMockModel(),
   // Sale verification (PlayTelecom SIM-sale documentation / back-office review)
   saleVerification: createMockModel(),
   // Live demo sessions (demo.dashboard.avoqado.io)

@@ -11573,6 +11573,30 @@ model McpRefreshToken {
   @@map("mcp_refresh_tokens")
 }
 
+/// Audit trail of every customer-MCP tool call — the queryable version of what
+/// `src/mcp/instrument.ts` already ships to BetterStack. METADATA ONLY (tool name,
+/// caller, venue, outcome, error reason, duration) — deliberately NO arguments or
+/// results, which carry venue/PII data. Feeds the 12h "bad MCP experience" audit
+/// (`src/jobs/mcp-conversation-audit.job.ts`): errors, permission denials, empty
+/// results and retry bursts. Fire-and-forget insert; never blocks a tool call.
+model McpToolCall {
+  id         String   @id @default(cuid())
+  toolName   String
+  staffId    String? // caller identity (from MCP OAuth context); null if unknown
+  orgId      String? // active org of the caller
+  venueId    String? // the ONLY tool argument kept (opaque id, already in logs)
+  outcome    String // 'ok' | 'error' | 'threw'  (see McpCallOutcome literals in code)
+  detail     String? // short reason when not ok (permission denied / out of scope / not found / ambiguous / thrown message)
+  durationMs Int
+  createdAt  DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([outcome, createdAt])
+  @@index([venueId, createdAt])
+  @@index([staffId, createdAt])
+  @@map("mcp_tool_calls")
+}
+
 // ─── Facturación CFDI 4.0 ───────────────────────────────────────────────
 enum CsdStatus {
   NONE
