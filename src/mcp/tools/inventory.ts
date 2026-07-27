@@ -7,6 +7,7 @@ import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { adjustInventoryStock } from '@/services/dashboard/productInventory.service'
 import { createRawMaterial } from '@/services/dashboard/rawMaterial.service'
+import { listPresentations, setPresentations } from '@/services/dashboard/rawMaterialPresentation.service'
 import { getReorderSuggestions, getAutoReorderConfig, setAutoReorderConfig } from '@/services/dashboard/autoReorder.service'
 import { planGateMessage } from '../planGate'
 import { venuesWithFeatureAccess } from '@/services/access/basePlan.service'
@@ -525,6 +526,95 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
             variance: i.countedAt ? round2(Number(i.counted) - Number(i.expected)) : null,
           })),
         })),
+      })
+    },
+  )
+
+  server.tool(
+    'raw_material_presentations',
+    'Presentaciones de compra/salida de un insumo: las unidades en que se COMPRA o se REMISIONA (caja, cono, kilo…) y cuántas unidades base equivale cada una. Sirve al flujo del CEDIS "compro en caja, entrego en cono o kilos". Un insumo sin presentaciones opera sólo en su unidad base. Requiere inventory:read.',
+    {
+      venueId: z.string().describe('Venue del insumo (debe estar en tu alcance)'),
+      rawMaterialId: z.string().describe('Insumo a consultar'),
+    },
+    async ({ venueId, rawMaterialId }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('inventory:read', venueId)
+      const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'El control de inventario')
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+
+      const rm = await prisma.rawMaterial.findFirst({ where: { id: rawMaterialId, venueId }, select: { name: true, unit: true } })
+      if (!rm) return text({ ok: false, error: 'Insumo no encontrado en este venue.' })
+
+      const presentations = await listPresentations(venueId, rawMaterialId)
+      return text({
+        ok: true,
+        insumo: rm.name,
+        unidadBase: rm.unit,
+        presentaciones: presentations.map(p => ({
+          nombre: p.name,
+          equivaleAUnidadesBase: Number(p.factorToBase),
+          esUnidadDeCompra: p.isPurchase,
+          esUnidadDeSalida: p.isDefaultOut,
+        })),
+      })
+    },
+  )
+
+  server.tool(
+    'set_raw_material_presentations',
+    'Configura las presentaciones de compra/salida de un insumo (ej. "1 caja = 360 piezas", "1 cono = 30 piezas"). REEMPLAZA el conjunto completo: manda TODAS las presentaciones que deben quedar. El factor es explícito, así que puede cruzar dimensiones (ej. "1 kilo = 18.18 piezas" para huevo). Cambiar estos factores altera cómo se valúan las compras futuras, así que es CONFIRM-GATED: la primera llamada devuelve un previo actual→nuevo y sólo ejecuta con confirm:true. Requiere inventory:update.',
+    {
+      venueId: z.string().describe('Venue del insumo (debe estar en tu alcance)'),
+      rawMaterialId: z.string().describe('Insumo a configurar'),
+      presentations: z
+        .array(
+          z.object({
+            name: z.string().min(1).describe('Nombre de la presentación, ej. "caja"'),
+            factorToBase: z.number().positive().describe('Cuántas unidades BASE hay en 1 de esta presentación'),
+            isPurchase: z.boolean().optional().describe('Es la unidad en que se compra'),
+            isDefaultOut: z.boolean().optional().describe('Es la unidad de salida por defecto'),
+          }),
+        )
+        .describe('Conjunto COMPLETO de presentaciones (una lista vacía las elimina todas)'),
+      confirm: z.boolean().optional().describe('true para ejecutar; sin esto sólo devuelve el previo'),
+    },
+    async ({ venueId, rawMaterialId, presentations, confirm }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('inventory:update', venueId)
+      const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'El control de inventario')
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+
+      const rm = await prisma.rawMaterial.findFirst({ where: { id: rawMaterialId, venueId }, select: { name: true, unit: true } })
+      if (!rm) return text({ ok: false, error: 'Insumo no encontrado en este venue.' })
+
+      const actuales = await listPresentations(venueId, rawMaterialId)
+      const describe = (list: { name: string; factorToBase: unknown }[]) =>
+        list.length === 0 ? 'sin presentaciones' : list.map(p => `1 ${p.name} = ${Number(p.factorToBase)} ${rm.unit}`).join(' · ')
+
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          insumo: rm.name,
+          preview: { actual: describe(actuales), nuevo: describe(presentations) },
+          aviso: 'Afecta cómo se valúan y convierten las compras futuras de este insumo. Vuelve a llamar con confirm:true para aplicar.',
+        })
+      }
+
+      const saved = await setPresentations(venueId, rawMaterialId, presentations, scope.staffId)
+      await auditMcpWrite(scope, {
+        action: 'RAW_MATERIAL_PRESENTATIONS_UPDATED',
+        entity: 'RawMaterial',
+        entityId: rawMaterialId,
+        venueId,
+        data: { antes: describe(actuales), despues: describe(saved) },
+      })
+      return text({
+        ok: true,
+        insumo: rm.name,
+        unidadBase: rm.unit,
+        presentaciones: saved.map(p => ({ nombre: p.name, equivaleAUnidadesBase: Number(p.factorToBase) })),
       })
     },
   )

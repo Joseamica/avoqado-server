@@ -204,6 +204,12 @@ export async function createInterVenueTransfer(contextVenueId: string, input: Cr
     if (!destination || destination.venueId !== input.destinationVenueId) {
       throw new AppError('El insumo de destino no pertenece a la sucursal de destino', 400)
     }
+    // Se exige la MISMA unidad base a propósito. Las presentaciones de compra
+    // (caja, cono, kilo) resuelven la CAPTURA — cuántas unidades entran o salen —
+    // no la equivalencia entre dos insumos distintos. Permitir vincular un insumo
+    // en piezas con otro en kilogramos obligaría a convertir stock entre
+    // dimensiones en cada traslado, y un factor mal capturado descuadraría el
+    // inventario de las dos sucursales sin que nadie lo note.
     if (source.unit !== destination.unit) {
       throw new AppError('Los insumos vinculados deben usar exactamente la misma unidad base', 400)
     }

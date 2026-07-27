@@ -218,6 +218,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   LowStockAlert: 'Inventory & Stock',
   RawMaterial: 'Inventory & Stock',
   RawMaterialMovement: 'Inventory & Stock',
+  RawMaterialPresentation: 'Inventory & Stock',
   Recipe: 'Inventory & Stock',
   RecipeLine: 'Inventory & Stock',
   Supplier: 'Inventory & Stock',

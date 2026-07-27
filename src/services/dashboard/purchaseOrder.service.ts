@@ -27,6 +27,59 @@ import PDFDocument from 'pdfkit'
 import { renderLabelsPdf, getUnitAbbreviation, type LabelItem } from '../labels/labelPdfRenderer'
 import { logAction } from './activity-log.service'
 
+/**
+ * Normaliza una cantidad recibida a la UNIDAD BASE del insumo, junto con su costo.
+ *
+ * Dos caminos, y el orden importa:
+ * 1. **Presentación de compra** (CEDIS: "50 cajas de huevo"): la línea trae
+ *    `presentationFactor` congelado al momento de la compra. Cantidad × factor
+ *    da la base, y el costo se DIVIDE entre el factor (una caja a $360 son $1
+ *    por pieza; sin dividir, el costo unitario quedaría inflado ×360).
+ *    Esto cruza dimensiones (kilos↔piezas) porque el factor es explícito.
+ * 2. **Legacy** (sin presentación): idéntico a antes — misma unidad se pasa
+ *    tal cual, y unidades distintas van por `convertUnit` con su guarda de
+ *    compatibilidad dimensional.
+ *
+ * Convertir AQUÍ (en el borde) mantiene a `createStockBatch`, `currentStock` y
+ * los movimientos viendo siempre la unidad base, como hasta hoy.
+ */
+function purchasedQuantityInBaseUnit(
+  orderItem: { unit: Unit; unitPrice: Decimal; presentationFactor: Decimal | null; rawMaterial: { name: string; unit: Unit } },
+  quantityInOrderUnit: Decimal | number,
+): { baseQuantity: Decimal; batch: { quantity: Decimal; unit: Unit; costPerUnit: Decimal } } {
+  const baseUnit = orderItem.rawMaterial.unit
+
+  if (orderItem.presentationFactor) {
+    const factor = new Decimal(orderItem.presentationFactor)
+    if (!factor.isFinite() || factor.lte(0)) {
+      throw new AppError(`El factor de presentación de ${orderItem.rawMaterial.name} es inválido`, 400)
+    }
+    const baseQuantity = new Decimal(quantityInOrderUnit).mul(factor)
+    // Ya viene en unidad base, así que `createStockBatch` no debe reconvertir:
+    // se le pasa la base explícita y el costo YA dividido entre el factor.
+    return {
+      baseQuantity,
+      batch: { quantity: baseQuantity, unit: baseUnit, costPerUnit: orderItem.unitPrice.div(factor) },
+    }
+  }
+
+  // Camino legacy — byte-idéntico al comportamiento anterior.
+  if (orderItem.unit !== baseUnit && !areUnitsCompatible(orderItem.unit, baseUnit)) {
+    throw new AppError(
+      `Cannot receive ${orderItem.rawMaterial.name}: PO unit ${orderItem.unit} is incompatible with raw material unit ${baseUnit}`,
+      400,
+    )
+  }
+  return {
+    baseQuantity:
+      orderItem.unit === baseUnit ? new Decimal(quantityInOrderUnit) : convertUnit(quantityInOrderUnit, orderItem.unit, baseUnit),
+    // `createStockBatch` normaliza (quantity, unit, costPerUnit) internamente:
+    // en legacy se le sigue pasando la cantidad y unidad DE LA ORDEN, tal como
+    // antes. Pasarle la base con la unidad de la orden la convertiría dos veces.
+    batch: { quantity: new Decimal(quantityInOrderUnit), unit: orderItem.unit, costPerUnit: orderItem.unitPrice },
+  }
+}
+
 async function getStaffSummary(staffId?: string | null) {
   if (!staffId) return null
   const staff = await prisma.staff.findUnique({
@@ -655,6 +708,11 @@ export async function receivePurchaseOrder(
       expirationDate.setDate(expirationDate.getDate() + orderItem.rawMaterial.shelfLifeDays)
     }
 
+    // Presentación de compra (CEDIS): si la línea se compró en "caja", se
+    // convierte AQUÍ, en el borde, y todo lo de abajo (batch, stock, movimiento)
+    // sigue viendo la unidad base como siempre.
+    const purchased = purchasedQuantityInBaseUnit(orderItem, receivedItem.quantityReceived)
+
     // Create FIFO batch for this received quantity. createStockBatch normalizes
     // (quantity, unit, costPerUnit) to the raw material's storage unit
     // internally — we still need to compute the same normalized quantity here
@@ -664,9 +722,9 @@ export async function receivePurchaseOrder(
       orderItem.rawMaterialId,
       {
         purchaseOrderItemId: orderItem.id,
-        quantity: receivedItem.quantityReceived,
-        unit: orderItem.unit,
-        costPerUnit: orderItem.unitPrice.toNumber(),
+        quantity: purchased.batch.quantity.toNumber(),
+        unit: purchased.batch.unit,
+        costPerUnit: purchased.batch.costPerUnit.toNumber(),
         receivedDate: new Date(data.receivedDate),
         expirationDate,
       },
@@ -675,19 +733,7 @@ export async function receivePurchaseOrder(
 
     batchCreations.push({ itemId: orderItem.id, batchPromise })
 
-    // Validate dimensional compatibility BEFORE mutating stock — same guard
-    // as createStockBatch, but applied here too because we increment
-    // currentStock independently and would otherwise diverge from the batch.
-    if (orderItem.unit !== orderItem.rawMaterial.unit && !areUnitsCompatible(orderItem.unit, orderItem.rawMaterial.unit)) {
-      throw new AppError(
-        `Cannot receive ${orderItem.rawMaterial.name}: PO unit ${orderItem.unit} is incompatible with raw material unit ${orderItem.rawMaterial.unit}`,
-        400,
-      )
-    }
-    const receivedInRmUnit =
-      orderItem.unit === orderItem.rawMaterial.unit
-        ? new Decimal(receivedItem.quantityReceived)
-        : convertUnit(receivedItem.quantityReceived, orderItem.unit, orderItem.rawMaterial.unit)
+    const receivedInRmUnit = purchased.baseQuantity
 
     // Update order item quantity received and set receiveStatus
     operations.push(
@@ -726,10 +772,7 @@ export async function receivePurchaseOrder(
     const receivedItem = data.items[i]
     const orderItem = order.items.find(item => item.id === receivedItem.purchaseOrderItemId)!
     const batch = createdBatches[i]
-    const receivedInRmUnit =
-      orderItem.unit === orderItem.rawMaterial.unit
-        ? new Decimal(receivedItem.quantityReceived)
-        : convertUnit(receivedItem.quantityReceived, orderItem.unit, orderItem.rawMaterial.unit)
+    const receivedInRmUnit = purchasedQuantityInBaseUnit(orderItem, receivedItem.quantityReceived).baseQuantity
 
     operations.push(
       prisma.rawMaterialMovement.create({

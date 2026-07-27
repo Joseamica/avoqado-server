@@ -181,6 +181,7 @@ const prismaMock: any = {
   recipeLine: createMockModel(),
   stockBatch: createMockModel(),
   rawMaterialMovement: createMockModel(),
+  rawMaterialPresentation: createMockModel(), // Presentaciones de compra/salida (caja, cono, kilo)
   // Payment config & analytics models
   merchantAccount: createMockModel(),
   angelPayUserAccount: createMockModel(),

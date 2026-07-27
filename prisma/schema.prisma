@@ -1692,6 +1692,7 @@ model RawMaterial {
   stockCountItems    StockCountItem[] // Physical count lines (ingredient counting)
   transferItemsFrom  InterVenueTransferItem[] @relation("TransferSourceRawMaterial")
   transferItemsTo    InterVenueTransferItem[] @relation("TransferDestinationRawMaterial")
+  presentations      RawMaterialPresentation[] // Unidades de compra/salida (caja, cono, kilo…)
 
   // Demo data flag (for cleanup on conversion)
   isDemo Boolean @default(false)
@@ -1706,6 +1707,30 @@ model RawMaterial {
   @@index([active])
   @@index([currentStock]) // For low stock queries
   @@index([deletedAt]) // For filtering out deleted records
+}
+
+// Presentaciones de compra/salida por insumo (CEDIS): la unidad en que se compra
+// o remisiona un producto (caja, cono, kilo…) y su equivalencia a la unidad base
+// del insumo. El factor es EXPLÍCITO por producto, así que puede cruzar dimensiones
+// (conteo↔peso) que `UnitConversion`/`convertUnit` prohíben. Sin filas ⇒ el insumo
+// se comporta byte-idéntico a hoy (usa `convertUnit`). Lógica: src/utils/productPresentations.ts
+model RawMaterialPresentation {
+  id            String      @id @default(cuid())
+  rawMaterialId String
+  rawMaterial   RawMaterial @relation(fields: [rawMaterialId], references: [id], onDelete: Cascade)
+  venueId       String // denormalizado desde el insumo para tenant isolation
+
+  name         String // "cono", "caja", "kilo"… libre, no es el enum Unit
+  factorToBase Decimal @db.Decimal(14, 6) // cuántas unidades BASE hay en UNA de esta presentación
+  isPurchase   Boolean @default(false) // unidad por defecto de COMPRA/entrada
+  isDefaultOut Boolean @default(false) // unidad por defecto de SALIDA/remisión
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([rawMaterialId, name]) // no repetir una presentación en el mismo insumo
+  @@index([rawMaterialId])
+  @@index([venueId])
 }
 
 // Product recipes - composition of raw materials
@@ -1923,6 +1948,13 @@ model PurchaseOrderItem {
   quantityOrdered  Decimal @db.Decimal(12, 3)
   quantityReceived Decimal @default(0) @db.Decimal(12, 3)
   unit             Unit
+
+  // Presentación de compra (CEDIS: "compro 50 CAJAS de huevo"). SNAPSHOT, no FK:
+  // el factor se congela al comprar, igual que StockBatch.costPerUnit congela el
+  // costo — si mañana alguien corrige "1 caja = 400", esta orden sigue valuada a
+  // su factor original. Ambos null ⇒ camino legacy por `unit` + convertUnit.
+  presentationName   String?
+  presentationFactor Decimal? @db.Decimal(14, 6) // unidades BASE por cada 1 de la presentación
 
   // Receive status tracking
   receiveStatus PurchaseOrderItemStatus @default(PENDING)

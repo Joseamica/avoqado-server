@@ -662,6 +662,34 @@ export const RawMaterialIdParamsSchema = z.object({
   }),
 })
 
+/**
+ * Presentaciones de compra/salida de un insumo (CEDIS): "1 caja = 360 piezas".
+ * El factor es explícito por producto, así que puede cruzar dimensiones
+ * (kilos↔piezas) — el servicio valida duplicados y unicidad de compra/salida.
+ */
+export const SetRawMaterialPresentationsSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid(),
+    rawMaterialId: cuidLikeId(),
+  }),
+  body: z.object({
+    presentations: z
+      .array(
+        z.object({
+          name: z.string().trim().min(1, 'El nombre de la presentación es requerido').max(40, 'El nombre es demasiado largo'),
+          factorToBase: z
+            .number()
+            .finite('El factor debe ser un número finito')
+            .positive('El factor debe ser mayor que cero')
+            .max(999_999.999999, 'El factor excede el máximo permitido'),
+          isPurchase: z.boolean().optional(),
+          isDefaultOut: z.boolean().optional(),
+        }),
+      )
+      .max(20, 'Máximo 20 presentaciones por insumo'),
+  }),
+})
+
 export const SupplierIdParamsSchema = z.object({
   params: z.object({
     venueId: z.string().cuid(),

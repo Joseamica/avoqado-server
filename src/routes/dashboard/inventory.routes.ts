@@ -8,6 +8,7 @@ import * as autoReorderController from '../../controllers/dashboard/auto-reorder
 
 // Import controllers
 import * as rawMaterialController from '../../controllers/dashboard/inventory/rawMaterial.controller'
+import * as rawMaterialPresentationController from '../../controllers/dashboard/inventory/rawMaterialPresentation.controller'
 import * as recipeController from '../../controllers/dashboard/inventory/recipe.controller'
 import * as pricingController from '../../controllers/dashboard/inventory/pricing.controller'
 import * as supplierController from '../../controllers/dashboard/inventory/supplier.controller'
@@ -39,6 +40,7 @@ import {
   AdjustStockSchema,
   GetRawMaterialsQuerySchema,
   RawMaterialIdParamsSchema,
+  SetRawMaterialPresentationsSchema,
   CreateRecipeSchema,
   UpdateRecipeSchema,
   AddRecipeLineSchema,
@@ -140,6 +142,29 @@ router.get(
   checkPermission('inventory:read'),
   validateRequest(RawMaterialIdParamsSchema),
   rawMaterialController.getRawMaterial,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/raw-materials/{rawMaterialId}/presentations:
+ *   get:
+ *     tags: [Inventory - Raw Materials]
+ *     summary: Presentaciones de compra/salida del insumo (caja, cono, kilo)
+ *   put:
+ *     tags: [Inventory - Raw Materials]
+ *     summary: Reemplaza el conjunto de presentaciones del insumo
+ */
+router.get(
+  '/raw-materials/:rawMaterialId/presentations',
+  checkPermission('inventory:read'),
+  validateRequest(RawMaterialIdParamsSchema),
+  rawMaterialPresentationController.getPresentations,
+)
+router.put(
+  '/raw-materials/:rawMaterialId/presentations',
+  checkPermission('inventory:update'),
+  validateRequest(SetRawMaterialPresentationsSchema),
+  rawMaterialPresentationController.setPresentations,
 )
 
 /**
