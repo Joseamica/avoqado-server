@@ -60,6 +60,26 @@ describe('rawMaterialPresentation.service', () => {
       ])
     })
 
+    it('REGRESIÓN: toma candado de fila del insumo ANTES de borrar (replace-all atómico)', async () => {
+      // Sin el `FOR UPDATE`, dos guardados simultáneos del mismo insumo se
+      // intercalan en READ COMMITTED y el resultado es la UNIÓN de ambos sets
+      // en vez del reemplazo: una presentación borrada por el usuario "revive".
+      const order: string[] = []
+      prismaMock.$queryRaw.mockImplementation(async () => {
+        order.push('lock')
+        return []
+      })
+      prismaMock.rawMaterialPresentation.deleteMany.mockImplementation(async () => {
+        order.push('delete')
+        return { count: 0 }
+      })
+
+      await setPresentations(VENUE, RM, [{ name: 'caja', factorToBase: 360 }], 'staff-1')
+
+      expect(prismaMock.$queryRaw).toHaveBeenCalled()
+      expect(order).toEqual(['lock', 'delete'])
+    })
+
     it('guarda el set y audita en ActivityLog', async () => {
       await setPresentations(
         VENUE,

@@ -80,6 +80,15 @@ export async function setPresentations(
   if (oneDefaultOut > 1) throw new AppError('Sólo una presentación puede ser la unidad de salida por defecto', 400)
 
   const saved = await prisma.$transaction(async tx => {
+    // Candado de fila sobre el insumo padre ANTES de borrar. Sin esto, dos
+    // guardados simultáneos del MISMO insumo se intercalan en READ COMMITTED:
+    // cada uno borra lo que alcanza a ver y luego inserta lo suyo, y el
+    // resultado es la UNIÓN de ambos en vez del reemplazo que el usuario pidió
+    // (una presentación borrada "revive"). Con nombres repetidos, además,
+    // reventaba con P2002 en `createMany`. El lock serializa los replace-all
+    // del mismo insumo; insumos distintos siguen en paralelo.
+    await tx.$queryRaw`SELECT id FROM "RawMaterial" WHERE id = ${rawMaterialId} FOR UPDATE`
+
     await tx.rawMaterialPresentation.deleteMany({ where: { rawMaterialId, venueId } })
     if (presentations.length === 0) return []
     await tx.rawMaterialPresentation.createMany({
