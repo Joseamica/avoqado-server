@@ -1,0 +1,18 @@
+-- PLACEHOLDER INTENCIONAL — NO BORRAR. No ejecuta nada.
+--
+-- Esta migración se aplicó a producción el 2025-12-02 04:21 con el nombre mal
+-- fechado (20241201 = diciembre 2024, un año antes de crearse). Ese nombre la
+-- ordenaba ANTES de todas las demás, que es exactamente el bug que después causó
+-- el incidente del folio de JournalEntry. Se corrigió 20 minutos más tarde
+-- reemplazándola por 20251202000200_add_isDemo_and_email_unique, y la carpeta se
+-- borró del repo (commit f9a35a93).
+--
+-- El renglón quedó en la tabla _prisma_migrations de producción. Sin esta carpeta,
+-- Prisma ve el historial como divergente: `migrate status` reporta ruido y, peor,
+-- `migrate dev` intenta reconciliar y deja shadow DBs huérfanas en el servidor
+-- (fue el origen de las dos que aparecieron en producción).
+--
+-- Se deja VACÍA a propósito: 20251202000200 hace todo el trabajo real con
+-- ADD COLUMN IF NOT EXISTS, así que es idempotente y autosuficiente. En una base
+-- nueva esta corre como no-op y la siguiente crea las columnas; en producción ya
+-- está registrada como aplicada y `migrate deploy` la salta.
