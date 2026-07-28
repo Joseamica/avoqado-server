@@ -55,6 +55,23 @@ export class InternalServerError extends AppError {
   }
 }
 
+/**
+ * 503 — the request could not be served right now, but the SAME request is
+ * expected to work on a retry. Use it for TRANSIENT infrastructure failures
+ * (dropped DB connection, upstream blip), never for a business rejection.
+ *
+ * Exists because the alternative is worse than a wrong status code: a transient
+ * DB error swallowed inside an authorization check reads to the user as
+ * "you lost access" (real incident 2026-07-27, see verifyAccess.middleware.ts).
+ * A 503 says "try again"; a 403 says "you are not allowed" — they must not be
+ * interchangeable.
+ */
+export class ServiceUnavailableError extends AppError {
+  constructor(message: string = 'Servicio no disponible temporalmente. Intenta de nuevo.', code?: string) {
+    super(message, 503, true, code)
+  }
+}
+
 // Consider re-adding other specific error classes if they were used elsewhere and are now missing:
 export class AuthenticationError extends AppError {
   constructor(message: string = 'No autenticado') {

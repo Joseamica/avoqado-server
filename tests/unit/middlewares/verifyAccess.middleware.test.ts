@@ -13,7 +13,7 @@ import { StaffRole } from '@prisma/client'
 import { verifyAccess } from '@/middlewares/verifyAccess.middleware'
 import * as accessService from '@/services/access/access.service'
 import prisma from '@/utils/prismaClient'
-import { ForbiddenError } from '@/errors/AppError'
+import { ForbiddenError, ServiceUnavailableError } from '@/errors/AppError'
 
 // Mock dependencies
 jest.mock('@/utils/prismaClient', () => ({
@@ -299,6 +299,110 @@ describe('verifyAccess Middleware', () => {
     })
   })
 
+  /**
+   * Regression suite for the 2026-07-27 23:26 UTC incident: three Prisma P1017
+   * ("Server has closed the connection") inside the access lookup were reported
+   * to a MANAGER — who had an active StaffVenue row — as 403 "No access to this
+   * venue", three times in four seconds.
+   *
+   * The invariant these tests lock down: a TRANSIENT connection failure must
+   * never be presented as an authorization verdict.
+   */
+  describe('Transient DB errors are NOT access denials', () => {
+    /** Shaped like a real PrismaClientKnownRequestError: what matters is `.code`. */
+    const dbConnectionError = (code: string) =>
+      Object.assign(new Error('\nInvalid `prisma.venue.findUnique()` invocation:\n\n\nServer has closed the connection.'), { code })
+
+    it('answers 503 (not 403) when a P1017 outlives the retry', async () => {
+      ;(accessService.getUserAccess as jest.Mock).mockRejectedValue(dbConnectionError('P1017'))
+
+      const middleware = verifyAccess({ permission: 'menu:read' })
+
+      await middleware(mockReq as Request, mockRes as Response, mockNext)
+
+      expect(mockNext).toHaveBeenCalledWith(expect.any(ServiceUnavailableError))
+      // The whole point: the user must NOT be told they lost access.
+      expect(mockNext).not.toHaveBeenCalledWith(expect.any(ForbiddenError))
+      expect((mockNext as jest.Mock).mock.calls[0][0].statusCode).toBe(503)
+    })
+
+    it('recovers silently when the retry reconnects', async () => {
+      ;(accessService.getUserAccess as jest.Mock).mockRejectedValueOnce(dbConnectionError('P1017')).mockResolvedValueOnce(mockUserAccess)
+      ;(accessService.hasPermission as jest.Mock).mockReturnValue(true)
+
+      const middleware = verifyAccess({ permission: 'menu:read' })
+
+      await middleware(mockReq as Request, mockRes as Response, mockNext)
+
+      // Access granted on the second attempt — no error reaches the client at all.
+      expect(mockNext).toHaveBeenCalledWith()
+      expect(accessService.getUserAccess).toHaveBeenCalledTimes(2)
+    })
+
+    it('answers 503 when the blip hits the SUPERADMIN lookup (outer catch path)', async () => {
+      // This query runs OUTSIDE the inner try/catch, so it used to reach the
+      // fail-closed handler and become a 403 as well.
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockRejectedValue(dbConnectionError('P1017'))
+
+      const middleware = verifyAccess({ permission: 'menu:read' })
+
+      await middleware(mockReq as Request, mockRes as Response, mockNext)
+
+      expect(mockNext).toHaveBeenCalledWith(expect.any(ServiceUnavailableError))
+      expect(mockNext).not.toHaveBeenCalledWith(expect.any(ForbiddenError))
+    })
+
+    it('covers every connection-level code, not just P1017', async () => {
+      for (const code of ['P1001', 'P1002', 'P1008', 'P1017', 'ECONNRESET', 'ETIMEDOUT']) {
+        jest.clearAllMocks()
+        ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(null)
+        ;(accessService.getUserAccess as jest.Mock).mockRejectedValue(dbConnectionError(code))
+
+        await verifyAccess({})(mockReq as Request, mockRes as Response, mockNext)
+
+        expect(mockNext).toHaveBeenCalledWith(expect.any(ServiceUnavailableError))
+      }
+    })
+
+    // --- REGRESSION: the fail-closed contract must survive the change ---
+
+    it('still fails CLOSED (403) on a P2024 pool timeout', async () => {
+      // P2024 is deliberately excluded from the retry predicate: retrying into an
+      // exhausted pool makes it worse. It must keep the fail-closed behavior.
+      ;(accessService.getUserAccess as jest.Mock).mockRejectedValue(dbConnectionError('P2024'))
+
+      const middleware = verifyAccess({ permission: 'menu:read' })
+
+      await middleware(mockReq as Request, mockRes as Response, mockNext)
+
+      expect(mockNext).toHaveBeenCalledWith(expect.any(ForbiddenError))
+      expect(accessService.getUserAccess).toHaveBeenCalledTimes(1) // not retried
+    })
+
+    it('still fails CLOSED (403) on a generic error with no code', async () => {
+      ;(accessService.getUserAccess as jest.Mock).mockRejectedValue(new Error('something unexpected'))
+
+      const middleware = verifyAccess({ permission: 'menu:read' })
+
+      await middleware(mockReq as Request, mockRes as Response, mockNext)
+
+      expect(mockNext).toHaveBeenCalledWith(expect.any(ForbiddenError))
+      expect(mockNext).not.toHaveBeenCalledWith(expect.any(ServiceUnavailableError))
+    })
+
+    it('still denies a genuine non-member with 403, not 503', async () => {
+      ;(accessService.getUserAccess as jest.Mock).mockRejectedValue(new Error('User has no access to venue'))
+
+      const middleware = verifyAccess({})
+
+      await middleware(mockReq as Request, mockRes as Response, mockNext)
+
+      const passed = (mockNext as jest.Mock).mock.calls[0][0]
+      expect(passed).toBeInstanceOf(ForbiddenError)
+      expect(passed.statusCode).toBe(403)
+    })
+  })
+
   describe('Venue Access from URL Params', () => {
     it('should use venueId from URL params over authContext', async () => {
       mockReq.params = { venueId: 'different_venue_456' }
@@ -365,18 +469,37 @@ describe('verifyAccess Middleware', () => {
   // Async rejection containment (the 2026-06-23 crash class).
   // The "Fail-Closed Error Handling" block above already covers a rejecting
   // getUserAccess (the INNER await). This pins the OUTER await — the SUPERADMIN
-  // prisma.staffVenue.findFirst lookup — so a transient DB error there is contained
-  // (fail-closed → ForbiddenError) and never escapes as an unhandledRejection.
+  // prisma.staffVenue.findFirst lookup — so a DB error there is contained and
+  // never escapes as an unhandledRejection.
+  //
+  // The containment property is unchanged. What the 2026-07-27 fix changed is the
+  // VERDICT: a transient connection code is now surfaced as 503 instead of being
+  // dressed up as a 403 permission denial. P2024 keeps failing closed, since it is
+  // excluded from the retry predicate on purpose.
   // ──────────────────────────────────────────────────────────────────
   describe('async rejection containment (the crash class)', () => {
-    it.each(['P1017', 'P2024'])('contains a %s rejection from the SUPERADMIN check (fail-closed, no escape)', async code => {
-      ;(prisma.staffVenue.findFirst as jest.Mock).mockRejectedValueOnce(Object.assign(new Error(`prisma ${code}`), { code }))
+    const rejectSuperAdminLookupWith = (code: string) =>
+      (prisma.staffVenue.findFirst as jest.Mock).mockRejectedValue(Object.assign(new Error(`prisma ${code}`), { code }))
+
+    it('contains a persistent P1017 from the SUPERADMIN check as 503 (no escape)', async () => {
+      rejectSuperAdminLookupWith('P1017')
 
       const middleware = verifyAccess({ permission: 'menu:read' })
 
       // Must not reject the returned promise (no unhandledRejection escapes)...
       await expect(middleware(mockReq as Request, mockRes as Response, mockNext)).resolves.toBeUndefined()
-      // ...and fails closed via the error handler rather than self-producing a response.
+      // ...and is handed to the error middleware rather than self-producing a response.
+      expect(mockNext).toHaveBeenCalledWith(expect.any(ServiceUnavailableError))
+      expect(mockNext).not.toHaveBeenCalledWith(expect.any(ForbiddenError))
+      expect(statusMock).not.toHaveBeenCalled()
+    })
+
+    it('contains a P2024 rejection from the SUPERADMIN check (fail-closed, no escape)', async () => {
+      rejectSuperAdminLookupWith('P2024')
+
+      const middleware = verifyAccess({ permission: 'menu:read' })
+
+      await expect(middleware(mockReq as Request, mockRes as Response, mockNext)).resolves.toBeUndefined()
       expect(mockNext).toHaveBeenCalledWith(expect.any(ForbiddenError))
       expect(statusMock).not.toHaveBeenCalled()
     })

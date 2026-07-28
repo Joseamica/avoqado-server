@@ -39,9 +39,39 @@ import {
   UserAccess,
   AccessCache,
 } from '@/services/access/access.service'
-import { ForbiddenError } from '@/errors/AppError'
+import { ForbiddenError, ServiceUnavailableError } from '@/errors/AppError'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
+import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
+
+/**
+ * A dropped DB connection is NOT an authorization decision.
+ *
+ * Incident 2026-07-27 23:26 UTC: three Prisma P1017 ("Server has closed the
+ * connection") raised inside the access lookup were caught by the blanket
+ * `catch` below, which assumed any throw meant "not a member", and answered
+ * 403 "No access to this venue" three times in four seconds to a MANAGER who
+ * *did* have an active StaffVenue row. The same P1017 hit the POS-monitor cron
+ * in the same second and survived, because crons retry (.claude/rules/cron-jobs.md)
+ * while the request path did not.
+ *
+ * Two consequences, both fixed here:
+ *   1. We retry ONCE on a connection-level blip, since these fail in 4-6ms when
+ *      Prisma lazily notices a dead pooled connection and the next attempt
+ *      generally reconnects.
+ *   2. If it still fails, we answer 503 (retryable) instead of 403. Fail-closed
+ *      still holds for genuine errors — we refuse only to MISLABEL infrastructure
+ *      as a permission verdict.
+ *
+ * `shouldRetryDbConnectionError` deliberately excludes P2024 (pool timeout):
+ * retrying into an exhausted pool makes it worse. A P2024 therefore keeps the
+ * fail-closed path, which is the intended behavior.
+ */
+const TRANSIENT_DB_RETRY = {
+  retries: 1,
+  initialDelay: 150,
+  shouldRetry: shouldRetryDbConnectionError,
+} as const
 
 /**
  * Options for verifyAccess middleware
@@ -113,13 +143,17 @@ export const verifyAccess = (options: VerifyAccessOptions = {}) => {
       // for the effective user / role.
       const superAdminVenue = isImpersonating
         ? null
-        : await prisma.staffVenue.findFirst({
-            where: {
-              staffId: userId,
-              role: StaffRole.SUPERADMIN,
-            },
-            select: { id: true },
-          })
+        : await retry(
+            () =>
+              prisma.staffVenue.findFirst({
+                where: {
+                  staffId: userId,
+                  role: StaffRole.SUPERADMIN,
+                },
+                select: { id: true },
+              }),
+            { ...TRANSIENT_DB_RETRY, context: 'verifyAccess.superAdminLookup' },
+          )
 
       // SUPERADMIN always passes through - they have access to ALL venues
       if (superAdminVenue) {
@@ -152,10 +186,24 @@ export const verifyAccess = (options: VerifyAccessOptions = {}) => {
 
       let access: UserAccess
       try {
-        access = impersonationOverride
-          ? await getUserAccess(userId, targetVenueId, req.accessCache, impersonationOverride)
-          : await getUserAccess(userId, targetVenueId, req.accessCache)
+        access = await retry(
+          () =>
+            impersonationOverride
+              ? getUserAccess(userId, targetVenueId, req.accessCache, impersonationOverride)
+              : getUserAccess(userId, targetVenueId, req.accessCache),
+          { ...TRANSIENT_DB_RETRY, context: 'verifyAccess.getUserAccess' },
+        )
       } catch (error) {
+        // A connection blip that survived the retry is infrastructure, not a
+        // membership verdict — say "try again", never "you have no access".
+        if (shouldRetryDbConnectionError(error)) {
+          logger.error(
+            `verifyAccess: transient DB error resolving access for user ${userId} on venue ${targetVenueId} — returning 503, NOT 403`,
+            error,
+          )
+          throw new ServiceUnavailableError('No se pudo verificar tu acceso en este momento. Intenta de nuevo.')
+        }
+
         // User doesn't have access to this venue
         logger.warn(`verifyAccess: User ${userId} denied access to venue ${targetVenueId}`, error)
         throw new ForbiddenError('No access to this venue')
@@ -245,6 +293,18 @@ export const verifyAccess = (options: VerifyAccessOptions = {}) => {
       // Re-throw ForbiddenError to be handled by error middleware
       if (error instanceof ForbiddenError) {
         return next(error)
+      }
+
+      // Already classified as transient upstream — pass it through untouched.
+      if (error instanceof ServiceUnavailableError) {
+        return next(error)
+      }
+
+      // Covers the SUPERADMIN lookup above, which runs OUTSIDE the inner try:
+      // a connection blip there used to land here and become a 403 as well.
+      if (shouldRetryDbConnectionError(error)) {
+        logger.error('verifyAccess: transient DB error while verifying access — returning 503, NOT 403', error)
+        return next(new ServiceUnavailableError('No se pudo verificar tu acceso en este momento. Intenta de nuevo.'))
       }
 
       // SECURITY: Fail-closed on unexpected errors
