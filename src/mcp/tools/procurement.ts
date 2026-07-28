@@ -112,7 +112,7 @@ export function registerProcurementTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'purchase_order_detail',
-    'Full detail of ONE purchase order in a venue you can access, by its id (from list_purchase_orders): supplier + contact, status, order/expected/received dates, amounts (subtotal, tax, total — pesos), whether auto-generated, approval/rejection info, notes, and every LINE ITEM (raw material, unit, quantity ordered vs received, receive status, unit price, line total). Answers "¿qué traía la orden OC-123? ¿cuánto recibí de cada cosa?". Pass venueId + purchaseOrderId.',
+    'Full detail of ONE purchase order in a venue you can access, by its id (from list_purchase_orders): supplier + contact, status, order/expected/received dates, amounts (subtotal, tax, total — pesos), whether auto-generated, approval/rejection info, notes, and every LINE ITEM (raw material, unit, quantity ordered vs received, receive status, unit price, line total, and — si el insumo se compró en presentación — la unidad de compra ("caja") y cuántas unidades base trae). Answers "¿qué traía la orden OC-123? ¿cuánto recibí de cada cosa?". Pass venueId + purchaseOrderId.',
     {
       venueId: z.string().describe('Venue that owns the order (must be in your scope)'),
       purchaseOrderId: z.string().min(1).describe('Purchase order id (from list_purchase_orders)'),
@@ -133,6 +133,8 @@ export function registerProcurementTools(server: McpServer, scope: McpScope) {
           items?: Array<{
             rawMaterial?: { name?: string; sku?: string | null; unit?: string } | null
             unit: string
+            presentationName?: string | null
+            presentationFactor?: unknown
             quantityOrdered: unknown
             quantityReceived: unknown
             receiveStatus: string
@@ -169,6 +171,10 @@ export function registerProcurementTools(server: McpServer, scope: McpScope) {
             material: it.rawMaterial?.name ?? null,
             sku: it.rawMaterial?.sku ?? null,
             unit: it.unit,
+            // Comprado en presentación ("50 cajas"): sin esto el agente reporta
+            // "50" sin saber 50 de QUÉ, y el precio parece 360 por pieza.
+            purchaseUnit: it.presentationName ?? null,
+            baseUnitsPerPurchaseUnit: it.presentationFactor != null ? num(it.presentationFactor) : null,
             quantityOrdered: num(it.quantityOrdered),
             quantityReceived: num(it.quantityReceived),
             receiveStatus: it.receiveStatus, // PENDING | PARTIAL | RECEIVED …
