@@ -341,6 +341,59 @@ export async function getPurchaseOrder(venueId: string, purchaseOrderId: string)
 /**
  * Create a new purchase order
  */
+/**
+ * Congela la presentación de compra en cada renglón ("50 cajas de huevo").
+ *
+ * El factor se copia AL MOMENTO DE LA COMPRA a `PurchaseOrderItem.presentationFactor`
+ * (snapshot): si mañana alguien corrige "caja = 12 conos" a 12.5, las órdenes
+ * viejas siguen valuadas con el factor que realmente se pagó. Sin snapshot, un
+ * ajuste de configuración reescribiría el costo histórico del inventario.
+ *
+ * Cuando hay presentación, `unit` se guarda como la unidad BASE del insumo — el
+ * enum `Unit` no puede expresar "caja", y quien lee el renglón se guía por
+ * `presentationName`. La recepción ignora `unit` si hay factor (ver
+ * `purchasedQuantityInBaseUnit`).
+ *
+ * Un renglón SIN `presentationName` no toca nada: factor `null` → camino de hoy.
+ */
+async function resolvePresentationSnapshots(
+  venueId: string,
+  items: Array<{ rawMaterialId: string; presentationName?: string }>,
+): Promise<Map<number, { name: string; factor: Decimal; baseUnit: Unit }>> {
+  const snapshots = new Map<number, { name: string; factor: Decimal; baseUnit: Unit }>()
+  const withPresentation = items.map((item, index) => ({ item, index })).filter(({ item }) => Boolean(item.presentationName))
+  if (withPresentation.length === 0) return snapshots
+
+  const rows = await prisma.rawMaterialPresentation.findMany({
+    where: {
+      venueId,
+      rawMaterialId: { in: [...new Set(withPresentation.map(({ item }) => item.rawMaterialId))] },
+    },
+    select: { rawMaterialId: true, name: true, factorToBase: true, rawMaterial: { select: { name: true, unit: true } } },
+  })
+
+  for (const { item, index } of withPresentation) {
+    const name = item.presentationName!.trim()
+    const match = rows.find(r => r.rawMaterialId === item.rawMaterialId && r.name === name)
+    if (!match) {
+      const available = rows.filter(r => r.rawMaterialId === item.rawMaterialId).map(r => r.name)
+      throw new AppError(
+        available.length > 0
+          ? `La presentación "${name}" no existe para este insumo. Disponibles: ${available.join(', ')}`
+          : `Este insumo no tiene presentaciones configuradas; no se puede comprar en "${name}"`,
+        400,
+      )
+    }
+    const factor = new Decimal(match.factorToBase)
+    if (!factor.isFinite() || factor.lte(0)) {
+      throw new AppError(`La presentación "${name}" tiene un factor inválido`, 400)
+    }
+    snapshots.set(index, { name, factor, baseUnit: match.rawMaterial.unit })
+  }
+
+  return snapshots
+}
+
 export async function createPurchaseOrder(venueId: string, data: CreatePurchaseOrderDto, staffId?: string): Promise<PurchaseOrder> {
   // Verify supplier exists and belongs to venue
   const supplier = await prisma.supplier.findFirst({
@@ -385,6 +438,10 @@ export async function createPurchaseOrder(venueId: string, data: CreatePurchaseO
     throw new AppError(`Order total ${totalAmount.toNumber()} is below supplier minimum order of ${supplier.minimumOrder.toNumber()}`, 400)
   }
 
+  // Resolver ANTES de crear nada: una presentación inexistente debe abortar la
+  // orden completa, no dejarla a medias.
+  const presentationSnapshots = await resolvePresentationSnapshots(venueId, data.items)
+
   // Generate order number
   const orderNumber = await generateOrderNumber(venueId)
 
@@ -412,17 +469,22 @@ export async function createPurchaseOrder(venueId: string, data: CreatePurchaseO
       shippingState: data.shippingState,
       shippingZipCode: data.shippingZipCode,
       items: {
-        create: data.items.map(item => {
+        create: data.items.map((item, index) => {
           const itemTotal = new Decimal(item.unitPrice).mul(item.quantityOrdered)
+          const presentation = presentationSnapshots.get(index)
           return {
             rawMaterial: {
               connect: { id: item.rawMaterialId },
             },
             quantityOrdered: item.quantityOrdered,
-            unit: item.unit as Unit,
+            // Con presentación, la unidad del renglón es la BASE del insumo: el
+            // enum no puede decir "caja", eso lo dice `presentationName`.
+            unit: presentation ? presentation.baseUnit : (item.unit as Unit),
             unitPrice: item.unitPrice,
             total: itemTotal,
             quantityReceived: 0,
+            presentationName: presentation?.name ?? null,
+            presentationFactor: presentation?.factor ?? null,
           }
         }),
       },
@@ -492,6 +554,8 @@ export async function updatePurchaseOrder(
     notes: data.notes,
   }
 
+  let updatedPresentationSnapshots = new Map<number, { name: string; factor: Decimal; baseUnit: Unit }>()
+
   // If items are being updated, recalculate totals
   if (data.items) {
     const subtotal = data.items.reduce((sum, item) => {
@@ -508,6 +572,10 @@ export async function updatePurchaseOrder(
       total: totalAmount,
     }
 
+    // Resolver ANTES de borrar: si la presentación no existe, la orden se queda
+    // como estaba en vez de perder sus renglones.
+    updatedPresentationSnapshots = await resolvePresentationSnapshots(existingOrder.venueId, data.items)
+
     // Delete old items and create new ones
     await prisma.purchaseOrderItem.deleteMany({
       where: { purchaseOrderId },
@@ -520,17 +588,22 @@ export async function updatePurchaseOrder(
       ? {
           ...updateData,
           items: {
-            create: data.items.map(item => {
+            create: data.items.map((item, index) => {
               const itemTotal = new Decimal(item.unitPrice).mul(item.quantityOrdered)
+              // El update BORRA y recrea los renglones: sin esto se perdería el
+              // snapshot y la orden se recibiría con la conversión apagada.
+              const presentation = updatedPresentationSnapshots.get(index)
               return {
                 rawMaterial: {
                   connect: { id: item.rawMaterialId },
                 },
                 quantityOrdered: item.quantityOrdered,
-                unit: item.unit as Unit,
+                unit: presentation ? presentation.baseUnit : (item.unit as Unit),
                 unitPrice: item.unitPrice,
                 total: itemTotal,
                 quantityReceived: 0,
+                presentationName: presentation?.name ?? null,
+                presentationFactor: presentation?.factor ?? null,
               }
             }),
           },
@@ -1114,8 +1187,20 @@ export async function applyItemReceiveStatusInTx(
     )
   }
 
-  const toRmUnit = (qInPoUnit: Decimal): Decimal =>
-    item.unit === item.rawMaterial.unit ? qInPoUnit : new Decimal(convertUnit(qInPoUnit.toNumber(), item.unit, item.rawMaterial.unit))
+  // Presentación de compra congelada al ordenar ("50 cajas"): la cantidad del
+  // renglón está EN CAJAS y una caja trae `presentationFactor` unidades base.
+  // Esto vive aquí, en el único punto de conversión del núcleo compartido, para
+  // que los TRES caminos de recepción (por renglón, "Recibir todo" y el flujo
+  // móvil) conviertan igual. Sin factor, todo se comporta byte-idéntico a antes.
+  const presentationFactor = item.presentationFactor ? new Decimal(item.presentationFactor) : null
+  if (presentationFactor && (!presentationFactor.isFinite() || presentationFactor.lte(0))) {
+    throw new AppError(`La presentación "${item.presentationName}" tiene un factor inválido; corrige el insumo antes de recibir.`, 400)
+  }
+
+  const toRmUnit = (qInPoUnit: Decimal): Decimal => {
+    if (presentationFactor) return qInPoUnit.mul(presentationFactor)
+    return item.unit === item.rawMaterial.unit ? qInPoUnit : new Decimal(convertUnit(qInPoUnit.toNumber(), item.unit, item.rawMaterial.unit))
+  }
 
   const newQtyInRmUnit = toRmUnit(newQtyReceivedInPoUnit)
 
@@ -1181,12 +1266,22 @@ export async function applyItemReceiveStatusInTx(
 
   if (deltaInRmUnit.greaterThan(0)) {
     // Forward: create new batch for the increment
-    const deltaInPoUnit = newQtyReceivedInPoUnit.minus(toPoUnitInverse(liveInitialTotal, item.unit, item.rawMaterial.unit))
+    const deltaInPoUnit = presentationFactor
+      ? deltaInRmUnit.div(presentationFactor)
+      : newQtyReceivedInPoUnit.minus(toPoUnitInverse(liveInitialTotal, item.unit, item.rawMaterial.unit))
 
     // Cost normalization: PO unitPrice is per PO unit. If RM unit differs,
     // costPerUnit on the batch must be expressed per RM unit so FIFO costing
     // stays consistent with deductStockFIFO.
-    const costPerUnitInRmUnit = item.unit === item.rawMaterial.unit ? item.unitPrice : item.unitPrice.mul(deltaInPoUnit).div(deltaInRmUnit)
+    //
+    // Con presentación el precio es POR CAJA: hay que dividirlo entre el factor
+    // o el inventario queda valuado ×factor (una caja de $360 se registraría a
+    // $360 el kilo en vez de $30). `item.unit` YA es la unidad base en ese caso,
+    // así que la comparación de unidades sola no basta para detectarlo.
+    const costPerUnitInRmUnit =
+      presentationFactor || item.unit !== item.rawMaterial.unit
+        ? item.unitPrice.mul(deltaInPoUnit).div(deltaInRmUnit)
+        : item.unitPrice
 
     const batchNumber = await generateBatchNumberInTx(tx, venueId, item.rawMaterialId)
 

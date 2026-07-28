@@ -182,6 +182,10 @@ const prismaMock: any = {
   stockBatch: createMockModel(),
   rawMaterialMovement: createMockModel(),
   rawMaterialPresentation: createMockModel(), // Presentaciones de compra/salida (caja, cono, kilo)
+  // Compras (un modelo sin registrar aquí revienta con "Cannot read properties of undefined")
+  supplier: createMockModel(),
+  purchaseOrder: createMockModel(),
+  purchaseOrderItem: createMockModel(),
   // Payment config & analytics models
   merchantAccount: createMockModel(),
   angelPayUserAccount: createMockModel(),

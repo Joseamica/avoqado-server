@@ -215,6 +215,52 @@ describe('updatePurchaseOrderItemStatus — robust state machine', () => {
       expect(stockUpdate.data.currentStock.toString()).toBe('1000')
     })
 
+    it('💰 REGRESIÓN: recibe 50 CAJAS (factor 12) como 600 kg a $30/kg, no 50 kg a $360/kg', async () => {
+      // Bug real encontrado al abrir la UI: este camino (recepción por renglón,
+      // "Recibir todo" y el flujo móvil comparten este núcleo) ignoraba la
+      // presentación y creaba un lote de 50 kg valuado a $360 EL KILO. El
+      // inventario quedaba corto ×12 y sobrevaluado ×12 al mismo tiempo.
+      mockedPrisma.purchaseOrderItem.findFirst.mockResolvedValue(
+        makeItem({
+          quantityOrdered: new Decimal(50),
+          unit: 'KILOGRAM', // con presentación, la unidad del renglón YA es la base
+          unitPrice: new Decimal(360), // $360 por CAJA
+          presentationName: 'caja',
+          presentationFactor: new Decimal(12), // 1 caja = 12 kg
+          rawMaterial: { id: RM_ID, name: 'Piña', unit: 'KILOGRAM', currentStock: new Decimal(20), perishable: false, shelfLifeDays: null },
+        }),
+      )
+
+      await updatePurchaseOrderItemStatus(VENUE_ID, PO_ID, ITEM_ID, {
+        receiveStatus: PurchaseOrderItemStatus.RECEIVED,
+        quantityReceived: 50,
+      } as any)
+
+      const batchData = mockedPrisma.stockBatch.create.mock.calls[0][0].data
+      expect(batchData.initialQuantity.toString()).toBe('600') // 50 × 12
+      expect(batchData.unit).toBe('KILOGRAM')
+      expect(batchData.costPerUnit.toString()).toBe('30') // $360 ÷ 12
+      // el lote debe valer lo que se pagó: 50 cajas × $360 = $18 000
+      expect(batchData.initialQuantity.mul(batchData.costPerUnit).toNumber()).toBe(18000)
+
+      const stockUpdate = mockedPrisma.rawMaterial.update.mock.calls[0][0]
+      expect(stockUpdate.data.currentStock.toString()).toBe('620') // 20 + 600
+    })
+
+    it('un factor de presentación corrupto no crea lote', async () => {
+      mockedPrisma.purchaseOrderItem.findFirst.mockResolvedValue(
+        makeItem({ presentationName: 'caja', presentationFactor: new Decimal(0) }),
+      )
+
+      await expect(
+        updatePurchaseOrderItemStatus(VENUE_ID, PO_ID, ITEM_ID, {
+          receiveStatus: PurchaseOrderItemStatus.RECEIVED,
+          quantityReceived: 1,
+        } as any),
+      ).rejects.toThrow(/factor inválido/i)
+      expect(mockedPrisma.stockBatch.create).not.toHaveBeenCalled()
+    })
+
     it('increments the existing daily batch sequence instead of producing NaN', async () => {
       const today = new Date()
       const prefix = `BATCH-${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`
