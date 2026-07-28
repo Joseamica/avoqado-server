@@ -5,6 +5,7 @@ import prisma from '../../utils/prismaClient'
 import socketManager from '../../communication/sockets'
 import { SocketEventType } from '../../communication/sockets/types'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
+import { logAction } from '../dashboard/activity-log.service'
 
 interface TableStatusResponse {
   id: string
@@ -328,8 +329,17 @@ export async function assignTable(
 /**
  * Clear table after payment is completed
  * Marks table as AVAILABLE and removes currentOrderId link
+ *
+ * `performedBy` (optional, additive) is the actor's `authContext.userId` —
+ * threaded through by callers that have a request context (the online `/tpv`
+ * controller). Callers without one (the offline sync reducer replaying
+ * CLEAR_TABLE, and the frozen `/mobile` controller) still get an audited row,
+ * just with `staffId: null` — visibility beats total blindness; "liberar
+ * mesa" was previously NOT audited from any path at all (found 2026-07-27
+ * while closing out Plan B Task 6 — comp/discount/cancel already logged via
+ * their own services, this one didn't).
  */
-export async function clearTable(venueId: string, tableId: string): Promise<void> {
+export async function clearTable(venueId: string, tableId: string, performedBy?: string): Promise<void> {
   logger.info(`🧹 [TABLE SERVICE] Clearing table ${tableId}`)
 
   const table = await prisma.table.findFirst({
@@ -362,6 +372,15 @@ export async function clearTable(venueId: string, tableId: string): Promise<void
   })
 
   logger.info(`✅ [TABLE SERVICE] Table ${table.number} cleared and marked as AVAILABLE`)
+
+  void logAction({
+    action: 'TABLE_CLEARED',
+    entity: 'Table',
+    entityId: table.id,
+    staffId: performedBy ?? null,
+    venueId,
+    data: { number: table.number, ordersCleared: openOnTable.map(o => o.orderNumber) },
+  })
 
   // Emit Socket.IO event
   const broadcastingService = socketManager.getBroadcastingService()

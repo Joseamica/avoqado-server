@@ -1,6 +1,7 @@
 import { Request, Response } from 'express'
 import * as floorElementService from '../../services/tpv/floor-element.tpv.service'
 import logger from '../../config/logger'
+import { logAction } from '../../services/dashboard/activity-log.service'
 
 /**
  * GET /tpv/venues/:venueId/floor-elements
@@ -52,6 +53,15 @@ export async function createFloorElement(req: Request, res: Response): Promise<v
       areaId,
     })
 
+    void logAction({
+      staffId: (req as any).authContext?.userId ?? null,
+      venueId,
+      action: 'FLOOR_ELEMENT_CREATED',
+      entity: 'FloorElement',
+      entityId: element.id,
+      data: { type, label, areaId },
+    })
+
     res.status(201).json({
       success: true,
       data: element,
@@ -91,6 +101,15 @@ export async function updateFloorElement(req: Request, res: Response): Promise<v
       active,
     })
 
+    void logAction({
+      staffId: (req as any).authContext?.userId ?? null,
+      venueId,
+      action: 'FLOOR_ELEMENT_UPDATED',
+      entity: 'FloorElement',
+      entityId: elementId,
+      data: { positionX, positionY, label, areaId, active },
+    })
+
     res.status(200).json({
       success: true,
       data: element,
@@ -116,6 +135,14 @@ export async function deleteFloorElement(req: Request, res: Response): Promise<v
     logger.info(`[FLOOR ELEMENT CONTROLLER] DELETE /tpv/venues/${venueId}/floor-elements/${elementId}`)
 
     await floorElementService.deleteFloorElement(venueId, elementId)
+
+    void logAction({
+      staffId: (req as any).authContext?.userId ?? null,
+      venueId,
+      action: 'FLOOR_ELEMENT_DELETED',
+      entity: 'FloorElement',
+      entityId: elementId,
+    })
 
     res.status(200).json({
       success: true,

@@ -1,6 +1,7 @@
 import { Request, Response } from 'express'
 import * as tableService from '../../services/tpv/table.tpv.service'
 import logger from '../../config/logger'
+import { logAction } from '../../services/dashboard/activity-log.service'
 
 /**
  * GET /tpv/venues/:venueId/tables
@@ -69,7 +70,7 @@ export async function clearTable(req: Request, res: Response): Promise<void> {
 
     logger.info(`[TABLE CONTROLLER] POST /tpv/venues/${venueId}/tables/${tableId}/clear`)
 
-    await tableService.clearTable(venueId, tableId)
+    await tableService.clearTable(venueId, tableId, (req as any).authContext?.userId)
 
     res.status(200).json({
       success: true,
@@ -105,6 +106,15 @@ export async function createTable(req: Request, res: Response): Promise<void> {
       areaId,
     })
 
+    void logAction({
+      staffId: (req as any).authContext?.userId ?? null,
+      venueId,
+      action: 'TABLE_CREATED',
+      entity: 'Table',
+      entityId: newTable.id,
+      data: { number, capacity, shape, areaId },
+    })
+
     res.status(201).json({
       success: true,
       data: newTable,
@@ -131,6 +141,15 @@ export async function updateTablePosition(req: Request, res: Response): Promise<
     logger.info(`[TABLE CONTROLLER] PUT /tpv/venues/${venueId}/tables/${tableId}/position - X: ${positionX}, Y: ${positionY}`)
 
     const updatedTable = await tableService.updateTablePosition(venueId, tableId, positionX, positionY)
+
+    void logAction({
+      staffId: (req as any).authContext?.userId ?? null,
+      venueId,
+      action: 'TABLE_POSITION_UPDATED',
+      entity: 'Table',
+      entityId: tableId,
+      data: { positionX, positionY },
+    })
 
     res.status(200).json({
       success: true,
@@ -165,6 +184,15 @@ export async function updateTable(req: Request, res: Response): Promise<void> {
       areaId,
     })
 
+    void logAction({
+      staffId: (req as any).authContext?.userId ?? null,
+      venueId,
+      action: 'TABLE_UPDATED',
+      entity: 'Table',
+      entityId: tableId,
+      data: { number, capacity, shape, rotation, areaId },
+    })
+
     res.status(200).json({
       success: true,
       data: updatedTable,
@@ -190,6 +218,14 @@ export async function deleteTable(req: Request, res: Response): Promise<void> {
     logger.info(`[TABLE CONTROLLER] DELETE /tpv/venues/${venueId}/tables/${tableId}`)
 
     await tableService.deleteTable(venueId, tableId)
+
+    void logAction({
+      staffId: (req as any).authContext?.userId ?? null,
+      venueId,
+      action: 'TABLE_DELETED',
+      entity: 'Table',
+      entityId: tableId,
+    })
 
     res.status(200).json({
       success: true,
