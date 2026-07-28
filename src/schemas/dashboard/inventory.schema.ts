@@ -389,6 +389,11 @@ export const CreatePurchaseOrderSchema = z.object({
         quantityOrdered: z.number().positive(),
         unit: z.nativeEnum(Unit),
         unitPrice: z.number().positive(),
+        // Presentación de compra del insumo ("caja"). Si viene, `quantityOrdered`
+        // y `unitPrice` están EN ESA presentación (50 cajas a $360 la caja) y se
+        // convierten a la unidad base al recibir. Si NO viene, el renglón se
+        // comporta byte-idéntico a como se comportaba antes de existir esto.
+        presentationName: z.string().trim().min(1).max(40).optional(),
       }),
     ),
   }),
@@ -410,6 +415,11 @@ export const UpdatePurchaseOrderSchema = z.object({
           quantityOrdered: z.number().positive(),
           unit: z.nativeEnum(Unit),
           unitPrice: z.number().positive(),
+          // OBLIGATORIO aquí también: el update BORRA y recrea los renglones, así
+          // que si Zod tira este campo el snapshot se pierde en silencio y la
+          // orden se recibe con la conversión apagada (stock ÷ factor, costo
+          // ×factor). Editar una orden no puede cambiar cómo se valúa.
+          presentationName: z.string().trim().min(1).max(40).optional(),
         }),
       )
       .optional(),
@@ -676,7 +686,17 @@ export const SetRawMaterialPresentationsSchema = z.object({
     presentations: z
       .array(
         z.object({
-          name: z.string().trim().min(1, 'El nombre de la presentación es requerido').max(40, 'El nombre es demasiado largo'),
+          name: z
+            .string()
+            .trim()
+            .min(1, 'El nombre de la presentación es requerido')
+            .max(40, 'El nombre es demasiado largo')
+            // Nombres de empaque reales ("caja", "cono", "costal", "bolsa 5 kg",
+            // "media-caja", "1/2 tarima"). Se prohíben `<>` y demás marcado: este
+            // nombre se congela en `PurchaseOrderItem.presentationName` y está
+            // pensado para imprimirse después en la orden de compra / remisión,
+            // donde ya no lo protege el escapado de React.
+            .regex(/^[\p{L}\p{N} .,'/()-]+$/u, 'El nombre sólo puede tener letras, números y . , \' / ( ) -'),
           factorToBase: z
             .number()
             .finite('El factor debe ser un número finito')
