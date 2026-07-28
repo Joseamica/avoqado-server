@@ -821,7 +821,7 @@ if (process.env.ENABLE_ONBOARDING_PAYMENT_PROVIDERS === 'true') {
  * plan step can collect the card via Stripe Elements. Gated by env flag at
  * registration time — if the flag is off, the endpoint simply doesn't exist (404).
  */
-if (process.env.ENABLE_VENUE_BASE_SUBSCRIPTION === 'true') {
+if (onboardingController.requiresBaseSubscriptionPlan()) {
   router.post('/venues/:venueId/plan-setup-intent', authenticateTokenMiddleware, onboardingController.planSetupIntent)
 }
 

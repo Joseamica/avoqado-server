@@ -764,6 +764,33 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
 }
 
 /**
+ * Single source of truth for the base-subscription plan gate.
+ *
+ * This flag has to be true in TWO places for the wizard to work — here and in the
+ * dashboard build (`VITE_ENABLE_VENUE_BASE_SUBSCRIPTION`) — and between 2026-05-27
+ * and 2026-07-27 they disagreed: the backend demanded a plan while the deployed
+ * wizard, built without the flag, never rendered the plan step. The funnel died
+ * silently. Every organization that reached the end got
+ * "Falta elegir tu plan" with no step to go back to, and the 400 looked like
+ * ordinary field validation, so nothing escalated it. Zero organizations completed
+ * onboarding in those two months.
+ *
+ * The flag is now published in `GET /onboarding/status` (`featureFlags`) so the
+ * wizard can derive the step list from the SERVER instead of from its own build
+ * env — one source of truth, no way to drift. Until the dashboard adopts that
+ * field, the two env vars must still be flipped together.
+ */
+// Declared as a `function` (not `const` + arrow) ON PURPOSE: onboarding.routes.ts
+// calls this at MODULE-LOAD time to decide whether to register the plan-setup-intent
+// route. A function declaration is hoisted, so it survives an indirect import cycle;
+// a const arrow would sit in the temporal dead zone and crash the server at boot.
+// Its neighbours used at load time (planSetupIntent, testPaymentLink) are declarations
+// for the same reason.
+export function requiresBaseSubscriptionPlan(): boolean {
+  return process.env.ENABLE_VENUE_BASE_SUBSCRIPTION === 'true'
+}
+
+/**
  * GET /api/v1/onboarding/status
  *
  * Returns the current user's primary organization and onboarding progress.
@@ -805,6 +832,11 @@ export async function getOnboardingStatus(req: Request, res: Response, next: Nex
       organization: org,
       onboardingProgress: progress,
       paymentProviders,
+      // Additive: lets the wizard build its step list from the backend gate
+      // instead of its own build-time env var. Old clients ignore it.
+      featureFlags: {
+        requiresBaseSubscriptionPlan: requiresBaseSubscriptionPlan(),
+      },
     })
   } catch (error) {
     next(error)
@@ -946,9 +978,22 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
     // additionally require a payment method; FREE completes without a card (the
     // venue simply stays on the Free plan, no base subscription is created).
     // Old payloads have no `tier` — parseV2Plan defaults them to PRO (back-compat).
-    const planEnabled = process.env.ENABLE_VENUE_BASE_SUBSCRIPTION === 'true'
+    const planEnabled = requiresBaseSubscriptionPlan()
     const planData = onboardingProgressService.parseV2Plan(progress.v2SetupData)
     if (planEnabled && !planData) {
+      // A wizard that HAS the plan step never reaches this line — it cannot advance
+      // past it without producing planData. Arriving here therefore means the client
+      // never rendered the step, i.e. the frontend build is missing
+      // VITE_ENABLE_VENUE_BASE_SUBSCRIPTION while this backend requires a plan.
+      // Logged at error level ON PURPOSE: as a plain 400 this was indistinguishable
+      // from ordinary field validation and went unnoticed for two months.
+      logger.error(
+        '🚨 ONBOARDING FUNNEL BLOCKED: backend requires a base-subscription plan but the wizard submitted none. ' +
+          'This is almost certainly a feature-flag mismatch — ENABLE_VENUE_BASE_SUBSCRIPTION is ON here while the ' +
+          'deployed dashboard was built WITHOUT VITE_ENABLE_VENUE_BASE_SUBSCRIPTION=true, so the plan step is absent ' +
+          'and NO organization can finish onboarding. Flip both together, or turn this one off.',
+        { organizationId, savedSteps: Object.keys((progress.v2SetupData as Record<string, unknown>) ?? {}) },
+      )
       throw new BadRequestError('Falta elegir tu plan. Completa el paso de plan para terminar.')
     }
     if (planEnabled && planData && planData.tier !== 'FREE' && !planData.paymentMethodId) {
