@@ -2,6 +2,28 @@ import { CorsOptions } from 'cors'
 
 export type Environment = 'development' | 'staging' | 'production'
 
+/**
+ * Cloudflare Pages preview deployments for the dashboard: `<branch>.<project>.pages.dev`.
+ *
+ * ANCHORED ON PURPOSE. The previous pattern was
+ * `/\.(?:demo-)?avoqado-web-dashboard.*\.pages\.dev$/` — unanchored at the start
+ * with a free `.*` before the suffix, which made the project name a PREFIX match
+ * rather than an exact one. Anyone can create a Cloudflare Pages project, and
+ * `<project>.pages.dev` is globally unique only for the exact name — so a project
+ * called `avoqado-web-dashboard-attacker` was enough: its branch previews
+ * (`https://x.avoqado-web-dashboard-attacker.pages.dev`) satisfied the old regex
+ * and were handed a CORS grant. Combined with `credentials: true` and auth cookies
+ * issued `sameSite: 'none'` + `secure` with no `domain`, an attacker page could
+ * make authenticated calls to the API and READ the responses.
+ *
+ * The project name is now fixed and the subdomain label is restricted to what
+ * Cloudflare actually generates (lowercase alphanumerics and hyphens), so
+ * `https://<branch-or-hash>.avoqado-web-dashboard.pages.dev` still works and
+ * `-attacker` suffixes no longer do. This branch applies in ALL environments,
+ * production included, which is exactly why it has to be exact.
+ */
+const CLOUDFLARE_PAGES_PREVIEW = /^https:\/\/[a-z0-9-]+\.(?:demo-)?avoqado-web-dashboard\.pages\.dev$/
+
 // Environment-specific CORS configuration
 export const getCorsConfig = (env: Environment): CorsOptions => {
   // Define allowed origins based on environment
@@ -93,7 +115,7 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
       } else if (env === 'development' && origin && /^https?:\/\/[^/]+\.ngrok-free\.dev(?::\d+)?$/i.test(origin)) {
         // Allow ngrok tunnels in local development
         callback(null, true)
-      } else if (origin && /\.(?:demo-)?avoqado-web-dashboard.*\.pages\.dev$/.test(origin)) {
+      } else if (origin && CLOUDFLARE_PAGES_PREVIEW.test(origin)) {
         // Allow Cloudflare Pages preview deployments (all environments)
         callback(null, true)
       } else {
