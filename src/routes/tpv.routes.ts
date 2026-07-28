@@ -13,6 +13,7 @@ import * as customerController from '../controllers/tpv/customer.tpv.controller'
 import * as discountController from '../controllers/tpv/discount.tpv.controller'
 import * as floorElementController from '../controllers/tpv/floor-element.tpv.controller'
 import * as heartbeatController from '../controllers/tpv/heartbeat.tpv.controller'
+import * as menuTpvController from '../controllers/tpv/menu.tpv.controller'
 import * as orderController from '../controllers/tpv/order.tpv.controller'
 import * as orderTableController from '../controllers/tpv/order-table.tpv.controller'
 import * as paymentController from '../controllers/tpv/payment.tpv.controller'
@@ -3805,6 +3806,55 @@ router.post(
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:create'),
   tableController.openTable,
+)
+
+// ============================================
+// MENU, PRODUCTS & CATEGORIES (Plan B Task 5, 2026-07-27)
+// ============================================
+// La TPV pegaba directo a `dashboard/venues/{venueId}/products` y
+// `dashboard/venues/{venueId}/categories` (ApiService.kt:505,555 en avoqado-tpv) — la segunda
+// NO EXISTE (404 silencioso, ver task-5-brief.md). Sin checkFeatureAccess a propósito: el menú
+// es capacidad core, gatearlo dejaría sin catálogo a retail/servicios en FREE (el ICP real de
+// la plataforma) — misma razón por la que las rutas genéricas de orden de Task 2 tampoco lo
+// llevan. Detalle de cada shape en menu.tpv.controller.ts.
+
+/**
+ * GET /tpv/venues/{venueId}/products
+ * Re-export verbatim de dashboard/venues/{venueId}/products — mismo shape que el cliente ya
+ * parsea hoy (`{ message, data, correlationId }`).
+ */
+router.get(
+  '/venues/:venueId/products',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkPermission('menu:read'),
+  menuTpvController.getProducts,
+)
+
+/**
+ * GET /tpv/venues/{venueId}/categories
+ * Array plano compatible con `CategoryDto` (avoqado-tpv, ProductDto.kt:128) — no el sobre
+ * `{ success, data }` de /mobile. Ver menu.tpv.controller.ts para el porqué.
+ */
+router.get(
+  '/venues/:venueId/categories',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkPermission('menu:read'),
+  menuTpvController.getCategories,
+)
+
+/**
+ * GET /tpv/venues/{venueId}/menus
+ * Net-new (sin llamada previa en la TPV) — mismo servicio y shape que
+ * dashboard/venues/{venueId}/menus.
+ */
+router.get(
+  '/venues/:venueId/menus',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkPermission('menu:read'),
+  menuTpvController.getMenus,
 )
 
 /**
