@@ -1174,7 +1174,10 @@ interface PaymentCreationData {
   amount: number // Amount in cents
   tip: number // Tip in cents
   status: 'COMPLETED' | 'PENDING' | 'FAILED' | 'PROCESSING' | 'REFUNDED'
-  method: 'CASH' | 'CREDIT_CARD' | 'DEBIT_CARD' | 'DIGITAL_WALLET'
+  method: 'CASH' | 'CREDIT_CARD' | 'DEBIT_CARD' | 'DIGITAL_WALLET' | 'BANK_TRANSFER' | 'OTHER'
+  // Detalle del cobro declarado a mano ("Tarjeta (terminal externa)"). Sólo aplica a
+  // métodos que NO pasaron por Avoqado; en efectivo va null. iOS manda null explícito.
+  externalSource?: string | null
   source: string
   splitType: 'PERPRODUCT' | 'EQUALPARTS' | 'CUSTOMAMOUNT' | 'FULLPAYMENT'
   tpvId: string
@@ -1646,6 +1649,9 @@ export async function recordOrderPayment(
           amount: totalAmount,
           tipAmount,
           method: paymentData.method as PaymentMethod, // Cast to PaymentMethod enum
+          // Mismo criterio que la venta rápida: el detalle declarado a mano sólo se
+          // guarda cuando el dinero NO pasó por Avoqado.
+          externalSource: paymentData.method === 'CASH' ? null : paymentData.externalSource?.trim()?.slice(0, 50) || null,
           status: paymentData.status as any, // Direct enum mapping since frontend sends correct values
           splitType: paymentData.splitType as SplitType, // Cast to SplitType enum
           source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value
@@ -2397,6 +2403,9 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           amount: totalAmount,
           tipAmount,
           method: paymentData.method as PaymentMethod, // Cast to PaymentMethod enum
+          // El detalle del cobro declarado a mano sólo tiene sentido si el dinero NO
+          // pasó por Avoqado; en efectivo se guarda null para no ensuciar el arqueo.
+          externalSource: paymentData.method === 'CASH' ? null : paymentData.externalSource?.trim()?.slice(0, 50) || null,
           status: paymentData.status as any, // Direct enum mapping since frontend sends correct values
           splitType: 'FULLPAYMENT' as SplitType, // Fast payments are always full payments
           source: mapPaymentSource(paymentData.source), // ✅ Map Android app source to enum value

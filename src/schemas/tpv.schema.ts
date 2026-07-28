@@ -146,7 +146,19 @@ export const recordPaymentBodySchema = z.object({
       amount: z.number().int().nonnegative({ message: 'El monto debe ser un número entero no negativo (en centavos).' }),
       tip: z.number().int().min(0, { message: 'La propina debe ser un número entero no negativo (en centavos).' }),
       status: z.enum(['COMPLETED', 'PENDING', 'FAILED', 'PROCESSING', 'REFUNDED'], { message: 'Estado de pago inválido.' }),
-      method: z.enum(['CASH', 'CREDIT_CARD', 'DEBIT_CARD', 'DIGITAL_WALLET'], { message: 'Método de pago inválido.' }),
+      // BANK_TRANSFER y OTHER son los métodos que el mesero declara A MANO porque el
+      // dinero NO pasó por Avoqado (terminal ajena, transferencia). Sin ellos la venta
+      // rápida rechazaba el cobro con 400 y la única salida del mesero era marcarlo
+      // efectivo — justo lo que descuadra el arqueo. CRYPTOCURRENCY y DIGITAL_WALLET
+      // NO se aceptan a mano a propósito: los escribe el flujo del procesador.
+      method: z.enum(['CASH', 'CREDIT_CARD', 'DEBIT_CARD', 'DIGITAL_WALLET', 'BANK_TRANSFER', 'OTHER'], {
+        message: 'Método de pago inválido.',
+      }),
+      // Detalle legible del cobro declarado a mano ("Tarjeta (terminal externa)").
+      // nullable() NO es cosmético: iOS manda `externalSource: null` explícito en los
+      // cobros normales, así que exigir string|undefined rechazaría cada cobro en
+      // efectivo del iPad con un 400.
+      externalSource: z.string().max(50).nullable().optional(),
       source: z.string().default('TPV'),
       splitType: z.enum(['PERPRODUCT', 'EQUALPARTS', 'CUSTOMAMOUNT', 'FULLPAYMENT'], { message: 'Tipo de división inválido.' }),
       staffId: z.string().min(1, { message: 'El ID del staff es requerido.' }),
