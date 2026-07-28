@@ -9,6 +9,7 @@ import { NotFoundError } from '../../errors/AppError'
 import { MovementType, RawMaterialMovementType } from '@prisma/client'
 import { adjustStock as adjustRawMaterialStock } from '../dashboard/rawMaterial.service'
 import { logAction } from '../dashboard/activity-log.service'
+import { computeInventoryAvailability } from '../dashboard/product.dashboard.service'
 
 // NOTE: When full inventory management is implemented in mobile (iOS/Android),
 // all CRUD operations (products, raw materials, recipes, suppliers, POs) must
@@ -63,6 +64,29 @@ export async function getStockOverview(venueId: string, page: number, pageSize: 
       include: {
         inventory: true,
         category: { select: { id: true, name: true } },
+        // La receta es imprescindible para los productos con
+        // inventoryMethod=RECIPE: su disponibilidad NO vive en `inventory`
+        // (nunca tienen registro propio), se calcula desde los insumos.
+        recipe: {
+          include: {
+            lines: {
+              include: {
+                rawMaterial: {
+                  select: {
+                    id: true,
+                    name: true,
+                    sku: true,
+                    unit: true,
+                    currentStock: true,
+                    minimumStock: true,
+                    avgCostPerUnit: true,
+                    active: true,
+                  },
+                },
+              },
+            },
+          },
+        },
       },
       orderBy,
       skip,
@@ -73,8 +97,18 @@ export async function getStockOverview(venueId: string, page: number, pageSize: 
 
   const items = products.map(p => {
     const inv = p.inventory
-    const currentStock = inv ? Number(inv.currentStock) : 0
     const reservedStock = inv ? Number(inv.reservedStock) : 0
+    // 🔴 MISMA fuente de verdad que el POS y el dashboard. Antes esto hacía
+    // `inventory?.currentStock ?? 0`, así que TODO producto por receta salía
+    // en 0 (rojo, "agotado") aunque el POS lo vendiera sin problema: los
+    // productos RECIPE nunca tienen registro propio en `inventory`, su
+    // disponibilidad son las porciones que alcanzan los insumos.
+    //
+    // El administrador veía "Hamburguesa de Pollo: 0" mientras el mesero la
+    // vendía con "Disponible: 33". Dos pantallas de la misma app, dos
+    // verdades distintas. (Encontrado en una D3, 2026-07-28.)
+    const { availableQuantity, limitingIngredient } = computeInventoryAvailability(p)
+    const currentStock = availableQuantity ?? (inv ? Number(inv.currentStock) : 0)
     return {
       id: p.id,
       name: p.name,
@@ -86,6 +120,11 @@ export async function getStockOverview(venueId: string, page: number, pageSize: 
       onHand: currentStock,
       available: currentStock - reservedStock,
       onOrder: 0, // TODO: implement purchase orders
+      // ADITIVOS: el cliente los usa para explicar QUÉ se acabó en un
+      // producto por receta, en vez de un "0" sin causa. Los clientes viejos
+      // los ignoran.
+      inventoryMethod: p.inventoryMethod ?? null,
+      limitingIngredientName: limitingIngredient?.name ?? null
     }
   })
 
