@@ -21,6 +21,7 @@ import * as refundController from '../controllers/tpv/refund.tpv.controller'
 import * as reportsController from '../controllers/tpv/reports.tpv.controller'
 import * as saleVerificationController from '../controllers/tpv/sale-verification.tpv.controller'
 import * as shiftController from '../controllers/tpv/shift.tpv.controller'
+import * as syncTpvController from '../controllers/tpv/sync.tpv.controller'
 import * as tableController from '../controllers/tpv/table.tpv.controller'
 import * as terminalController from '../controllers/tpv/terminal.tpv.controller'
 import * as timeEntryController from '../controllers/tpv/time-entry.tpv.controller'
@@ -3686,6 +3687,32 @@ router.delete(
   validateVenueAccess,
   checkPermission('tpv-floor-elements:delete'),
   floorElementController.deleteFloorElement,
+)
+
+// ============================================
+// OFFLINE-FIRST SYNC (Plan B Task 3, 2026-07-27)
+// ============================================
+
+/**
+ * POST /tpv/venues/{venueId}/sync/intents
+ *
+ * Replay del outbox offline del TPV: batch FIFO por dispositivo, un ack por intent
+ * (idempotente vía [venueId, idempotencyKey]). El handler es LITERALMENTE el mismo
+ * reducer que usa /mobile (reexportado en sync.tpv.controller.ts) — el gating de
+ * TABLE_SERVICE y la propiedad de mesa se evalúan POR INTENT dentro del reducer, así
+ * que esta ruta NO lleva checkFeatureAccess: gatearla aquí rechazaría un batch entero
+ * por un solo intent de mesa, aunque el resto (p.ej. PAY_CASH de un OrderType sin mesa)
+ * fuera legítimo. checkPermission('orders:create') es el mismo nombre EXACTO que usa
+ * /mobile (mobile.routes.ts) — mirroring intencional, ver
+ * .claude/rules/offline-first-y-hub-lan.md.
+ * Body: { deviceId, intents: [...] }
+ */
+router.post(
+  '/venues/:venueId/sync/intents',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkPermission('orders:create'),
+  syncTpvController.syncIntents,
 )
 
 /**
