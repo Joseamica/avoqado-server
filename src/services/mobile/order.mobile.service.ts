@@ -1550,6 +1550,24 @@ export interface CashPaymentInput {
   // pago PARCIAL/dividido re-encolado offline crea un SEGUNDO Payment (doble
   // ingreso). El fast path (payment.tpv.service.ts) ya usa este patrón.
   idempotencyKey?: string
+  /**
+   * Cómo pagó realmente el cliente. Default CASH — los clientes viejos no lo
+   * mandan y su comportamiento no cambia (ADITIVO).
+   *
+   * Existe porque el mesero a veces cobra por fuera de Avoqado: con una
+   * terminal que no es nuestra, o con la nuestra cuando su SIM 4G aún no
+   * reporta. Antes su única opción era marcarlo como efectivo, y eso rompía
+   * el arqueo: el corte pedía dinero que no estaba en el cajón
+   * (cashCloseout filtra por method=CASH).
+   */
+  method?: 'CASH' | 'CREDIT_CARD' | 'DEBIT_CARD' | 'BANK_TRANSFER' | 'OTHER'
+  /**
+   * Quién procesó el cobro cuando NO fue Avoqado ("Clip", "terminal del
+   * negocio", "transferencia BBVA"). Se guarda en Payment.externalSource, que
+   * ya existía para anotaciones manuales. Es lo que permite responder cuánto
+   * ingreso se está yendo por terminales ajenas.
+   */
+  externalSource?: string
 }
 
 export interface CashPaymentResponse {
@@ -1558,7 +1576,7 @@ export interface CashPaymentResponse {
   orderNumber: string
   amount: number
   tipAmount: number
-  method: 'CASH'
+  method: 'CASH' | 'CREDIT_CARD' | 'DEBIT_CARD' | 'BANK_TRANSFER' | 'OTHER'
   status: 'COMPLETED'
   changeAmount?: number // For display purposes (calculated on iOS)
   // Digital receipt for the mobile client's receipt QR (customer display +
@@ -1625,7 +1643,9 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         orderNumber: order.orderNumber,
         amount: Number(existingByKey.amount) * 100,
         tipAmount: Number(existingByKey.tipAmount) * 100,
-        method: 'CASH',
+        // El método REAL del pago que ya existe: devolver 'CASH' fijo haría
+        // que el reintento de un cobro con tarjeta se reportara como efectivo.
+        method: existingByKey.method as CashPaymentResponse['method'],
         status: 'COMPLETED',
         digitalReceipt: existingByKey.receipts?.[0]
           ? mapDigitalReceiptResponse(existingByKey.receipts[0], await resolveAutofacturaAvailable(orderId))
@@ -1637,6 +1657,14 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   if (order.paymentStatus === 'PAID') {
     throw new BadRequestError('Order is already paid')
   }
+
+  // Cómo pagó el cliente. Sin `method` (clientes viejos) sigue siendo efectivo.
+  const paymentMethod = input.method ?? 'CASH'
+  // Sólo el efectivo entra al cajón; lo cobrado por fuera se marca como manual
+  // para que el arqueo y la atribución de ingresos no lo confundan con nuestro
+  // procesamiento.
+  const paymentSource = paymentMethod === 'CASH' ? 'APP' : 'OTHER'
+  const externalSource = paymentMethod === 'CASH' ? null : input.externalSource?.trim()?.slice(0, 50) || null
 
   const effectiveStaffId = await validateStaffVenue(input.staffId, venueId)
 
@@ -1673,11 +1701,12 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
           orderId,
           amount: amountDecimal,
           tipAmount: tipDecimal,
-          method: 'CASH',
+          method: paymentMethod,
           status: 'COMPLETED',
           type: 'REGULAR',
           splitType: 'FULLPAYMENT',
-          source: 'APP',
+          source: paymentSource,
+          externalSource,
           processedById: effectiveStaffId,
           shiftId: currentShift?.id,
           // 🛡️ Llave de idempotencia: el índice único [venueId, idempotencyKey]
@@ -1779,7 +1808,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
           orderNumber: order.orderNumber,
           amount: Number(winner.amount) * 100,
           tipAmount: Number(winner.tipAmount) * 100,
-          method: 'CASH',
+          method: winner.method as CashPaymentResponse['method'],
           status: 'COMPLETED',
           digitalReceipt: winner.receipts?.[0]
             ? mapDigitalReceiptResponse(winner.receipts[0], await resolveAutofacturaAvailable(orderId))
@@ -1862,7 +1891,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       orderNumber: order.orderNumber,
       amount: amountDecimal,
       tipAmount: tipDecimal,
-      method: 'CASH',
+      method: paymentMethod,
       status: 'completed',
     })
 
@@ -1879,7 +1908,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     orderNumber: order.orderNumber,
     amount,
     tipAmount: tip,
-    method: 'CASH',
+    method: paymentMethod,
     status: 'COMPLETED',
     digitalReceipt,
   }

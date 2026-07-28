@@ -177,7 +177,19 @@ export const getOrder = async (req: Request, res: Response, next: NextFunction) 
 export const payCash = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId, orderId } = req.params
-    const { amount, tip, staffId, idempotencyKey } = req.body
+    const { amount, tip, staffId, idempotencyKey, method, externalSource } = req.body
+
+    // Métodos que el POS puede registrar a mano. NO incluye los que Avoqado
+    // procesa de verdad (DIGITAL_WALLET, CRYPTOCURRENCY): esos los escribe el
+    // flujo del procesador, y dejar que un cliente los declare aquí
+    // inventaría ingresos procesados que nunca pasaron por nosotros.
+    const MANUAL_METHODS = ['CASH', 'CREDIT_CARD', 'DEBIT_CARD', 'BANK_TRANSFER', 'OTHER'] as const
+    if (method !== undefined && !MANUAL_METHODS.includes(method)) {
+      return res.status(400).json({
+        success: false,
+        message: `method inválido. Permitidos: ${MANUAL_METHODS.join(', ')}`,
+      })
+    }
 
     // Validate required fields
     if (!amount || typeof amount !== 'number' || amount <= 0) {
@@ -197,6 +209,10 @@ export const payCash = async (req: Request, res: Response, next: NextFunction) =
       // 🛡️ Antes se descartaba: los clientes SIEMPRE la mandan y su cola offline
       // espera un 409-duplicado para marcar el pago como sincronizado.
       idempotencyKey: typeof idempotencyKey === 'string' ? idempotencyKey : undefined,
+      // Opcionales y ADITIVOS: sin ellos el cobro sigue siendo efectivo, así
+      // que las versiones viejas de la app no cambian de comportamiento.
+      method,
+      externalSource: typeof externalSource === 'string' ? externalSource : undefined,
     })
 
     res.status(200).json({

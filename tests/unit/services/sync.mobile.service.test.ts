@@ -220,6 +220,35 @@ describe('sync.mobile.service processIntents', () => {
     expect(acks[0]).toMatchObject({ status: 'ACKED', result: { paymentId: 'pay-1' } })
   })
 
+  it('PAY_CASH con tarjeta de terminal ajena conserva el método al reproducirse', async () => {
+    // Sin esto, un cobro con terminal externa hecho SIN RED se replay-earía
+    // como efectivo y el corte pediría dinero que nunca entró al cajón.
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({ paymentId: 'pay-2', orderNumber: 'A-5002' })
+    await processIntents(
+      baseParams([
+        {
+          id: 'i9b',
+          type: 'PAY_CASH',
+          payload: { orderId: 'order-5', amountCents: 10000, method: 'DEBIT_CARD', externalSource: 'Clip' },
+        },
+      ]),
+    )
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledWith(
+      VENUE,
+      'order-5',
+      expect.objectContaining({ method: 'DEBIT_CARD', externalSource: 'Clip' }),
+    )
+  })
+
+  it('PAY_CASH con método inválido → REJECTED, no se cobra nada', async () => {
+    ;(orderMobileService.payCashOrder as jest.Mock).mockClear()
+    const acks = await processIntents(
+      baseParams([{ id: 'i9c', type: 'PAY_CASH', payload: { orderId: 'order-5', amountCents: 100, method: 'BITCOIN' } }]),
+    )
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'INVALID_PAYLOAD' })
+    expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
+  })
+
   it('rechazo de negocio del delegado → REJECTED, nunca excepción del batch', async () => {
     ;(orderMobileService.payCashOrder as jest.Mock).mockRejectedValue(new Error('La orden ya está pagada'))
     const acks = await processIntents(baseParams([{ id: 'i10', type: 'PAY_CASH', payload: { orderId: 'order-6', amountCents: 100 } }]))

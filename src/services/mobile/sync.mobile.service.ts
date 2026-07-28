@@ -451,11 +451,22 @@ async function applyAddItems(
 }
 
 /**
- * PAY_CASH — payload: { orderId | localOrderId, amountCents, tipCents? }
+ * PAY_CASH — payload: { orderId | localOrderId, amountCents, tipCents?,
+ * method?, externalSource? }
+ *
+ * El nombre dice CASH por historia: el tipo NO se renombra porque los 14 tipos
+ * se espejan por nombre exacto entre server, Android e iOS y cambiarlo rompería
+ * los intents ya encolados en dispositivos allá afuera. Desde 2026-07-28
+ * transporta CUALQUIER cobro registrado a mano (tarjeta de una terminal ajena,
+ * transferencia). Sin `method` sigue siendo efectivo.
  * Reutiliza payCashOrder. Regla "Backgrounded": si el server rechaza (p.ej.
  * la orden cambió), el intent queda REJECTED y el CLIENTE reabre la cuenta —
  * jamás se cierra en silencio una venta no registrada.
  */
+/** Métodos que un POS puede declarar a mano; espejo exacto del controller. */
+const MANUAL_PAY_METHODS = ['CASH', 'CREDIT_CARD', 'DEBIT_CARD', 'BANK_TRANSFER', 'OTHER'] as const
+type PayCashMethod = (typeof MANUAL_PAY_METHODS)[number]
+
 async function applyPayCash(
   venueId: string,
   staffId: string,
@@ -465,6 +476,15 @@ async function applyPayCash(
   const orderId = await resolveOrderId(venueId, intent.payload, localRefMap)
   const amountCents = Number(intent.payload.amountCents ?? NaN)
   const tipCents = Number(intent.payload.tipCents ?? 0)
+  const method = intent.payload.method as PayCashMethod | undefined
+  if (method !== undefined && !MANUAL_PAY_METHODS.includes(method)) {
+    return {
+      id: intent.id,
+      status: 'REJECTED',
+      errorCode: 'INVALID_PAYLOAD',
+      message: `PAY_CASH: method inválido (${String(method)})`,
+    }
+  }
   if (!orderId || !Number.isFinite(amountCents) || amountCents <= 0) {
     return {
       id: intent.id,
@@ -483,6 +503,8 @@ async function applyPayCash(
     // reproduce (incluso concurrentemente antes de que se escriba el registro
     // PosSyncIntent), payCashOrder deduplica y jamás crea un segundo pago.
     idempotencyKey: intent.id,
+    method,
+    externalSource: typeof intent.payload.externalSource === 'string' ? intent.payload.externalSource : undefined,
   })
   return {
     id: intent.id,
