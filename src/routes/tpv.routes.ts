@@ -19,7 +19,9 @@ import * as orderTableController from '../controllers/tpv/order-table.tpv.contro
 import * as paymentController from '../controllers/tpv/payment.tpv.controller'
 import * as merchantRoutingController from '../controllers/tpv/merchantRouting.tpv.controller'
 import { merchantEligibilityRequestSchema } from '../schemas/dashboard/merchantRouting.schema'
+import { ValidateReferralCodeSchema, CaptureReferralSchema, ForceOverrideReferralSchema } from '../schemas/dashboard/referrals.schemas'
 import * as refundController from '../controllers/tpv/refund.tpv.controller'
+import * as referralsTpvController from '../controllers/tpv/referrals.tpv.controller'
 import * as reportsController from '../controllers/tpv/reports.tpv.controller'
 import * as saleVerificationController from '../controllers/tpv/sale-verification.tpv.controller'
 import * as shiftController from '../controllers/tpv/shift.tpv.controller'
@@ -7389,5 +7391,55 @@ router.post('/angelpay/report-merchant-switch', authenticateTokenMiddleware, ang
 // (PENDING_REVIEW) for admin approval in the dashboard. See controller for full
 // design notes and `upsertDiscoveredAngelPayMerchants` for upsert semantics.
 router.post('/angelpay/report-discovered-merchants', authenticateTokenMiddleware, angelpayValidationController.reportDiscoveredMerchants)
+
+// ==========================================
+// REFERRAL PROGRAM — capture-only surface (superficie /tpv, 2026-07-27)
+// Closes the TPV's last 3 calls into /dashboard (avoqado-tpv ReferralsApiService.kt:41,58,68).
+// Deliberately narrow: only validate/capture/force-override are exposed here — config,
+// summary, hall-of-fame, listing, and manual-void stay dashboard-only (a terminal mid-sale
+// has no business reading program config or aggregate stats; a smaller surface is the point
+// of the /tpv isolation). Controller re-exported VERBATIM from dashboard/referrals (see
+// referrals.tpv.controller.ts) and same Zod schemas, so response shapes stay byte-identical
+// for the client's ReferralValidateResponse/ReferralCaptureResponse.
+//
+// checkFeatureAccess('REFERRAL_PROGRAM') mirrors the dashboard's gate EXACTLY
+// (dashboard.routes.ts:4074 — same feature code, same tier system). Permission strings mirror
+// dashboard/referrals.routes.ts:94,104,114 exactly: validate/capture use 'referral:read';
+// force-override carries the STRONGER 'referral:override-existing-customer' (MANAGER+) —
+// that asymmetry is preserved on purpose, not an oversight.
+//
+// validateVenueAccess runs BEFORE checkFeatureAccess/checkPermission (same ordering as every
+// other /tpv route added this plan) so a cross-tenant probe 403s on tenant ownership before
+// either gate reveals anything about the venue's plan or the caller's role.
+// ==========================================
+router.post(
+  '/venues/:venueId/referrals/validate',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkFeatureAccess('REFERRAL_PROGRAM'),
+  checkPermission('referral:read'),
+  validateRequest(ValidateReferralCodeSchema),
+  referralsTpvController.validate,
+)
+
+router.post(
+  '/venues/:venueId/referrals/capture',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkFeatureAccess('REFERRAL_PROGRAM'),
+  checkPermission('referral:read'),
+  validateRequest(CaptureReferralSchema),
+  referralsTpvController.captureCode,
+)
+
+router.post(
+  '/venues/:venueId/referrals/force-override',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkFeatureAccess('REFERRAL_PROGRAM'),
+  checkPermission('referral:override-existing-customer'),
+  validateRequest(ForceOverrideReferralSchema),
+  referralsTpvController.forceOverride,
+)
 
 export default router
