@@ -134,7 +134,14 @@ export async function getTablesWithStatus(venueId: string): Promise<TableStatusR
     status: table.status,
     areaId: table.areaId,
     areaName: table.area?.name || null,
-    currentOrder: table.currentOrder
+    // 🔴 Sólo se manda el puntero si la orden SIGUE ABIERTA. Al cobrar una
+    // cuenta dividida, `Table.currentOrderId` se queda apuntando a la que se
+    // acaba de pagar; mandarla hacía que el POS mostrara "Pagar $310.50" de
+    // algo ya cobrado y el mesero no pudiera llegar a la cuenta viva.
+    // (Medido en una D3 sobre la mesa M2, 2026-07-28. El cliente además se
+    // defiende solo vía DiningTable.primaryCheck.)
+    currentOrder:
+      table.currentOrder && !['COMPLETED', 'CANCELLED', 'DELETED'].includes(String(table.currentOrder.status))
       ? {
           id: table.currentOrder.id,
           orderNumber: table.currentOrder.orderNumber,
