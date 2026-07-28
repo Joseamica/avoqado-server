@@ -1199,7 +1199,9 @@ export async function applyItemReceiveStatusInTx(
 
   const toRmUnit = (qInPoUnit: Decimal): Decimal => {
     if (presentationFactor) return qInPoUnit.mul(presentationFactor)
-    return item.unit === item.rawMaterial.unit ? qInPoUnit : new Decimal(convertUnit(qInPoUnit.toNumber(), item.unit, item.rawMaterial.unit))
+    return item.unit === item.rawMaterial.unit
+      ? qInPoUnit
+      : new Decimal(convertUnit(qInPoUnit.toNumber(), item.unit, item.rawMaterial.unit))
   }
 
   const newQtyInRmUnit = toRmUnit(newQtyReceivedInPoUnit)
@@ -1279,9 +1281,7 @@ export async function applyItemReceiveStatusInTx(
     // $360 el kilo en vez de $30). `item.unit` YA es la unidad base en ese caso,
     // así que la comparación de unidades sola no basta para detectarlo.
     const costPerUnitInRmUnit =
-      presentationFactor || item.unit !== item.rawMaterial.unit
-        ? item.unitPrice.mul(deltaInPoUnit).div(deltaInRmUnit)
-        : item.unitPrice
+      presentationFactor || item.unit !== item.rawMaterial.unit ? item.unitPrice.mul(deltaInPoUnit).div(deltaInRmUnit) : item.unitPrice
 
     const batchNumber = await generateBatchNumberInTx(tx, venueId, item.rawMaterialId)
 

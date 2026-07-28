@@ -42,7 +42,7 @@ describe('SetRawMaterialPresentationsSchema — nombre de la presentación', () 
       }
     })
 
-    it("el nombre con comilla simple SÍ pasa (Prisma parametriza; \"1/2 pieza' \" es legítimo)", () => {
+    it('el nombre con comilla simple SÍ pasa (Prisma parametriza; "1/2 pieza\' " es legítimo)', () => {
       expect(parse("caja 'chica'").success).toBe(true)
     })
   })
@@ -81,7 +81,9 @@ describe('UpdatePurchaseOrderSchema — el snapshot NO se puede perder al editar
     const r = UpdatePurchaseOrderSchema.safeParse({
       params,
       body: {
-        items: [{ rawMaterialId: 'cmpe652d500qh9k920gxsqhp6', quantityOrdered: 30, unit: 'KILOGRAM', unitPrice: 360, presentationName: 'caja' }],
+        items: [
+          { rawMaterialId: 'cmpe652d500qh9k920gxsqhp6', quantityOrdered: 30, unit: 'KILOGRAM', unitPrice: 360, presentationName: 'caja' },
+        ],
       },
     })
     expect(r.success).toBe(true)

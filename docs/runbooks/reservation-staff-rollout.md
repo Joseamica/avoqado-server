@@ -1,16 +1,20 @@
 # Runbook: selección de profesionista y horarios de equipo
 
-Este rollout es forward-only y usa dos releases. No activa módulos nuevos: el entitlement sigue siendo la Feature existente `RESERVATIONS`. En particular, no cambia `SERIALIZED_INVENTORY`, `OrganizationModule`, `VenueModule` ni la configuración white-label de Playtelecom.
+Este rollout es forward-only y usa dos releases. No activa módulos nuevos: el entitlement sigue siendo la Feature existente `RESERVATIONS`.
+En particular, no cambia `SERIALIZED_INVENTORY`, `OrganizationModule`, `VenueModule` ni la configuración white-label de Playtelecom.
 
 ## Artefactos
 
 - Release A (protocolo dual + gracia acotada para holds viejos): `63907e06130b2ac3c7d9788fbac4e15d6205795c`.
 - Release B (match estricto de reschedule): `6bc35bad41e2c2299e94f06d4df2d1b1f2030ee8`.
-- Los artefactos anteriores `8b4087e0…` / `a7d47d81…` y `a7c30dce…` / `909cb24b…` están superseded y no deben desplegarse: no parten del `develop` actual o no contienen los cierres del review técnico final.
+- Los artefactos anteriores `8b4087e0…` / `a7d47d81…` y `a7c30dce…` / `909cb24b…` están superseded y no deben desplegarse: no parten del
+  `develop` actual o no contienen los cierres del review técnico final.
 - Preflight read-only: `scripts/preflight-reservation-staff-rollout.ts` del artefacto B.
 - TTL del servidor: `SLOT_HOLD_TTL_MS = 600000` ms. La espera A→B es 11 minutos (`TTL + 60 s`).
 
-El seed general agrega mappings `ProductStaff` solamente a `avoqado-wellness`. Resuelve cada membership por `StaffVenue.staffId_venueId` y persiste `StaffVenue.id`; no modifica el seed de Playtelecom. `src/services/onboarding/demoSeed.service.ts` queda intencionalmente sin cambios porque no crea productos de cita ni mappings producto-profesionista.
+El seed general agrega mappings `ProductStaff` solamente a `avoqado-wellness`. Resuelve cada membership por `StaffVenue.staffId_venueId` y
+persiste `StaffVenue.id`; no modifica el seed de Playtelecom. `src/services/onboarding/demoSeed.service.ts` queda intencionalmente sin
+cambios porque no crea productos de cita ni mappings producto-profesionista.
 
 ## Gates previos
 
@@ -24,15 +28,19 @@ El seed general agrega mappings `ProductStaff` solamente a `avoqado-wellness`. R
    ORDER BY relname;
    ```
 
-   Si hubo crecimiento material respecto del snapshot del diseño, el DBA debe decidir si los índices nuevos requieren `CREATE INDEX CONCURRENTLY`. PostgreSQL no permite esa variante dentro de `BEGIN`/`COMMIT`.
-3. Desde un checkout del artefacto B, instalar dependencias y generar Prisma. Inyectar `DATABASE_URL` por el gestor de secretos; nunca ponerla en el comando, logs o documento.
+   Si hubo crecimiento material respecto del snapshot del diseño, el DBA debe decidir si los índices nuevos requieren
+   `CREATE INDEX CONCURRENTLY`. PostgreSQL no permite esa variante dentro de `BEGIN`/`COMMIT`.
+
+3. Desde un checkout del artefacto B, instalar dependencias y generar Prisma. Inyectar `DATABASE_URL` por el gestor de secretos; nunca
+   ponerla en el comando, logs o documento.
 4. Ejecutar:
 
    ```bash
    NODE_ENV=production npx ts-node -r tsconfig-paths/register scripts/preflight-reservation-staff-rollout.ts
    ```
 
-   El script sólo ejecuta `SELECT`, imprime categoría/conteo/IDs accionables y retorna 1 si cualquier categoría es mayor que cero. Deben estar en cero:
+   El script sólo ejecuta `SELECT`, imprime categoría/conteo/IDs accionables y retorna 1 si cualquier categoría es mayor que cero. Deben
+   estar en cero:
 
    - Reservation activa futura asignada sin `StaffVenue(staffId, venueId)`.
    - ClassSession `SCHEDULED` futura asignada sin esa membership.
@@ -45,11 +53,16 @@ Cualquier conteo positivo bloquea el rollout. Resolver cada ID explícitamente y
 
 ## Secuencia obligatoria
 
-1. Desplegar exactamente Release A. Aplicar la migración aditiva, mantener `capacityMode='pacing'` y `showStaffPicker=false`, y no desplegar clientes nuevos ni activar venues piloto.
-2. Esperar hasta que el control plane confirme que todos los pods/instances con código anterior a A salieron. No basta que A tenga réplicas saludables.
-3. Volver a ejecutar los seis preflights. Esto detecta escrituras inválidas que un pod viejo pudo hacer durante el rolling deploy. Cualquier conteo positivo bloquea B.
-4. Registrar fuera de PostgreSQL el timestamp del control plane en que salió el último pod viejo. Desde ese evento, esperar monotónicamente 11 minutos. No inferir la espera desde `SlotHold.createdAt`, `now()` ni el reloj SQL.
-5. Desplegar exactamente el SHA registrado de Release B. B exige `heldForReservationId === reservation.id`; todo hold de reschedule con etiqueta nula responde 409 y queda sin consumir.
+1. Desplegar exactamente Release A. Aplicar la migración aditiva, mantener `capacityMode='pacing'` y `showStaffPicker=false`, y no desplegar
+   clientes nuevos ni activar venues piloto.
+2. Esperar hasta que el control plane confirme que todos los pods/instances con código anterior a A salieron. No basta que A tenga réplicas
+   saludables.
+3. Volver a ejecutar los seis preflights. Esto detecta escrituras inválidas que un pod viejo pudo hacer durante el rolling deploy. Cualquier
+   conteo positivo bloquea B.
+4. Registrar fuera de PostgreSQL el timestamp del control plane en que salió el último pod viejo. Desde ese evento, esperar monotónicamente
+   11 minutos. No inferir la espera desde `SlotHold.createdAt`, `now()` ni el reloj SQL.
+5. Desplegar exactamente el SHA registrado de Release B. B exige `heldForReservationId === reservation.id`; todo hold de reschedule con
+   etiqueta nula responde 409 y queda sin consumir.
 6. Tras estabilizar B, desplegar clientes en este orden:
 
    1. dashboard y desktop;
@@ -70,7 +83,8 @@ La reversa primaria no es un revert de código:
 3. Verificar que `/info` ya no publique `staffSelection` ni `appointmentWindowSemantics`.
 4. Conservar tablas, columnas y migración. No ejecutar down migration.
 
-Los holds staff-aware existentes conservan su protocolo y pueden consumirse una vez. El servidor deja de mintear holds staff-aware nuevos para el venue después del opt-out.
+Los holds staff-aware existentes conservan su protocolo y pueden consumirse una vez. El servidor deja de mintear holds staff-aware nuevos
+para el venue después del opt-out.
 
 Si una emergencia exige volver a código anterior al protocolo dual:
 
@@ -82,7 +96,8 @@ Si una emergencia exige volver a código anterior al protocolo dual:
    SELECT count(*) FROM "SlotHold" WHERE "expiresAt" > (clock_timestamp() AT TIME ZONE 'UTC') AND ("windowSemantics" IS NOT NULL OR "staffId" IS NOT NULL OR "heldForReservationId" IS NOT NULL)
    ```
 
-4. Sólo con resultado cero desplegar el servidor viejo y restaurar los valores snapshot. No forzar valores `true` y no retirar las columnas aditivas.
+4. Sólo con resultado cero desplegar el servidor viejo y restaurar los valores snapshot. No forzar valores `true` y no retirar las columnas
+   aditivas.
 
 ## Gate de servidor
 

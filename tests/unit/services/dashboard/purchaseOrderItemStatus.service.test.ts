@@ -248,9 +248,7 @@ describe('updatePurchaseOrderItemStatus — robust state machine', () => {
     })
 
     it('un factor de presentación corrupto no crea lote', async () => {
-      mockedPrisma.purchaseOrderItem.findFirst.mockResolvedValue(
-        makeItem({ presentationName: 'caja', presentationFactor: new Decimal(0) }),
-      )
+      mockedPrisma.purchaseOrderItem.findFirst.mockResolvedValue(makeItem({ presentationName: 'caja', presentationFactor: new Decimal(0) }))
 
       await expect(
         updatePurchaseOrderItemStatus(VENUE_ID, PO_ID, ITEM_ID, {

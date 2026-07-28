@@ -696,7 +696,7 @@ export const SetRawMaterialPresentationsSchema = z.object({
             // nombre se congela en `PurchaseOrderItem.presentationName` y está
             // pensado para imprimirse después en la orden de compra / remisión,
             // donde ya no lo protege el escapado de React.
-            .regex(/^[\p{L}\p{N} .,'/()-]+$/u, 'El nombre sólo puede tener letras, números y . , \' / ( ) -'),
+            .regex(/^[\p{L}\p{N} .,'/()-]+$/u, "El nombre sólo puede tener letras, números y . , ' / ( ) -"),
           factorToBase: z
             .number()
             .finite('El factor debe ser un número finito')

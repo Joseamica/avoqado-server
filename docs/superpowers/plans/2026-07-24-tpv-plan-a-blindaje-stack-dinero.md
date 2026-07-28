@@ -1,23 +1,33 @@
 # Plan A — Blindaje del stack de dinero (avoqado-tpv)
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Cerrar los 9 defectos de la cola de registro de pagos de `avoqado-tpv` para que ninguna venta cobrada por el procesador se pierda, se duplique ni se marque como sincronizada sin haberlo sido.
+**Goal:** Cerrar los 9 defectos de la cola de registro de pagos de `avoqado-tpv` para que ninguna venta cobrada por el procesador se pierda,
+se duplique ni se marque como sincronizada sin haberlo sido.
 
-**Architecture:** Tres cambios de fondo. (1) La clasificación de errores deja de leer texto y pasa a leer **códigos HTTP tipados**, preservados desde la capa de red. (2) La cola gana un estado intermedio `SYNCING` con **claim por token**, de modo que dos workers nunca tomen la misma fila. (3) El retry deja de vivir dentro del worker (donde choca con el límite de 10 min de WorkManager) y pasa a WorkManager, que ya sabe reintentar cuando vuelve la red.
+**Architecture:** Tres cambios de fondo. (1) La clasificación de errores deja de leer texto y pasa a leer **códigos HTTP tipados**,
+preservados desde la capa de red. (2) La cola gana un estado intermedio `SYNCING` con **claim por token**, de modo que dos workers nunca
+tomen la misma fila. (3) El retry deja de vivir dentro del worker (donde choca con el límite de 10 min de WorkManager) y pasa a WorkManager,
+que ya sabe reintentar cuando vuelve la red.
 
-**Tech Stack:** Kotlin · Jetpack Compose · Room 2.7 · WorkManager · Hilt · JUnit4 + MockK 1.13 + Truth 1.1.5 + Turbine 1.0 + Robolectric 4.11 · Room `MigrationTestHelper` (androidTest)
+**Tech Stack:** Kotlin · Jetpack Compose · Room 2.7 · WorkManager · Hilt · JUnit4 + MockK 1.13 + Truth 1.1.5 + Turbine 1.0 + Robolectric
+4.11 · Room `MigrationTestHelper` (androidTest)
 
-**Spec:** `docs/superpowers/specs/2026-07-24-tpv-mesas-offline-first-design.md` §4
-**Repo:** `/Users/amieva/Documents/Programming/Avoqado/avoqado-tpv` (rama `main`)
+**Spec:** `docs/superpowers/specs/2026-07-24-tpv-mesas-offline-first-design.md` §4 **Repo:**
+`/Users/amieva/Documents/Programming/Avoqado/avoqado-tpv` (rama `main`)
 
 ## Global Constraints
 
-- **La cola NO es de cobro offline.** Es una cola de **registro post-autorización**: la tarjeta ya se cobró en línea a través del procesador y lo que falló fue anotar la venta en Avoqado. Cada fila perdida es dinero que el cliente sí pagó y que el venue no ve en sus libros, **sin recibo firmado que lo respalde**.
+- **La cola NO es de cobro offline.** Es una cola de **registro post-autorización**: la tarjeta ya se cobró en línea a través del procesador
+  y lo que falló fue anotar la venta en Avoqado. Cada fila perdida es dinero que el cliente sí pagó y que el venue no ve en sus libros,
+  **sin recibo firmado que lo respalde**.
 - **Nunca quitar ni renombrar un campo de una respuesta de API.** Campos nuevos: opcionales y con default.
 - **Money = `BigDecimal`, en PESOS 1:1.** Nunca centavos, nunca `Float`/`Double`.
-- **NO tocar `features/ordering/`** — es legacy y queda intacto (spec D-4). En particular **NO** arreglar los 11 `syncOrderImmediately` de `MenuViewModel.kt` (es F-2, saltada a propósito).
-- **NO tocar el constraint `NetworkType.CONNECTED`** de `PaymentSyncScheduler.kt:85,174` — hace que WorkManager dispare al volver la red y está bien.
+- **NO tocar `features/ordering/`** — es legacy y queda intacto (spec D-4). En particular **NO** arreglar los 11 `syncOrderImmediately` de
+  `MenuViewModel.kt` (es F-2, saltada a propósito).
+- **NO tocar el constraint `NetworkType.CONNECTED`** de `PaymentSyncScheduler.kt:85,174` — hace que WorkManager dispare al volver la red y
+  está bien.
 - **Nunca commitear sin permiso explícito del founder.** Los pasos de commit de este plan se ejecutan solo cuando el founder lo autorice.
 - Correr `./gradlew testProductionDebugUnitTest` después de cada tarea; dejar el repo compilando.
 - Fechas en tests siempre relativas (`System.currentTimeMillis() - N`), nunca hardcodeadas.
@@ -26,34 +36,39 @@
 
 F-6 → F-7 → F-8 → F-4 → F-9 → F-1 → F-10/F-11 → F-5 → F-3.
 
-Primero lo irreversible (una venta marcada como sincronizada sin estarlo se borra a los 7 días y no deja rastro), después lo que pierde ventas, después lo que las corrompe por concurrencia, y al final UX.
+Primero lo irreversible (una venta marcada como sincronizada sin estarlo se borra a los 7 días y no deja rastro), después lo que pierde
+ventas, después lo que las corrompe por concurrencia, y al final UX.
 
 ## File Structure
 
-| Archivo | Responsabilidad | Tarea |
-|---|---|---|
-| `core/data/network/BackendHttpException.kt` **(nuevo)** | Excepción tipada que preserva el status HTTP | 1 |
-| `features/payment/domain/usecase/RecordPaymentUseCase.kt` | Emitir `BackendHttpException` en vez de perder el código | 1, 8 |
-| `features/payment/domain/sync/SyncOutcome.kt` **(nuevo)** | Clasificador único: `Synced` / `Retryable` / `Permanent` | 1 |
-| `core/data/workers/PaymentSyncWorker.kt` | Consumir el clasificador; soltar el retry interno | 1, 5 |
-| `features/payment/data/repository/PaymentQueueRepositoryImpl.kt` | `enqueue` honesto; claim/release | 2, 3 |
-| `core/data/local/dao/PendingPaymentDao.kt` | Claim por token; `markSynced` con guarda; reset selectivo | 2, 3, 7 |
-| `core/data/local/entity/PendingPaymentEntity.kt` | Campos `claim_token` / `claimed_at`; corregir KDoc | 3, 7 |
-| `core/data/local/AvoqadoDatabase.kt` | Migración 27 → 28 | 3 |
-| `core/util/PaymentSyncScheduler.kt` | `enqueueUniqueWork` | 4 |
-| `features/payment/presentation/angelpay/AngelPayPaymentState.kt` | Estado `Queued` | 6 |
-| `features/payment/presentation/angelpay/AngelPayPaymentViewModel.kt` | Emitir `Queued`, no `Error` | 6 |
-| `core/presentation/components/ConnectionBannerHost.kt` **(nuevo)** | Dueño único de la franja superior | 9 |
+| Archivo                                                              | Responsabilidad                                           | Tarea   |
+| -------------------------------------------------------------------- | --------------------------------------------------------- | ------- |
+| `core/data/network/BackendHttpException.kt` **(nuevo)**              | Excepción tipada que preserva el status HTTP              | 1       |
+| `features/payment/domain/usecase/RecordPaymentUseCase.kt`            | Emitir `BackendHttpException` en vez de perder el código  | 1, 8    |
+| `features/payment/domain/sync/SyncOutcome.kt` **(nuevo)**            | Clasificador único: `Synced` / `Retryable` / `Permanent`  | 1       |
+| `core/data/workers/PaymentSyncWorker.kt`                             | Consumir el clasificador; soltar el retry interno         | 1, 5    |
+| `features/payment/data/repository/PaymentQueueRepositoryImpl.kt`     | `enqueue` honesto; claim/release                          | 2, 3    |
+| `core/data/local/dao/PendingPaymentDao.kt`                           | Claim por token; `markSynced` con guarda; reset selectivo | 2, 3, 7 |
+| `core/data/local/entity/PendingPaymentEntity.kt`                     | Campos `claim_token` / `claimed_at`; corregir KDoc        | 3, 7    |
+| `core/data/local/AvoqadoDatabase.kt`                                 | Migración 27 → 28                                         | 3       |
+| `core/util/PaymentSyncScheduler.kt`                                  | `enqueueUniqueWork`                                       | 4       |
+| `features/payment/presentation/angelpay/AngelPayPaymentState.kt`     | Estado `Queued`                                           | 6       |
+| `features/payment/presentation/angelpay/AngelPayPaymentViewModel.kt` | Emitir `Queued`, no `Error`                               | 6       |
+| `core/presentation/components/ConnectionBannerHost.kt` **(nuevo)**   | Dueño único de la franja superior                         | 9       |
 
 ---
 
 ## Task 1: F-6 — clasificar por código HTTP, no por texto
 
-Hoy `PaymentSyncWorker.kt:247-257` hace `errorMessage.contains("409")` → `markSynced()`. Los reference numbers son numéricos (`000000409231` contiene "409"), igual montos e ids. Un falso positivo marca como SUCCESS una venta que **nunca llegó al backend**, deja de reintentar, y a los 7 días la fila se borra.
+Hoy `PaymentSyncWorker.kt:247-257` hace `errorMessage.contains("409")` → `markSynced()`. Los reference numbers son numéricos (`000000409231`
+contiene "409"), igual montos e ids. Un falso positivo marca como SUCCESS una venta que **nunca llegó al backend**, deja de reintentar, y a
+los 7 días la fila se borra.
 
-La causa raíz está una capa más abajo: `RecordPaymentUseCase.kt:281` devuelve `Result.failure(Exception(...))` y **el status HTTP se pierde**. Por eso el worker no tiene más remedio que leer texto.
+La causa raíz está una capa más abajo: `RecordPaymentUseCase.kt:281` devuelve `Result.failure(Exception(...))` y **el status HTTP se
+pierde**. Por eso el worker no tiene más remedio que leer texto.
 
 **Files:**
+
 - Create: `app/src/main/java/com/jaac/avoqado_tpv/core/data/network/BackendHttpException.kt`
 - Create: `app/src/main/java/com/jaac/avoqado_tpv/features/payment/domain/sync/SyncOutcome.kt`
 - Create: `app/src/test/java/com/jaac/avoqado_tpv/features/payment/domain/sync/SyncOutcomeTest.kt`
@@ -61,7 +76,9 @@ La causa raíz está una capa más abajo: `RecordPaymentUseCase.kt:281` devuelve
 - Modify: `app/src/main/java/com/jaac/avoqado_tpv/core/data/workers/PaymentSyncWorker.kt:242-307`
 
 **Interfaces:**
-- Produces: `BackendHttpException(val statusCode: Int, override val message: String)`; `SyncOutcome` sealed class con `Synced` / `Retryable` / `Permanent(reason: String)`; `classifySyncFailure(error: Throwable?): SyncOutcome`.
+
+- Produces: `BackendHttpException(val statusCode: Int, override val message: String)`; `SyncOutcome` sealed class con `Synced` / `Retryable`
+  / `Permanent(reason: String)`; `classifySyncFailure(error: Throwable?): SyncOutcome`.
 - Consumes: nada de tareas previas (es la primera).
 
 - [ ] **Step 1: Escribir el test que falla**
@@ -136,8 +153,7 @@ class SyncOutcomeTest {
 
 - [ ] **Step 2: Correr el test y verificar que falla**
 
-Run: `./gradlew testProductionDebugUnitTest --tests "*SyncOutcomeTest*"`
-Expected: FAIL — `Unresolved reference: classifySyncFailure`
+Run: `./gradlew testProductionDebugUnitTest --tests "*SyncOutcomeTest*"` Expected: FAIL — `Unresolved reference: classifySyncFailure`
 
 - [ ] **Step 3: Implementar la excepción tipada**
 
@@ -207,12 +223,12 @@ fun classifySyncFailure(error: Throwable?): SyncOutcome = when {
 
 - [ ] **Step 5: Correr el test y verificar que pasa**
 
-Run: `./gradlew testProductionDebugUnitTest --tests "*SyncOutcomeTest*"`
-Expected: PASS (7 tests)
+Run: `./gradlew testProductionDebugUnitTest --tests "*SyncOutcomeTest*"` Expected: PASS (7 tests)
 
 - [ ] **Step 6: Hacer que `RecordPaymentUseCase` emita el tipo**
 
-En `RecordPaymentUseCase.kt`, donde hoy se construye el fallo (`:281-283`), envolver preservando el status. Localizar dónde el use case detecta una respuesta HTTP no exitosa y reemplazar el `Exception(...)` genérico por:
+En `RecordPaymentUseCase.kt`, donde hoy se construye el fallo (`:281-283`), envolver preservando el status. Localizar dónde el use case
+detecta una respuesta HTTP no exitosa y reemplazar el `Exception(...)` genérico por:
 
 ```kotlin
 return Result.failure(
@@ -223,7 +239,8 @@ return Result.failure(
 )
 ```
 
-Y en el `catch` de red, dejar pasar la `IOException` original en vez de envolverla en una `Exception` genérica (el clasificador la necesita intacta):
+Y en el `catch` de red, dejar pasar la `IOException` original en vez de envolverla en una `Exception` genérica (el clasificador la necesita
+intacta):
 
 ```kotlin
 } catch (e: IOException) {
@@ -275,10 +292,10 @@ Añadir imports de `SyncOutcome` y `classifySyncFailure`.
 
 - [ ] **Step 8: Correr toda la suite de pago**
 
-Run: `./gradlew testProductionDebugUnitTest --tests "*Payment*"`
-Expected: PASS. Si algún test viejo esperaba el string-matching, actualizarlo — el comportamiento nuevo es el correcto.
+Run: `./gradlew testProductionDebugUnitTest --tests "*Payment*"` Expected: PASS. Si algún test viejo esperaba el string-matching,
+actualizarlo — el comportamiento nuevo es el correcto.
 
-- [ ] **Step 9: Commit** *(solo con permiso del founder)*
+- [ ] **Step 9: Commit** _(solo con permiso del founder)_
 
 ```bash
 git add app/src/main/java/com/jaac/avoqado_tpv/core/data/network/BackendHttpException.kt \
@@ -300,16 +317,22 @@ decide por código. Ante la duda: Retryable, nunca Synced."
 
 ## Task 2: F-7 — `enqueue` no debe reportar éxito cuando la fila no entró
 
-`PaymentQueueRepositoryImpl.kt:51-57`: el insert es `OnConflictStrategy.IGNORE` sobre el índice único de `reference_number`; si choca devuelve rowId 0 y el repo responde **`Result.success(Unit)`**. Como las filas `FAILED` **nunca se borran** (`deleteOldSyncedPayments` solo toca `SUCCESS`), un reference number repetido choca con un cadáver y el pago nuevo jamás entra a la cola. El cajero lee "EN COLA, se completará automáticamente" y no hay nada que completar.
+`PaymentQueueRepositoryImpl.kt:51-57`: el insert es `OnConflictStrategy.IGNORE` sobre el índice único de `reference_number`; si choca
+devuelve rowId 0 y el repo responde **`Result.success(Unit)`**. Como las filas `FAILED` **nunca se borran** (`deleteOldSyncedPayments` solo
+toca `SUCCESS`), un reference number repetido choca con un cadáver y el pago nuevo jamás entra a la cola. El cajero lee "EN COLA, se
+completará automáticamente" y no hay nada que completar.
 
 **Files:**
+
 - Modify: `app/src/main/java/com/jaac/avoqado_tpv/core/data/local/dao/PendingPaymentDao.kt`
 - Modify: `app/src/main/java/com/jaac/avoqado_tpv/features/payment/data/repository/PaymentQueueRepositoryImpl.kt:40-63`
 - Test: `app/src/test/java/com/jaac/avoqado_tpv/features/payment/data/repository/PendingPaymentEnqueueTest.kt` (crear)
 
 **Interfaces:**
+
 - Consumes: nada de la Task 1.
-- Produces: `PendingPaymentDao.findByReference(reference: String): PendingPaymentEntity?`. `enqueue` sigue devolviendo `Result<Unit>` (firma intacta) pero ahora `Result.failure` cuando el pago **no** quedó encolado.
+- Produces: `PendingPaymentDao.findByReference(reference: String): PendingPaymentEntity?`. `enqueue` sigue devolviendo `Result<Unit>` (firma
+  intacta) pero ahora `Result.failure` cuando el pago **no** quedó encolado.
 
 - [ ] **Step 1: Escribir el test que falla**
 
@@ -376,12 +399,14 @@ class PendingPaymentEnqueueTest {
 }
 ```
 
-> **Nota para quien implemente:** `queuedPayment(...)` y `entity(...)` son helpers a escribir en el mismo archivo de test. Copiar la forma de `QueuedPayment` desde `features/payment/domain/model/QueuedPayment.kt` y la de `PendingPaymentEntity` desde `core/data/local/entity/PendingPaymentEntity.kt`, rellenando con valores mínimos válidos y `createdAt = System.currentTimeMillis()`.
+> **Nota para quien implemente:** `queuedPayment(...)` y `entity(...)` son helpers a escribir en el mismo archivo de test. Copiar la forma
+> de `QueuedPayment` desde `features/payment/domain/model/QueuedPayment.kt` y la de `PendingPaymentEntity` desde
+> `core/data/local/entity/PendingPaymentEntity.kt`, rellenando con valores mínimos válidos y `createdAt = System.currentTimeMillis()`.
 
 - [ ] **Step 2: Correr el test y verificar que falla**
 
-Run: `./gradlew testProductionDebugUnitTest --tests "*PendingPaymentEnqueueTest*"`
-Expected: FAIL — los dos últimos tests devuelven `isSuccess`, no `isFailure`.
+Run: `./gradlew testProductionDebugUnitTest --tests "*PendingPaymentEnqueueTest*"` Expected: FAIL — los dos últimos tests devuelven
+`isSuccess`, no `isFailure`.
 
 - [ ] **Step 3: Agregar la consulta al DAO**
 
@@ -440,10 +465,9 @@ if (stillQueued) {
 
 - [ ] **Step 5: Correr el test y verificar que pasa**
 
-Run: `./gradlew testProductionDebugUnitTest --tests "*PendingPaymentEnqueueTest*"`
-Expected: PASS (4 tests)
+Run: `./gradlew testProductionDebugUnitTest --tests "*PendingPaymentEnqueueTest*"` Expected: PASS (4 tests)
 
-- [ ] **Step 6: Commit** *(solo con permiso del founder)*
+- [ ] **Step 6: Commit** _(solo con permiso del founder)_
 
 ```bash
 git add app/src/main/java/com/jaac/avoqado_tpv/core/data/local/dao/PendingPaymentDao.kt \
@@ -460,9 +484,12 @@ con un cadaver, el insert se ignoraba y el repo devolvia success. El cajero leia
 
 ## Task 3: F-8 — claim por token, para que dos workers nunca tomen la misma fila
 
-`PendingPaymentDao.kt:58-63`: `getAllPending()` devuelve todo lo PENDING y **no existe estado intermedio ni claim**. Con dos workers vivos (F-4), ambos leen las mismas filas y las registran en paralelo. Lo único que hoy evita el doble registro es que el backend deduplique — la seguridad del dinero está fuera de la app.
+`PendingPaymentDao.kt:58-63`: `getAllPending()` devuelve todo lo PENDING y **no existe estado intermedio ni claim**. Con dos workers vivos
+(F-4), ambos leen las mismas filas y las registran en paralelo. Lo único que hoy evita el doble registro es que el backend deduplique — la
+seguridad del dinero está fuera de la app.
 
 **Files:**
+
 - Modify: `app/src/main/java/com/jaac/avoqado_tpv/core/data/local/entity/PendingPaymentEntity.kt`
 - Modify: `app/src/main/java/com/jaac/avoqado_tpv/core/data/local/dao/PendingPaymentDao.kt`
 - Modify: `app/src/main/java/com/jaac/avoqado_tpv/core/data/local/AvoqadoDatabase.kt:107-125`
@@ -473,8 +500,10 @@ con un cadaver, el insert se ignoraba y el repo devolvia success. El cajero leia
 - Test: `app/src/androidTest/java/com/jaac/avoqado_tpv/core/data/local/AvoqadoDatabaseMigrationTest.kt` (extender)
 
 **Interfaces:**
+
 - Consumes: `findByReference` de la Task 2 (el estado `SYNCING` ya se contempla ahí como "vivo").
-- Produces: `PaymentQueueRepository.claimBatch(limit: Int): List<QueuedPayment>` y `PaymentQueueRepository.release(queueId: Long, retryCount: Int, error: String)`. El worker deja de llamar `getAllPending()`.
+- Produces: `PaymentQueueRepository.claimBatch(limit: Int): List<QueuedPayment>` y
+  `PaymentQueueRepository.release(queueId: Long, retryCount: Int, error: String)`. El worker deja de llamar `getAllPending()`.
 
 - [ ] **Step 1: Escribir el test de instrumentación que falla**
 
@@ -560,12 +589,12 @@ class PendingPaymentClaimTest {
 }
 ```
 
-> **Nota:** `newPending(reference)` es un helper a escribir en el mismo archivo; construye un `PendingPaymentEntity` mínimo válido con `createdAt = System.currentTimeMillis()` y `syncStatus = "PENDING"`.
+> **Nota:** `newPending(reference)` es un helper a escribir en el mismo archivo; construye un `PendingPaymentEntity` mínimo válido con
+> `createdAt = System.currentTimeMillis()` y `syncStatus = "PENDING"`.
 
 - [ ] **Step 2: Correr el test y verificar que falla**
 
-Run: `./gradlew connectedProductionDebugAndroidTest --tests "*PendingPaymentClaimTest*"`
-Expected: FAIL — `Unresolved reference: claimBatch`
+Run: `./gradlew connectedProductionDebugAndroidTest --tests "*PendingPaymentClaimTest*"` Expected: FAIL — `Unresolved reference: claimBatch`
 
 - [ ] **Step 3: Agregar los campos a la entidad**
 
@@ -615,7 +644,8 @@ val MIGRATION_27_28 = object : Migration(27, 28) {
 }
 ```
 
-Registrarla donde se listan las demás (`.addMigrations(...)` en `DatabaseModule.kt` o en el builder del propio archivo — seguir el patrón ya presente).
+Registrarla donde se listan las demás (`.addMigrations(...)` en `DatabaseModule.kt` o en el builder del propio archivo — seguir el patrón ya
+presente).
 
 - [ ] **Step 5: Agregar claim y release al DAO**
 
@@ -738,21 +768,22 @@ is SyncOutcome.Retryable -> {
 }
 ```
 
-En la rama `Permanent`, cambiar `updateRetry(...)` por `release(payment.queueId, MAX_RETRY_ATTEMPTS, outcome.reason)` para que también suelte el token.
+En la rama `Permanent`, cambiar `updateRetry(...)` por `release(payment.queueId, MAX_RETRY_ATTEMPTS, outcome.reason)` para que también
+suelte el token.
 
 - [ ] **Step 8: Extender el test de migración**
 
-En `AvoqadoDatabaseMigrationTest.kt`, siguiendo el patrón de las migraciones ya cubiertas, añadir un caso 27 → 28 que verifique que una fila `pending_payments` existente sobrevive con `claim_token` y `claimed_at` en NULL.
+En `AvoqadoDatabaseMigrationTest.kt`, siguiendo el patrón de las migraciones ya cubiertas, añadir un caso 27 → 28 que verifique que una fila
+`pending_payments` existente sobrevive con `claim_token` y `claimed_at` en NULL.
 
 - [ ] **Step 9: Correr los tests**
 
-Run: `./gradlew connectedProductionDebugAndroidTest --tests "*PendingPaymentClaimTest*" --tests "*AvoqadoDatabaseMigrationTest*"`
-Expected: PASS
+Run: `./gradlew connectedProductionDebugAndroidTest --tests "*PendingPaymentClaimTest*" --tests "*AvoqadoDatabaseMigrationTest*"` Expected:
+PASS
 
-Run: `./gradlew testProductionDebugUnitTest --tests "*Payment*"`
-Expected: PASS
+Run: `./gradlew testProductionDebugUnitTest --tests "*Payment*"` Expected: PASS
 
-- [ ] **Step 10: Commit** *(solo con permiso del founder)*
+- [ ] **Step 10: Commit** _(solo con permiso del founder)_
 
 ```bash
 git add app/src/main/java/com/jaac/avoqado_tpv/core/data/local/ \
@@ -775,13 +806,16 @@ reclaman a los 15 min."
 
 ## Task 4: F-4 — un solo worker inmediato
 
-`PaymentSyncScheduler.kt:177-181` usa `enqueue()` pelón, sin nombre único. Cada `runNow()` crea un worker independiente, y `handleRecordFailure` llama `runNow()` en cada pago encolado.
+`PaymentSyncScheduler.kt:177-181` usa `enqueue()` pelón, sin nombre único. Cada `runNow()` crea un worker independiente, y
+`handleRecordFailure` llama `runNow()` en cada pago encolado.
 
 **Files:**
+
 - Modify: `app/src/main/java/com/jaac/avoqado_tpv/core/util/PaymentSyncScheduler.kt:170-184`
 - Test: `app/src/test/java/com/jaac/avoqado_tpv/core/util/PaymentSyncSchedulerTest.kt` (crear)
 
 **Interfaces:**
+
 - Consumes: el claim de la Task 3 (defensa en profundidad: aunque se colaran dos workers, el claim los separa).
 - Produces: constante `PaymentSyncScheduler.IMMEDIATE_WORK_NAME`.
 
@@ -825,8 +859,8 @@ class PaymentSyncSchedulerTest {
 
 - [ ] **Step 2: Correr el test y verificar que falla**
 
-Run: `./gradlew testProductionDebugUnitTest --tests "*PaymentSyncSchedulerTest*"`
-Expected: FAIL — `Unresolved reference: IMMEDIATE_WORK_NAME`, y `enqueueUniqueWork` nunca se llama.
+Run: `./gradlew testProductionDebugUnitTest --tests "*PaymentSyncSchedulerTest*"` Expected: FAIL —
+`Unresolved reference: IMMEDIATE_WORK_NAME`, y `enqueueUniqueWork` nunca se llama.
 
 - [ ] **Step 3: Implementar**
 
@@ -854,10 +888,9 @@ WorkManager.getInstance(context).enqueueUniqueWork(
 
 - [ ] **Step 4: Correr el test y verificar que pasa**
 
-Run: `./gradlew testProductionDebugUnitTest --tests "*PaymentSyncSchedulerTest*"`
-Expected: PASS
+Run: `./gradlew testProductionDebugUnitTest --tests "*PaymentSyncSchedulerTest*"` Expected: PASS
 
-- [ ] **Step 5: Commit** *(solo con permiso del founder)*
+- [ ] **Step 5: Commit** _(solo con permiso del founder)_
 
 ```bash
 git add app/src/main/java/com/jaac/avoqado_tpv/core/util/PaymentSyncScheduler.kt \
@@ -872,13 +905,18 @@ cada pago encolado: N pagos en cola => N workers sobre la misma tabla Room."
 
 ## Task 5: F-9 — sacar el retry del worker y dejárselo a WorkManager
 
-`PaymentSyncWorker.kt:113,207-214`: 10 pagos × hasta 10 intentos × backoff de hasta 30s ≈ 40 min, y **WorkManager mata al worker a los 10**. Se corta a media tanda pero el `retry_count` elevado ya quedó escrito y se acumula entre corridas, así que un pago bueno termina en `FAILED`. Además el `delay()` interno pelea con el framework: el constraint `NetworkType.CONNECTED` ya hace que WorkManager reintente al volver la red.
+`PaymentSyncWorker.kt:113,207-214`: 10 pagos × hasta 10 intentos × backoff de hasta 30s ≈ 40 min, y **WorkManager mata al worker a los 10**.
+Se corta a media tanda pero el `retry_count` elevado ya quedó escrito y se acumula entre corridas, así que un pago bueno termina en
+`FAILED`. Además el `delay()` interno pelea con el framework: el constraint `NetworkType.CONNECTED` ya hace que WorkManager reintente al
+volver la red.
 
 **Files:**
+
 - Modify: `app/src/main/java/com/jaac/avoqado_tpv/core/data/workers/PaymentSyncWorker.kt:182-340`
 - Test: `app/src/test/java/com/jaac/avoqado_tpv/core/data/workers/PaymentSyncWorkerTest.kt` (crear)
 
 **Interfaces:**
+
 - Consumes: `classifySyncFailure` (Task 1), `claimBatch`/`release` (Task 3).
 - Produces: `syncPayment` sin loop — un intento por corrida.
 
@@ -930,12 +968,14 @@ class PaymentSyncWorkerTest {
 }
 ```
 
-> **Nota:** `buildWorker(...)` construye el `PaymentSyncWorker` con `TestListenableWorkerBuilder` (androidx.work:work-testing). Si la dependencia no está en `app/build.gradle.kts`, añadir `testImplementation("androidx.work:work-testing:2.9.0")` como parte de este paso. `queuedPayment(...)` es el helper de la Task 2.
+> **Nota:** `buildWorker(...)` construye el `PaymentSyncWorker` con `TestListenableWorkerBuilder` (androidx.work:work-testing). Si la
+> dependencia no está en `app/build.gradle.kts`, añadir `testImplementation("androidx.work:work-testing:2.9.0")` como parte de este paso.
+> `queuedPayment(...)` es el helper de la Task 2.
 
 - [ ] **Step 2: Correr el test y verificar que falla**
 
-Run: `./gradlew testProductionDebugUnitTest --tests "*PaymentSyncWorkerTest*"`
-Expected: FAIL — se llama al use case 10 veces y el test tarda >30s.
+Run: `./gradlew testProductionDebugUnitTest --tests "*PaymentSyncWorkerTest*"` Expected: FAIL — se llama al use case 10 veces y el test
+tarda >30s.
 
 - [ ] **Step 3: Reemplazar `syncPayment` por un intento único**
 
@@ -1003,10 +1043,9 @@ Borrar las constantes `INITIAL_BACKOFF_MS` y `MAX_BACKOFF_MS` (`:100,106`) — y
 
 - [ ] **Step 4: Correr los tests**
 
-Run: `./gradlew testProductionDebugUnitTest --tests "*PaymentSyncWorkerTest*"`
-Expected: PASS, y en menos de 2 segundos.
+Run: `./gradlew testProductionDebugUnitTest --tests "*PaymentSyncWorkerTest*"` Expected: PASS, y en menos de 2 segundos.
 
-- [ ] **Step 5: Commit** *(solo con permiso del founder)*
+- [ ] **Step 5: Commit** _(solo con permiso del founder)_
 
 ```bash
 git add app/src/main/java/com/jaac/avoqado_tpv/core/data/workers/PaymentSyncWorker.kt \
@@ -1023,9 +1062,11 @@ buenos acababan en FAILED."
 
 ## Task 6: F-1 — un cobro exitoso no se pinta como error
 
-`AngelPayPaymentViewModel.kt:575` devuelve `AngelPayPaymentState.Error` cuando la tarjeta **sí** cobró y solo falló el registro. El texto ya es correcto, pero el tipo de estado hace que el cajero vea pantalla roja en una operación que salió bien — y vuelva a cobrar por miedo.
+`AngelPayPaymentViewModel.kt:575` devuelve `AngelPayPaymentState.Error` cuando la tarjeta **sí** cobró y solo falló el registro. El texto ya
+es correcto, pero el tipo de estado hace que el cajero vea pantalla roja en una operación que salió bien — y vuelva a cobrar por miedo.
 
 **Files:**
+
 - Modify: `app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentState.kt`
 - Modify: `app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentViewModel.kt:575-583`
 - Modify: `app/src/main/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentScreen.kt`
@@ -1033,6 +1074,7 @@ buenos acababan en FAILED."
 - Test: `app/src/test/java/com/jaac/avoqado_tpv/features/payment/presentation/angelpay/AngelPayPaymentViewModelTest.kt:770-810` (extender)
 
 **Interfaces:**
+
 - Consumes: `enqueue` honesto de la Task 2 — el caso de `Result.failure` es ahora el que sí merece `Error`.
 - Produces: `AngelPayPaymentState.Queued`.
 
@@ -1076,8 +1118,7 @@ fun `si el encolado TAMBIEN falla si es un Error real`() = runTest {
 
 - [ ] **Step 2: Correr el test y verificar que falla**
 
-Run: `./gradlew testProductionDebugUnitTest --tests "*AngelPayPaymentViewModelTest*"`
-Expected: FAIL — `Unresolved reference: Queued`
+Run: `./gradlew testProductionDebugUnitTest --tests "*AngelPayPaymentViewModelTest*"` Expected: FAIL — `Unresolved reference: Queued`
 
 - [ ] **Step 3: Agregar el estado**
 
@@ -1126,7 +1167,9 @@ La rama `else` (`:580-583`, cuando el encolado falla) se queda como está: ahí 
 
 - [ ] **Step 5: Renderizarlo como éxito**
 
-En `AngelPayPaymentScreen.kt`, añadir una rama para `AngelPayPaymentState.Queued` al `when` del estado. Reusar el composable de éxito que ya existe, cambiando el color de acento a ámbar y mostrando `state.message` bajo el monto. **No** reusar el composable de error — el punto entero es que no se vea rojo.
+En `AngelPayPaymentScreen.kt`, añadir una rama para `AngelPayPaymentState.Queued` al `when` del estado. Reusar el composable de éxito que ya
+existe, cambiando el color de acento a ámbar y mostrando `state.message` bajo el monto. **No** reusar el composable de error — el punto
+entero es que no se vea rojo.
 
 - [ ] **Step 6: Revisar el mismo patrón en Blumon**
 
@@ -1137,14 +1180,14 @@ rg -n "PaymentState.Error" app/src/main/java/com/jaac/avoqado_tpv/features/payme
    app/src/production/java app/src/sandbox/java | rg -i "cola|queue|encolad"
 ```
 
-Si aparece el mismo "éxito-como-Error", aplicar el mismo arreglo en `PaymentState.kt` + su ViewModel y su pantalla. Si no aparece, anotarlo en el commit — la revisión es parte del entregable.
+Si aparece el mismo "éxito-como-Error", aplicar el mismo arreglo en `PaymentState.kt` + su ViewModel y su pantalla. Si no aparece, anotarlo
+en el commit — la revisión es parte del entregable.
 
 - [ ] **Step 7: Correr los tests**
 
-Run: `./gradlew testProductionDebugUnitTest --tests "*Payment*"`
-Expected: PASS
+Run: `./gradlew testProductionDebugUnitTest --tests "*Payment*"` Expected: PASS
 
-- [ ] **Step 8: Commit** *(solo con permiso del founder)*
+- [ ] **Step 8: Commit** _(solo con permiso del founder)_
 
 ```bash
 git add app/src/main/java/com/jaac/avoqado_tpv/features/payment/ \
@@ -1160,15 +1203,20 @@ miedo. Error queda para cuando el encolado TAMBIEN falla."
 
 ## Task 7: F-10 + F-11 — reset selectivo, `markSynced` con guarda, y el KDoc que miente
 
-Tres arreglos pequeños en los mismos archivos. `resetAllFailed()` (`PendingPaymentDao.kt:172-177`, llamado desde `HomeViewModel.kt:896` y `DeviceHealthViewModel.kt:388`) regresa **todos** los FAILED a PENDING con `retry_count = 0`, incluyendo los que fallaron por un 4xx permanente → se reintentan para siempre. `markSynced` (`:72-77`) actualiza por `WHERE id = :id` sin verificar estado. Y el KDoc dice "3 attempts max" en cinco lugares cuando `MAX_RETRY_ATTEMPTS = 10`.
+Tres arreglos pequeños en los mismos archivos. `resetAllFailed()` (`PendingPaymentDao.kt:172-177`, llamado desde `HomeViewModel.kt:896` y
+`DeviceHealthViewModel.kt:388`) regresa **todos** los FAILED a PENDING con `retry_count = 0`, incluyendo los que fallaron por un 4xx
+permanente → se reintentan para siempre. `markSynced` (`:72-77`) actualiza por `WHERE id = :id` sin verificar estado. Y el KDoc dice "3
+attempts max" en cinco lugares cuando `MAX_RETRY_ATTEMPTS = 10`.
 
 **Files:**
+
 - Modify: `app/src/main/java/com/jaac/avoqado_tpv/core/data/local/dao/PendingPaymentDao.kt`
 - Modify: `app/src/main/java/com/jaac/avoqado_tpv/core/data/local/entity/PendingPaymentEntity.kt` (KDoc)
 - Modify: `app/src/main/java/com/jaac/avoqado_tpv/core/data/workers/PaymentSyncWorker.kt` (KDoc `:17-74,182-201`)
 - Test: `app/src/androidTest/java/com/jaac/avoqado_tpv/core/data/local/PendingPaymentClaimTest.kt` (extender)
 
 **Interfaces:**
+
 - Consumes: `SyncOutcome.Permanent` (Task 1) — es lo que marca una fila como no-reintentable.
 - Produces: columna `permanent` en `pending_payments` (Room v29).
 
@@ -1206,8 +1254,8 @@ fun `markSynced no puede voltear una fila FAILED`() = runTest {
 
 - [ ] **Step 2: Correr y verificar que falla**
 
-Run: `./gradlew connectedProductionDebugAndroidTest --tests "*PendingPaymentClaimTest*"`
-Expected: FAIL — `Unresolved reference: markPermanentlyFailed`
+Run: `./gradlew connectedProductionDebugAndroidTest --tests "*PendingPaymentClaimTest*"` Expected: FAIL —
+`Unresolved reference: markPermanentlyFailed`
 
 - [ ] **Step 3: Agregar la columna y la migración 28 → 29**
 
@@ -1269,11 +1317,14 @@ suspend fun markSynced(id: Long)
 suspend fun resetAllFailed(): Int
 ```
 
-En `PaymentSyncWorker.kt`, la rama `SyncOutcome.Permanent` (Task 5) pasa a llamar `paymentQueueRepository.markPermanentlyFailed(payment.queueId, outcome.reason)` en vez de `release(...)`. Añadir el método a la interfaz `PaymentQueueRepository` y su impl, siguiendo el patrón de `release`.
+En `PaymentSyncWorker.kt`, la rama `SyncOutcome.Permanent` (Task 5) pasa a llamar
+`paymentQueueRepository.markPermanentlyFailed(payment.queueId, outcome.reason)` en vez de `release(...)`. Añadir el método a la interfaz
+`PaymentQueueRepository` y su impl, siguiendo el patrón de `release`.
 
 - [ ] **Step 5: Corregir el KDoc que miente**
 
 Reemplazar toda mención de "3 attempts" / "3 retries" / "Retry count >= 3" por 10, en:
+
 - `PaymentSyncWorker.kt:24,41,45,64-66,191,196`
 - `PendingPaymentDao.kt:83-84`
 - `PendingPaymentEntity.kt:17`
@@ -1282,13 +1333,11 @@ Y quitar del KDoc del worker las líneas que describen el backoff exponencial in
 
 - [ ] **Step 6: Correr los tests**
 
-Run: `./gradlew connectedProductionDebugAndroidTest --tests "*PendingPaymentClaimTest*"`
-Expected: PASS
+Run: `./gradlew connectedProductionDebugAndroidTest --tests "*PendingPaymentClaimTest*"` Expected: PASS
 
-Run: `./gradlew testProductionDebugUnitTest --tests "*Payment*"`
-Expected: PASS
+Run: `./gradlew testProductionDebugUnitTest --tests "*Payment*"` Expected: PASS
 
-- [ ] **Step 7: Commit** *(solo con permiso del founder)*
+- [ ] **Step 7: Commit** _(solo con permiso del founder)_
 
 ```bash
 git add app/src/main/java/com/jaac/avoqado_tpv/core/data/local/ \
@@ -1308,9 +1357,11 @@ MAX_RETRY_ATTEMPTS = 10."
 
 ## Task 8: F-5 — clasificar por código en los 4 sitios restantes
 
-Los mismos `contains()` viven en cuatro archivos más. Un cambio de wording en el server rompe la clasificación **en silencio**: un error transitorio se vuelve permanente o al revés.
+Los mismos `contains()` viven en cuatro archivos más. Un cambio de wording en el server rompe la clasificación **en silencio**: un error
+transitorio se vuelve permanente o al revés.
 
 **Files:**
+
 - Modify: `app/src/main/java/com/jaac/avoqado_tpv/features/payment/domain/usecase/RecordPaymentUseCase.kt:310-328`
 - Modify: `app/src/main/java/com/jaac/avoqado_tpv/core/data/repository/ActivationRepositoryImpl.kt:125,128,148,151`
 - Modify: `app/src/main/java/com/jaac/avoqado_tpv/core/data/repository/TerminalConfigRepositoryImpl.kt:168,173,174`
@@ -1318,6 +1369,7 @@ Los mismos `contains()` viven en cuatro archivos más. Un cambio de wording en e
 - Test: `app/src/test/java/com/jaac/avoqado_tpv/features/payment/domain/sync/SyncOutcomeTest.kt` (extender)
 
 **Interfaces:**
+
 - Consumes: `classifySyncFailure` y `BackendHttpException` (Task 1).
 - Produces: nada nuevo — es la aplicación del clasificador ya existente.
 
@@ -1352,8 +1404,8 @@ fun `un 401 sigue siendo permanente sin importar el idioma`() {
 
 - [ ] **Step 2: Correr y verificar que pasa ya (el clasificador de Task 1 lo cubre)**
 
-Run: `./gradlew testProductionDebugUnitTest --tests "*SyncOutcomeTest*"`
-Expected: PASS. El clasificador ya es correcto; lo que falta es **usarlo** en los 4 sitios.
+Run: `./gradlew testProductionDebugUnitTest --tests "*SyncOutcomeTest*"` Expected: PASS. El clasificador ya es correcto; lo que falta es
+**usarlo** en los 4 sitios.
 
 - [ ] **Step 3: Reemplazar el nido de `RecordPaymentUseCase`**
 
@@ -1375,7 +1427,10 @@ Actualizar las llamadas al viejo helper para pasarle el `Throwable` en vez del `
 
 - [ ] **Step 4: Reemplazar en los otros tres archivos**
 
-En `ActivationRepositoryImpl.kt`, `TerminalConfigRepositoryImpl.kt` y `HomeViewModel.kt`, sustituir cada `message.contains("expired"|"timeout"|"network"|"UnknownHostException")` por `classifySyncFailure(error) is SyncOutcome.Retryable`, asegurando que el `Throwable` llegue intacto hasta ahí (si alguna capa intermedia lo envuelve en una `Exception` genérica, pasar el `cause`).
+En `ActivationRepositoryImpl.kt`, `TerminalConfigRepositoryImpl.kt` y `HomeViewModel.kt`, sustituir cada
+`message.contains("expired"|"timeout"|"network"|"UnknownHostException")` por `classifySyncFailure(error) is SyncOutcome.Retryable`,
+asegurando que el `Throwable` llegue intacto hasta ahí (si alguna capa intermedia lo envuelve en una `Exception` genérica, pasar el
+`cause`).
 
 Para el caso específico de sesión expirada, usar el código, no el texto:
 
@@ -1385,10 +1440,9 @@ val sessionExpired = (error as? BackendHttpException)?.statusCode == 401
 
 - [ ] **Step 5: Correr toda la suite**
 
-Run: `./gradlew testProductionDebugUnitTest`
-Expected: PASS
+Run: `./gradlew testProductionDebugUnitTest` Expected: PASS
 
-- [ ] **Step 6: Commit** *(solo con permiso del founder)*
+- [ ] **Step 6: Commit** _(solo con permiso del founder)_
 
 ```bash
 git add app/src/main/java/com/jaac/avoqado_tpv/features/payment/domain/usecase/RecordPaymentUseCase.kt \
@@ -1408,11 +1462,13 @@ Cualquier cambio de wording en el server rompia la clasificacion en silencio."
 Siete banners y dos fuentes de conectividad, sin dueño único. **Primero verificar cuáles se apilan de verdad** — no asumir.
 
 **Files:**
+
 - Create: `app/src/main/java/com/jaac/avoqado_tpv/core/presentation/components/ConnectionBannerHost.kt`
 - Modify: `app/src/main/java/com/jaac/avoqado_tpv/core/presentation/navigation/AppNavigation.kt`
 - Test: `app/src/test/java/com/jaac/avoqado_tpv/core/presentation/components/ConnectionBannerHostTest.kt` (crear)
 
 **Interfaces:**
+
 - Consumes: nada de tareas previas.
 - Produces: `ConnectionBannerHost(modifier)` y `enum class BannerPriority`.
 
@@ -1424,7 +1480,8 @@ rg -n "ConnectionBanner|DeviceAlertBanner|VenueStatusBanner|ShiftStatusBanner|An
    -g '*.kt' app/src/main/java/com/jaac/avoqado_tpv/ | rg -v "^app.*components/(Connection|Device|Venue|Shift)"
 ```
 
-Anotar en qué pantallas coinciden dos o más. **Solo consolidar los que realmente coexisten**; los que viven en pantallas distintas se quedan donde están.
+Anotar en qué pantallas coinciden dos o más. **Solo consolidar los que realmente coexisten**; los que viven en pantallas distintas se quedan
+donde están.
 
 - [ ] **Step 2: Escribir el test que falla**
 
@@ -1469,8 +1526,8 @@ class ConnectionBannerHostTest {
 
 - [ ] **Step 3: Correr y verificar que falla**
 
-Run: `./gradlew testProductionDebugUnitTest --tests "*ConnectionBannerHostTest*"`
-Expected: FAIL — `Unresolved reference: resolveVisibleBanner`
+Run: `./gradlew testProductionDebugUnitTest --tests "*ConnectionBannerHostTest*"` Expected: FAIL —
+`Unresolved reference: resolveVisibleBanner`
 
 - [ ] **Step 4: Implementar el host**
 
@@ -1500,21 +1557,22 @@ fun resolveVisibleBanner(
 }
 ```
 
-Añadir en el mismo archivo el composable `ConnectionBannerHost(...)` que lea las fuentes (`ConnectivityObserver` / `ConnectionViewModel`) y renderice el banner que devuelva `resolveVisibleBanner`, reusando los composables existentes para el contenido de cada uno.
+Añadir en el mismo archivo el composable `ConnectionBannerHost(...)` que lea las fuentes (`ConnectivityObserver` / `ConnectionViewModel`) y
+renderice el banner que devuelva `resolveVisibleBanner`, reusando los composables existentes para el contenido de cada uno.
 
 - [ ] **Step 5: Montarlo una sola vez**
 
-En `AppNavigation.kt`, colocar `ConnectionBannerHost()` en un único `Column` por encima del `NavHost` (patrón de `avoqado-android`: `AvoqadoNavGraph.kt` monta ConnectivityBanner + QuarantineBanner en orden fijo). Quitar de las pantallas individuales los banners que quedaron absorbidos, **solo los que el Step 1 confirmó que coexistían**.
+En `AppNavigation.kt`, colocar `ConnectionBannerHost()` en un único `Column` por encima del `NavHost` (patrón de `avoqado-android`:
+`AvoqadoNavGraph.kt` monta ConnectivityBanner + QuarantineBanner en orden fijo). Quitar de las pantallas individuales los banners que
+quedaron absorbidos, **solo los que el Step 1 confirmó que coexistían**.
 
 - [ ] **Step 6: Correr los tests y compilar**
 
-Run: `./gradlew testProductionDebugUnitTest --tests "*ConnectionBannerHostTest*"`
-Expected: PASS
+Run: `./gradlew testProductionDebugUnitTest --tests "*ConnectionBannerHostTest*"` Expected: PASS
 
-Run: `./gradlew assembleProductionDebug`
-Expected: BUILD SUCCESSFUL
+Run: `./gradlew assembleProductionDebug` Expected: BUILD SUCCESSFUL
 
-- [ ] **Step 7: Commit** *(solo con permiso del founder)*
+- [ ] **Step 7: Commit** _(solo con permiso del founder)_
 
 ```bash
 git add app/src/main/java/com/jaac/avoqado_tpv/core/presentation/
@@ -1530,9 +1588,8 @@ porque explica por que todo lo demas esta fallando."
 ## Apéndice — helpers de test compartidos
 
 Las tareas 2, 3, 5 y 6 usan estos constructores. Escribirlos **una vez** en
-`app/src/test/java/com/jaac/avoqado_tpv/features/payment/TestPayments.kt` (y una copia
-en `app/src/androidTest/.../TestPayments.kt` para los tests de Room, que no ven el
-source set de `test`).
+`app/src/test/java/com/jaac/avoqado_tpv/features/payment/TestPayments.kt` (y una copia en `app/src/androidTest/.../TestPayments.kt` para los
+tests de Room, que no ven el source set de `test`).
 
 ```kotlin
 package com.jaac.avoqado_tpv.features.payment
@@ -1600,10 +1657,9 @@ fun newPending(
 fun entity(reference: String, status: String) = newPending(reference, status)
 ```
 
-> **Al escribirlo:** abrir `features/payment/domain/model/QueuedPayment.kt` y
-> `core/data/local/entity/PendingPaymentEntity.kt` y confirmar la lista exacta de
-> parámetros sin default. Si alguno cambió (el repo se mueve), agregarlo aquí con un
-> valor mínimo válido — **nunca** silenciar el error borrando el campo del modelo.
+> **Al escribirlo:** abrir `features/payment/domain/model/QueuedPayment.kt` y `core/data/local/entity/PendingPaymentEntity.kt` y confirmar
+> la lista exacta de parámetros sin default. Si alguno cambió (el repo se mueve), agregarlo aquí con un valor mínimo válido — **nunca**
+> silenciar el error borrando el campo del modelo.
 
 ## Verificación final del plan
 
@@ -1615,7 +1671,9 @@ fun entity(reference: String, status: String) = newPending(reference, status)
 
 ## Qué NO cubre este plan
 
-- **Plan B** — superficie `/tpv` en `avoqado-server` (rutas nuevas §7.2, reducer de intents bajo `/tpv`, extracción a servicios compartidos, `checkFeatureAccess`, y el hueco de seguridad §4.4).
+- **Plan B** — superficie `/tpv` en `avoqado-server` (rutas nuevas §7.2, reducer de intents bajo `/tpv`, extracción a servicios compartidos,
+  `checkFeatureAccess`, y el hueco de seguridad §4.4).
 - **Plan C** — el módulo `features/tables/` en la TPV. Depende de A y B.
-- **F-2** — los 11 `syncOrderImmediately` de `MenuViewModel.kt`. Saltada a propósito (spec D-4): ese archivo queda huérfano cuando entre Mesas.
+- **F-2** — los 11 `syncOrderImmediately` de `MenuViewModel.kt`. Saltada a propósito (spec D-4): ese archivo queda huérfano cuando entre
+  Mesas.
 - **§4.3** — migrar las 2 llamadas a `dashboard/products` y `dashboard/categories`. Va en el Plan C, que es quien consume el menú.

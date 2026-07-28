@@ -1,16 +1,23 @@
 # Delivery Activation — Backend Implementation Plan (avoqado-server)
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Backend para la "solicitud de activación de delivery" del dashboard: modelo `DeliveryActivationRequest`, endpoints dueño (solicitar/ver) + ops (gestionar), resumen diario por canal, y MCP lockstep — de modo que el dashboard tenga los datos para resolver sus 4 estados.
+**Goal:** Backend para la "solicitud de activación de delivery" del dashboard: modelo `DeliveryActivationRequest`, endpoints dueño
+(solicitar/ver) + ops (gestionar), resumen diario por canal, y MCP lockstep — de modo que el dashboard tenga los datos para resolver sus 4
+estados.
 
-**Architecture:** Extiende el vertical delivery-channels ya commiteado (`2f8be09c..8374c949`). Modelo aditivo + servicio con `logAction` fire-and-forget; endpoints dueño en el `delivery-channels.routes.ts` existente (namespace `/api/v1/delivery-channels`), endpoint ops en un subrouter superadmin nuevo. El "resumen por canal" se extrae del MCP tool `delivery_channels` a un servicio compartido y se expone por REST (DRY).
+**Architecture:** Extiende el vertical delivery-channels ya commiteado (`2f8be09c..8374c949`). Modelo aditivo + servicio con `logAction`
+fire-and-forget; endpoints dueño en el `delivery-channels.routes.ts` existente (namespace `/api/v1/delivery-channels`), endpoint ops en un
+subrouter superadmin nuevo. El "resumen por canal" se extrae del MCP tool `delivery_channels` a un servicio compartido y se expone por REST
+(DRY).
 
 **Tech Stack:** Express + TS, Prisma/PostgreSQL, Jest + prismaMock, MCP SDK, Zod.
 
 ## Global Constraints
 
-- **Sin commits sin permiso del founder** (regla repo `testing-and-git.md`). Los pasos "Commit" asumen permiso dado para la ejecución; si no, acumular.
+- **Sin commits sin permiso del founder** (regla repo `testing-and-git.md`). Los pasos "Commit" asumen permiso dado para la ejecución; si
+  no, acumular.
 - **Schema 100% aditivo**; `npm run schema:map` + `MODEL_TO_DOMAIN` + prismaMock en el MISMO cambio que el schema.
 - **Dinero en PESOS `Prisma.Decimal` 1:1**, jamás cents fuera de fronteras externas.
 - **Tenant isolation**: todo query filtra por `venueId` (o `orgId`).
@@ -26,11 +33,13 @@
 ### Task 1: Schema — `DeliveryActivationRequest`
 
 **Files:**
+
 - Modify: `prisma/schema.prisma` (enum nuevo junto a `DeliveryChannelStatus`; modelo junto a `DeliveryChannelLink`; relación en `Venue`)
 - Modify: `scripts/generate-schema-map.ts` (`MODEL_TO_DOMAIN`)
 - Modify: `tests/__helpers__/setup.ts` (prismaMock)
 
 **Interfaces:**
+
 - Produces: modelo `DeliveryActivationRequest`; enum `DeliveryActivationStatus { PENDING, CONTACTED, CONNECTED, DISMISSED }`.
 
 - [ ] **Step 1: Agregar enum** (junto a `enum DeliveryChannelStatus`):
@@ -73,12 +82,14 @@ model DeliveryActivationRequest {
 }
 ```
 
-- [ ] **Step 3: Relación en `Venue` y `Staff`**: en `model Venue {}` agregar `deliveryActivationRequests DeliveryActivationRequest[]`; en `model Staff {}` agregar `deliveryActivationRequests DeliveryActivationRequest[] @relation("DeliveryActivationRequestedBy")`.
+- [ ] **Step 3: Relación en `Venue` y `Staff`**: en `model Venue {}` agregar `deliveryActivationRequests DeliveryActivationRequest[]`; en
+      `model Staff {}` agregar `deliveryActivationRequests DeliveryActivationRequest[] @relation("DeliveryActivationRequestedBy")`.
 
 - [ ] **Step 4: Migración:**
 
-Run: `npx prisma migrate dev --name delivery-activation-request`
-Expected: migración creada + aplicada, `prisma generate` OK. Antes de aplicar, revisar el SQL: solo `CREATE TYPE DeliveryActivationStatus`, `CREATE TABLE DeliveryActivationRequest`, 2 índices, 2 FKs — nada ajeno.
+Run: `npx prisma migrate dev --name delivery-activation-request` Expected: migración creada + aplicada, `prisma generate` OK. Antes de
+aplicar, revisar el SQL: solo `CREATE TYPE DeliveryActivationStatus`, `CREATE TABLE DeliveryActivationRequest`, 2 índices, 2 FKs — nada
+ajeno.
 
 - [ ] **Step 5: Schema map** — en `scripts/generate-schema-map.ts`, `MODEL_TO_DOMAIN`, agregar:
 
@@ -88,32 +99,44 @@ DeliveryActivationRequest: 'Orders, KDS & Cash',
 
 Run: `npm run schema:map` → sin "unclassified model".
 
-- [ ] **Step 6: prismaMock** — en `tests/__helpers__/setup.ts` junto a `deliveryChannelLink`: `deliveryActivationRequest: createMockModel(),`
+- [ ] **Step 6: prismaMock** — en `tests/__helpers__/setup.ts` junto a `deliveryChannelLink`:
+      `deliveryActivationRequest: createMockModel(),`
 
 - [ ] **Step 7:** `npx prisma validate && npm run build` → sin errores.
 
-- [ ] **Step 8: Commit** — `git add prisma/ scripts/generate-schema-map.ts docs/SCHEMA_MAP.md tests/__helpers__/setup.ts && git commit -m "feat(delivery): schema DeliveryActivationRequest (solicitud de activación)"`
+- [ ] **Step 8: Commit** —
+      `git add prisma/ scripts/generate-schema-map.ts docs/SCHEMA_MAP.md tests/__helpers__/setup.ts && git commit -m "feat(delivery): schema DeliveryActivationRequest (solicitud de activación)"`
 
 ---
 
 ### Task 2: Servicio de solicitud de activación
 
 **Files:**
+
 - Create: `src/services/delivery-channels/core/deliveryActivation.service.ts`
 - Test: `tests/unit/services/delivery-channels/deliveryActivation.service.test.ts`
 
 **Interfaces:**
-- Consumes: `logAction` de `src/services/dashboard/activity-log.service.ts` (firma: `logAction({ action, entity, entityId, staffId, venueId, data })`).
+
+- Consumes: `logAction` de `src/services/dashboard/activity-log.service.ts` (firma:
+  `logAction({ action, entity, entityId, staffId, venueId, data })`).
 - Produces:
-  - `getActivationRequest(venueId: string): Promise<DeliveryActivationRequest | null>` — la solicitud "viva" (status PENDING o CONTACTED) del venue, o null.
-  - `createActivationRequest(venueId: string, requestedById: string, input: { requestedChannels: string[]; note?: string }): Promise<DeliveryActivationRequest>` — idempotente: si ya hay una viva, la devuelve sin crear otra.
-  - `updateActivationStatus(id: string, status: DeliveryActivationStatus, performedBy: string): Promise<DeliveryActivationRequest>` — transición de ops; sella `contactedAt`/`connectedAt`.
+
+  - `getActivationRequest(venueId: string): Promise<DeliveryActivationRequest | null>` — la solicitud "viva" (status PENDING o CONTACTED)
+    del venue, o null.
+  - `createActivationRequest(venueId: string, requestedById: string, input: { requestedChannels: string[]; note?: string }): Promise<DeliveryActivationRequest>`
+    — idempotente: si ya hay una viva, la devuelve sin crear otra.
+  - `updateActivationStatus(id: string, status: DeliveryActivationStatus, performedBy: string): Promise<DeliveryActivationRequest>` —
+    transición de ops; sella `contactedAt`/`connectedAt`.
 
 - [ ] **Step 1: Tests (prismaMock, RED primero).** Casos NUEVOS:
-  - `getActivationRequest` devuelve la solicitud con status en `[PENDING, CONTACTED]` (findFirst con ese filtro + `venueId`), null si no hay.
-  - `createActivationRequest` cuando NO hay viva → crea PENDING con `requestedChannels`/`note`/`requestedById` + escribe ActivityLog `DELIVERY_ACTIVATION_REQUESTED` (staffId=requestedById, venueId, entity `DeliveryActivationRequest`, data con channels).
+  - `getActivationRequest` devuelve la solicitud con status en `[PENDING, CONTACTED]` (findFirst con ese filtro + `venueId`), null si no
+    hay.
+  - `createActivationRequest` cuando NO hay viva → crea PENDING con `requestedChannels`/`note`/`requestedById` + escribe ActivityLog
+    `DELIVERY_ACTIVATION_REQUESTED` (staffId=requestedById, venueId, entity `DeliveryActivationRequest`, data con channels).
   - `createActivationRequest` cuando YA hay viva → devuelve la existente, NO crea, NO re-loguea (idempotente).
-  - `updateActivationStatus(CONTACTED)` → set status + `contactedAt` + ActivityLog `DELIVERY_ACTIVATION_CONTACTED`; `(CONNECTED)` → `connectedAt` + `DELIVERY_ACTIVATION_CONNECTED`; `(DISMISSED)` → `DELIVERY_ACTIVATION_DISMISSED`.
+  - `updateActivationStatus(CONTACTED)` → set status + `contactedAt` + ActivityLog `DELIVERY_ACTIVATION_CONTACTED`; `(CONNECTED)` →
+    `connectedAt` + `DELIVERY_ACTIVATION_CONNECTED`; `(DISMISSED)` → `DELIVERY_ACTIVATION_DISMISSED`.
 
 ```typescript
 // esqueleto de asserts (escribir el archivo completo con este estilo):
@@ -212,15 +235,19 @@ export async function updateActivationStatus(
 ### Task 3: Endpoints del dueño (solicitar / ver) + permiso
 
 **Files:**
+
 - Modify: `src/schemas/delivery-channels.schema.ts` (agregar `createActivationRequestSchema`)
 - Modify: `src/controllers/delivery-channels/deliveryChannels.controller.ts` (2 handlers)
 - Modify: `src/routes/delivery-channels.routes.ts` (2 rutas)
 - Modify: `src/lib/permissions.ts` (`delivery-channels:request` en catálogo + defaults)
-- Test: `tests/unit/services/delivery-channels/deliveryActivation.service.test.ts` ya cubre el servicio; agregar `tests/unit/controllers/delivery-channels/deliveryActivation.controller.test.ts` para los handlers.
+- Test: `tests/unit/services/delivery-channels/deliveryActivation.service.test.ts` ya cubre el servicio; agregar
+  `tests/unit/controllers/delivery-channels/deliveryActivation.controller.test.ts` para los handlers.
 
 **Interfaces:**
+
 - Consumes: `getActivationRequest`, `createActivationRequest` (Task 2).
-- Produces: rutas `POST /api/v1/delivery-channels/venues/:venueId/activation-request` y `GET .../activation-request`; permiso `delivery-channels:request`.
+- Produces: rutas `POST /api/v1/delivery-channels/venues/:venueId/activation-request` y `GET .../activation-request`; permiso
+  `delivery-channels:request`.
 
 - [ ] **Step 1: Zod** en `src/schemas/delivery-channels.schema.ts` (español, shape-only):
 
@@ -235,9 +262,13 @@ export const createActivationRequestSchema = z.object({
 })
 ```
 
-- [ ] **Step 2: Permiso** en `src/lib/permissions.ts`: en `INDIVIDUAL_PERMISSIONS_BY_RESOURCE['delivery-channels']` agregar `'delivery-channels:request'` al array existente. En `DEFAULT_PERMISSIONS`: agregar `'delivery-channels:request'` a **OWNER** y **ADMIN** (NO a MANAGER — solicitar delivery es decisión de negocio). Correr `npm run audit:permissions` → exit 0.
+- [ ] **Step 2: Permiso** en `src/lib/permissions.ts`: en `INDIVIDUAL_PERMISSIONS_BY_RESOURCE['delivery-channels']` agregar
+      `'delivery-channels:request'` al array existente. En `DEFAULT_PERMISSIONS`: agregar `'delivery-channels:request'` a **OWNER** y
+      **ADMIN** (NO a MANAGER — solicitar delivery es decisión de negocio). Correr `npm run audit:permissions` → exit 0.
 
-- [ ] **Step 3: Tests de controller (RED).** Casos: POST con body válido → 200/201 con la solicitud (llama `createActivationRequest` con `authContext.userId` como requestedById); POST idempotente → devuelve la existente; GET → devuelve la solicitud viva o `null`. authContext tomado de `(req as any).authContext`.
+- [ ] **Step 3: Tests de controller (RED).** Casos: POST con body válido → 200/201 con la solicitud (llama `createActivationRequest` con
+      `authContext.userId` como requestedById); POST idempotente → devuelve la existente; GET → devuelve la solicitud viva o `null`.
+      authContext tomado de `(req as any).authContext`.
 
 - [ ] **Step 4: Controller** — agregar a `deliveryChannels.controller.ts`:
 
@@ -257,7 +288,8 @@ export const getActivation = async (req: Request, res: Response) => {
 }
 ```
 
-- [ ] **Step 5: Rutas** en `src/routes/delivery-channels.routes.ts` (mismo patrón de middleware: authenticateToken → validateRequest → checkFeatureAccess → checkPermission):
+- [ ] **Step 5: Rutas** en `src/routes/delivery-channels.routes.ts` (mismo patrón de middleware: authenticateToken → validateRequest →
+      checkFeatureAccess → checkPermission):
 
 ```typescript
 import { createActivationRequestSchema } from '../schemas/delivery-channels.schema'
@@ -287,6 +319,7 @@ router.get(
 ### Task 4: Endpoint de ops (superadmin: lista + avanzar status)
 
 **Files:**
+
 - Create: `src/routes/superadmin/deliveryActivation.routes.ts`
 - Create: `src/controllers/superadmin/deliveryActivation.superadmin.controller.ts`
 - Modify: `src/routes/superadmin.routes.ts` (montar el subrouter)
@@ -294,10 +327,13 @@ router.get(
 - Test: `tests/unit/services/delivery-channels/deliveryActivation.service.test.ts` (agregar caso de `listActivationRequests`)
 
 **Interfaces:**
-- Consumes: `updateActivationStatus` (Task 2).
-- Produces: `listActivationRequests(filter?: { status?: DeliveryActivationStatus }): Promise<DeliveryActivationRequest[]>`; rutas `GET /api/v1/superadmin/delivery-activation` + `PATCH /api/v1/superadmin/delivery-activation/:id`.
 
-- [ ] **Step 1: Test del servicio (RED)** para `listActivationRequests`: sin filtro → todas ordenadas por `createdAt desc` con `venue: { select: { name, slug } }`; con `status` → filtradas.
+- Consumes: `updateActivationStatus` (Task 2).
+- Produces: `listActivationRequests(filter?: { status?: DeliveryActivationStatus }): Promise<DeliveryActivationRequest[]>`; rutas
+  `GET /api/v1/superadmin/delivery-activation` + `PATCH /api/v1/superadmin/delivery-activation/:id`.
+
+- [ ] **Step 1: Test del servicio (RED)** para `listActivationRequests`: sin filtro → todas ordenadas por `createdAt desc` con
+      `venue: { select: { name, slug } }`; con `status` → filtradas.
 - [ ] **Step 2: Implementar `listActivationRequests`** en el servicio:
 
 ```typescript
@@ -347,12 +383,20 @@ const updateStatusSchema = z.object({
 })
 
 router.get('/', authenticateTokenMiddleware, authorizeRole(StaffRole.SUPERADMIN), ctrl.listRequests)
-router.patch('/:id', authenticateTokenMiddleware, authorizeRole(StaffRole.SUPERADMIN), validateRequest(updateStatusSchema), ctrl.updateRequest)
+router.patch(
+  '/:id',
+  authenticateTokenMiddleware,
+  authorizeRole(StaffRole.SUPERADMIN),
+  validateRequest(updateStatusSchema),
+  ctrl.updateRequest,
+)
 
 export default router
 ```
 
-- [ ] **Step 5: Montar** en `src/routes/superadmin.routes.ts`: `import deliveryActivationRoutes from './superadmin/deliveryActivation.routes'` + (junto a los otros `router.use`) `router.use('/delivery-activation', deliveryActivationRoutes)`.
+- [ ] **Step 5: Montar** en `src/routes/superadmin.routes.ts`:
+      `import deliveryActivationRoutes from './superadmin/deliveryActivation.routes'` + (junto a los otros `router.use`)
+      `router.use('/delivery-activation', deliveryActivationRoutes)`.
 - [ ] **Step 6:** Correr tests + `npm run build`.
 - [ ] **Step 7: Commit** — `git commit -m "feat(delivery): ops superadmin — cola de solicitudes + avanzar status"`
 
@@ -361,6 +405,7 @@ export default router
 ### Task 5: Resumen diario por canal (servicio compartido + REST) — DRY con el MCP
 
 **Files:**
+
 - Create: `src/services/delivery-channels/core/deliverySummary.service.ts`
 - Modify: `src/mcp/tools/deliveryChannels.ts` (usar el servicio compartido en vez del cálculo inline)
 - Modify: `src/controllers/delivery-channels/deliveryChannels.controller.ts` (handler `getSummary`)
@@ -368,9 +413,14 @@ export default router
 - Test: `tests/unit/services/delivery-channels/deliverySummary.service.test.ts`
 
 **Interfaces:**
-- Produces: `getDeliveryDailySummary(venueId: string): Promise<{ channels: Array<{ channel: string; orders: number; totalPesos: number }>; generatedAt: string }>` — pedidos e ingreso de HOY (venue-local) por `OrderSource` de delivery.
 
-- [ ] **Step 1: Test (RED).** Casos: agrupa `Order` con `originSystem: 'DELIVERY_PLATFORM'` de hoy (venue-local vía `venueStartOfDay(tz)`) por `source`; `totalPesos = Number(_sum.total)` (pesos, no cents); venue sin pedidos → `channels: []`. Reusar el patrón de fecha venue-local ya usado en `src/mcp/tools/deliveryChannels.ts` (que Task 12 del backend cableó con `venueStartOfDay`).
+- Produces:
+  `getDeliveryDailySummary(venueId: string): Promise<{ channels: Array<{ channel: string; orders: number; totalPesos: number }>; generatedAt: string }>`
+  — pedidos e ingreso de HOY (venue-local) por `OrderSource` de delivery.
+
+- [ ] **Step 1: Test (RED).** Casos: agrupa `Order` con `originSystem: 'DELIVERY_PLATFORM'` de hoy (venue-local vía `venueStartOfDay(tz)`)
+      por `source`; `totalPesos = Number(_sum.total)` (pesos, no cents); venue sin pedidos → `channels: []`. Reusar el patrón de fecha
+      venue-local ya usado en `src/mcp/tools/deliveryChannels.ts` (que Task 12 del backend cableó con `venueStartOfDay`).
 - [ ] **Step 2: Implementar** extrayendo la lógica que hoy vive inline en el MCP tool:
 
 ```typescript
@@ -393,9 +443,12 @@ export async function getDeliveryDailySummary(venueId: string) {
   }
 }
 ```
+
 (Confirmar el import exacto de `venueStartOfDay` leyendo `src/mcp/tools/deliveryChannels.ts` — usar el mismo.)
 
-- [ ] **Step 3: Refactor MCP tool** `src/mcp/tools/deliveryChannels.ts`: reemplazar el cálculo inline de `todayByChannel` por `const { channels } = await getDeliveryDailySummary(venueId)` y mapear a la forma que ya devuelve (no cambiar el shape de salida del tool — solo la fuente). Correr `tests/unit/mcp-customer/delivery-channels.test.ts` → sigue verde (regresión).
+- [ ] **Step 3: Refactor MCP tool** `src/mcp/tools/deliveryChannels.ts`: reemplazar el cálculo inline de `todayByChannel` por
+      `const { channels } = await getDeliveryDailySummary(venueId)` y mapear a la forma que ya devuelve (no cambiar el shape de salida del
+      tool — solo la fuente). Correr `tests/unit/mcp-customer/delivery-channels.test.ts` → sigue verde (regresión).
 - [ ] **Step 4: REST** — handler + ruta:
 
 ```typescript
@@ -406,7 +459,13 @@ export const getSummary = async (req: Request, res: Response) => {
   res.json({ success: true, data: summary })
 }
 // ruta (delivery-channels.routes.ts)
-router.get('/venues/:venueId/delivery/summary', authenticateTokenMiddleware, checkFeatureAccess('DELIVERY_CHANNELS'), checkPermission('delivery-channels:read'), ctrl.getSummary)
+router.get(
+  '/venues/:venueId/delivery/summary',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('DELIVERY_CHANNELS'),
+  checkPermission('delivery-channels:read'),
+  ctrl.getSummary,
+)
 ```
 
 - [ ] **Step 5:** Tests (summary + regresión MCP) + `npm run build`.
@@ -417,15 +476,19 @@ router.get('/venues/:venueId/delivery/summary', authenticateTokenMiddleware, che
 ### Task 6: MCP tool `delivery_activation_requests` (lockstep)
 
 **Files:**
+
 - Create: `src/mcp/tools/deliveryActivation.ts`
 - Modify: `src/mcp/server.ts` (registrar)
 - Test: `tests/unit/mcp-customer/delivery-activation.test.ts`
 
 **Interfaces:**
+
 - Consumes: `listActivationRequests` (Task 4).
 - Produces: tool `delivery_activation_requests` (lee la cola; scope por `getUserAccess`).
 
-- [ ] **Step 1: Implementar** (patrón exacto de `src/mcp/tools/deliveryChannels.ts` — guard, venueFilter, text; solo lectura, sin confirm-gate). El tool lista solicitudes de los venues en scope del usuario (filtrar por `venueId in scope`). Como es una vista de ops, gatear con `guard.requirePermission('delivery-channels:read', venueId)` por venue O exponer solo lo que el scope permite.
+- [ ] **Step 1: Implementar** (patrón exacto de `src/mcp/tools/deliveryChannels.ts` — guard, venueFilter, text; solo lectura, sin
+      confirm-gate). El tool lista solicitudes de los venues en scope del usuario (filtrar por `venueId in scope`). Como es una vista de
+      ops, gatear con `guard.requirePermission('delivery-channels:read', venueId)` por venue O exponer solo lo que el scope permite.
 - [ ] **Step 2: Registrar** en `src/mcp/server.ts` junto a `registerDeliveryChannelTools`.
 - [ ] **Step 3: Test** (o build + verificación de registro si no hay patrón de test) + `npm run build`.
 - [ ] **Step 4: Commit** — `git commit -m "feat(mcp): tool delivery_activation_requests (lockstep)"`
@@ -436,14 +499,21 @@ router.get('/venues/:venueId/delivery/summary', authenticateTokenMiddleware, che
 
 - [ ] **Step 1:** `npm run format && npm run lint:fix` (solo archivos delivery).
 - [ ] **Step 2:** `npm run audit:permissions` → exit 0 (permiso `delivery-channels:request` sin PHANTOM/CATALOG_GAP nuevos).
-- [ ] **Step 3:** `TZ=UTC npx jest tests/unit/services/delivery-channels tests/unit/controllers/delivery-channels tests/unit/mcp-customer --silent` → verde.
-- [ ] **Step 4:** `npm run pre-deploy` → MUST pass (si excede timeout, correr componentes en secuencia; nunca confiar en notificación de background sin `pgrep`).
+- [ ] **Step 3:**
+      `TZ=UTC npx jest tests/unit/services/delivery-channels tests/unit/controllers/delivery-channels tests/unit/mcp-customer --silent` →
+      verde.
+- [ ] **Step 4:** `npm run pre-deploy` → MUST pass (si excede timeout, correr componentes en secuencia; nunca confiar en notificación de
+      background sin `pgrep`).
 - [ ] **Step 5:** Actualizar memoria del proyecto (estado del backend de activación).
 - [ ] **Step 6: Commit** final si quedó format suelto.
 
 ---
 
 ## Self-review del plan (hecho)
+
 - **Cobertura spec §4:** modelo→T1; endpoints dueño→T3; ops→T4; MCP→T6; ActivityLog→T2 (cada mutación); summary (§6 del spec)→T5.
-- **Sin placeholders:** el único "confirmar import de `venueStartOfDay`" es una lectura puntual de un archivo existente, no un hueco de diseño.
-- **Consistencia de tipos:** `DeliveryActivationRequest`/`DeliveryActivationStatus` (T1) consumidos por T2/T4/T6; `getActivationRequest`/`createActivationRequest` (T2) por T3; `getDeliveryDailySummary` (T5) por MCP+REST; permiso `delivery-channels:request` idéntico T3.
+- **Sin placeholders:** el único "confirmar import de `venueStartOfDay`" es una lectura puntual de un archivo existente, no un hueco de
+  diseño.
+- **Consistencia de tipos:** `DeliveryActivationRequest`/`DeliveryActivationStatus` (T1) consumidos por T2/T4/T6;
+  `getActivationRequest`/`createActivationRequest` (T2) por T3; `getDeliveryDailySummary` (T5) por MCP+REST; permiso
+  `delivery-channels:request` idéntico T3.

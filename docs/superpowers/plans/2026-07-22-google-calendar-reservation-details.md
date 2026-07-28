@@ -1,31 +1,33 @@
 # Google Calendar — Detalles Completos de la Reserva: Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Que los eventos de Google Calendar muestren todos los servicios de una cita multi-servicio, sus modificadores, duración total, total estimado y teléfono, respetando los tres niveles de privacidad por venue.
+**Goal:** Que los eventos de Google Calendar muestren todos los servicios de una cita multi-servicio, sus modificadores, duración total,
+total estimado y teléfono, respetando los tres niveles de privacidad por venue.
 
-**Architecture:** Se extrae un resolvedor de servicios compartido (hoy duplicado entre el dashboard y Google Calendar) a `src/services/reservation/reservation-services.resolver.ts`. El builder de eventos (`event-body.service.ts`) se mantiene **puro y sin acceso a DB**: recibe `services` ya resuelto como argumento. `push.service.ts` resuelve pasando su `tx`. Se agrega un script de re-push manual por venue.
+**Architecture:** Se extrae un resolvedor de servicios compartido (hoy duplicado entre el dashboard y Google Calendar) a
+`src/services/reservation/reservation-services.resolver.ts`. El builder de eventos (`event-body.service.ts`) se mantiene **puro y sin acceso
+a DB**: recibe `services` ya resuelto como argumento. `push.service.ts` resuelve pasando su `tx`. Se agrega un script de re-push manual por
+venue.
 
 **Tech Stack:** TypeScript, Express, Prisma/PostgreSQL, googleapis (Calendar v3), Jest.
 
-**Spec:** `/Users/amieva/Documents/Programming/Avoqado/avoqado-server/docs/superpowers/specs/2026-07-22-google-calendar-reservation-details-design.md`
+**Spec:**
+`/Users/amieva/Documents/Programming/Avoqado/avoqado-server/docs/superpowers/specs/2026-07-22-google-calendar-reservation-details-design.md`
 
 ## 🔴 ANULACIÓN — ESTA CORRIDA NO HACE COMMITS
 
-**Instrucción directa del founder (2026-07-22): trabajar sobre `develop` en el
-repo actual y NO hacer NINGÚN commit.**
+**Instrucción directa del founder (2026-07-22): trabajar sobre `develop` en el repo actual y NO hacer NINGÚN commit.**
 
 Esto **anula todos los pasos de commit** que aparecen más abajo. En cada tarea:
 
 - **NO** ejecutar `git add`, `git commit`, `git stash`, `git checkout` ni `git restore`.
 - Donde un paso diga "Commit", **saltarlo** y dejar los cambios en el árbol de trabajo.
-- Sustituirlo por: `git status --short` y confirmar que solo aparecen los archivos
-  de esa tarea.
+- Sustituirlo por: `git status --short` y confirmar que solo aparecen los archivos de esa tarea.
 
-**Hay trabajo AJENO sin commitear en el árbol** (11 archivos de AngelPay /
-merchantAccount de otra sesión). No tocarlos, no formatearlos, no revertirlos.
-Si `npm run format` los modifica, revertir **solo esos** con
-`git checkout -- <ruta>` y avisar en el reporte.
+**Hay trabajo AJENO sin commitear en el árbol** (11 archivos de AngelPay / merchantAccount de otra sesión). No tocarlos, no formatearlos, no
+revertirlos. Si `npm run format` los modifica, revertir **solo esos** con `git checkout -- <ruta>` y avisar en el reporte.
 
 ---
 
@@ -38,20 +40,24 @@ Si `npm run format` los modifica, revertir **solo esos** con
 - **El builder `event-body.service.ts` NO accede a la DB.** Se mantiene síncrono y puro; sus tests no llevan mocks de Prisma.
 - **El push corre dentro de `prisma.$transaction`**: toda lectura usa el `tx`, nunca el `prisma` global.
 - Tras editar TS: `npm run format && npm run lint:fix`.
-- **`npm run format` reformatea markdown/JSON no relacionados** en `docs/generated` y `docs/superpowers`. Revisar `git status` y revertir esos archivos antes de commitear.
+- **`npm run format` reformatea markdown/JSON no relacionados** en `docs/generated` y `docs/superpowers`. Revisar `git status` y revertir
+  esos archivos antes de commitear.
 - Niveles de privacidad: **MINIMAL** = cero PII, solo URL. **SERVICE** = servicios + duración, sin nombre/teléfono/dinero. **FULL** = todo.
 
 ---
 
 ### Task 1: Resolvedor de servicios compartido
 
-Extrae la lógica que hoy vive privada en `reservation.dashboard.service.ts` (`reservationServiceIds` / `attachServicesMany`, líneas ~532-582) a un módulo propio, con cliente Prisma inyectable para que el push pueda pasar su `tx`.
+Extrae la lógica que hoy vive privada en `reservation.dashboard.service.ts` (`reservationServiceIds` / `attachServicesMany`, líneas
+~532-582) a un módulo propio, con cliente Prisma inyectable para que el push pueda pasar su `tx`.
 
 **Files:**
+
 - Create: `/Users/amieva/Documents/Programming/Avoqado/avoqado-server/src/services/reservation/reservation-services.resolver.ts`
 - Test: `/Users/amieva/Documents/Programming/Avoqado/avoqado-server/tests/unit/services/reservation/reservation-services.resolver.test.ts`
 
 **Interfaces:**
+
 - Consumes: nada (primera tarea).
 - Produces: `ResolvedService`, `reservationServiceIds()`, `resolveServicesMany()`, `resolveServices()`. Las tareas 2, 4 y 6 los consumen.
 
@@ -248,9 +254,12 @@ git commit -m "refactor(reservations): extract shared reservation services resol
 Reemplaza la copia privada por el módulo de la Task 1. Cambio puramente interno: la salida debe ser idéntica.
 
 **Files:**
-- Modify: `/Users/amieva/Documents/Programming/Avoqado/avoqado-server/src/services/dashboard/reservation.dashboard.service.ts` (borrar `reservationServiceIds` y el cuerpo de `attachServicesMany`, líneas ~532-582)
+
+- Modify: `/Users/amieva/Documents/Programming/Avoqado/avoqado-server/src/services/dashboard/reservation.dashboard.service.ts` (borrar
+  `reservationServiceIds` y el cuerpo de `attachServicesMany`, líneas ~532-582)
 
 **Interfaces:**
+
 - Consumes: `resolveServicesMany`, `ResolvedService` (Task 1).
 - Produces: nada nuevo. `attachServices` / `attachServicesMany` conservan su firma para no tocar sus 4 llamadas.
 
@@ -265,7 +274,8 @@ Expected: PASS — 139 tests. Este es el baseline: debe seguir en 139 al final.
 
 - [ ] **Step 2: Reemplazar la implementación privada**
 
-En `src/services/dashboard/reservation.dashboard.service.ts`, borrar la función `reservationServiceIds` y el cuerpo de `attachServicesMany`, y dejar `attachServicesMany` como envoltura delgada del resolvedor compartido:
+En `src/services/dashboard/reservation.dashboard.service.ts`, borrar la función `reservationServiceIds` y el cuerpo de `attachServicesMany`,
+y dejar `attachServicesMany` como envoltura delgada del resolvedor compartido:
 
 ```typescript
 /**
@@ -319,10 +329,12 @@ git commit -m "refactor(reservations): dashboard uses the shared services resolv
 Helpers puros dentro del builder. Se hacen primero y aparte porque son la parte con más casos borde y merecen su propio ciclo de test.
 
 **Files:**
+
 - Modify: `/Users/amieva/Documents/Programming/Avoqado/avoqado-server/src/services/google-calendar/event-body.service.ts`
 - Test: `/Users/amieva/Documents/Programming/Avoqado/avoqado-server/tests/unit/services/google-calendar/event-body.service.test.ts`
 
 **Interfaces:**
+
 - Consumes: `ResolvedService` (Task 1).
 - Produces: `formatDuration(minutes)`, `formatMoney(amount)`, `EventModifier`. Las tareas 4 y 5 los consumen.
 
@@ -441,10 +453,12 @@ git commit -m "feat(google-calendar): add duration and money formatting helpers"
 El corazón del cambio. El builder deja de leer `reservation.product` y usa la lista completa, respetando los tres niveles.
 
 **Files:**
+
 - Modify: `/Users/amieva/Documents/Programming/Avoqado/avoqado-server/src/services/google-calendar/event-body.service.ts`
 - Test: `/Users/amieva/Documents/Programming/Avoqado/avoqado-server/tests/unit/services/google-calendar/event-body.service.test.ts`
 
 **Interfaces:**
+
 - Consumes: `ResolvedService` (Task 1); `formatDuration`, `formatMoney`, `EventModifier` (Task 3).
 - Produces: `EventBodyForReservationArgs` con el campo nuevo `services: ResolvedService[]`. La Task 6 lo consume.
 
@@ -831,7 +845,8 @@ Expected: PASS — 11 tests.
 
 - [ ] **Step 6: Actualizar los tests existentes que asumían un solo servicio**
 
-Los 23 tests originales llaman a `buildEventBodyForReservation` sin `services`. Añadirles `services: []` (dispara el fallback al `product` líder, que es exactamente lo que probaban). Ejemplo del de la línea ~99:
+Los 23 tests originales llaman a `buildEventBodyForReservation` sin `services`. Añadirles `services: []` (dispara el fallback al `product`
+líder, que es exactamente lo que probaban). Ejemplo del de la línea ~99:
 
 ```typescript
 const body = buildEventBodyForReservation({
@@ -842,7 +857,9 @@ const body = buildEventBodyForReservation({
 })
 ```
 
-Excepción: el test *"SERVICE description includes service + party size + URL, but NOT guest name and NOT notes"* ahora también trae la sección `Servicios:`. **Conservar intactas** sus aserciones de privacidad (`not.toContain` del nombre y las notas) y ajustar solo la parte de formato.
+Excepción: el test _"SERVICE description includes service + party size + URL, but NOT guest name and NOT notes"_ ahora también trae la
+sección `Servicios:`. **Conservar intactas** sus aserciones de privacidad (`not.toContain` del nombre y las notas) y ajustar solo la parte
+de formato.
 
 - [ ] **Step 7: Verificar la suite completa del builder**
 
@@ -864,18 +881,22 @@ git commit -m "feat(google-calendar): include all booked services, extras, durat
 
 ### Task 5: Reforzar el candado de privacidad
 
-El test de regresión existente (línea ~174) es lo que impide que MINIMAL filtre PII. Ahora hay dos campos nuevos que puede filtrar: teléfono y dinero. **Es la tarea de seguridad del plan.**
+El test de regresión existente (línea ~174) es lo que impide que MINIMAL filtre PII. Ahora hay dos campos nuevos que puede filtrar: teléfono
+y dinero. **Es la tarea de seguridad del plan.**
 
 **Files:**
-- Modify: `/Users/amieva/Documents/Programming/Avoqado/avoqado-server/tests/unit/services/google-calendar/event-body.service.test.ts` (test de la línea ~174)
+
+- Modify: `/Users/amieva/Documents/Programming/Avoqado/avoqado-server/tests/unit/services/google-calendar/event-body.service.test.ts` (test
+  de la línea ~174)
 
 **Interfaces:**
+
 - Consumes: builder de la Task 4.
 - Produces: nada. Solo endurece la red.
 
 - [ ] **Step 1: Reforzar el test de regresión**
 
-Reemplazar el test *"REGRESSION: same reservation rendered MINIMAL strips ALL PII visible in FULL"*:
+Reemplazar el test _"REGRESSION: same reservation rendered MINIMAL strips ALL PII visible in FULL"_:
 
 ```typescript
 it('REGRESSION: la MISMA reserva en MINIMAL no filtra NADA de lo visible en FULL', () => {
@@ -899,7 +920,16 @@ it('REGRESSION: la MISMA reserva en MINIMAL no filtra NADA de lo visible en FULL
   // Este es EL candado de privacidad del diseño — la única defensa contra que
   // un cambio futuro mueva el `return` temprano de MINIMAL por debajo de las
   // secciones de servicios/dinero y filtre todo a un calendario público.
-  const leaked = ['Hilda', '55-1234-5678', 'Total estimado', '2,280', 'Alergia al acetona', 'Clienta frecuente', 'Extensión con polygel', 'Gel semipermanente']
+  const leaked = [
+    'Hilda',
+    '55-1234-5678',
+    'Total estimado',
+    '2,280',
+    'Alergia al acetona',
+    'Clienta frecuente',
+    'Extensión con polygel',
+    'Gel semipermanente',
+  ]
   for (const secret of leaked) {
     expect(minimal.description).not.toContain(secret)
     expect(minimal.summary).not.toContain(secret)
@@ -957,15 +987,18 @@ git commit -m "test(google-calendar): harden MINIMAL/SERVICE privacy regression 
 Conecta todo. `buildBodyForRow` pasa a `async` porque ahora necesita `await`.
 
 **Files:**
+
 - Modify: `/Users/amieva/Documents/Programming/Avoqado/avoqado-server/src/services/google-calendar/push.service.ts`
 
 **Interfaces:**
+
 - Consumes: `resolveServices` (Task 1); `buildEventBodyForReservation` con `services` (Task 4).
 - Produces: nada nuevo hacia afuera.
 
 - [ ] **Step 1: Añadir `modifiers` a los includes**
 
-En `src/services/google-calendar/push.service.ts` hay **dos** sitios con el include de `reservation` (el tipo `OutboxRowWithRelations` en la línea ~69 y el `findUnique` en la línea ~103). Añadir `modifiers: true` en ambos:
+En `src/services/google-calendar/push.service.ts` hay **dos** sitios con el include de `reservation` (el tipo `OutboxRowWithRelations` en la
+línea ~69 y el `findUnique` en la línea ~103). Añadir `modifiers: true` en ambos:
 
 ```typescript
 reservation: {
@@ -973,7 +1006,11 @@ reservation: {
     customer: true
     product: true
     modifiers: true
-    venue: { include: { reservationSettings: true } }
+    venue: {
+      include: {
+        reservationSettings: true
+      }
+    }
   }
 }
 ```
@@ -1034,7 +1071,8 @@ Expected: `SIN ERRORES`
 npx jest tests/unit/services/google-calendar --silent
 ```
 
-Expected: PASS. Si `push.service.test.ts` falla porque su mock de Prisma no tiene `product.findMany`, añadirlo al mock — el resolvedor lo necesita.
+Expected: PASS. Si `push.service.test.ts` falla porque su mock de Prisma no tiene `product.findMany`, añadirlo al mock — el resolvedor lo
+necesita.
 
 - [ ] **Step 6: Format, lint y commit (PEDIR PERMISO ANTES)**
 
@@ -1051,9 +1089,11 @@ git commit -m "feat(google-calendar): resolve booked services within the push tr
 Spec §7, decisión (b). Construirlo NO modifica ningún calendario; solo ejecutarlo lo hace.
 
 **Files:**
+
 - Create: `/Users/amieva/Documents/Programming/Avoqado/avoqado-server/scripts/repush-google-calendar-events.ts`
 
 **Interfaces:**
+
 - Consumes: el outbox existente (`CalendarSyncOutbox`).
 - Produces: nada para otras tareas.
 
@@ -1156,9 +1196,8 @@ npx tsc --noEmit 2>&1 | grep -i "repush-google" || echo "SIN ERRORES"
 
 Expected: `SIN ERRORES`.
 
-Nota de seguridad heredada: `resolveReservationPushTargets` respeta el kill switch
-`googleCalendarPushEnabled` del venue y devuelve `[]` si el push está pausado. El
-script hereda esa protección gratis — otra razón para no insertar a mano.
+Nota de seguridad heredada: `resolveReservationPushTargets` respeta el kill switch `googleCalendarPushEnabled` del venue y devuelve `[]` si
+el push está pausado. El script hereda esa protección gratis — otra razón para no insertar a mano.
 
 - [ ] **Step 3: Probar en DRY RUN contra el venue de Amaena**
 
@@ -1180,6 +1219,7 @@ git commit -m "feat(google-calendar): add manual per-venue event re-push script"
 ### Task 8: Verificación final y aviso de privacidad
 
 **Files:**
+
 - Ninguno de código. Verificación + la tarea no-código del spec §9.
 
 - [ ] **Step 1: Suite completa**
@@ -1211,7 +1251,8 @@ Revertir cualquier `docs/generated/*` o `docs/superpowers/*` que prettier haya r
 
 Tarea **no-código, parte del entregable**:
 
-1. Revisar el aviso de privacidad de Avoqado: ¿describe que se transfiere PII de clientes finales (nombre, teléfono) a Google Calendar cuando el venue conecta su calendario? Si no, agregarlo.
+1. Revisar el aviso de privacidad de Avoqado: ¿describe que se transfiere PII de clientes finales (nombre, teléfono) a Google Calendar
+   cuando el venue conecta su calendario? Si no, agregarlo.
 2. Avisar a Amaena que su propio aviso de privacidad debe cubrir esa transferencia (LFPDPPP: ella es la responsable, Avoqado el encargado).
 
 Marcar como bloqueante del deploy si el aviso no cubre la transferencia.
@@ -1224,8 +1265,11 @@ Backend primero, esperar estable. Este cambio es solo backend: no requiere APK n
 
 ## Notas de riesgo
 
-1. **El candado de privacidad es la Task 5.** Si algo se corta por tiempo, no es eso. Teléfono y dinero en un calendario compartido es el riesgo real de todo el diseño.
-2. **`reservation.duration` es autoritativa.** Ya incluye el tiempo de los modificadores (`reservation.dashboard.service.ts:296`). Recalcular sumando servicios da un número distinto y equivocado.
+1. **El candado de privacidad es la Task 5.** Si algo se corta por tiempo, no es eso. Teléfono y dinero en un calendario compartido es el
+   riesgo real de todo el diseño.
+2. **`reservation.duration` es autoritativa.** Ya incluye el tiempo de los modificadores (`reservation.dashboard.service.ts:296`).
+   Recalcular sumando servicios da un número distinto y equivocado.
 3. **El `tx` en la Task 6 no es opcional.** El push corre dentro de `prisma.$transaction`; leer con el `prisma` global rompe el aislamiento.
-4. **50 servicios en producción no tienen duración** (Mindform 33, Alberto Dominguez 12, Amaena 5). El evento los imprime sin `(N min)` — correcto, pero la línea `Duración:` refleja el fallback del venue, no el tiempo real.
+4. **50 servicios en producción no tienen duración** (Mindform 33, Alberto Dominguez 12, Amaena 5). El evento los imprime sin `(N min)` —
+   correcto, pero la línea `Duración:` refleja el fallback del venue, no el tiempo real.
 5. **D3 (título completo) es decisión cerrada del founder**, tomada con el tradeoff del truncado a la vista. No "arreglarla".
