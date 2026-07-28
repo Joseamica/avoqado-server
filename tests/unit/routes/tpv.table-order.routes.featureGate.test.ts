@@ -1,0 +1,153 @@
+/**
+ * TABLE_SERVICE plan gating on the 5 table-order-lifecycle routes mounted under
+ * /tpv (Plan B Task 4, 2026-07-27): split, split-by-seat, merge, service-charges,
+ * tables/:tableId/open.
+ *
+ * Same technique as tests/unit/routes/tpv-table-gating.test.ts (Task 2): mounts the
+ * REAL tpv.routes.ts router with the REAL checkFeatureAccess middleware, mocking only
+ * auth (context injector), checkPermission (passthrough — tpv.table-order.routes.test.ts
+ * already covers the exact permission names), prisma, moduleService, and the two
+ * controllers these routes call into.
+ *
+ * Unlike the generic order-mutation routes (items/guest — deliberately left ungated,
+ * see task-2-report.md), these 5 routes ARE exclusively table-service capabilities
+ * (split a check, merge checks, apply a service charge, open a table), so they DO
+ * carry checkFeatureAccess('TABLE_SERVICE') — mirroring exactly how /mobile gates its
+ * equivalent routes (mobile.routes.ts:1892-1998,1599).
+ */
+
+import express from 'express'
+import request from 'supertest'
+
+// 1. Auth: inject authContext from a test header (tpv.routes.ts references
+//    authenticateTokenMiddleware inline per-route, no parent router.use).
+jest.mock('@/middlewares/authenticateToken.middleware', () => ({
+  authenticateTokenMiddleware: (req: any, _res: any, next: any) => {
+    const ctx = req.headers['x-test-auth-context']
+    if (ctx) req.authContext = JSON.parse(ctx as string)
+    next()
+  },
+}))
+
+// 2. checkPermission: passthrough — not under test here. tpv.table-order.routes.test.ts
+//    already proves the exact permission name per route via static introspection.
+jest.mock('@/middlewares/checkPermission.middleware', () => ({
+  ...jest.requireActual('@/middlewares/checkPermission.middleware'),
+  checkPermission: () => (_req: any, _res: any, next: any) => next(),
+}))
+
+// 3. prisma: only the models checkFeatureAccess touches.
+jest.mock('@/utils/prismaClient', () => ({
+  __esModule: true,
+  default: {
+    staffVenue: { findFirst: jest.fn() }, // SUPERADMIN bypass (requestIsSuperAdmin)
+    venue: { findUnique: jest.fn() }, // venueIsExemptFromPlanGating (grandfathered/demo)
+    venueFeature: { findFirst: jest.fn(), findMany: jest.fn() }, // own grant + getVenueBaseTier
+  },
+}))
+
+jest.mock('@/config/logger', () => ({
+  __esModule: true,
+  default: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
+}))
+
+// 4. moduleService: the WRONG resolver for TABLE_SERVICE (Feature, not Module — see
+//    .claude/rules/feature-gating.md). Mocked so tests can assert it's NEVER consulted.
+jest.mock('@/services/modules/module.service', () => {
+  const actual = jest.requireActual('@/services/modules/module.service')
+  return { ...actual, moduleService: { ...actual.moduleService, isModuleEnabled: jest.fn() } }
+})
+
+// 5. Controllers: not under test — any handler responds 200 + a marker.
+const controllerProxy = () =>
+  new Proxy({}, { get: (_t, prop) => (prop === '__esModule' ? true : (_req: any, res: any) => res.json({ handler: String(prop) })) })
+jest.mock('@/controllers/tpv/order-table.tpv.controller', () => controllerProxy())
+jest.mock('@/controllers/tpv/table.tpv.controller', () => controllerProxy())
+
+// ─── Import router AFTER the mocks ─────────────────────────────────────────────
+import prisma from '@/utils/prismaClient'
+import tpvRouter from '@/routes/tpv.routes'
+import { moduleService } from '@/services/modules/module.service'
+
+const staffVenueFindFirst = (prisma as any).staffVenue.findFirst as jest.Mock
+const venueFindUnique = (prisma as any).venue.findUnique as jest.Mock
+const vfFindFirst = (prisma as any).venueFeature.findFirst as jest.Mock
+const vfFindMany = (prisma as any).venueFeature.findMany as jest.Mock
+const isModuleEnabledMock = moduleService.isModuleEnabled as jest.Mock
+
+const VENUE_ID = 'venue-tpv-order-1'
+const OTHER_VENUE_ID = 'venue-tpv-order-OTHER'
+
+function authHeader(ctx: object): Record<string, string> {
+  return { 'x-test-auth-context': JSON.stringify(ctx) }
+}
+
+const waiterCtx = { userId: 'user-1', orgId: 'org-1', venueId: VENUE_ID, role: 'WAITER' }
+
+function createApp() {
+  const app = express()
+  app.use(express.json())
+  app.use('/tpv', tpvRouter)
+  app.use((err: any, _req: any, res: any, _next: any) => res.status(err?.statusCode || 500).json({ error: err?.message || 'error' }))
+  return app
+}
+
+const FREE_ACTIVE_VENUE = { seatCapExempt: false, status: 'ACTIVE' }
+const PRO_PLAN_ROW = { active: true, suspendedAt: null, endDate: null, feature: { code: 'PLAN_PRO' } }
+
+beforeEach(() => {
+  jest.clearAllMocks()
+  staffVenueFindFirst.mockResolvedValue(null) // not a platform superadmin
+  venueFindUnique.mockResolvedValue(FREE_ACTIVE_VENUE)
+  vfFindFirst.mockResolvedValue(null) // no explicit own TABLE_SERVICE grant
+  vfFindMany.mockResolvedValue([]) // no active paid base plan → FREE
+  isModuleEnabledMock.mockResolvedValue(false)
+})
+
+// [method, path, expectedHandlerName]
+const routes: Array<[string, string, string]> = [
+  ['post', `/tpv/venues/${VENUE_ID}/orders/order-1/split`, 'splitOrder'],
+  ['post', `/tpv/venues/${VENUE_ID}/orders/order-1/split-by-seat`, 'splitOrderBySeat'],
+  ['post', `/tpv/venues/${VENUE_ID}/orders/order-1/merge`, 'mergeOrders'],
+  ['post', `/tpv/venues/${VENUE_ID}/orders/order-1/service-charges`, 'applyServiceCharge'],
+  ['post', `/tpv/venues/${VENUE_ID}/tables/table-1/open`, 'openTable'],
+]
+
+describe.each(routes)('%s %s — TABLE_SERVICE gate', (method, path, handlerName) => {
+  it('FREE venue → 403 TABLE_SERVICE, controller never reached', async () => {
+    const res = await (request(createApp()) as any)[method](path).set(authHeader(waiterCtx)).send({})
+
+    expect(res.status).toBe(403)
+    expect(res.body.featureCode).toBe('TABLE_SERVICE')
+    expect(res.body.subscriptionRequired).toBe(true)
+  })
+
+  it('PRO venue → 200 (controller reached)', async () => {
+    vfFindMany.mockResolvedValue([PRO_PLAN_ROW])
+
+    const res = await (request(createApp()) as any)[method](path).set(authHeader(waiterCtx)).send({})
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ handler: handlerName })
+  })
+
+  it('wrong-resolver guard: Module system NEVER consulted (TABLE_SERVICE is a Feature, not a Module)', async () => {
+    await (request(createApp()) as any)[method](path).set(authHeader(waiterCtx)).send({})
+
+    expect(isModuleEnabledMock).not.toHaveBeenCalled()
+    expect(vfFindMany).toHaveBeenCalled() // getVenueBaseTier (Feature system) actually ran
+  })
+
+  it('cross-tenant probe (URL venueId ≠ token venueId) → 403 from validateVenueAccess; checkFeatureAccess never runs (no plan leak)', async () => {
+    const crossPath = path.replace(VENUE_ID, OTHER_VENUE_ID)
+    const res = await (request(createApp()) as any)[method](crossPath).set(authHeader(waiterCtx)).send({})
+
+    expect(res.status).toBe(403)
+    expect(res.body.message).toBe('No tienes acceso a este venue')
+    expect(res.body.featureCode).toBeUndefined() // proves this is validateVenueAccess's 403, not checkFeatureAccess's
+    expect(staffVenueFindFirst).not.toHaveBeenCalled()
+    expect(venueFindUnique).not.toHaveBeenCalled()
+    expect(vfFindFirst).not.toHaveBeenCalled()
+    expect(vfFindMany).not.toHaveBeenCalled()
+  })
+})

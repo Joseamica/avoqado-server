@@ -14,6 +14,7 @@ import * as discountController from '../controllers/tpv/discount.tpv.controller'
 import * as floorElementController from '../controllers/tpv/floor-element.tpv.controller'
 import * as heartbeatController from '../controllers/tpv/heartbeat.tpv.controller'
 import * as orderController from '../controllers/tpv/order.tpv.controller'
+import * as orderTableController from '../controllers/tpv/order-table.tpv.controller'
 import * as paymentController from '../controllers/tpv/payment.tpv.controller'
 import * as merchantRoutingController from '../controllers/tpv/merchantRouting.tpv.controller'
 import { merchantEligibilityRequestSchema } from '../schemas/dashboard/merchantRouting.schema'
@@ -3713,6 +3714,97 @@ router.post(
   validateVenueAccess,
   checkPermission('orders:create'),
   syncTpvController.syncIntents,
+)
+
+// ============================================
+// TABLE SERVICE — ORDER LIFECYCLE (Plan B Task 4, 2026-07-27)
+// ============================================
+// Ciclo de orden de mesa: separar cuenta, dividir por puesto, fusionar cuentas,
+// cobros por servicio, y abrir mesa. `split`/`split-by-seat`/`merge`/`service-charges`
+// son wrappers delgados en order-table.tpv.controller.ts sobre los MISMOS servicios
+// puros que usa /mobile (order.mobile.service.ts / service-charge.mobile.service.ts).
+// `openTable` es un re-export del controller de /mobile (ver table.tpv.controller.ts).
+//
+// Cadena de middleware — espejo EXACTO de /mobile por nombre de permiso
+// (mobile.routes.ts:1892-1998,1599): validateVenueAccess (Task 1) ANTES de
+// checkFeatureAccess (para que una sonda cross-tenant 403 por tenant, no por plan)
+// y checkPermission AL FINAL. A diferencia de las rutas genéricas de orden de
+// arriba (items/guest, deliberadamente NO gateadas por TABLE_SERVICE porque
+// también sirven OrderTypes sin mesa — ver task-2-report.md), estas 5 rutas SÍ
+// llevan checkFeatureAccess('TABLE_SERVICE'): son EXCLUSIVAS de servicio a mesa.
+//
+// NO se agregó discounts/comp aquí — /tpv YA tiene esa familia completa
+// (discounts/apply, discounts/manual, discounts/coupon, discounts/auto,
+// orders/:orderId/comp) y es territorio de Cobrar (founder: intocable). Ver
+// task-4-brief.md.
+
+/**
+ * POST /tpv/venues/{venueId}/orders/{orderId}/split
+ * "Separar cuenta": mueve los artículos seleccionados a una cuenta NUEVA en la
+ * misma mesa (Square's separate checks). Body: { itemIds: string[] }
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/split',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkFeatureAccess('TABLE_SERVICE'),
+  checkPermission('orders:update'),
+  orderTableController.splitOrder,
+)
+
+/**
+ * POST /tpv/venues/{venueId}/orders/{orderId}/split-by-seat
+ * "Dividir por puesto" (Square): un cheque por asiento, en una sola transacción.
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/split-by-seat',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkFeatureAccess('TABLE_SERVICE'),
+  checkPermission('orders:update'),
+  orderTableController.splitOrderBySeat,
+)
+
+/**
+ * POST /tpv/venues/{venueId}/orders/{orderId}/merge
+ * "Fusionar cuentas" (Square's merge): vuelca los artículos de sourceOrderId en
+ * esta cuenta y cancela el origen. Body: { sourceOrderId: string }
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/merge',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkFeatureAccess('TABLE_SERVICE'),
+  checkPermission('orders:update'),
+  orderTableController.mergeOrders,
+)
+
+/**
+ * POST /tpv/venues/{venueId}/orders/{orderId}/service-charges
+ * Aplica un cobro por servicio del catálogo (propina automática por comensales,
+ * descorche, etc.) a la cuenta abierta. Body: { serviceChargeId: string }
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/service-charges',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkFeatureAccess('TABLE_SERVICE'),
+  checkPermission('orders:update'),
+  orderTableController.applyServiceCharge,
+)
+
+/**
+ * POST /tpv/venues/{venueId}/tables/{tableId}/open
+ * Abre una mesa: reusa la cuenta activa si existe, o crea una orden DINE_IN vacía
+ * y marca la mesa OCCUPIED. Body: { covers?: number }
+ */
+router.post(
+  '/venues/:venueId/tables/:tableId/open',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkFeatureAccess('TABLE_SERVICE'),
+  checkPermission('orders:create'),
+  tableController.openTable,
 )
 
 /**

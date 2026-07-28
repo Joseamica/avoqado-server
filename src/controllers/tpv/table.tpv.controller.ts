@@ -4,6 +4,24 @@ import logger from '../../config/logger'
 import { logAction } from '../../services/dashboard/activity-log.service'
 
 /**
+ * POST /tpv/venues/:venueId/tables/:tableId/open
+ * TABLE_SERVICE — abre una mesa: reusa la cuenta activa si ya existe, o crea una
+ * orden DINE_IN vacía y marca la mesa OCCUPIED (mismo servicio que `assignTable`
+ * de arriba: `tableService.assignTable`, para que el broadcast de Socket.IO
+ * TABLE_STATUS_CHANGE quede consistente entre clientes). Body: { covers?: number }
+ *
+ * Re-export del controller de `/mobile` (Plan B Task 4, 2026-07-27) — mismo
+ * patrón que `sync.tpv.controller.ts` con el reducer de sync (Task 3). Verificado
+ * que `openTable` (`src/controllers/mobile/table.mobile.controller.ts`) SOLO lee
+ * `req.params`, `authContext.userId` y `req.body.covers`, y llama a
+ * `tableService.assignTable` (el servicio `/tpv`, no uno de `/mobile`) más
+ * `syncAutomaticServiceCharges` — cero lógica acoplada al namespace `/mobile` que
+ * copiar. Reexportar evita una segunda implementación que pueda divergir en
+ * silencio; `/mobile` queda byte-idéntico.
+ */
+export { openTable } from '../mobile/table.mobile.controller'
+
+/**
  * GET /tpv/venues/:venueId/tables
  * Get all tables with their current status for floor plan display
  */
