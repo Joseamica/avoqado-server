@@ -750,8 +750,10 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tpv-orders:discount', // Can apply custom discounts
     'tpv-tables:assign',
     'tpv-tables:write', // Can create/modify tables
+    'tpv-tables:delete', // Can delete tables (security fix 2026-07-24 — spec §4.4: MANAGER was missing delete even though it already had write)
     'tpv-floor-elements:read',
     'tpv-floor-elements:write',
+    'tpv-floor-elements:delete', // Can delete floor elements (same fix, mirrors tpv-tables:delete)
     'tpv-time-entries:read', // Can view time entries
     'tpv-time-entries:write',
     'tpv-payments:send-receipt',

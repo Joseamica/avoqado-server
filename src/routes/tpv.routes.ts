@@ -32,9 +32,11 @@ import AppError from '../errors/AppError'
 import { getPromoterCashOut, withdrawAsPromoter } from '../services/dashboard/cash-out/cash-out.promoter.service'
 import { DEFAULT_PERMISSIONS, expandWildcards, resolvePermissions } from '../lib/permissions'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
+import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { pinLoginRateLimiter } from '../middlewares/pin-login-rate-limit.middleware'
 import { touchTerminalHeartbeatMiddleware } from '../middlewares/touchTerminalHeartbeat.middleware'
+import { validateVenueAccess } from '../middlewares/validateVenueAccess.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { activateTerminalSchema } from '../schemas/activation.schema'
 import { recordPromoterPingSchema } from '../schemas/promoterLocation.schema'
@@ -3489,7 +3491,13 @@ router.get(
  *       200:
  *         description: List of tables with their current status and orders
  */
-router.get('/venues/:venueId/tables', authenticateTokenMiddleware, validateRequest(tableParamsSchema), tableController.getTables)
+router.get(
+  '/venues/:venueId/tables',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  validateRequest(tableParamsSchema),
+  tableController.getTables,
+)
 
 /**
  * @openapi
@@ -3525,19 +3533,68 @@ router.get('/venues/:venueId/tables', authenticateTokenMiddleware, validateReque
  *       201:
  *         description: New order created
  */
-router.post('/venues/:venueId/tables/assign', authenticateTokenMiddleware, validateRequest(assignTableSchema), tableController.assignTable)
+// TABLE_SERVICE (PRO+) — assigning a table OPERATES table service (creates/returns the
+// DINE_IN order tied to it), mirroring how /mobile gates the equivalent tables/:tableId/open
+// (mobile.routes.ts:1601). checkFeatureAccess is a Feature-system gate (venueHasFeatureAccess /
+// PLAN_PRO+ blanket) — TABLE_SERVICE is NOT in MODULE_CODES, so it must never be gated with
+// moduleService.isModuleEnabled (see .claude/rules/feature-gating.md — crossing the two
+// resolvers fails silently for grandfathered venues). Placed AFTER validateVenueAccess so a
+// cross-tenant probe 403s on tenant ownership before this reveals anything about the venue's plan.
+router.post(
+  '/venues/:venueId/tables/assign',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkFeatureAccess('TABLE_SERVICE'),
+  validateRequest(assignTableSchema),
+  tableController.assignTable,
+)
 
 // POST /venues/:venueId/tables - Create a new table
-router.post('/venues/:venueId/tables', authenticateTokenMiddleware, tableController.createTable)
+// Security fix 2026-07-24 (spec §4.4): was authenticateTokenMiddleware-only — any
+// authenticated WAITER could create tables, and the venueId in the URL was never
+// checked against the token's venue (cross-tenant write). tpv-tables:write is the
+// pre-existing catalog permission for "create/modify tables" (MANAGER/ADMIN/OWNER
+// only) — it was already cataloged and mirrored in the dashboard's role editor,
+// just never enforced on this route.
+router.post(
+  '/venues/:venueId/tables',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkPermission('tpv-tables:write'),
+  tableController.createTable,
+)
 
 // PUT /venues/:venueId/tables/:tableId/position - Update table position on floor plan
-router.put('/venues/:venueId/tables/:tableId/position', authenticateTokenMiddleware, tableController.updateTablePosition)
+// Security fix 2026-07-24 (spec §4.4) — see createTable comment above.
+router.put(
+  '/venues/:venueId/tables/:tableId/position',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkPermission('tpv-tables:write'),
+  tableController.updateTablePosition,
+)
 
 // PUT /venues/:venueId/tables/:tableId - Update table properties (number, capacity, shape, rotation, areaId)
-router.put('/venues/:venueId/tables/:tableId', authenticateTokenMiddleware, tableController.updateTable)
+// Security fix 2026-07-24 (spec §4.4) — see createTable comment above.
+router.put(
+  '/venues/:venueId/tables/:tableId',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkPermission('tpv-tables:write'),
+  tableController.updateTable,
+)
 
 // DELETE /venues/:venueId/tables/:tableId - Delete a table (soft delete)
-router.delete('/venues/:venueId/tables/:tableId', authenticateTokenMiddleware, tableController.deleteTable)
+// Security fix 2026-07-24 (spec §4.4): this was the headline hole — a WAITER could
+// delete tables via the legacy edit dialog's delete button. tpv-tables:delete is
+// the pre-existing catalog permission (MANAGER/ADMIN/OWNER only).
+router.delete(
+  '/venues/:venueId/tables/:tableId',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkPermission('tpv-tables:delete'),
+  tableController.deleteTable,
+)
 
 /**
  * @openapi
@@ -3562,9 +3619,14 @@ router.delete('/venues/:venueId/tables/:tableId', authenticateTokenMiddleware, t
  *       200:
  *         description: Table cleared successfully
  */
+// TABLE_SERVICE (PRO+) — same gate as assign above; clearing releases a table after its
+// order is paid, the other half of the dine-in service loop. Mirrors /mobile's
+// tables/:tableId/clear (mobile.routes.ts:1616).
 router.post(
   '/venues/:venueId/tables/:tableId/clear',
   authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkFeatureAccess('TABLE_SERVICE'),
   validateRequest(clearTableSchema),
   tableController.clearTable,
 )
@@ -3576,26 +3638,55 @@ router.post(
 /**
  * GET /tpv/venues/:venueId/floor-elements
  * Get all floor elements for floor plan display
+ *
+ * Not in the brief's original line list, but same venueId-echo pattern as GET
+ * /tables above (§4.4) — added validateVenueAccess for consistency; see task-1 report.
  */
-router.get('/venues/:venueId/floor-elements', authenticateTokenMiddleware, floorElementController.getFloorElements)
+router.get('/venues/:venueId/floor-elements', authenticateTokenMiddleware, validateVenueAccess, floorElementController.getFloorElements)
 
 /**
  * POST /tpv/venues/:venueId/floor-elements
  * Create a new floor element
+ *
+ * Security fix 2026-07-24 (spec §4.4) — see the tables POST comment above.
+ * tpv-floor-elements:write is the pre-existing catalog permission (MANAGER/ADMIN/OWNER only).
  */
-router.post('/venues/:venueId/floor-elements', authenticateTokenMiddleware, floorElementController.createFloorElement)
+router.post(
+  '/venues/:venueId/floor-elements',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkPermission('tpv-floor-elements:write'),
+  floorElementController.createFloorElement,
+)
 
 /**
  * PUT /tpv/venues/:venueId/floor-elements/:elementId
  * Update a floor element
+ *
+ * Security fix 2026-07-24 (spec §4.4) — see above.
  */
-router.put('/venues/:venueId/floor-elements/:elementId', authenticateTokenMiddleware, floorElementController.updateFloorElement)
+router.put(
+  '/venues/:venueId/floor-elements/:elementId',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkPermission('tpv-floor-elements:write'),
+  floorElementController.updateFloorElement,
+)
 
 /**
  * DELETE /tpv/venues/:venueId/floor-elements/:elementId
  * Delete a floor element (soft delete)
+ *
+ * Security fix 2026-07-24 (spec §4.4) — see above.
+ * tpv-floor-elements:delete is the pre-existing catalog permission (MANAGER/ADMIN/OWNER only).
  */
-router.delete('/venues/:venueId/floor-elements/:elementId', authenticateTokenMiddleware, floorElementController.deleteFloorElement)
+router.delete(
+  '/venues/:venueId/floor-elements/:elementId',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkPermission('tpv-floor-elements:delete'),
+  floorElementController.deleteFloorElement,
+)
 
 /**
  * @openapi
