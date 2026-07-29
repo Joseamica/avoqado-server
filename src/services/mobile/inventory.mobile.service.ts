@@ -124,7 +124,7 @@ export async function getStockOverview(venueId: string, page: number, pageSize: 
       // producto por receta, en vez de un "0" sin causa. Los clientes viejos
       // los ignoran.
       inventoryMethod: p.inventoryMethod ?? null,
-      limitingIngredientName: limitingIngredient?.name ?? null
+      limitingIngredientName: limitingIngredient?.name ?? null,
     }
   })
 

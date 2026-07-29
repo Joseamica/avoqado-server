@@ -142,32 +142,32 @@ export async function getTablesWithStatus(venueId: string): Promise<TableStatusR
     // defiende solo vía DiningTable.primaryCheck.)
     currentOrder:
       table.currentOrder && !['COMPLETED', 'CANCELLED', 'DELETED'].includes(String(table.currentOrder.status))
-      ? {
-          id: table.currentOrder.id,
-          orderNumber: table.currentOrder.orderNumber,
-          covers: table.currentOrder.covers,
-          total: Number(table.currentOrder.total),
-          itemCount: table.currentOrder.items.length,
-          version: table.currentOrder.version,
-          items: table.currentOrder.items.map(item => ({
-            id: item.id,
-            productName: item.product?.name || item.productName || 'Unknown',
-            quantity: item.quantity,
-            unitPrice: Number(item.unitPrice),
-            total: Number(item.total),
-            course: item.course ?? null,
-            isCortesia: item.isCortesia,
-            cortesiaReason: item.cortesiaReason,
-          })),
-          waiter: table.currentOrder.servedBy
-            ? {
-                id: table.currentOrder.servedBy.id,
-                name: `${table.currentOrder.servedBy.firstName} ${table.currentOrder.servedBy.lastName}`,
-              }
-            : null,
-          createdAt: table.currentOrder.createdAt,
-        }
-      : null,
+        ? {
+            id: table.currentOrder.id,
+            orderNumber: table.currentOrder.orderNumber,
+            covers: table.currentOrder.covers,
+            total: Number(table.currentOrder.total),
+            itemCount: table.currentOrder.items.length,
+            version: table.currentOrder.version,
+            items: table.currentOrder.items.map(item => ({
+              id: item.id,
+              productName: item.product?.name || item.productName || 'Unknown',
+              quantity: item.quantity,
+              unitPrice: Number(item.unitPrice),
+              total: Number(item.total),
+              course: item.course ?? null,
+              isCortesia: item.isCortesia,
+              cortesiaReason: item.cortesiaReason,
+            })),
+            waiter: table.currentOrder.servedBy
+              ? {
+                  id: table.currentOrder.servedBy.id,
+                  name: `${table.currentOrder.servedBy.firstName} ${table.currentOrder.servedBy.lastName}`,
+                }
+              : null,
+            createdAt: table.currentOrder.createdAt,
+          }
+        : null,
     // Multi-cheque: TODAS las cuentas abiertas de la mesa (resumen ligero).
     // Additive — clients that only read currentOrder are untouched.
     openOrders: (openByTable.get(table.id) ?? []).map(o => ({
