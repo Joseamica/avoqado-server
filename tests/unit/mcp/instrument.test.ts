@@ -8,13 +8,21 @@ import { prismaMock } from '../../__helpers__/setup'
  */
 function makeInstrumentedServer(ctx = { staffId: 'staff_1', org: 'org_1' }) {
   const registered: Record<string, (...a: unknown[]) => unknown> = {}
+  const calls = { tool: 0, registerTool: 0 }
   const server: any = {
+    // Mirrors the SDK: `tool()` and `registerTool()` are INDEPENDENT entry points
+    // (each goes straight to _createRegisteredTool), so neither delegates to the other.
     tool: (name: string, _schema: unknown, cb: (...a: unknown[]) => unknown) => {
+      calls.tool++
+      registered[name] = cb
+    },
+    registerTool: (name: string, _config: unknown, cb: (...a: unknown[]) => unknown) => {
+      calls.registerTool++
       registered[name] = cb
     },
   }
   instrumentTools(server, ctx)
-  return { server, registered }
+  return { server, registered, calls }
 }
 
 const flush = () => new Promise(r => setImmediate(r)) // let the void recordMcpCall() settle
@@ -82,6 +90,42 @@ describe('instrumentTools — McpToolCall persistence', () => {
     expect(prismaMock.mcpToolCall.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ toolName: 'list_my_venues', venueId: null }) }),
     )
+  })
+
+  // ─── registerTool() coverage (audit blind-spot guard) ────────────────────
+  it('🔒 instruments registerTool() too — a modern-API tool is NOT invisible to the audit', async () => {
+    const { server, registered } = makeInstrumentedServer()
+    server.registerTool('serialized_sales_by_promoter', { title: 'x' }, async () => okResult({ ok: true }))
+
+    await registered.serialized_sales_by_promoter({ venueId: 'v1' }, {})
+    await flush()
+
+    expect(prismaMock.mcpToolCall.create).toHaveBeenCalledTimes(1)
+    expect(prismaMock.mcpToolCall.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ toolName: 'serialized_sales_by_promoter', outcome: 'ok' }) }),
+    )
+  })
+
+  it('REGRESSION — patching both APIs does NOT double-wrap (one call → ONE audit row)', async () => {
+    const { server, registered, calls } = makeInstrumentedServer()
+    server.tool('a', {}, async () => okResult({ ok: true }))
+    server.registerTool('b', {}, async () => okResult({ ok: true }))
+
+    // Each registration hits its OWN underlying entry point exactly once.
+    expect(calls).toEqual({ tool: 1, registerTool: 1 })
+
+    await registered.a({ venueId: 'v1' }, {})
+    await registered.b({ venueId: 'v1' }, {})
+    await flush()
+
+    // Two invocations → exactly two rows (not four).
+    expect(prismaMock.mcpToolCall.create).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not throw when the SDK has no registerTool (older versions)', () => {
+    const server: any = { tool: (_n: string, _s: unknown, _cb: unknown) => undefined }
+    expect(() => instrumentTools(server, { staffId: 's', org: 'o' })).not.toThrow()
+    expect(typeof server.registerTool).toBe('undefined') // nothing invented
   })
 
   it('a persistence failure NEVER breaks the tool call (best-effort audit)', async () => {
