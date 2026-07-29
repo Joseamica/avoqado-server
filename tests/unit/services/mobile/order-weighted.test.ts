@@ -257,6 +257,9 @@ describe('venta por peso — payCashOrder full-payment inventory deduction hook'
     prismaMock.venueTransaction.create.mockResolvedValue({ id: 'vt-1' })
     prismaMock.paymentAllocation.create.mockResolvedValue({ id: 'pa-1' })
     prismaMock.order.update.mockResolvedValue({ id: 'order-1' })
+    // Cobro atómico (§5.4): la transición de pago es un `updateMany` condicional
+    // (CAS sobre `version`), no un `update` ciego. count=1 = ganamos la transición.
+    prismaMock.order.updateMany.mockResolvedValue({ count: 1 })
   })
 
   it('deducts inventory (weight-aware helper) + fires auto-reorder when the order becomes fully paid', async () => {
@@ -272,7 +275,10 @@ describe('venta por peso — payCashOrder full-payment inventory deduction hook'
         },
       ],
     }
-    prismaMock.order.findUnique.mockResolvedValueOnce(baseOrder).mockResolvedValueOnce(paidOrderWithItems)
+    // Tres lecturas: (1) la de fuera, para el 404 y el orderNumber, (2) la RELECTURA
+    // dentro de la transacción — la que manda para validar el pago —, y (3) la del
+    // hook de inventario posterior al cobro.
+    prismaMock.order.findUnique.mockResolvedValueOnce(baseOrder).mockResolvedValueOnce(baseOrder).mockResolvedValueOnce(paidOrderWithItems)
 
     await payCashOrder('venue-1', 'order-1', { venueId: 'venue-1', amount: 18270, tip: 0, staffId: 'staff-1' } as any)
     await flushAsync()

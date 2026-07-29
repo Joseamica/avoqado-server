@@ -41,6 +41,8 @@ import * as tableMobileController from '../controllers/mobile/table.mobile.contr
 import * as syncMobileController from '../controllers/mobile/sync.mobile.controller'
 import * as creditPackMobileController from '../controllers/mobile/creditPack.mobile.controller'
 import * as printMobileController from '../controllers/mobile/print.mobile.controller'
+import * as areaTicketMobileController from '../controllers/mobile/areaTicket.mobile.controller'
+import { areaTicketResolveRateLimiter } from '../middlewares/area-ticket-rate-limit.middleware'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
@@ -2448,6 +2450,97 @@ router.post(
   checkPermission('orders:read'),
   validateRequest(gatewayHeartbeatSchema),
   printMobileController.gatewayHeartbeat,
+)
+
+// ============================================================================
+// VALES POR ÁREA (AREA_TICKETS) — cuenta compartida entre áreas emisoras
+// Contrato CONGELADO §6 del spec 2026-07-28-vales-por-area-y-bascula-design.md.
+// Las rutas y sus nombres NO se cambian: Android se implementa contra esto.
+//
+// 🔴 EL GATE DE PLAN VA SÓLO EN "ABRIR" (§2). `AREA_TICKETS` es PRO (blanket: NO
+// va en PREMIUM_ONLY_CODES). Consultar, agregar a un vale YA abierto, reclamar y
+// **entregar** quedan SIN gate a propósito: si el plan vence a media mañana, hay
+// producto de un cliente guardado en el mostrador y dejarlo secuestrado detrás de
+// un paywall sería indefendible. Lo que se corta es abrir vales NUEVOS.
+// ============================================================================
+
+/**
+ * POST /api/v1/mobile/devices/partition
+ * Asigna (o devuelve) la partición del dispositivo. Se llama al iniciar sesión.
+ * Sin gate de plan: sin partición el dispositivo no puede ni consultar un vale ya
+ * abierto, y el venue puede haber caído de plan con producto en el mostrador.
+ */
+router.post('/devices/partition', authenticateTokenMiddleware, areaTicketMobileController.assignDevicePartition)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/area-tickets
+ * Abre la cuenta con el código ACUÑADO POR EL CLIENTE. Único endpoint con gate.
+ */
+router.post(
+  '/venues/:venueId/area-tickets',
+  authenticateTokenMiddleware,
+  checkPermission('orders:create'),
+  checkFeatureAccess('AREA_TICKETS'),
+  areaTicketMobileController.openAreaTicket,
+)
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/area-tickets/:code
+ * Resuelve el vale. SIEMPRE 200 con `state` (OPEN | CHECKOUT_CLAIMED | ALREADY_PAID
+ * | DELIVERED | CANCELLED | NOT_FOUND) y `message` en español — nunca un 404 mudo.
+ * Con límite de tasa: el verificador mod-10 es público y no es seguridad (§5.1).
+ */
+router.get(
+  '/venues/:venueId/area-tickets/:code',
+  authenticateTokenMiddleware,
+  areaTicketResolveRateLimiter,
+  checkPermission('orders:read'),
+  areaTicketMobileController.resolveAreaTicket,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/area-tickets/:code/items
+ * Agrega renglones (área o caja). El server pone el área desde
+ * `Terminal.fulfillmentAreaId`, NUNCA desde el payload.
+ */
+router.post(
+  '/venues/:venueId/area-tickets/:code/items',
+  authenticateTokenMiddleware,
+  checkPermission('orders:update'),
+  areaTicketMobileController.addAreaTicketItems,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/area-tickets/:code/claim
+ * La caja reclama la cuenta (CHECKOUT_CLAIMED). Caduca sola a los 5 minutos.
+ */
+router.post(
+  '/venues/:venueId/area-tickets/:code/claim',
+  authenticateTokenMiddleware,
+  checkPermission('orders:update'),
+  areaTicketMobileController.claimAreaTicket,
+)
+
+/**
+ * POST /api/v1/mobile/orders/:id/fulfill
+ * Entrega de TODOS los renglones de un área. Idempotente; exige PAID.
+ */
+router.post(
+  '/orders/:id/fulfill',
+  authenticateTokenMiddleware,
+  checkPermission('orders:update'),
+  areaTicketMobileController.fulfillOrderArea,
+)
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/fulfillment/pending
+ * Vales PAGADOS y NO ENTREGADOS del área de esta terminal (o de `?fulfillmentAreaId`).
+ */
+router.get(
+  '/venues/:venueId/fulfillment/pending',
+  authenticateTokenMiddleware,
+  checkPermission('orders:read'),
+  areaTicketMobileController.listPendingFulfillment,
 )
 
 export default router

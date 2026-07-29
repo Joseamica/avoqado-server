@@ -14,6 +14,7 @@ import { getMergedCategories } from '../dashboard/category-resolution.service'
 import logger from '@/config/logger'
 import { SimCustodyError } from '../../lib/sim-custody-error-codes'
 import { buildCustodyDataForScanner } from './custodyAssignment.helper'
+import { parseDbDateRange } from '../../utils/datetime'
 
 // ==========================================
 // SERIAL NORMALIZATION
@@ -1001,6 +1002,91 @@ export class SerializedInventoryService {
     }
 
     return null
+  }
+
+  /**
+   * SOLD serialized items broken down by PROMOTER × CATEGORY (type) across the
+   * organization's venues plus the org-level pool.
+   *
+   * Why this exists: the data was always there (`SerializedItem` carries BOTH
+   * `assignedPromoterId` and `categoryId`, and the promoter link SURVIVES the
+   * sale), but it was only reachable by listing items one promoter at a time —
+   * so consumers concluded the breakdown "didn't exist". This aggregates it
+   * server-side in a single groupBy.
+   *
+   * `from`/`to` are VENUE-LOCAL calendar days resolved via `parseDbDateRange`
+   * (never a bare `new Date('YYYY-MM-DD')` — see the runtime-tz rule). With a
+   * range, items lacking `soldAt` are excluded; without one, all SOLD count.
+   */
+  async getOrgSalesByPromoterAndCategory(opts: {
+    orgId: string
+    allowedVenueIds: string[]
+    from?: string
+    to?: string
+    timezone?: string
+  }): Promise<{
+    range: { from: Date; to: Date } | null
+    totalSold: number
+    promoters: Array<{
+      promoterId: string | null
+      promoterName: string
+      total: number
+      byCategory: Array<{ category: string; count: number }>
+    }>
+  }> {
+    const range = opts.from || opts.to ? parseDbDateRange(opts.from, opts.to, opts.timezone, 30) : null
+
+    const where: Prisma.SerializedItemWhereInput = {
+      ...this.orgPoolWhere(opts.orgId, opts.allowedVenueIds),
+      status: 'SOLD',
+      ...(range ? { soldAt: { gte: range.from, lte: range.to } } : {}),
+    }
+
+    const rows = await this.db.serializedItem.groupBy({
+      by: ['assignedPromoterId', 'categoryId'],
+      where,
+      _count: true,
+    })
+    if (rows.length === 0) return { range, totalSold: 0, promoters: [] }
+
+    // Resolve display names in two bulk reads (never N+1 inside the loop).
+    const promoterIds = [...new Set(rows.map(r => r.assignedPromoterId).filter((id): id is string => !!id))]
+    const categoryIds = [...new Set(rows.map(r => r.categoryId))]
+    const [staff, categories] = await Promise.all([
+      promoterIds.length
+        ? this.db.staff.findMany({ where: { id: { in: promoterIds } }, select: { id: true, firstName: true, lastName: true } })
+        : Promise.resolve([] as Array<{ id: string; firstName: string; lastName: string }>),
+      this.db.itemCategory.findMany({ where: { id: { in: categoryIds } }, select: { id: true, name: true } }),
+    ])
+    const staffName = new Map(staff.map(s => [s.id, `${s.firstName} ${s.lastName}`.trim()]))
+    const categoryName = new Map(categories.map(c => [c.id, c.name]))
+
+    // Group rows → one bucket per promoter, each with its per-type counts.
+    const byPromoter = new Map<string, { promoterId: string | null; total: number; byCategory: Map<string, number> }>()
+    let totalSold = 0
+    for (const row of rows) {
+      const count = row._count as unknown as number
+      totalSold += count
+      const key = row.assignedPromoterId ?? '__unassigned__'
+      const bucket = byPromoter.get(key) ?? { promoterId: row.assignedPromoterId, total: 0, byCategory: new Map<string, number>() }
+      bucket.total += count
+      const cat = categoryName.get(row.categoryId) ?? row.categoryId
+      bucket.byCategory.set(cat, (bucket.byCategory.get(cat) ?? 0) + count)
+      byPromoter.set(key, bucket)
+    }
+
+    const promoters = [...byPromoter.values()]
+      .map(b => ({
+        promoterId: b.promoterId,
+        // A sale with no promoter attached is real data (e.g. sold straight from
+        // the admin pool) — surface it explicitly instead of silently dropping it.
+        promoterName: b.promoterId ? (staffName.get(b.promoterId) ?? b.promoterId) : 'Sin promotor asignado',
+        total: b.total,
+        byCategory: [...b.byCategory.entries()].map(([category, count]) => ({ category, count })).sort((a, z) => z.count - a.count),
+      }))
+      .sort((a, z) => z.total - a.total)
+
+    return { range, totalSold, promoters }
   }
 }
 

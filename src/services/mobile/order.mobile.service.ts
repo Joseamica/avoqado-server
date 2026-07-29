@@ -365,57 +365,43 @@ function normalizeExternalId(externalId?: string | null): string | null {
 }
 
 /**
- * Create a new order with items (for mobile order-based payment flow)
+ * Construye las filas de `OrderItem` de una lista de items del cliente, con TODA la
+ * aritmética de dinero: precio del producto, modificadores, venta por peso
+ * (cuantizada a 3 decimales ANTES del redondeo a centavos) y descuentos por línea.
  *
- * This is called by iOS/Android before initiating payment via BLE to TPV.
- * The TPV will then complete the payment using the orderId.
+ * 🔴 EXTRAÍDO PARA COMPARTIR, NO PARA REESCRIBIR. `createOrderWithItems` y los vales
+ * por área (`areaTicket.mobile.service.ts`) DEBEN producir importes idénticos al
+ * centavo: el cliente de Culiacán migra desde un sistema cuyos totales ya cuadran con
+ * los nuestros (0.224 × 164.00 → 36.74), y dos implementaciones paralelas divergen
+ * en cuanto alguien toque una. Una sola función, un solo redondeo.
  *
- * Idempotent when the client sends `externalId` (offline-retry safety): a
- * repeated venueId+externalId returns the existing order — same contract as
- * the TPV's createOrder.
- *
- * @param venueId Venue ID (tenant isolation)
- * @param input Order creation parameters including items
- * @returns Created order with calculated totals
+ * @param fulfillmentAreaId área que estampa cada línea (vales por área §5.3). Lo
+ *   resuelve el SERVER desde `Terminal.fulfillmentAreaId`; `null`/undefined deja las
+ *   líneas sin área ("se entrega en la caja, al momento"), que es el caso de todos
+ *   los flujos que no son vales.
  */
-export async function createOrderWithItems(venueId: string, input: CreateOrderInput): Promise<CreatedOrderResponse> {
-  logger.info(
-    `📱 [ORDER.MOBILE] Creating order with ${input.items.length} items | venue=${venueId} | type=${input.orderType || 'DINE_IN'} | source=${input.source || 'AVOQADO_IOS'}`,
-  )
-
-  // Idempotency short-circuit BEFORE any validation/creation work: an offline
-  // client retrying after a lost response must get the original order back.
-  const externalId = normalizeExternalId(input.externalId)
-  if (externalId) {
-    const existingOrder = await prisma.order.findUnique({
-      where: {
-        venueId_externalId: {
-          venueId,
-          externalId,
-        },
-      },
-      include: createdOrderInclude,
-    })
-    if (existingOrder) {
-      logger.warn(`🔄 [ORDER.MOBILE] Duplicate createOrderWithItems detected (externalId=${externalId}) — returning existing order`)
-      return toCreatedOrderResponse(existingOrder)
-    }
-  }
-
-  await assertVenueSalesEnabled(venueId)
-
-  const validatedStaffId = await validateStaffVenue(input.staffId, venueId)
-
+export async function buildOrderItemsData(
+  venueId: string,
+  items: CreateOrderItemInput[],
+  fulfillmentAreaId?: string | null,
+): Promise<{
+  itemsData: any[]
+  subtotal: number
+  itemDiscountTotal: number
+  discounts: Array<{ id: string; [key: string]: any }>
+}> {
   // Validate items array
-  if (!input.items || input.items.length === 0) {
+  if (!items || items.length === 0) {
     throw new BadRequestError('At least one item is required')
   }
 
-  // Split items into product items (need DB lookup) and custom items (trust client name + unitPrice).
-  const productInputs = input.items.filter(
+  let subtotal = 0
+  let itemDiscountTotal = 0
+
+  const productInputs = items.filter(
     (item): item is CreateOrderItemInput & { productId: string } => typeof item.productId === 'string' && item.productId.length > 0,
   )
-  const customInputs = input.items.filter(item => !item.productId)
+  const customInputs = items.filter(item => !item.productId)
 
   // Fetch products and validate
   const uniqueProductIds = [...new Set(productInputs.map(item => item.productId))]
@@ -460,7 +446,7 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
   // discount must exist, belong to this venue, and be active/within its validity window +
   // usage cap — see src/services/shared/discount.service.ts). TPV rejects the whole order
   // on any invalid/foreign discountId rather than silently ignoring it; mobile mirrors that.
-  const discountIds = [...new Set(input.items.map(item => item.discountId).filter((id): id is string => !!id))]
+  const discountIds = [...new Set(items.map(item => item.discountId).filter((id): id is string => !!id))]
   const discounts = discountIds.length
     ? await prisma.discount.findMany({
         where: {
@@ -478,16 +464,11 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
 
   discounts.forEach(validateDiscountActive)
 
-  // Generate order number
-  const orderNumber = `ORD-${Date.now()}`
-
   // Calculate totals and prepare items data.
   // NOTE: Prices are treated as tax-inclusive (Mexico: IVA is already in price).
   // taxAmount is stored as 0 on items and order. Tax is not added on top of the price.
   // Item/order totals stay gross; discount reductions live in `discountAmount`
   // (same convention as TPV's Cobrar V1 flow — see order.tpv.service.ts).
-  let subtotal = 0
-  let itemDiscountTotal = 0
   const productItemsData = productInputs.map(item => {
     const product = products.find(p => p.id === item.productId)!
     const itemModifierIds = item.modifierIds || []
@@ -552,6 +533,7 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
       taxAmount: new Prisma.Decimal(0),
       total: new Prisma.Decimal(itemTotal),
       notes: item.notes || null,
+      fulfillmentAreaId: fulfillmentAreaId || null,
       modifiers: {
         create: itemModifierIds.map(modifierId => {
           const modifier = modifiers.find(m => m.id === modifierId)!
@@ -591,10 +573,60 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
       taxAmount: new Prisma.Decimal(0),
       total: new Prisma.Decimal(itemTotal),
       notes: item.notes || null,
+      fulfillmentAreaId: fulfillmentAreaId || null,
     }
   })
 
   const itemsData = [...productItemsData, ...customItemsData]
+  return { itemsData, subtotal, itemDiscountTotal, discounts }
+}
+
+/**
+ * Create a new order with items (for mobile order-based payment flow)
+ *
+ * This is called by iOS/Android before initiating payment via BLE to TPV.
+ * The TPV will then complete the payment using the orderId.
+ *
+ * Idempotent when the client sends `externalId` (offline-retry safety): a
+ * repeated venueId+externalId returns the existing order — same contract as
+ * the TPV's createOrder.
+ *
+ * @param venueId Venue ID (tenant isolation)
+ * @param input Order creation parameters including items
+ * @returns Created order with calculated totals
+ */
+export async function createOrderWithItems(venueId: string, input: CreateOrderInput): Promise<CreatedOrderResponse> {
+  logger.info(
+    `📱 [ORDER.MOBILE] Creating order with ${input.items.length} items | venue=${venueId} | type=${input.orderType || 'DINE_IN'} | source=${input.source || 'AVOQADO_IOS'}`,
+  )
+
+  // Idempotency short-circuit BEFORE any validation/creation work: an offline
+  // client retrying after a lost response must get the original order back.
+  const externalId = normalizeExternalId(input.externalId)
+  if (externalId) {
+    const existingOrder = await prisma.order.findUnique({
+      where: {
+        venueId_externalId: {
+          venueId,
+          externalId,
+        },
+      },
+      include: createdOrderInclude,
+    })
+    if (existingOrder) {
+      logger.warn(`🔄 [ORDER.MOBILE] Duplicate createOrderWithItems detected (externalId=${externalId}) — returning existing order`)
+      return toCreatedOrderResponse(existingOrder)
+    }
+  }
+
+  await assertVenueSalesEnabled(venueId)
+
+  const validatedStaffId = await validateStaffVenue(input.staffId, venueId)
+
+  const { itemsData, subtotal, itemDiscountTotal, discounts } = await buildOrderItemsData(venueId, input.items)
+
+  // Generate order number
+  const orderNumber = `ORD-${Date.now()}`
 
   // Order-level flat discount (input.discount, cents) composes additively with the
   // per-item Discount reductions above — same shape as TPV's `discountAmount =
@@ -1654,9 +1686,9 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     }
   }
 
-  if (order.paymentStatus === 'PAID') {
-    throw new BadRequestError('Order is already paid')
-  }
+  // NOTA: el guard "ya está pagada" NO se evalúa aquí sobre esta lectura. Se evalúa
+  // DENTRO de la transacción, contra una relectura fresca (ver abajo). Esta lectura
+  // sólo sirve para el 404 y para el `orderNumber` de la respuesta idempotente.
 
   // Cómo pagó el cliente. Sin `method` (clientes viejos) sigue siendo efectivo.
   const paymentMethod = input.method ?? 'CASH'
@@ -1686,137 +1718,247 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   const amountDecimal = amount / 100
   const tipDecimal = tip / 100
 
-  // Create payment and update order in transaction.
-  // 🛡️ Carrera concurrente: si dos requests con la MISMA idempotencyKey pasan
-  // el findUnique de arriba (ninguna había commiteado aún), la segunda choca
-  // en el índice único (P2002); la atrapamos y devolvemos el pago ganador —
-  // nunca creamos un segundo Payment.
-  let paymentResult
-  try {
-    paymentResult = await prisma.$transaction(async tx => {
-      // Create payment record
-      const newPayment = await tx.payment.create({
-        data: {
-          venueId,
-          orderId,
-          amount: amountDecimal,
-          tipAmount: tipDecimal,
-          method: paymentMethod,
-          status: 'COMPLETED',
-          type: 'REGULAR',
-          splitType: 'FULLPAYMENT',
-          source: paymentSource,
-          externalSource,
-          processedById: effectiveStaffId,
-          shiftId: currentShift?.id,
-          // 🛡️ Llave de idempotencia: el índice único [venueId, idempotencyKey]
-          // hace que un reintento del cliente choque (P2002) o se atrape arriba,
-          // nunca cree un segundo pago.
-          idempotencyKey: input.idempotencyKey ?? null,
-          // Cash payments have no card data or merchant account
-          merchantAccountId: null,
-          feePercentage: 0,
-          feeAmount: 0,
-          netAmount: amountDecimal + tipDecimal,
-        },
-      })
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 🔴 COBRO ATÓMICO — arregla un doble-cobro que YA estaba desplegado.
+  // ══════════════════════════════════════════════════════════════════════════════
+  //
+  // Antes: `paymentStatus` se leía FUERA de la transacción y el `Payment` se creaba
+  // DENTRO. El único guard real era el índice `[venueId, idempotencyKey]`, que sólo
+  // atrapa dos requests con la MISMA llave. Dos dispositivos generan llaves
+  // DISTINTAS, ambos leen PENDING, ambos crean un pago, y `paidAmount > total` sin
+  // que nadie se entere hasta el corte.
+  //
+  // Era estrecho mientras la orden nacía al pagar en UN dispositivo. Con la cuenta
+  // compartida entre áreas deja de serlo: 4 dispositivos conocen el mismo `orderId`
+  // POR DISEÑO, y las órdenes sin mesa no tienen guard de propiedad.
+  //
+  // Ahora: lectura + validación + transición van DENTRO de la transacción, y la
+  // transición es una CAS sobre `version` (`updateMany` que devuelve count 0 si
+  // alguien más ganó). Mismo patrón que `addItemsToOrder` en order.tpv.service.ts.
+  //
+  // ── Por qué un REINTENTO acotado y no un 409 seco ────────────────────────────
+  // Un 409 al perdedor rompería el split legítimo: dos meseros cobrando mitad y
+  // mitad a la vez. Al reintentar, el perdedor RELEE el estado ya commiteado por el
+  // ganador y recalcula sobre él:
+  //   · si la orden quedó PAID  → "Order is already paid" (UN solo Payment) ✅
+  //   · si quedó PARTIAL        → cobra el restante real, no el que leyó primero ✅
+  // Tres intentos: la contención real es de 2-4 dispositivos, no de cientos.
+  const MAX_PAYMENT_CAS_ATTEMPTS = 3
+  let paymentResult: { newPayment: any; isFullyPaid: boolean } | undefined
 
-      // Create VenueTransaction for financial tracking
-      await tx.venueTransaction.create({
-        data: {
-          venueId,
-          paymentId: newPayment.id,
-          type: 'PAYMENT',
-          grossAmount: amountDecimal + tipDecimal,
-          feeAmount: 0,
-          netAmount: amountDecimal + tipDecimal,
-          status: 'SETTLED', // Cash is immediately settled
-        },
-      })
-
-      // Create payment allocation
-      await tx.paymentAllocation.create({
-        data: {
-          paymentId: newPayment.id,
-          orderId,
-          amount: amountDecimal,
-        },
-      })
-
-      // Update order payment status.
-      // Convention: order.total = subtotal - discountAmount + tipAmount (Mexico: tax is inclusive in subtotal).
-      // Recompute total defensively in case the order was created before tip was known.
-      // CUMULATIVE across payments (split-the-bill): sum every prior COMPLETED
-      // payment on this order so N partial payments converge to PAID — mirrors
-      // updateOrderTotalsForStandalonePayment in payment.tpv.service.ts. With a
-      // single full payment previousPayments is 0 and behavior is unchanged.
-      const previousPayments = await tx.payment.findMany({
-        where: { orderId, status: 'COMPLETED', id: { not: newPayment.id } },
-        select: { amount: true, tipAmount: true },
-      })
-      const previousPaid = previousPayments.reduce((sum, p) => sum + Number(p.amount) + Number(p.tipAmount), 0)
-      const previousTips = previousPayments.reduce((sum, p) => sum + Number(p.tipAmount), 0)
-
-      const orderSubtotal = Number(order.subtotal)
-      const orderDiscount = Number(order.discountAmount || 0)
-      // 🔴 MONEY (auditoría): sin esto, cualquier pago parcial en efectivo BORRA
-      // el cobro por servicio del total y el restante deja de cobrarlo.
-      const orderServiceCharge = Number(order.serviceChargeAmount || 0)
-      const totalTip = previousTips + tipDecimal
-      const newTotal = orderSubtotal - orderDiscount + orderServiceCharge + totalTip
-      const totalPaidIncludingTip = previousPaid + amountDecimal + tipDecimal
-      const remainingAfterPayment = newTotal - totalPaidIncludingTip
-      const isFullyPaid = remainingAfterPayment <= 0.01 // float tolerance, same as TPV path
-
-      await tx.order.update({
-        where: { id: orderId },
-        data: {
-          paymentStatus: isFullyPaid ? 'PAID' : 'PARTIAL',
-          status: isFullyPaid ? 'COMPLETED' : 'PENDING',
-          remainingBalance: Math.max(0, remainingAfterPayment),
-          tipAmount: totalTip,
-          total: new Prisma.Decimal(newTotal),
-          splitType: 'FULLPAYMENT',
-        },
-      })
-
-      // Update shift totals if there's an active shift
-      if (currentShift) {
-        await tx.shift.update({
-          where: { id: currentShift.id },
-          data: {
-            totalSales: { increment: amountDecimal },
-            totalTips: { increment: tipDecimal },
-            totalOrders: { increment: 1 },
+  for (let attempt = 1; attempt <= MAX_PAYMENT_CAS_ATTEMPTS; attempt++) {
+    try {
+      paymentResult = await prisma.$transaction(async tx => {
+        // 1️⃣ RELECTURA DENTRO DE LA TRANSACCIÓN. Esta es la lectura que manda: la de
+        //    arriba pudo quedar vieja mientras validábamos staff y turno.
+        const fresh = await tx.order.findUnique({
+          where: { id: orderId, venueId },
+          select: {
+            id: true,
+            orderNumber: true,
+            paymentStatus: true,
+            subtotal: true,
+            discountAmount: true,
+            serviceChargeAmount: true,
+            version: true,
+            areaTicketCode: true,
           },
         })
-      }
+        if (!fresh) {
+          throw new NotFoundError('Order not found')
+        }
 
-      return { newPayment, isFullyPaid }
-    })
-  } catch (err: any) {
-    if (err?.code === 'P2002' && input.idempotencyKey) {
-      const winner = await prisma.payment.findUnique({
-        where: { venueId_idempotencyKey: { venueId, idempotencyKey: input.idempotencyKey } },
-        include: { receipts: true },
+        // 2️⃣ VALIDACIÓN DENTRO DE LA TRANSACCIÓN (era el bug: estaba fuera).
+        if (fresh.paymentStatus === 'PAID') {
+          throw new BadRequestError('Order is already paid')
+        }
+
+        // 3️⃣ Suma acumulada de pagos previos — split-the-bill. Leída aquí dentro
+        //    para que refleje al ganador de una carrera anterior.
+        const previousPayments = await tx.payment.findMany({
+          where: { orderId, status: 'COMPLETED' },
+          select: { amount: true, tipAmount: true },
+        })
+        const previousPaid = previousPayments.reduce((sum, p) => sum + Number(p.amount) + Number(p.tipAmount), 0)
+        const previousTips = previousPayments.reduce((sum, p) => sum + Number(p.tipAmount), 0)
+
+        // Convention: order.total = subtotal - discountAmount + serviceCharge + tipAmount
+        // (Mexico: tax is inclusive in subtotal). Recompute defensively in case the
+        // order was created before tip was known.
+        const orderSubtotal = Number(fresh.subtotal)
+        const orderDiscount = Number(fresh.discountAmount || 0)
+        // 🔴 MONEY (auditoría): sin esto, cualquier pago parcial en efectivo BORRA
+        // el cobro por servicio del total y el restante deja de cobrarlo.
+        const orderServiceCharge = Number(fresh.serviceChargeAmount || 0)
+        const totalTip = previousTips + tipDecimal
+        const newTotal = orderSubtotal - orderDiscount + orderServiceCharge + totalTip
+        const totalPaidIncludingTip = previousPaid + amountDecimal + tipDecimal
+        const remainingAfterPayment = newTotal - totalPaidIncludingTip
+        const isFullyPaid = remainingAfterPayment <= 0.01 // float tolerance, same as TPV path
+
+        // 4️⃣ TRANSICIÓN CONDICIONAL (CAS). `updateMany` con la versión leída: si otro
+        //    dispositivo cobró entre la relectura y este write, PostgreSQL reevalúa el
+        //    WHERE contra la fila nueva, no coincide, y count = 0. Nada se escribió.
+        const transition = await tx.order.updateMany({
+          where: { id: orderId, venueId, version: fresh.version, paymentStatus: { in: ['PENDING', 'PARTIAL'] } },
+          data: {
+            paymentStatus: isFullyPaid ? 'PAID' : 'PARTIAL',
+            status: isFullyPaid ? 'COMPLETED' : 'PENDING',
+            remainingBalance: Math.max(0, remainingAfterPayment),
+            tipAmount: totalTip,
+            total: new Prisma.Decimal(newTotal),
+            splitType: 'FULLPAYMENT',
+            version: { increment: 1 },
+            // Vales por área: al quedar pagada, la cuenta deja de estar reclamada por
+            // la caja. El claim ya no significa nada y arrastrarlo confundiría la
+            // pantalla de "vales pendientes".
+            ...(isFullyPaid && fresh.areaTicketCode ? { claimedByTerminalId: null, claimedAt: null } : {}),
+          },
+        })
+        if (transition.count === 0) {
+          const conflict: any = new Error('PAY_CASH_CAS_LOST')
+          conflict.code = 'PAY_CASH_CAS_LOST'
+          throw conflict
+        }
+
+        // 5️⃣ El Payment se crea DESPUÉS de ganar la transición. Si la CAS falla, este
+        //    insert nunca ocurre — que es exactamente lo que evita el segundo cobro.
+        const newPayment = await tx.payment.create({
+          data: {
+            venueId,
+            orderId,
+            amount: amountDecimal,
+            tipAmount: tipDecimal,
+            method: paymentMethod,
+            status: 'COMPLETED',
+            type: 'REGULAR',
+            splitType: 'FULLPAYMENT',
+            source: paymentSource,
+            externalSource,
+            processedById: effectiveStaffId,
+            shiftId: currentShift?.id,
+            // 🛡️ Llave de idempotencia: el índice único [venueId, idempotencyKey]
+            // hace que un reintento del cliente choque (P2002) o se atrape arriba,
+            // nunca cree un segundo pago.
+            idempotencyKey: input.idempotencyKey ?? null,
+            // Cash payments have no card data or merchant account
+            merchantAccountId: null,
+            feePercentage: 0,
+            feeAmount: 0,
+            netAmount: amountDecimal + tipDecimal,
+          },
+        })
+
+        // Create VenueTransaction for financial tracking
+        await tx.venueTransaction.create({
+          data: {
+            venueId,
+            paymentId: newPayment.id,
+            type: 'PAYMENT',
+            grossAmount: amountDecimal + tipDecimal,
+            feeAmount: 0,
+            netAmount: amountDecimal + tipDecimal,
+            status: 'SETTLED', // Cash is immediately settled
+          },
+        })
+
+        // Create payment allocation
+        await tx.paymentAllocation.create({
+          data: {
+            paymentId: newPayment.id,
+            orderId,
+            amount: amountDecimal,
+          },
+        })
+
+        // Update shift totals if there's an active shift
+        if (currentShift) {
+          await tx.shift.update({
+            where: { id: currentShift.id },
+            data: {
+              totalSales: { increment: amountDecimal },
+              totalTips: { increment: tipDecimal },
+              totalOrders: { increment: 1 },
+            },
+          })
+        }
+
+        return { newPayment, isFullyPaid }
       })
-      if (winner) {
-        logger.info(`🔄 [ORDER.MOBILE] Carrera idempotente (P2002) — devuelvo el pago ganador ${winner.id}`)
-        return {
-          paymentId: winner.id,
-          orderId,
-          orderNumber: order.orderNumber,
-          amount: Number(winner.amount) * 100,
-          tipAmount: Number(winner.tipAmount) * 100,
-          method: winner.method as CashPaymentResponse['method'],
-          status: 'COMPLETED',
-          digitalReceipt: winner.receipts?.[0]
-            ? mapDigitalReceiptResponse(winner.receipts[0], await resolveAutofacturaAvailable(orderId))
-            : null,
+      break // ganamos la transición
+    } catch (err: any) {
+      // 🛡️ Carrera IDEMPOTENTE: si dos requests con la MISMA idempotencyKey pasan
+      // el findUnique de arriba (ninguna había commiteado aún), la segunda choca
+      // en el índice único (P2002); la atrapamos y devolvemos el pago ganador —
+      // nunca creamos un segundo Payment. ESTE CAMINO SE CONSERVA TAL CUAL.
+      if (err?.code === 'P2002' && input.idempotencyKey) {
+        const winner = await prisma.payment.findUnique({
+          where: { venueId_idempotencyKey: { venueId, idempotencyKey: input.idempotencyKey } },
+          include: { receipts: true },
+        })
+        if (winner) {
+          logger.info(`🔄 [ORDER.MOBILE] Carrera idempotente (P2002) — devuelvo el pago ganador ${winner.id}`)
+          return {
+            paymentId: winner.id,
+            orderId,
+            orderNumber: order.orderNumber,
+            amount: Number(winner.amount) * 100,
+            tipAmount: Number(winner.tipAmount) * 100,
+            method: winner.method as CashPaymentResponse['method'],
+            status: 'COMPLETED',
+            digitalReceipt: winner.receipts?.[0]
+              ? mapDigitalReceiptResponse(winner.receipts[0], await resolveAutofacturaAvailable(orderId))
+              : null,
+          }
         }
       }
+
+      // Perdimos la CAS: otro dispositivo cobró esta orden mientras calculábamos.
+      // Reintentamos releyendo — el propio guard "ya está pagada" de la relectura
+      // resuelve el caso del doble cobro completo.
+      if (err?.code === 'PAY_CASH_CAS_LOST') {
+        // 🛡️ Antes de reintentar, ¿existe ya un pago con NUESTRA llave? Puede pasar
+        // si nuestro propio reintento anterior sí commiteó y la respuesta se perdió.
+        if (input.idempotencyKey) {
+          const mine = await prisma.payment.findUnique({
+            where: { venueId_idempotencyKey: { venueId, idempotencyKey: input.idempotencyKey } },
+            include: { receipts: true },
+          })
+          if (mine) {
+            return {
+              paymentId: mine.id,
+              orderId,
+              orderNumber: order.orderNumber,
+              amount: Number(mine.amount) * 100,
+              tipAmount: Number(mine.tipAmount) * 100,
+              method: mine.method as CashPaymentResponse['method'],
+              status: 'COMPLETED',
+              digitalReceipt: mine.receipts?.[0]
+                ? mapDigitalReceiptResponse(mine.receipts[0], await resolveAutofacturaAvailable(orderId))
+                : null,
+            }
+          }
+        }
+        if (attempt < MAX_PAYMENT_CAS_ATTEMPTS) {
+          logger.warn(
+            `⚠️ [ORDER.MOBILE] Carrera de cobro en la orden ${orderId} (intento ${attempt}/${MAX_PAYMENT_CAS_ATTEMPTS}) — releo y recalculo`,
+          )
+          continue
+        }
+        // Agotados los intentos: 409 explícito. El cliente reintenta con la MISMA
+        // llave y cae en el camino idempotente, o descubre que ya está pagada.
+        throw new ConflictError(
+          'La cuenta cambió mientras se cobraba (otro dispositivo la está cobrando). Vuelve a intentar.',
+          'ORDER_PAYMENT_CONFLICT',
+        )
+      }
+      throw err
     }
-    throw err
+  }
+
+  if (!paymentResult) {
+    // Inalcanzable: el bucle o devuelve, o asigna, o lanza. Guard para el tipo.
+    throw new ConflictError('No se pudo registrar el cobro. Vuelve a intentar.', 'ORDER_PAYMENT_CONFLICT')
   }
   const { newPayment: payment, isFullyPaid: orderFullyPaid } = paymentResult
 

@@ -621,7 +621,9 @@ describe('order.mobile.service', () => {
     prismaMock.payment.create.mockResolvedValue({ id: 'payment-1' })
     prismaMock.venueTransaction.create.mockResolvedValue({ id: 'vtx-1' })
     prismaMock.paymentAllocation.create.mockResolvedValue({ id: 'alloc-1' })
-    prismaMock.order.update.mockResolvedValue({ id: 'order-1' })
+    // Cobro atómico (§5.4): la transición de pago es un `updateMany` CONDICIONAL
+    // (CAS sobre `version`) evaluado DENTRO de la transacción, no un `update` ciego.
+    prismaMock.order.updateMany.mockResolvedValue({ count: 1 })
 
     await payCashOrder('venue-1', 'order-1', {
       amount: 9000,
@@ -629,14 +631,15 @@ describe('order.mobile.service', () => {
       staffId: 'staff-1',
     })
 
-    expect(prismaMock.order.update).toHaveBeenCalledWith(
+    expect(prismaMock.order.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: 'order-1' },
+        where: expect.objectContaining({ id: 'order-1', venueId: 'venue-1', paymentStatus: { in: ['PENDING', 'PARTIAL'] } }),
         data: expect.objectContaining({
           paymentStatus: 'PAID',
           status: 'COMPLETED',
           remainingBalance: 0,
           total: new Decimal(90),
+          version: { increment: 1 },
         }),
       }),
     )
@@ -669,12 +672,12 @@ describe('order.mobile.service', () => {
     prismaMock.payment.create.mockResolvedValue({ id: 'payment-1' })
     prismaMock.venueTransaction.create.mockResolvedValue({ id: 'vtx-1' })
     prismaMock.paymentAllocation.create.mockResolvedValue({ id: 'alloc-1' })
-    prismaMock.order.update.mockResolvedValue({ id: 'order-1' })
+    prismaMock.order.updateMany.mockResolvedValue({ count: 1 })
 
     // First half: no prior payments → PARTIAL with $50 remaining.
     prismaMock.payment.findMany.mockResolvedValue([])
     await payCashOrder('venue-1', 'order-1', { amount: 5000, tip: 0, staffId: 'staff-1' })
-    expect(prismaMock.order.update).toHaveBeenLastCalledWith(
+    expect(prismaMock.order.updateMany).toHaveBeenLastCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           paymentStatus: 'PARTIAL',
@@ -688,7 +691,7 @@ describe('order.mobile.service', () => {
     prismaMock.order.findUnique.mockResolvedValue({ ...orderRow, paymentStatus: 'PARTIAL' })
     prismaMock.payment.findMany.mockResolvedValue([{ amount: new Decimal(50), tipAmount: new Decimal(0) }])
     await payCashOrder('venue-1', 'order-1', { amount: 5000, tip: 0, staffId: 'staff-1' })
-    expect(prismaMock.order.update).toHaveBeenLastCalledWith(
+    expect(prismaMock.order.updateMany).toHaveBeenLastCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           paymentStatus: 'PAID',

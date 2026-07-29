@@ -258,6 +258,11 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   DeliveryOrderEvent: 'Orders, KDS & Cash',
   DeliveryActivationRequest: 'Orders, KDS & Cash',
   PosSyncIntent: 'Orders, KDS & Cash',
+  // Vales por área (AREA_TICKETS): cuenta compartida entre áreas emisoras + entrega.
+  // Cuelgan de Order/OrderItem/PrintStation, por eso van con sus hermanos de orden.
+  FulfillmentArea: 'Orders, KDS & Cash',
+  OrderFulfillment: 'Orders, KDS & Cash',
+  OrderFulfillmentLine: 'Orders, KDS & Cash',
 
   // 9. Payments & Fees
   Payment: 'Payments & Fees',

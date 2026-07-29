@@ -40,6 +40,19 @@ export const PREMIUM_ONLY_CODES = [
   // para PREVENIR el doble-abre en vez de detectarlo al reconectar. Solo tiene
   // sentido con varios dispositivos — el perfil que ya paga Premium.
   'OFFLINE_LAN_HUB',
+  // Báscula por USB-serial (vales por área, 2026-07-28): driver de trama real
+  // (estable/inestable, neto/bruto, sobrecarga), no el parser de captura manual.
+  // Premium porque va con kit certificado e INSTALACIÓN: una sola combinación
+  // probada (Rhino BAR-8RS + adaptador concreto + Sunmi D3) antes de prometer
+  // chipsets genéricos. El riesgo principal es el baud/trama, no el software.
+  //
+  // 🔴 AQUÍ VA SÓLO ESTE CÓDIGO DE LOS TRES DEL SPEC. `AREA_TICKETS` y
+  // `VARIABLE_WEIGHT_BARCODE` son **PRO**, y PRO es BLANKET: esta lista sólo
+  // enumera los diferenciadores PREMIUM, así que meter un código PRO aquí lo
+  // volvería Premium y le quitaría a los venues Pro algo que ya les vendimos.
+  // El test `tests/unit/services/access/areaTicketsTierMirror.test.ts` falla si
+  // alguien los agrega.
+  'SCALE_INTEGRATION',
 ] as const
 
 /**

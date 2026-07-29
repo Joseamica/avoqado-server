@@ -22,8 +22,12 @@ export type GetTerminalsQuery = {
   statuses?: string
   types?: string
   versions?: string
+  /** Clase de aparato (device registry): PHONE, TABLET, HANDHELD_POS… */
+  formFactors?: string
   connections?: string
   activations?: string
+  /** provisioned | selfRegistered — hardware dado de alta por admin vs auto-registrado. */
+  origins?: string
   search?: string
 }
 

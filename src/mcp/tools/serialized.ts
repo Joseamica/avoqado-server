@@ -400,6 +400,43 @@ export function registerSerializedTools(server: McpServer, scope: McpScope) {
   )
 
   server.tool(
+    'serialized_sales_by_promoter',
+    'Desglose de SIMs VENDIDAS por PROMOTOR y por TIPO/categoría de SIM (la tabla "promotor × tipo de SIM"). Responde "¿qué tipo de SIM vendió cada promotor?", "detalle de SIM por promotor", "corte por promotor y tipo". Opcionalmente filtra por rango de fechas (días locales del venue). Cubre las tiendas de la organización MÁS el pool org-level. Este desglose SÍ existe: cada SIM guarda su categoría y el promotor que la traía, y ese vínculo se conserva tras la venta — usa ESTE tool en vez de listar SIMs una por una con list_serialized_items. Solo venues con SERIALIZED_INVENTORY. Pass venueId (cualquier venue de la org — para el gate del módulo y resolver la org).',
+    {
+      venueId: z.string().describe('Venue (must be in your scope) — for the module gate + org resolution'),
+      from: z.string().optional().describe('Fecha inicial YYYY-MM-DD (día local del venue). Omitir = todas las ventas históricas'),
+      to: z.string().optional().describe('Fecha final YYYY-MM-DD (día local del venue, inclusive)'),
+    },
+    async ({ venueId, from, to }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('inventory:read', venueId)
+      if (!(await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY))) {
+        return text({ ok: false, moduleRequired: true, error: SERIALIZED_OFF_MSG })
+      }
+      const orgId = scope.perVenueAccess.get(venueId)?.organizationId
+      if (!orgId) return text({ ok: false, error: 'No pude resolver la organización de este venue.' })
+
+      // Venue-local calendar days (never a bare new Date('YYYY-MM-DD') — runtime-tz trap).
+      const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+      const result = await serializedInventoryService.getOrgSalesByPromoterAndCategory({
+        orgId,
+        allowedVenueIds: scope.allowedVenueIds,
+        from,
+        to,
+        timezone: venue?.timezone,
+      })
+
+      return text({
+        orgId,
+        range: result.range ? { from: result.range.from.toISOString(), to: result.range.to.toISOString() } : null,
+        totalSold: result.totalSold,
+        promoterCount: result.promoters.length,
+        promoters: result.promoters,
+      })
+    },
+  )
+
+  server.tool(
     'serialized_low_stock',
     'Alerta de SIMs por acabarse por CATEGORÍA/tipo, según el mínimo configurado por tienda (StockAlertConfig). Responde "¿qué tipo de SIM se me está acabando?". Solo venues con SERIALIZED_INVENTORY. Pass venueId. Este es el equivalente, para inventario serializado (SIMs), de low_stock — low_stock NO cubre SIMs.',
     { venueId: z.string().describe('Venue (must be in your scope)') },

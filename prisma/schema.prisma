@@ -481,6 +481,11 @@ model Venue {
   printStations PrintStation[]
   printJobs     PrintJob[]
 
+  // ==========================================
+  // Vales por área (AREA_TICKETS) — cuenta compartida entre áreas emisoras
+  // ==========================================
+  fulfillmentAreas FulfillmentArea[]
+
   // Per-staff onboarding/tour state records scoped to this venue
   staffOnboardingStates StaffOnboardingState[]
 
@@ -822,6 +827,10 @@ model Staff {
   activities        ActivityLog[]
   reviewsReceived   Review[]
   orderActions      OrderAction[] // Order modifications performed by this staff member
+
+  /// Entregas de vales por área ejecutadas por esta persona (AREA_TICKETS §5.5) —
+  /// es el "por Rosa" que ve el área al reintentar una entrega ya hecha.
+  fulfillmentsDelivered OrderFulfillment[] @relation("OrderFulfillmentStaff")
 
   // Notifications
   notifications           Notification[]
@@ -2796,11 +2805,55 @@ model Order {
   // Facturación CFDI 4.0
   cfdis Cfdi[]
 
+  // ==========================================
+  // VALES POR ÁREA (AREA_TICKETS) — cuenta compartida entre áreas emisoras
+  // ==========================================
+  // Spec: docs/superpowers/specs/2026-07-28-vales-por-area-y-bascula-design.md §5.1/§5.4
+  //
+  // Todo ADITIVO y nullable: una orden normal (mostrador, mesa, delivery) deja los
+  // tres campos en null y NADA cambia para ella. Sólo las cuentas abiertas desde un
+  // área los usan.
+  //
+  /// Código impreso en el papelito del área. Formato `9 PP NNNNNN C` (10 dígitos):
+  /// `9` = espacio de nombres propio (10 dígitos ≠ EAN-8/UPC-A/EAN-13, así el
+  /// escáner nunca lo confunde con un producto), `PP` = partición del dispositivo,
+  /// `NNNNNN` = contador MONÓTONO del dispositivo (nunca se reinicia — sin reinicio
+  /// diario no existe `businessDay` ni el bug de "el vale de ayer abre la cuenta de
+  /// hoy"), `C` = verificador GS1 mod-10.
+  ///
+  /// La unicidad es `[venueId, areaTicketCode]` PARA SIEMPRE — es lo que permite que
+  /// la ruta reciba sólo `:code` y resuelva sin ambigüedad.
+  areaTicketCode String?
+
+  /// Terminal (caja) que reclamó la cuenta para cobrar — estado CHECKOUT_CLAIMED de
+  /// §5.4. Mientras el claim está VIVO las áreas no pueden agregar renglones: sin
+  /// esto el área suma jamón mientras la caja cobra y el total se mueve bajo los pies
+  /// del cajero.
+  claimedByTerminalId String?
+  claimedByTerminal   Terminal? @relation("OrderClaimedByTerminal", fields: [claimedByTerminalId], references: [id], onDelete: SetNull)
+
+  /// Cuándo se reclamó. El claim CADUCA SOLO a los 5 minutos (ver
+  /// `AREA_TICKET_CLAIM_TTL_MS`): una caja que se cuelga no puede secuestrar la
+  /// cuenta para siempre.
+  ///
+  /// 🔴 El estado de la cuenta (OPEN / CHECKOUT_CLAIMED / ALREADY_PAID / DELIVERED /
+  /// CANCELLED) NO se persiste como columna: se DERIVA de las fuentes de verdad que
+  /// ya existen (`paymentStatus`, `status`, filas de `OrderFulfillment`, y este
+  /// claim) en `deriveAreaTicketState()`. Una columna de estado paralela se
+  /// desincroniza en cuanto un cobro con tarjeta, un reembolso o una cancelación
+  /// pasan por otra ruta — y entonces el área entrega producto de una cuenta no
+  /// pagada. Una sola fuente por aspecto.
+  claimedAt DateTime?
+
+  /// Entregas por área (§5.5). Renglón COMPLETO, sin parcialidad.
+  fulfillments OrderFulfillment[]
+
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   completedAt DateTime?
 
   @@unique([venueId, externalId])
+  @@unique([venueId, areaTicketCode])
   @@index([venueId])
   @@index([shiftId])
   @@index([status])
@@ -2912,6 +2965,25 @@ model OrderItem {
   printedAt      DateTime?
 
   // ==========================================
+  // VALES POR ÁREA (AREA_TICKETS) — §5.3
+  // ==========================================
+  /// AUTORIDAD de "de quién es este renglón". NO se deduce de `printStationId`:
+  /// ése es un espejo DERIVADO de impresión, no autoridad de área.
+  ///
+  /// Lo pone el SERVER desde `Terminal.fulfillmentAreaId` de la terminal que envía el
+  /// renglón — **nunca** desde el payload del cliente, que es manipulable.
+  ///
+  /// 🔴 `null` es A PROPÓSITO y significa "línea de caja: se entrega al momento"
+  /// (papas, refrescos). NO se inventa un área sintética "Caja": sería una entidad
+  /// que nadie configura y que aparecería en la lista de pendientes de las 3 áreas
+  /// reales. La pantalla de entrega ignora estas líneas.
+  fulfillmentAreaId String?
+  fulfillmentArea   FulfillmentArea? @relation(fields: [fulfillmentAreaId], references: [id], onDelete: SetNull)
+
+  /// Entregas que cubren esta línea (§5.5). Renglón COMPLETO, sin parcialidad.
+  fulfillmentLines OrderFulfillmentLine[]
+
+  // ==========================================
   // SERIALIZED ITEM - Relation for unique barcode items
   // An OrderItem has Product OR SerializedItem, never both.
   // When it's SerializedItem, price comes from unitPrice (captured at sale).
@@ -2929,6 +3001,7 @@ model OrderItem {
   @@index([appliedDiscountId])
   @@index([externalId]) // ✅ NUEVO
   @@index([syncStatus]) // ✅ NUEVO
+  @@index([fulfillmentAreaId]) // pantalla "vales pendientes" por área
 }
 
 // ==========================================
@@ -3637,6 +3710,39 @@ model Terminal {
   modelIdentifier String? // identificador CRUDO del fabricante: "iPhone16,2", "SM-X710", "A910S". Se guarda para poder re-mapear a nombre comercial sin release de app.
   osVersion       String? // "iOS 17.2", "Android 14". Denormalizado desde TerminalHealth para los POS que no mandan health completo.
 
+  // 🆕 VALES POR ÁREA (AREA_TICKETS, 2026-07-28) — §5.2, §5.3
+  //
+  /// El BINDING que decide de quién es cada renglón: los `OrderItem` que manda esta
+  /// terminal se estampan con ESTA área. `null` = terminal de caja → sus líneas van
+  /// con `OrderItem.fulfillmentAreaId = null` ("se entrega al momento").
+  fulfillmentAreaId String?
+  fulfillmentArea   FulfillmentArea? @relation(fields: [fulfillmentAreaId], references: [id], onDelete: SetNull)
+
+  /// Partición del dispositivo (10..99) — los dos dígitos `PP` del código de vale.
+  /// La asigna el SERVER transaccionalmente en `POST /mobile/devices/partition`
+  /// (el registro pasivo de arriba es sólo eso: pasivo, y no devuelve nada al
+  /// cliente). Sin asignación transaccional + este índice único, dos dispositivos
+  /// pueden acuñar la MISMA secuencia y dos clientes distintos comparten cuenta.
+  ///
+  /// 🔴 Las particiones NO se reciclan. Una reinstalación de Android borra el
+  /// `deviceId` (allowBackup=false) y el aparato vuelve como Terminal nueva pidiendo
+  /// partición nueva; reusar el número de la vieja haría que un vale impreso ayer
+  /// resuelva la cuenta de otro cliente hoy. 90 particiones alcanzan para años en un
+  /// local de 4 terminales.
+  partition Int?
+
+  /// Mayor contador (`NNNNNN`) ya visto para esta partición. El contador vive en el
+  /// dispositivo, pero el server guarda el máximo para detectar un RETROCESO
+  /// (restore de iOS que revive un `UserDefaults` viejo) y rechazarlo con
+  /// `AREA_CODE_REPLAY` en vez de acuñar dos veces el mismo código.
+  areaTicketLastCounter Int @default(0)
+
+  /// Cuentas que esta terminal (caja) tiene reclamadas para cobrar.
+  claimedOrders Order[] @relation("OrderClaimedByTerminal")
+
+  /// Entregas ejecutadas desde esta terminal (§5.5).
+  fulfillments OrderFulfillment[] @relation("OrderFulfillmentTerminal")
+
   reviews Review[] // ✅ LÍNEA AGREGADA
 
   promoterLocationPings PromoterLocationPing[] // device-centric geolocation pings
@@ -3688,6 +3794,10 @@ model Terminal {
   // 2 renglones, uno por venue. Square hace lo mismo al fijar dispositivos a una location.
   // Por eso la unicidad es [venueId, deviceUid], NO deviceUid global.
   @@unique([venueId, deviceUid])
+  // Vales por área: dos dispositivos del mismo venue JAMÁS comparten partición.
+  // Nace NULL en todas las filas existentes y PostgreSQL trata los NULL como
+  // distintos entre sí, así que el índice se aplica sin colisionar.
+  @@unique([venueId, partition])
   @@index([venueId])
   @@index([status])
   @@index([activationCode]) // Fast lookup for activation code validation
@@ -3696,6 +3806,7 @@ model Terminal {
   @@index([terminalOrderId])
   @@index([venueId, selfRegistered]) // separar hardware provisionado de dispositivos auto-registrados en la lista
   @@index([venueId, formFactor]) // filtro por tipo de aparato en el dashboard
+  @@index([fulfillmentAreaId]) // terminales de un área
 }
 
 // ==========================================
@@ -11435,11 +11546,131 @@ model PrintStation {
   orderItems OrderItem[]
   printJobs  PrintJob[]
 
+  /// Áreas de entrega que imprimen su vale en esta estación (AREA_TICKETS).
+  fulfillmentAreas FulfillmentArea[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@unique([venueId, name])
   @@index([venueId])
+}
+
+// ============================================================================
+// VALES POR ÁREA (AREA_TICKETS) — cuenta compartida entre áreas emisoras
+// ============================================================================
+// Spec: docs/superpowers/specs/2026-07-28-vales-por-area-y-bascula-design.md §5
+//
+// El flujo: el área 1 atiende, ABRE la cuenta e imprime un vale con su código y se
+// queda con el producto. Las áreas 2..N escanean ese vale y AGREGAN a la MISMA
+// cuenta. La caja escanea, cobra UNA vez. El cliente vuelve al área con el ticket
+// pagado, el área escanea, ve SÓLO SUS renglones, entrega y marca ENTREGADO.
+//
+// 🔴 El MVP es ONLINE (§1.2). No hay intents de sincronización para este flujo: el
+// reducer offline está gateado completo por TABLE_SERVICE y el hub LAN no replica
+// cuentas. Vender "vales offline" hoy sería vender algo que no está construido.
+
+/// Un área emisora del local: cremería, panadería, cafetería. Entidad PROPIA, no
+/// derivada de la impresión — `OrderItem.printStationId` es un espejo de impresión y
+/// no puede ser la autoridad de "de quién es este renglón" (§5.3).
+model FulfillmentArea {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  /// Nombre que ve el operador ("Cremería", "Panadería"). Único por venue.
+  name String
+
+  /// Cómo trabaja el área (§5.6). El texto que ve el operador NUNCA es el enum:
+  /// HOLD_UNTIL_PAID se muestra como "Lo guardamos hasta que pague".
+  fulfillmentMode FulfillmentMode @default(IMMEDIATE)
+
+  active       Boolean @default(true)
+  displayOrder Int     @default(0)
+
+  /// Estación donde imprime su vale. Opcional: sin ella el motor de impresión cae a
+  /// su ruteo normal — un área sin estación configurada NUNCA debe dejar de imprimir
+  /// (ver `.claude/rules/offline-first-y-hub-lan.md` §4.1a: en este dominio el
+  /// fail-safe no puede ser "no imprimir").
+  printStationId String?
+  printStation   PrintStation? @relation(fields: [printStationId], references: [id], onDelete: SetNull)
+
+  /// Terminales enlazadas a esta área — el binding que estampa `fulfillmentAreaId`
+  /// en cada renglón que mandan.
+  terminals Terminal[]
+
+  orderItems   OrderItem[]
+  fulfillments OrderFulfillment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([venueId, name])
+  @@index([venueId, active])
+}
+
+/// Entrega de TODOS los renglones de UN área en UNA cuenta. Una fila por
+/// (orden, área) — el `@@unique` es lo que hace el endpoint idempotente: el segundo
+/// intento devuelve *"ya entregado a las 14:31 por Rosa"*, no un error.
+///
+/// 🔴 SIN PARCIALIDAD, a propósito (§5.5). No hay `deliveredQty` ni estado PARTIAL:
+/// el modelo simple no los soporta (un solo `deliveredAt`/actor, sin distinguir
+/// reintento de segunda entrega, sin definir qué significa "cantidad" en una línea
+/// pesada). Hacerlo bien pide un `FulfillmentEvent` append-only con llave de
+/// idempotencia — fase 2. Prometer entrega parcial a medias es peor que no tenerla.
+model OrderFulfillment {
+  id String @id @default(cuid())
+
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  /// El área que entregó. NO nullable: las líneas de caja (`OrderItem.fulfillmentAreaId
+  /// = null`) se entregan al momento y no generan fila de entrega. Si fuera nullable,
+  /// el `@@unique` no serviría de nada para ellas — en PostgreSQL los NULL son
+  /// distintos entre sí, así que la idempotencia se perdería en silencio.
+  fulfillmentAreaId String
+  fulfillmentArea   FulfillmentArea @relation(fields: [fulfillmentAreaId], references: [id], onDelete: Restrict)
+
+  deliveredAt        DateTime @default(now())
+  deliveredByStaffId String?
+  deliveredByStaff   Staff?   @relation("OrderFulfillmentStaff", fields: [deliveredByStaffId], references: [id], onDelete: SetNull)
+
+  terminalId String?
+  terminal   Terminal? @relation("OrderFulfillmentTerminal", fields: [terminalId], references: [id], onDelete: SetNull)
+
+  lines OrderFulfillmentLine[]
+
+  createdAt DateTime @default(now())
+
+  @@unique([orderId, fulfillmentAreaId])
+  @@index([fulfillmentAreaId, deliveredAt])
+}
+
+/// Qué renglones cubrió una entrega. Congela el alcance: si el área agrega producto
+/// DESPUÉS de entregar (no debería, la cuenta ya está pagada), se ve como líneas sin
+/// cubrir en vez de desaparecer del reporte "pagado y no entregado".
+model OrderFulfillmentLine {
+  id String @id @default(cuid())
+
+  fulfillmentId String
+  fulfillment   OrderFulfillment @relation(fields: [fulfillmentId], references: [id], onDelete: Cascade)
+
+  orderItemId String
+  orderItem   OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+
+  @@unique([fulfillmentId, orderItemId])
+  @@index([orderItemId])
+}
+
+/// Cómo trabaja un área (§5.6). Default `IMMEDIATE`.
+enum FulfillmentMode {
+  /// Entrega al momento, no guarda nada. Ej: pan que te llevas.
+  IMMEDIATE
+  /// Prepara YA y GUARDA el producto hasta que el cliente vuelve con el ticket
+  /// pagado. Ej: cremería — es el caso que motivó todo esto.
+  HOLD_UNTIL_PAID
+  /// Prepara cuando el cliente regresa ya pagado. Ej: cafetería.
+  PREPARE_ON_PAID
 }
 
 /// Cloud replica of the gateway's durable outbox. `id` is created BY THE GATEWAY
@@ -11485,6 +11716,9 @@ enum PrintJobType {
   EXPO
   TEST
   CASH_CLOSE
+  /// Vale de área (AREA_TICKETS, §6): el papelito con el código de barras que el
+  /// área imprime al abrir/agregar a la cuenta. Es el token que trae el cliente.
+  AREA_TICKET
 }
 
 enum PrintJobReason {
