@@ -236,6 +236,16 @@ export async function getOrder(
           number: true,
         },
       },
+      // 🆕 Itemized check breakdown (Plan B gap fix, 2026-07-29): the TPV "Mesas"
+      // module needs to show discounts/service charges, not just the flat
+      // `discountAmount`/`serviceChargeAmount` totals. Mirrors the exact include
+      // shape `order.mobile.service.ts::getOrder` already uses (same Prisma
+      // relation names, same field selection) — additive only, no existing
+      // field removed or renamed.
+      orderDiscounts: {
+        select: { id: true, name: true, amount: true },
+      },
+      serviceCharges: true,
     },
   })
 

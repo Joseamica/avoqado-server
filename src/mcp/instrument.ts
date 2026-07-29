@@ -75,8 +75,32 @@ async function recordMcpCall(row: {
  * everything the server itself sees.
  */
 export function instrumentTools(server: McpServer, ctx: ToolCallContext): void {
-  const original = server.tool.bind(server) as unknown as ToolFn
-  const patched: ToolFn = (...toolArgs: unknown[]) => {
+  // Patch BOTH registration APIs. `tool()` (legacy) and `registerTool()` (modern)
+  // are INDEPENDENT in the SDK — each calls `_createRegisteredTool()` directly, so
+  // neither delegates to the other. That means (a) patching both is safe (no
+  // double-wrapping / double audit rows), and (b) patching only `tool()` would let
+  // any future `registerTool()` tool — e.g. what MCP Apps' registerAppTool wraps —
+  // register with ZERO logging and ZERO McpToolCall rows: invisible to the 12h
+  // audit, failing silently. All 221 tools use `tool()` today; this keeps the
+  // audit airtight the day one doesn't.
+  const patchMethod = (method: 'tool' | 'registerTool'): void => {
+    const host = server as unknown as Record<string, unknown>
+    if (typeof host[method] !== 'function') return // not on this SDK version → nothing to patch
+    const original = (host[method] as ToolFn).bind(server) as ToolFn
+    host[method] = makePatched(original, ctx)
+  }
+  patchMethod('tool')
+  patchMethod('registerTool')
+}
+
+/**
+ * Build the logging/persisting wrapper around one registration function.
+ * Works for both `tool(name, ...args, cb)` and `registerTool(name, config, cb)`:
+ * in BOTH signatures the tool name is the FIRST argument and the handler is the
+ * LAST, which is all this needs to know.
+ */
+function makePatched(original: ToolFn, ctx: ToolCallContext): ToolFn {
+  return (...toolArgs: unknown[]) => {
     const name = typeof toolArgs[0] === 'string' ? toolArgs[0] : 'unknown'
     const cbIndex = toolArgs.length - 1
     const cb = toolArgs[cbIndex] as ToolFn
@@ -107,5 +131,4 @@ export function instrumentTools(server: McpServer, ctx: ToolCallContext): void {
     toolArgs[cbIndex] = wrapped
     return original(...toolArgs)
   }
-  ;(server as unknown as { tool: ToolFn }).tool = patched
 }

@@ -583,3 +583,19 @@ export function getSqlDateFilter(period: RelativeDateRange, columnName: string =
  * const percentageChange = ((currentSales - previousSales) / previousSales) * 100
  * ```
  */
+
+/**
+ * Hora local del VENUE ("02:31 p.m."), para mensajes que lee una persona parada en el mostrador.
+ *
+ * 🔴 Existe porque `toLocaleTimeString('es-MX', …)` SIN `timeZone` usa la zona del PROCESO, que en
+ * Fly.io es **UTC**. Un "ya se entregó a las 20:31" cuando fueron las 14:31 no es un detalle
+ * cosmético: el área deja de creerle al sistema y vuelve a su libreta. Y en Culiacán
+ * (`America/Mazatlan`) ni siquiera el default de Ciudad de México sirve — se pasa por una hora.
+ */
+export function formatVenueTime(date: Date | string, timezone: string = DEFAULT_TIMEZONE): string {
+  return new Date(date).toLocaleTimeString('es-MX', {
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: timezone,
+  })
+}
