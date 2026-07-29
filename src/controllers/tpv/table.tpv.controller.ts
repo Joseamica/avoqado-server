@@ -24,27 +24,18 @@ export { openTable } from '../mobile/table.mobile.controller'
 /**
  * GET /tpv/venues/:venueId/tables
  * Get all tables with their current status for floor plan display
+ *
+ * Re-export del controller de `/mobile` (gap fix, 2026-07-29) — mismo patrón que
+ * `openTable` arriba y `sync.tpv.controller.ts`. `table.mobile.controller.ts::getTables`
+ * llama al MISMO `tableService.getTablesWithStatus` (`/tpv`'s own service) y solo agrega
+ * los campos de propiedad de mesa (`settings.enforceTableOwnership`, `viewer.staffId`/
+ * `viewer.canManageAllTables`) al SOBRE de la respuesta — el array `data` no cambia de
+ * forma. Sin esto, dos terminales podían abrir la misma mesa sin que ninguna se enterara
+ * hasta que los intents colisionaran al reconectar (ver
+ * .claude/rules/offline-first-y-hub-lan.md). Reexportar evita una segunda copia que
+ * pueda divergir en silencio; `/mobile` queda byte-idéntico.
  */
-export async function getTables(req: Request, res: Response): Promise<void> {
-  try {
-    const { venueId } = req.params
-
-    logger.info(`[TABLE CONTROLLER] GET /tpv/venues/${venueId}/tables`)
-
-    const tables = await tableService.getTablesWithStatus(venueId)
-
-    res.status(200).json({
-      success: true,
-      data: tables,
-    })
-  } catch (error: any) {
-    logger.error(`[TABLE CONTROLLER] Error getting tables: ${error.message}`)
-    res.status(error.statusCode || 500).json({
-      success: false,
-      message: error.message || 'Internal server error',
-    })
-  }
-}
+export { getTables } from '../mobile/table.mobile.controller'
 
 /**
  * POST /tpv/venues/:venueId/tables/assign
