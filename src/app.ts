@@ -146,10 +146,13 @@ app.post(
   handleMcpRequest,
 )
 
-// MCP here is JSON-RPC over POST (stateless Streamable HTTP — no standalone GET/SSE stream).
-// Answer GET with 405 + Allow:POST so it reads as a real MCP endpoint, not an Express 404.
-app.get('/mcp', (_req, res) => {
-  res
+// MCP here is JSON-RPC over POST (stateless Streamable HTTP — no standalone GET/SSE stream,
+// and we never issue session ids, so there is no session for a client to DELETE).
+// Answer GET *and* DELETE with 405 + Allow:POST so it reads as a real MCP endpoint, not an
+// Express 404 — the Streamable HTTP spec prescribes exactly this for both verbs.
+app.all('/mcp', (req, res, next) => {
+  if (req.method !== 'GET' && req.method !== 'DELETE') return next()
+  return res
     .set('Allow', 'POST')
     .status(405)
     .json({
