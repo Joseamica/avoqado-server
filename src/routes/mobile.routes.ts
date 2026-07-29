@@ -45,11 +45,21 @@ import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.mi
 import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { checkTableOwnership } from '../middlewares/checkTableOwnership.middleware'
+import { registerDeviceMiddleware } from '../middlewares/registerDevice.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { recordFastPaymentParamsSchema, recordPaymentBodySchema } from '../schemas/tpv.schema'
 import { gatewayHeartbeatSchema, printConfigParamSchema, syncPrintJobsSchema } from '../schemas/mobile/print.mobile.schema'
 
 const router = Router()
+
+// Registro pasivo de dispositivos (estilo Square Device Management).
+//
+// Va arriba de todo A PROPÓSITO aunque la autenticación de este router es por ruta: el
+// middleware no hace nada en línea, sólo engancha el trabajo a `res.on('finish')`, así
+// que corre cuando la respuesta ya salió y `authContext` ya lo pobló la ruta que
+// autenticó. Un solo punto de montaje en vez de tocar las 126 rutas, y cero latencia
+// añadida al camino del cobro. Un request sin `X-Device-Id` no hace absolutamente nada.
+router.use(registerDeviceMiddleware)
 
 // ============================================================================
 // EMAIL/PASSWORD AUTHENTICATION

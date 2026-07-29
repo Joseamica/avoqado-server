@@ -1,5 +1,5 @@
 import logger from '@/config/logger'
-import { Prisma, Terminal, TerminalStatus, TerminalType } from '@prisma/client'
+import { DeviceFormFactor, Prisma, Terminal, TerminalStatus, TerminalType } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { CreateTpvBody, PaginatedTerminalsResponse, UpdateTpvBody } from '../../schemas/dashboard/tpv.schema'
 import { venueStartOfDay } from '../../utils/datetime'
@@ -24,9 +24,16 @@ export interface TerminalFilters {
   statuses?: TerminalStatus[]
   types?: TerminalType[]
   versions?: string[]
+  /** Clase de aparato (teléfono, tablet, POS de mano…). Device registry, 2026-07-28. */
+  formFactors?: DeviceFormFactor[]
   // Derived filters
   connections?: Array<'online' | 'offline'>
   activations?: Array<'activated' | 'notActivated'>
+  /**
+   * Separa hardware provisionado por un admin de dispositivos que aparecieron solos al
+   * hacer login. Ambos seleccionados (o ninguno) = sin filtro, igual que los demás.
+   */
+  origins?: Array<'provisioned' | 'selfRegistered'>
   search?: string
 }
 
@@ -67,6 +74,21 @@ export async function getTerminalsData(
   // Version filter
   if (filters.versions && filters.versions.length > 0) {
     whereClause.version = { in: filters.versions }
+  }
+
+  // Form factor filter (device registry). Las terminales viejas que nunca reportaron
+  // salud tienen formFactor null; se incluyen cuando se filtra por UNKNOWN, porque para
+  // el dueño "desconocido" y "sin clasificar" son la misma cosa y esperaría verlas ahí.
+  if (filters.formFactors && filters.formFactors.length > 0) {
+    whereClause.formFactor = filters.formFactors.includes(DeviceFormFactor.UNKNOWN)
+      ? { in: [...filters.formFactors, null] }
+      : { in: filters.formFactors }
+  }
+
+  // Origin filter: provisionado por admin vs auto-registrado al hacer login.
+  // Ambos seleccionados = sin filtro, misma semántica que connections/activations.
+  if (filters.origins && filters.origins.length === 1) {
+    whereClause.selfRegistered = filters.origins[0] === 'selfRegistered'
   }
 
   // Activation filter (activated = activatedAt not null; notActivated = activatedAt null)
@@ -393,6 +415,35 @@ export async function deleteTpv(venueId: string, tpvId: string): Promise<void> {
   // Esto previene eliminar dispositivos que tienen datos históricos importantes
   if (existingTerminal.activatedAt) {
     throw new BadRequestError(`No se puede eliminar una terminal activada. Use el estado RETIRED para desactivar terminales en uso.`)
+  }
+
+  // 3b. SECURITY (device registry, 2026-07-28): tampoco se borra un dispositivo que se
+  // registró solo, ni ninguno que ya tenga historial de ventas.
+  //
+  // Por qué hacía falta: `activatedAt` sólo lo sella el flujo de activación de las PAX.
+  // Un teléfono o un Sunmi que se auto-registra al hacer login nace con `activatedAt`
+  // en null, así que el guard de arriba NO lo cubría — se podía borrar en duro un
+  // aparato que llevaba semanas cobrando.
+  //
+  // Las FK de Order.terminalId y Payment.terminalId son ON DELETE SET NULL: borrar no
+  // destruye las ventas, pero deja cada orden y cada pago SIN dispositivo, y eso no se
+  // puede reconstruir. La atribución por dispositivo se pierde en silencio y para
+  // siempre. Retirar (RETIRED) conserva el vínculo y logra lo mismo para el dueño.
+  if (existingTerminal.selfRegistered) {
+    throw new BadRequestError(
+      `No se puede eliminar un dispositivo que se registró al iniciar sesión. Use el estado RETIRED para darlo de baja y conservar el historial de ventas.`,
+    )
+  }
+
+  const [orderCount, paymentCount] = await Promise.all([
+    prisma.order.count({ where: { terminalId: tpvId } }),
+    prisma.payment.count({ where: { terminalId: tpvId } }),
+  ])
+
+  if (orderCount > 0 || paymentCount > 0) {
+    throw new BadRequestError(
+      `No se puede eliminar una terminal con historial (${orderCount} órdenes, ${paymentCount} pagos). Use el estado RETIRED para darla de baja sin perder la atribución de esas ventas.`,
+    )
   }
 
   // 4. Eliminar la terminal

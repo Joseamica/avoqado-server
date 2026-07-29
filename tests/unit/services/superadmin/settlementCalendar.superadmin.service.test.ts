@@ -118,6 +118,88 @@ describe('getCrossVenueSettlementCalendar', () => {
     })
   })
 
+  it('desglosa el venue-día por afiliación, y el desglose suma exactamente al venue', async () => {
+    // El caso real: Amaena cobra por DOS afiliaciones AngelPay con tarifas
+    // distintas (8% y 4.18%). Sumadas en una sola fila, el total no cuadra con
+    // NINGÚN depósito del proveedor, que deposita por afiliación.
+    mockPayments([
+      {
+        amount: 782.5,
+        tipAmount: 0,
+        createdAt: SOLD_FRI,
+        venueId: 'v1',
+        merchantAccountId: 'm-amaena',
+        transactionCost: cost(62.6),
+        venue: venue('v1', 'Amaena'),
+        merchantAccount: {
+          ...withAgg('Externo'),
+          angelpayMerchantName: 'AMAENA',
+          angelpayAffiliation: '9946475',
+          provider: { name: 'AngelPay' },
+        },
+      },
+      {
+        amount: 60,
+        tipAmount: 9,
+        createdAt: SOLD_FRI,
+        venueId: 'v1',
+        merchantAccountId: 'm-salon',
+        transactionCost: cost(2.8814),
+        venue: venue('v1', 'Amaena'),
+        merchantAccount: {
+          ...noAgg,
+          angelpayMerchantName: 'SALON AMAENA',
+          angelpayAffiliation: '7494104',
+          provider: { name: 'AngelPay' },
+        },
+      },
+    ])
+    mockConfigs([cfg('m-amaena'), cfg('m-salon')])
+
+    const r = await getCrossVenueSettlementCalendar('2026-07-01', '2026-07-31')
+    const v = r.days[0].venues[0]
+
+    expect(v.merchants.map(m => [m.label, m.affiliation, m.net])).toEqual([
+      ['AMAENA', '9946475', 719.9], // 782.50 − 62.60
+      ['SALON AMAENA', '7494104', 66.12], // 69.00 − 2.8814
+    ])
+    expect(v.merchants[0]).toMatchObject({ providerName: 'AngelPay', aggregatorName: 'Externo', settlementDays: 1 })
+    expect(v.merchants[1].aggregatorName).toBeNull()
+    // La invariante que hace confiable el desglose: nunca puede diferir del total.
+    expect(v.merchants.reduce((s, m) => s + m.net, 0)).toBeCloseTo(v.net, 2)
+    expect(v.merchants.reduce((s, m) => s + m.count, 0)).toBe(v.count)
+  })
+
+  it('etiqueta el merchant con el mejor nombre disponible, nunca con el cuid si hay alternativa', async () => {
+    mockPayments([
+      {
+        amount: 100,
+        tipAmount: 0,
+        createdAt: SOLD_FRI,
+        venueId: 'v1',
+        merchantAccountId: 'm1',
+        transactionCost: cost(0),
+        venue: venue('v1', 'IQ'),
+        // displayName vacío y alias en blanco: prod real. Debe caer al externalMerchantId.
+        merchantAccount: { ...noAgg, displayName: null, alias: '   ', externalMerchantId: '814' },
+      },
+      {
+        amount: 100,
+        tipAmount: 0,
+        createdAt: SOLD_FRI,
+        venueId: 'v1',
+        merchantAccountId: 'm2',
+        transactionCost: cost(0),
+        venue: venue('v1', 'IQ'),
+        merchantAccount: noAgg, // sin ningún nombre → último recurso: el id
+      },
+    ])
+    mockConfigs([cfg('m1'), cfg('m2')])
+
+    const r = await getCrossVenueSettlementCalendar('2026-07-01', '2026-07-31')
+    expect(r.days[0].venues[0].merchants.map(m => m.label).sort()).toEqual(['814', 'm2'])
+  })
+
   it('reports unprojectable card money separately instead of dropping it', async () => {
     mockPayments([
       // No transactionCost → cannot be costed or dated

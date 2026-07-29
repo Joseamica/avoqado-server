@@ -1690,8 +1690,8 @@ model RawMaterial {
   batches            StockBatch[] // FIFO batch tracking
   modifiers          Modifier[] // Modifiers linked to this raw material for inventory tracking
   stockCountItems    StockCountItem[] // Physical count lines (ingredient counting)
-  transferItemsFrom  InterVenueTransferItem[] @relation("TransferSourceRawMaterial")
-  transferItemsTo    InterVenueTransferItem[] @relation("TransferDestinationRawMaterial")
+  transferItemsFrom  InterVenueTransferItem[]  @relation("TransferSourceRawMaterial")
+  transferItemsTo    InterVenueTransferItem[]  @relation("TransferDestinationRawMaterial")
   presentations      RawMaterialPresentation[] // Unidades de compra/salida (caja, cono, kilo…)
 
   // Demo data flag (for cleanup on conversion)
@@ -3610,6 +3610,33 @@ model Terminal {
 
   lastActivationStatusCheckAt DateTime? // stamped when a (possibly just-wiped) device polls activation-status; proof-of-wipe signal for venue migration
 
+  // 🆕 DEVICE REGISTRY (2026-07-28) — registro pasivo de dispositivos, estilo Square
+  //
+  // Un POS móvil (Sunmi, iPhone, tablet Android) que instala Avoqado y hace login se
+  // auto-registra aquí. Antes sólo existían las terminales que un admin daba de alta.
+  //
+  // Mapeo contra `DeviceAttributes` de Square: type→type, manufacturer→brand,
+  // model→model, name→name, manufacturers_id→serialNumber, version→version,
+  // merchant_token→venueId, updated_at→lastHeartbeat. El único campo que faltaba
+  // era el `device_id` acuñado al emparejar, que es `deviceUid`.
+  //
+  // ⚠️ `deviceUid` NO es un identificador nuevo: es EL MISMO `deviceId` que las apps
+  // ya usan para el outbox offline (`PosSyncIntent.deviceId`) y para la elección de
+  // árbitro del hub LAN. Ver `.claude/rules/offline-first-y-hub-lan.md` §2.4 — si un
+  // POS presenta dos identidades distintas, se ve como dos peers y la elección deja
+  // de ser estable. Una sola identidad de dispositivo en toda la plataforma.
+  //
+  // El serial NO sirve como identidad: Android ≥10 bloquea `Build.getSerial()` sin
+  // permiso privilegiado e iOS nunca lo expone (por eso Square marca su
+  // `manufacturers_id` como "where available"). Sunmi y PAX sí lo dan; el iPhone no.
+  deviceUid       String? // = PosSyncIntent.deviceId. Null en terminales provisionadas antes de este registro.
+  selfRegistered  Boolean           @default(false) // true = apareció solo al hacer login; false = alta por admin (PAX compradas, onboarding)
+  firstSeenAt     DateTime? // primer login registrado de este dispositivo en este venue
+  lastStaffId     String? // último staff que lo usó. Dispositivo y staff son ejes SEPARADOS: 3 meseros en un teléfono = 1 renglón.
+  formFactor      DeviceFormFactor? // qué clase de aparato es (teléfono, tablet, POS de mano...)
+  modelIdentifier String? // identificador CRUDO del fabricante: "iPhone16,2", "SM-X710", "A910S". Se guarda para poder re-mapear a nombre comercial sin release de app.
+  osVersion       String? // "iOS 17.2", "Android 14". Denormalizado desde TerminalHealth para los POS que no mandan health completo.
+
   reviews Review[] // ✅ LÍNEA AGREGADA
 
   promoterLocationPings PromoterLocationPing[] // device-centric geolocation pings
@@ -3657,12 +3684,18 @@ model Terminal {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // Un dispositivo físico puede operar en varios venues: el mismo iPhone en 2 venues son
+  // 2 renglones, uno por venue. Square hace lo mismo al fijar dispositivos a una location.
+  // Por eso la unicidad es [venueId, deviceUid], NO deviceUid global.
+  @@unique([venueId, deviceUid])
   @@index([venueId])
   @@index([status])
   @@index([activationCode]) // Fast lookup for activation code validation
   @@index([isLocked]) // Fast lookup for locked terminals
   @@index([latestHealthScore]) // Sort by latestHealthScore (NULLS LAST handled in query)
   @@index([terminalOrderId])
+  @@index([venueId, selfRegistered]) // separar hardware provisionado de dispositivos auto-registrados en la lista
+  @@index([venueId, formFactor]) // filtro por tipo de aparato en el dashboard
 }
 
 // ==========================================
@@ -6823,6 +6856,30 @@ enum TerminalType {
   PRINTER_RECEIPT
   PRINTER_KITCHEN
   KDS // Kitchen Display System
+
+  // 🆕 2026-07-28 — POS móvil auto-registrado (device registry).
+  // OJO: TPV_ANDROID/TPV_IOS significan terminal de COBRO (PAX/NexGo con SDK de Blumon).
+  // Estos tres son la app POS corriendo en hardware genérico, que NO cobra con tarjeta
+  // por sí misma. No mezclar: hay lógica de merchants/procesador que sólo aplica a TPV_*.
+  POS_ANDROID // Sunmi, tablet o teléfono Android con la app POS
+  POS_IOS // iPhone o iPad con la app POS
+  POS_DESKTOP // avoqado-desktop (Windows). Reservado: el repo va en F0 y no tiene auth todavía.
+}
+
+/// Clase física de aparato. Eje SEPARADO de `TerminalType` (que es el rol): una tablet
+/// Android con la app POS es type=POS_ANDROID + formFactor=TABLET; una PAX A910S es
+/// type=TPV_ANDROID + formFactor=HANDHELD_POS.
+///
+/// Detección en el cliente: iOS lo da limpio con `UIDevice.current.userInterfaceIdiom`
+/// (.phone/.pad). Android: `smallestScreenWidthDp >= 600` → TABLET, si no PHONE, con
+/// override por fabricante (SUNMI/PAX/NEXGO → HANDHELD_POS).
+enum DeviceFormFactor {
+  PHONE
+  TABLET
+  HANDHELD_POS // terminal de mano con cabezal/lector: PAX A910S, NexGo N62/N86, Sunmi V2
+  COUNTERTOP_POS // POS de mostrador: Sunmi D3, T2, kioscos
+  DESKTOP // PC Windows con avoqado-desktop
+  UNKNOWN // no se pudo determinar (backfill sin TerminalHealth, o cliente que no manda el header)
 }
 
 enum TerminalStatus {
@@ -12781,21 +12838,21 @@ model PlatformCfdi {
 /// `localRef` guarda el UUID local (p.ej. de OPEN_TABLE) para que intents
 /// posteriores del mismo dispositivo resuelvan su orderId de servidor.
 model PosSyncIntent {
-  id       String  @id @default(cuid())
-  venueId  String
-  deviceId String  @db.VarChar(64)
-  staffId  String?
+  id             String   @id @default(cuid())
+  venueId        String
+  deviceId       String   @db.VarChar(64)
+  staffId        String?
   /// Secuencia monotónica por dispositivo (orden de replay); informativa.
-  seq      Int?
-  type     String  @db.VarChar(40) // OPEN_TABLE | ADD_ITEMS | PAY_CASH | ...
-  idempotencyKey String @db.VarChar(64)
+  seq            Int?
+  type           String   @db.VarChar(40) // OPEN_TABLE | ADD_ITEMS | PAY_CASH | ...
+  idempotencyKey String   @db.VarChar(64)
   /// UUID local generado en el dispositivo (identidad offline) — resoluble a ids de server.
-  localRef String? @db.VarChar(64)
-  status    String  @db.VarChar(12) // ACKED | REJECTED
-  errorCode String? @db.VarChar(40) // p.ej. TABLE_OWNED_BY_OTHER, FEATURE_LOCKED
+  localRef       String?  @db.VarChar(64)
+  status         String   @db.VarChar(12) // ACKED | REJECTED
+  errorCode      String?  @db.VarChar(40) // p.ej. TABLE_OWNED_BY_OTHER, FEATURE_LOCKED
   /// Ack devuelto al cliente (ids de server, versión, folio) — se re-devuelve tal cual en reintentos.
-  resultJson Json?
-  createdAt DateTime @default(now())
+  resultJson     Json?
+  createdAt      DateTime @default(now())
 
   @@unique([venueId, idempotencyKey])
   @@index([venueId, localRef])

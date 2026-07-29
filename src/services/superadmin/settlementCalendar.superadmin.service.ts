@@ -47,6 +47,33 @@ interface Agg {
   count: number
 }
 
+/**
+ * One merchant account's slice of a venue-day.
+ *
+ * A venue is NOT one bank relationship: Amaena, for example, cobra por dos
+ * afiliaciones AngelPay distintas (9946475 "AMAENA" al 8%, 7494104 "SALON
+ * AMAENA" al 4.18%). Summed into a single venue row, the total reconciles with
+ * nothing the operator can see on the provider's side — the provider deposits
+ * per AFILIACIÓN, not per venue. This breakdown is what makes "me depositaron
+ * $750.73 pero el calendario dice $841.22" answerable instead of a mystery.
+ */
+export interface CalendarMerchant extends Agg {
+  merchantAccountId: string
+  /** Human label: displayName → alias → provider's merchant name → external id. */
+  label: string
+  /** Affiliation/terminal number the provider settles against (AngelPay, Blumon). */
+  affiliation: string | null
+  /** Provider display name ("AngelPay", "Menta"), null if the FK is missing. */
+  providerName: string | null
+  aggregatorName: string | null
+  /**
+   * Días de liquidación de la config que aplicó (T+n). Dos merchants del mismo
+   * venue pueden liquidar en días distintos — por eso la fila del venue puede
+   * no cuadrar con UN solo depósito del proveedor.
+   */
+  settlementDays: number | null
+}
+
 export interface CalendarVenue extends Agg {
   venueId: string
   venueName: string
@@ -59,6 +86,8 @@ export interface CalendarVenue extends Agg {
    */
   hasAggregator: boolean
   aggregatorNames: string[]
+  /** Desglose por afiliación. Siempre suma exactamente al total del venue-día. */
+  merchants: CalendarMerchant[]
 }
 
 export interface CalendarDay extends Agg {
@@ -84,6 +113,31 @@ export interface CrossVenueSettlementCalendar {
 }
 
 const newAgg = (): Agg => ({ gross: 0, commission: 0, net: 0, count: 0 })
+
+/**
+ * Best human name for a merchant account, most-curated first.
+ *
+ * In prod most rows have `displayName`/`alias` empty and only carry the provider's
+ * own name (`angelpayMerchantName`), so falling straight through to the id — which
+ * is what a naive `displayName ?? id` would do — would render a wall of cuids.
+ * Last resort is the external id, still more recognisable than our internal cuid.
+ */
+function merchantLabel(
+  ma: {
+    displayName?: string | null
+    alias?: string | null
+    angelpayMerchantName?: string | null
+    externalMerchantId?: string | null
+  } | null,
+  merchantAccountId: string,
+): string {
+  const candidates = [ma?.displayName, ma?.alias, ma?.angelpayMerchantName, ma?.externalMerchantId]
+  for (const c of candidates) {
+    const trimmed = c?.trim()
+    if (trimmed) return trimmed
+  }
+  return merchantAccountId
+}
 
 const roundAgg = (a: Agg): Agg => ({
   gross: round2(a.gross),
@@ -128,7 +182,19 @@ export async function getCrossVenueSettlementCalendar(fromKey: string, toKey: st
       merchantAccountId: true,
       transactionCost: { select: { transactionType: true, venueChargeAmount: true, venueFixedFee: true } },
       venue: { select: { id: true, name: true, timezone: true } },
-      merchantAccount: { select: { aggregatorId: true, aggregator: { select: { name: true } } } },
+      merchantAccount: {
+        select: {
+          aggregatorId: true,
+          aggregator: { select: { name: true } },
+          displayName: true,
+          alias: true,
+          externalMerchantId: true,
+          angelpayAffiliation: true,
+          angelpayMerchantName: true,
+          blumonSerialNumber: true,
+          provider: { select: { name: true } },
+        },
+      },
     },
   })
 
@@ -150,7 +216,9 @@ export async function getCrossVenueSettlementCalendar(fromKey: string, toKey: st
       })
     : []
 
-  const dayMap = new Map<string, { total: Agg; venues: Map<string, CalendarVenue> }>()
+  // Internal accumulator: merchants are a Map while we fold, an array on the way out.
+  type VenueAcc = Omit<CalendarVenue, 'merchants'> & { merchants: Map<string, CalendarMerchant> }
+  const dayMap = new Map<string, { total: Agg; venues: Map<string, VenueAcc> }>()
   const unprojected = { count: 0, gross: 0 }
 
   for (const p of payments) {
@@ -201,6 +269,7 @@ export async function getCrossVenueSettlementCalendar(fromKey: string, toKey: st
         venueName: p.venue?.name ?? 'Venue',
         hasAggregator: false,
         aggregatorNames: [],
+        merchants: new Map(),
         ...newAgg(),
       })
     }
@@ -209,6 +278,26 @@ export async function getCrossVenueSettlementCalendar(fromKey: string, toKey: st
     v.commission += projected.commission
     v.net += projected.net
     v.count += 1
+
+    const ma = p.merchantAccount
+    if (!v.merchants.has(merchantId)) {
+      v.merchants.set(merchantId, {
+        merchantAccountId: merchantId,
+        label: merchantLabel(ma, merchantId),
+        // AngelPay settles per afiliación; Blumon per terminal serial. Whichever
+        // exists is the number the operator can match against the provider's report.
+        affiliation: ma?.angelpayAffiliation ?? ma?.blumonSerialNumber ?? ma?.externalMerchantId ?? null,
+        providerName: ma?.provider?.name ?? null,
+        aggregatorName: ma?.aggregator?.name ?? null,
+        settlementDays: projected.settlementDays ?? null,
+        ...newAgg(),
+      })
+    }
+    const m = v.merchants.get(merchantId)!
+    m.gross += projected.gross
+    m.commission += projected.commission
+    m.net += projected.net
+    m.count += 1
 
     // A venue can route through several merchants (primary/secondary/tertiary), so
     // aggregator-ness is a property of the MERCHANT, not the venue: one venue-day can
@@ -231,7 +320,13 @@ export async function getCrossVenueSettlementCalendar(fromKey: string, toKey: st
       status: (date < todayKey ? 'settled' : date === todayKey ? 'today' : 'projected') as CalendarDay['status'],
       ...roundAgg(d.total),
       venues: Array.from(d.venues.values())
-        .map(v => ({ ...v, ...roundAgg(v) }))
+        .map(v => ({
+          ...v,
+          ...roundAgg(v),
+          merchants: Array.from(v.merchants.values())
+            .map(m => ({ ...m, ...roundAgg(m) }))
+            .sort((a, b) => b.net - a.net),
+        }))
         .sort((a, b) => b.net - a.net),
     }))
     .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))

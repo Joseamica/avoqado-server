@@ -42,8 +42,10 @@ export async function getTerminals(
       statuses: parseList(req.query.statuses as string | undefined) as any,
       types: parseList(req.query.types as string | undefined) as any,
       versions: parseList(req.query.versions as string | undefined),
+      formFactors: parseList(req.query.formFactors as string | undefined) as any,
       connections: parseList(req.query.connections as string | undefined) as any,
       activations: parseList(req.query.activations as string | undefined) as any,
+      origins: parseList(req.query.origins as string | undefined) as any,
       search: req.query.search as string | undefined,
     })
 
