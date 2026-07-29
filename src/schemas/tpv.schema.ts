@@ -344,6 +344,16 @@ export const addOrderItemsSchema = z.object({
             .nullable(),
           notes: z.string().optional().nullable(),
           modifierIds: z.array(z.string().cuid()).optional(), // ✅ FIX: Allow modifier IDs to be sent from Android
+          // 🔑 Llave idempotente por línea, generada por el cliente ANTES del primer
+          // intento (formato `sync:<intentId>:<idx>`). Sin esto Zod la descartaba en
+          // silencio y el caso DROP_RESPONSE —el server SÍ agregó la ronda pero la
+          // respuesta se perdió— duplicaba la ronda al reintentar: cobrada dos veces
+          // en el cheque y mandada dos veces a cocina.
+          //
+          // El servicio ya la respeta: `addItemsToOrder` hace findFirst por externalId
+          // y ACTUALIZA en vez de insertar (order.tpv.service.ts:1438), que es la misma
+          // ruta que usa el reducer de intents. Aquí sólo se destapa para la vía online.
+          externalId: z.string().max(120, { message: 'El identificador externo es demasiado largo.' }).optional().nullable(),
         }),
       )
       .min(1, { message: 'Debe proporcionar al menos un ítem.' }),
