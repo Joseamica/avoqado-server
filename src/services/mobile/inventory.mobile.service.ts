@@ -5,7 +5,7 @@
  */
 
 import prisma from '../../utils/prismaClient'
-import { NotFoundError } from '../../errors/AppError'
+import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { MovementType, RawMaterialMovementType } from '@prisma/client'
 import { adjustStock as adjustRawMaterialStock } from '../dashboard/rawMaterial.service'
 import { logAction } from '../dashboard/activity-log.service'
@@ -283,6 +283,18 @@ export async function createStockCount(
       })
       rawMaterialsToCount = rawMaterials.map(rm => ({ id: rm.id, currentStock: Number(rm.currentStock) }))
     }
+  }
+
+  // Un conteo sin líneas no es un conteo: el POS lo daría por "Completado" y el
+  // gerente perdería el recorrido entero sin un solo aviso. Pasó de verdad —
+  // mandó un producto con inventoryMethod RECIPE, que aquí se descarta a
+  // propósito (su existencia se calcula desde los insumos), y el conteo se
+  // guardó vacío. Mejor fallar aquí que archivar un conteo que miente.
+  if (productsToCount.length === 0 && rawMaterialsToCount.length === 0) {
+    throw new BadRequestError(
+      'Ninguno de los artículos seleccionados se puede contar. Los artículos con receta no ' +
+        'llevan existencia propia: cuenta sus insumos.',
+    )
   }
 
   const count = await prisma.stockCount.create({
