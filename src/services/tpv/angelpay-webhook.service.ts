@@ -43,6 +43,10 @@ export interface AngelPayWebhookPayload {
 
 export type AngelPayWebhookAction =
   | 'MATCHED'
+  // Reconciled against a Payment recorded under a DIFFERENT merchant than the one
+  // whose endpoint received the webhook — the money moved through one affiliation
+  // while the books say another (cross-merchant incident, 2026-07). Loud, never silent.
+  | 'MATCHED_WRONG_MERCHANT'
   | 'DISCREPANCY'
   | 'ORPHANED'
   | 'NOT_APPROVED'
@@ -77,6 +81,11 @@ export const ANGELPAY_WEBHOOK_ERROR_REASONS = {
   // after the cashier dismisses the success screen (often minutes later). The event
   // is left PENDING with this reason so reconcile-on-Payment-create can pick it up.
   AWAITING_PAYMENT: 'AWAITING_PAYMENT',
+  // The webhook's receiving endpoint (per-merchant URL + per-merchant HMAC secret,
+  // i.e. the affiliation that ACTUALLY charged) differs from the merchant the
+  // Payment was recorded under. Deposits follow the affiliation, so the books
+  // point at the wrong bank stream. Surfaced loudly; the match is still stored.
+  MERCHANT_MISMATCH: 'MERCHANT_MISMATCH',
   PROCESSING_ERROR: 'PROCESSING_ERROR',
 } as const
 
@@ -153,6 +162,12 @@ export async function attemptPaymentMatch(args: {
   }
   if (payload.payload.transactionId) {
     conditions.push({ processorId: payload.payload.transactionId })
+    // The TPV stores AngelPay's transactionId as the Payment's `referenceNumber`
+    // (verified in prod: ref 260727125955 == webhook transactionId). Without this
+    // key, a webhook that arrives WITHOUT integratorReference can never match
+    // directly and always falls to the payment-create backfill — which is exactly
+    // what made legitimate matches look like merchant mismatches (2026-07-25 $920).
+    conditions.push({ referenceNumber: payload.payload.transactionId })
   }
 
   if (conditions.length === 0) return null
@@ -172,6 +187,111 @@ export async function attemptPaymentMatch(args: {
     if (payment) return payment as MatchedPayment
   }
   return null
+}
+
+/**
+ * Second-chance match WITHOUT the receiving-merchant filter — the mismatch detector.
+ *
+ * The receiving endpoint (per-merchant URL + per-merchant HMAC secret) proves which
+ * affiliation ACTUALLY charged the card. If the same-merchant match failed but the
+ * same webhook keys point at a Payment recorded under a SIBLING AngelPay merchant of
+ * the SAME venue, the TPV registered the charge under the wrong merchant
+ * (multi-account incident, 2026-06→2026-07). Scope is deliberately tight:
+ *   - same venue as the receiving merchant (never cross-tenant);
+ *   - ANGELPAY-provider merchants only (a Blumon payment can never be linked —
+ *     both processors use yyMMddHHmmss references, so raw refs DO collide);
+ *   - amount must agree to the cent (weak keys are timestamps, not unique).
+ */
+export async function attemptCrossMerchantMatch(args: {
+  payload: AngelPayWebhookPayload
+  receiverMerchantAccountId: string
+  receiverVenueId: string | null
+}): Promise<(MatchedPayment & { merchantAccountId: string | null }) | null> {
+  const { payload, receiverMerchantAccountId, receiverVenueId } = args
+  if (!receiverVenueId) return null
+
+  const conditions: Prisma.PaymentWhereInput[] = []
+  if (payload.payload.integratorReference) {
+    conditions.push({ idempotencyKey: payload.payload.integratorReference })
+    conditions.push({ referenceNumber: payload.payload.integratorReference })
+  }
+  if (payload.payload.transactionId) {
+    conditions.push({ processorId: payload.payload.transactionId })
+    conditions.push({ referenceNumber: payload.payload.transactionId })
+  }
+  if (conditions.length === 0) return null
+
+  const payment = await prisma.payment.findFirst({
+    where: {
+      OR: conditions,
+      status: { in: ['COMPLETED', 'PENDING'] },
+      type: { not: 'REFUND' },
+      venueId: receiverVenueId,
+      merchantAccountId: { not: receiverMerchantAccountId },
+      merchantAccount: { provider: { code: 'ANGELPAY' } },
+    },
+    select: { id: true, amount: true, tipAmount: true, processorData: true, venueId: true, merchantAccountId: true },
+  })
+  if (!payment) return null
+
+  // Amount gate to the cent — a cross-merchant link on a weak key alone is how
+  // money gets attributed to the wrong row. Webhook amount arrives in centavos.
+  const webhookAmount = Number(payload.payload.amount) / 100
+  const recordedAmount = Number(payment.amount) + Number(payment.tipAmount ?? 0)
+  if (!Number.isFinite(webhookAmount) || Math.abs(webhookAmount - recordedAmount) >= 0.01) return null
+
+  return payment as MatchedPayment & { merchantAccountId: string | null }
+}
+
+/**
+ * Audit trail for a detected merchant mismatch. Fire-and-forget (never throws,
+ * never inside a transaction) — an audit failure must not break reconciliation.
+ * No staffId: the actor is AngelPay's webhook, not a human.
+ */
+function logMerchantMismatchActivity(args: {
+  paymentId: string
+  venueId: string | null
+  referenceNumber: string | null
+  receivedByMerchantAccountId: string
+  recordedMerchantAccountId: string | null
+  amount: number
+  via: 'webhook-direct' | 'payment-create-backfill'
+}): void {
+  void prisma.activityLog
+    .create({
+      data: {
+        action: 'ANGELPAY_MERCHANT_MISMATCH',
+        entity: 'Payment',
+        entityId: args.paymentId,
+        venueId: args.venueId,
+        data: {
+          referenceNumber: args.referenceNumber,
+          receivedByMerchantAccountId: args.receivedByMerchantAccountId,
+          recordedMerchantAccountId: args.recordedMerchantAccountId,
+          amount: args.amount,
+          via: args.via,
+        },
+      },
+    })
+    .catch(err =>
+      logger.warn('⚠️ [AngelPay webhook] failed to write ANGELPAY_MERCHANT_MISMATCH ActivityLog', {
+        paymentId: args.paymentId,
+        error: err instanceof Error ? err.message : err,
+      }),
+    )
+}
+
+/** Receiving merchant → its venue (via the AngelPay login that owns the merchant). */
+async function resolveReceiverVenueId(merchantAccountId: string): Promise<string | null> {
+  try {
+    const row = await prisma.merchantAccount.findUnique({
+      where: { id: merchantAccountId },
+      select: { angelpayUserAccount: { select: { venueId: true } } },
+    })
+    return row?.angelpayUserAccount?.venueId ?? null
+  } catch {
+    return null
+  }
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -225,6 +345,16 @@ export async function processAngelPayWebhook(args: ProcessArgs): Promise<AngelPa
   }
 
   // 2. Insert PENDING row (race-safe idempotency via unique eventId)
+  // Stamp the venue + receiving merchant AT INSERT: the endpoint identity is the
+  // only record of which affiliation actually charged (the payload itself carries
+  // no merchant/affiliation), and the backfill needs both to scope its match —
+  // an unscoped PENDING event can be stolen by a same-second reference collision
+  // from another venue or from the Blumon side.
+  const receiverVenueId = await resolveReceiverVenueId(merchantAccount.id)
+  const stampedPayload = {
+    ...payload,
+    _avoqado: { receivedByMerchantAccountId: merchantAccount.id },
+  }
   let eventLogId: string
   try {
     const created = await prisma.providerEventLog.create({
@@ -232,8 +362,8 @@ export async function processAngelPayWebhook(args: ProcessArgs): Promise<AngelPa
         provider: ProviderType.PAYMENT_PROCESSOR,
         eventId: eventLogId_key,
         type: payload.event_type,
-        payload: payload as unknown as Prisma.InputJsonValue,
-        venueId: null,
+        payload: stampedPayload as unknown as Prisma.InputJsonValue,
+        venueId: receiverVenueId,
         status: EventStatus.PENDING,
       },
       select: { id: true },
@@ -273,6 +403,76 @@ export async function processAngelPayWebhook(args: ProcessArgs): Promise<AngelPa
   const payment = await attemptPaymentMatch({ payload, merchantAccountId: merchantAccount.id, retryDelaysMs: args.retryDelaysMs })
 
   if (!payment) {
+    // Second chance WITHOUT the merchant filter: same venue, ANGELPAY merchants
+    // only, amount to the cent. A hit here means the charge went through THIS
+    // endpoint's affiliation but the TPV recorded a sibling merchant — the exact
+    // cross-merchant failure. Reconcile it (the money is real) but flag it LOUDLY instead
+    // of letting the backfill absorb it in silence.
+    const crossMatch = await attemptCrossMerchantMatch({
+      payload,
+      receiverMerchantAccountId: merchantAccount.id,
+      receiverVenueId,
+    })
+    if (crossMatch) {
+      const crossWebhookAmount = Number(payload.payload.amount) / 100
+      await prisma.payment.update({
+        where: { id: crossMatch.id },
+        data: {
+          processorData: {
+            ...((crossMatch.processorData as Record<string, unknown>) ?? {}),
+            angelpayWebhook: {
+              receivedAt: new Date().toISOString(),
+              eventId: rawEventId,
+              transactionId: payload.payload.transactionId ?? null,
+              integratorReference: payload.payload.integratorReference ?? null,
+              terminalSerial: payload.payload.terminalSerial ?? null,
+              timestamp: payload.payload.timestamp ?? null,
+              status: payload.payload.status ?? null,
+              merchantMismatch: true,
+              receivedByMerchantAccountId: merchantAccount.id,
+              recordedMerchantAccountId: crossMatch.merchantAccountId,
+            },
+          } as Prisma.InputJsonValue,
+        },
+      })
+      await prisma.providerEventLog.update({
+        where: { id: eventLogId },
+        data: {
+          status: EventStatus.PROCESSED,
+          errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.MERCHANT_MISMATCH,
+          paymentId: crossMatch.id,
+          venueId: crossMatch.venueId,
+          processedAt: new Date(),
+        },
+      })
+      await prisma.merchantAccount.update({
+        where: { id: merchantAccount.id },
+        data: { angelpayWebhookLastReceivedAt: new Date() },
+      })
+      logMerchantMismatchActivity({
+        paymentId: crossMatch.id,
+        venueId: crossMatch.venueId,
+        referenceNumber: payload.payload.transactionId ?? null,
+        receivedByMerchantAccountId: merchantAccount.id,
+        recordedMerchantAccountId: crossMatch.merchantAccountId,
+        amount: crossWebhookAmount,
+        via: 'webhook-direct',
+      })
+      logger.error('🚨 [AngelPay webhook] MERCHANT MISMATCH — charged affiliation differs from recorded merchant', {
+        correlationId,
+        paymentId: crossMatch.id,
+        receivedByMerchantAccountId: merchantAccount.id,
+        recordedMerchantAccountId: crossMatch.merchantAccountId,
+        webhookAmount: crossWebhookAmount,
+      })
+      return {
+        action: 'MATCHED_WRONG_MERCHANT',
+        errorReason: ANGELPAY_WEBHOOK_ERROR_REASONS.MERCHANT_MISMATCH,
+        eventLogId,
+        paymentId: crossMatch.id,
+      }
+    }
+
     // Leave the event PENDING (not terminal ERROR) so reconcile-on-Payment-create
     // can find and reconcile it when the TPV finally records the Payment.
     // AngelPay almost always fires before the cashier dismisses the success screen.
@@ -378,8 +578,21 @@ export async function reconcileAngelPayWebhookForPayment(payment: {
   venueId: string
   amount: Prisma.Decimal | number | string
   tipAmount: Prisma.Decimal | number | string
+  merchantAccountId?: string | null
 }): Promise<void> {
   try {
+    // Provider guard: this backfill runs on EVERY TPV payment (Blumon included).
+    // Blumon and AngelPay both use yyMMddHHmmss references, so a same-second charge
+    // on the PAX could steal a pending AngelPay event. Only AngelPay-merchant
+    // payments may link angelpay- events. (null merchant = legacy rows, allowed.)
+    if (payment.merchantAccountId) {
+      const merchant = await prisma.merchantAccount.findUnique({
+        where: { id: payment.merchantAccountId },
+        select: { provider: { select: { code: true } } },
+      })
+      if (merchant && merchant.provider?.code !== 'ANGELPAY') return
+    }
+
     const orFilters: Prisma.ProviderEventLogWhereInput[] = []
     if (payment.idempotencyKey) {
       orFilters.push({ payload: { path: ['payload', 'integratorReference'], equals: payment.idempotencyKey } })
@@ -395,6 +608,9 @@ export async function reconcileAngelPayWebhookForPayment(payment: {
         status: EventStatus.PENDING,
         eventId: { startsWith: 'angelpay-' },
         OR: orFilters,
+        // Venue scope: events stamped since 2026-07 carry the receiver's venue;
+        // pre-stamp events have venueId null (legacy) and stay matchable.
+        AND: [{ OR: [{ venueId: payment.venueId }, { venueId: null }] }],
       },
       select: { id: true, payload: true },
     })
@@ -405,6 +621,22 @@ export async function reconcileAngelPayWebhookForPayment(payment: {
       // Compare against base + tip (the full amount charged to the card).
       const recordedAmount = Number(payment.amount) + Number(payment.tipAmount ?? 0)
       const diff = Math.abs(webhookAmount - recordedAmount)
+
+      // Weak-key guard: `transactionId == referenceNumber` is a timestamp-to-the-
+      // second, NOT unique — if the amounts disagree on a weak-key-only match this
+      // is far more likely a reference collision than a real discrepancy. Skip it
+      // (leave the event PENDING for its true owner) instead of stamping the
+      // wrong Payment. The integratorReference key is a UUID → always trusted.
+      const strongKeyMatch = !!(payment.idempotencyKey && webhookPayload?.payload?.integratorReference === payment.idempotencyKey)
+      if (!strongKeyMatch && Number.isFinite(webhookAmount) && diff >= 0.01) {
+        logger.warn('🪝 [AngelPay backfill] weak-key match with amount mismatch — skipping (likely reference collision)', {
+          paymentId: payment.id,
+          eventLogId: event.id,
+          webhookAmount,
+          recordedAmount,
+        })
+        continue
+      }
 
       // Fetch the current payment's processorData to spread (preserve existing keys)
       const existingPayment = await prisma.payment.findUnique({
@@ -447,7 +679,15 @@ export async function reconcileAngelPayWebhookForPayment(payment: {
           diff,
         })
       } else {
-        // MATCHED — stamp processorData.angelpayWebhook, mark PROCESSED
+        // MATCHED — stamp processorData.angelpayWebhook, mark PROCESSED.
+        // Mismatch check: the event carries which merchant's endpoint received it
+        // (stamped at insert since 2026-07). If that differs from the merchant the
+        // Payment was recorded under, the charge went through another affiliation —
+        // reconcile anyway (the money is real) but flag it loudly.
+        const receivedBy = ((webhookPayload as unknown as Record<string, unknown>)?._avoqado as Record<string, unknown> | undefined)
+          ?.receivedByMerchantAccountId as string | undefined
+        const merchantMismatch = !!(receivedBy && payment.merchantAccountId && receivedBy !== payment.merchantAccountId)
+
         await prisma.payment.update({
           where: { id: payment.id },
           data: {
@@ -461,6 +701,13 @@ export async function reconcileAngelPayWebhookForPayment(payment: {
                 terminalSerial: webhookPayload?.payload?.terminalSerial ?? null,
                 timestamp: webhookPayload?.payload?.timestamp ?? null,
                 status: webhookPayload?.payload?.status ?? null,
+                ...(merchantMismatch
+                  ? {
+                      merchantMismatch: true,
+                      receivedByMerchantAccountId: receivedBy,
+                      recordedMerchantAccountId: payment.merchantAccountId ?? null,
+                    }
+                  : {}),
               },
             } as Prisma.InputJsonValue,
           },
@@ -471,14 +718,32 @@ export async function reconcileAngelPayWebhookForPayment(payment: {
             status: EventStatus.PROCESSED,
             paymentId: payment.id,
             venueId: payment.venueId,
-            errorReason: null,
+            errorReason: merchantMismatch ? ANGELPAY_WEBHOOK_ERROR_REASONS.MERCHANT_MISMATCH : null,
             processedAt: new Date(),
           },
         })
-        logger.info('🪝 [AngelPay backfill] reconciled pending webhook on payment-create', {
-          paymentId: payment.id,
-          eventLogId: event.id,
-        })
+        if (merchantMismatch) {
+          logMerchantMismatchActivity({
+            paymentId: payment.id,
+            venueId: payment.venueId,
+            referenceNumber: payment.referenceNumber,
+            receivedByMerchantAccountId: receivedBy as string,
+            recordedMerchantAccountId: payment.merchantAccountId ?? null,
+            amount: recordedAmount,
+            via: 'payment-create-backfill',
+          })
+          logger.error('🚨 [AngelPay backfill] MERCHANT MISMATCH — charged affiliation differs from recorded merchant', {
+            paymentId: payment.id,
+            eventLogId: event.id,
+            receivedByMerchantAccountId: receivedBy,
+            recordedMerchantAccountId: payment.merchantAccountId,
+          })
+        } else {
+          logger.info('🪝 [AngelPay backfill] reconciled pending webhook on payment-create', {
+            paymentId: payment.id,
+            eventLogId: event.id,
+          })
+        }
       }
     }
   } catch (err) {

@@ -46,6 +46,7 @@ import { validateStaffVenue } from '../../utils/staff-venue.util'
 import { logAction } from '../dashboard/activity-log.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { buildOrderItemsData, CreateOrderItemInput } from './order.mobile.service'
+import { formatVenueTime } from '@/utils/datetime'
 
 // MARK: - Constantes de contrato
 
@@ -136,6 +137,9 @@ export interface AreaTicketResolveResponse {
 // MARK: - Helpers internos
 
 const areaTicketInclude = {
+  // Zona del venue: los mensajes de hora los lee alguien parado en el mostrador.
+  // Sin esto se formatean en la zona del PROCESO (UTC en Fly.io) y salen 6 h corridas.
+  venue: { select: { timezone: true } },
   items: {
     include: {
       fulfillmentArea: { select: { id: true, name: true } },
@@ -201,7 +205,11 @@ function messageForState(state: AreaTicketResolution, ticket: AreaTicketView | n
     case 'DELIVERED': {
       const last = ticket?.fulfillments?.[ticket.fulfillments.length - 1]
       if (last) {
-        const hora = new Date(last.deliveredAt).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })
+        // TODO(vales): `AreaTicketView` todavía NO expone `venueTimezone`, así que esto cae al
+        // default (`America/Mexico_City`). Para Culiacán (`America/Mazatlan`) eso se pasa por una
+        // hora — mucho mejor que las 7 de UTC que había antes, pero sigue mal. Hay que colgar la
+        // zona del venue en la vista y pasarla aquí.
+        const hora = formatVenueTime(last.deliveredAt)
         return last.deliveredByStaffName
           ? `Este vale ya se entregó a las ${hora} por ${last.deliveredByStaffName}.`
           : `Este vale ya se entregó a las ${hora}.`
@@ -787,7 +795,7 @@ export async function fulfillOrderArea(
     const staffName = already.deliveredByStaff
       ? `${already.deliveredByStaff.firstName ?? ''} ${already.deliveredByStaff.lastName ?? ''}`.trim() || null
       : null
-    const hora = new Date(already.deliveredAt).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })
+    const hora = formatVenueTime(already.deliveredAt, (order as any).venue?.timezone)
     const lines = await prisma.orderFulfillmentLine.findMany({ where: { fulfillmentId: already.id }, select: { orderItemId: true } })
     return {
       fulfillmentId: already.id,

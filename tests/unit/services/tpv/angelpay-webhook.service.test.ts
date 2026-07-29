@@ -24,7 +24,11 @@ jest.mock('@/utils/prismaClient', () => ({
     },
     merchantAccount: {
       findFirst: jest.fn(),
+      findUnique: jest.fn(),
       update: jest.fn(),
+    },
+    activityLog: {
+      create: jest.fn(),
     },
   },
 }))
@@ -37,6 +41,8 @@ const mockedPaymentFindFirst = prisma.payment.findFirst as jest.Mock
 const mockedPaymentFindUnique = prisma.payment.findUnique as jest.Mock
 const mockedPaymentUpdate = prisma.payment.update as jest.Mock
 const mockedMerchantAccountUpdate = prisma.merchantAccount.update as jest.Mock
+const mockedMerchantAccountFindUnique = prisma.merchantAccount.findUnique as jest.Mock
+const mockedActivityLogCreate = prisma.activityLog.create as jest.Mock
 
 // Shared test merchantAccount arg
 const TEST_MERCHANT = { id: 'ma_1', externalMerchantId: '351' }
@@ -145,7 +151,14 @@ describe('attemptPaymentMatch', () => {
     expect(mockedPaymentFindFirst).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          OR: [{ idempotencyKey: 'ref-123' }, { referenceNumber: 'ref-123' }, { processorId: 'tx_abc' }],
+          OR: [
+            { idempotencyKey: 'ref-123' },
+            { referenceNumber: 'ref-123' },
+            { processorId: 'tx_abc' },
+            // 2026-07-29: the TPV stores AngelPay's transactionId as referenceNumber —
+            // without this key, webhooks lacking integratorReference never match directly.
+            { referenceNumber: 'tx_abc' },
+          ],
           status: { in: ['COMPLETED', 'PENDING'] },
           merchantAccountId: 'ma_xyz',
         }),
@@ -633,5 +646,306 @@ describe('reconcileAngelPayWebhookForPayment', () => {
     // Must resolve without throwing
     await expect(reconcileAngelPayWebhookForPayment(basePayment)).resolves.toBeUndefined()
     expect(mockedPaymentUpdate).not.toHaveBeenCalled()
+  })
+})
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// NUEVO (2026-07-29): detección de mismatch de comercio — incidente cross-merchant.
+// El endpoint receptor (URL + secreto HMAC por comercio) prueba qué afiliación
+// cobró; si difiere del comercio registrado en el Payment, se concilia PERO se
+// marca ruidosamente en vez de absorberse en silencio por el backfill.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+describe('processAngelPayWebhook — MATCHED_WRONG_MERCHANT (mismatch de comercio)', () => {
+  const webhookBody = {
+    event_type: 'send_transaction',
+    payload: {
+      amount: '000000006000', // $60.00 — caso real del incidente 2026-07-27
+      integratorReference: 'idem-cross-1',
+      transactionId: '260727125955',
+      status: 'approved',
+    },
+  }
+
+  beforeEach(() => {
+    ;[
+      mockedProviderEventLogCreate,
+      mockedProviderEventLogUpdate,
+      mockedPaymentFindFirst,
+      mockedPaymentUpdate,
+      mockedMerchantAccountUpdate,
+      mockedMerchantAccountFindUnique,
+      mockedActivityLogCreate,
+    ].forEach(m => m.mockReset())
+    mockedProviderEventLogCreate.mockResolvedValue({ id: 'evt_cross_1' })
+    mockedProviderEventLogUpdate.mockResolvedValue({})
+    mockedPaymentUpdate.mockResolvedValue({})
+    mockedMerchantAccountUpdate.mockResolvedValue({})
+    mockedActivityLogCreate.mockResolvedValue({})
+    // El receptor (ma_1) pertenece al venue_1 vía su login AngelPay
+    mockedMerchantAccountFindUnique.mockResolvedValue({ angelpayUserAccount: { venueId: 'venue_1' } })
+  })
+
+  it('cuando el match filtrado falla pero un comercio hermano del MISMO venue tiene el pago: MATCHED_WRONG_MERCHANT + flag ruidoso', async () => {
+    mockedPaymentFindFirst
+      // 1er findFirst: match filtrado por el comercio receptor → nada
+      .mockResolvedValueOnce(null)
+      // 2o findFirst: cross-merchant → el pago registrado bajo el comercio hermano
+      .mockResolvedValueOnce({
+        id: 'pay_cross_1',
+        amount: 60,
+        tipAmount: 0,
+        processorData: null,
+        venueId: 'venue_1',
+        merchantAccountId: 'ma_other',
+      })
+
+    const result = await processAngelPayWebhook({
+      payload: webhookBody,
+      eventId: 'msg_cross_1',
+      merchantAccount: TEST_MERCHANT as any,
+      retryDelaysMs: [0],
+    })
+
+    expect(result.action).toBe('MATCHED_WRONG_MERCHANT')
+    expect(result.errorReason).toBe('MERCHANT_MISMATCH')
+    expect(result.paymentId).toBe('pay_cross_1')
+
+    // El query cruzado va acotado: mismo venue, otro comercio, solo ANGELPAY
+    const crossCall = mockedPaymentFindFirst.mock.calls[1][0]
+    expect(crossCall.where.venueId).toBe('venue_1')
+    expect(crossCall.where.merchantAccountId).toEqual({ not: 'ma_1' })
+    expect(crossCall.where.merchantAccount).toEqual({ provider: { code: 'ANGELPAY' } })
+    expect(crossCall.where.type).toEqual({ not: 'REFUND' })
+
+    // El Payment queda estampado con el mismatch (quién recibió vs quién registró)
+    expect(mockedPaymentUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'pay_cross_1' },
+        data: expect.objectContaining({
+          processorData: expect.objectContaining({
+            angelpayWebhook: expect.objectContaining({
+              merchantMismatch: true,
+              receivedByMerchantAccountId: 'ma_1',
+              recordedMerchantAccountId: 'ma_other',
+            }),
+          }),
+        }),
+      }),
+    )
+
+    // El evento queda PROCESSED pero con errorReason MERCHANT_MISMATCH (visible en scans)
+    expect(mockedProviderEventLogUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'evt_cross_1' },
+        data: expect.objectContaining({
+          status: 'PROCESSED',
+          errorReason: 'MERCHANT_MISMATCH',
+          paymentId: 'pay_cross_1',
+        }),
+      }),
+    )
+
+    // Audit trail para el owner (leíble vía get_activity_log)
+    expect(mockedActivityLogCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          action: 'ANGELPAY_MERCHANT_MISMATCH',
+          entity: 'Payment',
+          entityId: 'pay_cross_1',
+          venueId: 'venue_1',
+        }),
+      }),
+    )
+  })
+
+  it('el cruce exige monto al centavo: si difiere, NO se vincula y el evento queda PENDING (regresión anti-colisión)', async () => {
+    mockedPaymentFindFirst
+      .mockResolvedValueOnce(null) // filtrado
+      .mockResolvedValueOnce({
+        // cruzado: mismas llaves pero OTRO monto → colisión de referencia, no vincular
+        id: 'pay_colision',
+        amount: 999,
+        tipAmount: 0,
+        processorData: null,
+        venueId: 'venue_1',
+        merchantAccountId: 'ma_other',
+      })
+
+    const result = await processAngelPayWebhook({
+      payload: webhookBody,
+      eventId: 'msg_cross_2',
+      merchantAccount: TEST_MERCHANT as any,
+      retryDelaysMs: [0],
+    })
+
+    expect(result.action).toBe('ORPHANED')
+    expect(result.errorReason).toBe('AWAITING_PAYMENT')
+    expect(mockedPaymentUpdate).not.toHaveBeenCalled()
+    expect(mockedActivityLogCreate).not.toHaveBeenCalled()
+  })
+
+  it('sin venue resoluble del receptor NO hay cruce (nunca cross-tenant): queda PENDING', async () => {
+    mockedMerchantAccountFindUnique.mockResolvedValue(null)
+    mockedPaymentFindFirst.mockResolvedValueOnce(null)
+
+    const result = await processAngelPayWebhook({
+      payload: webhookBody,
+      eventId: 'msg_cross_3',
+      merchantAccount: TEST_MERCHANT as any,
+      retryDelaysMs: [0],
+    })
+
+    expect(result.action).toBe('ORPHANED')
+    // Solo 1 llamada: el match filtrado. El cruce ni se intentó.
+    expect(mockedPaymentFindFirst).toHaveBeenCalledTimes(1)
+  })
+
+  it('el insert PENDING estampa venueId del receptor y _avoqado.receivedByMerchantAccountId', async () => {
+    mockedPaymentFindFirst.mockResolvedValue(null)
+
+    await processAngelPayWebhook({
+      payload: webhookBody,
+      eventId: 'msg_cross_4',
+      merchantAccount: TEST_MERCHANT as any,
+      retryDelaysMs: [0],
+    })
+
+    expect(mockedProviderEventLogCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          venueId: 'venue_1',
+          payload: expect.objectContaining({
+            _avoqado: { receivedByMerchantAccountId: 'ma_1' },
+          }),
+        }),
+      }),
+    )
+  })
+})
+
+describe('reconcileAngelPayWebhookForPayment — guardas de coexistencia (2026-07-29)', () => {
+  const basePayment = {
+    id: 'pay_guard_1',
+    idempotencyKey: 'idem-guard',
+    referenceNumber: '260727999999',
+    venueId: 'venue_g',
+    amount: 100,
+    tipAmount: 0,
+  }
+
+  beforeEach(() => {
+    ;[
+      mockedProviderEventLogFindMany,
+      mockedProviderEventLogUpdate,
+      mockedPaymentFindUnique,
+      mockedPaymentUpdate,
+      mockedMerchantAccountFindUnique,
+      mockedActivityLogCreate,
+    ].forEach(m => m.mockReset())
+    mockedPaymentFindUnique.mockResolvedValue({ processorData: null })
+    mockedProviderEventLogUpdate.mockResolvedValue({})
+    mockedPaymentUpdate.mockResolvedValue({})
+    mockedActivityLogCreate.mockResolvedValue({})
+  })
+
+  it('un pago Blumon NUNCA vincula eventos angelpay- (guard por proveedor)', async () => {
+    mockedMerchantAccountFindUnique.mockResolvedValue({ provider: { code: 'BLUMON' } })
+
+    await reconcileAngelPayWebhookForPayment({ ...basePayment, merchantAccountId: 'ma_blumon' })
+
+    expect(mockedProviderEventLogFindMany).not.toHaveBeenCalled()
+  })
+
+  it('el query de eventos queda acotado al venue del pago (o legacy sin venue)', async () => {
+    mockedMerchantAccountFindUnique.mockResolvedValue({ provider: { code: 'ANGELPAY' } })
+    mockedProviderEventLogFindMany.mockResolvedValue([])
+
+    await reconcileAngelPayWebhookForPayment({ ...basePayment, merchantAccountId: 'ma_ap' })
+
+    const where = mockedProviderEventLogFindMany.mock.calls[0][0].where
+    expect(where.AND).toEqual([{ OR: [{ venueId: 'venue_g' }, { venueId: null }] }])
+  })
+
+  it('match por llave débil (transactionId) con monto distinto: se SALTA, no estampa (anti-robo de webhook)', async () => {
+    mockedMerchantAccountFindUnique.mockResolvedValue({ provider: { code: 'ANGELPAY' } })
+    mockedProviderEventLogFindMany.mockResolvedValue([
+      {
+        id: 'evt_weak',
+        payload: {
+          event_type: 'send_transaction',
+          // Solo coincide transactionId (llave débil); integratorReference es de OTRO pago
+          payload: { amount: '000000099900', integratorReference: 'idem-de-otro', transactionId: '260727999999' },
+        },
+      },
+    ])
+
+    await reconcileAngelPayWebhookForPayment({ ...basePayment, merchantAccountId: 'ma_ap' })
+
+    expect(mockedPaymentUpdate).not.toHaveBeenCalled()
+    expect(mockedProviderEventLogUpdate).not.toHaveBeenCalled()
+  })
+
+  it('mismatch en backfill: _avoqado.receivedBy difiere del comercio registrado → flag + ActivityLog', async () => {
+    mockedMerchantAccountFindUnique.mockResolvedValue({ provider: { code: 'ANGELPAY' } })
+    mockedProviderEventLogFindMany.mockResolvedValue([
+      {
+        id: 'evt_mm',
+        payload: {
+          event_type: 'send_transaction',
+          _avoqado: { receivedByMerchantAccountId: 'ma_receptor' },
+          payload: { amount: '000000010000', integratorReference: 'idem-guard', transactionId: '260727999999' },
+        },
+      },
+    ])
+
+    await reconcileAngelPayWebhookForPayment({ ...basePayment, merchantAccountId: 'ma_registrado' })
+
+    expect(mockedPaymentUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          processorData: expect.objectContaining({
+            angelpayWebhook: expect.objectContaining({
+              merchantMismatch: true,
+              receivedByMerchantAccountId: 'ma_receptor',
+              recordedMerchantAccountId: 'ma_registrado',
+            }),
+          }),
+        }),
+      }),
+    )
+    expect(mockedProviderEventLogUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'PROCESSED', errorReason: 'MERCHANT_MISMATCH' }),
+      }),
+    )
+    expect(mockedActivityLogCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ action: 'ANGELPAY_MERCHANT_MISMATCH', entityId: 'pay_guard_1' }),
+      }),
+    )
+  })
+
+  it('regresión: mismo comercio receptor y registrado → PROCESSED limpio, sin flag ni ActivityLog', async () => {
+    mockedMerchantAccountFindUnique.mockResolvedValue({ provider: { code: 'ANGELPAY' } })
+    mockedProviderEventLogFindMany.mockResolvedValue([
+      {
+        id: 'evt_ok',
+        payload: {
+          event_type: 'send_transaction',
+          _avoqado: { receivedByMerchantAccountId: 'ma_mismo' },
+          payload: { amount: '000000010000', integratorReference: 'idem-guard', transactionId: '260727999999' },
+        },
+      },
+    ])
+
+    await reconcileAngelPayWebhookForPayment({ ...basePayment, merchantAccountId: 'ma_mismo' })
+
+    expect(mockedProviderEventLogUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'PROCESSED', errorReason: null }),
+      }),
+    )
+    expect(mockedActivityLogCreate).not.toHaveBeenCalled()
   })
 })
