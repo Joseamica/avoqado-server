@@ -136,6 +136,96 @@ describe('Task 2 — deterministic tiered matching', () => {
 })
 
 /**
+ * Incidente 2026-07-30 (Mindform): el webhook llegó 1.97 s ANTES de que el
+ * Payment existiera, así que los niveles fuertes (OP_NUMBER, REFERENCE_EXACT)
+ * no encontraron nada y la cascada cayó a AUTH_CODE — cuya llave era solo
+ * `venue + authorizationNumber` (+ monto como filtro). Los auth de 6 dígitos se
+ * reciclan, así que enganchó un pago de HACE 20 DÍAS: mismo venue, mismo $110,
+ * mismo auth 436971, pero VISA en vez de MASTERCARD y otro número de operación.
+ *
+ * La guarda de ambigüedad no salvó nada porque el competidor legítimo aún no
+ * existía: había UN solo candidato, y era el equivocado. Al consumirse ahí, el
+ * evento nunca llegó a PENDING, así que ni el reintento de 24 h ni el backfill
+ * —que lo habrían resuelto en segundos— llegaron a correr.
+ *
+ * Dos cotas independientes, cada una habría bastado sola:
+ *   1. ventana temporal en AUTH_CODE (un auth reciclado a 20 días no es defendible)
+ *   2. la marca de la tarjeta debe cuadrar cuando el payload la trae
+ */
+describe('AUTH_CODE — llave débil acotada (incidente cross-time 2026-07-30)', () => {
+  const authOnlyPayload = {
+    amount: '110.00',
+    authorizationCode: '436971',
+    brand: 'MASTERCARD',
+    operationType: 'VENTA',
+    codeResponse: '00',
+  } as any
+
+  it('acota AUTH_CODE por fecha — un pago viejo queda FUERA del universo de búsqueda', async () => {
+    mockedFindMany.mockResolvedValue([])
+
+    await reconcileBlumonEvent('evt_auth_window', authOnlyPayload, { scopeVenueIds: ['venue_1'] })
+
+    const authCall = mockedFindMany.mock.calls.find(c => c[0]?.where?.authorizationNumber === '436971')
+    expect(authCall).toBeDefined()
+    // Sin esta cota, el pago de hace 20 días es un candidato válido.
+    expect(authCall![0].where.createdAt).toEqual(expect.objectContaining({ gte: expect.any(Date) }))
+  })
+
+  it('la ventana es de días, no de meses (un auth reciclado a 20 días NO debe alcanzarse)', async () => {
+    mockedFindMany.mockResolvedValue([])
+
+    await reconcileBlumonEvent('evt_auth_window_size', authOnlyPayload, { scopeVenueIds: ['venue_1'] })
+
+    const authCall = mockedFindMany.mock.calls.find(c => c[0]?.where?.authorizationNumber === '436971')
+    // Banda, no igualdad: el servicio calcula su `gte` unos ms ANTES que este
+    // Date.now(), así que un `<= 48` exacto solo pasa si ambos caen en el mismo
+    // milisegundo. Lo que importa es el ORDEN DE MAGNITUD — días, no meses.
+    const horas = (Date.now() - (authCall![0].where.createdAt.gte as Date).getTime()) / 36e5
+    expect(horas).toBeGreaterThan(1) // no tan corta que rompa un replay de cola offline
+    expect(horas).toBeLessThan(72) // ni tan larga que alcance un auth reciclado (el caso real: 20 días)
+  })
+
+  it('exige que cuadre la MARCA cuando el payload la trae — VISA nunca satisface un webhook MASTERCARD', async () => {
+    // El caso real: el único candidato en ventana es de otra marca.
+    mockedFindMany.mockResolvedValue([{ ...candidate('pay_visa_vieja', 110), cardBrand: 'VISA' }])
+
+    const result = await reconcileBlumonEvent('evt_auth_brand', authOnlyPayload, { scopeVenueIds: ['venue_1'] })
+
+    expect(result.paymentId).toBeUndefined()
+    expect(mockedPaymentUpdate).not.toHaveBeenCalled()
+  })
+
+  it('la marca correcta SÍ engancha (regresión — no romper el camino feliz)', async () => {
+    mockedFindMany.mockResolvedValue([{ ...candidate('pay_mc_real', 110), cardBrand: 'MASTERCARD' }])
+
+    const result = await reconcileBlumonEvent('evt_auth_brand_ok', authOnlyPayload, { scopeVenueIds: ['venue_1'] })
+
+    expect(['MATCHED', 'RECONCILED']).toContain(result.action)
+    expect(result.paymentId).toBe('pay_mc_real')
+  })
+
+  it('un pago sin marca registrada NO se descarta (los AngelPay/legacy no traen cardBrand)', async () => {
+    mockedFindMany.mockResolvedValue([{ ...candidate('pay_sin_marca', 110), cardBrand: null }])
+
+    const result = await reconcileBlumonEvent('evt_auth_brand_null', authOnlyPayload, { scopeVenueIds: ['venue_1'] })
+
+    expect(['MATCHED', 'RECONCILED']).toContain(result.action)
+    expect(result.paymentId).toBe('pay_sin_marca')
+  })
+
+  it('los niveles FUERTES no llevan cota temporal (un replay tardío debe seguir enganchando)', async () => {
+    mockedFindMany.mockResolvedValue([])
+
+    await reconcileBlumonEvent('evt_strong_no_window', ventaPayload, { scopeVenueIds: ['venue_1'] })
+
+    const opCall = mockedFindMany.mock.calls.find(c => JSON.stringify(c[0]?.where ?? {}).includes('99000001'))
+    expect(opCall).toBeDefined()
+    expect(opCall![0].where.createdAt).toBeUndefined()
+  })
+})
+
+/**
  * `operationNumber` is Blumon's strongest per-transaction key, yet the payload
  * validator rejected any webhook identified ONLY by it. And a payload with no
  * usable key can never match — leaving it PENDING would make the cron retry it

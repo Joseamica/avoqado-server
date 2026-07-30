@@ -263,6 +263,14 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   FulfillmentArea: 'Orders, KDS & Cash',
   OrderFulfillment: 'Orders, KDS & Cash',
   OrderFulfillmentLine: 'Orders, KDS & Cash',
+  VenueAreaTicketSettings: 'Orders, KDS & Cash',
+  AreaTicket: 'Orders, KDS & Cash',
+  AreaTicketLine: 'Orders, KDS & Cash',
+  AreaTicketInventoryReservation: 'Orders, KDS & Cash',
+  AreaTicketCheckoutSession: 'Orders, KDS & Cash',
+  AreaTicketPaymentAttempt: 'Orders, KDS & Cash',
+  AreaTicketPrintAttempt: 'Orders, KDS & Cash',
+  AreaTicketFulfillment: 'Orders, KDS & Cash',
 
   // 9. Payments & Fees
   Payment: 'Payments & Fees',
@@ -421,6 +429,8 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   BulkCommandOperation: 'Terminals / TPV Fleet',
   GeofenceRule: 'Terminals / TPV Fleet',
   VenueCryptoConfig: 'Terminals / TPV Fleet',
+  VenueScaleSettings: 'Terminals / TPV Fleet',
+  ScaleProfile: 'Terminals / TPV Fleet',
 
   // 17. Notifications, WhatsApp & Marketing
   Notification: 'Notifications, WhatsApp & Marketing',

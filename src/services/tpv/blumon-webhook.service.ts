@@ -66,6 +66,22 @@ export const BLUMON_WEBHOOK_ERROR_REASONS = {
  */
 export const BLUMON_WEBHOOK_PENDING_TTL_MS = 24 * 60 * 60 * 1000
 
+/**
+ * Time window for the AUTH_CODE tier (incident 2026-07-30, Mindform).
+ *
+ * 6-digit issuer auth codes RECYCLE. Unbounded, `venue + auth + amount` matched
+ * a Payment from 20 days earlier — same venue, same $110, same auth, different
+ * card and different operation number. The real Payment did not exist yet (the
+ * webhook beat it by 1.97s), so there was only ONE candidate and the ambiguity
+ * guard never fired.
+ *
+ * 48h is deliberately wider than the arrival skew we actually see (seconds) so
+ * an offline-queue replay still lands, but far tighter than the recycle period.
+ * It only bounds the WEAK tier: OP_NUMBER / REFERENCE_EXACT stay unbounded
+ * because they identify a transaction on their own.
+ */
+export const BLUMON_AUTH_CODE_MATCH_WINDOW_MS = 48 * 60 * 60 * 1000
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // SerialNumber bridge — Blumon → our Terminal table
 //
@@ -784,6 +800,12 @@ async function attemptPaymentMatch(
       autoLink: boolean
       /** true ⇒ the amount is part of the selection key, not a post-hoc check */
       requireAmount: boolean
+      /**
+       * true ⇒ the card brand is part of the key too (when the payload carries
+       * one). Only for tiers keyed on a RECYCLABLE value — a brand mismatch
+       * proves it is a different transaction. See BLUMON_AUTH_CODE_MATCH_WINDOW_MS.
+       */
+      requireBrand?: boolean
     }
 
     const tiers: MatchTier[] = []
@@ -818,9 +840,18 @@ async function attemptPaymentMatch(
     if (payload.authorizationCode) {
       tiers.push({
         name: 'AUTH_CODE',
-        where: { ...scopeWhere, authorizationNumber: payload.authorizationCode },
+        where: {
+          ...scopeWhere,
+          authorizationNumber: payload.authorizationCode,
+          // Auth codes recycle — without this bound the tier reached a Payment
+          // from 20 days earlier (incident 2026-07-30). Out-of-window events
+          // fall through to PENDING, where the 24h retry + the per-Payment
+          // backfill reconcile them against their real owner.
+          createdAt: { gte: new Date(Date.now() - BLUMON_AUTH_CODE_MATCH_WINDOW_MS) },
+        },
         autoLink: true,
         requireAmount: true,
+        requireBrand: true,
       })
     }
 
@@ -857,6 +888,28 @@ async function attemptPaymentMatch(
     const amountMatches = (p: { amount: unknown; tipAmount: unknown }): boolean =>
       Math.abs(blumonAmount - (parseFloat(String(p.amount)) + parseFloat(String(p.tipAmount ?? 0)))) < 0.01
 
+    /**
+     * Brand check for tiers keyed on a recyclable value. FAIL-OPEN by design:
+     * only a POSITIVE disagreement rejects. The webhook without a brand, or a
+     * Payment stored without one (legacy rows, AngelPay records it UNKNOWN),
+     * proves nothing — rejecting those would strand real charges as orphans,
+     * which is the failure mode this whole path exists to prevent.
+     */
+    const normalizeBrand = (b: unknown): string | null => {
+      const s = String(b ?? '')
+        .trim()
+        .toUpperCase()
+      if (!s || s === 'UNKNOWN' || s === 'OTHER') return null
+      return s === 'AMEX' ? 'AMERICAN_EXPRESS' : s
+    }
+    const payloadBrand = normalizeBrand(payload.brand)
+    const brandMatches = (p: { cardBrand?: unknown }): boolean => {
+      if (!payloadBrand) return true
+      const paymentBrand = normalizeBrand(p.cardBrand)
+      if (!paymentBrand) return true
+      return paymentBrand === payloadBrand
+    }
+
     const paymentInclude = {
       order: {
         select: {
@@ -882,7 +935,8 @@ async function attemptPaymentMatch(
           orderBy: { createdAt: 'desc' },
           include: paymentInclude,
         })
-        const viable = tier.requireAmount ? found.filter(amountMatches) : found
+        const byAmount = tier.requireAmount ? found.filter(amountMatches) : found
+        const viable = tier.requireBrand ? byAmount.filter(brandMatches) : byAmount
         if (viable.length === 0) continue
         if (viable.length >= 2) return { kind: 'ambiguous', tier: tier.name, ids: viable.map(v => v.id) }
         if (!tier.autoLink) return { kind: 'weak', tier: tier.name, ids: viable.map(v => v.id) }

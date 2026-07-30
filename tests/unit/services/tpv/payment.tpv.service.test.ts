@@ -110,6 +110,17 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
         shift: {
           update: prisma.shift.update,
         },
+        // recordOrderPayment llama lockAreaTicketCheckoutForPayment(tx, …) — area
+        // tickets v7. Este `tx` se arma A MANO: un modelo que la ruta toque y no
+        // esté aquí sale undefined y el test truena con un TypeError en lugar de
+        // su aserción real. findFirst → null = "no es orden de area tickets".
+        areaTicketCheckoutSession: {
+          findFirst: jest.fn().mockResolvedValue(null),
+        },
+        areaTicketPaymentAttempt: {
+          findUnique: jest.fn().mockResolvedValue(null),
+        },
+        $queryRaw: jest.fn().mockResolvedValue([]),
       }
       return callback(tx)
     })

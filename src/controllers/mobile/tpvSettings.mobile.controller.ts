@@ -15,8 +15,16 @@ import prisma from '../../utils/prismaClient'
 import { VenuePlanInfo, getVenuePlanInfo } from '../../services/access/basePlan.service'
 import { TpvSettings, getTpvSettings } from '../../services/dashboard/tpv.dashboard.service'
 
+function requestDeviceUid(req: Request): string | null {
+  const raw = req.headers?.['x-device-id']
+  const value = Array.isArray(raw) ? raw[0] : raw
+  const trimmed = typeof value === 'string' ? value.trim().slice(0, 64) : ''
+  return trimmed || null
+}
+
 /**
- * Get venue terminals and merged settings for the first active terminal,
+ * Get venue terminals and merged settings for the requesting device's terminal
+ * (with the first active terminal retained as a legacy fallback),
  * plus the venue's plan-tier info (optional `plan` field) so POS apps can
  * gate UI by plan.
  * @route GET /api/v1/mobile/venues/:venueId/settings
@@ -46,6 +54,12 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
           assignedMerchantIds: true,
           preferredProcessor: true,
           activatedAt: true,
+          deviceUid: true,
+          fulfillmentAreaId: true,
+          canIssueAreaTickets: true,
+          canCheckoutAreaTickets: true,
+          canDeliverAreaTickets: true,
+          defaultWorkspace: true,
         },
         orderBy: { name: 'asc' },
       }),
@@ -55,8 +69,13 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
       }),
     ])
 
-    // 2. Find the first ACTIVE terminal
-    const activeTerminal = terminals.find(t => t.status === 'ACTIVE') ?? null
+    // 2. Prefer the terminal that made this request. A venue can have an area
+    //    station, a checkout and a café terminal at the same time; choosing the
+    //    first active row would leak one device's workspace/settings into another.
+    //    Headerless legacy clients keep the previous first-active fallback.
+    const deviceUid = requestDeviceUid(req)
+    const deviceTerminal = deviceUid ? (terminals.find(t => t.status === 'ACTIVE' && t.deviceUid === deviceUid) ?? null) : null
+    const activeTerminal = deviceTerminal ?? terminals.find(t => t.status === 'ACTIVE') ?? null
 
     // 3. If there is an active terminal, get its merged settings
     let settings: TpvSettings | null = null
@@ -64,8 +83,22 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
       settings = await getTpvSettings(activeTerminal.id)
     }
 
-    // 4. Strip config/configOverrides from terminal list (settings are returned separately)
-    const terminalList = terminals.map(({ config, configOverrides, ...rest }) => rest)
+    // 4. Strip private/internal fields from the terminal list. Per-device area
+    //    capabilities are returned separately below so Android never has to infer
+    //    its identity from a venue-wide list.
+    const terminalList = terminals.map(
+      ({
+        config,
+        configOverrides,
+        deviceUid: _deviceUid,
+        fulfillmentAreaId: _fulfillmentAreaId,
+        canIssueAreaTickets: _canIssueAreaTickets,
+        canCheckoutAreaTickets: _canCheckoutAreaTickets,
+        canDeliverAreaTickets: _canDeliverAreaTickets,
+        defaultWorkspace: _defaultWorkspace,
+        ...rest
+      }) => rest,
+    )
 
     // 5. `plan` is ADDITIVE and OPTIONAL (omitted when the lookup failed) — existing fields
     //    must never be removed/renamed (old app versions depend on them).
@@ -75,6 +108,16 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
         terminals: terminalList,
         settings,
         activeTerminalId: activeTerminal?.id ?? null,
+        deviceTerminal: deviceTerminal
+          ? {
+              id: deviceTerminal.id,
+              defaultWorkspace: deviceTerminal.defaultWorkspace,
+              canIssueAreaTickets: deviceTerminal.canIssueAreaTickets,
+              canCheckoutAreaTickets: deviceTerminal.canCheckoutAreaTickets,
+              canDeliverAreaTickets: deviceTerminal.canDeliverAreaTickets,
+              fulfillmentAreaId: deviceTerminal.fulfillmentAreaId,
+            }
+          : null,
         ...(plan ? { plan } : {}),
       },
     })

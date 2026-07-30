@@ -482,9 +482,17 @@ model Venue {
   printJobs     PrintJob[]
 
   // ==========================================
-  // Vales por área (AREA_TICKETS) — cuenta compartida entre áreas emisoras
+  // Vales por área (AREA_TICKETS) — vales independientes + consolidación en caja
   // ==========================================
-  fulfillmentAreas FulfillmentArea[]
+  fulfillmentAreas           FulfillmentArea[]
+  areaTicketSettings         VenueAreaTicketSettings?
+  areaTickets                AreaTicket[]
+  areaTicketCheckoutSessions AreaTicketCheckoutSession[]
+  areaTicketReservations     AreaTicketInventoryReservation[]
+
+  // Básculas (SCALE_INTEGRATION) — capacidad y rollout independientes de vales.
+  scaleSettings VenueScaleSettings?
+  scaleProfiles ScaleProfile[]
 
   // Per-staff onboarding/tour state records scoped to this venue
   staffOnboardingStates StaffOnboardingState[]
@@ -831,6 +839,11 @@ model Staff {
   /// Entregas de vales por área ejecutadas por esta persona (AREA_TICKETS §5.5) —
   /// es el "por Rosa" que ve el área al reintentar una entrega ya hecha.
   fulfillmentsDelivered OrderFulfillment[] @relation("OrderFulfillmentStaff")
+
+  areaTicketsIssued          AreaTicket[]                @relation("AreaTicketIssuedByStaff")
+  areaTicketCheckoutSessions AreaTicketCheckoutSession[] @relation("AreaTicketCheckoutStaff")
+  areaTicketPrintAttempts    AreaTicketPrintAttempt[]    @relation("AreaTicketPrintStaff")
+  areaTicketFulfillments     AreaTicketFulfillment[]     @relation("AreaTicketFulfillmentStaff")
 
   // Notifications
   notifications           Notification[]
@@ -1551,6 +1564,7 @@ model Product {
   // Relations
   inventory        Inventory?
   orderItems       OrderItem[]
+  areaTicketLines  AreaTicketLine[]
   paymentLinkItems PaymentLinkItem[]
   modifierGroups   ProductModifierGroup[]
   recipe           Recipe? // ✅ NEW: Recipe composition
@@ -2806,8 +2820,20 @@ model Order {
   cfdis Cfdi[]
 
   // ==========================================
-  // VALES POR ÁREA (AREA_TICKETS) — cuenta compartida entre áreas emisoras
+  // VALES POR ÁREA (AREA_TICKETS)
   // ==========================================
+  /// Código opaco de entrega del comprobante final v7. Se genera al materializar y
+  /// sólo autoriza consulta/entrega cuando la orden está completamente pagada.
+  areaDeliveryCode String?
+
+  /// Vales independientes v7 consolidados en esta venta y su sesión de caja.
+  areaTickets               AreaTicket[]
+  areaTicketCheckoutSession AreaTicketCheckoutSession?
+  areaTicketPaymentAttempts AreaTicketPaymentAttempt[]
+  areaTicketFulfillments    AreaTicketFulfillment[]
+
+  // Campos legacy v3. Se conservan nullable para clientes ya desplegados y no se
+  // reutilizan como autoridad del flujo v7.
   // Spec: docs/superpowers/specs/2026-07-28-vales-por-area-y-bascula-design.md §5.1/§5.4
   //
   // Todo ADITIVO y nullable: una orden normal (mostrador, mesa, delivery) deja los
@@ -2854,6 +2880,7 @@ model Order {
 
   @@unique([venueId, externalId])
   @@unique([venueId, areaTicketCode])
+  @@unique([venueId, areaDeliveryCode])
   @@index([venueId])
   @@index([shiftId])
   @@index([status])
@@ -2982,6 +3009,10 @@ model OrderItem {
 
   /// Entregas que cubren esta línea (§5.5). Renglón COMPLETO, sin parcialidad.
   fulfillmentLines OrderFulfillmentLine[]
+
+  /// Origen v7 inmutable. Único evita importar dos veces la misma línea de vale.
+  areaTicketLineId String?         @unique
+  areaTicketLine   AreaTicketLine? @relation(fields: [areaTicketLineId], references: [id], onDelete: SetNull)
 
   // ==========================================
   // SERIALIZED ITEM - Relation for unique barcode items
@@ -3249,6 +3280,8 @@ model Payment {
   // we link back to Payments here. One Payment can have multiple events (initial
   // VENTA + DEVOLUCION later, etc.).
   providerEventLogs ProviderEventLog[]
+
+  areaTicketPaymentAttempt AreaTicketPaymentAttempt?
 
   // Rate correction entries for retroactive economics recomputation
   rateCorrectionEntries RateCorrectionEntry[]
@@ -3743,6 +3776,20 @@ model Terminal {
   /// Entregas ejecutadas desde esta terminal (§5.5).
   fulfillments OrderFulfillment[] @relation("OrderFulfillmentTerminal")
 
+  // Vales v7: capacidades explícitas; tener el entitlement no activa una terminal.
+  canIssueAreaTickets    Boolean           @default(false)
+  canCheckoutAreaTickets Boolean           @default(false)
+  canDeliverAreaTickets  Boolean           @default(false)
+  defaultWorkspace       TerminalWorkspace @default(STANDARD_POS)
+
+  scaleProfileId String?
+  scaleProfile   ScaleProfile? @relation(fields: [scaleProfileId], references: [id], onDelete: SetNull)
+
+  areaTicketsIssued          AreaTicket[]                @relation("AreaTicketSourceTerminal")
+  areaTicketCheckoutSessions AreaTicketCheckoutSession[] @relation("AreaTicketCheckoutTerminal")
+  areaTicketPrintAttempts    AreaTicketPrintAttempt[]    @relation("AreaTicketPrintTerminal")
+  areaTicketFulfillments     AreaTicketFulfillment[]     @relation("AreaTicketFulfillmentTerminal")
+
   reviews Review[] // ✅ LÍNEA AGREGADA
 
   promoterLocationPings PromoterLocationPing[] // device-centric geolocation pings
@@ -3807,6 +3854,7 @@ model Terminal {
   @@index([venueId, selfRegistered]) // separar hardware provisionado de dispositivos auto-registrados en la lista
   @@index([venueId, formFactor]) // filtro por tipo de aparato en el dashboard
   @@index([fulfillmentAreaId]) // terminales de un área
+  @@index([scaleProfileId])
 }
 
 // ==========================================
@@ -11599,8 +11647,10 @@ model FulfillmentArea {
   /// en cada renglón que mandan.
   terminals Terminal[]
 
-  orderItems   OrderItem[]
-  fulfillments OrderFulfillment[]
+  orderItems             OrderItem[]
+  fulfillments           OrderFulfillment[]
+  areaTickets            AreaTicket[]
+  areaTicketFulfillments AreaTicketFulfillment[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -11671,6 +11721,374 @@ enum FulfillmentMode {
   HOLD_UNTIL_PAID
   /// Prepara cuando el cliente regresa ya pagado. Ej: cafetería.
   PREPARE_ON_PAID
+}
+
+// ============================================================================
+// VALES POR ÁREA v7 — vales independientes, sesión de caja y entrega por vale
+// ============================================================================
+
+model VenueAreaTicketSettings {
+  id      String @id @default(cuid())
+  venueId String @unique
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  enabled                      Boolean                            @default(false)
+  allowMixedCart               Boolean                            @default(true)
+  claimTtlSeconds              Int                                @default(300)
+  checkoutSessionMaxAgeMinutes Int                                @default(30)
+  ticketExpiryPolicy           AreaTicketExpiryPolicy             @default(BUSINESS_DAY_CLOSE)
+  ticketExpiryMinutes          Int?
+  deliveryVerificationMode     AreaTicketDeliveryVerificationMode @default(PAPER_OR_SCAN)
+  codeSymbology                String                             @default("CODE128")
+  requireManagerForCancel      Boolean                            @default(true)
+  recordWasteOnCancel          Boolean                            @default(false)
+  inventoryReservationMode     AreaTicketInventoryReservationMode @default(NONE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model AreaTicket {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Restrict)
+
+  fulfillmentAreaId String
+  fulfillmentArea   FulfillmentArea @relation(fields: [fulfillmentAreaId], references: [id], onDelete: Restrict)
+
+  code           String
+  idempotencyKey String           @db.VarChar(64)
+  status         AreaTicketStatus @default(ISSUED)
+
+  sourceTerminalId String
+  sourceTerminal   Terminal @relation("AreaTicketSourceTerminal", fields: [sourceTerminalId], references: [id], onDelete: Restrict)
+  issuedByStaffId  String?
+  issuedByStaff    Staff?   @relation("AreaTicketIssuedByStaff", fields: [issuedByStaffId], references: [id], onDelete: SetNull)
+
+  checkoutSessionId String?
+  checkoutSession   AreaTicketCheckoutSession? @relation(fields: [checkoutSessionId], references: [id], onDelete: SetNull)
+  orderId           String?
+  order             Order?                     @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  currency            String                @default("MXN")
+  subtotal            Decimal               @db.Decimal(12, 2)
+  discountAmount      Decimal               @default(0) @db.Decimal(12, 2)
+  taxAmount           Decimal               @db.Decimal(12, 2)
+  total               Decimal               @db.Decimal(12, 2)
+  pricingSnapshotHash String                @db.VarChar(64)
+  printStatus         AreaTicketPrintStatus @default(NOT_PRINTED)
+  version             Int                   @default(1)
+
+  issuedAt       DateTime  @default(now())
+  printedAt      DateTime?
+  claimedAt      DateTime?
+  claimExpiresAt DateTime?
+  paidAt         DateTime?
+  cancelledAt    DateTime?
+  expiresAt      DateTime?
+
+  lines         AreaTicketLine[]
+  reservations  AreaTicketInventoryReservation[]
+  printAttempts AreaTicketPrintAttempt[]
+  fulfillment   AreaTicketFulfillment?
+
+  @@unique([venueId, code])
+  @@unique([venueId, idempotencyKey])
+  @@index([venueId, status, fulfillmentAreaId, issuedAt])
+  @@index([venueId, checkoutSessionId, status])
+  @@index([venueId, orderId])
+}
+
+model AreaTicketLine {
+  id           String     @id @default(cuid())
+  areaTicketId String
+  areaTicket   AreaTicket @relation(fields: [areaTicketId], references: [id], onDelete: Cascade)
+  clientLineId String     @db.VarChar(64)
+
+  productId            String?
+  product              Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  productNameSnapshot  String
+  skuSnapshot          String?
+  categoryNameSnapshot String?
+  modifiersSnapshot    Json?
+  quantity             Decimal  @db.Decimal(12, 3)
+  weightKg             Decimal? @db.Decimal(12, 3)
+  unitPrice            Decimal  @db.Decimal(12, 2)
+  discountAmount       Decimal  @default(0) @db.Decimal(12, 2)
+  appliedDiscountId    String?
+  taxAmount            Decimal  @db.Decimal(12, 2)
+  total                Decimal  @db.Decimal(12, 2)
+  notes                String?
+
+  orderItem OrderItem?
+
+  reservations AreaTicketInventoryReservation[]
+
+  createdAt DateTime @default(now())
+
+  @@unique([areaTicketId, clientLineId])
+  @@index([areaTicketId])
+  @@index([productId])
+}
+
+model AreaTicketInventoryReservation {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Restrict)
+
+  areaTicketId     String
+  areaTicket       AreaTicket     @relation(fields: [areaTicketId], references: [id], onDelete: Cascade)
+  areaTicketLineId String
+  areaTicketLine   AreaTicketLine @relation(fields: [areaTicketLineId], references: [id], onDelete: Cascade)
+
+  inventoryKind       AreaTicketInventoryTarget
+  inventoryId         String
+  quantityBaseUnits   Decimal                              @db.Decimal(12, 3)
+  status              AreaTicketInventoryReservationStatus @default(ACTIVE)
+  inventoryMovementId String?                              @unique
+
+  createdAt  DateTime  @default(now())
+  consumedAt DateTime?
+  releasedAt DateTime?
+
+  @@unique([areaTicketLineId, inventoryKind, inventoryId])
+  @@index([venueId, inventoryKind, inventoryId, status])
+  @@index([areaTicketId, status])
+}
+
+model AreaTicketCheckoutSession {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Restrict)
+
+  terminalId String
+  terminal   Terminal @relation("AreaTicketCheckoutTerminal", fields: [terminalId], references: [id], onDelete: Restrict)
+  staffId    String?
+  staff      Staff?   @relation("AreaTicketCheckoutStaff", fields: [staffId], references: [id], onDelete: SetNull)
+
+  idempotencyKey            String                   @db.VarChar(64)
+  materializeIdempotencyKey String?                  @db.VarChar(64)
+  cancelIdempotencyKey      String?                  @db.VarChar(64)
+  status                    AreaTicketCheckoutStatus @default(OPEN)
+
+  orderId                String? @unique
+  order                  Order?  @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  activePaymentAttemptId String?
+
+  lastHeartbeatAt DateTime?
+  version         Int       @default(1)
+  expiresAt       DateTime
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  tickets         AreaTicket[]
+  paymentAttempts AreaTicketPaymentAttempt[]
+
+  @@unique([venueId, idempotencyKey])
+  @@index([venueId, terminalId, status, createdAt])
+}
+
+model AreaTicketPaymentAttempt {
+  id                String                         @id @default(cuid())
+  checkoutSessionId String
+  checkoutSession   AreaTicketCheckoutSession      @relation(fields: [checkoutSessionId], references: [id], onDelete: Restrict)
+  orderId           String
+  order             Order                          @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  sequence          Int
+  idempotencyKey    String                         @db.VarChar(64)
+  amount            Decimal                        @db.Decimal(12, 2)
+  method            PaymentMethod
+  status            AreaTicketPaymentAttemptStatus @default(PREPARED)
+
+  paymentId         String?   @unique
+  payment           Payment?  @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+  providerReference String?
+  startedAt         DateTime  @default(now())
+  completedAt       DateTime?
+  lastCheckedAt     DateTime?
+
+  @@unique([checkoutSessionId, idempotencyKey])
+  @@unique([checkoutSessionId, sequence])
+}
+
+model AreaTicketPrintAttempt {
+  id             String     @id @default(cuid())
+  areaTicketId   String
+  areaTicket     AreaTicket @relation(fields: [areaTicketId], references: [id], onDelete: Cascade)
+  idempotencyKey String     @db.VarChar(64)
+
+  terminalId String
+  terminal   Terminal @relation("AreaTicketPrintTerminal", fields: [terminalId], references: [id], onDelete: Restrict)
+  staffId    String?
+  staff      Staff?   @relation("AreaTicketPrintStaff", fields: [staffId], references: [id], onDelete: SetNull)
+
+  status    AreaTicketPrintAttemptStatus
+  kind      AreaTicketPrintAttemptKind
+  reason    String?
+  errorCode String?
+  createdAt DateTime                     @default(now())
+
+  @@unique([areaTicketId, idempotencyKey])
+  @@index([areaTicketId, createdAt])
+}
+
+model AreaTicketFulfillment {
+  id           String     @id @default(cuid())
+  areaTicketId String     @unique
+  areaTicket   AreaTicket @relation(fields: [areaTicketId], references: [id], onDelete: Restrict)
+  orderId      String
+  order        Order      @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  fulfillmentAreaId String
+  fulfillmentArea   FulfillmentArea             @relation(fields: [fulfillmentAreaId], references: [id], onDelete: Restrict)
+  method            AreaTicketFulfillmentMethod
+  idempotencyKey    String                      @db.VarChar(64)
+
+  deliveredByStaffId String?
+  deliveredByStaff   Staff?   @relation("AreaTicketFulfillmentStaff", fields: [deliveredByStaffId], references: [id], onDelete: SetNull)
+  terminalId         String
+  terminal           Terminal @relation("AreaTicketFulfillmentTerminal", fields: [terminalId], references: [id], onDelete: Restrict)
+  deliveredAt        DateTime @default(now())
+
+  @@unique([areaTicketId, idempotencyKey])
+  @@index([fulfillmentAreaId, deliveredAt])
+  @@index([orderId])
+}
+
+model VenueScaleSettings {
+  id      String @id @default(cuid())
+  venueId String @unique
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  enabled   Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model ScaleProfile {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  name            String
+  location        String
+  model           String
+  allowedContexts ScaleContext[]
+  transport       ScaleTransport @default(MANUAL)
+  vendorId        Int?
+  productId       Int?
+  baudRate        Int?
+  dataBits        Int?
+  parity          String?
+  stopBits        Int?
+  frameParser     Json?
+  stableIndicator String?
+  unit            Unit           @default(KILOGRAM)
+  active          Boolean        @default(true)
+
+  terminals Terminal[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([venueId, name])
+  @@index([venueId, active])
+}
+
+enum AreaTicketStatus {
+  ISSUED
+  CLAIMED
+  PAID
+  DELIVERED
+  CANCELLED
+  EXPIRED
+}
+
+enum AreaTicketCheckoutStatus {
+  OPEN
+  MATERIALIZED
+  PARTIALLY_PAID
+  PAYMENT_PENDING
+  RECONCILIATION_REQUIRED
+  PAID
+  CANCELLED
+  EXPIRED
+}
+
+enum AreaTicketPaymentAttemptStatus {
+  PREPARED
+  PENDING
+  SUCCEEDED
+  FAILED
+  UNKNOWN
+}
+
+enum AreaTicketPrintStatus {
+  NOT_PRINTED
+  PRINTED
+  PRINT_FAILED
+}
+
+enum AreaTicketPrintAttemptStatus {
+  PRINTED
+  FAILED
+}
+
+enum AreaTicketPrintAttemptKind {
+  ORIGINAL
+  REPRINT
+}
+
+enum AreaTicketFulfillmentMethod {
+  PAPER_CONFIRMATION
+  RECEIPT_SCAN
+}
+
+enum AreaTicketDeliveryVerificationMode {
+  PAPER_CONFIRMATION
+  RECEIPT_SCAN
+  PAPER_OR_SCAN
+}
+
+enum AreaTicketExpiryPolicy {
+  BUSINESS_DAY_CLOSE
+  FIXED_DURATION
+}
+
+enum AreaTicketInventoryReservationMode {
+  NONE
+  HOLD_AVAILABLE_STOCK
+}
+
+enum AreaTicketInventoryTarget {
+  QUANTITY_INVENTORY
+  RAW_MATERIAL
+}
+
+enum AreaTicketInventoryReservationStatus {
+  ACTIVE
+  CONSUMED
+  RELEASED
+  WASTE
+}
+
+enum TerminalWorkspace {
+  STANDARD_POS
+  AREA_OPERATIONS
+}
+
+enum ScaleContext {
+  AREA_TICKET_LINE
+  INVENTORY_RECEIPT
+  INVENTORY_TRANSFER_DISPATCH
+  STOCK_COUNT
+  STOCK_ADJUSTMENT
+}
+
+enum ScaleTransport {
+  ANDROID_USB_SERIAL
+  DESKTOP_BRIDGE
+  MANUAL
 }
 
 /// Cloud replica of the gateway's durable outbox. `id` is created BY THE GATEWAY

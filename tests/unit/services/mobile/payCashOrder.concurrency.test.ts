@@ -61,6 +61,7 @@ interface FakeOrderRow {
   discountAmount: Decimal
   serviceChargeAmount: Decimal
   total: Decimal
+  paidAmount: Decimal
   remainingBalance: Decimal
   version: number
   areaTicketCode: string | null
@@ -77,6 +78,7 @@ function installFakeStore(initial: Partial<FakeOrderRow> = {}) {
     discountAmount: new Decimal(0),
     serviceChargeAmount: new Decimal(0),
     total: new Decimal(100),
+    paidAmount: new Decimal(0),
     remainingBalance: new Decimal(100),
     version: 1,
     areaTicketCode: null,
@@ -104,6 +106,7 @@ function installFakeStore(initial: Partial<FakeOrderRow> = {}) {
 
     row.paymentStatus = data.paymentStatus ?? row.paymentStatus
     row.status = data.status ?? row.status
+    row.paidAmount = new Decimal(data.paidAmount ?? row.paidAmount)
     row.remainingBalance = new Decimal(data.remainingBalance ?? row.remainingBalance)
     row.total = data.total ?? row.total
     if (data.version?.increment) row.version += data.version.increment
@@ -179,6 +182,7 @@ describe('payCashOrder — cobro atómico (§5.4)', () => {
 
     // Y el dinero cuadra: la orden quedó PAID con saldo 0, no sobrepagada.
     expect(row.paymentStatus).toBe('PAID')
+    expect(Number(row.paidAmount)).toBe(100)
     expect(Number(row.remainingBalance)).toBe(0)
   })
 
@@ -222,6 +226,7 @@ describe('payCashOrder — cobro atómico (§5.4)', () => {
     expect(results.every(r => r.status === 'fulfilled')).toBe(true)
     expect(payments).toHaveLength(2)
     expect(row.paymentStatus).toBe('PAID')
+    expect(Number(row.paidAmount)).toBe(100)
     expect(Number(row.remainingBalance)).toBe(0)
   })
 
@@ -240,6 +245,7 @@ describe('payCashOrder — cobro atómico (§5.4)', () => {
 
     expect(payments).toHaveLength(1)
     expect(row.paymentStatus).toBe('PARTIAL')
+    expect(Number(row.paidAmount)).toBe(40)
     expect(Number(row.remainingBalance)).toBe(60)
   })
 

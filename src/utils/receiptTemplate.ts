@@ -32,6 +32,7 @@ interface ReceiptData {
   order: {
     id: string
     orderNumber: string
+    areaDeliveryCode?: string
     type: string
     source: string
     subtotal: number
@@ -51,6 +52,8 @@ interface ReceiptData {
     total: number
     /** Venta por peso: kilos pesados (unitPrice = precio por kg). Null/absent for normal lines. */
     weightKg?: number | null
+    /** Área y vale de origen de una línea preparada antes de pasar por caja. */
+    areaSourceLabel?: string
     modifiers?: Array<{
       name: string
       quantity: number
@@ -803,6 +806,7 @@ export function generateReceiptHTML(data: ReceiptData): string {
                                 <div>
                                     <div class="item-name">${item.productName}</div>
                                     <span class="item-quantity">${item.weightKg != null ? `Peso: ${item.weightKg} kg` : `Cantidad: ${item.quantity}`}</span>
+                                    ${item.areaSourceLabel ? `<div class="item-unit-price">${item.areaSourceLabel}</div>` : ''}
                                 </div>
                                 <div style="text-align: right;">
                                     <div class="item-price">${formatCurrency(item.total, currency)}</div>
@@ -865,6 +869,20 @@ export function generateReceiptHTML(data: ReceiptData): string {
                         </div>
                     </div>
                 </div>
+
+                ${
+                  data.order.areaDeliveryCode
+                    ? `
+                <div class="payment-section" style="text-align: center;">
+                    <div class="payment-method-name">ENTREGA POR ÁREA</div>
+                    <div style="margin-top: 8px;">Presenta este comprobante en el área</div>
+                    <div style="font-size: 24px; font-weight: 800; letter-spacing: 4px; margin-top: 12px;">
+                        ${data.order.areaDeliveryCode}
+                    </div>
+                </div>
+                `
+                    : ''
+                }
             </div>
 
             <!-- Footer -->

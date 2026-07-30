@@ -37,6 +37,8 @@ interface ReceiptDataSnapshot {
   order: {
     id: string
     orderNumber: string
+    /** Código estable para que cada área valide la entrega del comprobante pagado. */
+    areaDeliveryCode?: string
     type: string
     source: string
     subtotal: number
@@ -57,6 +59,8 @@ interface ReceiptDataSnapshot {
     total: number
     /** Venta por peso: kilos pesados (unitPrice = precio por kg). Null/absent for normal lines. */
     weightKg?: number | null
+    /** Origen operativo de una línea importada desde un vale, para verificación visual. */
+    areaSourceLabel?: string
     modifiers?: Array<{
       name: string
       quantity: number
@@ -131,6 +135,20 @@ export async function generateDigitalReceipt(paymentId: string): Promise<Digital
                     },
                   },
                 },
+                fulfillmentArea: {
+                  select: {
+                    name: true,
+                  },
+                },
+                areaTicketLine: {
+                  select: {
+                    areaTicket: {
+                      select: {
+                        code: true,
+                      },
+                    },
+                  },
+                },
               },
             },
           },
@@ -178,6 +196,7 @@ export async function generateDigitalReceipt(paymentId: string): Promise<Digital
       order: {
         id: paymentData.order.id,
         orderNumber: paymentData.order.orderNumber,
+        areaDeliveryCode: paymentData.order.areaDeliveryCode || undefined,
         type: paymentData.order.type,
         source: paymentData.order.source,
         subtotal: Number(paymentData.order.subtotal),
@@ -198,6 +217,10 @@ export async function generateDigitalReceipt(paymentId: string): Promise<Digital
         unitPrice: Number(item.unitPrice),
         total: Number(item.total),
         weightKg: item.weightQuantity != null ? Number(item.weightQuantity) : null,
+        areaSourceLabel:
+          item.fulfillmentArea && item.areaTicketLine
+            ? `${item.fulfillmentArea.name} · Vale ${item.areaTicketLine.areaTicket.code}`
+            : undefined,
         modifiers: item.modifiers.map(modifier => ({
           name: modifier.modifier?.name || modifier.name || 'Modifier',
           quantity: modifier.quantity,

@@ -1648,11 +1648,15 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       total: true,
       remainingBalance: true,
       venueId: true,
+      areaTicketCheckoutSession: { select: { id: true } },
     },
   })
 
   if (!order) {
     throw new NotFoundError('Order not found')
+  }
+  if (order.areaTicketCheckoutSession && !input.idempotencyKey) {
+    throw new BadRequestError('Las ventas con vales requieren idempotencyKey. Reintenta el mismo pago con una llave estable.')
   }
 
   // 🛡️ IDEMPOTENCIA — defensa PRINCIPAL contra doble-cobro en reintentos del
@@ -1744,11 +1748,22 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   //   · si quedó PARTIAL        → cobra el restante real, no el que leyó primero ✅
   // Tres intentos: la contención real es de 2-4 dispositivos, no de cientos.
   const MAX_PAYMENT_CAS_ATTEMPTS = 3
-  let paymentResult: { newPayment: any; isFullyPaid: boolean } | undefined
+  let paymentResult: { newPayment: any; isFullyPaid: boolean; areaTicketOrder: boolean; areaTicketSessionId?: string } | undefined
 
   for (let attempt = 1; attempt <= MAX_PAYMENT_CAS_ATTEMPTS; attempt++) {
     try {
       paymentResult = await prisma.$transaction(async tx => {
+        // Vales v7 bloquean sesión → vales → orden ANTES del flujo monetario.
+        // Para una orden normal devuelve null y el comportamiento queda idéntico.
+        const areaTicketPayment = await import('./areaTicketV7.mobile.service')
+        const lockedAreaCheckout = await areaTicketPayment.lockAreaTicketCheckoutForPayment(tx, {
+          venueId,
+          orderId,
+          idempotencyKey: input.idempotencyKey,
+          amount: new Prisma.Decimal(amountDecimal),
+          method: paymentMethod,
+        })
+
         // 1️⃣ RELECTURA DENTRO DE LA TRANSACCIÓN. Esta es la lectura que manda: la de
         //    arriba pudo quedar vieja mientras validábamos staff y turno.
         const fresh = await tx.order.findUnique({
@@ -1804,6 +1819,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
           data: {
             paymentStatus: isFullyPaid ? 'PAID' : 'PARTIAL',
             status: isFullyPaid ? 'COMPLETED' : 'PENDING',
+            paidAmount: new Prisma.Decimal(totalPaidIncludingTip),
             remainingBalance: Math.max(0, remainingAfterPayment),
             tipAmount: totalTip,
             total: new Prisma.Decimal(newTotal),
@@ -1883,7 +1899,21 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
           })
         }
 
-        return { newPayment, isFullyPaid }
+        const areaFinalization = await areaTicketPayment.finalizeAreaTicketPaymentInTransaction(tx, {
+          venueId,
+          orderId,
+          paymentId: newPayment.id,
+          fullyPaid: isFullyPaid,
+          staffId: effectiveStaffId,
+          locked: lockedAreaCheckout,
+        })
+
+        return {
+          newPayment,
+          isFullyPaid,
+          areaTicketOrder: areaFinalization.areaTicketOrder,
+          areaTicketSessionId: areaFinalization.sessionId,
+        }
       })
       break // ganamos la transición
     } catch (err: any) {
@@ -1960,7 +1990,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     // Inalcanzable: el bucle o devuelve, o asigna, o lanza. Guard para el tipo.
     throw new ConflictError('No se pudo registrar el cobro. Vuelve a intentar.', 'ORDER_PAYMENT_CONFLICT')
   }
-  const { newPayment: payment, isFullyPaid: orderFullyPaid } = paymentResult
+  const { newPayment: payment, isFullyPaid: orderFullyPaid, areaTicketOrder } = paymentResult
 
   logger.info(`✅ [ORDER.MOBILE] Cash payment recorded | paymentId=${payment.id} | order=${order.orderNumber}`)
 
@@ -1971,7 +2001,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   // logged, not thrown), and it only fires on the PENDING/PARTIAL → PAID
   // transition (re-calls are blocked above by the "already paid" guard).
   // Weighted lines (weightQuantity) deduct kilos; see spec venta-por-peso.
-  if (orderFullyPaid) {
+  if (orderFullyPaid && !areaTicketOrder) {
     void (async () => {
       try {
         const { deductTrackedInventoryForFreeCart } = await import('@/services/tpv/order.tpv.service')

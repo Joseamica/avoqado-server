@@ -21,8 +21,14 @@ import type { NextFunction, Request, Response } from 'express'
 import { prismaMock } from '@tests/__helpers__/setup'
 import logger from '@/config/logger'
 import { getVenueTpvSettings } from '@/controllers/mobile/tpvSettings.mobile.controller'
+import { getTpvSettings } from '@/services/dashboard/tpv.dashboard.service'
+
+jest.mock('@/services/dashboard/tpv.dashboard.service', () => ({
+  getTpvSettings: jest.fn(),
+}))
 
 const venueId = 'venue-123'
+const mockedGetTpvSettings = getTpvSettings as jest.MockedFunction<typeof getTpvSettings>
 
 function makeRes(): Response & { __json: any } {
   const res: any = {}
@@ -35,8 +41,11 @@ function makeRes(): Response & { __json: any } {
   return res
 }
 
-function makeReq(): Request {
-  return { params: { venueId } } as unknown as Request
+function makeReq(deviceUid?: string): Request {
+  return {
+    params: { venueId },
+    headers: deviceUid ? { 'x-device-id': deviceUid } : {},
+  } as unknown as Request
 }
 
 /** Active PLAN_PRO VenueFeature row as returned by getVenueBaseTier's findMany select. */
@@ -46,6 +55,7 @@ describe('getVenueTpvSettings (mobile) — plan-tier info', () => {
   beforeEach(() => {
     // No terminals → settings null, no per-terminal settings lookup. Keeps the focus on `plan`.
     prismaMock.terminal.findMany.mockResolvedValue([])
+    mockedGetTpvSettings.mockResolvedValue({} as Awaited<ReturnType<typeof getTpvSettings>>)
   })
 
   it('includes plan.tier "PRO" for a venue with an active PLAN_PRO base plan', async () => {
@@ -102,5 +112,82 @@ describe('getVenueTpvSettings (mobile) — plan-tier info', () => {
     expect(res.__json.data.activeTerminalId).toBeNull()
     // ...and the failure is observable in logs
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('plan info'), expect.objectContaining({ venueId }))
+  })
+
+  it('returns the workspace for the requesting device instead of the first active terminal', async () => {
+    prismaMock.venueFeature.findMany.mockResolvedValue([])
+    prismaMock.venue.findUnique.mockResolvedValue({ seatCapExempt: false, status: 'ACTIVE' })
+    prismaMock.terminal.findMany.mockResolvedValue([
+      {
+        id: 'terminal-area',
+        name: 'Cremería',
+        status: 'ACTIVE',
+        deviceUid: 'device-area',
+        defaultWorkspace: 'AREA_OPERATIONS',
+        canIssueAreaTickets: true,
+        canCheckoutAreaTickets: false,
+        canDeliverAreaTickets: true,
+        fulfillmentAreaId: 'area-cremeria',
+        config: {},
+        configOverrides: {},
+      },
+      {
+        id: 'terminal-checkout',
+        name: 'Caja',
+        status: 'ACTIVE',
+        deviceUid: 'device-checkout',
+        defaultWorkspace: 'AREA_OPERATIONS',
+        canIssueAreaTickets: false,
+        canCheckoutAreaTickets: true,
+        canDeliverAreaTickets: false,
+        fulfillmentAreaId: null,
+        config: {},
+        configOverrides: {},
+      },
+    ] as any)
+
+    const res = makeRes()
+    await getVenueTpvSettings(makeReq('device-checkout'), res, jest.fn() as NextFunction)
+
+    expect(mockedGetTpvSettings).toHaveBeenCalledWith('terminal-checkout')
+    expect(res.__json.data.activeTerminalId).toBe('terminal-checkout')
+    expect(res.__json.data.deviceTerminal).toEqual({
+      id: 'terminal-checkout',
+      defaultWorkspace: 'AREA_OPERATIONS',
+      canIssueAreaTickets: false,
+      canCheckoutAreaTickets: true,
+      canDeliverAreaTickets: false,
+      fulfillmentAreaId: null,
+    })
+    expect(res.__json.data.terminals[0]).not.toHaveProperty('deviceUid')
+    expect(res.__json.data.terminals[0]).not.toHaveProperty('defaultWorkspace')
+    expect(res.__json.data.terminals[0]).not.toHaveProperty('canIssueAreaTickets')
+  })
+
+  it('keeps the legacy first-active behavior when the client sends no device id', async () => {
+    prismaMock.venueFeature.findMany.mockResolvedValue([])
+    prismaMock.venue.findUnique.mockResolvedValue({ seatCapExempt: false, status: 'ACTIVE' })
+    prismaMock.terminal.findMany.mockResolvedValue([
+      {
+        id: 'terminal-legacy',
+        name: 'Legacy',
+        status: 'ACTIVE',
+        deviceUid: 'some-device',
+        defaultWorkspace: 'STANDARD_POS',
+        canIssueAreaTickets: false,
+        canCheckoutAreaTickets: false,
+        canDeliverAreaTickets: false,
+        fulfillmentAreaId: null,
+        config: {},
+        configOverrides: {},
+      },
+    ] as any)
+
+    const res = makeRes()
+    await getVenueTpvSettings(makeReq(), res, jest.fn() as NextFunction)
+
+    expect(mockedGetTpvSettings).toHaveBeenCalledWith('terminal-legacy')
+    expect(res.__json.data.activeTerminalId).toBe('terminal-legacy')
+    expect(res.__json.data.deviceTerminal).toBeNull()
   })
 })

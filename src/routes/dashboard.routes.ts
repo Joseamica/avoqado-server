@@ -268,6 +268,7 @@ import commissionRoutes from './dashboard/commission.routes'
 import cashOutRoutes from './dashboard/cash-out.routes'
 import reservationRoutes from './dashboard/reservation.routes'
 import printStationRoutes from './dashboard/printStation.routes'
+import areaTicketRoutes from './dashboard/areaTicket.routes'
 import classSessionRoutes from './dashboard/classSession.routes'
 import googleCalendarStatusRoutes from './dashboard/googleCalendarStatus.routes'
 // @temporary - Serialized inventory demo routes (delete after final implementation)
@@ -4078,6 +4079,9 @@ router.use('/venues/:venueId/referrals', authenticateTokenMiddleware, checkFeatu
 router.use('/venues/:venueId/reservations', authenticateTokenMiddleware, checkFeatureAccess('RESERVATIONS'), reservationRoutes)
 // PRINT_STATIONS — feature gratis/core (sin checkFeatureAccess); permission-gated dentro del sub-router.
 router.use('/venues/:venueId/print-stations', authenticateTokenMiddleware, printStationRoutes)
+// Configuración explícita y operación de vales/básculas. El servicio aplica
+// entitlement al ACTIVAR; consultar permite mostrar por qué está deshabilitado.
+router.use('/venues/:venueId/area-tickets', authenticateTokenMiddleware, areaTicketRoutes)
 
 // Class Sessions (group classes / workshops) — part of the reservations/appointments product
 // (uses reservations:* permissions; attendees ARE reservations), so it shares the RESERVATIONS gate.
