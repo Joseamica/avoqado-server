@@ -1,7 +1,41 @@
 import { StaffRole } from '@prisma/client'
-import { canAssignRole, evaluatePermissionList, expandWildcards, hasPermission } from '../../../src/lib/permissions'
+import {
+  canAssignRole,
+  evaluatePermissionList,
+  expandWildcards,
+  getEffectiveRolePermissions,
+  hasPermission,
+} from '../../../src/lib/permissions'
 
 describe('permissions', () => {
+  describe('area-ticket counter operator', () => {
+    it('allows a WAITER assigned to an area terminal to issue and deliver tickets', () => {
+      expect(hasPermission(StaffRole.WAITER, null, 'area-tickets:issue')).toBe(true)
+      expect(hasPermission(StaffRole.WAITER, null, 'area-tickets:deliver')).toBe(true)
+    })
+
+    it('does not let the area operator collect, cancel, or configure area tickets', () => {
+      expect(hasPermission(StaffRole.WAITER, null, 'area-tickets:checkout')).toBe(false)
+      expect(hasPermission(StaffRole.WAITER, null, 'area-tickets:cancel')).toBe(false)
+      expect(hasPermission(StaffRole.WAITER, null, 'area-tickets:configure')).toBe(false)
+    })
+
+    it.each([StaffRole.ADMIN, StaffRole.OWNER])('lets %s operate and configure area tickets and scales', role => {
+      expect(hasPermission(role, null, 'area-tickets:issue')).toBe(true)
+      expect(hasPermission(role, null, 'area-tickets:configure')).toBe(true)
+      expect(hasPermission(role, null, 'scale:use')).toBe(true)
+      expect(hasPermission(role, null, 'scale:configure')).toBe(true)
+    })
+
+    it('keeps new OWNER defaults when a venue has an older custom permission list', () => {
+      const permissions = getEffectiveRolePermissions(StaffRole.OWNER, ['menu:read'])
+
+      expect(permissions).toContain('menu:read')
+      expect(permissions).toContain('area-tickets:*')
+      expect(permissions).toContain('scale:*')
+    })
+  })
+
   describe('discount application', () => {
     it('allows CASHIER through discounts:apply', () => {
       expect(hasPermission(StaffRole.CASHIER, null, 'discounts:apply')).toBe(true)

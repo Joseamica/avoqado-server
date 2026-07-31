@@ -145,6 +145,14 @@ beforeEach(() => {
       venueTransaction: { create: prisma.venueTransaction.create },
       order: { update: prisma.order.update },
       shift: { update: prisma.shift.update },
+      // recordOrderPayment llama lockAreaTicketCheckoutForPayment(tx, …) — area
+      // tickets v7. Este `tx` se arma A MANO, así que un modelo que la ruta toque
+      // y no esté aquí sale undefined y el test truena con un TypeError en lugar
+      // de su aserción real. findFirst devuelve null = "esta orden no es de area
+      // tickets", que es el camino que estos tests ejercitan.
+      areaTicketCheckoutSession: { findFirst: jest.fn().mockResolvedValue(null) },
+      areaTicketPaymentAttempt: { findUnique: jest.fn().mockResolvedValue(null) },
+      $queryRaw: jest.fn().mockResolvedValue([]),
     }
     return callback(tx)
   })

@@ -149,6 +149,7 @@ wait stable, then APK. TPV sends `X-App-Version-Code` for conditional behavior.
   Prevents top-of-hour P1001 stampede deaths. NO global Prisma retry.
 - `feature-gating.md` - Module vs Feature: two parallel gating systems, don't cross the resolvers
 - `playtelecom-vertical.md` - PlayTelecom white-label vertical: who's who (Bait/Walmart), generic vs bespoke, gotchas
+- `blumon-seriales-virtuales.md` - 🔴 el dígito extra en `MerchantAccount.blumonSerialNumber` NO es typo: es multi-merchant deliberado. "¿Es nuestro?" = `Terminal` OR `MerchantAccount`, nunca solo una
 
 ### On-demand guides (`docs/guides/`)
 

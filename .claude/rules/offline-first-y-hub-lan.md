@@ -137,38 +137,26 @@ cocina nunca se entera del pedido. Una IP de impresora ligeramente vieja es much
 
 ### 4.1 Tres trampas más, encontradas tocando el hardware (2026-07-28)
 
-**a) Sin estaciones configuradas NO se imprimía NADA.** `printRoundComandas`
-exigía al menos una estación activa antes de intentar. Un local sin estaciones,
-o un POS recién instalado que nunca pudo bajarlas, se quedaba sin comandas
-**aunque tuviera su impresora de cocina conectada y con rol**. Contradecía al
-propio motor, que es fail-open ("SIN ESTACIÓN") y cae a la impresora KITCHEN
-local. El guard impedía llegar ahí. Nunca vuelvas a poner un guard de
-configuración delante de la impresión: en este dominio el fail-safe no puede ser
-no imprimir.
+**a) Sin estaciones configuradas NO se imprimía NADA.** `printRoundComandas` exigía al menos una estación activa antes de intentar. Un local
+sin estaciones, o un POS recién instalado que nunca pudo bajarlas, se quedaba sin comandas **aunque tuviera su impresora de cocina conectada
+y con rol**. Contradecía al propio motor, que es fail-open ("SIN ESTACIÓN") y cae a la impresora KITCHEN local. El guard impedía llegar ahí.
+Nunca vuelvas a poner un guard de configuración delante de la impresión: en este dominio el fail-safe no puede ser no imprimir.
 
-**b) Los resolves de mDNS deben ir EN SERIE.** `NsdManager.resolveService` mata
-todo lo que no sea el primero con `FAILURE_ALREADY_ACTIVE` (3), y el fallo es
-SILENCIOSO: la impresora simplemente no aparece. Medido: de 4 anuncios, 3
-fallaban y sólo 1 llegaba a la lista. Un local con cocina + barra + caja vería
-UNA. Es el MISMO tropiezo que el hub LAN — el fix nunca se había portado al
-descubrimiento de impresoras. Deduplica por DIRECCIÓN: la misma impresora se
-anuncia en `_printer`, `_pdl-datastream` e `_ipp`.
+**b) Los resolves de mDNS deben ir EN SERIE.** `NsdManager.resolveService` mata todo lo que no sea el primero con `FAILURE_ALREADY_ACTIVE`
+(3), y el fallo es SILENCIOSO: la impresora simplemente no aparece. Medido: de 4 anuncios, 3 fallaban y sólo 1 llegaba a la lista. Un local
+con cocina + barra + caja vería UNA. Es el MISMO tropiezo que el hub LAN — el fix nunca se había portado al descubrimiento de impresoras.
+Deduplica por DIRECCIÓN: la misma impresora se anuncia en `_printer`, `_pdl-datastream` e `_ipp`.
 
-**c) La impresora fantasma entra por DOS puertas.** Sunmi preinstala el servicio
-AIDL en toda su gama Y anuncia la interna por Bluetooth como "InnerPrinter". En
-una T3 Pro (sin cabezal) ambas mienten. Cerrar sólo la puerta AIDL no basta —
-por BT ya estaba configurada como impresora de recibos diciendo "Conectada".
-Detalle: `updatePrinterState()` devuelve **505** ("no printer detected") con
-modal/serial vacíos; `printerPaper` devuelve 1 igual, o sea que MIENTE.
+**c) La impresora fantasma entra por DOS puertas.** Sunmi preinstala el servicio AIDL en toda su gama Y anuncia la interna por Bluetooth
+como "InnerPrinter". En una T3 Pro (sin cabezal) ambas mienten. Cerrar sólo la puerta AIDL no basta — por BT ya estaba configurada como
+impresora de recibos diciendo "Conectada". Detalle: `updatePrinterState()` devuelve **505** ("no printer detected") con modal/serial vacíos;
+`printerPaper` devuelve 1 igual, o sea que MIENTE.
 
-**No hay alta manual de impresora por IP.** Si una impresora no se anuncia por
-mDNS (VLAN, aislamiento de cliente, IP fija sin anuncio), hoy NO hay forma de
-configurarla. Es el hueco de instalación más grande que queda.
+**No hay alta manual de impresora por IP.** Si una impresora no se anuncia por mDNS (VLAN, aislamiento de cliente, IP fija sin anuncio), hoy
+NO hay forma de configurarla. Es el hueco de instalación más grande que queda.
 
-**El permiso de "dispositivos cercanos"** (Android 13+) es obligatorio para
-descubrir impresoras: si alguien lo rechaza en la instalación, la lista sale
-vacía y —sin alta manual— el local se queda sin imprimir.
-
+**El permiso de "dispositivos cercanos"** (Android 13+) es obligatorio para descubrir impresoras: si alguien lo rechaza en la instalación,
+la lista sale vacía y —sin alta manual— el local se queda sin imprimir.
 
 ## 5. Qué es online-only A PROPÓSITO
 

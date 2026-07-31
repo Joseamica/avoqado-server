@@ -7,11 +7,11 @@
 import { WebhookEventStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
-import Stripe from 'stripe'
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', {
-  apiVersion: '2024-10-28' as any,
-})
+// NOTE: no Stripe client here anymore — `retryWebhookEvent` used to re-fetch the
+// event via `stripe.events.retrieve`, but the replay now reuses the payload
+// stored on the row (same as a Stripe redelivery), so the retry keeps working
+// even when the Stripe API is the thing that's down.
 
 /**
  * List webhook events with filtering and pagination
@@ -191,7 +191,7 @@ export async function getWebhookMetrics(timeRange: { startDate: Date; endDate: D
 /**
  * Retry a failed webhook event
  *
- * Fetches the event from Stripe and reprocesses it
+ * Replays the payload stored on the row via `replayStripeWebhookEvent`.
  */
 export async function retryWebhookEvent(eventId: string) {
   // Get the webhook event from database
@@ -215,23 +215,28 @@ export async function retryWebhookEvent(eventId: string) {
   })
 
   try {
-    // Mark as retrying
-    await prisma.webhookEvent.update({
-      where: { id: eventId },
-      data: {
-        status: 'RETRYING',
-        retryCount: { increment: 1 },
-      },
-    })
+    // Delegate to the shared replay path. Do NOT call `handleStripeWebhookEvent`
+    // directly here: this row is already claimed, so its idempotency `create`
+    // would hit P2002 and return early — the retry did NOTHING while this
+    // function reported success. `replayStripeWebhookEvent` also owns the
+    // RETRYING flip and the attempt counter, so neither is done here anymore.
+    const { replayStripeWebhookEvent } = await import('../stripe.webhook.service')
+    const result = await replayStripeWebhookEvent(eventId)
 
-    // Fetch original event from Stripe
-    const stripeEvent = await stripe.events.retrieve(webhookEvent.stripeEventId)
-
-    // Import the webhook handler
-    const { handleStripeWebhookEvent } = await import('../stripe.webhook.service')
-
-    // Reprocess the event
-    await handleStripeWebhookEvent(stripeEvent)
+    if (!result.replayed) {
+      logger.info('ℹ️ Webhook retry skipped', {
+        webhookEventId: eventId,
+        stripeEventId: webhookEvent.stripeEventId,
+        reason: result.reason,
+      })
+      return {
+        success: false,
+        message:
+          result.reason === 'MAX_RETRIES_EXHAUSTED'
+            ? 'El evento agotó sus reintentos automáticos. Requiere revisión manual.'
+            : 'El evento no es elegible para reintento.',
+      }
+    }
 
     logger.info('✅ Webhook retry successful', {
       webhookEventId: eventId,

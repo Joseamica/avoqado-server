@@ -72,6 +72,26 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   ],
 
   // ===========================
+  // AREA TICKETS + SCALES
+  // ===========================
+  'area-tickets:issue': ['area-tickets:issue', 'menu:read', 'products:read', 'inventory:read'],
+  'area-tickets:checkout': ['area-tickets:checkout', 'orders:read', 'orders:create', 'orders:update', 'payments:read', 'payments:create'],
+  'area-tickets:cancel': ['area-tickets:cancel', 'area-tickets:checkout', 'orders:cancel', 'payments:read'],
+  'area-tickets:deliver': ['area-tickets:deliver', 'orders:read', 'payments:read'],
+  'area-tickets:configure': [
+    'area-tickets:configure',
+    'area-tickets:issue',
+    'area-tickets:checkout',
+    'area-tickets:cancel',
+    'area-tickets:deliver',
+    'tpv:read',
+    'tpv-settings:read',
+    'tpv-settings:update',
+  ],
+  'scale:use': ['scale:use', 'products:read'],
+  'scale:configure': ['scale:configure', 'scale:use', 'tpv:read', 'tpv-settings:read', 'tpv-settings:update'],
+
+  // ===========================
   // MENU - Products and Categories
   // ===========================
   'menu:read': ['menu:read'],
@@ -572,6 +592,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'orders:read',
     'orders:update',
     'menu:read',
+    'area-tickets:issue',
+    'area-tickets:deliver',
+    'scale:use',
     'calendar:connect_self', // Google Calendar Sync — connect own personal calendar
   ],
 
@@ -588,6 +611,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'orders:update',
     'payments:read',
     'payments:create',
+    'area-tickets:issue',
+    'area-tickets:deliver',
+    'scale:use',
     'shifts:read',
     'tables:read',
     'tables:update',
@@ -630,6 +656,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'payments:read',
     'payments:create',
     'payments:refund',
+    'area-tickets:checkout',
     'shifts:read',
     'tables:read',
     'reviews:read',
@@ -681,6 +708,13 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'orders:create',
     'orders:update',
     'orders:cancel',
+    'area-tickets:issue',
+    'area-tickets:checkout',
+    'area-tickets:cancel',
+    'area-tickets:deliver',
+    'area-tickets:configure',
+    'scale:use',
+    'scale:configure',
     // Reservations & class sessions — managers operate the calendar (Square-style:
     // staff running the front desk see and book classes/appointments).
     'reservations:read',
@@ -808,6 +842,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'orders:*',
     'printers:*', // PRINT_STATIONS: impresoras, estaciones y ruteo de comandas (feature gratis/core)
     'payments:*',
+    'area-tickets:*', // Operate and configure multi-area retail tickets
+    'scale:*', // Use and configure connected scales
     'payment:create-manual', // Record payments received outside Avoqado (cash, external terminal, transfer)
     'payment-link:*', // Create / manage shareable payment links (Stripe Connect + Blumon)
     'shifts:*',
@@ -926,6 +962,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'menu:*',
     'orders:*',
     'payments:*',
+    'area-tickets:*', // Operate and configure multi-area retail tickets
+    'scale:*', // Use and configure connected scales
     'payment:create-manual', // Record payments received outside Avoqado (cash, external terminal, transfer)
     'payment-link:*', // Create / manage shareable payment links (Stripe Connect + Blumon)
     'shifts:*',
@@ -1134,14 +1172,14 @@ export const CRITICAL_PERMISSIONS = ['settings:manage', 'settings:read', 'teams:
  *
  * @param role User's role
  * @param customPermissions Custom permissions from VenueRolePermission (optional)
- * @param requiredPermission Permission to check (format: "resource:action")
- * @returns true if user has permission
+ * @returns the resolved permissions that API responses and authorization checks
+ * should expose for this role at the selected venue
  */
-export function hasPermission(role: StaffRole, customPermissions: string[] | null | undefined, requiredPermission: string): boolean {
+export function getEffectiveRolePermissions(role: StaffRole, customPermissions: string[] | null | undefined): string[] {
   // SUPERADMIN EXCEPTION: Always use wildcard, never custom permissions
   // This prevents accidental lockout if SUPERADMIN permissions are customized
   if (role === StaffRole.SUPERADMIN) {
-    return true // SUPERADMIN always has all permissions
+    return ['*:*']
   }
 
   // Get default permissions for role
@@ -1170,8 +1208,15 @@ export function hasPermission(role: StaffRole, customPermissions: string[] | nul
   // RESOLVE IMPLICIT DEPENDENCIES
   // Expand base permissions to include their implicit dependencies
   // Example: 'orders:read' automatically includes 'products:read', 'payments:read'
-  const resolvedSet = resolvePermissions(basePermissions)
-  const allPermissions = Array.from(resolvedSet)
+  return Array.from(resolvePermissions(basePermissions))
+}
+
+/**
+ * Check one permission against the same effective permission list returned to
+ * clients during authentication.
+ */
+export function hasPermission(role: StaffRole, customPermissions: string[] | null | undefined, requiredPermission: string): boolean {
+  const allPermissions = getEffectiveRolePermissions(role, customPermissions)
 
   // Check for wildcard (all permissions)
   if (allPermissions.includes('*:*')) return true
@@ -1410,6 +1455,8 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   reports: ['reports:read', 'reports:export'],
   menu: ['menu:read', 'menu:create', 'menu:update', 'menu:delete', 'menu:import'],
   orders: ['orders:read', 'orders:create', 'orders:update', 'orders:cancel', 'orders:comp', 'orders:void'],
+  'area-tickets': ['area-tickets:issue', 'area-tickets:checkout', 'area-tickets:cancel', 'area-tickets:deliver', 'area-tickets:configure'],
+  scale: ['scale:use', 'scale:configure'],
   payments: ['payments:read', 'payments:create', 'payments:refund', 'payments:routing-read', 'payments:routing-manage'],
   printers: ['printers:read', 'printers:manage'],
   // Singular `payment` namespace for admin-only, one-off payment actions.

@@ -4,6 +4,7 @@ import AppError from '../../errors/AppError'
 import { Decimal } from '@prisma/client/runtime/library'
 import { logAction } from './activity-log.service'
 import { areUnitsCompatible, convertUnit } from '../../utils/unitConversion'
+import { withSerializableRetry } from '../../utils/serializableRetry'
 
 /**
  * Generate unique batch number for a raw material
@@ -343,13 +344,38 @@ export async function allocateStockFIFO(
  *
  * If another transaction holds locks:
  * - Throws immediately (NOWAIT) with error code 55P03
- * - Client can retry after short delay
+ * - Retried here via `withSerializableRetry` (see below)
  * - No waiting/blocking = better performance
  *
  * Used by: Shopify, Stripe, GitHub for inventory/resource allocation
  *
+ * 🔴 EL REINTENTO VA AQUÍ Y SOLO AQUÍ — no lo subas de nivel.
+ *
+ * Bug real (Mindform, 17-18 jul 2026): un cajero tocó "Cobrar" 3 veces en 8s;
+ * cada toque corrió su propia pasada de deducción sobre los mismos insumos.
+ * Postgres abortó las colisiones con P2034 ("write conflict or a deadlock.
+ * Please retry your transaction") y el clasificador de payment.tpv.service las
+ * clasificó 'UNKNOWN' → tumbó la orden. Una venta cancelada por un tropiezo de
+ * milisegundos.
+ *
+ * Esta función es el ÚNICO nivel donde reintentar es seguro, porque es el único
+ * que es atómico: un solo insumo, dentro de una transacción Serializable. Si
+ * choca, Postgres deshizo TODO lo de ese insumo, así que el reintento rehace
+ * exactamente lo que no pasó.
+ *
+ * Subir el reintento a `deductStockForRecipe` o `deductInventoryForProduct`
+ * DESCONTARÍA DOBLE: la receta de un producto (~10 insumos) recorre sus líneas
+ * llamando aquí una por una, SIN transacción que las agrupe. Si el insumo #5
+ * choca, los 4 anteriores ya se commitearon; reintentar el producto los vuelve
+ * a descontar y el inventario queda mal en silencio.
+ *
+ * Sólo se reintentan conflictos TRANSITORIOS (P2034 / 40001 / 55P03). Falta de
+ * stock real, insumo de otro venue y "sin lotes activos" siguen fallando en el
+ * primer intento — el candado de inventario no se relaja.
+ * Cubierto por tests/unit/services/dashboard/fifoBatch.deductRetry.test.ts
+ *
  * @throws AppError(400) if insufficient stock
- * @throws Error(55P03) if batches locked by another transaction
+ * @throws ConflictError if the conflict persists after the bounded retries
  */
 export async function deductStockFIFO(
   venueId: string,
@@ -362,7 +388,7 @@ export async function deductStockFIFO(
     createdBy?: string
   },
 ): Promise<any[]> {
-  return await prisma.$transaction(
+  return await withSerializableRetry(
     async tx => {
       // 0. El rawMaterial debe pertenecer al venue que deduce — venueId no es
       // decorativo. Sin esto, cualquier caller interno con un rawMaterialId
@@ -448,8 +474,14 @@ export async function deductStockFIFO(
       return movements
     },
     {
-      isolationLevel: 'Serializable', // Highest isolation - prevents all anomalies
-      timeout: 10000, // 10 seconds max (prevent long-running transactions)
+      // Serializable lo fija withSerializableRetry — no se pasa aquí.
+      timeoutMs: 10_000, // 10s max (evita transacciones largas)
+      // 3 intentos con backoff 40ms → 80ms = ~120ms extra en el PEOR caso.
+      // Presupuesto deliberadamente corto: esto vive en la ruta del cobro, y si
+      // la terminal se cansa de esperar el cajero vuelve a picar "Cobrar" — que
+      // es justo lo que genera la colisión que estamos resolviendo.
+      maxRetries: 3,
+      baseDelayMs: 40,
     },
   )
 }

@@ -637,6 +637,7 @@ describe('order.mobile.service', () => {
         data: expect.objectContaining({
           paymentStatus: 'PAID',
           status: 'COMPLETED',
+          paidAmount: new Decimal(90),
           remainingBalance: 0,
           total: new Decimal(90),
           version: { increment: 1 },
@@ -682,6 +683,7 @@ describe('order.mobile.service', () => {
         data: expect.objectContaining({
           paymentStatus: 'PARTIAL',
           status: 'PENDING',
+          paidAmount: new Decimal(50),
           remainingBalance: 50,
         }),
       }),
@@ -696,6 +698,7 @@ describe('order.mobile.service', () => {
         data: expect.objectContaining({
           paymentStatus: 'PAID',
           status: 'COMPLETED',
+          paidAmount: new Decimal(100),
           remainingBalance: 0,
         }),
       }),

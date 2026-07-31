@@ -5,7 +5,7 @@ import { AuthenticationError, ForbiddenError, BadRequestError } from '../../erro
 import { LoginDto, RequestPasswordResetDto, ResetPasswordDto } from '../../schemas/dashboard/auth.schema'
 import { StaffRole, InvitationStatus } from '@prisma/client'
 import * as jwtService from '../../jwt.service'
-import { DEFAULT_PERMISSIONS } from '../../lib/permissions'
+import { getEffectiveRolePermissions } from '../../lib/permissions'
 import emailService from '../email.service'
 import logger from '@/config/logger'
 import { getPrimaryOrganizationId, hasOrganizationAccess } from '../staffOrganization.service'
@@ -475,7 +475,7 @@ export async function loginStaff(loginData: LoginDto) {
       } else {
         // No permission set: use role-based resolution
         const customPerms = customRolePermissions.find(crp => crp.venueId === sv.venueId && crp.role === sv.role)
-        permissions = customPerms ? (customPerms.permissions as string[]) : DEFAULT_PERMISSIONS[sv.role] || []
+        permissions = getEffectiveRolePermissions(sv.role, customPerms?.permissions as string[] | undefined)
       }
 
       const venueDisplayNames = roleDisplayNamesByVenue.get(sv.venueId)

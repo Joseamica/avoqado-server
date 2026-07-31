@@ -31,6 +31,7 @@ import { tpvOrderExpiryJob } from './jobs/tpv-order-expiry.job'
 import { blumonWebhookReconciliationJob } from './jobs/blumon-webhook-reconciliation.job'
 import { blumonPaymentAuditJob } from './jobs/blumon-payment-audit.job'
 import { deliveryWebhookReconciliationJob } from './jobs/delivery-webhook-reconciliation.job'
+import { stripeWebhookReconciliationJob } from './jobs/stripe-webhook-reconciliation.job'
 import { terminalPaymentWatchdogJob } from './jobs/terminal-payment-watchdog.job'
 import { reservationDepositReconciliationJob } from './jobs/reservation-deposit-reconciliation.job'
 import { reservationReminderJob } from './jobs/reservation-reminder.job'
@@ -159,6 +160,9 @@ const gracefulShutdown = async (signal: string) => {
 
       logger.info('Stopping delivery webhook reconciliation job...')
       deliveryWebhookReconciliationJob.stop()
+
+      logger.info('Stopping Stripe webhook reconciliation job...')
+      stripeWebhookReconciliationJob.stop()
 
       logger.info('Stopping reservation deposit reconciliation job...')
       reservationDepositReconciliationJob.stop()
@@ -449,6 +453,13 @@ const startApplication = async (retries = 3) => {
       // Start delivery webhook reconciliation job (every 2min at :45s — retries
       // FAILED/stuck-RECEIVED DeliveryOrderEvent rows; sweeps >24h to ORPHANED)
       deliveryWebhookReconciliationJob.start()
+
+      // Start Stripe PLATFORM webhook reconciliation job (every 5min at :03 —
+      // replays FAILED WebhookEvent rows. The controller answers 200 even on
+      // failure, so Stripe never redelivers: without this, one transient blip
+      // during invoice.payment_succeeded / plan-checkout fulfillment meant the
+      // venue paid and never got its plan, silently.)
+      stripeWebhookReconciliationJob.start()
 
       // Start Google Calendar sync jobs (Phase 1 + Phase 2)
       // Inbox sweeper: drives pulls for inbox rows the RMQ consumer missed (every 30s)

@@ -13,7 +13,7 @@ import crypto from 'crypto'
 import bcrypt from 'bcryptjs'
 import { AuthenticationError, ForbiddenError } from '../../errors/AppError'
 import * as jwtService from '../../jwt.service'
-import { DEFAULT_PERMISSIONS } from '../../lib/permissions'
+import { getEffectiveRolePermissions } from '../../lib/permissions'
 import logger from '@/config/logger'
 import {
   generateAuthenticationOptions,
@@ -265,7 +265,7 @@ export async function verifyPasskeyAssertion(credential: AuthenticationResponseJ
     lastLogin: staff.lastLoginAt,
     venues: staff.venues.map(sv => {
       const customPerms = customRolePermissions.find(crp => crp.venueId === sv.venueId && crp.role === sv.role)
-      const permissions = customPerms ? (customPerms.permissions as string[]) : DEFAULT_PERMISSIONS[sv.role] || []
+      const permissions = getEffectiveRolePermissions(sv.role, customPerms?.permissions as string[] | undefined)
 
       return {
         id: sv.venue.id,
@@ -618,7 +618,7 @@ export async function loginWithEmail(email: string, password: string, rememberMe
     lastLogin: staff.lastLoginAt,
     venues: staff.venues.map(sv => {
       const customPerms = customRolePermissions.find(crp => crp.venueId === sv.venueId && crp.role === sv.role)
-      const permissions = customPerms ? (customPerms.permissions as string[]) : DEFAULT_PERMISSIONS[sv.role] || []
+      const permissions = getEffectiveRolePermissions(sv.role, customPerms?.permissions as string[] | undefined)
 
       return {
         id: sv.venue.id,

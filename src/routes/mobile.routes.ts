@@ -42,6 +42,7 @@ import * as syncMobileController from '../controllers/mobile/sync.mobile.control
 import * as creditPackMobileController from '../controllers/mobile/creditPack.mobile.controller'
 import * as printMobileController from '../controllers/mobile/print.mobile.controller'
 import * as areaTicketMobileController from '../controllers/mobile/areaTicket.mobile.controller'
+import * as areaTicketV7MobileController from '../controllers/mobile/areaTicketV7.mobile.controller'
 import { areaTicketResolveRateLimiter } from '../middlewares/area-ticket-rate-limit.middleware'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
@@ -2479,9 +2480,132 @@ router.post('/devices/partition', authenticateTokenMiddleware, areaTicketMobileC
 router.post(
   '/venues/:venueId/area-tickets',
   authenticateTokenMiddleware,
-  checkPermission('orders:create'),
+  (req, res, next) => checkPermission(Array.isArray(req.body?.lines) ? 'area-tickets:issue' : 'orders:create')(req, res, next),
   checkFeatureAccess('AREA_TICKETS'),
-  areaTicketMobileController.openAreaTicket,
+  (req, res, next) =>
+    Array.isArray(req.body?.lines)
+      ? areaTicketV7MobileController.issue(req, res, next)
+      : areaTicketMobileController.openAreaTicket(req, res, next),
+)
+
+// V7 es aditivo: los endpoints legacy de arriba/abajo siguen disponibles para
+// apps desplegadas. La forma del body (`lines` vs `items + code`) discrimina la
+// emisión sin reinterpretar una petición vieja.
+router.get(
+  '/venues/:venueId/area-ticket-settings',
+  authenticateTokenMiddleware,
+  checkPermission('orders:read'),
+  areaTicketV7MobileController.getSettings,
+)
+
+router.get(
+  '/venues/:venueId/scale-settings',
+  authenticateTokenMiddleware,
+  checkPermission('scale:use'),
+  areaTicketV7MobileController.getScaleSettings,
+)
+
+router.post(
+  '/venues/:venueId/scans/resolve',
+  authenticateTokenMiddleware,
+  areaTicketResolveRateLimiter,
+  checkPermission('orders:read'),
+  areaTicketV7MobileController.resolveScan,
+)
+
+router.post(
+  '/venues/:venueId/area-ticket-checkouts',
+  authenticateTokenMiddleware,
+  checkPermission('area-tickets:checkout'),
+  checkFeatureAccess('AREA_TICKETS'),
+  areaTicketV7MobileController.createCheckout,
+)
+
+router.post(
+  '/venues/:venueId/area-ticket-checkouts/:sessionId/tickets',
+  authenticateTokenMiddleware,
+  checkPermission('area-tickets:checkout'),
+  areaTicketV7MobileController.addTicket,
+)
+
+router.delete(
+  '/venues/:venueId/area-ticket-checkouts/:sessionId/tickets/:ticketId',
+  authenticateTokenMiddleware,
+  checkPermission('area-tickets:checkout'),
+  areaTicketV7MobileController.removeTicket,
+)
+
+router.post(
+  '/venues/:venueId/area-ticket-checkouts/:sessionId/materialize-order',
+  authenticateTokenMiddleware,
+  checkPermission('area-tickets:checkout'),
+  areaTicketV7MobileController.materialize,
+)
+
+router.post(
+  '/venues/:venueId/area-ticket-checkouts/:sessionId/heartbeat',
+  authenticateTokenMiddleware,
+  checkPermission('area-tickets:checkout'),
+  areaTicketV7MobileController.heartbeat,
+)
+
+router.post(
+  '/venues/:venueId/area-ticket-checkouts/:sessionId/prepare-payment',
+  authenticateTokenMiddleware,
+  checkPermission('area-tickets:checkout'),
+  checkPermission('payments:create'),
+  areaTicketV7MobileController.preparePayment,
+)
+
+router.get(
+  '/venues/:venueId/area-ticket-checkouts/:sessionId/payment-attempts/:attemptId',
+  authenticateTokenMiddleware,
+  checkPermission('area-tickets:checkout'),
+  checkPermission('payments:read'),
+  areaTicketV7MobileController.getPaymentAttempt,
+)
+
+router.post(
+  '/venues/:venueId/area-ticket-checkouts/:sessionId/cancel',
+  authenticateTokenMiddleware,
+  checkPermission('area-tickets:cancel'),
+  areaTicketV7MobileController.cancelCheckout,
+)
+
+router.get(
+  '/venues/:venueId/area-ticket-checkouts/:sessionId',
+  authenticateTokenMiddleware,
+  checkPermission('area-tickets:checkout'),
+  areaTicketV7MobileController.getCheckout,
+)
+
+router.post(
+  '/venues/:venueId/area-tickets/:ticketId/print-attempts',
+  authenticateTokenMiddleware,
+  checkPermission('area-tickets:issue'),
+  areaTicketV7MobileController.recordPrintAttempt,
+)
+
+router.get(
+  '/venues/:venueId/area-ticket-fulfillment/pending',
+  authenticateTokenMiddleware,
+  checkPermission('area-tickets:deliver'),
+  areaTicketV7MobileController.pendingFulfillment,
+)
+
+router.post(
+  '/venues/:venueId/area-ticket-fulfillment/resolve',
+  authenticateTokenMiddleware,
+  areaTicketResolveRateLimiter,
+  checkPermission('area-tickets:deliver'),
+  areaTicketV7MobileController.resolveFulfillment,
+)
+
+router.post(
+  '/venues/:venueId/area-tickets/:ticketId/fulfill',
+  authenticateTokenMiddleware,
+  checkPermission('area-tickets:deliver'),
+  areaTicketV7MobileController.fulfill,
 )
 
 /**

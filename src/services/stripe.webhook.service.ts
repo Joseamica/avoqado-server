@@ -1107,6 +1107,14 @@ export async function handlePaymentIntentFailed(paymentIntent: Stripe.PaymentInt
 }
 
 /**
+ * Maximum number of reprocessing attempts for a FAILED event before it is left
+ * alone for manual investigation. Enforced by
+ * `StripeWebhookReconciliationJob` (which only picks up rows below this count),
+ * NOT here — this constant is the single place both sides agree on.
+ */
+export const STRIPE_WEBHOOK_MAX_RETRIES = 5
+
+/**
  * Main webhook event dispatcher
  * Routes events to appropriate handlers
  *
@@ -1114,37 +1122,49 @@ export async function handlePaymentIntentFailed(paymentIntent: Stripe.PaymentInt
  * by tracking events in the StripeWebhookEvent table
  *
  * @param event - Stripe Event object
+ * @param opts.claimedEventId - `WebhookEvent.id` of a row the CALLER already
+ *   owns. Pass this ONLY from a replay path (`replayStripeWebhookEvent`).
+ *
+ *   Why it exists: the claim below is a `create` on a UNIQUE column, so a
+ *   second call for the same `event.id` hits P2002 and returns early. That is
+ *   exactly right for a duplicate delivery from Stripe — but it also meant a
+ *   replay of an already-claimed FAILED row silently did NOTHING while
+ *   reporting success. Skipping the claim (instead of deleting and re-creating
+ *   the row) keeps the idempotency guarantee intact for real duplicates.
  */
-export async function handleStripeWebhookEvent(event: Stripe.Event) {
-  logger.info('📥 Webhook received', { type: event.type, id: event.id })
+export async function handleStripeWebhookEvent(event: Stripe.Event, opts?: { claimedEventId?: string }) {
+  logger.info('📥 Webhook received', { type: event.type, id: event.id, replay: !!opts?.claimedEventId })
 
   const startTime = Date.now()
-  let webhookEventId: string | null = null
+  let webhookEventId: string | null = opts?.claimedEventId ?? null
 
   try {
     // 🔒 ATOMIC IDEMPOTENCY: Create event record to claim this event
     // If another process already claimed it, Prisma will throw unique constraint error
-    try {
-      const webhookEvent = await prisma.webhookEvent.create({
-        data: {
-          stripeEventId: event.id,
-          eventType: event.type,
-          payload: event as any,
-          status: 'PENDING',
-        },
-      })
-      webhookEventId = webhookEvent.id
-    } catch (error: any) {
-      // P2002 = Unique constraint violation (stripeEventId already exists)
-      if (error.code === 'P2002') {
-        logger.info('⏭️ Webhook event already being processed by another instance, skipping', {
-          eventId: event.id,
-          type: event.type,
+    // (skipped on replay — the caller already holds the claim)
+    if (!webhookEventId) {
+      try {
+        const webhookEvent = await prisma.webhookEvent.create({
+          data: {
+            stripeEventId: event.id,
+            eventType: event.type,
+            payload: event as any,
+            status: 'PENDING',
+          },
         })
-        return
+        webhookEventId = webhookEvent.id
+      } catch (error: any) {
+        // P2002 = Unique constraint violation (stripeEventId already exists)
+        if (error.code === 'P2002') {
+          logger.info('⏭️ Webhook event already being processed by another instance, skipping', {
+            eventId: event.id,
+            type: event.type,
+          })
+          return
+        }
+        // Re-throw other errors
+        throw error
       }
-      // Re-throw other errors
-      throw error
     }
 
     // 📊 Update webhook event with venue info if available
@@ -1346,7 +1366,12 @@ export async function handleStripeWebhookEvent(event: Stripe.Event) {
             status: 'FAILED',
             errorMessage: errorMessage,
             processingTime,
-            retryCount: { increment: 1 },
+            // On a REPLAY the attempt was already counted up-front by
+            // `replayStripeWebhookEvent` (so a hard crash mid-replay still
+            // consumes it and can't crash-loop). Incrementing here too would
+            // burn two attempts per replay. `undefined` = leave the column
+            // untouched in Prisma.
+            retryCount: opts?.claimedEventId ? undefined : { increment: 1 },
           },
         })
       } catch (updateError) {
@@ -1385,8 +1410,67 @@ export async function handleStripeWebhookEvent(event: Stripe.Event) {
   }
 }
 
+/**
+ * Reprocess a stored `WebhookEvent` row that did not reach SUCCESS.
+ *
+ * This is the ONLY correct way to retry a Stripe platform webhook, and it is
+ * shared by both retry paths (the `StripeWebhookReconciliationJob` sweeper and
+ * the superadmin "retry" action). Calling `handleStripeWebhookEvent` directly
+ * for an already-stored event does nothing: the claim `create` hits P2002 and
+ * returns early.
+ *
+ * The attempt is counted BEFORE processing so that a hard crash (OOM, process
+ * kill) still consumes it — otherwise a poison-pill event could crash-loop the
+ * sweeper forever.
+ *
+ * Replays the STORED payload rather than re-fetching from Stripe: that is what
+ * Stripe itself does on a redelivery, it keeps the retry usable when the Stripe
+ * API is the thing that's down, and it avoids burning API quota per pass.
+ *
+ * @returns `{ replayed: false }` when the row is not eligible (already SUCCESS,
+ *   or out of attempts) — callers should treat that as "nothing to do", not an
+ *   error.
+ */
+export async function replayStripeWebhookEvent(webhookEventId: string): Promise<{ replayed: boolean; reason?: string }> {
+  const row = await prisma.webhookEvent.findUnique({
+    where: { id: webhookEventId },
+    select: { id: true, stripeEventId: true, eventType: true, status: true, retryCount: true, payload: true },
+  })
+
+  if (!row) throw new Error('Webhook event not found')
+  if (row.status === 'SUCCESS') return { replayed: false, reason: 'ALREADY_SUCCEEDED' }
+  if (row.retryCount >= STRIPE_WEBHOOK_MAX_RETRIES) {
+    return { replayed: false, reason: 'MAX_RETRIES_EXHAUSTED' }
+  }
+
+  // Count the attempt up-front (crash-safe) and mark it in flight so a
+  // concurrent sweeper pass skips this row.
+  await prisma.webhookEvent.update({
+    where: { id: row.id },
+    data: { status: 'RETRYING', retryCount: { increment: 1 } },
+  })
+
+  logger.info('🔄 Replaying Stripe webhook event', {
+    webhookEventId: row.id,
+    stripeEventId: row.stripeEventId,
+    eventType: row.eventType,
+    attempt: row.retryCount + 1,
+  })
+
+  // `payload` is the full Stripe.Event as delivered — signature was already
+  // verified at ingest, so no re-verification is needed (or possible) here.
+  const event = row.payload as unknown as Stripe.Event
+
+  // handleStripeWebhookEvent owns the SUCCESS/FAILED bookkeeping and rethrows
+  // on failure; let it propagate so the caller can log/alert per its own rules.
+  await handleStripeWebhookEvent(event, { claimedEventId: row.id })
+
+  return { replayed: true }
+}
+
 export default {
   handleStripeWebhookEvent,
+  replayStripeWebhookEvent,
   handleSubscriptionUpdated,
   handleSubscriptionDeleted,
   handleInvoicePaymentSucceeded,

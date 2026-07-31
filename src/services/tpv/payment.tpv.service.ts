@@ -20,6 +20,7 @@ import { serializedInventoryService } from '../serialized-inventory/serializedIn
 import { getEffectivePaymentConfig } from '../organization-payment-config.service'
 import { logAction } from '../dashboard/activity-log.service'
 import { validateStaffVenue as validateStaffVenueShared } from '../../utils/staff-venue.util'
+import { isRetryableDbError } from '../../utils/serializableRetry'
 import { loadOrderForCfdiFromDb } from '../fiscal/cfdi.service'
 import { terminalPaymentService } from '../terminal-payment.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
@@ -414,6 +415,7 @@ async function updateOrderTotalsForStandalonePayment(
   if (!order) {
     throw new Error(`Order ${orderId} not found for total update`)
   }
+  const isAreaTicketOrder = order.items.some(item => item.areaTicketLineId != null)
 
   // Calculate total payments made (including this new one)
   const previousPayments = order.payments.reduce(
@@ -442,7 +444,7 @@ async function updateOrderTotalsForStandalonePayment(
 
   // ✅ WORLD-CLASS: Pre-flight validation BEFORE capturing payment (Stripe pattern)
   // Validate inventory availability before marking order as complete
-  if (isFullyPaid) {
+  if (isFullyPaid && !isAreaTicketOrder) {
     // ✅ FIX: Only validate items that haven't been paid yet (no paymentAllocations)
     // Items with paymentAllocations have already been "claimed" by a previous split payment
     // Also skip items with deleted products (productId is null - Toast/Square pattern)
@@ -562,7 +564,7 @@ async function updateOrderTotalsForStandalonePayment(
 
   // 🔥 INVENTORY DEDUCTION: Automatically deduct stock when order is completed
   // ✅ WORLD-CLASS PATTERN: Fail payment if inventory deduction fails (Shopify, Square, Toast)
-  if (isFullyPaid) {
+  if (isFullyPaid && !isAreaTicketOrder) {
     const deductionErrors: Array<{ productId: string; productName: string; error: string }> = []
     // Items cuya deducción SÍ se aplicó — si otro item falla, esto es lo que
     // hay que revertir antes de regresar la orden a PENDING.
@@ -662,11 +664,26 @@ async function updateOrderTotalsForStandalonePayment(
         })
       } catch (deductionError: any) {
         // Collect errors instead of swallowing them
+        //
+        // La rama CONCURRENT_TRANSACTION antes buscaba SOLO el texto
+        // 'could not obtain lock', que Prisma nunca emite: en un deadlock manda
+        // 'Transaction failed due to a write conflict or a deadlock' con code
+        // P2034. Los 9 eventos del 17-18 jul 2026 (Mindform) cayeron por eso en
+        // 'UNKNOWN' y nos dejaron sin diagnóstico — parecían recetas mal
+        // configuradas cuando eran colisiones de concurrencia.
+        //
+        // Ahora se detectan por CÓDIGO (isRetryableDbError), no por texto, más
+        // el ConflictError que deductStockFIFO lanza cuando agota sus reintentos.
+        // ⚠️ Esto solo corrige la ETIQUETA para poder diagnosticar: el
+        // comportamiento no cambia — abajo, todo lo que no sea NO_RECIPE sigue
+        // tumbando la orden, a propósito.
         const errorReason = deductionError.message.includes('does not have a recipe')
           ? 'NO_RECIPE'
           : deductionError.message.includes('Insufficient stock')
             ? 'INSUFFICIENT_STOCK'
-            : deductionError.message.includes('could not obtain lock')
+            : isRetryableDbError(deductionError) ||
+                deductionError.message.includes('could not obtain lock') ||
+                deductionError.message.includes('Conflicto de concurrencia persistente')
               ? 'CONCURRENT_TRANSACTION'
               : 'UNKNOWN'
 
@@ -1510,10 +1527,18 @@ export async function recordOrderPayment(
   // Convert amounts from cents to decimal (Prisma expects Decimal)
   const totalAmount = paymentData.amount / 100
   const tipAmount = paymentData.tip / 100
+  const hasAreaTicketLines = activeOrder.items.some(item => item.areaTicketLineId != null)
+  if (hasAreaTicketLines && !paymentData.idempotencyKey) {
+    throw new BadRequestError('Las ventas con vales requieren idempotencyKey. Reintenta el mismo pago con una llave estable.')
+  }
 
   // ✅ WORLD-CLASS PATTERN: Pre-flight validation BEFORE creating payment record (Stripe, Shopify, Toast POS)
   // Validate inventory availability to prevent charging customers for orders we can't fulfill
-  await validatePreFlightInventory(activeOrder, totalAmount + tipAmount)
+  // Vales v7 ya reservaron disponibilidad y consumen esas reservas dentro de su
+  // finalización transaccional; validarlas como inventario libre las restaría dos veces.
+  if (!hasAreaTicketLines) {
+    await validatePreFlightInventory(activeOrder, totalAmount + tipAmount)
+  }
 
   // ✅ CORRECTED: Use validateStaffVenue helper for proper staffId validation
   const validatedStaffId = await validateStaffVenue(paymentData.staffId, venueId, userId)
@@ -1639,8 +1664,21 @@ export async function recordOrderPayment(
   // the second request. We catch that below and return the winning payment, making
   // the concurrent retry behave exactly like an idempotent success.
   let payment: Awaited<ReturnType<typeof prisma.payment.create>>
+  let lockedAreaCheckout: { sessionId: string; attemptId: string } | null = null
+  let areaTicketCheckoutState: string | null = null
   try {
     payment = await prisma.$transaction(async tx => {
+      if (paymentData.status === 'COMPLETED') {
+        const areaTicketPayment = await import('../mobile/areaTicketV7.mobile.service')
+        lockedAreaCheckout = await areaTicketPayment.lockAreaTicketCheckoutForPayment(tx, {
+          venueId,
+          orderId: activeOrder.id,
+          idempotencyKey: paymentData.idempotencyKey,
+          amount: new Prisma.Decimal(totalAmount),
+          method: paymentData.method as PaymentMethod,
+        })
+      }
+
       // Create the payment record
       const newPayment = await tx.payment.create({
         data: {
@@ -2063,6 +2101,66 @@ export async function recordOrderPayment(
       // ✅ FIX: Pass tipAmount separately to update order.tipAmount
       await updateOrderTotalsForStandalonePayment(activeOrder.id, totalAmount + tipAmount, tipAmount, payment.id, validatedStaffId)
 
+      const capturedAreaCheckout = lockedAreaCheckout as {
+        sessionId: string
+        attemptId: string
+      } | null
+
+      if (capturedAreaCheckout && payment.status === 'COMPLETED') {
+        const freshOrder = await prisma.order.findUnique({
+          where: { id: activeOrder.id },
+          select: { paymentStatus: true },
+        })
+        const areaTicketPayment = await import('../mobile/areaTicketV7.mobile.service')
+        try {
+          await prisma.$transaction(
+            tx =>
+              areaTicketPayment.finalizeAreaTicketPaymentInTransaction(tx, {
+                venueId,
+                orderId: activeOrder.id,
+                paymentId: payment.id,
+                fullyPaid: freshOrder?.paymentStatus === 'PAID',
+                staffId: validatedStaffId,
+                locked: capturedAreaCheckout,
+              }),
+            { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+          )
+          areaTicketCheckoutState = freshOrder?.paymentStatus === 'PAID' ? 'PAID' : 'PARTIALLY_PAID'
+        } catch (finalizationError) {
+          // El proveedor ya confirmó el dinero. Nunca habilitar otro cobro:
+          // congela la sesión y conserva el mismo intento para conciliación.
+          await prisma.$transaction(async tx => {
+            await tx.areaTicketPaymentAttempt.updateMany({
+              where: {
+                id: capturedAreaCheckout.attemptId,
+                checkoutSessionId: capturedAreaCheckout.sessionId,
+              },
+              data: {
+                status: 'UNKNOWN',
+                paymentId: payment.id,
+                lastCheckedAt: new Date(),
+              },
+            })
+            await tx.areaTicketCheckoutSession.updateMany({
+              where: { id: capturedAreaCheckout.sessionId, venueId },
+              data: {
+                status: 'RECONCILIATION_REQUIRED',
+                activePaymentAttemptId: capturedAreaCheckout.attemptId,
+                version: { increment: 1 },
+              },
+            })
+          })
+          logger.error('[AREA TICKETS v7] Pago capturado; finalización requiere conciliación', {
+            venueId,
+            orderId,
+            paymentId: payment.id,
+            checkoutSessionId: capturedAreaCheckout.sessionId,
+            error: finalizationError instanceof Error ? finalizationError.message : String(finalizationError),
+          })
+          areaTicketCheckoutState = 'RECONCILIATION_REQUIRED'
+        }
+      }
+
       logger.info('Order totals updated directly in backend (Standalone Mode)', {
         paymentId: payment.id,
         orderId: activeOrder.id,
@@ -2134,6 +2232,7 @@ export async function recordOrderPayment(
   // Add digital receipt info to payment response
   return {
     ...payment,
+    ...(areaTicketCheckoutState ? { areaTicketCheckoutState } : {}),
     digitalReceipt: digitalReceipt
       ? {
           id: digitalReceipt.id,

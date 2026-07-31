@@ -7,7 +7,7 @@ import { UpdateAccountDto, RequestPasswordResetDto, ResetPasswordDto } from '../
 import logger from '../../config/logger'
 import * as authService from '../../services/dashboard/auth.service'
 import bcrypt from 'bcrypt'
-import { DEFAULT_PERMISSIONS } from '../../lib/permissions'
+import { DEFAULT_PERMISSIONS, getEffectiveRolePermissions } from '../../lib/permissions'
 import { getRoleDisplayNames, DEFAULT_ROLE_DISPLAY_NAMES } from '../../services/dashboard/venueRoleConfig.dashboard.service'
 
 /**
@@ -634,8 +634,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
     const enrichedVenues = directVenues.map(venue => {
       const customPerms = customRolePermissions.find(crp => crp.venueId === venue.id && crp.role === venue.role)
 
-      // If custom permissions exist, use them; otherwise use defaults
-      const permissions = customPerms ? (customPerms.permissions as string[]) : DEFAULT_PERMISSIONS[venue.role as StaffRole] || []
+      const permissions = getEffectiveRolePermissions(venue.role as StaffRole, customPerms?.permissions as string[] | undefined)
 
       return {
         ...venue,

@@ -48,6 +48,7 @@ import { registerAccountingTools } from './tools/accounting'
 import { registerActivityLogTools } from './tools/activity-log'
 import { registerMerchantRoutingTools } from './tools/merchantRouting'
 import { registerPrinterTools } from './tools/printers'
+import { registerAreaTicketTools } from './tools/areaTickets'
 import { registerCashOutTools } from './tools/cash-out'
 import { registerWhiteLabelOpsTools } from './tools/whiteLabelOps'
 import { registerInterVenueTransferTools } from './tools/interVenueTransfers'
@@ -122,6 +123,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerActivityLogTools(server, scope)
   registerMerchantRoutingTools(server, scope)
   registerPrinterTools(server, scope)
+  registerAreaTicketTools(server, scope)
 
   if (flags.serializedEnabled) {
     registerSerializedTools(server, scope)
