@@ -1,4 +1,9 @@
-import { buildBlumonEventId, reconcileBlumonEvent, validateBlumonWebhookPayload } from '@/services/tpv/blumon-webhook.service'
+import {
+  buildBlumonEventId,
+  processBlumonPaymentWebhook,
+  reconcileBlumonEvent,
+  validateBlumonWebhookPayload,
+} from '@/services/tpv/blumon-webhook.service'
 import prisma from '@/utils/prismaClient'
 
 jest.mock('@/utils/prismaClient', () => ({
@@ -10,7 +15,18 @@ jest.mock('@/utils/prismaClient', () => ({
       update: jest.fn(),
     },
     providerEventLog: {
+      create: jest.fn(),
+      findFirst: jest.fn(),
       update: jest.fn(),
+    },
+    terminal: {
+      findUnique: jest.fn(),
+    },
+    merchantAccount: {
+      findFirst: jest.fn(),
+    },
+    venuePaymentConfig: {
+      findMany: jest.fn(),
     },
   },
 }))
@@ -19,6 +35,11 @@ const mockedFindFirst = prisma.payment.findFirst as jest.Mock
 const mockedFindMany = prisma.payment.findMany as jest.Mock
 const mockedPaymentUpdate = prisma.payment.update as jest.Mock
 const mockedEventLogUpdate = prisma.providerEventLog.update as jest.Mock
+const mockedEventLogCreate = prisma.providerEventLog.create as jest.Mock
+const mockedEventLogFindFirst = prisma.providerEventLog.findFirst as jest.Mock
+const mockedTerminalFindUnique = prisma.terminal.findUnique as jest.Mock
+const mockedMerchantFindFirst = prisma.merchantAccount.findFirst as jest.Mock
+const mockedVenueConfigFindMany = prisma.venuePaymentConfig.findMany as jest.Mock
 
 const ventaPayload = {
   amount: '100.00',
@@ -39,7 +60,22 @@ const matchingPayment = {
 }
 
 beforeEach(() => {
-  ;[mockedFindFirst, mockedFindMany, mockedPaymentUpdate, mockedEventLogUpdate].forEach(m => m.mockReset())
+  ;[
+    mockedFindFirst,
+    mockedFindMany,
+    mockedPaymentUpdate,
+    mockedEventLogUpdate,
+    mockedEventLogCreate,
+    mockedEventLogFindFirst,
+    mockedTerminalFindUnique,
+    mockedMerchantFindFirst,
+    mockedVenueConfigFindMany,
+  ].forEach(m => m.mockReset())
+  mockedEventLogCreate.mockResolvedValue({ id: 'evt_row' })
+  mockedEventLogFindFirst.mockResolvedValue(null)
+  mockedTerminalFindUnique.mockResolvedValue(null)
+  mockedMerchantFindFirst.mockResolvedValue(null)
+  mockedVenueConfigFindMany.mockResolvedValue([])
   mockedPaymentUpdate.mockResolvedValue({})
   mockedEventLogUpdate.mockResolvedValue({})
   // Resolve on the first attempt so the retry backoff (0/2s/3s) never runs.
@@ -222,6 +258,69 @@ describe('AUTH_CODE — llave débil acotada (incidente cross-time 2026-07-30)',
     const opCall = mockedFindMany.mock.calls.find(c => JSON.stringify(c[0]?.where ?? {}).includes('99000001'))
     expect(opCall).toBeDefined()
     expect(opCall![0].where.createdAt).toBeUndefined()
+  })
+})
+
+/**
+ * Incidente 2026-07-30 (Berthe, $9,324): un cobro real se descartó como
+ * UNKNOWN_TERMINAL antes de llegar a la cascada.
+ *
+ * CAUSA: los SERIALES VIRTUALES son una estrategia deliberada de multi-merchant
+ * (ver `.claude/rules/blumon-seriales-virtuales.md`). Un mismo aparato físico
+ * lleva N afiliaciones en Blumon: la base + variantes con un dígito extra
+ * (2840744167 → 28407441672). El serial virtual vive SOLO en
+ * `MerchantAccount.blumonSerialNumber`; NO existe como fila en `Terminal`.
+ *
+ * El gate preguntaba únicamente por `Terminal` y tiraba el webhook. Dos líneas
+ * más abajo, `resolveBlumonScope` — que ya corre en el mismo `Promise.all` — SÍ
+ * lo resuelve. El sistema sabía de quién era; le preguntó a la tabla equivocada.
+ *
+ * El match sigue siendo EXACTO en ambas tablas: nada de comparación difusa de
+ * seriales para rutear dinero.
+ */
+describe('Serial virtual (multi-merchant) — el gate acepta terminal O merchant', () => {
+  const webhookSerialVirtual = {
+    serialNumber: '28407441672', // afiliación virtual: existe en MerchantAccount, no en Terminal
+    amount: '9324.00',
+    operationNumber: 77000001,
+    authorizationCode: 'AUTH77',
+    operationType: 'VENTA',
+    codeResponse: '00',
+    lastFour: '1234',
+    cardType: 'CREDITO',
+    brand: 'VISA',
+    bank: 'BANORTE',
+  } as any
+
+  it('NO descarta el webhook cuando el serial resuelve a un MerchantAccount', async () => {
+    mockedTerminalFindUnique.mockResolvedValue(null) // no hay Terminal con ese serial
+    mockedMerchantFindFirst.mockResolvedValue({ id: 'merchant_goia' }) // pero sí un merchant
+    mockedVenueConfigFindMany.mockResolvedValue([{ venueId: 'venue_berthe' }])
+
+    const result = await processBlumonPaymentWebhook(webhookSerialVirtual)
+
+    expect(result.action).not.toBe('UNKNOWN_TERMINAL')
+    expect(mockedEventLogCreate).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ errorReason: 'UNKNOWN_TERMINAL' }) }),
+    )
+  })
+
+  it('un serial ajeno (ni Terminal ni MerchantAccount) SÍ sigue siendo UNKNOWN_TERMINAL', async () => {
+    mockedTerminalFindUnique.mockResolvedValue(null)
+    mockedMerchantFindFirst.mockResolvedValue(null) // de otro integrador
+
+    const result = await processBlumonPaymentWebhook({ ...webhookSerialVirtual, serialNumber: '99999999999' })
+
+    expect(result.action).toBe('UNKNOWN_TERMINAL')
+  })
+
+  it('el camino normal (terminal física registrada) no cambia', async () => {
+    mockedTerminalFindUnique.mockResolvedValue({ id: 'term_1', venueId: 'venue_berthe', serialNumber: 'AVQD-2840744167' })
+    mockedMerchantFindFirst.mockResolvedValue(null)
+
+    const result = await processBlumonPaymentWebhook({ ...webhookSerialVirtual, serialNumber: '2840744167' })
+
+    expect(result.action).not.toBe('UNKNOWN_TERMINAL')
   })
 })
 

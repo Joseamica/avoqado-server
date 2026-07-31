@@ -415,12 +415,29 @@ export async function processBlumonPaymentWebhook(payload: BlumonWebhookPayload)
     const merchantAccountId = blumonScope.merchantAccountId
     const scopeVenueId = terminal?.venueId ?? null
 
-    if (payload.serialNumber && !terminal) {
-      logger.warn('🚫 [Blumon webhook] Unknown terminal serial', {
+    // A serial is OURS if it resolves to EITHER identity:
+    //   • a physical `Terminal` row, or
+    //   • a `MerchantAccount.blumonSerialNumber` — where VIRTUAL serials live.
+    //
+    // Virtual serials are a deliberate multi-merchant strategy: one physical
+    // device carries N Blumon affiliations, registered as the base serial plus
+    // variants with an extra digit (2840744167 → 28407441672). Those variants
+    // exist ONLY on MerchantAccount, never as a Terminal row.
+    //
+    // Checking `terminal` alone discarded a real $9,324 charge as
+    // UNKNOWN_TERMINAL before it ever reached the matching cascade (Berthe,
+    // 2026-07-30) — while `resolveBlumonScope`, already resolved in the same
+    // Promise.all above, identified the merchant correctly.
+    //
+    // Both lookups stay EXACT. Fuzzy serial comparison to route money would be
+    // far more dangerous than a missed webhook.
+    // Full context: `.claude/rules/blumon-seriales-virtuales.md`
+    if (payload.serialNumber && !terminal && !merchantAccountId) {
+      logger.warn('🚫 [Blumon webhook] Unknown serial — no Terminal and no MerchantAccount', {
         correlationId,
         rawSerial: payload.serialNumber,
         canonical: canonicalizeBlumonSerial(payload.serialNumber),
-        hint: 'This terminal is not registered in our DB. Either it belongs to another integrator or we forgot to register it.',
+        hint: 'Serial matches neither a Terminal nor a MerchantAccount.blumonSerialNumber. Either it belongs to another integrator, or a (possibly virtual) merchant serial was never registered.',
       })
 
       // Still persist the event so ops can see it in the dashboard and decide
