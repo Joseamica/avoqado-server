@@ -74,7 +74,14 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
     //    first active row would leak one device's workspace/settings into another.
     //    Headerless legacy clients keep the previous first-active fallback.
     const deviceUid = requestDeviceUid(req)
-    const deviceTerminal = deviceUid ? (terminals.find(t => t.status === 'ACTIVE' && t.deviceUid === deviceUid) ?? null) : null
+    // POS Android devices can be marked INACTIVE by terminal-health liveness even
+    // while authenticated mobile requests keep updating their lastHeartbeat.
+    // Status is not the identity or permission boundary here: the exact deviceUid,
+    // staff permissions and the downstream feature endpoints are. Still exclude
+    // terminals that have not been activated, are in maintenance or were retired.
+    const deviceTerminal = deviceUid
+      ? (terminals.find(t => (t.status === 'ACTIVE' || t.status === 'INACTIVE') && t.deviceUid === deviceUid) ?? null)
+      : null
     const activeTerminal = deviceTerminal ?? terminals.find(t => t.status === 'ACTIVE') ?? null
 
     // 3. If there is an active terminal, get its merged settings

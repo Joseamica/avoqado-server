@@ -164,6 +164,53 @@ describe('getVenueTpvSettings (mobile) — plan-tier info', () => {
     expect(res.__json.data.terminals[0]).not.toHaveProperty('canIssueAreaTickets')
   })
 
+  it('returns an INACTIVE POS workspace when its exact device id is making the request', async () => {
+    prismaMock.venueFeature.findMany.mockResolvedValue([])
+    prismaMock.venue.findUnique.mockResolvedValue({ seatCapExempt: false, status: 'ACTIVE' })
+    prismaMock.terminal.findMany.mockResolvedValue([
+      {
+        id: 'terminal-default',
+        name: 'Caja activa',
+        status: 'ACTIVE',
+        deviceUid: 'device-default',
+        defaultWorkspace: 'STANDARD_POS',
+        canIssueAreaTickets: false,
+        canCheckoutAreaTickets: true,
+        canDeliverAreaTickets: false,
+        fulfillmentAreaId: null,
+        config: {},
+        configOverrides: {},
+      },
+      {
+        id: 'terminal-cremeria',
+        name: 'Samsung Cremería',
+        status: 'INACTIVE',
+        deviceUid: 'device-cremeria',
+        defaultWorkspace: 'AREA_OPERATIONS',
+        canIssueAreaTickets: true,
+        canCheckoutAreaTickets: false,
+        canDeliverAreaTickets: true,
+        fulfillmentAreaId: 'area-cremeria',
+        config: {},
+        configOverrides: {},
+      },
+    ] as any)
+
+    const res = makeRes()
+    await getVenueTpvSettings(makeReq('device-cremeria'), res, jest.fn() as NextFunction)
+
+    expect(mockedGetTpvSettings).toHaveBeenCalledWith('terminal-cremeria')
+    expect(res.__json.data.activeTerminalId).toBe('terminal-cremeria')
+    expect(res.__json.data.deviceTerminal).toEqual({
+      id: 'terminal-cremeria',
+      defaultWorkspace: 'AREA_OPERATIONS',
+      canIssueAreaTickets: true,
+      canCheckoutAreaTickets: false,
+      canDeliverAreaTickets: true,
+      fulfillmentAreaId: 'area-cremeria',
+    })
+  })
+
   it('keeps the legacy first-active behavior when the client sends no device id', async () => {
     prismaMock.venueFeature.findMany.mockResolvedValue([])
     prismaMock.venue.findUnique.mockResolvedValue({ seatCapExempt: false, status: 'ACTIVE' })
