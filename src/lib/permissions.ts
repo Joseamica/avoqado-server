@@ -842,6 +842,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'orders:*',
     'printers:*', // PRINT_STATIONS: impresoras, estaciones y ruteo de comandas (feature gratis/core)
     'payments:*',
+    'area-tickets:*', // Operate and configure multi-area retail tickets
+    'scale:*', // Use and configure connected scales
     'payment:create-manual', // Record payments received outside Avoqado (cash, external terminal, transfer)
     'payment-link:*', // Create / manage shareable payment links (Stripe Connect + Blumon)
     'shifts:*',
@@ -960,6 +962,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'menu:*',
     'orders:*',
     'payments:*',
+    'area-tickets:*', // Operate and configure multi-area retail tickets
+    'scale:*', // Use and configure connected scales
     'payment:create-manual', // Record payments received outside Avoqado (cash, external terminal, transfer)
     'payment-link:*', // Create / manage shareable payment links (Stripe Connect + Blumon)
     'shifts:*',
@@ -1168,14 +1172,14 @@ export const CRITICAL_PERMISSIONS = ['settings:manage', 'settings:read', 'teams:
  *
  * @param role User's role
  * @param customPermissions Custom permissions from VenueRolePermission (optional)
- * @param requiredPermission Permission to check (format: "resource:action")
- * @returns true if user has permission
+ * @returns the resolved permissions that API responses and authorization checks
+ * should expose for this role at the selected venue
  */
-export function hasPermission(role: StaffRole, customPermissions: string[] | null | undefined, requiredPermission: string): boolean {
+export function getEffectiveRolePermissions(role: StaffRole, customPermissions: string[] | null | undefined): string[] {
   // SUPERADMIN EXCEPTION: Always use wildcard, never custom permissions
   // This prevents accidental lockout if SUPERADMIN permissions are customized
   if (role === StaffRole.SUPERADMIN) {
-    return true // SUPERADMIN always has all permissions
+    return ['*:*']
   }
 
   // Get default permissions for role
@@ -1204,8 +1208,15 @@ export function hasPermission(role: StaffRole, customPermissions: string[] | nul
   // RESOLVE IMPLICIT DEPENDENCIES
   // Expand base permissions to include their implicit dependencies
   // Example: 'orders:read' automatically includes 'products:read', 'payments:read'
-  const resolvedSet = resolvePermissions(basePermissions)
-  const allPermissions = Array.from(resolvedSet)
+  return Array.from(resolvePermissions(basePermissions))
+}
+
+/**
+ * Check one permission against the same effective permission list returned to
+ * clients during authentication.
+ */
+export function hasPermission(role: StaffRole, customPermissions: string[] | null | undefined, requiredPermission: string): boolean {
+  const allPermissions = getEffectiveRolePermissions(role, customPermissions)
 
   // Check for wildcard (all permissions)
   if (allPermissions.includes('*:*')) return true
