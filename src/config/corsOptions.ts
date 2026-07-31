@@ -16,13 +16,29 @@ export type Environment = 'development' | 'staging' | 'production'
  * issued `sameSite: 'none'` + `secure` with no `domain`, an attacker page could
  * make authenticated calls to the API and READ the responses.
  *
- * The project name is now fixed and the subdomain label is restricted to what
- * Cloudflare actually generates (lowercase alphanumerics and hyphens), so
- * `https://<branch-or-hash>.avoqado-web-dashboard.pages.dev` still works and
- * `-attacker` suffixes no longer do. This branch applies in ALL environments,
- * production included, which is exactly why it has to be exact.
+ * 🔴 `avoqado-web-dashboard-4wx` is NOT a typo — don't "fix" it back. The
+ * Cloudflare Pages project genuinely IS named `avoqado-web-dashboard`
+ * (wrangler.toml, CI `--project-name`), but `<project>.pages.dev` is a GLOBAL
+ * namespace — that exact name was already taken by someone else, so Cloudflare
+ * silently serves the real project at the `-4wx`-suffixed domain instead.
+ * `demo-avoqado-web-dashboard` didn't collide, so it kept its exact name with
+ * no suffix — the two projects are independent literal alternatives below,
+ * NOT derived from one shared prefix, because only one of them carries a
+ * suffix. Verified 2026-07-31: `dig avoqado-web-dashboard.pages.dev` → NXDOMAIN,
+ * `dig avoqado-web-dashboard-4wx.pages.dev` → resolves (and is exactly what
+ * `dashboard.avoqado.io` CNAMEs to). The first cut of this anchor fix used the
+ * project name instead of the real domain and silently broke every preview's
+ * access to the API — reproduced live: logging in from
+ * `develop.avoqado-web-dashboard-4wx.pages.dev` failed with "Server
+ * Unavailable" because the origin didn't match. Before touching this regex
+ * again, re-verify BOTH domains with dig/curl — never assume the configured
+ * project name and its public pages.dev domain are the same string.
+ *
+ * The subdomain label is restricted to what Cloudflare actually generates
+ * (lowercase alphanumerics and hyphens). This branch applies in ALL
+ * environments, production included, which is exactly why it has to be exact.
  */
-const CLOUDFLARE_PAGES_PREVIEW = /^https:\/\/[a-z0-9-]+\.(?:demo-)?avoqado-web-dashboard\.pages\.dev$/
+const CLOUDFLARE_PAGES_PREVIEW = /^https:\/\/[a-z0-9-]+\.(?:avoqado-web-dashboard-4wx|demo-avoqado-web-dashboard)\.pages\.dev$/
 
 // Environment-specific CORS configuration
 export const getCorsConfig = (env: Environment): CorsOptions => {
