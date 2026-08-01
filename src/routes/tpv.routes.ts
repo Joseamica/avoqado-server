@@ -2791,6 +2791,15 @@ router.get('/auth/permissions', authenticateTokenMiddleware, async (req: Request
  *               isInternational:
  *                 type: boolean
  *                 default: false
+ *                 deprecated: true
+ *                 description: Legacy client guess; retained temporarily for financial compatibility
+ *               issuerCountryCode:
+ *                 type: string
+ *                 description: Optional raw issuer country evidence (for example EMV 5F28 value 0484)
+ *               issuerCountrySource:
+ *                 type: string
+ *                 enum: [EMV_5F28, PROCESSOR]
+ *                 description: Origin of issuerCountryCode; shadow classification only
  *               reviewRating:
  *                 type: string
  *     responses:
@@ -2909,6 +2918,15 @@ router.post(
  *               isInternational:
  *                 type: boolean
  *                 default: false
+ *                 deprecated: true
+ *                 description: Legacy client guess; retained temporarily for financial compatibility
+ *               issuerCountryCode:
+ *                 type: string
+ *                 description: Optional raw issuer country evidence (for example EMV 5F28 value 0484)
+ *               issuerCountrySource:
+ *                 type: string
+ *                 enum: [EMV_5F28, PROCESSOR]
+ *                 description: Origin of issuerCountryCode; shadow classification only
  *               reviewRating:
  *                 type: string
  *     responses:
@@ -3706,18 +3724,12 @@ router.delete(
  * TABLE_SERVICE y la propiedad de mesa se evalúan POR INTENT dentro del reducer, así
  * que esta ruta NO lleva checkFeatureAccess: gatearla aquí rechazaría un batch entero
  * por un solo intent de mesa, aunque el resto (p.ej. PAY_CASH de un OrderType sin mesa)
- * fuera legítimo. checkPermission('orders:create') es el mismo nombre EXACTO que usa
- * /mobile (mobile.routes.ts) — mirroring intencional, ver
- * .claude/rules/offline-first-y-hub-lan.md.
+ * fuera legítimo. La autorización se hace POR INTENT en el reducer usando el
+ * permiso de su ruta online equivalente; un gate genérico aquí permitiría una
+ * escalación o bloquearía batches legítimos.
  * Body: { deviceId, intents: [...] }
  */
-router.post(
-  '/venues/:venueId/sync/intents',
-  authenticateTokenMiddleware,
-  validateVenueAccess,
-  checkPermission('orders:create'),
-  syncTpvController.syncIntents,
-)
+router.post('/venues/:venueId/sync/intents', authenticateTokenMiddleware, validateVenueAccess, syncTpvController.syncIntents)
 
 // ============================================
 // TABLE SERVICE — ORDER LIFECYCLE (Plan B Task 4, 2026-07-27)

@@ -11,6 +11,7 @@
 import { Request, Response } from 'express'
 import * as syncService from '../../services/mobile/sync.mobile.service'
 import logger from '../../config/logger'
+import { getUserAccess, hasPermission } from '../../services/access/access.service'
 
 const MAX_BATCH = 100
 
@@ -45,7 +46,16 @@ export async function syncIntents(req: Request, res: Response): Promise<void> {
       }
     }
 
-    const acks = await syncService.processIntents({ venueId, staffId, deviceId, intents })
+    // Resolver permisos UNA vez por batch y evaluar cada intent con el permiso
+    // de su ruta online equivalente. El replay no es una puerta trasera.
+    const access = await getUserAccess(staffId, venueId)
+    const acks = await syncService.processIntents({
+      venueId,
+      staffId,
+      deviceId,
+      intents,
+      authorizeIntent: (_intent, requiredPermission) => hasPermission(access, requiredPermission),
+    })
     res.status(200).json({ success: true, data: acks })
   } catch (error: any) {
     logger.error(`[SYNC MOBILE CONTROLLER] Error procesando intents: ${error.message}`)

@@ -178,6 +178,14 @@ export const recordPaymentBodySchema = z.object({
       token: z.string().optional(),
       isInternational: z.boolean().default(false),
 
+      // Additive issuer-country evidence for the shadow classifier. Old TPVs omit
+      // both fields and continue through the legacy boolean path unchanged. Invalid
+      // evidence is discarded instead of rejecting an otherwise approved payment.
+      issuerCountryCode: z
+        .preprocess(value => (value === null || value === undefined ? undefined : String(value)), z.string().trim().max(10).optional())
+        .catch(undefined),
+      issuerCountrySource: z.enum(['EMV_5F28', 'PROCESSOR']).optional().catch(undefined),
+
       // Additional fields
       reviewRating: z.string().optional(),
 

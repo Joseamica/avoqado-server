@@ -18,7 +18,13 @@ import * as tableOwnership from '@/middlewares/checkTableOwnership.middleware'
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
-    posSyncIntent: { findUnique: jest.fn(), findFirst: jest.fn(), create: jest.fn() },
+    posSyncIntent: {
+      findUnique: jest.fn(),
+      findFirst: jest.fn(),
+      create: jest.fn(),
+      update: jest.fn(),
+      delete: jest.fn(),
+    },
     order: { findFirst: jest.fn() },
     orderItem: { findMany: jest.fn() },
   },
@@ -47,6 +53,7 @@ jest.mock('@/middlewares/checkTableOwnership.middleware', () => ({
   isTableOwnershipEnforced: jest.fn(),
   staffCanManageAllTables: jest.fn(),
 }))
+jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 jest.mock('@/config/logger', () => ({
   __esModule: true,
   default: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
@@ -56,7 +63,13 @@ const VENUE = 'venue-1'
 const STAFF = 'staff-juan'
 const DEVICE = 'device-a'
 
-const baseParams = (intents: any[]) => ({ venueId: VENUE, staffId: STAFF, deviceId: DEVICE, intents })
+const baseParams = (intents: any[]) => ({
+  venueId: VENUE,
+  staffId: STAFF,
+  deviceId: DEVICE,
+  intents,
+  authorizeIntent: jest.fn(() => true),
+})
 
 describe('sync.mobile.service processIntents', () => {
   beforeEach(() => {
@@ -64,6 +77,8 @@ describe('sync.mobile.service processIntents', () => {
     ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(null)
     ;(prisma.posSyncIntent.findFirst as jest.Mock).mockResolvedValue(null)
     ;(prisma.posSyncIntent.create as jest.Mock).mockResolvedValue({})
+    ;(prisma.posSyncIntent.update as jest.Mock).mockResolvedValue({})
+    ;(prisma.posSyncIntent.delete as jest.Mock).mockResolvedValue({})
     ;(featureAccess.hasFeatureAccess as jest.Mock).mockResolvedValue({ hasAccess: true })
     ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(false)
     ;(tableOwnership.staffCanManageAllTables as jest.Mock).mockResolvedValue(false)
@@ -90,6 +105,90 @@ describe('sync.mobile.service processIntents', () => {
     expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'UNKNOWN_INTENT_TYPE' })
   })
 
+  it('intent PROCESSING reciente → RETRY sin volver a aplicar el efecto', async () => {
+    ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue({
+      venueId: VENUE,
+      idempotencyKey: 'i-processing',
+      status: 'PROCESSING',
+      createdAt: new Date(),
+    })
+
+    const acks = await processIntents(baseParams([{ id: 'i-processing', type: 'OPEN_TABLE', payload: { tableId: 't1' } }]))
+
+    expect(acks[0]).toMatchObject({ status: 'RETRY', errorCode: 'INTENT_IN_PROGRESS' })
+    expect(tableService.assignTable).not.toHaveBeenCalled()
+  })
+
+  it('intent PROCESSING abandonado → OUTCOME_UNKNOWN visible sin repetir el efecto', async () => {
+    ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue({
+      venueId: VENUE,
+      idempotencyKey: 'i-unknown',
+      status: 'PROCESSING',
+      createdAt: new Date(Date.now() - 6 * 60 * 1000),
+    })
+
+    const acks = await processIntents(baseParams([{ id: 'i-unknown', type: 'OPEN_TABLE', payload: { tableId: 't1' } }]))
+
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'OUTCOME_UNKNOWN' })
+    expect(tableService.assignTable).not.toHaveBeenCalled()
+    expect(prisma.posSyncIntent.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { status: 'REJECTED', errorCode: 'OUTCOME_UNKNOWN' } }),
+    )
+  })
+
+  it('secuencia ya utilizada por el dispositivo → STALE_DEVICE_SEQUENCE sin ejecutar', async () => {
+    ;(prisma.posSyncIntent.findFirst as jest.Mock).mockResolvedValue({ seq: 12 })
+
+    const acks = await processIntents(baseParams([{ id: 'i-stale-seq', seq: 12, type: 'OPEN_TABLE', payload: { tableId: 't1' } }]))
+
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'STALE_DEVICE_SEQUENCE' })
+    expect(tableService.assignTable).not.toHaveBeenCalled()
+    expect(prisma.posSyncIntent.create).not.toHaveBeenCalled()
+  })
+
+  it('permiso faltante → REJECTED PERMISSION_DENIED sin aplicar el efecto', async () => {
+    const params = baseParams([{ id: 'i-perm', type: 'CANCEL_ORDER', payload: { orderId: 'order-1' } }])
+    params.authorizeIntent.mockReturnValue(false)
+
+    const acks = await processIntents(params)
+
+    expect(params.authorizeIntent).toHaveBeenCalledWith(expect.objectContaining({ type: 'CANCEL_ORDER' }), 'orders:cancel')
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'PERMISSION_DENIED' })
+    expect(orderMobileService.cancelOrder).not.toHaveBeenCalled()
+    expect(prisma.posSyncIntent.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'PROCESSING' }) }),
+    )
+    expect(prisma.posSyncIntent.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'REJECTED', errorCode: 'PERMISSION_DENIED' }) }),
+    )
+  })
+
+  it('actor distinto al autenticado → REJECTED ACTOR_MISMATCH', async () => {
+    const params = baseParams([
+      { id: 'i-actor', type: 'PAY_CASH', staffId: 'staff-otro', payload: { orderId: 'order-1', amountCents: 100 } },
+    ])
+
+    const acks = await processIntents(params)
+
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'ACTOR_MISMATCH' })
+    expect(params.authorizeIntent).not.toHaveBeenCalled()
+    expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
+  })
+
+  it('timeout transitorio de Prisma → RETRY y conserva el intent sin persistir rechazo', async () => {
+    ;(tableService.assignTable as jest.Mock).mockRejectedValue(Object.assign(new Error('pool timeout'), { code: 'P2024' }))
+
+    const acks = await processIntents(
+      baseParams([{ id: 'i-retry-db', type: 'OPEN_TABLE', payload: { tableId: 't1', localOrderId: 'local-db' } }]),
+    )
+
+    expect(acks[0]).toMatchObject({ status: 'RETRY', errorCode: 'P2024' })
+    expect(prisma.posSyncIntent.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'PROCESSING' }) }),
+    )
+    expect(prisma.posSyncIntent.delete).toHaveBeenCalled()
+  })
+
   it('OPEN_TABLE feliz: delega en assignTable y mapea localOrderId → orderId', async () => {
     ;(tableService.assignTable as jest.Mock).mockResolvedValue({
       order: { id: 'order-1', orderNumber: 'A-3001', version: 1 },
@@ -104,7 +203,10 @@ describe('sync.mobile.service processIntents', () => {
       result: { orderId: 'order-1', localOrderId: 'local-A', isNewOrder: true },
     })
     expect(prisma.posSyncIntent.create).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ idempotencyKey: 'i3', localRef: 'local-A', status: 'ACKED' }) }),
+      expect.objectContaining({ data: expect.objectContaining({ idempotencyKey: 'i3', localRef: 'local-A', status: 'PROCESSING' }) }),
+    )
+    expect(prisma.posSyncIntent.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'ACKED' }) }),
     )
   })
 
@@ -155,8 +257,10 @@ describe('sync.mobile.service processIntents', () => {
     // El primero es RETRY; el batch se corta ANTES del segundo (FIFO).
     expect(acks).toHaveLength(1)
     expect(acks[0]).toMatchObject({ id: 'iA', status: 'RETRY', errorCode: 'VERSION_CONFLICT' })
-    // RETRY NO se persiste — un próximo replay lo re-drive.
-    expect(prisma.posSyncIntent.create).not.toHaveBeenCalled()
+    // La reserva se elimina: un próximo replay lo re-drive.
+    expect(prisma.posSyncIntent.delete).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { venueId_idempotencyKey: { venueId: VENUE, idempotencyKey: 'iA' } } }),
+    )
   })
 
   it('el batch se ordena por seq (defensivo): OPEN_TABLE antes que su ADD_ITEMS aunque lleguen invertidos', async () => {

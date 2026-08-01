@@ -116,6 +116,9 @@ describe('list_payments', () => {
         feeAmount: 0,
         netAmount: -50,
         cardBrand: 'VISA',
+        internationalityStatus: 'UNKNOWN',
+        internationalitySource: 'LEGACY',
+        issuerCountryCode: null,
         maskedPan: '4111******1111',
         processor: 'blumon',
         authorizationNumber: '502511',
@@ -137,6 +140,12 @@ describe('list_payments', () => {
       terminal: 'Caja 1',
       orderNumber: 'A-1023',
       processedBy: 'Ana López',
+      internationalityShadow: {
+        status: 'UNKNOWN',
+        source: 'LEGACY',
+        issuerCountryCode: null,
+        authoritativeForMoney: false,
+      },
     })
     // sensitive fields must NOT leak to the LLM vendor
     expect(out.payments[0].card).toBeUndefined()

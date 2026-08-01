@@ -14,6 +14,7 @@ import bcrypt from 'bcryptjs'
 import { AuthenticationError, ForbiddenError } from '../../errors/AppError'
 import * as jwtService from '../../jwt.service'
 import { getEffectiveRolePermissions } from '../../lib/permissions'
+import { getRoleDisplayName } from '../dashboard/venueRoleConfig.dashboard.service'
 import logger from '@/config/logger'
 import {
   generateAuthenticationOptions,
@@ -251,6 +252,12 @@ export async function verifyPasskeyAssertion(credential: AuthenticationResponseJ
     where: { venueId: { in: venueIds } },
     select: { venueId: true, role: true, permissions: true },
   })
+  const roleDisplayNames = new Map<string, string>()
+  await Promise.all(
+    staff.venues.map(async sv => {
+      roleDisplayNames.set(sv.venueId, await getRoleDisplayName(sv.venueId, sv.role))
+    }),
+  )
 
   // 10. Format response (same structure as email login)
   const sanitizedStaff = {
@@ -274,6 +281,7 @@ export async function verifyPasskeyAssertion(credential: AuthenticationResponseJ
         logo: sv.venue.logo,
         type: sv.venue.type,
         role: sv.role,
+        roleDisplayName: roleDisplayNames.get(sv.venueId),
         status: sv.venue.status,
         kycStatus: sv.venue.kycStatus,
         timezone: sv.venue.timezone,
@@ -604,6 +612,12 @@ export async function loginWithEmail(email: string, password: string, rememberMe
     where: { venueId: { in: venueIds } },
     select: { venueId: true, role: true, permissions: true },
   })
+  const roleDisplayNames = new Map<string, string>()
+  await Promise.all(
+    staff.venues.map(async sv => {
+      roleDisplayNames.set(sv.venueId, await getRoleDisplayName(sv.venueId, sv.role))
+    }),
+  )
 
   // 9. Format response
   const sanitizedStaff = {
@@ -627,6 +641,7 @@ export async function loginWithEmail(email: string, password: string, rememberMe
         logo: sv.venue.logo,
         type: sv.venue.type,
         role: sv.role,
+        roleDisplayName: roleDisplayNames.get(sv.venueId),
         status: sv.venue.status,
         kycStatus: sv.venue.kycStatus,
         timezone: sv.venue.timezone,

@@ -24,6 +24,11 @@ import { isRetryableDbError } from '../../utils/serializableRetry'
 import { loadOrderForCfdiFromDb } from '../fiscal/cfdi.service'
 import { terminalPaymentService } from '../terminal-payment.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
+import {
+  classifyCardInternationality,
+  type CardInternationalityDecision,
+  type ClientCountryEvidenceSource,
+} from '../payments/cardInternationality.service'
 
 /**
  * Build the slim digitalReceipt response shape with a constructed `receiptUrl`.
@@ -1218,6 +1223,8 @@ interface PaymentCreationData {
   mentaTicketId?: string
   token?: string
   isInternational: boolean
+  issuerCountryCode?: string
+  issuerCountrySource?: ClientCountryEvidenceSource
 
   // Additional fields
   reviewRating?: string
@@ -1269,6 +1276,41 @@ interface PaymentCreationData {
   // Payment's creation closes the TerminalPaymentRequest row + frees the
   // terminal slot atomically. Optional/additive; old TPVs omit it.
   terminalPaymentRequestId?: string
+}
+
+/**
+ * Shadow-only issuer-country decision. Cash/manual/external methods have no card
+ * issuer to classify and therefore keep the new Payment fields null.
+ */
+function classifyPaymentInternationalityShadow(paymentData: PaymentCreationData): CardInternationalityDecision | null {
+  if (paymentData.method !== 'CREDIT_CARD' && paymentData.method !== 'DEBIT_CARD') return null
+
+  return classifyCardInternationality({
+    issuerCountryCode: paymentData.issuerCountryCode,
+    issuerCountrySource: paymentData.issuerCountrySource,
+    maskedPan: paymentData.maskedPan,
+    legacyIsInternational: paymentData.isInternational,
+  })
+}
+
+function logPaymentInternationalityShadow(
+  paymentId: string,
+  legacyIsInternational: boolean,
+  decision: CardInternationalityDecision | null,
+): void {
+  if (!decision) return
+
+  logger.info('[CardInternationality][shadow] Classification recorded; financial behavior unchanged', {
+    paymentId,
+    shadowMode: true,
+    status: decision.status,
+    source: decision.source,
+    reasonCode: decision.reasonCode,
+    classificationVersion: decision.classificationVersion,
+    legacyIsInternational,
+    legacyComparison: decision.legacyComparison,
+    registryMatched: decision.registryMatched,
+  })
 }
 
 /**
@@ -1656,6 +1698,11 @@ export async function recordOrderPayment(
     terminalId = await resolveTerminalIdFromSerial(venueId, paymentData.deviceSerialNumber)
   }
 
+  // Shadow mode only: persist the new evidence/result beside the legacy boolean,
+  // but keep every pricing and settlement consumer on the legacy path for now.
+  const internationalityShadow = classifyPaymentInternationalityShadow(paymentData)
+  const internationalityClassifiedAt = internationalityShadow ? new Date() : undefined
+
   // ⭐ ATOMICITY: Wrap critical payment creation in transaction (all or nothing)
   // This prevents orphaned records if any operation fails
   //
@@ -1706,6 +1753,14 @@ export async function recordOrderPayment(
             mentaAuthorizationReference: paymentData.mentaAuthorizationReference,
             mentaTicketId: paymentData.mentaTicketId,
             isInternational: paymentData.isInternational,
+            ...(paymentData.issuerCountryCode && paymentData.issuerCountrySource
+              ? {
+                  issuerCountryEvidence: {
+                    code: paymentData.issuerCountryCode,
+                    source: paymentData.issuerCountrySource,
+                  },
+                }
+              : {}),
             // ⭐ Blumon serial for reconciliation (matches dashboard de Blumon)
             blumonSerialNumber: paymentData.blumonSerialNumber || null,
             // 💸 Blumon Operation Number (2025-12-16) - For CancelIcc refunds without webhook
@@ -1719,6 +1774,11 @@ export async function recordOrderPayment(
           maskedPan: paymentData.maskedPan,
           cardBrand: paymentData.cardBrand ? (paymentData.cardBrand.toUpperCase().replace(' ', '_') as any) : null,
           entryMode: paymentData.entryMode ? (paymentData.entryMode.toUpperCase() as any) : null,
+          internationalityStatus: internationalityShadow?.status,
+          internationalitySource: internationalityShadow?.source,
+          issuerCountryCode: internationalityShadow?.issuerCountryCode,
+          internationalityClassificationVersion: internationalityShadow?.classificationVersion,
+          internationalityClassifiedAt,
           // ⭐ Provider-agnostic merchant account tracking
           merchantAccountId,
           // ⭐ Terminal that processed this payment (resolved from deviceSerialNumber)
@@ -1873,6 +1933,7 @@ export async function recordOrderPayment(
     feeAmount: payment.feeAmount,
     netAmount: payment.netAmount,
   })
+  logPaymentInternationalityShadow(payment.id, paymentData.isInternational, internationalityShadow)
 
   // Create TransactionCost for financial tracking (only for Avoqado-processed non-cash payments)
   try {
@@ -2453,6 +2514,11 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     terminalId = await resolveTerminalIdFromSerial(venueId, paymentData.deviceSerialNumber)
   }
 
+  // Same additive shadow snapshot as order payments. No existing consumer reads
+  // these fields yet, so old cost/settlement behavior remains byte-for-byte intact.
+  const internationalityShadow = classifyPaymentInternationalityShadow(paymentData)
+  const internationalityClassifiedAt = internationalityShadow ? new Date() : undefined
+
   // ⭐ ATOMICITY: Wrap critical fast payment creation in transaction (all or nothing)
   // This prevents orphaned records if any operation fails
   //
@@ -2523,6 +2589,14 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
             authorizationNumber: paymentData.authorizationNumber,
             referenceNumber: paymentData.referenceNumber,
             isInternational: paymentData.isInternational,
+            ...(paymentData.issuerCountryCode && paymentData.issuerCountrySource
+              ? {
+                  issuerCountryEvidence: {
+                    code: paymentData.issuerCountryCode,
+                    source: paymentData.issuerCountrySource,
+                  },
+                }
+              : {}),
             // ⭐ Blumon serial for reconciliation (matches dashboard de Blumon)
             blumonSerialNumber: paymentData.blumonSerialNumber || null,
             // 💸 Blumon Operation Number (2025-12-16) - For CancelIcc refunds without webhook
@@ -2536,6 +2610,11 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           maskedPan: paymentData.maskedPan,
           cardBrand: paymentData.cardBrand ? (paymentData.cardBrand.toUpperCase().replace(' ', '_') as any) : null,
           entryMode: paymentData.entryMode ? (paymentData.entryMode.toUpperCase() as any) : null,
+          internationalityStatus: internationalityShadow?.status,
+          internationalitySource: internationalityShadow?.source,
+          issuerCountryCode: internationalityShadow?.issuerCountryCode,
+          internationalityClassificationVersion: internationalityShadow?.classificationVersion,
+          internationalityClassifiedAt,
           // ⭐ Provider-agnostic merchant account tracking
           merchantAccountId,
           // ⭐ Terminal that processed this payment (resolved from deviceSerialNumber)
@@ -2687,6 +2766,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     feeAmount: payment.feeAmount,
     netAmount: payment.netAmount,
   })
+  logPaymentInternationalityShadow(payment.id, paymentData.isInternational, internationalityShadow)
 
   // Create TransactionCost for financial tracking (only for Avoqado-processed non-cash payments)
   try {

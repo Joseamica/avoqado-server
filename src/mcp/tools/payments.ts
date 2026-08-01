@@ -144,7 +144,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'list_payments',
-    'Individual payments/transactions for a venue you can access, over a date range (default last 7 days): each payment\'s amount, tip, method (cash/card/…), type (REGULAR/FAST/REFUND/…), card brand, status (completed/refunded/failed/…), processor fee & net deposited, who processed it, terminal, and order number. The summary splits money three ways: `completed` = TRUE sales revenue (refunds excluded), `refunds` = money returned to customers (amount/tips are NEGATIVE), and `byStatus` (with a normalized REFUND bucket). Modern refunds carry status=COMPLETED + type=REFUND; legacy refunds carry status=REFUNDED. For total cash movement before processor fees, sum completed.gross + completed.tips + refunds.amount + refunds.tips. Answers "¿qué pagos se reembolsaron?", "¿hubo cobros fallidos hoy?", "¿cuánto pagué de comisión al procesador?". Pass venueId; optionally status, method, fromDate/toDate (YYYY-MM-DD).',
+    'Individual payments/transactions for a venue you can access, over a date range (default last 7 days): each payment\'s amount, tip, method (cash/card/…), type (REGULAR/FAST/REFUND/…), card brand, status (completed/refunded/failed/…), processor fee & net deposited, who processed it, terminal, and order number. New card payments may include `internationalityShadow`: an OBSERVATIONAL issuer-country result being compared against legacy behavior; it is not yet the financial/settlement source of truth. The summary splits money three ways: `completed` = TRUE sales revenue (refunds excluded), `refunds` = money returned to customers (amount/tips are NEGATIVE), and `byStatus` (with a normalized REFUND bucket). Modern refunds carry status=COMPLETED + type=REFUND; legacy refunds carry status=REFUNDED. For total cash movement before processor fees, sum completed.gross + completed.tips + refunds.amount + refunds.tips. Answers "¿qué pagos se reembolsaron?", "¿hubo cobros fallidos hoy?", "¿cuánto pagué de comisión al procesador?". Pass venueId; optionally status, method, fromDate/toDate (YYYY-MM-DD).',
     {
       venueId: z.string().describe('Venue whose payments to read (must be in your scope)'),
       status: z
@@ -195,6 +195,9 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
             feeAmount: true,
             netAmount: true,
             cardBrand: true,
+            internationalityStatus: true,
+            internationalitySource: true,
+            issuerCountryCode: true,
             processor: true,
             createdAt: true,
             processedBy: { select: { firstName: true, lastName: true } },
@@ -223,6 +226,14 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
           processorFee: num(p.feeAmount),
           net: num(p.netAmount), // what actually lands after the processor fee
           cardBrand: p.cardBrand ?? null, // brand only — maskedPan/authorizationNumber are redacted (SENSITIVE_PAYMENT_FIELDS)
+          internationalityShadow: p.internationalityStatus
+            ? {
+                status: p.internationalityStatus,
+                source: p.internationalitySource,
+                issuerCountryCode: p.issuerCountryCode,
+                authoritativeForMoney: false,
+              }
+            : null,
           processor: p.processor,
           processedBy: p.processedBy ? `${p.processedBy.firstName} ${p.processedBy.lastName}`.trim() : null,
           terminal: p.terminal?.name ?? null,

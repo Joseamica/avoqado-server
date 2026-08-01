@@ -33,6 +33,9 @@ jest.mock('@/utils/prismaClient', () => ({
       create: jest.fn(),
       findFirst: jest.fn(),
     },
+    merchantAccount: {
+      findUnique: jest.fn(),
+    },
     venueTransaction: {
       create: jest.fn(),
     },
@@ -424,6 +427,67 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
   })
 
   describe('REGRESSION TESTS - Existing payment functionality', () => {
+    it('stores shadow classification without replacing the legacy financial boolean', async () => {
+      const mockOrder = {
+        id: mockOrderId,
+        venueId: mockVenueId,
+        orderNumber: 'ORD-001',
+        total: new Decimal(440),
+        paymentStatus: 'PENDING',
+        source: 'TPV',
+        externalId: null,
+        items: [],
+        payments: [],
+      }
+      const merchantAccountId = 'cmn3a6xr8000kn227eg8zeh41'
+      const mockPaymentData = {
+        venueId: mockVenueId,
+        amount: 44000,
+        tip: 0,
+        status: 'COMPLETED' as const,
+        method: 'CREDIT_CARD' as const,
+        source: 'TPV',
+        splitType: 'FULLPAYMENT' as const,
+        tpvId: 'tpv-1',
+        staffId: 'staff-1',
+        paidProductsId: [],
+        currency: 'MXN',
+        isInternational: true,
+        merchantAccountId,
+        maskedPan: '477291******004F',
+      }
+
+      ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(mockOrder)
+      ;(prisma.merchantAccount.findUnique as jest.Mock).mockResolvedValue({ id: merchantAccountId, active: true })
+      ;(prisma.payment.create as jest.Mock).mockResolvedValue({
+        id: 'payment-1',
+        feeAmount: 0,
+        netAmount: 440,
+        amount: new Decimal(440),
+        tipAmount: new Decimal(0),
+        method: 'CREDIT_CARD',
+        status: 'COMPLETED',
+      })
+      ;(prisma.venueTransaction.create as jest.Mock).mockResolvedValue({})
+      ;(prisma.paymentAllocation.create as jest.Mock).mockResolvedValue({})
+      ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...mockOrder, paymentStatus: 'PAID' })
+
+      await (paymentService as any).recordOrderPayment(mockVenueId, mockOrderId, mockPaymentData, 'user-1')
+
+      expect(prisma.payment.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            internationalityStatus: 'DOMESTIC',
+            internationalitySource: 'BIN_REGISTRY',
+            issuerCountryCode: '484',
+            internationalityClassificationVersion: 1,
+            internationalityClassifiedAt: expect.any(Date),
+            processorData: expect.objectContaining({ isInternational: true }),
+          }),
+        }),
+      )
+    })
+
     it('should still create payment record correctly', async () => {
       // Setup
       const mockOrder = {

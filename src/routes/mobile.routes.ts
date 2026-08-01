@@ -48,6 +48,7 @@ import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.mi
 import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { checkTableOwnership } from '../middlewares/checkTableOwnership.middleware'
+import { validateVenueAccess } from '../middlewares/validateVenueAccess.middleware'
 import { registerDeviceMiddleware } from '../middlewares/registerDevice.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { recordFastPaymentParamsSchema, recordPaymentBodySchema } from '../schemas/tpv.schema'
@@ -1683,12 +1684,7 @@ router.post(
  * (TABLE_SERVICE) y la propiedad de mesa se evalúan POR INTENT en el reducer —
  * sincronizar no es puerta trasera. Body: { deviceId, intents: [...] }
  */
-router.post(
-  '/venues/:venueId/sync/intents',
-  authenticateTokenMiddleware,
-  checkPermission('orders:create'),
-  syncMobileController.syncIntents,
-)
+router.post('/venues/:venueId/sync/intents', authenticateTokenMiddleware, validateVenueAccess, syncMobileController.syncIntents)
 
 // ============================================================================
 // INVENTORY

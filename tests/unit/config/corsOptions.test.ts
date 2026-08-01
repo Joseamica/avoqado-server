@@ -46,20 +46,20 @@ describe('CORS origin policy', () => {
     })
 
     it('rejects a plaintext http:// preview even on the exact project name', () => {
-      expect(isAllowed('production', 'http://abc123.avoqado-web-dashboard.pages.dev')).toBe(false)
+      expect(isAllowed('production', 'http://abc123.avoqado-web-dashboard-4wx.pages.dev')).toBe(false)
     })
 
     it('rejects a lookalike suffixed onto the real host', () => {
-      expect(isAllowed('production', 'https://abc.avoqado-web-dashboard.pages.dev.evil.com')).toBe(false)
+      expect(isAllowed('production', 'https://abc.avoqado-web-dashboard-4wx.pages.dev.evil.com')).toBe(false)
     })
   })
 
   describe('Cloudflare Pages previews — legitimate deploys still work (regression)', () => {
     const legitimatePreviews = [
-      'https://develop.avoqado-web-dashboard.pages.dev',
-      'https://abc123.avoqado-web-dashboard.pages.dev',
-      'https://4wx.avoqado-web-dashboard.pages.dev',
-      'https://feature-branch-x.avoqado-web-dashboard.pages.dev',
+      'https://develop.avoqado-web-dashboard-4wx.pages.dev',
+      'https://abc123.avoqado-web-dashboard-4wx.pages.dev',
+      'https://4wx.avoqado-web-dashboard-4wx.pages.dev',
+      'https://feature-branch-x.avoqado-web-dashboard-4wx.pages.dev',
       'https://preview.demo-avoqado-web-dashboard.pages.dev',
     ]
 

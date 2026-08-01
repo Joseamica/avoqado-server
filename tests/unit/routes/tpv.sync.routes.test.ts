@@ -13,15 +13,11 @@
  *
  *   1. The /tpv route and the /mobile route resolve to the exact SAME handler function
  *      (by reference) — the property that keeps the two namespaces from diverging.
- *   2. /tpv carries validateVenueAccess (Task 1) BEFORE the permission check, so a
- *      cross-tenant probe never reaches the reducer.
- *   3. /tpv gates with checkPermission('orders:create') — the exact same permission
- *      string /mobile uses (mirroring by exact name is the rule; a mismatch fails
- *      silently). No checkFeatureAccess at the route: the reducer evaluates
- *      TABLE_SERVICE gating and table ownership PER INTENT internally
- *      (sync.mobile.service.ts), so gating the whole batch at the route would reject a
- *      legitimate non-table intent (e.g. PAY_CASH) just because the batch also carried
- *      one table intent.
+ *   2. Ambas rutas llevan validateVenueAccess, así una sonda cross-tenant no
+ *      alcanza el reducer.
+ *   3. Ninguna ruta usa un permiso genérico para todo el batch: el controller
+ *      resuelve el acceso y el reducer autoriza cada tipo con el permiso de su
+ *      ruta online equivalente.
  */
 
 import tpvRouter from '@/routes/tpv.routes'
@@ -86,23 +82,24 @@ describe('sync/intents mounted under /tpv (Plan B Task 3)', () => {
     expect(route.hasValidateVenueAccess).toBe(true)
   })
 
-  it("/tpv gates with checkPermission('orders:create') — same exact name as /mobile", () => {
+  it('no usa un permiso genérico que autorice todos los tipos del batch', () => {
     const tpvRoute = inspectRoute(tpvRouter, 'post', TPV_PATH)!
     const mobileRoute = inspectRoute(mobileRouter, 'post', MOBILE_PATH)!
 
-    expect(tpvRoute.permission).toBe('orders:create')
-    expect(mobileRoute.permission).toBe('orders:create')
+    expect(tpvRoute.permission).toBeUndefined()
+    expect(mobileRoute.permission).toBeUndefined()
   })
 
-  it('/tpv route has EXACTLY 4 layers (auth, validateVenueAccess, checkPermission, handler) — no checkFeatureAccess at the route', () => {
+  it('/tpv route has auth, validateVenueAccess y handler — no gate genérico', () => {
     const route = inspectRoute(tpvRouter, 'post', TPV_PATH)!
-    expect(route.handlers).toHaveLength(4)
+    expect(route.handlers).toHaveLength(3)
   })
 
   // REGRESSION — /mobile's own route must be untouched by this change (frozen contract).
   it('/mobile route is still registered and unaffected', () => {
     const route = inspectRoute(mobileRouter, 'post', MOBILE_PATH)
     expect(route).toBeDefined()
-    expect(route!.permission).toBe('orders:create')
+    expect(route!.hasValidateVenueAccess).toBe(true)
+    expect(route!.permission).toBeUndefined()
   })
 })

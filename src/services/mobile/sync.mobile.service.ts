@@ -26,12 +26,14 @@
  */
 
 import prisma from '../../utils/prismaClient'
+import { Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import { hasFeatureAccess } from '../../middlewares/checkFeatureAccess.middleware'
 import { isTableOwnershipEnforced, staffCanManageAllTables } from '../../middlewares/checkTableOwnership.middleware'
 import * as tableService from '../tpv/table.tpv.service'
 import * as orderTpvService from '../tpv/order.tpv.service'
 import * as orderMobileService from './order.mobile.service'
+import { logAction } from '../dashboard/activity-log.service'
 
 // ─── Contrato (espejo EXACTO por nombre en iOS/Android) ─────────────────────
 
@@ -59,6 +61,8 @@ export interface SyncIntentInput {
   type: SyncIntentType
   /** Payload específico del tipo — ver reducers abajo. */
   payload: Record<string, unknown>
+  /** Actor que originó el intent. Clientes anteriores pueden omitirlo. */
+  staffId?: string
   /** Epoch ms del reloj local al crear el intent (informativo, NUNCA ordena). */
   createdAtLocal?: number
 }
@@ -82,7 +86,26 @@ export interface SyncIntentAck {
 }
 
 /** Códigos que son TRANSITORIOS → el intent se reintenta, nunca se pierde. */
-const RETRYABLE_ERROR_CODES = new Set(['VERSION_CONFLICT'])
+const RETRYABLE_ERROR_CODES = new Set([
+  'VERSION_CONFLICT',
+  // Prisma / PostgreSQL transitorios: nunca deben convertirse en cuarentena.
+  'P1001', // database unreachable
+  'P1002', // connection timeout
+  'P1008', // operation timeout
+  'P1017', // connection closed
+  'P2024', // connection pool timeout
+  'P2034', // transaction conflict / deadlock
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'ETIMEDOUT',
+])
+
+/**
+ * Una reserva PROCESSING evita que dos replays concurrentes ejecuten el mismo
+ * efecto antes de que exista el ACK. Si el proceso muere después del efecto,
+ * no se vuelve a ejecutar a ciegas: tras este plazo pasa a conciliación.
+ */
+const PROCESSING_TIMEOUT_MS = 5 * 60 * 1000
 
 const KNOWN_TYPES: SyncIntentType[] = [
   'OPEN_TABLE',
@@ -101,6 +124,70 @@ const KNOWN_TYPES: SyncIntentType[] = [
   'MERGE_ORDERS',
 ]
 
+/**
+ * Espejo de los permisos de las rutas online equivalentes. El endpoint de
+ * replay acepta varios tipos en un mismo batch, por lo que un único
+ * `checkPermission('orders:create')` no puede autorizarlo correctamente.
+ */
+export function requiredPermissionForIntent(type: string): string | null {
+  switch (type) {
+    case 'OPEN_TABLE':
+    case 'ADD_ITEMS':
+    case 'CLEAR_TABLE':
+      return 'orders:create'
+    case 'PAY_CASH':
+      return 'payments:create'
+    case 'CANCEL_ORDER':
+      return 'orders:cancel'
+    case 'APPLY_DISCOUNT':
+    case 'APPLY_SERVICE_CHARGE':
+    case 'COMP_ORDER':
+    case 'UPDATE_DETAILS':
+    case 'MOVE_ORDER':
+    case 'ASSIGN_ORDER':
+    case 'SPLIT_ORDER':
+    case 'SPLIT_BY_SEAT':
+    case 'MERGE_ORDERS':
+      return 'orders:update'
+    default:
+      return null
+  }
+}
+
+async function ackFromExisting(existing: any, intentId: string): Promise<SyncIntentAck> {
+  if (existing.status !== 'PROCESSING') {
+    return {
+      id: intentId,
+      status: existing.status as 'ACKED' | 'REJECTED',
+      errorCode: existing.errorCode ?? undefined,
+      result: (existing.resultJson as Record<string, unknown> | null) ?? undefined,
+    }
+  }
+
+  const createdAt = existing.createdAt instanceof Date ? existing.createdAt.getTime() : Date.now()
+  if (Date.now() - createdAt < PROCESSING_TIMEOUT_MS) {
+    return {
+      id: intentId,
+      status: 'RETRY',
+      errorCode: 'INTENT_IN_PROGRESS',
+      message: 'La operación sigue procesándose. Reintenta en unos segundos.',
+    }
+  }
+
+  // Resultado incierto: pudo aplicarse el efecto y caer antes del ACK. La
+  // alternativa peligrosa sería reejecutarlo y duplicar rondas, splits o caja.
+  await prisma.posSyncIntent.update({
+    where: { venueId_idempotencyKey: { venueId: existing.venueId, idempotencyKey: existing.idempotencyKey } },
+    data: { status: 'REJECTED', errorCode: 'OUTCOME_UNKNOWN' },
+  })
+  return {
+    id: intentId,
+    status: 'REJECTED',
+    errorCode: 'OUTCOME_UNKNOWN',
+    message: 'No se pudo confirmar si la operación terminó. Revisa la cuenta antes de repetirla.',
+  }
+}
+
 // ─── Entrada principal ───────────────────────────────────────────────────────
 
 export async function processIntents(params: {
@@ -108,8 +195,9 @@ export async function processIntents(params: {
   staffId: string
   deviceId: string
   intents: SyncIntentInput[]
+  authorizeIntent: (intent: SyncIntentInput, requiredPermission: string) => boolean
 }): Promise<SyncIntentAck[]> {
-  const { venueId, staffId, deviceId } = params
+  const { venueId, staffId, deviceId, authorizeIntent } = params
   const acks: SyncIntentAck[] = []
   /** localRef (UUID del dispositivo) → orderId de server, dentro del batch. */
   const localRefMap = new Map<string, string>()
@@ -128,33 +216,37 @@ export async function processIntents(params: {
     })
     if (existing) {
       logger.info(`🔁 [POS SYNC] Intent ${intent.id} ya procesado (${existing.status}) — ack repetido, sin re-aplicar`)
-      const result = (existing.resultJson as Record<string, unknown> | null) ?? undefined
+      const ack = await ackFromExisting(existing, intent.id)
+      const result = ack.result
       // Reponer el mapa local para intents posteriores del mismo batch.
       if (existing.localRef && result?.orderId) localRefMap.set(existing.localRef, String(result.orderId))
-      acks.push({
-        id: intent.id,
-        status: existing.status as 'ACKED' | 'REJECTED',
-        errorCode: existing.errorCode ?? undefined,
-        result,
-      })
+      acks.push(ack)
+      if (ack.status === 'RETRY') break
       continue
     }
 
-    // 2. Aplicar — cada intent se resuelve solo; un rechazo NO tumba el batch.
-    const ack = await applyIntent({ venueId, staffId, deviceId, intent, localRefMap })
-
-    // RETRY (transitorio): NO se persiste (para que un próximo replay lo
-    // re-drive) y se DETIENE el batch — los intents posteriores dependen de
-    // este por FIFO, así que se dejan sin procesar (el cliente los mantiene
-    // PENDING). Nunca se pierde nada.
-    if (ack.status === 'RETRY') {
-      acks.push(ack)
-      logger.info(`🔁 [POS SYNC] Intent ${intent.id} en RETRY — corto el batch para preservar FIFO`)
-      break
+    // Fence monotónico: una reinstalación/bug no puede reutilizar una seq con
+    // otro UUID y ejecutar una operación vieja como si fuera nueva. Clientes
+    // legacy sin seq siguen soportados.
+    if (typeof intent.seq === 'number') {
+      const latestForDevice = await prisma.posSyncIntent.findFirst({
+        where: { venueId, deviceId, seq: { not: null } },
+        orderBy: { seq: 'desc' },
+        select: { seq: true },
+      })
+      if (typeof latestForDevice?.seq === 'number' && latestForDevice.seq >= intent.seq) {
+        acks.push({
+          id: intent.id,
+          status: 'REJECTED',
+          errorCode: 'STALE_DEVICE_SEQUENCE',
+          message: 'La secuencia del dispositivo ya fue utilizada. Requiere revisión antes de repetir la operación.',
+        })
+        continue
+      }
     }
 
-    // 3. Persistir el ack (carrera-segura: si otro request ganó la unique,
-    //    releemos y devolvemos lo que quedó grabado).
+    // 2. Reservar ANTES del efecto. La unique hace de compare-and-set: sólo
+    // un request puede ejecutar; los concurrentes observan PROCESSING.
     try {
       await prisma.posSyncIntent.create({
         data: {
@@ -165,29 +257,111 @@ export async function processIntents(params: {
           type: intent.type,
           idempotencyKey: intent.id,
           localRef: typeof intent.payload?.localOrderId === 'string' ? (intent.payload.localOrderId as string) : null,
-          status: ack.status,
-          errorCode: ack.errorCode ?? null,
-          resultJson: ack.result ? (ack.result as import('@prisma/client').Prisma.InputJsonValue) : undefined,
+          status: 'PROCESSING',
         },
       })
-    } catch (persistError: any) {
-      if (persistError?.code === 'P2002') {
+    } catch (reserveError: any) {
+      if (reserveError?.code === 'P2002') {
         const winner = await prisma.posSyncIntent.findUnique({
           where: { venueId_idempotencyKey: { venueId, idempotencyKey: intent.id } },
         })
         if (winner) {
-          acks.push({
-            id: intent.id,
-            status: winner.status as 'ACKED' | 'REJECTED' | 'RETRY',
-            errorCode: winner.errorCode ?? undefined,
-            result: (winner.resultJson as Record<string, unknown> | null) ?? undefined,
-          })
+          const winnerAck = await ackFromExisting(winner, intent.id)
+          acks.push(winnerAck)
+          if (winnerAck.status === 'RETRY') break
           continue
         }
+        if (typeof intent.seq === 'number') {
+          const sequenceWinner = await prisma.posSyncIntent.findFirst({
+            where: { venueId, deviceId, seq: intent.seq },
+            select: { idempotencyKey: true },
+          })
+          if (sequenceWinner) {
+            acks.push({
+              id: intent.id,
+              status: 'REJECTED',
+              errorCode: 'STALE_DEVICE_SEQUENCE',
+              message: 'La secuencia del dispositivo pertenece a otra operación. Requiere revisión.',
+            })
+            continue
+          }
+        }
       }
+      logger.error(`❌ [POS SYNC] No se pudo reservar el intent ${intent.id}`, reserveError)
+      acks.push({
+        id: intent.id,
+        status: 'RETRY',
+        errorCode: reserveError?.code ?? 'INTENT_RESERVATION_FAILED',
+        message: 'No se pudo reservar la operación de forma segura. Reintenta.',
+      })
+      break
+    }
+
+    // 3. Autorizar + aplicar. El actor persistido evita que una operación
+    // encolada por una persona termine atribuida a quien inició sesión después.
+    let ack: SyncIntentAck
+    if (intent.staffId && intent.staffId !== staffId) {
+      ack = {
+        id: intent.id,
+        status: 'REJECTED',
+        errorCode: 'ACTOR_MISMATCH',
+        message: 'La operación pertenece a otra sesión. Requiere revisión del gerente.',
+      }
+    } else {
+      const requiredPermission = requiredPermissionForIntent(intent.type)
+      if (requiredPermission && !authorizeIntent(intent, requiredPermission)) {
+        ack = {
+          id: intent.id,
+          status: 'REJECTED',
+          errorCode: 'PERMISSION_DENIED',
+          message: `No tienes permiso para reproducir ${intent.type}.`,
+        }
+        void logAction({
+          staffId,
+          venueId,
+          action: 'PERMISSION_DENIED',
+          entity: 'pos-sync-intent',
+          entityId: intent.id,
+          data: { permission: requiredPermission, intentType: intent.type, deviceId },
+        })
+      } else {
+        ack = await applyIntent({ venueId, staffId, deviceId, intent, localRefMap })
+      }
+    }
+
+    // RETRY (transitorio): NO se persiste (para que un próximo replay lo
+    // re-drive) y se DETIENE el batch — los intents posteriores dependen de
+    // este por FIFO, así que se dejan sin procesar (el cliente los mantiene
+    // PENDING). Nunca se pierde nada.
+    if (ack.status === 'RETRY') {
+      // No hubo resultado terminal: liberar la reserva permite el próximo
+      // intento. El reducer sólo devuelve RETRY para errores transitorios.
+      await prisma.posSyncIntent
+        .delete({
+          where: { venueId_idempotencyKey: { venueId, idempotencyKey: intent.id } },
+        })
+        .catch(error => logger.error(`❌ [POS SYNC] No se pudo liberar reserva RETRY ${intent.id}`, error))
+      acks.push(ack)
+      logger.info(`🔁 [POS SYNC] Intent ${intent.id} en RETRY — corto el batch para preservar FIFO`)
+      break
+    }
+
+    // 4. Cerrar la reserva con el ACK terminal. Si esta escritura cae después
+    // del efecto, PROCESSING impide una segunda ejecución y fuerza revisión.
+    try {
+      await prisma.posSyncIntent.update({
+        where: { venueId_idempotencyKey: { venueId, idempotencyKey: intent.id } },
+        data: {
+          status: ack.status,
+          errorCode: ack.errorCode ?? null,
+          resultJson: ack.result ? (ack.result as Prisma.InputJsonValue) : Prisma.DbNull,
+        },
+      })
+    } catch (persistError: any) {
       logger.error(`❌ [POS SYNC] No se pudo persistir el ack del intent ${intent.id}`, persistError)
-      // El efecto ya corrió: devolvemos el ack real aunque el registro fallara
-      // (el reintento del cliente re-aplicará idempotente vía los servicios).
+      // El efecto ya corrió: devolvemos el resultado a este request, pero el
+      // registro queda PROCESSING. Si se perdió también la respuesta, el
+      // próximo replay NO re-aplica; termina en conciliación OUTCOME_UNKNOWN.
     }
 
     acks.push(ack)

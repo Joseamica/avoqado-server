@@ -3236,6 +3236,16 @@ model Payment {
   maskedPan String? // "411111******1111"
   entryMode CardEntryMode? // CONTACTLESS, CHIP, SWIPE, etc.
 
+  // Card issuer-country classification (shadow mode, 2026-07-31).
+  // These nullable/additive fields intentionally do NOT replace the legacy
+  // processorData.isInternational boolean yet. Financial calculations keep using
+  // the legacy value until the shadow results have been observed and approved.
+  internationalityStatus                CardInternationalityStatus?
+  internationalitySource                CardInternationalitySource?
+  issuerCountryCode                     String?                     @db.VarChar(3)
+  internationalityClassificationVersion Int?
+  internationalityClassifiedAt          DateTime?
+
   /// Stripe-hosted receipt URL (charges.data[0].receipt_url) — captured at
   /// webhook completion for Stripe Connect payments so the customer
   /// checkout can offer "Ver recibo" without re-hitting Stripe.
@@ -3300,6 +3310,7 @@ model Payment {
   @@index([authorizationNumber]) // ✅ NUEVO ÍNDICE
   @@index([referenceNumber]) // ✅ NUEVO ÍNDICE
   @@index([cardBrand]) // ✅ NUEVO ÍNDICE
+  @@index([internationalityStatus])
   @@index([merchantAccountId]) // ⭐ NUEVO: Provider-agnostic merchant tracking
   @@index([terminalId]) // ⭐ NUEVO: Device sales attribution tracking
   @@index([venueId])
@@ -7173,6 +7184,26 @@ enum TransactionCardType {
   AMEX
   INTERNATIONAL
   OTHER
+}
+
+/// Issuer-country result kept separate from TransactionCardType: UNKNOWN is an
+/// evidence state, not a pricing tier.
+enum CardInternationalityStatus {
+  DOMESTIC
+  INTERNATIONAL
+  UNKNOWN
+}
+
+/// Evidence that produced CardInternationalityStatus. LEGACY is observational
+/// only; the old client boolean is never promoted to trusted country evidence.
+enum CardInternationalitySource {
+  EMV_5F28
+  PROCESSOR
+  BIN_REGISTRY
+  MANUAL
+  LEGACY
+  CONFLICT
+  NONE
 }
 
 enum SettlementDayType {
@@ -13494,19 +13525,20 @@ model PosSyncIntent {
   venueId        String
   deviceId       String   @db.VarChar(64)
   staffId        String?
-  /// Secuencia monotónica por dispositivo (orden de replay); informativa.
+  /// Secuencia monotónica por dispositivo; el fence evita reutilizarla.
   seq            Int?
   type           String   @db.VarChar(40) // OPEN_TABLE | ADD_ITEMS | PAY_CASH | ...
   idempotencyKey String   @db.VarChar(64)
   /// UUID local generado en el dispositivo (identidad offline) — resoluble a ids de server.
   localRef       String?  @db.VarChar(64)
-  status         String   @db.VarChar(12) // ACKED | REJECTED
+  status         String   @db.VarChar(12) // PROCESSING | ACKED | REJECTED
   errorCode      String?  @db.VarChar(40) // p.ej. TABLE_OWNED_BY_OTHER, FEATURE_LOCKED
   /// Ack devuelto al cliente (ids de server, versión, folio) — se re-devuelve tal cual en reintentos.
   resultJson     Json?
   createdAt      DateTime @default(now())
 
   @@unique([venueId, idempotencyKey])
+  @@unique([venueId, deviceId, seq])
   @@index([venueId, localRef])
   @@index([venueId, deviceId, createdAt])
 }
