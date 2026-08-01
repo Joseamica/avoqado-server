@@ -231,6 +231,35 @@ export async function getRoleDisplayName(venueId: string, role: StaffRole): Prom
 }
 
 /**
+ * Get display names for (venueId, role) pairs spanning many venues (batch)
+ *
+ * Used by login responses, where one staff member belongs to many venues:
+ * one findMany instead of one findUnique per venue.
+ *
+ * @param pairs - Array of { venueId, role }
+ * @returns Map keyed by `${venueId}:${role}` → display name
+ */
+export async function getRoleDisplayNamesForVenues(pairs: { venueId: string; role: StaffRole }[]): Promise<Map<string, string>> {
+  const result = new Map<string, string>()
+  if (pairs.length === 0) return result
+
+  for (const { venueId, role } of pairs) {
+    result.set(`${venueId}:${role}`, DEFAULT_ROLE_DISPLAY_NAMES[role])
+  }
+
+  const configs = await prisma.venueRoleConfig.findMany({
+    where: { OR: pairs.map(p => ({ venueId: p.venueId, role: p.role })) },
+    select: { venueId: true, role: true, displayName: true },
+  })
+
+  for (const config of configs) {
+    result.set(`${config.venueId}:${config.role}`, config.displayName)
+  }
+
+  return result
+}
+
+/**
  * Get display names for multiple roles at a venue (batch)
  *
  * More efficient than calling getRoleDisplayName multiple times.
