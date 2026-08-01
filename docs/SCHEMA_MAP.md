@@ -223,7 +223,7 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `PlatformSettings` → `schema.prisma:L4552`
 - `PosCommand` → `schema.prisma:L6534`
 - `PosConnectionStatus` → `schema.prisma:L780`
-- `PosSyncIntent` (idempotencia + fence monotónico por venue/dispositivo/secuencia) → `schema.prisma:L13523`
+- `PosSyncIntent` → `schema.prisma:L13523`
 - `PricingPolicy` → `schema.prisma:L1999`
 - `Printer` → `schema.prisma:L11554`
 - `PrintGateway` → `schema.prisma:L11591`
