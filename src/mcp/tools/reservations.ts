@@ -659,9 +659,11 @@ export function registerReservationTools(server: McpServer, scope: McpScope) {
         .describe('Capacity policy: venue pacing or one concurrent booking per staff'),
       // Deposits
       depositMode: z
-        .enum(['none', 'card_hold', 'deposit', 'prepaid'])
+        // 'card_hold' deliberately NOT offered: its charge path is unimplemented and saving it
+        // breaks every public/app booking (the service write-guard also rejects it).
+        .enum(['none', 'deposit', 'prepaid'])
         .optional()
-        .describe('Deposit handling (needs Stripe for anything but none)'),
+        .describe('Deposit handling (needs Stripe for anything but none). card_hold no está disponible aún.'),
       depositFixedAmount: z.number().min(0).nullable().optional().describe('Fixed deposit amount in pesos (or null)'),
       depositPercentage: z.number().min(0).max(100).nullable().optional().describe('Deposit as % of total (or null)'),
       depositPartySizeGte: z

@@ -89,7 +89,9 @@ describe('updateReservationSettings — online-charging guard', () => {
     it('allows switching between two charging modes when already charging without a rail', async () => {
       prismaMock.reservationSettings.findUnique.mockResolvedValue(legacyChargingRow as never)
       prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(null)
-      await updateReservationSettings(VENUE, { depositMode: 'card_hold' }) // deposit -> card_hold, still charging
+      // deposit -> prepaid, still charging. (This used to switch to card_hold, but
+      // card_hold is now rejected at write time — see the card_hold write-guard below.)
+      await updateReservationSettings(VENUE, { depositMode: 'prepaid' })
       expect(prismaMock.reservationSettings.upsert).toHaveBeenCalledTimes(1)
     })
 
@@ -408,5 +410,49 @@ describe('updateReservationSettings — transactional staff-aware activation gat
       update: expect.objectContaining({ capacityMode: 'pacing', showStaffPicker: false }),
     })
     expect(logAction).toHaveBeenCalledTimes(1)
+  })
+})
+
+/**
+ * card_hold write-guard (2026-07-29).
+ *
+ * `card_hold` exists in the enum/schema (DepositStatus.CARD_HOLD) but its charge
+ * path was never built — the public controller and the consumer service both
+ * throw on it. Before this guard, the dashboard/API/MCP happily SAVED it, and
+ * from that moment every public/app booking for the venue returned 400 (a
+ * config-trap found during the Square competitive sweep: Square cannot do card
+ * holds at all, so this option stays visible-but-disabled as a teaser). The
+ * write guard is the backstop: saving card_hold must fail loudly, BEFORE any
+ * merchant checks or DB writes.
+ */
+describe('updateReservationSettings — card_hold write-guard', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    prismaMock.reservationSettings.upsert.mockResolvedValue({ id: 'rs1' } as never)
+  })
+
+  it('rejects card_hold via the FLAT payload, even when the venue CAN charge online', async () => {
+    prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(chargeableMerchant as never)
+    await expect(updateReservationSettings(VENUE, { depositMode: 'card_hold' })).rejects.toThrow(BadRequestError)
+    await expect(updateReservationSettings(VENUE, { depositMode: 'card_hold' })).rejects.toThrow(/retención de tarjeta/i)
+    expect(prismaMock.reservationSettings.upsert).not.toHaveBeenCalled()
+  })
+
+  it('rejects card_hold via the NESTED payload (dashboard form shape)', async () => {
+    await expect(updateReservationSettings(VENUE, { deposits: { mode: 'card_hold' } })).rejects.toThrow(BadRequestError)
+    expect(prismaMock.reservationSettings.upsert).not.toHaveBeenCalled()
+  })
+
+  it('rejects BEFORE the merchant-rail check — the guard is pure input validation', async () => {
+    await expect(updateReservationSettings(VENUE, { depositMode: 'card_hold' })).rejects.toThrow(BadRequestError)
+    expect(prismaMock.ecommerceMerchant.findFirst).not.toHaveBeenCalled()
+  })
+
+  // Regression: the two supported charging modes still save.
+  it('still allows deposit and prepaid when the venue can charge', async () => {
+    prismaMock.ecommerceMerchant.findFirst.mockResolvedValue(chargeableMerchant as never)
+    await updateReservationSettings(VENUE, { depositMode: 'prepaid' })
+    await updateReservationSettings(VENUE, { deposits: { mode: 'deposit' } })
+    expect(prismaMock.reservationSettings.upsert).toHaveBeenCalledTimes(2)
   })
 })

@@ -284,6 +284,17 @@ export async function ensureReservationSettings(venueId: string) {
 export async function updateReservationSettings(venueId: string, data: ReservationSettingsUpdateInput) {
   const normalized = normalizeReservationSettingsUpdate(data)
 
+  // card_hold exists in the schema (DepositStatus.CARD_HOLD — the SetupIntent design) but the
+  // charge path is NOT built: reservation.public.controller and reservation.consumer.service
+  // both throw on it, so PERSISTING it breaks every public/app booking for the venue
+  // (config-trap found 2026-07-29 during the Square competitive sweep). Reject at write time
+  // until the feature ships. The dashboard shows the option disabled and the MCP no longer
+  // offers it — this is the backstop for raw API calls. Covers flat AND nested payloads
+  // because normalize maps both into normalized.depositMode.
+  if (normalized.depositMode === 'card_hold') {
+    throw new BadRequestError('La retención de tarjeta aún no está disponible. Usa depósito o prepago mientras tanto.')
+  }
+
   const settings = await withSerializableRetry(async tx => {
     const current = await tx.reservationSettings.findUnique({ where: { venueId } })
 
