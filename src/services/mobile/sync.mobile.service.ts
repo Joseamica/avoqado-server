@@ -139,9 +139,15 @@ export function requiredPermissionForIntent(type: string): string | null {
       return 'payments:create'
     case 'CANCEL_ORDER':
       return 'orders:cancel'
-    case 'APPLY_DISCOUNT':
-    case 'APPLY_SERVICE_CHARGE':
+    // Cortesía y descuento tienen permiso PROPIO online (/orders/:id/comp →
+    // orders:comp, /orders/:id/discount* → discounts:apply). Con un genérico
+    // 'orders:update', un WAITER/CASHIER reproduciría offline lo que online
+    // tiene prohibido — el replay no es puerta trasera.
     case 'COMP_ORDER':
+      return 'orders:comp'
+    case 'APPLY_DISCOUNT':
+      return 'discounts:apply'
+    case 'APPLY_SERVICE_CHARGE':
     case 'UPDATE_DETAILS':
     case 'MOVE_ORDER':
     case 'ASSIGN_ORDER':

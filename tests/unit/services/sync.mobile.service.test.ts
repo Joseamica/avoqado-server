@@ -7,7 +7,7 @@
  * 5. Carrera de persistencia (P2002) → devuelve el ack del ganador.
  */
 
-import { processIntents } from '@/services/mobile/sync.mobile.service'
+import { processIntents, requiredPermissionForIntent } from '@/services/mobile/sync.mobile.service'
 import prisma from '@/utils/prismaClient'
 import * as tableService from '@/services/tpv/table.tpv.service'
 import * as orderTpvService from '@/services/tpv/order.tpv.service'
@@ -623,5 +623,39 @@ describe('sync.mobile.service processIntents', () => {
     const acks = await processIntents(baseParams([{ id: 'i11', type: 'OPEN_TABLE', payload: { tableId: 't3' } }]))
     expect(acks).toHaveLength(1)
     expect(acks[0]).toMatchObject({ status: 'ACKED', result: { orderId: 'order-7' } })
+  })
+
+  describe('requiredPermissionForIntent — espejo EXACTO de la ruta online equivalente', () => {
+    // Regresión: cortesía y descuento tienen permiso propio online; un genérico
+    // orders:update dejaría a WAITER/CASHIER comp-ear offline lo que online
+    // tienen prohibido (replay ≠ puerta trasera).
+    it.each([
+      ['OPEN_TABLE', 'orders:create'],
+      ['ADD_ITEMS', 'orders:create'],
+      ['CLEAR_TABLE', 'orders:create'],
+      ['PAY_CASH', 'payments:create'],
+      ['CANCEL_ORDER', 'orders:cancel'],
+      ['COMP_ORDER', 'orders:comp'],
+      ['APPLY_DISCOUNT', 'discounts:apply'],
+      ['APPLY_SERVICE_CHARGE', 'orders:update'],
+      ['UPDATE_DETAILS', 'orders:update'],
+      ['MOVE_ORDER', 'orders:update'],
+      ['ASSIGN_ORDER', 'orders:update'],
+      ['SPLIT_ORDER', 'orders:update'],
+      ['SPLIT_BY_SEAT', 'orders:update'],
+      ['MERGE_ORDERS', 'orders:update'],
+    ])('%s → %s', (type, permission) => {
+      expect(requiredPermissionForIntent(type)).toBe(permission)
+    })
+
+    it('COMP_ORDER sin orders:comp → REJECTED PERMISSION_DENIED sin aplicar cortesía', async () => {
+      const params = baseParams([{ id: 'i-comp-perm', type: 'COMP_ORDER', payload: { orderId: 'order-1' } }])
+      params.authorizeIntent.mockReturnValue(false)
+
+      const acks = await processIntents(params)
+
+      expect(params.authorizeIntent).toHaveBeenCalledWith(expect.objectContaining({ type: 'COMP_ORDER' }), 'orders:comp')
+      expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'PERMISSION_DENIED' })
+    })
   })
 })
