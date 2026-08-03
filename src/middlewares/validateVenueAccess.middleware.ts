@@ -1,4 +1,6 @@
 import { NextFunction, Request, Response } from 'express'
+import { resolveUserRoleForVenue } from './checkPermission.middleware'
+import logger from '../config/logger'
 
 /**
  * Verifica que el `:venueId` de la URL sea el del token.
@@ -29,4 +31,57 @@ export function validateVenueAccess(req: Request, res: Response, next: NextFunct
   }
 
   next()
+}
+
+/**
+ * Verifica que el staff TRABAJE en el `:venueId` de la URL.
+ *
+ * La versión laxa de `validateVenueAccess`, para las rutas mobile que no exigen
+ * un permiso concreto y por eso no pasaban por `checkPermission` — su única
+ * defensa era `authenticateTokenMiddleware`, que valida QUIÉN eres pero no
+ * DÓNDE. El venueId de la URL llegaba intacto al servicio, así que con un token
+ * válido de cualquier negocio se leían los descuentos, cupones, proveedores,
+ * ajustes y comandas de KDS de CUALQUIER otro — incluido uno de otra
+ * organización. Verificado: un staff de la org A recibió íntegra una promoción
+ * de un venue de la org B.
+ *
+ * Es deliberadamente MENOS estricto que `validateVenueAccess` (que exige
+ * igualdad exacta con el venue del token): pide sólo que el staff pertenezca al
+ * venue de la URL. La diferencia importa al desplegar — un POS cuyo token quedó
+ * apuntando a otro local propio (pasaba antes de que el refresh conservara el
+ * venue) sigue funcionando en vez de quedarse muerto hasta que alguien vuelva a
+ * entrar. Lo que se cierra es lo grave: ver datos de un negocio ajeno.
+ */
+export async function requireVenueMembership(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const authContext = (req as any).authContext
+
+  if (!authContext?.userId) {
+    res.status(401).json({ success: false, message: 'Autenticación requerida' })
+    return
+  }
+
+  const targetVenueId = req.params.venueId
+  if (!targetVenueId) {
+    next()
+    return
+  }
+
+  try {
+    const { role } = await resolveUserRoleForVenue({
+      userId: authContext.userId,
+      targetVenueId,
+      tokenVenueId: authContext.venueId,
+      tokenRole: authContext.role,
+    })
+
+    if (!role) {
+      logger.warn(`🔒 [VENUE ACCESS] staff ${authContext.userId} intentó entrar al venue ${targetVenueId} sin pertenecer`)
+      res.status(403).json({ success: false, message: 'No tienes acceso a este establecimiento' })
+      return
+    }
+
+    next()
+  } catch (error) {
+    next(error)
+  }
 }

@@ -48,7 +48,7 @@ import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.mi
 import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { checkTableOwnership } from '../middlewares/checkTableOwnership.middleware'
-import { validateVenueAccess } from '../middlewares/validateVenueAccess.middleware'
+import { validateVenueAccess, requireVenueMembership } from '../middlewares/validateVenueAccess.middleware'
 import { registerDeviceMiddleware } from '../middlewares/registerDevice.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { recordFastPaymentParamsSchema, recordPaymentBodySchema } from '../schemas/tpv.schema'
@@ -1538,26 +1538,26 @@ router.delete(
 // DISCOUNTS
 // ============================================================================
 
-router.get('/venues/:venueId/discounts', authenticateTokenMiddleware, discountMobileController.listDiscounts)
-router.post('/venues/:venueId/discounts', authenticateTokenMiddleware, discountMobileController.createDiscount)
-router.put('/venues/:venueId/discounts/:discountId', authenticateTokenMiddleware, discountMobileController.updateDiscount)
-router.delete('/venues/:venueId/discounts/:discountId', authenticateTokenMiddleware, discountMobileController.deleteDiscount)
+router.get('/venues/:venueId/discounts', authenticateTokenMiddleware, requireVenueMembership, discountMobileController.listDiscounts)
+router.post('/venues/:venueId/discounts', authenticateTokenMiddleware, requireVenueMembership, discountMobileController.createDiscount)
+router.put('/venues/:venueId/discounts/:discountId', authenticateTokenMiddleware, requireVenueMembership, discountMobileController.updateDiscount)
+router.delete('/venues/:venueId/discounts/:discountId', authenticateTokenMiddleware, requireVenueMembership, discountMobileController.deleteDiscount)
 
 // ============================================================================
 // COUPONS
 // ============================================================================
 
-router.get('/venues/:venueId/coupons', authenticateTokenMiddleware, couponMobileController.listCoupons)
-router.post('/venues/:venueId/coupons', authenticateTokenMiddleware, couponMobileController.createCoupon)
-router.put('/venues/:venueId/coupons/:couponId', authenticateTokenMiddleware, couponMobileController.updateCoupon)
-router.delete('/venues/:venueId/coupons/:couponId', authenticateTokenMiddleware, couponMobileController.deleteCoupon)
-router.post('/venues/:venueId/coupons/validate', authenticateTokenMiddleware, couponMobileController.validateCoupon)
+router.get('/venues/:venueId/coupons', authenticateTokenMiddleware, requireVenueMembership, couponMobileController.listCoupons)
+router.post('/venues/:venueId/coupons', authenticateTokenMiddleware, requireVenueMembership, couponMobileController.createCoupon)
+router.put('/venues/:venueId/coupons/:couponId', authenticateTokenMiddleware, requireVenueMembership, couponMobileController.updateCoupon)
+router.delete('/venues/:venueId/coupons/:couponId', authenticateTokenMiddleware, requireVenueMembership, couponMobileController.deleteCoupon)
+router.post('/venues/:venueId/coupons/validate', authenticateTokenMiddleware, requireVenueMembership, couponMobileController.validateCoupon)
 
 // ============================================================================
 // TPV SETTINGS (combined terminals + settings in one call)
 // ============================================================================
 
-router.get('/venues/:venueId/settings', authenticateTokenMiddleware, tpvSettingsMobileController.getVenueTpvSettings)
+router.get('/venues/:venueId/settings', authenticateTokenMiddleware, requireVenueMembership, tpvSettingsMobileController.getVenueTpvSettings)
 
 // ============================================================================
 // NOTIFICATIONS (user-scoped, not venue-scoped)
@@ -1573,7 +1573,7 @@ router.delete('/notifications/:notificationId', authenticateTokenMiddleware, not
 // SUPPLIERS
 // ============================================================================
 
-router.get('/venues/:venueId/suppliers', authenticateTokenMiddleware, supplierMobileController.listSuppliers)
+router.get('/venues/:venueId/suppliers', authenticateTokenMiddleware, requireVenueMembership, supplierMobileController.listSuppliers)
 
 // ============================================================================
 // TABLES (reservation MESA picker — reuses the same table.tpv.service the
@@ -2400,27 +2400,27 @@ router.delete(
  * List active KDS orders for a venue.
  * Query: ?status=NEW,PREPARING,READY (default: active orders)
  */
-router.get('/venues/:venueId/kds/orders', authenticateTokenMiddleware, kdsMobileController.listKdsOrders)
+router.get('/venues/:venueId/kds/orders', authenticateTokenMiddleware, requireVenueMembership, kdsMobileController.listKdsOrders)
 
 /**
  * POST /api/v1/mobile/venues/:venueId/kds/orders
  * Create a new KDS order (after payment succeeds).
  * Body: { orderNumber, orderType?, orderId?, items: [{ productName, quantity, modifiers?, notes? }] }
  */
-router.post('/venues/:venueId/kds/orders', authenticateTokenMiddleware, kdsMobileController.createKdsOrder)
+router.post('/venues/:venueId/kds/orders', authenticateTokenMiddleware, requireVenueMembership, kdsMobileController.createKdsOrder)
 
 /**
  * PUT /api/v1/mobile/venues/:venueId/kds/orders/:id/status
  * Update KDS order status.
  * Body: { status: "PREPARING" | "READY" | "COMPLETED" }
  */
-router.put('/venues/:venueId/kds/orders/:id/status', authenticateTokenMiddleware, kdsMobileController.updateKdsOrderStatus)
+router.put('/venues/:venueId/kds/orders/:id/status', authenticateTokenMiddleware, requireVenueMembership, kdsMobileController.updateKdsOrderStatus)
 
 /**
  * POST /api/v1/mobile/venues/:venueId/kds/orders/:id/bump
  * Mark KDS order as COMPLETED instantly.
  */
-router.post('/venues/:venueId/kds/orders/:id/bump', authenticateTokenMiddleware, kdsMobileController.bumpKdsOrder)
+router.post('/venues/:venueId/kds/orders/:id/bump', authenticateTokenMiddleware, requireVenueMembership, kdsMobileController.bumpKdsOrder)
 
 // ============================================================================
 // PRINT STATIONS (PRINT_STATIONS) — routing config + gateway outbox replica
