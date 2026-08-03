@@ -60,7 +60,10 @@ export const login = async (req: Request, res: Response, next: NextFunction) => 
  */
 export const refresh = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { refreshToken } = req.body
+    // `venueId` es opcional: sólo lo manda el POS cuando el usuario CAMBIA de
+    // local, para que la sesión renovada quede atada al local nuevo. Sin él, el
+    // refresh conserva el venue que ya traía — nunca lo muda por su cuenta.
+    const { refreshToken, venueId } = req.body
 
     if (!refreshToken) {
       return res.status(400).json({
@@ -69,7 +72,7 @@ export const refresh = async (req: Request, res: Response, next: NextFunction) =
       })
     }
 
-    const result = await authMobileService.refreshAccessToken(refreshToken)
+    const result = await authMobileService.refreshAccessToken(refreshToken, venueId)
 
     res.status(200).json({
       success: true,

@@ -234,7 +234,7 @@ export async function verifyPasskeyAssertion(credential: AuthenticationResponseJ
   // 7. Generate tokens (derive orgId from venue)
   const venueOrgId = selectedVenue.venue.organizationId
   const accessToken = jwtService.generateAccessToken(staff.id, venueOrgId, selectedVenue.venueId, selectedVenue.role, rememberMe)
-  const refreshToken = jwtService.generateRefreshToken(staff.id, venueOrgId, rememberMe)
+  const refreshToken = jwtService.generateRefreshToken(staff.id, venueOrgId, rememberMe, selectedVenue.venueId)
 
   // 8. Update last login
   await prisma.staff.update({
@@ -589,7 +589,7 @@ export async function loginWithEmail(email: string, password: string, rememberMe
   // 6. Generate tokens (derive orgId from venue)
   const emailLoginOrgId = selectedVenue.venue.organizationId
   const accessToken = jwtService.generateAccessToken(staff.id, emailLoginOrgId, selectedVenue.venueId, selectedVenue.role, rememberMe)
-  const refreshToken = jwtService.generateRefreshToken(staff.id, emailLoginOrgId, rememberMe)
+  const refreshToken = jwtService.generateRefreshToken(staff.id, emailLoginOrgId, rememberMe, selectedVenue.venueId)
 
   // 7. Update last login and reset failed attempts
   await prisma.staff.update({
@@ -658,9 +658,12 @@ export async function loginWithEmail(email: string, password: string, rememberMe
  * Mobile apps send refresh token in request body (not cookies)
  *
  * @param refreshToken - The refresh token from the client
+ * @param requestedVenueId - Venue al que debe quedar atada la sesión renovada.
+ *   Lo manda el POS al CAMBIAR de local; sin él se conserva el venue que ya
+ *   traía el refresh token.
  * @returns New access token and optionally new refresh token
  */
-export async function refreshAccessToken(refreshToken: string) {
+export async function refreshAccessToken(refreshToken: string, requestedVenueId?: string) {
   logger.info('🔐 [MOBILE AUTH] Token refresh attempt')
 
   // 1. Verify refresh token
@@ -708,12 +711,28 @@ export async function refreshAccessToken(refreshToken: string) {
     throw new ForbiddenError('No tienes acceso a ningún establecimiento')
   }
 
-  const selectedVenue = staff.venues[0]
+  // 🔴 El venue NO puede salir de `venues[0]`.
+  //
+  // Antes sí: renovar el token devolvía la sesión al PRIMER venue del staff,
+  // aunque estuviera trabajando en otro. Nadie tocaba nada — bastaba con dejar
+  // la app abierta hasta que expirara el access token. A partir de ahí el token
+  // decía un local y la app operaba en otro, y `sync/intents` (la única ruta que
+  // valida el venue de la URL contra el del token) respondía 403 en bucle: los
+  // cobros hechos sin red se quedaban atorados en el outbox para siempre.
+  //
+  // Orden de preferencia: el que pide el cliente (cambio de local) → el que ya
+  // traía el refresh token → el primero (sólo para tokens viejos, que no lo traen).
+  const requested = requestedVenueId ? staff.venues.find(v => v.venueId === requestedVenueId) : undefined
+  if (requestedVenueId && !requested) {
+    throw new ForbiddenError('No tienes acceso a este establecimiento')
+  }
+  const carried = payload.venueId ? staff.venues.find(v => v.venueId === payload.venueId) : undefined
+  const selectedVenue = requested ?? carried ?? staff.venues[0]
 
   // 4. Generate new tokens (derive orgId from venue)
   const refreshOrgId = selectedVenue.venue.organizationId
   const newAccessToken = jwtService.generateAccessToken(staff.id, refreshOrgId, selectedVenue.venueId, selectedVenue.role)
-  const newRefreshToken = jwtService.generateRefreshToken(staff.id, refreshOrgId)
+  const newRefreshToken = jwtService.generateRefreshToken(staff.id, refreshOrgId, undefined, selectedVenue.venueId)
 
   logger.info(`🔐 [MOBILE AUTH] Token refreshed for: ${staff.email}`)
 

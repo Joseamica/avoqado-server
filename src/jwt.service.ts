@@ -42,6 +42,8 @@ export interface AccessTokenPayload extends jwt.JwtPayload {
 export interface RefreshTokenPayload extends jwt.JwtPayload {
   sub: string // Staff.id
   orgId?: string // Organization ID (from StaffOrganization)
+  venueId?: string // Venue en el que estaba la sesión. Opcional: los tokens
+  // emitidos antes de este campo no lo traen y caen al primer venue del staff.
   tokenId: string // ID único para el token de refresco
 }
 
@@ -136,13 +138,22 @@ export function generateImpersonationAccessToken(
  * @param rememberMe - Si true, extiende la duración del token a 90 días
  * @returns El token de refresco firmado.
  */
-export function generateRefreshToken(staffId: string, organizationId?: string, rememberMe?: boolean): string {
+export function generateRefreshToken(
+  staffId: string,
+  organizationId?: string,
+  rememberMe?: boolean,
+  venueId?: string,
+): string {
   const payload: Omit<RefreshTokenPayload, 'iat' | 'exp' | 'aud' | 'iss'> = {
     sub: staffId,
     tokenId: crypto.randomBytes(16).toString('hex'), // Genera un ID único para el token
   }
   if (organizationId) {
     payload.orgId = organizationId
+  }
+  // El venue viaja en el refresh para que renovar la sesión no la mude de local.
+  if (venueId) {
+    payload.venueId = venueId
   }
   // Explicitly type the secret and options
   const secret: Secret = REFRESH_TOKEN_SECRET!
