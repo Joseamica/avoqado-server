@@ -1518,8 +1518,8 @@ async function calculateTimePeriodMetrics(
       COUNT(*) as order_count
     FROM "Order"
     WHERE "venueId" = $1
-      AND "createdAt" >= $2
-      AND "createdAt" <= $3
+      AND "createdAt" >= $2::timestamp
+      AND "createdAt" <= $3::timestamp
       -- Must mirror the summary grossSales filter (status notIn PENDING/CANCELLED/DELETED)
       -- so the period bars sum to the headline total. Previously this only excluded
       -- CANCELLED, double-counting PENDING/DELETED orders vs the summary card.
@@ -1540,8 +1540,8 @@ async function calculateTimePeriodMetrics(
       COUNT(*) as transaction_count
     FROM "Payment"
     WHERE "venueId" = $1
-      AND "createdAt" >= $2
-      AND "createdAt" <= $3
+      AND "createdAt" >= $2::timestamp
+      AND "createdAt" <= $3::timestamp
       AND status = 'COMPLETED'
       ${merchantPaymentClause}
       ${paymentSqlClause}
@@ -1558,8 +1558,8 @@ async function calculateTimePeriodMetrics(
       COALESCE(SUM(ABS(amount) + ABS("tipAmount")), 0) as refunds
     FROM "Payment"
     WHERE "venueId" = $1
-      AND "createdAt" >= $2
-      AND "createdAt" <= $3
+      AND "createdAt" >= $2::timestamp
+      AND "createdAt" <= $3::timestamp
       AND type = 'REFUND'
       ${merchantPaymentClause}
       ${paymentSqlClause}
@@ -1574,8 +1574,8 @@ async function calculateTimePeriodMetrics(
       COALESCE(SUM("remainingBalance"), 0) as deferred_sales
     FROM "Order"
     WHERE "venueId" = $1
-      AND "createdAt" >= $2
-      AND "createdAt" <= $3
+      AND "createdAt" >= $2::timestamp
+      AND "createdAt" <= $3::timestamp
       -- Mirror the summary deferred filter (status notIn PENDING/CANCELLED/DELETED).
       AND status NOT IN ('PENDING', 'CANCELLED', 'DELETED')
       AND "paymentStatus" IN ('PENDING', 'PARTIAL')
@@ -1596,8 +1596,8 @@ async function calculateTimePeriodMetrics(
     FROM "TransactionCost" tc
     JOIN "Payment" p ON p.id = tc."paymentId"
     WHERE p."venueId" = $1
-      AND p."createdAt" >= $2
-      AND p."createdAt" <= $3
+      AND p."createdAt" >= $2::timestamp
+      AND p."createdAt" <= $3::timestamp
       ${merchantPlatformClause}
       ${paymentSqlClauseWithPrefix}
     GROUP BY ${platformFeesGroupBy}
@@ -1617,8 +1617,8 @@ async function calculateTimePeriodMetrics(
       COALESCE(SUM("netCommission"), 0) as staff_commissions
     FROM "CommissionCalculation"
     WHERE "venueId" = $1
-      AND "createdAt" >= $2
-      AND "createdAt" <= $3
+      AND "createdAt" >= $2::timestamp
+      AND "createdAt" <= $3::timestamp
       AND status != 'VOIDED'
       ${merchantCommissionClause}
       ${staffCommissionsPaymentSubquery}
@@ -1628,9 +1628,22 @@ async function calculateTimePeriodMetrics(
 
   // Execute all queries in parallel
   // When merchantAccountId is provided, it becomes the 4th parameter ($4) for all queries
-  const queryParams: [string, Date, Date, ...string[]] = merchantAccountId
-    ? [venueId, startDate, endDate, merchantAccountId]
-    : [venueId, startDate, endDate]
+  // 🔴 El rango va como TEXTO sin zona, no como Date.
+  //
+  // `Order.createdAt` y `Payment.createdAt` son `timestamp WITHOUT time zone` y
+  // guardan UTC. Al pasar un Date, Prisma lo manda tipado como timestamptz y
+  // Postgres lo convierte a la zona de la sesión antes de comparar: el rango se
+  // corre 6 horas y las ventas del día quedan fuera. El resultado era `byPeriod`
+  // VACÍO — la gráfica del POS decía "Sin datos para este periodo" mientras el
+  // resumen de arriba mostraba $750 en ventas, la misma pantalla contradiciéndose.
+  //
+  // Con el valor como texto (`2026-08-03T17:32:06.455`) y `$2::timestamp` en la
+  // query, Postgres compara timestamp contra timestamp, sin conversión de por medio.
+  const rangeStart = startDate.toISOString().slice(0, 23)
+  const rangeEnd = endDate.toISOString().slice(0, 23)
+  const queryParams: [string, string, string, ...string[]] = merchantAccountId
+    ? [venueId, rangeStart, rangeEnd, merchantAccountId]
+    : [venueId, rangeStart, rangeEnd]
 
   // Under a payment-method filter, skip order-derived queries entirely — their
   // results would be misleading because a single order can't be split per method.
@@ -1708,6 +1721,18 @@ async function calculateTimePeriodMetrics(
       if (!seen.has(key)) legacyOnly.push(new Date(Number(key))) // epoch-ms key → Date for formatPeriod
     }
     periodsToProcess = [...nativePeriods, ...legacyOnly]
+  }
+
+  // Un byPeriod vacío deja la gráfica del POS en "Sin datos para este periodo"
+  // mientras el resumen de arriba muestra ventas — la pantalla se contradice sola.
+  // Cuando pase, este log dice de dónde vino el vacío en vez de obligar a repetir
+  // toda la investigación.
+  if (periodsToProcess.length === 0) {
+    logger.warn(
+      `[SalesSummary] byPeriod VACÍO — reportType=${reportType} isFiltered=${isFiltered} ` +
+        `orderMetrics=${orderMetrics.length} paymentMetrics=${paymentMetrics.length} ` +
+        `allPeriods=${allPeriods.length} rango=${startDate.toISOString()}..${endDate.toISOString()}`,
+    )
   }
 
   const result: TimePeriodMetrics[] = periodsToProcess.map(periodValue => {
