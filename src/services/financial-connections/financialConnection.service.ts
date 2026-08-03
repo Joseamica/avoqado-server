@@ -191,6 +191,10 @@ export async function startConnection(input: {
         step: 'connect',
         error: (e as Error).message,
         providerResponse: (e as { providerResponse?: unknown }).providerResponse as Prisma.InputJsonValue | undefined,
+        // Cuando el proveedor NUNCA respondió, `providerResponse` es null y el mensaje no
+        // dice nada útil: sin esto no se puede saber si fue DNS, reset, TLS o timeout, que
+        // es exactamente lo que pasó el 2026-08-02/03 (ver providerFailure en el client).
+        providerError: (e as { providerError?: unknown }).providerError as Prisma.InputJsonValue | undefined,
       },
     })
     throw e
@@ -295,6 +299,10 @@ export async function validateDevice(connectionId: string, code: string, staffId
         step: 'validate_device',
         error: (e as Error).message,
         providerResponse: (e as { providerResponse?: unknown }).providerResponse as Prisma.InputJsonValue | undefined,
+        // Cuando el proveedor NUNCA respondió, `providerResponse` es null y el mensaje no
+        // dice nada útil: sin esto no se puede saber si fue DNS, reset, TLS o timeout, que
+        // es exactamente lo que pasó el 2026-08-02/03 (ver providerFailure en el client).
+        providerError: (e as { providerError?: unknown }).providerError as Prisma.InputJsonValue | undefined,
       },
     })
     throw e
@@ -356,6 +364,10 @@ export async function validateTwoFactorAuth(connectionId: string, code: string, 
         step: 'validate_2fa',
         error: (e as Error).message,
         providerResponse: (e as { providerResponse?: unknown }).providerResponse as Prisma.InputJsonValue | undefined,
+        // Cuando el proveedor NUNCA respondió, `providerResponse` es null y el mensaje no
+        // dice nada útil: sin esto no se puede saber si fue DNS, reset, TLS o timeout, que
+        // es exactamente lo que pasó el 2026-08-02/03 (ver providerFailure en el client).
+        providerError: (e as { providerError?: unknown }).providerError as Prisma.InputJsonValue | undefined,
       },
     })
     throw e

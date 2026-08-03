@@ -711,3 +711,138 @@ it('sendSpeiOut: rechazo del proveedor (200 success:false y 4xx) → ok:false co
   r = await client.sendSpeiOut({ accessToken: 't', kind: 'MERCHANT' }, input)
   expect(r).toEqual({ ok: false, operationId: null, transferId: null, message: 'Banco no disponible' })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REGRESIÓN — fallo de TRANSPORTE (el proveedor nunca contestó) vs rechazo de NEGOCIO.
+// Bug real 2026-08-02/03 (venue Amaena, 9 intentos): un fallo sin respuesta salía como
+// 400 con el mensaje literal "sign-in falló (status undefined)" — el `undefined` es
+// `e.response.status` de una respuesta inexistente — y el catch descartaba `e.code`, así
+// que el ActivityLog de diagnóstico guardaba `providerResponse: null` y nada más.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Simula "no hubo respuesta": nock corta la conexión, igual que un DNS/reset/TCP caído. */
+function replyWithTransportError(path: string, code = 'ECONNREFUSED') {
+  return nock(BASE)
+    .post(path)
+    .replyWithError(Object.assign(new Error(`connect ${code} 10.0.0.1:443`), { code }))
+}
+
+it('connect: el proveedor NO responde → 503 accionable, nunca "status undefined" ni 400', async () => {
+  replyWithTransportError('/api/auth/sign-in/merchant')
+  const client = await loadClient()
+
+  const err = await client.connect({ email: 'a@b.co', password: 'p', deviceIdentifier: DEVICE }).catch(e => e)
+
+  // Lo que veía el usuario en pantalla — no debe volver jamás.
+  expect(err.message).not.toContain('undefined')
+  expect(err.message).not.toContain('status')
+  // Un banco inalcanzable NO es culpa de las credenciales: 503 (reintentable), no 400.
+  expect(err.statusCode).toBe(503)
+  expect(err.code).toBe('PROVIDER_UNREACHABLE')
+  expect(err.message).toContain('no de tus credenciales')
+})
+
+it('connect: el fallo de transporte adjunta diagnóstico (code/url/status:null) para el ActivityLog', async () => {
+  replyWithTransportError('/api/auth/sign-in/merchant', 'ENOTFOUND')
+  const client = await loadClient()
+
+  const err = await client.connect({ email: 'a@b.co', password: 'p', deviceIdentifier: DEVICE }).catch(e => e)
+
+  // Sin esto no se puede saber si fue DNS, reset, TLS o timeout: era el agujero del audit.
+  expect(err.providerError).toMatchObject({
+    code: 'ENOTFOUND',
+    method: 'POST',
+    url: `${BASE}/api/auth/sign-in/merchant`,
+    status: null, // null EXACTAMENTE cuando no hubo respuesta
+  })
+  expect(typeof err.providerError.message).toBe('string')
+})
+
+it('connect: el proveedor SÍ responde 400 → sigue siendo rechazo de negocio 400 con su mensaje (no regresión)', async () => {
+  nock(BASE).post('/api/auth/sign-in/merchant').reply(400, { Success: false, Message: 'Información inválida.' })
+  const client = await loadClient()
+
+  const err = await client.connect({ email: 'a@b.co', password: 'p', deviceIdentifier: DEVICE }).catch(e => e)
+
+  expect(err.statusCode).toBe(400)
+  expect(err.message).toBe('Información inválida.')
+  expect(err.providerResponse).toEqual({ Success: false, Message: 'Información inválida.' })
+  expect(err.providerError).toMatchObject({ status: 400 })
+})
+
+it('connect: el proveedor responde 4xx SIN message → mensaje con el HTTP real, nunca "undefined"', async () => {
+  nock(BASE).post('/api/auth/sign-in/merchant').reply(502, 'Bad Gateway')
+  const client = await loadClient()
+
+  const err = await client.connect({ email: 'a@b.co', password: 'p', deviceIdentifier: DEVICE }).catch(e => e)
+
+  expect(err.message).not.toContain('undefined')
+  expect(err.message).toContain('HTTP 502')
+  expect(err.statusCode).toBe(400) // el proveedor contestó: es su rechazo, no transporte
+})
+
+it('validateTwoFactorCode: proveedor inalcanzable → 503, NO "código inválido" (mandaría a regenerar un TOTP en vano)', async () => {
+  replyWithTransportError('/api/auth/validate-two-factor-code', 'ECONNRESET')
+  const client = await loadClient()
+
+  const err = await client
+    .validateTwoFactorCode({
+      email: 'a@b.co',
+      deviceIdentifier: DEVICE,
+      challenge: { accessToken: 't' },
+      code: '123456',
+      accountKind: 'MERCHANT',
+    })
+    .catch(e => e)
+
+  expect(err.statusCode).toBe(503)
+  expect(err.message).not.toContain('inválido')
+  expect(err.providerError).toMatchObject({ code: 'ECONNRESET', status: null })
+})
+
+it('validateTwoFactorCode: 400 real del proveedor → sigue siendo "código inválido" 400 (no regresión)', async () => {
+  nock(BASE).post('/api/auth/validate-two-factor-code').reply(400, { message: 'Código incorrecto.' })
+  const client = await loadClient()
+
+  const err = await client
+    .validateTwoFactorCode({
+      email: 'a@b.co',
+      deviceIdentifier: DEVICE,
+      challenge: { accessToken: 't' },
+      code: '000000',
+      accountKind: 'MERCHANT',
+    })
+    .catch(e => e)
+
+  expect(err.statusCode).toBe(400)
+  expect(err.message).toBe('Código incorrecto.')
+})
+
+it('sendSpeiOut / internalTransfer: proveedor inalcanzable → ok:false con mensaje honesto, sin "undefined"', async () => {
+  replyWithTransportError('/api/external/spei/out', 'ETIMEDOUT')
+  let client = await loadClient()
+  const spei = await client.sendSpeiOut(
+    { accessToken: 't', kind: 'MERCHANT' },
+    {
+      externalUserId: 'mg-1',
+      idempotencyKey: 'k1',
+      destinationClabe: '032180000118359719',
+      beneficiaryName: 'X',
+      amount: 5,
+      concept: '',
+      idBanco: 1,
+    },
+  )
+  expect(spei.ok).toBe(false)
+  expect(spei.message).not.toContain('undefined')
+  expect(spei.message).toContain('No pudimos conectar')
+
+  replyWithTransportError('/api/transferencia/add-transferenciaMG', 'ECONNREFUSED')
+  client = await loadClient()
+  const tr = await client.internalTransfer(
+    { accessToken: 't', kind: 'MERCHANT' },
+    { sourceAltId: 1234, destAltId: 4521, amount: 10, concept: 'x' },
+  )
+  expect(tr.ok).toBe(false)
+  expect(tr.message).not.toContain('undefined')
+})

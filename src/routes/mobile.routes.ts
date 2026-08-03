@@ -1541,8 +1541,18 @@ router.delete(
 
 router.get('/venues/:venueId/discounts', authenticateTokenMiddleware, requireVenueMembership, discountMobileController.listDiscounts)
 router.post('/venues/:venueId/discounts', authenticateTokenMiddleware, requireVenueMembership, discountMobileController.createDiscount)
-router.put('/venues/:venueId/discounts/:discountId', authenticateTokenMiddleware, requireVenueMembership, discountMobileController.updateDiscount)
-router.delete('/venues/:venueId/discounts/:discountId', authenticateTokenMiddleware, requireVenueMembership, discountMobileController.deleteDiscount)
+router.put(
+  '/venues/:venueId/discounts/:discountId',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  discountMobileController.updateDiscount,
+)
+router.delete(
+  '/venues/:venueId/discounts/:discountId',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  discountMobileController.deleteDiscount,
+)
 
 // ============================================================================
 // COUPONS
@@ -1551,14 +1561,24 @@ router.delete('/venues/:venueId/discounts/:discountId', authenticateTokenMiddlew
 router.get('/venues/:venueId/coupons', authenticateTokenMiddleware, requireVenueMembership, couponMobileController.listCoupons)
 router.post('/venues/:venueId/coupons', authenticateTokenMiddleware, requireVenueMembership, couponMobileController.createCoupon)
 router.put('/venues/:venueId/coupons/:couponId', authenticateTokenMiddleware, requireVenueMembership, couponMobileController.updateCoupon)
-router.delete('/venues/:venueId/coupons/:couponId', authenticateTokenMiddleware, requireVenueMembership, couponMobileController.deleteCoupon)
+router.delete(
+  '/venues/:venueId/coupons/:couponId',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  couponMobileController.deleteCoupon,
+)
 router.post('/venues/:venueId/coupons/validate', authenticateTokenMiddleware, requireVenueMembership, couponMobileController.validateCoupon)
 
 // ============================================================================
 // TPV SETTINGS (combined terminals + settings in one call)
 // ============================================================================
 
-router.get('/venues/:venueId/settings', authenticateTokenMiddleware, requireVenueMembership, tpvSettingsMobileController.getVenueTpvSettings)
+router.get(
+  '/venues/:venueId/settings',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  tpvSettingsMobileController.getVenueTpvSettings,
+)
 
 // ============================================================================
 // NOTIFICATIONS (user-scoped, not venue-scoped)
@@ -2415,7 +2435,12 @@ router.post('/venues/:venueId/kds/orders', authenticateTokenMiddleware, requireV
  * Update KDS order status.
  * Body: { status: "PREPARING" | "READY" | "COMPLETED" }
  */
-router.put('/venues/:venueId/kds/orders/:id/status', authenticateTokenMiddleware, requireVenueMembership, kdsMobileController.updateKdsOrderStatus)
+router.put(
+  '/venues/:venueId/kds/orders/:id/status',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  kdsMobileController.updateKdsOrderStatus,
+)
 
 /**
  * POST /api/v1/mobile/venues/:venueId/kds/orders/:id/bump

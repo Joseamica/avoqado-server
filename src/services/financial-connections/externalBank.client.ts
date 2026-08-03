@@ -1,6 +1,6 @@
-import axios from 'axios'
+import axios, { type AxiosError } from 'axios'
 import { env } from '@/config/env'
-import { BadRequestError, NotFoundError } from '@/errors/AppError'
+import AppError, { BadRequestError, NotFoundError, ServiceUnavailableError } from '@/errors/AppError'
 import { pick } from '@/services/externalBank/pick'
 import type {
   FinancialProviderClient,
@@ -24,6 +24,80 @@ import type {
 } from './types'
 
 const base = () => env.EXTERNAL_BANK_API_BASE
+
+/**
+ * Un fallo de axios tiene DOS formas que NO se pueden confundir:
+ *
+ *  - `e.response` PRESENTE → el proveedor contestó y rechazó. Es un error de NEGOCIO
+ *    ("Información inválida.", "La cuenta está temporalmente bloqueada.") → 400, el
+ *    usuario puede corregirlo.
+ *  - `e.response` AUSENTE → NUNCA hubo respuesta: DNS, TCP rechazado, TLS, reset o
+ *    timeout. Ni las credenciales ni el usuario tienen nada que ver → 503, se reintenta.
+ *
+ * Tratarlas igual fue un bug real (2026-08-02/03, venue Amaena, 9 intentos): el mensaje
+ * se armaba con `` `sign-in falló (status ${e.response?.status})` `` y, sin respuesta, el
+ * usuario leía literalmente **"sign-in falló (status undefined)"** en un 400 que lo
+ * culpaba de sus credenciales. Peor: el catch descartaba `e.code`, así que el
+ * `ActivityLog` que se agregó justo para diagnosticar (d947a75e) guardaba
+ * `providerResponse: null` y no quedaba rastro de si fue DNS, reset o timeout.
+ *
+ * Regla: nunca interpolar `e.response?.status` en un mensaje sin haber comprobado que
+ * la respuesta existe — ese `undefined` es la firma de un fallo de transporte mal leído.
+ */
+export interface ProviderErrorDiagnostics {
+  /** ECONNREFUSED · ENOTFOUND · ETIMEDOUT · ECONNRESET · ECONNABORTED… */
+  code: string | null
+  message: string
+  method: string | null
+  url: string | null
+  /** null exactamente cuando no hubo respuesta (el caso que producía "status undefined"). */
+  status: number | null
+}
+
+/** Error enriquecido: lo que el service audita en ActivityLog además del mensaje. */
+type ProviderFailure = AppError & { providerResponse?: unknown; providerError?: ProviderErrorDiagnostics }
+
+const providerAnswered = (e: AxiosError): boolean => e.response !== undefined
+
+function diagnosticsOf(e: AxiosError): ProviderErrorDiagnostics {
+  return {
+    code: e.code ?? null,
+    message: e.message,
+    method: e.config?.method?.toUpperCase() ?? null,
+    // Host + path SIN querystring: basta para saber a dónde no se llegó y no arrastra datos.
+    url: e.config?.url?.split('?')[0] ?? null,
+    status: e.response?.status ?? null,
+  }
+}
+
+/** Mensaje honesto para un fallo SIN respuesta — nunca dice "undefined" ni culpa al usuario. */
+const TRANSPORT_MESSAGE =
+  'No pudimos conectar con tu banco. Es una falla de comunicación con el proveedor, no de tus credenciales. Intenta de nuevo en unos minutos.'
+
+/**
+ * Convierte un AxiosError en el error correcto para el caller, con el diagnóstico adjunto
+ * para el audit trail. `businessFallback` solo se usa cuando el proveedor SÍ respondió
+ * pero no mandó `message`.
+ */
+function providerFailure(e: AxiosError, businessFallback: string): ProviderFailure {
+  const diagnostics = diagnosticsOf(e)
+  const err: ProviderFailure = providerAnswered(e)
+    ? new BadRequestError(pick<string>(e.response?.data, 'message') || `${businessFallback} (HTTP ${diagnostics.status})`)
+    : new ServiceUnavailableError(TRANSPORT_MESSAGE, 'PROVIDER_UNREACHABLE')
+  // El mensaje solo (p.ej. "Información inválida.") no siempre alcanza para diagnosticar —
+  // se conserva el body crudo del proveedor y el diagnóstico de transporte para que el
+  // caller lo audite completo en ActivityLog (ver logAction en startConnection/validateDevice/
+  // validateTwoFactorAuth).
+  err.providerResponse = e.response?.data
+  err.providerError = diagnostics
+  return err
+}
+
+/** Variante para los flujos que devuelven `{ ok:false, message }` en vez de lanzar (dinero). */
+function providerFailureMessage(e: AxiosError, businessFallback: string): string {
+  if (!providerAnswered(e)) return TRANSPORT_MESSAGE
+  return pick<string>(e.response?.data, 'message') || `${businessFallback} (HTTP ${e.response?.status})`
+}
 function platformForKind(kind: AccountKind = 'MERCHANT'): string {
   return kind === 'CLIENT' ? env.EXTERNAL_BANK_MG_PLATFORM_CLIENT : env.EXTERNAL_BANK_MG_PLATFORM
 }
@@ -185,14 +259,7 @@ async function signIn(email: string, password: string, deviceIdentifier: string,
     })
     return data
   } catch (e) {
-    if (axios.isAxiosError(e)) {
-      const err = new BadRequestError(pick<string>(e.response?.data, 'message') || `sign-in falló (status ${e.response?.status})`)
-      // El mensaje solo (p.ej. "Información inválida.") no siempre alcanza para diagnosticar —
-      // se conserva el body crudo del proveedor para que el caller lo audite completo en
-      // ActivityLog (ver logAction en startConnection/validateDevice/validateTwoFactorAuth).
-      ;(err as BadRequestError & { providerResponse?: unknown }).providerResponse = e.response?.data
-      throw err
-    }
+    if (axios.isAxiosError(e)) throw providerFailure(e, 'El banco rechazó el inicio de sesión')
     throw e
   }
 }
@@ -295,7 +362,9 @@ export const externalBankClient: FinancialProviderClient = {
         { headers: headers(challenge.accessToken, accountKind), timeout: 20_000 },
       ))
     } catch (e) {
-      if (axios.isAxiosError(e)) throw new BadRequestError(pick<string>(e.response?.data, 'message') || 'Código 2FA inválido o expirado.')
+      // Un 2FA que no llegó al proveedor NO es "código inválido": decirle eso al usuario lo
+      // manda a regenerar un TOTP que caduca en 30s contra un proveedor inalcanzable.
+      if (axios.isAxiosError(e)) throw providerFailure(e, 'Código 2FA inválido o expirado.')
       throw e
     }
     if (!pick<boolean>(v, 'success') && !pick<boolean>(v, 'isLoggedIn')) {
@@ -462,7 +531,7 @@ export const externalBankClient: FinancialProviderClient = {
         return {
           ok: false,
           movementId: null,
-          message: pick<string>(e.response?.data, 'message') || `traspaso falló (status ${e.response?.status})`,
+          message: providerFailureMessage(e, 'El banco rechazó el traspaso'),
         }
       }
       throw e
@@ -534,7 +603,7 @@ export const externalBankClient: FinancialProviderClient = {
           ok: false,
           operationId: null,
           transferId: null,
-          message: pick<string>(e.response?.data, 'message') || `SPEI falló (status ${e.response?.status})`,
+          message: providerFailureMessage(e, 'El banco rechazó el SPEI'),
         }
       }
       throw e
