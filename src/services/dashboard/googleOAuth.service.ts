@@ -5,7 +5,8 @@ import { StaffRole, OrgRole, InvitationStatus } from '@prisma/client'
 import * as jwtService from '../../jwt.service'
 import logger from '@/config/logger'
 import { getPrimaryOrganizationId } from '../staffOrganization.service'
-import { assertCanAddSeat } from '../access/seatCap.service'
+import { assertCanAddSeatsBulk } from '../access/seatCap.service'
+import { logAction } from './activity-log.service'
 
 // Validate Google OAuth configuration
 if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET || !process.env.FRONTEND_URL) {
@@ -153,6 +154,10 @@ export async function loginWithGoogle(
 
   let isNewUser = false
 
+  // Audit context for an invitation this login auto-accepted. Written AFTER the transaction:
+  // logAction is fire-and-forget and must never be able to roll back a signup.
+  let acceptedInvitation: { invitationId: string; staffId: string; venueId: string; role: StaffRole; venueCount: number } | null = null
+
   // If staff doesn't exist, check if they were invited
   if (!staff) {
     // Look for an invitation for this email
@@ -192,18 +197,105 @@ export async function loginWithGoogle(
       throw new ForbiddenError('Invitation data inconsistency: venue organization mismatch. Please contact your administrator.')
     }
 
-    // Create new staff from invitation
-    staff = await prisma.staff.create({
-      data: {
-        email: googleUser.email.toLowerCase(),
-        firstName: googleUser.given_name || googleUser.name.split(' ')[0] || 'Unknown',
-        lastName: googleUser.family_name || googleUser.name.split(' ').slice(1).join(' ') || '',
-        photoUrl: googleUser.picture,
-        emailVerified: true,
-        googleId: googleUser.id,
-        active: true,
-        lastLoginAt: new Date(),
-      },
+    const primaryVenueId = invitation.venueId || invitation.venue.id
+
+    // 🔴 A PIN cannot be captured during an OAuth redirect. When the inviter required one we still
+    // create the account (so the person can get in at all) but leave the invitation PENDING — the
+    // `venues.length === 0` branch below returns it as a pending invitation and the frontend routes
+    // them to /invite/:token, which collects the PIN. Auto-accepting here would silently drop the
+    // PIN requirement and leave them unable to log into the TPV.
+    const canAutoAccept = !invitation.requirePin
+
+    // Parity with invitation.service.ts: an OWNER invitation carrying `inviteToAllVenues` grants
+    // EVERY venue in the org, not just the invitation's own venue.
+    const permissions = invitation.permissions as { inviteToAllVenues?: boolean } | null
+    let venueIdsToAssign: string[] = [primaryVenueId]
+    if (canAutoAccept && permissions?.inviteToAllVenues === true) {
+      const orgVenues = await prisma.venue.findMany({
+        where: { organizationId: invitation.organizationId },
+        select: { id: true },
+      })
+      venueIdsToAssign = orgVenues.map(v => v.id)
+    }
+
+    // Free-tier seat cap: every venue here gets a BRAND-NEW seat. Checked BEFORE the transaction
+    // because seatCap.service runs on the global client. Cap usage counts pending invitations and
+    // this very invite is still PENDING, so exclude it for its own venue (off-by-one).
+    if (canAutoAccept) {
+      await assertCanAddSeatsBulk(venueIdsToAssign, { primaryVenueId, excludeInvitationId: invitation.id })
+    }
+
+    // Parity with invitation.service.ts: an OWNER invitation must become an OWNER at the
+    // ORGANIZATION level too. Hardcoding MEMBER here left every Google-signup owner unable to
+    // administer their own org.
+    const orgRole = invitation.role === StaffRole.OWNER ? OrgRole.OWNER : OrgRole.MEMBER
+
+    // One transaction: a half-applied signup leaves an orphan Staff row that owns the (globally
+    // unique) email but has no org and no venue — the person can then never be invited again.
+    const createdStaffId = await prisma.$transaction(async tx => {
+      const created = await tx.staff.create({
+        data: {
+          email: googleUser.email.toLowerCase(),
+          firstName: googleUser.given_name || googleUser.name.split(' ')[0] || 'Unknown',
+          lastName: googleUser.family_name || googleUser.name.split(' ').slice(1).join(' ') || '',
+          photoUrl: googleUser.picture,
+          emailVerified: true,
+          googleId: googleUser.id,
+          active: true,
+          lastLoginAt: new Date(),
+        },
+        select: { id: true },
+      })
+
+      await tx.staffOrganization.create({
+        data: {
+          staffId: created.id,
+          organizationId: invitation.organizationId,
+          role: orgRole,
+          isPrimary: true,
+          isActive: true,
+          joinedById: invitation.invitedById,
+        },
+      })
+
+      if (canAutoAccept) {
+        await tx.staffVenue.createMany({
+          data: venueIdsToAssign.map(venueId => ({
+            staffId: created.id,
+            venueId,
+            role: invitation.role,
+            active: true,
+          })),
+        })
+
+        await tx.invitation.update({
+          where: { id: invitation.id },
+          data: {
+            status: InvitationStatus.ACCEPTED,
+            acceptedAt: new Date(),
+            acceptedById: created.id,
+          },
+        })
+      }
+
+      return created.id
+    })
+
+    if (canAutoAccept) {
+      acceptedInvitation = {
+        invitationId: invitation.id,
+        staffId: createdStaffId,
+        venueId: primaryVenueId,
+        role: invitation.role,
+        venueCount: venueIdsToAssign.length,
+      }
+    }
+
+    // Refetch in the exact shape the rest of this function expects. The previous code hand-built
+    // `organizations`/`venues` (cast through `as any`) to save a query; that stopped being safe
+    // once one accept can grant N venues (inviteToAllVenues) or zero (requirePin).
+    staff = await prisma.staff.findUniqueOrThrow({
+      where: { id: createdStaffId },
       include: {
         organizations: {
           where: { isPrimary: true, isActive: true },
@@ -220,6 +312,7 @@ export async function loginWithGoogle(
                 slug: true,
                 logo: true,
                 status: true,
+                organizationId: true,
               },
             },
           },
@@ -227,71 +320,13 @@ export async function loginWithGoogle(
       },
     })
 
-    // Create StaffOrganization membership
-    await prisma.staffOrganization.create({
-      data: {
-        staffId: staff.id,
-        organizationId: invitation.organizationId,
-        role: OrgRole.MEMBER,
-        isPrimary: true,
-        isActive: true,
-      },
+    logger.info('Google OAuth: staff created from invitation', {
+      staffId: createdStaffId,
+      email: googleUser.email.toLowerCase(),
+      invitationId: invitation.id,
+      autoAccepted: canAutoAccept,
+      venueCount: canAutoAccept ? venueIdsToAssign.length : 0,
     })
-
-    // Create staff-venue relationship and mark invitation as accepted IN PARALLEL
-    // These operations are independent and can run concurrently
-    const venueId = invitation.venueId || invitation.venue.id
-
-    // Free-tier seat cap: this is a brand-new Google-signup accepting an invite, so the
-    // create below always adds a new seat. Enforce before creating it. Exempt/paid venues
-    // are unlimited (no-op). Cap usage now includes pending invitations; this very invite is
-    // STILL PENDING (it's marked ACCEPTED in the parallel update below), so EXCLUDE it from
-    // the pending count to avoid the off-by-one that would wrongly block a legitimate accept.
-    await assertCanAddSeat(venueId, { excludeInvitationId: invitation.id })
-
-    await Promise.all([
-      prisma.staffVenue.create({
-        data: {
-          staffId: staff.id,
-          venueId: venueId,
-          role: invitation.role,
-          active: true,
-        },
-      }),
-      prisma.invitation.update({
-        where: { id: invitation.id },
-        data: {
-          status: 'ACCEPTED',
-          acceptedAt: new Date(),
-        },
-      }),
-    ])
-
-    // No need to refetch - we have all the data we need
-    // Manually construct the organizations and venues arrays from the invitation data
-    staff.organizations = [
-      {
-        organizationId: invitation.organizationId,
-        organization: invitation.venue.organization,
-      },
-    ] as any
-
-    staff.venues = [
-      {
-        staffId: staff.id,
-        venueId: venueId,
-        role: invitation.role,
-        active: true,
-        venue: {
-          id: invitation.venue.id,
-          name: invitation.venue.name,
-          slug: invitation.venue.slug,
-          logo: (invitation.venue as any).logo || null,
-          status: (invitation.venue as any).status || 'ACTIVE',
-          organizationId: invitation.venue.organizationId,
-        },
-      },
-    ] as any
 
     isNewUser = true
   } else {
@@ -321,6 +356,20 @@ export async function loginWithGoogle(
 
   if (!staff || !staff.active) {
     throw new AuthenticationError('Account is inactive')
+  }
+
+  // Audit the accept — the owner audit screen reads ONLY ActivityLog, so an invitation accepted
+  // through Google used to be invisible there while the password path was logged. Fire-and-forget,
+  // outside the transaction, so an audit failure can never undo the signup.
+  if (acceptedInvitation) {
+    void logAction({
+      staffId: acceptedInvitation.staffId,
+      venueId: acceptedInvitation.venueId,
+      action: 'INVITATION_ACCEPTED',
+      entity: 'Invitation',
+      entityId: acceptedInvitation.invitationId,
+      data: { role: acceptedInvitation.role, via: 'GOOGLE_OAUTH', venueCount: acceptedInvitation.venueCount },
+    })
   }
 
   // World-Class Pattern (Stripe/Shopify): Allow OWNER login without venues if onboarding incomplete
