@@ -405,6 +405,85 @@ export async function clearTable(venueId: string, tableId: string, performedBy?:
 }
 
 /**
+ * TABLE_SERVICE — libera la mesa cuando su ÚLTIMA cuenta abierta queda saldada.
+ *
+ * 🔴 Por qué existe (mesa M9, 2026-08-03): liberar la mesa después de cobrar era
+ * responsabilidad del CLIENTE — `TablesViewModel.finishTableAfterPayment()` en
+ * Android (y su espejo en iOS) llamaba `clearTable` por HTTP directo, NO como
+ * intent. Si esa llamada no ocurría, `Table.status` se quedaba en `OCCUPIED`
+ * para siempre mientras la orden pasaba a COMPLETED. Resultado: una mesa que el
+ * plano pinta ocupada, sin cuenta viva, que **no se puede abrir ni anular ni
+ * liberar** — porque la única salida ("liberar mesa") vive detrás de un tap que
+ * muere en `primaryCheck ?: return`. Se pierde una mesa del salón, permanente.
+ *
+ * Formas de perder esa llamada, todas reales:
+ *  - Sin red: `repository.clearTable` es HTTP crudo, no va por el outbox. El
+ *    `PAY_CASH` replayado por el reducer NO libera la mesa (sólo `CLEAR_TABLE`).
+ *  - App matada / sesión de mesa perdida entre el cobro y la liberación.
+ *  - Se cobró desde OTRO dispositivo (TPV, otra tablet) que no tenía la sesión.
+ *
+ * La corrección de fondo es que la liberación NO puede depender de que un
+ * cliente siga vivo en el momento correcto: el server la hace al saldarse la
+ * última cuenta. Idempotente y NO transaccional a propósito — esto es
+ * bookkeeping del plano, jamás debe tumbar un cobro ya aprobado.
+ *
+ * Devuelve `true` sólo si esta llamada fue la que liberó la mesa.
+ */
+export async function releaseTableIfSettled(venueId: string, tableId: string): Promise<boolean> {
+  // ¿Queda ALGUNA cuenta viva? Multi-cheque: no basta con la que se acaba de
+  // pagar — una mesa con la cuenta B abierta sigue ocupada aunque la A se pague.
+  const stillOpen = await prisma.order.count({
+    where: { venueId, tableId, status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] } },
+  })
+  if (stillOpen > 0) return false
+
+  const table = await prisma.table.findFirst({
+    where: { id: tableId, venueId },
+    select: { id: true, number: true, status: true, currentOrderId: true },
+  })
+  if (!table) return false
+
+  // Ya está libre — nada que hacer (idempotencia: el cliente puede haber
+  // ganado la carrera con su propio clearTable, y está bien).
+  if (table.status === 'AVAILABLE' && table.currentOrderId === null) return false
+
+  // Una mesa RESERVED sin cuenta abierta NO es una fuga: es una reserva viva.
+  // Pisarla borraría la reservación del plano.
+  if (table.status === 'RESERVED') return false
+
+  await prisma.table.update({
+    where: { id: tableId },
+    data: { status: 'AVAILABLE', currentOrderId: null },
+  })
+
+  logger.info(`✅ [TABLE SERVICE] Table ${table.number} auto-released — última cuenta saldada`)
+
+  void logAction({
+    action: 'TABLE_AUTO_RELEASED',
+    entity: 'Table',
+    entityId: table.id,
+    staffId: null,
+    venueId,
+    data: { number: table.number, previousStatus: table.status },
+  })
+
+  const broadcastingService = socketManager.getBroadcastingService()
+  if (broadcastingService) {
+    broadcastingService.broadcastToVenue(venueId, SocketEventType.TABLE_STATUS_CHANGE, {
+      tableId: table.id,
+      tableNumber: table.number,
+      status: 'AVAILABLE',
+      orderId: null,
+      orderNumber: null,
+      covers: null,
+      waiter: null,
+    })
+  }
+
+  return true
+}
+
+/**
  * TABLE_SERVICE — move an OPEN check to another table (Square's "Mover").
  * The order keeps everything (items, courses, payments in flight are blocked
  * anyway); only the table binding changes. Source table is released, target

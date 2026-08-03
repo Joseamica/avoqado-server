@@ -23,6 +23,8 @@ import { validateStaffVenue as validateStaffVenueShared } from '../../utils/staf
 import { isRetryableDbError } from '../../utils/serializableRetry'
 import { loadOrderForCfdiFromDb } from '../fiscal/cfdi.service'
 import { terminalPaymentService } from '../terminal-payment.service'
+// Sin ciclo: table.tpv.service NO importa este archivo (verificado 2026-08-03).
+import * as tableService from './table.tpv.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import {
   classifyCardInternationality,
@@ -964,6 +966,28 @@ async function updateOrderTotalsForStandalonePayment(
         hasCustomerId: !!order.customerId,
         orderCustomersCount: orderCustomers.length,
         isGuestOrder: !order.customerId && orderCustomers.length === 0,
+      })
+    }
+  }
+
+  // 🪑 Liberar la mesa si ésta era su última cuenta viva.
+  //
+  // Va al FINAL a propósito: si la deducción de inventario revirtió la orden a
+  // PENDING, `releaseTableIfSettled` la vuelve a ver abierta y no libera nada.
+  // Y va en try/catch porque el estado del plano es bookkeeping — jamás puede
+  // tumbar un cobro que el banco ya aprobó.
+  //
+  // Antes esto lo hacía SOLO el cliente (`finishTableAfterPayment` → HTTP
+  // directo). Sin red, con la app matada, o cobrando desde otro dispositivo, la
+  // mesa se quedaba OCCUPIED sin cuenta: imposible de abrir, anular o liberar.
+  if (isFullyPaid && !isAreaTicketOrder && updatedOrder.tableId) {
+    try {
+      await tableService.releaseTableIfSettled(updatedOrder.venueId, updatedOrder.tableId)
+    } catch (error) {
+      logger.error('⚠️ No se pudo liberar la mesa tras el cobro (el pago NO se ve afectado)', {
+        orderId,
+        tableId: updatedOrder.tableId,
+        error: error instanceof Error ? error.message : String(error),
       })
     }
   }

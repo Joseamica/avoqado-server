@@ -49,6 +49,7 @@ import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware
 import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { checkTableOwnership } from '../middlewares/checkTableOwnership.middleware'
 import { validateVenueAccess, requireVenueMembership } from '../middlewares/validateVenueAccess.middleware'
+import { pinLoginRateLimiter } from '../middlewares/pin-login-rate-limit.middleware'
 import { registerDeviceMiddleware } from '../middlewares/registerDevice.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { recordFastPaymentParamsSchema, recordPaymentBodySchema } from '../schemas/tpv.schema'
@@ -966,7 +967,7 @@ router.get(
  *       401:
  *         description: Invalid PIN
  */
-router.post('/venues/:venueId/time-clock/identify', timeEntryMobileController.identifyByPin)
+router.post('/venues/:venueId/time-clock/identify', pinLoginRateLimiter, timeEntryMobileController.identifyByPin)
 
 /**
  * @openapi
@@ -1007,7 +1008,7 @@ router.post('/venues/:venueId/time-clock/identify', timeEntryMobileController.id
  *       401:
  *         description: Invalid PIN
  */
-router.post('/venues/:venueId/time-clock/clock-in', timeEntryMobileController.clockIn)
+router.post('/venues/:venueId/time-clock/clock-in', pinLoginRateLimiter, timeEntryMobileController.clockIn)
 
 /**
  * @openapi
@@ -1046,7 +1047,7 @@ router.post('/venues/:venueId/time-clock/clock-in', timeEntryMobileController.cl
  *       401:
  *         description: Invalid PIN
  */
-router.post('/venues/:venueId/time-clock/clock-out', timeEntryMobileController.clockOut)
+router.post('/venues/:venueId/time-clock/clock-out', pinLoginRateLimiter, timeEntryMobileController.clockOut)
 
 /**
  * @openapi
@@ -1055,7 +1056,7 @@ router.post('/venues/:venueId/time-clock/clock-out', timeEntryMobileController.c
  *     tags: [Mobile - Time Clock]
  *     summary: Start break (by PIN)
  */
-router.post('/venues/:venueId/time-clock/break/start', timeEntryMobileController.startBreak)
+router.post('/venues/:venueId/time-clock/break/start', pinLoginRateLimiter, timeEntryMobileController.startBreak)
 
 /**
  * @openapi
@@ -1064,7 +1065,7 @@ router.post('/venues/:venueId/time-clock/break/start', timeEntryMobileController
  *     tags: [Mobile - Time Clock]
  *     summary: End break (by PIN)
  */
-router.post('/venues/:venueId/time-clock/break/end', timeEntryMobileController.endBreak)
+router.post('/venues/:venueId/time-clock/break/end', pinLoginRateLimiter, timeEntryMobileController.endBreak)
 
 // ============================================================================
 // DEVICE REGISTRATION (Push Notifications)
