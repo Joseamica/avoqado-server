@@ -90,7 +90,12 @@ const envSchema = z.object({
 
   // External bank balance provider — one shared broker login
   // across all Avoqado sucursales; each sucursal is its own `negocio`.
-  EXTERNAL_BANK_API_BASE: z.string().url().optional().default('https://api.qpaydev.xyz'),
+  // 🔴 El default DEBE ser producción. Antes era 'https://api.qpaydev.xyz' — el entorno DEV del
+  // proveedor — así que borrar esta variable en Render mandaba producción a dev EN SILENCIO
+  // (cobros contra el ambiente equivocado, sin un solo error). El fallback tiene que fallar
+  // hacia el lado seguro. No se hace `required`: un parseo fallido hace `process.exit(1)` y
+  // tumbaría TODA la API por una variable de una sola feature. Ver EXTERNAL_BANK_DEV_HOSTS abajo.
+  EXTERNAL_BANK_API_BASE: z.string().url().optional().default('https://api.quarkpayments.mx'),
   EXTERNAL_BANK_MG_PLATFORM: z.string().optional().default('MERCHANT'),
   EXTERNAL_BANK_MG_PLATFORM_CLIENT: z.string().optional().default('PWA'),
   EXTERNAL_BANK_EMAIL: z.string().optional(),
@@ -207,6 +212,34 @@ if (!parsed.success) {
 // ============================================================================
 
 export const env = parsed.data
+
+/**
+ * Guardia de ambiente de la integración bancaria (mueve DINERO REAL).
+ *
+ * Cambiar el default ya cubre el caso "borraron la variable". Falta el otro: que alguien la
+ * ponga EXPLÍCITAMENTE a un host que no debe atender producción. Sin esto no hay señal:
+ * contra el entorno dev del proveedor las llamadas "funcionan" (responden 200) pero contra
+ * datos que no son los del cliente; contra un dominio retirado fallan sin respuesta.
+ *
+ * Es `logger.error`, NO `process.exit`: apagar TODA la API (pagos, POS, órdenes) por la
+ * config de una sola feature es desproporcionado. Un error de arranque sí entra a la alerta
+ * de Better Stack, que es justo lo que faltaba — el fallo del 2026-08-02/03 fue silencioso.
+ */
+const EXTERNAL_BANK_UNSAFE_PROD_HOSTS: Record<string, string> = {
+  'qpaydev.xyz': 'entorno DEV del proveedor — no son datos reales del cliente',
+  'moneygiver.xyz': 'dominio RETIRADO — redirige 301 a un host que ya no existe en DNS (2026-07)',
+}
+
+if (env.NODE_ENV === 'production') {
+  const host = new URL(env.EXTERNAL_BANK_API_BASE).hostname
+  const match = Object.keys(EXTERNAL_BANK_UNSAFE_PROD_HOSTS).find(d => host === d || host.endsWith(`.${d}`))
+  if (match) {
+    logger.error(
+      `🔴 EXTERNAL_BANK_API_BASE apunta a "${host}" en PRODUCCIÓN: ${EXTERNAL_BANK_UNSAFE_PROD_HOSTS[match]}. ` +
+        `Conectar banco / saldos / SPEI van a fallar o a operar contra el ambiente equivocado.`,
+    )
+  }
+}
 
 // Named exports for backward compatibility
 export const {
