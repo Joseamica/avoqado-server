@@ -708,6 +708,30 @@ export async function applyDiscountToOrder(
       }
     }
 
+    // 🔴 MONEY: `discount.amount` viene calculado contra el subtotal COMPLETO (calculateDiscountAmount
+    // no conoce los descuentos ya aplicados), así que al apilar varios stackables la suma podía
+    // pasarse del subtotal y dejar `total` NEGATIVO — enmascarado como cuenta pagada por el
+    // Math.max(0,…) de remainingBalance. Recortamos contra lo que queda por descontar.
+    // Ver `applyManualDiscount` (misma defensa) y la memoria descuento-manual-acumula-sin-tope.
+    const subtotal = Number(order.subtotal)
+    const alreadyDiscounted = Number(order.discountAmount)
+    const remainingDiscountable = Math.round(Math.max(0, subtotal - alreadyDiscounted) * 100) / 100
+
+    if (remainingDiscountable <= 0) {
+      return {
+        success: false,
+        amount: 0,
+        newOrderTotal: Number(order.total),
+        error: 'La cuenta ya está completamente descontada; no se puede aplicar otro descuento.',
+      }
+    }
+
+    const appliedAmount = Math.min(discount.amount, remainingDiscountable)
+    // La reducción de impuesto se recorta en la MISMA proporción que el monto, si no un descuento
+    // recortado seguiría restando el impuesto completo.
+    const appliedTaxReduction =
+      discount.amount > 0 ? Math.round(discount.taxReduction * (appliedAmount / discount.amount) * 100) / 100 : discount.taxReduction
+
     // Create order discount record
     const orderDiscount = await tx.orderDiscount.create({
       data: {
@@ -716,8 +740,8 @@ export async function applyDiscountToOrder(
         type: discount.type,
         name: discount.name,
         value: discount.value,
-        amount: discount.amount,
-        taxReduction: discount.taxReduction,
+        amount: appliedAmount,
+        taxReduction: appliedTaxReduction,
         isAutomatic: discount.isAutomatic,
         isComp: discount.type === 'COMP',
         appliedById,
@@ -726,9 +750,9 @@ export async function applyDiscountToOrder(
     })
 
     // Update order totals
-    const newDiscountAmount = Number(order.discountAmount) + discount.amount
-    const newTaxAmount = Number(order.taxAmount) - discount.taxReduction
-    const newTotal = Number(order.subtotal) - newDiscountAmount + newTaxAmount + Number(order.tipAmount)
+    const newDiscountAmount = alreadyDiscounted + appliedAmount
+    const newTaxAmount = Number(order.taxAmount) - appliedTaxReduction
+    const newTotal = Math.max(0, subtotal - newDiscountAmount + newTaxAmount + Number(order.tipAmount))
 
     await tx.order.update({
       where: { id: orderId },
@@ -746,7 +770,9 @@ export async function applyDiscountToOrder(
       data: { currentUses: { increment: 1 } },
     })
 
-    logger.info(`🎟️ Discount applied to order ${orderId}: ${discount.name} (-$${discount.amount})`)
+    // Reportar SIEMPRE el monto realmente aplicado (recortado), no el solicitado — si no, la
+    // bitácora y el retorno mienten cuando el recorte entra en juego.
+    logger.info(`🎟️ Discount applied to order ${orderId}: ${discount.name} (-$${appliedAmount})`)
 
     void logAction({
       staffId: appliedById ?? authorizedById ?? null,
@@ -754,13 +780,18 @@ export async function applyDiscountToOrder(
       action: 'DISCOUNT_APPLIED',
       entity: 'Order',
       entityId: orderId,
-      data: { discountId: discount.discountId, amount: discount.amount, source: 'catalog' },
+      data: {
+        discountId: discount.discountId,
+        amount: appliedAmount,
+        ...(appliedAmount < discount.amount ? { requestedAmount: discount.amount, cappedTo: remainingDiscountable } : {}),
+        source: 'catalog',
+      },
     })
 
     return {
       success: true,
       orderDiscountId: orderDiscount.id,
-      amount: discount.amount,
+      amount: appliedAmount,
       newOrderTotal: newTotal,
     }
   })
@@ -903,29 +934,46 @@ export async function applyManualDiscount(
       return { success: false, amount: 0, newOrderTotal: 0, error: 'Order not found' }
     }
 
-    // Calculate discount amount
-    let amount = 0
+    // 🔴 MONEY: cada descuento se calcula contra lo que QUEDA por descontar, nunca contra el
+    // subtotal completo. Aplicar 100% dos veces descontaba 200% del subtotal y dejaba `total`
+    // NEGATIVO — con `remainingBalance` en Math.max(0,…) la cuenta se veía PAGADA sin cobrar.
+    // (Bug real en prod 2026-07-30: 100% + 100% + $888 fijo sobre una cuenta de $888 → total
+    // −$1,776. Misma clase que Odoo #69807 / #20432.) La rama COMP ya lo hacía bien; ahora las
+    // tres comparten la misma base.
     const subtotal = Number(order.subtotal)
+    const alreadyDiscounted = Number(order.discountAmount)
+    const remainingDiscountable = Math.round(Math.max(0, subtotal - alreadyDiscounted) * 100) / 100
 
+    if (remainingDiscountable <= 0) {
+      return {
+        success: false,
+        amount: 0,
+        newOrderTotal: Number(order.total),
+        error: 'La cuenta ya está completamente descontada; no se puede aplicar otro descuento.',
+      }
+    }
+
+    let amount = 0
     switch (type) {
       case 'PERCENTAGE':
         if (value < 0 || value > 100) {
           return { success: false, amount: 0, newOrderTotal: Number(order.total), error: 'Percentage must be 0-100' }
         }
-        amount = (subtotal * value) / 100
+        amount = (remainingDiscountable * value) / 100
         break
       case 'FIXED_AMOUNT':
-        amount = Math.min(value, subtotal)
+        amount = Math.min(value, remainingDiscountable)
         break
       case 'COMP':
-        amount = subtotal - Number(order.discountAmount) // Full remaining amount
+        amount = remainingDiscountable // Full remaining amount
         if (!authorizedById) {
           return { success: false, amount: 0, newOrderTotal: Number(order.total), error: 'Comp requires manager authorization' }
         }
         break
     }
 
-    amount = Math.round(amount * 100) / 100
+    // Defensa final: el monto nunca puede exceder lo que queda por descontar.
+    amount = Math.min(Math.round(amount * 100) / 100, remainingDiscountable)
 
     // Create order discount record (no discountId since it's manual)
     const orderDiscount = await tx.orderDiscount.create({
@@ -945,9 +993,11 @@ export async function applyManualDiscount(
       },
     })
 
-    // Update order totals
-    const newDiscountAmount = Number(order.discountAmount) + amount
-    const newTotal = subtotal - newDiscountAmount + Number(order.taxAmount) + Number(order.tipAmount)
+    // Update order totals. `amount <= remainingDiscountable` garantiza que newDiscountAmount
+    // nunca supere el subtotal, así que el total no puede quedar negativo; el Math.max es
+    // cinturón-y-tirantes por si alguien cambia el cálculo de arriba.
+    const newDiscountAmount = alreadyDiscounted + amount
+    const newTotal = Math.max(0, subtotal - newDiscountAmount + Number(order.taxAmount) + Number(order.tipAmount))
 
     await tx.order.update({
       where: { id: orderId },

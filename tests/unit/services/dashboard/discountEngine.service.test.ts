@@ -1051,3 +1051,140 @@ describe('Discount Engine Service', () => {
     })
   })
 })
+
+/**
+ * 🔴 MONEY — descuentos que se acumulan sin tope (bug REAL en prod, 2026-08-01).
+ *
+ * Encontrado auditando la clase de error de Odoo (#69807 "promotion applied several times on the
+ * same order" / #20432 descuento que deja el total negativo). Dos órdenes de producción con total
+ * NEGATIVO; la peor (2026-07-30): subtotal $888 con TRES descuentos manuales —$888 fijo, 100% y
+ * otra vez 100%— = $2,664 descontados → total −$1,776. Y como `remainingBalance` usa
+ * `Math.max(0, …)`, la cuenta se mostraba PAGADA sin haber cobrado un peso.
+ *
+ * Causa: PERCENTAGE y FIXED_AMOUNT se calculaban contra el subtotal COMPLETO, ignorando
+ * `order.discountAmount`. La rama COMP sí lo restaba — el patrón se conocía y no se aplicó a las
+ * otras dos. El mismo defecto estaba DUPLICADO en `tpv/discount.tpv.service.ts`.
+ */
+describe('Discount Engine — 🔴 acumulación sin tope (regresión del bug de prod)', () => {
+  const orderAt = (subtotal: number, discountAmount: number, extra: Record<string, any> = {}) => ({
+    id: 'order-neg',
+    venueId: 'venue-1',
+    subtotal: new Decimal(subtotal),
+    taxAmount: new Decimal(0),
+    discountAmount: new Decimal(discountAmount),
+    tipAmount: new Decimal(0),
+    total: new Decimal(subtotal - discountAmount),
+    paidAmount: new Decimal(0),
+    orderDiscounts: [],
+    ...extra,
+  })
+
+  const lastOrderUpdate = () => {
+    const calls = prismaMock.order.update.mock.calls
+    return calls[calls.length - 1][0].data
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    prismaMock.$transaction.mockImplementation(async (cb: (tx: typeof prismaMock) => Promise<any>) => cb(prismaMock))
+    prismaMock.orderDiscount.create.mockResolvedValue({ id: 'od-x', amount: new Decimal(0) })
+    prismaMock.order.update.mockResolvedValue({} as never)
+    prismaMock.discount.update.mockResolvedValue({} as never)
+  })
+
+  // ── 1. EL CASO EXACTO DE PRODUCCIÓN ──────────────────────────────────────
+  it('el 2º 100% sobre una cuenta ya al 100% NO deja el total negativo (caso prod 2026-07-30)', async () => {
+    // Estado tras el 1er descuento de $888 sobre subtotal $888: ya no queda nada por descontar.
+    prismaMock.order.findUnique.mockResolvedValue(orderAt(888, 888) as never)
+
+    const result = await applyManualDiscount('order-neg', 'PERCENTAGE', 100, 'bday', 'staff-1')
+
+    expect(result.success).toBe(false)
+    expect(result.error).toMatch(/completamente descontada/i)
+    expect(prismaMock.order.update).not.toHaveBeenCalled()
+  })
+
+  it('un 100% sobre una cuenta a medio descontar solo consume el REMANENTE', async () => {
+    // subtotal 1000, ya descontados 400 → quedan 600. Un 100% debe descontar 600, no 1000.
+    prismaMock.order.findUnique.mockResolvedValue(orderAt(1000, 400) as never)
+
+    const result = await applyManualDiscount('order-neg', 'PERCENTAGE', 100, 'comp total', 'staff-1')
+
+    expect(result.amount).toBe(600)
+    expect(Number(lastOrderUpdate().discountAmount)).toBe(1000) // nunca > subtotal
+    expect(Number(lastOrderUpdate().total)).toBe(0) // nunca negativo
+  })
+
+  it('50% + 50% descuenta 75% del subtotal (secuencial sobre el remanente), no 100%', async () => {
+    prismaMock.order.findUnique.mockResolvedValue(orderAt(1000, 500) as never)
+
+    const result = await applyManualDiscount('order-neg', 'PERCENTAGE', 50, '2do 50', 'staff-1')
+
+    expect(result.amount).toBe(250) // 50% de los 500 restantes
+    expect(Number(lastOrderUpdate().total)).toBe(250)
+  })
+
+  it('FIXED_AMOUNT mayor al remanente se recorta al remanente', async () => {
+    prismaMock.order.findUnique.mockResolvedValue(orderAt(888, 500) as never)
+
+    const result = await applyManualDiscount('order-neg', 'FIXED_AMOUNT', 888, 'birthdayexperience', 'staff-1')
+
+    expect(result.amount).toBe(388) // no 888
+    expect(Number(lastOrderUpdate().total)).toBe(0)
+  })
+
+  it('descuento de CATÁLOGO también se recorta al remanente (no solo el manual)', async () => {
+    prismaMock.order.findUnique.mockResolvedValue(orderAt(1000, 800) as never)
+
+    const result = await applyDiscountToOrder('order-neg', {
+      discountId: 'd-1',
+      name: 'Promo',
+      type: 'PERCENTAGE' as DiscountType,
+      value: 100,
+      amount: 1000, // calculado contra el subtotal completo, ignora los 800 ya aplicados
+      taxReduction: 0,
+      applicableItems: [],
+      isAutomatic: true,
+      requiresApproval: false,
+    })
+
+    expect(result.success).toBe(true)
+    expect(result.amount).toBe(200) // recortado al remanente
+    expect(Number(lastOrderUpdate().total)).toBe(0)
+  })
+
+  // ── 2. REGRESIÓN: lo que NO debe cambiar ────────────────────────────────
+  it('el primer descuento de una cuenta limpia se comporta EXACTAMENTE igual que antes', async () => {
+    prismaMock.order.findUnique.mockResolvedValue(orderAt(1000, 0) as never)
+
+    const result = await applyManualDiscount('order-neg', 'PERCENTAGE', 15, 'Empleado', 'staff-1')
+
+    expect(result.amount).toBe(150)
+    expect(Number(lastOrderUpdate().total)).toBe(850)
+  })
+
+  it('COMP sigue descontando el remanente y sigue exigiendo autorización', async () => {
+    prismaMock.order.findUnique.mockResolvedValue(orderAt(1000, 300) as never)
+
+    const sinAutorizar = await applyManualDiscount('order-neg', 'COMP', 0, 'Cortesía', 'staff-1')
+    expect(sinAutorizar.success).toBe(false)
+    expect(sinAutorizar.error).toMatch(/authorization/i)
+
+    const autorizado = await applyManualDiscount('order-neg', 'COMP', 0, 'Cortesía', 'staff-1', 'manager-1')
+    expect(autorizado.amount).toBe(700)
+    expect(Number(lastOrderUpdate().total)).toBe(0)
+  })
+
+  it('propina e impuesto siguen entrando al total como antes (no cambiamos esa semántica)', async () => {
+    prismaMock.order.findUnique.mockResolvedValue({
+      ...orderAt(1000, 0),
+      taxAmount: new Decimal(50),
+      tipAmount: new Decimal(80),
+    } as never)
+
+    await applyManualDiscount('order-neg', 'PERCENTAGE', 10, 'Promo', 'staff-1')
+
+    // 1000 − 100 + 50 + 80
+    expect(Number(lastOrderUpdate().total)).toBe(1030)
+  })
+})

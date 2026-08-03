@@ -371,16 +371,32 @@ export async function applyCouponCode(
     }
   }
 
-  // Calculate discount amount
+  // 🔴 MONEY: contra lo que QUEDA por descontar, no contra el subtotal completo. Apilar
+  // descuentos (cupón + predefinido + manual) descontaba más que la cuenta y dejaba `total`
+  // NEGATIVO, enmascarado como pagada por el Math.max(0,…) de remainingBalance. Bug real en prod
+  // (2026-07-30) por el camino gemelo del dashboard; este archivo tenía el defecto DUPLICADO.
+  // La rama COMP ya restaba lo aplicado; ahora las tres comparten base.
   const subtotal = Number(order.subtotal)
-  let discountAmount = 0
+  const alreadyDiscounted = Number(order.discountAmount)
+  const remainingDiscountable = Math.round(Math.max(0, subtotal - alreadyDiscounted) * 100) / 100
 
+  if (remainingDiscountable <= 0) {
+    return {
+      success: false,
+      discountName: discount.name,
+      amount: 0,
+      newOrderTotal: Number(order.total),
+      error: 'La cuenta ya está completamente descontada; no se puede aplicar otro descuento.',
+    }
+  }
+
+  let discountAmount = 0
   if (discount.type === 'PERCENTAGE') {
-    discountAmount = (subtotal * Number(discount.value)) / 100
+    discountAmount = (remainingDiscountable * Number(discount.value)) / 100
   } else if (discount.type === 'FIXED_AMOUNT') {
-    discountAmount = Math.min(Number(discount.value), subtotal)
+    discountAmount = Math.min(Number(discount.value), remainingDiscountable)
   } else if (discount.type === 'COMP') {
-    discountAmount = subtotal - Number(order.discountAmount)
+    discountAmount = remainingDiscountable
   }
 
   // Apply max discount cap
@@ -388,7 +404,8 @@ export async function applyCouponCode(
     discountAmount = Math.min(discountAmount, Number(discount.maxDiscountAmount))
   }
 
-  discountAmount = Math.round(discountAmount * 100) / 100
+  // Defensa final: nunca más de lo que queda por descontar.
+  discountAmount = Math.min(Math.round(discountAmount * 100) / 100, remainingDiscountable)
 
   // Apply the coupon in a transaction
   const result = await prisma.$transaction(async tx => {
@@ -409,9 +426,10 @@ export async function applyCouponCode(
       },
     })
 
-    // Update order totals
-    const newDiscountAmount = Number(order.discountAmount) + discountAmount
-    const newTotal = subtotal - newDiscountAmount + Number(order.taxAmount) + Number(order.tipAmount)
+    // Update order totals. El recorte de arriba ya garantiza newDiscountAmount <= subtotal;
+    // el Math.max es cinturón-y-tirantes.
+    const newDiscountAmount = alreadyDiscounted + discountAmount
+    const newTotal = Math.max(0, subtotal - newDiscountAmount + Number(order.taxAmount) + Number(order.tipAmount))
 
     await tx.order.update({
       where: { id: orderId },
