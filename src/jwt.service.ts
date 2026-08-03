@@ -138,12 +138,7 @@ export function generateImpersonationAccessToken(
  * @param rememberMe - Si true, extiende la duración del token a 90 días
  * @returns El token de refresco firmado.
  */
-export function generateRefreshToken(
-  staffId: string,
-  organizationId?: string,
-  rememberMe?: boolean,
-  venueId?: string,
-): string {
+export function generateRefreshToken(staffId: string, organizationId?: string, rememberMe?: boolean, venueId?: string): string {
   const payload: Omit<RefreshTokenPayload, 'iat' | 'exp' | 'aud' | 'iss'> = {
     sub: staffId,
     tokenId: crypto.randomBytes(16).toString('hex'), // Genera un ID único para el token
