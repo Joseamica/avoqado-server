@@ -339,20 +339,35 @@ export async function getTenderBreakdown(venueId: string, from: Date, to: Date) 
     select: { method: true, amount: true, tipAmount: true },
   })
 
-  const byMethod = new Map<string, number>()
+  // `total` sigue incluyendo la propina —es lo que entró por ese método y lo que
+  // el cajón tiene físicamente— pero ahora viaja aparte cuánto de eso fue propina.
+  // Mezclarlas sin distinguirlas escondía dinero que NO es del negocio: la propina
+  // se le entrega al mesero, así que un corte que la suma al efectivo hace que el
+  // cajón "cuadre" con dinero que se va a repartir.
+  const byMethod = new Map<string, { total: number; tips: number }>()
   for (const p of payments) {
     const method = p.method || 'OTHER'
-    const total = Number(p.amount) + Number(p.tipAmount ?? 0)
-    byMethod.set(method, (byMethod.get(method) || 0) + total)
+    const tip = Number(p.tipAmount ?? 0)
+    const acc = byMethod.get(method) || { total: 0, tips: 0 }
+    acc.total += Number(p.amount) + tip
+    acc.tips += tip
+    byMethod.set(method, acc)
   }
 
   // Emit every method with activity, dollars major units (matches this API).
+  // `tips` es ADITIVO: los clientes viejos siguen leyendo `total` igual que antes.
   const tenderBreakdown = Array.from(byMethod.entries())
-    .map(([method, total]) => ({ method, total: Number(total.toFixed(2)) }))
-    .filter(t => t.total !== 0)
+    .map(([method, v]) => ({
+      method,
+      total: Number(v.total.toFixed(2)),
+      tips: Number(v.tips.toFixed(2)),
+    }))
+    .filter(t => t.total !== 0 || t.tips !== 0)
     .sort((a, b) => b.total - a.total)
 
-  return { tenderBreakdown, from: from.toISOString(), to: to.toISOString() }
+  const totalTips = Number(tenderBreakdown.reduce((sum, t) => sum + t.tips, 0).toFixed(2))
+
+  return { tenderBreakdown, totalTips, from: from.toISOString(), to: to.toISOString() }
 }
 
 // ============================================================================
