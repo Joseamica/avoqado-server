@@ -674,7 +674,13 @@ export class SerializedInventoryService {
       this.db.serializedItem.findMany({
         where,
         include: { category: true },
-        orderBy: { createdAt: 'desc' },
+        // `id` is the TIEBREAK — keep it. A bulk SIM upload inserts the whole batch in one
+        // statement, so hundreds of items share a byte-identical `createdAt` (prod: groups of
+        // 500). Ordering on `createdAt` alone leaves those ties for Postgres to arrange as it
+        // likes, and this list is read page-by-page: a tie group crossing a skip/take boundary
+        // repeats a SIM on one page and drops another for good. Same defect as the sales list
+        // (Asana 1217127206664238).
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         skip: options.skip,
         take: options.take,
       }),
@@ -721,7 +727,9 @@ export class SerializedInventoryService {
       this.db.serializedItem.findMany({
         where,
         include: { category: true },
-        orderBy: { createdAt: 'desc' },
+        // `id` is the TIEBREAK — see `listItems` above. Bulk-uploaded SIMs share one
+        // `createdAt`, and a non-unique sort key loses rows across skip/take pages.
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         skip: opts.skip,
         take: opts.take ?? 50,
       }),

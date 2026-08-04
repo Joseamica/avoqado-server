@@ -208,7 +208,16 @@ export async function listOrgSaleVerifications(orgId: string, filters: OrgSaleLi
   const [payments, totalCount] = await Promise.all([
     prisma.payment.findMany({
       where: paymentWhere,
-      orderBy: { createdAt: 'desc' },
+      // `id` is the TIEBREAK, not decoration — do NOT reduce this to `createdAt` alone.
+      // Manual uploads ("Subir ventas fuera de TPV") backdate every sale of a given day
+      // to the SAME noon-anchored instant, so a busy day is one big group of rows with a
+      // byte-identical `createdAt`. With a non-unique sort key, Postgres is free to order
+      // ties differently per query, and this list is read page-by-page (skip/take) by the
+      // org Ventas Excel export. A tie group straddling a page boundary then lands a row
+      // twice on one page and NEVER on the next: the sale vanishes from the export while
+      // still being SOLD in the DB (Asana 1217127206664238 — 4 ICCIDs missing from the
+      // historical-sales Excel, reproduced against prod: 5 of 5552 rows silently lost).
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       skip: (filters.pageNumber - 1) * filters.pageSize,
       take: filters.pageSize,
       include: {

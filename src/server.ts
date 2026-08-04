@@ -32,6 +32,7 @@ import { blumonWebhookReconciliationJob } from './jobs/blumon-webhook-reconcilia
 import { blumonPaymentAuditJob } from './jobs/blumon-payment-audit.job'
 import { deliveryWebhookReconciliationJob } from './jobs/delivery-webhook-reconciliation.job'
 import { stripeWebhookReconciliationJob } from './jobs/stripe-webhook-reconciliation.job'
+import { moneyIntegrityWatchdogJob } from './jobs/money-integrity-watchdog.job'
 import { terminalPaymentWatchdogJob } from './jobs/terminal-payment-watchdog.job'
 import { reservationDepositReconciliationJob } from './jobs/reservation-deposit-reconciliation.job'
 import { reservationReminderJob } from './jobs/reservation-reminder.job'
@@ -163,6 +164,9 @@ const gracefulShutdown = async (signal: string) => {
 
       logger.info('Stopping Stripe webhook reconciliation job...')
       stripeWebhookReconciliationJob.stop()
+
+      logger.info('Stopping money integrity watchdog...')
+      moneyIntegrityWatchdogJob.stop()
 
       logger.info('Stopping reservation deposit reconciliation job...')
       reservationDepositReconciliationJob.stop()
@@ -460,6 +464,10 @@ const startApplication = async (retries = 3) => {
       // during invoice.payment_succeeded / plan-checkout fulfillment meant the
       // venue paid and never got its plan, silently.)
       stripeWebhookReconciliationJob.start()
+
+      // Vigilante de dinero — PRUEBA DE 4 DÍAS, se auto-apaga el 2026-08-07.
+      // Revisa cada 6h: totales negativos, descuentos que exceden el consumo, propinas que no cuadran.
+      moneyIntegrityWatchdogJob.start()
 
       // Start Google Calendar sync jobs (Phase 1 + Phase 2)
       // Inbox sweeper: drives pulls for inbox rows the RMQ consumer missed (every 30s)

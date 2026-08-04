@@ -2327,9 +2327,19 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
 
   logger.info(`  💰 Comping ${itemsToComp.length} items | total discount: $${compAmount}`)
 
-  // Update order: increase discountAmount, decrease total
-  const newDiscountAmount = Number(order.discountAmount) + compAmount
-  const newTotal = Number(order.subtotal) - newDiscountAmount
+  // Update order: increase discountAmount, decrease total.
+  // 🔴 MONEY: compAmount is the comped items' GROSS total (OrderItem.total never
+  // zeroes — see the transaction below). Adding it on top of a PRE-EXISTING
+  // order.discountAmount (an earlier applyDiscount, or a previous partial comp)
+  // double-counts whatever those items already gave away: a whole-order comp on
+  // an order that already carries a $25.30 discount produced discountAmount
+  // $278.30 > subtotal $253.00 and total -$25.30 (reproduced on hardware,
+  // order cmsetvfft0001c9jxv33p26gl). "Cortesía toda la cuenta" means the guest
+  // owes nothing — clamp so the comp absorbs at most the currently-remaining
+  // balance (subtotal - existing discount), never pushing discountAmount above
+  // subtotal or total below zero, no matter what was discounted before.
+  const newDiscountAmount = Math.min(Number(order.discountAmount) + compAmount, Number(order.subtotal))
+  const newTotal = Math.max(0, Number(order.subtotal) - newDiscountAmount)
 
   // Calculate remaining balance (for partial payment tracking)
   const currentPaidAmount = Number(order.paidAmount || 0)

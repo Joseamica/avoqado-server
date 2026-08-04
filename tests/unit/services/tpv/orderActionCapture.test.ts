@@ -314,6 +314,65 @@ describe('ActivityLog dual-write in order.tpv.service', () => {
     })
   })
 
+  // ── compItems: whole-order comp on an order that ALREADY has a discount ─────
+  //
+  // Reproduced on hardware (order cmsetvfft0001c9jxv33p26gl): subtotal $253.00,
+  // an existing $25.30 discount already applied, then "cortesía toda la
+  // cuenta" (itemIds: []). compAmount is the comped items' GROSS total (253),
+  // and the old code did `order.discountAmount + compAmount` unclamped, so the
+  // pre-existing discount got double-counted on top of the 100% comp:
+  // discountAmount ended at $278.30 (> subtotal) and total at -$25.30 — a
+  // negative sale rendered on the terminal as "$-25.30". remainingBalance was
+  // already clamped so nobody was undercharged, but the stored money fields —
+  // and every report reading them — were corrupted.
+  //
+  // Fix: a whole-order comp means the guest owes nothing, full stop, regardless
+  // of what was already discounted — discountAmount must never exceed
+  // subtotal, total must never go negative.
+  describe('compItems: whole-order comp never drives discountAmount above subtotal or total below zero', () => {
+    it('comping the entire order clamps discountAmount to subtotal and total to 0, even with a pre-existing discount', async () => {
+      const order = makeOrder({
+        subtotal: new Decimal(253.0),
+        total: new Decimal(227.7), // 253.00 - 25.30 (already discounted before the comp)
+        discountAmount: new Decimal(25.3), // pre-existing discount, NOT related to the comp
+        items: [
+          { id: 'item-1', productName: 'Whole check', product: { name: 'Whole check' }, sentToKitchenAt: null, total: new Decimal(253.0) },
+        ],
+      })
+      mockPrisma.order.findUnique.mockResolvedValue(order)
+      mockPrisma.order.update.mockResolvedValue(makeUpdatedOrder())
+
+      await compItems(VENUE_ID, ORDER_ID, { itemIds: [], reason: 'Cortesía toda la cuenta', staffId: STAFF_ID })
+
+      const call = mockPrisma.order.update.mock.calls[0][0]
+      // 🔴 The money assertions that a false-green sabotage test skipped before:
+      // without them, `{ discountAmount: 278.3, total: -25.3 }` would also pass.
+      expect(call.data.discountAmount).toBe(253) // clamped to subtotal, NOT 278.3
+      expect(call.data.total).toBe(0) // clamped to 0, NOT -25.3
+      expect(call.data.discountAmount).toBeLessThanOrEqual(253)
+      expect(call.data.total).toBeGreaterThanOrEqual(0)
+    })
+
+    it('regression: comping a SUBSET of items on a discounted order still adds normally when it does not exceed subtotal', async () => {
+      // Sanity check the clamp doesn't change the ordinary (non-overflow) case:
+      // subtotal 100, existing discount 10, comp item worth 30 → 10+30=40 ≤ 100.
+      const order = makeOrder({
+        subtotal: new Decimal(100),
+        total: new Decimal(90),
+        discountAmount: new Decimal(10),
+      })
+      mockPrisma.order.findUnique.mockResolvedValue(order)
+      mockPrisma.order.update.mockResolvedValue(makeUpdatedOrder())
+
+      await compItems(VENUE_ID, ORDER_ID, { itemIds: ['item-1'], reason: 'Food quality issue', staffId: STAFF_ID })
+
+      // item-1.total = 60; discountAmount 10 -> 70; total 100 -> 30 (unclamped math, unaffected by the fix)
+      expect(mockPrisma.order.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ discountAmount: 70, total: 30 }) }),
+      )
+    })
+  })
+
   // ── voidItems ──────────────────────────────────────────────────────────────
 
   describe('voidItems → ITEM_VOIDED', () => {

@@ -170,7 +170,11 @@ export async function listSaleVerificationsWithDetails(
   const [payments, totalCount] = await Promise.all([
     prisma.payment.findMany({
       where: paymentWhere,
-      orderBy: { createdAt: 'desc' },
+      // `id` is the TIEBREAK — same reason as the org-level list
+      // (sale-verification.org.dashboard.service.ts): manually-uploaded sales all share one
+      // backdated noon instant, and a non-unique sort key lets Postgres order ties freely,
+      // so a tie group crossing a skip/take boundary drops rows between pages.
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       skip: (params.pageNumber - 1) * params.pageSize,
       take: params.pageSize,
       include: {

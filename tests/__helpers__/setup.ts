@@ -141,6 +141,16 @@ const prismaMock: any = {
   couponRedemption: createMockModel(),
   customerDiscount: createMockModel(),
   orderDiscount: createMockModel(),
+  // Order-level service charges (cobros por servicio) — MANUAL: without this
+  // entry, `prisma.orderServiceCharge` is undefined and mergeOrders/split/
+  // recalculateOrderTotals (which all read/write it) throw.
+  orderServiceCharge: createMockModel(),
+  // Upsell "¿Algo más?" — este registro es MANUAL: sin la entrada aquí,
+  // `prisma.upsellRule` es undefined y cualquier test que lo toque truena.
+  upsellRule: createMockModel(),
+  upsellImpression: createMockModel(),
+  upsellAcceptance: createMockModel(),
+  upsellAiRun: createMockModel(),
   // Referral Program — configurable tier rewards (grant + unlock tables)
   referral: createMockModel(),
   referralProgramConfig: createMockModel(),
