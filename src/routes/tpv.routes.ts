@@ -42,6 +42,7 @@ import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { pinLoginRateLimiter } from '../middlewares/pin-login-rate-limit.middleware'
 import { touchTerminalHeartbeatMiddleware } from '../middlewares/touchTerminalHeartbeat.middleware'
 import { validateVenueAccess } from '../middlewares/validateVenueAccess.middleware'
+import { checkTableOwnership } from '../middlewares/checkTableOwnership.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { activateTerminalSchema } from '../schemas/activation.schema'
 import { recordPromoterPingSchema } from '../schemas/promoterLocation.schema'
@@ -3428,13 +3429,16 @@ router.post(
 
 /**
  * Clock in
+ * Security fix (open finding #3): was authenticateTokenMiddleware-only — a
+ * token from venue A could clock in/out on venue B (IDOR). Same guard as the
+ * table/floor-element routes.
  */
-router.post('/venues/:venueId/time-entries/clock-in', authenticateTokenMiddleware, timeEntryController.clockIn)
+router.post('/venues/:venueId/time-entries/clock-in', authenticateTokenMiddleware, validateVenueAccess, timeEntryController.clockIn)
 
 /**
  * Clock out
  */
-router.post('/venues/:venueId/time-entries/clock-out', authenticateTokenMiddleware, timeEntryController.clockOut)
+router.post('/venues/:venueId/time-entries/clock-out', authenticateTokenMiddleware, validateVenueAccess, timeEntryController.clockOut)
 
 /**
  * Start break
@@ -3917,10 +3921,25 @@ router.get(
  *       400:
  *         description: Version mismatch (concurrent update detected)
  */
+// Security fix (open findings #2, #3): was authenticateTokenMiddleware-only — a
+// token from venue A could add rounds to an order in venue B (IDOR), and with
+// VenueSettings.enforceTableOwnership ON, a terminal that didn't own the table
+// could still add items as long as it had internet (the rule only applied via
+// the offline sync reducer, backwards). validateVenueAccess closes the IDOR
+// (same guard as the table/floor-element routes). checkTableOwnership('order')
+// mirrors the EXACT rule the offline reducer already enforces
+// (`assertOwnership` in sync.mobile.service.ts) — same isTableOwnershipEnforced/
+// staffCanManageAllTables — so online and offline agree. It is a no-op when the
+// switch is off or the order has no table (mostrador/counter sale), so it never
+// 403s a FREE retail/services venue; deliberately NOT paired with
+// checkFeatureAccess('TABLE_SERVICE') here since this route also serves
+// non-table order types.
 router.patch(
   '/venues/:venueId/orders/:orderId/items',
   authenticateTokenMiddleware,
+  validateVenueAccess,
   validateRequest(addOrderItemsSchema),
+  checkTableOwnership('order'),
   orderController.addItemsToOrder,
 )
 

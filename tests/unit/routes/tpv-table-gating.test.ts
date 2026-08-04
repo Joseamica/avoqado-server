@@ -72,13 +72,16 @@ jest.mock('@/middlewares/validation', () => ({
   validateRequest: () => (_req: any, _res: any, next: any) => next(),
 }))
 
-// 4. prisma: only the models checkFeatureAccess touches.
+// 4. prisma: the models checkFeatureAccess touches, PLUS venueSettings — the
+//    regression test below now also passes through checkTableOwnership('order')
+//    (open finding #2 fix), which queries venueSettings.enforceTableOwnership.
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     staffVenue: { findFirst: jest.fn() }, // SUPERADMIN bypass (requestIsSuperAdmin)
     venue: { findUnique: jest.fn() }, // venueIsExemptFromPlanGating (grandfathered/demo)
     venueFeature: { findFirst: jest.fn(), findMany: jest.fn() }, // own grant + getVenueBaseTier
+    venueSettings: { findUnique: jest.fn() }, // isTableOwnershipEnforced (checkTableOwnership)
   },
 }))
 
@@ -112,6 +115,7 @@ const staffVenueFindFirst = (prisma as any).staffVenue.findFirst as jest.Mock
 const venueFindUnique = (prisma as any).venue.findUnique as jest.Mock
 const vfFindFirst = (prisma as any).venueFeature.findFirst as jest.Mock
 const vfFindMany = (prisma as any).venueFeature.findMany as jest.Mock
+const venueSettingsFindUnique = (prisma as any).venueSettings.findUnique as jest.Mock
 const isModuleEnabledMock = moduleService.isModuleEnabled as jest.Mock
 
 const VENUE_ID = 'venue-tpv-table-1'
@@ -145,6 +149,7 @@ beforeEach(() => {
   venueFindUnique.mockResolvedValue(FREE_ACTIVE_VENUE)
   vfFindFirst.mockResolvedValue(null) // no explicit own TABLE_SERVICE grant
   vfFindMany.mockResolvedValue([]) // no active paid base plan → FREE
+  venueSettingsFindUnique.mockResolvedValue({ enforceTableOwnership: false }) // switch off → checkTableOwnership no-ops
   isModuleEnabledMock.mockResolvedValue(false)
 })
 

@@ -44,7 +44,15 @@ export { getTables } from '../mobile/table.mobile.controller'
 export async function assignTable(req: Request, res: Response): Promise<void> {
   try {
     const { venueId } = req.params
-    const { tableId, staffId, covers, terminalId } = req.body
+    const { tableId, covers, terminalId } = req.body
+    // Actor MUST come from the authenticated token, never the body — otherwise
+    // a caller could attribute the table assignment to any staffId it sends
+    // (same pattern as `openTable` in mobile/table.mobile.controller.ts).
+    const staffId = (req as any).authContext?.userId
+    if (!staffId) {
+      res.status(401).json({ success: false, message: 'No autenticado' })
+      return
+    }
 
     logger.info(
       `[TABLE CONTROLLER] POST /tpv/venues/${venueId}/tables/assign - Table: ${tableId}, Staff: ${staffId}, Covers: ${covers}, Terminal: ${terminalId || 'none'}`,
