@@ -3813,6 +3813,27 @@ router.post(
 )
 
 /**
+ * GET /tpv/venues/{venueId}/service-charges
+ *
+ * 🆕 Companion de lectura (Fase 3 de Mesas en avoqado-tpv, completitud del
+ * módulo — ver `avoqado-tpv/.superpowers/sdd/2026-07-24-tpv-plan-c-modulo-mesas/`):
+ * el POST de arriba existía SIN ningún caller bajo `/tpv` — la TPV no tenía
+ * forma de listar el catálogo para dejar que un mesero elija un cargo antes de
+ * aplicarlo (a diferencia de `discounts/available`, que ya existía). Mismo
+ * criterio de lectura pura que `discounts/available`: sin `checkFeatureAccess`
+ * (el catálogo en sí no es una acción exclusiva de mesa; aplicar uno sigue
+ * gateado arriba), `checkPermission('orders:read')` — cualquiera que pueda ver
+ * el cheque puede ver qué cargos existen.
+ */
+router.get(
+  '/venues/:venueId/service-charges',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkPermission('orders:read'),
+  orderTableController.listServiceCharges,
+)
+
+/**
  * POST /tpv/venues/{venueId}/tables/{tableId}/open
  * Abre una mesa: reusa la cuenta activa si existe, o crea una orden DINE_IN vacía
  * y marca la mesa OCCUPIED. Body: { covers?: number }

@@ -1,6 +1,20 @@
 /**
  * HTML template generator for digital receipts
  * Matches the ModernReceiptDesign component from avoqado-web-dashboard
+ *
+ * @deprecated ⚠️ LEGACY — página de recibo servida por el backend. Ya NO es el destino
+ * de los QRs que imprime el POS. El destino bueno es el dashboard:
+ * `${FRONTEND_URL}/receipts/public/:accessKey` (`ReceiptViewer.tsx`), que tiene
+ * calificación **y AUTOFACTURA (CFDI)** — esta plantilla sólo tiene calificación,
+ * así que un cliente que caiga aquí NO se puede facturar solo.
+ *
+ * Se mantiene viva sólo porque hay tickets YA IMPRESOS circulando con este QR
+ * (avoqado-android construía la URL a mano desde la base del API hasta agosto 2026).
+ * No la borres ni le agregues features nuevos: lo nuevo va en el dashboard.
+ *
+ * OJO: que ESTA plantilla sea legacy NO hace legacy a la ruta que la sirve. La rama
+ * JSON de `GET /api/v1/public/receipt/:accessKey` y las sub-rutas `/review*` y
+ * `/cfdi*` están VIVAS y son las que alimentan la página nueva del dashboard.
  */
 
 interface ReceiptData {

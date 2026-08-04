@@ -130,3 +130,33 @@ export async function applyServiceCharge(req: Request, res: Response): Promise<v
     res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Internal server error' })
   }
 }
+
+/**
+ * GET /tpv/venues/:venueId/service-charges
+ *
+ * 🆕 Companion de lectura de `applyServiceCharge` (arriba, Plan B Task 4) — esa
+ * ruta existía sin NINGÚN caller bajo `/tpv` desde antes de "Plan C" (el módulo
+ * Mesas de avoqado-tpv), exactamente el patrón de código muerto que motivó
+ * `completeness-audit.md`. A diferencia de `discounts/available`
+ * (`discount.tpv.controller.ts`), que YA existía como lectura filtrada por
+ * elegibilidad de UNA cuenta, nunca hubo un equivalente para cargos por
+ * servicio bajo `/tpv` — el único catálogo reachable era
+ * `GET /mobile/venues/:venueId/service-charges` (`service-charge.mobile.controller.ts`),
+ * fuera de alcance para la TPV (regla dura: "La TPV habla solo con /api/v1/tpv").
+ *
+ * Catálogo del VENUE (activos), NO filtrado por esta orden — `applyServiceCharge`
+ * ya rechaza (400) un cargo duplicado o una orden ya pagada, así que el picker no
+ * necesita repetir esa validación aquí, solo mostrar las opciones.
+ */
+export async function listServiceCharges(req: Request, res: Response): Promise<void> {
+  try {
+    const { venueId } = req.params
+
+    const data = await serviceChargeMobileService.listServiceCharges(venueId)
+
+    res.status(200).json({ success: true, data })
+  } catch (error: any) {
+    logger.error(`[ORDER-TABLE TPV] service-charges (list): ${error.message}`)
+    res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Internal server error' })
+  }
+}

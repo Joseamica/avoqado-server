@@ -7,6 +7,18 @@ import logger from '../../config/logger'
 
 // Public route to get a receipt by its access key
 // GET /api/public/receipt/:accessKey
+//
+// 🔴 ESTA RUTA TIENE DOS RAMAS Y **SÓLO UNA ES LEGACY**. Lee esto antes de borrar nada.
+//
+//   • Rama JSON (`Accept: application/json`) — **VIVA Y EN USO.** Es de donde el
+//     dashboard saca los datos del recibo público (`ReceiptViewer.tsx` →
+//     `GET /api/v1/public/receipt/:accessKey`). Si la quitas, tumbas la página
+//     de recibo del cliente final por completo.
+//   • Rama HTML (`Accept: text/html`, o sea: un QR escaneado con el navegador) —
+//     **LEGACY. Ya no es destino de QRs nuevos.** Ver `generateReceiptHTML` abajo.
+//
+// Sus hermanas `/:accessKey/review*` y `/:accessKey/cfdi*` (public.routes.ts)
+// también están VIVAS: son justamente las que hacen funcionar la página nueva.
 export async function getPublicReceipt(req: Request<{ accessKey: string }>, res: Response, next: NextFunction): Promise<void> {
   try {
     const { accessKey } = req.params
@@ -103,7 +115,13 @@ export async function getPublicReceipt(req: Request<{ accessKey: string }>, res:
       orderTotal: dataSnapshot.order?.total,
     })
 
-    // Generate HTML template for the receipt
+    // ⚠️ LEGACY — esta página HTML ya NO es a donde apuntan los QRs nuevos.
+    // El destino bueno es `${FRONTEND_URL}/receipts/public/:accessKey` (dashboard),
+    // que además de calificación tiene AUTOFACTURA (CFDI); esta plantilla nunca la tuvo.
+    // Los clientes (avoqado-android / avoqado-ios / avoqado-tpv) ya reciben esa URL
+    // armada en `digitalReceipt.receiptUrl` (ver `mapDigitalReceiptResponse`).
+    // Se mantiene viva SÓLO porque hay tickets YA IMPRESOS circulando con este QR.
+    // No la borres: rompes el recibo de todo ticket impreso antes de agosto 2026.
     const htmlContent = generateReceiptHTML(receiptData as any)
 
     // Set proper headers for HTML response
