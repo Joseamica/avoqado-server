@@ -2237,7 +2237,12 @@ router.put(
 /**
  * POST /api/v1/mobile/venues/:venueId/refunds
  * Create an unassociated refund (not tied to a specific order).
- * Body: { amount: number (cents), reason: string, method: "CASH", staffName?: string }
+ * Body: { amount: number (cents), reason: string, method, staffName?: string }
+ *
+ * `method` es cómo se devolvió el dinero DE VERDAD: CASH sale del cajón;
+ * CREDIT_CARD/DEBIT_CARD significa que la devolución la hizo la TERMINAL con su
+ * propia función —no hay API para eso— y aquí sólo se registra para que la
+ * venta deje de contar como cobrada, sin tocar el arqueo.
  */
 router.post(
   '/venues/:venueId/refunds',

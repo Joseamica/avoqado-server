@@ -18,7 +18,15 @@ interface CreateRefundParams {
   venueId: string
   amount: number // cents (positive)
   reason: string
-  method: string // CASH
+  /**
+   * Cómo se devolvió el dinero DE VERDAD.
+   *
+   * `CASH` sale del cajón. Cualquier otro (CREDIT_CARD, DEBIT_CARD…) significa
+   * que la devolución la hizo la TERMINAL con su propia función —no hay API
+   * para eso— y aquí sólo se registra para que la venta deje de contar como
+   * cobrada. Ese caso NO toca el cajón.
+   */
+  method: string
   staffId: string
   staffName?: string
 }
@@ -72,7 +80,11 @@ export async function createRefund(params: CreateRefundParams) {
       processedById: staffId,
       amount: negativeAmount,
       tipAmount: new Decimal('0.00'),
-      method: (method === 'CASH' ? 'CASH' : 'CASH') as any,
+      // Antes: `(method === 'CASH' ? 'CASH' : 'CASH')`, o sea SIEMPRE efectivo.
+      // Una devolución hecha en la terminal quedaba registrada como salida de
+      // efectivo, así que el arqueo perdía un dinero que nunca salió del cajón y
+      // no había forma de saber por dónde se devolvió.
+      method: method as any,
       source: 'POS',
       status: 'REFUNDED',
       type: 'REGULAR',

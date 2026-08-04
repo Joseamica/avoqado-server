@@ -27,11 +27,19 @@ export const createRefund = async (req: Request, res: Response, next: NextFuncti
       return res.status(400).json({ success: false, message: 'reason es requerido' })
     }
 
+    // Sólo métodos reales: un valor inventado acabaría en la columna `method`
+    // del pago y ensuciaría el desglose del corte en silencio.
+    const METODOS_VALIDOS = ['CASH', 'CREDIT_CARD', 'DEBIT_CARD', 'DIGITAL_WALLET', 'BANK_TRANSFER', 'OTHER']
+    const metodo = method || 'CASH'
+    if (!METODOS_VALIDOS.includes(metodo)) {
+      return res.status(400).json({ success: false, message: 'Método de reembolso inválido' })
+    }
+
     const result = await refundService.createRefund({
       venueId,
       amount: Number(amount),
       reason,
-      method: method || 'CASH',
+      method: metodo,
       staffId,
       staffName,
     })
