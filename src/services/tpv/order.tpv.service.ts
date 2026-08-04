@@ -2335,76 +2335,98 @@ export async function compItems(venueId: string, orderId: string, input: CompIte
   const currentPaidAmount = Number(order.paidAmount || 0)
   const newRemainingBalance = Math.max(0, newTotal - currentPaidAmount)
 
-  const updatedOrder = await prisma.order.update({
-    where: { id: orderId },
-    data: {
-      discountAmount: newDiscountAmount,
-      total: newTotal,
-      remainingBalance: newRemainingBalance,
-      version: {
-        increment: 1,
+  const updatedOrder = await prisma.$transaction(async tx => {
+    // Mark each comped OrderItem in the SAME transaction as the order total
+    // update. Convention (docs/TPV_COBRAR_STRUCTURED_DISCOUNTS.md): OrderItem.total
+    // stays GROSS — never zeroed, that breaks gross sales reporting — the
+    // reduction lives in OrderItem.discountAmount (full item.total, since a
+    // comp is a 100% item-level discount), with isCortesia=true so receipts,
+    // printed tickets, and line-level reports stop showing it as charged.
+    for (const item of itemsToComp) {
+      await tx.orderItem.update({
+        where: { id: item.id },
+        data: {
+          isCortesia: true,
+          cortesiaReason: input.reason,
+          discountAmount: item.total,
+        },
+      })
+    }
+
+    const updated = await tx.order.update({
+      where: { id: orderId },
+      data: {
+        discountAmount: newDiscountAmount,
+        total: newTotal,
+        remainingBalance: newRemainingBalance,
+        version: {
+          increment: 1,
+        },
       },
-    },
-    include: {
-      items: {
-        include: {
-          product: {
-            select: {
-              id: true,
-              name: true,
-              price: true,
+      include: {
+        items: {
+          include: {
+            product: {
+              select: {
+                id: true,
+                name: true,
+                price: true,
+              },
+            },
+            modifiers: {
+              include: {
+                modifier: true,
+              },
             },
           },
-          modifiers: {
-            include: {
-              modifier: true,
-            },
+        },
+        payments: {
+          include: {
+            allocations: true,
+          },
+        },
+        table: {
+          select: {
+            id: true,
+            number: true,
+          },
+        },
+        createdBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+          },
+        },
+        servedBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
           },
         },
       },
-      payments: {
-        include: {
-          allocations: true,
+    })
+
+    // Create audit trail (siloed OrderAction; dual-written to ActivityLog below)
+    await tx.orderAction.create({
+      data: {
+        orderId: updated.id,
+        actionType: 'COMP',
+        performedById: input.staffId,
+        reason: input.reason,
+        metadata: {
+          itemIds: input.itemIds,
+          compAmount,
+          itemCount: itemsToComp.length,
+          notes: input.notes,
         },
       },
-      table: {
-        select: {
-          id: true,
-          number: true,
-        },
-      },
-      createdBy: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-        },
-      },
-      servedBy: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-        },
-      },
-    },
+    })
+
+    return updated
   })
 
-  // Create audit trail
-  await prisma.orderAction.create({
-    data: {
-      orderId: order.id,
-      actionType: 'COMP',
-      performedById: input.staffId,
-      reason: input.reason,
-      metadata: {
-        itemIds: input.itemIds,
-        compAmount,
-        itemCount: itemsToComp.length,
-        notes: input.notes,
-      },
-    },
-  })
   void logAction({
     staffId: input.staffId ?? null,
     venueId,

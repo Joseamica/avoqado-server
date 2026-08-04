@@ -20,9 +20,12 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import { Decimal } from '@prisma/client/runtime/library'
 
 // ── Local prisma mock (overrides the global one for this test file) ───────────
-jest.mock('@/utils/prismaClient', () => ({
-  __esModule: true,
-  default: {
+// compItems wraps its writes in prisma.$transaction (open finding #1 fix) — the
+// mock below invokes the transaction callback with THIS SAME mock object, so
+// `tx.orderItem.update` / `tx.order.update` / `tx.orderAction.create` resolve
+// through the exact jest.fn()s the tests assert against.
+jest.mock('@/utils/prismaClient', () => {
+  const mockPrismaObj: any = {
     order: {
       findUnique: jest.fn(),
       update: jest.fn(),
@@ -30,6 +33,7 @@ jest.mock('@/utils/prismaClient', () => ({
     orderItem: {
       delete: jest.fn(),
       deleteMany: jest.fn(),
+      update: jest.fn(),
     },
     orderAction: {
       create: jest.fn(),
@@ -47,9 +51,10 @@ jest.mock('@/utils/prismaClient', () => ({
     staff: {
       findUnique: jest.fn(),
     },
-    $transaction: jest.fn(),
-  },
-}))
+  }
+  mockPrismaObj.$transaction = jest.fn((callback: any) => callback(mockPrismaObj))
+  return { __esModule: true, default: mockPrismaObj }
+})
 
 // Other deps the service imports at module level
 jest.mock('@/config/logger', () => ({
@@ -159,6 +164,7 @@ describe('ActivityLog dual-write in order.tpv.service', () => {
     jest.clearAllMocks()
     // orderAction.create is fire-and-forget in each function; resolve silently
     mockPrisma.orderAction.create.mockResolvedValue({})
+    mockPrisma.orderItem.update.mockResolvedValue({})
     mockPrisma.orderDiscount.findMany.mockResolvedValue([])
     mockPrisma.orderServiceCharge.findMany.mockResolvedValue([])
     mockPrisma.orderCustomer.deleteMany.mockResolvedValue({ count: 0 })
@@ -209,6 +215,102 @@ describe('ActivityLog dual-write in order.tpv.service', () => {
       })
 
       expect(mockLogAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'ITEM_COMPED', entity: 'Order', entityId: ORDER_ID }))
+    })
+  })
+
+  // ── compItems marks the OrderItem rows (open finding #1) ─────────────────────
+  //
+  // Before this fix, compItems only updated Order.discountAmount/total — the
+  // OrderItem rows were never touched, so a comped dish kept rendering as
+  // charged on the itemized check / printed ticket / line-level reports.
+  //
+  // Convention followed (docs/TPV_COBRAR_STRUCTURED_DISCOUNTS.md): OrderItem.total
+  // stays GROSS (never zeroed — that breaks gross sales reporting); the
+  // reduction lives in OrderItem.discountAmount, with isCortesia=true. This
+  // mirrors exactly how createOrderWithItems already persists a cortesía line.
+  describe('compItems marks comped OrderItem rows (open finding #1)', () => {
+    it('marks the comped item: isCortesia=true, cortesiaReason=reason, discountAmount=item.total — total left untouched (stays gross)', async () => {
+      const order = makeOrder()
+      mockPrisma.order.findUnique.mockResolvedValue(order)
+      mockPrisma.order.update.mockResolvedValue(makeUpdatedOrder())
+
+      await compItems(VENUE_ID, ORDER_ID, {
+        itemIds: ['item-1'],
+        reason: 'Food quality issue',
+        staffId: STAFF_ID,
+      })
+
+      expect(mockPrisma.orderItem.update).toHaveBeenCalledTimes(1)
+      expect(mockPrisma.orderItem.update).toHaveBeenCalledWith({
+        where: { id: 'item-1' },
+        data: {
+          isCortesia: true,
+          cortesiaReason: 'Food quality issue',
+          discountAmount: order.items[0].total, // full line total, gross unchanged
+        },
+      })
+      // OrderItem.total must NOT appear in the update payload — zeroing it
+      // would break sum(item.total) === Order.subtotal.
+      const call = mockPrisma.orderItem.update.mock.calls[0][0]
+      expect(call.data).not.toHaveProperty('total')
+    })
+
+    it('comps the entire order (empty itemIds): marks EVERY item, not just one', async () => {
+      const order = makeOrder()
+      mockPrisma.order.findUnique.mockResolvedValue(order)
+      mockPrisma.order.update.mockResolvedValue(makeUpdatedOrder())
+
+      await compItems(VENUE_ID, ORDER_ID, {
+        itemIds: [],
+        reason: 'Long wait',
+        staffId: STAFF_ID,
+      })
+
+      expect(mockPrisma.orderItem.update).toHaveBeenCalledTimes(order.items.length)
+      expect(mockPrisma.orderItem.update).toHaveBeenCalledWith({
+        where: { id: 'item-1' },
+        data: { isCortesia: true, cortesiaReason: 'Long wait', discountAmount: order.items[0].total },
+      })
+      expect(mockPrisma.orderItem.update).toHaveBeenCalledWith({
+        where: { id: 'item-2' },
+        data: { isCortesia: true, cortesiaReason: 'Long wait', discountAmount: order.items[1].total },
+      })
+    })
+
+    it('does NOT mark items outside the requested itemIds', async () => {
+      const order = makeOrder()
+      mockPrisma.order.findUnique.mockResolvedValue(order)
+      mockPrisma.order.update.mockResolvedValue(makeUpdatedOrder())
+
+      await compItems(VENUE_ID, ORDER_ID, { itemIds: ['item-1'], reason: 'Food quality issue', staffId: STAFF_ID })
+
+      expect(mockPrisma.orderItem.update).not.toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'item-2' } }))
+    })
+
+    it('order total math still correct: Order.discountAmount/total updated by the same compAmount as before', async () => {
+      const order = makeOrder()
+      mockPrisma.order.findUnique.mockResolvedValue(order)
+      mockPrisma.order.update.mockResolvedValue(makeUpdatedOrder())
+
+      await compItems(VENUE_ID, ORDER_ID, { itemIds: ['item-1'], reason: 'Food quality issue', staffId: STAFF_ID })
+
+      // item-1.total = 60; order.discountAmount 0 -> 60; order.total 100 -> 40
+      expect(mockPrisma.order.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: ORDER_ID },
+          data: expect.objectContaining({ discountAmount: 60, total: 40 }),
+        }),
+      )
+    })
+
+    it('wraps item updates, the order update, and OrderAction creation in a single prisma.$transaction', async () => {
+      const order = makeOrder()
+      mockPrisma.order.findUnique.mockResolvedValue(order)
+      mockPrisma.order.update.mockResolvedValue(makeUpdatedOrder())
+
+      await compItems(VENUE_ID, ORDER_ID, { itemIds: ['item-1'], reason: 'Food quality issue', staffId: STAFF_ID })
+
+      expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1)
     })
   })
 
