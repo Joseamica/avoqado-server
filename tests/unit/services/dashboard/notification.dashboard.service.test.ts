@@ -277,7 +277,10 @@ describe('Notification Dashboard Service', () => {
             },
           },
         },
-        orderBy: { createdAt: 'desc' },
+        // `id` is the TIEBREAK and must stay LAST, after the caller's `sortBy`. A paginated
+        // list ordered on a non-unique key alone can serve a row twice on one page and never
+        // on the next (Asana 1217127206664238) — see notification.dashboard.service.ts.
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         skip: 0,
         take: 10,
       })

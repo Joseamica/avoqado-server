@@ -164,7 +164,13 @@ export async function queryActivityLogs(params: QueryActivityLogsParams): Promis
           select: { id: true, firstName: true, lastName: true },
         },
       },
-      orderBy: { createdAt: 'desc' },
+      // `id` is the TIEBREAK — keep it. Audit rows are written in bursts (one request touching
+      // several entities, a bulk import, a fan-out over a venue's staff), so many land on a
+      // byte-identical `createdAt`: prod holds groups of up to 71 across 15,508 rows. Ordering on
+      // `createdAt` alone lets Postgres arrange those ties freely, and this list is read
+      // page-by-page — a tie group straddling a page boundary drops rows from the audit trail,
+      // which is exactly what an auditor cannot afford to silently miss. (Asana 1217127206664238)
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       skip: (page - 1) * pageSize,
       take: pageSize,
     }),
@@ -269,7 +275,8 @@ export async function queryVenueActivityLogs(params: QueryVenueActivityLogsParam
     prisma.activityLog.findMany({
       where: where as any,
       include: { staff: { select: { id: true, firstName: true, lastName: true } } },
-      orderBy: { createdAt: 'desc' },
+      // `id` is the TIEBREAK — see `queryActivityLogs` above; this is the owner audit screen.
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       skip: (page - 1) * pageSize,
       take: pageSize,
     }),
@@ -404,7 +411,8 @@ export async function querySuperadminActivityLogs(params: SuperadminQueryActivit
           select: { id: true, firstName: true, lastName: true },
         },
       },
-      orderBy: { createdAt: 'desc' },
+      // `id` is the TIEBREAK — see `queryActivityLogs` above. Same bulk-write ties, no venue scoping.
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       skip: (page - 1) * pageSize,
       take: pageSize,
     }),

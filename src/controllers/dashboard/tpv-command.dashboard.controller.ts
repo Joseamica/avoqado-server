@@ -179,7 +179,9 @@ export async function getCommands(
             select: { id: true, name: true, serialNumber: true, status: true },
           },
         },
-        orderBy: { createdAt: 'desc' },
+        // `id` is the TIEBREAK — without it a tie group crossing a skip/take page boundary repeats a row
+        // on one page and drops another for good (Asana 1217127206664238).
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         skip: (page - 1) * pageSize,
         take: pageSize,
       }),
@@ -384,7 +386,12 @@ export async function getCommandHistory(
       prisma.tpvCommandHistory.findMany({
         where,
         // Terminal data is denormalized in TpvCommandHistory (terminalId, terminalName, terminalSerial)
-        orderBy: { executedAt: 'desc' },
+        // `id` is the TIEBREAK, and here it carries the WHOLE sort: `executedAt` is NULL on every row
+        // in prod (299/299), so ordering by it alone leaves the entire table as ONE tie group for
+        // Postgres to arrange as it likes per query. Measured against prod by paging this list with N
+        // separate OFFSET/LIMIT queries: 6 of 299 rows came back twice and 6 never appeared at all.
+        // Do NOT reduce this back to `executedAt` alone. (Asana 1217127206664238)
+        orderBy: [{ executedAt: 'desc' }, { id: 'desc' }],
         skip: (page - 1) * pageSize,
         take: pageSize,
       }),
@@ -434,7 +441,9 @@ export async function getBulkOperations(
     const [operations, total] = await Promise.all([
       prisma.bulkCommandOperation.findMany({
         where,
-        orderBy: { createdAt: 'desc' },
+        // `id` is the TIEBREAK — without it a tie group crossing a skip/take page boundary repeats a row
+        // on one page and drops another for good (Asana 1217127206664238).
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         skip: (page - 1) * pageSize,
         take: pageSize,
       }),
@@ -573,7 +582,9 @@ export async function getScheduledCommands(
     const [schedules, total] = await Promise.all([
       prisma.scheduledCommand.findMany({
         where,
-        orderBy: { nextExecution: 'asc' },
+        // `id` is the TIEBREAK — without it a tie group crossing a skip/take page boundary repeats a row
+        // on one page and drops another for good (Asana 1217127206664238).
+        orderBy: [{ nextExecution: 'asc' }, { id: 'asc' }],
         skip: (page - 1) * pageSize,
         take: pageSize,
       }),
@@ -763,7 +774,9 @@ export async function getGeofenceRules(
     const [rules, total] = await Promise.all([
       prisma.geofenceRule.findMany({
         where,
-        orderBy: { createdAt: 'desc' },
+        // `id` is the TIEBREAK — without it a tie group crossing a skip/take page boundary repeats a row
+        // on one page and drops another for good (Asana 1217127206664238).
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         skip: (page - 1) * pageSize,
         take: pageSize,
       }),

@@ -352,7 +352,10 @@ export async function getTransactionCosts(params: TransactionCostParams) {
           },
         },
       },
-      orderBy: { createdAt: 'desc' },
+      // `id` is the TIEBREAK — without it a tie group crossing a skip/take page boundary repeats a row
+      // on one page and drops another for good (Asana 1217127206664238).
+      // TransactionCost rows are written per-payment in batches, so ties are real here.
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       skip: offset,
       take: limit,
     }),

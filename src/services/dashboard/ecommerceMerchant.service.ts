@@ -312,7 +312,9 @@ export async function listEcommerceMerchants(filters: ListEcommerceMerchantsFilt
           },
         },
       },
-      orderBy: { createdAt: 'desc' },
+      // `id` is the TIEBREAK — without it a tie group crossing a skip/take page boundary repeats a row
+      // on one page and drops another for good (Asana 1217127206664238).
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: limit,
       skip: offset,
     }),

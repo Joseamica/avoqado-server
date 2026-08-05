@@ -1070,7 +1070,10 @@ export async function getAllAssessments(
           take: 1,
         },
       },
-      orderBy: { [sortBy]: sortOrder },
+      // `id` is the TIEBREAK and must stay LAST, after the caller's `sortBy`. This one defaults to
+      // `creditScore` — a low-cardinality integer, so ties are the NORM here, not the exception, and
+      // paging without a unique trailing key silently skips venues. (Asana 1217127206664238)
+      orderBy: [{ [sortBy]: sortOrder }, { id: sortOrder }],
       skip: (page - 1) * pageSize,
       take: pageSize,
     }),

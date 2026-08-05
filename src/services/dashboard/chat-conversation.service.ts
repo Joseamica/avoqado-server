@@ -158,7 +158,11 @@ export class ChatConversationService {
         status: ChatConversationStatus.ACTIVE,
         deletedAt: null,
       },
-      orderBy: { updatedAt: 'desc' },
+      // `id` is the TIEBREAK — cursor pagination needs a TOTAL order even more than skip/take does:
+      // Prisma resolves the cursor by locating that row within this ordering, so if rows tie on
+      // `updatedAt` the window after the cursor is ambiguous and conversations get skipped or
+      // repeated. (Asana 1217127206664238)
+      orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
       take: limit + 1,
       ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
       select: {

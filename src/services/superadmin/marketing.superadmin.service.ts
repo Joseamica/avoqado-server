@@ -121,7 +121,9 @@ export async function listTemplates(params: { search?: string; limit?: number; o
           select: { campaigns: true },
         },
       },
-      orderBy: { createdAt: 'desc' },
+      // `id` is the TIEBREAK — without it a tie group crossing a skip/take page boundary repeats a row
+      // on one page and drops another for good (Asana 1217127206664238).
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: limit,
       skip: offset,
     }),
@@ -305,7 +307,9 @@ export async function listCampaigns(params: { search?: string; status?: Campaign
           select: { id: true, name: true },
         },
       },
-      orderBy: { createdAt: 'desc' },
+      // `id` is the TIEBREAK — without it a tie group crossing a skip/take page boundary repeats a row
+      // on one page and drops another for good (Asana 1217127206664238).
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: limit,
       skip: offset,
     }),
@@ -338,7 +342,9 @@ export async function getCampaignDeliveries(
   const [deliveries, total] = await Promise.all([
     prisma.campaignDelivery.findMany({
       where,
-      orderBy: { sentAt: 'desc' },
+      // `id` is the TIEBREAK — without it a tie group crossing a skip/take page boundary repeats a row
+      // on one page and drops another for good (Asana 1217127206664238).
+      orderBy: [{ sentAt: 'desc' }, { id: 'desc' }],
       take: limit,
       skip: offset,
     }),

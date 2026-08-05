@@ -472,7 +472,9 @@ export async function getTimeEntries(params: TimeEntriesQueryParams) {
           orderBy: { startTime: 'asc' },
         },
       },
-      orderBy: { clockInTime: 'desc' },
+      // `id` is the TIEBREAK — without it a tie group crossing a skip/take page boundary repeats a row
+      // on one page and drops another for good (Asana 1217127206664238).
+      orderBy: [{ clockInTime: 'desc' }, { id: 'desc' }],
       take: limit,
       skip: offset,
     }),

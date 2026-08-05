@@ -6399,7 +6399,10 @@ router.get(
               orderBy: { createdAt: 'desc' },
             },
           },
-          orderBy: { createdAt: 'desc' },
+          // `id` is the TIEBREAK — the TPV "mis ventas" list is paged, and prod has 619 orders sharing a
+          // `createdAt` with another (groups up to 25), so a non-unique sort key can hide a promoter's
+          // own sale from them. Same defect as the sales export (Asana 1217127206664238).
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
           take: limit,
           skip: offset,
         }),

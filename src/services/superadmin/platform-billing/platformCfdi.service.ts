@@ -207,7 +207,9 @@ export async function listPlatformCfdis(
   const pageSize = Math.min(Math.max(filters.pageSize ?? 20, 1), MAX_PAGE_SIZE)
 
   const [rows, total] = await Promise.all([
-    prisma.platformCfdi.findMany({ where, orderBy: { createdAt: 'desc' }, skip: (page - 1) * pageSize, take: pageSize }),
+    // `id` is the TIEBREAK — without it a tie group crossing a skip/take page boundary repeats a row
+    // on one page and drops another for good (Asana 1217127206664238).
+    prisma.platformCfdi.findMany({ where, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], skip: (page - 1) * pageSize, take: pageSize }),
     prisma.platformCfdi.count({ where }),
   ])
   return { rows, total, page, pageSize }

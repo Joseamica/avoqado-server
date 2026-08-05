@@ -255,9 +255,10 @@ export async function getUserNotifications(
           },
         },
       },
-      orderBy: {
-        [sortBy]: sortOrder,
-      },
+      // `id` is the TIEBREAK and must stay LAST, after whatever field the caller sorted by:
+      // `sortBy` is caller-supplied and none of its options is unique, so paging on it alone can
+      // drop notifications between pages. (Asana 1217127206664238)
+      orderBy: [{ [sortBy]: sortOrder }, { id: sortOrder }],
       skip: (page - 1) * limit,
       take: limit,
     }),

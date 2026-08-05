@@ -598,7 +598,9 @@ export class TpvCommandQueueService {
     const [commands, total] = await Promise.all([
       prisma.tpvCommandQueue.findMany({
         where,
-        orderBy: { createdAt: 'desc' },
+        // `id` is the TIEBREAK — without it a tie group crossing a skip/take page boundary repeats a row
+        // on one page and drops another for good (Asana 1217127206664238).
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: options?.limit || 50,
         skip: options?.offset || 0,
         include: {

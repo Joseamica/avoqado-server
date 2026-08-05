@@ -169,7 +169,9 @@ export async function getCloseoutHistory(venueId: string, page: number = 1, page
   const [closeouts, total] = await prisma.$transaction([
     prisma.cashCloseout.findMany({
       where: { venueId },
-      orderBy: { createdAt: 'desc' },
+      // `id` is the TIEBREAK — without it a tie group crossing a skip/take page boundary repeats a row
+      // on one page and drops another for good (Asana 1217127206664238).
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       skip: (page - 1) * pageSize,
       take: pageSize,
       include: {

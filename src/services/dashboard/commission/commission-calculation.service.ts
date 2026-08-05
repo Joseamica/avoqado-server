@@ -576,7 +576,9 @@ export async function getStaffCommissions(
           },
         },
       },
-      orderBy: { calculatedAt: 'desc' },
+      // `id` is the TIEBREAK — without it a tie group crossing a skip/take page boundary repeats a row
+      // on one page and drops another for good (Asana 1217127206664238).
+      orderBy: [{ calculatedAt: 'desc' }, { id: 'desc' }],
       take: filters.limit ?? 50,
       skip: filters.offset ?? 0,
     }),

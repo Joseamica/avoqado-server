@@ -196,7 +196,10 @@ export async function listSaleVerifications(
   const [verifications, totalCount] = await Promise.all([
     prisma.saleVerification.findMany({
       where,
-      orderBy: { createdAt: 'desc' },
+      // `id` is the TIEBREAK — SaleVerification carries ties up to 25 in prod (585 of 5,550 rows share
+      // a timestamp) because a manual upload backdates a whole day's sales to one instant. Same root
+      // cause as the dashboard sale lists (Asana 1217127206664238).
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       skip: (params.pageNumber - 1) * params.pageSize,
       take: params.pageSize,
     }),
