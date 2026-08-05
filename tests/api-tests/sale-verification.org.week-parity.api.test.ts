@@ -30,9 +30,16 @@ import { monthBucketSql, dayBucketSql, isoWeekKeySql, weekLabelSql } from '@/ser
 
 const TZ = 'America/Mexico_City'
 
-/** URL real del `.env`, sin tocar `process.env` (que el setup ya pisó). */
+/**
+ * URL real del `.env`, sin tocar `process.env` (que el setup ya pisó).
+ *
+ * `processEnv` va SIN cast: dotenv lo tipa como `DotenvPopulateInput`
+ * (`{ [name: string]: string }`), y forzarlo a `NodeJS.ProcessEnv` —cuyos valores son
+ * `string | undefined`— rompe la asignabilidad y truena `npm run typecheck` en CI.
+ * El objeto vacío es un destino de escritura para dotenv, no un `process.env`.
+ */
 function realDatabaseUrl(): string | undefined {
-  const parsed = loadEnv({ path: '.env', processEnv: {} as NodeJS.ProcessEnv })
+  const parsed = loadEnv({ path: '.env', processEnv: {} })
   return parsed.parsed?.DATABASE_URL
 }
 
