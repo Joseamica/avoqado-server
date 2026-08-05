@@ -32,6 +32,7 @@ import { MCP_RESOURCE_URL } from './mcp/oauth/config'
 
 // Import routes
 import publicMenuRoutes from './routes/publicMenu.routes'
+import { eventLoopGuardMiddleware, startEventLoopMonitor } from './middlewares/eventLoopGuard.middleware'
 import webhookRoutes from './routes/webhook.routes'
 import { handleGoogleCalendarWebhook } from './controllers/webhook/google-calendar.webhook.controller'
 import { handleMercadoPagoWebhook } from './controllers/webhook/mercadoPago.webhook.controller'
@@ -80,6 +81,14 @@ app.use((req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
   res.once('close', onDone)
   next()
 })
+
+// Guardia de retención del event loop: anota qué peticiones están en vuelo para poder
+// NOMBRAR a la que retiene el hilo (el histograma de arriba da el número, no la ruta).
+// Va antes de los webhooks a propósito: no toca el body, y las peticiones de cobro son
+// justo las que no queremos que se queden formadas sin que nadie se entere.
+// Incidente 2026-08-04: /dashboard/auth/status tardó 33.7 s y nada avisó.
+app.use(eventLoopGuardMiddleware)
+startEventLoopMonitor()
 
 // Getters for the metrics service to read live values
 export function getAppCpuPercent() {
