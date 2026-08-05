@@ -1,10 +1,13 @@
-const mockSVFindMany = jest.fn()
+const mockQueryRaw = jest.fn()
 const mockStaffVenueFindMany = jest.fn()
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
-    saleVerification: { findMany: (...a: unknown[]) => mockSVFindMany(...(a as [])) },
+    // Desde 2026-08-04 esta agregación agrupa en Postgres en vez de recorrer filas en JS
+    // (incidente del event loop: la pantalla retenía el hilo ~9 s por endpoint).
+    $queryRaw: (...a: unknown[]) => mockQueryRaw(...(a as [])),
+    saleVerification: { findMany: jest.fn() },
     staffVenue: { findMany: (...a: unknown[]) => mockStaffVenueFindMany(...(a as [])) },
   },
 }))
@@ -18,22 +21,15 @@ import { getSalesByPromoterWeekly } from '../../../src/services/dashboard/sale-v
 beforeEach(() => jest.clearAllMocks())
 
 it('buckets a promoter by ISO week and attributes venue + supervisor', async () => {
-  mockSVFindMany.mockResolvedValue([
-    {
-      createdAt: new Date('2026-05-01T18:00:00Z'),
-      venueId: 'v1',
-      venue: { id: 'v1', name: 'BAE Uno' },
-      staff: { id: 'p1', firstName: 'Ana', lastName: 'León' },
-    },
-    {
-      createdAt: new Date('2026-05-08T18:00:00Z'),
-      venueId: 'v1',
-      venue: { id: 'v1', name: 'BAE Uno' },
-      staff: { id: 'p1', firstName: 'Ana', lastName: 'León' },
-    },
+  // Postgres ya devuelve agrupado: la misma promotora, la misma tienda, dos semanas.
+  mockQueryRaw.mockResolvedValue([
+    { staff_id: 'p1', first_name: 'Ana', last_name: 'León', venue_id: 'v1', venue_name: 'BAE Uno', week: 'W18', count: BigInt(1) },
+    { staff_id: 'p1', first_name: 'Ana', last_name: 'León', venue_id: 'v1', venue_name: 'BAE Uno', week: 'W19', count: BigInt(1) },
   ])
   mockStaffVenueFindMany.mockResolvedValue([{ venueId: 'v1', role: 'MANAGER', staff: { id: 'sup1', firstName: 'Hugo', lastName: 'G' } }])
+
   const rows = await getSalesByPromoterWeekly('o1', { from: new Date('2026-04-01'), to: new Date('2026-06-01') } as never)
+
   expect(rows).toHaveLength(1)
   expect(rows[0]).toMatchObject({
     staffId: 'p1',

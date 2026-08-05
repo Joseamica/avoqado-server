@@ -3,6 +3,8 @@ import { fromZonedTime } from 'date-fns-tz'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { reviewSaleVerification as reviewSaleVerificationVenue, type ReviewDecision } from './sale-verification.dashboard.service'
+import { monthBucketSql, dayBucketSql, weekLabelSql, isoWeekKeySql, buildRangeConditions } from './sale-verification.org.sql'
+import { venueCivilDate } from '../../utils/venueDateKeys'
 import { moduleService, MODULE_CODES } from '../modules/module.service'
 import socketManager from '../../communication/sockets'
 import { SocketEventType } from '../../communication/sockets/types'
@@ -336,43 +338,77 @@ interface AggregationRange {
   toDate?: Date
 }
 
-function baseAggregationWhere(orgId: string, range: AggregationRange): Prisma.SaleVerificationWhereInput {
-  const where: Prisma.SaleVerificationWhereInput = {
-    status: 'COMPLETED',
-    venue: { organizationId: orgId },
-  }
-  if (range.fromDate && range.toDate) where.createdAt = { gte: range.fromDate, lte: range.toDate }
-  else if (range.fromDate) where.createdAt = { gte: range.fromDate }
-  else if (range.toDate) where.createdAt = { lte: range.toDate }
-  return where
+/**
+ * FROM + WHERE compartido por TODAS las agregaciones de ventas confirmadas en SQL.
+ *
+ * 🔴 Que sea UNO SOLO es lo que garantiza la regla de Isaac (2026-06-29): *"el total debe
+ * cuadrar en todas las tablas y gráficas"*. Antes esa garantía venía de que las 12
+ * agregaciones llamaban al mismo `baseAggregationWhere`; ahora viene de que arman su
+ * consulta a partir de este mismo bloque. Si alguien escribe su propio WHERE "porque su
+ * caso es especial", las tablas dejan de cuadrar entre sí — sin error visible.
+ *
+ * Alias fijos: `sv` = SaleVerification, `v` = Venue, `p` = Payment, `s` = Staff.
+ *
+ * Los tres joins van SIEMPRE, aunque una agregación concreta no use todas las columnas:
+ * `venueId`, `paymentId` y `staffId` son obligatorios en el esquema y `paymentId` además
+ * es único, así que ningún join puede multiplicar ni perder filas. Tenerlos fijos evita
+ * que cada agregación arme su propio FROM y se desvíe.
+ */
+function completedSalesFromWhere(orgId: string, range: AggregationRange): Prisma.Sql {
+  return Prisma.sql`
+    FROM "SaleVerification" sv
+    JOIN "Venue" v ON v."id" = sv."venueId"
+    LEFT JOIN "Payment" p ON p."id" = sv."paymentId"
+    LEFT JOIN "Staff" s ON s."id" = sv."staffId"
+    WHERE sv."status" = 'COMPLETED'
+      AND v."organizationId" = ${orgId}
+      ${buildRangeConditions(range, 'sv."createdAt"')}
+  `
 }
 
-/** ISO week label "Wxx" in venue timezone. */
-function toWeekLabel(d: Date, tz: string = VENUE_TIMEZONE_DEFAULT): string {
-  // Convert UTC to venue local for week extraction
-  const local = new Date(d.toLocaleString('en-US', { timeZone: tz }))
-  // ISO week (Mon-based)
-  const day = local.getUTCDay() || 7
-  local.setUTCDate(local.getUTCDate() + 4 - day)
-  const yearStart = new Date(Date.UTC(local.getUTCFullYear(), 0, 1))
-  const week = Math.ceil(((local.getTime() - yearStart.getTime()) / 86400000 + 1) / 7)
-  return `W${String(week).padStart(2, '0')}`
-}
-
-/** ISO year-week key "YYYY-Www" in venue timezone. Sortable across years. */
-function toIsoWeekKey(d: Date, tz: string = VENUE_TIMEZONE_DEFAULT): string {
-  const local = new Date(d.toLocaleString('en-US', { timeZone: tz }))
-  const day = local.getUTCDay() || 7
-  local.setUTCDate(local.getUTCDate() + 4 - day) // shift to the week's Thursday
-  const isoYear = local.getUTCFullYear()
-  const yearStart = new Date(Date.UTC(isoYear, 0, 1))
-  const week = Math.ceil(((local.getTime() - yearStart.getTime()) / 86400000 + 1) / 7)
-  return `${isoYear}-W${String(week).padStart(2, '0')}`
-}
-
-function toMonthKey(d: Date, tz: string = VENUE_TIMEZONE_DEFAULT): string {
-  const local = new Date(d.toLocaleString('en-US', { timeZone: tz }))
-  return `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, '0')}`
+/**
+ * Ventas confirmadas agrupadas por `bucketExpr` × categoría de SIM.
+ *
+ * 🔴 AQUÍ VIVE EL ARREGLO DEL AZAR. El código anterior resolvía la categoría con
+ * `payment.order.items.find(oi => oi.serializedItem)` — "el primer item que traiga un
+ * serializado". Pero esa lista no tenía `orderBy`, así que "el primero" lo decidía
+ * Postgres: una orden con DOS serializados de categorías distintas podía caer en un bucket
+ * u otro entre corridas, sin que nada fallara. Es el mismo defecto de familia que la
+ * pérdida silenciosa de filas en listas paginadas (arreglado el 2026-08-04 por la mañana).
+ *
+ * `DISTINCT ON (sv."id")` con un `ORDER BY` explícito lo fija:
+ *   1. `si."id" IS NULL` — los items SIN serializado se van al final, así que si la orden
+ *      tiene alguno con serializado, ese gana. Reproduce lo que hacía el `.find()`.
+ *   2. `oi."id"` — el desempate estable que faltaba.
+ *
+ * `bucketExpr` debe construirse sobre `cv."created_at"` (la columna que expone el CTE).
+ */
+function categoriaPorVentaSql(orgId: string, range: AggregationRange, bucketExpr: string): Prisma.Sql {
+  return Prisma.sql`
+    WITH categoria_por_venta AS (
+      SELECT DISTINCT ON (sv."id")
+             sv."id"        AS verification_id,
+             sv."createdAt" AS created_at,
+             ic."name"      AS category_name
+      FROM "SaleVerification" sv
+      JOIN "Venue" v ON v."id" = sv."venueId"
+      LEFT JOIN "Payment" p ON p."id" = sv."paymentId"
+      LEFT JOIN "Order" o ON o."id" = p."orderId"
+      LEFT JOIN "OrderItem" oi ON oi."orderId" = o."id"
+      LEFT JOIN "SerializedItem" si ON si."orderItemId" = oi."id"
+      LEFT JOIN "ItemCategory" ic ON ic."id" = si."categoryId"
+      WHERE sv."status" = 'COMPLETED'
+        AND v."organizationId" = ${orgId}
+        ${buildRangeConditions(range, 'sv."createdAt"')}
+      ORDER BY sv."id", (si."id" IS NULL), oi."id"
+    )
+    SELECT ${Prisma.raw(bucketExpr)} AS bucket,
+           cv."category_name"        AS category_name,
+           COUNT(*)                  AS count
+    FROM categoria_por_venta cv
+    GROUP BY 1, 2
+    ORDER BY 1
+  `
 }
 
 /** Summary metrics for the org Ventas page (top KPI cards). */
@@ -391,51 +427,52 @@ export async function getOrgSalesSummary(
   rejectedCount: number
   withoutVerificationCount: number
 }> {
-  const paymentWhere: Prisma.PaymentWhereInput = {
-    status: 'COMPLETED',
-    order: { venue: { organizationId: orgId } },
-  }
-  if (range.fromDate && range.toDate) paymentWhere.createdAt = { gte: range.fromDate, lte: range.toDate }
-  else if (range.fromDate) paymentWhere.createdAt = { gte: range.fromDate }
-  else if (range.toDate) paymentWhere.createdAt = { lte: range.toDate }
+  // 🔴 Esta agregación NO usa `completedSalesFromWhere`: su universo es distinto a
+  // propósito. Las demás cuentan sólo ventas CONFIRMADAS; ésta parte de TODOS los pagos
+  // completados de la organización —incluidos los que ni siquiera tienen verificación— y
+  // los desglosa por estado. Por eso el FROM arranca en "Payment" y la verificación entra
+  // con LEFT JOIN.
+  const rows = await prisma.$queryRaw<
+    Array<{
+      total_revenue: string | null
+      confirmed_revenue: string | null
+      total_count: bigint
+      completed_count: bigint
+      pending_count: bigint
+      failed_count: bigint
+      rejected_count: bigint
+      without_verification_count: bigint
+    }>
+  >(Prisma.sql`
+    SELECT
+      COALESCE(SUM(p."amount"), 0)                                          AS total_revenue,
+      COALESCE(SUM(p."amount") FILTER (WHERE sv."status" = 'COMPLETED'), 0) AS confirmed_revenue,
+      COUNT(*)                                                              AS total_count,
+      COUNT(*) FILTER (WHERE sv."status" = 'COMPLETED')                     AS completed_count,
+      COUNT(*) FILTER (WHERE sv."status" = 'PENDING')                       AS pending_count,
+      COUNT(*) FILTER (WHERE sv."status" = 'FAILED')                        AS failed_count,
+      COUNT(*) FILTER (WHERE sv."status" = 'REJECTED')                      AS rejected_count,
+      COUNT(*) FILTER (WHERE sv."id" IS NULL)                               AS without_verification_count
+    FROM "Payment" p
+    JOIN "Order" o ON o."id" = p."orderId"
+    JOIN "Venue" v ON v."id" = o."venueId"
+    LEFT JOIN "SaleVerification" sv ON sv."paymentId" = p."id"
+    WHERE p."status" = 'COMPLETED'
+      AND v."organizationId" = ${orgId}
+      ${buildRangeConditions(range, 'p."createdAt"')}
+  `)
 
-  const payments = await prisma.payment.findMany({
-    where: paymentWhere,
-    select: { amount: true, saleVerification: { select: { status: true } } },
-  })
-
-  let totalRevenue = 0
-  let confirmedRevenue = 0
-  let completedCount = 0
-  let pendingCount = 0
-  let failedCount = 0
-  let rejectedCount = 0
-  let withoutVerificationCount = 0
-
-  for (const p of payments) {
-    const amount = typeof p.amount === 'number' ? p.amount : Number(p.amount)
-    totalRevenue += amount
-    if (!p.saleVerification) {
-      withoutVerificationCount++
-      continue
-    }
-    if (p.saleVerification.status === 'COMPLETED') {
-      completedCount++
-      confirmedRevenue += amount
-    } else if (p.saleVerification.status === 'PENDING') pendingCount++
-    else if (p.saleVerification.status === 'FAILED') failedCount++
-    else if (p.saleVerification.status === 'REJECTED') rejectedCount++
-  }
-
+  const r = rows[0]
   return {
-    totalRevenue,
-    confirmedRevenue,
-    totalCount: payments.length,
-    completedCount,
-    pendingCount,
-    failedCount,
-    rejectedCount,
-    withoutVerificationCount,
+    // Montos en PESOS, 1:1. `amount` es Decimal(x,2); Number() lo deja en pesos.
+    totalRevenue: Number(r?.total_revenue ?? 0),
+    confirmedRevenue: Number(r?.confirmed_revenue ?? 0),
+    totalCount: Number(r?.total_count ?? 0),
+    completedCount: Number(r?.completed_count ?? 0),
+    pendingCount: Number(r?.pending_count ?? 0),
+    failedCount: Number(r?.failed_count ?? 0),
+    rejectedCount: Number(r?.rejected_count ?? 0),
+    withoutVerificationCount: Number(r?.without_verification_count ?? 0),
   }
 }
 
@@ -447,21 +484,23 @@ export async function getSalesByMonth(
   orgId: string,
   range: AggregationRange,
 ): Promise<Array<{ month: string; count: number; revenue: number }>> {
-  const verifications = await prisma.saleVerification.findMany({
-    where: baseAggregationWhere(orgId, range),
-    include: { payment: { select: { amount: true } } },
-  })
+  const bucket = monthBucketSql('sv."createdAt"', VENUE_TIMEZONE_DEFAULT)
 
-  const map = new Map<string, { count: number; revenue: number }>()
-  for (const v of verifications) {
-    const key = toMonthKey(v.createdAt)
-    const prev = map.get(key) ?? { count: 0, revenue: 0 }
-    const amount = v.payment?.amount ? Number(v.payment.amount) : 0
-    map.set(key, { count: prev.count + 1, revenue: prev.revenue + amount })
-  }
-  return Array.from(map.entries())
-    .map(([month, agg]) => ({ month, ...agg }))
-    .sort((a, b) => b.month.localeCompare(a.month))
+  const rows = await prisma.$queryRaw<Array<{ bucket: string; count: bigint; revenue: string | null }>>(Prisma.sql`
+    SELECT ${Prisma.raw(bucket)} AS bucket,
+           COUNT(*)                     AS count,
+           COALESCE(SUM(p."amount"), 0) AS revenue
+    ${completedSalesFromWhere(orgId, range)}
+    GROUP BY ${Prisma.raw(bucket)}
+    ORDER BY bucket DESC
+  `)
+
+  return rows.map(r => ({
+    month: r.bucket,
+    count: Number(r.count),
+    // `amount` es Decimal(x,2) en PESOS. Number() lo deja en pesos, 1:1 — nunca centavos.
+    revenue: Number(r.revenue ?? 0),
+  }))
 }
 
 /**
@@ -478,26 +517,16 @@ export async function getSalesBySimType(
   orgId: string,
   range: AggregationRange,
 ): Promise<Array<{ month: string; byCategory: Record<string, number>; total: number }>> {
-  const verifications = await prisma.saleVerification.findMany({
-    where: baseAggregationWhere(orgId, range),
-    select: {
-      createdAt: true,
-      payment: {
-        select: {
-          order: { select: { items: { select: { serializedItem: { select: { category: { select: { name: true } } } } } } } },
-        },
-      },
-    },
-  })
+  const rows = await prisma.$queryRaw<Array<{ bucket: string; category_name: string | null; count: bigint }>>(
+    categoriaPorVentaSql(orgId, range, monthBucketSql('cv."created_at"', VENUE_TIMEZONE_DEFAULT)),
+  )
 
   const map = new Map<string, Record<string, number>>()
-  for (const v of verifications) {
-    const month = toMonthKey(v.createdAt)
-    const first = v.payment?.order?.items?.find(oi => oi.serializedItem)?.serializedItem
-    const bucket = toSimBucket(first?.category?.name ?? null)
-    const row = map.get(month) ?? {}
-    row[bucket] = (row[bucket] ?? 0) + 1
-    map.set(month, row)
+  for (const r of rows) {
+    const row = map.get(r.bucket) ?? {}
+    const bucket = toSimBucket(r.category_name)
+    row[bucket] = (row[bucket] ?? 0) + Number(r.count)
+    map.set(r.bucket, row)
   }
   return Array.from(map.entries())
     .map(([month, byCategory]) => {
@@ -512,20 +541,22 @@ export async function getSalesByWeek(
   orgId: string,
   range: AggregationRange,
 ): Promise<Array<{ week: string; count: number; revenue: number }>> {
-  const verifications = await prisma.saleVerification.findMany({
-    where: baseAggregationWhere(orgId, range),
-    include: { payment: { select: { amount: true } } },
-  })
-  const map = new Map<string, { count: number; revenue: number }>()
-  for (const v of verifications) {
-    const key = toWeekLabel(v.createdAt)
-    const prev = map.get(key) ?? { count: 0, revenue: 0 }
-    const amount = v.payment?.amount ? Number(v.payment.amount) : 0
-    map.set(key, { count: prev.count + 1, revenue: prev.revenue + amount })
-  }
-  return Array.from(map.entries())
-    .map(([week, agg]) => ({ week, ...agg }))
-    .sort((a, b) => b.week.localeCompare(a.week))
+  const bucket = weekLabelSql('sv."createdAt"', VENUE_TIMEZONE_DEFAULT)
+
+  const rows = await prisma.$queryRaw<Array<{ bucket: string; count: bigint; revenue: string | null }>>(Prisma.sql`
+    SELECT ${Prisma.raw(bucket)} AS bucket,
+           COUNT(*)                     AS count,
+           COALESCE(SUM(p."amount"), 0) AS revenue
+    ${completedSalesFromWhere(orgId, range)}
+    GROUP BY ${Prisma.raw(bucket)}
+    ORDER BY bucket DESC
+  `)
+
+  return rows.map(r => ({
+    week: r.bucket,
+    count: Number(r.count),
+    revenue: Number(r.revenue ?? 0),
+  }))
 }
 
 /**
@@ -537,19 +568,28 @@ export async function getSalesBySaleTypeWeekly(
   orgId: string,
   range: AggregationRange,
 ): Promise<Array<{ name: 'Líneas Nuevas' | 'Portabilidades'; byWeek: Record<string, number>; total: number }>> {
-  const verifications = await prisma.saleVerification.findMany({
-    where: baseAggregationWhere(orgId, range),
-    select: { createdAt: true, isPortabilidad: true },
-  })
+  const bucket = isoWeekKeySql('sv."createdAt"', VENUE_TIMEZONE_DEFAULT)
+
+  const grouped = await prisma.$queryRaw<Array<{ bucket: string; is_portabilidad: boolean; count: bigint }>>(Prisma.sql`
+    SELECT ${Prisma.raw(bucket)} AS bucket,
+           sv."isPortabilidad"   AS is_portabilidad,
+           COUNT(*)              AS count
+    ${completedSalesFromWhere(orgId, range)}
+    GROUP BY ${Prisma.raw(bucket)}, sv."isPortabilidad"
+    ORDER BY bucket
+  `)
+
+  // Las dos filas SIEMPRE presentes y en orden fijo: la gráfica las espera así aunque una
+  // venga vacía.
   const rows: Record<'Líneas Nuevas' | 'Portabilidades', { byWeek: Record<string, number>; total: number }> = {
     'Líneas Nuevas': { byWeek: {}, total: 0 },
     Portabilidades: { byWeek: {}, total: 0 },
   }
-  for (const v of verifications) {
-    const key = v.isPortabilidad ? 'Portabilidades' : 'Líneas Nuevas'
-    const wk = toIsoWeekKey(v.createdAt)
-    rows[key].byWeek[wk] = (rows[key].byWeek[wk] ?? 0) + 1
-    rows[key].total += 1
+  for (const r of grouped) {
+    const key = r.is_portabilidad ? 'Portabilidades' : 'Líneas Nuevas'
+    const n = Number(r.count)
+    rows[key].byWeek[r.bucket] = (rows[key].byWeek[r.bucket] ?? 0) + n
+    rows[key].total += n
   }
   return [
     { name: 'Líneas Nuevas', ...rows['Líneas Nuevas'] },
@@ -567,17 +607,9 @@ export async function getSalesBySimTypeWeekly(
   orgId: string,
   range: AggregationRange,
 ): Promise<Array<{ name: SimBucket; byWeek: Record<string, number>; total: number }>> {
-  const verifications = await prisma.saleVerification.findMany({
-    where: baseAggregationWhere(orgId, range),
-    select: {
-      createdAt: true,
-      payment: {
-        select: {
-          order: { select: { items: { select: { serializedItem: { select: { category: { select: { name: true } } } } } } } },
-        },
-      },
-    },
-  })
+  const rows = await prisma.$queryRaw<Array<{ bucket: string; category_name: string | null; count: bigint }>>(
+    categoriaPorVentaSql(orgId, range, isoWeekKeySql('cv."created_at"', VENUE_TIMEZONE_DEFAULT)),
+  )
   const acc = new Map<SimBucket, { byWeek: Record<string, number>; total: number }>()
   const ensure = (b: SimBucket) => {
     let r = acc.get(b)
@@ -587,14 +619,12 @@ export async function getSalesBySimTypeWeekly(
     }
     return r
   }
-  for (const b of SIM_FIXED_BUCKETS) ensure(b) // fixed rows always present
-  for (const v of verifications) {
-    const first = v.payment?.order?.items?.find(oi => oi.serializedItem)?.serializedItem
-    const bucket = toSimBucket(first?.category?.name ?? null)
-    const wk = toIsoWeekKey(v.createdAt)
-    const r = ensure(bucket)
-    r.byWeek[wk] = (r.byWeek[wk] ?? 0) + 1
-    r.total += 1
+  for (const b of SIM_FIXED_BUCKETS) ensure(b) // las filas fijas siempre presentes
+  for (const row of rows) {
+    const r = ensure(toSimBucket(row.category_name))
+    const n = Number(row.count)
+    r.byWeek[row.bucket] = (r.byWeek[row.bucket] ?? 0) + n
+    r.total += n
   }
   const ordered: SimBucket[] = [...SIM_FIXED_BUCKETS]
   const others = acc.get(SIM_OTHERS)
@@ -607,16 +637,24 @@ export async function getSalesByCity(
   orgId: string,
   range: AggregationRange,
 ): Promise<Array<{ city: string; byMonth: Record<string, number>; total: number }>> {
-  const verifications = await prisma.saleVerification.findMany({
-    where: baseAggregationWhere(orgId, range),
-    include: { venue: { select: { city: true } } },
-  })
+  const bucket = monthBucketSql('sv."createdAt"', VENUE_TIMEZONE_DEFAULT)
+
+  const rows = await prisma.$queryRaw<Array<{ city: string | null; bucket: string; count: bigint }>>(Prisma.sql`
+    SELECT v."city"              AS city,
+           ${Prisma.raw(bucket)} AS bucket,
+           COUNT(*)              AS count
+    ${completedSalesFromWhere(orgId, range)}
+    GROUP BY v."city", ${Prisma.raw(bucket)}
+    ORDER BY v."city", bucket
+  `)
+
   const map = new Map<string, Record<string, number>>()
-  for (const v of verifications) {
-    const city = v.venue?.city || 'Sin ciudad'
-    const month = toMonthKey(v.createdAt)
+  for (const r of rows) {
+    // Varias sucursales de PlayTelecom no tienen ciudad capturada; se agrupan juntas,
+    // igual que antes.
+    const city = r.city || 'Sin ciudad'
     const row = map.get(city) ?? {}
-    row[month] = (row[month] ?? 0) + 1
+    row[r.bucket] = (row[r.bucket] ?? 0) + Number(r.count)
     map.set(city, row)
   }
   return Array.from(map.entries())
@@ -730,26 +768,37 @@ export async function getSalesBySupervisor(
     total: number
   }>
 > {
-  const verifications = await prisma.saleVerification.findMany({
-    where: baseAggregationWhere(orgId, range),
-    select: { createdAt: true, venueId: true },
-  })
+  const week = weekLabelSql('sv."createdAt"', VENUE_TIMEZONE_DEFAULT)
+  const month = monthBucketSql('sv."createdAt"', VENUE_TIMEZONE_DEFAULT)
 
-  // Bulk lookup of one supervisor per venue: MANAGER first, ADMIN as fallback,
-  // deterministic by staffId asc within each role.
-  const venueIds = Array.from(new Set(verifications.map(v => v.venueId).filter(Boolean) as string[]))
+  const grouped = await prisma.$queryRaw<Array<{ venue_id: string; week: string; month: string; count: bigint }>>(
+    Prisma.sql`
+      SELECT sv."venueId"         AS venue_id,
+             ${Prisma.raw(week)}  AS week,
+             ${Prisma.raw(month)} AS month,
+             COUNT(*)             AS count
+      ${completedSalesFromWhere(orgId, range)}
+      GROUP BY sv."venueId", ${Prisma.raw(week)}, ${Prisma.raw(month)}
+      ORDER BY sv."venueId", month, week
+    `,
+  )
+
+  // La atribución de supervisor se queda en JS a propósito: es una regla de NEGOCIO
+  // (MANAGER primero, ADMIN de respaldo, desempate determinista por staffId) sobre ~39
+  // sucursales, no sobre miles de filas. Bajarla a SQL la volvería un JOIN con subconsulta
+  // difícil de leer, para ahorrar un costo que no existe.
+  const venueIds = Array.from(new Set(grouped.map(r => r.venue_id).filter(Boolean)))
   const supervisorByVenue = await resolveSupervisorByVenue(venueIds)
 
   const map = new Map<string, { name: string; byWeek: Record<string, number>; byMonth: Record<string, number> }>()
-  for (const v of verifications) {
-    const supervisor = v.venueId ? supervisorByVenue.get(v.venueId) : undefined
+  for (const r of grouped) {
+    const supervisor = supervisorByVenue.get(r.venue_id)
     const key = supervisor?.id ?? 'unassigned'
     const name = supervisor?.name ?? 'Sin supervisor'
-    const week = toWeekLabel(v.createdAt)
-    const month = toMonthKey(v.createdAt)
+    const n = Number(r.count)
     const row = map.get(key) ?? { name, byWeek: {}, byMonth: {} }
-    row.byWeek[week] = (row.byWeek[week] ?? 0) + 1
-    row.byMonth[month] = (row.byMonth[month] ?? 0) + 1
+    row.byWeek[r.week] = (row.byWeek[r.week] ?? 0) + n
+    row.byMonth[r.month] = (row.byMonth[r.month] ?? 0) + n
     map.set(key, row)
   }
   return Array.from(map.entries())
@@ -785,34 +834,50 @@ export async function getSalesByPromoterWeekly(
     total: number
   }>
 > {
-  const verifications = await prisma.saleVerification.findMany({
-    where: baseAggregationWhere(orgId, range),
-    select: {
-      createdAt: true,
-      venueId: true,
-      venue: { select: { id: true, name: true } },
-      staff: { select: { id: true, firstName: true, lastName: true } },
-    },
-  })
-  const venueIds = Array.from(new Set(verifications.map(v => v.venueId).filter((x): x is string => !!x)))
+  const week = weekLabelSql('sv."createdAt"', VENUE_TIMEZONE_DEFAULT)
+
+  const grouped = await prisma.$queryRaw<
+    Array<{
+      staff_id: string | null
+      first_name: string | null
+      last_name: string | null
+      venue_id: string | null
+      venue_name: string | null
+      week: string
+      count: bigint
+    }>
+  >(Prisma.sql`
+    SELECT s."id"             AS staff_id,
+           s."firstName"      AS first_name,
+           s."lastName"       AS last_name,
+           v."id"             AS venue_id,
+           v."name"           AS venue_name,
+           ${Prisma.raw(week)} AS week,
+           COUNT(*)           AS count
+    ${completedSalesFromWhere(orgId, range)}
+    GROUP BY s."id", s."firstName", s."lastName", v."id", v."name", ${Prisma.raw(week)}
+    ORDER BY s."id", v."id", week
+  `)
+
+  const venueIds = Array.from(new Set(grouped.map(r => r.venue_id).filter((x): x is string => !!x)))
   const supervisorByVenue = await resolveSupervisorByVenue(venueIds)
 
   const map = new Map<
     string,
     { staffId: string; promoterName: string; venueId: string; venueName: string; byWeek: Record<string, number> }
   >()
-  for (const v of verifications) {
-    if (!v.staff || !v.venueId) continue
-    const key = `${v.staff.id}|${v.venueId}`
-    const week = toWeekLabel(v.createdAt)
+  for (const r of grouped) {
+    // Sin promotor o sin tienda no se puede atribuir la venta: se descarta, igual que antes.
+    if (!r.staff_id || !r.venue_id) continue
+    const key = `${r.staff_id}|${r.venue_id}`
     const row = map.get(key) ?? {
-      staffId: v.staff.id,
-      promoterName: `${v.staff.firstName} ${v.staff.lastName}`.trim(),
-      venueId: v.venueId,
-      venueName: v.venue?.name ?? 'Sin tienda',
+      staffId: r.staff_id,
+      promoterName: `${r.first_name ?? ''} ${r.last_name ?? ''}`.trim(),
+      venueId: r.venue_id,
+      venueName: r.venue_name ?? 'Sin tienda',
       byWeek: {},
     }
-    row.byWeek[week] = (row.byWeek[week] ?? 0) + 1
+    row.byWeek[r.week] = (row.byWeek[r.week] ?? 0) + Number(r.count)
     map.set(key, row)
   }
   return Array.from(map.values())
@@ -829,20 +894,29 @@ export async function getSalesByStore(
   orgId: string,
   range: AggregationRange,
 ): Promise<Array<{ venueId: string; venueName: string; byWeek: Record<string, number>; byMonth: Record<string, number>; total: number }>> {
-  const verifications = await prisma.saleVerification.findMany({
-    where: baseAggregationWhere(orgId, range),
-    include: { venue: { select: { id: true, name: true } } },
-  })
+  const week = weekLabelSql('sv."createdAt"', VENUE_TIMEZONE_DEFAULT)
+  const month = monthBucketSql('sv."createdAt"', VENUE_TIMEZONE_DEFAULT)
+
+  const rows = await prisma.$queryRaw<
+    Array<{ venue_id: string; venue_name: string | null; week: string; month: string; count: bigint }>
+  >(Prisma.sql`
+    SELECT v."id"               AS venue_id,
+           v."name"             AS venue_name,
+           ${Prisma.raw(week)}  AS week,
+           ${Prisma.raw(month)} AS month,
+           COUNT(*)             AS count
+    ${completedSalesFromWhere(orgId, range)}
+    GROUP BY v."id", v."name", ${Prisma.raw(week)}, ${Prisma.raw(month)}
+    ORDER BY v."id", month, week
+  `)
+
   const map = new Map<string, { name: string; byWeek: Record<string, number>; byMonth: Record<string, number> }>()
-  for (const v of verifications) {
-    const id = v.venue?.id ?? 'unknown'
-    const name = v.venue?.name ?? 'Sin tienda'
-    const week = toWeekLabel(v.createdAt)
-    const month = toMonthKey(v.createdAt)
-    const row = map.get(id) ?? { name, byWeek: {}, byMonth: {} }
-    row.byWeek[week] = (row.byWeek[week] ?? 0) + 1
-    row.byMonth[month] = (row.byMonth[month] ?? 0) + 1
-    map.set(id, row)
+  for (const r of rows) {
+    const n = Number(r.count)
+    const row = map.get(r.venue_id) ?? { name: r.venue_name ?? 'Sin tienda', byWeek: {}, byMonth: {} }
+    row.byWeek[r.week] = (row.byWeek[r.week] ?? 0) + n
+    row.byMonth[r.month] = (row.byMonth[r.month] ?? 0) + n
+    map.set(r.venue_id, row)
   }
   return Array.from(map.entries())
     .map(([venueId, val]) => {
@@ -861,20 +935,29 @@ export async function getSalesByPromoter(
   orgId: string,
   range: AggregationRange,
 ): Promise<Array<{ staffId: string | null; promoterName: string; byMonth: Record<string, number>; total: number }>> {
-  const verifications = await prisma.saleVerification.findMany({
-    where: baseAggregationWhere(orgId, range),
-    select: {
-      createdAt: true,
-      staff: { select: { id: true, firstName: true, lastName: true } },
-    },
-  })
+  const bucket = monthBucketSql('sv."createdAt"', VENUE_TIMEZONE_DEFAULT)
+
+  const rows = await prisma.$queryRaw<
+    Array<{ staff_id: string | null; first_name: string | null; last_name: string | null; bucket: string; count: bigint }>
+  >(Prisma.sql`
+    SELECT s."id"                AS staff_id,
+           s."firstName"         AS first_name,
+           s."lastName"          AS last_name,
+           ${Prisma.raw(bucket)} AS bucket,
+           COUNT(*)              AS count
+    ${completedSalesFromWhere(orgId, range)}
+    GROUP BY s."id", s."firstName", s."lastName", ${Prisma.raw(bucket)}
+    ORDER BY s."id", bucket
+  `)
+
   const map = new Map<string, { name: string; byMonth: Record<string, number> }>()
-  for (const v of verifications) {
-    const key = v.staff?.id ?? 'unassigned'
-    const name = v.staff ? `${v.staff.firstName} ${v.staff.lastName}`.trim() : 'Sin promotor'
-    const month = toMonthKey(v.createdAt)
+  for (const r of rows) {
+    // `staffId` es obligatorio en el esquema, así que "Sin promotor" es defensivo:
+    // sólo aparecería si el registro quedara huérfano. Se conserva el comportamiento previo.
+    const key = r.staff_id ?? 'unassigned'
+    const name = r.staff_id ? `${r.first_name ?? ''} ${r.last_name ?? ''}`.trim() : 'Sin promotor'
     const row = map.get(key) ?? { name, byMonth: {} }
-    row.byMonth[month] = (row.byMonth[month] ?? 0) + 1
+    row.byMonth[r.bucket] = (row.byMonth[r.bucket] ?? 0) + Number(r.count)
     map.set(key, row)
   }
   return Array.from(map.entries())
@@ -883,12 +966,6 @@ export async function getSalesByPromoter(
       return { staffId: staffId === 'unassigned' ? null : staffId, promoterName: val.name, byMonth: val.byMonth, total }
     })
     .sort((a, b) => b.total - a.total)
-}
-
-/** "YYYY-MM-DD" day key in venue timezone (same tz convention as toMonthKey/toWeekLabel). */
-function toDayKey(d: Date, tz: string = VENUE_TIMEZONE_DEFAULT): string {
-  const local = new Date(d.toLocaleString('en-US', { timeZone: tz }))
-  return `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, '0')}-${String(local.getDate()).padStart(2, '0')}`
 }
 
 export interface PromoterDailyRow {
@@ -930,59 +1007,85 @@ export interface PromoterDailyResult {
  */
 export async function getSalesByPromoterDaily(orgId: string): Promise<PromoterDailyResult> {
   const tz = VENUE_TIMEZONE_DEFAULT
-  // "Now" in venue local time → current month boundaries.
-  const nowLocal = new Date(new Date().toLocaleString('en-US', { timeZone: tz }))
-  const year = nowLocal.getFullYear()
-  const month0 = nowLocal.getMonth() // 0-based
-  const mm = String(month0 + 1).padStart(2, '0')
-  const monthKey = `${year}-${mm}`
-  const rangeStart = fromZonedTime(new Date(`${monthKey}-01T00:00:00`), tz)
 
-  // Day columns: 01 → today.
+  // "Hoy" en hora del venue. Antes esto era
+  // `new Date(new Date().toLocaleString('en-US', { timeZone: tz }))`, que construye la
+  // fecha en la zona del PROCESO — el mes en curso podía salir distinto en dev y en prod
+  // cerca de medianoche. `venueCivilDate` no depende del host.
+  const hoy = venueCivilDate(new Date(), tz)
+  const monthKey = `${hoy.year}-${String(hoy.month).padStart(2, '0')}`
+  // Cadena explícita: `fromZonedTime` la lee en la zona del VENUE. Pasarle un `Date`
+  // (como antes) la haría depender otra vez del host — es la trampa del `YYYY-MM-DD`
+  // documentada en `.claude/rules/critical-warnings.md`.
+  const rangeStart = fromZonedTime(`${monthKey}-01T00:00:00.000`, tz)
+
+  // Columnas de día: 01 → hoy.
   const days: string[] = []
-  for (let d = 1; d <= nowLocal.getDate(); d++) days.push(`${monthKey}-${String(d).padStart(2, '0')}`)
+  for (let d = 1; d <= hoy.day; d++) days.push(`${monthKey}-${String(d).padStart(2, '0')}`)
 
-  // COMPLETED is scoped to the current month (daily/total); FAILED is fetched for
-  // ALL dates so we can split it into this-month vs previous-months "to review".
-  const verifications = await prisma.saleVerification.findMany({
-    where: {
-      venue: { organizationId: orgId },
-      OR: [{ status: 'COMPLETED', createdAt: { gte: rangeStart } }, { status: 'FAILED' }],
-    },
-    select: {
-      createdAt: true,
-      status: true,
-      staff: { select: { id: true, firstName: true, lastName: true } },
-    },
-  })
+  const dayBucket = dayBucketSql('sv."createdAt"', tz)
+  const monthBucket = monthBucketSql('sv."createdAt"', tz)
 
-  const map = new Map<string, { name: string; byDay: Record<string, number>; toReview: number; toReviewPrevious: number }>()
-  for (const v of verifications) {
-    const key = v.staff?.id ?? 'unassigned'
-    const name = v.staff ? `${v.staff.firstName} ${v.staff.lastName}`.trim() : 'Sin promotor'
-    const row = map.get(key) ?? { name, byDay: {}, toReview: 0, toReviewPrevious: 0 }
-    if (v.status === 'COMPLETED') {
-      const dayKey = toDayKey(v.createdAt, tz)
-      row.byDay[dayKey] = (row.byDay[dayKey] ?? 0) + 1
-    } else if (v.status === 'FAILED') {
-      if (v.createdAt >= rangeStart) row.toReview += 1
-      else row.toReviewPrevious += 1
+  // COMPLETED se limita al mes en curso (desglose diario y total); FAILED se trae de
+  // TODAS las fechas para poder partirlo en "este mes" vs "meses anteriores".
+  const rows = await prisma.$queryRaw<
+    Array<{
+      staff_id: string | null
+      first_name: string | null
+      last_name: string | null
+      day_key: string | null
+      completed_count: bigint
+      to_review: bigint
+      to_review_previous: bigint
+    }>
+  >(Prisma.sql`
+    SELECT s."id"        AS staff_id,
+           s."firstName" AS first_name,
+           s."lastName"  AS last_name,
+           CASE WHEN sv."status" = 'COMPLETED' THEN ${Prisma.raw(dayBucket)} END AS day_key,
+           COUNT(*) FILTER (WHERE sv."status" = 'COMPLETED')                                          AS completed_count,
+           COUNT(*) FILTER (WHERE sv."status" = 'FAILED' AND ${Prisma.raw(monthBucket)} = ${monthKey}) AS to_review,
+           COUNT(*) FILTER (WHERE sv."status" = 'FAILED' AND ${Prisma.raw(monthBucket)} <> ${monthKey}) AS to_review_previous
+    FROM "SaleVerification" sv
+    JOIN "Venue" v ON v."id" = sv."venueId"
+    LEFT JOIN "Staff" s ON s."id" = sv."staffId"
+    WHERE v."organizationId" = ${orgId}
+      AND (
+        (sv."status" = 'COMPLETED' AND sv."createdAt" AT TIME ZONE 'UTC' >= ${rangeStart})
+        OR sv."status" = 'FAILED'
+      )
+    GROUP BY s."id", s."firstName", s."lastName",
+             CASE WHEN sv."status" = 'COMPLETED' THEN ${Prisma.raw(dayBucket)} END
+  `)
+
+  const map = new Map<string, PromoterDailyRow>()
+  for (const r of rows) {
+    const key = r.staff_id ?? 'unassigned'
+    const row =
+      map.get(key) ??
+      ({
+        staffId: r.staff_id,
+        promoterName: r.staff_id ? `${r.first_name ?? ''} ${r.last_name ?? ''}`.trim() : 'Sin promotor',
+        byDay: {},
+        total: 0,
+        toReview: 0,
+        toReviewPrevious: 0,
+      } as PromoterDailyRow)
+
+    if (r.day_key) {
+      const n = Number(r.completed_count)
+      row.byDay[r.day_key] = (row.byDay[r.day_key] ?? 0) + n
+      row.total += n
     }
+    // Los "por revisar" NUNCA se suman a `total`: son ventas que el promotor debe corregir
+    // en el TPV, no ventas confirmadas.
+    row.toReview += Number(r.to_review)
+    row.toReviewPrevious += Number(r.to_review_previous)
     map.set(key, row)
   }
 
-  const rows: PromoterDailyRow[] = Array.from(map.entries())
-    .map(([staffId, val]) => ({
-      staffId: staffId === 'unassigned' ? null : staffId,
-      promoterName: val.name,
-      byDay: val.byDay,
-      total: Object.values(val.byDay).reduce((a, b) => a + b, 0),
-      toReview: val.toReview,
-      toReviewPrevious: val.toReviewPrevious,
-    }))
-    .sort((a, b) => b.total - a.total)
-
-  return { month: monthKey, days, rows }
+  const rowsOrdenadas = Array.from(map.values()).sort((a, b) => b.total - a.total)
+  return { month: monthKey, days, rows: rowsOrdenadas }
 }
 
 // ============================================================

@@ -21,7 +21,10 @@ import {
   getSalesByStore,
   getSalesByPromoter,
   getSalesByPromoterDaily,
+  getSalesByPromoterWeekly,
   getSalesByWeek,
+  getSalesByMonth,
+  getSalesByCity,
   getSalesBySaleTypeWeekly,
   getSalesBySimTypeWeekly,
   getSalesBySimType,
@@ -37,6 +40,9 @@ jest.mock('@/utils/prismaClient', () => ({
     payment: { findMany: jest.fn() },
     saleVerification: { findMany: jest.fn() },
     staffVenue: { findMany: jest.fn() },
+    // Desde 2026-08-04 las agregaciones agrupan en Postgres (`$queryRaw`) en vez de
+    // recorrer filas en JS. Ver el incidente del event loop en el spec.
+    $queryRaw: jest.fn(),
   },
 }))
 
@@ -59,12 +65,15 @@ jest.mock('@/config/logger', () => ({
 const mockedPaymentFindMany = prisma.payment.findMany as jest.Mock
 const mockedSvFindMany = prisma.saleVerification.findMany as jest.Mock
 const mockedStaffVenueFindMany = prisma.staffVenue.findMany as jest.Mock
+const mockedQueryRaw = prisma.$queryRaw as jest.Mock
+
+/** El SQL que se le pasó a `$queryRaw` en la llamada N, como texto plano. */
+function sqlDeLlamada(n = 0): string {
+  const arg = mockedQueryRaw.mock.calls[n]?.[0]
+  return arg?.strings ? arg.strings.join(' ') : String(arg ?? '')
+}
 
 const ORG_ID = 'org-playtelecom'
-
-// Mid-month, midday CDMX timestamps so month/week bucketing is TZ-safe.
-const MARCH = new Date('2026-03-15T18:00:00Z')
-const APRIL = new Date('2026-04-15T18:00:00Z')
 
 beforeEach(() => {
   jest.clearAllMocks()
@@ -72,18 +81,25 @@ beforeEach(() => {
 
 describe('getOrgSalesSummary — confirmedRevenue', () => {
   it('only sums payments whose verification is COMPLETED, and counts each status', async () => {
-    mockedPaymentFindMany.mockResolvedValue([
-      { amount: 100, saleVerification: { status: 'COMPLETED' } },
-      { amount: 50, saleVerification: { status: 'PENDING' } }, // pendiente — NO entra
-      { amount: 25, saleVerification: { status: 'FAILED' } }, // "Revisar" (corregible) — NO entra
-      { amount: 30, saleVerification: { status: 'REJECTED' } }, // "Rechazada" (terminal) — NO entra
-      { amount: 10, saleVerification: null }, // sin verificación — NO entra
+    // El mismo escenario de antes, ya agrupado por Postgres: 1 COMPLETED de $100,
+    // 1 PENDING de $50, 1 FAILED de $25, 1 REJECTED de $30 y 1 sin verificación de $10.
+    mockedQueryRaw.mockResolvedValue([
+      {
+        total_revenue: '215',
+        confirmed_revenue: '100',
+        total_count: BigInt(5),
+        completed_count: BigInt(1),
+        pending_count: BigInt(1),
+        failed_count: BigInt(1),
+        rejected_count: BigInt(1),
+        without_verification_count: BigInt(1),
+      },
     ])
 
     const summary = await getOrgSalesSummary(ORG_ID, {})
 
     expect(summary.confirmedRevenue).toBe(100)
-    // totalRevenue keeps legacy semantics (every completed payment) for backwards compat
+    // totalRevenue conserva la semántica previa (todo pago completado) por compatibilidad.
     expect(summary.totalRevenue).toBe(215)
     expect(summary.completedCount).toBe(1)
     expect(summary.pendingCount).toBe(1)
@@ -93,9 +109,17 @@ describe('getOrgSalesSummary — confirmedRevenue', () => {
   })
 
   it('returns zero confirmedRevenue when nothing is confirmed', async () => {
-    mockedPaymentFindMany.mockResolvedValue([
-      { amount: 50, saleVerification: { status: 'PENDING' } },
-      { amount: 10, saleVerification: null },
+    mockedQueryRaw.mockResolvedValue([
+      {
+        total_revenue: '60',
+        confirmed_revenue: '0',
+        total_count: BigInt(2),
+        completed_count: BigInt(0),
+        pending_count: BigInt(1),
+        failed_count: BigInt(0),
+        rejected_count: BigInt(0),
+        without_verification_count: BigInt(1),
+      },
     ])
 
     const summary = await getOrgSalesSummary(ORG_ID, {})
@@ -103,15 +127,62 @@ describe('getOrgSalesSummary — confirmedRevenue', () => {
     expect(summary.confirmedRevenue).toBe(0)
     expect(summary.totalRevenue).toBe(60)
   })
+
+  it('devuelve ceros, no NaN ni undefined, cuando no hay pagos', async () => {
+    // Postgres devuelve NULL en los SUM cuando no hay filas; el COALESCE + Number(… ?? 0)
+    // tiene que dejar ceros de verdad. Un NaN aquí pintaría "$NaN" en el KPI.
+    mockedQueryRaw.mockResolvedValue([
+      {
+        total_revenue: null,
+        confirmed_revenue: null,
+        total_count: BigInt(0),
+        completed_count: BigInt(0),
+        pending_count: BigInt(0),
+        failed_count: BigInt(0),
+        rejected_count: BigInt(0),
+        without_verification_count: BigInt(0),
+      },
+    ])
+
+    const summary = await getOrgSalesSummary(ORG_ID, {})
+
+    expect(summary.totalRevenue).toBe(0)
+    expect(summary.confirmedRevenue).toBe(0)
+    expect(Number.isNaN(summary.totalRevenue)).toBe(false)
+  })
+
+  it('parte de TODOS los pagos completados, no sólo de las ventas confirmadas', async () => {
+    // Su universo es distinto al de las demás agregaciones a propósito: incluye pagos
+    // sin verificación. Por eso el FROM arranca en "Payment", no en "SaleVerification".
+    mockedQueryRaw.mockResolvedValue([
+      {
+        total_revenue: '0',
+        confirmed_revenue: '0',
+        total_count: BigInt(0),
+        completed_count: BigInt(0),
+        pending_count: BigInt(0),
+        failed_count: BigInt(0),
+        rejected_count: BigInt(0),
+        without_verification_count: BigInt(0),
+      },
+    ])
+    await getOrgSalesSummary(ORG_ID, {})
+    const sql = sqlDeLlamada().replace(/\s+/g, ' ')
+    expect(sql).toContain('FROM "Payment" p')
+    expect(sql).toContain(`LEFT JOIN "SaleVerification" sv`)
+    expect(sql).toContain(`p."status" = 'COMPLETED'`)
+    expect(mockedPaymentFindMany).not.toHaveBeenCalled()
+  })
 })
 
 describe('getSalesBySupervisor — MANAGER-first attribution', () => {
   it('attributes sales to the venue MANAGER even when an ADMIN has a lower staffId', async () => {
-    mockedSvFindMany.mockResolvedValue([
-      { createdAt: MARCH, venueId: 'venue-1' },
-      { createdAt: APRIL, venueId: 'venue-1' },
+    // Postgres ya agrupó: 1 venta en marzo y 1 en abril, ambas de venue-1.
+    mockedQueryRaw.mockResolvedValue([
+      { venue_id: 'venue-1', week: 'W11', month: '2026-03', count: BigInt(1) },
+      { venue_id: 'venue-1', week: 'W16', month: '2026-04', count: BigInt(1) },
     ])
-    // ADMIN sorts first by staffId — the old logic picked it as "supervisor".
+    // El ADMIN va primero por staffId — la lógica vieja lo escogía como "supervisor".
     mockedStaffVenueFindMany.mockResolvedValue([
       { venueId: 'venue-1', staffId: 'a-admin', role: 'ADMIN', staff: { id: 'a-admin', firstName: 'Jordi', lastName: 'Mota' } },
       { venueId: 'venue-1', staffId: 'z-manager', role: 'MANAGER', staff: { id: 'z-manager', firstName: 'Hugo', lastName: 'Gonzalez' } },
@@ -123,13 +194,13 @@ describe('getSalesBySupervisor — MANAGER-first attribution', () => {
     expect(rows[0].supervisorId).toBe('z-manager')
     expect(rows[0].supervisorName).toBe('Hugo Gonzalez')
     expect(rows[0].total).toBe(2)
-    // Month buckets exposed for the month-by-month client tables
+    // Buckets mensuales para las tablas mes-a-mes del cliente
     expect(rows[0].byMonth).toEqual({ '2026-03': 1, '2026-04': 1 })
     expect(Object.keys(rows[0].byWeek)).toHaveLength(2)
   })
 
   it('falls back to ADMIN when the venue has no MANAGER', async () => {
-    mockedSvFindMany.mockResolvedValue([{ createdAt: MARCH, venueId: 'venue-1' }])
+    mockedQueryRaw.mockResolvedValue([{ venue_id: 'venue-1', week: 'W11', month: '2026-03', count: BigInt(1) }])
     mockedStaffVenueFindMany.mockResolvedValue([
       { venueId: 'venue-1', staffId: 'a-admin', role: 'ADMIN', staff: { id: 'a-admin', firstName: 'Edgar', lastName: 'Salazar' } },
     ])
@@ -141,7 +212,7 @@ describe('getSalesBySupervisor — MANAGER-first attribution', () => {
   })
 
   it('reports "Sin supervisor" when the venue has neither', async () => {
-    mockedSvFindMany.mockResolvedValue([{ createdAt: MARCH, venueId: 'venue-1' }])
+    mockedQueryRaw.mockResolvedValue([{ venue_id: 'venue-1', week: 'W11', month: '2026-03', count: BigInt(1) }])
     mockedStaffVenueFindMany.mockResolvedValue([])
 
     const rows = await getSalesBySupervisor(ORG_ID, {})
@@ -149,33 +220,102 @@ describe('getSalesBySupervisor — MANAGER-first attribution', () => {
     expect(rows[0].supervisorId).toBeNull()
     expect(rows[0].supervisorName).toBe('Sin supervisor')
   })
+
+  it('junta bajo un mismo supervisor las ventas de varias tiendas suyas', async () => {
+    // Dos sucursales, mismo responsable: la fila del supervisor debe sumar las dos.
+    mockedQueryRaw.mockResolvedValue([
+      { venue_id: 'venue-1', week: 'W11', month: '2026-03', count: BigInt(3) },
+      { venue_id: 'venue-2', week: 'W11', month: '2026-03', count: BigInt(2) },
+    ])
+    mockedStaffVenueFindMany.mockResolvedValue([
+      { venueId: 'venue-1', staffId: 'sup', role: 'MANAGER', staff: { id: 'sup', firstName: 'Luis', lastName: 'Pérez' } },
+      { venueId: 'venue-2', staffId: 'sup', role: 'MANAGER', staff: { id: 'sup', firstName: 'Luis', lastName: 'Pérez' } },
+    ])
+
+    const rows = await getSalesBySupervisor(ORG_ID, {})
+
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ supervisorId: 'sup', total: 5, byWeek: { W11: 5 }, byMonth: { '2026-03': 5 } })
+  })
+})
+
+describe('getSalesByPromoterWeekly — una fila por (promotor, tienda)', () => {
+  it('separa al mismo promotor cuando vendió en dos tiendas', async () => {
+    mockedQueryRaw.mockResolvedValue([
+      { staff_id: 's1', first_name: 'Ana', last_name: 'López', venue_id: 'v1', venue_name: 'BAE Papagayo', week: 'W32', count: BigInt(4) },
+      { staff_id: 's1', first_name: 'Ana', last_name: 'López', venue_id: 'v2', venue_name: 'BAE Pavón', week: 'W32', count: BigInt(1) },
+    ])
+    mockedStaffVenueFindMany.mockResolvedValue([
+      { venueId: 'v1', staffId: 'sup', role: 'MANAGER', staff: { id: 'sup', firstName: 'Luis', lastName: 'Pérez' } },
+    ])
+
+    const rows = await getSalesByPromoterWeekly(ORG_ID, {})
+
+    expect(rows).toHaveLength(2)
+    expect(rows[0]).toMatchObject({
+      staffId: 's1',
+      promoterName: 'Ana López',
+      venueId: 'v1',
+      venueName: 'BAE Papagayo',
+      supervisorId: 'sup',
+      supervisorName: 'Luis Pérez',
+      byWeek: { W32: 4 },
+      total: 4,
+    })
+    expect(rows[1]).toMatchObject({ venueId: 'v2', supervisorId: null, supervisorName: 'Sin supervisor', total: 1 })
+  })
+
+  it('descarta las ventas sin promotor o sin tienda (no se pueden atribuir)', async () => {
+    mockedQueryRaw.mockResolvedValue([
+      { staff_id: null, first_name: null, last_name: null, venue_id: 'v1', venue_name: 'BAE Papagayo', week: 'W32', count: BigInt(3) },
+    ])
+    mockedStaffVenueFindMany.mockResolvedValue([])
+
+    const rows = await getSalesByPromoterWeekly(ORG_ID, {})
+
+    expect(rows).toEqual([])
+  })
 })
 
 describe('getSalesByStore — byMonth buckets', () => {
   it('exposes month buckets alongside weeks', async () => {
-    mockedSvFindMany.mockResolvedValue([
-      { createdAt: MARCH, venue: { id: 'venue-1', name: 'BAE POZOS' } },
-      { createdAt: MARCH, venue: { id: 'venue-1', name: 'BAE POZOS' } },
-      { createdAt: APRIL, venue: { id: 'venue-2', name: 'GEOPLAZAS' } },
+    mockedQueryRaw.mockResolvedValue([
+      { venue_id: 'venue-1', venue_name: 'BAE POZOS', week: 'W11', month: '2026-03', count: BigInt(2) },
+      { venue_id: 'venue-2', venue_name: 'GEOPLAZAS', week: 'W16', month: '2026-04', count: BigInt(1) },
     ])
 
     const rows = await getSalesByStore(ORG_ID, {})
 
     expect(rows).toHaveLength(2)
-    // Sorted desc by total
+    // Ordenadas de mayor a menor total
     expect(rows[0].venueName).toBe('BAE POZOS')
     expect(rows[0].byMonth).toEqual({ '2026-03': 2 })
+    expect(rows[0].byWeek).toEqual({ W11: 2 })
     expect(rows[1].byMonth).toEqual({ '2026-04': 1 })
+  })
+
+  it('suma las semanas de un mismo mes en el bucket mensual', async () => {
+    // Dos semanas del mismo mes en la misma tienda: el mes debe traer la suma, no la última.
+    mockedQueryRaw.mockResolvedValue([
+      { venue_id: 'v1', venue_name: 'BAE POZOS', week: 'W11', month: '2026-03', count: BigInt(2) },
+      { venue_id: 'v1', venue_name: 'BAE POZOS', week: 'W12', month: '2026-03', count: BigInt(3) },
+    ])
+
+    const rows = await getSalesByStore(ORG_ID, {})
+
+    expect(rows[0].byMonth).toEqual({ '2026-03': 5 })
+    expect(rows[0].byWeek).toEqual({ W11: 2, W12: 3 })
+    expect(rows[0].total).toBe(5)
   })
 })
 
 describe('getSalesByPromoter — monthly grouping', () => {
   it('groups by verification staff, sorted desc, with "Sin promotor" fallback', async () => {
-    mockedSvFindMany.mockResolvedValue([
-      { createdAt: MARCH, staff: { id: 's1', firstName: 'Susana', lastName: 'Valdez' } },
-      { createdAt: APRIL, staff: { id: 's1', firstName: 'Susana', lastName: 'Valdez' } },
-      { createdAt: APRIL, staff: { id: 's2', firstName: 'Ricardo', lastName: 'Martinez' } },
-      { createdAt: APRIL, staff: null },
+    mockedQueryRaw.mockResolvedValue([
+      { staff_id: 's1', first_name: 'Susana', last_name: 'Valdez', bucket: '2026-03', count: BigInt(1) },
+      { staff_id: 's1', first_name: 'Susana', last_name: 'Valdez', bucket: '2026-04', count: BigInt(1) },
+      { staff_id: 's2', first_name: 'Ricardo', last_name: 'Martinez', bucket: '2026-04', count: BigInt(1) },
+      { staff_id: null, first_name: null, last_name: null, bucket: '2026-04', count: BigInt(1) },
     ])
 
     const rows = await getSalesByPromoter(ORG_ID, {})
@@ -192,15 +332,44 @@ describe('getSalesByPromoter — monthly grouping', () => {
   })
 
   it('only queries CONFIRMED verifications (status=COMPLETED in the where clause)', async () => {
-    mockedSvFindMany.mockResolvedValue([])
+    mockedQueryRaw.mockResolvedValue([])
 
     await getSalesByPromoter(ORG_ID, {})
 
-    expect(mockedSvFindMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ status: 'COMPLETED', venue: { organizationId: ORG_ID } }),
-      }),
-    )
+    const sql = sqlDeLlamada().replace(/\s+/g, ' ')
+    expect(sql).toContain(`sv."status" = 'COMPLETED'`)
+    expect(sql).toContain(`v."organizationId"`)
+    expect(mockedQueryRaw.mock.calls[0][0].values).toContain(ORG_ID)
+  })
+})
+
+describe('getSalesByCity', () => {
+  it('agrupa por ciudad × mes y ordena por total desc', async () => {
+    mockedQueryRaw.mockResolvedValue([
+      { city: 'Querétaro', bucket: '2026-07', count: BigInt(2) },
+      { city: 'Querétaro', bucket: '2026-08', count: BigInt(5) },
+      { city: 'San Luis Potosí', bucket: '2026-08', count: BigInt(3) },
+    ])
+
+    const rows = await getSalesByCity(ORG_ID, {})
+
+    expect(rows).toEqual([
+      { city: 'Querétaro', byMonth: { '2026-07': 2, '2026-08': 5 }, total: 7 },
+      { city: 'San Luis Potosí', byMonth: { '2026-08': 3 }, total: 3 },
+    ])
+  })
+
+  it('agrupa bajo "Sin ciudad" las sucursales sin ciudad capturada', async () => {
+    // Varias sucursales de PlayTelecom no tienen ciudad; deben caer todas en el mismo grupo.
+    mockedQueryRaw.mockResolvedValue([
+      { city: null, bucket: '2026-08', count: BigInt(4) },
+      { city: '', bucket: '2026-08', count: BigInt(1) },
+    ])
+
+    const rows = await getSalesByCity(ORG_ID, {})
+
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toEqual({ city: 'Sin ciudad', byMonth: { '2026-08': 5 }, total: 5 })
   })
 })
 
@@ -209,32 +378,51 @@ describe('getSalesByPromoterDaily — current month, per-day + toReview', () => 
   function cdmxNow(): Date {
     return new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }))
   }
-  // 18:00 UTC on the 1st = 12:00 CDMX on the 1st → day key `${month}-01`, TZ-stable,
-  // and aligned to the SAME CDMX month the service computes (no month-boundary flake).
-  function firstOfThisMonthMidday(): Date {
-    const c = cdmxNow()
-    return new Date(Date.UTC(c.getFullYear(), c.getMonth(), 1, 18, 0, 0))
-  }
-
-  // A FAILED clearly in a PREVIOUS month (1 year before, 1st at noon CDMX).
-  function failedLastYear(): Date {
-    const c = cdmxNow()
-    return new Date(Date.UTC(c.getFullYear() - 1, c.getMonth(), 1, 18, 0, 0))
-  }
-
   it('counts COMPLETED per day in total, splits FAILED into this-month (toReview) vs prior (toReviewPrevious), excludes both from total, sorted desc', async () => {
-    const d1 = firstOfThisMonthMidday()
-    const prev = failedLastYear()
-    mockedSvFindMany.mockResolvedValue([
-      // staff A: 2 confirmed (this month) + 1 to-review (this month) + 1 to-review (prior month)
-      { createdAt: d1, status: 'COMPLETED', staff: { id: 'A', firstName: 'Nancy', lastName: 'Casillas' } },
-      { createdAt: d1, status: 'COMPLETED', staff: { id: 'A', firstName: 'Nancy', lastName: 'Casillas' } },
-      { createdAt: d1, status: 'FAILED', staff: { id: 'A', firstName: 'Nancy', lastName: 'Casillas' } },
-      { createdAt: prev, status: 'FAILED', staff: { id: 'A', firstName: 'Nancy', lastName: 'Casillas' } },
-      // staff B: 1 confirmed
-      { createdAt: d1, status: 'COMPLETED', staff: { id: 'B', firstName: 'Patricia', lastName: 'Navarro' } },
-      // staff C: ONLY a prior-month to-review → must still appear (promoter must act), total 0
-      { createdAt: prev, status: 'FAILED', staff: { id: 'C', firstName: 'Lucía', lastName: 'Briones' } },
+    const c = cdmxNow()
+    const mes = `${c.getFullYear()}-${String(c.getMonth() + 1).padStart(2, '0')}`
+    // Postgres ya devuelve agrupado. `day_key` sólo viene lleno en las filas COMPLETED;
+    // las de "por revisar" llegan con day_key null.
+    mockedQueryRaw.mockResolvedValue([
+      // promotora A: 2 confirmadas el día 1 + 1 por revisar de este mes + 1 de meses anteriores
+      {
+        staff_id: 'A',
+        first_name: 'Nancy',
+        last_name: 'Casillas',
+        day_key: `${mes}-01`,
+        completed_count: BigInt(2),
+        to_review: BigInt(0),
+        to_review_previous: BigInt(0),
+      },
+      {
+        staff_id: 'A',
+        first_name: 'Nancy',
+        last_name: 'Casillas',
+        day_key: null,
+        completed_count: BigInt(0),
+        to_review: BigInt(1),
+        to_review_previous: BigInt(1),
+      },
+      // promotora B: 1 confirmada
+      {
+        staff_id: 'B',
+        first_name: 'Patricia',
+        last_name: 'Navarro',
+        day_key: `${mes}-01`,
+        completed_count: BigInt(1),
+        to_review: BigInt(0),
+        to_review_previous: BigInt(0),
+      },
+      // promotora C: SÓLO una por revisar de meses anteriores → debe aparecer igual, con total 0
+      {
+        staff_id: 'C',
+        first_name: 'Lucía',
+        last_name: 'Briones',
+        day_key: null,
+        completed_count: BigInt(0),
+        to_review: BigInt(0),
+        to_review_previous: BigInt(1),
+      },
     ])
 
     const result = await getSalesByPromoterDaily(ORG_ID)
@@ -243,23 +431,23 @@ describe('getSalesByPromoterDaily — current month, per-day + toReview', () => 
     expect(result.rows[1]).toMatchObject({ staffId: 'B', total: 1, toReview: 0, toReviewPrevious: 0 })
     const cRow = result.rows.find(r => r.staffId === 'C')!
     expect(cRow).toMatchObject({ total: 0, toReview: 0, toReviewPrevious: 1 })
-    // Confirmed-only day buckets; the 1st carries staff A's two confirmed sales
-    const dayKey = `${result.month}-01`
-    expect(result.rows[0].byDay[dayKey]).toBe(2)
-    // byDay never includes FAILED → sum of byDay equals total (neither to-review count leaks in)
+    expect(result.rows[0].byDay[`${mes}-01`]).toBe(2)
+    // 🔴 `byDay` nunca incluye las "por revisar": su suma tiene que ser exactamente `total`.
+    // Si una por-revisar se colara, el promotor cobraría comisión por una venta no confirmada.
     expect(Object.values(result.rows[0].byDay).reduce((a, b) => a + b, 0)).toBe(result.rows[0].total)
   })
 
   it('queries COMPLETED (this month) OR FAILED (any date), so prior-month to-review is available', async () => {
-    mockedSvFindMany.mockResolvedValue([])
+    mockedQueryRaw.mockResolvedValue([])
 
     const result = await getSalesByPromoterDaily(ORG_ID)
 
-    const call = mockedSvFindMany.mock.calls[0][0]
-    expect(call.where.venue).toEqual({ organizationId: ORG_ID })
-    // OR: COMPLETED scoped to current month, FAILED unscoped (all dates)
-    expect(call.where.OR).toEqual([{ status: 'COMPLETED', createdAt: { gte: expect.any(Date) } }, { status: 'FAILED' }])
-    // month is the current CDMX YYYY-MM; days run 1..today
+    const sql = sqlDeLlamada().replace(/\s+/g, ' ')
+    expect(sql).toContain(`sv."status" = 'COMPLETED'`)
+    expect(sql).toContain(`OR sv."status" = 'FAILED'`)
+    // La comparación de fecha marca la columna como UTC: sin eso el mes se corre 6 horas.
+    expect(sql).toContain(`sv."createdAt" AT TIME ZONE 'UTC' >=`)
+    // El mes es el actual en CDMX; los días van del 1 a hoy.
     const c = cdmxNow()
     expect(result.month).toBe(`${c.getFullYear()}-${String(c.getMonth() + 1).padStart(2, '0')}`)
     expect(result.days.length).toBe(c.getDate())
@@ -290,138 +478,193 @@ describe('toSimBucket', () => {
 
 describe('getSalesBySaleTypeWeekly', () => {
   it('splits COMPLETED sales by isPortabilidad into fixed weekly rows', async () => {
-    const w1 = new Date('2026-03-09T18:00:00Z') // 2026-W11
-    const w2 = new Date('2026-03-16T18:00:00Z') // 2026-W12
-    mockedSvFindMany.mockResolvedValue([
-      { createdAt: w1, isPortabilidad: false },
-      { createdAt: w1, isPortabilidad: true },
-      { createdAt: w2, isPortabilidad: false },
+    mockedQueryRaw.mockResolvedValue([
+      { bucket: '2026-W11', is_portabilidad: false, count: BigInt(1) },
+      { bucket: '2026-W12', is_portabilidad: false, count: BigInt(1) },
+      { bucket: '2026-W11', is_portabilidad: true, count: BigInt(1) },
     ])
     const rows = await getSalesBySaleTypeWeekly(ORG_ID, {})
     expect(rows.map(r => r.name)).toEqual(['Líneas Nuevas', 'Portabilidades'])
     expect(rows[0]).toMatchObject({ total: 2, byWeek: { '2026-W11': 1, '2026-W12': 1 } })
     expect(rows[1]).toMatchObject({ total: 1, byWeek: { '2026-W11': 1 } })
   })
+
   it('returns both rows even when one type has zero sales', async () => {
-    mockedSvFindMany.mockResolvedValue([{ createdAt: new Date('2026-03-09T18:00:00Z'), isPortabilidad: false }])
+    mockedQueryRaw.mockResolvedValue([{ bucket: '2026-W11', is_portabilidad: false, count: BigInt(1) }])
     const rows = await getSalesBySaleTypeWeekly(ORG_ID, {})
     expect(rows.map(r => r.name)).toEqual(['Líneas Nuevas', 'Portabilidades'])
     expect(rows[1]).toMatchObject({ total: 0, byWeek: {} })
   })
-  it('only queries CONFIRMED verifications', async () => {
-    mockedSvFindMany.mockResolvedValue([])
+
+  it('only queries CONFIRMED verifications, scoped to the organization', async () => {
+    mockedQueryRaw.mockResolvedValue([])
     await getSalesBySaleTypeWeekly(ORG_ID, {})
-    expect(mockedSvFindMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ status: 'COMPLETED', venue: { organizationId: ORG_ID } }) }),
-    )
+    expect(sqlDeLlamada()).toContain(`sv."status" = 'COMPLETED'`)
+    expect(sqlDeLlamada()).toContain(`v."organizationId"`)
+    expect(mockedQueryRaw.mock.calls[0][0].values).toContain(ORG_ID)
+  })
+
+  it('ya no trae filas crudas: una sola consulta agregada', async () => {
+    mockedQueryRaw.mockResolvedValue([])
+    await getSalesBySaleTypeWeekly(ORG_ID, {})
+    expect(mockedQueryRaw).toHaveBeenCalledTimes(1)
+    expect(mockedSvFindMany).not.toHaveBeenCalled()
   })
 })
 
-describe('toIsoWeekKey (via getSalesBySaleTypeWeekly week keys)', () => {
-  it('produces ISO year-week keys and orders correctly across a year boundary', async () => {
-    // 2025-12-29 (Mon) is ISO 2026-W01; 2026-01-05 (Mon) is 2026-W02
-    const dec29 = new Date('2025-12-29T18:00:00Z')
-    const jan05 = new Date('2026-01-05T18:00:00Z')
-    mockedSvFindMany.mockResolvedValue([
-      { createdAt: dec29, isPortabilidad: false },
-      { createdAt: jan05, isPortabilidad: false },
-    ])
-    const rows = await getSalesBySaleTypeWeekly(ORG_ID, {})
-    const lineas = rows.find(r => r.name === 'Líneas Nuevas')!
-    expect(Object.keys(lineas.byWeek).sort()).toEqual(['2026-W01', '2026-W02'])
+describe('llave de semana ISO — la calcula Postgres, no JS', () => {
+  /**
+   * El bucketing por semana se hace ahora con `to_char(..., 'IYYY-"W"IW')`.
+   * La equivalencia real contra Postgres se prueba en
+   * `tests/api-tests/sale-verification.org.week-parity.api.test.ts` (13 instantes de
+   * frontera, bajo las dos zonas de host). Aquí sólo se blinda el formato: `IYYY` es lo
+   * que hace que el 3-ene-2027 caiga en `2026-W53` y no en `2027-W53`.
+   */
+  it('usa IYYY (año ISO), no YYYY (calendario)', async () => {
+    mockedQueryRaw.mockResolvedValue([])
+    await getSalesBySaleTypeWeekly(ORG_ID, {})
+    expect(sqlDeLlamada()).toContain(`'IYYY-"W"IW'`)
+    expect(sqlDeLlamada()).not.toContain(`'YYYY-"W"IW'`)
+  })
+
+  it('convierte a hora del venue antes de sacar la semana', async () => {
+    mockedQueryRaw.mockResolvedValue([])
+    await getSalesBySaleTypeWeekly(ORG_ID, {})
+    expect(sqlDeLlamada()).toContain(`AT TIME ZONE 'UTC' AT TIME ZONE 'America/Mexico_City'`)
   })
 })
 
 describe('getSalesBySimTypeWeekly', () => {
-  const w11 = new Date('2026-03-09T18:00:00Z') // 2026-W11
-  const cat = (name: string | null) => ({
-    payment: { order: { items: name === null ? [] : [{ serializedItem: { category: { name } } }] } },
-  })
+  const W11 = '2026-W11'
+  /** Fila ya agrupada por Postgres: categoría cruda + conteo en esa semana. */
+  const cat = (name: string | null, count: number) => ({ bucket: W11, category_name: name, count: BigInt(count) })
 
   it('groups by SIM bucket per week; fixed rows (incl. e-SIM) always present; Otros only when > 0', async () => {
-    mockedSvFindMany.mockResolvedValue([
-      { createdAt: w11, ...cat('SIM de Intercambio') },
-      { createdAt: w11, ...cat('SIM de Intercambio') },
-      { createdAt: w11, ...cat('SIM de Evento') },
-      { createdAt: w11, ...cat('E-SIM de promotor') }, // → e-SIM (its own row)
-      { createdAt: w11, ...cat('$40 de caja') }, // → Otros SIMs
+    mockedQueryRaw.mockResolvedValue([
+      cat('SIM de Intercambio', 2),
+      cat('SIM de Evento', 1),
+      cat('E-SIM de promotor', 1), // → e-SIM (su propia fila)
+      cat('$40 de caja', 1), // → Otros SIMs
     ])
     const rows = await getSalesBySimTypeWeekly(ORG_ID, {})
     expect(rows.map(r => r.name)).toEqual(['SIM de Intercambio', '$100 de Promotor', 'SIM de Evento', 'e-SIM', 'Otros SIMs'])
     expect(rows[0]).toMatchObject({ total: 2, byWeek: { '2026-W11': 2 } })
-    expect(rows[1]).toMatchObject({ name: '$100 de Promotor', total: 0, byWeek: {} }) // fixed, zero, still present
+    expect(rows[1]).toMatchObject({ name: '$100 de Promotor', total: 0, byWeek: {} }) // fija, en cero, presente igual
     expect(rows[2]).toMatchObject({ name: 'SIM de Evento', total: 1 })
     expect(rows[3]).toMatchObject({ name: 'e-SIM', total: 1 })
     expect(rows[4]).toMatchObject({ name: 'Otros SIMs', total: 1 })
   })
 
   it('omits "Otros SIMs" when every sale is a fixed category', async () => {
-    mockedSvFindMany.mockResolvedValue([{ createdAt: w11, ...cat('$100 de Promotor') }])
+    mockedQueryRaw.mockResolvedValue([cat('$100 de Promotor', 1)])
     const rows = await getSalesBySimTypeWeekly(ORG_ID, {})
     expect(rows.map(r => r.name)).toEqual(['SIM de Intercambio', '$100 de Promotor', 'SIM de Evento', 'e-SIM'])
   })
 
   it('treats a sale with no serialized item as Otros SIMs', async () => {
-    mockedSvFindMany.mockResolvedValue([{ createdAt: w11, ...cat(null) }])
+    // Sin serializado, el LEFT JOIN deja `category_name` en NULL.
+    mockedQueryRaw.mockResolvedValue([cat(null, 1)])
     const rows = await getSalesBySimTypeWeekly(ORG_ID, {})
     expect(rows.find(r => r.name === 'Otros SIMs')).toMatchObject({ total: 1 })
   })
+
+  it('suma varias categorías crudas que caen en el mismo bucket', async () => {
+    // "eSIM" y "E-SIM de promotor" son categorías distintas en la base pero el mismo bucket.
+    mockedQueryRaw.mockResolvedValue([cat('E-SIM de promotor', 2), cat('eSIM', 3)])
+    const rows = await getSalesBySimTypeWeekly(ORG_ID, {})
+    expect(rows.find(r => r.name === 'e-SIM')).toMatchObject({ total: 5, byWeek: { '2026-W11': 5 } })
+  })
 })
 
-describe('weekly tables reconcile with the weekly bar', () => {
-  it('grand totals: Σ sale-type == Σ sim-type == Σ by-week count', async () => {
-    // Helper to build a sale record with a serialized item category name
-    const c = (name: string) => ({
-      payment: { amount: 100, order: { items: [{ serializedItem: { category: { name } } }] } },
-    })
-    const W11 = '2026-03-09T18:00:00Z' // ISO week 2026-W11
-    const W12 = '2026-03-16T18:00:00Z' // ISO week 2026-W12
-    // 4 sales across 2 weeks, 2 sale types, 3 SIM buckets (incl. Otros)
-    const dataset = [
-      { createdAt: new Date(W11), isPortabilidad: false, ...c('SIM de Intercambio') },
-      { createdAt: new Date(W11), isPortabilidad: true, ...c('SIM de Evento') },
-      { createdAt: new Date(W11), isPortabilidad: false, ...c('E-SIM de promotor') }, // → e-SIM
-      { createdAt: new Date(W12), isPortabilidad: true, ...c('$100 de Promotor') },
-    ]
-    // All three functions share the same COMPLETED base query — one mock feeds all.
-    mockedSvFindMany.mockResolvedValue(dataset)
+describe('tipo de SIM — la categoría se elige de forma DETERMINISTA', () => {
+  /**
+   * 🔴 El código anterior hacía `order.items.find(oi => oi.serializedItem)` sobre una
+   * relación SIN `orderBy`: una orden con dos serializados de categorías distintas podía
+   * cambiar de bucket entre corridas. Mismo defecto de familia que la pérdida silenciosa
+   * de filas en listas paginadas. `DISTINCT ON` con `ORDER BY` explícito lo fija.
+   */
+  it('usa DISTINCT ON con desempate explícito, no el orden que devuelva Postgres', async () => {
+    mockedQueryRaw.mockResolvedValue([])
+    await getSalesBySimTypeWeekly(ORG_ID, {})
+    const sql = sqlDeLlamada().replace(/\s+/g, ' ')
+    expect(sql).toContain('DISTINCT ON (sv."id")')
+    // 1º los items CON serializado, 2º desempate estable por id del item.
+    expect(sql).toContain('ORDER BY sv."id", (si."id" IS NULL), oi."id"')
+  })
 
-    const byWeek = await getSalesByWeek(ORG_ID, {})
-    const sale = await getSalesBySaleTypeWeekly(ORG_ID, {})
-    const sim = await getSalesBySimTypeWeekly(ORG_ID, {})
+  it('resuelve la categoría por el camino completo pago → orden → item → serializado', async () => {
+    mockedQueryRaw.mockResolvedValue([])
+    await getSalesBySimType(ORG_ID, {})
+    const sql = sqlDeLlamada().replace(/\s+/g, ' ')
+    expect(sql).toContain(`LEFT JOIN "Order" o ON o."id" = p."orderId"`)
+    expect(sql).toContain(`LEFT JOIN "OrderItem" oi ON oi."orderId" = o."id"`)
+    expect(sql).toContain(`LEFT JOIN "SerializedItem" si ON si."orderItemId" = oi."id"`)
+    expect(sql).toContain(`LEFT JOIN "ItemCategory" ic ON ic."id" = si."categoryId"`)
+  })
+})
 
-    // Grand total from the bar chart (Σ count across all weeks)
-    const grand = byWeek.reduce((a, r) => a + r.count, 0)
+/**
+ * 🔴 REGLA DE NEGOCIO EXPLÍCITA (Isaac, 2026-06-29): *"el total debe cuadrar en todas las
+ * tablas y gráficas"*. Los reportes semanales alimentan el cobro a Walmart; si dos tablas
+ * de la misma pantalla cuentan conjuntos distintos de ventas, alguien cobra de menos.
+ *
+ * Antes esa garantía se probaba alimentando UN dataset a las tres funciones: como todas
+ * llamaban al mismo `baseAggregationWhere`, contaban lo mismo por construcción.
+ *
+ * Desde que agrupan en SQL (2026-08-04), la garantía vive en otro lado: todas arman su
+ * consulta a partir del MISMO `completedSalesFromWhere`. Por eso el test cambia de forma
+ * — ya no compara totales sobre un dataset compartido, sino que exige que las consultas
+ * lleven el mismo filtro base. Es una comprobación más fuerte: detecta la divergencia en
+ * el momento en que alguien escribe su propio WHERE, sin depender de que el dataset de
+ * prueba tuviera el caso que la destapa.
+ */
+describe('todas las agregaciones cuentan el MISMO conjunto de ventas', () => {
+  const FILTRO_BASE = [
+    `FROM "SaleVerification" sv`,
+    `JOIN "Venue" v ON v."id" = sv."venueId"`,
+    `sv."status" = 'COMPLETED'`,
+    `v."organizationId"`,
+  ]
 
-    // The two new weekly tables must agree with the bar's grand total.
-    // (Per-week key reconciliation is skipped: getSalesByWeek keys by "Wxx"
-    // while the two tables key by "YYYY-Www" — different formats, same invariant
-    // is fully captured by the grand totals below.)
-    expect(sale.reduce((a, r) => a + r.total, 0)).toBe(grand)
-    expect(sim.reduce((a, r) => a + r.total, 0)).toBe(grand)
-
-    // Additionally: the two new tables share the same "YYYY-Www" key format,
-    // so we can verify per-week equality between them.
-    const allWeeks = new Set([...sale.flatMap(r => Object.keys(r.byWeek)), ...sim.flatMap(r => Object.keys(r.byWeek))])
-    for (const wk of allWeeks) {
-      const saleWkTotal = sale.reduce((a, r) => a + (r.byWeek[wk] ?? 0), 0)
-      const simWkTotal = sim.reduce((a, r) => a + (r.byWeek[wk] ?? 0), 0)
-      expect(simWkTotal).toBe(saleWkTotal)
+  it.each([
+    ['getSalesByMonth', () => getSalesByMonth(ORG_ID, {})],
+    ['getSalesByWeek', () => getSalesByWeek(ORG_ID, {})],
+    ['getSalesBySaleTypeWeekly', () => getSalesBySaleTypeWeekly(ORG_ID, {})],
+  ])('%s usa el filtro base compartido', async (_nombre, fn) => {
+    mockedQueryRaw.mockResolvedValue([])
+    await fn()
+    const sql = sqlDeLlamada().replace(/\s+/g, ' ')
+    for (const fragmento of FILTRO_BASE) {
+      expect(sql).toContain(fragmento.replace(/\s+/g, ' '))
     }
+  })
+
+  it('los totales cuadran entre la barra semanal y la tabla por tipo de venta', async () => {
+    // Mismo conjunto de ventas, agrupado de dos maneras: 3 en W11 y 1 en W12.
+    mockedQueryRaw.mockResolvedValueOnce([
+      { bucket: 'W11', count: BigInt(3), revenue: '300.00' },
+      { bucket: 'W12', count: BigInt(1), revenue: '100.00' },
+    ])
+    const byWeek = await getSalesByWeek(ORG_ID, {})
+
+    mockedQueryRaw.mockResolvedValueOnce([
+      { bucket: '2026-W11', is_portabilidad: false, count: BigInt(2) },
+      { bucket: '2026-W11', is_portabilidad: true, count: BigInt(1) },
+      { bucket: '2026-W12', is_portabilidad: true, count: BigInt(1) },
+    ])
+    const sale = await getSalesBySaleTypeWeekly(ORG_ID, {})
+
+    const grand = byWeek.reduce((a, r) => a + r.count, 0)
+    expect(sale.reduce((a, r) => a + r.total, 0)).toBe(grand)
+    expect(grand).toBe(4)
   })
 })
 
 describe('getSalesBySimType — regrouped into SIM buckets', () => {
   it('collapses raw categories into the fixed buckets (incl. e-SIM) + Otros SIMs', async () => {
-    mockedSvFindMany.mockResolvedValue([
-      {
-        createdAt: new Date('2026-03-15T18:00:00Z'),
-        payment: { order: { items: [{ serializedItem: { category: { name: 'SIM de Intercambio' } } }] } },
-      },
-      {
-        createdAt: new Date('2026-03-16T18:00:00Z'),
-        payment: { order: { items: [{ serializedItem: { category: { name: 'E-SIM de promotor' } } }] } },
-      },
+    mockedQueryRaw.mockResolvedValue([
+      { bucket: '2026-03', category_name: 'SIM de Intercambio', count: BigInt(1) },
+      { bucket: '2026-03', category_name: 'E-SIM de promotor', count: BigInt(1) },
     ])
     const rows = await getSalesBySimType(ORG_ID, {})
     expect(rows).toHaveLength(1)
@@ -429,14 +672,24 @@ describe('getSalesBySimType — regrouped into SIM buckets', () => {
     expect(rows[0].total).toBe(2)
   })
 
+  it('ordena los meses del más reciente al más viejo', async () => {
+    mockedQueryRaw.mockResolvedValue([
+      { bucket: '2026-03', category_name: 'SIM de Evento', count: BigInt(1) },
+      { bucket: '2026-08', category_name: 'SIM de Evento', count: BigInt(5) },
+      { bucket: '2026-05', category_name: 'SIM de Evento', count: BigInt(2) },
+    ])
+    const rows = await getSalesBySimType(ORG_ID, {})
+    expect(rows.map(r => r.month)).toEqual(['2026-08', '2026-05', '2026-03'])
+  })
+
   it('queries the COMPLETED SaleVerification base (same as weekly bar)', async () => {
-    mockedSvFindMany.mockResolvedValue([])
+    mockedQueryRaw.mockResolvedValue([])
     await getSalesBySimType(ORG_ID, {})
-    expect(mockedSvFindMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({ status: 'COMPLETED', venue: { organizationId: ORG_ID } }),
-      }),
-    )
+    const sql = sqlDeLlamada().replace(/\s+/g, ' ')
+    expect(sql).toContain(`sv."status" = 'COMPLETED'`)
+    expect(sql).toContain(`v."organizationId"`)
+    expect(mockedQueryRaw.mock.calls[0][0].values).toContain(ORG_ID)
+    expect(mockedSvFindMany).not.toHaveBeenCalled()
   })
 })
 
