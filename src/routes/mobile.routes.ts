@@ -26,6 +26,8 @@ import * as productMobileController from '../controllers/mobile/product.mobile.c
 import * as categoryMobileController from '../controllers/mobile/category.mobile.controller'
 import * as discountMobileController from '../controllers/mobile/discount.mobile.controller'
 import * as couponMobileController from '../controllers/mobile/coupon.mobile.controller'
+import * as upsellMobileController from '../controllers/mobile/upsell.mobile.controller'
+import { recordUpsellImpressionSchema, convertUpsellImpressionSchema } from '../schemas/dashboard/upsell.schema'
 import * as tpvSettingsMobileController from '../controllers/mobile/tpvSettings.mobile.controller'
 import * as notificationMobileController from '../controllers/mobile/notification.mobile.controller'
 import * as supplierMobileController from '../controllers/mobile/supplier.mobile.controller'
@@ -1568,6 +1570,53 @@ router.delete(
   couponMobileController.deleteCoupon,
 )
 router.post('/venues/:venueId/coupons/validate', authenticateTokenMiddleware, requireVenueMembership, couponMobileController.validateCoupon)
+
+// ============================================================================
+// UPSELL "¿Algo más?"
+//
+// 🔴 `checkFeatureAccess('UPSELL')` va PRIMERO a propósito: su 403 lleva
+// `featureCode` en el cuerpo, y el POS borra su caché de reglas SÓLO cuando ve ese
+// campo. Un 403 de permisos no lo trae, así que no apaga la función en un local
+// que sí la paga (spec R3).
+//
+// Las impresiones NO llevan feature gate: son analítica fuego-y-olvido y un 403
+// ahí sólo generaría ruido en el log de un POS que ya dejó de mostrar tarjetas.
+// ============================================================================
+
+// 🔴 El permiso va ANTES del candado de plan, no al revés.
+//
+// Dos razones, y las dos importan:
+//  1. Al revés, un extraño que no es de este local recibe primero la respuesta
+//     del PLAN — o sea, se entera de qué contrata un negocio ajeno antes de que
+//     se le diga que no pertenece. Es la fuga "feature-antes-de-permiso" que ya
+//     está identificada en la plataforma; aquí no se agrega otra.
+//  2. El POS borra su tabla cacheada SÓLO ante un 403 con `featureCode`. Con este
+//     orden, ese cuerpo lo produce únicamente el candado de plan de verdad: a un
+//     mesero sin permiso se le niega sin `featureCode` y el local conserva sus
+//     sugerencias en lugar de apagarlas por una confusión de roles.
+router.get(
+  '/venues/:venueId/upsell-rules',
+  authenticateTokenMiddleware,
+  checkPermission('upsells:read'),
+  checkFeatureAccess('UPSELL'),
+  upsellMobileController.listUpsellRules,
+)
+
+router.post(
+  '/venues/:venueId/upsell-impressions',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  validateRequest(recordUpsellImpressionSchema),
+  upsellMobileController.recordUpsellImpression,
+)
+
+router.patch(
+  '/venues/:venueId/upsell-impressions/:impressionId',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  validateRequest(convertUpsellImpressionSchema),
+  upsellMobileController.convertUpsellImpression,
+)
 
 // ============================================================================
 // TPV SETTINGS (combined terminals + settings in one call)

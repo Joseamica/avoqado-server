@@ -86,6 +86,13 @@ const PERMISSION_TO_FEATURE_MAP: Record<string, string> = {
   'teams:invite': 'AVOQADO_TEAM',
   'teams:delete': 'AVOQADO_TEAM',
 
+  // Upsell "¿Algo más?" — sin esto, en modo white-label los permisos de upsell
+  // pasarían el filtro de feature access aunque el venue no tenga la función.
+  'upsells:read': 'UPSELL',
+  'upsells:create': 'UPSELL',
+  'upsells:update': 'UPSELL',
+  'upsells:delete': 'UPSELL',
+
   // Menu Management
   'menu:read': 'AVOQADO_MENU',
   'menu:write': 'AVOQADO_MENU',

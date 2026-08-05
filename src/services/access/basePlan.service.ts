@@ -53,6 +53,15 @@ export const PREMIUM_ONLY_CODES = [
   // El test `tests/unit/services/access/areaTicketsTierMirror.test.ts` falla si
   // alguien los agrega.
   'SCALE_INTEGRATION',
+  // Generación de sugerencias de upsell por IA (2026-08-04). PREMIUM porque son
+  // tokens que paga Avoqado, no el cliente.
+  //
+  // 🔴 AQUÍ VA SÓLO `UPSELL_AI`. El motor de upsell (`UPSELL`) es **PRO**, y PRO
+  // es BLANKET: esta lista enumera únicamente los diferenciadores PREMIUM, así que
+  // meter `UPSELL` aquí lo volvería Premium y le quitaría a los venues Pro algo que
+  // ya les vendimos. Sin PREMIUM el motor funciona completo — sólo no autogenera
+  // propuestas ni textos.
+  'UPSELL_AI',
 ] as const
 
 /**

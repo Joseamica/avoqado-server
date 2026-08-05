@@ -354,6 +354,12 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   // 13. Discounts, Loyalty & Credit Packs
   Discount: 'Discounts, Loyalty & Credit Packs',
   CustomerDiscount: 'Discounts, Loyalty & Credit Packs',
+  // Upsell "¿Algo más?" — vive aquí porque es la misma familia comercial que
+  // descuentos/promos: qué se le empuja al cliente y con qué evidencia.
+  UpsellRule: 'Discounts, Loyalty & Credit Packs',
+  UpsellImpression: 'Discounts, Loyalty & Credit Packs',
+  UpsellAcceptance: 'Discounts, Loyalty & Credit Packs',
+  UpsellAiRun: 'Discounts, Loyalty & Credit Packs',
   CouponCode: 'Discounts, Loyalty & Credit Packs',
   CouponRedemption: 'Discounts, Loyalty & Credit Packs',
   LoyaltyConfig: 'Discounts, Loyalty & Credit Packs',

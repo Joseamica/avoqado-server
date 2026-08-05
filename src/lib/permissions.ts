@@ -357,6 +357,17 @@ const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'discounts:create': ['discounts:read', 'discounts:create', 'products:read', 'customers:read'],
   'discounts:update': ['discounts:read', 'discounts:update'],
   'discounts:delete': ['discounts:read', 'discounts:delete'],
+  // Upsell "¿Algo más?" — sugerencias en la pantalla del cliente y la franja del cajero.
+  // `read` lo necesita el POS para pintar las tarjetas; sin él la función nace muerta.
+  // Aprobar y descartar una propuesta son `update`, no permisos aparte.
+  'upsells:read': ['upsells:read'],
+  'upsells:create': [
+    'upsells:read', // hay que ver las reglas existentes antes de crear otra
+    'upsells:create',
+    'menu:read', // el selector de producto sugerido lee el catálogo
+  ],
+  'upsells:update': ['upsells:read', 'upsells:update'],
+  'upsells:delete': ['upsells:read', 'upsells:delete'],
   'discounts:apply': [
     'discounts:read', // TPV can read discounts to apply them
     'discounts:apply', // TPV can apply discounts to orders
@@ -559,6 +570,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'customers:read', // Phase 1: Customer System
     'loyalty:read', // Phase 1b: Loyalty System
     'discounts:read', // Phase 2: Discount System
+    'upsells:read', // Upsell: el POS necesita leer las sugerencias
     'coupons:read', // Phase 2: Coupon System
     'referral:read', // Referral Program: read-only access
     'features:read',
@@ -621,6 +633,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'customers:read', // Phase 1: Customer System
     'loyalty:read', // Phase 1b: Loyalty System
     'discounts:read', // Phase 2: Can view discounts
+    'upsells:read', // Upsell: el POS necesita leer las sugerencias
     'discounts:apply', // Phase 2: Can apply discounts to orders
     'coupons:read', // Phase 2: Can view coupons
     'coupons:redeem', // Phase 2: Can redeem coupons at checkout
@@ -663,6 +676,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'customers:read', // Phase 1: Customer System
     'loyalty:read', // Phase 1b: Loyalty System
     'discounts:read', // Phase 2: Can view discounts
+    'upsells:read', // Upsell: el POS necesita leer las sugerencias
     'discounts:apply', // Phase 2: Can apply discounts to orders
     'coupons:read', // Phase 2: Can view coupons
     'coupons:redeem', // Phase 2: Can redeem coupons at checkout
@@ -765,6 +779,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'customer-groups:*', // Phase 1: Customer System
     'loyalty:*', // Phase 1b: Loyalty System
     'discounts:*', // Phase 2: Full discount management
+    'upsells:*', // Upsell: alta, aprobación y desempeño
     'coupons:*', // Phase 2: Full coupon management
     'creditPacks:*', // Credit pack/bundle management
     'referral:read', // Referral Program: read-only access
@@ -853,6 +868,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'customer-groups:*', // Phase 1: Customer System
     'loyalty:*', // Phase 1b: Loyalty System
     'discounts:*', // Phase 2: Full discount management
+    'upsells:*', // Upsell: alta, aprobación y desempeño
     'coupons:*', // Phase 2: Full coupon management
     'creditPacks:*', // Credit pack/bundle management
     // Referral Program (full management except no SUPERADMIN-only powers)
@@ -973,6 +989,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'customer-groups:*', // Phase 1: Customer System
     'loyalty:*', // Phase 1b: Loyalty System
     'discounts:*', // Phase 2: Full discount management
+    'upsells:*', // Upsell: alta, aprobación y desempeño
     'coupons:*', // Phase 2: Full coupon management
     'creditPacks:*', // Credit pack/bundle management
     // Referral Program (full management)
@@ -1496,6 +1513,8 @@ const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   'customer-groups': ['customer-groups:read', 'customer-groups:create', 'customer-groups:update', 'customer-groups:delete'],
   loyalty: ['loyalty:read', 'loyalty:create', 'loyalty:update', 'loyalty:delete', 'loyalty:redeem', 'loyalty:adjust', 'loyalty:expire'],
   discounts: ['discounts:read', 'discounts:create', 'discounts:update', 'discounts:delete', 'discounts:apply'],
+  // Upsell "¿Algo más?" (feature UPSELL). Aprobar/descartar propuestas = upsells:update.
+  upsells: ['upsells:read', 'upsells:create', 'upsells:update', 'upsells:delete'],
   coupons: ['coupons:read', 'coupons:create', 'coupons:update', 'coupons:delete', 'coupons:redeem'],
   // Credit packs / bundles — venue-level credit packages (e.g. class packs, prepaid plans).
   // Routes live in dashboard/creditPack.routes.ts.

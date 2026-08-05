@@ -43,6 +43,7 @@ import { autoClockOutJob } from './jobs/auto-clockout.job'
 import { monthlyOverageBillingJob } from './jobs/monthly-overage-billing.job'
 import { nightlySalesSummaryJob } from './jobs/nightly-sales-summary.job'
 import { nightlyLowStockJob } from './jobs/nightly-low-stock.job'
+import { nightlyUpsellRulesJob } from './jobs/nightly-upsell-rules.job'
 import { mcpConversationAuditJob } from './jobs/mcp-conversation-audit.job'
 import { marketingCampaignJob } from './jobs/marketing-campaign.job'
 import { venueCommissionSettlementJob } from './jobs/venue-commission-settlement.job'
@@ -195,6 +196,9 @@ const gracefulShutdown = async (signal: string) => {
       // Stop nightly low stock digest job
       logger.info('Stopping nightly low stock digest job...')
       nightlyLowStockJob.stop()
+
+      logger.info('Stopping nightly upsell rules job...')
+      nightlyUpsellRulesJob.stop()
 
       // Stop MCP bad-experience audit job
       mcpConversationAuditJob.stop()
@@ -503,6 +507,12 @@ const startApplication = async (retries = 3) => {
       } else {
         logger.info('⏭️  Nightly email jobs disabled (non-production environment)')
       }
+
+      // Upsell "¿Algo más?" — propone sugerencias desde los tickets del propio local.
+      // NO va detrás del candado de producción como los jobs de correo: éste no manda
+      // nada, sólo escribe propuestas en PROPOSED que el dueño aprueba. Apagarlo en
+      // dev significaría que nadie lo ve funcionar hasta que ya está en vivo.
+      nightlyUpsellRulesJob.start()
 
       // Start marketing campaign job (every 5 minutes - processes email queue)
       marketingCampaignJob.start()

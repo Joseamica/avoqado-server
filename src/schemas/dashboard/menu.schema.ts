@@ -160,6 +160,11 @@ const ProductBodyBase = z.object({
   // KILOGRAMO y el POS captura el peso al cobrar; el server fuerza unit=KILOGRAM.
   // Sin esta línea, Zod haría strip del campo y el flag nunca llegaría al service.
   soldByWeight: z.boolean().optional(),
+  // Upsell "¿Algo más?": permiso del dueño para que este producto pueda sugerirse
+  // en la pantalla del cliente. Es un VETO, no una regla: en false no lo sugiere
+  // ninguna capa, ni siquiera la IA. Misma advertencia que soldByWeight arriba —
+  // sin esta línea Zod haría strip del campo y el interruptor nunca guardaría.
+  upsellEnabled: z.boolean().optional(),
 
   // Class fields (for CLASS type)
   maxParticipants: z.number().int().min(1).optional().nullable(),

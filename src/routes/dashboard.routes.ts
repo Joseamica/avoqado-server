@@ -12,6 +12,13 @@ import { passwordResetRateLimiter } from '../middlewares/password-reset-rate-lim
 import { requireJsonBodyMiddleware } from '../middlewares/requireJsonBody.middleware'
 import { validateRequest } from '../middlewares/validation' // Verifica esta ruta
 import * as merchantRoutingDashboardController from '../controllers/dashboard/merchantRouting.dashboard.controller'
+import * as upsellDashboardController from '../controllers/dashboard/upsell.dashboard.controller'
+import {
+  createUpsellRuleSchema,
+  updateUpsellRuleSchema,
+  setUpsellSurfacesSchema,
+  setProductUpsellEnabledSchema,
+} from '../schemas/dashboard/upsell.schema'
 import {
   deleteMerchantRoutingRuleSchema,
   merchantEligibilityRequestSchema,
@@ -3243,6 +3250,112 @@ router.post(
   checkPermission('orders:update'), // Same permission as updating orders
   validateRequest(SettleOrderSchema),
   orderController.settleOrder,
+)
+
+// ---- UPSELL (PRO): "¿Algo más?" en la pantalla del cliente y la franja del cajero ----
+// Orden de middleware por permissions-policy: validar el cuerpo ANTES de los checks
+// de feature/permiso, para que un cuerpo malformado no se confunda con un 403.
+//
+// 🔴 Y el PERMISO antes del CANDADO DE PLAN: al revés, alguien que no pertenece a
+// este local recibiría primero la respuesta del plan y se enteraría de qué contrata
+// un negocio ajeno antes de que se le diga que no es de ahí. Es la fuga
+// "feature-antes-de-permiso" ya identificada en la plataforma; aquí no se agrega otra.
+//
+// El motor es PRO. Sólo la GENERACIÓN por IA es PREMIUM (`UPSELL_AI`), y esa ruta
+// llega con el hijo #8 — sin PREMIUM el motor funciona completo.
+
+router.get(
+  '/venues/:venueId/upsell-rules',
+  authenticateTokenMiddleware,
+  checkPermission('upsells:read'),
+  checkFeatureAccess('UPSELL'),
+  upsellDashboardController.listUpsellRules,
+)
+router.post(
+  '/venues/:venueId/upsell-rules',
+  authenticateTokenMiddleware,
+  validateRequest(createUpsellRuleSchema),
+  checkPermission('upsells:create'),
+  checkFeatureAccess('UPSELL'),
+  upsellDashboardController.createUpsellRule,
+)
+router.patch(
+  '/venues/:venueId/upsell-rules/:ruleId',
+  authenticateTokenMiddleware,
+  validateRequest(updateUpsellRuleSchema),
+  checkPermission('upsells:update'),
+  checkFeatureAccess('UPSELL'),
+  upsellDashboardController.updateUpsellRule,
+)
+// Aprobar y descartar son `upsells:update`, no permisos aparte.
+// 🔴 Ésta es la ÚNICA ruta de upsell gateada por `UPSELL_AI` (PREMIUM). El motor
+// completo —capas del dueño, del job nocturno y de promociones— vive en PRO; lo que
+// se paga aparte es que la IA escriba las propuestas y los ganchos. Un venue PRO sin
+// PREMIUM pierde este botón y NADA más.
+router.post(
+  '/venues/:venueId/upsell-rules/generate',
+  authenticateTokenMiddleware,
+  checkPermission('upsells:create'),
+  checkFeatureAccess('UPSELL_AI'),
+  upsellDashboardController.generateUpsellRulesWithAi,
+)
+
+router.post(
+  '/venues/:venueId/upsell-rules/:ruleId/approve',
+  authenticateTokenMiddleware,
+  checkPermission('upsells:update'),
+  checkFeatureAccess('UPSELL'),
+  upsellDashboardController.approveUpsellRule,
+)
+router.post(
+  '/venues/:venueId/upsell-rules/:ruleId/dismiss',
+  authenticateTokenMiddleware,
+  checkPermission('upsells:update'),
+  checkFeatureAccess('UPSELL'),
+  upsellDashboardController.dismissUpsellRule,
+)
+router.delete(
+  '/venues/:venueId/upsell-rules/:ruleId',
+  authenticateTokenMiddleware,
+  checkPermission('upsells:delete'),
+  checkFeatureAccess('UPSELL'),
+  upsellDashboardController.deleteUpsellRule,
+)
+
+// Las tres perillas por venue (mostrador / mesa-ordenando / mesa-cobrando).
+router.get(
+  '/venues/:venueId/upsell-surfaces',
+  authenticateTokenMiddleware,
+  checkPermission('upsells:read'),
+  checkFeatureAccess('UPSELL'),
+  upsellDashboardController.getSurfaces,
+)
+router.put(
+  '/venues/:venueId/upsell-surfaces',
+  authenticateTokenMiddleware,
+  validateRequest(setUpsellSurfacesSchema),
+  checkPermission('upsells:update'),
+  checkFeatureAccess('UPSELL'),
+  upsellDashboardController.updateSurfaces,
+)
+
+// El veto por producto. Acepta varios ids para la acción masiva desde la lista.
+router.put(
+  '/venues/:venueId/upsell-products',
+  authenticateTokenMiddleware,
+  validateRequest(setProductUpsellEnabledSchema),
+  checkPermission('upsells:update'),
+  checkFeatureAccess('UPSELL'),
+  upsellDashboardController.updateProductUpsellEnabled,
+)
+
+// Desempeño: ventas atribuidas + aumento medido contra el grupo de control.
+router.get(
+  '/venues/:venueId/upsell-performance',
+  authenticateTokenMiddleware,
+  checkPermission('upsells:read'),
+  checkFeatureAccess('UPSELL'),
+  upsellDashboardController.getUpsellPerformance,
 )
 
 // ---- MERCHANT_ROUTING_RULES (PREMIUM): reglas condicionales de merchants en TPV ----

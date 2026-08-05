@@ -1,0 +1,67 @@
+{
+  "_readme": [
+    "Vectores COMPARTIDOS del upsell — avoqado-server, avoqado-android y avoqado-ios.",
+    "Spec: Avoqado-HQ/specs/upsell-pantalla-cliente-2026-08-03.md (decisión R5).",
+    "",
+    "Por qué existe este archivo: el sorteo del grupo de control y la ventana horaria",
+    "se calculan por SEPARADO en tres lenguajes. Si Kotlin y Swift no reparten igual",
+    "que TypeScript, el reporte de aumento queda comparando dos poblaciones distintas",
+    "y NADIE lo nota: no truena nada, sólo el número miente.",
+    "",
+    "AUTORIDAD: TypeScript (isHoldout en upsellImpression.service.ts). Si un cliente",
+    "no reproduce estos números, el que está mal es el cliente.",
+    "",
+    "Copias: avoqado-android/app/src/test/resources/upsell-test-vectors.json",
+    "        avoqado-ios/POSTests/Resources/upsell-test-vectors.json",
+    "Al cambiar este archivo hay que actualizar las tres copias en el MISMO cambio."
+  ],
+
+  "holdout": {
+    "_note": "FNV-1a 32 bits sobre el impressionId. bucket = hash sin signo % 100. Es holdout si bucket < percent.",
+    "defaultPercent": 10,
+    "cases": [
+      { "impressionId": "a", "bucket": 20, "holdoutAt10": false },
+      { "impressionId": "impression-1", "bucket": 94, "holdoutAt10": false },
+      { "impressionId": "7f3a9c2e-1b4d-4a8e-9c11-2f6b0d5e7a34", "bucket": 75, "holdoutAt10": false },
+      { "impressionId": "3c9e1f77-88aa-4b2c-9d0e-5a1b2c3d4e5f", "bucket": 20, "holdoutAt10": false },
+      { "impressionId": "MOMENTO", "bucket": 14, "holdoutAt10": false },
+      { "impressionId": "", "bucket": 61, "holdoutAt10": false },
+      { "impressionId": "ñandú-áé", "bucket": 58, "holdoutAt10": false },
+      { "impressionId": "0000-0000", "bucket": 76, "holdoutAt10": false },
+      { "impressionId": "imp-9", "bucket": 7, "holdoutAt10": true },
+      { "impressionId": "imp-14", "bucket": 9, "holdoutAt10": true },
+      { "impressionId": "imp-21", "bucket": 5, "holdoutAt10": true },
+      { "impressionId": "imp-35", "bucket": 0, "holdoutAt10": true }
+    ]
+  },
+
+  "timeWindow": {
+    "_note": [
+      "Ventana de una UpsellRule. daysOfWeek: 0=domingo..6=sábado (igual que Discount).",
+      "Si timeUntil < timeFrom la ventana CRUZA MEDIANOCHE y la madrugada pertenece",
+      "a la jornada del día ANTERIOR — por eso el sábado 01:00 cae en la regla del viernes.",
+      "nowLocal es hora LOCAL DEL VENUE, nunca del dispositivo.",
+      "Una hora con formato inválido se IGNORA (la ventana no aplica), jamás tumba el cobro."
+    ],
+    "cases": [
+      { "name": "sin ventana, siempre aplica", "daysOfWeek": [], "timeFrom": null, "timeUntil": null, "nowLocal": "2026-08-03T12:00", "expected": true },
+      { "name": "dentro del horario de desayuno", "daysOfWeek": [], "timeFrom": "07:00", "timeUntil": "11:00", "nowLocal": "2026-08-03T08:00", "expected": true },
+      { "name": "fuera del horario de desayuno", "daysOfWeek": [], "timeFrom": "07:00", "timeUntil": "11:00", "nowLocal": "2026-08-03T23:00", "expected": false },
+      { "name": "sólo domingo, en domingo", "daysOfWeek": [0], "timeFrom": null, "timeUntil": null, "nowLocal": "2026-08-02T12:00", "expected": true },
+      { "name": "sólo domingo, en lunes", "daysOfWeek": [0], "timeFrom": null, "timeUntil": null, "nowLocal": "2026-08-03T12:00", "expected": false },
+      { "name": "cruza medianoche: viernes 23:00 dentro", "daysOfWeek": [5], "timeFrom": "22:00", "timeUntil": "02:00", "nowLocal": "2026-08-07T23:00", "expected": true },
+      { "name": "cruza medianoche: sábado 01:00 sigue siendo la jornada del viernes", "daysOfWeek": [5], "timeFrom": "22:00", "timeUntil": "02:00", "nowLocal": "2026-08-08T01:00", "expected": true },
+      { "name": "cruza medianoche: sábado 23:00 ya es otra jornada", "daysOfWeek": [5], "timeFrom": "22:00", "timeUntil": "02:00", "nowLocal": "2026-08-08T23:00", "expected": false },
+      { "name": "cruza medianoche: viernes mediodía fuera", "daysOfWeek": [5], "timeFrom": "22:00", "timeUntil": "02:00", "nowLocal": "2026-08-07T12:00", "expected": false },
+      { "name": "hora con formato inválido se ignora", "daysOfWeek": [], "timeFrom": "no soy hora", "timeUntil": "tampoco", "nowLocal": "2026-08-03T12:00", "expected": true }
+    ]
+  },
+
+  "externalId": {
+    "_note": "Identidad determinista de la línea aceptada, para poder atarla a la venta real. Mismo patrón que sync:<intentId>:<idx>.",
+    "cases": [
+      { "impressionId": "7f3a9c2e-1b4d-4a8e-9c11-2f6b0d5e7a34", "index": 0, "expected": "upsell:7f3a9c2e-1b4d-4a8e-9c11-2f6b0d5e7a34:0" },
+      { "impressionId": "imp-9", "index": 2, "expected": "upsell:imp-9:2" }
+    ]
+  }
+}

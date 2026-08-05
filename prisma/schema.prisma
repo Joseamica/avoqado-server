@@ -182,6 +182,16 @@ model Venue {
   /// because it's a small per-venue singleton with no history — same rationale as paymentLinkBranding.
   autoReorderConfig Json?
 
+  /// Dónde puede aparecer el upsell "¿Algo más?" en este venue (feature UPSELL).
+  /// JSON shape: { counter: boolean, tableOrdering: boolean, tablePaying: boolean }
+  /// NULL = las tres prendidas (default de la función). Mismo criterio que
+  /// autoReorderConfig: singleton chico por venue, sin historial.
+  ///
+  /// 🔴 `tablePaying` EXIGE RED: ahí el producto se agrega a una orden que ya vive
+  /// en el server y, sin red, un ADD_ITEMS rechazado con el cobro aplicado deja al
+  /// local cobrando de más. Mostrador y tableOrdering sí funcionan sin internet.
+  upsellSurfaces Json?
+
   // Status
   active           Boolean   @default(true)
   operationalSince DateTime?
@@ -536,6 +546,11 @@ model Venue {
 
   // Reglas condicionales de visibilidad/auto-selección de merchants en TPV (MERCHANT_ROUTING_RULES)
   merchantRoutingRules MerchantRoutingRule[]
+
+  // Upsell "¿Algo más?" (feature UPSELL / UPSELL_AI)
+  upsellRules       UpsellRule[]
+  upsellImpressions UpsellImpression[]
+  upsellAiRuns      UpsellAiRun[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -981,6 +996,9 @@ model Staff {
 
   // Email is now @unique on the field itself (globally unique)
   @@index([email])
+
+  // Reglas de upsell que este staff aprobó (ver nota en UpsellRule.approvedBy).
+  upsellRulesApproved UpsellRule[] @relation("UpsellRuleApprovedBy")
 }
 
 model StaffVenue {
@@ -1037,6 +1055,7 @@ model StaffVenue {
 
   // Referral Program
   referralsCaptured Referral[] @relation("ReferralsCaptured")
+
 
   @@unique([venueId, posStaffId]) // Asegura que no se duplique posStaffId por venue
   @@unique([staffId, venueId]) // Un staff solo puede tener una relación por venue
@@ -1594,6 +1613,22 @@ model Product {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  /// El dueño marcó este producto como sugerible en el upsell. NO es una regla:
+  /// es el PERMISO para que aparezca. Las reglas (qué lo dispara, con qué gancho)
+  /// viven en UpsellRule.
+  ///
+  /// 🔴 `false` = jamás se sugiere, pase lo que pase. Es el veto del dueño y gana
+  /// sobre las CUATRO capas, incluidas la IA y el market basket. Default false a
+  /// propósito: un venue que se actualiza no empieza a sugerir nada solo.
+  ///
+  /// 🔴 NO se reusó `featured` (arriba): ese campo ya se guarda desde el dashboard
+  /// y el API pero nadie lo lee, así que puede haber productos marcados por otra
+  /// razón — reusarlo los promocionaría sin que el dueño lo pidiera.
+  upsellEnabled Boolean @default(false)
+
+  // Reglas de upsell que sugieren ESTE producto.
+  upsellSuggestedBy UpsellRule[] @relation("UpsellSuggestedProduct")
+
   @@unique([venueId, sku])
   @@unique([venueId, gtin])
   @@unique([venueId, externalId])
@@ -1602,6 +1637,7 @@ model Product {
   @@index([active])
   @@index([type])
   @@index([syncStatus]) // ✅ NUEVO ÍNDICE
+  @@index([venueId, upsellEnabled])
 }
 
 model Inventory {
@@ -2873,6 +2909,10 @@ model Order {
 
   /// Entregas por área (§5.5). Renglón COMPLETO, sin parcialidad.
   fulfillments OrderFulfillment[]
+
+  /// Momentos de upsell que terminaron convirtiendo en ESTA orden.
+  /// Sin @unique: una mesa recibe upsells al ordenar, en rondas y al pagar.
+  upsellImpressions UpsellImpression[]
 
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -6174,11 +6214,208 @@ model Discount {
   referralRewards Referral[]            @relation("ReferralReward")
   referralGrants  ReferralRewardGrant[]
 
+  // Reglas de upsell que traen este descuento como sello (no se lee en v1).
+  upsellRules UpsellRule[] @relation("UpsellLinkedDiscount")
+
   @@index([venueId])
   @@index([isAutomatic])
   @@index([active])
   @@index([customerGroupId])
   @@index([validFrom, validUntil])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// UPSELL — "¿Algo más?" en la pantalla del cliente y en la franja del cajero.
+// Spec: Avoqado-HQ/specs/upsell-pantalla-cliente-2026-08-03.md
+//
+// Modelo mental: UpsellRule dice QUÉ sugerir y cuándo. UpsellImpression graba
+// CADA momento en que se ofreció (o se sorteó holdout). UpsellAcceptance ata
+// una aceptación a la LÍNEA real de la orden, que es lo único que prueba que
+// el upsell puso ese producto ahí.
+// ═══════════════════════════════════════════════════════════════════════════
+
+enum UpsellTriggerType {
+  PRODUCT // dispara si el carrito trae algo de triggerProductIds
+  CATEGORY // dispara si el carrito trae algo de triggerCategoryIds
+  ALWAYS // destacado sin disparador
+}
+
+enum UpsellOrigin {
+  OWNER // capa 1: el dueño la escribió. Gana sobre todas.
+  BASKET_DATA // capa 2: co-ocurrencia de sus ventas (por LIFT, no confianza)
+  AI // capa 3: gpt-4o-mini, sólo PREMIUM
+  PROMOTION // capa 4: derivada de un Discount activo
+}
+
+enum UpsellRuleStatus {
+  PROPOSED // generada por datos/IA, esperando al dueño
+  ACTIVE // aprobada, viaja al POS
+  DISMISSED // 🔴 el dueño dijo que NO. Permanente: es tumba, nunca revive.
+  INACTIVE // su fuente dejó de aplicar (promo vencida). PUEDE revivir sola.
+}
+
+enum UpsellSurface {
+  CUSTOMER_DISPLAY // el cliente tocó en su pantalla
+  CASHIER // el cajero agregó desde su franja
+  NONE // se mostró y nadie tocó (timeout o "No, gracias")
+  HOLDOUT // 🔴 grupo de control: NO se mostró nada, a propósito
+}
+
+enum UpsellAiRunStatus {
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+model UpsellRule {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  triggerType        UpsellTriggerType @default(ALWAYS)
+  triggerProductIds  String[]
+  triggerCategoryIds String[]
+
+  suggestedProductId String
+  suggestedProduct   Product @relation("UpsellSuggestedProduct", fields: [suggestedProductId], references: [id], onDelete: Cascade)
+
+  /// Gancho mostrado al cliente. Null = se usa el nombre del producto.
+  headline String? @db.Text
+
+  origin UpsellOrigin
+  status UpsellRuleStatus @default(PROPOSED)
+
+  /// Sólo BASKET_DATA: la evidencia que el dueño ve al aprobar.
+  /// 🔴 `lift` (confianza ÷ soporte del sugerido), NO confianza sola: la confianza
+  /// premia al producto ubicuo (si el 90% de los tickets llevan refresco,
+  /// "café → refresco" sale con 90% y no significa nada).
+  supportCount Int?
+  lift         Decimal? @db.Decimal(8, 4)
+  rationale    String?  @db.Text
+
+  /// 🔴 NO SE LEE EN v1. El descuento ligado quedó fuera del primer release:
+  /// `AddOrderItemInput` no acepta descuento (order.tpv.service.ts:487) ni el
+  /// schema de ADD_ITEMS, así que en mesa sería imposible y un sello que no
+  /// cambia el precio es una promesa rota. El campo existe para no migrar
+  /// después. Cuando se prenda, DEBE ser scope=ITEM y aplicarse de verdad.
+  linkedDiscountId String?
+  linkedDiscount   Discount? @relation("UpsellLinkedDiscount", fields: [linkedDiscountId], references: [id], onDelete: SetNull)
+
+  priority   Int      @default(0)
+  daysOfWeek Int[] // vacío = todos. 0=domingo..6=sábado, igual que Discount.daysOfWeek
+  timeFrom   String? // "HH:mm" hora LOCAL del venue
+  timeUntil  String? // si timeUntil < timeFrom la ventana CRUZA medianoche
+
+  /// 🔴 Apunta a Staff, NO a StaffVenue. `authContext.userId` es un `Staff.id`, que
+  /// es también lo que usa `ActivityLog.staffId`. Con StaffVenue esto reventaba con
+  /// violación de FK al crear una regla (bug encontrado en /full-testing 2026-08-04:
+  /// ni tsc ni los tests con mocks lo veían, sólo apareció al picarle al botón).
+  /// Además, un superadmin puede aprobar en un venue del que no es miembro — ahí no
+  /// habría fila de StaffVenue que traducir.
+  approvedById String?
+  approvedBy   Staff?    @relation("UpsellRuleApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
+  approvedAt   DateTime?
+
+  /// Identidad estable para que los generadores hagan upsert sin duplicar ni
+  /// pisar lo del dueño:
+  ///   "<origin>:<triggerType>:<ids disparadores ordenados>:<suggestedProductId>[:<discountId>]"
+  /// El sufijo del descuento SÓLO en origin=PROMOTION (dos promos del mismo
+  /// producto son dos reglas legítimas), y sobrevive al SetNull, así que el job
+  /// sigue sabiendo qué regla murió con qué descuento.
+  ///
+  /// 🔴 Un @@unique sobre (venueId, triggerType, suggestedProductId, origin) sería
+  /// un BUG: "café → galleta" y "té → galleta" son dos reglas OWNER legítimas.
+  dedupeKey String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  acceptances UpsellAcceptance[]
+
+  @@unique([venueId, dedupeKey])
+  @@index([venueId, status])
+  @@index([suggestedProductId])
+}
+
+model UpsellImpression {
+  /// 🔴 Lo genera el CLIENTE (UUID local), como `localOrderId` en el reducer de
+  /// sync, para que la conversión no necesite un round-trip previo.
+  id      String @id
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  /// Se llena al convertir, cuando el pago cerró de verdad.
+  /// Null = se mostró pero la venta no se completó → aporta CERO pesos.
+  /// 🔴 SIN @unique: una mesa recibe upsells al ordenar, en rondas y al pagar.
+  orderId String?
+  order   Order?  @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  shownRuleIds String[]
+
+  /// Dónde ocurrió el momento (mostrador / mesa-ordenando / mesa-cobrando).
+  context String
+
+  /// PESOS 1:1. Lo que el POS REPORTÓ. Informativo: el ingreso del reporte NO
+  /// sale de aquí, sale de las líneas reales vía UpsellAcceptance.
+  reportedAmount     Decimal @default(0) @db.Decimal(10, 2)
+  cartSubtotalBefore Decimal @default(0) @db.Decimal(10, 2)
+
+  surface UpsellSurface @default(NONE)
+
+  shownAt     DateTime  @default(now())
+  convertedAt DateTime?
+
+  acceptances UpsellAcceptance[]
+
+  @@index([venueId, shownAt])
+  @@index([orderId])
+}
+
+/// Ata una aceptación a la LÍNEA real de la orden. Sin esto, cruzar productos
+/// contra la orden sólo prueba que el producto existe, no que el upsell lo puso
+/// ahí — y un cliente alterado podría atribuirse cualquier línea pagada.
+/// El `orderItemExternalId` es determinista (`upsell:<impressionId>:<idx>`), el
+/// mismo patrón que `sync:<intentId>:<idx>`, así que sigue a la línea aunque la
+/// cuenta se separe después.
+model UpsellAcceptance {
+  id           String           @id @default(cuid())
+  impressionId String
+  impression   UpsellImpression @relation(fields: [impressionId], references: [id], onDelete: Cascade)
+
+  ruleId String
+  rule   UpsellRule @relation(fields: [ruleId], references: [id], onDelete: Restrict)
+
+  productId          String
+  orderItemExternalId String
+
+  createdAt DateTime @default(now())
+
+  @@unique([impressionId, orderItemExternalId])
+  @@index([ruleId])
+}
+
+/// Arrendamiento de la generación por IA. NO se resuelve con un `lastRunAt` en
+/// Venue: sostener una transacción durante una llamada externa de 60 s agotaría
+/// el pool de conexiones (este repo ya sufrió agotamiento de pool).
+model UpsellAiRun {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  status UpsellAiRunStatus @default(RUNNING)
+
+  /// Caducidad del arrendamiento: pasado esto, otra corrida puede tomarlo
+  /// aunque la anterior se haya muerto sin marcar FAILED.
+  leaseExpiresAt DateTime
+
+  proposedCount Int     @default(0)
+  error         String? @db.Text
+
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  @@index([venueId, startedAt])
+  @@index([status, leaseExpiresAt])
 }
 
 model CouponCode {
