@@ -22,6 +22,7 @@
  */
 
 import express from 'express'
+import type { Server } from 'http'
 import request from 'supertest'
 
 // 1. Auth: inyecta authContext desde un header de prueba.
@@ -84,19 +85,38 @@ function authHeader(ctx: object): Record<string, string> {
   return { 'x-test-auth-context': JSON.stringify(ctx) }
 }
 
-describe('delivery-channels.routes — Fix A1 (confused-deputy: create/link = SUPERADMIN only)', () => {
-  let app: express.Express
+// UN server escuchando para todo el archivo, reusado por cada request.
+//
+// Por qué NO `request(server)` con una *app*: supertest, cuando recibe una app en vez de un
+// server, llama `app.listen(0)` en CADA request y lo cierra al terminar la respuesta
+// (supertest/lib/test.js:60). Son 15 ciclos de bind/close de un puerto efímero por corrida
+// de este archivo. Ese churn es el único mecanismo capaz de producir el "socket hang up"
+// + el TCPSERVERWRAP abierto que dejó este archivo en rojo, y es el MISMO patrón que ya se
+// midió flaky al ~3% en `tpv-table-gating.test.ts` (ver el comentario de allá).
+//
+// Nada es específico de estas rutas: la app es idéntica en cada llamada y todo el estado
+// por test vive en los mocks, que `beforeEach` resetea — por eso construirla una sola vez
+// es equivalente. Enlazar una vez elimina el churn por completo.
+let server: Server
 
+beforeAll(() => {
+  server = createApp().listen(0)
+})
+
+afterAll(done => {
+  server.close(done)
+})
+
+describe('delivery-channels.routes — Fix A1 (confused-deputy: create/link = SUPERADMIN only)', () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    app = createApp()
   })
 
   describe('POST /venues/:venueId/channels (crear)', () => {
     const body = { provider: 'DELIVERECT', externalLocationId: 'loc-123' }
 
     it('403 para un no-superadmin (ADMIN) aunque tenga delivery-channels:manage', async () => {
-      const res = await request(app)
+      const res = await request(server)
         .post(`/delivery-channels/venues/${VENUE_ID}/channels`)
         .set({ ...authHeader(adminCtx), 'x-test-allow-permission': 'delivery-channels:manage' })
         .send(body)
@@ -105,7 +125,7 @@ describe('delivery-channels.routes — Fix A1 (confused-deputy: create/link = SU
     })
 
     it('gatea con delivery-channels:connect (NO con delivery-channels:manage)', async () => {
-      await request(app)
+      await request(server)
         .post(`/delivery-channels/venues/${VENUE_ID}/channels`)
         .set({ ...authHeader(adminCtx), 'x-test-allow-permission': '*' })
         .send(body)
@@ -115,7 +135,7 @@ describe('delivery-channels.routes — Fix A1 (confused-deputy: create/link = SU
     })
 
     it('200 para un superadmin (delivery-channels:connect permitido)', async () => {
-      const res = await request(app)
+      const res = await request(server)
         .post(`/delivery-channels/venues/${VENUE_ID}/channels`)
         .set({ ...authHeader(adminCtx), 'x-test-allow-permission': 'delivery-channels:connect' })
         .send(body)
@@ -126,7 +146,7 @@ describe('delivery-channels.routes — Fix A1 (confused-deputy: create/link = SU
 
   describe('PATCH /venues/:venueId/channels/:linkId (actualizar)', () => {
     it('tocar externalLocationId → gatea con delivery-channels:connect, 403 sin él', async () => {
-      const res = await request(app)
+      const res = await request(server)
         .patch(`/delivery-channels/venues/${VENUE_ID}/channels/${LINK_ID}`)
         .set({ ...authHeader(adminCtx), 'x-test-allow-permission': 'delivery-channels:manage' })
         .send({ externalLocationId: 'loc-arbitrario-999' })
@@ -136,7 +156,7 @@ describe('delivery-channels.routes — Fix A1 (confused-deputy: create/link = SU
     })
 
     it('tocar externalAccountId → también gatea con delivery-channels:connect', async () => {
-      await request(app)
+      await request(server)
         .patch(`/delivery-channels/venues/${VENUE_ID}/channels/${LINK_ID}`)
         .set({ ...authHeader(adminCtx), 'x-test-allow-permission': '*' })
         .send({ externalAccountId: 'acct-arbitrario-999' })
@@ -145,7 +165,7 @@ describe('delivery-channels.routes — Fix A1 (confused-deputy: create/link = SU
     })
 
     it('un superadmin SÍ puede cambiar externalLocationId', async () => {
-      const res = await request(app)
+      const res = await request(server)
         .patch(`/delivery-channels/venues/${VENUE_ID}/channels/${LINK_ID}`)
         .set({ ...authHeader(adminCtx), 'x-test-allow-permission': 'delivery-channels:connect' })
         .send({ externalLocationId: 'loc-arbitrario-999' })
@@ -154,7 +174,7 @@ describe('delivery-channels.routes — Fix A1 (confused-deputy: create/link = SU
     })
 
     it('un ADMIN con SOLO delivery-channels:manage recibe 403 si el body TAMBIÉN incluye externalLocationId', async () => {
-      const res = await request(app)
+      const res = await request(server)
         .patch(`/delivery-channels/venues/${VENUE_ID}/channels/${LINK_ID}`)
         .set({ ...authHeader(adminCtx), 'x-test-allow-permission': 'delivery-channels:manage' })
         .send({ orderAcceptanceMode: 'MANUAL', externalLocationId: 'loc-999' })
@@ -164,7 +184,7 @@ describe('delivery-channels.routes — Fix A1 (confused-deputy: create/link = SU
 
     // ── Regresión: el toggle de modo se queda en OWNER/ADMIN ──────────────────
     it('REGRESIÓN: tocar SOLO orderAcceptanceMode → gatea con delivery-channels:manage (ADMIN sigue pudiendo togglear modo)', async () => {
-      const res = await request(app)
+      const res = await request(server)
         .patch(`/delivery-channels/venues/${VENUE_ID}/channels/${LINK_ID}`)
         .set({ ...authHeader(adminCtx), 'x-test-allow-permission': 'delivery-channels:manage' })
         .send({ orderAcceptanceMode: 'MANUAL' })
@@ -175,7 +195,7 @@ describe('delivery-channels.routes — Fix A1 (confused-deputy: create/link = SU
     })
 
     it('REGRESIÓN: tocar SOLO autoSyncMenu/config → sigue en delivery-channels:manage', async () => {
-      const res = await request(app)
+      const res = await request(server)
         .patch(`/delivery-channels/venues/${VENUE_ID}/channels/${LINK_ID}`)
         .set({ ...authHeader(adminCtx), 'x-test-allow-permission': 'delivery-channels:manage' })
         .send({ autoSyncMenu: false })
@@ -188,7 +208,7 @@ describe('delivery-channels.routes — Fix A1 (confused-deputy: create/link = SU
   // ── Regresión: rutas hermanas sin cambios ─────────────────────────────────
   describe('Regresión: rutas hermanas no afectadas', () => {
     it('POST .../pause sigue en delivery-channels:manage (OWNER/ADMIN)', async () => {
-      const res = await request(app)
+      const res = await request(server)
         .post(`/delivery-channels/venues/${VENUE_ID}/channels/${LINK_ID}/pause`)
         .set({ ...authHeader(adminCtx), 'x-test-allow-permission': 'delivery-channels:manage' })
         .send({ paused: true })
@@ -198,7 +218,7 @@ describe('delivery-channels.routes — Fix A1 (confused-deputy: create/link = SU
     })
 
     it('GET .../channels sigue en delivery-channels:read', async () => {
-      const res = await request(app)
+      const res = await request(server)
         .get(`/delivery-channels/venues/${VENUE_ID}/channels`)
         .set({ ...authHeader(adminCtx), 'x-test-allow-permission': 'delivery-channels:read' })
 
@@ -207,7 +227,7 @@ describe('delivery-channels.routes — Fix A1 (confused-deputy: create/link = SU
     })
 
     it('POST .../activation-request sigue en delivery-channels:request', async () => {
-      const res = await request(app)
+      const res = await request(server)
         .post(`/delivery-channels/venues/${VENUE_ID}/activation-request`)
         .set({ ...authHeader(adminCtx), 'x-test-allow-permission': 'delivery-channels:request' })
         .send({ requestedChannels: ['RAPPI'] })
@@ -217,7 +237,7 @@ describe('delivery-channels.routes — Fix A1 (confused-deputy: create/link = SU
     })
 
     it('GET .../delivery/summary sigue en delivery-channels:read', async () => {
-      const res = await request(app)
+      const res = await request(server)
         .get(`/delivery-channels/venues/${VENUE_ID}/delivery/summary`)
         .set({ ...authHeader(adminCtx), 'x-test-allow-permission': 'delivery-channels:read' })
 
@@ -228,7 +248,7 @@ describe('delivery-channels.routes — Fix A1 (confused-deputy: create/link = SU
   // ── Fix §10.4: permiso/membresía ANTES que feature (no fuga de estado de plan) ──
   describe('Fix §10.4: permiso antes que feature (no fuga de plan a no-miembros)', () => {
     it('permiso DENEGADO → 403 y checkFeatureAccess NUNCA corre (no revela el plan del venue)', async () => {
-      const res = await request(app)
+      const res = await request(server)
         .get(`/delivery-channels/venues/${VENUE_ID}/channels`)
         .set({ ...authHeader(adminCtx), 'x-test-allow-permission': 'ninguno' }) // no coincide → 403
 
@@ -238,7 +258,7 @@ describe('delivery-channels.routes — Fix A1 (confused-deputy: create/link = SU
     })
 
     it('permiso PERMITIDO → el feature-gate corre DESPUÉS del permiso, no antes', async () => {
-      const res = await request(app)
+      const res = await request(server)
         .get(`/delivery-channels/venues/${VENUE_ID}/channels`)
         .set({ ...authHeader(adminCtx), 'x-test-allow-permission': 'delivery-channels:read' })
 
