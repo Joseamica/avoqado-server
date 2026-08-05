@@ -18,6 +18,7 @@
  */
 
 import express from 'express'
+import type { Server } from 'http'
 import request from 'supertest'
 
 // 1. Auth: inject authContext from a test header (tpv.routes.ts calls authenticateTokenMiddleware
@@ -115,9 +116,30 @@ beforeEach(() => {
   resolveStaffVenueIdMock.mockResolvedValue('staff-venue-1')
 })
 
+// UN server escuchando para todo el archivo, reusado por cada request.
+//
+// Por qué no pasarle la *app* a supertest: cuando recibe una app en vez de un server, llama
+// `app.listen(0)` en CADA request y lo cierra al terminar la respuesta
+// (supertest/lib/test.js:60). Eso es un ciclo de bind/close de un puerto efímero POR REQUEST,
+// y ese churn es lo que dejaba estos archivos flaky — el rojo caía en un test al azar y con
+// síntoma al azar: "socket hang up", un mock de middleware que "nunca se llamó" porque el
+// request no llegó, o un cuelgue hasta el timeout de Jest dejando un TCPSERVERWRAP abierto.
+//
+// Nada es específico de estas rutas: la app es idéntica en cada llamada y todo el estado por
+// test vive en los mocks. Enlazar una vez elimina el churn.
+let server: Server
+
+beforeAll(() => {
+  server = createApp().listen(0)
+})
+
+afterAll(done => {
+  server.close(done)
+})
+
 describe('POST /tpv/venues/:venueId/referrals/validate', () => {
   it('FREE venue → 403 REFERRAL_PROGRAM, service never reached', async () => {
-    const res = await request(createApp())
+    const res = await request(server)
       .post(`/tpv/venues/${VENUE_ID}/referrals/validate`)
       .set(authHeader(cashierCtx))
       .send({ referralCode: 'ABC123', newCustomerId: 'cust-1' })
@@ -131,7 +153,7 @@ describe('POST /tpv/venues/:venueId/referrals/validate', () => {
   it('PRO venue → 200, service reached with venueId taken from the URL', async () => {
     vfFindMany.mockResolvedValue([PRO_PLAN_ROW])
 
-    const res = await request(createApp())
+    const res = await request(server)
       .post(`/tpv/venues/${VENUE_ID}/referrals/validate`)
       .set(authHeader(cashierCtx))
       .send({ referralCode: 'ABC123', newCustomerId: 'cust-1' })
@@ -146,7 +168,7 @@ describe('POST /tpv/venues/:venueId/referrals/validate', () => {
   it('GRANDFATHERED venue → 200 (exempt from plan gating)', async () => {
     venueFindUnique.mockResolvedValue(GRANDFATHERED_VENUE)
 
-    const res = await request(createApp())
+    const res = await request(server)
       .post(`/tpv/venues/${VENUE_ID}/referrals/validate`)
       .set(authHeader(cashierCtx))
       .send({ referralCode: 'ABC123', newCustomerId: 'cust-1' })
@@ -155,7 +177,7 @@ describe('POST /tpv/venues/:venueId/referrals/validate', () => {
   })
 
   it('cross-tenant probe (URL venueId ≠ token venueId) → 403 from validateVenueAccess; checkFeatureAccess and the service never run', async () => {
-    const res = await request(createApp())
+    const res = await request(server)
       .post(`/tpv/venues/${OTHER_VENUE_ID}/referrals/validate`)
       .set(authHeader(cashierCtx)) // token is scoped to VENUE_ID, not OTHER_VENUE_ID
       .send({ referralCode: 'ABC123', newCustomerId: 'cust-1' })
@@ -172,7 +194,7 @@ describe('POST /tpv/venues/:venueId/referrals/validate', () => {
 
 describe('POST /tpv/venues/:venueId/referrals/capture', () => {
   it('FREE venue → 403 REFERRAL_PROGRAM, service never reached', async () => {
-    const res = await request(createApp())
+    const res = await request(server)
       .post(`/tpv/venues/${VENUE_ID}/referrals/capture`)
       .set(authHeader(cashierCtx))
       .send({ referralCode: 'ABC123', newCustomerId: 'cust-1', capturedByStaffVenueId: 'sv-1' })
@@ -185,7 +207,7 @@ describe('POST /tpv/venues/:venueId/referrals/capture', () => {
   it('PRO venue → 201, service reached with venueId taken from the URL', async () => {
     vfFindMany.mockResolvedValue([PRO_PLAN_ROW])
 
-    const res = await request(createApp())
+    const res = await request(server)
       .post(`/tpv/venues/${VENUE_ID}/referrals/capture`)
       .set(authHeader(cashierCtx))
       .send({ referralCode: 'ABC123', newCustomerId: 'cust-1', capturedByStaffVenueId: 'sv-1' })
@@ -195,7 +217,7 @@ describe('POST /tpv/venues/:venueId/referrals/capture', () => {
   })
 
   it('cross-tenant probe → 403 from validateVenueAccess, service never runs', async () => {
-    const res = await request(createApp())
+    const res = await request(server)
       .post(`/tpv/venues/${OTHER_VENUE_ID}/referrals/capture`)
       .set(authHeader(cashierCtx))
       .send({ referralCode: 'ABC123', newCustomerId: 'cust-1', capturedByStaffVenueId: 'sv-1' })
@@ -215,7 +237,7 @@ describe('POST /tpv/venues/:venueId/referrals/force-override', () => {
   }
 
   it('FREE venue → 403 REFERRAL_PROGRAM, service never reached', async () => {
-    const res = await request(createApp()).post(`/tpv/venues/${VENUE_ID}/referrals/force-override`).set(authHeader(cashierCtx)).send(body)
+    const res = await request(server).post(`/tpv/venues/${VENUE_ID}/referrals/force-override`).set(authHeader(cashierCtx)).send(body)
 
     expect(res.status).toBe(403)
     expect(res.body.featureCode).toBe('REFERRAL_PROGRAM')
@@ -225,7 +247,7 @@ describe('POST /tpv/venues/:venueId/referrals/force-override', () => {
   it('PRO venue → 201, service reached with venueId from the URL + the resolved managerStaffVenueId', async () => {
     vfFindMany.mockResolvedValue([PRO_PLAN_ROW])
 
-    const res = await request(createApp()).post(`/tpv/venues/${VENUE_ID}/referrals/force-override`).set(authHeader(cashierCtx)).send(body)
+    const res = await request(server).post(`/tpv/venues/${VENUE_ID}/referrals/force-override`).set(authHeader(cashierCtx)).send(body)
 
     expect(res.status).toBe(201)
     expect(resolveStaffVenueIdMock).toHaveBeenCalledWith(VENUE_ID, 'user-1')
@@ -235,10 +257,7 @@ describe('POST /tpv/venues/:venueId/referrals/force-override', () => {
   })
 
   it('cross-tenant probe → 403 from validateVenueAccess, service never runs', async () => {
-    const res = await request(createApp())
-      .post(`/tpv/venues/${OTHER_VENUE_ID}/referrals/force-override`)
-      .set(authHeader(cashierCtx))
-      .send(body)
+    const res = await request(server).post(`/tpv/venues/${OTHER_VENUE_ID}/referrals/force-override`).set(authHeader(cashierCtx)).send(body)
 
     expect(res.status).toBe(403)
     expect(res.body.message).toBe('No tienes acceso a este venue')

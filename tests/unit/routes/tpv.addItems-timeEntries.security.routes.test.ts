@@ -20,6 +20,7 @@
  */
 
 import express from 'express'
+import type { Server } from 'http'
 import request from 'supertest'
 
 // 1. Auth: inject authContext from a test header (tpv.routes.ts references
@@ -103,9 +104,30 @@ beforeEach(() => {
   venueRolePermissionFindUnique.mockResolvedValue(null) // no custom override → role defaults apply
 })
 
+// UN server escuchando para todo el archivo, reusado por cada request.
+//
+// Por qué no pasarle la *app* a supertest: cuando recibe una app en vez de un server, llama
+// `app.listen(0)` en CADA request y lo cierra al terminar la respuesta
+// (supertest/lib/test.js:60). Eso es un ciclo de bind/close de un puerto efímero POR REQUEST,
+// y ese churn es lo que dejaba estos archivos flaky — el rojo caía en un test al azar y con
+// síntoma al azar: "socket hang up", un mock de middleware que "nunca se llamó" porque el
+// request no llegó, o un cuelgue hasta el timeout de Jest dejando un TCPSERVERWRAP abierto.
+//
+// Nada es específico de estas rutas: la app es idéntica en cada llamada y todo el estado por
+// test vive en los mocks. Enlazar una vez elimina el churn.
+let server: Server
+
+beforeAll(() => {
+  server = createApp().listen(0)
+})
+
+afterAll(done => {
+  server.close(done)
+})
+
 describe('PATCH /venues/:venueId/orders/:orderId/items — venue IDOR (open finding #3)', () => {
   it('venue-A token on a venue-B URL → 403 from validateVenueAccess, table-ownership DB never even queried', async () => {
-    const res = await request(createApp())
+    const res = await request(server)
       .patch(`/tpv/venues/${VENUE_B}/orders/${ORDER_ID}/items`)
       .set(authHeader(waiterAtVenueA))
       .send({ items: [] })
@@ -119,7 +141,7 @@ describe('PATCH /venues/:venueId/orders/:orderId/items — venue IDOR (open find
   it('same-venue token → passes validateVenueAccess and reaches the controller', async () => {
     venueSettingsFindUnique.mockResolvedValue({ enforceTableOwnership: false })
 
-    const res = await request(createApp())
+    const res = await request(server)
       .patch(`/tpv/venues/${VENUE_A}/orders/${ORDER_ID}/items`)
       .set(authHeader(waiterAtVenueA))
       .send({ items: [] })
@@ -134,7 +156,7 @@ describe('PATCH /venues/:venueId/orders/:orderId/items — table ownership (open
     venueSettingsFindUnique.mockResolvedValue({ enforceTableOwnership: false })
     orderFindFirst.mockResolvedValue({ tableId: 'table-1', servedById: TABLE_OWNER, servedBy: { firstName: 'Ana', lastName: 'Owner' } })
 
-    const res = await request(createApp())
+    const res = await request(server)
       .patch(`/tpv/venues/${VENUE_A}/orders/${ORDER_ID}/items`)
       .set(authHeader(waiterAtVenueA))
       .send({ items: [] })
@@ -148,7 +170,7 @@ describe('PATCH /venues/:venueId/orders/:orderId/items — table ownership (open
     venueSettingsFindUnique.mockResolvedValue({ enforceTableOwnership: true })
     orderFindFirst.mockResolvedValue({ tableId: 'table-1', servedById: TABLE_OWNER, servedBy: { firstName: 'Ana', lastName: 'Owner' } })
 
-    const res = await request(createApp())
+    const res = await request(server)
       .patch(`/tpv/venues/${VENUE_A}/orders/${ORDER_ID}/items`)
       .set(authHeader(waiterAtVenueA))
       .send({ items: [] })
@@ -161,7 +183,7 @@ describe('PATCH /venues/:venueId/orders/:orderId/items — table ownership (open
     venueSettingsFindUnique.mockResolvedValue({ enforceTableOwnership: true })
     orderFindFirst.mockResolvedValue({ tableId: 'table-1', servedById: WAITER, servedBy: { firstName: 'W', lastName: 'Aiter' } })
 
-    const res = await request(createApp())
+    const res = await request(server)
       .patch(`/tpv/venues/${VENUE_A}/orders/${ORDER_ID}/items`)
       .set(authHeader(waiterAtVenueA))
       .send({ items: [] })
@@ -173,7 +195,7 @@ describe('PATCH /venues/:venueId/orders/:orderId/items — table ownership (open
     venueSettingsFindUnique.mockResolvedValue({ enforceTableOwnership: true })
     orderFindFirst.mockResolvedValue({ tableId: null, servedById: TABLE_OWNER, servedBy: null })
 
-    const res = await request(createApp())
+    const res = await request(server)
       .patch(`/tpv/venues/${VENUE_A}/orders/${ORDER_ID}/items`)
       .set(authHeader(waiterAtVenueA))
       .send({ items: [] })
@@ -187,7 +209,7 @@ describe.each([
   ['clock-out', 'clockOut'],
 ])('POST /venues/:venueId/time-entries/%s — venue IDOR (open finding #3)', (path, handlerName) => {
   it('venue-A token on a venue-B URL → 403 from validateVenueAccess', async () => {
-    const res = await request(createApp())
+    const res = await request(server)
       .post(`/tpv/venues/${VENUE_B}/time-entries/${path}`)
       .set(authHeader(waiterAtVenueA))
       .send({ staffId: WAITER, pin: '1234' })
@@ -197,7 +219,7 @@ describe.each([
   })
 
   it('same-venue token → reaches the controller', async () => {
-    const res = await request(createApp())
+    const res = await request(server)
       .post(`/tpv/venues/${VENUE_A}/time-entries/${path}`)
       .set(authHeader(waiterAtVenueA))
       .send({ staffId: WAITER, pin: '1234' })

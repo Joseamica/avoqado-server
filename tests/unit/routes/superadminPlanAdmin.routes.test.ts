@@ -13,6 +13,7 @@
  */
 
 import express from 'express'
+import type { Server } from 'http'
 import request from 'supertest'
 
 // Inject authContext from a JSON header; default to a superadmin context.
@@ -80,10 +81,31 @@ function planState(overrides: Record<string, any> = {}) {
 
 beforeEach(() => jest.clearAllMocks())
 
+// UN server escuchando para todo el archivo, reusado por cada request.
+//
+// Por qué no pasarle la *app* a supertest: cuando recibe una app en vez de un server, llama
+// `app.listen(0)` en CADA request y lo cierra al terminar la respuesta
+// (supertest/lib/test.js:60). Eso es un ciclo de bind/close de un puerto efímero POR REQUEST,
+// y ese churn es lo que dejaba estos archivos flaky — el rojo caía en un test al azar y con
+// síntoma al azar: "socket hang up", un mock de middleware que "nunca se llamó" porque el
+// request no llegó, o un cuelgue hasta el timeout de Jest dejando un TCPSERVERWRAP abierto.
+//
+// Nada es específico de estas rutas: la app es idéntica en cada llamada y todo el estado por
+// test vive en los mocks. Enlazar una vez elimina el churn.
+let server: Server
+
+beforeAll(() => {
+  server = createApp().listen(0)
+})
+
+afterAll(done => {
+  server.close(done)
+})
+
 describe('POST /plan/grandfathered', () => {
   it('superadmin: toggles grandfathered=true and returns PlanState', async () => {
     mockedSetGrandfathered.mockResolvedValue(planState({ grandfathered: true }))
-    const res = await request(createApp())
+    const res = await request(server)
       .post(`/api/v1/dashboard/superadmin/venues/${VENUE_ID}/plan/grandfathered`)
       .set('x-test-auth-context', SUPER)
       .send({ grandfathered: true })
@@ -95,7 +117,7 @@ describe('POST /plan/grandfathered', () => {
   })
 
   it('non-superadmin (CASHIER) → 403', async () => {
-    const res = await request(createApp())
+    const res = await request(server)
       .post(`/api/v1/dashboard/superadmin/venues/${VENUE_ID}/plan/grandfathered`)
       .set('x-test-auth-context', CASHIER)
       .send({ grandfathered: true })
@@ -105,7 +127,7 @@ describe('POST /plan/grandfathered', () => {
   })
 
   it('rejects a non-boolean grandfathered with 400 (Spanish message)', async () => {
-    const res = await request(createApp())
+    const res = await request(server)
       .post(`/api/v1/dashboard/superadmin/venues/${VENUE_ID}/plan/grandfathered`)
       .set('x-test-auth-context', SUPER)
       .send({ grandfathered: 'yes' })
@@ -119,7 +141,7 @@ describe('POST /plan/grandfathered', () => {
 describe('POST /plan/comp', () => {
   it('comp PRO → PlanState.planTier PRO, no stripe sub', async () => {
     mockedAssignComp.mockResolvedValue(planState({ hasPlan: true, state: 'active', planTier: 'PRO' }))
-    const res = await request(createApp())
+    const res = await request(server)
       .post(`/api/v1/dashboard/superadmin/venues/${VENUE_ID}/plan/comp`)
       .set('x-test-auth-context', SUPER)
       .send({ tier: 'PRO' })
@@ -132,7 +154,7 @@ describe('POST /plan/comp', () => {
 
   it('comp FREE → PlanState.planTier null', async () => {
     mockedAssignComp.mockResolvedValue(planState({ planTier: null }))
-    const res = await request(createApp())
+    const res = await request(server)
       .post(`/api/v1/dashboard/superadmin/venues/${VENUE_ID}/plan/comp`)
       .set('x-test-auth-context', SUPER)
       .send({ tier: 'FREE' })
@@ -143,7 +165,7 @@ describe('POST /plan/comp', () => {
   })
 
   it('rejects an unknown tier with 400 (Spanish message)', async () => {
-    const res = await request(createApp())
+    const res = await request(server)
       .post(`/api/v1/dashboard/superadmin/venues/${VENUE_ID}/plan/comp`)
       .set('x-test-auth-context', SUPER)
       .send({ tier: 'GOLD' })
@@ -158,7 +180,7 @@ describe('POST /plan/trial', () => {
   it('extends a PRO trial → PlanState state trial, trialEndsAt set', async () => {
     const ends = new Date(Date.now() + 30 * 86400000).toISOString()
     mockedExtendTrial.mockResolvedValue(planState({ hasPlan: true, state: 'trial', planTier: 'PRO', trialEndsAt: ends }))
-    const res = await request(createApp())
+    const res = await request(server)
       .post(`/api/v1/dashboard/superadmin/venues/${VENUE_ID}/plan/trial`)
       .set('x-test-auth-context', SUPER)
       .send({ tier: 'PRO', days: 30 })
@@ -170,7 +192,7 @@ describe('POST /plan/trial', () => {
   })
 
   it('rejects days = 0 with 400 (Spanish message), service NOT called', async () => {
-    const res = await request(createApp())
+    const res = await request(server)
       .post(`/api/v1/dashboard/superadmin/venues/${VENUE_ID}/plan/trial`)
       .set('x-test-auth-context', SUPER)
       .send({ tier: 'PRO', days: 0 })
@@ -181,7 +203,7 @@ describe('POST /plan/trial', () => {
   })
 
   it('rejects days = 400 with 400 (Spanish message), service NOT called', async () => {
-    const res = await request(createApp())
+    const res = await request(server)
       .post(`/api/v1/dashboard/superadmin/venues/${VENUE_ID}/plan/trial`)
       .set('x-test-auth-context', SUPER)
       .send({ tier: 'PRO', days: 400 })
@@ -192,7 +214,7 @@ describe('POST /plan/trial', () => {
   })
 
   it('rejects a non-integer days with 400', async () => {
-    const res = await request(createApp())
+    const res = await request(server)
       .post(`/api/v1/dashboard/superadmin/venues/${VENUE_ID}/plan/trial`)
       .set('x-test-auth-context', SUPER)
       .send({ tier: 'PRO', days: 14.5 })
@@ -202,7 +224,7 @@ describe('POST /plan/trial', () => {
   })
 
   it('rejects FREE tier on the trial endpoint (only PRO/PREMIUM)', async () => {
-    const res = await request(createApp())
+    const res = await request(server)
       .post(`/api/v1/dashboard/superadmin/venues/${VENUE_ID}/plan/trial`)
       .set('x-test-auth-context', SUPER)
       .send({ tier: 'FREE', days: 14 })

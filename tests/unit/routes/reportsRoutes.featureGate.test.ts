@@ -14,6 +14,7 @@
  */
 
 import express from 'express'
+import type { Server } from 'http'
 import request from 'supertest'
 
 jest.mock('@/utils/prismaClient', () => ({
@@ -94,9 +95,30 @@ beforeEach(() => {
   vfFindMany.mockResolvedValue([]) // no paid base plan (Free)
 })
 
+// UN server escuchando para todo el archivo, reusado por cada request.
+//
+// Por qué no pasarle la *app* a supertest: cuando recibe una app en vez de un server, llama
+// `app.listen(0)` en CADA request y lo cierra al terminar la respuesta
+// (supertest/lib/test.js:60). Eso es un ciclo de bind/close de un puerto efímero POR REQUEST,
+// y ese churn es lo que dejaba estos archivos flaky — el rojo caía en un test al azar y con
+// síntoma al azar: "socket hang up", un mock de middleware que "nunca se llamó" porque el
+// request no llegó, o un cuelgue hasta el timeout de Jest dejando un TCPSERVERWRAP abierto.
+//
+// Nada es específico de estas rutas: la app es idéntica en cada llamada y todo el estado por
+// test vive en los mocks. Enlazar una vez elimina el churn.
+let server: Server
+
+beforeAll(() => {
+  server = createApp().listen(0)
+})
+
+afterAll(done => {
+  server.close(done)
+})
+
 describe('GET /reports/sales-by-item — fully Pro-gated (ADVANCED_REPORTS)', () => {
   it('Free venue → 403 ADVANCED_REPORTS', async () => {
-    const res = await request(createApp()).get('/api/v1/dashboard/reports/sales-by-item').query({ startDate: now(), endDate: now() })
+    const res = await request(server).get('/api/v1/dashboard/reports/sales-by-item').query({ startDate: now(), endDate: now() })
 
     expect(res.status).toBe(403)
     expect(res.body.featureCode).toBe('ADVANCED_REPORTS')
@@ -106,7 +128,7 @@ describe('GET /reports/sales-by-item — fully Pro-gated (ADVANCED_REPORTS)', ()
   it('PRO venue → 200 (controller reached)', async () => {
     vfFindMany.mockResolvedValue([PRO_PLAN_ROW])
 
-    const res = await request(createApp()).get('/api/v1/dashboard/reports/sales-by-item').query({ startDate: now(), endDate: now() })
+    const res = await request(server).get('/api/v1/dashboard/reports/sales-by-item').query({ startDate: now(), endDate: now() })
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ report: 'sales-by-item' })
@@ -115,7 +137,7 @@ describe('GET /reports/sales-by-item — fully Pro-gated (ADVANCED_REPORTS)', ()
 
 describe('GET /reports/refunds — fully Pro-gated (ADVANCED_REPORTS)', () => {
   it('Free venue → 403 ADVANCED_REPORTS', async () => {
-    const res = await request(createApp()).get('/api/v1/dashboard/reports/refunds').query({ startDate: now(), endDate: now() })
+    const res = await request(server).get('/api/v1/dashboard/reports/refunds').query({ startDate: now(), endDate: now() })
 
     expect(res.status).toBe(403)
     expect(res.body.featureCode).toBe('ADVANCED_REPORTS')
@@ -124,7 +146,7 @@ describe('GET /reports/refunds — fully Pro-gated (ADVANCED_REPORTS)', () => {
 
 describe('GET /reports/sales-summary — Free gets TODAY only (range clamp, never a blanket 403)', () => {
   it('Free venue + multi-day range → 403 PLAN_LIMIT_RANGE with Spanish message', async () => {
-    const res = await request(createApp())
+    const res = await request(server)
       .get('/api/v1/dashboard/reports/sales-summary')
       .query({ startDate: daysAgo(7), endDate: now() })
 
@@ -135,7 +157,7 @@ describe('GET /reports/sales-summary — Free gets TODAY only (range clamp, neve
   })
 
   it('Free venue + today range → 200 (basic today-only summary is included in Free)', async () => {
-    const res = await request(createApp()).get('/api/v1/dashboard/reports/sales-summary').query({ startDate: now(), endDate: now() })
+    const res = await request(server).get('/api/v1/dashboard/reports/sales-summary').query({ startDate: now(), endDate: now() })
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ report: 'sales-summary' })
@@ -144,7 +166,7 @@ describe('GET /reports/sales-summary — Free gets TODAY only (range clamp, neve
   it('PRO venue + multi-day range → 200 (any range)', async () => {
     vfFindMany.mockResolvedValue([PRO_PLAN_ROW])
 
-    const res = await request(createApp())
+    const res = await request(server)
       .get('/api/v1/dashboard/reports/sales-summary')
       .query({ startDate: daysAgo(30), endDate: now() })
 
@@ -155,7 +177,7 @@ describe('GET /reports/sales-summary — Free gets TODAY only (range clamp, neve
   it('GRANDFATHERED venue + multi-day range → 200 (exempt)', async () => {
     venueFindUnique.mockResolvedValue(GRANDFATHERED_VENUE)
 
-    const res = await request(createApp())
+    const res = await request(server)
       .get('/api/v1/dashboard/reports/sales-summary')
       .query({ startDate: daysAgo(30), endDate: now() })
 
@@ -166,7 +188,7 @@ describe('GET /reports/sales-summary — Free gets TODAY only (range clamp, neve
   it('DEMO venue (LIVE_DEMO) + multi-day range → 200 (demos showcase everything)', async () => {
     venueFindUnique.mockResolvedValue(DEMO_VENUE)
 
-    const res = await request(createApp())
+    const res = await request(server)
       .get('/api/v1/dashboard/reports/sales-summary')
       .query({ startDate: daysAgo(30), endDate: now() })
 
@@ -175,7 +197,7 @@ describe('GET /reports/sales-summary — Free gets TODAY only (range clamp, neve
   })
 
   it('Free venue + missing dates → falls through to controller (which owns the 400)', async () => {
-    const res = await request(createApp()).get('/api/v1/dashboard/reports/sales-summary')
+    const res = await request(server).get('/api/v1/dashboard/reports/sales-summary')
 
     // Controller mock answers 200 here; the point is the clamp does NOT 403 on missing dates.
     expect(res.status).toBe(200)
@@ -185,7 +207,7 @@ describe('GET /reports/sales-summary — Free gets TODAY only (range clamp, neve
 
 describe('GET /reports/pay-later-aging — deliberately ungated (own permission, not ADVANCED_REPORTS)', () => {
   it('Free venue → 200', async () => {
-    const res = await request(createApp()).get('/api/v1/dashboard/reports/pay-later-aging')
+    const res = await request(server).get('/api/v1/dashboard/reports/pay-later-aging')
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ report: 'pay-later-aging' })

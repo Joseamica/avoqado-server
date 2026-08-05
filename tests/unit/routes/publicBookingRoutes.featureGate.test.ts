@@ -28,6 +28,7 @@
 import fs from 'fs'
 import path from 'path'
 import express from 'express'
+import type { Server } from 'http'
 import request from 'supertest'
 
 jest.mock('@/utils/prismaClient', () => ({
@@ -174,6 +175,27 @@ beforeEach(() => {
   vfFindMany.mockResolvedValue([]) // no paid base plan by default
 })
 
+// UN server escuchando para todo el archivo, reusado por cada request.
+//
+// Por qué no pasarle la *app* a supertest: cuando recibe una app en vez de un server, llama
+// `app.listen(0)` en CADA request y lo cierra al terminar la respuesta
+// (supertest/lib/test.js:60). Eso es un ciclo de bind/close de un puerto efímero POR REQUEST,
+// y ese churn es lo que dejaba estos archivos flaky — el rojo caía en un test al azar y con
+// síntoma al azar: "socket hang up", un mock de middleware que "nunca se llamó" porque el
+// request no llegó, o un cuelgue hasta el timeout de Jest dejando un TCPSERVERWRAP abierto.
+//
+// Nada es específico de estas rutas: la app es idéntica en cada llamada y todo el estado por
+// test vive en los mocks. Enlazar una vez elimina el churn.
+let server: Server
+
+beforeAll(() => {
+  server = createApp().listen(0)
+})
+
+afterAll(done => {
+  server.close(done)
+})
+
 describe('public booking surface — plan-tier gate (RESERVATIONS, Free venue → 403 PLAN_REQUIRED)', () => {
   it.each([
     ['GET', `${P}/availability`],
@@ -183,7 +205,7 @@ describe('public booking surface — plan-tier gate (RESERVATIONS, Free venue �
     ['POST', `${P}/reservations/secret123/reschedule/hold`],
     ['POST', `${P}/credit-packs/pack_1/checkout`],
   ])('%s %s → 403 PLAN_REQUIRED with customer-facing Spanish message', async (method, url) => {
-    const res = await (request(createApp()) as any)[method.toLowerCase()](url)
+    const res = await (request(server) as any)[method.toLowerCase()](url)
 
     expect(res.status).toBe(403)
     expect(res.body).toEqual({
@@ -212,7 +234,7 @@ describe('GOLDEN RULE — manage-existing flows are NOT gated on the same Free v
     ['POST', `${P}/auth/otp/request`, 'OTP request'],
     ['POST', `${P}/auth/otp/verify`, 'OTP verify'],
   ])('%s %s (%s) reaches the controller → 200', async (method, url) => {
-    const res = await (request(createApp()) as any)[method.toLowerCase()](url)
+    const res = await (request(server) as any)[method.toLowerCase()](url)
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ ok: true })
@@ -223,7 +245,7 @@ describe('public booking surface — entitled venues pass the gate', () => {
   it('PRO venue (tier blanket grant) → 200, controller reached', async () => {
     vfFindMany.mockResolvedValue([{ active: true, suspendedAt: null, endDate: null, feature: { code: 'PLAN_PRO' } }])
 
-    const res = await request(createApp()).post(`${P}/reservations`)
+    const res = await request(server).post(`${P}/reservations`)
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ ok: true })
@@ -232,7 +254,7 @@ describe('public booking surface — entitled venues pass the gate', () => {
   it('GRANDFATHERED venue (seatCapExempt) → 200 with no grant and no plan', async () => {
     venueFindUnique.mockResolvedValue({ seatCapExempt: true, status: 'ACTIVE' })
 
-    const res = await request(createApp()).post(`${P}/reservations`)
+    const res = await request(server).post(`${P}/reservations`)
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ ok: true })
@@ -241,7 +263,7 @@ describe('public booking surface — entitled venues pass the gate', () => {
   it.each([['LIVE_DEMO'], ['TRIAL']])('DEMO venue (status %s) → 200 with no grant and no plan', async status => {
     venueFindUnique.mockResolvedValue({ seatCapExempt: false, status })
 
-    const res = await request(createApp()).post(`${P}/reservations`)
+    const res = await request(server).post(`${P}/reservations`)
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ ok: true })
@@ -254,7 +276,7 @@ describe('public booking surface — pass-through and fail-open', () => {
 
     // With the real controller this is its existing 404 ('Negocio no encontrado');
     // here the mocked controller answers 200, proving the gate stepped aside.
-    const res = await request(createApp()).post(`${P}/reservations`)
+    const res = await request(server).post(`${P}/reservations`)
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ ok: true })
@@ -263,7 +285,7 @@ describe('public booking surface — pass-through and fail-open', () => {
   it('unexpected gate error (DB down) → FAIL-OPEN: logged, controller reached', async () => {
     venueFindFirst.mockRejectedValue(new Error('connection refused'))
 
-    const res = await request(createApp()).post(`${P}/reservations`)
+    const res = await request(server).post(`${P}/reservations`)
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ ok: true })
@@ -276,7 +298,7 @@ describe('public booking surface — pass-through and fail-open', () => {
 
 describe('consumer app routes — create gated, manage-existing not', () => {
   it('POST /venues/:venueSlug/reservations (create) on a Free venue → 403 PLAN_REQUIRED', async () => {
-    const res = await request(createApp()).post(`${C}/venues/${SLUG}/reservations`)
+    const res = await request(server).post(`${C}/venues/${SLUG}/reservations`)
 
     expect(res.status).toBe(403)
     expect(res.body.code).toBe('PLAN_REQUIRED')
@@ -284,7 +306,7 @@ describe('consumer app routes — create gated, manage-existing not', () => {
   })
 
   it('POST /venues/:venueSlug/credit-packs/:packId/checkout on a Free venue → 403 PLAN_REQUIRED', async () => {
-    const res = await request(createApp()).post(`${C}/venues/${SLUG}/credit-packs/pack_1/checkout`)
+    const res = await request(server).post(`${C}/venues/${SLUG}/credit-packs/pack_1/checkout`)
 
     expect(res.status).toBe(403)
     expect(res.body.code).toBe('PLAN_REQUIRED')
@@ -300,7 +322,7 @@ describe('consumer app routes — create gated, manage-existing not', () => {
     ['POST', `${C}/reservations/deposit/finalize`, 'deposit finalize'],
     ['POST', `${C}/credits/checkout/finalize`, 'credit checkout finalize'],
   ])('%s %s (%s) is NOT gated on a Free venue → 200', async (method, url) => {
-    const res = await (request(createApp()) as any)[method.toLowerCase()](url)
+    const res = await (request(server) as any)[method.toLowerCase()](url)
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ ok: true })
@@ -309,7 +331,7 @@ describe('consumer app routes — create gated, manage-existing not', () => {
   it('PRO venue → consumer create passes the gate → 200', async () => {
     vfFindMany.mockResolvedValue([{ active: true, suspendedAt: null, endDate: null, feature: { code: 'PLAN_PRO' } }])
 
-    const res = await request(createApp()).post(`${C}/venues/${SLUG}/reservations`)
+    const res = await request(server).post(`${C}/venues/${SLUG}/reservations`)
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ ok: true })

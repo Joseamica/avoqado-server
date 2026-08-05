@@ -17,6 +17,7 @@
  */
 
 import express from 'express'
+import type { Server } from 'http'
 import request from 'supertest'
 
 // 1. Auth: inject authContext from a test header (tpv.routes.ts references
@@ -104,6 +105,27 @@ beforeEach(() => {
   isModuleEnabledMock.mockResolvedValue(false)
 })
 
+// UN server escuchando para todo el archivo, reusado por cada request.
+//
+// Por qué no pasarle la *app* a supertest: cuando recibe una app en vez de un server, llama
+// `app.listen(0)` en CADA request y lo cierra al terminar la respuesta
+// (supertest/lib/test.js:60). Eso es un ciclo de bind/close de un puerto efímero POR REQUEST,
+// y ese churn es lo que dejaba estos archivos flaky — el rojo caía en un test al azar y con
+// síntoma al azar. En ESTE archivo se manifestó como `expect(vfFindMany).toHaveBeenCalled()`
+// con 0 llamadas: el request nunca llegó al middleware, así que el mock jamás corrió.
+//
+// Nada es específico de estas rutas: la app es idéntica en cada llamada y todo el estado por
+// test vive en los mocks, que `beforeEach` resetea. Enlazar una vez elimina el churn.
+let server: Server
+
+beforeAll(() => {
+  server = createApp().listen(0)
+})
+
+afterAll(done => {
+  server.close(done)
+})
+
 // [method, path, expectedHandlerName]
 const routes: Array<[string, string, string]> = [
   ['post', `/tpv/venues/${VENUE_ID}/orders/order-1/split`, 'splitOrder'],
@@ -115,7 +137,7 @@ const routes: Array<[string, string, string]> = [
 
 describe.each(routes)('%s %s — TABLE_SERVICE gate', (method, path, handlerName) => {
   it('FREE venue → 403 TABLE_SERVICE, controller never reached', async () => {
-    const res = await (request(createApp()) as any)[method](path).set(authHeader(waiterCtx)).send({})
+    const res = await (request(server) as any)[method](path).set(authHeader(waiterCtx)).send({})
 
     expect(res.status).toBe(403)
     expect(res.body.featureCode).toBe('TABLE_SERVICE')
@@ -125,14 +147,14 @@ describe.each(routes)('%s %s — TABLE_SERVICE gate', (method, path, handlerName
   it('PRO venue → 200 (controller reached)', async () => {
     vfFindMany.mockResolvedValue([PRO_PLAN_ROW])
 
-    const res = await (request(createApp()) as any)[method](path).set(authHeader(waiterCtx)).send({})
+    const res = await (request(server) as any)[method](path).set(authHeader(waiterCtx)).send({})
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ handler: handlerName })
   })
 
   it('wrong-resolver guard: Module system NEVER consulted (TABLE_SERVICE is a Feature, not a Module)', async () => {
-    await (request(createApp()) as any)[method](path).set(authHeader(waiterCtx)).send({})
+    await (request(server) as any)[method](path).set(authHeader(waiterCtx)).send({})
 
     expect(isModuleEnabledMock).not.toHaveBeenCalled()
     expect(vfFindMany).toHaveBeenCalled() // getVenueBaseTier (Feature system) actually ran
@@ -140,7 +162,7 @@ describe.each(routes)('%s %s — TABLE_SERVICE gate', (method, path, handlerName
 
   it('cross-tenant probe (URL venueId ≠ token venueId) → 403 from validateVenueAccess; checkFeatureAccess never runs (no plan leak)', async () => {
     const crossPath = path.replace(VENUE_ID, OTHER_VENUE_ID)
-    const res = await (request(createApp()) as any)[method](crossPath).set(authHeader(waiterCtx)).send({})
+    const res = await (request(server) as any)[method](crossPath).set(authHeader(waiterCtx)).send({})
 
     expect(res.status).toBe(403)
     expect(res.body.message).toBe('No tienes acceso a este venue')

@@ -15,6 +15,7 @@
  */
 
 import express from 'express'
+import type { Server } from 'http'
 import request from 'supertest'
 
 jest.mock('@/utils/prismaClient', () => ({
@@ -106,10 +107,31 @@ beforeEach(() => {
   isModuleEnabled.mockResolvedValue(false) // no COMMISSIONS module grant
 })
 
+// UN server escuchando para todo el archivo, reusado por cada request.
+//
+// Por qué no pasarle la *app* a supertest: cuando recibe una app en vez de un server, llama
+// `app.listen(0)` en CADA request y lo cierra al terminar la respuesta
+// (supertest/lib/test.js:60). Eso es un ciclo de bind/close de un puerto efímero POR REQUEST,
+// y ese churn es lo que dejaba estos archivos flaky — el rojo caía en un test al azar y con
+// síntoma al azar: "socket hang up", un mock de middleware que "nunca se llamó" porque el
+// request no llegó, o un cuelgue hasta el timeout de Jest dejando un TCPSERVERWRAP abierto.
+//
+// Nada es específico de estas rutas: la app es idéntica en cada llamada y todo el estado por
+// test vive en los mocks. Enlazar una vez elimina el churn.
+let server: Server
+
+beforeAll(() => {
+  server = createApp().listen(0)
+})
+
+afterAll(done => {
+  server.close(done)
+})
+
 describe('commission namespace plan gate — dual grant (module OR tier)', () => {
   // NEW FEATURE TESTS
   it('Free venue, no module → 403 COMMISSIONS subscriptionRequired', async () => {
-    const res = await request(createApp()).get(CONFIGS_URL)
+    const res = await request(server).get(CONFIGS_URL)
 
     expect(res.status).toBe(403)
     expect(res.body.featureCode).toBe('COMMISSIONS')
@@ -119,7 +141,7 @@ describe('commission namespace plan gate — dual grant (module OR tier)', () =>
   it('PRO venue (premium-only differentiator) → 403', async () => {
     vfFindMany.mockResolvedValue([PRO_PLAN_ROW])
 
-    const res = await request(createApp()).get(CONFIGS_URL)
+    const res = await request(server).get(CONFIGS_URL)
 
     expect(res.status).toBe(403)
     expect(res.body.featureCode).toBe('COMMISSIONS')
@@ -128,7 +150,7 @@ describe('commission namespace plan gate — dual grant (module OR tier)', () =>
   it('PREMIUM venue → 200 (controller reached)', async () => {
     vfFindMany.mockResolvedValue([PREMIUM_PLAN_ROW])
 
-    const res = await request(createApp()).get(CONFIGS_URL)
+    const res = await request(server).get(CONFIGS_URL)
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ handler: 'getConfigs' })
@@ -137,7 +159,7 @@ describe('commission namespace plan gate — dual grant (module OR tier)', () =>
   it('COMMISSIONS module enabled (VenueModule/OrgModule, e.g. white-label org) → 200 even on Free', async () => {
     isModuleEnabled.mockResolvedValue(true)
 
-    const res = await request(createApp()).get(CONFIGS_URL)
+    const res = await request(server).get(CONFIGS_URL)
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ handler: 'getConfigs' })
@@ -147,7 +169,7 @@ describe('commission namespace plan gate — dual grant (module OR tier)', () =>
   it('explicit own VenueFeature COMMISSIONS grant (à-la-carte legacy) → 200 even on Free', async () => {
     vfFindFirst.mockResolvedValue({ active: true, endDate: null, suspendedAt: null, feature: { code: 'COMMISSIONS', name: 'Comisiones' } })
 
-    const res = await request(createApp()).get(CONFIGS_URL)
+    const res = await request(server).get(CONFIGS_URL)
 
     expect(res.status).toBe(200)
   })
@@ -156,7 +178,7 @@ describe('commission namespace plan gate — dual grant (module OR tier)', () =>
   it('GRANDFATHERED venue → 200 (exempt from plan gating)', async () => {
     venueFindUnique.mockResolvedValue(GRANDFATHERED_VENUE)
 
-    const res = await request(createApp()).get(CONFIGS_URL)
+    const res = await request(server).get(CONFIGS_URL)
 
     expect(res.status).toBe(200)
   })
@@ -164,7 +186,7 @@ describe('commission namespace plan gate — dual grant (module OR tier)', () =>
   it('DEMO venue (LIVE_DEMO) → 200 (demos showcase everything)', async () => {
     venueFindUnique.mockResolvedValue(DEMO_VENUE)
 
-    const res = await request(createApp()).get(CONFIGS_URL)
+    const res = await request(server).get(CONFIGS_URL)
 
     expect(res.status).toBe(200)
   })
@@ -172,13 +194,13 @@ describe('commission namespace plan gate — dual grant (module OR tier)', () =>
   it('platform SUPERADMIN → 200 even on a Free venue (middleware bypass)', async () => {
     staffVenueFindFirst.mockResolvedValue({ id: 'sv_super' })
 
-    const res = await request(createApp()).get(CONFIGS_URL)
+    const res = await request(server).get(CONFIGS_URL)
 
     expect(res.status).toBe(200)
   })
 
   it('gate covers deep routes too (payouts) → 403 on Free', async () => {
-    const res = await request(createApp()).get(`/api/v1/dashboard/commissions/venues/${VENUE_ID}/payouts`)
+    const res = await request(server).get(`/api/v1/dashboard/commissions/venues/${VENUE_ID}/payouts`)
 
     expect(res.status).toBe(403)
     expect(res.body.featureCode).toBe('COMMISSIONS')
@@ -188,7 +210,7 @@ describe('commission namespace plan gate — dual grant (module OR tier)', () =>
     isModuleEnabled.mockRejectedValue(new Error('db hiccup'))
     vfFindMany.mockResolvedValue([PREMIUM_PLAN_ROW])
 
-    const res = await request(createApp()).get(CONFIGS_URL)
+    const res = await request(server).get(CONFIGS_URL)
 
     expect(res.status).toBe(200)
   })

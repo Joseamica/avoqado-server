@@ -19,6 +19,7 @@
 import fs from 'fs'
 import path from 'path'
 import express from 'express'
+import type { Server } from 'http'
 import request from 'supertest'
 
 jest.mock('@/utils/prismaClient', () => ({
@@ -86,11 +87,32 @@ beforeEach(() => {
   vfFindMany.mockResolvedValue([]) // no paid base plan by default
 })
 
+// UN server escuchando para todo el archivo, reusado por cada request.
+//
+// Por qué no pasarle la *app* a supertest: cuando recibe una app en vez de un server, llama
+// `app.listen(0)` en CADA request y lo cierra al terminar la respuesta
+// (supertest/lib/test.js:60). Eso es un ciclo de bind/close de un puerto efímero POR REQUEST,
+// y ese churn es lo que dejaba estos archivos flaky — el rojo caía en un test al azar y con
+// síntoma al azar: "socket hang up", un mock de middleware que "nunca se llamó" porque el
+// request no llegó, o un cuelgue hasta el timeout de Jest dejando un TCPSERVERWRAP abierto.
+//
+// Nada es específico de estas rutas: la app es idéntica en cada llamada y todo el estado por
+// test vive en los mocks. Enlazar una vez elimina el churn.
+let server: Server
+
+beforeAll(() => {
+  server = createApp().listen(0)
+})
+
+afterAll(done => {
+  server.close(done)
+})
+
 describe('reservations route group — plan-tier gate (RESERVATIONS)', () => {
   it('Free ACTIVE venue (no grant, no plan) → 403 RESERVATIONS', async () => {
     venueFindUnique.mockResolvedValue({ seatCapExempt: false, status: 'ACTIVE' })
 
-    const res = await request(createApp()).get(SETTINGS_URL)
+    const res = await request(server).get(SETTINGS_URL)
 
     expect(res.status).toBe(403)
     expect(res.body.featureCode).toBe('RESERVATIONS')
@@ -101,7 +123,7 @@ describe('reservations route group — plan-tier gate (RESERVATIONS)', () => {
     venueFindUnique.mockResolvedValue({ seatCapExempt: false, status: 'ACTIVE' })
     vfFindMany.mockResolvedValue([{ active: true, suspendedAt: null, endDate: null, feature: { code: 'PLAN_PRO' } }])
 
-    const res = await request(createApp()).get(SETTINGS_URL)
+    const res = await request(server).get(SETTINGS_URL)
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ ok: true })
@@ -110,7 +132,7 @@ describe('reservations route group — plan-tier gate (RESERVATIONS)', () => {
   it('GRANDFATHERED venue → 200 with no grant and no plan', async () => {
     venueFindUnique.mockResolvedValue({ seatCapExempt: true, status: 'ACTIVE' })
 
-    const res = await request(createApp()).get(SETTINGS_URL)
+    const res = await request(server).get(SETTINGS_URL)
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ ok: true })
@@ -119,7 +141,7 @@ describe('reservations route group — plan-tier gate (RESERVATIONS)', () => {
   it.each([['LIVE_DEMO'], ['TRIAL']])('DEMO venue (status %s) → 200 with no grant and no plan', async status => {
     venueFindUnique.mockResolvedValue({ seatCapExempt: false, status })
 
-    const res = await request(createApp()).get(SETTINGS_URL)
+    const res = await request(server).get(SETTINGS_URL)
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ ok: true })

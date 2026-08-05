@@ -14,6 +14,7 @@
  */
 
 import express from 'express'
+import type { Server } from 'http'
 import request from 'supertest'
 
 jest.mock('@/utils/prismaClient', () => ({
@@ -100,10 +101,31 @@ beforeEach(() => {
   vfFindMany.mockResolvedValue([]) // no paid base plan (Free)
 })
 
+// UN server escuchando para todo el archivo, reusado por cada request.
+//
+// Por qué no pasarle la *app* a supertest: cuando recibe una app en vez de un server, llama
+// `app.listen(0)` en CADA request y lo cierra al terminar la respuesta
+// (supertest/lib/test.js:60). Eso es un ciclo de bind/close de un puerto efímero POR REQUEST,
+// y ese churn es lo que dejaba estos archivos flaky — el rojo caía en un test al azar y con
+// síntoma al azar: "socket hang up", un mock de middleware que "nunca se llamó" porque el
+// request no llegó, o un cuelgue hasta el timeout de Jest dejando un TCPSERVERWRAP abierto.
+//
+// Nada es específico de estas rutas: la app es idéntica en cada llamada y todo el estado por
+// test vive en los mocks. Enlazar una vez elimina el churn.
+let server: Server
+
+beforeAll(() => {
+  server = createApp().listen(0)
+})
+
+afterAll(done => {
+  server.close(done)
+})
+
 describe('inventory namespace plan gate — INVENTORY_TRACKING (PREMIUM)', () => {
   // NEW FEATURE TESTS
   it('Free venue → 403 INVENTORY_TRACKING subscriptionRequired', async () => {
-    const res = await request(createApp()).get(RAW_MATERIALS_URL)
+    const res = await request(server).get(RAW_MATERIALS_URL)
 
     expect(res.status).toBe(403)
     expect(res.body.featureCode).toBe('INVENTORY_TRACKING')
@@ -113,7 +135,7 @@ describe('inventory namespace plan gate — INVENTORY_TRACKING (PREMIUM)', () =>
   it('PRO venue (premium-only differentiator) → 403', async () => {
     vfFindMany.mockResolvedValue([PRO_PLAN_ROW])
 
-    const res = await request(createApp()).get(RAW_MATERIALS_URL)
+    const res = await request(server).get(RAW_MATERIALS_URL)
 
     expect(res.status).toBe(403)
     expect(res.body.featureCode).toBe('INVENTORY_TRACKING')
@@ -122,7 +144,7 @@ describe('inventory namespace plan gate — INVENTORY_TRACKING (PREMIUM)', () =>
   it('PREMIUM venue → 200 (controller reached)', async () => {
     vfFindMany.mockResolvedValue([PREMIUM_PLAN_ROW])
 
-    const res = await request(createApp()).get(RAW_MATERIALS_URL)
+    const res = await request(server).get(RAW_MATERIALS_URL)
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ handler: 'getRawMaterials' })
@@ -138,13 +160,13 @@ describe('inventory namespace plan gate — INVENTORY_TRACKING (PREMIUM)', () =>
       feature: { code: 'INVENTORY_TRACKING', name: 'Inventario' },
     })
 
-    const res = await request(createApp()).get(RAW_MATERIALS_URL)
+    const res = await request(server).get(RAW_MATERIALS_URL)
 
     expect(res.status).toBe(200)
   })
 
   it('gate covers deep routes too (suppliers) → 403 on Free', async () => {
-    const res = await request(createApp()).get(`/api/v1/dashboard/venues/${VENUE_ID}/inventory/suppliers`)
+    const res = await request(server).get(`/api/v1/dashboard/venues/${VENUE_ID}/inventory/suppliers`)
 
     expect(res.status).toBe(403)
     expect(res.body.featureCode).toBe('INVENTORY_TRACKING')
@@ -154,7 +176,7 @@ describe('inventory namespace plan gate — INVENTORY_TRACKING (PREMIUM)', () =>
   it('GRANDFATHERED venue → 200 (exempt from plan gating)', async () => {
     venueFindUnique.mockResolvedValue(GRANDFATHERED_VENUE)
 
-    const res = await request(createApp()).get(RAW_MATERIALS_URL)
+    const res = await request(server).get(RAW_MATERIALS_URL)
 
     expect(res.status).toBe(200)
   })
@@ -162,7 +184,7 @@ describe('inventory namespace plan gate — INVENTORY_TRACKING (PREMIUM)', () =>
   it('DEMO venue (TRIAL) → 200 (demos showcase everything)', async () => {
     venueFindUnique.mockResolvedValue(DEMO_VENUE)
 
-    const res = await request(createApp()).get(RAW_MATERIALS_URL)
+    const res = await request(server).get(RAW_MATERIALS_URL)
 
     expect(res.status).toBe(200)
   })
@@ -170,7 +192,7 @@ describe('inventory namespace plan gate — INVENTORY_TRACKING (PREMIUM)', () =>
   it('platform SUPERADMIN → 200 even on a Free venue (middleware bypass)', async () => {
     staffVenueFindFirst.mockResolvedValue({ id: 'sv_super' })
 
-    const res = await request(createApp()).get(RAW_MATERIALS_URL)
+    const res = await request(server).get(RAW_MATERIALS_URL)
 
     expect(res.status).toBe(200)
   })
@@ -179,7 +201,7 @@ describe('inventory namespace plan gate — INVENTORY_TRACKING (PREMIUM)', () =>
     // PREMIUM tier blanket-grants both codes → both gates pass and the controller is reached.
     vfFindMany.mockResolvedValue([PREMIUM_PLAN_ROW])
 
-    const res = await request(createApp()).get(`/api/v1/dashboard/venues/${VENUE_ID}/inventory/auto-reorder`)
+    const res = await request(server).get(`/api/v1/dashboard/venues/${VENUE_ID}/inventory/auto-reorder`)
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ handler: 'getSettings' })

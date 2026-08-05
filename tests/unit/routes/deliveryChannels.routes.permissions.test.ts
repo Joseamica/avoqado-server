@@ -87,12 +87,16 @@ function authHeader(ctx: object): Record<string, string> {
 
 // UN server escuchando para todo el archivo, reusado por cada request.
 //
-// Por qué NO `request(server)` con una *app*: supertest, cuando recibe una app en vez de un
-// server, llama `app.listen(0)` en CADA request y lo cierra al terminar la respuesta
+// Por qué no pasarle la *app* a supertest: cuando recibe una app en vez de un server, llama
+// `app.listen(0)` en CADA request y lo cierra al terminar la respuesta
 // (supertest/lib/test.js:60). Son 15 ciclos de bind/close de un puerto efímero por corrida
 // de este archivo. Ese churn es el único mecanismo capaz de producir el "socket hang up"
 // + el TCPSERVERWRAP abierto que dejó este archivo en rojo, y es el MISMO patrón que ya se
 // midió flaky al ~3% en `tpv-table-gating.test.ts` (ver el comentario de allá).
+//
+// ⚠️ No se logró REPRODUCIR el rojo (0 fallas en 18 corridas: 12 con la CPU saturada y 6
+// concentrando el churn de los 10 archivos con este patrón). Con ~3% por corrida eso no
+// descarta nada — es el mecanismo + el precedente medido, no una repro.
 //
 // Nada es específico de estas rutas: la app es idéntica en cada llamada y todo el estado
 // por test vive en los mocks, que `beforeEach` resetea — por eso construirla una sola vez
