@@ -19,21 +19,43 @@ function burnCpuSync(ms: number): void {
 const yieldToLoop = () => new Promise<void>(resolve => setImmediate(resolve))
 
 describe('measureEventLoopBlock', () => {
-  it('detecta un bloqueo síncrono largo', async () => {
+  /**
+   * Referencia medida en ESTA máquina y bajo ESTA carga: 300 ms de CPU síncrono de corrido.
+   *
+   * 🔴 Las comparaciones de abajo son RELATIVAS a este número, nunca contra un umbral fijo
+   * de reloj de pared. Cualquier muestreador de event loop mide con el reloj, y un proceso
+   * que el sistema operativo desprogramó se ve EXACTAMENTE igual que un event loop
+   * bloqueado: en ambos casos el tick llega tarde. Con la suite completa en paralelo eso
+   * pasa de verdad — el caso "cede el hilo en trozos" midió 74 ms contra un presupuesto de
+   * 50 y tumbó el CI, pasando siempre al correrlo solo.
+   *
+   * La referencia se contamina con la MISMA carga que los casos que compara, así que el
+   * contraste sobrevive aunque la máquina esté saturada. Un umbral absoluto no.
+   */
+  let bloqueoDeReferenciaMs: number
+
+  beforeAll(async () => {
     const { maxBlockMs } = await measureEventLoopBlock(async () => {
       burnCpuSync(300)
     })
-    expect(maxBlockMs).toBeGreaterThan(200)
+    bloqueoDeReferenciaMs = maxBlockMs
+  })
+
+  it('detecta un bloqueo síncrono largo', () => {
+    // Cota INFERIOR: la carga sólo puede inflar este número, nunca hacerlo fallar.
+    expect(bloqueoDeReferenciaMs).toBeGreaterThan(200)
   })
 
   it('NO acusa a un trabajo igual de largo que cede el hilo en trozos', async () => {
     const { maxBlockMs } = await measureEventLoopBlock(async () => {
       for (let i = 0; i < 30; i++) {
-        burnCpuSync(10) // 300 ms de trabajo TOTAL, igual que el caso de arriba
+        burnCpuSync(10) // 300 ms de trabajo TOTAL, igual que la referencia
         await yieldToLoop()
       }
     })
-    expect(maxBlockMs).toBeLessThan(EVENT_LOOP_BUDGET_MS)
+    // Lo que se afirma: el peor bloqueo se parece al TROZO (10 ms), no al TOTAL (300 ms).
+    // Si ceder el hilo dejara de contar, este número treparía hasta la referencia.
+    expect(maxBlockMs).toBeLessThan(bloqueoDeReferenciaMs / 3)
   })
 
   it('no acusa a una espera de I/O, por larga que sea', async () => {
@@ -42,7 +64,7 @@ describe('measureEventLoopBlock', () => {
     const { maxBlockMs } = await measureEventLoopBlock(async () => {
       await new Promise(resolve => setTimeout(resolve, 300))
     })
-    expect(maxBlockMs).toBeLessThan(EVENT_LOOP_BUDGET_MS)
+    expect(maxBlockMs).toBeLessThan(bloqueoDeReferenciaMs / 3)
   })
 
   it('devuelve el resultado de la función sin alterarlo', async () => {
