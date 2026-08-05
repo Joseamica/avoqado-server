@@ -4,9 +4,22 @@ import tseslint from 'typescript-eslint'
 import prettierPlugin from 'eslint-plugin-prettier'
 
 export default tseslint.config(
-  // `.worktrees/**` = sibling git worktrees (other branches/sessions). Linting them from the
-  // main checkout surfaces stale/other-branch code as false errors — never lint another worktree.
-  { ignores: ['dist/**', 'node_modules/**', 'coverage/**', '.worktrees/**', '*.config.js', '*.config.mjs'] },
+  // `.worktrees/**` y `.claude/worktrees/**` = git worktrees hermanos (otras ramas/sesiones).
+  // Lintearlos desde el checkout principal saca código viejo o de otra rama como errores falsos
+  // — nunca lintear otro worktree. `**/dist/**` (no `dist/**`): en flat config el patrón es
+  // relativo a este archivo, así que sin `**/` sólo ignora el `dist/` de la raíz y se cuela el
+  // JS compilado que vive dentro de un worktree.
+  {
+    ignores: [
+      '**/dist/**',
+      '**/node_modules/**',
+      'coverage/**',
+      '.worktrees/**',
+      '.claude/worktrees/**',
+      '*.config.js',
+      '*.config.mjs',
+    ],
+  },
   {
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
     files: ['**/*.{ts,tsx}'],
