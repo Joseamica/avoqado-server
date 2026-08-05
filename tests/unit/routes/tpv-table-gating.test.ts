@@ -46,6 +46,7 @@
  */
 
 import express from 'express'
+import type { Server } from 'http'
 import request from 'supertest'
 
 // 1. Auth: inject authContext from a test header. tpv.routes.ts calls authenticateTokenMiddleware
@@ -136,6 +137,28 @@ function createApp() {
   return app
 }
 
+// ONE listening server for the whole file, reused by every request.
+//
+// Why not `request(createApp())` per test (the pattern the other route tests use):
+// supertest, when handed an *app* instead of a *server*, calls `app.listen(0)` on
+// EVERY request and closes it once the response ends (supertest/lib/test.js:60).
+// That is 19 bind/close cycles of an ephemeral port per run of this file, and it
+// made these tests flaky at ~3% per run in a tight loop — the failure landed on a
+// random test each time and with a random symptom (a 403 or 404 that no middleware
+// in that route's chain can produce, or a request that simply hung until Jest's
+// 30 s timeout, leaving a TCPSERVERWRAP handle open). Nothing route-specific: the
+// app is identical on every call, all per-test state lives in the prisma mocks,
+// which beforeEach resets. Binding once removes the port churn entirely.
+let server: Server
+
+beforeAll(() => {
+  server = createApp().listen(0)
+})
+
+afterAll(done => {
+  server.close(done)
+})
+
 const FREE_ACTIVE_VENUE = { seatCapExempt: false, status: 'ACTIVE' }
 const GRANDFATHERED_VENUE = { seatCapExempt: true, status: 'ACTIVE' }
 const DEMO_VENUE = { seatCapExempt: false, status: 'LIVE_DEMO' }
@@ -156,7 +179,7 @@ beforeEach(() => {
 describe('POST /tpv/venues/:venueId/tables/assign — TABLE_SERVICE gate', () => {
   // NEW FEATURE TESTS
   it('FREE venue → 403 TABLE_SERVICE, controller never reached', async () => {
-    const res = await request(createApp())
+    const res = await request(server)
       .post(`/tpv/venues/${VENUE_ID}/tables/assign`)
       .set(authHeader(waiterCtx))
       .send({ tableId: 'table-1', staffId: 'user-1', covers: 2 })
@@ -169,10 +192,7 @@ describe('POST /tpv/venues/:venueId/tables/assign — TABLE_SERVICE gate', () =>
   it('PRO venue → 200 (controller reached)', async () => {
     vfFindMany.mockResolvedValue([PRO_PLAN_ROW])
 
-    const res = await request(createApp())
-      .post(`/tpv/venues/${VENUE_ID}/tables/assign`)
-      .set(authHeader(waiterCtx))
-      .send({ tableId: 'table-1' })
+    const res = await request(server).post(`/tpv/venues/${VENUE_ID}/tables/assign`).set(authHeader(waiterCtx)).send({ tableId: 'table-1' })
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ handler: 'assignTable' })
@@ -181,10 +201,7 @@ describe('POST /tpv/venues/:venueId/tables/assign — TABLE_SERVICE gate', () =>
   it('PREMIUM venue → 200', async () => {
     vfFindMany.mockResolvedValue([PREMIUM_PLAN_ROW])
 
-    const res = await request(createApp())
-      .post(`/tpv/venues/${VENUE_ID}/tables/assign`)
-      .set(authHeader(waiterCtx))
-      .send({ tableId: 'table-1' })
+    const res = await request(server).post(`/tpv/venues/${VENUE_ID}/tables/assign`).set(authHeader(waiterCtx)).send({ tableId: 'table-1' })
 
     expect(res.status).toBe(200)
   })
@@ -192,10 +209,7 @@ describe('POST /tpv/venues/:venueId/tables/assign — TABLE_SERVICE gate', () =>
   it('GRANDFATHERED venue → 200 (exempt from plan gating)', async () => {
     venueFindUnique.mockResolvedValue(GRANDFATHERED_VENUE)
 
-    const res = await request(createApp())
-      .post(`/tpv/venues/${VENUE_ID}/tables/assign`)
-      .set(authHeader(waiterCtx))
-      .send({ tableId: 'table-1' })
+    const res = await request(server).post(`/tpv/venues/${VENUE_ID}/tables/assign`).set(authHeader(waiterCtx)).send({ tableId: 'table-1' })
 
     expect(res.status).toBe(200)
   })
@@ -203,10 +217,7 @@ describe('POST /tpv/venues/:venueId/tables/assign — TABLE_SERVICE gate', () =>
   it('DEMO venue (LIVE_DEMO) → 200 (demos showcase everything)', async () => {
     venueFindUnique.mockResolvedValue(DEMO_VENUE)
 
-    const res = await request(createApp())
-      .post(`/tpv/venues/${VENUE_ID}/tables/assign`)
-      .set(authHeader(waiterCtx))
-      .send({ tableId: 'table-1' })
+    const res = await request(server).post(`/tpv/venues/${VENUE_ID}/tables/assign`).set(authHeader(waiterCtx)).send({ tableId: 'table-1' })
 
     expect(res.status).toBe(200)
   })
@@ -221,10 +232,7 @@ describe('POST /tpv/venues/:venueId/tables/assign — TABLE_SERVICE gate', () =>
       feature: { code: 'TABLE_SERVICE', name: 'Servicio de mesa' },
     })
 
-    const res = await request(createApp())
-      .post(`/tpv/venues/${VENUE_ID}/tables/assign`)
-      .set(authHeader(waiterCtx))
-      .send({ tableId: 'table-1' })
+    const res = await request(server).post(`/tpv/venues/${VENUE_ID}/tables/assign`).set(authHeader(waiterCtx)).send({ tableId: 'table-1' })
 
     expect(res.status).toBe(200)
   })
@@ -232,10 +240,7 @@ describe('POST /tpv/venues/:venueId/tables/assign — TABLE_SERVICE gate', () =>
   it('platform SUPERADMIN → 200 even on a FREE venue (middleware bypass)', async () => {
     staffVenueFindFirst.mockResolvedValue({ id: 'sv_super' })
 
-    const res = await request(createApp())
-      .post(`/tpv/venues/${VENUE_ID}/tables/assign`)
-      .set(authHeader(waiterCtx))
-      .send({ tableId: 'table-1' })
+    const res = await request(server).post(`/tpv/venues/${VENUE_ID}/tables/assign`).set(authHeader(waiterCtx)).send({ tableId: 'table-1' })
 
     expect(res.status).toBe(200)
   })
@@ -246,7 +251,7 @@ describe('POST /tpv/venues/:venueId/tables/assign — TABLE_SERVICE gate', () =>
   // moduleService.isModuleEnabled(venueId, 'TABLE_SERVICE'), isModuleEnabledMock WOULD be
   // called and vfFindMany/vfFindFirst would NOT — either assertion below catches it.
   it('wrong-resolver guard: FREE denial goes through the Feature system, Module system never consulted', async () => {
-    await request(createApp()).post(`/tpv/venues/${VENUE_ID}/tables/assign`).set(authHeader(waiterCtx)).send({ tableId: 'table-1' })
+    await request(server).post(`/tpv/venues/${VENUE_ID}/tables/assign`).set(authHeader(waiterCtx)).send({ tableId: 'table-1' })
 
     expect(isModuleEnabledMock).not.toHaveBeenCalled()
     expect(vfFindMany).toHaveBeenCalled() // getVenueBaseTier (Feature system) actually ran
@@ -255,7 +260,7 @@ describe('POST /tpv/venues/:venueId/tables/assign — TABLE_SERVICE gate', () =>
   it('wrong-resolver guard: PRO grant (200) also never touches the Module system', async () => {
     vfFindMany.mockResolvedValue([PRO_PLAN_ROW])
 
-    await request(createApp()).post(`/tpv/venues/${VENUE_ID}/tables/assign`).set(authHeader(waiterCtx)).send({ tableId: 'table-1' })
+    await request(server).post(`/tpv/venues/${VENUE_ID}/tables/assign`).set(authHeader(waiterCtx)).send({ tableId: 'table-1' })
 
     expect(isModuleEnabledMock).not.toHaveBeenCalled()
   })
@@ -263,7 +268,7 @@ describe('POST /tpv/venues/:venueId/tables/assign — TABLE_SERVICE gate', () =>
   // Middleware order: validateVenueAccess (Task 1) BEFORE checkFeatureAccess — a cross-tenant
   // probe must be rejected on tenant ownership before the plan-gate reveals anything.
   it('cross-tenant probe (URL venueId ≠ token venueId) → 403 from validateVenueAccess; checkFeatureAccess never runs (no plan leak)', async () => {
-    const res = await request(createApp())
+    const res = await request(server)
       .post(`/tpv/venues/${OTHER_VENUE_ID}/tables/assign`)
       .set(authHeader(waiterCtx)) // token is scoped to VENUE_ID, not OTHER_VENUE_ID
       .send({ tableId: 'table-1' })
@@ -282,7 +287,7 @@ describe('POST /tpv/venues/:venueId/tables/assign — TABLE_SERVICE gate', () =>
 
 describe('POST /tpv/venues/:venueId/tables/:tableId/clear — TABLE_SERVICE gate', () => {
   it('FREE venue → 403 TABLE_SERVICE', async () => {
-    const res = await request(createApp()).post(`/tpv/venues/${VENUE_ID}/tables/table-1/clear`).set(authHeader(waiterCtx)).send({})
+    const res = await request(server).post(`/tpv/venues/${VENUE_ID}/tables/table-1/clear`).set(authHeader(waiterCtx)).send({})
 
     expect(res.status).toBe(403)
     expect(res.body.featureCode).toBe('TABLE_SERVICE')
@@ -292,21 +297,21 @@ describe('POST /tpv/venues/:venueId/tables/:tableId/clear — TABLE_SERVICE gate
   it('PRO venue → 200 (controller reached)', async () => {
     vfFindMany.mockResolvedValue([PRO_PLAN_ROW])
 
-    const res = await request(createApp()).post(`/tpv/venues/${VENUE_ID}/tables/table-1/clear`).set(authHeader(waiterCtx)).send({})
+    const res = await request(server).post(`/tpv/venues/${VENUE_ID}/tables/table-1/clear`).set(authHeader(waiterCtx)).send({})
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ handler: 'clearTable' })
   })
 
   it('wrong-resolver guard: Module system never consulted', async () => {
-    await request(createApp()).post(`/tpv/venues/${VENUE_ID}/tables/table-1/clear`).set(authHeader(waiterCtx)).send({})
+    await request(server).post(`/tpv/venues/${VENUE_ID}/tables/table-1/clear`).set(authHeader(waiterCtx)).send({})
 
     expect(isModuleEnabledMock).not.toHaveBeenCalled()
     expect(vfFindMany).toHaveBeenCalled()
   })
 
   it('cross-tenant probe → 403 from validateVenueAccess, checkFeatureAccess never runs', async () => {
-    const res = await request(createApp()).post(`/tpv/venues/${OTHER_VENUE_ID}/tables/table-1/clear`).set(authHeader(waiterCtx)).send({})
+    const res = await request(server).post(`/tpv/venues/${OTHER_VENUE_ID}/tables/table-1/clear`).set(authHeader(waiterCtx)).send({})
 
     expect(res.status).toBe(403)
     expect(res.body.message).toBe('No tienes acceso a este venue')
@@ -318,34 +323,34 @@ describe('POST /tpv/venues/:venueId/tables/:tableId/clear — TABLE_SERVICE gate
 // REGRESSION TESTS — the routes deliberately left ungated (see file header for the reasoning).
 describe('regression: floor-plan reads and floor-plan CRUD stay ungated by TABLE_SERVICE', () => {
   it('GET tables → 200 on a FREE venue (floor-plan read is core; also feeds the RESERVATIONS table picker)', async () => {
-    const res = await request(createApp()).get(`/tpv/venues/${VENUE_ID}/tables`).set(authHeader(waiterCtx))
+    const res = await request(server).get(`/tpv/venues/${VENUE_ID}/tables`).set(authHeader(waiterCtx))
 
     expect(res.status).toBe(200)
   })
 
   it('GET floor-elements → 200 on a FREE venue', async () => {
-    const res = await request(createApp()).get(`/tpv/venues/${VENUE_ID}/floor-elements`).set(authHeader(waiterCtx))
+    const res = await request(server).get(`/tpv/venues/${VENUE_ID}/floor-elements`).set(authHeader(waiterCtx))
 
     expect(res.status).toBe(200)
   })
 
   it('POST tables (create table, floor-plan setup) → 200 on a FREE venue — role-gated only (Task 1), not plan-gated', async () => {
-    const res = await request(createApp())
-      .post(`/tpv/venues/${VENUE_ID}/tables`)
-      .set(authHeader(waiterCtx))
-      .send({ number: '5', capacity: 4 })
+    const res = await request(server).post(`/tpv/venues/${VENUE_ID}/tables`).set(authHeader(waiterCtx)).send({ number: '5', capacity: 4 })
 
     expect(res.status).toBe(200)
   })
 
   it('DELETE tables/:tableId → 200 on a FREE venue', async () => {
-    const res = await request(createApp()).delete(`/tpv/venues/${VENUE_ID}/tables/table-1`).set(authHeader(waiterCtx))
+    const res = await request(server).delete(`/tpv/venues/${VENUE_ID}/tables/table-1`).set(authHeader(waiterCtx))
 
-    expect(res.status).toBe(200)
+    // Asserted as {status, body} so a failure prints WHICH middleware answered
+    // (validateVenueAccess / checkFeatureAccess / error handler all 403 with
+    // different bodies) instead of a bare status number.
+    expect({ status: res.status, body: res.body }).toEqual({ status: 200, body: { handler: 'deleteTable' } })
   })
 
   it('PATCH orders/:orderId/items (generic order add-items, any OrderType) → 200 on a FREE venue — NOT table-exclusive', async () => {
-    const res = await request(createApp())
+    const res = await request(server)
       .patch(`/tpv/venues/${VENUE_ID}/orders/order-1/items`)
       .set(authHeader(waiterCtx))
       .send({ items: [], version: 1 })
