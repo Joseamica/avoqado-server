@@ -112,7 +112,7 @@ export function registerProcurementTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'purchase_order_detail',
-    'Full detail of ONE purchase order in a venue you can access, by its id (from list_purchase_orders): supplier + contact, status, order/expected/received dates, amounts (subtotal, tax, total — pesos), whether auto-generated, approval/rejection info, notes, and every LINE ITEM (raw material, unit, quantity ordered vs received, receive status, unit price, line total, and — si el insumo se compró en presentación — la unidad de compra ("caja") y cuántas unidades base trae). Answers "¿qué traía la orden OC-123? ¿cuánto recibí de cada cosa?". Pass venueId + purchaseOrderId.',
+    'Full detail of ONE purchase order in a venue you can access, by its id (from list_purchase_orders): supplier + contact, status, order/expected/received dates, amounts (subtotal, tax, total — pesos), whether auto-generated, approval/rejection info, notes, and every LINE ITEM (nombre del artículo, su `tipo` — INSUMO de cocina o MERCANCIA_DE_REVENTA para tienda de conveniencia —, unit, quantity ordered vs received, receive status, unit price, line total, and — si el insumo se compró en presentación — la unidad de compra ("caja") y cuántas unidades base trae). Answers "¿qué traía la orden OC-123? ¿cuánto recibí de cada cosa?". Pass venueId + purchaseOrderId.',
     {
       venueId: z.string().describe('Venue that owns the order (must be in your scope)'),
       purchaseOrderId: z.string().min(1).describe('Purchase order id (from list_purchase_orders)'),
@@ -131,7 +131,12 @@ export function registerProcurementTools(server: McpServer, scope: McpScope) {
       const items = (
         po as {
           items?: Array<{
+            // Un renglón apunta a un insumo de cocina O a un producto de reventa
+            // (tienda de conveniencia). Si sólo se lee `rawMaterial`, las órdenes de
+            // mercancía salen con el nombre en null y el operador recibe renglones
+            // anónimos con precio: parece que la orden está vacía cuando no lo está.
             rawMaterial?: { name?: string; sku?: string | null; unit?: string } | null
+            product?: { name?: string; sku?: string | null; unit?: string } | null
             unit: string
             presentationName?: string | null
             presentationFactor?: unknown
@@ -168,8 +173,14 @@ export function registerProcurementTools(server: McpServer, scope: McpScope) {
           rejectionReason: po.rejectionReason ?? null,
           notes: po.notes ?? null,
           items: (items ?? []).map(it => ({
-            material: it.rawMaterial?.name ?? null,
-            sku: it.rawMaterial?.sku ?? null,
+            // `material` se conserva por compatibilidad (nunca se quita un campo de
+            // una respuesta), pero ahora también resuelve el producto de reventa.
+            material: it.rawMaterial?.name ?? it.product?.name ?? null,
+            sku: it.rawMaterial?.sku ?? it.product?.sku ?? null,
+            // Qué se compró: insumo de cocina o mercancía para revender. Sin esto el
+            // agente no puede distinguir "compré harina" de "compré refrescos", que es
+            // justo la diferencia entre un restaurante y una tienda.
+            tipo: it.product ? 'MERCANCIA_DE_REVENTA' : 'INSUMO',
             unit: it.unit,
             // Comprado en presentación ("50 cajas"): sin esto el agente reporta
             // "50" sin saber 50 de QUÉ, y el precio parece 360 por pieza.

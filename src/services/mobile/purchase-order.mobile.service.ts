@@ -59,6 +59,7 @@ export async function listPurchaseOrders(venueId: string, page: number, pageSize
         items: {
           include: {
             rawMaterial: { select: { id: true, name: true, sku: true } },
+            product: { select: { id: true, name: true, sku: true } }, // renglón de mercancía de reventa
           },
         },
       },
@@ -95,6 +96,7 @@ export async function getPurchaseOrder(poId: string, venueId: string) {
       items: {
         include: {
           rawMaterial: { select: { id: true, name: true, sku: true, unit: true } },
+          product: { select: { id: true, name: true, sku: true, unit: true } }, // renglón de mercancía de reventa
         },
       },
     },
@@ -205,6 +207,24 @@ export async function createPurchaseOrder(params: CreatePOParams) {
     }),
   )
 
+  // 🔴 Un renglón TIENE que apuntar a algo. Esta ruta no monta `validateRequest`, así
+  // que la única defensa que tenía era la restricción NOT NULL de la base: si la
+  // resolución de arriba no encontraba insumo, Prisma rechazaba el insert y no se
+  // guardaba nada. Al volver `rawMaterialId` opcional —para permitir mercancía de
+  // reventa— esa red desapareció y el renglón se habría guardado apuntando a NULL:
+  // imposible de recibir, revienta el PDF y las etiquetas de TODA la orden, y mata en
+  // silencio el correo al proveedor (es fire-and-forget).
+  //
+  // Hoy el CHECK de la base también lo impide, pero ahí el usuario recibiría un 500
+  // de Postgres. Esto le dice qué renglón está mal y por qué.
+  const sinDestino = resolvedItems.filter(item => !item.rawMaterialId)
+  if (sinDestino.length > 0) {
+    throw new BadRequestError(
+      `${sinDestino.length} renglón(es) de la orden no corresponden a ningún insumo ni producto de esta sucursal. ` +
+        `Revisa que los artículos existan antes de crear la orden.`,
+    )
+  }
+
   // Calculate totals
   let subtotal = 0
   const itemsData = resolvedItems.map(item => {
@@ -257,6 +277,7 @@ export async function createPurchaseOrder(params: CreatePOParams) {
       items: {
         include: {
           rawMaterial: { select: { id: true, name: true, sku: true } },
+          product: { select: { id: true, name: true, sku: true } }, // renglón de mercancía de reventa
         },
       },
     },
@@ -324,6 +345,7 @@ export async function updateStatus(poId: string, venueId: string, newStatus: str
       items: {
         include: {
           rawMaterial: { select: { id: true, name: true, sku: true } },
+          product: { select: { id: true, name: true, sku: true } }, // renglón de mercancía de reventa
         },
       },
     },
@@ -367,6 +389,7 @@ export async function receiveStock(poId: string, venueId: string, items: Receive
       items: {
         include: {
           rawMaterial: true,
+          product: true, // renglón de mercancía de reventa
         },
       },
     },
@@ -392,7 +415,7 @@ export async function receiveStock(poId: string, venueId: string, items: Receive
       const targetQty = Number(poItem.quantityReceived) + receiveItem.receivedQuantity
       if (targetQty > Number(poItem.quantityOrdered)) {
         throw new BadRequestError(
-          `No se puede recibir ${receiveItem.receivedQuantity} ${poItem.unit} de "${poItem.rawMaterial?.name ?? 'insumo'}": ` +
+          `No se puede recibir ${receiveItem.receivedQuantity} ${poItem.unit} de "${poItem.rawMaterial?.name ?? poItem.product?.name ?? 'el artículo'}": ` +
             `excede la cantidad ordenada (${Number(poItem.quantityOrdered)} ${poItem.unit}).`,
         )
       }
@@ -510,15 +533,23 @@ function formatPurchaseOrder(po: any) {
             id: item.id,
             // Legacy/internal field names (preserved for iOS and backward compatibility)
             rawMaterialId: item.rawMaterialId,
-            rawMaterialName: item.rawMaterial?.name || null,
-            rawMaterialSku: item.rawMaterial?.sku || null,
+            // Un renglón puede ser mercancía de reventa (`product`) en vez de insumo.
+            // Sin el respaldo, iOS y Android pintan un renglón SIN NOMBRE y sin id con
+            // el que casarlo al escanear. Los campos NO cambian de forma ni
+            // desaparecen: sólo dejan de venir en null cuando la línea es de producto.
+            rawMaterialName: item.rawMaterial?.name ?? item.product?.name ?? null,
+            rawMaterialSku: item.rawMaterial?.sku ?? item.product?.sku ?? null,
             quantityOrdered,
             quantityReceived,
             unitPrice: unitPriceCents,
             // New field aliases expected by the Android client
-            productId: item.rawMaterialId,
-            productName: item.rawMaterial?.name || null,
-            sku: item.rawMaterial?.sku || null,
+            productId: item.productId ?? item.rawMaterialId,
+            productName: item.rawMaterial?.name ?? item.product?.name ?? null,
+            sku: item.rawMaterial?.sku ?? item.product?.sku ?? null,
+            // Qué tipo de renglón es, para que el cliente no tenga que adivinar por
+            // cuál de los dos ids vino. Campo NUEVO y opcional: los clientes viejos
+            // simplemente lo ignoran.
+            itemKind: item.productId ? 'PRODUCT' : 'RAW_MATERIAL',
             orderedQuantity: quantityOrdered,
             receivedQuantity: quantityReceived,
             // `unitCost` is expressed in decimal currency (not cents) to match

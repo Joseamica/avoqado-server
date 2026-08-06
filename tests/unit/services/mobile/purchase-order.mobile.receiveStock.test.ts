@@ -136,7 +136,9 @@ describe('receiveStock (mobile) — invariante FIFO y conversión de unidades', 
     await receiveStock(PO_ID, VENUE_ID, [{ itemId: ITEM_ID, receivedQuantity: 5 }], 'staff-1')
 
     const stockArg = mockedPrisma.rawMaterial.update.mock.calls[0][0].data.currentStock
-    expect(new Decimal(stockArg).toNumber()).toBe(6000) // 1000 g + 5000 g
+    // Incremento atómico: se aserta el DELTA (5000 g = 5 KG), no el resultado.
+    expect(stockArg).toHaveProperty('increment')
+    expect(new Decimal(stockArg.increment).toNumber()).toBe(5000) // 1000 g + 5000 g = 6000 g
 
     const movement = mockedPrisma.rawMaterialMovement.create.mock.calls[0][0].data
     expect(movement.type).toBe(RawMaterialMovementType.PURCHASE)

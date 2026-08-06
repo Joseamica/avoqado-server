@@ -114,8 +114,13 @@ describe('receiveAllItems — invariante FIFO (currentStock === Σ lotes ACTIVE)
         data: expect.objectContaining({ currentStock: expect.anything() }),
       }),
     )
+    // El saldo se escribe como INCREMENTO ATÓMICO, no como valor absoluto: es lo que
+    // impide perder una recepción cuando dos llegan al mismo tiempo. Antes aquí se
+    // asertaba el resultado (6000); ahora se aserta el DELTA (5000 g = 5 KG), que es
+    // lo que realmente se le pide a la base.
     const stockArg = mockedPrisma.rawMaterial.update.mock.calls[0][0].data.currentStock
-    expect(new Decimal(stockArg).toNumber()).toBe(6000)
+    expect(stockArg).toHaveProperty('increment')
+    expect(new Decimal(stockArg.increment).toNumber()).toBe(5000)
 
     expect(mockedPrisma.rawMaterialMovement.create).toHaveBeenCalledTimes(1)
     const movement = mockedPrisma.rawMaterialMovement.create.mock.calls[0][0].data

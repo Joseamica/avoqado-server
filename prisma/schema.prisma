@@ -1594,6 +1594,9 @@ model Product {
 
   // Stock Counts
   stockCountItems StockCountItem[]
+  // Renglones de orden de compra que traen este producto como mercancía de reventa
+  // (tienda de conveniencia). Los insumos de cocina van por RawMaterial.
+  purchaseOrderItems PurchaseOrderItem[]
 
   // Reservations (product-based appointments/classes)
   reservations  Reservation[]
@@ -1683,6 +1686,16 @@ model InventoryMovement {
   reason    String?
   reference String? // Order ID, adjustment ID, etc.
 
+  // Renglón de orden de compra que originó este movimiento (mercancía de reventa).
+  // Espejo de `StockBatch.purchaseOrderItemId`, y con el mismo `onDelete: SetNull`:
+  // el movimiento es historia contable y sobrevive al borrado de la orden.
+  // Recibir consulta la SUMA de estos movimientos para saber cuánto puso ya esa
+  // línea en la bodega — estado real, autocorrectivo. Sin esta liga el delta salía
+  // de `PurchaseOrderItem.quantityReceived`, que `receiveNoItems` reinicia sin
+  // revertir el saldo, y la mercancía se contaba dos veces.
+  purchaseOrderItemId String?
+  purchaseOrderItem   PurchaseOrderItem? @relation(fields: [purchaseOrderItemId], references: [id], onDelete: SetNull)
+
   // Cost and supplier tracking (for PURCHASE movements)
   unitCost Decimal? @db.Decimal(10, 2) // Cost per unit for this movement
   supplier String? // Supplier name for this movement
@@ -1693,6 +1706,7 @@ model InventoryMovement {
   @@index([inventoryId])
   @@index([type])
   @@index([createdAt])
+  @@index([purchaseOrderItemId])
 }
 
 // ==========================================
@@ -2000,8 +2014,35 @@ model PurchaseOrderItem {
   id              String        @id @default(cuid())
   purchaseOrderId String
   purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
-  rawMaterialId   String
-  rawMaterial     RawMaterial   @relation(fields: [rawMaterialId], references: [id])
+
+  // Un renglón apunta a UN insumo O a UN producto de reventa, nunca a los dos ni a
+  // ninguno. Son dos sistemas de inventario paralelos que ya existían por separado:
+  //   · RawMaterial → StockBatch (lotes PEPS con caducidad) → RawMaterialMovement
+  //   · Product     → Inventory  (saldo simple)             → InventoryMovement
+  // La orden de compra sólo hablaba el primero, así que una tienda de conveniencia no
+  // podía comprar ni recibir un refresco. Ambos campos son OPCIONALES: las filas
+  // existentes conservan su rawMaterialId y el camino de recepción de insumos quedó
+  // byte-idéntico (se bifurca antes de tocar cualquier lógica de lotes).
+  //
+  // ⚠️ Volver opcional `rawMaterialId` NO fue gratis: la restricción NOT NULL era la
+  // ÚLTIMA red de seguridad de las rutas que escriben renglones SIN pasar por Zod
+  // (`/mobile`, chatbot, autoReorder). Antes, un renglón sin destino reventaba en la
+  // base y no se guardaba nada; al quitarla se guardaría en silencio un renglón
+  // huérfano. Por eso la exclusividad se defiende AHORA en tres capas y no en una:
+  //   1. Zod, en la entrada HTTP del dashboard (mensaje legible para el usuario).
+  //   2. El servicio `createPurchaseOrder`, que heredan TODAS las rutas.
+  //   3. Un CHECK en la base — `PurchaseOrderItem_insumo_xor_producto`, migración
+  //      20260806024353 — que es el que de verdad hace imposible el estado inválido
+  //      para TODAS las rutas. Prisma no declara CHECKs aquí, pero lo respeta y lo
+  //      conserva: NO lo quites al regenerar el esquema.
+  // `onDelete: Restrict` es EXPLÍCITO y obligatorio: al volver opcional el campo,
+  // Prisma cambia el default a SET NULL, lo que borraría en silencio la referencia de
+  // órdenes de compra históricas al eliminar un insumo o un producto. La orden de
+  // compra es evidencia de qué se compró y a quién; no puede quedar huérfana.
+  rawMaterialId String?
+  rawMaterial   RawMaterial? @relation(fields: [rawMaterialId], references: [id], onDelete: Restrict)
+  productId     String?
+  product       Product?     @relation(fields: [productId], references: [id], onDelete: Restrict)
 
   // Quantities
   quantityOrdered  Decimal @db.Decimal(12, 3)
@@ -2027,8 +2068,20 @@ model PurchaseOrderItem {
   // Relations
   batches StockBatch[] // FIFO batch tracking
 
+  // Movimientos de inventario que ESTE renglón ya aplicó (mercancía de reventa).
+  // Es el espejo exacto de `batches` para el otro sistema de inventario, y existe
+  // por la MISMA razón: al recibir hay que saber cuánto puso ya esta línea en la
+  // bodega, y ese dato tiene que salir del estado real, no de la columna
+  // `quantityReceived` —que es un metadato que otras operaciones reinician
+  // (`receiveNoItems` la pone en 0) sin tocar el saldo. Derivar el delta de esa
+  // columna hacía que "recibir 5 → recibir ninguno → recibir todo" sumara 10 a la
+  // existencia habiendo llegado 5. Los insumos nunca tuvieron ese defecto porque
+  // su delta sale de los lotes vivos.
+  inventoryMovements InventoryMovement[]
+
   @@index([purchaseOrderId])
   @@index([rawMaterialId])
+  @@index([productId])
 }
 
 // Pricing policies for products

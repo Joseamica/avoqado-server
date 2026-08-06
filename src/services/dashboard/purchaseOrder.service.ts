@@ -4,6 +4,7 @@ import {
   PurchaseOrderStatus,
   PurchaseOrderItemStatus,
   RawMaterialMovementType,
+  MovementType,
   Prisma,
   Unit,
 } from '@prisma/client'
@@ -28,6 +29,131 @@ import { renderLabelsPdf, getUnitAbbreviation, type LabelItem } from '../labels/
 import { logAction } from './activity-log.service'
 
 /**
+ * Un renglón de orden de compra apunta a UN insumo de cocina O a UN producto de
+ * reventa, nunca a los dos. Son dos sistemas de inventario paralelos que ya existían:
+ *
+ *   · RawMaterial → StockBatch (lotes PEPS con caducidad) → RawMaterialMovement
+ *   · Product     → Inventory  (saldo simple)             → InventoryMovement
+ *
+ * Este resolvedor es el ÚNICO lugar donde se decide cuál de los dos es. Todo lo demás
+ * —validaciones, mensajes de error, PDF, etiquetas, correo al proveedor— consume el
+ * resultado y deja de preguntar por `.rawMaterial` directamente. Sin esto, cada punto
+ * del archivo tendría su propio `if (item.rawMaterial)` y tarde o temprano uno se
+ * olvidaría, dejando la mercancía de tienda fuera en silencio.
+ *
+ * Devuelve una unión discriminada a propósito: obliga a TypeScript a exigir que cada
+ * consumidor contemple los dos casos.
+ */
+type LineTargetBase = {
+  id: string
+  name: string
+  sku: string
+  gtin: string | null
+  unit: Unit
+}
+export type LineTarget = (LineTargetBase & { kind: 'RAW_MATERIAL' }) | (LineTargetBase & { kind: 'PRODUCT' })
+
+/**
+ * Ambas relaciones son OBLIGATORIAS en el tipo (`| null`, no `?`) a propósito.
+ *
+ * Cuando eran opcionales, una consulta que olvidara `product: true` en su `include`
+ * seguía compilando: `line.product` quedaba en `undefined`, el resolvedor caía hasta
+ * su `throw` final y devolvía "el renglón no apunta a nada" para datos que estaban
+ * perfectamente bien. Pasó en DOS lugares a la vez —las etiquetas y el PDF que se le
+ * manda al proveedor— y en ambos rompía la orden COMPLETA, insumos incluidos.
+ *
+ * Al exigirlas, quien llame a `resolveLineTarget` sin haber cargado las dos relaciones
+ * no compila. El compilador pasa a ser la defensa, en vez de la disciplina.
+ */
+type ResolvableLine = {
+  id?: string
+  rawMaterial: { id: string; name: string; sku: string; gtin: string | null; unit: Unit } | null
+  product: { id: string; name: string; sku: string; gtin: string | null; unit: Unit | null } | null
+}
+
+/**
+ * Resuelve a qué apunta un renglón. Lanza si no apunta a nada o si apunta a los dos:
+ * ambos casos son datos corruptos, no estados válidos que el resto deba tolerar.
+ */
+export function resolveLineTarget(line: ResolvableLine): LineTarget {
+  const tieneInsumo = !!line.rawMaterial
+  const tieneProducto = !!line.product
+
+  if (tieneInsumo && tieneProducto) {
+    throw new AppError(`El renglón ${line.id ?? ''} apunta a un insumo y a un producto a la vez. Sólo puede ser uno.`, 400)
+  }
+
+  if (line.rawMaterial) {
+    const rm = line.rawMaterial
+    return { kind: 'RAW_MATERIAL', id: rm.id, name: rm.name, sku: rm.sku, gtin: rm.gtin, unit: rm.unit }
+  }
+
+  if (line.product) {
+    const p = line.product
+    // `Product.unit` es opcional en el esquema (un producto puede no rastrear
+    // inventario). Para comprarlo SÍ se necesita: sin unidad no se sabe qué se está
+    // recibiendo ni cómo valuarlo.
+    if (!p.unit) {
+      throw new AppError(`El producto "${p.name}" no tiene unidad de medida configurada y no se puede incluir en una orden de compra.`, 400)
+    }
+    return { kind: 'PRODUCT', id: p.id, name: p.name, sku: p.sku, gtin: p.gtin, unit: p.unit }
+  }
+
+  throw new AppError(`El renglón ${line.id ?? ''} no apunta a ningún insumo ni producto.`, 400)
+}
+
+/**
+ * Verifica que cada renglón apunte a un insumo o producto que EXISTE y pertenece a
+ * ESTE venue, y que un producto de reventa sea comprable.
+ *
+ * Lo usan crear Y editar. Antes sólo lo hacía crear, así que editar una orden podía
+ * conectar el insumo o el producto de OTRO local: el aislamiento entre inquilinos
+ * dependía de que nadie mandara un id ajeno. Al ser una sola función, cualquier ruta
+ * que la llame hereda la validación completa.
+ *
+ * Se comparan CONJUNTOS de ids únicos, no longitudes de arreglo. La versión anterior
+ * comparaba `findMany().length` contra `items.length`, así que repetir el mismo insumo
+ * en dos renglones respondía "Some raw materials not found" y mandaba al usuario a
+ * buscar un insumo que sí existía. Ahora el mensaje nombra qué id no se encontró.
+ */
+async function verificarRenglonesDelVenue(venueId: string, items: Array<{ rawMaterialId?: string; productId?: string }>): Promise<void> {
+  const rawMaterialIds = [...new Set(items.map(i => i.rawMaterialId).filter((v): v is string => !!v))]
+  const productIds = [...new Set(items.map(i => i.productId).filter((v): v is string => !!v))]
+
+  if (rawMaterialIds.length > 0) {
+    const encontrados = await prisma.rawMaterial.findMany({
+      where: { id: { in: rawMaterialIds }, venueId, deletedAt: null },
+      select: { id: true },
+    })
+    const faltantes = rawMaterialIds.filter(id => !encontrados.some(e => e.id === id))
+    if (faltantes.length > 0) {
+      throw new AppError(`No se encontraron estos insumos en la sucursal: ${faltantes.join(', ')}`, 404)
+    }
+  }
+
+  if (productIds.length > 0) {
+    const encontrados = await prisma.product.findMany({
+      where: { id: { in: productIds }, venueId, deletedAt: null },
+      select: { id: true, name: true, trackInventory: true, unit: true },
+    })
+    const faltantes = productIds.filter(id => !encontrados.some(e => e.id === id))
+    if (faltantes.length > 0) {
+      throw new AppError(`No se encontraron estos productos en la sucursal: ${faltantes.join(', ')}`, 404)
+    }
+
+    // Se valida AQUÍ, al ordenar, y no al recibir: descubrir que un producto no
+    // rastrea inventario cuando el camión ya está en la puerta no le sirve a nadie.
+    const sinInventario = encontrados.filter(p => !p.trackInventory || !p.unit)
+    if (sinInventario.length > 0) {
+      throw new AppError(
+        `Estos productos no tienen control de inventario activo y no se pueden comprar: ${sinInventario.map(p => p.name).join(', ')}. Actívalo y define su unidad de medida.`,
+        400,
+      )
+    }
+  }
+}
+
+/**
  * Normaliza una cantidad recibida a la UNIDAD BASE del insumo, junto con su costo.
  *
  * Dos caminos, y el orden importa:
@@ -44,15 +170,18 @@ import { logAction } from './activity-log.service'
  * los movimientos viendo siempre la unidad base, como hasta hoy.
  */
 function purchasedQuantityInBaseUnit(
-  orderItem: { unit: Unit; unitPrice: Decimal; presentationFactor: Decimal | null; rawMaterial: { name: string; unit: Unit } },
+  orderItem: { unit: Unit; unitPrice: Decimal; presentationFactor: Decimal | null },
   quantityInOrderUnit: Decimal | number,
+  // El insumo se pasa APARTE porque el renglón ya puede apuntar a un producto en su
+  // lugar. Quien llama es responsable de haber comprobado que este renglón es de insumo.
+  rawMaterial: { name: string; unit: Unit },
 ): { baseQuantity: Decimal; batch: { quantity: Decimal; unit: Unit; costPerUnit: Decimal } } {
-  const baseUnit = orderItem.rawMaterial.unit
+  const baseUnit = rawMaterial.unit
 
   if (orderItem.presentationFactor) {
     const factor = new Decimal(orderItem.presentationFactor)
     if (!factor.isFinite() || factor.lte(0)) {
-      throw new AppError(`El factor de presentación de ${orderItem.rawMaterial.name} es inválido`, 400)
+      throw new AppError(`El factor de presentación de ${rawMaterial.name} es inválido`, 400)
     }
     const baseQuantity = new Decimal(quantityInOrderUnit).mul(factor)
     // Ya viene en unidad base, así que `createStockBatch` no debe reconvertir:
@@ -66,7 +195,7 @@ function purchasedQuantityInBaseUnit(
   // Camino legacy — byte-idéntico al comportamiento anterior.
   if (orderItem.unit !== baseUnit && !areUnitsCompatible(orderItem.unit, baseUnit)) {
     throw new AppError(
-      `Cannot receive ${orderItem.rawMaterial.name}: PO unit ${orderItem.unit} is incompatible with raw material unit ${baseUnit}`,
+      `Cannot receive ${rawMaterial.name}: PO unit ${orderItem.unit} is incompatible with raw material unit ${baseUnit}`,
       400,
     )
   }
@@ -147,6 +276,7 @@ export async function sendPurchaseOrderEmailAsync(venueId: string, purchaseOrder
         items: {
           include: {
             rawMaterial: true,
+            product: true,
           },
         },
         venue: {
@@ -198,8 +328,12 @@ export async function sendPurchaseOrderEmailAsync(venueId: string, purchaseOrder
     const shippingZipCode = useCustomShipping ? po.shippingZipCode! : po.venue?.zipCode || 'N/A'
 
     // Format items for email
+    // OJO: este `any` fue el que dejó pasar un crash real — con renglones de
+    // mercancía de reventa, `item.rawMaterial` es null y el correo al proveedor
+    // reventaba en silencio (la función es fire-and-forget). El resolvedor da el
+    // nombre correcto sea insumo o producto.
     const formattedItems = po.items.map((item: any) => ({
-      name: item.rawMaterial.name,
+      name: resolveLineTarget(item).name,
       quantity: item.quantityOrdered.toNumber(),
       unit: item.unit,
       unitPrice: item.unitPrice.toFixed(2),
@@ -297,6 +431,17 @@ export async function getPurchaseOrders(
               currentStock: true,
             },
           },
+          // Un renglón puede ser mercancía de reventa en vez de insumo. Sin esto el
+          // listado devuelve renglones anónimos (nombre y sku en null) para toda
+          // orden de tienda de conveniencia.
+          product: {
+            select: {
+              id: true,
+              name: true,
+              sku: true,
+              unit: true,
+            },
+          },
         },
       },
     },
@@ -322,6 +467,7 @@ export async function getPurchaseOrder(venueId: string, purchaseOrderId: string)
       items: {
         include: {
           rawMaterial: true,
+          product: true, // renglón de mercancía de reventa: sin esto sale anónimo
         },
       },
     },
@@ -358,10 +504,17 @@ export async function getPurchaseOrder(venueId: string, purchaseOrderId: string)
  */
 async function resolvePresentationSnapshots(
   venueId: string,
-  items: Array<{ rawMaterialId: string; presentationName?: string }>,
+  // `rawMaterialId` es opcional porque un renglón puede ser mercancía de reventa.
+  // Las presentaciones de compra son exclusivas de insumos (el esquema Zod rechaza
+  // una presentación en un renglón de producto), así que esos renglones se ignoran.
+  items: Array<{ rawMaterialId?: string; presentationName?: string }>,
 ): Promise<Map<number, { name: string; factor: Decimal; baseUnit: Unit }>> {
   const snapshots = new Map<number, { name: string; factor: Decimal; baseUnit: Unit }>()
-  const withPresentation = items.map((item, index) => ({ item, index })).filter(({ item }) => Boolean(item.presentationName))
+  const withPresentation = items
+    .map((item, index) => ({ item, index }))
+    .filter((x): x is { item: { rawMaterialId: string; presentationName?: string }; index: number } =>
+      Boolean(x.item.presentationName && x.item.rawMaterialId),
+    )
   if (withPresentation.length === 0) return snapshots
 
   const rows = await prisma.rawMaterialPresentation.findMany({
@@ -407,18 +560,7 @@ export async function createPurchaseOrder(venueId: string, data: CreatePurchaseO
     throw new AppError(`Supplier with ID ${data.supplierId} not found`, 404)
   }
 
-  // Verify all raw materials exist
-  const rawMaterialIds = data.items.map(item => item.rawMaterialId)
-  const rawMaterials = await prisma.rawMaterial.findMany({
-    where: {
-      id: { in: rawMaterialIds },
-      venueId,
-    },
-  })
-
-  if (rawMaterials.length !== rawMaterialIds.length) {
-    throw new AppError('Some raw materials not found', 404)
-  }
+  await verificarRenglonesDelVenue(venueId, data.items)
 
   // Calculate totals
   const subtotal = data.items.reduce((sum, item) => {
@@ -473,9 +615,10 @@ export async function createPurchaseOrder(venueId: string, data: CreatePurchaseO
           const itemTotal = new Decimal(item.unitPrice).mul(item.quantityOrdered)
           const presentation = presentationSnapshots.get(index)
           return {
-            rawMaterial: {
-              connect: { id: item.rawMaterialId },
-            },
+            // Insumo de cocina O producto de reventa, nunca los dos: la exclusividad
+            // ya la garantizó el esquema Zod de entrada.
+            ...(item.rawMaterialId ? { rawMaterial: { connect: { id: item.rawMaterialId } } } : {}),
+            ...(item.productId ? { product: { connect: { id: item.productId } } } : {}),
             quantityOrdered: item.quantityOrdered,
             // Con presentación, la unidad del renglón es la BASE del insumo: el
             // enum no puede decir "caja", eso lo dice `presentationName`.
@@ -494,6 +637,7 @@ export async function createPurchaseOrder(venueId: string, data: CreatePurchaseO
       items: {
         include: {
           rawMaterial: true,
+          product: true, // renglón de mercancía de reventa: sin esto sale anónimo
         },
       },
     },
@@ -558,6 +702,26 @@ export async function updatePurchaseOrder(
 
   // If items are being updated, recalculate totals
   if (data.items) {
+    // 🔴 Reemplazar los renglones los BORRA y los recrea con ids nuevos, y eso corta
+    // en silencio la liga con lo que ya entró a la bodega: los `StockBatch` de los
+    // insumos y los `InventoryMovement` de la mercancía quedan con su
+    // `purchaseOrderItemId` en NULL, mientras `quantityReceived` vuelve a 0. La orden
+    // queda diciendo "no he recibido nada" con la mercancía ya en el almacén, así que
+    // volver a recibirla la cuenta DOS VECES. Editar cantidades y precios de lo que ya
+    // llegó tampoco tiene sentido de negocio: lo que llegó, llegó.
+    const conRecepciones = existingOrder.items.filter(i => new Decimal(i.quantityReceived).greaterThan(0))
+    if (conRecepciones.length > 0) {
+      throw new AppError(
+        `Esta orden ya tiene ${conRecepciones.length} renglón(es) con mercancía recibida y sus renglones no se pueden reemplazar. ` +
+          `Ajusta la cantidad recibida desde la recepción del renglón, o cancela la orden y crea una nueva.`,
+        400,
+      )
+    }
+
+    // Misma verificación que al crear: sin esto, editar podía conectar el insumo o el
+    // producto de OTRO local.
+    await verificarRenglonesDelVenue(venueId, data.items)
+
     const subtotal = data.items.reduce((sum, item) => {
       return sum.add(new Decimal(item.unitPrice).mul(item.quantityOrdered))
     }, new Decimal(0))
@@ -575,48 +739,55 @@ export async function updatePurchaseOrder(
     // Resolver ANTES de borrar: si la presentación no existe, la orden se queda
     // como estaba en vez de perder sus renglones.
     updatedPresentationSnapshots = await resolvePresentationSnapshots(existingOrder.venueId, data.items)
-
-    // Delete old items and create new ones
-    await prisma.purchaseOrderItem.deleteMany({
-      where: { purchaseOrderId },
-    })
   }
 
-  const purchaseOrder = await prisma.purchaseOrder.update({
-    where: { id: purchaseOrderId },
-    data: data.items
-      ? {
-          ...updateData,
-          items: {
-            create: data.items.map((item, index) => {
-              const itemTotal = new Decimal(item.unitPrice).mul(item.quantityOrdered)
-              // El update BORRA y recrea los renglones: sin esto se perdería el
-              // snapshot y la orden se recibiría con la conversión apagada.
-              const presentation = updatedPresentationSnapshots.get(index)
-              return {
-                rawMaterial: {
-                  connect: { id: item.rawMaterialId },
-                },
-                quantityOrdered: item.quantityOrdered,
-                unit: presentation ? presentation.baseUnit : (item.unit as Unit),
-                unitPrice: item.unitPrice,
-                total: itemTotal,
-                quantityReceived: 0,
-                presentationName: presentation?.name ?? null,
-                presentationFactor: presentation?.factor ?? null,
-              }
-            }),
+  // Borrar y recrear van en UNA transacción: sueltos, si la recreación falla (una FK
+  // inválida, un timeout), el `deleteMany` ya se confirmó y la orden se queda con CERO
+  // renglones y con sus totales intactos — una orden fantasma que cuadra a nada.
+  const purchaseOrder = await prisma.$transaction(async tx => {
+    if (data.items) {
+      await tx.purchaseOrderItem.deleteMany({ where: { purchaseOrderId } })
+    }
+
+    return tx.purchaseOrder.update({
+      where: { id: purchaseOrderId },
+      data: data.items
+        ? {
+            ...updateData,
+            items: {
+              create: data.items.map((item, index) => {
+                const itemTotal = new Decimal(item.unitPrice).mul(item.quantityOrdered)
+                // El update BORRA y recrea los renglones: sin esto se perdería el
+                // snapshot y la orden se recibiría con la conversión apagada.
+                const presentation = updatedPresentationSnapshots.get(index)
+                return {
+                  // Insumo de cocina O producto de reventa, igual que al crear. Antes
+                  // esto conectaba SIEMPRE `rawMaterial`, así que editar una orden de
+                  // tienda de conveniencia se llevaba sus renglones por delante.
+                  ...(item.rawMaterialId ? { rawMaterial: { connect: { id: item.rawMaterialId } } } : {}),
+                  ...(item.productId ? { product: { connect: { id: item.productId } } } : {}),
+                  quantityOrdered: item.quantityOrdered,
+                  unit: presentation ? presentation.baseUnit : (item.unit as Unit),
+                  unitPrice: item.unitPrice,
+                  total: itemTotal,
+                  quantityReceived: 0,
+                  presentationName: presentation?.name ?? null,
+                  presentationFactor: presentation?.factor ?? null,
+                }
+              }),
+            },
+          }
+        : updateData,
+      include: {
+        supplier: true,
+        items: {
+          include: {
+            rawMaterial: true,
+            product: true, // renglón de mercancía de reventa: sin esto sale anónimo
           },
-        }
-      : updateData,
-    include: {
-      supplier: true,
-      items: {
-        include: {
-          rawMaterial: true,
         },
       },
-    },
+    })
   })
 
   logAction({
@@ -703,6 +874,7 @@ export async function approvePurchaseOrder(venueId: string, purchaseOrderId: str
       items: {
         include: {
           rawMaterial: true,
+          product: true, // renglón de mercancía de reventa: sin esto sale anónimo
         },
       },
     },
@@ -738,6 +910,9 @@ export async function receivePurchaseOrder(
       items: {
         include: {
           rawMaterial: true,
+          // Se carga sólo para poder nombrar el producto en el mensaje de rechazo:
+          // este camino no recibe mercancía de reventa.
+          product: { select: { name: true } },
         },
       },
     },
@@ -765,26 +940,42 @@ export async function receivePurchaseOrder(
       throw new AppError(`Purchase order item ${receivedItem.purchaseOrderItemId} not found`, 404)
     }
 
+    // Este camino LEGACY sólo maneja insumos de cocina y NO se va a extender: usa la
+    // forma de arreglo de `$transaction`, que no expone el cliente `tx` y por eso deja
+    // los lotes fuera de la transacción (ver docs/DEMO-PITS-2026-08-BITACORA.md §2).
+    // La mercancía de reventa se recibe por `applyItemReceiveStatusInTx`, que sí es
+    // transaccional. Rechazar explícito es mejor que fallar raro más adelante.
+    if (orderItem.productId) {
+      throw new AppError(
+        `El renglón de "${orderItem.product?.name ?? 'producto'}" es mercancía de reventa y debe recibirse por renglón, no con "Recibir todo" del flujo anterior.`,
+        400,
+      )
+    }
+    if (!orderItem.rawMaterial) {
+      throw new AppError(`El renglón ${orderItem.id} no apunta a ningún insumo ni producto.`, 400)
+    }
+    const orderItemRawMaterial = orderItem.rawMaterial
+
     const totalReceived = orderItem.quantityReceived.add(receivedItem.quantityReceived)
 
     if (totalReceived.greaterThan(orderItem.quantityOrdered)) {
       throw new AppError(
-        `Cannot receive ${receivedItem.quantityReceived} of ${orderItem.rawMaterial.name}. Total would exceed ordered quantity.`,
+        `Cannot receive ${receivedItem.quantityReceived} of ${orderItemRawMaterial.name}. Total would exceed ordered quantity.`,
         400,
       )
     }
 
     // Calculate expiration date if perishable
     let expirationDate: Date | undefined
-    if (orderItem.rawMaterial.perishable && orderItem.rawMaterial.shelfLifeDays) {
+    if (orderItemRawMaterial.perishable && orderItemRawMaterial.shelfLifeDays) {
       expirationDate = new Date(data.receivedDate)
-      expirationDate.setDate(expirationDate.getDate() + orderItem.rawMaterial.shelfLifeDays)
+      expirationDate.setDate(expirationDate.getDate() + orderItemRawMaterial.shelfLifeDays)
     }
 
     // Presentación de compra (CEDIS): si la línea se compró en "caja", se
     // convierte AQUÍ, en el borde, y todo lo de abajo (batch, stock, movimiento)
     // sigue viendo la unidad base como siempre.
-    const purchased = purchasedQuantityInBaseUnit(orderItem, receivedItem.quantityReceived)
+    const purchased = purchasedQuantityInBaseUnit(orderItem, receivedItem.quantityReceived, orderItemRawMaterial)
 
     // Create FIFO batch for this received quantity. createStockBatch normalizes
     // (quantity, unit, costPerUnit) to the raw material's storage unit
@@ -792,7 +983,7 @@ export async function receivePurchaseOrder(
     // because RawMaterial.currentStock and the movement record use the RM unit.
     const batchPromise = createStockBatch(
       venueId,
-      orderItem.rawMaterialId,
+      orderItemRawMaterial.id,
       {
         purchaseOrderItemId: orderItem.id,
         quantity: purchased.batch.quantity.toNumber(),
@@ -823,12 +1014,23 @@ export async function receivePurchaseOrder(
     // the raw PO quantity, otherwise receiving "1 KG" of a GRAM raw material
     // would only bump currentStock by 1 (interpreted as 1 GRAM) while the
     // batch correctly stores 1000g.
-    const newStock = orderItem.rawMaterial.currentStock.add(receivedInRmUnit)
+    //
+    // 🔴 INCREMENTO ATÓMICO, NO ASIGNACIÓN. Antes esto calculaba
+    // `orderItemRawMaterial.currentStock.add(recibido)` desde la lectura hecha al
+    // inicio de la función —FUERA de la transacción— y lo escribía como valor
+    // absoluto. Dos renglones del mismo insumo en la misma OC, o dos recepciones
+    // concurrentes de dos paradores distintos, y la segunda escritura PISA a la
+    // primera: se pierde una recepción completa y nadie se entera.
+    //
+    // `increment` se traduce a un `SET currentStock = currentStock + n` que la base
+    // resuelve atómicamente, así que el orden de llegada deja de importar. No basta
+    // con meterlo en una transacción: con el aislamiento por defecto de PostgreSQL
+    // (READ COMMITTED) un leer-modificar-escribir sigue perdiendo actualizaciones.
     operations.push(
       prisma.rawMaterial.update({
-        where: { id: orderItem.rawMaterialId },
+        where: { id: orderItemRawMaterial.id },
         data: {
-          currentStock: newStock,
+          currentStock: { increment: receivedInRmUnit },
         },
       }),
     )
@@ -841,23 +1043,38 @@ export async function receivePurchaseOrder(
   // previousStock, newStock and costImpact must all reference the RM unit so
   // they reconcile cleanly with RawMaterial.currentStock and StockBatch
   // (both also normalized).
+  //
+  // ⚠️ DEUDA CONOCIDA — `previousStock` y `newStock` de abajo salen de la lectura
+  // hecha al INICIO de la función, no del valor real al momento de aplicar. Bajo
+  // concurrencia el saldo guardado en `RawMaterial.currentStock` queda CORRECTO
+  // (arriba se usa `increment`), pero estas dos columnas del kardex pueden quedar
+  // desfasadas. No se corrige aquí porque esta función usa la forma de ARREGLO de
+  // `$transaction`, que no expone el cliente `tx` necesario para releer adentro;
+  // arreglarlo obliga a convertirla a la forma de callback (~185 líneas).
+  //
+  // El camino moderno (`applyItemReceiveStatusInTx`) ya corre en forma de callback
+  // y no tiene este problema. Toda funcionalidad nueva —incluida la recepción de
+  // mercancía de reventa— debe construirse ahí, NO aquí.
+  // Ver docs/DEMO-PITS-2026-08-BITACORA.md §2.
   for (let i = 0; i < data.items.length; i++) {
     const receivedItem = data.items[i]
     const orderItem = order.items.find(item => item.id === receivedItem.purchaseOrderItemId)!
+    // Ya se validó arriba que todos los renglones de este camino son de insumo.
+    const orderItemRawMaterial = orderItem.rawMaterial!
     const batch = createdBatches[i]
-    const receivedInRmUnit = purchasedQuantityInBaseUnit(orderItem, receivedItem.quantityReceived).baseQuantity
+    const receivedInRmUnit = purchasedQuantityInBaseUnit(orderItem, receivedItem.quantityReceived, orderItemRawMaterial).baseQuantity
 
     operations.push(
       prisma.rawMaterialMovement.create({
         data: {
-          rawMaterialId: orderItem.rawMaterialId,
+          rawMaterialId: orderItemRawMaterial.id,
           venueId,
           batchId: batch.id,
           type: RawMaterialMovementType.PURCHASE,
           quantity: receivedInRmUnit,
-          unit: orderItem.rawMaterial.unit,
-          previousStock: orderItem.rawMaterial.currentStock,
-          newStock: orderItem.rawMaterial.currentStock.add(receivedInRmUnit),
+          unit: orderItemRawMaterial.unit,
+          previousStock: orderItemRawMaterial.currentStock,
+          newStock: orderItemRawMaterial.currentStock.add(receivedInRmUnit),
           // batch.costPerUnit is already per-RM-unit (createStockBatch normalized it).
           costImpact: batch.costPerUnit.mul(receivedInRmUnit),
           reason: `Purchase order ${order.orderNumber} received (Batch: ${batch.batchNumber})`,
@@ -893,6 +1110,7 @@ export async function receivePurchaseOrder(
       items: {
         include: {
           rawMaterial: true,
+          product: true, // renglón de mercancía de reventa: sin esto sale anónimo
         },
       },
     },
@@ -945,6 +1163,7 @@ export async function cancelPurchaseOrder(
       items: {
         include: {
           rawMaterial: true,
+          product: true, // renglón de mercancía de reventa: sin esto sale anónimo
         },
       },
     },
@@ -1060,6 +1279,7 @@ export async function updatePurchaseOrderFees(
       items: {
         include: {
           rawMaterial: true,
+          product: true, // renglón de mercancía de reventa: sin esto sale anónimo
         },
       },
     },
@@ -1131,6 +1351,192 @@ export async function updatePurchaseOrderItemStatus(
 }
 
 /**
+ * Recepción de MERCANCÍA DE REVENTA (tienda de conveniencia).
+ *
+ * Mucho más simple que la de insumos, y a propósito: un producto de reventa no se
+ * descompone en lotes con caducidad ni se consume por receta. Su saldo vive en
+ * `Inventory.currentStock` y su historia en `InventoryMovement`, que ya traía
+ * `unitCost`, `supplier` y el tipo `PURCHASE` sin que nadie los usara.
+ *
+ * Todo corre con el `tx` del llamador, así que saldo y movimiento se confirman juntos.
+ *
+ * Decisiones que conviene entender antes de tocar esto:
+ *
+ * · **Exige `trackInventory` activo.** Si un producto no rastrea inventario y aquí le
+ *   creáramos la fila `Inventory` por la puerta de atrás, el punto de venta empezaría
+ *   a BLOQUEAR sus ventas por falta de existencia. Se rechaza con un mensaje que dice
+ *   qué configurar, en vez de romper la caja de un cliente.
+ * · **El saldo se escribe con `increment`**, igual que en insumos y por la misma razón:
+ *   dos recepciones simultáneas no se pisan.
+ * · **No hay conversión de unidad.** El renglón se compra en la unidad del producto;
+ *   la presentación de compra (cajas) queda para cuando exista demanda real, y hasta
+ *   entonces se rechaza explícito en vez de valuar mal el inventario.
+ *
+ * 🔴 **El delta sale del ESTADO REAL, no de `quantityReceived`.** Esto es lo único
+ * sutil de la función y ya causó un error de doble conteo. `quantityReceived` es un
+ * METADATO mutable: `receiveNoItems` lo pone en 0 sin revertir el saldo. Si el delta
+ * se calcula contra esa columna, la secuencia "recibir 5 → recibir ninguno → recibir
+ * todo" deja 10 de existencia habiendo llegado 5 — un solo usuario, tres clics, sin
+ * concurrencia. El camino de insumos nunca tuvo ese defecto porque su delta sale de
+ * los lotes vivos, que son estado real y por tanto autocorrectivo.
+ *
+ * El equivalente aquí son los `InventoryMovement` que este mismo renglón generó. Se
+ * suman por `newStock - previousStock` y NO por `quantity` a propósito: cada fila
+ * lleva su propio antes y después, así que la suma es correcta sin depender de la
+ * convención de signo, que no es uniforme entre servicios.
+ */
+async function applyProductItemReceiveStatusInTx(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  item: {
+    id: string
+    productId: string | null
+    product: { id: string; name: string; unit: Unit | null; trackInventory: boolean } | null
+    unit: Unit
+    unitPrice: Decimal
+    quantityOrdered: Decimal
+    quantityReceived: Decimal
+    presentationName: string | null
+    presentationFactor: Decimal | null
+    purchaseOrder: { orderNumber: string; id: string }
+  },
+  data: UpdatePurchaseOrderItemStatusDto,
+  staffId?: string,
+): Promise<void> {
+  const producto = item.product
+  if (!producto) throw new AppError('El renglón apunta a un producto que ya no existe.', 404)
+
+  if (!producto.trackInventory || !producto.unit) {
+    throw new AppError(
+      `El producto "${producto.name}" no tiene control de inventario activo. Actívalo y define su unidad de medida antes de recibir mercancía.`,
+      400,
+    )
+  }
+
+  if (item.presentationFactor) {
+    throw new AppError(
+      `El renglón de "${producto.name}" usa la presentación "${item.presentationName}". Las presentaciones de compra todavía no están soportadas para mercancía de reventa; captura la cantidad en ${producto.unit}.`,
+      400,
+    )
+  }
+
+  if (item.unit !== producto.unit) {
+    throw new AppError(
+      `La unidad ${item.unit} de la orden no coincide con la unidad ${producto.unit} del producto "${producto.name}".`,
+      400,
+    )
+  }
+
+  // Cantidad efectiva: sólo RECEIVED aporta existencia. DAMAGED / NOT_PROCESSED /
+  // PENDING la dejan en cero, igual que en el camino de insumos.
+  const nuevaCantidad =
+    data.receiveStatus === PurchaseOrderItemStatus.RECEIVED
+      ? new Decimal(data.quantityReceived !== undefined ? data.quantityReceived : item.quantityReceived.toNumber())
+      : new Decimal(0)
+
+  if (nuevaCantidad.greaterThan(item.quantityOrdered)) {
+    throw new AppError(
+      `No se puede recibir ${nuevaCantidad.toString()} ${item.unit} de "${producto.name}": excede lo ordenado (${item.quantityOrdered.toString()} ${item.unit}).`,
+      400,
+    )
+  }
+
+  // Cuánto puso YA este renglón en la bodega, según los movimientos que él mismo
+  // generó. Ver la nota 🔴 del encabezado: NO se usa `item.quantityReceived`.
+  const movimientosPrevios = await tx.inventoryMovement.findMany({
+    where: { purchaseOrderItemId: item.id },
+    select: { previousStock: true, newStock: true },
+  })
+  const yaAplicado = movimientosPrevios.reduce((acc, m) => acc.add(m.newStock.minus(m.previousStock)), new Decimal(0))
+
+  // Recibir 3 sobre 5 ya aplicados devuelve 2 al almacén, no suma 3. Puede ser negativo.
+  const delta = nuevaCantidad.minus(yaAplicado)
+
+  await tx.purchaseOrderItem.update({
+    where: { id: item.id },
+    data: { quantityReceived: nuevaCantidad, receiveStatus: data.receiveStatus, notes: data.notes ?? undefined },
+  })
+
+  // La auditoría va SIEMPRE, incluso si el delta es cero: marcar un renglón como
+  // dañado o revertirlo a pendiente es exactamente el tipo de anomalía que un dueño
+  // audita. `void` a propósito: fire-and-forget, para que un fallo de bitácora no
+  // tumbe la transacción de inventario (mismo patrón que el camino de insumos).
+  void logAction({
+    staffId: staffId ?? null,
+    venueId,
+    action: 'PURCHASE_ORDER_ITEM_RECEIVED',
+    entity: 'PurchaseOrder',
+    entityId: item.purchaseOrder.id,
+    data: {
+      purchaseOrderItemId: item.id,
+      productId: producto.id,
+      productName: producto.name,
+      status: data.receiveStatus,
+      quantityReceived: Number(nuevaCantidad),
+      deltaAplicado: Number(delta),
+    },
+  })
+
+  if (delta.isZero()) return
+
+  // Filtrado por venue además de por producto: el `venueId` que recibe esta función
+  // es el de la orden de compra, ya validado por el llamador. Un `findUnique` sólo
+  // por productId funcionaría hoy (Inventory.productId es único y Product pertenece
+  // a un solo venue), pero deja la garantía apoyada en un invariante de otro modelo
+  // en vez de en la consulta que hace la escritura.
+  const inventario = await tx.inventory.findFirst({
+    where: { productId: producto.id, venueId },
+    select: { id: true, currentStock: true },
+  })
+  if (!inventario) {
+    throw new AppError(`El producto "${producto.name}" no tiene inventario inicializado en esta sucursal.`, 400)
+  }
+
+  const saldoAnterior = inventario.currentStock
+  await tx.inventory.update({
+    where: { id: inventario.id },
+    data: {
+      currentStock: { increment: delta },
+      ...(delta.greaterThan(0) ? { lastRestockedAt: data.receivedDate ? new Date(data.receivedDate) : new Date() } : {}),
+    },
+  })
+
+  // Mercancía marcada como DAÑADA sale como LOSS ("Damage, theft, expiry"), no como
+  // un ajuste genérico: es el espejo del SPOILAGE que usa el camino de insumos, y sin
+  // él un reporte de mermas no vería nunca la mercancía de tienda que llegó rota.
+  const tipoMovimiento = delta.greaterThan(0)
+    ? MovementType.PURCHASE
+    : data.receiveStatus === PurchaseOrderItemStatus.DAMAGED
+      ? MovementType.LOSS
+      : MovementType.ADJUSTMENT
+
+  const motivoPorEstado: Partial<Record<PurchaseOrderItemStatus, string>> = {
+    [PurchaseOrderItemStatus.DAMAGED]: 'Marcado como dañado en la entrega',
+    [PurchaseOrderItemStatus.NOT_PROCESSED]: 'Marcado como no tramitado',
+    [PurchaseOrderItemStatus.PENDING]: 'Reversión a pendiente',
+  }
+
+  await tx.inventoryMovement.create({
+    data: {
+      inventoryId: inventario.id,
+      purchaseOrderItemId: item.id, // es lo que permite recalcular `yaAplicado` la próxima vez
+      type: tipoMovimiento,
+      // Con signo, igual que `RawMaterialMovement.quantity` en el camino de insumos
+      // y como declara el propio modelo ("Positive or negative").
+      quantity: delta,
+      previousStock: saldoAnterior,
+      newStock: saldoAnterior.add(delta),
+      unitCost: item.unitPrice,
+      reason: delta.lessThan(0)
+        ? `${motivoPorEstado[data.receiveStatus] ?? 'Ajuste de recepción'} — Orden ${item.purchaseOrder.orderNumber} (${producto.name})`
+        : `Orden de compra ${item.purchaseOrder.orderNumber} recibida (${producto.name})`,
+      reference: item.purchaseOrder.id,
+      createdBy: staffId,
+    },
+  })
+}
+
+/**
  * Core of the receive state-machine, shared by updatePurchaseOrderItemStatus
  * (per-item endpoint), receiveAllItems ("Recibir todo") and the mobile
  * receiveStock flow. Runs inside the caller's transaction so batch + movement
@@ -1153,6 +1559,7 @@ export async function applyItemReceiveStatusInTx(
     },
     include: {
       rawMaterial: true,
+      product: true,
       batches: true,
       purchaseOrder: { select: { orderNumber: true, id: true } },
     },
@@ -1161,6 +1568,27 @@ export async function applyItemReceiveStatusInTx(
   if (!item) {
     throw new AppError('Item de orden de compra no encontrado', 404)
   }
+
+  // ── Bifurcación por tipo de renglón ──────────────────────────────────────
+  // La mercancía de reventa (tienda de conveniencia) no usa lotes PEPS: su saldo
+  // vive en `Inventory` y sus movimientos en `InventoryMovement`. Toda la lógica
+  // de abajo —lotes, caducidad, consumo, reversión por lote— es exclusiva de
+  // insumos de cocina, así que se delega ANTES de entrar.
+  //
+  // Se bifurca aquí y no con condicionales adentro para que el camino de insumos
+  // quede BYTE-IDÉNTICO a como estaba: ningún venue que hoy compra insumos cambia
+  // de comportamiento por este trabajo.
+  if (item.productId) {
+    await applyProductItemReceiveStatusInTx(tx, venueId, item, data, staffId)
+    return
+  }
+
+  if (!item.rawMaterial) {
+    throw new AppError('El renglón no apunta a ningún insumo ni producto.', 400)
+  }
+  // A partir de aquí el renglón es de INSUMO. `rawMaterial` local para que
+  // TypeScript no exija comprobar el nulo en cada uno de los ~30 usos de abajo.
+  const rawMaterial = item.rawMaterial
 
   // ── Compute effective received quantity in PO unit ───────────────────────
   // Only RECEIVED contributes positive stock; DAMAGED / NOT_PROCESSED /
@@ -1174,15 +1602,15 @@ export async function applyItemReceiveStatusInTx(
 
   if (newQtyReceivedInPoUnit.greaterThan(item.quantityOrdered)) {
     throw new AppError(
-      `No se puede recibir ${newQtyReceivedInPoUnit.toString()} ${item.unit} de ${item.rawMaterial.name}: excede la cantidad ordenada (${item.quantityOrdered.toString()} ${item.unit}).`,
+      `No se puede recibir ${newQtyReceivedInPoUnit.toString()} ${item.unit} de ${rawMaterial.name}: excede la cantidad ordenada (${item.quantityOrdered.toString()} ${item.unit}).`,
       400,
     )
   }
 
   // ── Unit compatibility (PO unit ↔ RawMaterial unit) ──────────────────────
-  if (item.unit !== item.rawMaterial.unit && !areUnitsCompatible(item.unit, item.rawMaterial.unit)) {
+  if (item.unit !== rawMaterial.unit && !areUnitsCompatible(item.unit, rawMaterial.unit)) {
     throw new AppError(
-      `La unidad ${item.unit} de la orden es incompatible con la unidad ${item.rawMaterial.unit} del insumo "${item.rawMaterial.name}".`,
+      `La unidad ${item.unit} de la orden es incompatible con la unidad ${rawMaterial.unit} del insumo "${rawMaterial.name}".`,
       400,
     )
   }
@@ -1199,9 +1627,7 @@ export async function applyItemReceiveStatusInTx(
 
   const toRmUnit = (qInPoUnit: Decimal): Decimal => {
     if (presentationFactor) return qInPoUnit.mul(presentationFactor)
-    return item.unit === item.rawMaterial.unit
-      ? qInPoUnit
-      : new Decimal(convertUnit(qInPoUnit.toNumber(), item.unit, item.rawMaterial.unit))
+    return item.unit === rawMaterial.unit ? qInPoUnit : new Decimal(convertUnit(qInPoUnit.toNumber(), item.unit, rawMaterial.unit))
   }
 
   const newQtyInRmUnit = toRmUnit(newQtyReceivedInPoUnit)
@@ -1220,7 +1646,7 @@ export async function applyItemReceiveStatusInTx(
   // by recipes/sales — that history is locked in.
   if (newQtyInRmUnit.lessThan(consumedTotal)) {
     throw new AppError(
-      `No se puede ajustar a ${newQtyReceivedInPoUnit.toString()} ${item.unit}: ya se consumieron ${consumedTotal.toString()} ${item.rawMaterial.unit} de este lote en ventas u otros movimientos. Haz un ajuste manual de inventario si es necesario.`,
+      `No se puede ajustar a ${newQtyReceivedInPoUnit.toString()} ${item.unit}: ya se consumieron ${consumedTotal.toString()} ${rawMaterial.unit} de este lote en ventas u otros movimientos. Haz un ajuste manual de inventario si es necesario.`,
       400,
     )
   }
@@ -1251,7 +1677,7 @@ export async function applyItemReceiveStatusInTx(
     entityId: purchaseOrderId,
     data: {
       purchaseOrderItemId: itemId,
-      rawMaterialId: item.rawMaterialId,
+      rawMaterialId: rawMaterial.id,
       status: newReceiveStatus,
       quantityReceived: Number(newQtyReceivedInPoUnit ?? 0),
     },
@@ -1262,7 +1688,7 @@ export async function applyItemReceiveStatusInTx(
     return
   }
 
-  const previousStock = item.rawMaterial.currentStock
+  const previousStock = rawMaterial.currentStock
   const newStock = previousStock.add(deltaInRmUnit)
   const receivedDate = data.receivedDate ? new Date(data.receivedDate) : new Date()
 
@@ -1270,7 +1696,7 @@ export async function applyItemReceiveStatusInTx(
     // Forward: create new batch for the increment
     const deltaInPoUnit = presentationFactor
       ? deltaInRmUnit.div(presentationFactor)
-      : newQtyReceivedInPoUnit.minus(toPoUnitInverse(liveInitialTotal, item.unit, item.rawMaterial.unit))
+      : newQtyReceivedInPoUnit.minus(toPoUnitInverse(liveInitialTotal, item.unit, rawMaterial.unit))
 
     // Cost normalization: PO unitPrice is per PO unit. If RM unit differs,
     // costPerUnit on the batch must be expressed per RM unit so FIFO costing
@@ -1281,26 +1707,26 @@ export async function applyItemReceiveStatusInTx(
     // $360 el kilo en vez de $30). `item.unit` YA es la unidad base en ese caso,
     // así que la comparación de unidades sola no basta para detectarlo.
     const costPerUnitInRmUnit =
-      presentationFactor || item.unit !== item.rawMaterial.unit ? item.unitPrice.mul(deltaInPoUnit).div(deltaInRmUnit) : item.unitPrice
+      presentationFactor || item.unit !== rawMaterial.unit ? item.unitPrice.mul(deltaInPoUnit).div(deltaInRmUnit) : item.unitPrice
 
-    const batchNumber = await generateBatchNumberInTx(tx, venueId, item.rawMaterialId)
+    const batchNumber = await generateBatchNumberInTx(tx, venueId, rawMaterial.id)
 
     // Calculate expiration if perishable
     let expirationDate: Date | undefined
-    if (item.rawMaterial.perishable && item.rawMaterial.shelfLifeDays) {
+    if (rawMaterial.perishable && rawMaterial.shelfLifeDays) {
       expirationDate = new Date(receivedDate)
-      expirationDate.setDate(expirationDate.getDate() + item.rawMaterial.shelfLifeDays)
+      expirationDate.setDate(expirationDate.getDate() + rawMaterial.shelfLifeDays)
     }
 
     const newBatch = await tx.stockBatch.create({
       data: {
         venueId,
-        rawMaterialId: item.rawMaterialId,
+        rawMaterialId: rawMaterial.id,
         purchaseOrderItemId: item.id,
         batchNumber,
         initialQuantity: deltaInRmUnit,
         remainingQuantity: deltaInRmUnit,
-        unit: item.rawMaterial.unit,
+        unit: rawMaterial.unit,
         costPerUnit: costPerUnitInRmUnit,
         receivedDate,
         expirationDate,
@@ -1311,15 +1737,15 @@ export async function applyItemReceiveStatusInTx(
     await tx.rawMaterialMovement.create({
       data: {
         venueId,
-        rawMaterialId: item.rawMaterialId,
+        rawMaterialId: rawMaterial.id,
         batchId: newBatch.id,
         type: RawMaterialMovementType.PURCHASE,
         quantity: deltaInRmUnit,
-        unit: item.rawMaterial.unit,
+        unit: rawMaterial.unit,
         previousStock,
         newStock,
         costImpact: costPerUnitInRmUnit.mul(deltaInRmUnit),
-        reason: `Orden de compra ${item.purchaseOrder.orderNumber} recibida (${item.rawMaterial.name})`,
+        reason: `Orden de compra ${item.purchaseOrder.orderNumber} recibida (${rawMaterial.name})`,
         reference: item.purchaseOrder.id,
         createdBy: staffId,
       },
@@ -1355,7 +1781,7 @@ export async function applyItemReceiveStatusInTx(
     if (remaining.greaterThan(0)) {
       // Defensive: should be impossible given the consumedTotal guard above
       throw new AppError(
-        `No se pudo revertir ${absDelta.toString()} ${item.rawMaterial.unit}: lotes activos insuficientes. Revisa el estado de inventario.`,
+        `No se pudo revertir ${absDelta.toString()} ${rawMaterial.unit}: lotes activos insuficientes. Revisa el estado de inventario.`,
         500,
       )
     }
@@ -1375,19 +1801,17 @@ export async function applyItemReceiveStatusInTx(
     await tx.rawMaterialMovement.create({
       data: {
         venueId,
-        rawMaterialId: item.rawMaterialId,
+        rawMaterialId: rawMaterial.id,
         type: movementType,
         quantity: deltaInRmUnit, // negative
-        unit: item.rawMaterial.unit,
+        unit: rawMaterial.unit,
         previousStock,
         newStock,
         // Approximate cost impact using PO unitPrice converted to RM unit
         costImpact: item.unitPrice.mul(
-          item.unit === item.rawMaterial.unit
-            ? deltaInRmUnit
-            : new Decimal(convertUnit(deltaInRmUnit.toNumber(), item.rawMaterial.unit, item.unit)),
+          item.unit === rawMaterial.unit ? deltaInRmUnit : new Decimal(convertUnit(deltaInRmUnit.toNumber(), rawMaterial.unit, item.unit)),
         ),
-        reason: `${reasonByStatus[newReceiveStatus] ?? 'Ajuste de recepción'} — Orden ${item.purchaseOrder.orderNumber} (${item.rawMaterial.name})`,
+        reason: `${reasonByStatus[newReceiveStatus] ?? 'Ajuste de recepción'} — Orden ${item.purchaseOrder.orderNumber} (${rawMaterial.name})`,
         reference: item.purchaseOrder.id,
         createdBy: staffId,
       },
@@ -1395,9 +1819,21 @@ export async function applyItemReceiveStatusInTx(
   }
 
   // ── 3. Sync RawMaterial.currentStock ─────────────────────────────────────
+  //
+  // 🔴 INCREMENTO ATÓMICO, NO ASIGNACIÓN. `newStock` se calcula arriba como
+  // `previousStock + delta` para poder estamparlo en el movimiento del kardex, y
+  // esa lectura sí ocurre dentro de la transacción. Pero escribirlo como valor
+  // absoluto seguiría perdiendo actualizaciones: con el aislamiento por defecto de
+  // PostgreSQL (READ COMMITTED) dos transacciones concurrentes pueden leer el mismo
+  // saldo y ambas escribir el suyo, y el último gana. Estar dentro de una
+  // transacción NO previene esto — sólo lo previene delegar la suma a la base.
+  //
+  // Con `increment` el saldo queda correcto sin importar el orden de llegada.
+  // Relevante para operaciones multi-sucursal donde varios paradores reciben
+  // mercancía al mismo tiempo. Ver docs/DEMO-PITS-2026-08-BITACORA.md §2.
   await tx.rawMaterial.update({
-    where: { id: item.rawMaterialId },
-    data: { currentStock: newStock },
+    where: { id: rawMaterial.id },
+    data: { currentStock: { increment: deltaInRmUnit } },
   })
 }
 
@@ -1485,6 +1921,7 @@ export async function receiveAllItems(
       items: {
         include: {
           rawMaterial: true,
+          product: true, // renglón de mercancía de reventa: sin esto sale anónimo
         },
       },
     },
@@ -1544,6 +1981,7 @@ export async function receiveNoItems(venueId: string, purchaseOrderId: string, d
       items: {
         include: {
           rawMaterial: true,
+          product: true, // renglón de mercancía de reventa: sin esto sale anónimo
         },
       },
     },
@@ -1646,6 +2084,7 @@ export async function generateLabels(
       items: {
         include: {
           rawMaterial: true,
+          product: true, // renglón de mercancía de reventa: sin esto sale anónimo
         },
       },
     },
@@ -1660,12 +2099,14 @@ export async function generateLabels(
     .filter(item => config.items.some(i => i.itemId === item.id))
     .map(item => {
       const configItem = config.items.find(i => i.itemId === item.id)!
+      // La etiqueta se imprime igual sea insumo de cocina o mercancía de tienda.
+      const target = resolveLineTarget(item)
       return {
-        name: item.rawMaterial.name,
-        sku: item.rawMaterial.sku,
-        gtin: item.rawMaterial.gtin ?? null,
+        name: target.name,
+        sku: target.sku,
+        gtin: target.gtin,
         price: item.unitPrice?.toString() ?? null,
-        unit: item.rawMaterial.unit,
+        unit: target.unit,
         labelQuantity: configItem.quantity,
       }
     })
@@ -1691,6 +2132,7 @@ export async function generatePurchaseOrderPDF(venueId: string, purchaseOrderId:
       items: {
         include: {
           rawMaterial: true,
+          product: true, // renglón de mercancía de reventa: sin esto sale anónimo
         },
       },
     },
@@ -1781,7 +2223,8 @@ export async function generatePurchaseOrderPDF(venueId: string, purchaseOrderId:
       yPosition = 50
     }
 
-    doc.text(item.rawMaterial.name, colX[0], yPosition, { width: colWidths[0] })
+    // El PDF que ve el proveedor lista igual insumos de cocina y mercancía de tienda.
+    doc.text(resolveLineTarget(item).name, colX[0], yPosition, { width: colWidths[0] })
     doc.text(`${item.quantityOrdered} ${getUnitAbbreviation(item.unit)}`, colX[1], yPosition, {
       width: colWidths[1],
       align: 'right',

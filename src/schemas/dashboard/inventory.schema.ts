@@ -369,6 +369,65 @@ export const GetSupplierRecommendationsSchema = z.object({
 // PURCHASE ORDER SCHEMAS
 // ==========================================
 
+/**
+ * Renglón de orden de compra: insumo de cocina O producto de reventa, nunca los dos.
+ *
+ * Vive aparte y se comparte entre CREAR y EDITAR a propósito. Cuando cada esquema
+ * tenía su propia copia, sólo se actualizó el de crear: el de editar siguió exigiendo
+ * `rawMaterialId` y desconociendo `productId`, y como editar BORRA los renglones y los
+ * recrea, cualquier edición de una orden con mercancía de tienda o la rechazaba con un
+ * mensaje incomprensible o se llevaba esas líneas por delante, recalculando los totales
+ * sobre lo que quedaba. Una sola definición hace imposible que vuelvan a divergir.
+ */
+const renglonOrdenDeCompra = z
+  .object({
+    // Ambos son opcionales aquí y la exclusividad se valida abajo. Esta es la capa
+    // que da el mensaje LEGIBLE; la garantía dura la da el CHECK de la base
+    // (`PurchaseOrderItem_insumo_xor_producto`), porque hay rutas de escritura
+    // —/mobile, chatbot, autoReorder— que no pasan por este esquema.
+    rawMaterialId: cuidLikeId().optional(),
+    productId: cuidLikeId().optional(),
+    quantityOrdered: z.number().positive(),
+    unit: z.nativeEnum(Unit),
+    unitPrice: z.number().positive(),
+    // Presentación de compra del insumo ("caja"). Si viene, `quantityOrdered`
+    // y `unitPrice` están EN ESA presentación (50 cajas a $360 la caja) y se
+    // convierten a la unidad base al recibir. Si NO viene, el renglón se
+    // comporta byte-idéntico a como se comportaba antes de existir esto.
+    //
+    // En EDITAR es igual de obligatorio conservarlo: el update borra y recrea los
+    // renglones, así que si Zod tira este campo el snapshot se pierde en silencio y
+    // la orden se recibe con la conversión apagada (stock ÷ factor, costo ×factor).
+    // Editar una orden no puede cambiar cómo se valúa.
+    presentationName: z.string().trim().min(1).max(40).optional(),
+  })
+  .superRefine((item, ctx) => {
+    const insumo = !!item.rawMaterialId
+    const producto = !!item.productId
+
+    if (insumo && producto) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Un renglón no puede ser insumo y producto a la vez. Indica sólo uno.',
+        path: ['productId'],
+      })
+    }
+    if (!insumo && !producto) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Cada renglón debe indicar un insumo o un producto.',
+        path: ['rawMaterialId'],
+      })
+    }
+    if (producto && item.presentationName) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Las presentaciones de compra todavía no aplican a mercancía de reventa. Captura la cantidad en la unidad del producto.',
+        path: ['presentationName'],
+      })
+    }
+  })
+
 export const CreatePurchaseOrderSchema = z.object({
   body: z.object({
     supplierId: z.string().cuid(),
@@ -383,19 +442,7 @@ export const CreatePurchaseOrderSchema = z.object({
     shippingCity: z.string().optional(),
     shippingState: z.string().optional(),
     shippingZipCode: z.string().optional(),
-    items: z.array(
-      z.object({
-        rawMaterialId: cuidLikeId(),
-        quantityOrdered: z.number().positive(),
-        unit: z.nativeEnum(Unit),
-        unitPrice: z.number().positive(),
-        // Presentación de compra del insumo ("caja"). Si viene, `quantityOrdered`
-        // y `unitPrice` están EN ESA presentación (50 cajas a $360 la caja) y se
-        // convierten a la unidad base al recibir. Si NO viene, el renglón se
-        // comporta byte-idéntico a como se comportaba antes de existir esto.
-        presentationName: z.string().trim().min(1).max(40).optional(),
-      }),
-    ),
+    items: z.array(renglonOrdenDeCompra).min(1, 'La orden de compra necesita al menos un renglón'),
   }),
 })
 
@@ -408,21 +455,9 @@ export const UpdatePurchaseOrderSchema = z.object({
     status: z.nativeEnum(PurchaseOrderStatus).optional(),
     expectedDeliveryDate: z.string().datetime().optional(),
     notes: z.string().optional(),
-    items: z
-      .array(
-        z.object({
-          rawMaterialId: cuidLikeId(),
-          quantityOrdered: z.number().positive(),
-          unit: z.nativeEnum(Unit),
-          unitPrice: z.number().positive(),
-          // OBLIGATORIO aquí también: el update BORRA y recrea los renglones, así
-          // que si Zod tira este campo el snapshot se pierde en silencio y la
-          // orden se recibe con la conversión apagada (stock ÷ factor, costo
-          // ×factor). Editar una orden no puede cambiar cómo se valúa.
-          presentationName: z.string().trim().min(1).max(40).optional(),
-        }),
-      )
-      .optional(),
+    // MISMA definición que al crear: editar borra y recrea los renglones, así que
+    // cualquier campo que este esquema no conozca se pierde en la edición.
+    items: z.array(renglonOrdenDeCompra).min(1, 'La orden de compra necesita al menos un renglón').optional(),
   }),
 })
 

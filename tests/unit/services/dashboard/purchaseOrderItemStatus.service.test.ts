@@ -145,10 +145,12 @@ describe('updatePurchaseOrderItemStatus — robust state machine', () => {
       // Stock incremented
       expect(mockedPrisma.rawMaterial.update).toHaveBeenCalledWith({
         where: { id: RM_ID },
-        data: { currentStock: expect.any(Decimal) },
+        data: { currentStock: { increment: expect.any(Decimal) } },
       })
       const stockUpdate = mockedPrisma.rawMaterial.update.mock.calls[0][0]
-      expect(stockUpdate.data.currentStock.toString()).toBe('4')
+      // El saldo se escribe como INCREMENTO ATÓMICO (delta), no como valor absoluto:
+      // es lo que impide perder una recepción cuando dos ocurren al mismo tiempo.
+      expect(stockUpdate.data.currentStock.increment.toString()).toBe('4')
 
       // PURCHASE movement logged
       expect(mockedPrisma.rawMaterialMovement.create).toHaveBeenCalledWith({
@@ -212,7 +214,9 @@ describe('updatePurchaseOrderItemStatus — robust state machine', () => {
       expect(batchData.costPerUnit.toString()).toBe('0.01')
 
       const stockUpdate = mockedPrisma.rawMaterial.update.mock.calls[0][0]
-      expect(stockUpdate.data.currentStock.toString()).toBe('1000')
+      // El saldo se escribe como INCREMENTO ATÓMICO (delta), no como valor absoluto:
+      // es lo que impide perder una recepción cuando dos ocurren al mismo tiempo.
+      expect(stockUpdate.data.currentStock.increment.toString()).toBe('1000')
     })
 
     it('💰 REGRESIÓN: recibe 50 CAJAS (factor 12) como 600 kg a $30/kg, no 50 kg a $360/kg', async () => {
@@ -244,7 +248,9 @@ describe('updatePurchaseOrderItemStatus — robust state machine', () => {
       expect(batchData.initialQuantity.mul(batchData.costPerUnit).toNumber()).toBe(18000)
 
       const stockUpdate = mockedPrisma.rawMaterial.update.mock.calls[0][0]
-      expect(stockUpdate.data.currentStock.toString()).toBe('620') // 20 + 600
+      // El saldo se escribe como INCREMENTO ATÓMICO (delta), no como valor absoluto:
+      // es lo que impide perder una recepción cuando dos ocurren al mismo tiempo.
+      expect(stockUpdate.data.currentStock.increment.toString()).toBe('600') // 20 + 600 = 620
     })
 
     it('un factor de presentación corrupto no crea lote', async () => {
@@ -320,7 +326,9 @@ describe('updatePurchaseOrderItemStatus — robust state machine', () => {
 
       // currentStock decremented to 0
       const stockUpdate = mockedPrisma.rawMaterial.update.mock.calls[0][0]
-      expect(stockUpdate.data.currentStock.toString()).toBe('0')
+      // El saldo se escribe como INCREMENTO ATÓMICO (delta), no como valor absoluto:
+      // es lo que impide perder una recepción cuando dos ocurren al mismo tiempo.
+      expect(stockUpdate.data.currentStock.increment.toString()).toBe('-4') // 4 - 4 = 0
 
       // Movement type SPOILAGE for DAMAGED
       const movement = mockedPrisma.rawMaterialMovement.create.mock.calls[0][0].data
@@ -424,7 +432,9 @@ describe('updatePurchaseOrderItemStatus — robust state machine', () => {
 
       // Stock down to 3
       const stockUpdate = mockedPrisma.rawMaterial.update.mock.calls[0][0]
-      expect(stockUpdate.data.currentStock.toString()).toBe('3')
+      // El saldo se escribe como INCREMENTO ATÓMICO (delta), no como valor absoluto:
+      // es lo que impide perder una recepción cuando dos ocurren al mismo tiempo.
+      expect(stockUpdate.data.currentStock.increment.toString()).toBe('-2') // 5 - 2 = 3
 
       // ADJUSTMENT or RETURN/SPOILAGE? Same status → ADJUSTMENT (we're still RECEIVED, just less)
       // Actually this is RECEIVED → RECEIVED with smaller qty: maps to ADJUSTMENT default
