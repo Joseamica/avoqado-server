@@ -275,8 +275,8 @@ revisar. Se corrigió todo antes de dar el punto 3 por bueno.
 
 El delta de la recepción se calculaba contra `PurchaseOrderItem.quantityReceived`, que **parece** la fuente obvia pero es un metadato
 mutable: `receiveNoItems` lo pone en 0 sin revertir el saldo, y `receiveAllItems` acepta correr sobre una orden `CANCELLED` justo para
-permitir deshacer esa acción. Tres clics de un solo usuario —recibir 5 → recibir ninguno → recibir todo— dejaban **10 de existencia
-habiendo llegado 5**.
+permitir deshacer esa acción. Tres clics de un solo usuario —recibir 5 → recibir ninguno → recibir todo— dejaban **10 de existencia habiendo
+llegado 5**.
 
 El camino de insumos nunca tuvo el defecto porque su delta sale de los **lotes vivos**, que son estado real y por tanto autocorrectivo. Se
 copió la forma de ese camino pero no su fuente de verdad.
@@ -296,23 +296,23 @@ compila**. El compilador pasa a ser la defensa en vez de la disciplina. Los 14 `
 
 ### El resto del barrido
 
-| Qué                       | Estaba                                                                    | Quedó                                                                              |
-| ------------------------- | ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `ActivityLog`             | La bifurcación hacía `return` **antes** del log: recepciones sin auditar  | `logAction` dentro del camino de producto, con `productId` y el actor              |
-| Editar una orden          | `deleteMany` + recrear conectando siempre `rawMaterial`                   | Conexión condicional, en transacción, y **bloqueado si ya hay recepciones**        |
-| `UpdatePurchaseOrderDto`  | Esquema propio que exigía `rawMaterialId` y desconocía `productId`        | Una sola definición compartida con crear — no pueden volver a divergir             |
-| `/mobile`                 | Escribía `rawMaterialId` crudo sin Zod                                    | Guarda explícita + el CHECK de la base                                             |
-| MCP `purchase_order_detail` | Renglones anónimos (nombre y sku en null)                                | Resuelve ambos + campo `tipo` (INSUMO / MERCANCIA_DE_REVENTA)                       |
-| Dashboard                 | **Imposible crear** una orden de reventa; detalle, recibir y CSV reventaban | Selector unificado con etiqueta, y helpers `nombreDelRenglon` en los 8 puntos      |
-| Movimiento de dañado      | `ADJUSTMENT` genérico                                                     | `LOSS` — espejo del `SPOILAGE` de insumos, para que un reporte de mermas lo vea    |
-| Aislamiento               | El update no validaba venue del insumo/producto                           | `verificarRenglonesDelVenue()` compartida por crear y editar                        |
+| Qué                         | Estaba                                                                      | Quedó                                                                           |
+| --------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `ActivityLog`               | La bifurcación hacía `return` **antes** del log: recepciones sin auditar    | `logAction` dentro del camino de producto, con `productId` y el actor           |
+| Editar una orden            | `deleteMany` + recrear conectando siempre `rawMaterial`                     | Conexión condicional, en transacción, y **bloqueado si ya hay recepciones**     |
+| `UpdatePurchaseOrderDto`    | Esquema propio que exigía `rawMaterialId` y desconocía `productId`          | Una sola definición compartida con crear — no pueden volver a divergir          |
+| `/mobile`                   | Escribía `rawMaterialId` crudo sin Zod                                      | Guarda explícita + el CHECK de la base                                          |
+| MCP `purchase_order_detail` | Renglones anónimos (nombre y sku en null)                                   | Resuelve ambos + campo `tipo` (INSUMO / MERCANCIA_DE_REVENTA)                   |
+| Dashboard                   | **Imposible crear** una orden de reventa; detalle, recibir y CSV reventaban | Selector unificado con etiqueta, y helpers `nombreDelRenglon` en los 8 puntos   |
+| Movimiento de dañado        | `ADJUSTMENT` genérico                                                       | `LOSS` — espejo del `SPOILAGE` de insumos, para que un reporte de mermas lo vea |
+| Aislamiento                 | El update no validaba venue del insumo/producto                             | `verificarRenglonesDelVenue()` compartida por crear y editar                    |
 
 ### Donde me equivoqué al reportar
 
-Dije que la migración era **"puramente aditiva y ningún comportamiento cambia"**. Fue la mitad cierto: las filas existentes quedan
-intactas y el camino de insumos sí es byte-idéntico. Pero quitar el `NOT NULL` **desarmó la última red de seguridad** de las rutas que
-escriben renglones sin pasar por Zod (`/mobile`, chatbot, autoReorder): un renglón sin destino pasaba de reventar ruidosamente en la base a
-guardarse en silencio. Por eso ahora la exclusividad se defiende en tres capas y el `CHECK` está en la base.
+Dije que la migración era **"puramente aditiva y ningún comportamiento cambia"**. Fue la mitad cierto: las filas existentes quedan intactas
+y el camino de insumos sí es byte-idéntico. Pero quitar el `NOT NULL` **desarmó la última red de seguridad** de las rutas que escriben
+renglones sin pasar por Zod (`/mobile`, chatbot, autoReorder): un renglón sin destino pasaba de reventar ruidosamente en la base a guardarse
+en silencio. Por eso ahora la exclusividad se defiende en tres capas y el `CHECK` está en la base.
 
 También dije que repetir el mismo insumo en dos renglones era "perfectamente legítimo" al cambiar la validación de longitudes a conjuntos.
 La validación vieja **sí los rechazaba**, y el kardex del camino legacy no los soporta (ambos movimientos estampan el mismo
@@ -339,8 +339,8 @@ La validación vieja **sí los rechazaba**, y el kardex del camino legacy no los
 - **Renglones duplicados del mismo insumo**: ahora se permiten, pero el kardex del camino legacy los estampa mal (ambos movimientos con el
   mismo `previousStock`). O se acumula por renglón, o se vuelven a rechazar. El saldo final SÍ queda correcto; es el kardex el que miente.
 - **La carrera restante**: `increment` cerró la escritura, no la lectura. Dos recepciones concurrentes del MISMO renglón siguen leyendo el
-  mismo estado y sumando doble — y ahora *cuadra* contra los lotes, así que es más difícil de detectar que antes. Se cierra con un candado de
-  fila (`FOR UPDATE`) sobre el renglón antes de calcular el delta.
+  mismo estado y sumando doble — y ahora _cuadra_ contra los lotes, así que es más difícil de detectar que antes. Se cierra con un candado
+  de fila (`FOR UPDATE`) sobre el renglón antes de calcular el delta.
 - **`strict: false` en el dashboard**: tipar bien `PurchaseOrderItem` allá NO protege, porque `strictNullChecks` está apagado. Los ocho
   sitios se arreglaron a mano. Mientras siga apagado, el compilador no va a avisar del siguiente.
 - **Crear una orden de compra dispara un correo real al proveedor** (fire-and-forget). Salió durante las pruebas. No es nuevo, pero conviene

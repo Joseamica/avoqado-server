@@ -1,10 +1,14 @@
 # Autorización y segregación de funciones en compras — Plan de implementación
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Que ninguna compra por encima de un monto configurable por sucursal pueda autorizarse sola, y que quien autoriza no sea forzosamente quien recibe — sin cambiar el comportamiento de los ~70 locales que ya operan.
+**Goal:** Que ninguna compra por encima de un monto configurable por sucursal pueda autorizarse sola, y que quien autoriza no sea
+forzosamente quien recibe — sin cambiar el comportamiento de los ~70 locales que ya operan.
 
-**Architecture:** Se conecta un flujo de autorización que **ya existe y está probado** (`purchaseOrderWorkflow.service.ts`) pero que hoy no tiene llamadores, se cierran los tres caminos que lo rodean, y se parte el permiso `inventory:update` en `approve` + `receive` con un alias de compatibilidad. La política vive en dos columnas nuevas de `VenueSettings`, apagadas por default.
+**Architecture:** Se conecta un flujo de autorización que **ya existe y está probado** (`purchaseOrderWorkflow.service.ts`) pero que hoy no
+tiene llamadores, se cierran los tres caminos que lo rodean, y se parte el permiso `inventory:update` en `approve` + `receive` con un alias
+de compatibilidad. La política vive en dos columnas nuevas de `VenueSettings`, apagadas por default.
 
 **Tech Stack:** Express + TypeScript, Prisma/PostgreSQL, Jest, React 18 + TanStack Query (dashboard).
 
@@ -16,13 +20,15 @@
 - **Toda mutación relevante escribe `ActivityLog`** en el MISMO cambio.
 - **El MCP (`src/mcp/tools/`) va en lockstep** en el MISMO cambio.
 - **CERO cambios en `/mobile`** — iOS y Android se tocan en paralelo desde otras sesiones.
-- **NO tocar** el enum `PurchaseOrderStatus` (10 valores en producción), `deductSimpleStock`, `validateOrderInventoryAvailability`, el enum `InventoryMethod`, el reducer offline ni el corte de caja.
+- **NO tocar** el enum `PurchaseOrderStatus` (10 valores en producción), `deductSimpleStock`, `validateOrderInventoryAvailability`, el enum
+  `InventoryMethod`, el reducer offline ni el corte de caja.
 - **Usar `createdBy`, NUNCA `createdById`** — en producción `createdById` está en 0 de 5 órdenes.
 - **Con el interruptor apagado el comportamiento debe ser byte-idéntico a hoy.** Es la restricción número uno del founder.
 - **`npm run audit:permissions` debe salir 0** antes de dar por terminada cualquier tarea de permisos.
 - Toda consulta filtra por `venueId`.
 - Mensajes de Zod **en español** (se muestran al usuario tal cual).
-- **No commitear sin permiso explícito del founder.** Los pasos de commit de este plan quedan preparados pero se ejecutan sólo cuando él lo autorice.
+- **No commitear sin permiso explícito del founder.** Los pasos de commit de este plan quedan preparados pero se ejecutan sólo cuando él lo
+  autorice.
 
 ---
 
@@ -30,38 +36,38 @@
 
 ### Backend (`avoqado-server`)
 
-| Archivo | Responsabilidad | Acción |
-| --- | --- | --- |
-| `prisma/schema.prisma` | 2 columnas en `VenueSettings` | Modificar |
-| `prisma/migrations/<ts>_purchase_approval_policy/migration.sql` | Migración aditiva | Crear |
-| `src/services/dashboard/purchaseApprovalPolicy.ts` | **Nuevo.** Función pura: dado un total y los ajustes del venue, ¿requiere autorización? Única fuente de esa decisión. | Crear |
-| `src/services/dashboard/purchaseOrderWorkflow.service.ts` | `product` en los 7 includes + guard de edición por estado + `requestChange` | Modificar |
-| `src/services/dashboard/purchaseOrder.service.ts` | `createPurchaseOrder` consulta la política; `updatePurchaseOrder` rechaza estados bloqueados | Modificar |
-| `src/lib/permissions.ts` | `inventory:approve`, `inventory:receive`, alias y dependencias | Modificar |
-| `src/routes/dashboard/inventory.routes.ts` | 3 rutas nuevas; re-apuntar `approve`; permisos nuevos | Modificar |
-| `src/controllers/dashboard/inventory/purchaseOrder.controller.ts` | Controladores de submit / reject / request-change / auto-aprobadas | Modificar |
-| `src/schemas/dashboard/inventory.schema.ts` | Zod de rechazo (motivo obligatorio); quitar `status` libre del PUT | Modificar |
-| `src/mcp/tools/procurement.ts` | Exponer política y las tres huellas | Modificar |
-| `src/services/dashboard/venueSettings.service.ts` *(o donde vivan hoy)* | Leer/escribir las 2 columnas | Modificar |
+| Archivo                                                                 | Responsabilidad                                                                                                       | Acción    |
+| ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | --------- |
+| `prisma/schema.prisma`                                                  | 2 columnas en `VenueSettings`                                                                                         | Modificar |
+| `prisma/migrations/<ts>_purchase_approval_policy/migration.sql`         | Migración aditiva                                                                                                     | Crear     |
+| `src/services/dashboard/purchaseApprovalPolicy.ts`                      | **Nuevo.** Función pura: dado un total y los ajustes del venue, ¿requiere autorización? Única fuente de esa decisión. | Crear     |
+| `src/services/dashboard/purchaseOrderWorkflow.service.ts`               | `product` en los 7 includes + guard de edición por estado + `requestChange`                                           | Modificar |
+| `src/services/dashboard/purchaseOrder.service.ts`                       | `createPurchaseOrder` consulta la política; `updatePurchaseOrder` rechaza estados bloqueados                          | Modificar |
+| `src/lib/permissions.ts`                                                | `inventory:approve`, `inventory:receive`, alias y dependencias                                                        | Modificar |
+| `src/routes/dashboard/inventory.routes.ts`                              | 3 rutas nuevas; re-apuntar `approve`; permisos nuevos                                                                 | Modificar |
+| `src/controllers/dashboard/inventory/purchaseOrder.controller.ts`       | Controladores de submit / reject / request-change / auto-aprobadas                                                    | Modificar |
+| `src/schemas/dashboard/inventory.schema.ts`                             | Zod de rechazo (motivo obligatorio); quitar `status` libre del PUT                                                    | Modificar |
+| `src/mcp/tools/procurement.ts`                                          | Exponer política y las tres huellas                                                                                   | Modificar |
+| `src/services/dashboard/venueSettings.service.ts` _(o donde vivan hoy)_ | Leer/escribir las 2 columnas                                                                                          | Modificar |
 
 ### Dashboard (`avoqado-web-dashboard`)
 
-| Archivo | Responsabilidad | Acción |
-| --- | --- | --- |
-| `src/services/purchaseOrder.service.ts` | Métodos submit/reject/requestChange + tipos | Modificar |
-| `src/pages/Inventory/PurchaseOrders/components/POActions.tsx` | Botones por estado; "Rechazar" deja de cancelar | Modificar |
-| `src/pages/Inventory/PurchaseOrders/PurchaseOrderDetailPage.tsx` | Las tres huellas visibles | Modificar |
-| `src/pages/Inventory/PurchaseOrders/components/RejectOrderDialog.tsx` | **Nuevo.** Motivo obligatorio | Crear |
-| `src/pages/Settings/...` | Interruptor + monto | Modificar |
+| Archivo                                                               | Responsabilidad                                 | Acción    |
+| --------------------------------------------------------------------- | ----------------------------------------------- | --------- |
+| `src/services/purchaseOrder.service.ts`                               | Métodos submit/reject/requestChange + tipos     | Modificar |
+| `src/pages/Inventory/PurchaseOrders/components/POActions.tsx`         | Botones por estado; "Rechazar" deja de cancelar | Modificar |
+| `src/pages/Inventory/PurchaseOrders/PurchaseOrderDetailPage.tsx`      | Las tres huellas visibles                       | Modificar |
+| `src/pages/Inventory/PurchaseOrders/components/RejectOrderDialog.tsx` | **Nuevo.** Motivo obligatorio                   | Crear     |
+| `src/pages/Settings/...`                                              | Interruptor + monto                             | Modificar |
 
 ### Tests
 
-| Archivo | Cubre |
-| --- | --- |
-| `tests/unit/services/dashboard/purchaseApprovalPolicy.test.ts` | **Nuevo.** El umbral, incluidos los bordes |
-| `tests/unit/services/dashboard/purchaseOrderStateGuard.test.ts` | **Nuevo.** Qué estados se pueden editar |
-| `tests/unit/lib/permissions.purchaseSegregation.test.ts` | **Nuevo.** Que nadie pierde accesos |
-| `tests/unit/routes/inventory.routes.permissions.test.ts` | Existente — se extiende |
+| Archivo                                                         | Cubre                                      |
+| --------------------------------------------------------------- | ------------------------------------------ |
+| `tests/unit/services/dashboard/purchaseApprovalPolicy.test.ts`  | **Nuevo.** El umbral, incluidos los bordes |
+| `tests/unit/services/dashboard/purchaseOrderStateGuard.test.ts` | **Nuevo.** Qué estados se pueden editar    |
+| `tests/unit/lib/permissions.purchaseSegregation.test.ts`        | **Nuevo.** Que nadie pierde accesos        |
+| `tests/unit/routes/inventory.routes.permissions.test.ts`        | Existente — se extiende                    |
 
 ---
 
@@ -77,21 +83,23 @@ Tarea 10 (roles y venue demo) depende de 3
 Tarea 11 (/full-testing) depende de TODO
 ```
 
-**Se pueden hacer en paralelo:** 1, 2 y 3 (tocan archivos distintos, sin dependencias).
-**Cuello de botella:** la 4 espera a 2 y 3.
+**Se pueden hacer en paralelo:** 1, 2 y 3 (tocan archivos distintos, sin dependencias). **Cuello de botella:** la 4 espera a 2 y 3.
 
 ---
 
 ### Task 1: Política de autorización por sucursal
 
 **Files:**
+
 - Modify: `prisma/schema.prisma` (model `VenueSettings`)
 - Create: `prisma/migrations/<timestamp>_purchase_approval_policy/migration.sql`
 - Create: `src/services/dashboard/purchaseApprovalPolicy.ts`
 - Test: `tests/unit/services/dashboard/purchaseApprovalPolicy.test.ts`
 
 **Interfaces:**
-- Produces: `requiereAutorizacion(total: Decimal | number, ajustes: PoliticaAutorizacion | null): boolean` y el tipo `PoliticaAutorizacion = { requirePurchaseApproval: boolean; purchaseApprovalThreshold: Decimal | null }`. Las tareas 5 y 6 la consumen.
+
+- Produces: `requiereAutorizacion(total: Decimal | number, ajustes: PoliticaAutorizacion | null): boolean` y el tipo
+  `PoliticaAutorizacion = { requirePurchaseApproval: boolean; purchaseApprovalThreshold: Decimal | null }`. Las tareas 5 y 6 la consumen.
 
 - [ ] **Step 1: Escribir la prueba que falla**
 
@@ -106,9 +114,7 @@ describe('requiereAutorizacion', () => {
   })
 
   it('con el interruptor apagado no exige nada, aunque haya umbral', () => {
-    expect(
-      requiereAutorizacion(999999, { requirePurchaseApproval: false, purchaseApprovalThreshold: new Decimal(100) }),
-    ).toBe(false)
+    expect(requiereAutorizacion(999999, { requirePurchaseApproval: false, purchaseApprovalThreshold: new Decimal(100) })).toBe(false)
   })
 
   it('prendido SIN umbral configurado exige autorización para TODA orden', () => {
@@ -117,21 +123,15 @@ describe('requiereAutorizacion', () => {
   })
 
   it('prendido, por DEBAJO del umbral no exige', () => {
-    expect(
-      requiereAutorizacion(4999.99, { requirePurchaseApproval: true, purchaseApprovalThreshold: new Decimal(5000) }),
-    ).toBe(false)
+    expect(requiereAutorizacion(4999.99, { requirePurchaseApproval: true, purchaseApprovalThreshold: new Decimal(5000) })).toBe(false)
   })
 
   it('EXACTAMENTE en el umbral no exige — el umbral es el último monto que pasa solo', () => {
-    expect(
-      requiereAutorizacion(5000, { requirePurchaseApproval: true, purchaseApprovalThreshold: new Decimal(5000) }),
-    ).toBe(false)
+    expect(requiereAutorizacion(5000, { requirePurchaseApproval: true, purchaseApprovalThreshold: new Decimal(5000) })).toBe(false)
   })
 
   it('un centavo ARRIBA del umbral sí exige', () => {
-    expect(
-      requiereAutorizacion(5000.01, { requirePurchaseApproval: true, purchaseApprovalThreshold: new Decimal(5000) }),
-    ).toBe(true)
+    expect(requiereAutorizacion(5000.01, { requirePurchaseApproval: true, purchaseApprovalThreshold: new Decimal(5000) })).toBe(true)
   })
 
   it('compara con precisión decimal, no con float', () => {
@@ -148,8 +148,8 @@ describe('requiereAutorizacion', () => {
 
 - [ ] **Step 2: Correr y verificar que falla**
 
-Run: `npx jest tests/unit/services/dashboard/purchaseApprovalPolicy.test.ts`
-Expected: FAIL — `Cannot find module '@/services/dashboard/purchaseApprovalPolicy'`
+Run: `npx jest tests/unit/services/dashboard/purchaseApprovalPolicy.test.ts` Expected: FAIL —
+`Cannot find module '@/services/dashboard/purchaseApprovalPolicy'`
 
 - [ ] **Step 3: Escribir la implementación mínima**
 
@@ -191,12 +191,12 @@ export function requiereAutorizacion(total: Decimal | number, ajustes: PoliticaA
 
 - [ ] **Step 4: Correr y verificar que pasa**
 
-Run: `npx jest tests/unit/services/dashboard/purchaseApprovalPolicy.test.ts`
-Expected: PASS — 7 pruebas
+Run: `npx jest tests/unit/services/dashboard/purchaseApprovalPolicy.test.ts` Expected: PASS — 7 pruebas
 
 - [ ] **Step 5: Agregar las columnas al esquema**
 
-En `prisma/schema.prisma`, dentro de `model VenueSettings`, junto a `enforceTableOwnership` (que ya vive ahí con este mismo patrón de política por sucursal):
+En `prisma/schema.prisma`, dentro de `model VenueSettings`, junto a `enforceTableOwnership` (que ya vive ahí con este mismo patrón de
+política por sucursal):
 
 ```prisma
   // Autorización de compras (forma de Odoo: interruptor + monto mínimo).
@@ -226,8 +226,7 @@ SET lock_timeout = '5s';
 
 - [ ] **Step 8: Aplicar y regenerar el mapa del esquema**
 
-Run: `npx prisma migrate dev && npm run schema:map`
-Expected: migración aplicada, `docs/SCHEMA_MAP.md` regenerado.
+Run: `npx prisma migrate dev && npm run schema:map` Expected: migración aplicada, `docs/SCHEMA_MAP.md` regenerado.
 
 - [ ] **Step 9: Commit (pedir permiso antes)**
 
@@ -241,17 +240,17 @@ git commit -m "feat(compras): politica de autorizacion por sucursal (interruptor
 ### Task 2: `product` en los includes del servicio de workflow
 
 **Files:**
+
 - Modify: `src/services/dashboard/purchaseOrderWorkflow.service.ts` (líneas 109, 158, 210, 254, 301, 339, 414)
 
 **Interfaces:**
+
 - Consumes: nada.
 - Produces: nada nuevo. Corrige el payload que la Tarea 4 va a exponer.
 
-> **Por qué esta tarea existe:** ayer se completaron los 14 `include` de
-> `purchaseOrder.service.ts` para que los renglones de mercancía de reventa no salieran
-> anónimos. `purchaseOrderWorkflow.service.ts` tiene **sus propios 7 includes** y no se
-> tocó porque ese archivo no tenía llamadores. La Tarea 4 le da llamadores. Si no se
-> arregla antes, aprobar una orden de tienda devolvería renglones sin nombre.
+> **Por qué esta tarea existe:** ayer se completaron los 14 `include` de `purchaseOrder.service.ts` para que los renglones de mercancía de
+> reventa no salieran anónimos. `purchaseOrderWorkflow.service.ts` tiene **sus propios 7 includes** y no se tocó porque ese archivo no tenía
+> llamadores. La Tarea 4 le da llamadores. Si no se arregla antes, aprobar una orden de tienda devolvería renglones sin nombre.
 
 - [ ] **Step 1: Escribir la prueba que falla**
 
@@ -282,8 +281,7 @@ describe('purchaseOrderWorkflow: los includes cargan las DOS relaciones', () => 
 
 - [ ] **Step 2: Correr y verificar que falla**
 
-Run: `npx jest tests/unit/services/dashboard/purchaseOrderWorkflow.includes.test.ts`
-Expected: FAIL — lista con 7 números de línea.
+Run: `npx jest tests/unit/services/dashboard/purchaseOrderWorkflow.includes.test.ts` Expected: FAIL — lista con 7 números de línea.
 
 - [ ] **Step 3: Agregar `product: true` en los 7 sitios**
 
@@ -296,8 +294,8 @@ En cada uno de los includes, justo debajo de `rawMaterial: true,`:
 
 - [ ] **Step 4: Correr y verificar que pasa**
 
-Run: `npx jest tests/unit/services/dashboard/purchaseOrderWorkflow.includes.test.ts && npm run typecheck`
-Expected: PASS y 0 errores de tipos.
+Run: `npx jest tests/unit/services/dashboard/purchaseOrderWorkflow.includes.test.ts && npm run typecheck` Expected: PASS y 0 errores de
+tipos.
 
 - [ ] **Step 5: Commit (pedir permiso antes)**
 
@@ -311,15 +309,17 @@ git commit -m "fix(compras): el workflow tambien carga product en sus includes"
 ### Task 3: Permisos `inventory:approve` e `inventory:receive`
 
 **Files:**
+
 - Modify: `src/lib/permissions.ts`
 - Test: `tests/unit/lib/permissions.purchaseSegregation.test.ts`
 
 **Interfaces:**
-- Produces: los strings `'inventory:approve'` e `'inventory:receive'`, que la Tarea 4 usa en `checkPermission(...)` y la Tarea 7 en `<PermissionGate>`.
 
-> 🔴 **El alias no es opcional.** Ambas rutas usan `inventory:update` HOY
-> (`inventory.routes.ts:711` y `:721`). Sin el alias, el día del deploy los ~70 locales
-> pierden el botón de recibir.
+- Produces: los strings `'inventory:approve'` e `'inventory:receive'`, que la Tarea 4 usa en `checkPermission(...)` y la Tarea 7 en
+  `<PermissionGate>`.
+
+> 🔴 **El alias no es opcional.** Ambas rutas usan `inventory:update` HOY (`inventory.routes.ts:711` y `:721`). Sin el alias, el día del
+> deploy los ~70 locales pierden el botón de recibir.
 
 - [ ] **Step 1: Escribir la prueba que falla**
 
@@ -369,7 +369,7 @@ describe('segregación de compras: aprobar ≠ recibir', () => {
   describe('asignables desde el editor de roles', () => {
     it('aparecen en el catálogo, o no se pueden dar individualmente', () => {
       const deInventario = INDIVIDUAL_PERMISSIONS_BY_RESOURCE['inventory'] ?? []
-      const claves = deInventario.map((p: any) => (typeof p === 'string' ? p : p.key ?? p.permission))
+      const claves = deInventario.map((p: any) => (typeof p === 'string' ? p : (p.key ?? p.permission)))
       expect(claves).toContain('inventory:approve')
       expect(claves).toContain('inventory:receive')
     })
@@ -379,13 +379,11 @@ describe('segregación de compras: aprobar ≠ recibir', () => {
 
 - [ ] **Step 2: Correr y verificar que falla**
 
-Run: `npx jest tests/unit/lib/permissions.purchaseSegregation.test.ts`
-Expected: FAIL en las aserciones de alias y catálogo.
+Run: `npx jest tests/unit/lib/permissions.purchaseSegregation.test.ts` Expected: FAIL en las aserciones de alias y catálogo.
 
 - [ ] **Step 3: Agregar las dependencias y el alias**
 
-En `PERMISSION_DEPENDENCIES` de `src/lib/permissions.ts`, junto al bloque de
-`inventory-transfers:*` que ya usa este molde:
+En `PERMISSION_DEPENDENCIES` de `src/lib/permissions.ts`, junto al bloque de `inventory-transfers:*` que ya usa este molde:
 
 ```typescript
   // Segregación de funciones en compras: quien autoriza no tiene que ser quien recibe.
@@ -395,8 +393,8 @@ En `PERMISSION_DEPENDENCIES` de `src/lib/permissions.ts`, junto al bloque de
   'inventory:receive': ['inventory:read', 'inventory:receive', 'products:read'],
 ```
 
-Y en la entrada YA existente de `inventory:update`, agregar los dos nuevos — **este es
-el alias de compatibilidad, y va en UN SOLO sentido**:
+Y en la entrada YA existente de `inventory:update`, agregar los dos nuevos — **este es el alias de compatibilidad, y va en UN SOLO
+sentido**:
 
 ```typescript
   // 🔴 ALIAS DE COMPATIBILIDAD, unidireccional. Hasta hoy aprobar y recibir vivían
@@ -415,13 +413,12 @@ En `DEFAULT_PERMISSIONS[StaffRole.MANAGER]`, junto a los demás `inventory:*`:
     'inventory:receive', // recibe mercancía contra una orden autorizada
 ```
 
-Y en `INDIVIDUAL_PERMISSIONS_BY_RESOURCE`, en el recurso `inventory`, siguiendo el
-formato exacto que ya usan sus vecinos en ese arreglo.
+Y en `INDIVIDUAL_PERMISSIONS_BY_RESOURCE`, en el recurso `inventory`, siguiendo el formato exacto que ya usan sus vecinos en ese arreglo.
 
 - [ ] **Step 5: Correr las pruebas y la auditoría**
 
-Run: `npx jest tests/unit/lib/permissions.purchaseSegregation.test.ts && npm run audit:permissions`
-Expected: PASS y la auditoría en 0. Si sale `PHANTOM`, el permiso quedó sin rol que lo satisfaga: revisar el paso 4.
+Run: `npx jest tests/unit/lib/permissions.purchaseSegregation.test.ts && npm run audit:permissions` Expected: PASS y la auditoría en 0. Si
+sale `PHANTOM`, el permiso quedó sin rol que lo satisfaga: revisar el paso 4.
 
 - [ ] **Step 6: Commit (pedir permiso antes)**
 
@@ -435,12 +432,14 @@ git commit -m "feat(permisos): separa inventory:approve de inventory:receive con
 ### Task 4: Conectar las rutas de autorización
 
 **Files:**
+
 - Modify: `src/routes/dashboard/inventory.routes.ts:711`
 - Modify: `src/controllers/dashboard/inventory/purchaseOrder.controller.ts:121`
 - Modify: `src/schemas/dashboard/inventory.schema.ts`
 - Test: `tests/unit/routes/inventory.routes.permissions.test.ts` (existente)
 
 **Interfaces:**
+
 - Consumes: `inventory:approve` / `inventory:receive` (Tarea 3); los includes corregidos (Tarea 2).
 - Produces: `POST …/purchase-orders/:purchaseOrderId/submit-for-approval`, `…/reject`. La Tarea 7 los consume desde el dashboard.
 
@@ -471,13 +470,12 @@ describe('segregación de compras en las rutas', () => {
 })
 ```
 
-> Usar el helper de introspección que ese archivo ya tiene; si se llama distinto,
-> conservar el nombre existente en vez de inventar `encontrarRuta`.
+> Usar el helper de introspección que ese archivo ya tiene; si se llama distinto, conservar el nombre existente en vez de inventar
+> `encontrarRuta`.
 
 - [ ] **Step 2: Correr y verificar que falla**
 
-Run: `npx jest tests/unit/routes/inventory.routes.permissions.test.ts`
-Expected: FAIL — las rutas de submit y reject no existen.
+Run: `npx jest tests/unit/routes/inventory.routes.permissions.test.ts` Expected: FAIL — las rutas de submit y reject no existen.
 
 - [ ] **Step 3: Zod del rechazo, con motivo obligatorio**
 
@@ -499,8 +497,8 @@ export const RejectPurchaseOrderSchema = z.object({
 
 - [ ] **Step 4: Controladores**
 
-En `src/controllers/dashboard/inventory/purchaseOrder.controller.ts`, importar el
-workflow y **re-apuntar `approvePurchaseOrder`** (hoy llama al servicio `@deprecated`):
+En `src/controllers/dashboard/inventory/purchaseOrder.controller.ts`, importar el workflow y **re-apuntar `approvePurchaseOrder`** (hoy
+llama al servicio `@deprecated`):
 
 ```typescript
 import * as purchaseOrderWorkflow from '../../../services/dashboard/purchaseOrderWorkflow.service'
@@ -566,13 +564,12 @@ router.post(
 )
 ```
 
-Y en la ruta de recibir (línea ~721) cambiar `checkPermission('inventory:update')` por
-`checkPermission('inventory:receive')`.
+Y en la ruta de recibir (línea ~721) cambiar `checkPermission('inventory:update')` por `checkPermission('inventory:receive')`.
 
 - [ ] **Step 6: Correr las pruebas**
 
-Run: `npx jest tests/unit/routes/inventory.routes.permissions.test.ts && npm run audit:permissions && npm run typecheck`
-Expected: todo verde, auditoría en 0.
+Run: `npx jest tests/unit/routes/inventory.routes.permissions.test.ts && npm run audit:permissions && npm run typecheck` Expected: todo
+verde, auditoría en 0.
 
 - [ ] **Step 7: Commit (pedir permiso antes)**
 
@@ -586,17 +583,18 @@ git commit -m "feat(compras): conecta submit/approve/reject al workflow real"
 ### Task 5: Candado por estado y "Solicitar cambio"
 
 **Files:**
+
 - Modify: `src/services/dashboard/purchaseOrder.service.ts` (`updatePurchaseOrder`)
 - Modify: `src/services/dashboard/purchaseOrderWorkflow.service.ts` (nueva `requestChange`)
 - Test: `tests/unit/services/dashboard/purchaseOrderStateGuard.test.ts`
 
 **Interfaces:**
+
 - Consumes: `requiereAutorizacion` (Tarea 1).
 - Produces: `requestChange(venueId, purchaseOrderId, staffId?)`. La Tarea 7 la consume.
 
-> **Ya implementado ayer, NO rehacer:** `updatePurchaseOrder` ya rechaza reemplazar
-> renglones cuando algún renglón tiene `quantityReceived > 0`. Esta tarea **agrega** el
-> candado por ESTADO encima de ese.
+> **Ya implementado ayer, NO rehacer:** `updatePurchaseOrder` ya rechaza reemplazar renglones cuando algún renglón tiene
+> `quantityReceived > 0`. Esta tarea **agrega** el candado por ESTADO encima de ese.
 
 - [ ] **Step 1: Escribir la prueba que falla**
 
@@ -636,8 +634,7 @@ describe('qué estados dejan editar una orden', () => {
 
 - [ ] **Step 2: Correr y verificar que falla**
 
-Run: `npx jest tests/unit/services/dashboard/purchaseOrderStateGuard.test.ts`
-Expected: FAIL — `estadoPermiteEdicion` no existe.
+Run: `npx jest tests/unit/services/dashboard/purchaseOrderStateGuard.test.ts` Expected: FAIL — `estadoPermiteEdicion` no existe.
 
 - [ ] **Step 3: Implementar el predicado y `requestChange`**
 
@@ -694,25 +691,24 @@ export async function requestChange(venueId: string, purchaseOrderId: string, st
 
 - [ ] **Step 4: Aplicar el candado en `updatePurchaseOrder`**
 
-En `src/services/dashboard/purchaseOrder.service.ts`, dentro de `updatePurchaseOrder`,
-junto al guard de recepciones que ya está ahí:
+En `src/services/dashboard/purchaseOrder.service.ts`, dentro de `updatePurchaseOrder`, junto al guard de recepciones que ya está ahí:
 
 ```typescript
-  // Candado por ESTADO, encima del de recepciones que ya existe. Una orden que ya fue
-  // enviada a autorización o autorizada no se edita: para corregirla hay que usar
-  // "Solicitar cambio", que la regresa a borrador y la obliga a repasar el umbral.
-  //
-  // ⚠️ Se evalúa SÓLO cuando se mandan `items` o montos. Un cambio de notas o de fecha
-  // esperada no toca el dinero y no debe bloquearse — y sobre todo, el job de recompra
-  // automática (autoReorder.service.ts:408) crea órdenes en DRAFT y luego las actualiza;
-  // un guard ciego lo rompería en silencio en los locales vivos.
-  if (data.items && !estadoPermiteEdicion(existingOrder.status)) {
-    throw new AppError(
-      `Esta orden está en estado ${existingOrder.status} y sus renglones ya no se pueden editar. ` +
-        `Usa "Solicitar cambio" para regresarla a borrador si necesitas corregirla.`,
-      400,
-    )
-  }
+// Candado por ESTADO, encima del de recepciones que ya existe. Una orden que ya fue
+// enviada a autorización o autorizada no se edita: para corregirla hay que usar
+// "Solicitar cambio", que la regresa a borrador y la obliga a repasar el umbral.
+//
+// ⚠️ Se evalúa SÓLO cuando se mandan `items` o montos. Un cambio de notas o de fecha
+// esperada no toca el dinero y no debe bloquearse — y sobre todo, el job de recompra
+// automática (autoReorder.service.ts:408) crea órdenes en DRAFT y luego las actualiza;
+// un guard ciego lo rompería en silencio en los locales vivos.
+if (data.items && !estadoPermiteEdicion(existingOrder.status)) {
+  throw new AppError(
+    `Esta orden está en estado ${existingOrder.status} y sus renglones ya no se pueden editar. ` +
+      `Usa "Solicitar cambio" para regresarla a borrador si necesitas corregirla.`,
+    400,
+  )
+}
 ```
 
 - [ ] **Step 5: Prueba de que no rompe la recompra automática**
@@ -720,18 +716,20 @@ junto al guard de recepciones que ya está ahí:
 ```typescript
 it('no bloquea una actualización que NO toca renglones (la recompra automática depende de eso)', async () => {
   mockedPrisma.purchaseOrder.findFirst.mockResolvedValue({
-    id: PO_ID, venueId: VENUE_ID, status: PurchaseOrderStatus.APPROVED, items: [], taxRate: new Decimal(0.16),
+    id: PO_ID,
+    venueId: VENUE_ID,
+    status: PurchaseOrderStatus.APPROVED,
+    items: [],
+    taxRate: new Decimal(0.16),
   })
-  await expect(
-    updatePurchaseOrder(VENUE_ID, PO_ID, { notes: 'llega el martes' } as any),
-  ).resolves.toBeDefined()
+  await expect(updatePurchaseOrder(VENUE_ID, PO_ID, { notes: 'llega el martes' } as any)).resolves.toBeDefined()
 })
 ```
 
 - [ ] **Step 6: Correr todo**
 
-Run: `npx jest tests/unit/services/dashboard/purchaseOrder --silent && npm run typecheck`
-Expected: verde, incluidas las pruebas de compras de ayer.
+Run: `npx jest tests/unit/services/dashboard/purchaseOrder --silent && npm run typecheck` Expected: verde, incluidas las pruebas de compras
+de ayer.
 
 - [ ] **Step 7: Commit (pedir permiso antes)**
 
@@ -745,11 +743,13 @@ git commit -m "feat(compras): candado de edicion por estado y solicitar-cambio"
 ### Task 6: Crear una orden respeta la política
 
 **Files:**
+
 - Modify: `src/services/dashboard/purchaseOrder.service.ts` (`createPurchaseOrder`)
 - Modify: `src/schemas/dashboard/inventory.schema.ts` (quitar `status` libre del PUT)
 - Test: `tests/unit/services/dashboard/purchaseOrder.approvalPolicy.test.ts`
 
 **Interfaces:**
+
 - Consumes: `requiereAutorizacion` (Tarea 1).
 - Produces: el estado inicial correcto. La Tarea 7 lo pinta.
 
@@ -784,28 +784,27 @@ describe('createPurchaseOrder respeta la política del venue', () => {
 
 - [ ] **Step 2: Correr y verificar que falla**
 
-Run: `npx jest tests/unit/services/dashboard/purchaseOrder.approvalPolicy.test.ts`
-Expected: FAIL — el estado inicial no depende de la política.
+Run: `npx jest tests/unit/services/dashboard/purchaseOrder.approvalPolicy.test.ts` Expected: FAIL — el estado inicial no depende de la
+política.
 
 - [ ] **Step 3: Implementar en `createPurchaseOrder`**
 
 Después de calcular `totalAmount` y antes del `create`:
 
 ```typescript
-  // Política de autorización del venue. Es lo que decide si esta orden nace lista o
-  // tiene que pasar por alguien más.
-  const ajustes = await prisma.venueSettings.findUnique({
-    where: { venueId },
-    select: { requirePurchaseApproval: true, purchaseApprovalThreshold: true },
-  })
-  const necesitaAutorizacion = requiereAutorizacion(totalAmount, ajustes)
+// Política de autorización del venue. Es lo que decide si esta orden nace lista o
+// tiene que pasar por alguien más.
+const ajustes = await prisma.venueSettings.findUnique({
+  where: { venueId },
+  select: { requirePurchaseApproval: true, purchaseApprovalThreshold: true },
+})
+const necesitaAutorizacion = requiereAutorizacion(totalAmount, ajustes)
 
-  const estadoInicial = necesitaAutorizacion ? PurchaseOrderStatus.PENDING_APPROVAL : PurchaseOrderStatus.DRAFT
+const estadoInicial = necesitaAutorizacion ? PurchaseOrderStatus.PENDING_APPROVAL : PurchaseOrderStatus.DRAFT
 
-  // Auto-autorizada: se estampa el mismo staff como autor Y autorizador. Ver la nota
-  // del spec §4.1 — es lo que hace que el reporte del auditor sea una sola consulta.
-  const selloAutoAutorizada =
-    ajustes?.requirePurchaseApproval && !necesitaAutorizacion ? { approvedBy: staffId, approvedAt: new Date() } : {}
+// Auto-autorizada: se estampa el mismo staff como autor Y autorizador. Ver la nota
+// del spec §4.1 — es lo que hace que el reporte del auditor sea una sola consulta.
+const selloAutoAutorizada = ajustes?.requirePurchaseApproval && !necesitaAutorizacion ? { approvedBy: staffId, approvedAt: new Date() } : {}
 ```
 
 Y en el `data` del `create`, usar `status: estadoInicial, ...selloAutoAutorizada`.
@@ -815,16 +814,15 @@ Y en el `data` del `create`, usar `status: estadoInicial, ...selloAutoAutorizada
 En `UpdatePurchaseOrderSchema`, **quitar** el campo `status`:
 
 ```typescript
-    // `status` SE QUITÓ a propósito. Aceptarlo aquí permitía saltar de
-    // PENDING_APPROVAL a APPROVED con sólo tener `inventory:update`, sin estampar
-    // quién autorizó. Los cambios de estado van EXCLUSIVAMENTE por sus rutas
-    // dedicadas: submit-for-approval, approve, reject, request-change, cancel.
+// `status` SE QUITÓ a propósito. Aceptarlo aquí permitía saltar de
+// PENDING_APPROVAL a APPROVED con sólo tener `inventory:update`, sin estampar
+// quién autorizó. Los cambios de estado van EXCLUSIVAMENTE por sus rutas
+// dedicadas: submit-for-approval, approve, reject, request-change, cancel.
 ```
 
 - [ ] **Step 5: Correr todo**
 
-Run: `npx jest tests/unit/services/dashboard/purchaseOrder --silent && npm run typecheck`
-Expected: verde.
+Run: `npx jest tests/unit/services/dashboard/purchaseOrder --silent && npm run typecheck` Expected: verde.
 
 - [ ] **Step 6: Commit (pedir permiso antes)**
 
@@ -838,12 +836,14 @@ git commit -m "feat(compras): el estado inicial de la orden sale de la politica 
 ### Task 7: Dashboard — botones por estado, rechazo real y reenvío
 
 **Files:**
+
 - Modify: `avoqado-web-dashboard/src/services/purchaseOrder.service.ts`
 - Modify: `avoqado-web-dashboard/src/pages/Inventory/PurchaseOrders/components/POActions.tsx:166`
 - Create: `avoqado-web-dashboard/src/pages/Inventory/PurchaseOrders/components/RejectOrderDialog.tsx`
 - Modify: `avoqado-web-dashboard/src/pages/Inventory/PurchaseOrders/components/PurchaseOrderWizard.tsx:470`
 
 **Interfaces:**
+
 - Consumes: las rutas de la Tarea 4 y los estados de la Tarea 6.
 
 - [ ] **Step 1: Métodos del servicio**
@@ -863,39 +863,37 @@ git commit -m "feat(compras): el estado inicial de la orden sale de la politica 
 
 - [ ] **Step 2: El wizard deja de forzar CONFIRMED**
 
-Quitar el bloque de `PurchaseOrderWizard.tsx:470` que hace el PUT con
-`status: CONFIRMED`. Ahora el backend decide el estado inicial según la política.
+Quitar el bloque de `PurchaseOrderWizard.tsx:470` que hace el PUT con `status: CONFIRMED`. Ahora el backend decide el estado inicial según
+la política.
 
 ```typescript
-        // El estado inicial lo decide el BACKEND según la política del venue
-        // (interruptor + umbral). Antes aquí se forzaba CONFIRMED con un PUT, y ese
-        // era el motivo real de que la autorización nunca ocurriera:
-        //   "This skips APPROVED → SENT steps for quick workflow"
+// El estado inicial lo decide el BACKEND según la política del venue
+// (interruptor + umbral). Antes aquí se forzaba CONFIRMED con un PUT, y ese
+// era el motivo real de que la autorización nunca ocurriera:
+//   "This skips APPROVED → SENT steps for quick workflow"
 ```
 
 - [ ] **Step 3: Diálogo de rechazo con motivo obligatorio**
 
-`RejectOrderDialog.tsx`: un `Textarea` con `required`, botón deshabilitado mientras
-esté vacío, y el texto de ayuda *"Quien capturó la orden va a leer esto para saber qué
-corregir."*
+`RejectOrderDialog.tsx`: un `Textarea` con `required`, botón deshabilitado mientras esté vacío, y el texto de ayuda _"Quien capturó la orden
+va a leer esto para saber qué corregir."_
 
 - [ ] **Step 4: Botones según el estado**
 
-En `POActions.tsx`, envolver cada acción en `<PermissionGate>` y mostrarla sólo desde
-los estados válidos:
+En `POActions.tsx`, envolver cada acción en `<PermissionGate>` y mostrarla sólo desde los estados válidos:
 
-| Botón | Estados | Permiso |
-| --- | --- | --- |
-| Enviar a autorización | `DRAFT`, `REJECTED` | `inventory:update` |
-| Autorizar | `PENDING_APPROVAL` | `inventory:approve` |
-| Rechazar | `PENDING_APPROVAL` | `inventory:approve` |
-| Solicitar cambio | `APPROVED`, `PENDING_APPROVAL` | `inventory:update` |
-| Recibir | `APPROVED`, `SENT`, `CONFIRMED`, `SHIPPED`, `PARTIAL` | `inventory:receive` |
+| Botón                 | Estados                                               | Permiso             |
+| --------------------- | ----------------------------------------------------- | ------------------- |
+| Enviar a autorización | `DRAFT`, `REJECTED`                                   | `inventory:update`  |
+| Autorizar             | `PENDING_APPROVAL`                                    | `inventory:approve` |
+| Rechazar              | `PENDING_APPROVAL`                                    | `inventory:approve` |
+| Solicitar cambio      | `APPROVED`, `PENDING_APPROVAL`                        | `inventory:update`  |
+| Recibir               | `APPROVED`, `SENT`, `CONFIRMED`, `SHIPPED`, `PARTIAL` | `inventory:receive` |
 
 - [ ] **Step 5: Verificar en el navegador**
 
-Correr el dev server y comprobar el ciclo: crear → enviar → autorizar → recibir, y que
-un usuario sin `inventory:approve` **no vea** el botón de autorizar.
+Correr el dev server y comprobar el ciclo: crear → enviar → autorizar → recibir, y que un usuario sin `inventory:approve` **no vea** el
+botón de autorizar.
 
 - [ ] **Step 6: Commit (pedir permiso antes)**
 
@@ -904,12 +902,14 @@ un usuario sin `inventory:approve` **no vea** el botón de autorizar.
 ### Task 8: Las tres huellas y el reporte de auto-autorizadas
 
 **Files:**
+
 - Modify: `src/services/dashboard/purchaseOrder.service.ts` (nueva consulta)
 - Modify: `src/controllers/.../purchaseOrder.controller.ts`
 - Modify: `src/routes/dashboard/inventory.routes.ts`
 - Modify: `avoqado-web-dashboard/.../PurchaseOrderDetailPage.tsx`
 
 **Interfaces:**
+
 - Produces: `GET …/purchase-orders/self-approved` → `{ orders: [...] }`. La Tarea 9 lo expone en el MCP.
 
 - [ ] **Step 1: Prueba de la consulta**
@@ -941,26 +941,39 @@ it('EXCLUYE las que generó la recompra automática (approvedBy null)', async ()
  * deja el reporte vacío y hace ver que no hay hallazgos cuando sí los hay.
  */
 export async function listarAutoAutorizadas(venueId: string, filtros: { from?: string; to?: string }) {
-  return prisma.purchaseOrder.findMany({
-    where: {
-      venueId,
-      approvedBy: { not: null },
-      // Prisma no compara dos columnas entre sí en un `where`; se filtra en memoria
-      // sobre un conjunto ya acotado por venue y fecha (son decenas de filas, no miles).
-      ...(filtros.from || filtros.to
-        ? { orderDate: { ...(filtros.from ? { gte: new Date(filtros.from) } : {}), ...(filtros.to ? { lte: new Date(filtros.to) } : {}) } }
-        : {}),
-    },
-    select: { id: true, orderNumber: true, total: true, orderDate: true, createdBy: true, approvedBy: true, approvedAt: true, receivedBy: true },
-    orderBy: { orderDate: 'desc' },
-  }).then(filas => filas.filter(f => f.createdBy && f.createdBy === f.approvedBy))
+  return prisma.purchaseOrder
+    .findMany({
+      where: {
+        venueId,
+        approvedBy: { not: null },
+        // Prisma no compara dos columnas entre sí en un `where`; se filtra en memoria
+        // sobre un conjunto ya acotado por venue y fecha (son decenas de filas, no miles).
+        ...(filtros.from || filtros.to
+          ? {
+              orderDate: { ...(filtros.from ? { gte: new Date(filtros.from) } : {}), ...(filtros.to ? { lte: new Date(filtros.to) } : {}) },
+            }
+          : {}),
+      },
+      select: {
+        id: true,
+        orderNumber: true,
+        total: true,
+        orderDate: true,
+        createdBy: true,
+        approvedBy: true,
+        approvedAt: true,
+        receivedBy: true,
+      },
+      orderBy: { orderDate: 'desc' },
+    })
+    .then(filas => filas.filter(f => f.createdBy && f.createdBy === f.approvedBy))
 }
 ```
 
 - [ ] **Step 3: Pintar las tres huellas en el detalle**
 
-Un bloque con **Solicitó / Autorizó / Recibió**, cada uno con nombre y fecha, y una
-insignia ámbar **"Auto-autorizada"** cuando solicitante y autorizador coinciden.
+Un bloque con **Solicitó / Autorizó / Recibió**, cada uno con nombre y fecha, y una insignia ámbar **"Auto-autorizada"** cuando solicitante
+y autorizador coinciden.
 
 - [ ] **Step 4: Correr y commitear (pedir permiso antes)**
 
@@ -969,17 +982,18 @@ insignia ámbar **"Auto-autorizada"** cuando solicitante y autorizador coinciden
 ### Task 9: MCP en lockstep
 
 **Files:**
+
 - Modify: `src/mcp/tools/procurement.ts`
 
 - [ ] **Step 1: Exponer las huellas en `purchase_order_detail`**
 
-Agregar al objeto que devuelve: `solicito`, `autorizo`, `autorizadoEn`, `recibio`,
-`autoAutorizada` (booleano). Actualizar la descripción del tool.
+Agregar al objeto que devuelve: `solicito`, `autorizo`, `autorizadoEn`, `recibio`, `autoAutorizada` (booleano). Actualizar la descripción
+del tool.
 
 - [ ] **Step 2: Tool nuevo `purchase_orders_self_approved`**
 
-Con `guard.requirePermission('inventory:read', venueId)`, `guard.venueFilter(venueId)`
-y el gate PREMIUM que ya usan sus vecinos en ese archivo.
+Con `guard.requirePermission('inventory:read', venueId)`, `guard.venueFilter(venueId)` y el gate PREMIUM que ya usan sus vecinos en ese
+archivo.
 
 - [ ] **Step 3: Extender `tests/unit/mcp-customer/procurement.test.ts` y commitear**
 
@@ -988,31 +1002,24 @@ y el gate PREMIUM que ya usan sus vecinos en ese archivo.
 ### Task 10: Roles y venue de demostración
 
 **Files:**
-- Create: `scripts/temp-seed-demo-pits.ts` *(temporal — se borra antes de commitear)*
 
-- [ ] **Step 1: Crear los dos roles personalizados** en el venue de demo vía
-  `VenueRolePermission`: **Comprador** (`inventory:read`, `inventory:create`,
-  `inventory:update`, `products:read`) y **Almacenista** (`inventory:read`,
-  `inventory:receive`, `products:read`).
-- [ ] **Step 2: Prender el interruptor** y poner el umbral en un monto que haga la
-  demo legible (p. ej. $5,000).
-- [ ] **Step 3: Verificar a mano** que el Comprador NO ve "Autorizar" y el Almacenista
-  NO ve "Autorizar" pero sí "Recibir".
+- Create: `scripts/temp-seed-demo-pits.ts` _(temporal — se borra antes de commitear)_
+
+- [ ] **Step 1: Crear los dos roles personalizados** en el venue de demo vía `VenueRolePermission`: **Comprador** (`inventory:read`,
+      `inventory:create`, `inventory:update`, `products:read`) y **Almacenista** (`inventory:read`, `inventory:receive`, `products:read`).
+- [ ] **Step 2: Prender el interruptor** y poner el umbral en un monto que haga la demo legible (p. ej. $5,000).
+- [ ] **Step 3: Verificar a mano** que el Comprador NO ve "Autorizar" y el Almacenista NO ve "Autorizar" pero sí "Recibir".
 - [ ] **Step 4: Borrar el script temporal.**
 
 ---
 
 ### Task 11: `/full-testing`
 
-- [ ] **Step 1:** Ciclo completo contra la base real: comprador crea una orden arriba
-  del umbral → nace pendiente → gerente autoriza → almacenista recibe. Verificar las
-  tres huellas estampadas.
-- [ ] **Step 2:** Que una orden **debajo** del umbral se auto-autorice y aparezca en el
-  reporte.
-- [ ] **Step 3:** Que una orden autorizada **no** se pueda editar, y que tras
-  "Solicitar cambio" con monto menor al umbral se auto-autorice.
-- [ ] **Step 4:** **Regresión:** con el interruptor apagado, el flujo completo se
-  comporta byte-idéntico a hoy.
+- [ ] **Step 1:** Ciclo completo contra la base real: comprador crea una orden arriba del umbral → nace pendiente → gerente autoriza →
+      almacenista recibe. Verificar las tres huellas estampadas.
+- [ ] **Step 2:** Que una orden **debajo** del umbral se auto-autorice y aparezca en el reporte.
+- [ ] **Step 3:** Que una orden autorizada **no** se pueda editar, y que tras "Solicitar cambio" con monto menor al umbral se auto-autorice.
+- [ ] **Step 4:** **Regresión:** con el interruptor apagado, el flujo completo se comporta byte-idéntico a hoy.
 - [ ] **Step 5:** `npm run audit:permissions` en 0 y `npm run pre-deploy` verde.
 - [ ] **Step 6:** Restaurar la base al conteo del baseline y borrar temporales.
 
@@ -1020,13 +1027,11 @@ y el gate PREMIUM que ya usan sus vecinos en ese archivo.
 
 ## Auto-revisión del plan
 
-**Cobertura del spec:** §4.1 → T1, T6 · §4.2 → T4 · §4.3 → T5 · §4.4 → T3 · §4.5 → T8 ·
-§4.6 → T4, T7 · §4.7 → T10 · §6 riesgos → T3 (alias), T5 (autoReorder), T8 (`createdBy`) ·
-§7 pruebas → T11.
+**Cobertura del spec:** §4.1 → T1, T6 · §4.2 → T4 · §4.3 → T5 · §4.4 → T3 · §4.5 → T8 · §4.6 → T4, T7 · §4.7 → T10 · §6 riesgos → T3
+(alias), T5 (autoReorder), T8 (`createdBy`) · §7 pruebas → T11.
 
-**Hueco encontrado y cerrado:** el spec no mencionaba los 7 `include` de
-`purchaseOrderWorkflow.service.ts`. Se agregó como **Tarea 2**, y es bloqueante de la 4.
+**Hueco encontrado y cerrado:** el spec no mencionaba los 7 `include` de `purchaseOrderWorkflow.service.ts`. Se agregó como **Tarea 2**, y
+es bloqueante de la 4.
 
-**Consistencia de nombres:** `requiereAutorizacion`, `estadoPermiteEdicion`,
-`requestChange` y `listarAutoAutorizadas` se usan con el mismo nombre en todas las
-tareas que las consumen.
+**Consistencia de nombres:** `requiereAutorizacion`, `estadoPermiteEdicion`, `requestChange` y `listarAutoAutorizadas` se usan con el mismo
+nombre en todas las tareas que las consumen.
