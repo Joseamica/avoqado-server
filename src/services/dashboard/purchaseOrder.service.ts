@@ -1169,7 +1169,7 @@ export async function receivePurchaseOrder(
   await prisma.$transaction(operations)
 
   // Update order status based on item statuses (considers RECEIVED, DAMAGED, NOT_PROCESSED)
-  await updatePurchaseOrderStatusBasedOnItems(purchaseOrderId)
+  await updatePurchaseOrderStatusBasedOnItems(purchaseOrderId, staffId)
 
   // Fetch updated order
   const updatedOrder = await prisma.purchaseOrder.findUnique({
@@ -1414,8 +1414,9 @@ export async function updatePurchaseOrderItemStatus(
   })
 
   // After the transaction commits, recompute the parent PO status (uses its
-  // own connection — safe to run after).
-  await updatePurchaseOrderStatusBasedOnItems(purchaseOrderId)
+  // own connection — safe to run after). El actor viaja para que la orden quede
+  // sellada con quién recibió, no sólo con el estado nuevo.
+  await updatePurchaseOrderStatusBasedOnItems(purchaseOrderId, staffId)
 }
 
 /**
@@ -2062,7 +2063,21 @@ export async function receiveNoItems(venueId: string, purchaseOrderId: string, d
  * - If some items are PROCESSED → status = PARTIAL
  * - If all items are NOT_PROCESSED or DAMAGED (and none RECEIVED) → status = CANCELLED
  */
-async function updatePurchaseOrderStatusBasedOnItems(purchaseOrderId: string): Promise<void> {
+/**
+ * Recalcula el estado de la orden a partir del estado de sus renglones, y —cuando la
+ * orden pasa a recibida o parcial— estampa QUIÉN recibió.
+ *
+ * Lo segundo faltaba, y es el hueco de auditoría más grande que tenía el módulo: el
+ * camino que la pantalla usa de verdad recibe renglón por renglón y después llama aquí
+ * para cerrar la orden. Esta función sólo escribía `status`, así que en el flujo
+ * dominante del dashboard **`receivedBy` quedaba en NULL**. En producción hay una orden
+ * recibida sin responsable por exactamente esto.
+ *
+ * `receivedBy` NO se sobrescribe si ya venía puesto: la primera recepción es la que
+ * cuenta, y el camino anterior (`receivePurchaseOrder`) ya lo estampa él mismo. Quien
+ * cierra una recepción parcial días después no borra a quien recibió la primera parte.
+ */
+async function updatePurchaseOrderStatusBasedOnItems(purchaseOrderId: string, staffId?: string): Promise<void> {
   const purchaseOrder = await prisma.purchaseOrder.findUnique({
     where: { id: purchaseOrderId },
     include: { items: true },
@@ -2095,11 +2110,18 @@ async function updatePurchaseOrderStatusBasedOnItems(purchaseOrderId: string): P
     newStatus = PurchaseOrderStatus.PARTIAL
   }
 
+  // Sellar quién recibió, la primera vez que la orden llega a recibida o parcial.
+  const entroMercancia = newStatus === PurchaseOrderStatus.RECEIVED || newStatus === PurchaseOrderStatus.PARTIAL
+  const selloDeRecepcion =
+    entroMercancia && !purchaseOrder.receivedBy && staffId
+      ? { receivedBy: staffId, receivedDate: purchaseOrder.receivedDate ?? new Date() }
+      : {}
+
   // Update status if changed
-  if (newStatus !== purchaseOrder.status) {
+  if (newStatus !== purchaseOrder.status || Object.keys(selloDeRecepcion).length > 0) {
     await prisma.purchaseOrder.update({
       where: { id: purchaseOrderId },
-      data: { status: newStatus },
+      data: { status: newStatus, ...selloDeRecepcion },
     })
   }
 }
@@ -2108,7 +2130,7 @@ async function updatePurchaseOrderStatusBasedOnItems(purchaseOrderId: string): P
  * Public function to recalculate and update purchase order status based on item statuses
  * This should be called after batch updates to ensure the order status reflects the latest item states
  */
-export async function recalculatePurchaseOrderStatus(venueId: string, purchaseOrderId: string): Promise<void> {
+export async function recalculatePurchaseOrderStatus(venueId: string, purchaseOrderId: string, staffId?: string): Promise<void> {
   // Verify the purchase order belongs to the venue
   const purchaseOrder = await prisma.purchaseOrder.findUnique({
     where: { id: purchaseOrderId, venueId },
@@ -2119,7 +2141,7 @@ export async function recalculatePurchaseOrderStatus(venueId: string, purchaseOr
     throw new AppError('Purchase order not found', 404)
   }
 
-  await updatePurchaseOrderStatusBasedOnItems(purchaseOrderId)
+  await updatePurchaseOrderStatusBasedOnItems(purchaseOrderId, staffId)
 }
 
 /**

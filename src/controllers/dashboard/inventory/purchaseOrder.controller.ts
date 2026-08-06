@@ -247,7 +247,10 @@ export async function recalculateStatus(req: Request, res: Response, next: NextF
   try {
     const { venueId, purchaseOrderId } = req.params
 
-    await purchaseOrderService.recalculatePurchaseOrderStatus(venueId, purchaseOrderId)
+    // El actor viaja: esta llamada es la que CIERRA la recepción en el flujo del
+    // dashboard (recibe renglón por renglón y luego recalcula), así que es donde se
+    // sella quién recibió. Sin él, `receivedBy` quedaba en NULL.
+    await purchaseOrderService.recalculatePurchaseOrderStatus(venueId, purchaseOrderId, req.authContext?.userId)
 
     res.status(200).json({ message: 'Status recalculated successfully' })
   } catch (error) {
