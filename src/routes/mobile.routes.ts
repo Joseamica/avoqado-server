@@ -2574,10 +2574,18 @@ router.get(
   areaTicketV7MobileController.getSettings,
 )
 
+// 🔴 `SCALE_INTEGRATION` es PREMIUM (basePlan.service.ts) y NADIE lo exigía:
+// ni esta ruta, ni iOS, ni Android. El código estaba declarado Premium y la
+// báscula funcionaba en cualquier plan — una etiqueta de precio que no cobraba.
+//
+// El permiso va ANTES del candado de plan, por lo mismo que en upsell-rules:
+// al revés, alguien ajeno al local se entera de qué contrata ese negocio antes
+// de que se le diga que no pertenece.
 router.get(
   '/venues/:venueId/scale-settings',
   authenticateTokenMiddleware,
   checkPermission('scale:use'),
+  checkFeatureAccess('SCALE_INTEGRATION'),
   areaTicketV7MobileController.getScaleSettings,
 )
 
