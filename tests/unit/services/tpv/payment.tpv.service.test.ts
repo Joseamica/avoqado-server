@@ -16,6 +16,7 @@ jest.mock('@/services/venueSalesGuard', () => ({
 }))
 
 import prisma from '@/utils/prismaClient'
+import logger from '@/config/logger'
 import * as paymentService from '@/services/tpv/payment.tpv.service'
 import * as productInventoryService from '@/services/dashboard/productInventoryIntegration.service'
 import { BadRequestError } from '@/errors/AppError'
@@ -51,6 +52,9 @@ jest.mock('@/utils/prismaClient', () => ({
     },
     review: {
       create: jest.fn(),
+    },
+    activityLog: {
+      create: jest.fn().mockResolvedValue({}),
     },
     $transaction: jest.fn(),
   },
@@ -593,6 +597,126 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
 
       // Verify - VenueTransaction was created
       expect(prisma.venueTransaction.create).toHaveBeenCalled()
+    })
+  })
+
+  describe('🚨 Detección de SOBREPAGO (caso Mindform 2026-06-21, orden cmqnz0gkb…)', () => {
+    /**
+     * El bug real: una cuenta de $380 YA saldada aceptó $122 más una hora después y $232 más al
+     * día siguiente ($734 sobre $380). `remainingBalance = Math.max(0,…)` lo aplastaba a 0, así
+     * que en pantalla la orden se veía perfectamente pagada — invisible 2 meses hasta que el
+     * money-watchdog lo pescó.
+     *
+     * Decisión de diseño (NO cambiar sin releer el comentario en el service): el pago se registra
+     * SIEMPRE — cuando este código corre la tarjeta YA se cobró en Blumon, y rechazar aquí
+     * dejaría dinero cobrado al cliente sin registro en Avoqado (cobro fantasma, peor que el
+     * sobrepago). Lo que se elimina es la INVISIBILIDAD: alerta 🚨 + ActivityLog.
+     */
+    const buildPaidOrder = () => ({
+      id: mockOrderId,
+      venueId: mockVenueId,
+      orderNumber: 'ORD-MINDFORM',
+      subtotal: new Decimal(380),
+      discountAmount: new Decimal(0),
+      taxAmount: new Decimal(0),
+      tipAmount: new Decimal(0),
+      total: new Decimal(380),
+      paymentStatus: 'PAID', // ← la cuenta YA estaba saldada
+      status: 'COMPLETED',
+      source: 'TPV',
+      externalId: null,
+      servedById: 'staff-1',
+      createdById: 'staff-1',
+      items: [
+        {
+          id: 'item-1',
+          productId: 'prod-1',
+          quantity: 1,
+          product: { name: 'Sesión' },
+          // Con allocations el ítem cuenta como "ya cobrado" → el pre-flight de inventario no estorba
+          paymentAllocations: [{ id: 'alloc-1' }],
+          modifiers: [],
+        },
+      ],
+      payments: [{ amount: new Decimal(380), tipAmount: new Decimal(0) }], // el cobro original
+    })
+
+    const buildOverpayData = () => ({
+      venueId: mockVenueId,
+      amount: 12200, // $122 — el segundo tarjetazo real de Mindform
+      tip: 0,
+      status: 'COMPLETED' as const,
+      method: 'CREDIT_CARD' as const,
+      source: 'TPV',
+      splitType: 'FULLPAYMENT' as const,
+      tpvId: 'tpv-1',
+      staffId: 'staff-1',
+      paidProductsId: [],
+      currency: 'MXN',
+      isInternational: false,
+    })
+
+    it('registra el pago (NUNCA lo rechaza) y dispara alerta 🚨 + ActivityLog', async () => {
+      const paidOrder = buildPaidOrder()
+      ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(paidOrder)
+      ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...paidOrder, items: [] })
+      ;(prisma.payment.create as jest.Mock).mockResolvedValue({ id: 'payment-2', feeAmount: 0, netAmount: 122 })
+      ;(prisma.venueTransaction.create as jest.Mock).mockResolvedValue({})
+      ;(prisma.paymentAllocation.create as jest.Mock).mockResolvedValue({})
+
+      // NO lanza: la tarjeta ya se cobró, el registro tiene que entrar
+      await (paymentService as any).recordOrderPayment(mockVenueId, mockOrderId, buildOverpayData(), 'user-1')
+      expect(prisma.payment.create).toHaveBeenCalled()
+
+      // Grita: alerta con el token que BetterStack debe vigilar
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('🚨 [Sobrepago]'),
+        expect.objectContaining({
+          orderId: mockOrderId,
+          overpaidBy: 122,
+          wasAlreadyPaid: true, // ← la firma exacta del caso Mindform
+        }),
+      )
+
+      // Y deja rastro auditable
+      expect(prisma.activityLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            action: 'SOBREPAGO_DETECTADO',
+            entity: 'Order',
+            entityId: mockOrderId,
+            venueId: mockVenueId,
+          }),
+        }),
+      )
+    })
+
+    it('REGRESIÓN: un pago exacto NO dispara la alerta ni escribe ActivityLog', async () => {
+      const openOrder = {
+        ...buildPaidOrder(),
+        paymentStatus: 'PENDING',
+        status: 'CONFIRMED',
+        payments: [], // sin cobros previos
+      }
+      ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(openOrder)
+      ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...openOrder, paymentStatus: 'PAID', items: [] })
+      ;(prisma.payment.create as jest.Mock).mockResolvedValue({ id: 'payment-1', feeAmount: 0, netAmount: 380 })
+      ;(prisma.venueTransaction.create as jest.Mock).mockResolvedValue({})
+      ;(prisma.paymentAllocation.create as jest.Mock).mockResolvedValue({})
+
+      await (paymentService as any).recordOrderPayment(
+        mockVenueId,
+        mockOrderId,
+        { ...buildOverpayData(), amount: 38000 }, // $380 exactos
+        'user-1',
+      )
+
+      expect(prisma.payment.create).toHaveBeenCalled()
+      const sobrepagoCalls = (logger.error as jest.Mock).mock.calls.filter(
+        ([msg]) => typeof msg === 'string' && msg.includes('🚨 [Sobrepago]'),
+      )
+      expect(sobrepagoCalls).toHaveLength(0)
+      expect(prisma.activityLog.create).not.toHaveBeenCalled()
     })
   })
 })

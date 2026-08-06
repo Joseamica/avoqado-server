@@ -60,6 +60,46 @@ export function mapDigitalReceiptResponse<T extends { accessKey: string }>(
 }
 
 /**
+ * Igual que {@link mapDigitalReceiptResponse}, pero si el pago existente NO tiene fila en
+ * `DigitalReceipt`, la GENERA en vez de devolver `null`.
+ *
+ * 🔴 Por qué existe (incidente Testarudo Café, 2026-08-05). `mapDigitalReceiptResponse` corta con
+ * `if (!receipt) return null` — correcto como mapeo, pero en las ramas idempotentes significaba
+ * responder 200 con `digitalReceipt: null` a un TPV que lo leía sin protección
+ * (`FastPaymentRecorder.kt` → `body.data.digitalReceipt.receiptUrl`). Gson no respeta la
+ * no-nulabilidad de Kotlin, así que el null entraba y reventaba con NPE; la NPE se clasificaba
+ * como error TRANSITORIO y el pago —ya cobrado y ya registrado— se reintentaba sin tope:
+ * 2,781 reintentos del mismo cobro del 23-jun en 6.3 h. Cero doble cargo (la idempotencia
+ * respondió bien las 2,781 veces), pero la terminal nunca cerró su pendiente.
+ *
+ * El TPV ya quedó blindado (`digitalReceipt` nullable + lectura null-safe), PERO un APK tarda
+ * 3-5 días en llegar a las terminales y hay pagos en prod hoy en esa condición. Esto lo corta
+ * desde el server, que despliega en minutos y cubre también a las terminales viejas.
+ *
+ * Nunca lanza: si la generación falla se cae a `null` (el comportamiento anterior) — un recibo
+ * faltante jamás puede tumbar la respuesta de un cobro que ya ocurrió.
+ */
+export async function ensureDigitalReceiptResponse(
+  paymentId: string,
+  receipt: { accessKey: string } | null | undefined,
+  autofacturaAvailable = false,
+): Promise<{ accessKey: string; receiptUrl: string; autofacturaAvailable: boolean } | null> {
+  if (receipt) return mapDigitalReceiptResponse(receipt, autofacturaAvailable)
+
+  try {
+    const generated = await generateDigitalReceipt(paymentId)
+    logger.info('🧾 [idempotent] Recibo digital faltante generado al vuelo', { paymentId, receiptId: generated.id })
+    return mapDigitalReceiptResponse(generated, autofacturaAvailable)
+  } catch (error) {
+    logger.error('🧾 [idempotent] No se pudo generar el recibo faltante — se responde sin recibo', {
+      paymentId,
+      error: error instanceof Error ? error.message : error,
+    })
+    return null
+  }
+}
+
+/**
  * Resolve whether this order's ticket may self-invoice (autofactura), for the TPV's
  * "…y factura" QR caption. Mirrors `getAutofacturaStatusController`
  * (`src/controllers/public/cfdi.public.controller.ts`) — reuses the SAME canonical resolver
@@ -446,8 +486,61 @@ async function updateOrderTotalsForStandalonePayment(
   const newTotal = orderSubtotal - orderDiscount + totalTip
 
   // Calculate remaining amount (based on new total)
+  // 🔴 El clamp a 0 se CONSERVA a propósito: clientes viejos (TPV/Android/iOS) esperan
+  // remainingBalance >= 0 y quitarlo rompería su UI. El problema nunca fue el clamp en sí,
+  // sino que era la ÚNICA representación del saldo: un sobrepago quedaba idéntico a una
+  // cuenta bien saldada y nadie se enteraba (Mindform: $734 cobrados sobre una cuenta de
+  // $380, invisible 2 meses hasta que el watchdog lo pescó). La detección de abajo rompe
+  // esa invisibilidad sin cambiar el contrato de la API.
   const remainingAmount = Math.max(0, newTotal - totalPaid)
   const isFullyPaid = remainingAmount <= 0.01 // Account for floating point precision
+
+  // 🚨 SOBREPAGO — detectar y gritar, NUNCA rechazar ni lanzar.
+  //
+  // Cuando este código corre, la tarjeta YA se cobró (Blumon primero, backend después): un
+  // rechazo aquí dejaría dinero cobrado al cliente SIN registro en Avoqado — un cobro
+  // fantasma, peor que el sobrepago. Por eso el pago SIEMPRE se registra; lo que se elimina
+  // es la invisibilidad. `wasAlreadyPaid` distingue el caso Mindform exacto: un cobro nuevo
+  // aterrizando sobre una cuenta que YA estaba saldada.
+  const overpaidBy = Math.round((totalPaid - newTotal) * 100) / 100
+  if (overpaidBy > 0.01) {
+    const wasAlreadyPaid = order.paymentStatus === 'PAID'
+    // BetterStack debe alertar sobre '🚨 [Sobrepago]'.
+    logger.error('🚨 [Sobrepago] Se cobró MÁS de lo que vale la cuenta — el pago se registra, pero requiere revisión', {
+      orderId,
+      venueId: order.venueId,
+      totalPaid,
+      orderTotal: newTotal,
+      overpaidBy,
+      wasAlreadyPaid,
+      paymentId: currentPaymentId ?? null,
+      staffId: staffId ?? null,
+    })
+    // Fire-and-forget FUERA de toda transacción: una falla del audit jamás puede tocar el cobro.
+    void prisma.activityLog
+      .create({
+        data: {
+          action: 'SOBREPAGO_DETECTADO',
+          entity: 'Order',
+          entityId: orderId,
+          staffId: staffId ?? null,
+          venueId: order.venueId,
+          data: {
+            totalPaid,
+            orderTotal: newTotal,
+            overpaidBy,
+            wasAlreadyPaid,
+            paymentId: currentPaymentId ?? null,
+          },
+        },
+      })
+      .catch(err => {
+        logger.error('🚨 [Sobrepago] No se pudo escribir el ActivityLog del sobrepago', {
+          orderId,
+          error: err instanceof Error ? err.message : err,
+        })
+      })
+  }
 
   // ✅ WORLD-CLASS: Pre-flight validation BEFORE capturing payment (Stripe pattern)
   // Validate inventory availability before marking order as complete
@@ -1491,7 +1584,7 @@ export async function recordOrderPayment(
         idempotencyKey: paymentData.idempotencyKey,
         existingPaymentId: existingByKey.id,
       })
-      return { ...existingByKey, digitalReceipt: mapDigitalReceiptResponse(existingByKey.receipts[0]) }
+      return { ...existingByKey, digitalReceipt: await ensureDigitalReceiptResponse(existingByKey.id, existingByKey.receipts[0]) }
     }
   }
 
@@ -1522,7 +1615,7 @@ export async function recordOrderPayment(
       // Return existing payment with receipt (safe retry - client gets same response)
       return {
         ...existingPayment,
-        digitalReceipt: mapDigitalReceiptResponse(existingPayment.receipts[0]),
+        digitalReceipt: await ensureDigitalReceiptResponse(existingPayment.id, existingPayment.receipts[0]),
       }
     }
   }
@@ -1938,7 +2031,7 @@ export async function recordOrderPayment(
         })
 
         if (winner) {
-          return { ...winner, digitalReceipt: mapDigitalReceiptResponse(winner.receipts[0]) }
+          return { ...winner, digitalReceipt: await ensureDigitalReceiptResponse(winner.id, winner.receipts[0]) }
         }
 
         logger.error('🚨 [recordOrderPayment] P2002 on idempotencyKey but winner not found — should be impossible', {
@@ -2373,7 +2466,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         idempotencyKey: paymentData.idempotencyKey,
         existingPaymentId: existingByKey.id,
       })
-      return { ...existingByKey, digitalReceipt: mapDigitalReceiptResponse(existingByKey.receipts[0]) }
+      return { ...existingByKey, digitalReceipt: await ensureDigitalReceiptResponse(existingByKey.id, existingByKey.receipts[0]) }
     }
   }
 
@@ -2406,7 +2499,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       // Return existing payment with receipt (safe retry - client gets same response)
       return {
         ...existingPayment,
-        digitalReceipt: mapDigitalReceiptResponse(existingPayment.receipts[0]),
+        digitalReceipt: await ensureDigitalReceiptResponse(existingPayment.id, existingPayment.receipts[0]),
       }
     }
   }
@@ -2772,7 +2865,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         })
 
         if (winner) {
-          return { ...winner, digitalReceipt: mapDigitalReceiptResponse(winner.receipts[0]) }
+          return { ...winner, digitalReceipt: await ensureDigitalReceiptResponse(winner.id, winner.receipts[0]) }
         }
 
         logger.error('🚨 [recordFastPayment] P2002 on idempotencyKey but winner not found — should be impossible', {
