@@ -44,6 +44,8 @@ export interface AutoReorderRunResult {
   emailsSent: number
   itemsOrdered: number
   skippedOpenPo: number
+  /** Insumos que NO se pidieron porque alguien rechazó su orden hace menos de 14 días. */
+  skippedRejectedPo: number
   skippedNoSupplier: number
   skippedCap: number
   skippedLowUrgency: number
@@ -55,6 +57,7 @@ const ZERO_RESULT: AutoReorderRunResult = {
   emailsSent: 0,
   itemsOrdered: 0,
   skippedOpenPo: 0,
+  skippedRejectedPo: 0,
   skippedNoSupplier: 0,
   skippedCap: 0,
   skippedLowUrgency: 0,
@@ -69,6 +72,21 @@ const OPEN_PO_STATUSES: PurchaseOrderStatus[] = [
   PurchaseOrderStatus.SHIPPED,
   PurchaseOrderStatus.PARTIAL,
 ]
+
+/**
+ * Cuántos días una orden RECHAZADA sigue frenando la recompra automática del mismo
+ * insumo.
+ *
+ * Una orden rechazada NO estaba en la lista de "abiertas", así que el cron volvía a
+ * pedir esa misma noche lo que un gerente acababa de frenar — y a la mañana siguiente
+ * había otra orden idéntica esperando. El gerente rechaza, el sistema insiste.
+ *
+ * Pero tampoco puede frenarla para siempre: una orden rechazada y olvidada dejaría
+ * ese insumo sin reponer indefinidamente, y ese es un problema peor —desabasto
+ * silencioso— que una orden duplicada. A las dos semanas el cron vuelve a proponerla,
+ * dando por hecho que si nadie la retomó, la necesidad sigue ahí.
+ */
+const DIAS_QUE_UNA_RECHAZADA_FRENA_LA_RECOMPRA = 14
 
 /** Dependencies injected for testability; defaults wire the real implementations. */
 export interface AutoReorderDeps {
@@ -528,11 +546,30 @@ export async function runAutoReorderForVenue(
   // 6. Dedupe — drop items already on an open PO
   if (candidates.length > 0) {
     const ids = candidates.map(s => s.rawMaterial.id)
+    // Se descarta un insumo si ya está en una orden ABIERTA o en una RECHAZADA
+    // reciente. Lo segundo es lo que impide que el cron vuelva a pedir esta misma
+    // noche lo que un gerente acaba de frenar — ver el porqué en la constante de
+    // arriba. La rechazada deja de frenar a los 14 días para no causar desabasto.
+    const cortePorRechazo = new Date(Date.now() - DIAS_QUE_UNA_RECHAZADA_FRENA_LA_RECOMPRA * 24 * 60 * 60 * 1000)
     const openItems = await prisma.purchaseOrderItem.findMany({
-      where: { rawMaterialId: { in: ids }, purchaseOrder: { venueId, status: { in: OPEN_PO_STATUSES } } },
-      select: { rawMaterialId: true },
+      where: {
+        rawMaterialId: { in: ids },
+        purchaseOrder: {
+          venueId,
+          OR: [{ status: { in: OPEN_PO_STATUSES } }, { status: PurchaseOrderStatus.REJECTED, rejectedAt: { gte: cortePorRechazo } }],
+        },
+      },
+      select: { rawMaterialId: true, purchaseOrder: { select: { status: true } } },
     })
     const alreadyOpen = new Set(openItems.map(i => i.rawMaterialId))
+    // Se cuentan aparte para que el resumen del cron distinga "ya lo pedí" de
+    // "alguien lo rechazó": son dos situaciones que se atienden distinto.
+    const frenadosPorRechazo = new Set(
+      openItems.filter(i => i.purchaseOrder.status === PurchaseOrderStatus.REJECTED).map(i => i.rawMaterialId),
+    )
+    if (frenadosPorRechazo.size > 0) {
+      result.skippedRejectedPo = frenadosPorRechazo.size
+    }
     candidates = candidates.filter(s => {
       if (alreadyOpen.has(s.rawMaterial.id)) {
         result.skippedOpenPo++
@@ -584,6 +621,7 @@ export async function runAutoReorderForVenue(
       emailsSent: result.emailsSent,
       itemsOrdered: result.itemsOrdered,
       skippedOpenPo: result.skippedOpenPo,
+      skippedRejectedPo: result.skippedRejectedPo,
       skippedCap: result.skippedCap,
       skippedLowUrgency: result.skippedLowUrgency,
       skippedNoSupplier: result.skippedNoSupplier,

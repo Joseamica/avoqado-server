@@ -336,8 +336,10 @@ La validación vieja **sí los rechazaba**, y el kardex del camino legacy no los
 
 ### Deuda que ESTO deja anotada
 
-- **Renglones duplicados del mismo insumo**: ahora se permiten, pero el kardex del camino legacy los estampa mal (ambos movimientos con el
-  mismo `previousStock`). O se acumula por renglón, o se vuelven a rechazar. El saldo final SÍ queda correcto; es el kardex el que miente.
+- ~~**Renglones duplicados del mismo insumo**~~ — **RESUELTO el 2026-08-06.** Se volvieron a rechazar, pero ahora con un mensaje que dice
+  qué artículo está repetido en vez del inútil "Some raw materials not found". La restricción sí hacía falta: el kardex del camino anterior
+  estampa el mismo saldo previo en los dos movimientos, así que dos renglones del mismo insumo dejan un historial que no encadena. Y al
+  usuario no le aportaba nada — dos renglones de 5 kg son 10 kg, y en uno solo se recibe y se audita mejor.
 - **La carrera restante**: `increment` cerró la escritura, no la lectura. Dos recepciones concurrentes del MISMO renglón siguen leyendo el
   mismo estado y sumando doble — y ahora _cuadra_ contra los lotes, así que es más difícil de detectar que antes. Se cierra con un candado
   de fila (`FOR UPDATE`) sobre el renglón antes de calcular el delta.

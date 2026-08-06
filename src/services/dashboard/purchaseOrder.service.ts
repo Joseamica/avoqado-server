@@ -140,6 +140,34 @@ async function verificarRenglonesDelVenue(venueId: string, items: Array<{ rawMat
   const rawMaterialIds = [...new Set(items.map(i => i.rawMaterialId).filter((v): v is string => !!v))]
   const productIds = [...new Set(items.map(i => i.productId).filter((v): v is string => !!v))]
 
+  // ── El mismo artículo no puede ir en dos renglones ────────────────────────
+  //
+  // La validación anterior los rechazaba de rebote, comparando longitudes de arreglo,
+  // con el mensaje inútil "Some raw materials not found" — que mandaba al usuario a
+  // buscar un insumo que sí existía. Al arreglar ese mensaje se abrió la puerta sin
+  // querer, y resulta que la restricción SÍ hacía falta: el kardex del camino de
+  // recepción anterior estampa el mismo saldo previo en los dos movimientos, así que
+  // dos renglones del mismo insumo dejan un historial que no encadena. El saldo final
+  // queda bien; lo que miente es la historia, y el kardex existe justamente para poder
+  // reconstruirla.
+  //
+  // Además no le sirve a nadie: dos renglones de 5 kg de harina son 10 kg de harina, y
+  // en un solo renglón se recibe, se audita y se concilia mejor.
+  const repetidos = (ids: Array<string | undefined>): string[] => {
+    const veces = new Map<string, number>()
+    for (const id of ids) if (id) veces.set(id, (veces.get(id) ?? 0) + 1)
+    return [...veces.entries()].filter(([, n]) => n > 1).map(([id]) => id)
+  }
+  const articulosRepetidos = [...repetidos(items.map(i => i.rawMaterialId)), ...repetidos(items.map(i => i.productId))]
+
+  if (articulosRepetidos.length > 0) {
+    throw new AppError(
+      `Hay artículos repetidos en más de un renglón (${articulosRepetidos.join(', ')}). ` +
+        `Junta las cantidades en un solo renglón por artículo.`,
+      400,
+    )
+  }
+
   if (rawMaterialIds.length > 0) {
     const encontrados = await prisma.rawMaterial.findMany({
       where: { id: { in: rawMaterialIds }, venueId, deletedAt: null },
@@ -1079,13 +1107,19 @@ export async function receivePurchaseOrder(
   // they reconcile cleanly with RawMaterial.currentStock and StockBatch
   // (both also normalized).
   //
-  // ⚠️ DEUDA CONOCIDA — `previousStock` y `newStock` de abajo salen de la lectura
-  // hecha al INICIO de la función, no del valor real al momento de aplicar. Bajo
-  // concurrencia el saldo guardado en `RawMaterial.currentStock` queda CORRECTO
-  // (arriba se usa `increment`), pero estas dos columnas del kardex pueden quedar
-  // desfasadas. No se corrige aquí porque esta función usa la forma de ARREGLO de
-  // `$transaction`, que no expone el cliente `tx` necesario para releer adentro;
-  // arreglarlo obliga a convertirla a la forma de callback (~185 líneas).
+  // ⚠️ DEUDA CONOCIDA, ya acotada — `previousStock` y `newStock` de abajo salen de la
+  // lectura hecha al INICIO de la función, no del valor real al momento de aplicar. El
+  // saldo guardado en `RawMaterial.currentStock` queda CORRECTO (arriba se usa
+  // `increment`); lo que puede quedar desfasado son estas dos columnas del kardex.
+  //
+  // El caso que lo disparaba SIN concurrencia —dos renglones del mismo insumo en la
+  // misma orden— ya no es alcanzable: `verificarRenglonesDelVenue` rechaza artículos
+  // repetidos al crear y al editar. Queda sólo la ventana de dos recepciones
+  // CONCURRENTES de la misma orden, que es mucho más estrecha.
+  //
+  // No se corrige aquí porque esta función usa la forma de ARREGLO de `$transaction`,
+  // que no expone el cliente `tx` necesario para releer adentro; arreglarlo obliga a
+  // convertirla a la forma de callback (~185 líneas).
   //
   // El camino moderno (`applyItemReceiveStatusInTx`) ya corre en forma de callback
   // y no tiene este problema. Toda funcionalidad nueva —incluida la recepción de
