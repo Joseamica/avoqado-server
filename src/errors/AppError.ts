@@ -152,4 +152,16 @@ export class TerminalBusyError extends AppError {
   }
 }
 
+/**
+ * Un POS pidió cobrar una orden que YA está saldada (`paymentStatus === 'PAID'`).
+ * Se lanza ANTES de despachar el cobro a la terminal — todavía no hay dinero movido,
+ * así que rechazar duro es seguro. Ver el candado en `terminal-payment.service.ts`
+ * (caso Mindform 2026-06-21: $354 de sobrecobro por una lista de órdenes rancia).
+ */
+export class OrderAlreadyPaidError extends AppError {
+  constructor(message: string) {
+    super(message, 409, true, 'ORDER_ALREADY_PAID')
+  }
+}
+
 export default AppError // Keep default export for the base class if used elsewhere

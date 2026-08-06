@@ -23,7 +23,7 @@ import prisma from '../utils/prismaClient'
 import { terminalRegistry, normalizeTerminalId } from '../communication/sockets/terminal-registry'
 import socketManager from '../communication/sockets/managers/socketManager'
 import logger from '../config/logger'
-import { TerminalBusyError } from '../errors/AppError'
+import { OrderAlreadyPaidError, TerminalBusyError } from '../errors/AppError'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
 export interface TerminalPaymentRequest {
@@ -211,6 +211,44 @@ class TerminalPaymentService {
    */
   async sendPaymentToTerminal(request: TerminalPaymentRequest): Promise<TerminalPaymentResult> {
     const { terminalId, venueId } = request
+
+    // 🛡️ CANDADO DE SOBREPAGO — rechazar AQUÍ, donde todavía no hay dinero movido.
+    //
+    // Caso real (Mindform, 2026-06-21/22): una cuenta de $380 YA saldada aceptó $122 una hora
+    // después y $232 al día siguiente — el POS mostraba la orden como abierta (lista rancia) y
+    // la mandó a cobrar de nuevo. En `recordOrderPayment` ya es demasiado tarde para rechazar
+    // (la tarjeta ya pasó por Blumon; ahí solo se detecta y alerta). Este es el ÚNICO punto del
+    // flujo remoto donde bloquear es seguro: el request aún no llega a la terminal.
+    //
+    // Solo aplica a cobros CON orden. Fail-open ante error de lectura: un fallo de infra aquí
+    // no debe tumbar un cobro legítimo (el resto del flujo tiene sus propias validaciones).
+    if (request.orderId) {
+      try {
+        const order = await prisma.order.findFirst({
+          where: { id: request.orderId, venueId },
+          select: { paymentStatus: true, orderNumber: true },
+        })
+        if (order?.paymentStatus === 'PAID') {
+          logger.warn('🛡️ [TerminalPayment] Cobro rechazado: la orden YA está pagada', {
+            orderId: request.orderId,
+            orderNumber: order.orderNumber,
+            venueId,
+            terminalId,
+            amountCents: request.amountCents,
+            requestedBy: request.requestedBy ?? null,
+          })
+          throw new OrderAlreadyPaidError(
+            `La cuenta ${order.orderNumber ?? request.orderId} ya está pagada por completo. Actualiza la lista de órdenes — si necesitas cobrar algo más, agrégalo a la cuenta primero.`,
+          )
+        }
+      } catch (err) {
+        if (err instanceof OrderAlreadyPaidError) throw err
+        logger.error('🛡️ [TerminalPayment] No se pudo verificar el estado de la orden — se procede (fail-open)', {
+          orderId: request.orderId,
+          error: err instanceof Error ? err.message : err,
+        })
+      }
+    }
 
     // Look up terminal (registry normalizes AVQD- prefix automatically)
     const terminalEntry = terminalRegistry.getTerminal(terminalId)

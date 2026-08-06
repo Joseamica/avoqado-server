@@ -15,7 +15,7 @@ import prisma from '@/utils/prismaClient'
 import socketManager from '@/communication/sockets/managers/socketManager'
 import { terminalRegistry } from '@/communication/sockets/terminal-registry'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
-import { TerminalBusyError } from '@/errors/AppError'
+import { OrderAlreadyPaidError, TerminalBusyError } from '@/errors/AppError'
 
 jest.mock('@/communication/sockets/managers/socketManager', () => ({
   __esModule: true,
@@ -467,5 +467,73 @@ describe('TerminalPaymentService — hasChargeBlockingOrderCancel (guard for can
   it('returns false when the order has no live/unknown terminal charge', async () => {
     tpr().findFirst.mockResolvedValueOnce(null)
     expect(await terminalPaymentService.hasChargeBlockingOrderCancel('venue-1', 'order-2')).toBe(false)
+  })
+})
+
+describe('TerminalPaymentService — candado de sobrepago (orden YA pagada, caso Mindform 2026-06-21)', () => {
+  /**
+   * Una cuenta de $380 YA saldada aceptó $122 y luego $232 más porque el POS tenía la lista de
+   * órdenes rancia y la mandó a cobrar de nuevo. Este es el ÚNICO punto del flujo remoto donde
+   * bloquear es seguro: el request aún no llegó a la terminal, no hay dinero movido.
+   */
+  const order = () => prismaMock.order
+
+  it('🔴 REGRESIÓN: orden PAID → rechaza con ORDER_ALREADY_PAID ANTES de tocar la terminal', async () => {
+    order().findFirst.mockResolvedValue({ paymentStatus: 'PAID', orderNumber: 'ORD-380' })
+
+    await expect(
+      terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-PAID', orderId: 'order-mindform' })),
+    ).rejects.toThrow(OrderAlreadyPaidError)
+
+    // Ni fila del lock, ni emit a la terminal: el cobro murió antes de existir
+    expect(tpr().create).not.toHaveBeenCalled()
+    expect(emit).not.toHaveBeenCalled()
+  })
+
+  it('orden PENDING → el cobro procede normal (el candado no estorba cuentas abiertas)', async () => {
+    order().findFirst.mockResolvedValue({ paymentStatus: 'PENDING', orderNumber: 'ORD-OPEN' })
+
+    const p1 = terminalPaymentService.sendPaymentToTerminal(
+      baseRequest({ terminalId: 'T-OPEN', orderId: 'order-open', requestId: 'REQ-G1' }),
+    )
+    await flush()
+    expect(tpr().create).toHaveBeenCalledTimes(1)
+    expect(emit).toHaveBeenCalledWith('terminal:payment_request', expect.objectContaining({ requestId: 'REQ-G1' }))
+
+    terminalPaymentService.handlePaymentResult({ requestId: 'REQ-G1', status: 'success', paymentId: 'pay-g1' })
+    expect((await p1).status).toBe('success')
+  })
+
+  it('orden PARTIAL → procede (los pagos divididos son legítimos)', async () => {
+    order().findFirst.mockResolvedValue({ paymentStatus: 'PARTIAL', orderNumber: 'ORD-SPLIT' })
+
+    const p1 = terminalPaymentService.sendPaymentToTerminal(
+      baseRequest({ terminalId: 'T-SPLIT', orderId: 'order-split', requestId: 'REQ-G2' }),
+    )
+    await flush()
+    expect(tpr().create).toHaveBeenCalledTimes(1)
+
+    terminalPaymentService.handlePaymentResult({ requestId: 'REQ-G2', status: 'success', paymentId: 'pay-g2' })
+    expect((await p1).status).toBe('success')
+  })
+
+  it('fail-open: si la verificación truena (DB caída), el cobro procede — un fallo de infra jamás bloquea un cobro legítimo', async () => {
+    order().findFirst.mockRejectedValue(new Error('connection refused'))
+
+    const p1 = terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-FO', orderId: 'order-x', requestId: 'REQ-G3' }))
+    await flush()
+    expect(tpr().create).toHaveBeenCalledTimes(1)
+
+    terminalPaymentService.handlePaymentResult({ requestId: 'REQ-G3', status: 'success', paymentId: 'pay-g3' })
+    expect((await p1).status).toBe('success')
+  })
+
+  it('cobro rápido SIN orden → ni siquiera consulta la orden (cero costo para el flujo Cobrar)', async () => {
+    const p1 = terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-FAST', requestId: 'REQ-G4' }))
+    await flush()
+    expect(order().findFirst).not.toHaveBeenCalled()
+
+    terminalPaymentService.handlePaymentResult({ requestId: 'REQ-G4', status: 'success', paymentId: 'pay-g4' })
+    expect((await p1).status).toBe('success')
   })
 })

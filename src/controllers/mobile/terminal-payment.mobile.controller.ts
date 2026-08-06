@@ -9,7 +9,7 @@ import { Request, Response } from 'express'
 import { terminalPaymentService } from '../../services/terminal-payment.service'
 import { terminalRegistry } from '../../communication/sockets/terminal-registry'
 import logger from '../../config/logger'
-import { BadRequestError, TerminalBusyError } from '../../errors/AppError'
+import { BadRequestError, OrderAlreadyPaidError, TerminalBusyError } from '../../errors/AppError'
 import { validateStaffVenue } from '../../utils/staff-venue.util'
 
 /**
@@ -98,6 +98,19 @@ export async function sendTerminalPayment(req: Request, res: Response) {
         errorMessage: message,
         message,
         blockingRequest: error.details.blockingRequest,
+      })
+    }
+
+    // Orden YA saldada → 409 con code propio. Mismo contrato defensivo que TERMINAL_BUSY:
+    // `status:'failed'` para que clientes VIEJOS (que leen el body, no el HTTP code) degraden
+    // a un fallo normal en vez de colgarse; clientes nuevos leen `code` y muestran el mensaje.
+    if (error instanceof OrderAlreadyPaidError) {
+      return res.status(409).json({
+        success: false,
+        status: 'failed',
+        code: 'ORDER_ALREADY_PAID',
+        errorMessage: message,
+        message,
       })
     }
 
