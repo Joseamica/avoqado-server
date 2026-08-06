@@ -1,4 +1,4 @@
-import { PaymentMethod, ProductType, TransactionStatus, OrderStatus } from '@prisma/client'
+import { PaymentMethod, ProductType, TransactionStatus, OrderStatus, Prisma } from '@prisma/client'
 import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { GeneralStatsResponse, GeneralStatsQuery } from '../../schemas/dashboard/generalStats.schema'
@@ -154,15 +154,9 @@ async function generateExtraMetrics(venueId: string, fromDate: Date, toDate: Dat
   const peakHoursData = await generatePeakHoursData(venueId, fromDate, toDate, timezone)
 
   // Generate weekly trends data
-  const weeklyTrendsData = await generateWeeklyTrendsData(venueId, fromDate, toDate)
+  const weeklyTrendsData = await generateWeeklyTrendsData(venueId, fromDate, toDate, timezone)
 
-  // Generate prep times by category (mock data for now)
-  const prepTimesByCategory = {
-    entradas: { avg: 8, target: 10 },
-    principales: { avg: 12, target: 15 },
-    postres: { avg: 4, target: 5 },
-    bebidas: { avg: 2, target: 3 },
-  }
+  const prepTimesByCategory = await generatePrepTimesByCategory(venueId, fromDate, toDate)
 
   return {
     tablePerformance,
@@ -245,7 +239,10 @@ async function generateStaffPerformance(venueId: string, fromDate: Date, toDate:
     totalSales: staff.totalRevenue, // SharedQueryService uses 'totalRevenue', generalStats expects 'totalSales'
     totalTips: staff.totalTips,
     orderCount: staff.totalOrders, // SharedQueryService uses 'totalOrders', generalStats expects 'orderCount'
-    avgPrepTime: Math.floor(Math.random() * 10) + 5, // Mock data (not tracked in DB yet)
+    // El tiempo de preparación por empleado no se mide hoy: la comanda (KdsOrder) no
+    // guarda quién la preparó. Devolvía `Math.random()`. Se deja en 0 —"sin medición"—
+    // conservando el campo para no romper el contrato con el dashboard.
+    avgPrepTime: 0,
   }))
 }
 
@@ -347,15 +344,106 @@ async function generatePeakHoursData(venueId: string, fromDate: Date, toDate: Da
   }))
 }
 
-async function generateWeeklyTrendsData(_venueId: string, _fromDate: Date, _toDate: Date) {
+// Tiempo de preparación por categoría.
+//
+// Hoy NO es medible por categoría: `KdsOrderItem` guarda `productName` como texto
+// libre y no tiene liga a `Product`, así que no hay forma de saber a qué tipo de
+// producto pertenece una línea de comanda. Para medirlo de verdad hay que agregar
+// `productId` a `KdsOrderItem` y sellar los tiempos por línea.
+//
+// Esta función DEVOLVÍA VALORES INVENTADOS: constantes fijas idénticas para todos los
+// venues. Las cuatro categorías van en 0 —que se lee como "sin medición"— en vez de
+// fabricar un número.
+//
+// ⚠️ Un intento anterior de este arreglo calculaba el promedio GLOBAL de todas las
+// comandas y lo estampaba en `principales`. Eso NO es medir: el número era real pero
+// la etiqueta mentía, y nadie río abajo podía distinguir "los platos fuertes tardan X"
+// de "todas las comandas tardan X". Sustituir un dato inventado por uno mal etiquetado
+// no es arreglarlo. El promedio global sí se reporta, pero en su propio campo y dicho
+// con todas sus letras.
+//
+// `target` es la meta configurada por tipo de servicio, no un dato medido.
+// La forma de la respuesta se CONSERVA (nunca se quita un campo de una API); `overall`
+// es aditivo y los clientes viejos simplemente lo ignoran.
+async function generatePrepTimesByCategory(venueId: string, fromDate: Date, toDate: Date) {
+  const comandas = await prisma.kdsOrder.findMany({
+    where: {
+      venueId,
+      startedAt: { not: null },
+      completedAt: { not: null },
+      createdAt: { gte: fromDate, lte: toDate },
+    },
+    select: { startedAt: true, completedAt: true },
+  })
+
+  const minutos = comandas.map(c => (c.completedAt!.getTime() - c.startedAt!.getTime()) / 60000).filter(m => m > 0 && m < 24 * 60) // descarta comandas que quedaron abiertas
+
+  const promedioGlobal = minutos.length ? Math.round((minutos.reduce((a, b) => a + b, 0) / minutos.length) * 10) / 10 : 0
+
+  return {
+    entradas: { avg: 0, target: 10 },
+    principales: { avg: 0, target: 15 },
+    postres: { avg: 0, target: 5 },
+    bebidas: { avg: 0, target: 3 },
+    // Lo único que hoy SÍ se mide: la comanda completa, de que entra a cocina a que
+    // sale. `medicion` dice sobre cuántas comandas se calculó, para que un promedio
+    // sacado de tres tickets no se lea igual que uno sacado de mil.
+    overall: { avg: promedioGlobal, target: null, medicion: minutos.length },
+  }
+}
+
+// Venta por día de la semana del periodo solicitado, contra el periodo inmediato
+// anterior de la MISMA duración. El día se determina en la zona horaria del venue,
+// no en la del servidor: en producción Node corre en UTC y agrupar sin convertir
+// mueve la venta nocturna al día siguiente.
+async function generateWeeklyTrendsData(venueId: string, fromDate: Date, toDate: Date, timezone?: string | null) {
+  const tz = timezone || DEFAULT_TIMEZONE
   const weekdays = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
 
-  return weekdays.map(day => ({
-    day,
-    currentWeek: Math.floor(Math.random() * 1000) + 500,
-    previousWeek: Math.floor(Math.random() * 1000) + 400,
-    changePercentage: Math.floor(Math.random() * 40) - 20,
-  }))
+  // Periodo anterior: se desplaza un número ENTERO DE SEMANAS hacia atrás, no la
+  // duración exacta del rango. Es la diferencia entre comparar lunes contra lunes o
+  // lunes contra jueves: con un rango de 10 días, restar 10 días mueve cada día de la
+  // semana tres posiciones y la "comparación" queda sin sentido, aunque los totales
+  // sean reales. Como la gráfica se indexa por día de la semana, el desfase tiene que
+  // ser múltiplo de 7.
+  const MS_POR_DIA = 24 * 60 * 60 * 1000
+  const diasDelRango = Math.max(1, Math.ceil((toDate.getTime() - fromDate.getTime()) / MS_POR_DIA))
+  const desfaseMs = Math.ceil(diasDelRango / 7) * 7 * MS_POR_DIA
+  const prevFrom = new Date(fromDate.getTime() - desfaseMs)
+  const prevTo = new Date(toDate.getTime() - desfaseMs)
+
+  const orders = await prisma.order.findMany({
+    where: {
+      venueId,
+      status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
+      OR: [{ createdAt: { gte: fromDate, lte: toDate } }, { createdAt: { gte: prevFrom, lte: prevTo } }],
+    },
+    select: { total: true, createdAt: true },
+  })
+
+  // Luxon: weekday 1 = lunes … 7 = domingo, que es el orden del arreglo.
+  // Se acumula en Decimal, no en float: es dinero, y este total se compara contra
+  // reportes que sí son Decimal. Sumar decenas de miles de `Number` deriva centavos.
+  const current = Array.from({ length: 7 }, () => new Prisma.Decimal(0))
+  const previous = Array.from({ length: 7 }, () => new Prisma.Decimal(0))
+
+  for (const order of orders) {
+    const idx = DateTime.fromJSDate(order.createdAt, { zone: 'utc' }).setZone(tz).weekday - 1
+    const esActual = order.createdAt >= fromDate && order.createdAt <= toDate
+    const bucket = esActual ? current : previous
+    bucket[idx] = bucket[idx].add(order.total)
+  }
+
+  return weekdays.map((day, i) => {
+    const currentWeek = current[i].toDecimalPlaces(2).toNumber()
+    const previousWeek = previous[i].toDecimalPlaces(2).toNumber()
+    // Sin base de comparación no existe variación porcentual: 0, no un número
+    // inventado. El dashboard pinta `previousWeek` al lado, así que el 0 se lee en
+    // contexto y no se confunde con "no cambió".
+    const changePercentage = previousWeek === 0 ? 0 : Math.round(((currentWeek - previousWeek) / previousWeek) * 100)
+
+    return { day, currentWeek, previousWeek, changePercentage }
+  })
 }
 
 // Accepts both the native Prisma `PaymentMethod` enum and the legacy MindForm
@@ -494,7 +582,7 @@ export async function getChartData(venueId: string, chartType: string, filters: 
       return await generatePeakHoursData(venueId, fromDate, toDate, venue.timezone)
 
     case 'weekly-trends':
-      return await generateWeeklyTrendsData(venueId, fromDate, toDate)
+      return await generateWeeklyTrendsData(venueId, fromDate, toDate, venue.timezone)
 
     // Strategic Analytics Chart Types
     case 'revenue-trends':
@@ -861,9 +949,10 @@ async function getKitchenPerformanceData(venueId: string, fromDate: Date, toDate
     if (orderCount > 0) {
       const existing = performanceByCategory.get(category) || { orders: 0, avgPrepTime: 0 }
       existing.orders += orderCount
-      // Mock prep time based on category
-      const basePrepTime = category === ProductType.FOOD ? 12 : category === ProductType.BEVERAGE ? 3 : 8
-      existing.avgPrepTime = basePrepTime + Math.floor(Math.random() * 5)
+      // El tiempo de preparación por categoría no se mide hoy: `KdsOrderItem` no tiene
+      // liga a `Product`, así que no se puede saber el tipo de una línea de comanda.
+      // Devolvía una constante por categoría más `Math.random()`. Se deja en 0.
+      existing.avgPrepTime = 0
       performanceByCategory.set(category, existing)
     }
   })
