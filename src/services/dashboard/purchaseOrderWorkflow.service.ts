@@ -4,6 +4,25 @@ import AppError from '../../errors/AppError'
 import { logAction } from './activity-log.service'
 
 /**
+ * Include compartido por TODAS las respuestas de este servicio.
+ *
+ * Un renglón apunta a un insumo de cocina O a un producto de reventa. Cargar sólo
+ * `rawMaterial` hace que las órdenes de tienda de conveniencia salgan con el nombre
+ * y el sku en null: el usuario ve renglones anónimos con precio y cree que la orden
+ * está vacía. Estaba repetido siete veces y las siete se habían olvidado del producto
+ * — por eso ahora es UNA constante y no siete copias.
+ */
+const includeOrdenConRenglones = {
+  supplier: true,
+  items: {
+    include: {
+      rawMaterial: true,
+      product: true,
+    },
+  },
+} as const
+
+/**
  * Valid state transitions for Purchase Orders
  * Key: current status -> Value: array of allowed next statuses
  */
@@ -102,14 +121,7 @@ export async function submitForApproval(venueId: string, purchaseOrderId: string
       rejectedAt: null,
       rejectionReason: null,
     },
-    include: {
-      supplier: true,
-      items: {
-        include: {
-          rawMaterial: true,
-        },
-      },
-    },
+    include: includeOrdenConRenglones,
   })
 
   logAction({
@@ -151,14 +163,7 @@ export async function approvePurchaseOrder(venueId: string, purchaseOrderId: str
       rejectedAt: null,
       rejectionReason: null,
     },
-    include: {
-      supplier: true,
-      items: {
-        include: {
-          rawMaterial: true,
-        },
-      },
-    },
+    include: includeOrdenConRenglones,
   })
 
   logAction({
@@ -203,14 +208,7 @@ export async function rejectPurchaseOrder(venueId: string, purchaseOrderId: stri
       approvedBy: null,
       approvedAt: null,
     },
-    include: {
-      supplier: true,
-      items: {
-        include: {
-          rawMaterial: true,
-        },
-      },
-    },
+    include: includeOrdenConRenglones,
   })
 
   logAction({
@@ -247,14 +245,7 @@ export async function sendToSupplier(venueId: string, purchaseOrderId: string, p
     data: {
       status: PurchaseOrderStatus.SENT,
     },
-    include: {
-      supplier: true,
-      items: {
-        include: {
-          rawMaterial: true,
-        },
-      },
-    },
+    include: includeOrdenConRenglones,
   })
 
   void logAction({
@@ -294,14 +285,7 @@ export async function confirmBySupplier(venueId: string, purchaseOrderId: string
     data: {
       status: PurchaseOrderStatus.CONFIRMED,
     },
-    include: {
-      supplier: true,
-      items: {
-        include: {
-          rawMaterial: true,
-        },
-      },
-    },
+    include: includeOrdenConRenglones,
   })
 }
 
@@ -332,14 +316,7 @@ export async function markAsShipped(venueId: string, purchaseOrderId: string, tr
   return prisma.purchaseOrder.update({
     where: { id: purchaseOrderId },
     data: updateData,
-    include: {
-      supplier: true,
-      items: {
-        include: {
-          rawMaterial: true,
-        },
-      },
-    },
+    include: includeOrdenConRenglones,
   })
 }
 
@@ -407,14 +384,7 @@ export async function transitionToStatus(
   const result = await prisma.purchaseOrder.update({
     where: { id: purchaseOrderId },
     data: updateData,
-    include: {
-      supplier: true,
-      items: {
-        include: {
-          rawMaterial: true,
-        },
-      },
-    },
+    include: includeOrdenConRenglones,
   })
 
   logAction({

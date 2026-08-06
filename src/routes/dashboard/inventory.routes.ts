@@ -647,6 +647,19 @@ router.get(
 
 /**
  * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/purchase-orders/stats:
+ *   get:
+ *     tags: [Inventory - Purchase Orders]
+ *     summary: Get purchase order statistics
+ */
+// 🔴 VA ANTES de `/purchase-orders/:purchaseOrderId`. Express resuelve por orden de
+// registro: declarada después, la ruta dinámica capturaba "stats" como si fuera un id,
+// la validación de cuid lo rechazaba y este endpoint era INALCANZABLE — devolvía 400
+// para todo el mundo. Cualquier ruta ESTÁTICA de este grupo tiene que quedar arriba.
+router.get('/purchase-orders/stats', checkPermission('inventory:read'), purchaseOrderController.getPurchaseOrderStats)
+
+/**
+ * @openapi
  * /api/v1/dashboard/venues/{venueId}/inventory/purchase-orders/{purchaseOrderId}:
  *   get:
  *     tags: [Inventory - Purchase Orders]
@@ -732,15 +745,6 @@ router.post(
  *     summary: Cancel a purchase order
  */
 router.post('/purchase-orders/:purchaseOrderId/cancel', checkPermission('inventory:update'), purchaseOrderController.cancelPurchaseOrder)
-
-/**
- * @openapi
- * /api/v1/dashboard/venues/{venueId}/inventory/purchase-orders/stats:
- *   get:
- *     tags: [Inventory - Purchase Orders]
- *     summary: Get purchase order statistics
- */
-router.get('/purchase-orders/stats', checkPermission('inventory:read'), purchaseOrderController.getPurchaseOrderStats)
 
 /**
  * @openapi

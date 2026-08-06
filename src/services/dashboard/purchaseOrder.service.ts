@@ -103,6 +103,26 @@ export function resolveLineTarget(line: ResolvableLine): LineTarget {
 }
 
 /**
+ * Los totales de una orden de compra, calculados en UN SOLO lugar.
+ *
+ * Existía por triplicado —al crear, al editar y al cambiar impuestos— y los tres
+ * divergieron: el de editar se saltaba la comisión, así que editar los renglones de
+ * una orden con comisión le borraba ese dinero del total sin avisar. Una fórmula de
+ * dinero repetida en tres sitios acaba discrepando siempre; la pregunta es cuándo.
+ *
+ * Todo en PESOS, 1:1, con Decimal. Nunca float.
+ */
+export function calcularTotalesDeOrden(
+  subtotal: Decimal,
+  taxRate: Decimal | number,
+  commissionRate: Decimal | number | null | undefined,
+): { taxAmount: Decimal; commission: Decimal; totalAmount: Decimal } {
+  const taxAmount = subtotal.mul(taxRate)
+  const commission = subtotal.mul(commissionRate ?? 0)
+  return { taxAmount, commission, totalAmount: subtotal.add(taxAmount).add(commission) }
+}
+
+/**
  * Verifica que cada renglón apunte a un insumo o producto que EXISTE y pertenece a
  * ESTE venue, y que un producto de reventa sea comprable.
  *
@@ -568,12 +588,10 @@ export async function createPurchaseOrder(venueId: string, data: CreatePurchaseO
   }, new Decimal(0))
 
   const taxRate = data.taxRate || 0.16
-  const taxAmount = subtotal.mul(taxRate)
-
   const commissionRate = data.commissionRate || 0
-  const commission = subtotal.mul(commissionRate)
 
-  const totalAmount = subtotal.add(taxAmount).add(commission)
+  // Misma fórmula que al editar y que al cambiar impuestos — un solo lugar.
+  const { taxAmount, commission, totalAmount } = calcularTotalesDeOrden(subtotal, taxRate, commissionRate)
 
   // Check minimum order requirement
   if (supplier.minimumOrder && totalAmount.lessThan(supplier.minimumOrder)) {
@@ -668,7 +686,7 @@ export async function updatePurchaseOrder(
   venueId: string,
   purchaseOrderId: string,
   data: UpdatePurchaseOrderDto,
-  _staffId?: string,
+  staffId?: string,
 ): Promise<PurchaseOrder> {
   const existingOrder = await prisma.purchaseOrder.findFirst({
     where: {
@@ -726,13 +744,19 @@ export async function updatePurchaseOrder(
       return sum.add(new Decimal(item.unitPrice).mul(item.quantityOrdered))
     }, new Decimal(0))
 
-    const taxAmount = subtotal.mul(existingOrder.taxRate)
-    const totalAmount = subtotal.add(taxAmount)
+    // 🔴 La COMISIÓN también entra en el total. Aquí se calculaba
+    // `subtotal + impuesto` a secas, así que editar los renglones de una orden con
+    // comisión le BORRABA la comisión del total en silencio: el documento dejaba de
+    // cuadrar consigo mismo y el proveedor recibía un total menor al pactado.
+    // Al crear sí se sumaba (ver `createPurchaseOrder`); que los dos caminos
+    // calcularan distinto es la causa raíz, por eso ahora se calcula igual.
+    const { taxAmount, totalAmount } = calcularTotalesDeOrden(subtotal, existingOrder.taxRate, existingOrder.commissionRate)
 
     updateData = {
       ...updateData,
       subtotal,
       taxAmount,
+      commission: subtotal.mul(existingOrder.commissionRate ?? 0),
       total: totalAmount,
     }
 
@@ -790,12 +814,23 @@ export async function updatePurchaseOrder(
     })
   })
 
+  // El actor SÍ llega hasta aquí y no se estaba usando: la bitácora del dueño
+  // registraba que una orden de compra cambió, pero no quién la cambió. Sin eso la
+  // entrada no sirve para auditar — que es su único propósito.
+  // También se guarda el estado ANTERIOR: "pasó de PENDIENTE a AUTORIZADA" es la
+  // información que se audita; "quedó en AUTORIZADA" no dice quién movió qué.
   logAction({
+    staffId,
     venueId,
     action: 'PURCHASE_ORDER_UPDATED',
     entity: 'PurchaseOrder',
     entityId: purchaseOrder.id,
-    data: { orderNumber: purchaseOrder.orderNumber, status: purchaseOrder.status },
+    data: {
+      orderNumber: purchaseOrder.orderNumber,
+      estadoAnterior: existingOrder.status,
+      estadoNuevo: purchaseOrder.status,
+      renglonesReemplazados: !!data.items,
+    },
   })
 
   return purchaseOrder as any
@@ -1260,9 +1295,8 @@ export async function updatePurchaseOrderFees(
 
   // Recalculate totals
   const subtotal = existingOrder.subtotal
-  const taxAmount = subtotal.mul(newTaxRate)
-  const commission = subtotal.mul(newCommissionRate)
-  const total = subtotal.add(taxAmount).add(commission)
+  // Misma fórmula que al crear y al editar renglones — un solo lugar.
+  const { taxAmount, commission, totalAmount: total } = calcularTotalesDeOrden(subtotal, newTaxRate, newCommissionRate)
 
   // Update purchase order
   const updatedOrder = await prisma.purchaseOrder.update({
