@@ -17,9 +17,11 @@ import { retry, shouldRetryDbConnectionError } from '../utils/retry'
  * Este job convierte esas revisiones manuales en una alarma automática: corre cada 6 h, calla si
  * todo está bien, y grita con detalle si algo se rompe.
  *
- * 🔴 SE AUTO-APAGA EL 2026-08-07 (decisión del founder: probarlo 4 días). Después de esa fecha
- * no hace trabajo — solo lo anuncia UNA vez. Para volverlo permanente: subir WATCHDOG_UNTIL o
- * quitar el bloque de expiración. Para matarlo antes: quitar el .start() en server.ts.
+ * 🔴 La prueba original era de 4 días (hasta 2026-08-07). El 2026-08-06 el founder decidió
+ * EXTENDERLA: la primera corrida encontró 7 problemas reales de backlog y validó las 4
+ * invariantes sin falsos positivos, así que sigue vigilando hasta WATCHDOG_UNTIL (abajo).
+ * Para volverlo permanente de verdad: quitar el bloque de expiración. Para matarlo antes:
+ * quitar el .start() en server.ts.
  *
  * ── Calibración (verificada contra producción 2026-08-03, NO cambiar a ciegas) ────────────────
  * Estas convenciones son la diferencia entre una alarma útil y 1,465 falsos positivos:
@@ -31,7 +33,7 @@ import { retry, shouldRetryDbConnectionError } from '../utils/retry'
  */
 
 /** Última fecha (inclusive) en que el vigilante trabaja. Después: no-op. */
-const WATCHDOG_UNTIL = new Date('2026-08-08T00:00:00-06:00')
+const WATCHDOG_UNTIL = new Date('2026-12-31T00:00:00-06:00')
 
 /**
  * Filtro de venues reales — los demo/seed usan convenciones propias.
