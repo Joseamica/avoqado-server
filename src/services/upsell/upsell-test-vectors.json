@@ -44,16 +44,86 @@
       "Una hora con formato inválido se IGNORA (la ventana no aplica), jamás tumba el cobro."
     ],
     "cases": [
-      { "name": "sin ventana, siempre aplica", "daysOfWeek": [], "timeFrom": null, "timeUntil": null, "nowLocal": "2026-08-03T12:00", "expected": true },
-      { "name": "dentro del horario de desayuno", "daysOfWeek": [], "timeFrom": "07:00", "timeUntil": "11:00", "nowLocal": "2026-08-03T08:00", "expected": true },
-      { "name": "fuera del horario de desayuno", "daysOfWeek": [], "timeFrom": "07:00", "timeUntil": "11:00", "nowLocal": "2026-08-03T23:00", "expected": false },
-      { "name": "sólo domingo, en domingo", "daysOfWeek": [0], "timeFrom": null, "timeUntil": null, "nowLocal": "2026-08-02T12:00", "expected": true },
-      { "name": "sólo domingo, en lunes", "daysOfWeek": [0], "timeFrom": null, "timeUntil": null, "nowLocal": "2026-08-03T12:00", "expected": false },
-      { "name": "cruza medianoche: viernes 23:00 dentro", "daysOfWeek": [5], "timeFrom": "22:00", "timeUntil": "02:00", "nowLocal": "2026-08-07T23:00", "expected": true },
-      { "name": "cruza medianoche: sábado 01:00 sigue siendo la jornada del viernes", "daysOfWeek": [5], "timeFrom": "22:00", "timeUntil": "02:00", "nowLocal": "2026-08-08T01:00", "expected": true },
-      { "name": "cruza medianoche: sábado 23:00 ya es otra jornada", "daysOfWeek": [5], "timeFrom": "22:00", "timeUntil": "02:00", "nowLocal": "2026-08-08T23:00", "expected": false },
-      { "name": "cruza medianoche: viernes mediodía fuera", "daysOfWeek": [5], "timeFrom": "22:00", "timeUntil": "02:00", "nowLocal": "2026-08-07T12:00", "expected": false },
-      { "name": "hora con formato inválido se ignora", "daysOfWeek": [], "timeFrom": "no soy hora", "timeUntil": "tampoco", "nowLocal": "2026-08-03T12:00", "expected": true }
+      {
+        "name": "sin ventana, siempre aplica",
+        "daysOfWeek": [],
+        "timeFrom": null,
+        "timeUntil": null,
+        "nowLocal": "2026-08-03T12:00",
+        "expected": true
+      },
+      {
+        "name": "dentro del horario de desayuno",
+        "daysOfWeek": [],
+        "timeFrom": "07:00",
+        "timeUntil": "11:00",
+        "nowLocal": "2026-08-03T08:00",
+        "expected": true
+      },
+      {
+        "name": "fuera del horario de desayuno",
+        "daysOfWeek": [],
+        "timeFrom": "07:00",
+        "timeUntil": "11:00",
+        "nowLocal": "2026-08-03T23:00",
+        "expected": false
+      },
+      {
+        "name": "sólo domingo, en domingo",
+        "daysOfWeek": [0],
+        "timeFrom": null,
+        "timeUntil": null,
+        "nowLocal": "2026-08-02T12:00",
+        "expected": true
+      },
+      {
+        "name": "sólo domingo, en lunes",
+        "daysOfWeek": [0],
+        "timeFrom": null,
+        "timeUntil": null,
+        "nowLocal": "2026-08-03T12:00",
+        "expected": false
+      },
+      {
+        "name": "cruza medianoche: viernes 23:00 dentro",
+        "daysOfWeek": [5],
+        "timeFrom": "22:00",
+        "timeUntil": "02:00",
+        "nowLocal": "2026-08-07T23:00",
+        "expected": true
+      },
+      {
+        "name": "cruza medianoche: sábado 01:00 sigue siendo la jornada del viernes",
+        "daysOfWeek": [5],
+        "timeFrom": "22:00",
+        "timeUntil": "02:00",
+        "nowLocal": "2026-08-08T01:00",
+        "expected": true
+      },
+      {
+        "name": "cruza medianoche: sábado 23:00 ya es otra jornada",
+        "daysOfWeek": [5],
+        "timeFrom": "22:00",
+        "timeUntil": "02:00",
+        "nowLocal": "2026-08-08T23:00",
+        "expected": false
+      },
+      {
+        "name": "cruza medianoche: viernes mediodía fuera",
+        "daysOfWeek": [5],
+        "timeFrom": "22:00",
+        "timeUntil": "02:00",
+        "nowLocal": "2026-08-07T12:00",
+        "expected": false
+      },
+      {
+        "name": "hora con formato inválido se ignora",
+        "daysOfWeek": [],
+        "timeFrom": "no soy hora",
+        "timeUntil": "tampoco",
+        "nowLocal": "2026-08-03T12:00",
+        "expected": true
+      }
     ]
   },
 
