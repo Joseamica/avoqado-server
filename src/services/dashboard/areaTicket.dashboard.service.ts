@@ -42,12 +42,17 @@ async function assertVenue(venueId: string): Promise<void> {
   if (!venue) throw new NotFoundError('Venue no encontrado')
 }
 
-async function assertFeature(venueId: string, featureCode: 'AREA_TICKETS' | 'SCALE_INTEGRATION'): Promise<void> {
+async function assertFeature(
+  venueId: string,
+  featureCode: 'AREA_TICKETS' | 'SCALE_INTEGRATION' | 'VARIABLE_WEIGHT_BARCODE',
+): Promise<void> {
   if (!(await venueHasFeatureAccess(venueId, featureCode))) {
     const message =
       featureCode === 'AREA_TICKETS'
         ? 'El plan de este local no incluye vales por área.'
-        : 'El plan de este local no incluye integración con básculas.'
+        : featureCode === 'SCALE_INTEGRATION'
+          ? 'El plan de este local no incluye integración con básculas.'
+          : 'El plan de este local no incluye etiquetas de peso variable.'
     throw new ForbiddenError(message, `${featureCode}_NOT_ENTITLED`)
   }
 }
@@ -84,6 +89,7 @@ export async function getOverview(venueId: string) {
   const [
     areaTicketsEntitled,
     scaleIntegrationEntitled,
+    variableWeightBarcodeEntitled,
     settings,
     scaleSettings,
     areas,
@@ -95,6 +101,7 @@ export async function getOverview(venueId: string) {
   ] = await Promise.all([
     venueHasFeatureAccess(venueId, 'AREA_TICKETS'),
     venueHasFeatureAccess(venueId, 'SCALE_INTEGRATION'),
+    venueHasFeatureAccess(venueId, 'VARIABLE_WEIGHT_BARCODE'),
     prisma.venueAreaTicketSettings.findUnique({ where: { venueId } }),
     prisma.venueScaleSettings.findUnique({ where: { venueId } }),
     prisma.fulfillmentArea.findMany({
@@ -139,13 +146,20 @@ export async function getOverview(venueId: string) {
     entitlements: {
       areaTickets: areaTicketsEntitled,
       scaleIntegration: scaleIntegrationEntitled,
+      variableWeightBarcode: variableWeightBarcodeEntitled,
     },
     effective: {
       areaTickets: areaTicketsEntitled && Boolean(settings?.enabled),
       scales: scaleIntegrationEntitled && Boolean(scaleSettings?.enabled),
+      variableWeightBarcode: variableWeightBarcodeEntitled && Boolean(scaleSettings?.variableBarcodeEnabled),
     },
     settings: settings ?? { venueId, ...DEFAULT_SETTINGS },
-    scaleSettings: scaleSettings ?? { venueId, enabled: false },
+    scaleSettings: scaleSettings ?? {
+      venueId,
+      enabled: false,
+      variableBarcodeEnabled: false,
+      variableBarcodePrefix: '20',
+    },
     areas,
     terminals,
     scaleProfiles,
@@ -245,9 +259,34 @@ export async function updateArea(venueId: string, areaId: string, input: UpdateF
 }
 
 export async function updateTerminal(venueId: string, terminalId: string, input: UpdateAreaTicketTerminalInput, performedBy?: string) {
-  const terminal = await prisma.terminal.findFirst({ where: { id: terminalId, venueId }, select: { id: true } })
+  const terminal = await prisma.terminal.findFirst({
+    where: { id: terminalId, venueId },
+    select: {
+      id: true,
+      canIssueAreaTickets: true,
+      canCheckoutAreaTickets: true,
+      canDeliverAreaTickets: true,
+      defaultWorkspace: true,
+    },
+  })
   if (!terminal) throw new NotFoundError('Terminal no encontrada')
   await Promise.all([assertArea(venueId, input.fulfillmentAreaId), assertScaleProfile(venueId, input.scaleProfileId)])
+
+  const capabilityWasUpdated =
+    input.canIssueAreaTickets !== undefined ||
+    input.canCheckoutAreaTickets !== undefined ||
+    input.canDeliverAreaTickets !== undefined
+  const hasAreaTicketCapability =
+    (input.canIssueAreaTickets ?? terminal.canIssueAreaTickets) ||
+    (input.canCheckoutAreaTickets ?? terminal.canCheckoutAreaTickets) ||
+    (input.canDeliverAreaTickets ?? terminal.canDeliverAreaTickets)
+  const inferredWorkspace = capabilityWasUpdated
+    ? hasAreaTicketCapability
+      ? TerminalWorkspace.AREA_OPERATIONS
+      : terminal.defaultWorkspace === TerminalWorkspace.AREA_OPERATIONS
+        ? TerminalWorkspace.STANDARD_POS
+        : terminal.defaultWorkspace
+    : undefined
 
   const updated = await prisma.terminal.update({
     where: { id: terminalId },
@@ -256,7 +295,10 @@ export async function updateTerminal(venueId: string, terminalId: string, input:
       canIssueAreaTickets: input.canIssueAreaTickets,
       canCheckoutAreaTickets: input.canCheckoutAreaTickets,
       canDeliverAreaTickets: input.canDeliverAreaTickets,
-      defaultWorkspace: input.defaultWorkspace as TerminalWorkspace | undefined,
+      // El dashboard presenta capacidades, no una opción técnica de workspace.
+      // Mantenerlos sincronizados evita que una terminal de cremería vuelva a
+      // abrir Mesas/POS estándar después de configurarla correctamente.
+      defaultWorkspace: (input.defaultWorkspace as TerminalWorkspace | undefined) ?? inferredWorkspace,
       scaleProfileId: input.scaleProfileId,
     },
     select: {
@@ -283,11 +325,12 @@ export async function updateTerminal(venueId: string, terminalId: string, input:
 
 export async function updateScaleSettings(venueId: string, input: UpdateScaleSettingsInput, performedBy?: string) {
   await assertVenue(venueId)
-  if (input.enabled) await assertFeature(venueId, 'SCALE_INTEGRATION')
+  if (input.enabled === true) await assertFeature(venueId, 'SCALE_INTEGRATION')
+  if (input.variableBarcodeEnabled === true) await assertFeature(venueId, 'VARIABLE_WEIGHT_BARCODE')
   const settings = await prisma.venueScaleSettings.upsert({
     where: { venueId },
-    create: { venueId, enabled: input.enabled },
-    update: { enabled: input.enabled },
+    create: { venueId, ...input },
+    update: input,
   })
   await logAction({
     staffId: performedBy ?? null,
@@ -295,7 +338,7 @@ export async function updateScaleSettings(venueId: string, input: UpdateScaleSet
     action: 'SCALE_SETTINGS_UPDATED',
     entity: 'VenueScaleSettings',
     entityId: settings.id,
-    data: { enabled: settings.enabled },
+    data: { changes: input } as unknown as Prisma.InputJsonValue,
   })
   return settings
 }

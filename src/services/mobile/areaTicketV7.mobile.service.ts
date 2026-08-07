@@ -409,9 +409,10 @@ export async function getScaleSettings(venueId: string, deviceUid: string) {
 }
 
 export async function getAreaTicketSettings(venueId: string, deviceUid: string) {
-  const [areaTicketsEntitled, scaleEntitled, settings, scaleSettings, terminal] = await Promise.all([
+  const [areaTicketsEntitled, scaleEntitled, variableBarcodeEntitled, settings, scaleSettings, terminal] = await Promise.all([
     venueHasFeatureAccess(venueId, 'AREA_TICKETS'),
     venueHasFeatureAccess(venueId, 'SCALE_INTEGRATION'),
+    venueHasFeatureAccess(venueId, 'VARIABLE_WEIGHT_BARCODE'),
     getSettingsRecord(venueId),
     prisma.venueScaleSettings.findUnique({ where: { venueId } }),
     resolveTerminal(venueId, deviceUid),
@@ -442,6 +443,12 @@ export async function getAreaTicketSettings(venueId: string, deviceUid: string) 
       defaultWorkspace: terminal.defaultWorkspace,
     },
     scaleIntegration: mapScaleIntegration(scaleEntitled, scaleSettings?.enabled === true, terminal.scaleProfile),
+    variableWeightBarcode: {
+      entitled: variableBarcodeEntitled,
+      enabled: variableBarcodeEntitled && scaleSettings?.variableBarcodeEnabled === true,
+      format: 'EAN13_PLU5_WEIGHT5',
+      prefix: scaleSettings?.variableBarcodePrefix ?? '20',
+    },
   }
 }
 

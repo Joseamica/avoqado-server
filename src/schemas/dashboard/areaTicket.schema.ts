@@ -80,7 +80,14 @@ export const updateAreaTicketTerminalSchema = z.object({
 export const updateScaleSettingsSchema = z.object({
   params: venueParams,
   query: emptyQuery,
-  body: z.object({ enabled: z.boolean() }).strict(),
+  body: z
+    .object({
+      enabled: z.boolean().optional(),
+      variableBarcodeEnabled: z.boolean().optional(),
+      variableBarcodePrefix: z.string().regex(/^\d{2}$/, 'El prefijo debe contener exactamente 2 dígitos.').optional(),
+    })
+    .strict()
+    .refine(body => Object.keys(body).length > 0, 'Envía al menos un campo a actualizar'),
 })
 
 const scaleProfileBody = z

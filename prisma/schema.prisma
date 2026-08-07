@@ -12281,7 +12281,9 @@ model VenueScaleSettings {
   venueId String @unique
   venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
-  enabled   Boolean  @default(false)
+  enabled                  Boolean @default(false)
+  variableBarcodeEnabled   Boolean @default(false)
+  variableBarcodePrefix    String  @default("20") @db.VarChar(2)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
