@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express'
 import { PurchaseOrderStatus } from '@prisma/client'
 import * as purchaseOrderService from '../../../services/dashboard/purchaseOrder.service'
+import * as purchaseOrderWorkflow from '../../../services/dashboard/purchaseOrderWorkflow.service'
 import AppError from '../../../errors/AppError'
 
 /**
@@ -159,6 +160,48 @@ export async function receivePurchaseOrder(req: Request, res: Response, next: Ne
 /**
  * Cancel a purchase order
  */
+/**
+ * Rechazar una orden de compra.
+ *
+ * RECHAZAR NO ES CANCELAR, y hasta hoy el dashboard las confundía: su botón
+ * "Rechazar" llamaba a cancelar, por eso `rejectedBy`, `rejectedAt` y
+ * `rejectionReason` estaban vacíos en todas las órdenes de la base.
+ *
+ * La diferencia importa: una orden CANCELADA está muerta; una RECHAZADA la corrige
+ * quien la capturó y la vuelve a mandar. Sin esa vuelta, rechazar es irreversible y
+ * la gente deja de usar la autorización.
+ */
+export async function rejectPurchaseOrder(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId, purchaseOrderId } = req.params
+    const { reason } = req.body
+    const staffId = req.authContext?.userId
+
+    const purchaseOrder = await purchaseOrderWorkflow.rejectPurchaseOrder(venueId, purchaseOrderId, reason, staffId)
+
+    res.json({ success: true, message: 'Orden de compra rechazada', data: purchaseOrder })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Enviar una orden a autorización. Acepta borradores y órdenes rechazadas —esto
+ * último es el ciclo de corregir y reenviar.
+ */
+export async function submitPurchaseOrderForApproval(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId, purchaseOrderId } = req.params
+    const staffId = req.authContext?.userId
+
+    const purchaseOrder = await purchaseOrderWorkflow.submitForApproval(venueId, purchaseOrderId, staffId)
+
+    res.json({ success: true, message: 'Orden enviada a autorización', data: purchaseOrder })
+  } catch (error) {
+    next(error)
+  }
+}
+
 export async function cancelPurchaseOrder(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId, purchaseOrderId } = req.params

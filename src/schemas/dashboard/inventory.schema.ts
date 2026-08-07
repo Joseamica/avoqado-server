@@ -510,7 +510,10 @@ export const RejectPurchaseOrderSchema = z.object({
     purchaseOrderId: z.string().cuid(),
   }),
   body: z.object({
-    reason: z.string().min(1, 'Rejection reason is required'),
+    // Obligatorio a propósito, y en español porque este mensaje se le muestra tal cual
+    // al usuario. Un rechazo sin motivo le hace perder el día a quien capturó la orden:
+    // no sabe qué corregir y tiene que ir a preguntar.
+    reason: z.string().trim().min(1, 'Escribe el motivo del rechazo').max(500, 'El motivo no puede pasar de 500 caracteres'),
   }),
 })
 

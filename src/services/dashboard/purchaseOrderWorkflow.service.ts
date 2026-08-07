@@ -39,6 +39,10 @@ const VALID_TRANSITIONS: Record<PurchaseOrderStatus, PurchaseOrderStatus[]> = {
   ],
   [PurchaseOrderStatus.REJECTED]: [
     PurchaseOrderStatus.DRAFT, // Back to draft to fix issues
+    // Corregir y reenviar directo, sin pasar por borrador. Es el ciclo que cierra la
+    // autorización: sin él, rechazar es irreversible y quien capturó la orden tiene
+    // que volver a hacerla desde cero. Es el patrón de NetSuite y Dynamics.
+    PurchaseOrderStatus.PENDING_APPROVAL,
     PurchaseOrderStatus.CANCELLED, // Cancel permanently
   ],
   [PurchaseOrderStatus.APPROVED]: [
@@ -95,11 +99,15 @@ export async function submitForApproval(venueId: string, purchaseOrderId: string
   })
 
   if (!order) {
-    throw new AppError('Purchase order not found', 404)
+    throw new AppError('Orden de compra no encontrada', 404)
   }
 
-  if (order.status !== PurchaseOrderStatus.DRAFT) {
-    throw new AppError(`Cannot submit order with status ${order.status} for approval`, 400)
+  // Se acepta también una orden RECHAZADA: es el ciclo de corregir y reenviar. Sin él,
+  // rechazar sería irreversible y quien capturó la orden tendría que volver a armarla
+  // desde cero — que es justo lo que hace que la gente deje de usar la autorización.
+  const estadosQueSePuedenEnviar: PurchaseOrderStatus[] = [PurchaseOrderStatus.DRAFT, PurchaseOrderStatus.REJECTED]
+  if (!estadosQueSePuedenEnviar.includes(order.status)) {
+    throw new AppError(`No se puede enviar a autorización una orden en estado ${order.status}`, 400)
   }
 
   // Validate order has items

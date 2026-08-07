@@ -57,6 +57,7 @@ import {
   CreatePurchaseOrderSchema,
   UpdatePurchaseOrderSchema,
   ReceivePurchaseOrderSchema,
+  RejectPurchaseOrderSchema,
   GetPurchaseOrdersQuerySchema,
   PurchaseOrderIdParamsSchema,
   UpdatePurchaseOrderFeesSchema,
@@ -735,6 +736,37 @@ router.post(
   checkPermission('inventory:update'),
   validateRequest(ReceivePurchaseOrderSchema),
   purchaseOrderController.receivePurchaseOrder,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/purchase-orders/{purchaseOrderId}/submit-for-approval:
+ *   post:
+ *     tags: [Inventory - Purchase Orders]
+ *     summary: Send a purchase order for approval (accepts DRAFT and REJECTED)
+ */
+// La captura la hace el comprador, así que basta el permiso de edición: enviar a
+// autorización NO es autorizar.
+router.post(
+  '/purchase-orders/:purchaseOrderId/submit-for-approval',
+  checkPermission('inventory:update'),
+  purchaseOrderController.submitPurchaseOrderForApproval,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/inventory/purchase-orders/{purchaseOrderId}/reject:
+ *   post:
+ *     tags: [Inventory - Purchase Orders]
+ *     summary: Reject a purchase order (requires a reason)
+ */
+// RECHAZAR NO ES CANCELAR. Hasta hoy el dashboard llamaba a /cancel desde su botón
+// "Rechazar", por eso rejectedBy y rejectionReason estaban vacíos en toda la base.
+router.post(
+  '/purchase-orders/:purchaseOrderId/reject',
+  checkPermission('inventory:update'),
+  validateRequest(RejectPurchaseOrderSchema),
+  purchaseOrderController.rejectPurchaseOrder,
 )
 
 /**
