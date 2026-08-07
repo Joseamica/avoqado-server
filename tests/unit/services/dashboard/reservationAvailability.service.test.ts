@@ -903,12 +903,14 @@ describe('Reservation Availability Service', () => {
     // tiene duración le suma cero, así que pedía disponibilidad de 35 min para
     // una cita que dura 2 h 5 min: ofrecía las 12:45 aunque a la 1:30 ya
     // hubiera otra cosa, y el siguiente cliente acababa encimado.
-    const twoServices = [
+    type LegacyServiceRow = { id: string; duration: number | null; durationMinutes: number | null; type: string }
+
+    const twoServices: LegacyServiceRow[] = [
       { id: 'manicure-pedicure-spa-gel', duration: 90, durationMinutes: null, type: 'APPOINTMENTS_SERVICE' },
       { id: 'retiro-geles-duros', duration: 35, durationMinutes: null, type: 'APPOINTMENTS_SERVICE' },
     ]
 
-    const primeLegacyAppointment = (products = twoServices) => {
+    const primeLegacyAppointment = (products: LegacyServiceRow[] = twoServices) => {
       prismaMock.product.findMany.mockResolvedValue(products as any)
       prismaMock.product.findFirst.mockResolvedValue({ eventCapacity: null, type: 'APPOINTMENTS_SERVICE' } as any)
       prismaMock.reservation.findMany.mockResolvedValue([])
