@@ -740,6 +740,37 @@ export const createProofOfSaleSchema = z.object({
   }),
 })
 
+// ==========================================
+// HEARTBEAT SCHEMA (con telemetría opcional de autorización)
+// ==========================================
+
+// Un intento de autorización local reportado por el batching de telemetría del TPV
+// (Task 7). Sin datos de tarjeta ni montos — solo resultado/duración/riel/hora.
+// `timestamp` es opcional a propósito: el payload real del TPV puede omitirlo.
+const authAttemptSchema = z.object({
+  code: z.string().min(1, { message: 'El código del intento es requerido.' }).max(50, { message: 'El código es demasiado largo.' }),
+  durationMs: z.number().int().nonnegative({ message: 'La duración debe ser un entero no negativo.' }),
+  rail: z.string().min(1, { message: 'El riel (rail) es requerido.' }).max(50, { message: 'El riel es demasiado largo.' }),
+  timestamp: z.string().optional(),
+})
+
+// Terminales viejas instaladas NUNCA envían `authAttempts` — debe seguir siendo
+// additive/opcional. `systemInfo` se mantiene permisivo (record arbitrario) porque
+// ya viaja con forma libre desde el campo en producción.
+export const heartbeatSchema = z.object({
+  body: z.object({
+    terminalId: z.string().min(1, { message: 'El terminalId es requerido.' }),
+    timestamp: z.string().min(1, { message: 'El timestamp es requerido.' }),
+    status: z.enum(['ACTIVE', 'MAINTENANCE'], { message: 'El status debe ser ACTIVE o MAINTENANCE.' }),
+    version: z.string().optional(),
+    systemInfo: z.record(z.string(), z.any()).optional(),
+    // Lote de telemetría de autorización local (piggyback en el heartbeat). Tope de
+    // 100 intentos por envío — coincide con el cap del batch del lado TPV; un lote
+    // más grande se rechaza en vez de aceptarse silenciosamente.
+    authAttempts: z.array(authAttemptSchema).max(100, { message: 'El lote de intentos de autorización es demasiado grande.' }).optional(),
+  }),
+})
+
 /** Schema for TPV feedback (bug reports and feature suggestions) */
 export const tpvFeedbackSchema = z.object({
   body: z.object({
