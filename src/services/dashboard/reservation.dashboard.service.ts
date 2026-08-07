@@ -361,12 +361,27 @@ export async function createReservation(
       const modifiers = await resolveModifierSelections(tx, bookedProductIds, data.modifierSelections ?? [])
       modifierRows = modifiers.persistRows
       modifierDelta = modifiers.totalDelta
+
       finalDuration = data.duration + modifiers.totalDurationDelta
       if (!Number.isInteger(finalDuration) || finalDuration < 1 || finalDuration > 1_440) {
         throw new BadRequestError('La duración final debe estar entre 1 y 1440 minutos')
       }
-      finalEndsAt =
+
+      // INVARIANTE: el bloque guardado NUNCA puede ser más corto que la
+      // `duration` que se guarda junto a él.
+      //
+      // El widget suma las duraciones en el navegador y un servicio sin
+      // duración le suma cero, así que mandaba la ventana de un solo servicio;
+      // el servidor ya corregía `duration` sumando el catálogo (con relleno),
+      // pero se quedaba con el `endsAt` corto del cliente. Resultado: la
+      // descripción decía "Duración: 2 h 5 min" y Google Calendar apartaba
+      // 12:45–13:20 — 35 min (Amaena, 2026-08-05; misma familia que
+      // RES-PY45XU). La ventana sólo se ESTIRA: si recepción apartó a
+      // propósito más calendario del que dura el servicio, se respeta.
+      const rawEndsAtWithModifiers =
         modifiers.totalDurationDelta === 0 ? data.endsAt : new Date(data.endsAt.getTime() + modifiers.totalDurationDelta * 60_000)
+      const minimumEndsAt = new Date(data.startsAt.getTime() + finalDuration * 60_000)
+      finalEndsAt = minimumEndsAt > rawEndsAtWithModifiers ? minimumEndsAt : rawEndsAtWithModifiers
     }
 
     let effectiveAssignedStaffId = data.assignedStaffId ?? null

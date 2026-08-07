@@ -122,6 +122,10 @@ describe('Reservation Availability Service', () => {
     primeReservationStaffMocks()
     // Default: no external busy blocks. Tests opt in by overriding.
     prismaMock.externalBusyBlock.findMany.mockResolvedValue([])
+    // Default: el catálogo no resuelve ningún servicio de cita, así que la
+    // duración canónica no aplica y manda la que pidió el caller. Los tests de
+    // citas lo sobrescriben con sus productos.
+    prismaMock.product.findMany.mockResolvedValue([])
   })
 
   // ==========================================
@@ -887,6 +891,91 @@ describe('Reservation Availability Service', () => {
           }),
         }),
       )
+    })
+  })
+
+  // ==========================================
+  // Ventana canónica en el camino legacy (Amaena, 2026-08-05)
+  // ==========================================
+
+  describe('getAvailableSlots — la duración la manda el catálogo, no el cliente', () => {
+    // El widget suma las duraciones en el navegador. Cuando un servicio no
+    // tiene duración le suma cero, así que pedía disponibilidad de 35 min para
+    // una cita que dura 2 h 5 min: ofrecía las 12:45 aunque a la 1:30 ya
+    // hubiera otra cosa, y el siguiente cliente acababa encimado.
+    const twoServices = [
+      { id: 'manicure-pedicure-spa-gel', duration: 90, durationMinutes: null, type: 'APPOINTMENTS_SERVICE' },
+      { id: 'retiro-geles-duros', duration: 35, durationMinutes: null, type: 'APPOINTMENTS_SERVICE' },
+    ]
+
+    const primeLegacyAppointment = (products = twoServices) => {
+      prismaMock.product.findMany.mockResolvedValue(products as any)
+      prismaMock.product.findFirst.mockResolvedValue({ eventCapacity: null, type: 'APPOINTMENTS_SERVICE' } as any)
+      prismaMock.reservation.findMany.mockResolvedValue([])
+      prismaMock.table.findMany.mockResolvedValue([])
+      prismaMock.staff.findMany.mockResolvedValue([])
+      prismaMock.classSession.findMany.mockResolvedValue([])
+      prismaMock.slotHold.findMany.mockResolvedValue([])
+      prismaMock.reservation.groupBy.mockResolvedValue([] as any)
+    }
+
+    const bookedIds = twoServices.map(s => s.id)
+
+    it('genera la rejilla con los 125 min reales, no con los 35 que pidió el cliente', async () => {
+      primeLegacyAppointment()
+
+      const result = await getSlots({ duration: 35, productIds: bookedIds })
+
+      // 08:00–22:00 con paso de 60 min: con 125 min el último inicio que cabe
+      // es 19:00 (12 slots). Con los 35 min del cliente serían 14 — y las dos
+      // últimas citas no cabrían en el horario del negocio.
+      expect(result.length).toBe(12)
+      expect(Math.max(...result.map(s => s.startsAt.getUTCHours()))).toBe(19)
+    })
+
+    it('descarta un horario donde el evento del Google Calendar del negocio cae DENTRO de la cita completa', async () => {
+      primeLegacyAppointment()
+      // Su propio evento de las 14:00: queda fuera de una ventana de 35 min
+      // (12:00–12:35) pero DENTRO de la real (12:00–14:05).
+      prismaMock.externalBusyBlock.findMany.mockResolvedValue([
+        { startsAt: at(14), endsAt: at(15), staffId: null, venueId: VENUE_ID },
+      ] as any)
+
+      const result = await getSlots({ duration: 35, productIds: bookedIds })
+
+      expect(result.find(s => s.startsAt.getUTCHours() === 12)).toBeUndefined()
+    })
+
+    it('rellena con el default del venue el servicio sin duración en vez de contarlo como cero', async () => {
+      primeLegacyAppointment([
+        { id: 'manicure-pedicure-spa-gel', duration: null, durationMinutes: null, type: 'APPOINTMENTS_SERVICE' },
+        { id: 'retiro-geles-duros', duration: 35, durationMinutes: null, type: 'APPOINTMENTS_SERVICE' },
+      ])
+
+      const result = await getSlots({ duration: 35, productIds: bookedIds })
+
+      // 60 (default) + 35 = 95 min → último inicio 20:00 = 13 slots.
+      expect(result.length).toBe(13)
+    })
+
+    // ── REGRESIÓN ──────────────────────────────────────────────────────────
+    it('respeta una duración pedida MÁS LARGA que el catálogo', async () => {
+      primeLegacyAppointment([{ id: 'manicure-pedicure-spa-gel', duration: 60, durationMinutes: null, type: 'APPOINTMENTS_SERVICE' }])
+
+      const result = await getSlots({ duration: 180, productIds: ['manicure-pedicure-spa-gel'] })
+
+      expect(result.length).toBe(12) // 08:00–19:00 con 180 min
+    })
+
+    it('no cambia nada cuando no se piden servicios de cita (reserva de mesa)', async () => {
+      prismaMock.reservation.findMany.mockResolvedValue([])
+      prismaMock.table.findMany.mockResolvedValue([createMockTable()])
+      prismaMock.staff.findMany.mockResolvedValue([createMockStaff()])
+      prismaMock.product.findMany.mockResolvedValue([])
+
+      const result = await getSlots({ duration: 60 })
+
+      expect(result.length).toBe(14)
     })
   })
 })

@@ -10,15 +10,7 @@ export default tseslint.config(
   // relativo a este archivo, así que sin `**/` sólo ignora el `dist/` de la raíz y se cuela el
   // JS compilado que vive dentro de un worktree.
   {
-    ignores: [
-      '**/dist/**',
-      '**/node_modules/**',
-      'coverage/**',
-      '.worktrees/**',
-      '.claude/worktrees/**',
-      '*.config.js',
-      '*.config.mjs',
-    ],
+    ignores: ['**/dist/**', '**/node_modules/**', 'coverage/**', '.worktrees/**', '.claude/worktrees/**', '*.config.js', '*.config.mjs'],
   },
   {
     extends: [js.configs.recommended, ...tseslint.configs.recommended],

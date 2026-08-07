@@ -154,6 +154,43 @@ export async function resolveCanonicalAppointmentDuration(
   return { productIds, canonicalBaseDurationMin }
 }
 
+/**
+ * La duración base canónica SOLO si cada id es un servicio de cita válido.
+ *
+ * Devuelve `null` —en vez de tirar— cuando la lista está vacía, es demasiado
+ * larga, o incluye algo que no es `APPOINTMENTS_SERVICE` (una mesa, un evento,
+ * un producto de otro venue). Eso deja que la DISPONIBILIDAD la consulte en el
+ * camino legacy sin romper los flujos que no son de citas, que sí pasan por
+ * aquí con productos de otro tipo.
+ *
+ * Misma semántica de relleno que `resolveCanonicalAppointmentDuration`: un
+ * servicio sin duración cuenta como `defaultDurationMin`, NUNCA como cero.
+ */
+export async function resolveAppointmentBaseDurationIfAllAppointments(
+  db: ReservationDbClient,
+  args: CanonicalAppointmentDurationArgs,
+): Promise<number | null> {
+  const productIds = stableDedupe(args.productIds.map(id => id.trim()).filter(Boolean))
+  if (productIds.length === 0 || productIds.length > MAX_BOOKED_PRODUCTS) return null
+
+  const products = await db.product.findMany({
+    where: { id: { in: productIds }, venueId: args.venueId, type: 'APPOINTMENTS_SERVICE' },
+    select: { id: true, duration: true, durationMinutes: true },
+  })
+  if (products.length !== productIds.length) return null
+
+  const byId = new Map(products.map(product => [product.id, product]))
+  let total = 0
+  for (const productId of productIds) {
+    const product = byId.get(productId)
+    if (!product) return null
+    const duration = product.duration ?? product.durationMinutes ?? args.settings.scheduling.defaultDurationMin
+    if (!Number.isInteger(duration) || duration <= 0) return null
+    total += duration
+  }
+  return total > MAX_FINAL_DURATION_MIN ? null : total
+}
+
 export async function resolveAppointmentWindow(
   tx: ReservationDbClient,
   input: ResolveAppointmentWindowInput,

@@ -1,10 +1,16 @@
 # Reportes que no traban el servidor de pagos — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Que ninguna petición de reportes retenga el event loop de `avoqado-server` más de 50 ms, bajando 12 agregaciones de `sale-verification.org` a `GROUP BY` de Postgres, y dejando instalado un guardia que detecte la próxima vez.
+**Goal:** Que ninguna petición de reportes retenga el event loop de `avoqado-server` más de 50 ms, bajando 12 agregaciones de
+`sale-verification.org` a `GROUP BY` de Postgres, y dejando instalado un guardia que detecte la próxima vez.
 
-**Architecture:** Las agregaciones hoy leen 5,446 filas por endpoint y las recorren en JS convirtiendo zona horaria por fila (~10,900 conversiones/petición). Se sustituyen por `$queryRaw` con `to_char(... AT TIME ZONE ...)` — Postgres devuelve ~20 renglones ya agrupados y las conversiones desaparecen. Un módulo puro de llaves de fecha (`venueDateKeys`) queda como la única fuente de verdad en JS y se prueba contra el mismo formato que emite Postgres. Encima, un guardia de lag del event loop (middleware en prod, helper en tests) hace medible el presupuesto.
+**Architecture:** Las agregaciones hoy leen 5,446 filas por endpoint y las recorren en JS convirtiendo zona horaria por fila (~10,900
+conversiones/petición). Se sustituyen por `$queryRaw` con `to_char(... AT TIME ZONE ...)` — Postgres devuelve ~20 renglones ya agrupados y
+las conversiones desaparecen. Un módulo puro de llaves de fecha (`venueDateKeys`) queda como la única fuente de verdad en JS y se prueba
+contra el mismo formato que emite Postgres. Encima, un guardia de lag del event loop (middleware en prod, helper en tests) hace medible el
+presupuesto.
 
 **Tech Stack:** TypeScript, Express, Prisma (`$queryRaw`), PostgreSQL 15, Jest, `perf_hooks`.
 
@@ -12,27 +18,39 @@
 
 ## Global Constraints
 
-- **Completitud sobre latencia.** Ningún reporte se trunca, muestrea ni pagina para hacerlo rápido. Si hay que tardar más, se tarda más. Requisito textual del founder: *"quiero que sí salga el reporte completo pero que no cause lo que está causando; y si eso es que tarde más, no me importa."*
-- **Dinero en PESOS, unidades mayores, 1:1.** Nunca `* 100`. `Payment.amount` es `Decimal(x,2)`; convertir con `Number(...)` al salir de SQL.
-- **Fechas VENUE-LOCAL.** Toda expresión SQL de fecha usa `"createdAt" AT TIME ZONE 'UTC' AT TIME ZONE <tz>`. Nunca `new Date('YYYY-MM-DD')` ni `parseISO` sobre una fecha desnuda.
-- **Zona horaria fija del módulo:** `VENUE_TIMEZONE_DEFAULT = 'America/Mexico_City'` (ya existe en `sale-verification.org.dashboard.service.ts:23`). Toda tz que entre a SQL pasa por `assertValidIANATimezone` de `src/utils/sanitizeTimezone.ts` antes de interpolarse.
+- **Completitud sobre latencia.** Ningún reporte se trunca, muestrea ni pagina para hacerlo rápido. Si hay que tardar más, se tarda más.
+  Requisito textual del founder: _"quiero que sí salga el reporte completo pero que no cause lo que está causando; y si eso es que tarde
+  más, no me importa."_
+- **Dinero en PESOS, unidades mayores, 1:1.** Nunca `* 100`. `Payment.amount` es `Decimal(x,2)`; convertir con `Number(...)` al salir de
+  SQL.
+- **Fechas VENUE-LOCAL.** Toda expresión SQL de fecha usa `"createdAt" AT TIME ZONE 'UTC' AT TIME ZONE <tz>`. Nunca `new Date('YYYY-MM-DD')`
+  ni `parseISO` sobre una fecha desnuda.
+- **Zona horaria fija del módulo:** `VENUE_TIMEZONE_DEFAULT = 'America/Mexico_City'` (ya existe en
+  `sale-verification.org.dashboard.service.ts:23`). Toda tz que entre a SQL pasa por `assertValidIANATimezone` de
+  `src/utils/sanitizeTimezone.ts` antes de interpolarse.
 - **Aislamiento multi-tenant:** toda consulta filtra por `Venue."organizationId" = <orgId>`. Sin excepción.
-- **Ningún campo de respuesta cambia de nombre, tipo ni forma.** Los 11 endpoints del dashboard y los 11 tools del MCP (`src/mcp/tools/saleVerifications.ts`) consumen estas funciones; el contrato es idéntico antes y después.
-- **Los tests de fecha corren bajo `TZ=UTC` Y bajo `TZ=America/Mexico_City`.** Prod no define `TZ` (corre UTC); dev suele correr en México. Un test que sólo pasa en uno de los dos no prueba nada.
+- **Ningún campo de respuesta cambia de nombre, tipo ni forma.** Los 11 endpoints del dashboard y los 11 tools del MCP
+  (`src/mcp/tools/saleVerifications.ts`) consumen estas funciones; el contrato es idéntico antes y después.
+- **Los tests de fecha corren bajo `TZ=UTC` Y bajo `TZ=America/Mexico_City`.** Prod no define `TZ` (corre UTC); dev suele correr en México.
+  Un test que sólo pasa en uno de los dos no prueba nada.
 - **Mensajes de error de Zod en español** (no aplica a este plan, pero la regla del repo sigue vigente).
 - **Prohibido `prisma db push`.** Este plan no toca el esquema; no hay migraciones.
 - **Presupuesto:** 50 ms de retención del event loop en CI. 200 ms para alertar en producción.
-- **Sin commits sin permiso explícito del founder.** Los pasos de `git commit` de este plan se ejecutan sólo cuando el founder lo autorice; si no, se acumulan los cambios y se le pregunta.
+- **Sin commits sin permiso explícito del founder.** Los pasos de `git commit` de este plan se ejecutan sólo cuando el founder lo autorice;
+  si no, se acumulan los cambios y se le pregunta.
 
 ---
 
 ## File Structure
 
 **Nuevos:**
-- `src/utils/venueDateKeys.ts` — llaves de fecha venue-local (mes, día, semana ISO). Puro, sin I/O, formateadores cacheados. Única fuente de verdad en JS.
+
+- `src/utils/venueDateKeys.ts` — llaves de fecha venue-local (mes, día, semana ISO). Puro, sin I/O, formateadores cacheados. Única fuente de
+  verdad en JS.
 - `src/utils/eventLoopBudget.ts` — medición de retención del event loop; usado por tests y por el middleware.
 - `src/middlewares/eventLoopGuard.middleware.ts` — registro de peticiones en vuelo + muestreo de lag; loguea la ruta culpable.
-- `src/services/dashboard/sale-verification.org.sql.ts` — expresiones SQL compartidas (bucket de fecha, `WHERE` base). Aísla el SQL del servicio para poder probarlo solo.
+- `src/services/dashboard/sale-verification.org.sql.ts` — expresiones SQL compartidas (bucket de fecha, `WHERE` base). Aísla el SQL del
+  servicio para poder probarlo solo.
 - `tests/unit/utils/venueDateKeys.test.ts`
 - `tests/unit/utils/eventLoopBudget.test.ts`
 - `tests/unit/middlewares/eventLoopGuard.test.ts`
@@ -41,7 +59,9 @@
 - `tests/api-tests/sale-verification.org.week-parity.test.ts` — prueba contra Postgres real que JS y SQL coinciden.
 
 **Modificados:**
-- `src/services/dashboard/sale-verification.org.dashboard.service.ts` — las 12 agregaciones; se borran `toWeekLabel`, `toIsoWeekKey`, `toMonthKey`, `toDayKey`.
+
+- `src/services/dashboard/sale-verification.org.dashboard.service.ts` — las 12 agregaciones; se borran `toWeekLabel`, `toIsoWeekKey`,
+  `toMonthKey`, `toDayKey`.
 - `src/app.ts` — montar el middleware del guardia.
 - `tests/__helpers__/setup.ts` — registrar `$queryRaw` en `prismaMock`.
 - `tests/unit/services/dashboard/sale-verification.org.aggregations.test.ts` — adaptar mocks de `findMany` a `$queryRaw`.
@@ -50,15 +70,19 @@
 
 ### Task 1: Llaves de fecha venue-local (arregla la semana ISO y quita el costo por fila)
 
-Este es el arreglo del bug latente del §3.1 del spec y la base de todo lo demás. Hoy `toWeekLabel` depende del `TZ` del proceso: en producción (UTC) 2026 sale bien pero 2027 sale mal el 95% del año; en una Mac en México ya sale mal el 3.7% de las horas de hoy.
+Este es el arreglo del bug latente del §3.1 del spec y la base de todo lo demás. Hoy `toWeekLabel` depende del `TZ` del proceso: en
+producción (UTC) 2026 sale bien pero 2027 sale mal el 95% del año; en una Mac en México ya sale mal el 3.7% de las horas de hoy.
 
 **Files:**
+
 - Create: `src/utils/venueDateKeys.ts`
 - Test: `tests/unit/utils/venueDateKeys.test.ts`
 
 **Interfaces:**
+
 - Consumes: nada (módulo hoja).
 - Produces:
+
   - `venueCivilDate(d: Date, tz: string): { year: number; month: number; day: number }`
   - `venueMonthKey(d: Date, tz: string): string` → `"2026-08"`
   - `venueDayKey(d: Date, tz: string): string` → `"2026-08-04"`
@@ -81,14 +105,7 @@ Crear `tests/unit/utils/venueDateKeys.test.ts`:
  * en 312 horas. Estos tests corren la misma hora bajo las DOS zonas de host y
  * exigen resultado idéntico.
  */
-import {
-  venueCivilDate,
-  venueMonthKey,
-  venueDayKey,
-  venueIsoWeek,
-  venueWeekLabel,
-  venueIsoWeekKey,
-} from '@/utils/venueDateKeys'
+import { venueCivilDate, venueMonthKey, venueDayKey, venueIsoWeek, venueWeekLabel, venueIsoWeekKey } from '@/utils/venueDateKeys'
 
 const TZ = 'America/Mexico_City'
 
@@ -318,7 +335,8 @@ TZ=UTC npx jest tests/unit/utils/venueDateKeys.test.ts
 TZ=America/Mexico_City npx jest tests/unit/utils/venueDateKeys.test.ts
 ```
 
-Esperado: PASS en ambas, con los mismos resultados. Si una pasa y la otra no, el módulo sigue dependiendo del host y la tarea NO está terminada.
+Esperado: PASS en ambas, con los mismos resultados. Si una pasa y la otra no, el módulo sigue dependiendo del host y la tarea NO está
+terminada.
 
 - [ ] **Step 5: Formatear y commitear**
 
@@ -342,15 +360,19 @@ Ahora la aritmetica ocurre sobre la fecha civil y el formateador se cachea."
 
 ### Task 2: Medir la retención del event loop
 
-Sin esto no hay forma de probar que el arreglo sirvió ni de detectar la próxima regresión. Se construye antes que las migraciones, a propósito: da la medición de "antes".
+Sin esto no hay forma de probar que el arreglo sirvió ni de detectar la próxima regresión. Se construye antes que las migraciones, a
+propósito: da la medición de "antes".
 
 **Files:**
+
 - Create: `src/utils/eventLoopBudget.ts`
 - Test: `tests/unit/utils/eventLoopBudget.test.ts`
 
 **Interfaces:**
+
 - Consumes: nada.
 - Produces:
+
   - `measureEventLoopBlock<T>(fn: () => Promise<T>, sampleIntervalMs?: number): Promise<{ result: T; maxBlockMs: number }>`
   - `EVENT_LOOP_BUDGET_MS = 50`
 
@@ -503,16 +525,20 @@ git commit -m "feat(observabilidad): medir retencion del event loop con presupue
 
 ### Task 3: Guardia en producción — quién retuvo el hilo
 
-`measureEventLoopBlock` sirve en tests, pero en producción hay que saber **qué ruta** fue. Este middleware mantiene el registro de peticiones en vuelo y, cuando el lag se dispara, las loguea.
+`measureEventLoopBlock` sirve en tests, pero en producción hay que saber **qué ruta** fue. Este middleware mantiene el registro de
+peticiones en vuelo y, cuando el lag se dispara, las loguea.
 
 **Files:**
+
 - Create: `src/middlewares/eventLoopGuard.middleware.ts`
 - Modify: `src/app.ts`
 - Test: `tests/unit/middlewares/eventLoopGuard.test.ts`
 
 **Interfaces:**
+
 - Consumes: `EVENT_LOOP_BUDGET_MS` de `@/utils/eventLoopBudget`.
 - Produces:
+
   - `eventLoopGuardMiddleware(req, res, next): void`
   - `startEventLoopMonitor(options?: { thresholdMs?: number; sampleIntervalMs?: number }): () => void` — devuelve la función para detenerlo.
   - `getInFlightRequests(): Array<{ method: string; url: string; ageMs: number }>`
@@ -704,9 +730,7 @@ export function getInFlightRequests(): Array<{ method: string; url: string; ageM
  * secuestrado. Cuando pasa del umbral, se loguean las peticiones en vuelo: la más vieja
  * es casi siempre la culpable.
  */
-export function startEventLoopMonitor(
-  options: { thresholdMs?: number; sampleIntervalMs?: number } = {},
-): () => void {
+export function startEventLoopMonitor(options: { thresholdMs?: number; sampleIntervalMs?: number } = {}): () => void {
   const thresholdMs = options.thresholdMs ?? PROD_ALERT_THRESHOLD_MS
   const sampleIntervalMs = options.sampleIntervalMs ?? DEFAULT_SAMPLE_INTERVAL_MS
 
@@ -750,7 +774,8 @@ Esperado: PASS (5 tests).
 
 - [ ] **Step 5: Montar en la app**
 
-En `src/app.ts`, montar el middleware **después** de los webhooks de Stripe (que necesitan el body crudo y van antes de `express.json()`) y **antes** de las rutas de negocio. Buscar dónde se montan los demás middlewares globales y agregar:
+En `src/app.ts`, montar el middleware **después** de los webhooks de Stripe (que necesitan el body crudo y van antes de `express.json()`) y
+**antes** de las rutas de negocio. Buscar dónde se montan los demás middlewares globales y agregar:
 
 ```typescript
 import { eventLoopGuardMiddleware, startEventLoopMonitor } from './middlewares/eventLoopGuard.middleware'
@@ -787,14 +812,17 @@ git commit -m "feat(observabilidad): guardia que nombra la ruta que retiene el e
 
 ### Task 4: Cimiento SQL compartido
 
-Las 12 agregaciones comparten el mismo `WHERE` y las mismas expresiones de fecha. Se aíslan en su propio módulo para poder probar el SQL sin base de datos, y para que un cambio de zona o de filtro ocurra en un solo lugar.
+Las 12 agregaciones comparten el mismo `WHERE` y las mismas expresiones de fecha. Se aíslan en su propio módulo para poder probar el SQL sin
+base de datos, y para que un cambio de zona o de filtro ocurra en un solo lugar.
 
 **Files:**
+
 - Create: `src/services/dashboard/sale-verification.org.sql.ts`
 - Test: `tests/unit/services/dashboard/sale-verification.org.sql.test.ts`
 - Modify: `tests/__helpers__/setup.ts` (registrar `$queryRaw` en `prismaMock`)
 
 **Interfaces:**
+
 - Consumes: `assertValidIANATimezone` de `@/utils/sanitizeTimezone`.
 - Produces:
   - `venueLocalExpr(column: string, timezone: string): string` — `("createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Mexico_City')`
@@ -802,10 +830,13 @@ Las 12 agregaciones comparten el mismo `WHERE` y las mismas expresiones de fecha
   - `dayBucketSql(column: string, timezone: string): string`
   - `isoWeekKeySql(column: string, timezone: string): string`
   - `weekLabelSql(column: string, timezone: string): string`
-  - `buildRangeConditions(range: AggregationRange, column: string): Prisma.Sql` — **dos** argumentos; usa `Prisma.sql` parametrizado (nunca interpolación de fechas)
+  - `buildRangeConditions(range: AggregationRange, column: string): Prisma.Sql` — **dos** argumentos; usa `Prisma.sql` parametrizado (nunca
+    interpolación de fechas)
   - `AggregationRange` — el tipo se **mueve** aquí desde el servicio
 
-**⚠️ `AggregationRange` ya existe en `sale-verification.org.dashboard.service.ts`.** Para no tener dos definiciones: dejar la fuente en el módulo SQL y en el servicio reemplazar la declaración por un re-export, de modo que los consumidores externos (controller, MCP) no se enteren:
+**⚠️ `AggregationRange` ya existe en `sale-verification.org.dashboard.service.ts`.** Para no tener dos definiciones: dejar la fuente en el
+módulo SQL y en el servicio reemplazar la declaración por un re-export, de modo que los consumidores externos (controller, MCP) no se
+enteren:
 
 ```typescript
 // en sale-verification.org.dashboard.service.ts, donde estaba la interface:
@@ -821,7 +852,8 @@ grep -rn "AggregationRange" src/ --include="*.ts"
 
 - [ ] **Step 1: Registrar `$queryRaw` en el mock de Prisma**
 
-`tests/__helpers__/setup.ts` lista los modelos a mano; un método no registrado revienta al usarse (ver memoria `prismamock-manual-registry`). Agregar `$queryRaw` al objeto del mock:
+`tests/__helpers__/setup.ts` lista los modelos a mano; un método no registrado revienta al usarse (ver memoria
+`prismamock-manual-registry`). Agregar `$queryRaw` al objeto del mock:
 
 ```typescript
 // en el objeto que exporta prismaMock, junto a los modelos:
@@ -841,21 +873,13 @@ Crear `tests/unit/services/dashboard/sale-verification.org.sql.test.ts`:
  * que produzcan el bucket correcto, y que una zona horaria inventada NO pueda
  * colarse como inyección.
  */
-import {
-  venueLocalExpr,
-  monthBucketSql,
-  dayBucketSql,
-  isoWeekKeySql,
-  weekLabelSql,
-} from '@/services/dashboard/sale-verification.org.sql'
+import { venueLocalExpr, monthBucketSql, dayBucketSql, isoWeekKeySql, weekLabelSql } from '@/services/dashboard/sale-verification.org.sql'
 
 const TZ = 'America/Mexico_City'
 
 describe('expresiones de fecha', () => {
   it('convierte de UTC almacenado a hora local del venue', () => {
-    expect(venueLocalExpr('sv."createdAt"', TZ)).toBe(
-      `(sv."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Mexico_City')`,
-    )
+    expect(venueLocalExpr('sv."createdAt"', TZ)).toBe(`(sv."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'America/Mexico_City')`)
   })
 
   it('mes en formato YYYY-MM, igual que venueMonthKey', () => {
@@ -884,12 +908,7 @@ describe('expresiones de fecha', () => {
 })
 
 describe('defensa contra inyección por zona horaria', () => {
-  it.each([
-    `America/Mexico_City'; DROP TABLE "Payment"; --`,
-    `'; SELECT 1; --`,
-    'Zona/Inventada',
-    '',
-  ])('rechaza %p', bad => {
+  it.each([`America/Mexico_City'; DROP TABLE "Payment"; --`, `'; SELECT 1; --`, 'Zona/Inventada', ''])('rechaza %p', bad => {
     expect(() => monthBucketSql('sv."createdAt"', bad)).toThrow()
   })
 
@@ -981,7 +1000,8 @@ export function buildRangeConditions(range: AggregationRange, column: string): P
 grep -n "export function assertValidIANATimezone\|export const assertValidIANATimezone" src/utils/sanitizeTimezone.ts
 ```
 
-Si el nombre real difiere (p. ej. `sanitizeTimezone` o `assertValidTimezone`), usar ese e importar el correcto. Si no existe ninguna variante que **lance** ante una zona inválida, escribirla en `src/utils/sanitizeTimezone.ts` reusando `isValidIANATimezone`:
+Si el nombre real difiere (p. ej. `sanitizeTimezone` o `assertValidTimezone`), usar ese e importar el correcto. Si no existe ninguna
+variante que **lance** ante una zona inválida, escribirla en `src/utils/sanitizeTimezone.ts` reusando `isValidIANATimezone`:
 
 ```typescript
 export function assertValidIANATimezone(timezone: string): void {
@@ -1014,12 +1034,15 @@ git commit -m "feat(reportes): expresiones SQL compartidas para bucketing venue-
 
 ### Task 5: Paridad JS ↔ Postgres contra base real
 
-Antes de migrar una sola agregación hay que **probar** que `venueIsoWeekKey` y `to_char(..., 'IYYY-"W"IW')` dan lo mismo. Si difieren, todas las migraciones quedan mal y no nos enteraríamos hasta enero de 2027.
+Antes de migrar una sola agregación hay que **probar** que `venueIsoWeekKey` y `to_char(..., 'IYYY-"W"IW')` dan lo mismo. Si difieren, todas
+las migraciones quedan mal y no nos enteraríamos hasta enero de 2027.
 
 **Files:**
+
 - Create: `tests/api-tests/sale-verification.org.week-parity.test.ts`
 
 **Interfaces:**
+
 - Consumes: `venueMonthKey`, `venueDayKey`, `venueIsoWeekKey` (Task 1); `monthBucketSql`, `dayBucketSql`, `isoWeekKeySql` (Task 4).
 - Produces: nada — es una red de seguridad.
 
@@ -1039,12 +1062,7 @@ Crear `tests/api-tests/sale-verification.org.week-parity.test.ts`:
  */
 import prisma from '@/utils/prismaClient'
 import { venueMonthKey, venueDayKey, venueIsoWeekKey, venueWeekLabel } from '@/utils/venueDateKeys'
-import {
-  monthBucketSql,
-  dayBucketSql,
-  isoWeekKeySql,
-  weekLabelSql,
-} from '@/services/dashboard/sale-verification.org.sql'
+import { monthBucketSql, dayBucketSql, isoWeekKeySql, weekLabelSql } from '@/services/dashboard/sale-verification.org.sql'
 
 const TZ = 'America/Mexico_City'
 
@@ -1072,9 +1090,7 @@ describe('paridad de llaves de fecha JS ↔ Postgres', () => {
   it.each(INSTANTES)('%s da la misma llave en JS y en Postgres', async iso => {
     const d = new Date(iso)
 
-    const rows = await prisma.$queryRawUnsafe<
-      Array<{ mes: string; dia: string; semana: string; etiqueta: string }>
-    >(
+    const rows = await prisma.$queryRawUnsafe<Array<{ mes: string; dia: string; semana: string; etiqueta: string }>>(
       `SELECT ${monthBucketSql('$1::timestamp', TZ)} AS mes,
               ${dayBucketSql('$1::timestamp', TZ)} AS dia,
               ${isoWeekKeySql('$1::timestamp', TZ)} AS semana,
@@ -1102,7 +1118,9 @@ TZ=America/Mexico_City npx jest tests/api-tests/sale-verification.org.week-parit
 
 Esperado: PASS en ambas.
 
-**Si falla:** parar y no seguir con las migraciones. Una divergencia aquí significa que `venueDateKeys` y las expresiones SQL no están de acuerdo, y toda la migración quedaría mal. Diagnosticar cuál de los dos lados está mal antes de continuar. Sospechosos por orden: (a) `IYYY` escrito como `YYYY` en el SQL — es el error clásico y sólo se nota en los bordes de año; (b) el doble `AT TIME ZONE` invertido.
+**Si falla:** parar y no seguir con las migraciones. Una divergencia aquí significa que `venueDateKeys` y las expresiones SQL no están de
+acuerdo, y toda la migración quedaría mal. Diagnosticar cuál de los dos lados está mal antes de continuar. Sospechosos por orden: (a) `IYYY`
+escrito como `YYYY` en el SQL — es el error clásico y sólo se nota en los bordes de año; (b) el doble `AT TIME ZONE` invertido.
 
 - [ ] **Step 3: Commitear**
 
@@ -1115,13 +1133,17 @@ git commit -m "test(reportes): paridad de llaves de fecha entre JS y Postgres"
 
 ### Task 6: Migrar las agregaciones de sólo fecha
 
-`getSalesByMonth`, `getSalesByWeek` y `getSalesBySaleTypeWeekly` comparten forma: agrupan por bucket de fecha (y a lo mucho un booleano), sin joins más allá de `Venue` para el filtro de organización. Son las tres más simples y establecen el patrón que siguen las demás.
+`getSalesByMonth`, `getSalesByWeek` y `getSalesBySaleTypeWeekly` comparten forma: agrupan por bucket de fecha (y a lo mucho un booleano),
+sin joins más allá de `Venue` para el filtro de organización. Son las tres más simples y establecen el patrón que siguen las demás.
 
 **Files:**
-- Modify: `src/services/dashboard/sale-verification.org.dashboard.service.ts:446-465` (`getSalesByMonth`), `:511-529` (`getSalesByWeek`), `:536-558` (`getSalesBySaleTypeWeekly`)
+
+- Modify: `src/services/dashboard/sale-verification.org.dashboard.service.ts:446-465` (`getSalesByMonth`), `:511-529` (`getSalesByWeek`),
+  `:536-558` (`getSalesBySaleTypeWeekly`)
 - Test: `tests/unit/services/dashboard/sale-verification.org.aggregations.test.ts`
 
 **Interfaces:**
+
 - Consumes: `monthBucketSql`, `weekLabelSql`, `isoWeekKeySql`, `buildRangeConditions` (Task 4).
 - Produces: las mismas tres funciones con la MISMA firma y la MISMA forma de respuesta. Ningún consumidor cambia.
 
@@ -1171,9 +1193,7 @@ describe('agregaciones de sólo fecha — ahora agrupan en SQL', () => {
   })
 
   it('getSalesBySaleTypeWeekly siempre devuelve las dos filas, en orden fijo, aunque una venga vacía', async () => {
-    ;(prisma.$queryRaw as jest.Mock).mockResolvedValueOnce([
-      { bucket: '2026-W32', is_portabilidad: false, count: BigInt(4) },
-    ])
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValueOnce([{ bucket: '2026-W32', is_portabilidad: false, count: BigInt(4) }])
 
     const result = await getSalesBySaleTypeWeekly('org-1', {})
 
@@ -1338,7 +1358,8 @@ Si la columna se llama distinto, corregir las tres consultas antes de seguir.
 npx jest tests/unit/services/dashboard/sale-verification.org.aggregations.test.ts
 ```
 
-Esperado: PASS, incluidos los tests viejos del archivo (algunos mockeaban `findMany` para estas tres funciones y hay que actualizarlos a `$queryRaw`).
+Esperado: PASS, incluidos los tests viejos del archivo (algunos mockeaban `findMany` para estas tres funciones y hay que actualizarlos a
+`$queryRaw`).
 
 - [ ] **Step 6: Comprobar contra datos reales que los números no cambiaron**
 
@@ -1428,14 +1449,19 @@ git commit -m "perf(reportes): agrupar por mes y semana en Postgres, no fila por
 
 ### Task 7: Migrar las agregaciones con join de un salto
 
-`getOrgSalesSummary`, `getSalesByCity`, `getSalesByStore`, `getSalesByPromoter` y `getSalesByPromoterDaily` agrupan por un atributo que está a un join de distancia (`Venue.city`, `Venue.name`, `Staff`). Mismo patrón que la Task 6 más una columna de agrupación.
+`getOrgSalesSummary`, `getSalesByCity`, `getSalesByStore`, `getSalesByPromoter` y `getSalesByPromoterDaily` agrupan por un atributo que está
+a un join de distancia (`Venue.city`, `Venue.name`, `Staff`). Mismo patrón que la Task 6 más una columna de agrupación.
 
 **Files:**
-- Modify: `src/services/dashboard/sale-verification.org.dashboard.service.ts` — `getOrgSalesSummary:379-440`, `getSalesByCity:606-628`, `getSalesByStore:828-853`, `getSalesByPromoter:860-886`, `getSalesByPromoterDaily:931-1007`
+
+- Modify: `src/services/dashboard/sale-verification.org.dashboard.service.ts` — `getOrgSalesSummary:379-440`, `getSalesByCity:606-628`,
+  `getSalesByStore:828-853`, `getSalesByPromoter:860-886`, `getSalesByPromoterDaily:931-1007`
 - Test: `tests/unit/services/dashboard/sale-verification.org.aggregations.test.ts`
 
 **Interfaces:**
-- Consumes: `monthBucketSql`, `weekLabelSql`, `dayBucketSql`, `buildRangeConditions` (Task 4); `venueDayKey`, `venueMonthKey` (Task 1, para las columnas de días del mes actual).
+
+- Consumes: `monthBucketSql`, `weekLabelSql`, `dayBucketSql`, `buildRangeConditions` (Task 4); `venueDayKey`, `venueMonthKey` (Task 1, para
+  las columnas de días del mes actual).
 - Produces: las mismas cinco funciones, firmas y formas de respuesta idénticas.
 
 - [ ] **Step 1: Escribir los tests que fallan**
@@ -1667,9 +1693,7 @@ export async function getSalesByCity(
 export async function getSalesByStore(
   orgId: string,
   range: AggregationRange,
-): Promise<
-  Array<{ venueId: string; venueName: string; byWeek: Record<string, number>; byMonth: Record<string, number>; total: number }>
-> {
+): Promise<Array<{ venueId: string; venueName: string; byWeek: Record<string, number>; byMonth: Record<string, number>; total: number }>> {
   const week = weekLabelSql('sv."createdAt"', VENUE_TIMEZONE_DEFAULT)
   const month = monthBucketSql('sv."createdAt"', VENUE_TIMEZONE_DEFAULT)
 
@@ -1758,7 +1782,8 @@ export async function getSalesByPromoter(
 
 - [ ] **Step 7: Reemplazar `getSalesByPromoterDaily`**
 
-Esta además arregla el `new Date(...toLocaleString(...))` de la línea 934 y el `fromZonedTime(new Date(...))` de la 939 — ambos dependen del `TZ` del host.
+Esta además arregla el `new Date(...toLocaleString(...))` de la línea 934 y el `fromZonedTime(new Date(...))` de la 939 — ambos dependen del
+`TZ` del host.
 
 ```typescript
 export async function getSalesByPromoterDaily(orgId: string): Promise<PromoterDailyResult> {
@@ -1858,7 +1883,8 @@ Esperado: PASS.
 
 - [ ] **Step 9: Comprobar contra datos reales**
 
-Repetir el script temporal de la Task 6 Step 6 para estas cinco funciones. **Los KPIs de `summary` tienen que cuadrar al peso** contra lo que muestra hoy el dashboard. Borrar el script al terminar.
+Repetir el script temporal de la Task 6 Step 6 para estas cinco funciones. **Los KPIs de `summary` tienen que cuadrar al peso** contra lo
+que muestra hoy el dashboard. Borrar el script al terminar.
 
 - [ ] **Step 10: Formatear y commitear**
 
@@ -1875,14 +1901,20 @@ git commit -m "perf(reportes): agrupar summary, ciudad, tienda y promotor en Pos
 
 ### Task 8: Migrar supervisor y promotor semanal
 
-`getSalesBySupervisor` y `getSalesByPromoterWeekly` son mixtas: el agrupado baja a SQL, pero la resolución tienda→supervisor sigue en JS porque es una regla de negocio (MANAGER primero, ADMIN como respaldo, desempate determinista por `staffId`) sobre ~39 sucursales — un costo despreciable.
+`getSalesBySupervisor` y `getSalesByPromoterWeekly` son mixtas: el agrupado baja a SQL, pero la resolución tienda→supervisor sigue en JS
+porque es una regla de negocio (MANAGER primero, ADMIN como respaldo, desempate determinista por `staffId`) sobre ~39 sucursales — un costo
+despreciable.
 
 **Files:**
-- Modify: `src/services/dashboard/sale-verification.org.dashboard.service.ts:721-767` (`getSalesBySupervisor`), `:773-825` (`getSalesByPromoterWeekly`)
+
+- Modify: `src/services/dashboard/sale-verification.org.dashboard.service.ts:721-767` (`getSalesBySupervisor`), `:773-825`
+  (`getSalesByPromoterWeekly`)
 - Test: `tests/unit/services/dashboard/sale-verification.org.aggregations.test.ts`
 
 **Interfaces:**
-- Consumes: `weekLabelSql`, `monthBucketSql`, `buildRangeConditions` (Task 4); `resolveSupervisorByVenue` (ya existe, línea 642, sin cambios).
+
+- Consumes: `weekLabelSql`, `monthBucketSql`, `buildRangeConditions` (Task 4); `resolveSupervisorByVenue` (ya existe, línea 642, sin
+  cambios).
 - Produces: las dos funciones con firma y forma de respuesta idénticas.
 
 - [ ] **Step 1: Escribir los tests que fallan**
@@ -1917,9 +1949,7 @@ describe('supervisor y promotor semanal — agrupado en SQL, atribución en JS',
   })
 
   it('getSalesBySupervisor agrupa bajo "Sin supervisor" las sucursales sin responsable', async () => {
-    ;(prisma.$queryRaw as jest.Mock).mockResolvedValueOnce([
-      { venue_id: 'v9', week: 'W32', month: '2026-08', count: BigInt(2) },
-    ])
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValueOnce([{ venue_id: 'v9', week: 'W32', month: '2026-08', count: BigInt(2) }])
     ;(prisma.staffVenue.findMany as jest.Mock).mockResolvedValueOnce([])
 
     const result = await getSalesBySupervisor('org-1', {})
@@ -2143,14 +2173,20 @@ git commit -m "perf(reportes): agrupar supervisor y promotor-semanal en Postgres
 
 ### Task 9: Migrar tipo de SIM y quitarle el azar
 
-`getSalesBySimType` y `getSalesBySimTypeWeekly` resuelven la categoría con `payment.order.items.find(oi => oi.serializedItem)` — "el primer item con serializado". La relación no tiene `orderBy`, así que ese "primero" lo decide Postgres y puede cambiar entre corridas (§3.2 del spec). En SQL se elige explícitamente con `DISTINCT ON` ordenado.
+`getSalesBySimType` y `getSalesBySimTypeWeekly` resuelven la categoría con `payment.order.items.find(oi => oi.serializedItem)` — "el primer
+item con serializado". La relación no tiene `orderBy`, así que ese "primero" lo decide Postgres y puede cambiar entre corridas (§3.2 del
+spec). En SQL se elige explícitamente con `DISTINCT ON` ordenado.
 
 **Files:**
-- Modify: `src/services/dashboard/sale-verification.org.dashboard.service.ts:477-508` (`getSalesBySimType`), `:566-603` (`getSalesBySimTypeWeekly`)
+
+- Modify: `src/services/dashboard/sale-verification.org.dashboard.service.ts:477-508` (`getSalesBySimType`), `:566-603`
+  (`getSalesBySimTypeWeekly`)
 - Test: `tests/unit/services/dashboard/sale-verification.org.aggregations.test.ts`
 
 **Interfaces:**
-- Consumes: `monthBucketSql`, `isoWeekKeySql`, `buildRangeConditions` (Task 4); `toSimBucket`, `SIM_FIXED_BUCKETS`, `SIM_OTHERS` (ya existen).
+
+- Consumes: `monthBucketSql`, `isoWeekKeySql`, `buildRangeConditions` (Task 4); `toSimBucket`, `SIM_FIXED_BUCKETS`, `SIM_OTHERS` (ya
+  existen).
 - Produces: las dos funciones con firma y forma idénticas.
 
 - [ ] **Step 1: Escribir los tests que fallan**
@@ -2186,9 +2222,7 @@ describe('tipo de SIM — categoría elegida de forma determinista', () => {
   })
 
   it('getSalesBySimType trata la categoría nula igual que antes', async () => {
-    ;(prisma.$queryRaw as jest.Mock).mockResolvedValueOnce([
-      { bucket: '2026-08', category_name: null, count: BigInt(1) },
-    ])
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValueOnce([{ bucket: '2026-08', category_name: null, count: BigInt(1) }])
 
     const result = await getSalesBySimType('org-1', {})
 
@@ -2205,9 +2239,7 @@ describe('tipo de SIM — categoría elegida de forma determinista', () => {
   })
 
   it('getSalesBySimTypeWeekly sólo agrega la fila de otros cuando tiene ventas', async () => {
-    ;(prisma.$queryRaw as jest.Mock).mockResolvedValueOnce([
-      { bucket: '2026-W32', category_name: 'Categoría Rarísima', count: BigInt(2) },
-    ])
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValueOnce([{ bucket: '2026-W32', category_name: 'Categoría Rarísima', count: BigInt(2) }])
 
     const result = await getSalesBySimTypeWeekly('org-1', {})
 
@@ -2284,7 +2316,9 @@ export async function getSalesBySimType(
 }
 ```
 
-**Nota sobre `ORDER BY sv."id", (si."id" IS NULL), oi."id"`:** el segundo término empuja al final las filas sin serializado, así que `DISTINCT ON` se queda con un item que **sí** trae serializado si existe alguno — igual que hacía `.find(oi => oi.serializedItem)`. El tercer término (`oi."id"`) es el desempate estable que faltaba.
+**Nota sobre `ORDER BY sv."id", (si."id" IS NULL), oi."id"`:** el segundo término empuja al final las filas sin serializado, así que
+`DISTINCT ON` se queda con un item que **sí** trae serializado si existe alguno — igual que hacía `.find(oi => oi.serializedItem)`. El
+tercer término (`oi."id"`) es el desempate estable que faltaba.
 
 - [ ] **Step 4: Verificar los nombres reales de columnas del join**
 
@@ -2362,7 +2396,8 @@ export async function getSalesBySimTypeWeekly(
 }
 ```
 
-Por consistencia, cambiar también el bucket de `getSalesBySimType` a `monthBucketSql('cv."created_at"', VENUE_TIMEZONE_DEFAULT)` y quitar el `.replace(...)` del Step 3 — el `replace` funciona pero es frágil.
+Por consistencia, cambiar también el bucket de `getSalesBySimType` a `monthBucketSql('cv."created_at"', VENUE_TIMEZONE_DEFAULT)` y quitar el
+`.replace(...)` del Step 3 — el `replace` funciona pero es frágil.
 
 - [ ] **Step 6: Correr los tests**
 
@@ -2374,7 +2409,9 @@ Esperado: PASS.
 
 - [ ] **Step 7: Verificar que el total de SIM cuadra con el total semanal**
 
-Regla de negocio explícita de Isaac (2026-06-29): *"el total debe cuadrar en todas las tablas y gráficas"*. Comprobar contra datos reales que `sum(getSalesBySimTypeWeekly[].total) === sum(getSalesByWeek[].count)` para el mismo rango. Si no cuadra, el `DISTINCT ON` está perdiendo o duplicando filas.
+Regla de negocio explícita de Isaac (2026-06-29): _"el total debe cuadrar en todas las tablas y gráficas"_. Comprobar contra datos reales
+que `sum(getSalesBySimTypeWeekly[].total) === sum(getSalesByWeek[].count)` para el mismo rango. Si no cuadra, el `DISTINCT ON` está
+perdiendo o duplicando filas.
 
 - [ ] **Step 8: Formatear y commitear**
 
@@ -2395,13 +2432,17 @@ corridas. DISTINCT ON con ORDER BY explicito lo fija."
 
 ### Task 10: Borrar los helpers viejos y poner el presupuesto a prueba
 
-Cierre: se eliminan las cuatro funciones que causaron el incidente y se agrega el test que hace fallar CI si alguna agregación vuelve a retener el hilo.
+Cierre: se eliminan las cuatro funciones que causaron el incidente y se agrega el test que hace fallar CI si alguna agregación vuelve a
+retener el hilo.
 
 **Files:**
-- Modify: `src/services/dashboard/sale-verification.org.dashboard.service.ts` — borrar `toWeekLabel:351`, `toIsoWeekKey:363`, `toMonthKey:373`, `toDayKey:889`
+
+- Modify: `src/services/dashboard/sale-verification.org.dashboard.service.ts` — borrar `toWeekLabel:351`, `toIsoWeekKey:363`,
+  `toMonthKey:373`, `toDayKey:889`
 - Create: `tests/unit/services/dashboard/sale-verification.org.eventloop-budget.test.ts`
 
 **Interfaces:**
+
 - Consumes: `measureEventLoopBlock`, `EVENT_LOOP_BUDGET_MS` (Task 2); las 12 agregaciones migradas.
 - Produces: nada.
 
@@ -2415,7 +2456,8 @@ Esperado: **sin resultados**. Si aparece alguno, esa agregación no se migró �
 
 - [ ] **Step 2: Borrar las cuatro funciones**
 
-Eliminar de `src/services/dashboard/sale-verification.org.dashboard.service.ts` los bloques de `toWeekLabel`, `toIsoWeekKey`, `toMonthKey` y `toDayKey` completos, incluyendo sus comentarios.
+Eliminar de `src/services/dashboard/sale-verification.org.dashboard.service.ts` los bloques de `toWeekLabel`, `toIsoWeekKey`, `toMonthKey` y
+`toDayKey` completos, incluyendo sus comentarios.
 
 - [ ] **Step 3: Escribir el test de presupuesto**
 
@@ -2526,7 +2568,9 @@ Esperado: PASS (13 tests).
 
 - [ ] **Step 4b: Capa 2 del spec — sólo si el presupuesto falla**
 
-El spec (§5, Capa 2) contempla partir en tandas con respiro lo que quede en JS. **Después de las Tasks 6-9 no debería quedar nada que lo necesite**: el post-procesamiento es armar mapas sobre ~20 renglones, no sobre 5,446 filas. Por eso NO se construye por adelantado — sería complejidad sin problema que resolver.
+El spec (§5, Capa 2) contempla partir en tandas con respiro lo que quede en JS. **Después de las Tasks 6-9 no debería quedar nada que lo
+necesite**: el post-procesamiento es armar mapas sobre ~20 renglones, no sobre 5,446 filas. Por eso NO se construye por adelantado — sería
+complejidad sin problema que resolver.
 
 **Si el test del Step 4 falla en alguna agregación**, entonces sí hace falta y se implementa así:
 
@@ -2539,11 +2583,7 @@ El spec (§5, Capa 2) contempla partir en tandas con respiro lo que quede en JS.
  * pero deja de hacerse de corrido, así que las demás peticiones se atienden en
  * los huecos. Es exactamente el trato del spec: "que tarde más, pero que no trabe".
  */
-export async function chunkedForEach<T>(
-  items: readonly T[],
-  chunkSize: number,
-  fn: (item: T, index: number) => void,
-): Promise<void> {
+export async function chunkedForEach<T>(items: readonly T[], chunkSize: number, fn: (item: T, index: number) => void): Promise<void> {
   for (let i = 0; i < items.length; i++) {
     fn(items[i], i)
     if ((i + 1) % chunkSize === 0) {
@@ -2565,7 +2605,8 @@ npm run build
 npm test
 ```
 
-Esperado: 0 errores de TypeScript, suite completa verde. Comparar el conteo de suites/tests contra la línea base de esta mañana (5,446+ tests) — no debe **bajar**.
+Esperado: 0 errores de TypeScript, suite completa verde. Comparar el conteo de suites/tests contra la línea base de esta mañana (5,446+
+tests) — no debe **bajar**.
 
 - [ ] **Step 6: Correr los tests de fecha bajo la zona de producción**
 
@@ -2601,17 +2642,23 @@ el event loop ~9s por endpoint y dejaba /dashboard/auth/status en 33.7s."
 
 ## Verificación final (después de la última tarea)
 
-- [ ] **Contrato del MCP intacto.** Los 11 tools de `src/mcp/tools/saleVerifications.ts` consumen estas funciones directo, sin pasar por el controller (§2.4 del spec). Verificar que devuelven exactamente lo mismo que antes:
+- [ ] **Contrato del MCP intacto.** Los 11 tools de `src/mcp/tools/saleVerifications.ts` consumen estas funciones directo, sin pasar por el
+      controller (§2.4 del spec). Verificar que devuelven exactamente lo mismo que antes:
 
 ```bash
 npx jest tests/unit/mcp
 ```
 
-- [ ] **Medir el antes/después en producción.** Con el guardia de la Task 3 desplegado, abrir la pantalla de Ventas de PlayTelecom y consultar Better Stack (source `render log stream`, id 1720702) para confirmar que `durationMs` de los endpoints `/sale-verifications/*` bajó de 4,000-9,000 ms a menos de 1,000 ms, y que `/dashboard/auth/status` ya no se dispara durante esas ráfagas.
+- [ ] **Medir el antes/después en producción.** Con el guardia de la Task 3 desplegado, abrir la pantalla de Ventas de PlayTelecom y
+      consultar Better Stack (source `render log stream`, id 1720702) para confirmar que `durationMs` de los endpoints
+      `/sale-verifications/*` bajó de 4,000-9,000 ms a menos de 1,000 ms, y que `/dashboard/auth/status` ya no se dispara durante esas
+      ráfagas.
 
-- [ ] **Decidir D7 con el founder** (§6.2 del spec): reactivar los 4 monitores de uptime pausados desde el 26-jun-2026, o dejar la detección sólo en el log stream. Sin esta decisión, el guardia loguea en un cuarto vacío.
+- [ ] **Decidir D7 con el founder** (§6.2 del spec): reactivar los 4 monitores de uptime pausados desde el 26-jun-2026, o dejar la detección
+      sólo en el log stream. Sin esta decisión, el guardia loguea en un cuarto vacío.
 
-- [ ] **Avisar a PlayTelecom** del cambio de cálculo de semana (§9 del spec). Los números de 2026 no se mueven, pero los reportes semanales alimentan el cobro a Walmart.
+- [ ] **Avisar a PlayTelecom** del cambio de cálculo de semana (§9 del spec). Los números de 2026 no se mueven, pero los reportes semanales
+      alimentan el cobro a Walmart.
 
 ---
 
@@ -2619,7 +2666,9 @@ npx jest tests/unit/mcp
 
 Este plan **no** toca, y sigue pendiente:
 
-1. **`/dashboard/auth/status` a 1,655 ms de mediana sin reportes corriendo** — problema independiente, probablemente el N+1 del venue-switcher.
-2. **Los endpoints del TPV entre 6 y 19 s con el servidor ocioso** — independiente de los reportes (verificado: en los 25 minutos más lentos había cero reportes). Ligado a las 29 órdenes PENDING huérfanas. **El founder pidió explícitamente no tocarlo todavía.**
+1. **`/dashboard/auth/status` a 1,655 ms de mediana sin reportes corriendo** — problema independiente, probablemente el N+1 del
+   venue-switcher.
+2. **Los endpoints del TPV entre 6 y 19 s con el servidor ocioso** — independiente de los reportes (verificado: en los 25 minutos más lentos
+   había cero reportes). Ligado a las 29 órdenes PENDING huérfanas. **El founder pidió explícitamente no tocarlo todavía.**
 3. **`stock-control/overview` (mediana 3.5 s, máximo 12 s)** — otra pantalla, otra causa, sin diagnosticar.
 4. **426 `findMany` en servicios de dashboard**, varios sin `take`.

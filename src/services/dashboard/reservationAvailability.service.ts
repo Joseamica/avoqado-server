@@ -8,7 +8,10 @@ import {
   findLegacyStaffAvailabilityForDayWindows,
   isLiveSlotHold,
 } from './appointmentStaffAssignment.service'
-import { resolveCanonicalAppointmentDuration } from '../reservation/resolveAppointmentWindow'
+import {
+  resolveAppointmentBaseDurationIfAllAppointments,
+  resolveCanonicalAppointmentDuration,
+} from '../reservation/resolveAppointmentWindow'
 
 // ==========================================
 // AVAILABILITY ENGINE — Slot calculation + conflict detection
@@ -170,7 +173,19 @@ export async function getAvailableSlots(
     }
     defaultDuration = Math.max(canonical.canonicalBaseDurationMin, advisoryDuration)
   } else {
-    defaultDuration = options.duration ?? moduleConfig?.scheduling?.defaultDurationMin ?? 60
+    // Camino legacy (venue sin staff-aware, cliente sin `windowSemantics`).
+    // La duración que manda el cliente es una PISTA, no la verdad: el widget
+    // suma en el navegador y un servicio sin duración le suma cero, así que
+    // pedía 35 min para una cita que el catálogo dice que dura 2 h 5 min y
+    // ofrecía horarios que en realidad no caben (Amaena, 2026-08-05). El
+    // catálogo manda; si los productos no son servicios de cita, no cambia nada.
+    const requested = options.duration ?? moduleConfig?.scheduling?.defaultDurationMin ?? 60
+    const canonicalBaseMin = await resolveAppointmentBaseDurationIfAllAppointments(prisma, {
+      venueId,
+      productIds: requestedProductIds,
+      settings: normalizedSettings,
+    })
+    defaultDuration = canonicalBaseMin === null ? requested : Math.max(requested, canonicalBaseMin)
   }
   const onlineCapacityPercent = moduleConfig?.scheduling?.onlineCapacityPercent ?? 100
   const pacingMax = moduleConfig?.scheduling?.pacingMaxPerSlot ?? null
