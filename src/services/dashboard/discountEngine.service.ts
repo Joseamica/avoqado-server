@@ -546,9 +546,21 @@ function calculateBOGO(
  * Evaluate and return all automatic discounts that should be applied to an order
  *
  * @param orderId - Order ID
+ * @param forceDiscountId - Evaluate THIS catalog discount too, even if it is not
+ *   `isAutomatic`. Needed because a waiter picking a discount by hand is not an
+ *   automatic rule: `applyPredefinedDiscount` used to call this function with no
+ *   way to say so, so a hand-picked catalog discount never showed up in the result
+ *   and every attempt died with "This discount cannot be applied to this order".
+ *   Reproduced on hardware (NEXGO, 2026-08-06) — applying ANY catalog discount
+ *   from the TPV picker always failed.
+ *
+ *   It only lifts the `isAutomatic` filter. Every other rule still applies: the
+ *   discount must be active and eligible (dates, weekdays, minimum), it is skipped
+ *   if already applied, and stacking rules are unchanged. Passing an id that is
+ *   not eligible still yields nothing — the caller's rejection stays correct.
  * @returns List of discounts to apply, sorted by priority
  */
-export async function evaluateAutomaticDiscounts(orderId: string): Promise<DiscountCalculationResult[]> {
+export async function evaluateAutomaticDiscounts(orderId: string, forceDiscountId?: string): Promise<DiscountCalculationResult[]> {
   // Load order with items
   const order = await prisma.order.findUnique({
     where: { id: orderId },
@@ -616,7 +628,9 @@ export async function evaluateAutomaticDiscounts(orderId: string): Promise<Disco
 
   // Get eligible automatic discounts
   const eligibleDiscounts = await getEligibleDiscounts(order.venueId, order.customerId ?? undefined, context.subtotal)
-  const automaticDiscounts = eligibleDiscounts.filter(d => d.isAutomatic)
+  // A hand-picked catalog discount is eligible but not automatic — keep it too when
+  // the caller named it (see `forceDiscountId` in this function's doc).
+  const automaticDiscounts = eligibleDiscounts.filter(d => d.isAutomatic || d.id === forceDiscountId)
 
   // Also get customer-specific discounts if customer is identified
   let customerDiscounts: DiscountCandidate['discount'][] = []

@@ -236,8 +236,18 @@ export async function applyPredefinedDiscount(
     throw new NotFoundError('Discount not found or inactive')
   }
 
-  // Evaluate the discount for this order
-  const discounts = await discountEngine.evaluateAutomaticDiscounts(orderId)
+  // Evaluate the discount for this order.
+  //
+  // 🔴 `forceDiscountId` is required here: the waiter PICKED this discount by hand,
+  // so it is not an automatic rule. Without it the engine only returned discounts
+  // flagged `isAutomatic`, the chosen one was never in the list, and EVERY catalog
+  // discount applied from the TPV died on the rejection below. Reproduced on
+  // hardware (NEXGO, 2026-08-06).
+  //
+  // Eligibility is still enforced — dates, weekdays, minimum, already-applied and
+  // stacking rules all run unchanged. An ineligible id still returns nothing and
+  // still lands on the rejection, which is the correct outcome.
+  const discounts = await discountEngine.evaluateAutomaticDiscounts(orderId, discountId)
   const calculatedDiscount = discounts.find(d => d.discountId === discountId)
 
   if (!calculatedDiscount) {
