@@ -829,7 +829,18 @@ export async function removeDiscountFromOrder(orderId: string, orderDiscountId: 
     // Update order totals
     const newDiscountAmount = Math.max(0, Number(order.discountAmount) - Number(orderDiscount.amount))
     const newTaxAmount = Number(order.taxAmount) + Number(orderDiscount.taxReduction)
-    const newTotal = Number(order.subtotal) - newDiscountAmount + newTaxAmount + Number(order.tipAmount)
+    // 🔴 MONEY — `serviceChargeAmount` ADDS to the total (taxable business revenue,
+    // not a tip and not a discount). It was omitted here, so removing a discount
+    // from a check that ALSO carried a service charge DROPPED the charge from the
+    // stored total and the customer underpaid.
+    //
+    // Reproduced on hardware against the real DB (NEXGO, 2026-08-06): should have
+    // recalculated $35 -> $55 and landed at $35. `order.mobile.service.ts` already
+    // included the charge; only this legacy path kept the old formula (since
+    // Nov 2025). The bug was LATENT: nobody could remove a discount from the TPV
+    // until that action was added, and that is what surfaced it.
+    const newTotal =
+      Number(order.subtotal) - newDiscountAmount + newTaxAmount + Number(order.serviceChargeAmount ?? 0) + Number(order.tipAmount)
 
     await tx.order.update({
       where: { id: orderId },

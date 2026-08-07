@@ -841,6 +841,53 @@ describe('Discount Engine Service', () => {
       )
     })
 
+    /**
+     * 🔴 MONEY regression — reproduced on hardware (NEXGO, 2026-08-06).
+     *
+     * The old formula was `subtotal - discount + tax + tip`, silently dropping
+     * `serviceChargeAmount`. Removing a discount from a check that ALSO carried a
+     * service charge wiped the charge from the stored total and the customer
+     * underpaid. Live repro: expected $35 -> $55, landed at $35.
+     *
+     * The pre-existing test above never caught it because its mock order has no
+     * `serviceChargeAmount` field at all — the bug only shows when one is present.
+     */
+    it('keeps the service charge in the total when a discount is removed', async () => {
+      const mockOrderDiscount = {
+        id: 'od-1',
+        orderId: 'order-123',
+        discountId: null,
+        amount: new Decimal(20),
+        taxReduction: new Decimal(0),
+        name: 'Descuento',
+      }
+      const mockOrder = {
+        id: 'order-123',
+        subtotal: new Decimal(35),
+        taxAmount: new Decimal(0),
+        discountAmount: new Decimal(20),
+        serviceChargeAmount: new Decimal(20), // <- the field the old formula ignored
+        tipAmount: new Decimal(0),
+        total: new Decimal(35),
+        paidAmount: new Decimal(0),
+      }
+
+      prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<any>) => callback(prismaMock))
+      prismaMock.orderDiscount.findFirst.mockResolvedValue(mockOrderDiscount)
+      prismaMock.order.findUnique.mockResolvedValue(mockOrder)
+      prismaMock.orderDiscount.delete.mockResolvedValue(mockOrderDiscount)
+      prismaMock.order.update.mockResolvedValue(mockOrder)
+
+      const result = await removeDiscountFromOrder('order-123', 'od-1')
+
+      expect(result.success).toBe(true)
+      // subtotal 35 - discount 0 + tax 0 + serviceCharge 20 + tip 0 = 55
+      expect(prismaMock.order.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ total: 55 }) }),
+      )
+      expect(result.newOrderTotal).toBe(55)
+    })
+
     it('should return error for non-existent discount', async () => {
       prismaMock.$transaction.mockImplementation(async (callback: (tx: typeof prismaMock) => Promise<any>) => callback(prismaMock))
       prismaMock.orderDiscount.findFirst.mockResolvedValue(null)
