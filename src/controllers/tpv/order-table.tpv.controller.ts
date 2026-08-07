@@ -132,6 +132,38 @@ export async function applyServiceCharge(req: Request, res: Response): Promise<v
 }
 
 /**
+ * DELETE /tpv/venues/:venueId/orders/:orderId/service-charges/:orderServiceChargeId
+ *
+ * Quita un cobro por servicio YA aplicado. Cierra el hueco de paridad con Android
+ * (`avoqado-tpv/.superpowers/.../paridad-android-tpv.md` hallazgo #4, 2026-08-06):
+ * el servicio existía (`service-charge.mobile.service.ts::removeServiceCharge`)
+ * pero la ruta DELETE solo estaba montada bajo `/mobile` — la TPV, aislada a
+ * `/tpv`, no tenía cómo llamarla y su checkout quedó sin "quitar cargo".
+ *
+ * DESHACER es online-only A PROPÓSITO (regla offline §5): aplicar un cargo se
+ * puede encolar; quitarlo no. Por eso NO hay intent `REMOVE_SERVICE_CHARGE` en
+ * el reducer — esta ruta es el único camino, y sin red el cliente lo dice en
+ * vez de encolar.
+ *
+ * El id viene en el PATH (no body), así que no aplica el guard de undefined de
+ * `applyServiceCharge`: el servicio hace findFirst por [id, orderId] y rechaza
+ * si no existe. El actor sale del token, nunca del body.
+ */
+export async function removeServiceCharge(req: Request, res: Response): Promise<void> {
+  try {
+    const { venueId, orderId, orderServiceChargeId } = req.params
+    const staffId = (req as any).authContext?.userId as string | undefined
+
+    const result = await serviceChargeMobileService.removeServiceCharge(venueId, orderId, orderServiceChargeId, staffId)
+
+    res.status(200).json({ success: true, data: result })
+  } catch (error: any) {
+    logger.error(`[ORDER-TABLE TPV] remove service-charge: ${error.message}`)
+    res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Internal server error' })
+  }
+}
+
+/**
  * GET /tpv/venues/:venueId/service-charges
  *
  * 🆕 Companion de lectura de `applyServiceCharge` (arriba, Plan B Task 4) — esa

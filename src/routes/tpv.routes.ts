@@ -3813,6 +3813,24 @@ router.post(
 )
 
 /**
+ * DELETE /tpv/venues/:venueId/orders/:orderId/service-charges/:orderServiceChargeId
+ *
+ * Espejo de la ruta /mobile equivalente (mobile.routes.ts, DELETE service-charges):
+ * misma cadena INCLUIDO checkTableOwnership('order') — deshacer un cargo en la
+ * mesa de otro mesero es exactamente el cruce que ese guard existe para impedir.
+ * Ver el KDoc del controller: deshacer es online-only a propósito.
+ */
+router.delete(
+  '/venues/:venueId/orders/:orderId/service-charges/:orderServiceChargeId',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkFeatureAccess('TABLE_SERVICE'),
+  checkPermission('orders:update'),
+  checkTableOwnership('order'),
+  orderTableController.removeServiceCharge,
+)
+
+/**
  * GET /tpv/venues/{venueId}/service-charges
  *
  * 🆕 Companion de lectura (Fase 3 de Mesas en avoqado-tpv, completitud del
