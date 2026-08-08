@@ -186,6 +186,32 @@ async function checkForForcedUpdate(
 }
 
 /**
+ * Resolve the terminal's own IP rather than the CDN edge it came through.
+ *
+ * `app.set('trust proxy', 1)` (src/config/middleware.ts) unwraps a single hop,
+ * but production sits behind Cloudflare in front of the host proxy — so `req.ip`
+ * resolves to a Cloudflare address (172.64.x / 172.71.x) that is identical for
+ * every terminal in the fleet and therefore useless for locating a device.
+ *
+ * `CF-Connecting-IP` is set by Cloudflare itself and is the trustworthy value
+ * here; a client-supplied header cannot survive the edge. `X-Forwarded-For` is
+ * a comma-separated chain whose FIRST entry is the original client. Both are
+ * spoofable if a request ever reaches the app without passing the edge, so this
+ * is used for diagnostics only — never for auth or rate limiting.
+ */
+function resolveClientIp(req: Request<any, any, any>): string | undefined {
+  const cfConnectingIp = req.headers['cf-connecting-ip']
+  if (typeof cfConnectingIp === 'string' && cfConnectingIp.trim()) return cfConnectingIp.trim()
+
+  const forwardedFor = req.headers['x-forwarded-for']
+  const forwardedChain = Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor
+  const originClient = forwardedChain?.split(',')[0]?.trim()
+  if (originClient) return originClient
+
+  return req.ip || req.socket.remoteAddress
+}
+
+/**
  * Process heartbeat from TPV terminal (unauthenticated endpoint)
  * This allows terminals to report status even when authentication fails
  * and returns server status for synchronization
@@ -193,7 +219,7 @@ async function checkForForcedUpdate(
 export async function processHeartbeat(req: Request<{}, {}, HeartbeatData>, res: Response, next: NextFunction): Promise<void> {
   try {
     const heartbeatData = req.body
-    const clientIp = req.ip || req.socket.remoteAddress
+    const clientIp = resolveClientIp(req)
 
     logger.debug(`Heartbeat received from terminal ${heartbeatData.terminalId}`, {
       terminalId: heartbeatData.terminalId,
