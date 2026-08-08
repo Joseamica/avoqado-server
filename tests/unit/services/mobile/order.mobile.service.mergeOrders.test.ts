@@ -124,22 +124,38 @@ describe('mergeOrders frees the source table even when the source order came fro
     })
   })
 
-  // ⏸️ SKIP DELIBERADO — este test FALLA hoy porque el bug sigue vivo.
+  // ⏸️ SKIP DELIBERADO — este test sigue fallando hoy, A PROPÓSITO.
   //
-  // No es un test roto: fija el defecto de la "mesa fantasma". Al fusionar, la
-  // liberacion de la mesa origen condiciona a Table.currentOrderId === source.id,
-  // pero ese campo NUNCA se setea para ordenes hijas de un SPLIT_ORDER, asi que
-  // la busqueda falla y la mesa queda OCCUPIED con openOrders vacio para siempre.
-  // Reproducido en hardware. El endpoint lo admite devolviendo tableFreed: false.
+  // No es un test roto: fija el defecto de la "mesa fantasma" en `mergeOrders`
+  // MISMO (esta función, `src/services/mobile/`, sigue CONGELADA — iOS/Android
+  // se desarrollan contra ese namespace en paralelo). Sigue en skip porque este
+  // archivo llama a `mergeOrders` DIRECTAMENTE — nunca se puede arreglar sin
+  // tocar la zona congelada.
   //
-  // Esta en skip y no arreglado porque el fix vive en src/services/mobile/, zona
-  // CONGELADA (iOS y Android se desarrollan contra ese namespace en paralelo).
-  // Parchear cualquier llamador no-congelado deja el mismo hueco abierto en los
-  // otros tres consumidores — el mismo defecto existe en cancelOrder.
+  // FIX 2026-08-07: el hueco se cerró del lado `/tpv` (el único lado que la
+  // TPV usa), NO acá. Ver `table.tpv.service.ts::reconcileTableAfterOrderRemoved`
+  // (reconcilia por `tableId` sin condicionar a `currentOrderId`, igual que
+  // `moveOrderToTable`) y su prueba:
+  // `tests/unit/services/tpv/table.tpv.service.reconcileTableAfterOrderRemoved.test.ts`
+  // — más la prueba de wiring en
+  // `tests/unit/controllers/tpv/order-table.tpv.controller.test.ts` (describe
+  // "mergeOrders", casos de `reconcileTableAfterOrderRemoved`). El mismo hueco
+  // SIGUE abierto en `/mobile` (única superficie congelada, sin caller
+  // no-congelado donde reconciliar) — ver el reporte de Fix 1 para el detalle.
+  // Este test se queda en skip como prueba viva de que el hueco de `/mobile`
+  // sigue ahí.
   //
-  // PARA ARREGLARLO: espejar table.tpv.service.ts::moveOrderToTable, que reconcilia
-  // por tableId sin condicionar a currentOrderId. Requiere coordinar con las otras
-  // sesiones antes de tocar la zona congelada. Quitar el .skip al hacerlo.
+  // 🔴 `cancelOrder` (el otro caller de la MISMA release-de-mesa con el MISMO
+  // hueco — busca `Table.currentOrderId === orderId`) SÍ se cerró del lado
+  // `/tpv`, 2026-08-07: hasta entonces `cancelOrder` no tenía NINGUNA ruta
+  // online bajo `/tpv` (viajaba siempre como intent, ver KDoc de
+  // `TablesRepository.cancelOrder` en avoqado-tpv), así que no había
+  // superficie no-congelada donde reconciliar. Se agregó
+  // `POST /tpv/venues/:venueId/orders/:orderId/cancel`
+  // (`order-table.tpv.controller.ts::cancelOrder`), que delega en el MISMO
+  // `orderMobileService.cancelOrder` de este archivo y reconcilia después con
+  // `reconcileTableAfterOrderRemoved` — mismo patrón que `mergeOrders` arriba.
+  // Ver `.superpowers/sdd/2026-07-24-tpv-plan-b-superficie-tpv-server/tpv-cancel-order-route.md`.
   it.skip('releases table-1 (AVAILABLE, currentOrderId: null) after merging away its only order, a split child', async () => {
     const result = await mergeOrders(VENUE_ID, TARGET_ID, SPLIT_CHILD_SOURCE_ID, 'staff-1')
 

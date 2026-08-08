@@ -37,13 +37,19 @@ jest.mock('@/middlewares/checkPermission.middleware', () => ({
   checkPermission: () => (_req: any, _res: any, next: any) => next(),
 }))
 
-// 3. prisma: only the models checkFeatureAccess touches.
+// 3. prisma: only the models checkFeatureAccess touches, plus venueSettings —
+//    the cancel route (below) is the only one in this file that also carries
+//    checkTableOwnership('order'), which reads VenueSettings.enforceTableOwnership.
+//    Mocked to `null` (the real default: the PRO ownership switch is OFF for
+//    most venues) so checkTableOwnership no-ops for cancel exactly like it
+//    does in prod for a venue that never turned the switch on.
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     staffVenue: { findFirst: jest.fn() }, // SUPERADMIN bypass (requestIsSuperAdmin)
     venue: { findUnique: jest.fn() }, // venueIsExemptFromPlanGating (grandfathered/demo)
     venueFeature: { findFirst: jest.fn(), findMany: jest.fn() }, // own grant + getVenueBaseTier
+    venueSettings: { findUnique: jest.fn() }, // checkTableOwnership('order') — cancel route only
   },
 }))
 
@@ -74,6 +80,7 @@ const staffVenueFindFirst = (prisma as any).staffVenue.findFirst as jest.Mock
 const venueFindUnique = (prisma as any).venue.findUnique as jest.Mock
 const vfFindFirst = (prisma as any).venueFeature.findFirst as jest.Mock
 const vfFindMany = (prisma as any).venueFeature.findMany as jest.Mock
+const venueSettingsFindUnique = (prisma as any).venueSettings.findUnique as jest.Mock
 const isModuleEnabledMock = moduleService.isModuleEnabled as jest.Mock
 
 const VENUE_ID = 'venue-tpv-order-1'
@@ -103,6 +110,7 @@ beforeEach(() => {
   vfFindFirst.mockResolvedValue(null) // no explicit own TABLE_SERVICE grant
   vfFindMany.mockResolvedValue([]) // no active paid base plan → FREE
   isModuleEnabledMock.mockResolvedValue(false)
+  venueSettingsFindUnique.mockResolvedValue(null) // table-ownership switch OFF (real default) — cancel route only
 })
 
 // UN server escuchando para todo el archivo, reusado por cada request.
@@ -131,6 +139,7 @@ const routes: Array<[string, string, string]> = [
   ['post', `/tpv/venues/${VENUE_ID}/orders/order-1/split`, 'splitOrder'],
   ['post', `/tpv/venues/${VENUE_ID}/orders/order-1/split-by-seat`, 'splitOrderBySeat'],
   ['post', `/tpv/venues/${VENUE_ID}/orders/order-1/merge`, 'mergeOrders'],
+  ['post', `/tpv/venues/${VENUE_ID}/orders/order-1/cancel`, 'cancelOrder'],
   ['post', `/tpv/venues/${VENUE_ID}/orders/order-1/service-charges`, 'applyServiceCharge'],
   ['post', `/tpv/venues/${VENUE_ID}/tables/table-1/open`, 'openTable'],
 ]

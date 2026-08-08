@@ -3500,6 +3500,26 @@ router.get(
 )
 
 /**
+ * Get staff eligible for order/table reassignment — the ASSIGN_ORDER staff
+ * picker (Fix 2, "staff picker", 2026-08-07 — see
+ * .superpowers/sdd/2026-07-24-tpv-plan-b-superficie-tpv-server/zombie-table-and-staff-picker.md).
+ *
+ * 🔴 Deliberately NOT `tpv-time-entries:read` (the route above, MANAGER+): that
+ * gate protects the time-clock MANAGER view (full attendance history). The
+ * ASSIGN_ORDER action itself only needs `orders:update` (WAITER has it by
+ * default — src/lib/permissions.ts), so a waiter who CAN reassign a table
+ * could not previously even see who to reassign it to. Same permission as the
+ * action it serves, on purpose — and `getAssignableStaff` returns only name +
+ * on-break flag, never a clock-in/out timestamp.
+ */
+router.get(
+  '/venues/:venueId/staff/assignable',
+  authenticateTokenMiddleware,
+  checkPermission('orders:update'),
+  timeEntryController.getAssignableStaff,
+)
+
+/**
  * @openapi
  * /tpv/venues/{venueId}/tables:
  *   get:
@@ -3739,9 +3759,10 @@ router.post('/venues/:venueId/sync/intents', authenticateTokenMiddleware, valida
 // TABLE SERVICE — ORDER LIFECYCLE (Plan B Task 4, 2026-07-27)
 // ============================================
 // Ciclo de orden de mesa: separar cuenta, dividir por puesto, fusionar cuentas,
-// cobros por servicio, y abrir mesa. `split`/`split-by-seat`/`merge`/`service-charges`
-// son wrappers delgados en order-table.tpv.controller.ts sobre los MISMOS servicios
-// puros que usa /mobile (order.mobile.service.ts / service-charge.mobile.service.ts).
+// cancelar cuenta, cobros por servicio, y abrir mesa. `split`/`split-by-seat`/
+// `merge`/`cancel`/`service-charges` son wrappers delgados en
+// order-table.tpv.controller.ts sobre los MISMOS servicios puros que usa
+// /mobile (order.mobile.service.ts / service-charge.mobile.service.ts).
 // `openTable` es un re-export del controller de /mobile (ver table.tpv.controller.ts).
 //
 // Cadena de middleware — espejo EXACTO de /mobile por nombre de permiso
@@ -3749,8 +3770,12 @@ router.post('/venues/:venueId/sync/intents', authenticateTokenMiddleware, valida
 // checkFeatureAccess (para que una sonda cross-tenant 403 por tenant, no por plan)
 // y checkPermission AL FINAL. A diferencia de las rutas genéricas de orden de
 // arriba (items/guest, deliberadamente NO gateadas por TABLE_SERVICE porque
-// también sirven OrderTypes sin mesa — ver task-2-report.md), estas 5 rutas SÍ
+// también sirven OrderTypes sin mesa — ver task-2-report.md), estas 6 rutas SÍ
 // llevan checkFeatureAccess('TABLE_SERVICE'): son EXCLUSIVAS de servicio a mesa.
+// `cancel` además lleva checkPermission('orders:cancel') (no 'orders:update' —
+// mismo permiso que exige el reducer offline para CANCEL_ORDER) y
+// checkTableOwnership('order'), espejo exacto de la ruta /mobile equivalente
+// (DELETE /mobile/venues/:venueId/orders/:orderId).
 //
 // NO se agregó discounts/comp aquí — /tpv YA tiene esa familia completa
 // (discounts/apply, discounts/manual, discounts/coupon, discounts/auto,
@@ -3796,6 +3821,34 @@ router.post(
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   orderTableController.mergeOrders,
+)
+
+/**
+ * POST /tpv/venues/{venueId}/orders/{orderId}/cancel
+ *
+ * "Cancelar cuenta" — la ÚNICA acción de mesa que hasta ahora NO tenía ruta
+ * online bajo `/tpv` (2026-08-07, ver
+ * .superpowers/sdd/2026-07-24-tpv-plan-b-superficie-tpv-server/tpv-cancel-order-route.md):
+ * la TPV la mandaba SIEMPRE como intent (`CANCEL_ORDER`) aunque estuviera en
+ * línea, porque no había otro camino — verificado contra este archivo por
+ * `TablesRepository.cancelOrder` en avoqado-tpv. Body: { reason?: string }
+ *
+ * Cadena de permiso — mismo permiso que `requiredPermissionForIntent('CANCEL_ORDER')`
+ * en `sync.mobile.service.ts` (`orders:cancel`, NO `orders:update` como
+ * split/merge/service-charges: cancelar es más destructivo que actualizar, y
+ * el reducer offline ya lo trata distinto) + `checkTableOwnership('order')`,
+ * espejo EXACTO de la ruta `/mobile` equivalente (`DELETE
+ * /mobile/venues/:venueId/orders/:orderId`) y de la propia `assertOwnership`
+ * que corre el reducer antes de aplicar CUALQUIER `CANCEL_ORDER` reproducido.
+ */
+router.post(
+  '/venues/:venueId/orders/:orderId/cancel',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkFeatureAccess('TABLE_SERVICE'),
+  checkPermission('orders:cancel'),
+  checkTableOwnership('order'),
+  orderTableController.cancelOrder,
 )
 
 /**
