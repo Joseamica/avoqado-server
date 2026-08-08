@@ -4,6 +4,7 @@ import { TerminalStatus, TpvCommandType } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { NotFoundError, UnauthorizedError } from '../../errors/AppError'
+import { looksLikeAndroidIdFallback } from '../../utils/terminalSerial'
 import { broadcastTpvStatusUpdate, broadcastTpvCommandStatusChanged } from '../../communication/sockets'
 // import { tpvCommandExecutionService } from './command-execution.service'
 import { tpvCommandQueueService } from './command-queue.service'
@@ -128,6 +129,45 @@ export class TpvHealthService {
       }
 
       if (!terminal) {
+        // An unknown terminal id is the ONLY signal we get about a device that lost its
+        // identity, so log every scrap of context the payload carries. Without this the
+        // 404 is anonymous: the request IP is the CDN edge, and the serial we were sent
+        // is exactly the one that matches nothing — leaving no way to tell which physical
+        // device in which venue is failing. `uptimeSeconds` is the strongest fingerprint
+        // (boot time = now - uptime) followed by model + app version + battery.
+        const androidIdFallbackSuspected = looksLikeAndroidIdFallback(terminalId)
+        const unknownTerminalContext = {
+          terminalId,
+          androidIdFallbackSuspected,
+          clientIp: clientIp ?? 'unknown',
+          appVersion: version ?? 'unknown',
+          deviceModel: systemInfo?.deviceModel ?? 'unknown',
+          manufacturer: systemInfo?.manufacturer ?? 'unknown',
+          osVersion: systemInfo?.osVersion ?? 'unknown',
+          appVersionCode: systemInfo?.versionCode ?? 'unknown',
+          uptimeSeconds: systemInfo?.uptime ?? 'unknown',
+          bootedAt: typeof systemInfo?.uptime === 'number' ? new Date(Date.now() - systemInfo.uptime * 1000).toISOString() : 'unknown',
+          batteryLevel: systemInfo?.batteryLevel ?? 'unknown',
+          networkType: systemInfo?.networkType ?? 'unknown',
+          storageAvailableGB: systemInfo?.storageAvailableGB ?? 'unknown',
+          reportedStatus: status,
+        }
+
+        // Severity is split on purpose, because these are two different problems and only
+        // one of them is an incident. An ANDROID_ID-shaped id means a PROVISIONED terminal
+        // in the field lost its hardware serial and is now counting down to wiping its own
+        // activation (10 consecutive 404s in HeartbeatWorker) — that must page. A plausible
+        // hardware serial that simply isn't registered is a provisioning gap; logging those
+        // at error would bury the real incident under the noise of every new PAX setup.
+        if (androidIdFallbackSuspected) {
+          logger.error(
+            '🚨 [Heartbeat] Terminal lost its hardware serial — heartbeating as ANDROID_ID, will self-wipe activation',
+            unknownTerminalContext,
+          )
+        } else {
+          logger.warn('🔍 [Heartbeat] Unknown terminal — serial looks real but is not provisioned', unknownTerminalContext)
+        }
+
         throw new NotFoundError(`Terminal with ID, serial number, or Menta terminal ID ${terminalId} not found`)
       }
 
