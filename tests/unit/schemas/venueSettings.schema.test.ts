@@ -25,3 +25,16 @@ describe('UpdateVenueSettingsSchema googleReviewLink', () => {
     expect(r.success).toBe(true)
   })
 })
+
+describe('UpdateVenueSettingsSchema cash reconciliation opt-in', () => {
+  it.each([true, false])('accepts and preserves cashReconciliationEnabled=%s', value => {
+    const result = parseBody({ cashReconciliationEnabled: value })
+
+    expect(result.success).toBe(true)
+    if (result.success) expect(result.data.body.cashReconciliationEnabled).toBe(value)
+  })
+
+  it('rejects non-boolean activation values', () => {
+    expect(parseBody({ cashReconciliationEnabled: 'true' }).success).toBe(false)
+  })
+})

@@ -53,19 +53,26 @@ export function getUnitType(unit: Unit): UnitType {
   return UnitType.COUNT
 }
 
+/** Filters a raw-material listing can be narrowed by. Shared by the screen and its export. */
+export interface RawMaterialFilters {
+  category?: string
+  /** Applied IN MEMORY (`currentStock <= reorderPoint` compares two columns). See below. */
+  lowStock?: boolean
+  active?: boolean
+  search?: string
+}
+
 /**
- * Get all raw materials for a venue
+ * The one place the raw-material filter is written. The screen listing and the export count
+ * both read from here on purpose: a second where-clause built for the export drifts from the
+ * one behind the screen, and then the file quietly disagrees with what the user is looking at.
+ *
+ * `lowStock` is deliberately NOT here — it compares two columns of the same row, which Prisma
+ * cannot express, so the listing applies it after the query. Anything counting with this
+ * clause therefore gets an UPPER BOUND when `lowStock` is on.
  */
-export async function getRawMaterials(
-  venueId: string,
-  filters?: {
-    category?: string
-    lowStock?: boolean
-    active?: boolean
-    search?: string
-  },
-): Promise<RawMaterial[]> {
-  const where: Prisma.RawMaterialWhereInput = {
+function buildRawMaterialsWhereClause(venueId: string, filters?: RawMaterialFilters): Prisma.RawMaterialWhereInput {
+  return {
     venueId,
     deletedAt: null, // Exclude soft-deleted records
     ...(filters?.category && { category: filters.category as any }),
@@ -74,6 +81,13 @@ export async function getRawMaterials(
       OR: [{ name: { contains: filters.search, mode: 'insensitive' } }, { sku: { contains: filters.search, mode: 'insensitive' } }],
     }),
   }
+}
+
+/**
+ * Get all raw materials for a venue
+ */
+export async function getRawMaterials(venueId: string, filters?: RawMaterialFilters): Promise<RawMaterial[]> {
+  const where = buildRawMaterialsWhereClause(venueId, filters)
 
   // Handle low stock filter separately
   let rawMaterials = await prisma.rawMaterial.findMany({
@@ -90,7 +104,10 @@ export async function getRawMaterials(
         },
       },
     },
-    orderBy: { name: 'asc' },
+    // `id` is the tie-breaker, not decoration: two raw materials can share a name, and a
+    // non-unique sort hands back a different arrangement per call — two exports taken minutes
+    // apart stop being comparable, and any future pagination would drop rows outright.
+    orderBy: [{ name: 'asc' }, { id: 'asc' }],
   })
 
   if (filters?.lowStock) {
@@ -793,32 +810,114 @@ export async function getRawMaterialRecipes(venueId: string, rawMaterialId: stri
   return Array.from(productsMap.values())
 }
 
+/** Date window a kardex query can be narrowed to. Shared by the screen and its export. */
+export interface StockMovementFilters {
+  startDate?: Date
+  endDate?: Date
+}
+
+/**
+ * The one place the kardex filter is written. The screen listing, the export count and the
+ * export fetch all read from here on purpose: a second where-clause built for the export
+ * drifts from the one behind the screen, and then the file quietly disagrees with what the
+ * user is looking at.
+ */
+function buildStockMovementsWhereClause(venueId: string, rawMaterialId: string, filters?: StockMovementFilters) {
+  return {
+    rawMaterialId,
+    venueId,
+    ...((filters?.startDate || filters?.endDate) && {
+      createdAt: {
+        ...(filters?.startDate && { gte: filters.startDate }),
+        ...(filters?.endDate && { lte: filters.endDate }),
+      },
+    }),
+  }
+}
+
 /**
  * Get stock movements for a raw material
  */
 export async function getStockMovements(
   venueId: string,
   rawMaterialId: string,
-  options?: {
-    startDate?: Date
-    endDate?: Date
+  options?: StockMovementFilters & {
     limit?: number
   },
 ) {
   const movements = await prisma.rawMaterialMovement.findMany({
-    where: {
-      rawMaterialId,
-      venueId,
-      ...(options?.startDate && { createdAt: { gte: options.startDate } }),
-      ...(options?.endDate && { createdAt: { lte: options.endDate } }),
-    },
-    orderBy: {
-      createdAt: 'desc',
-    },
+    where: buildStockMovementsWhereClause(venueId, rawMaterialId, options),
+    // `createdAt` alone is not unique — bulk movements written in the same transaction share a
+    // timestamp to the millisecond, and a non-unique sort drops rows across pages silently.
+    // `id` is the tiebreaker.
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take: options?.limit || 100,
   })
 
   return movements
+}
+
+/**
+ * Row count for the kardex export, using the SAME filter builder as the listing. The
+ * controller counts before building so it can refuse a file that would be truncated — a
+ * truncated export reads as complete, which is the failure nobody reports.
+ */
+export async function countStockMovementsForExport(
+  venueId: string,
+  rawMaterialId: string,
+  filters?: StockMovementFilters,
+): Promise<number> {
+  return prisma.rawMaterialMovement.count({
+    where: buildStockMovementsWhereClause(venueId, rawMaterialId, filters),
+  })
+}
+
+/**
+ * Kardex rows for the export: the SAME listing the screen calls, plus the two things the
+ * report is actually read for — WHICH material and WHO moved it.
+ *
+ * Both need resolving here rather than through an `include`: the listing returns bare
+ * movement rows, and `RawMaterialMovement.createdBy` is a plain staff id with no Prisma
+ * relation behind it, so the names take their own scoped lookups. `limit` comes from the
+ * caller's cap; leaving it out inherits the listing's default page size of 100 and hands
+ * over a fraction of the year as if it were the year.
+ */
+export async function fetchStockMovementsForExport(
+  venueId: string,
+  rawMaterialId: string,
+  filters: StockMovementFilters | undefined,
+  limit: number,
+) {
+  const movements = await getStockMovements(venueId, rawMaterialId, { ...filters, limit })
+
+  const staffIds = Array.from(new Set(movements.map(m => m.createdBy).filter((id): id is string => Boolean(id))))
+
+  // Scoped to the venue like every other query: a staff id read off a movement row still gets
+  // checked against this venue's roster before its name is printed. Skipped entirely when no
+  // movement carries an author, so a system-generated kardex costs one query, not two.
+  const staffPromise: Promise<{ id: string; firstName: string; lastName: string }[]> =
+    staffIds.length > 0
+      ? prisma.staff.findMany({
+          where: { id: { in: staffIds }, venues: { some: { venueId } } },
+          select: { id: true, firstName: true, lastName: true },
+        })
+      : Promise.resolve([])
+
+  const [rawMaterial, staff] = await Promise.all([
+    prisma.rawMaterial.findFirst({
+      where: { id: rawMaterialId, venueId },
+      select: { name: true },
+    }),
+    staffPromise,
+  ])
+
+  const staffNameById = new Map(staff.map(s => [s.id, `${s.firstName} ${s.lastName}`.trim()]))
+
+  return movements.map(movement => ({
+    ...movement,
+    rawMaterialName: rawMaterial?.name ?? '',
+    staffName: movement.createdBy ? (staffNameById.get(movement.createdBy) ?? '') : '',
+  }))
 }
 
 /**
@@ -1055,4 +1154,18 @@ export async function deductStockForRecipe(
       },
     })
   }
+}
+
+/**
+ * Row count for the export, using the SAME filter builder as `getRawMaterials`. The controller
+ * counts before building so it can refuse a file that would be truncated — a truncated export
+ * reads as complete, which is the failure nobody reports.
+ *
+ * ⚠️ With `lowStock` on this is an UPPER BOUND, not the row count: that filter is applied in
+ * memory (it compares `currentStock` against `reorderPoint`, two columns of the same row, which
+ * Prisma cannot express). Refusing on an upper bound would 413 a fifty-row file, so the caller
+ * has to fall back to counting the fetched rows — see `exportRawMaterials`.
+ */
+export async function countRawMaterialsForExport(venueId: string, filters?: RawMaterialFilters): Promise<number> {
+  return prisma.rawMaterial.count({ where: buildRawMaterialsWhereClause(venueId, filters) })
 }

@@ -2,6 +2,7 @@ import cron from 'node-cron'
 import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
+import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
 
 const HEARTBEAT_TIMEOUT_MINUTES = 3 // Si no recibimos heartbeat en 3 mins, se considera OFFLINE
 
@@ -74,5 +75,11 @@ async function checkPosConnections() {
  */
 export function startPosConnectionMonitor() {
   logger.info(`[Monitor Job] ⏰ Monitor de conexiones POS iniciado. Se ejecutará cada 5 minutos.`)
-  cron.schedule('1-59/5 * * * *', checkPosConnections)
+  const task = cron.schedule(DATABASE_JOB_SCHEDULES.posConnectionMonitor, checkPosConnections, {
+    noOverlap: true,
+    timezone: 'America/Mexico_City',
+  })
+  task.on('execution:overlap', () => {
+    logger.warn('[POS connection monitor] tick skipped — previous run still in progress')
+  })
 }

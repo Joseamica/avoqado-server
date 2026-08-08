@@ -70,6 +70,13 @@ const mockRequest = (
     resetMaxAge: jest.fn(), // Added missing resetMaxAge
     ...sessionArgs,
   } as Session
+  // A real Express Request ALWAYS carries `ip` and `get()`. The access log uses them to
+  // answer "where did they sign in from?", so the double has to carry them too — otherwise
+  // the controller blows up before it ever reaches the service, and the failure looks
+  // nothing like its cause.
+  ;(req as { ip?: string }).ip = '127.0.0.1' // `ip` is read-only in Express's type
+  req.headers = {}
+  req.get = ((header: string) => (header.toLowerCase() === 'user-agent' ? 'jest' : undefined)) as Request['get']
   if (authContextArgs) {
     req.authContext = authContextArgs
   }
@@ -277,7 +284,11 @@ describe('Dashboard Auth Controller', () => {
 
       await authController.dashboardLoginController(req as Request, res as Response, next)
 
-      expect(authService.loginStaff).toHaveBeenCalledWith(mockLoginData)
+      expect(authService.loginStaff).toHaveBeenCalledWith(
+        mockLoginData,
+        // Access origin (IP and device) travels to the service for the audit log.
+        expect.objectContaining({ ipAddress: '127.0.0.1', userAgent: 'jest' }),
+      )
       expect(res.cookie).toHaveBeenCalledTimes(2)
       expect(res.cookie).toHaveBeenNthCalledWith(1, 'accessToken', mockAccessToken, {
         httpOnly: true,
@@ -332,7 +343,11 @@ describe('Dashboard Auth Controller', () => {
 
       await authController.dashboardLoginController(req as Request, res as Response, next)
 
-      expect(authService.loginStaff).toHaveBeenCalledWith(mockLoginData)
+      expect(authService.loginStaff).toHaveBeenCalledWith(
+        mockLoginData,
+        // Access origin (IP and device) travels to the service for the audit log.
+        expect.objectContaining({ ipAddress: '127.0.0.1', userAgent: 'jest' }),
+      )
       expect(res.cookie).not.toHaveBeenCalled()
       expect(res.status).not.toHaveBeenCalled()
       expect(res.json).not.toHaveBeenCalled()

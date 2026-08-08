@@ -1,5 +1,5 @@
 import prisma from '../../utils/prismaClient'
-import { Order, Prisma } from '@prisma/client'
+import { AreaTicketInventoryReservationStatus, Order, Prisma } from '@prisma/client'
 import { NotFoundError, BadRequestError, ConflictError, ValidationError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
@@ -721,10 +721,47 @@ async function fetchOrderForTpvResponse(orderId: string) {
 // Exported: also reused by the mobile cash path (payCashOrder in
 // order.mobile.service.ts), which historically never deducted inventory at all —
 // same never-throws contract there (payment success is never at risk).
+export async function getAreaTicketLineIdsCoveredByInventoryReservations(
+  venueId: string,
+  items: Array<{ areaTicketLineId?: string | null }>,
+): Promise<Set<string>> {
+  const areaTicketLineIds = [
+    ...new Set(
+      items
+        .map((item: any) => item.areaTicketLineId)
+        .filter((lineId: unknown): lineId is string => typeof lineId === 'string' && lineId.length > 0),
+    ),
+  ]
+  if (areaTicketLineIds.length === 0) return new Set<string>()
+
+  const reservations = await prisma.areaTicketInventoryReservation.findMany({
+    where: {
+      venueId,
+      areaTicketLineId: { in: areaTicketLineIds },
+      status: {
+        in: [AreaTicketInventoryReservationStatus.ACTIVE, AreaTicketInventoryReservationStatus.CONSUMED],
+      },
+    },
+    select: { areaTicketLineId: true },
+  })
+  return new Set(reservations.map(reservation => reservation.areaTicketLineId))
+}
+
 export async function deductTrackedInventoryForFreeCart(order: any, staffId: string): Promise<void> {
   const deductionErrors: Array<{ productId: string; productName: string; error: string }> = []
+  const coveredAreaTicketLines = await getAreaTicketLineIdsCoveredByInventoryReservations(order.venueId, order.items || [])
 
   for (const item of order.items || []) {
+    if (item.areaTicketLineId && coveredAreaTicketLines.has(item.areaTicketLineId)) {
+      logger.info('⏭️ [WITH ITEMS] Skipping generic deduction for area-ticket line covered by reservation', {
+        orderId: order.id,
+        orderItemId: item.id,
+        areaTicketLineId: item.areaTicketLineId,
+        reason: 'AREA_TICKET_RESERVATION',
+      })
+      continue
+    }
+
     if (!item.productId) {
       logger.info('⏭️ [WITH ITEMS] Skipping inventory deduction for custom line item', {
         orderId: order.id,
@@ -736,7 +773,10 @@ export async function deductTrackedInventoryForFreeCart(order: any, staffId: str
     }
 
     const inventoryMethod = await getProductInventoryMethod(item.productId)
-    if (!inventoryMethod) {
+    const hasInventoryModifiers = item.modifiers?.some(
+      (orderModifier: any) => orderModifier.modifier?.rawMaterialId && orderModifier.modifier?.quantityPerUnit,
+    )
+    if (!inventoryMethod && !hasInventoryModifiers) {
       logger.info('⏭️ [WITH ITEMS] Skipping inventory deduction for untracked product', {
         orderId: order.id,
         orderItemId: item.id,

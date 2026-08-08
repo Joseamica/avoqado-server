@@ -9,7 +9,16 @@
  * Money is ALWAYS integer cents, MXN (mirrors the Cfdi model). Never float/pesos.
  */
 
+import type { SatValidationResult } from '@/services/fiscal/providers/fiscal-provider.interface'
+import type { BillingTaxProfile } from '@prisma/client'
+
 export type BillingCustomerKind = 'ORGANIZATION' | 'VENUE' | 'STANDALONE'
+
+/** Perfil fiscal + resultado de validarlo contra el SAT. `validation: null` = no se pudo validar. */
+export interface TaxProfileWithValidation {
+  profile: BillingTaxProfile
+  validation: SatValidationResult | null
+}
 
 /** A single line item on an income CFDI. */
 export interface PlatformCfdiLineInput {

@@ -479,6 +479,18 @@ export async function loginWithGoogle(
 
   const refreshToken = jwtService.generateRefreshToken(staff.id, googleOrgId)
 
+  // Access log. `loginWithGoogleOneTap` delegates here, so this single row covers both SSO
+  // paths. The method is recorded separately because in a security review signing in with a
+  // password is not the same as signing in with a Google account.
+  void logAction({
+    staffId: staff.id,
+    venueId: selectedVenue.venueId,
+    action: 'STAFF_LOGIN',
+    entity: 'Staff',
+    entityId: staff.id,
+    data: { source: 'dashboard', method: 'google', role: selectedVenue.role },
+  })
+
   // Format response
   const sanitizedStaff = {
     id: staff.id,

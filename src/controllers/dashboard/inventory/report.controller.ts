@@ -122,3 +122,24 @@ export async function getInventoryValuation(req: Request, res: Response, next: N
     next(error)
   }
 }
+
+/**
+ * Days of coverage: at this consumption rate, how many days does the stock on hand last?
+ * It is the question that comes right before raising a purchase order.
+ */
+export async function getStockCoverageReport(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId } = req.params
+    const { windowDays, maxDays, limit } = req.query as Record<string, string | undefined>
+
+    const report = await reportService.getStockCoverageReport(venueId, {
+      windowDays: windowDays ? Number(windowDays) : undefined,
+      maxDays: maxDays !== undefined ? Number(maxDays) : undefined,
+      limit: limit ? Number(limit) : undefined,
+    })
+
+    res.json({ success: true, data: report })
+  } catch (error) {
+    next(error)
+  }
+}

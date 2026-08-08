@@ -11,6 +11,7 @@ import {
   REVERSAL_OPERATION_TYPES,
   reconcileBlumonEvent,
 } from '../services/tpv/blumon-webhook.service'
+import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
 
 /**
  * Blumon TPV webhook async reconciliation job
@@ -42,7 +43,8 @@ export class BlumonWebhookReconciliationJob {
   private job: CronJob | null = null
 
   /** Run every 30 seconds — sub-minute is fine, the work per pass is small. */
-  private readonly CRON_PATTERN = '*/30 * * * * *'
+  private readonly CRON_PATTERN = DATABASE_JOB_SCHEDULES.blumonWebhookReconciliation
+  private isRunning = false
 
   /** Cap per pass to avoid long transactions if a backlog builds up. */
   private readonly BATCH_SIZE = 100
@@ -68,6 +70,11 @@ export class BlumonWebhookReconciliationJob {
   }
 
   private async run(): Promise<void> {
+    if (this.isRunning) {
+      logger.warn('[Blumon recon] tick skipped — previous run still in progress')
+      return
+    }
+    this.isRunning = true
     const startedAt = Date.now()
     try {
       const reconciled = await this.reconcilePending()
@@ -84,6 +91,8 @@ export class BlumonWebhookReconciliationJob {
         error: err instanceof Error ? err.message : err,
         stack: err instanceof Error ? err.stack : undefined,
       })
+    } finally {
+      this.isRunning = false
     }
   }
 

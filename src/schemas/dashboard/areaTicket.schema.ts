@@ -84,7 +84,10 @@ export const updateScaleSettingsSchema = z.object({
     .object({
       enabled: z.boolean().optional(),
       variableBarcodeEnabled: z.boolean().optional(),
-      variableBarcodePrefix: z.string().regex(/^\d{2}$/, 'El prefijo debe contener exactamente 2 dígitos.').optional(),
+      variableBarcodePrefix: z
+        .string()
+        .regex(/^\d{2}$/, 'El prefijo debe contener exactamente 2 dígitos.')
+        .optional(),
     })
     .strict()
     .refine(body => Object.keys(body).length > 0, 'Envía al menos un campo a actualizar'),

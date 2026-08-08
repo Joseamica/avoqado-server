@@ -327,7 +327,12 @@ describe('loginWithGoogle — invitation acceptance parity with the password pat
       expect(result.accessToken).toBe('access-token')
       expect(transactionRuns).not.toHaveBeenCalled()
       expect(txInvitationUpdate).not.toHaveBeenCalled()
-      expect(logAction).not.toHaveBeenCalled()
+      // This used to assert `logAction` was never called, which only meant "no invitation
+      // was touched" for as long as a plain login wrote nothing. A sign-in now DOES leave a
+      // row (the access log), so the assertion has to say what it actually means: that no
+      // invitation acceptance was recorded.
+      expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'INVITATION_ACCEPTED' }))
+      expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'STAFF_LOGIN', staffId: 'new-staff-1' }))
     })
   })
 })

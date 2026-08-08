@@ -2001,16 +2001,22 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   // logged, not thrown), and it only fires on the PENDING/PARTIAL → PAID
   // transition (re-calls are blocked above by the "already paid" guard).
   // Weighted lines (weightQuantity) deduct kilos; see spec venta-por-peso.
-  if (orderFullyPaid && !areaTicketOrder) {
+  if (orderFullyPaid) {
     void (async () => {
       try {
-        const { deductTrackedInventoryForFreeCart } = await import('@/services/tpv/order.tpv.service')
-        const paidOrder = await prisma.order.findUnique({
-          where: { id: orderId },
-          include: { items: { include: { modifiers: { include: { modifier: true } } } } },
-        })
-        if (paidOrder) {
-          await deductTrackedInventoryForFreeCart(paidOrder, effectiveStaffId || input.staffId || '')
+        // V7 area-ticket orders already applied reservations, normal lines,
+        // recipes and modifiers inside the payment transaction. Running the
+        // legacy post-commit helper here would make retries crash-unsafe and
+        // could deduct the non-reserved portion twice.
+        if (!areaTicketOrder) {
+          const { deductTrackedInventoryForFreeCart } = await import('@/services/tpv/order.tpv.service')
+          const paidOrder = await prisma.order.findUnique({
+            where: { id: orderId },
+            include: { items: { include: { modifiers: { include: { modifier: true } } } } },
+          })
+          if (paidOrder) {
+            await deductTrackedInventoryForFreeCart(paidOrder, effectiveStaffId || input.staffId || '')
+          }
         }
         // Real-time auto-reorder, mirroring recordOrderPayment: if this sale
         // left an ingredient at/below its reorder point, create the PO now.

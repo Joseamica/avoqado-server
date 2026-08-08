@@ -38,6 +38,14 @@ import logger from '@/config/logger'
 export async function seedDemoVenue(venueId: string): Promise<{ categoriesCreated: number; productsCreated: number }> {
   logger.info(`🎬 Seeding demo data for venue: ${venueId}`)
 
+  // Keep the PRO reconciliation capability explicit/default-off even for demo data. `update: {}`
+  // deliberately preserves a founder/operator choice when the demo seed is rerun.
+  await prisma.venueSettings.upsert({
+    where: { venueId },
+    update: {},
+    create: { venueId, cashReconciliationEnabled: false },
+  })
+
   // 1. Create payment providers and merchant accounts (for multi-merchant support)
   const merchantAccounts = await seedPaymentProvidersAndMerchants(venueId)
   logger.info(`✅ Created ${merchantAccounts.length} merchant accounts`)

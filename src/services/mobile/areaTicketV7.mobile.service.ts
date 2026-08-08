@@ -17,6 +17,7 @@
 import { createHash, randomInt } from 'node:crypto'
 import {
   AreaTicketCheckoutStatus,
+  AreaTicketDeliveryVerificationMode,
   AreaTicketFulfillmentMethod,
   AreaTicketInventoryReservationMode,
   AreaTicketInventoryReservationStatus,
@@ -25,6 +26,7 @@ import {
   AreaTicketPrintAttemptKind,
   AreaTicketPrintAttemptStatus,
   AreaTicketStatus,
+  FulfillmentMode,
   PaymentMethod,
   Prisma,
 } from '@prisma/client'
@@ -175,6 +177,22 @@ function checkoutStatusIn(status: AreaTicketCheckoutStatus, allowed: AreaTicketC
   return allowed.includes(status)
 }
 
+function assertDeliveryMethodAllowed(verificationMode: AreaTicketDeliveryVerificationMode, method: AreaTicketFulfillmentMethod): void {
+  const allowed =
+    verificationMode === AreaTicketDeliveryVerificationMode.PAPER_OR_SCAN ||
+    (verificationMode === AreaTicketDeliveryVerificationMode.PAPER_CONFIRMATION &&
+      method === AreaTicketFulfillmentMethod.PAPER_CONFIRMATION) ||
+    (verificationMode === AreaTicketDeliveryVerificationMode.RECEIPT_SCAN && method === AreaTicketFulfillmentMethod.RECEIPT_SCAN)
+  if (allowed) return
+  throw domainError(
+    409,
+    'AREA_TICKET_DELIVERY_METHOD_NOT_ALLOWED',
+    method === AreaTicketFulfillmentMethod.RECEIPT_SCAN
+      ? 'Este local no permite confirmar entregas escaneando el comprobante.'
+      : 'Este local no permite confirmar entregas con el vale de papel.',
+  )
+}
+
 function requireIdempotencyKey(value: string | null | undefined): string {
   const key = value?.trim()
   if (!key || key.length > 64) {
@@ -240,7 +258,8 @@ function mapTicket(ticket: any) {
     id: ticket.id,
     code: ticket.code,
     status: ticket.status,
-    fulfillmentArea: ticket.fulfillmentArea,
+    fulfillmentModeSnapshot: ticket.fulfillmentModeSnapshot,
+    fulfillmentArea: ticket.fulfillmentArea ? { ...ticket.fulfillmentArea, fulfillmentMode: ticket.fulfillmentModeSnapshot } : null,
     sourceTerminal: ticket.sourceTerminal,
     currency: ticket.currency,
     subtotal: money(ticket.subtotal),
@@ -736,6 +755,7 @@ export async function issueAreaTicket(venueId: string, input: IssueAreaTicketInp
             data: {
               venueId,
               fulfillmentAreaId: terminal.fulfillmentAreaId!,
+              fulfillmentModeSnapshot: terminal.fulfillmentArea.fulfillmentMode,
               sourceTerminalId: terminal.id,
               issuedByStaffId: staffId ?? null,
               code,
@@ -1253,6 +1273,7 @@ export async function materializeAreaTicketCheckout(venueId: string, sessionId: 
             }
             assertSnapshotIntegrity(ticket)
           }
+          const requiresDeliveryCode = fresh.tickets.some(ticket => ticket.fulfillmentModeSnapshot !== FulfillmentMode.IMMEDIATE)
 
           const order = await tx.order.create({
             data: {
@@ -1275,7 +1296,7 @@ export async function materializeAreaTicketCheckout(venueId: string, sessionId: 
               total,
               paidAmount: new Prisma.Decimal(0),
               remainingBalance: total,
-              areaDeliveryCode: deliveryCode,
+              areaDeliveryCode: requiresDeliveryCode ? deliveryCode : null,
             },
           })
 
@@ -1608,16 +1629,22 @@ export async function resolveAreaTicketScan(
       where: { venueId_code: { venueId, code: normalized } },
       include: ticketInclude,
     }),
-    prisma.order.findUnique({
-      where: { venueId_areaDeliveryCode: { venueId, areaDeliveryCode: normalized } },
-      select: { id: true, orderNumber: true, paymentStatus: true, status: true, areaDeliveryCode: true },
-    }),
+    context === 'AREA_DELIVERY'
+      ? prisma.order.findUnique({
+          where: { venueId_areaDeliveryCode: { venueId, areaDeliveryCode: normalized } },
+          select: { id: true, orderNumber: true, paymentStatus: true, status: true, areaDeliveryCode: true },
+        })
+      : Promise.resolve(null),
   ])
   const moduleEnabled = entitled && settings?.enabled === true
+  const deliveryReceiptCandidate = moduleEnabled && context === 'AREA_DELIVERY' && deliveryOrder
+  if (deliveryReceiptCandidate) {
+    assertDeliveryMethodAllowed(settings.deliveryVerificationMode, AreaTicketFulfillmentMethod.RECEIPT_SCAN)
+  }
   const candidates = [
     ...(product ? ['PRODUCT'] : []),
     ...(moduleEnabled && ticket ? [ticket.status === AreaTicketStatus.PAID ? 'PAID_AREA_TICKET' : 'AREA_TICKET'] : []),
-    ...(moduleEnabled && deliveryOrder ? ['DELIVERY_RECEIPT'] : []),
+    ...(deliveryReceiptCandidate ? ['DELIVERY_RECEIPT'] : []),
   ]
   if (candidates.length === 0) return { type: 'UNKNOWN', code: normalized }
   if (candidates.length > 1) {
@@ -1680,6 +1707,7 @@ export async function listPendingAreaTicketFulfillment(
     where: {
       venueId,
       fulfillmentAreaId: terminal.fulfillmentAreaId!,
+      fulfillmentModeSnapshot: { not: FulfillmentMode.IMMEDIATE },
       status: AreaTicketStatus.PAID,
       fulfillment: null,
       order: { paymentStatus: 'PAID', status: { notIn: ['CANCELLED', 'DELETED'] } },
@@ -1704,6 +1732,11 @@ export async function listPendingAreaTicketFulfillment(
 
 export async function resolveAreaTicketFulfillment(venueId: string, deliveryCode: string, deviceUid: string) {
   const terminal = await assertDeliveryTerminal(venueId, deviceUid)
+  const settings = await getSettingsRecord(venueId)
+  assertDeliveryMethodAllowed(
+    settings?.deliveryVerificationMode ?? AreaTicketDeliveryVerificationMode.PAPER_OR_SCAN,
+    AreaTicketFulfillmentMethod.RECEIPT_SCAN,
+  )
   const order = await prisma.order.findUnique({
     where: { venueId_areaDeliveryCode: { venueId, areaDeliveryCode: deliveryCode.trim() } },
     select: {
@@ -1761,12 +1794,17 @@ export async function fulfillAreaTicket(venueId: string, ticketId: string, input
         },
       })
       if (!ticket) throw domainError(404, 'AREA_TICKET_NOT_FOUND', 'No encontramos ese vale en este local.')
-      if (ticket.fulfillment) {
-        return { fulfillment: ticket.fulfillment, created: false }
-      }
       if (ticket.fulfillmentAreaId !== terminal.fulfillmentAreaId) {
         throw new ForbiddenError('El vale pertenece a otra área.', 'TERMINAL_AREA_MISMATCH')
       }
+      if (ticket.fulfillment) {
+        return { fulfillment: ticket.fulfillment, created: false }
+      }
+      if (ticket.fulfillmentModeSnapshot === FulfillmentMode.IMMEDIATE) {
+        throw domainError(409, 'AREA_TICKET_FULFILLMENT_NOT_REQUIRED', 'Este vale se entregó al momento y no requiere confirmación manual.')
+      }
+      const settings = await getSettingsRecord(venueId, tx)
+      assertDeliveryMethodAllowed(settings?.deliveryVerificationMode ?? AreaTicketDeliveryVerificationMode.PAPER_OR_SCAN, input.method)
       if (!ticket.order || ticket.order.paymentStatus !== 'PAID' || ticket.status !== AreaTicketStatus.PAID) {
         throw domainError(409, 'AREA_TICKET_NOT_PAID', 'Este vale todavía no está completamente pagado.')
       }
@@ -2075,6 +2113,442 @@ async function consumeAreaTicketReservations(
 }
 
 /**
+ * Locks the complete inventory footprint of a v7 checkout before the first
+ * deduction. Reservations and ordinary cart lines can target the same rows in
+ * opposite combinations across two concurrent payments; locking each subset
+ * independently would allow a Z→A / A→Z deadlock. The union is therefore
+ * acquired once in the same deterministic kind/id order used at issuance.
+ */
+async function lockAreaOrderInventoryFootprint(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  sessionId: string,
+  orderId: string,
+): Promise<void> {
+  const reservations = await tx.areaTicketInventoryReservation.findMany({
+    where: {
+      venueId,
+      areaTicket: { checkoutSessionId: sessionId },
+      status: AreaTicketInventoryReservationStatus.ACTIVE,
+    },
+    select: {
+      inventoryKind: true,
+      inventoryId: true,
+    },
+  })
+  const unreservedDemands = await buildUnreservedAreaOrderInventoryDemands(tx, venueId, orderId)
+  const targets = new Map<string, { inventoryKind: AreaTicketInventoryTarget; inventoryId: string }>()
+  for (const target of [...reservations, ...unreservedDemands]) {
+    const key = `${target.inventoryKind}:${target.inventoryId}`
+    targets.set(key, {
+      inventoryKind: target.inventoryKind,
+      inventoryId: target.inventoryId,
+    })
+  }
+
+  for (const target of [...targets.values()].sort((a, b) =>
+    `${a.inventoryKind}:${a.inventoryId}`.localeCompare(`${b.inventoryKind}:${b.inventoryId}`),
+  )) {
+    const rows =
+      target.inventoryKind === AreaTicketInventoryTarget.QUANTITY_INVENTORY
+        ? await tx.$queryRaw<Array<{ id: string }>>`
+            SELECT id
+            FROM "Inventory"
+            WHERE id = ${target.inventoryId} AND "venueId" = ${venueId}
+            FOR UPDATE
+          `
+        : await tx.$queryRaw<Array<{ id: string }>>`
+            SELECT id
+            FROM "RawMaterial"
+            WHERE id = ${target.inventoryId} AND "venueId" = ${venueId}
+            FOR UPDATE
+          `
+    if (rows.length !== 1) {
+      throw domainError(409, 'AREA_TICKET_INVENTORY_MISSING', 'No se encontró uno de los inventarios de la orden.')
+    }
+
+    if (target.inventoryKind === AreaTicketInventoryTarget.RAW_MATERIAL) {
+      await tx.$queryRaw`
+        SELECT id
+        FROM "StockBatch"
+        WHERE "venueId" = ${venueId}
+          AND "rawMaterialId" = ${target.inventoryId}
+          AND status = 'ACTIVE'
+          AND "remainingQuantity" > 0
+        ORDER BY "receivedDate" ASC, id ASC
+        FOR UPDATE
+      `
+    }
+  }
+}
+
+interface AreaOrderInventoryDemand {
+  areaTicketLineId: string | null
+  orderItemId: string
+  inventoryKind: AreaTicketInventoryTarget
+  inventoryId: string
+  quantityBaseUnits: Prisma.Decimal
+  label: string
+}
+
+interface AggregatedAreaOrderInventoryDemand {
+  inventoryKind: AreaTicketInventoryTarget
+  inventoryId: string
+  quantityBaseUnits: Prisma.Decimal
+  label: string
+}
+
+interface LockedAreaOrderInventoryTarget extends AggregatedAreaOrderInventoryDemand {
+  currentStock: Prisma.Decimal
+  unit?: any
+  batches?: Array<{
+    id: string
+    remainingQuantity: Prisma.Decimal
+    costPerUnit: Prisma.Decimal
+  }>
+}
+
+/**
+ * Builds the inventory portion that was not already covered by an area-ticket
+ * reservation. Coverage is target-specific, not line-wide: if an old ticket
+ * reserved the base product but omitted an inventory modifier, the modifier is
+ * still consumed here.
+ */
+async function buildUnreservedAreaOrderInventoryDemands(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  orderId: string,
+): Promise<AggregatedAreaOrderInventoryDemand[]> {
+  const items = await tx.orderItem.findMany({
+    where: { orderId, order: { venueId } },
+    select: {
+      id: true,
+      areaTicketLineId: true,
+      quantity: true,
+      weightQuantity: true,
+      product: {
+        select: {
+          id: true,
+          name: true,
+          trackInventory: true,
+          inventoryMethod: true,
+          inventory: { select: { id: true } },
+          recipe: {
+            select: {
+              lines: {
+                select: {
+                  quantity: true,
+                  unit: true,
+                  isOptional: true,
+                  isVariable: true,
+                  linkedModifierGroupId: true,
+                  rawMaterial: { select: { id: true, name: true, unit: true } },
+                },
+              },
+            },
+          },
+        },
+      },
+      modifiers: {
+        select: {
+          quantity: true,
+          modifier: {
+            select: {
+              id: true,
+              groupId: true,
+              rawMaterialId: true,
+              quantityPerUnit: true,
+              unit: true,
+              inventoryMode: true,
+              rawMaterial: { select: { id: true, name: true, unit: true } },
+            },
+          },
+        },
+      },
+    },
+  })
+
+  const demands: AreaOrderInventoryDemand[] = []
+  for (const item of items) {
+    if (!item.product) continue
+    const effectiveQuantity = new Prisma.Decimal(item.weightQuantity ?? item.quantity)
+    if (effectiveQuantity.lessThanOrEqualTo(0)) continue
+    const consumedSubstitutionModifierIds = new Set<string>()
+
+    if (item.product.trackInventory && item.product.inventoryMethod === 'QUANTITY') {
+      if (!item.product.inventory) {
+        throw domainError(409, 'AREA_TICKET_INVENTORY_MISSING', `No existe inventario para "${item.product.name}".`)
+      }
+      demands.push({
+        areaTicketLineId: item.areaTicketLineId,
+        orderItemId: item.id,
+        inventoryKind: AreaTicketInventoryTarget.QUANTITY_INVENTORY,
+        inventoryId: item.product.inventory.id,
+        quantityBaseUnits: effectiveQuantity,
+        label: item.product.name,
+      })
+    } else if (item.product.trackInventory && item.product.inventoryMethod === 'RECIPE') {
+      if (!item.product.recipe) {
+        throw domainError(409, 'AREA_TICKET_INVENTORY_MISSING', `No existe receta para "${item.product.name}".`)
+      }
+      for (const recipeLine of item.product.recipe.lines) {
+        if (recipeLine.isOptional) continue
+        const substitution =
+          recipeLine.isVariable && recipeLine.linkedModifierGroupId
+            ? item.modifiers.find(
+                candidate =>
+                  candidate.modifier?.groupId === recipeLine.linkedModifierGroupId &&
+                  candidate.modifier.inventoryMode === 'SUBSTITUTION' &&
+                  candidate.modifier.rawMaterialId &&
+                  candidate.modifier.quantityPerUnit,
+              )
+            : undefined
+        if (substitution?.modifier) {
+          consumedSubstitutionModifierIds.add(substitution.modifier.id)
+          continue
+        }
+        const perSale = convertUnit(recipeLine.quantity, recipeLine.unit, recipeLine.rawMaterial.unit)
+        demands.push({
+          areaTicketLineId: item.areaTicketLineId,
+          orderItemId: item.id,
+          inventoryKind: AreaTicketInventoryTarget.RAW_MATERIAL,
+          inventoryId: recipeLine.rawMaterial.id,
+          quantityBaseUnits: perSale.mul(effectiveQuantity),
+          label: recipeLine.rawMaterial.name,
+        })
+      }
+    }
+
+    for (const orderModifier of item.modifiers) {
+      const modifier = orderModifier.modifier
+      if (!modifier?.rawMaterial || modifier.quantityPerUnit == null) continue
+      const consumesInventory = modifier.inventoryMode === 'ADDITION' || consumedSubstitutionModifierIds.has(modifier.id)
+      if (!consumesInventory) continue
+      const modifierUnit = modifier.unit ?? modifier.rawMaterial.unit
+      const perSelection = convertUnit(modifier.quantityPerUnit, modifierUnit, modifier.rawMaterial.unit)
+      demands.push({
+        areaTicketLineId: item.areaTicketLineId,
+        orderItemId: item.id,
+        inventoryKind: AreaTicketInventoryTarget.RAW_MATERIAL,
+        inventoryId: modifier.rawMaterial.id,
+        quantityBaseUnits: perSelection.mul(effectiveQuantity).mul(orderModifier.quantity),
+        label: modifier.rawMaterial.name,
+      })
+    }
+  }
+
+  // A single reservation can aggregate base + modifier demand for the same
+  // line/target, so aggregate before matching it against reservation coverage.
+  const byLineTarget = new Map<string, AreaOrderInventoryDemand>()
+  for (const demand of demands) {
+    const lineKey = demand.areaTicketLineId ?? `order-item:${demand.orderItemId}`
+    const key = `${lineKey}:${demand.inventoryKind}:${demand.inventoryId}`
+    const current = byLineTarget.get(key)
+    if (current) current.quantityBaseUnits = current.quantityBaseUnits.add(demand.quantityBaseUnits)
+    else byLineTarget.set(key, { ...demand })
+  }
+
+  const areaTicketLineIds = [...new Set(items.map(item => item.areaTicketLineId).filter((id): id is string => !!id))]
+  const coveredTargets = new Map<string, Prisma.Decimal>()
+  if (areaTicketLineIds.length > 0) {
+    const reservations = await tx.areaTicketInventoryReservation.findMany({
+      where: {
+        venueId,
+        areaTicketLineId: { in: areaTicketLineIds },
+        status: {
+          in: [AreaTicketInventoryReservationStatus.ACTIVE, AreaTicketInventoryReservationStatus.CONSUMED],
+        },
+      },
+      select: { areaTicketLineId: true, inventoryKind: true, inventoryId: true, quantityBaseUnits: true },
+    })
+    for (const reservation of reservations) {
+      const key = `${reservation.areaTicketLineId}:${reservation.inventoryKind}:${reservation.inventoryId}`
+      coveredTargets.set(key, (coveredTargets.get(key) ?? new Prisma.Decimal(0)).add(reservation.quantityBaseUnits))
+    }
+  }
+
+  const byTarget = new Map<string, AggregatedAreaOrderInventoryDemand>()
+  for (const demand of byLineTarget.values()) {
+    let uncoveredQuantity = demand.quantityBaseUnits
+    if (demand.areaTicketLineId) {
+      const coveredQuantity =
+        coveredTargets.get(`${demand.areaTicketLineId}:${demand.inventoryKind}:${demand.inventoryId}`) ?? new Prisma.Decimal(0)
+      uncoveredQuantity = Prisma.Decimal.max(new Prisma.Decimal(0), uncoveredQuantity.sub(coveredQuantity))
+    }
+    if (uncoveredQuantity.isZero()) continue
+    const key = `${demand.inventoryKind}:${demand.inventoryId}`
+    const current = byTarget.get(key)
+    if (current) current.quantityBaseUnits = current.quantityBaseUnits.add(uncoveredQuantity)
+    else {
+      byTarget.set(key, {
+        inventoryKind: demand.inventoryKind,
+        inventoryId: demand.inventoryId,
+        quantityBaseUnits: uncoveredQuantity,
+        label: demand.label,
+      })
+    }
+  }
+  return [...byTarget.values()].sort((a, b) => `${a.inventoryKind}:${a.inventoryId}`.localeCompare(`${b.inventoryKind}:${b.inventoryId}`))
+}
+
+/**
+ * Applies non-reserved order inventory with the same row-lock protocol used by
+ * reservation issuance. Every target is locked and validated before the first
+ * mutation, and the caller's transaction rolls back reservation, recipe and
+ * modifier writes together on any later failure.
+ */
+async function consumeUnreservedAreaOrderInventory(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  orderId: string,
+  staffId?: string,
+): Promise<void> {
+  const demands = await buildUnreservedAreaOrderInventoryDemands(tx, venueId, orderId)
+  const lockedTargets: LockedAreaOrderInventoryTarget[] = []
+
+  for (const demand of demands) {
+    const rows =
+      demand.inventoryKind === AreaTicketInventoryTarget.QUANTITY_INVENTORY
+        ? await tx.$queryRaw<Array<{ id: string; currentStock: Prisma.Decimal }>>`
+            SELECT id, "currentStock"
+            FROM "Inventory"
+            WHERE id = ${demand.inventoryId} AND "venueId" = ${venueId}
+            FOR UPDATE
+          `
+        : await tx.$queryRaw<Array<{ id: string; currentStock: Prisma.Decimal; unit: any }>>`
+            SELECT id, "currentStock", unit
+            FROM "RawMaterial"
+            WHERE id = ${demand.inventoryId} AND "venueId" = ${venueId}
+            FOR UPDATE
+          `
+    if (rows.length !== 1) {
+      throw domainError(409, 'AREA_TICKET_INVENTORY_MISSING', `No se encontró inventario para "${demand.label}".`)
+    }
+
+    const reserved = await tx.areaTicketInventoryReservation.aggregate({
+      where: {
+        venueId,
+        inventoryKind: demand.inventoryKind,
+        inventoryId: demand.inventoryId,
+        status: AreaTicketInventoryReservationStatus.ACTIVE,
+      },
+      _sum: { quantityBaseUnits: true },
+    })
+    const currentStock = new Prisma.Decimal(rows[0].currentStock)
+    const available = currentStock.sub(reserved._sum.quantityBaseUnits ?? 0)
+    if (available.lessThan(demand.quantityBaseUnits)) {
+      throw domainError(
+        409,
+        'AREA_TICKET_INSUFFICIENT_STOCK',
+        `No hay existencia libre suficiente de "${demand.label}". Disponible: ${quantity(available)}; requerida: ${quantity(
+          demand.quantityBaseUnits,
+        )}.`,
+      )
+    }
+
+    if (demand.inventoryKind === AreaTicketInventoryTarget.QUANTITY_INVENTORY) {
+      lockedTargets.push({ ...demand, currentStock })
+      continue
+    }
+
+    const batches = await tx.$queryRaw<Array<{ id: string; remainingQuantity: Prisma.Decimal; costPerUnit: Prisma.Decimal }>>`
+      SELECT id, "remainingQuantity", "costPerUnit"
+      FROM "StockBatch"
+      WHERE "venueId" = ${venueId}
+        AND "rawMaterialId" = ${demand.inventoryId}
+        AND status = 'ACTIVE'
+        AND "remainingQuantity" > 0
+      ORDER BY "receivedDate" ASC, id ASC
+      FOR UPDATE
+    `
+    const batchStock = batches.reduce((sum, batch) => sum.add(batch.remainingQuantity), new Prisma.Decimal(0))
+    if (batchStock.lessThan(demand.quantityBaseUnits)) {
+      throw domainError(
+        409,
+        'AREA_TICKET_INSUFFICIENT_STOCK',
+        `Los lotes FIFO de "${demand.label}" no cubren la venta. Disponible: ${quantity(batchStock)}; requerida: ${quantity(
+          demand.quantityBaseUnits,
+        )}.`,
+      )
+    }
+    lockedTargets.push({ ...demand, currentStock, unit: (rows[0] as any).unit, batches })
+  }
+
+  for (const target of lockedTargets) {
+    if (target.inventoryKind === AreaTicketInventoryTarget.QUANTITY_INVENTORY) {
+      const updated = await tx.$queryRaw<Array<{ id: string; currentStock: Prisma.Decimal; previousStock: Prisma.Decimal }>>`
+        UPDATE "Inventory"
+        SET "currentStock" = "currentStock" - ${target.quantityBaseUnits},
+            "updatedAt" = NOW()
+        WHERE id = ${target.inventoryId}
+          AND "venueId" = ${venueId}
+        RETURNING id, "currentStock", ("currentStock" + ${target.quantityBaseUnits}) AS "previousStock"
+      `
+      if (updated.length !== 1) {
+        throw domainError(409, 'AREA_TICKET_INVENTORY_FINALIZATION_FAILED', 'No pudimos aplicar el inventario de la orden.')
+      }
+      await tx.inventoryMovement.create({
+        data: {
+          inventoryId: target.inventoryId,
+          type: 'SALE',
+          quantity: target.quantityBaseUnits.neg(),
+          previousStock: updated[0].previousStock,
+          newStock: updated[0].currentStock,
+          reason: 'Venta de orden con vales por área',
+          reference: orderId,
+          createdBy: staffId,
+        },
+      })
+      continue
+    }
+
+    let remaining = new Prisma.Decimal(target.quantityBaseUnits)
+    let currentStock = new Prisma.Decimal(target.currentStock)
+    for (const batch of target.batches ?? []) {
+      if (remaining.lessThanOrEqualTo(0)) break
+      const batchAvailable = new Prisma.Decimal(batch.remainingQuantity)
+      const used = Prisma.Decimal.min(batchAvailable, remaining)
+      if (used.lessThanOrEqualTo(0)) continue
+      const previousStock = currentStock
+      currentStock = currentStock.sub(used)
+      const batchRemaining = batchAvailable.sub(used)
+      await tx.stockBatch.update({
+        where: { id: batch.id },
+        data: {
+          remainingQuantity: batchRemaining,
+          status: batchRemaining.isZero() ? 'DEPLETED' : 'ACTIVE',
+          depletedAt: batchRemaining.isZero() ? new Date() : null,
+        },
+      })
+      await tx.rawMaterialMovement.create({
+        data: {
+          rawMaterialId: target.inventoryId,
+          venueId,
+          batchId: batch.id,
+          type: 'USAGE',
+          quantity: used.neg(),
+          unit: target.unit,
+          previousStock,
+          newStock: currentStock,
+          costImpact: used.mul(batch.costPerUnit).neg(),
+          reason: 'Venta de orden con vales por área',
+          reference: orderId,
+          createdBy: staffId,
+        },
+      })
+      remaining = remaining.sub(used)
+    }
+    if (remaining.greaterThan(0)) {
+      throw domainError(409, 'AREA_TICKET_INVENTORY_FINALIZATION_FAILED', 'Los lotes FIFO cambiaron durante la venta.')
+    }
+    await tx.rawMaterial.update({
+      where: { id: target.inventoryId },
+      data: { currentStock },
+    })
+  }
+}
+
+/**
  * Se llama después de crear Payment pero antes del COMMIT. Payment, Order,
  * sesión, vales y reservas quedan confirmados o revertidos juntos.
  */
@@ -2086,27 +2560,37 @@ export async function finalizeAreaTicketPaymentInTransaction(
     paymentId: string
     fullyPaid: boolean
     staffId?: string
+    reconcileCapturedPayment?: boolean
     locked: LockedAreaTicketPayment | null
   },
-): Promise<{ areaTicketOrder: boolean; sessionId?: string }> {
+): Promise<{ areaTicketOrder: boolean; sessionId?: string; fullyPaid?: boolean }> {
   if (!input.locked) return { areaTicketOrder: false }
   await tx.$queryRaw`SELECT id FROM "AreaTicketCheckoutSession" WHERE id = ${input.locked.sessionId} AND "venueId" = ${input.venueId} FOR UPDATE`
-  const ticketIds = await tx.areaTicket.findMany({
+  const tickets = await tx.areaTicket.findMany({
     where: { venueId: input.venueId, checkoutSessionId: input.locked.sessionId },
-    select: { id: true },
+    select: { id: true, fulfillmentModeSnapshot: true },
     orderBy: { id: 'asc' },
   })
-  if (ticketIds.length > 0) {
+  if (tickets.length > 0) {
     await tx.$queryRaw(
       Prisma.sql`SELECT id FROM "AreaTicket" WHERE "venueId" = ${input.venueId} AND id IN (${Prisma.join(
-        ticketIds.map(ticket => ticket.id),
+        tickets.map(ticket => ticket.id),
       )}) ORDER BY id FOR UPDATE`,
     )
   }
   await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${input.orderId} AND "venueId" = ${input.venueId} FOR UPDATE`
   const lockedOrder = await tx.order.findFirst({
     where: { id: input.orderId, venueId: input.venueId },
-    select: { paymentStatus: true, status: true },
+    select: {
+      paymentStatus: true,
+      status: true,
+      subtotal: true,
+      discountAmount: true,
+      serviceChargeAmount: true,
+      servedById: true,
+      createdById: true,
+      areaTicketCode: true,
+    },
   })
   if (!lockedOrder) {
     throw domainError(409, 'CHECKOUT_ORDER_MISSING', 'La orden materializada de esta sesión ya no existe.')
@@ -2114,8 +2598,38 @@ export async function finalizeAreaTicketPaymentInTransaction(
   if (lockedOrder.paymentStatus === 'REFUNDED' || lockedOrder.status === 'CANCELLED' || lockedOrder.status === 'DELETED') {
     throw domainError(409, 'CHECKOUT_ORDER_NOT_PAYABLE', 'La orden materializada ya no admite pagos.')
   }
-  const orderIsFullyPaid = lockedOrder.paymentStatus === 'PAID'
-  if (orderIsFullyPaid !== input.fullyPaid) {
+  let finalFullyPaid = input.fullyPaid
+  if (input.reconcileCapturedPayment) {
+    const payments = await tx.payment.findMany({
+      where: { orderId: input.orderId, venueId: input.venueId, status: 'COMPLETED' },
+      select: { amount: true, tipAmount: true },
+    })
+    const totalPaid = payments.reduce((sum, payment) => sum.add(payment.amount).add(payment.tipAmount), new Prisma.Decimal(0))
+    const totalTip = payments.reduce((sum, payment) => sum.add(payment.tipAmount), new Prisma.Decimal(0))
+    const total = new Prisma.Decimal(lockedOrder.subtotal)
+      .sub(lockedOrder.discountAmount ?? 0)
+      .add(lockedOrder.serviceChargeAmount ?? 0)
+      .add(totalTip)
+    const remainingBalance = Prisma.Decimal.max(new Prisma.Decimal(0), total.sub(totalPaid))
+    finalFullyPaid = remainingBalance.lessThanOrEqualTo(new Prisma.Decimal('0.01'))
+    const paymentStatus = finalFullyPaid ? 'PAID' : totalPaid.greaterThan(0) ? 'PARTIAL' : 'PENDING'
+    await tx.order.update({
+      where: { id: input.orderId },
+      data: {
+        paymentStatus,
+        status: finalFullyPaid ? 'COMPLETED' : 'PENDING',
+        paidAmount: totalPaid,
+        remainingBalance,
+        tipAmount: totalTip,
+        total,
+        ...(finalFullyPaid ? { completedAt: new Date() } : {}),
+        ...(!lockedOrder.servedById && input.staffId
+          ? { servedById: input.staffId, createdById: lockedOrder.createdById ?? input.staffId }
+          : {}),
+        ...(finalFullyPaid && lockedOrder.areaTicketCode ? { claimedByTerminalId: null, claimedAt: null } : {}),
+      },
+    })
+  } else if ((lockedOrder.paymentStatus === 'PAID') !== finalFullyPaid) {
     throw domainError(
       409,
       'CHECKOUT_PAYMENT_STATE_MISMATCH',
@@ -2132,6 +2646,19 @@ export async function finalizeAreaTicketPaymentInTransaction(
   if (!attempt) {
     throw domainError(409, 'CHECKOUT_PAYMENT_ATTEMPT_MISSING', 'No encontramos el intento de pago de esta sesión.')
   }
+  if (attempt.status === AreaTicketPaymentAttemptStatus.SUCCEEDED) {
+    if (attempt.paymentId !== input.paymentId) {
+      throw domainError(409, 'CHECKOUT_PAYMENT_ALREADY_FINALIZED', 'La sesión ya fue finalizada por otro pago; requiere conciliación.', {
+        paymentAttemptId: attempt.id,
+        paymentId: attempt.paymentId,
+      })
+    }
+    return {
+      areaTicketOrder: true,
+      sessionId: input.locked.sessionId,
+      ...(input.reconcileCapturedPayment ? { fullyPaid: finalFullyPaid } : {}),
+    }
+  }
   if (attempt.status !== AreaTicketPaymentAttemptStatus.SUCCEEDED) {
     await tx.areaTicketPaymentAttempt.update({
       where: { id: attempt.id },
@@ -2144,7 +2671,7 @@ export async function finalizeAreaTicketPaymentInTransaction(
     })
   }
 
-  if (!input.fullyPaid) {
+  if (!finalFullyPaid) {
     await tx.areaTicketCheckoutSession.update({
       where: { id: input.locked.sessionId },
       data: {
@@ -2153,25 +2680,48 @@ export async function finalizeAreaTicketPaymentInTransaction(
         version: { increment: 1 },
       },
     })
-    return { areaTicketOrder: true, sessionId: input.locked.sessionId }
+    return {
+      areaTicketOrder: true,
+      sessionId: input.locked.sessionId,
+      ...(input.reconcileCapturedPayment ? { fullyPaid: false } : {}),
+    }
   }
 
+  await lockAreaOrderInventoryFootprint(tx, input.venueId, input.locked.sessionId, input.orderId)
   await consumeAreaTicketReservations(tx, input.venueId, input.locked.sessionId, input.orderId, input.staffId)
+  await consumeUnreservedAreaOrderInventory(tx, input.venueId, input.orderId, input.staffId)
   const paidAt = new Date()
-  await tx.areaTicket.updateMany({
-    where: {
-      venueId: input.venueId,
-      checkoutSessionId: input.locked.sessionId,
-      orderId: input.orderId,
-      status: AreaTicketStatus.CLAIMED,
-    },
-    data: {
-      status: AreaTicketStatus.PAID,
-      paidAt,
-      claimExpiresAt: null,
-      version: { increment: 1 },
-    },
-  })
+  const immediateTicketIds = tickets.filter(ticket => ticket.fulfillmentModeSnapshot === FulfillmentMode.IMMEDIATE).map(ticket => ticket.id)
+  const deferredTicketIds = tickets.filter(ticket => ticket.fulfillmentModeSnapshot !== FulfillmentMode.IMMEDIATE).map(ticket => ticket.id)
+  const paidTicketUpdate = {
+    paidAt,
+    claimExpiresAt: null,
+    version: { increment: 1 },
+  }
+  if (immediateTicketIds.length > 0) {
+    await tx.areaTicket.updateMany({
+      where: {
+        id: { in: immediateTicketIds },
+        venueId: input.venueId,
+        checkoutSessionId: input.locked.sessionId,
+        orderId: input.orderId,
+        status: AreaTicketStatus.CLAIMED,
+      },
+      data: { ...paidTicketUpdate, status: AreaTicketStatus.DELIVERED },
+    })
+  }
+  if (deferredTicketIds.length > 0) {
+    await tx.areaTicket.updateMany({
+      where: {
+        id: { in: deferredTicketIds },
+        venueId: input.venueId,
+        checkoutSessionId: input.locked.sessionId,
+        orderId: input.orderId,
+        status: AreaTicketStatus.CLAIMED,
+      },
+      data: { ...paidTicketUpdate, status: AreaTicketStatus.PAID },
+    })
+  }
   await tx.areaTicketCheckoutSession.update({
     where: { id: input.locked.sessionId },
     data: {
@@ -2180,5 +2730,9 @@ export async function finalizeAreaTicketPaymentInTransaction(
       version: { increment: 1 },
     },
   })
-  return { areaTicketOrder: true, sessionId: input.locked.sessionId }
+  return {
+    areaTicketOrder: true,
+    sessionId: input.locked.sessionId,
+    ...(input.reconcileCapturedPayment ? { fullyPaid: true } : {}),
+  }
 }

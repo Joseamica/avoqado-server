@@ -14,11 +14,14 @@ import {
   ProviderInvoiceSummary,
   ReceptorInput,
   ReceptorValidationResult,
+  SatValidationField,
+  SatValidationResult,
   SearchInvoicesParams,
   StampedInvoice,
   UpdateOrgLegalParams,
   UploadCsdParams,
   UploadCsdResult,
+  UpsertCustomerParams,
 } from './fiscal-provider.interface'
 
 const toPesos = (cents: number): number => Math.round(cents) / 100
@@ -79,6 +82,56 @@ export class FacturapiProvider implements FiscalProvider {
     // Format-level validation only here; the SDK will reject at createInvoice() time if SAT
     // rejects the receptor data (e.g. RFC not found in registry, mismatched regimenFiscal).
     return { valid: reasons.length === 0, reasons }
+  }
+
+  /**
+   * Mapea el `path` que devuelve Facturapi al campo del formulario. Los paths siguen la
+   * forma del payload de Customer (`legal_name`, `tax_id`, `tax_system`, `address.zip`),
+   * no los nombres del CFDI.
+   */
+  private static mapValidationPath(path: string): SatValidationField {
+    if (path.startsWith('legal_name')) return 'razonSocial'
+    if (path.startsWith('tax_id')) return 'rfc'
+    if (path.startsWith('tax_system')) return 'regimenFiscal'
+    if (path.startsWith('address')) return 'codigoPostal'
+    if (path.startsWith('email')) return 'email'
+    return 'otro'
+  }
+
+  async upsertCustomer(params: UpsertCustomerParams): Promise<string> {
+    const payload = {
+      legal_name: params.razonSocial,
+      tax_id: params.rfc,
+      tax_system: params.regimenFiscal,
+      address: { zip: params.codigoPostal },
+      ...(params.email ? { email: params.email } : {}),
+    }
+
+    if (params.existingCustomerId) {
+      try {
+        const updated = await this.client.customers.update(params.existingCustomerId, payload)
+        return updated.id
+      } catch (err) {
+        // El Customer guardado pudo borrarse en Facturapi (o venir de otra organización).
+        // Cualquier fallo al actualizar se resuelve creando uno nuevo; el id se re-persiste.
+        const msg = err instanceof Error ? err.message : String(err)
+        if (!/404|not found/i.test(msg)) throw err
+      }
+    }
+
+    const created = await this.client.customers.create(payload)
+    return created.id
+  }
+
+  async validateCustomerTaxInfo(customerId: string): Promise<SatValidationResult> {
+    const res = await this.client.customers.validateTaxInfo(customerId)
+    return {
+      valid: Boolean(res.is_valid),
+      errors: (res.errors ?? []).map(e => ({
+        field: FacturapiProvider.mapValidationPath(e.path ?? ''),
+        message: e.message,
+      })),
+    }
   }
 
   async createInvoice(params: CreateInvoiceParams): Promise<StampedInvoice> {

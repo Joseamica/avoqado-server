@@ -15,6 +15,7 @@ import {
   getBillingTaxProfileForCustomer,
   uploadConstancia,
   searchBillingCustomers,
+  validateBillingTaxProfile,
 } from '@/services/superadmin/platform-billing/billingTaxProfile.service'
 import {
   issuePlatformCfdi,
@@ -32,8 +33,11 @@ import type { BillingCustomerKind } from '@/services/superadmin/platform-billing
 /** Map a typed PlatformBillingError to an HTTP status; otherwise defer to the global handler. */
 function handleBillingError(error: unknown, res: Response, next: NextFunction): void {
   if (error instanceof PlatformBillingError) {
+    // PROVIDER = falla real del PAC (timeout, 5xx, llave) → 502. Todo lo demás es dato
+    // corregible por el operador → 422, para que la UI lo trate como validación y no
+    // como caída del servidor.
     const status = error.code === 'NO_CFDI' ? 404 : error.code === 'PROVIDER' ? 502 : 422
-    res.status(status).json({ success: false, error: error.message, code: error.code })
+    res.status(status).json({ success: false, error: error.message, code: error.code, field: error.field })
     return
   }
   next(error as Error)
@@ -153,18 +157,30 @@ export async function getTaxProfileForCustomer(req: Request, res: Response, next
 export async function upsertTaxProfile(req: Request, res: Response, next: NextFunction) {
   try {
     const { userId } = (req as any).authContext
-    const profile = await upsertBillingTaxProfile({ ...req.body, performedById: userId })
+    const saved = await upsertBillingTaxProfile({ ...req.body, performedById: userId })
     await prisma.activityLog.create({
       data: {
         staffId: userId,
-        venueId: profile.venueId,
+        venueId: saved.venueId,
         action: 'PLATFORM_TAXPROFILE_UPSERTED',
         entity: 'BillingTaxProfile',
-        entityId: profile.id,
-        data: { customerType: profile.customerType, rfc: profile.rfc },
+        entityId: saved.id,
+        data: { customerType: saved.customerType, rfc: saved.rfc },
       },
     })
-    res.json({ success: true, data: profile })
+    // Validación best-effort contra el SAT: nunca impide que el guardado haya sido exitoso.
+    const { profile, validation } = await validateBillingTaxProfile(saved.id)
+    res.json({ success: true, data: profile, validation })
+  } catch (error) {
+    handleBillingError(error, res, next)
+  }
+}
+
+/** POST /api/v1/superadmin/billing/tax-profiles/:id/validate — revalida contra el padrón del SAT. */
+export async function validateTaxProfile(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { profile, validation } = await validateBillingTaxProfile(req.params.id)
+    res.json({ success: true, data: profile, validation })
   } catch (error) {
     handleBillingError(error, res, next)
   }

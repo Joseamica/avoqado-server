@@ -240,16 +240,13 @@ export interface QueryVenueActivityLogsParams {
   pageSize?: number
 }
 
-/** Query activity logs for ONE venue with filters + pagination. */
-export async function queryVenueActivityLogs(params: QueryVenueActivityLogsParams): Promise<PaginatedActivityLogs> {
-  const { venueId, page = 1, pageSize = 25 } = params
-
-  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { id: true, name: true, timezone: true } })
-  if (!venue) {
-    return { logs: [], pagination: { page, pageSize, total: 0, totalPages: 0 } }
-  }
-
-  const where: Record<string, unknown> = { venueId }
+/**
+ * The filter set, in ONE place. The listing and the export must never diverge: an export
+ * that quietly matches a different set of rows than the screen the user is looking at is a
+ * bug nobody reports, because the file looks plausible.
+ */
+export function buildVenueActivityLogWhere(params: QueryVenueActivityLogsParams, venueTimezone?: string | null): Record<string, unknown> {
+  const where: Record<string, unknown> = { venueId: params.venueId }
   if (params.staffId) where.staffId = params.staffId
   if (params.action) where.action = params.action
   if (params.entity) where.entity = params.entity
@@ -263,12 +260,25 @@ export async function queryVenueActivityLogs(params: QueryVenueActivityLogsParam
   if (params.startDate || params.endDate) {
     // Parse the bare YYYY-MM-DD in the VENUE timezone (pass a STRING, not new Date()) so a
     // venue-local day range is correct under any host TZ (prod runs UTC). See critical-warnings.md.
-    const venueTz = venue.timezone || 'America/Mexico_City'
+    const venueTz = venueTimezone || 'America/Mexico_City'
     const createdAt: Record<string, Date> = {}
     if (params.startDate) createdAt.gte = fromZonedTime(`${params.startDate}T00:00:00.000`, venueTz)
     if (params.endDate) createdAt.lte = fromZonedTime(`${params.endDate}T23:59:59.999`, venueTz)
     where.createdAt = createdAt
   }
+  return where
+}
+
+/** Query activity logs for ONE venue with filters + pagination. */
+export async function queryVenueActivityLogs(params: QueryVenueActivityLogsParams): Promise<PaginatedActivityLogs> {
+  const { venueId, page = 1, pageSize = 25 } = params
+
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { id: true, name: true, timezone: true } })
+  if (!venue) {
+    return { logs: [], pagination: { page, pageSize, total: 0, totalPages: 0 } }
+  }
+
+  const where = buildVenueActivityLogWhere(params, venue.timezone)
 
   const [total, logs] = await Promise.all([
     prisma.activityLog.count({ where: where as any }),
@@ -295,6 +305,45 @@ export async function queryVenueActivityLogs(params: QueryVenueActivityLogsParam
   }))
 
   return { logs: enrichedLogs, pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) } }
+}
+
+/**
+ * Every matching row for an export, capped. Deliberately NOT paginated: an export that
+ * silently returns page 1 is worse than one that refuses, so the caller counts first and
+ * rejects over the cap rather than truncating.
+ *
+ * `orderBy` carries `id` as a tiebreaker — two rows written in the same millisecond would
+ * otherwise come back in arbitrary order, and a file whose row order changes between
+ * downloads is indefensible in front of an auditor.
+ */
+export async function fetchVenueActivityLogsForExport(params: QueryVenueActivityLogsParams & { cap: number }): Promise<ActivityLogEntry[]> {
+  const venue = await prisma.venue.findUnique({ where: { id: params.venueId }, select: { name: true, timezone: true } })
+  if (!venue) return []
+
+  const logs = await prisma.activityLog.findMany({
+    where: buildVenueActivityLogWhere(params, venue.timezone),
+    include: { staff: { select: { id: true, firstName: true, lastName: true } } },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    take: params.cap,
+  })
+
+  return logs.map(log => ({
+    id: log.id,
+    action: log.action,
+    entity: log.entity,
+    entityId: log.entityId,
+    data: log.data,
+    ipAddress: log.ipAddress,
+    createdAt: log.createdAt,
+    staff: log.staff,
+    venueName: venue.name,
+  }))
+}
+
+/** Row count for the same filters, so the caller can refuse before building a huge file. */
+export async function countVenueActivityLogsForExport(params: QueryVenueActivityLogsParams): Promise<number> {
+  const venue = await prisma.venue.findUnique({ where: { id: params.venueId }, select: { timezone: true } })
+  return prisma.activityLog.count({ where: buildVenueActivityLogWhere(params, venue?.timezone) as never })
 }
 
 /** Distinct action strings for ONE venue (filter dropdown). */

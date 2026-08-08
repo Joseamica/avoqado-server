@@ -9,10 +9,11 @@ import { adjustInventoryStock } from '@/services/dashboard/productInventory.serv
 import { createRawMaterial } from '@/services/dashboard/rawMaterial.service'
 import { listPresentations, setPresentations } from '@/services/dashboard/rawMaterialPresentation.service'
 import { getReorderSuggestions, getAutoReorderConfig, setAutoReorderConfig } from '@/services/dashboard/autoReorder.service'
+import { getBatchesForRawMaterial, quarantineBatch, releaseBatchFromQuarantine } from '@/services/dashboard/fifoBatch.service'
 import { planGateMessage } from '../planGate'
 import { venuesWithFeatureAccess } from '@/services/access/basePlan.service'
 import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
-import { MovementType, RawMaterialMovementType, RawMaterialCategory, Unit } from '@prisma/client'
+import { BatchStatus, MovementType, RawMaterialMovementType, RawMaterialCategory, Unit } from '@prisma/client'
 
 const MOVEMENT_TYPE = {
   adjustment: MovementType.ADJUSTMENT,
@@ -21,6 +22,22 @@ const MOVEMENT_TYPE = {
 } as const
 
 const round2 = (n: number): number => Math.round(n * 100) / 100
+
+/** The operator speaks Spanish; the Prisma enum does not. Keys stay Spanish — they are the values the operator passes in. */
+const BATCH_STATUS_BY_INPUT = {
+  activo: BatchStatus.ACTIVE,
+  agotado: BatchStatus.DEPLETED,
+  caducado: BatchStatus.EXPIRED,
+  retenido: BatchStatus.QUARANTINED,
+} as const
+
+/** Same reason in reverse: what we hand back to the operator is a Spanish label, not the raw enum. */
+const BATCH_STATUS_LABEL = {
+  [BatchStatus.ACTIVE]: 'Activo',
+  [BatchStatus.DEPLETED]: 'Agotado',
+  [BatchStatus.EXPIRED]: 'Caducado',
+  [BatchStatus.QUARANTINED]: 'Retenido',
+} as const
 
 export function registerInventoryTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
@@ -616,6 +633,130 @@ export function registerInventoryTools(server: McpServer, scope: McpScope) {
         unidadBase: rm.unit,
         presentaciones: saved.map(p => ({ nombre: p.name, equivaleAUnidadesBase: Number(p.factorToBase) })),
       })
+    },
+  )
+  server.tool(
+    'stock_batches',
+    'Lotes de un insumo en una sucursal a la que tengas acceso, del más viejo al más nuevo (el orden real en que se van a consumir: PEPS). Devuelve número de lote, cantidad inicial y remanente, costo unitario, fecha de recepción, caducidad, estado (activo / agotado / caducado / retenido) y la orden de compra que lo trajo. Responde "¿qué lotes tengo?", "¿qué se me caduca primero?", "¿de qué compra vino este lote?". El insumo se busca por nombre; si coincide con varios, los devuelve para que seas específico.',
+    {
+      venueId: z.string().describe('Sucursal dueña del insumo (debe estar en tu alcance)'),
+      material: z.string().min(1).describe('Nombre del insumo o parte de él'),
+      estado: z
+        .enum(['activo', 'agotado', 'caducado', 'retenido'])
+        .optional()
+        .describe('Filtra por estado del lote; sin esto devuelve todos'),
+    },
+    async ({ venueId, material, estado }) => {
+      const where = guard.venueFilter(venueId)
+      guard.requirePermission('inventory:read', venueId) // WHY: mirror the dashboard's inventory:read gate — per-batch costs are not free-for-all
+      const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'El control de inventario')
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+
+      const matches = await prisma.rawMaterial.findMany({
+        where: { ...where, name: { contains: material, mode: 'insensitive' as const } },
+        select: { id: true, name: true, unit: true },
+        take: 10,
+      })
+      if (matches.length === 0) {
+        return text({ ok: false, error: `No encontré un insumo que coincida con "${material}".` })
+      }
+      if (matches.length > 1) {
+        return text({
+          ok: false,
+          ambiguous: true,
+          error: `"${material}" coincide con varios insumos — sé más específico.`,
+          matches: matches.map(m => m.name),
+        })
+      }
+
+      const batches = await getBatchesForRawMaterial(venueId, matches[0].id, { status: estado ? BATCH_STATUS_BY_INPUT[estado] : undefined })
+      return text({
+        ok: true,
+        insumo: matches[0].name,
+        unidad: matches[0].unit,
+        lotes: batches.map((b: any) => ({
+          lote: b.batchNumber,
+          id: b.id,
+          cantidadInicial: Number(b.initialQuantity),
+          remanente: Number(b.remainingQuantity),
+          costoUnitario: Number(b.costPerUnit), // pesos, 1:1
+          recibido: b.receivedDate,
+          caduca: b.expirationDate ?? null,
+          estado: BATCH_STATUS_LABEL[b.status as keyof typeof BATCH_STATUS_LABEL] ?? b.status,
+          ordenDeCompra: b.purchaseOrderItem?.purchaseOrder?.orderNumber ?? null,
+        })),
+      })
+    },
+  )
+
+  server.tool(
+    'quarantine_batch',
+    'Retiene un lote por un problema de calidad (almacén de cuarentena), o lo libera. Retener SACA el lote de la rotación PEPS y descuenta su remanente del disponible; liberar lo regresa, salvo que ya haya caducado. ALTO IMPACTO: mueve existencia real. Por DEFECTO sólo PREVISUALIZA; vuelve a llamar con confirm:true para aplicarlo. ESCRIBE — requiere inventory:adjust. El motivo es obligatorio: es lo que va a leer quien audite la decisión.',
+    {
+      venueId: z.string().describe('Sucursal dueña del lote (debe estar en tu alcance)'),
+      batchId: z.string().min(1).describe('Id del lote (lo devuelve stock_batches)'),
+      accion: z.enum(['retener', 'liberar']).describe("'retener' lo saca de circulación; 'liberar' lo regresa"),
+      motivo: z.string().min(1).describe('Por qué se retiene o se libera (queda en la bitácora)'),
+      confirm: z.boolean().optional().describe('Debe ser true para aplicar; sin esto sólo obtienes la previsualización'),
+    },
+    async ({ venueId, batchId, accion, motivo, confirm }) => {
+      const where = guard.venueFilter(venueId)
+      guard.requirePermission('inventory:adjust', venueId) // moving available stock is an adjustment, not a generic update
+      const gate = await planGateMessage(venueId, 'INVENTORY_TRACKING', 'El control de inventario')
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+
+      // Resolve against the in-scope venue BEFORE touching anything: a batchId from
+      // another venue must not even show up in the preview.
+      const batch = await prisma.stockBatch.findFirst({
+        where: { ...where, id: batchId },
+        select: { id: true, batchNumber: true, status: true, remainingQuantity: true, unit: true, rawMaterial: { select: { name: true } } },
+      })
+      if (!batch) return text({ ok: false, error: 'No encontré ese lote en esa sucursal.' })
+
+      const isQuarantine = accion === 'retener'
+      if (isQuarantine && batch.status === 'QUARANTINED')
+        return text({ ok: false, error: `El lote ${batch.batchNumber} ya está retenido.` })
+      if (!isQuarantine && batch.status !== 'QUARANTINED')
+        return text({ ok: false, error: `El lote ${batch.batchNumber} no está retenido.` })
+
+      const remaining = Number(batch.remainingQuantity)
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          change: {
+            insumo: batch.rawMaterial.name,
+            lote: batch.batchNumber,
+            label: 'Estado del lote',
+            from: BATCH_STATUS_LABEL[batch.status as keyof typeof BATCH_STATUS_LABEL] ?? batch.status,
+            to: isQuarantine ? 'Retenido' : 'Se resuelve según caducidad y remanente',
+          },
+          message: isQuarantine
+            ? `Esto RETIENE el lote ${batch.batchNumber} de "${batch.rawMaterial.name}" y descuenta ${remaining} ${batch.unit} del disponible. Confirma con el operador; luego vuelve a llamar con confirm:true.`
+            : `Esto LIBERA el lote ${batch.batchNumber} de "${batch.rawMaterial.name}" y regresa ${remaining} ${batch.unit} al disponible (salvo que ya haya caducado, en cuyo caso queda como caducado y no regresa). Confirma con el operador; luego vuelve a llamar con confirm:true.`,
+        })
+      }
+
+      try {
+        const result = isQuarantine
+          ? await quarantineBatch(venueId, batchId, motivo, scope.staffId)
+          : await releaseBatchFromQuarantine(venueId, batchId, motivo, scope.staffId)
+        await auditMcpWrite(scope, {
+          action: isQuarantine ? 'STOCK_BATCH_QUARANTINED' : 'STOCK_BATCH_RELEASED',
+          entity: 'StockBatch',
+          entityId: batchId,
+          venueId,
+          data: { lote: batch.batchNumber, insumo: batch.rawMaterial.name, motivo, remanente: remaining },
+        })
+        return text({
+          ok: true,
+          lote: batch.batchNumber,
+          insumo: batch.rawMaterial.name,
+          estado: BATCH_STATUS_LABEL[result.status as keyof typeof BATCH_STATUS_LABEL] ?? result.status,
+        })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
     },
   )
 }

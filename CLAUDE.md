@@ -3,6 +3,10 @@
 Multi-tenant B2B SaaS for restaurant/venue management (POS, payments, inventory, staff). Express.js + TypeScript, PostgreSQL/Prisma,
 Socket.IO, Redis, RabbitMQ. Payments via Blumon (TPV + E-commerce) and Stripe (subscriptions).
 
+> **Reglas de entorno** — sesiones de IA en paralelo, y cuándo verificar según la carga de la
+> máquina — están en el `CLAUDE.md` del workspace (`../CLAUDE.md`), que auto-carga junto con este
+> archivo. Léelas antes de correr builds/tests o de tocar git.
+
 ## 🔴 CRITICAL — Ask which payment tier BEFORE building or changing anything
 
 Avoqado is a tier-gated SaaS (**FREE · PRO · PREMIUM · ENTERPRISE**). Whenever you add a new feature, modify existing behavior, or expose a

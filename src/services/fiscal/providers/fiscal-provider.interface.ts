@@ -42,6 +42,27 @@ export interface ReceptorValidationResult {
   reasons: string[] // human-readable, Spanish (shown to staff/customer on failure)
 }
 
+/** Datos para crear/actualizar el Customer espejo en el PAC. */
+export interface UpsertCustomerParams extends ReceptorInput {
+  email?: string
+  /** Id del Customer ya guardado, si existe. Se intenta actualizar antes de crear. */
+  existingCustomerId?: string | null
+}
+
+/** Campo del formulario al que apunta un error de validación del SAT. */
+export type SatValidationField = 'razonSocial' | 'rfc' | 'regimenFiscal' | 'codigoPostal' | 'email' | 'otro'
+
+export interface SatValidationError {
+  field: SatValidationField
+  message: string
+}
+
+/** Resultado de validar los datos del receptor contra el padrón del SAT (sin gastar timbre). */
+export interface SatValidationResult {
+  valid: boolean
+  errors: SatValidationError[]
+}
+
 export interface CfdiItemTax {
   type: 'IVA' | 'IEPS' | 'ISR'
   factor: 'Tasa' | 'Cuota' | 'Exento'
@@ -207,6 +228,10 @@ export interface FiscalProvider {
   updateOrgLegal(params: UpdateOrgLegalParams): Promise<void>
   uploadCsd(params: UploadCsdParams): Promise<UploadCsdResult>
   validateReceptor(params: ReceptorInput): Promise<ReceptorValidationResult>
+  /** Crea o actualiza el Customer espejo en el PAC. Devuelve su id. */
+  upsertCustomer(params: UpsertCustomerParams): Promise<string>
+  /** Valida los datos del Customer contra el padrón del SAT. No gasta timbre. */
+  validateCustomerTaxInfo(customerId: string): Promise<SatValidationResult>
   createInvoice(params: CreateInvoiceParams): Promise<StampedInvoice>
   /** Issues a factura global to "Público en General" (RFC XAXX010101000). */
   createGlobalInvoice(params: GlobalInvoiceParams): Promise<StampedInvoice>

@@ -1122,6 +1122,54 @@ export type GenerateLabelsDto = z.infer<typeof GenerateLabelsSchema>['body']
 export type CreatePricingPolicyDto = z.infer<typeof CreatePricingPolicySchema>['body']
 export type UpdatePricingPolicyDto = z.infer<typeof UpdatePricingPolicySchema>['body']
 
+export const GetStockCoverageReportSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid(),
+  }),
+  query: z
+    .object({
+      windowDays: z.coerce.number().int().positive().max(365).optional(),
+      maxDays: z.coerce.number().nonnegative().optional(),
+      limit: z.coerce.number().int().positive().max(1000).optional(),
+    })
+    .optional()
+    .default({}),
+})
+
+export type GetStockCoverageReportQuery = z.infer<typeof GetStockCoverageReportSchema>['query']
+
+// ── Inventory batches (traceability and quarantine) ──────────────────────────
+
+/**
+ * The reason is mandatory in both directions. Holding goods without saying why leaves the
+ * warehouse frozen "just because", and releasing them without saying why erases the only
+ * trace that somebody inspected and decided. It is the line an auditor reads months later.
+ */
+const batchActionReason = z
+  .string()
+  .trim()
+  .min(1, 'Escribe el motivo: es lo que va a leer quien audite esta decisión.')
+  .max(500, 'El motivo no puede pasar de 500 caracteres.')
+
+export const QuarantineBatchSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid(),
+    batchId: cuidLikeId(),
+  }),
+  body: z.object({ reason: batchActionReason }),
+})
+
+export const ReleaseBatchSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid(),
+    batchId: cuidLikeId(),
+  }),
+  body: z.object({ reason: batchActionReason }),
+})
+
+export type QuarantineBatchDto = z.infer<typeof QuarantineBatchSchema>['body']
+export type ReleaseBatchDto = z.infer<typeof ReleaseBatchSchema>['body']
+
 // NEW: Product Wizard type exports
 export type ProductWizardStep1Dto = z.infer<typeof ProductWizardStep1Schema>['body']
 export type ProductWizardStep2Dto = z.infer<typeof ProductWizardStep2Schema>['body']

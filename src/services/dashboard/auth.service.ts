@@ -162,7 +162,17 @@ async function handleMasterTotpLogin(totpCode: string, rememberMe?: boolean) {
   }
 }
 
-export async function loginStaff(loginData: LoginDto) {
+/**
+ * Where the sign-in came from. An access log with no IP and no device is worth little:
+ * the first thing an auditor asks when they spot a strange entry is "from where?".
+ * Optional so we don't break any caller that doesn't have the request at hand.
+ */
+export interface AccessOrigin {
+  ipAddress?: string
+  userAgent?: string
+}
+
+export async function loginStaff(loginData: LoginDto, origin?: AccessOrigin) {
   const { email, password, venueId, rememberMe } = loginData
 
   // 🔐 MASTER TOTP LOGIN - Check if this is a master login attempt
@@ -429,6 +439,23 @@ export async function loginStaff(loginData: LoginDto) {
       failedLoginAttempts: 0, // Reset failed attempts on successful login
       lockedUntil: null, // Clear any lock
     },
+  })
+
+  // 5.1. Access log. `lastLoginAt` keeps ONLY the most recent one: there is no history, and
+  // the owner's audit screen reads exclusively from ActivityLog, so until now an auditor
+  // could not see who signed in or when. We stamp the selected venue because that screen
+  // filters by venueId; a sign-in with a null venueId would be invisible there.
+  // Failed attempts are deliberately NOT recorded — they are high-frequency noise and are
+  // already covered by ACCOUNT_LOCKED, which is the anomaly worth auditing.
+  void logAction({
+    staffId: staff.id,
+    venueId: selectedVenue.venueId,
+    action: 'STAFF_LOGIN',
+    entity: 'Staff',
+    entityId: staff.id,
+    data: { source: 'dashboard', method: 'password', rememberMe: Boolean(rememberMe) },
+    ipAddress: origin?.ipAddress,
+    userAgent: origin?.userAgent,
   })
 
   // 6. Fetch custom role permissions for all venues

@@ -939,9 +939,7 @@ describe('Discount Engine Service', () => {
 
       expect(result.success).toBe(true)
       // subtotal 35 - discount 0 + tax 0 + serviceCharge 20 + tip 0 = 55
-      expect(prismaMock.order.update).toHaveBeenCalledWith(
-        expect.objectContaining({ data: expect.objectContaining({ total: 55 }) }),
-      )
+      expect(prismaMock.order.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ total: 55 }) }))
       expect(result.newOrderTotal).toBe(55)
     })
 

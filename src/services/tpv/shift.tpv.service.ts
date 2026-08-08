@@ -1,4 +1,5 @@
 import { Shift, ShiftStatus } from '@prisma/client'
+import { computeCashDifference } from '../dashboard/shift.dashboard.service'
 import { Decimal } from '@prisma/client/runtime/library'
 import logger from '../../config/logger'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
@@ -928,6 +929,33 @@ interface ShiftCloseData {
   notes?: string
 }
 
+export type CashReconciliationOutcome =
+  | 'APPLIED'
+  | 'SKIPPED'
+  | 'LEGACY_APPLIED'
+  | 'IGNORED_DISABLED'
+  | 'IGNORED_INVALID'
+  | 'IGNORED_OVERFLOW'
+  | 'NOT_REQUESTED'
+
+export interface CashReconciliationResult {
+  outcome: CashReconciliationOutcome
+  countedCash?: string
+  cashDifference?: string
+}
+
+export interface ShiftCloseRequestContext {
+  orgId?: string
+  actorStaffId?: string
+  ipAddress?: string
+  userAgent?: string
+}
+
+export interface ShiftCloseExecutionResult {
+  shift: Shift
+  reconciliation: CashReconciliationResult
+}
+
 /**
  * Open a new shift for a venue
  * Works with both integrated POS (SOFTRESTAURANT) and standalone (NONE) mode
@@ -1407,6 +1435,21 @@ export async function closeShiftForVenue(venueId: string, shiftId: string, close
         ? new Decimal(shift.startingCash || 0).add(new Decimal(closeData.cashDeclared))
         : totalCashPayments,
       cashDeclared: closeData?.cashDeclared || null,
+      // Cash over/short, same formula the dashboard uses — one function, two callers, so
+      // the two paths can never drift the way the purchase-order totals did.
+      //
+      // 🔴 In practice this stays NULL today: the TPV closes the shift WITHOUT sending
+      // `closeData` at all (`CloseShiftData` is marked "NOT USED IN MVP" in ShiftDto.kt and
+      // `ShiftViewModel.closeShift()` passes nothing), so nobody ever tells us how much cash
+      // was actually counted. There is no cash difference to compute without a count, and
+      // writing 0 would read as "balanced" — the one answer we must never invent.
+      // The wiring is here so the day the TPV ships the count screen this works with no
+      // server change. Until then the honest value is NULL.
+      cashDifference: computeCashDifference({
+        countedCash: closeData?.cashDeclared ?? null,
+        startingCash: Number(shift.startingCash ?? 0),
+        cashSales: totalCashPayments.toNumber(),
+      }),
       cardDeclared: closeData?.cardDeclared || null,
       vouchersDeclared: closeData?.vouchersDeclared || null,
       otherDeclared: closeData?.otherDeclared || null,
@@ -1500,4 +1543,40 @@ export async function closeShiftForVenue(venueId: string, shiftId: string, close
   }
 
   return updatedShift
+}
+
+/**
+ * HTTP-facing additive wrapper. It intentionally leaves the long-lived
+ * `closeShiftForVenue(...): Promise<Shift>` export intact for scripts and trusted callers.
+ * Reconciliation normalization is expanded behind this boundary in the H0.6 TDD slices.
+ */
+export async function closeShiftForVenueWithResult(
+  venueId: string,
+  shiftId: string,
+  rawBody: unknown,
+  context: ShiftCloseRequestContext = {},
+): Promise<ShiftCloseExecutionResult> {
+  const body = rawBody && typeof rawBody === 'object' && !Array.isArray(rawBody) ? (rawBody as Record<string, unknown>) : {}
+  const nested = body.closeData && typeof body.closeData === 'object' && !Array.isArray(body.closeData)
+    ? (body.closeData as Record<string, unknown>)
+    : {}
+  const legacySource = Object.prototype.hasOwnProperty.call(body, 'cashDeclared') ? body : nested
+  const hasLegacyData = ['cashDeclared', 'cardDeclared', 'vouchersDeclared', 'otherDeclared', 'notes'].some(key =>
+    Object.prototype.hasOwnProperty.call(legacySource, key),
+  )
+  const legacyCloseData = hasLegacyData
+    ? ({
+        cashDeclared: legacySource.cashDeclared ?? 0,
+        cardDeclared: legacySource.cardDeclared ?? 0,
+        vouchersDeclared: legacySource.vouchersDeclared ?? 0,
+        otherDeclared: legacySource.otherDeclared ?? 0,
+        notes: legacySource.notes,
+      } as ShiftCloseData)
+    : undefined
+
+  const shift = await closeShiftForVenue(venueId, shiftId, legacyCloseData, context.orgId)
+  return {
+    shift,
+    reconciliation: { outcome: hasLegacyData ? 'LEGACY_APPLIED' : 'NOT_REQUESTED' },
+  }
 }

@@ -13,6 +13,7 @@ import logger from '../config/logger'
 import prisma from '../utils/prismaClient'
 import { pullConnection } from '../services/google-calendar/pull.service'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
+import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
 
 const TIMEZONE = 'America/Mexico_City'
 const STALE_AFTER_MS = 60_000
@@ -24,7 +25,7 @@ export class GcalInboxSweeperJob {
 
   constructor() {
     this.job = new CronJob(
-      '*/30 * * * * *',
+      DATABASE_JOB_SCHEDULES.gcalInboxSweeper,
       async () => {
         await this.process()
       },
@@ -53,7 +54,10 @@ export class GcalInboxSweeperJob {
   }
 
   private async process(): Promise<void> {
-    if (this.isRunning) return
+    if (this.isRunning) {
+      logger.warn('[Gcal inbox] tick skipped — previous run still in progress', { job: 'gcal-inbox-sweeper' })
+      return
+    }
     this.isRunning = true
 
     try {

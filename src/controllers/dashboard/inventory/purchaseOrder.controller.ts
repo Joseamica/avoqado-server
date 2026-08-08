@@ -330,7 +330,7 @@ export async function receiveNoItems(req: Request, res: Response, next: NextFunc
     const { venueId, purchaseOrderId } = req.params
     const data = req.body
 
-    const purchaseOrder = await purchaseOrderService.receiveNoItems(venueId, purchaseOrderId, data)
+    const purchaseOrder = await purchaseOrderService.receiveNoItems(venueId, purchaseOrderId, data, (req as any).authContext?.userId)
 
     res.json({
       success: true,

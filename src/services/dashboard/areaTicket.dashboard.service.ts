@@ -273,9 +273,7 @@ export async function updateTerminal(venueId: string, terminalId: string, input:
   await Promise.all([assertArea(venueId, input.fulfillmentAreaId), assertScaleProfile(venueId, input.scaleProfileId)])
 
   const capabilityWasUpdated =
-    input.canIssueAreaTickets !== undefined ||
-    input.canCheckoutAreaTickets !== undefined ||
-    input.canDeliverAreaTickets !== undefined
+    input.canIssueAreaTickets !== undefined || input.canCheckoutAreaTickets !== undefined || input.canDeliverAreaTickets !== undefined
   const hasAreaTicketCapability =
     (input.canIssueAreaTickets ?? terminal.canIssueAreaTickets) ||
     (input.canCheckoutAreaTickets ?? terminal.canCheckoutAreaTickets) ||

@@ -18,6 +18,7 @@ import * as mappingController from '@/controllers/dashboard/accountMapping.contr
 import * as journalController from '@/controllers/dashboard/journalEntry.controller'
 import * as periodLockController from '@/controllers/dashboard/periodLock.controller'
 import { getTrialBalanceController } from '@/controllers/dashboard/trialBalance.controller'
+import * as accountingExportController from '@/controllers/dashboard/accounting.export.controller'
 import { getAccountingReportsController } from '@/controllers/dashboard/accountingReports.controller'
 import { getIvaCashflowController } from '@/controllers/dashboard/ivaFlujo.controller'
 import { generatePoliciesController } from '@/controllers/dashboard/autoPosting.controller'
@@ -349,6 +350,21 @@ router.get(
   getTrialBalanceController,
 )
 
+/**
+ * GET /accounting/trial-balance/export?period=&format=&columns= — the trial balance as a file.
+ *
+ * No `validateRequest`: that middleware REPLACES `req.query` with whatever Zod parsed, so a
+ * schema that does not list `format` and `columns` strips them silently and every export comes
+ * out as a full CSV. The controller parses them and the service validates the period. Same
+ * pattern as the exports already in production (payments, orders, sales summary).
+ */
+router.get(
+  '/trial-balance/export',
+  checkFeatureAccess('CFDI'),
+  checkPermission('accounting:read'),
+  accountingExportController.exportTrialBalance,
+)
+
 const accountLedgerSchema = z.object({
   params: z.object({ venueId: z.string().cuid({ message: 'El ID del local no es válido.' }) }),
   query: z.object({
@@ -475,6 +491,15 @@ router.get(
   validateRequest(listExpensesSchema),
   listExpensesController,
 )
+
+/**
+ * GET /accounting/expenses/export?period=&paymentStatus=&proveedorRfc=&format=&columns=
+ *
+ * Declared BEFORE `/expenses/:expenseId/pay` so Express never reads "export" as `:expenseId`.
+ * No `validateRequest`, for the same reason as the trial balance above: it would strip `format`
+ * and `columns`.
+ */
+router.get('/expenses/export', checkFeatureAccess('CFDI'), checkPermission('accounting:read'), accountingExportController.exportExpenses)
 
 /** POST /accounting/expenses/generate-policies?period=YYYY-MM — postea las pólizas de gasto del periodo. */
 router.post(

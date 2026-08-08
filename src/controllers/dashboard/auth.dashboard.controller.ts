@@ -9,6 +9,8 @@ import * as authService from '../../services/dashboard/auth.service'
 import bcrypt from 'bcrypt'
 import { DEFAULT_PERMISSIONS, getEffectiveRolePermissions } from '../../lib/permissions'
 import { getRoleDisplayNames, DEFAULT_ROLE_DISPLAY_NAMES } from '../../services/dashboard/venueRoleConfig.dashboard.service'
+import { logAction } from '../../services/dashboard/activity-log.service'
+import { verifyAccessToken } from '../../jwt.service'
 
 /**
  * Simple deep merge for module config objects.
@@ -726,7 +728,10 @@ export async function dashboardLoginController(req: Request, res: Response, next
     const rememberMe = loginData.rememberMe === true
 
     // Llamar al servicio
-    const { accessToken, refreshToken, staff } = await authService.loginStaff(loginData)
+    const { accessToken, refreshToken, staff } = await authService.loginStaff(loginData, {
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+    })
     logger.info('[AUTH] 🔐 Login service success', { staffId: staff.id, email: staff.email })
 
     // Cookie maxAge must match JWT expiration to prevent premature logout
@@ -774,6 +779,39 @@ export async function dashboardLoginController(req: Request, res: Response, next
 export const dashboardLogoutController = async (req: Request, res: Response) => {
   logger.info('[AUTH] 🚪 Logout request received')
   try {
+    // Sign-out audit entry. This route deliberately carries NO authentication middleware
+    // (logging out has to work even after the token has expired), so the identity is taken
+    // from the token by verifying its SIGNATURE. Never with `jwt.decode`: unverified,
+    // anyone could send a forged cookie and pollute the audit trail with sign-outs under
+    // someone else's name, which is worse than having no record at all.
+    // If there is no verifiable identity we write nothing — a row without an actor says
+    // nothing — and the logout proceeds as usual: this can never prevent signing out.
+    // The dedicated try/catch is NOT decorative: the catch below turns ANY exception into
+    // "Error al cerrar sesión", so without this guard a stumble while writing the audit
+    // entry would leave someone unable to sign out. The audit trail is best-effort;
+    // signing out is not.
+    try {
+      const authHeader = req.headers?.authorization
+      const logoutToken = req.cookies?.accessToken ?? (authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : undefined)
+      if (logoutToken) {
+        const payload = verifyAccessToken(logoutToken)
+        if (payload?.sub) {
+          void logAction({
+            staffId: payload.sub,
+            venueId: payload.venueId ?? null,
+            action: 'STAFF_LOGOUT',
+            entity: 'Staff',
+            entityId: payload.sub,
+            data: { source: 'dashboard' },
+            ipAddress: req.ip,
+            userAgent: req.get?.('user-agent'),
+          })
+        }
+      }
+    } catch (auditLogError) {
+      logger.error('[AUTH] 🚪 Failed to record the sign-out in the audit log', auditLogError)
+    }
+
     // Limpiar cookies con las mismas opciones
     res.clearCookie('accessToken', {
       httpOnly: true,

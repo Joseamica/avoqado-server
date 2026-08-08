@@ -725,6 +725,7 @@ model VenueSettings {
   autoCloseShifts     Boolean @default(false)
   shiftDuration       Int     @default(8) // hours
   enableShifts        Boolean @default(true) // Enable/disable shift system for venue
+  cashReconciliationEnabled Boolean @default(false) // PRO + explicit opt-in; effective gate is server-owned
   requirePinLogin     Boolean @default(true)
   terminalPermissions Json? // Permissions for terminal session when requirePinLogin=false
 
@@ -12077,6 +12078,10 @@ model AreaTicket {
   fulfillmentAreaId String
   fulfillmentArea   FulfillmentArea @relation(fields: [fulfillmentAreaId], references: [id], onDelete: Restrict)
 
+  /// Modo congelado al emitir el vale. Las ediciones posteriores del área no deben
+  /// cambiar si este vale se entrega al momento o requiere entrega manual.
+  fulfillmentModeSnapshot FulfillmentMode
+
   code           String
   idempotencyKey String           @db.VarChar(64)
   status         AreaTicketStatus @default(ISSUED)
@@ -13722,6 +13727,10 @@ model BillingTaxProfile {
   constanciaUrl    String? // PDF en Firebase Storage (opcional)
   validationStatus String    @default("PENDING") // PENDING | VALID | INVALID
   validatedAt      DateTime?
+
+  /// Id del Customer espejo en Facturapi. Necesario porque `customers.validateTaxInfo()`
+  /// valida contra el padrón del SAT por id, y el timbrado manda el receptor inline.
+  facturapiCustomerId String?
 
   createdById String?
   createdAt   DateTime @default(now())

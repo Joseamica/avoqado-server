@@ -1,0 +1,12 @@
+/**
+ * Database-heavy jobs are deliberately staggered by seconds. Keeping the
+ * offsets together makes accidental pool stampedes visible in code review.
+ */
+export const DATABASE_JOB_SCHEDULES = {
+  terminalPaymentWatchdog: '8,38 * * * * *',
+  blumonWebhookReconciliation: '11,41 * * * * *',
+  tpvHealthMonitor: '14 */2 * * * *',
+  posConnectionMonitor: '17 1-59/5 * * * *',
+  gcalInboxSweeper: '23,53 * * * * *',
+  gcalOutboxSweeper: '26,56 * * * * *',
+} as const

@@ -44,6 +44,7 @@ describe('tables_status', () => {
         capacity: 4,
         status: 'OCCUPIED',
         area: { name: 'Terraza' },
+        orders: [{ id: 'order-1001' }],
         currentOrder: {
           orderNumber: 'A-1001',
           total: 480,
@@ -53,8 +54,8 @@ describe('tables_status', () => {
           createdAt: new Date('2026-06-06T18:00:00Z'),
         },
       },
-      { number: '13', capacity: 2, status: 'AVAILABLE', area: { name: 'Terraza' }, currentOrder: null },
-      { number: '14', capacity: 6, status: 'CLEANING', area: null, currentOrder: null },
+      { number: '13', capacity: 2, status: 'AVAILABLE', area: { name: 'Terraza' }, orders: [], currentOrder: null },
+      { number: '14', capacity: 6, status: 'CLEANING', area: null, orders: [], currentOrder: null },
     ])
     const out = parse(await call({ venueId: 'v1' }))
 
@@ -73,6 +74,30 @@ describe('tables_status', () => {
       venueId: { in: ['v1'] },
       active: true,
     })
+  })
+
+  it('reports AVAILABLE when the stored status is a stale OCCUPIED with no live order (phantom-table fix)', async () => {
+    mockTableFind.mockResolvedValueOnce([
+      // Table.status never got released (e.g. currentOrderId belonged to a since-closed
+      // parent of a SPLIT_ORDER) but there is no open check left on it anymore.
+      { number: '9', capacity: 4, status: 'OCCUPIED', area: null, orders: [], currentOrder: null },
+    ])
+    const out = parse(await call({ venueId: 'v1' }))
+
+    expect(out.byStatus).toEqual({ AVAILABLE: 1 })
+    expect(out.tables[0]).toMatchObject({ status: 'AVAILABLE', storedStatus: 'OCCUPIED', order: null })
+  })
+
+  it('reports OCCUPIED from a live split-order check even without currentOrder set', async () => {
+    mockTableFind.mockResolvedValueOnce([
+      // The child order from a SPLIT_ORDER never populates Table.currentOrderId, but it
+      // is still an open check and must count as occupied.
+      { number: '10', capacity: 4, status: 'AVAILABLE', area: null, orders: [{ id: 'split-child-1' }], currentOrder: null },
+    ])
+    const out = parse(await call({ venueId: 'v1' }))
+
+    expect(out.byStatus).toEqual({ OCCUPIED: 1 })
+    expect(out.tables[0]).toMatchObject({ status: 'OCCUPIED', storedStatus: 'AVAILABLE', order: null })
   })
 
   it('filters by area when provided', async () => {

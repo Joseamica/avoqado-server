@@ -64,7 +64,10 @@ describe('inventory.routes — permisos por endpoint', () => {
   })
 
   it.each([
-    ['post', '/raw-materials/:rawMaterialId/adjust-stock', 'inventory:update'],
+    // Moving stock is not the same authority as editing the item's record: `inventory:adjust`
+    // separates them. Changed 2026-08-07 — the dashboard was already gating its menu entry on
+    // `inventory:adjust`, so the UI hid the button while this route accepted the call.
+    ['post', '/raw-materials/:rawMaterialId/adjust-stock', 'inventory:adjust'],
     ['post', '/suppliers', 'inventory:create'],
     ['post', '/purchase-orders', 'inventory:create'],
     ['put', '/purchase-orders/:purchaseOrderId', 'inventory:update'],

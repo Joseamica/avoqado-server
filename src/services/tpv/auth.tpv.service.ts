@@ -170,6 +170,19 @@ export async function staffSignIn(venueId: string, pin: string, serialNumber: st
     role: staffVenue.role,
   })
 
+  // Owner-facing access log. The logger above goes to Better Stack and expires; the screen
+  // a manager audits reads ActivityLog. On top of that, terminal sign-in is by PIN and the
+  // device is shared, so the serial number is part of the answer to "who signed in, and
+  // from where?". Fire-and-forget: it can never hold up a sign-in.
+  void logAction({
+    staffId: staffVenue.staff.id,
+    venueId: staffVenue.venueId,
+    action: 'STAFF_LOGIN',
+    entity: 'Staff',
+    entityId: staffVenue.staff.id,
+    data: { source: 'tpv', method: 'pin', terminalSerialNumber: serialNumber, role: staffVenue.role },
+  })
+
   // 🎁 Check if loyalty program is active for this venue (Toast/Square pattern)
   const loyaltyConfig = await prisma.loyaltyConfig.findUnique({
     where: { venueId },
@@ -366,6 +379,23 @@ export async function staffLogout(accessToken: string) {
       userId,
     })
   }
+
+  // Owner-facing audit entry. It is written even when the StaffVenue no longer exists (a
+  // staff member removed while their session was still open): the identity comes from the
+  // token ALREADY verified above, so the row is attributable — and that case is precisely
+  // the one an auditor wants to see.
+  void logAction({
+    staffId: userId,
+    venueId: venueId ?? null,
+    action: 'STAFF_LOGOUT',
+    entity: 'Staff',
+    entityId: userId,
+    data: {
+      source: 'tpv',
+      terminalSerialNumber: decoded.terminalSerialNumber ?? null,
+      staffVenueActive: Boolean(staffVenue),
+    },
+  })
 
   return {
     message: 'Logout successful',
